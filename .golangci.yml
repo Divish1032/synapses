@@ -1,0 +1,36 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck       # unchecked errors
+    - govet          # go vet checks (includes shadow)
+    - staticcheck    # broad static analysis
+    - unused         # unexported identifiers never used
+    - gofmt          # formatting
+    - goimports      # import grouping
+    - misspell       # common English misspellings in comments
+    - revive         # drop-in golint replacement
+    - gosimple       # simplification suggestions
+
+linters-settings:
+  govet:
+    enable:
+      - shadow
+  revive:
+    rules:
+      - name: exported
+        arguments:
+          - disableStutteringCheck  # allow e.g. graph.GraphSummary
+  goimports:
+    local-prefixes: github.com/synapses/synapses
+
+issues:
+  exclude-rules:
+    # Test files: allow errcheck gaps and dot imports.
+    - path: _test\.go
+      linters:
+        - errcheck
+        - revive
+  # Show all issues of the same type, not just the first 3.
+  max-same-issues: 0
+  max-issues-per-linter: 0

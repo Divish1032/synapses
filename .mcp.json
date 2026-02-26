@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "synapses": {
+      "type": "stdio",
+      "command": "/Users/itachi/go/bin/synapses",
+      "args": [
+        "start",
+        "-path",
+        "/Users/itachi/Documents/Github/synapses"
+      ]
+    }
+  }
+}

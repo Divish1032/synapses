@@ -1,0 +1,304 @@
+// Package parser converts source files into graph nodes and edges using
+// Tree-sitter for accurate, incremental, multi-language AST parsing.
+package parser
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+
+	"github.com/synapses/synapses/internal/graph"
+)
+
+// LanguageParser is implemented by each language-specific parser.
+// Parse receives the raw source bytes and the file path; it appends
+// discovered nodes and edges into the provided graph.
+type LanguageParser interface {
+	// Extensions returns the file extensions this parser handles (e.g. ".go").
+	Extensions() []string
+	// Parse extracts code entities from src and merges them into g.
+	Parse(g *graph.Graph, filePath string, src []byte) error
+}
+
+// Walker orchestrates multi-language parsing over a directory tree.
+type Walker struct {
+	parsers map[string]LanguageParser // extension → parser
+}
+
+// NewWalker creates a Walker pre-loaded with all built-in language parsers.
+// Registration order matters: generic (file-only) is registered first so that
+// dedicated AST parsers registered afterward take precedence for their extensions.
+func NewWalker() *Walker {
+	w := &Walker{parsers: make(map[string]LanguageParser)}
+	w.Register(newGenericParser())    // file-level fallback for all other languages
+	w.Register(NewGoParser())         // deep: .go
+	w.Register(NewTypeScriptParser()) // deep: .ts .tsx
+	w.Register(NewJavaScriptParser()) // deep: .js .jsx .mjs .cjs
+	w.Register(NewPythonParser())     // deep: .py .pyi
+	// JVM
+	w.Register(NewJavaParser())   // deep: .java
+	w.Register(NewKotlinParser()) // deep: .kt .kts
+	w.Register(NewScalaParser())  // deep: .scala
+	w.Register(NewGroovyParser()) // deep: .groovy .gradle
+	// Systems
+	w.Register(NewRustParser())   // deep: .rs
+	w.Register(NewCParser())      // deep: .c .h .ino
+	w.Register(NewCppParser())    // deep: .cpp .cc .cxx .hpp .hh .hxx .mm
+	w.Register(NewCSharpParser()) // deep: .cs
+	w.Register(NewSwiftParser())  // deep: .swift
+	// Scripting
+	w.Register(NewRubyParser()) // deep: .rb
+	w.Register(NewPHPParser())  // deep: .php
+	w.Register(NewLuaParser())  // deep: .lua
+	// Functional
+	w.Register(NewElixirParser()) // deep: .ex .exs
+	// Schema / API
+	w.Register(NewProtobufParser()) // deep: .proto
+	return w
+}
+
+// Register adds a language parser. If two parsers claim the same extension
+// the last one registered wins.
+func (w *Walker) Register(p LanguageParser) {
+	for _, ext := range p.Extensions() {
+		w.parsers[ext] = p
+	}
+}
+
+// RegisterPlugin adds an external parser plugin for the given file extensions.
+// command is split on whitespace into binary + args (e.g. "node parsers/graphql.js").
+// If two parsers claim the same extension the last one registered wins, so
+// plugins registered here override built-in parsers for their extensions.
+func (w *Walker) RegisterPlugin(extensions []string, command string) {
+	w.Register(newPluginParser(extensions, command))
+}
+
+// WalkDir recursively parses all supported files under root and populates g.
+// It skips hidden directories (prefixed with ".") and common non-source dirs.
+// Returns a map of absolute file path → modification time (UnixNano) for every
+// file that was successfully (or non-fatally) parsed. This map can be persisted
+// to the store and used by IncrementalReindex on subsequent runs.
+//
+// Parsing is parallelised across min(runtime.NumCPU(), 8) workers. All language
+// parsers create a fresh sitter.Parser per call so there is no shared mutable
+// state between goroutines. Graph mutations are protected by Graph's own mutex.
+func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) {
+	type fileJob struct {
+		path   string
+		parser LanguageParser
+		mtime  int64
+	}
+
+	// Phase 1 — sequential directory scan: collect parseable files + mtimes.
+	// filepath.WalkDir itself is not parallelisable (tree traversal must be
+	// ordered), but it's fast — just stat calls and map lookups.
+	var jobs []fileJob
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if shouldSkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		p, ok := w.parsers[ext]
+		if !ok {
+			return nil
+		}
+		var mtime int64
+		if info, statErr := d.Info(); statErr == nil {
+			mtime = info.ModTime().UnixNano()
+		}
+		jobs = append(jobs, fileJob{path: path, parser: p, mtime: mtime})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	if len(jobs) == 0 {
+		return make(map[string]int64), nil
+	}
+
+	// Phase 2 — parallel read + parse.
+	// Worker count is bounded to 8 to avoid opening too many files at once on
+	// systems with low file-descriptor limits.
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+
+	mtimes := make(map[string]int64, len(jobs))
+	var mtimesMu sync.Mutex
+
+	for _, job := range jobs {
+		job := job // capture loop variable
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			src, err := os.ReadFile(job.path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "synapses: read %s: %v\n", job.path, err)
+			} else if parseErr := job.parser.Parse(g, job.path, src); parseErr != nil {
+				fmt.Fprintf(os.Stderr, "synapses: parse %s: %v\n", job.path, parseErr)
+			}
+
+			if job.mtime != 0 {
+				mtimesMu.Lock()
+				mtimes[job.path] = job.mtime
+				mtimesMu.Unlock()
+			}
+		}()
+	}
+
+	wg.Wait()
+	return mtimes, nil
+}
+
+// IncrementalReindex re-parses only files whose modification time has changed
+// since the last full index. g must be a fully-populated graph (e.g. loaded
+// from SQLite). known maps absolute path → UnixNano mtime from the last index.
+//
+// Returns: fresh mtime map (all current parseable files), # changed/new files,
+// # removed files (deleted from disk since last index).
+//
+// Note: CALLS edges from unchanged files that point INTO re-parsed files may be
+// lost if the re-parsed file's node IDs changed. Run a full reindex if perfect
+// edge fidelity is required.
+func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[string]int64) (fresh map[string]int64, changed, removed int, err error) {
+	fresh = make(map[string]int64, len(known))
+
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil // skip unreadable entries
+		}
+		if d.IsDir() {
+			if shouldSkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(path))
+		p, ok := w.parsers[ext]
+		if !ok {
+			return nil // unsupported extension
+		}
+
+		info, statErr := d.Info()
+		if statErr != nil {
+			return nil
+		}
+		mtime := info.ModTime().UnixNano()
+
+		if stored, hit := known[path]; hit && stored == mtime {
+			fresh[path] = mtime // unchanged: carry forward
+			return nil
+		}
+
+		// Changed or new file: remove stale data and re-parse.
+		g.RemoveFile(path)
+		src, readErr := os.ReadFile(path)
+		if readErr != nil {
+			fmt.Fprintf(os.Stderr, "synapses: read %s: %v\n", path, readErr)
+			return nil
+		}
+		if parseErr := p.Parse(g, path, src); parseErr != nil {
+			fmt.Fprintf(os.Stderr, "synapses: parse %s: %v\n", path, parseErr)
+		}
+		fresh[path] = mtime
+		changed++
+		return nil
+	})
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	// Detect files that have been deleted since the last full index.
+	for path := range known {
+		if _, ok := fresh[path]; !ok {
+			g.RemoveFile(path)
+			removed++
+		}
+	}
+	return fresh, changed, removed, nil
+}
+
+// ParseFile parses a single file and updates g. If the file extension is not
+// supported it returns nil without error.
+func (w *Walker) ParseFile(g *graph.Graph, path string) error {
+	ext := strings.ToLower(filepath.Ext(path))
+	p, ok := w.parsers[ext]
+	if !ok {
+		return nil
+	}
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	return p.Parse(g, path, src)
+}
+
+// shouldSkipDir returns true for directories that never contain useful source:
+// dependency folders, build artefacts, generated output, and hidden dirs.
+func shouldSkipDir(name string) bool {
+	switch name {
+	// --- Dependency managers ---
+	case "node_modules",   // Node.js
+		"vendor",          // Go / PHP / Ruby
+		"bower_components", // Bower (legacy JS)
+		"jspm_packages",   // JSPM
+		"Pods":            // iOS CocoaPods
+		return true
+
+	// --- Build / compiled output ---
+	case "dist",
+		"build",
+		"out",
+		"target",  // Rust (Cargo), Java (Maven)
+		"obj",     // C/C++
+		"storybook-static",
+		"coverage",
+		".nyc_output":
+		return true
+
+	// --- Temporary / cache ---
+	case "tmp",
+		"temp",
+		"cache":
+		return true
+
+	// --- Generated code ---
+	case "generated",
+		"gen",
+		"__generated__",
+		"__mocks__": // Jest mock directories
+		return true
+
+	// --- Third-party bundled sources ---
+	case "third_party",
+		"vendor_ruby",
+		"testdata": // Go test fixtures rarely need indexing
+		return true
+
+	// --- IDE / tooling ---
+	case ".git", ".svn", ".hg",
+		".idea", ".vscode",
+		"__pycache__":
+		return true
+	}
+
+	// Skip all hidden directories (e.g. .next, .nuxt, .turbo, .cache, .gradle).
+	return strings.HasPrefix(name, ".")
+}
