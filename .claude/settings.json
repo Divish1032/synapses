@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__synapses__detect_changes",
+      "Bash(go vet ./internal/mcp/)",
+      "mcp__synapses__find_data_paths",
+      "mcp__synapses__semantic_search",
+      "Bash(node --version)",
+      "Bash(npm --version)",
+      "Read(//Users/itachi/go/bin/**)",
+      "Bash(lsof)",
+      "Bash(kill 55453 55408 55341)",
+      "Bash(grep -n \"func jsonResult\\\\|func errResult\" /Users/itachi/Documents/Github/synapses/internal/mcp/*.go)",
+      "mcp__synapses__get_proposals",
+      "mcp__synapses__propose_change",
+      "mcp__synapses__withdraw_proposal",
+      "Bash(while read dir)",
+      "Bash(do test_file=\"$dir\"/*_test.go)",
+      "Bash(if ! ls $test_file)",
+      "Bash(then basename \"$dir\")",
+      "Bash(fi)",
+      "Bash(done)",
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); print\\(data[0][''text''][:500]\\)\")",
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); parsed=json.loads\\(data[0][''text'']\\); print\\(''warnings:'', parsed.get\\(''warnings''\\)\\); print\\(''status:'', parsed.get\\(''status''\\)\\)\")"
+    ]
+  }
+}

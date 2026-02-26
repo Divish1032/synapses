@@ -1,0 +1,35 @@
+# Binaries
+bin/
+dist/
+synapses
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build cache
+*.test
+*.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependency cache
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Synapses runtime data
+.synapses/cache/
+*.synapses.db
+
+# Environment
+.env
+.env.local

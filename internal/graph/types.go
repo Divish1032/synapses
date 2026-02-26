@@ -1,0 +1,217 @@
+// Package graph implements the core in-memory graph engine for Synapses.
+// It stores code entities (nodes) and their relationships (edges), and provides
+// BFS-based context carving with edge-type-weighted relevance decay.
+package graph
+
+// NodeType classifies what kind of code entity a node represents.
+type NodeType string
+
+const (
+	NodeFile      NodeType = "file"
+	NodePackage   NodeType = "package"
+	NodeFunction  NodeType = "function"
+	NodeMethod    NodeType = "method"
+	NodeStruct    NodeType = "struct"
+	NodeInterface NodeType = "interface"
+	NodeVariable  NodeType = "variable"
+)
+
+// EdgeType classifies the relationship between two nodes.
+type EdgeType string
+
+const (
+	EdgeImports    EdgeType = "IMPORTS"
+	EdgeCalls      EdgeType = "CALLS"
+	EdgeImplements EdgeType = "IMPLEMENTS"
+	EdgeDefines    EdgeType = "DEFINES"
+	EdgeEmbeds     EdgeType = "EMBEDS"
+	EdgeDependsOn  EdgeType = "DEPENDS_ON"
+	EdgeExports    EdgeType = "EXPORTS"
+	EdgeDataFlows  EdgeType = "DATA_FLOWS"
+)
+
+// DefaultEdgeWeights defines the semantic significance of each edge type.
+// Higher weight = more relevant when carving context. Configurable via synapses.json.
+//
+// EdgeDefines is intentionally low (0.15) because file→entity DEFINES edges would
+// otherwise turn every file node into a high-relevance hub, equalising all siblings
+// in a file with equal — and misleading — relevance scores.
+var DefaultEdgeWeights = map[EdgeType]float64{
+	EdgeCalls:      1.0,
+	EdgeDataFlows:  0.95,
+	EdgeImplements: 0.9,
+	EdgeEmbeds:     0.85,
+	EdgeDependsOn:  0.8,
+	EdgeImports:    0.7,
+	EdgeExports:    0.5,
+	EdgeDefines:    0.15,
+}
+
+// NodeID is a composite identifier with the format: "repoID::file::name".
+// Using a named type (not a plain string) enforces intent at compile time.
+type NodeID string
+
+// Node represents a single code entity in the graph.
+type Node struct {
+	ID       NodeID            `json:"id"`
+	Type     NodeType          `json:"type"`
+	Name     string            `json:"name"`
+	Package  string            `json:"package"`
+	File     string            `json:"file"`
+	Line     int               `json:"line"`
+	Exported bool              `json:"exported"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// Edge represents a directed relationship between two nodes.
+type Edge struct {
+	From NodeID   `json:"from"`
+	To   NodeID   `json:"to"`
+	Type EdgeType `json:"type"`
+}
+
+// CallSite records an unresolved function call encountered during parsing.
+// The resolver drains these after all files are parsed and creates CALLS edges.
+type CallSite struct {
+	CallerID   NodeID // node ID of the calling function/method
+	CallerFile string // absolute path of the file containing the caller
+	PkgAlias   string // "" for direct calls; "pkg" for pkg.Func() qualified calls
+	FuncName   string // name of the function/method being called
+}
+
+// CarveConfig controls how an ego-subgraph is extracted for a query node.
+type CarveConfig struct {
+	// MaxDepth is the maximum number of hops from the root node.
+	MaxDepth int
+	// TokenBudget caps the approximate output size in tokens (1 token ≈ 4 chars).
+	TokenBudget int
+	// EdgeWeights overrides DefaultEdgeWeights. Nil means use defaults.
+	EdgeWeights map[EdgeType]float64
+	// DecayFactor is multiplied per hop: relevance = weight × (decay ^ hop).
+	DecayFactor float64
+	// MinRelevance drops any node whose relevance score falls below this threshold
+	// before the token-budget cut is applied. Prevents low-signal siblings and
+	// package-import nodes from crowding out actual dependencies.
+	MinRelevance float64
+	// ExcludeTypes lists node types to omit from the response. These nodes are
+	// still traversed during BFS (so edges through them are discovered) but are
+	// never emitted to the caller. Defaults to {NodePackage, NodeFile} so that
+	// stdlib imports and file hub-nodes do not waste the token budget.
+	ExcludeTypes map[NodeType]bool
+	// ExcludeTestFiles omits nodes whose source file ends in _test.go from the
+	// output. The nodes are still BFS-traversed (so their edges are discovered)
+	// but they are never emitted to the caller. Defaults to true so that test
+	// functions do not crowd the related bucket for well-tested codebases.
+	ExcludeTestFiles bool
+	// DirectionBoost applies a relevance multiplier to nodes reachable via
+	// outgoing CALLS edges (the forward / callee direction). A value of 0.2
+	// gives callees a 20% higher relevance than callers at equal hop distance,
+	// so the token-budget pruner prefers call dependencies over call-sites.
+	// 0 disables the boost. Default: 0.2.
+	DirectionBoost float64
+}
+
+// DefaultCarveConfig returns sensible defaults for context carving.
+func DefaultCarveConfig() CarveConfig {
+	return CarveConfig{
+		MaxDepth:         2,
+		TokenBudget:      4000,
+		EdgeWeights:      DefaultEdgeWeights,
+		DecayFactor:      0.5,
+		MinRelevance:     0.25,
+		ExcludeTestFiles: true,
+		ExcludeTypes: map[NodeType]bool{
+			NodePackage: true,
+			NodeFile:    true,
+		},
+	}
+}
+
+// CarvedNode is a node annotated with its relevance score and hop distance
+// from the query root, as computed during a carving traversal.
+type CarvedNode struct {
+	Node      *Node   `json:"node"`
+	Relevance float64 `json:"relevance"`
+	Hop       int     `json:"hop"`
+}
+
+// SubGraph is the result of a context carve: a relevance-ranked slice of the graph.
+type SubGraph struct {
+	Root           NodeID       `json:"root"`
+	Nodes          []CarvedNode `json:"nodes"`
+	Edges          []*Edge      `json:"edges"`
+	Truncated      bool         `json:"truncated,omitempty"`       // true when token budget cut BFS results
+	TruncatedCount int          `json:"truncated_count,omitempty"` // number of nodes dropped by budget
+}
+
+// SuggestedRule is a detected high-density structural coupling pattern.
+// Returned in get_project_identity to surface architectural conventions that
+// the team may want to formalise as explicit forbidden-edge rules.
+type SuggestedRule struct {
+	// ID is a stable slug derived from the directory pair.
+	ID string `json:"id"`
+	// Description is a human-readable summary including sample counts.
+	Description string `json:"description"`
+	// Confidence is the fraction of from-dir nodes that call into to-dir (0–1).
+	Confidence float64 `json:"confidence"`
+	// SampleCount is the number of distinct from-dir nodes that exhibit the pattern.
+	SampleCount int `json:"sample_count"`
+	// FromDirPattern is a glob suitable for use as from_file_pattern in a rule.
+	FromDirPattern string `json:"from_dir_pattern"`
+	// ToDirPattern is a glob suitable for use as to_file_pattern in a rule.
+	ToDirPattern string `json:"to_dir_pattern"`
+	// EdgeType is the type of coupling detected (always EdgeCalls for now).
+	EdgeType EdgeType `json:"edge_type"`
+}
+
+// ProjectIdentity is the compact architectural summary returned by get_project_identity.
+type ProjectIdentity struct {
+	RepoID         string          `json:"repo_id"`
+	Summary        GraphSummary    `json:"summary"`
+	EntryPoints    []EntityRef     `json:"entry_points"`
+	KeyEntities    []EntityInfo    `json:"key_entities"`
+	SuggestedRules []SuggestedRule `json:"suggested_rules,omitempty"`
+}
+
+// GraphSummary contains aggregate counts across the whole graph.
+type GraphSummary struct {
+	Files      int `json:"files"`
+	Packages   int `json:"packages"`
+	Functions  int `json:"functions"`
+	Methods    int `json:"methods"`
+	Structs    int `json:"structs"`
+	Interfaces int `json:"interfaces"`
+	Edges      int `json:"edges"`
+}
+
+// EntityRef is a minimal reference to a node, used for lists like entry points.
+type EntityRef struct {
+	ID   NodeID   `json:"id"`
+	Name string   `json:"name"`
+	Type NodeType `json:"type"`
+	File string   `json:"file"`
+	Line int      `json:"line"`
+}
+
+// EntityInfo extends EntityRef with connectivity metrics.
+type EntityInfo struct {
+	EntityRef
+	Fanin  int `json:"fanin"`
+	Fanout int `json:"fanout"`
+}
+
+// ImpactTier groups nodes at the same blast-radius hop distance.
+type ImpactTier struct {
+	Depth      int         `json:"depth"`
+	Label      string      `json:"label"`      // "direct" | "indirect" | "peripheral"
+	Confidence float64     `json:"confidence"` // 1.0 / 0.6 / 0.3
+	Nodes      []EntityRef `json:"nodes"`
+}
+
+// ImpactResult is returned by ImpactAnalysis.
+type ImpactResult struct {
+	Root          EntityRef    `json:"root"`
+	Tiers         []ImpactTier `json:"tiers"`
+	TotalAffected int          `json:"total_affected"`
+	AffectedFiles []string     `json:"affected_files"`
+}

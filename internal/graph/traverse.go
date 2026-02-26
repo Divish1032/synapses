@@ -1,0 +1,390 @@
+package graph
+
+import (
+	"math"
+	"sort"
+	"strings"
+)
+
+// CarveEgoGraph extracts a relevance-ranked subgraph centred on the given root node.
+//
+// Algorithm:
+//  1. BFS outward from root, up to cfg.MaxDepth hops.
+//  2. Each node is assigned a relevance score:
+//     relevance = edgeTypeWeight(edge) × (cfg.DecayFactor ^ hopCount)
+//  3. When a node is reachable via multiple paths the maximum score is kept.
+//  4. If the estimated token cost exceeds cfg.TokenBudget, the lowest-scored
+//     nodes are pruned (highest-hop, lowest-weight first).
+//  5. Only edges where both endpoints survived pruning are included.
+func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error) {
+	// Fast path: return a cached result without acquiring the heavier graph lock.
+	if sub, ok := g.cache.get(rootID, cfg); ok {
+		return sub, nil
+	}
+
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	if _, ok := g.nodes[rootID]; !ok {
+		return nil, ErrNodeNotFound(rootID)
+	}
+
+	weights := cfg.EdgeWeights
+	if weights == nil {
+		weights = DefaultEdgeWeights
+	}
+	decay := cfg.DecayFactor
+	if decay <= 0 || decay > 1 {
+		decay = 0.5
+	}
+
+	// BFS state.
+	type qItem struct {
+		id  NodeID
+		hop int
+	}
+
+	visited := make(map[NodeID]float64) // nodeID → best relevance seen
+	visited[rootID] = 1.0
+
+	queue := []qItem{{rootID, 0}}
+
+	// Struct/interface nodes have no CALLS edges — only DEFINES from their file.
+	// Seed BFS with the struct's methods so the carve includes method-level context.
+	if rootNode := g.nodes[rootID]; rootNode != nil &&
+		(rootNode.Type == NodeStruct || rootNode.Type == NodeInterface) {
+		prefix := rootNode.Name + "."
+		for _, n := range g.nodes {
+			if n.Type == NodeMethod && strings.HasPrefix(n.Name, prefix) {
+				visited[n.ID] = 0.9 // slightly below root
+				queue = append(queue, qItem{n.ID, 0})
+			}
+		}
+	}
+
+	var edgesInSubgraph []*Edge
+
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+
+		if curr.hop >= cfg.MaxDepth {
+			continue
+		}
+
+		// Traverse both outgoing and incoming edges so the carve captures
+		// "what does this call" AND "what calls this".
+		// Build a fresh slice — never append into g.outEdges[x] directly, as that
+		// can silently extend the underlying array while holding only a read lock.
+		var allEdges []*Edge
+		allEdges = append(allEdges, g.outEdges[curr.id]...)
+		allEdges = append(allEdges, g.inEdges[curr.id]...)
+
+		for _, e := range allEdges {
+			typeWeight := edgeWeight(e.Type, weights)
+			relevance := typeWeight * math.Pow(decay, float64(curr.hop+1))
+
+			neighbor := e.To
+			if e.To == curr.id {
+				neighbor = e.From
+			}
+
+			// Forward CALLS (curr → neighbor) get a relevance boost to prefer
+			// callees over callers when the token budget forces pruning.
+			if cfg.DirectionBoost > 0 && e.Type == EdgeCalls && e.From == curr.id {
+				relevance *= (1.0 + cfg.DirectionBoost)
+			}
+
+			if prev, seen := visited[neighbor]; !seen || relevance > prev {
+				visited[neighbor] = relevance
+				if curr.hop+1 < cfg.MaxDepth {
+					queue = append(queue, qItem{neighbor, curr.hop + 1})
+				}
+			}
+
+			// Collect the edge if both endpoints are in our visited set
+			// (we will filter again after budget pruning).
+			edgesInSubgraph = append(edgesInSubgraph, e)
+		}
+	}
+
+	// Build scored node list, applying MinRelevance and ExcludeTypes filters.
+	// Excluded-type nodes are still BFS-traversed above (so their edges are
+	// discovered) but they are never emitted in the output.
+	type scoredNode struct {
+		id        NodeID
+		relevance float64
+		hop       int
+	}
+	var scored []scoredNode
+	for id, rel := range visited {
+		// Drop nodes below the minimum relevance threshold (kills sibling explosion
+		// from file-hub nodes and low-signal package imports).
+		if cfg.MinRelevance > 0 && rel < cfg.MinRelevance && id != rootID {
+			continue
+		}
+		// Drop excluded node types from output (still traversed in BFS above).
+		if n, ok := g.nodes[id]; ok && cfg.ExcludeTypes[n.Type] {
+			continue
+		}
+		// Drop test-file nodes when requested (still traversed for edge discovery).
+		if cfg.ExcludeTestFiles {
+			if n, ok := g.nodes[id]; ok && strings.HasSuffix(n.File, "_test.go") {
+				continue
+			}
+		}
+		hop := hopDistance(id, rootID, rel, decay)
+		scored = append(scored, scoredNode{id, rel, hop})
+	}
+
+	// Sort by relevance descending so we keep the most important nodes first
+	// when applying the token budget.
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].relevance != scored[j].relevance {
+			return scored[i].relevance > scored[j].relevance
+		}
+		return scored[i].hop < scored[j].hop
+	})
+
+	// Apply token budget using per-node byte-based estimation (1 token ≈ 4 bytes).
+	// Always keep at least the first (highest-relevance) node.
+	truncated := false
+	truncatedCount := 0
+	if cfg.TokenBudget > 0 && len(scored) > 1 {
+		var usedTokens int
+		cutoff := len(scored)
+		for i, s := range scored {
+			n := g.nodes[s.id]
+			if n == nil {
+				continue
+			}
+			cost := estimateNodeTokens(n)
+			if usedTokens+cost > cfg.TokenBudget && i > 0 {
+				cutoff = i
+				break
+			}
+			usedTokens += cost
+		}
+		if cutoff < len(scored) {
+			truncated = true
+			truncatedCount = len(scored) - cutoff
+		}
+		scored = scored[:cutoff]
+	}
+
+	// Build the final node set.
+	keep := make(map[NodeID]struct{}, len(scored))
+	for _, s := range scored {
+		keep[s.id] = struct{}{}
+	}
+
+	// Assemble output nodes.
+	outNodes := make([]CarvedNode, 0, len(scored))
+	for _, s := range scored {
+		n := g.nodes[s.id]
+		if n == nil {
+			continue
+		}
+		outNodes = append(outNodes, CarvedNode{
+			Node:      n,
+			Relevance: s.relevance,
+			Hop:       s.hop,
+		})
+	}
+
+	// Include only edges where both endpoints survived the budget cut.
+	seen := make(map[[2]NodeID]struct{})
+	var outEdges []*Edge
+	for _, e := range edgesInSubgraph {
+		_, fromOK := keep[e.From]
+		_, toOK := keep[e.To]
+		if !fromOK || !toOK {
+			continue
+		}
+		key := [2]NodeID{e.From, e.To}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		outEdges = append(outEdges, e)
+	}
+
+	result := &SubGraph{
+		Root:           rootID,
+		Nodes:          outNodes,
+		Edges:          outEdges,
+		Truncated:      truncated,
+		TruncatedCount: truncatedCount,
+	}
+	g.cache.put(rootID, cfg, result)
+	return result, nil
+}
+
+// edgeWeight returns the configured weight for an edge type, falling back to 0.5.
+func edgeWeight(et EdgeType, weights map[EdgeType]float64) float64 {
+	if w, ok := weights[et]; ok {
+		return w
+	}
+	return 0.5
+}
+
+// hopDistance estimates the hop count from relevance and decay.
+// relevance = weight × decay^hop → hop ≈ log(relevance/weight) / log(decay)
+// This is approximate; it is only used for display, not for pruning decisions.
+func hopDistance(id, root NodeID, relevance, decay float64) int {
+	if id == root {
+		return 0
+	}
+	if decay <= 0 || decay >= 1 || relevance <= 0 {
+		return 1
+	}
+	// Assume max edge weight of 1.0 for simplicity.
+	h := math.Log(relevance) / math.Log(decay)
+	if h < 0 {
+		h = -h
+	}
+	return int(math.Round(h))
+}
+
+// estimateNodeTokens estimates the token cost of serialising a node (1 token ≈ 4 bytes).
+// It sums the byte lengths of all string fields and metadata key/value pairs.
+func estimateNodeTokens(n *Node) int {
+	b := len(n.ID) + len(string(n.Type)) + len(n.Name) + len(n.Package) + len(n.File)
+	for k, v := range n.Metadata {
+		b += len(k) + len(v)
+	}
+	return b/4 + 1
+}
+
+// ImpactAnalysis performs a reverse BFS from rootID following incoming CALLS
+// and IMPLEMENTS edges to find all nodes that could be affected if rootID changes.
+// Results are grouped into depth tiers: direct (depth 1), indirect (depth 2),
+// peripheral (depth 3+). maxDepth caps the traversal (0 uses default of 3).
+func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, error) {
+	if maxDepth <= 0 {
+		maxDepth = 3
+	}
+
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	root, ok := g.nodes[rootID]
+	if !ok {
+		return nil, ErrNodeNotFound(rootID)
+	}
+
+	// Reverse BFS: at each hop follow edges that CALL INTO or IMPLEMENT rootID.
+	type entry struct {
+		id    NodeID
+		depth int
+	}
+
+	visited := map[NodeID]int{rootID: 0} // node → first-seen depth
+	queue := []entry{{rootID, 0}}
+	fileSet := map[string]struct{}{}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		if cur.depth >= maxDepth {
+			continue
+		}
+
+		nextDepth := cur.depth + 1
+		// inEdges gives us nodes that have an edge pointing TO cur.id
+		for _, e := range g.inEdges[cur.id] {
+			if e.Type != EdgeCalls && e.Type != EdgeImplements {
+				continue
+			}
+			if _, seen := visited[e.From]; seen {
+				continue
+			}
+			visited[e.From] = nextDepth
+			queue = append(queue, entry{e.From, nextDepth})
+		}
+	}
+
+	// Build tiers.
+	tierNodes := map[int][]EntityRef{}
+	for id, depth := range visited {
+		if depth == 0 {
+			continue // skip root itself
+		}
+		n := g.nodes[id]
+		if n == nil {
+			continue
+		}
+		tierNodes[depth] = append(tierNodes[depth], EntityRef{
+			ID:   id,
+			Name: n.Name,
+			Type: n.Type,
+			File: n.File,
+			Line: n.Line,
+		})
+		if n.File != "" {
+			fileSet[n.File] = struct{}{}
+		}
+	}
+
+	// Sort nodes within each tier by name for stable output.
+	for d := range tierNodes {
+		nodes := tierNodes[d]
+		sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+		tierNodes[d] = nodes
+	}
+
+	tierLabel := func(depth int) (string, float64) {
+		switch depth {
+		case 1:
+			return "direct", 1.0
+		case 2:
+			return "indirect", 0.6
+		default:
+			return "peripheral", 0.3
+		}
+	}
+
+	var tiers []ImpactTier
+	total := 0
+	for d := 1; d <= maxDepth; d++ {
+		nodes, ok := tierNodes[d]
+		if !ok || len(nodes) == 0 {
+			continue
+		}
+		label, conf := tierLabel(d)
+		tiers = append(tiers, ImpactTier{
+			Depth:      d,
+			Label:      label,
+			Confidence: conf,
+			Nodes:      nodes,
+		})
+		total += len(nodes)
+	}
+
+	files := make([]string, 0, len(fileSet))
+	for f := range fileSet {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+
+	return &ImpactResult{
+		Root: EntityRef{
+			ID:   rootID,
+			Name: root.Name,
+			Type: root.Type,
+			File: root.File,
+			Line: root.Line,
+		},
+		Tiers:         tiers,
+		TotalAffected: total,
+		AffectedFiles: files,
+	}, nil
+}
+
+// ErrNodeNotFound is returned when a query targets a non-existent node.
+type ErrNodeNotFound NodeID
+
+func (e ErrNodeNotFound) Error() string {
+	return "node not found: " + string(e)
+}
