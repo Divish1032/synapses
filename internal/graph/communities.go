@@ -34,14 +34,14 @@ type Community struct {
 
 // CommunityResult is returned by DetectCommunities.
 type CommunityResult struct {
-	Algorithm      string      `json:"algorithm"`
+	Algorithm string `json:"algorithm"`
 	// Modularity is the Newman-Girvan modularity score (0–1).
 	// Higher values indicate stronger community separation.
-	Modularity     float64     `json:"modularity"`
-	IterationCount int         `json:"iteration_count"`
-	CommunityCount int         `json:"community_count"`
+	Modularity     float64 `json:"modularity"`
+	IterationCount int     `json:"iteration_count"`
+	CommunityCount int     `json:"community_count"`
 	// Communities are sorted by size descending.
-	Communities    []Community `json:"communities"`
+	Communities []Community `json:"communities"`
 }
 
 type communityNeighbor struct {
@@ -309,7 +309,7 @@ func computeModularity(nodes []*Node, edges []*Edge, nodeIndex map[NodeID]int, l
 	twoM := 2 * m
 	Q := 0.0
 	for _, s := range stats {
-		Q += s.internal/m - math.Pow(s.degree/twoM, 2)
+		Q += s.internal/m - (s.degree/twoM)*(s.degree/twoM)
 	}
 	return Q
 }

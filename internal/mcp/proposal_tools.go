@@ -118,11 +118,12 @@ func (s *Server) handleVoteOnProposal(_ context.Context, req mcp.CallToolRequest
 		"vote_threshold": p.VoteThreshold,
 		"votes":          p.Votes,
 	}
-	if p.Status == "accepted" {
+	switch p.Status {
+	case "accepted":
 		result["message"] = fmt.Sprintf("Proposal ACCEPTED (%d/%d approve votes reached threshold). The change may proceed.", p.ApproveCount, p.VoteThreshold)
-	} else if p.Status == "rejected" {
+	case "rejected":
 		result["message"] = fmt.Sprintf("Proposal REJECTED (%d/%d reject votes reached threshold). The change should not proceed.", p.RejectCount, p.VoteThreshold)
-	} else {
+	default:
 		remaining := p.VoteThreshold - p.ApproveCount
 		if p.VoteThreshold-p.RejectCount < remaining {
 			remaining = p.VoteThreshold - p.RejectCount

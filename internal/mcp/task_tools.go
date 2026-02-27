@@ -53,7 +53,7 @@ func (s *Server) autoLinkNodes(text string) []string {
 	var result []string
 	// Split on common delimiters to get candidate tokens.
 	for _, word := range strings.FieldsFunc(text, func(r rune) bool {
-		return !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '.')
+		return (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' && r != '.'
 	}) {
 		if len(word) < 3 {
 			continue
@@ -291,10 +291,10 @@ func (s *Server) handleGetMyTasks(
 	}
 
 	return jsonResult(map[string]interface{}{
-		"agent_id":       agentID,
+		"agent_id":        agentID,
 		"unblocked_count": len(unblocked),
-		"tasks":          unblocked,
-		"suggested_next": suggested,
+		"tasks":           unblocked,
+		"suggested_next":  suggested,
 	})
 }
 

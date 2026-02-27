@@ -39,10 +39,10 @@ type Server struct {
 	mcp          *server.MCPServer
 	graph        *graph.Graph
 	config       *config.Config
-	store        *store.Store  // nil if started without a persistent store
-	changeSource ChangeSource  // nil if started without a file watcher
-	peerManager  interface{}   // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
-	brainClient  interface{}   // *brain.Client — set via SetBrainClient; nil if brain not configured
+	store        *store.Store // nil if started without a persistent store
+	changeSource ChangeSource // nil if started without a file watcher
+	peerManager  interface{}  // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
+	brainClient  interface{}  // *brain.Client — set via SetBrainClient; nil if brain not configured
 	rulesMu      sync.RWMutex // protects s.config.Rules for concurrent dynamic upserts
 
 	// Context-packet cache: 20 slots max, 30s TTL. Keyed by "entityName:depth".
@@ -126,8 +126,8 @@ func (c *callStartTimes) pop(name string) time.Time {
 }
 
 const (
-	packetCacheTTL  = 30 * time.Second
-	packetCacheMax  = 20
+	packetCacheTTL = 30 * time.Second
+	packetCacheMax = 20
 )
 
 // getPacketFromCache returns a cached context packet for the given key, or nil
@@ -562,7 +562,6 @@ func (s *Server) registerTools() {
 		s.handleGetPlans,
 	)
 
-
 	// link_task_nodes
 	s.mcp.AddTool(
 		mcp.NewTool(
@@ -623,7 +622,6 @@ func (s *Server) registerTools() {
 		s.handleGetChangeCoupling,
 	)
 
-
 	// ── Rule Management Tools ────────────────────────────────────────────────
 
 	// upsert_rule
@@ -663,7 +661,6 @@ func (s *Server) registerTools() {
 		),
 		s.handleUpsertRule,
 	)
-
 
 	// ── Session Awareness Tools ──────────────────────────────────────────────
 
@@ -759,7 +756,6 @@ func (s *Server) registerTools() {
 		),
 		s.handleGetCommunities,
 	)
-
 
 	// ── Data Flow Analysis ────────────────────────────────────────────────────
 
@@ -926,6 +922,73 @@ func (s *Server) registerTools() {
 			mcp.WithString("notes", mcp.Description("Free-text context notes for future sessions.")),
 		),
 		s.handleLogDecision,
+	)
+
+	// get_violation_log
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_violation_log",
+			mcp.WithDescription(
+				"Returns the audit trail of architectural rule violations detected by get_violations. "+
+					"Each entry shows which rule fired, which nodes were involved, when it was first and "+
+					"last seen, and how many times it occurred. Use rule_id to filter to a specific rule.",
+			),
+			mcp.WithString("rule_id", mcp.Description("Optional. Filter to violations for a specific rule ID.")),
+			mcp.WithNumber("limit", mcp.Description("Max entries to return (default 50).")),
+		),
+		s.handleGetViolationLog,
+	)
+
+	// get_federation_status
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_federation_status",
+			mcp.WithDescription(
+				"Shows which linked projects are currently merged into the graph, node counts per project, "+
+					"and the number of cross-project CALLS edges. Returns is_federated=false when running on a single project.",
+			),
+		),
+		s.handleGetFederationStatus,
+	)
+
+	// get_usage_guide
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_usage_guide",
+			mcp.WithDescription(
+				"Returns a project-specific guide for using Synapses: quick-start sequence, tool selection guide, "+
+					"entry points, and key entities. Call this when you are unsure which tool to use or how to start exploring.",
+			),
+		),
+		s.handleGetUsageGuide,
+	)
+
+	// get_my_tasks
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_my_tasks",
+			mcp.WithDescription(
+				"Returns the calling agent's unblocked pending tasks, plus a suggested next task. "+
+					"Filters out tasks blocked by unfinished dependencies. "+
+					"Convenience wrapper around get_pending_tasks for focused agent workflows.",
+			),
+			mcp.WithString("agent_id", mcp.Required(), mcp.Description("The calling agent's self-declared identifier.")),
+			mcp.WithString("plan_id", mcp.Description("Optional. Filter to a specific plan.")),
+		),
+		s.handleGetMyTasks,
+	)
+
+	// get_agents
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_agents",
+			mcp.WithDescription(
+				"Returns all agents that have interacted with Synapses, ordered by last-seen timestamp. "+
+					"Agents self-declare their identity via the agent_id parameter on create_plan, update_task, "+
+					"and get_pending_tasks calls. Use this for multi-agent coordination to discover which agents are active.",
+			),
+		),
+		s.handleGetAgents,
 	)
 
 	// sdlc (get + set in one tool)

@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -332,7 +333,7 @@ func (p *GoParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree := parser.Parse(nil, src)
+	tree, _ := parser.ParseCtx(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	// First pass: extract package name.
@@ -686,11 +687,4 @@ func countComplexity(node *sitter.Node) int {
 		count += countComplexity(node.Child(i))
 	}
 	return count
-}
-
-// lastSegment returns the last path segment of an import path.
-// e.g. "github.com/foo/bar" → "bar"
-func lastSegment(importPath string) string {
-	parts := strings.Split(importPath, "/")
-	return parts[len(parts)-1]
 }

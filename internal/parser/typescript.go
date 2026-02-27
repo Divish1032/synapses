@@ -1,12 +1,13 @@
 package parser
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
-	tssitter "github.com/smacker/go-tree-sitter/typescript/typescript"
 	tsxsitter "github.com/smacker/go-tree-sitter/typescript/tsx"
+	tssitter "github.com/smacker/go-tree-sitter/typescript/typescript"
 
 	"github.com/Divish1032/synapses/internal/graph"
 )
@@ -120,7 +121,7 @@ func (p *TypeScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 	tsParser := sitter.NewParser()
 	tsParser.SetLanguage(lang)
 
-	tree := tsParser.Parse(nil, src)
+	tree, _ := tsParser.ParseCtx(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	// File node.
