@@ -205,6 +205,60 @@ func TestCheckViolations_FilePatternNoMatch(t *testing.T) {
 	}
 }
 
+// --- Peer config tests ---
+
+func TestPeerConfig_DefaultTrustLevel(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"version":"1","peers":[{"name":"backend","url":"http://localhost:8767"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Peers) != 1 {
+		t.Fatalf("expected 1 peer, got %d", len(cfg.Peers))
+	}
+	if cfg.Peers[0].TrustLevel != "read_only" {
+		t.Errorf("TrustLevel = %q, want %q", cfg.Peers[0].TrustLevel, "read_only")
+	}
+}
+
+func TestPeerConfig_EnvVarOverridesToken(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"version":"1","peers":[{"name":"my-svc","url":"http://localhost:8767","token":"json-token"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SYNAPSES_PEER_TOKEN_MY_SVC", "env-token")
+
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Peers[0].Token != "env-token" {
+		t.Errorf("Token = %q, want %q (env var should win)", cfg.Peers[0].Token, "env-token")
+	}
+}
+
+func TestPeerConfig_PeerAPITokenFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"version":"1","peer_api_port":8766}`
+	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SYNAPSES_PEER_API_TOKEN", "incoming-token")
+
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PeerAPIToken != "incoming-token" {
+		t.Errorf("PeerAPIToken = %q, want %q", cfg.PeerAPIToken, "incoming-token")
+	}
+}
+
 // buildViolationGraph creates a small graph with a .tsx file calling a function.
 func buildViolationGraph(t *testing.T) *graph.Graph {
 	t.Helper()

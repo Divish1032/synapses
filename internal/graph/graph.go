@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"crypto/rand"
 	"fmt"
 	"math"
 	"path"
@@ -9,6 +10,15 @@ import (
 	"sync"
 	"time"
 )
+
+// stableIDRecord holds the identity data used to migrate stable UUIDs across
+// file renames and re-parses.
+type stableIDRecord struct {
+	name string
+	pkg  string
+	sig  string
+	id   string // the stable UUID to reuse
+}
 
 // Graph is the core in-memory code graph. It is safe for concurrent reads
 // and writes — a RWMutex serialises mutations while allowing parallel queries.
@@ -22,19 +32,34 @@ type Graph struct {
 	callSites []CallSite         // temporary: accumulated during parse, drained by resolver
 	cache     *subgraphCache     // in-memory cache for carved subgraphs (30s TTL, max 20 entries)
 
+	// fileStableIDs stores stable UUID snapshots keyed by absolute file path.
+	// Populated by SnapshotFileStableIDs before RemoveFile; consumed by MigrateStableID.
+	fileStableIDs map[string][]stableIDRecord
+
 	// Cached ProjectIdentity result — invalidated on graph mutation.
 	piCache   *ProjectIdentity
 	piCacheAt int64 // unix timestamp of when piCache was computed
 }
 
+// generateStableID returns a random UUID v4 using crypto/rand (no external deps).
+func generateStableID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant bits
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 // New creates an empty Graph for the given repository identifier.
 func New(repoID string) *Graph {
 	return &Graph{
-		repoID:   repoID,
-		nodes:    make(map[NodeID]*Node),
-		outEdges: make(map[NodeID][]*Edge),
-		inEdges:  make(map[NodeID][]*Edge),
-		cache:    newSubgraphCache(),
+		repoID:        repoID,
+		nodes:         make(map[NodeID]*Node),
+		outEdges:      make(map[NodeID][]*Edge),
+		inEdges:       make(map[NodeID][]*Edge),
+		cache:         newSubgraphCache(),
+		fileStableIDs: make(map[string][]stableIDRecord),
 	}
 }
 
@@ -77,7 +102,11 @@ func (g *Graph) MakeNodeID(file, name string) NodeID {
 
 // AddNode inserts or replaces a node. If a node with the same ID already
 // exists it is overwritten — the caller is responsible for deduplication.
+// A stable UUID is generated for n.StableID if it is empty.
 func (g *Graph) AddNode(n *Node) {
+	if n.StableID == "" {
+		n.StableID = generateStableID()
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.nodes[n.ID] = n
@@ -216,6 +245,20 @@ func (g *Graph) AllNodes() []*Node {
 	return out
 }
 
+// NodesForFile returns all nodes whose source file matches the given path.
+// Used by the watcher to migrate stable IDs after a re-parse.
+func (g *Graph) NodesForFile(file string) []*Node {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var out []*Node
+	for _, n := range g.nodes {
+		if n.File == file {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // AllEdges returns a snapshot of every edge in the graph.
 func (g *Graph) AllEdges() []*Edge {
 	g.mu.RLock()
@@ -302,6 +345,82 @@ func (g *Graph) RemoveCallSitesForFile(file string) {
 		}
 	}
 	g.callSites = filtered
+}
+
+// SnapshotFileStableIDs records the stable UUIDs of all nodes in the given file
+// so that MigrateStableID can reuse them after the file is re-parsed.
+// Must be called BEFORE RemoveFile for the migration to work correctly.
+func (g *Graph) SnapshotFileStableIDs(file string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var records []stableIDRecord
+	for _, n := range g.nodes {
+		if n.File != file || n.StableID == "" {
+			continue
+		}
+		sig := ""
+		if n.Metadata != nil {
+			sig = n.Metadata["signature"]
+		}
+		records = append(records, stableIDRecord{
+			name: n.Name,
+			pkg:  n.Package,
+			sig:  sig,
+			id:   n.StableID,
+		})
+	}
+	if g.fileStableIDs == nil {
+		g.fileStableIDs = make(map[string][]stableIDRecord)
+	}
+	g.fileStableIDs[file] = records
+}
+
+// MigrateStableID attempts to reuse a stable UUID from a previous snapshot for
+// the given node. It checks snapshots for the node's file in two tiers:
+//   - Tier 1: exact (name, pkg, signature) match → certain same entity
+//   - Tier 2: same (pkg, signature) with different name → likely rename
+//
+// If no match is found, the node's current StableID is left unchanged.
+// Must be called AFTER re-parsing and AddNode, but before SnapshotFileStableIDs
+// is called again for the same file.
+func (g *Graph) MigrateStableID(n *Node) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	records, ok := g.fileStableIDs[n.File]
+	if !ok || len(records) == 0 {
+		return
+	}
+	sig := ""
+	if n.Metadata != nil {
+		sig = n.Metadata["signature"]
+	}
+	// Tier 1: exact match on name + pkg + sig.
+	for _, r := range records {
+		if r.name == n.Name && r.pkg == n.Package && r.sig == sig {
+			n.StableID = r.id
+			g.nodes[n.ID] = n
+			return
+		}
+	}
+	// Tier 2: same pkg + sig, different name (rename).
+	if sig != "" {
+		for _, r := range records {
+			if r.pkg == n.Package && r.sig == sig {
+				n.StableID = r.id
+				g.nodes[n.ID] = n
+				return
+			}
+		}
+	}
+}
+
+// ClearFileSnapshot removes the stable ID snapshot for a file once migration
+// is complete. Optional — snapshots are small and automatically replaced on
+// the next SnapshotFileStableIDs call for the same file.
+func (g *Graph) ClearFileSnapshot(file string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.fileStableIDs, file)
 }
 
 // RemoveFile removes all nodes and their associated edges for a given file path.

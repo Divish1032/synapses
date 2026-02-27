@@ -1,4 +1,14 @@
 {
   "version": "1",
-  "use_go_types": true
+  "use_go_types": true,
+  "peer_api_port": 8766,
+  "peer_api_token": "token-synapses",
+  "peers": [
+    {
+      "name": "synapses-intelligence",
+      "url": "http://localhost:8767",
+      "token": "token-intelligence",
+      "trust_level": "full"
+    }
+  ]
 }

@@ -206,3 +206,122 @@ func toLower(s string) string {
 	}
 	return string(b)
 }
+
+// --- Stable UUID tests ---
+
+func TestAddNode_AssignsStableID(t *testing.T) {
+	g := graph.New("repo")
+	id := g.MakeNodeID("svc.go", "Serve")
+	g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: "Serve", File: "svc.go"})
+
+	nodes := g.NodesForFile("svc.go")
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(nodes))
+	}
+	if nodes[0].StableID == "" {
+		t.Error("AddNode should assign a non-empty StableID")
+	}
+}
+
+func TestAddNode_PreservesExistingStableID(t *testing.T) {
+	g := graph.New("repo")
+	id := g.MakeNodeID("svc.go", "Serve")
+	g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: "Serve", File: "svc.go", StableID: "fixed-uuid"})
+
+	nodes := g.NodesForFile("svc.go")
+	if nodes[0].StableID != "fixed-uuid" {
+		t.Errorf("StableID = %q, want %q", nodes[0].StableID, "fixed-uuid")
+	}
+}
+
+func TestMigrateStableID_ExactMatch(t *testing.T) {
+	g := graph.New("repo")
+	id := g.MakeNodeID("svc.go", "Serve")
+	g.AddNode(&graph.Node{
+		ID: id, Type: graph.NodeFunction, Name: "Serve", Package: "svc", File: "svc.go",
+		Metadata: map[string]string{"signature": "func() error"},
+	})
+
+	nodes := g.NodesForFile("svc.go")
+	original := nodes[0].StableID
+	if original == "" {
+		t.Fatal("expected non-empty StableID after AddNode")
+	}
+
+	// Simulate re-parse: snapshot → remove → add new node → migrate.
+	g.SnapshotFileStableIDs("svc.go")
+	g.RemoveFile("svc.go")
+
+	id2 := g.MakeNodeID("svc.go", "Serve")
+	g.AddNode(&graph.Node{
+		ID: id2, Type: graph.NodeFunction, Name: "Serve", Package: "svc", File: "svc.go",
+		Metadata: map[string]string{"signature": "func() error"},
+	})
+
+	for _, n := range g.NodesForFile("svc.go") {
+		g.MigrateStableID(n)
+	}
+	g.ClearFileSnapshot("svc.go")
+
+	nodes = g.NodesForFile("svc.go")
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 node after re-parse, got %d", len(nodes))
+	}
+	if nodes[0].StableID != original {
+		t.Errorf("StableID after re-parse = %q, want %q (original)", nodes[0].StableID, original)
+	}
+}
+
+func TestMigrateStableID_RenameViaSignature(t *testing.T) {
+	g := graph.New("repo")
+	id := g.MakeNodeID("svc.go", "OldName")
+	g.AddNode(&graph.Node{
+		ID: id, Type: graph.NodeFunction, Name: "OldName", Package: "svc", File: "svc.go",
+		Metadata: map[string]string{"signature": "func(ctx context.Context) error"},
+	})
+	original := g.NodesForFile("svc.go")[0].StableID
+
+	g.SnapshotFileStableIDs("svc.go")
+	g.RemoveFile("svc.go")
+
+	// Re-parsed with new name but same signature → Tier 2 match.
+	id2 := g.MakeNodeID("svc.go", "NewName")
+	g.AddNode(&graph.Node{
+		ID: id2, Type: graph.NodeFunction, Name: "NewName", Package: "svc", File: "svc.go",
+		Metadata: map[string]string{"signature": "func(ctx context.Context) error"},
+	})
+	for _, n := range g.NodesForFile("svc.go") {
+		g.MigrateStableID(n)
+	}
+	g.ClearFileSnapshot("svc.go")
+
+	if got := g.NodesForFile("svc.go")[0].StableID; got != original {
+		t.Errorf("renamed node StableID = %q, want %q (tier-2 migration)", got, original)
+	}
+}
+
+func TestMigrateStableID_NoMatchGetsNewUUID(t *testing.T) {
+	g := graph.New("repo")
+	id := g.MakeNodeID("svc.go", "Serve")
+	g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: "Serve", Package: "svc", File: "svc.go"})
+	original := g.NodesForFile("svc.go")[0].StableID
+
+	g.SnapshotFileStableIDs("svc.go")
+	g.RemoveFile("svc.go")
+
+	// Completely different function — should get a fresh UUID.
+	id2 := g.MakeNodeID("svc.go", "Stop")
+	g.AddNode(&graph.Node{ID: id2, Type: graph.NodeFunction, Name: "Stop", Package: "svc", File: "svc.go"})
+	for _, n := range g.NodesForFile("svc.go") {
+		g.MigrateStableID(n)
+	}
+	g.ClearFileSnapshot("svc.go")
+
+	newID := g.NodesForFile("svc.go")[0].StableID
+	if newID == "" {
+		t.Error("new node should have a non-empty StableID")
+	}
+	if newID == original {
+		t.Error("completely different function should not reuse the original StableID")
+	}
+}

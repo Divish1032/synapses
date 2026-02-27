@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/synapses/synapses/internal/graph"
 )
@@ -98,6 +99,35 @@ type Config struct {
 	// the first line of stdin followed by the raw file content, and writes a
 	// single JSON object {"nodes":[...],"edges":[...]} to stdout.
 	Plugins []PluginConfig `json:"plugins,omitempty"`
+
+	// PeerAPIPort is the port this synapses instance listens on for incoming
+	// peer queries. Set to 0 (default) to disable the peer API server.
+	PeerAPIPort int `json:"peer_api_port,omitempty"`
+
+	// PeerAPIToken is the bearer token that remote peers must supply in the
+	// Authorization header when calling this instance's peer API. May also be
+	// set via the SYNAPSES_PEER_API_TOKEN environment variable (env wins).
+	PeerAPIToken string `json:"peer_api_token,omitempty"`
+
+	// Peers is the list of remote synapses instances this project connects to.
+	Peers []PeerConfig `json:"peers,omitempty"`
+}
+
+// PeerConfig describes a remote synapses peer instance to connect to.
+type PeerConfig struct {
+	// Name is a short, unique identifier used in MCP tool params and env var
+	// lookup. Example: "backend". Must not contain whitespace.
+	Name string `json:"name"`
+	// URL is the base URL of the peer's peer API. Example: "http://localhost:8767".
+	URL string `json:"url"`
+	// Token is the bearer token to include in requests to this peer. May be
+	// left empty and supplied via the SYNAPSES_PEER_TOKEN_<NAME> environment
+	// variable instead (env always wins over the JSON value).
+	Token string `json:"token,omitempty"`
+	// TrustLevel controls which peer API endpoints are accessible.
+	// "full" allows queries + claims; "read_only" allows queries only.
+	// Defaults to "read_only" if empty.
+	TrustLevel string `json:"trust_level,omitempty"`
 }
 
 // PluginConfig describes a single external parser plugin.
@@ -226,6 +256,21 @@ func Load(dir string) (*Config, error) {
 	}
 
 	cfg.applyDefaults()
+
+	// Resolve env var tokens for peers. SYNAPSES_PEER_TOKEN_<NAME> always wins
+	// over the JSON value, making it safe for CI/CD environments.
+	replacer := strings.NewReplacer("-", "_", ".", "_", " ", "_")
+	for i, p := range cfg.Peers {
+		envKey := "SYNAPSES_PEER_TOKEN_" + strings.ToUpper(replacer.Replace(p.Name))
+		if tok := os.Getenv(envKey); tok != "" {
+			cfg.Peers[i].Token = tok
+		}
+	}
+	// Resolve incoming token: env var beats JSON.
+	if tok := os.Getenv("SYNAPSES_PEER_API_TOKEN"); tok != "" {
+		cfg.PeerAPIToken = tok
+	}
+
 	// Resolve relative Linked paths against the directory that holds the config.
 	for i, p := range cfg.Linked {
 		if !filepath.IsAbs(p) {
@@ -396,6 +441,11 @@ func (c *Config) applyDefaults() {
 	}
 	if c.ContextCarve.TokenBudget == 0 {
 		c.ContextCarve.TokenBudget = 4000
+	}
+	for i := range c.Peers {
+		if c.Peers[i].TrustLevel == "" {
+			c.Peers[i].TrustLevel = "read_only"
+		}
 	}
 }
 

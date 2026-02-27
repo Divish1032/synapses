@@ -214,14 +214,27 @@ func (w *Watcher) reparseFile(path, _ string) {
 	nodesBefore := w.countNodesForFile(path)
 	edgesBefore := w.graph.EdgeCount()
 
+	// Snapshot stable UUIDs before removing nodes so they can be migrated to
+	// the re-parsed nodes (preserving cross-project references across renames).
+	w.graph.SnapshotFileStableIDs(path)
+
 	// Remove stale graph data and call sites for this file before re-parsing.
 	w.graph.RemoveFile(path)
 	w.graph.RemoveCallSitesForFile(path)
 
 	if err := w.walker.ParseFile(w.graph, path); err != nil {
 		fmt.Fprintf(os.Stderr, "synapses/watcher: re-parse %s: %v\n", path, err)
+		w.graph.ClearFileSnapshot(path)
 		return
 	}
+
+	// Migrate stable UUIDs: reuse old UUIDs for nodes that survived the re-parse
+	// (same identity) so cross-project references remain valid.
+	for _, n := range w.graph.NodesForFile(path) {
+		w.graph.MigrateStableID(n)
+	}
+	w.graph.ClearFileSnapshot(path)
+
 	resolver.ResolveCallEdges(w.graph)
 	resolver.ResolveImplementsEdges(w.graph)
 	w.graph.InvalidateCache()

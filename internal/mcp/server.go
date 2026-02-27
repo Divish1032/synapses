@@ -33,6 +33,7 @@ type Server struct {
 	config       *config.Config
 	store        *store.Store  // nil if started without a persistent store
 	changeSource ChangeSource  // nil if started without a file watcher
+	peerManager  interface{}   // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
 	rulesMu      sync.RWMutex // protects s.config.Rules for concurrent dynamic upserts
 }
 
@@ -67,6 +68,13 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 // get_working_state can report recent file activity to agents.
 func (s *Server) SetChangeSource(cs ChangeSource) {
 	s.changeSource = cs
+}
+
+// SetPeerManager wires a *peer.PeerManager into the server so that the
+// list_peers, get_peer_context, and get_dependency_graph tools are functional.
+// Using interface{} avoids an import cycle (peer imports graph/store but not mcp).
+func (s *Server) SetPeerManager(pm interface{}) {
+	s.peerManager = pm
 }
 
 // ServeStdio starts the MCP server on stdin/stdout. This call blocks until
@@ -876,4 +884,56 @@ func (s *Server) registerTools() {
 		s.handleGetProposals,
 	)
 
+	// ── Peer Tools ──────────────────────────────────────────────────────────
+
+	// list_peers
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"list_peers",
+			mcp.WithDescription(
+				"Lists all configured peer synapses instances with their connection status, "+
+					"node count, and number of entities shared with this project. "+
+					"Configure peers in synapses.json under the 'peers' key. "+
+					"Returns an empty array with a hint if no peers are configured.",
+			),
+		),
+		s.handleListPeers,
+	)
+
+	// get_peer_context
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_peer_context",
+			mcp.WithDescription(
+				"Returns the context subgraph for a named entity in a peer project. "+
+					"Equivalent to calling get_context on the peer's graph — shows callers, callees, "+
+					"and related nodes. Useful for understanding how a shared API is used in another project.",
+			),
+			mcp.WithString("project",
+				mcp.Required(),
+				mcp.Description("Peer name as configured in synapses.json (e.g. 'backend')."),
+			),
+			mcp.WithString("entity",
+				mcp.Required(),
+				mcp.Description("Function, struct, or interface name to look up in the peer project."),
+			),
+			mcp.WithNumber("depth",
+				mcp.Description("BFS hop depth. Default 2."),
+			),
+		),
+		s.handleGetPeerContext,
+	)
+
+	// get_dependency_graph
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_dependency_graph",
+			mcp.WithDescription(
+				"Returns an inter-project dependency overview across all connected peers. "+
+					"Shows which entities are shared between projects and includes a Mermaid diagram "+
+					"of inter-project links. Useful for understanding cross-project architecture.",
+			),
+		),
+		s.handleGetDependencyGraph,
+	)
 }

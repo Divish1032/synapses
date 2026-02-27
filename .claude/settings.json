@@ -21,7 +21,33 @@
       "Bash(fi)",
       "Bash(done)",
       "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); print\\(data[0][''text''][:500]\\)\")",
-      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); parsed=json.loads\\(data[0][''text'']\\); print\\(''warnings:'', parsed.get\\(''warnings''\\)\\); print\\(''status:'', parsed.get\\(''status''\\)\\)\")"
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); parsed=json.loads\\(data[0][''text'']\\); print\\(''warnings:'', parsed.get\\(''warnings''\\)\\); print\\(''status:'', parsed.get\\(''status''\\)\\)\")",
+      "Read(//Users/itachi/**)",
+      "Bash(sqlite3 ~/Library/Caches/synapses/cache/synapses_04b9ce4b.db \"SELECT id, description FROM dynamic_rules;\")",
+      "Bash(sqlite3 ~/Library/Caches/synapses/cache/synapses_04b9ce4b.db \"DELETE FROM dynamic_rules WHERE description LIKE ''%CLEANUP%'' OR description LIKE ''%removing test rule%'' OR description LIKE ''Test:%test rule%''; SELECT changes\\(\\) || '' rows deleted'';\")",
+      "Bash(grep -n \"handleClaimWork\\\\|handleGetConflicts\\\\|claim_work\\\\|get_conflicts\" /Users/itachi/Documents/Github/synapses/internal/mcp/*.go)",
+      "Bash(echo \"PATH=$PATH\")",
+      "Bash(export PATH=$PATH:~/go/bin)",
+      "Bash(export PATH=$PATH:/Users/itachi/go/bin)",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s http://localhost:8767/api/v1/identity)",
+      "Bash(curl -v http://localhost:8766/api/v1/identity)",
+      "Bash(pkill -f \"synapses start\")",
+      "Bash(curl -v http://localhost:8767/api/v1/identity)",
+      "Bash(lsof -i :8767)",
+      "Bash(curl -s http://localhost:8766/api/v1/identity)",
+      "Bash(curl -s -H \"Authorization: Bearer token-synapses\" http://localhost:8766/api/v1/api-digest)",
+      "Bash(curl -s -H \"Authorization: Bearer token-synapses\" http://localhost:8766/api/v1/api-surface)",
+      "Bash(curl -s -X POST -H \"Authorization: Bearer token-synapses\" -H \"Content-Type: application/json\" -d '{\"\"entity\"\":\"\"PeerManager\"\",\"\"depth\"\":1}' http://localhost:8766/api/v1/query)",
+      "Bash(curl -s -H \"Authorization: Bearer token-synapses\" http://localhost:8766/api/v1/claims)",
+      "Bash(curl -s -X POST -H \"Authorization: Bearer token-synapses\" -H \"Content-Type: application/json\" -d '{\"\"trace_id\"\":\"\"test-trace-001\"\",\"\"agent_id\"\":\"\"test-agent\"\",\"\"intent_type\"\":\"\"claim_work\"\",\"\"scope\"\":\"\"internal/peer/manager.go\"\",\"\"scope_type\"\":\"\"file\"\",\"\"timestamp\"\":1709000000}' http://localhost:8766/api/v1/intents)",
+      "Bash(python3 /tmp/test_mcp_peer.py)",
+      "Bash(__NEW_LINE_14cee9fdfd341232__ echo \"=== Query: Builder on intelligence ===\")",
+      "Bash(curl -s -X POST -H \"Authorization: Bearer token-intelligence\" -H \"Content-Type: application/json\" -d '{\"\"entity\"\":\"\"Builder\"\",\"\"depth\"\":1}' http://localhost:8767/api/v1/query)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/Users/itachi/Documents/Github/synapses-intelligence"
     ]
   }
 }
