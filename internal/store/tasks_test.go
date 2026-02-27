@@ -3,7 +3,7 @@ package store_test
 import (
 	"testing"
 
-	"github.com/synapses/synapses/internal/store"
+	"github.com/Divish1032/synapses/internal/store"
 )
 
 func TestCreatePlan_AndGetPendingTasks(t *testing.T) {

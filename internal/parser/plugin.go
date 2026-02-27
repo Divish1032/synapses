@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // pluginTimeout caps the time a single plugin invocation may take.

@@ -3,9 +3,9 @@ package dataflow_test
 import (
 	"testing"
 
-	"github.com/synapses/synapses/internal/config"
-	"github.com/synapses/synapses/internal/dataflow"
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/config"
+	"github.com/Divish1032/synapses/internal/dataflow"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // emptyCfg returns a config with no custom data-flow patterns.

@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/tools/go/packages"
 
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // ResolveGoTypesCallEdges performs a type-checked CALLS resolution pass for

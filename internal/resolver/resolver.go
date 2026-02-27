@@ -10,7 +10,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // ResolveCallEdges drains all pending call sites from the graph and creates

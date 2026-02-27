@@ -5,6 +5,7 @@
 package watcher
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,11 +15,12 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/synapses/synapses/internal/config"
-	"github.com/synapses/synapses/internal/graph"
-	"github.com/synapses/synapses/internal/parser"
-	"github.com/synapses/synapses/internal/resolver"
-	"github.com/synapses/synapses/internal/store"
+	"github.com/Divish1032/synapses/internal/brain"
+	"github.com/Divish1032/synapses/internal/config"
+	"github.com/Divish1032/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/parser"
+	"github.com/Divish1032/synapses/internal/resolver"
+	"github.com/Divish1032/synapses/internal/store"
 )
 
 const debounceDelay = 150 * time.Millisecond
@@ -33,13 +35,21 @@ type ChangeEvent struct {
 	EdgesAdded   int       `json:"edges_added"`
 }
 
+// PacketCacheInvalidator is implemented by types that cache brain context packets
+// and need to be notified when file changes make cached packets stale.
+type PacketCacheInvalidator interface {
+	InvalidatePacketCache()
+}
+
 // Watcher watches a directory tree and keeps a Graph current as files change.
 type Watcher struct {
-	fw     *fsnotify.Watcher
-	graph  *graph.Graph
-	walker *parser.Walker
-	store  *store.Store   // may be nil — cache update is best-effort
-	cfg    *config.Config // may be nil — violation checking is best-effort
+	fw          *fsnotify.Watcher
+	graph       *graph.Graph
+	walker      *parser.Walker
+	store       *store.Store             // may be nil — cache update is best-effort
+	cfg         *config.Config           // may be nil — violation checking is best-effort
+	brainClient interface{}              // *brain.Client — set via SetBrainClient; nil if brain not configured
+	pktInval    PacketCacheInvalidator   // set via SetPacketInvalidator; may be nil
 
 	mu      sync.Mutex
 	timers  map[string]*time.Timer // debounce timers keyed by absolute file path
@@ -72,6 +82,20 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 // Must be called before Start. cfg may be nil to disable violation checking.
 func (w *Watcher) SetConfig(cfg *config.Config) {
 	w.cfg = cfg
+}
+
+// SetBrainClient wires a *brain.Client into the watcher so that changed files
+// are incrementally ingested to the intelligence sidecar. Using interface{}
+// avoids an import cycle (brain imports only stdlib, not watcher).
+func (w *Watcher) SetBrainClient(bc interface{}) {
+	w.brainClient = bc
+}
+
+// SetPacketInvalidator wires a PacketCacheInvalidator (typically the MCP Server)
+// into the watcher. On every file change the packet cache is cleared so that
+// stale brain context packets are not returned to agents.
+func (w *Watcher) SetPacketInvalidator(pi PacketCacheInvalidator) {
+	w.pktInval = pi
 }
 
 // Start begins watching root recursively. It returns immediately; the event
@@ -238,6 +262,9 @@ func (w *Watcher) reparseFile(path, _ string) {
 	resolver.ResolveCallEdges(w.graph)
 	resolver.ResolveImplementsEdges(w.graph)
 	w.graph.InvalidateCache()
+	if w.pktInval != nil {
+		w.pktInval.InvalidatePacketCache()
+	}
 
 	// Record change event with delta counts.
 	nodesAfter := w.countNodesForFile(path)
@@ -252,6 +279,11 @@ func (w *Watcher) reparseFile(path, _ string) {
 
 	fmt.Fprintf(os.Stderr, "synapses/watcher: updated %s\n", path)
 	w.persistAsync(path)
+
+	// Fire-and-forget: ingest changed nodes to brain for semantic summarization.
+	if w.brainClient != nil {
+		go w.ingestToBrain(path)
+	}
 }
 
 // checkViolations runs the rule engine against edges touching path and emits
@@ -388,6 +420,53 @@ func (w *Watcher) persistAsync(changedFile string) {
 			}
 		}
 	}()
+}
+
+// ingestToBrain sends nodes from the re-parsed file to the intelligence sidecar
+// so its semantic summaries stay current. After ingest, schedules a delayed
+// write-back to fetch the generated summaries and store them as annotations.
+// Runs in a goroutine; all errors are silently discarded (fail-silent contract).
+func (w *Watcher) ingestToBrain(path string) {
+	bc, ok := w.brainClient.(*brain.Client)
+	if !ok || bc == nil {
+		return
+	}
+	nodes := w.graph.NodesForFile(path)
+	for _, n := range nodes {
+		if string(n.Type) == "package" || string(n.Type) == "file" {
+			continue
+		}
+		code := ""
+		if sig, ok := n.Metadata["signature"]; ok && sig != "" {
+			code = sig
+		}
+		if doc, ok := n.Metadata["doc"]; ok && doc != "" && code != "" {
+			code = "// " + doc + "\n" + code
+		}
+		bc.Ingest(context.Background(), brain.IngestRequest{
+			NodeID:   string(n.ID),
+			NodeName: n.Name,
+			NodeType: string(n.Type),
+			Package:  n.Package,
+			Code:     code,
+		})
+	}
+
+	// Delayed write-back: fetch summaries after the brain has processed the ingest queue.
+	if w.store != nil {
+		go func(nodeList []*graph.Node) {
+			time.Sleep(15 * time.Second)
+			for _, n := range nodeList {
+				if string(n.Type) == "package" || string(n.Type) == "file" {
+					continue
+				}
+				summary := bc.GetSummary(context.Background(), string(n.ID))
+				if summary != "" {
+					_, _ = w.store.AddAnnotation(string(n.ID), "brain", summary)
+				}
+			}
+		}(nodes)
+	}
 }
 
 // shouldSkipDir matches the same exclusion list used by the parser walker.

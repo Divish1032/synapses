@@ -3,7 +3,7 @@ package graph_test
 import (
 	"testing"
 
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // buildFixture returns a small but representative graph used across tests.

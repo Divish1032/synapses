@@ -43,11 +43,23 @@
       "Bash(curl -s -X POST -H \"Authorization: Bearer token-synapses\" -H \"Content-Type: application/json\" -d '{\"\"trace_id\"\":\"\"test-trace-001\"\",\"\"agent_id\"\":\"\"test-agent\"\",\"\"intent_type\"\":\"\"claim_work\"\",\"\"scope\"\":\"\"internal/peer/manager.go\"\",\"\"scope_type\"\":\"\"file\"\",\"\"timestamp\"\":1709000000}' http://localhost:8766/api/v1/intents)",
       "Bash(python3 /tmp/test_mcp_peer.py)",
       "Bash(__NEW_LINE_14cee9fdfd341232__ echo \"=== Query: Builder on intelligence ===\")",
-      "Bash(curl -s -X POST -H \"Authorization: Bearer token-intelligence\" -H \"Content-Type: application/json\" -d '{\"\"entity\"\":\"\"Builder\"\",\"\"depth\"\":1}' http://localhost:8767/api/v1/query)"
+      "Bash(curl -s -X POST -H \"Authorization: Bearer token-intelligence\" -H \"Content-Type: application/json\" -d '{\"\"entity\"\":\"\"Builder\"\",\"\"depth\"\":1}' http://localhost:8767/api/v1/query)",
+      "Bash(curl -s http://localhost:11435/v1/health)",
+      "Read(//usr/local/bin/**)",
+      "Bash(python3 /tmp/test_brain_e2e.py)",
+      "Bash(grep -n \"^func \\(s \\\\*Server\\) handle\" /Users/itachi/Documents/Github/synapses/internal/mcp/*.go)",
+      "Bash(sort -t: -k2 -n)",
+      "Bash(go list -m all)",
+      "Bash(grep -n \"export\\\\|Export\\\\|graphml\\\\|mermaid\" /Users/itachi/Documents/Github/synapses/internal/graph/*.go)",
+      "Bash(grep -n \"pull\\\\|model_pull\\\\|AutoPull\\\\|ensure\\\\|download\" /Users/itachi/Documents/Github/synapses-intelligence/internal/brain/*.go)",
+      "Bash(grep -n \"Available\\\\|LLM\\\\|llm\\\\|OllamaClient\\\\|NewOllama\" /Users/itachi/Documents/Github/synapses-intelligence/pkg/brain/*.go)",
+      "Bash(__NEW_LINE_432f700c6e47d7b3__ echo \"\")",
+      "Bash(git -C /Users/itachi/Documents/Github/synapses tag --list)"
     ],
     "additionalDirectories": [
       "/tmp",
-      "/Users/itachi/Documents/Github/synapses-intelligence"
+      "/Users/itachi/Documents/Github/synapses-intelligence",
+      "/Users/itachi/.claude/projects/-Users-itachi-Documents-Github-synapses/memory"
     ]
   }
 }

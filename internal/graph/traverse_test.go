@@ -3,7 +3,7 @@ package graph_test
 import (
 	"testing"
 
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // buildCarveFixture creates a 4-layer graph for traversal tests.

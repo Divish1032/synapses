@@ -17,8 +17,8 @@ import (
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver; no CGo required
 
-	"github.com/synapses/synapses/internal/config"
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/config"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // ProjectStat holds the lightweight per-project metadata that can be read
@@ -232,6 +232,18 @@ CREATE TABLE IF NOT EXISTS proposal_votes (
 	PRIMARY KEY (proposal_id, agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pvotes_proposal ON proposal_votes(proposal_id);
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	tool_name   TEXT    NOT NULL,
+	agent_id    TEXT    NOT NULL DEFAULT '',
+	entity      TEXT    NOT NULL DEFAULT '',
+	duration_ms INTEGER NOT NULL DEFAULT 0,
+	success     INTEGER NOT NULL DEFAULT 1,
+	created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool_name);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_ts   ON tool_calls(created_at);
 `
 
 // Store wraps a SQLite database and provides graph serialisation.
@@ -1507,4 +1519,58 @@ func scanWorkClaims(rows *sql.Rows) ([]WorkClaim, error) {
 		claims = append(claims, c)
 	}
 	return claims, rows.Err()
+}
+
+// ── Tool Call Observability ───────────────────────────────────────────────────
+
+// ToolUsageStat summarises call patterns for one MCP tool over a time window.
+type ToolUsageStat struct {
+	ToolName  string  `json:"tool_name"`
+	CallCount int     `json:"call_count"`
+	AvgMs     float64 `json:"avg_ms"`
+	ErrorRate float64 `json:"error_rate"` // 0.0–1.0 fraction of calls that errored
+}
+
+// RecordToolCall inserts one row into the tool_calls table. All errors are
+// silently discarded — observability must never block the hot path.
+func (s *Store) RecordToolCall(toolName, agentID, entity string, durationMs int64, success bool) {
+	succ := 1
+	if !success {
+		succ = 0
+	}
+	_, _ = s.db.Exec(
+		`INSERT INTO tool_calls(tool_name,agent_id,entity,duration_ms,success) VALUES(?,?,?,?,?)`,
+		toolName, agentID, entity, durationMs, succ,
+	)
+}
+
+// ToolUsageStats returns the top-N tools by call count over the last `days` days.
+func (s *Store) ToolUsageStats(days, limit int) ([]ToolUsageStat, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	since := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02T15:04:05Z")
+	rows, err := s.db.Query(`
+		SELECT tool_name,
+		       COUNT(*) AS calls,
+		       AVG(duration_ms) AS avg_ms,
+		       1.0 - AVG(success) AS error_rate
+		FROM tool_calls
+		WHERE created_at >= ?
+		GROUP BY tool_name
+		ORDER BY calls DESC
+		LIMIT ?`, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var stats []ToolUsageStat
+	for rows.Next() {
+		var s ToolUsageStat
+		if err := rows.Scan(&s.ToolName, &s.CallCount, &s.AvgMs, &s.ErrorRate); err != nil {
+			return nil, err
+		}
+		stats = append(stats, s)
+	}
+	return stats, rows.Err()
 }

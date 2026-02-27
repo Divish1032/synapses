@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 const configFileName = "synapses.json"
@@ -111,6 +111,23 @@ type Config struct {
 
 	// Peers is the list of remote synapses instances this project connects to.
 	Peers []PeerConfig `json:"peers,omitempty"`
+
+	// Brain configures the optional synapses-intelligence integration.
+	// When set, get_context returns LLM-enriched Context Packets, violations
+	// include plain-English explanations, and file changes are auto-ingested.
+	Brain BrainConfig `json:"brain,omitempty"`
+}
+
+// BrainConfig describes the connection to a synapses-intelligence sidecar.
+type BrainConfig struct {
+	// URL is the base URL of the intelligence service, e.g. "http://localhost:11435".
+	// Leave empty to disable brain integration.
+	URL string `json:"url,omitempty"`
+	// TimeoutSec is the per-request HTTP timeout. Defaults to 5 if URL is set.
+	TimeoutSec int `json:"timeout_sec,omitempty"`
+	// EnableLLM controls whether the context-packet endpoint is allowed to call
+	// the local LLM. Defaults to true when URL is set.
+	EnableLLM bool `json:"enable_llm,omitempty"`
 }
 
 // PeerConfig describes a remote synapses peer instance to connect to.
@@ -223,15 +240,18 @@ type ContextCarveConfig struct {
 
 // Violation records a detected rule breach.
 type Violation struct {
-	RuleID       string         `json:"rule_id"`
-	Severity     string         `json:"severity"`
-	Description  string         `json:"description"`
-	FromNode     graph.NodeID   `json:"from_node"`
-	ToNode       graph.NodeID   `json:"to_node"`
-	EdgeType     graph.EdgeType `json:"edge_type"`
+	RuleID      string         `json:"rule_id"`
+	Severity    string         `json:"severity"`
+	Description string         `json:"description"`
+	FromNode    graph.NodeID   `json:"from_node"`
+	ToNode      graph.NodeID   `json:"to_node"`
+	EdgeType    graph.EdgeType `json:"edge_type"`
 	// SuggestedFix is a concise, actionable refactoring hint generated from the
 	// rule pattern and the names of the two nodes involved in the violation.
-	SuggestedFix string         `json:"suggested_fix,omitempty"`
+	SuggestedFix string `json:"suggested_fix,omitempty"`
+	// Explanation is a plain-English LLM-generated explanation of why this
+	// violation matters, populated when synapses-intelligence is configured.
+	Explanation string `json:"explanation,omitempty"`
 }
 
 // Load reads synapses.json from the given directory. If the file does not
@@ -445,6 +465,15 @@ func (c *Config) applyDefaults() {
 	for i := range c.Peers {
 		if c.Peers[i].TrustLevel == "" {
 			c.Peers[i].TrustLevel = "read_only"
+		}
+	}
+	// Brain defaults: if URL is set but other fields are zero, apply sensible defaults.
+	if c.Brain.URL != "" {
+		if c.Brain.TimeoutSec <= 0 {
+			c.Brain.TimeoutSec = 5
+		}
+		if !c.Brain.EnableLLM {
+			c.Brain.EnableLLM = true // default true when URL is provided
 		}
 	}
 }
