@@ -255,19 +255,19 @@ func (w *Walker) ParseFile(g *graph.Graph, path string) error {
 func shouldSkipDir(name string) bool {
 	switch name {
 	// --- Dependency managers ---
-	case "node_modules",   // Node.js
-		"vendor",          // Go / PHP / Ruby
+	case "node_modules", // Node.js
+		"vendor",           // Go / PHP / Ruby
 		"bower_components", // Bower (legacy JS)
-		"jspm_packages",   // JSPM
-		"Pods":            // iOS CocoaPods
+		"jspm_packages",    // JSPM
+		"Pods":             // iOS CocoaPods
 		return true
 
 	// --- Build / compiled output ---
 	case "dist",
 		"build",
 		"out",
-		"target",  // Rust (Cargo), Java (Maven)
-		"obj",     // C/C++
+		"target", // Rust (Cargo), Java (Maven)
+		"obj",    // C/C++
 		"storybook-static",
 		"coverage",
 		".nyc_output":

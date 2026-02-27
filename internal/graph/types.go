@@ -6,6 +6,7 @@ package graph
 // NodeType classifies what kind of code entity a node represents.
 type NodeType string
 
+// Node type constants: classify what kind of code entity a node represents.
 const (
 	NodeFile      NodeType = "file"
 	NodePackage   NodeType = "package"
@@ -19,6 +20,7 @@ const (
 // EdgeType classifies the relationship between two nodes.
 type EdgeType string
 
+// Edge type constants: classify the relationship between two graph nodes.
 const (
 	EdgeImports    EdgeType = "IMPORTS"
 	EdgeCalls      EdgeType = "CALLS"

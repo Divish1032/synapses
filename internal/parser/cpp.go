@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"path/filepath"
 
 	sitter "github.com/smacker/go-tree-sitter"
@@ -29,7 +30,7 @@ func (p *CppParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree := parser.Parse(nil, src)
+	tree, _ := parser.ParseCtx(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
