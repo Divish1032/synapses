@@ -188,8 +188,8 @@ func parseCoverProfile(path string) ([]coverBlock, error) {
 		if comma < 0 {
 			continue
 		}
-		startStr := rangePart[:comma]             // "10.5"
-		endStr := rangePart[comma+1:]             // "20.15"
+		startStr := rangePart[:comma] // "10.5"
+		endStr := rangePart[comma+1:] // "20.15"
 		startLine, _ := strconv.Atoi(strings.SplitN(startStr, ".", 2)[0])
 		endLine, _ := strconv.Atoi(strings.SplitN(endStr, ".", 2)[0])
 

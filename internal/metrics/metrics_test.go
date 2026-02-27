@@ -28,12 +28,12 @@ func buildMetricsGraph(t *testing.T, repoRoot string) *graph.Graph {
 
 	fn2ID := g.MakeNodeID(filepath.Join(repoRoot, "pkg/svc.go"), "Stop")
 	g.AddNode(&graph.Node{
-		ID:      fn2ID,
-		Type:    graph.NodeFunction,
-		Name:    "Stop",
-		Package: "pkg",
-		File:    filepath.Join(repoRoot, "pkg/svc.go"),
-		Line:    35,
+		ID:       fn2ID,
+		Type:     graph.NodeFunction,
+		Name:     "Stop",
+		Package:  "pkg",
+		File:     filepath.Join(repoRoot, "pkg/svc.go"),
+		Line:     35,
 		Metadata: map[string]string{"line_count": "5"},
 	})
 

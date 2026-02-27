@@ -25,11 +25,11 @@ type Task struct {
 	PlanID        string   `json:"plan_id"`
 	Title         string   `json:"title"`
 	Description   string   `json:"description"`
-	Status        string   `json:"status"`         // pending | in_progress | done | cancelled
-	Priority      string   `json:"priority"`       // p0 | p1 | p2 | p3
-	LinkedNodes   []string `json:"linked_nodes"`   // node IDs related to this task
-	DependsOn     []string `json:"depends_on"`     // task IDs that must complete first
-	Notes         string   `json:"notes"`          // append-only notes from each session
+	Status        string   `json:"status"`       // pending | in_progress | done | cancelled
+	Priority      string   `json:"priority"`     // p0 | p1 | p2 | p3
+	LinkedNodes   []string `json:"linked_nodes"` // node IDs related to this task
+	DependsOn     []string `json:"depends_on"`   // task IDs that must complete first
+	Notes         string   `json:"notes"`        // append-only notes from each session
 	AssignedTo    string   `json:"assigned_to,omitempty"`
 	LastUpdatedBy string   `json:"last_updated_by,omitempty"`
 	// Computed fields — not stored in DB; set by GetPendingTasks.
