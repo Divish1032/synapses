@@ -4,15 +4,17 @@
 package mcp
 
 import (
+	"context"
 	"sync"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/synapses/synapses/internal/config"
-	"github.com/synapses/synapses/internal/graph"
-	"github.com/synapses/synapses/internal/store"
-	"github.com/synapses/synapses/internal/watcher"
+	"github.com/Divish1032/synapses/internal/config"
+	"github.com/Divish1032/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/store"
+	"github.com/Divish1032/synapses/internal/watcher"
 )
 
 // ChangeSource is implemented by types that maintain a recent file-change log.
@@ -23,8 +25,14 @@ type ChangeSource interface {
 
 const (
 	serverName    = "synapses"
-	serverVersion = "0.2.0"
+	serverVersion = "0.3.1"
 )
+
+// packetCacheEntry holds a cached context packet with an expiry time.
+type packetCacheEntry struct {
+	pkt       interface{} // *brain.ContextPacket (typed as interface{} to avoid import cycle)
+	expiresAt time.Time
+}
 
 // Server holds the MCP server and the dependencies that tool handlers need.
 type Server struct {
@@ -34,7 +42,12 @@ type Server struct {
 	store        *store.Store  // nil if started without a persistent store
 	changeSource ChangeSource  // nil if started without a file watcher
 	peerManager  interface{}   // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
+	brainClient  interface{}   // *brain.Client — set via SetBrainClient; nil if brain not configured
 	rulesMu      sync.RWMutex // protects s.config.Rules for concurrent dynamic upserts
+
+	// Context-packet cache: 20 slots max, 30s TTL. Keyed by "entityName:depth".
+	packetCacheMu sync.Mutex
+	packetCache   map[string]*packetCacheEntry
 }
 
 // New creates a Server wired to the given graph, config, and optional store.
@@ -43,9 +56,10 @@ type Server struct {
 // All tools are registered during construction.
 func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 	s := &Server{
-		graph:  g,
-		config: cfg,
-		store:  st,
+		graph:       g,
+		config:      cfg,
+		store:       st,
+		packetCache: make(map[string]*packetCacheEntry, 20),
 	}
 
 	// Restore dynamic rules persisted from previous sessions. This runs before
@@ -57,11 +71,95 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		}
 	}
 
+	// Usage observability: wire before/after hooks to record every tool call
+	// timing and success status into the tool_calls SQLite table.
+	hooks := &server.Hooks{}
+	startTimes := &callStartTimes{}
+	hooks.AddBeforeCallTool(func(_ context.Context, _ any, req *mcp.CallToolRequest) {
+		startTimes.set(req.Params.Name, time.Now())
+	})
+	hooks.AddAfterCallTool(func(_ context.Context, _ any, req *mcp.CallToolRequest, result *mcp.CallToolResult) {
+		if s.store == nil {
+			return
+		}
+		elapsed := time.Since(startTimes.pop(req.Params.Name))
+		success := result == nil || !result.IsError
+		agentID, _ := req.Params.Arguments["agent_id"].(string)
+		entity, _ := req.Params.Arguments["entity"].(string)
+		if entity == "" {
+			entity, _ = req.Params.Arguments["query"].(string)
+		}
+		s.store.RecordToolCall(req.Params.Name, agentID, entity, elapsed.Milliseconds(), success)
+	})
+
 	s.mcp = server.NewMCPServer(serverName, serverVersion,
 		server.WithToolCapabilities(true),
+		server.WithHooks(hooks),
 	)
 	s.registerTools()
 	return s
+}
+
+// callStartTimes is a simple concurrent map for per-tool-call start timestamps.
+// It uses the tool name as key; concurrent calls to the same tool will race,
+// but that is acceptable — timing accuracy is best-effort for observability.
+type callStartTimes struct {
+	mu   sync.Mutex
+	data map[string]time.Time
+}
+
+func (c *callStartTimes) set(name string, t time.Time) {
+	c.mu.Lock()
+	if c.data == nil {
+		c.data = make(map[string]time.Time)
+	}
+	c.data[name] = t
+	c.mu.Unlock()
+}
+
+func (c *callStartTimes) pop(name string) time.Time {
+	c.mu.Lock()
+	t := c.data[name]
+	delete(c.data, name)
+	c.mu.Unlock()
+	return t
+}
+
+const (
+	packetCacheTTL  = 30 * time.Second
+	packetCacheMax  = 20
+)
+
+// getPacketFromCache returns a cached context packet for the given key, or nil
+// if the entry is absent or expired.
+func (s *Server) getPacketFromCache(key string) interface{} {
+	s.packetCacheMu.Lock()
+	defer s.packetCacheMu.Unlock()
+	e, ok := s.packetCache[key]
+	if !ok || time.Now().After(e.expiresAt) {
+		delete(s.packetCache, key)
+		return nil
+	}
+	return e.pkt
+}
+
+// setPacketCache stores a context packet under key with a 30s TTL.
+// When the cache exceeds packetCacheMax entries, it is cleared entirely (simple eviction).
+func (s *Server) setPacketCache(key string, pkt interface{}) {
+	s.packetCacheMu.Lock()
+	defer s.packetCacheMu.Unlock()
+	if len(s.packetCache) >= packetCacheMax {
+		s.packetCache = make(map[string]*packetCacheEntry, packetCacheMax)
+	}
+	s.packetCache[key] = &packetCacheEntry{pkt: pkt, expiresAt: time.Now().Add(packetCacheTTL)}
+}
+
+// InvalidatePacketCache clears the entire context-packet cache. Called by the
+// file watcher after any file change so stale packets are not returned.
+func (s *Server) InvalidatePacketCache() {
+	s.packetCacheMu.Lock()
+	s.packetCache = make(map[string]*packetCacheEntry, packetCacheMax)
+	s.packetCacheMu.Unlock()
 }
 
 // SetChangeSource wires a change event source (typically the file watcher) so
@@ -75,6 +173,13 @@ func (s *Server) SetChangeSource(cs ChangeSource) {
 // Using interface{} avoids an import cycle (peer imports graph/store but not mcp).
 func (s *Server) SetPeerManager(pm interface{}) {
 	s.peerManager = pm
+}
+
+// SetBrainClient wires a *brain.Client into the server so that get_context
+// returns enriched Context Packets and violations include LLM explanations.
+// Using interface{} avoids an import cycle (brain imports only stdlib).
+func (s *Server) SetBrainClient(bc interface{}) {
+	s.brainClient = bc
 }
 
 // ServeStdio starts the MCP server on stdin/stdout. This call blocks until
@@ -167,13 +272,23 @@ func (s *Server) registerTools() {
 		s.handleValidatePlan,
 	)
 
-	// get_violations
+	// get_violations (absorbs get_violation_log via rule_id + limit params)
 	s.mcp.AddTool(
 		mcp.NewTool(
 			"get_violations",
 			mcp.WithDescription(
 				"Lists all current architectural rule violations found in the graph. "+
-					"Returns rule ID, severity, affected nodes, and a human-readable description.",
+					"Returns rule ID, severity, affected nodes, and a human-readable description. "+
+					"Pass rule_id to filter to a specific rule. Pass include_log=true to also return the historical audit log.",
+			),
+			mcp.WithString("rule_id",
+				mcp.Description("Optional. Filter violations to a specific rule ID."),
+			),
+			mcp.WithBoolean("include_log",
+				mcp.Description("When true, also returns the historical violation log entries. Default false."),
+			),
+			mcp.WithNumber("log_limit",
+				mcp.Description("Max historical log entries to return when include_log=true. Default 50."),
 			),
 		),
 		s.handleGetViolations,
@@ -217,45 +332,29 @@ func (s *Server) registerTools() {
 		s.handleGetApiContract,
 	)
 
-	// search
+	// search (absorbs semantic_search via mode param)
 	s.mcp.AddTool(
 		mcp.NewTool(
 			"search",
 			mcp.WithDescription(
 				"Keyword search across entity names and doc comments. "+
 					"Results are ranked: exact name match > name prefix > name substring > doc comment match. "+
-					"Returns up to 25 results. Use this to find auth-related code, error handlers, etc.",
+					"Returns up to 25 results. Use this to find auth-related code, error handlers, etc. "+
+					"Set mode='semantic' for full-text BM25 search by concept ('rate limiting', 'JWT validation'). "+
+					"CamelCase names are auto-split: searching 'carve' finds 'CarveEgoGraph'.",
 			),
 			mcp.WithString("query",
 				mcp.Required(),
 				mcp.Description("Search term (case-insensitive)."),
 			),
-		),
-		s.handleSearch,
-	)
-
-	// semantic_search
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"semantic_search",
-			mcp.WithDescription(
-				"Full-text BM25 search over node names, signatures, and doc comments. "+
-					"Finds code by concept, not just by exact name. "+
-					"Examples: 'rate limiting', 'JWT validation', 'database connection pool'. "+
-					"CamelCase names are auto-split: searching 'carve' finds 'CarveEgoGraph'. "+
-					"Results ranked by relevance; falls back to LIKE search if FTS finds nothing. "+
-					"Prefer this over search() for exploratory queries where you don't know the exact name. "+
-					"Configure embedding_endpoint in synapses.json for future vector re-ranking.",
-			),
-			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("Natural-language or keyword query, e.g. 'handles authentication', 'parse call sites'."),
+			mcp.WithString("mode",
+				mcp.Description("Search mode: 'keyword' (default, exact/prefix/substring) or 'semantic' (FTS BM25 by concept)."),
 			),
 			mcp.WithNumber("limit",
-				mcp.Description("Maximum results to return (default 20, max 50)."),
+				mcp.Description("Maximum results to return (default 20, max 50). Only used for mode=semantic."),
 			),
 		),
-		s.handleSemanticSearch,
+		s.handleSearch,
 	)
 
 	// get_call_chain
@@ -463,39 +562,6 @@ func (s *Server) registerTools() {
 		s.handleGetPlans,
 	)
 
-	// get_my_tasks
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_my_tasks",
-			mcp.WithDescription(
-				"Returns the calling agent's unblocked pending tasks, plus a suggested next task. "+
-					"Filters out tasks blocked by unfinished dependencies. "+
-					"Convenience wrapper around get_pending_tasks for focused agent workflows.",
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The calling agent's self-declared identifier."),
-			),
-			mcp.WithString("plan_id",
-				mcp.Description("Optional. Filter to a specific plan."),
-			),
-		),
-		s.handleGetMyTasks,
-	)
-
-	// get_agents
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_agents",
-			mcp.WithDescription(
-				"Returns all agents that have interacted with Synapses, ordered by last-seen timestamp. "+
-					"Agents self-declare their identity via the agent_id parameter on create_plan, "+
-					"update_task, and get_pending_tasks calls. "+
-					"Use this for multi-agent coordination to discover which agents are active.",
-			),
-		),
-		s.handleGetAgents,
-	)
 
 	// link_task_nodes
 	s.mcp.AddTool(
@@ -557,18 +623,6 @@ func (s *Server) registerTools() {
 		s.handleGetChangeCoupling,
 	)
 
-	// get_federation_status
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_federation_status",
-			mcp.WithDescription(
-				"Shows which linked projects are currently merged into the graph, "+
-					"node counts per project, and the number of cross-project CALLS edges. "+
-					"Returns is_federated=false when running on a single project.",
-			),
-		),
-		s.handleGetFederationStatus,
-	)
 
 	// ── Rule Management Tools ────────────────────────────────────────────────
 
@@ -610,40 +664,8 @@ func (s *Server) registerTools() {
 		s.handleUpsertRule,
 	)
 
-	// get_violation_log
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_violation_log",
-			mcp.WithDescription(
-				"Returns the audit trail of architectural rule violations detected by get_violations. "+
-					"Each entry shows which rule fired, which nodes were involved, when it was "+
-					"first and last seen, and how many times it occurred. "+
-					"Use rule_id to filter to a specific rule.",
-			),
-			mcp.WithString("rule_id",
-				mcp.Description("Optional. Filter to violations for a specific rule ID."),
-			),
-			mcp.WithNumber("limit",
-				mcp.Description("Max entries to return (default 50)."),
-			),
-		),
-		s.handleGetViolationLog,
-	)
 
 	// ── Session Awareness Tools ──────────────────────────────────────────────
-
-	// get_usage_guide
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_usage_guide",
-			mcp.WithDescription(
-				"Returns a project-specific guide for using Synapses: quick-start sequence, "+
-					"tool selection guide, entry points, and key entities. "+
-					"Call this when you are unsure which tool to use or how to start exploring.",
-			),
-		),
-		s.handleGetUsageGuide,
-	)
 
 	// get_working_state
 	s.mcp.AddTool(
@@ -738,32 +760,6 @@ func (s *Server) registerTools() {
 		s.handleGetCommunities,
 	)
 
-	// ── Visualization Export ─────────────────────────────────────────────────
-
-	// export_graph
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"export_graph",
-			mcp.WithDescription(
-				"Exports a subgraph (around an entity) or the full graph as DOT (Graphviz), Mermaid, or GraphML. "+
-					"Use for documentation, PR diagrams, and architectural analysis. "+
-					"For ego-subgraph: provide entity name and depth. Omit entity for full-graph export.",
-			),
-			mcp.WithString("entity",
-				mcp.Description("Optional root node name for ego-subgraph export. Omit for full-graph export."),
-			),
-			mcp.WithString("format",
-				mcp.Description("Output format: 'dot' (Graphviz), 'mermaid', or 'graphml'. Default: 'dot'."),
-			),
-			mcp.WithNumber("depth",
-				mcp.Description("Max hop depth for ego-subgraph. Default: 2."),
-			),
-			mcp.WithBoolean("include_metadata",
-				mcp.Description("Include doc/signature in node labels. Default: false."),
-			),
-		),
-		s.handleExportGraph,
-	)
 
 	// ── Data Flow Analysis ────────────────────────────────────────────────────
 
@@ -790,98 +786,69 @@ func (s *Server) registerTools() {
 
 	// ── Agent Consensus Tools ────────────────────────────────────────────────
 
-	// propose_change
+	// proposals (create + list in one tool)
 	s.mcp.AddTool(
 		mcp.NewTool(
-			"propose_change",
+			"proposals",
 			mcp.WithDescription(
-				"Proposes an architectural change that other agents can vote on. "+
-					"When multiple agents may have conflicting opinions (e.g. merge vs split a package), "+
-					"use this to surface the conflict and reach a documented consensus before implementing. "+
+				"Manages architectural change proposals for multi-agent consensus. "+
+					"Use action='create' to propose a change that other agents can vote on. "+
+					"Use action='list' (default) to see proposals waiting for votes. "+
 					"A proposal is resolved when approve or reject votes reach vote_threshold.",
 			),
+			mcp.WithString("action",
+				mcp.Description("'create' to propose a change, 'list' (default) to view proposals."),
+			),
 			mcp.WithString("title",
-				mcp.Required(),
-				mcp.Description("Short description of the proposed change, e.g. 'Merge handlers and services packages'."),
+				mcp.Description("(create) Short description of the proposed change."),
 			),
 			mcp.WithString("description",
-				mcp.Description("Detailed rationale and affected code. Supports multi-line text."),
+				mcp.Description("(create) Detailed rationale and affected code."),
 			),
 			mcp.WithString("agent_id",
-				mcp.Description("Self-declared identifier of the proposing agent."),
+				mcp.Description("Self-declared identifier of the calling agent."),
 			),
 			mcp.WithString("affected_nodes",
-				mcp.Description("Optional JSON array of node IDs that this change touches. Auto-detected from title+description if omitted."),
+				mcp.Description("(create) Optional JSON array of node IDs. Auto-detected from title+description if omitted."),
 			),
 			mcp.WithNumber("vote_threshold",
-				mcp.Description("Number of approve (or reject) votes required to resolve the proposal. Default: 2."),
-			),
-		),
-		s.handleProposeChange,
-	)
-
-	// vote_on_proposal
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"vote_on_proposal",
-			mcp.WithDescription(
-				"Casts a vote on an open architectural change proposal. "+
-					"Each agent gets one vote per proposal (updates if you vote again). "+
-					"When approve or reject votes reach the threshold the proposal is resolved automatically. "+
-					"Returns the current tally and resolution status.",
-			),
-			mcp.WithString("proposal_id",
-				mcp.Required(),
-				mcp.Description("ID of the proposal to vote on (from propose_change or get_proposals)."),
-			),
-			mcp.WithString("vote",
-				mcp.Required(),
-				mcp.Description("Your vote: 'approve', 'reject', or 'abstain'."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Self-declared identifier of the voting agent."),
-			),
-			mcp.WithString("rationale",
-				mcp.Description("Optional explanation of your vote, stored for audit purposes."),
-			),
-		),
-		s.handleVoteOnProposal,
-	)
-
-	// withdraw_proposal
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"withdraw_proposal",
-			mcp.WithDescription(
-				"Withdraws an open proposal. Only the agent that created it can withdraw it. "+
-					"Use this if circumstances changed and the proposal is no longer relevant.",
-			),
-			mcp.WithString("proposal_id",
-				mcp.Required(),
-				mcp.Description("ID of the proposal to withdraw."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("Self-declared identifier of the proposing agent (must match the creator)."),
-			),
-		),
-		s.handleWithdrawProposal,
-	)
-
-	// get_proposals
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_proposals",
-			mcp.WithDescription(
-				"Lists architectural change proposals, optionally filtered by status. "+
-					"Call with no arguments (or status='open') to see proposals waiting for votes. "+
-					"Use at session start to check for pending decisions before making changes.",
+				mcp.Description("(create) Votes needed to resolve. Default: 2."),
 			),
 			mcp.WithString("status",
-				mcp.Description("Filter by status: 'open', 'accepted', 'rejected', or 'withdrawn'. Omit for all."),
+				mcp.Description("(list) Filter by status: 'open', 'accepted', 'rejected', 'withdrawn'. Omit for all."),
 			),
 		),
-		s.handleGetProposals,
+		s.handleProposals,
+	)
+
+	// vote_proposal (vote + withdraw in one tool)
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"vote_proposal",
+			mcp.WithDescription(
+				"Votes on or withdraws an architectural change proposal. "+
+					"Use action='vote' (default) to cast a vote. Each agent gets one vote per proposal. "+
+					"Use action='withdraw' to cancel a proposal you created. "+
+					"When approve or reject votes reach the threshold the proposal is resolved automatically.",
+			),
+			mcp.WithString("proposal_id",
+				mcp.Required(),
+				mcp.Description("ID of the proposal (from proposals tool)."),
+			),
+			mcp.WithString("action",
+				mcp.Description("'vote' (default) to cast a vote, 'withdraw' to cancel the proposal."),
+			),
+			mcp.WithString("vote",
+				mcp.Description("(vote) Your vote: 'approve', 'reject', or 'abstain'."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Self-declared identifier of the calling agent."),
+			),
+			mcp.WithString("rationale",
+				mcp.Description("(vote) Optional explanation stored for audit purposes."),
+			),
+		),
+		s.handleVoteProposal,
 	)
 
 	// ── Peer Tools ──────────────────────────────────────────────────────────
@@ -935,5 +902,52 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleGetDependencyGraph,
+	)
+
+	// ── Brain / Intelligence Tools ───────────────────────────────────────────
+	// These tools proxy to the synapses-intelligence sidecar. When brain is not
+	// configured they return safe defaults or a helpful hint — never an error.
+
+	// log_decision
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"log_decision",
+			mcp.WithDescription(
+				"Records an agent architectural decision to the intelligence service for future context. "+
+					"Use this after making a significant implementation choice so future sessions can "+
+					"understand why the code evolved the way it did. Requires brain.url in synapses.json.",
+			),
+			mcp.WithString("agent_id", mcp.Required(), mcp.Description("Identifier of the calling agent.")),
+			mcp.WithString("entity_name", mcp.Required(), mcp.Description("The entity the decision concerns (e.g. 'AuthService').")),
+			mcp.WithString("action", mcp.Required(), mcp.Description("What was decided (e.g. 'refactor', 'add_method', 'remove_coupling').")),
+			mcp.WithString("phase", mcp.Description("Current SDLC phase: planning|development|testing|review|deployment.")),
+			mcp.WithString("related_entities", mcp.Description("Comma-separated list of other entities affected by this decision.")),
+			mcp.WithString("outcome", mcp.Description("Result of the action: success|partial|blocked.")),
+			mcp.WithString("notes", mcp.Description("Free-text context notes for future sessions.")),
+		),
+		s.handleLogDecision,
+	)
+
+	// sdlc (get + set in one tool)
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"sdlc",
+			mcp.WithDescription(
+				"Gets or sets the current SDLC phase on the intelligence service. "+
+					"The phase controls which sections appear in Context Packets: "+
+					"planning gets insights; testing gets constraints; deployment gets team status. "+
+					"Returns development/standard defaults when brain is not configured.",
+			),
+			mcp.WithString("action",
+				mcp.Description("'get' (default) to read current phase, 'set' to update it."),
+			),
+			mcp.WithString("phase",
+				mcp.Description("(set) Phase to set: planning|development|testing|review|deployment."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Optional. Agent identifier for audit purposes."),
+			),
+		),
+		s.handleSDLC,
 	)
 }

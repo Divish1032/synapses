@@ -10,5 +10,10 @@
       "token": "token-intelligence",
       "trust_level": "full"
     }
-  ]
+  ],
+  "brain": {
+    "url": "http://localhost:11435",
+    "timeout_sec": 5,
+    "enable_llm": true
+  }
 }

@@ -3,7 +3,7 @@ package parser
 import (
 	"path/filepath"
 
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // genericParser is a fallback for languages that do not yet have a dedicated

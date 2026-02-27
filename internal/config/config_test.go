@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/synapses/synapses/internal/config"
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/config"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // writeConfig writes a synapses.json into a temp directory and returns the dir path.

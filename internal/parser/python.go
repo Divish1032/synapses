@@ -7,7 +7,7 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/python"
 
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // extractPythonDeclInfo walks the Python AST and builds a name→declMeta map

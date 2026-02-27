@@ -10,7 +10,7 @@ Thank you for your interest in contributing. This document covers how to get sta
 - `make`
 
 ```bash
-git clone https://github.com/synapses/synapses
+git clone https://github.com/Divish1032/synapses
 cd synapses
 go mod tidy
 make build

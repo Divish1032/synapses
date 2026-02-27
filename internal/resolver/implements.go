@@ -3,7 +3,7 @@ package resolver
 import (
 	"strings"
 
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // ResolveImplementsEdges detects which structs satisfy which interfaces using

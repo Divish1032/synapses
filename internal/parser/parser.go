@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // LanguageParser is implemented by each language-specific parser.

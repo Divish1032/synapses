@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/synapses/synapses/internal/graph"
-	"github.com/synapses/synapses/internal/parser"
+	"github.com/Divish1032/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/parser"
 )
 
 // settle waits for at least 3× the debounce window to ensure any pending

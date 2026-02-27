@@ -9,6 +9,38 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
+// handleProposals dispatches between create and list based on the action param.
+func (s *Server) handleProposals(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	action := stringArg(req, "action")
+	if action == "" {
+		action = "list"
+	}
+	switch action {
+	case "create":
+		return s.handleProposeChange(ctx, req)
+	case "list":
+		return s.handleGetProposals(ctx, req)
+	default:
+		return mcp.NewToolResultError("action must be 'create' or 'list'"), nil
+	}
+}
+
+// handleVoteProposal dispatches between vote and withdraw based on the action param.
+func (s *Server) handleVoteProposal(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	action := stringArg(req, "action")
+	if action == "" {
+		action = "vote"
+	}
+	switch action {
+	case "vote":
+		return s.handleVoteOnProposal(ctx, req)
+	case "withdraw":
+		return s.handleWithdrawProposal(ctx, req)
+	default:
+		return mcp.NewToolResultError("action must be 'vote' or 'withdraw'"), nil
+	}
+}
+
 // handleProposeChange creates a new architectural change proposal.
 func (s *Server) handleProposeChange(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if s.store == nil {

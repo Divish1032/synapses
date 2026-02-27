@@ -6,7 +6,7 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/javascript"
 
-	"github.com/synapses/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/graph"
 )
 
 // JavaScriptParser parses JavaScript (.js, .jsx, .mjs, .cjs) source files.

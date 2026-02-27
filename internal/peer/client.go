@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/synapses/synapses/internal/config"
-	"github.com/synapses/synapses/internal/graph"
-	"github.com/synapses/synapses/internal/store"
+	"github.com/Divish1032/synapses/internal/config"
+	"github.com/Divish1032/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/store"
 )
 
 // PeerStatus is the last-known health and metadata of a configured peer.

@@ -8,37 +8,96 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/synapses/synapses/internal/config"
-	"github.com/synapses/synapses/internal/git"
-	"github.com/synapses/synapses/internal/graph"
-	"github.com/synapses/synapses/internal/peer"
-	"github.com/synapses/synapses/internal/store"
+	"github.com/Divish1032/synapses/internal/brain"
+	"github.com/Divish1032/synapses/internal/config"
+	"github.com/Divish1032/synapses/internal/git"
+	"github.com/Divish1032/synapses/internal/graph"
+	"github.com/Divish1032/synapses/internal/peer"
+	"github.com/Divish1032/synapses/internal/store"
 )
 
-// handleGetProjectIdentity returns the compact architectural summary.
+// handleGetProjectIdentity returns the compact architectural summary,
+// enriched with federation status and workflow guidance.
 func (s *Server) handleGetProjectIdentity(
 	_ context.Context,
 	_ mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	identity := s.graph.ProjectIdentity()
-	return jsonResult(identity)
+
+	// Enrich with federation status (absorbed from get_federation_status).
+	primaryRepoID := s.graph.RepoID()
+	repoNodeCounts := make(map[string]int)
+	for _, n := range s.graph.AllNodes() {
+		if idx := strings.Index(string(n.ID), "::"); idx >= 0 {
+			repoNodeCounts[string(n.ID)[:idx]]++
+		}
+	}
+	crossCallCount := 0
+	var linkedRepos []string
+	linkedSet := make(map[string]bool)
+	for _, e := range s.graph.AllEdges() {
+		if e.Type != graph.EdgeCalls {
+			continue
+		}
+		fromIdx := strings.Index(string(e.From), "::")
+		toIdx := strings.Index(string(e.To), "::")
+		if fromIdx < 0 || toIdx < 0 {
+			continue
+		}
+		fromRepo := string(e.From)[:fromIdx]
+		toRepo := string(e.To)[:toIdx]
+		if fromRepo != toRepo {
+			crossCallCount++
+			if fromRepo != primaryRepoID && !linkedSet[fromRepo] {
+				linkedSet[fromRepo] = true
+				linkedRepos = append(linkedRepos, fromRepo)
+			}
+			if toRepo != primaryRepoID && !linkedSet[toRepo] {
+				linkedSet[toRepo] = true
+				linkedRepos = append(linkedRepos, toRepo)
+			}
+		}
+	}
+	sort.Strings(linkedRepos)
+
+	// Build the enriched result as a map so we can add fields.
+	out := map[string]interface{}{
+		"identity": identity,
+		"federation": map[string]interface{}{
+			"is_federated":        len(linkedRepos) > 0,
+			"linked_repos":        linkedRepos,
+			"cross_project_edges": crossCallCount,
+		},
+		"workflow_hints": []string{
+			"1. get_project_identity → understand scope, entry points, active rules",
+			"2. claim_work → register your scope before editing",
+			"3. validate_plan → check proposed changes against architectural rules",
+			"4. get_context → explore entity structure (callees, callers, annotations)",
+			"5. annotate_node → leave findings for other agents",
+			"6. update_task → mark work done as you go",
+			"7. release_claims → free scope when done",
+		},
+	}
+	return jsonResult(out)
 }
 
 // directionalContext is the response shape for get_context.
 // Nodes are split into callers/callees/related so the LLM can immediately
 // understand call direction without inspecting raw edge types.
 type directionalContext struct {
-	Root               *graph.Node                   `json:"root"`
-	Callees            []graph.CarvedNode             `json:"callees"`                         // root --CALLS--> node
-	Callers            []graph.CarvedNode             `json:"callers"`                         // node --CALLS--> root
-	Related            []graph.CarvedNode             `json:"related"`                         // everything else
-	Annotations        map[string][]store.Annotation  `json:"annotations,omitempty"`           // node_id → []Annotation
-	SuggestedNextTools []toolSuggestion                `json:"suggested_next_tools,omitempty"`  // context-aware next steps
-	Truncated          bool                           `json:"truncated,omitempty"`             // true when token budget cut results
-	TruncatedCount     int                            `json:"truncated_count,omitempty"`       // nodes dropped by budget
+	Root               *graph.Node                  `json:"root"`
+	Callees            []graph.CarvedNode            `json:"callees"`                        // root --CALLS--> node
+	Callers            []graph.CarvedNode            `json:"callers"`                        // node --CALLS--> root
+	Related            []graph.CarvedNode            `json:"related"`                        // everything else
+	Annotations        map[string][]store.Annotation `json:"annotations,omitempty"`          // node_id → []Annotation
+	ContextPacket      *brain.ContextPacket          `json:"context_packet,omitempty"`       // LLM-enriched packet (present when brain is available)
+	SuggestedNextTools []toolSuggestion              `json:"suggested_next_tools,omitempty"` // context-aware next steps
+	Truncated          bool                          `json:"truncated,omitempty"`            // true when token budget cut results
+	TruncatedCount     int                           `json:"truncated_count,omitempty"`      // nodes dropped by budget
 }
 
 // handleGetContext returns an N-hop ego-subgraph around the named entity,
@@ -82,7 +141,7 @@ func (s *Server) handleGetContext(
 	if len(nodes) == 0 {
 		return jsonResult(map[string]interface{}{
 			"error": fmt.Sprintf("entity not found: %q", entityName),
-			"hint":  "Try semantic_search for fuzzy/concept matching, or find_entity to check exact name. For methods, use TypeName.MethodName format.",
+			"hint":  "Try search(mode=semantic) for fuzzy/concept matching, or find_entity to check exact name. For methods, use TypeName.MethodName format.",
 		})
 	}
 
@@ -119,6 +178,61 @@ func (s *Server) handleGetContext(
 	}
 
 	dc := toDirectionalContext(sg)
+
+	// Brain enrichment: build a Context Packet if the intelligence sidecar is available.
+	// Results are cached for 30s (keyed by entity:depth) to avoid re-hitting the brain
+	// on repeated get_context calls within the same agent session.
+	if bc := s.getBrainClient(); bc != nil {
+		cacheKey := fmt.Sprintf("%s:%d", entityName, cfg.MaxDepth)
+		var pkt *brain.ContextPacket
+		if cached := s.getPacketFromCache(cacheKey); cached != nil {
+			pkt = cached.(*brain.ContextPacket)
+		} else {
+			calleeNames := make([]string, 0, len(dc.Callees))
+			for _, c := range dc.Callees {
+				calleeNames = append(calleeNames, c.Node.Name)
+			}
+			callerNames := make([]string, 0, len(dc.Callers))
+			for _, c := range dc.Callers {
+				callerNames = append(callerNames, c.Node.Name)
+			}
+
+			rules := matchRulesForFile(s.config, best.File)
+
+			var claims []brain.ClaimInput
+			if s.store != nil {
+				if allClaims, err := s.store.GetAllClaims(); err == nil {
+					for _, c := range allClaims {
+						claims = append(claims, brain.ClaimInput{
+							AgentID:   c.AgentID,
+							Scope:     c.Scope,
+							ScopeType: c.ScopeType,
+							ExpiresAt: c.ExpiresAt.Format(time.RFC3339),
+						})
+					}
+				}
+			}
+
+			pkt = bc.BuildContextPacket(context.Background(), brain.ContextPacketRequest{
+				Snapshot: brain.SnapshotInput{
+					RootNodeID:      string(best.ID),
+					RootName:        best.Name,
+					RootType:        string(best.Type),
+					RootFile:        best.File,
+					CalleeNames:     calleeNames,
+					CallerNames:     callerNames,
+					ApplicableRules: rules,
+					ActiveClaims:    claims,
+					TaskID:          taskID,
+				},
+				EnableLLM: s.config.Brain.EnableLLM,
+			})
+			if pkt != nil {
+				s.setPacketCache(cacheKey, pkt)
+			}
+		}
+		dc.ContextPacket = pkt // nil if brain unavailable — callers check for nil
+	}
 
 	// Attach annotations from all agents if the store is available.
 	if s.store != nil {
@@ -174,6 +288,32 @@ func suggestNextAfterContext(dc *directionalContext) []toolSuggestion {
 		toolSuggestion{Tool: "annotate_node", Reason: "leave a note for other agents on a key finding"},
 	)
 	return suggestions
+}
+
+// matchRulesForFile returns the slim rule descriptors applicable to the given
+// file. Rules with no from_file_pattern always apply; rules with a pattern
+// apply only when the file path matches.
+func matchRulesForFile(cfg *config.Config, file string) []brain.RuleInput {
+	var out []brain.RuleInput
+	for _, r := range cfg.Rules {
+		if r.ForbiddenEdge.FromFilePattern == "" {
+			out = append(out, brain.RuleInput{
+				RuleID:      r.ID,
+				Severity:    r.Severity,
+				Description: r.Description,
+			})
+			continue
+		}
+		matched, _ := filepath.Match(r.ForbiddenEdge.FromFilePattern, filepath.Base(file))
+		if matched {
+			out = append(out, brain.RuleInput{
+				RuleID:      r.ID,
+				Severity:    r.Severity,
+				Description: r.Description,
+			})
+		}
+	}
+	return out
 }
 
 // toDirectionalContext reshapes a flat SubGraph into the directional form.
@@ -287,7 +427,7 @@ func (s *Server) handleFindEntity(
 		"matches": results,
 	}
 	if len(results) == 0 {
-		result["hint"] = "No exact or substring match. Try semantic_search for concept-based lookup, or check get_file_context for a specific file."
+		result["hint"] = "No exact or substring match. Try search(mode=semantic) for concept-based lookup, or check get_file_context for a specific file."
 	}
 	return jsonResult(result)
 }
@@ -360,17 +500,66 @@ func (s *Server) handleValidatePlan(
 }
 
 // handleGetViolations returns all current architectural rule violations.
+// Optional rule_id filters to a specific rule. Optional include_log=true appends the historical log.
 func (s *Server) handleGetViolations(
 	_ context.Context,
-	_ mcp.CallToolRequest,
+	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
+	ruleIDFilter := stringArg(req, "rule_id")
+	includeLog, _ := req.Params.Arguments["include_log"].(bool)
+	logLimit := 50
+	if l, ok := req.Params.Arguments["log_limit"].(float64); ok && l > 0 {
+		logLimit = int(l)
+	}
+
 	s.rulesMu.RLock()
 	violations := s.config.CheckViolations(s.graph)
 	s.rulesMu.RUnlock()
 
+	// Apply optional rule_id filter.
+	if ruleIDFilter != "" {
+		filtered := violations[:0]
+		for _, v := range violations {
+			if v.RuleID == ruleIDFilter {
+				filtered = append(filtered, v)
+			}
+		}
+		violations = filtered
+	}
+
 	// Persist to the audit log so agents can query violation history later.
 	if s.store != nil && len(violations) > 0 {
 		_ = s.store.LogViolations(violations)
+	}
+
+	// Brain enrichment: add plain-English LLM explanations for each violation.
+	if bc := s.getBrainClient(); bc != nil && len(violations) > 0 {
+		for i := range violations {
+			v := &violations[i]
+			fromNode := s.graph.GetNode(v.FromNode)
+			toNode := s.graph.GetNode(v.ToNode)
+			sourceFile := ""
+			targetName := string(v.ToNode)
+			if fromNode != nil {
+				sourceFile = fromNode.File
+			}
+			if toNode != nil {
+				targetName = toNode.Name
+			}
+			explanation, fix := bc.ExplainViolation(context.Background(), brain.ViolationRequest{
+				RuleID:       v.RuleID,
+				RuleSeverity: v.Severity,
+				Description:  v.Description,
+				SourceFile:   sourceFile,
+				TargetName:   targetName,
+			})
+			if explanation != "" {
+				v.Explanation = explanation
+			}
+			if fix != "" && v.SuggestedFix == "" {
+				v.SuggestedFix = fix
+			}
+		}
 	}
 
 	summary := "no violations found"
@@ -384,10 +573,19 @@ func (s *Server) handleGetViolations(
 		summary = fmt.Sprintf("%d violations (%d errors)", len(violations), errorCount)
 	}
 
-	return jsonResult(map[string]interface{}{
+	result := map[string]interface{}{
 		"summary":    summary,
 		"violations": violations,
-	})
+	}
+
+	// Include historical log when requested.
+	if includeLog && s.store != nil {
+		if entries, err := s.store.GetViolationLog(ruleIDFilter, logLimit); err == nil {
+			result["log"] = entries
+		}
+	}
+
+	return jsonResult(result)
 }
 
 // handleUpsertRule creates or updates a dynamic architectural rule.
@@ -633,12 +831,17 @@ func (s *Server) handleGetFileContext(
 // handleSearch performs a keyword search across entity names and doc comments.
 // Results are ranked: exact name > name prefix > name substring > doc match.
 func (s *Server) handleSearch(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	query, ok := req.Params.Arguments["query"].(string)
 	if !ok || query == "" {
 		return mcp.NewToolResultError("query is required"), nil
+	}
+
+	// mode=semantic delegates to FTS BM25 semantic search.
+	if mode := stringArg(req, "mode"); mode == "semantic" {
+		return s.handleSemanticSearch(ctx, req)
 	}
 
 	root := s.graph.Root()
@@ -2146,19 +2349,40 @@ func (s *Server) handleClaimWork(
 		go pm.BroadcastIntent(agentID, scope, scopeType)
 	}
 
+	// Brain coordination: get a concrete suggestion when conflicts exist.
+	var coordinationSuggestion string
+	if bc := s.getBrainClient(); bc != nil && len(conflicts) > 0 {
+		var conflictClaims []brain.ClaimInput
+		for _, c := range conflicts {
+			conflictClaims = append(conflictClaims, brain.ClaimInput{
+				AgentID:   c.AgentID,
+				Scope:     c.Scope,
+				ScopeType: c.ScopeType,
+			})
+		}
+		coordinationSuggestion = bc.Coordinate(context.Background(), brain.CoordinateRequest{
+			NewAgentID:        agentID,
+			NewScope:          scope,
+			ConflictingClaims: conflictClaims,
+		})
+	}
+
 	resp := map[string]interface{}{
-		"agent_id":   agentID,
-		"scope":      scope,
-		"scope_type": scopeType,
+		"agent_id":    agentID,
+		"scope":       scope,
+		"scope_type":  scopeType,
 		"ttl_minutes": ttlMinutes,
-		"claimed":    true,
-		"conflicts":  conflicts,
+		"claimed":     true,
+		"conflicts":   conflicts,
 	}
 	if len(conflicts) > 0 {
 		resp["warning"] = fmt.Sprintf(
 			"%d other agent(s) are actively working on overlapping scope. Consider coordinating before proceeding.",
 			len(conflicts),
 		)
+		if coordinationSuggestion != "" {
+			resp["coordination_suggestion"] = coordinationSuggestion
+		}
 	} else {
 		resp["message"] = "Scope claimed. No conflicts detected."
 	}
