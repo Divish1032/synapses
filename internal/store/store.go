@@ -291,6 +291,8 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE tasks ADD COLUMN last_updated_by TEXT NOT NULL DEFAULT ''`,
 		// v1.0.4: Task dependencies
 		`ALTER TABLE tasks ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]'`,
+		// v0.2.0: Stable cross-project node identity (survives file renames).
+		`ALTER TABLE nodes ADD COLUMN stable_id TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -519,8 +521,8 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 
 	// Insert nodes in batches.
 	nodeStmt, err := tx.Prepare(`
-		INSERT INTO nodes (id, type, name, package, file, line, exported, metadata, doc, signature, line_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO nodes (id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("prepare node stmt: %w", err)
@@ -564,7 +566,7 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		if _, err := nodeStmt.Exec(
 			string(n.ID), string(n.Type),
 			n.Name, n.Package, n.File, n.Line,
-			exported, string(meta), doc, sig, lineCount,
+			exported, string(meta), doc, sig, lineCount, n.StableID,
 		); err != nil {
 			return fmt.Errorf("insert node %s: %w", n.ID, err)
 		}
@@ -669,7 +671,7 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 
 	// Load nodes.
 	rows, err := s.db.Query(`
-		SELECT id, type, name, package, file, line, exported, metadata, doc, signature, line_count FROM nodes
+		SELECT id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id FROM nodes
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("query nodes: %w", err)
@@ -682,8 +684,9 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 			line, exported           int
 			metaJSON, doc, sig       string
 			lineCount                int
+			stableID                 string
 		)
-		if err := rows.Scan(&id, &typ, &name, &pkg, &file, &line, &exported, &metaJSON, &doc, &sig, &lineCount); err != nil {
+		if err := rows.Scan(&id, &typ, &name, &pkg, &file, &line, &exported, &metaJSON, &doc, &sig, &lineCount, &stableID); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		var meta map[string]string
@@ -711,6 +714,7 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 			Line:     line,
 			Exported: exported != 0,
 			Metadata: meta,
+			StableID: stableID,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -1466,6 +1470,22 @@ func (s *Store) GetMyClaims(agentID string) ([]WorkClaim, error) {
 		 FROM work_claims WHERE agent_id = ? AND expires_at > ?
 		 ORDER BY claimed_at DESC`,
 		agentID, time.Now().UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return scanWorkClaims(rows)
+}
+
+// GetAllClaims returns every non-expired work claim across all agents.
+// Used by the peer API /claims endpoint to expose active work state to peers.
+func (s *Store) GetAllClaims() ([]WorkClaim, error) {
+	s.pruneExpiredClaims()
+	rows, err := s.db.Query(
+		`SELECT agent_id, scope, scope_type, claimed_at, expires_at
+		 FROM work_claims WHERE expires_at > ?
+		 ORDER BY claimed_at DESC`,
+		time.Now().UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		return nil, err

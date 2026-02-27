@@ -14,6 +14,7 @@ import (
 	"github.com/synapses/synapses/internal/config"
 	"github.com/synapses/synapses/internal/git"
 	"github.com/synapses/synapses/internal/graph"
+	"github.com/synapses/synapses/internal/peer"
 	"github.com/synapses/synapses/internal/store"
 )
 
@@ -1391,6 +1392,11 @@ func (s *Server) handleGetUsageGuide(
 			{"detect_changes", "Map a git diff to affected graph symbols — run after editing to see what changed"},
 			{"get_working_state", "Recent file changes from the watcher + git diff stat (use at session start)"},
 		},
+		"peer_communication": {
+			{"list_peers", "List configured peer synapses instances with connection status and shared entity counts"},
+			{"get_peer_context", "Fetch context subgraph for an entity in a peer project (project+entity params)"},
+			{"get_dependency_graph", "Inter-project dependency overview with Mermaid diagram of entity sharing"},
+		},
 	}
 
 	// Top-5 key entities for the guide.
@@ -1424,6 +1430,7 @@ func (s *Server) handleGetUsageGuide(
 			"Call claim_work(scope, agent_id) before editing any file — prevents multi-agent conflicts",
 			"Pass your agent_id consistently so ownership and history are tracked across sessions",
 			"Never mark a task done if tests are failing or implementation is partial",
+			"Configure peers in synapses.json → list_peers → get_peer_context for cross-project context",
 		},
 		"antipatterns": []string{
 			"Reading raw files with cat/grep instead of using find_entity + get_context + get_file_context",
@@ -2134,6 +2141,11 @@ func (s *Server) handleClaimWork(
 		return mcp.NewToolResultError(fmt.Sprintf("claim work: %v", err)), nil
 	}
 
+	// Notify connected peers about the new claim (fire-and-forget).
+	if pm := s.getPeerManager(); pm != nil {
+		go pm.BroadcastIntent(agentID, scope, scopeType)
+	}
+
 	resp := map[string]interface{}{
 		"agent_id":   agentID,
 		"scope":      scope,
@@ -2154,9 +2166,10 @@ func (s *Server) handleClaimWork(
 }
 
 // handleGetConflicts returns all work claims by other agents that overlap with
-// any scope the given agent currently holds.
+// any scope the given agent currently holds. Also checks connected peers for
+// cross-project conflicts.
 func (s *Server) handleGetConflicts(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
@@ -2180,21 +2193,42 @@ func (s *Server) handleGetConflicts(
 		return mcp.NewToolResultError(fmt.Sprintf("get conflicts: %v", err)), nil
 	}
 
+	// Fetch claims from connected peers and find cross-project overlaps.
+	crossConflicts := []peer.CrossProjectConflict{}
+	if pm := s.getPeerManager(); pm != nil {
+		peerClaims := pm.FetchAllPeerClaims(ctx)
+		for peerName, pClaims := range peerClaims {
+			for _, pc := range pClaims {
+				for _, ac := range myClaims {
+					if peer.ScopesOverlap(ac.Scope, pc.Scope) {
+						crossConflicts = append(crossConflicts, peer.CrossProjectConflict{
+							PeerName: peerName,
+							Claim:    pc,
+						})
+					}
+				}
+			}
+		}
+	}
+
 	summary := "no active claims"
 	if len(myClaims) > 0 {
 		summary = fmt.Sprintf("%d active claim(s)", len(myClaims))
 	}
 	conflictSummary := "no conflicts"
-	if len(conflicts) > 0 {
-		conflictSummary = fmt.Sprintf("%d conflict(s) detected", len(conflicts))
+	total := len(conflicts) + len(crossConflicts)
+	if total > 0 {
+		conflictSummary = fmt.Sprintf("%d conflict(s) detected (%d local, %d cross-project)",
+			total, len(conflicts), len(crossConflicts))
 	}
 
 	return jsonResult(map[string]interface{}{
-		"agent_id":         agentID,
-		"my_claims":        myClaims,
-		"my_claims_summary": summary,
-		"conflicts":        conflicts,
-		"conflicts_summary": conflictSummary,
+		"agent_id":                 agentID,
+		"my_claims":                myClaims,
+		"my_claims_summary":        summary,
+		"conflicts":                conflicts,
+		"cross_project_conflicts":  crossConflicts,
+		"conflicts_summary":        conflictSummary,
 	})
 }
 
