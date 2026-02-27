@@ -46,10 +46,10 @@ type Watcher struct {
 	fw          *fsnotify.Watcher
 	graph       *graph.Graph
 	walker      *parser.Walker
-	store       *store.Store             // may be nil — cache update is best-effort
-	cfg         *config.Config           // may be nil — violation checking is best-effort
-	brainClient interface{}              // *brain.Client — set via SetBrainClient; nil if brain not configured
-	pktInval    PacketCacheInvalidator   // set via SetPacketInvalidator; may be nil
+	store       *store.Store           // may be nil — cache update is best-effort
+	cfg         *config.Config         // may be nil — violation checking is best-effort
+	brainClient interface{}            // *brain.Client — set via SetBrainClient; nil if brain not configured
+	pktInval    PacketCacheInvalidator // set via SetPacketInvalidator; may be nil
 
 	mu      sync.Mutex
 	timers  map[string]*time.Timer // debounce timers keyed by absolute file path

@@ -89,7 +89,7 @@ func (s *Server) handleGetProjectIdentity(
 // Nodes are split into callers/callees/related so the LLM can immediately
 // understand call direction without inspecting raw edge types.
 type directionalContext struct {
-	Root               *graph.Node                  `json:"root"`
+	Root               *graph.Node                   `json:"root"`
 	Callees            []graph.CarvedNode            `json:"callees"`                        // root --CALLS--> node
 	Callers            []graph.CarvedNode            `json:"callers"`                        // node --CALLS--> root
 	Related            []graph.CarvedNode            `json:"related"`                        // everything else
@@ -682,11 +682,11 @@ func stringArg(req mcp.CallToolRequest, key string) string {
 // pickBestNode selects the most-relevant node from a candidate list using a
 // tiered priority system that avoids test files and structural noise:
 //
-//  Tier 1: function or method in a non-test file  (exact semantic match)
-//  Tier 2: struct or interface in a non-test file
-//  Tier 3: function or method in a test file
-//  Tier 4: any other type in a non-test file
-//  Tier 5: everything else
+//	Tier 1: function or method in a non-test file  (exact semantic match)
+//	Tier 2: struct or interface in a non-test file
+//	Tier 3: function or method in a test file
+//	Tier 4: any other type in a non-test file
+//	Tier 5: everything else
 //
 // Within each tier the node with the highest connectivity (fanin+fanout) wins.
 func pickBestNode(nodes []*graph.Node, g *graph.Graph) *graph.Node {
@@ -803,11 +803,11 @@ func (s *Server) handleGetFileContext(
 
 	// Trim absolute paths for output.
 	type fileEntity struct {
-		Type      graph.NodeType    `json:"type"`
-		Name      string            `json:"name"`
-		Line      int               `json:"line"`
-		Exported  bool              `json:"exported"`
-		Metadata  map[string]string `json:"metadata,omitempty"`
+		Type     graph.NodeType    `json:"type"`
+		Name     string            `json:"name"`
+		Line     int               `json:"line"`
+		Exported bool              `json:"exported"`
+		Metadata map[string]string `json:"metadata,omitempty"`
 	}
 	out := make([]fileEntity, len(matches))
 	for i, n := range matches {
@@ -821,9 +821,9 @@ func (s *Server) handleGetFileContext(
 	}
 
 	return jsonResult(map[string]interface{}{
-		"file":    strings.TrimPrefix(matches[0].File, prefix),
-		"package": matches[0].Package,
-		"count":   len(out),
+		"file":     strings.TrimPrefix(matches[0].File, prefix),
+		"package":  matches[0].Package,
+		"count":    len(out),
 		"entities": out,
 	})
 }
@@ -1653,8 +1653,8 @@ func (s *Server) handleGetUsageGuide(
 			"Task depends_on another task that is stuck or unassigned",
 		},
 		"tools_by_category": toolsByCategory,
-		"entry_points":       identity.EntryPoints,
-		"key_entities":       top5,
+		"entry_points":      identity.EntryPoints,
+		"key_entities":      top5,
 	})
 }
 
@@ -2447,12 +2447,12 @@ func (s *Server) handleGetConflicts(
 	}
 
 	return jsonResult(map[string]interface{}{
-		"agent_id":                 agentID,
-		"my_claims":                myClaims,
-		"my_claims_summary":        summary,
-		"conflicts":                conflicts,
-		"cross_project_conflicts":  crossConflicts,
-		"conflicts_summary":        conflictSummary,
+		"agent_id":                agentID,
+		"my_claims":               myClaims,
+		"my_claims_summary":       summary,
+		"conflicts":               conflicts,
+		"cross_project_conflicts": crossConflicts,
+		"conflicts_summary":       conflictSummary,
 	})
 }
 

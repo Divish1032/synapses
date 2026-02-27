@@ -7,7 +7,7 @@ import (
 
 // IntentMessage is the payload sent to peers when local scope is claimed.
 type IntentMessage struct {
-	TraceID    string `json:"trace_id"`    // UUID v4; used for dedup by receiver
+	TraceID    string `json:"trace_id"` // UUID v4; used for dedup by receiver
 	AgentID    string `json:"agent_id"`
 	IntentType string `json:"intent_type"` // "claim_work" | "release_work"
 	Scope      string `json:"scope"`

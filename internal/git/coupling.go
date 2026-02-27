@@ -12,10 +12,10 @@ import (
 type CouplingPair struct {
 	FileA      string  `json:"file_a"`
 	FileB      string  `json:"file_b"`
-	CoChanges  int     `json:"co_changes"`  // number of commits where both changed
-	Confidence float64 `json:"confidence"`  // co_changes / max(total_A, total_B)
-	SupportA   int     `json:"support_a"`   // total commits touching file_a
-	SupportB   int     `json:"support_b"`   // total commits touching file_b
+	CoChanges  int     `json:"co_changes"` // number of commits where both changed
+	Confidence float64 `json:"confidence"` // co_changes / max(total_A, total_B)
+	SupportA   int     `json:"support_a"`  // total commits touching file_a
+	SupportB   int     `json:"support_b"`  // total commits touching file_b
 }
 
 // AnalyzeChangeCoupling parses git log for the given repo to find files that
@@ -52,8 +52,8 @@ func AnalyzeChangeCoupling(repoRoot string, commitLimit int, minConfidence float
 	}
 
 	// Step 2 & 3: for each commit collect changed files and update counters.
-	totalChanges := map[string]int{}   // file → total commits that touched it
-	coChanges := map[[2]string]int{}   // sorted pair → co-change count
+	totalChanges := map[string]int{} // file → total commits that touched it
+	coChanges := map[[2]string]int{} // sorted pair → co-change count
 
 	for _, sha := range shas {
 		filesOut, err := exec.Command(
