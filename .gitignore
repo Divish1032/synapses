@@ -11,6 +11,7 @@ synapses
 *.test
 *.out
 coverage.html
+coverage.out
 
 # Go workspace
 go.work
@@ -24,12 +25,26 @@ vendor/
 .vscode/
 *.swp
 *.swo
+
+# OS
 .DS_Store
+Thumbs.db
 
 # Synapses runtime data
-.synapses/cache/
+.synapses/
 *.synapses.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Config files with secrets (use synapses.example.json as template)
+synapses.json
+
+# Claude Code local settings
+.claude/
+.mcp.json
 
 # Environment
 .env
 .env.local
+.env.*.local
