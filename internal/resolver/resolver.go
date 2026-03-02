@@ -46,18 +46,38 @@ func ResolveCallEdges(g *graph.Graph) int {
 		var targetID graph.NodeID
 
 		if site.PkgAlias != "" {
-			// Qualified call: pkg.Func()
-			// Only resolve if the alias matches a known import (not a variable).
+			// Qualified call: pkg.Func() or var.Method()
+			// The parser cannot distinguish these at AST time, so we try
+			// the import-based resolution first and fall through to
+			// method resolution if the alias is not an import.
 			aliases, ok := importMap[site.CallerFile]
-			if !ok {
-				continue
+			if ok {
+				if importPath, found := aliases[site.PkgAlias]; found {
+					shortPkg := path.Base(importPath)
+					targetID = findInPackage(pkgIndex, shortPkg, site.FuncName)
+				}
 			}
-			importPath, ok := aliases[site.PkgAlias]
-			if !ok {
-				continue // operand is a local variable, not a package — skip
+
+			// Fallback: alias was not an import — treat as var.Method().
+			// Search the caller's own package and all imported packages
+			// for a method matching ".FuncName" (e.g. Graph.CarveEgoGraph).
+			if targetID == "" {
+				callerNode := g.GetNode(site.CallerID)
+				if callerNode != nil {
+					targetID = findInPackage(pkgIndex, callerNode.Package, site.FuncName)
+				}
+				if targetID == "" {
+					if aliases, ok := importMap[site.CallerFile]; ok {
+						for _, importPath := range aliases {
+							shortPkg := path.Base(importPath)
+							if id := findInPackage(pkgIndex, shortPkg, site.FuncName); id != "" {
+								targetID = id
+								break
+							}
+						}
+					}
+				}
 			}
-			shortPkg := path.Base(importPath)
-			targetID = findInPackage(pkgIndex, shortPkg, site.FuncName)
 		} else {
 			// Direct call: Func()
 			// 1. Look in the caller's own package (Go-style, same-package calls).

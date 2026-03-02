@@ -262,10 +262,12 @@ func extractDocComment(lines []string, startLine int) string {
 // extractCallSites recursively walks an AST subtree (typically a function body)
 // and collects all call expressions as raw call sites for post-parse resolution.
 // It captures:
-//   - pkg.Func() (selector_expression with a plain identifier operand) → pkgAlias set
-//   - Func()    (plain identifier)                                      → pkgAlias empty
+//   - pkg.Func()          (selector: identifier operand)       → pkgAlias set
+//   - var.Method()        (selector: identifier operand)       → pkgAlias set (resolved later)
+//   - a.field.Method()   (selector: inner selector operand)   → pkgAlias = inner field
+//   - Func()             (plain identifier)                    → pkgAlias empty
 //
-// Chained calls like a.b.c() and Go built-ins are intentionally skipped.
+// Deeper chains (a.b.c.d()) are skipped.
 func extractCallSites(node *sitter.Node, src []byte) []rawCallSite {
 	var calls []rawCallSite
 	var walk func(n *sitter.Node)
@@ -280,11 +282,22 @@ func extractCallSites(node *sitter.Node, src []byte) []rawCallSite {
 				case "selector_expression":
 					operand := fn.ChildByFieldName("operand")
 					field := fn.ChildByFieldName("field")
-					// Only handle simple identifier operands (not chained a.b.c())
-					if operand != nil && field != nil && operand.Type() == "identifier" {
-						pkg := string(src[operand.StartByte():operand.EndByte()])
+					if operand != nil && field != nil {
 						name := string(src[field.StartByte():field.EndByte()])
-						calls = append(calls, rawCallSite{pkgAlias: pkg, funcName: name})
+						switch operand.Type() {
+						case "identifier":
+							// Simple: pkg.Func() or var.Method()
+							pkg := string(src[operand.StartByte():operand.EndByte()])
+							calls = append(calls, rawCallSite{pkgAlias: pkg, funcName: name})
+						case "selector_expression":
+							// 2-level: a.field.Method() — use inner field as alias
+							// Handles s.graph.CarveEgoGraph(), self.db.Query(), etc.
+							innerField := operand.ChildByFieldName("field")
+							if innerField != nil {
+								alias := string(src[innerField.StartByte():innerField.EndByte()])
+								calls = append(calls, rawCallSite{pkgAlias: alias, funcName: name})
+							}
+						}
 					}
 				case "identifier":
 					name := string(src[fn.StartByte():fn.EndByte()])
