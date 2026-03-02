@@ -1,4 +1,4 @@
-module github.com/Divish1032/synapses
+module github.com/SynapsesOS/synapses
 
 go 1.26
 

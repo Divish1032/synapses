@@ -8,7 +8,7 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/elixir"
 
-	"github.com/Divish1032/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // ElixirParser parses Elixir (.ex, .exs) source files.

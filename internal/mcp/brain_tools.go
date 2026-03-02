@@ -6,7 +6,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/Divish1032/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/brain"
 )
 
 // getBrainClient type-asserts the stored brainClient to *brain.Client.

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Divish1032/synapses/internal/graph"
-	"github.com/Divish1032/synapses/internal/metrics"
+	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/metrics"
 )
 
 // buildMetricsGraph creates a simple graph with two function nodes.

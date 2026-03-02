@@ -2,8 +2,8 @@
 # Synapses installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Divish1032/synapses/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/Divish1032/synapses/main/install.sh | sh -s -- --full
+#   curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh -s -- --full
 #
 # Flags:
 #   (default)  Install synapses only (Tier 1 — code graph + MCP)
@@ -12,8 +12,8 @@
 
 set -e
 
-SYNAPSES_PKG="github.com/Divish1032/synapses/cmd/synapses@latest"
-BRAIN_PKG="github.com/Divish1032/synapses-intelligence/cmd/brain@latest"
+SYNAPSES_PKG="github.com/SynapsesOS/synapses/cmd/synapses@latest"
+BRAIN_PKG="github.com/SynapsesOS/synapses-intelligence/cmd/brain@latest"
 
 TIER="core"
 for arg in "$@"; do
@@ -111,7 +111,7 @@ else
   echo "       claude mcp add synapses -- synapses start --path ."
   echo ""
   echo "  To add the AI brain later:"
-  echo "       curl -fsSL https://raw.githubusercontent.com/Divish1032/synapses/main/install.sh | sh -s -- --full"
+  echo "       curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh -s -- --full"
 fi
 
 echo ""

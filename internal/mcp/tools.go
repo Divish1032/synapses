@@ -12,12 +12,12 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/Divish1032/synapses/internal/brain"
-	"github.com/Divish1032/synapses/internal/config"
-	"github.com/Divish1032/synapses/internal/git"
-	"github.com/Divish1032/synapses/internal/graph"
-	"github.com/Divish1032/synapses/internal/peer"
-	"github.com/Divish1032/synapses/internal/store"
+	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/git"
+	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/peer"
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 // handleGetProjectIdentity returns the compact architectural summary,

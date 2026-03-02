@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Divish1032/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // EnrichChurn annotates every graph node with a "churn" metadata value

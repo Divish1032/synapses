@@ -8,7 +8,7 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/swift"
 
-	"github.com/Divish1032/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // SwiftParser parses Swift (.swift) source files.

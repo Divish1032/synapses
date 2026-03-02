@@ -24,17 +24,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Divish1032/synapses/internal/brain"
-	"github.com/Divish1032/synapses/internal/config"
-	"github.com/Divish1032/synapses/internal/dataflow"
-	"github.com/Divish1032/synapses/internal/graph"
-	mcpsrv "github.com/Divish1032/synapses/internal/mcp"
-	"github.com/Divish1032/synapses/internal/metrics"
-	"github.com/Divish1032/synapses/internal/parser"
-	"github.com/Divish1032/synapses/internal/peer"
-	"github.com/Divish1032/synapses/internal/resolver"
-	"github.com/Divish1032/synapses/internal/store"
-	"github.com/Divish1032/synapses/internal/watcher"
+	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/dataflow"
+	"github.com/SynapsesOS/synapses/internal/graph"
+	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
+	"github.com/SynapsesOS/synapses/internal/metrics"
+	"github.com/SynapsesOS/synapses/internal/parser"
+	"github.com/SynapsesOS/synapses/internal/peer"
+	"github.com/SynapsesOS/synapses/internal/resolver"
+	"github.com/SynapsesOS/synapses/internal/store"
+	"github.com/SynapsesOS/synapses/internal/watcher"
 )
 
 // version is set at build time via ldflags: -X main.version=<tag>
@@ -1332,7 +1332,7 @@ func cmdSetup(args []string) error {
 			fmt.Println()
 			fmt.Println("    To install the brain sidecar later:")
 			fmt.Println("      curl -fsSL https://raw.githubusercontent.com/synapses/synapses/main/install.sh | sh -s -- --full")
-			fmt.Println("    or:  go install github.com/Divish1032/synapses-intelligence/cmd/brain@latest")
+			fmt.Println("    or:  go install github.com/SynapsesOS/synapses-intelligence/cmd/brain@latest")
 			fmt.Println("    Then re-run:  synapses setup --path", absPath)
 		}
 	}

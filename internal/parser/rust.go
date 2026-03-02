@@ -8,7 +8,7 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/rust"
 
-	"github.com/Divish1032/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // extractRustDeclInfo walks the Rust AST collecting metadata for function,

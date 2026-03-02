@@ -15,12 +15,12 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/Divish1032/synapses/internal/brain"
-	"github.com/Divish1032/synapses/internal/config"
-	"github.com/Divish1032/synapses/internal/graph"
-	"github.com/Divish1032/synapses/internal/parser"
-	"github.com/Divish1032/synapses/internal/resolver"
-	"github.com/Divish1032/synapses/internal/store"
+	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/parser"
+	"github.com/SynapsesOS/synapses/internal/resolver"
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 const debounceDelay = 150 * time.Millisecond

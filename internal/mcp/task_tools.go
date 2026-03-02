@@ -8,8 +8,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/Divish1032/synapses/internal/graph"
-	"github.com/Divish1032/synapses/internal/store"
+	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 // autoLinkNodes scans text for node names that exist in the graph and returns

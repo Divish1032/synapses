@@ -56,7 +56,7 @@ changelog:
 
 release:
   github:
-    owner: Divish1032
+    owner: SynapsesOS
     name: synapses
   name_template: "{{.ProjectName}} {{.Version}}"
   draft: false

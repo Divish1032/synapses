@@ -3,8 +3,8 @@ package parser_test
 import (
 	"testing"
 
-	"github.com/Divish1032/synapses/internal/graph"
-	"github.com/Divish1032/synapses/internal/parser"
+	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/parser"
 )
 
 const tsSource = `

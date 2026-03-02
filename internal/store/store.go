@@ -17,8 +17,8 @@ import (
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver; no CGo required
 
-	"github.com/Divish1032/synapses/internal/config"
-	"github.com/Divish1032/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // ProjectStat holds the lightweight per-project metadata that can be read

@@ -22,7 +22,7 @@ Users should start at Core and optionally upgrade to Full.
 
 ```bash
 # macOS / Linux (Go 1.22+)
-go install github.com/Divish1032/synapses/cmd/synapses@latest
+go install github.com/SynapsesOS/synapses/cmd/synapses@latest
 
 # or via Homebrew (future)
 brew install synapses/tap/synapses
@@ -50,7 +50,7 @@ codebases) and serves 34 MCP tools to the agent.
 ### Step 3: Install the intelligence sidecar
 
 ```bash
-go install github.com/Divish1032/synapses-intelligence/cmd/brain@latest
+go install github.com/SynapsesOS/synapses-intelligence/cmd/brain@latest
 
 # or via Homebrew (future)
 brew install synapses/tap/synapses-intelligence

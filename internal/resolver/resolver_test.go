@@ -3,8 +3,8 @@ package resolver_test
 import (
 	"testing"
 
-	"github.com/Divish1032/synapses/internal/graph"
-	"github.com/Divish1032/synapses/internal/resolver"
+	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/resolver"
 )
 
 // buildResolverGraph creates a graph with two files in different packages.
