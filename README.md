@@ -74,14 +74,14 @@ brew install synapses/tap/synapses
 ### curl installer (macOS / Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Divish1032/synapses/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh
 ```
 
 This downloads the latest pre-built binary from GitHub Releases and places it in `/usr/local/bin` (or `~/.local/bin` if you prefer no `sudo`).
 
 ### Pre-built binaries (all platforms)
 
-Download the binary for your OS and architecture from the [latest GitHub Release](https://github.com/Divish1032/synapses/releases/latest):
+Download the binary for your OS and architecture from the [latest GitHub Release](https://github.com/SynapsesOS/synapses/releases/latest):
 
 | Platform | File |
 |---|---|
@@ -96,7 +96,7 @@ Extract and place the `synapses` binary somewhere on your `PATH`.
 ### go install (Go developers)
 
 ```bash
-go install github.com/Divish1032/synapses/cmd/synapses@latest
+go install github.com/SynapsesOS/synapses/cmd/synapses@latest
 ```
 
 Requires Go 1.24+. Binary lands in `$GOPATH/bin` (usually `~/go/bin`).
@@ -104,7 +104,7 @@ Requires Go 1.24+. Binary lands in `$GOPATH/bin` (usually `~/go/bin`).
 ### From source
 
 ```bash
-git clone https://github.com/Divish1032/synapses
+git clone https://github.com/SynapsesOS/synapses
 cd synapses
 make install        # installs to $GOPATH/bin
 ```

@@ -7,7 +7,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/Divish1032/synapses/internal/peer"
+	"github.com/SynapsesOS/synapses/internal/peer"
 )
 
 // handleListPeers returns connection status for all configured peers.

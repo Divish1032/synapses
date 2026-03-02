@@ -22,7 +22,7 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/Divish1032/synapses
+        - github.com/SynapsesOS/synapses
 
 issues:
   max-same-issues: 0

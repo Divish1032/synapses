@@ -9,7 +9,7 @@ import (
 	tsxsitter "github.com/smacker/go-tree-sitter/typescript/tsx"
 	tssitter "github.com/smacker/go-tree-sitter/typescript/typescript"
 
-	"github.com/Divish1032/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // extractTSDeclInfo walks the TypeScript/TSX AST and builds a name→declMeta map

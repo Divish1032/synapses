@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Divish1032/synapses/internal/graph"
-	"github.com/Divish1032/synapses/internal/store"
+	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 func openTestStore(t *testing.T) *store.Store {

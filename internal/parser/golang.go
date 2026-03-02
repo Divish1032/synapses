@@ -12,7 +12,7 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 	gositter "github.com/smacker/go-tree-sitter/golang"
 
-	"github.com/Divish1032/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // rawCallSite is an unresolved call captured during AST walk.

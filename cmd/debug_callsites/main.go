@@ -2,9 +2,9 @@ package main
 
 import (
 	"fmt"
-	"github.com/Divish1032/synapses/internal/graph"
-	"github.com/Divish1032/synapses/internal/parser"
-	"github.com/Divish1032/synapses/internal/resolver"
+	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/parser"
+	"github.com/SynapsesOS/synapses/internal/resolver"
 )
 
 func main() {
