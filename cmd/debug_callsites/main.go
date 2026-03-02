@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/resolver"

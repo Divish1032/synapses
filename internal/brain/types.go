@@ -24,8 +24,8 @@ type SnapshotInput struct {
 	ActiveClaims    []ClaimInput `json:"active_claims"`
 	TaskContext     string       `json:"task_context,omitempty"`
 	TaskID          string       `json:"task_id,omitempty"`
-	HasTests        bool         `json:"has_tests"`  // whether *_test.go exists for root file
-	FanIn           int          `json:"fan_in"`     // total caller count from graph
+	HasTests        bool         `json:"has_tests"` // whether *_test.go exists for root file
+	FanIn           int          `json:"fan_in"`    // total caller count from graph
 }
 
 // RuleInput is a slim rule descriptor for the intelligence service.
