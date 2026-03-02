@@ -7,6 +7,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased] — v1.0.3
 
+### Fixed
+
+- **Python CALLS edges (0 → 12+ edges)**: Python parser was not collecting
+  attribute/method call sites (`self.method()`, `obj.func()`). Added
+  `attrCallQuery` in `internal/parser/python.go` to capture these patterns and
+  register them as call sites for cross-file resolution.
+
+- **TypeScript CALLS edges (0 → 10+ edges)**: Three issues fixed in
+  `internal/parser/typescript.go`:
+  (1) All TS nodes had an empty `Package` field — now populated from the module
+  name derived from the filename.
+  (2) Class methods (`method_definition`) were not captured as `NodeMethod` nodes.
+  (3) Call edges used direct `AddEdge` instead of `AddCallSite`, bypassing
+  the cross-file resolver. Replaced with `collectTSCallSites()` + `isTSBuiltin()`
+  for proper cross-module resolution.
+
+- **`find_orphans` always returned 0**: `graph.Fanin(id)` counts ALL incoming
+  edges including `DEFINES` edges — every function had Fanin ≥ 1 due to its
+  file's DEFINES edge, and was incorrectly excluded. Fixed to count only
+  `EdgeCalls`-type incoming edges. (`internal/mcp/tools.go`)
+
+- **`find_orphans` false exclusion of Python/TypeScript functions**: The
+  `n.Exported` skip was applied to all languages, but Python's `isPythonPublic()`
+  marks all non-underscore names as `Exported = true`. Fixed to apply the
+  exported-symbol skip only for `.go` files. Added `__init__`, `__new__`,
+  `__del__` to the runtime entry-point exclusion list alongside `main` and `init`.
+
+- **`create_plan` tasks parameter type panic**: The handler type-asserted `tasks`
+  as a JSON-encoded `string`, but MCP clients (including Claude Code) send it as
+  a native `[]interface{}` array. Added a type switch accepting both formats.
+  (`internal/mcp/task_tools.go`)
+
+- **Brain client hardcoded 2-second timeout**: `BuildContextPacket` in
+  `internal/brain/client.go` wrapped every call in a hardcoded 2-second
+  `context.WithTimeout`. On CPU-only Ollama deployments (`qwen2.5-coder:1.5b`
+  takes 2–4s), brain enrichment always timed out and silently returned nil.
+  Fixed to propagate the caller's context timeout, which respects `timeout_sec`
+  from `synapses.json`.
+
 ### Added
 
 **Dynamic Rule Engine:**

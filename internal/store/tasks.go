@@ -48,6 +48,36 @@ type TaskInput struct {
 	DependsOn   []string `json:"depends_on"` // task IDs that must be done before this task
 }
 
+// UnmarshalJSON allows `priority` to be either a string ("p0", "p1") or a number (0, 1, 2).
+// LLMs naturally emit integer priorities; this coerces them to the internal string format.
+func (t *TaskInput) UnmarshalJSON(data []byte) error {
+	// Use an alias to avoid recursion.
+	type Alias TaskInput
+	aux := &struct {
+		Priority json.RawMessage `json:"priority"`
+		*Alias
+	}{Alias: (*Alias)(t)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	if len(aux.Priority) == 0 {
+		return nil
+	}
+	// Try string first.
+	var s string
+	if err := json.Unmarshal(aux.Priority, &s); err == nil {
+		t.Priority = s
+		return nil
+	}
+	// Try number — convert to "p<n>" string.
+	var n json.Number
+	if err := json.Unmarshal(aux.Priority, &n); err == nil {
+		t.Priority = "p" + n.String()
+		return nil
+	}
+	return fmt.Errorf("priority must be a string or number, got %s", string(aux.Priority))
+}
+
 // PlanSummary is a plan with task completion counts, used by GetPlans.
 type PlanSummary struct {
 	Plan

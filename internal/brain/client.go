@@ -59,12 +59,11 @@ func (c *Client) HealthCheck(ctx context.Context) (string, error) {
 
 // BuildContextPacket calls POST /v1/context-packet and returns the enriched
 // context packet. Returns nil on any failure (brain unreachable, timeout, etc.).
-// A hard 2s deadline is applied so a slow brain sidecar cannot stall agents.
+// Uses the client's configured HTTP timeout (set via NewClient) so CPU-only
+// Ollama deployments with slower inference do not always time out.
 func (c *Client) BuildContextPacket(ctx context.Context, req ContextPacketRequest) *ContextPacket {
-	ctx2, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
 	var pkt ContextPacket
-	if err := c.post(ctx2, "/v1/context-packet", req, &pkt); err != nil {
+	if err := c.post(ctx, "/v1/context-packet", req, &pkt); err != nil {
 		return nil
 	}
 	return &pkt

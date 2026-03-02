@@ -109,14 +109,24 @@ func (s *Server) handleCreatePlan(
 	description, _ := req.Params.Arguments["description"].(string)
 	agentID, _ := req.Params.Arguments["agent_id"].(string)
 
-	tasksRaw, _ := req.Params.Arguments["tasks"].(string)
-	if tasksRaw == "" {
-		return mcp.NewToolResultError("tasks is required (JSON array of task objects)"), nil
-	}
-
 	var taskInputs []store.TaskInput
-	if err := json.Unmarshal([]byte(tasksRaw), &taskInputs); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid tasks JSON: %v", err)), nil
+	switch tv := req.Params.Arguments["tasks"].(type) {
+	case string:
+		// LLM sent tasks as a JSON-encoded string (legacy path).
+		if tv == "" {
+			return mcp.NewToolResultError("tasks is required (JSON array of task objects)"), nil
+		}
+		if err := json.Unmarshal([]byte(tv), &taskInputs); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid tasks JSON: %v", err)), nil
+		}
+	case []interface{}:
+		// LLM sent tasks as a native JSON array (normal MCP path).
+		b, _ := json.Marshal(tv)
+		if err := json.Unmarshal(b, &taskInputs); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid tasks array: %v", err)), nil
+		}
+	default:
+		return mcp.NewToolResultError("tasks is required (JSON array of task objects)"), nil
 	}
 	if len(taskInputs) == 0 {
 		return mcp.NewToolResultError("tasks array must not be empty"), nil

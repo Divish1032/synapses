@@ -60,12 +60,27 @@ func ResolveCallEdges(g *graph.Graph) int {
 			targetID = findInPackage(pkgIndex, shortPkg, site.FuncName)
 		} else {
 			// Direct call: Func()
-			// Look in the caller's own package.
+			// 1. Look in the caller's own package (Go-style, same-package calls).
 			callerNode := g.GetNode(site.CallerID)
 			if callerNode == nil {
 				continue
 			}
 			targetID = findInPackage(pkgIndex, callerNode.Package, site.FuncName)
+
+			// 2. Fallback: search all packages imported by the caller's file.
+			//    This handles Python/TypeScript `from X import Y` style calls where
+			//    the symbol is imported directly (no qualifier) from another module.
+			if targetID == "" {
+				if aliases, ok := importMap[site.CallerFile]; ok {
+					for _, importPath := range aliases {
+						shortPkg := path.Base(importPath)
+						if id := findInPackage(pkgIndex, shortPkg, site.FuncName); id != "" {
+							targetID = id
+							break
+						}
+					}
+				}
+			}
 		}
 
 		if targetID == "" {

@@ -111,10 +111,11 @@ func (p *TypeScriptParser) Extensions() []string {
 //   - Import declarations     → IMPORTS edges
 //   - Function declarations   → NodeFunction
 //   - Arrow functions (named) → NodeFunction
+//   - Method definitions      → NodeMethod (inside classes)
 //   - Class declarations      → NodeStruct
 //   - Interface declarations  → NodeInterface
 //   - Type alias declarations → NodeInterface (treated as nominal types)
-//   - Call expressions        → CALLS edges
+//   - Call expressions        → call sites (resolved to CALLS edges by resolver)
 func (p *TypeScriptParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	lang := p.langForFile(filePath)
 
@@ -124,17 +125,21 @@ func (p *TypeScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 	tree, _ := tsParser.ParseCtx(context.Background(), nil, src)
 	root := tree.RootNode()
 
+	// Module name = basename without extension (e.g. "pipeline" for pipeline.ts).
+	moduleName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
+
 	// File node.
 	fileNodeID := g.MakeNodeID(filePath, filePath)
 	g.AddNode(&graph.Node{
-		ID:   fileNodeID,
-		Type: graph.NodeFile,
-		Name: filepath.Base(filePath),
-		File: filePath,
-		Line: 1,
+		ID:      fileNodeID,
+		Type:    graph.NodeFile,
+		Name:    filepath.Base(filePath),
+		File:    filePath,
+		Line:    1,
+		Package: moduleName,
 	})
 
-	return p.extractDeclarations(g, lang, root, src, filePath, fileNodeID)
+	return p.extractDeclarations(g, lang, root, src, filePath, fileNodeID, moduleName)
 }
 
 // langForFile returns the appropriate tree-sitter language for the extension.
@@ -153,6 +158,7 @@ func (p *TypeScriptParser) extractDeclarations(
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
+	moduleName string,
 ) error {
 	declInfo := extractTSDeclInfo(root, src)
 
@@ -192,6 +198,7 @@ func (p *TypeScriptParser) extractDeclarations(
 			ID:       nodeID,
 			Type:     graph.NodeFunction,
 			Name:     name,
+			Package:  moduleName,
 			File:     filePath,
 			Line:     startLine,
 			Exported: isExported(name),
@@ -222,9 +229,33 @@ func (p *TypeScriptParser) extractDeclarations(
 			ID:       nodeID,
 			Type:     graph.NodeFunction,
 			Name:     name,
+			Package:  moduleName,
 			File:     filePath,
 			Line:     startLine,
 			Exported: true,
+			Metadata: buildLangMeta(declInfo[name]),
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}); err != nil {
+		return err
+	}
+
+	// --- Method definitions (inside class bodies) ---
+	methodQuery := `(method_definition name: (property_identifier) @method_name)`
+	if err := runQuery(lang, root, src, methodQuery, func(captures map[string]string, startLine int) {
+		name := captures["method_name"]
+		if name == "" || name == "constructor" {
+			return
+		}
+		nodeID := g.MakeNodeID(filePath, name)
+		g.AddNode(&graph.Node{
+			ID:       nodeID,
+			Type:     graph.NodeMethod,
+			Name:     name,
+			Package:  moduleName,
+			File:     filePath,
+			Line:     startLine,
+			Exported: isExported(name),
 			Metadata: buildLangMeta(declInfo[name]),
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
@@ -244,6 +275,7 @@ func (p *TypeScriptParser) extractDeclarations(
 			ID:       nodeID,
 			Type:     graph.NodeStruct,
 			Name:     name,
+			Package:  moduleName,
 			File:     filePath,
 			Line:     startLine,
 			Exported: isExported(name),
@@ -266,6 +298,7 @@ func (p *TypeScriptParser) extractDeclarations(
 			ID:       nodeID,
 			Type:     graph.NodeInterface,
 			Name:     name,
+			Package:  moduleName,
 			File:     filePath,
 			Line:     startLine,
 			Exported: isExported(name),
@@ -293,6 +326,7 @@ func (p *TypeScriptParser) extractDeclarations(
 			ID:       nodeID,
 			Type:     graph.NodeInterface,
 			Name:     name,
+			Package:  moduleName,
 			File:     filePath,
 			Line:     startLine,
 			Exported: isExported(name),
@@ -303,29 +337,65 @@ func (p *TypeScriptParser) extractDeclarations(
 		return err
 	}
 
-	// --- Call expressions: obj.method() pattern ---
-	callQuery := `
-(call_expression
-  function: (member_expression
-    object: (identifier) @callee_obj
-    property: (property_identifier) @callee_prop
-  )
-)`
-	if err := runQuery(lang, root, src, callQuery, func(captures map[string]string, _ int) {
-		obj := captures["callee_obj"]
-		prop := captures["callee_prop"]
-		if obj == "" || prop == "" {
-			return
-		}
-		qualifiedName := obj + "." + prop
-		calleeID := g.MakeNodeID(filePath, qualifiedName)
-		if g.GetNode(calleeID) == nil {
-			return
-		}
-		g.AddEdge(&graph.Edge{From: fileNodeID, To: calleeID, Type: graph.EdgeCalls})
-	}); err != nil {
-		return err
-	}
+	// --- Call sites: direct calls foo() and method calls obj.method() ---
+	// Collected now and resolved into CALLS edges after all files are parsed.
+	collectTSCallSites(g, lang, root, src, filePath, fileNodeID)
 
 	return nil
+}
+
+// collectTSCallSites walks the AST and adds call sites for function and method
+// calls so the cross-file resolver can link them as CALLS edges.
+func collectTSCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	// Direct calls: foo(...)
+	directQuery := `(call_expression function: (identifier) @callee)`
+	_ = runQuery(lang, root, src, directQuery, func(captures map[string]string, _ int) {
+		callee := captures["callee"]
+		if callee == "" || isTSBuiltin(callee) {
+			return
+		}
+		g.AddCallSite(graph.CallSite{
+			CallerID:   fileNodeID,
+			CallerFile: filePath,
+			FuncName:   callee,
+			PkgAlias:   "",
+		})
+	})
+
+	// Method calls: obj.method(...) — collect the method name for cross-module resolution.
+	memberQuery := `(call_expression function: (member_expression property: (property_identifier) @method_name))`
+	_ = runQuery(lang, root, src, memberQuery, func(captures map[string]string, _ int) {
+		name := captures["method_name"]
+		if name == "" || isTSBuiltin(name) {
+			return
+		}
+		g.AddCallSite(graph.CallSite{
+			CallerID:   fileNodeID,
+			CallerFile: filePath,
+			FuncName:   name,
+			PkgAlias:   "",
+		})
+	})
+}
+
+// isTSBuiltin returns true for TypeScript/JavaScript built-in methods and
+// constructors that should never generate CALLS edges.
+func isTSBuiltin(name string) bool {
+	switch name {
+	case "push", "pop", "shift", "unshift", "splice", "slice", "map", "filter",
+		"reduce", "forEach", "find", "findIndex", "some", "every", "includes",
+		"indexOf", "join", "reverse", "sort", "concat", "flat", "flatMap",
+		"keys", "values", "entries", "assign", "create", "freeze",
+		"stringify", "parse", "toString", "valueOf", "hasOwnProperty",
+		"addEventListener", "removeEventListener", "dispatchEvent",
+		"setTimeout", "setInterval", "clearTimeout", "clearInterval",
+		"console", "log", "warn", "error", "info", "debug",
+		"Promise", "resolve", "reject", "then", "catch", "finally",
+		"JSON", "Math", "Date", "Object", "Array", "String", "Number", "Boolean",
+		"Symbol", "RegExp", "Error", "TypeError", "RangeError",
+		"parseInt", "parseFloat", "isNaN", "isFinite",
+		"now", "from", "of", "call", "apply", "bind":
+		return true
+	}
+	return false
 }
