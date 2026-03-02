@@ -158,6 +158,8 @@ func (s *Server) handleCreatePlan(
 // handleGetPendingTasks returns all pending and in-progress tasks, ordered by
 // priority. This is the key session-resume tool: call it at the start of every
 // session to discover what was agreed in previous sessions.
+// For in_progress tasks, the session_state is included inline so the next LLM
+// can resume from exactly where the previous session stopped.
 func (s *Server) handleGetPendingTasks(
 	_ context.Context,
 	req mcp.CallToolRequest,
@@ -176,6 +178,27 @@ func (s *Server) handleGetPendingTasks(
 		return mcp.NewToolResultError(fmt.Sprintf("get pending tasks: %v", err)), nil
 	}
 
+	// Collect IDs of in_progress tasks to fetch their session state.
+	type taskWithState struct {
+		store.Task
+		SessionState *store.SessionState `json:"session_state,omitempty"`
+	}
+	inProgressIDs := make([]string, 0)
+	for _, t := range tasks {
+		if t.Status == "in_progress" {
+			inProgressIDs = append(inProgressIDs, t.ID)
+		}
+	}
+	stateMap, _ := s.store.GetSessionStateForTasks(inProgressIDs)
+
+	result := make([]taskWithState, len(tasks))
+	for i, t := range tasks {
+		result[i] = taskWithState{Task: t}
+		if stateMap != nil {
+			result[i].SessionState = stateMap[t.ID]
+		}
+	}
+
 	summary := "no pending tasks"
 	if len(tasks) > 0 {
 		summary = fmt.Sprintf("%d task(s) pending/in-progress", len(tasks))
@@ -183,11 +206,106 @@ func (s *Server) handleGetPendingTasks(
 
 	resp := map[string]interface{}{
 		"summary":  summary,
-		"tasks":    tasks,
+		"tasks":    result,
 		"reminder": "Call update_task(id, 'in_progress') before starting a task and update_task(id, 'done', notes) immediately when finished. Never batch completions.",
 	}
 
 	return jsonResult(resp)
+}
+
+// handleSaveSessionState upserts the working state for an in-progress task.
+// Call this at regular intervals while working on a task so future sessions
+// can resume from the exact point where this session stopped.
+func (s *Server) handleSaveSessionState(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	if s.store == nil {
+		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
+	}
+
+	taskID := stringArg(req, "task_id")
+	if taskID == "" {
+		return mcp.NewToolResultError("task_id is required"), nil
+	}
+
+	state := store.SessionState{
+		TaskID:          taskID,
+		AgentID:         stringArg(req, "agent_id"),
+		Approach:        stringArg(req, "approach"),
+		ContextSnapshot: stringArg(req, "context_snapshot"),
+	}
+
+	// Parse JSON array fields; accept both raw arrays and JSON strings.
+	parseStrArr := func(key string) []string {
+		switch v := req.Params.Arguments[key].(type) {
+		case []interface{}:
+			out := make([]string, 0, len(v))
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					out = append(out, s)
+				}
+			}
+			return out
+		case string:
+			if v == "" {
+				return nil
+			}
+			var arr []string
+			_ = json.Unmarshal([]byte(v), &arr)
+			return arr
+		}
+		return nil
+	}
+
+	state.FilesModified = parseStrArr("files_modified")
+	state.CompletedSteps = parseStrArr("completed_steps")
+	state.RemainingSteps = parseStrArr("remaining_steps")
+	state.Blockers = parseStrArr("blockers")
+	state.Decisions = parseStrArr("decisions")
+
+	if err := s.store.UpsertSessionState(state); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("save session state: %v", err)), nil
+	}
+
+	return jsonResult(map[string]interface{}{
+		"task_id": taskID,
+		"message": "Session state saved. The next session will see this state via get_pending_tasks().",
+	})
+}
+
+// handleGetSessionState returns the saved session state for a task, enabling
+// exact-moment resumption of work started in a previous LLM session.
+func (s *Server) handleGetSessionState(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	if s.store == nil {
+		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
+	}
+
+	taskID := stringArg(req, "task_id")
+	if taskID == "" {
+		return mcp.NewToolResultError("task_id is required"), nil
+	}
+
+	state, err := s.store.GetSessionState(taskID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("get session state: %v", err)), nil
+	}
+	if state == nil {
+		return jsonResult(map[string]interface{}{
+			"task_id": taskID,
+			"found":   false,
+			"message": "No session state saved for this task yet. Call save_session_state() while working to enable resumption.",
+		})
+	}
+
+	return jsonResult(map[string]interface{}{
+		"task_id": taskID,
+		"found":   true,
+		"state":   state,
+	})
 }
 
 // handleUpdateTask marks a task as done, in_progress, or cancelled, and

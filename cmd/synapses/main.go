@@ -1096,27 +1096,46 @@ func buildIngestCode(n *graph.Node) string {
 	return code
 }
 
-// bulkIngestToBrain sends all non-package/non-file nodes to the brain sidecar
-// using 8 concurrent goroutines. Nodes are sorted by caller count descending so
-// the most-referenced (and thus most important) nodes are summarized first.
+// bulkIngestToBrain sends high-value nodes to the brain sidecar for summarization.
+// "High-value" means: exported with callers, heavily-used (fanin>3), entry points,
+// or interface implementations. Low-fanin unexported helpers are skipped — they
+// will be enriched on-demand when get_context is called for them.
+// This reduces init-time ingest from ~700 nodes to ~80-100, keeping startup fast.
 func bulkIngestToBrain(bc *brain.Client, g *graph.Graph) {
 	all := g.AllNodes()
 
-	// Collect eligible nodes (skip file/package hub nodes).
-	nodes := make([]*graph.Node, 0, len(all))
+	// Collect high-value nodes only.
+	nodes := make([]*graph.Node, 0, 150)
 	for _, n := range all {
-		if string(n.Type) != "package" && string(n.Type) != "file" {
+		t := string(n.Type)
+		if t == "package" || t == "file" {
+			continue
+		}
+		fanin := g.Fanin(n.ID) // caller count (EdgeCalls only)
+
+		// Include if: heavily called, exported+used, entry point, or interface impl.
+		isEntryPoint := n.Name == "main" || n.Name == "init" || strings.HasSuffix(n.Name, ".main") || strings.HasSuffix(n.Name, ".init")
+		isHighFanin := fanin > 3
+		isExportedUsed := n.Exported && fanin > 0
+		isImpl := len(g.OutEdges(n.ID)) > 0 && t == "method" && n.Exported
+
+		if isHighFanin || isEntryPoint || isExportedUsed || isImpl {
 			nodes = append(nodes, n)
 		}
 	}
 
-	// Sort by caller count descending — most-connected first so the brain warms
-	// important summaries before less-referenced leaf nodes.
+	// Sort by caller count descending — most-connected first.
 	sort.Slice(nodes, func(i, j int) bool {
-		return len(g.InEdges(nodes[i].ID)) > len(g.InEdges(nodes[j].ID))
+		return g.Fanin(nodes[i].ID) > g.Fanin(nodes[j].ID)
 	})
 
-	sem := make(chan struct{}, 8)
+	// Cap at 100 nodes to bound init time regardless of repo size.
+	const maxIngest = 100
+	if len(nodes) > maxIngest {
+		nodes = nodes[:maxIngest]
+	}
+
+	sem := make(chan struct{}, 4) // 4 concurrent — 7b is slower than 1.5b
 	var wg sync.WaitGroup
 	for _, n := range nodes {
 		wg.Add(1)
@@ -1134,7 +1153,7 @@ func bulkIngestToBrain(bc *brain.Client, g *graph.Graph) {
 		}(n)
 	}
 	wg.Wait()
-	fmt.Fprintf(os.Stderr, "synapses: ingested %d nodes to brain\n", len(nodes))
+	fmt.Fprintf(os.Stderr, "synapses: ingested %d high-value nodes to brain (of %d total)\n", len(nodes), len(all))
 }
 
 // fetchAndWriteBackSummaries waits for the brain to process ingested nodes,

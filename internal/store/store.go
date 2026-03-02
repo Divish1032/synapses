@@ -84,6 +84,26 @@ CREATE TABLE IF NOT EXISTS tasks (
 	updated_at   TEXT NOT NULL
 );
 
+-- Session state table: captures exact work state so future LLM sessions can
+-- resume from the precise point where the previous session stopped.
+-- Unlike task.notes (append-only audit trail), session_state is a single mutable
+-- row per task that always reflects the latest working state.
+CREATE TABLE IF NOT EXISTS session_state (
+	id               TEXT NOT NULL,
+	task_id          TEXT NOT NULL,          -- one state per task (UNIQUE enforced as PK)
+	agent_id         TEXT NOT NULL DEFAULT '',
+	approach         TEXT NOT NULL DEFAULT '',      -- current strategy being taken
+	files_modified   TEXT NOT NULL DEFAULT '[]',   -- JSON array of file paths
+	completed_steps  TEXT NOT NULL DEFAULT '[]',   -- JSON array of step descriptions
+	remaining_steps  TEXT NOT NULL DEFAULT '[]',   -- JSON array of step descriptions
+	blockers         TEXT NOT NULL DEFAULT '[]',   -- JSON array of blocker descriptions
+	decisions        TEXT NOT NULL DEFAULT '[]',   -- JSON array of decision records
+	context_snapshot TEXT NOT NULL DEFAULT '',     -- free-form context dump for resumption
+	created_at       TEXT NOT NULL,
+	updated_at       TEXT NOT NULL,
+	PRIMARY KEY (task_id)                    -- one row per task; upsert on task_id
+);
+
 -- File modification-time table for incremental reindex.
 -- Stores path → mtime (Unix nanoseconds) for every file that was successfully
 -- parsed during the last full index. Used by smartReindex to skip unchanged files.

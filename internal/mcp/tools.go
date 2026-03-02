@@ -213,6 +213,10 @@ func (s *Server) handleGetContext(
 				}
 			}
 
+			// Compute graph topology signals for enhanced context packets.
+			hasTests := fileHasTests(best.File)
+			fanIn := s.graph.Fanin(best.ID)
+
 			pkt = bc.BuildContextPacket(context.Background(), brain.ContextPacketRequest{
 				Snapshot: brain.SnapshotInput{
 					RootNodeID:      string(best.ID),
@@ -224,6 +228,8 @@ func (s *Server) handleGetContext(
 					ApplicableRules: rules,
 					ActiveClaims:    claims,
 					TaskID:          taskID,
+					HasTests:        hasTests,
+					FanIn:           fanIn,
 				},
 				EnableLLM: s.config.Brain.EnableLLM,
 			})
@@ -288,6 +294,48 @@ func suggestNextAfterContext(dc *directionalContext) []toolSuggestion {
 		toolSuggestion{Tool: "annotate_node", Reason: "leave a note for other agents on a key finding"},
 	)
 	return suggestions
+}
+
+// fileHasTests returns true if a _test.go file exists in the same directory
+// as the given source file (Go convention). For non-Go files, checks for
+// a test file with common naming patterns in the same directory.
+func fileHasTests(file string) bool {
+	if file == "" {
+		return false
+	}
+	dir := filepath.Dir(file)
+	base := filepath.Base(file)
+	ext := filepath.Ext(base)
+	stem := base[:len(base)-len(ext)]
+
+	// Go: check for stem_test.go or any *_test.go in the directory.
+	if ext == ".go" {
+		testFile := filepath.Join(dir, stem+"_test.go")
+		if _, err := filepath.Glob(testFile); err == nil {
+			if _, statErr := filepath.Abs(testFile); statErr == nil {
+				// Use exec.LookPath-style check via os.Stat.
+				if matches, _ := filepath.Glob(filepath.Join(dir, "*_test.go")); len(matches) > 0 {
+					return true
+				}
+			}
+		}
+		matches, _ := filepath.Glob(filepath.Join(dir, "*_test.go"))
+		return len(matches) > 0
+	}
+
+	// Python/TypeScript: check for test_*.py, *.test.ts, *.spec.ts, etc.
+	patterns := []string{
+		filepath.Join(dir, "test_*.py"),
+		filepath.Join(dir, "*_test.py"),
+		filepath.Join(dir, stem+".test"+ext),
+		filepath.Join(dir, stem+".spec"+ext),
+	}
+	for _, p := range patterns {
+		if m, _ := filepath.Glob(p); len(m) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // matchRulesForFile returns the slim rule descriptors applicable to the given

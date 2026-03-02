@@ -311,27 +311,6 @@ func (s *Server) registerTools() {
 		s.handleGetFileContext,
 	)
 
-	// get_api_contract
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_api_contract",
-			mcp.WithDescription(
-				"Detects HTTP and gRPC API endpoints in the codebase using framework conventions "+
-					"(net/http, Gin, Echo, Fiber, gRPC, Protocol Buffers) and optional custom patterns "+
-					"from synapses.json api_entries. For each endpoint returns its signature, "+
-					"the detected framework, direct callers (route registration), and direct callees "+
-					"(service/repository dependencies). Answers: 'what is the public API surface?'",
-			),
-			mcp.WithString("package",
-				mcp.Description("Optional. Filter to a specific package name (substring match)."),
-			),
-			mcp.WithString("file",
-				mcp.Description("Optional. Filter to a specific file path suffix, e.g. 'handlers/auth.go'."),
-			),
-		),
-		s.handleGetApiContract,
-	)
-
 	// search (absorbs semantic_search via mode param)
 	s.mcp.AddTool(
 		mcp.NewTool(
@@ -376,29 +355,6 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleGetCallChain,
-	)
-
-	// get_events
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_events",
-			mcp.WithDescription(
-				"Returns recent events from the pull-based event log since a cursor sequence number. "+
-					"Event types: file_change, task_update, annotation_added, agent_activity. "+
-					"Pass the returned latest_seq as since_seq on the next call to receive only new events. "+
-					"Use this for multi-agent coordination — poll to discover what other agents did.",
-			),
-			mcp.WithNumber("since_seq",
-				mcp.Description("Return only events with seq > since_seq. Pass 0 (or omit) for all recent events."),
-			),
-			mcp.WithString("types",
-				mcp.Description("Optional comma-separated list of event types to filter: file_change,task_update,annotation_added,agent_activity"),
-			),
-			mcp.WithNumber("limit",
-				mcp.Description("Max events to return (default 100)."),
-			),
-		),
-		s.handleGetEvents,
 	)
 
 	// annotate_node
@@ -447,27 +403,6 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleGetImpact,
-	)
-
-	// detect_changes
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"detect_changes",
-			mcp.WithDescription(
-				"Maps a git diff to affected graph symbols. "+
-					"Runs `git diff --unified=0 [ref]` against the repo, parses changed "+
-					"file paths and line ranges, and returns all graph nodes whose source "+
-					"location falls within the changed ranges. "+
-					"Answers: 'which symbols were touched by recent changes?'",
-			),
-			mcp.WithString("ref",
-				mcp.Description(
-					"Optional git ref to diff against (branch name, SHA, '--cached'). "+
-						"Defaults to HEAD (unstaged changes). Example: 'main', 'HEAD~1'.",
-				),
-			),
-		),
-		s.handleDetectChanges,
 	)
 
 	// ── Agent Task Memory Tools ──────────────────────────────────────────────
@@ -523,6 +458,66 @@ func (s *Server) registerTools() {
 		s.handleGetPendingTasks,
 	)
 
+	// save_session_state
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"save_session_state",
+			mcp.WithDescription(
+				"Saves the exact working state for an in-progress task so the next LLM session "+
+					"can resume from precisely where this session stopped. Call this at the end of "+
+					"a session or whenever significant progress is made. "+
+					"The state is included automatically in get_pending_tasks() for in_progress tasks.",
+			),
+			mcp.WithString("task_id",
+				mcp.Required(),
+				mcp.Description("The task ID from get_pending_tasks."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Optional. Self-declared agent identifier."),
+			),
+			mcp.WithString("approach",
+				mcp.Description("Current strategy or approach being taken for this task."),
+			),
+			mcp.WithString("files_modified",
+				mcp.Description("JSON array of file paths modified so far, e.g. [\"internal/store/tasks.go\"]."),
+			),
+			mcp.WithString("completed_steps",
+				mcp.Description("JSON array of step descriptions already completed."),
+			),
+			mcp.WithString("remaining_steps",
+				mcp.Description("JSON array of step descriptions still to do."),
+			),
+			mcp.WithString("blockers",
+				mcp.Description("JSON array of blocker descriptions (empty if none)."),
+			),
+			mcp.WithString("decisions",
+				mcp.Description("JSON array of key decisions made during this session."),
+			),
+			mcp.WithString("context_snapshot",
+				mcp.Description("Free-form text snapshot of the current LLM context (key facts, state, etc.)."),
+			),
+		),
+		s.handleSaveSessionState,
+	)
+
+	// get_session_state
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_session_state",
+			mcp.WithDescription(
+				"Returns the saved session state for a task, enabling exact-moment resumption "+
+					"of work started in a previous LLM session. "+
+					"Note: get_pending_tasks() already includes session state for in_progress tasks inline; "+
+					"use this tool only when you need to fetch state for a specific task explicitly.",
+			),
+			mcp.WithString("task_id",
+				mcp.Required(),
+				mcp.Description("The task ID to retrieve session state for."),
+			),
+		),
+		s.handleGetSessionState,
+	)
+
 	// update_task
 	s.mcp.AddTool(
 		mcp.NewTool(
@@ -548,78 +543,6 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleUpdateTask,
-	)
-
-	// get_plans
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_plans",
-			mcp.WithDescription(
-				"Lists all plans with task completion counts. "+
-					"Use this to get an overview of all ongoing and completed plans.",
-			),
-		),
-		s.handleGetPlans,
-	)
-
-	// link_task_nodes
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"link_task_nodes",
-			mcp.WithDescription(
-				"Explicitly links a task to code graph nodes, bridging 'work to be done' with 'code to change'. "+
-					"If query is provided, finds nodes whose name matches the query and links them. "+
-					"If query is omitted, scans the task's own title+description+notes for node name mentions. "+
-					"Result is MERGED with existing linked_nodes — safe to call multiple times. "+
-					"Note: create_plan already auto-links on creation; use this for corrections or additions.",
-			),
-			mcp.WithString("task_id", mcp.Required(), mcp.Description("ID of the task to link.")),
-			mcp.WithString("query", mcp.Description("Optional node name substring to search for. Omit to auto-scan the task text.")),
-		),
-		s.handleLinkTaskNodes,
-	)
-
-	// ── Diagnostic Tools ────────────────────────────────────────────────────
-
-	// find_orphans
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"find_orphans",
-			mcp.WithDescription(
-				"Returns unexported functions and methods with no callers (fanin=0). "+
-					"Useful for dead code detection. Exported symbols, Go runtime entry points (main, init), "+
-					"interface implementors, and framework entry points (http.Handler, Cobra, gRPC) are excluded. "+
-					"Each result includes a confidence score: 1.0=fully isolated, 0.7=has outgoing calls, 0.5=only file-defines edge.",
-			),
-			mcp.WithBoolean("include_tests",
-				mcp.Description("Include helpers defined in _test.go files (default false)."),
-			),
-			mcp.WithNumber("min_confidence",
-				mcp.Description("Only return orphans with confidence >= this value (default 0.5, range 0.0–1.0)."),
-			),
-		),
-		s.handleFindOrphans,
-	)
-
-	// get_change_coupling
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_change_coupling",
-			mcp.WithDescription(
-				"Analyses git history to find files that frequently change together, "+
-					"surfacing implicit dependencies that static analysis misses. "+
-					"confidence = co_changes / max(total_commits_A, total_commits_B). "+
-					"Returns pairs sorted by confidence descending. "+
-					"Use this to discover hidden coupling before making changes.",
-			),
-			mcp.WithNumber("commit_limit",
-				mcp.Description("Number of recent commits to analyse (default 500)."),
-			),
-			mcp.WithNumber("min_confidence",
-				mcp.Description("Minimum coupling confidence to include (default 0.3, range 0–1)."),
-			),
-		),
-		s.handleGetChangeCoupling,
 	)
 
 	// ── Rule Management Tools ────────────────────────────────────────────────
@@ -681,336 +604,4 @@ func (s *Server) registerTools() {
 		s.handleGetWorkingState,
 	)
 
-	// ── Multi-Agent Coordination ─────────────────────────────────────────────
-
-	// claim_work
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"claim_work",
-			mcp.WithDescription(
-				"Registers an agent's active work on a scope (file, package, directory, or entity). "+
-					"Prevents two agents from unknowingly editing the same code at the same time. "+
-					"Returns any conflicting claims by other agents immediately, so the caller can "+
-					"decide whether to proceed or coordinate first. Claims expire automatically after ttl_minutes. "+
-					"Call release_claims (or let the TTL expire) when work is done.",
-			),
-			mcp.WithString("agent_id", mcp.Required(), mcp.Description("Identifier of the calling agent.")),
-			mcp.WithString("scope", mcp.Required(), mcp.Description("What is being claimed: file path, package name, directory path, or entity name.")),
-			mcp.WithString("scope_type", mcp.Description("How to interpret scope: 'file' (default), 'package', 'directory', or 'entity'.")),
-			mcp.WithNumber("ttl_minutes", mcp.Description("How long the claim is valid. Default: 30 minutes.")),
-		),
-		s.handleClaimWork,
-	)
-
-	// get_conflicts
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_conflicts",
-			mcp.WithDescription(
-				"Returns all work claims by other agents that overlap with any scope the given agent "+
-					"currently holds. Also returns the agent's own active claims. "+
-					"Use this to detect coordination problems before starting work on a shared codebase. "+
-					"Expired claims are pruned automatically before checking.",
-			),
-			mcp.WithString("agent_id", mcp.Required(), mcp.Description("Identifier of the calling agent.")),
-		),
-		s.handleGetConflicts,
-	)
-
-	// release_claims
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"release_claims",
-			mcp.WithDescription(
-				"Releases all active work claims held by the given agent. "+
-					"Call this when you are done editing a file/package/entity to free the scope for other agents. "+
-					"Claims also expire automatically after their TTL.",
-			),
-			mcp.WithString("agent_id", mcp.Required(), mcp.Description("Identifier of the calling agent.")),
-		),
-		s.handleReleaseClaims,
-	)
-
-	// ── Community Detection ──────────────────────────────────────────────────
-
-	// get_communities
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_communities",
-			mcp.WithDescription(
-				"Detects emergent community clusters in the codebase using Label Propagation (LPA). "+
-					"Nodes that call each other frequently end up in the same community regardless of directory. "+
-					"Pure-package communities indicate clean boundaries; mixed-package communities reveal "+
-					"hidden coupling across module lines. Returns communities sorted by size with a "+
-					"modularity score (0–1, higher = stronger separation).",
-			),
-			mcp.WithNumber("max_iterations",
-				mcp.Description("Max LPA rounds before stopping (default 10). Higher = more stable but slower."),
-			),
-			mcp.WithNumber("min_community_size",
-				mcp.Description("Minimum nodes per community to include in results (default 2, hides singletons)."),
-			),
-			mcp.WithBoolean("include_nodes",
-				mcp.Description("Include member node lists per community (default false). Omit for a compact summary."),
-			),
-		),
-		s.handleGetCommunities,
-	)
-
-	// ── Data Flow Analysis ────────────────────────────────────────────────────
-
-	// find_data_paths
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"find_data_paths",
-			mcp.WithDescription(
-				"Finds paths from source nodes (HTTP inputs, parsers, env vars) to sink nodes "+
-					"(SQL exec, file writes, exec.Command). Answers: 'can user input reach this database call?' "+
-					"Sources and sinks are detected automatically from function signatures; "+
-					"add custom patterns via data_flow_sources/data_flow_sinks in synapses.json. "+
-					"Requires a fresh index (synapses index --reindex) to populate DATA_FLOWS edges.",
-			),
-			mcp.WithString("source",
-				mcp.Description("Optional: entity name to trace forward from (show reachable sinks)."),
-			),
-			mcp.WithString("sink",
-				mcp.Description("Optional: entity name to trace backward to (show sources that reach it)."),
-			),
-		),
-		s.handleFindDataPaths,
-	)
-
-	// ── Agent Consensus Tools ────────────────────────────────────────────────
-
-	// proposals (create + list in one tool)
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"proposals",
-			mcp.WithDescription(
-				"Manages architectural change proposals for multi-agent consensus. "+
-					"Use action='create' to propose a change that other agents can vote on. "+
-					"Use action='list' (default) to see proposals waiting for votes. "+
-					"A proposal is resolved when approve or reject votes reach vote_threshold.",
-			),
-			mcp.WithString("action",
-				mcp.Description("'create' to propose a change, 'list' (default) to view proposals."),
-			),
-			mcp.WithString("title",
-				mcp.Description("(create) Short description of the proposed change."),
-			),
-			mcp.WithString("description",
-				mcp.Description("(create) Detailed rationale and affected code."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Self-declared identifier of the calling agent."),
-			),
-			mcp.WithString("affected_nodes",
-				mcp.Description("(create) Optional JSON array of node IDs. Auto-detected from title+description if omitted."),
-			),
-			mcp.WithNumber("vote_threshold",
-				mcp.Description("(create) Votes needed to resolve. Default: 2."),
-			),
-			mcp.WithString("status",
-				mcp.Description("(list) Filter by status: 'open', 'accepted', 'rejected', 'withdrawn'. Omit for all."),
-			),
-		),
-		s.handleProposals,
-	)
-
-	// vote_proposal (vote + withdraw in one tool)
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"vote_proposal",
-			mcp.WithDescription(
-				"Votes on or withdraws an architectural change proposal. "+
-					"Use action='vote' (default) to cast a vote. Each agent gets one vote per proposal. "+
-					"Use action='withdraw' to cancel a proposal you created. "+
-					"When approve or reject votes reach the threshold the proposal is resolved automatically.",
-			),
-			mcp.WithString("proposal_id",
-				mcp.Required(),
-				mcp.Description("ID of the proposal (from proposals tool)."),
-			),
-			mcp.WithString("action",
-				mcp.Description("'vote' (default) to cast a vote, 'withdraw' to cancel the proposal."),
-			),
-			mcp.WithString("vote",
-				mcp.Description("(vote) Your vote: 'approve', 'reject', or 'abstain'."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Self-declared identifier of the calling agent."),
-			),
-			mcp.WithString("rationale",
-				mcp.Description("(vote) Optional explanation stored for audit purposes."),
-			),
-		),
-		s.handleVoteProposal,
-	)
-
-	// ── Peer Tools ──────────────────────────────────────────────────────────
-
-	// list_peers
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"list_peers",
-			mcp.WithDescription(
-				"Lists all configured peer synapses instances with their connection status, "+
-					"node count, and number of entities shared with this project. "+
-					"Configure peers in synapses.json under the 'peers' key. "+
-					"Returns an empty array with a hint if no peers are configured.",
-			),
-		),
-		s.handleListPeers,
-	)
-
-	// get_peer_context
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_peer_context",
-			mcp.WithDescription(
-				"Returns the context subgraph for a named entity in a peer project. "+
-					"Equivalent to calling get_context on the peer's graph — shows callers, callees, "+
-					"and related nodes. Useful for understanding how a shared API is used in another project.",
-			),
-			mcp.WithString("project",
-				mcp.Required(),
-				mcp.Description("Peer name as configured in synapses.json (e.g. 'backend')."),
-			),
-			mcp.WithString("entity",
-				mcp.Required(),
-				mcp.Description("Function, struct, or interface name to look up in the peer project."),
-			),
-			mcp.WithNumber("depth",
-				mcp.Description("BFS hop depth. Default 2."),
-			),
-		),
-		s.handleGetPeerContext,
-	)
-
-	// get_dependency_graph
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_dependency_graph",
-			mcp.WithDescription(
-				"Returns an inter-project dependency overview across all connected peers. "+
-					"Shows which entities are shared between projects and includes a Mermaid diagram "+
-					"of inter-project links. Useful for understanding cross-project architecture.",
-			),
-		),
-		s.handleGetDependencyGraph,
-	)
-
-	// ── Brain / Intelligence Tools ───────────────────────────────────────────
-	// These tools proxy to the synapses-intelligence sidecar. When brain is not
-	// configured they return safe defaults or a helpful hint — never an error.
-
-	// log_decision
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"log_decision",
-			mcp.WithDescription(
-				"Records an agent architectural decision to the intelligence service for future context. "+
-					"Use this after making a significant implementation choice so future sessions can "+
-					"understand why the code evolved the way it did. Requires brain.url in synapses.json.",
-			),
-			mcp.WithString("agent_id", mcp.Required(), mcp.Description("Identifier of the calling agent.")),
-			mcp.WithString("entity_name", mcp.Required(), mcp.Description("The entity the decision concerns (e.g. 'AuthService').")),
-			mcp.WithString("action", mcp.Required(), mcp.Description("What was decided (e.g. 'refactor', 'add_method', 'remove_coupling').")),
-			mcp.WithString("phase", mcp.Description("Current SDLC phase: planning|development|testing|review|deployment.")),
-			mcp.WithString("related_entities", mcp.Description("Comma-separated list of other entities affected by this decision.")),
-			mcp.WithString("outcome", mcp.Description("Result of the action: success|partial|blocked.")),
-			mcp.WithString("notes", mcp.Description("Free-text context notes for future sessions.")),
-		),
-		s.handleLogDecision,
-	)
-
-	// get_violation_log
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_violation_log",
-			mcp.WithDescription(
-				"Returns the audit trail of architectural rule violations detected by get_violations. "+
-					"Each entry shows which rule fired, which nodes were involved, when it was first and "+
-					"last seen, and how many times it occurred. Use rule_id to filter to a specific rule.",
-			),
-			mcp.WithString("rule_id", mcp.Description("Optional. Filter to violations for a specific rule ID.")),
-			mcp.WithNumber("limit", mcp.Description("Max entries to return (default 50).")),
-		),
-		s.handleGetViolationLog,
-	)
-
-	// get_federation_status
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_federation_status",
-			mcp.WithDescription(
-				"Shows which linked projects are currently merged into the graph, node counts per project, "+
-					"and the number of cross-project CALLS edges. Returns is_federated=false when running on a single project.",
-			),
-		),
-		s.handleGetFederationStatus,
-	)
-
-	// get_usage_guide
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_usage_guide",
-			mcp.WithDescription(
-				"Returns a project-specific guide for using Synapses: quick-start sequence, tool selection guide, "+
-					"entry points, and key entities. Call this when you are unsure which tool to use or how to start exploring.",
-			),
-		),
-		s.handleGetUsageGuide,
-	)
-
-	// get_my_tasks
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_my_tasks",
-			mcp.WithDescription(
-				"Returns the calling agent's unblocked pending tasks, plus a suggested next task. "+
-					"Filters out tasks blocked by unfinished dependencies. "+
-					"Convenience wrapper around get_pending_tasks for focused agent workflows.",
-			),
-			mcp.WithString("agent_id", mcp.Required(), mcp.Description("The calling agent's self-declared identifier.")),
-			mcp.WithString("plan_id", mcp.Description("Optional. Filter to a specific plan.")),
-		),
-		s.handleGetMyTasks,
-	)
-
-	// get_agents
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_agents",
-			mcp.WithDescription(
-				"Returns all agents that have interacted with Synapses, ordered by last-seen timestamp. "+
-					"Agents self-declare their identity via the agent_id parameter on create_plan, update_task, "+
-					"and get_pending_tasks calls. Use this for multi-agent coordination to discover which agents are active.",
-			),
-		),
-		s.handleGetAgents,
-	)
-
-	// sdlc (get + set in one tool)
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"sdlc",
-			mcp.WithDescription(
-				"Gets or sets the current SDLC phase on the intelligence service. "+
-					"The phase controls which sections appear in Context Packets: "+
-					"planning gets insights; testing gets constraints; deployment gets team status. "+
-					"Returns development/standard defaults when brain is not configured.",
-			),
-			mcp.WithString("action",
-				mcp.Description("'get' (default) to read current phase, 'set' to update it."),
-			),
-			mcp.WithString("phase",
-				mcp.Description("(set) Phase to set: planning|development|testing|review|deployment."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Agent identifier for audit purposes."),
-			),
-		),
-		s.handleSDLC,
-	)
 }
