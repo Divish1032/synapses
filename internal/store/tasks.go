@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -475,4 +476,139 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 // Uses time + random suffix — collision probability is negligible for local use.
 func newID() string {
 	return fmt.Sprintf("%x", time.Now().UnixNano())
+}
+
+// --- Session State (exact-moment task resumption) ---
+
+// SessionState captures the precise working state of a task so that a future
+// LLM session can resume from exactly where the previous session stopped.
+// Unlike Task.Notes (append-only audit trail), this is a single mutable snapshot.
+type SessionState struct {
+	ID              string   `json:"id"`
+	TaskID          string   `json:"task_id"`
+	AgentID         string   `json:"agent_id,omitempty"`
+	Approach        string   `json:"approach,omitempty"`         // current strategy being taken
+	FilesModified   []string `json:"files_modified,omitempty"`   // files being edited
+	CompletedSteps  []string `json:"completed_steps,omitempty"`  // what's already done
+	RemainingSteps  []string `json:"remaining_steps,omitempty"`  // what still needs doing
+	Blockers        []string `json:"blockers,omitempty"`         // any known blockers
+	Decisions       []string `json:"decisions,omitempty"`        // key decisions made
+	ContextSnapshot string   `json:"context_snapshot,omitempty"` // free-form context dump
+	CreatedAt       string   `json:"created_at"`
+	UpdatedAt       string   `json:"updated_at"`
+}
+
+// UpsertSessionState saves or replaces the session state for a task.
+// Each task has at most one session_state row (keyed by task_id).
+// agentID is optional metadata for auditing.
+func (s *Store) UpsertSessionState(state SessionState) error {
+	filesJSON, _ := json.Marshal(state.FilesModified)
+	completedJSON, _ := json.Marshal(state.CompletedSteps)
+	remainingJSON, _ := json.Marshal(state.RemainingSteps)
+	blockersJSON, _ := json.Marshal(state.Blockers)
+	decisionsJSON, _ := json.Marshal(state.Decisions)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	id := newID()
+	if state.ID != "" {
+		id = state.ID
+	}
+
+	_, err := s.db.Exec(`
+		INSERT INTO session_state
+			(id, task_id, agent_id, approach, files_modified, completed_steps,
+			 remaining_steps, blockers, decisions, context_snapshot, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(task_id) DO UPDATE SET
+			agent_id         = excluded.agent_id,
+			approach         = excluded.approach,
+			files_modified   = excluded.files_modified,
+			completed_steps  = excluded.completed_steps,
+			remaining_steps  = excluded.remaining_steps,
+			blockers         = excluded.blockers,
+			decisions        = excluded.decisions,
+			context_snapshot = excluded.context_snapshot,
+			updated_at       = excluded.updated_at`,
+		id, state.TaskID, state.AgentID, state.Approach,
+		string(filesJSON), string(completedJSON), string(remainingJSON),
+		string(blockersJSON), string(decisionsJSON), state.ContextSnapshot,
+		now, now,
+	)
+	return err
+}
+
+// GetSessionState returns the session state for a task, or nil if none exists.
+func (s *Store) GetSessionState(taskID string) (*SessionState, error) {
+	row := s.db.QueryRow(`
+		SELECT id, task_id, agent_id, approach,
+		       files_modified, completed_steps, remaining_steps,
+		       blockers, decisions, context_snapshot, created_at, updated_at
+		FROM session_state WHERE task_id = ?`, taskID)
+
+	var st SessionState
+	var filesJSON, completedJSON, remainingJSON, blockersJSON, decisionsJSON string
+	err := row.Scan(
+		&st.ID, &st.TaskID, &st.AgentID, &st.Approach,
+		&filesJSON, &completedJSON, &remainingJSON,
+		&blockersJSON, &decisionsJSON, &st.ContextSnapshot,
+		&st.CreatedAt, &st.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(filesJSON), &st.FilesModified)
+	_ = json.Unmarshal([]byte(completedJSON), &st.CompletedSteps)
+	_ = json.Unmarshal([]byte(remainingJSON), &st.RemainingSteps)
+	_ = json.Unmarshal([]byte(blockersJSON), &st.Blockers)
+	_ = json.Unmarshal([]byte(decisionsJSON), &st.Decisions)
+	return &st, nil
+}
+
+// GetSessionStateForTasks returns session states for multiple task IDs,
+// keyed by task_id. Used by GetPendingTasks to inline state into task results.
+func (s *Store) GetSessionStateForTasks(taskIDs []string) (map[string]*SessionState, error) {
+	if len(taskIDs) == 0 {
+		return nil, nil
+	}
+	// Build ? placeholders
+	placeholders := make([]string, len(taskIDs))
+	args := make([]interface{}, len(taskIDs))
+	for i, id := range taskIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	rows, err := s.db.Query(
+		`SELECT id, task_id, agent_id, approach,
+		        files_modified, completed_steps, remaining_steps,
+		        blockers, decisions, context_snapshot, created_at, updated_at
+		 FROM session_state WHERE task_id IN (`+strings.Join(placeholders, ",")+`)`,
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]*SessionState)
+	for rows.Next() {
+		var st SessionState
+		var filesJSON, completedJSON, remainingJSON, blockersJSON, decisionsJSON string
+		if err := rows.Scan(
+			&st.ID, &st.TaskID, &st.AgentID, &st.Approach,
+			&filesJSON, &completedJSON, &remainingJSON,
+			&blockersJSON, &decisionsJSON, &st.ContextSnapshot,
+			&st.CreatedAt, &st.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(filesJSON), &st.FilesModified)
+		_ = json.Unmarshal([]byte(completedJSON), &st.CompletedSteps)
+		_ = json.Unmarshal([]byte(remainingJSON), &st.RemainingSteps)
+		_ = json.Unmarshal([]byte(blockersJSON), &st.Blockers)
+		_ = json.Unmarshal([]byte(decisionsJSON), &st.Decisions)
+		result[st.TaskID] = &st
+	}
+	return result, rows.Err()
 }

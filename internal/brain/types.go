@@ -24,6 +24,8 @@ type SnapshotInput struct {
 	ActiveClaims    []ClaimInput `json:"active_claims"`
 	TaskContext     string       `json:"task_context,omitempty"`
 	TaskID          string       `json:"task_id,omitempty"`
+	HasTests        bool         `json:"has_tests"`  // whether *_test.go exists for root file
+	FanIn           int          `json:"fan_in"`     // total caller count from graph
 }
 
 // RuleInput is a slim rule descriptor for the intelligence service.
@@ -59,6 +61,7 @@ type ContextPacket struct {
 	PhaseGuidance       string            `json:"phase_guidance,omitempty"`
 	LLMUsed             bool              `json:"llm_used"`
 	PacketQuality       float64           `json:"packet_quality"`
+	GraphWarnings       []string          `json:"graph_warnings,omitempty"`
 }
 
 // ConstraintItem is an active architectural constraint in a context packet.
