@@ -1344,7 +1344,10 @@ func (s *Server) handleFindOrphans(
 		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
 			continue
 		}
-		if n.Exported {
+		if n.Exported && strings.HasSuffix(n.File, ".go") {
+			// Go exported symbols (capitalised) are part of the public API.
+			// Python/TypeScript Exported=true only means "not private by convention"
+			// and does NOT exclude a symbol from orphan detection.
 			continue
 		}
 		isTestFile := strings.HasSuffix(n.File, "_test.go")
@@ -1352,7 +1355,9 @@ func (s *Server) handleFindOrphans(
 			continue
 		}
 		switch n.Name {
-		case "main", "init":
+		case "main", "init", "__init__", "__new__", "__del__":
+			// Go: main/init are runtime entry points.
+			// Python: __init__/__new__/__del__ are called via instantiation, not direct calls.
 			continue
 		}
 		if isTestFile {
@@ -1361,7 +1366,15 @@ func (s *Server) handleFindOrphans(
 				continue
 			}
 		}
-		if s.graph.Fanin(n.ID) > 0 {
+		// Only count incoming CALLS edges (not DEFINES edges, which are structural).
+		// A function is an orphan only if no other code *calls* it.
+		callsIn := 0
+		for _, e := range s.graph.InEdges(n.ID) {
+			if e.Type == graph.EdgeCalls {
+				callsIn++
+			}
+		}
+		if callsIn > 0 {
 			continue
 		}
 
@@ -1421,7 +1434,7 @@ func (s *Server) handleFindOrphans(
 	return jsonResult(map[string]interface{}{
 		"count":   len(orphans),
 		"orphans": orphans,
-		"note":    "Exported symbols, Go runtime entry points (main, init), interface implementors, and framework entry points are excluded. confidence: 1.0=fully isolated, 0.7=has outgoing calls, 0.5=only file-defines edge.",
+		"note":    "Go exported symbols, runtime entry points (main, init), interface implementors, and framework entry points are excluded. Python/TypeScript exported symbols are included. confidence: 1.0=fully isolated, 0.7=has outgoing calls, 0.5=only file-defines edge.",
 	})
 }
 
