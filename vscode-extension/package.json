@@ -1,23 +1,60 @@
 {
   "name": "synapses",
   "displayName": "Synapses",
-  "description": "Graph-based code context for AI coding agents — hover to inspect callers, callees, and metadata",
-  "version": "0.1.0",
+  "description": "Graph-based code context for AI coding agents — context sidebar, auto-ingest, and hover summaries",
+  "version": "0.2.0",
   "publisher": "synapses",
   "engines": { "vscode": "^1.85.0" },
   "categories": ["Other"],
-  "keywords": ["ai", "context", "graph", "mcp"],
+  "keywords": ["ai", "context", "graph", "mcp", "claude"],
   "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "synapses",
+          "title": "Synapses",
+          "icon": "$(symbol-class)"
+        }
+      ]
+    },
+    "views": {
+      "synapses": [
+        {
+          "type": "webview",
+          "id": "synapses.sidebar",
+          "name": "Context",
+          "when": "true"
+        }
+      ]
+    },
     "commands": [
       {
-        "command": "synapses.showEntity",
-        "title": "Synapses: Show Entity Context"
+        "command": "synapses.showContext",
+        "title": "Synapses: Show Context Panel"
       },
       {
         "command": "synapses.reindex",
         "title": "Synapses: Re-index Project"
+      },
+      {
+        "command": "synapses.injectContext",
+        "title": "Synapses: Copy Context to Clipboard"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "synapses.showContext",
+        "key": "ctrl+shift+s",
+        "mac": "cmd+shift+s",
+        "when": "editorFocus"
+      },
+      {
+        "command": "synapses.injectContext",
+        "key": "ctrl+shift+c",
+        "mac": "cmd+shift+c",
+        "when": "editorFocus"
       }
     ],
     "configuration": {
@@ -28,10 +65,20 @@
           "default": "synapses",
           "description": "Path to the synapses binary (defaults to 'synapses' on PATH)"
         },
+        "synapses.brainUrl": {
+          "type": "string",
+          "default": "http://localhost:11435",
+          "description": "URL for the synapses-intelligence brain sidecar HTTP API"
+        },
         "synapses.enableHover": {
           "type": "boolean",
           "default": true,
-          "description": "Show Synapses context in hover tooltips"
+          "description": "Show Synapses summaries in hover tooltips (requires brain sidecar)"
+        },
+        "synapses.autoIngest": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically ingest file summaries to brain when saving (requires brain sidecar)"
         }
       }
     }
