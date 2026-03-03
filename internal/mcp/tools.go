@@ -71,13 +71,11 @@ func (s *Server) handleGetProjectIdentity(
 			"cross_project_edges": crossCallCount,
 		},
 		"workflow_hints": []string{
-			"1. get_project_identity → understand scope, entry points, active rules",
-			"2. claim_work → register your scope before editing",
-			"3. validate_plan → check proposed changes against architectural rules",
-			"4. get_context → explore entity structure (callees, callers, annotations)",
-			"5. annotate_node → leave findings for other agents",
-			"6. update_task → mark work done as you go",
-			"7. release_claims → free scope when done",
+			"1. session_init → single call to get pending tasks, project identity, and working state",
+			"2. validate_plan → check proposed changes against architectural rules",
+			"3. get_context → explore entity structure (callees, callers, annotations)",
+			"4. annotate_node → leave findings for other agents",
+			"5. update_task → mark work done as you go",
 		},
 	}
 	// Autosubscribe: surface detected tech stack (populated by cmdStart after indexing).
@@ -331,16 +329,7 @@ func suggestNextAfterContext(dc *directionalContext) []toolSuggestion {
 			Reason: fmt.Sprintf("%d callees found — trace exact path between two entities", len(dc.Callees)),
 		})
 	}
-	if dc.Root != nil && dc.Root.Metadata != nil {
-		if dc.Root.Metadata["complexity"] != "" {
-			suggestions = append(suggestions, toolSuggestion{
-				Tool:   "get_communities",
-				Reason: "complexity metadata present — check if this entity bridges module clusters",
-			})
-		}
-	}
 	suggestions = append(suggestions,
-		toolSuggestion{Tool: "claim_work", Reason: "reserve this entity before editing to prevent conflicts"},
 		toolSuggestion{Tool: "validate_plan", Reason: "check proposed changes against architectural rules"},
 		toolSuggestion{Tool: "annotate_node", Reason: "leave a note for other agents on a key finding"},
 	)
@@ -1238,27 +1227,8 @@ func suggestToolsForChanges(events []changeEntry) []toolSuggestion {
 		}
 	}
 	suggestions := []toolSuggestion{
-		{Tool: "detect_changes", Reason: "map the git diff to affected graph symbols"},
 		{Tool: "get_violations", Reason: "check if recent edits introduced architectural violations"},
 		{Tool: "update_task", Reason: "mark in-progress tasks complete if work is finished"},
-	}
-	// If nodes were removed, dead code may now exist.
-	removals := 0
-	for _, e := range events {
-		removals += e.NodesRemoved
-	}
-	if removals > 0 {
-		suggestions = append(suggestions, toolSuggestion{
-			Tool:   "find_orphans",
-			Reason: fmt.Sprintf("%d nodes removed — check for dead code", removals),
-		})
-	}
-	// If multiple files changed, cross-file coupling may be relevant.
-	if len(events) > 2 {
-		suggestions = append(suggestions, toolSuggestion{
-			Tool:   "get_change_coupling",
-			Reason: fmt.Sprintf("%d files changed — check which historically change together", len(events)),
-		})
 	}
 	// Suggest exploring changed files.
 	seen := make(map[string]bool)
