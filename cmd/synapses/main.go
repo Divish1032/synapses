@@ -893,15 +893,23 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 |---|---|
 | Check proposed changes against architecture rules | ` + "`validate_plan(changes=[...])`" + ` |
 | View current architecture violations | ` + "`get_violations()`" + ` |
+| Reserve a scope before editing (multi-agent) | ` + "`claim_work(agent_id=\"...\", scope=\"pkg/auth\")`" + ` |
+| Check for conflicting edits by other agents | ` + "`get_conflicts(agent_id=\"...\")`" + ` |
+| Release locks when done | ` + "`release_claims(agent_id=\"...\")`" + ` |
 
 ### Task & Session Management
 
 | When you want to... | Use this |
 |---|---|
 | Save a plan with tasks for future sessions | ` + "`create_plan(title=\"...\", tasks=[...])`" + ` |
+| List all plans and completion counts | ` + "`get_plans()`" + ` |
+| Get your own pending tasks | ` + "`get_my_tasks(agent_id=\"...\")`" + ` |
+| Link a task to relevant code entities | ` + "`link_task_nodes(task_id=\"...\", node_ids=[...])`" + ` |
 | Mark a task as done or add notes | ` + "`update_task(id=\"...\", status=\"done\", notes=\"...\")`" + ` |
 | Save progress so next session can resume | ` + "`save_session_state(task_id=\"...\")`" + ` |
 | Leave a note on a code entity for other agents | ` + "`annotate_node(node_id=\"...\", note=\"...\")`" + ` |
+| See recent file/task/annotation events | ` + "`get_events(since_seq=N)`" + ` (use latest_event_seq from session_init) |
+| See all active agents | ` + "`get_agents()`" + ` |
 
 ### Rules
 - **Read/Grep** are for *writing* code (editing a specific file you have already found). For *understanding* code structure, always prefer Synapses tools.

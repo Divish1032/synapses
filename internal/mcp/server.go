@@ -583,6 +583,154 @@ func (s *Server) registerTools() {
 		s.handleUpdateTask,
 	)
 
+	// ── Coordination & Multi-Agent Tools ────────────────────────────────────
+
+	// get_plans
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_plans",
+			mcp.WithDescription(
+				"List all saved plans with task completion counts. "+
+					"Use this to get an overview of all active and completed work across sessions.",
+			),
+		),
+		s.handleGetPlans,
+	)
+
+	// get_my_tasks
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_my_tasks",
+			mcp.WithDescription(
+				"Returns unblocked pending tasks assigned to or created by a specific agent, "+
+					"with a suggested next task. Scoped to agent_id so each agent sees only its own work.",
+			),
+			mcp.WithString("agent_id",
+				mcp.Required(),
+				mcp.Description("The agent's self-declared identifier."),
+			),
+			mcp.WithString("plan_id",
+				mcp.Description("Optional. Filter to tasks belonging to a specific plan."),
+			),
+		),
+		s.handleGetMyTasks,
+	)
+
+	// link_task_nodes
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"link_task_nodes",
+			mcp.WithDescription(
+				"Explicitly links a task to graph node IDs. "+
+					"Linked nodes get a relevance boost when get_context is called with task_id=. "+
+					"Replaces any existing links for the task.",
+			),
+			mcp.WithString("task_id",
+				mcp.Required(),
+				mcp.Description("The task ID to link nodes to."),
+			),
+			mcp.WithString("node_ids",
+				mcp.Required(),
+				mcp.Description("JSON array of node ID strings, e.g. [\"repo::pkg/auth.go::AuthService\"]."),
+			),
+		),
+		s.handleLinkTaskNodes,
+	)
+
+	// get_agents
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_agents",
+			mcp.WithDescription(
+				"Returns all agents that have interacted with Synapses, ordered by last-seen timestamp. "+
+					"Useful for understanding who else is working in this repository.",
+			),
+		),
+		s.handleGetAgents,
+	)
+
+	// claim_work
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"claim_work",
+			mcp.WithDescription(
+				"Registers active work on a file, package, directory, or entity. "+
+					"Returns any conflicting claims by other agents immediately. "+
+					"Call before editing to coordinate with other agents. "+
+					"Claims expire automatically after ttl_minutes (default 30).",
+			),
+			mcp.WithString("agent_id",
+				mcp.Required(),
+				mcp.Description("The agent's self-declared identifier."),
+			),
+			mcp.WithString("scope",
+				mcp.Required(),
+				mcp.Description("Path or entity being claimed, e.g. 'internal/auth' or 'cmd/server/main.go'."),
+			),
+			mcp.WithString("scope_type",
+				mcp.Description("Type of scope: 'file', 'package', 'directory', 'entity'. Defaults to 'path'."),
+			),
+			mcp.WithNumber("ttl_minutes",
+				mcp.Description("How long to hold the claim in minutes. Defaults to 30."),
+			),
+		),
+		s.handleClaimWork,
+	)
+
+	// release_claims
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"release_claims",
+			mcp.WithDescription(
+				"Releases all active work claims for the given agent. "+
+					"Call this when done editing to immediately free scopes for other agents.",
+			),
+			mcp.WithString("agent_id",
+				mcp.Required(),
+				mcp.Description("The agent's self-declared identifier."),
+			),
+		),
+		s.handleReleaseClaims,
+	)
+
+	// get_conflicts
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_conflicts",
+			mcp.WithDescription(
+				"Returns all work claims by other agents that overlap with the calling agent's current claims. "+
+					"Check this before starting large edits if you are working in a multi-agent environment.",
+			),
+			mcp.WithString("agent_id",
+				mcp.Required(),
+				mcp.Description("The agent's self-declared identifier."),
+			),
+		),
+		s.handleGetConflicts,
+	)
+
+	// get_events
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_events",
+			mcp.WithDescription(
+				"Returns recent events from the pull-based event log: file_change, task_update, "+
+					"annotation_added, agent_activity. Poll with since_seq cursor (from session_init "+
+					"or the previous call's latest_seq) to get only new events.",
+			),
+			mcp.WithNumber("since_seq",
+				mcp.Description("Return events with seq greater than this value. Use 0 for all recent events."),
+			),
+			mcp.WithString("types",
+				mcp.Description("Comma-separated list of event types to filter by, e.g. 'file_change,task_update'. Omit for all types."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Maximum events to return. Defaults to 50."),
+			),
+		),
+		s.handleGetEvents,
+	)
+
 	// ── Rule Management Tools ────────────────────────────────────────────────
 
 	// upsert_rule
