@@ -444,10 +444,25 @@ func cmdStatus(args []string) error {
 // on large codebases. Falls back to a full parse if the smart reindex fails.
 // plugins is forwarded to the Walker so external parser plugins handle their extensions.
 func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bool, plugins []config.PluginConfig) (*graph.Graph, error) {
+	// Always attempt smart reindex first: a fast filesystem mtime walk that
+	// re-parses only changed files. This keeps line numbers accurate after
+	// offline edits made between sessions (when the watcher was not running).
+	// On repos with no changes the walk is cheap and returns immediately.
+	g, err := smartReindex(repoRoot, st, plugins)
+	if err == nil {
+		if saveErr := st.SaveGraph(g); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "synapses: cache save failed: %v\n", saveErr)
+		}
+		return g, nil
+	}
+
+	// smartReindex failed (no stored mtimes = first run, or corrupted cache).
 	if !forceReindex {
-		cached, err := st.LoadGraph()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: cache load failed (%v), re-indexing\n", err)
+		// Fall back to plain cache load so startup stays fast on first-run
+		// or on repos that predate file-mtime tracking.
+		cached, cacheErr := st.LoadGraph()
+		if cacheErr != nil {
+			fmt.Fprintf(os.Stderr, "synapses: cache load failed (%v), re-indexing\n", cacheErr)
 		} else if cached != nil {
 			savedAt, _ := st.SavedAt()
 			fmt.Fprintf(os.Stderr, "synapses: loaded from cache (indexed %s)\n",
@@ -455,21 +470,13 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 			return cached, nil
 		}
 	} else {
-		// --reindex: try a smart incremental update before falling back to full parse.
-		g, err := smartReindex(repoRoot, st, plugins)
-		if err == nil {
-			if saveErr := st.SaveGraph(g); saveErr != nil {
-				fmt.Fprintf(os.Stderr, "synapses: cache save failed: %v\n", saveErr)
-			}
-			return g, nil
-		}
 		fmt.Fprintf(os.Stderr, "synapses: smart reindex skipped (%v), doing full reindex\n", err)
 	}
 
 	// No cache or smart reindex skipped: full parse from scratch.
 	fmt.Fprintf(os.Stderr, "synapses: indexing %s...\n", repoRoot)
 	start := time.Now()
-	g, err := buildGraph(repoRoot, st, plugins)
+	g, err = buildGraph(repoRoot, st, plugins)
 	if err != nil {
 		return nil, err
 	}
