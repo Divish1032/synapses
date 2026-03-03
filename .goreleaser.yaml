@@ -12,10 +12,12 @@ builds:
     binary: synapses
     env:
       - CGO_ENABLED=1
+      - 'CC={{ if eq .Arch "arm64" }}aarch64-linux-gnu-gcc{{ else }}gcc{{ end }}'
     goos:
       - linux
     goarch:
       - amd64
+      - arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
 

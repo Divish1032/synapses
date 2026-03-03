@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Release
+  release-linux:
+    name: Release (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +23,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install ARM64 cross-compiler
+        run: sudo apt-get install -y gcc-aarch64-linux-gnu
+
       - name: Run tests
         run: go test ./... -race -timeout 120s
 
@@ -34,3 +37,81 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-darwin:
+    name: Release (macOS)
+    needs: release-linux
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build darwin/amd64
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+          CGO_ENABLED: "1"
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          go build -o synapses -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
+          tar czf synapses_darwin_x86_64.tar.gz synapses README.md LICENSE COMMANDS.md synapses.example.json
+          rm synapses
+
+      - name: Build darwin/arm64
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          go build -o synapses -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
+          tar czf synapses_darwin_arm64.tar.gz synapses README.md LICENSE COMMANDS.md synapses.example.json
+          rm synapses
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ github.ref_name }} \
+            synapses_darwin_x86_64.tar.gz \
+            synapses_darwin_arm64.tar.gz
+
+  release-windows:
+    name: Release (Windows)
+    needs: release-linux
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build windows/amd64
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "1"
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          go build -o synapses.exe -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
+
+      - name: Create archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path synapses.exe, README.md, LICENSE, COMMANDS.md, synapses.example.json -DestinationPath synapses_windows_x86_64.zip
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release upload ${{ github.ref_name }} synapses_windows_x86_64.zip
