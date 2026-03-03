@@ -2,7 +2,9 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
@@ -97,7 +99,71 @@ func (s *Server) handleWebFetch(
 		result["tags"] = resp.Fragment.Tags
 	}
 
+	// Fire-and-forget: send to intelligence for summarization so the content
+	// surfaces in future context packets. No-op if brain is not configured.
+	go s.ingestWebContent(resp.URL, resp.Title, resp.ContentMD)
+
 	return jsonResult(result)
+}
+
+// handleWebAnnotate persists web findings as a graph node annotation so they
+// survive across sessions and appear in get_context for that node.
+// This is the "context sharing" pattern from Nia — web findings become
+// first-class data objects attached to code entities.
+func (s *Server) handleWebAnnotate(
+	ctx context.Context,
+	req mcpgo.CallToolRequest,
+) (*mcpgo.CallToolResult, error) {
+	if s.store == nil {
+		return mcpgo.NewToolResultError("store not available (run synapses start, not synapses index)"), nil
+	}
+
+	nodeID, _ := req.Params.Arguments["node_id"].(string)
+	if nodeID == "" {
+		return mcpgo.NewToolResultError("node_id is required"), nil
+	}
+	agentID, _ := req.Params.Arguments["agent_id"].(string)
+	note, _ := req.Params.Arguments["note"].(string)
+
+	// Optional: structured hits JSON to format as a readable annotation.
+	if hitsJSON, ok := req.Params.Arguments["hits"].(string); ok && hitsJSON != "" {
+		var hits []scout.SearchHit
+		if err := json.Unmarshal([]byte(hitsJSON), &hits); err == nil && len(hits) > 0 {
+			var sb strings.Builder
+			sb.WriteString("[web findings]")
+			if note != "" {
+				sb.WriteString(" ")
+				sb.WriteString(note)
+			}
+			for i, h := range hits {
+				if i >= 5 {
+					break
+				}
+				sb.WriteString(fmt.Sprintf("\n  - [%s](%s)", h.Title, h.URL))
+				if h.Snippet != "" {
+					sb.WriteString(": ")
+					sb.WriteString(h.Snippet)
+				}
+			}
+			note = sb.String()
+		}
+	}
+
+	if note == "" {
+		return mcpgo.NewToolResultError("note or hits is required"), nil
+	}
+
+	id, err := s.store.AddAnnotation(nodeID, agentID, note)
+	if err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("store annotation failed: %v", err)), nil
+	}
+	_ = ctx
+	return jsonResult(map[string]interface{}{
+		"id":      id,
+		"node_id": nodeID,
+		"note":    note,
+		"status":  "annotated — visible in get_context for this node",
+	})
 }
 
 // handleWebDeepSearch calls scout POST /v1/deep-search for multi-query
