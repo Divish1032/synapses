@@ -44,6 +44,7 @@ type Server struct {
 	peerManager  interface{}  // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
 	brainClient  interface{}  // *brain.Client — set via SetBrainClient; nil if brain not configured
 	scoutClient  interface{}  // *scout.Client — set via SetScoutClient; nil if scout not configured
+	techStack    interface{}  // []scout.TechStackEntry — set via SetTechStack after autosubscribe
 	rulesMu      sync.RWMutex // protects s.config.Rules for concurrent dynamic upserts
 
 	// Context-packet cache: 20 slots max, 30s TTL. Keyed by "entityName:depth".
@@ -188,6 +189,13 @@ func (s *Server) SetBrainClient(bc interface{}) {
 // Using interface{} avoids an import cycle (scout imports only stdlib).
 func (s *Server) SetScoutClient(sc interface{}) {
 	s.scoutClient = sc
+}
+
+// SetTechStack stores the detected tech stack entries ([]scout.TechStackEntry)
+// so that get_project_identity can surface them as tech_stack.
+// Called from cmdStart after autosubscribe detection completes.
+func (s *Server) SetTechStack(ts interface{}) {
+	s.techStack = ts
 }
 
 // ServeStdio starts the MCP server on stdin/stdout. This call blocks until

@@ -80,6 +80,10 @@ func (s *Server) handleGetProjectIdentity(
 			"7. release_claims → free scope when done",
 		},
 	}
+	// Autosubscribe: surface detected tech stack (populated by cmdStart after indexing).
+	if s.techStack != nil {
+		out["tech_stack"] = s.techStack
+	}
 	return jsonResult(out)
 }
 
