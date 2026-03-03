@@ -291,6 +291,14 @@ func (s *Server) handleGetContext(
 	// Context-aware next-step suggestions.
 	dc.SuggestedNextTools = suggestNextAfterContext(dc)
 
+	// format=compact returns a ~400-600 token natural-language briefing instead of the
+	// default JSON blob (~2000-3800 tokens). Faster for Claude to process; uses brain
+	// prose summaries when available, falls back to AST doc metadata.
+	format, _ := req.Params.Arguments["format"].(string)
+	if format == "compact" {
+		return mcp.NewToolResultText(serializeCompact(dc)), nil
+	}
+
 	// If multiple candidates existed, attach disambiguation list so agents
 	// can re-call with file= if the selected entity is not what they wanted.
 	if len(disambiguationCandidates) > 1 {
