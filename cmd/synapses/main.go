@@ -313,6 +313,15 @@ func cmdIndex(args []string) error {
 
 	identity := g.ProjectIdentity()
 	printSummaryTable(identity, time.Since(start), nil, 0, 0, 0, 0)
+
+	// Write agent-guidance files so AI agents use Synapses tools by default.
+	if err := writeProjectCLAUDE(absPath); err != nil {
+		fmt.Fprintf(os.Stderr, "synapses: warning: could not update CLAUDE.md: %v\n", err)
+	}
+	if err := writeClaudeSettings(absPath); err != nil {
+		fmt.Fprintf(os.Stderr, "synapses: warning: could not update .claude/settings.json: %v\n", err)
+	}
+
 	return nil
 }
 
@@ -776,7 +785,23 @@ func cmdInit(args []string) error {
 	fmt.Printf("Writing .mcp.json...\n")
 	fmt.Printf("  ✓ %s\n\n", mcpFile)
 
-	// ── Step 3: Next steps ─────────────────────────────────────────────────────
+	// ── Step 3: Write CLAUDE.md ─────────────────────────────────────────────────
+	fmt.Printf("Writing CLAUDE.md...\n")
+	if err := writeProjectCLAUDE(absPath); err != nil {
+		fmt.Printf("  ! could not update CLAUDE.md: %v\n\n", err)
+	} else {
+		fmt.Printf("  ✓ %s\n\n", filepath.Join(absPath, "CLAUDE.md"))
+	}
+
+	// ── Step 4: Write .claude/settings.json ────────────────────────────────────
+	fmt.Printf("Writing .claude/settings.json...\n")
+	if err := writeClaudeSettings(absPath); err != nil {
+		fmt.Printf("  ! could not update .claude/settings.json: %v\n\n", err)
+	} else {
+		fmt.Printf("  ✓ %s\n\n", filepath.Join(absPath, ".claude", "settings.json"))
+	}
+
+	// ── Step 5: Next steps ─────────────────────────────────────────────────────
 	fmt.Printf("Next step — reload MCP servers in Claude Code:\n")
 	fmt.Printf("  Type  /mcp  in the chat, or close and reopen the chat panel.\n\n")
 	fmt.Printf("Or register via CLI (user-scoped, works across all projects):\n")
@@ -785,6 +810,202 @@ func cmdInit(args []string) error {
 	fmt.Printf("  get_project_identity   get_context   find_entity\n")
 	fmt.Printf("  validate_plan          get_violations\n")
 	return nil
+}
+
+// writeProjectCLAUDE writes (or updates) a Synapses-managed section in
+// CLAUDE.md at the repository root. The section is delimited by HTML comments
+// so it can be safely updated on subsequent index runs without clobbering the
+// rest of the file.
+func writeProjectCLAUDE(repoRoot string) error {
+	const (
+		sectionStart = "<!-- synapses:start -->\n"
+		sectionEnd   = "<!-- synapses:end -->"
+	)
+
+	section := sectionStart + `## Synapses — Code Intelligence (MCP)
+
+This project is indexed by **Synapses**, a graph-based code intelligence server.
+
+### Session Start
+Call **one tool** at the start of every session:
+` + "```" + `
+session_init()   ← replaces get_pending_tasks + get_project_identity + get_working_state
+` + "```" + `
+Returns: pending tasks, project identity, working state, recent agent events, and **scale_guidance** — a repo-size-aware recommendation on which tools to prefer.
+
+### Tool Selection — follow scale_guidance from session_init
+
+| Repo scale | When to use Synapses | When to use Read/Grep |
+|---|---|---|
+| micro (<100 nodes) | Structural analysis, multi-file understanding | Simple targeted edits to a known file |
+| small (100–499) | Code exploration, cross-file analysis | Targeted single-file edits |
+| medium (500–1999) | All code exploration — Glob/Grep surfaces too much noise | Writing to a specific file you already identified |
+| large (2000+) | Always — direct scanning is too noisy at this scale | Writing to a specific file you already identified |
+
+### Code Exploration
+
+| When you want to... | Use this |
+|---|---|
+| Understand a function, struct, or interface | ` + "`get_context(entity=\"Name\")`" + ` |
+| Pin to a specific file (avoids wrong-entity picks) | ` + "`get_context(entity=\"Name\", file=\"cmd/server/main.go\")`" + ` |
+| Boost nodes linked to current task | ` + "`get_context(entity=\"Name\", task_id=\"...\")`" + ` |
+| Find a symbol by name or substring | ` + "`find_entity(query=\"name\")`" + ` |
+| Search by concept ("auth", "rate limiting") | ` + "`search(query=\"...\", mode=\"semantic\")`" + ` |
+| List all entities in a file | ` + "`get_file_context(file=\"path/to/file\")`" + ` |
+| Trace how function A calls function B | ` + "`get_call_chain(from=\"A\", to=\"B\")`" + ` |
+| Find what breaks if a symbol changes | ` + "`get_impact(symbol=\"Name\")`" + ` |
+
+### Before Writing Code
+
+| When you want to... | Use this |
+|---|---|
+| Check proposed changes against architecture rules | ` + "`validate_plan(changes=[...])`" + ` |
+| Reserve a file/package before editing | ` + "`claim_work(agent_id=\"...\", scope=\"pkg/auth\", scope_type=\"package\")`" + ` |
+| Check if another agent is editing the same code | ` + "`get_conflicts(agent_id=\"...\")`" + ` |
+| Release locks when done | ` + "`release_claims(agent_id=\"...\")`" + ` |
+
+### Task & Session Management
+
+| When you want to... | Use this |
+|---|---|
+| Save a plan with tasks for future sessions | ` + "`create_plan(title=\"...\", tasks=[...])`" + ` |
+| Mark a task as done or add notes | ` + "`update_task(id=\"...\", status=\"done\", notes=\"...\")`" + ` |
+| Save progress so next session can resume | ` + "`save_session_state(task_id=\"...\")`" + ` |
+| Leave a note on a code entity for other agents | ` + "`annotate_node(node_id=\"...\", note=\"...\")`" + ` |
+| See what other agents have been doing | ` + "`get_events(since_seq=N)`" + ` (use latest_event_seq from session_init) |
+
+### Rules
+- **Read/Grep** are for *writing* code (editing a specific file you have already found). For *understanding* code structure, always prefer Synapses tools.
+- **Call ` + "`session_init()`" + `** at the start of every session. It replaces the 3-call startup ritual.
+- **Call ` + "`validate_plan()`" + `** before implementing multi-file changes.
+- **Call ` + "`claim_work()`" + `** before editing to avoid conflicts with other agents.
+- When ` + "`get_context`" + ` returns ` + "`other_candidates`" + `, re-call with ` + "`file=`" + ` to pin to the right entity.
+` + sectionEnd
+
+	claudePath := filepath.Join(repoRoot, "CLAUDE.md")
+	existing, err := os.ReadFile(claudePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read CLAUDE.md: %w", err)
+	}
+
+	content := string(existing)
+	startIdx := strings.Index(content, sectionStart)
+	if startIdx != -1 {
+		// Replace the existing Synapses section.
+		endIdx := strings.Index(content, sectionEnd)
+		if endIdx != -1 {
+			content = content[:startIdx] + section + content[endIdx+len(sectionEnd):]
+		} else {
+			content = content[:startIdx] + section
+		}
+	} else {
+		// Append a new section, ensuring a blank line separator.
+		if len(content) > 0 && !strings.HasSuffix(content, "\n\n") {
+			if strings.HasSuffix(content, "\n") {
+				content += "\n"
+			} else {
+				content += "\n\n"
+			}
+		}
+		content += section + "\n"
+	}
+
+	return os.WriteFile(claudePath, []byte(content), 0o644)
+}
+
+// writeClaudeSettings writes (or updates) .claude/settings.json to add hooks
+// that guide LLMs to use Synapses tools:
+//   - SessionStart: stdout IS fed to the LLM as context — primary mechanism
+//   - PreToolUse on Glob|Grep: reminder shown in verbose mode
+func writeClaudeSettings(repoRoot string) error {
+	dir := filepath.Join(repoRoot, ".claude")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create .claude dir: %w", err)
+	}
+
+	settingsPath := filepath.Join(dir, "settings.json")
+
+	// Parse existing settings or start fresh.
+	raw := map[string]interface{}{}
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("parse settings.json: %w", err)
+		}
+	}
+
+	// Navigate / create: raw["hooks"]
+	hooks, _ := raw["hooks"].(map[string]interface{})
+	if hooks == nil {
+		hooks = map[string]interface{}{}
+		raw["hooks"] = hooks
+	}
+
+	// ── SessionStart hook (stdout is fed to the LLM as context) ──────────
+	upsertHookEntry(hooks, "SessionStart", "startup", map[string]interface{}{
+		"type": "command",
+		"command": "echo '[Synapses] This project is indexed by Synapses code intelligence. " +
+			"Call session_init() ONCE at session start — it returns pending tasks, project identity, " +
+			"working state, recent events, and scale_guidance in one round-trip. " +
+			"For code exploration use: get_context(entity, file=), find_entity, search, get_call_chain, get_impact, get_file_context. " +
+			"Use validate_plan() before implementing multi-file changes. " +
+			"Use claim_work() before editing, release_claims() when done.'",
+	})
+
+	// ── PreToolUse hook on Glob|Grep (visible in verbose mode) ───────────
+	upsertHookEntry(hooks, "PreToolUse", "Glob|Grep", map[string]interface{}{
+		"type":    "command",
+		"command": "echo '[Synapses] This project is indexed — prefer get_context(entity, file=), find_entity, or search(mode=semantic) over file scanning for code exploration. Use Read/Grep only when writing to a specific file you have already identified.'",
+	})
+
+	// ── Pre-allow all Synapses MCP tools so users are never prompted ─────
+	allow, _ := raw["permissions"].(map[string]interface{})
+	if allow == nil {
+		allow = map[string]interface{}{}
+		raw["permissions"] = allow
+	}
+	allowList, _ := allow["allow"].([]interface{})
+	const synapsesPattern = "mcp__synapses__*"
+	found := false
+	for _, v := range allowList {
+		if s, ok := v.(string); ok && s == synapsesPattern {
+			found = true
+			break
+		}
+	}
+	if !found {
+		allowList = append(allowList, synapsesPattern)
+		allow["allow"] = allowList
+	}
+
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(settingsPath, append(out, '\n'), 0o644)
+}
+
+// upsertHookEntry adds or replaces a hook entry in a given event type list,
+// matching by the "matcher" field. This avoids duplicate entries on repeated runs.
+func upsertHookEntry(hooks map[string]interface{}, eventType, matcher string, hookDef map[string]interface{}) {
+	list, _ := hooks[eventType].([]interface{})
+
+	entry := map[string]interface{}{
+		"matcher": matcher,
+		"hooks":   []interface{}{hookDef},
+	}
+
+	replaced := false
+	for i, existing := range list {
+		if m, ok := existing.(map[string]interface{}); ok && m["matcher"] == matcher {
+			list[i] = entry
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		list = append(list, entry)
+	}
+	hooks[eventType] = list
 }
 
 // writeMCPConfig writes (or updates) the .mcp.json file at mcpFile so it
