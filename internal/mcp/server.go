@@ -693,6 +693,34 @@ func (s *Server) registerTools() {
 		s.handleWebFetch,
 	)
 
+	// web_annotate
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"web_annotate",
+			mcp.WithDescription(
+				"Persists web findings as a graph node annotation so they survive across sessions "+
+					"and appear in get_context for that node. "+
+					"This is the 'context sharing' pattern: web research becomes a first-class "+
+					"data object attached to a code entity, visible to all future agent sessions. "+
+					"Pass hits (JSON array from web_search) or a plain note string, or both.",
+			),
+			mcp.WithString("node_id",
+				mcp.Required(),
+				mcp.Description("The node ID to annotate (from find_entity or get_context)."),
+			),
+			mcp.WithString("note",
+				mcp.Description("Plain-text note summarising what was found. Used as-is or prepended to hits."),
+			),
+			mcp.WithString("hits",
+				mcp.Description("JSON array of search hits from web_search, e.g. [{\"title\":\"...\",\"url\":\"...\",\"snippet\":\"...\"}]."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Optional. Self-declared agent identifier for attribution."),
+			),
+		),
+		s.handleWebAnnotate,
+	)
+
 	// web_deep_search
 	s.mcp.AddTool(
 		mcp.NewTool(
