@@ -33,6 +33,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/peer"
 	"github.com/SynapsesOS/synapses/internal/resolver"
+	"github.com/SynapsesOS/synapses/internal/scout"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 )
@@ -193,6 +194,17 @@ func cmdStart(args []string) error {
 				bulkIngestToBrain(brainCli, g)
 				fetchAndWriteBackSummaries(brainCli, g, st)
 			}()
+		}
+	}
+
+	// Optional: connect to synapses-scout web-search service.
+	if cfg.Scout.URL != "" {
+		scoutCli := scout.NewClient(cfg.Scout.URL, cfg.Scout.TimeoutSec)
+		if scoutCli.Health(context.Background()) {
+			fmt.Fprintf(os.Stderr, "synapses: scout connected at %s\n", cfg.Scout.URL)
+			srv.SetScoutClient(scoutCli)
+		} else {
+			fmt.Fprintf(os.Stderr, "synapses: scout unreachable at %s (continuing without)\n", cfg.Scout.URL)
 		}
 	}
 
