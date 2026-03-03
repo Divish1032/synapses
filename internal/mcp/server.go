@@ -269,6 +269,9 @@ func (s *Server) registerTools() {
 			mcp.WithString("file",
 				mcp.Description("Optional file path suffix to pin the lookup to a specific file (e.g. 'cmd/synapses/main.go'). Use when entity names are ambiguous across multiple files."),
 			),
+			mcp.WithString("format",
+				mcp.Description("Output format: 'json' (default, full JSON blob ~2000-3800 tokens) or 'compact' (natural-language briefing ~400-600 tokens). Use 'compact' to reduce token usage when brain summaries are available."),
+			),
 		),
 		s.handleGetContext,
 	)
