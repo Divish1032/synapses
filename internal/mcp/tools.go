@@ -86,12 +86,13 @@ func (s *Server) handleGetProjectIdentity(
 // directionalContext is the response shape for get_context.
 // Nodes are split into callers/callees/related so the LLM can immediately
 // understand call direction without inspecting raw edge types.
+// Annotations are surfaced first so agents see peer knowledge before graph structure.
 type directionalContext struct {
 	Root               *graph.Node                   `json:"root"`
+	Annotations        map[string][]store.Annotation `json:"annotations,omitempty"`          // node_id → []Annotation — surfaced first for multi-agent visibility
 	Callees            []graph.CarvedNode            `json:"callees"`                        // root --CALLS--> node
 	Callers            []graph.CarvedNode            `json:"callers"`                        // node --CALLS--> root
 	Related            []graph.CarvedNode            `json:"related"`                        // everything else
-	Annotations        map[string][]store.Annotation `json:"annotations,omitempty"`          // node_id → []Annotation
 	ContextPacket      *brain.ContextPacket          `json:"context_packet,omitempty"`       // LLM-enriched packet (present when brain is available)
 	SuggestedNextTools []toolSuggestion              `json:"suggested_next_tools,omitempty"` // context-aware next steps
 	Truncated          bool                          `json:"truncated,omitempty"`            // true when token budget cut results
@@ -131,6 +132,9 @@ func (s *Server) handleGetContext(
 		}
 	}
 
+	// Optional file hint — narrows lookup to a specific file when entity names are ambiguous.
+	fileHint, _ := req.Params.Arguments["file"].(string)
+
 	// Resolve the entity name to a node ID.
 	nodes := s.graph.FindByName(entityName)
 	if len(nodes) == 0 {
@@ -141,6 +145,36 @@ func (s *Server) handleGetContext(
 			"error": fmt.Sprintf("entity not found: %q", entityName),
 			"hint":  "Try search(mode=semantic) for fuzzy/concept matching, or find_entity to check exact name. For methods, use TypeName.MethodName format.",
 		})
+	}
+
+	// If a file hint is given, filter candidates to that file path (suffix match).
+	if fileHint != "" {
+		var filtered []*graph.Node
+		for _, n := range nodes {
+			if strings.HasSuffix(n.File, fileHint) || strings.Contains(n.File, fileHint) {
+				filtered = append(filtered, n)
+			}
+		}
+		if len(filtered) > 0 {
+			nodes = filtered
+		}
+		// If no match, fall through to pick best from all candidates.
+	}
+
+	// Disambiguation: when multiple candidates exist and no file hint was given,
+	// surface a disambiguation list alongside the best-guess result so agents
+	// can confirm or re-call with file= if needed.
+	var disambiguationCandidates []map[string]interface{}
+	if len(nodes) > 1 && fileHint == "" {
+		for _, n := range nodes {
+			disambiguationCandidates = append(disambiguationCandidates, map[string]interface{}{
+				"name": n.Name,
+				"type": n.Type,
+				"file": s.graph.Root() + "/" + strings.TrimPrefix(n.File, s.graph.Root()+"/"),
+				"line": n.Line,
+				"pkg":  n.Package,
+			})
+		}
 	}
 
 	best := pickBestNode(nodes, s.graph)
@@ -252,6 +286,21 @@ func (s *Server) handleGetContext(
 
 	// Context-aware next-step suggestions.
 	dc.SuggestedNextTools = suggestNextAfterContext(dc)
+
+	// If multiple candidates existed, attach disambiguation list so agents
+	// can re-call with file= if the selected entity is not what they wanted.
+	if len(disambiguationCandidates) > 1 {
+		type disambiguatedContext struct {
+			*directionalContext
+			OtherCandidates []map[string]interface{} `json:"other_candidates,omitempty"`
+			DisambigHint    string                   `json:"disambig_hint,omitempty"`
+		}
+		return jsonResult(&disambiguatedContext{
+			directionalContext: dc,
+			OtherCandidates:    disambiguationCandidates,
+			DisambigHint:       fmt.Sprintf("%d entities named %q found. Showing best match. Re-call with file=\"path/suffix\" to pin to a specific file.", len(disambiguationCandidates), entityName),
+		})
+	}
 
 	return jsonResult(dc)
 }
@@ -1147,11 +1196,24 @@ func (s *Server) handleGetWorkingState(
 		"recent_changes": events,
 	}
 
+	root := s.graph.Root()
+
 	// Best-effort git diff stat — omitted when git is unavailable or not a git repo.
-	if root := s.graph.Root(); root != "" {
+	if root != "" {
 		if out, err := exec.Command("git", "-C", root, "diff", "--stat", "HEAD").Output(); err == nil {
 			if stat := strings.TrimSpace(string(out)); stat != "" {
 				result["git_diff_stat"] = stat
+			}
+		}
+	}
+
+	// When no recent file watcher changes, fall back to recent git log so agents
+	// always get meaningful orientation rather than an empty response.
+	if len(events) == 0 && root != "" {
+		if out, err := exec.Command("git", "-C", root, "log", "--oneline", "-7").Output(); err == nil {
+			if log := strings.TrimSpace(string(out)); log != "" {
+				result["fallback_git_log"] = log
+				result["fallback_note"] = fmt.Sprintf("No file changes in the last %d minutes. Showing recent git commits for context.", windowMinutes)
 			}
 		}
 	}
@@ -1209,6 +1271,160 @@ func suggestToolsForChanges(events []changeEntry) []toolSuggestion {
 		}
 	}
 	return suggestions
+}
+
+// handleSessionInit is the single-call session bootstrap that replaces the
+// three-step startup ritual (get_pending_tasks → get_project_identity →
+// get_working_state). One MCP round-trip returns all the context an agent
+// needs to start work, including scale-aware tool guidance and recent events.
+func (s *Server) handleSessionInit(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	agentID, _ := req.Params.Arguments["agent_id"].(string)
+	s.upsertAgentIfNeeded(agentID)
+
+	// ── 1. Project identity + scale guidance ─────────────────────────────
+	identity := s.graph.ProjectIdentity()
+
+	// Enrich with federation summary (mirrors handleGetProjectIdentity).
+	primaryRepoID := s.graph.RepoID()
+	crossCallCount := 0
+	linkedSet := make(map[string]bool)
+	var linkedRepos []string
+	for _, e := range s.graph.AllEdges() {
+		if e.Type != graph.EdgeCalls {
+			continue
+		}
+		fromIdx := strings.Index(string(e.From), "::")
+		toIdx := strings.Index(string(e.To), "::")
+		if fromIdx < 0 || toIdx < 0 {
+			continue
+		}
+		fromRepo := string(e.From)[:fromIdx]
+		toRepo := string(e.To)[:toIdx]
+		if fromRepo != toRepo {
+			crossCallCount++
+			for _, r := range []string{fromRepo, toRepo} {
+				if r != primaryRepoID && !linkedSet[r] {
+					linkedSet[r] = true
+					linkedRepos = append(linkedRepos, r)
+				}
+			}
+		}
+	}
+	sort.Strings(linkedRepos)
+
+	projectSection := map[string]interface{}{
+		"identity": identity,
+		"federation": map[string]interface{}{
+			"is_federated":        len(linkedRepos) > 0,
+			"linked_repos":        linkedRepos,
+			"cross_project_edges": crossCallCount,
+		},
+	}
+
+	// ── 2. Pending tasks ──────────────────────────────────────────────────
+	type taskWithState struct {
+		store.Task
+		SessionState *store.SessionState `json:"session_state,omitempty"`
+	}
+	var pendingSection map[string]interface{}
+	if s.store != nil {
+		tasks, err := s.store.GetPendingTasks("", agentID)
+		if err == nil {
+			inProgressIDs := make([]string, 0)
+			for _, t := range tasks {
+				if t.Status == "in_progress" {
+					inProgressIDs = append(inProgressIDs, t.ID)
+				}
+			}
+			stateMap, _ := s.store.GetSessionStateForTasks(inProgressIDs)
+			result := make([]taskWithState, len(tasks))
+			for i, t := range tasks {
+				result[i] = taskWithState{Task: t}
+				if stateMap != nil {
+					result[i].SessionState = stateMap[t.ID]
+				}
+			}
+			summary := "no pending tasks"
+			if len(tasks) > 0 {
+				summary = fmt.Sprintf("%d task(s) pending/in-progress", len(tasks))
+			}
+			pendingSection = map[string]interface{}{
+				"summary":  summary,
+				"tasks":    result,
+				"reminder": "Call update_task(id, 'in_progress') before starting a task and update_task(id, 'done', notes) immediately when finished. Never batch completions.",
+			}
+		}
+	}
+	if pendingSection == nil {
+		pendingSection = map[string]interface{}{"summary": "no pending tasks", "tasks": []interface{}{}}
+	}
+
+	// ── 3. Working state ──────────────────────────────────────────────────
+	windowMinutes := 15
+	var recentChanges []changeEntry
+	if s.changeSource != nil {
+		for _, e := range s.changeSource.RecentChanges(windowMinutes) {
+			recentChanges = append(recentChanges, changeEntry{
+				File:         e.File,
+				At:           e.Timestamp.Format("15:04:05"),
+				NodesAdded:   e.NodesAdded,
+				NodesRemoved: e.NodesRemoved,
+				EdgesAdded:   e.EdgesAdded,
+			})
+		}
+	}
+	if recentChanges == nil {
+		recentChanges = []changeEntry{}
+	}
+	workingSection := map[string]interface{}{
+		"recent_changes": recentChanges,
+	}
+	root := s.graph.Root()
+	if root != "" {
+		if out, err := exec.Command("git", "-C", root, "diff", "--stat", "HEAD").Output(); err == nil {
+			if stat := strings.TrimSpace(string(out)); stat != "" {
+				workingSection["git_diff_stat"] = stat
+			}
+		}
+		if len(recentChanges) == 0 {
+			if out, err := exec.Command("git", "-C", root, "log", "--oneline", "-7").Output(); err == nil {
+				if log := strings.TrimSpace(string(out)); log != "" {
+					workingSection["fallback_git_log"] = log
+					workingSection["fallback_note"] = fmt.Sprintf("No file changes in the last %d minutes. Showing recent git commits for context.", windowMinutes)
+				}
+			}
+		}
+	}
+
+	// ── 4. Recent agent events (last 20) ──────────────────────────────────
+	var recentEvents []store.Event
+	var latestEventSeq int64
+	if s.store != nil {
+		events, seq, err := s.store.GetEvents(0, nil, 20)
+		if err == nil {
+			recentEvents = events
+			latestEventSeq = seq
+		}
+	}
+	if recentEvents == nil {
+		recentEvents = []store.Event{}
+	}
+
+	// ── Assemble response ─────────────────────────────────────────────────
+	resp := map[string]interface{}{
+		"project_identity": projectSection,
+		"pending_tasks":    pendingSection,
+		"working_state":    workingSection,
+		"recent_events":    recentEvents,
+		"latest_event_seq": latestEventSeq,
+		"scale_guidance":   identity.ToolGuidance,
+		"session_hint":     "Pass latest_event_seq to get_events on the next call to receive only new events. Use scale_guidance to decide when to use Synapses tools vs Read/Grep.",
+	}
+
+	return jsonResult(resp)
 }
 
 // jsonResult marshals v to JSON and wraps it in a text tool result.

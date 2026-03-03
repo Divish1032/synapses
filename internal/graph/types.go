@@ -171,6 +171,18 @@ type SuggestedRule struct {
 	EdgeType EdgeType `json:"edge_type"`
 }
 
+// Scale classifies a project's size based on semantic node count
+// (functions + methods + structs + interfaces). Used to give agents
+// scale-aware guidance on when to prefer Synapses tools vs direct file access.
+type Scale string
+
+const (
+	ScaleMicro  Scale = "micro"  // <100 semantic nodes
+	ScaleSmall  Scale = "small"  // 100–499
+	ScaleMedium Scale = "medium" // 500–1999
+	ScaleLarge  Scale = "large"  // 2000+
+)
+
 // ProjectIdentity is the compact architectural summary returned by get_project_identity.
 type ProjectIdentity struct {
 	RepoID         string          `json:"repo_id"`
@@ -178,6 +190,10 @@ type ProjectIdentity struct {
 	EntryPoints    []EntityRef     `json:"entry_points"`
 	KeyEntities    []EntityInfo    `json:"key_entities"`
 	SuggestedRules []SuggestedRule `json:"suggested_rules,omitempty"`
+	// Scale is the repo size tier, computed from semantic node count.
+	Scale Scale `json:"scale"`
+	// ToolGuidance is a scale-aware recommendation for agents on which tools to prefer.
+	ToolGuidance string `json:"tool_guidance"`
 }
 
 // GraphSummary contains aggregate counts across the whole graph.

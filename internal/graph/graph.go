@@ -593,12 +593,33 @@ func (g *Graph) ProjectIdentity() *ProjectIdentity {
 		})
 	}
 
+	// Compute scale from semantic node count (functions+methods+structs+interfaces).
+	semanticNodes := summary.Functions + summary.Methods + summary.Structs + summary.Interfaces
+	var scale Scale
+	var toolGuidance string
+	switch {
+	case semanticNodes < 100:
+		scale = ScaleMicro
+		toolGuidance = "Micro repo (<100 semantic nodes): Read/Grep is often faster for targeted edits. Use Synapses tools (get_context, find_entity, search) for structural understanding and cross-file analysis. Always use validate_plan before multi-file changes."
+	case semanticNodes < 500:
+		scale = ScaleSmall
+		toolGuidance = "Small repo (100–499 nodes): prefer Synapses for exploration (get_context, search), use Read/Grep for targeted single-file edits. Use validate_plan before multi-file changes."
+	case semanticNodes < 2000:
+		scale = ScaleMedium
+		toolGuidance = "Medium repo (500–1999 nodes): strongly prefer Synapses tools for all code exploration — Glob/Grep surfaces too much noise. Use Read only when you know the exact file to edit."
+	default:
+		scale = ScaleLarge
+		toolGuidance = "Large repo (2000+ nodes): always use Synapses tools for exploration. Direct file scanning is too noisy at this scale. Reserve Read/Grep for writing specific files you have already identified."
+	}
+
 	result := &ProjectIdentity{
 		RepoID:         g.repoID,
 		Summary:        summary,
 		EntryPoints:    entryPoints,
 		KeyEntities:    keyEntities,
 		SuggestedRules: g.SuggestRules(),
+		Scale:          scale,
+		ToolGuidance:   toolGuidance,
 	}
 	// Best-effort cache — safe because piCache is only read under RLock
 	// and invalidated under Lock in AddNode/AddEdge/RemoveFile.

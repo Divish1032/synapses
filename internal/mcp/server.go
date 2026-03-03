@@ -190,6 +190,25 @@ func (s *Server) ServeStdio() error {
 
 // registerTools wires all Synapses tool definitions to their handlers.
 func (s *Server) registerTools() {
+	// ── Session Bootstrap ────────────────────────────────────────────────────
+
+	// session_init: single round-trip startup replacing the 3-call ritual.
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"session_init",
+			mcp.WithDescription(
+				"Single-call session bootstrap. Returns pending_tasks, project_identity, "+
+					"working_state, and recent_events in one round-trip — replacing the "+
+					"three-step startup ritual. Includes scale_guidance so agents self-tune "+
+					"their tool usage to repo size. Call this INSTEAD of the three individual tools.",
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Optional. Self-declared agent identifier for task filtering and event attribution."),
+			),
+		),
+		s.handleSessionInit,
+	)
+
 	// ── Code Graph Tools ────────────────────────────────────────────────────
 
 	// get_project_identity
@@ -230,6 +249,9 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("mode",
 				mcp.Description("'explore' (default): ego-subgraph BFS. 'impact': reverse-BFS showing what depends on this entity (same as get_impact)."),
+			),
+			mcp.WithString("file",
+				mcp.Description("Optional file path suffix to pin the lookup to a specific file (e.g. 'cmd/synapses/main.go'). Use when entity names are ambiguous across multiple files."),
 			),
 		),
 		s.handleGetContext,
