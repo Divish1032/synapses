@@ -820,7 +820,7 @@ func cmdInit(args []string) error {
 	if err := writeProjectCLAUDE(absPath); err != nil {
 		fmt.Printf("  ! could not update CLAUDE.md: %v\n\n", err)
 	} else {
-		fmt.Printf("  ✓ %s\n\n", filepath.Join(absPath, "CLAUDE.md"))
+		fmt.Printf("  ✓ %s\n\n", filepath.Join(absPath, ".claude", "CLAUDE.md"))
 	}
 
 	// ── Step 4: Write .claude/settings.json ────────────────────────────────────
@@ -843,9 +843,11 @@ func cmdInit(args []string) error {
 }
 
 // writeProjectCLAUDE writes (or updates) a Synapses-managed section in
-// CLAUDE.md at the repository root. The section is delimited by HTML comments
-// so it can be safely updated on subsequent index runs without clobbering the
-// rest of the file.
+// .claude/CLAUDE.md (preferred by Claude Code). The section is delimited by
+// HTML comments so it can be safely updated on subsequent index runs without
+// clobbering the rest of the file. If a root-level CLAUDE.md exists with a
+// Synapses section it is migrated to .claude/CLAUDE.md and the section is
+// removed from the root file.
 func writeProjectCLAUDE(repoRoot string) error {
 	const (
 		sectionStart = "<!-- synapses:start -->\n"
@@ -890,9 +892,7 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 | When you want to... | Use this |
 |---|---|
 | Check proposed changes against architecture rules | ` + "`validate_plan(changes=[...])`" + ` |
-| Reserve a file/package before editing | ` + "`claim_work(agent_id=\"...\", scope=\"pkg/auth\", scope_type=\"package\")`" + ` |
-| Check if another agent is editing the same code | ` + "`get_conflicts(agent_id=\"...\")`" + ` |
-| Release locks when done | ` + "`release_claims(agent_id=\"...\")`" + ` |
+| View current architecture violations | ` + "`get_violations()`" + ` |
 
 ### Task & Session Management
 
@@ -902,20 +902,43 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 | Mark a task as done or add notes | ` + "`update_task(id=\"...\", status=\"done\", notes=\"...\")`" + ` |
 | Save progress so next session can resume | ` + "`save_session_state(task_id=\"...\")`" + ` |
 | Leave a note on a code entity for other agents | ` + "`annotate_node(node_id=\"...\", note=\"...\")`" + ` |
-| See what other agents have been doing | ` + "`get_events(since_seq=N)`" + ` (use latest_event_seq from session_init) |
 
 ### Rules
 - **Read/Grep** are for *writing* code (editing a specific file you have already found). For *understanding* code structure, always prefer Synapses tools.
 - **Call ` + "`session_init()`" + `** at the start of every session. It replaces the 3-call startup ritual.
 - **Call ` + "`validate_plan()`" + `** before implementing multi-file changes.
-- **Call ` + "`claim_work()`" + `** before editing to avoid conflicts with other agents.
 - When ` + "`get_context`" + ` returns ` + "`other_candidates`" + `, re-call with ` + "`file=`" + ` to pin to the right entity.
 ` + sectionEnd
 
-	claudePath := filepath.Join(repoRoot, "CLAUDE.md")
+	clauDir := filepath.Join(repoRoot, ".claude")
+	if err := os.MkdirAll(clauDir, 0o755); err != nil {
+		return fmt.Errorf("create .claude dir: %w", err)
+	}
+	claudePath := filepath.Join(clauDir, "CLAUDE.md")
+
+	// Migrate: if root-level CLAUDE.md has a Synapses section, remove it from
+	// there so the content lives only in .claude/CLAUDE.md.
+	rootCLAUDE := filepath.Join(repoRoot, "CLAUDE.md")
+	if rootData, err := os.ReadFile(rootCLAUDE); err == nil {
+		rs := string(rootData)
+		si := strings.Index(rs, sectionStart)
+		if si != -1 {
+			ei := strings.Index(rs, sectionEnd)
+			if ei != -1 {
+				cleaned := rs[:si] + rs[ei+len(sectionEnd):]
+				cleaned = strings.TrimRight(cleaned, "\n") + "\n"
+				_ = os.WriteFile(rootCLAUDE, []byte(cleaned), 0o644)
+			}
+		}
+		// Remove root CLAUDE.md entirely if it is now empty/whitespace-only.
+		if strings.TrimSpace(string(rootData)) == "" || strings.TrimSpace(rs[:strings.Index(rs, sectionStart)]) == "" {
+			_ = os.Remove(rootCLAUDE)
+		}
+	}
+
 	existing, err := os.ReadFile(claudePath)
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read CLAUDE.md: %w", err)
+		return fmt.Errorf("read .claude/CLAUDE.md: %w", err)
 	}
 
 	content := string(existing)
@@ -975,10 +998,9 @@ func writeClaudeSettings(repoRoot string) error {
 		"type": "command",
 		"command": "echo '[Synapses] This project is indexed by Synapses code intelligence. " +
 			"Call session_init() ONCE at session start — it returns pending tasks, project identity, " +
-			"working state, recent events, and scale_guidance in one round-trip. " +
+			"working state, and scale_guidance in one round-trip. " +
 			"For code exploration use: get_context(entity, file=), find_entity, search, get_call_chain, get_impact, get_file_context. " +
-			"Use validate_plan() before implementing multi-file changes. " +
-			"Use claim_work() before editing, release_claims() when done.'",
+			"Use validate_plan() before implementing multi-file changes.'",
 	})
 
 	// ── PreToolUse hook on Glob|Grep (visible in verbose mode) ───────────
