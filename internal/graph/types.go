@@ -177,13 +177,13 @@ type SuggestedRule struct {
 type Scale string
 
 const (
-	// ScaleMicro: <100 semantic nodes — Read/Grep often faster for targeted edits.
+	// ScaleMicro represents projects <100 semantic nodes — Read/Grep often faster.
 	ScaleMicro Scale = "micro"
-	// ScaleSmall: 100–499 nodes — prefer Synapses for exploration.
+	// ScaleSmall represents projects with 100–499 nodes — prefer Synapses for exploration.
 	ScaleSmall Scale = "small"
-	// ScaleMedium: 500–1999 nodes — strongly prefer Synapses tools.
+	// ScaleMedium represents projects with 500–1999 nodes — strongly prefer Synapses tools.
 	ScaleMedium Scale = "medium"
-	// ScaleLarge: 2000+ nodes — always use Synapses tools.
+	// ScaleLarge represents projects with 2000+ nodes — always use Synapses tools.
 	ScaleLarge Scale = "large"
 )
 
