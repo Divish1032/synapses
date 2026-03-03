@@ -25,7 +25,7 @@ type ChangeSource interface {
 
 const (
 	serverName    = "synapses"
-	serverVersion = "0.3.1"
+	serverVersion = "0.5.0"
 )
 
 // packetCacheEntry holds a cached context packet with an expiry time.
@@ -43,6 +43,8 @@ type Server struct {
 	changeSource ChangeSource // nil if started without a file watcher
 	peerManager  interface{}  // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
 	brainClient  interface{}  // *brain.Client — set via SetBrainClient; nil if brain not configured
+	scoutClient  interface{}  // *scout.Client — set via SetScoutClient; nil if scout not configured
+	techStack    interface{}  // []scout.TechStackEntry — set via SetTechStack after autosubscribe
 	rulesMu      sync.RWMutex // protects s.config.Rules for concurrent dynamic upserts
 
 	// Context-packet cache: 20 slots max, 30s TTL. Keyed by "entityName:depth".
@@ -180,6 +182,20 @@ func (s *Server) SetPeerManager(pm interface{}) {
 // Using interface{} avoids an import cycle (brain imports only stdlib).
 func (s *Server) SetBrainClient(bc interface{}) {
 	s.brainClient = bc
+}
+
+// SetScoutClient wires a *scout.Client into the server so that web_search,
+// web_fetch, and web_deep_search tools are functional.
+// Using interface{} avoids an import cycle (scout imports only stdlib).
+func (s *Server) SetScoutClient(sc interface{}) {
+	s.scoutClient = sc
+}
+
+// SetTechStack stores the detected tech stack entries ([]scout.TechStackEntry)
+// so that get_project_identity can surface them as tech_stack.
+// Called from cmdStart after autosubscribe detection completes.
+func (s *Server) SetTechStack(ts interface{}) {
+	s.techStack = ts
 }
 
 // ServeStdio starts the MCP server on stdin/stdout. This call blocks until
@@ -624,6 +640,85 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleGetWorkingState,
+	)
+
+	// ── Web Tools (requires synapses-scout sidecar) ──────────────────────────
+
+	// web_search
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"web_search",
+			mcp.WithDescription(
+				"Searches the web via the synapses-scout sidecar and returns structured results. "+
+					"Use this to find framework docs, API references, error solutions, or any "+
+					"information that requires real-time data. "+
+					"Requires scout.url in synapses.json (default: http://localhost:11436).",
+			),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description("The search query."),
+			),
+			mcp.WithNumber("max_results",
+				mcp.Description("Maximum results to return. Default 5."),
+			),
+			mcp.WithString("region",
+				mcp.Description("Optional region code for localised results, e.g. 'us-en'."),
+			),
+			mcp.WithString("timelimit",
+				mcp.Description("Optional time limit, e.g. 'd' (day), 'w' (week), 'm' (month)."),
+			),
+		),
+		s.handleWebSearch,
+	)
+
+	// web_fetch
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"web_fetch",
+			mcp.WithDescription(
+				"Fetches and extracts a URL (or performs a search if given a query) via "+
+					"synapses-scout, returning the content as Markdown. "+
+					"Use this to read documentation pages, GitHub READMEs, or any web content "+
+					"that an agent needs to reason about. "+
+					"Requires scout.url in synapses.json (default: http://localhost:11436).",
+			),
+			mcp.WithString("input",
+				mcp.Required(),
+				mcp.Description("A URL to fetch or a plain-text search query (scout auto-routes)."),
+			),
+			mcp.WithBoolean("force_refresh",
+				mcp.Description("When true, bypasses the scout cache and re-fetches. Default false."),
+			),
+		),
+		s.handleWebFetch,
+	)
+
+	// web_deep_search
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"web_deep_search",
+			mcp.WithDescription(
+				"Performs an orchestrated multi-query search via synapses-scout: expands the "+
+					"original query into sub-queries, fans out searches, deduplicates, and returns "+
+					"a richer result set than web_search. Use this for research tasks where "+
+					"a single query is unlikely to capture all relevant results. "+
+					"Requires scout.url in synapses.json (default: http://localhost:11436).",
+			),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description("The research query to expand and search."),
+			),
+			mcp.WithNumber("max_results",
+				mcp.Description("Maximum deduplicated results to return. Default 10."),
+			),
+			mcp.WithString("region",
+				mcp.Description("Optional region code for localised results, e.g. 'us-en'."),
+			),
+			mcp.WithString("timelimit",
+				mcp.Description("Optional time limit, e.g. 'd' (day), 'w' (week), 'm' (month)."),
+			),
+		),
+		s.handleWebDeepSearch,
 	)
 
 }

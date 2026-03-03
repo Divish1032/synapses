@@ -33,6 +33,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/peer"
 	"github.com/SynapsesOS/synapses/internal/resolver"
+	"github.com/SynapsesOS/synapses/internal/scout"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 )
@@ -195,6 +196,35 @@ func cmdStart(args []string) error {
 			}()
 		}
 	}
+
+	// Optional: connect to synapses-scout web-search service.
+	var scoutCli *scout.Client
+	if cfg.Scout.URL != "" {
+		scoutCli = scout.NewClient(cfg.Scout.URL, cfg.Scout.TimeoutSec)
+		if scoutCli.Health(context.Background()) {
+			fmt.Fprintf(os.Stderr, "synapses: scout connected at %s\n", cfg.Scout.URL)
+			srv.SetScoutClient(scoutCli)
+		} else {
+			fmt.Fprintf(os.Stderr, "synapses: scout unreachable at %s (continuing without)\n", cfg.Scout.URL)
+			scoutCli = nil
+		}
+	}
+
+	// Autosubscribe: detect tech stack from manifest files and optionally enrich
+	// with official doc URLs via scout. Runs in the background — does not block startup.
+	go func() {
+		entries := scout.DetectTechStack(absPath)
+		if len(entries) == 0 {
+			return
+		}
+		if scoutCli != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			entries = scout.EnrichWithDocs(ctx, scoutCli, entries)
+			cancel()
+		}
+		srv.SetTechStack(entries)
+		fmt.Fprintf(os.Stderr, "synapses: tech stack detected (%d deps)\n", len(entries))
+	}()
 
 	// Start the file watcher so the graph stays current as files change.
 	if !*noWatch {

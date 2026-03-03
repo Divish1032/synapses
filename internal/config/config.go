@@ -116,6 +116,11 @@ type Config struct {
 	// When set, get_context returns LLM-enriched Context Packets, violations
 	// include plain-English explanations, and file changes are auto-ingested.
 	Brain BrainConfig `json:"brain,omitempty"`
+
+	// Scout configures the optional synapses-scout integration.
+	// When set, web_search, web_fetch, and web_deep_search MCP tools become
+	// available, giving AI agents real-time web data through the scout sidecar.
+	Scout ScoutConfig `json:"scout,omitempty"`
 }
 
 // BrainConfig describes the connection to a synapses-intelligence sidecar.
@@ -128,6 +133,16 @@ type BrainConfig struct {
 	// EnableLLM controls whether the context-packet endpoint is allowed to call
 	// the local LLM. Defaults to true when URL is set.
 	EnableLLM bool `json:"enable_llm,omitempty"`
+}
+
+// ScoutConfig describes the connection to a synapses-scout sidecar.
+type ScoutConfig struct {
+	// URL is the base URL of the scout service, e.g. "http://localhost:11436".
+	// Leave empty to disable scout integration.
+	URL string `json:"url,omitempty"`
+	// TimeoutSec is the per-request HTTP timeout. Defaults to 30 if URL is set.
+	// Scout fetches real web pages so a generous timeout is required.
+	TimeoutSec int `json:"timeout_sec,omitempty"`
 }
 
 // PeerConfig describes a remote synapses peer instance to connect to.
@@ -474,6 +489,12 @@ func (c *Config) applyDefaults() {
 		}
 		if !c.Brain.EnableLLM {
 			c.Brain.EnableLLM = true // default true when URL is provided
+		}
+	}
+	// Scout defaults: if URL is set but timeout is zero, apply sensible default.
+	if c.Scout.URL != "" {
+		if c.Scout.TimeoutSec <= 0 {
+			c.Scout.TimeoutSec = 30
 		}
 	}
 }
