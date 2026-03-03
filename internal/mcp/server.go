@@ -25,7 +25,7 @@ type ChangeSource interface {
 
 const (
 	serverName    = "synapses"
-	serverVersion = "0.3.1"
+	serverVersion = "0.4.0"
 )
 
 // packetCacheEntry holds a cached context packet with an expiry time.
