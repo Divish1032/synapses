@@ -177,10 +177,14 @@ type SuggestedRule struct {
 type Scale string
 
 const (
-	ScaleMicro  Scale = "micro"  // <100 semantic nodes
-	ScaleSmall  Scale = "small"  // 100–499
-	ScaleMedium Scale = "medium" // 500–1999
-	ScaleLarge  Scale = "large"  // 2000+
+	// ScaleMicro: <100 semantic nodes — Read/Grep often faster for targeted edits.
+	ScaleMicro Scale = "micro"
+	// ScaleSmall: 100–499 nodes — prefer Synapses for exploration.
+	ScaleSmall Scale = "small"
+	// ScaleMedium: 500–1999 nodes — strongly prefer Synapses tools.
+	ScaleMedium Scale = "medium"
+	// ScaleLarge: 2000+ nodes — always use Synapses tools.
+	ScaleLarge Scale = "large"
 )
 
 // ProjectIdentity is the compact architectural summary returned by get_project_identity.
