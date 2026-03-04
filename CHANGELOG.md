@@ -5,6 +5,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.1] — 2026-03-04
+
+### Fixed
+
+- **Multi-word AND search (`search("BFS carver")` now finds `CarveEgoGraph`)**: Added `camelWords()` helper that splits CamelCase identifiers into lowercase words ("CarveEgoGraph" → ["carve", "ego", "graph"]). When a query contains multiple words, all words must match against either the entity name (CamelCase split) or the doc comment (AND semantics). Score 6 when at least one word matches the name, score 3 for doc-only matches. (`internal/mcp/tools.go`)
+
+- **`get_impact` global truncated flag**: `ImpactResult` now has a top-level `Truncated bool` field that is `true` when any tier was capped at 50 nodes. Previously only per-tier `Truncated` existed, making it hard to detect partial results. (`internal/graph/types.go`, `internal/graph/traverse.go`)
+
+- **`validate_plan` UX improvements**: Nodes not found in the graph are now reported in `skipped[]` (not `warnings[]`), keeping the violations list clean. When no architectural rules are configured, a `hint` field is added suggesting how to add rules via `upsert_rule`. (`internal/mcp/tools.go`)
+
+---
+
+## [0.6.0] — 2026-03-03
+
+### Added
+
+- **Hot Constitution**: Add `{"constitution": {"principles": ["..."]}}` to `synapses.json`. Principles are injected into every `session_init` response and every `get_context(format="compact")` output — AI agents see project laws at the start of every session without manual prompting.
+
+- **Architectural Decision Records (ADRs)**: New MCP tools `upsert_adr` and `get_adrs`. ADRs store the "why" behind architectural choices as permanent cold memory in brain.sqlite. Accepted ADRs appear in `get_context(format="compact")` output when the entity's file matches the ADR's `linked_files`. Requires brain sidecar.
+
+- **`detail_level` parameter for `get_context(format="compact")`**: `"summary"` (~50 tokens, root header only), `"neighbors"` (~200 tokens, adds callers/callees lists), `"full"` (default, ~400-600 tokens). Enables progressive context loading — load a summary first, expand only the entities you need to edit.
+
+- **`session_init` single-call bootstrap**: Replaces the 3-step startup ritual (`get_pending_tasks` + `get_project_identity` + `get_working_state`). Returns all four fields in one MCP round-trip. Includes `scale_guidance` for tool selection hints.
+
+- **`get_working_state` config file scanning**: Now includes changes to `*.json`, `*.yaml`, `*.toml`, `Makefile`, and `Dockerfile` in addition to source files. Configuration changes are often the most significant indicator of what the developer is working on.
+
+- **`get_file_context` multi-file grouping**: When a path suffix matches multiple files (e.g. `server.go` in a monorepo), results are grouped by file with clear headers.
+
+- **Brain unavailable hint**: When brain enrichment is not configured, `get_context` includes a `brain_unavailable` hint with instructions for adding `brain.url` to `synapses.json`.
+
+- **`get_impact` node cap (50/tier)**: High-fanin nodes (e.g. `Graph.AddNode` with 55 callers) no longer overflow. Each tier is capped at 50 nodes; `Truncated` and `TotalNodes` fields indicate when results were cut.
+
+- **`synapses.json` hot-reload**: The config watcher detects changes to `synapses.json` and re-initialises the brain/scout clients without restarting the MCP server. Add `brain.url` after startup and it takes effect within the watcher debounce window.
+
+---
+
 ## [Unreleased] — v1.0.3
 
 ### Fixed

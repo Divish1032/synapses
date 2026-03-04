@@ -243,4 +243,7 @@ type ImpactResult struct {
 	Tiers         []ImpactTier `json:"tiers"`
 	TotalAffected int          `json:"total_affected"`
 	AffectedFiles []string     `json:"affected_files"`
+	// Truncated is true when any tier was capped at maxImpactNodesPerTier.
+	// Check per-tier Truncated + TotalNodes for exact counts.
+	Truncated bool `json:"truncated,omitempty"`
 }

@@ -591,6 +591,7 @@ func (s *Server) handleValidatePlan(
 	// Build a temporary overlay graph that includes the proposed additions.
 	overlay := cloneGraph(s.graph)
 	var warnings []string
+	var skipped []string
 	for _, change := range changes {
 		if change.AddsCallTo == "" {
 			continue
@@ -598,13 +599,15 @@ func (s *Server) handleValidatePlan(
 		// Find the callee node.
 		callees := overlay.FindByName(change.AddsCallTo)
 		if len(callees) == 0 {
-			warnings = append(warnings, fmt.Sprintf("adds_call_to %q: not found in graph — cannot validate this edge", change.AddsCallTo))
+			// Not alarming — the target may not exist yet (new symbol).
+			// Skip this edge; it cannot violate rules that reference existing nodes.
+			skipped = append(skipped, fmt.Sprintf("adds_call_to %q not yet in graph — edge skipped (no rules can fire for unknown targets)", change.AddsCallTo))
 			continue
 		}
 		// Find a node representing the source file.
 		sources := overlay.FindByPattern(change.File)
 		if len(sources) == 0 {
-			warnings = append(warnings, fmt.Sprintf("file %q: no matching node in graph", change.File))
+			skipped = append(skipped, fmt.Sprintf("file %q not in graph — skipped", change.File))
 			continue
 		}
 		overlay.AddEdge(&graph.Edge{
@@ -616,6 +619,7 @@ func (s *Server) handleValidatePlan(
 
 	s.rulesMu.RLock()
 	violations := s.config.CheckViolations(overlay)
+	hasRules := len(s.config.Rules) > 0
 	s.rulesMu.RUnlock()
 
 	status := "ok"
@@ -627,8 +631,14 @@ func (s *Server) handleValidatePlan(
 		"status":     status,
 		"violations": violations,
 	}
+	if len(skipped) > 0 {
+		result["skipped"] = skipped
+	}
 	if len(warnings) > 0 {
 		result["warnings"] = warnings
+	}
+	if !hasRules {
+		result["hint"] = "No architectural rules configured. Add rules via upsert_rule or in synapses.json to enable validation."
 	}
 	return jsonResult(result)
 }
@@ -786,6 +796,34 @@ func (s *Server) handleUpsertRule(
 func stringArg(req mcp.CallToolRequest, key string) string {
 	v, _ := req.Params.Arguments[key].(string)
 	return v
+}
+
+// camelWords splits a CamelCase or mixedCase identifier into lowercase words.
+//
+//	"CarveEgoGraph" → ["carve", "ego", "graph"]
+//	"BFSCarver"     → ["bfs", "carver"]   (consecutive capitals = one word)
+//	"handleGetNode" → ["handle", "get", "node"]
+func camelWords(name string) []string {
+	runes := []rune(name)
+	var words []string
+	var cur strings.Builder
+	for i, r := range runes {
+		isUp := r >= 'A' && r <= 'Z'
+		prevUp := i > 0 && runes[i-1] >= 'A' && runes[i-1] <= 'Z'
+		nextLo := i+1 < len(runes) && runes[i+1] >= 'a' && runes[i+1] <= 'z'
+		// Start a new word at an uppercase letter when it's a standard camelCase
+		// boundary (previous was lower, e.g. "Ego" in "CarveEgoGraph") OR when
+		// it's the last capital in an acronym run (e.g. "C" in "BFSCarver").
+		if isUp && cur.Len() > 0 && (!prevUp || nextLo) {
+			words = append(words, strings.ToLower(cur.String()))
+			cur.Reset()
+		}
+		cur.WriteRune(r)
+	}
+	if cur.Len() > 0 {
+		words = append(words, strings.ToLower(cur.String()))
+	}
+	return words
 }
 
 // pickBestNode selects the most-relevant node from a candidate list using a
@@ -1016,6 +1054,43 @@ func (s *Server) handleSearch(
 				score = 5
 			}
 		}
+		// Multi-word AND query: each query word must appear in the name components
+		// or doc comment. Handles stemmed/derived forms like "BFS carver" matching
+		// "CarveEgoGraph" (query "carver" prefix-matches name component "carve").
+		if score == 0 {
+			words := strings.Fields(lower)
+			if len(words) > 1 {
+				nameWords := camelWords(n.Name)
+				docLow := strings.ToLower(n.Metadata["doc"])
+				matchCount := 0
+				inNameCount := 0
+				for _, qw := range words {
+					// Check name components: exact match, or qw starts with component
+					// (handles "carver"→"carve"), or component starts with qw.
+					inName := false
+					for _, nw := range nameWords {
+						if nw == qw || strings.HasPrefix(qw, nw) || strings.HasPrefix(nw, qw) {
+							inName = true
+							break
+						}
+					}
+					if inName {
+						matchCount++
+						inNameCount++
+					} else if strings.Contains(docLow, qw) {
+						matchCount++
+					}
+				}
+				if matchCount == len(words) {
+					if inNameCount > 0 {
+						score = 6 // partial name + doc match
+					} else {
+						score = 3 // all words only in doc
+					}
+				}
+			}
+		}
+
 		if score > 0 {
 			hits = append(hits, hit{n, score})
 		}
