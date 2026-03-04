@@ -233,6 +233,8 @@ type ImpactTier struct {
 	Label      string      `json:"label"`      // "direct" | "indirect" | "peripheral"
 	Confidence float64     `json:"confidence"` // 1.0 / 0.6 / 0.3
 	Nodes      []EntityRef `json:"nodes"`
+	Truncated  bool        `json:"truncated,omitempty"` // true when nodes were capped
+	TotalNodes int         `json:"total_nodes,omitempty"` // actual count before cap
 }
 
 // ImpactResult is returned by ImpactAnalysis.

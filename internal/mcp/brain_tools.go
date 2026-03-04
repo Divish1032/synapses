@@ -2,6 +2,9 @@ package mcp
 
 import (
 	"context"
+	"strings"
+
+	mcp "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 )
@@ -14,6 +17,82 @@ func (s *Server) getBrainClient() *brain.Client {
 	}
 	bc, _ := s.brainClient.(*brain.Client)
 	return bc
+}
+
+// handleUpsertADR creates or updates an Architectural Decision Record in the brain.
+func (s *Server) handleUpsertADR(
+	ctx context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	bc := s.getBrainClient()
+	if bc == nil {
+		return mcp.NewToolResultText(`{"error": "brain not configured — add brain.url to synapses.json"}`), nil
+	}
+
+	id, _ := req.Params.Arguments["id"].(string)
+	title, _ := req.Params.Arguments["title"].(string)
+	decision, _ := req.Params.Arguments["decision"].(string)
+	if id == "" || title == "" || decision == "" {
+		return mcp.NewToolResultText(`{"error": "id, title, and decision are required"}`), nil
+	}
+
+	status, _ := req.Params.Arguments["status"].(string)
+	if status == "" {
+		status = "proposed"
+	}
+	contextText, _ := req.Params.Arguments["context"].(string)
+	consequences, _ := req.Params.Arguments["consequences"].(string)
+
+	var linkedFiles []string
+	if lf, ok := req.Params.Arguments["linked_files"].([]interface{}); ok {
+		for _, f := range lf {
+			if s, ok := f.(string); ok && s != "" {
+				linkedFiles = append(linkedFiles, s)
+			}
+		}
+	}
+
+	adr, err := bc.UpsertADR(ctx, brain.ADRRequest{
+		ID:           id,
+		Title:        title,
+		Status:       status,
+		ContextText:  contextText,
+		Decision:     decision,
+		Consequences: consequences,
+		LinkedFiles:  linkedFiles,
+	})
+	if err != nil {
+		return mcp.NewToolResultText(`{"error": "` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`), nil
+	}
+	return jsonResult(adr)
+}
+
+// handleGetADRs retrieves ADRs from the brain, optionally filtered by file path.
+func (s *Server) handleGetADRs(
+	ctx context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	bc := s.getBrainClient()
+	if bc == nil {
+		return mcp.NewToolResultText(`{"error": "brain not configured — add brain.url to synapses.json"}`), nil
+	}
+
+	fileFilter, _ := req.Params.Arguments["file"].(string)
+	adrs, err := bc.GetADRs(ctx, fileFilter)
+	if err != nil {
+		return mcp.NewToolResultText(`{"error": "` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`), nil
+	}
+	if adrs == nil {
+		adrs = []brain.ADR{}
+	}
+	result := map[string]interface{}{
+		"adrs":  adrs,
+		"count": len(adrs),
+	}
+	if fileFilter != "" {
+		result["file_filter"] = fileFilter
+	}
+	return jsonResult(result)
 }
 
 // ingestWebContent sends fetched web content to the intelligence sidecar as a

@@ -256,6 +256,11 @@ func estimateNodeTokens(n *Node) int {
 	return b/4 + 1
 }
 
+// maxImpactNodesPerTier caps the number of nodes returned per tier to avoid
+// overwhelming the LLM context window. When a tier exceeds this limit, the
+// slice is truncated and ImpactTier.Truncated is set true.
+const maxImpactNodesPerTier = 50
+
 // ImpactAnalysis performs a reverse BFS from rootID following incoming CALLS
 // and IMPLEMENTS edges to find all nodes that could be affected if rootID changes.
 // Results are grouped into depth tiers: direct (depth 1), indirect (depth 2),
@@ -353,12 +358,18 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 			continue
 		}
 		label, conf := tierLabel(d)
-		tiers = append(tiers, ImpactTier{
+		tier := ImpactTier{
 			Depth:      d,
 			Label:      label,
 			Confidence: conf,
+			TotalNodes: len(nodes),
 			Nodes:      nodes,
-		})
+		}
+		if len(nodes) > maxImpactNodesPerTier {
+			tier.Nodes = nodes[:maxImpactNodesPerTier]
+			tier.Truncated = true
+		}
+		tiers = append(tiers, tier)
 		total += len(nodes)
 	}
 

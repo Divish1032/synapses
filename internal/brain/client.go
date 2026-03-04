@@ -172,6 +172,68 @@ func (c *Client) SetPhase(ctx context.Context, req SetPhaseRequest) (*SDLCConfig
 	return &out, nil
 }
 
+// UpsertADR calls POST /v1/adr to create or update an ADR.
+func (c *Client) UpsertADR(ctx context.Context, req ADRRequest) (*ADR, error) {
+	var out ADR
+	if err := c.post(ctx, "/v1/adr", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetADR calls GET /v1/adr/{id} to retrieve an ADR by ID.
+func (c *Client) GetADR(ctx context.Context, id string) (*ADR, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/adr/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.cli.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("ADR %q not found", id)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var out ADR
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetADRs calls GET /v1/adr (optionally with ?file=path) to retrieve ADRs.
+func (c *Client) GetADRs(ctx context.Context, fileFilter string) ([]ADR, error) {
+	u := c.baseURL + "/v1/adr"
+	if fileFilter != "" {
+		u += "?file=" + url.QueryEscape(fileFilter)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.cli.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var out struct {
+		ADRs []ADR `json:"adrs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.ADRs, nil
+}
+
 // post marshals body as JSON, POSTs to the endpoint, and decodes the response
 // into out (if out is non-nil). Returns an error on any failure.
 func (c *Client) post(ctx context.Context, path string, body, out interface{}) error {
