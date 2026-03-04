@@ -91,13 +91,18 @@ func EnrichCoverage(g *graph.Graph, repoRoot, profilePath string) {
 		fileBlocks[rel] = append(fileBlocks[rel], b)
 	}
 
-	prefix := repoRoot + "/"
+	// Normalize repoRoot to use forward slashes for comparison with coverage paths.
+	normRepoRoot := filepath.ToSlash(repoRoot)
+	prefix := normRepoRoot + "/"
+
 	nodes := g.AllNodes()
 	for _, n := range nodes {
 		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
 			continue
 		}
-		rel := strings.TrimPrefix(n.File, prefix)
+		// Normalize file path to use forward slashes for comparison.
+		normFile := filepath.ToSlash(n.File)
+		rel := strings.TrimPrefix(normFile, prefix)
 		blks, ok := fileBlocks[rel]
 		if !ok {
 			continue
