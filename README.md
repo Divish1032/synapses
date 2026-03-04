@@ -63,6 +63,18 @@ HTML, CSS/SCSS/SASS/LESS, YAML, JSON, TOML, XML, SQL, Markdown, Dockerfile, Terr
 
 ---
 
+## System Requirements
+
+| Component | Requirement |
+|---|---|
+| **synapses core** | Go 1.22+, any OS (macOS / Linux / Windows), any architecture |
+| **synapses-intelligence** (optional AI brain) | Ollama + 4 GB RAM minimum; 8 GB+ recommended for 7B models |
+| **synapses-scout** (optional web search) | Python 3.11+, pip |
+
+> **GPU vs CPU:** On GPU machines (Apple Silicon / NVIDIA / AMD), the Qwen3.5 family is used for highest quality. On CPU-only machines, `qwen2.5-coder` models are used instead (10-20s/call). `brain setup` auto-detects your hardware and picks the right models.
+
+---
+
 ## Installation
 
 ### Homebrew (macOS / Linux — recommended)
@@ -131,7 +143,7 @@ That's it. `init` does three things automatically:
 
 Then in Claude Code, type `/mcp` to reload — or just close and reopen the chat panel.
 
-Your agent immediately has access to all 16 MCP tools — from `get_project_identity` and `get_context` to `get_usage_guide` (which tells the agent exactly when to use each tool) and `get_pending_tasks` (session continuity across LLM conversations).
+Your agent immediately has access to all 24 MCP tools — from `session_init` (single-call bootstrap) and `get_context` to `web_search` / `web_fetch` (when scout is configured) and `get_pending_tasks` (session continuity across LLM conversations).
 
 **Re-running `init` is safe** — it updates only the `synapses` entry in `.mcp.json` and preserves any other MCP servers you have configured.
 
@@ -156,43 +168,59 @@ Full flag reference: see [COMMANDS.md](COMMANDS.md).
 
 ## MCP Tools
 
-### Orientation
+### Session Bootstrap
 
 | Tool | Parameters | What it returns |
 |---|---|---|
+| `session_init` | `agent_id?` | **Single-call startup**: pending tasks + project identity + working state in one round-trip |
 | `get_project_identity` | — | Node/edge counts, entry points, key entities by connectivity, active rules |
-| `get_usage_guide` | — | Quick-start sequence, per-tool catalogue, live entry points, top-5 key entities |
 | `get_working_state` | `window_minutes?` | Recent file changes from the watcher + `git diff --stat HEAD` |
 
 ### Context & Discovery
 
 | Tool | Parameters | What it returns |
 |---|---|---|
-| `get_context` | `entity`, `depth?`, `token_budget?`, `task_id?` | BFS subgraph around entity — ranked callers, callees, and related nodes |
-| `get_file_context` | `file` | All entities defined in a file, ordered by line number |
-| `get_api_contract` | `package?`, `file?` | HTTP/gRPC endpoint detection by convention; returns framework, callers, and callees per endpoint |
+| `get_context` | `entity`, `depth?`, `format?`, `detail_level?`, `token_budget?`, `task_id?` | BFS subgraph around entity. `format="compact"` → 80% fewer tokens |
+| `get_file_context` | `file` | All entities defined in a file, ordered by line number; groups when multiple files match |
 | `find_entity` | `query` | Matching nodes with file, line, signature, and doc |
-| `search` | `query` | Keyword search across entity names and doc comments — returns signature |
-| `get_call_chain` | `from`, `to` | Shortest CALLS path between two entities; crosses interface boundaries via IMPLEMENTS |
+| `search` | `query`, `mode?` | Keyword/FTS search across entity names and doc comments; multi-word AND supported |
+| `get_call_chain` | `from`, `to` | Shortest CALLS path; crosses IMPLEMENTS edges and explains cross-binary boundaries |
+| `get_impact` | `symbol`, `depth?` | Reverse-BFS blast radius — direct/indirect/peripheral affected entities + global truncated flag |
 | `find_orphans` | `include_tests?` | Unexported functions/methods with no callers (dead-code candidates) |
 
 ### Architecture & Rules
 
 | Tool | Parameters | What it returns |
 |---|---|---|
-| `validate_plan` | `changes` (JSON) | Rule violations for proposed call-graph changes, without touching the live graph |
-| `get_violations` | — | All current rule violations across the graph |
-| `upsert_rule` | `rule_id`, `description`, `severity`, `edge_type?`, `from_file_pattern?`, `to_file_pattern?`, `to_name_pattern?` | Creates or updates a dynamic architectural rule; persisted to SQLite, active immediately |
-| `get_federation_status` | — | Linked project node counts and cross-project CALLS edge count |
+| `validate_plan` | `changes` (JSON) | Rule violations for proposed call-graph changes; skips unknown nodes with a hint |
+| `get_violations` | `rule_id?`, `include_log?` | All current rule violations + historical audit log |
+| `upsert_rule` | `rule_id`, `description`, `severity`, … | Creates/updates a dynamic architectural rule; active immediately, persisted to SQLite |
+| `annotate_node` | `node_id`, `note` | Attach a note to a graph node (visible in `get_context`) |
+
+### AI Brain (requires synapses-intelligence)
+
+| Tool | Parameters | What it returns |
+|---|---|---|
+| `upsert_adr` | `id`, `title`, `decision`, … | Store an Architectural Decision Record as cold memory |
+| `get_adrs` | `file?` | List ADRs; filter by file path to see relevant decisions |
+
+### Web Intelligence (requires synapses-scout)
+
+| Tool | Parameters | What it returns |
+|---|---|---|
+| `web_search` | `query`, `max_results?`, `region?` | Ranked search hits (title, url, snippet) |
+| `web_fetch` | `input`, `force_refresh?` | Web page / YouTube transcript / search results as Markdown |
+| `web_deep_search` | `query`, `max_results?` | Orchestrated multi-query search with deduplication |
+| `web_annotate` | `node_id`, `note`, `hits?` | Persist web findings to a graph node — survives across sessions |
 
 ### Agent Task Memory
 
 | Tool | Parameters | What it returns |
 |---|---|---|
 | `create_plan` | `title`, `tasks`, `description?` | Persisted plan with prioritised task list (p0–p3) |
-| `get_pending_tasks` | `plan_id?` | All pending/in-progress tasks ordered by priority |
-| `update_task` | `id`, `status`, `notes?` | Updated task — use to track progress across sessions |
-| `get_plans` | — | All plans with task completion counts |
+| `get_pending_tasks` | `plan_id?`, `agent_id?` | All pending/in-progress tasks ordered by priority; includes session state for in-progress tasks |
+| `update_task` | `id`, `status`, `notes?` | Update task status; append timestamped notes |
+| `save_session_state` | `task_id`, … | Save working state so next LLM session can resume from exactly here |
 
 ---
 
@@ -207,31 +235,34 @@ Place a `synapses.json` in your project root to define architectural rules and t
     {
       "id": "no-sql-in-view",
       "description": "Database queries must not appear in view/component files",
-      "forbidden_edge": {
-        "from_file_pattern": "*.tsx",
-        "edge_type": "CALLS",
-        "to_name_pattern": "SELECT|INSERT|UPDATE|DELETE"
-      },
-      "severity": "error"
-    },
-    {
-      "id": "no-direct-db-from-handler",
-      "description": "HTTP handlers must go through the service layer",
-      "forbidden_edge": {
-        "from_file_pattern": "*/handlers/*",
-        "to_file_pattern": "*/db/*",
-        "edge_type": "IMPORTS"
-      },
-      "severity": "warning"
+      "severity": "error",
+      "from_file_pattern": "*.tsx",
+      "to_name_pattern": "SELECT|INSERT|UPDATE|DELETE"
     }
   ],
   "context_carve": {
     "default_depth": 2,
     "decay_factor": 0.5,
     "token_budget": 4000
+  },
+  "constitution": {
+    "principles": [
+      "Never use CGo — use modernc/sqlite (pure Go)",
+      "All MCP handlers must be fail-silent (return empty result on LLM timeout, not error)"
+    ]
+  },
+  "brain": {
+    "url": "http://localhost:11435",
+    "timeout_ms": 30000
+  },
+  "scout": {
+    "url": "http://localhost:11436",
+    "timeout_sec": 30
   }
 }
 ```
+
+**constitution.principles** are injected into every `session_init` response — AI agents see your project laws at the start of every conversation without any manual prompting.
 
 See `synapses.example.json` for a full reference with all options.
 

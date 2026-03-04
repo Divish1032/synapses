@@ -379,6 +379,14 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 	}
 	sort.Strings(files)
 
+	anyTruncated := false
+	for _, t := range tiers {
+		if t.Truncated {
+			anyTruncated = true
+			break
+		}
+	}
+
 	return &ImpactResult{
 		Root: EntityRef{
 			ID:   rootID,
@@ -390,6 +398,7 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 		Tiers:         tiers,
 		TotalAffected: total,
 		AffectedFiles: files,
+		Truncated:     anyTruncated,
 	}, nil
 }
 

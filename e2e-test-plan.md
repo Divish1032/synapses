@@ -13,16 +13,71 @@ Each leg has Pass/Fail checks + a scored metric. A final composite rating is com
 
 ---
 
+## Step 0 — Reset, Rebuild, and Reindex
+
+Run this before every test run to ensure a clean baseline.
+
+### 0-A: Rebuild binaries from source
+```bash
+# Build synapses
+cd /path/to/synapses-os/synapses
+export PATH=$PATH:/usr/local/go/bin
+make build && sudo cp bin/synapses /usr/local/bin/synapses
+
+# Build synapses-intelligence
+cd /path/to/synapses-os/synapses-intelligence
+make build && sudo cp bin/brain /usr/local/bin/brain
+```
+Expected: both compile without errors. `synapses version` and `brain version` print current versions.
+
+### 0-B: Reset brain data
+```bash
+# Clear semantic summaries for a cold-brain test
+brain reset   # prompts for y/N — confirm
+# OR directly:
+rm -f ~/.synapses/brain.sqlite
+```
+Expected: clean slate — no stale summaries from previous sessions.
+
+### 0-C: Reindex the codebase
+```bash
+# If MCP server is already running via Claude Code, the watcher handles this.
+# For a forced reindex:
+synapses index --path /path/to/synapses-os
+```
+Expected: graph nodes updated; `session_init()` returns updated file/function counts.
+
+### 0-D: Verify brain.json config
+```bash
+cat ~/.synapses/brain.json
+# Ensure db_path uses absolute path (not ~/...) to avoid BUG-I02
+# For CPU-only: model_ingest/model_guardian should be qwen2.5-coder:1.5b
+# For GPU/Apple Silicon: qwen3.5:0.8b/2b/4b/9b
+brain setup   # re-run setup if unsure — now detects GPU automatically
+```
+
+### 0-E: Restart brain sidecar with updated config
+```bash
+pkill -f "brain serve" || true
+brain serve &
+sleep 2
+curl -s http://localhost:11435/v1/health | python3 -m json.tool
+```
+Expected: `{"available": true, "model": "..."}`.
+
+---
+
 ## Pre-flight Checklist
 
 ```bash
 # Verify all 3 components are reachable
 synapses version                          # should print current version
-curl -s http://localhost:11435/v1/health  # intelligence sidecar
-curl -s http://localhost:11436/v1/health  # scout sidecar
+brain version                             # should print current version
+curl -s http://localhost:11435/v1/health  # intelligence: available:true
+curl -s http://localhost:11436/v1/health  # scout: intelligence_available:true
 ```
 
-Expected: synapses binary exists, both HTTP 200 with `status:ok`.
+Expected: synapses binary exists, both HTTP 200 with `status:ok`, brain `available:true`.
 
 ---
 
@@ -203,11 +258,14 @@ curl -s -X POST http://localhost:11436/v1/fetch \
 ```bash
 curl -s -X POST http://localhost:11436/v1/fetch \
   -H "Content-Type: application/json" \
-  -d '{"url":"https://pkg.go.dev/github.com/smacker/go-tree-sitter","distill":true}'
+  -d '{"input":"https://pkg.go.dev/github.com/smacker/go-tree-sitter","distill":true}'
 ```
-- **Pass**: returns `distilled: true`, `distilled_content` present and shorter than raw
-- **Fail**: `distilled: false`, timeout, or missing field
-- **Metric**: distilled_content length vs raw content length
+- **Pass**: returns `distilled: true` AND `fragment.summary` non-empty (or `distilled_content`
+  for v0.0.4+ backward-compat field) — summary is shorter than raw `content_md`
+- **Fail**: `distilled: false`, `fragment: null`, timeout, or missing intelligence
+- **API note (v0.0.4+)**: use `input` field (not `url`). Response includes both
+  `fragment: {summary, tags, distilled_by}` and backward-compat `distilled`/`distilled_content` fields.
+- **Metric**: `fragment.summary` length vs `content_md` length (target: ≥50% reduction)
 
 ### L3-E: Cache check (no duplicate fetch)
 - Repeat L3-C with same URL
@@ -350,6 +408,106 @@ Fill this in after each test run:
 - What needs improvement:
 - Bugs found:
 ```
+
+---
+
+## E2E Test Results — v0.6.0 — 2026-03-04
+
+### System Versions
+- synapses: v0.6.0 (git tag v0.4.1-22-g8e38b56 — Makefile auto-computes from git, not bumped ⚠️)
+- synapses-intelligence: v0.6.0 (binary correctly reads "0.6.0" ✅)
+- synapses-scout: v0.0.4
+
+### Environment
+- CPU-only Linux. qwen2.5-coder:1.5b (ingest/guardian), qwen2.5-coder:7b (enrich) for test.
+
+---
+
+### Leg 1 — Synapses Core
+| Check | Pass/Fail | Score | Notes |
+|-------|-----------|-------|-------|
+| L1-A session_init | ✅ Pass | 10 | 1 call, all 4 fields |
+| L1-B find_entity | ✅ Pass | 10 | Main entity now ranks first (improved) |
+| L1-C token savings | ✅ Pass | 10 | compact ~220 tokens, json ~1450 tokens → 85% reduction |
+| L1-D call chain | ⚠️ Partial | 7 | Same-binary works. Cross-binary still "no path" without explanation. |
+| L1-E search | ⚠️ Partial | 7 | "rate limiting" → 1 hit ✅. "BFS carver" → 1 hit (helper, not CarveEgoGraph) — improved from 0 |
+| L1-F impact | ⚠️ Partial | 7 | Node cap 50/tier works. Still 53KB output (too large inline). Global truncated flag not set. |
+| L1-G validate_plan | ⚠️ Partial | 7 | No rules configured. New "node not found" warning (minor UX regression). |
+| L1-H working_state | ✅ Pass | 9 | Correctly detected builds. New suggested_tools section. |
+| **Leg 1 Score** | | **8.6/10** | Weighted (10+10+20+7+7+7+7+9)/9 |
+
+### Leg 2 — Intelligence Sidecar
+| Check | Pass/Fail | Score | Notes |
+|-------|-----------|-------|-------|
+| L2-A health | ✅ Pass | 10 | available:true |
+| L2-B ingest | ⚠️ Partial | 9 | 15.6s with qwen2.5-coder:1.5b ✅. New tags field! Default qwen3.5:0.8b still times out (58s). |
+| L2-C enrich | ❌ Fail | 2 | WithThinking(true) hardcoded → timeout even for qwen2.5-coder:7b |
+| L2-D context packet | ✅ Pass | 8 | packet_quality=0.4 ✅ (was 0.0). API: nested snapshot required. New graph_warnings. |
+| L2-E explain violation | ✅ Pass | 7 | 11s ✅ (was FAIL in v0.5.1). Somewhat generic explanation. |
+| L2-F SDLC | ✅ Pass | 9 | phase=development, mode=standard |
+| L2-G prune | ✅ Pass | 10 | 5.7s, ratio 0.41 ✅ (was FAIL/timeout in v0.5.1!) |
+| **Leg 2 Score** | | **7.4/10** | Weighted (10+18+4+16+7+9+10)/10 |
+
+### Leg 3 — Scout
+| Check | Pass/Fail | Score | Notes |
+|-------|-----------|-------|-------|
+| L3-A health | ✅ Pass | 10 | status:ok, intelligence_available:true |
+| L3-B search | ✅ Pass | 10 | 3 hits 1.48s ✅. API: hits key (was results) |
+| L3-C fetch | ✅ Pass | 8 | content_md present. API: input field (was url) |
+| L3-D distillation | ⚠️ Partial | 4 | distilled/distilled_content fields removed from response. Cannot verify. |
+| L3-E cache | ✅ Pass | 10 | ~9ms cache hit |
+| L3-F MCP web_search | ✅ Pass | 10 | Works with synapses.json at correct root. Hot-reload confirmed! |
+| L3-G web_annotate | ✅ Pass | 9 | Cross-session persistence ✅. In JSON context. Not in compact. |
+| **Leg 3 Score** | | **8.4/10** | Weighted (10+20+8+8+10+10+18)/10 |
+
+---
+
+### Token & Effort Savings
+| Metric | Value |
+|--------|-------|
+| get_context compact vs json | 85% reduction (~220 vs ~1450 tokens) |
+| Estimated tokens saved per session | ~12,000–18,000 tokens |
+| Monthly API cost saved (100 sessions) | ~$3.60–$5.40/month |
+
+### Final Rating
+
+```
+Leg 1 (Core):         8.6/10
+Leg 2 (Intelligence): 7.4/10
+Leg 3 (Scout):        8.4/10
+Token Score:          1.0 (85% reduction, capped)
+
+Composite = (0.86 × 0.35) + (0.74 × 0.30) + (0.84 × 0.25) + (1.0 × 0.10)
+          = 0.301 + 0.222 + 0.210 + 0.100 = 0.833
+```
+
+**Composite Score: 8.3 / 10 — Good (approaching Excellent)**
+vs v0.5.1: 7.0 → 8.3 (+1.3 points)
+
+### Bugs Found
+| ID | Severity | Description |
+|----|----------|-------------|
+| BUG-I01 | High | WithThinking(true) hardcoded in brain.go — non-Qwen3.5 models timeout on enrich |
+| BUG-I02 | Medium | db_path tilde not expanded → DB written to literal ~/. dir relative to CWD |
+| BUG-I03 | Low | /v1/context-packet API breaking change: nested snapshot field required |
+| BUG-S01 | Medium | distilled/distilled_content fields removed from fetch response — opaque pipeline |
+| BUG-S02 | Info | Scout API: hits (was results), input (was url) — undocumented breaking changes |
+| BUG-NEW-05 | Low | get_call_chain cross-binary still generic message — no boundary explanation |
+| CONFIG-01 | Medium | synapses.json must be at MCP root (-path dir) for scout/brain; no parent-dir search |
+
+### What Improved vs v0.5.1
+- Leg 2: +2.9pts — prune works (5.7s), guardian works (11s), packet_quality=0.4
+- Leg 1: +0.7pts — find_entity ranks main entity first; working_state has suggested_tools
+- Leg 3: +1.0pts — MCP web_search hot-reload confirmed; web_annotate cross-session confirmed
+- brain setup probes actual model latency (latency-based, not RAM heuristic)
+- version constant properly set to "0.6.0" in main.go
+
+### New v0.6.0 Features Discovered
+- context_packet embedded in get_context(format="json") response
+- graph_warnings in context_packet (deterministic topology-based warnings)
+- IngestResponse now has tags field
+- get_working_state has suggested_tools
+- brain setup uses latency probing for CPU model selection
 
 ---
 
