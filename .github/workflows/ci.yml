@@ -34,7 +34,13 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: go test ./... -v -race -timeout 120s
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            go test ./... -v -timeout 120s
+          else
+            go test ./... -v -race -timeout 120s
+          fi
+        shell: bash
 
   lint:
     name: Lint
