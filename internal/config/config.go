@@ -112,6 +112,11 @@ type Config struct {
 	// Peers is the list of remote synapses instances this project connects to.
 	Peers []PeerConfig `json:"peers,omitempty"`
 
+	// Constitution defines project-wide principles that are injected into every
+	// agent session and get_context response. Use this to codify architectural
+	// laws, coding standards, and constraints that every AI agent must respect.
+	Constitution ConstitutionConfig `json:"constitution,omitempty"`
+
 	// Brain configures the optional synapses-intelligence integration.
 	// When set, get_context returns LLM-enriched Context Packets, violations
 	// include plain-English explanations, and file changes are auto-ingested.
@@ -121,6 +126,19 @@ type Config struct {
 	// When set, web_search, web_fetch, and web_deep_search MCP tools become
 	// available, giving AI agents real-time web data through the scout sidecar.
 	Scout ScoutConfig `json:"scout,omitempty"`
+}
+
+// ConstitutionConfig holds project-wide principles that are injected into agent
+// responses so every LLM session is aware of the architectural laws it must follow.
+type ConstitutionConfig struct {
+	// Principles is a list of terse statements, e.g. "No CGo", "All handlers fail-silent".
+	Principles []string `json:"principles,omitempty"`
+	// InjectInContext controls whether principles are appended to get_context compact output.
+	// Defaults to true when Principles is non-empty.
+	InjectInContext bool `json:"inject_in_context,omitempty"`
+	// InjectInSessionInit controls whether principles are included in session_init output.
+	// Defaults to true when Principles is non-empty.
+	InjectInSessionInit bool `json:"inject_in_session_init,omitempty"`
 }
 
 // BrainConfig describes the connection to a synapses-intelligence sidecar.
@@ -480,6 +498,15 @@ func (c *Config) applyDefaults() {
 	for i := range c.Peers {
 		if c.Peers[i].TrustLevel == "" {
 			c.Peers[i].TrustLevel = "read_only"
+		}
+	}
+	// Constitution defaults: if principles are set but inject flags are false, default both to true.
+	if len(c.Constitution.Principles) > 0 {
+		if !c.Constitution.InjectInContext {
+			c.Constitution.InjectInContext = true
+		}
+		if !c.Constitution.InjectInSessionInit {
+			c.Constitution.InjectInSessionInit = true
 		}
 	}
 	// Brain defaults: if URL is set but other fields are zero, apply sensible defaults.

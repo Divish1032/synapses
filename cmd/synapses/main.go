@@ -247,6 +247,33 @@ func cmdStart(args []string) error {
 				if brainCli != nil {
 					fw.SetBrainClient(brainCli) // wire incremental ingest
 				}
+				// Hot-reload synapses.json: reconnect scout/brain when config changes.
+				fw.SetConfigChangeHandler(func(newCfg *config.Config) {
+					if newCfg.Scout.URL != "" {
+						newScout := scout.NewClient(newCfg.Scout.URL, newCfg.Scout.TimeoutSec)
+						if newScout.Health(context.Background()) {
+							srv.SetScoutClient(newScout)
+							fmt.Fprintf(os.Stderr, "synapses: scout reconnected at %s\n", newCfg.Scout.URL)
+						} else {
+							fmt.Fprintf(os.Stderr, "synapses: scout unreachable at %s after config reload\n", newCfg.Scout.URL)
+						}
+					} else {
+						srv.SetScoutClient(nil)
+					}
+					if newCfg.Brain.URL != "" {
+						newBrain := brain.NewClient(newCfg.Brain.URL, newCfg.Brain.TimeoutSec)
+						if _, err := newBrain.HealthCheck(context.Background()); err != nil {
+							fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s after config reload: %v\n", newCfg.Brain.URL, err)
+						} else {
+							srv.SetBrainClient(newBrain)
+							fw.SetBrainClient(newBrain)
+							fmt.Fprintf(os.Stderr, "synapses: brain reconnected at %s\n", newCfg.Brain.URL)
+						}
+					} else {
+						srv.SetBrainClient(nil)
+						fw.SetBrainClient(nil)
+					}
+				})
 				fmt.Fprintf(os.Stderr, "synapses: watching %s for changes\n", absPath)
 			}
 		}
