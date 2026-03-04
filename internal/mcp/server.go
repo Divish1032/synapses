@@ -25,7 +25,7 @@ type ChangeSource interface {
 
 const (
 	serverName    = "synapses"
-	serverVersion = "0.5.0"
+	serverVersion = "0.6.0"
 )
 
 // packetCacheEntry holds a cached context packet with an expiry time.
@@ -271,6 +271,9 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("format",
 				mcp.Description("Output format: 'json' (default, full JSON blob ~2000-3800 tokens) or 'compact' (natural-language briefing ~400-600 tokens). Use 'compact' to reduce token usage when brain summaries are available."),
+			),
+			mcp.WithString("detail_level",
+				mcp.Description("Only used with format='compact'. Controls verbosity: 'summary' (~50 tokens, root entity header + warnings only), 'neighbors' (~200 tokens, adds Calls/Called-by name lists), 'full' (default, ~400-600 tokens, adds callee detail blocks and insight)."),
 			),
 		),
 		s.handleGetContext,
@@ -750,6 +753,58 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleWebDeepSearch,
+	)
+
+	// upsert_adr
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"upsert_adr",
+			mcp.WithDescription(
+				"Creates or updates an Architectural Decision Record (ADR) in the brain. "+
+					"ADRs are persistent cold-memory entries for significant design choices — "+
+					"they appear in get_context compact output when linked_files match the entity's file. "+
+					"Requires brain.url to be configured in synapses.json.",
+			),
+			mcp.WithString("id",
+				mcp.Required(),
+				mcp.Description("Unique identifier for the ADR, e.g. 'adr-001-no-cgo'. Use kebab-case."),
+			),
+			mcp.WithString("title",
+				mcp.Required(),
+				mcp.Description("Short, declarative title of the decision, e.g. 'No CGo — use modernc/sqlite'."),
+			),
+			mcp.WithString("decision",
+				mcp.Required(),
+				mcp.Description("The decision made, in 1-3 sentences."),
+			),
+			mcp.WithString("status",
+				mcp.Description("One of: proposed, accepted, deprecated, superseded. Defaults to 'proposed'."),
+			),
+			mcp.WithString("context",
+				mcp.Description("Problem context and forces that led to this decision."),
+			),
+			mcp.WithString("consequences",
+				mcp.Description("Consequences and trade-offs of this decision."),
+			),
+		),
+		s.handleUpsertADR,
+	)
+
+	// get_adrs
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_adrs",
+			mcp.WithDescription(
+				"Returns Architectural Decision Records (ADRs) from the brain. "+
+					"ADRs are persistent cold-memory entries for significant design choices. "+
+					"When a file param is provided, returns only accepted ADRs whose linked_files patterns match. "+
+					"Requires brain.url to be configured in synapses.json.",
+			),
+			mcp.WithString("file",
+				mcp.Description("Optional file path suffix to filter ADRs by linked_files patterns. Returns only accepted ADRs that match."),
+			),
+		),
+		s.handleGetADRs,
 	)
 
 }

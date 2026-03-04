@@ -512,11 +512,13 @@ func (s *Store) likeSearch(query string, limit int) ([]SearchResult, error) {
 }
 
 // sanitizeFTSQuery converts a raw user query into a safe FTS5 MATCH expression.
-// Each word is double-quoted to prevent AND/OR/NOT operators and special syntax
-// from causing parse errors. Empty result means the query had no usable terms.
+// Each word is double-quoted and suffixed with * for prefix matching — this
+// enables multi-word phrase queries like "BFS carver" to find "CarveEgoGraph"
+// (split_name = "Carve Ego Graph") by matching carv* → "Carve".
+// Empty result means the query had no usable terms.
 func sanitizeFTSQuery(q string) string {
 	// Strip FTS5 special characters.
-	replacer := strings.NewReplacer(`"`, " ", `'`, " ", `(`, " ", `)`, " ", `:`, " ")
+	replacer := strings.NewReplacer(`"`, " ", `'`, " ", `(`, " ", `)`, " ", `:`, " ", `*`, " ")
 	q = strings.TrimSpace(replacer.Replace(q))
 	words := strings.Fields(q)
 	if len(words) == 0 {
@@ -524,7 +526,13 @@ func sanitizeFTSQuery(q string) string {
 	}
 	quoted := make([]string, len(words))
 	for i, w := range words {
-		quoted[i] = `"` + w + `"`
+		// Prefix match (*) so "carver" finds "carve", "carving", "CarveEgoGraph".
+		// Short words (≤2 chars) skip prefix to avoid broad noise matches.
+		if len(w) > 2 {
+			quoted[i] = `"` + w + `"*`
+		} else {
+			quoted[i] = `"` + w + `"`
+		}
 	}
 	return strings.Join(quoted, " ")
 }

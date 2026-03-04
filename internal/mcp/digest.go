@@ -10,9 +10,12 @@ import (
 )
 
 // serializeCompact converts a directionalContext to a compact natural-language briefing.
-// Token usage: ~400-600 tokens vs 2000-3800 for the equivalent JSON.
+// Token usage varies by detail level:
+//   - "summary":   ~50 tokens  — root entity header + summary + warnings only
+//   - "neighbors": ~200 tokens — summary + Calls/Called-by name lists (no callee blocks)
+//   - "full":      ~400-600 tokens — full briefing with callee detail blocks (default)
 //
-// Format:
+// Format (full):
 //
 //	[entityName] type · file.go:line · complexity:N
 //	Summary: "prose briefing from brain or AST doc"
@@ -23,11 +26,26 @@ import (
 //
 //	[callee_name] type · file.go:line
 //	Summary: "callee summary if available in brain"
-func serializeCompact(dc *directionalContext) string {
+func serializeCompact(dc *directionalContext, detailLevel string) string {
 	var b strings.Builder
 
 	// Root entity header + summary.
 	writeNodeHeader(&b, dc.Root, getRootSummary(dc.Root, dc.ContextPacket))
+
+	// "summary" level: just the root header + warnings. Stop here.
+	if detailLevel == "summary" {
+		var warnings []string
+		if dc.ContextPacket != nil {
+			warnings = append(warnings, dc.ContextPacket.GraphWarnings...)
+			warnings = append(warnings, dc.ContextPacket.Concerns...)
+		}
+		if len(warnings) > 0 {
+			fmt.Fprintf(&b, "⚠ %s\n", strings.Join(warnings, " · "))
+		}
+		return strings.TrimSpace(b.String())
+	}
+
+	// "neighbors" and "full": add Calls / Called-by name lists.
 
 	// Calls: list callee names.
 	if len(dc.Callees) > 0 {
@@ -59,6 +77,27 @@ func serializeCompact(dc *directionalContext) string {
 	if len(warnings) > 0 {
 		fmt.Fprintf(&b, "⚠ %s\n", strings.Join(warnings, " · "))
 	}
+
+	// Hot Constitution: append project principles as a Laws line.
+	if len(dc.Principles) > 0 {
+		laws := strings.Join(dc.Principles, " · ")
+		if len(laws) > 120 {
+			laws = laws[:117] + "…"
+		}
+		fmt.Fprintf(&b, "📋 Laws: %s\n", laws)
+	}
+
+	// ADRs: show up to 2 accepted ADRs relevant to this entity's file.
+	for _, adr := range dc.ADRs {
+		fmt.Fprintf(&b, "[ADR] %s (%s)\n", adr.Title, adr.Status)
+	}
+
+	// "neighbors" level: stop after caller/callee names. No callee blocks.
+	if detailLevel == "neighbors" {
+		return strings.TrimSpace(b.String())
+	}
+
+	// "full" level (default): add insight + callee detail blocks.
 
 	// Architectural insight from brain (LLM-generated, only when brain available).
 	if dc.ContextPacket != nil && dc.ContextPacket.Insight != "" {

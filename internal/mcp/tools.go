@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -101,6 +102,9 @@ type directionalContext struct {
 	SuggestedNextTools []toolSuggestion              `json:"suggested_next_tools,omitempty"` // context-aware next steps
 	Truncated          bool                          `json:"truncated,omitempty"`            // true when token budget cut results
 	TruncatedCount     int                           `json:"truncated_count,omitempty"`      // nodes dropped by budget
+	BrainHint          string                        `json:"brain,omitempty"`                // set when brain is not configured
+	Principles         []string                      `json:"principles,omitempty"`           // Hot Constitution principles from synapses.json
+	ADRs               []brain.ADR                   `json:"adrs,omitempty"`                 // relevant accepted ADRs for this entity's file
 }
 
 // handleGetContext returns an N-hop ego-subgraph around the named entity,
@@ -259,6 +263,7 @@ func (s *Server) handleGetContext(
 					RootName:        best.Name,
 					RootType:        string(best.Type),
 					RootFile:        best.File,
+					RootDoc:         best.Metadata["doc"],
 					CalleeNames:     calleeNames,
 					CallerNames:     callerNames,
 					ApplicableRules: rules,
@@ -274,6 +279,8 @@ func (s *Server) handleGetContext(
 			}
 		}
 		dc.ContextPacket = pkt // nil if brain unavailable — callers check for nil
+	} else {
+		dc.BrainHint = "not configured — add brain.url to synapses.json for semantic enrichment"
 	}
 
 	// Attach annotations from all agents if the store is available.
@@ -291,12 +298,27 @@ func (s *Server) handleGetContext(
 	// Context-aware next-step suggestions.
 	dc.SuggestedNextTools = suggestNextAfterContext(dc)
 
-	// format=compact returns a ~400-600 token natural-language briefing instead of the
-	// default JSON blob (~2000-3800 tokens). Faster for Claude to process; uses brain
-	// prose summaries when available, falls back to AST doc metadata.
+	// Hot Constitution: inject project principles if configured.
+	if s.config != nil && s.config.Constitution.InjectInContext && len(s.config.Constitution.Principles) > 0 {
+		dc.Principles = s.config.Constitution.Principles
+	}
+
+	// ADRs: fetch relevant accepted ADRs for this entity's file (brain required, fail-silent).
+	if bc := s.getBrainClient(); bc != nil && dc.Root != nil && dc.Root.File != "" {
+		if adrs, err := bc.GetADRs(context.Background(), dc.Root.File); err == nil && len(adrs) > 0 {
+			if len(adrs) > 2 {
+				adrs = adrs[:2]
+			}
+			dc.ADRs = adrs
+		}
+	}
+
+	// format=compact returns a natural-language briefing instead of the default JSON blob.
+	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t, default).
 	format, _ := req.Params.Arguments["format"].(string)
 	if format == "compact" {
-		return mcp.NewToolResultText(serializeCompact(dc)), nil
+		detailLevel, _ := req.Params.Arguments["detail_level"].(string)
+		return mcp.NewToolResultText(serializeCompact(dc, detailLevel)), nil
 	}
 
 	// If multiple candidates existed, attach disambiguation list so agents
@@ -527,6 +549,22 @@ func (s *Server) handleFindEntity(
 		}
 		results = append(results, m)
 	}
+
+	// Sort results: implementation files before test files, then by path depth
+	// (shorter = closer to root). This ensures the authoritative definition
+	// appears first when both a_test.go and a.go define the same function name.
+	sort.Slice(results, func(i, j int) bool {
+		ti := isTestFile(results[i].File)
+		tj := isTestFile(results[j].File)
+		if ti != tj {
+			return !ti // non-test wins
+		}
+		// Same test-ness: prefer shorter file path (closer to project root).
+		if len(results[i].File) != len(results[j].File) {
+			return len(results[i].File) < len(results[j].File)
+		}
+		return results[i].File < results[j].File
+	})
 
 	result := map[string]interface{}{
 		"query":   query,
@@ -881,9 +919,13 @@ func (s *Server) handleGetFileContext(
 		})
 	}
 
-	sort.Slice(matches, func(i, j int) bool { return matches[i].Line < matches[j].Line })
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].File != matches[j].File {
+			return matches[i].File < matches[j].File
+		}
+		return matches[i].Line < matches[j].Line
+	})
 
-	// Trim absolute paths for output.
 	type fileEntity struct {
 		Type     graph.NodeType    `json:"type"`
 		Name     string            `json:"name"`
@@ -891,22 +933,43 @@ func (s *Server) handleGetFileContext(
 		Exported bool              `json:"exported"`
 		Metadata map[string]string `json:"metadata,omitempty"`
 	}
-	out := make([]fileEntity, len(matches))
-	for i, n := range matches {
-		out[i] = fileEntity{
-			Type:     n.Type,
-			Name:     n.Name,
-			Line:     n.Line,
-			Exported: n.Exported,
-			Metadata: n.Metadata,
-		}
+
+	// Check how many distinct files were matched.
+	fileSet := make(map[string]struct{})
+	for _, n := range matches {
+		fileSet[n.File] = struct{}{}
 	}
 
+	if len(fileSet) == 1 {
+		// Single file — keep existing flat format.
+		out := make([]fileEntity, len(matches))
+		for i, n := range matches {
+			out[i] = fileEntity{Type: n.Type, Name: n.Name, Line: n.Line, Exported: n.Exported, Metadata: n.Metadata}
+		}
+		return jsonResult(map[string]interface{}{
+			"file":     strings.TrimPrefix(matches[0].File, prefix),
+			"package":  matches[0].Package,
+			"count":    len(out),
+			"entities": out,
+		})
+	}
+
+	// Multiple files matched — group by file with attribution.
+	byFile := make(map[string][]fileEntity)
+	fileOrder := make([]string, 0, len(fileSet))
+	for _, n := range matches {
+		rel := strings.TrimPrefix(n.File, prefix)
+		if _, seen := byFile[rel]; !seen {
+			fileOrder = append(fileOrder, rel)
+		}
+		byFile[rel] = append(byFile[rel], fileEntity{Type: n.Type, Name: n.Name, Line: n.Line, Exported: n.Exported, Metadata: n.Metadata})
+	}
+	sort.Strings(fileOrder)
 	return jsonResult(map[string]interface{}{
-		"file":     strings.TrimPrefix(matches[0].File, prefix),
-		"package":  matches[0].Package,
-		"count":    len(out),
-		"entities": out,
+		"files_matched":    len(fileSet),
+		"total_count":      len(matches),
+		"entities_by_file": byFile,
+		"hint":             fmt.Sprintf("%d files named %q found. Use file= param with a longer path suffix to pin to one file.", len(fileSet), filePath),
 	})
 }
 
@@ -1109,11 +1172,32 @@ func (s *Server) handleGetCallChain(
 	}
 
 	if !found {
+		// Build a helpful explanation for why no path was found.
+		fromPkg := topLevelPackage(fromNode.File)
+		toPkg := topLevelPackage(toNode.File)
+		var reason, hint string
+		if fromPkg != toPkg && fromPkg != "" && toPkg != "" {
+			// Different top-level packages — likely a cross-binary boundary.
+			reason = fmt.Sprintf(
+				"No direct CALLS path found. %q (%s) and %q (%s) are in different packages (%s vs %s). "+
+					"Cross-binary calls (e.g. HTTP, gRPC, queue) are not captured as CALLS edges.",
+				fromName, fromNode.File, toName, toNode.File, fromPkg, toPkg,
+			)
+			hint = "If these communicate via HTTP or another protocol, use get_context on each entity to understand their APIs, then trace the integration manually."
+		} else {
+			reason = fmt.Sprintf(
+				"No direct CALLS path found between %q and %q. "+
+					"They may be unrelated, or connected only at runtime (e.g. via interface dispatch, reflection, or dynamic config).",
+				fromName, toName,
+			)
+			hint = "Use get_context on each entity to see their callers/callees, or get_impact to find what depends on them."
+		}
 		return jsonResult(map[string]interface{}{
-			"found":   false,
-			"from":    fromName,
-			"to":      toName,
-			"message": "no call chain exists between these entities",
+			"found":  false,
+			"from":   map[string]interface{}{"name": fromName, "file": fromNode.File, "type": string(fromNode.Type)},
+			"to":     map[string]interface{}{"name": toName, "file": toNode.File, "type": string(toNode.Type)},
+			"reason": reason,
+			"hint":   hint,
 		})
 	}
 
@@ -1166,6 +1250,37 @@ func (s *Server) handleGetCallChain(
 	})
 }
 
+// isTestFile returns true for test files (_test.go, test_*.py, *_test.ts, etc.)
+// so find_entity can rank implementation files above test files.
+func isTestFile(filePath string) bool {
+	base := filePath
+	if i := strings.LastIndex(filePath, "/"); i >= 0 {
+		base = filePath[i+1:]
+	}
+	return strings.HasSuffix(base, "_test.go") ||
+		strings.HasPrefix(base, "test_") ||
+		strings.HasSuffix(base, "_test.ts") ||
+		strings.HasSuffix(base, ".test.ts") ||
+		strings.HasSuffix(base, "_test.py") ||
+		strings.HasSuffix(base, ".spec.ts") ||
+		strings.HasSuffix(base, "_test.js") ||
+		strings.HasSuffix(base, ".test.js")
+}
+
+// topLevelPackage returns the first path component of filePath (the top-level
+// directory name), which typically corresponds to the binary or package root.
+// Returns "" if filePath has no directory component.
+func topLevelPackage(filePath string) string {
+	if filePath == "" {
+		return ""
+	}
+	parts := strings.SplitN(strings.TrimLeft(filePath, "/"), "/", 2)
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
+}
+
 // changeEntry is one record in the working-state change log.
 type changeEntry struct {
 	File         string `json:"file"`
@@ -1203,12 +1318,45 @@ func (s *Server) handleGetWorkingState(
 		events = []changeEntry{}
 	}
 
+	// Also surface recently-modified config files (synapses.json, Makefile, etc.)
+	// that the watcher ignores since they aren't source code.
+	root := s.graph.Root()
+	if root != "" {
+		cutoff := time.Now().Add(-time.Duration(windowMinutes) * time.Minute)
+		configPatterns := []string{"synapses.json", "Makefile", "Dockerfile"}
+		if entries, err := os.ReadDir(root); err == nil {
+			for _, de := range entries {
+				if de.IsDir() {
+					continue
+				}
+				name := de.Name()
+				ext := filepath.Ext(name)
+				isConfig := ext == ".json" || ext == ".yaml" || ext == ".yml" || ext == ".toml"
+				if !isConfig {
+					for _, p := range configPatterns {
+						if name == p {
+							isConfig = true
+							break
+						}
+					}
+				}
+				if !isConfig {
+					continue
+				}
+				if info, err := de.Info(); err == nil && info.ModTime().After(cutoff) {
+					events = append(events, changeEntry{
+						File: filepath.Join(root, name),
+						At:   info.ModTime().Format("15:04:05"),
+					})
+				}
+			}
+		}
+	}
+
 	result := map[string]interface{}{
 		"window_minutes": windowMinutes,
 		"recent_changes": events,
 	}
-
-	root := s.graph.Root()
 
 	// Best-effort git diff stat — omitted when git is unavailable or not a git repo.
 	if root != "" {
@@ -1436,6 +1584,15 @@ func (s *Server) handleSessionInit(
 		"session_hint":     "Pass latest_event_seq to get_events on the next call to receive only new events. Use scale_guidance to decide when to use Synapses tools vs Read/Grep.",
 	}
 
+	// ── 5. Constitution (Hot Constitution — project principles) ───────────
+	if s.config != nil && s.config.Constitution.InjectInSessionInit && len(s.config.Constitution.Principles) > 0 {
+		resp["constitution"] = map[string]interface{}{
+			"principles": s.config.Constitution.Principles,
+			"count":      len(s.config.Constitution.Principles),
+			"note":       "These project laws apply to all work in this session.",
+		}
+	}
+
 	return jsonResult(resp)
 }
 
@@ -1531,6 +1688,9 @@ func (s *Server) handleGetImpact(
 	result, err := s.graph.ImpactAnalysis(root.ID, maxDepth)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("impact analysis: %v", err)), nil
+	}
+	if result.Tiers == nil {
+		result.Tiers = []graph.ImpactTier{}
 	}
 
 	return jsonResult(result)

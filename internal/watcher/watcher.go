@@ -41,6 +41,11 @@ type PacketCacheInvalidator interface {
 	InvalidatePacketCache()
 }
 
+// ConfigChangeHandler is called when synapses.json changes on disk.
+// The argument is the new parsed config. Implementations should reconnect
+// any clients (scout, brain) whose settings may have changed.
+type ConfigChangeHandler func(newCfg *config.Config)
+
 // Watcher watches a directory tree and keeps a Graph current as files change.
 type Watcher struct {
 	fw          *fsnotify.Watcher
@@ -50,6 +55,8 @@ type Watcher struct {
 	cfg         *config.Config         // may be nil — violation checking is best-effort
 	brainClient interface{}            // *brain.Client — set via SetBrainClient; nil if brain not configured
 	pktInval    PacketCacheInvalidator // set via SetPacketInvalidator; may be nil
+	cfgHandler  ConfigChangeHandler    // called when synapses.json changes; may be nil
+	configPath  string                 // absolute path to synapses.json (set by Start)
 
 	mu      sync.Mutex
 	timers  map[string]*time.Timer // debounce timers keyed by absolute file path
@@ -98,9 +105,19 @@ func (w *Watcher) SetPacketInvalidator(pi PacketCacheInvalidator) {
 	w.pktInval = pi
 }
 
+// SetConfigChangeHandler registers a callback that is invoked whenever
+// synapses.json changes on disk. The callback receives the newly parsed config.
+// This enables hot-reload of brain/scout client settings without restarting.
+func (w *Watcher) SetConfigChangeHandler(fn ConfigChangeHandler) {
+	w.cfgHandler = fn
+}
+
 // Start begins watching root recursively. It returns immediately; the event
 // loop runs in a background goroutine. Call Stop to shut it down.
 func (w *Watcher) Start(root string) error {
+	// Record the config file path so handleEvent can detect changes to it.
+	w.configPath = filepath.Join(root, "synapses.json")
+
 	// Add every subdirectory under root to the fsnotify watch list.
 	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -208,6 +225,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 
 	// File written or created: debounce then re-parse.
 	if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
+		// synapses.json hot-reload: reload config and reconnect clients.
+		if w.cfgHandler != nil && path == w.configPath {
+			w.debounceConfigReload(path)
+			return
+		}
 		w.debounce(path, root)
 	}
 }
@@ -230,6 +252,45 @@ func (w *Watcher) debounce(path, root string) {
 
 		w.reparseFile(path, root)
 	})
+}
+
+// debounceConfigReload coalesces rapid writes to synapses.json into a single
+// config reload after debounceDelay of silence. Uses the same timer map as
+// code file debouncing since the key space is separate.
+func (w *Watcher) debounceConfigReload(path string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if t, ok := w.timers[path]; ok {
+		t.Reset(debounceDelay)
+		return
+	}
+
+	w.timers[path] = time.AfterFunc(debounceDelay, func() {
+		w.mu.Lock()
+		delete(w.timers, path)
+		w.mu.Unlock()
+
+		w.reloadConfig(path)
+	})
+}
+
+// reloadConfig parses the updated synapses.json and calls the registered
+// ConfigChangeHandler. Errors are logged to stderr but are otherwise non-fatal.
+func (w *Watcher) reloadConfig(configPath string) {
+	dir := filepath.Dir(configPath)
+	newCfg, err := config.Load(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "synapses/watcher: reload %s: %v\n", configPath, err)
+		return
+	}
+	// Update the watcher's own violation-checking config so future file changes
+	// use the freshly loaded rules.
+	w.cfg = newCfg
+	fmt.Fprintf(os.Stderr, "synapses/watcher: config reloaded from %s\n", configPath)
+	if w.cfgHandler != nil {
+		w.cfgHandler(newCfg)
+	}
 }
 
 // reparseFile removes stale nodes for path and re-parses it into the graph.
