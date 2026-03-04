@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+var idCounter uint64
 
 // Plan is a named collection of related tasks created during an LLM session.
 // It persists in SQLite so future sessions can resume the agreed work.
@@ -475,7 +478,12 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 // newID generates a short random ID for plans and tasks.
 // Uses time + random suffix — collision probability is negligible for local use.
 func newID() string {
-	return fmt.Sprintf("%x", time.Now().UnixNano())
+	// Combine timestamp with counter to ensure uniqueness even on systems with
+	// coarse timer resolution (like Windows). The counter ensures that multiple
+	// IDs generated within the same nanosecond are still unique.
+	ts := time.Now().UnixNano()
+	counter := atomic.AddUint64(&idCounter, 1)
+	return fmt.Sprintf("%x-%x", ts, counter)
 }
 
 // --- Session State (exact-moment task resumption) ---
