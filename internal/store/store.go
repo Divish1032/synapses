@@ -445,8 +445,8 @@ func (s *Store) SemanticSearch(query string, limit int) ([]SearchResult, error) 
 	if limit <= 0 {
 		limit = 20
 	}
-	q := sanitizeFTSQuery(query)
-	if q == "" {
+	andQ, orQ := sanitizeFTSQuery(query)
+	if andQ == "" {
 		return nil, nil
 	}
 
@@ -459,25 +459,36 @@ func (s *Store) SemanticSearch(query string, limit int) ([]SearchResult, error) 
 		ORDER BY score DESC
 		LIMIT ?`
 
-	rows, err := s.db.Query(ftsSQL, q, limit)
-	if err != nil {
-		// FTS5 syntax error — fall back to LIKE search on name.
-		return s.likeSearch(query, limit)
-	}
-	defer rows.Close()
-
-	var results []SearchResult
-	for rows.Next() {
-		var r SearchResult
-		if err := rows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc, &r.Score); err != nil {
+	// Strategy: try AND-match first (most precise), then OR-match (broader),
+	// then LIKE fallback (catches camelCase / substring hits).
+	tryQuery := func(q string) ([]SearchResult, error) {
+		rows, err := s.db.Query(ftsSQL, q, limit)
+		if err != nil {
 			return nil, err
 		}
-		results = append(results, r)
+		defer rows.Close()
+		var out []SearchResult
+		for rows.Next() {
+			var r SearchResult
+			if err := rows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc, &r.Score); err != nil {
+				return nil, err
+			}
+			out = append(out, r)
+		}
+		return out, rows.Err()
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+
+	results, err := tryQuery(andQ)
+	if err != nil {
+		return s.likeSearch(query, limit)
 	}
-	// If FTS returned nothing, try LIKE as a last resort.
+	if len(results) == 0 && orQ != andQ {
+		// AND returned nothing — broaden to OR across all words.
+		results, err = tryQuery(orQ)
+		if err != nil || len(results) == 0 {
+			return s.likeSearch(query, limit)
+		}
+	}
 	if len(results) == 0 {
 		return s.likeSearch(query, limit)
 	}
@@ -511,30 +522,29 @@ func (s *Store) likeSearch(query string, limit int) ([]SearchResult, error) {
 	return results, rows.Err()
 }
 
-// sanitizeFTSQuery converts a raw user query into a safe FTS5 MATCH expression.
-// Each word is double-quoted and suffixed with * for prefix matching — this
-// enables multi-word phrase queries like "BFS carver" to find "CarveEgoGraph"
-// (split_name = "Carve Ego Graph") by matching carv* → "Carve".
-// Empty result means the query had no usable terms.
-func sanitizeFTSQuery(q string) string {
+// sanitizeFTSQuery converts a raw user query into two safe FTS5 MATCH expressions:
+//   - andQuery: all words must match (most precise, space-joined quoted tokens)
+//   - orQuery:  any word must match (broader fallback, OR-joined quoted tokens)
+//
+// Each word is double-quoted to prevent AND/OR/NOT operators and special syntax
+// from causing parse errors. Empty andQuery means the query had no usable terms.
+func sanitizeFTSQuery(q string) (andQuery, orQuery string) {
 	// Strip FTS5 special characters.
-	replacer := strings.NewReplacer(`"`, " ", `'`, " ", `(`, " ", `)`, " ", `:`, " ", `*`, " ")
+	replacer := strings.NewReplacer(`"`, " ", `'`, " ", `(`, " ", `)`, " ", `:`, " ")
 	q = strings.TrimSpace(replacer.Replace(q))
 	words := strings.Fields(q)
 	if len(words) == 0 {
-		return ""
+		return "", ""
 	}
 	quoted := make([]string, len(words))
 	for i, w := range words {
-		// Prefix match (*) so "carver" finds "carve", "carving", "CarveEgoGraph".
-		// Short words (≤2 chars) skip prefix to avoid broad noise matches.
-		if len(w) > 2 {
-			quoted[i] = `"` + w + `"*`
-		} else {
-			quoted[i] = `"` + w + `"`
-		}
+		quoted[i] = `"` + w + `"`
 	}
-	return strings.Join(quoted, " ")
+	// AND: space-separated quoted tokens (FTS5 implicit AND)
+	andQuery = strings.Join(quoted, " ")
+	// OR: explicit OR between tokens — broadens multi-word queries
+	orQuery = strings.Join(quoted, " OR ")
+	return andQuery, orQuery
 }
 
 // Close releases the database connection.
