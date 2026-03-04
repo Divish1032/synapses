@@ -67,12 +67,12 @@ type DeepSearchRequest struct {
 
 // DeepSearchResponse is returned by POST /v1/deep-search.
 type DeepSearchResponse struct {
-	Query            string      `json:"query"`
-	ExpandedQueries  []string    `json:"expanded_queries"`
-	Hits             []SearchHit `json:"hits"`
-	Count            int         `json:"count"`
-	TotalRawHits     int         `json:"total_raw_hits"`
-	DeduplicatedCount int        `json:"deduplicated"`
+	Query             string      `json:"query"`
+	ExpandedQueries   []string    `json:"expanded_queries"`
+	Hits              []SearchHit `json:"hits"`
+	Count             int         `json:"count"`
+	TotalRawHits      int         `json:"total_raw_hits"`
+	DeduplicatedCount int         `json:"deduplicated"`
 }
 
 // HealthResponse is returned by GET /v1/health.
