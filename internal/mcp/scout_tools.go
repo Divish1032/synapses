@@ -139,7 +139,7 @@ func (s *Server) handleWebAnnotate(
 				if i >= 5 {
 					break
 				}
-				sb.WriteString(fmt.Sprintf("\n  - [%s](%s)", h.Title, h.URL))
+				fmt.Fprintf(&sb, "\n  - [%s](%s)", h.Title, h.URL)
 				if h.Snippet != "" {
 					sb.WriteString(": ")
 					sb.WriteString(h.Snippet)

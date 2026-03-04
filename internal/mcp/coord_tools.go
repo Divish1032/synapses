@@ -71,9 +71,9 @@ func (s *Server) handleGetMyTasks(
 		summary = fmt.Sprintf("%d task(s) for agent %q", len(tasks), agentID)
 	}
 	return jsonResult(map[string]interface{}{
-		"summary":         summary,
-		"tasks":           tasks,
-		"suggested_next":  suggested,
+		"summary":        summary,
+		"tasks":          tasks,
+		"suggested_next": suggested,
 	})
 }
 
@@ -111,10 +111,10 @@ func (s *Server) handleLinkTaskNodes(
 		return mcp.NewToolResultError(fmt.Sprintf("link task nodes: %v", err)), nil
 	}
 	return jsonResult(map[string]interface{}{
-		"task_id":    taskID,
-		"linked":     len(nodeIDs),
-		"node_ids":   nodeIDs,
-		"message":    "Nodes linked. get_context(task_id=) will now boost these nodes in relevance ranking.",
+		"task_id":  taskID,
+		"linked":   len(nodeIDs),
+		"node_ids": nodeIDs,
+		"message":  "Nodes linked. get_context(task_id=) will now boost these nodes in relevance ranking.",
 	})
 }
 
