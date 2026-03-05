@@ -72,6 +72,8 @@ func run(args []string) error {
 		return nil
 	case "setup":
 		return cmdSetup(args[1:])
+	case "mcp-setup":
+		return cmdMCPSetup(args[1:])
 	case "query":
 		return cmdQuery(args[1:])
 	case "export":
@@ -100,7 +102,13 @@ func cmdStart(args []string) error {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
-	cfg, err := config.Load(absPath)
+	// CONFIG-01: walk upward to find synapses.json (like .git discovery).
+	// The index path (absPath) stays unchanged — we only adjust where config is loaded from.
+	cfgDir, found := config.FindConfigDir(absPath)
+	if found && cfgDir != absPath {
+		fmt.Fprintf(os.Stderr, "synapses: using config from %s\n", cfgDir)
+	}
+	cfg, err := config.Load(cfgDir)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -1405,7 +1413,176 @@ MCP TOOLS EXPOSED:
   find_entity            Locate nodes by name or substring
   validate_plan          Check changes against architectural rules
   get_violations         List all current rule violations
+
+AGENT SETUP:
+  mcp-setup  -agent <name>   Write MCP config for the specified agent
+  Supported agents: cursor, gemini, zed, windsurf, claude, all
 `, version)
+}
+
+// cmdMCPSetup writes per-agent MCP configuration files so that AI coding
+// agents other than Claude Code can discover and use the Synapses MCP server.
+//
+// Usage:
+//
+//	synapses mcp-setup --agent cursor|gemini|zed|windsurf|claude|all [--path .]
+//
+// All per-project config files are written relative to --path (default ".").
+// Windsurf writes to the global user config (~/.codeium/windsurf/mcp_config.json).
+func cmdMCPSetup(args []string) error {
+	fs := flag.NewFlagSet("mcp-setup", flag.ContinueOnError)
+	agent := fs.String("agent", "all", "Agent to configure: cursor|gemini|zed|windsurf|claude|all")
+	repoPath := fs.String("path", ".", "Project root to write per-project configs into")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	absPath, err := filepath.Abs(*repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	// The MCP server entry common to all stdio-based agents.
+	type stdioServer struct {
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
+		Type    string   `json:"type"`
+	}
+	type mcpServersWrapper struct {
+		MCPServers map[string]stdioServer `json:"mcpServers"`
+	}
+
+	serverEntry := stdioServer{
+		Command: "synapses",
+		Args:    []string{"start", "--path", "."},
+		Type:    "stdio",
+	}
+
+	// mergeStdioConfig reads an existing JSON file (if any), sets/updates the
+	// "synapses" key inside the top-level "mcpServers" object, and writes back.
+	mergeStdioConfig := func(filePath string) error {
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+			return err
+		}
+		existing := make(map[string]interface{})
+		if data, err := os.ReadFile(filePath); err == nil {
+			_ = json.Unmarshal(data, &existing)
+		}
+		servers, _ := existing["mcpServers"].(map[string]interface{})
+		if servers == nil {
+			servers = make(map[string]interface{})
+		}
+		servers["synapses"] = serverEntry
+		existing["mcpServers"] = servers
+		out, err := json.MarshalIndent(existing, "", "  ")
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filePath, append(out, '\n'), 0o644)
+	}
+
+	// mergeZedConfig handles Zed's different "context_servers" key shape.
+	mergeZedConfig := func(filePath string) error {
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+			return err
+		}
+		existing := make(map[string]interface{})
+		if data, err := os.ReadFile(filePath); err == nil {
+			_ = json.Unmarshal(data, &existing)
+		}
+		ctxServers, _ := existing["context_servers"].(map[string]interface{})
+		if ctxServers == nil {
+			ctxServers = make(map[string]interface{})
+		}
+		ctxServers["synapses"] = map[string]interface{}{
+			"command": map[string]interface{}{
+				"path": "synapses",
+				"args": []string{"start", "--path", "."},
+			},
+		}
+		existing["context_servers"] = ctxServers
+		out, err := json.MarshalIndent(existing, "", "  ")
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filePath, append(out, '\n'), 0o644)
+	}
+
+	type agentSetup struct {
+		name    string
+		setup   func() error
+		cfgPath string // for display only
+	}
+
+	homeDir, _ := os.UserHomeDir()
+
+	agents := []agentSetup{
+		{
+			name:    "cursor",
+			cfgPath: filepath.Join(absPath, ".cursor", "mcp.json"),
+			setup: func() error {
+				return mergeStdioConfig(filepath.Join(absPath, ".cursor", "mcp.json"))
+			},
+		},
+		{
+			name:    "gemini",
+			cfgPath: filepath.Join(absPath, ".gemini", "settings.json"),
+			setup: func() error {
+				return mergeStdioConfig(filepath.Join(absPath, ".gemini", "settings.json"))
+			},
+		},
+		{
+			name:    "zed",
+			cfgPath: filepath.Join(absPath, ".zed", "settings.json"),
+			setup: func() error {
+				return mergeZedConfig(filepath.Join(absPath, ".zed", "settings.json"))
+			},
+		},
+		{
+			name:    "windsurf",
+			cfgPath: filepath.Join(homeDir, ".codeium", "windsurf", "mcp_config.json"),
+			setup: func() error {
+				return mergeStdioConfig(filepath.Join(homeDir, ".codeium", "windsurf", "mcp_config.json"))
+			},
+		},
+		{
+			name:    "claude",
+			cfgPath: "via `claude mcp add` (Claude Code CLI)",
+			setup: func() error {
+				cmd := exec.Command("claude", "mcp", "add", "synapses", "--", "synapses", "start", "--path", ".")
+				cmd.Dir = absPath
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				if err := cmd.Run(); err != nil {
+					// Not fatal — Claude Code may not be installed.
+					fmt.Fprintf(os.Stderr, "  ! claude CLI not available (%v). Manual setup: claude mcp add synapses -- synapses start --path .\n", err)
+				}
+				return nil
+			},
+		},
+	}
+
+	target := strings.ToLower(*agent)
+	wrote := 0
+	for _, a := range agents {
+		if target != "all" && target != a.name {
+			continue
+		}
+		if err := a.setup(); err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ %-12s %v\n", a.name, err)
+		} else {
+			fmt.Printf("  \033[32m✓\033[0m %-12s %s\n", a.name, a.cfgPath)
+			wrote++
+		}
+	}
+
+	if wrote == 0 && target != "all" {
+		return fmt.Errorf("unknown agent %q — choose one of: cursor, gemini, zed, windsurf, claude, all", *agent)
+	}
+
+	fmt.Printf("\n  Done. Restart your AI agent to pick up the new MCP server.\n")
+	fmt.Printf("  Note: make sure 'synapses' is on PATH before starting your agent.\n")
+	return nil
 }
 
 // buildIngestCode constructs the ingest code string for a node (signature + doc comment).
