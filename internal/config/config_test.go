@@ -94,6 +94,42 @@ func TestLoad_MissingRuleID_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestFindConfigDir_ParentDir(t *testing.T) {
+	// Setup: create /repo/synapses.json and a sub-directory /repo/a/b/c
+	baseDir := writeConfig(t, config.Config{Version: "1"})
+	subDir := filepath.Join(baseDir, "a", "b", "c")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should walk up and find it in baseDir
+	foundDir, ok := config.FindConfigDir(subDir)
+	if !ok {
+		t.Fatal("FindConfigDir returned false")
+	}
+	if foundDir != baseDir {
+		t.Errorf("FindConfigDir returned %q, want %q", foundDir, baseDir)
+	}
+}
+
+func TestFindConfigDir_NotFound(t *testing.T) {
+	dir := t.TempDir()
+	// No synapses.json created
+
+	subDir := filepath.Join(dir, "a", "b", "c")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	foundDir, ok := config.FindConfigDir(subDir)
+	if ok {
+		t.Errorf("FindConfigDir returned true with dir %q, want false", foundDir)
+	}
+	if foundDir != subDir {
+		t.Errorf("FindConfigDir returned %q, want %q when ok=false", foundDir, subDir)
+	}
+}
+
 func TestCarveConfig_OverridesApplied(t *testing.T) {
 	dir := writeConfig(t, config.Config{
 		Rules: []config.Rule{},

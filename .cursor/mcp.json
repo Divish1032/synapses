@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "synapses": {
+      "command": "synapses",
+      "args": [
+        "start",
+        "--path",
+        "."
+      ],
+      "type": "stdio"
+    }
+  }
+}

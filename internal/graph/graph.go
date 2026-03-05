@@ -166,6 +166,22 @@ func (g *Graph) FindByPattern(pattern string) []*Node {
 	return results
 }
 
+// FindByFile returns all nodes whose File field matches the given path.
+// The match is suffix-based so callers may pass either a full absolute path or
+// a relative path such as "internal/graph/graph.go"; both resolve correctly
+// against the absolute paths that the parser stores on each node.
+func (g *Graph) FindByFile(filePath string) []*Node {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var results []*Node
+	for _, n := range g.nodes {
+		if n.File == filePath || strings.HasSuffix(n.File, "/"+filePath) {
+			results = append(results, n)
+		}
+	}
+	return results
+}
+
 // Fanout returns the number of outgoing edges from the given node.
 func (g *Graph) Fanout(id NodeID) int {
 	g.mu.RLock()

@@ -1,0 +1,14 @@
+{
+  "context_servers": {
+    "synapses": {
+      "command": {
+        "args": [
+          "start",
+          "--path",
+          "."
+        ],
+        "path": "synapses"
+      }
+    }
+  }
+}

@@ -604,10 +604,12 @@ func (s *Server) handleValidatePlan(
 			skipped = append(skipped, fmt.Sprintf("adds_call_to %q not yet in graph — edge skipped (no rules can fire for unknown targets)", change.AddsCallTo))
 			continue
 		}
-		// Find a node representing the source file.
-		sources := overlay.FindByPattern(change.File)
+		// Find nodes in the source file. Accepts both absolute and relative paths
+		// (e.g. "synapses/internal/graph/graph.go" resolves against absolute paths
+		// stored by the parser via the suffix-based FindByFile match).
+		sources := overlay.FindByFile(change.File)
 		if len(sources) == 0 {
-			skipped = append(skipped, fmt.Sprintf("file %q not in graph — skipped", change.File))
+			skipped = append(skipped, fmt.Sprintf("file %q: no nodes found in graph (check path is correct relative to repo root)", change.File))
 			continue
 		}
 		overlay.AddEdge(&graph.Edge{

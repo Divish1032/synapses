@@ -287,6 +287,32 @@ type Violation struct {
 	Explanation string `json:"explanation,omitempty"`
 }
 
+// FindConfigDir walks upward from start looking for a directory that contains
+// synapses.json, stopping at the filesystem root. It mirrors the way git locates
+// .git so that "synapses start --path backend/handlers" can still load a
+// synapses.json that lives at the repository root.
+//
+// Returns (dir, true) where dir is the first ancestor (inclusive) that contains
+// synapses.json. Returns (start, false) when no such directory is found.
+func FindConfigDir(start string) (string, bool) {
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return start, false
+	}
+	for {
+		candidate := filepath.Join(dir, configFileName)
+		if _, err := os.Stat(candidate); err == nil {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached the filesystem root without finding the file.
+			return start, false
+		}
+		dir = parent
+	}
+}
+
 // Load reads synapses.json from the given directory. If the file does not
 // exist, a default (empty rules) config is returned without error.
 func Load(dir string) (*Config, error) {
