@@ -50,6 +50,10 @@ type Server struct {
 	// Context-packet cache: 20 slots max, 30s TTL. Keyed by "entityName:depth".
 	packetCacheMu sync.Mutex
 	packetCache   map[string]*packetCacheEntry
+
+	// Brain cache warming debounce: prevents hammering the brain on rapid saves.
+	warmMu   sync.Mutex
+	lastWarm time.Time
 }
 
 // New creates a Server wired to the given graph, config, and optional store.
@@ -86,19 +90,21 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		}
 		elapsed := time.Since(startTimes.pop(req.Params.Name))
 		success := result == nil || !result.IsError
-		agentID, _ := req.Params.Arguments["agent_id"].(string)
-		entity, _ := req.Params.Arguments["entity"].(string)
+		agentID, _ := req.GetArguments()["agent_id"].(string)
+		entity, _ := req.GetArguments()["entity"].(string)
 		if entity == "" {
-			entity, _ = req.Params.Arguments["query"].(string)
+			entity, _ = req.GetArguments()["query"].(string)
 		}
 		s.store.RecordToolCall(req.Params.Name, agentID, entity, elapsed.Milliseconds(), success)
 	})
 
 	s.mcp = server.NewMCPServer(serverName, serverVersion,
 		server.WithToolCapabilities(true),
+		server.WithResourceCapabilities(true, true), // subscribe + listChanged
 		server.WithHooks(hooks),
 	)
 	s.registerTools()
+	s.registerResources()
 	return s
 }
 
@@ -156,12 +162,11 @@ func (s *Server) setPacketCache(key string, pkt interface{}) {
 	s.packetCache[key] = &packetCacheEntry{pkt: pkt, expiresAt: time.Now().Add(packetCacheTTL)}
 }
 
-// InvalidatePacketCache clears the entire context-packet cache. Called by the
-// file watcher after any file change so stale packets are not returned.
+// InvalidatePacketCache clears the entire context-packet cache. Satisfies the
+// watcher.PacketCacheInvalidator interface; delegates to InvalidatePacketCacheForFile
+// with an empty path so resource notifications and brain warming are also triggered.
 func (s *Server) InvalidatePacketCache() {
-	s.packetCacheMu.Lock()
-	s.packetCache = make(map[string]*packetCacheEntry, packetCacheMax)
-	s.packetCacheMu.Unlock()
+	s.InvalidatePacketCacheForFile("")
 }
 
 // SetChangeSource wires a change event source (typically the file watcher) so
@@ -936,6 +941,39 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleUpsertADR,
+	)
+
+	// prepare_context — intent-based context assembly (replaces multi-tool chains).
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"prepare_context",
+			mcp.WithDescription(
+				"Intent-based context assembly. Declare WHAT you need and a target; "+
+					"Synapses composes the right context in one round-trip. "+
+					"Replaces chains like get_context→get_impact→get_violations.\n"+
+					"Intents: 'modify' (safe-edit briefing), 'understand' (structure), "+
+					"'review' (quality/risk), 'debug' (call-path trace), "+
+					"'add' (conventions for new code), 'plan' (dry-run scope assessment).",
+			),
+			mcp.WithString("intent",
+				mcp.Required(),
+				mcp.Description("'modify' | 'understand' | 'review' | 'debug' | 'add' | 'plan'"),
+			),
+			mcp.WithString("target",
+				mcp.Required(),
+				mcp.Description("Entity name, file path suffix, or search query."),
+			),
+			mcp.WithString("file",
+				mcp.Description("Optional file path suffix to disambiguate entity names."),
+			),
+			mcp.WithString("task_id",
+				mcp.Description("Optional task ID for relevance boosting."),
+			),
+			mcp.WithNumber("token_budget",
+				mcp.Description("Max tokens for the response. Defaults vary by intent (1500–3500)."),
+			),
+		),
+		s.handlePrepareContext,
 	)
 
 	// get_adrs

@@ -1602,3 +1602,34 @@ func (s *Store) ToolUsageStats(days, limit int) ([]ToolUsageStat, error) {
 	}
 	return stats, rows.Err()
 }
+
+// ---------------------------------------------------------------------------
+// GraphIndex snapshot persistence
+//
+// The snapshot is stored as a binary BLOB in the meta table under the key
+// "graph_snapshot". On a warm boot where file_hashes are unchanged, the watcher
+// can call LoadIndexSnapshot to restore the columnar index in <200ms instead of
+// re-parsing every source file.
+// ---------------------------------------------------------------------------
+
+// SaveIndexSnapshot persists a zstd-compressed GraphIndex BLOB to the meta table.
+func (s *Store) SaveIndexSnapshot(blob []byte) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO meta (key, value) VALUES ('graph_snapshot', ?)`,
+		blob,
+	)
+	return err
+}
+
+// LoadIndexSnapshot returns the raw BLOB previously saved by SaveIndexSnapshot,
+// or (nil, nil) if no snapshot exists.
+func (s *Store) LoadIndexSnapshot() ([]byte, error) {
+	var blob []byte
+	err := s.db.QueryRow(
+		`SELECT value FROM meta WHERE key = 'graph_snapshot'`,
+	).Scan(&blob)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return blob, err
+}

@@ -31,17 +31,17 @@ func (s *Server) handleWebSearch(
 		return mcpgo.NewToolResultError("scout unavailable: configure scout.url in synapses.json"), nil
 	}
 
-	query, _ := req.Params.Arguments["query"].(string)
+	query, _ := req.GetArguments()["query"].(string)
 	if query == "" {
 		return mcpgo.NewToolResultError("query is required"), nil
 	}
 
 	maxResults := 5
-	if v, ok := req.Params.Arguments["max_results"].(float64); ok && v > 0 {
+	if v, ok := req.GetArguments()["max_results"].(float64); ok && v > 0 {
 		maxResults = int(v)
 	}
-	region, _ := req.Params.Arguments["region"].(string)
-	timelimit, _ := req.Params.Arguments["timelimit"].(string)
+	region, _ := req.GetArguments()["region"].(string)
+	timelimit, _ := req.GetArguments()["timelimit"].(string)
 
 	resp := sc.Search(ctx, scout.SearchRequest{
 		Query:      query,
@@ -71,12 +71,12 @@ func (s *Server) handleWebFetch(
 		return mcpgo.NewToolResultError("scout unavailable: configure scout.url in synapses.json"), nil
 	}
 
-	input, _ := req.Params.Arguments["input"].(string)
+	input, _ := req.GetArguments()["input"].(string)
 	if input == "" {
 		return mcpgo.NewToolResultError("input is required (URL or search query)"), nil
 	}
 
-	forceRefresh, _ := req.Params.Arguments["force_refresh"].(bool)
+	forceRefresh, _ := req.GetArguments()["force_refresh"].(bool)
 
 	resp := sc.Fetch(ctx, scout.FetchRequest{
 		Input:        input,
@@ -118,15 +118,15 @@ func (s *Server) handleWebAnnotate(
 		return mcpgo.NewToolResultError("store not available (run synapses start, not synapses index)"), nil
 	}
 
-	nodeID, _ := req.Params.Arguments["node_id"].(string)
+	nodeID, _ := req.GetArguments()["node_id"].(string)
 	if nodeID == "" {
 		return mcpgo.NewToolResultError("node_id is required"), nil
 	}
-	agentID, _ := req.Params.Arguments["agent_id"].(string)
-	note, _ := req.Params.Arguments["note"].(string)
+	agentID, _ := req.GetArguments()["agent_id"].(string)
+	note, _ := req.GetArguments()["note"].(string)
 
 	// Optional: structured hits JSON to format as a readable annotation.
-	if hitsJSON, ok := req.Params.Arguments["hits"].(string); ok && hitsJSON != "" {
+	if hitsJSON, ok := req.GetArguments()["hits"].(string); ok && hitsJSON != "" {
 		var hits []scout.SearchHit
 		if err := json.Unmarshal([]byte(hitsJSON), &hits); err == nil && len(hits) > 0 {
 			var sb strings.Builder
@@ -177,17 +177,17 @@ func (s *Server) handleWebDeepSearch(
 		return mcpgo.NewToolResultError("scout unavailable: configure scout.url in synapses.json"), nil
 	}
 
-	query, _ := req.Params.Arguments["query"].(string)
+	query, _ := req.GetArguments()["query"].(string)
 	if query == "" {
 		return mcpgo.NewToolResultError("query is required"), nil
 	}
 
 	maxResults := 10
-	if v, ok := req.Params.Arguments["max_results"].(float64); ok && v > 0 {
+	if v, ok := req.GetArguments()["max_results"].(float64); ok && v > 0 {
 		maxResults = int(v)
 	}
-	region, _ := req.Params.Arguments["region"].(string)
-	timelimit, _ := req.Params.Arguments["timelimit"].(string)
+	region, _ := req.GetArguments()["region"].(string)
+	timelimit, _ := req.GetArguments()["timelimit"].(string)
 
 	resp := sc.DeepSearch(ctx, scout.DeepSearchRequest{
 		Query:      query,

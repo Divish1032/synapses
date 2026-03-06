@@ -102,15 +102,15 @@ func (s *Server) handleCreatePlan(
 		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
 	}
 
-	title, _ := req.Params.Arguments["title"].(string)
+	title, _ := req.GetArguments()["title"].(string)
 	if title == "" {
 		return mcp.NewToolResultError("title is required"), nil
 	}
-	description, _ := req.Params.Arguments["description"].(string)
-	agentID, _ := req.Params.Arguments["agent_id"].(string)
+	description, _ := req.GetArguments()["description"].(string)
+	agentID, _ := req.GetArguments()["agent_id"].(string)
 
 	var taskInputs []store.TaskInput
-	switch tv := req.Params.Arguments["tasks"].(type) {
+	switch tv := req.GetArguments()["tasks"].(type) {
 	case string:
 		// LLM sent tasks as a JSON-encoded string (legacy path).
 		if tv == "" {
@@ -168,8 +168,8 @@ func (s *Server) handleGetPendingTasks(
 		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
 	}
 
-	planID, _ := req.Params.Arguments["plan_id"].(string)
-	agentID, _ := req.Params.Arguments["agent_id"].(string)
+	planID, _ := req.GetArguments()["plan_id"].(string)
+	agentID, _ := req.GetArguments()["agent_id"].(string)
 
 	s.upsertAgentIfNeeded(agentID)
 
@@ -238,7 +238,7 @@ func (s *Server) handleSaveSessionState(
 
 	// Parse JSON array fields; accept both raw arrays and JSON strings.
 	parseStrArr := func(key string) []string {
-		switch v := req.Params.Arguments[key].(type) {
+		switch v := req.GetArguments()[key].(type) {
 		case []interface{}:
 			out := make([]string, 0, len(v))
 			for _, item := range v {
@@ -318,11 +318,11 @@ func (s *Server) handleUpdateTask(
 		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
 	}
 
-	id, _ := req.Params.Arguments["id"].(string)
+	id, _ := req.GetArguments()["id"].(string)
 	if id == "" {
 		return mcp.NewToolResultError("id is required"), nil
 	}
-	status, _ := req.Params.Arguments["status"].(string)
+	status, _ := req.GetArguments()["status"].(string)
 	if status == "" {
 		return mcp.NewToolResultError("status is required (pending | in_progress | done | cancelled)"), nil
 	}
@@ -333,8 +333,8 @@ func (s *Server) handleUpdateTask(
 		return mcp.NewToolResultError(fmt.Sprintf("invalid status %q — must be one of: pending, in_progress, done, cancelled", status)), nil
 	}
 
-	notes, _ := req.Params.Arguments["notes"].(string)
-	agentID, _ := req.Params.Arguments["agent_id"].(string)
+	notes, _ := req.GetArguments()["notes"].(string)
+	agentID, _ := req.GetArguments()["agent_id"].(string)
 
 	s.upsertAgentIfNeeded(agentID)
 

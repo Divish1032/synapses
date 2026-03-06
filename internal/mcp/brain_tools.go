@@ -29,22 +29,22 @@ func (s *Server) handleUpsertADR(
 		return mcp.NewToolResultText(`{"error": "brain not configured — add brain.url to synapses.json"}`), nil
 	}
 
-	id, _ := req.Params.Arguments["id"].(string)
-	title, _ := req.Params.Arguments["title"].(string)
-	decision, _ := req.Params.Arguments["decision"].(string)
+	id, _ := req.GetArguments()["id"].(string)
+	title, _ := req.GetArguments()["title"].(string)
+	decision, _ := req.GetArguments()["decision"].(string)
 	if id == "" || title == "" || decision == "" {
 		return mcp.NewToolResultText(`{"error": "id, title, and decision are required"}`), nil
 	}
 
-	status, _ := req.Params.Arguments["status"].(string)
+	status, _ := req.GetArguments()["status"].(string)
 	if status == "" {
 		status = "proposed"
 	}
-	contextText, _ := req.Params.Arguments["context"].(string)
-	consequences, _ := req.Params.Arguments["consequences"].(string)
+	contextText, _ := req.GetArguments()["context"].(string)
+	consequences, _ := req.GetArguments()["consequences"].(string)
 
 	var linkedFiles []string
-	if lf, ok := req.Params.Arguments["linked_files"].([]interface{}); ok {
+	if lf, ok := req.GetArguments()["linked_files"].([]interface{}); ok {
 		for _, f := range lf {
 			if s, ok := f.(string); ok && s != "" {
 				linkedFiles = append(linkedFiles, s)
@@ -77,7 +77,7 @@ func (s *Server) handleGetADRs(
 		return mcp.NewToolResultText(`{"error": "brain not configured — add brain.url to synapses.json"}`), nil
 	}
 
-	fileFilter, _ := req.Params.Arguments["file"].(string)
+	fileFilter, _ := req.GetArguments()["file"].(string)
 	adrs, err := bc.GetADRs(ctx, fileFilter)
 	if err != nil {
 		return mcp.NewToolResultText(`{"error": "` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`), nil
