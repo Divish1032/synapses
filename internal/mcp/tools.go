@@ -111,7 +111,7 @@ func (s *Server) handleGetContext(
 	_ context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
-	entityName, ok := req.Params.Arguments["entity"].(string)
+	entityName, ok := req.GetArguments()["entity"].(string)
 	if !ok || entityName == "" {
 		return mcp.NewToolResultError("entity is required"), nil
 	}
@@ -119,15 +119,15 @@ func (s *Server) handleGetContext(
 	cfg := s.config.CarveConfig()
 
 	// Allow per-call overrides of depth and token budget.
-	if d, ok := req.Params.Arguments["depth"].(float64); ok && d > 0 {
+	if d, ok := req.GetArguments()["depth"].(float64); ok && d > 0 {
 		cfg.MaxDepth = int(d)
 	}
-	if b, ok := req.Params.Arguments["token_budget"].(float64); ok && b > 0 {
+	if b, ok := req.GetArguments()["token_budget"].(float64); ok && b > 0 {
 		cfg.TokenBudget = int(b)
 	}
 
 	// P1.6: Task-aware relevance boost — nodes linked to the active task float up.
-	taskID, _ := req.Params.Arguments["task_id"].(string)
+	taskID, _ := req.GetArguments()["task_id"].(string)
 	var boostedNodes map[graph.NodeID]bool
 	if taskID != "" && s.store != nil {
 		if task, err := s.store.GetTask(taskID); err == nil && len(task.LinkedNodes) > 0 {
@@ -139,7 +139,7 @@ func (s *Server) handleGetContext(
 	}
 
 	// Optional file hint — narrows lookup to a specific file when entity names are ambiguous.
-	fileHint, _ := req.Params.Arguments["file"].(string)
+	fileHint, _ := req.GetArguments()["file"].(string)
 
 	// Resolve the entity name to a node ID.
 	nodes := s.graph.FindByName(entityName)
@@ -205,7 +205,7 @@ func (s *Server) handleGetContext(
 	}
 
 	// P2.2: impact mode — reverse-only BFS, same shape as get_impact.
-	mode, _ := req.Params.Arguments["mode"].(string)
+	mode, _ := req.GetArguments()["mode"].(string)
 	if mode == "impact" {
 		maxDepth := cfg.MaxDepth
 		result, err := s.graph.ImpactAnalysis(best.ID, maxDepth)
@@ -313,9 +313,9 @@ func (s *Server) handleGetContext(
 
 	// format=compact returns a natural-language briefing instead of the default JSON blob.
 	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t, default).
-	format, _ := req.Params.Arguments["format"].(string)
+	format, _ := req.GetArguments()["format"].(string)
 	if format == "compact" {
-		detailLevel, _ := req.Params.Arguments["detail_level"].(string)
+		detailLevel, _ := req.GetArguments()["detail_level"].(string)
 		return mcp.NewToolResultText(serializeCompact(dc, detailLevel)), nil
 	}
 
@@ -347,6 +347,15 @@ type toolSuggestion struct {
 
 func suggestNextAfterContext(dc *directionalContext) []toolSuggestion {
 	var suggestions []toolSuggestion
+
+	// Suggest prepare_context first when the agent likely needs a broader view.
+	if len(dc.Callers) > 3 {
+		suggestions = append(suggestions, toolSuggestion{
+			Tool:   "prepare_context",
+			Reason: fmt.Sprintf("high blast radius (%d callers) — use intent=\"modify\" for a safe-edit briefing or intent=\"plan\" for scope assessment", len(dc.Callers)),
+		})
+	}
+
 	if len(dc.Callers) > 0 {
 		suggestions = append(suggestions, toolSuggestion{
 			Tool:   "get_impact",
@@ -493,7 +502,7 @@ func (s *Server) handleFindEntity(
 	_ context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
-	query, ok := req.Params.Arguments["query"].(string)
+	query, ok := req.GetArguments()["query"].(string)
 	if !ok || query == "" {
 		return mcp.NewToolResultError("query is required"), nil
 	}
@@ -578,7 +587,7 @@ func (s *Server) handleValidatePlan(
 	_ context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
-	changesRaw, ok := req.Params.Arguments["changes"].(string)
+	changesRaw, ok := req.GetArguments()["changes"].(string)
 	if !ok || changesRaw == "" {
 		return mcp.NewToolResultError("changes is required"), nil
 	}
@@ -652,9 +661,9 @@ func (s *Server) handleGetViolations(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	ruleIDFilter := stringArg(req, "rule_id")
-	includeLog, _ := req.Params.Arguments["include_log"].(bool)
+	includeLog, _ := req.GetArguments()["include_log"].(bool)
 	logLimit := 50
-	if l, ok := req.Params.Arguments["log_limit"].(float64); ok && l > 0 {
+	if l, ok := req.GetArguments()["log_limit"].(float64); ok && l > 0 {
 		logLimit = int(l)
 	}
 
@@ -796,7 +805,7 @@ func (s *Server) handleUpsertRule(
 // stringArg extracts a string argument from a CallToolRequest by key.
 // Returns "" if the key is absent or not a string.
 func stringArg(req mcp.CallToolRequest, key string) string {
-	v, _ := req.Params.Arguments[key].(string)
+	v, _ := req.GetArguments()[key].(string)
 	return v
 }
 
@@ -918,7 +927,7 @@ func (s *Server) handleGetFileContext(
 	_ context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
-	filePath, ok := req.Params.Arguments["file"].(string)
+	filePath, ok := req.GetArguments()["file"].(string)
 	if !ok || filePath == "" {
 		return mcp.NewToolResultError("file is required"), nil
 	}
@@ -1008,7 +1017,7 @@ func (s *Server) handleSearch(
 	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
-	query, ok := req.Params.Arguments["query"].(string)
+	query, ok := req.GetArguments()["query"].(string)
 	if !ok || query == "" {
 		return mcp.NewToolResultError("query is required"), nil
 	}
@@ -1143,8 +1152,8 @@ func (s *Server) handleGetCallChain(
 	_ context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
-	fromName, ok1 := req.Params.Arguments["from"].(string)
-	toName, ok2 := req.Params.Arguments["to"].(string)
+	fromName, ok1 := req.GetArguments()["from"].(string)
+	toName, ok2 := req.GetArguments()["to"].(string)
 	if !ok1 || !ok2 || fromName == "" || toName == "" {
 		return mcp.NewToolResultError("from and to are required"), nil
 	}
@@ -1364,7 +1373,7 @@ func (s *Server) handleGetWorkingState(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	windowMinutes := 15
-	if w, ok := req.Params.Arguments["window_minutes"].(float64); ok && w > 0 {
+	if w, ok := req.GetArguments()["window_minutes"].(float64); ok && w > 0 {
 		windowMinutes = int(w)
 	}
 
@@ -1488,7 +1497,7 @@ func (s *Server) handleSessionInit(
 	_ context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
-	agentID, _ := req.Params.Arguments["agent_id"].(string)
+	agentID, _ := req.GetArguments()["agent_id"].(string)
 	s.upsertAgentIfNeeded(agentID)
 
 	// ── 1. Project identity + scale guidance ─────────────────────────────
@@ -1674,15 +1683,15 @@ func (s *Server) handleAnnotateNode(
 		return mcp.NewToolResultError("annotations unavailable: server started without a persistent store"), nil
 	}
 
-	nodeID, _ := req.Params.Arguments["node_id"].(string)
+	nodeID, _ := req.GetArguments()["node_id"].(string)
 	if nodeID == "" {
 		return mcp.NewToolResultError("node_id is required"), nil
 	}
-	note, _ := req.Params.Arguments["note"].(string)
+	note, _ := req.GetArguments()["note"].(string)
 	if note == "" {
 		return mcp.NewToolResultError("note is required"), nil
 	}
-	agentID, _ := req.Params.Arguments["agent_id"].(string)
+	agentID, _ := req.GetArguments()["agent_id"].(string)
 
 	// Verify the node exists in the graph.
 	if s.graph.GetNode(graph.NodeID(nodeID)) == nil {
@@ -1712,13 +1721,13 @@ func (s *Server) handleGetImpact(
 	_ context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
-	symbol, _ := req.Params.Arguments["symbol"].(string)
+	symbol, _ := req.GetArguments()["symbol"].(string)
 	if symbol == "" {
 		return mcp.NewToolResultError("symbol is required"), nil
 	}
 
 	maxDepth := 3
-	if d, ok := req.Params.Arguments["depth"].(float64); ok && d > 0 {
+	if d, ok := req.GetArguments()["depth"].(float64); ok && d > 0 {
 		maxDepth = int(d)
 		if maxDepth > 10 {
 			maxDepth = 10
@@ -1761,7 +1770,7 @@ func (s *Server) handleSemanticSearch(
 		return mcp.NewToolResultError("query is required"), nil
 	}
 
-	limitRaw, _ := req.Params.Arguments["limit"].(float64)
+	limitRaw, _ := req.GetArguments()["limit"].(float64)
 	limit := int(limitRaw)
 	if limit <= 0 {
 		limit = 20

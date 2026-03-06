@@ -1,0 +1,408 @@
+package mcp
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/graph"
+)
+
+// registerResources wires MCP Resources to their handlers.
+// Three resources are exposed:
+//
+//	synapses://active-context  — compact project briefing, updated on file changes
+//	synapses://file/{path}     — entity map for a specific file
+//	synapses://violations      — current architectural violations
+func (s *Server) registerResources() {
+	// synapses://active-context
+	s.mcp.AddResource(
+		mcp.NewResource(
+			"synapses://active-context",
+			"Active Project Context",
+			mcp.WithResourceDescription(
+				"Compact project briefing: scale, recently changed files, pending tasks, "+
+					"and active violations. Re-read whenever you need a project orientation "+
+					"without calling session_init.",
+			),
+			mcp.WithMIMEType("text/plain"),
+		),
+		s.handleActiveContextResource,
+	)
+
+	// synapses://file/{path}
+	s.mcp.AddResourceTemplate(
+		mcp.NewResourceTemplate(
+			"synapses://file/{path}",
+			"File Entity Map",
+			mcp.WithTemplateDescription(
+				"All entities defined in the given file (functions, methods, structs, "+
+					"interfaces) with line numbers and exported status. "+
+					"Use a relative path suffix, e.g. 'internal/graph/traverse.go'.",
+			),
+			mcp.WithTemplateMIMEType("text/plain"),
+		),
+		s.handleFileResource,
+	)
+
+	// synapses://violations
+	s.mcp.AddResource(
+		mcp.NewResource(
+			"synapses://violations",
+			"Current Violations",
+			mcp.WithResourceDescription(
+				"Active architectural rule violations detected in the indexed codebase. "+
+					"Empty string when the codebase is clean.",
+			),
+			mcp.WithMIMEType("text/plain"),
+		),
+		s.handleViolationsResource,
+	)
+}
+
+// notifyResourceChanged sends a notifications/resources/updated delta to all
+// connected MCP clients. The client receives only the URI that changed — not
+// the full content — and decides whether to re-read based on its current task.
+// This prevents stdio pipe overload while still enabling proactive updates.
+func (s *Server) notifyResourceChanged(uri string) {
+	s.mcp.SendNotificationToAllClients(
+		mcp.MethodNotificationResourceUpdated,
+		map[string]any{"uri": uri},
+	)
+}
+
+// warmBrainCacheDebounce is the minimum interval between consecutive warm cycles.
+const warmBrainCacheDebounce = 2 * time.Second
+
+// warmBrainCache proactively pre-computes brain packets for entities in the
+// changed file and stores them in the brain's SQLite insight cache (6h TTL).
+// Runs in a background goroutine so the file-watcher callback is non-blocking.
+// Capped at 5 entities per call and debounced to 2s to avoid hammering the
+// brain on rapid successive saves.
+func (s *Server) warmBrainCache(changedFile string) {
+	bc := s.getBrainClient()
+	if bc == nil {
+		return
+	}
+
+	// Debounce: skip if we warmed the cache less than 2s ago.
+	s.warmMu.Lock()
+	if time.Since(s.lastWarm) < warmBrainCacheDebounce {
+		s.warmMu.Unlock()
+		return
+	}
+	s.lastWarm = time.Now()
+	s.warmMu.Unlock()
+
+	entities := s.graph.FindByFile(changedFile)
+	if len(entities) == 0 {
+		return
+	}
+	if len(entities) > 5 {
+		entities = entities[:5]
+	}
+
+	go func() {
+		for _, entity := range entities {
+			_ = bc.BuildContextPacket(context.Background(), brain.ContextPacketRequest{
+				Snapshot: brain.SnapshotInput{
+					RootNodeID: string(entity.ID),
+					RootName:   entity.Name,
+					RootType:   string(entity.Type),
+					RootFile:   entity.File,
+					RootDoc:    entity.Metadata["doc"],
+					HasTests:   fileHasTests(entity.File),
+					FanIn:      s.graph.Fanin(entity.ID),
+				},
+				EnableLLM: s.config.Brain.EnableLLM,
+			})
+		}
+	}()
+}
+
+// ---------------------------------------------------------------------------
+// Resource handlers
+// ---------------------------------------------------------------------------
+
+// handleActiveContextResource returns a compact Markdown dashboard briefing.
+// Target: ≤400 tokens so agents can "glance" at it for orientation without
+// spending significant context budget.
+func (s *Server) handleActiveContextResource(
+	_ context.Context,
+	_ mcp.ReadResourceRequest,
+) ([]mcp.ResourceContents, error) {
+	var b strings.Builder
+
+	// Project identity.
+	repoID := s.graph.RepoID()
+	nodeCount := s.graph.NodeCount()
+	edgeCount := s.graph.EdgeCount()
+	identity := s.graph.ProjectIdentity()
+
+	fmt.Fprintf(&b, "# Synapses Active Context\n")
+	fmt.Fprintf(&b, "**Project:** %s\n", repoID)
+	fmt.Fprintf(&b, "**Scale:** %d Nodes | %d Edges | %s\n", nodeCount, edgeCount, identity.Scale)
+
+	// Most recently changed file (single line — keeps it under budget).
+	if s.changeSource != nil {
+		changes := s.changeSource.RecentChanges(15)
+		if len(changes) > 0 {
+			root := s.graph.Root()
+			prefix := root
+			if prefix != "" && !strings.HasSuffix(prefix, "/") {
+				prefix += "/"
+			}
+			c := changes[0]
+			relFile := strings.TrimPrefix(c.File, prefix)
+			age := formatChangeAge(c.Timestamp)
+			fmt.Fprintf(&b, "**Last Change:** %s (%s ago)\n", relFile, age)
+		}
+	}
+
+	// Violations — single line, critical number up front.
+	violations := s.checkViolations()
+	if len(violations) > 0 {
+		fmt.Fprintf(&b, "**Critical Violations:** %d", len(violations))
+		// Show the first error-severity violation inline if present.
+		for _, v := range violations {
+			if v.Severity == "error" {
+				fmt.Fprintf(&b, " — %s", v.Description)
+				break
+			}
+		}
+		b.WriteString("\n")
+	} else {
+		b.WriteString("**Critical Violations:** 0\n")
+	}
+
+	// Active task — top in-progress or highest-priority pending.
+	if s.store != nil {
+		tasks, err := s.store.GetPendingTasks("", "")
+		if err == nil && len(tasks) > 0 {
+			// Prefer in_progress tasks.
+			active := tasks[0]
+			for _, t := range tasks {
+				if t.Status == "in_progress" {
+					active = t
+					break
+				}
+			}
+			fmt.Fprintf(&b, "**Active Task:** \"%s\" [%s/%s]\n", active.Title, active.Priority, active.Status)
+			if len(tasks) > 1 {
+				fmt.Fprintf(&b, "**Pending Tasks:** %d total\n", len(tasks))
+			}
+		}
+	}
+
+	// Constitution principles (brief — only if ≤3, else count only).
+	if s.config != nil && len(s.config.Constitution.Principles) > 0 {
+		ps := s.config.Constitution.Principles
+		if len(ps) <= 3 {
+			b.WriteString("**Laws:** ")
+			b.WriteString(strings.Join(ps, " · "))
+			b.WriteString("\n")
+		} else {
+			fmt.Fprintf(&b, "**Laws:** %d project principles — use get_project_identity() for full list\n", len(ps))
+		}
+	}
+
+	return []mcp.ResourceContents{
+		mcp.TextResourceContents{
+			URI:      "synapses://active-context",
+			MIMEType: "text/plain",
+			Text:     strings.TrimSpace(b.String()),
+		},
+	}, nil
+}
+
+// formatChangeAge returns a human-readable age string for a file change timestamp.
+func formatChangeAge(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+// handleFileResource returns an entity map for the file identified by {path}.
+func (s *Server) handleFileResource(
+	_ context.Context,
+	req mcp.ReadResourceRequest,
+) ([]mcp.ResourceContents, error) {
+	uri := req.Params.URI
+	filePath := strings.TrimPrefix(uri, "synapses://file/")
+	if filePath == "" {
+		return nil, fmt.Errorf("file path required in URI, e.g. synapses://file/internal/graph/traverse.go")
+	}
+
+	nodes := s.graph.FindByFile(filePath)
+	if len(nodes) == 0 {
+		return []mcp.ResourceContents{
+			mcp.TextResourceContents{
+				URI:      uri,
+				MIMEType: "text/plain",
+				Text:     fmt.Sprintf("No entities found for file: %q\nThe file may not be indexed yet — try reindex.", filePath),
+			},
+		}, nil
+	}
+
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].Line < nodes[j].Line
+	})
+
+	root := s.graph.Root()
+	prefix := root
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+
+	var b strings.Builder
+	relFile := strings.TrimPrefix(nodes[0].File, prefix)
+	pkg := nodes[0].Package
+	fmt.Fprintf(&b, "# %s", relFile)
+	if pkg != "" {
+		fmt.Fprintf(&b, " (package %s)", pkg)
+	}
+	fmt.Fprintf(&b, " — %d entities\n\n", len(nodes))
+
+	for _, n := range nodes {
+		expMark := ""
+		if n.Exported {
+			expMark = " ✓"
+		}
+		line := ""
+		if n.Line > 0 {
+			line = fmt.Sprintf(":%d", n.Line)
+		}
+		fmt.Fprintf(&b, "[%s] %s%s · %s%s\n", n.Name, n.Type, expMark, filepath.Base(n.File), line)
+		if n.Metadata != nil {
+			if doc := n.Metadata["doc"]; doc != "" {
+				if len(doc) > 100 {
+					doc = doc[:97] + "…"
+				}
+				fmt.Fprintf(&b, "  %s\n", doc)
+			}
+		}
+	}
+
+	return []mcp.ResourceContents{
+		mcp.TextResourceContents{
+			URI:      uri,
+			MIMEType: "text/plain",
+			Text:     strings.TrimSpace(b.String()),
+		},
+	}, nil
+}
+
+// handleViolationsResource returns current architectural violations as plain text.
+func (s *Server) handleViolationsResource(
+	_ context.Context,
+	_ mcp.ReadResourceRequest,
+) ([]mcp.ResourceContents, error) {
+	violations := s.checkViolations()
+
+	var b strings.Builder
+	if len(violations) == 0 {
+		b.WriteString("No architectural violations detected.")
+	} else {
+		fmt.Fprintf(&b, "%d violation(s):\n\n", len(violations))
+		for _, v := range violations {
+			from := string(v.FromNode)
+			to := string(v.ToNode)
+			if n := s.graph.GetNode(v.FromNode); n != nil {
+				from = n.Name
+			}
+			if n := s.graph.GetNode(v.ToNode); n != nil {
+				to = n.Name
+			}
+			fmt.Fprintf(&b, "⚠ [%s] %s\n  Rule: %s · From: %s → To: %s\n\n",
+				v.Severity, v.Description, v.RuleID, from, to)
+		}
+	}
+
+	return []mcp.ResourceContents{
+		mcp.TextResourceContents{
+			URI:      "synapses://violations",
+			MIMEType: "text/plain",
+			Text:     strings.TrimSpace(b.String()),
+		},
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Violation helper (delegates to config.CheckViolations)
+// ---------------------------------------------------------------------------
+
+// checkViolations runs the rule engine and returns all current violations.
+// It wraps config.CheckViolations under the rules mutex to avoid data races.
+func (s *Server) checkViolations() []violationRef {
+	if s.config == nil {
+		return nil
+	}
+	s.rulesMu.RLock()
+	vs := s.config.CheckViolations(s.graph)
+	s.rulesMu.RUnlock()
+
+	out := make([]violationRef, len(vs))
+	for i, v := range vs {
+		out[i] = violationRef{
+			RuleID:      v.RuleID,
+			Severity:    v.Severity,
+			Description: v.Description,
+			FromNode:    v.FromNode,
+			ToNode:      v.ToNode,
+		}
+	}
+	return out
+}
+
+// violationRef is a slim struct used by resource handlers to avoid importing
+// config.Violation directly in display logic.
+type violationRef struct {
+	RuleID      string
+	Severity    string
+	Description string
+	FromNode    graph.NodeID
+	ToNode      graph.NodeID
+}
+
+// ---------------------------------------------------------------------------
+// Watcher integration
+// ---------------------------------------------------------------------------
+
+// InvalidatePacketCacheForFile clears the in-memory packet cache, sends MCP
+// resource-updated notifications (currently a no-op, see notifyResourceChanged),
+// and proactively warms the brain cache for entities in the changed file.
+//
+// Call this from the file watcher instead of (or in addition to) the plain
+// InvalidatePacketCache to activate brain pre-warming.
+func (s *Server) InvalidatePacketCacheForFile(changedFile string) {
+	s.packetCacheMu.Lock()
+	s.packetCache = make(map[string]*packetCacheEntry, packetCacheMax)
+	s.packetCacheMu.Unlock()
+
+	s.notifyResourceChanged("synapses://active-context")
+	s.notifyResourceChanged("synapses://violations")
+	if changedFile != "" {
+		root := s.graph.Root()
+		prefix := root
+		if prefix != "" && !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
+		}
+		relFile := strings.TrimPrefix(changedFile, prefix)
+		s.notifyResourceChanged("synapses://file/" + relFile)
+		s.warmBrainCache(changedFile)
+	}
+}

@@ -93,7 +93,7 @@ func (s *Server) handleLinkTaskNodes(
 
 	// Accept node_ids as a JSON array string or a raw []interface{}.
 	var nodeIDs []string
-	switch v := req.Params.Arguments["node_ids"].(type) {
+	switch v := req.GetArguments()["node_ids"].(type) {
 	case string:
 		_ = json.Unmarshal([]byte(v), &nodeIDs)
 	case []interface{}:
@@ -164,7 +164,7 @@ func (s *Server) handleClaimWork(
 		scopeType = "path"
 	}
 	ttl := 30
-	if v, ok := req.Params.Arguments["ttl_minutes"].(float64); ok && v > 0 {
+	if v, ok := req.GetArguments()["ttl_minutes"].(float64); ok && v > 0 {
 		ttl = int(v)
 	}
 
@@ -251,18 +251,18 @@ func (s *Server) handleGetEvents(
 	}
 
 	var sinceSeq int64
-	if v, ok := req.Params.Arguments["since_seq"].(float64); ok {
+	if v, ok := req.GetArguments()["since_seq"].(float64); ok {
 		sinceSeq = int64(v)
 	}
 
 	limit := 50
-	if v, ok := req.Params.Arguments["limit"].(float64); ok && v > 0 {
+	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
 		limit = int(v)
 	}
 
 	// Parse optional types filter — accepts JSON array string or []interface{}.
 	var types []string
-	switch v := req.Params.Arguments["types"].(type) {
+	switch v := req.GetArguments()["types"].(type) {
 	case string:
 		if v != "" {
 			for _, t := range strings.Split(v, ",") {

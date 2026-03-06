@@ -39,6 +39,9 @@ type ChangeEvent struct {
 // and need to be notified when file changes make cached packets stale.
 type PacketCacheInvalidator interface {
 	InvalidatePacketCache()
+	// InvalidatePacketCacheForFile is like InvalidatePacketCache but also triggers
+	// MCP resource notifications and proactive brain cache warming for the given file.
+	InvalidatePacketCacheForFile(changedFile string)
 }
 
 // ConfigChangeHandler is called when synapses.json changes on disk.
@@ -323,8 +326,13 @@ func (w *Watcher) reparseFile(path, _ string) {
 	resolver.ResolveCallEdges(w.graph)
 	resolver.ResolveImplementsEdges(w.graph)
 	w.graph.InvalidateCache()
+
+	// Rebuild the columnar GraphIndex asynchronously so BFS reads pick up the
+	// latest graph state without blocking the watcher loop.
+	// Snapshot is saved by main.go via the store; watcher discards the bytes.
+	go func() { w.graph.RebuildIndex() }() //nolint:errcheck
 	if w.pktInval != nil {
-		w.pktInval.InvalidatePacketCache()
+		w.pktInval.InvalidatePacketCacheForFile(path)
 	}
 
 	// Record change event with delta counts.

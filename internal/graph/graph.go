@@ -39,6 +39,18 @@ type Graph struct {
 	// Cached ProjectIdentity result — invalidated on graph mutation.
 	piCache   *ProjectIdentity
 	piCacheAt int64 // unix timestamp of when piCache was computed
+
+	// index is the read-optimised columnar (SoA) view of the graph.
+	// It is rebuilt asynchronously after each full parse cycle via RebuildIndex().
+	// BFS traversal uses it when index.Ready() is true; falls back to the map otherwise.
+	index *GraphIndex
+
+	// indexMu ensures only one index rebuild runs at a time.
+	indexMu sync.Mutex
+
+	// pool is the shared string interning pool used by GraphIndex.
+	// Kept on Graph so it persists across index rebuilds (strings stay interned).
+	pool *StringPool
 }
 
 // generateStableID returns a random UUID v4 using crypto/rand (no external deps).
@@ -293,6 +305,58 @@ func (g *Graph) NodeCount() int {
 	return len(g.nodes)
 }
 
+// Index returns the current columnar GraphIndex, or nil if it has not been
+// built yet. Callers should check Index().Ready() before using it.
+func (g *Graph) Index() *GraphIndex {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.index
+}
+
+// SetIndex atomically replaces the graph's columnar index with the provided one.
+// Used during warm-boot to install a snapshot-loaded index without a full rebuild.
+// Also sets g.pool to idx.Pool so subsequent RebuildIndex calls share the same pool.
+func (g *Graph) SetIndex(idx *GraphIndex) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.index = idx
+	if idx != nil && g.pool == nil {
+		g.pool = idx.Pool
+	}
+}
+
+// RebuildIndex builds a fresh columnar GraphIndex from the current map state
+// and atomically replaces g.index. Only one rebuild runs at a time.
+// It returns the zstd-compressed snapshot bytes for the caller to persist to the
+// store for fast warm-boot loading. Returns nil bytes on serialisation error.
+// Typical usage:
+//
+//	go func() {
+//	    blob, err := g.RebuildIndex()
+//	    if err == nil { st.SaveIndexSnapshot(blob) }
+//	}()
+func (g *Graph) RebuildIndex() ([]byte, error) {
+	g.indexMu.Lock()
+	defer g.indexMu.Unlock()
+
+	// Lazily initialise the shared string pool on first rebuild.
+	g.mu.Lock()
+	if g.pool == nil {
+		g.pool = NewStringPool()
+	}
+	pool := g.pool
+	g.mu.Unlock()
+
+	newIdx := buildIndex(g, pool)
+
+	g.mu.Lock()
+	g.index = newIdx
+	g.mu.Unlock()
+
+	blob, err := newIdx.SaveSnapshot()
+	return blob, err
+}
+
 // EdgeCount returns the total number of edges.
 func (g *Graph) EdgeCount() int {
 	g.mu.RLock()
@@ -467,6 +531,16 @@ func (g *Graph) RemoveFile(file string) {
 	}
 	if len(toRemove) > 0 {
 		g.piCache = nil // invalidate ProjectIdentity cache
+
+		// Tombstone removed nodes in the columnar index so BFS skips them
+		// immediately without waiting for the next full rebuild.
+		if idx := g.index; idx != nil && idx.Ready() {
+			for _, id := range toRemove {
+				if seq := idx.Seq(id); seq != 0 {
+					idx.MarkTombstone(seq)
+				}
+			}
+		}
 	}
 }
 

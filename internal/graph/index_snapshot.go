@@ -1,0 +1,302 @@
+package graph
+
+// index_snapshot.go — binary serialisation and mmap-load for GraphIndex.
+//
+// The snapshot encodes the entire SoA slice state as a single zstd-compressed
+// binary BLOB.  On a warm boot (SQLite DB + snapshot BLOB both exist and
+// file_hashes are unchanged), the watcher calls LoadSnapshot instead of
+// re-parsing every file, reducing cold-start time from seconds to <200ms for
+// large repos.
+//
+// Wire-format (little-endian, no external schema):
+//   [4]  magic      "SIDX"
+//   [4]  version    uint32  (currently 1)
+//   [4]  nodeCount  uint32
+//   [4]  edgeCount  uint32  (total edges, used to pre-allocate CSR arrays)
+//   ... for each node (nodeCount entries):
+//         [varies]  NodeID string (uint32 len + bytes)
+//         [4]       TypeID  StringID
+//         [4]       NameID  StringID
+//         [4]       FileID  StringID
+//         [4]       PkgID   StringID
+//         [4]       Line    int32
+//         [1]       Exported bool
+//   ... StringPool section:
+//         [4]       poolSize uint32
+//         for each entry: uint32 len + bytes
+//   ... CSR out-edges:
+//         for each node: uint32 start, uint32 end
+//         [4*edgeCount] OutTargets
+//         [4*edgeCount] OutTypes (StringID)
+//   ... CSR in-edges (same layout)
+//
+// The BLOB is zstd-compressed before being passed to the store.
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"sync/atomic"
+
+	"github.com/klauspost/compress/zstd"
+)
+
+const (
+	snapshotMagic   = "SIDX"
+	snapshotVersion = uint32(1)
+)
+
+var (
+	errBadMagic   = errors.New("graph snapshot: invalid magic bytes")
+	errBadVersion = errors.New("graph snapshot: unsupported version")
+)
+
+// SaveSnapshot serialises idx to a zstd-compressed byte slice.
+// The caller is responsible for persisting the bytes (e.g. in the SQLite meta table).
+func (idx *GraphIndex) SaveSnapshot() ([]byte, error) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	var buf bytes.Buffer
+
+	// Helper writers
+	writeU32 := func(v uint32) { _ = binary.Write(&buf, binary.LittleEndian, v) }
+	writeI32 := func(v int32)  { _ = binary.Write(&buf, binary.LittleEndian, v) }
+	writeSID := func(v StringID) { writeU32(uint32(v)) }
+	writeBool := func(v bool) {
+		b := byte(0)
+		if v {
+			b = 1
+		}
+		buf.WriteByte(b)
+	}
+	writeStr := func(s string) {
+		bs := []byte(s)
+		writeU32(uint32(len(bs)))
+		buf.Write(bs)
+	}
+
+	// Header
+	buf.WriteString(snapshotMagic)
+	writeU32(snapshotVersion)
+
+	nodeCount := uint32(len(idx.SeqIDs) - 1) // exclude sentinel at 0
+	edgeCount := uint32(len(idx.OutTargets))
+	writeU32(nodeCount)
+	writeU32(edgeCount)
+
+	// Node property arrays (1-indexed, skip sentinel at 0)
+	for i := uint32(1); i <= nodeCount; i++ {
+		writeStr(string(idx.SeqIDs[i]))
+		writeSID(idx.Types[i])
+		writeSID(idx.Names[i])
+		writeSID(idx.FileIDs[i])
+		writeSID(idx.PkgIDs[i])
+		writeI32(idx.Lines[i])
+		writeBool(idx.Exported[i])
+	}
+
+	// StringPool: reconstruct all interned strings in insertion order
+	// (position 0 = empty string, already implied)
+	idx.Pool.mu.RLock()
+	poolStrs := make([]string, len(idx.Pool.reverse))
+	for i, h := range idx.Pool.reverse {
+		poolStrs[i] = h.Value()
+	}
+	idx.Pool.mu.RUnlock()
+
+	writeU32(uint32(len(poolStrs)))
+	for _, s := range poolStrs {
+		writeStr(s)
+	}
+
+	// CSR out-edges
+	for i := uint32(1); i <= nodeCount; i++ {
+		writeU32(idx.OutStart[i])
+		writeU32(idx.OutEnd[i])
+	}
+	for _, t := range idx.OutTargets {
+		writeU32(t)
+	}
+	for _, t := range idx.OutTypes {
+		writeSID(t)
+	}
+
+	// CSR in-edges
+	for i := uint32(1); i <= nodeCount; i++ {
+		writeU32(idx.InStart[i])
+		writeU32(idx.InEnd[i])
+	}
+	for _, t := range idx.InTargets {
+		writeU32(t)
+	}
+	for _, t := range idx.InTypes {
+		writeSID(t)
+	}
+
+	// zstd compress
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if err != nil {
+		return nil, fmt.Errorf("graph snapshot: zstd encoder: %w", err)
+	}
+	compressed := enc.EncodeAll(buf.Bytes(), nil)
+	enc.Close()
+	return compressed, nil
+}
+
+// LoadSnapshot deserialises a zstd-compressed byte slice produced by SaveSnapshot
+// and returns a ready GraphIndex. The provided pool is reused so strings already
+// interned during a previous session share the same memory.
+func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
+	// zstd decompress
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		return nil, fmt.Errorf("graph snapshot: zstd decoder: %w", err)
+	}
+	raw, err := dec.DecodeAll(data, nil)
+	dec.Close()
+	if err != nil {
+		return nil, fmt.Errorf("graph snapshot: decompress: %w", err)
+	}
+
+	r := bytes.NewReader(raw)
+
+	readU32 := func() (uint32, error) {
+		var v uint32
+		return v, binary.Read(r, binary.LittleEndian, &v)
+	}
+	readI32 := func() (int32, error) {
+		var v int32
+		return v, binary.Read(r, binary.LittleEndian, &v)
+	}
+	readSID := func() (StringID, error) {
+		v, err := readU32()
+		return StringID(v), err
+	}
+	readBool := func() (bool, error) {
+		b, err := r.ReadByte()
+		return b == 1, err
+	}
+	readStr := func() (string, error) {
+		l, err := readU32()
+		if err != nil {
+			return "", err
+		}
+		if l == 0 {
+			return "", nil
+		}
+		bs := make([]byte, l)
+		if _, err := io.ReadFull(r, bs); err != nil {
+			return "", err
+		}
+		return string(bs), nil
+	}
+
+	// Magic + version
+	magic := make([]byte, 4)
+	if _, err := io.ReadFull(r, magic); err != nil {
+		return nil, errBadMagic
+	}
+	if string(magic) != snapshotMagic {
+		return nil, errBadMagic
+	}
+	ver, err := readU32()
+	if err != nil || ver != snapshotVersion {
+		return nil, errBadVersion
+	}
+
+	nodeCount, err := readU32()
+	if err != nil {
+		return nil, err
+	}
+	edgeCount, err := readU32()
+	if err != nil {
+		return nil, err
+	}
+
+	idx := newGraphIndex(pool)
+
+	// Pre-allocate to avoid repeated re-slicing
+	idx.SeqIDs   = make([]NodeID,   nodeCount+1)
+	idx.Types    = make([]StringID, nodeCount+1)
+	idx.Names    = make([]StringID, nodeCount+1)
+	idx.FileIDs  = make([]StringID, nodeCount+1)
+	idx.PkgIDs   = make([]StringID, nodeCount+1)
+	idx.Lines    = make([]int32,    nodeCount+1)
+	idx.Exported = make([]bool,     nodeCount+1)
+	idx.Tombstone = make([]bool,    nodeCount+1)
+
+	// Sentinel at 0 already set by newGraphIndex; fill 1..nodeCount
+	for i := uint32(1); i <= nodeCount; i++ {
+		nidStr, err := readStr()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d id: %w", i, err)
+		}
+		typeID, _ := readSID()
+		nameID, _ := readSID()
+		fileID, _ := readSID()
+		pkgID,  _ := readSID()
+		line,   _ := readI32()
+		exp,    _ := readBool()
+
+		nid := NodeID(nidStr)
+		idx.SeqIDs[i]   = nid
+		idx.Types[i]    = typeID
+		idx.Names[i]    = nameID
+		idx.FileIDs[i]  = fileID
+		idx.PkgIDs[i]   = pkgID
+		idx.Lines[i]    = line
+		idx.Exported[i] = exp
+		idx.IDToSeq[nid] = i
+	}
+
+	// StringPool
+	poolSize, err := readU32()
+	if err != nil {
+		return nil, err
+	}
+	for i := uint32(0); i < poolSize; i++ {
+		s, err := readStr()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: pool entry %d: %w", i, err)
+		}
+		pool.Intern(s) // re-intern to restore IDs (IDs are positional in the pool)
+	}
+
+	// CSR out-edges
+	idx.OutStart = make([]uint32, nodeCount+2)
+	idx.OutEnd   = make([]uint32, nodeCount+2)
+	for i := uint32(1); i <= nodeCount; i++ {
+		idx.OutStart[i], _ = readU32()
+		idx.OutEnd[i], _   = readU32()
+	}
+	idx.OutTargets = make([]uint32, edgeCount)
+	for i := range idx.OutTargets {
+		idx.OutTargets[i], _ = readU32()
+	}
+	idx.OutTypes = make([]StringID, edgeCount)
+	for i := range idx.OutTypes {
+		idx.OutTypes[i], _ = readSID()
+	}
+
+	// CSR in-edges
+	idx.InStart = make([]uint32, nodeCount+2)
+	idx.InEnd   = make([]uint32, nodeCount+2)
+	for i := uint32(1); i <= nodeCount; i++ {
+		idx.InStart[i], _ = readU32()
+		idx.InEnd[i], _   = readU32()
+	}
+	idx.InTargets = make([]uint32, edgeCount)
+	for i := range idx.InTargets {
+		idx.InTargets[i], _ = readU32()
+	}
+	idx.InTypes = make([]StringID, edgeCount)
+	for i := range idx.InTypes {
+		idx.InTypes[i], _ = readSID()
+	}
+
+	atomic.StoreInt32(&idx.ready, 1)
+	return idx, nil
+}

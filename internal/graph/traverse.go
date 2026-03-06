@@ -6,6 +6,49 @@ import (
 	"strings"
 )
 
+// outInEdges returns combined outgoing and incoming edges for id.
+// When the columnar index is ready it reads directly from CSR flat arrays,
+// avoiding map lookups and pointer chasing. Tombstoned edge endpoints are
+// silently filtered. Falls back to the pointer-map when the index is not ready.
+// The returned slice is always a fresh allocation — callers must not modify it.
+func (g *Graph) outInEdges(id NodeID, idx *GraphIndex) []*Edge {
+	if idx != nil && idx.Ready() {
+		seq, ok := idx.IDToSeq[id]
+		if !ok {
+			return nil
+		}
+		outSeqs, outTypes := idx.OutNeighbours(seq)
+		inSeqs, inTypes := idx.InNeighbours(seq)
+		edges := make([]*Edge, 0, len(outSeqs)+len(inSeqs))
+		for i, tSeq := range outSeqs {
+			if idx.IsTombstoned(tSeq) {
+				continue
+			}
+			edges = append(edges, &Edge{
+				From: id,
+				To:   idx.SeqIDs[tSeq],
+				Type: EdgeType(idx.Pool.Value(outTypes[i])),
+			})
+		}
+		for i, fSeq := range inSeqs {
+			if idx.IsTombstoned(fSeq) {
+				continue
+			}
+			edges = append(edges, &Edge{
+				From: idx.SeqIDs[fSeq],
+				To:   id,
+				Type: EdgeType(idx.Pool.Value(inTypes[i])),
+			})
+		}
+		return edges
+	}
+	// Fallback: pointer-map path.
+	var all []*Edge
+	all = append(all, g.outEdges[id]...)
+	all = append(all, g.inEdges[id]...)
+	return all
+}
+
 // CarveEgoGraph extracts a relevance-ranked subgraph centred on the given root node.
 //
 // Algorithm:
@@ -28,6 +71,9 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	if _, ok := g.nodes[rootID]; !ok {
 		return nil, ErrNodeNotFound(rootID)
 	}
+
+	// Grab index once under the read lock; nil if not yet built.
+	idx := g.index
 
 	weights := cfg.EdgeWeights
 	if weights == nil {
@@ -74,11 +120,9 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 
 		// Traverse both outgoing and incoming edges so the carve captures
 		// "what does this call" AND "what calls this".
-		// Build a fresh slice — never append into g.outEdges[x] directly, as that
-		// can silently extend the underlying array while holding only a read lock.
-		var allEdges []*Edge
-		allEdges = append(allEdges, g.outEdges[curr.id]...)
-		allEdges = append(allEdges, g.inEdges[curr.id]...)
+		// When the columnar index is ready, reads from CSR arrays (cache-friendly,
+		// skips tombstoned nodes). Falls back to pointer-map when not ready.
+		allEdges := g.outInEdges(curr.id, idx)
 
 		for _, e := range allEdges {
 			typeWeight := edgeWeight(e.Type, weights)
