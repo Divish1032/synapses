@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -346,6 +347,11 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// by polling get_events, without manually calling get_violations.
 	w.checkViolations(path)
 
+	// Cross-project reactive propagation: if any linked-project node depends on
+	// a node we just changed, broadcast a cross_project_impact message so agents
+	// working in this session are warned before they continue.
+	w.notifyCrossProjectImpact(path)
+
 	fmt.Fprintf(os.Stderr, "synapses/watcher: updated %s\n", path)
 	w.persistAsync(path)
 
@@ -536,6 +542,130 @@ func (w *Watcher) ingestToBrain(path string) {
 			}
 		}(nodes)
 	}
+}
+
+// notifyCrossProjectImpact checks whether any node in the re-parsed file is
+// depended upon by nodes from a linked (federated) project. When it finds such
+// cross-project edges it broadcasts a "cross_project_impact" message on the
+// agent bus so all agents connected to this project know their change may
+// affect dependent projects.
+//
+// This is the core of Phase 5 (Cross-Project Reactive Propagation):
+//   - Project A has `linked: ["../project-b"]` in synapses.json.
+//   - Project B's nodes are merged into A's graph at startup.
+//   - When A's watcher re-parses a file it calls this method.
+//   - If any of B's nodes CALLS one of A's changed nodes, a broadcast fires.
+//   - B's agents (also connected to A's instance) see it in session_init.
+//
+// Fail-silent: any error is ignored so the watcher loop is never interrupted.
+func (w *Watcher) notifyCrossProjectImpact(changedFile string) {
+	if w.store == nil {
+		return
+	}
+
+	primaryRepoID := w.graph.RepoID()
+	changedNodes := w.graph.NodesForFile(changedFile)
+	if len(changedNodes) == 0 {
+		return
+	}
+
+	// Compute repo-relative path for the payload (cleaner for agents to read).
+	relFile := changedFile
+	if root := w.graph.Root(); root != "" {
+		prefix := root
+		if !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
+		}
+		if strings.HasPrefix(changedFile, prefix) {
+			relFile = changedFile[len(prefix):]
+		}
+	}
+
+	// For each changed node, find in-edges from nodes in a different project
+	// (linked project nodes that CALL or IMPORT something we just changed).
+	type projectImpact struct {
+		callerNames []string
+		calledNames []string
+		edgeTypes   map[string]bool
+	}
+	byProject := make(map[string]*projectImpact)
+
+	for _, n := range changedNodes {
+		// In-edges: linked project depends on this changed node.
+		for _, e := range w.graph.InEdges(n.ID) {
+			fromRepoID := repoIDOfNodeID(string(e.From))
+			if fromRepoID == "" || fromRepoID == primaryRepoID {
+				continue
+			}
+			fromNode := w.graph.GetNode(e.From)
+			if fromNode == nil {
+				continue
+			}
+			imp := byProject[fromRepoID]
+			if imp == nil {
+				imp = &projectImpact{edgeTypes: make(map[string]bool)}
+				byProject[fromRepoID] = imp
+			}
+			imp.callerNames = append(imp.callerNames, fromNode.Name)
+			imp.calledNames = append(imp.calledNames, n.Name)
+			imp.edgeTypes[string(e.Type)] = true
+		}
+	}
+
+	if len(byProject) == 0 {
+		return
+	}
+
+	for linkedRepoID, imp := range byProject {
+		callers := dedup(imp.callerNames)
+		called := dedup(imp.calledNames)
+		edgeTypes := make([]string, 0, len(imp.edgeTypes))
+		for et := range imp.edgeTypes {
+			edgeTypes = append(edgeTypes, et)
+		}
+
+		payload, _ := json.Marshal(map[string]interface{}{
+			"changed_file":      relFile,
+			"changed_project":   primaryRepoID,
+			"affected_project":  linkedRepoID,
+			"callers_affected":  callers,  // linked-project nodes that call the changed code
+			"changed_symbols":   called,   // which symbols in the changed file are depended on
+			"edge_types":        edgeTypes,
+			"hint": fmt.Sprintf(
+				"Project %q depends on %d symbol(s) you just changed in %s. Verify compatibility.",
+				linkedRepoID, len(called), relFile,
+			),
+		})
+		_, _ = w.store.SendMessage(
+			"synapses-watcher", // from: the watcher itself
+			"",                 // to: broadcast to all connected agents
+			"cross_project_impact",
+			string(payload),
+			primaryRepoID,
+		)
+	}
+}
+
+// repoIDOfNodeID extracts the repoID prefix from a NodeID of the form
+// "repoID::file::name". Returns "" for malformed IDs.
+func repoIDOfNodeID(nodeID string) string {
+	if idx := strings.Index(nodeID, "::"); idx >= 0 {
+		return nodeID[:idx]
+	}
+	return ""
+}
+
+// dedup returns a copy of ss with duplicate strings removed, preserving order.
+func dedup(ss []string) []string {
+	seen := make(map[string]bool, len(ss))
+	out := ss[:0:0]
+	for _, s := range ss {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // shouldSkipDir matches the same exclusion list used by the parser walker.
