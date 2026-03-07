@@ -271,14 +271,28 @@ type Store struct {
 	db *sql.DB
 }
 
-// DefaultPath returns the canonical cache path for a repository root.
-// It uses a user-scoped cache directory so the project tree stays clean.
-func DefaultPath(repoRoot string) (string, error) {
-	cacheDir, err := os.UserCacheDir()
+// CacheDir returns the canonical directory where synapses stores all project
+// index databases: ~/.synapses/cache/
+//
+// Using the home directory (rather than os.UserCacheDir which resolves to
+// ~/Library/Caches on macOS, ~/.cache on Linux, %LocalAppData% on Windows)
+// gives a single, discoverable, cross-platform path that is not subject to
+// OS or tool-driven cache eviction.
+func CacheDir() (string, error) {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("locate cache dir: %w", err)
+		return "", fmt.Errorf("locate home dir: %w", err)
 	}
-	dir := filepath.Join(cacheDir, "synapses", "cache")
+	return filepath.Join(home, ".synapses", "cache"), nil
+}
+
+// DefaultPath returns the canonical DB path for a repository root.
+// The file lives at ~/.synapses/cache/<reponame>_<hash>.db
+func DefaultPath(repoRoot string) (string, error) {
+	dir, err := CacheDir()
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create cache dir: %w", err)
 	}
@@ -841,11 +855,10 @@ func (s *Store) Stat(dbPath string) (*ProjectStat, error) {
 // synapses cache directory for *.db files and reading their meta tables.
 // Results are sorted by SavedAt descending (most recent first).
 func ScanAll() ([]ProjectStat, error) {
-	cacheDir, err := os.UserCacheDir()
+	dir, err := CacheDir()
 	if err != nil {
-		return nil, fmt.Errorf("locate cache dir: %w", err)
+		return nil, err
 	}
-	dir := filepath.Join(cacheDir, "synapses", "cache")
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {

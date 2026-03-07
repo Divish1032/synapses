@@ -104,14 +104,12 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		fmt.Fprintf(&b, "Insight: %s\n", dc.ContextPacket.Insight)
 	}
 
-	// Callee detail blocks: only show nodes with summaries in brain.
-	// This avoids showing empty filler lines for uncached callees.
+	// Callee detail blocks: always show all callees in "full" mode so the output
+	// is visibly richer than "neighbors" even when the brain cache is cold.
+	// Without summaries, only the entity header line is written (no Summary line).
 	if len(dc.Callees) > 0 {
 		for _, c := range dc.Callees {
 			depSummary := getDepSummary(c.Node.Name, dc.ContextPacket)
-			if depSummary == "" && c.Relevance < 0.6 {
-				continue // skip low-relevance uncached callees
-			}
 			b.WriteString("\n")
 			writeNodeHeader(&b, c.Node, depSummary)
 		}

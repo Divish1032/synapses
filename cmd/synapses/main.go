@@ -797,11 +797,10 @@ func cmdReset(args []string) error {
 	if *all {
 		// Show which projects will be removed before wiping.
 		stats, _ := store.ScanAll()
-		cacheDir, err := os.UserCacheDir()
+		synapsesCache, err := store.CacheDir()
 		if err != nil {
 			return fmt.Errorf("locate cache dir: %w", err)
 		}
-		synapsesCache := filepath.Join(cacheDir, "synapses", "cache")
 		if err := os.RemoveAll(synapsesCache); err != nil {
 			return fmt.Errorf("remove cache dir: %w", err)
 		}
