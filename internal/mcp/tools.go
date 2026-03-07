@@ -1734,12 +1734,78 @@ func (s *Server) handleGetImpact(
 		}
 	}
 
-	// Resolve symbol name → node ID.
+	// Resolve symbol name → node. Fall back to pattern match (same as get_context).
 	candidates := s.graph.FindByName(symbol)
+	if len(candidates) == 0 {
+		candidates = s.graph.FindByPattern(symbol)
+	}
 	if len(candidates) == 0 {
 		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q", symbol)), nil
 	}
 	root := pickBestNode(candidates, s.graph)
+
+	// For struct/interface nodes, aggregate impact across all their methods.
+	// A struct itself has no incoming CALLS edges — its methods do.
+	if root.Type == graph.NodeStruct || root.Type == graph.NodeInterface {
+		methods := s.graph.FindByPattern(root.Name)
+		merged := &graph.ImpactResult{Tiers: []graph.ImpactTier{}}
+		seen := make(map[graph.NodeID]bool)
+		for _, m := range methods {
+			if m.Type != graph.NodeMethod || m.ID == root.ID {
+				continue
+			}
+			r, err2 := s.graph.ImpactAnalysis(m.ID, maxDepth)
+			if err2 != nil || r == nil {
+				continue
+			}
+			for _, tier := range r.Tiers {
+				var tierNodes []graph.EntityRef
+				for _, ref := range tier.Nodes {
+					if !seen[ref.ID] {
+						seen[ref.ID] = true
+						tierNodes = append(tierNodes, ref)
+					}
+				}
+				if len(tierNodes) == 0 {
+					continue
+				}
+				// Merge into existing tier or append new.
+				found := false
+				for i, mt := range merged.Tiers {
+					if mt.Label == tier.Label {
+						merged.Tiers[i].Nodes = append(merged.Tiers[i].Nodes, tierNodes...)
+						merged.Tiers[i].TotalNodes += len(tierNodes)
+						found = true
+						break
+					}
+				}
+				if !found {
+					merged.Tiers = append(merged.Tiers, graph.ImpactTier{
+						Label:      tier.Label,
+						Depth:      tier.Depth,
+						Confidence: tier.Confidence,
+						Nodes:      tierNodes,
+						TotalNodes: len(tierNodes),
+					})
+				}
+				for _, f := range r.AffectedFiles {
+					merged.AffectedFiles = append(merged.AffectedFiles, f)
+				}
+				merged.TotalAffected += len(tierNodes)
+			}
+		}
+		// Deduplicate AffectedFiles.
+		seenFiles := make(map[string]bool)
+		unique := merged.AffectedFiles[:0]
+		for _, f := range merged.AffectedFiles {
+			if !seenFiles[f] {
+				seenFiles[f] = true
+				unique = append(unique, f)
+			}
+		}
+		merged.AffectedFiles = unique
+		return jsonResult(merged)
+	}
 
 	result, err := s.graph.ImpactAnalysis(root.ID, maxDepth)
 	if err != nil {

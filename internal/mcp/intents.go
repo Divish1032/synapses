@@ -18,6 +18,70 @@ import (
 // tokensUsed estimates the token count of s using the ~4 chars/token heuristic.
 func tokensUsed(b *strings.Builder) int { return b.Len() / 4 }
 
+// aggregatedImpact runs ImpactAnalysis and, for struct/interface nodes, aggregates
+// impact across all methods (same logic as handleGetImpact). This ensures plan/modify/review
+// intents show meaningful blast radius for struct types.
+func (s *Server) aggregatedImpact(node *graph.Node, depth int) *graph.ImpactResult {
+	if node.Type == graph.NodeStruct || node.Type == graph.NodeInterface {
+		methods := s.graph.FindByPattern(node.Name)
+		merged := &graph.ImpactResult{Tiers: []graph.ImpactTier{}}
+		seen := make(map[graph.NodeID]bool)
+		for _, m := range methods {
+			if m.Type != graph.NodeMethod || m.ID == node.ID {
+				continue
+			}
+			r, err := s.graph.ImpactAnalysis(m.ID, depth)
+			if err != nil || r == nil {
+				continue
+			}
+			for _, tier := range r.Tiers {
+				var tierNodes []graph.EntityRef
+				for _, ref := range tier.Nodes {
+					if !seen[ref.ID] {
+						seen[ref.ID] = true
+						tierNodes = append(tierNodes, ref)
+					}
+				}
+				if len(tierNodes) == 0 {
+					continue
+				}
+				found := false
+				for i, mt := range merged.Tiers {
+					if mt.Label == tier.Label {
+						merged.Tiers[i].Nodes = append(merged.Tiers[i].Nodes, tierNodes...)
+						merged.Tiers[i].TotalNodes += len(tierNodes)
+						found = true
+						break
+					}
+				}
+				if !found {
+					merged.Tiers = append(merged.Tiers, graph.ImpactTier{
+						Label:      tier.Label,
+						Depth:      tier.Depth,
+						Confidence: tier.Confidence,
+						Nodes:      tierNodes,
+						TotalNodes: len(tierNodes),
+					})
+				}
+				merged.AffectedFiles = append(merged.AffectedFiles, r.AffectedFiles...)
+				merged.TotalAffected += len(tierNodes)
+			}
+		}
+		seenFiles := make(map[string]bool)
+		uniq := merged.AffectedFiles[:0]
+		for _, f := range merged.AffectedFiles {
+			if !seenFiles[f] {
+				seenFiles[f] = true
+				uniq = append(uniq, f)
+			}
+		}
+		merged.AffectedFiles = uniq
+		return merged
+	}
+	r, _ := s.graph.ImpactAnalysis(node.ID, depth)
+	return r
+}
+
 // budgetLeft returns how many tokens remain given the budget and current output.
 // Always returns at least 0.
 func budgetLeft(b *strings.Builder, budget int) int {
@@ -102,8 +166,17 @@ func (s *Server) choiceMapHeader(resolved *resolvedTarget, target string) string
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Ambiguous Target: %q (%d matches)\n", target, len(resolved.candidates))
 
-	// Show up to 5 candidates with one-line summaries.
-	shown := resolved.candidates
+	// Show up to 5 candidates — non-test nodes first, then test nodes.
+	nonTest := make([]*graph.Node, 0, len(resolved.candidates))
+	testNodes := make([]*graph.Node, 0)
+	for _, n := range resolved.candidates {
+		if strings.HasSuffix(n.File, "_test.go") {
+			testNodes = append(testNodes, n)
+		} else {
+			nonTest = append(nonTest, n)
+		}
+	}
+	shown := append(nonTest, testNodes...)
 	if len(shown) > 5 {
 		shown = shown[:5]
 	}
@@ -192,8 +265,10 @@ func (s *Server) handlePrepareContext(
 
 	var b strings.Builder
 
-	// Prepend disambiguation header if ambiguous.
-	b.WriteString(s.choiceMapHeader(resolved, target))
+	// Prepend disambiguation header if ambiguous — skip for file targets (all entities in file are expected).
+	if !resolved.isFile {
+		b.WriteString(s.choiceMapHeader(resolved, target))
+	}
 
 	switch intent {
 	case "modify":
@@ -255,11 +330,10 @@ func (s *Server) assembleModifyContext(
 	// Header.
 	writeNodeHeader(b, node, getRootSummary(node, pkt))
 
-	// Blast radius.
-	impact, ierr := s.graph.ImpactAnalysis(node.ID, 2)
-	if ierr == nil && len(impact.Tiers) > 0 {
-		total := impact.TotalAffected
-		fmt.Fprintf(b, "\n## Blast Radius (%d affected)\n", total)
+	// Blast radius — always shown; use struct aggregation for struct/interface nodes.
+	impact := s.aggregatedImpact(node, 2)
+	fmt.Fprintf(b, "\n## Blast Radius (%d affected)\n", impact.TotalAffected)
+	if impact != nil && len(impact.Tiers) > 0 {
 		for _, tier := range impact.Tiers {
 			names := make([]string, 0, len(tier.Nodes))
 			for _, ref := range tier.Nodes {
@@ -268,6 +342,8 @@ func (s *Server) assembleModifyContext(
 			label := strings.ToUpper(tier.Label)
 			fmt.Fprintf(b, "%s: %s\n", label, strings.Join(names, ", "))
 		}
+	} else {
+		b.WriteString("No compile-time callers tracked (may be invoked via interface or dispatcher).\n")
 	}
 
 	// Architecture rules.
@@ -303,9 +379,9 @@ func (s *Server) assembleModifyContext(
 	// Optional tier 2: Pre-edit checklist (compact — always fits if we got here).
 	if budgetLeft(b, budget) > 80 {
 		b.WriteString("\n## Pre-Edit Checklist\n")
-		callerCount := len(dc.Callers)
-		if impact != nil {
-			callerCount = impact.TotalAffected
+		callerCount := impact.TotalAffected
+		if callerCount == 0 {
+			callerCount = len(dc.Callers)
 		}
 		if callerCount > 0 {
 			fmt.Fprintf(b, "- %d caller(s) must remain compatible\n", callerCount)
@@ -429,19 +505,20 @@ func (s *Server) assembleReviewContext(
 		}
 	}
 
-	// Blast radius (broad: depth 3).
-	impact, ierr := s.graph.ImpactAnalysis(node.ID, 3)
-	if ierr == nil && len(impact.Tiers) > 0 {
-		fmt.Fprintf(b, "\n## Blast Radius (%d total across %d files)\n",
-			impact.TotalAffected, len(impact.AffectedFiles))
-		for _, tier := range impact.Tiers {
-			names := make([]string, 0, len(tier.Nodes))
-			for _, ref := range tier.Nodes {
-				names = append(names, ref.Name)
-			}
-			label := strings.ToUpper(tier.Label)
-			fmt.Fprintf(b, "%s (%d): %s\n", label, tier.TotalNodes, strings.Join(names, ", "))
+	// Blast radius (broad: depth 3) — struct aggregation applied.
+	impact := s.aggregatedImpact(node, 3)
+	fmt.Fprintf(b, "\n## Blast Radius (%d total across %d files)\n",
+		impact.TotalAffected, len(impact.AffectedFiles))
+	for _, tier := range impact.Tiers {
+		names := make([]string, 0, len(tier.Nodes))
+		for _, ref := range tier.Nodes {
+			names = append(names, ref.Name)
 		}
+		label := strings.ToUpper(tier.Label)
+		fmt.Fprintf(b, "%s (%d): %s\n", label, tier.TotalNodes, strings.Join(names, ", "))
+	}
+	if len(impact.Tiers) == 0 {
+		b.WriteString("No compile-time callers tracked.\n")
 	}
 
 	// Optional: Agent annotations (strip when budget is tight).
@@ -616,8 +693,8 @@ func (s *Server) assemblePlanContext(
 
 	fmt.Fprintf(b, "## Change Plan: %s (%s)\n", node.Name, relFile)
 
-	// Impact analysis (depth 3) to find all affected files.
-	impact, ierr := s.graph.ImpactAnalysis(node.ID, 3)
+	// Impact analysis (depth 3) to find all affected files — struct aggregation applied.
+	impact := s.aggregatedImpact(node, 3)
 
 	// Files you'll touch.
 	b.WriteString("\n## Files You'll Touch\n")
@@ -638,7 +715,7 @@ func (s *Server) assemblePlanContext(
 
 	// Callers grouped by file.
 	callerFiles := make(map[string][]string) // relFile → []callerName
-	if ierr == nil {
+	if impact != nil {
 		for _, tier := range impact.Tiers {
 			for _, ref := range tier.Nodes {
 				rf := strings.TrimPrefix(ref.File, prefix)
@@ -699,7 +776,7 @@ func (s *Server) assemblePlanContext(
 	// Scope assessment and risk.
 	b.WriteString("\n## Scope Assessment\n")
 	directCallers := 0
-	if ierr == nil && len(impact.Tiers) > 0 {
+	if impact != nil && len(impact.Tiers) > 0 {
 		directCallers = impact.Tiers[0].TotalNodes
 	}
 	testMark := "none"
