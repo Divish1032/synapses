@@ -98,6 +98,11 @@ func cmdStart(args []string) error {
 		return err
 	}
 
+	// appCtx is cancelled on SIGINT/SIGTERM so background goroutines can exit
+	// gracefully. Declared early so it's available throughout cmdStart.
+	appCtx, appCancel := context.WithCancel(context.Background())
+	defer appCancel()
+
 	absPath, err := filepath.Abs(*repoPath)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
@@ -273,11 +278,11 @@ func cmdStart(args []string) error {
 			// embedding_enabled=true was set in brain.json and llama-server started).
 			candidate := embed.NewBrainClient(cfg.Brain.URL)
 			probeCtx, probeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer probeCancel()
 			if _, err := candidate.Embed(probeCtx, "probe"); err == nil {
 				embedCli = candidate
 				fmt.Fprintf(os.Stderr, "synapses: embeddings via brain /v1/embed (Ollama-free)\n")
 			}
-			probeCancel()
 		}
 		if embedCli == nil && cfg.EmbeddingEndpoint != "" {
 			embedCli = embed.NewClient(cfg.EmbeddingEndpoint, "")
@@ -285,7 +290,7 @@ func cmdStart(args []string) error {
 		}
 		if embedCli != nil {
 			srv.SetEmbedClient(embedCli)
-			go embedAllNodes(context.Background(), embedCli, g, st)
+			go embedAllNodes(appCtx, embedCli, g, st)
 		}
 	}
 
@@ -364,6 +369,7 @@ func cmdStart(args []string) error {
 	go func() {
 		sig := <-sigCh
 		fmt.Fprintf(os.Stderr, "\nsynapses: received %s, shutting down\n", sig)
+		appCancel()
 		os.Exit(0)
 	}()
 

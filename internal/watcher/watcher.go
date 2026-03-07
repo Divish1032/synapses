@@ -624,7 +624,7 @@ func (w *Watcher) notifyCrossProjectImpact(changedFile string) {
 			edgeTypes = append(edgeTypes, et)
 		}
 
-		payload, _ := json.Marshal(map[string]interface{}{
+		payload, err := json.Marshal(map[string]interface{}{
 			"changed_file":      relFile,
 			"changed_project":   primaryRepoID,
 			"affected_project":  linkedRepoID,
@@ -636,6 +636,10 @@ func (w *Watcher) notifyCrossProjectImpact(changedFile string) {
 				linkedRepoID, len(called), relFile,
 			),
 		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "synapses/watcher: marshal cross_project_impact: %v\n", err)
+			continue
+		}
 		_, _ = w.store.SendMessage(
 			"synapses-watcher", // from: the watcher itself
 			"",                 // to: broadcast to all connected agents
