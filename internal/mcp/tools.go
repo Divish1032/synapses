@@ -1629,6 +1629,19 @@ func (s *Server) handleSessionInit(
 		recentEvents = []store.Event{}
 	}
 
+	// ── 5. Cross-project impact alerts (federated projects only) ──────────
+	// Pull unread cross_project_impact messages from the message bus. These are
+	// broadcast by the file watcher whenever a local change breaks a dependency
+	// in a linked project. Surfacing them here ensures agents see the warning
+	// at the very start of a session, before they commit to a plan.
+	var crossProjectAlerts []store.Message
+	if s.store != nil && crossCallCount > 0 {
+		msgs, _, err := s.store.GetMessages("", 0, "cross_project_impact", true, 10)
+		if err == nil && len(msgs) > 0 {
+			crossProjectAlerts = msgs
+		}
+	}
+
 	// ── Assemble response ─────────────────────────────────────────────────
 	resp := map[string]interface{}{
 		"project_identity": projectSection,
@@ -1638,6 +1651,13 @@ func (s *Server) handleSessionInit(
 		"latest_event_seq": latestEventSeq,
 		"scale_guidance":   identity.ToolGuidance,
 		"session_hint":     "Pass latest_event_seq to get_events on the next call to receive only new events. Use scale_guidance to decide when to use Synapses tools vs Read/Grep.",
+	}
+	if len(crossProjectAlerts) > 0 {
+		resp["cross_project_alerts"] = map[string]interface{}{
+			"count":    len(crossProjectAlerts),
+			"messages": crossProjectAlerts,
+			"warning":  fmt.Sprintf("%d unread cross-project impact alert(s). A recent change may have broken dependencies in a linked project. Review before proceeding.", len(crossProjectAlerts)),
+		}
 	}
 
 	// ── 5. Constitution (Hot Constitution — project principles) ───────────
@@ -1824,7 +1844,7 @@ func (s *Server) handleGetImpact(
 // knowing exact function names. When embedding_endpoint is configured in
 // synapses.json, future versions will re-rank using vector similarity.
 func (s *Server) handleSemanticSearch(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
@@ -1842,26 +1862,70 @@ func (s *Server) handleSemanticSearch(
 		limit = 20
 	}
 
-	results, err := s.store.SemanticSearch(query, limit)
+	// --- Vector path (when embedding_endpoint is configured) ---
+	// Embed the query with a 2s timeout so a slow Ollama never blocks the agent.
+	// On any error, silently fall through to FTS5-only results.
+	var vectorResults []store.SearchResult
+	searchMode := "fts5_bm25"
+	if s.embedClient != nil {
+		embedCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		queryVec, embedErr := s.embedClient.Embed(embedCtx, query)
+		cancel()
+		if embedErr == nil && len(queryVec) > 0 {
+			vr, verr := s.store.VectorSearch(queryVec, limit)
+			if verr == nil && len(vr) > 0 {
+				vectorResults = vr
+				searchMode = "vector_cosine"
+			}
+		}
+	}
+
+	// --- FTS5 path (always runs as fallback / supplement) ---
+	ftsResults, err := s.store.SemanticSearch(query, limit)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("semantic search: %v", err)), nil
 	}
 
-	embeddingNote := ""
-	if s.config != nil && s.config.EmbeddingEndpoint != "" {
-		embeddingNote = fmt.Sprintf("embedding_endpoint configured (%s) — vector re-ranking coming in a future version", s.config.EmbeddingEndpoint)
+	// --- Merge: vector results first, then FTS results not already returned ---
+	var results []store.SearchResult
+	if len(vectorResults) > 0 {
+		results = vectorResults
+		seen := make(map[string]bool, len(vectorResults))
+		for _, r := range vectorResults {
+			seen[r.ID] = true
+		}
+		for _, r := range ftsResults {
+			if !seen[r.ID] {
+				results = append(results, r)
+			}
+		}
+		if len(results) > limit {
+			results = results[:limit]
+		}
+		if len(vectorResults) > 0 {
+			searchMode = "hybrid_vector+fts5"
+		}
+	} else {
+		results = ftsResults
 	}
 
 	resp := map[string]interface{}{
-		"query":   query,
-		"count":   len(results),
-		"results": results,
+		"query":       query,
+		"count":       len(results),
+		"results":     results,
+		"search_mode": searchMode,
 	}
-	if embeddingNote != "" {
-		resp["note"] = embeddingNote
+
+	embeddingCount := s.store.EmbeddingCount()
+	if s.embedClient != nil && searchMode == "fts5_bm25" {
+		if embeddingCount == 0 {
+			resp["note"] = fmt.Sprintf("Vector embeddings not yet built. Run 'synapses index' or wait for the background embedding pass to complete (model: %s).", s.embedClient.Model())
+		} else {
+			resp["note"] = fmt.Sprintf("Vector index partial (%d nodes embedded). Results blended from cosine+FTS5 as more embeddings complete.", embeddingCount)
+		}
 	}
 	if len(results) == 0 {
-		resp["hint"] = "No FTS matches. Try broader terms, partial names, or use search() for exact substring matching."
+		resp["hint"] = "No matches found. Try broader terms, partial names, or use search() for exact substring matching."
 	}
 
 	return jsonResult(resp)

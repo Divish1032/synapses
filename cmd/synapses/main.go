@@ -26,6 +26,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/dataflow"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
@@ -257,6 +258,34 @@ func cmdStart(args []string) error {
 		} else {
 			fmt.Fprintf(os.Stderr, "synapses: scout unreachable at %s (continuing without)\n", cfg.Scout.URL)
 			scoutCli = nil
+		}
+	}
+
+	// Optional: vector embedding for semantic search.
+	// Priority: (1) brain /v1/embed when brain is connected and embedding is available,
+	//           (2) explicit embedding_endpoint in synapses.json (Ollama/OpenAI compat),
+	//           (3) FTS5-only fallback (no embeddings).
+	// Embeddings are built/updated in the background so startup is never delayed.
+	{
+		var embedCli *embed.Client
+		if brainCli != nil {
+			// Probe brain's /v1/embed — only wire it if the endpoint responds (i.e.
+			// embedding_enabled=true was set in brain.json and llama-server started).
+			candidate := embed.NewBrainClient(cfg.Brain.URL)
+			probeCtx, probeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if _, err := candidate.Embed(probeCtx, "probe"); err == nil {
+				embedCli = candidate
+				fmt.Fprintf(os.Stderr, "synapses: embeddings via brain /v1/embed (Ollama-free)\n")
+			}
+			probeCancel()
+		}
+		if embedCli == nil && cfg.EmbeddingEndpoint != "" {
+			embedCli = embed.NewClient(cfg.EmbeddingEndpoint, "")
+			fmt.Fprintf(os.Stderr, "synapses: embeddings via %s\n", cfg.EmbeddingEndpoint)
+		}
+		if embedCli != nil {
+			srv.SetEmbedClient(embedCli)
+			go embedAllNodes(context.Background(), embedCli, g, st)
 		}
 	}
 
@@ -1668,6 +1697,55 @@ func buildIngestCode(n *graph.Node) string {
 // completes in ~3min at 8× concurrency — runs in background, does not block startup.
 // Summaries are stored in brain.sqlite and surfaced in get_context responses.
 // Sort order: high-fanin nodes first so the most-used code gets summaries soonest.
+// embedAllNodes generates vector embeddings for every graph node that does not
+// yet have one, storing results in the node_embeddings table. Runs in a
+// background goroutine after startup so the MCP server is never delayed.
+// Rate-limited to ~10 req/s to avoid saturating a local Ollama instance.
+// Fail-silent: any error per-node is logged to stderr and skipped.
+func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *store.Store) {
+	if ec == nil || st == nil {
+		return
+	}
+
+	nodeIDs, err := st.GetNodesWithoutEmbeddings(0) // 0 = no limit
+	if err != nil || len(nodeIDs) == 0 {
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "synapses: embedding %d nodes (model: %s) …\n", len(nodeIDs), ec.Model())
+
+	const rateLimit = 100 * time.Millisecond // ~10 req/s
+	done := 0
+	for _, nodeID := range nodeIDs {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		text, ok := st.GetNodeTextForEmbedding(nodeID)
+		if !ok || text == "" {
+			continue
+		}
+
+		embedCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		vec, embedErr := ec.Embed(embedCtx, text)
+		cancel()
+
+		if embedErr != nil {
+			// Fail-silent: skip this node, try next.
+			continue
+		}
+		if err := st.UpsertEmbedding(nodeID, ec.Model(), vec); err != nil {
+			fmt.Fprintf(os.Stderr, "synapses: embed store error for %s: %v\n", nodeID, err)
+		}
+		done++
+		time.Sleep(rateLimit)
+	}
+
+	fmt.Fprintf(os.Stderr, "synapses: embedding complete (%d/%d nodes indexed)\n", done, len(nodeIDs))
+}
+
 func bulkIngestToBrain(bc *brain.Client, g *graph.Graph) {
 	all := g.AllNodes()
 

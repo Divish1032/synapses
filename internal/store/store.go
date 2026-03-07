@@ -264,6 +264,94 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool_name);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_ts   ON tool_calls(created_at);
+
+-- Agent Message Bus: direct and broadcast messaging between agents.
+-- Enables inter-agent communication without requiring persistent HTTP endpoints.
+-- Agents are ephemeral LLM sessions; SQLite acts as the message broker.
+-- to_agent NULL = broadcast (all agents receive it).
+-- seq is the cursor for get_messages polling (same pattern as events table).
+CREATE TABLE IF NOT EXISTS agent_messages (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         TEXT    NOT NULL UNIQUE,
+    from_agent TEXT    NOT NULL,
+    to_agent   TEXT,                        -- NULL = broadcast to all agents
+    topic      TEXT    NOT NULL,            -- e.g. "api_changed", "task_blocked"
+    payload    TEXT    NOT NULL DEFAULT '{}', -- arbitrary JSON
+    project_id TEXT    NOT NULL DEFAULT '', -- repo context (empty = global)
+    created_at INTEGER NOT NULL,            -- Unix seconds
+    read_at    INTEGER                      -- NULL = unread; set by mark_read
+);
+CREATE INDEX IF NOT EXISTS idx_messages_to_agent ON agent_messages(to_agent, read_at);
+CREATE INDEX IF NOT EXISTS idx_messages_created  ON agent_messages(created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_seq      ON agent_messages(seq);
+
+-- Episodic memory: agents record decisions and failures so future sessions can
+-- recall them. episode_type distinguishes decisions from failures; outcome tracks
+-- whether the approach worked. promoted_rule links a failure to the dynamic_rule
+-- it eventually spawned (closes the failure→pattern→constraint feedback loop).
+CREATE TABLE IF NOT EXISTS episodes (
+    id              TEXT PRIMARY KEY,
+    agent_id        TEXT NOT NULL,
+    project_id      TEXT NOT NULL DEFAULT '',
+    created_at      INTEGER NOT NULL,            -- Unix seconds
+    episode_type    TEXT NOT NULL DEFAULT 'decision', -- 'decision' | 'failure' | 'pattern' | 'rule_proposal'
+    outcome         TEXT NOT NULL DEFAULT 'unknown',  -- 'success' | 'failure' | 'partial' | 'unknown'
+    trigger         TEXT NOT NULL DEFAULT '',    -- what prompted this episode
+    decision        TEXT NOT NULL,               -- the decision or observation (concise)
+    rationale       TEXT NOT NULL DEFAULT '',    -- why (1-3 sentences)
+    affected_files  TEXT NOT NULL DEFAULT '[]',  -- JSON array of file paths
+    affected_nodes  TEXT NOT NULL DEFAULT '[]',  -- JSON array of graph node IDs
+    tags            TEXT NOT NULL DEFAULT '[]',  -- JSON array e.g. ["auth", "breaking"]
+    importance      REAL NOT NULL DEFAULT 0.5,   -- 0.0-1.0; reserved for future decay/pruning
+    promoted_rule   TEXT NOT NULL DEFAULT ''     -- rule_id if promoted to a dynamic_rule
+);
+CREATE INDEX IF NOT EXISTS idx_episodes_agent   ON episodes(agent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_episodes_project ON episodes(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_episodes_type    ON episodes(episode_type, outcome);
+
+-- Vector embeddings for graph nodes. Stored separately from the nodes table
+-- to keep the main table lean — embeddings are optional and can be regenerated.
+-- embedding is a little-endian float32 BLOB; indexed_at is Unix seconds.
+CREATE TABLE IF NOT EXISTS node_embeddings (
+    node_id    TEXT PRIMARY KEY,
+    model      TEXT NOT NULL DEFAULT '',
+    embedding  BLOB NOT NULL,
+    indexed_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_embeddings_node ON node_embeddings(node_id);
+
+-- FTS5 over episode content for check_plan_safety and recall().
+-- content='episodes' makes this an external-content FTS5 table: FTS stores its
+-- own index but reads content from the episodes table on demand.
+-- Triggers below keep the FTS index atomically in sync on every INSERT/UPDATE/DELETE.
+CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(
+    decision,
+    rationale,
+    trigger,
+    tags,
+    content='episodes',
+    content_rowid='rowid'
+);
+
+-- Keep episodes_fts in sync automatically. Without these triggers the FTS index
+-- goes stale whenever episodes are inserted or deleted, making recall() and
+-- check_plan_safety() silently return no results.
+CREATE TRIGGER IF NOT EXISTS episodes_ai AFTER INSERT ON episodes BEGIN
+    INSERT INTO episodes_fts(rowid, decision, rationale, trigger, tags)
+    VALUES (new.rowid, new.decision, new.rationale, new.trigger, new.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS episodes_ad AFTER DELETE ON episodes BEGIN
+    INSERT INTO episodes_fts(episodes_fts, rowid, decision, rationale, trigger, tags)
+    VALUES ('delete', old.rowid, old.decision, old.rationale, old.trigger, old.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS episodes_au AFTER UPDATE ON episodes BEGIN
+    INSERT INTO episodes_fts(episodes_fts, rowid, decision, rationale, trigger, tags)
+    VALUES ('delete', old.rowid, old.decision, old.rationale, old.trigger, old.tags);
+    INSERT INTO episodes_fts(rowid, decision, rationale, trigger, tags)
+    VALUES (new.rowid, new.decision, new.rationale, new.trigger, new.tags);
+END;
 `
 
 // Store wraps a SQLite database and provides graph serialisation.

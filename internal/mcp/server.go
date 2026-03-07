@@ -12,6 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
@@ -41,9 +42,10 @@ type Server struct {
 	config       *config.Config
 	store        *store.Store // nil if started without a persistent store
 	changeSource ChangeSource // nil if started without a file watcher
-	peerManager  interface{}  // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
-	brainClient  interface{}  // *brain.Client — set via SetBrainClient; nil if brain not configured
-	scoutClient  interface{}  // *scout.Client — set via SetScoutClient; nil if scout not configured
+	peerManager  interface{}    // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
+	brainClient  interface{}    // *brain.Client — set via SetBrainClient; nil if brain not configured
+	scoutClient  interface{}    // *scout.Client — set via SetScoutClient; nil if scout not configured
+	embedClient  *embed.Client  // nil if embedding_endpoint not configured
 	techStack    interface{}  // []scout.TechStackEntry — set via SetTechStack after autosubscribe
 	rulesMu      sync.RWMutex // protects s.config.Rules for concurrent dynamic upserts
 
@@ -201,6 +203,13 @@ func (s *Server) SetScoutClient(sc interface{}) {
 // Called from cmdStart after autosubscribe detection completes.
 func (s *Server) SetTechStack(ts interface{}) {
 	s.techStack = ts
+}
+
+// SetEmbedClient wires an embedding client so handleSemanticSearch can
+// perform vector similarity search in addition to FTS5 BM25 ranking.
+// Pass nil to disable vector search (falls back to FTS5-only).
+func (s *Server) SetEmbedClient(ec *embed.Client) {
+	s.embedClient = ec
 }
 
 // ServeStdio starts the MCP server on stdin/stdout. This call blocks until
@@ -974,6 +983,228 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handlePrepareContext,
+	)
+
+	// ── Agent Message Bus ────────────────────────────────────────────────────
+	// Phase 1: direct + broadcast messaging between ephemeral agent sessions.
+	// Transport: SQLite (not HTTP) — agents are ephemeral, need a broker.
+	// Semantics: A2A-lite (topic-based, task-linked payloads, lifecycle: unread→read).
+
+	// send_message
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"send_message",
+			mcp.WithDescription(
+				"Sends a message from one agent to another, or broadcasts it to all agents. "+
+					"Use this to notify peers about API changes, task blockers, or plan updates. "+
+					"to_agent omitted = broadcast. payload must be valid JSON.",
+			),
+			mcp.WithString("from_agent",
+				mcp.Required(),
+				mcp.Description("Self-declared sender identity (e.g. 'backend-claude')."),
+			),
+			mcp.WithString("topic",
+				mcp.Required(),
+				mcp.Description("Message topic, e.g. 'api_changed', 'task_blocked', 'plan_updated'."),
+			),
+			mcp.WithString("payload",
+				mcp.Description("JSON payload with message details. Defaults to '{}'. Example: '{\"endpoint\":\"/api/users\",\"change\":\"added role field\"}'."),
+			),
+			mcp.WithString("to_agent",
+				mcp.Description("Target agent ID. Omit (or leave empty) to broadcast to all agents."),
+			),
+			mcp.WithString("project_id",
+				mcp.Description("Optional repo context identifier (e.g. 'my-backend'). Used for cross-project coordination."),
+			),
+		),
+		s.handleSendMessage,
+	)
+
+	// get_messages
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_messages",
+			mcp.WithDescription(
+				"Retrieves messages from the agent message bus visible to the calling agent. "+
+					"Includes direct messages and broadcasts (to_agent omitted). "+
+					"Use since_seq cursor for efficient polling. unread_only=true by default.",
+			),
+			mcp.WithString("agent_id",
+				mcp.Required(),
+				mcp.Description("The calling agent's ID. Only messages addressed to this agent or broadcast are returned."),
+			),
+			mcp.WithNumber("since_seq",
+				mcp.Description("Return messages with seq greater than this value. Use 0 or omit for all. Use latest_seq from previous call as cursor."),
+			),
+			mcp.WithString("topic_filter",
+				mcp.Description("Optional. Only return messages with this exact topic (e.g. 'api_changed')."),
+			),
+			mcp.WithString("unread_only",
+				mcp.Description("If 'true' (default), only return unread messages. Pass 'false' to retrieve all messages including already-read ones."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Maximum messages to return. Defaults to 50."),
+			),
+		),
+		s.handleGetMessages,
+	)
+
+	// mark_read
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"mark_read",
+			mcp.WithDescription(
+				"Marks a message as read by the calling agent. "+
+					"Idempotent — calling it on an already-read message is safe. "+
+					"Call this after processing a message so it no longer appears in get_messages(unread_only=true).",
+			),
+			mcp.WithString("message_id",
+				mcp.Required(),
+				mcp.Description("The message ID to mark as read (from get_messages response)."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Required(),
+				mcp.Description("The agent marking the message as read."),
+			),
+		),
+		s.handleMarkRead,
+	)
+
+	// remember
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"remember",
+			mcp.WithDescription(
+				"Records a decision or failure as an episode in persistent memory. "+
+					"Use episode_type='failure' + outcome='failure' to populate the Hall of Shame "+
+					"so check_plan_safety() can warn future agents. "+
+					"Use episode_type='decision' for general architectural choices.",
+			),
+			mcp.WithString("agent_id",
+				mcp.Required(),
+				mcp.Description("Self-declared agent identifier (e.g. 'claude-code-session-1')."),
+			),
+			mcp.WithString("decision",
+				mcp.Required(),
+				mcp.Description("The decision made or failure observed. Concise, 1-2 sentences."),
+			),
+			mcp.WithString("episode_type",
+				mcp.Description("One of: decision (default), failure, pattern, rule_proposal."),
+			),
+			mcp.WithString("outcome",
+				mcp.Description("One of: success, failure, partial, unknown (default)."),
+			),
+			mcp.WithString("rationale",
+				mcp.Description("Why this decision was made or why it failed (1-3 sentences)."),
+			),
+			mcp.WithString("trigger",
+				mcp.Description("What prompted this episode, e.g. 'modifying auth_handler.go'."),
+			),
+			mcp.WithString("affected_files",
+				mcp.Description("JSON array of file paths involved, e.g. '[\"cmd/server/main.go\"]'."),
+			),
+			mcp.WithString("affected_nodes",
+				mcp.Description("JSON array of graph node IDs involved (from find_entity or get_context)."),
+			),
+			mcp.WithString("tags",
+				mcp.Description("JSON array of tags for filtering, e.g. '[\"auth\",\"breaking\"]'."),
+			),
+			mcp.WithString("project_id",
+				mcp.Description("Repo context (leave empty to use current project)."),
+			),
+		),
+		s.handleRemember,
+	)
+
+	// recall
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"recall",
+			mcp.WithDescription(
+				"Searches episodic memory using FTS5 BM25 for episodes matching the query. "+
+					"Returns the top-N most relevant episodes (best match first). "+
+					"Also surfaces any dynamic_rules that were derived from similar past failures. "+
+					"Use this before starting work on a component you haven't touched recently.",
+			),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description("Natural language search query, e.g. 'auth handler redirect loop'."),
+			),
+			mcp.WithString("project_id",
+				mcp.Description("Filter to episodes for this project (empty = all projects)."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Filter to episodes recorded by this agent (empty = all agents)."),
+			),
+			mcp.WithString("episode_type",
+				mcp.Description("Filter by type: decision, failure, pattern, rule_proposal (empty = all)."),
+			),
+			mcp.WithString("outcome_filter",
+				mcp.Description("Filter by outcome: success, failure, partial, unknown (empty = all)."),
+			),
+		),
+		s.handleRecall,
+	)
+
+	// get_episodes
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_episodes",
+			mcp.WithDescription(
+				"Lists recent episodes without search, ordered by creation time (newest first). "+
+					"Use recall() for semantic search. Use this to browse recent decisions or failures.",
+			),
+			mcp.WithString("project_id",
+				mcp.Description("Filter to this project (empty = all)."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Filter to this agent (empty = all)."),
+			),
+			mcp.WithString("episode_type",
+				mcp.Description("Filter by type: decision, failure, pattern, rule_proposal (empty = all)."),
+			),
+			mcp.WithString("tags",
+				mcp.Description("Comma-separated tags to filter by, e.g. 'auth,breaking'."),
+			),
+		),
+		s.handleGetEpisodes,
+	)
+
+	// check_plan_safety
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"check_plan_safety",
+			mcp.WithDescription(
+				"Searches failure episodes for the closest match to the proposed plan (Reactive Interjection). "+
+					"Returns a Recovery Packet if a similar past failure is found — the agent decides relevance. "+
+					"Non-blocking: returns 'clear' if no failures recorded yet or on timeout. "+
+					"Call this BEFORE validate_plan() when touching sensitive components.",
+			),
+			mcp.WithString("plan_description",
+				mcp.Required(),
+				mcp.Description("Natural language description of what you plan to do, e.g. 'modify auth_provider.dart login flow without fallback'."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Self-declared agent identifier (used to record the interjection event)."),
+			),
+			mcp.WithString("project_id",
+				mcp.Description("Repo context for scoping the failure search (empty = all projects)."),
+			),
+		),
+		s.handleCheckPlanSafety,
+	)
+
+	// get_rule_candidates
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_rule_candidates",
+			mcp.WithDescription(
+				"Returns failure episodes that have appeared ≥N times and have not yet been promoted to a dynamic_rule. "+
+					"Use this to close the feedback loop: review candidates, call upsert_rule() to enforce the pattern, "+
+					"then call mark_episode_promoted() to mark the episode as promoted.",
+			),
+		),
+		s.handleGetRuleCandidates,
 	)
 
 	// get_adrs
