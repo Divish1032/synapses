@@ -625,12 +625,12 @@ func (w *Watcher) notifyCrossProjectImpact(changedFile string) {
 		}
 
 		payload, err := json.Marshal(map[string]interface{}{
-			"changed_file":      relFile,
-			"changed_project":   primaryRepoID,
-			"affected_project":  linkedRepoID,
-			"callers_affected":  callers,  // linked-project nodes that call the changed code
-			"changed_symbols":   called,   // which symbols in the changed file are depended on
-			"edge_types":        edgeTypes,
+			"changed_file":     relFile,
+			"changed_project":  primaryRepoID,
+			"affected_project": linkedRepoID,
+			"callers_affected": callers, // linked-project nodes that call the changed code
+			"changed_symbols":  called,  // which symbols in the changed file are depended on
+			"edge_types":       edgeTypes,
 			"hint": fmt.Sprintf(
 				"Project %q depends on %d symbol(s) you just changed in %s. Verify compatibility.",
 				linkedRepoID, len(called), relFile,

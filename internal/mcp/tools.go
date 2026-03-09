@@ -1832,9 +1832,7 @@ func (s *Server) handleGetImpact(
 						TotalNodes: len(tierNodes),
 					})
 				}
-				for _, f := range r.AffectedFiles {
-					merged.AffectedFiles = append(merged.AffectedFiles, f)
-				}
+				merged.AffectedFiles = append(merged.AffectedFiles, r.AffectedFiles...)
 				merged.TotalAffected += len(tierNodes)
 			}
 		}
