@@ -1,27 +1,68 @@
 package store
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"sort"
 	"strings"
 )
 
+// nodeContentHash computes an 8-char hex hash of the concatenated node text
+// (name + signature + doc) used to detect stale embeddings after code changes.
+func nodeContentHash(name, sig, doc string) string {
+	parts := []string{name}
+	if sig != "" {
+		parts = append(parts, sig)
+	}
+	if doc != "" {
+		parts = append(parts, doc)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, " ")))
+	return hex.EncodeToString(sum[:4]) // 8 hex chars
+}
+
+// nodeText builds the embedding input string from raw node fields.
+// Mirrors GetNodeTextForEmbedding without a DB round-trip.
+func nodeText(name, sig, doc string) string {
+	parts := []string{name}
+	if sig != "" {
+		parts = append(parts, sig)
+	}
+	if doc != "" {
+		parts = append(parts, doc)
+	}
+	return strings.Join(parts, " ")
+}
+
 // UpsertEmbedding stores or replaces the vector embedding for a graph node.
-// vec is encoded as a little-endian float32 BLOB. model is the Ollama model
-// name used to generate the embedding (needed for cache invalidation when the
-// model changes). Thread-safe: each call is a single UPSERT.
+// vec is encoded as a little-endian float32 BLOB. model is the model name
+// used to generate the embedding (for cache invalidation when the model
+// changes). A content_hash of the node's name+signature+doc is computed and
+// stored so that GetNodesWithoutEmbeddings can detect stale embeddings when
+// the code changes. Thread-safe: each call is a single UPSERT.
 func (s *Store) UpsertEmbedding(nodeID, model string, vec []float32) error {
 	blob := vecToBlob(vec)
+
+	// Compute content hash for change detection. If the node has been deleted
+	// or renamed, the query returns empty strings and the hash reflects that —
+	// the embedding will be marked stale on the next re-index pass.
+	var name, sig, doc string
+	_ = s.db.QueryRow(`SELECT name, signature, doc FROM nodes WHERE id = ?`, nodeID).
+		Scan(&name, &sig, &doc)
+	hash := nodeContentHash(name, sig, doc)
+
 	_, err := s.db.Exec(`
-		INSERT INTO node_embeddings (node_id, model, embedding, indexed_at)
-		VALUES (?, ?, ?, strftime('%s','now'))
+		INSERT INTO node_embeddings (node_id, model, embedding, content_hash, indexed_at)
+		VALUES (?, ?, ?, ?, strftime('%s','now'))
 		ON CONFLICT(node_id) DO UPDATE SET
-			model      = excluded.model,
-			embedding  = excluded.embedding,
-			indexed_at = excluded.indexed_at`,
-		nodeID, model, blob,
+			model        = excluded.model,
+			embedding    = excluded.embedding,
+			content_hash = excluded.content_hash,
+			indexed_at   = excluded.indexed_at`,
+		nodeID, model, blob, hash,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert embedding: %w", err)
@@ -36,20 +77,17 @@ func (s *Store) EmbeddingCount() int {
 	return count
 }
 
-// GetNodesWithoutEmbeddings returns up to limit node IDs that exist in the
-// nodes table but have no corresponding row in node_embeddings. File and
-// package nodes are excluded — only functions, methods, and structs get embedded.
+// GetNodesWithoutEmbeddings returns up to limit node IDs that either have no
+// embedding yet or whose stored content_hash no longer matches the current
+// node text (name+signature+doc). File and package nodes are excluded.
+// Pass limit=0 to return all matching nodes (no cap).
 func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
-	if limit <= 0 {
-		limit = 500
-	}
+	// Fetch all non-file/package nodes with their stored hash (NULL when no embedding exists).
 	rows, err := s.db.Query(`
-		SELECT n.id
+		SELECT n.id, n.name, n.signature, n.doc, COALESCE(e.content_hash, '') AS stored_hash
 		FROM nodes n
 		LEFT JOIN node_embeddings e ON n.id = e.node_id
-		WHERE e.node_id IS NULL
-		  AND n.type NOT IN ('file', 'package')
-		LIMIT ?`, limit)
+		WHERE n.type NOT IN ('file', 'package')`)
 	if err != nil {
 		return nil, fmt.Errorf("get unembed nodes: %w", err)
 	}
@@ -57,11 +95,18 @@ func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 
 	var ids []string
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var id, name, sig, doc, storedHash string
+		if err := rows.Scan(&id, &name, &sig, &doc, &storedHash); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		// Include nodes with missing embeddings (storedHash=="") or stale ones
+		// (current content hash differs from what was stored at embedding time).
+		if nodeContentHash(name, sig, doc) != storedHash {
+			ids = append(ids, id)
+			if limit > 0 && len(ids) >= limit {
+				break
+			}
+		}
 	}
 	return ids, rows.Err()
 }
@@ -76,15 +121,7 @@ func (s *Store) GetNodeTextForEmbedding(nodeID string) (text string, ok bool) {
 	if err != nil {
 		return "", false
 	}
-	// Concatenate non-empty fields with spaces to form a rich embedding input.
-	parts := []string{name}
-	if sig != "" {
-		parts = append(parts, sig)
-	}
-	if doc != "" {
-		parts = append(parts, doc)
-	}
-	return strings.Join(parts, " "), true
+	return nodeText(name, sig, doc), true
 }
 
 // VectorSearch performs brute-force cosine similarity search over all stored

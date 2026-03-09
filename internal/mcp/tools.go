@@ -1642,6 +1642,27 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// ── Proactive failure injection ───────────────────────────────────────
+	// If ≥5 failure episodes exist for this project, recall the most relevant
+	// one relative to the most recently changed file. Cold-start safe: the
+	// field is omitted entirely when fewer than 5 failures are recorded.
+	var recentFailure map[string]interface{}
+	if s.store != nil && len(recentChanges) > 0 {
+		failures, err := s.store.GetEpisodes(primaryRepoID, "", "failure", nil, 5, 0)
+		if err == nil && len(failures) >= 5 {
+			query := filepath.Base(recentChanges[0].File)
+			if matches, mErr := s.store.RecallEpisodes(query, primaryRepoID, "", "failure", "", 1); mErr == nil && len(matches) > 0 {
+				e := matches[0]
+				recentFailure = map[string]interface{}{
+					"decision":   e.Decision,
+					"rationale":  e.Rationale,
+					"outcome":    e.Outcome,
+					"created_at": e.CreatedAt,
+				}
+			}
+		}
+	}
+
 	// ── Assemble response ─────────────────────────────────────────────────
 	resp := map[string]interface{}{
 		"project_identity": projectSection,
@@ -1651,6 +1672,9 @@ func (s *Server) handleSessionInit(
 		"latest_event_seq": latestEventSeq,
 		"scale_guidance":   identity.ToolGuidance,
 		"session_hint":     "Pass latest_event_seq to get_events on the next call to receive only new events. Use scale_guidance to decide when to use Synapses tools vs Read/Grep.",
+	}
+	if recentFailure != nil {
+		resp["recent_failure"] = recentFailure
 	}
 	if len(crossProjectAlerts) > 0 {
 		resp["cross_project_alerts"] = map[string]interface{}{

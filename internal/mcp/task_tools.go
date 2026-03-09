@@ -347,6 +347,14 @@ func (s *Server) handleUpdateTask(
 	_ = s.store.AppendEvent("task_update", agentID,
 		fmt.Sprintf(`{"task_id":%q,"status":%q}`, id, status))
 
+	// B1: Reflective Synthesis — when a task is marked done, annotate its
+	// linked nodes with a retrospective note so future agents see the task
+	// history in get_context. Runs in a goroutine so it never delays the
+	// response. Fail-silent: annotation errors are discarded.
+	if status == "done" {
+		go s.writeRetrospectiveAnnotations(id, agentID, notes)
+	}
+
 	result := map[string]interface{}{
 		"id":      id,
 		"status":  status,
@@ -357,4 +365,51 @@ func (s *Server) handleUpdateTask(
 		result["message"] = fmt.Sprintf("Task updated to %q. %d task(s) are now unblocked: %v", status, len(unblocked), unblocked)
 	}
 	return jsonResult(result)
+}
+
+// writeRetrospectiveAnnotations is the B1 Reflective Synthesis auditor.
+// When a task is marked done it fetches the task's linked_nodes and writes a
+// system annotation on each one recording which task touched it, by whom, and
+// any completion notes. This builds a "Diary of the Codebase" visible in
+// get_context and find_entity responses.
+//
+// Coupling filter: only nodes with fanin > 3 (called by more than 3 other
+// nodes) are annotated — low-connectivity nodes are typically leaf utilities
+// that accumulate noisy history with little navigation value.
+//
+// All errors are silently discarded (fail-silent contract).
+func (s *Server) writeRetrospectiveAnnotations(taskID, agentID, completionNotes string) {
+	if s.store == nil || s.graph == nil {
+		return
+	}
+	task, err := s.store.GetTask(taskID)
+	if err != nil || len(task.LinkedNodes) == 0 {
+		return
+	}
+
+	// Build the annotation text once — shared across all linked nodes.
+	var note strings.Builder
+	note.WriteString("[Auditor] Task done: ")
+	note.WriteString(task.Title)
+	if agentID != "" {
+		note.WriteString(" (by ")
+		note.WriteString(agentID)
+		note.WriteString(")")
+	}
+	if completionNotes != "" {
+		note.WriteString(". Notes: ")
+		note.WriteString(completionNotes)
+	}
+	noteStr := note.String()
+
+	const faninThreshold = 3
+	for _, rawID := range task.LinkedNodes {
+		nodeID := graph.NodeID(rawID)
+		// Only annotate nodes that are genuinely coupled (called by many others).
+		// Low-fanin nodes are typically leaf utilities; annotating them adds noise.
+		if s.graph.Fanin(nodeID) <= faninThreshold {
+			continue
+		}
+		_, _ = s.store.AddSystemAnnotation(rawID, noteStr)
+	}
 }

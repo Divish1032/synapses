@@ -194,7 +194,8 @@ CREATE TABLE IF NOT EXISTS annotations (
     node_id    TEXT NOT NULL,
     agent_id   TEXT NOT NULL DEFAULT '',
     note       TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT 'agent'
 );
 CREATE INDEX IF NOT EXISTS idx_annotations_node ON annotations(node_id);
 
@@ -313,10 +314,11 @@ CREATE INDEX IF NOT EXISTS idx_episodes_type    ON episodes(episode_type, outcom
 -- to keep the main table lean — embeddings are optional and can be regenerated.
 -- embedding is a little-endian float32 BLOB; indexed_at is Unix seconds.
 CREATE TABLE IF NOT EXISTS node_embeddings (
-    node_id    TEXT PRIMARY KEY,
-    model      TEXT NOT NULL DEFAULT '',
-    embedding  BLOB NOT NULL,
-    indexed_at INTEGER NOT NULL
+    node_id      TEXT PRIMARY KEY,
+    model        TEXT NOT NULL DEFAULT '',
+    embedding    BLOB NOT NULL,
+    content_hash TEXT NOT NULL DEFAULT '',
+    indexed_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_embeddings_node ON node_embeddings(node_id);
 
@@ -427,6 +429,10 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE tasks ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]'`,
 		// v0.2.0: Stable cross-project node identity (survives file renames).
 		`ALTER TABLE nodes ADD COLUMN stable_id TEXT NOT NULL DEFAULT ''`,
+		// B1: Reflective Synthesis — distinguish agent vs system-generated annotations.
+		`ALTER TABLE annotations ADD COLUMN source TEXT NOT NULL DEFAULT 'agent'`,
+		// B11: Content-hash invalidation — detect stale embeddings when code changes.
+		`ALTER TABLE node_embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -1434,15 +1440,32 @@ type Annotation struct {
 	AgentID   string `json:"agent_id,omitempty"`
 	Note      string `json:"note"`
 	CreatedAt string `json:"created_at"`
+	// Source distinguishes manually-added agent notes ("agent") from
+	// system-generated retrospective notes ("system"). Defaults to "agent".
+	Source string `json:"source,omitempty"`
 }
 
-// AddAnnotation attaches a note to a graph node.
+// AddAnnotation attaches a note to a graph node. Source is set to "agent".
 func (s *Store) AddAnnotation(nodeID, agentID, note string) (string, error) {
 	id := fmt.Sprintf("%x", time.Now().UnixNano())
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.Exec(
-		`INSERT INTO annotations (id, node_id, agent_id, note, created_at) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO annotations (id, node_id, agent_id, note, created_at, source) VALUES (?, ?, ?, ?, ?, 'agent')`,
 		id, nodeID, agentID, note, now,
+	)
+	return id, err
+}
+
+// AddSystemAnnotation attaches a system-generated retrospective note to a graph
+// node. Unlike AddAnnotation it sets source='system' so callers can distinguish
+// automated notes from agent-authored ones. Used by the Reflective Synthesis
+// auditor that runs when a task is marked done.
+func (s *Store) AddSystemAnnotation(nodeID, note string) (string, error) {
+	id := fmt.Sprintf("%x", time.Now().UnixNano())
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`INSERT INTO annotations (id, node_id, agent_id, note, created_at, source) VALUES (?, ?, '', ?, ?, 'system')`,
+		id, nodeID, note, now,
 	)
 	return id, err
 }
@@ -1460,7 +1483,7 @@ func (s *Store) GetAnnotationsForNodes(nodeIDs []string) (map[string][]Annotatio
 		args[i] = id
 	}
 	rows, err := s.db.Query(
-		`SELECT id, node_id, agent_id, note, created_at FROM annotations WHERE node_id IN (`+placeholders+`) ORDER BY created_at ASC`,
+		`SELECT id, node_id, agent_id, note, created_at, source FROM annotations WHERE node_id IN (`+placeholders+`) ORDER BY created_at ASC`,
 		args...,
 	)
 	if err != nil {
@@ -1471,7 +1494,7 @@ func (s *Store) GetAnnotationsForNodes(nodeIDs []string) (map[string][]Annotatio
 	result := make(map[string][]Annotation)
 	for rows.Next() {
 		var a Annotation
-		if err := rows.Scan(&a.ID, &a.NodeID, &a.AgentID, &a.Note, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.NodeID, &a.AgentID, &a.Note, &a.CreatedAt, &a.Source); err != nil {
 			return nil, err
 		}
 		result[a.NodeID] = append(result[a.NodeID], a)

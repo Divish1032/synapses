@@ -1713,40 +1713,73 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 		return
 	}
 
-	nodeIDs, err := st.GetNodesWithoutEmbeddings(0) // 0 = no limit
+	nodeIDs, err := st.GetNodesWithoutEmbeddings(0) // 0 = no limit (includes stale)
 	if err != nil || len(nodeIDs) == 0 {
 		return
 	}
 
 	fmt.Fprintf(os.Stderr, "synapses: embedding %d nodes (model: %s) …\n", len(nodeIDs), ec.Model())
 
-	const rateLimit = 100 * time.Millisecond // ~10 req/s
+	const batchSize = 16
 	done := 0
-	for _, nodeID := range nodeIDs {
+
+	for i := 0; i < len(nodeIDs); i += batchSize {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
 
-		text, ok := st.GetNodeTextForEmbedding(nodeID)
-		if !ok || text == "" {
+		end := i + batchSize
+		if end > len(nodeIDs) {
+			end = len(nodeIDs)
+		}
+		chunk := nodeIDs[i:end]
+
+		// Collect texts; skip nodes with no embeddable content.
+		texts := make([]string, 0, len(chunk))
+		validIDs := make([]string, 0, len(chunk))
+		for _, nodeID := range chunk {
+			text, ok := st.GetNodeTextForEmbedding(nodeID)
+			if !ok || text == "" {
+				continue
+			}
+			texts = append(texts, text)
+			validIDs = append(validIDs, nodeID)
+		}
+		if len(texts) == 0 {
 			continue
 		}
 
-		embedCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		vec, embedErr := ec.Embed(embedCtx, text)
+		// Try batch embed; fall back to per-node on error or length mismatch.
+		batchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		vecs, batchErr := ec.EmbedBatch(batchCtx, texts)
 		cancel()
 
-		if embedErr != nil {
-			// Fail-silent: skip this node, try next.
+		if batchErr != nil || len(vecs) != len(texts) {
+			// Fallback: embed each node individually (fail-silent per node).
+			for j, nodeID := range validIDs {
+				sCtx, sCancel := context.WithTimeout(ctx, 10*time.Second)
+				vec, sErr := ec.Embed(sCtx, texts[j])
+				sCancel()
+				if sErr != nil {
+					continue
+				}
+				if err := st.UpsertEmbedding(nodeID, ec.Model(), vec); err != nil {
+					fmt.Fprintf(os.Stderr, "synapses: embed store error for %s: %v\n", nodeID, err)
+				}
+				done++
+			}
 			continue
 		}
-		if err := st.UpsertEmbedding(nodeID, ec.Model(), vec); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: embed store error for %s: %v\n", nodeID, err)
+
+		// Store all batch results.
+		for j, nodeID := range validIDs {
+			if err := st.UpsertEmbedding(nodeID, ec.Model(), vecs[j]); err != nil {
+				fmt.Fprintf(os.Stderr, "synapses: embed store error for %s: %v\n", nodeID, err)
+			}
+			done++
 		}
-		done++
-		time.Sleep(rateLimit)
 	}
 
 	fmt.Fprintf(os.Stderr, "synapses: embedding complete (%d/%d nodes indexed)\n", done, len(nodeIDs))
