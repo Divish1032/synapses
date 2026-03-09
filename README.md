@@ -1,8 +1,9 @@
 # Synapses — Code Intelligence for AI Agents
 
-[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=for-the-badge&logo=go)](https://golang.org)
+[![Release](https://img.shields.io/github/v/release/SynapsesOS/synapses?style=for-the-badge&color=00ADD8)](https://github.com/SynapsesOS/synapses/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
-[![CI](https://img.shields.io/badge/CI-Passing-brightgreen?style=for-the-badge)](https://github.com/SynapsesOS/synapses/actions)
+[![CI](https://github.com/SynapsesOS/synapses/actions/workflows/ci.yml/badge.svg)](https://github.com/SynapsesOS/synapses/actions)
+[![VS Code](https://img.shields.io/visual-studio-marketplace/v/SynapsesOS.synapses?style=for-the-badge&label=VS%20Code&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=SynapsesOS.synapses)
 
 **Synapses** is a graph-based code intelligence server that gives AI coding agents structured understanding of large codebases. Replace ad-hoc grep with typed graph queries. Supports 18 languages. Works with Claude Code, Cursor, Zed, Windsurf, Gemini, and any editor via [MCP](https://modelcontextprotocol.io).
 
@@ -43,8 +44,7 @@ Synapses maintains **episodic memory** (past decisions, failures), an **agent me
 ✅ **Cross-Project Propagation** — when one repo changes, affected repos in a monorepo are notified
 ✅ **Intent-Based Context** — context packets adapt to agent intent (understand/review/debug/add/modify/plan)
 ✅ **Architectural Rules** — enforce no-regex constraints (e.g., "graph layer cannot call store"); get violations + suggestions
-✅ **No CGo** — pure Go, zero external dependencies for core functionality
-✅ **Single Binary** — one MCP server, works with any IDE
+✅ **Single Binary** — one MCP server, works with any IDE. Pre-built for macOS, Linux, Windows.
 ✅ **Fail-Silent** — brain sidecar crashes? graph queries still work. Scout down? web tools return "unavailable"
 
 ---
@@ -77,11 +77,31 @@ Synapses maintains **episodic memory** (past decisions, failures), an **agent me
 
 ### 1. Install
 
+**macOS / Linux (Homebrew — recommended):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh
+brew tap SynapsesOS/tap
+brew install synapses
 ```
 
-This installs the `synapses` binary to `/usr/local/bin`. Requires Go 1.21+ or pre-built binary.
+**macOS / Linux / Windows (direct binary):**
+
+Download the latest release from [GitHub Releases](https://github.com/SynapsesOS/synapses/releases/latest):
+
+| Platform | File |
+|----------|------|
+| macOS (Apple Silicon) | `synapses_darwin_arm64.tar.gz` |
+| macOS (Intel) | `synapses_darwin_x86_64.tar.gz` |
+| Linux (x86_64) | `synapses_linux_x86_64.tar.gz` |
+| Linux (ARM64) | `synapses_linux_arm64.tar.gz` |
+| Windows | `synapses_windows_x86_64.zip` |
+
+Extract and place the `synapses` binary on your `PATH` (e.g. `/usr/local/bin/synapses`).
+
+**VS Code Extension:**
+```
+ext install SynapsesOS.synapses
+```
+Or search "Synapses" in the VS Code Extensions panel.
 
 ### 2. Initialize Your Project
 
@@ -339,7 +359,7 @@ Both sidecars are optional — Synapses works without them (fail-silent).
 
 ### Core Design Principles
 
-🚫 **No CGo** — Pure Go. `modernc.org/sqlite` is pure-Go. No C dependencies at runtime.
+📦 **Pre-built Binaries** — No toolchain needed. Download from GitHub Releases or install via Homebrew.
 
 🔄 **Fail-Silent** — Brain crashes? Graph queries still work. Scout down? Web tools return "unavailable".
 
