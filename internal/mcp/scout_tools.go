@@ -166,6 +166,50 @@ func (s *Server) handleWebAnnotate(
 	})
 }
 
+// handleLookupDocs calls scout POST /v1/lookup-docs: one-shot search + fetch
+// for verifying current package/API documentation before writing code.
+func (s *Server) handleLookupDocs(
+	ctx context.Context,
+	req mcpgo.CallToolRequest,
+) (*mcpgo.CallToolResult, error) {
+	sc := s.getScoutClient()
+	if sc == nil {
+		return mcpgo.NewToolResultError("scout unavailable: configure scout.url in synapses.json"), nil
+	}
+
+	query, _ := req.GetArguments()["query"].(string)
+	if query == "" {
+		return mcpgo.NewToolResultError("query is required"), nil
+	}
+
+	maxChars := 6000
+	if v, ok := req.GetArguments()["max_chars"].(float64); ok && v > 0 {
+		maxChars = int(v)
+	}
+
+	resp := sc.LookupDocs(ctx, scout.LookupDocsRequest{
+		Query:    query,
+		MaxChars: maxChars,
+	})
+	if resp == nil {
+		return mcpgo.NewToolResultError("lookup_docs failed: scout service unreachable or timed out"), nil
+	}
+	if resp.Error != "" {
+		return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %s", resp.Error)), nil
+	}
+
+	return jsonResult(map[string]interface{}{
+		"query":       resp.Query,
+		"source_url":  resp.SourceURL,
+		"title":       resp.Title,
+		"content":     resp.Content,
+		"truncated":   resp.Truncated,
+		"cached":      resp.Cached,
+		"note":        resp.Note,
+		"search_hits": resp.SearchHits,
+	})
+}
+
 // handleWebDeepSearch calls scout POST /v1/deep-search for multi-query
 // orchestrated search with fan-out and deduplication.
 func (s *Server) handleWebDeepSearch(

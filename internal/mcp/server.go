@@ -917,6 +917,32 @@ func (s *Server) registerTools() {
 		s.handleWebDeepSearch,
 	)
 
+	// lookup_docs
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"lookup_docs",
+			mcp.WithDescription(
+				"One-shot documentation lookup: searches the web and fetches the top result in a "+
+					"single call. Use this BEFORE writing code that uses external packages or APIs "+
+					"to verify you have the current API — training data may be outdated. "+
+					"Faster than calling web_search then web_fetch separately. "+
+					"Requires scout.url in synapses.json (default: http://localhost:11436).",
+			),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description(
+					"What to look up. Include the package name, topic, and language for best results. "+
+						"Examples: 'openai python chat completions API', 'react hooks useState', "+
+						"'docker compose v2 CLI flags', 'langchain LCEL chain syntax'.",
+				),
+			),
+			mcp.WithNumber("max_chars",
+				mcp.Description("Maximum characters of page content to return. Default 6000 (~1500 tokens)."),
+			),
+		),
+		s.handleLookupDocs,
+	)
+
 	// upsert_adr
 	s.mcp.AddTool(
 		mcp.NewTool(
