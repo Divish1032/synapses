@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-// Global instance of the StringPool accessed by FlatGraph
+// Pool is the global instance of the StringPool accessed by FlatGraph.
 var Pool = NewStringPool()
 
 // NodeIndex is a dense integer ID assigned sequentially to each parsed node.
