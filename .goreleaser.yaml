@@ -34,7 +34,6 @@ archives:
     files:
       - README.md
       - LICENSE
-      - COMMANDS.md
       - synapses.example.json
 
 checksum:
