@@ -3,7 +3,7 @@
   "displayName": "Synapses",
   "description": "Graph-based code context for AI coding agents — context sidebar, auto-ingest, and hover summaries",
   "version": "0.2.0",
-  "publisher": "synapses",
+  "publisher": "SynapsesOS",
   "engines": { "vscode": "^1.85.0" },
   "categories": ["Other"],
   "keywords": ["ai", "context", "graph", "mcp", "claude"],
