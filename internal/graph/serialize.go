@@ -291,6 +291,7 @@ func readString(r io.Reader) (string, error) {
 	return string(buf), nil
 }
 
+// DeserializeMapped deserializes a FlatGraph from raw bytes.
 // MemoryMap (Placeholder) - mmap requires OS specific syscalls (unix package)
 // to map a file directly to the struct byte slices.
 // This deserializer reads to heap for now, but provides the structure

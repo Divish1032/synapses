@@ -26,8 +26,8 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
-	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/dataflow"
+	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/metrics"
@@ -1546,9 +1546,6 @@ func cmdMCPSetup(args []string) error {
 		Command string   `json:"command"`
 		Args    []string `json:"args"`
 		Type    string   `json:"type"`
-	}
-	type mcpServersWrapper struct {
-		MCPServers map[string]stdioServer `json:"mcpServers"`
 	}
 
 	serverEntry := stdioServer{

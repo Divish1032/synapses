@@ -85,7 +85,7 @@ func (s *Server) handleRemember(
 		"episode_id":   id,
 		"episode_type": episodeType,
 		"outcome":      outcome,
-		"message":      fmt.Sprintf("Episode recorded. Use recall() to surface similar past episodes in future sessions."),
+		"message":      "Episode recorded. Use recall() to surface similar past episodes in future sessions.",
 	})
 }
 

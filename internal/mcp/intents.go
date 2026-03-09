@@ -332,15 +332,17 @@ func (s *Server) assembleModifyContext(
 
 	// Blast radius — always shown; use struct aggregation for struct/interface nodes.
 	impact := s.aggregatedImpact(node, 2)
-	fmt.Fprintf(b, "\n## Blast Radius (%d affected)\n", impact.TotalAffected)
-	if impact != nil && len(impact.Tiers) > 0 {
-		for _, tier := range impact.Tiers {
-			names := make([]string, 0, len(tier.Nodes))
-			for _, ref := range tier.Nodes {
-				names = append(names, ref.Name)
+	if impact != nil {
+		fmt.Fprintf(b, "\n## Blast Radius (%d affected)\n", impact.TotalAffected)
+		if len(impact.Tiers) > 0 {
+			for _, tier := range impact.Tiers {
+				names := make([]string, 0, len(tier.Nodes))
+				for _, ref := range tier.Nodes {
+					names = append(names, ref.Name)
+				}
+				label := strings.ToUpper(tier.Label)
+				fmt.Fprintf(b, "%s: %s\n", label, strings.Join(names, ", "))
 			}
-			label := strings.ToUpper(tier.Label)
-			fmt.Fprintf(b, "%s: %s\n", label, strings.Join(names, ", "))
 		}
 	} else {
 		b.WriteString("No compile-time callers tracked (may be invoked via interface or dispatcher).\n")
