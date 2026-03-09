@@ -139,6 +139,97 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	return out.Embedding, nil
 }
 
+// EmbedBatch returns vector embeddings for a batch of texts in one HTTP round-trip.
+// Supports Brain batch format ({"input": [...]}) and OpenAI batch format.
+// Ollama does not support batch — falls back to serial Embed() calls.
+// Returns (nil, nil) if the client is nil or texts is empty.
+func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if c == nil || len(texts) == 0 {
+		return nil, nil
+	}
+
+	isBrain := strings.HasSuffix(c.endpoint, "/v1/embed")
+	isOpenAI := !isBrain && strings.Contains(c.endpoint, "/v1/embeddings")
+
+	if !isBrain && !isOpenAI {
+		// Ollama doesn't support batch — fall back to serial.
+		return c.embedSerial(ctx, texts)
+	}
+
+	var bodyMap map[string]interface{}
+	if isBrain {
+		bodyMap = map[string]interface{}{"input": texts}
+	} else {
+		bodyMap = map[string]interface{}{"model": c.model, "input": texts}
+	}
+
+	body, err := json.Marshal(bodyMap)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("embed batch request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("embed batch endpoint returned %d", resp.StatusCode)
+	}
+
+	if isOpenAI {
+		var out struct {
+			Data []struct {
+				Embedding []float32 `json:"embedding"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return nil, fmt.Errorf("decode batch embed response: %w", err)
+		}
+		if len(out.Data) != len(texts) {
+			return nil, fmt.Errorf("batch response length mismatch: got %d, want %d", len(out.Data), len(texts))
+		}
+		vecs := make([][]float32, len(out.Data))
+		for i, d := range out.Data {
+			vecs[i] = d.Embedding
+		}
+		return vecs, nil
+	}
+
+	// Brain format: {"embeddings": [[...], ...]}
+	var out struct {
+		Embeddings [][]float32 `json:"embeddings"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode batch embed response: %w", err)
+	}
+	if len(out.Embeddings) != len(texts) {
+		return nil, fmt.Errorf("batch response length mismatch: got %d, want %d", len(out.Embeddings), len(texts))
+	}
+	return out.Embeddings, nil
+}
+
+// embedSerial falls back to individual Embed() calls for endpoints that don't
+// support batching (e.g. Ollama). Stops and returns an error on the first failure.
+func (c *Client) embedSerial(ctx context.Context, texts []string) ([][]float32, error) {
+	vecs := make([][]float32, len(texts))
+	for i, text := range texts {
+		v, err := c.Embed(ctx, text)
+		if err != nil {
+			return nil, fmt.Errorf("serial embed[%d]: %w", i, err)
+		}
+		vecs[i] = v
+	}
+	return vecs, nil
+}
+
 // Model returns the configured embedding model name.
 func (c *Client) Model() string {
 	if c == nil {
