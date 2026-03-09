@@ -43,14 +43,14 @@ type GraphIndex struct {
 
 	// Parallel node property slices — all indexed by sequential uint32 seq ID.
 	// seq 0 is reserved as the "null / not found" sentinel.
-	SeqIDs   []NodeID  // seq → original NodeID string
-	Types    []StringID // seq → interned NodeType string
-	Names    []StringID // seq → interned Name string
-	FileIDs  []StringID // seq → interned File path string
-	PkgIDs   []StringID // seq → interned Package string
-	Lines    []int32    // seq → line number
-	Exported []bool     // seq → exported flag
-	Tombstone []bool    // seq → true means node is deleted (pending compaction)
+	SeqIDs    []NodeID   // seq → original NodeID string
+	Types     []StringID // seq → interned NodeType string
+	Names     []StringID // seq → interned Name string
+	FileIDs   []StringID // seq → interned File path string
+	PkgIDs    []StringID // seq → interned Package string
+	Lines     []int32    // seq → line number
+	Exported  []bool     // seq → exported flag
+	Tombstone []bool     // seq → true means node is deleted (pending compaction)
 
 	// IDToSeq maps NodeID strings → seq for O(1) lookup in the BFS hot path.
 	IDToSeq map[NodeID]uint32
@@ -80,19 +80,19 @@ func newGraphIndex(pool *StringPool) *GraphIndex {
 		IDToSeq: make(map[NodeID]uint32),
 	}
 	// Append sentinel at position 0 for all slices.
-	idx.SeqIDs   = append(idx.SeqIDs, "")
-	idx.Types    = append(idx.Types, 0)
-	idx.Names    = append(idx.Names, 0)
-	idx.FileIDs  = append(idx.FileIDs, 0)
-	idx.PkgIDs   = append(idx.PkgIDs, 0)
-	idx.Lines    = append(idx.Lines, 0)
+	idx.SeqIDs = append(idx.SeqIDs, "")
+	idx.Types = append(idx.Types, 0)
+	idx.Names = append(idx.Names, 0)
+	idx.FileIDs = append(idx.FileIDs, 0)
+	idx.PkgIDs = append(idx.PkgIDs, 0)
+	idx.Lines = append(idx.Lines, 0)
 	idx.Exported = append(idx.Exported, false)
 	idx.Tombstone = append(idx.Tombstone, false)
 	// CSR sentinel row at position 0.
 	idx.OutStart = append(idx.OutStart, 0)
-	idx.OutEnd   = append(idx.OutEnd, 0)
-	idx.InStart  = append(idx.InStart, 0)
-	idx.InEnd    = append(idx.InEnd, 0)
+	idx.OutEnd = append(idx.OutEnd, 0)
+	idx.InStart = append(idx.InStart, 0)
+	idx.InEnd = append(idx.InEnd, 0)
 	return idx
 }
 
@@ -245,12 +245,12 @@ func buildIndex(g *Graph, pool *StringPool) *GraphIndex {
 	for i, ns := range nodeSnaps {
 		seq := uint32(i + 1)
 		idx.IDToSeq[ns.id] = seq
-		idx.SeqIDs   = append(idx.SeqIDs, ns.id)
-		idx.Types    = append(idx.Types,   pool.Intern(string(ns.ntype)))
-		idx.Names    = append(idx.Names,   pool.Intern(ns.name))
-		idx.FileIDs  = append(idx.FileIDs, pool.Intern(ns.file))
-		idx.PkgIDs   = append(idx.PkgIDs,  pool.Intern(ns.pkg))
-		idx.Lines    = append(idx.Lines,   int32(ns.line))
+		idx.SeqIDs = append(idx.SeqIDs, ns.id)
+		idx.Types = append(idx.Types, pool.Intern(string(ns.ntype)))
+		idx.Names = append(idx.Names, pool.Intern(ns.name))
+		idx.FileIDs = append(idx.FileIDs, pool.Intern(ns.file))
+		idx.PkgIDs = append(idx.PkgIDs, pool.Intern(ns.pkg))
+		idx.Lines = append(idx.Lines, int32(ns.line))
 		idx.Exported = append(idx.Exported, ns.exported)
 		idx.Tombstone = append(idx.Tombstone, false)
 	}
@@ -258,7 +258,7 @@ func buildIndex(g *Graph, pool *StringPool) *GraphIndex {
 	// --- Phase 3: build CSR adjacency lists ---
 	// Count out-degree and in-degree per node (1-indexed arrays).
 	outDeg := make([]int, n+1)
-	inDeg  := make([]int, n+1)
+	inDeg := make([]int, n+1)
 	for _, es := range edgeSnaps {
 		srcSeq := idx.IDToSeq[es.from]
 		dstSeq := idx.IDToSeq[es.to]
@@ -278,23 +278,23 @@ func buildIndex(g *Graph, pool *StringPool) *GraphIndex {
 	// Extend CSR arrays (already have sentinel row at 0 from newGraphIndex).
 	for i := 1; i <= n; i++ {
 		idx.OutStart = append(idx.OutStart, 0) // will be set below
-		idx.OutEnd   = append(idx.OutEnd, 0)
-		idx.InStart  = append(idx.InStart, 0)
-		idx.InEnd    = append(idx.InEnd, 0)
+		idx.OutEnd = append(idx.OutEnd, 0)
+		idx.InStart = append(idx.InStart, 0)
+		idx.InEnd = append(idx.InEnd, 0)
 	}
 	idx.OutTargets = make([]uint32, totalEdges)
-	idx.OutTypes   = make([]StringID, totalEdges)
-	idx.InTargets  = make([]uint32, totalEdges)
-	idx.InTypes    = make([]StringID, totalEdges)
+	idx.OutTypes = make([]StringID, totalEdges)
+	idx.InTargets = make([]uint32, totalEdges)
+	idx.InTypes = make([]StringID, totalEdges)
 
 	outPos := uint32(0)
-	inPos  := uint32(0)
+	inPos := uint32(0)
 	for i := 1; i <= n; i++ {
 		idx.OutStart[i] = outPos
-		idx.OutEnd[i]   = outPos
+		idx.OutEnd[i] = outPos
 		outPos += uint32(outDeg[i])
 		idx.InStart[i] = inPos
-		idx.InEnd[i]   = inPos
+		idx.InEnd[i] = inPos
 		inPos += uint32(inDeg[i])
 	}
 
@@ -310,13 +310,13 @@ func buildIndex(g *Graph, pool *StringPool) *GraphIndex {
 		// Out direction: src → dst
 		op := idx.OutEnd[srcSeq]
 		idx.OutTargets[op] = dstSeq
-		idx.OutTypes[op]   = etID
+		idx.OutTypes[op] = etID
 		idx.OutEnd[srcSeq]++
 
 		// In direction: dst ← src
 		ip := idx.InEnd[dstSeq]
 		idx.InTargets[ip] = srcSeq
-		idx.InTypes[ip]   = etID
+		idx.InTypes[ip] = etID
 		idx.InEnd[dstSeq]++
 	}
 

@@ -23,7 +23,7 @@ type Episode struct {
 	Rationale     string  `json:"rationale,omitempty"`
 	AffectedFiles string  `json:"affected_files"` // JSON array string
 	AffectedNodes string  `json:"affected_nodes"` // JSON array string
-	Tags          string  `json:"tags"`            // JSON array string
+	Tags          string  `json:"tags"`           // JSON array string
 	Importance    float64 `json:"importance"`
 	PromotedRule  string  `json:"promoted_rule,omitempty"`
 }

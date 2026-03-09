@@ -10,15 +10,15 @@ import (
 // Agents send messages to specific peers (to_agent non-empty) or broadcast
 // to all agents (to_agent empty). The seq field acts as a cursor for polling.
 type Message struct {
-	Seq       int64   `json:"seq"`
-	ID        string  `json:"id"`
-	FromAgent string  `json:"from_agent"`
-	ToAgent   string  `json:"to_agent,omitempty"` // empty = broadcast
-	Topic     string  `json:"topic"`
-	Payload   string  `json:"payload"`   // arbitrary JSON
-	ProjectID string  `json:"project_id,omitempty"`
-	CreatedAt int64   `json:"created_at"` // Unix seconds
-	ReadAt    *int64  `json:"read_at,omitempty"` // nil = unread
+	Seq       int64  `json:"seq"`
+	ID        string `json:"id"`
+	FromAgent string `json:"from_agent"`
+	ToAgent   string `json:"to_agent,omitempty"` // empty = broadcast
+	Topic     string `json:"topic"`
+	Payload   string `json:"payload"` // arbitrary JSON
+	ProjectID string `json:"project_id,omitempty"`
+	CreatedAt int64  `json:"created_at"`        // Unix seconds
+	ReadAt    *int64 `json:"read_at,omitempty"` // nil = unread
 }
 
 // SendMessage inserts a new message into the bus and returns the generated

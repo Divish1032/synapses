@@ -63,7 +63,7 @@ func (idx *GraphIndex) SaveSnapshot() ([]byte, error) {
 
 	// Helper writers
 	writeU32 := func(v uint32) { _ = binary.Write(&buf, binary.LittleEndian, v) }
-	writeI32 := func(v int32)  { _ = binary.Write(&buf, binary.LittleEndian, v) }
+	writeI32 := func(v int32) { _ = binary.Write(&buf, binary.LittleEndian, v) }
 	writeSID := func(v StringID) { writeU32(uint32(v)) }
 	writeBool := func(v bool) {
 		b := byte(0)
@@ -219,14 +219,14 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 	idx := newGraphIndex(pool)
 
 	// Pre-allocate to avoid repeated re-slicing
-	idx.SeqIDs   = make([]NodeID,   nodeCount+1)
-	idx.Types    = make([]StringID, nodeCount+1)
-	idx.Names    = make([]StringID, nodeCount+1)
-	idx.FileIDs  = make([]StringID, nodeCount+1)
-	idx.PkgIDs   = make([]StringID, nodeCount+1)
-	idx.Lines    = make([]int32,    nodeCount+1)
-	idx.Exported = make([]bool,     nodeCount+1)
-	idx.Tombstone = make([]bool,    nodeCount+1)
+	idx.SeqIDs = make([]NodeID, nodeCount+1)
+	idx.Types = make([]StringID, nodeCount+1)
+	idx.Names = make([]StringID, nodeCount+1)
+	idx.FileIDs = make([]StringID, nodeCount+1)
+	idx.PkgIDs = make([]StringID, nodeCount+1)
+	idx.Lines = make([]int32, nodeCount+1)
+	idx.Exported = make([]bool, nodeCount+1)
+	idx.Tombstone = make([]bool, nodeCount+1)
 
 	// Sentinel at 0 already set by newGraphIndex; fill 1..nodeCount
 	for i := uint32(1); i <= nodeCount; i++ {
@@ -237,17 +237,17 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 		typeID, _ := readSID()
 		nameID, _ := readSID()
 		fileID, _ := readSID()
-		pkgID,  _ := readSID()
-		line,   _ := readI32()
-		exp,    _ := readBool()
+		pkgID, _ := readSID()
+		line, _ := readI32()
+		exp, _ := readBool()
 
 		nid := NodeID(nidStr)
-		idx.SeqIDs[i]   = nid
-		idx.Types[i]    = typeID
-		idx.Names[i]    = nameID
-		idx.FileIDs[i]  = fileID
-		idx.PkgIDs[i]   = pkgID
-		idx.Lines[i]    = line
+		idx.SeqIDs[i] = nid
+		idx.Types[i] = typeID
+		idx.Names[i] = nameID
+		idx.FileIDs[i] = fileID
+		idx.PkgIDs[i] = pkgID
+		idx.Lines[i] = line
 		idx.Exported[i] = exp
 		idx.IDToSeq[nid] = i
 	}
@@ -267,10 +267,10 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 
 	// CSR out-edges
 	idx.OutStart = make([]uint32, nodeCount+2)
-	idx.OutEnd   = make([]uint32, nodeCount+2)
+	idx.OutEnd = make([]uint32, nodeCount+2)
 	for i := uint32(1); i <= nodeCount; i++ {
 		idx.OutStart[i], _ = readU32()
-		idx.OutEnd[i], _   = readU32()
+		idx.OutEnd[i], _ = readU32()
 	}
 	idx.OutTargets = make([]uint32, edgeCount)
 	for i := range idx.OutTargets {
@@ -283,10 +283,10 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 
 	// CSR in-edges
 	idx.InStart = make([]uint32, nodeCount+2)
-	idx.InEnd   = make([]uint32, nodeCount+2)
+	idx.InEnd = make([]uint32, nodeCount+2)
 	for i := uint32(1); i <= nodeCount; i++ {
 		idx.InStart[i], _ = readU32()
-		idx.InEnd[i], _   = readU32()
+		idx.InEnd[i], _ = readU32()
 	}
 	idx.InTargets = make([]uint32, edgeCount)
 	for i := range idx.InTargets {

@@ -40,14 +40,14 @@ type Server struct {
 	mcp          *server.MCPServer
 	graph        *graph.Graph
 	config       *config.Config
-	store        *store.Store // nil if started without a persistent store
-	changeSource ChangeSource // nil if started without a file watcher
-	peerManager  interface{}    // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
-	brainClient  interface{}    // *brain.Client — set via SetBrainClient; nil if brain not configured
-	scoutClient  interface{}    // *scout.Client — set via SetScoutClient; nil if scout not configured
-	embedClient  *embed.Client  // nil if embedding_endpoint not configured
-	techStack    interface{}  // []scout.TechStackEntry — set via SetTechStack after autosubscribe
-	rulesMu      sync.RWMutex // protects s.config.Rules for concurrent dynamic upserts
+	store        *store.Store  // nil if started without a persistent store
+	changeSource ChangeSource  // nil if started without a file watcher
+	peerManager  interface{}   // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
+	brainClient  interface{}   // *brain.Client — set via SetBrainClient; nil if brain not configured
+	scoutClient  interface{}   // *scout.Client — set via SetScoutClient; nil if scout not configured
+	embedClient  *embed.Client // nil if embedding_endpoint not configured
+	techStack    interface{}   // []scout.TechStackEntry — set via SetTechStack after autosubscribe
+	rulesMu      sync.RWMutex  // protects s.config.Rules for concurrent dynamic upserts
 
 	// Context-packet cache: 20 slots max, 30s TTL. Keyed by "entityName:depth".
 	packetCacheMu sync.Mutex

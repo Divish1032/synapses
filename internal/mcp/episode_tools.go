@@ -282,13 +282,13 @@ func (s *Server) handleCheckPlanSafety(
 	return jsonResult(map[string]interface{}{
 		"status": "warning",
 		"match": map[string]interface{}{
-			"episode_id":  match.ID,
-			"trigger":     match.Trigger,
-			"decision":    match.Decision,
-			"outcome":     match.Outcome,
-			"rationale":   match.Rationale,
-			"tags":        match.Tags,
-			"created_at":  match.CreatedAt,
+			"episode_id": match.ID,
+			"trigger":    match.Trigger,
+			"decision":   match.Decision,
+			"outcome":    match.Outcome,
+			"rationale":  match.Rationale,
+			"tags":       match.Tags,
+			"created_at": match.CreatedAt,
 		},
 		"message": fmt.Sprintf(
 			"⚠ Past failure match found [%s]: %q (outcome: %s). Review rationale before proceeding. Then run validate_plan() for structural checks.",
