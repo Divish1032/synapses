@@ -1349,7 +1349,11 @@ func topLevelPackage(filePath string) string {
 	if filePath == "" {
 		return ""
 	}
-	parts := strings.SplitN(strings.TrimLeft(filePath, "/"), "/", 2)
+	// Normalize to forward slashes so this works on Windows (where graph paths
+	// may use backslashes) and Unix alike.
+	clean := filepath.ToSlash(filePath)
+	clean = strings.TrimLeft(clean, "/")
+	parts := strings.SplitN(clean, "/", 2)
 	if len(parts) == 0 {
 		return ""
 	}
