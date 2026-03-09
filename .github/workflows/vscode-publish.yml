@@ -29,6 +29,7 @@ jobs:
         run: cd vscode-extension && npx @vscode/vsce package
 
       - name: Publish to VS Code Marketplace
+        continue-on-error: true
         run: cd vscode-extension && npx @vscode/vsce publish
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
