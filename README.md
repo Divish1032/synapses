@@ -1,330 +1,398 @@
-# Synapses
+# Synapses — Code Intelligence for AI Agents
 
-**The Agentic Control Plane.** A local-first, graph-based context manager for AI coding agents.
+[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=for-the-badge&logo=go)](https://golang.org)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
+[![CI](https://img.shields.io/badge/CI-Passing-brightgreen?style=for-the-badge)](https://github.com/SynapsesOS/synapses/actions)
 
-Instead of letting an agent grep through your codebase, Synapses parses your code into a relational graph and hands the agent a mathematically-carved slice — only the nodes and edges it actually needs.
+**Synapses** is a graph-based code intelligence server that gives AI coding agents structured understanding of large codebases. Replace ad-hoc grep with typed graph queries. Supports 18 languages. Works with Claude Code, Cursor, Zed, Windsurf, Gemini, and any editor via [MCP](https://modelcontextprotocol.io).
 
 ```
-Agent → "What is AuthService?"
-Synapses → 2-hop BFS subgraph, edge-weighted, token-budgeted
-         → AuthService + its direct callers + its direct dependencies
-         → Delivered in <10ms, never exceeds your token budget
+IDE → MCP Tools → Synapses (Graph+SQLite)
+                    ↓
+           Brain Sidecar (LLM)
+           Scout Sidecar (Web)
 ```
 
-The agent gets structural truth. Not grep results.
+---
+
+## What is Synapses?
+
+Synapses solves a core problem in AI-assisted development: **large codebases are too big to fit in context, and grep is too dumb to understand code structure.**
+
+Instead of line-by-line searching, Synapses maintains an in-memory graph of your codebase:
+- **Nodes**: functions, methods, structs, classes, interfaces, variables, files, packages
+- **Edges**: calls, implements, defines, embeds, imports, depends on, data flows
+
+AI agents query the graph via **38 MCP tools** to answer questions like:
+- "Find all callers of auth.Login()"
+- "What breaks if I change this function signature?"
+- "Architect a context packet for debugging checkout flow"
+- "Explain this architectural rule violation in English"
+
+Synapses maintains **episodic memory** (past decisions, failures), an **agent message bus**, **vector embeddings** (semantic search), and **cross-project propagation** so agents don't repeat work across sessions.
 
 ---
 
 ## Features
 
-- **Context Carving** — BFS ego-graph with relevance decay. The agent gets a ranked subgraph, not a file dump.
-- **Project Identity** — Compact architectural handshake at session start: key entities, entry points, node/edge counts.
-- **Architectural Rules** — Enforce constraints via `synapses.json` or `upsert_rule` at runtime. AI agents can define new rules during a session; they persist to SQLite and take effect immediately.
-- **MCP Protocol** — Works natively with Claude Code, Cursor, and any MCP-compatible agent over stdio.
-- **18 Language Parsers** — Deep AST parsing for all major languages. Fallback file-tracking for 80+ more.
-- **Persistent Index** — Parse once, load in <1s on subsequent runs. Cache lives outside your project tree.
-- **Live File Watcher** — Incremental re-parse on save. Graph stays current as you code.
-- **Agent Task Memory** — `create_plan` / `get_pending_tasks` / `update_task` persist agent work across LLM sessions.
-- **IMPLEMENTS Edges** — Structural interface satisfaction detection for Go; `get_call_chain` crosses interface boundaries automatically.
-- **Federation / Monorepo** — Link multiple project graphs; cross-project CALLS edges resolved automatically.
-- **Global Project List** — `synapses list` shows all indexed projects from one command.
-- **Zero Operational Overhead** — Single binary. No Docker, no external services, no background daemons.
+✅ **38 MCP Tools** — session management, code graph queries, task memory, agent coordination, episodic memory, web intelligence, architecture enforcement
+✅ **18-Language Parser** — Go, TypeScript, Python, Java, Rust, C, C++, C#, Swift, Ruby, PHP, Kotlin, Scala, Lua, Elixir, Protobuf, Groovy, and a generic fallback
+✅ **Episodic Memory** — persist past decisions and failures; future sessions query them to avoid repeating mistakes
+✅ **Agent Message Bus** — broadcast work status across agents; unread messages surface on session start
+✅ **Vector Embeddings** — semantic search via content-hash invalidation (detect stale embeddings automatically)
+✅ **Cross-Project Propagation** — when one repo changes, affected repos in a monorepo are notified
+✅ **Intent-Based Context** — context packets adapt to agent intent (understand/review/debug/add/modify/plan)
+✅ **Architectural Rules** — enforce no-regex constraints (e.g., "graph layer cannot call store"); get violations + suggestions
+✅ **No CGo** — pure Go, zero external dependencies for core functionality
+✅ **Single Binary** — one MCP server, works with any IDE
+✅ **Fail-Silent** — brain sidecar crashes? graph queries still work. Scout down? web tools return "unavailable"
 
 ---
 
-## Language Support
+## Supported Languages
 
-### Deep AST (functions, classes, imports, methods)
-
-| Language | Extensions |
-|---|---|
-| Go | `.go` |
-| TypeScript | `.ts`, `.tsx` |
-| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` |
-| Python | `.py`, `.pyi` |
-| Java | `.java` |
-| Kotlin | `.kt`, `.kts` |
-| Scala | `.scala` |
-| Groovy | `.groovy`, `.gradle` |
-| Rust | `.rs` |
-| C | `.c`, `.h`, `.ino` |
-| C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx`, `.mm` |
-| C# | `.cs` |
-| Swift | `.swift` |
-| Ruby | `.rb` |
-| PHP | `.php` |
-| Lua | `.lua` |
-| Elixir | `.ex`, `.exs` |
-| Protocol Buffers | `.proto` |
-
-### File-level tracking (appear in graph, no AST)
-
-HTML, CSS/SCSS/SASS/LESS, YAML, JSON, TOML, XML, SQL, Markdown, Dockerfile, Terraform, Shell scripts, Vue, Svelte, Jinja, Handlebars, Dart, R, Perl, PowerShell, Haskell, OCaml, Erlang, Clojure, F#, and 50+ more.
-
----
-
-## System Requirements
-
-| Component | Requirement |
-|---|---|
-| **synapses core** | Go 1.22+, any OS (macOS / Linux / Windows), any architecture |
-| **synapses-intelligence** (optional AI brain) | Ollama + 4 GB RAM minimum; 8 GB+ recommended for 7B models |
-| **synapses-scout** (optional web search) | Python 3.11+, pip |
-
-> **GPU vs CPU:** On GPU machines (Apple Silicon / NVIDIA / AMD), the Qwen3.5 family is used for highest quality. On CPU-only machines, `qwen2.5-coder` models are used instead (10-20s/call). `brain setup` auto-detects your hardware and picks the right models.
-
----
-
-## Installation
-
-### Homebrew (macOS / Linux — recommended)
-
-```bash
-brew install synapses/tap/synapses
-```
-
-### curl installer (macOS / Linux)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh
-```
-
-This downloads the latest pre-built binary from GitHub Releases and places it in `/usr/local/bin` (or `~/.local/bin` if you prefer no `sudo`).
-
-### Pre-built binaries (all platforms)
-
-Download the binary for your OS and architecture from the [latest GitHub Release](https://github.com/SynapsesOS/synapses/releases/latest):
-
-| Platform | File |
-|---|---|
-| macOS (Apple Silicon) | `synapses_darwin_arm64.tar.gz` |
-| macOS (Intel) | `synapses_darwin_amd64.tar.gz` |
-| Linux (x86-64) | `synapses_linux_amd64.tar.gz` |
-| Linux (ARM64) | `synapses_linux_arm64.tar.gz` |
-| Windows (x86-64) | `synapses_windows_amd64.zip` |
-
-Extract and place the `synapses` binary somewhere on your `PATH`.
-
-### go install (Go developers)
-
-```bash
-go install github.com/SynapsesOS/synapses/cmd/synapses@latest
-```
-
-Requires Go 1.24+. Binary lands in `$GOPATH/bin` (usually `~/go/bin`).
-
-### From source
-
-```bash
-git clone https://github.com/SynapsesOS/synapses
-cd synapses
-make install        # installs to $GOPATH/bin
-```
-
-Make sure `$GOPATH/bin` is in your `PATH`:
-
-```bash
-echo 'export PATH="$PATH:$HOME/go/bin"' >> ~/.zshrc && source ~/.zshrc
-```
+| Language | Tier | Status |
+|----------|------|--------|
+| Go | 1st | ✅ Full support (go/types, build graph, test detection) |
+| TypeScript/JavaScript | 1st | ✅ Full support (tree-sitter + optional tsserver for types) |
+| Python | 1st | ✅ Full support (dynamic import detection) |
+| Java | 1st | ✅ Full support (classpath resolution) |
+| Rust | 1st | ✅ Full support |
+| C/C++ | 1st | ✅ Full support (via tree-sitter) |
+| C# | 2nd | ✅ Supported |
+| Swift | 2nd | ✅ Supported |
+| Ruby | 2nd | ✅ Supported |
+| PHP | 2nd | ✅ Supported |
+| Kotlin | 2nd | ✅ Supported |
+| Scala | 2nd | ✅ Supported |
+| Lua | 2nd | ✅ Supported |
+| Elixir | 2nd | ✅ Supported |
+| Protobuf | 2nd | ✅ Supported |
+| Groovy | 2nd | ✅ Supported |
+| Generic (regex-based) | Fallback | ✅ Catches basic function defs in any language |
 
 ---
 
 ## Quick Start
 
+### 1. Install
+
 ```bash
-cd /your/project
+curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh
+```
+
+This installs the `synapses` binary to `/usr/local/bin`. Requires Go 1.21+ or pre-built binary.
+
+### 2. Initialize Your Project
+
+```bash
+cd /path/to/your/repo
 synapses init
 ```
 
-That's it. `init` does three things automatically:
-1. Indexes your project (or loads from cache if already indexed)
-2. Writes `.mcp.json` in your project root with the correct absolute path
-3. Tells you exactly how to reload Claude Code
+This:
+- Parses your codebase into a graph (18-language support)
+- Creates SQLite cache at `~/.cache/synapses/`
+- Writes `.claude/CLAUDE.md` with navigation rules
+- Writes `.mcp.json` for IDE integration
 
-Then in Claude Code, type `/mcp` to reload — or just close and reopen the chat panel.
+### 3. Add to Your IDE
 
-Your agent immediately has access to all 24 MCP tools — from `session_init` (single-call bootstrap) and `get_context` to `web_search` / `web_fetch` (when scout is configured) and `get_pending_tasks` (session continuity across LLM conversations).
+```bash
+synapses mcp-setup --agent claude  # Claude Code
+synapses mcp-setup --agent cursor  # Cursor
+synapses mcp-setup --agent zed     # Zed
+synapses mcp-setup --agent windsurf # Windsurf
+```
 
-**Re-running `init` is safe** — it updates only the `synapses` entry in `.mcp.json` and preserves any other MCP servers you have configured.
+This updates your IDE's MCP config to point to the Synapses server.
 
----
+### 4. Start the Server
 
-## Commands
+```bash
+synapses start -path /path/to/repo
+```
 
-| Command | Description |
-|---|---|
-| `synapses init` | **Index + write `.mcp.json` — the one command you need** |
-| `synapses index -path <dir>` | Index only (no .mcp.json written) |
-| `synapses start -path <dir>` | Start MCP server manually (blocks) |
-| `synapses status -path <dir>` | Show stats for one indexed project |
-| `synapses list` | Global overview of all indexed projects |
-| `synapses reset -path <dir>` | Remove one project's index |
-| `synapses reset -all` | Remove all indexes |
-| `synapses version` | Print version |
-
-Full flag reference: see [COMMANDS.md](COMMANDS.md).
+Keep this running in a terminal. The IDE connects via stdio.
 
 ---
 
-## MCP Tools
+## IDE Integrations
+
+**Synapses works with any editor that supports MCP (Model Context Protocol):**
+
+- **Claude Code** — `synapses mcp-setup --agent claude`
+- **Cursor** — `synapses mcp-setup --agent cursor`
+- **Zed** — `synapses mcp-setup --agent zed`
+- **Windsurf** — `synapses mcp-setup --agent windsurf`
+- **Gemini Code Assist** — `synapses mcp-setup --agent gemini`
+- **Manual config** — edit `~/.cursor/mcp_config.json` or equivalent
+
+Each editor's config points to: `{"command": "synapses", "args": ["start", "-path", "/path/to/repo"]}`
+
+---
+
+## MCP Tools Reference
+
+Synapses registers **38 MCP tools** across 9 categories. All are available in your IDE's tool palette.
 
 ### Session Bootstrap
+| Tool | Params | Description |
+|------|--------|-------------|
+| `session_init` | `agent_id` (optional) | One round-trip: pending tasks + project identity + working state + recent events. Replaces the 3-call startup ritual. |
 
-| Tool | Parameters | What it returns |
-|---|---|---|
-| `session_init` | `agent_id?` | **Single-call startup**: pending tasks + project identity + working state in one round-trip |
-| `get_project_identity` | — | Node/edge counts, entry points, key entities by connectivity, active rules |
-| `get_working_state` | `window_minutes?` | Recent file changes from the watcher + `git diff --stat HEAD` |
-
-### Context & Discovery
-
-| Tool | Parameters | What it returns |
-|---|---|---|
-| `get_context` | `entity`, `depth?`, `format?`, `detail_level?`, `token_budget?`, `task_id?` | BFS subgraph around entity. `format="compact"` → 80% fewer tokens |
-| `get_file_context` | `file` | All entities defined in a file, ordered by line number; groups when multiple files match |
-| `find_entity` | `query` | Matching nodes with file, line, signature, and doc |
-| `search` | `query`, `mode?` | Keyword/FTS search across entity names and doc comments; multi-word AND supported |
-| `get_call_chain` | `from`, `to` | Shortest CALLS path; crosses IMPLEMENTS edges and explains cross-binary boundaries |
-| `get_impact` | `symbol`, `depth?` | Reverse-BFS blast radius — direct/indirect/peripheral affected entities + global truncated flag |
-| `find_orphans` | `include_tests?` | Unexported functions/methods with no callers (dead-code candidates) |
+### Code Graph
+| Tool | Params | Description |
+|------|--------|-------------|
+| `get_project_identity` | — | Compact architectural summary: node/edge counts, entry points, key entities, active rules. |
+| `get_context` | `entity`, `depth`, `token_budget`, `task_id`, `file`, `format`, `detail_level` | BFS ego-subgraph with decay. `format=compact` returns 400-600 token prose; `format=json` returns full JSON. |
+| `find_entity` | `query` | Locate nodes by name/substring. Returns ID, type, file, line, doc, signature. |
+| `get_file_context` | `file` | All entities in a file ordered by line. |
+| `search` | `query`, `mode`, `limit` | Keyword search or FTS5 BM25 semantic search. CamelCase auto-split. |
+| `get_call_chain` | `from`, `to` | Shortest CALLS path (BFS), follows IMPLEMENTS edges. |
+| `get_impact` | `symbol`, `depth` | Blast-radius reverse-BFS: direct (1.0), indirect (0.6), peripheral (0.3) tiers. |
 
 ### Architecture & Rules
+| Tool | Params | Description |
+|------|--------|-------------|
+| `validate_plan` | `changes` (JSON) | Check proposed call-graph changes against architectural rules before coding. |
+| `get_violations` | `rule_id`, `include_log` | List current rule violations; optionally show historical audit log. |
+| `upsert_rule` | `rule_id`, `description`, `severity`, `edge_type`, `from_file_pattern`, `to_file_pattern`, `to_name_pattern` | Create/update dynamic architectural rule. Persisted immediately, no restart needed. |
 
-| Tool | Parameters | What it returns |
-|---|---|---|
-| `validate_plan` | `changes` (JSON) | Rule violations for proposed call-graph changes; skips unknown nodes with a hint |
-| `get_violations` | `rule_id?`, `include_log?` | All current rule violations + historical audit log |
-| `upsert_rule` | `rule_id`, `description`, `severity`, … | Creates/updates a dynamic architectural rule; active immediately, persisted to SQLite |
-| `annotate_node` | `node_id`, `note` | Attach a note to a graph node (visible in `get_context`) |
+### Task Memory
+| Tool | Params | Description |
+|------|--------|-------------|
+| `create_plan` | `title`, `tasks`, `description`, `agent_id` | Save a plan with prioritized tasks (p0-p3). |
+| `get_pending_tasks` | `plan_id`, `agent_id` | All pending/in-progress tasks; in_progress tasks include session state for resumption. |
+| `update_task` | `id`, `status`, `notes`, `agent_id` | Update task status, append notes. |
+| `save_session_state` | `task_id`, `agent_id`, `approach`, `files_modified`, `completed_steps`, `remaining_steps`, `blockers`, `decisions`, `context_snapshot` | Save exact work state for cross-session resumption. |
+| `get_session_state` | `task_id` | Retrieve saved state for a task. |
+| `get_plans` | — | List all plans with completion counts. |
+| `get_my_tasks` | `agent_id`, `plan_id` | Unblocked tasks for a specific agent. |
+| `link_task_nodes` | `task_id`, `node_ids` (JSON) | Link task to graph nodes for relevance boosting. |
+| `annotate_node` | `node_id`, `note`, `agent_id` | Attach persistent note to a code entity. |
+| `get_working_state` | `window_minutes` | Recent file changes + git diff stats. |
 
-### AI Brain (requires synapses-intelligence)
+### Agent Coordination
+| Tool | Params | Description |
+|------|--------|-------------|
+| `get_agents` | — | List all active agents sorted by last-seen. |
+| `claim_work` | `agent_id`, `scope`, `scope_type`, `ttl_minutes` | Reserve a scope; conflicts returned immediately. |
+| `release_claims` | `agent_id` | Release all work claims. |
+| `get_conflicts` | `agent_id` | All overlapping claims by other agents. |
+| `get_events` | `since_seq`, `types`, `limit` | Event log with cursor: file_change, task_update, annotation_added, agent_activity. |
 
-| Tool | Parameters | What it returns |
-|---|---|---|
-| `upsert_adr` | `id`, `title`, `decision`, … | Store an Architectural Decision Record as cold memory |
-| `get_adrs` | `file?` | List ADRs; filter by file path to see relevant decisions |
+### Agent Message Bus
+| Tool | Params | Description |
+|------|--------|-------------|
+| `send_message` | `from_agent`, `topic`, `payload`, `to_agent` (optional), `project_id` (optional) | Direct or broadcast message via SQLite. Broadcast to all: set `to_agent=""`. |
+| `get_messages` | `agent_id`, `since_seq`, `topic_filter`, `unread_only`, `limit` | Retrieve messages. Unread surface automatically in `session_init`. |
+| `mark_read` | `message_id`, `agent_id` | Mark message as read. |
 
-### Web Intelligence (requires synapses-scout)
+### Episodic Memory
+| Tool | Params | Description |
+|------|--------|-------------|
+| `remember` | `agent_id`, `decision`, `episode_type`, `outcome`, `rationale`, `trigger`, `affected_files`, `affected_nodes`, `tags`, `project_id` | Record decision/failure as persistent episode. |
+| `recall` | `query`, `project_id`, `agent_id`, `episode_type`, `outcome_filter` | FTS5 BM25 search over past episodes. |
+| `get_episodes` | `project_id`, `agent_id`, `episode_type`, `tags` | List episodes without search. |
+| `check_plan_safety` | `plan_description`, `agent_id`, `project_id` | Search for past failures matching proposed plan (Reactive Interjection). |
+| `get_rule_candidates` | — | Failure episodes ≥N times, not yet promoted to rules. |
 
-| Tool | Parameters | What it returns |
-|---|---|---|
-| `web_search` | `query`, `max_results?`, `region?` | Ranked search hits (title, url, snippet) |
-| `web_fetch` | `input`, `force_refresh?` | Web page / YouTube transcript / search results as Markdown |
-| `web_deep_search` | `query`, `max_results?` | Orchestrated multi-query search with deduplication |
-| `web_annotate` | `node_id`, `note`, `hits?` | Persist web findings to a graph node — survives across sessions |
+### Web Intelligence (requires scout sidecar)
+| Tool | Params | Description |
+|------|--------|-------------|
+| `web_search` | `query`, `max_results`, `region`, `timelimit` | Search via synapses-scout. |
+| `web_fetch` | `input`, `force_refresh` | Fetch URL or search query. Returns Markdown. Triggers brain ingest. |
+| `web_annotate` | `node_id`, `note`, `hits`, `agent_id` | Persist web findings to graph node. |
+| `web_deep_search` | `query`, `max_results`, `region`, `timelimit` | Multi-query orchestrated search. |
 
-### Agent Task Memory
-
-| Tool | Parameters | What it returns |
-|---|---|---|
-| `create_plan` | `title`, `tasks`, `description?` | Persisted plan with prioritised task list (p0–p3) |
-| `get_pending_tasks` | `plan_id?`, `agent_id?` | All pending/in-progress tasks ordered by priority; includes session state for in-progress tasks |
-| `update_task` | `id`, `status`, `notes?` | Update task status; append timestamped notes |
-| `save_session_state` | `task_id`, … | Save working state so next LLM session can resume from exactly here |
+### Brain / ADRs (requires brain sidecar)
+| Tool | Params | Description |
+|------|--------|-------------|
+| `upsert_adr` | `id`, `title`, `decision`, `status`, `context`, `consequences` | Create/update Architectural Decision Record. |
+| `get_adrs` | `file` (optional) | List ADRs; filter by file. |
 
 ---
 
-## Configuration (`synapses.json`)
+## CLI Reference
 
-Place a `synapses.json` in your project root to define architectural rules and tuning parameters. The file is optional — Synapses works with zero configuration.
+All commands use the syntax `synapses <command> [flags]`.
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `init` | `-path`, `-reindex` | Parse project, write `.mcp.json`, write navigation files. Zero-friction onboarding. |
+| `start` | `-path`, `-reindex`, `-no-watch` | Load/build graph, start file watcher, serve MCP over stdio. |
+| `index` | `-path`, `-reindex` | Parse + cache graph, exit. |
+| `status` | `-path` | Node/edge counts, entry points, violations, top tools. |
+| `query` | `-path`, `-entity` | JSON lookup of entity (read-only). |
+| `export` | `-path`, `-entity`, `-format` (dot/mermaid/graphml), `-depth` | Export graph to stdout. |
+| `list` | — | Scan cache dir, print summary of all indexed projects. |
+| `reset` | `-path`, `-all` | Remove SQLite cache. |
+| `setup` | `-path`, `-core` | First-time config: check brain binary, run `brain setup`, write synapses.json. |
+| `mcp-setup` | `-agent` (cursor/gemini/zed/windsurf/claude/all), `-path` | Write agent-specific MCP config. |
+| `version` | — | Print version. |
+
+---
+
+## Configuration: synapses.json
+
+Synapses reads runtime config from `synapses.json` in your project root:
 
 ```json
 {
-  "version": 1,
-  "rules": [
-    {
-      "id": "no-sql-in-view",
-      "description": "Database queries must not appear in view/component files",
-      "severity": "error",
-      "from_file_pattern": "*.tsx",
-      "to_name_pattern": "SELECT|INSERT|UPDATE|DELETE"
-    }
-  ],
-  "context_carve": {
-    "default_depth": 2,
-    "decay_factor": 0.5,
-    "token_budget": 4000
-  },
-  "constitution": {
-    "principles": [
-      "Never use CGo — use modernc/sqlite (pure Go)",
-      "All MCP handlers must be fail-silent (return empty result on LLM timeout, not error)"
-    ]
-  },
+  "version": "1",
   "brain": {
     "url": "http://localhost:11435",
-    "timeout_ms": 30000
+    "timeout_sec": 60,
+    "enable_llm": true
   },
   "scout": {
     "url": "http://localhost:11436",
     "timeout_sec": 30
-  }
+  },
+  "rules": [
+    {
+      "id": "no-store-in-graph",
+      "description": "Graph layer cannot call Store methods",
+      "forbidden_edge": {
+        "from_file_pattern": "*/graph/*.go",
+        "edge_type": "CALLS",
+        "to_name_pattern": "Store."
+      },
+      "severity": "error"
+    }
+  ],
+  "edge_weights": {
+    "CALLS": 1.0,
+    "IMPLEMENTS": 1.2,
+    "IMPORTS": 0.5
+  },
+  "context_carve": {
+    "max_depth": 3,
+    "token_budget": 4000,
+    "decay_rate": 0.7
+  },
+  "use_go_types": true,
+  "use_ts_types": false,
+  "metrics_days": 30,
+  "linked": [
+    {
+      "path": "../other-repo",
+      "peer_url": "http://localhost:3000"
+    }
+  ]
 }
 ```
 
-**constitution.principles** are injected into every `session_init` response — AI agents see your project laws at the start of every conversation without any manual prompting.
+**Key fields:**
+- `brain.url` — Brain sidecar HTTP endpoint (default: http://localhost:11435)
+- `brain.timeout_sec` — LLM timeout in seconds (default: 60, increase for slow CPUs)
+- `scout.url` — Scout sidecar HTTP endpoint (default: http://localhost:11436)
+- `rules` — Dynamic architectural rules (hot-reloaded)
+- `edge_weights` — BFS weights for relevance decay
+- `context_carve` — Graph carving thresholds (depth, tokens, decay)
+- `linked` — Monorepo peer projects
 
-See `synapses.example.json` for a full reference with all options.
+See `synapses.example.json` for all 20+ config options.
 
 ---
 
-## How Context Carving Works
+## Working with Sidecars
 
-When an agent calls `get_context("AuthService", depth=2)`:
+Synapses is most powerful when paired with two optional sidecars:
 
-1. Synapses finds the `AuthService` node in the graph.
-2. BFS expands outward up to `depth` hops, following edges in both directions.
-3. Each node gets a **relevance score** = `edge_weight × decay^hop_distance`.
-   - Edge weights: `CALLS=1.0`, `IMPLEMENTS=0.9`, `EMBEDS=0.85`, `DEPENDS_ON=0.8`, `IMPORTS=0.7`, `EXPORTS=0.5`, `DEFINES=0.15`
-   - Default decay: `0.5` (each hop halves relevance)
-4. Nodes are sorted by relevance score, then pruned to fit within `token_budget`.
-5. The result is a compact, ranked subgraph — not a file dump.
+### Brain Sidecar (synapses-intelligence)
 
-This gives the agent the exact structural context it needs without hallucination-inducing noise.
+Adds semantic enrichment via local LLMs:
+- Generate prose summaries of code entities
+- Explain architectural rule violations in English
+- Build context packets (~800 tokens vs 4000 raw)
+- Episodic memory learning loop
+
+```bash
+brain setup --llama-server  # Recommended: no Ollama, CPU/GPU auto-detect
+brain serve                  # Start on :11435
+```
+
+Then configure `synapses.json` with `brain.url: "http://localhost:11435"`.
+
+### Scout Sidecar (synapses-scout)
+
+Adds web intelligence:
+- Search the web via DuckDuckGo or Tavily
+- Fetch and extract URLs
+- Distill web content (boilerplate removal, AI summary)
+- Cache search results (6h TTL)
+
+```bash
+pip install synapses-scout
+scout serve  # Start on :11436
+```
+
+Then configure `synapses.json` with `scout.url: "http://localhost:11436"`.
+
+Both sidecars are optional — Synapses works without them (fail-silent).
 
 ---
 
 ## Architecture
 
-```
-synapses/
-├── cmd/synapses/        # CLI entry point (start, index, status, list, reset)
-├── internal/
-│   ├── graph/           # In-memory graph engine
-│   │   ├── types.go     # Node/Edge types, CarveConfig
-│   │   ├── graph.go     # Thread-safe graph (Add, Find, Remove, ProjectIdentity)
-│   │   ├── traverse.go  # BFS ego-graph carver with relevance decay
-│   │   └── cache.go     # 20-entry FIFO subgraph cache (30s TTL)
-│   ├── parser/          # Tree-sitter → graph mapper (18 languages + generic fallback)
-│   ├── resolver/        # Post-parse CALLS + IMPLEMENTS edge resolution
-│   ├── store/           # SQLite persistence (SaveGraph, LoadGraph, task memory)
-│   ├── config/          # synapses.json loader and rule checker
-│   ├── watcher/         # fsnotify file watcher with 150ms debounce
-│   └── mcp/             # MCP server and 16 tool handlers
-└── synapses.example.json
-```
+### Core Design Principles
 
----
+🚫 **No CGo** — Pure Go. `modernc.org/sqlite` is pure-Go. No C dependencies at runtime.
 
-## Performance Targets
+🔄 **Fail-Silent** — Brain crashes? Graph queries still work. Scout down? Web tools return "unavailable".
 
-| Operation | Target |
-|---|---|
-| Cold parse (10k files) | < 30s |
-| Incremental re-parse on save | < 100ms |
-| `get_context` query | < 10ms |
-| `validate_plan` | < 5ms |
-| `get_project_identity` | < 50ms |
-| Cache load (any size) | < 1s |
+📦 **Single Binary** — One MCP server. Works with any IDE via stdio.
+
+💾 **Local Cache** — All state at `~/.cache/synapses/cache/<hash>.db`. No cloud.
+
+🔁 **Incremental** — File watcher re-parses only changed files.
+
+### Data Model
+
+**Nodes**: Typed entities (function, method, struct, interface, variable, file, package)
+**Edges**: Relation types (CALLS, IMPLEMENTS, IMPORTS, DEFINES, EMBEDS, DEPENDS_ON, EXPORTS, DATA_FLOWS)
+**Graph**: In-memory adjacency lists + columnar GraphIndex for fast BFS
+
+Serialized to SQLite: full graph snapshot for recovery, FTS5 for semantic search, episodic memory tables.
+
+### Stack
+
+- **Language**: Go 1.26
+- **Graph DB**: SQLite (modernc.org/sqlite, pure Go)
+- **Parser**: Tree-sitter (18 languages)
+- **MCP**: mark3labs/mcp-go (stdio transport)
+- **Compression**: klauspost/compress (snapshot blobs)
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
+- Setup instructions
+- Code style guide
+- How to add a new MCP tool
+- How to add a language parser
+- Testing and CI requirements
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT License — See [LICENSE](LICENSE) for details.
+
+---
+
+## Links
+
+- **GitHub**: https://github.com/SynapsesOS/synapses
+- **Brain Sidecar**: https://github.com/SynapsesOS/synapses-intelligence
+- **Web Intelligence**: https://github.com/SynapsesOS/synapses-scout
+- **Organization**: https://github.com/SynapsesOS
+
+## Support
+
+- **Issues**: https://github.com/SynapsesOS/synapses/issues
+- **Discussions**: https://github.com/SynapsesOS/synapses/discussions
+- **Security**: security@synapsesos.dev (see [SECURITY.md](SECURITY.md))
