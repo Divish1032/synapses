@@ -59,7 +59,7 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           go build -o synapses -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
-          tar czf synapses_darwin_x86_64.tar.gz synapses README.md LICENSE COMMANDS.md synapses.example.json
+          tar czf synapses_darwin_x86_64.tar.gz synapses README.md LICENSE synapses.example.json
           rm synapses
 
       - name: Build darwin/arm64
@@ -70,7 +70,7 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           go build -o synapses -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
-          tar czf synapses_darwin_arm64.tar.gz synapses README.md LICENSE COMMANDS.md synapses.example.json
+          tar czf synapses_darwin_arm64.tar.gz synapses README.md LICENSE synapses.example.json
           rm synapses
 
       - name: Upload to release
@@ -107,7 +107,7 @@ jobs:
       - name: Create archive
         shell: pwsh
         run: |
-          Compress-Archive -Path synapses.exe, README.md, LICENSE, COMMANDS.md, synapses.example.json -DestinationPath synapses_windows_x86_64.zip
+          Compress-Archive -Path synapses.exe, README.md, LICENSE, synapses.example.json -DestinationPath synapses_windows_x86_64.zip
 
       - name: Upload to release
         env:
