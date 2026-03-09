@@ -74,6 +74,16 @@ func (c *Client) DeepSearch(ctx context.Context, req DeepSearchRequest) *DeepSea
 	return &out
 }
 
+// LookupDocs calls POST /v1/lookup-docs: searches + fetches in one round-trip.
+// Returns nil on failure.
+func (c *Client) LookupDocs(ctx context.Context, req LookupDocsRequest) *LookupDocsResponse {
+	var out LookupDocsResponse
+	if err := c.post(ctx, "/v1/lookup-docs", req, &out); err != nil {
+		return nil
+	}
+	return &out
+}
+
 // post marshals body as JSON, POSTs to the endpoint, and decodes the response
 // into out (if out is non-nil). Returns an error on any failure.
 func (c *Client) post(ctx context.Context, path string, body, out interface{}) error {

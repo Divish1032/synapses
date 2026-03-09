@@ -75,6 +75,25 @@ type DeepSearchResponse struct {
 	DeduplicatedCount int         `json:"deduplicated"`
 }
 
+// LookupDocsRequest is the body sent to POST /v1/lookup-docs.
+type LookupDocsRequest struct {
+	Query    string `json:"query"`
+	MaxChars int    `json:"max_chars,omitempty"`
+}
+
+// LookupDocsResponse is returned by POST /v1/lookup-docs.
+type LookupDocsResponse struct {
+	Query      string      `json:"query"`
+	SourceURL  string      `json:"source_url"`
+	Title      string      `json:"title"`
+	Content    string      `json:"content"`
+	Truncated  bool        `json:"truncated"`
+	Cached     bool        `json:"cached"`
+	Note       string      `json:"note,omitempty"`
+	Error      string      `json:"error,omitempty"`
+	SearchHits []SearchHit `json:"search_hits,omitempty"`
+}
+
 // HealthResponse is returned by GET /v1/health.
 type HealthResponse struct {
 	Status                string      `json:"status"`
