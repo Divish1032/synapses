@@ -13,7 +13,7 @@ class Brain < Formula
   license "MIT"
 
   # Version is updated automatically by the release workflow.
-  version "0.7.0"
+  version "0.7.1"
 
   on_macos do
     if Hardware::CPU.arm?

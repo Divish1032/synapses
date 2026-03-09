@@ -2,6 +2,21 @@
 
 All notable changes to Synapses are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] - 2026-03-09
+
+### Added
+- **`lookup_docs` Scout Integration** — New `LookupDocsRequest`/`LookupDocsResponse` types in scout client for one-shot documentation lookup.
+
+### Fixed
+- **CI Lint Fixes** — Resolved 15 golangci-lint errors (goimports formatting, staticcheck S1011) across 8 files.
+- **Windows Path Compatibility** — `topLevelPackage()` now uses `filepath.ToSlash()` for correct path normalization on Windows.
+- **Release Archives** — Removed stale `COMMANDS.md` from goreleaser archive config.
+
+### Infrastructure
+- **Distribution Setup** — Homebrew formulas (`synapses.rb`, `brain.rb`), GitHub issue templates (bug report, feature request), VS Code extension publish workflow.
+
+---
+
 ## [0.7.0] - 2026-03-09
 
 ### Added
