@@ -34,6 +34,6 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
       - name: Publish to Open VSX Registry
-        run: cd vscode-extension && npx ovsx publish *.vsix
+        run: cd vscode-extension && npx ovsx publish $(ls *.vsix)
         env:
           OVSX_PAT: ${{ secrets.OVSX_TOKEN }}
