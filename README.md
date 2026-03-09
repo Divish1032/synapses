@@ -24,7 +24,7 @@ Instead of line-by-line searching, Synapses maintains an in-memory graph of your
 - **Nodes**: functions, methods, structs, classes, interfaces, variables, files, packages
 - **Edges**: calls, implements, defines, embeds, imports, depends on, data flows
 
-AI agents query the graph via **38 MCP tools** to answer questions like:
+AI agents query the graph via **42 MCP tools** to answer questions like:
 - "Find all callers of auth.Login()"
 - "What breaks if I change this function signature?"
 - "Architect a context packet for debugging checkout flow"
@@ -36,7 +36,7 @@ Synapses maintains **episodic memory** (past decisions, failures), an **agent me
 
 ## Features
 
-✅ **38 MCP Tools** — session management, code graph queries, task memory, agent coordination, episodic memory, web intelligence, architecture enforcement
+✅ **42 MCP Tools** — session management, code graph queries, task memory, agent coordination, episodic memory, web intelligence, architecture enforcement
 ✅ **18-Language Parser** — Go, TypeScript, Python, Java, Rust, C, C++, C#, Swift, Ruby, PHP, Kotlin, Scala, Lua, Elixir, Protobuf, Groovy, and a generic fallback
 ✅ **Episodic Memory** — persist past decisions and failures; future sessions query them to avoid repeating mistakes
 ✅ **Agent Message Bus** — broadcast work status across agents; unread messages surface on session start
@@ -154,7 +154,7 @@ Each editor's config points to: `{"command": "synapses", "args": ["start", "-pat
 
 ## MCP Tools Reference
 
-Synapses registers **38 MCP tools** across 9 categories. All are available in your IDE's tool palette.
+Synapses registers **42 MCP tools** across 9 categories. All are available in your IDE's tool palette.
 
 ### Session Bootstrap
 | Tool | Params | Description |
@@ -171,6 +171,7 @@ Synapses registers **38 MCP tools** across 9 categories. All are available in yo
 | `search` | `query`, `mode`, `limit` | Keyword search or FTS5 BM25 semantic search. CamelCase auto-split. |
 | `get_call_chain` | `from`, `to` | Shortest CALLS path (BFS), follows IMPLEMENTS edges. |
 | `get_impact` | `symbol`, `depth` | Blast-radius reverse-BFS: direct (1.0), indirect (0.6), peripheral (0.3) tiers. |
+| `prepare_context` | `intent`, `target` | Intent-based context assembly. Declare `modify`/`understand`/`review`/`debug`/`add`/`plan` and a target; composes the right context in one round-trip. |
 
 ### Architecture & Rules
 | Tool | Params | Description |
@@ -225,6 +226,7 @@ Synapses registers **38 MCP tools** across 9 categories. All are available in yo
 | `web_fetch` | `input`, `force_refresh` | Fetch URL or search query. Returns Markdown. Triggers brain ingest. |
 | `web_annotate` | `node_id`, `note`, `hits`, `agent_id` | Persist web findings to graph node. |
 | `web_deep_search` | `query`, `max_results`, `region`, `timelimit` | Multi-query orchestrated search. |
+| `lookup_docs` | `query` | One-shot doc lookup: searches and fetches the best result in a single call. Use before writing code to verify current API. |
 
 ### Brain / ADRs (requires brain sidecar)
 | Tool | Params | Description |
