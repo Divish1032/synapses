@@ -295,6 +295,82 @@ func TestPeerConfig_PeerAPITokenFromEnv(t *testing.T) {
 	}
 }
 
+func TestCheckViolations_PathComponentPatterns(t *testing.T) {
+	tests := []struct {
+		name            string
+		fromFilePattern string
+		toFilePattern   string
+		fromFile        string
+		toFile          string
+		wantViolation   bool
+	}{
+		{
+			name:            "path-component from_file_pattern matches deep path",
+			fromFilePattern: "*/mcp/*",
+			fromFile:        "synapses/internal/mcp/tools.go",
+			toFile:          "synapses/internal/graph/graph.go",
+			wantViolation:   true,
+		},
+		{
+			name:          "path-component to_file_pattern matches deep path",
+			toFilePattern: "*/parser/*",
+			fromFile:      "synapses/internal/mcp/tools.go",
+			toFile:        "synapses/internal/parser/golang.go",
+			wantViolation: true,
+		},
+		{
+			name:            "from_file_pattern does not match wrong directory",
+			fromFilePattern: "*/graph/*",
+			fromFile:        "mcp/tools.go",
+			toFile:          "other/file.go",
+			wantViolation:   false,
+		},
+		{
+			name:            "simple basename glob matches",
+			fromFilePattern: "*.go",
+			fromFile:        "handler.go",
+			toFile:          "db.go",
+			wantViolation:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeConfig(t, config.Config{
+				Rules: []config.Rule{{
+					ID:       "test-rule",
+					Severity: "error",
+					ForbiddenEdge: config.ForbiddenEdge{
+						FromFilePattern: tc.fromFilePattern,
+						ToFilePattern:   tc.toFilePattern,
+						EdgeType:        graph.EdgeCalls,
+					},
+				}},
+			})
+
+			cfg, err := config.Load(dir)
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+
+			g := graph.New("test")
+			fromID := graph.NodeID("test::" + tc.fromFile + "::Caller")
+			toID := graph.NodeID("test::" + tc.toFile + "::Callee")
+			g.AddNode(&graph.Node{ID: fromID, Type: graph.NodeFunction, Name: "Caller", File: tc.fromFile})
+			g.AddNode(&graph.Node{ID: toID, Type: graph.NodeFunction, Name: "Callee", File: tc.toFile})
+			g.AddEdge(&graph.Edge{From: fromID, To: toID, Type: graph.EdgeCalls})
+
+			violations := cfg.CheckViolations(g)
+			if tc.wantViolation && len(violations) == 0 {
+				t.Error("expected a violation, got none")
+			}
+			if !tc.wantViolation && len(violations) != 0 {
+				t.Errorf("expected no violation, got %d: %+v", len(violations), violations)
+			}
+		})
+	}
+}
+
 // buildViolationGraph creates a small graph with a .tsx file calling a function.
 func buildViolationGraph(t *testing.T) *graph.Graph {
 	t.Helper()

@@ -32,6 +32,13 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 	// Root entity header + summary.
 	writeNodeHeader(&b, dc.Root, getRootSummary(dc.Root, dc.ContextPacket))
 
+	// Annotations: show agent/system notes for this entity (multi-agent visibility).
+	if anns, ok := dc.Annotations[string(dc.Root.ID)]; ok && len(anns) > 0 {
+		for _, a := range anns {
+			fmt.Fprintf(&b, "\U0001f4dd %s\n", a.Note)
+		}
+	}
+
 	// "summary" level: just the root header + warnings. Stop here.
 	if detailLevel == "summary" {
 		var warnings []string

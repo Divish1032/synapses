@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -344,8 +345,10 @@ func (s *Server) handleUpdateTask(
 	}
 
 	// Emit event so other agents polling get_events see the update.
-	_ = s.store.AppendEvent("task_update", agentID,
-		fmt.Sprintf(`{"task_id":%q,"status":%q}`, id, status))
+	if err := s.store.AppendEvent("task_update", agentID,
+		fmt.Sprintf(`{"task_id":%q,"status":%q}`, id, status)); err != nil {
+		fmt.Fprintf(os.Stderr, "synapses: append task_update event: %v\n", err)
+	}
 
 	// B1: Reflective Synthesis — when a task is marked done, annotate its
 	// linked nodes with a retrospective note so future agents see the task

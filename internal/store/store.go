@@ -593,15 +593,28 @@ func (s *Store) SemanticSearch(query string, limit int) ([]SearchResult, error) 
 }
 
 // likeSearch is a fallback when FTS5 returns no results or encounters a syntax
-// error. It performs a simple case-insensitive LIKE search on name and doc.
+// error. It splits the query into words and matches each word independently
+// using LIKE, joining the per-word conditions with OR so that a multi-word
+// concept query like "traverse BFS ego" finds nodes matching ANY of the words.
 func (s *Store) likeSearch(query string, limit int) ([]SearchResult, error) {
-	pattern := "%" + strings.ReplaceAll(query, "%", "\\%") + "%"
-	rows, err := s.db.Query(`
+	words := strings.Fields(query)
+	if len(words) == 0 {
+		return nil, nil
+	}
+	conds := make([]string, len(words))
+	args := make([]interface{}, 0, len(words)*2+1)
+	for i, w := range words {
+		pat := "%" + strings.ReplaceAll(w, "%", "\\%") + "%"
+		conds[i] = "(name LIKE ? OR doc LIKE ?)"
+		args = append(args, pat, pat)
+	}
+	args = append(args, limit)
+	rows, err := s.db.Query(fmt.Sprintf(`
         SELECT id, name, signature, doc
         FROM nodes
-        WHERE name LIKE ? OR doc LIKE ?
+        WHERE %s
         ORDER BY length(name) ASC
-        LIMIT ?`, pattern, pattern, limit)
+        LIMIT ?`, strings.Join(conds, " OR ")), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -620,34 +633,55 @@ func (s *Store) likeSearch(query string, limit int) ([]SearchResult, error) {
 }
 
 // sanitizeFTSQuery converts a raw user query into a safe FTS5 MATCH expression.
-// Each word is double-quoted and suffixed with * for prefix matching — this
-// enables multi-word phrase queries like "BFS carver" to find "CarveEgoGraph"
-// (split_name = "Carve Ego Graph") by matching carv* → "Carve".
+// Each word becomes an unquoted prefix term (word*) joined by OR so that
+// "traverse BFS ego" finds any node matching ANY of the three tokens.
+// Unquoted prefix syntax is simpler and more portable than "word"* phrase syntax.
 // Empty result means the query had no usable terms.
 func sanitizeFTSQuery(q string) string {
-	// Strip FTS5 special characters.
+	// Strip FTS5 special characters to prevent syntax errors.
 	replacer := strings.NewReplacer(`"`, " ", `'`, " ", `(`, " ", `)`, " ", `:`, " ", `*`, " ")
 	q = strings.TrimSpace(replacer.Replace(q))
 	words := strings.Fields(q)
 	if len(words) == 0 {
 		return ""
 	}
-	quoted := make([]string, len(words))
+	terms := make([]string, len(words))
 	for i, w := range words {
 		// Prefix match (*) so "carver" finds "carve", "carving", "CarveEgoGraph".
 		// Short words (≤2 chars) skip prefix to avoid broad noise matches.
 		if len(w) > 2 {
-			quoted[i] = `"` + w + `"*`
+			terms[i] = w + "*"
 		} else {
-			quoted[i] = `"` + w + `"`
+			terms[i] = w
 		}
 	}
-	return strings.Join(quoted, " ")
+	return strings.Join(terms, " OR ")
 }
 
 // Close releases the database connection.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// PruneStaleData removes old rows from tables that grow unbounded over time.
+// retentionDays controls the cutoff; rows older than that are deleted.
+// Safe to call concurrently (each DELETE is a separate implicit transaction).
+// Intended to be called once on startup in a background goroutine.
+func (s *Store) PruneStaleData(retentionDays int) {
+	cutoff := time.Now().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
+
+	// tool_calls: one row per MCP tool invocation — can reach millions.
+	s.db.Exec(`DELETE FROM tool_calls WHERE created_at < ?`, cutoff)
+
+	// agent_messages: no built-in TTL.
+	s.db.Exec(`DELETE FROM agent_messages WHERE created_at < ?`, cutoff)
+
+	// proposals: resolved proposals have no further value after retention period.
+	s.db.Exec(`DELETE FROM proposals WHERE status IN ('accepted','rejected','withdrawn') AND updated_at < ?`, cutoff)
+	s.db.Exec(`DELETE FROM proposal_votes WHERE proposal_id NOT IN (SELECT id FROM proposals)`)
+
+	// SQLite housekeeping.
+	s.db.Exec(`PRAGMA optimize`)
 }
 
 // SaveGraph persists all nodes and edges of g, replacing any existing data.

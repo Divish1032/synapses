@@ -373,6 +373,68 @@ func TestSemanticSearch_EmptyQuery(t *testing.T) {
 	}
 }
 
+func TestSemanticSearch_MultiWord(t *testing.T) {
+	st := openTestStore(t)
+	g := graph.New("testrepo")
+
+	for _, n := range []struct{ name, file string }{
+		{"CarveEgoGraph", "graph.go"},
+		{"BFSTraverse", "traverse.go"},
+		{"EgoSubgraph", "subgraph.go"},
+	} {
+		g.AddNode(&graph.Node{
+			ID:      g.MakeNodeID(n.file, n.name),
+			Type:    graph.NodeFunction,
+			Name:    n.name,
+			Package: "graph",
+			File:    n.file,
+			Line:    1,
+		})
+	}
+	if err := st.SaveGraph(g); err != nil {
+		t.Fatalf("SaveGraph: %v", err)
+	}
+
+	// Multi-word query — OR semantics: any term should match.
+	results, err := st.SemanticSearch("carve BFS ego", 10)
+	if err != nil {
+		t.Fatalf("SemanticSearch: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results for multi-word query 'carve BFS ego', got none")
+	}
+	// All three nodes contain at least one of the query words, so we expect multiple hits.
+	names := make(map[string]bool)
+	for _, r := range results {
+		names[r.Name] = true
+	}
+	for _, want := range []string{"CarveEgoGraph", "BFSTraverse", "EgoSubgraph"} {
+		if !names[want] {
+			t.Errorf("expected %s in results, got: %v", want, names)
+		}
+	}
+}
+
+func TestSemanticSearch_SpecialChars(t *testing.T) {
+	st := openTestStore(t)
+	g := graph.New("testrepo")
+	g.AddNode(&graph.Node{
+		ID:   g.MakeNodeID("main.go", "main"),
+		Type: graph.NodeFunction, Name: "main", File: "main.go", Line: 1,
+	})
+	if err := st.SaveGraph(g); err != nil {
+		t.Fatalf("SaveGraph: %v", err)
+	}
+
+	// Special characters that could break FTS5 syntax — must not panic or error.
+	results, err := st.SemanticSearch(`func(x) *int`, 10)
+	if err != nil {
+		t.Fatalf("SemanticSearch with special chars returned error: %v", err)
+	}
+	// Results may be empty or non-empty; the important thing is no crash.
+	_ = results
+}
+
 // TestScanAll_DoesNotCrash verifies that ScanAll on the live cache dir returns
 // without error regardless of what is (or isn't) cached on this machine.
 func TestScanAll_DoesNotCrash(t *testing.T) {

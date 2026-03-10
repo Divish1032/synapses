@@ -126,6 +126,11 @@ type Config struct {
 	// When set, web_search, web_fetch, and web_deep_search MCP tools become
 	// available, giving AI agents real-time web data through the scout sidecar.
 	Scout ScoutConfig `json:"scout,omitempty"`
+
+	// Pulse configures the optional synapses-pulse analytics sidecar.
+	// When set, every tool call is reported to the pulse service for token
+	// savings and cost attribution telemetry. All errors are silently discarded.
+	Pulse PulseConfig `json:"pulse,omitempty"`
 }
 
 // ConstitutionConfig holds project-wide principles that are injected into agent
@@ -160,6 +165,16 @@ type ScoutConfig struct {
 	URL string `json:"url,omitempty"`
 	// TimeoutSec is the per-request HTTP timeout. Defaults to 30 if URL is set.
 	// Scout fetches real web pages so a generous timeout is required.
+	TimeoutSec int `json:"timeout_sec,omitempty"`
+}
+
+// PulseConfig describes the connection to a synapses-pulse analytics sidecar.
+type PulseConfig struct {
+	// URL is the base URL of the pulse service, e.g. "http://localhost:11437".
+	// Leave empty to disable pulse integration.
+	URL string `json:"url,omitempty"`
+	// TimeoutSec is the per-request HTTP timeout. Defaults to 2 if URL is set.
+	// Pulse is fire-and-forget so a short timeout is appropriate.
 	TimeoutSec int `json:"timeout_sec,omitempty"`
 }
 
@@ -464,6 +479,25 @@ func (c *Config) CheckViolationsForFile(g *graph.Graph, file string) []Violation
 	return violations
 }
 
+// matchFilePath returns true if filePath matches pattern.
+// It tries progressively shorter path suffixes so that path-component patterns
+// like "*/mcp/*" correctly match "synapses/internal/mcp/tools.go", while simple
+// basename patterns like "*.tsx" still work via the first iteration.
+func matchFilePath(pattern, filePath string) bool {
+	p := filepath.ToSlash(filePath)
+	for {
+		if matched, _ := filepath.Match(pattern, p); matched {
+			return true
+		}
+		idx := strings.IndexByte(p, '/')
+		if idx < 0 {
+			break
+		}
+		p = p[idx+1:]
+	}
+	return false
+}
+
 // matchesForbidden returns true if the given edge matches the forbidden pattern.
 // All non-empty pattern fields must match for the rule to fire.
 func matchesForbidden(p ForbiddenEdge, e *graph.Edge, from, to *graph.Node) bool {
@@ -477,14 +511,12 @@ func matchesForbidden(p ForbiddenEdge, e *graph.Edge, from, to *graph.Node) bool
 		return false
 	}
 	if p.FromFilePattern != "" {
-		matched, _ := filepath.Match(p.FromFilePattern, filepath.Base(from.File))
-		if !matched {
+		if !matchFilePath(p.FromFilePattern, from.File) {
 			return false
 		}
 	}
 	if p.ToFilePattern != "" {
-		matched, _ := filepath.Match(p.ToFilePattern, filepath.Base(to.File))
-		if !matched {
+		if !matchFilePath(p.ToFilePattern, to.File) {
 			return false
 		}
 	}

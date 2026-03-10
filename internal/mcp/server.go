@@ -14,6 +14,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 )
@@ -24,10 +25,11 @@ type ChangeSource interface {
 	RecentChanges(windowMinutes int) []watcher.ChangeEvent
 }
 
-const (
-	serverName    = "synapses"
-	serverVersion = "0.6.0"
-)
+const serverName = "synapses"
+
+// Version is the server version advertised to MCP clients.
+// Set from main.go via ldflags-injected version before creating the server.
+var Version = "dev"
 
 // packetCacheEntry holds a cached context packet with an expiry time.
 type packetCacheEntry struct {
@@ -45,6 +47,7 @@ type Server struct {
 	peerManager  interface{}   // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
 	brainClient  interface{}   // *brain.Client — set via SetBrainClient; nil if brain not configured
 	scoutClient  interface{}   // *scout.Client — set via SetScoutClient; nil if scout not configured
+	pulseClient  interface{}   // *pulse.Client — set via SetPulseClient; nil if pulse not configured
 	embedClient  *embed.Client // nil if embedding_endpoint not configured
 	techStack    interface{}   // []scout.TechStackEntry — set via SetTechStack after autosubscribe
 	rulesMu      sync.RWMutex  // protects s.config.Rules for concurrent dynamic upserts
@@ -87,9 +90,6 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		startTimes.set(req.Params.Name, time.Now())
 	})
 	hooks.AddAfterCallTool(func(_ context.Context, _ any, req *mcp.CallToolRequest, result *mcp.CallToolResult) {
-		if s.store == nil {
-			return
-		}
 		elapsed := time.Since(startTimes.pop(req.Params.Name))
 		success := result == nil || !result.IsError
 		agentID, _ := req.GetArguments()["agent_id"].(string)
@@ -97,10 +97,29 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		if entity == "" {
 			entity, _ = req.GetArguments()["query"].(string)
 		}
-		s.store.RecordToolCall(req.Params.Name, agentID, entity, elapsed.Milliseconds(), success)
+		if s.store != nil {
+			s.store.RecordToolCall(req.Params.Name, agentID, entity, elapsed.Milliseconds(), success)
+		}
+		// Fire-and-forget telemetry to synapses-pulse (if configured).
+		if pc := s.getPulseClient(); pc != nil {
+			var responseBytes int
+			if result != nil && !result.IsError && len(result.Content) > 0 {
+				if tc, ok := result.Content[0].(mcp.TextContent); ok {
+					responseBytes = len(tc.Text)
+				}
+			}
+			go pc.RecordToolCall(pulse.ToolCallEvent{
+				ToolName:      req.Params.Name,
+				AgentID:       agentID,
+				Entity:        entity,
+				DurationMs:    elapsed.Milliseconds(),
+				Success:       success,
+				ResponseBytes: responseBytes,
+			})
+		}
 	})
 
-	s.mcp = server.NewMCPServer(serverName, serverVersion,
+	s.mcp = server.NewMCPServer(serverName, Version,
 		server.WithToolCapabilities(true),
 		server.WithResourceCapabilities(true, true), // subscribe + listChanged
 		server.WithHooks(hooks),
@@ -154,12 +173,21 @@ func (s *Server) getPacketFromCache(key string) interface{} {
 }
 
 // setPacketCache stores a context packet under key with a 30s TTL.
-// When the cache exceeds packetCacheMax entries, it is cleared entirely (simple eviction).
+// When the cache exceeds packetCacheMax entries, the entry with the oldest
+// expiresAt timestamp is evicted (LRU-style). With ≤20 slots, the linear
+// scan is trivial.
 func (s *Server) setPacketCache(key string, pkt interface{}) {
 	s.packetCacheMu.Lock()
 	defer s.packetCacheMu.Unlock()
 	if len(s.packetCache) >= packetCacheMax {
-		s.packetCache = make(map[string]*packetCacheEntry, packetCacheMax)
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range s.packetCache {
+			if oldestKey == "" || v.expiresAt.Before(oldestTime) {
+				oldestKey, oldestTime = k, v.expiresAt
+			}
+		}
+		delete(s.packetCache, oldestKey)
 	}
 	s.packetCache[key] = &packetCacheEntry{pkt: pkt, expiresAt: time.Now().Add(packetCacheTTL)}
 }
@@ -196,6 +224,22 @@ func (s *Server) SetBrainClient(bc interface{}) {
 // Using interface{} avoids an import cycle (scout imports only stdlib).
 func (s *Server) SetScoutClient(sc interface{}) {
 	s.scoutClient = sc
+}
+
+// SetPulseClient wires a *pulse.Client into the server so that every tool
+// call emits telemetry to the synapses-pulse analytics sidecar.
+func (s *Server) SetPulseClient(pc *pulse.Client) {
+	s.pulseClient = pc
+}
+
+// getPulseClient type-asserts the stored pulseClient to *pulse.Client.
+// Returns nil if no pulse client is configured.
+func (s *Server) getPulseClient() *pulse.Client {
+	if s.pulseClient == nil {
+		return nil
+	}
+	pc, _ := s.pulseClient.(*pulse.Client)
+	return pc
 }
 
 // SetTechStack stores the detected tech stack entries ([]scout.TechStackEntry)
@@ -237,6 +281,23 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleSessionInit,
+	)
+
+	// discover_tools: lightweight tool finder
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"discover_tools",
+			mcp.WithDescription(
+				"Finds the right Synapses tool for a task. Describe what you need in natural language "+
+					"and get back the top matching tools with usage examples. "+
+					"Use this instead of scanning all tool definitions. ~300 tokens vs ~4200.",
+			),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description("Natural language description of what you need, e.g. 'check what calls this function' or 'save my progress'."),
+			),
+		),
+		s.handleDiscoverTools,
 	)
 
 	// ── Code Graph Tools ────────────────────────────────────────────────────
@@ -377,7 +438,7 @@ func (s *Server) registerTools() {
 				"Keyword search across entity names and doc comments. "+
 					"Results are ranked: exact name match > name prefix > name substring > doc comment match. "+
 					"Returns up to 25 results. Use this to find auth-related code, error handlers, etc. "+
-					"Set mode='semantic' for full-text BM25 search by concept ('rate limiting', 'JWT validation'). "+
+					"Set mode='fulltext' for FTS5 BM25 search by concept ('rate limiting', 'JWT validation'). 'semantic' is accepted as alias. "+
 					"CamelCase names are auto-split: searching 'carve' finds 'CarveEgoGraph'.",
 			),
 			mcp.WithString("query",

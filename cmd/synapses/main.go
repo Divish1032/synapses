@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -33,6 +34,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/metrics"
 	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/peer"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/scout"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -79,6 +81,8 @@ func run(args []string) error {
 		return cmdQuery(args[1:])
 	case "export":
 		return cmdExport(args[1:])
+	case "doctor":
+		return cmdDoctor(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -129,6 +133,9 @@ func cmdStart(args []string) error {
 		return fmt.Errorf("open store: %w", err)
 	}
 	defer st.Close()
+
+	// Prune stale operational data in the background (30-day retention).
+	go st.PruneStaleData(30)
 
 	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins)
 	if err != nil {
@@ -211,6 +218,7 @@ func cmdStart(args []string) error {
 	}()
 
 	// Create the MCP server early so we can wire the watcher into it below.
+	mcpsrv.Version = version
 	srv := mcpsrv.New(g, cfg, st)
 
 	// Start the peer API server if configured. Non-fatal on failure.
@@ -254,16 +262,27 @@ func cmdStart(args []string) error {
 	}
 
 	// Optional: connect to synapses-scout web-search service.
+	// The client is wired unconditionally so that tools work as soon as scout
+	// becomes available — even if it wasn't reachable at startup. Individual
+	// tool calls degrade gracefully (fail-silent) when scout is down.
 	var scoutCli *scout.Client
 	if cfg.Scout.URL != "" {
 		scoutCli = scout.NewClient(cfg.Scout.URL, cfg.Scout.TimeoutSec)
+		srv.SetScoutClient(scoutCli)
 		if scoutCli.Health(context.Background()) {
 			fmt.Fprintf(os.Stderr, "synapses: scout connected at %s\n", cfg.Scout.URL)
-			srv.SetScoutClient(scoutCli)
 		} else {
-			fmt.Fprintf(os.Stderr, "synapses: scout unreachable at %s (continuing without)\n", cfg.Scout.URL)
-			scoutCli = nil
+			fmt.Fprintf(os.Stderr, "synapses: scout configured at %s (unreachable at startup — tools will retry on use)\n", cfg.Scout.URL)
 		}
+	}
+
+	// Optional: connect to synapses-pulse analytics sidecar.
+	// Pulse is fire-and-forget: if unreachable at startup or during operation,
+	// all errors are silently discarded and the MCP server continues normally.
+	if cfg.Pulse.URL != "" {
+		pulseCli := pulse.NewClient(cfg.Pulse.URL, cfg.Pulse.TimeoutSec)
+		srv.SetPulseClient(pulseCli)
+		fmt.Fprintf(os.Stderr, "synapses: pulse analytics enabled at %s\n", cfg.Pulse.URL)
 	}
 
 	// Optional: vector embedding for semantic search.
@@ -335,11 +354,11 @@ func cmdStart(args []string) error {
 				fw.SetConfigChangeHandler(func(newCfg *config.Config) {
 					if newCfg.Scout.URL != "" {
 						newScout := scout.NewClient(newCfg.Scout.URL, newCfg.Scout.TimeoutSec)
+						srv.SetScoutClient(newScout)
 						if newScout.Health(context.Background()) {
-							srv.SetScoutClient(newScout)
 							fmt.Fprintf(os.Stderr, "synapses: scout reconnected at %s\n", newCfg.Scout.URL)
 						} else {
-							fmt.Fprintf(os.Stderr, "synapses: scout unreachable at %s after config reload\n", newCfg.Scout.URL)
+							fmt.Fprintf(os.Stderr, "synapses: scout configured at %s (unreachable — tools will retry on use)\n", newCfg.Scout.URL)
 						}
 					} else {
 						srv.SetScoutClient(nil)
@@ -364,13 +383,19 @@ func cmdStart(args []string) error {
 	}
 
 	// Intercept OS signals so we can shut down cleanly (flush watcher, close store).
+	// We call appCancel() which should cause ServeStdio() to return, allowing
+	// all deferred cleanups (st.Close, watcher stop, peer stop) to execute.
+	// A 5s safety-net timer ensures we exit even if ServeStdio hangs.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
 		fmt.Fprintf(os.Stderr, "\nsynapses: received %s, shutting down\n", sig)
 		appCancel()
-		os.Exit(0)
+		time.AfterFunc(5*time.Second, func() {
+			fmt.Fprintf(os.Stderr, "synapses: graceful shutdown timed out, forcing exit\n")
+			os.Exit(1)
+		})
 	}()
 
 	// MCP server writes to stdout (protocol messages); all status goes to stderr.
@@ -547,6 +572,135 @@ func cmdStatus(args []string) error {
 		}
 	}
 	return nil
+}
+
+// cmdDoctor runs a quick health check of all Synapses components and prints a
+// formatted status table: graph index freshness, brain reachability, and scout
+// reachability.
+func cmdDoctor(args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	repoPath := fs.String("path", ".", "Path to the repository root")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	absPath, err := filepath.Abs(*repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	cfgDir, _ := config.FindConfigDir(absPath)
+	cfg, err := config.Load(cfgDir)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	fmt.Println("synapses doctor — Health Check")
+	fmt.Println()
+	fmt.Printf("%-16s%-16s%s\n", "Component", "Status", "Details")
+	fmt.Printf("%-16s%-16s%s\n", "---------", "------", "-------")
+
+	// ── Graph Index ──────────────────────────────────────────────────────────
+	dbPath, dbErr := store.DefaultPath(absPath)
+	if dbErr != nil {
+		fmt.Printf("%-16s%-16s%s\n", "Graph Index", "error", dbErr.Error())
+	} else {
+		st, openErr := store.OpenReadOnly(dbPath)
+		if openErr != nil {
+			fmt.Printf("%-16s%-16s%s\n", "Graph Index", "missing", "no index — run 'synapses index'")
+		} else {
+			stat, statErr := st.Stat(dbPath)
+			st.Close()
+			if statErr != nil || stat == nil {
+				fmt.Printf("%-16s%-16s%s\n", "Graph Index", "empty", "index exists but contains no data")
+			} else {
+				ago := time.Since(stat.SavedAt).Truncate(time.Second)
+				status := "fresh"
+				if ago > 24*time.Hour {
+					status = "stale"
+				}
+				fmt.Printf("%-16s%-16s%s\n", "Graph Index", status,
+					fmt.Sprintf("%s nodes, %s edges (indexed %s ago)",
+						formatCount(stat.NodeCount), formatCount(stat.EdgeCount), formatDuration(ago)))
+			}
+		}
+	}
+
+	// ── Brain ────────────────────────────────────────────────────────────────
+	if cfg.Brain.URL != "" {
+		status, detail := pingHealth(cfg.Brain.URL + "/health")
+		fmt.Printf("%-16s%-16s%s\n", "Brain", status, detail)
+	} else {
+		fmt.Printf("%-16s%-16s%s\n", "Brain", "not configured", "(no brain.url in synapses.json)")
+	}
+
+	// ── Scout ────────────────────────────────────────────────────────────────
+	if cfg.Scout.URL != "" {
+		status, detail := pingHealth(cfg.Scout.URL + "/v1/health")
+		fmt.Printf("%-16s%-16s%s\n", "Scout", status, detail)
+	} else {
+		fmt.Printf("%-16s%-16s%s\n", "Scout", "not configured", "(no scout.url in synapses.json)")
+	}
+
+	return nil
+}
+
+// pingHealth sends an HTTP GET to url with a 2s timeout and returns a
+// human-readable status and detail string.
+func pingHealth(url string) (string, string) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "unreachable", fmt.Sprintf("%s (%s)", url, shortenErr(err))
+	}
+	resp.Body.Close()
+	return "reachable", url
+}
+
+// shortenErr extracts the most useful suffix from a net/http error string,
+// stripping the verbose URL and method prefix that Go wraps around the root cause.
+func shortenErr(err error) string {
+	s := err.Error()
+	// net/http wraps: Get "http://…": dial tcp …: connect: connection refused
+	// We want just the tail after the last colon-space.
+	if idx := strings.LastIndex(s, ": "); idx >= 0 {
+		return s[idx+2:]
+	}
+	return s
+}
+
+// formatCount renders an integer with thousands separators (e.g. 1842 → "1,842").
+func formatCount(n int) string {
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	offset := len(s) % 3
+	if offset > 0 {
+		b.WriteString(s[:offset])
+	}
+	for i := offset; i < len(s); i += 3 {
+		if b.Len() > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
+}
+
+// formatDuration renders a duration in a human-friendly short form.
+func formatDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
 }
 
 // loadOrBuildGraphWithStore tries to load from an already-open SQLite store,
@@ -1019,6 +1173,7 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 
 | When you want to... | Use this |
 |---|---|
+| Not sure which tool to use | ` + "`discover_tools(query=\"what I'm trying to do\")`" + ` |
 | Understand a function, struct, or interface | ` + "`get_context(entity=\"Name\")`" + ` |
 | Pin to a specific file (avoids wrong-entity picks) | ` + "`get_context(entity=\"Name\", file=\"cmd/server/main.go\")`" + ` |
 | Boost nodes linked to current task | ` + "`get_context(entity=\"Name\", task_id=\"...\")`" + ` |
@@ -1063,11 +1218,22 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 | Deep multi-query research on a topic | ` + "`web_deep_search(query=\"...\")`" + ` |
 | Persist web findings to a code entity | ` + "`web_annotate(node_id=\"...\", note=\"...\", hits=[...])`" + ` |
 
+### NEVER do these (anti-patterns)
+- **NEVER** use ` + "`Grep`" + ` to understand code structure, find what calls a function, or explore cross-file relationships — use ` + "`get_context`" + ` or ` + "`get_impact`" + ` instead.
+- **NEVER** use ` + "`Glob`" + ` to discover where a symbol is defined — use ` + "`find_entity(query=\"name\")`" + ` instead.
+- **NEVER** use ` + "`Read`" + ` to explore unfamiliar code — use ` + "`get_context(entity=\"Name\")`" + ` instead. Reserve ` + "`Read`" + ` for writing to a specific file you have already identified.
+- **NEVER** use ` + "`Bash`" + ` + ` + "`grep`" + ` as a substitute for ` + "`search(mode=\"semantic\")`" + ` when looking for a concept across the codebase.
+- **NEVER** skip ` + "`validate_plan()`" + ` before a multi-file change — it catches architecture violations before any code is written.
+- **NEVER** leave bugs or discovered issues untracked — always add them as tasks via ` + "`create_plan()`" + ` so future sessions can find them.
+
 ### Rules
 - **Read/Grep** are for *writing* code (editing a specific file you have already found). For *understanding* code structure, always prefer Synapses tools.
 - **Call ` + "`session_init()`" + `** at the start of every session. It replaces the 3-call startup ritual.
+- **Workflow:** ` + "`session_init`" + ` → ` + "`prepare_context`" + ` (or specific tools) → write code → ` + "`validate_plan`" + ` → edit files.
+- **When unsure** which tool to use, call ` + "`discover_tools(query=\"...\")`" + ` — it returns the right tool + example in one call.
 - **Call ` + "`validate_plan()`" + `** before implementing multi-file changes.
 - When ` + "`get_context`" + ` returns ` + "`other_candidates`" + `, re-call with ` + "`file=`" + ` to pin to the right entity.
+- **Track all bugs and tasks** via ` + "`create_plan()`" + ` immediately when discovered — do not rely on memory across sessions.
 ` + sectionEnd
 
 	clauDir := filepath.Join(repoRoot, ".claude")
@@ -1156,17 +1322,23 @@ func writeClaudeSettings(repoRoot string) error {
 	// ── SessionStart hook (stdout is fed to the LLM as context) ──────────
 	upsertHookEntry(hooks, "SessionStart", "startup", map[string]interface{}{
 		"type": "command",
-		"command": "echo '[Synapses] This project is indexed by Synapses code intelligence. " +
-			"Call session_init() ONCE at session start — it returns pending tasks, project identity, " +
-			"working state, and scale_guidance in one round-trip. " +
-			"For code exploration use: get_context(entity, file=), find_entity, search, get_call_chain, get_impact, get_file_context. " +
-			"Use validate_plan() before implementing multi-file changes.'",
+		"command": "echo '[Synapses] MANDATORY: Call session_init() as your FIRST action — it returns pending tasks, " +
+			"project identity, working state, and scale_guidance in one call. " +
+			"WORKFLOW: session_init → prepare_context (or specific tools) → validate_plan → edit files. " +
+			"CODE EXPLORATION: use get_context(entity), find_entity(query), search(mode=semantic), get_call_chain, get_impact. " +
+			"NEVER use Grep/Glob/Read to understand code structure — those are for writing to files you already found. " +
+			"UNSURE which tool? Call discover_tools(query=\"what you need\"). " +
+			"TRACK all bugs/tasks via create_plan() immediately when discovered — never rely on memory across sessions.'",
 	})
 
-	// ── PreToolUse hook on Glob|Grep (visible in verbose mode) ───────────
+	// ── PreToolUse hook on Glob|Grep (feedback loop against tool drift) ──
 	upsertHookEntry(hooks, "PreToolUse", "Glob|Grep", map[string]interface{}{
-		"type":    "command",
-		"command": "echo '[Synapses] This project is indexed — prefer get_context(entity, file=), find_entity, or search(mode=semantic) over file scanning for code exploration. Use Read/Grep only when writing to a specific file you have already identified.'",
+		"type": "command",
+		"command": "echo '[Synapses] STOP — this project is indexed. For code understanding use Synapses instead: " +
+			"find_entity(query) to locate a symbol, get_context(entity) to understand it, " +
+			"search(query, mode=semantic) to find by concept, get_impact(symbol) to find dependents. " +
+			"Grep/Glob are only appropriate when WRITING to a specific file you have already identified. " +
+			"If unsure, call discover_tools(query=\"...\") to find the right tool.'",
 	})
 
 	// ── Pre-allow all Synapses MCP tools so users are never prompted ─────
@@ -1492,6 +1664,7 @@ COMMANDS:
   query   -path <dir> -entity <n>  Dump entity context as JSON (for tooling/IDE)
   status  -path <dir>              Show index statistics for one project
   list                             List all indexed projects (global overview)
+  doctor  -path <dir>              Health check (index, brain, scout)
   reset   -path <dir>              Remove the cached index for a project
   reset   -all                     Remove ALL cached indexes
   version                          Print version

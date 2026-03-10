@@ -311,6 +311,16 @@ func (s *Server) handleGetContext(
 		}
 	}
 
+	// Pulse telemetry: emit context delivery metrics (token savings vs baseline).
+	agentID, _ := req.GetArguments()["agent_id"].(string)
+	s.emitContextDelivery(
+		"get_context", agentID, entityName, best.File,
+		dc, sg.Nodes, sg.Edges,
+		sg.Truncated,
+		dc.ContextPacket != nil, // brain_enriched
+		false,                   // cache_hit (packet cache is internal; context always delivered fresh)
+	)
+
 	// format=compact returns a natural-language briefing instead of the default JSON blob.
 	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t, default).
 	format, _ := req.GetArguments()["format"].(string)
@@ -621,11 +631,15 @@ func (s *Server) handleValidatePlan(
 			skipped = append(skipped, fmt.Sprintf("file %q: no nodes found in graph (check path is correct relative to repo root)", change.File))
 			continue
 		}
-		overlay.AddEdge(&graph.Edge{
-			From: sources[0].ID,
-			To:   callees[0].ID,
-			Type: graph.EdgeCalls,
-		})
+		// Add edges to all name-matched callees so CheckViolations can
+		// detect rule violations regardless of which callee is the intended target.
+		for _, callee := range callees {
+			overlay.AddEdge(&graph.Edge{
+				From: sources[0].ID,
+				To:   callee.ID,
+				Type: graph.EdgeCalls,
+			})
+		}
 	}
 
 	s.rulesMu.RLock()
@@ -800,6 +814,165 @@ func (s *Server) handleUpsertRule(
 		"rule_id": ruleID,
 		"message": fmt.Sprintf("Rule %q is now active.", ruleID),
 	})
+}
+
+// ── Tool Catalog for discover_tools ─────────────────────────────────────────
+
+// toolCatalogEntry describes a single Synapses tool for discovery purposes.
+type toolCatalogEntry struct {
+	Name        string
+	Category    string
+	Description string
+	Keywords    []string
+	Example     string
+}
+
+// toolCatalog is the static catalog of all major Synapses tools, grouped by
+// category and annotated with keywords for lightweight matching.
+var toolCatalog = []toolCatalogEntry{
+	// Session
+	{Name: "session_init", Category: "session", Description: "Single-call session bootstrap", Keywords: []string{"start", "begin", "init", "session", "bootstrap", "startup"}, Example: `session_init(agent_id="my-agent")`},
+
+	// Code exploration
+	{Name: "get_context", Category: "exploration", Description: "Relevance-ranked subgraph around an entity", Keywords: []string{"context", "understand", "entity", "function", "struct", "interface", "subgraph", "explore", "code", "definition"}, Example: `get_context(entity="AuthService")`},
+	{Name: "find_entity", Category: "exploration", Description: "Locate nodes by name or substring", Keywords: []string{"find", "search", "locate", "entity", "name", "symbol", "discover"}, Example: `find_entity(query="Auth")`},
+	{Name: "get_file_context", Category: "exploration", Description: "All entities in a file", Keywords: []string{"file", "entities", "overview", "list", "defined"}, Example: `get_file_context(file="internal/store/tasks.go")`},
+	{Name: "search", Category: "exploration", Description: "Keyword/fulltext search across entities", Keywords: []string{"search", "keyword", "concept", "fulltext", "semantic", "grep"}, Example: `search(query="rate limiting", mode="fulltext")`},
+	{Name: "get_call_chain", Category: "exploration", Description: "Shortest call path between two entities", Keywords: []string{"call", "chain", "path", "trace", "reach", "how", "calls"}, Example: `get_call_chain(from="Handler", to="Repository")`},
+	{Name: "get_impact", Category: "exploration", Description: "Blast-radius analysis of what breaks if entity changes", Keywords: []string{"impact", "blast", "radius", "breaks", "change", "depends", "dependents", "affected"}, Example: `get_impact(symbol="CarveEgoGraph")`},
+
+	// Architecture
+	{Name: "validate_plan", Category: "architecture", Description: "Check changes against architectural rules", Keywords: []string{"validate", "plan", "check", "rules", "architecture", "violations", "before"}, Example: `validate_plan(changes=[{"file":"auth.go","adds_call_to":"DB"}])`},
+	{Name: "get_violations", Category: "architecture", Description: "List current architectural violations", Keywords: []string{"violations", "rules", "broken", "forbidden", "architecture"}, Example: `get_violations()`},
+	{Name: "upsert_rule", Category: "architecture", Description: "Create or update an architectural constraint", Keywords: []string{"rule", "create", "constraint", "forbid", "enforce", "pattern"}, Example: `upsert_rule(rule_id="no-db-in-handler", description="...", severity="error")`},
+
+	// Task management
+	{Name: "create_plan", Category: "tasks", Description: "Save a plan with tasks for future sessions", Keywords: []string{"plan", "create", "tasks", "save", "work", "implement"}, Example: `create_plan(title="v1.1 improvements", tasks=[...])`},
+	{Name: "get_pending_tasks", Category: "tasks", Description: "List pending/in-progress tasks", Keywords: []string{"pending", "tasks", "todo", "remaining", "work", "resume"}, Example: `get_pending_tasks()`},
+	{Name: "update_task", Category: "tasks", Description: "Mark task done or add notes", Keywords: []string{"update", "task", "done", "complete", "status", "notes"}, Example: `update_task(id="...", status="done")`},
+	{Name: "get_my_tasks", Category: "tasks", Description: "Tasks assigned to a specific agent", Keywords: []string{"my", "tasks", "assigned", "agent"}, Example: `get_my_tasks(agent_id="my-agent")`},
+	{Name: "save_session_state", Category: "tasks", Description: "Save progress for session resumption", Keywords: []string{"save", "session", "state", "progress", "resume", "checkpoint"}, Example: `save_session_state(task_id="...", completed_steps=[...])`},
+	{Name: "get_session_state", Category: "tasks", Description: "Resume from saved session state", Keywords: []string{"get", "session", "state", "resume", "restore"}, Example: `get_session_state(task_id="...")`},
+
+	// Coordination
+	{Name: "claim_work", Category: "coordination", Description: "Register work scope to prevent conflicts", Keywords: []string{"claim", "lock", "scope", "editing", "conflict", "reserve"}, Example: `claim_work(agent_id="...", scope="pkg/auth")`},
+	{Name: "release_claims", Category: "coordination", Description: "Release work claims when done", Keywords: []string{"release", "unlock", "free", "claims", "done"}, Example: `release_claims(agent_id="...")`},
+	{Name: "get_conflicts", Category: "coordination", Description: "Check for conflicting work claims", Keywords: []string{"conflicts", "overlap", "other", "agents", "clash"}, Example: `get_conflicts(agent_id="...")`},
+	{Name: "get_agents", Category: "coordination", Description: "List all agents in this repository", Keywords: []string{"agents", "who", "list", "working", "active"}, Example: `get_agents()`},
+
+	// Memory
+	{Name: "remember", Category: "memory", Description: "Record a decision or failure as an episode", Keywords: []string{"remember", "record", "episode", "decision", "failure", "learn"}, Example: `remember(agent_id="...", decision="...", episode_type="failure")`},
+	{Name: "recall", Category: "memory", Description: "Search episodic memory for past decisions/failures", Keywords: []string{"recall", "remember", "past", "history", "episode", "memory", "similar"}, Example: `recall(query="auth handler redirect loop")`},
+	{Name: "check_plan_safety", Category: "memory", Description: "Check if similar plans failed before", Keywords: []string{"safety", "check", "failed", "before", "similar", "risk", "interjection"}, Example: `check_plan_safety(plan_description="modify auth login flow")`},
+
+	// Messaging
+	{Name: "send_message", Category: "messaging", Description: "Send message to another agent", Keywords: []string{"send", "message", "notify", "tell", "broadcast", "communicate"}, Example: `send_message(from_agent="...", topic="api_changed", payload="{...}")`},
+	{Name: "get_messages", Category: "messaging", Description: "Retrieve messages from agent bus", Keywords: []string{"messages", "inbox", "unread", "received", "poll"}, Example: `get_messages(agent_id="...")`},
+
+	// Web
+	{Name: "web_search", Category: "web", Description: "Search the web for docs/solutions", Keywords: []string{"web", "search", "internet", "docs", "documentation", "online"}, Example: `web_search(query="go context.WithTimeout best practices")`},
+	{Name: "web_fetch", Category: "web", Description: "Fetch and read a web page", Keywords: []string{"fetch", "read", "url", "page", "website", "download"}, Example: `web_fetch(input="https://docs.example.com")`},
+	{Name: "web_deep_search", Category: "web", Description: "Multi-query research on a topic", Keywords: []string{"deep", "research", "thorough", "comprehensive", "multiple"}, Example: `web_deep_search(query="Go MCP server patterns")`},
+	{Name: "lookup_docs", Category: "web", Description: "One-shot documentation lookup", Keywords: []string{"docs", "documentation", "api", "reference", "lookup", "package"}, Example: `lookup_docs(query="openai python chat completions API")`},
+
+	// Intent-based
+	{Name: "prepare_context", Category: "meta", Description: "Intent-based context assembly (replaces multi-tool chains)", Keywords: []string{"prepare", "intent", "modify", "understand", "review", "debug", "add", "plan", "context"}, Example: `prepare_context(intent="modify", target="AuthService")`},
+
+	// Events
+	{Name: "get_events", Category: "coordination", Description: "Recent events (file changes, task updates, annotations)", Keywords: []string{"events", "recent", "changes", "updates", "activity", "poll"}, Example: `get_events(since_seq=0)`},
+
+	// ADRs
+	{Name: "upsert_adr", Category: "architecture", Description: "Create/update an Architectural Decision Record", Keywords: []string{"adr", "architecture", "decision", "record", "create"}, Example: `upsert_adr(id="adr-001", title="No CGo", decision="...")`},
+	{Name: "get_adrs", Category: "architecture", Description: "List Architectural Decision Records", Keywords: []string{"adr", "adrs", "architecture", "decisions", "records", "list"}, Example: `get_adrs()`},
+}
+
+// handleDiscoverTools is a lightweight keyword matcher that helps agents find
+// the right tool without scanning all tool definitions.
+func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	query := strings.ToLower(stringArg(req, "query"))
+
+	// Empty query: return categorized overview of all tools.
+	if query == "" {
+		categories := make(map[string][]map[string]string)
+		for _, t := range toolCatalog {
+			categories[t.Category] = append(categories[t.Category], map[string]string{
+				"name":        t.Name,
+				"description": t.Description,
+			})
+		}
+		return jsonResult(map[string]interface{}{
+			"hint":       "Pass a query to get targeted results, e.g. discover_tools(query=\"check what calls this function\")",
+			"categories": categories,
+		})
+	}
+
+	// Tokenize query.
+	queryWords := strings.Fields(query)
+
+	// Score each tool by keyword overlap.
+	type scored struct {
+		entry toolCatalogEntry
+		score int
+	}
+	var results []scored
+	for _, tool := range toolCatalog {
+		score := 0
+		for _, qw := range queryWords {
+			for _, kw := range tool.Keywords {
+				if strings.Contains(kw, qw) || strings.Contains(qw, kw) {
+					score++
+				}
+			}
+			// Also check tool name and description.
+			if strings.Contains(tool.Name, qw) {
+				score += 2
+			}
+			if strings.Contains(strings.ToLower(tool.Description), qw) {
+				score++
+			}
+		}
+		if score > 0 {
+			results = append(results, scored{tool, score})
+		}
+	}
+
+	// Sort by score descending.
+	sort.Slice(results, func(i, j int) bool { return results[i].score > results[j].score })
+
+	// Return top 3.
+	limit := 3
+	if len(results) < limit {
+		limit = len(results)
+	}
+	results = results[:limit]
+
+	// Format output.
+	type toolMatch struct {
+		Name        string `json:"name"`
+		Category    string `json:"category"`
+		Description string `json:"description"`
+		Example     string `json:"example"`
+		Score       int    `json:"score"`
+	}
+	matches := make([]toolMatch, len(results))
+	for i, r := range results {
+		matches[i] = toolMatch{
+			Name:        r.entry.Name,
+			Category:    r.entry.Category,
+			Description: r.entry.Description,
+			Example:     r.entry.Example,
+			Score:       r.score,
+		}
+	}
+
+	resp := map[string]interface{}{
+		"query":   query,
+		"matches": matches,
+	}
+	if len(matches) == 0 {
+		resp["hint"] = "No matches. Try broader terms like 'explore', 'task', 'web', 'architecture'."
+	}
+	return jsonResult(resp)
 }
 
 // stringArg extracts a string argument from a CallToolRequest by key.
@@ -978,18 +1151,22 @@ func (s *Server) handleGetFileContext(
 		fileSet[n.File] = struct{}{}
 	}
 
+	agentIDFC, _ := req.GetArguments()["agent_id"].(string)
+
 	if len(fileSet) == 1 {
 		// Single file — keep existing flat format.
 		out := make([]fileEntity, len(matches))
 		for i, n := range matches {
 			out[i] = fileEntity{Type: n.Type, Name: n.Name, Line: n.Line, Exported: n.Exported, Metadata: n.Metadata}
 		}
-		return jsonResult(map[string]interface{}{
+		payload := map[string]interface{}{
 			"file":     strings.TrimPrefix(matches[0].File, prefix),
 			"package":  matches[0].Package,
 			"count":    len(out),
 			"entities": out,
-		})
+		}
+		s.emitFileContextDelivery(agentIDFC, filePath, matches, payload)
+		return jsonResult(payload)
 	}
 
 	// Multiple files matched — group by file with attribution.
@@ -1003,12 +1180,14 @@ func (s *Server) handleGetFileContext(
 		byFile[rel] = append(byFile[rel], fileEntity{Type: n.Type, Name: n.Name, Line: n.Line, Exported: n.Exported, Metadata: n.Metadata})
 	}
 	sort.Strings(fileOrder)
-	return jsonResult(map[string]interface{}{
+	multiPayload := map[string]interface{}{
 		"files_matched":    len(fileSet),
 		"total_count":      len(matches),
 		"entities_by_file": byFile,
 		"hint":             fmt.Sprintf("%d files named %q found. Use file= param with a longer path suffix to pin to one file.", len(fileSet), filePath),
-	})
+	}
+	s.emitFileContextDelivery(agentIDFC, filePath, matches, multiPayload)
+	return jsonResult(multiPayload)
 }
 
 // handleSearch performs a keyword search across entity names and doc comments.
@@ -1022,8 +1201,8 @@ func (s *Server) handleSearch(
 		return mcp.NewToolResultError("query is required"), nil
 	}
 
-	// mode=semantic delegates to FTS BM25 semantic search.
-	if mode := stringArg(req, "mode"); mode == "semantic" {
+	// mode=fulltext (or legacy alias "semantic") delegates to FTS5 BM25 search.
+	if mode := stringArg(req, "mode"); mode == "semantic" || mode == "fulltext" {
 		return s.handleSemanticSearch(ctx, req)
 	}
 
@@ -1655,7 +1834,7 @@ func (s *Server) handleSessionInit(
 		failures, err := s.store.GetEpisodes(primaryRepoID, "", "failure", nil, 5, 0)
 		if err == nil && len(failures) >= 5 {
 			query := filepath.Base(recentChanges[0].File)
-			if matches, mErr := s.store.RecallEpisodes(query, primaryRepoID, "", "failure", "", 1); mErr == nil && len(matches) > 0 {
+			if matches, mErr := s.store.RecallEpisodes(query, primaryRepoID, "", "failure", "", 1, 0); mErr == nil && len(matches) > 0 {
 				e := matches[0]
 				recentFailure = map[string]interface{}{
 					"decision":   e.Decision,
@@ -1694,6 +1873,40 @@ func (s *Server) handleSessionInit(
 			"principles": s.config.Constitution.Principles,
 			"count":      len(s.config.Constitution.Principles),
 			"note":       "These project laws apply to all work in this session.",
+		}
+	}
+
+	// ── Pre-warm brain cache for top entities (silent background op) ─────
+	if bc := s.getBrainClient(); bc != nil {
+		seen := make(map[string]bool)
+		var warmFiles []string
+		// Gather unique file paths from entry points and key entities.
+		for _, ep := range identity.EntryPoints {
+			if ep.File != "" && !seen[ep.File] {
+				seen[ep.File] = true
+				warmFiles = append(warmFiles, ep.File)
+				if len(warmFiles) >= 5 {
+					break
+				}
+			}
+		}
+		if len(warmFiles) < 5 {
+			for _, ke := range identity.KeyEntities {
+				if ke.File != "" && !seen[ke.File] {
+					seen[ke.File] = true
+					warmFiles = append(warmFiles, ke.File)
+					if len(warmFiles) >= 5 {
+						break
+					}
+				}
+			}
+		}
+		if len(warmFiles) > 0 {
+			go func() {
+				for _, f := range warmFiles {
+					s.warmBrainCache(f)
+				}
+			}()
 		}
 	}
 
@@ -1752,8 +1965,10 @@ func (s *Server) handleAnnotateNode(
 	}
 
 	// Emit event.
-	_ = s.store.AppendEvent("annotation_added", agentID,
-		fmt.Sprintf(`{"annotation_id":%q,"node_id":%q}`, id, nodeID))
+	if err := s.store.AppendEvent("annotation_added", agentID,
+		fmt.Sprintf(`{"annotation_id":%q,"node_id":%q}`, id, nodeID)); err != nil {
+		fmt.Fprintf(os.Stderr, "synapses: append annotation_added event: %v\n", err)
+	}
 
 	return jsonResult(map[string]interface{}{
 		"annotation_id": id,

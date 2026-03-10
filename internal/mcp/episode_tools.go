@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -76,9 +77,11 @@ func (s *Server) handleRemember(
 	}
 
 	if episodeType == "failure" {
-		_ = s.store.AppendEvent("failure_recorded", agentID,
+		if err := s.store.AppendEvent("failure_recorded", agentID,
 			fmt.Sprintf(`{"episode_id":%q,"outcome":%q,"trigger":%q}`,
-				id, outcome, e.Trigger))
+				id, outcome, e.Trigger)); err != nil {
+			fmt.Fprintf(os.Stderr, "synapses: append failure_recorded event: %v\n", err)
+		}
 	}
 
 	return jsonResult(map[string]interface{}{
@@ -113,7 +116,6 @@ func (s *Server) handleRecall(
 	if v, ok := req.GetArguments()["since_days"].(float64); ok && v > 0 {
 		sinceDays = int(v)
 	}
-	_ = sinceDays // passed to GetEpisodes; RecallEpisodes uses FTS rank ordering
 
 	episodes, err := s.store.RecallEpisodes(
 		query,
@@ -122,6 +124,7 @@ func (s *Server) handleRecall(
 		stringArg(req, "episode_type"),
 		stringArg(req, "outcome_filter"),
 		limit,
+		sinceDays,
 	)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("recall episodes: %v", err)), nil
@@ -276,7 +279,9 @@ func (s *Server) handleCheckPlanSafety(
 			Tags:        `["interjection"]`,
 			Importance:  0.6,
 		}
-		_, _ = s.store.RememberEpisode(interjection)
+		if _, err := s.store.RememberEpisode(interjection); err != nil {
+			fmt.Fprintf(os.Stderr, "synapses: record interjection episode: %v\n", err)
+		}
 	}
 
 	return jsonResult(map[string]interface{}{
