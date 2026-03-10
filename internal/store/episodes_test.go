@@ -28,7 +28,7 @@ func TestRememberEpisode_FTSTriggerIndexes(t *testing.T) {
 	}
 
 	// FTS trigger must have indexed the episode — recall must find it.
-	results, err := st.RecallEpisodes("database handler", "", "", "", "", 5)
+	results, err := st.RecallEpisodes("database handler", "", "", "", "", 5, 0)
 	if err != nil {
 		t.Fatalf("RecallEpisodes: %v", err)
 	}
@@ -100,6 +100,51 @@ func TestGetEpisodes_FilterByType(t *testing.T) {
 	}
 }
 
+func TestRecallEpisodes_SinceDays(t *testing.T) {
+	st := openTestStore(t)
+
+	// Insert an episode (created_at defaults to time.Now() inside RememberEpisode).
+	ep := store.Episode{
+		AgentID:     "agent-time",
+		EpisodeType: "decision",
+		Outcome:     "success",
+		Trigger:     "refactored database connection pool",
+		Decision:    "switched from single connection to pool manager",
+		Rationale:   "improved concurrency under load",
+	}
+	id, err := st.RememberEpisode(ep)
+	if err != nil {
+		t.Fatalf("RememberEpisode: %v", err)
+	}
+	if id == "" {
+		t.Fatal("expected non-empty episode ID")
+	}
+
+	// sinceDays=1 should include an episode created just now (within the last day).
+	results, err := st.RecallEpisodes("database connection pool", "", "", "", "", 5, 1)
+	if err != nil {
+		t.Fatalf("RecallEpisodes sinceDays=1: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected episode created just now to be found with sinceDays=1")
+	}
+	if results[0].ID != id {
+		t.Errorf("expected episode %s, got %s", id, results[0].ID)
+	}
+
+	// sinceDays=0 (no time filter) should also find it.
+	results2, err := st.RecallEpisodes("database connection pool", "", "", "", "", 5, 0)
+	if err != nil {
+		t.Fatalf("RecallEpisodes sinceDays=0: %v", err)
+	}
+	if len(results2) == 0 {
+		t.Fatal("expected episode to be found with sinceDays=0 (no filter)")
+	}
+	if results2[0].ID != id {
+		t.Errorf("expected episode %s with sinceDays=0, got %s", id, results2[0].ID)
+	}
+}
+
 func TestFTSTrigger_DeleteKeepsIndexClean(t *testing.T) {
 	st := openTestStore(t)
 
@@ -111,7 +156,7 @@ func TestFTSTrigger_DeleteKeepsIndexClean(t *testing.T) {
 		Decision:    "unique canary episode for delete test",
 	})
 
-	results, _ := st.RecallEpisodes("canary episode delete", "", "", "", "", 5)
+	results, _ := st.RecallEpisodes("canary episode delete", "", "", "", "", 5, 0)
 	if len(results) == 0 {
 		t.Fatal("episode not found before delete — FTS trigger not working")
 	}

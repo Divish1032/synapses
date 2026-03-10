@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 )
@@ -49,9 +50,11 @@ func (s *Server) handleSendMessage(
 
 	// Emit event so agents polling get_events see the message immediately
 	// without needing to poll get_messages as well.
-	_ = s.store.AppendEvent("agent_message", fromAgent,
+	if err := s.store.AppendEvent("agent_message", fromAgent,
 		fmt.Sprintf(`{"message_id":%q,"topic":%q,"to_agent":%q,"project_id":%q}`,
-			msgID, topic, toAgent, projectID))
+			msgID, topic, toAgent, projectID)); err != nil {
+		fmt.Fprintf(os.Stderr, "synapses: append agent_message event: %v\n", err)
+	}
 
 	audience := "all agents (broadcast)"
 	if toAgent != "" {

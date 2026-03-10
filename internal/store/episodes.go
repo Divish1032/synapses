@@ -84,9 +84,10 @@ func (s *Store) RememberEpisode(e Episode) (string, error) {
 // RecallEpisodes performs an FTS5 BM25 search over episodes matching query.
 // Optional filters: projectID (empty = all), agentID (empty = all),
 // episodeType (empty = all), outcomeFilter (empty = all).
+// sinceDays limits results to the last N days (0 = no time filter).
 // Returns up to limit results ordered by relevance (best match first).
 // v1 uses top-N strategy with no score threshold — caller decides relevance.
-func (s *Store) RecallEpisodes(query, projectID, agentID, episodeType, outcomeFilter string, limit int) ([]Episode, error) {
+func (s *Store) RecallEpisodes(query, projectID, agentID, episodeType, outcomeFilter string, limit, sinceDays int) ([]Episode, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -102,6 +103,11 @@ func (s *Store) RecallEpisodes(query, projectID, agentID, episodeType, outcomeFi
 
 	args := []interface{}{query}
 
+	if sinceDays > 0 {
+		cutoff := time.Now().AddDate(0, 0, -sinceDays).Unix()
+		baseQuery += ` AND e.created_at >= ?`
+		args = append(args, cutoff)
+	}
 	if projectID != "" {
 		baseQuery += ` AND e.project_id = ?`
 		args = append(args, projectID)
