@@ -430,6 +430,29 @@ func (s *Server) registerTools() {
 		s.handleValidatePlan,
 	)
 
+	// verify_implementation — post-write complement to validate_plan
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"verify_implementation",
+			mcp.WithDescription(
+				"Post-write verification: checks the actual graph state of files you just wrote "+
+					"against architectural rules. Returns violations, entity counts, and freshness warnings. "+
+					"Optionally pass task_id to verify linked entities still exist in the graph. "+
+					"Call this AFTER writing code to close the plan→implement→verify loop.",
+			),
+			mcp.WithString("files_written",
+				mcp.Required(),
+				mcp.Description(
+					`JSON array of file paths that were written, e.g. ["internal/auth/service.go", "internal/auth/handler.go"].`,
+				),
+			),
+			mcp.WithString("task_id",
+				mcp.Description("Optional task ID. If provided, verifies that the task's linked_nodes still exist in the graph after implementation."),
+			),
+		),
+		s.handleVerifyImplementation,
+	)
+
 	// get_violations (absorbs get_violation_log via rule_id + limit params)
 	s.mcp.AddTool(
 		mcp.NewTool(
