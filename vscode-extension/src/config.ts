@@ -45,6 +45,20 @@ export function defaultModel(): string {
   return cfg().get<string>('defaultModel') || 'qwen2.5-coder:1.5b';
 }
 
+export function enableLLM(): boolean {
+  return cfg().get<boolean>('enableLLM') ?? true;
+}
+
+export type SidebarTab = 'home' | 'intelligence' | 'analytics' | 'explorer';
+
+export function sidebarDefaultTab(): SidebarTab {
+  return cfg().get<SidebarTab>('sidebarDefaultTab') || 'home';
+}
+
+export function analyticsDateRange(): number {
+  return cfg().get<number>('analyticsDateRange') ?? 7;
+}
+
 export function workspaceRoot(): string {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
 }

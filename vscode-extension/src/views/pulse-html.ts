@@ -27,8 +27,8 @@ function svgSparkline(points: number[], w = 180, h = 40): string {
   const last = `${w},${h}`;
   const area = `${first} ${coords} ${last}`;
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
-  <polygon points="${area}" fill="rgba(0,122,204,0.12)" />
-  <polyline fill="none" stroke="#007acc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="${coords}"/>
+  <polygon points="${area}" class="chart-fill" />
+  <polyline fill="none" class="chart-line" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="${coords}"/>
 </svg>`;
 }
 
@@ -52,8 +52,8 @@ function svgTimeline(points: PulseTimelinePoint[], w = 600, h = 100): string {
     .join('');
 
   return `<svg width="100%" viewBox="0 0 ${w} ${h + 20}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible">
-  <polygon points="${area}" fill="rgba(0,122,204,0.10)" />
-  <polyline fill="none" stroke="#007acc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="${coords}"/>
+  <polygon points="${area}" class="chart-fill" />
+  <polyline fill="none" class="chart-line" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="${coords}"/>
   ${labels}
 </svg>`;
 }
@@ -94,6 +94,9 @@ export function buildPulseHtml(data: PulseDashboard | null): string {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   *, *::before, *::after { box-sizing: border-box; }
+  :focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+  .chart-line { stroke: var(--vscode-activityBarBadge-background, #007acc); }
+  .chart-fill { fill: var(--vscode-activityBarBadge-background, #007acc); opacity: 0.12; }
   body {
     font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, sans-serif);
     font-size: var(--vscode-font-size, 13px);
@@ -147,7 +150,7 @@ export function buildPulseHtml(data: PulseDashboard | null): string {
     color: var(--vscode-foreground); }
   .bar-track { flex: 1; height: 8px; background: var(--vscode-widget-border, rgba(128,128,128,0.2));
     border-radius: 4px; overflow: hidden; }
-  .bar-fill { height: 100%; background: #007acc; border-radius: 4px; transition: width 0.3s; }
+  .bar-fill { height: 100%; background: var(--vscode-activityBarBadge-background, #007acc); border-radius: 4px; transition: width 0.3s; }
   .bar-val { width: 36px; text-align: right; font-weight: 600; }
   .bar-sub { width: 40px; text-align: right; color: var(--vscode-descriptionForeground, #888); font-size: 0.9em; }
 
