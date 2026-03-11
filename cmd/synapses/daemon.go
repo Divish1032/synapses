@@ -217,6 +217,11 @@ func cmdDaemon(args []string) error {
 	}
 
 	switch sub {
+	case "serve":
+		// "synapses daemon serve -path <repo>" — run the MCP server as a
+		// long-lived daemon process listening on a Unix socket. This is the
+		// heavy server; proxies connect to it via the socket.
+		return cmdDaemonServe(rest)
 	case "start":
 		return daemonStart(targets, quiet)
 	case "stop":
@@ -526,15 +531,19 @@ func printDaemonUsage() {
   synapses daemon — manage background services
 
   Usage:
-    synapses daemon start              Start all sidecars (brain, scout, pulse)
-    synapses daemon start --service X  Start a single sidecar
-    synapses daemon stop               Stop all sidecars
-    synapses daemon stop  --service X  Stop a single sidecar
-    synapses daemon restart            Restart all
-    synapses daemon status             Show running / stopped state
-    synapses daemon logs --service X   Tail last 200 lines of a sidecar log
-    synapses daemon install            Register as login service (launchd/systemd)
-    synapses daemon uninstall          Remove login service registration
+    synapses daemon serve -path <repo>   Run MCP server as a daemon (Unix socket)
+    synapses daemon start                Start all sidecars (brain, scout, pulse)
+    synapses daemon start --service X    Start a single sidecar
+    synapses daemon stop                 Stop all sidecars
+    synapses daemon stop  --service X    Stop a single sidecar
+    synapses daemon restart              Restart all
+    synapses daemon status               Show running / stopped state
+    synapses daemon logs --service X     Tail last 200 lines of a sidecar log
+    synapses daemon install              Register as login service (launchd/systemd)
+    synapses daemon uninstall            Remove login service registration
+
+  The 'serve' command is automatically invoked by 'synapses start' (the proxy).
+  You rarely need to call it manually.
 
   Services:  brain (port 11435)  scout (port 11436)  pulse (port 11437)
 `)
