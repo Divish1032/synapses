@@ -1304,7 +1304,7 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 			}
 		}
 		// Remove root CLAUDE.md entirely if it is now empty/whitespace-only.
-		if strings.TrimSpace(string(rootData)) == "" || strings.TrimSpace(rs[:strings.Index(rs, sectionStart)]) == "" {
+		if strings.TrimSpace(string(rootData)) == "" || (si != -1 && strings.TrimSpace(rs[:si]) == "") {
 			_ = os.Remove(rootCLAUDE)
 		}
 	}

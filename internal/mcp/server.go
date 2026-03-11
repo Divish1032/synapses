@@ -394,7 +394,8 @@ func (s *Server) registerTools() {
 			mcp.WithDescription(
 				"Checks a list of proposed code changes against the project's architectural rules. "+
 					"Returns any violations before a single line of code is written. "+
-					"Call this before implementing a plan that touches multiple files.",
+					"Call this before implementing a plan that touches multiple files. "+
+					"Pass check_safety=true to also run check_plan_safety inline (saves a round-trip).",
 			),
 			mcp.WithString("changes",
 				mcp.Required(),
@@ -402,6 +403,12 @@ func (s *Server) registerTools() {
 					"JSON array of proposed changes. Each item: "+
 						`{"file": "path/to/file.go", "adds_call_to": "SomeFunction", "removes_call_to": "OtherFunction"}.`,
 				),
+			),
+			mcp.WithBoolean("check_safety",
+				mcp.Description("When true, also runs check_plan_safety inline and adds safety_check to the response."),
+			),
+			mcp.WithString("plan_description",
+				mcp.Description("Natural language description of the plan (used for safety check). Auto-derived from changed files if omitted."),
 			),
 		),
 		s.handleValidatePlan,
@@ -574,20 +581,24 @@ func (s *Server) registerTools() {
 		s.handleCreatePlan,
 	)
 
-	// get_pending_tasks
+	// get_pending_tasks (absorbs get_my_tasks via agent_id + suggest_next)
 	s.mcp.AddTool(
 		mcp.NewTool(
 			"get_pending_tasks",
 			mcp.WithDescription(
 				"Returns all pending and in-progress tasks, ordered by priority (p0 first). "+
 					"Call this at the start of every session to discover what work was agreed "+
-					"in previous sessions and resume from exactly where the last session stopped.",
+					"in previous sessions and resume from exactly where the last session stopped. "+
+					"Pass agent_id= to scope to your own tasks. Pass suggest_next=true to get the top unblocked task highlighted.",
 			),
 			mcp.WithString("plan_id",
 				mcp.Description("Optional. Filter to tasks belonging to a specific plan."),
 			),
 			mcp.WithString("agent_id",
-				mcp.Description("Optional. Filter to tasks assigned to a specific agent."),
+				mcp.Description("Optional. Filter to tasks assigned to a specific agent. Use your own agent_id to see only your tasks."),
+			),
+			mcp.WithBoolean("suggest_next",
+				mcp.Description("When true, adds a suggested_next field with the top unblocked pending task."),
 			),
 		),
 		s.handleGetPendingTasks,
@@ -722,24 +733,7 @@ func (s *Server) registerTools() {
 		s.handleGetPlans,
 	)
 
-	// get_my_tasks
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_my_tasks",
-			mcp.WithDescription(
-				"Returns unblocked pending tasks assigned to or created by a specific agent, "+
-					"with a suggested next task. Scoped to agent_id so each agent sees only its own work.",
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The agent's self-declared identifier."),
-			),
-			mcp.WithString("plan_id",
-				mcp.Description("Optional. Filter to tasks belonging to a specific plan."),
-			),
-		),
-		s.handleGetMyTasks,
-	)
+
 
 	// link_task_nodes
 	s.mcp.AddTool(
@@ -1180,29 +1174,11 @@ func (s *Server) registerTools() {
 			mcp.WithNumber("limit",
 				mcp.Description("Maximum messages to return. Defaults to 50."),
 			),
+			mcp.WithString("mark_read_ids",
+				mcp.Description("JSON array of message IDs to mark as read in the same call, e.g. [\"id1\",\"id2\"]. Replaces separate mark_read calls."),
+			),
 		),
 		s.handleGetMessages,
-	)
-
-	// mark_read
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"mark_read",
-			mcp.WithDescription(
-				"Marks a message as read by the calling agent. "+
-					"Idempotent — calling it on an already-read message is safe. "+
-					"Call this after processing a message so it no longer appears in get_messages(unread_only=true).",
-			),
-			mcp.WithString("message_id",
-				mcp.Required(),
-				mcp.Description("The message ID to mark as read (from get_messages response)."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The agent marking the message as read."),
-			),
-		),
-		s.handleMarkRead,
 	)
 
 	// remember
@@ -1251,19 +1227,18 @@ func (s *Server) registerTools() {
 		s.handleRemember,
 	)
 
-	// recall
+	// recall (absorbs get_episodes: omit query for chronological browse)
 	s.mcp.AddTool(
 		mcp.NewTool(
 			"recall",
 			mcp.WithDescription(
-				"Searches episodic memory using FTS5 BM25 for episodes matching the query. "+
-					"Returns the top-N most relevant episodes (best match first). "+
-					"Also surfaces any dynamic_rules that were derived from similar past failures. "+
-					"Use this before starting work on a component you haven't touched recently.",
+				"Searches or browses episodic memory. "+
+					"With query: FTS5 BM25 semantic search, results ordered by relevance — use before starting work on a component. "+
+					"Without query: chronological browse (newest first), equivalent to the deprecated get_episodes. "+
+					"Also surfaces dynamic_rules derived from similar past failures.",
 			),
 			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("Natural language search query, e.g. 'auth handler redirect loop'."),
+				mcp.Description("Natural language search query, e.g. 'auth handler redirect loop'. Omit for chronological browse."),
 			),
 			mcp.WithString("project_id",
 				mcp.Description("Filter to episodes for this project (empty = all projects)."),
@@ -1275,34 +1250,16 @@ func (s *Server) registerTools() {
 				mcp.Description("Filter by type: decision, failure, pattern, rule_proposal (empty = all)."),
 			),
 			mcp.WithString("outcome_filter",
-				mcp.Description("Filter by outcome: success, failure, partial, unknown (empty = all)."),
+				mcp.Description("Filter by outcome: success, failure, partial, unknown (empty = all). Search mode only."),
+			),
+			mcp.WithString("tags",
+				mcp.Description("Comma-separated tags to filter by, e.g. 'auth,breaking'. Browse mode only."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Max episodes to return. Default 5 (search) or 20 (browse)."),
 			),
 		),
 		s.handleRecall,
-	)
-
-	// get_episodes
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_episodes",
-			mcp.WithDescription(
-				"Lists recent episodes without search, ordered by creation time (newest first). "+
-					"Use recall() for semantic search. Use this to browse recent decisions or failures.",
-			),
-			mcp.WithString("project_id",
-				mcp.Description("Filter to this project (empty = all)."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Filter to this agent (empty = all)."),
-			),
-			mcp.WithString("episode_type",
-				mcp.Description("Filter by type: decision, failure, pattern, rule_proposal (empty = all)."),
-			),
-			mcp.WithString("tags",
-				mcp.Description("Comma-separated tags to filter by, e.g. 'auth,breaking'."),
-			),
-		),
-		s.handleGetEpisodes,
 	)
 
 	// check_plan_safety
@@ -1357,6 +1314,39 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleGetADRs,
+	)
+
+	// plan_context — single-call pre-implementation gate (replaces the 3-step ritual:
+	// check_plan_safety → validate_plan → prepare_context(intent=plan)).
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"plan_context",
+			mcp.WithDescription(
+				"Single-call pre-implementation gate. Runs three checks in one round-trip: "+
+					"(1) check_plan_safety — searches failure episodes for past matches (500ms cap); "+
+					"(2) validate_plan — checks proposed changes against architectural rules; "+
+					"(3) prepare_context(intent=plan) — scope assessment: files, interfaces, risk level. "+
+					"Returns a verdict: 'clear' | 'warnings' | 'violations' | 'blocked'. "+
+					"Use this BEFORE implementing any multi-file plan.",
+			),
+			mcp.WithString("target",
+				mcp.Required(),
+				mcp.Description("Entity name, file path, or concept to assess scope for (e.g. 'AuthService', 'internal/auth')."),
+			),
+			mcp.WithString("changes",
+				mcp.Description("JSON array of proposed changes for structural validation. Same format as validate_plan. Omit to skip rule checking."),
+			),
+			mcp.WithString("plan_description",
+				mcp.Description("Natural language description for the safety check (e.g. 'refactor auth to remove direct DB access'). Defaults to target if omitted."),
+			),
+			mcp.WithString("file",
+				mcp.Description("Optional file path suffix to disambiguate entity names."),
+			),
+			mcp.WithString("task_id",
+				mcp.Description("Optional task ID for relevance boosting in scope assessment."),
+			),
+		),
+		s.handlePlanContext,
 	)
 
 }

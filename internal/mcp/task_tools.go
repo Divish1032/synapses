@@ -212,6 +212,21 @@ func (s *Server) handleGetPendingTasks(
 		"reminder": "Call update_task(id, 'in_progress') before starting a task and update_task(id, 'done', notes) immediately when finished. Never batch completions.",
 	}
 
+	// suggest_next: when requested, surface the top unblocked pending task so
+	// agents don't have to scan the full task list themselves.
+	if suggestNext, _ := req.GetArguments()["suggest_next"].(bool); suggestNext {
+		for _, t := range tasks {
+			if len(t.DependsOn) == 0 && t.Status == "pending" {
+				resp["suggested_next"] = map[string]interface{}{
+					"id":       t.ID,
+					"title":    t.Title,
+					"priority": t.Priority,
+				}
+				break
+			}
+		}
+	}
+
 	return jsonResult(resp)
 }
 
