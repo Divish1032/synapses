@@ -1179,9 +1179,8 @@ var toolCatalog = []toolCatalogEntry{
 
 	// Task management
 	{Name: "create_plan", Category: "tasks", Description: "Save a plan with tasks for future sessions", Keywords: []string{"plan", "create", "tasks", "save", "work", "implement"}, Example: `create_plan(title="v1.1 improvements", tasks=[...])`},
-	{Name: "get_pending_tasks", Category: "tasks", Description: "List pending/in-progress tasks", Keywords: []string{"pending", "tasks", "todo", "remaining", "work", "resume"}, Example: `get_pending_tasks()`},
+	{Name: "get_pending_tasks", Category: "tasks", Description: "List pending/in-progress tasks (suggest_next=true for recommendation)", Keywords: []string{"pending", "tasks", "todo", "remaining", "work", "resume", "my", "assigned"}, Example: `get_pending_tasks(suggest_next=true)`},
 	{Name: "update_task", Category: "tasks", Description: "Mark task done or add notes", Keywords: []string{"update", "task", "done", "complete", "status", "notes"}, Example: `update_task(id="...", status="done")`},
-	{Name: "get_my_tasks", Category: "tasks", Description: "Tasks assigned to a specific agent", Keywords: []string{"my", "tasks", "assigned", "agent"}, Example: `get_my_tasks(agent_id="my-agent")`},
 	{Name: "save_session_state", Category: "tasks", Description: "Save progress for session resumption", Keywords: []string{"save", "session", "state", "progress", "resume", "checkpoint"}, Example: `save_session_state(task_id="...", completed_steps=[...])`},
 	{Name: "get_session_state", Category: "tasks", Description: "Resume from saved session state", Keywords: []string{"get", "session", "state", "resume", "restore"}, Example: `get_session_state(task_id="...")`},
 
@@ -1193,12 +1192,12 @@ var toolCatalog = []toolCatalogEntry{
 
 	// Memory
 	{Name: "remember", Category: "memory", Description: "Record a decision or failure as an episode", Keywords: []string{"remember", "record", "episode", "decision", "failure", "learn"}, Example: `remember(agent_id="...", decision="...", episode_type="failure")`},
-	{Name: "recall", Category: "memory", Description: "Search episodic memory for past decisions/failures", Keywords: []string{"recall", "remember", "past", "history", "episode", "memory", "similar"}, Example: `recall(query="auth handler redirect loop")`},
+	{Name: "recall", Category: "memory", Description: "Search or browse episodic memory (empty query=chronological, query=FTS5 search)", Keywords: []string{"recall", "remember", "past", "history", "episode", "memory", "similar", "browse", "episodes"}, Example: `recall(query="auth handler redirect loop")`},
 	{Name: "check_plan_safety", Category: "memory", Description: "Check if similar plans failed before", Keywords: []string{"safety", "check", "failed", "before", "similar", "risk", "interjection"}, Example: `check_plan_safety(plan_description="modify auth login flow")`},
 
 	// Messaging
 	{Name: "send_message", Category: "messaging", Description: "Send message to another agent", Keywords: []string{"send", "message", "notify", "tell", "broadcast", "communicate"}, Example: `send_message(from_agent="...", topic="api_changed", payload="{...}")`},
-	{Name: "get_messages", Category: "messaging", Description: "Retrieve messages from agent bus", Keywords: []string{"messages", "inbox", "unread", "received", "poll"}, Example: `get_messages(agent_id="...")`},
+	{Name: "get_messages", Category: "messaging", Description: "Retrieve messages + batch-ack via mark_read_ids", Keywords: []string{"messages", "inbox", "unread", "received", "poll", "mark", "read"}, Example: `get_messages(agent_id="...", mark_read_ids=["id1"])`},
 
 	// Web
 	{Name: "web_search", Category: "web", Description: "Search the web for docs/solutions", Keywords: []string{"web", "search", "internet", "docs", "documentation", "online"}, Example: `web_search(query="go context.WithTimeout best practices")`},
@@ -1208,6 +1207,7 @@ var toolCatalog = []toolCatalogEntry{
 
 	// Intent-based
 	{Name: "prepare_context", Category: "meta", Description: "Intent-based context assembly (replaces multi-tool chains)", Keywords: []string{"prepare", "intent", "modify", "understand", "review", "debug", "add", "plan", "context"}, Example: `prepare_context(intent="modify", target="AuthService")`},
+	{Name: "plan_context", Category: "meta", Description: "Compound pre-implementation check: safety + validation + scope in one call", Keywords: []string{"plan", "implement", "check", "safety", "validate", "before", "compound"}, Example: `plan_context(target="AuthService", changes=[{"file":"auth.go","adds_call_to":"DB"}])`},
 
 	// Events
 	{Name: "get_events", Category: "coordination", Description: "Recent events (file changes, task updates, annotations)", Keywords: []string{"events", "recent", "changes", "updates", "activity", "poll"}, Example: `get_events(since_seq=0)`},
@@ -1215,6 +1215,100 @@ var toolCatalog = []toolCatalogEntry{
 	// ADRs
 	{Name: "upsert_adr", Category: "architecture", Description: "Create/update an Architectural Decision Record", Keywords: []string{"adr", "architecture", "decision", "record", "create"}, Example: `upsert_adr(id="adr-001", title="No CGo", decision="...")`},
 	{Name: "get_adrs", Category: "architecture", Description: "List Architectural Decision Records", Keywords: []string{"adr", "adrs", "architecture", "decisions", "records", "list"}, Example: `get_adrs()`},
+}
+
+// ── Workflow Recipes for discover_tools (GAP-5: Navigator short-term) ──────
+
+// workflowStep describes one step in a multi-tool workflow recipe.
+type workflowStep struct {
+	Tool       string `json:"tool"`
+	ArgsHint   string `json:"args"`        // template with {placeholders}
+	Expects    string `json:"expects"`     // what this step returns
+	UsesOutput string `json:"uses_output"` // what from the previous step feeds into this
+}
+
+// workflowRecipe is a pre-built tool sequence for a common intent.
+// Returned by discover_tools when the query matches the intent keywords,
+// so agents don't have to reason about tool chaining from scratch.
+type workflowRecipe struct {
+	ID       string         `json:"id"`
+	Intent   string         `json:"intent"`
+	Keywords []string       `json:"-"`
+	Steps    []workflowStep `json:"steps"`
+}
+
+var workflowRecipes = []workflowRecipe{
+	{
+		ID:       "understand_entity",
+		Intent:   "Understand how a function, struct, or module works",
+		Keywords: []string{"understand", "explore", "what", "how", "entity", "function", "struct", "works", "does"},
+		Steps: []workflowStep{
+			{Tool: "find_entity", ArgsHint: `query="{name}"`, Expects: "List of matching nodes with name, type, file, line. Pick the best match.", UsesOutput: ""},
+			{Tool: "get_context", ArgsHint: `entity="{name}", file="{file}"`, Expects: "Subgraph: root entity, callers, callees, annotations, recent_changes (git commits), brain enrichment.", UsesOutput: "Use exact name and file from find_entity results"},
+			{Tool: "get_call_chain", ArgsHint: `from="{entity}", to="{callee}"`, Expects: "Step-by-step call path between two entities.", UsesOutput: "Optional: pick an interesting callee from get_context's callees list to trace deeper"},
+		},
+	},
+	{
+		ID:       "implement_change",
+		Intent:   "Safely implement a code change across files",
+		Keywords: []string{"implement", "modify", "change", "edit", "write", "code", "add", "feature", "refactor"},
+		Steps: []workflowStep{
+			{Tool: "get_context", ArgsHint: `entity="{target}"`, Expects: "Current structure, callers/callees, annotations, and applicable rules.", UsesOutput: ""},
+			{Tool: "plan_context", ArgsHint: `target="{target}", changes=[{"file":"...","adds_call_to":"..."}]`, Expects: "verdict: clear|warnings|violations|blocked + safety check + scope assessment.", UsesOutput: "Use the entity's file and planned dependencies from get_context"},
+			{Tool: "claim_work", ArgsHint: `agent_id="...", scope="{file}"`, Expects: "Confirmation of scope reservation.", UsesOutput: "Use files from your plan"},
+			{Tool: "update_task", ArgsHint: `id="...", status="done"`, Expects: "Task marked complete.", UsesOutput: "After editing: mark the task done and release_claims"},
+		},
+	},
+	{
+		ID:       "debug_issue",
+		Intent:   "Debug a bug — find the source, trace the call path, assess blast radius",
+		Keywords: []string{"debug", "bug", "fix", "broken", "error", "issue", "trace", "wrong", "fails"},
+		Steps: []workflowStep{
+			{Tool: "search", ArgsHint: `query="{symptom}", mode="semantic"`, Expects: "Matching entities ranked by relevance.", UsesOutput: ""},
+			{Tool: "get_context", ArgsHint: `entity="{suspect}"`, Expects: "Subgraph around the suspected entity + recent_changes (who modified it last).", UsesOutput: "Pick the most relevant entity from search results"},
+			{Tool: "get_call_chain", ArgsHint: `from="{entrypoint}", to="{suspect}"`, Expects: "How the entry point reaches the buggy code.", UsesOutput: "Use the caller that triggers the bug as 'from'"},
+			{Tool: "get_impact", ArgsHint: `symbol="{suspect}"`, Expects: "Reverse-BFS: everything that depends on this entity.", UsesOutput: "Assess blast radius before fixing"},
+		},
+	},
+	{
+		ID:       "resume_work",
+		Intent:   "Resume a previous session's work where you left off",
+		Keywords: []string{"resume", "continue", "pick", "left", "session", "previous", "start", "pending"},
+		Steps: []workflowStep{
+			{Tool: "session_init", ArgsHint: `agent_id="..."`, Expects: "pending_tasks, project_identity, working_state, sidecars, scale_guidance.", UsesOutput: ""},
+			{Tool: "get_pending_tasks", ArgsHint: `suggest_next=true`, Expects: "Tasks list + suggested_next (first unblocked task).", UsesOutput: "Use suggested_next to decide what to work on"},
+			{Tool: "get_session_state", ArgsHint: `task_id="{suggested_task_id}"`, Expects: "Saved progress: completed_steps, current_step, context_snapshot.", UsesOutput: "Use task ID from suggested_next"},
+			{Tool: "get_context", ArgsHint: `entity="{from_session_state}", task_id="{task_id}"`, Expects: "Fresh context with task-boosted relevance.", UsesOutput: "Use entity from session state's context_snapshot"},
+		},
+	},
+	{
+		ID:       "check_impact",
+		Intent:   "Assess what breaks if an entity is changed or removed",
+		Keywords: []string{"impact", "blast", "radius", "breaks", "change", "refactor", "remove", "depends", "dependents", "safe"},
+		Steps: []workflowStep{
+			{Tool: "get_impact", ArgsHint: `symbol="{entity}"`, Expects: "Reverse-BFS: all dependents and their distance from the entity.", UsesOutput: ""},
+			{Tool: "validate_plan", ArgsHint: `changes=[{"file":"{entity_file}","adds_call_to":"..."}], check_safety=true`, Expects: "violations + safety_check from episodic memory.", UsesOutput: "Use affected files from get_impact to build your changes array"},
+		},
+	},
+	{
+		ID:       "review_architecture",
+		Intent:   "Review and enforce architectural rules and constraints",
+		Keywords: []string{"architecture", "rules", "violations", "enforce", "review", "constraints", "quality"},
+		Steps: []workflowStep{
+			{Tool: "get_violations", ArgsHint: ``, Expects: "List of all current rule violations with severity, suggested_fix.", UsesOutput: ""},
+			{Tool: "get_context", ArgsHint: `entity="{violating_entity}"`, Expects: "Context around the violating entity to understand why the violation exists.", UsesOutput: "Use from_node or to_node from violations list"},
+			{Tool: "upsert_rule", ArgsHint: `rule_id="...", description="...", severity="error"`, Expects: "Rule created/updated.", UsesOutput: "Only if you need to add new constraints"},
+		},
+	},
+	{
+		ID:       "search_concept",
+		Intent:   "Find code related to a concept or feature area",
+		Keywords: []string{"find", "search", "concept", "feature", "where", "which", "related", "handles", "about"},
+		Steps: []workflowStep{
+			{Tool: "search", ArgsHint: `query="{concept}", mode="semantic"`, Expects: "Entities ranked by relevance. search_mode shows if vector or FTS5 was used.", UsesOutput: ""},
+			{Tool: "get_context", ArgsHint: `entity="{top_result}"`, Expects: "Full subgraph around the best match.", UsesOutput: "Use the top result's name and file"},
+		},
+	},
 }
 
 // handleDiscoverTools is a lightweight keyword matcher that helps agents find
@@ -1303,6 +1397,33 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 	if len(matches) == 0 {
 		resp["hint"] = "No matches. Try broader terms like 'explore', 'task', 'web', 'architecture'."
 	}
+
+	// GAP-5: Navigator short-term — match against workflow recipes and return
+	// the best one as recommended_workflow so agents get a full tool sequence.
+	var bestWorkflow *workflowRecipe
+	bestWfScore := 0
+	for i := range workflowRecipes {
+		wf := &workflowRecipes[i]
+		score := 0
+		for _, qw := range queryWords {
+			for _, kw := range wf.Keywords {
+				if strings.Contains(kw, qw) || strings.Contains(qw, kw) {
+					score++
+				}
+			}
+			if strings.Contains(strings.ToLower(wf.Intent), qw) {
+				score++
+			}
+		}
+		if score > bestWfScore {
+			bestWfScore = score
+			bestWorkflow = wf
+		}
+	}
+	if bestWorkflow != nil && bestWfScore > 0 {
+		resp["recommended_workflow"] = bestWorkflow
+	}
+
 	return jsonResult(resp)
 }
 
