@@ -316,6 +316,7 @@ func (s *Server) handleGetContext(
 	s.emitContextDelivery(
 		"get_context", agentID, entityName, best.File,
 		dc, sg.Nodes, sg.Edges,
+		sg.TruncatedCount,       // nodes_pruned: nodes dropped by the token budget
 		sg.Truncated,
 		dc.ContextPacket != nil, // brain_enriched
 		false,                   // cache_hit (packet cache is internal; context always delivered fresh)
@@ -521,6 +522,23 @@ func (s *Server) handleFindEntity(
 	nodes := s.graph.FindByName(query)
 	if len(nodes) == 0 {
 		nodes = s.graph.FindByPattern(query)
+	}
+	// Dotted method name fallback: "Store.Close" → search "Close", filter by "Store".
+	// Go method nodes are stored by their short name (e.g. "Close") without the
+	// receiver type prefix, so "Store.Close" matches nothing via substring.
+	if len(nodes) == 0 && strings.Contains(query, ".") {
+		parts := strings.SplitN(query, ".", 2)
+		prefix, method := strings.ToLower(parts[0]), parts[1]
+		candidates := s.graph.FindByName(method)
+		if len(candidates) == 0 {
+			candidates = s.graph.FindByPattern(method)
+		}
+		for _, n := range candidates {
+			if strings.Contains(strings.ToLower(string(n.ID)), prefix) ||
+				strings.Contains(strings.ToLower(n.File), prefix) {
+				nodes = append(nodes, n)
+			}
+		}
 	}
 
 	root := s.graph.Root()

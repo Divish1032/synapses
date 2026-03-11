@@ -1,13 +1,13 @@
 {
   "name": "synapses",
   "displayName": "Synapses",
-  "description": "Graph-based code context for AI coding agents — context sidebar, auto-ingest, and hover summaries",
-  "version": "0.2.0",
+  "description": "Control center for SynapsesOS — graph-based code intelligence with service management, analytics, and AI model control",
+  "version": "0.3.0",
   "publisher": "SynapsesOS",
   "repository": { "type": "git", "url": "https://github.com/SynapsesOS/synapses.git" },
   "engines": { "vscode": "^1.85.0" },
   "categories": ["Other"],
-  "keywords": ["ai", "context", "graph", "mcp", "claude"],
+  "keywords": ["ai", "context", "graph", "mcp", "claude", "analytics", "ollama"],
   "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
@@ -25,7 +25,7 @@
         {
           "type": "webview",
           "id": "synapses.sidebar",
-          "name": "Context",
+          "name": "Control Center",
           "when": "true"
         }
       ]
@@ -42,6 +42,38 @@
       {
         "command": "synapses.injectContext",
         "title": "Synapses: Copy Context to Clipboard"
+      },
+      {
+        "command": "synapses.showPulse",
+        "title": "Synapses: Show Analytics Dashboard"
+      },
+      {
+        "command": "synapses.deregisterProject",
+        "title": "Synapses: Deregister from Project"
+      },
+      {
+        "command": "synapses.registerProject",
+        "title": "Synapses: Register with Project"
+      },
+      {
+        "command": "synapses.toggleSidecar",
+        "title": "Synapses: Toggle Service"
+      },
+      {
+        "command": "synapses.pullModel",
+        "title": "Synapses: Pull Ollama Model"
+      },
+      {
+        "command": "synapses.runDoctor",
+        "title": "Synapses: Run Diagnostics"
+      },
+      {
+        "command": "synapses.openSettings",
+        "title": "Synapses: Open Settings"
+      },
+      {
+        "command": "synapses.startOllama",
+        "title": "Synapses: Start Ollama"
       }
     ],
     "keybindings": [
@@ -55,6 +87,12 @@
         "command": "synapses.injectContext",
         "key": "ctrl+shift+c",
         "mac": "cmd+shift+c",
+        "when": "editorFocus"
+      },
+      {
+        "command": "synapses.showPulse",
+        "key": "ctrl+shift+alt+p",
+        "mac": "cmd+shift+alt+p",
         "when": "editorFocus"
       }
     ],
@@ -71,15 +109,49 @@
           "default": "http://localhost:11435",
           "description": "URL for the synapses-intelligence brain sidecar HTTP API"
         },
+        "synapses.scoutUrl": {
+          "type": "string",
+          "default": "http://localhost:11436",
+          "description": "URL for the synapses-scout web intelligence sidecar"
+        },
+        "synapses.pulseUrl": {
+          "type": "string",
+          "default": "http://localhost:11437",
+          "description": "URL for the synapses-pulse analytics sidecar"
+        },
+        "synapses.ollamaUrl": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "URL for the local Ollama server"
+        },
         "synapses.enableHover": {
           "type": "boolean",
           "default": true,
-          "description": "Show Synapses summaries in hover tooltips (requires brain sidecar)"
+          "description": "Show Synapses AI summaries in hover tooltips (requires brain sidecar)"
         },
         "synapses.autoIngest": {
           "type": "boolean",
           "default": true,
           "description": "Automatically ingest file summaries to brain when saving (requires brain sidecar)"
+        },
+        "synapses.healthPollInterval": {
+          "type": "number",
+          "default": 15,
+          "minimum": 5,
+          "maximum": 300,
+          "description": "How often (in seconds) to poll service health status"
+        },
+        "synapses.pulseRefreshInterval": {
+          "type": "number",
+          "default": 30,
+          "minimum": 10,
+          "maximum": 600,
+          "description": "How often (in seconds) to refresh the Pulse analytics dashboard"
+        },
+        "synapses.defaultModel": {
+          "type": "string",
+          "default": "qwen2.5-coder:1.5b",
+          "description": "Default Ollama model for synapses-intelligence enrichment"
         }
       }
     }

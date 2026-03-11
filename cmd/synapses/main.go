@@ -83,6 +83,10 @@ func run(args []string) error {
 		return cmdExport(args[1:])
 	case "doctor":
 		return cmdDoctor(args[1:])
+	case "daemon":
+		return cmdDaemon(args[1:])
+	case "onboard":
+		return cmdOnboard(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -487,6 +491,11 @@ func cmdIndex(args []string) error {
 	}
 	if err := writeClaudeSettings(absPath); err != nil {
 		fmt.Fprintf(os.Stderr, "synapses: warning: could not update .claude/settings.json: %v\n", err)
+	}
+
+	// Silently ensure sidecars are running after indexing.
+	if ensureDirs() == nil {
+		daemonStart(allSidecars, true) //nolint:errcheck
 	}
 
 	return nil
@@ -1126,7 +1135,13 @@ func cmdInit(args []string) error {
 		fmt.Printf("  ✓ %s\n\n", filepath.Join(absPath, ".claude", "settings.json"))
 	}
 
-	// ── Step 5: Next steps ─────────────────────────────────────────────────────
+	// ── Step 5: Ensure sidecars running ────────────────────────────────────────
+	fmt.Printf("Starting background services...\n")
+	if ensureDirs() == nil {
+		daemonStart(allSidecars, false) //nolint:errcheck
+	}
+
+	// ── Step 6: Next steps ─────────────────────────────────────────────────────
 	fmt.Printf("Next step — reload MCP servers in Claude Code:\n")
 	fmt.Printf("  Type  /mcp  in the chat, or close and reopen the chat panel.\n\n")
 	fmt.Printf("Or register via CLI (user-scoped, works across all projects):\n")
