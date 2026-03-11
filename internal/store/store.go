@@ -433,6 +433,10 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE annotations ADD COLUMN source TEXT NOT NULL DEFAULT 'agent'`,
 		// B11: Content-hash invalidation — detect stale embeddings when code changes.
 		`ALTER TABLE node_embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
+		// Dedup system annotations: prevent identical auditor notes from accumulating
+		// on the same node when update_task(done) is called more than once.
+		// Partial index (WHERE source='system') leaves agent annotations unrestricted.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_annotations_system_dedup ON annotations(node_id, note) WHERE source='system'`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -1498,7 +1502,7 @@ func (s *Store) AddSystemAnnotation(nodeID, note string) (string, error) {
 	id := fmt.Sprintf("%x", time.Now().UnixNano())
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.Exec(
-		`INSERT INTO annotations (id, node_id, agent_id, note, created_at, source) VALUES (?, ?, '', ?, ?, 'system')`,
+		`INSERT OR IGNORE INTO annotations (id, node_id, agent_id, note, created_at, source) VALUES (?, ?, '', ?, ?, 'system')`,
 		id, nodeID, note, now,
 	)
 	return id, err

@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh -s -- --full
+#   curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh -s -- --all
 #   curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh -s -- --full --with-scout
 #
 # Flags:
@@ -13,25 +13,32 @@
 #                 Requires: Ollama (https://ollama.com) + 4 GB+ RAM
 #   --with-scout  Also install the web-intelligence sidecar (optional add-on)
 #                 Requires: Python 3.11+ and pip
+#   --with-pulse  Also install the analytics sidecar
+#   --all         Install all four legs: core + brain + scout + pulse
 #
 # System Requirements:
-#   Core only:       Go 1.22+, any OS/arch
-#   With --full:     Go 1.22+, Ollama, 4 GB RAM minimum (8 GB recommended)
-#   With --with-scout: Python 3.11+, pip
+#   Core only:         Go 1.22+, any OS/arch
+#   With --full/--all: Go 1.22+, Ollama, 4 GB RAM minimum (8 GB recommended)
+#   With scout:        Python 3.11+, pip
 
 set -e
 
 SYNAPSES_PKG="github.com/SynapsesOS/synapses/cmd/synapses@latest"
 BRAIN_PKG="github.com/SynapsesOS/synapses-intelligence/cmd/brain@latest"
+PULSE_PKG="github.com/SynapsesOS/synapses-pulse/cmd/pulse@latest"
 SCOUT_PIP_PKG="synapses-scout"
 
 TIER="core"
 WITH_SCOUT=false
+WITH_PULSE=false
+
 for arg in "$@"; do
   case "$arg" in
+    --all)         TIER="full"; WITH_SCOUT=true; WITH_PULSE=true ;;
     --full)        TIER="full" ;;
     --core)        TIER="core" ;;
     --with-scout)  WITH_SCOUT=true ;;
+    --with-pulse)  WITH_PULSE=true ;;
   esac
 done
 
@@ -56,12 +63,16 @@ if [ "$WITH_SCOUT" = true ] && ! command -v python3 >/dev/null 2>&1; then
   WITH_SCOUT=false
 fi
 
-# ── main ──────────────────────────────────────────────────────────────────────
+# ── header ────────────────────────────────────────────────────────────────────
 
 echo ""
 printf "  \033[1mSynapses installer\033[0m"
-if [ "$TIER" = "full" ] && [ "$WITH_SCOUT" = true ]; then
-  printf " (full stack: core + brain + scout)\n"
+if [ "$TIER" = "full" ] && [ "$WITH_SCOUT" = true ] && [ "$WITH_PULSE" = true ]; then
+  printf " (full stack: core + brain + scout + pulse)\n"
+elif [ "$TIER" = "full" ] && [ "$WITH_SCOUT" = true ]; then
+  printf " (core + brain + scout)\n"
+elif [ "$TIER" = "full" ] && [ "$WITH_PULSE" = true ]; then
+  printf " (core + brain + pulse)\n"
 elif [ "$TIER" = "full" ]; then
   printf " (core + brain AI sidecar)\n"
 else
@@ -70,23 +81,25 @@ fi
 echo "  ──────────────────────────────────────"
 echo ""
 
-# Always install synapses core
-info "Installing synapses..."
+# ── install core ──────────────────────────────────────────────────────────────
+
+info "Installing synapses core..."
 go install "$SYNAPSES_PKG"
-ok "synapses installed  ($(which synapses 2>/dev/null || echo '~/.go/bin/synapses'))"
+ok "synapses installed  ($(command -v synapses 2>/dev/null || echo '~/.go/bin/synapses'))"
+
+# ── install brain ─────────────────────────────────────────────────────────────
 
 if [ "$TIER" = "full" ]; then
   echo ""
-  info "Installing brain (AI sidecar)..."
+  info "Installing brain (AI enrichment sidecar)..."
   go install "$BRAIN_PKG"
-  ok "brain installed  ($(which brain 2>/dev/null || echo '~/.go/bin/brain'))"
+  ok "brain installed  ($(command -v brain 2>/dev/null || echo '~/.go/bin/brain'))"
 
   echo ""
   printf "  \033[1mRunning brain setup...\033[0m\n"
   echo "  (detects your GPU/CPU, benchmarks installed Ollama models, picks the fastest)"
   echo ""
 
-  # brain setup is interactive; exit code non-zero means Ollama missing or no models
   if ! brain setup; then
     echo ""
     warn "brain setup hit an issue (see above)."
@@ -95,18 +108,29 @@ if [ "$TIER" = "full" ]; then
   fi
 fi
 
+# ── install scout ─────────────────────────────────────────────────────────────
+
 if [ "$WITH_SCOUT" = true ]; then
   echo ""
   info "Installing scout (web intelligence sidecar)..."
   if command -v pip3 >/dev/null 2>&1; then
     pip3 install "$SCOUT_PIP_PKG" --quiet
-    ok "scout installed  ($(which scout 2>/dev/null || echo '~/.local/bin/scout'))"
+    ok "scout installed  ($(command -v scout 2>/dev/null || echo '~/.local/bin/scout'))"
   elif command -v pip >/dev/null 2>&1; then
     pip install "$SCOUT_PIP_PKG" --quiet
-    ok "scout installed  ($(which scout 2>/dev/null || echo '~/.local/bin/scout'))"
+    ok "scout installed  ($(command -v scout 2>/dev/null || echo '~/.local/bin/scout'))"
   else
     warn "pip not found — skipping scout. Install pip then run:  pip install synapses-scout"
   fi
+fi
+
+# ── install pulse ─────────────────────────────────────────────────────────────
+
+if [ "$WITH_PULSE" = true ]; then
+  echo ""
+  info "Installing pulse (analytics sidecar)..."
+  go install "$PULSE_PKG"
+  ok "pulse installed  ($(command -v pulse 2>/dev/null || echo '~/.go/bin/pulse'))"
 fi
 
 # ── path hint ────────────────────────────────────────────────────────────────
@@ -124,37 +148,34 @@ if ! echo "$PATH" | grep -q "$EFFECTIVE_BIN"; then
   echo ""
 fi
 
-# ── next steps ────────────────────────────────────────────────────────────────
+# ── start sidecars ────────────────────────────────────────────────────────────
 
 echo ""
 echo "  ──────────────────────────────────────"
-printf "  \033[1mDone. Next steps:\033[0m\n"
+info "Starting background services..."
 echo ""
 
-if [ "$TIER" = "full" ]; then
-  echo "  1. Start the brain sidecar in the background:"
-  echo "       brain serve &"
-  echo "     (add to ~/.zshrc or ~/.profile to start automatically)"
-  echo ""
-  if [ "$WITH_SCOUT" = true ]; then
-    echo "  2. Start the scout sidecar in the background:"
-    echo "       scout serve &"
-    echo ""
-    echo "  3. Wire synapses into your AI agent (Cursor, Gemini, Zed, Windsurf, Claude):"
-    echo "       synapses mcp-setup --agent all"
-  else
-    echo "  2. Wire synapses into your AI agent (Cursor, Gemini, Zed, Windsurf, Claude):"
-    echo "       synapses mcp-setup --agent all"
-    echo ""
-    echo "  To add web search/fetch later:"
-    echo "       pip install synapses-scout && scout serve &"
-  fi
-else
-  echo "  Wire synapses into your AI agent (Cursor, Gemini, Zed, Windsurf, Claude):"
-  echo "       synapses mcp-setup --agent all"
-  echo ""
-  echo "  To add the AI brain (local LLM enrichment):"
-  echo "       curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh -s -- --full"
-fi
+# synapses daemon start is idempotent and skips binaries not in PATH
+synapses daemon start
 
+# ── next steps ────────────────────────────────────────────────────────────────
+
+echo "  ──────────────────────────────────────"
+printf "  \033[1mDone! Next steps:\033[0m\n"
+echo ""
+echo "  1. Wire Synapses into your AI agent:"
+echo "       synapses mcp-setup --agent all"
+echo ""
+echo "  2. Index your first project:"
+echo "       synapses init --path /path/to/your/project"
+echo "       (this auto-starts sidecars and registers the project)"
+echo ""
+echo "  3. Optional — start sidecars at login:"
+echo "       synapses daemon install"
+echo ""
+echo "  Useful commands:"
+echo "    synapses daemon status        — see what's running"
+echo "    synapses daemon logs --service brain"
+echo "    synapses doctor               — full health check"
+echo "    synapses onboard              — guided interactive setup"
 echo ""
