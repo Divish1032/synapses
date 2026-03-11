@@ -59,6 +59,19 @@ type Server struct {
 	// Brain cache warming debounce: prevents hammering the brain on rapid saves.
 	warmMu   sync.Mutex
 	lastWarm time.Time
+
+	// GAP-1: Feedback loop — track get_context call counts per (agentID, entity)
+	// within a session. When the same agent calls get_context ≥3 times for the
+	// same entity, we auto-record a "context_repeated" episode as a signal that
+	// the initial context slice wasn't sufficient. Entries expire after 30m.
+	ctxCallMu sync.Mutex
+	ctxCalls  map[string]*ctxCallEntry
+}
+
+// ctxCallEntry tracks how many times an agent requested context for an entity.
+type ctxCallEntry struct {
+	count   int
+	firstAt time.Time
 }
 
 // New creates a Server wired to the given graph, config, and optional store.
@@ -365,6 +378,9 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("detail_level",
 				mcp.Description("Only used with format='compact'. Controls verbosity: 'summary' (~50 tokens, root entity header + warnings only), 'neighbors' (~200 tokens, adds Calls/Called-by name lists), 'full' (default, ~400-600 tokens, adds callee detail blocks and insight)."),
+			),
+			mcp.WithBoolean("helpful",
+				mcp.Description("Optional explicit feedback signal (true=context was useful, false=context missed what you needed). Recorded as an episode to improve future context delivery. Omit if you don't have a clear signal yet."),
 			),
 		),
 		s.handleGetContext,
