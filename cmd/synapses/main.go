@@ -1124,11 +1124,55 @@ func cmdInit(args []string) error {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
+	initStart := time.Now()
 	projectName := filepath.Base(absPath)
-	fmt.Printf("Synapses — setting up %s\n\n", projectName)
+	fmt.Printf("\n  Synapses — setting up %s\n", projectName)
+	fmt.Printf("  ─────────────────────────────────────\n\n")
 
-	// ── Step 1: Index ──────────────────────────────────────────────────────────
-	fmt.Printf("Indexing...\n")
+	// ── Step 1: Detect languages ───────────────────────────────────────────────
+	// GAP-9: Show what's in the project so the user knows parsing is relevant.
+	fmt.Printf("  Detecting languages...\n")
+	langs := detectProjectLanguages(absPath)
+	if len(langs) > 0 {
+		fmt.Printf("  ✓ Found: %s\n\n", strings.Join(langs, ", "))
+	} else {
+		fmt.Printf("  ✓ Generic parsing (no deep AST parsers matched)\n\n")
+	}
+
+	// ── Step 2: Generate synapses.json if missing ──────────────────────────────
+	// GAP-9: Without this, sidecars (brain/scout/pulse) aren't configured.
+	cfgPath := filepath.Join(absPath, "synapses.json")
+	if _, statErr := os.Stat(cfgPath); os.IsNotExist(statErr) {
+		fmt.Printf("  Generating synapses.json...\n")
+		hasBrain := binaryExists("brain")
+		hasScout := binaryExists("scout")
+		hasPulse := binaryExists("pulse")
+		if err := writeOnboardSynapsesJSON(absPath, hasBrain, hasScout, hasPulse); err != nil {
+			fmt.Printf("  ! could not write synapses.json: %v\n\n", err)
+		} else {
+			fmt.Printf("  ✓ %s\n", cfgPath)
+			var configured []string
+			if hasBrain {
+				configured = append(configured, "brain")
+			}
+			if hasScout {
+				configured = append(configured, "scout")
+			}
+			if hasPulse {
+				configured = append(configured, "pulse")
+			}
+			if len(configured) > 0 {
+				fmt.Printf("    Sidecars configured: %s\n\n", strings.Join(configured, ", "))
+			} else {
+				fmt.Printf("    No sidecars installed — run 'synapses onboard' for full setup\n\n")
+			}
+		}
+	} else {
+		fmt.Printf("  synapses.json already exists — skipping\n\n")
+	}
+
+	// ── Step 3: Index ──────────────────────────────────────────────────────────
+	fmt.Printf("  Indexing...\n")
 	start := time.Now()
 	g, err := loadOrBuildGraph(absPath, *forceReindex)
 	if err != nil {
@@ -1143,45 +1187,94 @@ func cmdInit(args []string) error {
 		identity.Summary.Edges,
 		elapsed)
 
-	// ── Step 2: Write .mcp.json ────────────────────────────────────────────────
+	// ── Step 4: Write .mcp.json ────────────────────────────────────────────────
 	mcpFile := filepath.Join(absPath, ".mcp.json")
 	if err := writeMCPConfig(mcpFile, absPath); err != nil {
 		return fmt.Errorf("write .mcp.json: %w", err)
 	}
-	fmt.Printf("Writing .mcp.json...\n")
+	fmt.Printf("  Writing .mcp.json...\n")
 	fmt.Printf("  ✓ %s\n\n", mcpFile)
 
-	// ── Step 3: Write CLAUDE.md ─────────────────────────────────────────────────
-	fmt.Printf("Writing CLAUDE.md...\n")
+	// ── Step 5: Write CLAUDE.md ────────────────────────────────────────────────
+	fmt.Printf("  Writing CLAUDE.md...\n")
 	if err := writeProjectCLAUDE(absPath); err != nil {
 		fmt.Printf("  ! could not update CLAUDE.md: %v\n\n", err)
 	} else {
 		fmt.Printf("  ✓ %s\n\n", filepath.Join(absPath, ".claude", "CLAUDE.md"))
 	}
 
-	// ── Step 4: Write .claude/settings.json ────────────────────────────────────
-	fmt.Printf("Writing .claude/settings.json...\n")
+	// ── Step 6: Write .claude/settings.json ────────────────────────────────────
+	fmt.Printf("  Writing .claude/settings.json...\n")
 	if err := writeClaudeSettings(absPath); err != nil {
 		fmt.Printf("  ! could not update .claude/settings.json: %v\n\n", err)
 	} else {
 		fmt.Printf("  ✓ %s\n\n", filepath.Join(absPath, ".claude", "settings.json"))
 	}
 
-	// ── Step 5: Ensure sidecars running ────────────────────────────────────────
-	fmt.Printf("Starting background services...\n")
+	// ── Step 7: Ensure sidecars running ────────────────────────────────────────
+	fmt.Printf("  Starting background services...\n")
 	if ensureDirs() == nil {
 		daemonStart(allSidecars, false) //nolint:errcheck
 	}
 
-	// ── Step 6: Next steps ─────────────────────────────────────────────────────
-	fmt.Printf("Next step — reload MCP servers in Claude Code:\n")
-	fmt.Printf("  Type  /mcp  in the chat, or close and reopen the chat panel.\n\n")
-	fmt.Printf("Or register via CLI (user-scoped, works across all projects):\n")
-	fmt.Printf("  claude mcp add --scope user synapses -- synapses start -path %s\n\n", absPath)
-	fmt.Printf("Your agent will then have access to:\n")
-	fmt.Printf("  get_project_identity   get_context   find_entity\n")
-	fmt.Printf("  validate_plan          get_violations\n")
+	// ── Summary ────────────────────────────────────────────────────────────────
+	totalElapsed := time.Since(initStart).Round(time.Millisecond)
+	fmt.Printf("\n  ✓ Setup complete in %s\n\n", totalElapsed)
+
+	fmt.Printf("  Next step — reload MCP servers in your agent:\n")
+	fmt.Printf("    Claude Code:  type /mcp or reopen the chat panel\n")
+	fmt.Printf("    CLI:          claude mcp add --scope user synapses -- synapses start -path %s\n\n", absPath)
+
+	fmt.Printf("  Your agent can now call session_init() to start.\n")
+	fmt.Printf("  Run 'synapses onboard' for full interactive setup (install sidecars, configure brain).\n\n")
 	return nil
+}
+
+// detectProjectLanguages scans the project root for known source file extensions
+// and returns a sorted list of detected language names. Stops after 5000 files
+// to keep init fast on large repos.
+func detectProjectLanguages(root string) []string {
+	extToLang := map[string]string{
+		".go": "Go", ".py": "Python", ".pyi": "Python",
+		".ts": "TypeScript", ".tsx": "TypeScript",
+		".js": "JavaScript", ".jsx": "JavaScript", ".mjs": "JavaScript",
+		".java": "Java", ".kt": "Kotlin", ".kts": "Kotlin",
+		".rs": "Rust", ".c": "C", ".h": "C", ".cpp": "C++", ".cc": "C++",
+		".cs": "C#", ".swift": "Swift", ".rb": "Ruby", ".php": "PHP",
+		".lua": "Lua", ".ex": "Elixir", ".exs": "Elixir",
+		".scala": "Scala", ".groovy": "Groovy", ".proto": "Protobuf",
+	}
+
+	seen := make(map[string]bool)
+	count := 0
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error { //nolint:errcheck
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			base := filepath.Base(path)
+			if strings.HasPrefix(base, ".") || base == "node_modules" || base == "vendor" || base == "__pycache__" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		count++
+		if count > 5000 {
+			return filepath.SkipAll
+		}
+		ext := filepath.Ext(path)
+		if lang, ok := extToLang[ext]; ok {
+			seen[lang] = true
+		}
+		return nil
+	})
+
+	langs := make([]string, 0, len(seen))
+	for lang := range seen {
+		langs = append(langs, lang)
+	}
+	sort.Strings(langs)
+	return langs
 }
 
 // writeProjectCLAUDE writes (or updates) a Synapses-managed section in

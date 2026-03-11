@@ -132,6 +132,7 @@ type directionalContext struct {
 	ADRs                   []brain.ADR                   `json:"adrs,omitempty"`                 // relevant accepted ADRs for this entity's file
 	StaleAnnotationWarning string                        `json:"stale_annotation_warning,omitempty"` // GAP-3: set when ≥1 annotation may be outdated
 	RecentChanges          []metrics.CommitInfo          `json:"recent_changes,omitempty"`           // GAP-7: last 3 git commits that touched the entity's file
+	GraphFreshness         string                        `json:"graph_freshness,omitempty"`          // GAP-4: warning when entity's file was recently modified
 }
 
 // handleGetContext returns an N-hop ego-subgraph around the named entity,
@@ -427,6 +428,20 @@ func (s *Server) handleGetContext(
 		if repoRoot != "" {
 			if commits := metrics.RecentCommitsForFile(repoRoot, dc.Root.File, 3); len(commits) > 0 {
 				dc.RecentChanges = commits
+			}
+		}
+	}
+
+	// GAP-4: Graph freshness — warn when the entity's file was modified very recently,
+	// meaning the graph may not yet reflect the latest changes (watcher latency).
+	if dc.Root != nil && dc.Root.File != "" {
+		if fi, err := os.Stat(dc.Root.File); err == nil {
+			age := time.Since(fi.ModTime())
+			if age < 10*time.Second {
+				dc.GraphFreshness = fmt.Sprintf(
+					"⚠ File modified %s ago — graph may not reflect latest changes. Re-call after a few seconds if results seem stale.",
+					age.Round(time.Second),
+				)
 			}
 		}
 	}
@@ -878,6 +893,24 @@ func (s *Server) handleValidatePlan(
 		}
 	}
 
+	// GAP-4: Check freshness of files in the changes array.
+	var freshWarnings []string
+	repoRoot := s.graph.Root()
+	for _, c := range changes {
+		if c.File == "" {
+			continue
+		}
+		absFile := c.File
+		if repoRoot != "" && !filepath.IsAbs(absFile) {
+			absFile = filepath.Join(repoRoot, absFile)
+		}
+		if fi, err := os.Stat(absFile); err == nil {
+			if age := time.Since(fi.ModTime()); age < 10*time.Second {
+				freshWarnings = append(freshWarnings, fmt.Sprintf("%s (modified %s ago)", c.File, age.Round(time.Second)))
+			}
+		}
+	}
+
 	// Build a temporary overlay graph that includes the proposed additions.
 	overlay := cloneGraph(s.graph)
 	var warnings []string
@@ -978,6 +1011,9 @@ func (s *Server) handleValidatePlan(
 	}
 	if safetyCheck != nil {
 		result["safety_check"] = safetyCheck
+	}
+	if len(freshWarnings) > 0 {
+		result["graph_freshness"] = fmt.Sprintf("⚠ %d file(s) modified very recently — graph may not reflect latest changes. Consider re-indexing: %s", len(freshWarnings), strings.Join(freshWarnings, "; "))
 	}
 	return jsonResult(result)
 }
