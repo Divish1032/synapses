@@ -18,6 +18,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/metrics"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -126,9 +127,11 @@ type directionalContext struct {
 	SuggestedNextTools []toolSuggestion              `json:"suggested_next_tools,omitempty"` // context-aware next steps
 	Truncated          bool                          `json:"truncated,omitempty"`            // true when token budget cut results
 	TruncatedCount     int                           `json:"truncated_count,omitempty"`      // nodes dropped by budget
-	BrainHint          string                        `json:"brain,omitempty"`                // set when brain is not configured
-	Principles         []string                      `json:"principles,omitempty"`           // Hot Constitution principles from synapses.json
-	ADRs               []brain.ADR                   `json:"adrs,omitempty"`                 // relevant accepted ADRs for this entity's file
+	BrainHint              string                        `json:"brain,omitempty"`                // set when brain is not configured
+	Principles             []string                      `json:"principles,omitempty"`           // Hot Constitution principles from synapses.json
+	ADRs                   []brain.ADR                   `json:"adrs,omitempty"`                 // relevant accepted ADRs for this entity's file
+	StaleAnnotationWarning string                        `json:"stale_annotation_warning,omitempty"` // GAP-3: set when ≥1 annotation may be outdated
+	RecentChanges          []metrics.CommitInfo          `json:"recent_changes,omitempty"`           // GAP-7: last 3 git commits that touched the entity's file
 }
 
 // handleGetContext returns an N-hop ego-subgraph around the named entity,
@@ -140,6 +143,50 @@ func (s *Server) handleGetContext(
 	entityName, ok := req.GetArguments()["entity"].(string)
 	if !ok || entityName == "" {
 		return mcp.NewToolResultError("entity is required"), nil
+	}
+
+	// GAP-1: Feedback loop.
+	// (a) Track repeat calls — ≥3 calls for the same entity by the same agent
+	//     auto-records a pattern episode: initial context wasn't sufficient.
+	// (b) Optional explicit feedback via helpful=true/false.
+	agentIDForFeedback, _ := req.GetArguments()["agent_id"].(string)
+	if agentIDForFeedback != "" && s.store != nil {
+		repeatCount := s.trackContextCall(agentIDForFeedback, entityName)
+		if repeatCount == 3 {
+			go func() {
+				ep := store.Episode{
+					AgentID:     agentIDForFeedback,
+					EpisodeType: "pattern",
+					Outcome:     "partial",
+					Trigger:     fmt.Sprintf("get_context called %dx for %q", repeatCount, entityName),
+					Decision:    fmt.Sprintf("Repeated context requests for %q — initial slice may be too shallow or entity is large", entityName),
+					Rationale:   "Three or more get_context calls for the same entity in one session signals the initial BFS depth or token budget wasn't sufficient. Consider increasing depth or using get_call_chain for deep traces.",
+					Tags:        `["feedback","repeated_context","auto"]`,
+					Importance:  0.3,
+				}
+				if _, err := s.store.RememberEpisode(ep); err != nil {
+					log.Printf("mcp: auto-record repeat context episode: %v", err)
+				}
+			}()
+		}
+	}
+	if helpful, ok := req.GetArguments()["helpful"].(bool); ok && agentIDForFeedback != "" && s.store != nil {
+		go func() {
+			outcome, decision := "success", fmt.Sprintf("Context for %q was helpful", entityName)
+			if !helpful {
+				outcome, decision = "failure", fmt.Sprintf("Context for %q was not helpful — agent signalled miss", entityName)
+			}
+			ep := store.Episode{
+				AgentID:     agentIDForFeedback,
+				EpisodeType: "pattern",
+				Outcome:     outcome,
+				Trigger:     fmt.Sprintf("explicit feedback on get_context(%q)", entityName),
+				Decision:    decision,
+				Tags:        `["feedback","context_quality","explicit"]`,
+				Importance:  0.4,
+			}
+			_, _ = s.store.RememberEpisode(ep)
+		}()
 	}
 
 	cfg := s.config.CarveConfig()
@@ -277,6 +324,22 @@ func (s *Server) handleGetContext(
 		}
 		if annMap, err := s.store.GetAnnotationsForNodes(nodeIDs); err == nil && len(annMap) > 0 {
 			dc.Annotations = annMap
+			// GAP-3: Warn when any annotation was written against a node whose
+			// call-graph has since changed significantly (stale=true).
+			var staleCount int
+			for _, anns := range annMap {
+				for _, a := range anns {
+					if a.Stale {
+						staleCount++
+					}
+				}
+			}
+			if staleCount > 0 {
+				dc.StaleAnnotationWarning = fmt.Sprintf(
+					"⚠ %d annotation(s) may be stale — the code was significantly refactored since they were written. Treat them as hints, not facts. Re-annotate with annotate_node() if they are wrong.",
+					staleCount,
+				)
+			}
 		}
 	}
 
@@ -355,6 +418,17 @@ func (s *Server) handleGetContext(
 	// Hot Constitution: inject project principles if configured.
 	if s.config != nil && s.config.Constitution.InjectInContext && len(s.config.Constitution.Principles) > 0 {
 		dc.Principles = s.config.Constitution.Principles
+	}
+
+	// GAP-7: Git "why" layer — surface recent commits for the entity's file so
+	// agents understand WHY the code looks the way it does without needing ADRs.
+	if dc.Root != nil && dc.Root.File != "" {
+		repoRoot := s.graph.Root()
+		if repoRoot != "" {
+			if commits := metrics.RecentCommitsForFile(repoRoot, dc.Root.File, 3); len(commits) > 0 {
+				dc.RecentChanges = commits
+			}
+		}
 	}
 
 	// ADRs: fetch relevant accepted ADRs for this entity's file (brain required, fail-silent).
@@ -847,6 +921,46 @@ func (s *Server) handleValidatePlan(
 	status := "ok"
 	if len(violations) > 0 {
 		status = "violations_found"
+	}
+
+	// GAP-8: Auto pattern extraction — when violations are found, record an
+	// episode so check_plan_safety surfaces this warning for similar future plans.
+	// This fills episodic memory without requiring agents to call remember() manually.
+	if len(violations) > 0 && s.store != nil {
+		go func() {
+			agentIDForEp := stringArg(req, "agent_id")
+			planDescForEp := stringArg(req, "plan_description")
+			if planDescForEp == "" {
+				var files []string
+				for _, c := range changes {
+					if c.File != "" {
+						files = append(files, c.File)
+					}
+				}
+				planDescForEp = strings.Join(files, ", ")
+			}
+			var sb strings.Builder
+			for i, v := range violations {
+				if i >= 3 {
+					fmt.Fprintf(&sb, "... and %d more", len(violations)-3)
+					break
+				}
+				fmt.Fprintf(&sb, "[%s] %s; ", v.RuleID, v.Description)
+			}
+			ep := store.Episode{
+				AgentID:     agentIDForEp,
+				EpisodeType: "failure",
+				Outcome:     "failure",
+				Trigger:     fmt.Sprintf("validate_plan: %d violation(s) for: %s", len(violations), planDescForEp),
+				Decision:    fmt.Sprintf("Plan failed validation: %s", sb.String()),
+				Rationale:   "Auto-recorded when validate_plan detected violations. check_plan_safety will surface this for similar future plans.",
+				Tags:        `["auto","validate_plan","violation"]`,
+				Importance:  0.6,
+			}
+			if _, err := s.store.RememberEpisode(ep); err != nil {
+				log.Printf("mcp: auto-record validate_plan episode: %v", err)
+			}
+		}()
 	}
 
 	result := map[string]interface{}{
@@ -2382,11 +2496,15 @@ func (s *Server) handleGetImpact(
 	return jsonResult(result)
 }
 
-// handleSemanticSearch queries the FTS5 full-text index over node names,
-// signatures, and doc comments. Results are ranked by BM25 relevance so
-// concept-based queries ("find code that handles rate limiting") work without
-// knowing exact function names. When embedding_endpoint is configured in
-// synapses.json, future versions will re-rank using vector similarity.
+// handleSemanticSearch runs a two-path search and merges results:
+//  1. Vector cosine similarity — when an embed client is configured (brain /v1/embed
+//     or explicit embedding_endpoint in synapses.json). This is the true semantic
+//     path: concept queries like "how does auth work" find TokenValidator even if
+//     those words never appear in the query.
+//  2. FTS5 BM25 keyword ranking — always runs as fallback / supplement.
+//
+// Results are merged: vector hits first, then unique FTS5 hits appended up to
+// the requested limit. search_mode in the response reports which path fired.
 func (s *Server) handleSemanticSearch(
 	ctx context.Context,
 	req mcp.CallToolRequest,
@@ -2518,4 +2636,30 @@ func (s *Server) inlineFindEntity(query string) []map[string]interface{} {
 		})
 	}
 	return results
+}
+
+// trackContextCall increments and returns the call count for (agentID, entity)
+// within the current server session. Entries older than 30m are lazily pruned.
+// Used by the GAP-1 feedback loop to detect when initial context is insufficient.
+func (s *Server) trackContextCall(agentID, entity string) int {
+	key := agentID + "\x00" + entity
+	s.ctxCallMu.Lock()
+	defer s.ctxCallMu.Unlock()
+	if s.ctxCalls == nil {
+		s.ctxCalls = make(map[string]*ctxCallEntry)
+	}
+	// Lazy GC: purge entries older than 30 minutes on each write.
+	now := time.Now()
+	for k, e := range s.ctxCalls {
+		if now.Sub(e.firstAt) > 30*time.Minute {
+			delete(s.ctxCalls, k)
+		}
+	}
+	e, ok := s.ctxCalls[key]
+	if !ok {
+		s.ctxCalls[key] = &ctxCallEntry{count: 1, firstAt: now}
+		return 1
+	}
+	e.count++
+	return e.count
 }

@@ -66,6 +66,52 @@ func fileChurn(repoRoot string, days int) (map[string]int, error) {
 	return counts, nil
 }
 
+// CommitInfo holds a summary of a single git commit, as surfaced by
+// get_context's recent_changes field (GAP-7: the "why" layer).
+type CommitInfo struct {
+	Hash    string `json:"hash"`
+	Author  string `json:"author"`
+	Date    string `json:"date"`
+	Message string `json:"message"`
+}
+
+// RecentCommitsForFile returns the last [limit] commits that touched filePath,
+// using git log relative to repoRoot. Returns nil when not a git repo or when
+// no commits exist for the file. Errors are silently swallowed — caller treats
+// this as an optional enrichment.
+func RecentCommitsForFile(repoRoot, filePath string, limit int) []CommitInfo {
+	if limit <= 0 {
+		limit = 3
+	}
+	// git log: %H=hash %an=author name %ad=author date (short) %s=subject
+	// --follow tracks renames; -- separates the file path from flags.
+	out, err := exec.Command(
+		"git", "-C", repoRoot,
+		"log", fmt.Sprintf("-n%d", limit),
+		"--format=%H\x1f%an\x1f%ad\x1f%s",
+		"--date=short",
+		"--follow",
+		"--", filePath,
+	).Output()
+	if err != nil || len(out) == 0 {
+		return nil
+	}
+	var commits []CommitInfo
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "\x1f", 4)
+		if len(parts) != 4 {
+			continue
+		}
+		commits = append(commits, CommitInfo{
+			Hash:    parts[0][:min(7, len(parts[0]))], // short hash
+			Author:  parts[1],
+			Date:    parts[2],
+			Message: parts[3],
+		})
+	}
+	return commits
+}
+
 // EnrichCoverage parses a go test -coverprofile output file and annotates
 // function/method nodes with a "coverage" metadata value (0.0–1.0, the
 // fraction of statements covered by tests). Nodes without matching coverage

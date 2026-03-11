@@ -450,6 +450,9 @@ func Open(path string) (*Store, error) {
 		// on the same node when update_task(done) is called more than once.
 		// Partial index (WHERE source='system') leaves agent annotations unrestricted.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_annotations_system_dedup ON annotations(node_id, note) WHERE source='system'`,
+		// GAP-3: Annotation staleness — marks annotations written against a node
+		// whose call graph has changed significantly (fan-in delta >20% or node removed).
+		`ALTER TABLE annotations ADD COLUMN stale INTEGER NOT NULL DEFAULT 0`,
 		// Context Efficiency Layer: agent context profile for incremental session_init.
 		`CREATE TABLE IF NOT EXISTS agent_context (
 			agent_id       TEXT PRIMARY KEY,
@@ -705,6 +708,10 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	s.db.Exec(`DELETE FROM proposals WHERE status IN ('accepted','rejected','withdrawn') AND updated_at < ?`, cutoff)
 	s.db.Exec(`DELETE FROM proposal_votes WHERE proposal_id NOT IN (SELECT id FROM proposals)`)
 
+	// Stale annotations for nodes that no longer exist — actively misleading,
+	// safe to remove once the retention window has passed.
+	s.db.Exec(`DELETE FROM annotations WHERE stale=1 AND node_id NOT IN (SELECT id FROM nodes)`)
+
 	// SQLite housekeeping.
 	s.db.Exec(`PRAGMA optimize`)
 }
@@ -712,6 +719,20 @@ func (s *Store) PruneStaleData(retentionDays int) {
 // SaveGraph persists all nodes and edges of g, replacing any existing data.
 // A metadata record stores the repo ID and the save timestamp.
 func (s *Store) SaveGraph(g *graph.Graph) error {
+	// GAP-3: Snapshot CALLS fan-in counts before the wipe so we can detect nodes
+	// whose call structure changed significantly and mark their annotations stale.
+	oldFanIn := make(map[string]int)
+	if fanRows, err := s.db.Query(`SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id`); err == nil {
+		defer fanRows.Close()
+		for fanRows.Next() {
+			var nid string
+			var cnt int
+			if fanRows.Scan(&nid, &cnt) == nil {
+				oldFanIn[nid] = cnt
+			}
+		}
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -841,7 +862,50 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// GAP-3: After the new graph is committed, compute new fan-in and mark
+	// annotations stale where the call structure changed by >20% or node removed.
+	go func() {
+		newFanIn := make(map[string]int)
+		if fanRows, err := s.db.Query(`SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id`); err == nil {
+			defer fanRows.Close()
+			for fanRows.Next() {
+				var nid string
+				var cnt int
+				if fanRows.Scan(&nid, &cnt) == nil {
+					newFanIn[nid] = cnt
+				}
+			}
+		}
+		var staleIDs []string
+		const threshold = 0.20
+		for nid, oldCnt := range oldFanIn {
+			if oldCnt == 0 {
+				continue
+			}
+			newCnt, exists := newFanIn[nid]
+			if !exists {
+				// Node removed entirely — its annotations are definitely stale.
+				staleIDs = append(staleIDs, nid)
+				continue
+			}
+			delta := float64(newCnt-oldCnt)
+			if delta < 0 {
+				delta = -delta
+			}
+			if delta/float64(oldCnt) > threshold {
+				staleIDs = append(staleIDs, nid)
+			}
+		}
+		if len(staleIDs) > 0 {
+			_ = s.MarkAnnotationsStale(staleIDs)
+		}
+	}()
+
+	return nil
 }
 
 // LoadGraph reads the persisted graph from the store and returns it.
@@ -1547,6 +1611,10 @@ type Annotation struct {
 	// Source distinguishes manually-added agent notes ("agent") from
 	// system-generated retrospective notes ("system"). Defaults to "agent".
 	Source string `json:"source,omitempty"`
+	// Stale is true when the node's call-graph changed significantly (fan-in delta
+	// >20% or node removed) since the annotation was written. Treat stale
+	// annotations as hints, not facts — they may describe outdated structure.
+	Stale bool `json:"stale,omitempty"`
 }
 
 // AddAnnotation attaches a note to a graph node. Source is set to "agent".
@@ -1614,7 +1682,7 @@ func (s *Store) GetAnnotationsForNodes(nodeIDs []string) (map[string][]Annotatio
 		args[i] = id
 	}
 	rows, err := s.db.Query(
-		`SELECT id, node_id, agent_id, note, created_at, source FROM annotations WHERE node_id IN (`+placeholders+`) ORDER BY created_at ASC`,
+		`SELECT id, node_id, agent_id, note, created_at, source, stale FROM annotations WHERE node_id IN (`+placeholders+`) ORDER BY created_at ASC`,
 		args...,
 	)
 	if err != nil {
@@ -1625,12 +1693,34 @@ func (s *Store) GetAnnotationsForNodes(nodeIDs []string) (map[string][]Annotatio
 	result := make(map[string][]Annotation)
 	for rows.Next() {
 		var a Annotation
-		if err := rows.Scan(&a.ID, &a.NodeID, &a.AgentID, &a.Note, &a.CreatedAt, &a.Source); err != nil {
+		var staleInt int
+		if err := rows.Scan(&a.ID, &a.NodeID, &a.AgentID, &a.Note, &a.CreatedAt, &a.Source, &staleInt); err != nil {
 			return nil, err
 		}
+		a.Stale = staleInt != 0
 		result[a.NodeID] = append(result[a.NodeID], a)
 	}
 	return result, rows.Err()
+}
+
+// MarkAnnotationsStale marks all annotations on the given node IDs as stale.
+// Called when a node's call-graph changes significantly (fan-in delta >20%)
+// or when a node is removed, so agents see a warning in get_context.
+func (s *Store) MarkAnnotationsStale(nodeIDs []string) error {
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	placeholders := strings.Repeat("?,", len(nodeIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]interface{}, len(nodeIDs))
+	for i, id := range nodeIDs {
+		args[i] = id
+	}
+	_, err := s.db.Exec(
+		`UPDATE annotations SET stale=1 WHERE node_id IN (`+placeholders+`) AND stale=0`,
+		args...,
+	)
+	return err
 }
 
 // ─── Work Claims ──────────────────────────────────────────────────────────────
