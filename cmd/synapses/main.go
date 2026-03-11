@@ -45,6 +45,14 @@ import (
 var version = "dev"
 
 func main() {
+	// Fast-path: print version and exit immediately.
+	// This avoids loading SQLite drivers and other heavy init() code
+	// that runs before main(). Keeps `synapses version` zero-cost.
+	if len(os.Args) >= 2 && os.Args[1] == "version" {
+		fmt.Printf("synapses %s\n", version)
+		return
+	}
+
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -61,7 +69,7 @@ func run(args []string) error {
 	case "init":
 		return cmdInit(args[1:])
 	case "start":
-		return cmdStart(args[1:])
+		return cmdStartProxy(args[1:])
 	case "index":
 		return cmdIndex(args[1:])
 	case "status":
@@ -97,9 +105,10 @@ func run(args []string) error {
 	}
 }
 
-// cmdStart indexes the repo (using cache if available), starts the file watcher
-// for incremental updates, then starts the MCP server on stdio.
-func cmdStart(args []string) error {
+// cmdStartDirect runs the MCP server directly on stdio (legacy mode).
+// Used when "synapses start --direct" is passed, or for debugging.
+// In normal operation, "synapses start" uses the proxy+daemon model instead.
+func cmdStartDirect(args []string) error {
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Path to the repository root")
 	forceReindex := fs.Bool("reindex", false, "Force a full re-index even if cache is fresh")
@@ -635,6 +644,19 @@ func cmdDoctor(args []string) error {
 						formatCount(stat.NodeCount), formatCount(stat.EdgeCount), formatDuration(ago)))
 			}
 		}
+	}
+
+	// ── Daemon ───────────────────────────────────────────────────────────────
+	if isDaemonRunning(absPath) {
+		verPath, _ := daemonVersionPath(absPath)
+		daemonVer := "unknown"
+		if data, err := os.ReadFile(verPath); err == nil {
+			daemonVer = strings.TrimSpace(string(data))
+		}
+		sockPath, _ := daemonSocketPath(absPath)
+		fmt.Printf("%-16s%-16s%s\n", "Daemon", "running", fmt.Sprintf("version %s, socket %s", daemonVer, sockPath))
+	} else {
+		fmt.Printf("%-16s%-16s%s\n", "Daemon", "stopped", "(will auto-start on next 'synapses start')")
 	}
 
 	// ── Brain ────────────────────────────────────────────────────────────────

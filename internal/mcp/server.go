@@ -262,6 +262,13 @@ func (s *Server) ServeStdio() error {
 	return server.ServeStdio(s.mcp)
 }
 
+// MCPServer returns the underlying mcp-go MCPServer instance.
+// Used by the daemon to serve MCP sessions over Unix socket connections
+// instead of stdio.
+func (s *Server) MCPServer() *server.MCPServer {
+	return s.mcp
+}
+
 // registerTools wires all Synapses tool definitions to their handlers.
 func (s *Server) registerTools() {
 	// ── Session Bootstrap ────────────────────────────────────────────────────

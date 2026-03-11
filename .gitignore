@@ -23,6 +23,9 @@ vendor/
 # IDE
 .idea/
 .vscode/
+.cursor/
+.gemini/
+.zed/
 *.swp
 *.swo
 
