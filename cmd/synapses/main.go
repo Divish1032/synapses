@@ -2156,7 +2156,9 @@ func fetchAndWriteBackSummaries(bc *brain.Client, g *graph.Graph, st *store.Stor
 			defer func() { <-sem }()
 			summary := bc.GetSummary(context.Background(), string(node.ID))
 			if summary != "" {
-				if _, err := st.AddAnnotation(string(node.ID), "brain", summary); err == nil {
+				// Use AddAnnotationIfNew with a 24-hour window to prevent duplicate
+				// brain annotations when the daemon is restarted within a day.
+				if _, ok, err := st.AddAnnotationIfNew(string(node.ID), "brain", summary, 24*time.Hour); err == nil && ok {
 					mu.Lock()
 					written++
 					mu.Unlock()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -413,7 +414,9 @@ func (s *Server) writeRetrospectiveAnnotations(taskID, agentID, completionNotes 
 		if s.graph.Fanin(nodeID) <= faninThreshold {
 			continue
 		}
-		_, _ = s.store.AddSystemAnnotation(rawID, noteStr)
+		if _, err := s.store.AddSystemAnnotation(rawID, noteStr); err != nil {
+			log.Printf("mcp: add system annotation: %v", err)
+		}
 	}
 }
 
@@ -458,7 +461,9 @@ func (s *Server) handleHandoffTask(
 		"from_agent": fromAgent,
 		"to_agent":   toAgent,
 	})
-	_ = s.store.AppendEvent("task_handoff", fromAgent, string(payload))
+	if err := s.store.AppendEvent("task_handoff", fromAgent, string(payload)); err != nil {
+		log.Printf("mcp: append task_handoff event: %v", err)
+	}
 
 	// Register both agents.
 	s.upsertAgentIfNeeded(fromAgent)
