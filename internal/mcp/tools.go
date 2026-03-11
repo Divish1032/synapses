@@ -1018,6 +1018,154 @@ func (s *Server) handleValidatePlan(
 	return jsonResult(result)
 }
 
+// handleVerifyImplementation checks the actual graph state of written files
+// against architectural rules and (optionally) a task's expectations.
+// This is the write-side complement to validate_plan: validate_plan checks
+// *before* writing, verify_implementation checks *after*.
+func (s *Server) handleVerifyImplementation(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	filesRaw := stringArg(req, "files_written")
+	if filesRaw == "" {
+		return mcp.NewToolResultError("files_written is required"), nil
+	}
+
+	var files []string
+	if err := json.Unmarshal([]byte(filesRaw), &files); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("invalid files_written JSON: %v", err)), nil
+	}
+	if len(files) == 0 {
+		return mcp.NewToolResultError("files_written must contain at least one file path"), nil
+	}
+
+	taskID := stringArg(req, "task_id")
+	repoRoot := s.graph.Root()
+
+	// Per-file analysis.
+	type fileReport struct {
+		File             string              `json:"file"`
+		InGraph          bool                `json:"in_graph"`
+		NodeCount        int                 `json:"node_count"`
+		Entities         []string            `json:"entities,omitempty"`
+		Violations       []config.Violation  `json:"violations,omitempty"`
+		FreshnessWarning string              `json:"freshness_warning,omitempty"`
+	}
+
+	var reports []fileReport
+	totalViolations := 0
+
+	for _, f := range files {
+		r := fileReport{File: f}
+
+		nodes := s.graph.FindByFile(f)
+		r.InGraph = len(nodes) > 0
+		r.NodeCount = len(nodes)
+
+		for _, n := range nodes {
+			r.Entities = append(r.Entities, n.Name)
+		}
+
+		// Check architectural violations for this file.
+		if r.InGraph {
+			s.rulesMu.RLock()
+			violations := s.config.CheckViolationsForFile(s.graph, f)
+			s.rulesMu.RUnlock()
+			r.Violations = violations
+			totalViolations += len(violations)
+		}
+
+		// Freshness check.
+		absFile := f
+		if repoRoot != "" && !filepath.IsAbs(absFile) {
+			absFile = filepath.Join(repoRoot, absFile)
+		}
+		if fi, err := os.Stat(absFile); err == nil {
+			if age := time.Since(fi.ModTime()); age < 10*time.Second {
+				r.FreshnessWarning = fmt.Sprintf("modified %s ago — graph may be stale", age.Round(time.Second))
+			}
+		}
+
+		reports = append(reports, r)
+	}
+
+	// Task-level verification: compare actual graph entities against task's linked_nodes.
+	var taskVerification map[string]interface{}
+	if taskID != "" && s.store != nil {
+		task, err := s.store.GetTask(taskID)
+		if err == nil && task != nil && len(task.LinkedNodes) > 0 {
+			var found, missing []string
+			for _, nodeID := range task.LinkedNodes {
+				if n := s.graph.GetNode(graph.NodeID(nodeID)); n != nil {
+					found = append(found, n.Name)
+				} else {
+					missing = append(missing, nodeID)
+				}
+			}
+			taskVerification = map[string]interface{}{
+				"task_id":       taskID,
+				"task_title":    task.Title,
+				"linked_found":  found,
+				"linked_missing": missing,
+			}
+		}
+	}
+
+	// Build result.
+	status := "pass"
+	if totalViolations > 0 {
+		status = "violations_found"
+	}
+	// Check if any files are not yet in the graph.
+	notIndexed := 0
+	for _, r := range reports {
+		if !r.InGraph {
+			notIndexed++
+		}
+	}
+	if notIndexed > 0 && status == "pass" {
+		status = "pending_indexing"
+	}
+
+	result := map[string]interface{}{
+		"status":           status,
+		"total_violations": totalViolations,
+		"files":            reports,
+	}
+	if taskVerification != nil {
+		result["task_verification"] = taskVerification
+	}
+	if notIndexed > 0 {
+		result["indexing_hint"] = fmt.Sprintf("%d file(s) not yet in graph — wait for indexing or re-run verify_implementation.", notIndexed)
+	}
+
+	// Auto-record episode when post-implementation violations are found.
+	if totalViolations > 0 && s.store != nil {
+		go func() {
+			var fileSummary []string
+			for _, r := range reports {
+				if len(r.Violations) > 0 {
+					fileSummary = append(fileSummary, fmt.Sprintf("%s: %d violation(s)", r.File, len(r.Violations)))
+				}
+			}
+			ep := store.Episode{
+				EpisodeType: "failure",
+				Outcome:     "failure",
+				Trigger:     "verify_implementation found post-write violations",
+				Decision:    fmt.Sprintf("Post-implementation violations in: %s", strings.Join(fileSummary, "; ")),
+				Rationale:   "Code was written that violates architectural rules. Fix violations or update rules.",
+				Tags:        `["auto","verify_implementation","violation"]`,
+				Importance:  0.7,
+			}
+			if _, err := s.store.RememberEpisode(ep); err != nil {
+				log.Printf("mcp: auto-record verify_implementation episode: %v", err)
+			}
+		}()
+	}
+
+	return jsonResult(result)
+}
+
 // handleGetViolations returns all current architectural rule violations.
 // Optional rule_id filters to a specific rule. Optional include_log=true appends the historical log.
 func (s *Server) handleGetViolations(
@@ -1210,6 +1358,7 @@ var toolCatalog = []toolCatalogEntry{
 
 	// Architecture
 	{Name: "validate_plan", Category: "architecture", Description: "Check changes against architectural rules", Keywords: []string{"validate", "plan", "check", "rules", "architecture", "violations", "before"}, Example: `validate_plan(changes=[{"file":"auth.go","adds_call_to":"DB"}])`},
+	{Name: "verify_implementation", Category: "architecture", Description: "Post-write check: verify written files against rules and task expectations", Keywords: []string{"verify", "implementation", "after", "written", "check", "post", "validate", "confirm"}, Example: `verify_implementation(files_written=["internal/auth/service.go"])`},
 	{Name: "get_violations", Category: "architecture", Description: "List current architectural violations", Keywords: []string{"violations", "rules", "broken", "forbidden", "architecture"}, Example: `get_violations()`},
 	{Name: "upsert_rule", Category: "architecture", Description: "Create or update an architectural constraint", Keywords: []string{"rule", "create", "constraint", "forbid", "enforce", "pattern"}, Example: `upsert_rule(rule_id="no-db-in-handler", description="...", severity="error")`},
 
@@ -1292,7 +1441,8 @@ var workflowRecipes = []workflowRecipe{
 			{Tool: "get_context", ArgsHint: `entity="{target}"`, Expects: "Current structure, callers/callees, annotations, and applicable rules.", UsesOutput: ""},
 			{Tool: "plan_context", ArgsHint: `target="{target}", changes=[{"file":"...","adds_call_to":"..."}]`, Expects: "verdict: clear|warnings|violations|blocked + safety check + scope assessment.", UsesOutput: "Use the entity's file and planned dependencies from get_context"},
 			{Tool: "claim_work", ArgsHint: `agent_id="...", scope="{file}"`, Expects: "Confirmation of scope reservation.", UsesOutput: "Use files from your plan"},
-			{Tool: "update_task", ArgsHint: `id="...", status="done"`, Expects: "Task marked complete.", UsesOutput: "After editing: mark the task done and release_claims"},
+			{Tool: "verify_implementation", ArgsHint: `files_written=["file1.go","file2.go"]`, Expects: "pass|violations_found|pending_indexing + per-file entity counts and violations.", UsesOutput: "After writing code: verify the implementation matches expectations"},
+			{Tool: "update_task", ArgsHint: `id="...", status="done"`, Expects: "Task marked complete.", UsesOutput: "After verify passes: mark the task done and release_claims"},
 		},
 	},
 	{

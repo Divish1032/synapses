@@ -1328,6 +1328,7 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 | When you want to... | Use this |
 |---|---|
 | Check proposed changes against architecture rules | ` + "`validate_plan(changes=[...])`" + ` |
+| Verify written files against rules after implementation | ` + "`verify_implementation(files_written=[\"...\"])`" + ` |
 | View current architecture violations | ` + "`get_violations()`" + ` |
 | Create or update an architectural constraint | ` + "`upsert_rule(rule_id=\"...\", description=\"...\", severity=\"error\")`" + ` |
 | Reserve a scope before editing (multi-agent) | ` + "`claim_work(agent_id=\"...\", scope=\"pkg/auth\")`" + ` |
@@ -1369,7 +1370,7 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 ### Rules
 - **Read/Grep** are for *writing* code (editing a specific file you have already found). For *understanding* code structure, always prefer Synapses tools.
 - **Call ` + "`session_init()`" + `** at the start of every session. It replaces the 3-call startup ritual.
-- **Workflow:** ` + "`session_init`" + ` → ` + "`prepare_context`" + ` (or specific tools) → write code → ` + "`validate_plan`" + ` → edit files.
+- **Workflow:** ` + "`session_init`" + ` → ` + "`prepare_context`" + ` (or specific tools) → ` + "`validate_plan`" + ` → edit files → ` + "`verify_implementation`" + `.
 - **When unsure** which tool to use, call ` + "`discover_tools(query=\"...\")`" + ` — it returns the right tool + example in one call.
 - **Call ` + "`validate_plan()`" + `** before implementing multi-file changes.
 - When ` + "`get_context`" + ` returns ` + "`other_candidates`" + `, re-call with ` + "`file=`" + ` to pin to the right entity.
@@ -1464,7 +1465,7 @@ func writeClaudeSettings(repoRoot string) error {
 		"type": "command",
 		"command": "echo '[Synapses] MANDATORY: Call session_init() as your FIRST action — it returns pending tasks, " +
 			"project identity, working state, and scale_guidance in one call. " +
-			"WORKFLOW: session_init → prepare_context (or specific tools) → validate_plan → edit files. " +
+			"WORKFLOW: session_init → prepare_context (or specific tools) → validate_plan → edit files → verify_implementation. " +
 			"CODE EXPLORATION: use get_context(entity), find_entity(query), search(mode=semantic), get_call_chain, get_impact. " +
 			"NEVER use Grep/Glob/Read to understand code structure — those are for writing to files you already found. " +
 			"UNSURE which tool? Call discover_tools(query=\"what you need\"). " +
@@ -1912,6 +1913,7 @@ MCP TOOLS EXPOSED:
   get_context            N-hop ego-subgraph around an entity
   find_entity            Locate nodes by name or substring
   validate_plan          Check changes against architectural rules
+  verify_implementation  Post-write verification against rules
   get_violations         List all current rule violations
 
 AGENT SETUP:
