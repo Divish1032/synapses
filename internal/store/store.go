@@ -174,6 +174,19 @@ CREATE TABLE IF NOT EXISTS agents (
     metadata  TEXT NOT NULL DEFAULT '{}'
 );
 
+-- Agent context profile: tracks what each agent already knows so session_init
+-- can skip unchanged sections and avoid redundant token delivery.
+-- identity_hash is SHA-1 of the serialized ProjectIdentity; when it matches
+-- the current hash, project_identity is omitted from session_init responses.
+CREATE TABLE IF NOT EXISTS agent_context (
+    agent_id       TEXT PRIMARY KEY,
+    last_event_seq INTEGER NOT NULL DEFAULT 0,
+    identity_hash  TEXT    NOT NULL DEFAULT '',
+    last_session   TEXT    NOT NULL DEFAULT '',
+    task_seq       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_agent_context_id ON agent_context(agent_id);
+
 -- Pull-based event log: agents poll this table to discover what happened since
 -- their last check. Append-only; rows older than 24 hours are pruned automatically.
 -- Sequence number (seq) acts as a cursor — agents pass since_seq on each call.
@@ -437,6 +450,14 @@ func Open(path string) (*Store, error) {
 		// on the same node when update_task(done) is called more than once.
 		// Partial index (WHERE source='system') leaves agent annotations unrestricted.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_annotations_system_dedup ON annotations(node_id, note) WHERE source='system'`,
+		// Context Efficiency Layer: agent context profile for incremental session_init.
+		`CREATE TABLE IF NOT EXISTS agent_context (
+			agent_id       TEXT PRIMARY KEY,
+			last_event_seq INTEGER NOT NULL DEFAULT 0,
+			identity_hash  TEXT    NOT NULL DEFAULT '',
+			last_session   TEXT    NOT NULL DEFAULT '',
+			task_seq       INTEGER NOT NULL DEFAULT 0
+		)`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -1345,6 +1366,16 @@ type Agent struct {
 	Metadata string `json:"metadata"`
 }
 
+// AgentContext tracks what an agent already knows so session_init can deliver
+// incremental updates instead of repeating the full project identity every time.
+type AgentContext struct {
+	AgentID      string `json:"agent_id"`
+	LastEventSeq int64  `json:"last_event_seq"` // last event seq the agent received
+	IdentityHash string `json:"identity_hash"`  // SHA-1 of last ProjectIdentity sent
+	LastSession  string `json:"last_session"`   // RFC3339 timestamp of last session_init
+	TaskSeq      int64  `json:"task_seq"`       // sequence marker for task change detection
+}
+
 // UpsertAgent records that an agent was seen. Called as a side-effect whenever
 // an MCP tool receives a non-empty agent_id parameter.
 func (s *Store) UpsertAgent(id string) error {
@@ -1381,6 +1412,41 @@ func (s *Store) CountIndexedFiles() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM file_hashes`).Scan(&n)
 	return n, err
+}
+
+// ── Agent Context Profile ────────────────────────────────────────────────────
+
+// GetAgentContext retrieves the context profile for the given agent.
+// Returns nil if no profile exists yet (first session).
+func (s *Store) GetAgentContext(agentID string) (*AgentContext, error) {
+	var ac AgentContext
+	err := s.db.QueryRow(
+		`SELECT agent_id, last_event_seq, identity_hash, last_session, task_seq
+		 FROM agent_context WHERE agent_id = ?`, agentID,
+	).Scan(&ac.AgentID, &ac.LastEventSeq, &ac.IdentityHash, &ac.LastSession, &ac.TaskSeq)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ac, nil
+}
+
+// UpsertAgentContext creates or updates the context profile for an agent.
+// Called after session_init to record what the agent has received.
+func (s *Store) UpsertAgentContext(ac *AgentContext) error {
+	_, err := s.db.Exec(`
+		INSERT INTO agent_context (agent_id, last_event_seq, identity_hash, last_session, task_seq)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(agent_id) DO UPDATE SET
+			last_event_seq = excluded.last_event_seq,
+			identity_hash  = excluded.identity_hash,
+			last_session   = excluded.last_session,
+			task_seq       = excluded.task_seq`,
+		ac.AgentID, ac.LastEventSeq, ac.IdentityHash, ac.LastSession, ac.TaskSeq,
+	)
+	return err
 }
 
 // ── Event Log ────────────────────────────────────────────────────────────────
@@ -1492,6 +1558,33 @@ func (s *Store) AddAnnotation(nodeID, agentID, note string) (string, error) {
 		id, nodeID, agentID, note, now,
 	)
 	return id, err
+}
+
+// AddAnnotationIfNew attaches a note to a graph node only when no annotation
+// from the same agentID with the same note content already exists within the
+// last dedupeWindow seconds. Returns the new annotation ID and true on insert,
+// or ("", false, nil) when deduplication suppresses the write.
+func (s *Store) AddAnnotationIfNew(nodeID, agentID, note string, dedupeWindow time.Duration) (string, bool, error) {
+	id := fmt.Sprintf("%x", time.Now().UnixNano())
+	now := time.Now().UTC().Format(time.RFC3339)
+	windowSec := fmt.Sprintf("-%d seconds", int(dedupeWindow.Seconds()))
+	result, err := s.db.Exec(
+		`INSERT INTO annotations (id, node_id, agent_id, note, created_at, source)
+		 SELECT ?, ?, ?, ?, ?, 'agent'
+		 WHERE NOT EXISTS (
+		     SELECT 1 FROM annotations
+		     WHERE node_id = ? AND agent_id = ?
+		       AND note = ?
+		       AND created_at > datetime('now', ?)
+		 )`,
+		id, nodeID, agentID, note, now,
+		nodeID, agentID, note, windowSec,
+	)
+	if err != nil {
+		return "", false, err
+	}
+	rows, _ := result.RowsAffected()
+	return id, rows > 0, nil
 }
 
 // AddSystemAnnotation attaches a system-generated retrospective note to a graph

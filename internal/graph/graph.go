@@ -149,14 +149,22 @@ func (g *Graph) GetNode(id NodeID) *Node {
 }
 
 // FindByName returns all nodes whose Name field matches the given string
-// (case-insensitive). An empty slice is returned if nothing matches.
+// (case-insensitive). Also matches qualified names: searching "Close" will
+// match a node named "Store.Close" (suffix after the last dot). An empty
+// slice is returned if nothing matches.
 func (g *Graph) FindByName(name string) []*Node {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	lower := strings.ToLower(name)
 	var results []*Node
 	for _, n := range g.nodes {
-		if strings.ToLower(n.Name) == lower {
+		nodeLower := strings.ToLower(n.Name)
+		if nodeLower == lower {
+			results = append(results, n)
+			continue
+		}
+		// Also match qualified names like "Store.Close" when query is "Close".
+		if idx := strings.LastIndex(nodeLower, "."); idx >= 0 && nodeLower[idx+1:] == lower {
 			results = append(results, n)
 		}
 	}
