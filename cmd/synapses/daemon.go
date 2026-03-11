@@ -527,7 +527,7 @@ func uninstallSystemd() error {
 }
 
 func printDaemonUsage() {
-	fmt.Println(`
+	fmt.Print(`
   synapses daemon — manage background services
 
   Usage:

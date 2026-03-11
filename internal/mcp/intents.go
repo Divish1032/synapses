@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -507,6 +508,17 @@ func (s *Server) assembleReviewContext(
 		}
 	}
 
+	// Coupling metrics.
+	fanIn := s.graph.Fanin(node.ID)
+	b.WriteString("\n## Coupling\n")
+	fmt.Fprintf(b, "Fan-in (callers): %d | Callees: %d | Related: %d\n",
+		fanIn, len(dc.Callees), len(dc.Related))
+	if hasTests := fileHasTests(node.File); hasTests {
+		b.WriteString("Test coverage: test file exists\n")
+	} else {
+		b.WriteString("Test coverage: NO test file found\n")
+	}
+
 	// Blast radius (broad: depth 3) — struct aggregation applied.
 	impact := s.aggregatedImpact(node, 3)
 	fmt.Fprintf(b, "\n## Blast Radius (%d total across %d files)\n",
@@ -519,7 +531,7 @@ func (s *Server) assembleReviewContext(
 		label := strings.ToUpper(tier.Label)
 		fmt.Fprintf(b, "%s (%d): %s\n", label, tier.TotalNodes, strings.Join(names, ", "))
 	}
-	if len(impact.Tiers) == 0 {
+	if len(impact.Tiers) == 0 && fanIn == 0 {
 		b.WriteString("No compile-time callers tracked.\n")
 	}
 
@@ -822,8 +834,10 @@ func (s *Server) assemblePlanContext(
 // buildBrainPacket assembles a ContextPacket from the brain client.
 // Checks the 30s packet cache first; falls back to nil if brain unavailable.
 // This is extracted here so both handleGetContext and intent assemblers share it.
+// Returns a cached packet if available, otherwise kicks off async enrichment
+// and returns nil (caller proceeds without brain enrichment).
 func (s *Server) buildBrainPacket(
-	ctx context.Context,
+	_ context.Context,
 	node *graph.Node,
 	dc *directionalContext,
 	taskID string,
@@ -838,52 +852,9 @@ func (s *Server) buildBrainPacket(
 		return cached.(*brain.ContextPacket)
 	}
 
-	calleeNames := make([]string, 0, len(dc.Callees))
-	for _, c := range dc.Callees {
-		calleeNames = append(calleeNames, c.Node.Name)
-	}
-	callerNames := make([]string, 0, len(dc.Callers))
-	for _, c := range dc.Callers {
-		callerNames = append(callerNames, c.Node.Name)
-	}
-
-	rules := matchRulesForFile(s.config, node.File)
-
-	var claims []brain.ClaimInput
-	if s.store != nil {
-		if allClaims, err := s.store.GetAllClaims(); err == nil {
-			for _, c := range allClaims {
-				claims = append(claims, brain.ClaimInput{
-					AgentID:   c.AgentID,
-					Scope:     c.Scope,
-					ScopeType: c.ScopeType,
-					ExpiresAt: c.ExpiresAt.Format(time.RFC3339),
-				})
-			}
-		}
-	}
-
-	pkt := bc.BuildContextPacket(ctx, brain.ContextPacketRequest{
-		Snapshot: brain.SnapshotInput{
-			RootNodeID:      string(node.ID),
-			RootName:        node.Name,
-			RootType:        string(node.Type),
-			RootFile:        node.File,
-			RootDoc:         node.Metadata["doc"],
-			CalleeNames:     calleeNames,
-			CallerNames:     callerNames,
-			ApplicableRules: rules,
-			ActiveClaims:    claims,
-			TaskID:          taskID,
-			HasTests:        fileHasTests(node.File),
-			FanIn:           s.graph.Fanin(node.ID),
-		},
-		EnableLLM: s.config.Brain.EnableLLM,
-	})
-	if pkt != nil {
-		s.setPacketCache(cacheKey, pkt)
-	}
-	return pkt
+	// Async enrichment: fire background goroutine, return nil for this call.
+	go s.asyncEnrichContext(bc, cacheKey, dc, node, taskID)
+	return nil
 }
 
 // writeWarnings appends brain warnings/concerns to b, prefixed with ⚠.
@@ -945,4 +916,150 @@ func formatAge(createdAt string) string {
 	default:
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
+}
+
+// handlePlanContext is the single-call pre-implementation gate. It runs three
+// checks in one round-trip that agents normally chain manually:
+//  1. check_plan_safety  — searches failure episodes for past matches (500ms cap)
+//  2. validate_plan      — checks proposed changes against architectural rules
+//  3. prepare_context(intent=plan) — scope assessment: files, interfaces, risk level
+//
+// Verdict field summarises the overall result:
+//   - "clear"      — no past failures, no violations
+//   - "warnings"   — past failure match found (review rationale)
+//   - "violations" — architectural rules broken
+//   - "blocked"    — both warnings and violations present
+func (s *Server) handlePlanContext(
+	ctx context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	target := stringArg(req, "target")
+	if target == "" {
+		return mcp.NewToolResultError("target is required"), nil
+	}
+	fileHint := stringArg(req, "file")
+	taskID := stringArg(req, "task_id")
+	changesRaw := stringArg(req, "changes")
+	planDesc := stringArg(req, "plan_description")
+
+	result := map[string]interface{}{}
+
+	// ── 1. Episodic safety check ─────────────────────────────────────────
+	var safetyStatus string
+	if s.store != nil {
+		desc := planDesc
+		if desc == "" {
+			desc = target
+		}
+		type safetyRes struct {
+			ep  *store.Episode
+			err error
+		}
+		ch := make(chan safetyRes, 1)
+		go func() {
+			ep, err := s.store.CheckPlanSafety(desc, "")
+			ch <- safetyRes{ep, err}
+		}()
+		safetyCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		select {
+		case r := <-ch:
+			if r.err == nil && r.ep != nil {
+				safetyStatus = "warnings"
+				result["safety_check"] = map[string]interface{}{
+					"status": "warning",
+					"match": map[string]interface{}{
+						"episode_id": r.ep.ID,
+						"decision":   r.ep.Decision,
+						"outcome":    r.ep.Outcome,
+						"rationale":  r.ep.Rationale,
+					},
+					"message": fmt.Sprintf("⚠ Past failure match: %q (outcome: %s). Review rationale before proceeding.", r.ep.Decision, r.ep.Outcome),
+				}
+			} else {
+				safetyStatus = "clear"
+				result["safety_check"] = map[string]interface{}{"status": "clear"}
+			}
+		case <-safetyCtx.Done():
+			safetyStatus = "clear"
+			result["safety_check"] = map[string]interface{}{"status": "clear", "note": "timed out (>500ms)"}
+		}
+	}
+
+	// ── 2. Structural validation ──────────────────────────────────────────
+	var violationsStatus string
+	if changesRaw != "" {
+		var changes []ProposedChange
+		if err := json.Unmarshal([]byte(changesRaw), &changes); err == nil {
+			overlay := cloneGraph(s.graph)
+			var skipped []string
+			for _, change := range changes {
+				if change.AddsCallTo == "" {
+					continue
+				}
+				callees := overlay.FindByName(change.AddsCallTo)
+				if len(callees) == 0 {
+					skipped = append(skipped, fmt.Sprintf("%q not in graph — skipped", change.AddsCallTo))
+					continue
+				}
+				sources := overlay.FindByFile(change.File)
+				if len(sources) == 0 {
+					skipped = append(skipped, fmt.Sprintf("file %q not in graph — skipped", change.File))
+					continue
+				}
+				for _, callee := range callees {
+					overlay.AddEdge(&graph.Edge{From: sources[0].ID, To: callee.ID, Type: graph.EdgeCalls})
+				}
+			}
+			s.rulesMu.RLock()
+			violations := s.config.CheckViolations(overlay)
+			s.rulesMu.RUnlock()
+
+			if len(violations) > 0 {
+				violationsStatus = "violations"
+				result["validation"] = map[string]interface{}{
+					"status":     "violations_found",
+					"violations": violations,
+				}
+			} else {
+				violationsStatus = "ok"
+				validation := map[string]interface{}{"status": "ok"}
+				if len(skipped) > 0 {
+					validation["skipped"] = skipped
+				}
+				result["validation"] = validation
+			}
+		}
+	}
+
+	// ── 3. Scope assessment via plan intent ───────────────────────────────
+	resolved := s.resolveTarget(target, fileHint)
+	if !resolved.isConcept {
+		tokenBudget := 2000
+		var scopeBuilder strings.Builder
+		s.assemblePlanContext(ctx, &scopeBuilder, resolved, taskID, tokenBudget)
+		if scopeBuilder.Len() > 0 {
+			result["scope_context"] = scopeBuilder.String()
+		}
+	}
+
+	// ── Verdict ───────────────────────────────────────────────────────────
+	hasViolations := violationsStatus == "violations"
+	hasWarnings := safetyStatus == "warnings"
+	switch {
+	case hasViolations && hasWarnings:
+		result["verdict"] = "blocked"
+		result["verdict_message"] = "⛔ Both past failures and architectural violations detected. Do not proceed without resolving violations and reviewing the failure history."
+	case hasViolations:
+		result["verdict"] = "violations"
+		result["verdict_message"] = "⛔ Architectural violations detected. Fix before implementing."
+	case hasWarnings:
+		result["verdict"] = "warnings"
+		result["verdict_message"] = "⚠ Past failure match found. Review the safety_check entry — agent decides relevance."
+	default:
+		result["verdict"] = "clear"
+		result["verdict_message"] = "✓ No past failures, no architectural violations. Safe to proceed."
+	}
+
+	return jsonResult(result)
 }

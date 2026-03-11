@@ -173,9 +173,18 @@ func (s *Server) handleGetContext(
 		nodes = s.graph.FindByPattern(entityName)
 	}
 	if len(nodes) == 0 {
+		// Auto-fuzzy: surface candidates inline so agents don't need an extra find_entity round-trip.
+		candidates := s.inlineFindEntity(entityName)
+		if len(candidates) == 0 {
+			return jsonResult(map[string]interface{}{
+				"error": fmt.Sprintf("entity not found: %q", entityName),
+				"hint":  "No substring match. Try search(query=\"...\", mode=\"semantic\") for concept-based lookup.",
+			})
+		}
 		return jsonResult(map[string]interface{}{
-			"error": fmt.Sprintf("entity not found: %q", entityName),
-			"hint":  "Try search(mode=semantic) for fuzzy/concept matching, or find_entity to check exact name. For methods, use TypeName.MethodName format.",
+			"entity_not_found": entityName,
+			"candidates":       candidates,
+			"hint":             "Re-call get_context with entity= set to one of the exact names above. Add file= to pin if multiple files match.",
 		})
 	}
 
@@ -243,66 +252,18 @@ func (s *Server) handleGetContext(
 
 	dc := toDirectionalContext(sg)
 
-	// Brain enrichment: build a Context Packet if the intelligence sidecar is available.
-	// Results are cached for 30s (keyed by entity:depth) to avoid re-hitting the brain
-	// on repeated get_context calls within the same agent session.
+	// Brain enrichment: async pattern — serve raw graph immediately, enrich in background.
+	// If a cached packet exists, attach it (fast path). Otherwise, kick off background
+	// enrichment so the next get_context call for this entity picks up the enriched version.
 	if bc := s.getBrainClient(); bc != nil {
 		cacheKey := fmt.Sprintf("%s:%d", entityName, cfg.MaxDepth)
-		var pkt *brain.ContextPacket
 		if cached := s.getPacketFromCache(cacheKey); cached != nil {
-			pkt = cached.(*brain.ContextPacket)
+			dc.ContextPacket = cached.(*brain.ContextPacket)
 		} else {
-			calleeNames := make([]string, 0, len(dc.Callees))
-			for _, c := range dc.Callees {
-				calleeNames = append(calleeNames, c.Node.Name)
-			}
-			callerNames := make([]string, 0, len(dc.Callers))
-			for _, c := range dc.Callers {
-				callerNames = append(callerNames, c.Node.Name)
-			}
-
-			rules := matchRulesForFile(s.config, best.File)
-
-			var claims []brain.ClaimInput
-			if s.store != nil {
-				if allClaims, err := s.store.GetAllClaims(); err == nil {
-					for _, c := range allClaims {
-						claims = append(claims, brain.ClaimInput{
-							AgentID:   c.AgentID,
-							Scope:     c.Scope,
-							ScopeType: c.ScopeType,
-							ExpiresAt: c.ExpiresAt.Format(time.RFC3339),
-						})
-					}
-				}
-			}
-
-			// Compute graph topology signals for enhanced context packets.
-			hasTests := fileHasTests(best.File)
-			fanIn := s.graph.Fanin(best.ID)
-
-			pkt = bc.BuildContextPacket(context.Background(), brain.ContextPacketRequest{
-				Snapshot: brain.SnapshotInput{
-					RootNodeID:      string(best.ID),
-					RootName:        best.Name,
-					RootType:        string(best.Type),
-					RootFile:        best.File,
-					RootDoc:         best.Metadata["doc"],
-					CalleeNames:     calleeNames,
-					CallerNames:     callerNames,
-					ApplicableRules: rules,
-					ActiveClaims:    claims,
-					TaskID:          taskID,
-					HasTests:        hasTests,
-					FanIn:           fanIn,
-				},
-				EnableLLM: s.config.Brain.EnableLLM,
-			})
-			if pkt != nil {
-				s.setPacketCache(cacheKey, pkt)
-			}
+			// Async enrichment: return raw graph now, enrich in background.
+			dc.BrainHint = "enrichment in progress — call get_context again in a few seconds for brain-enriched results"
+			go s.asyncEnrichContext(bc, cacheKey, dc, best, taskID)
 		}
-		dc.ContextPacket = pkt // nil if brain unavailable — callers check for nil
 	} else {
 		dc.BrainHint = "not configured — add brain.url to synapses.json for semantic enrichment"
 	}
@@ -490,6 +451,66 @@ func suggestNextAfterContext(dc *directionalContext) []toolSuggestion {
 		toolSuggestion{Tool: "annotate_node", Reason: "leave a note for other agents on a key finding"},
 	)
 	return suggestions
+}
+
+// asyncEnrichContext kicks off a background brain enrichment for a get_context call.
+// The result is cached so subsequent get_context calls for the same entity pick it up.
+// This is fire-and-forget — errors are logged but do not affect the caller.
+func (s *Server) asyncEnrichContext(
+	bc *brain.Client,
+	cacheKey string,
+	dc *directionalContext,
+	best *graph.Node,
+	taskID string,
+) {
+	calleeNames := make([]string, 0, len(dc.Callees))
+	for _, c := range dc.Callees {
+		calleeNames = append(calleeNames, c.Node.Name)
+	}
+	callerNames := make([]string, 0, len(dc.Callers))
+	for _, c := range dc.Callers {
+		callerNames = append(callerNames, c.Node.Name)
+	}
+
+	rules := matchRulesForFile(s.config, best.File)
+
+	var claims []brain.ClaimInput
+	if s.store != nil {
+		if allClaims, err := s.store.GetAllClaims(); err == nil {
+			for _, c := range allClaims {
+				claims = append(claims, brain.ClaimInput{
+					AgentID:   c.AgentID,
+					Scope:     c.Scope,
+					ScopeType: c.ScopeType,
+					ExpiresAt: c.ExpiresAt.Format(time.RFC3339),
+				})
+			}
+		}
+	}
+
+	hasTests := fileHasTests(best.File)
+	fanIn := s.graph.Fanin(best.ID)
+
+	pkt := bc.BuildContextPacket(context.Background(), brain.ContextPacketRequest{
+		Snapshot: brain.SnapshotInput{
+			RootNodeID:      string(best.ID),
+			RootName:        best.Name,
+			RootType:        string(best.Type),
+			RootFile:        best.File,
+			RootDoc:         best.Metadata["doc"],
+			CalleeNames:     calleeNames,
+			CallerNames:     callerNames,
+			ApplicableRules: rules,
+			ActiveClaims:    claims,
+			TaskID:          taskID,
+			HasTests:        hasTests,
+			FanIn:           fanIn,
+		},
+		EnableLLM: s.config.Brain.EnableLLM,
+	})
+	if pkt != nil {
+		s.setPacketCache(cacheKey, pkt)
+	}
 }
 
 // fileHasTests returns true if a _test.go file exists in the same directory
@@ -717,8 +738,11 @@ type ProposedChange struct {
 }
 
 // handleValidatePlan checks proposed changes against architectural rules.
+// When check_safety=true is passed, it also runs check_plan_safety inline
+// (500ms cap) so agents get both history-based warnings and structural
+// violations in a single round-trip.
 func (s *Server) handleValidatePlan(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	changesRaw, ok := req.GetArguments()["changes"].(string)
@@ -729,6 +753,55 @@ func (s *Server) handleValidatePlan(
 	var changes []ProposedChange
 	if err := json.Unmarshal([]byte(changesRaw), &changes); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid changes JSON: %v", err)), nil
+	}
+
+	// Optional inline safety check — runs check_plan_safety before structural validation.
+	var safetyCheck map[string]interface{}
+	if checkSafety, _ := req.GetArguments()["check_safety"].(bool); checkSafety && s.store != nil {
+		planDesc := stringArg(req, "plan_description")
+		if planDesc == "" {
+			var files []string
+			for _, c := range changes {
+				if c.File != "" {
+					files = append(files, c.File)
+				}
+			}
+			if len(files) > 0 {
+				planDesc = strings.Join(files, ", ")
+			}
+		}
+		if planDesc != "" {
+			type safetyRes struct {
+				ep  *store.Episode
+				err error
+			}
+			ch := make(chan safetyRes, 1)
+			go func() {
+				ep, err := s.store.CheckPlanSafety(planDesc, "")
+				ch <- safetyRes{ep, err}
+			}()
+			safetyCtx, safetyCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+			defer safetyCancel()
+			select {
+			case r := <-ch:
+				if r.err == nil && r.ep != nil {
+					safetyCheck = map[string]interface{}{
+						"status": "warning",
+						"match": map[string]interface{}{
+							"episode_id": r.ep.ID,
+							"decision":   r.ep.Decision,
+							"outcome":    r.ep.Outcome,
+							"rationale":  r.ep.Rationale,
+						},
+						"message": fmt.Sprintf("⚠ Past failure match: %q (outcome: %s). Review before proceeding.", r.ep.Decision, r.ep.Outcome),
+					}
+				} else {
+					safetyCheck = map[string]interface{}{"status": "clear"}
+				}
+			case <-safetyCtx.Done():
+				safetyCheck = map[string]interface{}{"status": "clear", "note": "safety check timed out (>500ms)"}
+			}
+		}
 	}
 
 	// Build a temporary overlay graph that includes the proposed additions.
@@ -788,6 +861,9 @@ func (s *Server) handleValidatePlan(
 	}
 	if !hasRules {
 		result["hint"] = "No architectural rules configured. Add rules via upsert_rule or in synapses.json to enable validation."
+	}
+	if safetyCheck != nil {
+		result["safety_check"] = safetyCheck
 	}
 	return jsonResult(result)
 }
@@ -2107,6 +2183,23 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// ── 7. Sidecar availability ───────────────────────────────────────────
+	// Let agents skip tool calls for unavailable sidecars without trial-and-error.
+	resp["sidecars"] = map[string]interface{}{
+		"brain": map[string]interface{}{
+			"available": s.getBrainClient() != nil,
+			"note":      "enriches get_context with LLM summaries; required by upsert_adr, get_adrs",
+		},
+		"scout": map[string]interface{}{
+			"available": s.getScoutClient() != nil,
+			"note":      "enables web_search, web_fetch, web_deep_search, lookup_docs",
+		},
+		"pulse": map[string]interface{}{
+			"available": s.getPulseClient() != nil,
+			"note":      "enables agent analytics and token tracking",
+		},
+	}
+
 	// ── Update agent context profile ─────────────────────────────────────
 	// Record what this agent now knows so the next session_init can be incremental.
 	if agentID != "" && s.store != nil {
@@ -2380,4 +2473,49 @@ func (s *Server) handleSemanticSearch(
 	}
 
 	return jsonResult(resp)
+}
+
+// inlineFindEntity runs the find_entity lookup inline. Used by handleGetContext
+// to surface candidates when the requested entity cannot be found by exact name,
+// saving agents a separate find_entity round-trip.
+func (s *Server) inlineFindEntity(query string) []map[string]interface{} {
+	nodes := s.graph.FindByName(query)
+	if len(nodes) == 0 {
+		nodes = s.graph.FindByPattern(query)
+	}
+	// Dotted method name fallback: "Store.Close" → search "Close", filter by "Store".
+	if len(nodes) == 0 && strings.Contains(query, ".") {
+		parts := strings.SplitN(query, ".", 2)
+		typePrefix, method := strings.ToLower(parts[0]), parts[1]
+		candidates := s.graph.FindByName(method)
+		if len(candidates) == 0 {
+			candidates = s.graph.FindByPattern(method)
+		}
+		for _, n := range candidates {
+			if strings.Contains(strings.ToLower(string(n.ID)), typePrefix) ||
+				strings.Contains(strings.ToLower(n.File), typePrefix) {
+				nodes = append(nodes, n)
+			}
+		}
+	}
+
+	pathPrefix := s.graph.Root()
+	if pathPrefix != "" && !strings.HasSuffix(pathPrefix, "/") {
+		pathPrefix += "/"
+	}
+
+	results := make([]map[string]interface{}, 0, len(nodes))
+	for _, n := range nodes {
+		file := n.File
+		if pathPrefix != "" {
+			file = strings.TrimPrefix(file, pathPrefix)
+		}
+		results = append(results, map[string]interface{}{
+			"name": n.Name,
+			"type": string(n.Type),
+			"file": file,
+			"line": n.Line,
+		})
+	}
+	return results
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
@@ -175,6 +176,12 @@ func (s *Server) handleClaimWork(
 		return mcp.NewToolResultError(fmt.Sprintf("claim work: %v", err)), nil
 	}
 
+	// Emit event so agents polling get_events see claim activity.
+	if err := s.store.AppendEvent("claim_work", agentID,
+		fmt.Sprintf(`{"scope":%q,"scope_type":%q,"ttl_minutes":%d,"conflicts":%d}`, scope, scopeType, ttl, len(conflicts))); err != nil {
+		fmt.Fprintf(os.Stderr, "synapses: append claim_work event: %v\n", err)
+	}
+
 	msg := fmt.Sprintf("Claimed %q for %d minutes.", scope, ttl)
 	if len(conflicts) > 0 {
 		msg += fmt.Sprintf(" WARNING: %d conflicting claim(s) by other agents — review before editing.", len(conflicts))
@@ -204,6 +211,13 @@ func (s *Server) handleReleaseClaims(
 	if err := s.store.ReleaseClaims(agentID); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("release claims: %v", err)), nil
 	}
+
+	// Emit event so agents polling get_events see claim releases.
+	if err := s.store.AppendEvent("claim_released", agentID,
+		fmt.Sprintf(`{"agent_id":%q}`, agentID)); err != nil {
+		fmt.Fprintf(os.Stderr, "synapses: append claim_released event: %v\n", err)
+	}
+
 	return jsonResult(map[string]interface{}{
 		"agent_id": agentID,
 		"message":  "All work claims released.",

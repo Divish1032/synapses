@@ -20,9 +20,10 @@ type SearchHit struct {
 
 // SearchResponse is returned by POST /v1/search.
 type SearchResponse struct {
-	Query string      `json:"query"`
-	Hits  []SearchHit `json:"hits"`
-	Count int         `json:"count"`
+	Query  string      `json:"query"`
+	Hits   []SearchHit `json:"hits"`
+	Count  int         `json:"count"`
+	Cached bool        `json:"cached"`
 }
 
 // FetchRequest is the body sent to POST /v1/fetch.

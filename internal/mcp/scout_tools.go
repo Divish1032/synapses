@@ -54,9 +54,10 @@ func (s *Server) handleWebSearch(
 	}
 
 	return jsonResult(map[string]interface{}{
-		"query": resp.Query,
-		"hits":  resp.Hits,
-		"count": resp.Count,
+		"query":  resp.Query,
+		"hits":   resp.Hits,
+		"count":  resp.Count,
+		"cached": resp.Cached,
 	})
 }
 

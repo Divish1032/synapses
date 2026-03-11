@@ -92,8 +92,9 @@ func (s *Server) handleRemember(
 	})
 }
 
-// handleRecall performs FTS5 BM25 search over episodes and returns the top
-// matches. v1 uses top-N without a score threshold — caller decides relevance.
+// handleRecall searches episodic memory.
+// When query is provided: FTS5 BM25 semantic search, results ordered by relevance.
+// When query is empty: chronological browse (newest first), same as deprecated get_episodes.
 func (s *Server) handleRecall(
 	_ context.Context,
 	req mcp.CallToolRequest,
@@ -103,11 +104,8 @@ func (s *Server) handleRecall(
 	}
 
 	query := stringArg(req, "query")
-	if query == "" {
-		return mcp.NewToolResultError("query is required"), nil
-	}
 
-	limit := 5
+	limit := 20
 	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
 		limit = int(v)
 	}
@@ -117,13 +115,56 @@ func (s *Server) handleRecall(
 		sinceDays = int(v)
 	}
 
+	// Browse mode: empty query = list chronologically (newest first).
+	if query == "" {
+		// Parse tags: accept comma-separated string or JSON array.
+		var tags []string
+		if raw := stringArg(req, "tags"); raw != "" {
+			for _, t := range strings.Split(raw, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					tags = append(tags, t)
+				}
+			}
+		}
+		episodes, err := s.store.GetEpisodes(
+			stringArg(req, "project_id"),
+			stringArg(req, "agent_id"),
+			stringArg(req, "episode_type"),
+			tags,
+			limit,
+			sinceDays,
+		)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("get episodes: %v", err)), nil
+		}
+		summary := "no episodes found"
+		if len(episodes) > 0 {
+			summary = fmt.Sprintf("%d episode(s)", len(episodes))
+		}
+		return jsonResult(map[string]interface{}{
+			"summary":  summary,
+			"episodes": episodes,
+			"mode":     "browse",
+			"hint":     "Ordered by creation time (newest first). Pass query=... for semantic search.",
+		})
+	}
+
+	// Search mode: FTS5 BM25.
+	searchLimit := limit
+	if searchLimit > 5 {
+		searchLimit = 5 // default cap for search mode
+	}
+	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
+		searchLimit = int(v) // explicit override
+	}
+
 	episodes, err := s.store.RecallEpisodes(
 		query,
 		stringArg(req, "project_id"),
 		stringArg(req, "agent_id"),
 		stringArg(req, "episode_type"),
 		stringArg(req, "outcome_filter"),
-		limit,
+		searchLimit,
 		sinceDays,
 	)
 	if err != nil {
@@ -143,13 +184,13 @@ func (s *Server) handleRecall(
 		summary = fmt.Sprintf("%d episode(s) matching %q", len(episodes), query)
 	}
 
-	result := map[string]interface{}{
+	return jsonResult(map[string]interface{}{
 		"summary":       summary,
 		"episodes":      episodes,
 		"related_rules": relatedRules,
-		"hint":          "Episodes ordered by relevance (best match first). Check related_rules for constraints derived from similar past failures.",
-	}
-	return jsonResult(result)
+		"mode":          "search",
+		"hint":          "Episodes ordered by relevance (best match first). Check related_rules for constraints derived from similar past failures. Omit query for chronological browse.",
+	})
 }
 
 // handleGetEpisodes lists episodes with optional filters, ordered by

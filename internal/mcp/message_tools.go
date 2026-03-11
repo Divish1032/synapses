@@ -111,16 +111,45 @@ func (s *Server) handleGetMessages(
 		return mcp.NewToolResultError(fmt.Sprintf("get messages: %v", err)), nil
 	}
 
+	// mark_read_ids: batch-acknowledge messages in the same call, eliminating
+	// the need for a separate mark_read round-trip.
+	var markedCount int
+	switch v := req.GetArguments()["mark_read_ids"].(type) {
+	case string:
+		if v != "" {
+			var ids []string
+			if json.Unmarshal([]byte(v), &ids) == nil {
+				for _, id := range ids {
+					if e := s.store.MarkRead(id, agentID); e == nil {
+						markedCount++
+					}
+				}
+			}
+		}
+	case []interface{}:
+		for _, item := range v {
+			if id, ok := item.(string); ok {
+				if e := s.store.MarkRead(id, agentID); e == nil {
+					markedCount++
+				}
+			}
+		}
+	}
+
 	summary := fmt.Sprintf("no messages for agent %q", agentID)
 	if len(msgs) > 0 {
 		summary = fmt.Sprintf("%d message(s) for agent %q", len(msgs), agentID)
 	}
-	return jsonResult(map[string]interface{}{
+	resp := map[string]interface{}{
 		"summary":    summary,
 		"messages":   msgs,
 		"latest_seq": latestSeq,
-		"hint":       "Pass latest_seq as since_seq on next call to receive only new messages. Use mark_read to acknowledge messages.",
-	})
+		"hint":       "Pass latest_seq as since_seq on next call to receive only new messages. Pass mark_read_ids=[\"id1\",\"id2\"] to acknowledge messages in the same call.",
+	}
+	if markedCount > 0 {
+		resp["marked_read"] = markedCount
+	}
+	return jsonResult(resp)
 }
 
 // handleMarkRead marks a message as read by the calling agent.
