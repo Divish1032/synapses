@@ -267,6 +267,10 @@ func (s *Server) registerTools() {
 	// ── Session Bootstrap ────────────────────────────────────────────────────
 
 	// session_init: single round-trip startup replacing the 3-call ritual.
+	// Supports incremental mode: when agent_id is provided and the agent has
+	// called session_init before, unchanged sections (e.g. project_identity)
+	// are omitted to save tokens. The agent's context profile is updated
+	// after each call so subsequent calls are incremental.
 	s.mcp.AddTool(
 		mcp.NewTool(
 			"session_init",
@@ -274,10 +278,15 @@ func (s *Server) registerTools() {
 				"Single-call session bootstrap. Returns pending_tasks, project_identity, "+
 					"working_state, and recent_events in one round-trip — replacing the "+
 					"three-step startup ritual. Includes scale_guidance so agents self-tune "+
-					"their tool usage to repo size. Call this INSTEAD of the three individual tools.",
+					"their tool usage to repo size. Call this INSTEAD of the three individual tools. "+
+					"Incremental mode: when agent_id is provided and the agent has called "+
+					"session_init before, unchanged sections are skipped to save tokens "+
+					"(e.g. project_identity is omitted if the graph hasn't changed).",
 			),
 			mcp.WithString("agent_id",
-				mcp.Description("Optional. Self-declared agent identifier for task filtering and event attribution."),
+				mcp.Description("Self-declared agent identifier. Enables incremental delivery: "+
+					"subsequent calls skip unchanged project_identity and filter events to only "+
+					"those since the last session. Always provide for token savings."),
 			),
 		),
 		s.handleSessionInit,
@@ -664,6 +673,34 @@ func (s *Server) registerTools() {
 		s.handleUpdateTask,
 	)
 
+	// handoff_task: transfer task ownership between agents with session state.
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"handoff_task",
+			mcp.WithDescription(
+				"Transfers a task to another agent with context. The departing agent's session "+
+					"state is preserved so the receiving agent can resume seamlessly. Use this when "+
+					"handing off work between agents or LLM sessions.",
+			),
+			mcp.WithString("task_id",
+				mcp.Required(),
+				mcp.Description("The task ID to hand off."),
+			),
+			mcp.WithString("from_agent",
+				mcp.Required(),
+				mcp.Description("The agent currently owning the task."),
+			),
+			mcp.WithString("to_agent",
+				mcp.Required(),
+				mcp.Description("The agent receiving the task."),
+			),
+			mcp.WithString("notes",
+				mcp.Description("Optional handoff notes explaining current state, blockers, or next steps."),
+			),
+		),
+		s.handleHandoffTask,
+	)
+
 	// ── Coordination & Multi-Agent Tools ────────────────────────────────────
 
 	// get_plans
@@ -1034,6 +1071,10 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("consequences",
 				mcp.Description("Consequences and trade-offs of this decision."),
+			),
+			mcp.WithArray("linked_files",
+				mcp.Description("File path patterns to associate with this ADR (e.g. [\"internal/auth/\", \"cmd/server.go\"]). Used by get_adrs(file=) to surface relevant ADRs for a given file."),
+				mcp.Items(map[string]any{"type": "string"}),
 			),
 		),
 		s.handleUpsertADR,

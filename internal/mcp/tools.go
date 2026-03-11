@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -90,9 +91,33 @@ func (s *Server) handleGetProjectIdentity(
 // Nodes are split into callers/callees/related so the LLM can immediately
 // understand call direction without inspecting raw edge types.
 // Annotations are surfaced first so agents see peer knowledge before graph structure.
+// contextEnrichment holds auto-injected rules, failures, and task context
+// appended to get_context responses without requiring extra tool calls.
+type contextEnrichment struct {
+	ApplicableRules []ruleHint    `json:"applicable_rules,omitempty"` // architectural rules for this entity's file
+	RecentFailures  []failureHint `json:"recent_failures,omitempty"`  // relevant failure episodes
+	ActiveTask      *taskHint     `json:"active_task,omitempty"`      // linked task context
+}
+type ruleHint struct {
+	RuleID      string `json:"rule_id"`
+	Description string `json:"description"`
+	Severity    string `json:"severity"`
+}
+type failureHint struct {
+	Decision  string `json:"decision"`
+	Outcome   string `json:"outcome"`
+	CreatedAt int64  `json:"created_at"`
+}
+type taskHint struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+}
+
 type directionalContext struct {
 	Root               *graph.Node                   `json:"root"`
 	Annotations        map[string][]store.Annotation `json:"annotations,omitempty"`          // node_id → []Annotation — surfaced first for multi-agent visibility
+	Enrichment         *contextEnrichment            `json:"enrichment,omitempty"`            // auto-injected rules, failures, task context
 	Callees            []graph.CarvedNode            `json:"callees"`                        // root --CALLS--> node
 	Callers            []graph.CarvedNode            `json:"callers"`                        // node --CALLS--> root
 	Related            []graph.CarvedNode            `json:"related"`                        // everything else
@@ -293,6 +318,75 @@ func (s *Server) handleGetContext(
 		}
 	}
 
+	// ── Context enrichment: auto-inject rules, failures, and task context ──
+	// This saves agents from making separate calls to get_violations, recall,
+	// and get_pending_tasks when exploring an entity.
+	if s.store != nil && best != nil {
+		var enrichment contextEnrichment
+
+		// 1. Applicable architectural rules for this file.
+		if s.config != nil {
+			for _, r := range s.config.Rules {
+				matched := r.ForbiddenEdge.FromFilePattern == ""
+				if !matched {
+					matched, _ = filepath.Match(r.ForbiddenEdge.FromFilePattern, filepath.Base(best.File))
+				}
+				if matched {
+					enrichment.ApplicableRules = append(enrichment.ApplicableRules, ruleHint{
+						RuleID:      r.ID,
+						Description: r.Description,
+						Severity:    r.Severity,
+					})
+				}
+			}
+			// Also include dynamic rules from store.
+			if dynRules, err := s.store.LoadDynamicRules(); err == nil {
+				for _, dr := range dynRules {
+					matched := dr.ForbiddenEdge.FromFilePattern == ""
+					if !matched {
+						matched, _ = filepath.Match(dr.ForbiddenEdge.FromFilePattern, filepath.Base(best.File))
+					}
+					if matched {
+						enrichment.ApplicableRules = append(enrichment.ApplicableRules, ruleHint{
+							RuleID:      dr.ID,
+							Description: dr.Description,
+							Severity:    dr.Severity,
+						})
+					}
+				}
+			}
+		}
+
+		// 2. Recent failure episodes mentioning this entity (top 2).
+		if matches, err := s.store.RecallEpisodes(
+			best.Name, s.graph.RepoID(), "", "failure", "", 2, 0,
+		); err == nil {
+			for _, ep := range matches {
+				enrichment.RecentFailures = append(enrichment.RecentFailures, failureHint{
+					Decision:  ep.Decision,
+					Outcome:   ep.Outcome,
+					CreatedAt: ep.CreatedAt,
+				})
+			}
+		}
+
+		// 3. Active task linked to this entity.
+		if taskID != "" {
+			if task, err := s.store.GetTask(taskID); err == nil {
+				enrichment.ActiveTask = &taskHint{
+					ID:     task.ID,
+					Title:  task.Title,
+					Status: task.Status,
+				}
+			}
+		}
+
+		// Only attach if there's anything to show.
+		if len(enrichment.ApplicableRules) > 0 || len(enrichment.RecentFailures) > 0 || enrichment.ActiveTask != nil {
+			dc.Enrichment = &enrichment
+		}
+	}
+
 	// Context-aware next-step suggestions.
 	dc.SuggestedNextTools = suggestNextAfterContext(dc)
 
@@ -321,6 +415,15 @@ func (s *Server) handleGetContext(
 		dc.ContextPacket != nil, // brain_enriched
 		false,                   // cache_hit (packet cache is internal; context always delivered fresh)
 	)
+
+	// Multi-agent awareness: emit event so other agents can see what's being examined.
+	if agentID != "" && s.store != nil {
+		payload, _ := json.Marshal(map[string]string{
+			"entity": entityName,
+			"file":   best.File,
+		})
+		_ = s.store.AppendEvent("agent_examining", agentID, string(payload))
+	}
 
 	// format=compact returns a natural-language briefing instead of the default JSON blob.
 	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t, default).
@@ -826,6 +929,19 @@ func (s *Server) handleUpsertRule(
 		s.config.Rules = append(s.config.Rules, rule)
 	}
 	s.rulesMu.Unlock()
+
+	// Retroactive scan: check existing graph edges against the new rule and
+	// log any violations so get_violations() surfaces them immediately without
+	// requiring a new validate_plan call.
+	if s.store != nil {
+		go func(r config.Rule) {
+			snapshot := config.Config{Rules: []config.Rule{r}}
+			violations := snapshot.CheckViolations(s.graph)
+			if len(violations) > 0 {
+				_ = s.store.LogViolations(violations)
+			}
+		}(rule)
+	}
 
 	return jsonResult(map[string]interface{}{
 		"status":  "ok",
@@ -1690,10 +1806,26 @@ func suggestToolsForChanges(events []changeEntry) []toolSuggestion {
 	return suggestions
 }
 
+// hashIdentity produces a SHA-1 hex digest of the serialised ProjectIdentity.
+// Used to detect whether the project structure has changed since the last
+// session_init call, allowing incremental responses that skip unchanged data.
+func hashIdentity(identity *graph.ProjectIdentity) string {
+	b, err := json.Marshal(identity)
+	if err != nil {
+		return ""
+	}
+	h := sha1.Sum(b)
+	return fmt.Sprintf("%x", h)
+}
+
 // handleSessionInit is the single-call session bootstrap that replaces the
 // three-step startup ritual (get_pending_tasks → get_project_identity →
 // get_working_state). One MCP round-trip returns all the context an agent
 // needs to start work, including scale-aware tool guidance and recent events.
+//
+// Incremental mode: when agent_id is provided and the agent has called
+// session_init before, unchanged sections are omitted to save tokens.
+// The agent's context profile is updated after each call.
 func (s *Server) handleSessionInit(
 	_ context.Context,
 	req mcp.CallToolRequest,
@@ -1701,8 +1833,19 @@ func (s *Server) handleSessionInit(
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 	s.upsertAgentIfNeeded(agentID)
 
+	// ── Look up agent context profile for incremental delivery ───────────
+	var agentCtx *store.AgentContext
+	incremental := false
+	if agentID != "" && s.store != nil {
+		if ac, err := s.store.GetAgentContext(agentID); err == nil && ac != nil {
+			agentCtx = ac
+			incremental = true
+		}
+	}
+
 	// ── 1. Project identity + scale guidance ─────────────────────────────
 	identity := s.graph.ProjectIdentity()
+	currentHash := hashIdentity(identity)
 
 	// Enrich with federation summary (mirrors handleGetProjectIdentity).
 	primaryRepoID := s.graph.RepoID()
@@ -1732,13 +1875,24 @@ func (s *Server) handleSessionInit(
 	}
 	sort.Strings(linkedRepos)
 
-	projectSection := map[string]interface{}{
-		"identity": identity,
-		"federation": map[string]interface{}{
-			"is_federated":        len(linkedRepos) > 0,
-			"linked_repos":        linkedRepos,
-			"cross_project_edges": crossCallCount,
-		},
+	// In incremental mode, skip project_identity if the hash hasn't changed.
+	identitySkipped := false
+	var projectSection interface{}
+	if incremental && agentCtx.IdentityHash == currentHash && currentHash != "" {
+		identitySkipped = true
+		projectSection = map[string]interface{}{
+			"skipped": true,
+			"reason":  "unchanged since last session — identity_hash matches",
+		}
+	} else {
+		projectSection = map[string]interface{}{
+			"identity": identity,
+			"federation": map[string]interface{}{
+				"is_federated":        len(linkedRepos) > 0,
+				"linked_repos":        linkedRepos,
+				"cross_project_edges": crossCallCount,
+			},
+		}
 	}
 
 	// ── 2. Pending tasks ──────────────────────────────────────────────────
@@ -1816,11 +1970,18 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
-	// ── 4. Recent agent events (last 20) ──────────────────────────────────
+	// ── 4. Recent agent events ───────────────────────────────────────────
+	// In incremental mode, only return events since the agent's last known seq.
 	var recentEvents []store.Event
 	var latestEventSeq int64
 	if s.store != nil {
-		events, seq, err := s.store.GetEvents(0, nil, 20)
+		sinceSeq := int64(0)
+		limit := 20
+		if incremental && agentCtx.LastEventSeq > 0 {
+			sinceSeq = agentCtx.LastEventSeq
+			limit = 50 // allow more events when fetching delta
+		}
+		events, seq, err := s.store.GetEvents(sinceSeq, nil, limit)
 		if err == nil {
 			recentEvents = events
 			latestEventSeq = seq
@@ -1874,6 +2035,12 @@ func (s *Server) handleSessionInit(
 		"scale_guidance":   identity.ToolGuidance,
 		"session_hint":     "Pass latest_event_seq to get_events on the next call to receive only new events. Use scale_guidance to decide when to use Synapses tools vs Read/Grep.",
 	}
+	if incremental {
+		resp["incremental"] = true
+		if identitySkipped {
+			resp["identity_skipped"] = true
+		}
+	}
 	if recentFailure != nil {
 		resp["recent_failure"] = recentFailure
 	}
@@ -1885,7 +2052,7 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
-	// ── 5. Constitution (Hot Constitution — project principles) ───────────
+	// ── 6. Constitution (Hot Constitution — project principles) ───────────
 	if s.config != nil && s.config.Constitution.InjectInSessionInit && len(s.config.Constitution.Principles) > 0 {
 		resp["constitution"] = map[string]interface{}{
 			"principles": s.config.Constitution.Principles,
@@ -1926,6 +2093,17 @@ func (s *Server) handleSessionInit(
 				}
 			}()
 		}
+	}
+
+	// ── Update agent context profile ─────────────────────────────────────
+	// Record what this agent now knows so the next session_init can be incremental.
+	if agentID != "" && s.store != nil {
+		_ = s.store.UpsertAgentContext(&store.AgentContext{
+			AgentID:      agentID,
+			LastEventSeq: latestEventSeq,
+			IdentityHash: currentHash,
+			LastSession:  time.Now().UTC().Format(time.RFC3339),
+		})
 	}
 
 	return jsonResult(resp)

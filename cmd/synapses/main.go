@@ -85,6 +85,8 @@ func run(args []string) error {
 		return cmdDoctor(args[1:])
 	case "daemon":
 		return cmdDaemon(args[1:])
+	case "brief":
+		return cmdBrief(args[1:])
 	case "onboard":
 		return cmdOnboard(args[1:])
 	case "help", "-h", "--help":
@@ -649,6 +651,14 @@ func cmdDoctor(args []string) error {
 		fmt.Printf("%-16s%-16s%s\n", "Scout", status, detail)
 	} else {
 		fmt.Printf("%-16s%-16s%s\n", "Scout", "not configured", "(no scout.url in synapses.json)")
+	}
+
+	// ── Pulse ────────────────────────────────────────────────────────────────
+	if cfg.Pulse.URL != "" {
+		status, detail := pingHealth(cfg.Pulse.URL + "/v1/health")
+		fmt.Printf("%-16s%-16s%s\n", "Pulse", status, detail)
+	} else {
+		fmt.Printf("%-16s%-16s%s\n", "Pulse", "not configured", "(no pulse.url in synapses.json)")
 	}
 
 	return nil
@@ -1663,6 +1673,93 @@ func cmdQuery(args []string) error {
 	return enc.Encode(result)
 }
 
+// cmdBrief outputs a concise markdown briefing (~150-300 tokens) for use as
+// a Claude Code startup hook. It surfaces active agents, priority tasks,
+// cross-project alerts, and recent failures in a single glance.
+//
+// Usage:
+//
+//	synapses brief --path <repo> [--agent-id <id>]
+func cmdBrief(args []string) error {
+	fs := flag.NewFlagSet("brief", flag.ContinueOnError)
+	repoPath := fs.String("path", ".", "Repository root")
+	agentID := fs.String("agent-id", "", "Agent identifier (for filtering tasks)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	absPath, err := filepath.Abs(*repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	dbPath, err := store.DefaultPath(absPath)
+	if err != nil {
+		return err
+	}
+	st, err := store.OpenReadOnly(dbPath)
+	if err != nil {
+		// No index yet — output a minimal brief rather than failing.
+		fmt.Println("## Synapses Brief\n- No index found. Run `synapses init` first.")
+		return nil
+	}
+	defer st.Close()
+
+	var b strings.Builder
+	b.WriteString("## Synapses Brief\n")
+
+	// 1. Active agents
+	if agents, err := st.GetAgents(); err == nil && len(agents) > 0 {
+		names := make([]string, 0, len(agents))
+		for _, a := range agents {
+			names = append(names, a.ID)
+		}
+		if len(names) > 5 {
+			names = names[:5]
+		}
+		b.WriteString(fmt.Sprintf("- **Active agents** (%d): %s\n", len(agents), strings.Join(names, ", ")))
+	}
+
+	// 2. Priority tasks (top 3, ordered by priority)
+	if tasks, err := st.GetPendingTasks("", *agentID); err == nil && len(tasks) > 0 {
+		limit := 3
+		if len(tasks) < limit {
+			limit = len(tasks)
+		}
+		for i := 0; i < limit; i++ {
+			t := tasks[i]
+			marker := ""
+			if t.Status == "in_progress" {
+				marker = " (in_progress)"
+			}
+			b.WriteString(fmt.Sprintf("- **[%s] %s**%s\n", t.Priority, t.Title, marker))
+		}
+		if len(tasks) > limit {
+			b.WriteString(fmt.Sprintf("- ... and %d more task(s)\n", len(tasks)-limit))
+		}
+	} else {
+		b.WriteString("- No pending tasks\n")
+	}
+
+	// 3. Cross-project alerts (unread)
+	if msgs, _, err := st.GetMessages("", 0, "cross_project_impact", true, 5); err == nil && len(msgs) > 0 {
+		b.WriteString(fmt.Sprintf("- **%d cross-project alert(s)**: recent changes may have broken linked dependencies\n", len(msgs)))
+	}
+
+	// 4. Recent failure episode (if any)
+	repoID := filepath.Base(absPath)
+	if g, err := st.LoadGraph(); err == nil && g != nil {
+		repoID = g.RepoID()
+	}
+	if failures, err := st.GetEpisodes(repoID, "", "failure", nil, 1, 0); err == nil && len(failures) > 0 {
+		f := failures[0]
+		b.WriteString(fmt.Sprintf("- **Recent failure**: %s\n", f.Decision))
+	}
+
+	fmt.Print(b.String())
+	return nil
+}
+
 func printUsage() {
 	fmt.Printf(`Synapses %s — graph-based context manager for AI coding agents
 
@@ -1679,6 +1776,7 @@ COMMANDS:
   query   -path <dir> -entity <n>  Dump entity context as JSON (for tooling/IDE)
   status  -path <dir>              Show index statistics for one project
   list                             List all indexed projects (global overview)
+  brief   -path <dir>              Concise session brief (for startup hooks)
   doctor  -path <dir>              Health check (index, brain, scout)
   reset   -path <dir>              Remove the cached index for a project
   reset   -all                     Remove ALL cached indexes

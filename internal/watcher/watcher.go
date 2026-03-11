@@ -537,7 +537,7 @@ func (w *Watcher) ingestToBrain(path string) {
 				}
 				summary := bc.GetSummary(context.Background(), string(n.ID))
 				if summary != "" {
-					_, _ = w.store.AddAnnotation(string(n.ID), "brain", summary)
+					_, _, _ = w.store.AddAnnotationIfNew(string(n.ID), "brain", summary, 60*time.Second)
 				}
 			}
 		}(nodes)
