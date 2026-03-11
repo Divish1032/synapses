@@ -7,6 +7,7 @@ import { deregisterProject, toggleSidecarConfig } from './services/deregister';
 import { OllamaService } from './services/ollama';
 import { SynapsesSidebarProvider } from './views/sidebar';
 import { PulseDashboardPanel } from './views/pulse-panel';
+import { GraphExplorerPanel } from './views/graph-panel';
 import { ContextPacket, ServiceId } from './types';
 
 const execFileAsync = promisify(execFile);
@@ -114,19 +115,21 @@ export async function cmdToggleSidecar(sidecar: ServiceId, enabled: boolean): Pr
     return;
   }
 
-  // Update synapses.json first
-  toggleSidecarConfig(root, sidecar, enabled);
-
-  // Then start or stop the actual background process via daemon
+  // Attempt daemon start/stop first — only update config on success
   const serviceName = DAEMON_NAME[sidecar];
   if (serviceName) {
     const sub = enabled ? 'start' : 'stop';
     try {
       await execFileAsync(cfg.binaryPath(), ['daemon', sub, '--service', serviceName, '--quiet']);
-    } catch {
-      // Best-effort — daemon errors are not blocking
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      vscode.window.showWarningMessage(`Synapses: failed to ${sub} ${sidecar}: ${msg}`);
+      return; // Don't update config if daemon operation failed
     }
   }
+
+  // Only update synapses.json after daemon operation succeeds
+  toggleSidecarConfig(root, sidecar, enabled);
 
   const action = enabled ? 'enabled and started' : 'disabled and stopped';
   vscode.window.showInformationMessage(`Synapses: ${sidecar} ${action}.`);
@@ -175,6 +178,10 @@ export async function cmdRunDoctor(): Promise<void> {
   }
 }
 
+export function cmdShowGraphExplorer(extensionUri: vscode.Uri): void {
+  GraphExplorerPanel.show(extensionUri);
+}
+
 export function cmdOpenSettings(): void {
   vscode.commands.executeCommand('workbench.action.openSettings', 'synapses');
 }
@@ -219,6 +226,9 @@ export function registerCommands(
       (sidecar: ServiceId, enabled: boolean) => cmdToggleSidecar(sidecar, enabled)
     ),
     vscode.commands.registerCommand('synapses.pullModel', () => cmdPullModel(ollamaService)),
+    vscode.commands.registerCommand('synapses.showGraphExplorer', () =>
+      cmdShowGraphExplorer(context.extensionUri)
+    ),
     vscode.commands.registerCommand('synapses.runDoctor', cmdRunDoctor),
     vscode.commands.registerCommand('synapses.openSettings', cmdOpenSettings),
     vscode.commands.registerCommand('synapses.startOllama', cmdStartOllama),

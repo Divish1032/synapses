@@ -3,12 +3,15 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { HealthPoller } from '../services/health';
 import { OllamaService } from '../services/ollama';
+import { BrainService } from '../services/brain';
+import { ProjectService } from '../services/project';
 import { buildSidebarHtml } from './sidebar-html';
 import { httpGet, httpPost } from '../http';
 import * as cfg from '../config';
 import {
-  HealthState, SidebarState, ContextPacket, SDLCConfig,
+  HealthState, SidebarState, SidebarTab, ContextPacket, SDLCConfig,
   OllamaStatus, OllamaModel, ServiceId, PulseSummary, PulseTimelinePoint,
+  PulseAgentStats, BrainCostTier,
 } from '../types';
 
 const execFileAsync = promisify(execFile);
@@ -22,22 +25,73 @@ function identifierAt(doc: vscode.TextDocument, pos: vscode.Position): string | 
   return range ? doc.getText(range) : null;
 }
 
+async function symbolKindAt(doc: vscode.TextDocument, pos: vscode.Position): Promise<string> {
+  try {
+    const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+      'vscode.executeDocumentSymbolProvider', doc.uri
+    );
+    if (!symbols) return 'function';
+    const match = findDeepest(symbols, pos);
+    if (!match) return 'function';
+    const kindMap: Record<number, string> = {
+      [vscode.SymbolKind.Function]: 'function',
+      [vscode.SymbolKind.Method]: 'method',
+      [vscode.SymbolKind.Class]: 'struct',
+      [vscode.SymbolKind.Struct]: 'struct',
+      [vscode.SymbolKind.Interface]: 'interface',
+      [vscode.SymbolKind.Variable]: 'variable',
+      [vscode.SymbolKind.Constant]: 'variable',
+      [vscode.SymbolKind.Property]: 'variable',
+      [vscode.SymbolKind.Enum]: 'struct',
+      [vscode.SymbolKind.Module]: 'package',
+      [vscode.SymbolKind.Namespace]: 'package',
+      [vscode.SymbolKind.Constructor]: 'method',
+    };
+    return kindMap[match.kind] ?? 'function';
+  } catch {
+    return 'function';
+  }
+}
+
+function findDeepest(symbols: vscode.DocumentSymbol[], pos: vscode.Position): vscode.DocumentSymbol | null {
+  for (const sym of symbols) {
+    if (sym.range.contains(pos)) {
+      const child = findDeepest(sym.children, pos);
+      return child ?? sym;
+    }
+  }
+  return null;
+}
+
 export class SynapsesSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'synapses.sidebar';
 
   private _view?: vscode.WebviewView;
   private _state: SidebarState;
+  private _brainService: BrainService;
+  private _projectService: ProjectService;
+  private _context?: vscode.ExtensionContext;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _healthPoller: HealthPoller,
-    private readonly _ollamaService: OllamaService
+    private readonly _ollamaService: OllamaService,
+    context?: vscode.ExtensionContext
   ) {
+    this._brainService = new BrainService();
+    this._projectService = new ProjectService();
+    this._context = context;
+
+    const savedCollapsed = context?.workspaceState.get<Record<string, boolean>>('synapses.collapsed') ?? {};
+
     this._state = {
+      activeTab: cfg.sidebarDefaultTab(),
       health: _healthPoller.getState(),
       ollamaStatus: 'stopped',
       ollamaModels: [],
       defaultModel: cfg.defaultModel(),
+      analyticsDateRange: cfg.analyticsDateRange(),
+      collapsedSections: savedCollapsed,
     };
   }
 
@@ -53,8 +107,7 @@ export class SynapsesSidebarProvider implements vscode.WebviewViewProvider {
     };
 
     this._render();
-    this._refreshOllama();
-    this._refreshPulse();
+    this._refreshTabData(this._state.activeTab);
 
     webviewView.webview.onDidReceiveMessage((msg) => this._handleMessage(msg));
 
@@ -65,7 +118,12 @@ export class SynapsesSidebarProvider implements vscode.WebviewViewProvider {
 
   public updateHealth(state: HealthState): void {
     this._state = { ...this._state, health: state };
-    this._refreshPulse();
+    if (this._state.activeTab === 'home') {
+      this._refreshProjectIdentity();
+    }
+    if (this._state.activeTab === 'analytics') {
+      this._refreshPulse();
+    }
     this._render();
   }
 
@@ -84,6 +142,28 @@ export class SynapsesSidebarProvider implements vscode.WebviewViewProvider {
 
   private async _handleMessage(msg: { command: string; [key: string]: unknown }): Promise<void> {
     switch (msg.command) {
+      case 'switchTab': {
+        const tab = msg.tab as SidebarTab;
+        this._state = { ...this._state, activeTab: tab };
+        this._render();
+        this._refreshTabData(tab);
+        break;
+      }
+      case 'toggleSection': {
+        const section = msg.section as string;
+        const collapsed = { ...this._state.collapsedSections };
+        collapsed[section] = !collapsed[section];
+        this._state = { ...this._state, collapsedSections: collapsed };
+        this._context?.workspaceState.update('synapses.collapsed', collapsed);
+        this._render();
+        break;
+      }
+      case 'setDateRange': {
+        const days = msg.days as number;
+        this._state = { ...this._state, analyticsDateRange: days };
+        this._refreshPulse();
+        break;
+      }
       case 'toggleService':
         await this._toggleService(msg.service as ServiceId, msg.enabled as boolean);
         break;
@@ -114,10 +194,18 @@ export class SynapsesSidebarProvider implements vscode.WebviewViewProvider {
         await this._refreshOllama();
         break;
       }
-      case 'deleteModel':
-        await this._ollamaService.deleteModel(msg.model as string);
+      case 'deleteModel': {
+        const modelName = msg.model as string;
+        const confirm = await vscode.window.showWarningMessage(
+          `Delete model "${modelName}"? This cannot be undone.`,
+          { modal: true },
+          'Delete'
+        );
+        if (confirm !== 'Delete') break;
+        await this._ollamaService.deleteModel(modelName);
         await this._refreshOllama();
         break;
+      }
       case 'openExternal':
         await vscode.env.openExternal(vscode.Uri.parse(msg.url as string));
         break;
@@ -132,6 +220,46 @@ export class SynapsesSidebarProvider implements vscode.WebviewViewProvider {
         break;
       case 'setPhase':
         await this._setPhase(msg.phase as string);
+        break;
+      case 'navigateToEntity': {
+        const file = msg.file as string;
+        const line = (msg.line as number) || 0;
+        const root = cfg.workspaceRoot();
+        if (!root) break;
+        const fullPath = file.startsWith('/') ? file : `${root}/${file}`;
+        const uri = vscode.Uri.file(fullPath);
+        const pos = new vscode.Position(Math.max(0, line - 1), 0);
+        await vscode.window.showTextDocument(uri, { selection: new vscode.Range(pos, pos) });
+        break;
+      }
+      case 'showGraphExplorer':
+        await vscode.commands.executeCommand('synapses.showGraphExplorer');
+        break;
+    }
+  }
+
+  // Tab-aware data loading — only fetch what the active tab needs
+  private async _refreshTabData(tab: SidebarTab): Promise<void> {
+    switch (tab) {
+      case 'home':
+        this._refreshProjectIdentity();
+        this._refreshPulse(); // for ROI banner
+        break;
+      case 'intelligence':
+        this._refreshOllama();
+        this._refreshBrainHealth();
+        this._refreshPatterns();
+        this._refreshADRs();
+        this._refreshSDLC();
+        break;
+      case 'analytics':
+        this._refreshPulse();
+        this._refreshAgents();
+        this._refreshBrainCosts();
+        break;
+      case 'explorer':
+        this._refreshProjectIdentity();
+        this._refreshViolations();
         break;
     }
   }
@@ -149,6 +277,58 @@ export class SynapsesSidebarProvider implements vscode.WebviewViewProvider {
       await vscode.commands.executeCommand('synapses.registerProject');
     } else {
       await vscode.commands.executeCommand('synapses.toggleSidecar', id, enabled);
+    }
+  }
+
+  // ── Data refresh methods ──────────────────────────────────────────────
+
+  private async _refreshProjectIdentity(): Promise<void> {
+    const root = cfg.workspaceRoot();
+    if (!root) return;
+    const identity = await this._projectService.getProjectIdentity(root);
+    if (identity) {
+      this._state = {
+        ...this._state,
+        projectIdentity: identity,
+        keyEntities: identity.key_entities,
+        suggestedRules: identity.suggested_rules,
+        graphSummary: identity.summary,
+      };
+      this._render();
+    }
+  }
+
+  private async _refreshBrainHealth(): Promise<void> {
+    if (this._state.health.intelligence?.status !== 'online') return;
+    try {
+      const health = await this._brainService.getHealthExtended();
+      this._state = { ...this._state, brainHealth: health };
+      this._render();
+    } catch {
+      // brain not reachable
+    }
+  }
+
+  private async _refreshPatterns(): Promise<void> {
+    if (this._state.health.intelligence?.status !== 'online') return;
+    const patterns = await this._brainService.getPatterns(20);
+    this._state = { ...this._state, patterns };
+    this._render();
+  }
+
+  private async _refreshADRs(): Promise<void> {
+    if (this._state.health.intelligence?.status !== 'online') return;
+    const adrs = await this._brainService.getADRs();
+    this._state = { ...this._state, adrs };
+    this._render();
+  }
+
+  private async _refreshSDLC(): Promise<void> {
+    if (this._state.health.intelligence?.status !== 'online') return;
+    const sdlc = await this._brainService.getSDLC();
+    if (sdlc) {
+      this._state = { ...this._state, sdlc };
+      this._render();
     }
   }
 
@@ -173,23 +353,60 @@ export class SynapsesSidebarProvider implements vscode.WebviewViewProvider {
       }
       return;
     }
+    const days = this._state.analyticsDateRange;
     try {
-      const summary = await httpGet<PulseSummary>(cfg.pulseUrl(), '/v1/summary?days=7', 3000);
-      const timeline = await httpGet<{ points: PulseTimelinePoint[] }>(cfg.pulseUrl(), '/v1/timeline?days=7&granularity=daily', 3000);
+      const [summaryRes, timelineRes] = await Promise.allSettled([
+        httpGet<PulseSummary>(cfg.pulseUrl(), `/v1/summary?days=${days}`, 3000),
+        httpGet<{ points: PulseTimelinePoint[] }>(cfg.pulseUrl(), `/v1/timeline?days=${days}&granularity=daily`, 3000),
+      ]);
       this._state = {
         ...this._state,
-        pulse: summary,
-        pulseTrend: timeline.points ?? [],
+        pulse: summaryRes.status === 'fulfilled' ? summaryRes.value : this._state.pulse,
+        pulseTrend: timelineRes.status === 'fulfilled' ? (timelineRes.value.points ?? []) : this._state.pulseTrend,
       };
       this._render();
     } catch {
-      // pulse unreachable — leave existing stats
+      // pulse unreachable
     }
+  }
+
+  private async _refreshAgents(): Promise<void> {
+    if (this._state.health.pulse?.status !== 'online') return;
+    try {
+      const res = await httpGet<{ agents: PulseAgentStats[] }>(cfg.pulseUrl(), '/v1/agents', 3000);
+      this._state = { ...this._state, pulseAgents: res.agents ?? [] };
+      this._render();
+    } catch {
+      // pulse unreachable
+    }
+  }
+
+  private async _refreshBrainCosts(): Promise<void> {
+    if (this._state.health.pulse?.status !== 'online') return;
+    try {
+      const res = await httpGet<{ costs: BrainCostTier[] }>(cfg.pulseUrl(), '/v1/brain-costs', 3000);
+      this._state = { ...this._state, brainCosts: res.costs ?? [] };
+      this._render();
+    } catch {
+      // pulse unreachable
+    }
+  }
+
+  private async _refreshViolations(): Promise<void> {
+    const root = cfg.workspaceRoot();
+    if (!root) return;
+    const violations = await this._projectService.getViolations(root);
+    this._state = { ...this._state, violations };
+    this._render();
   }
 
   private async _refreshContext(name: string, doc: vscode.TextDocument): Promise<void> {
     const root = cfg.repoRoot(doc);
     if (!root || this._state.health.intelligence?.status !== 'online') return;
+
+    const editor = vscode.window.activeTextEditor;
+    const pos = editor?.document === doc ? editor.selection.active : new vscode.Position(0, 0);
+    const rootType = await symbolKindAt(doc, pos);
 
     const [statsResult, sdlcResult] = await Promise.allSettled([
       execFileAsync(cfg.binaryPath(), ['status', '-path', root]),
@@ -202,11 +419,12 @@ export class SynapsesSidebarProvider implements vscode.WebviewViewProvider {
       sdlc: sdlcResult.status === 'fulfilled' ? sdlcResult.value : undefined,
     };
 
-    const nodeId = `${baseName(root)}::${baseName(doc.uri.fsPath)}::${name}`;
+    const relPath = doc.uri.fsPath.replace(root + '/', '');
+    const nodeId = `${baseName(root)}::${relPath}::${name}`;
     try {
       const packet = await httpPost<ContextPacket>(cfg.intelligenceUrl(), '/v1/context-packet', {
-        snapshot: { root_node_id: nodeId, root_name: name, root_type: 'function', root_file: doc.uri.fsPath },
-        enable_llm: false,
+        snapshot: { root_node_id: nodeId, root_name: name, root_type: rootType, root_file: doc.uri.fsPath },
+        enable_llm: cfg.enableLLM(),
       }, 5000);
       this._state = { ...this._state, contextPacket: packet };
     } catch {
@@ -218,8 +436,9 @@ export class SynapsesSidebarProvider implements vscode.WebviewViewProvider {
 
   private async _setPhase(phase: string): Promise<void> {
     try {
-      await httpPost<unknown>(cfg.intelligenceUrl(), '/v1/sdlc/phase', { phase }, 3000);
+      await this._brainService.setPhase(phase);
       vscode.window.showInformationMessage(`Synapses: SDLC phase set to ${phase}`);
+      this._refreshSDLC();
     } catch {
       vscode.window.showWarningMessage('Synapses: could not set SDLC phase — is brain running?');
     }

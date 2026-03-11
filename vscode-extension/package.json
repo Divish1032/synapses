@@ -74,6 +74,10 @@
       {
         "command": "synapses.startOllama",
         "title": "Synapses: Start Ollama"
+      },
+      {
+        "command": "synapses.showGraphExplorer",
+        "title": "Synapses: Show Graph Explorer"
       }
     ],
     "keybindings": [
@@ -93,6 +97,12 @@
         "command": "synapses.showPulse",
         "key": "ctrl+shift+alt+p",
         "mac": "cmd+shift+alt+p",
+        "when": "editorFocus"
+      },
+      {
+        "command": "synapses.showGraphExplorer",
+        "key": "ctrl+shift+alt+g",
+        "mac": "cmd+shift+alt+g",
         "when": "editorFocus"
       }
     ],
@@ -152,6 +162,23 @@
           "type": "string",
           "default": "qwen2.5-coder:1.5b",
           "description": "Default Ollama model for synapses-intelligence enrichment"
+        },
+        "synapses.enableLLM": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable LLM enrichment in context packets (requires brain sidecar and Ollama)"
+        },
+        "synapses.sidebarDefaultTab": {
+          "type": "string",
+          "default": "home",
+          "enum": ["home", "intelligence", "analytics", "explorer"],
+          "description": "Default tab shown when the Synapses sidebar opens"
+        },
+        "synapses.analyticsDateRange": {
+          "type": "number",
+          "default": 7,
+          "enum": [7, 30, 90],
+          "description": "Default date range (in days) for the analytics view"
         }
       }
     }

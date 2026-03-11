@@ -40,7 +40,8 @@ export class SynapsesHoverProvider implements vscode.HoverProvider {
     if (!root) return null;
     if (token.isCancellationRequested) return null;
 
-    const nodeId = `${baseName(root)}::${baseName(document.uri.fsPath)}::${name}`;
+    const relPath = document.uri.fsPath.replace(root + '/', '');
+    const nodeId = `${baseName(root)}::${relPath}::${name}`;
     const cached = this.cache.get(nodeId);
     if (cached && Date.now() - cached.ts < this.ttlMs) {
       return this._buildHover(name, cached.summary, document.uri.fsPath);

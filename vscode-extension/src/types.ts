@@ -51,10 +51,26 @@ export interface PulseSummary {
   top_entities: string[];
 }
 
+export interface PulseAgentStats {
+  agent_id: string;
+  sessions: number;
+  tool_calls: number;
+  tokens_saved: number;
+}
+
+export interface BrainCostTier {
+  tier: string;
+  model: string;
+  tokens: number;
+  calls: number;
+}
+
 export interface PulseDashboard {
   summary: PulseSummary;
   timeline: PulseTimelinePoint[];
   tools: PulseTool[];
+  agents?: PulseAgentStats[];
+  brain_costs?: BrainCostTier[];
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +90,81 @@ export interface OllamaModel {
 // ---------------------------------------------------------------------------
 
 export interface BrainHealth { status: string; version?: string }
+
+export interface BrainHealthExtended {
+  status: string;
+  model: string;
+  available: boolean;
+  version?: string;
+  enrichment_rate?: number;
+  patterns_learned?: number;
+  summaries_count?: number;
+}
+
+export interface PatternHint {
+  trigger: string;
+  co_change: string;
+  reason?: string;
+  confidence: number;
+}
+
+export interface ADR {
+  id: string;
+  title: string;
+  status: 'proposed' | 'accepted' | 'deprecated';
+  decision: string;
+  context?: string;
+  linked_files?: string[];
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Graph / Project
+// ---------------------------------------------------------------------------
+
+export interface GraphSummary {
+  files: number;
+  packages: number;
+  functions: number;
+  methods: number;
+  structs: number;
+  interfaces: number;
+  edges: number;
+}
+
+export interface EntityInfo {
+  id: string;
+  name: string;
+  type: string;
+  file: string;
+  line: number;
+  fanin: number;
+  fanout: number;
+}
+
+export interface Violation {
+  rule_id: string;
+  rule_name: string;
+  severity: 'error' | 'warning' | 'info';
+  from: string;
+  to: string;
+  message: string;
+}
+
+export interface SuggestedRule {
+  id: string;
+  description: string;
+  confidence: number;
+}
+
+export interface ProjectIdentity {
+  repo_id: string;
+  summary: GraphSummary;
+  key_entities: EntityInfo[];
+  scale: 'micro' | 'small' | 'medium' | 'large';
+  suggested_rules: SuggestedRule[];
+  languages?: string[];
+}
 
 export interface IngestRequest {
   node_id: string;
@@ -123,18 +214,49 @@ export interface SDLCConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Sidebar tab
+// ---------------------------------------------------------------------------
+
+export type SidebarTab = 'home' | 'intelligence' | 'analytics' | 'explorer';
+
+// ---------------------------------------------------------------------------
 // Sidebar state (passed to HTML builder)
 // ---------------------------------------------------------------------------
 
 export interface SidebarState {
+  activeTab: SidebarTab;
   health: HealthState;
-  pulse?: PulseSummary;
-  pulseTrend?: PulseTimelinePoint[];  // last 7 days for sparkline
+
+  // Home tab
+  projectIdentity?: ProjectIdentity;
+
+  // Intelligence tab
   ollamaStatus: OllamaStatus;
   ollamaModels: OllamaModel[];
   defaultModel: string;
-  contextPacket?: ContextPacket;
-  sdlc?: SDLCConfig;
-  graphStats?: string;
   modelPullProgress?: { model: string; pct: number; status: string };
+  brainHealth?: BrainHealthExtended;
+  patterns?: PatternHint[];
+  adrs?: ADR[];
+  sdlc?: SDLCConfig;
+
+  // Analytics tab
+  pulse?: PulseSummary;
+  pulseTrend?: PulseTimelinePoint[];
+  pulseAgents?: PulseAgentStats[];
+  brainCosts?: BrainCostTier[];
+  analyticsDateRange: number;
+
+  // Explorer tab
+  keyEntities?: EntityInfo[];
+  violations?: Violation[];
+  suggestedRules?: SuggestedRule[];
+  graphSummary?: GraphSummary;
+
+  // Context (legacy)
+  contextPacket?: ContextPacket;
+  graphStats?: string;
+
+  // UI state
+  collapsedSections: Record<string, boolean>;
 }

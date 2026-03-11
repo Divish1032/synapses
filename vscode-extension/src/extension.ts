@@ -19,7 +19,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const ollamaService = new OllamaService();
 
   // 2. Create providers
-  const sidebar = new SynapsesSidebarProvider(context.extensionUri, healthPoller, ollamaService);
+  const sidebar = new SynapsesSidebarProvider(context.extensionUri, healthPoller, ollamaService, context);
   const statusBar = new StatusBarManager();
   const hoverProvider = new SynapsesHoverProvider();
 
