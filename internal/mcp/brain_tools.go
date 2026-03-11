@@ -36,6 +36,7 @@ func (s *Server) handleUpsertADR(
 		return mcp.NewToolResultText(`{"error": "id, title, and decision are required"}`), nil
 	}
 
+	_, statusProvided := req.GetArguments()["status"]
 	status, _ := req.GetArguments()["status"].(string)
 	if status == "" {
 		status = "proposed"
@@ -50,6 +51,11 @@ func (s *Server) handleUpsertADR(
 				linkedFiles = append(linkedFiles, s)
 			}
 		}
+	}
+	// If linked_files are specified but status was not explicitly set,
+	// default to "accepted" so get_adrs(file=) surfaces this ADR immediately.
+	if !statusProvided && len(linkedFiles) > 0 {
+		status = "accepted"
 	}
 
 	adr, err := bc.UpsertADR(ctx, brain.ADRRequest{

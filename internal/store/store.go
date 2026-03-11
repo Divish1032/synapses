@@ -664,7 +664,7 @@ func (s *Store) likeSearch(query string, limit int) ([]SearchResult, error) {
 // Empty result means the query had no usable terms.
 func sanitizeFTSQuery(q string) string {
 	// Strip FTS5 special characters to prevent syntax errors.
-	replacer := strings.NewReplacer(`"`, " ", `'`, " ", `(`, " ", `)`, " ", `:`, " ", `*`, " ")
+	replacer := strings.NewReplacer(`"`, " ", `'`, " ", `(`, " ", `)`, " ", `:`, " ", `*`, " ", `.`, " ", `-`, " ", `/`, " ")
 	q = strings.TrimSpace(replacer.Replace(q))
 	words := strings.Fields(q)
 	if len(words) == 0 {

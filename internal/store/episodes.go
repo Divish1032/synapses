@@ -92,6 +92,13 @@ func (s *Store) RecallEpisodes(query, projectID, agentID, episodeType, outcomeFi
 		limit = 10
 	}
 
+	// Sanitize query before passing to FTS5 MATCH to prevent syntax errors
+	// from special characters like ".", "-", "/", etc.
+	safeQuery := sanitizeFTSQuery(query)
+	if safeQuery == "" {
+		return nil, nil
+	}
+
 	// FTS5 MATCH returns rows ordered by BM25 rank (most relevant first).
 	baseQuery := `
 		SELECT e.id, e.agent_id, e.project_id, e.created_at, e.episode_type,
@@ -101,7 +108,7 @@ func (s *Store) RecallEpisodes(query, projectID, agentID, episodeType, outcomeFi
 		JOIN episodes e ON episodes_fts.rowid = e.rowid
 		WHERE episodes_fts MATCH ?`
 
-	args := []interface{}{query}
+	args := []interface{}{safeQuery}
 
 	if sinceDays > 0 {
 		cutoff := time.Now().AddDate(0, 0, -sinceDays).Unix()

@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -422,7 +423,9 @@ func (s *Server) handleGetContext(
 			"entity": entityName,
 			"file":   best.File,
 		})
-		_ = s.store.AppendEvent("agent_examining", agentID, string(payload))
+		if err := s.store.AppendEvent("agent_examining", agentID, string(payload)); err != nil {
+			log.Printf("mcp: append agent_examining event: %v", err)
+		}
 	}
 
 	// format=compact returns a natural-language briefing instead of the default JSON blob.
@@ -819,7 +822,9 @@ func (s *Server) handleGetViolations(
 
 	// Persist to the audit log so agents can query violation history later.
 	if s.store != nil && len(violations) > 0 {
-		_ = s.store.LogViolations(violations)
+		if err := s.store.LogViolations(violations); err != nil {
+			log.Printf("mcp: log violations: %v", err)
+		}
 	}
 
 	// Brain enrichment: add plain-English LLM explanations for each violation.
@@ -938,7 +943,9 @@ func (s *Server) handleUpsertRule(
 			snapshot := config.Config{Rules: []config.Rule{r}}
 			violations := snapshot.CheckViolations(s.graph)
 			if len(violations) > 0 {
-				_ = s.store.LogViolations(violations)
+				if err := s.store.LogViolations(violations); err != nil {
+					log.Printf("mcp: log violations (upsert_rule): %v", err)
+				}
 			}
 		}(rule)
 	}
@@ -1833,6 +1840,11 @@ func (s *Server) handleSessionInit(
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 	s.upsertAgentIfNeeded(agentID)
 
+	// Notify pulse of session start so agent stats are trackable.
+	if pc := s.getPulseClient(); pc != nil && agentID != "" {
+		go pc.RecordSessionEvent(agentID, "start")
+	}
+
 	// ── Look up agent context profile for incremental delivery ───────────
 	var agentCtx *store.AgentContext
 	incremental := false
@@ -2098,12 +2110,14 @@ func (s *Server) handleSessionInit(
 	// ── Update agent context profile ─────────────────────────────────────
 	// Record what this agent now knows so the next session_init can be incremental.
 	if agentID != "" && s.store != nil {
-		_ = s.store.UpsertAgentContext(&store.AgentContext{
+		if err := s.store.UpsertAgentContext(&store.AgentContext{
 			AgentID:      agentID,
 			LastEventSeq: latestEventSeq,
 			IdentityHash: currentHash,
 			LastSession:  time.Now().UTC().Format(time.RFC3339),
-		})
+		}); err != nil {
+			log.Printf("mcp: upsert agent context: %v", err)
+		}
 	}
 
 	return jsonResult(resp)
