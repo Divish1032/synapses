@@ -395,8 +395,10 @@ func cmdDaemonServe(args []string) error {
 	if cfg.Brain.URL != "" {
 		brainCli = brain.NewClient(cfg.Brain.URL, cfg.Brain.TimeoutSec)
 		if model, err := brainCli.HealthCheck(context.Background()); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s: %v (continuing without)\n", cfg.Brain.URL, err)
+			fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s: %v (continuing without — will retry)\n", cfg.Brain.URL, err)
 			brainCli = nil
+			// Retry brain connection in background every 15s until it becomes available.
+			go retryBrainConnect(appCtx, cfg, srv, g, st)
 		} else {
 			fmt.Fprintf(os.Stderr, "synapses: brain connected (%s)\n", model)
 			srv.SetBrainClient(brainCli)

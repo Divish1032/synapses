@@ -10,8 +10,12 @@ dist/
 # Build cache
 *.test
 *.out
+*.cov
 coverage.html
 coverage.out
+
+# Debug binaries
+/debug_callsites
 
 # Go workspace
 go.work

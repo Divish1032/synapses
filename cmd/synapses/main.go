@@ -48,7 +48,7 @@ func main() {
 	// Fast-path: print version and exit immediately.
 	// This avoids loading SQLite drivers and other heavy init() code
 	// that runs before main(). Keeps `synapses version` zero-cost.
-	if len(os.Args) >= 2 && os.Args[1] == "version" {
+	if len(os.Args) >= 2 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Printf("synapses %s\n", version)
 		return
 	}
@@ -78,7 +78,7 @@ func run(args []string) error {
 		return cmdList()
 	case "reset":
 		return cmdReset(args[1:])
-	case "version":
+	case "version", "--version", "-v":
 		fmt.Printf("synapses %s\n", version)
 		return nil
 	case "setup":
@@ -262,8 +262,10 @@ func cmdStartDirect(args []string) error {
 	if cfg.Brain.URL != "" {
 		brainCli = brain.NewClient(cfg.Brain.URL, cfg.Brain.TimeoutSec)
 		if model, err := brainCli.HealthCheck(context.Background()); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s: %v (continuing without)\n", cfg.Brain.URL, err)
+			fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s: %v (continuing without — will retry)\n", cfg.Brain.URL, err)
 			brainCli = nil
+			// Retry brain connection in background every 15s until it becomes available.
+			go retryBrainConnect(appCtx, cfg, srv, g, st)
 		} else {
 			fmt.Fprintf(os.Stderr, "synapses: brain connected (%s)\n", model)
 			srv.SetBrainClient(brainCli)
@@ -2184,6 +2186,34 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 	}
 
 	fmt.Fprintf(os.Stderr, "synapses: embedding complete (%d/%d nodes indexed)\n", done, len(nodeIDs))
+}
+
+// retryBrainConnect periodically retries connecting to the brain sidecar when
+// it was unreachable at startup. Once connected, it wires the brain client into
+// the server, triggers bulk ingest + summary fetch, and exits. Stops retrying
+// when ctx is cancelled (server shutdown).
+func retryBrainConnect(ctx context.Context, cfg *config.Config, srv *mcpsrv.Server, g *graph.Graph, st *store.Store) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			bc := brain.NewClient(cfg.Brain.URL, cfg.Brain.TimeoutSec)
+			model, err := bc.HealthCheck(ctx)
+			if err != nil {
+				continue // still unreachable, try again next tick
+			}
+			fmt.Fprintf(os.Stderr, "synapses: brain connected on retry (%s)\n", model)
+			srv.SetBrainClient(bc)
+			go func() {
+				bulkIngestToBrain(bc, g)
+				fetchAndWriteBackSummaries(bc, g, st)
+			}()
+			return
+		}
+	}
 }
 
 func bulkIngestToBrain(bc *brain.Client, g *graph.Graph) {

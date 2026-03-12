@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/parser"
@@ -9,9 +11,16 @@ import (
 )
 
 func main() {
-	g := graph.New("beta-worker")
+	if len(os.Args) < 2 {
+		fmt.Fprintf(os.Stderr, "usage: debug_callsites <directory>\n")
+		os.Exit(1)
+	}
+	dir := os.Args[1]
+	projectName := filepath.Base(dir)
+
+	g := graph.New(projectName)
 	w := parser.NewWalker()
-	if _, err := w.WalkDir(g, "/home/ubuntu/work/synapses-os/test-workspace/beta-worker"); err != nil {
+	if _, err := w.WalkDir(g, dir); err != nil {
 		panic(err)
 	}
 

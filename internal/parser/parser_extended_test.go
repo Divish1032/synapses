@@ -393,6 +393,86 @@ func TestWalker_RegisterPlugin_ExtensionOverride(t *testing.T) {
 	_ = err
 }
 
+// ── Walker coverage: WalkDir / IncrementalReindex edge cases ──────────────────
+
+func TestWalker_WalkDir_NonExistentRoot(t *testing.T) {
+	w := parser.NewWalker()
+	g := graph.New("test")
+	_, err := w.WalkDir(g, "/nonexistent/path/that/does/not/exist")
+	if err == nil {
+		t.Error("expected error for non-existent root")
+	}
+}
+
+func TestWalker_IncrementalReindex_WithVendorDir(t *testing.T) {
+	dir := t.TempDir()
+	// Create a vendor/ subdir with a Go file — should be skipped.
+	vendorDir := filepath.Join(dir, "vendor")
+	if err := os.MkdirAll(vendorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vendorDir, "lib.go"),
+		[]byte("package lib\nfunc Lib() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Create a real Go file in the root.
+	if err := os.WriteFile(filepath.Join(dir, "main.go"),
+		[]byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w := parser.NewWalker()
+	g := graph.New("test")
+	fresh, changed, _, err := w.IncrementalReindex(g, dir, nil)
+	if err != nil {
+		t.Fatalf("IncrementalReindex: %v", err)
+	}
+	_ = fresh
+	_ = changed
+	// vendor/lib.go must NOT appear in fresh mtimes.
+	for path := range fresh {
+		if filepath.Base(filepath.Dir(path)) == "vendor" {
+			t.Errorf("vendor file should be skipped, got %s", path)
+		}
+	}
+}
+
+func TestWalker_IncrementalReindex_UnsupportedExtension(t *testing.T) {
+	dir := t.TempDir()
+	// .xyz is genuinely unsupported — not handled by any built-in or generic parser.
+	if err := os.WriteFile(filepath.Join(dir, "data.xyz"),
+		[]byte("some binary blob"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"),
+		[]byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w := parser.NewWalker()
+	g := graph.New("test")
+	fresh, _, _, err := w.IncrementalReindex(g, dir, nil)
+	if err != nil {
+		t.Fatalf("IncrementalReindex: %v", err)
+	}
+	// data.xyz must not be in fresh (unsupported extension).
+	for path := range fresh {
+		if filepath.Ext(path) == ".xyz" {
+			t.Errorf("unsupported .xyz file should not appear in fresh mtimes, got %s", path)
+		}
+	}
+	// main.go must be in fresh.
+	found := false
+	for path := range fresh {
+		if filepath.Base(path) == "main.go" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected main.go in fresh mtimes")
+	}
+}
+
 // hasNode is a local helper (mirrors the one in watcher_test.go).
 func hasNode(g *graph.Graph, name string) bool {
 	return len(g.FindByName(name)) > 0
