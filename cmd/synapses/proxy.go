@@ -151,7 +151,8 @@ func ensureDaemon(absPath, sockPath string) error {
 		return fmt.Errorf("start daemon: %w", err)
 	}
 	logFile.Close()
-	cmd.Process.Release()
+	// Reap the daemon process in the background to prevent zombie accumulation.
+	go cmd.Wait() //nolint:errcheck
 
 	// Wait for the daemon socket to appear (it creates the socket after init).
 	// Large repos may take 30+ seconds for cold start.

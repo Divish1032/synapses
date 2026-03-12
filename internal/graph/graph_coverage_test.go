@@ -326,8 +326,8 @@ func TestProjectIdentity_NotNil(t *testing.T) {
 	if p == nil {
 		t.Fatal("expected non-nil ProjectIdentity")
 	}
-	if p.TotalNodes == 0 {
-		t.Error("expected non-zero TotalNodes")
+	if p.Summary.Functions == 0 {
+		t.Error("expected non-zero function count")
 	}
 }
 
@@ -338,7 +338,7 @@ func TestProjectIdentity_Cached(t *testing.T) {
 	if p1 == nil || p2 == nil {
 		t.Fatal("expected non-nil ProjectIdentity")
 	}
-	if p1.TotalNodes != p2.TotalNodes {
+	if p1.Summary.Functions != p2.Summary.Functions {
 		t.Error("cached and fresh identity should match")
 	}
 }
@@ -367,15 +367,12 @@ func TestExportDOT_WithSpecialChars(t *testing.T) {
 
 func TestSnapshotAndMigrateStableID(t *testing.T) {
 	g := buildTestGraph(t)
-	snap := g.SnapshotFileStableIDs("/repo/pkg/auth/auth.go")
-	if len(snap) == 0 {
-		t.Error("expected non-empty stable ID snapshot")
-	}
-	// MigrateStableID: try migrating a node using the snapshot.
-	for oldID, name := range snap {
-		newID := g.MigrateStableID(oldID, name, "/repo/pkg/auth/auth.go")
-		_ = newID // may be empty if not found
-		break     // just test one
+	// SnapshotFileStableIDs is void — call for side-effects / coverage.
+	g.SnapshotFileStableIDs("/repo/pkg/auth/auth.go")
+	// MigrateStableID takes a *Node — call with an existing node.
+	nodes := g.AllNodes()
+	if len(nodes) > 0 {
+		g.MigrateStableID(nodes[0])
 	}
 }
 
@@ -384,16 +381,20 @@ func TestSnapshotAndMigrateStableID(t *testing.T) {
 func TestRemoveFile_Existing(t *testing.T) {
 	g := buildTestGraph(t)
 	n := g.AllNodes()[0]
-	removed := g.RemoveFile(n.File)
-	if removed == 0 {
-		t.Error("expected at least one node removed")
+	before := len(g.AllNodes())
+	g.RemoveFile(n.File)
+	after := len(g.AllNodes())
+	if after >= before {
+		t.Error("expected nodes to be removed after RemoveFile")
 	}
 }
 
 func TestRemoveFile_NonExistent(t *testing.T) {
 	g := buildTestGraph(t)
-	removed := g.RemoveFile("nonexistent/file.go")
-	if removed != 0 {
-		t.Errorf("expected 0 removed for non-existent file, got %d", removed)
+	before := len(g.AllNodes())
+	g.RemoveFile("nonexistent/file.go")
+	after := len(g.AllNodes())
+	if after != before {
+		t.Errorf("expected no change for non-existent file, before=%d after=%d", before, after)
 	}
 }

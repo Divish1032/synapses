@@ -142,7 +142,9 @@ func startSidecar(s Sidecar, quiet bool) error {
 	lf.Close()
 
 	pid := cmd.Process.Pid
-	cmd.Process.Release() //nolint:errcheck
+	// Reap the child process in the background so it doesn't become a zombie.
+	// Without Wait(), the OS keeps a process table entry until the parent exits.
+	go cmd.Wait() //nolint:errcheck
 
 	if err := writePID(s.Name, pid); err != nil {
 		return fmt.Errorf("write pid for %s: %w", s.Name, err)
