@@ -90,7 +90,15 @@ func mergeNodeIDs(existing, detected []string) []string {
 // upsertAgentIfNeeded registers an agent side-effect when agent_id is present.
 func (s *Server) upsertAgentIfNeeded(agentID string) {
 	if s.store != nil && agentID != "" {
-		_ = s.store.UpsertAgent(agentID) // non-fatal; best-effort
+		_ = s.store.UpsertAgent(agentID, nil) // non-fatal; best-effort
+	}
+}
+
+// upsertAgentWithActivity updates the agent registry with current activity info.
+// Only non-empty fields in activity replace existing values.
+func (s *Server) upsertAgentWithActivity(agentID string, activity *store.AgentActivity) {
+	if s.store != nil && agentID != "" {
+		_ = s.store.UpsertAgent(agentID, activity) // non-fatal; best-effort
 	}
 }
 
@@ -360,10 +368,33 @@ func (s *Server) handleUpdateTask(
 		return mcp.NewToolResultError(fmt.Sprintf("update task: %v", err)), nil
 	}
 
-	// Emit event so other agents polling get_events see the update.
-	if err := s.store.AppendEvent("task_update", agentID,
+	// Track agent activity: update or clear current task fields.
+	if agentID != "" {
+		switch status {
+		case "in_progress":
+			// Fetch the task title so peers can see what this agent is working on.
+			if task, err := s.store.GetTask(id); err == nil {
+				s.upsertAgentWithActivity(agentID, &store.AgentActivity{
+					TaskID:    id,
+					TaskTitle: task.Title,
+				})
+			}
+		case "done", "cancelled":
+			_ = s.store.ClearAgentTask(agentID)
+		}
+	}
+
+	// Emit lifecycle events so other agents polling get_events see the update.
+	eventType := "task_update"
+	switch status {
+	case "in_progress":
+		eventType = "agent_task_started"
+	case "done":
+		eventType = "agent_task_completed"
+	}
+	if err := s.store.AppendEvent(eventType, agentID,
 		fmt.Sprintf(`{"task_id":%q,"status":%q}`, id, status)); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: append task_update event: %v\n", err)
+		fmt.Fprintf(os.Stderr, "synapses: append %s event: %v\n", eventType, err)
 	}
 
 	// B1: Reflective Synthesis — when a task is marked done, annotate its

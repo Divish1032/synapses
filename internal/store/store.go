@@ -453,6 +453,15 @@ func Open(path string) (*Store, error) {
 		// GAP-3: Annotation staleness — marks annotations written against a node
 		// whose call graph has changed significantly (fan-in delta >20% or node removed).
 		`ALTER TABLE annotations ADD COLUMN stale INTEGER NOT NULL DEFAULT 0`,
+		// Cross-agent awareness: track what each agent is currently doing so
+		// peers can see activity in real time via session_init and get_agents.
+		`ALTER TABLE agents ADD COLUMN current_task_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN current_task_title TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN current_focus TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN current_scope TEXT NOT NULL DEFAULT ''`,
+		// project_id marks agents synced from federated peer projects.
+		// Local agents have project_id = ''. Used for cross-project agent visibility.
+		`ALTER TABLE agents ADD COLUMN project_id TEXT NOT NULL DEFAULT ''`,
 		// Context Efficiency Layer: agent context profile for incremental session_init.
 		`CREATE TABLE IF NOT EXISTS agent_context (
 			agent_id       TEXT PRIMARY KEY,
@@ -1425,9 +1434,52 @@ func (s *Store) GetViolationLog(ruleID string, limit int) ([]ViolationLogEntry, 
 
 // Agent is a registered agent that has interacted with Synapses.
 type Agent struct {
-	ID       string `json:"id"`
-	LastSeen string `json:"last_seen"`
-	Metadata string `json:"metadata"`
+	ID               string `json:"id"`
+	LastSeen         string `json:"last_seen"`
+	Metadata         string `json:"metadata"`
+	CurrentTaskID    string `json:"current_task_id,omitempty"`
+	CurrentTaskTitle string `json:"current_task_title,omitempty"`
+	CurrentFocus     string `json:"current_focus,omitempty"`
+	// ProjectID is non-empty only for remote agents synced from federated peers.
+	// Local agents always have ProjectID = "".
+	ProjectID string `json:"project_id,omitempty"`
+	// Presence is computed from LastSeen: active (≤5min), idle (5–15min), inactive (>15min).
+	Presence string `json:"presence,omitempty"`
+}
+
+// AgentActivity carries optional activity fields for UpsertAgent.
+// Only non-empty fields overwrite existing values (partial update semantics).
+type AgentActivity struct {
+	TaskID    string
+	TaskTitle string
+	Focus     string
+}
+
+// AgentSummary is the compact view of a peer agent returned in session_init's
+// agent_awareness section. Includes active claims so the caller can avoid conflicts.
+type AgentSummary struct {
+	ID       string   `json:"id"`
+	Presence string   `json:"presence"`
+	Project  string   `json:"project,omitempty"` // non-empty for remote (federated) agents
+	Task     string   `json:"task,omitempty"`
+	Focus    string   `json:"focus,omitempty"`
+	Scopes   []string `json:"scopes,omitempty"` // for local agents: from work_claims; for remote: from peer sync
+}
+
+// classifyPresence derives active/idle/inactive from a RFC3339 last_seen timestamp.
+func classifyPresence(lastSeen string, now time.Time) string {
+	t, err := time.Parse(time.RFC3339, lastSeen)
+	if err != nil {
+		return "inactive"
+	}
+	switch elapsed := now.Sub(t); {
+	case elapsed <= 8*time.Minute:
+		return "active"
+	case elapsed <= 15*time.Minute:
+		return "idle"
+	default:
+		return "inactive"
+	}
 }
 
 // AgentContext tracks what an agent already knows so session_init can deliver
@@ -1440,35 +1492,195 @@ type AgentContext struct {
 	TaskSeq      int64  `json:"task_seq"`       // sequence marker for task change detection
 }
 
-// UpsertAgent records that an agent was seen. Called as a side-effect whenever
-// an MCP tool receives a non-empty agent_id parameter.
-func (s *Store) UpsertAgent(id string) error {
+// UpsertAgent records that an agent was seen. activity is optional — when nil,
+// only last_seen is touched (fast path). When non-nil, non-empty fields replace
+// existing values; empty fields leave existing values untouched.
+func (s *Store) UpsertAgent(id string, activity *AgentActivity) error {
 	now := time.Now().UTC().Format(time.RFC3339)
+	if activity == nil {
+		_, err := s.db.Exec(`
+			INSERT INTO agents (id, last_seen) VALUES (?, ?)
+			ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen`,
+			id, now,
+		)
+		return err
+	}
 	_, err := s.db.Exec(`
-        INSERT INTO agents (id, last_seen) VALUES (?, ?)
-        ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen`,
+		INSERT INTO agents (id, last_seen, current_task_id, current_task_title, current_focus)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			last_seen          = excluded.last_seen,
+			current_task_id    = CASE WHEN excluded.current_task_id    != '' THEN excluded.current_task_id    ELSE agents.current_task_id    END,
+			current_task_title = CASE WHEN excluded.current_task_title != '' THEN excluded.current_task_title ELSE agents.current_task_title END,
+			current_focus      = CASE WHEN excluded.current_focus      != '' THEN excluded.current_focus      ELSE agents.current_focus      END`,
 		id, now,
+		activity.TaskID, activity.TaskTitle, activity.Focus,
+	)
+	return err
+}
+
+// ClearAgentTask zeroes the current task fields for the given agent.
+// Call when a task transitions to done/cancelled.
+func (s *Store) ClearAgentTask(agentID string) error {
+	_, err := s.db.Exec(
+		`UPDATE agents SET current_task_id = '', current_task_title = '' WHERE id = ?`,
+		agentID,
+	)
+	return err
+}
+
+// ClearAgentScope zeroes the current_scope field for the given agent.
+// Kept for compatibility; the column is not surfaced in API responses —
+// use work_claims (local) or metadata (remote) for scope visibility.
+func (s *Store) ClearAgentScope(agentID string) error {
+	_, err := s.db.Exec(
+		`UPDATE agents SET current_scope = '' WHERE id = ?`,
+		agentID,
+	)
+	return err
+}
+
+// UpsertRemoteAgent registers or refreshes an agent synced from a federated peer.
+// projectID is the peer's repo name (e.g. "backend-repo"). scopes are the peer's
+// active work claims at the time of sync — stored in metadata as JSON for display.
+// Remote agents age out naturally via the same presence thresholds as local agents.
+func (s *Store) UpsertRemoteAgent(id, projectID string, activity *AgentActivity, scopes []string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	scopesJSON := "[]"
+	if len(scopes) > 0 {
+		if b, err := json.Marshal(scopes); err == nil {
+			scopesJSON = string(b)
+		}
+	}
+	// Store scopes in metadata JSON: {"scopes":["internal/auth","cmd/server"]}
+	meta := `{"scopes":` + scopesJSON + `}`
+	task, focus := "", ""
+	if activity != nil {
+		task = activity.TaskTitle
+		focus = activity.Focus
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO agents (id, last_seen, metadata, current_task_title, current_focus, project_id)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			last_seen          = excluded.last_seen,
+			metadata           = excluded.metadata,
+			current_task_title = excluded.current_task_title,
+			current_focus      = excluded.current_focus,
+			project_id         = excluded.project_id`,
+		id, now, meta, task, focus, projectID,
 	)
 	return err
 }
 
 // GetAgents returns all known agents ordered by last_seen descending.
+// Presence is computed from last_seen: active (≤5min), idle (5–15min), inactive (>15min).
 func (s *Store) GetAgents() ([]Agent, error) {
-	rows, err := s.db.Query(`SELECT id, last_seen, metadata FROM agents ORDER BY last_seen DESC`)
+	rows, err := s.db.Query(`
+		SELECT id, last_seen, metadata,
+		       current_task_id, current_task_title, current_focus, project_id
+		FROM agents ORDER BY last_seen DESC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	now := time.Now().UTC()
 	var agents []Agent
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.LastSeen, &a.Metadata); err != nil {
+		if err := rows.Scan(&a.ID, &a.LastSeen, &a.Metadata,
+			&a.CurrentTaskID, &a.CurrentTaskTitle, &a.CurrentFocus, &a.ProjectID); err != nil {
 			return nil, err
 		}
+		a.Presence = classifyPresence(a.LastSeen, now)
 		agents = append(agents, a)
 	}
 	return agents, rows.Err()
+}
+
+// GetActiveAgents returns a compact summary of agents seen within the last 15
+// minutes (active or idle), excluding the caller. Active claims are attached so
+// the caller can immediately spot scope conflicts. Capped at 10 peers.
+// For local agents scopes come from work_claims; for remote (project_id != "")
+// they are read from the metadata JSON stored during peer sync.
+func (s *Store) GetActiveAgents(excludeAgentID string) ([]AgentSummary, error) {
+	cutoff := time.Now().UTC().Add(-15 * time.Minute).Format(time.RFC3339)
+	now := time.Now().UTC()
+	expiry := now.Format(time.RFC3339)
+
+	// Include agents seen in the last 15 minutes OR holding a non-expired work
+	// claim. The second condition covers LLMs in long thinking loops: if they
+	// claimed a scope before going silent, they are still in-flight.
+	rows, err := s.db.Query(`
+		SELECT id, last_seen, current_task_title, current_focus, project_id, metadata
+		FROM agents
+		WHERE (last_seen > ? OR id IN (
+			SELECT DISTINCT agent_id FROM work_claims WHERE expires_at > ? AND agent_id != ?
+		)) AND id != ?
+		ORDER BY last_seen DESC
+		LIMIT 10`, cutoff, expiry, excludeAgentID, excludeAgentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var peers []AgentSummary
+	for rows.Next() {
+		var p AgentSummary
+		var lastSeen, meta string
+		if err := rows.Scan(&p.ID, &lastSeen, &p.Task, &p.Focus, &p.Project, &meta); err != nil {
+			return nil, err
+		}
+		p.Presence = classifyPresence(lastSeen, now)
+		// Remote agents carry their scopes in metadata JSON: {"scopes":[...]}.
+		if p.Project != "" && meta != "" && meta != "{}" {
+			var m struct {
+				Scopes []string `json:"scopes"`
+			}
+			if json.Unmarshal([]byte(meta), &m) == nil && len(m.Scopes) > 0 {
+				p.Scopes = m.Scopes
+			}
+		}
+		peers = append(peers, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(peers) == 0 {
+		return nil, nil
+	}
+
+	// Attach active local claims keyed by agent_id in a single indexed query.
+	claimRows, err := s.db.Query(`
+		SELECT agent_id, scope FROM work_claims
+		WHERE expires_at > ? AND agent_id != ?`,
+		expiry, excludeAgentID)
+	if err == nil {
+		defer claimRows.Close()
+		claimMap := make(map[string][]string)
+		for claimRows.Next() {
+			var aid, scope string
+			if claimRows.Scan(&aid, &scope) == nil {
+				claimMap[aid] = append(claimMap[aid], scope)
+			}
+		}
+		for i := range peers {
+			// Only override scopes for local agents (remote scopes come from metadata).
+			if peers[i].Project == "" {
+				if scopes, ok := claimMap[peers[i].ID]; ok {
+					peers[i].Scopes = scopes
+					// Claim-based presence override: an agent holding a live claim is
+					// provably in-flight regardless of how long ago it last called a tool.
+					// This covers LLMs in long thinking loops between tool calls.
+					if peers[i].Presence != "active" {
+						peers[i].Presence = "active"
+					}
+				}
+			}
+		}
+	}
+	return peers, nil
 }
 
 // CountIndexedFiles returns the number of files currently tracked in the index.

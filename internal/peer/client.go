@@ -135,6 +135,28 @@ func (pc *PeerClient) FetchClaims() ([]store.WorkClaim, error) {
 	return claims, nil
 }
 
+// FetchAgents returns the active agents on this peer (seen in the last 15 min).
+// Used by the health monitor to sync remote agent presence into the local store.
+func (pc *PeerClient) FetchAgents() ([]store.AgentSummary, error) {
+	req, err := pc.newRequest(http.MethodGet, "/api/v1/agents", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := pc.httpCli.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("peer returned %d", resp.StatusCode)
+	}
+	var agents []store.AgentSummary
+	if err := json.NewDecoder(resp.Body).Decode(&agents); err != nil {
+		return nil, fmt.Errorf("decode agents: %w", err)
+	}
+	return agents, nil
+}
+
 // BroadcastIntent sends an intent notification to this peer. Errors are
 // intentionally ignored by callers (fire-and-forget).
 func (pc *PeerClient) BroadcastIntent(msg IntentMessage) error {
