@@ -110,12 +110,131 @@ type CarveConfig struct {
 	// but they are never emitted to the caller. Defaults to true so that test
 	// functions do not crowd the related bucket for well-tested codebases.
 	ExcludeTestFiles bool
-	// DirectionBoost applies a relevance multiplier to nodes reachable via
-	// outgoing CALLS edges (the forward / callee direction). A value of 0.2
-	// gives callees a 20% higher relevance than callers at equal hop distance,
-	// so the token-budget pruner prefers call dependencies over call-sites.
-	// 0 disables the boost. Default: 0.2.
+	// DirectionBoost applies a relevance multiplier along the CALLS direction.
+	// Positive: boosts outgoing (callee) edges — token-budget pruner prefers
+	// what this node calls. Negative: boosts incoming (caller) edges — pruner
+	// prefers what calls this node. 0 disables directional preference. Default: 0.2.
 	DirectionBoost float64
+	// IntentID is an optional cache-key discriminator for intent-specific configs.
+	// When EdgeWeights are overridden per-intent, set this to the intent string
+	// (e.g. "modify", "debug") so that intent-specific subgraphs are cached
+	// separately and do not collide with the default or other intents.
+	IntentID string
+}
+
+// intentModifyWeights boosts outgoing CALLS (callees) for the "modify" intent.
+// Agents modifying code need to see what they will break (dependencies).
+// IMPLEMENTS is reduced — the focus is behavioral, not contractual.
+var intentModifyWeights = map[EdgeType]float64{
+	EdgeCalls:      1.0,
+	EdgeDataFlows:  0.95,
+	EdgeImplements: 0.6,
+	EdgeEmbeds:     0.75,
+	EdgeDependsOn:  0.8,
+	EdgeImports:    0.6,
+	EdgeExports:    0.4,
+	EdgeDefines:    0.15,
+}
+
+// intentDebugWeights boosts DATA_FLOWS and DEPENDS_ON for the "debug" intent.
+// Combined with negative DirectionBoost, callers (upstream triggers) are preferred.
+var intentDebugWeights = map[EdgeType]float64{
+	EdgeCalls:      1.0,
+	EdgeDataFlows:  1.1,
+	EdgeImplements: 0.7,
+	EdgeEmbeds:     0.65,
+	EdgeDependsOn:  0.95,
+	EdgeImports:    0.5,
+	EdgeExports:    0.4,
+	EdgeDefines:    0.15,
+}
+
+// intentReviewWeights boosts IMPLEMENTS and EMBEDS for the "review" intent.
+// Code review is about contract surface, interface compliance, and test coverage.
+var intentReviewWeights = map[EdgeType]float64{
+	EdgeCalls:      0.8,
+	EdgeDataFlows:  1.0,
+	EdgeImplements: 1.2,
+	EdgeEmbeds:     1.0,
+	EdgeDependsOn:  0.7,
+	EdgeImports:    0.5,
+	EdgeExports:    0.6,
+	EdgeDefines:    0.15,
+}
+
+// intentUnderstandWeights is the same as DefaultEdgeWeights — balanced for exploration.
+var intentUnderstandWeights = map[EdgeType]float64{
+	EdgeCalls:      1.0,
+	EdgeDataFlows:  0.95,
+	EdgeImplements: 0.9,
+	EdgeEmbeds:     0.85,
+	EdgeDependsOn:  0.8,
+	EdgeImports:    0.7,
+	EdgeExports:    0.5,
+	EdgeDefines:    0.15,
+}
+
+// intentAddWeights boosts IMPORTS and IMPLEMENTS for the "add" intent.
+// Agents adding new code need to follow existing import patterns and interfaces.
+var intentAddWeights = map[EdgeType]float64{
+	EdgeCalls:      0.7,
+	EdgeDataFlows:  0.8,
+	EdgeImplements: 1.0,
+	EdgeEmbeds:     0.9,
+	EdgeDependsOn:  0.9,
+	EdgeImports:    0.85,
+	EdgeExports:    0.65,
+	EdgeDefines:    0.15,
+}
+
+// intentPlanWeights boosts IMPLEMENTS and DEPENDS_ON for the "plan" intent.
+// Planning requires understanding interface contracts and dependency scope.
+var intentPlanWeights = map[EdgeType]float64{
+	EdgeCalls:      1.0,
+	EdgeDataFlows:  0.9,
+	EdgeImplements: 1.1,
+	EdgeEmbeds:     0.85,
+	EdgeDependsOn:  0.95,
+	EdgeImports:    0.7,
+	EdgeExports:    0.6,
+	EdgeDefines:    0.15,
+}
+
+// IntentCarveWeights returns the pre-allocated edge weight map for the given
+// intent. These maps are package-level vars — zero allocation at call time.
+// Falls back to DefaultEdgeWeights for unknown intents.
+func IntentCarveWeights(intent string) map[EdgeType]float64 {
+	switch intent {
+	case "modify":
+		return intentModifyWeights
+	case "debug":
+		return intentDebugWeights
+	case "review":
+		return intentReviewWeights
+	case "understand":
+		return intentUnderstandWeights
+	case "add":
+		return intentAddWeights
+	case "plan":
+		return intentPlanWeights
+	default:
+		return DefaultEdgeWeights
+	}
+}
+
+// IntentDirectionBoost returns the DirectionBoost value for the given intent.
+// Positive = prefer callees, negative = prefer callers, 0 = balanced.
+func IntentDirectionBoost(intent string) float64 {
+	switch intent {
+	case "modify":
+		return 0.3 // prefer callees — see what this will break
+	case "debug":
+		return -0.3 // prefer callers — find what triggers this
+	case "review":
+		return 0.0 // balanced — review the full contract surface
+	default:
+		return 0.2 // default callee preference
+	}
 }
 
 // DefaultCarveConfig returns sensible defaults for context carving.
