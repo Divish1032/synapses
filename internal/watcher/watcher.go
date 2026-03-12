@@ -352,6 +352,10 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// working in this session are warned before they continue.
 	w.notifyCrossProjectImpact(path)
 
+	// Intra-project change alerts: notify agents whose claimed scope covers the
+	// changed file, and agents whose in-progress task has nodes in the changed file.
+	w.notifyIntraProjectImpact(path)
+
 	fmt.Fprintf(os.Stderr, "synapses/watcher: updated %s\n", path)
 	w.persistAsync(path)
 
@@ -648,6 +652,141 @@ func (w *Watcher) notifyCrossProjectImpact(changedFile string) {
 			primaryRepoID,
 		)
 	}
+}
+
+// notifyIntraProjectImpact fires targeted messages to agents that are directly
+// affected by the re-parsed file within the same project. Two probes run:
+//
+//  1. Claimed-scope probe: if the changed file is inside an agent's claimed
+//     scope, that agent receives a "scope_change_alert" message so it knows
+//     its active work area was touched.
+//
+//  2. Task-node probe: if any in-progress task has linked nodes that live in
+//     the changed file, the task's assigned agent receives a "task_node_changed"
+//     message.
+//
+// Fail-silent: any error is ignored so the watcher loop is never interrupted.
+func (w *Watcher) notifyIntraProjectImpact(changedFile string) {
+	if w.store == nil {
+		return
+	}
+
+	primaryRepoID := w.graph.RepoID()
+
+	// Compute repo-relative path for cleaner payloads.
+	relFile := changedFile
+	if root := w.graph.Root(); root != "" {
+		prefix := root
+		if !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
+		}
+		if strings.HasPrefix(changedFile, prefix) {
+			relFile = changedFile[len(prefix):]
+		}
+	}
+
+	// Collect changed symbol names and node IDs for payloads.
+	changedNodes := w.graph.NodesForFile(changedFile)
+	changedNames := make([]string, 0, len(changedNodes))
+	changedNodeIDs := make(map[string]struct{}, len(changedNodes))
+	for _, n := range changedNodes {
+		changedNames = append(changedNames, n.Name)
+		changedNodeIDs[string(n.ID)] = struct{}{}
+	}
+	symbols := dedup(changedNames)
+
+	// ── 1. Claimed-scope probe ─────────────────────────────────────────────
+	claims, err := w.store.GetAllClaims()
+	if err == nil && len(claims) > 0 {
+		notifiedAgent := make(map[string]struct{})
+		for _, claim := range claims {
+			if !fileInScope(relFile, claim.Scope) {
+				continue
+			}
+			if _, seen := notifiedAgent[claim.AgentID]; seen {
+				continue
+			}
+			notifiedAgent[claim.AgentID] = struct{}{}
+
+			payload, merr := json.Marshal(map[string]interface{}{
+				"changed_file":    relFile,
+				"project":         primaryRepoID,
+				"claimed_scope":   claim.Scope,
+				"changed_symbols": symbols,
+				"hint": fmt.Sprintf(
+					"File %q (inside your claimed scope %q) was just modified. %d symbol(s) changed.",
+					relFile, claim.Scope, len(symbols),
+				),
+			})
+			if merr != nil {
+				continue
+			}
+			_, _ = w.store.SendMessage(
+				"synapses-watcher",
+				claim.AgentID,
+				"scope_change_alert",
+				string(payload),
+				primaryRepoID,
+			)
+		}
+	}
+
+	// ── 2. Task-node probe ─────────────────────────────────────────────────
+	if len(changedNodeIDs) == 0 {
+		return
+	}
+	tasks, terr := w.store.GetPendingTasks("", "")
+	if terr != nil {
+		return
+	}
+	for _, task := range tasks {
+		if task.AssignedTo == "" {
+			continue
+		}
+		var hitNodes []string
+		for _, nid := range task.LinkedNodes {
+			if _, ok := changedNodeIDs[nid]; ok {
+				hitNodes = append(hitNodes, nid)
+			}
+		}
+		if len(hitNodes) == 0 {
+			continue
+		}
+		payload, merr := json.Marshal(map[string]interface{}{
+			"changed_file":   relFile,
+			"project":        primaryRepoID,
+			"task_id":        task.ID,
+			"task_title":     task.Title,
+			"affected_nodes": hitNodes,
+			"hint": fmt.Sprintf(
+				"Task %q: %d linked node(s) in %q were just modified.",
+				task.Title, len(hitNodes), relFile,
+			),
+		})
+		if merr != nil {
+			continue
+		}
+		_, _ = w.store.SendMessage(
+			"synapses-watcher",
+			task.AssignedTo,
+			"task_node_changed",
+			string(payload),
+			primaryRepoID,
+		)
+	}
+}
+
+// fileInScope reports whether relFile is covered by the given claim scope.
+// scope may be an exact relative file path or a directory prefix.
+func fileInScope(relFile, scope string) bool {
+	if relFile == scope {
+		return true
+	}
+	dir := scope
+	if !strings.HasSuffix(dir, "/") {
+		dir += "/"
+	}
+	return strings.HasPrefix(relFile, dir)
 }
 
 // repoIDOfNodeID extracts the repoID prefix from a NodeID of the form
