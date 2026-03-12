@@ -277,6 +277,11 @@ func activeSidecars(brain, scout, pulse bool) []Sidecar {
 }
 
 func writeOnboardSynapsesJSON(root string, brain, scout, pulse bool) error {
+	// Create the directory if it doesn't exist (handles `synapses init --path /new/dir`).
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
+	}
+
 	cfgPath := filepath.Join(root, "synapses.json")
 
 	// Load existing config if present.

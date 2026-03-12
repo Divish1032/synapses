@@ -470,6 +470,9 @@ func Open(path string) (*Store, error) {
 			last_session   TEXT    NOT NULL DEFAULT '',
 			task_seq       INTEGER NOT NULL DEFAULT 0
 		)`,
+		// Agent behavioral rules: distinguish code-graph (structural) rules from
+		// conversation-level (agent) constraints. Existing rows default to 'structural'.
+		`ALTER TABLE dynamic_rules ADD COLUMN rule_type TEXT NOT NULL DEFAULT 'structural'`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -1239,11 +1242,15 @@ func (s *Store) LoadCallSites() ([]graph.CallSite, error) {
 // Server.handleUpsertRule for the in-memory update that accompanies this call.
 func (s *Store) UpsertDynamicRule(r config.Rule) error {
 	now := time.Now().UTC().Format(time.RFC3339)
+	ruleType := r.RuleType
+	if ruleType == "" {
+		ruleType = "structural"
+	}
 	_, err := s.db.Exec(`
         INSERT INTO dynamic_rules
             (id, description, severity, from_file_pattern, to_file_pattern,
-             from_type, to_type, edge_type, to_name_pattern, created_at, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+             from_type, to_type, edge_type, to_name_pattern, rule_type, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             description=excluded.description, severity=excluded.severity,
             from_file_pattern=excluded.from_file_pattern,
@@ -1251,12 +1258,13 @@ func (s *Store) UpsertDynamicRule(r config.Rule) error {
             from_type=excluded.from_type, to_type=excluded.to_type,
             edge_type=excluded.edge_type,
             to_name_pattern=excluded.to_name_pattern,
+            rule_type=excluded.rule_type,
             updated_at=excluded.updated_at`,
 		r.ID, r.Description, r.Severity,
 		r.ForbiddenEdge.FromFilePattern, r.ForbiddenEdge.ToFilePattern,
 		string(r.ForbiddenEdge.FromType), string(r.ForbiddenEdge.ToType),
 		string(r.ForbiddenEdge.EdgeType), r.ForbiddenEdge.ToNamePattern,
-		now, now,
+		ruleType, now, now,
 	)
 	return err
 }
@@ -1268,7 +1276,7 @@ func (s *Store) LoadDynamicRules() ([]config.Rule, error) {
 	rows, err := s.db.Query(`
         SELECT id, description, severity,
             from_file_pattern, to_file_pattern, from_type, to_type,
-            edge_type, to_name_pattern
+            edge_type, to_name_pattern, rule_type
         FROM dynamic_rules
         ORDER BY created_at`)
 	if err != nil {
@@ -1284,7 +1292,7 @@ func (s *Store) LoadDynamicRules() ([]config.Rule, error) {
 			&r.ID, &r.Description, &r.Severity,
 			&r.ForbiddenEdge.FromFilePattern, &r.ForbiddenEdge.ToFilePattern,
 			&fromType, &toType, &edgeType,
-			&r.ForbiddenEdge.ToNamePattern,
+			&r.ForbiddenEdge.ToNamePattern, &r.RuleType,
 		); err != nil {
 			return nil, fmt.Errorf("scan dynamic_rule: %w", err)
 		}
