@@ -19,6 +19,17 @@ import (
 // tokensUsed estimates the token count of s using the ~4 chars/token heuristic.
 func tokensUsed(b *strings.Builder) int { return b.Len() / 4 }
 
+// applyIntentCarveConfig stamps intent-specific edge weights and directional
+// bias onto a CarveConfig returned by s.config.CarveConfig(). The per-intent
+// weight maps are pre-allocated package-level vars (graph/types.go) — zero
+// allocation. IntentID is set so the subgraph cache stores intent results
+// separately, preventing cross-intent cache collisions.
+func applyIntentCarveConfig(cfg *graph.CarveConfig, intent string) {
+	cfg.EdgeWeights = graph.IntentCarveWeights(intent)
+	cfg.DirectionBoost = graph.IntentDirectionBoost(intent)
+	cfg.IntentID = intent
+}
+
 // aggregatedImpact runs ImpactAnalysis and, for struct/interface nodes, aggregates
 // impact across all methods (same logic as handleGetImpact). This ensures plan/modify/review
 // intents show meaningful blast radius for struct types.
@@ -305,6 +316,7 @@ func (s *Server) assembleModifyContext(
 	node := resolved.bestNode
 	cfg := s.config.CarveConfig()
 	cfg.MaxDepth = 2
+	applyIntentCarveConfig(&cfg, "modify")
 
 	sg, err := s.graph.CarveEgoGraph(node.ID, cfg)
 	if err != nil {
@@ -409,6 +421,7 @@ func (s *Server) assembleUnderstandContext(
 	node := resolved.bestNode
 	cfg := s.config.CarveConfig()
 	cfg.MaxDepth = 2
+	applyIntentCarveConfig(&cfg, "understand")
 
 	sg, err := s.graph.CarveEgoGraph(node.ID, cfg)
 	if err != nil {
@@ -453,6 +466,7 @@ func (s *Server) assembleReviewContext(
 	node := resolved.bestNode
 	cfg := s.config.CarveConfig()
 	cfg.MaxDepth = 1
+	applyIntentCarveConfig(&cfg, "review")
 
 	sg, err := s.graph.CarveEgoGraph(node.ID, cfg)
 	if err != nil {
@@ -557,6 +571,7 @@ func (s *Server) assembleDebugContext(
 	node := resolved.bestNode
 	cfg := s.config.CarveConfig()
 	cfg.MaxDepth = 3
+	applyIntentCarveConfig(&cfg, "debug")
 
 	sg, err := s.graph.CarveEgoGraph(node.ID, cfg)
 	if err != nil {
@@ -761,6 +776,7 @@ func (s *Server) assemblePlanContext(
 	// Interface contracts.
 	cfg := s.config.CarveConfig()
 	cfg.MaxDepth = 1
+	applyIntentCarveConfig(&cfg, "plan")
 	if sg, sgErr := s.graph.CarveEgoGraph(node.ID, cfg); sgErr == nil {
 		var interfaces []string
 		for _, cn := range sg.Nodes {

@@ -32,11 +32,14 @@ func newSubgraphCache() *subgraphCache {
 }
 
 // cacheKeyFor produces a compact string key from a root node ID and the
-// CarveConfig fields that agents typically vary (depth, budget, minRel, decay).
-// EdgeWeights and ExcludeTypes are assumed to be the project defaults.
+// CarveConfig fields that affect BFS output.
+// DirectionBoost is included because intent-specific configs vary it.
+// IntentID is included to prevent intent-specific weight overrides from
+// colliding with each other or with the default (non-intent) subgraph.
 func cacheKeyFor(rootID NodeID, cfg CarveConfig) string {
-	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f",
-		rootID, cfg.MaxDepth, cfg.TokenBudget, cfg.MinRelevance, cfg.DecayFactor)
+	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s",
+		rootID, cfg.MaxDepth, cfg.TokenBudget, cfg.MinRelevance, cfg.DecayFactor,
+		cfg.DirectionBoost, cfg.IntentID)
 }
 
 // get returns a cached SubGraph if one exists and has not expired.

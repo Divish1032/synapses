@@ -501,3 +501,109 @@ func TestCamelWords_Empty(t *testing.T) {
 
 // prevent unused import errors
 var _ = fmt.Sprintf
+
+// ── applyIntentCarveConfig ────────────────────────────────────────────────────
+
+// TestApplyIntentCarveConfig_SetsAllThreeFields verifies that applyIntentCarveConfig
+// populates EdgeWeights, DirectionBoost, and IntentID correctly for each intent.
+func TestApplyIntentCarveConfig_SetsAllThreeFields(t *testing.T) {
+	cases := []struct {
+		intent        string
+		wantIntentID  string
+		wantBoost     float64
+		checkEdgeType graph.EdgeType
+		wantRelOp     string // "gt" or "lt" relative to DefaultEdgeWeights value
+	}{
+		// modify: DirectionBoost=0.3, IMPLEMENTS reduced vs default
+		{"modify", "modify", 0.3, graph.EdgeImplements, "lt"},
+		// debug: DirectionBoost=-0.3, DATA_FLOWS boosted vs default
+		{"debug", "debug", -0.3, graph.EdgeDataFlows, "gt"},
+		// review: DirectionBoost=0.0, IMPLEMENTS boosted vs default
+		{"review", "review", 0.0, graph.EdgeImplements, "gt"},
+		// understand: DirectionBoost=0.2, weights equal to default
+		{"understand", "understand", 0.2, graph.EdgeCalls, "eq"},
+		// plan: DirectionBoost=0.2, IMPLEMENTS boosted vs default
+		{"plan", "plan", 0.2, graph.EdgeImplements, "gt"},
+		// add: DirectionBoost=0.2, IMPORTS boosted vs default
+		{"add", "add", 0.2, graph.EdgeImports, "gt"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.intent, func(t *testing.T) {
+			cfg := graph.DefaultCarveConfig()
+			applyIntentCarveConfig(&cfg, tc.intent)
+
+			// IntentID must match the intent string.
+			if cfg.IntentID != tc.wantIntentID {
+				t.Errorf("IntentID = %q, want %q", cfg.IntentID, tc.wantIntentID)
+			}
+
+			// DirectionBoost must match expected value.
+			if cfg.DirectionBoost != tc.wantBoost {
+				t.Errorf("DirectionBoost = %v, want %v", cfg.DirectionBoost, tc.wantBoost)
+			}
+
+			// EdgeWeights must be non-nil and contain the spot-checked edge type.
+			if cfg.EdgeWeights == nil {
+				t.Fatal("EdgeWeights is nil after applyIntentCarveConfig")
+			}
+			got := cfg.EdgeWeights[tc.checkEdgeType]
+			def := graph.DefaultEdgeWeights[tc.checkEdgeType]
+			switch tc.wantRelOp {
+			case "gt":
+				if got <= def {
+					t.Errorf("EdgeWeights[%s] = %v, want > default %v", tc.checkEdgeType, got, def)
+				}
+			case "lt":
+				if got >= def {
+					t.Errorf("EdgeWeights[%s] = %v, want < default %v", tc.checkEdgeType, got, def)
+				}
+			case "eq":
+				if got != def {
+					t.Errorf("EdgeWeights[%s] = %v, want == default %v", tc.checkEdgeType, got, def)
+				}
+			}
+		})
+	}
+}
+
+// TestApplyIntentCarveConfig_ReplacesPointerNotMutatesDefault verifies that
+// applyIntentCarveConfig replaces cfg.EdgeWeights with an intent-specific map
+// and does NOT point to DefaultEdgeWeights (which would allow accidental
+// mutation of the global).
+func TestApplyIntentCarveConfig_ReplacesPointerNotMutatesDefault(t *testing.T) {
+	// For every intent, the resulting EdgeWeights pointer must differ from
+	// DefaultEdgeWeights for intents that change weights. Specifically, "modify"
+	// sets EdgeImplements to a lower value than the default.
+	intentsWithDifferentWeights := []string{"modify", "debug", "review", "add", "plan"}
+	for _, intent := range intentsWithDifferentWeights {
+		cfg := graph.DefaultCarveConfig()
+		applyIntentCarveConfig(&cfg, intent)
+
+		// The returned map must not be identical to DefaultEdgeWeights.
+		// We check by looking for at least one weight that differs.
+		differs := false
+		for et, w := range cfg.EdgeWeights {
+			if w != graph.DefaultEdgeWeights[et] {
+				differs = true
+				break
+			}
+		}
+		if !differs {
+			t.Errorf("intent=%q: EdgeWeights is identical to DefaultEdgeWeights — intent-specific weights not applied", intent)
+		}
+	}
+}
+
+// TestApplyIntentCarveConfig_UnderstandUsesDefaultWeights verifies that the
+// "understand" intent uses default weights (balanced/unchanged).
+func TestApplyIntentCarveConfig_UnderstandUsesDefaultWeights(t *testing.T) {
+	cfg := graph.DefaultCarveConfig()
+	applyIntentCarveConfig(&cfg, "understand")
+
+	for et, def := range graph.DefaultEdgeWeights {
+		if cfg.EdgeWeights[et] != def {
+			t.Errorf("understand EdgeWeights[%s] = %v, want default %v", et, cfg.EdgeWeights[et], def)
+		}
+	}
+}

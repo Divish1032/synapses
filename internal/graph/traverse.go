@@ -133,10 +133,17 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 				neighbor = e.From
 			}
 
-			// Forward CALLS (curr → neighbor) get a relevance boost to prefer
-			// callees over callers when the token budget forces pruning.
-			if cfg.DirectionBoost > 0 && e.Type == EdgeCalls && e.From == curr.id {
-				relevance *= (1.0 + cfg.DirectionBoost)
+			// Directional CALLS boost — intent-aware:
+			//   Positive DirectionBoost: forward edges (curr→neighbor) boosted
+			//     → pruner prefers callees (what this calls). Used by "modify".
+			//   Negative DirectionBoost: backward edges (neighbor→curr) boosted
+			//     → pruner prefers callers (what calls this). Used by "debug".
+			if cfg.DirectionBoost != 0 && e.Type == EdgeCalls {
+				if cfg.DirectionBoost > 0 && e.From == curr.id {
+					relevance *= (1.0 + cfg.DirectionBoost)
+				} else if cfg.DirectionBoost < 0 && e.To == curr.id {
+					relevance *= (1.0 - cfg.DirectionBoost) // double-neg: 1+|boost|
+				}
 			}
 
 			if prev, seen := visited[neighbor]; !seen || relevance > prev {
