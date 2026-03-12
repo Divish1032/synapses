@@ -129,6 +129,11 @@ func startSidecar(s Sidecar, quiet bool) error {
 	cmd.Stdout = lf
 	cmd.Stderr = lf
 	cmd.SysProcAttr = detachedSysProcAttr()
+	// Pass pulse URL to brain so it can emit usage telemetry.
+	// Only set if brain hasn't already configured pulse_url in its config file.
+	if s.Name == "brain" {
+		cmd.Env = append(os.Environ(), "BRAIN_PULSE_URL=http://localhost:11437")
+	}
 
 	if err := cmd.Start(); err != nil {
 		lf.Close()

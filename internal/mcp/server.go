@@ -66,12 +66,35 @@ type Server struct {
 	// the initial context slice wasn't sufficient. Entries expire after 30m.
 	ctxCallMu sync.Mutex
 	ctxCalls  map[string]*ctxCallEntry
+
+	// lastAgentID is the agent_id from the most recent session_init call.
+	// Used as a fallback when individual tool calls don't include agent_id,
+	// ensuring Pulse can attribute token savings to the correct agent.
+	lastAgentMu sync.RWMutex
+	lastAgentID string
 }
 
 // ctxCallEntry tracks how many times an agent requested context for an entity.
 type ctxCallEntry struct {
 	count   int
 	firstAt time.Time
+}
+
+// setLastAgent records the agent_id from the most recent session_init call.
+func (s *Server) setLastAgent(id string) {
+	if id == "" {
+		return
+	}
+	s.lastAgentMu.Lock()
+	s.lastAgentID = id
+	s.lastAgentMu.Unlock()
+}
+
+// getLastAgent returns the agent_id from the most recent session_init call, or "".
+func (s *Server) getLastAgent() string {
+	s.lastAgentMu.RLock()
+	defer s.lastAgentMu.RUnlock()
+	return s.lastAgentID
 }
 
 // New creates a Server wired to the given graph, config, and optional store.
@@ -106,6 +129,9 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		elapsed := time.Since(startTimes.pop(req.Params.Name))
 		success := result == nil || !result.IsError
 		agentID, _ := req.GetArguments()["agent_id"].(string)
+		if agentID == "" {
+			agentID = s.getLastAgent()
+		}
 		entity, _ := req.GetArguments()["entity"].(string)
 		if entity == "" {
 			entity, _ = req.GetArguments()["query"].(string)

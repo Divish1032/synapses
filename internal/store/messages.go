@@ -35,15 +35,10 @@ func (s *Store) SendMessage(fromAgent, toAgent, topic, payload, projectID string
 		toAgentVal = toAgent
 	}
 
-	var projectIDVal interface{}
-	if projectID != "" {
-		projectIDVal = projectID
-	}
-
 	_, err := s.db.Exec(
 		`INSERT INTO agent_messages (id, from_agent, to_agent, topic, payload, project_id, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, fromAgent, toAgentVal, topic, payload, projectIDVal, now,
+		id, fromAgent, toAgentVal, topic, payload, projectID, now,
 	)
 	if err != nil {
 		return "", fmt.Errorf("send message: %w", err)

@@ -30,6 +30,9 @@ func (s *Server) handleSendMessage(
 
 	toAgent := stringArg(req, "to_agent") // empty = broadcast
 	projectID := stringArg(req, "project_id")
+	if projectID == "" {
+		projectID = s.graph.RepoID()
+	}
 
 	// payload must be valid JSON; default to empty object if omitted.
 	payload := stringArg(req, "payload")
