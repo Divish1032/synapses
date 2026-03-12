@@ -475,7 +475,7 @@ func TestNotifyIntraProjectImpact_TaskNodeAlert_InProgressTask_Fires(t *testing.
 	if len(tasks) == 0 {
 		t.Fatal("no tasks returned after CreatePlan")
 	}
-	_, _ = st.UpdateTask(tasks[0].ID, "in_progress", "", "inprog-agent")
+	_, _, _ = st.UpdateTask(tasks[0].ID, "in_progress", "", "inprog-agent")
 
 	w.notifyIntraProjectImpact(changedFile)
 
@@ -533,7 +533,7 @@ func TestNotifyIntraProjectImpact_MultipleTasks_EachAssigneeNotified(t *testing.
 	tasks, _ := st.GetPendingTasks("", "agent-x")
 	for _, task := range tasks {
 		if task.Title == "task-y" {
-			_, _ = st.UpdateTask(task.ID, "in_progress", "", "agent-y")
+			_, _, _ = st.UpdateTask(task.ID, "in_progress", "", "agent-y")
 			// Force re-assign via direct update.
 			break
 		}

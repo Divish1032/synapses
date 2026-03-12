@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -84,12 +85,48 @@ func (s *Server) handleRemember(
 		}
 	}
 
-	return jsonResult(map[string]interface{}{
+	resp := map[string]interface{}{
 		"episode_id":   id,
 		"episode_type": episodeType,
 		"outcome":      outcome,
 		"message":      "Episode recorded. Use recall() to surface similar past episodes in future sessions.",
-	})
+	}
+
+	// F12: Auto-create a fix task when:
+	//   • episode_type is "failure", AND
+	//   • create_fix_task=true is explicitly requested, OR importance >= 0.7
+	// The fix task is linked to the episode's affected_nodes so agents can jump
+	// straight to the relevant code via get_context(task_id=...).
+	createFixTask, _ := req.GetArguments()["create_fix_task"].(bool)
+	if s.store != nil && episodeType == "failure" && (createFixTask || importance >= 0.7) {
+		var affectedNodes []string
+		_ = json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes)
+
+		fixTitle := "Fix: " + e.Decision
+		if len(fixTitle) > 120 {
+			fixTitle = fixTitle[:117] + "..."
+		}
+		fixDesc := fmt.Sprintf("Auto-created from failure episode %s.\nFailure: %s", id, e.Decision)
+		if e.Rationale != "" {
+			fixDesc += "\nRationale: " + e.Rationale
+		}
+		planID, perr := s.store.CreatePlan(fixTitle, fixDesc, agentID, []store.TaskInput{{
+			Title:       fixTitle,
+			Description: fixDesc,
+			Priority:    "p1",
+			LinkedNodes: affectedNodes,
+		}})
+		if perr == nil {
+			// Retrieve the newly created task ID (one task per auto-fix plan).
+			if tasks, terr := s.store.GetPendingTasks(planID, ""); terr == nil && len(tasks) > 0 {
+				resp["fix_task_id"] = tasks[0].ID
+				resp["fix_plan_id"] = planID
+				resp["message"] = resp["message"].(string) + fmt.Sprintf(" Fix task created (id=%s).", tasks[0].ID)
+			}
+		}
+	}
+
+	return jsonResult(resp)
 }
 
 // handleRecall searches episodic memory.

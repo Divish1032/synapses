@@ -20,6 +20,9 @@ type Plan struct {
 	CreatedBy   string `json:"created_by,omitempty"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
+	// CompletedAt is set (unix seconds) when all tasks in the plan reach done/cancelled.
+	// Zero means still active.
+	CompletedAt int64 `json:"completed_at,omitempty"`
 }
 
 // Task is a single actionable work item belonging to a plan.
@@ -85,9 +88,10 @@ func (t *TaskInput) UnmarshalJSON(data []byte) error {
 // PlanSummary is a plan with task completion counts, used by GetPlans.
 type PlanSummary struct {
 	Plan
-	TotalTasks   int `json:"total_tasks"`
-	PendingTasks int `json:"pending_tasks"`
-	DoneTasks    int `json:"done_tasks"`
+	TotalTasks   int  `json:"total_tasks"`
+	PendingTasks int  `json:"pending_tasks"`
+	DoneTasks    int  `json:"done_tasks"`
+	IsCompleted  bool `json:"is_completed"` // true when all tasks are done/cancelled
 }
 
 // CreatePlan persists a plan and its initial tasks atomically.
@@ -245,16 +249,25 @@ func (s *Store) UpdateLinkedNodes(taskID string, nodeIDs []string) error {
 // UpdateTask changes the status and optionally appends notes to a task.
 // agentID is optional — if non-empty it is recorded as the last_updated_by agent.
 // Appended notes are prefixed with a timestamp so they form an audit trail.
-// Returns the IDs of tasks that became unblocked as a result of this update
-// (only meaningful when status == "done").
-func (s *Store) UpdateTask(id, status, appendNotes, agentID string) ([]string, error) {
+// Returns:
+//   - unblocked: task IDs that became unblocked (only meaningful when status=="done")
+//   - planCompleted: true when this update caused the parent plan to auto-complete
+//     (all tasks in the plan are now done/cancelled)
+func (s *Store) UpdateTask(id, status, appendNotes, agentID string) (unblocked []string, planCompleted bool, err error) {
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	// When transitioning to in_progress, also stamp assigned_to so that
+	// get_session_state can look up failure episodes for the right agent (F12).
+	assignedTo := ""
+	if status == "in_progress" && agentID != "" {
+		assignedTo = agentID
+	}
 
 	if appendNotes != "" {
 		var existing string
 		row := s.db.QueryRow(`SELECT notes FROM tasks WHERE id = ?`, id)
-		if err := row.Scan(&existing); err != nil && err != sql.ErrNoRows {
-			return nil, fmt.Errorf("read task notes: %w", err)
+		if scanErr := row.Scan(&existing); scanErr != nil && scanErr != sql.ErrNoRows {
+			return nil, false, fmt.Errorf("read task notes: %w", scanErr)
 		}
 		newNote := fmt.Sprintf("[%s] %s", now, appendNotes)
 		if existing != "" {
@@ -262,26 +275,89 @@ func (s *Store) UpdateTask(id, status, appendNotes, agentID string) ([]string, e
 		} else {
 			existing = newNote
 		}
-		if _, err := s.db.Exec(
-			`UPDATE tasks SET status = ?, notes = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
-			status, existing, agentID, now, id,
-		); err != nil {
-			return nil, err
+		if assignedTo != "" {
+			if _, execErr := s.db.Exec(
+				`UPDATE tasks SET status = ?, notes = ?, assigned_to = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
+				status, existing, assignedTo, agentID, now, id,
+			); execErr != nil {
+				return nil, false, execErr
+			}
+		} else {
+			if _, execErr := s.db.Exec(
+				`UPDATE tasks SET status = ?, notes = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
+				status, existing, agentID, now, id,
+			); execErr != nil {
+				return nil, false, execErr
+			}
 		}
 	} else {
-		if _, err := s.db.Exec(
-			`UPDATE tasks SET status = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
-			status, agentID, now, id,
-		); err != nil {
-			return nil, err
+		if assignedTo != "" {
+			if _, execErr := s.db.Exec(
+				`UPDATE tasks SET status = ?, assigned_to = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
+				status, assignedTo, agentID, now, id,
+			); execErr != nil {
+				return nil, false, execErr
+			}
+		} else {
+			if _, execErr := s.db.Exec(
+				`UPDATE tasks SET status = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
+				status, agentID, now, id,
+			); execErr != nil {
+				return nil, false, execErr
+			}
 		}
 	}
 
-	// If marking done, find tasks that depended on this task and are now unblocked.
-	if status != "done" {
-		return nil, nil
+	// For terminal statuses, run both dependency unblocking and plan completion checks.
+	if status == "done" || status == "cancelled" {
+		// Fetch the plan_id of this task so we can check plan completion.
+		var planID string
+		_ = s.db.QueryRow(`SELECT plan_id FROM tasks WHERE id = ?`, id).Scan(&planID)
+
+		if status == "done" {
+			unblocked, err = s.findNewlyUnblocked(id)
+			if err != nil {
+				return nil, false, err
+			}
+		}
+		planCompleted, err = checkAndCompletePlan(s.db, planID)
+		if err != nil {
+			return unblocked, false, err
+		}
 	}
-	return s.findNewlyUnblocked(id)
+	return unblocked, planCompleted, nil
+}
+
+// checkAndCompletePlan marks a plan as completed if every task in it has
+// reached a terminal status (done or cancelled). It is idempotent: a plan
+// that is already completed (completed_at != 0) is never double-stamped.
+// Returns true when the plan was just transitioned to completed.
+func checkAndCompletePlan(db *sql.DB, planID string) (bool, error) {
+	if planID == "" {
+		return false, nil
+	}
+	// A plan completes when it has at least one task and all tasks are terminal.
+	var totalTasks, openTasks int
+	row := db.QueryRow(`
+		SELECT COUNT(*),
+		       COALESCE(SUM(CASE WHEN status NOT IN ('done','cancelled') THEN 1 ELSE 0 END), 0)
+		FROM tasks WHERE plan_id = ?`, planID)
+	if err := row.Scan(&totalTasks, &openTasks); err != nil {
+		return false, fmt.Errorf("check plan completion: %w", err)
+	}
+	if totalTasks == 0 || openTasks > 0 {
+		return false, nil
+	}
+	// Stamp completed_at atomically — only rows that are still active (0) are updated.
+	res, err := db.Exec(
+		`UPDATE plans SET completed_at = ? WHERE id = ? AND completed_at = 0`,
+		time.Now().Unix(), planID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("mark plan complete: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // findNewlyUnblocked returns IDs of pending tasks that had `completedID` as
@@ -421,6 +497,7 @@ func (s *Store) taskStatusByID(ids []string) (map[string]string, error) {
 func (s *Store) GetPlans() ([]PlanSummary, error) {
 	rows, err := s.db.Query(`
 		SELECT p.id, p.title, p.description, p.created_by, p.created_at, p.updated_at,
+		       p.completed_at,
 		       COUNT(t.id)                                           AS total,
 		       SUM(CASE WHEN t.status IN ('pending','in_progress') THEN 1 ELSE 0 END) AS pending,
 		       SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END)  AS done
@@ -436,14 +513,16 @@ func (s *Store) GetPlans() ([]PlanSummary, error) {
 
 	var summaries []PlanSummary
 	for rows.Next() {
-		var s PlanSummary
+		var ps PlanSummary
 		if err := rows.Scan(
-			&s.ID, &s.Title, &s.Description, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
-			&s.TotalTasks, &s.PendingTasks, &s.DoneTasks,
+			&ps.ID, &ps.Title, &ps.Description, &ps.CreatedBy, &ps.CreatedAt, &ps.UpdatedAt,
+			&ps.CompletedAt,
+			&ps.TotalTasks, &ps.PendingTasks, &ps.DoneTasks,
 		); err != nil {
 			return nil, err
 		}
-		summaries = append(summaries, s)
+		ps.IsCompleted = ps.CompletedAt != 0
+		summaries = append(summaries, ps)
 	}
 	return summaries, rows.Err()
 }

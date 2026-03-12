@@ -301,6 +301,9 @@ func (s *Server) handleSaveSessionState(
 
 // handleGetSessionState returns the saved session state for a task, enabling
 // exact-moment resumption of work started in a previous LLM session.
+//
+// F12: Also returns failure_context — recent failure episodes for the task's
+// assigned agent (last 7 days) so the resuming session knows what went wrong.
 func (s *Server) handleGetSessionState(
 	_ context.Context,
 	req mcp.CallToolRequest,
@@ -318,19 +321,50 @@ func (s *Server) handleGetSessionState(
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("get session state: %v", err)), nil
 	}
+
+	// F12: Fetch recent failure episodes for the task's assigned agent so the
+	// resuming session can see what previously went wrong (failure-point resumption).
+	type failureSummary struct {
+		Decision  string `json:"decision"`
+		Outcome   string `json:"outcome"`
+		Trigger   string `json:"trigger,omitempty"`
+		CreatedAt int64  `json:"created_at"`
+	}
+	var failureCtx []failureSummary
+	if task, terr := s.store.GetTask(taskID); terr == nil && task.AssignedTo != "" {
+		if eps, eerr := s.store.GetEpisodes("", task.AssignedTo, "failure", nil, 5, 7); eerr == nil {
+			for _, ep := range eps {
+				failureCtx = append(failureCtx, failureSummary{
+					Decision:  ep.Decision,
+					Outcome:   ep.Outcome,
+					Trigger:   ep.Trigger,
+					CreatedAt: ep.CreatedAt,
+				})
+			}
+		}
+	}
+
 	if state == nil {
-		return jsonResult(map[string]interface{}{
+		resp := map[string]interface{}{
 			"task_id": taskID,
 			"found":   false,
 			"message": "No session state saved for this task yet. Call save_session_state() while working to enable resumption.",
-		})
+		}
+		if len(failureCtx) > 0 {
+			resp["failure_context"] = failureCtx
+		}
+		return jsonResult(resp)
 	}
 
-	return jsonResult(map[string]interface{}{
+	resp := map[string]interface{}{
 		"task_id": taskID,
 		"found":   true,
 		"state":   state,
-	})
+	}
+	if len(failureCtx) > 0 {
+		resp["failure_context"] = failureCtx
+	}
+	return jsonResult(resp)
 }
 
 // handleUpdateTask marks a task as done, in_progress, or cancelled, and
@@ -363,7 +397,7 @@ func (s *Server) handleUpdateTask(
 
 	s.upsertAgentIfNeeded(agentID)
 
-	unblocked, err := s.store.UpdateTask(id, status, notes, agentID)
+	unblocked, planCompleted, err := s.store.UpdateTask(id, status, notes, agentID)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("update task: %v", err)), nil
 	}
@@ -397,6 +431,27 @@ func (s *Server) handleUpdateTask(
 		fmt.Fprintf(os.Stderr, "synapses: append %s event: %v\n", eventType, err)
 	}
 
+	// F11: If this task completion closed the entire plan, emit a plan_completed
+	// event so agents polling get_events see the milestone.
+	if planCompleted {
+		// Best-effort: fetch plan title for a richer event payload.
+		planTitle := ""
+		if task, err := s.store.GetTask(id); err == nil {
+			if plans, err := s.store.GetPlans(); err == nil {
+				for _, p := range plans {
+					if p.ID == task.PlanID {
+						planTitle = p.Title
+						break
+					}
+				}
+			}
+		}
+		if err := s.store.AppendEvent("plan_completed", agentID,
+			fmt.Sprintf(`{"task_id":%q,"plan_title":%q}`, id, planTitle)); err != nil {
+			fmt.Fprintf(os.Stderr, "synapses: append plan_completed event: %v\n", err)
+		}
+	}
+
 	// B1: Reflective Synthesis — when a task is marked done, annotate its
 	// linked nodes with a retrospective note so future agents see the task
 	// history in get_context. Runs in a goroutine so it never delays the
@@ -413,6 +468,10 @@ func (s *Server) handleUpdateTask(
 	if len(unblocked) > 0 {
 		result["newly_unblocked"] = unblocked
 		result["message"] = fmt.Sprintf("Task updated to %q. %d task(s) are now unblocked: %v", status, len(unblocked), unblocked)
+	}
+	if planCompleted {
+		result["plan_completed"] = true
+		result["message"] = result["message"].(string) + " All tasks in the plan are now complete."
 	}
 	return jsonResult(result)
 }
@@ -496,7 +555,7 @@ func (s *Server) handleHandoffTask(
 	if notes != "" {
 		handoffNote += ". " + notes
 	}
-	if _, err := s.store.UpdateTask(taskID, "in_progress", handoffNote, toAgent); err != nil {
+	if _, _, err := s.store.UpdateTask(taskID, "in_progress", handoffNote, toAgent); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("update task: %v", err)), nil
 	}
 

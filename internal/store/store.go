@@ -436,6 +436,8 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE nodes ADD COLUMN line_count INTEGER NOT NULL DEFAULT 0`,
 		// v1.0.4: Agent identity columns
 		`ALTER TABLE plans ADD COLUMN created_by TEXT NOT NULL DEFAULT ''`,
+		// F11: Smart Task Lifecycle — plan auto-completion timestamp (unix seconds, 0=active).
+		`ALTER TABLE plans ADD COLUMN completed_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE tasks ADD COLUMN assigned_to TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE tasks ADD COLUMN last_updated_by TEXT NOT NULL DEFAULT ''`,
 		// v1.0.4: Task dependencies

@@ -68,10 +68,10 @@ func TestUpdateTask_StatusAndNotes(t *testing.T) {
 	}
 	taskID := tasks[0].ID
 
-	if _, err := st.UpdateTask(taskID, "in_progress", "started work", ""); err != nil {
+	if _, _, err := st.UpdateTask(taskID, "in_progress", "started work", ""); err != nil {
 		t.Fatalf("UpdateTask in_progress: %v", err)
 	}
-	if _, err := st.UpdateTask(taskID, "done", "all done", ""); err != nil {
+	if _, _, err := st.UpdateTask(taskID, "done", "all done", ""); err != nil {
 		t.Fatalf("UpdateTask done: %v", err)
 	}
 
@@ -91,7 +91,7 @@ func TestGetPlans_Summary(t *testing.T) {
 	})
 
 	tasks, _ := st.GetPendingTasks(planID, "")
-	_, _ = st.UpdateTask(tasks[0].ID, "done", "", "")
+	_, _, _ = st.UpdateTask(tasks[0].ID, "done", "", "")
 
 	plans, err := st.GetPlans()
 	if err != nil {

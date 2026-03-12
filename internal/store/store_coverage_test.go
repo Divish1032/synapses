@@ -45,7 +45,7 @@ func TestUpdateTask_UnblocksDependent(t *testing.T) {
 	}
 
 	// Mark A as done — should call findNewlyUnblocked.
-	unblocked, err := st.UpdateTask(taskAID, "done", "", "agent-x")
+	unblocked, _, err := st.UpdateTask(taskAID, "done", "", "agent-x")
 	if err != nil {
 		t.Fatalf("UpdateTask done: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestUpdateTask_TwoDeps_OnlyOneComplete(t *testing.T) {
 	})
 
 	// Mark only A as done — B should NOT be unblocked (C still pending).
-	unblocked, err := st.UpdateTask(taskAID, "done", "", "")
+	unblocked, _, err := st.UpdateTask(taskAID, "done", "", "")
 	if err != nil {
 		t.Fatalf("UpdateTask: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestUpdateTask_NotDone_NoUnblocked(t *testing.T) {
 	taskID := tasks[0].ID
 
 	// in_progress status does not trigger findNewlyUnblocked.
-	unblocked, err := st.UpdateTask(taskID, "in_progress", "", "")
+	unblocked, _, err := st.UpdateTask(taskID, "in_progress", "", "")
 	if err != nil {
 		t.Fatalf("UpdateTask in_progress: %v", err)
 	}
