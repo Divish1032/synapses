@@ -220,6 +220,20 @@ func (s *Server) handleGetContext(
 	if len(nodes) == 0 {
 		nodes = s.graph.FindByPattern(entityName)
 	}
+	// Dotted-name resolution: "Graph.New" where "New" is a standalone function
+	// (not a method). FindByName only does suffix matching on stored names, so
+	// "Graph.New" won't match a node named "New". Split on dot and filter by
+	// whether the prefix appears in the node's ID or file path.
+	if len(nodes) == 0 && strings.Contains(entityName, ".") {
+		parts := strings.SplitN(entityName, ".", 2)
+		prefix, method := strings.ToLower(parts[0]), parts[1]
+		for _, n := range s.graph.FindByName(method) {
+			if strings.Contains(strings.ToLower(string(n.ID)), prefix) ||
+				strings.Contains(strings.ToLower(n.File), prefix) {
+				nodes = append(nodes, n)
+			}
+		}
+	}
 	if len(nodes) == 0 {
 		// Auto-fuzzy: surface candidates inline so agents don't need an extra find_entity round-trip.
 		candidates := s.inlineFindEntity(entityName)
@@ -2336,6 +2350,9 @@ func (s *Server) handleSessionInit(
 ) (*mcp.CallToolResult, error) {
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 	s.upsertAgentIfNeeded(agentID)
+	// Remember this agent so subsequent tool calls that omit agent_id
+	// can still be attributed correctly in Pulse analytics.
+	s.setLastAgent(agentID)
 
 	// Notify pulse of session start so agent stats are trackable.
 	if pc := s.getPulseClient(); pc != nil && agentID != "" {
