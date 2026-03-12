@@ -472,6 +472,9 @@ func (s *Server) handleGetContext(
 
 	// Pulse telemetry: emit context delivery metrics (token savings vs baseline).
 	agentID, _ := req.GetArguments()["agent_id"].(string)
+	if agentID == "" {
+		agentID = s.getLastAgent()
+	}
 	s.emitContextDelivery(
 		"get_context", agentID, entityName, best.File,
 		dc, sg.Nodes, sg.Edges,
@@ -1291,16 +1294,28 @@ func (s *Server) handleUpsertRule(
 		return mcp.NewToolResultError("severity must be 'error' or 'warning'"), nil
 	}
 
+	fe := config.ForbiddenEdge{
+		EdgeType:        graph.EdgeType(stringArg(req, "edge_type")),
+		FromFilePattern: stringArg(req, "from_file_pattern"),
+		ToFilePattern:   stringArg(req, "to_file_pattern"),
+		ToNamePattern:   stringArg(req, "to_name_pattern"),
+	}
+
+	// Auto-detect rule type: if no ForbiddenEdge fields are set, this is a
+	// behavioral/agent rule (conversation-level constraint), not a structural
+	// code-graph rule. Agent rules are surfaced in session_init as
+	// agent_constraints rather than being checked against the call graph.
+	ruleType := "structural"
+	if fe.EdgeType == "" && fe.FromFilePattern == "" && fe.ToFilePattern == "" && fe.ToNamePattern == "" {
+		ruleType = "agent"
+	}
+
 	rule := config.Rule{
-		ID:          ruleID,
-		Description: description,
-		Severity:    severity,
-		ForbiddenEdge: config.ForbiddenEdge{
-			EdgeType:        graph.EdgeType(stringArg(req, "edge_type")),
-			FromFilePattern: stringArg(req, "from_file_pattern"),
-			ToFilePattern:   stringArg(req, "to_file_pattern"),
-			ToNamePattern:   stringArg(req, "to_name_pattern"),
-		},
+		ID:            ruleID,
+		Description:   description,
+		Severity:      severity,
+		ForbiddenEdge: fe,
+		RuleType:      ruleType,
 	}
 
 	// Persist first — if the DB write fails, don't mutate in-memory state.
@@ -1328,7 +1343,8 @@ func (s *Server) handleUpsertRule(
 	// Retroactive scan: check existing graph edges against the new rule and
 	// log any violations so get_violations() surfaces them immediately without
 	// requiring a new validate_plan call.
-	if s.store != nil {
+	// Agent rules have no ForbiddenEdge, so skip the graph scan for them.
+	if s.store != nil && ruleType == "structural" {
 		go func(r config.Rule) {
 			snapshot := config.Config{Rules: []config.Rule{r}}
 			violations := snapshot.CheckViolations(s.graph)
@@ -1341,9 +1357,10 @@ func (s *Server) handleUpsertRule(
 	}
 
 	return jsonResult(map[string]interface{}{
-		"status":  "ok",
-		"rule_id": ruleID,
-		"message": fmt.Sprintf("Rule %q is now active.", ruleID),
+		"status":    "ok",
+		"rule_id":   ruleID,
+		"rule_type": ruleType,
+		"message":   fmt.Sprintf("Rule %q (%s) is now active.", ruleID, ruleType),
 	})
 }
 
@@ -1806,6 +1823,9 @@ func (s *Server) handleGetFileContext(
 	}
 
 	agentIDFC, _ := req.GetArguments()["agent_id"].(string)
+	if agentIDFC == "" {
+		agentIDFC = s.getLastAgent()
+	}
 
 	if len(fileSet) == 1 {
 		// Single file — keep existing flat format.
@@ -2694,6 +2714,30 @@ func (s *Server) handleSessionInit(
 			"available": s.getPulseClient() != nil,
 			"note":      "enables agent analytics and token tracking",
 		},
+	}
+
+	// ── 8. Agent constraints (behavioral rules) ───────────────────────────
+	// Surface all agent-type rules (no ForbiddenEdge, conversation-level constraints)
+	// so every new session inherits decisions made in prior sessions without
+	// the agent needing to re-discover or re-ask for them.
+	s.rulesMu.RLock()
+	var agentConstraints []map[string]string
+	for _, r := range s.config.Rules {
+		if r.IsAgentRule() {
+			agentConstraints = append(agentConstraints, map[string]string{
+				"id":          r.ID,
+				"description": r.Description,
+				"severity":    r.Severity,
+			})
+		}
+	}
+	s.rulesMu.RUnlock()
+	if len(agentConstraints) > 0 {
+		resp["agent_constraints"] = map[string]interface{}{
+			"count":       len(agentConstraints),
+			"constraints": agentConstraints,
+			"note":        "These behavioral rules were established in prior sessions. Apply them throughout this session.",
+		}
 	}
 
 	// ── Update agent context profile ─────────────────────────────────────

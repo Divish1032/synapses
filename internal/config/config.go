@@ -243,9 +243,20 @@ type Rule struct {
 	// Description explains what the rule prevents and why.
 	Description string `json:"description"`
 	// ForbiddenEdge describes the edge pattern that must never exist.
+	// Empty for agent-type rules (no code-graph check).
 	ForbiddenEdge ForbiddenEdge `json:"forbidden_edge"`
 	// Severity is one of "error" or "warning".
 	Severity string `json:"severity"`
+	// RuleType distinguishes structural rules (code-graph enforcement) from
+	// agent rules (behavioral constraints surfaced in session_init).
+	// Values: "structural" (default) or "agent".
+	RuleType string `json:"rule_type,omitempty"`
+}
+
+// IsAgentRule reports whether this rule is a behavioral agent constraint
+// (no code-graph check, surfaced in session_init instead of violations).
+func (r Rule) IsAgentRule() bool {
+	return r.RuleType == "agent"
 }
 
 // ForbiddenEdge specifies a pattern for edges that must not exist in the graph.
@@ -501,6 +512,13 @@ func matchFilePath(pattern, filePath string) bool {
 // matchesForbidden returns true if the given edge matches the forbidden pattern.
 // All non-empty pattern fields must match for the rule to fire.
 func matchesForbidden(p ForbiddenEdge, e *graph.Edge, from, to *graph.Node) bool {
+	// An all-empty ForbiddenEdge means no code-graph check (agent/behavioral rule).
+	// Without this guard, every field check would be skipped and the function
+	// would return true for every edge, generating spurious violations.
+	if p.EdgeType == "" && p.FromType == "" && p.ToType == "" &&
+		p.FromFilePattern == "" && p.ToFilePattern == "" && p.ToNamePattern == "" {
+		return false
+	}
 	if p.EdgeType != "" && e.Type != p.EdgeType {
 		return false
 	}
