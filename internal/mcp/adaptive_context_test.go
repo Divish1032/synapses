@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
+
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -352,6 +354,81 @@ func TestHandleGetContext_ExplicitDepthOverridesAdaptive(t *testing.T) {
 	m := mustResult(t, result, nil)
 	if _, ok := m["adaptive_hint"]; !ok {
 		t.Error("adaptive_hint should be present even when explicit depth overrides adaptive depth")
+	}
+}
+
+// TestAdaptiveCarveConfig_PartialOutcome_NoBoost ensures outcome="partial" does
+// NOT trigger the unhelpful-feedback depth boost (only outcome="failure" does).
+func TestAdaptiveCarveConfig_PartialOutcome_NoBoost(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	cfg := s.config.CarveConfig()
+	origDepth := cfg.MaxDepth
+
+	_, err := s.store.RememberEpisode(store.Episode{
+		AgentID:     "agent-008",
+		ProjectID:   "test-repo",
+		EpisodeType: "pattern",
+		Outcome:     "partial", // not "failure" — must NOT trigger boost
+		Trigger:     `explicit feedback on get_context("AuthLogin")`,
+		Decision:    `Context for "AuthLogin" was partially helpful`,
+		Tags:        `["feedback","context_quality","explicit"]`,
+		Importance:  0.3,
+		CreatedAt:   time.Now().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("RememberEpisode: %v", err)
+	}
+
+	forceFullDetail := s.adaptiveCarveConfig(&cfg, "AuthLogin", "agent-008")
+
+	if cfg.MaxDepth != origDepth {
+		t.Errorf("partial outcome must not boost depth: got %d, want %d", cfg.MaxDepth, origDepth)
+	}
+	if forceFullDetail {
+		t.Error("expected forceFullDetail=false for partial-outcome context_quality episode")
+	}
+}
+
+// TestHandleGetContext_CompactFormat_AdaptiveHintInText verifies that the
+// adaptive hint appears in compact (plain-text) responses, and that
+// detail_level is implicitly forced to "full" when adaptive expansion fired.
+func TestHandleGetContext_CompactFormat_AdaptiveHintInText(t *testing.T) {
+	s := newAdaptiveTestServer(t)
+
+	_, err := s.store.RememberEpisode(store.Episode{
+		AgentID:     "agent-z",
+		ProjectID:   "test-repo",
+		EpisodeType: "pattern",
+		Outcome:     "failure",
+		Trigger:     `explicit feedback on get_context("AuthService")`,
+		Tags:        `["feedback","context_quality","explicit"]`,
+		Importance:  0.4,
+		CreatedAt:   time.Now().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("RememberEpisode: %v", err)
+	}
+
+	req := callTool(map[string]any{
+		"entity":   "AuthService",
+		"agent_id": "agent-z",
+		"format":   "compact",
+		// no explicit detail_level — adaptive should force "full"
+	})
+	result, err := s.handleGetContext(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleGetContext: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %v", result.Content)
+	}
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	// Adaptive hint appended by serializeCompact when dc.AdaptiveHint != "".
+	if !strings.Contains(tc.Text, "prior feedback") {
+		t.Errorf("compact text should contain adaptive hint, got:\n%s", tc.Text)
 	}
 }
 
