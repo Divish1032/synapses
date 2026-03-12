@@ -198,8 +198,31 @@ func (pm *PeerManager) BroadcastIntent(agentID, scope, scopeType string) {
 	}
 }
 
+// syncPeerAgents fetches active agents from a connected peer and upserts them
+// into the local store as remote agents. This makes cross-project agent presence
+// visible in session_init's agent_awareness section without any import-cycle risk
+// — the data flows through the store, just like cross_project_impact messages.
+func (pm *PeerManager) syncPeerAgents(peerName string, cli *PeerClient) {
+	if pm.st == nil {
+		return
+	}
+	agents, err := cli.FetchAgents()
+	if err != nil {
+		return // peer offline or doesn't support /agents yet — silent skip
+	}
+	for _, a := range agents {
+		remoteID := peerName + "::" + a.ID
+		activity := &store.AgentActivity{
+			TaskTitle: a.Task,
+			Focus:     a.Focus,
+		}
+		_ = pm.st.UpsertRemoteAgent(remoteID, peerName, activity, a.Scopes)
+	}
+}
+
 // StartHealthMonitor starts a background goroutine that re-pings all peers
-// every interval. Call Stop() to shut it down cleanly.
+// every interval and syncs their active agents into the local store.
+// Call Stop() to shut it down cleanly.
 func (pm *PeerManager) StartHealthMonitor(interval time.Duration) {
 	go func() {
 		t := time.NewTicker(interval)
@@ -208,6 +231,16 @@ func (pm *PeerManager) StartHealthMonitor(interval time.Duration) {
 			select {
 			case <-t.C:
 				pm.Connect()
+				// Sync remote agent presence after each health check.
+				pm.mu.RLock()
+				clients := pm.clients
+				statuses := pm.statuses
+				pm.mu.RUnlock()
+				for i, cli := range clients {
+					if i < len(statuses) && statuses[i].Connected {
+						go pm.syncPeerAgents(statuses[i].Name, cli)
+					}
+				}
 			case <-pm.stopCh:
 				return
 			}

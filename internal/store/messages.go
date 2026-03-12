@@ -24,9 +24,18 @@ type Message struct {
 // SendMessage inserts a new message into the bus and returns the generated
 // message ID. toAgent may be empty to broadcast to all agents.
 // payload should be a valid JSON string (e.g. "{}").
+// messageTTL defines retention windows for the agent_messages table.
+// Read messages are cheap to discard early; unread messages are kept longer
+// so agents that are temporarily offline don't miss broadcasts.
+const (
+	msgReadTTL   = 24 * time.Hour      // prune already-read messages after 24 h
+	msgUnreadTTL = 7 * 24 * time.Hour  // prune unread messages after 7 days
+)
+
 func (s *Store) SendMessage(fromAgent, toAgent, topic, payload, projectID string) (string, error) {
 	id := newID()
-	now := time.Now().Unix()
+	now := time.Now()
+	nowUnix := now.Unix()
 
 	// Normalise: store empty string as SQL NULL for to_agent so the
 	// IS NULL broadcast query works correctly.
@@ -35,13 +44,30 @@ func (s *Store) SendMessage(fromAgent, toAgent, topic, payload, projectID string
 		toAgentVal = toAgent
 	}
 
-	_, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", fmt.Errorf("send message: begin tx: %w", err)
+	}
+
+	if _, err := tx.Exec(
 		`INSERT INTO agent_messages (id, from_agent, to_agent, topic, payload, project_id, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, fromAgent, toAgentVal, topic, payload, projectID, now,
-	)
-	if err != nil {
+		id, fromAgent, toAgentVal, topic, payload, projectID, nowUnix,
+	); err != nil {
+		_ = tx.Rollback()
 		return "", fmt.Errorf("send message: %w", err)
+	}
+
+	// Prune stale messages: read messages after 24 h, unread after 7 days.
+	readCutoff := now.Add(-msgReadTTL).Unix()
+	unreadCutoff := now.Add(-msgUnreadTTL).Unix()
+	_, _ = tx.Exec(
+		`DELETE FROM agent_messages WHERE (read_at IS NOT NULL AND created_at < ?) OR created_at < ?`,
+		readCutoff, unreadCutoff,
+	)
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("send message: commit: %w", err)
 	}
 	return id, nil
 }
@@ -111,6 +137,17 @@ func (s *Store) GetMessages(agentID string, sinceSeq int64, topicFilter string, 
 		return nil, 0, fmt.Errorf("iterate messages: %w", err)
 	}
 	return msgs, latestSeq, nil
+}
+
+// CountUnreadMessages returns the number of unread messages visible to agentID
+// (direct messages to the agent or broadcasts). Fast indexed count query.
+func (s *Store) CountUnreadMessages(agentID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM agent_messages
+		WHERE read_at IS NULL
+		  AND (to_agent = ? OR to_agent IS NULL)`, agentID).Scan(&count)
+	return count, err
 }
 
 // MarkRead stamps a message as read by the given agent.

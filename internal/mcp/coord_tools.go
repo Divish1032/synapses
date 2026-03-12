@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 // handleGetPlans lists all plans with task completion counts.
@@ -120,7 +122,8 @@ func (s *Server) handleLinkTaskNodes(
 }
 
 // handleGetAgents returns all agents that have interacted with Synapses,
-// ordered by last-seen timestamp descending.
+// ordered by last-seen timestamp descending. Includes presence classification,
+// current task/focus, and active work claims per agent.
 func (s *Server) handleGetAgents(
 	_ context.Context,
 	_ mcp.CallToolRequest,
@@ -132,13 +135,37 @@ func (s *Server) handleGetAgents(
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("get agents: %v", err)), nil
 	}
+
+	// Attach active claims per agent in a single query.
+	allClaims, _ := s.store.GetAllClaims()
+	claimMap := make(map[string][]store.WorkClaim)
+	for _, c := range allClaims {
+		claimMap[c.AgentID] = append(claimMap[c.AgentID], c)
+	}
+
+	type agentWithClaims struct {
+		store.Agent
+		Claims []store.WorkClaim `json:"claims,omitempty"`
+	}
+	enriched := make([]agentWithClaims, len(agents))
+	active := 0
+	for i, a := range agents {
+		enriched[i] = agentWithClaims{Agent: a}
+		if cls, ok := claimMap[a.ID]; ok {
+			enriched[i].Claims = cls
+		}
+		if a.Presence == "active" || a.Presence == "idle" {
+			active++
+		}
+	}
+
 	summary := "no agents seen yet"
 	if len(agents) > 0 {
-		summary = fmt.Sprintf("%d agent(s) known", len(agents))
+		summary = fmt.Sprintf("%d agent(s) known (%d currently active/idle)", len(agents), active)
 	}
 	return jsonResult(map[string]interface{}{
 		"summary": summary,
-		"agents":  agents,
+		"agents":  enriched,
 	})
 }
 
@@ -255,7 +282,10 @@ func (s *Server) handleGetConflicts(
 
 // handleGetEvents returns events from the pull-based event log with seq >
 // since_seq. Use the latest_event_seq from session_init as the starting cursor.
-// Event types: file_change, task_update, annotation_added, agent_activity.
+// Emitted event types: file_change, agent_examining, claim_work, claim_released,
+// agent_message, agent_session_start, agent_task_started, agent_task_completed,
+// task_handoff, annotation_added, failure_recorded, rule_violation,
+// intent_received, intent_broadcast, proposal_created, proposal_voted, proposal_resolved.
 func (s *Server) handleGetEvents(
 	_ context.Context,
 	req mcp.CallToolRequest,

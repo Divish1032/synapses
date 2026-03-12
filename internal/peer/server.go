@@ -124,6 +124,7 @@ func (ps *PeerServer) handler() http.Handler {
 	mux.HandleFunc("/api/v1/api-surface", ps.auth(ps.handleApiSurface))
 	mux.HandleFunc("/api/v1/query", ps.auth(ps.handleQuery))
 	mux.HandleFunc("/api/v1/claims", ps.auth(ps.handleClaims))
+	mux.HandleFunc("/api/v1/agents", ps.auth(ps.handleAgents))
 	mux.HandleFunc("/api/v1/intents", ps.auth(ps.handleIntents))
 	return mux
 }
@@ -302,6 +303,25 @@ func (ps *PeerServer) handleClaims(w http.ResponseWriter, _ *http.Request) {
 		claims = []store.WorkClaim{}
 	}
 	writeJSON(w, http.StatusOK, claims)
+}
+
+// handleAgents returns active agents on this peer (seen in the last 15 minutes).
+// Consumers use this to populate cross-project agent awareness in session_init.
+func (ps *PeerServer) handleAgents(w http.ResponseWriter, _ *http.Request) {
+	if ps.st == nil {
+		writeJSON(w, http.StatusOK, []store.AgentSummary{})
+		return
+	}
+	// excludeAgentID="" — return all local agents; remote side will filter if needed.
+	agents, err := ps.st.GetActiveAgents("")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if agents == nil {
+		agents = []store.AgentSummary{}
+	}
+	writeJSON(w, http.StatusOK, agents)
 }
 
 // handleIntents receives an IntentMessage from a peer and records it as an

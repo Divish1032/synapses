@@ -173,3 +173,39 @@ func TestHandleClaims_NoStore(t *testing.T) {
 		t.Fatalf("claims status = %d, want 200", w.Code)
 	}
 }
+
+func TestHandleAgents_NoStore(t *testing.T) {
+	g := buildServerGraph(t)
+	ps := peer.NewPeerServer(g, buildCfg("tok"), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	ps.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("agents status = %d, want 200", w.Code)
+	}
+	// Response must be an empty array, never null.
+	var result []interface{}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result == nil {
+		t.Errorf("response body must be [] not null")
+	}
+}
+
+func TestHandleAgents_RequiresAuth(t *testing.T) {
+	g := buildServerGraph(t)
+	ps := peer.NewPeerServer(g, buildCfg("secret"), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
+	// No auth header — must be rejected.
+	w := httptest.NewRecorder()
+	ps.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without auth, got %d", w.Code)
+	}
+}

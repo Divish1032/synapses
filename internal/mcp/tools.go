@@ -481,7 +481,8 @@ func (s *Server) handleGetContext(
 		false,                   // cache_hit (packet cache is internal; context always delivered fresh)
 	)
 
-	// Multi-agent awareness: emit event so other agents can see what's being examined.
+	// Multi-agent awareness: emit event and update focus so other agents can
+	// see what this agent is currently examining.
 	if agentID != "" && s.store != nil {
 		payload, _ := json.Marshal(map[string]string{
 			"entity": entityName,
@@ -490,6 +491,7 @@ func (s *Server) handleGetContext(
 		if err := s.store.AppendEvent("agent_examining", agentID, string(payload)); err != nil {
 			log.Printf("mcp: append agent_examining event: %v", err)
 		}
+		s.upsertAgentWithActivity(agentID, &store.AgentActivity{Focus: entityName})
 	}
 
 	// format=compact returns a natural-language briefing instead of the default JSON blob.
@@ -2359,13 +2361,33 @@ func (s *Server) handleSessionInit(
 		go pc.RecordSessionEvent(agentID, "start")
 	}
 
+	// Emit session-start event so peers polling get_events see a new agent arrive.
+	if s.store != nil && agentID != "" {
+		_ = s.store.AppendEvent("agent_session_start", agentID,
+			fmt.Sprintf(`{"agent_id":%q}`, agentID))
+	}
+
 	// ── Look up agent context profile for incremental delivery ───────────
 	var agentCtx *store.AgentContext
 	incremental := false
+	var collisionWarning string
 	if agentID != "" && s.store != nil {
 		if ac, err := s.store.GetAgentContext(agentID); err == nil && ac != nil {
 			agentCtx = ac
 			incremental = true
+			// Collision detection: if the same agent_id started a session within the
+			// last 2 minutes, warn that two sessions may be competing under the same ID.
+			if ac.LastSession != "" {
+				if prev, parseErr := time.Parse(time.RFC3339, ac.LastSession); parseErr == nil {
+					if time.Since(prev) < 2*time.Minute {
+						collisionWarning = fmt.Sprintf(
+							"agent_id %q was last seen %.0f seconds ago — another session may already be using this ID. "+
+								"If this is a new session, append a unique suffix (e.g. %q) to avoid overwriting peer state.",
+							agentID, time.Since(prev).Seconds(), agentID+"-2",
+						)
+					}
+				}
+			}
 		}
 	}
 
@@ -2517,6 +2539,29 @@ func (s *Server) handleSessionInit(
 		recentEvents = []store.Event{}
 	}
 
+	// ── 4b. Agent awareness (other active/idle peers) ────────────────────
+	// Omitted entirely when no peers are active (zero token cost for solo agents).
+	var agentAwareness map[string]interface{}
+	var unreadMsgs []store.Message
+	if s.store != nil && agentID != "" {
+		if peers, err := s.store.GetActiveAgents(agentID); err == nil && len(peers) > 0 {
+			agentAwareness = map[string]interface{}{
+				"active_peers": peers,
+				"count":        len(peers),
+			}
+		}
+		if unread, err := s.store.CountUnreadMessages(agentID); err == nil && unread > 0 {
+			if agentAwareness == nil {
+				agentAwareness = map[string]interface{}{}
+			}
+			agentAwareness["unread_messages"] = unread
+		}
+		// Auto-deliver up to 10 unread messages so agents don't need a separate call.
+		if msgs, _, err := s.store.GetMessages(agentID, 0, "", true, 10); err == nil && len(msgs) > 0 {
+			unreadMsgs = msgs
+		}
+	}
+
 	// ── 5. Cross-project impact alerts (federated projects only) ──────────
 	// Pull unread cross_project_impact messages from the message bus. These are
 	// broadcast by the file watcher whenever a local change breaks a dependency
@@ -2566,6 +2611,19 @@ func (s *Server) handleSessionInit(
 		if identitySkipped {
 			resp["identity_skipped"] = true
 		}
+	}
+	if agentAwareness != nil {
+		resp["agent_awareness"] = agentAwareness
+	}
+	if len(unreadMsgs) > 0 {
+		resp["unread_messages"] = map[string]interface{}{
+			"count":    len(unreadMsgs),
+			"messages": unreadMsgs,
+			"hint":     "Call mark_read(message_id, agent_id) to acknowledge. Messages are NOT auto-marked as read.",
+		}
+	}
+	if collisionWarning != "" {
+		resp["warning"] = collisionWarning
 	}
 	if recentFailure != nil {
 		resp["recent_failure"] = recentFailure
