@@ -136,6 +136,12 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		fmt.Fprintf(&b, "\n[%d additional nodes omitted by token budget]\n", dc.TruncatedCount)
 	}
 
+	// F17: surface adaptive expansion hint so agents know why they received
+	// deeper context than the configured default.
+	if dc.AdaptiveHint != "" {
+		fmt.Fprintf(&b, "\n%s\n", dc.AdaptiveHint)
+	}
+
 	return strings.TrimSpace(b.String())
 }
 

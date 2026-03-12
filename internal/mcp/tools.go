@@ -133,6 +133,7 @@ type directionalContext struct {
 	StaleAnnotationWarning string                        `json:"stale_annotation_warning,omitempty"` // GAP-3: set when ≥1 annotation may be outdated
 	RecentChanges          []metrics.CommitInfo          `json:"recent_changes,omitempty"`           // GAP-7: last 3 git commits that touched the entity's file
 	GraphFreshness         string                        `json:"graph_freshness,omitempty"`          // GAP-4: warning when entity's file was recently modified
+	AdaptiveHint           string                        `json:"adaptive_hint,omitempty"`            // F17: set when BFS depth/detail was auto-expanded based on prior feedback
 }
 
 // handleGetContext returns an N-hop ego-subgraph around the named entity,
@@ -192,7 +193,15 @@ func (s *Server) handleGetContext(
 
 	cfg := s.config.CarveConfig()
 
-	// Allow per-call overrides of depth and token budget.
+	// F17: Adaptive Context Learning — auto-expand depth/detail based on
+	// stored feedback for this entity+agent before per-call explicit overrides
+	// are applied. Explicit caller values always win over adaptive adjustments.
+	adaptiveForceFullDetail := false
+	if agentIDForFeedback != "" && s.store != nil {
+		adaptiveForceFullDetail = s.adaptiveCarveConfig(&cfg, entityName, agentIDForFeedback)
+	}
+
+	// Allow per-call overrides of depth and token budget (always win over adaptive).
 	if d, ok := req.GetArguments()["depth"].(float64); ok && d > 0 {
 		cfg.MaxDepth = int(d)
 	}
@@ -497,11 +506,21 @@ func (s *Server) handleGetContext(
 		s.upsertAgentWithActivity(agentID, &store.AgentActivity{Focus: entityName})
 	}
 
+	// F17: surface adaptive expansion hint in the response so agents know why
+	// they received deeper context than the default.
+	if adaptiveForceFullDetail {
+		dc.AdaptiveHint = "⟳ Context depth auto-expanded based on prior feedback for this entity."
+	}
+
 	// format=compact returns a natural-language briefing instead of the default JSON blob.
 	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t, default).
 	format, _ := req.GetArguments()["format"].(string)
 	if format == "compact" {
 		detailLevel, _ := req.GetArguments()["detail_level"].(string)
+		// F17: if no explicit detail_level given, honour the adaptive expansion.
+		if detailLevel == "" && adaptiveForceFullDetail {
+			detailLevel = "full"
+		}
 		return mcp.NewToolResultText(serializeCompact(dc, detailLevel)), nil
 	}
 
@@ -3062,6 +3081,48 @@ func (s *Server) inlineFindEntity(query string) []map[string]interface{} {
 		})
 	}
 	return results
+}
+
+// adaptiveCarveConfig adjusts cfg in-place based on stored feedback episodes
+// for the given entity+agent pair. Returns true when the detail level should
+// be forced to "full" (caller handles compact-format override).
+//
+// Two signals are read from the episode store (last 30 days):
+//  1. context_quality + failure (explicit helpful=false) within the last 7 days
+//     → depth += 1, force full detail
+//  2. repeated_context (≥2 cross-session repeat episodes within 30 days)
+//     → expand to depth=3 (if not already deeper), force full detail
+//
+// Older feedback (7–30 days) is ignored so decay is natural over time.
+// Fail-silent: any store error leaves cfg unchanged.
+func (s *Server) adaptiveCarveConfig(cfg *graph.CarveConfig, entityName, agentID string) (forceFullDetail bool) {
+	episodes, err := s.store.RecallEpisodes(
+		entityName, s.graph.RepoID(), agentID, "pattern", "", 5, 30,
+	)
+	if err != nil || len(episodes) == 0 {
+		return false
+	}
+
+	sevenDaysAgo := time.Now().AddDate(0, 0, -7).Unix()
+	var recentUnhelpful, crossSessionRepeats int
+	for _, ep := range episodes {
+		if strings.Contains(ep.Tags, "context_quality") && ep.Outcome == "failure" && ep.CreatedAt >= sevenDaysAgo {
+			recentUnhelpful++
+		}
+		if strings.Contains(ep.Tags, "repeated_context") {
+			crossSessionRepeats++
+		}
+	}
+
+	if recentUnhelpful > 0 {
+		cfg.MaxDepth++
+		forceFullDetail = true
+	}
+	if crossSessionRepeats >= 2 && cfg.MaxDepth < 3 {
+		cfg.MaxDepth = 3
+		forceFullDetail = true
+	}
+	return forceFullDetail
 }
 
 // trackContextCall increments and returns the call count for (agentID, entity)
