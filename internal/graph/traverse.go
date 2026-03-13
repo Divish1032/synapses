@@ -453,6 +453,74 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 	}, nil
 }
 
+// testFileSuffixes lists filename patterns that identify test files across
+// supported languages. Used by FindTestsFor to filter test-only nodes.
+var testFileSuffixes = []string{"_test.go", "_test.ts", "_test.js", "_spec.ts", "_spec.js", "test_.py", "_test.py", ".test.ts", ".test.js", ".spec.ts", ".spec.js"}
+
+func isTestFile(file string) bool {
+	for _, suffix := range testFileSuffixes {
+		if strings.HasSuffix(file, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// FindTestsFor returns the files of test nodes that call into the given node,
+// found via reverse-BFS over CALLS edges limited to test files.
+// The result is a deduplicated sorted list of test file paths.
+// Returns an empty slice when no test coverage is found.
+func (g *Graph) FindTestsFor(nodeID NodeID) []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	if _, ok := g.nodes[nodeID]; !ok {
+		return nil
+	}
+
+	type entry struct {
+		id    NodeID
+		depth int
+	}
+	visited := map[NodeID]bool{nodeID: true}
+	queue := []entry{{nodeID, 0}}
+	testFiles := map[string]struct{}{}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur.depth >= 5 { // cap at 5 hops to avoid runaway traversal
+			continue
+		}
+		for _, e := range g.inEdges[cur.id] {
+			if e.Type != EdgeCalls {
+				continue
+			}
+			if visited[e.From] {
+				continue
+			}
+			visited[e.From] = true
+			caller := g.nodes[e.From]
+			if caller == nil {
+				continue
+			}
+			if isTestFile(caller.File) {
+				testFiles[caller.File] = struct{}{}
+			} else {
+				// Keep traversing up — tests may call through non-test helpers.
+				queue = append(queue, entry{e.From, cur.depth + 1})
+			}
+		}
+	}
+
+	files := make([]string, 0, len(testFiles))
+	for f := range testFiles {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	return files
+}
+
 // ErrNodeNotFound is returned when a query targets a non-existent node.
 type ErrNodeNotFound NodeID
 

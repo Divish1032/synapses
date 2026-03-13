@@ -254,6 +254,76 @@ func TestCarveEgoGraph_TruncationSignal(t *testing.T) {
 	}
 }
 
+// ── FindTestsFor ──────────────────────────────────────────────────────────────
+
+func TestFindTestsFor_DirectTestCaller(t *testing.T) {
+	g := graph.New("repo")
+	serviceID := g.MakeNodeID("service.go", "Service")
+	testID := g.MakeNodeID("service_test.go", "TestService")
+
+	g.AddNode(&graph.Node{ID: serviceID, Name: "Service", Type: graph.NodeFunction, File: "service.go"})
+	g.AddNode(&graph.Node{ID: testID, Name: "TestService", Type: graph.NodeFunction, File: "service_test.go"})
+	g.AddEdge(&graph.Edge{From: testID, To: serviceID, Type: graph.EdgeCalls})
+
+	files := g.FindTestsFor(serviceID)
+	if len(files) != 1 || files[0] != "service_test.go" {
+		t.Errorf("expected [service_test.go], got %v", files)
+	}
+}
+
+func TestFindTestsFor_NonTestCallerNotIncluded(t *testing.T) {
+	g := graph.New("repo")
+	serviceID := g.MakeNodeID("service.go", "Service")
+	callerID := g.MakeNodeID("handler.go", "Handler")
+
+	g.AddNode(&graph.Node{ID: serviceID, Name: "Service", Type: graph.NodeFunction, File: "service.go"})
+	g.AddNode(&graph.Node{ID: callerID, Name: "Handler", Type: graph.NodeFunction, File: "handler.go"})
+	g.AddEdge(&graph.Edge{From: callerID, To: serviceID, Type: graph.EdgeCalls})
+
+	files := g.FindTestsFor(serviceID)
+	if len(files) != 0 {
+		t.Errorf("expected no test files, got %v", files)
+	}
+}
+
+func TestFindTestsFor_IndirectTestViaHelper(t *testing.T) {
+	// test → helper → service: test file should still be found via BFS
+	g := graph.New("repo")
+	serviceID := g.MakeNodeID("service.go", "Service")
+	helperID := g.MakeNodeID("helpers.go", "setupService")
+	testID := g.MakeNodeID("service_test.go", "TestIntegration")
+
+	g.AddNode(&graph.Node{ID: serviceID, Name: "Service", Type: graph.NodeFunction, File: "service.go"})
+	g.AddNode(&graph.Node{ID: helperID, Name: "setupService", Type: graph.NodeFunction, File: "helpers.go"})
+	g.AddNode(&graph.Node{ID: testID, Name: "TestIntegration", Type: graph.NodeFunction, File: "service_test.go"})
+	g.AddEdge(&graph.Edge{From: helperID, To: serviceID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: testID, To: helperID, Type: graph.EdgeCalls})
+
+	files := g.FindTestsFor(serviceID)
+	if len(files) != 1 || files[0] != "service_test.go" {
+		t.Errorf("expected [service_test.go], got %v", files)
+	}
+}
+
+func TestFindTestsFor_NoCallers(t *testing.T) {
+	g := graph.New("repo")
+	serviceID := g.MakeNodeID("service.go", "Isolated")
+	g.AddNode(&graph.Node{ID: serviceID, Name: "Isolated", Type: graph.NodeFunction, File: "service.go"})
+
+	files := g.FindTestsFor(serviceID)
+	if len(files) != 0 {
+		t.Errorf("expected empty, got %v", files)
+	}
+}
+
+func TestFindTestsFor_UnknownNode(t *testing.T) {
+	g := graph.New("repo")
+	files := g.FindTestsFor("nonexistent-id")
+	if files != nil {
+		t.Errorf("expected nil for unknown node, got %v", files)
+	}
+}
+
 // nodeIDSet returns the set of NodeIDs present in a SubGraph for quick lookup.
 func nodeIDSet(sub *graph.SubGraph) map[graph.NodeID]struct{} {
 	m := make(map[graph.NodeID]struct{}, len(sub.Nodes))

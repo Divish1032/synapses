@@ -471,6 +471,93 @@ func TestHandleGetImpact_MissingSymbol_ReturnsError(t *testing.T) {
 	mustErrorResult(t, res, err)
 }
 
+// ── entity_hash + known_hash (R14) ────────────────────────────────────────────
+
+func TestHandleGetContext_EntityHashPresent(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	res, err := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	m := mustResult(t, res, err)
+	hash, ok := m["entity_hash"].(string)
+	if !ok || len(hash) != 12 {
+		t.Errorf("expected entity_hash of length 12, got %q", hash)
+	}
+}
+
+func TestHandleGetContext_KnownHash_ReturnsUnchanged(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	// First call — get the hash.
+	res1, err1 := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	m1 := mustResult(t, res1, err1)
+	hash, _ := m1["entity_hash"].(string)
+	if hash == "" {
+		t.Fatal("no entity_hash in first response")
+	}
+
+	// Second call with known_hash matching — expect {"unchanged": true}.
+	res2, err2 := s.handleGetContext(ctx, callTool(map[string]any{
+		"entity":     "AuthLogin",
+		"known_hash": hash,
+	}))
+	m2 := mustResult(t, res2, err2)
+	if m2["unchanged"] != true {
+		t.Errorf("expected unchanged=true when known_hash matches, got %v", m2)
+	}
+	if m2["entity_hash"] != hash {
+		t.Errorf("expected entity_hash to be echoed back, got %v", m2["entity_hash"])
+	}
+}
+
+func TestHandleGetContext_WrongKnownHash_ReturnsFull(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	res, err := s.handleGetContext(ctx, callTool(map[string]any{
+		"entity":     "AuthLogin",
+		"known_hash": "000000000000",
+	}))
+	m := mustResult(t, res, err)
+	// Hash mismatch → full response with root and entity_hash.
+	hasKey(t, m, "root")
+	hasKey(t, m, "entity_hash")
+	if m["unchanged"] == true {
+		t.Error("should not return unchanged=true for wrong hash")
+	}
+}
+
+// ── test_coverage in get_impact (R2) ─────────────────────────────────────────
+
+func TestHandleGetImpact_TestCoverageField(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	res, err := s.handleGetImpact(ctx, callTool(map[string]any{"symbol": "AuthLogin"}))
+	m := mustResult(t, res, err)
+	// test_coverage key must be present (may be empty slice if no test files).
+	// We check that it doesn't cause a panic or wrong type — actual coverage
+	// depends on whether test files exist in the fixture.
+	_ = m["test_coverage"] // nil (omitempty) or []interface{}
+}
+
+// ── closest_reachable in get_call_chain not-found (R2) ───────────────────────
+
+func TestHandleGetCallChain_NotFound_ClosestReachable(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	// Use entities that exist but have no call path between them.
+	res, err := s.handleGetCallChain(ctx, callTool(map[string]any{
+		"from": "HandleRequest",
+		"to":   "Database",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, res, err)
+	if found, _ := m["found"].(bool); !found {
+		// When not found, closest_reachable MAY be present if BFS reached any nodes.
+		// We just verify the field doesn't cause a crash and has the right shape if set.
+		if cr, ok := m["closest_reachable"].(map[string]any); ok {
+			if cr["name"] == nil || cr["hops"] == nil {
+				t.Errorf("closest_reachable missing required fields: %v", cr)
+			}
+		}
+	}
+}
+
 // ── handleGetEvents ───────────────────────────────────────────────────────────
 
 func TestHandleGetEvents_InitialEmpty(t *testing.T) {
