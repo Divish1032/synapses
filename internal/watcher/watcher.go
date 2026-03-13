@@ -61,6 +61,7 @@ type Watcher struct {
 	pktInval    PacketCacheInvalidator // set via SetPacketInvalidator; may be nil
 	cfgHandler  ConfigChangeHandler    // called when synapses.json changes; may be nil
 	configPath  string                 // absolute path to synapses.json (set by Start)
+	projectID   string                 // stable project identifier (FNV hash of project root path)
 
 	mu      sync.Mutex
 	timers  map[string]*time.Timer // debounce timers keyed by absolute file path
@@ -100,6 +101,11 @@ func (w *Watcher) SetConfig(cfg *config.Config) {
 // avoids an import cycle (brain imports only stdlib, not watcher).
 func (w *Watcher) SetBrainClient(bc interface{}) {
 	w.brainClient = bc
+}
+
+// SetProjectID sets the stable project identifier used when ingesting nodes to brain.
+func (w *Watcher) SetProjectID(id string) {
+	w.projectID = id
 }
 
 // SetPacketInvalidator wires a PacketCacheInvalidator (typically the MCP Server)
@@ -523,11 +529,12 @@ func (w *Watcher) ingestToBrain(path string) {
 			code = "// " + doc + "\n" + code
 		}
 		bc.Ingest(context.Background(), brain.IngestRequest{
-			NodeID:   string(n.ID),
-			NodeName: n.Name,
-			NodeType: string(n.Type),
-			Package:  n.Package,
-			Code:     code,
+			ProjectID: w.projectID,
+			NodeID:    string(n.ID),
+			NodeName:  n.Name,
+			NodeType:  string(n.Type),
+			Package:   n.Package,
+			Code:      code,
 		})
 	}
 
