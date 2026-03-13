@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 //go:embed builtin_prompts/*.md
@@ -136,8 +137,13 @@ func DeduplicatePrompts(templates []PromptTemplate) []PromptTemplate {
 
 // matchesAll returns true if ALL non-empty patterns on the template match their
 // respective context fields. A template with no patterns set returns false
-// (those are handled by AutoLoadPrompts).
+// (those are handled by AutoLoadPrompts). AutoLoad templates are also excluded
+// here because they are already injected globally via session_init — re-injecting
+// them per entity would duplicate content in the agent's context window.
 func matchesAll(pt PromptTemplate, file, entity, pkg string) bool {
+	if pt.AutoLoad {
+		return false // already delivered via session_init; skip per-entity injection
+	}
 	hasPattern := pt.FilePattern != "" || pt.EntityPattern != "" || pt.ModulePattern != ""
 	if !hasPattern {
 		return false
@@ -177,12 +183,22 @@ func matchGlob(pattern, path string) bool {
 	return ok
 }
 
+// regexCache caches compiled regexes to avoid recompiling on every MatchPrompts call.
+var regexCache sync.Map // map[string]*regexp.Regexp
+
 // matchRegex matches a regex pattern against a name.
-// Invalid patterns are silently treated as non-matching.
+// Compiled regexes are cached globally. Invalid patterns are silently treated as non-matching.
 func matchRegex(pattern, name string) bool {
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return false
+	var re *regexp.Regexp
+	if v, ok := regexCache.Load(pattern); ok {
+		re = v.(*regexp.Regexp)
+	} else {
+		compiled, err := regexp.Compile(pattern)
+		if err != nil {
+			return false
+		}
+		regexCache.Store(pattern, compiled)
+		re = compiled
 	}
 	return re.MatchString(name)
 }
