@@ -1630,6 +1630,142 @@ func TestServeMCPConn_ContextCancel(t *testing.T) {
 	}
 }
 
+// ── serveMCPConn: session auto-cache E2E via net.Pipe ─────────────────────────
+//
+// This test exercises the real serveMCPConn path end-to-end: it opens a Unix-
+// like pipe pair, performs a full JSON-RPC session (initialize + two get_context
+// calls), and verifies that the second call returns {unchanged:true} without the
+// client passing known_hash — confirming that session auto-cache works through
+// the actual MCP dispatch stack, not just at the handler level.
+func TestServeMCPConn_SessionAutoCacheE2E(t *testing.T) {
+	dir := t.TempDir()
+	dbPath, _ := store.DefaultPath(dir)
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	// Build a graph with one known function so get_context has something to return.
+	g := graph.New(dir)
+	nodeID := g.MakeNodeID("pkg/auth/auth.go", "AuthLogin")
+	g.AddNode(&graph.Node{
+		ID:      nodeID,
+		Name:    "AuthLogin",
+		Type:    graph.NodeFunction,
+		File:    dir + "/pkg/auth/auth.go",
+		Line:    10,
+		Package: "auth",
+	})
+
+	cfg := &config.Config{}
+	srv := mcpsrv.New(g, cfg, st)
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go serveMCPConn(ctx, srv.MCPServer(), srv, server, "e2e-session-1") //nolint:errcheck
+
+	writeMsg := func(v interface{}) {
+		data, _ := json.Marshal(v)
+		client.Write(append(data, '\n')) //nolint:errcheck
+	}
+	readMsg := func() map[string]interface{} {
+		client.SetReadDeadline(time.Now().Add(3 * time.Second))
+		buf := make([]byte, 65536)
+		n, err := client.Read(buf)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(buf[:n], &m); err != nil {
+			t.Fatalf("unmarshal: %v (raw: %s)", err, buf[:n])
+		}
+		return m
+	}
+
+	// Step 1: initialize handshake.
+	writeMsg(map[string]interface{}{
+		"jsonrpc": "2.0", "id": 1, "method": "initialize",
+		"params": map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]interface{}{},
+			"clientInfo":      map[string]interface{}{"name": "test", "version": "0"},
+		},
+	})
+	initResp := readMsg()
+	if initResp["error"] != nil {
+		t.Fatalf("initialize failed: %v", initResp["error"])
+	}
+
+	// Step 2: first get_context call — expect full response with entity_hash.
+	writeMsg(map[string]interface{}{
+		"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+		"params": map[string]interface{}{
+			"name":      "get_context",
+			"arguments": map[string]interface{}{"entity": "AuthLogin"},
+		},
+	})
+	resp1 := readMsg()
+	result1, ok := resp1["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result object, got: %v", resp1)
+	}
+	// MCP tool result is in result.content[0].text (JSON string).
+	content1, _ := result1["content"].([]interface{})
+	if len(content1) == 0 {
+		t.Fatalf("empty content in first response")
+	}
+	text1, _ := content1[0].(map[string]interface{})["text"].(string)
+	var payload1 map[string]interface{}
+	if err := json.Unmarshal([]byte(text1), &payload1); err != nil {
+		t.Fatalf("unmarshal payload1: %v (text: %s)", err, text1)
+	}
+	if payload1["unchanged"] == true {
+		t.Fatal("first get_context call must not return unchanged")
+	}
+	entityHash, _ := payload1["entity_hash"].(string)
+	if entityHash == "" {
+		t.Fatal("first get_context call must include entity_hash")
+	}
+
+	// Step 3: second get_context call — same entity, same session, no known_hash.
+	// The session auto-cache must return {unchanged:true, cache_source:"session"}.
+	writeMsg(map[string]interface{}{
+		"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+		"params": map[string]interface{}{
+			"name":      "get_context",
+			"arguments": map[string]interface{}{"entity": "AuthLogin"},
+		},
+	})
+	resp2 := readMsg()
+	result2, ok := resp2["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result object in second response, got: %v", resp2)
+	}
+	content2, _ := result2["content"].([]interface{})
+	if len(content2) == 0 {
+		t.Fatalf("empty content in second response")
+	}
+	text2, _ := content2[0].(map[string]interface{})["text"].(string)
+	var payload2 map[string]interface{}
+	if err := json.Unmarshal([]byte(text2), &payload2); err != nil {
+		t.Fatalf("unmarshal payload2: %v (text: %s)", err, text2)
+	}
+	if payload2["unchanged"] != true {
+		t.Errorf("second get_context must return unchanged=true via session auto-cache, got: %v", payload2)
+	}
+	if payload2["cache_source"] != "session" {
+		t.Errorf("expected cache_source=session, got: %v", payload2["cache_source"])
+	}
+	if payload2["entity_hash"] != entityHash {
+		t.Errorf("entity_hash mismatch: got %v want %v", payload2["entity_hash"], entityHash)
+	}
+}
+
 // ── buildTestIndexedDir helper ────────────────────────────────────────────────
 
 // buildTestIndexedDir creates a temp dir with a small Go file, builds and
