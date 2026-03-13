@@ -40,6 +40,7 @@ func (s *Server) emitContextDelivery(
 	go pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
 		ToolName:       toolName,
 		AgentID:        agentID,
+		ProjectID:      s.projectID,
 		Entity:         entity,
 		File:           file,
 		ResponseBytes:  responseBytes,
@@ -84,6 +85,7 @@ func (s *Server) emitFileContextDelivery(
 	go pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
 		ToolName:       "get_file_context",
 		AgentID:        agentID,
+		ProjectID:      s.projectID,
 		File:           filePath,
 		ResponseBytes:  responseBytes,
 		ResponseTokens: responseBytes / 4,

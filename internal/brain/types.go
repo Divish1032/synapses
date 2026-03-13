@@ -6,6 +6,7 @@ package brain
 // ContextPacketRequest is the payload for POST /v1/context-packet.
 type ContextPacketRequest struct {
 	AgentID     string        `json:"agent_id"`
+	ProjectID   string        `json:"project_id,omitempty"`
 	Snapshot    SnapshotInput `json:"snapshot"`
 	Phase       string        `json:"phase,omitempty"`        // "" = use stored
 	QualityMode string        `json:"quality_mode,omitempty"` // "" = use stored
@@ -95,11 +96,12 @@ type PatternHint struct {
 
 // IngestRequest is the payload for POST /v1/ingest.
 type IngestRequest struct {
-	NodeID   string `json:"node_id"`
-	NodeName string `json:"node_name"`
-	NodeType string `json:"node_type"`
-	Package  string `json:"package"`
-	Code     string `json:"code"`
+	ProjectID string `json:"project_id,omitempty"`
+	NodeID    string `json:"node_id"`
+	NodeName  string `json:"node_name"`
+	NodeType  string `json:"node_type"`
+	Package   string `json:"package"`
+	Code      string `json:"code"`
 }
 
 // ViolationRequest is the payload for POST /v1/explain-violation.
