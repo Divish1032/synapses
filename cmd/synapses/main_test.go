@@ -1570,7 +1570,7 @@ func TestServeMCPConn_InvalidJSON(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- serveMCPConn(ctx, srv.MCPServer(), server, "test-session-1")
+		errCh <- serveMCPConn(ctx, srv.MCPServer(), srv, server, "test-session-1")
 	}()
 
 	// Send invalid JSON — serveMCPConn should write a parse error response.
@@ -1616,7 +1616,7 @@ func TestServeMCPConn_ContextCancel(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- serveMCPConn(ctx, srv.MCPServer(), server, "test-session-2")
+		errCh <- serveMCPConn(ctx, srv.MCPServer(), srv, server, "test-session-2")
 	}()
 
 	// Cancel context → serveMCPConn should return.

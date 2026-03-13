@@ -655,7 +655,7 @@ func cmdDaemonServe(args []string) error {
 			defer tracker.remove()
 
 			fmt.Fprintf(os.Stderr, "synapses daemon: session %s connected\n", sid)
-			if err := serveMCPConn(appCtx, srv.MCPServer(), c, sid); err != nil {
+			if err := serveMCPConn(appCtx, srv.MCPServer(), srv, c, sid); err != nil {
 				// EOF is normal — proxy disconnected.
 				if !strings.Contains(err.Error(), "EOF") &&
 					!strings.Contains(err.Error(), "use of closed") {
@@ -685,7 +685,9 @@ func cmdDaemonServe(args []string) error {
 // serveMCPConn handles one MCP session over a Unix socket connection.
 // It registers a unique session with the MCPServer, processes JSON-RPC
 // messages, and forwards notifications to the client.
-func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, conn net.Conn, sessionID string) error {
+// synSrv is the Synapses Server — passed here so session-local state
+// (entity hash cache) can be cleaned up when the connection closes.
+func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcpsrv.Server, conn net.Conn, sessionID string) error {
 	session := &connSession{
 		id:            sessionID,
 		notifications: make(chan mcp.JSONRPCNotification, 100),
@@ -695,10 +697,15 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, conn net.Con
 		return fmt.Errorf("register session: %w", err)
 	}
 	defer mcpSrv.UnregisterSession(ctx, sessionID)
+	// Release per-session entity hash cache on disconnect.
+	defer synSrv.ClearSessionHashes(sessionID)
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Inject session ID into context so tool handlers can perform
+	// session-scoped auto-caching without agents needing to pass known_hash.
+	sessionCtx = mcpsrv.WithSessionID(sessionCtx, sessionID)
 	sessionCtx = mcpSrv.WithContext(sessionCtx, session)
 
 	// writeMu protects conn.Write from concurrent access. Both the

@@ -192,13 +192,23 @@ type entityMemoryHint struct {
 // handleGetContext returns an N-hop ego-subgraph around the named entity,
 // split into callers, callees, and related buckets.
 func (s *Server) handleGetContext(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	entityName, ok := req.GetArguments()["entity"].(string)
 	if !ok || entityName == "" {
 		return mcp.NewToolResultError("entity is required"), nil
 	}
+
+	// Session ID for server-side auto-caching. Empty for stdio/test paths — auto-cache
+	// is silently disabled when no session ID is present (getSessionHash returns "").
+	sessionID := SessionIDFromContext(ctx)
+
+	// Extract format/detailLevel early so they can be included in the session cache key.
+	// These same values are used again at rendering time — reading from the same request,
+	// so values are identical. Declaring here avoids a second GetArguments call later.
+	format, _ := req.GetArguments()["format"].(string)
+	detailLevel, _ := req.GetArguments()["detail_level"].(string)
 
 	// GAP-1: Feedback loop.
 	// (a) Track repeat calls — ≥3 calls for the same entity by the same agent
@@ -276,6 +286,17 @@ func (s *Server) handleGetContext(
 
 	// Optional file hint — narrows lookup to a specific file when entity names are ambiguous.
 	fileHint, _ := req.GetArguments()["file"].(string)
+
+	// Session auto-cache key: encodes the full request shape that determines which
+	// subgraph is carved and which output format is produced. All fields that affect
+	// either the entity_hash (depth, tokenBudget) or the usability of a cached
+	// response (format, detailLevel, fileHint) are included.
+	//
+	// task_id is intentionally excluded: it only adjusts relevance scores AFTER the
+	// subgraph is carved, so it does not change the entity_hash and two calls with
+	// different task_ids for the same entity produce identical hashes.
+	entityCacheKey := fmt.Sprintf("%s|%s|%s|%s|%d|%d",
+		entityName, fileHint, format, detailLevel, cfg.MaxDepth, cfg.TokenBudget)
 
 	// Resolve the entity name to a node ID.
 	nodes := s.graph.FindByName(entityName)
@@ -364,12 +385,32 @@ func (s *Server) handleGetContext(
 	// Skipped for mode=impact — that path produces a different response shape.
 	entityHash := computeEntityHash(best.ID, sg.Nodes, sg.Edges)
 	if mode == "" {
-		if knownHash, _ := req.GetArguments()["known_hash"].(string); knownHash != "" && knownHash == entityHash {
-			return jsonResult(map[string]interface{}{
-				"unchanged":   true,
-				"entity_hash": entityHash,
-				"entity":      entityName,
-			})
+		explicitKnownHash, _ := req.GetArguments()["known_hash"].(string)
+		if explicitKnownHash != "" {
+			// Agent is explicitly managing cache with their own hash.
+			// Only return unchanged when it matches; a mismatch falls through to
+			// the full response. Session auto-cache is bypassed entirely when an
+			// explicit known_hash is present — the agent owns the decision.
+			if explicitKnownHash == entityHash {
+				return jsonResult(map[string]interface{}{
+					"unchanged":   true,
+					"entity_hash": entityHash,
+					"entity":      entityName,
+				})
+			}
+		} else if sessionID != "" {
+			// No explicit hash — use server-side session auto-cache: if this session
+			// already received a full response for this entity+config and the graph
+			// hasn't changed since, return {unchanged:true} automatically.
+			// Disabled when sessionID=="" (stdio path, tests).
+			if s.getSessionHash(sessionID, entityCacheKey) == entityHash {
+				return jsonResult(map[string]interface{}{
+					"unchanged":    true,
+					"entity_hash":  entityHash,
+					"entity":       entityName,
+					"cache_source": "session",
+				})
+			}
 		}
 	}
 
@@ -643,13 +684,13 @@ func (s *Server) handleGetContext(
 
 	// format=compact returns a natural-language briefing instead of the default JSON blob.
 	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t, default).
-	format, _ := req.GetArguments()["format"].(string)
+	// format and detailLevel were extracted early for the session cache key; reused here.
 	if format == "compact" {
-		detailLevel, _ := req.GetArguments()["detail_level"].(string)
 		// F17: if no explicit detail_level given, honour the adaptive expansion.
 		if detailLevel == "" && adaptiveForceFullDetail {
 			detailLevel = "full"
 		}
+		s.setSessionHash(sessionID, entityCacheKey, entityHash)
 		return mcp.NewToolResultText(serializeCompact(dc, detailLevel)), nil
 	}
 
@@ -661,6 +702,7 @@ func (s *Server) handleGetContext(
 			OtherCandidates []map[string]interface{} `json:"other_candidates,omitempty"`
 			DisambigHint    string                   `json:"disambig_hint,omitempty"`
 		}
+		s.setSessionHash(sessionID, entityCacheKey, entityHash)
 		return jsonResult(&disambiguatedContext{
 			directionalContext: dc,
 			OtherCandidates:    disambiguationCandidates,
@@ -668,6 +710,7 @@ func (s *Server) handleGetContext(
 		})
 	}
 
+	s.setSessionHash(sessionID, entityCacheKey, entityHash)
 	return jsonResult(dc)
 }
 
