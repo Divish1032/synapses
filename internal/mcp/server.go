@@ -475,6 +475,12 @@ func (s *Server) registerTools() {
 			mcp.WithBoolean("helpful",
 				mcp.Description("Optional explicit feedback signal (true=context was useful, false=context missed what you needed). Recorded as an episode to improve future context delivery. Omit if you don't have a clear signal yet."),
 			),
+			mcp.WithString("known_hash",
+				mcp.Description("Optional. Pass the entity_hash value from a previous get_context response for the same entity. "+
+					"If the ego-graph is structurally unchanged, returns {\"unchanged\": true, \"entity_hash\": \"...\", \"entity\": \"...\"} "+
+					"instead of the full payload — saving tokens on repeated calls in tight reasoning loops. "+
+					"Ignored when mode='impact'."),
+			),
 		),
 		s.handleGetContext,
 	)
