@@ -32,6 +32,14 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 	// Root entity header + summary.
 	writeNodeHeader(&b, dc.Root, getRootSummary(dc.Root, dc.ContextPacket))
 
+	// R32: Open quality gaps — surface before annotations so agents see known issues first.
+	if len(dc.QualityGaps) > 0 {
+		fmt.Fprintf(&b, "⚠ %d open quality gap(s):\n", len(dc.QualityGaps))
+		for _, g := range dc.QualityGaps {
+			fmt.Fprintf(&b, "  [%s] %s — %s\n", g.Severity, g.GapID, g.Description)
+		}
+	}
+
 	// Annotations: show agent/system notes for this entity (multi-agent visibility).
 	if anns, ok := dc.Annotations[string(dc.Root.ID)]; ok && len(anns) > 0 {
 		for _, a := range anns {
@@ -172,13 +180,33 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 }
 
 // writeNodeHeader writes a compact entity header line + optional summary.
-// Format: [name] type · basename.go:line [ · complexity:N]
+// Format: [name] type · basename.go:line [ · complexity:N] [ · ⚠ provenance]
 //
 //	Summary: "..."
+//
+// R1: route nodes (NodeRoute / inferred=true) are prefixed with ⚡ inferred:
+// to make synthesised framework routing edges visually distinct from AST edges.
 func writeNodeHeader(b *strings.Builder, n *graph.Node, summary string) {
 	var extras []string
 	if c := n.Metadata["complexity"]; c != "" && c != "0" && c != "1" {
 		extras = append(extras, "complexity:"+c)
+	}
+	// R28: surface non-user-authored provenance so agents know when they are
+	// looking at generated or vendored code (lower trust for architectural decisions).
+	switch n.Provenance {
+	case graph.ProvenanceGenerated:
+		extras = append(extras, "⚠ generated")
+	case graph.ProvenanceVendored:
+		extras = append(extras, "⚠ vendored")
+	case graph.ProvenanceExternal:
+		extras = append(extras, "⚠ external")
+	}
+
+	// R1: surface confidence for inferred route nodes.
+	if n.Type == graph.NodeRoute {
+		if conf := n.Metadata["confidence"]; conf != "" {
+			extras = append(extras, "conf:"+conf)
+		}
 	}
 
 	file := filepath.Base(n.File)
@@ -189,7 +217,13 @@ func writeNodeHeader(b *strings.Builder, n *graph.Node, summary string) {
 	if len(extras) > 0 {
 		header += " · " + strings.Join(extras, " · ")
 	}
-	b.WriteString(header + "\n")
+
+	// R1: prefix synthesised route nodes with ⚡ to distinguish from AST nodes.
+	if n.Type == graph.NodeRoute || (n.Metadata != nil && n.Metadata["inferred"] == "true") {
+		b.WriteString("⚡ inferred: " + header + "\n")
+	} else {
+		b.WriteString(header + "\n")
+	}
 
 	if summary != "" {
 		fmt.Fprintf(b, "Summary: %s\n", summary)

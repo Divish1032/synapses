@@ -139,6 +139,15 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 	mtimes := make(map[string]int64, len(jobs))
 	var mtimesMu sync.Mutex
 
+	// R1: collect route registrations during parallel parse; inject HANDLES
+	// edges serially after wg.Wait() so all handler nodes are present.
+	type parsedFile struct {
+		path string
+		src  []byte
+	}
+	var heuristicFiles []parsedFile
+	var heuristicMu sync.Mutex
+
 	for _, job := range jobs {
 		job := job // capture loop variable
 		wg.Add(1)
@@ -152,6 +161,13 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 				fmt.Fprintf(os.Stderr, "synapses: read %s: %v\n", job.path, err)
 			} else if parseErr := job.parser.Parse(g, job.path, src); parseErr != nil {
 				fmt.Fprintf(os.Stderr, "synapses: parse %s: %v\n", job.path, parseErr)
+			} else {
+				// R28: stamp provenance on all nodes produced by this file.
+				ApplyProvenance(g, job.path, src)
+				// R1: collect for heuristic pass.
+				heuristicMu.Lock()
+				heuristicFiles = append(heuristicFiles, parsedFile{job.path, src})
+				heuristicMu.Unlock()
 			}
 
 			if job.mtime != 0 {
@@ -163,6 +179,12 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 	}
 
 	wg.Wait()
+
+	// R1: serial heuristic pass — all AST nodes are now present in the graph.
+	for _, pf := range heuristicFiles {
+		ApplyHeuristics(g, pf.path, pf.src)
+	}
+
 	return mtimes, nil
 }
 
@@ -216,6 +238,11 @@ func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[strin
 		}
 		if parseErr := p.Parse(g, path, src); parseErr != nil {
 			fmt.Fprintf(os.Stderr, "synapses: parse %s: %v\n", path, parseErr)
+		} else {
+			// R28: stamp provenance on all nodes produced by this file.
+			ApplyProvenance(g, path, src)
+			// R1: re-inject HANDLES edges for the changed file.
+			ApplyHeuristics(g, path, src)
 		}
 		fresh[path] = mtime
 		changed++
@@ -247,7 +274,14 @@ func (w *Walker) ParseFile(g *graph.Graph, path string) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-	return p.Parse(g, path, src)
+	if err := p.Parse(g, path, src); err != nil {
+		return err
+	}
+	// R28: stamp provenance on all nodes produced by this file.
+	ApplyProvenance(g, path, src)
+	// R1: inject HANDLES edges for this file.
+	ApplyHeuristics(g, path, src)
+	return nil
 }
 
 // shouldSkipDir returns true for directories that never contain useful source:

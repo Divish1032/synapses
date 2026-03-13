@@ -127,6 +127,8 @@ func (g *Graph) AddNode(n *Node) {
 
 // AddEdge inserts a directed edge. Both endpoint nodes must already exist;
 // if either is absent the edge is silently dropped to avoid dangling refs.
+// Duplicate edges (same From, To, Type) are silently dropped so that
+// repeated calls from incremental reindex or heuristic passes are idempotent.
 func (g *Graph) AddEdge(e *Edge) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -135,6 +137,12 @@ func (g *Graph) AddEdge(e *Edge) {
 	}
 	if _, ok := g.nodes[e.To]; !ok {
 		return
+	}
+	// Deduplicate: skip if this exact (From, To, Type) triple already exists.
+	for _, existing := range g.outEdges[e.From] {
+		if existing.To == e.To && existing.Type == e.Type {
+			return
+		}
 	}
 	g.outEdges[e.From] = append(g.outEdges[e.From], e)
 	g.inEdges[e.To] = append(g.inEdges[e.To], e)
@@ -200,6 +208,39 @@ func (g *Graph) FindByFile(filePath string) []*Node {
 		}
 	}
 	return results
+}
+
+// UpsertRouteNode atomically inserts a synthetic route node if one with the
+// same ID does not already exist. Returns true if the node was newly created.
+// This is the safe alternative to the non-atomic GetNode+AddNode pattern: by
+// holding the write lock for both the existence check and the insert, two
+// concurrent incremental-reindex goroutines cannot both create the same route
+// with different StableIDs.
+func (g *Graph) UpsertRouteNode(n *Node) bool {
+	if n.StableID == "" {
+		n.StableID = generateStableID()
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, exists := g.nodes[n.ID]; exists {
+		return false
+	}
+	g.nodes[n.ID] = n
+	g.piCache = nil
+	return true
+}
+
+// SetFileProvenance sets the Provenance field on all nodes whose File matches
+// filePath. Runs under a write lock to avoid the data race that would occur if
+// callers mutated node pointers returned by FindByFile after releasing the lock.
+func (g *Graph) SetFileProvenance(filePath string, p ProvenanceType) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, n := range g.nodes {
+		if n.File == filePath || strings.HasSuffix(n.File, "/"+filePath) {
+			n.Provenance = p
+		}
+	}
 }
 
 // Fanout returns the number of outgoing edges from the given node.

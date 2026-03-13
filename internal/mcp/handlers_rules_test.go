@@ -70,6 +70,29 @@ func TestHandleGetViolations_Empty(t *testing.T) {
 	res, err := s.handleGetViolations(ctx, callTool(nil))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "violations")
+	// R32: open_quality_gaps key must always be present (empty slice when no gaps).
+	hasKey(t, m, "open_quality_gaps")
+	if m["quality_gap_count"].(float64) != 0 {
+		t.Errorf("expected 0 quality gaps in fresh store, got %v", m["quality_gap_count"])
+	}
+}
+
+func TestHandleGetViolations_SurfacesOpenQualityGaps(t *testing.T) {
+	s := newTestServer(t)
+	// Insert a quality gap.
+	_, _ = s.handleUpsertGap(ctx, callTool(map[string]any{
+		"node_id":     "parser.go:DetectProvenance",
+		"gap_id":      "dist-relative-path",
+		"description": "dist/ relative path not matched",
+		"severity":    "medium",
+	}))
+
+	res, err := s.handleGetViolations(ctx, callTool(nil))
+	m := mustResult(t, res, err)
+	hasKey(t, m, "open_quality_gaps")
+	if m["quality_gap_count"].(float64) != 1 {
+		t.Errorf("expected 1 open quality gap, got %v", m["quality_gap_count"])
+	}
 }
 
 func TestHandleGetViolations_AfterRuleUpsert(t *testing.T) {

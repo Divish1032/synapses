@@ -4,8 +4,26 @@ import (
 	"math"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
+
+// provenanceWeight returns a relevance multiplier based on node provenance.
+// user-authored nodes are not penalized; generated/vendored/external nodes
+// are deprioritized so they rank below user code when the token budget is applied.
+// The root node is never penalized (checked by the caller).
+func provenanceWeight(p ProvenanceType) float64 {
+	switch p {
+	case ProvenanceGenerated:
+		return 0.5
+	case ProvenanceVendored:
+		return 0.3
+	case ProvenanceExternal:
+		return 0.2
+	default: // ProvenanceUserAuthored or empty — no penalty
+		return 1.0
+	}
+}
 
 // outInEdges returns combined outgoing and incoming edges for id.
 // When the columnar index is ready it reads directly from CSR flat arrays,
@@ -127,6 +145,19 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 
 		for _, e := range allEdges {
 			typeWeight := edgeWeight(e.Type, weights)
+
+			// R1: HANDLES edges are heuristically inferred (not AST-proven).
+			// Scale their weight by the route node's confidence score so that
+			// a 0.85-confidence inferred route ranks below a structural CALLS
+			// edge. The confidence is stored in the route node's metadata.
+			if e.Type == EdgeHandles {
+				if routeNode := g.nodes[e.From]; routeNode != nil {
+					if conf, err := strconv.ParseFloat(routeNode.Metadata["confidence"], 64); err == nil && conf > 0 {
+						typeWeight *= conf
+					}
+				}
+			}
+
 			relevance := typeWeight * math.Pow(decay, float64(curr.hop+1))
 
 			neighbor := e.To
@@ -187,6 +218,18 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		}
 		hop := hopDistance(id, rootID, rel, decay)
 		scored = append(scored, scoredNode{id, rel, hop})
+	}
+
+	// R28: Apply provenance multiplier — deprioritize generated/vendored/external
+	// nodes relative to user-authored code. The root node is never penalized so
+	// the agent always gets the entity it asked for regardless of its provenance.
+	for i := range scored {
+		if scored[i].id == rootID {
+			continue
+		}
+		if n, ok := g.nodes[scored[i].id]; ok {
+			scored[i].relevance *= provenanceWeight(n.Provenance)
+		}
 	}
 
 	// Sort by relevance descending so we keep the most important nodes first

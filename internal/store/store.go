@@ -323,6 +323,26 @@ CREATE INDEX IF NOT EXISTS idx_episodes_agent   ON episodes(agent_id, created_at
 CREATE INDEX IF NOT EXISTS idx_episodes_project ON episodes(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_episodes_type    ON episodes(episode_type, outcome);
 
+-- R32: Quality Intelligence — agent-discovered quality gaps on code entities.
+-- Unlike architecture violations (deterministic rule checks), quality gaps are
+-- agent-asserted findings discovered through reasoning about a specific entity.
+-- They persist across sessions, have a severity/status lifecycle, and surface
+-- in get_violations() and get_context() so future agents never re-discover them.
+CREATE TABLE IF NOT EXISTS quality_gaps (
+    id          TEXT PRIMARY KEY,            -- "{node_id}:{gap_id}" stable slug
+    node_id     TEXT NOT NULL,
+    gap_id      TEXT NOT NULL,               -- human slug: "dist-relative-path"
+    description TEXT NOT NULL,
+    severity    TEXT NOT NULL DEFAULT 'medium',  -- low | medium | high | critical
+    status      TEXT NOT NULL DEFAULT 'open',    -- open | fixed | wontfix
+    found_by    TEXT NOT NULL DEFAULT '',
+    found_at    TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    fix_notes   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_quality_gaps_node   ON quality_gaps(node_id);
+CREATE INDEX IF NOT EXISTS idx_quality_gaps_status ON quality_gaps(status);
+
 -- Vector embeddings for graph nodes. Stored separately from the nodes table
 -- to keep the main table lean — embeddings are optional and can be regenerated.
 -- embedding is a little-endian float32 BLOB; indexed_at is Unix seconds.
@@ -536,8 +556,11 @@ func Open(path string) (*Store, error) {
 		// Agent behavioral rules: distinguish code-graph (structural) rules from
 		// conversation-level (agent) constraints. Existing rows default to 'structural'.
 		`ALTER TABLE dynamic_rules ADD COLUMN rule_type TEXT NOT NULL DEFAULT 'structural'`,
+		// R28: Provenance labels — trust tier for each node (user-authored | generated | vendored | external).
+		// Existing rows default to 'user-authored' (safe: old code has no generated/vendored nodes tagged).
+		`ALTER TABLE nodes ADD COLUMN provenance TEXT NOT NULL DEFAULT 'user-authored'`,
 	} {
-		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
 			db.Close()
 			return nil, fmt.Errorf("migrate schema: %w", err)
 		}
@@ -834,8 +857,8 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 
 	// Insert nodes in batches.
 	nodeStmt, err := tx.Prepare(`
-        INSERT INTO nodes (id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO nodes (id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 	if err != nil {
 		return fmt.Errorf("prepare node stmt: %w", err)
@@ -876,10 +899,14 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		if n.Type == graph.NodeFile {
 			fileCount++
 		}
+		prov := string(n.Provenance)
+		if prov == "" {
+			prov = "user-authored"
+		}
 		if _, err := nodeStmt.Exec(
 			string(n.ID), string(n.Type),
 			n.Name, n.Package, n.File, n.Line,
-			exported, string(meta), doc, sig, lineCount, n.StableID,
+			exported, string(meta), doc, sig, lineCount, n.StableID, prov,
 		); err != nil {
 			return fmt.Errorf("insert node %s: %w", n.ID, err)
 		}
@@ -1027,7 +1054,7 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 
 	// Load nodes.
 	rows, err := s.db.Query(`
-        SELECT id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id FROM nodes
+        SELECT id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance FROM nodes
     `)
 	if err != nil {
 		return nil, fmt.Errorf("query nodes: %w", err)
@@ -1041,8 +1068,9 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 			metaJSON, doc, sig       string
 			lineCount                int
 			stableID                 string
+			provenance               string
 		)
-		if err := rows.Scan(&id, &typ, &name, &pkg, &file, &line, &exported, &metaJSON, &doc, &sig, &lineCount, &stableID); err != nil {
+		if err := rows.Scan(&id, &typ, &name, &pkg, &file, &line, &exported, &metaJSON, &doc, &sig, &lineCount, &stableID, &provenance); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		var meta map[string]string
@@ -1062,15 +1090,16 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 		}
 
 		g.AddNode(&graph.Node{
-			ID:       graph.NodeID(id),
-			Type:     graph.NodeType(typ),
-			Name:     name,
-			Package:  pkg,
-			File:     file,
-			Line:     line,
-			Exported: exported != 0,
-			Metadata: meta,
-			StableID: stableID,
+			ID:         graph.NodeID(id),
+			Type:       graph.NodeType(typ),
+			Name:       name,
+			Package:    pkg,
+			File:       file,
+			Line:       line,
+			Exported:   exported != 0,
+			Metadata:   meta,
+			StableID:   stableID,
+			Provenance: graph.ProvenanceType(provenance),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -1511,6 +1540,164 @@ func (s *Store) GetViolationLog(ruleID string, limit int) ([]ViolationLogEntry, 
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
+}
+
+// ── Quality Intelligence (R32) ────────────────────────────────────────────────
+
+// QualityGap is an agent-discovered quality finding on a specific code entity.
+// Unlike architecture violations (deterministic rule checks), quality gaps are
+// asserted through reasoning — "I examined this function and found this edge case."
+type QualityGap struct {
+	ID          string `json:"id"`          // "{node_id}:{gap_id}"
+	NodeID      string `json:"node_id"`
+	GapID       string `json:"gap_id"`      // slug: "dist-relative-path"
+	Description string `json:"description"`
+	Severity    string `json:"severity"`    // low | medium | high | critical
+	Status      string `json:"status"`      // open | fixed | wontfix
+	FoundBy     string `json:"found_by,omitempty"`
+	FoundAt     string `json:"found_at"`
+	UpdatedAt   string `json:"updated_at"`
+	FixNotes    string `json:"fix_notes,omitempty"`
+}
+
+// GapFilter controls which quality gaps are returned by GetGaps.
+type GapFilter struct {
+	NodeID   string // filter by exact node ID
+	File     string // filter by source file (matches any node in that file)
+	Severity string // filter by severity ("low" | "medium" | "high" | "critical")
+	Status   string // filter by status; default "open" when empty
+}
+
+// UpsertGap creates or updates a quality gap. The primary key is
+// "{nodeID}:{gapID}" — re-calling with the same pair updates the record.
+func (s *Store) UpsertGap(g QualityGap) (QualityGap, error) {
+	if g.NodeID == "" || g.GapID == "" {
+		return QualityGap{}, fmt.Errorf("node_id and gap_id are required")
+	}
+	g.ID = g.NodeID + ":" + g.GapID
+	if g.Severity == "" {
+		g.Severity = "medium"
+	}
+	if g.Status == "" {
+		g.Status = "open"
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if g.FoundAt == "" {
+		g.FoundAt = now
+	}
+	g.UpdatedAt = now
+	_, err := s.db.Exec(`
+		INSERT INTO quality_gaps
+			(id, node_id, gap_id, description, severity, status, found_by, found_at, updated_at, fix_notes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			description = excluded.description,
+			severity    = excluded.severity,
+			status      = excluded.status,
+			updated_at  = excluded.updated_at,
+			fix_notes   = excluded.fix_notes`,
+		g.ID, g.NodeID, g.GapID, g.Description, g.Severity, g.Status,
+		g.FoundBy, g.FoundAt, g.UpdatedAt, g.FixNotes,
+	)
+	if err != nil {
+		return QualityGap{}, fmt.Errorf("upsert quality gap: %w", err)
+	}
+	return g, nil
+}
+
+// GetGaps returns quality gaps matching the filter. When filter.Status is
+// empty it defaults to "open". Pass status="all" to return every status.
+func (s *Store) GetGaps(f GapFilter) ([]QualityGap, error) {
+	status := f.Status
+	if status == "" {
+		status = "open"
+	}
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	base := `SELECT id, node_id, gap_id, description, severity, status,
+	                found_by, found_at, updated_at, fix_notes
+	         FROM quality_gaps`
+
+	// severityOrder sorts critical→high→medium→low semantically.
+	// TEXT columns sort lexicographically in SQLite, so ORDER BY severity DESC
+	// would yield medium→low→high→critical (wrong). The CASE expression maps
+	// each value to an integer weight so DESC gives the intended order.
+	const severityOrder = ` CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, updated_at DESC`
+
+	// filePattern builds two LIKE patterns to match node_id by file basename.
+	// node_id format: "{repoID}::{filePath}::{name}"
+	//   - "%/auth.go::%" matches  "repo::pkg/auth.go::Func" (path component)
+	//   - "%::auth.go::%" matches "repo::auth.go::Func"     (root-level file)
+	// Using two patterns with OR avoids the substring false-positive of the old
+	// single "%auth.go%" pattern (which matched "unauth.go" as well).
+	fileWhere := func(extra string) string {
+		return base + ` WHERE (node_id LIKE ? OR node_id LIKE ?)` + extra + ` ORDER BY` + severityOrder
+	}
+
+	switch {
+	// Compound: NodeID + Severity (most specific — must come before single-field cases).
+	case f.NodeID != "" && f.Severity != "" && status != "all":
+		rows, err = s.db.Query(base+` WHERE node_id = ? AND severity = ? AND status = ? ORDER BY`+severityOrder, f.NodeID, f.Severity, status)
+	case f.NodeID != "" && f.Severity != "":
+		rows, err = s.db.Query(base+` WHERE node_id = ? AND severity = ? ORDER BY`+severityOrder, f.NodeID, f.Severity)
+	// Compound: File + Severity.
+	case f.File != "" && f.Severity != "" && status != "all":
+		rows, err = s.db.Query(fileWhere(` AND severity = ? AND status = ?`), "%/"+f.File+"::%", "%::"+f.File+"::%", f.Severity, status)
+	case f.File != "" && f.Severity != "":
+		rows, err = s.db.Query(fileWhere(` AND severity = ?`), "%/"+f.File+"::%", "%::"+f.File+"::%", f.Severity)
+	// Single-field cases.
+	case f.NodeID != "" && status != "all":
+		rows, err = s.db.Query(base+` WHERE node_id = ? AND status = ? ORDER BY`+severityOrder, f.NodeID, status)
+	case f.NodeID != "":
+		rows, err = s.db.Query(base+` WHERE node_id = ? ORDER BY`+severityOrder, f.NodeID)
+	case f.File != "" && status != "all":
+		rows, err = s.db.Query(fileWhere(` AND status = ?`), "%/"+f.File+"::%", "%::"+f.File+"::%", status)
+	case f.File != "":
+		rows, err = s.db.Query(fileWhere(``), "%/"+f.File+"::%", "%::"+f.File+"::%")
+	case f.Severity != "" && status != "all":
+		rows, err = s.db.Query(base+` WHERE severity = ? AND status = ? ORDER BY`+severityOrder, f.Severity, status)
+	case status != "all":
+		rows, err = s.db.Query(base+` WHERE status = ? ORDER BY`+severityOrder, status)
+	default:
+		rows, err = s.db.Query(base + ` ORDER BY` + severityOrder)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []QualityGap
+	for rows.Next() {
+		var g QualityGap
+		if err := rows.Scan(&g.ID, &g.NodeID, &g.GapID, &g.Description,
+			&g.Severity, &g.Status, &g.FoundBy, &g.FoundAt, &g.UpdatedAt, &g.FixNotes); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// CountOpenGaps returns the number of open quality gaps matching the given
+// node IDs. Used by session_init to surface gap counts for recently-worked files.
+func (s *Store) CountOpenGaps(nodeIDs []string) (int, error) {
+	if len(nodeIDs) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(nodeIDs))
+	args := make([]interface{}, len(nodeIDs))
+	for i, id := range nodeIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	row := s.db.QueryRow(
+		`SELECT COUNT(*) FROM quality_gaps WHERE status = 'open' AND node_id IN (`+
+			strings.Join(placeholders, ",")+`)`,
+		args...)
+	var n int
+	return n, row.Scan(&n)
 }
 
 // Agent is a registered agent that has interacted with Synapses.
