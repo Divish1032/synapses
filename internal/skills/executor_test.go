@@ -38,7 +38,7 @@ func TestExecutor_AllStepsRun(t *testing.T) {
 	caller.responses["get_context"] = `{"entity":"Graph"}`
 	caller.responses["get_violations"] = `{"violations":[]}`
 
-	exec := NewExecutor(caller)
+	exec := NewExecutor(caller, nil)
 	recipe := Recipe{
 		ID:     "test-recipe",
 		Output: "structured",
@@ -69,7 +69,7 @@ func TestExecutor_OptionalStepSkipped(t *testing.T) {
 	caller.responses["get_context"] = `{"entity":"Graph"}`
 	caller.errors["recall"] = errors.New("store unavailable")
 
-	exec := NewExecutor(caller)
+	exec := NewExecutor(caller, nil)
 	recipe := Recipe{
 		ID:     "test-optional",
 		Output: "structured",
@@ -99,7 +99,7 @@ func TestExecutor_RequiredStepFailAborts(t *testing.T) {
 	caller := newMockCaller()
 	caller.errors["get_context"] = errors.New("graph offline")
 
-	exec := NewExecutor(caller)
+	exec := NewExecutor(caller, nil)
 	recipe := Recipe{
 		ID: "test-abort",
 		Steps: []RecipeStep{
@@ -114,7 +114,7 @@ func TestExecutor_RequiredStepFailAborts(t *testing.T) {
 }
 
 func TestExecutor_MissingRequiredParam(t *testing.T) {
-	exec := NewExecutor(newMockCaller())
+	exec := NewExecutor(newMockCaller(), nil)
 	recipe := Recipe{
 		ID:     "test-param",
 		Params: []RecipeParam{{Name: "target", Type: "string", Required: true}},
@@ -129,7 +129,7 @@ func TestExecutor_MissingRequiredParam(t *testing.T) {
 
 func TestExecutor_DefaultParamApplied(t *testing.T) {
 	caller := newMockCaller()
-	exec := NewExecutor(caller)
+	exec := NewExecutor(caller, nil)
 	recipe := Recipe{
 		ID: "test-default",
 		Params: []RecipeParam{
@@ -155,7 +155,7 @@ func TestExecutor_PrevResultPropagated(t *testing.T) {
 	caller.responses["get_context"] = "first-output"
 	caller.responses["get_impact"] = "impact-result"
 
-	exec := NewExecutor(caller)
+	exec := NewExecutor(caller, nil)
 	recipe := Recipe{
 		ID:     "test-prev",
 		Output: "merged",
@@ -180,7 +180,7 @@ func TestExecutor_MergedOutput(t *testing.T) {
 	caller.responses["get_context"] = "ctx"
 	caller.responses["get_violations"] = "violations"
 
-	exec := NewExecutor(caller)
+	exec := NewExecutor(caller, nil)
 	recipe := Recipe{
 		ID:     "test-merge",
 		Output: "merged",

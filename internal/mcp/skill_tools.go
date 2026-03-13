@@ -179,9 +179,9 @@ func (s *Server) registerSkillTools() {
 	)
 }
 
-// SetSkillRecipes wires loaded recipes into the server and creates the Executor.
-// Must be called before the server starts serving requests.
+// SetSkillRecipes wires loaded recipes into the server and creates the Executor
+// with the default security policy. Must be called before the server starts serving requests.
 func (s *Server) SetSkillRecipes(recipes []skills.Recipe) {
 	s.skillRecipes = recipes
-	s.skillExecutor = skills.NewExecutor(s)
+	s.skillExecutor = skills.NewExecutor(s, skills.DefaultPolicy())
 }

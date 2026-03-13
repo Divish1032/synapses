@@ -36,17 +36,27 @@ type ExecutionResult struct {
 // Executor runs Recipe definitions by dispatching steps to a ToolCaller.
 type Executor struct {
 	caller ToolCaller
+	policy *SecurityPolicy
 }
 
-// NewExecutor creates an Executor backed by the given ToolCaller.
-func NewExecutor(caller ToolCaller) *Executor {
-	return &Executor{caller: caller}
+// NewExecutor creates an Executor backed by the given ToolCaller and SecurityPolicy.
+// If policy is nil, DefaultPolicy() is used — no recipe ever runs without a policy.
+func NewExecutor(caller ToolCaller, policy *SecurityPolicy) *Executor {
+	if policy == nil {
+		policy = DefaultPolicy()
+	}
+	return &Executor{caller: caller, policy: policy}
 }
 
 // Execute runs recipe r with the given params.
+// The recipe's origin is checked against the security policy before any step runs.
 // Required params that are missing and have no Default cause an error.
 // Optional steps that fail are recorded with Skipped=true; non-optional step failures abort.
 func (e *Executor) Execute(ctx context.Context, r Recipe, params map[string]interface{}) (*ExecutionResult, error) {
+	// Security gate: check origin permissions before any steps execute.
+	if err := e.policy.Check(r.ID, TrustOrigin(r.Origin), r.RequiredPermissions); err != nil {
+		return nil, err
+	}
 	// Validate and apply defaults for params.
 	resolved := make(map[string]interface{}, len(r.Params))
 	for _, p := range r.Params {
