@@ -373,6 +373,8 @@ func cmdDaemonServe(args []string) error {
 	mcpsrv.Version = version
 	srv := mcpsrv.New(g, cfg, st)
 	srv.SetProjectID(pathProjectID(absPath))
+	srv.StartBackground()
+	defer srv.Close()
 
 	// Load activation-context prompts from all scopes (fail-silent per scope).
 	{

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -135,6 +136,7 @@ type directionalContext struct {
 	RecentChanges          []metrics.CommitInfo          `json:"recent_changes,omitempty"`           // GAP-7: last 3 git commits that touched the entity's file
 	GraphFreshness         string                        `json:"graph_freshness,omitempty"`          // GAP-4: warning when entity's file was recently modified
 	AdaptiveHint           string                        `json:"adaptive_hint,omitempty"`            // F17: set when BFS depth/detail was auto-expanded based on prior feedback
+	EntityMemories         []entityMemoryHint            `json:"entity_memories,omitempty"`          // R10: institutional knowledge attached to this entity
 }
 
 // activePrompt is a matched activation-context snippet included in get_context
@@ -142,6 +144,14 @@ type directionalContext struct {
 type activePrompt struct {
 	ID   string `json:"id"`
 	Body string `json:"body"`
+}
+
+// entityMemoryHint is an institutional-knowledge entry surfaced alongside
+// entity context from the unified memories table.
+type entityMemoryHint struct {
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
+	Source    string `json:"source"`
 }
 
 // handleGetContext returns an N-hop ego-subgraph around the named entity,
@@ -347,8 +357,17 @@ func (s *Server) handleGetContext(
 		dc.BrainHint = "not configured — add brain.url to synapses.json for semantic enrichment"
 	}
 
-	// Attach annotations from all agents if the store is available.
-	if s.store != nil {
+	// ── Parallel enrichment: run independent I/O-bound queries concurrently ──
+	// Each goroutine writes to a separate field of dc — no shared writes.
+	var enrichWg sync.WaitGroup
+
+	// 1. Annotations from all agents (store query).
+	enrichWg.Add(1)
+	go func() {
+		defer enrichWg.Done()
+		if s.store == nil {
+			return
+		}
 		nodeIDs := make([]string, 0, len(sg.Nodes)+1)
 		nodeIDs = append(nodeIDs, string(sg.Root))
 		for _, cn := range sg.Nodes {
@@ -356,8 +375,6 @@ func (s *Server) handleGetContext(
 		}
 		if annMap, err := s.store.GetAnnotationsForNodes(nodeIDs); err == nil && len(annMap) > 0 {
 			dc.Annotations = annMap
-			// GAP-3: Warn when any annotation was written against a node whose
-			// call-graph has since changed significantly (stale=true).
 			var staleCount int
 			for _, anns := range annMap {
 				for _, a := range anns {
@@ -373,15 +390,17 @@ func (s *Server) handleGetContext(
 				)
 			}
 		}
-	}
+	}()
 
-	// ── Context enrichment: auto-inject rules, failures, and task context ──
-	// This saves agents from making separate calls to get_violations, recall,
-	// and get_pending_tasks when exploring an entity.
-	if s.store != nil && best != nil {
+	// 2. Context enrichment: rules, failures, and task context (store + config queries).
+	enrichWg.Add(1)
+	go func() {
+		defer enrichWg.Done()
+		if s.store == nil || best == nil {
+			return
+		}
 		var enrichment contextEnrichment
 
-		// 1. Applicable architectural rules for this file.
 		if s.config != nil {
 			for _, r := range s.config.Rules {
 				matched := r.ForbiddenEdge.FromFilePattern == ""
@@ -396,7 +415,6 @@ func (s *Server) handleGetContext(
 					})
 				}
 			}
-			// Also include dynamic rules from store.
 			if dynRules, err := s.store.LoadDynamicRules(); err == nil {
 				for _, dr := range dynRules {
 					matched := dr.ForbiddenEdge.FromFilePattern == ""
@@ -414,7 +432,6 @@ func (s *Server) handleGetContext(
 			}
 		}
 
-		// 2. Recent failure episodes mentioning this entity (top 2).
 		if matches, err := s.store.RecallEpisodes(
 			best.Name, s.graph.RepoID(), "", "failure", "", 2, 0,
 		); err == nil {
@@ -427,7 +444,6 @@ func (s *Server) handleGetContext(
 			}
 		}
 
-		// 3. Active task linked to this entity.
 		if taskID != "" {
 			if task, err := s.store.GetTask(taskID); err == nil {
 				enrichment.ActiveTask = &taskHint{
@@ -438,11 +454,70 @@ func (s *Server) handleGetContext(
 			}
 		}
 
-		// Only attach if there's anything to show.
 		if len(enrichment.ApplicableRules) > 0 || len(enrichment.RecentFailures) > 0 || enrichment.ActiveTask != nil {
 			dc.Enrichment = &enrichment
 		}
-	}
+	}()
+
+	// 3. Git "why" layer — recent commits for the entity's file (spawns git subprocess).
+	enrichWg.Add(1)
+	go func() {
+		defer enrichWg.Done()
+		if dc.Root == nil || dc.Root.File == "" {
+			return
+		}
+		repoRoot := s.graph.Root()
+		if repoRoot != "" {
+			if commits := metrics.RecentCommitsForFile(repoRoot, dc.Root.File, 3); len(commits) > 0 {
+				dc.RecentChanges = commits
+			}
+		}
+	}()
+
+	// 4. ADRs from brain sidecar (HTTP call, fail-silent).
+	enrichWg.Add(1)
+	go func() {
+		defer enrichWg.Done()
+		bc := s.getBrainClient()
+		if bc == nil || dc.Root == nil || dc.Root.File == "" {
+			return
+		}
+		if adrs, err := bc.GetADRs(context.Background(), dc.Root.File); err == nil && len(adrs) > 0 {
+			if len(adrs) > 2 {
+				adrs = adrs[:2]
+			}
+			dc.ADRs = adrs
+		}
+	}()
+
+	// 5. Entity memories from unified memories table (R10).
+	// Guard: best.ID must be non-empty — empty string would fetch ALL entity memories.
+	enrichWg.Add(1)
+	go func() {
+		defer enrichWg.Done()
+		if s.store == nil || best == nil || best.ID == "" {
+			return
+		}
+		mems, err := s.store.QueryMemories(store.TierEntity, string(best.ID), "", 3)
+		if err != nil || len(mems) == 0 {
+			return
+		}
+		hints := make([]entityMemoryHint, 0, len(mems))
+		for _, m := range mems {
+			hints = append(hints, entityMemoryHint{
+				Content:   m.Content,
+				CreatedAt: m.CreatedAt,
+				Source:    m.Source,
+			})
+			s.store.TouchMemory(m.ID)
+		}
+		dc.EntityMemories = hints
+	}()
+
+	// Wait for all enrichment goroutines to complete.
+	enrichWg.Wait()
+
+	// ── Sequential enrichment (fast, in-memory only) ──
 
 	// Context-aware next-step suggestions.
 	dc.SuggestedNextTools = suggestNextAfterContext(dc)
@@ -453,7 +528,6 @@ func (s *Server) handleGetContext(
 	}
 
 	// Activation-context prompts: inject matching snippets from .synapses/prompts/.
-	// Zero-cost when no prompts are loaded or no patterns match.
 	if dc.Root != nil {
 		matched := s.getMatchingPrompts(dc.Root.File, dc.Root.Name, dc.Root.Package)
 		if len(matched) > 0 {
@@ -464,19 +538,7 @@ func (s *Server) handleGetContext(
 		}
 	}
 
-	// GAP-7: Git "why" layer — surface recent commits for the entity's file so
-	// agents understand WHY the code looks the way it does without needing ADRs.
-	if dc.Root != nil && dc.Root.File != "" {
-		repoRoot := s.graph.Root()
-		if repoRoot != "" {
-			if commits := metrics.RecentCommitsForFile(repoRoot, dc.Root.File, 3); len(commits) > 0 {
-				dc.RecentChanges = commits
-			}
-		}
-	}
-
-	// GAP-4: Graph freshness — warn when the entity's file was modified very recently,
-	// meaning the graph may not yet reflect the latest changes (watcher latency).
+	// GAP-4: Graph freshness — warn when the entity's file was modified very recently.
 	if dc.Root != nil && dc.Root.File != "" {
 		if fi, err := os.Stat(dc.Root.File); err == nil {
 			age := time.Since(fi.ModTime())
@@ -489,41 +551,32 @@ func (s *Server) handleGetContext(
 		}
 	}
 
-	// ADRs: fetch relevant accepted ADRs for this entity's file (brain required, fail-silent).
-	if bc := s.getBrainClient(); bc != nil && dc.Root != nil && dc.Root.File != "" {
-		if adrs, err := bc.GetADRs(context.Background(), dc.Root.File); err == nil && len(adrs) > 0 {
-			if len(adrs) > 2 {
-				adrs = adrs[:2]
-			}
-			dc.ADRs = adrs
-		}
-	}
-
-	// Pulse telemetry: emit context delivery metrics (token savings vs baseline).
+	// ── Fire-and-forget telemetry (non-blocking) ──
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 	if agentID == "" {
 		agentID = s.getLastAgent()
 	}
-	s.emitContextDelivery(
+	go s.emitContextDelivery(
 		"get_context", agentID, entityName, best.File,
 		dc, sg.Nodes, sg.Edges,
-		sg.TruncatedCount,       // nodes_pruned: nodes dropped by the token budget
+		sg.TruncatedCount,
 		sg.Truncated,
-		dc.ContextPacket != nil, // brain_enriched
-		false,                   // cache_hit (packet cache is internal; context always delivered fresh)
+		dc.ContextPacket != nil,
+		false,
 	)
 
-	// Multi-agent awareness: emit event and update focus so other agents can
-	// see what this agent is currently examining.
+	// Multi-agent awareness: fire-and-forget event emission.
 	if agentID != "" && s.store != nil {
-		payload, _ := json.Marshal(map[string]string{
-			"entity": entityName,
-			"file":   best.File,
-		})
-		if err := s.store.AppendEvent("agent_examining", agentID, string(payload)); err != nil {
-			log.Printf("mcp: append agent_examining event: %v", err)
-		}
-		s.upsertAgentWithActivity(agentID, &store.AgentActivity{Focus: entityName})
+		go func() {
+			payload, _ := json.Marshal(map[string]string{
+				"entity": entityName,
+				"file":   best.File,
+			})
+			if err := s.store.AppendEvent("agent_examining", agentID, string(payload)); err != nil {
+				log.Printf("mcp: append agent_examining event: %v", err)
+			}
+			s.upsertAgentWithActivity(agentID, &store.AgentActivity{Focus: entityName})
+		}()
 	}
 
 	// F17: surface adaptive expansion hint in the response so agents know why
@@ -2780,6 +2833,100 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// ── 9. Relevant memories ─────────────────────────────────────────────
+	// Surface institutional knowledge at session start so agents benefit from
+	// prior sessions automatically. Three tiers:
+	//   1. Entity memories for nodes linked to in-progress tasks
+	//   2. Project-tier memories (always relevant)
+	//   3. Session logs from this agent's recent sessions
+	// Capped at ~500 chars total; all surfaced memories get touched (TTL renewal).
+	if s.store != nil {
+		const memCap = 500
+		var memoryItems []map[string]string
+		var touchIDs []string
+		totalLen := 0
+
+		addMemory := func(m store.Memory, label string) bool {
+			if totalLen >= memCap {
+				return false
+			}
+			content := m.Content
+			// UTF-8 safe cap: truncate by rune count, not byte count.
+			if runes := []rune(content); totalLen+len(runes) > memCap {
+				content = string(runes[:memCap-totalLen])
+			}
+			memoryItems = append(memoryItems, map[string]string{
+				"tier":    m.Tier,
+				"content": content,
+				"label":   label,
+			})
+			touchIDs = append(touchIDs, m.ID)
+			totalLen += len(content)
+			return totalLen < memCap
+		}
+
+		// 1. Entity memories for in-progress task linked nodes.
+		if pendingSection != nil {
+			if tasks, ok := pendingSection["tasks"].([]taskWithState); ok {
+				var linkedNodeIDs []string
+				for _, t := range tasks {
+					if t.Status == "in_progress" {
+						linkedNodeIDs = append(linkedNodeIDs, t.LinkedNodes...)
+					}
+				}
+				if len(linkedNodeIDs) > 0 {
+					entityMems, _ := s.store.QueryMemoriesForEntities(linkedNodeIDs, 5)
+					for _, nodeID := range linkedNodeIDs {
+						for _, m := range entityMems[nodeID] {
+							if !addMemory(m, "task_entity") {
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// 2. Project-tier memories.
+		if totalLen < memCap {
+			projMems, _ := s.store.QueryMemories(store.TierProject, "", "", 5)
+			for _, m := range projMems {
+				if !addMemory(m, "project") {
+					break
+				}
+			}
+		}
+
+		// 3. Session logs from this agent's recent sessions.
+		if totalLen < memCap && agentID != "" {
+			sessMems, _ := s.store.QueryRecentSessionMemories(agentID, 3)
+			for _, m := range sessMems {
+				if !addMemory(m, "session_history") {
+					break
+				}
+			}
+		}
+
+		if len(memoryItems) > 0 {
+			resp["relevant_memories"] = map[string]interface{}{
+				"count":    len(memoryItems),
+				"memories": memoryItems,
+				"note":     "Institutional knowledge from prior sessions. These memories are auto-surfaced and renewed on access.",
+			}
+			// Touch surfaced memories in background — TTL renewal must not add
+			// latency to the session_init response.
+			if len(touchIDs) > 0 {
+				ids := make([]string, len(touchIDs))
+				copy(ids, touchIDs)
+				go func() {
+					for _, id := range ids {
+						s.store.TouchMemory(id)
+					}
+				}()
+			}
+		}
+	}
+
 	// ── Activation-context prompts (auto_load: true) ──────────────────────
 	// Surface project-wide conventions so agents apply them from the first message.
 	// Only prompts with auto_load: true are included here; entity-specific prompts
@@ -2866,6 +3013,16 @@ func (s *Server) handleAnnotateNode(
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("add annotation: %v", err)), nil
 	}
+
+	// Dual-write to unified memories table (entity tier).
+	_, _ = s.store.InsertMemory(store.Memory{
+		Tier:     store.TierEntity,
+		Content:  note,
+		EntityID: nodeID,
+		AgentID:  agentID,
+		Source:   store.SourceManual,
+		Tags:     `["annotation"]`,
+	})
 
 	// Emit event.
 	if err := s.store.AppendEvent("annotation_added", agentID,

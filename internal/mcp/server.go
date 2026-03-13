@@ -85,6 +85,11 @@ type Server struct {
 	// Populated via SetSkillRecipes after the server is constructed.
 	skillRecipes  []skills.Recipe
 	skillExecutor *skills.Executor
+
+	// stopCh is closed by Close() to signal background goroutines to exit.
+	// startOnce ensures StartBackground() is truly idempotent.
+	stopCh    chan struct{}
+	startOnce sync.Once
 }
 
 // ctxCallEntry tracks how many times an agent requested context for an entity.
@@ -120,6 +125,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		config:      cfg,
 		store:       st,
 		packetCache: make(map[string]*packetCacheEntry, 20),
+		stopCh:      make(chan struct{}),
 	}
 
 	// Restore dynamic rules persisted from previous sessions. This runs before
@@ -328,6 +334,45 @@ func (s *Server) ServeStdio() error {
 // instead of stdio.
 func (s *Server) MCPServer() *server.MCPServer {
 	return s.mcp
+}
+
+// StartBackground launches background maintenance goroutines.
+// Call Close() to stop them. Idempotent — safe to call multiple times.
+func (s *Server) StartBackground() {
+	if s.store == nil {
+		return
+	}
+	s.startOnce.Do(func() {
+		go s.memoryExpiryLoop()
+	})
+}
+
+// Close signals all background goroutines to stop.
+func (s *Server) Close() {
+	select {
+	case <-s.stopCh:
+		// already closed
+	default:
+		close(s.stopCh)
+	}
+}
+
+// memoryExpiryLoop runs ExpireMemories every 6 hours until stopCh is closed.
+func (s *Server) memoryExpiryLoop() {
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+
+	// Run once at startup to clear any stale memories from previous sessions.
+	s.store.ExpireMemories()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.store.ExpireMemories()
+		case <-s.stopCh:
+			return
+		}
+	}
 }
 
 // registerTools wires all Synapses tool definitions to their handlers.
@@ -731,6 +776,32 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleSaveSessionState,
+	)
+
+	// end_session
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"end_session",
+			mcp.WithDescription(
+				"Captures session knowledge and persists it as structured memories. "+
+					"Call at the end of a session to automatically extract: files touched, "+
+					"entities examined, tasks updated. Saves session-log, entity, and project "+
+					"memories that future sessions will see in session_init and get_context. "+
+					"This is how institutional knowledge accumulates across sessions.",
+			),
+			mcp.WithString("agent_id",
+				mcp.Required(),
+				mcp.Description("Self-declared agent identifier."),
+			),
+			mcp.WithString("task_id",
+				mcp.Description("Optional. Link session memories to this task."),
+			),
+			mcp.WithString("summary",
+				mcp.Description("Optional. High-level summary of what was accomplished. "+
+					"Saved as a project-tier memory visible to all future sessions."),
+			),
+		),
+		s.handleEndSession,
 	)
 
 	// get_session_state
