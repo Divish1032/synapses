@@ -52,13 +52,20 @@ func (s *Server) CallTool(ctx context.Context, toolName string, args map[string]
 	if result == nil {
 		return "", nil
 	}
+	// Surface IsError regardless of whether content is present or parseable,
+	// so recipe steps never silently swallow tool errors as empty output.
+	if result.IsError {
+		msg := toolName + ": tool reported error"
+		if len(result.Content) > 0 {
+			if tc, ok := result.Content[0].(mcp.TextContent); ok {
+				msg = toolName + ": " + tc.Text
+			}
+		}
+		return "", fmt.Errorf("skills.CallTool: %s", msg)
+	}
 	// Extract text from first content block.
 	if len(result.Content) > 0 {
 		if tc, ok := result.Content[0].(mcp.TextContent); ok {
-			// If the result signals an error via IsError, surface it.
-			if result.IsError {
-				return "", fmt.Errorf("skills.CallTool: %s: %s", toolName, tc.Text)
-			}
 			return tc.Text, nil
 		}
 	}
