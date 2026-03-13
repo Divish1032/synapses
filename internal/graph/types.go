@@ -365,4 +365,7 @@ type ImpactResult struct {
 	// Truncated is true when any tier was capped at maxImpactNodesPerTier.
 	// Check per-tier Truncated + TotalNodes for exact counts.
 	Truncated bool `json:"truncated,omitempty"`
+	// TestCoverage lists test files that exercise the root entity (R2).
+	// Populated by FindTestsFor via reverse-BFS over CALLS edges filtered to test files.
+	TestCoverage []string `json:"test_coverage,omitempty"`
 }

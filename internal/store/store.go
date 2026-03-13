@@ -505,9 +505,8 @@ func Open(path string) (*Store, error) {
 			VALUES ('delete', old.rowid, old.content);
 			INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
 		END`,
-		// Backfill: re-sync FTS index for any memories that existed before the FTS
-		// table was created. Safe on already-populated indexes (just rebuilds in place).
-		`INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')`,
+		// Note: memories_fts backfill is handled after migration loop (conditional,
+		// like nodes_fts) rather than here, to avoid rebuilding on every startup.
 		// B11: Content-hash invalidation — detect stale embeddings when code changes.
 		`ALTER TABLE node_embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
 		// Dedup system annotations: prevent identical auditor notes from accumulating
@@ -553,6 +552,16 @@ func Open(path string) (*Store, error) {
 	_ = db.QueryRow(`SELECT count(*) FROM nodes`).Scan(&nodeCount)
 	if ftsCount == 0 && nodeCount > 0 {
 		_ = st.rebuildFTS() // best-effort; non-fatal
+	}
+
+	// Backfill memories_fts for existing databases upgraded from before the
+	// FTS table was created. Only runs when memories exist but FTS is empty,
+	// not on every startup.
+	var memFtsCount, memCount int
+	_ = db.QueryRow(`SELECT count(*) FROM memories_fts`).Scan(&memFtsCount)
+	_ = db.QueryRow(`SELECT count(*) FROM memories`).Scan(&memCount)
+	if memFtsCount == 0 && memCount > 0 {
+		_, _ = db.Exec(`INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')`) // best-effort
 	}
 
 	return st, nil

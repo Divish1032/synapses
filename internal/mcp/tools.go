@@ -137,6 +137,26 @@ type directionalContext struct {
 	GraphFreshness         string                        `json:"graph_freshness,omitempty"`          // GAP-4: warning when entity's file was recently modified
 	AdaptiveHint           string                        `json:"adaptive_hint,omitempty"`            // F17: set when BFS depth/detail was auto-expanded based on prior feedback
 	EntityMemories         []entityMemoryHint            `json:"entity_memories,omitempty"`          // R10: institutional knowledge attached to this entity
+	EntityHash             string                        `json:"entity_hash,omitempty"`              // R14: SHA1 of node+neighbor IDs; stable cache key for clients
+}
+
+// computeEntityHash returns a short SHA1 hex digest that identifies the
+// current ego-graph structure for a given root node. It is stable across
+// identical graphs and changes when any node or edge in the subgraph changes.
+// Clients can pass this back as known_hash to get an early {"unchanged":true}
+// response instead of a full context payload.
+func computeEntityHash(rootID graph.NodeID, nodes []graph.CarvedNode) string {
+	ids := make([]string, 0, len(nodes)+1)
+	ids = append(ids, string(rootID))
+	for _, cn := range nodes {
+		ids = append(ids, string(cn.Node.ID))
+	}
+	sort.Strings(ids)
+	h := sha1.New()
+	for _, s := range ids {
+		_, _ = h.Write([]byte(s))
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))[:12] // 12 hex chars = 48 bits — ample for cache hit detection
 }
 
 // activePrompt is a matched activation-context snippet included in get_context
@@ -317,6 +337,19 @@ func (s *Server) handleGetContext(
 	// normalizeSubgraph deep-copies nodes, so boosting relevance on the result
 	// is safe — we never mutate the cached subgraph.
 	sg := normalizeSubgraph(subgraph, s.graph.Root())
+
+	// R14 Part B: entity_hash — stable fingerprint of the ego-graph structure.
+	// If the caller provides known_hash matching the current hash, return an
+	// early "unchanged" response so agents can skip re-processing stale context.
+	entityHash := computeEntityHash(best.ID, sg.Nodes)
+	if knownHash, _ := req.GetArguments()["known_hash"].(string); knownHash != "" && knownHash == entityHash {
+		return jsonResult(map[string]interface{}{
+			"unchanged":   true,
+			"entity_hash": entityHash,
+			"entity":      entityName,
+		})
+	}
+
 	if len(boostedNodes) > 0 {
 		for i := range sg.Nodes {
 			if boostedNodes[sg.Nodes[i].Node.ID] {
@@ -585,6 +618,9 @@ func (s *Server) handleGetContext(
 		dc.AdaptiveHint = "⟳ Context depth auto-expanded based on prior feedback for this entity."
 	}
 
+	// Attach entity_hash to the response so clients can cache and compare.
+	dc.EntityHash = entityHash
+
 	// format=compact returns a natural-language briefing instead of the default JSON blob.
 	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t, default).
 	format, _ := req.GetArguments()["format"].(string)
@@ -691,7 +727,13 @@ func (s *Server) asyncEnrichContext(
 	hasTests := fileHasTests(best.File)
 	fanIn := s.graph.Fanin(best.ID)
 
-	pkt := bc.BuildContextPacket(context.Background(), brain.ContextPacketRequest{
+	// Hard 200ms timeout: brain enrichment must not block the cache write path.
+	// If brain is slow or unavailable, we silently skip caching — the next
+	// get_context call will trigger another background attempt.
+	enrichCtx, enrichCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer enrichCancel()
+
+	pkt := bc.BuildContextPacket(enrichCtx, brain.ContextPacketRequest{
 		ProjectID: s.projectID,
 		Snapshot: brain.SnapshotInput{
 			RootNodeID:      string(best.ID),
@@ -709,7 +751,9 @@ func (s *Server) asyncEnrichContext(
 		},
 		EnableLLM: s.config.Brain.EnableLLM,
 	})
-	if pkt != nil {
+	// Sanitize: don't cache "enrichment in progress" placeholder packets —
+	// they would poison the cache and suppress future real enrichments.
+	if pkt != nil && !strings.Contains(strings.ToLower(pkt.RootSummary), "in progress") {
 		s.setPacketCache(cacheKey, pkt)
 	}
 }
@@ -2147,10 +2191,27 @@ func (s *Server) handleGetCallChain(
 	viaImpl := make(map[graph.NodeID]bool)
 	queue := []graph.NodeID{fromNode.ID}
 	found := false
+	// closestReachable tracks the deepest node reached (by hop count from root).
+	// Used in the not-found response to show agents where the static graph ends.
+	type bfsEntry struct {
+		id  graph.NodeID
+		hop int
+	}
+	bfsQueue := []bfsEntry{{fromNode.ID, 0}}
+	depth := map[graph.NodeID]int{fromNode.ID: 0}
+	var closestReachableID graph.NodeID
+	maxHop := 0
 
 	for len(queue) > 0 && !found {
 		curr := queue[0]
+		currEntry := bfsQueue[0]
 		queue = queue[1:]
+		bfsQueue = bfsQueue[1:]
+
+		if currEntry.hop > maxHop {
+			maxHop = currEntry.hop
+			closestReachableID = curr
+		}
 
 		// Forward edges: CALLS and IMPLEMENTS (concrete → interface).
 		for _, e := range s.graph.OutEdges(curr) {
@@ -2161,6 +2222,7 @@ func (s *Server) handleGetCallChain(
 				continue
 			}
 			prev[e.To] = curr
+			depth[e.To] = currEntry.hop + 1
 			if e.Type == graph.EdgeImplements {
 				viaImpl[e.To] = true
 			}
@@ -2169,6 +2231,7 @@ func (s *Server) handleGetCallChain(
 				break
 			}
 			queue = append(queue, e.To)
+			bfsQueue = append(bfsQueue, bfsEntry{e.To, currEntry.hop + 1})
 		}
 		if found {
 			break
@@ -2183,14 +2246,17 @@ func (s *Server) handleGetCallChain(
 				continue
 			}
 			prev[e.From] = curr
+			depth[e.From] = currEntry.hop + 1
 			viaImpl[e.From] = true
 			if e.From == toNode.ID {
 				found = true
 				break
 			}
 			queue = append(queue, e.From)
+			bfsQueue = append(bfsQueue, bfsEntry{e.From, currEntry.hop + 1})
 		}
 	}
+	_ = depth
 
 	if !found {
 		// Build a helpful explanation for why no path was found.
@@ -2213,13 +2279,26 @@ func (s *Server) handleGetCallChain(
 			)
 			hint = "Use get_context on each entity to see their callers/callees, or get_impact to find what depends on them."
 		}
-		return jsonResult(map[string]interface{}{
+		notFound := map[string]interface{}{
 			"found":  false,
 			"from":   map[string]interface{}{"name": fromName, "file": fromNode.File, "type": string(fromNode.Type)},
 			"to":     map[string]interface{}{"name": toName, "file": toNode.File, "type": string(toNode.Type)},
 			"reason": reason,
 			"hint":   hint,
-		})
+		}
+		// R2: surface the deepest reachable node so agents know where the static
+		// graph ends — especially useful for dynamic-dispatch gaps.
+		if closestReachableID != "" && closestReachableID != fromNode.ID {
+			if n := s.graph.GetNode(closestReachableID); n != nil {
+				notFound["closest_reachable"] = map[string]interface{}{
+					"name": n.Name,
+					"file": strings.TrimPrefix(n.File, s.graph.Root()+"/"),
+					"type": string(n.Type),
+					"hops": maxHop,
+				}
+			}
+		}
+		return jsonResult(notFound)
 	}
 
 	// Reconstruct path.
@@ -3135,6 +3214,9 @@ func (s *Server) handleGetImpact(
 	if result.Tiers == nil {
 		result.Tiers = []graph.ImpactTier{}
 	}
+
+	// R2: Attach test coverage — files that exercise this entity via reverse CALLS BFS.
+	result.TestCoverage = s.graph.FindTestsFor(root.ID)
 
 	return jsonResult(result)
 }

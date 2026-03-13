@@ -2184,6 +2184,59 @@ func buildIngestCode(n *graph.Node) string {
 	return code
 }
 
+// fetchTopNSummaries eagerly fetches summaries for the top N most-connected
+// nodes and writes them back as annotations. Called with a short initial wait
+// (2s) so hot entities are enriched before the first agent context request.
+// Runs concurrently with bulkIngestToBrain + fetchAndWriteBackSummaries.
+func fetchTopNSummaries(bc *brain.Client, g *graph.Graph, st *store.Store, n int) {
+	if st == nil || n <= 0 {
+		return
+	}
+	all := g.AllNodes()
+	// Collect non-structural nodes and sort by fanin descending.
+	nodes := make([]*graph.Node, 0, len(all))
+	for _, node := range all {
+		t := string(node.Type)
+		if t == "package" || t == "file" {
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		return g.Fanin(nodes[i].ID) > g.Fanin(nodes[j].ID)
+	})
+	if len(nodes) > n {
+		nodes = nodes[:n]
+	}
+
+	// Short wait for brain to have processed the ingest queue head.
+	time.Sleep(2 * time.Second)
+
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	written := 0
+	var mu sync.Mutex
+	for _, node := range nodes {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(nd *graph.Node) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			summary := bc.GetSummary(context.Background(), string(nd.ID))
+			if summary == "" || strings.Contains(summary, "in progress") {
+				return
+			}
+			if _, ok, err := st.AddAnnotationIfNew(string(nd.ID), "brain", summary, 24*time.Hour); err == nil && ok {
+				mu.Lock()
+				written++
+				mu.Unlock()
+			}
+		}(node)
+	}
+	wg.Wait()
+	fmt.Fprintf(os.Stderr, "synapses: eager brain write-back complete (%d/%d top entities enriched)\n", written, len(nodes))
+}
+
 // bulkIngestToBrain sends all code nodes to the brain sidecar for prose summary generation.
 // With qwen3.5:0.8b as the ingest model (~3s per node on CPU), a 500-node codebase
 // completes in ~3min at 8× concurrency — runs in background, does not block startup.
@@ -2303,6 +2356,7 @@ func retryBrainConnect(ctx context.Context, cfg *config.Config, srv *mcpsrv.Serv
 			}
 			probeCancel()
 			go func() {
+				go fetchTopNSummaries(bc, g, st, 20)
 				bulkIngestToBrain(bc, g, projectID)
 				fetchAndWriteBackSummaries(bc, g, st)
 			}()
