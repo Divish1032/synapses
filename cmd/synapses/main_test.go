@@ -1926,7 +1926,7 @@ func TestBulkIngestToBrain_WithGraph(t *testing.T) {
 	})
 
 	// Should complete without panicking regardless of brain response.
-	bulkIngestToBrain(bc, g)
+	bulkIngestToBrain(bc, g, "test-project")
 }
 
 // ── cmdStartProxy and cmdStartDirect flag errors ──────────────────────────────
@@ -2354,7 +2354,7 @@ func TestRetryBrainConnect_ContextCancelled(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		retryBrainConnect(ctx, cfg, srv, g, st)
+		retryBrainConnect(ctx, cfg, srv, g, st, "test-project")
 		close(done)
 	}()
 

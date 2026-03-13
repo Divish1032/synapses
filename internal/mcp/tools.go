@@ -639,6 +639,7 @@ func (s *Server) asyncEnrichContext(
 	fanIn := s.graph.Fanin(best.ID)
 
 	pkt := bc.BuildContextPacket(context.Background(), brain.ContextPacketRequest{
+		ProjectID: s.projectID,
 		Snapshot: brain.SnapshotInput{
 			RootNodeID:      string(best.ID),
 			RootName:        best.Name,
@@ -2417,7 +2418,7 @@ func (s *Server) handleSessionInit(
 
 	// Notify pulse of session start so agent stats are trackable.
 	if pc := s.getPulseClient(); pc != nil && agentID != "" {
-		go pc.RecordSessionEvent(agentID, "start")
+		go pc.RecordSessionEvent(agentID, s.projectID, "start")
 	}
 
 	// Emit session-start event so peers polling get_events see a new agent arrive.

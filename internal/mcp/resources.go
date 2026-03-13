@@ -111,6 +111,7 @@ func (s *Server) warmBrainCache(changedFile string) {
 	go func() {
 		for _, entity := range entities {
 			_ = bc.BuildContextPacket(context.Background(), brain.ContextPacketRequest{
+				ProjectID: s.projectID,
 				Snapshot: brain.SnapshotInput{
 					RootNodeID: string(entity.ID),
 					RootName:   entity.Name,

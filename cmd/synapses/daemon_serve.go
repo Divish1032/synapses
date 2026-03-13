@@ -372,6 +372,7 @@ func cmdDaemonServe(args []string) error {
 	// Create the MCP server.
 	mcpsrv.Version = version
 	srv := mcpsrv.New(g, cfg, st)
+	srv.SetProjectID(pathProjectID(absPath))
 
 	// Load activation-context prompts from all scopes (fail-silent per scope).
 	{
@@ -438,12 +439,12 @@ func cmdDaemonServe(args []string) error {
 			fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s: %v (continuing without — will retry)\n", cfg.Brain.URL, err)
 			brainCli = nil
 			// Retry brain connection in background every 15s until it becomes available.
-			go retryBrainConnect(appCtx, cfg, srv, g, st)
+			go retryBrainConnect(appCtx, cfg, srv, g, st, pathProjectID(absPath))
 		} else {
 			fmt.Fprintf(os.Stderr, "synapses: brain connected (%s)\n", model)
 			srv.SetBrainClient(brainCli)
 			go func() {
-				bulkIngestToBrain(brainCli, g)
+				bulkIngestToBrain(brainCli, g, pathProjectID(absPath))
 				fetchAndWriteBackSummaries(brainCli, g, st)
 			}()
 		}
@@ -520,6 +521,7 @@ func cmdDaemonServe(args []string) error {
 			} else {
 				defer fw.Stop()
 				fw.SetConfig(cfg)
+				fw.SetProjectID(pathProjectID(absPath))
 				srv.SetChangeSource(fw)
 				fw.SetPacketInvalidator(srv)
 				if brainCli != nil {

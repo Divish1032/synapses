@@ -15,6 +15,7 @@ import (
 type ToolCallEvent struct {
 	ToolName      string `json:"tool_name"`
 	AgentID       string `json:"agent_id,omitempty"`
+	ProjectID     string `json:"project_id,omitempty"`
 	Entity        string `json:"entity,omitempty"`
 	DurationMs    int64  `json:"duration_ms"`
 	Success       bool   `json:"success"`
@@ -26,6 +27,7 @@ type ToolCallEvent struct {
 type ContextDeliveryEvent struct {
 	ToolName       string `json:"tool_name"`
 	AgentID        string `json:"agent_id,omitempty"`
+	ProjectID      string `json:"project_id,omitempty"`
 	Entity         string `json:"entity,omitempty"`
 	File           string `json:"file,omitempty"`
 	ResponseBytes  int    `json:"response_bytes"`
@@ -42,8 +44,9 @@ type ContextDeliveryEvent struct {
 
 // SessionEvent is sent when an agent session starts or ends.
 type SessionEvent struct {
-	AgentID string `json:"agent_id"`
-	Event   string `json:"event"` // "start" | "end" | "task_done"
+	AgentID   string `json:"agent_id"`
+	ProjectID string `json:"project_id,omitempty"`
+	Event     string `json:"event"` // "start" | "end" | "task_done"
 }
 
 // Client is a fail-silent HTTP client for the synapses-pulse sidecar.
@@ -75,8 +78,8 @@ func (c *Client) RecordContextDelivery(ev ContextDeliveryEvent) {
 }
 
 // RecordSessionEvent sends a SessionEvent to pulse. All errors are silently discarded.
-func (c *Client) RecordSessionEvent(agentID, eventType string) {
-	c.post("/v1/ingest/session-event", SessionEvent{AgentID: agentID, Event: eventType})
+func (c *Client) RecordSessionEvent(agentID, projectID, eventType string) {
+	c.post("/v1/ingest/session-event", SessionEvent{AgentID: agentID, ProjectID: projectID, Event: eventType})
 }
 
 // post marshals body as JSON and POSTs to the endpoint. All errors are silently discarded.
