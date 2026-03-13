@@ -2223,7 +2223,7 @@ func fetchTopNSummaries(bc *brain.Client, g *graph.Graph, st *store.Store, n int
 			defer wg.Done()
 			defer func() { <-sem }()
 			summary := bc.GetSummary(context.Background(), string(nd.ID))
-			if summary == "" || strings.Contains(summary, "in progress") {
+			if summary == "" || strings.Contains(strings.ToLower(summary), "in progress") {
 				return
 			}
 			if _, ok, err := st.AddAnnotationIfNew(string(nd.ID), "brain", summary, 24*time.Hour); err == nil && ok {

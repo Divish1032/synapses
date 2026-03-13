@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // ── handleSessionInit ─────────────────────────────────────────────────────────
@@ -578,6 +581,94 @@ func TestHandleGetEvents_AfterSessionInit(t *testing.T) {
 		t.Error("expected at least one event after session_init")
 	}
 }
+
+// ── entity_hash stable (root not double-counted) ──────────────────────────────
+
+func TestHandleGetContext_EntityHashStable(t *testing.T) {
+	// Two consecutive calls with the same graph must return the same hash.
+	s, _, _ := newPopulatedServer(t)
+	res1, err1 := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	m1 := mustResult(t, res1, err1)
+	hash1, _ := m1["entity_hash"].(string)
+
+	res2, err2 := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	m2 := mustResult(t, res2, err2)
+	hash2, _ := m2["entity_hash"].(string)
+
+	if hash1 == "" || hash2 == "" {
+		t.Fatal("entity_hash missing in one of the responses")
+	}
+	if hash1 != hash2 {
+		t.Errorf("entity_hash unstable across identical calls: %q vs %q", hash1, hash2)
+	}
+}
+
+// ── entity_hash in compact format ─────────────────────────────────────────────
+
+func TestHandleGetContext_CompactFormat_EntityHashPresent(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	res, err := s.handleGetContext(ctx, callTool(map[string]any{
+		"entity": "AuthLogin",
+		"format": "compact",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tc, ok := res.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatal("expected TextContent for compact format")
+	}
+	if !strings.Contains(tc.Text, "entity_hash:") {
+		t.Errorf("compact format must contain entity_hash: line, got:\n%s", tc.Text)
+	}
+}
+
+// ── TestCoverage for struct/interface impact ──────────────────────────────────
+
+func TestHandleGetImpact_StructNode_TestCoverageField(t *testing.T) {
+	// Build a server with a struct node and a method on it.
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	structID := g.MakeNodeID("pkg/store/store.go", "UserStore")
+	methodID := g.MakeNodeID("pkg/store/store.go", "UserStore.Get")
+	callerID := g.MakeNodeID("pkg/api/handler.go", "HandleGet")
+	testID := g.MakeNodeID("pkg/store/store_test.go", "TestUserStore_Get")
+
+	g.AddNode(&graph.Node{ID: structID, Name: "UserStore", Type: graph.NodeStruct, File: "pkg/store/store.go", Line: 1, Package: "store"})
+	g.AddNode(&graph.Node{ID: methodID, Name: "UserStore.Get", Type: graph.NodeMethod, File: "pkg/store/store.go", Line: 5, Package: "store"})
+	g.AddNode(&graph.Node{ID: callerID, Name: "HandleGet", Type: graph.NodeFunction, File: "pkg/api/handler.go", Line: 1, Package: "api"})
+	g.AddNode(&graph.Node{ID: testID, Name: "TestUserStore_Get", Type: graph.NodeFunction, File: "pkg/store/store_test.go", Line: 1, Package: "store"})
+
+	g.AddEdge(&graph.Edge{From: callerID, To: methodID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: testID, To: methodID, Type: graph.EdgeCalls})
+
+	s := New(g, cfg, st)
+	res, err := s.handleGetImpact(ctx, callTool(map[string]any{"symbol": "UserStore"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, res, err)
+	hasKey(t, m, "total_affected")
+
+	// The struct path (merged) must also populate TestCoverage.
+	coverage, _ := m["test_coverage"].([]any)
+	found := false
+	for _, f := range coverage {
+		if f == "pkg/store/store_test.go" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected store_test.go in test_coverage for struct node, got %v", m["test_coverage"])
+	}
+}
+
+// ── handleGetEvents ───────────────────────────────────────────────────────────
 
 func TestHandleGetEvents_SinceCursorFilters(t *testing.T) {
 	s := newTestServer(t)

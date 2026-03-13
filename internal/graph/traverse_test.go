@@ -324,6 +324,39 @@ func TestFindTestsFor_UnknownNode(t *testing.T) {
 	}
 }
 
+// ── isTestFile (Python prefix-naming fix) ────────────────────────────────────
+
+func TestFindTestsFor_PythonPrefixTestFile(t *testing.T) {
+	// Bug fix: "test_.py" suffix was wrong — test_auth.py has a prefix not suffix.
+	g := graph.New("repo")
+	funcID := g.MakeNodeID("auth.py", "validate_token")
+	testID := g.MakeNodeID("test_auth.py", "test_validate_token")
+
+	g.AddNode(&graph.Node{ID: funcID, Name: "validate_token", Type: graph.NodeFunction, File: "auth.py"})
+	g.AddNode(&graph.Node{ID: testID, Name: "test_validate_token", Type: graph.NodeFunction, File: "test_auth.py"})
+	g.AddEdge(&graph.Edge{From: testID, To: funcID, Type: graph.EdgeCalls})
+
+	files := g.FindTestsFor(funcID)
+	if len(files) != 1 || files[0] != "test_auth.py" {
+		t.Errorf("expected [test_auth.py] for Python prefix-named test, got %v", files)
+	}
+}
+
+func TestFindTestsFor_PythonSuffixTestFile(t *testing.T) {
+	g := graph.New("repo")
+	funcID := g.MakeNodeID("utils.py", "helper")
+	testID := g.MakeNodeID("utils_test.py", "test_helper")
+
+	g.AddNode(&graph.Node{ID: funcID, Name: "helper", Type: graph.NodeFunction, File: "utils.py"})
+	g.AddNode(&graph.Node{ID: testID, Name: "test_helper", Type: graph.NodeFunction, File: "utils_test.py"})
+	g.AddEdge(&graph.Edge{From: testID, To: funcID, Type: graph.EdgeCalls})
+
+	files := g.FindTestsFor(funcID)
+	if len(files) != 1 || files[0] != "utils_test.py" {
+		t.Errorf("expected [utils_test.py] for Python suffix-named test, got %v", files)
+	}
+}
+
 // nodeIDSet returns the set of NodeIDs present in a SubGraph for quick lookup.
 func nodeIDSet(sub *graph.SubGraph) map[graph.NodeID]struct{} {
 	m := make(map[graph.NodeID]struct{}, len(sub.Nodes))
