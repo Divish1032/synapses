@@ -125,7 +125,7 @@ func TestRecordSessionEvent(t *testing.T) {
 
 	cli := NewClient(server.URL, 2)
 
-	cli.RecordSessionEvent("test-agent", "start")
+	cli.RecordSessionEvent("test-agent", "", "start")
 
 	if receivedEvent.AgentID != "test-agent" {
 		t.Errorf("expected AgentID test-agent, got %s", receivedEvent.AgentID)
@@ -142,7 +142,7 @@ func TestClientFireAndForgetServerDown(t *testing.T) {
 	// These should not panic even though server is down.
 	cli.RecordToolCall(ToolCallEvent{ToolName: "test", Success: true})
 	cli.RecordContextDelivery(ContextDeliveryEvent{ToolName: "test"})
-	cli.RecordSessionEvent("agent-1", "start")
+	cli.RecordSessionEvent("agent-1", "", "start")
 
 	// If we got here without panic, the fail-silent behavior is working.
 }

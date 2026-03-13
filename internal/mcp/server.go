@@ -51,6 +51,7 @@ type Server struct {
 	pulseClient  interface{}   // *pulse.Client — set via SetPulseClient; nil if pulse not configured
 	embedClient  *embed.Client // nil if embedding_endpoint not configured
 	techStack    interface{}   // []scout.TechStackEntry — set via SetTechStack after autosubscribe
+	projectID    string        // stable project identifier (FNV hash of project root path)
 	rulesMu      sync.RWMutex  // protects s.config.Rules for concurrent dynamic upserts
 
 	// Context-packet cache: 20 slots max, 30s TTL. Keyed by "entityName:depth".
@@ -162,6 +163,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 			go pc.RecordToolCall(pulse.ToolCallEvent{
 				ToolName:      req.Params.Name,
 				AgentID:       agentID,
+				ProjectID:     s.projectID,
 				Entity:        entity,
 				DurationMs:    elapsed.Milliseconds(),
 				Success:       success,
@@ -271,6 +273,11 @@ func (s *Server) SetPeerManager(pm interface{}) {
 // Using interface{} avoids an import cycle (brain imports only stdlib).
 func (s *Server) SetBrainClient(bc interface{}) {
 	s.brainClient = bc
+}
+
+// SetProjectID sets the stable project identifier used when building context packets.
+func (s *Server) SetProjectID(id string) {
+	s.projectID = id
 }
 
 // SetScoutClient wires a *scout.Client into the server so that web_search,

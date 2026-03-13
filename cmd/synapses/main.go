@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"os"
 	"os/exec"
@@ -236,6 +237,7 @@ func cmdStartDirect(args []string) error {
 	// Create the MCP server early so we can wire the watcher into it below.
 	mcpsrv.Version = version
 	srv := mcpsrv.New(g, cfg, st)
+	srv.SetProjectID(pathProjectID(absPath))
 
 	// Load activation-context prompts from all scopes (fail-silent per scope).
 	// Order matters: builtin < user < project (project can override user).
@@ -307,14 +309,14 @@ func cmdStartDirect(args []string) error {
 			fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s: %v (continuing without — will retry)\n", cfg.Brain.URL, err)
 			brainCli = nil
 			// Retry brain connection in background every 15s until it becomes available.
-			go retryBrainConnect(appCtx, cfg, srv, g, st)
+			go retryBrainConnect(appCtx, cfg, srv, g, st, pathProjectID(absPath))
 		} else {
 			fmt.Fprintf(os.Stderr, "synapses: brain connected (%s)\n", model)
 			srv.SetBrainClient(brainCli)
 			// Bulk-ingest all nodes in parallel, then fetch summaries and write them
 			// back as annotations so they surface in get_context/find_entity.
 			go func() {
-				bulkIngestToBrain(brainCli, g)
+				bulkIngestToBrain(brainCli, g, pathProjectID(absPath))
 				fetchAndWriteBackSummaries(brainCli, g, st)
 			}()
 		}
@@ -403,9 +405,10 @@ func cmdStartDirect(args []string) error {
 				fmt.Fprintf(os.Stderr, "synapses: file watcher start failed: %v\n", err)
 			} else {
 				defer fw.Stop()
-				fw.SetConfig(cfg)            // wire rules for proactive violation events
-				srv.SetChangeSource(fw)      // wire change log into get_working_state
-				fw.SetPacketInvalidator(srv) // clear brain packet cache on file change
+				fw.SetConfig(cfg)                    // wire rules for proactive violation events
+				fw.SetProjectID(pathProjectID(absPath)) // scope brain ingest to this project
+				srv.SetChangeSource(fw)               // wire change log into get_working_state
+				fw.SetPacketInvalidator(srv)          // clear brain packet cache on file change
 				if brainCli != nil {
 					fw.SetBrainClient(brainCli) // wire incremental ingest
 				}
@@ -2234,7 +2237,7 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 // it was unreachable at startup. Once connected, it wires the brain client into
 // the server, triggers bulk ingest + summary fetch, and exits. Stops retrying
 // when ctx is cancelled (server shutdown).
-func retryBrainConnect(ctx context.Context, cfg *config.Config, srv *mcpsrv.Server, g *graph.Graph, st *store.Store) {
+func retryBrainConnect(ctx context.Context, cfg *config.Config, srv *mcpsrv.Server, g *graph.Graph, st *store.Store, projectID string) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -2250,7 +2253,7 @@ func retryBrainConnect(ctx context.Context, cfg *config.Config, srv *mcpsrv.Serv
 			fmt.Fprintf(os.Stderr, "synapses: brain connected on retry (%s)\n", model)
 			srv.SetBrainClient(bc)
 			go func() {
-				bulkIngestToBrain(bc, g)
+				bulkIngestToBrain(bc, g, projectID)
 				fetchAndWriteBackSummaries(bc, g, st)
 			}()
 			return
@@ -2258,7 +2261,14 @@ func retryBrainConnect(ctx context.Context, cfg *config.Config, srv *mcpsrv.Serv
 	}
 }
 
-func bulkIngestToBrain(bc *brain.Client, g *graph.Graph) {
+// pathProjectID returns a stable 8-hex-char project identifier derived from the project root path.
+func pathProjectID(absPath string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(absPath))
+	return fmt.Sprintf("%x", h.Sum32())
+}
+
+func bulkIngestToBrain(bc *brain.Client, g *graph.Graph, projectID string) {
 	all := g.AllNodes()
 
 	// Collect all non-structural nodes (skip package/file nodes — no code to summarize).
@@ -2285,11 +2295,12 @@ func bulkIngestToBrain(bc *brain.Client, g *graph.Graph) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			bc.Ingest(context.Background(), brain.IngestRequest{
-				NodeID:   string(node.ID),
-				NodeName: node.Name,
-				NodeType: string(node.Type),
-				Package:  node.Package,
-				Code:     buildIngestCode(node),
+				ProjectID: projectID,
+				NodeID:    string(node.ID),
+				NodeName:  node.Name,
+				NodeType:  string(node.Type),
+				Package:   node.Package,
+				Code:      buildIngestCode(node),
 			})
 		}(n)
 	}
