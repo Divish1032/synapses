@@ -79,6 +79,11 @@ type Server struct {
 	// when their patterns (file, entity, module) match the queried entity.
 	// Populated via SetPromptTemplates after the server is constructed.
 	promptTemplates []skills.PromptTemplate
+
+	// skillRecipes holds named multi-step workflow definitions.
+	// Populated via SetSkillRecipes after the server is constructed.
+	skillRecipes  []skills.Recipe
+	skillExecutor *skills.Executor
 }
 
 // ctxCallEntry tracks how many times an agent requested context for an entity.
@@ -173,7 +178,8 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 	)
 	s.registerTools()
 	s.registerResources()
-	s.registerPrompts() // no-op until SetPromptTemplates is called
+	s.registerPrompts()      // no-op until SetPromptTemplates is called
+	s.registerSkillTools()   // no-op until SetSkillRecipes is called
 	return s
 }
 
