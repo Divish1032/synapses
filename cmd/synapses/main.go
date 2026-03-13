@@ -77,7 +77,7 @@ func run(args []string) error {
 	case "status":
 		return cmdStatus(args[1:])
 	case "list":
-		return cmdList()
+		return cmdList(args[1:])
 	case "reset":
 		return cmdReset(args[1:])
 	case "version", "--version", "-v":
@@ -309,7 +309,7 @@ func cmdStartDirect(args []string) error {
 			fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s: %v (continuing without — will retry)\n", cfg.Brain.URL, err)
 			brainCli = nil
 			// Retry brain connection in background every 15s until it becomes available.
-			go retryBrainConnect(appCtx, cfg, srv, g, st, pathProjectID(absPath))
+			go retryBrainConnect(appCtx, cfg, srv, g, st, pathProjectID(absPath), nil)
 		} else {
 			fmt.Fprintf(os.Stderr, "synapses: brain connected (%s)\n", model)
 			srv.SetBrainClient(brainCli)
@@ -1119,11 +1119,47 @@ func cmdReset(args []string) error {
 
 // cmdList scans the synapses cache directory and prints a summary row for every
 // project that has been indexed, without loading any full graph.
-func cmdList() error {
+func cmdList(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	jsonOut := fs.Bool("json", false, "Output as JSON array")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
 	stats, err := store.ScanAll()
 	if err != nil {
 		return fmt.Errorf("scan projects: %w", err)
 	}
+
+	if *jsonOut {
+		type jsonProject struct {
+			Path        string `json:"path"`
+			Name        string `json:"name"`
+			Nodes       int    `json:"nodes"`
+			Files       int    `json:"files"`
+			Edges       int    `json:"edges"`
+			LastIndexed string `json:"last_indexed,omitempty"`
+		}
+		out := make([]jsonProject, 0, len(stats))
+		for _, s := range stats {
+			ts := ""
+			if !s.SavedAt.IsZero() {
+				ts = s.SavedAt.UTC().Format(time.RFC3339)
+			}
+			out = append(out, jsonProject{
+				Path:        s.RepoRoot,
+				Name:        s.RepoID,
+				Nodes:       s.NodeCount,
+				Files:       s.FileCount,
+				Edges:       s.EdgeCount,
+				LastIndexed: ts,
+			})
+		}
+		data, _ := json.Marshal(out)
+		fmt.Println(string(data))
+		return nil
+	}
+
 	if len(stats) == 0 {
 		fmt.Println("No indexed projects found. Run: synapses index -path <dir>")
 		return nil
@@ -2237,7 +2273,7 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 // it was unreachable at startup. Once connected, it wires the brain client into
 // the server, triggers bulk ingest + summary fetch, and exits. Stops retrying
 // when ctx is cancelled (server shutdown).
-func retryBrainConnect(ctx context.Context, cfg *config.Config, srv *mcpsrv.Server, g *graph.Graph, st *store.Store, projectID string) {
+func retryBrainConnect(ctx context.Context, cfg *config.Config, srv *mcpsrv.Server, g *graph.Graph, st *store.Store, projectID string, fw *watcher.Watcher) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -2252,6 +2288,18 @@ func retryBrainConnect(ctx context.Context, cfg *config.Config, srv *mcpsrv.Serv
 			}
 			fmt.Fprintf(os.Stderr, "synapses: brain connected on retry (%s)\n", model)
 			srv.SetBrainClient(bc)
+			if fw != nil {
+				fw.SetBrainClient(bc)
+			}
+			// Wire embeddings if brain supports them.
+			embedCli := embed.NewBrainClient(cfg.Brain.URL)
+			probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
+			if _, err := embedCli.Embed(probeCtx, "probe"); err == nil {
+				srv.SetEmbedClient(embedCli)
+				go embedAllNodes(ctx, embedCli, g, st)
+				fmt.Fprintf(os.Stderr, "synapses: embeddings via brain /v1/embed (on retry)\n")
+			}
+			probeCancel()
 			go func() {
 				bulkIngestToBrain(bc, g, projectID)
 				fetchAndWriteBackSummaries(bc, g, st)
