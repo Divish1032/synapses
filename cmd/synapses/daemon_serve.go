@@ -438,8 +438,7 @@ func cmdDaemonServe(args []string) error {
 		if model, err := brainCli.HealthCheck(context.Background()); err != nil {
 			fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s: %v (continuing without — will retry)\n", cfg.Brain.URL, err)
 			brainCli = nil
-			// Retry brain connection in background every 15s until it becomes available.
-			go retryBrainConnect(appCtx, cfg, srv, g, st, pathProjectID(absPath))
+			// Retry will be started after file watcher setup (so watcher gets wired too).
 		} else {
 			fmt.Fprintf(os.Stderr, "synapses: brain connected (%s)\n", model)
 			srv.SetBrainClient(brainCli)
@@ -507,17 +506,20 @@ func cmdDaemonServe(args []string) error {
 	}()
 
 	// File watcher.
+	var fw *watcher.Watcher
 	if !*noWatch {
 		w := parser.NewWalker()
 		for _, p := range cfg.Plugins {
 			w.RegisterPlugin(p.Extensions, p.Command)
 		}
-		fw, err := watcher.New(g, w, st)
+		var err error
+		fw, err = watcher.New(g, w, st)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "synapses: file watcher unavailable: %v\n", err)
 		} else {
 			if err := fw.Start(absPath); err != nil {
 				fmt.Fprintf(os.Stderr, "synapses: file watcher start failed: %v\n", err)
+				fw = nil
 			} else {
 				defer fw.Stop()
 				fw.SetConfig(cfg)
@@ -556,6 +558,11 @@ func cmdDaemonServe(args []string) error {
 				fmt.Fprintf(os.Stderr, "synapses: watching %s for changes\n", absPath)
 			}
 		}
+	}
+
+	// Deferred brain retry: launched after watcher setup so all dependents get wired.
+	if brainCli == nil && cfg.Brain.URL != "" {
+		go retryBrainConnect(appCtx, cfg, srv, g, st, pathProjectID(absPath), fw)
 	}
 
 	// ── Unix socket listener ─────────────────────────────────────────────────

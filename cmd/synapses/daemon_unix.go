@@ -24,7 +24,9 @@ func killProcess(pid int) error {
 	if err != nil {
 		return nil
 	}
-	return proc.Signal(syscall.SIGTERM)
+	err = proc.Signal(syscall.SIGTERM)
+	proc.Release()
+	return err
 }
 
 func forceKillProcess(pid int) error {
@@ -32,5 +34,7 @@ func forceKillProcess(pid int) error {
 	if err != nil {
 		return nil
 	}
-	return proc.Kill()
+	err = proc.Kill()
+	proc.Release()
+	return err
 }
