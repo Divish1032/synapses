@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
@@ -213,6 +214,19 @@ func (s *Server) handleClaimWork(
 	if len(conflicts) > 0 {
 		msg += fmt.Sprintf(" WARNING: %d conflicting claim(s) by other agents — review before editing.", len(conflicts))
 	}
+
+	// R28: Semantic Firewall — warn when claiming vendored/generated paths.
+	// Agents should not be editing these files; the warning surfaces the issue
+	// without blocking legitimate maintenance tasks (e.g. "update vendor deps").
+	scopeNorm := filepath.ToSlash(scope)
+	for _, seg := range []string{"/vendor/", "/node_modules/", "/third_party/"} {
+		if strings.Contains(scopeNorm+"/", seg) || strings.HasPrefix(scopeNorm, strings.TrimPrefix(seg, "/")) {
+			msg += " ⚠ Provenance warning: scope appears to be a vendored or generated path. " +
+				"Editing third-party code is usually the wrong approach — consider patching via your dependency manager instead."
+			break
+		}
+	}
+
 	return jsonResult(map[string]interface{}{
 		"claimed":   scope,
 		"agent_id":  agentID,

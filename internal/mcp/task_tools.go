@@ -7,10 +7,12 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -150,6 +152,31 @@ func (s *Server) handleCreatePlan(
 	for i := range taskInputs {
 		detected := s.autoLinkNodes(taskInputs[i].Title + " " + taskInputs[i].Description)
 		taskInputs[i].LinkedNodes = mergeNodeIDs(taskInputs[i].LinkedNodes, detected)
+	}
+
+	// R29: detect mid-session replan — emit only when the agent has an
+	// in_progress task that was recently started (within 2 hours). Stale
+	// in_progress tasks from previous sessions that were never marked done
+	// are excluded; they represent abandoned work, not an active replan.
+	if pc := s.getPulseClient(); pc != nil && agentID != "" {
+		const replanWindow = 2 * time.Hour
+		if existing, err := s.store.GetPendingTasks("", agentID); err == nil {
+			for _, t := range existing {
+				if t.Status != "in_progress" {
+					continue
+				}
+				updatedAt, parseErr := time.Parse(time.RFC3339, t.UpdatedAt)
+				if parseErr != nil || time.Since(updatedAt) > replanWindow {
+					continue // stale — not an active session replan
+				}
+				go pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
+					ProjectID:  s.projectID,
+					AgentID:    agentID,
+					SignalType: "replan",
+				})
+				break
+			}
+		}
 	}
 
 	planID, err := s.store.CreatePlan(title, description, agentID, taskInputs)
@@ -415,6 +442,42 @@ func (s *Server) handleUpdateTask(
 			}
 		case "done", "cancelled":
 			_ = s.store.ClearAgentTask(agentID)
+			// R29: emit one outcome signal per linked entity so effectiveness
+			// scores are computed per-entity. Without linked entities the signal
+			// is emitted without an entity as a fallback for aggregate metrics.
+			if pc := s.getPulseClient(); pc != nil {
+				signalType := "task_done"
+				if status == "cancelled" {
+					signalType = "task_cancelled"
+				}
+				projID := s.projectID
+				taskID := id
+				sg := s.graph
+				st := s.store
+				go func() {
+					var emitted bool
+					if task, err := st.GetTask(taskID); err == nil {
+						for _, nodeID := range task.LinkedNodes {
+							if n := sg.GetNode(graph.NodeID(nodeID)); n != nil && n.Name != "" {
+								pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
+									ProjectID:  projID,
+									AgentID:    agentID,
+									Entity:     entityWithPath(n.Name, n.File),
+									SignalType: signalType,
+								})
+								emitted = true
+							}
+						}
+					}
+					if !emitted {
+						pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
+							ProjectID:  projID,
+							AgentID:    agentID,
+							SignalType: signalType,
+						})
+					}
+				}()
+			}
 		}
 	}
 
@@ -588,4 +651,21 @@ func (s *Server) handleHandoffTask(
 		"session_state":   stateAvailable,
 		"hint":            fmt.Sprintf("Agent %s can call get_session_state(task_id=%q) to resume from the exact state.", toAgent, taskID),
 	})
+}
+
+// entityWithPath returns "name@dir/file" for disambiguation when the same
+// function name exists in multiple packages. Uses the last two path components.
+// Example: "Health@internal/api/server.go" → unambiguous across packages.
+func entityWithPath(name, filePath string) string {
+	if filePath == "" {
+		return name
+	}
+	parts := strings.Split(strings.ReplaceAll(filePath, "\\", "/"), "/")
+	var short string
+	if len(parts) <= 2 {
+		short = filePath
+	} else {
+		short = parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	}
+	return name + "@" + short
 }

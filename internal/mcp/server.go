@@ -86,8 +86,9 @@ type Server struct {
 	// within a session. When the same agent calls get_context ≥3 times for the
 	// same entity, we auto-record a "context_repeated" episode as a signal that
 	// the initial context slice wasn't sufficient. Entries expire after 30m.
-	ctxCallMu sync.Mutex
-	ctxCalls  map[string]*ctxCallEntry
+	ctxCallMu     sync.Mutex
+	ctxCalls      map[string]*ctxCallEntry
+	ctxCallLastGC time.Time // tracks when we last ran GC on ctxCalls (R29 GAP3)
 
 	// lastAgentID is the agent_id from the most recent session_init call.
 	// Used as a fallback when individual tool calls don't include agent_id,
@@ -639,6 +640,72 @@ func (s *Server) registerTools() {
 		s.handleGetViolations,
 	)
 
+	// upsert_gap — R32: record a quality gap on a code entity
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"upsert_gap",
+			mcp.WithDescription(
+				"Record or update a quality gap on a specific code entity. "+
+					"Quality gaps are agent-discovered findings that require reasoning to find — "+
+					"edge cases, incomplete coverage, known limitations — unlike architecture violations "+
+					"which are deterministic rule checks. Gaps persist across sessions and surface in "+
+					"get_violations() and get_context() so future agents never re-discover the same issue. "+
+					"Use status=\"fixed\" with fix_notes to close a gap after it is resolved.",
+			),
+			mcp.WithString("node_id",
+				mcp.Required(),
+				mcp.Description("The node ID of the code entity this gap applies to. Use find_entity() to resolve the ID."),
+			),
+			mcp.WithString("gap_id",
+				mcp.Required(),
+				mcp.Description("A short stable slug for this gap, e.g. \"dist-relative-path\". Used as the dedup key."),
+			),
+			mcp.WithString("description",
+				mcp.Required(),
+				mcp.Description("Human-readable description of the gap, including what is missing and why it matters."),
+			),
+			mcp.WithString("severity",
+				mcp.Description("low | medium | high | critical. Default: medium."),
+			),
+			mcp.WithString("status",
+				mcp.Description("open | fixed | wontfix. Default: open. Use \"fixed\" once the gap is resolved."),
+			),
+			mcp.WithString("fix_notes",
+				mcp.Description("Optional. Explanation of how the gap was fixed. Only relevant when status=\"fixed\"."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Optional. Self-declared agent identifier for attribution."),
+			),
+		),
+		s.handleUpsertGap,
+	)
+
+	// get_gaps — R32: query quality gaps
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"get_gaps",
+			mcp.WithDescription(
+				"Query quality gaps on code entities. Default returns open gaps only. "+
+					"Use as a tech debt inventory (no filters), a pre-merge quality gate (file= filter), "+
+					"or to check a specific entity's known issues (node_id= filter). "+
+					"Open gaps also appear in get_violations() and at the top of get_context() responses.",
+			),
+			mcp.WithString("node_id",
+				mcp.Description("Optional. Filter to gaps on a specific node ID."),
+			),
+			mcp.WithString("file",
+				mcp.Description("Optional. Filter to gaps on nodes belonging to this file path."),
+			),
+			mcp.WithString("severity",
+				mcp.Description("Optional. Filter by severity: low | medium | high | critical."),
+			),
+			mcp.WithString("status",
+				mcp.Description("Optional. Filter by status: open | fixed | wontfix | all. Default: open."),
+			),
+		),
+		s.handleGetGaps,
+	)
+
 	// get_file_context
 	s.mcp.AddTool(
 		mcp.NewTool(
@@ -1114,6 +1181,14 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("to_name_pattern",
 				mcp.Description("Substring that must appear in the target entity name."),
+			),
+			mcp.WithString("context_source",
+				mcp.Description(
+					"Optional provenance of the context that led to this rule. "+
+						"If 'external' or 'generated', the call is rejected — rules derived from "+
+						"low-trust sources (web content, codegen headers) must not become "+
+						"architectural constraints. Omit when context is user-authored code.",
+				),
 			),
 		),
 		s.handleUpsertRule,

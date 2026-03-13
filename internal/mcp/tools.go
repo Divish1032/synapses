@@ -20,6 +20,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/metrics"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -137,6 +138,7 @@ type directionalContext struct {
 	GraphFreshness         string                        `json:"graph_freshness,omitempty"`          // GAP-4: warning when entity's file was recently modified
 	AdaptiveHint           string                        `json:"adaptive_hint,omitempty"`            // F17: set when BFS depth/detail was auto-expanded based on prior feedback
 	EntityMemories         []entityMemoryHint            `json:"entity_memories,omitempty"`          // R10: institutional knowledge attached to this entity
+	QualityGaps            []store.QualityGap            `json:"quality_gaps,omitempty"`             // R32: open quality gaps on this entity
 	EntityHash             string                        `json:"entity_hash,omitempty"`              // R14: SHA1 of node+neighbor IDs; stable cache key for clients
 }
 
@@ -217,7 +219,39 @@ func (s *Server) handleGetContext(
 	agentIDForFeedback, _ := req.GetArguments()["agent_id"].(string)
 	if agentIDForFeedback != "" && s.store != nil {
 		repeatCount := s.trackContextCall(agentIDForFeedback, entityName)
+		// R29: disambiguate entity name for pulse signals when same name exists
+		// in multiple packages. Resolves to "Name@dir/file" format.
+		// Use pickBestNode (same scoring used by the main resolution path) for
+		// deterministic selection — map iteration order is non-deterministic so
+		// nodes[0] varies across process runs for common names like New/Close.
+		pulseEntity := entityName
+		if pulseNodes := s.graph.FindByName(entityName); len(pulseNodes) > 0 {
+			pulseNode := pickBestNode(pulseNodes, s.graph)
+			pulseEntity = entityWithPath(pulseNode.Name, pulseNode.File)
+		}
+		if repeatCount == 2 {
+			// R29: correction signal — second fetch of same entity in session.
+			if pc := s.getPulseClient(); pc != nil {
+				go pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
+					ProjectID:  s.projectID,
+					AgentID:    agentIDForFeedback,
+					Entity:     pulseEntity,
+					SignalType: "correction",
+					Count:      repeatCount,
+				})
+			}
+		}
 		if repeatCount == 3 {
+			// R29: escalation signal — three or more fetches.
+			if pc := s.getPulseClient(); pc != nil {
+				go pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
+					ProjectID:  s.projectID,
+					AgentID:    agentIDForFeedback,
+					Entity:     pulseEntity,
+					SignalType: "escalation",
+					Count:      repeatCount,
+				})
+			}
 			go func() {
 				ep := store.Episode{
 					AgentID:     agentIDForFeedback,
@@ -611,6 +645,13 @@ func (s *Server) handleGetContext(
 	// Wait for all enrichment goroutines to complete.
 	enrichWg.Wait()
 
+	// R32: surface open quality gaps on this entity.
+	if s.store != nil && dc.Root != nil {
+		if gaps, err := s.store.GetGaps(store.GapFilter{NodeID: string(dc.Root.ID), Status: "open"}); err == nil && len(gaps) > 0 {
+			dc.QualityGaps = gaps
+		}
+	}
+
 	// ── Sequential enrichment (fast, in-memory only) ──
 
 	// Context-aware next-step suggestions.
@@ -724,6 +765,14 @@ type toolSuggestion struct {
 
 func suggestNextAfterContext(dc *directionalContext) []toolSuggestion {
 	var suggestions []toolSuggestion
+
+	// Surface quality gaps first — agent should review known debt before editing.
+	if len(dc.QualityGaps) > 0 {
+		suggestions = append(suggestions, toolSuggestion{
+			Tool:   "get_gaps",
+			Reason: fmt.Sprintf("%d open quality gap(s) on this entity — review before modifying", len(dc.QualityGaps)),
+		})
+	}
 
 	// Suggest prepare_context first when the agent likely needs a broader view.
 	if len(dc.Callers) > 3 {
@@ -893,10 +942,11 @@ func matchRulesForFile(cfg *config.Config, file string) []brain.RuleInput {
 // Classification is based on direct CALLS edges incident on the root node.
 func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	// Build sets of nodes directly called by / directly calling the root.
+	// R1: also include HANDLES edges so route nodes surface as callees.
 	calleesOfRoot := make(map[graph.NodeID]bool)
 	callersOfRoot := make(map[graph.NodeID]bool)
 	for _, e := range sg.Edges {
-		if e.Type != graph.EdgeCalls {
+		if e.Type != graph.EdgeCalls && e.Type != graph.EdgeHandles {
 			continue
 		}
 		if e.From == sg.Root {
@@ -1473,6 +1523,24 @@ func (s *Server) handleGetViolations(
 		}
 	}
 
+	// R32: Append open quality gaps so agents see the full quality picture in
+	// one call. Gaps are agent-discovered findings (reasoning-based) vs.
+	// violations which are deterministic rule checks.
+	// Always write both keys (even when store is nil) so callers can assert
+	// m["quality_gap_count"] safely without a nil-key panic.
+	if s.store != nil {
+		if gaps, err := s.store.GetGaps(store.GapFilter{Status: "open"}); err == nil && len(gaps) > 0 {
+			result["open_quality_gaps"] = gaps
+			result["quality_gap_count"] = len(gaps)
+		} else {
+			result["open_quality_gaps"] = []interface{}{}
+			result["quality_gap_count"] = 0
+		}
+	} else {
+		result["open_quality_gaps"] = []interface{}{}
+		result["quality_gap_count"] = 0
+	}
+
 	return jsonResult(result)
 }
 
@@ -1492,6 +1560,31 @@ func (s *Server) handleUpsertRule(
 	}
 	if severity != "error" && severity != "warning" {
 		return mcp.NewToolResultError("severity must be 'error' or 'warning'"), nil
+	}
+
+	// R28: Semantic Firewall — reject rule creation when the triggering context
+	// is not user-authored code. Two layers:
+	// 1. Explicit: agent declared context_source="external"|"generated".
+	// 2. Automatic: any entity name in rule_id or description resolves to a
+	//    non-user-authored graph node (generated protobuf, vendored lib, etc.).
+	if src := stringArg(req, "context_source"); src == "external" || src == "generated" {
+		return mcp.NewToolResultError(
+			fmt.Sprintf(
+				"upsert_rule blocked: context_source=%q — architectural rules must be derived "+
+					"from user-authored code, not %s content. "+
+					"Re-evaluate the pattern against your own codebase before creating a rule.",
+				src, src,
+			),
+		), nil
+	}
+	if detectedProv, detectedNode := s.detectRuleProvenance(ruleID, description); detectedProv != "" {
+		return mcp.NewToolResultError(
+			fmt.Sprintf(
+				"upsert_rule blocked: the entity %q referenced in this rule is %s code, not user-authored. "+
+					"Architectural rules must be grounded in your own codebase.",
+				detectedNode, detectedProv,
+			),
+		), nil
 	}
 
 	fe := config.ForbiddenEdge{
@@ -1562,6 +1655,35 @@ func (s *Server) handleUpsertRule(
 		"rule_type": ruleType,
 		"message":   fmt.Sprintf("Rule %q (%s) is now active.", ruleID, ruleType),
 	})
+}
+
+// detectRuleProvenance auto-detects whether a rule references non-user-authored
+// entities. It tokenises ruleID and description, looks up each token in the
+// graph, and returns (provenance, entityName) for the first non-user-authored
+// node found. Returns ("", "") when all referenced entities are user-authored
+// or when no tokens match graph nodes.
+// This powers the automatic layer of the R28 Semantic Firewall so agents
+// don't need to declare context_source="generated" explicitly.
+func (s *Server) detectRuleProvenance(ruleID, description string) (string, string) {
+	if s.graph == nil {
+		return "", ""
+	}
+	seen := make(map[string]bool)
+	for _, word := range strings.FieldsFunc(ruleID+" "+description, func(r rune) bool {
+		return !('a' <= r && r <= 'z') && !('A' <= r && r <= 'Z') && !('0' <= r && r <= '9') && r != '_'
+	}) {
+		if len(word) < 3 || seen[word] {
+			continue
+		}
+		seen[word] = true
+		for _, n := range s.graph.FindByName(word) {
+			p := string(n.Provenance)
+			if p == "generated" || p == "vendored" || p == "external" {
+				return p, n.Name
+			}
+		}
+	}
+	return "", ""
 }
 
 // ── Tool Catalog for discover_tools ─────────────────────────────────────────
@@ -2026,6 +2148,11 @@ func (s *Server) handleGetFileContext(
 	if agentIDFC == "" {
 		agentIDFC = s.getLastAgent()
 	}
+	// R29: track repeated file-context fetches as a confusion signal, the same
+	// way get_context tracks repeated entity fetches.
+	if agentIDFC != "" && s.store != nil {
+		s.trackContextCall(agentIDFC, "file:"+filePath)
+	}
 
 	if len(fileSet) == 1 {
 		// Single file — keep existing flat format.
@@ -2073,6 +2200,11 @@ func (s *Server) handleSearch(
 	query, ok := req.GetArguments()["query"].(string)
 	if !ok || query == "" {
 		return mcp.NewToolResultError("query is required"), nil
+	}
+
+	// R29: track repeated searches for the same query as a confusion signal.
+	if agentIDSrch, _ := req.GetArguments()["agent_id"].(string); agentIDSrch != "" && s.store != nil {
+		s.trackContextCall(agentIDSrch, "search:"+query)
 	}
 
 	// mode=fulltext (or legacy alias "semantic") delegates to FTS5 BM25 search.
@@ -2244,7 +2376,9 @@ func (s *Server) handleGetCallChain(
 		})
 	}
 
-	// BFS following CALLS edges (forward) and IMPLEMENTS edges (both directions).
+	// BFS following CALLS + HANDLES edges (forward) and IMPLEMENTS edges (both
+	// directions). HANDLES edges allow traversal through framework routing
+	// registrations (R1): setupFn --CALLS--> routeNode --HANDLES--> handlerFn.
 	// IMPLEMENTS edges are traversed bidirectionally so the search can cross
 	// interface boundaries: struct → interface (forward) and interface → struct
 	// (backward), enabling chains like: Caller → ConcreteType → Interface or
@@ -2252,6 +2386,8 @@ func (s *Server) handleGetCallChain(
 	prev := map[graph.NodeID]graph.NodeID{fromNode.ID: ""}
 	// viaImpl tracks which steps in the chain crossed an IMPLEMENTS boundary.
 	viaImpl := make(map[graph.NodeID]bool)
+	// viaHandles tracks which steps crossed a synthetic HANDLES boundary (R1).
+	viaHandles := make(map[graph.NodeID]bool)
 	// Single queue carries both the node ID and hop distance — no parallel slice needed.
 	type bfsEntry struct {
 		id  graph.NodeID
@@ -2273,9 +2409,9 @@ func (s *Server) handleGetCallChain(
 			closestReachableID = curr.id
 		}
 
-		// Forward edges: CALLS and IMPLEMENTS (concrete → interface).
+		// Forward edges: CALLS, HANDLES, and IMPLEMENTS (concrete → interface).
 		for _, e := range s.graph.OutEdges(curr.id) {
-			if e.Type != graph.EdgeCalls && e.Type != graph.EdgeImplements {
+			if e.Type != graph.EdgeCalls && e.Type != graph.EdgeImplements && e.Type != graph.EdgeHandles {
 				continue
 			}
 			if _, visited := prev[e.To]; visited {
@@ -2284,6 +2420,9 @@ func (s *Server) handleGetCallChain(
 			prev[e.To] = curr.id
 			if e.Type == graph.EdgeImplements {
 				viaImpl[e.To] = true
+			}
+			if e.Type == graph.EdgeHandles {
+				viaHandles[e.To] = true
 			}
 			if e.To == toNode.ID {
 				found = true
@@ -2375,9 +2514,10 @@ func (s *Server) handleGetCallChain(
 		Type string `json:"type"`
 		File string `json:"file"`
 		Line int    `json:"line"`
-		Via  string `json:"via,omitempty"` // "implements" when crossing an interface boundary
+		Via  string `json:"via,omitempty"` // "implements" | "handles" when crossing a dispatch boundary
 	}
 	usedInterface := false
+	usedHandles := false
 	chain := make([]chainStep, 0, len(chainIDs))
 	for _, id := range chainIDs {
 		n := s.graph.GetNode(id)
@@ -2394,6 +2534,10 @@ func (s *Server) handleGetCallChain(
 			step.Via = "implements"
 			usedInterface = true
 		}
+		if viaHandles[id] {
+			step.Via = "handles" // R1: inferred framework routing edge
+			usedHandles = true
+		}
 		chain = append(chain, step)
 	}
 
@@ -2401,6 +2545,7 @@ func (s *Server) handleGetCallChain(
 		"found":         true,
 		"hops":          len(chain) - 1,
 		"via_interface": usedInterface,
+		"via_handles":   usedHandles, // R1: true when path crossed a synthetic routing edge
 		"chain":         chain,
 	})
 }
@@ -2602,6 +2747,18 @@ func (s *Server) handleSessionInit(
 	// Remember this agent so subsequent tool calls that omit agent_id
 	// can still be attributed correctly in Pulse analytics.
 	s.setLastAgent(agentID)
+	// R29: Reset the correction/escalation counters for this agent when a new
+	// session starts. Without this, a reconnecting agent (same agentID, new
+	// session) inherits stale repeat-counts and fires spurious signals.
+	if agentID != "" {
+		s.ctxCallMu.Lock()
+		for k := range s.ctxCalls {
+			if strings.HasPrefix(k, agentID+"\x00") {
+				delete(s.ctxCalls, k)
+			}
+		}
+		s.ctxCallMu.Unlock()
+	}
 
 	// Notify pulse of session start so agent stats are trackable.
 	if pc := s.getPulseClient(); pc != nil && agentID != "" {
@@ -2747,6 +2904,14 @@ func (s *Server) handleSessionInit(
 	}
 	workingSection := map[string]interface{}{
 		"recent_changes": recentChanges,
+	}
+	// R32: include open quality gap count so agents know whether to check get_violations().
+	// Always write the key (zero when store is nil) so callers can assert it safely.
+	workingSection["open_quality_gaps"] = 0
+	if s.store != nil {
+		if gaps, err := s.store.GetGaps(store.GapFilter{Status: "open"}); err == nil {
+			workingSection["open_quality_gaps"] = len(gaps)
+		}
 	}
 	root := s.graph.Root()
 	if root != "" {
@@ -2941,6 +3106,49 @@ func (s *Server) handleSessionInit(
 			"available": s.getPulseClient() != nil,
 			"note":      "enables agent analytics and token tracking",
 		},
+	}
+
+	// R29: surface effectiveness hints for low-scoring entities so agents
+	// know upfront which entities typically need deeper context fetches.
+	// Run in a goroutine with a 100ms deadline so a slow or unavailable pulse
+	// sidecar never adds latency to the critical session_init response path.
+	if pc := s.getPulseClient(); pc != nil {
+		type hintResult struct{ hints []pulse.EntityEffectiveness }
+		hintCh := make(chan hintResult, 1)
+		projID := s.projectID
+		// minSignals=5: require at least 5 signals before surfacing hints.
+		// With 2 signals a single correction event would score 0.0 and trigger
+		// a false "frequently insufficient" warning — 5 provides minimal
+		// statistical validity before an entity is flagged.
+		go func() { hintCh <- hintResult{hints: pc.FetchEffectiveness(projID, 5)} }()
+		select {
+		case res := <-hintCh:
+			if len(res.hints) > 0 {
+				// Only surface entities with a non-empty suggestion (score < 0.6).
+				var lowScoring []map[string]interface{}
+				for _, h := range res.hints {
+					if h.Suggestion == "" {
+						continue
+					}
+					lowScoring = append(lowScoring, map[string]interface{}{
+						"entity":     h.Entity,
+						"score":      h.Score,
+						"suggestion": h.Suggestion,
+					})
+					if len(lowScoring) >= 5 {
+						break
+					}
+				}
+				if len(lowScoring) > 0 {
+					resp["context_effectiveness_hints"] = map[string]interface{}{
+						"note":     "These entities historically required multiple context fetches. Use detail_level=full or increase depth on first call.",
+						"entities": lowScoring,
+					}
+				}
+			}
+		case <-time.After(100 * time.Millisecond):
+			// Pulse sidecar is slow or unavailable — skip hints rather than blocking.
+		}
 	}
 
 	// ── 8. Agent constraints (behavioral rules) ───────────────────────────
@@ -3498,8 +3706,8 @@ func (s *Server) adaptiveCarveConfig(cfg *graph.CarveConfig, entityName, agentID
 }
 
 // trackContextCall increments and returns the call count for (agentID, entity)
-// within the current server session. Entries older than 30m are lazily pruned.
-// Used by the GAP-1 feedback loop to detect when initial context is insufficient.
+// within the current server session. Entries older than 30m are pruned at most
+// once every 5 minutes to avoid O(n) iteration on every write (R29 GAP3).
 func (s *Server) trackContextCall(agentID, entity string) int {
 	key := agentID + "\x00" + entity
 	s.ctxCallMu.Lock()
@@ -3507,11 +3715,15 @@ func (s *Server) trackContextCall(agentID, entity string) int {
 	if s.ctxCalls == nil {
 		s.ctxCalls = make(map[string]*ctxCallEntry)
 	}
-	// Lazy GC: purge entries older than 30 minutes on each write.
+	// Time-gated GC: only scan the map if 5+ minutes have passed since the last
+	// sweep. This bounds GC cost to O(n) once per window rather than per call.
 	now := time.Now()
-	for k, e := range s.ctxCalls {
-		if now.Sub(e.firstAt) > 30*time.Minute {
-			delete(s.ctxCalls, k)
+	if now.Sub(s.ctxCallLastGC) > 5*time.Minute {
+		s.ctxCallLastGC = now
+		for k, e := range s.ctxCalls {
+			if now.Sub(e.firstAt) > 30*time.Minute {
+				delete(s.ctxCalls, k)
+			}
 		}
 	}
 	e, ok := s.ctxCalls[key]
