@@ -99,13 +99,18 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		fmt.Fprintf(&b, "[ADR] %s (%s)\n", adr.Title, adr.Status)
 	}
 
-	// Active prompts: note IDs in compact mode (full bodies appear in JSON mode).
-	if len(dc.ActivePrompts) > 0 {
-		ids := make([]string, 0, len(dc.ActivePrompts))
-		for _, ap := range dc.ActivePrompts {
-			ids = append(ids, ap.ID)
+	// Active prompts: show the first line of each body as a compact convention hint.
+	// Full bodies are also included in the JSON representation (dc.ActivePrompts).
+	for _, ap := range dc.ActivePrompts {
+		hint := ap.Body
+		if nl := strings.IndexByte(hint, '\n'); nl > 0 {
+			hint = hint[:nl]
 		}
-		fmt.Fprintf(&b, "📚 Context: %s\n", strings.Join(ids, ", "))
+		hint = strings.TrimSpace(hint)
+		if len(hint) > 120 {
+			hint = hint[:117] + "…"
+		}
+		fmt.Fprintf(&b, "📚 [%s] %s\n", ap.ID, hint)
 	}
 
 	// "neighbors" level: stop after caller/callee names. No callee blocks.

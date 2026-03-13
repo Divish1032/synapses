@@ -184,6 +184,84 @@ func TestMatchPrompts_EmptyInputs(t *testing.T) {
 	}
 }
 
+func TestMatchPrompts_ANDSemantics_BothMustMatch(t *testing.T) {
+	// Template with BOTH file_pattern AND entity_pattern — both must match.
+	templates := []PromptTemplate{
+		{ID: "graph-guide", FilePattern: "**/*.go", EntityPattern: ".*Graph.*"},
+	}
+	// File matches, entity matches → should match.
+	got := MatchPrompts(templates, "internal/graph/graph.go", "CarveEgoGraph", "internal/graph")
+	if len(got) != 1 {
+		t.Errorf("AND: both match → expected 1, got %d", len(got))
+	}
+	// File matches but entity doesn't → should NOT match.
+	got2 := MatchPrompts(templates, "internal/graph/graph.go", "Store", "internal/graph")
+	if len(got2) != 0 {
+		t.Errorf("AND: entity miss → expected 0, got %d", len(got2))
+	}
+	// Entity matches but file doesn't (.ts file, not .go) → should NOT match.
+	got3 := MatchPrompts(templates, "internal/store/store.ts", "GraphAdapter", "internal/store")
+	if len(got3) != 0 {
+		t.Errorf("AND: file miss → expected 0, got %d", len(got3))
+	}
+}
+
+func TestMatchPrompts_ANDSemantics_EmptyFieldSkipsCheck(t *testing.T) {
+	// Template with only entity_pattern — file being empty doesn't block it.
+	templates := []PromptTemplate{
+		{ID: "service-guide", EntityPattern: ".*Service"},
+	}
+	// file="" is fine because FilePattern is not set on the template.
+	got := MatchPrompts(templates, "", "AuthService", "internal/auth")
+	if len(got) != 1 {
+		t.Errorf("entity-only template should match even with empty file, got %d", len(got))
+	}
+}
+
+// --- DeduplicatePrompts ---
+
+func TestDeduplicatePrompts_LastWins(t *testing.T) {
+	templates := []PromptTemplate{
+		{ID: "go-errors", Body: "builtin version", Source: "builtin"},
+		{ID: "other", Body: "stays", Source: "builtin"},
+		{ID: "go-errors", Body: "user version", Source: "user"},
+		{ID: "go-errors", Body: "project version", Source: "project"},
+	}
+	got := DeduplicatePrompts(templates)
+	// Should have 2 entries: "other" and the last "go-errors".
+	if len(got) != 2 {
+		t.Fatalf("expected 2, got %d: %+v", len(got), got)
+	}
+	for _, pt := range got {
+		if pt.ID == "go-errors" && pt.Source != "project" {
+			t.Errorf("go-errors should be project version, got %q", pt.Source)
+		}
+	}
+}
+
+func TestDeduplicatePrompts_NoDuplicates(t *testing.T) {
+	templates := []PromptTemplate{
+		{ID: "a", Body: "a"},
+		{ID: "b", Body: "b"},
+	}
+	got := DeduplicatePrompts(templates)
+	if len(got) != 2 {
+		t.Errorf("no duplicates: expected 2, got %d", len(got))
+	}
+}
+
+func TestDeduplicatePrompts_EmptyIDKept(t *testing.T) {
+	// Templates without IDs should always be kept (no dedup key).
+	templates := []PromptTemplate{
+		{Body: "no id 1"},
+		{Body: "no id 2"},
+	}
+	got := DeduplicatePrompts(templates)
+	if len(got) != 2 {
+		t.Errorf("empty-ID templates should all be kept, got %d", len(got))
+	}
+}
+
 // --- AutoLoadPrompts ---
 
 func TestAutoLoadPrompts(t *testing.T) {

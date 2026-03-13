@@ -87,13 +87,15 @@ func LoadPromptDir(dir, source string) ([]PromptTemplate, error) {
 }
 
 // MatchPrompts returns templates whose patterns match the given entity context.
-// A template matches if ANY of its non-empty patterns match the inputs.
+// A template matches if ALL of its non-empty patterns match the inputs (AND semantics).
+// A template with file_pattern AND entity_pattern only fires when both the file
+// glob and the entity regex both match — not when just one does.
 // Templates with no patterns set (only auto_load) are not returned by this
 // function — use AutoLoadPrompts to retrieve those.
 func MatchPrompts(templates []PromptTemplate, file, entity, pkg string) []PromptTemplate {
 	var out []PromptTemplate
 	for _, pt := range templates {
-		if matchesAny(pt, file, entity, pkg) {
+		if matchesAll(pt, file, entity, pkg) {
 			out = append(out, pt)
 		}
 	}
@@ -112,19 +114,50 @@ func AutoLoadPrompts(templates []PromptTemplate) []PromptTemplate {
 	return out
 }
 
-// matchesAny returns true if the template has at least one non-empty pattern
-// that matches the given entity context fields.
-func matchesAny(pt PromptTemplate, file, entity, pkg string) bool {
-	if pt.FilePattern != "" && file != "" && matchGlob(pt.FilePattern, file) {
-		return true
+// DeduplicatePrompts removes duplicate IDs, keeping the last occurrence.
+// Since templates are loaded builtin < user < project, this gives project-scoped
+// prompts precedence over user-scoped, and user over builtin.
+func DeduplicatePrompts(templates []PromptTemplate) []PromptTemplate {
+	// Record the last index at which each ID appears.
+	last := make(map[string]int, len(templates))
+	for i, pt := range templates {
+		if pt.ID != "" {
+			last[pt.ID] = i
+		}
 	}
-	if pt.EntityPattern != "" && entity != "" && matchRegex(pt.EntityPattern, entity) {
-		return true
+	out := make([]PromptTemplate, 0, len(templates))
+	for i, pt := range templates {
+		if pt.ID == "" || last[pt.ID] == i {
+			out = append(out, pt)
+		}
 	}
-	if pt.ModulePattern != "" && pkg != "" && matchGlob(pt.ModulePattern, pkg) {
-		return true
+	return out
+}
+
+// matchesAll returns true if ALL non-empty patterns on the template match their
+// respective context fields. A template with no patterns set returns false
+// (those are handled by AutoLoadPrompts).
+func matchesAll(pt PromptTemplate, file, entity, pkg string) bool {
+	hasPattern := pt.FilePattern != "" || pt.EntityPattern != "" || pt.ModulePattern != ""
+	if !hasPattern {
+		return false
 	}
-	return false
+	if pt.FilePattern != "" {
+		if file == "" || !matchGlob(pt.FilePattern, file) {
+			return false
+		}
+	}
+	if pt.EntityPattern != "" {
+		if entity == "" || !matchRegex(pt.EntityPattern, entity) {
+			return false
+		}
+	}
+	if pt.ModulePattern != "" {
+		if pkg == "" || !matchGlob(pt.ModulePattern, pkg) {
+			return false
+		}
+	}
+	return true
 }
 
 // matchGlob matches a glob pattern against a path.

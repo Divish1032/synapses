@@ -71,6 +71,25 @@ func LoadRecipeDir(dir, origin string) ([]Recipe, error) {
 	return out, nil
 }
 
+// DeduplicateRecipes removes duplicate IDs, keeping the last occurrence.
+// Since recipes are loaded builtin < user < project, this gives project-scoped
+// recipes precedence over user-scoped, and user over builtin.
+func DeduplicateRecipes(recipes []Recipe) []Recipe {
+	last := make(map[string]int, len(recipes))
+	for i, r := range recipes {
+		if r.ID != "" {
+			last[r.ID] = i
+		}
+	}
+	out := make([]Recipe, 0, len(recipes))
+	for i, r := range recipes {
+		if r.ID == "" || last[r.ID] == i {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // resolveArg substitutes template variables in a single value:
 //
 //	$param_name   → from params map

@@ -101,6 +101,10 @@ func (s *Server) handleExecuteSkill(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 
+	if s.skillExecutor == nil {
+		return mcp.NewToolResultError("execute_skill: skill engine not initialized; call SetSkillRecipes before serving requests"), nil
+	}
+
 	result, err := s.skillExecutor.Execute(ctx, *found, params)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("execute_skill: %v", err)), nil
