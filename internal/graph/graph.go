@@ -250,6 +250,14 @@ func (g *Graph) InvalidateCache() {
 	g.cache.invalidate()
 }
 
+// InvalidateCacheForFile evicts only cached subgraphs that reference the given
+// file. Entries for unrelated entities survive, dramatically improving cache
+// hit rates when a single file changes. Prefer this over InvalidateCache when
+// you know which file was modified.
+func (g *Graph) InvalidateCacheForFile(file string) {
+	g.cache.invalidateForFile(file)
+}
+
 // PeekCallSites returns a copy of all pending call sites without clearing them.
 // Used to persist call sites to the store before the resolver drains them.
 func (g *Graph) PeekCallSites() []CallSite {

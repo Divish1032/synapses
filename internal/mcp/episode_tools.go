@@ -77,6 +77,42 @@ func (s *Server) handleRemember(
 		return mcp.NewToolResultError(fmt.Sprintf("remember episode: %v", err)), nil
 	}
 
+	// ── Dual-write to unified memories table ──
+	// Failures with affected nodes → entity-tier memories.
+	// All episodes → project-tier memory (decisions, patterns, failures).
+	memContent := e.Decision
+	if e.Rationale != "" {
+		memContent += " — " + e.Rationale
+	}
+	memTags := fmt.Sprintf(`["episode","%s"]`, episodeType)
+
+	// Entity-tier: one memory per affected node (failures & patterns only).
+	if episodeType == "failure" || episodeType == "pattern" {
+		var affectedNodes []string
+		_ = json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes)
+		for _, nodeID := range affectedNodes {
+			_, _ = s.store.InsertMemory(store.Memory{
+				Tier:     store.TierEntity,
+				Content:  memContent,
+				EntityID: nodeID,
+				AgentID:  agentID,
+				TaskID:   e.ProjectID,
+				Source:   store.SourceManual,
+				Tags:     memTags,
+			})
+		}
+	}
+
+	// Project-tier: always write the episode as project knowledge.
+	_, _ = s.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: memContent,
+		AgentID: agentID,
+		TaskID:  e.ProjectID,
+		Source:  store.SourceManual,
+		Tags:    memTags,
+	})
+
 	if episodeType == "failure" {
 		if err := s.store.AppendEvent("failure_recorded", agentID,
 			fmt.Sprintf(`{"episode_id":%q,"outcome":%q,"trigger":%q}`,
@@ -174,16 +210,27 @@ func (s *Server) handleRecall(
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("get episodes: %v", err)), nil
 		}
+
+		// Also surface recent memories from the unified table.
+		// Filter by agentID when provided (agent browsing their own history),
+		// otherwise return recent project/entity memories across all agents.
+		agentID := stringArg(req, "agent_id")
+		recentMems, _ := s.store.QueryMemories("", "", agentID, limit)
+
 		summary := "no episodes found"
-		if len(episodes) > 0 {
-			summary = fmt.Sprintf("%d episode(s)", len(episodes))
+		if len(episodes) > 0 || len(recentMems) > 0 {
+			summary = fmt.Sprintf("%d episode(s), %d memory/memories", len(episodes), len(recentMems))
 		}
-		return jsonResult(map[string]interface{}{
+		resp := map[string]interface{}{
 			"summary":  summary,
 			"episodes": episodes,
 			"mode":     "browse",
-			"hint":     "Ordered by creation time (newest first). Pass query=... for semantic search.",
-		})
+			"hint":     "Ordered by creation time (newest first). 'memories' includes auto-captured memories from end_session and annotate_node. Pass query=... for relevance-ranked search.",
+		}
+		if len(recentMems) > 0 {
+			resp["memories"] = recentMems
+		}
+		return jsonResult(resp)
 	}
 
 	// Search mode: FTS5 BM25.
@@ -208,6 +255,24 @@ func (s *Server) handleRecall(
 		return mcp.NewToolResultError(fmt.Sprintf("recall episodes: %v", err)), nil
 	}
 
+	// Search unified memories table (session_log, entity, project tiers).
+	// This surfaces everything written by end_session, annotate_node, remember(),
+	// which is invisible to the episodes-only search above.
+	memories, _ := s.store.SearchMemories(query, searchLimit)
+
+	// Touch surfaced memories in background to renew TTL.
+	if len(memories) > 0 {
+		ids := make([]string, len(memories))
+		for i, m := range memories {
+			ids[i] = m.ID
+		}
+		go func() {
+			for _, id := range ids {
+				s.store.TouchMemory(id)
+			}
+		}()
+	}
+
 	// Surface any dynamic rules derived from matching failure episodes.
 	var relatedRules []string
 	for _, ep := range episodes {
@@ -216,18 +281,24 @@ func (s *Server) handleRecall(
 		}
 	}
 
-	summary := "no matching episodes"
-	if len(episodes) > 0 {
-		summary = fmt.Sprintf("%d episode(s) matching %q", len(episodes), query)
+	totalMatches := len(episodes) + len(memories)
+	summary := "no matching results"
+	if totalMatches > 0 {
+		summary = fmt.Sprintf("%d result(s) matching %q (%d episode(s), %d memory/memories)",
+			totalMatches, query, len(episodes), len(memories))
 	}
 
-	return jsonResult(map[string]interface{}{
+	resp := map[string]interface{}{
 		"summary":       summary,
 		"episodes":      episodes,
 		"related_rules": relatedRules,
 		"mode":          "search",
-		"hint":          "Episodes ordered by relevance (best match first). Check related_rules for constraints derived from similar past failures. Omit query for chronological browse.",
-	})
+		"hint":          "Results ordered by relevance. 'episodes' = explicit remember() calls. 'memories' = auto-captured from end_session, annotate_node, and remember() across all tiers (session_log, entity, project). Check related_rules for constraints from past failures.",
+	}
+	if len(memories) > 0 {
+		resp["memories"] = memories
+	}
+	return jsonResult(resp)
 }
 
 // handleGetEpisodes lists episodes with optional filters, ordered by

@@ -1,0 +1,409 @@
+package store
+
+import (
+	"database/sql"
+	"fmt"
+	"strings"
+	"time"
+	"unicode"
+)
+
+// MemoryTier classifies the scope and lifespan of a memory.
+const (
+	TierSessionLog = "session_log" // What happened — auto-captured session summaries.
+	TierEntity     = "entity"      // Facts about code nodes — travels with the entity.
+	TierProject    = "project"     // Conventions, decisions, gotchas — project-wide.
+)
+
+// MemorySource indicates how the memory was created.
+const (
+	SourceManual    = "manual"    // Agent explicitly called remember() or annotate_node().
+	SourceAuto      = "auto"      // Auto-captured by end_session structured extraction.
+	SourceExtracted = "extracted" // LLM-synthesized from session data by brain sidecar.
+)
+
+// Base TTLs per tier. Entity memories live until the node dies in the graph.
+const (
+	ttlSessionLog = 90 * 24 * time.Hour // 90 days
+	ttlProject    = 60 * 24 * time.Hour // 60 days
+)
+
+// Memory represents a single memory entry in the unified memories table.
+type Memory struct {
+	ID             string `json:"id"`
+	Tier           string `json:"tier"`
+	Content        string `json:"content"`
+	EntityID       string `json:"entity_id,omitempty"`
+	AgentID        string `json:"agent_id,omitempty"`
+	TaskID         string `json:"task_id,omitempty"`
+	Tags           string `json:"tags,omitempty"`           // JSON array string
+	CreatedAt      string `json:"created_at"`
+	ExpiresAt      string `json:"expires_at,omitempty"`
+	LastAccessedAt string `json:"last_accessed_at,omitempty"`
+	Source         string `json:"source"`
+}
+
+// InsertMemory writes a new memory, applying tier-based TTL and noise filtering.
+// Returns the memory ID. Deduplicates against existing memories with similar content.
+func (s *Store) InsertMemory(m Memory) (string, error) {
+	if m.ID == "" {
+		m.ID = newID()
+	}
+	now := time.Now().UTC()
+	if m.CreatedAt == "" {
+		m.CreatedAt = now.Format(time.RFC3339)
+	}
+	if m.LastAccessedAt == "" {
+		m.LastAccessedAt = m.CreatedAt
+	}
+	if m.Source == "" {
+		m.Source = SourceManual
+	}
+	if m.Tags == "" {
+		m.Tags = "[]"
+	}
+
+	// Compute expires_at based on tier TTL (entity memories don't expire by time).
+	if m.ExpiresAt == "" {
+		switch m.Tier {
+		case TierSessionLog:
+			m.ExpiresAt = now.Add(ttlSessionLog).Format(time.RFC3339)
+		case TierProject:
+			m.ExpiresAt = now.Add(ttlProject).Format(time.RFC3339)
+		case TierEntity:
+			// Entity memories don't expire by time — they live until the node dies.
+			// Use a far-future sentinel.
+			m.ExpiresAt = now.Add(365 * 10 * 24 * time.Hour).Format(time.RFC3339)
+		default:
+			m.ExpiresAt = now.Add(ttlProject).Format(time.RFC3339)
+		}
+	}
+
+	// Noise filter: reject memories that are too short to be useful.
+	content := strings.TrimSpace(m.Content)
+	if len(content) < 10 {
+		return "", fmt.Errorf("memory content too short (min 10 chars)")
+	}
+	m.Content = content
+
+	// Size cap: truncate memories > 2000 Unicode code points (~500 tokens).
+	// Uses rune slicing (not byte slicing) to avoid cutting multi-byte characters.
+	if runes := []rune(m.Content); len(runes) > 2000 {
+		m.Content = string(runes[:2000]) + "…[truncated]"
+	}
+
+	// Dedup check: query recent same-scope memories and skip if too similar.
+	// Entity memories: scope = tier + entityID.
+	// Non-entity memories: scope = tier + agentID (prevents end_session duplicates).
+	var dupCandidates []Memory
+	if m.EntityID != "" {
+		dupCandidates, _ = s.QueryMemories(m.Tier, m.EntityID, "", 5)
+	} else if m.AgentID != "" {
+		dupCandidates, _ = s.QueryMemories(m.Tier, "", m.AgentID, 5)
+	}
+	for _, ex := range dupCandidates {
+		if stringSimilarity(ex.Content, m.Content) > 0.85 {
+			// Touch the existing memory instead of creating a duplicate.
+			_ = s.TouchMemory(ex.ID)
+			return ex.ID, nil
+		}
+	}
+
+	_, err := s.db.Exec(`
+		INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
+		                      created_at, expires_at, last_accessed_at, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.ID, m.Tier, m.Content, m.EntityID, m.AgentID, m.TaskID, m.Tags,
+		m.CreatedAt, m.ExpiresAt, m.LastAccessedAt, m.Source,
+	)
+	if err != nil {
+		return "", fmt.Errorf("insert memory: %w", err)
+	}
+	return m.ID, nil
+}
+
+// QueryMemories retrieves memories matching the given filters.
+// All filter params are optional (empty string = no filter applied for that field).
+// NOTE: passing empty entityID does NOT filter by entity — it returns all entities.
+// Use QueryMemoriesForEntities for multi-entity batched lookups.
+func (s *Store) QueryMemories(tier, entityID, agentID string, limit int) ([]Memory, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
+	             created_at, expires_at, last_accessed_at, source
+	      FROM memories WHERE expires_at > ?`
+	args := []interface{}{now}
+
+	if tier != "" {
+		q += ` AND tier = ?`
+		args = append(args, tier)
+	}
+	if entityID != "" {
+		q += ` AND entity_id = ?`
+		args = append(args, entityID)
+	}
+	if agentID != "" {
+		q += ` AND agent_id = ?`
+		args = append(args, agentID)
+	}
+
+	q += ` ORDER BY last_accessed_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query memories: %w", err)
+	}
+	defer rows.Close()
+
+	return scanMemories(rows)
+}
+
+// QueryMemoriesForEntities retrieves entity-tier memories for multiple entity IDs.
+// Returns a map of entityID → []Memory. Non-expired only.
+func (s *Store) QueryMemoriesForEntities(entityIDs []string, limit int) (map[string][]Memory, error) {
+	if len(entityIDs) == 0 || limit <= 0 {
+		return nil, nil
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	placeholders := make([]string, len(entityIDs))
+	args := make([]interface{}, 0, len(entityIDs)+1)
+	for i, id := range entityIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	args = append(args, now)
+
+	q := fmt.Sprintf(`
+		SELECT id, tier, content, entity_id, agent_id, task_id, tags,
+		       created_at, expires_at, last_accessed_at, source
+		FROM memories
+		WHERE tier = 'entity'
+		  AND entity_id IN (%s)
+		  AND expires_at > ?
+		ORDER BY last_accessed_at DESC`, strings.Join(placeholders, ","))
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query memories for entities: %w", err)
+	}
+	defer rows.Close()
+
+	mems, err := scanMemories(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string][]Memory)
+	for _, m := range mems {
+		if len(result[m.EntityID]) < limit {
+			result[m.EntityID] = append(result[m.EntityID], m)
+		}
+	}
+	return result, nil
+}
+
+// QueryRecentSessionMemories retrieves the most recent session-log memories
+// for the given agent, ordered newest-first. Returns at most limit rows.
+func (s *Store) QueryRecentSessionMemories(agentID string, limit int) ([]Memory, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
+	             created_at, expires_at, last_accessed_at, source
+	      FROM memories
+	      WHERE tier = 'session_log'
+	        AND agent_id = ?
+	        AND expires_at > ?
+	      ORDER BY created_at DESC LIMIT ?`
+
+	rows, err := s.db.Query(q, agentID, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query session memories: %w", err)
+	}
+	defer rows.Close()
+
+	return scanMemories(rows)
+}
+
+// TouchMemory updates last_accessed_at and extends expires_at by 50% of the
+// tier's base TTL (capped at 2x base). This implements access-based decay
+// renewal — memories that prove useful stay alive longer.
+func (s *Store) TouchMemory(id string) error {
+	now := time.Now().UTC()
+	nowStr := now.Format(time.RFC3339)
+
+	// Read current tier to compute extension.
+	var tier, expiresAt string
+	err := s.db.QueryRow(`SELECT tier, expires_at FROM memories WHERE id = ?`, id).Scan(&tier, &expiresAt)
+	if err != nil {
+		return fmt.Errorf("touch memory: %w", err)
+	}
+
+	// Compute extension.
+	var extension time.Duration
+	var maxExpiry time.Time
+	switch tier {
+	case TierSessionLog:
+		extension = ttlSessionLog / 2
+		maxExpiry = now.Add(2 * ttlSessionLog)
+	case TierProject:
+		extension = ttlProject / 2
+		maxExpiry = now.Add(2 * ttlProject)
+	default:
+		// Entity memories: no meaningful extension needed, just update access time.
+		_, err := s.db.Exec(`UPDATE memories SET last_accessed_at = ? WHERE id = ?`, nowStr, id)
+		return err
+	}
+
+	// Parse current expires_at and extend.
+	current, _ := time.Parse(time.RFC3339, expiresAt)
+	if current.IsZero() {
+		current = now
+	}
+	newExpiry := current.Add(extension)
+	if newExpiry.After(maxExpiry) {
+		newExpiry = maxExpiry
+	}
+
+	_, err = s.db.Exec(`UPDATE memories SET last_accessed_at = ?, expires_at = ? WHERE id = ?`,
+		nowStr, newExpiry.Format(time.RFC3339), id)
+	return err
+}
+
+// TouchMemories batch-updates last_accessed_at for multiple memory IDs.
+func (s *Store) TouchMemories(ids []string) {
+	for _, id := range ids {
+		_ = s.TouchMemory(id) // best-effort
+	}
+}
+
+// ExpireMemories deletes memories past their expires_at. Call periodically.
+func (s *Store) ExpireMemories() (int64, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := s.db.Exec(`DELETE FROM memories WHERE expires_at <= ?`, now)
+	if err != nil {
+		return 0, fmt.Errorf("expire memories: %w", err)
+	}
+	return result.RowsAffected()
+}
+
+// MarkEntityMemoriesStale marks all entity-tier memories for the given entity
+// as expiring in 30 days. Called when a node is tombstoned (deleted from graph).
+func (s *Store) MarkEntityMemoriesStale(entityID string) error {
+	staleExpiry := time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339)
+	_, err := s.db.Exec(`
+		UPDATE memories SET expires_at = ?
+		WHERE tier = 'entity' AND entity_id = ?`,
+		staleExpiry, entityID)
+	return err
+}
+
+// SearchMemories performs FTS5 BM25 full-text search over memory content.
+// Returns non-expired memories ordered by relevance (best match first).
+// The query uses FTS5 query syntax — each space-separated word is an implicit AND term.
+func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
+	if query == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	rows, err := s.db.Query(`
+		SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
+		       m.created_at, m.expires_at, m.last_accessed_at, m.source
+		FROM memories m
+		JOIN memories_fts f ON m.rowid = f.rowid
+		WHERE memories_fts MATCH ?
+		  AND m.expires_at > ?
+		ORDER BY rank
+		LIMIT ?`, query, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search memories: %w", err)
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
+// CountMemories returns total memory count by tier.
+func (s *Store) CountMemories() (map[string]int, error) {
+	rows, err := s.db.Query(`SELECT tier, COUNT(*) FROM memories GROUP BY tier`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var tier string
+		var count int
+		if err := rows.Scan(&tier, &count); err != nil {
+			return nil, err
+		}
+		counts[tier] = count
+	}
+	return counts, rows.Err()
+}
+
+// scanMemories reads rows into a Memory slice.
+func scanMemories(rows *sql.Rows) ([]Memory, error) {
+	var out []Memory
+	for rows.Next() {
+		var m Memory
+		if err := rows.Scan(
+			&m.ID, &m.Tier, &m.Content, &m.EntityID, &m.AgentID, &m.TaskID, &m.Tags,
+			&m.CreatedAt, &m.ExpiresAt, &m.LastAccessedAt, &m.Source,
+		); err != nil {
+			return nil, fmt.Errorf("scan memory: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// stringSimilarity computes Jaccard similarity between two strings based on
+// normalized word overlap. Punctuation is stripped from word boundaries so
+// "management." and "management" are treated as the same word. Returns 0.0–1.0.
+func stringSimilarity(a, b string) float64 {
+	setA := tokenSet(a)
+	setB := tokenSet(b)
+	if len(setA) == 0 || len(setB) == 0 {
+		return 0
+	}
+
+	var intersection int
+	for w := range setA {
+		if setB[w] {
+			intersection++
+		}
+	}
+
+	union := len(setA) + len(setB) - intersection
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
+}
+
+// tokenSet normalizes a string into a set of lowercase words, splitting on any
+// non-alphanumeric character. This handles hyphens, parens, and punctuation so
+// "auth-module (JWT)" and "auth module JWT" produce identical token sets.
+func tokenSet(s string) map[string]bool {
+	words := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	set := make(map[string]bool, len(words))
+	for _, w := range words {
+		if w != "" {
+			set[w] = true
+		}
+	}
+	return set
+}

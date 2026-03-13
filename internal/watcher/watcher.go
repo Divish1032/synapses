@@ -332,7 +332,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 
 	resolver.ResolveCallEdges(w.graph)
 	resolver.ResolveImplementsEdges(w.graph)
-	w.graph.InvalidateCache()
+	w.graph.InvalidateCacheForFile(path)
 
 	// Rebuild the columnar GraphIndex asynchronously so BFS reads pick up the
 	// latest graph state without blocking the watcher loop.

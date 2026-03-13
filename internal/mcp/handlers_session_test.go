@@ -295,6 +295,9 @@ func TestHandleGetContext_UpdatesAgentFocus(t *testing.T) {
 	}))
 	mustResult(t, res, err)
 
+	// The agent focus update is fire-and-forget (goroutine). Give it a moment.
+	time.Sleep(50 * time.Millisecond)
+
 	agents, err := s.store.GetAgents()
 	if err != nil {
 		t.Fatalf("GetAgents: %v", err)
