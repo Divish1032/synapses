@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,25 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 )
+
+// sessionContextKey is an unexported type for context values to avoid collisions
+// with other packages that also store values in context.
+type sessionContextKey int
+
+const sessionIDCtxKey sessionContextKey = iota
+
+// WithSessionID stores a MCP session ID in ctx. Called during daemon connection
+// setup so all tool handlers can read the session ID via SessionIDFromContext.
+func WithSessionID(ctx context.Context, sessionID string) context.Context {
+	return context.WithValue(ctx, sessionIDCtxKey, sessionID)
+}
+
+// SessionIDFromContext retrieves the session ID injected by WithSessionID.
+// Returns "" when no session ID was injected (stdio path, tests).
+func SessionIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(sessionIDCtxKey).(string)
+	return v
+}
 
 // ChangeSource is implemented by types that maintain a recent file-change log.
 // Typically this is *watcher.Watcher, wired in cmdStart via SetChangeSource.
@@ -86,10 +106,55 @@ type Server struct {
 	skillRecipes  []skills.Recipe
 	skillExecutor *skills.Executor
 
+	// sessionHashes auto-caches entity_hash per session to allow the server to
+	// detect unchanged context without requiring agents to pass known_hash manually.
+	// Key format: "sessionID::entityCacheKey", Value: entity_hash string.
+	// sync.Map gives safe concurrent reads/writes with no lock contention.
+	// Entries are cleared by ClearSessionHashes when a session disconnects.
+	sessionHashes sync.Map
+
 	// stopCh is closed by Close() to signal background goroutines to exit.
 	// startOnce ensures StartBackground() is truly idempotent.
 	stopCh    chan struct{}
 	startOnce sync.Once
+}
+
+// getSessionHash returns the last stored entity_hash for this session+entityKey, or "".
+func (s *Server) getSessionHash(sessionID, entityKey string) string {
+	if sessionID == "" {
+		return ""
+	}
+	v, ok := s.sessionHashes.Load(sessionID + "::" + entityKey)
+	if !ok {
+		return ""
+	}
+	return v.(string)
+}
+
+// setSessionHash stores an entity_hash for a session+entityKey pair.
+// Called after successfully serving a full get_context response so agents
+// can receive {unchanged:true} automatically on the next identical call.
+func (s *Server) setSessionHash(sessionID, entityKey, hash string) {
+	if sessionID == "" || entityKey == "" || hash == "" {
+		return
+	}
+	s.sessionHashes.Store(sessionID+"::"+entityKey, hash)
+}
+
+// ClearSessionHashes removes all cached hashes for a session. Must be called
+// when a session disconnects to prevent unbounded memory growth in long-running
+// daemons with many short-lived connections.
+func (s *Server) ClearSessionHashes(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	prefix := sessionID + "::"
+	s.sessionHashes.Range(func(k, _ interface{}) bool {
+		if strings.HasPrefix(k.(string), prefix) {
+			s.sessionHashes.Delete(k)
+		}
+		return true
+	})
 }
 
 // ctxCallEntry tracks how many times an agent requested context for an entity.

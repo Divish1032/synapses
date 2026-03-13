@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -522,6 +523,226 @@ func TestHandleGetContext_WrongKnownHash_ReturnsFull(t *testing.T) {
 	hasKey(t, m, "entity_hash")
 	if m["unchanged"] == true {
 		t.Error("should not return unchanged=true for wrong hash")
+	}
+}
+
+// ── Session auto-cache (transparent known_hash) ───────────────────────────────
+
+// sessionCtx returns a context carrying the given session ID, simulating what
+// serveMCPConn injects in production daemon sessions.
+func sessionCtx(sessionID string) context.Context {
+	return WithSessionID(context.Background(), sessionID)
+}
+
+func TestHandleGetContext_SessionAutoCache_ReturnsUnchanged(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	sctx := sessionCtx("agent-session-1")
+
+	// First call: full response expected; server stores hash in session cache.
+	res1, err1 := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	m1 := mustResult(t, res1, err1)
+	if m1["unchanged"] == true {
+		t.Fatal("first call should not return unchanged")
+	}
+	hash1, _ := m1["entity_hash"].(string)
+	if hash1 == "" {
+		t.Fatal("first call missing entity_hash")
+	}
+
+	// Second call with same session and same entity — no known_hash passed.
+	// Auto-cache should detect unchanged graph and return {unchanged: true}.
+	res2, err2 := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	m2 := mustResult(t, res2, err2)
+	if m2["unchanged"] != true {
+		t.Errorf("expected unchanged=true on second session call, got %v", m2)
+	}
+	if m2["cache_source"] != "session" {
+		t.Errorf("expected cache_source=session, got %v", m2["cache_source"])
+	}
+	if m2["entity_hash"] != hash1 {
+		t.Errorf("entity_hash mismatch: got %v want %v", m2["entity_hash"], hash1)
+	}
+}
+
+func TestHandleGetContext_SessionAutoCache_NoSessionID_ReturnsFull(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	// ctx with NO session ID — auto-cache must be disabled.
+	plain := context.Background()
+
+	res1, err1 := s.handleGetContext(plain, callTool(map[string]any{"entity": "AuthLogin"}))
+	mustResult(t, res1, err1)
+
+	// Second call — still no session ID. Must return full response, not unchanged.
+	res2, err2 := s.handleGetContext(plain, callTool(map[string]any{"entity": "AuthLogin"}))
+	m2 := mustResult(t, res2, err2)
+	if m2["unchanged"] == true {
+		t.Error("auto-cache must be disabled when no session ID is in context")
+	}
+	hasKey(t, m2, "root")
+}
+
+func TestHandleGetContext_SessionAutoCache_DifferentSessions_Isolated(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	sctx1 := sessionCtx("session-A")
+	sctx2 := sessionCtx("session-B")
+
+	// Populate session A cache.
+	res1, err1 := s.handleGetContext(sctx1, callTool(map[string]any{"entity": "AuthLogin"}))
+	m1 := mustResult(t, res1, err1)
+	if m1["unchanged"] == true {
+		t.Fatal("session A first call should not be unchanged")
+	}
+
+	// Session B calls same entity — must get full response (different session cache).
+	res2, err2 := s.handleGetContext(sctx2, callTool(map[string]any{"entity": "AuthLogin"}))
+	m2 := mustResult(t, res2, err2)
+	if m2["unchanged"] == true {
+		t.Error("session B should not see session A's cached hash — sessions must be isolated")
+	}
+	hasKey(t, m2, "root")
+}
+
+func TestHandleGetContext_SessionAutoCache_DifferentFormat_DifferentKey(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	sctx := sessionCtx("format-session")
+
+	// First call: JSON format → populates JSON cache key.
+	res1, err1 := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	m1 := mustResult(t, res1, err1)
+	if m1["unchanged"] == true {
+		t.Fatal("first call (json) should not be unchanged")
+	}
+
+	// Second call: compact format — different cache key, must return full compact response.
+	res2, err2 := s.handleGetContext(sctx, callTool(map[string]any{
+		"entity": "AuthLogin",
+		"format": "compact",
+	}))
+	if err2 != nil {
+		t.Fatalf("compact call error: %v", err2)
+	}
+	// compact returns a text result, not JSON — so res2 should not have unchanged=true
+	// (it is a TextContent result, not an error result).
+	if res2 != nil && res2.IsError {
+		t.Error("compact format call returned error")
+	}
+}
+
+func TestHandleGetContext_SessionAutoCache_ModeImpact_NotCached(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	sctx := sessionCtx("impact-session")
+
+	// mode=impact call — must NOT write to session cache (different response shape).
+	res1, err1 := s.handleGetContext(sctx, callTool(map[string]any{
+		"entity": "AuthLogin",
+		"mode":   "impact",
+	}))
+	if err1 != nil {
+		t.Fatalf("impact call error: %v", err1)
+	}
+	_ = res1
+
+	// Subsequent normal get_context for same entity (mode="") — must return full
+	// response because the impact call must NOT have populated the session cache.
+	res2, err2 := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	m2 := mustResult(t, res2, err2)
+	if m2["unchanged"] == true {
+		t.Error("mode=impact call must not populate session cache for mode='' calls")
+	}
+	hasKey(t, m2, "root")
+}
+
+func TestHandleGetContext_SessionAutoCache_ManualKnownHashTakesPrecedence(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	sctx := sessionCtx("priority-session")
+
+	// Populate the session cache.
+	res1, _ := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	m1 := mustResult(t, res1, nil)
+	hash := m1["entity_hash"].(string)
+
+	// Pass wrong known_hash manually — should get full response (manual hash mismatch
+	// takes precedence; auto-cache should not fire when manual hash is provided and mismatches).
+	res2, err2 := s.handleGetContext(sctx, callTool(map[string]any{
+		"entity":     "AuthLogin",
+		"known_hash": "000000000000",
+	}))
+	m2 := mustResult(t, res2, err2)
+	if m2["unchanged"] == true {
+		t.Error("wrong manual known_hash should return full response, not unchanged")
+	}
+	hasKey(t, m2, "root")
+
+	// Pass correct known_hash manually — manual path fires, not auto-cache.
+	res3, err3 := s.handleGetContext(sctx, callTool(map[string]any{
+		"entity":     "AuthLogin",
+		"known_hash": hash,
+	}))
+	m3 := mustResult(t, res3, err3)
+	if m3["unchanged"] != true {
+		t.Error("correct manual known_hash should return unchanged=true")
+	}
+	// Manual path does NOT set cache_source=session.
+	if m3["cache_source"] == "session" {
+		t.Error("manual known_hash should not report cache_source=session")
+	}
+}
+
+func TestClearSessionHashes_OnlyRemovesTargetSession(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	sctxA := sessionCtx("clear-session-A")
+	sctxB := sessionCtx("clear-session-B")
+
+	// Populate both sessions.
+	s.handleGetContext(sctxA, callTool(map[string]any{"entity": "AuthLogin"})) //nolint
+	s.handleGetContext(sctxB, callTool(map[string]any{"entity": "AuthLogin"})) //nolint
+
+	// Clear only session A.
+	s.ClearSessionHashes("clear-session-A")
+
+	// Session A: should get full response (cache cleared).
+	resA2, errA2 := s.handleGetContext(sctxA, callTool(map[string]any{"entity": "AuthLogin"}))
+	mA2 := mustResult(t, resA2, errA2)
+	if mA2["unchanged"] == true {
+		t.Error("session A cache should have been cleared — expected full response")
+	}
+
+	// Session B: should still get {unchanged:true} (cache intact).
+	resB2, errB2 := s.handleGetContext(sctxB, callTool(map[string]any{"entity": "AuthLogin"}))
+	mB2 := mustResult(t, resB2, errB2)
+	if mB2["unchanged"] != true {
+		t.Error("session B cache should be intact after clearing session A")
+	}
+}
+
+func TestSessionHashMethods_Unit(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+
+	// Empty session ID — all ops are no-ops.
+	s.setSessionHash("", "key", "hash")
+	if got := s.getSessionHash("", "key"); got != "" {
+		t.Errorf("empty sessionID get should return '', got %q", got)
+	}
+
+	// Normal get/set.
+	s.setSessionHash("sess1", "entity|file||2|4000", "abc123")
+	if got := s.getSessionHash("sess1", "entity|file||2|4000"); got != "abc123" {
+		t.Errorf("expected abc123, got %q", got)
+	}
+
+	// Different session — isolated.
+	if got := s.getSessionHash("sess2", "entity|file||2|4000"); got != "" {
+		t.Errorf("different session should not see sess1's entry, got %q", got)
+	}
+
+	// ClearSessionHashes removes only target session.
+	s.setSessionHash("sess2", "entity|file||2|4000", "xyz789")
+	s.ClearSessionHashes("sess1")
+	if got := s.getSessionHash("sess1", "entity|file||2|4000"); got != "" {
+		t.Errorf("sess1 should be cleared, got %q", got)
+	}
+	if got := s.getSessionHash("sess2", "entity|file||2|4000"); got != "xyz789" {
+		t.Errorf("sess2 should be untouched, got %q", got)
 	}
 }
 
