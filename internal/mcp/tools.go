@@ -145,19 +145,30 @@ type directionalContext struct {
 // identical graphs and changes when any node or edge in the subgraph changes.
 // Clients can pass this back as known_hash to get an early {"unchanged":true}
 // response instead of a full context payload.
-func computeEntityHash(rootID graph.NodeID, nodes []graph.CarvedNode) string {
-	ids := make([]string, 0, len(nodes)+1)
-	ids = append(ids, string(rootID))
+//
+// The hash covers:
+//   - root node ID
+//   - all neighbor node IDs (excluding root to avoid double-count)
+//   - all edges as "from>to:type" strings
+//
+// Including edge types means interface/struct refactors (which change IMPLEMENTS
+// edges but not node membership) correctly produce a different hash.
+func computeEntityHash(rootID graph.NodeID, nodes []graph.CarvedNode, edges []*graph.Edge) string {
+	parts := make([]string, 0, len(nodes)+1+len(edges))
+	parts = append(parts, string(rootID))
 	for _, cn := range nodes {
 		// Skip root itself — CarveEgoGraph includes it in Nodes; counting it
 		// twice would make the hash depend on irrelevant dedup order.
 		if cn.Node.ID != rootID {
-			ids = append(ids, string(cn.Node.ID))
+			parts = append(parts, string(cn.Node.ID))
 		}
 	}
-	sort.Strings(ids)
+	for _, e := range edges {
+		parts = append(parts, string(e.From)+">"+string(e.To)+":"+string(e.Type))
+	}
+	sort.Strings(parts)
 	h := sha1.New()
-	for _, s := range ids {
+	for _, s := range parts {
 		_, _ = h.Write([]byte(s))
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))[:12] // 12 hex chars = 48 bits — ample for cache hit detection
@@ -342,16 +353,24 @@ func (s *Server) handleGetContext(
 	// is safe — we never mutate the cached subgraph.
 	sg := normalizeSubgraph(subgraph, s.graph.Root())
 
+	// P2.2: impact mode — reverse-only BFS, same shape as get_impact.
+	// Extract mode early so the known_hash short-circuit below is skipped for
+	// impact requests (impact uses a different BFS and has no entity_hash).
+	mode, _ := req.GetArguments()["mode"].(string)
+
 	// R14 Part B: entity_hash — stable fingerprint of the ego-graph structure.
 	// If the caller provides known_hash matching the current hash, return an
 	// early "unchanged" response so agents can skip re-processing stale context.
-	entityHash := computeEntityHash(best.ID, sg.Nodes)
-	if knownHash, _ := req.GetArguments()["known_hash"].(string); knownHash != "" && knownHash == entityHash {
-		return jsonResult(map[string]interface{}{
-			"unchanged":   true,
-			"entity_hash": entityHash,
-			"entity":      entityName,
-		})
+	// Skipped for mode=impact — that path produces a different response shape.
+	entityHash := computeEntityHash(best.ID, sg.Nodes, sg.Edges)
+	if mode == "" {
+		if knownHash, _ := req.GetArguments()["known_hash"].(string); knownHash != "" && knownHash == entityHash {
+			return jsonResult(map[string]interface{}{
+				"unchanged":   true,
+				"entity_hash": entityHash,
+				"entity":      entityName,
+			})
+		}
 	}
 
 	if len(boostedNodes) > 0 {
@@ -364,9 +383,6 @@ func (s *Server) handleGetContext(
 			}
 		}
 	}
-
-	// P2.2: impact mode — reverse-only BFS, same shape as get_impact.
-	mode, _ := req.GetArguments()["mode"].(string)
 	if mode == "impact" {
 		maxDepth := cfg.MaxDepth
 		result, err := s.graph.ImpactAnalysis(best.ID, maxDepth)
@@ -2193,40 +2209,36 @@ func (s *Server) handleGetCallChain(
 	prev := map[graph.NodeID]graph.NodeID{fromNode.ID: ""}
 	// viaImpl tracks which steps in the chain crossed an IMPLEMENTS boundary.
 	viaImpl := make(map[graph.NodeID]bool)
-	queue := []graph.NodeID{fromNode.ID}
-	found := false
-	// closestReachable tracks the deepest node reached (by hop count from root).
-	// Used in the not-found response to show agents where the static graph ends.
+	// Single queue carries both the node ID and hop distance — no parallel slice needed.
 	type bfsEntry struct {
 		id  graph.NodeID
 		hop int
 	}
-	bfsQueue := []bfsEntry{{fromNode.ID, 0}}
-	depth := map[graph.NodeID]int{fromNode.ID: 0}
+	queue := []bfsEntry{{fromNode.ID, 0}}
+	found := false
+	// closestReachable tracks the deepest node reached (by hop count from root).
+	// Used in the not-found response to show agents where the static graph ends.
 	var closestReachableID graph.NodeID
 	maxHop := 0
 
 	for len(queue) > 0 && !found {
 		curr := queue[0]
-		currEntry := bfsQueue[0]
 		queue = queue[1:]
-		bfsQueue = bfsQueue[1:]
 
-		if currEntry.hop > maxHop {
-			maxHop = currEntry.hop
-			closestReachableID = curr
+		if curr.hop > maxHop {
+			maxHop = curr.hop
+			closestReachableID = curr.id
 		}
 
 		// Forward edges: CALLS and IMPLEMENTS (concrete → interface).
-		for _, e := range s.graph.OutEdges(curr) {
+		for _, e := range s.graph.OutEdges(curr.id) {
 			if e.Type != graph.EdgeCalls && e.Type != graph.EdgeImplements {
 				continue
 			}
 			if _, visited := prev[e.To]; visited {
 				continue
 			}
-			prev[e.To] = curr
-			depth[e.To] = currEntry.hop + 1
+			prev[e.To] = curr.id
 			if e.Type == graph.EdgeImplements {
 				viaImpl[e.To] = true
 			}
@@ -2234,33 +2246,29 @@ func (s *Server) handleGetCallChain(
 				found = true
 				break
 			}
-			queue = append(queue, e.To)
-			bfsQueue = append(bfsQueue, bfsEntry{e.To, currEntry.hop + 1})
+			queue = append(queue, bfsEntry{e.To, curr.hop + 1})
 		}
 		if found {
 			break
 		}
 
 		// Backward IMPLEMENTS edges (interface → concrete struct).
-		for _, e := range s.graph.InEdges(curr) {
+		for _, e := range s.graph.InEdges(curr.id) {
 			if e.Type != graph.EdgeImplements {
 				continue
 			}
 			if _, visited := prev[e.From]; visited {
 				continue
 			}
-			prev[e.From] = curr
-			depth[e.From] = currEntry.hop + 1
+			prev[e.From] = curr.id
 			viaImpl[e.From] = true
 			if e.From == toNode.ID {
 				found = true
 				break
 			}
-			queue = append(queue, e.From)
-			bfsQueue = append(bfsQueue, bfsEntry{e.From, currEntry.hop + 1})
+			queue = append(queue, bfsEntry{e.From, curr.hop + 1})
 		}
 	}
-	_ = depth
 
 	if !found {
 		// Build a helpful explanation for why no path was found.

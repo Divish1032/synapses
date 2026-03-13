@@ -1794,7 +1794,7 @@ func TestCmdList_WithProjects(t *testing.T) {
 	st.Close()
 	_ = dir
 	// cmdList scans the global synapses home — should succeed.
-	if err := cmdList(); err != nil {
+	if err := cmdList(nil); err != nil {
 		t.Errorf("cmdList: %v", err)
 	}
 }
@@ -2354,7 +2354,7 @@ func TestRetryBrainConnect_ContextCancelled(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		retryBrainConnect(ctx, cfg, srv, g, st, "test-project")
+		retryBrainConnect(ctx, cfg, srv, g, st, "test-project", nil)
 		close(done)
 	}()
 

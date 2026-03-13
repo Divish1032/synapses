@@ -445,7 +445,7 @@ func cmdDaemonServe(args []string) error {
 			fmt.Fprintf(os.Stderr, "synapses: brain connected (%s)\n", model)
 			srv.SetBrainClient(brainCli)
 			go func() {
-				go fetchTopNSummaries(brainCli, g, st, 20)
+				go fetchTopNSummaries(appCtx, brainCli, g, st, 20)
 				bulkIngestToBrain(brainCli, g, pathProjectID(absPath))
 				fetchAndWriteBackSummaries(brainCli, g, st)
 			}()
