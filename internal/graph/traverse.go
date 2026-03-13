@@ -2,6 +2,7 @@ package graph
 
 import (
 	"math"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -453,11 +454,24 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 	}, nil
 }
 
-// testFileSuffixes lists filename patterns that identify test files across
-// supported languages. Used by FindTestsFor to filter test-only nodes.
-var testFileSuffixes = []string{"_test.go", "_test.ts", "_test.js", "_spec.ts", "_spec.js", "test_.py", "_test.py", ".test.ts", ".test.js", ".spec.ts", ".spec.js"}
+// testFileSuffixes covers test file conventions for Go, TypeScript, and JavaScript.
+// Python has two conventions: suffix-named (*_test.py) and prefix-named (test_*.py).
+// Prefix detection is handled separately in isTestFile via filepath.Base + HasPrefix.
+var testFileSuffixes = []string{
+	"_test.go",
+	"_test.ts", "_test.js",
+	"_spec.ts", "_spec.js",
+	"_test.py",       // Python suffix convention: auth_test.py
+	".test.ts", ".test.js",
+	".spec.ts", ".spec.js",
+}
 
 func isTestFile(file string) bool {
+	base := filepath.Base(file)
+	// Python prefix convention: test_auth.py, test_models.py, etc.
+	if strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py") {
+		return true
+	}
 	for _, suffix := range testFileSuffixes {
 		if strings.HasSuffix(file, suffix) {
 			return true

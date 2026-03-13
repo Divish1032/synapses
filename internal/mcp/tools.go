@@ -149,7 +149,11 @@ func computeEntityHash(rootID graph.NodeID, nodes []graph.CarvedNode) string {
 	ids := make([]string, 0, len(nodes)+1)
 	ids = append(ids, string(rootID))
 	for _, cn := range nodes {
-		ids = append(ids, string(cn.Node.ID))
+		// Skip root itself — CarveEgoGraph includes it in Nodes; counting it
+		// twice would make the hash depend on irrelevant dedup order.
+		if cn.Node.ID != rootID {
+			ids = append(ids, string(cn.Node.ID))
+		}
 	}
 	sort.Strings(ids)
 	h := sha1.New()
@@ -3204,6 +3208,20 @@ func (s *Server) handleGetImpact(
 			}
 		}
 		merged.AffectedFiles = unique
+		// R2: Collect test coverage across all methods of the struct/interface.
+		seenTestFiles := make(map[string]bool)
+		for _, m2 := range methods {
+			if m2.Type != graph.NodeMethod || m2.ID == root.ID {
+				continue
+			}
+			for _, tf := range s.graph.FindTestsFor(m2.ID) {
+				if !seenTestFiles[tf] {
+					seenTestFiles[tf] = true
+					merged.TestCoverage = append(merged.TestCoverage, tf)
+				}
+			}
+		}
+		sort.Strings(merged.TestCoverage)
 		return jsonResult(merged)
 	}
 

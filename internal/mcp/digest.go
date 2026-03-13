@@ -49,6 +49,9 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		if len(warnings) > 0 {
 			fmt.Fprintf(&b, "⚠ %s\n", strings.Join(warnings, " · "))
 		}
+		if dc.EntityHash != "" {
+			fmt.Fprintf(&b, "\nentity_hash:%s\n", dc.EntityHash)
+		}
 		return strings.TrimSpace(b.String())
 	}
 
@@ -115,6 +118,9 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 
 	// "neighbors" level: stop after caller/callee names. No callee blocks.
 	if detailLevel == "neighbors" {
+		if dc.EntityHash != "" {
+			fmt.Fprintf(&b, "\nentity_hash:%s\n", dc.EntityHash)
+		}
 		return strings.TrimSpace(b.String())
 	}
 
@@ -154,6 +160,12 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 	// deeper context than the configured default.
 	if dc.AdaptiveHint != "" {
 		fmt.Fprintf(&b, "\n%s\n", dc.AdaptiveHint)
+	}
+
+	// R14: append entity_hash so agents using compact format can still do
+	// hash-based caching by passing known_hash on the next get_context call.
+	if dc.EntityHash != "" {
+		fmt.Fprintf(&b, "\nentity_hash:%s\n", dc.EntityHash)
 	}
 
 	return strings.TrimSpace(b.String())
