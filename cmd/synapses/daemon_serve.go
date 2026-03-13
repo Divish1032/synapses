@@ -393,6 +393,23 @@ func cmdDaemonServe(args []string) error {
 		}
 	}
 
+	// Load skill recipes from all scopes (fail-silent per scope).
+	{
+		allRecipes := skills.BuiltinRecipes()
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			userDir := filepath.Join(homeDir, ".synapses", "skills")
+			if rs, err := skills.LoadRecipeDir(userDir, "user"); err == nil {
+				allRecipes = append(allRecipes, rs...)
+			}
+		}
+		projectDir := filepath.Join(absPath, ".synapses", "skills")
+		if rs, err := skills.LoadRecipeDir(projectDir, "project"); err == nil {
+			allRecipes = append(allRecipes, rs...)
+		}
+		srv.SetSkillRecipes(allRecipes)
+		fmt.Fprintf(os.Stderr, "synapses: loaded %d skill recipes\n", len(allRecipes))
+	}
+
 	// Peer API server.
 	if cfg.PeerAPIPort > 0 {
 		peerSrv := peer.NewPeerServer(g, cfg, st)
