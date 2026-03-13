@@ -129,11 +129,19 @@ type directionalContext struct {
 	TruncatedCount     int                           `json:"truncated_count,omitempty"`      // nodes dropped by budget
 	BrainHint              string                        `json:"brain,omitempty"`                // set when brain is not configured
 	Principles             []string                      `json:"principles,omitempty"`           // Hot Constitution principles from synapses.json
+	ActivePrompts          []activePrompt                `json:"active_prompts,omitempty"`           // matched activation-context snippets from .synapses/prompts/
 	ADRs                   []brain.ADR                   `json:"adrs,omitempty"`                 // relevant accepted ADRs for this entity's file
 	StaleAnnotationWarning string                        `json:"stale_annotation_warning,omitempty"` // GAP-3: set when ≥1 annotation may be outdated
 	RecentChanges          []metrics.CommitInfo          `json:"recent_changes,omitempty"`           // GAP-7: last 3 git commits that touched the entity's file
 	GraphFreshness         string                        `json:"graph_freshness,omitempty"`          // GAP-4: warning when entity's file was recently modified
 	AdaptiveHint           string                        `json:"adaptive_hint,omitempty"`            // F17: set when BFS depth/detail was auto-expanded based on prior feedback
+}
+
+// activePrompt is a matched activation-context snippet included in get_context
+// responses. The Body is the full Markdown text from the prompt template.
+type activePrompt struct {
+	ID   string `json:"id"`
+	Body string `json:"body"`
 }
 
 // handleGetContext returns an N-hop ego-subgraph around the named entity,
@@ -442,6 +450,18 @@ func (s *Server) handleGetContext(
 	// Hot Constitution: inject project principles if configured.
 	if s.config != nil && s.config.Constitution.InjectInContext && len(s.config.Constitution.Principles) > 0 {
 		dc.Principles = s.config.Constitution.Principles
+	}
+
+	// Activation-context prompts: inject matching snippets from .synapses/prompts/.
+	// Zero-cost when no prompts are loaded or no patterns match.
+	if dc.Root != nil {
+		matched := s.getMatchingPrompts(dc.Root.File, dc.Root.Name, dc.Root.Package)
+		if len(matched) > 0 {
+			dc.ActivePrompts = make([]activePrompt, 0, len(matched))
+			for _, pt := range matched {
+				dc.ActivePrompts = append(dc.ActivePrompts, activePrompt{ID: pt.ID, Body: pt.Body})
+			}
+		}
 	}
 
 	// GAP-7: Git "why" layer — surface recent commits for the entity's file so
@@ -2756,6 +2776,26 @@ func (s *Server) handleSessionInit(
 			"count":       len(agentConstraints),
 			"constraints": agentConstraints,
 			"note":        "These behavioral rules were established in prior sessions. Apply them throughout this session.",
+		}
+	}
+
+	// ── Activation-context prompts (auto_load: true) ──────────────────────
+	// Surface project-wide conventions so agents apply them from the first message.
+	// Only prompts with auto_load: true are included here; entity-specific prompts
+	// surface in individual get_context calls.
+	if autoPrompts := s.getAutoLoadPrompts(); len(autoPrompts) > 0 {
+		promptList := make([]map[string]string, 0, len(autoPrompts))
+		for _, pt := range autoPrompts {
+			promptList = append(promptList, map[string]string{
+				"id":     pt.ID,
+				"source": pt.Source,
+				"body":   pt.Body,
+			})
+		}
+		resp["active_prompts"] = map[string]interface{}{
+			"count":   len(promptList),
+			"prompts": promptList,
+			"note":    "Project-wide activation context. Apply these conventions throughout the session.",
 		}
 	}
 
