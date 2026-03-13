@@ -51,6 +51,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/embed"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/parser"
+	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/peer"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/resolver"
@@ -371,6 +372,26 @@ func cmdDaemonServe(args []string) error {
 	// Create the MCP server.
 	mcpsrv.Version = version
 	srv := mcpsrv.New(g, cfg, st)
+
+	// Load activation-context prompts from all scopes (fail-silent per scope).
+	{
+		var allPrompts []skills.PromptTemplate
+		allPrompts = append(allPrompts, skills.BuiltinPrompts()...)
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			userDir := filepath.Join(homeDir, ".synapses", "prompts")
+			if pts, err := skills.LoadPromptDir(userDir, "user"); err == nil {
+				allPrompts = append(allPrompts, pts...)
+			}
+		}
+		projectDir := filepath.Join(absPath, ".synapses", "prompts")
+		if pts, err := skills.LoadPromptDir(projectDir, "project"); err == nil {
+			allPrompts = append(allPrompts, pts...)
+		}
+		if len(allPrompts) > 0 {
+			srv.SetPromptTemplates(allPrompts)
+			fmt.Fprintf(os.Stderr, "synapses: loaded %d activation-context prompts\n", len(allPrompts))
+		}
+	}
 
 	// Peer API server.
 	if cfg.PeerAPIPort > 0 {

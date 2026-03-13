@@ -15,6 +15,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/pulse"
+	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 )
@@ -72,6 +73,12 @@ type Server struct {
 	// ensuring Pulse can attribute token savings to the correct agent.
 	lastAgentMu sync.RWMutex
 	lastAgentID string
+
+	// promptTemplates holds activation-context prompts loaded at startup.
+	// They are auto-injected into get_context and session_init responses
+	// when their patterns (file, entity, module) match the queried entity.
+	// Populated via SetPromptTemplates after the server is constructed.
+	promptTemplates []skills.PromptTemplate
 }
 
 // ctxCallEntry tracks how many times an agent requested context for an entity.
@@ -161,10 +168,12 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 	s.mcp = server.NewMCPServer(serverName, Version,
 		server.WithToolCapabilities(true),
 		server.WithResourceCapabilities(true, true), // subscribe + listChanged
+		server.WithPromptCapabilities(false),         // static prompts; no listChanged notifications
 		server.WithHooks(hooks),
 	)
 	s.registerTools()
 	s.registerResources()
+	s.registerPrompts() // no-op until SetPromptTemplates is called
 	return s
 }
 
