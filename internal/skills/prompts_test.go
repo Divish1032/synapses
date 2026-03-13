@@ -262,6 +262,23 @@ func TestDeduplicatePrompts_EmptyIDKept(t *testing.T) {
 	}
 }
 
+func TestMatchPrompts_AutoLoad_ExcludedFromPerEntityMatch(t *testing.T) {
+	// An auto_load template with a file_pattern should NOT appear in MatchPrompts results
+	// because it is already injected globally via session_init.
+	// If it appeared in both, agents would receive duplicate content.
+	templates := []PromptTemplate{
+		{ID: "global", AutoLoad: true, FilePattern: "**/*.go", Body: "global conventions"},
+		{ID: "targeted", AutoLoad: false, FilePattern: "**/*.go", Body: "targeted guide"},
+	}
+	matched := MatchPrompts(templates, "internal/store/store.go", "Store", "internal/store")
+	if len(matched) != 1 {
+		t.Fatalf("expected 1 match (targeted only), got %d: %v", len(matched), matched)
+	}
+	if matched[0].ID != "targeted" {
+		t.Errorf("wrong match: got %q, want %q", matched[0].ID, "targeted")
+	}
+}
+
 // --- AutoLoadPrompts ---
 
 func TestAutoLoadPrompts(t *testing.T) {
