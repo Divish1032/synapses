@@ -3128,6 +3128,26 @@ func (s *Server) handleAnnotateNode(
 	})
 }
 
+// trimRepoRoot strips the repo root prefix from a slice of absolute file paths,
+// returning paths relative to the repo root. Mirrors the normalizeSubgraph
+// behaviour so TestCoverage paths are consistent with all other file references
+// in get_context/get_impact responses.
+func (s *Server) trimRepoRoot(paths []string) []string {
+	root := s.graph.Root()
+	if root == "" || len(paths) == 0 {
+		return paths
+	}
+	prefix := root
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = strings.TrimPrefix(p, prefix)
+	}
+	return out
+}
+
 // handleGetImpact performs reverse-BFS blast-radius analysis from a named entity.
 // Returns nodes grouped by depth tier: direct (depth 1, confidence 1.0),
 // indirect (depth 2, confidence 0.6), peripheral (depth 3+, confidence 0.3).
@@ -3229,6 +3249,7 @@ func (s *Server) handleGetImpact(
 				}
 			}
 		}
+		merged.TestCoverage = s.trimRepoRoot(merged.TestCoverage)
 		sort.Strings(merged.TestCoverage)
 		return jsonResult(merged)
 	}
@@ -3242,7 +3263,9 @@ func (s *Server) handleGetImpact(
 	}
 
 	// R2: Attach test coverage — files that exercise this entity via reverse CALLS BFS.
-	result.TestCoverage = s.graph.FindTestsFor(root.ID)
+	// trimRepoRoot converts absolute paths to repo-relative paths for consistency
+	// with all other file references in get_context/get_impact responses.
+	result.TestCoverage = s.trimRepoRoot(s.graph.FindTestsFor(root.ID))
 
 	return jsonResult(result)
 }

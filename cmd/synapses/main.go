@@ -1401,6 +1401,7 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 | Not sure which tool to use | ` + "`discover_tools(query=\"what I'm trying to do\")`" + ` |
 | Understand a function, struct, or interface | ` + "`get_context(entity=\"Name\")`" + ` |
 | Pin to a specific file (avoids wrong-entity picks) | ` + "`get_context(entity=\"Name\", file=\"cmd/server/main.go\")`" + ` |
+| Skip re-fetching unchanged context (token saver) | ` + "`get_context(entity=\"Name\", known_hash=\"<prev entity_hash>\")`" + ` → ` + "`{unchanged: true}`" + ` if graph is stable |
 | Query by package-qualified name | ` + "`get_context(entity=\"graph.New\")`" + ` — works for both standalone functions and methods; use ` + "`file=`" + ` to disambiguate further |
 | Boost nodes linked to current task | ` + "`get_context(entity=\"Name\", task_id=\"...\")`" + ` |
 | Find a symbol by name or substring | ` + "`find_entity(query=\"name\")`" + ` |
