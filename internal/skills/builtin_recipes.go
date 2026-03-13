@@ -19,7 +19,7 @@ func BuiltinRecipes() []Recipe {
 				{Tool: "recall", Args: map[string]interface{}{"query": "$target", "episode_type": "failure"}, OutputKey: "failures", Optional: true},
 			},
 			Output:              "structured",
-			RequiredPermissions: []string{"graph_read"},
+			RequiredPermissions: []string{string(PermGraphRead)},
 		},
 		{
 			ID:          "pre-review-checklist",
@@ -35,7 +35,7 @@ func BuiltinRecipes() []Recipe {
 				{Tool: "recall", Args: map[string]interface{}{"query": "$target", "episode_type": "failure"}, OutputKey: "failures", Optional: true},
 			},
 			Output:              "structured",
-			RequiredPermissions: []string{"graph_read"},
+			RequiredPermissions: []string{string(PermGraphRead)},
 		},
 		{
 			ID:          "impact-audit",
@@ -51,7 +51,7 @@ func BuiltinRecipes() []Recipe {
 				{Tool: "recall", Args: map[string]interface{}{"query": "$target", "episode_type": "failure"}, OutputKey: "failures", Optional: true},
 			},
 			Output:              "structured",
-			RequiredPermissions: []string{"graph_read"},
+			RequiredPermissions: []string{string(PermGraphRead)},
 		},
 		{
 			ID:          "dependency-health",
@@ -66,7 +66,7 @@ func BuiltinRecipes() []Recipe {
 				{Tool: "recall", Args: map[string]interface{}{"query": "$target", "episode_type": "failure"}, OutputKey: "failures", Optional: true},
 			},
 			Output:              "structured",
-			RequiredPermissions: []string{"graph_read"},
+			RequiredPermissions: []string{string(PermGraphRead)},
 		},
 	}
 }
