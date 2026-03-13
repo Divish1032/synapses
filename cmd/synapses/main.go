@@ -2186,9 +2186,10 @@ func buildIngestCode(n *graph.Node) string {
 
 // fetchTopNSummaries eagerly fetches summaries for the top N most-connected
 // nodes and writes them back as annotations. Called with a short initial wait
-// (2s) so hot entities are enriched before the first agent context request.
+// so hot entities are enriched before the first agent context request.
 // Runs concurrently with bulkIngestToBrain + fetchAndWriteBackSummaries.
-func fetchTopNSummaries(bc *brain.Client, g *graph.Graph, st *store.Store, n int) {
+// ctx should be the daemon's appCtx so goroutines cancel on shutdown.
+func fetchTopNSummaries(ctx context.Context, bc *brain.Client, g *graph.Graph, st *store.Store, n int) {
 	if st == nil || n <= 0 {
 		return
 	}
@@ -2209,8 +2210,25 @@ func fetchTopNSummaries(bc *brain.Client, g *graph.Graph, st *store.Store, n int
 		nodes = nodes[:n]
 	}
 
-	// Short wait for brain to have processed the ingest queue head.
-	time.Sleep(2 * time.Second)
+	// Poll brain readiness: try top node up to 3 times with 1s gaps instead of
+	// a blind sleep. This keeps the wait short (often <1s) and exits cleanly
+	// if ctx is cancelled during shutdown.
+	if len(nodes) > 0 {
+		for attempt := 0; attempt < 3; attempt++ {
+			if ctx.Err() != nil {
+				return // daemon shutting down
+			}
+			probe := bc.GetSummary(ctx, string(nodes[0].ID))
+			if probe != "" {
+				break // brain has at least one summary ready
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(1 * time.Second):
+			}
+		}
+	}
 
 	sem := make(chan struct{}, 4)
 	var wg sync.WaitGroup
@@ -2222,7 +2240,10 @@ func fetchTopNSummaries(bc *brain.Client, g *graph.Graph, st *store.Store, n int
 		go func(nd *graph.Node) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			summary := bc.GetSummary(context.Background(), string(nd.ID))
+			if ctx.Err() != nil {
+				return // daemon shutting down
+			}
+			summary := bc.GetSummary(ctx, string(nd.ID))
 			if summary == "" || strings.Contains(strings.ToLower(summary), "in progress") {
 				return
 			}
@@ -2356,7 +2377,7 @@ func retryBrainConnect(ctx context.Context, cfg *config.Config, srv *mcpsrv.Serv
 			}
 			probeCancel()
 			go func() {
-				go fetchTopNSummaries(bc, g, st, 20)
+				go fetchTopNSummaries(ctx, bc, g, st, 20)
 				bulkIngestToBrain(bc, g, projectID)
 				fetchAndWriteBackSummaries(bc, g, st)
 			}()
