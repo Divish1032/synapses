@@ -23,14 +23,14 @@ func BuiltinRecipes() []Recipe {
 		},
 		{
 			ID:          "pre-review-checklist",
-			Description: "Validates a proposed change set: plan safety, impact analysis, violations, and recent failures.",
+			Description: "Pre-change review: code context, downstream impact, current violations, and failure history for a target symbol.",
 			Origin:      "builtin",
 			Params: []RecipeParam{
 				{Name: "target", Type: "string", Required: true},
 			},
 			Steps: []RecipeStep{
+				{Tool: "get_context", Args: map[string]interface{}{"entity": "$target"}, OutputKey: "context"},
 				{Tool: "get_impact", Args: map[string]interface{}{"symbol": "$target"}, OutputKey: "impact"},
-				{Tool: "check_plan_safety", Args: map[string]interface{}{}, OutputKey: "safety", Optional: true},
 				{Tool: "get_violations", Args: map[string]interface{}{}, OutputKey: "violations", Optional: true},
 				{Tool: "recall", Args: map[string]interface{}{"query": "$target", "episode_type": "failure"}, OutputKey: "failures", Optional: true},
 			},

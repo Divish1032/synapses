@@ -252,6 +252,7 @@ func cmdStartDirect(args []string) error {
 		if pts, err := skills.LoadPromptDir(projectDir, "project"); err == nil {
 			allPrompts = append(allPrompts, pts...)
 		}
+		allPrompts = skills.DeduplicatePrompts(allPrompts) // project overrides user, user overrides builtin
 		if len(allPrompts) > 0 {
 			srv.SetPromptTemplates(allPrompts)
 			fmt.Fprintf(os.Stderr, "synapses: loaded %d activation-context prompts\n", len(allPrompts))
@@ -272,6 +273,7 @@ func cmdStartDirect(args []string) error {
 		if rs, err := skills.LoadRecipeDir(projectDir, "project"); err == nil {
 			allRecipes = append(allRecipes, rs...)
 		}
+		allRecipes = skills.DeduplicateRecipes(allRecipes) // project overrides user, user overrides builtin
 		srv.SetSkillRecipes(allRecipes)
 		fmt.Fprintf(os.Stderr, "synapses: loaded %d skill recipes\n", len(allRecipes))
 	}

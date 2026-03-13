@@ -128,6 +128,34 @@ func TestLoadRecipeDir_MalformedJSON(t *testing.T) {
 	}
 }
 
+// --- DeduplicateRecipes ---
+
+func TestDeduplicateRecipes_LastWins(t *testing.T) {
+	recipes := []Recipe{
+		{ID: "onboard-to-module", Description: "builtin", Origin: "builtin"},
+		{ID: "other", Description: "stays", Origin: "builtin"},
+		{ID: "onboard-to-module", Description: "user override", Origin: "user"},
+		{ID: "onboard-to-module", Description: "project override", Origin: "project"},
+	}
+	got := DeduplicateRecipes(recipes)
+	if len(got) != 2 {
+		t.Fatalf("expected 2, got %d", len(got))
+	}
+	for _, r := range got {
+		if r.ID == "onboard-to-module" && r.Origin != "project" {
+			t.Errorf("onboard-to-module should be project version, got origin=%q", r.Origin)
+		}
+	}
+}
+
+func TestDeduplicateRecipes_NoDuplicates(t *testing.T) {
+	recipes := []Recipe{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	got := DeduplicateRecipes(recipes)
+	if len(got) != 3 {
+		t.Errorf("no dups: expected 3, got %d", len(got))
+	}
+}
+
 // --- BuiltinRecipes ---
 
 func TestBuiltinRecipes_NotEmpty(t *testing.T) {
