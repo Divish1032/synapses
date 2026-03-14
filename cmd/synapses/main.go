@@ -1221,7 +1221,20 @@ func cmdList(args []string) error {
 			Nodes       int    `json:"nodes"`
 			Files       int    `json:"files"`
 			Edges       int    `json:"edges"`
+			Scale       string `json:"scale,omitempty"`
 			LastIndexed string `json:"last_indexed,omitempty"`
+		}
+		nodeScale := func(n int) string {
+			switch {
+			case n < 100:
+				return "micro"
+			case n < 500:
+				return "small"
+			case n < 2000:
+				return "medium"
+			default:
+				return "large"
+			}
 		}
 		out := make([]jsonProject, 0, len(stats))
 		for _, s := range stats {
@@ -1235,6 +1248,7 @@ func cmdList(args []string) error {
 				Nodes:       s.NodeCount,
 				Files:       s.FileCount,
 				Edges:       s.EdgeCount,
+				Scale:       nodeScale(s.NodeCount),
 				LastIndexed: ts,
 			})
 		}
@@ -2130,7 +2144,7 @@ func cmdMCPSetup(args []string) error {
 	useHTTP := strings.ToLower(*transport) == "http"
 
 	// mergeHTTPConfig writes an HTTP MCP entry (for IDEs that support HTTP transport).
-	// URL format: http://127.0.0.1:11434/mcp?project=<absPath>
+	// URL format: http://127.0.0.1:11435/mcp?project=<absPath>
 	mergeHTTPConfig := func(filePath string) error {
 		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 			return err

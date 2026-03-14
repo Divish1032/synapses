@@ -19,10 +19,11 @@
 //	                   │
 //	┌──────────────────▼──────────────────────┐
 //	│       synapses singleton daemon          │  ← ONE per machine
-//	│  HTTP 127.0.0.1:11434                    │
+//	│  HTTP 127.0.0.1:11435                    │
 //	│  GET  /api/admin/health                  │
 //	│  GET  /api/admin/projects                │
 //	│  POST /api/admin/projects                │
+//	│  GET  /api/admin/pulse/summary[?days=N]  │  analytics
 //	│  POST|GET|DELETE /mcp?project=<path>     │  HTTP MCP transport
 //	│  ~/.synapses/daemons/<hash>.sock per-proj │  stdio proxy compat
 //	└─────────────────────────────────────────┘
@@ -69,7 +70,8 @@ import (
 )
 
 // DaemonHTTPPort is the fixed port for the singleton daemon HTTP server.
-const DaemonHTTPPort = "11434"
+// Port 11434 is Ollama's default — we use 11435 to avoid conflicts.
+const DaemonHTTPPort = "11435"
 
 // DaemonHTTPAddr is the loopback address the singleton daemon binds to.
 const DaemonHTTPAddr = "127.0.0.1:" + DaemonHTTPPort
@@ -328,6 +330,22 @@ func cmdDaemonServe(args []string) error {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+
+	// Admin: pulse analytics summary
+	mux.HandleFunc("/api/admin/pulse/summary", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		days := 7
+		if d := r.URL.Query().Get("days"); d != "" {
+			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sharedPulse.GetSummary(days))
 	})
 
 	// MCP: route to per-project StreamableHTTPServer
