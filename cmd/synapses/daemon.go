@@ -35,9 +35,8 @@ type Sidecar struct {
 }
 
 var allSidecars = []Sidecar{
-	{Name: "brain", Binary: "brain", Args: []string{"serve"}, Port: "11435"},
+	// scout is the only external sidecar; brain and pulse are now in-process.
 	{Name: "scout", Binary: "scout", Args: []string{"serve"}, Port: "11436"},
-	{Name: "pulse", Binary: "pulse", Args: []string{"serve"}, Port: "11437"},
 }
 
 // ── path helpers ──────────────────────────────────────────────────────────────
@@ -129,11 +128,7 @@ func startSidecar(s Sidecar, quiet bool) error {
 	cmd.Stdout = lf
 	cmd.Stderr = lf
 	cmd.SysProcAttr = detachedSysProcAttr()
-	// Pass pulse URL to brain so it can emit usage telemetry.
-	// Only set if brain hasn't already configured pulse_url in its config file.
-	if s.Name == "brain" {
-		cmd.Env = append(os.Environ(), "BRAIN_PULSE_URL=http://localhost:11437")
-	}
+
 
 	if err := cmd.Start(); err != nil {
 		lf.Close()
@@ -225,9 +220,8 @@ func cmdDaemon(args []string) error {
 
 	switch sub {
 	case "serve":
-		// "synapses daemon serve -path <repo>" — run the MCP server as a
-		// long-lived daemon process listening on a Unix socket. This is the
-		// heavy server; proxies connect to it via the socket.
+		// "synapses daemon serve" — run the singleton MCP daemon that
+		// serves all projects via HTTP (:11434) and per-project Unix sockets.
 		return cmdDaemonServe(rest)
 	case "start":
 		return daemonStart(targets, quiet)
@@ -259,7 +253,7 @@ func resolveSidecars(name string) ([]Sidecar, error) {
 			return []Sidecar{s}, nil
 		}
 	}
-	return nil, fmt.Errorf("unknown service %q (valid: brain, scout, pulse)", name)
+	return nil, fmt.Errorf("unknown service %q (valid: scout)", name)
 }
 
 // ── subcommand implementations ────────────────────────────────────────────────
@@ -538,8 +532,8 @@ func printDaemonUsage() {
   synapses daemon — manage background services
 
   Usage:
-    synapses daemon serve -path <repo>   Run MCP server as a daemon (Unix socket)
-    synapses daemon start                Start all sidecars (brain, scout, pulse)
+    synapses daemon serve                Run singleton MCP daemon (HTTP :11434)
+    synapses daemon start                Start all sidecars (scout)
     synapses daemon start --service X    Start a single sidecar
     synapses daemon stop                 Stop all sidecars
     synapses daemon stop  --service X    Stop a single sidecar
@@ -549,9 +543,9 @@ func printDaemonUsage() {
     synapses daemon install              Register as login service (launchd/systemd)
     synapses daemon uninstall            Remove login service registration
 
-  The 'serve' command is automatically invoked by 'synapses start' (the proxy).
-  You rarely need to call it manually.
+  The 'serve' command starts the singleton daemon that serves all projects.
+  It is automatically invoked by 'synapses start' (the proxy).
 
-  Services:  brain (port 11435)  scout (port 11436)  pulse (port 11437)
+  Services:  scout (port 11436)  — brain and pulse run in-process
 `)
 }

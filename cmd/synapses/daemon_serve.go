@@ -1,28 +1,34 @@
 // daemon_serve.go — "synapses daemon serve" subcommand.
 //
-// Runs the Synapses MCP server as a long-lived daemon process. Instead of
-// communicating over stdio (like the old cmdStart), the daemon listens on a
-// Unix domain socket and accepts multiple concurrent MCP proxy connections.
+// Runs ONE singleton daemon per machine. Serves multiple projects
+// within a single process. Each project gets its own graph, store,
+// file watcher, and Unix socket (for stdio proxy backward compat).
 //
-// Architecture:
+// Architecture (after singleton refactor):
 //
-//	┌─────────────┐     ┌─────────────┐
-//	│ Claude Code  │     │   Cursor    │
-//	└──────┬───────┘     └──────┬──────┘
-//	       │ stdio              │ stdio
-//	       ▼                    ▼
-//	┌────────────┐     ┌────────────┐
-//	│  mcp proxy │     │  mcp proxy │   ← disposable, stateless
-//	└──────┬─────┘     └──────┬─────┘
-//	       └── Unix socket ───┘
-//	                │
-//	     ┌──────────▼────────────┐
-//	     │   synapses daemon     │   ← one per project, owns DB + watcher
-//	     └───────────────────────┘
+//	┌─────────────┐   ┌───────────┐
+//	│ Claude Code  │   │  Cursor   │    (stdio MCP — backward compat)
+//	└──────┬───────┘   └─────┬─────┘
+//	       │ stdio             │ stdio
+//	       ▼                   ▼
+//	┌────────────┐    ┌────────────┐
+//	│ mcp proxy  │    │ mcp proxy  │   ← "synapses start --path <repo>"
+//	└──────┬─────┘    └──────┬─────┘
+//	       │ Unix socket       │
+//	       └───────────────────┘
+//	                   │
+//	┌──────────────────▼──────────────────────┐
+//	│       synapses singleton daemon          │  ← ONE per machine
+//	│  HTTP 127.0.0.1:11434                    │
+//	│  GET  /api/admin/health                  │
+//	│  GET  /api/admin/projects                │
+//	│  POST /api/admin/projects                │
+//	│  POST|GET|DELETE /mcp?project=<path>     │  HTTP MCP transport
+//	│  ~/.synapses/daemons/<hash>.sock per-proj │  stdio proxy compat
+//	└─────────────────────────────────────────┘
 //
-// Socket path: ~/.synapses/daemons/<sha256(absPath)[:16]>.sock
-// PID file:    ~/.synapses/daemons/<sha256(absPath)[:16]>.pid
-// Version:     ~/.synapses/daemons/<sha256(absPath)[:16]>.version
+// PID:     ~/.synapses/daemon.pid  (singleton)
+// Sockets: ~/.synapses/daemons/<sha256(path)[:16]>.sock  (one per registered project)
 package main
 
 import (
@@ -30,9 +36,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -48,17 +55,24 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/contextfile"
 	"github.com/SynapsesOS/synapses/internal/embed"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/parser"
-	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/peer"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/scout"
+	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 )
+
+// DaemonHTTPPort is the fixed port for the singleton daemon HTTP server.
+const DaemonHTTPPort = "11434"
+
+// DaemonHTTPAddr is the loopback address the singleton daemon binds to.
+const DaemonHTTPAddr = "127.0.0.1:" + DaemonHTTPPort
 
 // canonicalPath resolves a path to its absolute, symlink-free form.
 // This ensures that /project and /symlink-to-project map to the same daemon.
@@ -76,7 +90,7 @@ func canonicalPath(path string) (string, error) {
 	return resolved, nil
 }
 
-// ── path helpers for daemon socket/pid/version files ─────────────────────────
+// ── path helpers ──────────────────────────────────────────────────────────────
 
 func daemonDir() (string, error) {
 	base, err := synapsesHome()
@@ -92,6 +106,8 @@ func projectHash(absPath string) string {
 	return fmt.Sprintf("%x", h[:8]) // 16-char hex
 }
 
+// daemonSocketPath returns the per-project Unix socket path.
+// Used by both the daemon (to create the socket) and the proxy (to connect).
 func daemonSocketPath(absPath string) (string, error) {
 	dir, err := daemonDir()
 	if err != nil {
@@ -100,63 +116,53 @@ func daemonSocketPath(absPath string) (string, error) {
 	return filepath.Join(dir, projectHash(absPath)+".sock"), nil
 }
 
-func daemonPIDPath(absPath string) (string, error) {
-	dir, err := daemonDir()
+// singletonPIDPath returns the path to the singleton daemon PID file.
+func singletonPIDPath() (string, error) {
+	base, err := synapsesHome()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, projectHash(absPath)+".pid"), nil
+	return filepath.Join(base, "daemon.pid"), nil
 }
 
-func daemonVersionPath(absPath string) (string, error) {
-	dir, err := daemonDir()
+// singletonLogPath returns the singleton daemon log path.
+func singletonLogPath() (string, error) {
+	base, err := synapsesHome()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, projectHash(absPath)+".version"), nil
+	return filepath.Join(base, "daemon.log"), nil
 }
 
-// isDaemonRunning tries to connect to the daemon socket. Returns true if the
-// daemon is alive and accepting connections.
-func isDaemonRunning(absPath string) bool {
-	sockPath, err := daemonSocketPath(absPath)
+// IsSingletonDaemonRunning checks if the singleton daemon is up by hitting
+// the health endpoint. Returns true if the daemon responds within 2 seconds.
+func IsSingletonDaemonRunning() bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + DaemonHTTPAddr + "/api/admin/health")
 	if err != nil {
 		return false
 	}
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
-// cleanStaleDaemonFiles removes socket and PID files if the daemon is not
-// actually running. Called on startup to recover from hard crashes/reboots.
-func cleanStaleDaemonFiles(absPath string) {
-	sockPath, _ := daemonSocketPath(absPath)
-	pidPath, _ := daemonPIDPath(absPath)
-	verPath, _ := daemonVersionPath(absPath)
-
-	if sockPath == "" {
+// cleanStaleSingletonPID removes the PID file if the process is not alive.
+func cleanStaleSingletonPID() {
+	pidPath, err := singletonPIDPath()
+	if err != nil {
 		return
 	}
-
-	// If socket file exists but not connectable, it's stale.
-	if _, err := os.Stat(sockPath); err == nil {
-		conn, err := net.DialTimeout("unix", sockPath, 1*time.Second)
-		if err != nil {
-			// Stale socket — clean up.
-			os.Remove(sockPath)
-			os.Remove(pidPath)
-			os.Remove(verPath)
-		} else {
-			conn.Close()
-		}
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || !processAlive(pid) {
+		os.Remove(pidPath)
 	}
 }
 
-// ── connSession: per-connection MCP session ──────────────────────────────────
+// ── connSession: per-connection MCP session (used for Unix socket serving) ───
 
 // connSession implements the mcp-go ClientSession, SessionWithLogging, and
 // SessionWithClientInfo interfaces. Each proxy connection gets its own session.
@@ -192,128 +198,248 @@ func (s *connSession) GetLogLevel() mcp.LoggingLevel {
 	return mcp.LoggingLevelError
 }
 
-// ── connection tracker for idle timeout ──────────────────────────────────────
-
-type connectionTracker struct {
-	mu          sync.Mutex
-	count       int
-	lastDisconn time.Time
-}
-
-func (ct *connectionTracker) add() {
-	ct.mu.Lock()
-	ct.count++
-	ct.mu.Unlock()
-}
-
-func (ct *connectionTracker) remove() {
-	ct.mu.Lock()
-	ct.count--
-	if ct.count <= 0 {
-		ct.count = 0
-		ct.lastDisconn = time.Now()
-	}
-	ct.mu.Unlock()
-}
-
-func (ct *connectionTracker) idleSince() (time.Time, bool) {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-	if ct.count > 0 {
-		return time.Time{}, false
-	}
-	return ct.lastDisconn, true
-}
-
-func (ct *connectionTracker) active() int {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-	return ct.count
-}
-
-// ── cmdDaemonServe: the daemon entry point ───────────────────────────────────
+// ── cmdDaemonServe: the singleton daemon entry point ─────────────────────────
 
 func cmdDaemonServe(args []string) error {
-	fs := flag.NewFlagSet("daemon-serve", flag.ContinueOnError)
-	repoPath := fs.String("path", ".", "Path to the repository root")
-	forceReindex := fs.Bool("reindex", false, "Force a full re-index even if cache is fresh")
-	noWatch := fs.Bool("no-watch", false, "Disable the file watcher")
-	idleTimeout := fs.Duration("idle-timeout", 30*time.Minute, "Shut down after this duration with no connections (0 = never)")
-	if err := fs.Parse(args); err != nil {
-		return err
+	// No flags — the singleton daemon serves all projects.
+	// Projects are registered on-demand via the admin API.
+
+	// ── Singleton check ──────────────────────────────────────────────────────
+	cleanStaleSingletonPID()
+	if IsSingletonDaemonRunning() {
+		return fmt.Errorf("singleton daemon already running at %s", DaemonHTTPAddr)
 	}
 
-	absPath, err := canonicalPath(*repoPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
-
-	// ── Singleton check: is another daemon already running for this project? ─
-	cleanStaleDaemonFiles(absPath)
-	if isDaemonRunning(absPath) {
-		return fmt.Errorf("daemon already running for %s", absPath)
-	}
-
-	sockPath, err := daemonSocketPath(absPath)
-	if err != nil {
-		return fmt.Errorf("socket path: %w", err)
-	}
-	pidPath, err := daemonPIDPath(absPath)
+	pidPath, err := singletonPIDPath()
 	if err != nil {
 		return fmt.Errorf("pid path: %w", err)
 	}
-	verPath, err := daemonVersionPath(absPath)
-	if err != nil {
-		return fmt.Errorf("version path: %w", err)
-	}
-
-	// Write PID file immediately so proxies know we're starting.
 	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		return fmt.Errorf("write pid: %w", err)
 	}
 	defer os.Remove(pidPath)
 
-	// Write version file so proxies can detect binary upgrades.
-	if err := os.WriteFile(verPath, []byte(version), 0o600); err != nil {
-		return fmt.Errorf("write version: %w", err)
-	}
-	defer os.Remove(verPath)
-
-	// ── Context for graceful shutdown ────────────────────────────────────────
+	// ── App context for graceful shutdown ────────────────────────────────────
 	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
 
-	// ── Heavy initialization (same as old cmdStart) ─────────────────────────
+	// ── Project registry ─────────────────────────────────────────────────────
+	reg := newProjectRegistry()
+	defer reg.Close()
+
+	// ── Pulse (shared across all projects) ───────────────────────────────────
+	var sharedPulse *pulse.Client
+	if pulseDBPath, err := pulse.DefaultDBPath(); err == nil {
+		if pulseCli, err := pulse.New(pulseDBPath); err == nil {
+			sharedPulse = pulseCli
+			defer pulseCli.Close()
+			fmt.Fprintf(os.Stderr, "synapses: pulse analytics enabled (in-process, db: %s)\n", pulseDBPath)
+		}
+	}
+
+	// ── HTTP MCP router ───────────────────────────────────────────────────────
+	// /mcp?project=<absPath>  → per-project StreamableHTTPServer
+	// /api/admin/*            → daemon management API
+	mux := http.NewServeMux()
+
+	// Admin: health
+	mux.HandleFunc("/api/admin/health", func(w http.ResponseWriter, r *http.Request) {
+		projects := reg.All()
+		paths := make([]string, 0, len(projects))
+		for _, p := range projects {
+			paths = append(paths, p.AbsPath)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":   "ok",
+			"version":  version,
+			"projects": paths,
+		})
+	})
+
+	// Admin: list projects
+	mux.HandleFunc("/api/admin/projects", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			projects := reg.All()
+			type projectInfo struct {
+				Path   string `json:"path"`
+				Hash   string `json:"hash"`
+				Socket string `json:"socket"`
+			}
+			infos := make([]projectInfo, 0, len(projects))
+			for _, p := range projects {
+				sock, _ := daemonSocketPath(p.AbsPath)
+				infos = append(infos, projectInfo{
+					Path:   p.AbsPath,
+					Hash:   projectHash(p.AbsPath),
+					Socket: sock,
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"projects": infos})
+
+		case http.MethodPost:
+			var req struct {
+				Path string `json:"path"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "invalid JSON", http.StatusBadRequest)
+				return
+			}
+			absPath, err := canonicalPath(req.Path)
+			if err != nil {
+				http.Error(w, "invalid path: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			sockPath, err := daemonSocketPath(absPath)
+			if err != nil {
+				http.Error(w, "socket path error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			// GetOrSet: lazy-initialize the project if not already registered.
+			_, initErr := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
+				return initProjectInstance(appCtx, absPath, sharedPulse)
+			})
+			if initErr != nil {
+				http.Error(w, "init project: "+initErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "ok",
+				"path":   absPath,
+				"socket": sockPath,
+			})
+
+		case http.MethodDelete:
+			var req struct {
+				Path string `json:"path"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "invalid JSON", http.StatusBadRequest)
+				return
+			}
+			absPath, _ := canonicalPath(req.Path)
+			reg.Delete(absPath)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// MCP: route to per-project StreamableHTTPServer
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		projectPath := r.URL.Query().Get("project")
+		if projectPath == "" {
+			http.Error(w, "missing ?project=<abs-path> query parameter", http.StatusBadRequest)
+			return
+		}
+
+		// Decode URL-encoded path
+		if decoded, err := url.QueryUnescape(projectPath); err == nil {
+			projectPath = decoded
+		}
+
+		absPath, err := canonicalPath(projectPath)
+		if err != nil {
+			http.Error(w, "invalid project path: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		pi, initErr := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
+			return initProjectInstance(appCtx, absPath, sharedPulse)
+		})
+		if initErr != nil {
+			http.Error(w, "init project: "+initErr.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Strip the ?project= param before forwarding so the MCP server
+		// doesn't see unknown query parameters.
+		r2 := r.Clone(r.Context())
+		q := r2.URL.Query()
+		q.Del("project")
+		r2.URL.RawQuery = q.Encode()
+
+		pi.HTTPHandler.ServeHTTP(w, r2)
+	})
+
+	// ── HTTP server ───────────────────────────────────────────────────────────
+	httpSrv := &http.Server{
+		Addr:         DaemonHTTPAddr,
+		Handler:      mux,
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 0, // SSE streams can be indefinite
+		IdleTimeout:  120 * time.Second,
+	}
+
+	fmt.Fprintf(os.Stderr, "synapses %s singleton daemon starting on %s\n", version, DaemonHTTPAddr)
+
+	// ── Signal handling ──────────────────────────────────────────────────────
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		fmt.Fprintf(os.Stderr, "\nsynapses daemon: received %s, shutting down\n", sig)
+		appCancel()
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutCancel()
+		httpSrv.Shutdown(shutCtx) //nolint:errcheck
+	}()
+
+	// ── Start HTTP server ─────────────────────────────────────────────────────
+	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("http server: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "synapses daemon: stopped\n")
+	return nil
+}
+
+// ── initProjectInstance: bootstrap one project in the singleton daemon ────────
+
+// initProjectInstance loads/builds all resources for one project and starts
+// its per-project Unix socket listener (for stdio proxy backward compat)
+// and registers an HTTP MCP handler for the project.
+func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pulse.Client) (*ProjectInstance, error) {
+	projCtx, projCancel := context.WithCancel(appCtx)
+
 	cfgDir, found := config.FindConfigDir(absPath)
 	if found && cfgDir != absPath {
-		fmt.Fprintf(os.Stderr, "synapses: using config from %s\n", cfgDir)
+		fmt.Fprintf(os.Stderr, "synapses [%s]: using config from %s\n", projectHash(absPath), cfgDir)
 	}
 	cfg, err := config.Load(cfgDir)
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		projCancel()
+		return nil, fmt.Errorf("load config: %w", err)
 	}
 
 	dbPath, err := store.DefaultPath(absPath)
 	if err != nil {
-		return err
+		projCancel()
+		return nil, err
 	}
 	st, err := store.Open(dbPath)
 	if err != nil {
-		return fmt.Errorf("open store: %w", err)
+		projCancel()
+		return nil, fmt.Errorf("open store: %w", err)
 	}
-	defer st.Close()
-
 	go st.PruneStaleData(30)
 
-	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins)
+	g, err := loadOrBuildGraphWithStore(absPath, st, false, cfg.Plugins)
 	if err != nil {
-		return err
+		st.Close()
+		projCancel()
+		return nil, err
 	}
 
-	// Federation: merge linked project graphs.
+	// Federation.
 	for _, linkedPath := range cfg.Linked {
 		if mergeErr := mergeLinkedProject(g, linkedPath); mergeErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: skipping linked project %s: %v\n", linkedPath, mergeErr)
+			fmt.Fprintf(os.Stderr, "synapses [%s]: skipping linked project %s: %v\n",
+				projectHash(absPath), linkedPath, mergeErr)
 		}
 	}
 	if len(cfg.Linked) > 0 {
@@ -322,7 +448,8 @@ func cmdDaemonServe(args []string) error {
 				g.AddCallSite(cs)
 			}
 			if n := resolver.ResolveCallEdges(g); n > 0 {
-				fmt.Fprintf(os.Stderr, "synapses: resolved %d cross-project CALLS edges\n", n)
+				fmt.Fprintf(os.Stderr, "synapses [%s]: resolved %d cross-project CALLS edges\n",
+					projectHash(absPath), n)
 			}
 		}
 	}
@@ -332,51 +459,64 @@ func cmdDaemonServe(args []string) error {
 	enrichMetricsIfEnabled(g, absPath, cfg)
 	analyzeDataFlowIfEnabled(g, cfg)
 
+	// Context file (auto-injected session context).
+	writeCtxFile := func() {
+		identity := g.ProjectIdentity()
+		var tasks []store.Task
+		if pending, err := st.GetPendingTasks("", ""); err == nil {
+			tasks = pending
+		}
+		_ = contextfile.Write(absPath, identity, tasks)
+	}
+	go writeCtxFile()
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				writeCtxFile()
+			case <-projCtx.Done():
+				return
+			}
+		}
+	}()
+
+	// Background index rebuild.
 	go func() {
 		blob, err := g.RebuildIndex()
 		if err == nil && len(blob) > 0 {
 			_ = st.SaveIndexSnapshot(blob)
 		}
 	}()
-
-	// Background idle-defrag goroutine.
+	// Background idle-defrag.
 	go func() {
-		const (
-			checkInterval  = 60 * time.Second
-			tombstoneLimit = 0.15
-		)
-		ticker := time.NewTicker(checkInterval)
+		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
 				idx := g.Index()
-				if idx == nil || !idx.Ready() {
-					continue
-				}
-				if idx.TombstoneRatio() < tombstoneLimit {
+				if idx == nil || !idx.Ready() || idx.TombstoneRatio() < 0.15 {
 					continue
 				}
 				blob, err := g.RebuildIndex()
 				if err == nil && len(blob) > 0 {
 					_ = st.SaveIndexSnapshot(blob)
-					fmt.Fprintf(os.Stderr, "synapses: idle defrag complete (tombstone ratio was %.0f%%)\n",
-						idx.TombstoneRatio()*100)
 				}
-			case <-appCtx.Done():
+			case <-projCtx.Done():
 				return
 			}
 		}
 	}()
 
-	// Create the MCP server.
+	// MCP server.
 	mcpsrv.Version = version
 	srv := mcpsrv.New(g, cfg, st)
 	srv.SetProjectID(pathProjectID(absPath))
 	srv.StartBackground()
-	defer srv.Close()
 
-	// Load activation-context prompts from all scopes (fail-silent per scope).
+	// Skills / prompts.
 	{
 		var allPrompts []skills.PromptTemplate
 		allPrompts = append(allPrompts, skills.BuiltinPrompts()...)
@@ -390,14 +530,11 @@ func cmdDaemonServe(args []string) error {
 		if pts, err := skills.LoadPromptDir(projectDir, "project"); err == nil {
 			allPrompts = append(allPrompts, pts...)
 		}
-		allPrompts = skills.DeduplicatePrompts(allPrompts) // project overrides user, user overrides builtin
+		allPrompts = skills.DeduplicatePrompts(allPrompts)
 		if len(allPrompts) > 0 {
 			srv.SetPromptTemplates(allPrompts)
-			fmt.Fprintf(os.Stderr, "synapses: loaded %d activation-context prompts\n", len(allPrompts))
 		}
 	}
-
-	// Load skill recipes from all scopes (fail-silent per scope).
 	{
 		allRecipes := skills.BuiltinRecipes()
 		if homeDir, err := os.UserHomeDir(); err == nil {
@@ -410,90 +547,51 @@ func cmdDaemonServe(args []string) error {
 		if rs, err := skills.LoadRecipeDir(projectDir, "project"); err == nil {
 			allRecipes = append(allRecipes, rs...)
 		}
-		allRecipes = skills.DeduplicateRecipes(allRecipes) // project overrides user, user overrides builtin
+		allRecipes = skills.DeduplicateRecipes(allRecipes)
 		srv.SetSkillRecipes(allRecipes)
-		fmt.Fprintf(os.Stderr, "synapses: loaded %d skill recipes\n", len(allRecipes))
 	}
 
-	// Peer API server.
+	// Peer API.
 	if cfg.PeerAPIPort > 0 {
 		peerSrv := peer.NewPeerServer(g, cfg, st)
-		if err := peerSrv.Start(cfg.PeerAPIPort); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: peer API: %v\n", err)
-		} else {
-			defer peerSrv.Stop()
-			fmt.Fprintf(os.Stderr, "synapses: peer API listening on :%d\n", cfg.PeerAPIPort)
+		if err := peerSrv.Start(cfg.PeerAPIPort); err == nil {
+			// Stopped when projCtx is cancelled via peerSrv.Stop() — we rely on
+			// the ProjectInstance.Close() calling projCancel() which signals the
+			// peer server through its context.
+			_ = peerSrv
 		}
 	}
 	if len(cfg.Peers) > 0 {
 		pm := peer.NewPeerManager(cfg, g, st)
 		pm.Connect()
 		pm.StartHealthMonitor(30 * time.Second)
-		defer pm.Stop()
 		srv.SetPeerManager(pm)
+		go func() {
+			<-projCtx.Done()
+			pm.Stop()
+		}()
 	}
 
 	// Brain.
-	var brainCli *brain.Client
-	if cfg.Brain.URL != "" {
-		brainCli = brain.NewClient(cfg.Brain.URL, cfg.Brain.TimeoutSec)
-		if model, err := brainCli.HealthCheck(context.Background()); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s: %v (continuing without — will retry)\n", cfg.Brain.URL, err)
-			brainCli = nil
-			// Retry will be started after file watcher setup (so watcher gets wired too).
-		} else {
-			fmt.Fprintf(os.Stderr, "synapses: brain connected (%s)\n", model)
-			srv.SetBrainClient(brainCli)
-			go func() {
-				go fetchTopNSummaries(appCtx, brainCli, g, st, 20)
-				bulkIngestToBrain(brainCli, g, pathProjectID(absPath))
-				fetchAndWriteBackSummaries(brainCli, g, st)
-			}()
-		}
+	brainCli := brain.NewInProcess(cfg.Brain.ToBrainConfig())
+	if cfg.Brain.Enabled {
+		srv.SetBrainClient(brainCli)
+		go func() {
+			go fetchTopNSummaries(projCtx, brainCli, g, st, 20)
+			bulkIngestToBrain(brainCli, g, pathProjectID(absPath))
+			fetchAndWriteBackSummaries(brainCli, g, st)
+		}()
 	}
 
-	// Scout.
+	// Scout: prefer explicit URL from config; fall back to Unix socket default.
+	// This means scout works out-of-the-box without any config entry.
 	var scoutCli *scout.Client
-	if cfg.Scout.URL != "" {
-		scoutCli = scout.NewClient(cfg.Scout.URL, cfg.Scout.TimeoutSec)
-		srv.SetScoutClient(scoutCli)
-		if scoutCli.Health(context.Background()) {
-			fmt.Fprintf(os.Stderr, "synapses: scout connected at %s\n", cfg.Scout.URL)
-		} else {
-			fmt.Fprintf(os.Stderr, "synapses: scout configured at %s (unreachable at startup — tools will retry on use)\n", cfg.Scout.URL)
-		}
+	scoutURL := cfg.Scout.URL
+	if scoutURL == "" {
+		scoutURL = scout.DefaultUnixSocketURL()
 	}
-
-	// Pulse.
-	if cfg.Pulse.URL != "" {
-		pulseCli := pulse.NewClient(cfg.Pulse.URL, cfg.Pulse.TimeoutSec)
-		srv.SetPulseClient(pulseCli)
-		fmt.Fprintf(os.Stderr, "synapses: pulse analytics enabled at %s\n", cfg.Pulse.URL)
-	}
-
-	// Embeddings.
-	{
-		var embedCli *embed.Client
-		if brainCli != nil {
-			candidate := embed.NewBrainClient(cfg.Brain.URL)
-			probeCtx, probeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer probeCancel()
-			if _, err := candidate.Embed(probeCtx, "probe"); err == nil {
-				embedCli = candidate
-				fmt.Fprintf(os.Stderr, "synapses: embeddings via brain /v1/embed\n")
-			}
-		}
-		if embedCli == nil && cfg.EmbeddingEndpoint != "" {
-			embedCli = embed.NewClient(cfg.EmbeddingEndpoint, "")
-			fmt.Fprintf(os.Stderr, "synapses: embeddings via %s\n", cfg.EmbeddingEndpoint)
-		}
-		if embedCli != nil {
-			srv.SetEmbedClient(embedCli)
-			go embedAllNodes(appCtx, embedCli, g, st)
-		}
-	}
-
-	// Tech stack autosubscribe.
+	scoutCli = scout.NewClient(scoutURL, cfg.Scout.TimeoutSec)
+	srv.SetScoutClient(scoutCli)
 	go func() {
 		entries := scout.DetectTechStack(absPath)
 		if len(entries) == 0 {
@@ -505,188 +603,140 @@ func cmdDaemonServe(args []string) error {
 			cancel()
 		}
 		srv.SetTechStack(entries)
-		fmt.Fprintf(os.Stderr, "synapses: tech stack detected (%d deps)\n", len(entries))
 	}()
+
+	// Pulse.
+	if sharedPulse != nil {
+		srv.SetPulseClient(sharedPulse)
+	}
+
+	// Embeddings.
+	if cfg.EmbeddingEndpoint != "" {
+		embedCli := embed.NewClient(cfg.EmbeddingEndpoint, "")
+		srv.SetEmbedClient(embedCli)
+		go embedAllNodes(projCtx, embedCli, g, st)
+	}
 
 	// File watcher.
 	var fw *watcher.Watcher
-	if !*noWatch {
-		w := parser.NewWalker()
-		for _, p := range cfg.Plugins {
-			w.RegisterPlugin(p.Extensions, p.Command)
-		}
-		var err error
-		fw, err = watcher.New(g, w, st)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: file watcher unavailable: %v\n", err)
-		} else {
-			if err := fw.Start(absPath); err != nil {
-				fmt.Fprintf(os.Stderr, "synapses: file watcher start failed: %v\n", err)
-				fw = nil
-			} else {
-				defer fw.Stop()
-				fw.SetConfig(cfg)
-				fw.SetProjectID(pathProjectID(absPath))
-				srv.SetChangeSource(fw)
-				fw.SetPacketInvalidator(srv)
-				if brainCli != nil {
-					fw.SetBrainClient(brainCli)
+	w := parser.NewWalker()
+	for _, p := range cfg.Plugins {
+		w.RegisterPlugin(p.Extensions, p.Command)
+	}
+	fw2, err := watcher.New(g, w, st)
+	if err == nil {
+		if startErr := fw2.Start(absPath); startErr == nil {
+			fw = fw2
+			fw.SetConfig(cfg)
+			fw.SetProjectID(pathProjectID(absPath))
+			srv.SetChangeSource(fw)
+			fw.SetPacketInvalidator(srv)
+			fw.SetBrainClient(brainCli)
+			fw.SetConfigChangeHandler(func(newCfg *config.Config) {
+				newScoutURL := newCfg.Scout.URL
+				if newScoutURL == "" {
+					newScoutURL = scout.DefaultUnixSocketURL()
 				}
-				fw.SetConfigChangeHandler(func(newCfg *config.Config) {
-					if newCfg.Scout.URL != "" {
-						newScout := scout.NewClient(newCfg.Scout.URL, newCfg.Scout.TimeoutSec)
-						srv.SetScoutClient(newScout)
-						if newScout.Health(context.Background()) {
-							fmt.Fprintf(os.Stderr, "synapses: scout reconnected at %s\n", newCfg.Scout.URL)
-						} else {
-							fmt.Fprintf(os.Stderr, "synapses: scout configured at %s (unreachable — tools will retry on use)\n", newCfg.Scout.URL)
-						}
-					} else {
-						srv.SetScoutClient(nil)
-					}
-					if newCfg.Brain.URL != "" {
-						newBrain := brain.NewClient(newCfg.Brain.URL, newCfg.Brain.TimeoutSec)
-						if _, err := newBrain.HealthCheck(context.Background()); err != nil {
-							fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s after config reload: %v\n", newCfg.Brain.URL, err)
-						} else {
-							srv.SetBrainClient(newBrain)
-							fw.SetBrainClient(newBrain)
-							fmt.Fprintf(os.Stderr, "synapses: brain reconnected at %s\n", newCfg.Brain.URL)
-						}
-					} else {
-						srv.SetBrainClient(nil)
-						fw.SetBrainClient(nil)
-					}
-				})
-				fmt.Fprintf(os.Stderr, "synapses: watching %s for changes\n", absPath)
-			}
+				newScout := scout.NewClient(newScoutURL, newCfg.Scout.TimeoutSec)
+				srv.SetScoutClient(newScout)
+				newBrain := brain.NewInProcess(newCfg.Brain.ToBrainConfig())
+				srv.SetBrainClient(newBrain)
+				fw.SetBrainClient(newBrain)
+			})
 		}
 	}
 
-	// Deferred brain retry: launched after watcher setup so all dependents get wired.
-	if brainCli == nil && cfg.Brain.URL != "" {
-		go retryBrainConnect(appCtx, cfg, srv, g, st, pathProjectID(absPath), fw)
+	// HTTP MCP handler for this project (used via /mcp?project=<path>).
+	httpHandler := mcpserver.NewStreamableHTTPServer(srv.MCPServer())
+
+	// Per-project Unix socket (for stdio proxy backward compat).
+	sockPath, sockErr := daemonSocketPath(absPath)
+	if sockErr == nil {
+		os.Remove(sockPath) // clean stale socket
+		listener, listenErr := net.Listen("unix", sockPath)
+		if listenErr == nil {
+			os.Chmod(sockPath, 0o700) //nolint:errcheck
+			go serveProjectSocket(projCtx, srv, listener)
+		}
 	}
-
-	// ── Unix socket listener ─────────────────────────────────────────────────
-	// Remove any stale socket before binding.
-	os.Remove(sockPath)
-
-	listener, err := net.Listen("unix", sockPath)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", sockPath, err)
-	}
-	defer func() {
-		listener.Close()
-		os.Remove(sockPath)
-	}()
-
-	// Set socket permissions so only the owner can connect.
-	os.Chmod(sockPath, 0o700)
 
 	identity := g.ProjectIdentity()
-	fmt.Fprintf(os.Stderr, "synapses %s ready — %d nodes, %d edges (repo: %s)\n",
-		version,
+	fmt.Fprintf(os.Stderr, "synapses: project ready — %s (%d nodes, %d edges)\n",
+		identity.RepoID,
 		identity.Summary.Files+identity.Summary.Functions+
 			identity.Summary.Structs+identity.Summary.Interfaces,
-		identity.Summary.Edges, identity.RepoID)
-	fmt.Fprintf(os.Stderr, "daemon listening on %s\n", sockPath)
+		identity.Summary.Edges)
 
-	// ── Signal handling ──────────────────────────────────────────────────────
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		fmt.Fprintf(os.Stderr, "\nsynapses daemon: received %s, shutting down\n", sig)
-		appCancel()
-		listener.Close() // unblock Accept
-		time.AfterFunc(10*time.Second, func() {
-			fmt.Fprintf(os.Stderr, "synapses daemon: graceful shutdown timed out, forcing exit\n")
-			os.Exit(1)
-		})
+	return &ProjectInstance{
+		AbsPath:     absPath,
+		Graph:       g,
+		Store:       st,
+		MCPServer:   srv,
+		HTTPHandler: httpHandler,
+		BrainClient: brainCli,
+		ScoutClient: scoutCli,
+		Watcher:     fw,
+		cancel:      projCancel,
+	}, nil
+}
+
+// serveProjectSocket accepts MCP sessions on the per-project Unix socket.
+// This provides backward compatibility for "synapses start" stdio proxies.
+func serveProjectSocket(ctx context.Context, srv *mcpsrv.Server, listener net.Listener) {
+	defer func() {
+		listener.Close()
+		// Remove the socket file on exit.
+		if ul, ok := listener.(*net.UnixListener); ok {
+			_ = ul.Close()
+			// Retrieve socket path via the addr.
+			if addr := listener.Addr(); addr != nil {
+				os.Remove(addr.String())
+			}
+		}
 	}()
 
-	// ── Idle timeout goroutine ───────────────────────────────────────────────
-	tracker := &connectionTracker{}
-	if *idleTimeout > 0 {
-		go func() {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					if since, idle := tracker.idleSince(); idle && !since.IsZero() {
-						if time.Since(since) >= *idleTimeout {
-							fmt.Fprintf(os.Stderr, "synapses daemon: idle for %s, shutting down\n", *idleTimeout)
-							appCancel()
-							listener.Close()
-							return
-						}
-					}
-				case <-appCtx.Done():
-					return
-				}
-			}
-		}()
-	}
+	// Stop accepting when context is cancelled.
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
 
-	// ── Accept loop ──────────────────────────────────────────────────────────
 	var connID atomic.Int64
 	var wg sync.WaitGroup
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			if appCtx.Err() != nil {
-				break // shutting down
+			if ctx.Err() != nil {
+				break
 			}
-			fmt.Fprintf(os.Stderr, "synapses daemon: accept error: %v\n", err)
 			continue
 		}
 
 		id := connID.Add(1)
-		sessionID := fmt.Sprintf("daemon-%d", id)
-		tracker.add()
+		sessionID := fmt.Sprintf("sock-%d", id)
 		wg.Add(1)
-
 		go func(c net.Conn, sid string) {
 			defer wg.Done()
 			defer c.Close()
-			defer tracker.remove()
-
-			fmt.Fprintf(os.Stderr, "synapses daemon: session %s connected\n", sid)
-			if err := serveMCPConn(appCtx, srv.MCPServer(), srv, c, sid); err != nil {
-				// EOF is normal — proxy disconnected.
+			if err := serveMCPConn(ctx, srv.MCPServer(), srv, c, sid); err != nil {
 				if !strings.Contains(err.Error(), "EOF") &&
 					!strings.Contains(err.Error(), "use of closed") {
-					fmt.Fprintf(os.Stderr, "synapses daemon: session %s error: %v\n", sid, err)
+					fmt.Fprintf(os.Stderr, "synapses socket session %s error: %v\n", sid, err)
 				}
 			}
-			fmt.Fprintf(os.Stderr, "synapses daemon: session %s disconnected (%d active)\n", sid, tracker.active())
 		}(conn, sessionID)
 	}
 
-	// Wait for active sessions to finish (up to 5s).
 	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
+	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		fmt.Fprintf(os.Stderr, "synapses daemon: timed out waiting for sessions to close\n")
 	}
-
-	fmt.Fprintf(os.Stderr, "synapses daemon: stopped\n")
-	return nil
 }
 
 // serveMCPConn handles one MCP session over a Unix socket connection.
-// It registers a unique session with the MCPServer, processes JSON-RPC
-// messages, and forwards notifications to the client.
-// synSrv is the Synapses Server — passed here so session-local state
-// (entity hash cache) can be cleaned up when the connection closes.
 func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcpsrv.Server, conn net.Conn, sessionID string) error {
 	session := &connSession{
 		id:            sessionID,
@@ -697,22 +747,15 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcps
 		return fmt.Errorf("register session: %w", err)
 	}
 	defer mcpSrv.UnregisterSession(ctx, sessionID)
-	// Release per-session entity hash cache on disconnect.
 	defer synSrv.ClearSessionHashes(sessionID)
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Inject session ID into context so tool handlers can perform
-	// session-scoped auto-caching without agents needing to pass known_hash.
 	sessionCtx = mcpsrv.WithSessionID(sessionCtx, sessionID)
 	sessionCtx = mcpSrv.WithContext(sessionCtx, session)
 
-	// writeMu protects conn.Write from concurrent access. Both the
-	// notification goroutine and the message handler write responses;
-	// without this mutex, large writes could interleave and corrupt JSON.
 	var writeMu sync.Mutex
-
 	writeJSON := func(v interface{}) error {
 		data, err := json.Marshal(v)
 		if err != nil {
@@ -725,7 +768,6 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcps
 		return err
 	}
 
-	// Forward notifications to the connection.
 	go func() {
 		for {
 			select {
@@ -739,36 +781,27 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcps
 		}
 	}()
 
-	// Process incoming JSON-RPC messages.
 	reader := bufio.NewReader(conn)
 	for {
 		if sessionCtx.Err() != nil {
 			return sessionCtx.Err()
 		}
-
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return err // EOF = proxy disconnected
+			return err
 		}
-
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-
 		var rawMsg json.RawMessage
 		if err := json.Unmarshal([]byte(line), &rawMsg); err != nil {
 			writeJSON(map[string]interface{}{
-				"jsonrpc": "2.0",
-				"id":      nil,
-				"error": map[string]interface{}{
-					"code":    -32700,
-					"message": "Parse error",
-				},
-			})
+				"jsonrpc": "2.0", "id": nil,
+				"error": map[string]interface{}{"code": -32700, "message": "Parse error"},
+			}) //nolint:errcheck
 			continue
 		}
-
 		response := mcpSrv.HandleMessage(sessionCtx, rawMsg)
 		if response != nil {
 			if err := writeJSON(response); err != nil {

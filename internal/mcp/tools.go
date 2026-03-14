@@ -861,7 +861,7 @@ func (s *Server) asyncEnrichContext(
 			HasTests:        hasTests,
 			FanIn:           fanIn,
 		},
-		EnableLLM: s.config.Brain.EnableLLM,
+		EnableLLM: s.config.Brain.ContextBuilder,
 	})
 	// Sanitize: don't cache "enrichment in progress" placeholder packets —
 	// they would poison the cache and suppress future real enrichments.

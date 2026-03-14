@@ -28,6 +28,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/contextfile"
 	"github.com/SynapsesOS/synapses/internal/dataflow"
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -72,6 +73,12 @@ func run(args []string) error {
 		return cmdInit(args[1:])
 	case "start":
 		return cmdStartProxy(args[1:])
+	case "stop":
+		return cmdStop(args[1:])
+	case "projects":
+		return cmdProjects(args[1:])
+	case "logs":
+		return cmdLogs(args[1:])
 	case "index":
 		return cmdIndex(args[1:])
 	case "status":
@@ -303,25 +310,19 @@ func cmdStartDirect(args []string) error {
 		srv.SetPeerManager(pm)
 	}
 
-	// Optional: connect to synapses-intelligence brain service.
-	var brainCli *brain.Client
-	if cfg.Brain.URL != "" {
-		brainCli = brain.NewClient(cfg.Brain.URL, cfg.Brain.TimeoutSec)
-		if model, err := brainCli.HealthCheck(context.Background()); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s: %v (continuing without — will retry)\n", cfg.Brain.URL, err)
-			brainCli = nil
-			// Retry brain connection in background every 15s until it becomes available.
-			go retryBrainConnect(appCtx, cfg, srv, g, st, pathProjectID(absPath), nil)
+	// Brain — now in-process; no external sidecar or port required.
+	brainCli := brain.NewInProcess(cfg.Brain.ToBrainConfig())
+	if cfg.Brain.Enabled {
+		if model, _ := brainCli.HealthCheck(context.Background()); model != "" {
+			fmt.Fprintf(os.Stderr, "synapses: brain enabled in-process (%s)\n", model)
 		} else {
-			fmt.Fprintf(os.Stderr, "synapses: brain connected (%s)\n", model)
-			srv.SetBrainClient(brainCli)
-			// Bulk-ingest all nodes in parallel, then fetch summaries and write them
-			// back as annotations so they surface in get_context/find_entity.
-			go func() {
-				bulkIngestToBrain(brainCli, g, pathProjectID(absPath))
-				fetchAndWriteBackSummaries(brainCli, g, st)
-			}()
+			fmt.Fprintf(os.Stderr, "synapses: brain enabled in-process (Ollama not yet reachable — will retry on use)\n")
 		}
+		srv.SetBrainClient(brainCli)
+		go func() {
+			bulkIngestToBrain(brainCli, g, pathProjectID(absPath))
+			fetchAndWriteBackSummaries(brainCli, g, st)
+		}()
 	}
 
 	// Optional: connect to synapses-scout web-search service.
@@ -355,18 +356,7 @@ func cmdStartDirect(args []string) error {
 	// Embeddings are built/updated in the background so startup is never delayed.
 	{
 		var embedCli *embed.Client
-		if brainCli != nil {
-			// Probe brain's /v1/embed — only wire it if the endpoint responds (i.e.
-			// embedding_enabled=true was set in brain.json and llama-server started).
-			candidate := embed.NewBrainClient(cfg.Brain.URL)
-			probeCtx, probeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer probeCancel()
-			if _, err := candidate.Embed(probeCtx, "probe"); err == nil {
-				embedCli = candidate
-				fmt.Fprintf(os.Stderr, "synapses: embeddings via brain /v1/embed (Ollama-free)\n")
-			}
-		}
-		if embedCli == nil && cfg.EmbeddingEndpoint != "" {
+		if cfg.EmbeddingEndpoint != "" {
 			embedCli = embed.NewClient(cfg.EmbeddingEndpoint, "")
 			fmt.Fprintf(os.Stderr, "synapses: embeddings via %s\n", cfg.EmbeddingEndpoint)
 		}
@@ -411,9 +401,7 @@ func cmdStartDirect(args []string) error {
 				fw.SetProjectID(pathProjectID(absPath)) // scope brain ingest to this project
 				srv.SetChangeSource(fw)               // wire change log into get_working_state
 				fw.SetPacketInvalidator(srv)          // clear brain packet cache on file change
-				if brainCli != nil {
-					fw.SetBrainClient(brainCli) // wire incremental ingest
-				}
+				fw.SetBrainClient(brainCli)           // wire incremental ingest
 				// Hot-reload synapses.json: reconnect scout/brain when config changes.
 				fw.SetConfigChangeHandler(func(newCfg *config.Config) {
 					if newCfg.Scout.URL != "" {
@@ -427,19 +415,10 @@ func cmdStartDirect(args []string) error {
 					} else {
 						srv.SetScoutClient(nil)
 					}
-					if newCfg.Brain.URL != "" {
-						newBrain := brain.NewClient(newCfg.Brain.URL, newCfg.Brain.TimeoutSec)
-						if _, err := newBrain.HealthCheck(context.Background()); err != nil {
-							fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s after config reload: %v\n", newCfg.Brain.URL, err)
-						} else {
-							srv.SetBrainClient(newBrain)
-							fw.SetBrainClient(newBrain)
-							fmt.Fprintf(os.Stderr, "synapses: brain reconnected at %s\n", newCfg.Brain.URL)
-						}
-					} else {
-						srv.SetBrainClient(nil)
-						fw.SetBrainClient(nil)
-					}
+					newBrain := brain.NewInProcess(newCfg.Brain.ToBrainConfig())
+					srv.SetBrainClient(newBrain)
+					fw.SetBrainClient(newBrain)
+					fmt.Fprintf(os.Stderr, "synapses: brain reloaded (enabled=%v)\n", newCfg.Brain.Enabled)
 				})
 				fmt.Fprintf(os.Stderr, "synapses: watching %s for changes\n", absPath)
 			}
@@ -558,6 +537,114 @@ func cmdIndex(args []string) error {
 		daemonStart(allSidecars, true) //nolint:errcheck
 	}
 
+	return nil
+}
+
+// cmdStop stops the singleton daemon by sending SIGTERM via its PID file.
+func cmdStop(args []string) error {
+	pidPath, err := singletonPIDPath()
+	if err != nil {
+		return fmt.Errorf("resolve PID path: %w", err)
+	}
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("Daemon is not running.")
+			return nil
+		}
+		return fmt.Errorf("read PID file: %w", err)
+	}
+	pid, err := parseInt(strings.TrimSpace(string(data)))
+	if err != nil {
+		return fmt.Errorf("invalid PID in %s: %w", pidPath, err)
+	}
+	if !processAlive(pid) {
+		fmt.Printf("Process %d not found — removing stale PID file.\n", pid)
+		os.Remove(pidPath) //nolint:errcheck
+		return nil
+	}
+	if err := killProcess(pid); err != nil {
+		return fmt.Errorf("kill daemon (pid %d): %w", pid, err)
+	}
+	// Wait up to 10s for graceful exit.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		if !processAlive(pid) {
+			fmt.Printf("Daemon stopped (was pid %d).\n", pid)
+			return nil
+		}
+	}
+	forceKillProcess(pid) //nolint:errcheck
+	fmt.Printf("Daemon force-killed (pid %d).\n", pid)
+	return nil
+}
+
+// cmdProjects lists all projects currently registered with the singleton daemon.
+func cmdProjects(args []string) error {
+	if !IsSingletonDaemonRunning() {
+		fmt.Fprintf(os.Stderr, "Daemon not running at %s.\n", DaemonHTTPAddr)
+		return nil
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://" + DaemonHTTPAddr + "/api/admin/projects")
+	if err != nil {
+		return fmt.Errorf("query daemon: %w", err)
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Projects []struct {
+			Path   string `json:"path"`
+			Hash   string `json:"hash"`
+			Socket string `json:"socket"`
+		} `json:"projects"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	if len(result.Projects) == 0 {
+		fmt.Println("No projects registered with daemon.")
+		return nil
+	}
+	fmt.Printf("%-6s  %s\n", "HASH", "PATH")
+	for _, p := range result.Projects {
+		hash := p.Hash
+		if len(hash) > 8 {
+			hash = hash[:8]
+		}
+		fmt.Printf("%-6s  %s\n", hash, p.Path)
+	}
+	return nil
+}
+
+// cmdLogs tails the singleton daemon log file (~/.synapses/daemon.log).
+func cmdLogs(args []string) error {
+	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
+	n := fs.Int("n", 50, "Number of lines to show")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("find home dir: %w", err)
+	}
+	logPath := filepath.Join(home, ".synapses", "daemon.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("No daemon log found. Has the daemon started yet?")
+			return nil
+		}
+		return fmt.Errorf("read log: %w", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	start := 0
+	if len(lines) > *n {
+		start = len(lines) - *n
+	}
+	for _, line := range lines[start:] {
+		fmt.Println(line)
+	}
 	return nil
 }
 
@@ -696,24 +783,18 @@ func cmdDoctor(args []string) error {
 	}
 
 	// ── Daemon ───────────────────────────────────────────────────────────────
-	if isDaemonRunning(absPath) {
-		verPath, _ := daemonVersionPath(absPath)
-		daemonVer := "unknown"
-		if data, err := os.ReadFile(verPath); err == nil {
-			daemonVer = strings.TrimSpace(string(data))
-		}
+	if IsSingletonDaemonRunning() {
 		sockPath, _ := daemonSocketPath(absPath)
-		fmt.Printf("%-16s%-16s%s\n", "Daemon", "running", fmt.Sprintf("version %s, socket %s", daemonVer, sockPath))
+		fmt.Printf("%-16s%-16s%s\n", "Daemon", "running", fmt.Sprintf("http://%s, socket %s", DaemonHTTPAddr, sockPath))
 	} else {
 		fmt.Printf("%-16s%-16s%s\n", "Daemon", "stopped", "(will auto-start on next 'synapses start')")
 	}
 
 	// ── Brain ────────────────────────────────────────────────────────────────
-	if cfg.Brain.URL != "" {
-		status, detail := pingHealth(cfg.Brain.URL + "/health")
-		fmt.Printf("%-16s%-16s%s\n", "Brain", status, detail)
+	if cfg.Brain.Enabled {
+		fmt.Printf("%-16s%-16s%s\n", "Brain", "enabled", fmt.Sprintf("in-process (ollama: %s)", cfg.Brain.OllamaURL))
 	} else {
-		fmt.Printf("%-16s%-16s%s\n", "Brain", "not configured", "(no brain.url in synapses.json)")
+		fmt.Printf("%-16s%-16s%s\n", "Brain", "disabled", "(set brain.enabled:true in synapses.json to activate)")
 	}
 
 	// ── Scout ────────────────────────────────────────────────────────────────
@@ -1204,6 +1285,10 @@ func cmdInit(args []string) error {
 		return err
 	}
 
+	fmt.Fprintf(os.Stderr, "[deprecated] 'synapses init' is superseded by the Synapses app, which\n"+
+		"starts the daemon and writes IDE configs automatically. For headless use,\n"+
+		"run: synapses index && synapses mcp-setup\n\n")
+
 	absPath, err := filepath.Abs(*repoPath)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
@@ -1229,27 +1314,15 @@ func cmdInit(args []string) error {
 	cfgPath := filepath.Join(absPath, "synapses.json")
 	if _, statErr := os.Stat(cfgPath); os.IsNotExist(statErr) {
 		fmt.Printf("  Generating synapses.json...\n")
-		hasBrain := binaryExists("brain")
 		hasScout := binaryExists("scout")
-		hasPulse := binaryExists("pulse")
-		if err := writeOnboardSynapsesJSON(absPath, hasBrain, hasScout, hasPulse); err != nil {
+		if err := writeOnboardSynapsesJSON(absPath, hasScout); err != nil {
 			fmt.Printf("  ! could not write synapses.json: %v\n\n", err)
 		} else {
 			fmt.Printf("  ✓ %s\n", cfgPath)
-			var configured []string
-			if hasBrain {
-				configured = append(configured, "brain")
-			}
 			if hasScout {
-				configured = append(configured, "scout")
-			}
-			if hasPulse {
-				configured = append(configured, "pulse")
-			}
-			if len(configured) > 0 {
-				fmt.Printf("    Sidecars configured: %s\n\n", strings.Join(configured, ", "))
+				fmt.Printf("    Sidecars configured: scout\n\n")
 			} else {
-				fmt.Printf("    No sidecars installed — run 'synapses onboard' for full setup\n\n")
+				fmt.Printf("    brain+pulse: in-process (no install needed)\n    scout: not installed — run 'synapses onboard' for web intelligence\n\n")
 			}
 		}
 	} else {
@@ -1522,8 +1595,9 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 
 // writeClaudeSettings writes (or updates) .claude/settings.json to add hooks
 // that guide LLMs to use Synapses tools:
-//   - SessionStart: stdout IS fed to the LLM as context — primary mechanism
-//   - PreToolUse on Glob|Grep: reminder shown in verbose mode
+//   - SessionStart: cats the context file (auto-injected real data, no tool call needed)
+//   - PreToolUse on Glob|Grep: blocks with exit 2 — forces use of Synapses tools
+//   - PostToolUse on Write|Edit: nudges agent to call verify_implementation
 func writeClaudeSettings(repoRoot string) error {
 	dir := filepath.Join(repoRoot, ".claude")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -1547,26 +1621,54 @@ func writeClaudeSettings(repoRoot string) error {
 		raw["hooks"] = hooks
 	}
 
-	// ── SessionStart hook (stdout is fed to the LLM as context) ──────────
+	// ── SessionStart: cat the daemon-written context file instead of a static echo.
+	// The context file contains project identity, pending tasks, and tool cheat sheet.
+	// If the daemon is not running the file won't exist and the fallback echo fires.
+	ctxFilePath, ctxErr := contextfile.ContextFilePath(repoRoot)
+	var sessionStartCmd string
+	if ctxErr == nil {
+		sessionStartCmd = fmt.Sprintf(
+			"cat %q 2>/dev/null || echo '[Synapses] Daemon not running — start via the Synapses app or: synapses start'",
+			ctxFilePath,
+		)
+	} else {
+		// Fallback to static reminder if we can't compute the path.
+		sessionStartCmd = "echo '[Synapses] MANDATORY: Call session_init() as your FIRST action — " +
+			"it returns pending tasks, project identity, working state, and scale_guidance in one call. " +
+			"WORKFLOW: session_init → prepare_context → validate_plan → edit files → verify_implementation.'"
+	}
 	upsertHookEntry(hooks, "SessionStart", "startup", map[string]interface{}{
-		"type": "command",
-		"command": "echo '[Synapses] MANDATORY: Call session_init() as your FIRST action — it returns pending tasks, " +
-			"project identity, working state, and scale_guidance in one call. " +
-			"WORKFLOW: session_init → prepare_context (or specific tools) → validate_plan → edit files → verify_implementation. " +
-			"CODE EXPLORATION: use get_context(entity), find_entity(query), search(mode=semantic), get_call_chain, get_impact. " +
-			"NEVER use Grep/Glob/Read to understand code structure — those are for writing to files you already found. " +
-			"UNSURE which tool? Call discover_tools(query=\"what you need\"). " +
-			"TRACK all bugs/tasks via create_plan() immediately when discovered — never rely on memory across sessions.'",
+		"type":    "command",
+		"command": sessionStartCmd,
 	})
 
-	// ── PreToolUse hook on Glob|Grep (feedback loop against tool drift) ──
+	// ── PreToolUse: BLOCK Glob|Grep with exit 2 (not just advisory).
+	// exit 2 causes Claude Code to reject the tool call and show the message.
 	upsertHookEntry(hooks, "PreToolUse", "Glob|Grep", map[string]interface{}{
 		"type": "command",
-		"command": "echo '[Synapses] STOP — this project is indexed. For code understanding use Synapses instead: " +
+		"command": "echo '[Synapses] BLOCKED — this project is indexed. Use Synapses tools instead: " +
 			"find_entity(query) to locate a symbol, get_context(entity) to understand it, " +
 			"search(query, mode=semantic) to find by concept, get_impact(symbol) to find dependents. " +
-			"Grep/Glob are only appropriate when WRITING to a specific file you have already identified. " +
-			"If unsure, call discover_tools(query=\"...\") to find the right tool.'",
+			"Grep/Glob are only for WRITING to a specific file you have already identified.' && exit 2",
+	})
+
+	// ── PostToolUse: nudge verify_implementation after any file write/edit.
+	upsertHookEntry(hooks, "PostToolUse", "Write|Edit", map[string]interface{}{
+		"type": "command",
+		"command": "echo '[Synapses] Files written. Now call verify_implementation(files_written=[\"<path>\"]) " +
+			"to check your changes against architecture rules before continuing.'",
+	})
+
+	// ── PostToolUse: confirm after validate_plan so agent knows it is safe to edit.
+	upsertHookEntry(hooks, "PostToolUse", "mcp__synapses__validate_plan", map[string]interface{}{
+		"type":    "command",
+		"command": "echo '[Synapses] Plan validated. Proceed with edits.'",
+	})
+
+	// ── PostToolUse: after create_plan remind agent to claim work before editing.
+	upsertHookEntry(hooks, "PostToolUse", "mcp__synapses__create_plan", map[string]interface{}{
+		"type":    "command",
+		"command": "echo '[Synapses] Plan created. Call claim_work(agent_id=\"...\", scope=\"pkg/...\") before starting edits to prevent conflicts.'",
 	})
 
 	// ── Pre-allow all Synapses MCP tools so users are never prompted ─────
@@ -1969,43 +2071,36 @@ func printUsage() {
 USAGE:
   synapses <command> [flags]
 
-GETTING STARTED (one command):
-  cd /your/project && synapses init
+GETTING STARTED:
+  Open the Synapses app — it starts the daemon and writes IDE configs automatically.
+  For headless/CI environments: cd /your/project && synapses index && synapses mcp-setup
 
-COMMANDS:
-  init    [-path <dir>]            Index + write .mcp.json (recommended first step)
-  start   -path <dir>              Index repo and start MCP server (stdio)
-  index   -path <dir>              Index repo and save to cache
-  query   -path <dir> -entity <n>  Dump entity context as JSON (for tooling/IDE)
-  status  -path <dir>              Show index statistics for one project
-  list                             List all indexed projects (global overview)
-  brief   -path <dir>              Concise session brief (for startup hooks)
-  doctor  -path <dir>              Health check (index, brain, scout)
-  reset   -path <dir>              Remove the cached index for a project
-  reset   -all                     Remove ALL cached indexes
+DAEMON COMMANDS:
+  start     -path <dir>   Ensure daemon is running and register project (proxy mode)
+  stop                    Stop the singleton daemon
+  projects                List projects registered with the running daemon
+  logs      [-n N]        Tail the daemon log (~/.synapses/daemon.log)
+  status    -path <dir>   Show index statistics and daemon health
+  doctor    -path <dir>   Full health check (index, brain, scout)
+
+INDEX COMMANDS:
+  index     -path <dir>   Index repo and save to cache
+  list                    List all indexed projects
+  reset     -path <dir>   Remove the cached index for a project
+  reset     -all          Remove ALL cached indexes
+
+SETUP COMMANDS:
+  mcp-setup -agent <name>   Write MCP config for the specified agent
+  init      -path <dir>     [deprecated] Index + write MCP config (use Synapses app instead)
+
+OTHER:
+  query   -path <dir> -entity <n>  Dump entity context as JSON
+  brief   -path <dir>              Concise session brief
+  export  -path <dir>              Export graph as DOT/JSON/GraphML
   version                          Print version
   help                             Print this message
 
-FLAGS (init / index / start):
-  -path <dir>    Repository root (default: current directory)
-  -reindex       Force full re-index, ignoring cache
-  -no-watch      Disable file watcher (start only)
-
-FLAGS (reset):
-  -path <dir>    Repository root to reset (default: current directory)
-  -all           Remove all project indexes
-
-MCP TOOLS EXPOSED:
-  get_project_identity   Compact architectural handshake
-  get_context            N-hop ego-subgraph around an entity
-  find_entity            Locate nodes by name or substring
-  validate_plan          Check changes against architectural rules
-  verify_implementation  Post-write verification against rules
-  get_violations         List all current rule violations
-
-AGENT SETUP:
-  mcp-setup  -agent <name>   Write MCP config for the specified agent
-  Supported agents: cursor, gemini, zed, windsurf, claude, all
+Supported agents for mcp-setup: cursor, gemini, zed, windsurf, claude, all
 `, version)
 }
 
@@ -2022,6 +2117,7 @@ func cmdMCPSetup(args []string) error {
 	fs := flag.NewFlagSet("mcp-setup", flag.ContinueOnError)
 	agent := fs.String("agent", "all", "Agent to configure: cursor|gemini|zed|windsurf|claude|all")
 	repoPath := fs.String("path", ".", "Project root to write per-project configs into")
+	transport := fs.String("transport", "stdio", "MCP transport: stdio|http")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2029,6 +2125,34 @@ func cmdMCPSetup(args []string) error {
 	absPath, err := filepath.Abs(*repoPath)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	useHTTP := strings.ToLower(*transport) == "http"
+
+	// mergeHTTPConfig writes an HTTP MCP entry (for IDEs that support HTTP transport).
+	// URL format: http://127.0.0.1:11434/mcp?project=<absPath>
+	mergeHTTPConfig := func(filePath string) error {
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+			return err
+		}
+		existing := make(map[string]interface{})
+		if data, err := os.ReadFile(filePath); err == nil {
+			_ = json.Unmarshal(data, &existing)
+		}
+		servers, _ := existing["mcpServers"].(map[string]interface{})
+		if servers == nil {
+			servers = make(map[string]interface{})
+		}
+		servers["synapses"] = map[string]interface{}{
+			"type": "http",
+			"url":  "http://" + DaemonHTTPAddr + "/mcp?project=" + absPath,
+		}
+		existing["mcpServers"] = servers
+		out, err := json.MarshalIndent(existing, "", "  ")
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filePath, append(out, '\n'), 0o644)
 	}
 
 	// The MCP server entry common to all stdio-based agents.
@@ -2047,6 +2171,9 @@ func cmdMCPSetup(args []string) error {
 	// mergeStdioConfig reads an existing JSON file (if any), sets/updates the
 	// "synapses" key inside the top-level "mcpServers" object, and writes back.
 	mergeStdioConfig := func(filePath string) error {
+		if useHTTP {
+			return mergeHTTPConfig(filePath)
+		}
 		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 			return err
 		}
@@ -2135,6 +2262,11 @@ func cmdMCPSetup(args []string) error {
 			name:    "claude",
 			cfgPath: "via `claude mcp add` (Claude Code CLI)",
 			setup: func() error {
+				if useHTTP {
+					// HTTP transport: write to ~/.claude/mcp.json directly.
+					homeDir2, _ := os.UserHomeDir()
+					return mergeHTTPConfig(filepath.Join(homeDir2, ".claude", "mcp.json"))
+				}
 				cmd := exec.Command("claude", "mcp", "add", "synapses", "--", "synapses", "start", "--path", ".")
 				cmd.Dir = absPath
 				cmd.Stdout = os.Stdout
@@ -2348,47 +2480,6 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 	}
 
 	fmt.Fprintf(os.Stderr, "synapses: embedding complete (%d/%d nodes indexed)\n", done, len(nodeIDs))
-}
-
-// retryBrainConnect periodically retries connecting to the brain sidecar when
-// it was unreachable at startup. Once connected, it wires the brain client into
-// the server, triggers bulk ingest + summary fetch, and exits. Stops retrying
-// when ctx is cancelled (server shutdown).
-func retryBrainConnect(ctx context.Context, cfg *config.Config, srv *mcpsrv.Server, g *graph.Graph, st *store.Store, projectID string, fw *watcher.Watcher) {
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			bc := brain.NewClient(cfg.Brain.URL, cfg.Brain.TimeoutSec)
-			model, err := bc.HealthCheck(ctx)
-			if err != nil {
-				continue // still unreachable, try again next tick
-			}
-			fmt.Fprintf(os.Stderr, "synapses: brain connected on retry (%s)\n", model)
-			srv.SetBrainClient(bc)
-			if fw != nil {
-				fw.SetBrainClient(bc)
-			}
-			// Wire embeddings if brain supports them.
-			embedCli := embed.NewBrainClient(cfg.Brain.URL)
-			probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
-			if _, err := embedCli.Embed(probeCtx, "probe"); err == nil {
-				srv.SetEmbedClient(embedCli)
-				go embedAllNodes(ctx, embedCli, g, st)
-				fmt.Fprintf(os.Stderr, "synapses: embeddings via brain /v1/embed (on retry)\n")
-			}
-			probeCancel()
-			go func() {
-				go fetchTopNSummaries(ctx, bc, g, st, 20)
-				bulkIngestToBrain(bc, g, projectID)
-				fetchAndWriteBackSummaries(bc, g, st)
-			}()
-			return
-		}
-	}
 }
 
 // pathProjectID returns a stable 8-hex-char project identifier derived from the project root path.

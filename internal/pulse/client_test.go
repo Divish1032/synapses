@@ -1,253 +1,130 @@
 package pulse
 
 import (
-	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestNewClient(t *testing.T) {
-	cli := NewClient("http://localhost:11437", 5)
+func TestNew(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "pulse.sqlite")
 
-	if cli.baseURL != "http://localhost:11437" {
-		t.Errorf("expected baseURL http://localhost:11437, got %s", cli.baseURL)
+	cli, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
-	if cli.cli == nil {
-		t.Errorf("expected non-nil http.Client")
-	}
-	if cli.cli.Timeout != 5*time.Second {
-		t.Errorf("expected timeout 5s, got %v", cli.cli.Timeout)
-	}
-}
+	defer cli.Close()
 
-func TestNewClientDefaultTimeout(t *testing.T) {
-	cli := NewClient("http://localhost:11437", 0)
-
-	if cli.cli.Timeout != 2*time.Second {
-		t.Errorf("expected default timeout 2s, got %v", cli.cli.Timeout)
+	if cli.store == nil {
+		t.Error("expected non-nil store")
+	}
+	if cli.coll == nil {
+		t.Error("expected non-nil collector")
 	}
 }
 
-func TestRecordToolCall(t *testing.T) {
-	receivedEvent := ToolCallEvent{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/ingest/tool-call" {
-			t.Errorf("expected /v1/ingest/tool-call, got %s", r.URL.Path)
-		}
-		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &receivedEvent)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
+func TestNewClient_BackwardsCompat(t *testing.T) {
+	// NewClient should not panic; it ignores its arguments and uses DefaultDBPath.
+	// We can't control the DB path here, so just verify it doesn't crash.
+	// (In CI the home dir is writable; worst case it returns nil, which is fine.)
+	_ = NewClient("http://ignored", 5)
+}
 
-	cli := NewClient(server.URL, 2)
-	event := ToolCallEvent{
+func TestClose_Nil(t *testing.T) {
+	var cli *Client
+	cli.Close() // must not panic
+}
+
+func TestRecordMethods_NilSafe(t *testing.T) {
+	var cli *Client
+	// All Record* methods must be nil-safe (fire-and-forget contract).
+	cli.RecordToolCall(ToolCallEvent{ToolName: "test"})
+	cli.RecordContextDelivery(ContextDeliveryEvent{ToolName: "test"})
+	cli.RecordSessionEvent("agent", "proj", "start")
+	cli.RecordOutcomeSignal(OutcomeSignalEvent{SignalType: "task_done"})
+}
+
+func TestRecordAndFlush(t *testing.T) {
+	dir := t.TempDir()
+	cli, err := New(filepath.Join(dir, "pulse.sqlite"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Fire several events — should not panic.
+	cli.RecordToolCall(ToolCallEvent{
 		ToolName:      "get_context",
 		AgentID:       "test-agent",
+		ProjectID:     "test-proj",
 		DurationMs:    42,
 		Success:       true,
 		ResponseBytes: 1200,
-	}
-
-	cli.RecordToolCall(event)
-
-	if receivedEvent.ToolName != "get_context" {
-		t.Errorf("expected ToolName get_context, got %s", receivedEvent.ToolName)
-	}
-	if receivedEvent.AgentID != "test-agent" {
-		t.Errorf("expected AgentID test-agent, got %s", receivedEvent.AgentID)
-	}
-	if receivedEvent.DurationMs != 42 {
-		t.Errorf("expected DurationMs 42, got %d", receivedEvent.DurationMs)
-	}
-}
-
-func TestRecordContextDelivery(t *testing.T) {
-	receivedEvent := ContextDeliveryEvent{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/ingest/context-delivery" {
-			t.Errorf("expected /v1/ingest/context-delivery, got %s", r.URL.Path)
-		}
-		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &receivedEvent)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	cli := NewClient(server.URL, 2)
-	event := ContextDeliveryEvent{
+	})
+	cli.RecordContextDelivery(ContextDeliveryEvent{
 		ToolName:       "get_context",
-		AgentID:        "claude-opus",
-		Entity:         "Graph.New",
-		File:           "internal/graph/graph.go",
-		ResponseBytes:  3200,
+		AgentID:        "test-agent",
 		ResponseTokens: 800,
 		BaselineTokens: 5400,
-		NodesDelivered: 12,
-		NodesPruned:    3,
-		EdgesDelivered: 8,
-		Truncated:      false,
-		DurationMs:     15,
-		CacheHit:       true,
-		BrainEnriched:  false,
-	}
+	})
+	cli.RecordSessionEvent("test-agent", "test-proj", "start")
+	cli.RecordOutcomeSignal(OutcomeSignalEvent{
+		ProjectID:  "test-proj",
+		Entity:     "Graph.New",
+		SignalType: "task_done",
+	})
 
-	cli.RecordContextDelivery(event)
+	// Close flushes the collector before closing the store.
+	cli.Close()
+}
 
-	if receivedEvent.ToolName != "get_context" {
-		t.Errorf("expected ToolName get_context, got %s", receivedEvent.ToolName)
+func TestFetchEffectiveness_Empty(t *testing.T) {
+	dir := t.TempDir()
+	cli, err := New(filepath.Join(dir, "pulse.sqlite"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
-	if receivedEvent.ResponseTokens != 800 {
-		t.Errorf("expected ResponseTokens 800, got %d", receivedEvent.ResponseTokens)
-	}
-	if receivedEvent.BaselineTokens != 5400 {
-		t.Errorf("expected BaselineTokens 5400, got %d", receivedEvent.BaselineTokens)
-	}
-	if !receivedEvent.CacheHit {
-		t.Errorf("expected CacheHit true")
+	defer cli.Close()
+
+	// No signals yet — should return nil, not panic.
+	result := cli.FetchEffectiveness("test-proj", 1)
+	if result != nil {
+		t.Errorf("expected nil effectiveness for empty store, got %v", result)
 	}
 }
 
-func TestRecordSessionEvent(t *testing.T) {
-	receivedEvent := SessionEvent{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/ingest/session-event" {
-			t.Errorf("expected /v1/ingest/session-event, got %s", r.URL.Path)
-		}
-		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &receivedEvent)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
+func TestDBFileCreated(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "subdir", "pulse.sqlite")
 
-	cli := NewClient(server.URL, 2)
-
-	cli.RecordSessionEvent("test-agent", "", "start")
-
-	if receivedEvent.AgentID != "test-agent" {
-		t.Errorf("expected AgentID test-agent, got %s", receivedEvent.AgentID)
+	cli, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
-	if receivedEvent.Event != "start" {
-		t.Errorf("expected Event start, got %s", receivedEvent.Event)
+	cli.Close()
+
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		t.Error("expected DB file to be created")
 	}
 }
 
-func TestClientFireAndForgetServerDown(t *testing.T) {
-	// Use a port that's unlikely to be listening.
-	cli := NewClient("http://127.0.0.1:9999", 1)
-
-	// These should not panic even though server is down.
-	cli.RecordToolCall(ToolCallEvent{ToolName: "test", Success: true})
-	cli.RecordContextDelivery(ContextDeliveryEvent{ToolName: "test"})
-	cli.RecordSessionEvent("agent-1", "", "start")
-
-	// If we got here without panic, the fail-silent behavior is working.
-}
-
-func TestClientContentTypeHeader(t *testing.T) {
-	contentType := ""
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		contentType = r.Header.Get("Content-Type")
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	cli := NewClient(server.URL, 2)
-	cli.RecordToolCall(ToolCallEvent{ToolName: "test", Success: true})
-
-	if contentType != "application/json" {
-		t.Errorf("expected Content-Type application/json, got %s", contentType)
+func TestFireAndForgetDoesNotBlock(t *testing.T) {
+	dir := t.TempDir()
+	cli, err := New(filepath.Join(dir, "pulse.sqlite"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
-}
+	defer cli.Close()
 
-func TestClientTimeout(t *testing.T) {
-	// Create server that delays response
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Second) // Delay longer than client timeout
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	// Client with 1-second timeout.
-	cli := NewClient(server.URL, 1)
-
-	// Record the time before and after.
 	start := time.Now()
-	cli.RecordToolCall(ToolCallEvent{ToolName: "test", Success: true})
-	elapsed := time.Since(start)
-
-	// Should return quickly (within ~1-2 seconds due to timeout).
-	// If it took the full 2 seconds of server delay, timeout didn't work.
-	if elapsed > 3*time.Second {
-		t.Errorf("expected timeout to trigger, but request took %v", elapsed)
-	}
-}
-
-func TestClientEventFieldsPropagated(t *testing.T) {
-	receivedEvent := ToolCallEvent{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &receivedEvent)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	cli := NewClient(server.URL, 2)
-	event := ToolCallEvent{
-		ToolName:      "prepare_context",
-		AgentID:       "test-agent",
-		Entity:        "Store.CarveEgoGraph",
-		DurationMs:    123,
-		Success:       false,
-		ResponseBytes: 5000,
-	}
-
-	cli.RecordToolCall(event)
-
-	// Verify all fields were propagated.
-	if receivedEvent.ToolName != event.ToolName {
-		t.Errorf("ToolName mismatch")
-	}
-	if receivedEvent.AgentID != event.AgentID {
-		t.Errorf("AgentID mismatch")
-	}
-	if receivedEvent.Entity != event.Entity {
-		t.Errorf("Entity mismatch")
-	}
-	if receivedEvent.DurationMs != event.DurationMs {
-		t.Errorf("DurationMs mismatch")
-	}
-	if receivedEvent.Success != event.Success {
-		t.Errorf("Success mismatch")
-	}
-	if receivedEvent.ResponseBytes != event.ResponseBytes {
-		t.Errorf("ResponseBytes mismatch")
-	}
-}
-
-func TestMultipleConcurrentRequests(t *testing.T) {
-	callCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	cli := NewClient(server.URL, 2)
-
-	// Make multiple concurrent requests.
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 100; i++ {
 		cli.RecordToolCall(ToolCallEvent{ToolName: "test", Success: true})
 	}
+	elapsed := time.Since(start)
 
-	// Give time for requests to complete.
-	time.Sleep(100 * time.Millisecond)
-
-	// We expect at least some requests to have been received (may not be all 10 due to race).
-	if callCount == 0 {
-		t.Error("expected at least some requests to be received")
+	// 100 enqueues should be essentially instantaneous (< 50ms).
+	if elapsed > 50*time.Millisecond {
+		t.Errorf("RecordToolCall is blocking: 100 calls took %v", elapsed)
 	}
 }
