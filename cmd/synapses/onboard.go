@@ -25,51 +25,20 @@ func cmdOnboard(args []string) error {
 	r := bufio.NewReader(os.Stdin)
 
 	// ── Step 1: detect what's installed ────────────────────────────────────
-	fmt.Println("  Step 1 of 6 — Checking installed components")
+	fmt.Println("  Step 1 of 5 — Checking installed components")
 	fmt.Println("  ──────────────────────────────────────────────")
 
-	hasScout := binaryExists("scout")
 	hasOllama := binaryExists("ollama")
 
-	printInstalled("synapses (core + brain + pulse)", true)
-	printInstalled("scout (web intelligence)", hasScout)
+	printInstalled("synapses (core + brain + pulse + web-cache)", true)
 	printInstalled("ollama (local LLM runtime — optional)", hasOllama)
 	fmt.Println()
-	fmt.Println("  Note: brain (AI enrichment) and pulse (analytics) are now built")
-	fmt.Println("  into synapses — no separate install needed.")
+	fmt.Println("  Note: brain, pulse, and web intelligence are now built into")
+	fmt.Println("  synapses — no separate sidecars needed.")
 	fmt.Println()
 
-	// ── Step 2: install missing legs ──────────────────────────────────────
-	fmt.Println("  Step 2 of 6 — Install missing components")
-	fmt.Println("  ──────────────────────────────────────────────")
-
-	if !hasScout {
-		if prompt(r, "  Install scout (web intelligence sidecar)? [Y/n]: ") {
-			if !binaryExists("pip3") && !binaryExists("pip") {
-				fmt.Println("  \033[31m✗\033[0m pip not found — install Python 3.11+ first.")
-			} else {
-				pipBin := "pip3"
-				if !binaryExists("pip3") {
-					pipBin = "pip"
-				}
-				fmt.Printf("  Running: %s install synapses-scout\n", pipBin)
-				if err := runCmd(pipBin, "install", "synapses-scout", "--quiet"); err != nil {
-					fmt.Printf("  \033[31m✗\033[0m scout install failed: %v\n", err)
-				} else {
-					hasScout = binaryExists("scout")
-					if hasScout {
-						fmt.Println("  \033[32m✓\033[0m scout installed")
-					}
-				}
-			}
-		} else {
-			fmt.Println("  \033[33m!\033[0m Skipping scout — web intelligence will be unavailable.")
-		}
-		fmt.Println()
-	}
-
-	// ── Step 3: Ollama setup (optional — enables AI brain enrichment) ─────
-	fmt.Println("  Step 3 of 6 — Configure AI brain (optional)")
+	// ── Step 2: Ollama setup (optional — enables AI brain enrichment) ─────
+	fmt.Println("  Step 2 of 5 — Configure AI brain (optional)")
 	fmt.Println("  ──────────────────────────────────────────────")
 	if !hasOllama {
 		fmt.Println("  \033[33m!\033[0m Ollama is not installed.")
@@ -83,7 +52,7 @@ func cmdOnboard(args []string) error {
 	}
 
 	// ── Step 4: write synapses.json ────────────────────────────────────────
-	fmt.Println("  Step 4 of 6 — Write project configuration")
+	fmt.Println("  Step 3 of 5 — Write project configuration")
 	fmt.Println("  ──────────────────────────────────────────────")
 
 	repoPath := "."
@@ -95,36 +64,29 @@ func cmdOnboard(args []string) error {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
-	if err := writeOnboardSynapsesJSON(absPath, hasScout); err != nil {
+	if err := writeOnboardSynapsesJSON(absPath); err != nil {
 		fmt.Printf("  \033[31m✗\033[0m Could not write synapses.json: %v\n", err)
 	} else {
 		fmt.Printf("  \033[32m✓\033[0m synapses.json written (%s)\n", filepath.Join(absPath, "synapses.json"))
 	}
 	fmt.Println()
 
-	// ── Step 5: start services ────────────────────────────────────────────
-	fmt.Println("  Step 5 of 6 — Start services")
+	// ── Step 4: start services ────────────────────────────────────────────
+	fmt.Println("  Step 4 of 5 — Start services")
 	fmt.Println("  ──────────────────────────────────────────────")
 
 	if err := ensureDirs(); err != nil {
 		return err
 	}
 
-	startNow := prompt(r, "  Start all sidecars now in the background? [Y/n]: ")
-	fmt.Println()
-	if startNow {
-		active := activeSidecars(hasScout)
-		daemonStart(active, false) //nolint:errcheck
-	}
-
-	installOnLogin := prompt(r, "  Auto-start sidecars at login? [Y/n]: ")
+	installOnLogin := prompt(r, "  Auto-start daemon at login? [Y/n]: ")
 	fmt.Println()
 	if installOnLogin {
 		daemonInstall() //nolint:errcheck
 	}
 
-	// ── Step 6: wire into AI agent ────────────────────────────────────────
-	fmt.Println("  Step 6 of 6 — Wire into AI agent")
+	// ── Step 5: wire into AI agent ────────────────────────────────────────
+	fmt.Println("  Step 5 of 5 — Wire into AI agent")
 	fmt.Println("  ──────────────────────────────────────────────")
 	fmt.Println()
 
@@ -202,17 +164,11 @@ func runCmd(bin string, args ...string) error {
 	return cmd.Run()
 }
 
-func activeSidecars(scout bool) []Sidecar {
-	var out []Sidecar
-	for _, s := range allSidecars {
-		if s.Name == "scout" && scout {
-			out = append(out, s)
-		}
-	}
-	return out
+func activeSidecars() []Sidecar {
+	return allSidecars
 }
 
-func writeOnboardSynapsesJSON(root string, scout bool) error {
+func writeOnboardSynapsesJSON(root string) error {
 	// Create the directory if it doesn't exist (handles `synapses init --path /new/dir`).
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return fmt.Errorf("create directory: %w", err)
@@ -233,13 +189,6 @@ func writeOnboardSynapsesJSON(root string, scout bool) error {
 			// Set enabled:true and ollama_url to activate AI enrichment.
 		}
 	}
-	if scout {
-		existing["scout"] = map[string]interface{}{
-			"url":         "http://localhost:11436",
-			"timeout_sec": 30,
-		}
-	}
-
 	data, err := json.MarshalIndent(existing, "", "  ")
 	if err != nil {
 		return err

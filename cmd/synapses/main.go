@@ -40,6 +40,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/scout"
+	"github.com/SynapsesOS/synapses/internal/webcache"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 )
@@ -325,19 +326,12 @@ func cmdStartDirect(args []string) error {
 		}()
 	}
 
-	// Optional: connect to synapses-scout web-search service.
-	// The client is wired unconditionally so that tools work as soon as scout
-	// becomes available — even if it wasn't reachable at startup. Individual
-	// tool calls degrade gracefully (fail-silent) when scout is down.
-	var scoutCli *scout.Client
-	if cfg.Scout.URL != "" {
-		scoutCli = scout.NewClient(cfg.Scout.URL, cfg.Scout.TimeoutSec)
-		srv.SetScoutClient(scoutCli)
-		if scoutCli.Health(context.Background()) {
-			fmt.Fprintf(os.Stderr, "synapses: scout connected at %s\n", cfg.Scout.URL)
-		} else {
-			fmt.Fprintf(os.Stderr, "synapses: scout configured at %s (unreachable at startup — tools will retry on use)\n", cfg.Scout.URL)
-		}
+	// Web doc cache: version-pinned Go package docs, cached locally in SQLite.
+	if st != nil {
+		wc := webcache.New(st)
+		srv.SetWebCache(wc)
+		srv.SetProjectPath(absPath)
+		go webcache.IndexProjectImports(appCtx, absPath, g, wc, 20)
 	}
 
 	// Optional: connect to synapses-pulse analytics sidecar.
@@ -366,17 +360,11 @@ func cmdStartDirect(args []string) error {
 		}
 	}
 
-	// Autosubscribe: detect tech stack from manifest files and optionally enrich
-	// with official doc URLs via scout. Runs in the background — does not block startup.
+	// Autosubscribe: detect tech stack from manifest files.
 	go func() {
 		entries := scout.DetectTechStack(absPath)
 		if len(entries) == 0 {
 			return
-		}
-		if scoutCli != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			entries = scout.EnrichWithDocs(ctx, scoutCli, entries)
-			cancel()
 		}
 		srv.SetTechStack(entries)
 		fmt.Fprintf(os.Stderr, "synapses: tech stack detected (%d deps)\n", len(entries))
@@ -402,19 +390,8 @@ func cmdStartDirect(args []string) error {
 				srv.SetChangeSource(fw)               // wire change log into get_working_state
 				fw.SetPacketInvalidator(srv)          // clear brain packet cache on file change
 				fw.SetBrainClient(brainCli)           // wire incremental ingest
-				// Hot-reload synapses.json: reconnect scout/brain when config changes.
+				// Hot-reload synapses.json: reconnect brain when config changes.
 				fw.SetConfigChangeHandler(func(newCfg *config.Config) {
-					if newCfg.Scout.URL != "" {
-						newScout := scout.NewClient(newCfg.Scout.URL, newCfg.Scout.TimeoutSec)
-						srv.SetScoutClient(newScout)
-						if newScout.Health(context.Background()) {
-							fmt.Fprintf(os.Stderr, "synapses: scout reconnected at %s\n", newCfg.Scout.URL)
-						} else {
-							fmt.Fprintf(os.Stderr, "synapses: scout configured at %s (unreachable — tools will retry on use)\n", newCfg.Scout.URL)
-						}
-					} else {
-						srv.SetScoutClient(nil)
-					}
 					newBrain := brain.NewInProcess(newCfg.Brain.ToBrainConfig())
 					srv.SetBrainClient(newBrain)
 					fw.SetBrainClient(newBrain)
@@ -731,8 +708,7 @@ func cmdStatus(args []string) error {
 }
 
 // cmdDoctor runs a quick health check of all Synapses components and prints a
-// formatted status table: graph index freshness, brain reachability, and scout
-// reachability.
+// formatted status table: graph index freshness, daemon status, and brain/doc-cache state.
 func cmdDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Path to the repository root")
@@ -797,13 +773,8 @@ func cmdDoctor(args []string) error {
 		fmt.Printf("%-16s%-16s%s\n", "Brain", "disabled", "(set brain.enabled:true in synapses.json to activate)")
 	}
 
-	// ── Scout ────────────────────────────────────────────────────────────────
-	if cfg.Scout.URL != "" {
-		status, detail := pingHealth(cfg.Scout.URL + "/v1/health")
-		fmt.Printf("%-16s%-16s%s\n", "Scout", status, detail)
-	} else {
-		fmt.Printf("%-16s%-16s%s\n", "Scout", "not configured", "(no scout.url in synapses.json)")
-	}
+	// ── Doc Cache ────────────────────────────────────────────────────────────
+	fmt.Printf("%-16s%-16s%s\n", "Doc Cache", "built-in", "version-pinned Go package docs via webcache (no sidecar needed)")
 
 	// ── Pulse ────────────────────────────────────────────────────────────────
 	if cfg.Pulse.URL != "" {
@@ -1324,20 +1295,13 @@ func cmdInit(args []string) error {
 	}
 
 	// ── Step 2: Generate synapses.json if missing ──────────────────────────────
-	// GAP-9: Without this, sidecars (brain/scout/pulse) aren't configured.
 	cfgPath := filepath.Join(absPath, "synapses.json")
 	if _, statErr := os.Stat(cfgPath); os.IsNotExist(statErr) {
 		fmt.Printf("  Generating synapses.json...\n")
-		hasScout := binaryExists("scout")
-		if err := writeOnboardSynapsesJSON(absPath, hasScout); err != nil {
+		if err := writeOnboardSynapsesJSON(absPath); err != nil {
 			fmt.Printf("  ! could not write synapses.json: %v\n\n", err)
 		} else {
-			fmt.Printf("  ✓ %s\n", cfgPath)
-			if hasScout {
-				fmt.Printf("    Sidecars configured: scout\n\n")
-			} else {
-				fmt.Printf("    brain+pulse: in-process (no install needed)\n    scout: not installed — run 'synapses onboard' for web intelligence\n\n")
-			}
+			fmt.Printf("  ✓ %s\n    brain+pulse+web-cache: all in-process (no sidecars needed)\n\n", cfgPath)
 		}
 	} else {
 		fmt.Printf("  synapses.json already exists — skipping\n\n")

@@ -4,10 +4,7 @@ package scout
 // using package scout (not scout_test) for symbol access.
 
 import (
-	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -519,96 +516,3 @@ func TestDetectTechStack_MultipleManifests(t *testing.T) {
 	}
 }
 
-// ── EnrichWithDocs ────────────────────────────────────────────────────────────
-
-func newScoutSearchServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/search", func(w http.ResponseWriter, _ *http.Request) {
-		resp := SearchResponse{
-			Query: "test",
-			Hits: []SearchHit{
-				{Title: "Docs", URL: "https://example.com/docs", Snippet: "official docs"},
-			},
-			Count: 1,
-		}
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck
-	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-func TestEnrichWithDocs_PopulatesDocURL(t *testing.T) {
-	srv := newScoutSearchServer(t)
-	sc := NewClient(srv.URL, 5)
-
-	entries := []TechStackEntry{
-		{Name: "requests", Ecosystem: "python"},
-	}
-	enriched := EnrichWithDocs(context.Background(), sc, entries)
-	if len(enriched) == 0 {
-		t.Fatal("expected enriched entries")
-	}
-	if enriched[0].DocURL == "" {
-		t.Error("expected DocURL to be populated")
-	}
-	if enriched[0].Snippet == "" {
-		t.Error("expected Snippet to be populated")
-	}
-}
-
-func TestEnrichWithDocs_SkipsAlreadyEnriched(t *testing.T) {
-	srv := newScoutSearchServer(t)
-	sc := NewClient(srv.URL, 5)
-
-	entries := []TechStackEntry{
-		{Name: "requests", Ecosystem: "python", DocURL: "https://already-set.com"},
-	}
-	enriched := EnrichWithDocs(context.Background(), sc, entries)
-	// DocURL should remain unchanged (skip path).
-	if enriched[0].DocURL != "https://already-set.com" {
-		t.Errorf("expected original URL preserved, got %q", enriched[0].DocURL)
-	}
-}
-
-func TestEnrichWithDocs_UnreachableScout(t *testing.T) {
-	sc := NewClient("http://127.0.0.1:19999", 1)
-	entries := []TechStackEntry{
-		{Name: "requests", Ecosystem: "python"},
-	}
-	enriched := EnrichWithDocs(context.Background(), sc, entries)
-	// Should return unchanged entries (fail-silent).
-	if len(enriched) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(enriched))
-	}
-	if enriched[0].DocURL != "" {
-		t.Error("expected empty DocURL for unreachable scout")
-	}
-}
-
-func TestEnrichWithDocs_EmptyEntries(t *testing.T) {
-	srv := newScoutSearchServer(t)
-	sc := NewClient(srv.URL, 5)
-	enriched := EnrichWithDocs(context.Background(), sc, nil)
-	if len(enriched) != 0 {
-		t.Errorf("expected 0 entries, got %d", len(enriched))
-	}
-}
-
-func TestEnrichWithDocs_NoHitsReturned(t *testing.T) {
-	// Scout returns empty hits — entry should be unchanged.
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/search", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(SearchResponse{Hits: nil}) //nolint:errcheck
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	sc := NewClient(srv.URL, 5)
-	entries := []TechStackEntry{{Name: "obscure-lib", Ecosystem: "python"}}
-	enriched := EnrichWithDocs(context.Background(), sc, entries)
-	if enriched[0].DocURL != "" {
-		t.Error("expected empty DocURL when no hits returned")
-	}
-}

@@ -14,7 +14,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
-	"github.com/SynapsesOS/synapses/internal/scout"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 )
@@ -28,7 +27,6 @@ type ProjectInstance struct {
 	MCPServer   *mcpsrv.Server
 	HTTPHandler *mcpserver.StreamableHTTPServer // HTTP MCP endpoint for this project
 	BrainClient *brain.Client
-	ScoutClient *scout.Client
 	Watcher     *watcher.Watcher
 	cancel      context.CancelFunc // cancels the project context (stops watcher, socket listener)
 }

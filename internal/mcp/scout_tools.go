@@ -5,112 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/SynapsesOS/synapses/internal/scout"
+	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/webcache"
 )
-
-// getScoutClient type-asserts the stored scoutClient to *scout.Client.
-// Returns nil if no scout client is configured.
-func (s *Server) getScoutClient() *scout.Client {
-	if s.scoutClient == nil {
-		return nil
-	}
-	sc, _ := s.scoutClient.(*scout.Client)
-	return sc
-}
-
-// handleWebSearch calls scout POST /v1/search and returns structured results.
-func (s *Server) handleWebSearch(
-	ctx context.Context,
-	req mcpgo.CallToolRequest,
-) (*mcpgo.CallToolResult, error) {
-	sc := s.getScoutClient()
-	if sc == nil {
-		return mcpgo.NewToolResultError("scout unavailable: configure scout.url in synapses.json"), nil
-	}
-
-	query, _ := req.GetArguments()["query"].(string)
-	if query == "" {
-		return mcpgo.NewToolResultError("query is required"), nil
-	}
-
-	maxResults := 5
-	if v, ok := req.GetArguments()["max_results"].(float64); ok && v > 0 {
-		maxResults = int(v)
-	}
-	region, _ := req.GetArguments()["region"].(string)
-	timelimit, _ := req.GetArguments()["timelimit"].(string)
-
-	resp := sc.Search(ctx, scout.SearchRequest{
-		Query:      query,
-		MaxResults: maxResults,
-		Region:     region,
-		Timelimit:  timelimit,
-	})
-	if resp == nil {
-		return mcpgo.NewToolResultError("scout search failed: service unreachable or timed out"), nil
-	}
-
-	return jsonResult(map[string]interface{}{
-		"query":  resp.Query,
-		"hits":   resp.Hits,
-		"count":  resp.Count,
-		"cached": resp.Cached,
-	})
-}
-
-// handleWebFetch calls scout POST /v1/fetch and returns extracted Markdown content.
-// Input may be a URL or a plain-text query — scout auto-routes.
-func (s *Server) handleWebFetch(
-	ctx context.Context,
-	req mcpgo.CallToolRequest,
-) (*mcpgo.CallToolResult, error) {
-	sc := s.getScoutClient()
-	if sc == nil {
-		return mcpgo.NewToolResultError("scout unavailable: configure scout.url in synapses.json"), nil
-	}
-
-	input, _ := req.GetArguments()["input"].(string)
-	if input == "" {
-		return mcpgo.NewToolResultError("input is required (URL or search query)"), nil
-	}
-
-	forceRefresh, _ := req.GetArguments()["force_refresh"].(bool)
-
-	resp := sc.Fetch(ctx, scout.FetchRequest{
-		Input:        input,
-		ForceRefresh: forceRefresh,
-	})
-	if resp == nil {
-		return mcpgo.NewToolResultError(fmt.Sprintf("scout fetch failed for input=%q: service unreachable or timed out", input)), nil
-	}
-
-	result := map[string]interface{}{
-		"url":          resp.URL,
-		"title":        resp.Title,
-		"content_type": resp.ContentType,
-		"content_md":   resp.ContentMD,
-		"word_count":   resp.WordCount,
-		"cached":       resp.Cached,
-	}
-	if resp.Fragment != nil {
-		result["summary"] = resp.Fragment.Summary
-		result["tags"] = resp.Fragment.Tags
-	}
-
-	// Fire-and-forget: send to intelligence for summarization so the content
-	// surfaces in future context packets. No-op if brain is not configured.
-	go s.ingestWebContent(resp.URL, resp.Title, resp.ContentMD)
-
-	return jsonResult(result)
-}
 
 // handleWebAnnotate persists web findings as a graph node annotation so they
 // survive across sessions and appear in get_context for that node.
-// This is the "context sharing" pattern from Nia — web findings become
-// first-class data objects attached to code entities.
+// This is the "context sharing" pattern — web findings become first-class
+// data objects attached to code entities.
 func (s *Server) handleWebAnnotate(
 	ctx context.Context,
 	req mcpgo.CallToolRequest,
@@ -127,8 +33,13 @@ func (s *Server) handleWebAnnotate(
 	note, _ := req.GetArguments()["note"].(string)
 
 	// Optional: structured hits JSON to format as a readable annotation.
+	type searchHit struct {
+		Title   string `json:"title"`
+		URL     string `json:"url"`
+		Snippet string `json:"snippet"`
+	}
 	if hitsJSON, ok := req.GetArguments()["hits"].(string); ok && hitsJSON != "" {
-		var hits []scout.SearchHit
+		var hits []searchHit
 		if err := json.Unmarshal([]byte(hitsJSON), &hits); err == nil && len(hits) > 0 {
 			var sb strings.Builder
 			sb.WriteString("[web findings]")
@@ -167,89 +78,156 @@ func (s *Server) handleWebAnnotate(
 	})
 }
 
-// handleLookupDocs calls scout POST /v1/lookup-docs: one-shot search + fetch
-// for verifying current package/API documentation before writing code.
+// handleLookupDocs returns cached Go package documentation or arbitrary URL
+// content. Accepts one of:
+//   - package= (Go import path, e.g. "github.com/mark3labs/mcp-go")
+//   - url=     (arbitrary URL, cached for 24 hours)
+//   - entity=  (code entity name — returns docs for all packages it imports)
+//
+// Package docs are version-pinned from go.mod and never expire unless go.mod
+// changes. Results are cached cross-session in the local SQLite store.
 func (s *Server) handleLookupDocs(
 	ctx context.Context,
 	req mcpgo.CallToolRequest,
 ) (*mcpgo.CallToolResult, error) {
-	sc := s.getScoutClient()
-	if sc == nil {
-		return mcpgo.NewToolResultError("scout unavailable: configure scout.url in synapses.json"), nil
+	if s.webCache == nil {
+		return mcpgo.NewToolResultError("doc cache not available"), nil
 	}
 
-	query, _ := req.GetArguments()["query"].(string)
-	if query == "" {
-		return mcpgo.NewToolResultError("query is required"), nil
+	args := req.GetArguments()
+	pkgParam, _ := args["package"].(string)
+	urlParam, _ := args["url"].(string)
+	entityParam, _ := args["entity"].(string)
+
+	switch {
+	case pkgParam != "":
+		return s.lookupPackageDocs(ctx, pkgParam)
+	case urlParam != "":
+		return s.lookupURL(ctx, urlParam)
+	case entityParam != "":
+		return s.lookupEntityDocs(ctx, entityParam)
+	default:
+		return mcpgo.NewToolResultError("one of package, url, or entity is required"), nil
+	}
+}
+
+func (s *Server) lookupPackageDocs(ctx context.Context, importPath string) (*mcpgo.CallToolResult, error) {
+	version := ""
+	if s.projectPath != "" {
+		if versions, err := webcache.ParseGoMod(s.projectPath); err == nil && versions != nil {
+			version = versions[importPath]
+		}
 	}
 
-	maxChars := 6000
-	if v, ok := req.GetArguments()["max_chars"].(float64); ok && v > 0 {
-		maxChars = int(v)
+	content, fromCache, err := s.webCache.FetchPackageDocs(ctx, importPath, version)
+	if err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
 	}
 
-	resp := sc.LookupDocs(ctx, scout.LookupDocsRequest{
-		Query:    query,
-		MaxChars: maxChars,
-	})
-	if resp == nil {
-		return mcpgo.NewToolResultError("lookup_docs failed: scout service unreachable or timed out"), nil
+	result := map[string]interface{}{
+		"import_path": importPath,
+		"content":     content,
+		"from_cache":  fromCache,
+		"fetched_at":  time.Now().UTC().Format(time.RFC3339),
 	}
-	if resp.Error != "" {
-		return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %s", resp.Error)), nil
+	if version != "" {
+		result["version"] = version
+		result["note"] = fmt.Sprintf("docs pinned to go.mod version %s — re-fetched only on version bump", version)
 	}
+	return jsonResult(result)
+}
 
+func (s *Server) lookupURL(ctx context.Context, url string) (*mcpgo.CallToolResult, error) {
+	content, fromCache, err := s.webCache.Fetch(ctx, url, webcache.URLCacheTTL)
+	if err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
+	}
 	return jsonResult(map[string]interface{}{
-		"query":       resp.Query,
-		"source_url":  resp.SourceURL,
-		"title":       resp.Title,
-		"content":     resp.Content,
-		"truncated":   resp.Truncated,
-		"cached":      resp.Cached,
-		"note":        resp.Note,
-		"search_hits": resp.SearchHits,
+		"url":        url,
+		"content":    content,
+		"from_cache": fromCache,
+		"fetched_at": time.Now().UTC().Format(time.RFC3339),
+		"ttl_hours":  webcache.URLCacheTTL,
 	})
 }
 
-// handleWebDeepSearch calls scout POST /v1/deep-search for multi-query
-// orchestrated search with fan-out and deduplication.
-func (s *Server) handleWebDeepSearch(
-	ctx context.Context,
-	req mcpgo.CallToolRequest,
-) (*mcpgo.CallToolResult, error) {
-	sc := s.getScoutClient()
-	if sc == nil {
-		return mcpgo.NewToolResultError("scout unavailable: configure scout.url in synapses.json"), nil
+func (s *Server) lookupEntityDocs(ctx context.Context, entityName string) (*mcpgo.CallToolResult, error) {
+	if s.graph == nil {
+		return mcpgo.NewToolResultError("graph not available"), nil
 	}
 
-	query, _ := req.GetArguments()["query"].(string)
-	if query == "" {
-		return mcpgo.NewToolResultError("query is required"), nil
+	// Find the entity node by exact name or suffix match.
+	var entityNode *graph.Node
+	for _, n := range s.graph.AllNodes() {
+		if n.Name == entityName || strings.HasSuffix(n.Name, "/"+entityName) {
+			entityNode = n
+			break
+		}
+	}
+	if entityNode == nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("entity %q not found in graph", entityName)), nil
 	}
 
-	maxResults := 10
-	if v, ok := req.GetArguments()["max_results"].(float64); ok && v > 0 {
-		maxResults = int(v)
+	// Collect external package nodes reachable via IMPORTS edges from this entity.
+	seen := make(map[string]bool)
+	var packages []string
+	for _, e := range s.graph.OutEdges(entityNode.ID) {
+		if e.Type != graph.EdgeImports {
+			continue
+		}
+		target := s.graph.GetNode(e.To)
+		if target == nil || target.Type != graph.NodePackage {
+			continue
+		}
+		if webcache.IsStdlib(target.Name) || seen[target.Name] {
+			continue
+		}
+		seen[target.Name] = true
+		packages = append(packages, target.Name)
 	}
-	region, _ := req.GetArguments()["region"].(string)
-	timelimit, _ := req.GetArguments()["timelimit"].(string)
 
-	resp := sc.DeepSearch(ctx, scout.DeepSearchRequest{
-		Query:      query,
-		MaxResults: maxResults,
-		Region:     region,
-		Timelimit:  timelimit,
-	})
-	if resp == nil {
-		return mcpgo.NewToolResultError("scout deep-search failed: service unreachable or timed out"), nil
+	if len(packages) == 0 {
+		return mcpgo.NewToolResultError(fmt.Sprintf("no external package imports found for entity %q", entityName)), nil
+	}
+
+	// Parse go.mod versions once for all packages.
+	versions := map[string]string{}
+	if s.projectPath != "" {
+		if v, err := webcache.ParseGoMod(s.projectPath); err == nil && v != nil {
+			versions = v
+		}
+	}
+
+	type pkgDoc struct {
+		ImportPath string `json:"import_path"`
+		Version    string `json:"version,omitempty"`
+		Content    string `json:"content"`
+		FromCache  bool   `json:"from_cache"`
+	}
+	var docs []pkgDoc
+	for _, pkg := range packages {
+		if len(docs) >= 5 {
+			break
+		}
+		ver := versions[pkg]
+		content, fromCache, err := s.webCache.FetchPackageDocs(ctx, pkg, ver)
+		if err != nil {
+			continue
+		}
+		docs = append(docs, pkgDoc{
+			ImportPath: pkg,
+			Version:    ver,
+			Content:    content,
+			FromCache:  fromCache,
+		})
+	}
+
+	if len(docs) == 0 {
+		return mcpgo.NewToolResultError("failed to fetch docs for any imported packages"), nil
 	}
 
 	return jsonResult(map[string]interface{}{
-		"query":            resp.Query,
-		"expanded_queries": resp.ExpandedQueries,
-		"hits":             resp.Hits,
-		"count":            resp.Count,
-		"total_raw_hits":   resp.TotalRawHits,
-		"deduplicated":     resp.DeduplicatedCount,
+		"entity":   entityName,
+		"packages": docs,
 	})
 }

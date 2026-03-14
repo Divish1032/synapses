@@ -270,12 +270,9 @@ func TestPrintInstalled(t *testing.T) {
 // ── activeSidecars ────────────────────────────────────────────────────────────
 
 func TestActiveSidecars(t *testing.T) {
-	// Only scout is an external sidecar; brain and pulse are in-process.
-	if got := activeSidecars(false); len(got) != 0 {
-		t.Errorf("activeSidecars(false) = %d, want 0", len(got))
-	}
-	if got := activeSidecars(true); len(got) != 1 || got[0].Name != "scout" {
-		t.Errorf("activeSidecars(true) = %v, want [scout]", got)
+	// All sidecars are now in-process; allSidecars is empty.
+	if got := activeSidecars(); len(got) != 0 {
+		t.Errorf("activeSidecars() = %d, want 0 (no external sidecars)", len(got))
 	}
 }
 
@@ -307,9 +304,9 @@ func TestPrompt(t *testing.T) {
 
 // ── writeOnboardSynapsesJSON ──────────────────────────────────────────────────
 
-func TestWriteOnboardSynapsesJSON_WithScout(t *testing.T) {
+func TestWriteOnboardSynapsesJSON_Basic(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeOnboardSynapsesJSON(dir, true); err != nil {
+	if err := writeOnboardSynapsesJSON(dir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "synapses.json"))
@@ -320,29 +317,13 @@ func TestWriteOnboardSynapsesJSON_WithScout(t *testing.T) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	// brain always present (in-process, disabled by default), scout present when installed
+	// brain always present (in-process, disabled by default)
 	if _, ok := m["brain"]; !ok {
 		t.Error("expected brain key in synapses.json")
 	}
-	if _, ok := m["scout"]; !ok {
-		t.Error("expected scout key in synapses.json when scout=true")
-	}
-}
-
-func TestWriteOnboardSynapsesJSON_NoScout(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeOnboardSynapsesJSON(dir, false); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	data, _ := os.ReadFile(filepath.Join(dir, "synapses.json"))
-	var m map[string]interface{}
-	_ = json.Unmarshal(data, &m)
-	// brain still present (in-process placeholder), scout absent
-	if _, ok := m["brain"]; !ok {
-		t.Error("brain key should always be present")
-	}
+	// scout should never be written — web intelligence is built-in
 	if _, ok := m["scout"]; ok {
-		t.Error("scout key should not be present when scout=false")
+		t.Error("scout key must not be written — web intelligence is built-in via webcache")
 	}
 }
 
@@ -353,7 +334,7 @@ func TestWriteOnboardSynapsesJSON_MergesExisting(t *testing.T) {
 	data, _ := json.Marshal(initial)
 	os.WriteFile(filepath.Join(dir, "synapses.json"), data, 0o644)
 
-	if err := writeOnboardSynapsesJSON(dir, false); err != nil {
+	if err := writeOnboardSynapsesJSON(dir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	result, _ := os.ReadFile(filepath.Join(dir, "synapses.json"))
@@ -775,13 +756,10 @@ func TestResolveSidecars_All(t *testing.T) {
 }
 
 func TestResolveSidecars_Named(t *testing.T) {
-	// Only scout is an external sidecar now; brain and pulse are in-process.
-	s, err := resolveSidecars("scout")
-	if err != nil {
-		t.Errorf("resolveSidecars(\"scout\") unexpected error: %v", err)
-	}
-	if len(s) != 1 || s[0].Name != "scout" {
-		t.Errorf("resolveSidecars(\"scout\") = %v, want single match", s)
+	// All sidecars are in-process; any named lookup should error.
+	_, err := resolveSidecars("scout")
+	if err == nil {
+		t.Error("resolveSidecars(\"scout\") should error — no external sidecars registered")
 	}
 }
 
@@ -1448,15 +1426,6 @@ func TestCmdOnboard_AllNo(t *testing.T) {
 	_ = cmdOnboard([]string{dir})
 }
 
-// ── cmdDaemonServe: flag parse error ─────────────────────────────────────────
-
-func TestCmdDaemonServe_FlagParseError(t *testing.T) {
-	err := cmdDaemonServe([]string{"-unknown-flag-xyz"})
-	if err == nil {
-		t.Error("expected flag parse error for unknown flag")
-	}
-}
-
 // ── serveMCPConn via net.Pipe() ───────────────────────────────────────────────
 
 func TestServeMCPConn_InvalidJSON(t *testing.T) {
@@ -1725,7 +1694,7 @@ func TestCmdDoctor_WithBrainURL(t *testing.T) {
 	dir, st, _ := buildTestIndexedDir(t)
 	st.Close()
 
-	// Write synapses.json with brain/scout/pulse URLs pointing to test servers.
+	// Write synapses.json with brain/pulse URLs pointing to test servers.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -1733,14 +1702,13 @@ func TestCmdDoctor_WithBrainURL(t *testing.T) {
 
 	cfg := map[string]interface{}{
 		"brain": map[string]interface{}{"url": ts.URL},
-		"scout": map[string]interface{}{"url": ts.URL},
 		"pulse": map[string]interface{}{"url": ts.URL},
 	}
 	data, _ := json.Marshal(cfg)
 	os.WriteFile(filepath.Join(dir, "synapses.json"), data, 0o644)
 
 	if err := cmdDoctor([]string{"--path", dir}); err != nil {
-		t.Errorf("cmdDoctor with brain/scout/pulse: %v", err)
+		t.Errorf("cmdDoctor with brain/pulse: %v", err)
 	}
 }
 

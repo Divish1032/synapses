@@ -1,5 +1,5 @@
 // daemon.go — "synapses daemon" subcommand
-// Manages brain, scout, and pulse as background services.
+// Manages the singleton daemon and any external background services.
 // Uses ~/.synapses/pids/ for PID tracking and ~/.synapses/logs/ for output.
 //
 // Usage:
@@ -34,10 +34,9 @@ type Sidecar struct {
 	Port   string
 }
 
-var allSidecars = []Sidecar{
-	// scout is the only external sidecar; brain and pulse are now in-process.
-	{Name: "scout", Binary: "scout", Args: []string{"serve"}, Port: "11436"},
-}
+// allSidecars lists external managed services. Brain and pulse are in-process;
+// web intelligence is now built into the core via the Go webcache module.
+var allSidecars = []Sidecar{}
 
 // ── path helpers ──────────────────────────────────────────────────────────────
 
@@ -253,7 +252,7 @@ func resolveSidecars(name string) ([]Sidecar, error) {
 			return []Sidecar{s}, nil
 		}
 	}
-	return nil, fmt.Errorf("unknown service %q (valid: scout)", name)
+	return nil, fmt.Errorf("unknown service %q (no external sidecars registered)", name)
 }
 
 // ── subcommand implementations ────────────────────────────────────────────────
@@ -533,8 +532,8 @@ func printDaemonUsage() {
 
   Usage:
     synapses daemon serve                Run singleton MCP daemon (HTTP :11435)
-    synapses daemon start                Start all sidecars (scout)
-    synapses daemon start --service X    Start a single sidecar
+    synapses daemon start                Start all external sidecars (none currently)
+    synapses daemon start --service X    Start a named external sidecar
     synapses daemon stop                 Stop all sidecars
     synapses daemon stop  --service X    Stop a single sidecar
     synapses daemon restart              Restart all
@@ -546,6 +545,6 @@ func printDaemonUsage() {
   The 'serve' command starts the singleton daemon that serves all projects.
   It is automatically invoked by 'synapses start' (the proxy).
 
-  Services:  scout (port 11436)  — brain and pulse run in-process
+  Services:  brain + pulse + web-cache run in-process (no external sidecars)
 `)
 }
