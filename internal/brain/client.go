@@ -1,291 +1,150 @@
+// Package brain provides in-process access to the Thinking Brain.
+// Previously a separate HTTP sidecar (synapses-intelligence), the brain is now
+// embedded directly so no external process or port is required.
+//
+// All public methods are fail-silent: errors are silently discarded so that
+// brain failures never degrade the MCP hot path. The graph-only path always works.
 package brain
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
 	"io"
-	"net/http"
-	"net/url"
-	"time"
+
+	brainconfig "github.com/SynapsesOS/synapses/internal/brain/config"
 )
 
-// Client is a fail-silent HTTP client for the synapses-intelligence sidecar.
-// Every method returns zero values on failure — callers never need to handle
-// brain errors, and the graph-only path always degrades gracefully.
+// Client wraps the in-process Brain implementation. It exposes the same method
+// signatures as the former HTTP client so all callers compile without changes.
+// Create with NewInProcess; always non-nil (uses NullBrain on failure).
 type Client struct {
-	baseURL string
-	cli     *http.Client
+	brain Brain
 }
 
-// NewClient creates a Client targeting the given base URL. timeoutSec is the
-// per-request HTTP timeout; pass 0 to use the default of 5 seconds.
-func NewClient(baseURL string, timeoutSec int) *Client {
-	if timeoutSec <= 0 {
-		timeoutSec = 5
+// NewInProcess creates a Client backed by an in-process Brain. If cfg is nil or
+// cfg.Enabled is false, returns a Client wrapping NullBrain (all methods return
+// zero values). Never returns nil.
+func NewInProcess(cfg *brainconfig.BrainConfig) *Client {
+	if cfg == nil || !cfg.Enabled {
+		return &Client{brain: &NullBrain{}}
 	}
-	return &Client{
-		baseURL: baseURL,
-		cli: &http.Client{
-			Timeout: time.Duration(timeoutSec) * time.Second,
-		},
-	}
+	return &Client{brain: New(*cfg)}
 }
 
-// HealthCheck calls GET /v1/health and returns the active model name.
-// Returns an error if the service is unreachable or returns a non-200 status.
-func (c *Client) HealthCheck(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/health", nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := c.cli.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("health check: HTTP %d", resp.StatusCode)
-	}
-	var out struct {
-		Model string `json:"model"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "unknown", nil // healthy but couldn't parse model name
-	}
-	return out.Model, nil
+// NewClient is a backward-compatible constructor kept for callers that still use
+// NewClient(url, timeout). It now ignores both arguments and returns a NullBrain
+// client. Callers should migrate to NewInProcess(cfg).
+//
+// Deprecated: use NewInProcess.
+func NewClient(_ string, _ int) *Client {
+	return &Client{brain: &NullBrain{}}
 }
 
-// BuildContextPacket calls POST /v1/context-packet and returns the enriched
-// context packet. Returns nil on any failure (brain unreachable, timeout, etc.).
-// Uses the client's configured HTTP timeout (set via NewClient) so CPU-only
-// Ollama deployments with slower inference do not always time out.
+// HealthCheck returns ("ok", nil) when the brain is available, or an error when not.
+func (c *Client) HealthCheck(_ context.Context) (string, error) {
+	if c.brain.Available() {
+		return c.brain.ModelName(), nil
+	}
+	return "", nil // NullBrain — brain disabled, not an error
+}
+
+// BuildContextPacket builds and returns an enriched context packet. Returns nil
+// if the brain is unavailable or returns an error.
 func (c *Client) BuildContextPacket(ctx context.Context, req ContextPacketRequest) *ContextPacket {
-	var pkt ContextPacket
-	if err := c.post(ctx, "/v1/context-packet", req, &pkt); err != nil {
+	pkt, err := c.brain.BuildContextPacket(ctx, req)
+	if err != nil {
 		return nil
 	}
-	return &pkt
+	return pkt
 }
 
-// Ingest calls POST /v1/ingest as a fire-and-forget operation.
-// All errors are silently discarded.
+// Ingest submits a code node for summarization. Fire-and-forget.
 func (c *Client) Ingest(ctx context.Context, req IngestRequest) {
-	_ = c.post(ctx, "/v1/ingest", req, nil)
+	_, _ = c.brain.Ingest(ctx, req)
 }
 
-// BulkIngest sends a slice of IngestRequests as individual POST /v1/ingest calls.
-// All errors are silently discarded (fire-and-forget semantics).
+// BulkIngest calls Ingest for each node. Fire-and-forget.
 func (c *Client) BulkIngest(ctx context.Context, nodes []IngestRequest) {
 	for _, n := range nodes {
-		_ = c.post(ctx, "/v1/ingest", n, nil)
+		_, _ = c.brain.Ingest(ctx, n)
 	}
 }
 
-// ExplainViolation calls POST /v1/explain-violation and returns (explanation, fix).
-// Returns ("", "") on any failure.
+// ExplainViolation returns (explanation, fix) for an architecture violation.
+// Returns ("", "") if the brain is unavailable.
 func (c *Client) ExplainViolation(ctx context.Context, req ViolationRequest) (string, string) {
-	var out ViolationExplanation
-	if err := c.post(ctx, "/v1/explain-violation", req, &out); err != nil {
+	resp, err := c.brain.ExplainViolation(ctx, req)
+	if err != nil {
 		return "", ""
 	}
-	return out.Explanation, out.Fix
+	return resp.Explanation, resp.Fix
 }
 
-// Coordinate calls POST /v1/coordinate and returns the suggestion string.
-// Returns "" on any failure.
-func (c *Client) Coordinate(ctx context.Context, req CoordinateRequest) string {
-	var out CoordinateResponse
-	if err := c.post(ctx, "/v1/coordinate", req, &out); err != nil {
-		return ""
-	}
-	return out.Suggestion
+// GetSummary returns the cached summary for nodeID, or "" if not yet summarized.
+func (c *Client) GetSummary(_ context.Context, nodeID string) string {
+	return c.brain.Summary("", nodeID)
 }
 
-// GetSummary calls GET /v1/summary/{nodeID} and returns the cached summary string.
-// Returns "" on any failure (node not yet summarized, brain unreachable, timeout, etc.).
-func (c *Client) GetSummary(ctx context.Context, nodeID string) string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.baseURL+"/v1/summary/"+url.PathEscape(nodeID), nil)
-	if err != nil {
-		return ""
-	}
-	resp, err := c.cli.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		if resp != nil {
-			resp.Body.Close()
-		}
-		return ""
-	}
-	defer resp.Body.Close()
-	var out struct {
-		Summary string `json:"summary"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return ""
-	}
-	return out.Summary
-}
-
-// LogDecision calls POST /v1/decision as a fire-and-forget operation.
-// All errors are silently discarded.
+// LogDecision records a reasoning decision. Fire-and-forget.
 func (c *Client) LogDecision(ctx context.Context, req DecisionRequest) {
-	_ = c.post(ctx, "/v1/decision", req, nil)
+	_ = c.brain.LogDecision(ctx, req)
 }
 
-// GetSDLC calls GET /v1/sdlc and returns (phase, qualityMode).
-// Returns ("development", "standard") on any failure.
-func (c *Client) GetSDLC(ctx context.Context) (string, string) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sdlc", nil)
-	if err != nil {
-		return "development", "standard"
+// GetSDLC returns (phase, qualityMode) from the brain's SDLC config.
+// Returns ("development", "standard") if the brain is unavailable.
+func (c *Client) GetSDLC(_ context.Context) (string, string) {
+	cfg := c.brain.GetSDLCConfig()
+	phase := string(cfg.Phase)
+	mode := string(cfg.QualityMode)
+	if phase == "" {
+		phase = "development"
 	}
-	resp, err := c.cli.Do(httpReq)
-	if err != nil {
-		return "development", "standard"
+	if mode == "" {
+		mode = "standard"
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "development", "standard"
-	}
-	var out SDLCConfig
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "development", "standard"
-	}
-	if out.Phase == "" {
-		out.Phase = "development"
-	}
-	if out.QualityMode == "" {
-		out.QualityMode = "standard"
-	}
-	return out.Phase, out.QualityMode
+	return phase, mode
 }
 
-// SetPhase calls PUT /v1/sdlc/phase to update the current SDLC phase.
-// Returns ("", error) on failure.
-func (c *Client) SetPhase(ctx context.Context, req SetPhaseRequest) (*SDLCConfig, error) {
-	var out SDLCConfig
-	if err := c.put(ctx, "/v1/sdlc/phase", req, &out); err != nil {
+// SetPhase updates the active SDLC phase. Returns the updated SDLCConfig.
+func (c *Client) SetPhase(_ context.Context, req SetPhaseRequest) (*SDLCConfig, error) {
+	if err := c.brain.SetSDLCPhase(SDLCPhase(req.Phase), ""); err != nil {
 		return nil, err
 	}
-	return &out, nil
+	cfg := c.brain.GetSDLCConfig()
+	return &cfg, nil
 }
 
-// UpsertADR calls POST /v1/adr to create or update an ADR.
-func (c *Client) UpsertADR(ctx context.Context, req ADRRequest) (*ADR, error) {
-	var out ADR
-	if err := c.post(ctx, "/v1/adr", req, &out); err != nil {
+// UpsertADR creates or updates an ADR. Returns the stored ADR.
+func (c *Client) UpsertADR(_ context.Context, req ADRRequest) (*ADR, error) {
+	if err := c.brain.UpsertADR(req); err != nil {
 		return nil, err
 	}
-	return &out, nil
-}
-
-// GetADR calls GET /v1/adr/{id} to retrieve an ADR by ID.
-func (c *Client) GetADR(ctx context.Context, id string) (*ADR, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/adr/"+url.PathEscape(id), nil)
+	adr, err := c.brain.GetADR(req.ID)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.cli.Do(httpReq)
+	return &adr, nil
+}
+
+// GetADR retrieves an ADR by ID.
+func (c *Client) GetADR(_ context.Context, id string) (*ADR, error) {
+	adr, err := c.brain.GetADR(id)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("ADR %q not found", id)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	var out ADR
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return &adr, nil
 }
 
-// GetADRs calls GET /v1/adr (optionally with ?file=path) to retrieve ADRs.
-func (c *Client) GetADRs(ctx context.Context, fileFilter string) ([]ADR, error) {
-	u := c.baseURL + "/v1/adr"
+// GetADRs returns all ADRs, optionally filtered by file path.
+func (c *Client) GetADRs(_ context.Context, fileFilter string) ([]ADR, error) {
 	if fileFilter != "" {
-		u += "?file=" + url.QueryEscape(fileFilter)
+		return c.brain.GetADRsForFile(fileFilter, 50)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.cli.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	var out struct {
-		ADRs []ADR `json:"adrs"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return out.ADRs, nil
+	return c.brain.AllADRs()
 }
 
-// post marshals body as JSON, POSTs to the endpoint, and decodes the response
-// into out (if out is non-nil). Returns an error on any failure.
-func (c *Client) post(ctx context.Context, path string, body, out interface{}) error {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return err
+// Close shuts down the in-process brain, releasing resources.
+func (c *Client) Close() {
+	if closer, ok := c.brain.(io.Closer); ok {
+		_ = closer.Close()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.cli.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNoContent {
-		return nil // success, no body expected
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
-	}
-	return nil
-}
-
-// put marshals body as JSON, PUTs to the endpoint, and decodes into out.
-func (c *Client) put(ctx context.Context, path string, body, out interface{}) error {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+path, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.cli.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
-	}
-	return nil
 }

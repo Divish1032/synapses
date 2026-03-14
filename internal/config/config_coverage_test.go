@@ -119,10 +119,10 @@ func TestCheckViolationsForFile_UnrelatedFile(t *testing.T) {
 
 // ── applyDefaults (brain/scout/constitution) ──────────────────────────────────
 
-func TestApplyDefaults_BrainURL(t *testing.T) {
+func TestApplyDefaults_BrainEnabled(t *testing.T) {
 	raw := map[string]interface{}{
 		"version": "1",
-		"brain":   map[string]interface{}{"url": "http://localhost:11435"},
+		"brain":   map[string]interface{}{"enabled": true},
 		"rules":   []interface{}{},
 	}
 	dir := writeCoverageConfig(t, raw)
@@ -130,11 +130,11 @@ func TestApplyDefaults_BrainURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Brain.TimeoutSec <= 0 {
-		t.Error("expected brain.timeout_sec to be defaulted to >0")
+	if cfg.Brain.OllamaURL == "" {
+		t.Error("expected brain.ollama_url to be defaulted")
 	}
-	if !cfg.Brain.EnableLLM {
-		t.Error("expected brain.enable_llm to be defaulted to true")
+	if cfg.Brain.Model == "" {
+		t.Error("expected brain.model to be defaulted")
 	}
 }
 

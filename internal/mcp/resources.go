@@ -121,7 +121,7 @@ func (s *Server) warmBrainCache(changedFile string) {
 					HasTests:   fileHasTests(entity.File),
 					FanIn:      s.graph.Fanin(entity.ID),
 				},
-				EnableLLM: s.config.Brain.EnableLLM,
+				EnableLLM: s.config.Brain.ContextBuilder,
 			})
 		}
 	}()

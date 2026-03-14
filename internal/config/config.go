@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/SynapsesOS/synapses/internal/brain/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
@@ -146,16 +147,49 @@ type ConstitutionConfig struct {
 	InjectInSessionInit bool `json:"inject_in_session_init,omitempty"`
 }
 
-// BrainConfig describes the connection to a synapses-intelligence sidecar.
+// BrainConfig configures the in-process Thinking Brain (formerly synapses-intelligence sidecar).
+// Set Enabled:true to activate LLM-enriched context packets, violation explanations,
+// and auto-ingestion. Requires Ollama running locally.
 type BrainConfig struct {
-	// URL is the base URL of the intelligence service, e.g. "http://localhost:11435".
-	// Leave empty to disable brain integration.
-	URL string `json:"url,omitempty"`
-	// TimeoutSec is the per-request HTTP timeout. Defaults to 5 if URL is set.
-	TimeoutSec int `json:"timeout_sec,omitempty"`
-	// EnableLLM controls whether the context-packet endpoint is allowed to call
-	// the local LLM. Defaults to true when URL is set.
-	EnableLLM bool `json:"enable_llm,omitempty"`
+	// Enabled controls whether the brain is active. Default: false.
+	Enabled bool `json:"enabled"`
+	// OllamaURL is the base URL of the Ollama server. Default: "http://localhost:11434".
+	OllamaURL string `json:"ollama_url,omitempty"`
+	// Model is the primary model tag. Default: "qwen3.5:2b".
+	Model string `json:"model,omitempty"`
+	// FastModel is the model for bulk ingestion. Default: "qwen3.5:2b".
+	FastModel string `json:"fast_model,omitempty"`
+	// ModelIngest overrides the model for the ingest tier.
+	ModelIngest string `json:"model_ingest,omitempty"`
+	// ModelEnrich overrides the model for the enrich tier.
+	ModelEnrich string `json:"model_enrich,omitempty"`
+	// ModelOrchestrate overrides the model for the orchestrate tier.
+	ModelOrchestrate string `json:"model_orchestrate,omitempty"`
+	// DBPath overrides the default SQLite path (~/.synapses/brain.sqlite).
+	DBPath string `json:"db_path,omitempty"`
+	// Ingest enables automatic code summarization on file save. Default: false.
+	Ingest bool `json:"ingest"`
+	// Enrich enables LLM enrichment of get_context responses. Default: false.
+	Enrich bool `json:"enrich"`
+	// ContextBuilder enables LLM-assembled context packets. Default: false.
+	ContextBuilder bool `json:"context_builder"`
+}
+
+// ToBrainConfig converts to the internal brain configuration type used by NewInProcess.
+func (b *BrainConfig) ToBrainConfig() *config.BrainConfig {
+	return &config.BrainConfig{
+		Enabled:          b.Enabled,
+		OllamaURL:        b.OllamaURL,
+		Model:            b.Model,
+		FastModel:        b.FastModel,
+		ModelIngest:      b.ModelIngest,
+		ModelEnrich:      b.ModelEnrich,
+		ModelOrchestrate: b.ModelOrchestrate,
+		DBPath:           b.DBPath,
+		Ingest:           b.Ingest,
+		Enrich:           b.Enrich,
+		ContextBuilder:   b.ContextBuilder,
+	}
 }
 
 // ScoutConfig describes the connection to a synapses-scout sidecar.
@@ -585,13 +619,13 @@ func (c *Config) applyDefaults() {
 			c.Constitution.InjectInSessionInit = true
 		}
 	}
-	// Brain defaults: if URL is set but other fields are zero, apply sensible defaults.
-	if c.Brain.URL != "" {
-		if c.Brain.TimeoutSec <= 0 {
-			c.Brain.TimeoutSec = 5
+	// Brain defaults: apply sensible defaults when brain is enabled.
+	if c.Brain.Enabled {
+		if c.Brain.OllamaURL == "" {
+			c.Brain.OllamaURL = "http://localhost:11434"
 		}
-		if !c.Brain.EnableLLM {
-			c.Brain.EnableLLM = true // default true when URL is provided
+		if c.Brain.Model == "" {
+			c.Brain.Model = "qwen3.5:2b"
 		}
 	}
 	// Scout defaults: if URL is set but timeout is zero, apply sensible default.

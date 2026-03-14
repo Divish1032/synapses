@@ -6,31 +6,72 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
 // Client is a fail-silent HTTP client for the synapses-scout sidecar.
 // Every method returns zero/nil values on failure — callers never need to
 // handle scout errors, and the graph-only path always degrades gracefully.
+//
+// Supports two URL schemes:
+//   - http://host:port/  — standard TCP connection
+//   - unix:///path/to/scout.sock — HTTP over Unix domain socket
 type Client struct {
 	baseURL string
 	cli     *http.Client
 }
 
+// DefaultUnixSocketURL returns the standard Unix socket URL for scout.
+// The daemon uses this when no explicit URL is configured.
+func DefaultUnixSocketURL() string {
+	return "unix:///~/.synapses/scout.sock"
+}
+
 // NewClient creates a Client targeting the given base URL. timeoutSec is the
 // per-request HTTP timeout; pass 0 to use the default of 30 seconds.
 // Scout fetches real pages, so the timeout must be generous.
+//
+// If baseURL starts with "unix://", the client dials a Unix domain socket.
+// HTTP requests are still issued normally; only the transport differs.
 func NewClient(baseURL string, timeoutSec int) *Client {
 	if timeoutSec <= 0 {
 		timeoutSec = 30
 	}
-	return &Client{
-		baseURL: baseURL,
-		cli: &http.Client{
-			Timeout: time.Duration(timeoutSec) * time.Second,
-		},
+	timeout := time.Duration(timeoutSec) * time.Second
+
+	var transport http.RoundTripper
+	if strings.HasPrefix(baseURL, "unix://") {
+		// Extract socket path from unix:///path  → /path or ~/path
+		sockPath := strings.TrimPrefix(baseURL, "unix://")
+		// Strip the leading slash that triple-slash notation adds before "~"
+		if strings.HasPrefix(sockPath, "/~") {
+			sockPath = sockPath[1:] // → "~/.synapses/scout.sock"
+		}
+		// Expand tilde — net.Dial does not shell-expand paths.
+		if strings.HasPrefix(sockPath, "~/") {
+			home, err := os.UserHomeDir()
+			if err == nil {
+				sockPath = home + sockPath[1:]
+			}
+		}
+		transport = &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", sockPath)
+			},
+		}
+		// Requests must target http://localhost/... — the transport ignores host/port.
+		baseURL = "http://localhost"
 	}
+
+	httpCli := &http.Client{Timeout: timeout}
+	if transport != nil {
+		httpCli.Transport = transport
+	}
+	return &Client{baseURL: baseURL, cli: httpCli}
 }
 
 // Health calls GET /v1/health and returns true if the service is reachable.

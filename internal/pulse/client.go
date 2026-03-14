@@ -1,164 +1,134 @@
-// Package pulse is a thin, fail-silent HTTP client for the synapses-pulse
-// analytics sidecar. Every method is fire-and-forget: errors are silently
-// discarded so that the absence of pulse never degrades the MCP hot path.
+// Package pulse provides in-process analytics for the Synapses MCP server.
+// Previously a separate HTTP sidecar (synapses-pulse), the collector and store
+// are now embedded directly so no external process or port is required.
+//
+// All public methods are fire-and-forget: errors are silently discarded so
+// that pulse never degrades the MCP hot path.
 package pulse
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
+	"os"
+	"path/filepath"
 	"time"
+
+	"github.com/SynapsesOS/synapses/internal/pulse/aggregator"
+	"github.com/SynapsesOS/synapses/internal/pulse/collector"
+	pulsestore "github.com/SynapsesOS/synapses/internal/pulse/pstore"
+	"github.com/SynapsesOS/synapses/internal/pulse/types"
 )
 
-// ToolCallEvent is sent for every MCP tool invocation.
-type ToolCallEvent struct {
-	ToolName      string `json:"tool_name"`
-	AgentID       string `json:"agent_id,omitempty"`
-	ProjectID     string `json:"project_id,omitempty"`
-	Entity        string `json:"entity,omitempty"`
-	DurationMs    int64  `json:"duration_ms"`
-	Success       bool   `json:"success"`
-	ResponseBytes int    `json:"response_bytes"`
-}
+// Re-export event types from pulse/types so callers use pulse.ToolCallEvent etc.
+// without needing to import the types sub-package.
+type ToolCallEvent = types.ToolCallEvent
+type ContextDeliveryEvent = types.ContextDeliveryEvent
+type SessionEvent = types.SessionEvent
+type OutcomeSignalEvent = types.OutcomeSignalEvent
+type EntityEffectiveness = types.EntityEffectiveness
+type BrainUsageEvent = types.BrainUsageEvent
 
-// ContextDeliveryEvent is sent for context-delivery tools (get_context,
-// get_file_context, prepare_context) and carries the token savings data.
-type ContextDeliveryEvent struct {
-	ToolName       string `json:"tool_name"`
-	AgentID        string `json:"agent_id,omitempty"`
-	ProjectID      string `json:"project_id,omitempty"`
-	Entity         string `json:"entity,omitempty"`
-	File           string `json:"file,omitempty"`
-	ResponseBytes  int    `json:"response_bytes"`
-	ResponseTokens int    `json:"response_tokens"`
-	BaselineTokens int    `json:"baseline_tokens"`
-	NodesDelivered int    `json:"nodes_delivered"`
-	NodesPruned    int    `json:"nodes_pruned"`
-	EdgesDelivered int    `json:"edges_delivered"`
-	Truncated      bool   `json:"truncated"`
-	DurationMs     int64  `json:"duration_ms"`
-	CacheHit       bool   `json:"cache_hit"`
-	BrainEnriched  bool   `json:"brain_enriched"`
-}
-
-// SessionEvent is sent when an agent session starts or ends.
-type SessionEvent struct {
-	AgentID   string `json:"agent_id"`
-	ProjectID string `json:"project_id,omitempty"`
-	Event     string `json:"event"` // "start" | "end" | "task_done"
-}
-
-// OutcomeSignalEvent is sent for passive outcome signals (R29 — Intent Alignment Metrics).
-// These signals correlate context delivery quality with downstream outcomes.
-//
-// SignalType values:
-//   - "correction":  same entity queried twice in one session w/o file change  — first context was insufficient
-//   - "escalation":  same entity queried 3+ times in one session — context wasn't sufficient upfront
-//   - "replan":      create_plan called mid-session — context led to wrong direction
-//   - "task_done":   task status set to "done" — positive outcome
-//   - "task_cancelled": task status set to "cancelled" — negative outcome
-type OutcomeSignalEvent struct {
-	ProjectID  string `json:"project_id,omitempty"`
-	AgentID    string `json:"agent_id,omitempty"`
-	Entity     string `json:"entity,omitempty"` // entity name that was queried (correction/escalation)
-	SignalType string `json:"signal_type"`      // see above
-	Count      int    `json:"count,omitempty"`  // repeat count for correction/escalation
-}
-
-// EntityEffectiveness is returned by GET /v1/effectiveness for a single entity.
-type EntityEffectiveness struct {
-	Entity     string  `json:"entity"`
-	Score      float64 `json:"score"`       // 0.0–1.0; higher = context was helpful
-	Signals    int     `json:"signals"`     // total signal count
-	Positives  int     `json:"positives"`   // task_done signals
-	Negatives  int     `json:"negatives"`   // correction + escalation + replan signals
-	Suggestion string  `json:"suggestion"`  // human-readable improvement hint
-}
-
-// Client is a fail-silent HTTP client for the synapses-pulse sidecar.
+// Client is the in-process analytics collector. It replaces the HTTP sidecar.
+// Create with New; call Close when the daemon shuts down.
 type Client struct {
-	baseURL string
-	cli     *http.Client
+	store *pulsestore.Store
+	coll  *collector.Collector
+	agg   *aggregator.Aggregator
 }
 
-// NewClient creates a Client targeting the given base URL. timeoutSec is the
-// per-request HTTP timeout; pass 0 to use the default of 2 seconds.
-func NewClient(baseURL string, timeoutSec int) *Client {
-	if timeoutSec <= 0 {
-		timeoutSec = 2
+// DefaultDBPath returns the canonical path for the pulse SQLite database.
+func DefaultDBPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("pulse: locate home dir: %w", err)
 	}
-	return &Client{
-		baseURL: baseURL,
-		cli:     &http.Client{Timeout: time.Duration(timeoutSec) * time.Second},
-	}
+	return filepath.Join(home, ".synapses", "pulse.sqlite"), nil
 }
 
-// RecordToolCall sends a ToolCallEvent to pulse. All errors are silently discarded.
+// New creates and starts an in-process pulse collector backed by a SQLite store
+// at dbPath. Returns an error if the database cannot be opened.
+func New(dbPath string) (*Client, error) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		return nil, fmt.Errorf("pulse: mkdir: %w", err)
+	}
+	st, err := pulsestore.Open(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("pulse: open store: %w", err)
+	}
+	coll := collector.New(st, 1000, 500)
+	coll.Start()
+
+	agg := aggregator.New(st, 3600)
+	agg.Start()
+
+	return &Client{store: st, coll: coll, agg: agg}, nil
+}
+
+// NewClient is a backwards-compatible constructor for code that still calls
+// NewClient(url, timeout). It ignores both arguments and calls New with the
+// default DB path; errors are silently swallowed (pulse is optional).
+//
+// Deprecated: prefer New(dbPath) for explicit control.
+func NewClient(_ string, _ int) *Client {
+	dbPath, err := DefaultDBPath()
+	if err != nil {
+		return nil
+	}
+	c, _ := New(dbPath)
+	return c
+}
+
+// Close stops the collector (flushing remaining events) and closes the store.
+func (c *Client) Close() {
+	if c == nil {
+		return
+	}
+	c.agg.Stop()
+	c.coll.Stop()
+	_ = c.store.Close()
+}
+
+// RecordToolCall enqueues a tool call event. Fire-and-forget.
 func (c *Client) RecordToolCall(ev ToolCallEvent) {
-	c.post("/v1/ingest/tool-call", ev)
+	if c == nil {
+		return
+	}
+	c.coll.RecordToolCall(ev)
 }
 
-// RecordContextDelivery sends a ContextDeliveryEvent to pulse. All errors are silently discarded.
+// RecordContextDelivery enqueues a context delivery event. Fire-and-forget.
 func (c *Client) RecordContextDelivery(ev ContextDeliveryEvent) {
-	c.post("/v1/ingest/context-delivery", ev)
+	if c == nil {
+		return
+	}
+	c.coll.RecordContextDelivery(ev)
 }
 
-// RecordSessionEvent sends a SessionEvent to pulse. All errors are silently discarded.
+// RecordSessionEvent enqueues a session lifecycle event. Fire-and-forget.
 func (c *Client) RecordSessionEvent(agentID, projectID, eventType string) {
-	c.post("/v1/ingest/session-event", SessionEvent{AgentID: agentID, ProjectID: projectID, Event: eventType})
+	if c == nil {
+		return
+	}
+	sessionID := agentID + ":" + time.Now().UTC().Format("2006-01-02")
+	c.coll.RecordSessionEvent(sessionID, agentID, projectID, eventType)
 }
 
-// RecordOutcomeSignal sends an OutcomeSignalEvent to pulse. All errors are silently discarded.
+// RecordOutcomeSignal enqueues an intent alignment outcome signal. Fire-and-forget.
 func (c *Client) RecordOutcomeSignal(ev OutcomeSignalEvent) {
-	c.post("/v1/ingest/outcome-signal", ev)
+	if c == nil {
+		return
+	}
+	c.coll.RecordOutcomeSignal(ev)
 }
 
-// FetchEffectiveness fetches per-entity effectiveness scores from pulse.
-// Returns nil if pulse is unavailable or returns no data.
+// FetchEffectiveness returns per-entity effectiveness scores from the local store.
+// Returns nil if no data is available or the store returns an error.
 func (c *Client) FetchEffectiveness(projectID string, minSignals int) []EntityEffectiveness {
-	url := c.baseURL + "/v1/effectiveness?project_id=" + projectID
-	if minSignals > 0 {
-		url += fmt.Sprintf("&min_signals=%d", minSignals)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), c.cli.Timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
+	if c == nil {
 		return nil
 	}
-	resp, err := c.cli.Do(req)
-	if err != nil {
+	results, err := c.store.GetEffectiveness(projectID, minSignals)
+	if err != nil || len(results) == 0 {
 		return nil
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-	var out []EntityEffectiveness
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil
-	}
-	return out
-}
-
-// post marshals body as JSON and POSTs to the endpoint. All errors are silently discarded.
-func (c *Client) post(path string, body interface{}) {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), c.cli.Timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(data))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.cli.Do(req)
-	if err != nil {
-		return
-	}
-	resp.Body.Close()
+	return results
 }
