@@ -221,7 +221,7 @@ func cmdDaemon(args []string) error {
 	switch sub {
 	case "serve":
 		// "synapses daemon serve" — run the singleton MCP daemon that
-		// serves all projects via HTTP (:11434) and per-project Unix sockets.
+		// serves all projects via HTTP (:11435) and per-project Unix sockets.
 		return cmdDaemonServe(rest)
 	case "start":
 		return daemonStart(targets, quiet)
@@ -532,7 +532,7 @@ func printDaemonUsage() {
   synapses daemon — manage background services
 
   Usage:
-    synapses daemon serve                Run singleton MCP daemon (HTTP :11434)
+    synapses daemon serve                Run singleton MCP daemon (HTTP :11435)
     synapses daemon start                Start all sidecars (scout)
     synapses daemon start --service X    Start a single sidecar
     synapses daemon stop                 Stop all sidecars
