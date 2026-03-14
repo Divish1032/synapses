@@ -378,6 +378,9 @@ func cmdDaemonServe(args []string) error {
 
 	fmt.Fprintf(os.Stderr, "synapses %s singleton daemon starting on %s\n", version, DaemonHTTPAddr)
 
+	// ── Background self-update check (every 6 hours, silent) ─────────────────
+	startSelfUpdateLoop(appCtx)
+
 	// ── Signal handling ──────────────────────────────────────────────────────
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
