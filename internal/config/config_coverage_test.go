@@ -2,7 +2,7 @@ package config_test
 
 // Additional tests for uncovered config functions:
 // IsAgentRule, CheckViolationsForFile, globContains (via matchesForbidden),
-// applyDefaults (brain/scout/constitution), matchesForbidden edge cases,
+// applyDefaults (brain/constitution), matchesForbidden edge cases,
 // suggestFix branch coverage.
 
 import (
@@ -138,21 +138,6 @@ func TestApplyDefaults_BrainEnabled(t *testing.T) {
 	}
 }
 
-func TestApplyDefaults_ScoutURL(t *testing.T) {
-	raw := map[string]interface{}{
-		"version": "1",
-		"scout":   map[string]interface{}{"url": "http://localhost:11436"},
-		"rules":   []interface{}{},
-	}
-	dir := writeCoverageConfig(t, raw)
-	cfg, err := config.Load(dir)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Scout.TimeoutSec <= 0 {
-		t.Error("expected scout.timeout_sec to be defaulted to >0")
-	}
-}
 
 func TestApplyDefaults_ConstitutionPrinciples(t *testing.T) {
 	raw := map[string]interface{}{

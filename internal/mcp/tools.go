@@ -1739,11 +1739,9 @@ var toolCatalog = []toolCatalogEntry{
 	{Name: "send_message", Category: "messaging", Description: "Send message to another agent", Keywords: []string{"send", "message", "notify", "tell", "broadcast", "communicate"}, Example: `send_message(from_agent="...", topic="api_changed", payload="{...}")`},
 	{Name: "get_messages", Category: "messaging", Description: "Retrieve messages + batch-ack via mark_read_ids", Keywords: []string{"messages", "inbox", "unread", "received", "poll", "mark", "read"}, Example: `get_messages(agent_id="...", mark_read_ids=["id1"])`},
 
-	// Web
-	{Name: "web_search", Category: "web", Description: "Search the web for docs/solutions", Keywords: []string{"web", "search", "internet", "docs", "documentation", "online"}, Example: `web_search(query="go context.WithTimeout best practices")`},
-	{Name: "web_fetch", Category: "web", Description: "Fetch and read a web page", Keywords: []string{"fetch", "read", "url", "page", "website", "download"}, Example: `web_fetch(input="https://docs.example.com")`},
-	{Name: "web_deep_search", Category: "web", Description: "Multi-query research on a topic", Keywords: []string{"deep", "research", "thorough", "comprehensive", "multiple"}, Example: `web_deep_search(query="Go MCP server patterns")`},
-	{Name: "lookup_docs", Category: "web", Description: "One-shot documentation lookup", Keywords: []string{"docs", "documentation", "api", "reference", "lookup", "package"}, Example: `lookup_docs(query="openai python chat completions API")`},
+	// Web / Doc Cache
+	{Name: "web_annotate", Category: "web", Description: "Persist web findings to a code entity (survives across sessions)", Keywords: []string{"annotate", "web", "save", "persist", "findings", "research"}, Example: `web_annotate(node_id="...", note="...", hits=[...])`},
+	{Name: "lookup_docs", Category: "web", Description: "Look up version-pinned package docs or cache a URL (cross-session)", Keywords: []string{"docs", "documentation", "api", "reference", "lookup", "package", "cache"}, Example: `lookup_docs(package="github.com/mark3labs/mcp-go")`},
 
 	// Intent-based
 	{Name: "prepare_context", Category: "meta", Description: "Intent-based context assembly (replaces multi-tool chains)", Keywords: []string{"prepare", "intent", "modify", "understand", "review", "debug", "add", "plan", "context"}, Example: `prepare_context(intent="modify", target="AuthService")`},
@@ -3098,9 +3096,9 @@ func (s *Server) handleSessionInit(
 			"available": s.getBrainClient() != nil,
 			"note":      "enriches get_context with LLM summaries; required by upsert_adr, get_adrs",
 		},
-		"scout": map[string]interface{}{
-			"available": s.getScoutClient() != nil,
-			"note":      "enables web_search, web_fetch, web_deep_search, lookup_docs",
+		"doc_cache": map[string]interface{}{
+			"available": s.webCache != nil,
+			"note":      "enables lookup_docs with version-pinned package documentation",
 		},
 		"pulse": map[string]interface{}{
 			"available": s.getPulseClient() != nil,

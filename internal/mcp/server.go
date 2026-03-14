@@ -19,6 +19,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
+	"github.com/SynapsesOS/synapses/internal/webcache"
 )
 
 // sessionContextKey is an unexported type for context values to avoid collisions
@@ -67,11 +68,12 @@ type Server struct {
 	changeSource ChangeSource  // nil if started without a file watcher
 	peerManager  interface{}   // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
 	brainClient  interface{}   // *brain.Client — set via SetBrainClient; nil if brain not configured
-	scoutClient  interface{}   // *scout.Client — set via SetScoutClient; nil if scout not configured
-	pulseClient  interface{}   // *pulse.Client — set via SetPulseClient; nil if pulse not configured
-	embedClient  *embed.Client // nil if embedding_endpoint not configured
-	techStack    interface{}   // []scout.TechStackEntry — set via SetTechStack after autosubscribe
-	projectID    string        // stable project identifier (FNV hash of project root path)
+	webCache     *webcache.Cache // nil if webcache not configured
+	pulseClient  interface{}    // *pulse.Client — set via SetPulseClient; nil if pulse not configured
+	embedClient  *embed.Client  // nil if embedding_endpoint not configured
+	techStack    interface{}    // []TechStackEntry — set via SetTechStack after autosubscribe
+	projectID    string         // stable project identifier (FNV hash of project root path)
+	projectPath  string         // absolute path to the project root (for go.mod parsing)
 	rulesMu      sync.RWMutex  // protects s.config.Rules for concurrent dynamic upserts
 
 	// Context-packet cache: 20 slots max, 30s TTL. Keyed by "entityName:depth".
@@ -352,11 +354,16 @@ func (s *Server) SetProjectID(id string) {
 	s.projectID = id
 }
 
-// SetScoutClient wires a *scout.Client into the server so that web_search,
-// web_fetch, and web_deep_search tools are functional.
-// Using interface{} avoids an import cycle (scout imports only stdlib).
-func (s *Server) SetScoutClient(sc interface{}) {
-	s.scoutClient = sc
+// SetWebCache wires a *webcache.Cache into the server so that lookup_docs
+// can serve version-pinned package documentation and URL caching.
+func (s *Server) SetWebCache(wc *webcache.Cache) {
+	s.webCache = wc
+}
+
+// SetProjectPath stores the absolute project root path so that lookup_docs
+// can parse go.mod for version-pinned package documentation.
+func (s *Server) SetProjectPath(path string) {
+	s.projectPath = path
 }
 
 // SetPulseClient wires a *pulse.Client into the server so that every tool
@@ -375,8 +382,8 @@ func (s *Server) getPulseClient() *pulse.Client {
 	return pc
 }
 
-// SetTechStack stores the detected tech stack entries ([]scout.TechStackEntry)
-// so that get_project_identity can surface them as tech_stack.
+// SetTechStack stores the detected tech stack entries so that
+// get_project_identity can surface them as tech_stack.
 // Called from cmdStart after autosubscribe detection completes.
 func (s *Server) SetTechStack(ts interface{}) {
 	s.techStack = ts
@@ -1213,56 +1220,7 @@ func (s *Server) registerTools() {
 		s.handleGetWorkingState,
 	)
 
-	// ── Web Tools (requires synapses-scout sidecar) ──────────────────────────
-
-	// web_search
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"web_search",
-			mcp.WithDescription(
-				"Searches the web via the synapses-scout sidecar and returns structured results. "+
-					"Use this to find framework docs, API references, error solutions, or any "+
-					"information that requires real-time data. "+
-					"Requires scout.url in synapses.json (default: http://localhost:11436).",
-			),
-			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("The search query."),
-			),
-			mcp.WithNumber("max_results",
-				mcp.Description("Maximum results to return. Default 5."),
-			),
-			mcp.WithString("region",
-				mcp.Description("Optional region code for localised results, e.g. 'us-en'."),
-			),
-			mcp.WithString("timelimit",
-				mcp.Description("Optional time limit, e.g. 'd' (day), 'w' (week), 'm' (month)."),
-			),
-		),
-		s.handleWebSearch,
-	)
-
-	// web_fetch
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"web_fetch",
-			mcp.WithDescription(
-				"Fetches and extracts a URL (or performs a search if given a query) via "+
-					"synapses-scout, returning the content as Markdown. "+
-					"Use this to read documentation pages, GitHub READMEs, or any web content "+
-					"that an agent needs to reason about. "+
-					"Requires scout.url in synapses.json (default: http://localhost:11436).",
-			),
-			mcp.WithString("input",
-				mcp.Required(),
-				mcp.Description("A URL to fetch or a plain-text search query (scout auto-routes)."),
-			),
-			mcp.WithBoolean("force_refresh",
-				mcp.Description("When true, bypasses the scout cache and re-fetches. Default false."),
-			),
-		),
-		s.handleWebFetch,
-	)
+	// ── Web Tools ─────────────────────────────────────────────────────────────
 
 	// web_annotate
 	s.mcp.AddTool(
@@ -1273,7 +1231,7 @@ func (s *Server) registerTools() {
 					"and appear in get_context for that node. "+
 					"This is the 'context sharing' pattern: web research becomes a first-class "+
 					"data object attached to a code entity, visible to all future agent sessions. "+
-					"Pass hits (JSON array from web_search) or a plain note string, or both.",
+					"Pass hits (JSON array of {title,url,snippet} objects) or a plain note string, or both.",
 			),
 			mcp.WithString("node_id",
 				mcp.Required(),
@@ -1283,7 +1241,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Plain-text note summarising what was found. Used as-is or prepended to hits."),
 			),
 			mcp.WithString("hits",
-				mcp.Description("JSON array of search hits from web_search, e.g. [{\"title\":\"...\",\"url\":\"...\",\"snippet\":\"...\"}]."),
+				mcp.Description("JSON array of web hits, e.g. [{\"title\":\"...\",\"url\":\"...\",\"snippet\":\"...\"}]."),
 			),
 			mcp.WithString("agent_id",
 				mcp.Description("Optional. Self-declared agent identifier for attribution."),
@@ -1292,55 +1250,31 @@ func (s *Server) registerTools() {
 		s.handleWebAnnotate,
 	)
 
-	// web_deep_search
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"web_deep_search",
-			mcp.WithDescription(
-				"Performs an orchestrated multi-query search via synapses-scout: expands the "+
-					"original query into sub-queries, fans out searches, deduplicates, and returns "+
-					"a richer result set than web_search. Use this for research tasks where "+
-					"a single query is unlikely to capture all relevant results. "+
-					"Requires scout.url in synapses.json (default: http://localhost:11436).",
-			),
-			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("The research query to expand and search."),
-			),
-			mcp.WithNumber("max_results",
-				mcp.Description("Maximum deduplicated results to return. Default 10."),
-			),
-			mcp.WithString("region",
-				mcp.Description("Optional region code for localised results, e.g. 'us-en'."),
-			),
-			mcp.WithString("timelimit",
-				mcp.Description("Optional time limit, e.g. 'd' (day), 'w' (week), 'm' (month)."),
-			),
-		),
-		s.handleWebDeepSearch,
-	)
-
 	// lookup_docs
 	s.mcp.AddTool(
 		mcp.NewTool(
 			"lookup_docs",
 			mcp.WithDescription(
-				"One-shot documentation lookup: searches the web and fetches the top result in a "+
-					"single call. Use this BEFORE writing code that uses external packages or APIs "+
-					"to verify you have the current API — training data may be outdated. "+
-					"Faster than calling web_search then web_fetch separately. "+
-					"Requires scout.url in synapses.json (default: http://localhost:11436).",
+				"Returns cached Go package documentation or arbitrary URL content from the "+
+					"local Synapses doc cache. Package docs are version-pinned from go.mod and "+
+					"never expire — re-fetched only when go.mod changes. URL content is cached "+
+					"for 24 hours. Use this to verify API signatures before writing code. "+
+					"Provide exactly one of: package=, url=, or entity=.",
 			),
-			mcp.WithString("query",
-				mcp.Required(),
+			mcp.WithString("package",
 				mcp.Description(
-					"What to look up. Include the package name, topic, and language for best results. "+
-						"Examples: 'openai python chat completions API', 'react hooks useState', "+
-						"'docker compose v2 CLI flags', 'langchain LCEL chain syntax'.",
+					"Go import path to look up, e.g. 'github.com/mark3labs/mcp-go'. "+
+						"Returns docs at the version pinned in go.mod.",
 				),
 			),
-			mcp.WithNumber("max_chars",
-				mcp.Description("Maximum characters of page content to return. Default 6000 (~1500 tokens)."),
+			mcp.WithString("url",
+				mcp.Description("Arbitrary URL to fetch and cache (24h TTL)."),
+			),
+			mcp.WithString("entity",
+				mcp.Description(
+					"Code entity name (function, struct, file). Returns docs for all external "+
+						"packages imported by that entity.",
+				),
 			),
 		),
 		s.handleLookupDocs,

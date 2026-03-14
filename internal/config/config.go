@@ -123,11 +123,6 @@ type Config struct {
 	// include plain-English explanations, and file changes are auto-ingested.
 	Brain BrainConfig `json:"brain,omitempty"`
 
-	// Scout configures the optional synapses-scout integration.
-	// When set, web_search, web_fetch, and web_deep_search MCP tools become
-	// available, giving AI agents real-time web data through the scout sidecar.
-	Scout ScoutConfig `json:"scout,omitempty"`
-
 	// Pulse configures the optional synapses-pulse analytics sidecar.
 	// When set, every tool call is reported to the pulse service for token
 	// savings and cost attribution telemetry. All errors are silently discarded.
@@ -190,16 +185,6 @@ func (b *BrainConfig) ToBrainConfig() *config.BrainConfig {
 		Enrich:           b.Enrich,
 		ContextBuilder:   b.ContextBuilder,
 	}
-}
-
-// ScoutConfig describes the connection to a synapses-scout sidecar.
-type ScoutConfig struct {
-	// URL is the base URL of the scout service, e.g. "http://localhost:11436".
-	// Leave empty to disable scout integration.
-	URL string `json:"url,omitempty"`
-	// TimeoutSec is the per-request HTTP timeout. Defaults to 30 if URL is set.
-	// Scout fetches real web pages so a generous timeout is required.
-	TimeoutSec int `json:"timeout_sec,omitempty"`
 }
 
 // PulseConfig describes the connection to a synapses-pulse analytics sidecar.
@@ -626,12 +611,6 @@ func (c *Config) applyDefaults() {
 		}
 		if c.Brain.Model == "" {
 			c.Brain.Model = "qwen3.5:2b"
-		}
-	}
-	// Scout defaults: if URL is set but timeout is zero, apply sensible default.
-	if c.Scout.URL != "" {
-		if c.Scout.TimeoutSec <= 0 {
-			c.Scout.TimeoutSec = 30
 		}
 	}
 }

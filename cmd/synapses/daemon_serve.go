@@ -67,6 +67,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
+	"github.com/SynapsesOS/synapses/internal/webcache"
 )
 
 // DaemonHTTPPort is the fixed port for the singleton daemon HTTP server.
@@ -604,26 +605,18 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		}()
 	}
 
-	// Scout: prefer explicit URL from config; fall back to Unix socket default.
-	// This means scout works out-of-the-box without any config entry.
-	var scoutCli *scout.Client
-	scoutURL := cfg.Scout.URL
-	if scoutURL == "" {
-		scoutURL = scout.DefaultUnixSocketURL()
-	}
-	scoutCli = scout.NewClient(scoutURL, cfg.Scout.TimeoutSec)
-	srv.SetScoutClient(scoutCli)
+	// Web doc cache: version-pinned Go package docs, cached locally in SQLite.
+	wc := webcache.New(st)
+	srv.SetWebCache(wc)
+	srv.SetProjectPath(absPath)
+	go webcache.IndexProjectImports(projCtx, absPath, g, wc, 20)
+
+	// Tech stack detection (no longer enriched via scout).
 	go func() {
 		entries := scout.DetectTechStack(absPath)
-		if len(entries) == 0 {
-			return
+		if len(entries) > 0 {
+			srv.SetTechStack(entries)
 		}
-		if scoutCli != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			entries = scout.EnrichWithDocs(ctx, scoutCli, entries)
-			cancel()
-		}
-		srv.SetTechStack(entries)
 	}()
 
 	// Pulse.
@@ -654,12 +647,6 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			fw.SetPacketInvalidator(srv)
 			fw.SetBrainClient(brainCli)
 			fw.SetConfigChangeHandler(func(newCfg *config.Config) {
-				newScoutURL := newCfg.Scout.URL
-				if newScoutURL == "" {
-					newScoutURL = scout.DefaultUnixSocketURL()
-				}
-				newScout := scout.NewClient(newScoutURL, newCfg.Scout.TimeoutSec)
-				srv.SetScoutClient(newScout)
 				newBrain := brain.NewInProcess(newCfg.Brain.ToBrainConfig())
 				srv.SetBrainClient(newBrain)
 				fw.SetBrainClient(newBrain)
@@ -695,7 +682,6 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		MCPServer:   srv,
 		HTTPHandler: httpHandler,
 		BrainClient: brainCli,
-		ScoutClient: scoutCli,
 		Watcher:     fw,
 		cancel:      projCancel,
 	}, nil

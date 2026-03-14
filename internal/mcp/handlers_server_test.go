@@ -116,10 +116,10 @@ func TestServer_Setters(t *testing.T) {
 		t.Error("SetBrainClient did not store value")
 	}
 
-	// SetScoutClient.
-	s.SetScoutClient("fake-scout")
-	if s.scoutClient != "fake-scout" {
-		t.Error("SetScoutClient did not store value")
+	// SetProjectPath.
+	s.SetProjectPath("/tmp/testproject")
+	if s.projectPath != "/tmp/testproject" {
+		t.Error("SetProjectPath did not store value")
 	}
 
 	// SetTechStack.

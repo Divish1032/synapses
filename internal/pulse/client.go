@@ -132,3 +132,30 @@ func (c *Client) FetchEffectiveness(projectID string, minSignals int) []EntityEf
 	}
 	return results
 }
+
+// PulseSummary is the response shape for GET /api/admin/pulse/summary.
+type PulseSummary struct {
+	Days    int                      `json:"days"`
+	Summary *pulsestore.Summary      `json:"summary"`
+	Tools   []pulsestore.ToolStats   `json:"tools"`
+}
+
+// GetSummary returns aggregated analytics for the last N days plus per-tool stats.
+// Returns nil summary and empty tools if pulse is unavailable.
+func (c *Client) GetSummary(days int) *PulseSummary {
+	if c == nil {
+		return &PulseSummary{Days: days}
+	}
+	if days <= 0 {
+		days = 7
+	}
+	sum, err := c.store.GetSummary(days)
+	if err != nil {
+		sum = &pulsestore.Summary{}
+	}
+	tools, err := c.store.GetToolStats(days)
+	if err != nil {
+		tools = nil
+	}
+	return &PulseSummary{Days: days, Summary: sum, Tools: tools}
+}

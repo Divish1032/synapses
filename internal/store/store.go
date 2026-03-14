@@ -200,6 +200,19 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_events_type    ON events(type);
 
+-- Web documentation cache: stores fetched HTML-stripped content from pkg.go.dev
+-- and arbitrary URLs. Go package docs are keyed by "pkg:<importPath>@<version>"
+-- with ttl_hours=0 (never expire — valid until go.mod bumps the version).
+-- Arbitrary URL cache uses ttl_hours>0 (e.g., 24h). Expiry check:
+--   ttl_hours=0 OR datetime(fetched_at, '+' || ttl_hours || ' hours') > datetime('now')
+CREATE TABLE IF NOT EXISTS web_cache (
+    url        TEXT PRIMARY KEY,
+    content    TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    ttl_hours  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_web_cache_fetched ON web_cache(fetched_at);
+
 -- Shared annotations: agents can attach notes to graph nodes that are visible
 -- to all other agents via get_context and find_entity responses.
 CREATE TABLE IF NOT EXISTS annotations (
@@ -822,6 +835,61 @@ func (s *Store) PruneStaleData(retentionDays int) {
 
 	// SQLite housekeeping.
 	s.db.Exec(`PRAGMA optimize`)
+}
+
+// ── Web cache ──────────────────────────────────────────────────────────────
+
+// WebCacheEntry holds a single cached web document.
+type WebCacheEntry struct {
+	URL       string
+	Content   string
+	FetchedAt time.Time
+	TTLHours  int
+}
+
+// UpsertWebCache inserts or replaces a web cache entry.
+// ttlHours=0 means never expire (used for version-pinned package docs).
+func (s *Store) UpsertWebCache(url, content string, ttlHours int) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO web_cache(url, content, fetched_at, ttl_hours)
+		 VALUES (?, ?, ?, ?)`,
+		url, content, time.Now().UTC().Format(time.RFC3339), ttlHours,
+	)
+	return err
+}
+
+// GetWebCache returns the cached entry for url, or (nil, false) if missing or expired.
+func (s *Store) GetWebCache(url string) (*WebCacheEntry, bool) {
+	row := s.db.QueryRow(
+		`SELECT url, content, fetched_at, ttl_hours FROM web_cache WHERE url = ?
+		 AND (ttl_hours = 0
+		      OR datetime(fetched_at, '+' || ttl_hours || ' hours') > datetime('now'))`,
+		url,
+	)
+	var e WebCacheEntry
+	var fetchedAt string
+	if err := row.Scan(&e.URL, &e.Content, &fetchedAt, &e.TTLHours); err != nil {
+		return nil, false
+	}
+	e.FetchedAt, _ = time.Parse(time.RFC3339, fetchedAt)
+	return &e, true
+}
+
+// DeleteWebCachePrefix removes all cache entries whose URL starts with prefix.
+// Used to invalidate version-pinned entries when go.mod bumps a package version.
+func (s *Store) DeleteWebCachePrefix(prefix string) error {
+	_, err := s.db.Exec(`DELETE FROM web_cache WHERE url LIKE ?`, prefix+"%")
+	return err
+}
+
+// PruneExpiredWebCache removes all entries whose TTL has elapsed.
+func (s *Store) PruneExpiredWebCache() error {
+	_, err := s.db.Exec(
+		`DELETE FROM web_cache
+		 WHERE ttl_hours > 0
+		   AND datetime(fetched_at, '+' || ttl_hours || ' hours') <= datetime('now')`,
+	)
+	return err
 }
 
 // SaveGraph persists all nodes and edges of g, replacing any existing data.

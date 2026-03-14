@@ -2,13 +2,11 @@ package scout
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 // TechStackEntry represents one detected dependency with optional doc enrichment.
@@ -51,29 +49,6 @@ func DetectTechStack(projectRoot string) []TechStackEntry {
 		}
 	}
 	return entries
-}
-
-// EnrichWithDocs searches for official documentation for each entry via scout.
-// Enrichment is best-effort: any failed entries are returned unchanged.
-// A per-entry timeout of 5 seconds is enforced so startup stays fast.
-func EnrichWithDocs(ctx context.Context, sc *Client, entries []TechStackEntry) []TechStackEntry {
-	enriched := make([]TechStackEntry, len(entries))
-	copy(enriched, entries)
-
-	for i, e := range enriched {
-		if e.DocURL != "" {
-			continue // already has a URL
-		}
-		entryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		query := e.Name + " official documentation"
-		resp := sc.Search(entryCtx, SearchRequest{Query: query, MaxResults: 1})
-		cancel()
-		if resp != nil && len(resp.Hits) > 0 {
-			enriched[i].DocURL = resp.Hits[0].URL
-			enriched[i].Snippet = resp.Hits[0].Snippet
-		}
-	}
-	return enriched
 }
 
 // ── manifest parsers ──────────────────────────────────────────────────────────
