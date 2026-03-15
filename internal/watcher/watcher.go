@@ -189,31 +189,60 @@ func (w *Watcher) RecentChanges(windowMinutes int) []ChangeEvent {
 	return result
 }
 
-// loop is the background event processing goroutine.
+// loop is the background event processing goroutine. If a panic occurs inside
+// the event loop it is recovered and the loop is restarted with exponential
+// backoff (up to maxLoopRestarts times). If all restarts are exhausted the
+// watcher silently stops — file watching is disabled but the daemon stays up.
 func (w *Watcher) loop(root string) {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "synapses/watcher: recovered panic in loop: %v\n", r)
+	const maxRestarts = 3
+	backoff := 100 * time.Millisecond
+
+	for attempt := 0; attempt <= maxRestarts; attempt++ {
+		panicked := false
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "synapses/watcher: panic in loop (attempt %d/%d): %v\n", attempt+1, maxRestarts+1, r)
+					panicked = true
+				}
+			}()
+			for {
+				select {
+				case <-w.stopCh:
+					return
+				case event, ok := <-w.fw.Events:
+					if !ok {
+						return
+					}
+					w.handleEvent(event, root)
+				case err, ok := <-w.fw.Errors:
+					if !ok {
+						return
+					}
+					fmt.Fprintf(os.Stderr, "synapses/watcher: %v\n", err)
+				}
+			}
+		}()
+
+		// Clean exit (stopCh closed or fw closed) — no restart needed.
+		if !panicked {
+			return
 		}
-	}()
-	for {
+
+		// Panic recovery: check if stop was also requested before restarting.
 		select {
 		case <-w.stopCh:
 			return
+		default:
+		}
 
-		case event, ok := <-w.fw.Events:
-			if !ok {
-				return
-			}
-			w.handleEvent(event, root)
-
-		case err, ok := <-w.fw.Errors:
-			if !ok {
-				return
-			}
-			fmt.Fprintf(os.Stderr, "synapses/watcher: %v\n", err)
+		if attempt < maxRestarts {
+			fmt.Fprintf(os.Stderr, "synapses/watcher: restarting event loop in %v\n", backoff)
+			time.Sleep(backoff)
+			backoff *= 2
 		}
 	}
+	fmt.Fprintf(os.Stderr, "synapses/watcher: loop exhausted all %d restart attempts, file watching disabled\n", maxRestarts)
 }
 
 // handleEvent processes a single fsnotify event.
