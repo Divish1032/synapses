@@ -5,6 +5,9 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +24,24 @@ import (
 	"github.com/SynapsesOS/synapses/internal/watcher"
 	"github.com/SynapsesOS/synapses/internal/webcache"
 )
+
+// loadAppSettingsJSON reads ~/.synapses/app_settings.json and returns the
+// decoded map. Returns an error (and nil map) if the file is absent or invalid.
+func loadAppSettingsJSON() (map[string]interface{}, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".synapses", "app_settings.json"))
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
 
 // sessionContextKey is an unexported type for context values to avoid collisions
 // with other packages that also store values in context.
@@ -75,6 +96,12 @@ type Server struct {
 	projectID    string         // stable project identifier (FNV hash of project root path)
 	projectPath  string         // absolute path to the project root (for go.mod parsing)
 	rulesMu      sync.RWMutex  // protects s.config.Rules for concurrent dynamic upserts
+
+	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
+	// Loaded once at startup. When false, the corresponding data collection is skipped.
+	logToolCalls     bool // controls RecordToolCall recording (default: true)
+	logSessions      bool // controls pulse session tracking (default: true)
+	cacheWebSearches bool // controls web_cache inserts (default: true)
 
 	// Context-packet cache: 20 slots max, 30s TTL. Keyed by "entityName:depth".
 	packetCacheMu sync.Mutex
@@ -189,11 +216,35 @@ func (s *Server) getLastAgent() string {
 // All tools are registered during construction.
 func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 	s := &Server{
-		graph:       g,
-		config:      cfg,
-		store:       st,
-		packetCache: make(map[string]*packetCacheEntry, 20),
-		stopCh:      make(chan struct{}),
+		graph:            g,
+		config:           cfg,
+		store:            st,
+		packetCache:      make(map[string]*packetCacheEntry, 20),
+		stopCh:           make(chan struct{}),
+		logToolCalls:     true, // default on
+		logSessions:      true,
+		cacheWebSearches: true,
+	}
+
+	// Load app-level settings from ~/.synapses/app_settings.json.
+	// This file is written by the Synapses desktop app; the daemon reads it
+	// once at startup. Missing file or missing keys → defaults (all enabled).
+	if appSettingsJSON, err := loadAppSettingsJSON(); err == nil {
+		if v, ok := appSettingsJSON["log_tool_calls"]; ok {
+			if b, ok := v.(bool); ok {
+				s.logToolCalls = b
+			}
+		}
+		if v, ok := appSettingsJSON["log_sessions"]; ok {
+			if b, ok := v.(bool); ok {
+				s.logSessions = b
+			}
+		}
+		if v, ok := appSettingsJSON["cache_web_searches"]; ok {
+			if b, ok := v.(bool); ok {
+				s.cacheWebSearches = b
+			}
+		}
 	}
 
 	// Restore dynamic rules persisted from previous sessions. This runs before
@@ -210,10 +261,10 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 	hooks := &server.Hooks{}
 	startTimes := &callStartTimes{}
 	hooks.AddBeforeCallTool(func(_ context.Context, _ any, req *mcp.CallToolRequest) {
-		startTimes.set(req.Params.Name, time.Now())
+		startTimes.push(req, time.Now())
 	})
 	hooks.AddAfterCallTool(func(_ context.Context, _ any, req *mcp.CallToolRequest, result *mcp.CallToolResult) {
-		elapsed := time.Since(startTimes.pop(req.Params.Name))
+		elapsed := time.Since(startTimes.pop(req))
 		success := result == nil || !result.IsError
 		agentID, _ := req.GetArguments()["agent_id"].(string)
 		if agentID == "" {
@@ -223,11 +274,8 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		if entity == "" {
 			entity, _ = req.GetArguments()["query"].(string)
 		}
-		if s.store != nil {
-			s.store.RecordToolCall(req.Params.Name, agentID, entity, elapsed.Milliseconds(), success)
-		}
 		// Fire-and-forget telemetry to synapses-pulse (if configured).
-		if pc := s.getPulseClient(); pc != nil {
+		if pc := s.getPulseClient(); pc != nil && s.logToolCalls {
 			var responseBytes int
 			if result != nil && !result.IsError && len(result.Content) > 0 {
 				if tc, ok := result.Content[0].(mcp.TextContent); ok {
@@ -259,27 +307,28 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 	return s
 }
 
-// callStartTimes is a simple concurrent map for per-tool-call start timestamps.
-// It uses the tool name as key; concurrent calls to the same tool will race,
-// but that is acceptable — timing accuracy is best-effort for observability.
+// callStartTimes tracks per-tool-call start timestamps keyed by request pointer.
+// Each *mcp.CallToolRequest is a unique allocation per invocation, so using the
+// pointer as the key is correct for all transports (stdio, HTTP/SSE) including
+// concurrent calls to the same tool — no FIFO ordering assumption is needed.
 type callStartTimes struct {
 	mu   sync.Mutex
-	data map[string]time.Time
+	data map[*mcp.CallToolRequest]time.Time
 }
 
-func (c *callStartTimes) set(name string, t time.Time) {
+func (c *callStartTimes) push(req *mcp.CallToolRequest, t time.Time) {
 	c.mu.Lock()
 	if c.data == nil {
-		c.data = make(map[string]time.Time)
+		c.data = make(map[*mcp.CallToolRequest]time.Time)
 	}
-	c.data[name] = t
+	c.data[req] = t
 	c.mu.Unlock()
 }
 
-func (c *callStartTimes) pop(name string) time.Time {
+func (c *callStartTimes) pop(req *mcp.CallToolRequest) time.Time {
 	c.mu.Lock()
-	t := c.data[name]
-	delete(c.data, name)
+	t := c.data[req]
+	delete(c.data, req)
 	c.mu.Unlock()
 	return t
 }
@@ -474,8 +523,49 @@ func (s *Server) registerTools() {
 					"subsequent calls skip unchanged project_identity and filter events to only "+
 					"those since the last session. Always provide for token savings."),
 			),
+			mcp.WithString("model",
+				mcp.Description("Optional. The model you are running on, e.g. 'claude-sonnet-4-6'. "+
+					"Recorded in pulse analytics so cost savings are calculated against your actual model price."),
+			),
+			mcp.WithString("provider",
+				mcp.Description("Optional. Model provider: 'anthropic', 'openai', etc."),
+			),
 		),
 		s.handleSessionInit,
+	)
+
+	// report_usage: agent self-reports its LLM token usage after a response (Option B).
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"report_usage",
+			mcp.WithDescription(
+				"Report your LLM token usage for this response. Call after completing a major task "+
+					"to give Synapses accurate data on model cost and token consumption. "+
+					"All fields are optional but model is strongly recommended. "+
+					"This is the complement to session_init(model=...) — session_init records the model once, "+
+					"report_usage records per-response token counts.",
+			),
+			mcp.WithString("model",
+				mcp.Required(),
+				mcp.Description("Model name, e.g. 'claude-sonnet-4-6' or 'gpt-4o'."),
+			),
+			mcp.WithString("provider",
+				mcp.Description("Model provider: 'anthropic', 'openai', 'google', etc."),
+			),
+			mcp.WithNumber("input_tokens",
+				mcp.Description("Input/prompt tokens consumed by this response."),
+			),
+			mcp.WithNumber("output_tokens",
+				mcp.Description("Output/completion tokens generated by this response."),
+			),
+			mcp.WithNumber("cost_usd",
+				mcp.Description("Actual USD cost if known. Leave unset to let Synapses estimate from token counts."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Agent identifier. Defaults to the agent_id from the most recent session_init."),
+			),
+		),
+		s.handleReportUsage,
 	)
 
 	// discover_tools: lightweight tool finder

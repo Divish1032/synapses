@@ -17,14 +17,15 @@ import (
 
 func TestCallStartTimes_SetAndPop(t *testing.T) {
 	var c callStartTimes
+	req := &mcp.CallToolRequest{}
 	now := time.Now()
-	c.set("get_context", now)
-	got := c.pop("get_context")
+	c.push(req, now)
+	got := c.pop(req)
 	if !got.Equal(now) {
 		t.Errorf("pop: got %v, want %v", got, now)
 	}
 	// Second pop returns zero time.
-	zero := c.pop("get_context")
+	zero := c.pop(req)
 	if !zero.IsZero() {
 		t.Error("second pop should return zero time")
 	}
@@ -32,11 +33,12 @@ func TestCallStartTimes_SetAndPop(t *testing.T) {
 
 func TestCallStartTimes_SetLazyInit(t *testing.T) {
 	var c callStartTimes
-	// set with nil inner map should not panic (lazy init).
-	c.set("tool", time.Now())
-	got := c.pop("tool")
+	// push with nil inner map should not panic (lazy init).
+	req := &mcp.CallToolRequest{}
+	c.push(req, time.Now())
+	got := c.pop(req)
 	if got.IsZero() {
-		t.Error("expected non-zero time after set+pop")
+		t.Error("expected non-zero time after push+pop")
 	}
 }
 

@@ -166,6 +166,21 @@ CREATE INDEX IF NOT EXISTS idx_dynamic_rules_id  ON dynamic_rules(id);
 CREATE INDEX IF NOT EXISTS idx_vlog_rule       ON violation_log(rule_id);
 CREATE INDEX IF NOT EXISTS idx_vlog_last_seen  ON violation_log(last_seen);
 
+-- R32: Compound indexes for sub-linear access at federation scale (30k+ nodes).
+-- All use IF NOT EXISTS — safe to apply to existing databases without migration.
+--
+-- idx_nodes_type_pkg: type-filtered package queries ("all functions in package X").
+--   Used by future get_repo_map and explain_codebase tools.
+-- idx_edges_to_type:  inbound edge lookup by type ("who CALLS X?", "what IMPLEMENTS X?").
+--   Compound supersedes the single-column idx_edges_to for type-filtered lookups.
+-- idx_edges_type_to:  covering index for edge type aggregation ("COUNT(*) WHERE type='CALLS'
+--   GROUP BY to_id" in SaveGraph). Covering = both columns in the index, no table fetch.
+-- idx_nodes_pkg:      package-only queries ("all nodes in package X", package-local recency).
+CREATE INDEX IF NOT EXISTS idx_nodes_type_pkg ON nodes(type, package);
+CREATE INDEX IF NOT EXISTS idx_edges_to_type  ON edges(to_id, type);
+CREATE INDEX IF NOT EXISTS idx_edges_type_to  ON edges(type, to_id);
+CREATE INDEX IF NOT EXISTS idx_nodes_pkg      ON nodes(package);
+
 -- Agent registry: tracks which agents have interacted with Synapses.
 -- Self-declared identity (no auth); upserted on every call with agent_id.
 CREATE TABLE IF NOT EXISTS agents (
@@ -476,6 +491,12 @@ func Open(path string) (*Store, error) {
 		// Non-fatal: old DBs without WAL still work, just without concurrent reads.
 		fmt.Fprintf(os.Stderr, "synapses: store: enable WAL: %v\n", err)
 	}
+	// busy_timeout: under heavy watcher load (rapid file changes) the write
+	// connection can hit SQLITE_BUSY. Waiting up to 5 s before failing avoids
+	// spurious errors without stalling the daemon noticeably.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
+		fmt.Fprintf(os.Stderr, "synapses: store: set busy_timeout: %v\n", err)
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
@@ -572,6 +593,9 @@ func Open(path string) (*Store, error) {
 		// R28: Provenance labels — trust tier for each node (user-authored | generated | vendored | external).
 		// Existing rows default to 'user-authored' (safe: old code has no generated/vendored nodes tagged).
 		`ALTER TABLE nodes ADD COLUMN provenance TEXT NOT NULL DEFAULT 'user-authored'`,
+		// OF-H1: Generic entity schema — domain field enables non-code nodes (infra, api, docs, issues).
+		// Existing rows default to 'code' (zero regression: all current nodes are code entities).
+		`ALTER TABLE nodes ADD COLUMN domain TEXT NOT NULL DEFAULT 'code'`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
 			db.Close()
@@ -598,6 +622,11 @@ func Open(path string) (*Store, error) {
 	_ = db.QueryRow(`SELECT count(*) FROM memories`).Scan(&memCount)
 	if memFtsCount == 0 && memCount > 0 {
 		_, _ = db.Exec(`INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')`) // best-effort
+	}
+
+	// R32: Emit query plan stats when SYNAPSES_QUERY_STATS=1 is set. Non-fatal.
+	if os.Getenv("SYNAPSES_QUERY_STATS") == "1" {
+		st.CollectQueryStats()
 	}
 
 	return st, nil
@@ -812,18 +841,107 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// QueryStats reports index coverage for a set of representative hot-path queries.
+// It runs EXPLAIN QUERY PLAN on each query and classifies each step as either an
+// index hit ("SEARCH USING INDEX") or a full scan ("SCAN").
+//
+// Only active when the environment variable SYNAPSES_QUERY_STATS=1 is set.
+// Has no effect on normal query execution — purely observational.
+//
+// Example output logged to stderr:
+//
+//	synapses: query_stats: edges(to_id,type) SEARCH USING INDEX idx_edges_to_type [hit]
+//	synapses: query_stats: edges(type,to_id) SEARCH USING INDEX idx_edges_type_to [hit]
+//	synapses: query_stats: nodes(type,package) SEARCH USING INDEX idx_nodes_type_pkg [hit]
+//	synapses: query_stats: nodes(package) SEARCH USING INDEX idx_nodes_pkg [hit]
+//	synapses: query_stats: summary — 4 index hits, 0 full scans
+type QueryStats struct {
+	IndexHits int
+	FullScans int
+}
+
+// CollectQueryStats runs EXPLAIN QUERY PLAN on the four R32 hot queries and
+// returns a QueryStats summarising how many use an index vs full scan.
+// Call once at startup for observability; does not affect query execution.
+func (s *Store) CollectQueryStats() QueryStats {
+	type probe struct {
+		label string
+		sql   string
+	}
+	probes := []probe{
+		{
+			label: "edges(to_id,type)",
+			sql:   `SELECT from_id FROM edges WHERE to_id = 'x' AND type = 'CALLS' LIMIT 1`,
+		},
+		{
+			label: "edges(type,to_id) aggregate",
+			sql:   `SELECT to_id, COUNT(*) FROM edges WHERE type = 'CALLS' GROUP BY to_id`,
+		},
+		{
+			label: "nodes(type,package)",
+			sql:   `SELECT id FROM nodes WHERE type = 'function' AND package = 'x' LIMIT 1`,
+		},
+		{
+			label: "nodes(package)",
+			sql:   `SELECT id FROM nodes WHERE package = 'x' LIMIT 1`,
+		},
+	}
+
+	var stats QueryStats
+	for _, p := range probes {
+		rows, err := s.db.Query(`EXPLAIN QUERY PLAN ` + p.sql)
+		if err != nil {
+			continue
+		}
+		usesIndex := false
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+				continue
+			}
+			if strings.Contains(detail, "USING INDEX") || strings.Contains(detail, "USING COVERING INDEX") {
+				usesIndex = true
+				fmt.Fprintf(os.Stderr, "synapses: query_stats: %s — %s [hit]\n", p.label, detail)
+			}
+		}
+		rows.Close()
+		if usesIndex {
+			stats.IndexHits++
+		} else {
+			stats.FullScans++
+			fmt.Fprintf(os.Stderr, "synapses: query_stats: %s — FULL SCAN (no index used)\n", p.label)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "synapses: query_stats: summary — %d index hits, %d full scans\n",
+		stats.IndexHits, stats.FullScans)
+	return stats
+}
+
 // PruneStaleData removes old rows from tables that grow unbounded over time.
 // retentionDays controls the cutoff; rows older than that are deleted.
 // Safe to call concurrently (each DELETE is a separate implicit transaction).
 // Intended to be called once on startup in a background goroutine.
 func (s *Store) PruneStaleData(retentionDays int) {
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
+	cutoffUnix := time.Now().AddDate(0, 0, -retentionDays).Unix()
 
 	// tool_calls: one row per MCP tool invocation — can reach millions.
 	s.db.Exec(`DELETE FROM tool_calls WHERE created_at < ?`, cutoff)
 
 	// agent_messages: no built-in TTL.
 	s.db.Exec(`DELETE FROM agent_messages WHERE created_at < ?`, cutoff)
+
+	// events: coordination/observability stream — pruned to retention window.
+	s.db.Exec(`DELETE FROM events WHERE created_at < ?`, cutoff)
+
+	// episodes: stored as Unix seconds (INTEGER).
+	s.db.Exec(`DELETE FROM episodes WHERE created_at < ?`, cutoffUnix)
+
+	// memories: honour their own expires_at field; also remove session_log entries
+	// older than the retention window regardless of their expires_at.
+	s.db.Exec(`DELETE FROM memories WHERE expires_at != '' AND expires_at < ?`, time.Now().UTC().Format(time.RFC3339))
+	s.db.Exec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at < ?`, cutoff)
 
 	// proposals: resolved proposals have no further value after retention period.
 	s.db.Exec(`DELETE FROM proposals WHERE status IN ('accepted','rejected','withdrawn') AND updated_at < ?`, cutoff)
@@ -925,8 +1043,8 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 
 	// Insert nodes in batches.
 	nodeStmt, err := tx.Prepare(`
-        INSERT INTO nodes (id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO nodes (id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance, domain)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 	if err != nil {
 		return fmt.Errorf("prepare node stmt: %w", err)
@@ -971,10 +1089,14 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		if prov == "" {
 			prov = "user-authored"
 		}
+		domain := string(n.Domain)
+		if domain == "" {
+			domain = "code"
+		}
 		if _, err := nodeStmt.Exec(
 			string(n.ID), string(n.Type),
 			n.Name, n.Package, n.File, n.Line,
-			exported, string(meta), doc, sig, lineCount, n.StableID, prov,
+			exported, string(meta), doc, sig, lineCount, n.StableID, prov, domain,
 		); err != nil {
 			return fmt.Errorf("insert node %s: %w", n.ID, err)
 		}
@@ -1122,7 +1244,7 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 
 	// Load nodes.
 	rows, err := s.db.Query(`
-        SELECT id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance FROM nodes
+        SELECT id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance, domain FROM nodes
     `)
 	if err != nil {
 		return nil, fmt.Errorf("query nodes: %w", err)
@@ -1137,8 +1259,9 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 			lineCount                int
 			stableID                 string
 			provenance               string
+			domain                   string
 		)
-		if err := rows.Scan(&id, &typ, &name, &pkg, &file, &line, &exported, &metaJSON, &doc, &sig, &lineCount, &stableID, &provenance); err != nil {
+		if err := rows.Scan(&id, &typ, &name, &pkg, &file, &line, &exported, &metaJSON, &doc, &sig, &lineCount, &stableID, &provenance, &domain); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		var meta map[string]string
@@ -1168,6 +1291,7 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 			Metadata:   meta,
 			StableID:   stableID,
 			Provenance: graph.ProvenanceType(provenance),
+			Domain:     graph.DomainType(domain),
 		})
 	}
 	if err := rows.Err(); err != nil {

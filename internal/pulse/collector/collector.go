@@ -15,7 +15,7 @@ import (
 
 // event wraps a typed event for the ring buffer.
 type event struct {
-	kind string // "tool_call", "context_delivery", "brain_usage", "session"
+	kind string // "tool_call", "context_delivery", "brain_usage", "session", "session_model", "agent_llm_usage"
 	data interface{}
 }
 
@@ -25,6 +25,15 @@ type sessionPayload struct {
 	AgentID   string
 	ProjectID string
 	Event     string
+}
+
+// sessionModelPayload carries the model/provider for Option A (session_init reports model).
+type sessionModelPayload struct {
+	SessionID string
+	AgentID   string
+	ProjectID string
+	Model     string
+	Provider  string
 }
 
 // Collector buffers analytics events and batch-writes them to the store.
@@ -94,6 +103,20 @@ func (c *Collector) RecordOutcomeSignal(ev pulsetypes.OutcomeSignalEvent) {
 	c.enqueue(event{kind: "outcome_signal", data: ev})
 }
 
+// RecordSessionModel enqueues a model/provider update for an existing session.
+// Called when an agent reports its model via session_init (Option A).
+func (c *Collector) RecordSessionModel(sessionID, agentID, projectID, model, provider string) {
+	c.enqueue(event{kind: "session_model", data: sessionModelPayload{
+		SessionID: sessionID, AgentID: agentID, ProjectID: projectID,
+		Model: model, Provider: provider,
+	}})
+}
+
+// RecordAgentLLMUsage enqueues an agent-reported LLM usage event (Option B).
+func (c *Collector) RecordAgentLLMUsage(ev pulsetypes.AgentLLMUsageEvent) {
+	c.enqueue(event{kind: "agent_llm_usage", data: ev})
+}
+
 func (c *Collector) enqueue(ev event) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -147,15 +170,25 @@ func (c *Collector) writeBatch(batch []event) {
 		var err error
 		switch ev.kind {
 		case "tool_call":
-			err = c.store.InsertToolCall(ev.data.(pulsetypes.ToolCallEvent))
+			tc := ev.data.(pulsetypes.ToolCallEvent)
+			err = c.store.InsertToolCall(tc)
+			// Increment the session tool_call counter for every real tool invocation.
+			if err == nil {
+				agentID := tc.AgentID
+				if agentID == "" {
+					agentID = "default"
+				}
+				sessionID := agentID + ":" + tc.ProjectID + ":" + time.Now().UTC().Format("2006-01-02")
+				if serr := c.store.UpdateSessionStats(sessionID, agentID, tc.ProjectID, 0, 0); serr != nil {
+					log.Printf("pulse collector: update session stats: %v", serr)
+				}
+			}
 		case "context_delivery":
 			cd := ev.data.(pulsetypes.ContextDeliveryEvent)
 			err = c.store.InsertContextDelivery(cd)
-			// Update per-session token savings after a successful write.
-			// Session ID mirrors the formula in handleIngestSessionEvent:
-			// agentID + ":" + UTC date, grouping all activity per agent per day.
-			// When agent_id is missing (common — it's optional on most tools),
-			// attribute to "default" so token savings are still tracked.
+			// Accumulate token savings separately — does NOT increment tool_calls
+			// (that is handled above in the tool_call branch so the counter
+			// reflects actual tool invocations, not just context deliveries).
 			if err == nil {
 				agentID := cd.AgentID
 				if agentID == "" {
@@ -165,9 +198,10 @@ func (c *Collector) writeBatch(batch []event) {
 				if tokensSaved < 0 {
 					tokensSaved = 0
 				}
-				sessionID := agentID + ":" + time.Now().UTC().Format("2006-01-02")
-				if serr := c.store.UpdateSessionStats(sessionID, agentID, cd.ProjectID, tokensSaved, 0); serr != nil {
-					log.Printf("pulse collector: update session stats: %v", serr)
+				costSaved := c.computeCostSaved(tokensSaved)
+				sessionID := agentID + ":" + cd.ProjectID + ":" + time.Now().UTC().Format("2006-01-02")
+				if serr := c.store.AddSessionTokensSaved(sessionID, agentID, cd.ProjectID, tokensSaved, costSaved); serr != nil {
+					log.Printf("pulse collector: add session tokens saved: %v", serr)
 				}
 			}
 		case "brain_usage":
@@ -177,11 +211,31 @@ func (c *Collector) writeBatch(batch []event) {
 			err = c.store.UpsertSession(sp.ID, sp.AgentID, sp.ProjectID, sp.Event)
 		case "outcome_signal":
 			err = c.store.InsertOutcomeSignal(ev.data.(pulsetypes.OutcomeSignalEvent))
+		case "session_model":
+			sp := ev.data.(sessionModelPayload)
+			err = c.store.UpdateSessionModel(sp.SessionID, sp.AgentID, sp.ProjectID, sp.Model, sp.Provider)
+		case "agent_llm_usage":
+			err = c.store.InsertAgentLLMUsage(ev.data.(pulsetypes.AgentLLMUsageEvent))
 		}
 		if err != nil {
 			log.Printf("pulse collector: write error (%s): %v", ev.kind, err)
 		}
 	}
+}
+
+// computeCostSaved estimates the USD value of tokensSaved by pricing the saved
+// tokens at gpt-4o input rates (the canonical high-value agent baseline).
+// Falls back to 0 if the pricing table has no entry for the baseline model.
+func (c *Collector) computeCostSaved(tokensSaved int) float64 {
+	if tokensSaved <= 0 {
+		return 0
+	}
+	const baselineModel = "gpt-4o"
+	inputPer1M, _, found := c.store.GetPricing(baselineModel)
+	if !found || inputPer1M <= 0 {
+		return 0
+	}
+	return float64(tokensSaved) / 1_000_000.0 * inputPer1M
 }
 
 // Len returns the current buffer length (for diagnostics).

@@ -26,6 +26,7 @@ type SessionEvent = types.SessionEvent
 type OutcomeSignalEvent = types.OutcomeSignalEvent
 type EntityEffectiveness = types.EntityEffectiveness
 type BrainUsageEvent = types.BrainUsageEvent
+type AgentLLMUsageEvent = types.AgentLLMUsageEvent
 
 // Client is the in-process analytics collector. It replaces the HTTP sidecar.
 // Create with New; call Close when the daemon shuts down.
@@ -104,11 +105,13 @@ func (c *Client) RecordContextDelivery(ev ContextDeliveryEvent) {
 }
 
 // RecordSessionEvent enqueues a session lifecycle event. Fire-and-forget.
+// Session ID includes projectID so sessions from different projects are never
+// merged even when the same agent_id is used across projects.
 func (c *Client) RecordSessionEvent(agentID, projectID, eventType string) {
 	if c == nil {
 		return
 	}
-	sessionID := agentID + ":" + time.Now().UTC().Format("2006-01-02")
+	sessionID := agentID + ":" + projectID + ":" + time.Now().UTC().Format("2006-01-02")
 	c.coll.RecordSessionEvent(sessionID, agentID, projectID, eventType)
 }
 
@@ -118,6 +121,25 @@ func (c *Client) RecordOutcomeSignal(ev OutcomeSignalEvent) {
 		return
 	}
 	c.coll.RecordOutcomeSignal(ev)
+}
+
+// RecordSessionModel records which model the agent declared in session_init (Option A).
+// Fire-and-forget; errors are silently discarded.
+func (c *Client) RecordSessionModel(agentID, projectID, model, provider string) {
+	if c == nil || model == "" {
+		return
+	}
+	sessionID := agentID + ":" + projectID + ":" + time.Now().UTC().Format("2006-01-02")
+	c.coll.RecordSessionModel(sessionID, agentID, projectID, model, provider)
+}
+
+// RecordAgentLLMUsage enqueues an agent-reported LLM usage event (Option B).
+// Fire-and-forget.
+func (c *Client) RecordAgentLLMUsage(ev AgentLLMUsageEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordAgentLLMUsage(ev)
 }
 
 // FetchEffectiveness returns per-entity effectiveness scores from the local store.
@@ -135,13 +157,19 @@ func (c *Client) FetchEffectiveness(projectID string, minSignals int) []EntityEf
 
 // PulseSummary is the response shape for GET /api/admin/pulse/summary.
 type PulseSummary struct {
-	Days    int                      `json:"days"`
-	Summary *pulsestore.Summary      `json:"summary"`
-	Tools   []pulsestore.ToolStats   `json:"tools"`
+	Days        int                          `json:"days"`
+	Summary     *pulsestore.Summary          `json:"summary"`
+	Tools       []pulsestore.ToolStats       `json:"tools"`
+	Agents      []pulsestore.AgentStats      `json:"agents"`
+	Timeline    []pulsestore.TimelinePoint   `json:"timeline"`
+	TopEntities []pulsestore.EntityCount     `json:"top_entities"`
+	Insights    []EntityEffectiveness        `json:"insights"`
+	LLMStats    []pulsestore.AgentLLMStats   `json:"llm_stats"`
 }
 
-// GetSummary returns aggregated analytics for the last N days plus per-tool stats.
-// Returns nil summary and empty tools if pulse is unavailable.
+// GetSummary returns aggregated analytics for the last N days including per-tool,
+// per-agent, 14-day timeline, and top queried entities.
+// Returns nil summary and empty slices if pulse is unavailable.
 func (c *Client) GetSummary(days int) *PulseSummary {
 	if c == nil {
 		return &PulseSummary{Days: days}
@@ -157,5 +185,36 @@ func (c *Client) GetSummary(days int) *PulseSummary {
 	if err != nil {
 		tools = nil
 	}
-	return &PulseSummary{Days: days, Summary: sum, Tools: tools}
+	agents, err := c.store.GetAgentStats(days)
+	if err != nil {
+		agents = nil
+	}
+	// Always use 14 days for the timeline chart regardless of the summary period.
+	timelineDays := 14
+	if days > 14 {
+		timelineDays = days
+	}
+	timeline, err := c.store.GetTimeline(timelineDays)
+	if err != nil {
+		timeline = nil
+	}
+	topEntities, err := c.store.TopEntities(days, 12)
+	if err != nil {
+		topEntities = nil
+	}
+	insights := c.FetchEffectiveness("", 2)
+	llmStats, err := c.store.GetAgentLLMStats(days)
+	if err != nil {
+		llmStats = nil
+	}
+	return &PulseSummary{
+		Days:        days,
+		Summary:     sum,
+		Tools:       tools,
+		Agents:      agents,
+		Timeline:    timeline,
+		TopEntities: topEntities,
+		Insights:    insights,
+		LLMStats:    llmStats,
+	}
 }

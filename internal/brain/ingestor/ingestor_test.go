@@ -126,6 +126,74 @@ func TestBuildPrompt_TruncatesLongCode(t *testing.T) {
 	}
 }
 
+func TestSummarize_CodeHallucination_JSONPath(t *testing.T) {
+	// LLM returns Go code as the summary value — must be rejected.
+	mock := llm.NewMockClient(`{"summary": "func Validate(token string) { x := 5; return x }"}`)
+	st := newTestStore(t)
+	ing := New(mock, st, 3*time.Second)
+
+	_, err := ing.Summarize(context.Background(), Request{
+		ProjectID: "test-project",
+		NodeID:    "node:auth:Validate",
+		NodeName:  "Validate",
+		Code:      "func Validate(token string) error { return nil }",
+	})
+	if err == nil {
+		t.Fatal("expected error when LLM returns code as summary, got nil")
+	}
+
+	// Nothing should be written to the store on rejection.
+	if stored := st.GetSummary("test-project", "node:auth:Validate"); stored != "" {
+		t.Errorf("expected no stored summary when code hallucination rejected, got: %q", stored)
+	}
+}
+
+func TestSummarize_CodeHallucination_FallbackPath(t *testing.T) {
+	// LLM returns raw Go code (not JSON) — fallback path must also reject it.
+	mock := llm.NewMockClient("func Validate(token string) {\n\tx := verify(token)\n\treturn x\n}")
+	st := newTestStore(t)
+	ing := New(mock, st, 3*time.Second)
+
+	_, err := ing.Summarize(context.Background(), Request{
+		ProjectID: "test-project",
+		NodeID:    "node:auth:Validate",
+		NodeName:  "Validate",
+		Code:      "func Validate(token string) error { return nil }",
+	})
+	if err == nil {
+		t.Fatal("expected error when LLM returns raw code as fallback, got nil")
+	}
+
+	if stored := st.GetSummary("test-project", "node:auth:Validate"); stored != "" {
+		t.Errorf("expected no stored summary when code hallucination rejected, got: %q", stored)
+	}
+}
+
+func TestLooksLikeCode(t *testing.T) {
+	cases := []struct {
+		input string
+		want  bool
+	}{
+		// Clearly code — should be rejected.
+		{"func Foo() { x := 5 }", true},
+		{"x := compute(y)", true},
+		{"func Open(path string) (*Store, error) {\n\tdb, err := sql.Open(...)\n}", true},
+		// Natural prose mentioning "function" or "returns" — should NOT be rejected.
+		{"This function validates JWT tokens and returns an error on expiry.", false},
+		{"Manages the connection pool for the database.", false},
+		{"Handles HTTP routing and dispatches requests to registered handlers.", false},
+		// Edge: single brace or "func" without both markers — not rejected.
+		{"Groups related {items} in the config.", false},
+		{"Calls the func defined in the store package.", false},
+	}
+	for _, tc := range cases {
+		got := looksLikeCode(tc.input)
+		if got != tc.want {
+			t.Errorf("looksLikeCode(%q) = %v, want %v", tc.input, got, tc.want)
+		}
+	}
+}
+
 func TestExtractJSON(t *testing.T) {
 	cases := []struct {
 		input string

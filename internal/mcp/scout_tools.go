@@ -119,9 +119,21 @@ func (s *Server) lookupPackageDocs(ctx context.Context, importPath string) (*mcp
 		}
 	}
 
-	content, fromCache, err := s.webCache.FetchPackageDocs(ctx, importPath, version)
-	if err != nil {
-		return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
+	var content string
+	var fromCache bool
+	if s.cacheWebSearches {
+		var err error
+		content, fromCache, err = s.webCache.FetchPackageDocs(ctx, importPath, version)
+		if err != nil {
+			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
+		}
+	} else {
+		// Cache disabled — fetch fresh, skip read/write
+		var err error
+		content, err = s.webCache.FetchPackageDocsFresh(ctx, importPath, version)
+		if err != nil {
+			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
+		}
 	}
 
 	result := map[string]interface{}{
@@ -134,21 +146,39 @@ func (s *Server) lookupPackageDocs(ctx context.Context, importPath string) (*mcp
 		result["version"] = version
 		result["note"] = fmt.Sprintf("docs pinned to go.mod version %s — re-fetched only on version bump", version)
 	}
+	if !s.cacheWebSearches {
+		result["cache_disabled"] = true
+	}
 	return jsonResult(result)
 }
 
 func (s *Server) lookupURL(ctx context.Context, url string) (*mcpgo.CallToolResult, error) {
-	content, fromCache, err := s.webCache.Fetch(ctx, url, webcache.URLCacheTTL)
-	if err != nil {
-		return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
+	var content string
+	var fromCache bool
+	if s.cacheWebSearches {
+		var err error
+		content, fromCache, err = s.webCache.Fetch(ctx, url, webcache.URLCacheTTL)
+		if err != nil {
+			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
+		}
+	} else {
+		var err error
+		content, err = s.webCache.FetchFresh(ctx, url)
+		if err != nil {
+			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
+		}
 	}
-	return jsonResult(map[string]interface{}{
+	result := map[string]interface{}{
 		"url":        url,
 		"content":    content,
 		"from_cache": fromCache,
 		"fetched_at": time.Now().UTC().Format(time.RFC3339),
 		"ttl_hours":  webcache.URLCacheTTL,
-	})
+	}
+	if !s.cacheWebSearches {
+		result["cache_disabled"] = true
+	}
+	return jsonResult(result)
 }
 
 func (s *Server) lookupEntityDocs(ctx context.Context, entityName string) (*mcpgo.CallToolResult, error) {

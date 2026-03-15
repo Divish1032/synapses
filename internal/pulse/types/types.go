@@ -78,3 +78,17 @@ type BrainUsageEvent struct {
 func (e *BrainUsageEvent) TotalTokens() int {
 	return e.PromptTokens + e.CompletionTokens
 }
+
+// AgentLLMUsageEvent is reported by the AI agent itself (via report_usage tool)
+// to record the model it used and how many tokens/cost the response incurred.
+// This is Option B: agent-self-reported usage for accurate cost tracking.
+type AgentLLMUsageEvent struct {
+	SessionID    string  `json:"session_id"`
+	AgentID      string  `json:"agent_id,omitempty"`
+	ProjectID    string  `json:"project_id,omitempty"`
+	Model        string  `json:"model"`
+	Provider     string  `json:"provider,omitempty"` // "anthropic", "openai", etc.
+	InputTokens  int     `json:"input_tokens"`
+	OutputTokens int     `json:"output_tokens"`
+	CostUSD      float64 `json:"cost_usd,omitempty"`
+}

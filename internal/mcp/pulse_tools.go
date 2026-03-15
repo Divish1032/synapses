@@ -24,6 +24,7 @@ func (s *Server) emitContextDelivery(
 	truncated bool,
 	brainEnriched bool,
 	cacheHit bool,
+	durationMs int64,
 ) {
 	pc := s.getPulseClient()
 	if pc == nil {
@@ -52,6 +53,7 @@ func (s *Server) emitContextDelivery(
 		Truncated:      truncated,
 		BrainEnriched:  brainEnriched,
 		CacheHit:       cacheHit,
+		DurationMs:     durationMs,
 	})
 }
 
@@ -61,6 +63,7 @@ func (s *Server) emitFileContextDelivery(
 	agentID, filePath string,
 	nodes []*graph.Node,
 	responsePayload interface{},
+	durationMs int64,
 ) {
 	pc := s.getPulseClient()
 	if pc == nil {
@@ -91,6 +94,7 @@ func (s *Server) emitFileContextDelivery(
 		ResponseTokens: responseBytes / 4,
 		BaselineTokens: int(total / 4),
 		NodesDelivered: len(nodes),
+		DurationMs:     durationMs,
 	})
 }
 

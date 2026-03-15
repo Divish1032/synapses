@@ -387,9 +387,21 @@ func cmdDaemonServe(args []string) error {
 	})
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
+	// Wrap the mux with a CORS handler so the Tauri WebView (origin tauri://localhost)
+	// can call /api/admin/* endpoints directly from the frontend.
+	corsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 	httpSrv := &http.Server{
 		Addr:         DaemonHTTPAddr,
-		Handler:      mux,
+		Handler:      corsHandler,
 		ReadTimeout:  60 * time.Second,
 		WriteTimeout: 0, // SSE streams can be indefinite
 		IdleTimeout:  120 * time.Second,

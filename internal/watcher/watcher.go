@@ -63,10 +63,11 @@ type Watcher struct {
 	configPath  string                 // absolute path to synapses.json (set by Start)
 	projectID   string                 // stable project identifier (FNV hash of project root path)
 
-	mu      sync.Mutex
-	timers  map[string]*time.Timer // debounce timers keyed by absolute file path
-	stopCh  chan struct{}
-	stopped bool
+	mu        sync.Mutex
+	timers    map[string]*time.Timer // debounce timers keyed by absolute file path
+	stopCh    chan struct{}
+	stopped   bool
+	reparseMu sync.Mutex // serialises concurrent reparseFile goroutines (debounce timers)
 
 	changeMu  sync.RWMutex
 	changeLog []ChangeEvent // bounded log of recent file events (max changeLogCap)
@@ -190,6 +191,11 @@ func (w *Watcher) RecentChanges(windowMinutes int) []ChangeEvent {
 
 // loop is the background event processing goroutine.
 func (w *Watcher) loop(root string) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "synapses/watcher: recovered panic in loop: %v\n", r)
+		}
+	}()
 	for {
 		select {
 		case <-w.stopCh:
@@ -304,7 +310,15 @@ func (w *Watcher) reloadConfig(configPath string) {
 }
 
 // reparseFile removes stale nodes for path and re-parses it into the graph.
+//
+// reparseMu serialises concurrent calls: debounce timers for different files
+// can fire simultaneously, and ResolveCallEdges drains ALL pending call sites
+// from the graph (not just the ones for this file).  If two reparseFile calls
+// race, the second DrainCallSites returns empty and those edges are lost.
 func (w *Watcher) reparseFile(path, _ string) {
+	w.reparseMu.Lock()
+	defer w.reparseMu.Unlock()
+
 	// Snapshot counts before mutation for ChangeEvent delta.
 	nodesBefore := w.countNodesForFile(path)
 	edgesBefore := w.graph.EdgeCount()
@@ -822,7 +836,8 @@ func dedup(ss []string) []string {
 func shouldSkipDir(name string) bool {
 	switch name {
 	case "vendor", "node_modules", "dist", "build", ".git",
-		".idea", ".vscode", "__pycache__", "testdata":
+		".idea", ".vscode", "__pycache__", "testdata",
+		"tmp_repos": // synapses-fine-distilling: cloned training repos — never index
 		return true
 	}
 	if len(name) > 0 && name[0] == '.' {

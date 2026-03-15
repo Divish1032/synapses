@@ -28,6 +28,7 @@ const (
 	// The summary replaces verbose raw code/doc in get_context responses, giving
 	// Claude natural-language context that costs far fewer tokens than JSON.
 	promptTemplate = `Write a 2-3 sentence technical briefing for this code entity: what it does, its role in the system, and any important patterns or concerns to be aware of.
+Do not write code. Describe the entity in plain English sentences only.
 Output ONLY valid JSON with no other text: {"summary": "...", "tags": ["tag1"]}
 
 Name: %s (%s, package %s)
@@ -125,6 +126,9 @@ func parseSummary(raw string) (summary string, tags []string, err error) {
 	if jsonErr := json.Unmarshal([]byte(extracted), &result); jsonErr == nil {
 		summary = strings.TrimSpace(result.Summary)
 		if summary != "" {
+			if looksLikeCode(summary) {
+				return "", nil, fmt.Errorf("LLM returned code instead of prose summary")
+			}
 			return summary, result.Tags, nil
 		}
 	}
@@ -137,11 +141,28 @@ func parseSummary(raw string) (summary string, tags []string, err error) {
 	if fallback == "" {
 		return "", nil, fmt.Errorf("empty response from LLM")
 	}
+	if looksLikeCode(fallback) {
+		return "", nil, fmt.Errorf("LLM returned code instead of prose summary")
+	}
 	// Limit to first 300 chars to keep summaries concise.
 	if len(fallback) > 300 {
 		fallback = fallback[:300] + "…"
 	}
 	return fallback, nil, nil
+}
+
+// looksLikeCode returns true when s appears to be Go source code rather than
+// a prose description. It checks for patterns that never appear in English prose:
+//   - ":=" (Go short variable declaration)
+//   - "func " combined with "{" (function definition with body)
+func looksLikeCode(s string) bool {
+	if strings.Contains(s, ":=") {
+		return true
+	}
+	if strings.Contains(s, "func ") && strings.Contains(s, "{") {
+		return true
+	}
+	return false
 }
 
 // truncateCode caps the code snippet at maxCodeChars runes.

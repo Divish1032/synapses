@@ -273,6 +273,122 @@ func TestPruneStaleData_DoesNotCrash(t *testing.T) {
 
 // ── CountIndexedFiles ─────────────────────────────────────────────────────────
 
+// ── OF-H1: Domain field persistence ──────────────────────────────────────────
+
+// TestDomainField_RoundTrip verifies that Node.Domain survives a SaveGraph/LoadGraph cycle.
+func TestDomainField_RoundTrip(t *testing.T) {
+	st := openTestStore(t)
+	g := graph.New("testrepo")
+
+	nodeID := g.MakeNodeID("api/openapi.yaml", "GetUsers")
+	g.AddNode(&graph.Node{
+		ID:     nodeID,
+		Type:   graph.NodeType("endpoint"),
+		Name:   "GetUsers",
+		File:   "api/openapi.yaml",
+		Line:   10,
+		Domain: graph.DomainAPI,
+	})
+
+	if err := st.SaveGraph(g); err != nil {
+		t.Fatalf("SaveGraph: %v", err)
+	}
+
+	loaded, err := st.LoadGraph()
+	if err != nil {
+		t.Fatalf("LoadGraph: %v", err)
+	}
+	n := loaded.GetNode(nodeID)
+	if n == nil {
+		t.Fatal("node not found after LoadGraph")
+	}
+	if n.Domain != graph.DomainAPI {
+		t.Errorf("expected domain %q, got %q", graph.DomainAPI, n.Domain)
+	}
+}
+
+// TestDomainField_DefaultsToCode verifies that nodes without an explicit domain
+// load as "code" (the default set by the migration and SaveGraph normalisation).
+func TestDomainField_DefaultsToCode(t *testing.T) {
+	st := openTestStore(t)
+	g := graph.New("testrepo")
+
+	nodeID := g.MakeNodeID("main.go", "main")
+	g.AddNode(&graph.Node{
+		ID:   nodeID,
+		Type: graph.NodeFunction,
+		Name: "main",
+		File: "main.go",
+		Line: 1,
+		// Domain intentionally omitted — should default to "code".
+	})
+
+	if err := st.SaveGraph(g); err != nil {
+		t.Fatalf("SaveGraph: %v", err)
+	}
+
+	loaded, err := st.LoadGraph()
+	if err != nil {
+		t.Fatalf("LoadGraph: %v", err)
+	}
+	n := loaded.GetNode(nodeID)
+	if n == nil {
+		t.Fatal("node not found after LoadGraph")
+	}
+	// Domain "code" is stored and loaded correctly.
+	if n.Domain != graph.DomainCode {
+		t.Errorf("expected domain %q, got %q", graph.DomainCode, n.Domain)
+	}
+}
+
+// TestDomainField_AllDomains verifies that all defined DomainType constants
+// round-trip correctly through SaveGraph/LoadGraph.
+func TestDomainField_AllDomains(t *testing.T) {
+	domains := []graph.DomainType{
+		graph.DomainCode,
+		graph.DomainInfra,
+		graph.DomainAPI,
+		graph.DomainDocs,
+		graph.DomainIssues,
+		graph.DomainCustom,
+	}
+
+	for _, dom := range domains {
+		dom := dom
+		t.Run(string(dom), func(t *testing.T) {
+			st := openTestStore(t)
+			g := graph.New("testrepo")
+
+			nodeID := g.MakeNodeID("file.txt", string(dom)+"-node")
+			g.AddNode(&graph.Node{
+				ID:     nodeID,
+				Type:   graph.NodeFunction,
+				Name:   string(dom) + "-node",
+				File:   "file.txt",
+				Line:   1,
+				Domain: dom,
+			})
+
+			if err := st.SaveGraph(g); err != nil {
+				t.Fatalf("SaveGraph: %v", err)
+			}
+			loaded, err := st.LoadGraph()
+			if err != nil {
+				t.Fatalf("LoadGraph: %v", err)
+			}
+			n := loaded.GetNode(nodeID)
+			if n == nil {
+				t.Fatalf("node not found for domain %q", dom)
+			}
+			if n.Domain != dom {
+				t.Errorf("domain mismatch: got %q, want %q", n.Domain, dom)
+			}
+		})
+	}
+}
+
+// ── CountIndexedFiles ─────────────────────────────────────────────────────────
+
 func TestCountIndexedFiles_AfterSaveFileMtimes(t *testing.T) {
 	st := openTestStore(t)
 
@@ -292,5 +408,55 @@ func TestCountIndexedFiles_AfterSaveFileMtimes(t *testing.T) {
 	}
 	if n2 != 3 {
 		t.Errorf("expected 3 indexed files, got %d", n2)
+	}
+}
+
+// ── R32: Compound indexes (CollectQueryStats) ─────────────────────────────────
+
+// TestR32_AllHotQueriesUseIndexes verifies that every R32 compound index is
+// present in the schema and is actually chosen by the SQLite query planner for
+// the representative hot queries it was designed to accelerate.
+//
+// CollectQueryStats runs EXPLAIN QUERY PLAN on each probe query and classifies
+// the result as an index hit or full scan. A full scan here means either an
+// index is missing (CREATE INDEX was not applied) or the query is written in a
+// way that prevents index use — both are bugs.
+func TestR32_AllHotQueriesUseIndexes(t *testing.T) {
+	st := openTestStore(t)
+
+	stats := st.CollectQueryStats()
+
+	if stats.FullScans > 0 {
+		t.Errorf("R32: %d hot queries use full table scans — expected 0 (missing indexes?)", stats.FullScans)
+	}
+	if stats.IndexHits != 4 {
+		t.Errorf("R32: expected 4 index hits, got %d (some compound indexes may be missing)", stats.IndexHits)
+	}
+}
+
+// TestR32_IndexesIdempotentOnUpgrade verifies that opening the same database
+// twice does not fail due to duplicate index errors. All R32 indexes use
+// CREATE INDEX IF NOT EXISTS, so re-applying them is always safe.
+func TestR32_IndexesIdempotentOnUpgrade(t *testing.T) {
+	path := t.TempDir() + "/upgrade.db"
+
+	// First open: creates schema + R32 indexes.
+	st1, err := openTestStoreAtPath(t, path)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	st1.Close()
+
+	// Second open: must not fail with "index already exists" or any other error.
+	st2, err := openTestStoreAtPath(t, path)
+	if err != nil {
+		t.Fatalf("second Open (idempotency check): %v", err)
+	}
+	defer st2.Close()
+
+	// Indexes must still work after re-open.
+	stats := st2.CollectQueryStats()
+	if stats.FullScans > 0 {
+		t.Errorf("R32 after re-open: %d full scans (indexes lost on upgrade path?)", stats.FullScans)
 	}
 }
