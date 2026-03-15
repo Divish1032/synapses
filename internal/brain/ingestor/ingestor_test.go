@@ -185,6 +185,20 @@ func TestLooksLikeCode(t *testing.T) {
 		// Edge: single brace or "func" without both markers — not rejected.
 		{"Groups related {items} in the config.", false},
 		{"Calls the func defined in the store package.", false},
+		// Go struct/interface declarations.
+		{"type Config struct { Host string }", true},
+		{"type Handler interface { Handle(r *Request) error }", true},
+		// Python function definition.
+		{"def validate(token, expiry):", true},
+		// JS/TS arrow function.
+		{"const handler = (req) => { return req.body }", true},
+		{"app.get('/health', (req, res) => res.send('ok'))", true},
+		// JS/TS function keyword.
+		{"function(x) { return x + 1 }", true},
+		// Prose that mentions programming terms but is not code.
+		{"Defines the interface between the client and server.", false},
+		{"Python-style configuration using key-value pairs.", false},
+		{"The function type is registered in the handler map.", false},
 	}
 	for _, tc := range cases {
 		got := looksLikeCode(tc.input)

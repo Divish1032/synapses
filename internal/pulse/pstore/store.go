@@ -432,6 +432,12 @@ func (s *Store) GetSummary(days int) (*Summary, error) {
 		return nil, err
 	}
 
+	// Compute tokens_saved from context_deliveries (ground truth) instead of sessions table
+	sum.TokensSaved = sum.BaselineTokens - sum.TokensDelivered
+	if sum.TokensSaved < 0 {
+		sum.TokensSaved = 0
+	}
+
 	if sum.TokensDelivered > 0 {
 		sum.CompressionRatio = float64(sum.BaselineTokens) / float64(sum.TokensDelivered)
 	} else {
@@ -439,10 +445,9 @@ func (s *Store) GetSummary(days int) (*Summary, error) {
 	}
 
 	row = s.db.QueryRow(
-		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0),
-		        COALESCE(SUM(tokens_saved), 0)
+		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0)
 		 FROM sessions WHERE started_at >= ?`, since)
-	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD, &sum.TokensSaved); err != nil {
+	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD); err != nil {
 		return nil, err
 	}
 
@@ -512,7 +517,12 @@ func mergeSummaries(hist, today *Summary) *Summary {
 		TasksCompleted:    hist.TasksCompleted + today.TasksCompleted,
 	}
 
-	out.TokensSaved = hist.TokensSaved + today.TokensSaved
+	// Compute tokens_saved from baseline - delivered (ground truth)
+	out.TokensSaved = out.BaselineTokens - out.TokensDelivered
+	if out.TokensSaved < 0 {
+		out.TokensSaved = 0
+	}
+
 	if out.BaselineTokens > 0 && out.TokensSaved > 0 {
 		out.SavingsPct = float64(out.TokensSaved) / float64(out.BaselineTokens) * 100.0
 	}
@@ -564,6 +574,12 @@ func (s *Store) GetSummaryForDay(day string) (*Summary, error) {
 		return nil, err
 	}
 
+	// Compute tokens_saved from context_deliveries (ground truth) instead of sessions table
+	sum.TokensSaved = sum.BaselineTokens - sum.TokensDelivered
+	if sum.TokensSaved < 0 {
+		sum.TokensSaved = 0
+	}
+
 	if sum.TokensDelivered > 0 {
 		sum.CompressionRatio = float64(sum.BaselineTokens) / float64(sum.TokensDelivered)
 	} else {
@@ -571,10 +587,9 @@ func (s *Store) GetSummaryForDay(day string) (*Summary, error) {
 	}
 
 	row = s.db.QueryRow(
-		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0),
-		        COALESCE(SUM(tokens_saved), 0)
+		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0)
 		 FROM sessions WHERE date(started_at) = ?`, day)
-	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD, &sum.TokensSaved); err != nil {
+	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD); err != nil {
 		return nil, err
 	}
 

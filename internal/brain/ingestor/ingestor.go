@@ -151,15 +151,40 @@ func parseSummary(raw string) (summary string, tags []string, err error) {
 	return fallback, nil, nil
 }
 
-// looksLikeCode returns true when s appears to be Go source code rather than
-// a prose description. It checks for patterns that never appear in English prose:
-//   - ":=" (Go short variable declaration)
-//   - "func " combined with "{" (function definition with body)
+// looksLikeCode returns true when s appears to be source code rather than a
+// prose description. It checks for patterns that are unambiguous code markers
+// across the languages most likely to appear in LLM hallucinations:
+//
+//	Go:         ":="  |  "func "+"{" |  " struct {" |  "interface {"
+//	Python:     "def "+"("+"):"
+//	JavaScript: ") => "  |  " => {"  |  "function("  |  "function ("
 func looksLikeCode(s string) bool {
+	// Go: short variable declaration — never in English prose.
 	if strings.Contains(s, ":=") {
 		return true
 	}
+	// Go: function definition with body.
 	if strings.Contains(s, "func ") && strings.Contains(s, "{") {
+		return true
+	}
+	// Go: type/struct declaration.
+	if strings.Contains(s, " struct {") {
+		return true
+	}
+	// Go/TS: interface block.
+	if strings.Contains(s, "interface {") {
+		return true
+	}
+	// Python: function definition  "def foo(args):"
+	if strings.Contains(s, "def ") && strings.Contains(s, "(") && strings.Contains(s, "):") {
+		return true
+	}
+	// JS/TS: arrow function body or return type.
+	if strings.Contains(s, " => {") || strings.Contains(s, ") => ") {
+		return true
+	}
+	// JS/TS: function keyword with parens (avoids false-positive on plain "function").
+	if strings.Contains(s, "function(") || strings.Contains(s, "function (") {
 		return true
 	}
 	return false

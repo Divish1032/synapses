@@ -204,6 +204,7 @@ func writeNodeHeader(b *strings.Builder, n *graph.Node, summary string) {
 
 	// OF-H1: surface domain for non-code nodes so agents know they are looking at
 	// infrastructure/API/doc/issue context rather than source code.
+	// Speed: two string comparisons per node — O(1), negligible vs. BFS traversal cost.
 	if n.Domain != "" && n.Domain != graph.DomainCode {
 		extras = append(extras, "domain:"+string(n.Domain))
 	}
