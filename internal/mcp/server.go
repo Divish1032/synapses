@@ -154,6 +154,14 @@ type Server struct {
 	// startOnce ensures StartBackground() is truly idempotent.
 	stopCh    chan struct{}
 	startOnce sync.Once
+
+	// B28: scale-aware tool registration.
+	// repoScale is determined from g.NodeCount() in New() and controls which
+	// tools are registered at startup vs. deferred for on-demand loading.
+	// deferredTools holds ServerTool definitions for tools not yet registered.
+	repoScale      graph.Scale
+	deferredTools  map[string]server.ServerTool
+	deferredToolsMu sync.Mutex
 }
 
 // getSessionHash returns the last stored entity_hash for this session+entityKey, or "".
@@ -263,6 +271,27 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 			cfg.Rules = append(cfg.Rules, dynamicRules...)
 		}
 	}
+
+	// B28: compute repo scale for scale-aware tool registration.
+	// NodeCount == 0 means the graph is not yet indexed → default to full tier
+	// so agents always have access to all tools on first run.
+	{
+		var nc int
+		if g != nil {
+			nc = g.NodeCount()
+		}
+		switch {
+		case nc == 0:
+			s.repoScale = graph.ScaleLarge // not yet indexed — register all tools
+		case nc < 100:
+			s.repoScale = graph.ScaleMicro
+		case nc < 2000:
+			s.repoScale = graph.ScaleSmall // small + medium both get standard tier
+		default:
+			s.repoScale = graph.ScaleLarge
+		}
+	}
+	s.deferredTools = make(map[string]server.ServerTool)
 
 	// Usage observability: wire before/after hooks to record every tool call
 	// timing and success status into the tool_calls SQLite table.
@@ -511,6 +540,113 @@ func (s *Server) memoryExpiryLoop() {
 	}
 }
 
+// ── B28: Scale-aware tool registration ───────────────────────────────────────
+
+// coreTierTools are the 10 tools registered at every repo scale (micro+).
+// They cover the minimal viable session: bootstrap, navigate, plan, implement,
+// and finish. Always available regardless of repo size.
+var coreTierTools = map[string]bool{
+	"session_init":          true,
+	"get_context":           true,
+	"find_entity":           true,
+	"search":                true,
+	"validate_plan":         true,
+	"verify_implementation": true,
+	"create_plan":           true,
+	"update_task":           true,
+	"discover_tools":        true,
+	"end_session":           true,
+}
+
+// standardTierTools are the 20 tools registered for small and medium repos.
+// Adds coordination, memory, and exploration tools on top of the core set.
+var standardTierTools = map[string]bool{
+	// Core (same as above, duplicated for O(1) lookup).
+	"session_init":          true,
+	"get_context":           true,
+	"find_entity":           true,
+	"search":                true,
+	"validate_plan":         true,
+	"verify_implementation": true,
+	"create_plan":           true,
+	"update_task":           true,
+	"discover_tools":        true,
+	"end_session":           true,
+	// Standard additions.
+	"get_pending_tasks": true,
+	"get_file_context":  true,
+	"get_impact":        true,
+	"get_call_chain":    true,
+	"claim_work":        true,
+	"release_claims":    true,
+	"remember":          true,
+	"recall":            true,
+	"get_working_state": true,
+	"get_violations":    true,
+}
+
+// toolInTier reports whether name should be registered at startup given
+// s.repoScale. Returns true (register immediately) for ScaleLarge or any
+// unrecognised value so that the default is always safe (all tools available).
+func (s *Server) toolInTier(name string) bool {
+	switch s.repoScale {
+	case graph.ScaleMicro:
+		return coreTierTools[name]
+	case graph.ScaleSmall, graph.ScaleMedium:
+		return standardTierTools[name]
+	default: // ScaleLarge, or "" (unset / pre-index)
+		return true
+	}
+}
+
+// addOrDefer either registers tool t immediately (when it belongs to the
+// current repo-scale tier) or stores it in s.deferredTools for later
+// promotion via RegisterDeferredTools. Called by registerTools and
+// registerSkillTools instead of s.mcp.AddTool directly.
+func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
+	if s.toolInTier(t.Name) {
+		s.mcp.AddTool(t, h)
+		return
+	}
+	s.deferredToolsMu.Lock()
+	s.deferredTools[t.Name] = server.ServerTool{Tool: t, Handler: h}
+	s.deferredToolsMu.Unlock()
+}
+
+// RegisterDeferredTools promotes the named tools from the deferred set to the
+// live MCP session. Returns the names of tools that were actually promoted
+// (subset of names that were in the deferred set). Thread-safe; idempotent for
+// names that are already registered or unknown.
+//
+// Calling this triggers mcp-go's notifications/tools/list_changed broadcast to
+// all connected clients. Clients that implement this notification (Cursor,
+// VSCode) will re-fetch the tool list automatically. Claude Code requires a
+// manual MCP reconnect due to a known issue (github.com/anthropics/claude-code/issues/4118).
+func (s *Server) RegisterDeferredTools(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	// Collect and remove from deferred map under the lock, then register
+	// outside the lock to avoid holding deferredToolsMu while AddTool
+	// acquires mcp-go's toolsMu and writes a network notification.
+	s.deferredToolsMu.Lock()
+	var toRegister []server.ServerTool
+	var registered []string
+	for _, name := range names {
+		if st, ok := s.deferredTools[name]; ok {
+			toRegister = append(toRegister, st)
+			delete(s.deferredTools, name)
+			registered = append(registered, name)
+		}
+	}
+	s.deferredToolsMu.Unlock()
+
+	for _, st := range toRegister {
+		s.addOrDefer(st.Tool, st.Handler)
+	}
+	return registered
+}
+
 // registerTools wires all Synapses tool definitions to their handlers.
 func (s *Server) registerTools() {
 	// ── Session Bootstrap ────────────────────────────────────────────────────
@@ -520,7 +656,7 @@ func (s *Server) registerTools() {
 	// called session_init before, unchanged sections (e.g. project_identity)
 	// are omitted to save tokens. The agent's context profile is updated
 	// after each call so subsequent calls are incremental.
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"session_init",
 			mcp.WithDescription(
@@ -549,7 +685,7 @@ func (s *Server) registerTools() {
 	)
 
 	// report_usage: agent self-reports its LLM token usage after a response (Option B).
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"report_usage",
 			mcp.WithDescription(
@@ -583,7 +719,7 @@ func (s *Server) registerTools() {
 	)
 
 	// discover_tools: lightweight tool finder
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"discover_tools",
 			mcp.WithDescription(
@@ -602,7 +738,7 @@ func (s *Server) registerTools() {
 	// ── Code Graph Tools ────────────────────────────────────────────────────
 
 	// get_project_identity
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_project_identity",
 			mcp.WithDescription(
@@ -615,7 +751,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_context
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_context",
 			mcp.WithDescription(
@@ -663,7 +799,7 @@ func (s *Server) registerTools() {
 	)
 
 	// find_entity
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"find_entity",
 			mcp.WithDescription(
@@ -680,7 +816,7 @@ func (s *Server) registerTools() {
 	)
 
 	// validate_plan
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"validate_plan",
 			mcp.WithDescription(
@@ -707,7 +843,7 @@ func (s *Server) registerTools() {
 	)
 
 	// verify_implementation — post-write complement to validate_plan
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"verify_implementation",
 			mcp.WithDescription(
@@ -730,7 +866,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_violations (absorbs get_violation_log via rule_id + limit params)
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_violations",
 			mcp.WithDescription(
@@ -752,7 +888,7 @@ func (s *Server) registerTools() {
 	)
 
 	// upsert_gap — R32: record a quality gap on a code entity
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"upsert_gap",
 			mcp.WithDescription(
@@ -792,7 +928,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_gaps — R32: query quality gaps
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_gaps",
 			mcp.WithDescription(
@@ -818,7 +954,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_file_context
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_file_context",
 			mcp.WithDescription(
@@ -835,7 +971,7 @@ func (s *Server) registerTools() {
 	)
 
 	// search (absorbs semantic_search via mode param)
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"search",
 			mcp.WithDescription(
@@ -860,7 +996,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_call_chain
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_call_chain",
 			mcp.WithDescription(
@@ -881,7 +1017,7 @@ func (s *Server) registerTools() {
 	)
 
 	// annotate_node
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"annotate_node",
 			mcp.WithDescription(
@@ -906,7 +1042,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_impact
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_impact",
 			mcp.WithDescription(
@@ -933,7 +1069,7 @@ func (s *Server) registerTools() {
 	// one LLM conversation are stored in SQLite and surfaced to future sessions.
 
 	// create_plan
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"create_plan",
 			mcp.WithDescription(
@@ -963,7 +1099,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_pending_tasks (absorbs get_my_tasks via agent_id + suggest_next)
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_pending_tasks",
 			mcp.WithDescription(
@@ -986,7 +1122,7 @@ func (s *Server) registerTools() {
 	)
 
 	// save_session_state
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"save_session_state",
 			mcp.WithDescription(
@@ -1028,7 +1164,7 @@ func (s *Server) registerTools() {
 	)
 
 	// end_session
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"end_session",
 			mcp.WithDescription(
@@ -1054,7 +1190,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_session_state
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_session_state",
 			mcp.WithDescription(
@@ -1072,7 +1208,7 @@ func (s *Server) registerTools() {
 	)
 
 	// update_task
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"update_task",
 			mcp.WithDescription(
@@ -1099,7 +1235,7 @@ func (s *Server) registerTools() {
 	)
 
 	// handoff_task: transfer task ownership between agents with session state.
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"handoff_task",
 			mcp.WithDescription(
@@ -1129,7 +1265,7 @@ func (s *Server) registerTools() {
 	// ── Coordination & Multi-Agent Tools ────────────────────────────────────
 
 	// get_plans
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_plans",
 			mcp.WithDescription(
@@ -1143,7 +1279,7 @@ func (s *Server) registerTools() {
 
 
 	// link_task_nodes
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"link_task_nodes",
 			mcp.WithDescription(
@@ -1164,7 +1300,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_agents
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_agents",
 			mcp.WithDescription(
@@ -1176,7 +1312,7 @@ func (s *Server) registerTools() {
 	)
 
 	// claim_work
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"claim_work",
 			mcp.WithDescription(
@@ -1204,7 +1340,7 @@ func (s *Server) registerTools() {
 	)
 
 	// release_claims
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"release_claims",
 			mcp.WithDescription(
@@ -1220,7 +1356,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_conflicts
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_conflicts",
 			mcp.WithDescription(
@@ -1236,7 +1372,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_events
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_events",
 			mcp.WithDescription(
@@ -1260,7 +1396,7 @@ func (s *Server) registerTools() {
 	// ── Rule Management Tools ────────────────────────────────────────────────
 
 	// upsert_rule
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"upsert_rule",
 			mcp.WithDescription(
@@ -1308,7 +1444,7 @@ func (s *Server) registerTools() {
 	// ── Session Awareness Tools ──────────────────────────────────────────────
 
 	// get_working_state
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_working_state",
 			mcp.WithDescription(
@@ -1327,7 +1463,7 @@ func (s *Server) registerTools() {
 	// ── Web Tools ─────────────────────────────────────────────────────────────
 
 	// web_annotate
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"web_annotate",
 			mcp.WithDescription(
@@ -1355,7 +1491,7 @@ func (s *Server) registerTools() {
 	)
 
 	// lookup_docs
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"lookup_docs",
 			mcp.WithDescription(
@@ -1385,7 +1521,7 @@ func (s *Server) registerTools() {
 	)
 
 	// upsert_adr
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"upsert_adr",
 			mcp.WithDescription(
@@ -1424,7 +1560,7 @@ func (s *Server) registerTools() {
 	)
 
 	// prepare_context — intent-based context assembly (replaces multi-tool chains).
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"prepare_context",
 			mcp.WithDescription(
@@ -1462,7 +1598,7 @@ func (s *Server) registerTools() {
 	// Semantics: A2A-lite (topic-based, task-linked payloads, lifecycle: unread→read).
 
 	// send_message
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"send_message",
 			mcp.WithDescription(
@@ -1492,7 +1628,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_messages
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_messages",
 			mcp.WithDescription(
@@ -1524,7 +1660,7 @@ func (s *Server) registerTools() {
 	)
 
 	// remember
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"remember",
 			mcp.WithDescription(
@@ -1570,7 +1706,7 @@ func (s *Server) registerTools() {
 	)
 
 	// recall (absorbs get_episodes: omit query for chronological browse)
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"recall",
 			mcp.WithDescription(
@@ -1605,7 +1741,7 @@ func (s *Server) registerTools() {
 	)
 
 	// check_plan_safety
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"check_plan_safety",
 			mcp.WithDescription(
@@ -1629,7 +1765,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_rule_candidates
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_rule_candidates",
 			mcp.WithDescription(
@@ -1642,7 +1778,7 @@ func (s *Server) registerTools() {
 	)
 
 	// get_adrs
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_adrs",
 			mcp.WithDescription(
@@ -1660,7 +1796,7 @@ func (s *Server) registerTools() {
 
 	// plan_context — single-call pre-implementation gate (replaces the 3-step ritual:
 	// check_plan_safety → validate_plan → prepare_context(intent=plan)).
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"plan_context",
 			mcp.WithDescription(

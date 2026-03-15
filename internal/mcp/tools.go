@@ -1973,6 +1973,23 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 		resp["recommended_workflow"] = bestWorkflow
 	}
 
+	// B28: promote any matched tools that are currently deferred (not yet
+	// registered at startup due to repo scale) so the agent can call them
+	// immediately after this response. Triggers notifications/tools/list_changed
+	// to all connected clients.
+	matchedNames := make([]string, len(matches))
+	for i, m := range matches {
+		matchedNames[i] = m.Name
+	}
+	if newlyRegistered := s.RegisterDeferredTools(matchedNames); len(newlyRegistered) > 0 {
+		resp["newly_registered"] = newlyRegistered
+		resp["registration_hint"] = fmt.Sprintf(
+			"%d tool(s) newly registered: %v. They are now available in this session. "+
+				"If using Claude Code: reconnect the MCP client to see them in the tool list "+
+				"(known issue: github.com/anthropics/claude-code/issues/4118).",
+			len(newlyRegistered), newlyRegistered)
+	}
+
 	return jsonResult(resp)
 }
 
