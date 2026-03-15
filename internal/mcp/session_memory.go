@@ -30,12 +30,23 @@ type sessionSummary struct {
 	TasksUpdated     []string `json:"tasks_updated,omitempty"`
 }
 
+// sessionCallEntry tracks per-connection tool call depth for RX1 auto-end detection.
+// One entry exists per (sessionID + agentID) pair while the session is active.
+type sessionCallEntry struct {
+	agentID   string
+	callCount int
+	startedAt time.Time
+	// autoLogged is set after the first auto-log fires, preventing re-trigger until
+	// the count resets (manual end_session or reconnect).
+	autoLogged bool
+}
+
 // handleEndSession captures session knowledge and persists it as memories.
 // This is the key tool for the "coordination and memory infrastructure" pivot:
 // agents call this at session end, and institutional knowledge accumulates
 // automatically without manual remember() calls.
 func (s *Server) handleEndSession(
-	_ context.Context,
+	ctx context.Context,
 	req mcplib.CallToolRequest,
 ) (*mcplib.CallToolResult, error) {
 	agentID, _ := req.GetArguments()["agent_id"].(string)
@@ -49,6 +60,13 @@ func (s *Server) handleEndSession(
 	if s.store == nil {
 		return mcplib.NewToolResultError("store not available"), nil
 	}
+
+	// RX1: clear call counter so that the auto-log doesn't fire again for this
+	// agent after a manual end_session call. The existing dedup logic in
+	// InsertMemory (stringSimilarity) handles the case where an auto-log was
+	// already written — manual end_session just touches it rather than duplicating.
+	sessionID := SessionIDFromContext(ctx)
+	s.clearSessionCallEntry(sessionID, agentID)
 
 	result := endSessionResult{
 		Status:  "ok",
@@ -246,6 +264,84 @@ func buildSessionLogContent(agentID, taskID, summary string, sess *sessionSummar
 	}
 	return content
 }
+
+// ── RX1: Auto end_session on context pressure ──────────────────────────────
+
+// trackSessionCall increments the call counter for (sessionID, agentID) and
+// fires triggerAutoSessionLog asynchronously when the configured threshold is
+// exceeded. Safe to call from the AddAfterCallTool hook concurrently.
+func (s *Server) trackSessionCall(sessionID, agentID string) {
+	threshold := 0
+	if s.config != nil {
+		threshold = s.config.Session.AutoEndThresholdCalls
+	}
+	if threshold <= 0 {
+		return // auto-end disabled
+	}
+
+	key := sessionID + "::" + agentID
+
+	s.sessionCallsMu.Lock()
+	entry, ok := s.sessionCalls[key]
+	if !ok {
+		entry = &sessionCallEntry{
+			agentID:   agentID,
+			startedAt: time.Now(),
+		}
+		s.sessionCalls[key] = entry
+	}
+	entry.callCount++
+	shouldFire := entry.callCount >= threshold && !entry.autoLogged
+	if shouldFire {
+		entry.autoLogged = true
+	}
+	s.sessionCallsMu.Unlock()
+
+	if shouldFire {
+		go s.triggerAutoSessionLog(agentID)
+	}
+}
+
+// triggerAutoSessionLog performs session memory extraction without an explicit
+// end_session call. Captures entities examined, files touched, and tasks updated
+// using the same extraction logic as handleEndSession.
+// Tags the memory with "auto_session_log" to distinguish it from manual logs.
+// Errors are silently discarded — this is best-effort, non-blocking.
+func (s *Server) triggerAutoSessionLog(agentID string) {
+	if s.store == nil || agentID == "" {
+		return
+	}
+
+	sessSummary := s.extractSessionSummary(agentID)
+	content := buildSessionLogContent(agentID, "", "", sessSummary)
+	if content == "" {
+		return
+	}
+
+	// Tag as auto_session_log so callers can filter if needed.
+	_, _ = s.store.InsertMemory(store.Memory{
+		Tier:    store.TierSessionLog,
+		Content: content,
+		AgentID: agentID,
+		Source:  store.SourceAuto,
+		Tags:    `["auto_session_log","auto"]`,
+	})
+}
+
+// clearSessionCallEntry removes the call counter for (sessionID, agentID).
+// Called by handleEndSession so that a manual end_session resets the counter
+// and prevents a duplicate auto-log from firing later in the same session.
+func (s *Server) clearSessionCallEntry(sessionID, agentID string) {
+	if sessionID == "" && agentID == "" {
+		return
+	}
+	key := sessionID + "::" + agentID
+	s.sessionCallsMu.Lock()
+	delete(s.sessionCalls, key)
+	s.sessionCallsMu.Unlock()
+}
+
+// ── end RX1 ────────────────────────────────────────────────────────────────
 
 // getRecentlyModifiedFiles returns files changed recently (from watcher events).
 func (s *Server) getRecentlyModifiedFiles() []string {
