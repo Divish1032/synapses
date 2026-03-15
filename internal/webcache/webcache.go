@@ -125,6 +125,22 @@ func (c *Cache) Fetch(ctx context.Context, url string, ttlHours int) (string, bo
 	return content, false, nil
 }
 
+// FetchFresh fetches url from the network without reading or writing the cache.
+// Use this when the user has disabled web doc caching (cache_web_searches=false).
+// Returns (content, false, error) — fromCache is always false.
+func (c *Cache) FetchFresh(ctx context.Context, url string) (string, error) {
+	return c.fetchAndStrip(ctx, url)
+}
+
+// FetchPackageDocsFresh fetches package docs without reading or writing the cache.
+func (c *Cache) FetchPackageDocsFresh(ctx context.Context, importPath, version string) (string, error) {
+	docURL := pkgDocBaseURL + importPath
+	if version != "" {
+		docURL += "@" + version
+	}
+	return c.fetchAndStrip(ctx, docURL)
+}
+
 // InvalidatePackage removes cached docs for importPath at oldVersion so they
 // will be re-fetched at the new version. Called when go.mod bumps a dependency.
 func (c *Cache) InvalidatePackage(importPath, oldVersion string) {

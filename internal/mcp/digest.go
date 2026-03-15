@@ -202,6 +202,12 @@ func writeNodeHeader(b *strings.Builder, n *graph.Node, summary string) {
 		extras = append(extras, "⚠ external")
 	}
 
+	// OF-H1: surface domain for non-code nodes so agents know they are looking at
+	// infrastructure/API/doc/issue context rather than source code.
+	if n.Domain != "" && n.Domain != graph.DomainCode {
+		extras = append(extras, "domain:"+string(n.Domain))
+	}
+
 	// R1: surface confidence for inferred route nodes.
 	if n.Type == graph.NodeRoute {
 		if conf := n.Metadata["confidence"]; conf != "" {

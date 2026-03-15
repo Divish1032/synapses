@@ -80,6 +80,79 @@ func TestWriteNodeHeader_ComplexityZeroSkipped(t *testing.T) {
 	}
 }
 
+// ── OF-H1: domain badge in writeNodeHeader ────────────────────────────────────
+
+func TestWriteNodeHeader_DomainBadge_NonCode(t *testing.T) {
+	var b strings.Builder
+	n := &graph.Node{
+		Name:   "GetUsers",
+		Type:   graph.NodeType("endpoint"),
+		File:   "api/openapi.yaml",
+		Line:   10,
+		Domain: graph.DomainAPI,
+	}
+	writeNodeHeader(&b, n, "")
+	out := b.String()
+	if !strings.Contains(out, "domain:api") {
+		t.Errorf("expected 'domain:api' badge for api domain node, got %q", out)
+	}
+}
+
+func TestWriteNodeHeader_DomainBadge_CodeHidden(t *testing.T) {
+	var b strings.Builder
+	n := &graph.Node{
+		Name:   "Login",
+		Type:   graph.NodeFunction,
+		File:   "auth/auth.go",
+		Line:   5,
+		Domain: graph.DomainCode,
+	}
+	writeNodeHeader(&b, n, "")
+	out := b.String()
+	if strings.Contains(out, "domain:") {
+		t.Errorf("domain:code should be hidden (zero noise for code nodes), got %q", out)
+	}
+}
+
+func TestWriteNodeHeader_DomainBadge_EmptyHidden(t *testing.T) {
+	var b strings.Builder
+	n := &graph.Node{
+		Name: "main",
+		Type: graph.NodeFunction,
+		File: "main.go",
+		Line: 1,
+		// Domain intentionally empty — treated as "code".
+	}
+	writeNodeHeader(&b, n, "")
+	out := b.String()
+	if strings.Contains(out, "domain:") {
+		t.Errorf("empty domain should be hidden, got %q", out)
+	}
+}
+
+func TestWriteNodeHeader_DomainBadge_AllNonCodeDomains(t *testing.T) {
+	nonCodeDomains := []graph.DomainType{
+		graph.DomainInfra,
+		graph.DomainAPI,
+		graph.DomainDocs,
+		graph.DomainIssues,
+		graph.DomainCustom,
+	}
+	for _, dom := range nonCodeDomains {
+		dom := dom
+		t.Run(string(dom), func(t *testing.T) {
+			var b strings.Builder
+			n := &graph.Node{Name: "X", Type: graph.NodeFunction, File: "x.txt", Line: 1, Domain: dom}
+			writeNodeHeader(&b, n, "")
+			out := b.String()
+			want := "domain:" + string(dom)
+			if !strings.Contains(out, want) {
+				t.Errorf("expected %q badge, got %q", want, out)
+			}
+		})
+	}
+}
+
 // ── getRootSummary ────────────────────────────────────────────────────────────
 
 func TestGetRootSummary_NilPacket(t *testing.T) {

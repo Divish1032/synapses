@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,10 +50,29 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// migrate creates all tables and indexes if they don't exist.
+// migrate creates all tables and indexes if they don't exist, then runs
+// column-level migrations for databases created before new columns were added.
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	return s.migrateColumns()
+}
+
+// migrateColumns adds columns introduced after initial schema to existing databases.
+// SQLite returns "duplicate column name" when a column already exists; we ignore that.
+func (s *Store) migrateColumns() error {
+	for _, stmt := range []string{
+		`ALTER TABLE sessions ADD COLUMN model    TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN provider TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return fmt.Errorf("migrate columns: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 const schema = `
@@ -119,10 +139,28 @@ CREATE TABLE IF NOT EXISTS sessions (
     tool_calls       INTEGER NOT NULL DEFAULT 0,
     tokens_saved     INTEGER NOT NULL DEFAULT 0,
     cost_saved_usd   REAL    NOT NULL DEFAULT 0.0,
-    tasks_completed  INTEGER NOT NULL DEFAULT 0
+    tasks_completed  INTEGER NOT NULL DEFAULT 0,
+    model            TEXT    NOT NULL DEFAULT '',
+    provider         TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_sess_agent ON sessions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_sess_start ON sessions(started_at);
+
+CREATE TABLE IF NOT EXISTS agent_llm_usage (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    TEXT    NOT NULL DEFAULT '',
+    agent_id      TEXT    NOT NULL DEFAULT '',
+    project_id    TEXT    NOT NULL DEFAULT '',
+    model         TEXT    NOT NULL,
+    provider      TEXT    NOT NULL DEFAULT '',
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd      REAL    NOT NULL DEFAULT 0.0,
+    created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_alu_model   ON agent_llm_usage(model);
+CREATE INDEX IF NOT EXISTS idx_alu_agent   ON agent_llm_usage(agent_id);
+CREATE INDEX IF NOT EXISTS idx_alu_created ON agent_llm_usage(created_at);
 
 CREATE TABLE IF NOT EXISTS daily_rollups (
     day    TEXT NOT NULL,
@@ -138,6 +176,17 @@ CREATE TABLE IF NOT EXISTS pricing (
     source        TEXT NOT NULL DEFAULT 'default',
     updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
+
+-- Default pricing for common models used as the baseline cost reference.
+-- "What would the agent have paid to send the un-compressed baseline tokens?"
+-- Prices in USD per 1M tokens (input). Updated via UpsertPricing if stale.
+INSERT OR IGNORE INTO pricing (model, input_per_1m, output_per_1m, source) VALUES
+    ('gpt-4o',               2.50, 10.00, 'default'),
+    ('gpt-4o-mini',          0.15,  0.60, 'default'),
+    ('claude-3-5-sonnet',    3.00, 15.00, 'default'),
+    ('claude-3-5-haiku',     0.80,  4.00, 'default'),
+    ('claude-sonnet-4-6',    3.00, 15.00, 'default'),
+    ('claude-opus-4-6',     15.00, 75.00, 'default');
 
 -- R29: Intent Alignment Metrics — passive outcome signals.
 -- Correlates context delivery quality with downstream agent actions.
@@ -273,6 +322,26 @@ func (s *Store) UpdateSessionStats(sessionID, agentID, projectID string, tokensS
 	return err
 }
 
+// AddSessionTokensSaved increments only the token savings and cost fields for
+// a session row. Unlike UpdateSessionStats it does NOT increment tool_calls —
+// this is used by the context-delivery path so tool_calls counts real tool
+// invocations only (recorded by UpdateSessionStats in the tool_call path).
+func (s *Store) AddSessionTokensSaved(sessionID, agentID, projectID string, tokensSaved int, costSaved float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`INSERT INTO sessions (id, agent_id, project_id, started_at, tokens_saved, cost_saved_usd)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		 	tokens_saved   = tokens_saved + excluded.tokens_saved,
+		 	cost_saved_usd = cost_saved_usd + excluded.cost_saved_usd`,
+		sessionID, agentID, projectID, now, tokensSaved, costSaved,
+	)
+	return err
+}
+
 // UpsertPricing inserts or updates a model pricing entry.
 func (s *Store) UpsertPricing(model string, inputPer1M, outputPer1M float64, source string) error {
 	s.mu.Lock()
@@ -323,11 +392,27 @@ type Summary struct {
 }
 
 // GetSummary returns aggregated analytics for the last N days.
+// Fast path: sums pre-computed daily_rollups for past days, then adds today's
+// raw data. Falls back to a full raw-table scan if rollups are not yet available
+// (e.g. new installation or rollup gap).
 func (s *Store) GetSummary(days int) (*Summary, error) {
+	today := time.Now().UTC().Format("2006-01-02")
+	rollupSince := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
+
+	// ── Fast path: rollups for past days + raw for today ──────────────────
+	hist, rollupErr := s.sumRollups(rollupSince, today)
+	if rollupErr == nil && hist != nil {
+		raw, err := s.GetSummaryForDay(today)
+		if err != nil {
+			return nil, err
+		}
+		return mergeSummaries(hist, raw), nil
+	}
+
+	// ── Slow path: full raw-table scan (rollups absent or incomplete) ──────
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	sum := &Summary{}
 
-	// Tool calls
 	row := s.db.QueryRow(
 		`SELECT COUNT(*), COALESCE(AVG(duration_ms), 0)
 		 FROM tool_calls WHERE created_at >= ?`, since)
@@ -335,7 +420,6 @@ func (s *Store) GetSummary(days int) (*Summary, error) {
 		return nil, err
 	}
 
-	// Context deliveries
 	row = s.db.QueryRow(
 		`SELECT COUNT(*),
 		        COALESCE(SUM(response_tokens), 0),
@@ -348,26 +432,154 @@ func (s *Store) GetSummary(days int) (*Summary, error) {
 		return nil, err
 	}
 
-	// Compute savings
-	sum.TokensSaved = sum.BaselineTokens - sum.TokensDelivered
-	if sum.TokensSaved < 0 {
-		sum.TokensSaved = 0
-	}
-	if sum.BaselineTokens > 0 {
-		sum.SavingsPct = float64(sum.TokensSaved) / float64(sum.BaselineTokens) * 100.0
-	}
 	if sum.TokensDelivered > 0 {
 		sum.CompressionRatio = float64(sum.BaselineTokens) / float64(sum.TokensDelivered)
 	} else {
 		sum.CompressionRatio = 1.0
 	}
 
-	// Sessions
 	row = s.db.QueryRow(
-		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0)
+		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0),
+		        COALESCE(SUM(tokens_saved), 0)
 		 FROM sessions WHERE started_at >= ?`, since)
-	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted); err != nil {
+	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD, &sum.TokensSaved); err != nil {
 		return nil, err
+	}
+
+	if sum.BaselineTokens > 0 && sum.TokensSaved > 0 {
+		sum.SavingsPct = float64(sum.TokensSaved) / float64(sum.BaselineTokens) * 100.0
+	}
+
+	return sum, nil
+}
+
+// sumRollups aggregates daily_rollups rows in [since, before) into a Summary.
+// Returns (nil, nil) when no rollup rows exist for the period (triggers fallback).
+func (s *Store) sumRollups(since, before string) (*Summary, error) {
+	rows, err := s.db.Query(
+		`SELECT metric, COALESCE(SUM(value), 0)
+		 FROM daily_rollups WHERE day >= ? AND day < ?
+		 GROUP BY metric`, since, before)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	m := make(map[string]float64)
+	for rows.Next() {
+		var metric string
+		var value float64
+		if err := rows.Scan(&metric, &value); err != nil {
+			return nil, err
+		}
+		m[metric] = value
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	if len(m) == 0 {
+		return nil, nil // no rollup data — caller should use slow path
+	}
+
+	sum := &Summary{
+		TotalToolCalls:    int(m["tool_calls"]),
+		TokensDelivered:   int(m["tokens_delivered"]),
+		BaselineTokens:    int(m["baseline_tokens"]),
+		TokensSaved:       int(m["tokens_saved"]),
+		SavingsPct:        m["savings_pct"],
+		CompressionRatio:  m["compression"],
+		CacheHitRate:      m["cache_hit_rate"],
+		BrainEnrichRate:   m["brain_enrichment_rate"],
+		AvgLatencyMs:      m["avg_latency_ms"],
+		ContextDeliveries: int(m["context_deliveries"]),
+		CostSavedUSD:      m["cost_saved_usd"],
+		Sessions:          int(m["sessions"]),
+		TasksCompleted:    int(m["tasks_completed"]),
+	}
+	return sum, nil
+}
+
+// mergeSummaries combines historical (rollup-based) and today's (raw) summaries.
+// Additive fields are summed; rate fields are recomputed from combined totals.
+func mergeSummaries(hist, today *Summary) *Summary {
+	out := &Summary{
+		TotalToolCalls:    hist.TotalToolCalls + today.TotalToolCalls,
+		TokensDelivered:   hist.TokensDelivered + today.TokensDelivered,
+		BaselineTokens:    hist.BaselineTokens + today.BaselineTokens,
+		ContextDeliveries: hist.ContextDeliveries + today.ContextDeliveries,
+		CostSavedUSD:      hist.CostSavedUSD + today.CostSavedUSD,
+		Sessions:          hist.Sessions + today.Sessions,
+		TasksCompleted:    hist.TasksCompleted + today.TasksCompleted,
+	}
+
+	out.TokensSaved = hist.TokensSaved + today.TokensSaved
+	if out.BaselineTokens > 0 && out.TokensSaved > 0 {
+		out.SavingsPct = float64(out.TokensSaved) / float64(out.BaselineTokens) * 100.0
+	}
+	if out.TokensDelivered > 0 {
+		out.CompressionRatio = float64(out.BaselineTokens) / float64(out.TokensDelivered)
+	} else {
+		out.CompressionRatio = 1.0
+	}
+
+	// Weighted average for rate fields (weighted by event count).
+	totalCDs := hist.ContextDeliveries + today.ContextDeliveries
+	if totalCDs > 0 {
+		out.CacheHitRate = (hist.CacheHitRate*float64(hist.ContextDeliveries) +
+			today.CacheHitRate*float64(today.ContextDeliveries)) / float64(totalCDs)
+		out.BrainEnrichRate = (hist.BrainEnrichRate*float64(hist.ContextDeliveries) +
+			today.BrainEnrichRate*float64(today.ContextDeliveries)) / float64(totalCDs)
+	}
+	totalTC := hist.TotalToolCalls + today.TotalToolCalls
+	if totalTC > 0 {
+		out.AvgLatencyMs = (hist.AvgLatencyMs*float64(hist.TotalToolCalls) +
+			today.AvgLatencyMs*float64(today.TotalToolCalls)) / float64(totalTC)
+	}
+
+	return out
+}
+
+// GetSummaryForDay returns aggregated metrics for a specific calendar day
+// (format "2006-01-02"). Used by the aggregator to pre-compute daily rollups
+// with exact calendar-day boundaries instead of a rolling 24-hour window.
+func (s *Store) GetSummaryForDay(day string) (*Summary, error) {
+	sum := &Summary{}
+
+	row := s.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(AVG(duration_ms), 0)
+		 FROM tool_calls WHERE date(created_at) = ?`, day)
+	if err := row.Scan(&sum.TotalToolCalls, &sum.AvgLatencyMs); err != nil {
+		return nil, err
+	}
+
+	row = s.db.QueryRow(
+		`SELECT COUNT(*),
+		        COALESCE(SUM(response_tokens), 0),
+		        COALESCE(SUM(baseline_tokens), 0),
+		        COALESCE(AVG(CASE WHEN cache_hit = 1 THEN 1.0 ELSE 0.0 END), 0),
+		        COALESCE(AVG(CASE WHEN brain_enriched = 1 THEN 1.0 ELSE 0.0 END), 0)
+		 FROM context_deliveries WHERE date(created_at) = ?`, day)
+	if err := row.Scan(&sum.ContextDeliveries, &sum.TokensDelivered, &sum.BaselineTokens,
+		&sum.CacheHitRate, &sum.BrainEnrichRate); err != nil {
+		return nil, err
+	}
+
+	if sum.TokensDelivered > 0 {
+		sum.CompressionRatio = float64(sum.BaselineTokens) / float64(sum.TokensDelivered)
+	} else {
+		sum.CompressionRatio = 1.0
+	}
+
+	row = s.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0),
+		        COALESCE(SUM(tokens_saved), 0)
+		 FROM sessions WHERE date(started_at) = ?`, day)
+	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD, &sum.TokensSaved); err != nil {
+		return nil, err
+	}
+
+	if sum.BaselineTokens > 0 && sum.TokensSaved > 0 {
+		sum.SavingsPct = float64(sum.TokensSaved) / float64(sum.BaselineTokens) * 100.0
 	}
 
 	return sum, nil
@@ -382,16 +594,43 @@ type TimelinePoint struct {
 }
 
 // GetTimeline returns daily aggregated data for the last N days.
+// ToolCalls counts actual tool invocations; TokensSaved comes from context_deliveries;
+// CostSavedUSD comes from sessions. Three subqueries are unioned and grouped by day
+// so days with only some event types still appear correctly.
 func (s *Store) GetTimeline(days int) ([]TimelinePoint, error) {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 
 	rows, err := s.db.Query(
-		`SELECT date(created_at) AS day,
-		        COALESCE(SUM(baseline_tokens) - SUM(response_tokens), 0),
-		        COUNT(*)
-		 FROM context_deliveries
-		 WHERE date(created_at) >= ?
-		 GROUP BY day ORDER BY day`, since)
+		`SELECT day,
+		        COALESCE(SUM(tokens_saved), 0),
+		        COALESCE(SUM(tool_calls), 0),
+		        COALESCE(SUM(cost_saved_usd), 0)
+		 FROM (
+		   SELECT date(created_at) AS day,
+		          COALESCE(SUM(baseline_tokens) - SUM(response_tokens), 0) AS tokens_saved,
+		          0 AS tool_calls,
+		          0.0 AS cost_saved_usd
+		   FROM context_deliveries
+		   WHERE date(created_at) >= ?
+		   GROUP BY day
+		   UNION ALL
+		   SELECT date(created_at) AS day,
+		          0 AS tokens_saved,
+		          COUNT(*) AS tool_calls,
+		          0.0 AS cost_saved_usd
+		   FROM tool_calls
+		   WHERE date(created_at) >= ?
+		   GROUP BY day
+		   UNION ALL
+		   SELECT date(started_at) AS day,
+		          0 AS tokens_saved,
+		          0 AS tool_calls,
+		          COALESCE(SUM(cost_saved_usd), 0) AS cost_saved_usd
+		   FROM sessions
+		   WHERE date(started_at) >= ?
+		   GROUP BY day
+		 )
+		 GROUP BY day ORDER BY day`, since, since, since)
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +639,7 @@ func (s *Store) GetTimeline(days int) ([]TimelinePoint, error) {
 	var points []TimelinePoint
 	for rows.Next() {
 		var p TimelinePoint
-		if err := rows.Scan(&p.Date, &p.TokensSaved, &p.ToolCalls); err != nil {
+		if err := rows.Scan(&p.Date, &p.TokensSaved, &p.ToolCalls, &p.CostSavedUSD); err != nil {
 			return nil, err
 		}
 		if p.TokensSaved < 0 {
@@ -597,8 +836,15 @@ func (s *Store) GetPricing(model string) (inputPer1M, outputPer1M float64, found
 	return inputPer1M, outputPer1M, true
 }
 
-// TopEntities returns the most frequently queried entities in context deliveries.
-func (s *Store) TopEntities(days, limit int) ([]string, error) {
+// EntityCount holds an entity name and the number of times it was queried.
+type EntityCount struct {
+	Entity string `json:"entity"`
+	Count  int    `json:"count"`
+}
+
+// TopEntities returns the most frequently queried entities in context deliveries,
+// each with a query count so the UI can display relative frequency.
+func (s *Store) TopEntities(days, limit int) ([]EntityCount, error) {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	rows, err := s.db.Query(
 		`SELECT entity, COUNT(*) AS cnt
@@ -610,14 +856,13 @@ func (s *Store) TopEntities(days, limit int) ([]string, error) {
 	}
 	defer rows.Close()
 
-	var entities []string
+	var entities []EntityCount
 	for rows.Next() {
-		var e string
-		var cnt int
-		if err := rows.Scan(&e, &cnt); err != nil {
+		var ec EntityCount
+		if err := rows.Scan(&ec.Entity, &ec.Count); err != nil {
 			return nil, err
 		}
-		entities = append(entities, e)
+		entities = append(entities, ec)
 	}
 	return entities, rows.Err()
 }
@@ -688,4 +933,77 @@ func (s *Store) GetEffectiveness(projectID string, minSignals int) ([]pulsetypes
 		results = append(results, e)
 	}
 	return results, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// Agent LLM usage tracking (Option A + B: model reported via session_init or report_usage)
+// ---------------------------------------------------------------------------
+
+// UpdateSessionModel records which model the agent is using for this session.
+// Uses an upsert so it is safe to call before or after UpsertSession("start").
+func (s *Store) UpdateSessionModel(sessionID, agentID, projectID, model, provider string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`INSERT INTO sessions (id, agent_id, project_id, started_at, model, provider)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET model = excluded.model, provider = excluded.provider`,
+		sessionID, agentID, projectID, now, model, provider,
+	)
+	return err
+}
+
+// InsertAgentLLMUsage records one reported LLM call from an AI agent.
+func (s *Store) InsertAgentLLMUsage(ev pulsetypes.AgentLLMUsageEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(
+		`INSERT INTO agent_llm_usage
+		 (session_id, agent_id, project_id, model, provider, input_tokens, output_tokens, cost_usd)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		ev.SessionID, ev.AgentID, ev.ProjectID, ev.Model, ev.Provider,
+		ev.InputTokens, ev.OutputTokens, ev.CostUSD,
+	)
+	return err
+}
+
+// AgentLLMStats holds per-model aggregated usage reported by agents.
+type AgentLLMStats struct {
+	Model        string  `json:"model"`
+	Provider     string  `json:"provider"`
+	Calls        int     `json:"calls"`
+	InputTokens  int     `json:"input_tokens"`
+	OutputTokens int     `json:"output_tokens"`
+	TotalCostUSD float64 `json:"total_cost_usd"`
+}
+
+// GetAgentLLMStats returns per-model aggregated LLM usage for the last N days.
+func (s *Store) GetAgentLLMStats(days int) ([]AgentLLMStats, error) {
+	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
+	rows, err := s.db.Query(
+		`SELECT model, provider,
+		        COUNT(*),
+		        COALESCE(SUM(input_tokens), 0),
+		        COALESCE(SUM(output_tokens), 0),
+		        COALESCE(SUM(cost_usd), 0)
+		 FROM agent_llm_usage
+		 WHERE created_at >= ?
+		 GROUP BY model, provider
+		 ORDER BY SUM(cost_usd) DESC, COUNT(*) DESC`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var stats []AgentLLMStats
+	for rows.Next() {
+		var st AgentLLMStats
+		if err := rows.Scan(&st.Model, &st.Provider, &st.Calls,
+			&st.InputTokens, &st.OutputTokens, &st.TotalCostUSD); err != nil {
+			return nil, err
+		}
+		stats = append(stats, st)
+	}
+	return stats, rows.Err()
 }

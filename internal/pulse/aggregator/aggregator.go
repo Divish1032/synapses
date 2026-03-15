@@ -63,26 +63,31 @@ func (a *Aggregator) loop() {
 }
 
 // rollup computes today's metrics and writes them to daily_rollups.
+// Uses calendar-day boundaries (WHERE date(created_at) = today) rather than
+// a rolling 24-hour window so each day's rollup represents exactly midnight→midnight.
 func (a *Aggregator) rollup() {
 	today := time.Now().UTC().Format("2006-01-02")
 
-	// Get summary for the last 1 day to compute today's metrics.
-	sum, err := a.store.GetSummary(1)
+	sum, err := a.store.GetSummaryForDay(today)
 	if err != nil {
 		log.Printf("pulse aggregator: summary error: %v", err)
 		return
 	}
 
 	metrics := map[string]float64{
-		"tokens_saved":     float64(sum.TokensSaved),
-		"tokens_delivered": float64(sum.TokensDelivered),
-		"baseline_tokens":  float64(sum.BaselineTokens),
-		"tool_calls":       float64(sum.TotalToolCalls),
-		"savings_pct":      sum.SavingsPct,
-		"compression":      sum.CompressionRatio,
-		"cache_hit_rate":   sum.CacheHitRate,
-		"sessions":         float64(sum.Sessions),
-		"tasks_completed":  float64(sum.TasksCompleted),
+		"tokens_saved":          float64(sum.TokensSaved),
+		"tokens_delivered":      float64(sum.TokensDelivered),
+		"baseline_tokens":       float64(sum.BaselineTokens),
+		"tool_calls":            float64(sum.TotalToolCalls),
+		"savings_pct":           sum.SavingsPct,
+		"compression":           sum.CompressionRatio,
+		"cache_hit_rate":        sum.CacheHitRate,
+		"brain_enrichment_rate": sum.BrainEnrichRate,
+		"avg_latency_ms":        sum.AvgLatencyMs,
+		"context_deliveries":    float64(sum.ContextDeliveries),
+		"cost_saved_usd":        sum.CostSavedUSD,
+		"sessions":              float64(sum.Sessions),
+		"tasks_completed":       float64(sum.TasksCompleted),
 	}
 
 	for metric, value := range metrics {

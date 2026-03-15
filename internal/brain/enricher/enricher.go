@@ -214,7 +214,9 @@ func parseInsight(raw string) (Response, error) {
 	extracted := llm.ExtractJSON(raw)
 	var result insightJSON
 	if jsonErr := json.Unmarshal([]byte(extracted), &result); jsonErr == nil {
-		if txt := strings.TrimSpace(result.Insight); txt != "" {
+		// Reject placeholder strings echoed from the prompt template schema
+		// (e.g. "..." or short single-word values) — only store real insights.
+		if txt := strings.TrimSpace(result.Insight); txt != "" && txt != "..." && len(txt) > 10 {
 			return Response{Insight: txt, Concerns: result.Concerns, LLMUsed: true}, nil
 		}
 	}

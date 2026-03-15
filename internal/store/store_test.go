@@ -21,6 +21,13 @@ func openTestStore(t *testing.T) *store.Store {
 	return st
 }
 
+// openTestStoreAtPath opens (or creates) a store at a specific path.
+// Used by upgrade-path tests that need to open the same file twice.
+func openTestStoreAtPath(t *testing.T, path string) (*store.Store, error) {
+	t.Helper()
+	return store.Open(path)
+}
+
 func buildTestGraph(t *testing.T) *graph.Graph {
 	t.Helper()
 	g := graph.New("testrepo")

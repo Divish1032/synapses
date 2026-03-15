@@ -65,6 +65,26 @@ var DefaultEdgeWeights = map[EdgeType]float64{
 // Using a named type (not a plain string) enforces intent at compile time.
 type NodeID string
 
+// DomainType classifies which knowledge domain a graph node belongs to.
+// Code is the default domain; future parsers and connectors set other domains
+// so that infrastructure, API, doc, and issue nodes can coexist in the same graph.
+type DomainType string
+
+const (
+	// DomainCode is the default: source-code entities (functions, structs, etc.).
+	DomainCode DomainType = "code"
+	// DomainInfra represents infrastructure resources (Terraform, k8s, Docker).
+	DomainInfra DomainType = "infra"
+	// DomainAPI represents API schema entities (OpenAPI endpoints, gRPC services).
+	DomainAPI DomainType = "api"
+	// DomainDocs represents documentation sections (Markdown, wikis).
+	DomainDocs DomainType = "docs"
+	// DomainIssues represents external tickets and issues (GitHub, Linear, Jira).
+	DomainIssues DomainType = "issues"
+	// DomainCustom is a catch-all for user-defined domain parsers and connectors.
+	DomainCustom DomainType = "custom"
+)
+
 // ProvenanceType classifies the trust tier of a graph node.
 // Derived at index time from file path patterns and content headers — no LLM needed.
 type ProvenanceType string
@@ -108,6 +128,12 @@ type Node struct {
 	// Used by BFS ranking (user-authored nodes surface first) and as a
 	// Semantic Firewall gate on high-privilege operations.
 	Provenance ProvenanceType `json:"provenance,omitempty"`
+	// Domain classifies which knowledge domain this node belongs to.
+	// Defaults to DomainCode ("code") for all source-code entities.
+	// Future domain parsers (infra, api, docs, issues) set this at index time
+	// so that non-code nodes coexist in the same graph without ambiguity.
+	// An empty string is treated as DomainCode everywhere in the codebase.
+	Domain DomainType `json:"domain,omitempty"`
 }
 
 // Edge represents a directed relationship between two nodes.

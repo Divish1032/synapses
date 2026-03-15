@@ -197,6 +197,7 @@ func (s *Server) handleGetContext(
 	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
+	handlerStart := time.Now()
 	entityName, ok := req.GetArguments()["entity"].(string)
 	if !ok || entityName == "" {
 		return mcp.NewToolResultError("entity is required"), nil
@@ -426,11 +427,15 @@ func (s *Server) handleGetContext(
 			// the full response. Session auto-cache is bypassed entirely when an
 			// explicit known_hash is present — the agent owns the decision.
 			if explicitKnownHash == entityHash {
-				return jsonResult(map[string]interface{}{
-					"unchanged":   true,
-					"entity_hash": entityHash,
-					"entity":      entityName,
-				})
+				cacheAgentID := agentIDForFeedback
+				if cacheAgentID == "" {
+					cacheAgentID = s.getLastAgent()
+				}
+				cacheResp := map[string]interface{}{"unchanged": true, "entity_hash": entityHash, "entity": entityName}
+				go s.emitContextDelivery("get_context", cacheAgentID, entityName, best.File,
+					cacheResp, sg.Nodes, sg.Edges, sg.TruncatedCount, sg.Truncated,
+					false, true, time.Since(handlerStart).Milliseconds())
+				return jsonResult(cacheResp)
 			}
 		} else if sessionID != "" {
 			// No explicit hash — use server-side session auto-cache: if this session
@@ -438,12 +443,15 @@ func (s *Server) handleGetContext(
 			// hasn't changed since, return {unchanged:true} automatically.
 			// Disabled when sessionID=="" (stdio path, tests).
 			if s.getSessionHash(sessionID, entityCacheKey) == entityHash {
-				return jsonResult(map[string]interface{}{
-					"unchanged":    true,
-					"entity_hash":  entityHash,
-					"entity":       entityName,
-					"cache_source": "session",
-				})
+				cacheAgentID := agentIDForFeedback
+				if cacheAgentID == "" {
+					cacheAgentID = s.getLastAgent()
+				}
+				cacheResp := map[string]interface{}{"unchanged": true, "entity_hash": entityHash, "entity": entityName, "cache_source": "session"}
+				go s.emitContextDelivery("get_context", cacheAgentID, entityName, best.File,
+					cacheResp, sg.Nodes, sg.Edges, sg.TruncatedCount, sg.Truncated,
+					false, true, time.Since(handlerStart).Milliseconds())
+				return jsonResult(cacheResp)
 			}
 		}
 	}
@@ -686,6 +694,16 @@ func (s *Server) handleGetContext(
 		}
 	}
 
+	// F17: surface adaptive expansion hint in the response so agents know why
+	// they received deeper context than the default.
+	if adaptiveForceFullDetail {
+		dc.AdaptiveHint = "⟳ Context depth auto-expanded based on prior feedback for this entity."
+	}
+
+	// Attach entity_hash to the response so clients can cache and compare.
+	// Must be set BEFORE the telemetry goroutine reads dc via json.Marshal.
+	dc.EntityHash = entityHash
+
 	// ── Fire-and-forget telemetry (non-blocking) ──
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 	if agentID == "" {
@@ -698,6 +716,7 @@ func (s *Server) handleGetContext(
 		sg.Truncated,
 		dc.ContextPacket != nil,
 		false,
+		time.Since(handlerStart).Milliseconds(),
 	)
 
 	// Multi-agent awareness: fire-and-forget event emission.
@@ -713,15 +732,6 @@ func (s *Server) handleGetContext(
 			s.upsertAgentWithActivity(agentID, &store.AgentActivity{Focus: entityName})
 		}()
 	}
-
-	// F17: surface adaptive expansion hint in the response so agents know why
-	// they received deeper context than the default.
-	if adaptiveForceFullDetail {
-		dc.AdaptiveHint = "⟳ Context depth auto-expanded based on prior feedback for this entity."
-	}
-
-	// Attach entity_hash to the response so clients can cache and compare.
-	dc.EntityHash = entityHash
 
 	// format=compact returns a natural-language briefing instead of the default JSON blob.
 	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t, default).
@@ -2091,6 +2101,7 @@ func (s *Server) handleGetFileContext(
 	_ context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
+	handlerStart := time.Now()
 	filePath, ok := req.GetArguments()["file"].(string)
 	if !ok || filePath == "" {
 		return mcp.NewToolResultError("file is required"), nil
@@ -2164,7 +2175,7 @@ func (s *Server) handleGetFileContext(
 			"count":    len(out),
 			"entities": out,
 		}
-		s.emitFileContextDelivery(agentIDFC, filePath, matches, payload)
+		s.emitFileContextDelivery(agentIDFC, filePath, matches, payload, time.Since(handlerStart).Milliseconds())
 		return jsonResult(payload)
 	}
 
@@ -2185,7 +2196,7 @@ func (s *Server) handleGetFileContext(
 		"entities_by_file": byFile,
 		"hint":             fmt.Sprintf("%d files named %q found. Use file= param with a longer path suffix to pin to one file.", len(fileSet), filePath),
 	}
-	s.emitFileContextDelivery(agentIDFC, filePath, matches, multiPayload)
+	s.emitFileContextDelivery(agentIDFC, filePath, matches, multiPayload, time.Since(handlerStart).Milliseconds())
 	return jsonResult(multiPayload)
 }
 
@@ -2741,6 +2752,8 @@ func (s *Server) handleSessionInit(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	agentID, _ := req.GetArguments()["agent_id"].(string)
+	model, _    := req.GetArguments()["model"].(string)
+	provider, _ := req.GetArguments()["provider"].(string)
 	s.upsertAgentIfNeeded(agentID)
 	// Remember this agent so subsequent tool calls that omit agent_id
 	// can still be attributed correctly in Pulse analytics.
@@ -2758,9 +2771,14 @@ func (s *Server) handleSessionInit(
 		s.ctxCallMu.Unlock()
 	}
 
-	// Notify pulse of session start so agent stats are trackable.
-	if pc := s.getPulseClient(); pc != nil && agentID != "" {
-		go pc.RecordSessionEvent(agentID, s.projectID, "start")
+	// Notify pulse of session start and record the model if provided (Option A).
+	if pc := s.getPulseClient(); pc != nil && agentID != "" && s.logSessions {
+		go func() {
+			pc.RecordSessionEvent(agentID, s.projectID, "start")
+			if model != "" {
+				pc.RecordSessionModel(agentID, s.projectID, model, provider)
+			}
+		}()
 	}
 
 	// Emit session-start event so peers polling get_events see a new agent arrive.
@@ -3310,6 +3328,60 @@ func jsonResult(v interface{}) (*mcp.CallToolResult, error) {
 		return mcp.NewToolResultError(fmt.Sprintf("marshal result: %v", err)), nil
 	}
 	return mcp.NewToolResultText(string(b)), nil
+}
+
+// handleReportUsage records agent-self-reported LLM token usage (Option B).
+// The agent calls this after completing a response to give Synapses accurate
+// model cost data that cannot be inferred from the MCP layer alone.
+func (s *Server) handleReportUsage(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	model, _    := args["model"].(string)
+	provider, _ := args["provider"].(string)
+	agentID, _  := args["agent_id"].(string)
+	if agentID == "" {
+		agentID = s.getLastAgent()
+	}
+
+	inputTokens  := 0
+	outputTokens := 0
+	costUSD       := 0.0
+	if v, ok := args["input_tokens"].(float64); ok {
+		inputTokens = int(v)
+	}
+	if v, ok := args["output_tokens"].(float64); ok {
+		outputTokens = int(v)
+	}
+	if v, ok := args["cost_usd"].(float64); ok {
+		costUSD = v
+	}
+
+	if model == "" {
+		return mcp.NewToolResultError("model is required"), nil
+	}
+
+	pc := s.getPulseClient()
+	if pc != nil {
+		sessionID := agentID + ":" + s.projectID + ":" + time.Now().UTC().Format("2006-01-02")
+		go pc.RecordAgentLLMUsage(pulse.AgentLLMUsageEvent{
+			SessionID:    sessionID,
+			AgentID:      agentID,
+			ProjectID:    s.projectID,
+			Model:        model,
+			Provider:     provider,
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+			CostUSD:      costUSD,
+		})
+	}
+
+	return jsonResult(map[string]interface{}{
+		"recorded": true,
+		"model":    model,
+		"note":     "Usage recorded. Thank you — this improves cost-savings accuracy in Analytics.",
+	})
 }
 
 // cloneGraph creates a shallow copy of g with an independent edge set.

@@ -6,6 +6,7 @@ package watcher
 import (
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,8 +100,8 @@ func TestDebounceConfigReload_TriggersReload(t *testing.T) {
 	}
 	defer w.Stop()
 
-	called := 0
-	w.SetConfigChangeHandler(func(_ *config.Config) { called++ })
+	var called int32
+	w.SetConfigChangeHandler(func(_ *config.Config) { atomic.AddInt32(&called, 1) })
 
 	// debounceConfigReload schedules the reload after debounceDelay.
 	w.debounceConfigReload(cfgPath)
@@ -108,7 +109,7 @@ func TestDebounceConfigReload_TriggersReload(t *testing.T) {
 	// Wait for timer to fire (debounceDelay + margin).
 	time.Sleep(debounceDelay + 100*time.Millisecond)
 
-	if called < 1 {
+	if atomic.LoadInt32(&called) < 1 {
 		t.Error("expected cfgHandler to be called after debounce timer fired")
 	}
 }

@@ -11,11 +11,13 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"hash/fnv"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -107,6 +109,10 @@ func run(args []string) error {
 		return cmdBrief(args[1:])
 	case "onboard":
 		return cmdOnboard(args[1:])
+	case "connect":
+		return cmdConnect(args[1:])
+	case "memory":
+		return cmdMemory(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -500,14 +506,6 @@ func cmdIndex(args []string) error {
 
 	identity := g.ProjectIdentity()
 	printSummaryTable(identity, time.Since(start), nil, 0, 0, 0, 0)
-
-	// Write agent-guidance files so AI agents use Synapses tools by default.
-	if err := writeProjectCLAUDE(absPath); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: warning: could not update CLAUDE.md: %v\n", err)
-	}
-	if err := writeClaudeSettings(absPath); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: warning: could not update .claude/settings.json: %v\n", err)
-	}
 
 	// Silently ensure sidecars are running after indexing.
 	if ensureDirs() == nil {
@@ -1171,6 +1169,104 @@ func cmdReset(args []string) error {
 	return nil
 }
 
+// agentMemoryTables are the tables that hold agent-created data — plans, tasks,
+// episodic memory, session state, annotations, and inter-agent coordination.
+// Clearing these removes all AI-generated memory while leaving the code graph intact.
+var agentMemoryTables = []string{
+	"plans", "tasks", "session_state",
+	"episodes", "episodes_fts",
+	"memories", "memories_fts",
+	"annotations", "quality_gaps",
+	"agent_messages", "work_claims",
+	"agents", "agent_context", "events",
+}
+
+// cmdMemory dispatches "synapses memory <subcommand>".
+func cmdMemory(args []string) error {
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Println("Usage: synapses memory clear -all [--logs]")
+		fmt.Println("  -all    Clear agent memory for all indexed projects")
+		fmt.Println("  --logs  Also clear activity logs (tool_calls)")
+		return nil
+	}
+	switch args[0] {
+	case "clear":
+		return cmdMemoryClear(args[1:])
+	default:
+		return fmt.Errorf("unknown memory subcommand %q — try 'synapses memory help'", args[0])
+	}
+}
+
+// cmdMemoryClear erases agent-generated memory tables from all project databases
+// while preserving the code graph (nodes, edges, file_hashes).
+func cmdMemoryClear(args []string) error {
+	fs := flag.NewFlagSet("memory clear", flag.ContinueOnError)
+	all := fs.Bool("all", false, "Clear memory across all indexed projects")
+	withLogs := fs.Bool("logs", false, "Also clear activity logs (tool_calls)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if !*all {
+		return fmt.Errorf("specify -all to clear memory for all indexed projects")
+	}
+
+	tables := make([]string, len(agentMemoryTables))
+	copy(tables, agentMemoryTables)
+	if *withLogs {
+		tables = append(tables, "tool_calls")
+	}
+
+	cacheDir, err := store.CacheDir()
+	if err != nil {
+		return fmt.Errorf("locate cache dir: %w", err)
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("No indexed projects found.")
+			return nil
+		}
+		return fmt.Errorf("read cache dir: %w", err)
+	}
+
+	cleared := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".db") {
+			continue
+		}
+		dbPath := filepath.Join(cacheDir, entry.Name())
+		if err := clearTablesInDB(dbPath, tables); err != nil {
+			fmt.Printf("  warning: %s: %v\n", entry.Name(), err)
+		} else {
+			fmt.Printf("  cleared  %s\n", entry.Name())
+			cleared++
+		}
+	}
+	if cleared == 0 {
+		fmt.Println("No project databases found.")
+	} else {
+		fmt.Printf("\nAgent memory cleared across %d project(s).\n", cleared)
+	}
+	return nil
+}
+
+// clearTablesInDB opens a SQLite database and deletes all rows from the given
+// tables, ignoring tables that do not exist (older DBs may lack some tables).
+func clearTablesInDB(dbPath string, tables []string) error {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	for _, table := range tables {
+		// Use IF EXISTS equivalent: ignore errors from missing tables.
+		if _, err := db.Exec("DELETE FROM " + table); err != nil {
+			continue
+		}
+	}
+	return nil
+}
+
 // cmdList scans the synapses cache directory and prints a summary row for every
 // project that has been indexed, without loading any full graph.
 func cmdList(args []string) error {
@@ -1413,19 +1509,19 @@ func detectProjectLanguages(root string) []string {
 	return langs
 }
 
-// writeProjectCLAUDE writes (or updates) a Synapses-managed section in
-// .claude/CLAUDE.md (preferred by Claude Code). The section is delimited by
-// HTML comments so it can be safely updated on subsequent index runs without
-// clobbering the rest of the file. If a root-level CLAUDE.md exists with a
-// Synapses section it is migrated to .claude/CLAUDE.md and the section is
-// removed from the root file.
-func writeProjectCLAUDE(repoRoot string) error {
-	const (
-		sectionStart = "<!-- synapses:start -->\n"
-		sectionEnd   = "<!-- synapses:end -->"
-	)
+// synapsesSectionStart / synapsesSectionEnd are the HTML comment sentinels
+// that fence the Synapses-managed guidance block in every agent rules file.
+// Identical markers across all agents allow `synapses connect` to be idempotent.
+const (
+	synapsesSectionStart = "<!-- synapses:start -->\n"
+	synapsesSectionEnd   = "<!-- synapses:end -->"
+)
 
-	section := sectionStart + `## Synapses — Code Intelligence (MCP)
+// synapsesSection is the full guidance block (including sentinels) injected
+// into every agent guidance file: .claude/CLAUDE.md, .cursor/rules/synapses.mdc,
+// .windsurfrules. Content is identical for all agents; only the file path and
+// any agent-specific frontmatter differ.
+var synapsesSection = synapsesSectionStart + `## Synapses — Code Intelligence (MCP)
 
 This project is indexed by **Synapses**, a graph-based code intelligence server.
 
@@ -1513,7 +1609,16 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 - **Call ` + "`validate_plan()`" + `** before implementing multi-file changes.
 - When ` + "`get_context`" + ` returns ` + "`other_candidates`" + `, re-call with ` + "`file=`" + ` to pin to the right entity.
 - **Track all bugs and tasks** via ` + "`create_plan()`" + ` immediately when discovered — do not rely on memory across sessions.
-` + sectionEnd
+` + synapsesSectionEnd
+
+// writeProjectCLAUDE writes (or updates) a Synapses-managed section in
+// .claude/CLAUDE.md (preferred by Claude Code). The section is delimited by
+// HTML comments so it can be safely updated on subsequent connect runs without
+// clobbering the rest of the file. If a root-level CLAUDE.md exists with a
+// Synapses section it is migrated to .claude/CLAUDE.md and the section is
+// removed from the root file.
+func writeProjectCLAUDE(repoRoot string) error {
+	section := synapsesSection
 
 	clauDir := filepath.Join(repoRoot, ".claude")
 	if err := os.MkdirAll(clauDir, 0o755); err != nil {
@@ -1526,11 +1631,11 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 	rootCLAUDE := filepath.Join(repoRoot, "CLAUDE.md")
 	if rootData, err := os.ReadFile(rootCLAUDE); err == nil {
 		rs := string(rootData)
-		si := strings.Index(rs, sectionStart)
+		si := strings.Index(rs, synapsesSectionStart)
 		if si != -1 {
-			ei := strings.Index(rs, sectionEnd)
+			ei := strings.Index(rs, synapsesSectionEnd)
 			if ei != -1 {
-				cleaned := rs[:si] + rs[ei+len(sectionEnd):]
+				cleaned := rs[:si] + rs[ei+len(synapsesSectionEnd):]
 				cleaned = strings.TrimRight(cleaned, "\n") + "\n"
 				_ = os.WriteFile(rootCLAUDE, []byte(cleaned), 0o644)
 			}
@@ -1547,12 +1652,12 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 	}
 
 	content := string(existing)
-	startIdx := strings.Index(content, sectionStart)
+	startIdx := strings.Index(content, synapsesSectionStart)
 	if startIdx != -1 {
 		// Replace the existing Synapses section.
-		endIdx := strings.Index(content, sectionEnd)
+		endIdx := strings.Index(content, synapsesSectionEnd)
 		if endIdx != -1 {
-			content = content[:startIdx] + section + content[endIdx+len(sectionEnd):]
+			content = content[:startIdx] + section + content[endIdx+len(synapsesSectionEnd):]
 		} else {
 			content = content[:startIdx] + section
 		}
@@ -1738,6 +1843,218 @@ func writeMCPConfig(mcpFile, repoRoot string) error {
 		return err
 	}
 	return os.WriteFile(mcpFile, append(out, '\n'), 0o644)
+}
+
+// ── Agent connect helpers ─────────────────────────────────────────────────────
+
+// mcpURL returns the Synapses MCP endpoint with the project path embedded as
+// a query parameter, which the daemon requires to route requests correctly.
+func mcpURL(projectRoot string) string {
+	return "http://127.0.0.1:11435/mcp?project=" + url.QueryEscape(projectRoot)
+}
+
+// writeHTTPMCPServerEntry merges a synapses HTTP entry into a JSON file that
+// uses the standard { "mcpServers": { … } } shape (Claude .mcp.json, Cursor,
+// Windsurf, Antigravity). Creates the file and its parent directories if missing.
+func writeHTTPMCPServerEntry(file, projectRoot string) error {
+	raw := map[string]interface{}{"mcpServers": map[string]interface{}{}}
+	if data, err := os.ReadFile(file); err == nil {
+		parsed := map[string]interface{}{}
+		if json.Unmarshal(data, &parsed) == nil {
+			raw = parsed
+		}
+	}
+	if _, ok := raw["mcpServers"]; !ok {
+		raw["mcpServers"] = map[string]interface{}{}
+	}
+	servers, _ := raw["mcpServers"].(map[string]interface{})
+	if servers == nil {
+		servers = map[string]interface{}{}
+		raw["mcpServers"] = servers
+	}
+	servers["synapses"] = map[string]interface{}{
+		"type": "http",
+		"url":  mcpURL(projectRoot),
+	}
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(file, append(out, '\n'), 0o644)
+}
+
+// writeZedMCPConfig merges a synapses entry into .zed/settings.json using
+// Zed's context_servers format for HTTP MCP servers.
+func writeZedMCPConfig(repoRoot string) error {
+	file := filepath.Join(repoRoot, ".zed", "settings.json")
+	raw := map[string]interface{}{}
+	if data, err := os.ReadFile(file); err == nil {
+		json.Unmarshal(data, &raw) //nolint:errcheck
+	}
+	cs, _ := raw["context_servers"].(map[string]interface{})
+	if cs == nil {
+		cs = map[string]interface{}{}
+		raw["context_servers"] = cs
+	}
+	cs["synapses"] = map[string]interface{}{
+		"settings": map[string]interface{}{"url": mcpURL(repoRoot)},
+	}
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".zed"), 0o755); err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(file, append(out, '\n'), 0o644)
+}
+
+// writeVSCodeMCPConfig merges a synapses entry into .vscode/mcp.json for
+// VS Code 1.99+ native MCP support (GitHub Copilot agent mode).
+func writeVSCodeMCPConfig(repoRoot string) error {
+	file := filepath.Join(repoRoot, ".vscode", "mcp.json")
+	raw := map[string]interface{}{"servers": map[string]interface{}{}}
+	if data, err := os.ReadFile(file); err == nil {
+		parsed := map[string]interface{}{}
+		if json.Unmarshal(data, &parsed) == nil {
+			raw = parsed
+		}
+	}
+	if _, ok := raw["servers"]; !ok {
+		raw["servers"] = map[string]interface{}{}
+	}
+	servers, _ := raw["servers"].(map[string]interface{})
+	if servers == nil {
+		servers = map[string]interface{}{}
+		raw["servers"] = servers
+	}
+	servers["synapses"] = map[string]interface{}{
+		"type": "http",
+		"url":  mcpURL(repoRoot),
+	}
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".vscode"), 0o755); err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(file, append(out, '\n'), 0o644)
+}
+
+// writeGuidanceFile writes (or updates) the Synapses guidance section in a
+// plain-markdown rules file (e.g. .windsurfrules). frontmatter is prepended
+// only on first creation; subsequent runs update only the synapses section.
+func writeGuidanceFile(file, frontmatter string) error {
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		return err
+	}
+	section := synapsesSection
+	existing, _ := os.ReadFile(file)
+	content := string(existing)
+	if si := strings.Index(content, synapsesSectionStart); si != -1 {
+		ei := strings.Index(content, synapsesSectionEnd)
+		if ei != -1 {
+			content = content[:si] + section + content[ei+len(synapsesSectionEnd):]
+		} else {
+			content = content[:si] + section
+		}
+	} else {
+		if frontmatter != "" && len(content) == 0 {
+			content = frontmatter
+		} else if len(content) > 0 && !strings.HasSuffix(content, "\n\n") {
+			if strings.HasSuffix(content, "\n") {
+				content += "\n"
+			} else {
+				content += "\n\n"
+			}
+		}
+		content += section + "\n"
+	}
+	return os.WriteFile(file, []byte(content), 0o644)
+}
+
+// cmdConnect wires an AI coding agent into an indexed project. For each agent
+// it writes the MCP config file and an agent-specific guidance/rules file so
+// the AI uses Synapses tools by default. For Claude Code it also writes
+// .claude/settings.json (hooks + permissions).
+func cmdConnect(args []string) error {
+	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	agent := fs.String("agent", "", "Agent to connect: claude, cursor, windsurf, zed, vscode")
+	repoPath := fs.String("path", ".", "Path to the project root")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *agent == "" {
+		return fmt.Errorf("--agent is required (claude, cursor, windsurf, zed, vscode)")
+	}
+	absPath, err := filepath.Abs(*repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	type result struct {
+		path string
+		err  error
+	}
+	var results []result
+	add := func(path string, err error) {
+		results = append(results, result{path, err})
+	}
+
+	switch *agent {
+	case "claude":
+		mcpFile := filepath.Join(absPath, ".mcp.json")
+		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
+		claudeMD := filepath.Join(absPath, ".claude", "CLAUDE.md")
+		add(claudeMD, writeProjectCLAUDE(absPath))
+		settingsFile := filepath.Join(absPath, ".claude", "settings.json")
+		add(settingsFile, writeClaudeSettings(absPath))
+
+	case "cursor":
+		mcpFile := filepath.Join(absPath, ".cursor", "mcp.json")
+		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
+		rulesFile := filepath.Join(absPath, ".cursor", "rules", "synapses.mdc")
+		frontmatter := "---\ndescription: Synapses code intelligence — always use these MCP tools for code exploration\nalwaysApply: true\n---\n\n"
+		add(rulesFile, writeGuidanceFile(rulesFile, frontmatter))
+
+	case "windsurf":
+		mcpFile := filepath.Join(absPath, ".windsurf", "mcp_config.json")
+		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
+		rulesFile := filepath.Join(absPath, ".windsurfrules")
+		add(rulesFile, writeGuidanceFile(rulesFile, ""))
+
+	case "zed":
+		settingsFile := filepath.Join(absPath, ".zed", "settings.json")
+		add(settingsFile, writeZedMCPConfig(absPath))
+
+	case "vscode":
+		mcpFile := filepath.Join(absPath, ".vscode", "mcp.json")
+		add(mcpFile, writeVSCodeMCPConfig(absPath))
+
+	case "antigravity":
+		// Antigravity (https://antigravity.google) stores workspace MCP config
+		// at .agent/mcp.json and agent rules at .agent/rules/
+		mcpFile := filepath.Join(absPath, ".agent", "mcp.json")
+		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
+		rulesFile := filepath.Join(absPath, ".agent", "rules", "synapses.md")
+		add(rulesFile, writeGuidanceFile(rulesFile, ""))
+
+	default:
+		return fmt.Errorf("unknown agent %q — supported: claude, cursor, windsurf, zed, vscode, antigravity", *agent)
+	}
+
+	for _, r := range results {
+		if r.err != nil {
+			fmt.Fprintf(os.Stderr, "  warning: %s: %v\n", r.path, r.err)
+		} else {
+			fmt.Printf("  wrote %s\n", r.path)
+		}
+	}
+	return nil
 }
 
 func printSummaryTable(

@@ -32,8 +32,12 @@ func provenanceWeight(p ProvenanceType) float64 {
 // The returned slice is always a fresh allocation — callers must not modify it.
 func (g *Graph) outInEdges(id NodeID, idx *GraphIndex) []*Edge {
 	if idx != nil && idx.Ready() {
-		seq, ok := idx.IDToSeq[id]
-		if !ok {
+		// Use idx.Seq() rather than reading idx.IDToSeq directly: Seq() acquires
+		// idx.mu.RLock() which synchronises with the idx.mu.Lock() held by
+		// MarkTombstone.  A direct map read without the lock is flagged as a data
+		// race by the race detector even though IDToSeq is immutable after ready=1.
+		seq := idx.Seq(id)
+		if seq == 0 {
 			return nil
 		}
 		outSeqs, outTypes := idx.OutNeighbours(seq)
