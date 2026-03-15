@@ -377,5 +377,38 @@ func truncateSlice(s []string, n int) []string {
 	return result
 }
 
+// parseExaminedEntities extracts entity names from a session log content string.
+// Session logs from buildSessionLogContent embed examined entities as:
+//
+//	"Examined: FuncA, Store.Close, Graph.New."
+//
+// Entity names can contain dots (e.g. "Store.Close"), so we stop at a
+// sentence-boundary period: a period followed by a space or end-of-string.
+// Returns the slice of trimmed entity names, or nil if no "Examined:" section is found.
+// Used by R14C (stale context hints) to build the active entity register on session resume.
+func parseExaminedEntities(content string) []string {
+	const marker = "Examined: "
+	idx := strings.Index(content, marker)
+	if idx < 0 {
+		return nil
+	}
+	rest := content[idx+len(marker):]
+	// Find the sentence-ending period (period at EOL or followed by a space).
+	// This correctly handles entity names that contain dots (e.g. "Store.Close").
+	for i := 0; i < len(rest); i++ {
+		if rest[i] == '.' && (i+1 == len(rest) || rest[i+1] == ' ') {
+			rest = rest[:i]
+			break
+		}
+	}
+	var names []string
+	for _, part := range strings.Split(rest, ",") {
+		if name := strings.TrimSpace(part); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // Ensure graph.NodeID is used (imported for FindByName return type).
 var _ graph.NodeID

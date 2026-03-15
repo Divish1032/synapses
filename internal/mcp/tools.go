@@ -3285,6 +3285,73 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// ── R14C: Stale context hints ─────────────────────────────────────────
+	// Cross-reference task-linked nodes and the previous session's entity register
+	// against recently changed files. Returns entities whose containing file was
+	// modified since the last session — signalling the agent to re-fetch them.
+	if len(recentChanges) > 0 {
+		// 1. Collect node IDs from in-progress task linked nodes.
+		var nodeIDs []string
+		if tasks, ok := pendingSection["tasks"].([]taskWithState); ok {
+			for _, t := range tasks {
+				nodeIDs = append(nodeIDs, t.LinkedNodes...)
+			}
+		}
+
+		// 2. Augment with entity register from the most recent session log.
+		// The session log embeds "Examined: X, Y, Z." — resolve names to node IDs.
+		if s.store != nil && agentID != "" {
+			if regMems, _ := s.store.QueryRecentSessionMemories(agentID, 1); len(regMems) > 0 {
+				for _, name := range parseExaminedEntities(regMems[0].Content) {
+					if nodes := s.graph.FindByName(name); len(nodes) > 0 {
+						nodeIDs = append(nodeIDs, string(nodes[0].ID))
+					}
+				}
+			}
+		}
+
+		if len(nodeIDs) > 0 {
+			// Build a file-path → changed_at map for O(1) lookup.
+			changedFiles := make(map[string]string)
+			for _, rc := range recentChanges {
+				changedFiles[rc.File] = rc.At
+			}
+
+			seen := make(map[string]bool)
+			var hints []map[string]interface{}
+			for _, nodeID := range nodeIDs {
+				if seen[nodeID] {
+					continue
+				}
+				seen[nodeID] = true
+
+				// Node IDs are formatted as "repo::file::entityName".
+				parts := strings.SplitN(nodeID, "::", 3)
+				if len(parts) < 3 {
+					continue
+				}
+				nodeFile, entityName := parts[1], parts[2]
+
+				for changedFile, changedAt := range changedFiles {
+					if containsFile([]string{changedFile}, nodeFile) {
+						hints = append(hints, map[string]interface{}{
+							"entity":     entityName,
+							"file":       nodeFile,
+							"changed_at": changedAt,
+						})
+						break
+					}
+				}
+				if len(hints) >= 10 {
+					break
+				}
+			}
+			if len(hints) > 0 {
+				resp["stale_context_hints"] = hints
+			}
+		}
+	}
+
 	// ── Activation-context prompts (auto_load: true) ──────────────────────
 	// Surface project-wide conventions so agents apply them from the first message.
 	// Only prompts with auto_load: true are included here; entity-specific prompts
