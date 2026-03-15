@@ -237,6 +237,22 @@ func writeNodeHeader(b *strings.Builder, n *graph.Node, summary string) {
 	}
 }
 
+// filterInferredNodes removes synthetic route / inferred nodes from a carved-node slice.
+// Used by handleGetContext when include_inferred=false so agents receive only AST-proven edges.
+func filterInferredNodes(nodes []graph.CarvedNode) []graph.CarvedNode {
+	out := nodes[:0] // reuse backing array; safe because we only shrink
+	for _, cn := range nodes {
+		if cn.Node.Type == graph.NodeRoute {
+			continue
+		}
+		if cn.Node.Metadata != nil && cn.Node.Metadata["inferred"] == "true" {
+			continue
+		}
+		out = append(out, cn)
+	}
+	return out
+}
+
 // getRootSummary returns the best available prose summary for the root node.
 // Priority: brain RootSummary > AST doc metadata > "".
 func getRootSummary(n *graph.Node, pkt *brain.ContextPacket) string {

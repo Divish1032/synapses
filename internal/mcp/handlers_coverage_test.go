@@ -2357,3 +2357,89 @@ func TestPickBestNode_PrefersHigherConnectivity(t *testing.T) {
 		t.Error("expected higher-connectivity node to be preferred")
 	}
 }
+
+// ── R1: include_inferred parameter ───────────────────────────────────────────
+
+// TestHandleGetContext_IncludeInferred_FiltersRouteNodes verifies that
+// include_inferred=false strips NodeRoute nodes from get_context callees, and
+// include_inferred=true (default) keeps them.
+func TestHandleGetContext_IncludeInferred_FiltersRouteNodes(t *testing.T) {
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	st := openMCPTestStore(t)
+	s := New(g, cfg, st)
+
+	// Add a handler function.
+	handlerID := g.MakeNodeID("pkg/api/handler.go", "GetUsers")
+	g.AddNode(&graph.Node{
+		ID:      handlerID,
+		Type:    graph.NodeFunction,
+		Name:    "GetUsers",
+		File:    "pkg/api/handler.go",
+		Line:    10,
+		Package: "api",
+	})
+
+	// Add a synthetic route node (as heuristic.go produces them).
+	routeID := graph.NodeID("test-repo::pkg/api/handler.go::GET /users")
+	g.UpsertRouteNode(&graph.Node{
+		ID:   routeID,
+		Type: graph.NodeRoute,
+		Name: "GET /users",
+		File: "pkg/api/handler.go",
+		Line: 5,
+		Metadata: map[string]string{
+			"inferred":   "true",
+			"confidence": "0.90",
+			"method":     "GET",
+			"path":       "/users",
+			"handler":    "GetUsers",
+		},
+	})
+
+	// Wire: routeNode --HANDLES--> handler
+	g.AddEdge(&graph.Edge{From: routeID, To: handlerID, Type: graph.EdgeHandles})
+
+	// --- include_inferred=true (default): route node should appear in callers ---
+	resTrue, err := s.handleGetContext(ctx, callTool(map[string]any{
+		"entity":           "GetUsers",
+		"include_inferred": true,
+	}))
+	if err != nil {
+		t.Fatalf("include_inferred=true: unexpected error: %v", err)
+	}
+	mTrue := mustResult(t, resTrue, nil)
+	callers, _ := mTrue["callers"].([]any)
+	foundRoute := false
+	for _, c := range callers {
+		cm, _ := c.(map[string]any)
+		node, _ := cm["node"].(map[string]any)
+		if node["type"] == "route" {
+			foundRoute = true
+		}
+	}
+	if !foundRoute {
+		t.Error("include_inferred=true: expected route node in callers, got none")
+	}
+
+	// --- include_inferred=false: route node must be absent ---
+	resFalse, err := s.handleGetContext(ctx, callTool(map[string]any{
+		"entity":           "GetUsers",
+		"include_inferred": false,
+	}))
+	if err != nil {
+		t.Fatalf("include_inferred=false: unexpected error: %v", err)
+	}
+	mFalse := mustResult(t, resFalse, nil)
+	callersFalse, _ := mFalse["callers"].([]any)
+	for _, c := range callersFalse {
+		cm, _ := c.(map[string]any)
+		node, _ := cm["node"].(map[string]any)
+		if node["type"] == "route" {
+			t.Error("include_inferred=false: route node must not appear in callers")
+		}
+	}
+}
