@@ -330,8 +330,15 @@ func (s *Server) handleGetContext(
 	// task_id is intentionally excluded: it only adjusts relevance scores AFTER the
 	// subgraph is carved, so it does not change the entity_hash and two calls with
 	// different task_ids for the same entity produce identical hashes.
-	entityCacheKey := fmt.Sprintf("%s|%s|%s|%s|%d|%d",
-		entityName, fileHint, format, detailLevel, cfg.MaxDepth, cfg.TokenBudget)
+	// R1: include_inferred controls whether synthetic route/HANDLES nodes appear.
+	// Default is true (include them); false strips NodeRoute nodes from output.
+	includeInferred := true
+	if v, ok := req.GetArguments()["include_inferred"].(bool); ok {
+		includeInferred = v
+	}
+
+	entityCacheKey := fmt.Sprintf("%s|%s|%s|%s|%d|%d|inferred:%v",
+		entityName, fileHint, format, detailLevel, cfg.MaxDepth, cfg.TokenBudget, includeInferred)
 
 	// Resolve the entity name to a node ID.
 	nodes := s.graph.FindByName(entityName)
@@ -476,6 +483,13 @@ func (s *Server) handleGetContext(
 	}
 
 	dc := toDirectionalContext(sg)
+
+	// R1: strip synthetic route/inferred nodes when include_inferred=false.
+	if !includeInferred {
+		dc.Callees = filterInferredNodes(dc.Callees)
+		dc.Callers = filterInferredNodes(dc.Callers)
+		dc.Related = filterInferredNodes(dc.Related)
+	}
 
 	// Brain enrichment: async pattern — serve raw graph immediately, enrich in background.
 	// If a cached packet exists, attach it (fast path). Otherwise, kick off background
