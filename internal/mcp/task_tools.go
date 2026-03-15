@@ -421,8 +421,13 @@ func (s *Server) handleUpdateTask(
 
 	notes, _ := req.GetArguments()["notes"].(string)
 	agentID, _ := req.GetArguments()["agent_id"].(string)
+	intent, _ := req.GetArguments()["intent"].(string)
 
 	s.upsertAgentIfNeeded(agentID)
+	// B29: store declared intent so peers can see what this agent is working on.
+	if agentID != "" && intent != "" {
+		s.upsertAgentWithActivity(agentID, &store.AgentActivity{Intent: intent})
+	}
 
 	unblocked, planCompleted, err := s.store.UpdateTask(id, status, notes, agentID)
 	if err != nil {

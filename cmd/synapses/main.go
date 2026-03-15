@@ -953,6 +953,8 @@ func enrichMetricsIfEnabled(g *graph.Graph, root string, cfg *config.Config) {
 		days = 90
 	}
 	metrics.EnrichChurn(g, root, days)
+	// R3: blame must run after churn — staleness_score reads metadata["churn"].
+	metrics.EnrichBlame(g, root)
 
 	if cfg.CoverageProfile != "" {
 		metrics.EnrichCoverage(g, root, cfg.CoverageProfile)

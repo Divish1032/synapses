@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
@@ -337,7 +338,11 @@ func (s *Server) handleGetEvents(
 		}
 	}
 
-	events, latestSeq, err := s.store.GetEvents(sinceSeq, types, limit)
+	// Optional agent_id filter: returns only events emitted by that agent.
+	// Use for on-demand peer activity stream (Tier 3).
+	agentIDFilter := stringArg(req, "agent_id")
+
+	events, latestSeq, err := s.store.GetEvents(sinceSeq, types, agentIDFilter, limit)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("get events: %v", err)), nil
 	}
@@ -351,5 +356,118 @@ func (s *Server) handleGetEvents(
 		"events":     events,
 		"latest_seq": latestSeq,
 		"hint":       "Store latest_seq and pass as since_seq on next poll to get only new events.",
+	})
+}
+
+// handleGetPeerActivity returns a structured digest of a specific peer agent's
+// recent actions. This is the Tier 3 on-demand signal: call it explicitly when
+// you want to understand what a peer has been doing. It is never injected into
+// session_init automatically — use conflicts/dependency_alerts for proactive signals.
+func (s *Server) handleGetPeerActivity(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	if s.store == nil {
+		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
+	}
+	peerID := stringArg(req, "agent_id")
+	if peerID == "" {
+		return mcp.NewToolResultError("agent_id is required"), nil
+	}
+
+	var sinceSeq int64
+	if v, ok := req.GetArguments()["since_seq"].(float64); ok {
+		sinceSeq = int64(v)
+	}
+	limit := 10
+	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	// Fetch agent profile.
+	agents, err := s.store.GetAgents()
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("get agents: %v", err)), nil
+	}
+	var profile *store.Agent
+	for i := range agents {
+		if agents[i].ID == peerID {
+			profile = &agents[i]
+			break
+		}
+	}
+	if profile == nil {
+		return jsonResult(map[string]interface{}{
+			"error": fmt.Sprintf("agent %q not found", peerID),
+		})
+	}
+
+	// Fetch active scopes for this peer.
+	allClaims, _ := s.store.GetAllClaims()
+	var scopes []string
+	for _, c := range allClaims {
+		if c.AgentID == peerID {
+			scopes = append(scopes, c.Scope)
+		}
+	}
+
+	// Fetch recent events from this peer. Note: file_change events are emitted by the
+	// file watcher with agent_id="" so they can't be filtered by peer — excluded here.
+	// The peer's active scopes (work_claims) already convey what files they own.
+	activityTypes := []string{"agent_examining", "agent_task_started", "claim_work"}
+	events, latestSeq, _ := s.store.GetEvents(sinceSeq, activityTypes, peerID, limit)
+
+	// Assemble recent_actions digest.
+	type action struct {
+		Type   string `json:"type"`
+		Entity string `json:"entity,omitempty"`
+		File   string `json:"file,omitempty"`
+		Task   string `json:"task,omitempty"`
+		Scope  string `json:"scope,omitempty"`
+		At     string `json:"at"`
+	}
+	var recentActions []action
+	for _, e := range events {
+		a := action{Type: e.Type, At: e.CreatedAt}
+		// Parse common payload fields.
+		var p map[string]interface{}
+		if err := json.Unmarshal([]byte(e.Payload), &p); err == nil {
+			if v, ok := p["entity"].(string); ok {
+				a.Entity = v
+			}
+			if v, ok := p["file"].(string); ok {
+				a.File = v
+			}
+			if v, ok := p["task"].(string); ok {
+				a.Task = v
+			}
+			if v, ok := p["scope"].(string); ok {
+				a.Scope = v
+			}
+		}
+		recentActions = append(recentActions, a)
+	}
+
+	return jsonResult(map[string]interface{}{
+		"agent_id":        peerID,
+		"intent":          profile.Intent,
+		"presence":        profile.Presence,
+		"focus":           profile.CurrentFocus,
+		"focus_file":      profile.CurrentFocusFile,
+		"focus_age_seconds": func() int {
+			if profile.CurrentFocusSince == "" {
+				return 0
+			}
+			t, err := time.Parse(time.RFC3339, profile.CurrentFocusSince)
+			if err != nil {
+				return 0
+			}
+			return int(time.Since(t).Seconds())
+		}(),
+		"task":           profile.CurrentTaskTitle,
+		"scopes":         scopes,
+		"recent_actions": recentActions,
+		"latest_seq":     latestSeq,
+		"hint":           "Pass latest_seq as since_seq on next call to get only new activity.",
 	})
 }

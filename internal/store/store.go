@@ -596,6 +596,24 @@ func Open(path string) (*Store, error) {
 		// OF-H1: Generic entity schema — domain field enables non-code nodes (infra, api, docs, issues).
 		// Existing rows default to 'code' (zero regression: all current nodes are code entities).
 		`ALTER TABLE nodes ADD COLUMN domain TEXT NOT NULL DEFAULT 'code'`,
+		// B29: Inter-agent communication — richer focus tracking for peer awareness.
+		`ALTER TABLE agents ADD COLUMN focus_file  TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN focus_since TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN intent      TEXT NOT NULL DEFAULT ''`,
+		// B29: Watched symbols — track what each agent has examined via get_context (30-min TTL).
+		// Used to compute dependency_alerts in session_init: when another agent edits a symbol
+		// this agent was recently examining, that's worth surfacing as a Tier 2 signal.
+		`CREATE TABLE IF NOT EXISTS agent_watched_symbols (
+			agent_id    TEXT NOT NULL,
+			entity_id   TEXT NOT NULL,
+			entity_name TEXT NOT NULL,
+			entity_file TEXT NOT NULL,
+			watched_at  TEXT NOT NULL,
+			PRIMARY KEY (agent_id, entity_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_watched_symbols_entity ON agent_watched_symbols(entity_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_watched_symbols_agent  ON agent_watched_symbols(agent_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_events_agent           ON events(agent_id)`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
 			db.Close()
@@ -1900,6 +1918,10 @@ type Agent struct {
 	CurrentTaskID    string `json:"current_task_id,omitempty"`
 	CurrentTaskTitle string `json:"current_task_title,omitempty"`
 	CurrentFocus     string `json:"current_focus,omitempty"`
+	// B29: richer focus fields.
+	CurrentFocusFile  string `json:"current_focus_file,omitempty"`
+	CurrentFocusSince string `json:"current_focus_since,omitempty"`
+	Intent            string `json:"intent,omitempty"`
 	// ProjectID is non-empty only for remote agents synced from federated peers.
 	// Local agents always have ProjectID = "".
 	ProjectID string `json:"project_id,omitempty"`
@@ -1913,6 +1935,10 @@ type AgentActivity struct {
 	TaskID    string
 	TaskTitle string
 	Focus     string
+	// B29: richer focus fields.
+	FocusFile  string
+	FocusSince string // RFC3339; DB only applies this when Focus changes entity name.
+	Intent     string
 }
 
 // AgentSummary is the compact view of a peer agent returned in session_init's
@@ -1923,7 +1949,20 @@ type AgentSummary struct {
 	Project  string   `json:"project,omitempty"` // non-empty for remote (federated) agents
 	Task     string   `json:"task,omitempty"`
 	Focus    string   `json:"focus,omitempty"`
-	Scopes   []string `json:"scopes,omitempty"` // for local agents: from work_claims; for remote: from peer sync
+	// B29: richer focus fields surfaced to peers.
+	FocusFile    string `json:"focus_file,omitempty"`
+	FocusAgeSecs int    `json:"focus_age_seconds,omitempty"` // how long on current entity
+	Intent       string `json:"intent,omitempty"`
+	Scopes       []string `json:"scopes,omitempty"` // for local agents: from work_claims; for remote: from peer sync
+}
+
+// DependencyAlert is emitted when a peer agent recently changed a file containing
+// a symbol the calling agent was actively examining (via get_context).
+type DependencyAlert struct {
+	PeerAgentID string `json:"peer_agent_id"`
+	EntityName  string `json:"entity_name"`
+	EntityFile  string `json:"entity_file"`
+	ChangedAt   string `json:"changed_at"` // RFC3339
 }
 
 // classifyPresence derives active/idle/inactive from a RFC3339 last_seen timestamp.
@@ -1966,15 +2005,23 @@ func (s *Store) UpsertAgent(id string, activity *AgentActivity) error {
 		return err
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO agents (id, last_seen, current_task_id, current_task_title, current_focus)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO agents (id, last_seen, current_task_id, current_task_title, current_focus, focus_file, focus_since, intent)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			last_seen          = excluded.last_seen,
 			current_task_id    = CASE WHEN excluded.current_task_id    != '' THEN excluded.current_task_id    ELSE agents.current_task_id    END,
 			current_task_title = CASE WHEN excluded.current_task_title != '' THEN excluded.current_task_title ELSE agents.current_task_title END,
-			current_focus      = CASE WHEN excluded.current_focus      != '' THEN excluded.current_focus      ELSE agents.current_focus      END`,
+			current_focus      = CASE WHEN excluded.current_focus      != '' THEN excluded.current_focus      ELSE agents.current_focus      END,
+			focus_file         = CASE WHEN excluded.focus_file         != '' THEN excluded.focus_file         ELSE agents.focus_file         END,
+			focus_since        = CASE
+				WHEN excluded.current_focus != '' AND excluded.current_focus != agents.current_focus
+				THEN excluded.focus_since
+				ELSE agents.focus_since
+			END,
+			intent             = CASE WHEN excluded.intent != '' THEN excluded.intent ELSE agents.intent END`,
 		id, now,
 		activity.TaskID, activity.TaskTitle, activity.Focus,
+		activity.FocusFile, activity.FocusSince, activity.Intent,
 	)
 	return err
 }
@@ -2038,7 +2085,8 @@ func (s *Store) UpsertRemoteAgent(id, projectID string, activity *AgentActivity,
 func (s *Store) GetAgents() ([]Agent, error) {
 	rows, err := s.db.Query(`
 		SELECT id, last_seen, metadata,
-		       current_task_id, current_task_title, current_focus, project_id
+		       current_task_id, current_task_title, current_focus, project_id,
+		       focus_file, focus_since, intent
 		FROM agents ORDER BY last_seen DESC`)
 	if err != nil {
 		return nil, err
@@ -2050,7 +2098,8 @@ func (s *Store) GetAgents() ([]Agent, error) {
 	for rows.Next() {
 		var a Agent
 		if err := rows.Scan(&a.ID, &a.LastSeen, &a.Metadata,
-			&a.CurrentTaskID, &a.CurrentTaskTitle, &a.CurrentFocus, &a.ProjectID); err != nil {
+			&a.CurrentTaskID, &a.CurrentTaskTitle, &a.CurrentFocus, &a.ProjectID,
+			&a.CurrentFocusFile, &a.CurrentFocusSince, &a.Intent); err != nil {
 			return nil, err
 		}
 		a.Presence = classifyPresence(a.LastSeen, now)
@@ -2073,7 +2122,8 @@ func (s *Store) GetActiveAgents(excludeAgentID string) ([]AgentSummary, error) {
 	// claim. The second condition covers LLMs in long thinking loops: if they
 	// claimed a scope before going silent, they are still in-flight.
 	rows, err := s.db.Query(`
-		SELECT id, last_seen, current_task_title, current_focus, project_id, metadata
+		SELECT id, last_seen, current_task_title, current_focus, project_id, metadata,
+		       focus_file, focus_since, intent
 		FROM agents
 		WHERE (last_seen > ? OR id IN (
 			SELECT DISTINCT agent_id FROM work_claims WHERE expires_at > ? AND agent_id != ?
@@ -2088,11 +2138,18 @@ func (s *Store) GetActiveAgents(excludeAgentID string) ([]AgentSummary, error) {
 	var peers []AgentSummary
 	for rows.Next() {
 		var p AgentSummary
-		var lastSeen, meta string
-		if err := rows.Scan(&p.ID, &lastSeen, &p.Task, &p.Focus, &p.Project, &meta); err != nil {
+		var lastSeen, meta, focusSince string
+		if err := rows.Scan(&p.ID, &lastSeen, &p.Task, &p.Focus, &p.Project, &meta,
+			&p.FocusFile, &focusSince, &p.Intent); err != nil {
 			return nil, err
 		}
 		p.Presence = classifyPresence(lastSeen, now)
+		// Compute how long the agent has been on its current entity.
+		if focusSince != "" {
+			if t, err := time.Parse(time.RFC3339, focusSince); err == nil {
+				p.FocusAgeSecs = int(now.Sub(t).Seconds())
+			}
+		}
 		// Remote agents carry their scopes in metadata JSON: {"scopes":[...]}.
 		if p.Project != "" && meta != "" && meta != "{}" {
 			var m struct {
@@ -2143,11 +2200,106 @@ func (s *Store) GetActiveAgents(excludeAgentID string) ([]AgentSummary, error) {
 	return peers, nil
 }
 
+// CountActiveAgents returns the number of agents (excluding agentID) that are
+// either seen within the last 15 minutes OR hold a non-expired work claim.
+// Cheaper than GetActiveAgents — a single COUNT query with no claims join.
+func (s *Store) CountActiveAgents(excludeAgentID string) (int, error) {
+	cutoff := time.Now().UTC().Add(-15 * time.Minute).Format(time.RFC3339)
+	expiry := time.Now().UTC().Format(time.RFC3339)
+	var n int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM agents
+		WHERE (last_seen > ? OR id IN (
+			SELECT DISTINCT agent_id FROM work_claims WHERE expires_at > ? AND agent_id != ?
+		)) AND id != ?`,
+		cutoff, expiry, excludeAgentID, excludeAgentID,
+	).Scan(&n)
+	return n, err
+}
+
 // CountIndexedFiles returns the number of files currently tracked in the index.
 func (s *Store) CountIndexedFiles() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM file_hashes`).Scan(&n)
 	return n, err
+}
+
+// ── B29: Watched Symbols ──────────────────────────────────────────────────────
+
+// WatchSymbol records that agentID recently examined the given entity via get_context.
+// Subsequent calls refresh watched_at (resetting the 30-minute TTL).
+// Old entries for this agent older than 30 minutes are pruned inline.
+// Non-fatal: errors are silently discarded to keep the hot path unaffected.
+func (s *Store) WatchSymbol(agentID, entityID, entityName, entityFile string) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	cutoff := time.Now().UTC().Add(-30 * time.Minute).Format(time.RFC3339)
+	_, _ = s.db.Exec(`
+		INSERT INTO agent_watched_symbols (agent_id, entity_id, entity_name, entity_file, watched_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(agent_id, entity_id) DO UPDATE SET watched_at = excluded.watched_at`,
+		agentID, entityID, entityName, entityFile, now,
+	)
+	_, _ = s.db.Exec(
+		`DELETE FROM agent_watched_symbols WHERE agent_id = ? AND watched_at < ?`,
+		agentID, cutoff,
+	)
+}
+
+// GetDependencyAlerts returns alerts for symbols this agent has watched (via get_context)
+// that were recently changed in a scope claimed by another agent.
+// Returns nil when there are no alerts.
+//
+// Design note: file_change events are emitted by the file watcher with agent_id=""
+// (no agent attribution). Rather than relying on the event's agent_id, we join against
+// work_claims to find which peer agent currently holds a claim over the changed file's
+// directory. This correctly attributes watcher-detected changes to the agent who declared
+// intent to work in that scope — the only reliable source of file-to-agent mapping.
+//
+// Tier 2 signal: only surfaces when a peer's claimed scope overlaps a file you were examining.
+func (s *Store) GetDependencyAlerts(agentID string) ([]DependencyAlert, error) {
+	now := time.Now().UTC()
+	eventCutoff := now.Add(-60 * time.Minute).Format(time.RFC3339)
+	watchCutoff := now.Add(-30 * time.Minute).Format(time.RFC3339)
+	claimsExpiry := now.Format(time.RFC3339)
+	rows, err := s.db.Query(`
+		SELECT wc.agent_id, aws.entity_name, aws.entity_file, e.created_at
+		FROM events e
+		JOIN agent_watched_symbols aws
+		     ON json_extract(e.payload, '$.file') = aws.entity_file
+		JOIN work_claims wc
+		     ON (aws.entity_file = wc.scope
+		         OR aws.entity_file LIKE wc.scope || '/%'
+		         OR wc.scope LIKE aws.entity_file || '/%')
+		WHERE aws.agent_id  = ?
+		  AND wc.agent_id   != ?
+		  AND wc.expires_at  > ?
+		  AND e.type         = 'file_change'
+		  AND e.created_at   > ?
+		  AND aws.watched_at > ?
+		ORDER BY e.created_at DESC
+		LIMIT 20`,
+		agentID, agentID, claimsExpiry, eventCutoff, watchCutoff,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	seen := make(map[string]struct{})
+	var alerts []DependencyAlert
+	for rows.Next() {
+		var a DependencyAlert
+		if err := rows.Scan(&a.PeerAgentID, &a.EntityName, &a.EntityFile, &a.ChangedAt); err != nil {
+			return nil, err
+		}
+		key := a.PeerAgentID + "|" + a.EntityFile
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		alerts = append(alerts, a)
+	}
+	return alerts, rows.Err()
 }
 
 // ── Agent Context Profile ────────────────────────────────────────────────────
@@ -2223,8 +2375,9 @@ func (s *Store) AppendEvent(typ, agentID, payload string) error {
 }
 
 // GetEvents returns up to limit events with seq > sinceSeq, optionally filtered
-// by event type. Returns the latest seq seen so the caller can use it as a cursor.
-func (s *Store) GetEvents(sinceSeq int64, types []string, limit int) ([]Event, int64, error) {
+// by event type and/or agent ID. Returns the latest seq seen so the caller can
+// use it as a cursor. Pass agentIDFilter="" to disable agent filtering.
+func (s *Store) GetEvents(sinceSeq int64, types []string, agentIDFilter string, limit int) ([]Event, int64, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -2239,6 +2392,10 @@ func (s *Store) GetEvents(sinceSeq int64, types []string, limit int) ([]Event, i
 		for _, t := range types {
 			args = append(args, t)
 		}
+	}
+	if agentIDFilter != "" {
+		query += ` AND agent_id = ?`
+		args = append(args, agentIDFilter)
 	}
 	query += ` ORDER BY seq ASC LIMIT ?`
 	args = append(args, limit)

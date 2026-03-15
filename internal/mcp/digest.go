@@ -3,10 +3,12 @@ package mcp
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/metrics"
 )
 
 // serializeCompact converts a directionalContext to a compact natural-language briefing.
@@ -31,6 +33,23 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 
 	// Root entity header + summary.
 	writeNodeHeader(&b, dc.Root, getRootSummary(dc.Root, dc.ContextPacket))
+
+	// R3: Git blame line — who last touched this function and how stale it is.
+	if dc.Root.Metadata != nil {
+		if author := dc.Root.Metadata["blame_author"]; author != "" {
+			age := metrics.BlameAgeLabel(dc.Root.Metadata["blame_date"])
+			subject := dc.Root.Metadata["blame_subject"]
+			staleness := "low"
+			if s, err := strconv.ParseFloat(dc.Root.Metadata["staleness_score"], 64); err == nil {
+				staleness = metrics.StalenessLabel(s)
+			}
+			if age != "" && subject != "" {
+				fmt.Fprintf(&b, "⚑ @%s, %s: %q — staleness: %s\n", author, age, subject, staleness)
+			} else if age != "" {
+				fmt.Fprintf(&b, "⚑ @%s, %s — staleness: %s\n", author, age, staleness)
+			}
+		}
+	}
 
 	// R32: Open quality gaps — surface before annotations so agents see known issues first.
 	if len(dc.QualityGaps) > 0 {
