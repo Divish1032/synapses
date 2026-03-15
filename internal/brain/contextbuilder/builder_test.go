@@ -407,14 +407,30 @@ func TestComputeQuality_RootSummaryOnly(t *testing.T) {
 }
 
 func TestComputeQuality_Full(t *testing.T) {
+	// Without enricher deterministic path: max quality = 0.4+0.1+0.4 = 0.9.
 	pkt := &Packet{
 		RootSummary:         "summary",
 		DependencySummaries: map[string]string{"X": "dep"},
 		Insight:             "some insight",
 	}
 	q := computeQuality(pkt)
+	if q != 0.9 {
+		t.Errorf("computeQuality(full, no deterministic path) = %f, want 0.9", q)
+	}
+}
+
+func TestComputeQuality_FullWithDeterministic(t *testing.T) {
+	// With enricher deterministic path: max quality = 0.1+0.4+0.1+0.4 = 1.0.
+	pkt := &Packet{
+		RootSummary:         "summary",
+		DependencySummaries: map[string]string{"X": "dep"},
+		Insight:             "some insight",
+		ComplexityScore:     5.0,
+		DeterministicPath:   true,
+	}
+	q := computeQuality(pkt)
 	if q != 1.0 {
-		t.Errorf("computeQuality(full) = %f, want 1.0", q)
+		t.Errorf("computeQuality(full with deterministic) = %f, want 1.0", q)
 	}
 }
 

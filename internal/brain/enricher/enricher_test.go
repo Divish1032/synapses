@@ -44,14 +44,34 @@ func TestEnrich_Success(t *testing.T) {
 	}
 }
 
-func TestEnrich_LLMFailure_ReturnsError(t *testing.T) {
+func TestEnrich_LLMFailure_ReturnsDeterministicFields(t *testing.T) {
+	// After R33: Enrich is fail-silent on LLM errors. The deterministic pass
+	// always runs and returns Phase + ComplexityScore even when the LLM is down.
 	mock := &llm.MockClient{Err: os.ErrDeadlineExceeded}
 	st := newTestStore(t)
 	e := New(mock, st, 3*time.Second)
 
-	_, err := e.Enrich(context.Background(), Request{RootName: "X"})
-	if err == nil {
-		t.Fatal("expected error when LLM fails, got nil")
+	resp, err := e.Enrich(context.Background(), Request{
+		RootName:    "X",
+		RootFile:    "internal/store/store.go",
+		CalleeNames: []string{"A", "B"},
+		FanIn:       5,
+	})
+	if err != nil {
+		t.Fatalf("expected nil error (fail-silent), got: %v", err)
+	}
+	if resp.Insight != "" {
+		t.Error("expected empty insight when LLM fails")
+	}
+	if !resp.DeterministicHit {
+		t.Error("expected DeterministicHit=true even when LLM fails")
+	}
+	if resp.Phase != "persistence" {
+		t.Errorf("expected Phase=persistence for internal/store/ path, got %q", resp.Phase)
+	}
+	// ComplexityScore = (5+2) * (1 + 2/10.0) = 7 * 1.2 = 8.4
+	if resp.ComplexityScore == 0 {
+		t.Error("expected non-zero ComplexityScore when FanIn>0")
 	}
 }
 
@@ -69,6 +89,118 @@ func TestEnrich_EmptyCallers(t *testing.T) {
 	}
 	if resp.Insight == "" {
 		t.Error("expected non-empty insight")
+	}
+}
+
+func TestEnrich_DeterministicAlwaysPopulated(t *testing.T) {
+	// Deterministic fields must be populated even when LLM succeeds.
+	mock := llm.NewMockClient(`{"insight": "Handles persistence.", "concerns": ["SQL correctness"]}`)
+	st := newTestStore(t)
+	e := New(mock, st, 3*time.Second)
+
+	resp, err := e.Enrich(context.Background(), Request{
+		RootName:    "Store",
+		RootFile:    "internal/store/store.go",
+		CalleeNames: []string{"db.Exec", "db.Query"},
+		FanIn:       10,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.DeterministicHit {
+		t.Error("DeterministicHit must be true even when LLM succeeds")
+	}
+	if resp.Phase != "persistence" {
+		t.Errorf("expected Phase=persistence, got %q", resp.Phase)
+	}
+	if resp.ComplexityScore == 0 {
+		t.Error("expected non-zero ComplexityScore")
+	}
+	if resp.Insight == "" {
+		t.Error("expected LLM insight when LLM succeeds")
+	}
+}
+
+func TestDeterministicPhase(t *testing.T) {
+	cases := []struct {
+		file  string
+		phase string
+	}{
+		{"internal/store/store.go", "persistence"},
+		{"internal/db/migrations.go", "persistence"},
+		{"internal/mcp/tools.go", "api"},
+		{"cmd/synapses/main.go", "entry_point"},
+		{"main.go", "entry_point"},
+		{"internal/graph/graph_test.go", "test"},
+		{"auth_test.go", "test"},
+		{"internal/graph/traverse.go", "core"},
+		{"pkg/brain/client.go", "core"},
+		{"router/v1.go", "api"},
+		{"handler/users.go", "api"},
+		{"server.go", "api"},
+		{"", ""},
+		{"vendor/github.com/foo/bar.go", ""}, // no matching pattern — vendor paths return empty
+	}
+	for _, tc := range cases {
+		got := deterministicPhase(tc.file)
+		if got != tc.phase {
+			t.Errorf("deterministicPhase(%q) = %q, want %q", tc.file, got, tc.phase)
+		}
+	}
+}
+
+func TestDeterministicComplexity(t *testing.T) {
+	cases := []struct {
+		fanIn  int
+		fanOut int
+		want   float64
+	}{
+		{0, 0, 0.0},
+		{1, 0, 1.0},   // (1+0) * (1 + 0/10) = 1.0
+		{0, 10, 20.0}, // (0+10) * (1 + 10/10) = 10*2 = 20
+		{5, 2, 8.4},   // (5+2) * (1 + 2/10) = 7 * 1.2 = 8.4
+		{10, 10, 40.0}, // (10+10) * (1+10/10) = 20*2 = 40
+	}
+	const eps = 1e-9
+	for _, tc := range cases {
+		got := deterministicComplexity(tc.fanIn, tc.fanOut)
+		diff := got - tc.want
+		if diff < -eps || diff > eps {
+			t.Errorf("deterministicComplexity(%d,%d) = %v, want %v", tc.fanIn, tc.fanOut, got, tc.want)
+		}
+	}
+}
+
+func TestEnricherStats(t *testing.T) {
+	mock := llm.NewMockClient(`{"insight": "ok", "concerns": []}`)
+	st := newTestStore(t)
+	e := New(mock, st, 3*time.Second)
+
+	// Zero before any calls.
+	s := e.Stats()
+	if s.DeterministicHits != 0 || s.OllamaCalls != 0 {
+		t.Errorf("expected zero stats, got %+v", s)
+	}
+
+	_, _ = e.Enrich(context.Background(), Request{RootName: "X"})
+	s = e.Stats()
+	if s.DeterministicHits != 1 {
+		t.Errorf("expected DeterministicHits=1, got %d", s.DeterministicHits)
+	}
+	if s.OllamaCalls != 1 {
+		t.Errorf("expected OllamaCalls=1, got %d", s.OllamaCalls)
+	}
+
+	// LLM failure: deterministic hits but no ollama call increment.
+	failMock := &llm.MockClient{Err: os.ErrDeadlineExceeded}
+	e2 := New(failMock, st, 3*time.Second)
+	_, _ = e2.Enrich(context.Background(), Request{RootName: "Y"})
+	s2 := e2.Stats()
+	if s2.DeterministicHits != 1 {
+		t.Errorf("expected DeterministicHits=1, got %d", s2.DeterministicHits)
+	}
+	if s2.OllamaCalls != 0 {
+		t.Errorf("expected OllamaCalls=0 on LLM failure, got %d", s2.OllamaCalls)
 	}
 }
 

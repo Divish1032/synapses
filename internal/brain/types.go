@@ -207,6 +207,15 @@ type ContextPacket struct {
 	// Examples: "High blast radius (12 callers)", "No tests found for this file".
 	// These supplement the LLM Insight with deterministic, always-available guidance.
 	GraphWarnings []string `json:"graph_warnings,omitempty"`
+
+	// ComplexityScore is a dimensionless topology-derived risk indicator:
+	// (fanIn + fanOut) * (1 + fanOut/10.0). Always populated when the enricher ran,
+	// regardless of Ollama availability. 0.0 = isolated/leaf node.
+	ComplexityScore float64 `json:"complexity_score,omitempty"`
+
+	// DeterministicPath is true when Phase and ComplexityScore were derived from
+	// graph topology without an LLM call. False only when the enricher was not invoked.
+	DeterministicPath bool `json:"deterministic_path,omitempty"`
 }
 
 // ConstraintItem is a single architectural rule the agent must respect.

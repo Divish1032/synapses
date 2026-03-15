@@ -81,6 +81,15 @@ type Packet struct {
 	// GraphWarnings are actionable warnings derived from graph topology.
 	// Always populated (no LLM required) — deterministic, high-signal guidance.
 	GraphWarnings []string
+
+	// ComplexityScore is a dimensionless topology-derived risk indicator:
+	// (fanIn + fanOut) * (1 + fanOut/10.0). Always populated (no LLM required).
+	// 0.0 = isolated/leaf node; higher = more callers + dependencies = higher change risk.
+	ComplexityScore float64
+
+	// DeterministicPath is true when Phase and ComplexityScore were computed
+	// from graph topology (always). False only when the enricher was not called.
+	DeterministicPath bool
 }
 
 // RuleRef is a single architectural rule reference from the Synapses snapshot.
@@ -172,25 +181,57 @@ func (b *Builder) Build(ctx context.Context, req Request) (*Packet, error) {
 		}
 	}
 
-	// Section 2: LLM Insight (cache-first; slow path only on cache miss).
-	if sections.LLMInsight && req.EnableLLM && b.enr != nil && req.RootNodeID != "" {
-		// Fast path: check cache first (entries live 6h, pruned at startup).
-		if cached, ok := b.store.GetInsightCache(req.RootNodeID, phase); ok {
-			pkt.Insight = cached.Insight
-			pkt.Concerns = cached.Concerns
-			// LLMUsed stays false — served from cache, no live LLM call
-		} else {
-			r, err := b.enr.Enrich(ctx, enricher.Request{
-				RootID:       req.RootNodeID,
-				RootName:     req.RootName,
-				RootType:     req.RootType,
-				RootFile:     req.RootFile,
-				CalleeNames:  req.CalleeNames,
-				CallerNames:  req.CallerNames,
-				RelatedNames: req.RelatedNames,
-				TaskContext:  req.TaskContext,
-			})
-			if err == nil {
+	// Section 2: Enricher (deterministic pass always; LLM pass when enabled + no cache hit).
+	if b.enr != nil && req.RootNodeID != "" {
+		enrReq := enricher.Request{
+			RootID:       req.RootNodeID,
+			RootName:     req.RootName,
+			RootType:     req.RootType,
+			RootFile:     req.RootFile,
+			CalleeNames:  req.CalleeNames,
+			CallerNames:  req.CallerNames,
+			RelatedNames: req.RelatedNames,
+			TaskContext:  req.TaskContext,
+			FanIn:        req.FanIn,
+		}
+
+		// Fast path: check LLM insight cache before calling the enricher's LLM path.
+		// The deterministic pass always runs inside enr.Enrich regardless of cache.
+		var cachedInsight string
+		var cachedConcerns []string
+		hasCachedInsight := false
+		if sections.LLMInsight && req.EnableLLM {
+			if cached, ok := b.store.GetInsightCache(req.RootNodeID, phase); ok {
+				cachedInsight = cached.Insight
+				cachedConcerns = cached.Concerns
+				hasCachedInsight = true
+			}
+		}
+
+		// Disable LLM in the enricher call when cache hit or LLM disabled —
+		// the deterministic pass still runs and populates Phase + ComplexityScore.
+		if hasCachedInsight || !sections.LLMInsight || !req.EnableLLM {
+			enrReq.CalleeNames = req.CalleeNames // ensure passed for fanOut computation
+		}
+
+		r, err := b.enr.Enrich(ctx, enrReq)
+		if err == nil {
+			// Deterministic fields — always apply when enricher ran.
+			pkt.ComplexityScore = r.ComplexityScore
+			pkt.DeterministicPath = r.DeterministicHit
+
+			// Phase fallback: use enricher's file-path-inferred phase when the
+			// stored SDLC config has no phase set (phase == "").
+			if pkt.Phase == "" && r.Phase != "" {
+				pkt.Phase = r.Phase
+			}
+
+			// LLM fields: prefer cached insight; fall back to fresh LLM result.
+			if hasCachedInsight {
+				pkt.Insight = cachedInsight
+				pkt.Concerns = cachedConcerns
+				// LLMUsed stays false — served from cache
+			} else if r.LLMUsed {
 				// SIL model may provide a root summary more specific than SQLite.
 				if r.RootSummary != "" {
 					pkt.RootSummary = r.RootSummary
@@ -199,10 +240,12 @@ func (b *Builder) Build(ctx context.Context, req Request) (*Packet, error) {
 				pkt.Concerns = r.Concerns
 				pkt.LLMUsed = r.LLMUsed
 				// Store in cache for future requests.
-				_ = b.store.UpsertInsightCache(req.RootNodeID, phase, r.Insight, r.Concerns)
+				if req.RootNodeID != "" {
+					_ = b.store.UpsertInsightCache(req.RootNodeID, phase, r.Insight, r.Concerns)
+				}
 			}
-			// Error is non-fatal — insight section stays empty.
 		}
+		// err is non-fatal — deterministic fields still delivered when err == nil above.
 	}
 
 	// Section 3: Active constraints.
@@ -388,11 +431,16 @@ func buildGraphWarnings(req Request) []string {
 // computeQuality returns a 0.0–1.0 heuristic for how complete a packet is.
 //
 // Scoring:
+//   - Enricher deterministic path ran (ComplexityScore or DeterministicPath): +0.1
 //   - RootSummary present: +0.4
 //   - At least one DependencySummary: +0.1
-//   - LLM Insight present (live or cached): +0.5
+//   - LLM Insight present (live or cached): +0.4
 func computeQuality(pkt *Packet) float64 {
 	var q float64
+	// Only count the deterministic enricher pass — not SDLC phase from stored config.
+	if pkt.DeterministicPath || pkt.ComplexityScore > 0 {
+		q += 0.1
+	}
 	if pkt.RootSummary != "" {
 		q += 0.4
 	}
@@ -400,7 +448,7 @@ func computeQuality(pkt *Packet) float64 {
 		q += 0.1
 	}
 	if pkt.Insight != "" {
-		q += 0.5
+		q += 0.4
 	}
 	if q > 1.0 {
 		q = 1.0

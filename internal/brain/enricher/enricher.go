@@ -1,11 +1,12 @@
 // Package enricher implements the Context Enricher — Feature 2 of synapses-intelligence.
 //
-// During a get_context call, the enricher:
-//  1. Loads pre-computed summaries from brain.sqlite (fast, no LLM)
-//  2. Optionally generates a 2-sentence insight about the root entity's architectural role
+// During a get_context call, the enricher runs two passes:
+//  1. Deterministic pass: SDLC phase (file path regex), complexity score (fanin+fanout),
+//     dependency names — always returns in <5ms, no LLM required.
+//  2. LLM pass (optional): 2-sentence insight + concerns — skipped when Ollama is
+//     unavailable, disabled, or slow. Deterministic fields are always returned.
 //
-// The summaries replace raw code in get_context responses, dramatically reducing
-// token usage for the main LLM (Claude, Gemini, GPT, etc.).
+// This ensures context packets are never fully empty even when the LLM is down.
 package enricher
 
 import (
@@ -14,6 +15,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/brain/llm"
@@ -58,11 +60,14 @@ type Request struct {
 	RootID       string
 	RootName     string
 	RootType     string
-	RootFile     string // file path of the root entity; used for domain detection
+	RootFile     string // file path of the root entity; used for domain detection + phase inference
 	CalleeNames  []string
 	CallerNames  []string
 	RelatedNames []string
 	TaskContext  string
+	// Topology signals used by the deterministic pass.
+	// FanIn is the total caller count (may exceed len(CallerNames) when capped).
+	FanIn int
 }
 
 // Response is added to the get_context output.
@@ -70,7 +75,38 @@ type Response struct {
 	RootSummary string // populated by the SIL model (ROOT_SUMMARY: label)
 	Insight     string
 	Concerns    []string
-	LLMUsed     bool // true when the LLM was called; false on cache hit (future)
+	LLMUsed     bool // true when the LLM was called; false on cache hit or deterministic-only path
+
+	// Deterministic fields — always populated, no LLM required.
+	Phase           string  // SDLC phase inferred from file path ("entry_point", "persistence", "test", "api", "core", "")
+	ComplexityScore float64 // (fanin + fanout) * (1 + fanout/10.0); 0 when topology unknown
+	DeterministicHit bool   // true when deterministic pass ran (even if LLM was also called)
+}
+
+// deterministicResult holds the output of the deterministic pre-pass.
+type deterministicResult struct {
+	Phase           string
+	ComplexityScore float64
+}
+
+// sdlcPhasePatterns maps file path substrings to SDLC phase labels.
+// Evaluated in order; first match wins. Patterns work for both relative
+// ("internal/store/store.go") and absolute ("/home/user/project/cmd/main.go") paths.
+var sdlcPhasePatterns = []struct {
+	pattern string
+	phase   string
+}{
+	{"_test.go", "test"},
+	{"cmd/", "entry_point"},
+	{"main.go", "entry_point"},
+	{"internal/store/", "persistence"},
+	{"internal/db/", "persistence"},
+	{"internal/mcp/", "api"},
+	{"handler", "api"},
+	{"router", "api"},
+	{"server.go", "api"},
+	{"internal/", "core"},
+	{"pkg/", "core"},
 }
 
 type insightJSON struct {
@@ -102,12 +138,22 @@ type silGraphPacket struct {
 	Language string         `json:"language"`
 }
 
+// Stats holds observable counters for the enricher's two execution paths.
+type Stats struct {
+	DeterministicHits uint64 // calls where deterministic pass ran (always ≥ OllamaCalls)
+	OllamaCalls       uint64 // calls where the LLM was invoked (subset of DeterministicHits)
+}
+
 // Enricher adds semantic context to get_context responses.
 type Enricher struct {
 	llm     llm.LLMClient
 	store   *store.Store
 	timeout time.Duration
 	silMode bool // when true, builds graph JSON prompts for the SIL fine-tuned model
+
+	// Atomic counters for observability. Read via Stats().
+	deterministicHits uint64
+	ollamaCalls       uint64
 }
 
 // New creates an Enricher.
@@ -118,6 +164,15 @@ func New(client llm.LLMClient, st *store.Store, timeout time.Duration) *Enricher
 	return &Enricher{llm: client, store: st, timeout: timeout}
 }
 
+// Stats returns a snapshot of the enricher's execution path counters.
+// Safe to call concurrently.
+func (e *Enricher) Stats() Stats {
+	return Stats{
+		DeterministicHits: atomic.LoadUint64(&e.deterministicHits),
+		OllamaCalls:       atomic.LoadUint64(&e.ollamaCalls),
+	}
+}
+
 // WithSILMode configures the enricher to build "Graph: {json}" prompts suited
 // to the fine-tuned SIL model rather than the generic JSON-output Ollama prompt.
 // Call this when brain config backend == "local".
@@ -126,32 +181,89 @@ func (e *Enricher) WithSILMode() *Enricher {
 	return e
 }
 
-// Enrich generates a 2-sentence insight for the root entity.
-// This calls the LLM; callers should handle errors gracefully (fail-silent).
+// Enrich generates context enrichment for the root entity.
+//
+// The deterministic pass always runs first and returns Phase + ComplexityScore
+// in <5ms regardless of LLM availability. The LLM pass (Insight + Concerns) is
+// attempted after and its results merged in — but the response is never empty
+// even when the LLM is unavailable or times out.
 func (e *Enricher) Enrich(ctx context.Context, req Request) (Response, error) {
-	ctx, cancel := context.WithTimeout(ctx, e.timeout)
+	// --- Deterministic pass (always runs, no LLM) ---
+	det := deterministicPass(req)
+	atomic.AddUint64(&e.deterministicHits, 1)
+
+	resp := Response{
+		Phase:            det.Phase,
+		ComplexityScore:  det.ComplexityScore,
+		DeterministicHit: true,
+	}
+
+	// --- LLM pass (optional: insight + concerns) ---
+	llmCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
 	var prompt string
 	if e.silMode {
-		// SIL model path: send graph JSON format that matches training data.
-		// The SIL system prompt (baked into the GGUF) handles the output schema.
 		prompt = e.buildSILPrompt(req)
 	} else {
-		// Generic Ollama path: structured prose prompt asking for JSON output.
 		prompt = e.buildPrompt(req)
 	}
-	raw, err := e.llm.Generate(ctx, prompt)
+
+	raw, err := e.llm.Generate(llmCtx, prompt)
 	if err != nil {
-		return Response{}, fmt.Errorf("llm generate: %w", err)
+		// LLM unavailable — return deterministic fields, no error (fail-silent).
+		return resp, nil
 	}
 
-	result, err := parseInsight(raw)
-	if err != nil {
-		return Response{}, fmt.Errorf("parse insight: %w (raw: %q)", err, llm.Truncate(raw, 100))
+	result, parseErr := parseInsight(raw)
+	if parseErr != nil {
+		// Unparseable response — deterministic fields still delivered.
+		return resp, nil
 	}
 
-	return result, nil
+	atomic.AddUint64(&e.ollamaCalls, 1)
+
+	// Merge LLM result into response. Deterministic Phase wins over any LLM-inferred value.
+	resp.RootSummary = result.RootSummary
+	resp.Insight = result.Insight
+	resp.Concerns = result.Concerns
+	resp.LLMUsed = result.LLMUsed
+	return resp, nil
+}
+
+// deterministicPass computes graph-derivable fields without any LLM call.
+// It always succeeds — errors are impossible (pure math + string matching).
+func deterministicPass(req Request) deterministicResult {
+	fanOut := len(req.CalleeNames)
+	return deterministicResult{
+		Phase:           deterministicPhase(req.RootFile),
+		ComplexityScore: deterministicComplexity(req.FanIn, fanOut),
+	}
+}
+
+// deterministicPhase infers the SDLC phase from a file path using ordered
+// pattern matching. Returns "" when no pattern matches (e.g. empty path).
+func deterministicPhase(filePath string) string {
+	for _, p := range sdlcPhasePatterns {
+		if strings.Contains(filePath, p.pattern) {
+			return p.phase
+		}
+	}
+	return ""
+}
+
+// deterministicComplexity computes a dimensionless complexity proxy from
+// graph topology: (fanIn + fanOut) * (1 + fanOut/10.0).
+//
+// Rationale: fanIn measures blast radius (how many callers break on change);
+// fanOut measures cognitive load (how many dependencies must be understood).
+// The product grows super-linearly to reflect the combined risk.
+// Returns 0.0 when both inputs are zero (leaf/isolated node).
+func deterministicComplexity(fanIn, fanOut int) float64 {
+	if fanIn == 0 && fanOut == 0 {
+		return 0.0
+	}
+	return float64(fanIn+fanOut) * (1.0 + float64(fanOut)/10.0)
 }
 
 func (e *Enricher) buildPrompt(req Request) string {
