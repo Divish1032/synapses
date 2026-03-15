@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -51,12 +52,38 @@ type Cache struct {
 	httpClient *http.Client
 }
 
-// New creates a Cache backed by the given store.
+// New creates a Cache backed by the given store with SSRF protection enabled.
 func New(s *store.Store) *Cache {
+	// SSRF Protection: custom Dialer that rejects private/loopback/metadata IPs.
+	dialer := &net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+			if err != nil {
+				return nil, err
+			}
+			for _, ip := range ips {
+				if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+					return nil, fmt.Errorf("SSRF prevention blocked access to %s (%s)", host, ip.String())
+				}
+			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+		},
+	}
+
 	return &Cache{
 		store: s,
 		httpClient: &http.Client{
-			Timeout: httpTimeout,
+			Transport: transport,
+			Timeout:   httpTimeout,
 		},
 	}
 }

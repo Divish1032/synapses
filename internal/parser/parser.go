@@ -106,15 +106,37 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 			}
 			return nil
 		}
+		
+		info, statErr := d.Info()
+		if statErr != nil {
+			return nil
+		}
+
+		// Security: Prevent Directory Traversal via Symlinks.
+		// Resolve the symlink and ensure the target is within the repository root.
+		if info.Mode()&os.ModeSymlink != 0 {
+			resolved, symErr := filepath.EvalSymlinks(path)
+			if symErr != nil {
+				return nil // Skip dangling or invalid symlinks
+			}
+			absRoot, absErr := filepath.Abs(root)
+			if absErr != nil {
+				return nil
+			}
+			absResolved, resErr := filepath.Abs(resolved)
+			if resErr != nil || !strings.HasPrefix(absResolved, absRoot) {
+				fmt.Fprintf(os.Stderr, "synapses/security: skipped symlink resolving outside repo root: %s -> %s\n", path, resolved)
+				return nil
+			}
+		}
+
 		ext := strings.ToLower(filepath.Ext(path))
 		p, ok := w.parsers[ext]
 		if !ok {
 			return nil
 		}
-		var mtime int64
-		if info, statErr := d.Info(); statErr == nil {
-			mtime = info.ModTime().UnixNano()
-		}
+		
+		mtime := info.ModTime().UnixNano()
 		jobs = append(jobs, fileJob{path: path, parser: p, mtime: mtime})
 		return nil
 	}); err != nil {

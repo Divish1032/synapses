@@ -95,11 +95,9 @@ type Config struct {
 	// A value of 0 defaults to 4. Higher values find more indirect paths but are slower.
 	DataFlowMaxHops int `json:"data_flow_max_hops,omitempty"`
 
-	// Plugins registers external parser plugins for file extensions not handled
-	// by built-in parsers. Each plugin is a process that reads a file path on
-	// the first line of stdin followed by the raw file content, and writes a
-	// single JSON object {"nodes":[...],"edges":[...]} to stdout.
-	Plugins []PluginConfig `json:"plugins,omitempty"`
+	// Plugins have been removed for security reasons (Workspace RCE).
+	// They must now be configured globally via the CLI or user-level config.
+	Plugins []PluginConfig `json:"-"`
 
 	// PeerAPIPort is the port this synapses instance listens on for incoming
 	// peer queries. Set to 0 (default) to disable the peer API server.
