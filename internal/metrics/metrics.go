@@ -1,16 +1,18 @@
 // Package metrics enriches graph nodes with code health signals:
-// cyclomatic complexity (computed during parsing), git churn, and test coverage.
+// cyclomatic complexity (computed during parsing), git churn, git blame, and test coverage.
 package metrics
 
 import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -368,6 +370,148 @@ func parsePprofTop(profilePath string) (map[string]float64, error) {
 		result[fields[5]] = pct
 	}
 	return result, sc.Err()
+}
+
+// blameResult holds the most-recent git commit that touched a file.
+type blameResult struct {
+	Author  string
+	Date    string // ISO short: "2025-01-15"
+	Commit  string // 7-char short hash
+	Subject string
+}
+
+// fileBlame runs git log -1 to get the most-recent commit that touched absFile,
+// relative to repoRoot. Returns nil when git is unavailable or the file has no commits.
+func fileBlame(repoRoot, absFile string) *blameResult {
+	out, err := exec.Command(
+		"git", "-C", repoRoot,
+		"log", "-1",
+		"--format=%an\x1f%ad\x1f%H\x1f%s",
+		"--date=short",
+		"--follow",
+		"--", absFile,
+	).Output()
+	if err != nil || len(out) == 0 {
+		return nil
+	}
+	line := strings.TrimSpace(string(out))
+	parts := strings.SplitN(line, "\x1f", 4)
+	if len(parts) != 4 {
+		return nil
+	}
+	hash := parts[2]
+	if len(hash) > 7 {
+		hash = hash[:7]
+	}
+	return &blameResult{
+		Author:  parts[0],
+		Date:    parts[1],
+		Commit:  hash,
+		Subject: parts[3],
+	}
+}
+
+// BlameAgeLabel converts an ISO short date ("2025-01-15") to a human-readable age
+// relative to now ("3d ago", "1w ago", "2mo ago", "1y ago").
+// Returns "" if the date cannot be parsed.
+func BlameAgeLabel(dateStr string) string {
+	t, err := time.Parse("2006-01-02", dateStr)
+	if err != nil {
+		return ""
+	}
+	days := int(time.Since(t).Hours() / 24)
+	switch {
+	case days < 1:
+		return "today"
+	case days == 1:
+		return "1d ago"
+	case days < 7:
+		return fmt.Sprintf("%dd ago", days)
+	case days < 30:
+		if weeks := days / 7; weeks == 1 {
+			return "1w ago"
+		} else {
+			return fmt.Sprintf("%dw ago", weeks)
+		}
+	case days < 365:
+		if months := days / 30; months == 1 {
+			return "1mo ago"
+		} else {
+			return fmt.Sprintf("%dmo ago", months)
+		}
+	default:
+		if years := days / 365; years == 1 {
+			return "1y ago"
+		} else {
+			return fmt.Sprintf("%dy ago", years)
+		}
+	}
+}
+
+// StalenessLabel converts a numeric staleness score to a qualitative label.
+// low: < 30, medium: 30–149, high: ≥ 150.
+func StalenessLabel(score float64) string {
+	switch {
+	case score < 30:
+		return "low"
+	case score < 150:
+		return "medium"
+	default:
+		return "high"
+	}
+}
+
+// EnrichBlame annotates every function/method node with git blame metadata:
+// blame_author, blame_date, blame_commit, blame_subject, and staleness_score.
+// Uses per-file granularity (one git log call per unique file) for performance.
+// Nodes in vendored/generated paths are skipped.
+// Must be called after EnrichChurn — staleness_score reads metadata["churn"].
+// Git errors are silently ignored; the graph remains usable without blame data.
+func EnrichBlame(g *graph.Graph, repoRoot string) {
+	// Per-file blame cache: absFile → *blameResult (nil = no git data for file).
+	cache := make(map[string]*blameResult)
+
+	for _, n := range g.AllNodes() {
+		// Only function/method nodes carry meaningful blame.
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		// Skip vendored/generated code — blame is not actionable.
+		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
+			continue
+		}
+
+		absFile := n.File
+		bi, seen := cache[absFile]
+		if !seen {
+			bi = fileBlame(repoRoot, absFile)
+			cache[absFile] = bi
+		}
+		if bi == nil {
+			continue
+		}
+
+		if n.Metadata == nil {
+			n.Metadata = make(map[string]string)
+		}
+		n.Metadata["blame_author"] = bi.Author
+		n.Metadata["blame_date"] = bi.Date
+		n.Metadata["blame_commit"] = bi.Commit
+		n.Metadata["blame_subject"] = bi.Subject
+
+		// staleness_score = days_since_change × log(1 + churn).
+		// churn is set by EnrichChurn (must run first).
+		daysAgo := 0.0
+		if t, err := time.Parse("2006-01-02", bi.Date); err == nil {
+			daysAgo = time.Since(t).Hours() / 24
+		}
+		churn := 0.0
+		if c, err := strconv.ParseFloat(n.Metadata["churn"], 64); err == nil {
+			churn = c
+		}
+		score := daysAgo * math.Log(1+churn)
+		n.Metadata["staleness_score"] = fmt.Sprintf("%.1f", score)
+	}
 }
 
 // pprofShortName converts a fully-qualified pprof function name to the short

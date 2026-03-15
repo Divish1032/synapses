@@ -680,6 +680,9 @@ func (s *Server) registerTools() {
 			mcp.WithString("provider",
 				mcp.Description("Optional. Model provider: 'anthropic', 'openai', etc."),
 			),
+			mcp.WithString("intent",
+				mcp.Description("Optional. Short free-text declaration of what you are working on — visible to peer agents as a Tier 2/3 signal. E.g. 'implementing R1 framework edge injection'. Pass empty string to clear."),
+			),
 		),
 		s.handleSessionInit,
 	)
@@ -796,6 +799,12 @@ func (s *Server) registerTools() {
 					"If the ego-graph is structurally unchanged, returns {\"unchanged\": true, \"entity_hash\": \"...\", \"entity\": \"...\"} "+
 					"instead of the full payload — saving tokens on repeated calls in tight reasoning loops. "+
 					"Ignored when mode='impact'."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Optional. Your agent ID (same value passed to session_init). "+
+					"When provided, this call is recorded as a watched symbol — if another agent "+
+					"subsequently edits that file, a dependency_alert will surface in your next session_init. "+
+					"Omit in read-only or exploratory sessions where you don't want peer tracking."),
 			),
 		),
 		s.handleGetContext,
@@ -1233,6 +1242,9 @@ func (s *Server) registerTools() {
 			mcp.WithString("agent_id",
 				mcp.Description("Optional. Self-declared agent identifier. Recorded as last_updated_by."),
 			),
+			mcp.WithString("intent",
+				mcp.Description("Optional. Short free-text declaration of what you are working on — visible to peer agents. E.g. 'implementing R1 framework edge injection'. Pass space to clear."),
+			),
 		),
 		s.handleUpdateTask,
 	)
@@ -1392,8 +1404,37 @@ func (s *Server) registerTools() {
 			mcp.WithNumber("limit",
 				mcp.Description("Maximum events to return. Defaults to 50."),
 			),
+			mcp.WithString("agent_id",
+				mcp.Description("Optional. Filter events to only those emitted by this agent ID. Use to view a specific peer's activity stream (Tier 3 on-demand signal)."),
+			),
 		),
 		s.handleGetEvents,
+	)
+
+	// get_peer_activity (B29): structured digest of a specific peer agent's recent actions.
+	// Tier 3 on-demand signal — never auto-injected; call explicitly when you need peer context.
+	s.addOrDefer(
+		mcp.NewTool(
+			"get_peer_activity",
+			mcp.WithDescription(
+				"Returns a structured digest of a specific peer agent's recent actions: "+
+					"what entities they examined, files they changed, tasks they started, and scopes they claimed. "+
+					"This is the Tier 3 on-demand signal — call it when session_init surfaced a conflict or "+
+					"dependency_alert and you need to understand what the peer is actually doing. "+
+					"Never injected automatically; you pull it explicitly.",
+			),
+			mcp.WithString("agent_id",
+				mcp.Required(),
+				mcp.Description("ID of the peer agent to inspect."),
+			),
+			mcp.WithNumber("since_seq",
+				mcp.Description("Return only events with seq greater than this value. Use 0 for recent history. Pass the latest_seq from the previous call to get only new activity."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Maximum recent actions to return. Defaults to 10."),
+			),
+		),
+		s.handleGetPeerActivity,
 	)
 
 	// ── Rule Management Tools ────────────────────────────────────────────────

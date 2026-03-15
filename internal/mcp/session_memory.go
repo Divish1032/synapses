@@ -176,7 +176,7 @@ func (s *Server) extractSessionSummary(agentID string) *sessionSummary {
 	}
 
 	// Get recent events (all types, last 200).
-	events, _, err := s.store.GetEvents(0, nil, 200)
+	events, _, err := s.store.GetEvents(0, nil, "", 200)
 	if err != nil {
 		return summary
 	}

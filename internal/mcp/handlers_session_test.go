@@ -40,7 +40,7 @@ func TestHandleSessionInit_EmitsSessionStartEvent(t *testing.T) {
 	s := newTestServer(t)
 	_, _ = s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "agent-x"}))
 
-	events, _, err := s.store.GetEvents(0, nil, 50)
+	events, _, err := s.store.GetEvents(0, nil, "", 50)
 	if err != nil {
 		t.Fatalf("GetEvents: %v", err)
 	}
@@ -67,7 +67,14 @@ func TestHandleSessionInit_MultiAgent_AwarenessSurfaced(t *testing.T) {
 		"scope_type": "directory",
 	}))
 
-	// Agent B starts — should see agent-a in agent_awareness.
+	// Agent B also claims the same scope, creating a conflict.
+	_, _ = s.handleClaimWork(ctx, callTool(map[string]any{
+		"agent_id":   "agent-b",
+		"scope":      "pkg/auth",
+		"scope_type": "directory",
+	}))
+
+	// Agent B starts — should see a conflict in agent_awareness (Tier 1 signal).
 	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "agent-b"}))
 	m := mustResult(t, res, err)
 
@@ -75,9 +82,9 @@ func TestHandleSessionInit_MultiAgent_AwarenessSurfaced(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected agent_awareness map, got %T — keys: %v", m["agent_awareness"], mapKeys(m))
 	}
-	peers, ok := awareness["active_peers"].([]any)
-	if !ok || len(peers) == 0 {
-		t.Fatalf("expected active_peers to be non-empty, got %v", awareness["active_peers"])
+	// B29: active_peers list is gone; instead expect active_count or conflicts.
+	if awareness["active_count"] == nil && awareness["conflicts"] == nil {
+		t.Fatalf("expected active_count or conflicts in agent_awareness, got keys: %v", mapKeys(awareness))
 	}
 }
 

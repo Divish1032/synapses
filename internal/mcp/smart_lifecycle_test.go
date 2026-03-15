@@ -145,11 +145,11 @@ func TestPlanAutoCompletion_PlanCompletedEventEmitted(t *testing.T) {
 	_, taskIDs := makePlan(t, s, "Event Plan", "Solo Task")
 
 	// Capture latest_seq before the completion.
-	_, seqBefore, _ := s.store.GetEvents(0, nil, 1)
+	_, seqBefore, _ := s.store.GetEvents(0, nil, "", 1)
 
 	updateTask(t, s, taskIDs[0], "done")
 
-	events, _, err := s.store.GetEvents(seqBefore, []string{"plan_completed"}, 10)
+	events, _, err := s.store.GetEvents(seqBefore, []string{"plan_completed"}, "", 10)
 	if err != nil {
 		t.Fatalf("GetEvents: %v", err)
 	}

@@ -1,0 +1,4032 @@
+{
+	"Golang errors": {},
+	"Issues": [
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint8",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/serialize.go",
+			"code": "57: \t\tfor i, t := range fg.Types {\n58: \t\t\ttypesInt[i] = uint8(len(t)) // Using len temporarily as a surrogate ID\n59: \t\t}\n",
+			"line": "58",
+			"column": "23",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/serialize.go",
+			"code": "267: func writeString(w io.Writer, s string) error {\n268: \tlength := uint32(len(s))\n269: \tif err := binary.Write(w, binary.LittleEndian, length); err != nil {\n",
+			"line": "268",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/serialize.go",
+			"code": "239: \n240: \tinternedCount := uint32(len(Pool.reverse))\n241: \tif err := binary.Write(w, binary.LittleEndian, internedCount); err != nil {\n",
+			"line": "240",
+			"column": "25",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/serialize.go",
+			"code": "100: \n101: \tinEdgeCount := uint32(len(fg.InEdges))\n102: \tif err := binary.Write(enc, binary.LittleEndian, inEdgeCount); err != nil {\n",
+			"line": "101",
+			"column": "23",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/serialize.go",
+			"code": "84: \t// 4. Write Edges\n85: \toutEdgeCount := uint32(len(fg.OutEdges))\n86: \tif err := binary.Write(enc, binary.LittleEndian, outEdgeCount); err != nil {\n",
+			"line": "85",
+			"column": "24",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/serialize.go",
+			"code": "42: \t// 3. Write Nodes Capacity\n43: \tnodeCount := uint32(len(fg.Names))\n44: \tif err := binary.Write(enc, binary.LittleEndian, nodeCount); err != nil {\n",
+			"line": "43",
+			"column": "21",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/intern.go",
+			"code": "75: \t// Assign the next available ID sequence (offset by the ghost range)\n76: \tid = StringID(len(p.reverse) + ReservedGhostRange)\n77: \tp.forward[h] = id\n",
+			"line": "76",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/index_snapshot.go",
+			"code": "109: \n110: \twriteU32(uint32(len(poolStrs)))\n111: \tfor _, s := range poolStrs {\n",
+			"line": "110",
+			"column": "17",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/index_snapshot.go",
+			"code": "85: \tnodeCount := uint32(len(idx.SeqIDs) - 1) // exclude sentinel at 0\n86: \tedgeCount := uint32(len(idx.OutTargets))\n87: \twriteU32(nodeCount)\n",
+			"line": "86",
+			"column": "21",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/index_snapshot.go",
+			"code": "84: \n85: \tnodeCount := uint32(len(idx.SeqIDs) - 1) // exclude sentinel at 0\n86: \tedgeCount := uint32(len(idx.OutTargets))\n",
+			"line": "85",
+			"column": "21",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/index_snapshot.go",
+			"code": "76: \t\tbs := []byte(s)\n77: \t\twriteU32(uint32(len(bs)))\n78: \t\tbuf.Write(bs)\n",
+			"line": "77",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/index.go",
+			"code": "297: \t\tidx.InEnd[i] = inPos\n298: \t\tinPos += uint32(inDeg[i])\n299: \t}\n",
+			"line": "298",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/index.go",
+			"code": "294: \t\tidx.OutEnd[i] = outPos\n295: \t\toutPos += uint32(outDeg[i])\n296: \t\tidx.InStart[i] = inPos\n",
+			"line": "295",
+			"column": "19",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/flatgraph.go",
+			"code": "109: \n110: \tidx := NodeIndex(len(fg.Names))\n111: \n",
+			"line": "110",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e int32",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/index.go",
+			"code": "252: \t\tidx.PkgIDs = append(idx.PkgIDs, pool.Intern(ns.pkg))\n253: \t\tidx.Lines = append(idx.Lines, int32(ns.line))\n254: \t\tidx.Exported = append(idx.Exported, ns.exported)\n",
+			"line": "253",
+			"column": "38",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "338",
+				"url": "https://cwe.mitre.org/data/definitions/338.html"
+			},
+			"rule_id": "G404",
+			"details": "Use of weak random number generator (math/rand or math/rand/v2 instead of crypto/rand)",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/communities.go",
+			"code": "117: \t// Shuffle order for each iteration — required for LPA correctness.\n118: \trng := rand.New(rand.NewSource(42))\n119: \torder := make([]int, len(nodes))\n",
+			"line": "118",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "LOW",
+			"cwe": {
+				"id": "295",
+				"url": "https://cwe.mitre.org/data/definitions/295.html"
+			},
+			"rule_id": "G402",
+			"details": "TLS InsecureSkipVerify may be set to true.",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/peer/client.go",
+			"code": "41: \t\tTLSClientConfig: \u0026tls.Config{\n42: \t\t\tInsecureSkipVerify: strings.HasPrefix(cfg.URL, \"https://localhost\") ||\n43: \t\t\t\tstrings.HasPrefix(cfg.URL, \"https://127.\"),\n44: \t\t},\n",
+			"line": "42-43",
+			"column": "24",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "HIGH",
+			"cwe": null,
+			"rule_id": "G703",
+			"details": "Path traversal via taint analysis",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/selfupdate.go",
+			"code": "94: \ttmp := exe + \".new\"\n95: \tif err := os.WriteFile(tmp, data, 0o755); err != nil {\n96: \t\treturn fmt.Errorf(\"write temp binary: %w\", err)\n",
+			"line": "95",
+			"column": "24",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "HIGH",
+			"cwe": null,
+			"rule_id": "G703",
+			"details": "Path traversal via taint analysis",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/onboard.go",
+			"code": "195: \t}\n196: \treturn os.WriteFile(cfgPath, append(data, '\\n'), 0o644)\n197: }\n",
+			"line": "196",
+			"column": "21",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "HIGH",
+			"cwe": null,
+			"rule_id": "G703",
+			"details": "Path traversal via taint analysis",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/onboard.go",
+			"code": "180: \texisting := map[string]interface{}{}\n181: \tif data, err := os.ReadFile(cfgPath); err == nil {\n182: \t\t_ = json.Unmarshal(data, \u0026existing)\n",
+			"line": "181",
+			"column": "29",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "HIGH",
+			"cwe": null,
+			"rule_id": "G703",
+			"details": "Path traversal via taint analysis",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/onboard.go",
+			"code": "172: \t// Create the directory if it doesn't exist (handles `synapses init --path /new/dir`).\n173: \tif err := os.MkdirAll(root, 0o755); err != nil {\n174: \t\treturn fmt.Errorf(\"create directory: %w\", err)\n",
+			"line": "173",
+			"column": "23",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "HIGH",
+			"cwe": null,
+			"rule_id": "G703",
+			"details": "Path traversal via taint analysis",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1978: \t}\n1979: \treturn os.WriteFile(file, []byte(content), 0o644)\n1980: }\n",
+			"line": "1979",
+			"column": "21",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "HIGH",
+			"cwe": null,
+			"rule_id": "G703",
+			"details": "Path traversal via taint analysis",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1677: \n1678: \treturn os.WriteFile(claudePath, []byte(content), 0o644)\n1679: }\n",
+			"line": "1678",
+			"column": "21",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "HIGH",
+			"cwe": null,
+			"rule_id": "G703",
+			"details": "Path traversal via taint analysis",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1641: \t\t\t\tcleaned = strings.TrimRight(cleaned, \"\\n\") + \"\\n\"\n1642: \t\t\t\t_ = os.WriteFile(rootCLAUDE, []byte(cleaned), 0o644)\n1643: \t\t\t}\n",
+			"line": "1642",
+			"column": "21",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "400",
+				"url": "https://cwe.mitre.org/data/definitions/400.html"
+			},
+			"rule_id": "G118",
+			"details": "Goroutine uses context.Background/TODO while request-scoped context is available",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/tools.go",
+			"code": "640: \tenrichWg.Add(1)\n641: \tgo func() {\n642: \t\tdefer enrichWg.Done()\n",
+			"line": "641",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "400",
+				"url": "https://cwe.mitre.org/data/definitions/400.html"
+			},
+			"rule_id": "G118",
+			"details": "Goroutine uses context.Background/TODO while request-scoped context is available",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/tools.go",
+			"code": "515: \t\t\tdc.BrainHint = \"enrichment in progress — call get_context again in a few seconds for brain-enriched results\"\n516: \t\t\tgo s.asyncEnrichContext(bc, cacheKey, dc, best, taskID)\n517: \t\t}\n",
+			"line": "516",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "400",
+				"url": "https://cwe.mitre.org/data/definitions/400.html"
+			},
+			"rule_id": "G118",
+			"details": "Goroutine uses context.Background/TODO while request-scoped context is available",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/intents.go",
+			"code": "871: \t// Async enrichment: fire background goroutine, return nil for this call.\n872: \tgo s.asyncEnrichContext(bc, cacheKey, dc, node, taskID)\n873: \treturn nil\n",
+			"line": "872",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "367",
+				"url": "https://cwe.mitre.org/data/definitions/367.html"
+			},
+			"rule_id": "G122",
+			"details": "Filesystem operation in filepath.Walk/WalkDir callback uses race-prone path; consider root-scoped APIs (e.g. os.Root) to prevent symlink TOCTOU traversal",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/parser/parser.go",
+			"code": "233: \t\tg.RemoveFile(path)\n234: \t\tsrc, readErr := os.ReadFile(path)\n235: \t\tif readErr != nil {\n",
+			"line": "234",
+			"column": "30",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "328",
+				"url": "https://cwe.mitre.org/data/definitions/328.html"
+			},
+			"rule_id": "G401",
+			"details": "Use of weak cryptographic primitive",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "1647: func ViolationID(ruleID, fromNode, toNode, edgeType string) string {\n1648: \th := sha1.Sum([]byte(ruleID + \"\\x00\" + fromNode + \"\\x00\" + toNode + \"\\x00\" + edgeType))\n1649: \treturn fmt.Sprintf(\"%x\", h[:8]) // 16 hex chars — compact and collision-resistant\n",
+			"line": "1648",
+			"column": "7",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "328",
+				"url": "https://cwe.mitre.org/data/definitions/328.html"
+			},
+			"rule_id": "G401",
+			"details": "Use of weak cryptographic primitive",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/tools.go",
+			"code": "2780: \t}\n2781: \th := sha1.Sum(b)\n2782: \treturn fmt.Sprintf(\"%x\", h)\n",
+			"line": "2781",
+			"column": "7",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "328",
+				"url": "https://cwe.mitre.org/data/definitions/328.html"
+			},
+			"rule_id": "G401",
+			"details": "Use of weak cryptographic primitive",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/tools.go",
+			"code": "171: \tsort.Strings(parts)\n172: \th := sha1.New()\n173: \tfor _, s := range parts {\n",
+			"line": "172",
+			"column": "7",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/resolver/tstypes.go",
+			"code": "59: \t// Spawn: node \u003cscript\u003e \u003croot\u003e\n60: \tcmd := exec.Command(\"node\", tmpPath, root) //nolint:gosec\n61: \tcmd.Dir = root\n",
+			"line": "60",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/metrics/metrics.go",
+			"code": "385: func fileBlame(repoRoot, absFile string) *blameResult {\n386: \tout, err := exec.Command(\n387: \t\t\"git\", \"-C\", repoRoot,\n388: \t\t\"log\", \"-1\",\n389: \t\t\"--format=%an\\x1f%ad\\x1f%H\\x1f%s\",\n390: \t\t\"--date=short\",\n391: \t\t\"--follow\",\n392: \t\t\"--\", absFile,\n393: \t).Output()\n394: \tif err != nil || len(out) == 0 {\n",
+			"line": "386-393",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/metrics/metrics.go",
+			"code": "338: func parsePprofTop(profilePath string) (map[string]float64, error) {\n339: \tout, err := exec.Command(\n340: \t\t\"go\", \"tool\", \"pprof\", \"-top\", \"-nodecount=100000\", profilePath,\n341: \t).Output()\n342: \tif err != nil {\n",
+			"line": "339-341",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/metrics/metrics.go",
+			"code": "89: \t// --follow tracks renames; -- separates the file path from flags.\n90: \tout, err := exec.Command(\n91: \t\t\"git\", \"-C\", repoRoot,\n92: \t\t\"log\", fmt.Sprintf(\"-n%d\", limit),\n93: \t\t\"--format=%H\\x1f%an\\x1f%ad\\x1f%s\",\n94: \t\t\"--date=short\",\n95: \t\t\"--follow\",\n96: \t\t\"--\", filePath,\n97: \t).Output()\n98: \tif err != nil || len(out) == 0 {\n",
+			"line": "90-97",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/metrics/metrics.go",
+			"code": "52: \tsince := fmt.Sprintf(\"--since=%d.days.ago\", days)\n53: \tout, err := exec.Command(\n54: \t\t\"git\", \"-C\", repoRoot,\n55: \t\t\"log\", since, \"--name-only\", \"--format=\",\n56: \t).Output()\n57: \tif err != nil {\n",
+			"line": "53-56",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/tools.go",
+			"code": "2987: \t\tif len(recentChanges) == 0 {\n2988: \t\t\tif out, err := exec.Command(\"git\", \"-C\", root, \"log\", \"--oneline\", \"-7\").Output(); err == nil {\n2989: \t\t\t\tif log := strings.TrimSpace(string(out)); log != \"\" {\n",
+			"line": "2988",
+			"column": "19",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/tools.go",
+			"code": "2981: \tif root != \"\" {\n2982: \t\tif out, err := exec.Command(\"git\", \"-C\", root, \"diff\", \"--stat\", \"HEAD\").Output(); err == nil {\n2983: \t\t\tif stat := strings.TrimSpace(string(out)); stat != \"\" {\n",
+			"line": "2982",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/tools.go",
+			"code": "2728: \tif len(events) == 0 \u0026\u0026 root != \"\" {\n2729: \t\tif out, err := exec.Command(\"git\", \"-C\", root, \"log\", \"--oneline\", \"-7\").Output(); err == nil {\n2730: \t\t\tif log := strings.TrimSpace(string(out)); log != \"\" {\n",
+			"line": "2729",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/tools.go",
+			"code": "2718: \tif root != \"\" {\n2719: \t\tif out, err := exec.Command(\"git\", \"-C\", root, \"diff\", \"--stat\", \"HEAD\").Output(); err == nil {\n2720: \t\t\tif stat := strings.TrimSpace(string(out)); stat != \"\" {\n",
+			"line": "2719",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/git/coupling.go",
+			"code": "58: \tfor _, sha := range shas {\n59: \t\tfilesOut, err := exec.Command(\n60: \t\t\t\"git\", \"-C\", repoRoot,\n61: \t\t\t\"diff-tree\", \"--no-commit-id\", \"--name-only\", \"-r\", sha,\n62: \t\t).Output()\n63: \t\tif err != nil {\n",
+			"line": "59-62",
+			"column": "20",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/git/coupling.go",
+			"code": "40: \t// Step 1: get recent commit SHAs.\n41: \tshaOut, err := exec.Command(\n42: \t\t\"git\", \"-C\", repoRoot,\n43: \t\t\"log\", \"--format=%H\", fmt.Sprintf(\"-n%d\", commitLimit),\n44: \t).Output()\n45: \tif err != nil {\n",
+			"line": "41-44",
+			"column": "17",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "131: \n132: \tcmd := exec.Command(self, \"daemon\", \"serve\")\n133: \tcmd.Stdout = logFile\n",
+			"line": "132",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/onboard.go",
+			"code": "160: func runCmd(bin string, args ...string) error {\n161: \tcmd := exec.Command(bin, args...)\n162: \tcmd.Stdout = os.Stdout\n",
+			"line": "161",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "519: \t\tunitName := \"synapses-\" + s.Name + \".service\"\n520: \t\texec.Command(\"systemctl\", \"--user\", \"disable\", \"--now\", unitName).Run() //nolint:errcheck\n521: \t\tos.Remove(filepath.Join(svcDir, unitName))\n",
+			"line": "520",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "501: \t\texec.Command(\"systemctl\", \"--user\", \"daemon-reload\").Run() //nolint:errcheck\n502: \t\tif out, err := exec.Command(\"systemctl\", \"--user\", \"enable\", \"--now\", unitName).CombinedOutput(); err != nil {\n503: \t\t\tfmt.Printf(\"  \\033[31m✗\\033[0m %-8s systemctl failed: %s\\n\", s.Name, strings.TrimSpace(string(out)))\n",
+			"line": "502",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "438: \t\tplistPath := filepath.Join(agentsDir, label+\".plist\")\n439: \t\texec.Command(\"launchctl\", \"unload\", plistPath).Run() //nolint:errcheck\n440: \t\tos.Remove(plistPath)\n",
+			"line": "439",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "417: \n418: \t\tif out, err := exec.Command(\"launchctl\", \"load\", plistPath).CombinedOutput(); err != nil {\n419: \t\t\tfmt.Printf(\"  \\033[31m✗\\033[0m %-8s launchctl load failed: %s\\n\", s.Name, strings.TrimSpace(string(out)))\n",
+			"line": "418",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "415: \t\t// Unload first in case it's already registered with old config.\n416: \t\texec.Command(\"launchctl\", \"unload\", plistPath).Run() //nolint:errcheck\n417: \n",
+			"line": "416",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "125: \n126: \tcmd := exec.Command(binPath, s.Args...)\n127: \tcmd.Stdout = lf\n",
+			"line": "126",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with a potential tainted input or cmd arguments",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/parser/plugin.go",
+			"code": "96: \n97: \tcmd := exec.CommandContext(ctx, p.command, p.args...) //nolint:gosec\n98: \t// stdin: file path on first line, then raw file content.\n",
+			"line": "97",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with a potential tainted input or cmd arguments",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/embed.go",
+			"code": "148: \t\ts.mu.Lock()\n149: \t\tnewProc := exec.CommandContext(ctx, s.llamaBin, args...)\n150: \t\tnewProc.Stderr = os.Stderr\n",
+			"line": "149",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with a potential tainted input or cmd arguments",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/embed.go",
+			"code": "98: \n99: \ts.proc = exec.CommandContext(ctx, s.llamaBin, args...)\n100: \ts.proc.Stderr = os.Stderr // surface llama.cpp startup messages\n",
+			"line": "99",
+			"column": "11",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G201",
+			"details": "SQL string formatting",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/memories.go",
+			"code": "180: \n181: \tq := fmt.Sprintf(`\n182: \t\tSELECT id, tier, content, entity_id, agent_id, task_id, tags,\n183: \t\t       created_at, expires_at, last_accessed_at, source\n184: \t\tFROM memories\n185: \t\tWHERE tier = 'entity'\n186: \t\t  AND entity_id IN (%s)\n187: \t\t  AND expires_at \u003e ?\n188: \t\tORDER BY last_accessed_at DESC`, strings.Join(placeholders, \",\"))\n189: \n",
+			"line": "181-188",
+			"column": "7",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G201",
+			"details": "SQL string formatting",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/store/store.go",
+			"code": "449: \targs = append(args, limit)\n450: \tquery := fmt.Sprintf(\n451: \t\t`SELECT trigger, co_change, reason, confidence, co_count\n452: \t\t FROM context_patterns\n453: \t\t WHERE trigger IN (%s)\n454: \t\t ORDER BY confidence DESC\n455: \t\t LIMIT ?`,\n456: \t\tstrings.Join(placeholders, \",\"),\n457: \t)\n458: \trows, err := s.db.Query(query, args...)\n",
+			"line": "450-457",
+			"column": "11",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G201",
+			"details": "SQL string formatting",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/store/store.go",
+			"code": "252: \t}\n253: \tquery := fmt.Sprintf(\n254: \t\t`SELECT node_name, summary FROM semantic_summaries WHERE node_name IN (%s)`,\n255: \t\tstrings.Join(placeholders, \",\"),\n256: \t)\n257: \trows, err := s.db.Query(query, args...)\n",
+			"line": "253-256",
+			"column": "11",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G202",
+			"details": "SQL string concatenation",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/tasks.go",
+			"code": "670: \trows, err := s.db.Query(\n671: \t\t`SELECT id, task_id, agent_id, approach,\n672: \t\t        files_modified, completed_steps, remaining_steps,\n673: \t\t        blockers, decisions, context_snapshot, created_at, updated_at\n674: \t\t FROM session_state WHERE task_id IN (`+strings.Join(placeholders, \",\")+`)`,\n675: \t\targs...)\n",
+			"line": "671-674",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G202",
+			"details": "SQL string concatenation",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/tasks.go",
+			"code": "477: \trows, err := s.db.Query(\n478: \t\t`SELECT id, status FROM tasks WHERE id IN (`+string(placeholders)+`)`,\n479: \t\targs...,\n",
+			"line": "478",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G202",
+			"details": "SQL string concatenation",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "2548: \t_, err := s.db.Exec(\n2549: \t\t`UPDATE annotations SET stale=1 WHERE node_id IN (`+placeholders+`) AND stale=0`,\n2550: \t\targs...,\n",
+			"line": "2549",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G202",
+			"details": "SQL string concatenation",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "2513: \trows, err := s.db.Query(\n2514: \t\t`SELECT id, node_id, agent_id, note, created_at, source, stale FROM annotations WHERE node_id IN (`+placeholders+`) ORDER BY created_at ASC`,\n2515: \t\targs...,\n",
+			"line": "2514",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G202",
+			"details": "SQL string concatenation",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "2390: \t\tplaceholders = placeholders[:len(placeholders)-1]\n2391: \t\tquery += ` AND type IN (` + placeholders + `)`\n2392: \t\tfor _, t := range types {\n",
+			"line": "2391",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G202",
+			"details": "SQL string concatenation",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "1905: \trow := s.db.QueryRow(\n1906: \t\t`SELECT COUNT(*) FROM quality_gaps WHERE status = 'open' AND node_id IN (`+\n1907: \t\t\tstrings.Join(placeholders, \",\")+`)`,\n1908: \t\targs...)\n",
+			"line": "1906-1907",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "89",
+				"url": "https://cwe.mitre.org/data/definitions/89.html"
+			},
+			"rule_id": "G202",
+			"details": "SQL string concatenation",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1264: \t\t// Use IF EXISTS equivalent: ignore errors from missing tables.\n1265: \t\tif _, err := db.Exec(\"DELETE FROM \" + table); err != nil {\n1266: \t\t\tcontinue\n",
+			"line": "1265",
+			"column": "24",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/webcache/webcache.go",
+			"code": "160: \tgomodPath := filepath.Join(projectPath, \"go.mod\")\n161: \tf, err := os.Open(gomodPath)\n162: \tif err != nil {\n",
+			"line": "161",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/skills/recipe.go",
+			"code": "56: \t\t}\n57: \t\tdata, err := os.ReadFile(filepath.Join(dir, e.Name()))\n58: \t\tif err != nil {\n",
+			"line": "57",
+			"column": "16",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/skills/prompts.go",
+			"code": "76: \t\t}\n77: \t\tdata, err := os.ReadFile(filepath.Join(dir, entry.Name()))\n78: \t\tif err != nil {\n",
+			"line": "77",
+			"column": "16",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/scout/techstack.go",
+			"code": "218: func parsePyprojectToml(root string) []TechStackEntry {\n219: \tdata, err := os.ReadFile(filepath.Join(root, \"pyproject.toml\"))\n220: \tif err != nil {\n",
+			"line": "219",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/scout/techstack.go",
+			"code": "183: func parseCargoToml(root string) []TechStackEntry {\n184: \tdata, err := os.ReadFile(filepath.Join(root, \"Cargo.toml\"))\n185: \tif err != nil {\n",
+			"line": "184",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/scout/techstack.go",
+			"code": "149: func parseRequirementsTxt(root string) []TechStackEntry {\n150: \tdata, err := os.ReadFile(filepath.Join(root, \"requirements.txt\"))\n151: \tif err != nil {\n",
+			"line": "150",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/scout/techstack.go",
+			"code": "114: func parsePackageJSON(root string) []TechStackEntry {\n115: \tdata, err := os.ReadFile(filepath.Join(root, \"package.json\"))\n116: \tif err != nil {\n",
+			"line": "115",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/scout/techstack.go",
+			"code": "56: func parseGoMod(root string) []TechStackEntry {\n57: \tdata, err := os.ReadFile(filepath.Join(root, \"go.mod\"))\n58: \tif err != nil {\n",
+			"line": "57",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/peer/server.go",
+			"code": "652: \n653: \tkeyOut, err := os.Create(keyFile)\n654: \tif err != nil {\n",
+			"line": "653",
+			"column": "17",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/peer/server.go",
+			"code": "645: \n646: \tcertOut, err := os.Create(certFile)\n647: \tif err != nil {\n",
+			"line": "646",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/peer/server.go",
+			"code": "613: \t// Reuse existing cert if it has \u003e30 days remaining.\n614: \tif certPEM, e := os.ReadFile(certFile); e == nil {\n615: \t\tblock, _ := pem.Decode(certPEM)\n",
+			"line": "614",
+			"column": "19",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/parser/parser.go",
+			"code": "272: \t}\n273: \tsrc, err := os.ReadFile(path)\n274: \tif err != nil {\n",
+			"line": "273",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/parser/parser.go",
+			"code": "233: \t\tg.RemoveFile(path)\n234: \t\tsrc, readErr := os.ReadFile(path)\n235: \t\tif readErr != nil {\n",
+			"line": "234",
+			"column": "19",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/metrics/metrics.go",
+			"code": "284: func readModuleName(repoRoot string) string {\n285: \tdata, err := os.ReadFile(filepath.Join(repoRoot, \"go.mod\"))\n286: \tif err != nil {\n",
+			"line": "285",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/metrics/metrics.go",
+			"code": "202: func parseCoverProfile(path string) ([]coverBlock, error) {\n203: \tf, err := os.Open(path)\n204: \tif err != nil {\n",
+			"line": "203",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/server.go",
+			"code": "34: \t}\n35: \tdata, err := os.ReadFile(filepath.Join(home, \".synapses\", \"app_settings.json\"))\n36: \tif err != nil {\n",
+			"line": "35",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/config/config.go",
+			"code": "381: \tpath := filepath.Join(dir, configFileName)\n382: \tdata, err := os.ReadFile(path)\n383: \tif errors.Is(err, os.ErrNotExist) {\n",
+			"line": "382",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/llm/download.go",
+			"code": "105: \ttmpPath := dest + \".tmp\"\n106: \tf, err := os.Create(tmpPath)\n107: \tif err != nil {\n",
+			"line": "106",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/download.go",
+			"code": "248: \n249: \tout, err := os.Create(destPath)\n250: \tif err != nil {\n",
+			"line": "249",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/download.go",
+			"code": "198: \t\t}\n199: \t\tout, err := os.Create(outPath)\n200: \t\tif err != nil {\n",
+			"line": "199",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/config/config.go",
+			"code": "220: \tcfg := DefaultConfig()\n221: \tdata, err := os.ReadFile(path)\n222: \tif err != nil {\n",
+			"line": "221",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/selfupdate.go",
+			"code": "87: \t// Read new binary\n88: \tdata, err := os.ReadFile(newBinary)\n89: \tif err != nil {\n",
+			"line": "88",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "259: \tif pidPath != \"\" {\n260: \t\tdata, err := os.ReadFile(pidPath)\n261: \t\tif err == nil {\n",
+			"line": "260",
+			"column": "16",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "162: \t\t\t// Report log tail.\n163: \t\t\tlogData, _ := os.ReadFile(logPath)\n164: \t\t\tif len(logData) \u003e 0 {\n",
+			"line": "163",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "126: \t}\n127: \tlogFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)\n128: \tif err != nil {\n",
+			"line": "127",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/onboard.go",
+			"code": "180: \texisting := map[string]interface{}{}\n181: \tif data, err := os.ReadFile(cfgPath); err == nil {\n182: \t\t_ = json.Unmarshal(data, \u0026existing)\n",
+			"line": "181",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "3032: \n3033: \tif data, err := os.ReadFile(cfgFile); err == nil {\n3034: \t\t// Preserve existing keys; we only add/update the brain block.\n",
+			"line": "3033",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "2499: \t\texisting := make(map[string]interface{})\n2500: \t\tif data, err := os.ReadFile(filePath); err == nil {\n2501: \t\t\t_ = json.Unmarshal(data, \u0026existing)\n",
+			"line": "2500",
+			"column": "19",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "2477: \t\texisting := make(map[string]interface{})\n2478: \t\tif data, err := os.ReadFile(filePath); err == nil {\n2479: \t\t\t_ = json.Unmarshal(data, \u0026existing)\n",
+			"line": "2478",
+			"column": "19",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "2435: \t\texisting := make(map[string]interface{})\n2436: \t\tif data, err := os.ReadFile(filePath); err == nil {\n2437: \t\t\t_ = json.Unmarshal(data, \u0026existing)\n",
+			"line": "2436",
+			"column": "19",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1957: \tsection := synapsesSection\n1958: \texisting, _ := os.ReadFile(file)\n1959: \tcontent := string(existing)\n",
+			"line": "1958",
+			"column": "17",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1921: \traw := map[string]interface{}{\"servers\": map[string]interface{}{}}\n1922: \tif data, err := os.ReadFile(file); err == nil {\n1923: \t\tparsed := map[string]interface{}{}\n",
+			"line": "1922",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1895: \traw := map[string]interface{}{}\n1896: \tif data, err := os.ReadFile(file); err == nil {\n1897: \t\tjson.Unmarshal(data, \u0026raw) //nolint:errcheck\n",
+			"line": "1896",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1862: \traw := map[string]interface{}{\"mcpServers\": map[string]interface{}{}}\n1863: \tif data, err := os.ReadFile(file); err == nil {\n1864: \t\tparsed := map[string]interface{}{}\n",
+			"line": "1863",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1819: \n1820: \tif data, err := os.ReadFile(mcpFile); err == nil {\n1821: \t\t// File exists — parse it to preserve existing MCP server entries.\n",
+			"line": "1820",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1695: \traw := map[string]interface{}{}\n1696: \tif data, err := os.ReadFile(settingsPath); err == nil {\n1697: \t\tif err := json.Unmarshal(data, \u0026raw); err != nil {\n",
+			"line": "1696",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1650: \n1651: \texisting, err := os.ReadFile(claudePath)\n1652: \tif err != nil \u0026\u0026 !os.IsNotExist(err) {\n",
+			"line": "1651",
+			"column": "19",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1633: \trootCLAUDE := filepath.Join(repoRoot, \"CLAUDE.md\")\n1634: \tif rootData, err := os.ReadFile(rootCLAUDE); err == nil {\n1635: \t\trs := string(rootData)\n",
+			"line": "1634",
+			"column": "22",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "606: \tlogPath := filepath.Join(home, \".synapses\", \"daemon.log\")\n607: \tdata, err := os.ReadFile(logPath)\n608: \tif err != nil {\n",
+			"line": "607",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "523: \t}\n524: \tdata, err := os.ReadFile(pidPath)\n525: \tif err != nil {\n",
+			"line": "524",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "157: \t}\n158: \tdata, err := os.ReadFile(pidPath)\n159: \tif err != nil {\n",
+			"line": "158",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "409",
+				"url": "https://cwe.mitre.org/data/definitions/409.html"
+			},
+			"rule_id": "G110",
+			"details": "Potential DoS vulnerability via decompression bomb",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/download.go",
+			"code": "203: \t\t}\n204: \t\t_, err = io.Copy(out, rc)\n205: \t\trc.Close()\n",
+			"line": "204",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G302",
+			"details": "Expect file permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/download.go",
+			"code": "96: \t// Make executable.\n97: \tif err := os.Chmod(binPath, 0o755); err != nil {\n98: \t\treturn \"\", err\n",
+			"line": "97",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G302",
+			"details": "Expect file permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "677: \t\tif listenErr == nil {\n678: \t\t\tos.Chmod(sockPath, 0o700) //nolint:errcheck\n679: \t\t\tgo serveProjectSocket(projCtx, srv, listener)\n",
+			"line": "678",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G302",
+			"details": "Expect file permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "120: \n121: \tlf, err := os.OpenFile(logFilePath(s.Name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)\n122: \tif err != nil {\n",
+			"line": "121",
+			"column": "13",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "466: \t}\n467: \tif err := os.MkdirAll(dir, 0o755); err != nil {\n468: \t\treturn \"\", fmt.Errorf(\"create cache dir: %w\", err)\n",
+			"line": "467",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/pulse/pstore/store.go",
+			"code": "26: func Open(path string) (*Store, error) {\n27: \tif err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {\n28: \t\treturn nil, fmt.Errorf(\"pulse store: mkdir: %w\", err)\n",
+			"line": "27",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/pulse/client.go",
+			"code": "50: func New(dbPath string) (*Client, error) {\n51: \tif err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {\n52: \t\treturn nil, fmt.Errorf(\"pulse: mkdir: %w\", err)\n",
+			"line": "51",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/contextfile/writer.go",
+			"code": "37: \tdir := filepath.Join(home, \".synapses\", \"context\")\n38: \tif err := os.MkdirAll(dir, 0o755); err != nil {\n39: \t\treturn \"\", fmt.Errorf(\"create context dir: %w\", err)\n",
+			"line": "38",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/store/store.go",
+			"code": "112: func Open(path string) (*Store, error) {\n113: \tif err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {\n114: \t\treturn nil, fmt.Errorf(\"create db dir: %w\", err)\n",
+			"line": "113",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/llm/download.go",
+			"code": "75: \t// Create destination directory.\n76: \tif err := os.MkdirAll(cfg.DestDir, 0o755); err != nil {\n77: \t\treturn \"\", fmt.Errorf(\"download: create model dir %q: %w\", cfg.DestDir, err)\n",
+			"line": "76",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/download.go",
+			"code": "113: \t}\n114: \tif err := os.MkdirAll(opts.ModelDir, 0o755); err != nil {\n115: \t\treturn \"\", fmt.Errorf(\"create model dir: %w\", err)\n",
+			"line": "114",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/download.go",
+			"code": "67: \t}\n68: \tif err := os.MkdirAll(opts.BinDir, 0o755); err != nil {\n69: \t\treturn \"\", fmt.Errorf(\"create bin dir: %w\", err)\n",
+			"line": "68",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/config/config.go",
+			"code": "206: func SaveFile(path string, cfg BrainConfig) error {\n207: \tif err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {\n208: \t\treturn err\n",
+			"line": "207",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/onboard.go",
+			"code": "172: \t// Create the directory if it doesn't exist (handles `synapses init --path /new/dir`).\n173: \tif err := os.MkdirAll(root, 0o755); err != nil {\n174: \t\treturn fmt.Errorf(\"create directory: %w\", err)\n",
+			"line": "173",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "2495: \tmergeZedConfig := func(filePath string) error {\n2496: \t\tif err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {\n2497: \t\t\treturn err\n",
+			"line": "2496",
+			"column": "13",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "2473: \t\t}\n2474: \t\tif err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {\n2475: \t\t\treturn err\n",
+			"line": "2474",
+			"column": "13",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "2431: \tmergeHTTPConfig := func(filePath string) error {\n2432: \t\tif err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {\n2433: \t\t\treturn err\n",
+			"line": "2432",
+			"column": "13",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1953: func writeGuidanceFile(file, frontmatter string) error {\n1954: \tif err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {\n1955: \t\treturn err\n",
+			"line": "1954",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1939: \t}\n1940: \tif err := os.MkdirAll(filepath.Join(repoRoot, \".vscode\"), 0o755); err != nil {\n1941: \t\treturn err\n",
+			"line": "1940",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1906: \t}\n1907: \tif err := os.MkdirAll(filepath.Join(repoRoot, \".zed\"), 0o755); err != nil {\n1908: \t\treturn err\n",
+			"line": "1907",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1880: \t}\n1881: \tif err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {\n1882: \t\treturn err\n",
+			"line": "1881",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1687: \tdir := filepath.Join(repoRoot, \".claude\")\n1688: \tif err := os.MkdirAll(dir, 0o755); err != nil {\n1689: \t\treturn fmt.Errorf(\"create .claude dir: %w\", err)\n",
+			"line": "1688",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1625: \tclauDir := filepath.Join(repoRoot, \".claude\")\n1626: \tif err := os.MkdirAll(clauDir, 0o755); err != nil {\n1627: \t\treturn fmt.Errorf(\"create .claude dir: %w\", err)\n",
+			"line": "1626",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "481: \t}\n482: \tif err := os.MkdirAll(svcDir, 0o755); err != nil {\n483: \t\treturn err\n",
+			"line": "482",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "395: \t}\n396: \tif err := os.MkdirAll(agentsDir, 0o755); err != nil {\n397: \t\treturn err\n",
+			"line": "396",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G301",
+			"details": "Expect directory permissions to be 0750 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "56: \tfor _, sub := range []string{\"pids\", \"logs\"} {\n57: \t\tif err := os.MkdirAll(filepath.Join(base, sub), 0o755); err != nil {\n58: \t\t\treturn err\n",
+			"line": "57",
+			"column": "13",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/contextfile/writer.go",
+			"code": "55: \ttmp := path + \".tmp\"\n56: \tif err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {\n57: \t\treturn fmt.Errorf(\"write context file: %w\", err)\n",
+			"line": "56",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/config/config.go",
+			"code": "213: \t}\n214: \treturn os.WriteFile(path, append(data, '\\n'), 0o644)\n215: }\n",
+			"line": "214",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/selfupdate.go",
+			"code": "94: \ttmp := exe + \".new\"\n95: \tif err := os.WriteFile(tmp, data, 0o755); err != nil {\n96: \t\treturn fmt.Errorf(\"write temp binary: %w\", err)\n",
+			"line": "95",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/onboard.go",
+			"code": "195: \t}\n196: \treturn os.WriteFile(cfgPath, append(data, '\\n'), 0o644)\n197: }\n",
+			"line": "196",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "3050: \t}\n3051: \tif err := os.WriteFile(cfgFile, append(out, '\\n'), 0o644); err != nil {\n3052: \t\treturn fmt.Errorf(\"write synapses.json: %w\", err)\n",
+			"line": "3051",
+			"column": "12",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "2517: \t\t}\n2518: \t\treturn os.WriteFile(filePath, append(out, '\\n'), 0o644)\n2519: \t}\n",
+			"line": "2518",
+			"column": "10",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "2490: \t\t}\n2491: \t\treturn os.WriteFile(filePath, append(out, '\\n'), 0o644)\n2492: \t}\n",
+			"line": "2491",
+			"column": "10",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "2451: \t\t}\n2452: \t\treturn os.WriteFile(filePath, append(out, '\\n'), 0o644)\n2453: \t}\n",
+			"line": "2452",
+			"column": "10",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1978: \t}\n1979: \treturn os.WriteFile(file, []byte(content), 0o644)\n1980: }\n",
+			"line": "1979",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1946: \t}\n1947: \treturn os.WriteFile(file, append(out, '\\n'), 0o644)\n1948: }\n",
+			"line": "1947",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1913: \t}\n1914: \treturn os.WriteFile(file, append(out, '\\n'), 0o644)\n1915: }\n",
+			"line": "1914",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1887: \t}\n1888: \treturn os.WriteFile(file, append(out, '\\n'), 0o644)\n1889: }\n",
+			"line": "1888",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1846: \t}\n1847: \treturn os.WriteFile(mcpFile, append(out, '\\n'), 0o644)\n1848: }\n",
+			"line": "1847",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1782: \t}\n1783: \treturn os.WriteFile(settingsPath, append(out, '\\n'), 0o644)\n1784: }\n",
+			"line": "1783",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1677: \n1678: \treturn os.WriteFile(claudePath, []byte(content), 0o644)\n1679: }\n",
+			"line": "1678",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1641: \t\t\t\tcleaned = strings.TrimRight(cleaned, \"\\n\") + \"\\n\"\n1642: \t\t\t\t_ = os.WriteFile(rootCLAUDE, []byte(cleaned), 0o644)\n1643: \t\t\t}\n",
+			"line": "1642",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "497: \n498: \t\tif err := os.WriteFile(unitPath, []byte(systemdUnit(s)), 0o644); err != nil {\n499: \t\t\treturn fmt.Errorf(\"write unit for %s: %w\", s.Name, err)\n",
+			"line": "498",
+			"column": "13",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "411: \n412: \t\tif err := os.WriteFile(plistPath, []byte(launchdPlist(s)), 0o644); err != nil {\n413: \t\t\treturn fmt.Errorf(\"write plist for %s: %w\", s.Name, err)\n",
+			"line": "412",
+			"column": "13",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "84: func writePID(name string, pid int) error {\n85: \treturn os.WriteFile(pidFilePath(name), []byte(strconv.Itoa(pid)), 0o644)\n86: }\n",
+			"line": "85",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "327",
+				"url": "https://cwe.mitre.org/data/definitions/327.html"
+			},
+			"rule_id": "G505",
+			"details": "Blocklisted import crypto/sha1: weak cryptographic primitive",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "6: import (\n7: \t\"crypto/sha1\"\n8: \t\"database/sql\"\n",
+			"line": "7",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "327",
+				"url": "https://cwe.mitre.org/data/definitions/327.html"
+			},
+			"rule_id": "G505",
+			"details": "Blocklisted import crypto/sha1: weak cryptographic primitive",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/tools.go",
+			"code": "4: \t\"context\"\n5: \t\"crypto/sha1\"\n6: \t\"encoding/json\"\n",
+			"line": "5",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/watcher/watcher.go",
+			"code": "382: \t// Snapshot is saved by main.go via the store; watcher discards the bytes.\n383: \tgo func() { w.graph.RebuildIndex() }() //nolint:errcheck\n384: \tif w.pktInval != nil {\n",
+			"line": "383",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/watcher/watcher.go",
+			"code": "160: \tclose(w.stopCh)\n161: \tw.fw.Close()\n162: \n",
+			"line": "161",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "2632: \t}\n2633: \tmyRows.Close()\n2634: \n",
+			"line": "2633",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "2627: \t\tif err := myRows.Scan(\u0026sc); err != nil {\n2628: \t\t\tmyRows.Close()\n2629: \t\t\treturn nil, err\n",
+			"line": "2628",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "1423: \t\tstat, err := st.Stat(dbPath)\n1424: \t\tst.Close()\n1425: \t\tif err != nil {\n",
+			"line": "1424",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "1247: \t}\n1248: \tmetaRows.Close()\n1249: \tif err := metaRows.Err(); err != nil {\n",
+			"line": "1248",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "1242: \t\tif err := metaRows.Scan(\u0026k, \u0026v); err != nil {\n1243: \t\t\tmetaRows.Close()\n1244: \t\t\treturn nil, err\n",
+			"line": "1243",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "972: \t// SQLite housekeeping.\n973: \ts.db.Exec(`PRAGMA optimize`)\n974: }\n",
+			"line": "973",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "969: \t// safe to remove once the retention window has passed.\n970: \ts.db.Exec(`DELETE FROM annotations WHERE stale=1 AND node_id NOT IN (SELECT id FROM nodes)`)\n971: \n",
+			"line": "970",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "965: \ts.db.Exec(`DELETE FROM proposals WHERE status IN ('accepted','rejected','withdrawn') AND updated_at \u003c ?`, cutoff)\n966: \ts.db.Exec(`DELETE FROM proposal_votes WHERE proposal_id NOT IN (SELECT id FROM proposals)`)\n967: \n",
+			"line": "966",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "964: \t// proposals: resolved proposals have no further value after retention period.\n965: \ts.db.Exec(`DELETE FROM proposals WHERE status IN ('accepted','rejected','withdrawn') AND updated_at \u003c ?`, cutoff)\n966: \ts.db.Exec(`DELETE FROM proposal_votes WHERE proposal_id NOT IN (SELECT id FROM proposals)`)\n",
+			"line": "965",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "961: \ts.db.Exec(`DELETE FROM memories WHERE expires_at != '' AND expires_at \u003c ?`, time.Now().UTC().Format(time.RFC3339))\n962: \ts.db.Exec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at \u003c ?`, cutoff)\n963: \n",
+			"line": "962",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "960: \t// older than the retention window regardless of their expires_at.\n961: \ts.db.Exec(`DELETE FROM memories WHERE expires_at != '' AND expires_at \u003c ?`, time.Now().UTC().Format(time.RFC3339))\n962: \ts.db.Exec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at \u003c ?`, cutoff)\n",
+			"line": "961",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "956: \t// episodes: stored as Unix seconds (INTEGER).\n957: \ts.db.Exec(`DELETE FROM episodes WHERE created_at \u003c ?`, cutoffUnix)\n958: \n",
+			"line": "957",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "953: \t// events: coordination/observability stream — pruned to retention window.\n954: \ts.db.Exec(`DELETE FROM events WHERE created_at \u003c ?`, cutoff)\n955: \n",
+			"line": "954",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "950: \t// agent_messages: no built-in TTL.\n951: \ts.db.Exec(`DELETE FROM agent_messages WHERE created_at \u003c ?`, cutoff)\n952: \n",
+			"line": "951",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "947: \t// tool_calls: one row per MCP tool invocation — can reach millions.\n948: \ts.db.Exec(`DELETE FROM tool_calls WHERE created_at \u003c ?`, cutoff)\n949: \n",
+			"line": "948",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "925: \t\t}\n926: \t\trows.Close()\n927: \t\tif usesIndex {\n",
+			"line": "926",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "669: \tif _, err := db.Exec(\"PRAGMA query_only=true; PRAGMA busy_timeout=5000;\"); err != nil {\n670: \t\tdb.Close()\n671: \t\treturn nil, fmt.Errorf(\"configure read-only: %w\", err)\n",
+			"line": "670",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "618: \t\tif _, err := db.Exec(m); err != nil \u0026\u0026 !strings.Contains(err.Error(), \"duplicate column\") \u0026\u0026 !strings.Contains(err.Error(), \"already has a column\") {\n619: \t\t\tdb.Close()\n620: \t\t\treturn nil, fmt.Errorf(\"migrate schema: %w\", err)\n",
+			"line": "619",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/store/store.go",
+			"code": "500: \tif _, err := db.Exec(schema); err != nil {\n501: \t\tdb.Close()\n502: \t\treturn nil, fmt.Errorf(\"apply schema: %w\", err)\n",
+			"line": "501",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/resolver/tstypes.go",
+			"code": "56: \t}\n57: \ttmp.Close()\n58: \n",
+			"line": "57",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/resolver/tstypes.go",
+			"code": "53: \tif _, err := tmp.Write(tsResolverScript); err != nil {\n54: \t\ttmp.Close()\n55: \t\treturn 0, fmt.Errorf(\"write temp script: %w\", err)\n",
+			"line": "54",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/pulse/pstore/store.go",
+			"code": "41: \tif err := s.migrate(); err != nil {\n42: \t\tdb.Close()\n43: \t\treturn nil, fmt.Errorf(\"pulse store: migrate: %w\", err)\n",
+			"line": "42",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/peer/server.go",
+			"code": "657: \t_ = pem.Encode(keyOut, \u0026pem.Block{Type: \"RSA PRIVATE KEY\", Bytes: x509.MarshalPKCS1PrivateKey(key)})\n658: \tkeyOut.Close()\n659: \n",
+			"line": "658",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/peer/server.go",
+			"code": "650: \t_ = pem.Encode(certOut, \u0026pem.Block{Type: \"CERTIFICATE\", Bytes: certDER})\n651: \tcertOut.Close()\n652: \n",
+			"line": "651",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/peer/client.go",
+			"code": "172: \t}\n173: \tresp.Body.Close()\n174: \treturn nil\n",
+			"line": "173",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/tools.go",
+			"code": "3361: \t\t\t\t\tfor _, id := range ids {\n3362: \t\t\t\t\t\ts.store.TouchMemory(id)\n3363: \t\t\t\t\t}\n",
+			"line": "3362",
+			"column": "7",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/tools.go",
+			"code": "673: \t\t\t})\n674: \t\t\ts.store.TouchMemory(m.ID)\n675: \t\t}\n",
+			"line": "674",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/server.go",
+			"code": "535: \t\tcase \u003c-ticker.C:\n536: \t\t\ts.store.ExpireMemories()\n537: \t\tcase \u003c-s.stopCh:\n",
+			"line": "536",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/server.go",
+			"code": "530: \t// Run once at startup to clear any stale memories from previous sessions.\n531: \ts.store.ExpireMemories()\n532: \n",
+			"line": "531",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/mcp/episode_tools.go",
+			"code": "270: \t\t\tfor _, id := range ids {\n271: \t\t\t\ts.store.TouchMemory(id)\n272: \t\t\t}\n",
+			"line": "271",
+			"column": "5",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/graph/index_snapshot.go",
+			"code": "144: \tcompressed := enc.EncodeAll(buf.Bytes(), nil)\n145: \tenc.Close()\n146: \treturn compressed, nil\n",
+			"line": "145",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/store/store.go",
+			"code": "274: \tvar n int\n275: \ts.db.QueryRow(`SELECT COUNT(*) FROM semantic_summaries`).Scan(\u0026n)\n276: \treturn n\n",
+			"line": "275",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/store/store.go",
+			"code": "216: \t\t// Fallback: legacy unscoped entry\n217: \t\ts.db.QueryRow(\n218: \t\t\t`SELECT summary, tags FROM semantic_summaries WHERE project_id = '' AND node_id = ?`, nodeID,\n219: \t\t).Scan(\u0026summary, \u0026tagsJSON)\n220: \t}\n",
+			"line": "217-219",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/store/store.go",
+			"code": "201: \t// Fallback: legacy unscoped entry\n202: \ts.db.QueryRow(\n203: \t\t`SELECT summary FROM semantic_summaries WHERE project_id = '' AND node_id = ?`, nodeID,\n204: \t).Scan(\u0026summary)\n205: \treturn summary\n",
+			"line": "202-204",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/store/store.go",
+			"code": "121: \tif _, err := db.Exec(schema); err != nil {\n122: \t\tdb.Close()\n123: \t\treturn nil, fmt.Errorf(\"apply schema: %w\", err)\n",
+			"line": "122",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/llm/ollama.go",
+			"code": "316: \t}\n317: \tresp.Body.Close()\n318: \treturn resp.StatusCode == http.StatusOK\n",
+			"line": "317",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/llm/ollama.go",
+			"code": "296: \t}\n297: \tio.Copy(io.Discard, resp.Body) //nolint:errcheck\n298: \treturn nil\n",
+			"line": "297",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/llm/download.go",
+			"code": "127: \tif err := os.Rename(tmpPath, dest); err != nil {\n128: \t\tos.Remove(tmpPath)\n129: \t\treturn \"\", fmt.Errorf(\"download: rename to %q: %w\", dest, err)\n",
+			"line": "128",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/llm/download.go",
+			"code": "123: \t}\n124: \tf.Close()\n125: \n",
+			"line": "124",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/llm/download.go",
+			"code": "120: \t\tf.Close()\n121: \t\tos.Remove(tmpPath)\n122: \t\treturn \"\", fmt.Errorf(\"download: write %q: %w\", tmpPath, err)\n",
+			"line": "121",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/llm/download.go",
+			"code": "119: \tif _, err := io.Copy(f, reader); err != nil {\n120: \t\tf.Close()\n121: \t\tos.Remove(tmpPath)\n",
+			"line": "120",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/embed.go",
+			"code": "302: \t\tif err == nil {\n303: \t\t\tresp.Body.Close()\n304: \t\t\tif resp.StatusCode == http.StatusOK {\n",
+			"line": "303",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/embed.go",
+			"code": "275: \t}\n276: \tresp.Body.Close()\n277: \treturn resp.StatusCode == http.StatusOK\n",
+			"line": "276",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/download.go",
+			"code": "205: \t\trc.Close()\n206: \t\tout.Close()\n207: \t\tif err != nil {\n",
+			"line": "206",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/download.go",
+			"code": "204: \t\t_, err = io.Copy(out, rc)\n205: \t\trc.Close()\n206: \t\tout.Close()\n",
+			"line": "205",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/embed/download.go",
+			"code": "200: \t\tif err != nil {\n201: \t\t\trc.Close()\n202: \t\t\treturn err\n",
+			"line": "201",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/internal/brain/contextbuilder/learner.go",
+			"code": "47: \t// 1. Persist the audit log entry.\n48: \tl.store.LogDecision(\n49: \t\treq.AgentID, req.Phase, req.EntityName, req.Action,\n50: \t\treq.RelatedEntities, req.Outcome, req.Notes,\n51: \t)\n52: \n",
+			"line": "48-51",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/selfupdate.go",
+			"code": "100: \tif err := os.Rename(tmp, exe); err != nil {\n101: \t\tos.Remove(tmp)\n102: \t\treturn fmt.Errorf(\"rename new binary into place: %w\", err)\n",
+			"line": "101",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/registry.go",
+			"code": "49: \tif pi.Store != nil {\n50: \t\tpi.Store.Close()\n51: \t}\n",
+			"line": "50",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/registry.go",
+			"code": "46: \tif pi.HTTPHandler != nil {\n47: \t\tpi.HTTPHandler.Shutdown(context.Background()) //nolint:errcheck\n48: \t}\n",
+			"line": "47",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "273: \t\t\t\tif processAlive(pid) {\n274: \t\t\t\t\tforceKillProcess(pid) //nolint:errcheck\n275: \t\t\t\t\ttime.Sleep(500 * time.Millisecond)\n",
+			"line": "274",
+			"column": "6",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "262: \t\t\tif pid, err := parseInt(strings.TrimSpace(string(data))); err == nil {\n263: \t\t\t\tkillProcess(pid) //nolint:errcheck\n264: \n",
+			"line": "263",
+			"column": "5",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "223: \t\tif err == nil {\n224: \t\t\tconn.Close()\n225: \t\t\treturn nil\n",
+			"line": "224",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "141: \t}\n142: \tlogFile.Close()\n143: \tgo cmd.Wait() //nolint:errcheck\n",
+			"line": "142",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "138: \tif err := cmd.Start(); err != nil {\n139: \t\tlogFile.Close()\n140: \t\treturn fmt.Errorf(\"start daemon: %w\", err)\n",
+			"line": "139",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "98: \t\u003c-sockDone\n99: \tconn.Close()\n100: \t\u003c-stdinDone\n",
+			"line": "99",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "94: \t\tdefer close(sockDone)\n95: \t\tio.Copy(os.Stdout, conn) //nolint:errcheck\n96: \t}()\n",
+			"line": "95",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "88: \t\tif uc, ok := conn.(*net.UnixConn); ok {\n89: \t\t\tuc.CloseWrite() //nolint:errcheck\n90: \t\t}\n",
+			"line": "89",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/proxy.go",
+			"code": "86: \t\tdefer close(stdinDone)\n87: \t\tio.Copy(conn, os.Stdin) //nolint:errcheck\n88: \t\tif uc, ok := conn.(*net.UnixConn); ok {\n",
+			"line": "87",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/onboard.go",
+			"code": "108: \t\tif prompt(r, fmt.Sprintf(\"  Wire into %s? [y/N]: \", a.Name)) {\n109: \t\t\trunCmd(\"synapses\", \"mcp-setup\", \"--agent\", a.Flag) //nolint:errcheck\n110: \t\t}\n",
+			"line": "109",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/onboard.go",
+			"code": "84: \tif installOnLogin {\n85: \t\tdaemonInstall() //nolint:errcheck\n86: \t}\n",
+			"line": "85",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1896: \tif data, err := os.ReadFile(file); err == nil {\n1897: \t\tjson.Unmarshal(data, \u0026raw) //nolint:errcheck\n1898: \t}\n",
+			"line": "1897",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1483: \tcount := 0\n1484: \tfilepath.Walk(root, func(path string, info os.FileInfo, err error) error { //nolint:errcheck\n1485: \t\tif err != nil {\n1486: \t\t\treturn nil\n1487: \t\t}\n1488: \t\tif info.IsDir() {\n1489: \t\t\tbase := filepath.Base(path)\n1490: \t\t\tif strings.HasPrefix(base, \".\") || base == \"node_modules\" || base == \"vendor\" || base == \"__pycache__\" {\n1491: \t\t\t\treturn filepath.SkipDir\n1492: \t\t\t}\n1493: \t\t\treturn nil\n1494: \t\t}\n1495: \t\tcount++\n1496: \t\tif count \u003e 5000 {\n1497: \t\t\treturn filepath.SkipAll\n1498: \t\t}\n1499: \t\text := filepath.Ext(path)\n1500: \t\tif lang, ok := extToLang[ext]; ok {\n1501: \t\t\tseen[lang] = true\n1502: \t\t}\n1503: \t\treturn nil\n1504: \t})\n1505: \n",
+			"line": "1484-1504",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "1450: \tif ensureDirs() == nil {\n1451: \t\tdaemonStart(allSidecars, false) //nolint:errcheck\n1452: \t}\n",
+			"line": "1451",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "795: \t}\n796: \tresp.Body.Close()\n797: \treturn \"reachable\", url\n",
+			"line": "796",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "742: \t\t\tstat, statErr := st.Stat(dbPath)\n743: \t\t\tst.Close()\n744: \t\t\tif statErr != nil || stat == nil {\n",
+			"line": "743",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "552: \t}\n553: \tforceKillProcess(pid) //nolint:errcheck\n554: \tfmt.Printf(\"Daemon force-killed (pid %d).\\n\", pid)\n",
+			"line": "553",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "537: \t\tfmt.Printf(\"Process %d not found — removing stale PID file.\\n\", pid)\n538: \t\tos.Remove(pidPath) //nolint:errcheck\n539: \t\treturn nil\n",
+			"line": "538",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/main.go",
+			"code": "511: \tif ensureDirs() == nil {\n512: \t\tdaemonStart(allSidecars, true) //nolint:errcheck\n513: \t}\n",
+			"line": "512",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_unix.go",
+			"code": "37: \terr = proc.Kill()\n38: \tproc.Release()\n39: \treturn err\n",
+			"line": "38",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_unix.go",
+			"code": "27: \terr = proc.Signal(syscall.SIGTERM)\n28: \tproc.Release()\n29: \treturn err\n",
+			"line": "28",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "817: \t\tif err := json.Unmarshal([]byte(line), \u0026rawMsg); err != nil {\n818: \t\t\twriteJSON(map[string]interface{}{\n819: \t\t\t\t\"jsonrpc\": \"2.0\", \"id\": nil,\n820: \t\t\t\t\"error\": map[string]interface{}{\"code\": -32700, \"message\": \"Parse error\"},\n821: \t\t\t}) //nolint:errcheck\n822: \t\t\tcontinue\n",
+			"line": "818-821",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "719: \t\t\u003c-ctx.Done()\n720: \t\tlistener.Close()\n721: \t}()\n",
+			"line": "720",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "711: \t\t\tif addr := listener.Addr(); addr != nil {\n712: \t\t\t\tos.Remove(addr.String())\n713: \t\t\t}\n",
+			"line": "712",
+			"column": "5",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "705: \tdefer func() {\n706: \t\tlistener.Close()\n707: \t\t// Remove the socket file on exit.\n",
+			"line": "706",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "677: \t\tif listenErr == nil {\n678: \t\t\tos.Chmod(sockPath, 0o700) //nolint:errcheck\n679: \t\t\tgo serveProjectSocket(projCtx, srv, listener)\n",
+			"line": "678",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "674: \tif sockErr == nil {\n675: \t\tos.Remove(sockPath) // clean stale socket\n676: \t\tlistener, listenErr := net.Listen(\"unix\", sockPath)\n",
+			"line": "675",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "466: \tif err != nil {\n467: \t\tst.Close()\n468: \t\tprojCancel()\n",
+			"line": "467",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "423: \t\tdefer shutCancel()\n424: \t\thttpSrv.Shutdown(shutCtx) //nolint:errcheck\n425: \t}()\n",
+			"line": "424",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "348: \t\tw.Header().Set(\"Content-Type\", \"application/json\")\n349: \t\tjson.NewEncoder(w).Encode(sharedPulse.GetSummary(days))\n350: \t})\n",
+			"line": "349",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "328: \t\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n329: \t\t\tjson.NewEncoder(w).Encode(map[string]interface{}{\"status\": \"ok\"})\n330: \n",
+			"line": "329",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "311: \t\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n312: \t\t\tjson.NewEncoder(w).Encode(map[string]interface{}{\n313: \t\t\t\t\"status\": \"ok\",\n314: \t\t\t\t\"path\":   absPath,\n315: \t\t\t\t\"socket\": sockPath,\n316: \t\t\t})\n317: \n",
+			"line": "312-316",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "282: \t\t\tw.Header().Set(\"Content-Type\", \"application/json\")\n283: \t\t\tjson.NewEncoder(w).Encode(map[string]interface{}{\"projects\": infos})\n284: \n",
+			"line": "283",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "255: \t\tw.Header().Set(\"Content-Type\", \"application/json\")\n256: \t\tjson.NewEncoder(w).Encode(map[string]interface{}{\n257: \t\t\t\"status\":   \"ok\",\n258: \t\t\t\"version\":  version,\n259: \t\t\t\"projects\": paths,\n260: \t\t})\n261: \t})\n",
+			"line": "256-260",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "163: \tif err != nil || !processAlive(pid) {\n164: \t\tos.Remove(pidPath)\n165: \t}\n",
+			"line": "164",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon_serve.go",
+			"code": "147: \t}\n148: \tresp.Body.Close()\n149: \treturn resp.StatusCode == http.StatusOK\n",
+			"line": "148",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "523: \t}\n524: \texec.Command(\"systemctl\", \"--user\", \"daemon-reload\").Run() //nolint:errcheck\n525: \tfmt.Println()\n",
+			"line": "524",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "520: \t\texec.Command(\"systemctl\", \"--user\", \"disable\", \"--now\", unitName).Run() //nolint:errcheck\n521: \t\tos.Remove(filepath.Join(svcDir, unitName))\n522: \t\tfmt.Printf(\"  \\033[32m✓\\033[0m %-8s uninstalled\\n\", s.Name)\n",
+			"line": "521",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "519: \t\tunitName := \"synapses-\" + s.Name + \".service\"\n520: \t\texec.Command(\"systemctl\", \"--user\", \"disable\", \"--now\", unitName).Run() //nolint:errcheck\n521: \t\tos.Remove(filepath.Join(svcDir, unitName))\n",
+			"line": "520",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "500: \t\t}\n501: \t\texec.Command(\"systemctl\", \"--user\", \"daemon-reload\").Run() //nolint:errcheck\n502: \t\tif out, err := exec.Command(\"systemctl\", \"--user\", \"enable\", \"--now\", unitName).CombinedOutput(); err != nil {\n",
+			"line": "501",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "439: \t\texec.Command(\"launchctl\", \"unload\", plistPath).Run() //nolint:errcheck\n440: \t\tos.Remove(plistPath)\n441: \t\tfmt.Printf(\"  \\033[32m✓\\033[0m %-8s uninstalled\\n\", s.Name)\n",
+			"line": "440",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "438: \t\tplistPath := filepath.Join(agentsDir, label+\".plist\")\n439: \t\texec.Command(\"launchctl\", \"unload\", plistPath).Run() //nolint:errcheck\n440: \t\tos.Remove(plistPath)\n",
+			"line": "439",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "415: \t\t// Unload first in case it's already registered with old config.\n416: \t\texec.Command(\"launchctl\", \"unload\", plistPath).Run() //nolint:errcheck\n417: \n",
+			"line": "416",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "174: \tif processAlive(pid) {\n175: \t\tforceKillProcess(pid) //nolint:errcheck\n176: \t}\n",
+			"line": "175",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "135: \t}\n136: \tlf.Close()\n137: \n",
+			"line": "136",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "132: \tif err := cmd.Start(); err != nil {\n133: \t\tlf.Close()\n134: \t\treturn fmt.Errorf(\"start %s: %w\", s.Name, err)\n",
+			"line": "133",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "/Users/itachi/Documents/Github/synapses-os/synapses/cmd/synapses/daemon.go",
+			"code": "87: \n88: func removePID(name string) { os.Remove(pidFilePath(name)) }\n89: \n",
+			"line": "88",
+			"column": "31",
+			"nosec": false,
+			"suppressions": null
+		}
+	],
+	"Stats": {
+		"files": 125,
+		"lines": 44952,
+		"nosec": 0,
+		"found": 250
+	},
+	"GosecVersion": "dev"
+}

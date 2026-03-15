@@ -761,7 +761,7 @@ func TestGetEvents_ZeroLimit(t *testing.T) {
 	st := openTestStore(t)
 	_ = st.AppendEvent("test_event", "agent-ev", `{"x":1}`)
 	// limit=0 exercises the `if limit <= 0 { limit = 100 }` branch.
-	events, lastSeq, err := st.GetEvents(0, nil, 0)
+	events, lastSeq, err := st.GetEvents(0, nil, "", 0)
 	if err != nil {
 		t.Fatalf("GetEvents: %v", err)
 	}

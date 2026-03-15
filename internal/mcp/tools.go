@@ -407,6 +407,18 @@ func (s *Server) handleGetContext(
 
 	best := pickBestNode(nodes, s.graph)
 
+	// B29: Auto-track watched symbol for dependency alert detection.
+	// When a peer later modifies the same file, session_init will surface a Tier 2 alert.
+	if agentIDForFeedback != "" && s.store != nil {
+		relFile := strings.TrimPrefix(best.File, s.graph.Root()+"/")
+		s.store.WatchSymbol(agentIDForFeedback, string(best.ID), best.Name, relFile)
+		s.upsertAgentWithActivity(agentIDForFeedback, &store.AgentActivity{
+			Focus:      best.Name,
+			FocusFile:  relFile,
+			FocusSince: time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+
 	subgraph, err := s.graph.CarveEgoGraph(best.ID, cfg)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
@@ -2785,7 +2797,12 @@ func (s *Server) handleSessionInit(
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 	model, _    := req.GetArguments()["model"].(string)
 	provider, _ := req.GetArguments()["provider"].(string)
+	intent, _   := req.GetArguments()["intent"].(string)
 	s.upsertAgentIfNeeded(agentID)
+	// B29: Store declared intent so peers can see what this agent is working on.
+	if agentID != "" && intent != "" && s.store != nil {
+		s.upsertAgentWithActivity(agentID, &store.AgentActivity{Intent: intent})
+	}
 	// Remember this agent so subsequent tool calls that omit agent_id
 	// can still be attributed correctly in Pulse analytics.
 	s.setLastAgent(agentID)
@@ -2988,7 +3005,7 @@ func (s *Server) handleSessionInit(
 			sinceSeq = agentCtx.LastEventSeq
 			limit = 50 // allow more events when fetching delta
 		}
-		events, seq, err := s.store.GetEvents(sinceSeq, nil, limit)
+		events, seq, err := s.store.GetEvents(sinceSeq, nil, "", limit)
 		if err == nil {
 			recentEvents = events
 			latestEventSeq = seq
@@ -2998,17 +3015,50 @@ func (s *Server) handleSessionInit(
 		recentEvents = []store.Event{}
 	}
 
-	// ── 4b. Agent awareness (other active/idle peers) ────────────────────
-	// Omitted entirely when no peers are active (zero token cost for solo agents).
+	// ── 4b. Agent awareness — 3-tier signal system (B29) ─────────────────
+	// Zero noise by default. agent_awareness is omitted entirely when the calling
+	// agent has no scope conflicts and no dependency alerts. Most solo sessions
+	// produce no output here at all.
+	//
+	// Tier 1 — conflicts: another agent has a claim overlapping this agent's scope.
+	// Tier 2 — dependency_alerts: a peer modified a symbol this agent examined.
+	// active_count: integer, not a list — use get_peer_activity for the full digest.
 	var agentAwareness map[string]interface{}
 	var unreadMsgs []store.Message
 	if s.store != nil && agentID != "" {
-		if peers, err := s.store.GetActiveAgents(agentID); err == nil && len(peers) > 0 {
-			agentAwareness = map[string]interface{}{
-				"active_peers": peers,
-				"count":        len(peers),
+		// Tier 1: scope conflicts (always surface when present).
+		var conflicts []store.WorkClaim
+		if cls, err := s.store.GetConflicts(agentID); err == nil {
+			conflicts = cls
+		}
+
+		// Tier 2: dependency alerts (surface when a peer touched a watched symbol).
+		var depAlerts []store.DependencyAlert
+		if alerts, err := s.store.GetDependencyAlerts(agentID); err == nil {
+			depAlerts = alerts
+		}
+
+		// active_count: peers present (integer only — no list surfaced here).
+		var activeCount int
+		if n, err := s.store.CountActiveAgents(agentID); err == nil {
+			activeCount = n
+		}
+
+		// Only build agent_awareness when there is a signal worth surfacing.
+		if len(conflicts) > 0 || len(depAlerts) > 0 || activeCount > 0 {
+			agentAwareness = map[string]interface{}{}
+			if len(conflicts) > 0 {
+				agentAwareness["conflicts"] = conflicts
+			}
+			if len(depAlerts) > 0 {
+				agentAwareness["dependency_alerts"] = depAlerts
+			}
+			if activeCount > 0 {
+				agentAwareness["active_count"] = activeCount
+				agentAwareness["hint"] = "Call get_peer_activity(agent_id='<id>') or get_events(agent_id='<id>', types=['agent_examining','claim_work']) for a peer's activity stream."
 			}
 		}
+
 		if unread, err := s.store.CountUnreadMessages(agentID); err == nil && unread > 0 {
 			if agentAwareness == nil {
 				agentAwareness = map[string]interface{}{}

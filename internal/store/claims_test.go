@@ -149,7 +149,7 @@ func TestGetEvents_AfterAppend(t *testing.T) {
 	_ = st.AppendEvent("file_change", "agent-1", `{"file":"auth.go"}`)
 	_ = st.AppendEvent("task_update", "agent-2", `{"task_id":"xyz"}`)
 
-	events, latestSeq, err := st.GetEvents(0, nil, 50)
+	events, latestSeq, err := st.GetEvents(0, nil, "", 50)
 	if err != nil {
 		t.Fatalf("GetEvents: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestGetEvents_TypeFilter(t *testing.T) {
 	_ = st.AppendEvent("file_change", "a", `{}`)
 	_ = st.AppendEvent("session_start", "b", `{}`)
 
-	events, _, err := st.GetEvents(0, []string{"session_start"}, 50)
+	events, _, err := st.GetEvents(0, []string{"session_start"}, "", 50)
 	if err != nil {
 		t.Fatalf("GetEvents typed: %v", err)
 	}
@@ -189,10 +189,10 @@ func TestGetEvents_SinceCursor(t *testing.T) {
 	_ = st.AppendEvent("e2", "a", `{}`)
 	_ = st.AppendEvent("e3", "a", `{}`)
 
-	all, _, _ := st.GetEvents(0, nil, 50)
+	all, _, _ := st.GetEvents(0, nil, "", 50)
 	firstSeq := all[0].Seq
 
-	after, _, err := st.GetEvents(firstSeq, nil, 50)
+	after, _, err := st.GetEvents(firstSeq, nil, "", 50)
 	if err != nil {
 		t.Fatalf("GetEvents since cursor: %v", err)
 	}
