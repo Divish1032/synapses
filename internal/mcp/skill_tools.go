@@ -158,7 +158,7 @@ func (s *Server) handleListSkills(_ context.Context, _ mcp.CallToolRequest) (*mc
 // registerSkillTools wires execute_skill and list_skills into the MCP server.
 // Called from New(); handlers are no-ops until SetSkillRecipes populates recipes.
 func (s *Server) registerSkillTools() {
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool("execute_skill",
 			mcp.WithDescription("Execute a named skill recipe that composes multiple tools into a single call. Returns aggregated results from all steps."),
 			mcp.WithString("skill_id",
@@ -171,7 +171,7 @@ func (s *Server) registerSkillTools() {
 		),
 		s.handleExecuteSkill,
 	)
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool("list_skills",
 			mcp.WithDescription("List all available skill recipes with their IDs, descriptions, parameters, and step counts."),
 		),
