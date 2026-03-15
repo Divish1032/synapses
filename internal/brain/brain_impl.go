@@ -707,6 +707,8 @@ func toContextPacket(p *contextbuilder.Packet) *ContextPacket {
 		LLMUsed:             p.LLMUsed,
 		PacketQuality:       p.PacketQuality,
 		GraphWarnings:       p.GraphWarnings,
+		ComplexityScore:     p.ComplexityScore,
+		DeterministicPath:   p.DeterministicPath,
 		QualityGate: QualityGate{
 			RequireTests:   p.Gate.RequireTests,
 			RequireDocs:    p.Gate.RequireDocs,

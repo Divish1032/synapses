@@ -133,6 +133,15 @@ func (c *Client) RecordSessionModel(agentID, projectID, model, provider string) 
 	c.coll.RecordSessionModel(sessionID, agentID, projectID, model, provider)
 }
 
+// RecordBrainUsage enqueues a brain LLM inference event. Fire-and-forget.
+// Used to track deterministic vs. Ollama call ratios in the brain enricher.
+func (c *Client) RecordBrainUsage(ev BrainUsageEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordBrainUsage(ev)
+}
+
 // RecordAgentLLMUsage enqueues an agent-reported LLM usage event (Option B).
 // Fire-and-forget.
 func (c *Client) RecordAgentLLMUsage(ev AgentLLMUsageEvent) {
