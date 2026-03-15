@@ -143,6 +143,13 @@ type Server struct {
 	// Entries are cleared by ClearSessionHashes when a session disconnects.
 	sessionHashes sync.Map
 
+	// RX1: per-connection call counters for auto end_session detection.
+	// Key: "sessionID::agentID", Value: *sessionCallEntry.
+	// Protected by sessionCallsMu. Entries removed when auto-log fires or
+	// agent calls end_session explicitly.
+	sessionCallsMu sync.Mutex
+	sessionCalls   map[string]*sessionCallEntry
+
 	// stopCh is closed by Close() to signal background goroutines to exit.
 	// startOnce ensures StartBackground() is truly idempotent.
 	stopCh    chan struct{}
@@ -220,6 +227,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		config:           cfg,
 		store:            st,
 		packetCache:      make(map[string]*packetCacheEntry, 20),
+		sessionCalls:     make(map[string]*sessionCallEntry),
 		stopCh:           make(chan struct{}),
 		logToolCalls:     true, // default on
 		logSessions:      true,
@@ -263,7 +271,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 	hooks.AddBeforeCallTool(func(_ context.Context, _ any, req *mcp.CallToolRequest) {
 		startTimes.push(req, time.Now())
 	})
-	hooks.AddAfterCallTool(func(_ context.Context, _ any, req *mcp.CallToolRequest, result *mcp.CallToolResult) {
+	hooks.AddAfterCallTool(func(ctx context.Context, _ any, req *mcp.CallToolRequest, result *mcp.CallToolResult) {
 		elapsed := time.Since(startTimes.pop(req))
 		success := result == nil || !result.IsError
 		agentID, _ := req.GetArguments()["agent_id"].(string)
@@ -291,6 +299,12 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 				Success:       success,
 				ResponseBytes: responseBytes,
 			})
+		}
+		// RX1: track per-connection call depth and auto-trigger session log on threshold.
+		// Skip end_session calls themselves to avoid recursion.
+		if req.Params.Name != "end_session" && agentID != "" && s.store != nil {
+			sessionID := SessionIDFromContext(ctx)
+			s.trackSessionCall(sessionID, agentID)
 		}
 	})
 

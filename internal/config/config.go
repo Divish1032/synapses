@@ -127,6 +127,9 @@ type Config struct {
 	// When set, every tool call is reported to the pulse service for token
 	// savings and cost attribution telemetry. All errors are silently discarded.
 	Pulse PulseConfig `json:"pulse,omitempty"`
+
+	// Session configures agent session memory behavior.
+	Session SessionConfig `json:"session,omitempty"`
 }
 
 // ConstitutionConfig holds project-wide principles that are injected into agent
@@ -195,6 +198,20 @@ type PulseConfig struct {
 	// TimeoutSec is the per-request HTTP timeout. Defaults to 2 if URL is set.
 	// Pulse is fire-and-forget so a short timeout is appropriate.
 	TimeoutSec int `json:"timeout_sec,omitempty"`
+}
+
+// SessionConfig configures agent session memory behavior.
+type SessionConfig struct {
+	// AutoEndThresholdCalls is the number of tool calls before the daemon automatically
+	// extracts and persists session memory without waiting for an explicit end_session call.
+	// When exceeded, a session log is written with source="auto" and the "auto_session_log"
+	// tag so it can be filtered if needed. If the agent later calls end_session explicitly,
+	// the existing auto-log is reused (touched) rather than creating a duplicate.
+	//
+	// Default: 0 (disabled). Set to a positive integer to enable. Recommended: 80
+	// (roughly 40 minutes of session time at ~2 calls/minute).
+	// Example: auto_end_threshold_calls: 80
+	AutoEndThresholdCalls int `json:"auto_end_threshold_calls,omitempty"`
 }
 
 // PeerConfig describes a remote synapses peer instance to connect to.
