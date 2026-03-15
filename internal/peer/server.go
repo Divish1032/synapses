@@ -53,6 +53,22 @@ type QueryRequest struct {
 	Depth  int    `json:"depth"` // 0 → default 2
 }
 
+// EntitySearchResult is a single entity returned by GET /api/search_entities.
+type EntitySearchResult struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+	File   string `json:"file"`
+	Domain string `json:"domain"`
+}
+
+// SearchEntitiesResponse is the response body for GET /api/search_entities.
+type SearchEntitiesResponse struct {
+	Entities []EntitySearchResult `json:"entities"`
+	Total    int                  `json:"total"`
+	Query    string               `json:"query"`
+}
+
 // traceIDCache deduplicates incoming IntentMessages by trace_id to prevent
 // notification loops in a mesh. Entries expire after ttl (default 5 min).
 type traceIDCache struct {
@@ -126,6 +142,7 @@ func (ps *PeerServer) handler() http.Handler {
 	mux.HandleFunc("/api/v1/claims", ps.auth(ps.handleClaims))
 	mux.HandleFunc("/api/v1/agents", ps.auth(ps.handleAgents))
 	mux.HandleFunc("/api/v1/intents", ps.auth(ps.handleIntents))
+	mux.HandleFunc("/api/search_entities", ps.handleSearchEntities) // no auth for app access
 	return mux
 }
 
@@ -351,6 +368,82 @@ func (ps *PeerServer) handleIntents(w http.ResponseWriter, r *http.Request) {
 		_ = ps.st.AppendEvent("intent_received", msg.AgentID, string(payload))
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleSearchEntities returns a list of entities matching the search query.
+// Query params: project (URL-encoded path), q (search query).
+// No auth required — intended for app UI access.
+func (ps *PeerServer) handleSearchEntities(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q parameter required"})
+		return
+	}
+
+	query = strings.TrimSpace(query)
+	if len(query) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q parameter cannot be empty"})
+		return
+	}
+
+	if ps.g == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "graph not available"})
+		return
+	}
+
+	// Search by name first (exact/qualified match), then by pattern (substring).
+	var results []*graph.Node
+	nameMatches := ps.g.FindByName(query)
+	results = append(results, nameMatches...)
+
+	// Add pattern matches if they weren't already found.
+	patternMatches := ps.g.FindByPattern(query)
+	for _, pm := range patternMatches {
+		found := false
+		for _, nm := range nameMatches {
+			if nm.ID == pm.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			results = append(results, pm)
+		}
+	}
+
+	// Convert to response format, capped at 200 results.
+	const maxResults = 200
+	if len(results) > maxResults {
+		results = results[:maxResults]
+	}
+
+	entities := make([]EntitySearchResult, 0, len(results))
+	for _, n := range results {
+		// Skip internal/test nodes and non-code types for cleaner results.
+		if !n.Exported && !strings.Contains(n.File, "/tests/") && !strings.Contains(n.Name, "_test") {
+			continue
+		}
+
+		domain := "code"
+		if n.Domain != "" {
+			domain = string(n.Domain)
+		}
+
+		entities = append(entities, EntitySearchResult{
+			ID:     string(n.ID),
+			Name:   n.Name,
+			Type:   string(n.Type),
+			File:   n.File,
+			Domain: domain,
+		})
+	}
+
+	resp := SearchEntitiesResponse{
+		Entities: entities,
+		Total:    len(entities),
+		Query:    query,
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // collectDigest returns DigestEntry list for all exported nodes in the graph.
