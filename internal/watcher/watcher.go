@@ -265,6 +265,13 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 		w.graph.RemoveFile(path)
 		w.graph.RemoveCallSitesForFile(path)
 		w.graph.InvalidateCache()
+		// Remove this file's call sites from the persisted table so they are
+		// not reloaded by future reparseFile calls for other files.
+		if w.store != nil {
+			if err := w.store.UpdateCallSitesForFile(path, nil); err != nil {
+				fmt.Fprintf(os.Stderr, "synapses/watcher: remove call sites for %s: %v\n", path, err)
+			}
+		}
 		w.persistAsync("")
 		return
 	}
@@ -562,22 +569,23 @@ func (w *Watcher) recordChange(path string, nodesBefore, nodesAfter, edgesAdded 
 	}
 }
 
-// persistAsync saves the current graph, call sites, and file mtime to the
-// SQLite cache in a goroutine. The changedFile path is used to update the
-// file_hashes table so the next smart-reindex skips this file correctly.
+// persistAsync saves the current graph and file mtime to the SQLite cache in
+// a goroutine. The changedFile path is used to update the file_hashes table so
+// the next smart-reindex skips this file correctly.
+//
+// Call-site persistence is NOT done here: ResolveCallEdges drains the pending
+// call-site list before persistAsync is called, so PeekCallSites() would return
+// empty and SaveCallSites would wipe the table. Instead, reparseFile calls
+// UpdateCallSitesForFile to keep the stored table current on a per-file basis.
 // Failures are logged but do not interrupt the watcher.
 func (w *Watcher) persistAsync(changedFile string) {
 	if w.store == nil {
 		return
 	}
-	sites := w.graph.PeekCallSites()
 	mtime := time.Now().UnixNano()
 	go func() {
 		if err := w.store.SaveGraph(w.graph); err != nil {
 			fmt.Fprintf(os.Stderr, "synapses/watcher: cache save: %v\n", err)
-		}
-		if err := w.store.SaveCallSites(sites); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses/watcher: save call sites: %v\n", err)
 		}
 		if changedFile != "" {
 			if err := w.store.UpsertFileMtime(changedFile, mtime); err != nil {

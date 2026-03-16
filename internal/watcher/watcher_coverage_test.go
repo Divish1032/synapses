@@ -25,6 +25,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/parser"
+	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -299,5 +300,103 @@ func TestStart_WithVendorSubdir(t *testing.T) {
 
 	if err := w.Start(root); err != nil {
 		t.Fatalf("Start: %v", err)
+	}
+}
+
+// ── reparseFile: call-site persistence survives multiple re-parses ─────────────
+//
+// This test validates that cross-file CALLS edges are correctly preserved across
+// multiple incremental re-parses. The bug: persistAsync was calling
+// PeekCallSites() AFTER ResolveCallEdges drained them, saving empty and wiping
+// the call-site table. On the second re-parse, LoadCallSites() returned empty,
+// so edges from other files were not recreated.
+//
+// The test calls reparseFile directly (white-box) to avoid the Start walk which
+// does not call SaveCallSites (that is buildGraph's responsibility in main.go).
+// We manually simulate the post-buildGraph state: parse files, SaveCallSites,
+// ResolveCallEdges — then verify reparseFile preserves the stored table.
+
+func TestReparseFile_CallSitesPersistAcrossMultipleReparses(t *testing.T) {
+	dir := t.TempDir()
+
+	// Two Go files in the same package: caller.go calls helper() from helper.go.
+	helperSrc := "package mypkg\n\nfunc helper() {}\n"
+	callerSrc := "package mypkg\n\nfunc Caller() { helper() }\n"
+	helperPath := filepath.Join(dir, "helper.go")
+	callerPath := filepath.Join(dir, "caller.go")
+
+	if err := os.WriteFile(helperPath, []byte(helperSrc), 0o644); err != nil {
+		t.Fatalf("write helper.go: %v", err)
+	}
+	if err := os.WriteFile(callerPath, []byte(callerSrc), 0o644); err != nil {
+		t.Fatalf("write caller.go: %v", err)
+	}
+
+	g := graph.New("testcallsites")
+	g.SetRoot(dir)
+	wlkr := parser.NewWalker()
+
+	// Parse both files (simulates buildGraph's parse phase).
+	if err := wlkr.ParseFile(g, helperPath); err != nil {
+		t.Fatalf("ParseFile helper.go: %v", err)
+	}
+	if err := wlkr.ParseFile(g, callerPath); err != nil {
+		t.Fatalf("ParseFile caller.go: %v", err)
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	// Simulate buildGraph: SaveCallSites BEFORE ResolveCallEdges drains them.
+	initialSites := g.PeekCallSites()
+	if len(initialSites) == 0 {
+		t.Skip("parser produced no call sites for this Go version/env — skipping")
+	}
+	if err := st.SaveCallSites(initialSites); err != nil {
+		t.Fatalf("SaveCallSites: %v", err)
+	}
+	// Drain pending call sites exactly as buildGraph does after SaveCallSites.
+	resolver.ResolveCallEdges(g)
+
+	w, err := New(g, wlkr, st)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer w.Stop()
+
+	// First reparseFile call: re-parse helper.go (the callee). The watcher must
+	// reload caller.go's call sites from the DB and keep them in the table.
+	helperSrc2 := "package mypkg\n\nfunc helper() { _ = 1 }\n"
+	if err := os.WriteFile(helperPath, []byte(helperSrc2), 0o644); err != nil {
+		t.Fatalf("write helper.go v2: %v", err)
+	}
+	w.reparseFile(helperPath, "")
+
+	sitesAfterFirst, err := st.LoadCallSites()
+	if err != nil {
+		t.Fatalf("LoadCallSites after first reparseFile: %v", err)
+	}
+	if len(sitesAfterFirst) == 0 {
+		t.Fatal("call-site table must not be empty after first reparseFile (persistAsync was wiping it)")
+	}
+
+	// Second reparseFile call: re-parse helper.go again. If the table was wiped
+	// after the first call, this second call would find an empty DB and lose
+	// all cross-file edges.
+	helperSrc3 := "package mypkg\n\nfunc helper() { _ = 2 }\n"
+	if err := os.WriteFile(helperPath, []byte(helperSrc3), 0o644); err != nil {
+		t.Fatalf("write helper.go v3: %v", err)
+	}
+	w.reparseFile(helperPath, "")
+
+	sitesAfterSecond, err := st.LoadCallSites()
+	if err != nil {
+		t.Fatalf("LoadCallSites after second reparseFile: %v", err)
+	}
+	if len(sitesAfterSecond) == 0 {
+		t.Error("call-site table must not be empty after second reparseFile (table was wiped and not restored)")
 	}
 }
