@@ -19,6 +19,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/metrics"
 	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -375,6 +376,13 @@ func (w *Watcher) reparseFile(path, _ string) {
 
 	resolver.ResolveCallEdges(w.graph)
 	resolver.ResolveImplementsEdges(w.graph)
+
+	// R3: re-enrich blame for nodes in the changed file only — keeps blame
+	// current without re-running git against the entire graph.
+	if root := w.graph.Root(); root != "" {
+		metrics.EnrichBlameForFile(w.graph, root, path)
+	}
+
 	w.graph.InvalidateCacheForFile(path)
 
 	// Rebuild the columnar GraphIndex asynchronously so BFS reads pick up the

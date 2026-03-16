@@ -346,6 +346,64 @@ func TestEnrichBlame_StalenessScore_UsesChurn(t *testing.T) {
 	}
 }
 
+func TestEnrichBlameForFile_UpdatesOnlyTargetFile(t *testing.T) {
+	repoRoot := t.TempDir()
+	srcFile := filepath.Join(repoRoot, "pkg/svc.go")
+	otherFile := filepath.Join(repoRoot, "pkg/other.go")
+	if !initGitRepo(t, repoRoot, map[string]string{
+		"pkg/svc.go":   "package pkg\nfunc Serve() {}\n",
+		"pkg/other.go": "package pkg\nfunc Other() {}\n",
+	}) {
+		return
+	}
+
+	g := graph.New("testrepo")
+	g.SetRoot(repoRoot)
+	for _, tc := range []struct {
+		file, name string
+	}{
+		{srcFile, "Serve"},
+		{otherFile, "Other"},
+	} {
+		id := g.MakeNodeID(tc.file, tc.name)
+		g.AddNode(&graph.Node{
+			ID:      id,
+			Type:    graph.NodeFunction,
+			Name:    tc.name,
+			Package: "pkg",
+			File:    tc.file,
+			Line:    2,
+		})
+	}
+
+	// Only enrich svc.go — Other in other.go should remain unset.
+	metrics.EnrichBlameForFile(g, repoRoot, srcFile)
+
+	for _, n := range g.AllNodes() {
+		switch n.Name {
+		case "Serve":
+			if n.Metadata["blame_author"] == "" {
+				t.Error("Serve: blame_author not set after EnrichBlameForFile")
+			}
+		case "Other":
+			if n.Metadata != nil && n.Metadata["blame_author"] != "" {
+				t.Error("Other: blame_author should not be set (different file)")
+			}
+		}
+	}
+}
+
+func TestEnrichBlameForFile_NoGitRepo(t *testing.T) {
+	g := buildMetricsGraph(t, t.TempDir())
+	// Must not panic or set any blame fields.
+	metrics.EnrichBlameForFile(g, t.TempDir(), filepath.Join(t.TempDir(), "pkg/svc.go"))
+	for _, n := range g.AllNodes() {
+		if n.Metadata != nil && n.Metadata["blame_author"] != "" {
+			t.Errorf("node %s got blame_author — no git repo", n.Name)
+		}
+	}
+}
+
 // --- BlameAgeLabel tests ---
 
 func TestBlameAgeLabel_Today(t *testing.T) {

@@ -502,10 +502,58 @@ func EnrichBlame(g *graph.Graph, repoRoot string) {
 		// staleness_score = days_since_change × log(1 + churn).
 		// churn is set by EnrichChurn (must run first).
 		daysAgo := 0.0
+		// Graceful: unparseable date → 0 days → staleness_score = 0 (treated as fresh).
 		if t, err := time.Parse("2006-01-02", bi.Date); err == nil {
 			daysAgo = time.Since(t).Hours() / 24
 		}
 		churn := 0.0
+		// Graceful: churn absent or non-numeric → 0 → log(1+0)=0, score = 0.
+		if c, err := strconv.ParseFloat(n.Metadata["churn"], 64); err == nil {
+			churn = c
+		}
+		score := daysAgo * math.Log(1+churn)
+		n.Metadata["staleness_score"] = fmt.Sprintf("%.1f", score)
+	}
+}
+
+// EnrichBlameForFile updates blame metadata for all function/method nodes in a
+// single file. Called by the watcher after a file is re-parsed to keep blame
+// data current without a full re-blame of the entire graph.
+// It is a no-op when git is unavailable, when the file has no commits, or when
+// no function/method nodes exist in the file.
+// Note: churn metadata may be absent on incrementally re-parsed nodes (EnrichChurn
+// runs only at startup); staleness_score gracefully falls back to 0 in that case.
+func EnrichBlameForFile(g *graph.Graph, repoRoot, absFile string) {
+	nodes := g.NodesForFile(absFile)
+	if len(nodes) == 0 {
+		return
+	}
+	bi := fileBlame(repoRoot, absFile)
+	if bi == nil {
+		return
+	}
+	for _, n := range nodes {
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
+			continue
+		}
+		if n.Metadata == nil {
+			n.Metadata = make(map[string]string)
+		}
+		n.Metadata["blame_author"] = bi.Author
+		n.Metadata["blame_date"] = bi.Date
+		n.Metadata["blame_commit"] = bi.Commit
+		n.Metadata["blame_subject"] = bi.Subject
+
+		daysAgo := 0.0
+		// Graceful: unparseable date → 0 days → staleness_score = 0.
+		if t, err := time.Parse("2006-01-02", bi.Date); err == nil {
+			daysAgo = time.Since(t).Hours() / 24
+		}
+		churn := 0.0
+		// Graceful: churn absent or non-numeric → 0 → score = 0.
 		if c, err := strconv.ParseFloat(n.Metadata["churn"], 64); err == nil {
 			churn = c
 		}
