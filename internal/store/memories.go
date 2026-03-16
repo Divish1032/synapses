@@ -267,6 +267,32 @@ func (s *Store) MarkEntityMemoriesStale(entityID string) error {
 	return err
 }
 
+// MarkAnchoredMemoriesStale sets stale=1 on all memories that have at least one
+// anchor in nodeIDs. Idempotent: calling twice with the same IDs is safe.
+// reason is stored in stale_reason for surfacing in session_init (AM-3).
+// A no-op when nodeIDs is empty.
+func (s *Store) MarkAnchoredMemoriesStale(nodeIDs []string, reason string) error {
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	placeholders := strings.Repeat("?,", len(nodeIDs))
+	placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
+	args := make([]any, 0, len(nodeIDs)+1)
+	args = append(args, reason)
+	for _, id := range nodeIDs {
+		args = append(args, id)
+	}
+	_, err := s.db.Exec(`
+		UPDATE memories SET stale = 1, stale_reason = ?
+		WHERE id IN (
+			SELECT memory_id FROM memory_anchors WHERE node_id IN (`+placeholders+`)
+		)`, args...)
+	if err != nil {
+		return fmt.Errorf("store.MarkAnchoredMemoriesStale: %w", err)
+	}
+	return nil
+}
+
 // SearchMemories performs FTS5 BM25 full-text search over memory content.
 // Returns non-expired memories ordered by relevance (best match first).
 // The query uses FTS5 query syntax — each space-separated word is an implicit AND term.

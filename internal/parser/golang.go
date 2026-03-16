@@ -585,9 +585,238 @@ func (p *GoParser) extractDeclarations(
 			Metadata: meta,
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+		// Emit NodeMethod for each declared interface method so the graph can
+		// traverse interface → method edges (e.g. "what does IAuthService expose?").
+		if methods, ok := ifaceMethods[name]; ok {
+			for _, methodName := range methods {
+				qualName := name + "." + methodName
+				methID := g.MakeNodeID(filePath, qualName)
+				if g.GetNode(methID) != nil {
+					continue
+				}
+				g.AddNode(&graph.Node{
+					ID:       methID,
+					Type:     graph.NodeMethod,
+					Name:     qualName,
+					Package:  pkg,
+					File:     filePath,
+					Line:     startLine,
+					Exported: isExported(methodName),
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: methID, Type: graph.EdgeDefines})
+				g.AddEdge(&graph.Edge{From: nodeID, To: methID, Type: graph.EdgeDefines})
+			}
+		}
 	}); err != nil {
 		return err
 	}
+
+	// --- Type alias and named type declarations (non-struct, non-interface) ---
+	// Captures: type Foo = Bar, type ID int64, type Handler func(...), etc.
+	// These are type_spec nodes whose type field is NOT struct_type or interface_type.
+	// We collect all type_spec names and skip those already added above.
+	typeAliasQuery := `
+(type_declaration
+  (type_spec
+    name: (type_identifier) @type_name
+  )
+)`
+	if err := runQuery(lang, root, src, typeAliasQuery, func(captures map[string]string, startLine int) {
+		name := captures["type_name"]
+		if name == "" {
+			return
+		}
+		nodeID := g.MakeNodeID(filePath, name)
+		if g.GetNode(nodeID) != nil {
+			return // Already added as struct or interface.
+		}
+		meta := buildMeta(declInfo[name])
+		if meta == nil {
+			meta = make(map[string]string, 1)
+		}
+		meta["kind"] = "type_alias"
+		g.AddNode(&graph.Node{
+			ID:       nodeID,
+			Type:     graph.NodeStruct,
+			Name:     name,
+			Package:  pkg,
+			File:     filePath,
+			Line:     startLine,
+			Exported: isExported(name),
+			Metadata: meta,
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}); err != nil {
+		return err
+	}
+
+	// --- Package-level const declarations ---
+	// Handles both single: `const Foo = 1` and grouped: `const ( A = 1; B = 2 )`
+	// In grouped form the grammar wraps specs in a const_spec_list container node.
+	emitConst := func(spec *sitter.Node) {
+		for j := 0; j < int(spec.ChildCount()); j++ {
+			child := spec.Child(j)
+			if child == nil {
+				continue
+			}
+			if child.Type() == "identifier" {
+				name := string(src[child.StartByte():child.EndByte()])
+				nodeID := g.MakeNodeID(filePath, name)
+				if g.GetNode(nodeID) != nil {
+					continue
+				}
+				meta := map[string]string{"kind": "const"}
+				g.AddNode(&graph.Node{
+					ID:       nodeID,
+					Type:     graph.NodeStruct,
+					Name:     name,
+					Package:  pkg,
+					File:     filePath,
+					Line:     int(child.StartPoint().Row) + 1,
+					Exported: isExported(name),
+					Metadata: meta,
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			}
+		}
+	}
+	var walkConst func(n *sitter.Node)
+	walkConst = func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "const_declaration" {
+			for i := 0; i < int(n.ChildCount()); i++ {
+				spec := n.Child(i)
+				if spec == nil {
+					continue
+				}
+				switch spec.Type() {
+				case "const_spec":
+					emitConst(spec)
+				case "const_spec_list":
+					// Grouped: const ( A = 1; B = 2 ) — specs are children of the list.
+					for k := 0; k < int(spec.ChildCount()); k++ {
+						inner := spec.Child(k)
+						if inner != nil && inner.Type() == "const_spec" {
+							emitConst(inner)
+						}
+					}
+				}
+			}
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			walkConst(n.Child(i))
+		}
+	}
+	walkConst(root)
+
+	// --- Package-level var declarations ---
+	// Handles both single: `var Foo = 1` and grouped: `var ( A = 1; B = 2 )`
+	// In grouped form the grammar wraps specs in a var_spec_list container node.
+	emitVar := func(spec *sitter.Node) {
+		for j := 0; j < int(spec.ChildCount()); j++ {
+			child := spec.Child(j)
+			if child == nil {
+				continue
+			}
+			if child.Type() == "identifier" {
+				name := string(src[child.StartByte():child.EndByte()])
+				nodeID := g.MakeNodeID(filePath, name)
+				if g.GetNode(nodeID) != nil {
+					continue
+				}
+				meta := map[string]string{"kind": "var"}
+				g.AddNode(&graph.Node{
+					ID:       nodeID,
+					Type:     graph.NodeStruct,
+					Name:     name,
+					Package:  pkg,
+					File:     filePath,
+					Line:     int(child.StartPoint().Row) + 1,
+					Exported: isExported(name),
+					Metadata: meta,
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			}
+		}
+	}
+	var walkVar func(n *sitter.Node)
+	walkVar = func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "var_declaration" {
+			for i := 0; i < int(n.ChildCount()); i++ {
+				spec := n.Child(i)
+				if spec == nil {
+					continue
+				}
+				switch spec.Type() {
+				case "var_spec":
+					emitVar(spec)
+				case "var_spec_list":
+					// Grouped: var ( A = 1; B = 2 ) — specs are children of the list.
+					for k := 0; k < int(spec.ChildCount()); k++ {
+						inner := spec.Child(k)
+						if inner != nil && inner.Type() == "var_spec" {
+							emitVar(inner)
+						}
+					}
+				}
+			}
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			walkVar(n.Child(i))
+		}
+	}
+	walkVar(root)
+
+	// --- True type aliases: type Foo = Bar (uses type_alias node in some grammar versions) ---
+	// In certain go-tree-sitter versions, `type X = Y` is a `type_alias` node,
+	// not a `type_spec`, so the query above misses them.  Walk the AST directly.
+	var walkTypeAlias func(n *sitter.Node)
+	walkTypeAlias = func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "type_alias" {
+			// Structure varies by grammar version; look for the first type_identifier.
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child == nil {
+					continue
+				}
+				if child.Type() == "type_identifier" {
+					name := string(src[child.StartByte():child.EndByte()])
+					nodeID := g.MakeNodeID(filePath, name)
+					if g.GetNode(nodeID) == nil {
+						meta := buildMeta(declInfo[name])
+						if meta == nil {
+							meta = make(map[string]string, 1)
+						}
+						meta["kind"] = "type_alias"
+						g.AddNode(&graph.Node{
+							ID:       nodeID,
+							Type:     graph.NodeStruct,
+							Name:     name,
+							Package:  pkg,
+							File:     filePath,
+							Line:     int(child.StartPoint().Row) + 1,
+							Exported: isExported(name),
+							Metadata: meta,
+						})
+						g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+					}
+					break // Only the first type_identifier is the alias name.
+				}
+			}
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			walkTypeAlias(n.Child(i))
+		}
+	}
+	walkTypeAlias(root)
 
 	return nil
 }

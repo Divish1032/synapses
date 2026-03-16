@@ -3,6 +3,7 @@ package parser
 import (
 	"context"
 	"path/filepath"
+	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/lua"
@@ -25,7 +26,180 @@ func (p *LuaParser) Extensions() []string {
 	return []string{".lua"}
 }
 
-// Parse extracts code entities from a single Lua file and merges them into the graph.
+// extractLuaCATS does a line-by-line pre-pass scanning for LuaCATS annotations
+// (from lua-language-server) and emits graph nodes for classes and their fields.
+//
+// Supported annotations:
+//
+//	---@class ClassName [:ParentClass]   → NodeStruct with kind="class"
+//	---@field [public|protected|private] fieldName type [description]
+//	                                     → NodeMethod with kind="field" on the last seen class
+//	---@alias AliasName type             → NodeStruct with kind="alias"
+//	---@type type (on local x = ...)     → stored as metadata on next local assignment
+func extractLuaCATS(g *graph.Graph, src []byte, filePath string, fileNodeID graph.NodeID) {
+	lines := strings.Split(string(src), "\n")
+	var currentClass string
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lineNum := i + 1
+
+		// ---@class ClassName or ---@class ClassName : Parent
+		if strings.HasPrefix(trimmed, "---@class ") {
+			rest := strings.TrimPrefix(trimmed, "---@class ")
+			rest = strings.TrimSpace(rest)
+			// Strip any parent class annotation "ClassName : Parent"
+			parts := strings.SplitN(rest, ":", 2)
+			className := strings.TrimSpace(parts[0])
+			// Also handle space-separated parent: "ClassName Parent"
+			if idx := strings.IndexByte(className, ' '); idx != -1 {
+				className = className[:idx]
+			}
+			if className == "" {
+				continue
+			}
+			currentClass = className
+			nodeID := g.MakeNodeID(filePath, className)
+			if g.GetNode(nodeID) == nil {
+				meta := map[string]string{"kind": "class", "source": "luacats"}
+				if len(parts) == 2 {
+					meta["extends"] = strings.TrimSpace(parts[1])
+				}
+				g.AddNode(&graph.Node{
+					ID:       nodeID,
+					Type:     graph.NodeStruct,
+					Name:     className,
+					File:     filePath,
+					Line:     lineNum,
+					Exported: isExported(className),
+					Metadata: meta,
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			}
+			continue
+		}
+
+		// ---@field [public|protected|private] fieldName type
+		if strings.HasPrefix(trimmed, "---@field ") && currentClass != "" {
+			rest := strings.TrimPrefix(trimmed, "---@field ")
+			rest = strings.TrimSpace(rest)
+			// Strip optional visibility modifier
+			for _, vis := range []string{"public ", "protected ", "private "} {
+				if strings.HasPrefix(rest, vis) {
+					rest = strings.TrimPrefix(rest, vis)
+					break
+				}
+			}
+			// Field name is the first token
+			tokens := strings.Fields(rest)
+			if len(tokens) == 0 {
+				continue
+			}
+			fieldName := tokens[0]
+			qualName := currentClass + "." + fieldName
+			nodeID := g.MakeNodeID(filePath, qualName)
+			if g.GetNode(nodeID) == nil {
+				meta := map[string]string{"kind": "field", "source": "luacats"}
+				if len(tokens) > 1 {
+					meta["field_type"] = tokens[1]
+				}
+				g.AddNode(&graph.Node{
+					ID:       nodeID,
+					Type:     graph.NodeMethod,
+					Name:     qualName,
+					File:     filePath,
+					Line:     lineNum,
+					Exported: true,
+					Metadata: meta,
+				})
+				classNodeID := g.MakeNodeID(filePath, currentClass)
+				if g.GetNode(classNodeID) != nil {
+					g.AddEdge(&graph.Edge{From: classNodeID, To: nodeID, Type: graph.EdgeDefines})
+				} else {
+					g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+				}
+			}
+			continue
+		}
+
+		// ---@alias AliasName type
+		if strings.HasPrefix(trimmed, "---@alias ") {
+			rest := strings.TrimPrefix(trimmed, "---@alias ")
+			rest = strings.TrimSpace(rest)
+			tokens := strings.Fields(rest)
+			if len(tokens) == 0 {
+				continue
+			}
+			aliasName := tokens[0]
+			nodeID := g.MakeNodeID(filePath, aliasName)
+			if g.GetNode(nodeID) == nil {
+				meta := map[string]string{"kind": "alias", "source": "luacats"}
+				g.AddNode(&graph.Node{
+					ID:       nodeID,
+					Type:     graph.NodeStruct,
+					Name:     aliasName,
+					File:     filePath,
+					Line:     lineNum,
+					Exported: isExported(aliasName),
+					Metadata: meta,
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			}
+			// Reset current class context — alias breaks field association
+			currentClass = ""
+			continue
+		}
+
+		// Reset class context on non-annotation, non-empty lines (a blank or
+		// non-comment line means the @class block ended).
+		if trimmed != "" && !strings.HasPrefix(trimmed, "---") && !strings.HasPrefix(trimmed, "--") {
+			// If the next real code line is not a table/local assignment that
+			// follows the annotation block, clear class context.
+			// We keep it for table field assignments that follow the annotation.
+			if !strings.HasPrefix(trimmed, "local ") &&
+				!strings.HasPrefix(trimmed, "M.") &&
+				!strings.HasPrefix(trimmed, "return ") {
+				currentClass = ""
+			}
+		}
+	}
+}
+
+// extractLuaDeclInfo collects metadata for Lua declarations.
+func extractLuaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+	result := make(map[string]declMeta)
+	lines := strings.Split(string(src), "\n")
+	var walk func(n *sitter.Node)
+	walk = func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "function_statement" {
+			sl := int(n.StartPoint().Row) + 1
+			// Try to extract function name from various children.
+			if fnName := firstChildOfType(n, "function_name"); fnName != nil {
+				name := string(src[fnName.StartByte():fnName.EndByte()])
+				result[name] = declMeta{
+					Doc:       extractLineDoc(lines, sl, "--"),
+					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
+				}
+			} else if ident := firstChildOfType(n, "identifier"); ident != nil {
+				name := string(src[ident.StartByte():ident.EndByte()])
+				result[name] = declMeta{
+					Doc:       extractLineDoc(lines, sl, "--"),
+					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
+				}
+			}
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return result
+}
+
+// Parse extracts code entities from a single Lua file.
 func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
@@ -42,14 +216,64 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		Line: 1,
 	})
 
-	lang := p.language
+	// --- LuaCATS annotation pre-pass (---@class, ---@field, ---@alias) ---
+	extractLuaCATS(g, src, filePath, fileNodeID)
 
-	// In the bundled Lua grammar, both global and local functions are represented
-	// as function_statement nodes (no separate function_declaration or local_function
-	// node types). Global functions have their name inside a function_name subtree;
-	// local functions have an identifier as a direct child after the local keyword.
+	lang := p.language
+	declInfo := extractLuaDeclInfo(root, src)
+
+	// --- require() calls as imports ---
+	// The Lua grammar wraps string args in function_arguments, so we walk
+	// function_call nodes directly rather than using a query.
+	var walkRequire func(n *sitter.Node)
+	walkRequire = func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "function_call" {
+			// Check if the callee identifier is "require".
+			isRequire := false
+			var reqPath string
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child == nil {
+					continue
+				}
+				if child.Type() == "identifier" {
+					if string(src[child.StartByte():child.EndByte()]) == "require" {
+						isRequire = true
+					}
+				}
+				if child.Type() == "function_arguments" {
+					for j := 0; j < int(child.ChildCount()); j++ {
+						arg := child.Child(j)
+						if arg == nil {
+							continue
+						}
+						if arg.Type() == "string" {
+							rawStr := string(src[arg.StartByte():arg.EndByte()])
+							reqPath = strings.Trim(rawStr, `"'`)
+						}
+					}
+				}
+			}
+			if isRequire && reqPath != "" {
+				importNodeID := g.MakeNodeID(reqPath, reqPath)
+				g.AddNode(&graph.Node{ID: importNodeID, Type: graph.NodePackage, Name: reqPath, Package: reqPath, File: filePath})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
+			}
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			walkRequire(n.Child(i))
+		}
+	}
+	walkRequire(root)
 
 	// --- global function declarations: function Foo() end ---
+	// NOTE: the query also fires for each identifier component inside a qualified
+	// function_name (e.g. "Vector2" and "new" for `function Vector2.new()`).
+	// We skip if the node was already added (e.g. by the LuaCATS pre-pass) to
+	// avoid overwriting class/alias nodes with empty function nodes.
 	globalFuncQuery := `(function_statement (function_name (identifier) @func_name))`
 	if err := runQuery(lang, root, src, globalFuncQuery, func(captures map[string]string, startLine int) {
 		name := captures["func_name"]
@@ -57,23 +281,40 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			return
 		}
 		nodeID := g.MakeNodeID(filePath, name)
+		if g.GetNode(nodeID) != nil {
+			return // already added (LuaCATS class/alias or duplicate)
+		}
 		g.AddNode(&graph.Node{
-			ID:       nodeID,
-			Type:     graph.NodeFunction,
-			Name:     name,
-			File:     filePath,
-			Line:     startLine,
-			Exported: isExported(name),
+			ID: nodeID, Type: graph.NodeFunction, Name: name, File: filePath,
+			Line: startLine, Exported: isExported(name), Metadata: buildLangMeta(declInfo[name]),
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 	}); err != nil {
 		return err
 	}
 
+	// --- method-style functions: function Foo.bar() or function Foo:bar() ---
+	methodFuncQuery := `(function_statement (function_name) @full_name)`
+	_ = runQuery(lang, root, src, methodFuncQuery, func(captures map[string]string, startLine int) {
+		fullName := captures["full_name"]
+		if fullName == "" || !strings.ContainsAny(fullName, ".:") {
+			return // Already captured by global func query.
+		}
+		// Convert Foo.bar or Foo:bar to Foo.bar.
+		qualName := strings.ReplaceAll(fullName, ":", ".")
+		// Don't re-add if it's a simple name already captured.
+		nodeID := g.MakeNodeID(filePath, qualName)
+		if g.GetNode(nodeID) != nil {
+			return
+		}
+		g.AddNode(&graph.Node{
+			ID: nodeID, Type: graph.NodeMethod, Name: qualName, File: filePath,
+			Line: startLine, Exported: true, Metadata: buildLangMeta(declInfo[fullName]),
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	})
+
 	// --- local function declarations: local function foo() end ---
-	// The local keyword is a direct sibling of the identifier; this query matches
-	// function_statement nodes that have both a (local) child and an (identifier)
-	// child (the latter being the function name).
 	localFuncQuery := `(function_statement (local) (identifier) @func_name)`
 	if err := runQuery(lang, root, src, localFuncQuery, func(captures map[string]string, startLine int) {
 		name := captures["func_name"]
@@ -81,18 +322,128 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			return
 		}
 		nodeID := g.MakeNodeID(filePath, name)
+		if g.GetNode(nodeID) != nil {
+			return
+		}
 		g.AddNode(&graph.Node{
-			ID:       nodeID,
-			Type:     graph.NodeFunction,
-			Name:     name,
-			File:     filePath,
-			Line:     startLine,
-			Exported: false, // local functions are file-scoped
+			ID: nodeID, Type: graph.NodeFunction, Name: name, File: filePath,
+			Line: startLine, Exported: false, Metadata: buildLangMeta(declInfo[name]),
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 	}); err != nil {
 		return err
 	}
 
+	// --- Table field function assignments: M.foo = function() end ---
+	// In the Lua grammar this is a variable_declaration with:
+	//   variable_declarator (identifier "." identifier) = function(...)...end
+	var walkTableFuncs func(n *sitter.Node)
+	walkTableFuncs = func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "variable_declaration" {
+			// Find variable_declarator children followed by a function value.
+			hasFuncVal := false
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child != nil && child.Type() == "function" {
+					hasFuncVal = true
+					break
+				}
+			}
+			if hasFuncVal {
+				for i := 0; i < int(n.ChildCount()); i++ {
+					varNode := n.Child(i)
+					if varNode == nil || varNode.Type() != "variable_declarator" {
+						continue
+					}
+					// variable_declarator: could be M.foo (dot) or M["foo"] (bracket)
+					qualName := extractLuaTableFieldName(varNode, src)
+					if qualName == "" {
+						continue
+					}
+					nodeID := g.MakeNodeID(filePath, qualName)
+					if g.GetNode(nodeID) != nil {
+						continue
+					}
+					g.AddNode(&graph.Node{
+						ID: nodeID, Type: graph.NodeFunction, Name: qualName, File: filePath,
+						Line: int(varNode.StartPoint().Row) + 1, Exported: true,
+						Metadata: map[string]string{"kind": "table_func"},
+					})
+					g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+				}
+			}
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			walkTableFuncs(n.Child(i))
+		}
+	}
+	walkTableFuncs(root)
+
+	// --- Call sites ---
+	collectLuaCallSites(g, lang, root, src, filePath, fileNodeID)
+
 	return nil
+}
+
+// extractLuaTableFieldName extracts a qualified "Table.field" name from a
+// variable_declarator node. Handles both dot notation (M.foo) and bracket
+// notation with string literals (M["foo"]). Returns "" for plain identifiers
+// or non-string bracket keys (e.g. M[i]).
+func extractLuaTableFieldName(varNode *sitter.Node, src []byte) string {
+	if varNode == nil {
+		return ""
+	}
+	// Collect children skipping punctuation (. [ ] ,).
+	var parts []string
+	hasBracket := false
+	for i := 0; i < int(varNode.ChildCount()); i++ {
+		child := varNode.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type() {
+		case "identifier":
+			text := strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
+			if text != "" {
+				parts = append(parts, text)
+			}
+		case "string":
+			hasBracket = true
+			// Extract the string_content child (strips quotes).
+			for j := 0; j < int(child.ChildCount()); j++ {
+				sc := child.Child(j)
+				if sc != nil && sc.Type() == "string_content" {
+					parts = append(parts, string(src[sc.StartByte():sc.EndByte()]))
+					break
+				}
+			}
+		}
+	}
+	if len(parts) < 2 {
+		return "" // plain variable, not a table field
+	}
+	_ = hasBracket
+	return strings.Join(parts, ".")
+}
+
+// collectLuaCallSites collects call sites.
+func collectLuaCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	callQuery := `(function_call (identifier) @callee)`
+	_ = runQuery(lang, root, src, callQuery, func(captures map[string]string, _ int) {
+		callee := captures["callee"]
+		if callee == "" || callee == "require" || callee == "print" || callee == "error" ||
+			callee == "type" || callee == "tostring" || callee == "tonumber" ||
+			callee == "pairs" || callee == "ipairs" || callee == "next" ||
+			callee == "select" || callee == "pcall" || callee == "xpcall" ||
+			callee == "assert" || callee == "rawget" || callee == "rawset" ||
+			callee == "setmetatable" || callee == "getmetatable" ||
+			callee == "unpack" || callee == "table" || callee == "string" ||
+			callee == "math" || callee == "io" || callee == "os" || callee == "debug" {
+			return
+		}
+		g.AddCallSite(graph.CallSite{CallerID: fileNodeID, CallerFile: filePath, FuncName: callee})
+	})
 }

@@ -749,6 +749,120 @@ func TestInsertMemoryWithAnchors_RollsBackOnAnchorFailure(t *testing.T) {
 	}
 }
 
+// --- AM-2: MarkAnchoredMemoriesStale tests ---
+
+// TestMarkAnchoredMemoriesStale_EmptyNodeIDs is a no-op — no SQL should run.
+func TestMarkAnchoredMemoriesStale_EmptyNodeIDs(t *testing.T) {
+	st := openMemTestStore(t)
+	if err := st.MarkAnchoredMemoriesStale(nil, "reason"); err != nil {
+		t.Fatalf("unexpected error on empty nodeIDs: %v", err)
+	}
+}
+
+// TestMarkAnchoredMemoriesStale_NoAnchors verifies that a node with no anchored
+// memories produces no error and marks nothing.
+func TestMarkAnchoredMemoriesStale_NoAnchors(t *testing.T) {
+	st := openMemTestStore(t)
+	id, _ := st.InsertMemory(Memory{
+		Tier: TierProject, Content: "fact with no anchor", AgentID: "a", Source: SourceManual,
+	})
+	if err := st.MarkAnchoredMemoriesStale([]string{"repo::x.go::Foo"}, "anchor node removed"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Memory should not be stale.
+	rows, err := st.db.Query(`SELECT stale FROM memories WHERE id = ?`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var stale int
+		_ = rows.Scan(&stale)
+		if stale != 0 {
+			t.Errorf("expected stale=0 for unanchored memory, got %d", stale)
+		}
+	}
+}
+
+// TestMarkAnchoredMemoriesStale_MarksAnchored verifies that a memory anchored
+// to the given node ID is flagged stale with the correct reason.
+func TestMarkAnchoredMemoriesStale_MarksAnchored(t *testing.T) {
+	st := openMemTestStore(t)
+	id, _ := st.InsertMemory(Memory{
+		Tier: TierProject, Content: "Store.Close has 96 callers", AgentID: "a", Source: SourceManual,
+	})
+	if err := st.InsertMemoryAnchors(id, []string{"repo::store.go::Store.Close"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.MarkAnchoredMemoriesStale([]string{"repo::store.go::Store.Close"}, "anchor node removed"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rows, err := st.db.Query(`SELECT stale, stale_reason FROM memories WHERE id = ?`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatal("memory not found")
+	}
+	var stale int
+	var reason string
+	_ = rows.Scan(&stale, &reason)
+	if stale != 1 {
+		t.Errorf("expected stale=1, got %d", stale)
+	}
+	if reason != "anchor node removed" {
+		t.Errorf("expected stale_reason='anchor node removed', got %q", reason)
+	}
+}
+
+// TestMarkAnchoredMemoriesStale_BatchNodes verifies multiple node IDs in one call.
+func TestMarkAnchoredMemoriesStale_BatchNodes(t *testing.T) {
+	st := openMemTestStore(t)
+	id1, _ := st.InsertMemory(Memory{Tier: TierProject, Content: "fact about Foo", AgentID: "a", Source: SourceManual})
+	id2, _ := st.InsertMemory(Memory{Tier: TierProject, Content: "fact about Bar", AgentID: "a", Source: SourceManual})
+	id3, _ := st.InsertMemory(Memory{Tier: TierProject, Content: "unrelated fact", AgentID: "a", Source: SourceManual})
+
+	_ = st.InsertMemoryAnchors(id1, []string{"repo::a.go::Foo"})
+	_ = st.InsertMemoryAnchors(id2, []string{"repo::b.go::Bar"})
+
+	if err := st.MarkAnchoredMemoriesStale([]string{"repo::a.go::Foo", "repo::b.go::Bar"}, "anchor node removed"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct{ id string; wantStale int }{
+		{id1, 1}, {id2, 1}, {id3, 0},
+	} {
+		var stale int
+		_ = st.db.QueryRow(`SELECT stale FROM memories WHERE id = ?`, tc.id).Scan(&stale)
+		if stale != tc.wantStale {
+			t.Errorf("id=%s: expected stale=%d, got %d", tc.id, tc.wantStale, stale)
+		}
+	}
+}
+
+// TestMarkAnchoredMemoriesStale_Idempotent verifies calling twice does not error.
+func TestMarkAnchoredMemoriesStale_Idempotent(t *testing.T) {
+	st := openMemTestStore(t)
+	id, _ := st.InsertMemory(Memory{Tier: TierProject, Content: "fact about Foo", AgentID: "a", Source: SourceManual})
+	_ = st.InsertMemoryAnchors(id, []string{"repo::a.go::Foo"})
+
+	if err := st.MarkAnchoredMemoriesStale([]string{"repo::a.go::Foo"}, "anchor node removed"); err != nil {
+		t.Fatal(err)
+	}
+	// Call again — should not error.
+	if err := st.MarkAnchoredMemoriesStale([]string{"repo::a.go::Foo"}, "anchor node removed"); err != nil {
+		t.Fatalf("idempotent second call failed: %v", err)
+	}
+	var stale int
+	_ = st.db.QueryRow(`SELECT stale FROM memories WHERE id = ?`, id).Scan(&stale)
+	if stale != 1 {
+		t.Errorf("expected stale=1 after idempotent call, got %d", stale)
+	}
+}
+
 // TestSearchMemories_NoResults verifies a query with no matches returns empty
 // slice (not an error).
 func TestSearchMemories_NoResults(t *testing.T) {

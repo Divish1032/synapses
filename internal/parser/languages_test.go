@@ -134,7 +134,7 @@ func TestJavaParser_ExtractsMethod(t *testing.T) {
 func TestJavaParser_DefinesEdges(t *testing.T) {
 	g := parseJava(t, javaSource)
 	fileID := g.FindByName("AuthService.java")[0].ID
-	for _, name := range []string{"Authenticator", "AuthService", "Status", "login"} {
+	for _, name := range []string{"Authenticator", "AuthService", "Status", "AuthService.login"} {
 		assertDefinesEdge(t, g, fileID, name)
 	}
 }
@@ -246,7 +246,8 @@ func TestScalaParser_ExtractsObject(t *testing.T) {
 }
 
 func TestScalaParser_ExtractsFunction(t *testing.T) {
-	assertNode(t, parseScala(t, scalaSource), "login", graph.NodeFunction)
+	// login is inside AuthService class body, so it's class-qualified as a method.
+	assertNode(t, parseScala(t, scalaSource), "AuthService.login", graph.NodeMethod)
 }
 
 func TestScalaParser_EmptyFile(t *testing.T) {
@@ -287,7 +288,7 @@ func TestGroovyParser_ExtractsClass(t *testing.T) {
 }
 
 func TestGroovyParser_ExtractsMethod(t *testing.T) {
-	assertNode(t, parseGroovy(t, groovySource), "login", graph.NodeMethod)
+	assertNode(t, parseGroovy(t, groovySource), "AuthService.login", graph.NodeMethod)
 }
 
 func TestGroovyParser_EmptyFile(t *testing.T) {
@@ -484,7 +485,8 @@ func TestCppParser_ExtractsStruct(t *testing.T) {
 }
 
 func TestCppParser_ExtractsNamespace(t *testing.T) {
-	assertNode(t, parseCpp(t, cppSource), "auth", graph.NodeStruct)
+	// Namespaces are now NodePackage (more accurate than NodeStruct).
+	assertNode(t, parseCpp(t, cppSource), "auth", graph.NodePackage)
 }
 
 func TestCppParser_EmptyFile(t *testing.T) {
@@ -931,14 +933,15 @@ func TestProtobufParser_ExtractsService(t *testing.T) {
 
 func TestProtobufParser_ExtractsRPCs(t *testing.T) {
 	g := parseProto(t, protoSource)
-	assertNode(t, g, "Login", graph.NodeMethod)
-	assertNode(t, g, "Logout", graph.NodeMethod)
+	// RPCs are qualified as ServiceName.RPCName.
+	assertNode(t, g, "AuthService.Login", graph.NodeMethod)
+	assertNode(t, g, "AuthService.Logout", graph.NodeMethod)
 }
 
 func TestProtobufParser_DefinesEdges(t *testing.T) {
 	g := parseProto(t, protoSource)
 	fileID := g.FindByName("auth.proto")[0].ID
-	for _, name := range []string{"LoginRequest", "LoginResponse", "Status", "AuthService", "Login", "Logout"} {
+	for _, name := range []string{"LoginRequest", "LoginResponse", "Status", "AuthService", "AuthService.Login", "AuthService.Logout"} {
 		assertDefinesEdge(t, g, fileID, name)
 	}
 }

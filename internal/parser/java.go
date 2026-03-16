@@ -53,7 +53,8 @@ func extractJavaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 				_ = name // suppress unused
 			}
-		case "class_declaration", "interface_declaration", "enum_declaration", "record_declaration":
+		case "class_declaration", "interface_declaration", "enum_declaration", "record_declaration",
+			"annotation_type_declaration":
 			className := ""
 			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -214,6 +215,31 @@ func (p *JavaParser) extractAllDeclarations(
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
 			nodeID := g.MakeNodeID(filePath, name)
+			meta := buildLangMeta(declInfo[name])
+			// Detect sealed modifier — check modifiers child (field or direct).
+			var mods *sitter.Node
+			mods = n.ChildByFieldName("modifiers")
+			if mods == nil {
+				for k := 0; k < int(n.ChildCount()); k++ {
+					child := n.Child(k)
+					if child != nil && child.Type() == "modifiers" {
+						mods = child
+						break
+					}
+				}
+			}
+			if mods != nil {
+				for k := 0; k < int(mods.ChildCount()); k++ {
+					mod := mods.Child(k)
+					if mod != nil && string(src[mod.StartByte():mod.EndByte()]) == "sealed" {
+						if meta == nil {
+							meta = make(map[string]string, 1)
+						}
+						meta["kind"] = "sealed"
+						break
+					}
+				}
+			}
 			g.AddNode(&graph.Node{
 				ID:       nodeID,
 				Type:     graph.NodeStruct,
@@ -221,9 +247,34 @@ func (p *JavaParser) extractAllDeclarations(
 				File:     filePath,
 				Line:     int(n.StartPoint().Row) + 1,
 				Exported: isJavaPublicNode(n, src),
-				Metadata: buildLangMeta(declInfo[name]),
+				Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			// Extract permitted subclasses from "permits" clause.
+			for k := 0; k < int(n.ChildCount()); k++ {
+				child := n.Child(k)
+				if child == nil || child.Type() != "permits" {
+					continue
+				}
+				if tl := firstChildOfType(child, "type_list"); tl != nil {
+					for j := 0; j < int(tl.ChildCount()); j++ {
+						ti := tl.Child(j)
+						if ti == nil || ti.Type() != "type_identifier" {
+							continue
+						}
+						subName := string(src[ti.StartByte():ti.EndByte()])
+						subID := g.MakeNodeID(filePath, subName)
+						if g.GetNode(subID) == nil {
+							subMeta := map[string]string{"kind": "permitted"}
+							g.AddNode(&graph.Node{
+								ID: subID, Type: graph.NodeStruct, Name: subName, File: filePath,
+								Line: int(ti.StartPoint().Row) + 1, Exported: true, Metadata: subMeta,
+							})
+							g.AddEdge(&graph.Edge{From: fileNodeID, To: subID, Type: graph.EdgeDefines})
+						}
+					}
+				}
+			}
 			// Walk body with class context.
 			if body := n.ChildByFieldName("body"); body != nil {
 				for i := 0; i < int(body.ChildCount()); i++ {
@@ -314,6 +365,29 @@ func (p *JavaParser) extractAllDeclarations(
 			}
 			return
 
+		case "annotation_type_declaration":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				break
+			}
+			name := string(src[nameNode.StartByte():nameNode.EndByte()])
+			nodeID := g.MakeNodeID(filePath, name)
+			meta := buildLangMeta(declInfo[name])
+			if meta == nil {
+				meta = make(map[string]string, 1)
+			}
+			meta["kind"] = "annotation"
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeInterface,
+				Name:     name,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: isJavaPublicNode(n, src),
+				Metadata: meta,
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+
 		case "method_declaration":
 			nameNode := n.ChildByFieldName("name")
 			if nameNode == nil {
@@ -369,6 +443,36 @@ func (p *JavaParser) extractAllDeclarations(
 					g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
 				}
 			}
+		case "enum_constant":
+			// Java enum constant: enum Status { ACTIVE, INACTIVE, PENDING }
+			if enclosingClass == "" {
+				break
+			}
+			nameNode := firstChildOfType(n, "identifier")
+			if nameNode == nil {
+				break
+			}
+			constName := string(src[nameNode.StartByte():nameNode.EndByte()])
+			qualName := enclosingClass + "." + constName
+			nodeID := g.MakeNodeID(filePath, qualName)
+			if g.GetNode(nodeID) != nil {
+				break
+			}
+			enumMeta := map[string]string{"kind": "enum_constant"}
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeMethod,
+				Name:     qualName,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: true, // enum constants are always public
+				Metadata: enumMeta,
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			classID := g.MakeNodeID(filePath, enclosingClass)
+			if g.GetNode(classID) != nil {
+				g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
+			}
 		}
 		for i := 0; i < int(n.ChildCount()); i++ {
 			walk(n.Child(i), enclosingClass)
@@ -377,37 +481,45 @@ func (p *JavaParser) extractAllDeclarations(
 	walk(root, "")
 }
 
-// collectJavaCallSites walks the AST and adds call sites for method invocations
-// and function/constructor calls.
-func collectJavaCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
-	// Method invocations: obj.method(...)
-	methodCallQuery := `(method_invocation name: (identifier) @callee)`
-	_ = runQuery(lang, root, src, methodCallQuery, func(captures map[string]string, _ int) {
-		callee := captures["callee"]
-		if callee == "" || isJavaBuiltin(callee) {
-			return
-		}
-		g.AddCallSite(graph.CallSite{
-			CallerID:   fileNodeID,
-			CallerFile: filePath,
-			FuncName:   callee,
-			PkgAlias:   "",
-		})
-	})
-
-	// Object creation: new ClassName(...)
-	objectCreationQuery := `(object_creation_expression type: (type_identifier) @type_name)`
-	_ = runQuery(lang, root, src, objectCreationQuery, func(captures map[string]string, _ int) {
-		typeName := captures["type_name"]
-		if typeName == "" || isJavaBuiltin(typeName) {
-			return
-		}
-		g.AddCallSite(graph.CallSite{
-			CallerID:   fileNodeID,
-			CallerFile: filePath,
-			FuncName:   typeName,
-			PkgAlias:   "",
-		})
+// collectJavaCallSites performs a depth-first AST walk to collect call sites
+// with function-level caller resolution.
+func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
+		ClassTypes: map[string]bool{
+			"class_declaration":          true,
+			"interface_declaration":      true,
+			"enum_declaration":           true,
+			"record_declaration":         true,
+			"annotation_type_declaration": true,
+		},
+		FuncTypes: map[string]bool{
+			"method_declaration":      true,
+			"constructor_declaration": true,
+		},
+		CallTypes: map[string]bool{
+			"method_invocation":        true,
+			"object_creation_expression": true,
+		},
+		NameExtractor: func(n *sitter.Node, src []byte) string {
+			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+				return string(src[nameNode.StartByte():nameNode.EndByte()])
+			}
+			return ""
+		},
+		CalleeExtractor: func(n *sitter.Node, src []byte) string {
+			switch n.Type() {
+			case "method_invocation":
+				if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+					return string(src[nameNode.StartByte():nameNode.EndByte()])
+				}
+			case "object_creation_expression":
+				if typeNode := n.ChildByFieldName("type"); typeNode != nil {
+					return string(src[typeNode.StartByte():typeNode.EndByte()])
+				}
+			}
+			return ""
+		},
+		IsBuiltin: isJavaBuiltin,
 	})
 }
 
