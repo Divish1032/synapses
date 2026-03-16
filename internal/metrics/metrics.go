@@ -5,6 +5,7 @@ package metrics
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -559,6 +560,81 @@ func EnrichBlameForFile(g *graph.Graph, repoRoot, absFile string) {
 		}
 		score := daysAgo * math.Log(1+churn)
 		n.Metadata["staleness_score"] = fmt.Sprintf("%.1f", score)
+	}
+}
+
+// EnrichCommitContext annotates every function/method node with the last 3
+// commit messages that touched its file. The subjects are stored as a JSON
+// array in metadata["commit_context"] so they can be parsed and rendered at
+// query time without a git subprocess.
+//
+// Uses per-file granularity (one git log call per unique file, same as
+// EnrichBlame) for performance. Nodes in vendored/generated paths are skipped.
+// Git errors are silently ignored — the graph remains usable without commit data.
+func EnrichCommitContext(g *graph.Graph, repoRoot string) {
+	// Per-file cache: absFile → marshaled JSON (empty string = no data for file).
+	cache := make(map[string]string)
+	seen := make(map[string]bool)
+
+	for _, n := range g.AllNodes() {
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
+			continue
+		}
+
+		absFile := n.File
+		if !seen[absFile] {
+			seen[absFile] = true
+			commits := RecentCommitsForFile(repoRoot, absFile, 3)
+			if len(commits) > 0 {
+				if raw, err := json.Marshal(commits); err == nil {
+					cache[absFile] = string(raw)
+				}
+			}
+		}
+		raw := cache[absFile]
+		if raw == "" {
+			continue
+		}
+		if n.Metadata == nil {
+			n.Metadata = make(map[string]string)
+		}
+		n.Metadata["commit_context"] = raw
+	}
+}
+
+// EnrichCommitContextForFile updates commit context metadata for all
+// function/method nodes in a single file. Called by the watcher after a file
+// is re-parsed to keep commit data current without re-enriching the full graph.
+// It is a no-op when git is unavailable, when the file has no commits, or when
+// no function/method nodes exist in the file.
+func EnrichCommitContextForFile(g *graph.Graph, repoRoot, absFile string) {
+	nodes := g.NodesForFile(absFile)
+	if len(nodes) == 0 {
+		return
+	}
+	commits := RecentCommitsForFile(repoRoot, absFile, 3)
+	if len(commits) == 0 {
+		return
+	}
+	raw, err := json.Marshal(commits)
+	if err != nil {
+		return
+	}
+	encoded := string(raw)
+	for _, n := range nodes {
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
+			continue
+		}
+		if n.Metadata == nil {
+			n.Metadata = make(map[string]string)
+		}
+		n.Metadata["commit_context"] = encoded
 	}
 }
 

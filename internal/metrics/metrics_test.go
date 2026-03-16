@@ -1,6 +1,7 @@
 package metrics_test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -497,6 +498,160 @@ example.com/proj/pkg/svc.go:20.1,29.1 2 0
 			if n.Metadata["coverage"] != "0.50" {
 				t.Errorf("Serve partial coverage = %q, want 0.50", n.Metadata["coverage"])
 			}
+		}
+	}
+}
+
+// --- EnrichCommitContext tests ---
+
+func TestEnrichCommitContext_NoGitRepo(t *testing.T) {
+	// EnrichCommitContext on a non-git directory should silently do nothing.
+	g := buildMetricsGraph(t, t.TempDir())
+	metrics.EnrichCommitContext(g, t.TempDir())
+
+	for _, n := range g.AllNodes() {
+		if n.Metadata != nil && n.Metadata["commit_context"] != "" {
+			t.Errorf("node %s got commit_context=%q but repo has no git history", n.Name, n.Metadata["commit_context"])
+		}
+	}
+}
+
+func TestEnrichCommitContext_WithGitRepo(t *testing.T) {
+	repoRoot := t.TempDir()
+	srcFile := filepath.Join(repoRoot, "pkg/svc.go")
+	if !initGitRepo(t, repoRoot, map[string]string{
+		"pkg/svc.go": "package pkg\nfunc Serve() {}\nfunc Stop() {}\n",
+	}) {
+		return
+	}
+
+	g := graph.New("testrepo")
+	g.SetRoot(repoRoot)
+	for _, name := range []string{"Serve", "Stop"} {
+		id := g.MakeNodeID(srcFile, name)
+		g.AddNode(&graph.Node{
+			ID:      id,
+			Type:    graph.NodeFunction,
+			Name:    name,
+			Package: "pkg",
+			File:    srcFile,
+			Line:    2,
+		})
+	}
+
+	metrics.EnrichCommitContext(g, repoRoot)
+
+	for _, n := range g.AllNodes() {
+		if n.Type != graph.NodeFunction {
+			continue
+		}
+		raw := n.Metadata["commit_context"]
+		if raw == "" {
+			t.Errorf("node %s: commit_context not set", n.Name)
+			continue
+		}
+		var commits []metrics.CommitInfo
+		if err := json.Unmarshal([]byte(raw), &commits); err != nil {
+			t.Errorf("node %s: commit_context is not valid JSON: %v", n.Name, err)
+			continue
+		}
+		if len(commits) == 0 {
+			t.Errorf("node %s: commit_context has 0 commits", n.Name)
+			continue
+		}
+		if commits[0].Message == "" {
+			t.Errorf("node %s: commits[0].Message is empty", n.Name)
+		}
+		if commits[0].Hash == "" {
+			t.Errorf("node %s: commits[0].Hash is empty", n.Name)
+		}
+	}
+}
+
+func TestEnrichCommitContext_SkipsVendored(t *testing.T) {
+	repoRoot := t.TempDir()
+	srcFile := filepath.Join(repoRoot, "vendor/pkg/svc.go")
+	if !initGitRepo(t, repoRoot, map[string]string{
+		"vendor/pkg/svc.go": "package pkg\nfunc Serve() {}\n",
+	}) {
+		return
+	}
+
+	g := graph.New("testrepo")
+	g.SetRoot(repoRoot)
+	id := g.MakeNodeID(srcFile, "Serve")
+	g.AddNode(&graph.Node{
+		ID:         id,
+		Type:       graph.NodeFunction,
+		Name:       "Serve",
+		Package:    "pkg",
+		File:       srcFile,
+		Line:       2,
+		Provenance: graph.ProvenanceVendored,
+	})
+
+	metrics.EnrichCommitContext(g, repoRoot)
+
+	for _, n := range g.AllNodes() {
+		if n.Metadata != nil && n.Metadata["commit_context"] != "" {
+			t.Errorf("vendored node %s got commit_context — should be skipped", n.Name)
+		}
+	}
+}
+
+func TestEnrichCommitContextForFile_UpdatesOnlyTargetFile(t *testing.T) {
+	repoRoot := t.TempDir()
+	srcFile := filepath.Join(repoRoot, "pkg/svc.go")
+	otherFile := filepath.Join(repoRoot, "pkg/other.go")
+	if !initGitRepo(t, repoRoot, map[string]string{
+		"pkg/svc.go":   "package pkg\nfunc Serve() {}\n",
+		"pkg/other.go": "package pkg\nfunc Other() {}\n",
+	}) {
+		return
+	}
+
+	g := graph.New("testrepo")
+	g.SetRoot(repoRoot)
+	for _, tc := range []struct{ file, name string }{
+		{srcFile, "Serve"},
+		{otherFile, "Other"},
+	} {
+		id := g.MakeNodeID(tc.file, tc.name)
+		g.AddNode(&graph.Node{
+			ID:      id,
+			Type:    graph.NodeFunction,
+			Name:    tc.name,
+			Package: "pkg",
+			File:    tc.file,
+			Line:    2,
+		})
+	}
+
+	// Only enrich svc.go — Other in other.go should remain unset.
+	metrics.EnrichCommitContextForFile(g, repoRoot, srcFile)
+
+	for _, n := range g.AllNodes() {
+		switch n.Name {
+		case "Serve":
+			if n.Metadata == nil || n.Metadata["commit_context"] == "" {
+				t.Error("Serve: commit_context not set after EnrichCommitContextForFile")
+			}
+		case "Other":
+			if n.Metadata != nil && n.Metadata["commit_context"] != "" {
+				t.Error("Other: commit_context should not be set (different file)")
+			}
+		}
+	}
+}
+
+func TestEnrichCommitContextForFile_NoGitRepo(t *testing.T) {
+	g := buildMetricsGraph(t, t.TempDir())
+	// Must not panic or set any commit_context fields.
+	metrics.EnrichCommitContextForFile(g, t.TempDir(), filepath.Join(t.TempDir(), "pkg/svc.go"))
+
+	for _, n := range g.AllNodes() {
+		if n.Metadata != nil && n.Metadata["commit_context"] != "" {
+			t.Errorf("node %s got commit_context — no git repo", n.Name)
 		}
 	}
 }

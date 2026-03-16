@@ -381,6 +381,8 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// current without re-running git against the entire graph.
 	if root := w.graph.Root(); root != "" {
 		metrics.EnrichBlameForFile(w.graph, root, path)
+		// R34: re-enrich commit context for the changed file.
+		metrics.EnrichCommitContextForFile(w.graph, root, path)
 	}
 
 	w.graph.InvalidateCacheForFile(path)

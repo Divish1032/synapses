@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -47,6 +48,22 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 				fmt.Fprintf(&b, "⚑ @%s, %s: %q — staleness: %s\n", author, age, subject, staleness)
 			} else if age != "" {
 				fmt.Fprintf(&b, "⚑ @%s, %s — staleness: %s\n", author, age, staleness)
+			}
+		}
+	}
+
+	// R34: Commit context — the "why" layer: last 3 commit subjects for this function.
+	if cc := dc.Root.Metadata["commit_context"]; cc != "" {
+		var commits []metrics.CommitInfo
+		if json.Unmarshal([]byte(cc), &commits) == nil && len(commits) > 0 {
+			subjects := make([]string, 0, len(commits))
+			for _, c := range commits {
+				if c.Message != "" {
+					subjects = append(subjects, fmt.Sprintf("%q", c.Message))
+				}
+			}
+			if len(subjects) > 0 {
+				fmt.Fprintf(&b, "📝 last changes: %s\n", strings.Join(subjects, " · "))
 			}
 		}
 	}

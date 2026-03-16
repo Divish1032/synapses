@@ -955,6 +955,8 @@ func enrichMetricsIfEnabled(g *graph.Graph, root string, cfg *config.Config) {
 	metrics.EnrichChurn(g, root, days)
 	// R3: blame must run after churn — staleness_score reads metadata["churn"].
 	metrics.EnrichBlame(g, root)
+	// R34: commit context — the "why" layer (last 3 commit subjects per function).
+	metrics.EnrichCommitContext(g, root)
 
 	if cfg.CoverageProfile != "" {
 		metrics.EnrichCoverage(g, root, cfg.CoverageProfile)
