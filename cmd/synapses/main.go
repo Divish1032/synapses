@@ -93,6 +93,8 @@ func run(args []string) error {
 	case "version", "--version", "-v":
 		fmt.Printf("synapses %s\n", version)
 		return nil
+	case "brain":
+		return cmdBrain(args[1:])
 	case "setup":
 		return cmdSetup(args[1:])
 	case "mcp-setup":
@@ -2390,6 +2392,7 @@ INDEX COMMANDS:
   reset     -all          Remove ALL cached indexes
 
 SETUP COMMANDS:
+  brain setup               Pull qwen3.5:2b + register all 5 AI tier identities
   mcp-setup -agent <name>   Write MCP config for the specified agent
   init      -path <dir>     [deprecated] Index + write MCP config (use Synapses app instead)
 
