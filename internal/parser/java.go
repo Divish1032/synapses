@@ -4,7 +4,6 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
-	"unicode"
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/java"
@@ -13,42 +12,70 @@ import (
 )
 
 // extractJavaDeclInfo walks the Java AST collecting metadata for method,
-// class, interface, and enum declarations. Java line comments use "//".
+// constructor, class, interface, enum, and record declarations.
+// Method names are class-qualified (ClassName.methodName).
 func extractJavaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
 
-	var walk func(n *sitter.Node, depth int)
-	walk = func(n *sitter.Node, depth int) {
-		if n == nil || depth > 6 {
+	var walk func(n *sitter.Node, enclosingClass string, depth int)
+	walk = func(n *sitter.Node, enclosingClass string, depth int) {
+		if n == nil || depth > 8 {
 			return
 		}
 		switch n.Type() {
 		case "method_declaration":
 			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
+				qualName := name
+				if enclosingClass != "" {
+					qualName = enclosingClass + "." + name
+				}
 				sl := int(n.StartPoint().Row) + 1
-				result[name] = declMeta{
-					Signature: extractSigToBody(n, src),
-					Doc:       extractLineDoc(lines, sl, "//"),
+				result[qualName] = declMeta{
+					Signature: extractSigToBodyMulti(n, src, []string{"block"}),
+					Doc:       extractDocMulti(lines, sl, "//"),
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 			}
-		case "class_declaration", "interface_declaration", "enum_declaration":
+		case "constructor_declaration":
 			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
+				qualName := name
+				if enclosingClass != "" {
+					qualName = enclosingClass + ".constructor"
+				}
 				sl := int(n.StartPoint().Row) + 1
-				result[name] = declMeta{
-					Doc:       extractLineDoc(lines, sl, "//"),
+				result[qualName] = declMeta{
+					Signature: extractSigToBodyMulti(n, src, []string{"constructor_body", "block"}),
+					Doc:       extractDocMulti(lines, sl, "//"),
+					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
+				}
+				_ = name // suppress unused
+			}
+		case "class_declaration", "interface_declaration", "enum_declaration", "record_declaration":
+			className := ""
+			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+				className = string(src[nameNode.StartByte():nameNode.EndByte()])
+				sl := int(n.StartPoint().Row) + 1
+				result[className] = declMeta{
+					Doc:       extractDocMulti(lines, sl, "//"),
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 			}
+			// Walk body with class context.
+			if body := n.ChildByFieldName("body"); body != nil {
+				for i := 0; i < int(body.ChildCount()); i++ {
+					walk(body.Child(i), className, depth+1)
+				}
+			}
+			return
 		}
 		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i), depth+1)
+			walk(n.Child(i), enclosingClass, depth+1)
 		}
 	}
-	walk(root, 0)
+	walk(root, "", 0)
 	return result
 }
 
@@ -67,8 +94,42 @@ func (p *JavaParser) Extensions() []string {
 	return []string{".java"}
 }
 
+// isJavaPublicNode checks if a declaration node has the "public" modifier
+// by inspecting its modifier children. Falls back to true for top-level
+// declarations (Java default package-private is still accessible within package).
+func isJavaPublicNode(n *sitter.Node, src []byte) bool {
+	if n == nil {
+		return false
+	}
+	// Check for modifiers child.
+	modifiers := n.ChildByFieldName("modifiers")
+	if modifiers == nil {
+		// Try finding a "modifiers" node among children.
+		for i := 0; i < int(n.ChildCount()); i++ {
+			child := n.Child(i)
+			if child != nil && child.Type() == "modifiers" {
+				modifiers = child
+				break
+			}
+		}
+	}
+	if modifiers != nil {
+		for i := 0; i < int(modifiers.ChildCount()); i++ {
+			mod := modifiers.Child(i)
+			if mod != nil {
+				text := string(src[mod.StartByte():mod.EndByte()])
+				if text == "public" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	// No modifiers — default is package-private; treat as exported for graph purposes.
+	return true
+}
+
 // Parse extracts code entities from a single Java file and merges them into the graph.
-// Captured constructs: import declarations, class/interface/enum declarations, method declarations.
 func (p *JavaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
@@ -87,6 +148,19 @@ func (p *JavaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 
 	lang := p.language
 	declInfo := extractJavaDeclInfo(root, src)
+
+	// --- package declaration ---
+	pkgQuery := `(package_declaration (scoped_identifier) @pkg_name)`
+	_ = runQuery(lang, root, src, pkgQuery, func(captures map[string]string, _ int) {
+		pkgName := captures["pkg_name"]
+		if pkgName == "" {
+			return
+		}
+		// Set the file node's package.
+		if fn := g.GetNode(fileNodeID); fn != nil {
+			fn.Package = pkgName
+		}
+	})
 
 	// --- import declarations ---
 	importQuery := `(import_declaration (scoped_identifier) @import_path)`
@@ -108,106 +182,248 @@ func (p *JavaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		return err
 	}
 
-	// --- class declarations ---
-	classQuery := `(class_declaration name: (identifier) @class_name)`
-	if err := runQuery(lang, root, src, classQuery, func(captures map[string]string, startLine int) {
-		name := captures["class_name"]
-		if name == "" {
-			return
-		}
-		nodeID := g.MakeNodeID(filePath, name)
-		g.AddNode(&graph.Node{
-			ID:       nodeID,
-			Type:     graph.NodeStruct,
-			Name:     name,
-			File:     filePath,
-			Line:     startLine,
-			Exported: isJavaPublic(name),
-			Metadata: buildLangMeta(declInfo[name]),
-		})
-		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-	}); err != nil {
-		return err
-	}
+	// --- All type and method declarations via AST walk (class-qualified) ---
+	p.extractAllDeclarations(g, root, src, filePath, fileNodeID, declInfo)
 
-	// --- interface declarations ---
-	ifaceQuery := `(interface_declaration name: (identifier) @iface_name)`
-	if err := runQuery(lang, root, src, ifaceQuery, func(captures map[string]string, startLine int) {
-		name := captures["iface_name"]
-		if name == "" {
-			return
-		}
-		nodeID := g.MakeNodeID(filePath, name)
-		g.AddNode(&graph.Node{
-			ID:       nodeID,
-			Type:     graph.NodeInterface,
-			Name:     name,
-			File:     filePath,
-			Line:     startLine,
-			Exported: isJavaPublic(name),
-			Metadata: buildLangMeta(declInfo[name]),
-		})
-		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-	}); err != nil {
-		return err
-	}
-
-	// --- enum declarations ---
-	enumQuery := `(enum_declaration name: (identifier) @enum_name)`
-	if err := runQuery(lang, root, src, enumQuery, func(captures map[string]string, startLine int) {
-		name := captures["enum_name"]
-		if name == "" {
-			return
-		}
-		nodeID := g.MakeNodeID(filePath, name)
-		g.AddNode(&graph.Node{
-			ID:       nodeID,
-			Type:     graph.NodeStruct,
-			Name:     name,
-			File:     filePath,
-			Line:     startLine,
-			Exported: isJavaPublic(name),
-			Metadata: buildLangMeta(declInfo[name]),
-		})
-		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-	}); err != nil {
-		return err
-	}
-
-	// --- method declarations ---
-	methodQuery := `(method_declaration name: (identifier) @method_name)`
-	if err := runQuery(lang, root, src, methodQuery, func(captures map[string]string, startLine int) {
-		name := captures["method_name"]
-		if name == "" {
-			return
-		}
-		nodeID := g.MakeNodeID(filePath, name)
-		g.AddNode(&graph.Node{
-			ID:       nodeID,
-			Type:     graph.NodeMethod,
-			Name:     name,
-			File:     filePath,
-			Line:     startLine,
-			Exported: isJavaPublic(name),
-			Metadata: buildLangMeta(declInfo[name]),
-		})
-		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-	}); err != nil {
-		return err
-	}
+	// --- Call sites ---
+	collectJavaCallSites(g, lang, root, src, filePath, fileNodeID)
 
 	return nil
 }
 
-// isJavaPublic returns true if the name starts with an uppercase letter.
-// Java's actual visibility is determined by the `public` keyword in the AST, but
-// querying modifiers requires a more complex Tree-sitter pattern. As a pragmatic
-// approximation: public-API identifiers in Java follow PascalCase (types) or
-// camelCase-starting-with-upper (rare), while private/package-private helpers
-// use camelCase starting with a lowercase letter.
-func isJavaPublic(name string) bool {
-	if name == "" {
-		return false
+// extractAllDeclarations walks the AST to extract classes, interfaces, enums,
+// records, methods, and constructors with proper class-qualification.
+func (p *JavaParser) extractAllDeclarations(
+	g *graph.Graph,
+	root *sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+	declInfo map[string]declMeta,
+) {
+	var walk func(n *sitter.Node, enclosingClass string)
+	walk = func(n *sitter.Node, enclosingClass string) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "class_declaration":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				break
+			}
+			name := string(src[nameNode.StartByte():nameNode.EndByte()])
+			nodeID := g.MakeNodeID(filePath, name)
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeStruct,
+				Name:     name,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: isJavaPublicNode(n, src),
+				Metadata: buildLangMeta(declInfo[name]),
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			// Walk body with class context.
+			if body := n.ChildByFieldName("body"); body != nil {
+				for i := 0; i < int(body.ChildCount()); i++ {
+					walk(body.Child(i), name)
+				}
+			}
+			return
+
+		case "interface_declaration":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				break
+			}
+			name := string(src[nameNode.StartByte():nameNode.EndByte()])
+			nodeID := g.MakeNodeID(filePath, name)
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeInterface,
+				Name:     name,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: isJavaPublicNode(n, src),
+				Metadata: buildLangMeta(declInfo[name]),
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			if body := n.ChildByFieldName("body"); body != nil {
+				for i := 0; i < int(body.ChildCount()); i++ {
+					walk(body.Child(i), name)
+				}
+			}
+			return
+
+		case "enum_declaration":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				break
+			}
+			name := string(src[nameNode.StartByte():nameNode.EndByte()])
+			nodeID := g.MakeNodeID(filePath, name)
+			meta := buildLangMeta(declInfo[name])
+			if meta == nil {
+				meta = make(map[string]string, 1)
+			}
+			meta["kind"] = "enum"
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeStruct,
+				Name:     name,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: isJavaPublicNode(n, src),
+				Metadata: meta,
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			if body := n.ChildByFieldName("body"); body != nil {
+				for i := 0; i < int(body.ChildCount()); i++ {
+					walk(body.Child(i), name)
+				}
+			}
+			return
+
+		case "record_declaration":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				break
+			}
+			name := string(src[nameNode.StartByte():nameNode.EndByte()])
+			nodeID := g.MakeNodeID(filePath, name)
+			meta := buildLangMeta(declInfo[name])
+			if meta == nil {
+				meta = make(map[string]string, 1)
+			}
+			meta["kind"] = "record"
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeStruct,
+				Name:     name,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: isJavaPublicNode(n, src),
+				Metadata: meta,
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			if body := n.ChildByFieldName("body"); body != nil {
+				for i := 0; i < int(body.ChildCount()); i++ {
+					walk(body.Child(i), name)
+				}
+			}
+			return
+
+		case "method_declaration":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				break
+			}
+			name := string(src[nameNode.StartByte():nameNode.EndByte()])
+			qualName := name
+			if enclosingClass != "" {
+				qualName = enclosingClass + "." + name
+			}
+			nodeID := g.MakeNodeID(filePath, qualName)
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeMethod,
+				Name:     qualName,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: isJavaPublicNode(n, src),
+				Metadata: buildLangMeta(declInfo[qualName]),
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			// Link class → method.
+			if enclosingClass != "" {
+				classID := g.MakeNodeID(filePath, enclosingClass)
+				if g.GetNode(classID) != nil {
+					g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
+				}
+			}
+
+		case "constructor_declaration":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				break
+			}
+			qualName := "constructor"
+			if enclosingClass != "" {
+				qualName = enclosingClass + ".constructor"
+			}
+			nodeID := g.MakeNodeID(filePath, qualName)
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeMethod,
+				Name:     qualName,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: isJavaPublicNode(n, src),
+				Metadata: buildLangMeta(declInfo[qualName]),
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			if enclosingClass != "" {
+				classID := g.MakeNodeID(filePath, enclosingClass)
+				if g.GetNode(classID) != nil {
+					g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
+				}
+			}
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			walk(n.Child(i), enclosingClass)
+		}
 	}
-	return unicode.IsUpper(rune(name[0]))
+	walk(root, "")
+}
+
+// collectJavaCallSites walks the AST and adds call sites for method invocations
+// and function/constructor calls.
+func collectJavaCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	// Method invocations: obj.method(...)
+	methodCallQuery := `(method_invocation name: (identifier) @callee)`
+	_ = runQuery(lang, root, src, methodCallQuery, func(captures map[string]string, _ int) {
+		callee := captures["callee"]
+		if callee == "" || isJavaBuiltin(callee) {
+			return
+		}
+		g.AddCallSite(graph.CallSite{
+			CallerID:   fileNodeID,
+			CallerFile: filePath,
+			FuncName:   callee,
+			PkgAlias:   "",
+		})
+	})
+
+	// Object creation: new ClassName(...)
+	objectCreationQuery := `(object_creation_expression type: (type_identifier) @type_name)`
+	_ = runQuery(lang, root, src, objectCreationQuery, func(captures map[string]string, _ int) {
+		typeName := captures["type_name"]
+		if typeName == "" || isJavaBuiltin(typeName) {
+			return
+		}
+		g.AddCallSite(graph.CallSite{
+			CallerID:   fileNodeID,
+			CallerFile: filePath,
+			FuncName:   typeName,
+			PkgAlias:   "",
+		})
+	})
+}
+
+// isJavaBuiltin returns true for common Java stdlib types/methods that should
+// not generate CALLS edges.
+func isJavaBuiltin(name string) bool {
+	switch name {
+	case "toString", "equals", "hashCode", "getClass", "notify", "notifyAll", "wait",
+		"clone", "finalize", "compareTo", "iterator", "size", "get", "put",
+		"add", "remove", "contains", "isEmpty", "clear", "toArray",
+		"println", "print", "printf", "format",
+		"valueOf", "parseInt", "parseDouble", "parseLong", "parseFloat",
+		"String", "Integer", "Long", "Double", "Float", "Boolean", "Byte",
+		"Character", "Short", "Object", "System", "Math", "Arrays", "Collections",
+		"List", "Map", "Set", "Optional", "Stream":
+		return true
+	}
+	return false
 }

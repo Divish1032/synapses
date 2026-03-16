@@ -13,14 +13,14 @@ import (
 )
 
 // extractTSDeclInfo walks the TypeScript/TSX AST and builds a name→declMeta map
-// for all function, class, interface, and type alias declarations.
+// for all function, class, interface, type alias, and enum declarations.
 func extractTSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
 
-	var walk func(n *sitter.Node, depth int)
-	walk = func(n *sitter.Node, depth int) {
-		if n == nil || depth > 5 {
+	var walk func(n *sitter.Node, enclosingClass string, depth int)
+	walk = func(n *sitter.Node, enclosingClass string, depth int) {
+		if n == nil || depth > 8 {
 			return
 		}
 		switch n.Type() {
@@ -29,36 +29,45 @@ func extractTSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
-					Signature: extractSigToBody(n, src),
-					Doc:       extractLineDoc(lines, sl, "//"),
+					Signature: extractSigToBodyMulti(n, src, []string{"statement_block", "block"}),
+					Doc:       extractDocMulti(lines, sl, "//"),
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 			}
 		case "method_definition":
 			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
+				qualName := name
+				if enclosingClass != "" {
+					qualName = enclosingClass + "." + name
+				}
 				sl := int(n.StartPoint().Row) + 1
-				result[name] = declMeta{
-					Signature: extractSigToBody(n, src),
-					Doc:       extractLineDoc(lines, sl, "//"),
+				result[qualName] = declMeta{
+					Signature: extractSigToBodyMulti(n, src, []string{"statement_block", "block"}),
+					Doc:       extractDocMulti(lines, sl, "//"),
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 			}
-		case "class_declaration":
+		case "class_declaration", "abstract_class_declaration":
+			className := ""
+			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+				className = string(src[nameNode.StartByte():nameNode.EndByte()])
+				sl := int(n.StartPoint().Row) + 1
+				result[className] = declMeta{
+					Doc:       extractDocMulti(lines, sl, "//"),
+					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
+				}
+			}
+			for i := 0; i < int(n.ChildCount()); i++ {
+				walk(n.Child(i), className, depth+1)
+			}
+			return
+		case "interface_declaration", "type_alias_declaration", "enum_declaration":
 			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
-					Doc:       extractLineDoc(lines, sl, "//"),
-					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
-				}
-			}
-		case "interface_declaration", "type_alias_declaration":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
-				name := string(src[nameNode.StartByte():nameNode.EndByte()])
-				sl := int(n.StartPoint().Row) + 1
-				result[name] = declMeta{
-					Doc:       extractLineDoc(lines, sl, "//"),
+					Doc:       extractDocMulti(lines, sl, "//"),
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 			}
@@ -72,17 +81,17 @@ func extractTSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 					name := string(src[nameNode.StartByte():nameNode.EndByte()])
 					sl := int(n.StartPoint().Row) + 1
 					result[name] = declMeta{
-						Doc:       extractLineDoc(lines, sl, "//"),
+						Doc:       extractDocMulti(lines, sl, "//"),
 						LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 					}
 				}
 			}
 		}
 		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i), depth+1)
+			walk(n.Child(i), enclosingClass, depth+1)
 		}
 	}
-	walk(root, 0)
+	walk(root, "", 0)
 	return result
 }
 
@@ -106,16 +115,7 @@ func (p *TypeScriptParser) Extensions() []string {
 }
 
 // Parse extracts code entities from a single TypeScript/TSX file and merges
-// them into the provided graph. The following constructs are captured:
-//
-//   - Import declarations     → IMPORTS edges
-//   - Function declarations   → NodeFunction
-//   - Arrow functions (named) → NodeFunction
-//   - Method definitions      → NodeMethod (inside classes)
-//   - Class declarations      → NodeStruct
-//   - Interface declarations  → NodeInterface
-//   - Type alias declarations → NodeInterface (treated as nominal types)
-//   - Call expressions        → call sites (resolved to CALLS edges by resolver)
+// them into the provided graph.
 func (p *TypeScriptParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	lang := p.langForFile(filePath)
 
@@ -125,10 +125,9 @@ func (p *TypeScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 	tree, _ := tsParser.ParseCtx(context.Background(), nil, src)
 	root := tree.RootNode()
 
-	// Module name = basename without extension (e.g. "pipeline" for pipeline.ts).
+	// Module name = basename without extension.
 	moduleName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
 
-	// File node.
 	fileNodeID := g.MakeNodeID(filePath, filePath)
 	g.AddNode(&graph.Node{
 		ID:      fileNodeID,
@@ -163,16 +162,12 @@ func (p *TypeScriptParser) extractDeclarations(
 	declInfo := extractTSDeclInfo(root, src)
 
 	// --- Import declarations ---
-	// import Foo from 'bar'       → string source
-	// import { X } from 'bar'    → string source
-	// import * as X from 'bar'   → string source
 	importQuery := `(import_statement source: (string (string_fragment) @import_path))`
 	if err := runQuery(lang, root, src, importQuery, func(captures map[string]string, _ int) {
 		importPath := captures["import_path"]
 		if importPath == "" {
 			return
 		}
-		// Use the full import path as Name so FindByPattern can match substrings.
 		importNodeID := g.MakeNodeID(importPath, importPath)
 		g.AddNode(&graph.Node{
 			ID:      importNodeID,
@@ -240,22 +235,32 @@ func (p *TypeScriptParser) extractDeclarations(
 		return err
 	}
 
-	// --- Method definitions (inside class bodies) ---
-	methodQuery := `(method_definition name: (property_identifier) @method_name)`
-	if err := runQuery(lang, root, src, methodQuery, func(captures map[string]string, startLine int) {
-		name := captures["method_name"]
-		if name == "" || name == "constructor" {
+	// --- Non-exported arrow/function expressions ---
+	nonExportArrowQuery := `
+(lexical_declaration
+  (variable_declarator
+    name: (identifier) @func_name
+    value: [(arrow_function) (function_expression)]
+  )
+)`
+	if err := runQuery(lang, root, src, nonExportArrowQuery, func(captures map[string]string, startLine int) {
+		name := captures["func_name"]
+		if name == "" {
+			return
+		}
+		// Skip if already captured by the export query.
+		if g.GetNode(g.MakeNodeID(filePath, name)) != nil {
 			return
 		}
 		nodeID := g.MakeNodeID(filePath, name)
 		g.AddNode(&graph.Node{
 			ID:       nodeID,
-			Type:     graph.NodeMethod,
+			Type:     graph.NodeFunction,
 			Name:     name,
 			Package:  moduleName,
 			File:     filePath,
 			Line:     startLine,
-			Exported: isExported(name),
+			Exported: false,
 			Metadata: buildLangMeta(declInfo[name]),
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
@@ -263,7 +268,7 @@ func (p *TypeScriptParser) extractDeclarations(
 		return err
 	}
 
-	// --- Class declarations ---
+	// --- Class declarations (including abstract) ---
 	classQuery := `(class_declaration name: (type_identifier) @class_name)`
 	if err := runQuery(lang, root, src, classQuery, func(captures map[string]string, startLine int) {
 		name := captures["class_name"]
@@ -280,6 +285,38 @@ func (p *TypeScriptParser) extractDeclarations(
 			Line:     startLine,
 			Exported: isExported(name),
 			Metadata: buildLangMeta(declInfo[name]),
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}); err != nil {
+		return err
+	}
+
+	// --- Abstract class declarations ---
+	abstractClassQuery := `(abstract_class_declaration name: (type_identifier) @class_name)`
+	if err := runQuery(lang, root, src, abstractClassQuery, func(captures map[string]string, startLine int) {
+		name := captures["class_name"]
+		if name == "" {
+			return
+		}
+		// Skip if already added by the regular class query.
+		nodeID := g.MakeNodeID(filePath, name)
+		if g.GetNode(nodeID) != nil {
+			return
+		}
+		meta := buildLangMeta(declInfo[name])
+		if meta == nil {
+			meta = make(map[string]string, 1)
+		}
+		meta["abstract"] = "true"
+		g.AddNode(&graph.Node{
+			ID:       nodeID,
+			Type:     graph.NodeStruct,
+			Name:     name,
+			Package:  moduleName,
+			File:     filePath,
+			Line:     startLine,
+			Exported: isExported(name),
+			Metadata: meta,
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 	}); err != nil {
@@ -309,7 +346,7 @@ func (p *TypeScriptParser) extractDeclarations(
 		return err
 	}
 
-	// --- Type alias declarations (treated as nominal types) ---
+	// --- Type alias declarations ---
 	typeQuery := `(type_alias_declaration name: (type_identifier) @type_name)`
 	if err := runQuery(lang, root, src, typeQuery, func(captures map[string]string, startLine int) {
 		name := captures["type_name"]
@@ -337,11 +374,101 @@ func (p *TypeScriptParser) extractDeclarations(
 		return err
 	}
 
-	// --- Call sites: direct calls foo() and method calls obj.method() ---
-	// Collected now and resolved into CALLS edges after all files are parsed.
+	// --- Enum declarations ---
+	enumQuery := `(enum_declaration name: (identifier) @enum_name)`
+	if err := runQuery(lang, root, src, enumQuery, func(captures map[string]string, startLine int) {
+		name := captures["enum_name"]
+		if name == "" {
+			return
+		}
+		nodeID := g.MakeNodeID(filePath, name)
+		meta := buildLangMeta(declInfo[name])
+		if meta == nil {
+			meta = make(map[string]string, 1)
+		}
+		meta["kind"] = "enum"
+		g.AddNode(&graph.Node{
+			ID:       nodeID,
+			Type:     graph.NodeStruct,
+			Name:     name,
+			Package:  moduleName,
+			File:     filePath,
+			Line:     startLine,
+			Exported: isExported(name),
+			Metadata: meta,
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}); err != nil {
+		return err
+	}
+
+	// --- Method definitions (class-qualified) ---
+	p.extractClassMethods(g, root, src, filePath, moduleName, fileNodeID, declInfo)
+
+	// --- Call sites ---
 	collectTSCallSites(g, lang, root, src, filePath, fileNodeID)
 
 	return nil
+}
+
+// extractClassMethods walks the AST to find method definitions inside class bodies
+// and creates class-qualified method nodes.
+func (p *TypeScriptParser) extractClassMethods(
+	g *graph.Graph,
+	root *sitter.Node,
+	src []byte,
+	filePath, moduleName string,
+	fileNodeID graph.NodeID,
+	declInfo map[string]declMeta,
+) {
+	var walk func(n *sitter.Node, enclosingClass string)
+	walk = func(n *sitter.Node, enclosingClass string) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "class_declaration", "abstract_class_declaration":
+			className := ""
+			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+				className = string(src[nameNode.StartByte():nameNode.EndByte()])
+			}
+			for i := 0; i < int(n.ChildCount()); i++ {
+				walk(n.Child(i), className)
+			}
+			return
+		case "method_definition":
+			if enclosingClass == "" {
+				break
+			}
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				break
+			}
+			name := string(src[nameNode.StartByte():nameNode.EndByte()])
+			qualName := enclosingClass + "." + name
+			nodeID := g.MakeNodeID(filePath, qualName)
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeMethod,
+				Name:     qualName,
+				Package:  moduleName,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: isExported(name),
+				Metadata: buildLangMeta(declInfo[qualName]),
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			// Link class → method
+			classID := g.MakeNodeID(filePath, enclosingClass)
+			if g.GetNode(classID) != nil {
+				g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
+			}
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			walk(n.Child(i), enclosingClass)
+		}
+	}
+	walk(root, "")
 }
 
 // collectTSCallSites walks the AST and adds call sites for function and method
@@ -394,7 +521,8 @@ func isTSBuiltin(name string) bool {
 		"JSON", "Math", "Date", "Object", "Array", "String", "Number", "Boolean",
 		"Symbol", "RegExp", "Error", "TypeError", "RangeError",
 		"parseInt", "parseFloat", "isNaN", "isFinite",
-		"now", "from", "of", "call", "apply", "bind":
+		"now", "from", "of", "call", "apply", "bind",
+		"require", "define":
 		return true
 	}
 	return false
