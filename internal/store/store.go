@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -644,7 +645,7 @@ func Open(path string) (*Store, error) {
 
 	// R32: Emit query plan stats when SYNAPSES_QUERY_STATS=1 is set. Non-fatal.
 	if os.Getenv("SYNAPSES_QUERY_STATS") == "1" {
-		st.CollectQueryStats()
+		st.CollectQueryStats(os.Stderr)
 	}
 
 	return st, nil
@@ -881,7 +882,8 @@ type QueryStats struct {
 // CollectQueryStats runs EXPLAIN QUERY PLAN on the four R32 hot queries and
 // returns a QueryStats summarising how many use an index vs full scan.
 // Call once at startup for observability; does not affect query execution.
-func (s *Store) CollectQueryStats() QueryStats {
+// Pass os.Stderr for production output or io.Discard to suppress output in tests.
+func (s *Store) CollectQueryStats(w io.Writer) QueryStats {
 	type probe struct {
 		label string
 		sql   string
@@ -920,7 +922,7 @@ func (s *Store) CollectQueryStats() QueryStats {
 			}
 			if strings.Contains(detail, "USING INDEX") || strings.Contains(detail, "USING COVERING INDEX") {
 				usesIndex = true
-				fmt.Fprintf(os.Stderr, "synapses: query_stats: %s — %s [hit]\n", p.label, detail)
+				fmt.Fprintf(w, "synapses: query_stats: %s — %s [hit]\n", p.label, detail)
 			}
 		}
 		rows.Close()
@@ -928,10 +930,10 @@ func (s *Store) CollectQueryStats() QueryStats {
 			stats.IndexHits++
 		} else {
 			stats.FullScans++
-			fmt.Fprintf(os.Stderr, "synapses: query_stats: %s — FULL SCAN (no index used)\n", p.label)
+			fmt.Fprintf(w, "synapses: query_stats: %s — FULL SCAN (no index used)\n", p.label)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "synapses: query_stats: summary — %d index hits, %d full scans\n",
+	fmt.Fprintf(w, "synapses: query_stats: summary — %d index hits, %d full scans\n",
 		stats.IndexHits, stats.FullScans)
 	return stats
 }
@@ -2369,6 +2371,12 @@ func (s *Store) AppendEvent(typ, agentID, payload string) error {
 	}
 	// Prune old events (bounded table).
 	if _, err := tx.Exec(`DELETE FROM events WHERE created_at < ?`, cutoff); err != nil {
+		return err
+	}
+	// Prune globally expired watched symbols. WatchSymbol only prunes per-agent inline,
+	// so agents who stopped connecting would leave orphaned rows forever without this.
+	watchCutoff := now.Add(-30 * time.Minute).Format(time.RFC3339)
+	if _, err := tx.Exec(`DELETE FROM agent_watched_symbols WHERE watched_at < ?`, watchCutoff); err != nil {
 		return err
 	}
 	return tx.Commit()

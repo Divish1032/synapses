@@ -507,7 +507,9 @@ func (s *Server) handleGetContext(
 	// If a cached packet exists, attach it (fast path). Otherwise, kick off background
 	// enrichment so the next get_context call for this entity picks up the enriched version.
 	if bc := s.getBrainClient(); bc != nil {
-		cacheKey := fmt.Sprintf("%s:%d", entityName, cfg.MaxDepth)
+		// R1: include includeInferred in cache key — a packet built from filtered
+		// callees must not be served for an unfiltered request (different content).
+		cacheKey := fmt.Sprintf("%s:%d:%v", entityName, cfg.MaxDepth, includeInferred)
 		if cached := s.getPacketFromCache(cacheKey); cached != nil {
 			dc.ContextPacket = cached.(*brain.ContextPacket)
 		} else {
@@ -745,17 +747,20 @@ func (s *Server) handleGetContext(
 		time.Since(handlerStart).Milliseconds(),
 	)
 
-	// Multi-agent awareness: fire-and-forget event emission.
-	if agentID != "" && s.store != nil {
+	// Multi-agent awareness: fire-and-forget event so peers can see this via get_peer_activity.
+	// Uses agentIDForFeedback (same value as agentID when provided). upsertAgentWithActivity
+	// is NOT called here — it already ran synchronously above in the WatchSymbol block with
+	// the full Focus+FocusFile+FocusSince payload, making a second call redundant.
+	if agentIDForFeedback != "" && s.store != nil {
+		relFileForEvent := strings.TrimPrefix(best.File, s.graph.Root()+"/")
 		go func() {
 			payload, _ := json.Marshal(map[string]string{
 				"entity": entityName,
-				"file":   best.File,
+				"file":   relFileForEvent, // repo-relative, consistent with agent_watched_symbols
 			})
-			if err := s.store.AppendEvent("agent_examining", agentID, string(payload)); err != nil {
+			if err := s.store.AppendEvent("agent_examining", agentIDForFeedback, string(payload)); err != nil {
 				log.Printf("mcp: append agent_examining event: %v", err)
 			}
-			s.upsertAgentWithActivity(agentID, &store.AgentActivity{Focus: entityName})
 		}()
 	}
 
