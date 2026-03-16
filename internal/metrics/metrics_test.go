@@ -347,6 +347,190 @@ func TestEnrichBlame_StalenessScore_UsesChurn(t *testing.T) {
 	}
 }
 
+// TestEnrichBlame_UmbrellaWorkspace verifies that EnrichBlame succeeds when
+// repoRoot is an umbrella workspace directory (no .git) that contains a
+// git sub-repo in a subdirectory. This is the root cause of BUG-EVAL-6:
+// passing the umbrella root to git -C fails with "not a git repository",
+// so blame was silently absent from every get_context response.
+func TestEnrichBlame_UmbrellaWorkspace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// umbrella/ (no .git) ← repoRoot passed to EnrichBlame
+	//   └── subpkg/       (has .git)
+	umbrella := t.TempDir()
+	subpkg := filepath.Join(umbrella, "subpkg")
+	if err := os.MkdirAll(subpkg, 0o755); err != nil {
+		t.Fatalf("mkdir subpkg: %v", err)
+	}
+
+	srcFile := filepath.Join(subpkg, "svc.go")
+	if !initGitRepo(t, subpkg, map[string]string{
+		"svc.go": "package subpkg\nfunc Handle() {}\n",
+	}) {
+		return
+	}
+
+	g := graph.New("testrepo")
+	g.SetRoot(umbrella)
+	id := g.MakeNodeID(srcFile, "Handle")
+	g.AddNode(&graph.Node{
+		ID:      id,
+		Type:    graph.NodeFunction,
+		Name:    "Handle",
+		Package: "subpkg",
+		File:    srcFile,
+		Line:    2,
+	})
+
+	// Pass the umbrella root — not a git repo itself.
+	metrics.EnrichBlame(g, umbrella)
+
+	for _, n := range g.AllNodes() {
+		if n.Type != graph.NodeFunction {
+			continue
+		}
+		if n.Metadata["blame_author"] == "" {
+			t.Errorf("node %s: blame_author not set — umbrella workspace git root detection failed", n.Name)
+		}
+		if n.Metadata["blame_date"] == "" {
+			t.Errorf("node %s: blame_date not set", n.Name)
+		}
+		if n.Metadata["staleness_score"] == "" {
+			t.Errorf("node %s: staleness_score not set", n.Name)
+		}
+	}
+}
+
+// initGitRepoNow creates a minimal git repo in dir with one commit using the
+// current timestamp, so churn queries with --since=N.days.ago include it.
+// Returns true if git is available and setup succeeded.
+func initGitRepoNow(t *testing.T, dir string, files map[string]string) bool {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+		return false
+	}
+	run := func(args ...string) bool {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1")
+		if err := cmd.Run(); err != nil {
+			t.Logf("git %v: %v", args, err)
+			return false
+		}
+		return true
+	}
+	if !run("init", "-b", "main") {
+		if !run("init") {
+			return false
+		}
+	}
+	run("config", "user.email", "alice@example.com")
+	run("config", "user.name", "Alice")
+	for name, content := range files {
+		full := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		run("add", name)
+	}
+	run("commit", "-m", "fix: initial setup")
+	return true
+}
+
+// TestEnrichChurn_UmbrellaWorkspace verifies that EnrichChurn populates churn
+// data for nodes in a git sub-repo when repoRoot is a non-git umbrella dir.
+func TestEnrichChurn_UmbrellaWorkspace(t *testing.T) {
+	umbrella := t.TempDir()
+	subpkg := filepath.Join(umbrella, "subpkg")
+	if err := os.MkdirAll(subpkg, 0o755); err != nil {
+		t.Fatalf("mkdir subpkg: %v", err)
+	}
+
+	srcFile := filepath.Join(subpkg, "svc.go")
+	// Use initGitRepoNow (current timestamp) so the commit falls within the
+	// 30-day churn window.
+	if !initGitRepoNow(t, subpkg, map[string]string{
+		"svc.go": "package subpkg\nfunc Handle() {}\n",
+	}) {
+		return
+	}
+
+	g := graph.New("testrepo")
+	g.SetRoot(umbrella)
+	id := g.MakeNodeID(srcFile, "Handle")
+	g.AddNode(&graph.Node{
+		ID:      id,
+		Type:    graph.NodeFunction,
+		Name:    "Handle",
+		Package: "subpkg",
+		File:    srcFile,
+		Line:    2,
+	})
+
+	metrics.EnrichChurn(g, umbrella, 30)
+
+	found := false
+	for _, n := range g.AllNodes() {
+		if n.Type == graph.NodeFunction && n.Metadata["churn"] != "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no churn data set for any node — umbrella workspace git root detection failed")
+	}
+}
+
+// TestEnrichCommitContext_UmbrellaWorkspace verifies commit_context metadata
+// is populated when repoRoot is a non-git umbrella workspace directory.
+func TestEnrichCommitContext_UmbrellaWorkspace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	umbrella := t.TempDir()
+	subpkg := filepath.Join(umbrella, "subpkg")
+	if err := os.MkdirAll(subpkg, 0o755); err != nil {
+		t.Fatalf("mkdir subpkg: %v", err)
+	}
+
+	srcFile := filepath.Join(subpkg, "svc.go")
+	if !initGitRepo(t, subpkg, map[string]string{
+		"svc.go": "package subpkg\nfunc Handle() {}\n",
+	}) {
+		return
+	}
+
+	g := graph.New("testrepo")
+	g.SetRoot(umbrella)
+	id := g.MakeNodeID(srcFile, "Handle")
+	g.AddNode(&graph.Node{
+		ID:      id,
+		Type:    graph.NodeFunction,
+		Name:    "Handle",
+		Package: "subpkg",
+		File:    srcFile,
+		Line:    2,
+	})
+
+	metrics.EnrichCommitContext(g, umbrella)
+
+	found := false
+	for _, n := range g.AllNodes() {
+		if n.Type == graph.NodeFunction && n.Metadata["commit_context"] != "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no commit_context data set for any node — umbrella workspace git root detection failed")
+	}
+}
+
 func TestEnrichBlameForFile_UpdatesOnlyTargetFile(t *testing.T) {
 	repoRoot := t.TempDir()
 	srcFile := filepath.Join(repoRoot, "pkg/svc.go")

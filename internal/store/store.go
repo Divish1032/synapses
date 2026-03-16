@@ -1266,9 +1266,11 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		if len(staleIDs) > 0 {
 			_ = s.MarkAnnotationsStale(staleIDs)
 			// AM-2: cascade stale flag to any memories anchored to these structurally-changed nodes.
-			// Error discarded intentionally — this goroutine is fire-and-forget post-save; a failure
-			// here is non-fatal (stale memories will be re-detected on next session via AM-3).
+			// Gap-4 fix: also stale entity-tier memories written with entity_id but no anchor_nodes.
+			// Both calls are fire-and-forget — failures are non-fatal; stale memories will be
+			// re-detected on next session via AM-3.
 			_ = s.MarkAnchoredMemoriesStale(staleIDs, "anchor node structural change (fanin delta >20%)")
+			_ = s.MarkEntityMemoriesStaleForNodes(staleIDs, "entity node structural change (fanin delta >20%)")
 		}
 	}()
 

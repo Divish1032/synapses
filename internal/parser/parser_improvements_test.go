@@ -50,17 +50,18 @@ end
 		t.Errorf("expected behaviours=GenServer on module, got %v", modNode.Metadata)
 	}
 
-	// Virtual callbacks should be injected
+	// Virtual callbacks should be injected as module-qualified names.
 	for _, cb := range []string{"handle_call", "handle_cast", "handle_info", "terminate"} {
-		cbID := g.MakeNodeID("worker.ex", cb)
+		qualName := "MyApp.Worker." + cb
+		cbID := g.MakeNodeID("worker.ex", qualName)
 		if g.GetNode(cbID) == nil {
-			t.Errorf("expected virtual callback %q to be injected", cb)
+			t.Errorf("expected virtual callback %q to be injected", qualName)
 		} else if g.GetNode(cbID).Metadata == nil || g.GetNode(cbID).Metadata["kind"] != "behaviour_callback" {
-			t.Errorf("callback %q missing kind=behaviour_callback, got %v", cb, g.GetNode(cbID).Metadata)
+			t.Errorf("callback %q missing kind=behaviour_callback, got %v", qualName, g.GetNode(cbID).Metadata)
 		}
 	}
 
-	// init/1 was explicitly defined — should not be duplicated
+	// init/1 was explicitly defined — should not be duplicated (bare name retained).
 	count := 0
 	for _, n := range g.AllNodes() {
 		if n.Name == "init" {
@@ -87,20 +88,26 @@ end
 	}
 
 	for _, cb := range []string{"init", "call"} {
-		cbID := g.MakeNodeID("router.ex", cb)
+		qualName := "MyApp.Router." + cb
+		cbID := g.MakeNodeID("router.ex", qualName)
 		if g.GetNode(cbID) == nil {
-			t.Errorf("expected Plug.Router callback %q to be injected", cb)
+			t.Errorf("expected Plug.Router callback %q to be injected", qualName)
 		}
 	}
 }
 
 func TestElixir_OTPBehaviourCallbacks_PhoenixLiveView(t *testing.T) {
+	// Use a plain string body to avoid HEEx sigil parse issues with tree-sitter.
 	src := `
 defmodule MyAppWeb.CounterLive do
   use Phoenix.LiveView
 
   def render(assigns) do
-    ~H"""<div><%= @count %></div>"""
+    {:ok, assigns}
+  end
+
+  def mount(_params, _session, socket) do
+    {:ok, socket}
   end
 end
 `
@@ -109,22 +116,26 @@ end
 		t.Fatal(err)
 	}
 
-	for _, cb := range []string{"mount", "handle_event", "handle_info"} {
-		cbID := g.MakeNodeID("counter_live.ex", cb)
+	for _, cb := range []string{"handle_event", "handle_info"} {
+		qualName := "MyAppWeb.CounterLive." + cb
+		cbID := g.MakeNodeID("counter_live.ex", qualName)
 		if g.GetNode(cbID) == nil {
-			t.Errorf("expected LiveView callback %q to be injected", cb)
+			t.Errorf("expected LiveView callback %q to be injected", qualName)
 		}
 	}
 
-	// render was explicitly defined — must not be duplicated
-	count := 0
-	for _, n := range g.AllNodes() {
-		if n.Name == "render" {
-			count++
+	// render and mount were explicitly defined — must not be duplicated.
+	// Explicitly defined callbacks keep their bare name; no qualified virtual is created.
+	for _, name := range []string{"render", "mount"} {
+		count := 0
+		for _, n := range g.AllNodes() {
+			if n.Name == name {
+				count++
+			}
 		}
-	}
-	if count != 1 {
-		t.Errorf("expected exactly 1 'render' node, got %d", count)
+		if count != 1 {
+			t.Errorf("expected exactly 1 %q node, got %d", name, count)
+		}
 	}
 }
 

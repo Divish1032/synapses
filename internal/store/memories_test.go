@@ -229,19 +229,84 @@ func TestMarkEntityMemoriesStale(t *testing.T) {
 
 	st.InsertMemory(Memory{Tier: TierEntity, Content: "memory for a node that will be deleted", EntityID: "dead-node"})
 
-	err := st.MarkEntityMemoriesStale("dead-node")
+	err := st.MarkEntityMemoriesStale("dead-node", "entity node removed")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// The memory should still exist but with a shortened expiry (~30 days from now).
-	var expiresAt string
-	st.db.QueryRow(`SELECT expires_at FROM memories WHERE entity_id = ?`, "dead-node").Scan(&expiresAt)
-
+	// Must set stale=1 and stale_reason.
+	var stale int
+	var reason, expiresAt string
+	st.db.QueryRow(`SELECT stale, stale_reason, expires_at FROM memories WHERE entity_id = ?`, "dead-node").Scan(&stale, &reason, &expiresAt)
+	if stale != 1 {
+		t.Errorf("expected stale=1, got %d", stale)
+	}
+	if reason != "entity node removed" {
+		t.Errorf("unexpected stale_reason: %q", reason)
+	}
+	// TTL shortened to ~30 days.
 	exp, _ := time.Parse(time.RFC3339, expiresAt)
 	daysUntilExpiry := time.Until(exp).Hours() / 24
 	if daysUntilExpiry < 28 || daysUntilExpiry > 32 {
 		t.Errorf("expected ~30 days until expiry, got %.0f", daysUntilExpiry)
+	}
+}
+
+// TestMarkEntityMemoriesStaleForNodes_BatchCoversEntityIDMemories verifies that
+// entity-tier memories written with entity_id (no anchors) are staled by the
+// batch function — the Gap 4 fix.
+func TestMarkEntityMemoriesStaleForNodes_BatchCoversEntityIDMemories(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Three entity memories: two in the removed batch, one surviving.
+	id1, _ := st.InsertMemory(Memory{Tier: TierEntity, Content: "Store.Close serializes shutdown via reparseMu.", EntityID: "node-A", Source: SourceAuto})
+	id2, _ := st.InsertMemory(Memory{Tier: TierEntity, Content: "Graph.New allocates adjacency list structures.", EntityID: "node-B", Source: SourceAuto})
+	id3, _ := st.InsertMemory(Memory{Tier: TierEntity, Content: "Walker.ParseFile parses a single source file.", EntityID: "node-C", Source: SourceAuto})
+
+	err := st.MarkEntityMemoriesStaleForNodes([]string{"node-A", "node-B"}, "entity node removed")
+	if err != nil {
+		t.Fatalf("MarkEntityMemoriesStaleForNodes: %v", err)
+	}
+
+	check := func(id string, wantStale int) {
+		t.Helper()
+		var stale int
+		st.db.QueryRow(`SELECT stale FROM memories WHERE id = ?`, id).Scan(&stale)
+		if stale != wantStale {
+			t.Errorf("id=%s: expected stale=%d, got %d", id, wantStale, stale)
+		}
+	}
+	check(id1, 1) // removed — must be stale
+	check(id2, 1) // removed — must be stale
+	check(id3, 0) // surviving — must stay fresh
+}
+
+// TestMarkEntityMemoriesStaleForNodes_EmptyIsNoop ensures an empty slice does
+// not error or affect any rows.
+func TestMarkEntityMemoriesStaleForNodes_EmptyIsNoop(t *testing.T) {
+	st := openMemTestStore(t)
+	if err := st.MarkEntityMemoriesStaleForNodes(nil, "test"); err != nil {
+		t.Fatalf("expected nil error for empty slice, got %v", err)
+	}
+}
+
+// TestMarkEntityMemoriesStaleForNodes_NonEntityTierUntouched verifies that
+// project-tier and session-tier memories with a matching entity_id are NOT
+// staled — the function is scoped to tier='entity' only.
+func TestMarkEntityMemoriesStaleForNodes_NonEntityTierUntouched(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Project-tier memory with entity_id set (unusual but possible).
+	idProj, _ := st.InsertMemory(Memory{Tier: TierProject, Content: "Project-tier memory referencing a node.", EntityID: "node-X", AgentID: "a", Source: SourceManual, Tags: `[]`})
+
+	if err := st.MarkEntityMemoriesStaleForNodes([]string{"node-X"}, "entity node removed"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var stale int
+	st.db.QueryRow(`SELECT stale FROM memories WHERE id = ?`, idProj).Scan(&stale)
+	if stale != 0 {
+		t.Errorf("project-tier memory should be untouched, got stale=%d", stale)
 	}
 }
 
@@ -878,5 +943,89 @@ func TestSearchMemories_NoResults(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Errorf("expected 0 results for nonsense query, got %d", len(results))
+	}
+}
+
+// TestInsertMemory_Dedup_SkipsStaleMemories verifies that deduplication does NOT
+// match against stale (AM-2 invalidated) memories — Gap 2 fix.
+// Without the fix, a new write similar to a stale memory would call TouchMemory
+// on the stale ID, extending its TTL and resurrecting invalidated data.
+func TestInsertMemory_Dedup_SkipsStaleMemories(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Insert a memory, then mark it stale via a fake anchor cascade.
+	content := "Store.Close serializes shutdown through reparseMu lock."
+	id1, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: content, AgentID: "agent-z", Source: SourceAuto, Tags: `[]`,
+	})
+	if err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+
+	// Simulate AM-2 cascade: manually set stale=1 on the memory.
+	_, err = st.db.Exec(`UPDATE memories SET stale = 1, stale_reason = 'anchor node removed' WHERE id = ?`, id1)
+	if err != nil {
+		t.Fatalf("force stale: %v", err)
+	}
+
+	// Insert a semantically similar memory. Without Gap 2 fix this would dedup
+	// to id1 (the stale memory) and extend its TTL. With the fix it must get a
+	// new ID because stale memories are excluded from dedup candidates.
+	// Add one word to stay above 0.85 similarity threshold but still very close.
+	id2, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: content + " Confirmed.", AgentID: "agent-z", Source: SourceAuto, Tags: `[]`,
+	})
+	if err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+
+	if id1 == id2 {
+		t.Errorf("dedup matched a stale memory (id=%s) — stale memory was resurrected", id1)
+	}
+
+	// Verify id1 is still stale (TouchMemory was NOT called on it).
+	var stale int
+	st.db.QueryRow(`SELECT stale FROM memories WHERE id = ?`, id1).Scan(&stale)
+	if stale != 1 {
+		t.Errorf("stale memory should remain stale=1, got stale=%d", stale)
+	}
+}
+
+// TestMarkAnchoredMemoriesStale_LargeBatch verifies that batching works correctly
+// for nodeID slices exceeding SQLite's 999-variable limit — Gap 5 fix.
+func TestMarkAnchoredMemoriesStale_LargeBatch(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Insert one memory and anchor it to node "node-0".
+	id, err := st.InsertMemoryWithAnchors(
+		Memory{Tier: TierProject, Content: "Large batch test memory for variable limit.", AgentID: "a", Source: SourceAuto, Tags: `[]`},
+		[]string{"node-0"},
+	)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Build a nodeID slice of 600 entries (> 500 batch size, > 999/2).
+	// node-0 is the real anchor; the rest are phantom IDs that match nothing.
+	nodeIDs := make([]string, 600)
+	nodeIDs[0] = "node-0"
+	for i := 1; i < 600; i++ {
+		nodeIDs[i] = strings.Repeat("x", 10) + string(rune('a'+i%26)) // unique phantoms
+	}
+
+	// Must not fail with "too many SQL variables".
+	if err := st.MarkAnchoredMemoriesStale(nodeIDs, "large batch test"); err != nil {
+		t.Fatalf("MarkAnchoredMemoriesStale with 600 nodes: %v", err)
+	}
+
+	// Memory anchored to node-0 must be stale.
+	var stale int
+	var reason string
+	st.db.QueryRow(`SELECT stale, stale_reason FROM memories WHERE id = ?`, id).Scan(&stale, &reason)
+	if stale != 1 {
+		t.Errorf("expected stale=1, got %d", stale)
+	}
+	if reason != "large batch test" {
+		t.Errorf("unexpected stale_reason: %q", reason)
 	}
 }

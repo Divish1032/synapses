@@ -18,26 +18,99 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
+// gitRootForDir returns the absolute path of the git repository root that
+// contains dir, or "" when dir is not inside any git repository.
+// Uses 'git rev-parse --show-toplevel' — errors are silently ignored.
+// The returned path has symlinks resolved (via filepath.EvalSymlinks) so that
+// TrimPrefix comparisons with file paths remain accurate on platforms like
+// macOS where /var/folders is a symlink to /private/var/folders.
+// Callers that iterate over many files should cache results by directory
+// to avoid repeated subprocess spawns.
+func gitRootForDir(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil || len(out) == 0 {
+		return ""
+	}
+	gr := strings.TrimSpace(string(out))
+	if resolved, err := filepath.EvalSymlinks(gr); err == nil {
+		gr = resolved
+	}
+	return gr
+}
+
 // EnrichChurn annotates every graph node with a "churn" metadata value
 // indicating how many git commits touched the node's file in the last
 // [days] days. Nodes in files with no recent commits are left unchanged.
 // Errors (e.g. not a git repo) are silently ignored — the graph is still
 // usable without churn data.
+//
+// Supports umbrella workspaces where repoRoot is not itself a git repository
+// but contains sub-repos (e.g. a monorepo with separate .git in each package).
+// In that case, each file's git root is detected automatically.
 func EnrichChurn(g *graph.Graph, repoRoot string, days int) {
 	if days <= 0 {
 		days = 90
 	}
-	churnMap, err := fileChurn(repoRoot, days)
-	if err != nil || len(churnMap) == 0 {
-		return
-	}
 
-	prefix := repoRoot + "/"
+	// Build per-git-root churn maps. dirToGitRoot caches git root lookups to
+	// avoid one subprocess call per file. gitRootChurn maps each discovered
+	// git root to its relPath→count map (nil = git call failed for that root).
+	dirToGitRoot := make(map[string]string)
+	gitRootChurn := make(map[string]map[string]int)
+
 	nodes := g.AllNodes()
 	for _, n := range nodes {
-		rel := strings.TrimPrefix(n.File, prefix)
-		count, ok := churnMap[rel]
-		if !ok || count == 0 {
+		if n.File == "" {
+			continue
+		}
+		dir := filepath.Dir(n.File)
+		if _, seen := dirToGitRoot[dir]; !seen {
+			dirToGitRoot[dir] = gitRootForDir(dir)
+		}
+		gr := dirToGitRoot[dir]
+		if gr == "" {
+			continue
+		}
+		if _, loaded := gitRootChurn[gr]; !loaded {
+			cm, err := fileChurn(gr, days)
+			if err != nil {
+				cm = nil
+			}
+			gitRootChurn[gr] = cm
+		}
+	}
+
+	// resolvedFile caches filepath.EvalSymlinks results for node file paths.
+	// This ensures TrimPrefix works when gitRootForDir returns a canonical path
+	// but n.File uses a symlinked path (e.g. macOS /var → /private/var).
+	resolvedFile := make(map[string]string)
+
+	for _, n := range nodes {
+		if n.File == "" {
+			continue
+		}
+		gr := dirToGitRoot[filepath.Dir(n.File)]
+		if gr == "" {
+			continue
+		}
+		cm := gitRootChurn[gr]
+		if cm == nil {
+			continue
+		}
+		// Resolve the file path to canonical form so TrimPrefix matches the
+		// canonical git root returned by gitRootForDir.
+		absFile, ok := resolvedFile[n.File]
+		if !ok {
+			absFile = n.File
+			if canon, err := filepath.EvalSymlinks(n.File); err == nil {
+				absFile = canon
+			}
+			resolvedFile[n.File] = absFile
+		}
+		// churnMap keys are paths relative to the git root.
+		rel := strings.TrimPrefix(absFile, gr+"/")
+		count, ok2 := cm[rel]
+		if !ok2 || count == 0 {
 			continue
 		}
 		if n.Metadata == nil {
@@ -494,6 +567,9 @@ func StalenessLabel(score float64) string {
 func EnrichBlame(g *graph.Graph, repoRoot string) {
 	// Per-file blame cache: absFile → *blameResult (nil = no git data for file).
 	cache := make(map[string]*blameResult)
+	// dirToGitRoot caches git root lookups to avoid one subprocess per file.
+	// Supports umbrella workspaces where repoRoot has no .git but sub-dirs do.
+	dirToGitRoot := make(map[string]string)
 
 	for _, n := range g.AllNodes() {
 		// Only function/method nodes carry meaningful blame.
@@ -508,7 +584,16 @@ func EnrichBlame(g *graph.Graph, repoRoot string) {
 		absFile := n.File
 		bi, seen := cache[absFile]
 		if !seen {
-			bi = fileBlame(repoRoot, absFile)
+			dir := filepath.Dir(absFile)
+			gr, grSeen := dirToGitRoot[dir]
+			if !grSeen {
+				gr = gitRootForDir(dir)
+				dirToGitRoot[dir] = gr
+			}
+			if gr == "" {
+				gr = repoRoot // fall back; fileBlame handles git errors silently
+			}
+			bi = fileBlame(gr, absFile)
 			cache[absFile] = bi
 		}
 		if bi == nil {
@@ -552,7 +637,13 @@ func EnrichBlameForFile(g *graph.Graph, repoRoot, absFile string) {
 	if len(nodes) == 0 {
 		return
 	}
-	bi := fileBlame(repoRoot, absFile)
+	// Detect the actual git root for this file — repoRoot may be an umbrella
+	// workspace directory that is not itself a git repository.
+	gr := gitRootForDir(filepath.Dir(absFile))
+	if gr == "" {
+		gr = repoRoot // fall back; fileBlame handles git errors silently
+	}
+	bi := fileBlame(gr, absFile)
 	if bi == nil {
 		return
 	}
@@ -598,6 +689,9 @@ func EnrichCommitContext(g *graph.Graph, repoRoot string) {
 	// Per-file cache: absFile → marshaled JSON (empty string = no data for file).
 	cache := make(map[string]string)
 	seen := make(map[string]bool)
+	// dirToGitRoot caches git root lookups to avoid one subprocess per file.
+	// Supports umbrella workspaces where repoRoot has no .git but sub-dirs do.
+	dirToGitRoot := make(map[string]string)
 
 	for _, n := range g.AllNodes() {
 		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
@@ -610,7 +704,16 @@ func EnrichCommitContext(g *graph.Graph, repoRoot string) {
 		absFile := n.File
 		if !seen[absFile] {
 			seen[absFile] = true
-			commits := RecentCommitsForFile(repoRoot, absFile, 3)
+			dir := filepath.Dir(absFile)
+			gr, grSeen := dirToGitRoot[dir]
+			if !grSeen {
+				gr = gitRootForDir(dir)
+				if gr == "" {
+					gr = repoRoot // fall back; RecentCommitsForFile handles git errors silently
+				}
+				dirToGitRoot[dir] = gr
+			}
+			commits := RecentCommitsForFile(gr, absFile, 3)
 			if len(commits) > 0 {
 				if raw, err := json.Marshal(commits); err == nil {
 					cache[absFile] = string(raw)
@@ -638,7 +741,13 @@ func EnrichCommitContextForFile(g *graph.Graph, repoRoot, absFile string) {
 	if len(nodes) == 0 {
 		return
 	}
-	commits := RecentCommitsForFile(repoRoot, absFile, 3)
+	// Detect the actual git root for this file — repoRoot may be an umbrella
+	// workspace directory that is not itself a git repository.
+	gr := gitRootForDir(filepath.Dir(absFile))
+	if gr == "" {
+		gr = repoRoot // fall back; RecentCommitsForFile handles git errors silently
+	}
+	commits := RecentCommitsForFile(gr, absFile, 3)
 	if len(commits) == 0 {
 		return
 	}

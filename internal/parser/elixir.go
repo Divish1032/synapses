@@ -41,23 +41,23 @@ func extractElixirDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				keyword := string(src[targetNode.StartByte():targetNode.EndByte()])
 				switch keyword {
 				case "def", "defp", "defmacro", "defmacrop":
-					if argsNode := n.ChildByFieldName("arguments"); argsNode != nil {
+					if argsNode := firstChildOfType(n, "arguments"); argsNode != nil {
 						funcName := extractElixirFuncName(argsNode, src)
 						if funcName != "" {
 							sl := int(n.StartPoint().Row) + 1
 							result[funcName] = declMeta{
-								Doc:       extractLineDoc(lines, sl, "#"),
+								Doc:       extractElixirAtDoc(lines, sl),
 								LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 							}
 						}
 					}
 				case "defmodule":
-					if argsNode := n.ChildByFieldName("arguments"); argsNode != nil {
+					if argsNode := firstChildOfType(n, "arguments"); argsNode != nil {
 						if aliasNode := firstChildOfType(argsNode, "alias"); aliasNode != nil {
 							name := string(src[aliasNode.StartByte():aliasNode.EndByte()])
 							sl := int(n.StartPoint().Row) + 1
 							result[name] = declMeta{
-								Doc:       extractLineDoc(lines, sl, "#"),
+								Doc:       extractElixirAtDoc(lines, sl),
 								LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 							}
 						}
@@ -71,6 +71,106 @@ func extractElixirDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 	}
 	walk(root)
 	return result
+}
+
+// extractElixirAtDoc scans backward from startLine (1-indexed) to find an
+// @doc attribute preceding the function definition and returns its text.
+// It handles:
+//   - @doc "single line"
+//   - @doc """
+//     multi-line heredoc
+//     """
+//
+// Blank lines and @spec / @type / @callback / @impl / @deprecated annotations
+// that commonly appear between @doc and def are skipped. Returns "" if no @doc
+// is found within 30 lines.
+func extractElixirAtDoc(lines []string, startLine int) string {
+	if startLine <= 1 || len(lines) == 0 {
+		return ""
+	}
+	// When scanning backward we may hit `"""` which is the *closing* delimiter
+	// of a heredoc block. Once we've seen that, we must continue scanning
+	// backward through the heredoc *content* until we find the `@doc """` opening.
+	seenClosingHeredoc := false
+
+	for i := startLine - 2; i >= 0 && i >= startLine-30; i-- {
+		line := strings.TrimSpace(lines[i])
+
+		// Standalone `"""` — the closing delimiter of a preceding heredoc block.
+		if line == `"""` {
+			seenClosingHeredoc = true
+			continue
+		}
+
+		if seenClosingHeredoc {
+			// We are scanning backward through heredoc content.  Keep going until
+			// we find the opening `@doc """` line.
+			if strings.HasPrefix(line, "@doc") {
+				isHeredoc := strings.HasPrefix(line, `@doc """`) ||
+					strings.HasPrefix(line, `@doc ~S"""`)
+				if !isHeredoc {
+					return "" // @doc false or unexpected
+				}
+				// Collect heredoc content between i+1 and the closing `"""`.
+				var parts []string
+				for j := i + 1; j < len(lines); j++ {
+					if strings.TrimSpace(lines[j]) == `"""` {
+						break
+					}
+					if t := strings.TrimSpace(lines[j]); t != "" {
+						parts = append(parts, t)
+					}
+				}
+				return strings.Join(parts, " ")
+			}
+			// Still inside heredoc content — keep scanning backward.
+			continue
+		}
+
+		// --- Not in heredoc mode ---
+
+		// Skip blank lines and annotations that sit between @doc and def.
+		if line == "" ||
+			strings.HasPrefix(line, "@spec") ||
+			strings.HasPrefix(line, "@type") ||
+			strings.HasPrefix(line, "@callback") ||
+			strings.HasPrefix(line, "@impl") ||
+			strings.HasPrefix(line, "@deprecated") {
+			continue
+		}
+
+		if strings.HasPrefix(line, "@doc ") {
+			// Could be a single-line or the opening of a heredoc (rare — content
+			// on same line as `@doc """`).
+			rest := strings.TrimSpace(line[5:])
+			if strings.HasPrefix(rest, `"""`) {
+				// Opening + content may be on subsequent lines — reuse heredoc
+				// extraction by scanning forward from i+1.
+				var parts []string
+				for j := i + 1; j < len(lines); j++ {
+					if strings.TrimSpace(lines[j]) == `"""` {
+						break
+					}
+					if t := strings.TrimSpace(lines[j]); t != "" {
+						parts = append(parts, t)
+					}
+				}
+				return strings.Join(parts, " ")
+			}
+			// Single-line string: @doc "text"
+			doc := strings.Trim(rest, `"`)
+			return strings.TrimSpace(doc)
+		}
+
+		// @doc false / @moduledoc — no doc.
+		if strings.HasPrefix(line, "@doc") {
+			return ""
+		}
+
+		// Hit something unrelated — stop.
+		break
+	}
+	return ""
 }
 
 // extractElixirFuncName gets the function name from def/defp arguments.
@@ -321,7 +421,7 @@ func (p *ElixirParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 	})
 
-	// --- defstruct field names ---
+	// --- defstruct field names (qualified with enclosing module) ---
 	extractElixirStructFields(g, root, src, filePath, fileNodeID)
 
 	// --- defguard / defguardp ---
@@ -350,11 +450,13 @@ func collectElixirCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.
 }
 
 // extractElixirStructFields walks the AST for defstruct calls and emits
-// individual field names as NodeMethod nodes.
+// individual field names as NodeMethod nodes qualified with the enclosing module.
 // AST: call(target="defstruct") → arguments → keywords → pair → keyword("name: ")
+// The walk tracks the enclosing defmodule so field names are qualified as
+// "ModuleName.field_name" instead of bare "field_name".
 func extractElixirStructFields(g *graph.Graph, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
+	var walk func(n *sitter.Node, moduleName string)
+	walk = func(n *sitter.Node, moduleName string) {
 		if n == nil {
 			return
 		}
@@ -363,26 +465,46 @@ func extractElixirStructFields(g *graph.Graph, root *sitter.Node, src []byte, fi
 			if targetNode == nil {
 				targetNode = firstChildOfType(n, "identifier")
 			}
-			if targetNode != nil && string(src[targetNode.StartByte():targetNode.EndByte()]) == "defstruct" {
-				// Find the arguments → keywords → pair children.
-				argsNode := n.ChildByFieldName("arguments")
-				if argsNode == nil {
-					argsNode = firstChildOfType(n, "arguments")
-				}
-				if argsNode != nil {
-					extractStructFieldsFromArgs(g, argsNode, src, filePath, fileNodeID)
+			if targetNode != nil {
+				keyword := string(src[targetNode.StartByte():targetNode.EndByte()])
+				switch keyword {
+				case "defmodule":
+					// Track the current module name for child nodes.
+					argsNode := n.ChildByFieldName("arguments")
+					if argsNode == nil {
+						argsNode = firstChildOfType(n, "arguments")
+					}
+					newModule := moduleName
+					if argsNode != nil {
+						if aliasNode := firstChildOfType(argsNode, "alias"); aliasNode != nil {
+							newModule = string(src[aliasNode.StartByte():aliasNode.EndByte()])
+						}
+					}
+					for i := 0; i < int(n.ChildCount()); i++ {
+						walk(n.Child(i), newModule)
+					}
+					return
+				case "defstruct":
+					argsNode := n.ChildByFieldName("arguments")
+					if argsNode == nil {
+						argsNode = firstChildOfType(n, "arguments")
+					}
+					if argsNode != nil {
+						extractStructFieldsFromArgs(g, argsNode, src, filePath, fileNodeID, moduleName)
+					}
 				}
 			}
 		}
 		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i))
+			walk(n.Child(i), moduleName)
 		}
 	}
-	walk(root)
+	walk(root, "")
 }
 
-// extractStructFieldsFromArgs extracts field names from defstruct keyword arguments.
-func extractStructFieldsFromArgs(g *graph.Graph, argsNode *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+// extractStructFieldsFromArgs extracts field names from defstruct keyword arguments
+// and qualifies them with the enclosing module name (e.g. "Plug.Conn.status").
+func extractStructFieldsFromArgs(g *graph.Graph, argsNode *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID, moduleName string) {
 	var walkArgs func(n *sitter.Node)
 	walkArgs = func(n *sitter.Node) {
 		if n == nil {
@@ -396,11 +518,16 @@ func extractStructFieldsFromArgs(g *graph.Graph, argsNode *sitter.Node, src []by
 				fieldName = strings.TrimSuffix(fieldName, ":")
 				fieldName = strings.TrimSpace(fieldName)
 				if fieldName != "" {
-					nodeID := g.MakeNodeID(filePath, fieldName)
+					// Qualify with enclosing module name to avoid bare field nodes.
+					qualName := fieldName
+					if moduleName != "" {
+						qualName = moduleName + "." + fieldName
+					}
+					nodeID := g.MakeNodeID(filePath, qualName)
 					if g.GetNode(nodeID) == nil {
 						meta := map[string]string{"kind": "field"}
 						g.AddNode(&graph.Node{
-							ID: nodeID, Type: graph.NodeMethod, Name: fieldName, File: filePath,
+							ID: nodeID, Type: graph.NodeMethod, Name: qualName, File: filePath,
 							Line: int(kw.StartPoint().Row) + 1, Exported: true, Metadata: meta,
 						})
 						g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
@@ -584,32 +711,42 @@ func injectElixirBehaviourCallbacks(
 			continue
 		}
 		for _, cb := range callbacks {
-			nodeID := g.MakeNodeID(filePath, cb)
-			if g.GetNode(nodeID) != nil {
-				// Already explicitly defined — mark it as a behaviour callback.
-				if existing := g.GetNode(nodeID); existing != nil {
-					if existing.Metadata == nil {
-						existing.Metadata = make(map[string]string)
-					}
-					existing.Metadata["behaviour_callback"] = bname
+			// Check whether the callback is already explicitly defined (bare name).
+			bareID := g.MakeNodeID(filePath, cb)
+			if existing := g.GetNode(bareID); existing != nil {
+				// Explicitly defined — annotate in place, don't create a duplicate.
+				if existing.Metadata == nil {
+					existing.Metadata = make(map[string]string)
 				}
+				existing.Metadata["behaviour"] = bname
+				existing.Metadata["kind"] = "behaviour_callback"
+				continue
+			}
+			// Build a module-qualified name for the virtual node so it doesn't
+			// collide with same-named callbacks from other modules in the same file.
+			qualName := cb
+			if moduleName != "" {
+				qualName = moduleName + "." + cb
+			}
+			qualID := g.MakeNodeID(filePath, qualName)
+			if g.GetNode(qualID) != nil {
 				continue
 			}
 			meta := map[string]string{
-				"kind":              "behaviour_callback",
-				"behaviour":         bname,
-				"virtual":           "true",
+				"kind":     "behaviour_callback",
+				"behaviour": bname,
+				"virtual":  "true",
 			}
 			g.AddNode(&graph.Node{
-				ID:       nodeID,
+				ID:       qualID,
 				Type:     graph.NodeFunction,
-				Name:     cb,
+				Name:     qualName,
 				File:     filePath,
 				Line:     0,
 				Exported: true,
 				Metadata: meta,
 			})
-			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: qualID, Type: graph.EdgeDefines})
 		}
 	}
 }
