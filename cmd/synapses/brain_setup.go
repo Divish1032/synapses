@@ -197,6 +197,7 @@ func cmdBrain(args []string) error {
 		fmt.Println("    --mode <mode>    Intelligence mode: optimal | standard | full  (default: standard)")
 		fmt.Println("    --skip-pull      Assume qwen3.5:2b is already downloaded")
 		fmt.Println("    --skip-smoke     Skip post-registration smoke tests")
+		fmt.Println("    --no-color       Disable ANSI color codes (for GUI / non-terminal output)")
 		fmt.Println()
 		return nil
 	}
@@ -215,9 +216,16 @@ func cmdBrainSetup(args []string) error {
 	mode      := fs.String("mode", "standard", "Intelligence mode: optimal | standard | full")
 	skipPull  := fs.Bool("skip-pull", false, "Skip pulling qwen3.5:2b")
 	skipSmoke := fs.Bool("skip-smoke", false, "Skip smoke tests")
+	noColor   := fs.Bool("no-color", false, "Disable ANSI color codes (useful when output is consumed by a GUI)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
+	// color helpers — inline so callers stay readable
+	green  := func(s string) string { if *noColor { return s }; return "\033[32m" + s + "\033[0m" }
+	yellow := func(s string) string { if *noColor { return s }; return "\033[33m" + s + "\033[0m" }
+	red    := func(s string) string { if *noColor { return s }; return "\033[31m" + s + "\033[0m" }
+	bold   := func(s string) string { if *noColor { return s }; return "\033[1m" + s + "\033[0m" }
 
 	fmt.Println()
 	fmt.Println("  Synapses Brain Setup")
@@ -234,7 +242,7 @@ func cmdBrainSetup(args []string) error {
 	if err != nil {
 		fmt.Println()
 		fmt.Println()
-		fmt.Println("  \033[31m✗\033[0m Ollama is not running or unreachable.")
+		fmt.Printf("  %s Ollama is not running or unreachable.\n", red("✗"))
 		fmt.Printf("        URL tried: %s\n", *ollamaURL)
 		fmt.Println()
 		fmt.Println("  To start Ollama:")
@@ -244,7 +252,7 @@ func cmdBrainSetup(args []string) error {
 		fmt.Println()
 		return fmt.Errorf("brain setup: ollama not running at %s: %w", *ollamaURL, err)
 	}
-	fmt.Printf("\033[32m✓\033[0m  Ollama %s at %s\n", version, *ollamaURL)
+	fmt.Printf("%s  Ollama %s at %s\n", green("✓"), version, *ollamaURL)
 	fmt.Println()
 
 	// ── Step 2: Base model ───────────────────────────────────────────────────
@@ -262,13 +270,13 @@ func cmdBrainSetup(args []string) error {
 			return fmt.Errorf("brain setup: check model: %w", err)
 		}
 		if installed {
-			fmt.Printf("        \033[32m✓\033[0m %s is already downloaded\n", baseModel)
+			fmt.Printf("        %s %s is already downloaded\n", green("✓"), baseModel)
 		} else {
-			fmt.Printf("        \033[33m↓\033[0m Downloading %s (~2.7 GB) — this may take a few minutes...\n\n", baseModel)
+			fmt.Printf("        %s Downloading %s (~2.7 GB) — this may take a few minutes...\n\n", yellow("↓"), baseModel)
 			if err := brainPullModel(*ollamaURL, baseModel); err != nil {
 				return fmt.Errorf("brain setup: pull %s: %w", baseModel, err)
 			}
-			fmt.Printf("\n        \033[32m✓\033[0m %s downloaded\n", baseModel)
+			fmt.Printf("\n        %s %s downloaded\n", green("✓"), baseModel)
 		}
 	}
 	fmt.Println()
@@ -282,10 +290,10 @@ func cmdBrainSetup(args []string) error {
 	for _, tier := range brainTiers {
 		fmt.Printf("        %-24s  %s\n", tier.label, tier.role)
 		if err := brainRegisterIdentity(tier); err != nil {
-			fmt.Printf("        \033[31m✗\033[0m  Failed to register %s: %v\n", tier.name, err)
+			fmt.Printf("        %s  Failed to register %s: %v\n", red("✗"), tier.name, err)
 			return fmt.Errorf("brain setup: register %s: %w", tier.name, err)
 		}
-		fmt.Printf("        \033[32m✓\033[0m  %s registered\n", tier.name)
+		fmt.Printf("        %s  %s registered\n", green("✓"), tier.name)
 	}
 	fmt.Println()
 
@@ -299,15 +307,15 @@ func cmdBrainSetup(args []string) error {
 		for _, tier := range brainTiers {
 			ok, elapsed := brainSmokeTest(*ollamaURL, tier.name)
 			if ok {
-				fmt.Printf("        \033[32m✓\033[0m  %-24s  responded in %s\n", tier.name, elapsed)
+				fmt.Printf("        %s  %-24s  responded in %s\n", green("✓"), tier.name, elapsed)
 			} else {
-				fmt.Printf("        \033[33m!\033[0m  %-24s  no valid JSON (cold-start timeout?)\n", tier.name)
+				fmt.Printf("        %s  %-24s  no valid JSON (cold-start timeout?)\n", yellow("!"), tier.name)
 				failed++
 			}
 		}
 		if failed > 0 {
 			fmt.Println()
-			fmt.Printf("  \033[33m!\033[0m  %d tier(s) did not respond during smoke test.\n", failed)
+			fmt.Printf("  %s  %d tier(s) did not respond during smoke test.\n", yellow("!"), failed)
 			fmt.Println("        This is often a cold-start timeout — try running the test again:")
 			fmt.Printf("        synapses brain setup --skip-pull --skip-smoke\n")
 		}
@@ -317,14 +325,14 @@ func cmdBrainSetup(args []string) error {
 	// ── Write brain.json ─────────────────────────────────────────────────────
 	brainJSONPath, err := brainWriteConfig(*ollamaURL, *mode)
 	if err != nil {
-		fmt.Printf("  \033[33m!\033[0m  Could not write brain.json: %v\n", err)
+		fmt.Printf("  %s  Could not write brain.json: %v\n", yellow("!"), err)
 	} else {
-		fmt.Printf("  \033[32m✓\033[0m  brain.json written  (%s)\n", brainJSONPath)
+		fmt.Printf("  %s  brain.json written  (%s)\n", green("✓"), brainJSONPath)
 	}
 
 	fmt.Println()
 	fmt.Println("  ─────────────────────────────────────────")
-	fmt.Printf("  \033[1mBrain is ready.\033[0m  Intelligence mode: %s\n", *mode)
+	fmt.Printf("  %s  Intelligence mode: %s\n", bold("Brain is ready."), *mode)
 	fmt.Println()
 	fmt.Println("  Enable in synapses.json (project root):")
 	fmt.Println(`    "brain": { "enabled": true, "intelligence_mode": "` + *mode + `" }`)
@@ -435,6 +443,33 @@ func brainPullModel(baseURL, modelName string) error {
 	return nil
 }
 
+// findOllamaBinary resolves the ollama executable path.
+// Tauri app bundles on macOS do not inherit the full shell PATH
+// (/usr/local/bin is excluded), so we probe common install locations
+// when exec.LookPath fails.
+func findOllamaBinary() (string, error) {
+	if p, err := exec.LookPath("ollama"); err == nil {
+		return p, nil
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		"/usr/local/bin/ollama",
+		"/opt/homebrew/bin/ollama",
+		filepath.Join(home, ".local/bin/ollama"),
+		"/usr/bin/ollama",
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf(
+		"ollama not found in PATH or common install locations " +
+			"(/usr/local/bin, /opt/homebrew/bin, ~/.local/bin). " +
+			"Install from https://ollama.com",
+	)
+}
+
 // brainRegisterIdentity writes the Modelfile to a temp file and runs `ollama create`.
 func brainRegisterIdentity(tier brainTierDef) error {
 	tmp, err := os.CreateTemp("", "synapses-modelfile-*.txt")
@@ -448,7 +483,11 @@ func brainRegisterIdentity(tier brainTierDef) error {
 	}
 	tmp.Close()
 
-	cmd := exec.Command("ollama", "create", tier.name, "-f", tmp.Name())
+	ollamaBin, err := findOllamaBinary()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(ollamaBin, "create", tier.name, "-f", tmp.Name())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ollama create: %w\n%s", err, strings.TrimSpace(string(out)))
@@ -512,7 +551,12 @@ func brainWriteConfig(ollamaURL, mode string) (string, error) {
 
 	existing := map[string]interface{}{}
 	if data, err := os.ReadFile(cfgPath); err == nil {
-		_ = json.Unmarshal(data, &existing)
+		if jsonErr := json.Unmarshal(data, &existing); jsonErr != nil {
+			fmt.Fprintf(os.Stderr,
+				"  warning: brain.json could not be parsed (%v) — existing keys will be overwritten\n",
+				jsonErr)
+			existing = map[string]interface{}{}
+		}
 	}
 	existing["enabled"] = true
 	existing["backend"] = "ollama"
