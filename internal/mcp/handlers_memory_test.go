@@ -598,3 +598,44 @@ func TestSessionInit_SurfacesInvalidatedMemories(t *testing.T) {
 		t.Error("invalidated_memories should be absent on second call after surfacing")
 	}
 }
+
+// TestSessionInit_InvalidatedMemories_PerAgentIsolation verifies that
+// agent-A surfacing does NOT suppress the invalidation signal for agent-B.
+func TestSessionInit_InvalidatedMemories_PerAgentIsolation(t *testing.T) {
+	srv := newTestServer(t)
+
+	_, err := srv.store.InsertMemory(store.Memory{
+		Tier:     store.TierEntity,
+		Content:  "auth middleware uses JWT tokens for session validation",
+		EntityID: "repo::auth/middleware.go::AuthMiddleware",
+		Source:   store.SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.MarkEntityMemoriesStale("repo::auth/middleware.go::AuthMiddleware", "node removed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent-A calls session_init — sees invalidated memory.
+	resultA, errA := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "agent-A"}))
+	mA := mustResult(t, resultA, errA)
+	hasKey(t, mA, "invalidated_memories")
+
+	// Allow background goroutine to mark surfaced for agent-A.
+	time.Sleep(50 * time.Millisecond)
+
+	// Agent-B calls session_init — should STILL see the invalidated memory.
+	resultB, errB := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "agent-B"}))
+	mB := mustResult(t, resultB, errB)
+	if _, found := mB["invalidated_memories"]; !found {
+		t.Error("agent-B should still see invalidated_memories after agent-A surfaced them")
+	}
+
+	// Agent-A calls again — should NOT see them.
+	resultA2, errA2 := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "agent-A"}))
+	mA2 := mustResult(t, resultA2, errA2)
+	if _, found := mA2["invalidated_memories"]; found {
+		t.Error("agent-A should NOT see invalidated_memories on second call")
+	}
+}

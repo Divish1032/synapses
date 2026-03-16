@@ -1051,7 +1051,7 @@ func TestQueryInvalidatedMemories_ReturnsStaleUnsurfaced(t *testing.T) {
 	}
 
 	// Query should return 1 invalidated memory.
-	mems, err := st.QueryInvalidatedMemories(10)
+	mems, err := st.QueryInvalidatedMemories("agent-1", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1082,7 +1082,7 @@ func TestQueryInvalidatedMemories_EmptyWhenNoneStale(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mems, err := st.QueryInvalidatedMemories(10)
+	mems, err := st.QueryInvalidatedMemories("agent-1", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1109,7 +1109,7 @@ func TestMarkMemoriesSurfaced_PreventsRequery(t *testing.T) {
 	}
 
 	// First query returns the memory.
-	mems, err := st.QueryInvalidatedMemories(10)
+	mems, err := st.QueryInvalidatedMemories("agent-1", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1118,12 +1118,12 @@ func TestMarkMemoriesSurfaced_PreventsRequery(t *testing.T) {
 	}
 
 	// Mark surfaced.
-	if err := st.MarkMemoriesSurfaced([]string{id}); err != nil {
+	if err := st.MarkMemoriesSurfaced("agent-1", []string{id}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Second query returns empty — surfaced_at is set.
-	mems, err = st.QueryInvalidatedMemories(10)
+	mems, err = st.QueryInvalidatedMemories("agent-1", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1134,8 +1134,112 @@ func TestMarkMemoriesSurfaced_PreventsRequery(t *testing.T) {
 
 func TestMarkMemoriesSurfaced_EmptyIDsNoop(t *testing.T) {
 	st := openMemTestStore(t)
-	if err := st.MarkMemoriesSurfaced(nil); err != nil {
+	if err := st.MarkMemoriesSurfaced("agent-1", nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestQueryInvalidatedMemories_PerAgentIsolation verifies that surfacing
+// for agent-A does NOT prevent agent-B from seeing the same invalidated memory.
+func TestQueryInvalidatedMemories_PerAgentIsolation(t *testing.T) {
+	st := openMemTestStore(t)
+
+	_, err := st.InsertMemory(Memory{
+		Tier:     TierEntity,
+		Content:  "auth middleware uses JWT tokens for session management in this codebase",
+		EntityID: "repo::auth/middleware.go::AuthMiddleware",
+		Source:   SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkEntityMemoriesStale("repo::auth/middleware.go::AuthMiddleware", "node removed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both agents see the invalidated memory initially.
+	memsA, err := st.QueryInvalidatedMemories("agent-A", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memsB, err := st.QueryInvalidatedMemories("agent-B", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(memsA) != 1 || len(memsB) != 1 {
+		t.Fatalf("both agents should see 1 invalidated memory; A=%d B=%d", len(memsA), len(memsB))
+	}
+
+	// Agent-A surfaces it.
+	if err := st.MarkMemoriesSurfaced("agent-A", []string{memsA[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent-A no longer sees it, but Agent-B still does.
+	memsA, err = st.QueryInvalidatedMemories("agent-A", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memsB, err = st.QueryInvalidatedMemories("agent-B", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(memsA) != 0 {
+		t.Errorf("agent-A should see 0 after surfacing, got %d", len(memsA))
+	}
+	if len(memsB) != 1 {
+		t.Errorf("agent-B should still see 1 (not surfaced for them), got %d", len(memsB))
+	}
+}
+
+// TestQueryInvalidatedMemories_StaledAtOrdering verifies that memories are
+// ordered by staled_at (when invalidated), not created_at (when written).
+func TestQueryInvalidatedMemories_StaledAtOrdering(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Insert two memories at different times. Both get staled, but in reverse order.
+	id1, err := st.InsertMemory(Memory{
+		Tier:     TierEntity,
+		Content:  "first memory written earlier but invalidated later to test ordering",
+		EntityID: "repo::first.go::First",
+		Source:   SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := st.InsertMemory(Memory{
+		Tier:     TierEntity,
+		Content:  "second memory written later but invalidated first to test ordering",
+		EntityID: "repo::second.go::Second",
+		Source:   SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Stale id2 first, then id1 — so id1 has a LATER staled_at.
+	if err := st.MarkEntityMemoriesStale("repo::second.go::Second", "removed first"); err != nil {
+		t.Fatal(err)
+	}
+	// Small delay to ensure staled_at differs.
+	time.Sleep(10 * time.Millisecond)
+	if err := st.MarkEntityMemoriesStale("repo::first.go::First", "removed second"); err != nil {
+		t.Fatal(err)
+	}
+
+	mems, err := st.QueryInvalidatedMemories("agent-1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 2 {
+		t.Fatalf("expected 2, got %d", len(mems))
+	}
+	// Most recently staled should be first (id1 was staled second).
+	if mems[0].ID != id1 {
+		t.Errorf("expected most recently staled (id1=%s) first, got %s", id1, mems[0].ID)
+	}
+	if mems[1].ID != id2 {
+		t.Errorf("expected earlier staled (id2=%s) second, got %s", id2, mems[1].ID)
 	}
 }
 
@@ -1225,7 +1329,7 @@ func TestQueryInvalidatedMemories_CapsAt10(t *testing.T) {
 		}
 	}
 
-	mems, err := st.QueryInvalidatedMemories(10)
+	mems, err := st.QueryInvalidatedMemories("agent-1", 10)
 	if err != nil {
 		t.Fatal(err)
 	}

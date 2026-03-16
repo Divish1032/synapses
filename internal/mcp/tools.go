@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -397,13 +400,20 @@ func (s *Server) handleGetContext(
 	// Disambiguation: when multiple candidates exist and no file hint was given,
 	// surface a disambiguation list alongside the best-guess result so agents
 	// can confirm or re-call with file= if needed.
+	// "file" is stored as the repo-relative path so it can be used directly
+	// as the file= argument in a follow-up get_context call.
 	var disambiguationCandidates []map[string]interface{}
 	if len(nodes) > 1 && fileHint == "" {
+		repoRoot := s.graph.Root()
 		for _, n := range nodes {
+			relFile := n.File
+			if repoRoot != "" {
+				relFile = strings.TrimPrefix(n.File, repoRoot+"/")
+			}
 			disambiguationCandidates = append(disambiguationCandidates, map[string]interface{}{
 				"name": n.Name,
 				"type": n.Type,
-				"file": s.graph.Root() + "/" + strings.TrimPrefix(n.File, s.graph.Root()+"/"),
+				"file": relFile, // repo-relative; pass as file= to pin
 				"line": n.Line,
 				"pkg":  n.Package,
 			})
@@ -1473,10 +1483,11 @@ func (s *Server) handleVerifyImplementation(
 			for _, e := range r.SignatureImpact {
 				alreadyReported[e.Symbol] = true
 			}
-			// Sort candidates by name for deterministic results: FindByFile returns
-			// nodes from a map (non-deterministic order). Without sorting, the 50-node
-			// scan cap could skip high-fanin symbols on large files depending on Go's
-			// map iteration order.
+			// Sort candidates by fanin (in-edge count) descending so the most
+			// widely-used exports are checked first. This ensures the scan cap
+			// (maxExportsToCheck) never skips a genuinely high-fanin symbol in
+			// favour of an alphabetically-earlier low-fanin one.
+			// graph.Fanin is O(1) — reads the pre-built in-edge index.
 			sortedNodes := make([]*graph.Node, 0, len(nodes))
 			for _, n := range nodes {
 				if !n.Exported {
@@ -1492,7 +1503,11 @@ func (s *Server) handleVerifyImplementation(
 				sortedNodes = append(sortedNodes, n)
 			}
 			sort.Slice(sortedNodes, func(i, j int) bool {
-				return sortedNodes[i].Name < sortedNodes[j].Name
+				fi, fj := s.graph.Fanin(sortedNodes[i].ID), s.graph.Fanin(sortedNodes[j].ID)
+				if fi != fj {
+					return fi > fj // highest fanin first — most important symbols scanned first
+				}
+				return sortedNodes[i].Name < sortedNodes[j].Name // stable alphabetical tiebreaker
 			})
 			newEntries := 0
 			checked := 0
@@ -2063,8 +2078,29 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 		})
 	}
 
-	// Tokenize query.
-	queryWords := strings.Fields(query)
+	// Tokenize query, removing stop words.
+	// Short common words (≤2 chars) and frequent English filler ("the", "and",
+	// "for", etc.) match as substrings inside longer keywords — e.g. "is" inside
+	// "episodes", "if" inside "verify" — causing severe score inflation on wrong
+	// tools. Filtering them before scoring ensures only intent-bearing terms count.
+	stopWords := map[string]bool{
+		// 1-char
+		"a": true, "i": true,
+		// 2-char
+		"an": true, "as": true, "at": true, "be": true, "by": true,
+		"do": true, "if": true, "in": true, "is": true, "it": true,
+		"no": true, "of": true, "on": true, "or": true, "to": true,
+		// 3-char (common filler — kept short to preserve intent words like "ban", "add", "api")
+		"and": true, "are": true, "but": true, "can": true, "did": true,
+		"for": true, "has": true, "its": true, "not": true, "the": true,
+		"was": true,
+	}
+	var queryWords []string
+	for _, w := range strings.Fields(query) {
+		if !stopWords[w] {
+			queryWords = append(queryWords, w)
+		}
+	}
 
 	// Score each tool by keyword overlap.
 	type scored struct {
@@ -3524,22 +3560,23 @@ func (s *Server) handleSessionInit(
 	}
 
 	// ── AM-3: Invalidated memories ──────────────────────────────────────
-	// Surface stale memories that haven't been shown to any agent yet.
-	// After surfacing, mark surfaced_at so they don't re-appear next session.
+	// Surface stale memories not yet shown to THIS agent. Per-agent tracking
+	// via memory_surfaced table ensures every agent sees each invalidation.
 	if s.store != nil {
-		if invalMems, err := s.store.QueryInvalidatedMemories(10); err == nil && len(invalMems) > 0 {
+		if invalMems, err := s.store.QueryInvalidatedMemories(agentID, 10); err == nil && len(invalMems) > 0 {
 			resp["invalidated_memories"] = map[string]interface{}{
 				"count":    len(invalMems),
 				"memories": invalMems,
-				"note":     "These beliefs were invalidated since the last session because their anchor nodes were removed or changed. Review before proceeding — they may no longer be true.",
+				"note":     "These beliefs were invalidated because their anchor nodes were removed or changed. Review before proceeding — they may no longer be true.",
 			}
 			resp["memory_integrity"] = fmt.Sprintf("warn — %d belief(s) were invalidated since last session. Review invalidated_memories before proceeding.", len(invalMems))
-			// Mark surfaced in background so they don't re-appear.
+			// Mark surfaced for this agent in background so they don't re-appear.
 			surfaceIDs := make([]string, len(invalMems))
 			for i, m := range invalMems {
 				surfaceIDs[i] = m.ID
 			}
-			go func() { _ = s.store.MarkMemoriesSurfaced(surfaceIDs) }()
+			aid := agentID // capture for goroutine
+			go func() { _ = s.store.MarkMemoriesSurfaced(aid, surfaceIDs) }()
 		}
 	}
 
@@ -3628,6 +3665,31 @@ func (s *Server) handleSessionInit(
 			"prompts": promptList,
 			"note":    "Project-wide activation context. Apply these conventions throughout the session.",
 		}
+	}
+
+	// ── Daemon health (IMP-EVAL-3) ────────────────────────────────────────
+	// Surface uptime, CPU%, and goroutine count so agents can detect an
+	// overloaded or long-running daemon without external tooling.
+	{
+		uptimeMin := int(time.Since(s.startTime).Minutes())
+		health := map[string]interface{}{
+			"uptime_minutes": uptimeMin,
+			"goroutines":     runtime.NumGoroutine(),
+		}
+		var rusage syscall.Rusage
+		if err := syscall.Getrusage(syscall.RUSAGE_SELF, &rusage); err == nil {
+			cpuSec := float64(rusage.Utime.Sec) + float64(rusage.Utime.Usec)/1e6 +
+				float64(rusage.Stime.Sec) + float64(rusage.Stime.Usec)/1e6
+			wallSec := time.Since(s.startTime).Seconds()
+			if wallSec > 0 {
+				pct := math.Round(cpuSec/wallSec*1000) / 10 // one decimal place
+				health["cpu_pct"] = pct
+				if pct >= 20 {
+					health["hint"] = "warn: daemon CPU usage is high — consider restarting for optimal performance"
+				}
+			}
+		}
+		resp["daemon_health"] = health
 	}
 
 	// ── Update agent context profile ─────────────────────────────────────
