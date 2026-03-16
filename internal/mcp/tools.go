@@ -141,6 +141,10 @@ type directionalContext struct {
 	QualityGaps            []store.QualityGap            `json:"quality_gaps,omitempty"`             // R32: open quality gaps on this entity
 	EntityHash             string                        `json:"entity_hash,omitempty"`              // R14: SHA1 of node+neighbor IDs; stable cache key for clients
 	CallerCountWarning     string                        `json:"caller_count_warning,omitempty"`     // DIAG-3: set when caller count is 0 for a method and use_go_types=false
+	// BUG-EVAL-9: disambiguation — present when multiple entities share the same name
+	// and no file= hint was provided. Available in both JSON and compact formats.
+	OtherCandidates []map[string]interface{} `json:"other_candidates,omitempty"` // all matching entities (including the one shown)
+	DisambigHint    string                   `json:"disambig_hint,omitempty"`    // human-readable re-call instruction
 }
 
 // computeEntityHash returns a short SHA1 hex digest that identifies the
@@ -773,6 +777,13 @@ func (s *Server) handleGetContext(
 		}()
 	}
 
+	// BUG-EVAL-9: populate disambiguation fields on dc BEFORE format dispatch
+	// so both compact and JSON responses include other_candidates when ambiguous.
+	if len(disambiguationCandidates) > 1 {
+		dc.OtherCandidates = disambiguationCandidates
+		dc.DisambigHint = fmt.Sprintf("%d entities named %q found. Showing best match. Re-call with file=\"path/suffix\" to pin to a specific file.", len(disambiguationCandidates), entityName)
+	}
+
 	// format=compact returns a natural-language briefing instead of the default JSON blob.
 	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t, default).
 	// format and detailLevel were extracted early for the session cache key; reused here.
@@ -783,22 +794,6 @@ func (s *Server) handleGetContext(
 		}
 		s.setSessionHash(sessionID, entityCacheKey, entityHash)
 		return mcp.NewToolResultText(serializeCompact(dc, detailLevel)), nil
-	}
-
-	// If multiple candidates existed, attach disambiguation list so agents
-	// can re-call with file= if the selected entity is not what they wanted.
-	if len(disambiguationCandidates) > 1 {
-		type disambiguatedContext struct {
-			*directionalContext
-			OtherCandidates []map[string]interface{} `json:"other_candidates,omitempty"`
-			DisambigHint    string                   `json:"disambig_hint,omitempty"`
-		}
-		s.setSessionHash(sessionID, entityCacheKey, entityHash)
-		return jsonResult(&disambiguatedContext{
-			directionalContext: dc,
-			OtherCandidates:    disambiguationCandidates,
-			DisambigHint:       fmt.Sprintf("%d entities named %q found. Showing best match. Re-call with file=\"path/suffix\" to pin to a specific file.", len(disambiguationCandidates), entityName),
-		})
 	}
 
 	s.setSessionHash(sessionID, entityCacheKey, entityHash)
@@ -1368,12 +1363,15 @@ func (s *Server) handleVerifyImplementation(
 		Line int    `json:"line"`
 	}
 
-	// signatureImpactEntry reports callers of one exported symbol whose signature changed.
+	// signatureImpactEntry reports callers of one exported symbol whose signature changed,
+	// or (when Warning is set) a high-fanin export in the written file whose edit
+	// could break callers even without a signature change.
 	type signatureImpactEntry struct {
 		Symbol    string      `json:"symbol"`
 		Type      string      `json:"type"`
 		Before    string      `json:"before,omitempty"`    // signature before the change
 		Signature string      `json:"signature,omitempty"` // current signature
+		Warning   string      `json:"warning,omitempty"`   // BUG-EVAL-8: high-fanin blast-radius note
 		Callers   []callerRef `json:"callers"`
 	}
 
@@ -1459,6 +1457,77 @@ func (s *Server) handleVerifyImplementation(
 					Callers:   callers,
 				})
 				totalImpactWarnings++
+			}
+		}
+
+		// BUG-EVAL-8: High-fanin exported symbols — blast-radius warning even when
+		// signature didn't change. Any edit to a file containing widely-used exports
+		// risks breaking callers; surface these so agents review call sites.
+		const (
+			highFaninThreshold  = 10 // callers needed to trigger a warning
+			maxExportsToCheck   = 50 // cap ImpactAnalysis scans on large files
+			maxHighFaninEntries = 5  // max new entries added per file
+		)
+		if r.InGraph {
+			alreadyReported := make(map[string]bool)
+			for _, e := range r.SignatureImpact {
+				alreadyReported[e.Symbol] = true
+			}
+			// Sort candidates by name for deterministic results: FindByFile returns
+			// nodes from a map (non-deterministic order). Without sorting, the 50-node
+			// scan cap could skip high-fanin symbols on large files depending on Go's
+			// map iteration order.
+			sortedNodes := make([]*graph.Node, 0, len(nodes))
+			for _, n := range nodes {
+				if !n.Exported {
+					continue
+				}
+				if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod &&
+					n.Type != graph.NodeStruct && n.Type != graph.NodeInterface {
+					continue
+				}
+				if alreadyReported[n.Name] {
+					continue
+				}
+				sortedNodes = append(sortedNodes, n)
+			}
+			sort.Slice(sortedNodes, func(i, j int) bool {
+				return sortedNodes[i].Name < sortedNodes[j].Name
+			})
+			newEntries := 0
+			checked := 0
+			for _, n := range sortedNodes {
+				if checked >= maxExportsToCheck || newEntries >= maxHighFaninEntries {
+					break
+				}
+				checked++
+				impact, err := s.graph.ImpactAnalysis(n.ID, 1)
+				if err != nil || impact == nil || impact.TotalAffected < highFaninThreshold {
+					continue
+				}
+				var callers []callerRef
+				for _, tier := range impact.Tiers {
+					if tier.Depth != 1 {
+						continue
+					}
+					for i, ref := range tier.Nodes {
+						if i >= maxCallersPerSymbol {
+							break
+						}
+						callers = append(callers, callerRef{Name: ref.Name, File: ref.File, Line: ref.Line})
+					}
+				}
+				if len(callers) < highFaninThreshold {
+					continue
+				}
+				r.SignatureImpact = append(r.SignatureImpact, signatureImpactEntry{
+					Symbol:  n.Name,
+					Type:    string(n.Type),
+					Warning: fmt.Sprintf("high-fanin export (%d callers) — blast radius risk even if signature unchanged", len(callers)),
+					Callers: callers,
+				})
+				totalImpactWarnings++
+				newEntries++
 			}
 		}
 
@@ -1829,17 +1898,17 @@ var toolCatalog = []toolCatalogEntry{
 	{Name: "explain_codebase", Category: "exploration", Description: "First-5-minutes orientation: entry points, key types, patterns, packages, tech stack", Keywords: []string{"explain", "codebase", "orientation", "overview", "introduce", "what is", "architecture", "summary", "new", "unfamiliar", "onboard"}, Example: `explain_codebase()`},
 	{Name: "get_repo_map", Category: "exploration", Description: "Navigable package+entity map grouped by architectural layer", Keywords: []string{"repo", "map", "packages", "layout", "navigate", "overview", "structure", "where", "layers"}, Example: `get_repo_map(detail="compact")`},
 	{Name: "get_context", Category: "exploration", Description: "Relevance-ranked subgraph around an entity", Keywords: []string{"context", "understand", "entity", "function", "struct", "interface", "subgraph", "explore", "code", "definition"}, Example: `get_context(entity="AuthService")`},
-	{Name: "find_entity", Category: "exploration", Description: "Locate nodes by name or substring", Keywords: []string{"find", "search", "locate", "entity", "name", "symbol", "discover"}, Example: `find_entity(query="Auth")`},
+	{Name: "find_entity", Category: "exploration", Description: "Locate nodes by name or substring", Keywords: []string{"find", "search", "locate", "entity", "name", "symbol", "discover", "where", "defined", "definition", "which", "contains", "method", "function", "class", "type", "has"}, Example: `find_entity(query="Auth")`},
 	{Name: "get_file_context", Category: "exploration", Description: "All entities in a file", Keywords: []string{"file", "entities", "overview", "list", "defined"}, Example: `get_file_context(file="internal/store/tasks.go")`},
 	{Name: "search", Category: "exploration", Description: "Keyword/fulltext search across entities", Keywords: []string{"search", "keyword", "concept", "fulltext", "semantic", "grep"}, Example: `search(query="rate limiting", mode="fulltext")`},
 	{Name: "get_call_chain", Category: "exploration", Description: "Shortest call path between two entities", Keywords: []string{"call", "chain", "path", "trace", "reach", "how", "calls"}, Example: `get_call_chain(from="Handler", to="Repository")`},
-	{Name: "get_impact", Category: "exploration", Description: "Blast-radius analysis of what breaks if entity changes", Keywords: []string{"impact", "blast", "radius", "breaks", "change", "depends", "dependents", "affected"}, Example: `get_impact(symbol="CarveEgoGraph")`},
+	{Name: "get_impact", Category: "exploration", Description: "Blast-radius analysis of what breaks if entity changes", Keywords: []string{"impact", "blast", "radius", "breaks", "change", "depends", "dependents", "affected", "callers", "usage", "uses", "downstream", "refactor", "safe", "remove", "delete"}, Example: `get_impact(symbol="CarveEgoGraph")`},
 
 	// Architecture
 	{Name: "validate_plan", Category: "architecture", Description: "Check changes against architectural rules", Keywords: []string{"validate", "plan", "check", "rules", "architecture", "violations", "before"}, Example: `validate_plan(changes=[{"file":"auth.go","adds_call_to":"DB"}])`},
 	{Name: "verify_implementation", Category: "architecture", Description: "Post-write check: verify written files against rules and task expectations", Keywords: []string{"verify", "implementation", "after", "written", "check", "post", "validate", "confirm"}, Example: `verify_implementation(files_written=["internal/auth/service.go"])`},
 	{Name: "get_violations", Category: "architecture", Description: "List current architectural violations", Keywords: []string{"violations", "rules", "broken", "forbidden", "architecture"}, Example: `get_violations()`},
-	{Name: "upsert_rule", Category: "architecture", Description: "Create or update an architectural constraint", Keywords: []string{"rule", "create", "constraint", "forbid", "enforce", "pattern"}, Example: `upsert_rule(rule_id="no-db-in-handler", description="...", severity="error")`},
+	{Name: "upsert_rule", Category: "architecture", Description: "Create or update an architectural constraint", Keywords: []string{"rule", "create", "constraint", "forbid", "enforce", "pattern", "add", "ban", "prevent", "restrict", "policy", "architectural"}, Example: `upsert_rule(rule_id="no-db-in-handler", description="...", severity="error")`},
 
 	// Task management
 	{Name: "create_plan", Category: "tasks", Description: "Save a plan with tasks for future sessions", Keywords: []string{"plan", "create", "tasks", "save", "work", "implement"}, Example: `create_plan(title="v1.1 improvements", tasks=[...])`},
@@ -3451,6 +3520,26 @@ func (s *Server) handleSessionInit(
 					}
 				}()
 			}
+		}
+	}
+
+	// ── AM-3: Invalidated memories ──────────────────────────────────────
+	// Surface stale memories that haven't been shown to any agent yet.
+	// After surfacing, mark surfaced_at so they don't re-appear next session.
+	if s.store != nil {
+		if invalMems, err := s.store.QueryInvalidatedMemories(10); err == nil && len(invalMems) > 0 {
+			resp["invalidated_memories"] = map[string]interface{}{
+				"count":    len(invalMems),
+				"memories": invalMems,
+				"note":     "These beliefs were invalidated since the last session because their anchor nodes were removed or changed. Review before proceeding — they may no longer be true.",
+			}
+			resp["memory_integrity"] = fmt.Sprintf("warn — %d belief(s) were invalidated since last session. Review invalidated_memories before proceeding.", len(invalMems))
+			// Mark surfaced in background so they don't re-appear.
+			surfaceIDs := make([]string, len(invalMems))
+			for i, m := range invalMems {
+				surfaceIDs[i] = m.ID
+			}
+			go func() { _ = s.store.MarkMemoriesSurfaced(surfaceIDs) }()
 		}
 	}
 

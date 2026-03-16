@@ -360,6 +360,59 @@ func (s *Store) MarkAnchoredMemoriesStale(nodeIDs []string, reason string) error
 	return tx.Commit()
 }
 
+// QueryInvalidatedMemories returns stale memories that have not yet been
+// surfaced to any agent (surfaced_at IS NULL). Capped at limit rows, ordered
+// by created_at DESC so the most recent invalidations appear first.
+// Used by AM-3: session_init surfaces these once, then MarkMemoriesSurfaced
+// sets surfaced_at so they don't re-appear.
+func (s *Store) QueryInvalidatedMemories(limit int) ([]InvalidatedMemory, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.Query(`
+		SELECT id, content, tier, stale_reason, created_at
+		FROM memories
+		WHERE stale = 1 AND surfaced_at IS NULL
+		ORDER BY created_at DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query invalidated memories: %w", err)
+	}
+	defer rows.Close()
+
+	var out []InvalidatedMemory
+	for rows.Next() {
+		var m InvalidatedMemory
+		if err := rows.Scan(&m.ID, &m.Content, &m.Tier, &m.StaleReason, &m.InvalidatedAt); err != nil {
+			return nil, fmt.Errorf("scan invalidated memory: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// MarkMemoriesSurfaced sets surfaced_at to the current time for the given
+// memory IDs, preventing them from being returned by QueryInvalidatedMemories
+// again. Idempotent: calling twice with the same IDs is safe.
+func (s *Store) MarkMemoriesSurfaced(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, now)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	_, err := s.db.Exec(`UPDATE memories SET surfaced_at = ? WHERE id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return fmt.Errorf("mark memories surfaced: %w", err)
+	}
+	return nil
+}
+
 // SearchMemories performs FTS5 BM25 full-text search over memory content.
 // Returns non-expired memories ordered by relevance (best match first).
 // The query uses FTS5 query syntax — each space-separated word is an implicit AND term.

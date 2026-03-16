@@ -1029,3 +1029,140 @@ func TestMarkAnchoredMemoriesStale_LargeBatch(t *testing.T) {
 		t.Errorf("unexpected stale_reason: %q", reason)
 	}
 }
+
+// ── AM-3: QueryInvalidatedMemories + MarkMemoriesSurfaced ──────────────
+
+func TestQueryInvalidatedMemories_ReturnsStaleUnsurfaced(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Insert a memory, then mark it stale.
+	id, err := st.InsertMemory(Memory{
+		Tier:     TierEntity,
+		Content:  "synapses-intelligence is an active sidecar at localhost:11435",
+		EntityID: "repo::intel/main.go::main",
+		AgentID:  "agent-1",
+		Source:   SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkEntityMemoriesStale("repo::intel/main.go::main", "anchor node removed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Query should return 1 invalidated memory.
+	mems, err := st.QueryInvalidatedMemories(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 1 {
+		t.Fatalf("expected 1, got %d", len(mems))
+	}
+	if mems[0].ID != id {
+		t.Errorf("expected id=%q, got %q", id, mems[0].ID)
+	}
+	if mems[0].StaleReason != "anchor node removed" {
+		t.Errorf("unexpected stale_reason: %q", mems[0].StaleReason)
+	}
+	if mems[0].Tier != TierEntity {
+		t.Errorf("expected tier=%q, got %q", TierEntity, mems[0].Tier)
+	}
+}
+
+func TestQueryInvalidatedMemories_EmptyWhenNoneStale(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Insert a non-stale memory.
+	_, err := st.InsertMemory(Memory{
+		Tier:    TierProject,
+		Content: "this project uses Go modules for dependency management",
+		Source:  SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mems, err := st.QueryInvalidatedMemories(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 0 {
+		t.Fatalf("expected 0, got %d", len(mems))
+	}
+}
+
+func TestMarkMemoriesSurfaced_PreventsRequery(t *testing.T) {
+	st := openMemTestStore(t)
+
+	id, err := st.InsertMemory(Memory{
+		Tier:     TierEntity,
+		Content:  "Store.Close has 96 callers — high blast radius refactor target",
+		EntityID: "repo::store.go::Store.Close",
+		AgentID:  "agent-1",
+		Source:   SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkEntityMemoriesStale("repo::store.go::Store.Close", "node changed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// First query returns the memory.
+	mems, err := st.QueryInvalidatedMemories(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 1 {
+		t.Fatalf("expected 1, got %d", len(mems))
+	}
+
+	// Mark surfaced.
+	if err := st.MarkMemoriesSurfaced([]string{id}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second query returns empty — surfaced_at is set.
+	mems, err = st.QueryInvalidatedMemories(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 0 {
+		t.Fatalf("expected 0 after surfacing, got %d", len(mems))
+	}
+}
+
+func TestMarkMemoriesSurfaced_EmptyIDsNoop(t *testing.T) {
+	st := openMemTestStore(t)
+	if err := st.MarkMemoriesSurfaced(nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQueryInvalidatedMemories_CapsAt10(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Insert 12 memories and mark all stale.
+	for i := 0; i < 12; i++ {
+		_, err := st.InsertMemory(Memory{
+			Tier:     TierEntity,
+			Content:  strings.Repeat("memory content for invalidation test ", 3) + string(rune('A'+i)),
+			EntityID: "repo::entity" + string(rune('A'+i)),
+			Source:   SourceManual,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.MarkEntityMemoriesStale("repo::entity"+string(rune('A'+i)), "removed"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mems, err := st.QueryInvalidatedMemories(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 10 {
+		t.Fatalf("expected cap at 10, got %d", len(mems))
+	}
+}
