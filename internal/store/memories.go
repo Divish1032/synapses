@@ -244,7 +244,7 @@ func (s *Store) TouchMemories(ids []string) {
 }
 
 // ExpireMemories deletes memories past their expires_at. Call periodically.
-// Also cleans up orphaned memory_anchors rows for deleted memories.
+// Also cleans up orphaned memory_anchors and memory_surfaced rows for deleted memories.
 func (s *Store) ExpireMemories() (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	// Delete expired memories and clean up their anchors in one transaction.
@@ -254,10 +254,14 @@ func (s *Store) ExpireMemories() (int64, error) {
 	}
 	defer tx.Rollback()
 
-	// Delete anchors for memories about to expire (correlated EXISTS is O(n·log n)
-	// with the PK index on memories, vs NOT IN which materializes a full result set).
+	// Delete anchors and surfacing records for memories about to expire.
+	// Correlated EXISTS is O(n·log n) with the PK index on memories,
+	// vs NOT IN which materializes a full result set.
 	_, _ = tx.Exec(`DELETE FROM memory_anchors WHERE EXISTS (
 		SELECT 1 FROM memories WHERE memories.id = memory_anchors.memory_id AND memories.expires_at <= ?
+	)`, now)
+	_, _ = tx.Exec(`DELETE FROM memory_surfaced WHERE EXISTS (
+		SELECT 1 FROM memories WHERE memories.id = memory_surfaced.memory_id AND memories.expires_at <= ?
 	)`, now)
 	result, err := tx.Exec(`DELETE FROM memories WHERE expires_at <= ?`, now)
 	if err != nil {
@@ -424,10 +428,14 @@ func (s *Store) QueryInvalidatedMemories(agentID string, limit int) ([]Invalidat
 }
 
 // MarkMemoriesSurfaced records that the given agent has seen these invalidated
-// memories. Per-agent: each agent gets an independent surfacing record in the
-// memory_surfaced table. Also sets the legacy surfaced_at column on the memories
-// table for backward compatibility with anonymous sessions.
-// Idempotent: INSERT OR IGNORE on the composite PK.
+// memories. Two paths:
+//   - Named agent (agentID != ""): INSERT into memory_surfaced table. Does NOT
+//     touch the legacy surfaced_at column — anonymous sessions must still be able
+//     to see these memories via their own fallback path.
+//   - Anonymous (agentID == ""): SET surfaced_at on the memories table directly.
+//     This is the only surfacing mechanism for anonymous sessions.
+//
+// Idempotent: INSERT OR IGNORE on the composite PK (named); UPDATE is idempotent (anon).
 func (s *Store) MarkMemoriesSurfaced(agentID string, ids []string) error {
 	if len(ids) == 0 {
 		return nil
@@ -440,26 +448,26 @@ func (s *Store) MarkMemoriesSurfaced(agentID string, ids []string) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Per-agent surfacing record.
 	if agentID != "" {
+		// Per-agent surfacing record. Does NOT touch legacy surfaced_at.
 		for _, id := range ids {
 			if _, err := tx.Exec(`INSERT OR IGNORE INTO memory_surfaced (memory_id, agent_id, surfaced_at)
 				VALUES (?, ?, ?)`, id, agentID, now); err != nil {
 				return fmt.Errorf("mark memories surfaced: %w", err)
 			}
 		}
-	}
-
-	// Legacy global surfaced_at for anonymous fallback path.
-	placeholders := strings.Repeat("?,", len(ids))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, now)
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	if _, err := tx.Exec(`UPDATE memories SET surfaced_at = ? WHERE id IN (`+placeholders+`)`, args...); err != nil {
-		return fmt.Errorf("mark memories surfaced (legacy): %w", err)
+	} else {
+		// Anonymous fallback: set global surfaced_at on the memories table.
+		placeholders := strings.Repeat("?,", len(ids))
+		placeholders = placeholders[:len(placeholders)-1]
+		args := make([]any, 0, len(ids)+1)
+		args = append(args, now)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		if _, err := tx.Exec(`UPDATE memories SET surfaced_at = ? WHERE id IN (`+placeholders+`)`, args...); err != nil {
+			return fmt.Errorf("mark memories surfaced (legacy): %w", err)
+		}
 	}
 	return tx.Commit()
 }

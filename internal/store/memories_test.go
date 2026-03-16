@@ -1243,6 +1243,109 @@ func TestQueryInvalidatedMemories_StaledAtOrdering(t *testing.T) {
 	}
 }
 
+// TestQueryInvalidatedMemories_AnonymousFallback verifies that anonymous
+// sessions (empty agentID) use the legacy surfaced_at path correctly, AND that
+// a named agent surfacing does NOT poison the anonymous path.
+func TestQueryInvalidatedMemories_AnonymousFallback(t *testing.T) {
+	st := openMemTestStore(t)
+
+	_, err := st.InsertMemory(Memory{
+		Tier:     TierEntity,
+		Content:  "config service uses gRPC for inter-service communication in this project",
+		EntityID: "repo::config/service.go::ConfigService",
+		Source:   SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkEntityMemoriesStale("repo::config/service.go::ConfigService", "node removed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Named agent surfaces the memory.
+	memsNamed, err := st.QueryInvalidatedMemories("agent-named", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(memsNamed) != 1 {
+		t.Fatalf("named agent should see 1, got %d", len(memsNamed))
+	}
+	if err := st.MarkMemoriesSurfaced("agent-named", []string{memsNamed[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Anonymous session should STILL see the memory (legacy surfaced_at not set).
+	memsAnon, err := st.QueryInvalidatedMemories("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(memsAnon) != 1 {
+		t.Fatalf("anonymous session should still see 1 after named agent surfaced, got %d", len(memsAnon))
+	}
+
+	// Anonymous session surfaces it.
+	if err := st.MarkMemoriesSurfaced("", []string{memsAnon[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now anonymous should see 0.
+	memsAnon2, err := st.QueryInvalidatedMemories("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(memsAnon2) != 0 {
+		t.Fatalf("anonymous session should see 0 after own surfacing, got %d", len(memsAnon2))
+	}
+}
+
+// TestExpireMemories_CleansOrphanedSurfacedRows verifies that ExpireMemories
+// removes orphaned memory_surfaced rows when their parent memory is deleted.
+func TestExpireMemories_CleansOrphanedSurfacedRows(t *testing.T) {
+	st := openMemTestStore(t)
+
+	id, err := st.InsertMemory(Memory{
+		Tier:     TierEntity,
+		Content:  "Store.Close has 96 callers and is a high blast radius refactor target",
+		EntityID: "repo::store.go::Store.Close",
+		Source:   SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mark stale (shortens TTL to 30d).
+	if err := st.MarkEntityMemoriesStale("repo::store.go::Store.Close", "removed"); err != nil {
+		t.Fatal(err)
+	}
+	// Surface for an agent — creates a memory_surfaced row.
+	if err := st.MarkMemoriesSurfaced("agent-1", []string{id}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify memory_surfaced row exists.
+	var surfCount int
+	st.db.QueryRow(`SELECT count(*) FROM memory_surfaced WHERE memory_id = ?`, id).Scan(&surfCount)
+	if surfCount != 1 {
+		t.Fatalf("expected 1 memory_surfaced row, got %d", surfCount)
+	}
+
+	// Force-expire by setting expires_at to the past.
+	st.db.Exec(`UPDATE memories SET expires_at = '2020-01-01T00:00:00Z' WHERE id = ?`, id)
+
+	n, err := st.ExpireMemories()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 expired, got %d", n)
+	}
+
+	// memory_surfaced row should be cleaned up.
+	st.db.QueryRow(`SELECT count(*) FROM memory_surfaced WHERE memory_id = ?`, id).Scan(&surfCount)
+	if surfCount != 0 {
+		t.Fatalf("expected 0 orphaned memory_surfaced rows, got %d", surfCount)
+	}
+}
+
 // TestQueryMemories_ExcludesStaleMemories verifies that QueryMemories,
 // QueryMemoriesForEntities, and SearchMemories all filter out stale=1 memories.
 // This is the Gap 1 fix: stale memories must NOT appear as active truth.
