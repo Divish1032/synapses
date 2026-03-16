@@ -55,6 +55,12 @@ func (s *Server) handleRemember(
 		importance = v
 	}
 
+	// AM-1: Parse optional anchor_nodes for binding memories to graph nodes.
+	var anchorNodes []string
+	if raw := stringArg(req, "anchor_nodes"); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &anchorNodes)
+	}
+
 	e := store.Episode{
 		AgentID:       agentID,
 		ProjectID:     stringArg(req, "project_id"),
@@ -91,7 +97,7 @@ func (s *Server) handleRemember(
 		var affectedNodes []string
 		_ = json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes)
 		for _, nodeID := range affectedNodes {
-			_, _ = s.store.InsertMemory(store.Memory{
+			memID, _ := s.store.InsertMemory(store.Memory{
 				Tier:     store.TierEntity,
 				Content:  memContent,
 				EntityID: nodeID,
@@ -100,11 +106,14 @@ func (s *Server) handleRemember(
 				Source:   store.SourceManual,
 				Tags:     memTags,
 			})
+			if memID != "" && len(anchorNodes) > 0 {
+				_ = s.store.InsertMemoryAnchors(memID, anchorNodes)
+			}
 		}
 	}
 
 	// Project-tier: always write the episode as project knowledge.
-	_, _ = s.store.InsertMemory(store.Memory{
+	projMemID, _ := s.store.InsertMemory(store.Memory{
 		Tier:    store.TierProject,
 		Content: memContent,
 		AgentID: agentID,
@@ -112,6 +121,9 @@ func (s *Server) handleRemember(
 		Source:  store.SourceManual,
 		Tags:    memTags,
 	})
+	if projMemID != "" && len(anchorNodes) > 0 {
+		_ = s.store.InsertMemoryAnchors(projMemID, anchorNodes)
+	}
 
 	if episodeType == "failure" {
 		if err := s.store.AppendEvent("failure_recorded", agentID,
@@ -126,6 +138,9 @@ func (s *Server) handleRemember(
 		"episode_type": episodeType,
 		"outcome":      outcome,
 		"message":      "Episode recorded. Use recall() to surface similar past episodes in future sessions.",
+	}
+	if len(anchorNodes) > 0 {
+		resp["anchored_to"] = len(anchorNodes)
 	}
 
 	// F12: Auto-create a fix task when:

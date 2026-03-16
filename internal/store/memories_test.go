@@ -552,6 +552,73 @@ func TestSearchMemories_CrossTier(t *testing.T) {
 	}
 }
 
+// ── AM-1: Memory Anchors ────────────────────────────────────────────────────
+
+func TestInsertMemoryAnchors_BasicRoundTrip(t *testing.T) {
+	st := openMemTestStore(t)
+	id, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: "AuthService handles all auth flows", AgentID: "a", Source: SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertMemoryAnchors(id, []string{"repo::auth.go::AuthService", "repo::auth.go::Login"}); err != nil {
+		t.Fatal(err)
+	}
+	anchors, err := st.GetMemoryAnchors(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(anchors) != 2 {
+		t.Fatalf("expected 2 anchors, got %d", len(anchors))
+	}
+	if anchors[0] != "repo::auth.go::AuthService" || anchors[1] != "repo::auth.go::Login" {
+		t.Errorf("unexpected anchors: %v", anchors)
+	}
+}
+
+func TestInsertMemoryAnchors_EmptySlice_NoOp(t *testing.T) {
+	st := openMemTestStore(t)
+	id, _ := st.InsertMemory(Memory{
+		Tier: TierProject, Content: "some project fact with no anchors", AgentID: "a", Source: SourceManual,
+	})
+	if err := st.InsertMemoryAnchors(id, nil); err != nil {
+		t.Fatal(err)
+	}
+	anchors, _ := st.GetMemoryAnchors(id)
+	if len(anchors) != 0 {
+		t.Errorf("expected 0 anchors, got %d", len(anchors))
+	}
+}
+
+func TestInsertMemoryAnchors_DuplicateIgnored(t *testing.T) {
+	st := openMemTestStore(t)
+	id, _ := st.InsertMemory(Memory{
+		Tier: TierProject, Content: "fact anchored to same node twice", AgentID: "a", Source: SourceManual,
+	})
+	if err := st.InsertMemoryAnchors(id, []string{"repo::a.go::Foo", "repo::a.go::Foo"}); err != nil {
+		t.Fatal(err)
+	}
+	anchors, _ := st.GetMemoryAnchors(id)
+	if len(anchors) != 1 {
+		t.Errorf("expected 1 anchor (deduped), got %d", len(anchors))
+	}
+}
+
+func TestInsertMemoryAnchors_EmptyNodeIDSkipped(t *testing.T) {
+	st := openMemTestStore(t)
+	id, _ := st.InsertMemory(Memory{
+		Tier: TierProject, Content: "fact with empty anchor nodes mixed in", AgentID: "a", Source: SourceManual,
+	})
+	if err := st.InsertMemoryAnchors(id, []string{"repo::a.go::Foo", "", "repo::b.go::Bar"}); err != nil {
+		t.Fatal(err)
+	}
+	anchors, _ := st.GetMemoryAnchors(id)
+	if len(anchors) != 2 {
+		t.Errorf("expected 2 anchors (empty skipped), got %d", len(anchors))
+	}
+}
+
 // TestSearchMemories_NoResults verifies a query with no matches returns empty
 // slice (not an error).
 func TestSearchMemories_NoResults(t *testing.T) {
