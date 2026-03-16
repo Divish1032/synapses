@@ -402,11 +402,11 @@ func (s *Server) handleGetPeerActivity(
 		})
 	}
 
-	// Fetch active scopes for this peer.
-	allClaims, _ := s.store.GetAllClaims()
-	var scopes []string
-	for _, c := range allClaims {
-		if c.AgentID == peerID {
+	// Fetch active scopes for this peer. GetMyClaims is targeted (indexed by agent_id)
+	// whereas GetAllClaims fetches all agents' claims and filters inline.
+	scopes := make([]string, 0)
+	if claims, err := s.store.GetMyClaims(peerID); err == nil {
+		for _, c := range claims {
 			scopes = append(scopes, c.Scope)
 		}
 	}
@@ -426,7 +426,7 @@ func (s *Server) handleGetPeerActivity(
 		Scope  string `json:"scope,omitempty"`
 		At     string `json:"at"`
 	}
-	var recentActions []action
+	recentActions := make([]action, 0, len(events))
 	for _, e := range events {
 		a := action{Type: e.Type, At: e.CreatedAt}
 		// Parse common payload fields.

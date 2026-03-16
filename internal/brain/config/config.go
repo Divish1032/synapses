@@ -286,7 +286,10 @@ func (c *BrainConfig) applyDefaults() {
 		c.ModelOrchestrate = c.Model
 	}
 	if c.ModelArchivist == "" {
-		c.ModelArchivist = c.ModelOrchestrate
+		// Archivist always uses a Qwen 3.5 base model (not fine-tuned).
+		// Default to qwen3.5:2b regardless of what ModelOrchestrate is set to,
+		// so that changing the orchestrate tier doesn't accidentally break Archivist.
+		c.ModelArchivist = "qwen3.5:2b"
 	}
 	if c.TimeoutMS <= 0 {
 		c.TimeoutMS = 60000
@@ -356,31 +359,78 @@ func (c *BrainConfig) applyDefaults() {
 	}
 }
 
-// AutoConfigureModels sets tier models based on the total available system RAM.
-// Until fine-tuned SIL models are available, all tiers use qwen3.5:2b by default.
-// When fine-tuned models are ready, this table will assign per-tier SIL models.
+// AutoConfigureModels sets per-tier model tags based on IntelligenceMode.
 //
-//	| Total RAM | T0 (Ingest)    | T1 (Guardian)  | T2 (Enrich)    | T3 (Orchestrate) |
-//	|-----------|----------------|----------------|----------------|------------------|
-//	| ≤8GB      | qwen3.5:2b     | qwen3.5:2b     | qwen3.5:2b     | qwen3.5:2b       |
-//	| 8-16GB    | qwen3.5:2b     | qwen3.5:2b     | qwen3.5:2b     | qwen3.5:2b       |
-//	| 16-24GB   | qwen3.5:2b     | qwen3.5:2b     | qwen3.5:4b     | qwen3.5:4b       |
-//	| ≥24GB     | qwen3.5:2b     | qwen3.5:2b     | qwen3.5:4b     | qwen3.5:9b       |
+// The three modes map to the specialist/generalist split:
+//   - Fine-tuned (FT) models handle code-structural tasks: Sentry, Librarian, Critic.
+//   - Base Qwen 3.5 2B handles general reasoning tasks: Navigator, Archivist (always).
+//
+// Model tag conventions:
+//
+//	synapses/sentry:q4   — Sentry 0.5B FT, Q4_K_M quantization
+//	synapses/sentry:q8   — Sentry 0.5B FT, Q8_0 quantization
+//	synapses/librarian:q4 — Librarian 1.5B FT, Q4_K_M
+//	synapses/librarian:q8 — Librarian 1.5B FT, Q8_0
+//	synapses/critic:q4   — Critic 1.5B FT, Q4_K_M
+//	synapses/critic:q8   — Critic 1.5B FT, Q8_0
+//	qwen3.5:2b           — Base Qwen 3.5 2B (Navigator + Archivist always)
+//
+// Mode summary:
+//
+//	| Tier      | Optimal (8GB)          | Standard (16GB)        | Full (32GB+)           |
+//	|-----------|------------------------|------------------------|------------------------|
+//	| Sentry T0 | synapses/sentry:q4     | synapses/sentry:q4     | synapses/sentry:q8     |
+//	| Librarian | synapses/librarian:q4  | synapses/librarian:q4  | synapses/librarian:q8  |
+//	| Guardian  | synapses/librarian:q4  | synapses/critic:q4     | synapses/critic:q8     |
+//	| Navigator | qwen3.5:2b             | qwen3.5:2b             | qwen3.5:2b             |
+//	| Archivist | qwen3.5:2b             | qwen3.5:2b             | qwen3.5:2b             |
+//
+// In Optimal mode Guardian shares Librarian's model slot (sequential queue,
+// rarely contended in practice). In Standard/Full, Critic gets its own slot.
+//
+// totalRAMGB is used only when IntelligenceMode is "" (legacy auto-scaling path).
 func (c *BrainConfig) AutoConfigureModels(totalRAMGB float64) {
-	// Base model for all tiers until fine-tuned SIL models replace them.
-	c.ModelIngest = "qwen3.5:2b"
-	c.ModelGuardian = "qwen3.5:2b"
-
-	switch {
-	case totalRAMGB <= 16:
-		c.ModelEnrich = "qwen3.5:2b"
+	switch c.IntelligenceMode {
+	case ModeOptimal:
+		c.ModelIngest = "synapses/sentry:q4"
+		c.ModelEnrich = "synapses/librarian:q4"
+		// Guardian shares Librarian's model in Optimal mode — same Ollama slot,
+		// sequential queue. Saves ~1.1 GB vs running a separate Critic model.
+		c.ModelGuardian = "synapses/librarian:q4"
 		c.ModelOrchestrate = "qwen3.5:2b"
-	case totalRAMGB <= 24:
-		c.ModelEnrich = "qwen3.5:4b"
-		c.ModelOrchestrate = "qwen3.5:4b"
-	default: // >24GB
-		c.ModelEnrich = "qwen3.5:4b"
-		c.ModelOrchestrate = "qwen3.5:9b"
+		c.ModelArchivist = "qwen3.5:2b"
+
+	case ModeStandard:
+		c.ModelIngest = "synapses/sentry:q4"
+		c.ModelEnrich = "synapses/librarian:q4"
+		c.ModelGuardian = "synapses/critic:q4"
+		c.ModelOrchestrate = "qwen3.5:2b"
+		c.ModelArchivist = "qwen3.5:2b"
+
+	case ModeFull:
+		c.ModelIngest = "synapses/sentry:q8"
+		c.ModelEnrich = "synapses/librarian:q8"
+		c.ModelGuardian = "synapses/critic:q8"
+		c.ModelOrchestrate = "qwen3.5:2b"
+		c.ModelArchivist = "qwen3.5:2b"
+
+	default:
+		// Legacy auto-scaling: no IntelligenceMode set.
+		// Keep existing behaviour until user explicitly picks a mode.
+		c.ModelIngest = "qwen3.5:2b"
+		c.ModelGuardian = "qwen3.5:2b"
+		switch {
+		case totalRAMGB <= 16:
+			c.ModelEnrich = "qwen3.5:2b"
+			c.ModelOrchestrate = "qwen3.5:2b"
+		case totalRAMGB <= 24:
+			c.ModelEnrich = "qwen3.5:4b"
+			c.ModelOrchestrate = "qwen3.5:4b"
+		default:
+			c.ModelEnrich = "qwen3.5:4b"
+			c.ModelOrchestrate = "qwen3.5:9b"
+		}
+		c.ModelArchivist = "qwen3.5:2b"
 	}
 }
 

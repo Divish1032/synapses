@@ -155,8 +155,9 @@ func TestApplyDefaults_ModelIngestFallsToFastModel(t *testing.T) {
 	}
 }
 
-func TestApplyDefaults_ModelArchivistFallsToModelOrchestrate(t *testing.T) {
-	// Set model_orchestrate; leave model_archivist unset.
+func TestApplyDefaults_ModelArchivistDefaultsToQwen35(t *testing.T) {
+	// Archivist always defaults to qwen3.5:2b independently of ModelOrchestrate.
+	// Navigator and Archivist are base-model tiers; they must not inherit FT model tags.
 	path := writePartialConfig(t, map[string]interface{}{
 		"model_orchestrate": "myorch:3b",
 		"model_archivist":   "",
@@ -165,8 +166,8 @@ func TestApplyDefaults_ModelArchivistFallsToModelOrchestrate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
-	if cfg.ModelArchivist != "myorch:3b" {
-		t.Errorf("ModelArchivist = %q after applyDefaults, want %q", cfg.ModelArchivist, "myorch:3b")
+	if cfg.ModelArchivist != "qwen3.5:2b" {
+		t.Errorf("ModelArchivist = %q after applyDefaults, want %q", cfg.ModelArchivist, "qwen3.5:2b")
 	}
 }
 

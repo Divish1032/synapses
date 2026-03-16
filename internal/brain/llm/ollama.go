@@ -36,6 +36,14 @@ type OllamaClient struct {
 	// nil = use Ollama default (5 minutes). -1 = keep loaded indefinitely (pin in RAM).
 	// 0 = evict immediately after each request. Set via WithKeepAlive().
 	keepAlive *int
+	// useJSON sets "format":"json" in the Ollama request body, constraining the
+	// model to emit only valid JSON. Use for tiers that parse structured output
+	// (Orchestrator, Archivist) where base models might otherwise produce free-text.
+	useJSON bool
+	// numPredict caps the maximum output tokens per request.
+	// Default: 400 (sufficient for insight/coordination JSON).
+	// Increase for tiers with longer outputs, e.g. Archivist (1024).
+	numPredict int
 }
 
 // NewOllamaClient creates a client targeting the given Ollama base URL and model.
@@ -50,6 +58,7 @@ func NewOllamaClient(baseURL, model string, timeoutMS int) *OllamaClient {
 		httpClient: &http.Client{
 			Timeout: time.Duration(timeoutMS) * time.Millisecond,
 		},
+		numPredict: 400, // default: enough for insight/coordination JSON
 	}
 }
 
@@ -81,6 +90,28 @@ func (c *OllamaClient) WithKeepAlive(secs int) *OllamaClient {
 	return c
 }
 
+// WithJSONFormat enables Ollama's structured JSON output mode by setting
+// "format":"json" in the request body. When enabled, the model is constrained
+// to emit only valid JSON — it will not produce prose, markdown fences, or
+// partial output. Use for tiers that parse structured responses (Orchestrator,
+// Archivist) where base models might otherwise produce free-text.
+// Returns the client to allow chaining.
+func (c *OllamaClient) WithJSONFormat(enabled bool) *OllamaClient {
+	c.useJSON = enabled
+	return c
+}
+
+// WithNumPredict sets the maximum output tokens per request.
+// Default is 400 (sufficient for insight/coordination JSON).
+// Increase for tiers with longer structured outputs, e.g. Archivist (1024).
+// Returns the client to allow chaining.
+func (c *OllamaClient) WithNumPredict(n int) *OllamaClient {
+	if n > 0 {
+		c.numPredict = n
+	}
+	return c
+}
+
 // ollamaRequest is the payload for POST /api/generate.
 type ollamaRequest struct {
 	Model  string `json:"model"`
@@ -94,6 +125,10 @@ type ollamaRequest struct {
 	// KeepAlive overrides the server-level OLLAMA_KEEP_ALIVE for this request.
 	// -1 = pin indefinitely, 0 = evict immediately, nil = use server default.
 	KeepAlive *int `json:"keep_alive,omitempty"`
+	// Format constrains output to a specific format. Set to "json" to force
+	// valid JSON output — the model will not produce prose or markdown fences.
+	// omitempty: empty string = not sent (free-form output).
+	Format string `json:"format,omitempty"`
 	// Options tuned for small models: low temperature for deterministic JSON output.
 	Options ollamaOptions `json:"options"`
 }
@@ -117,7 +152,10 @@ type ollamaChatRequest struct {
 	Messages  []ollamaMessage `json:"messages"`
 	Stream    bool            `json:"stream"`
 	KeepAlive *int            `json:"keep_alive,omitempty"`
-	Options   ollamaOptions   `json:"options"`
+	// Format constrains output to a specific format. Set to "json" to force
+	// valid JSON output. omitempty: empty string = not sent (free-form output).
+	Format  string        `json:"format,omitempty"`
+	Options ollamaOptions `json:"options"`
 }
 
 type ollamaMessage struct {
@@ -153,11 +191,14 @@ func (c *OllamaClient) generateRaw(ctx context.Context, prompt string) (string, 
 		KeepAlive: c.keepAlive,
 		Options: ollamaOptions{
 			Temperature: 0.1, // near-deterministic for structured JSON
-			NumPredict:  400, // enough for JSON insight with headroom for 7b verbosity
+			NumPredict:  c.numPredict,
 			// No stop tokens: models wrap JSON in markdown fences and stop tokens
 			// fire immediately (e.g. "```" fires on the opening fence), producing
 			// empty responses. ExtractJSON handles all formatting variants.
 		},
+	}
+	if c.useJSON {
+		reqBody.Format = "json"
 	}
 
 	// Set think: bool for Qwen3.x models via the Ollama ≥0.6 API field.
@@ -208,7 +249,8 @@ func (c *OllamaClient) generateRaw(ctx context.Context, prompt string) (string, 
 
 // generateChat calls POST /api/chat, wrapping the prompt as a user message.
 // The Modelfile's SYSTEM block is applied automatically by Ollama.
-// Used for fine-tuned Qwen3.5 models that require chat-template formatting.
+// Used for Qwen3.5 models (base or fine-tuned) where chat-template formatting
+// improves structured output adherence.
 func (c *OllamaClient) generateChat(ctx context.Context, prompt string) (string, error) {
 	reqBody := ollamaChatRequest{
 		Model: c.model,
@@ -219,8 +261,11 @@ func (c *OllamaClient) generateChat(ctx context.Context, prompt string) (string,
 		KeepAlive: c.keepAlive,
 		Options: ollamaOptions{
 			Temperature: 0.1,
-			NumPredict:  400,
+			NumPredict:  c.numPredict,
 		},
+	}
+	if c.useJSON {
+		reqBody.Format = "json"
 	}
 
 	data, err := json.Marshal(reqBody)
