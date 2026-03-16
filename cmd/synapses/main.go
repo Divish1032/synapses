@@ -1073,6 +1073,16 @@ func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfi
 		changed, unchanged, removed)
 
 	if changed+removed > 0 {
+		// Reload stored call sites from ALL files so ResolveCallEdges can
+		// recreate CALLS edges pointing INTO the re-parsed changed files.
+		// IncrementalReindex called RemoveFile for each changed file, which
+		// deleted those incoming edges. Only the changed files' new call sites
+		// are pending in g.callSites; call sites from unchanged files were
+		// drained during the previous full build and are not in memory.
+		// This mirrors the fix applied to Watcher.reparseFile.
+		if stored, err := st.LoadCallSites(); err == nil {
+			g.BulkAddCallSites(stored)
+		}
 		n := resolver.ResolveCallEdges(g)
 		fmt.Fprintf(os.Stderr, "synapses: resolved %d CALLS edges\n", n)
 		if ni := resolver.ResolveImplementsEdges(g); ni > 0 {
