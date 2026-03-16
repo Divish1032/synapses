@@ -35,6 +35,12 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 	// Root entity header + summary.
 	writeNodeHeader(&b, dc.Root, getRootSummary(dc.Root, dc.ContextPacket))
 
+	// BUG-EVAL-9: disambiguation warning — shown when multiple entities share the same name.
+	if len(dc.OtherCandidates) > 0 {
+		fmt.Fprintf(&b, "⚠ %d entities named %q — showing best match (file=%s). Re-call with file= to pin.\n",
+			len(dc.OtherCandidates), dc.Root.Name, filepath.Base(dc.Root.File))
+	}
+
 	// R3: Git blame line — who last touched this function and how stale it is.
 	if dc.Root.Metadata != nil {
 		if author := dc.Root.Metadata["blame_author"]; author != "" {

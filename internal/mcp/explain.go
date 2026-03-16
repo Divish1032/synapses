@@ -107,7 +107,41 @@ func buildExplanation(
 	// ── Entry Points ──────────────────────────────────────────────────────────
 	if len(identity.EntryPoints) > 0 {
 		sb.WriteString("## Entry Points\n\n")
-		shown := identity.EntryPoints
+
+		// IMP-EVAL-6: rank entry points so primary daemon/cmd entries appear first.
+		// Priority tiers (lower = higher priority):
+		//   0: main() in a cmd/ directory (the actual application entry point)
+		//   1: main() anywhere else
+		//   2: exported function not in archive/scripts/tools
+		//   3: exported function in archive/scripts/tools (deprioritised)
+		entryPointTier := func(ep graph.EntityRef) int {
+			f := strings.ToLower(ep.File)
+			isMain := ep.Name == "main"
+			isArchived := strings.Contains(f, "archive") || strings.Contains(f, "script") ||
+				strings.Contains(f, "tools/") || strings.Contains(f, "_archive")
+			inCmd := strings.Contains(f, "cmd/") || strings.Contains(f, "/cmd")
+			switch {
+			case isMain && inCmd:
+				return 0
+			case isMain:
+				return 1
+			case !isArchived:
+				return 2
+			default:
+				return 3
+			}
+		}
+		eps := make([]graph.EntityRef, len(identity.EntryPoints))
+		copy(eps, identity.EntryPoints)
+		sort.Slice(eps, func(i, j int) bool {
+			ti, tj := entryPointTier(eps[i]), entryPointTier(eps[j])
+			if ti != tj {
+				return ti < tj
+			}
+			return eps[i].File < eps[j].File // stable secondary sort by path
+		})
+
+		shown := eps
 		if len(shown) > 8 {
 			shown = shown[:8]
 		}

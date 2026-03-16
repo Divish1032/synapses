@@ -536,3 +536,65 @@ func TestE2E_RememberWithAnchors_InvalidNodeID(t *testing.T) {
 	}))
 	mustErrorResult(t, res, err)
 }
+
+// ── AM-3: invalidated_memories in session_init ──────────────────────────
+
+// TestSessionInit_SurfacesInvalidatedMemories verifies that session_init
+// returns an invalidated_memories section for stale+unsurfaced memories
+// and that subsequent calls don't re-surface them.
+func TestSessionInit_SurfacesInvalidatedMemories(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Insert an entity memory and mark it stale (simulates AM-2 cascade).
+	id, err := srv.store.InsertMemory(store.Memory{
+		Tier:     store.TierEntity,
+		Content:  "synapses-intelligence is an active sidecar",
+		EntityID: "repo::intel/main.go::main",
+		AgentID:  "agent-1",
+		Source:   store.SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.MarkEntityMemoriesStale("repo::intel/main.go::main", "anchor node removed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// First session_init should surface the invalidated memory.
+	result, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "agent-1",
+	}))
+	m := mustResult(t, result, err)
+
+	hasKey(t, m, "invalidated_memories")
+	invalSection, ok := m["invalidated_memories"].(map[string]any)
+	if !ok {
+		t.Fatalf("invalidated_memories is not a map: %T", m["invalidated_memories"])
+	}
+	mems, ok := invalSection["memories"].([]any)
+	if !ok || len(mems) == 0 {
+		t.Fatal("expected at least 1 invalidated memory")
+	}
+	first := mems[0].(map[string]any)
+	if first["id"] != id {
+		t.Errorf("expected id=%q, got %v", id, first["id"])
+	}
+	if first["stale_reason"] != "anchor node removed" {
+		t.Errorf("unexpected stale_reason: %v", first["stale_reason"])
+	}
+
+	// memory_integrity warning should be present.
+	hasKey(t, m, "memory_integrity")
+
+	// Allow background goroutine to mark surfaced.
+	time.Sleep(50 * time.Millisecond)
+
+	// Second session_init should NOT re-surface the same memory.
+	result2, err2 := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "agent-1",
+	}))
+	m2 := mustResult(t, result2, err2)
+	if _, found := m2["invalidated_memories"]; found {
+		t.Error("invalidated_memories should be absent on second call after surfacing")
+	}
+}
