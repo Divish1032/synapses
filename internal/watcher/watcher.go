@@ -374,8 +374,35 @@ func (w *Watcher) reparseFile(path, _ string) {
 	}
 	w.graph.ClearFileSnapshot(path)
 
+	// Peek the newly-registered call sites from the re-parsed file before the
+	// resolver drains them. We need these to update the stored call-site table.
+	newSites := w.graph.PeekCallSites()
+
+	// Reload stored call sites from ALL OTHER files and bulk-add them so the
+	// resolver can recreate CALLS edges pointing INTO the re-parsed file.
+	// (RemoveFile deleted those edges; the other files' call sites were already
+	// drained during the initial build and are NOT in graph.callSites.)
+	if w.store != nil {
+		if stored, err := w.store.LoadCallSites(); err == nil {
+			var filtered []graph.CallSite
+			for _, cs := range stored {
+				if cs.CallerFile != path {
+					filtered = append(filtered, cs)
+				}
+			}
+			w.graph.BulkAddCallSites(filtered)
+		}
+	}
+
 	resolver.ResolveCallEdges(w.graph)
 	resolver.ResolveImplementsEdges(w.graph)
+
+	// Keep the stored call-site table consistent with the re-parsed file.
+	if w.store != nil {
+		if err := w.store.UpdateCallSitesForFile(path, newSites); err != nil {
+			fmt.Fprintf(os.Stderr, "synapses/watcher: update call sites for %s: %v\n", path, err)
+		}
+	}
 
 	// R3: re-enrich blame for nodes in the changed file only — keeps blame
 	// current without re-running git against the entire graph.

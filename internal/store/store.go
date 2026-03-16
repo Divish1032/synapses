@@ -1620,6 +1620,37 @@ func (s *Store) LoadCallSites() ([]graph.CallSite, error) {
 	return sites, rows.Err()
 }
 
+// UpdateCallSitesForFile atomically replaces the persisted call sites whose
+// caller_file matches file with newSites. This is used by the watcher after
+// an incremental re-parse so the stored call-site table stays consistent with
+// the live graph without a full table replacement.
+func (s *Store) UpdateCallSitesForFile(file string, newSites []graph.CallSite) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.Exec(`DELETE FROM call_sites WHERE caller_file = ?`, file); err != nil {
+		return fmt.Errorf("delete call_sites for %s: %w", file, err)
+	}
+
+	if len(newSites) > 0 {
+		stmt, err := tx.Prepare(`INSERT INTO call_sites (caller_id, caller_file, pkg_alias, func_name) VALUES (?, ?, ?, ?)`)
+		if err != nil {
+			return fmt.Errorf("prepare call_sites stmt: %w", err)
+		}
+		defer stmt.Close()
+
+		for _, cs := range newSites {
+			if _, err := stmt.Exec(string(cs.CallerID), cs.CallerFile, cs.PkgAlias, cs.FuncName); err != nil {
+				return fmt.Errorf("insert call_site: %w", err)
+			}
+		}
+	}
+	return tx.Commit()
+}
+
 // UpsertDynamicRule persists a dynamic architectural rule to the store.
 // If a rule with the same ID already exists it is fully replaced; otherwise
 // a new row is inserted. The rule takes effect in-memory immediately — see
