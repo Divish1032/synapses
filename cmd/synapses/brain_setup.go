@@ -190,7 +190,8 @@ func cmdBrain(args []string) error {
 		fmt.Println("  Usage: synapses brain <subcommand>")
 		fmt.Println()
 		fmt.Println("  Subcommands:")
-		fmt.Println("    setup    Configure Ollama + register AI tier identities")
+		fmt.Println("    setup     Configure Ollama + register AI tier identities")
+		fmt.Println("    register  Register a single AI tier identity (called by the Tauri app)")
 		fmt.Println()
 		fmt.Println("  Flags for 'setup':")
 		fmt.Println("    --ollama <url>   Ollama base URL  (default: http://localhost:11434)")
@@ -219,6 +220,10 @@ func cmdBrainSetup(args []string) error {
 	noColor   := fs.Bool("no-color", false, "Disable ANSI color codes (useful when output is consumed by a GUI)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	validModes := map[string]bool{"optimal": true, "standard": true, "full": true}
+	if !validModes[*mode] {
+		return fmt.Errorf("invalid mode %q â must be one of: optimal, standard, full", *mode)
 	}
 
 	// color helpers — inline so callers stay readable
@@ -338,6 +343,26 @@ func cmdBrainSetup(args []string) error {
 	fmt.Println(`    "brain": { "enabled": true, "intelligence_mode": "` + *mode + `" }`)
 	fmt.Println()
 	return nil
+}
+
+// cmdBrainRegister registers a single AI tier identity.
+// Called by the Tauri app via "synapses brain register <tier-name>".
+func cmdBrainRegister(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: synapses brain register <tier-name>\nKnown tiers: %s",
+			func() string {
+				names := make([]string, len(brainTiers))
+				for i, t := range brainTiers { names[i] = t.name }
+				return strings.Join(names, ", ")
+			}())
+	}
+	tierName := args[0]
+	for _, tier := range brainTiers {
+		if tier.name == tierName {
+			return brainRegisterIdentity(tier)
+		}
+	}
+	return fmt.Errorf("unknown tier %q — run 'synapses brain help' to see known tiers", tierName)
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
