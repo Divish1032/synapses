@@ -95,6 +95,14 @@ func (o *Orchestrator) buildPrompt(req Request) string {
 }
 
 func (o *Orchestrator) fallbackResponse(req Request) Response {
+	return DeterministicCoordinate(req)
+}
+
+// DeterministicCoordinate returns a rule-based conflict resolution response
+// without calling any LLM. Used by brain_impl.go when the orchestrate circuit
+// is open — guarantees a non-empty, always-correct response even when all LLM
+// tiers are unavailable. No external dependencies; cannot fail.
+func DeterministicCoordinate(req Request) Response {
 	if len(req.ConflictingClaims) == 0 {
 		return Response{
 			Suggestion:       fmt.Sprintf("No conflicts detected. You can safely claim %q.", req.NewScope),

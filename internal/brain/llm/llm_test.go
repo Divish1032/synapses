@@ -190,6 +190,54 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
+func TestRepairJSON(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		valid bool // expect valid JSON after repair
+	}{
+		{
+			name:  "already valid — no change",
+			input: `{"key":"value"}`,
+			valid: true,
+		},
+		{
+			name:  "archivist bracket bug — ]] instead of ]}]",
+			input: `{"new_memories":[{"key":"k","content":"c","entities":["A"]],"annotations":[]}`,
+			valid: true,
+		},
+		{
+			name:  "nested array-of-objects with two items",
+			input: `{"items":[{"a":["x"]},{"b":["y"]],"other":"v"}`,
+			valid: true,
+		},
+		{
+			name:  "completely broken — unrepairable",
+			input: `{"key": broken`,
+			valid: false,
+		},
+		{
+			name:  "empty object",
+			input: `{}`,
+			valid: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := RepairJSON(tc.input)
+			var m interface{}
+			err := json.Unmarshal([]byte(result), &m)
+			if tc.valid && err != nil {
+				t.Errorf("RepairJSON failed to fix: %v\nInput:  %s\nOutput: %s", err, tc.input, result)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("RepairJSON unexpectedly fixed broken JSON\nInput:  %s\nOutput: %s", tc.input, result)
+			}
+		})
+	}
+}
+
 // ============================================================
 // parser.go — ParseSILResponse, extractSILLabel, isSILLabelLine
 // ============================================================
@@ -714,7 +762,10 @@ func TestOllamaClient_Generate_Qwen3ThinkField(t *testing.T) {
 		}
 	})
 
-	t.Run("non-qwen3 model does not send think field", func(t *testing.T) {
+	t.Run("non-qwen3 model also receives think=false (ignored by model)", func(t *testing.T) {
+		// think is now sent for all models — non-Qwen3 models ignore it.
+		// This avoids needing to detect model family by name prefix, which
+		// would miss synapses/* models that are Qwen3-based internally.
 		capturedBody = nil
 		c := NewOllamaClient(srv.URL, "llama3", 5000)
 		_, _ = c.Generate(context.Background(), "prompt")
@@ -722,8 +773,10 @@ func TestOllamaClient_Generate_Qwen3ThinkField(t *testing.T) {
 		if err := json.Unmarshal(capturedBody, &req); err != nil {
 			t.Fatalf("failed to unmarshal request: %v", err)
 		}
-		if req.Think != nil {
-			t.Errorf("expected think field to be nil for non-qwen3 model, got %v", *req.Think)
+		if req.Think == nil {
+			t.Error("expected think field to be sent for all models")
+		} else if *req.Think != false {
+			t.Errorf("expected think=false by default, got %v", *req.Think)
 		}
 	})
 }

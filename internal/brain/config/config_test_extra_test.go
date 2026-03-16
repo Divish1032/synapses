@@ -452,3 +452,121 @@ func TestApplyDefaults_LocalBackend_SetsHFRepo(t *testing.T) {
 		t.Error("expected HFRepo to be set for local backend")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DefaultConfig — fields that must always be non-zero (regression for Bug 2+3)
+// ---------------------------------------------------------------------------
+
+func TestDefaultConfig_ModelArchivistIsSet(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if cfg.ModelArchivist == "" {
+		t.Error("DefaultConfig().ModelArchivist must not be empty — Archivist client would call Ollama with empty model string")
+	}
+	if cfg.ModelArchivist != "qwen3.5:2b" {
+		t.Errorf("DefaultConfig().ModelArchivist = %q, want qwen3.5:2b", cfg.ModelArchivist)
+	}
+}
+
+func TestDefaultConfig_MemorizeIsTrue(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if !cfg.Memorize {
+		t.Error("DefaultConfig().Memorize must be true — feature is silently disabled otherwise, inconsistent with other feature flags")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AutoConfigureModels — IntelligenceMode paths (Optimal / Standard / Full)
+// ---------------------------------------------------------------------------
+
+// All modes use synapses/* Ollama identities backed by base qwen3.5:2b.
+// Modes differ only in keep_alive, not model tags.
+
+func TestAutoConfigureModels_ModeOptimal(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.IntelligenceMode = config.ModeOptimal
+	cfg.AutoConfigureModels(0)
+
+	if cfg.ModelIngest != "synapses/sentry" {
+		t.Errorf("Optimal ModelIngest = %q, want synapses/sentry", cfg.ModelIngest)
+	}
+	if cfg.ModelEnrich != "synapses/librarian" {
+		t.Errorf("Optimal ModelEnrich = %q, want synapses/librarian", cfg.ModelEnrich)
+	}
+	// Guardian shares Librarian in Optimal (no separate Critic slot).
+	if cfg.ModelGuardian != "synapses/librarian" {
+		t.Errorf("Optimal ModelGuardian = %q, want synapses/librarian (shares Librarian)", cfg.ModelGuardian)
+	}
+	if cfg.ModelOrchestrate != "synapses/navigator" {
+		t.Errorf("Optimal ModelOrchestrate = %q, want synapses/navigator", cfg.ModelOrchestrate)
+	}
+	if cfg.ModelArchivist != "synapses/archivist" {
+		t.Errorf("Optimal ModelArchivist = %q, want synapses/archivist", cfg.ModelArchivist)
+	}
+}
+
+func TestAutoConfigureModels_ModeStandard(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.IntelligenceMode = config.ModeStandard
+	cfg.AutoConfigureModels(0)
+
+	if cfg.ModelIngest != "synapses/sentry" {
+		t.Errorf("Standard ModelIngest = %q, want synapses/sentry", cfg.ModelIngest)
+	}
+	if cfg.ModelEnrich != "synapses/librarian" {
+		t.Errorf("Standard ModelEnrich = %q, want synapses/librarian", cfg.ModelEnrich)
+	}
+	if cfg.ModelGuardian != "synapses/critic" {
+		t.Errorf("Standard ModelGuardian = %q, want synapses/critic", cfg.ModelGuardian)
+	}
+	if cfg.ModelOrchestrate != "synapses/navigator" {
+		t.Errorf("Standard ModelOrchestrate = %q, want synapses/navigator", cfg.ModelOrchestrate)
+	}
+	if cfg.ModelArchivist != "synapses/archivist" {
+		t.Errorf("Standard ModelArchivist = %q, want synapses/archivist", cfg.ModelArchivist)
+	}
+}
+
+func TestAutoConfigureModels_ModeFull(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.IntelligenceMode = config.ModeFull
+	cfg.AutoConfigureModels(0)
+
+	// Full uses same model identities as Standard — difference is keep_alive only.
+	if cfg.ModelIngest != "synapses/sentry" {
+		t.Errorf("Full ModelIngest = %q, want synapses/sentry", cfg.ModelIngest)
+	}
+	if cfg.ModelEnrich != "synapses/librarian" {
+		t.Errorf("Full ModelEnrich = %q, want synapses/librarian", cfg.ModelEnrich)
+	}
+	if cfg.ModelGuardian != "synapses/critic" {
+		t.Errorf("Full ModelGuardian = %q, want synapses/critic", cfg.ModelGuardian)
+	}
+	if cfg.ModelOrchestrate != "synapses/navigator" {
+		t.Errorf("Full ModelOrchestrate = %q, want synapses/navigator", cfg.ModelOrchestrate)
+	}
+	if cfg.ModelArchivist != "synapses/archivist" {
+		t.Errorf("Full ModelArchivist = %q, want synapses/archivist", cfg.ModelArchivist)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// KeepAliveValues — all modes including guardian (regression for Bug 1)
+// ---------------------------------------------------------------------------
+
+// All modes return keep_alive=-1 (pinned) because all identities share the
+// same qwen3.5:2b weights. Ollama treats them as one loaded model — evicting
+// one evicts all. Verified via /api/ps testing.
+func TestKeepAliveValues_AllModesPinned(t *testing.T) {
+	for _, mode := range []config.IntelligenceMode{config.ModeOptimal, config.ModeStandard, config.ModeFull, ""} {
+		cfg := config.DefaultConfig()
+		cfg.IntelligenceMode = mode
+		kaG, kaE, kaO, kaA := cfg.KeepAliveValues()
+		for name, v := range map[string]int{
+			"guardian": kaG, "enrich": kaE, "orchestrate": kaO, "archivist": kaA,
+		} {
+			if v != -1 {
+				t.Errorf("mode=%q %s = %d, want -1 (shared weights → always pinned)", mode, name, v)
+			}
+		}
+	}
+}

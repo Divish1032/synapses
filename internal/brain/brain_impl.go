@@ -22,23 +22,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/brain/store"
 )
 
-// supportsThinking returns true for models that support Qwen3.x thinking mode
-// (/think and /no_think prompt prefixes). Qwen2.5 and other non-Qwen3 models
-// do not understand these prefixes and produce garbage output when they are sent.
-func supportsThinking(model string) bool {
-	lower := strings.ToLower(model)
-	// Match "qwen3" prefix: covers qwen3:1b, qwen3.5:4b, qwen3:8b, etc.
-	return strings.HasPrefix(lower, "qwen3")
-}
-
-// needsChatMode returns true for fine-tuned Qwen3.5 models that require the
-// /api/chat endpoint instead of /api/generate. These models were trained with
-// chat-template formatting; raw prompts cause them to echo training examples.
-// Currently: synapses/navigator and synapses/archivist (both Qwen3.5 2B base).
-func needsChatMode(model string) bool {
-	lower := strings.ToLower(model)
-	return strings.Contains(lower, "navigator") || strings.Contains(lower, "archivist")
-}
 
 // Brain is the public interface for the Thinking Brain.
 // All methods are safe for concurrent use.
@@ -142,7 +125,96 @@ type TierStatusProvider interface {
 	TierStatus() map[string]TierState
 }
 
+// BrainStatsProvider exposes cumulative telemetry counters for health dashboards.
+// Type-assert Brain to this interface to access stats.
+type BrainStatsProvider interface {
+	BrainStats() map[string]interface{}
+}
+
 // impl is the production Brain backed by Ollama (or local CGo) + SQLite.
+// brainStats tracks per-tier success/failure counts and cumulative latency.
+// Thread-safe via sync/atomic. Exported via GetSummary for health checks.
+type brainStats struct {
+	mu                   sync.Mutex
+	ingestCalls          int64
+	ingestSuccess        int64
+	ingestDeterministic  int64 // fast-path hits (no LLM)
+	ingestLatencyMS      int64
+	enrichCalls          int64
+	enrichSuccess        int64
+	enrichLatencyMS      int64
+	guardianCalls        int64
+	guardianSuccess      int64
+	orchestrateCalls     int64
+	orchestrateSuccess   int64
+	archivistCalls       int64
+	archivistSuccess     int64
+	archivistRepairs     int64 // JSON bracket repairs
+}
+
+func (s *brainStats) record(tier string, success bool, latencyMS int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch tier {
+	case "ingest":
+		s.ingestCalls++
+		s.ingestLatencyMS += latencyMS
+		if success {
+			s.ingestSuccess++
+		}
+	case "enrich":
+		s.enrichCalls++
+		s.enrichLatencyMS += latencyMS
+		if success {
+			s.enrichSuccess++
+		}
+	case "guardian":
+		s.guardianCalls++
+		if success {
+			s.guardianSuccess++
+		}
+	case "orchestrate":
+		s.orchestrateCalls++
+		if success {
+			s.orchestrateSuccess++
+		}
+	case "archivist":
+		s.archivistCalls++
+		if success {
+			s.archivistSuccess++
+		}
+	}
+}
+
+func (s *brainStats) snapshot() map[string]interface{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	avgIngest := int64(0)
+	if s.ingestCalls > 0 {
+		avgIngest = s.ingestLatencyMS / s.ingestCalls
+	}
+	avgEnrich := int64(0)
+	if s.enrichCalls > 0 {
+		avgEnrich = s.enrichLatencyMS / s.enrichCalls
+	}
+	return map[string]interface{}{
+		"ingest_calls":         s.ingestCalls,
+		"ingest_success":       s.ingestSuccess,
+		"ingest_deterministic": s.ingestDeterministic,
+		"ingest_avg_ms":        avgIngest,
+		"enrich_calls":         s.enrichCalls,
+		"enrich_success":       s.enrichSuccess,
+		"enrich_avg_ms":        avgEnrich,
+		"guardian_calls":       s.guardianCalls,
+		"guardian_success":     s.guardianSuccess,
+		"orchestrate_calls":    s.orchestrateCalls,
+		"orchestrate_success":  s.orchestrateSuccess,
+		"archivist_calls":      s.archivistCalls,
+		"archivist_success":    s.archivistSuccess,
+		"archivist_repairs":    s.archivistRepairs,
+	}
+}
+
 type impl struct {
 	cfg          config.BrainConfig
 	llm          llm.LLMClient
@@ -157,14 +229,18 @@ type impl struct {
 	builder      *contextbuilder.Builder
 	learner      *contextbuilder.Learner
 	cb           *circuitBreaker
+	stats        brainStats
 
 	// Fallback components: pre-built at New() using lower-tier LLM clients.
 	// Used when the primary tier's circuit breaker trips, so agents always
 	// receive something rather than zero-values.
-	fallbackEnricher      *enricher.Enricher      // T2 → T0: uses ingestClient model
-	fallbackGuardian      *guardian.Guardian      // T1 → T0: uses ingestClient model
-	fallbackOrchestratorT2 *orchestrator.Orchestrator // T3 → T2: uses enrichClient model
-	fallbackOrchestratorT0 *orchestrator.Orchestrator // T3 → T0: uses ingestClient model
+	fallbackEnricher *enricher.Enricher // T2 → T0: uses ingestClient model
+	fallbackGuardian *guardian.Guardian // T1 → T0: uses ingestClient model
+	// Note: orchestrate fallback does NOT use an LLM-backed orchestrator.
+	// Sending orchestration prompts to Librarian (FT code-graph model) or Sentry
+	// produces garbage — those models have no conflict-resolution capability.
+	// orchestrator.DeterministicCoordinate() provides a guaranteed non-empty
+	// rule-based response when the orchestrate circuit is open.
 }
 
 // New creates a fully-configured Brain from cfg.
@@ -209,23 +285,29 @@ func New(cfg config.BrainConfig) Brain {
 		// Sentry (T0) is always pinned — it is called on every file-save event.
 		// Librarian (T2) is pinned in Standard/Full; JIT in Optimal to save RAM.
 		// Navigator/Archivist (T3/cold) are JIT in Optimal, TTL in Standard, pinned in Full.
-		kaEnrich, kaOrchestrate, kaArchivist := cfg.KeepAliveValues()
+		kaGuardian, kaEnrich, kaOrchestrate, kaArchivist := cfg.KeepAliveValues()
 
+		// All tiers use base qwen3.5:2b with different Ollama Modelfile identities
+		// (system prompts). All use /api/chat + format:json + think:false for
+		// consistent structured JSON output.
 		ingestClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelIngest, cfg.TimeoutMS).
 			WithThinking(false).
+			WithChatMode(true).
+			WithJSONFormat(true).
 			WithKeepAlive(-1) // Sentry always pinned regardless of mode
 
 		guardianClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelGuardian, cfg.TimeoutMS).
-			WithThinking(false)
+			WithThinking(false).
+			WithChatMode(true).
+			WithJSONFormat(true).
+			WithKeepAlive(kaGuardian)
 
 		enrichClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelEnrich, cfg.TimeoutMS).
-			WithThinking(supportsThinking(cfg.ModelEnrich)).
+			WithThinking(false).
+			WithChatMode(true).
+			WithJSONFormat(true).
 			WithKeepAlive(kaEnrich)
 
-		// Navigator (T3) and Archivist always use Qwen 3.5 models (base or named
-		// identity). Chat-template formatting (/api/chat) improves structured JSON
-		// output adherence for both base and fine-tuned Qwen 3.5 models.
-		// JSON format constraint ensures valid output even from base models.
 		orchestrateClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelOrchestrate, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
@@ -286,13 +368,11 @@ func New(cfg config.BrainConfig) Brain {
 	// These are used when the primary tier's circuit breaker trips, so callers
 	// always receive a degraded-but-present response instead of zero-values.
 	fallbackEnr := enricher.New(ingestClient, st, timeout) // T2→T0: enrich with T0 model
-	var fallbackGrd *guardian.Guardian
-	fallbackGrd = guardian.New(ingestClient, st, timeout) // T1→T0: explain with T0 model
-	var fallbackOrcT2, fallbackOrcT0 *orchestrator.Orchestrator
-	if enrichClient != nil {
-		fallbackOrcT2 = orchestrator.New(enrichClient, timeout) // T3→T2: coordinate with T1 model
-	}
-	fallbackOrcT0 = orchestrator.New(ingestClient, timeout) // T3→T0: coordinate with T0 model
+	fallbackGrd := guardian.New(ingestClient, st, timeout)  // T1→T0: explain with T0 model
+	// No fallback LLM orchestrators: sending orchestration prompts to code-graph
+	// FT models (Librarian, Sentry) produces garbage — they have no conflict-resolution
+	// capability. coordinateFallback uses orchestrator.DeterministicCoordinate instead,
+	// which guarantees a correct rule-based response with zero external dependencies.
 
 	b := &impl{
 		cfg:          cfg,
@@ -309,10 +389,8 @@ func New(cfg config.BrainConfig) Brain {
 		learner:      contextbuilder.NewLearner(st),
 		cb:           newCircuitBreaker(3, 5*time.Minute),
 
-		fallbackEnricher:       fallbackEnr,
-		fallbackGuardian:       fallbackGrd,
-		fallbackOrchestratorT2: fallbackOrcT2,
-		fallbackOrchestratorT0: fallbackOrcT0,
+		fallbackEnricher: fallbackEnr,
+		fallbackGuardian: fallbackGrd,
 	}
 
 	// Pre-load all configured models in background so the first real request
@@ -366,6 +444,7 @@ func (b *impl) Ingest(ctx context.Context, req IngestRequest) (IngestResponse, e
 		return IngestResponse{NodeID: req.NodeID}, nil
 	}
 
+	start := time.Now()
 	r, err := b.ingestor.Summarize(ctx, ingestor.Request{
 		ProjectID: req.ProjectID,
 		NodeID:    req.NodeID,
@@ -374,19 +453,31 @@ func (b *impl) Ingest(ctx context.Context, req IngestRequest) (IngestResponse, e
 		Package:   req.Package,
 		Code:      req.Code,
 	})
+	latency := time.Since(start).Milliseconds()
+
 	if err != nil {
 		b.cb.recordFailure("ingest")
+		b.stats.record("ingest", false, latency)
 		return IngestResponse{NodeID: req.NodeID}, err
 	}
 
 	// Quality gate: validate the summary response.
-	if !validateResponse(r.Summary, 10) {
+	if !validateIngestResponse(r.Summary) {
 		b.cb.recordFailure("ingest")
+		b.stats.record("ingest", false, latency)
 		fmt.Fprintf(os.Stderr, "brain: ingest response below quality threshold for node %s\n", req.NodeID)
 		return IngestResponse{NodeID: req.NodeID}, nil
 	}
 
+	// Track deterministic fast-path hits (latency < 5ms = no LLM call).
+	if latency < 5 {
+		b.stats.mu.Lock()
+		b.stats.ingestDeterministic++
+		b.stats.mu.Unlock()
+	}
+
 	b.cb.recordSuccess("ingest")
+	b.stats.record("ingest", true, latency)
 	return IngestResponse{NodeID: r.NodeID, Summary: r.Summary, Tags: r.Tags}, nil
 }
 
@@ -414,6 +505,7 @@ func (b *impl) Enrich(ctx context.Context, req EnrichRequest) (EnrichResponse, e
 		return EnrichResponse{Summaries: summaries}, nil
 	}
 
+	start := time.Now()
 	r, err := b.enricher.Enrich(ctx, enricher.Request{
 		RootID:       req.RootID,
 		RootName:     req.RootName,
@@ -423,20 +515,24 @@ func (b *impl) Enrich(ctx context.Context, req EnrichRequest) (EnrichResponse, e
 		RelatedNames: req.RelatedNames,
 		TaskContext:  req.TaskContext,
 	})
+	latency := time.Since(start).Milliseconds()
+
 	if err != nil {
 		b.cb.recordFailure("enrich")
-		// Return summaries even if insight generation failed.
+		b.stats.record("enrich", false, latency)
 		return EnrichResponse{Summaries: summaries}, nil
 	}
 
 	// Quality gate: validate the insight response.
-	if !validateResponse(r.Insight, 20) {
+	if !validateEnrichResponse(r.Insight, r.Concerns) {
 		b.cb.recordFailure("enrich")
+		b.stats.record("enrich", false, latency)
 		fmt.Fprintf(os.Stderr, "brain: enrich response below quality threshold, falling back to raw data\n")
 		return EnrichResponse{Summaries: summaries}, nil
 	}
 
 	b.cb.recordSuccess("enrich")
+	b.stats.record("enrich", true, latency)
 	return EnrichResponse{
 		Insight:   r.Insight,
 		Concerns:  r.Concerns,
@@ -465,6 +561,7 @@ func (b *impl) ExplainViolation(ctx context.Context, req ViolationRequest) (Viol
 		return ViolationResponse{}, nil
 	}
 
+	start := time.Now()
 	r, err := b.guardian.Explain(ctx, guardian.Request{
 		RuleID:       req.RuleID,
 		RuleSeverity: req.RuleSeverity,
@@ -472,19 +569,24 @@ func (b *impl) ExplainViolation(ctx context.Context, req ViolationRequest) (Viol
 		SourceFile:   req.SourceFile,
 		TargetName:   req.TargetName,
 	})
+	latency := time.Since(start).Milliseconds()
+
 	if err != nil {
 		b.cb.recordFailure("guardian")
+		b.stats.record("guardian", false, latency)
 		return ViolationResponse{}, err
 	}
 
-	// Quality gate: validate the explanation response.
-	if !validateResponse(r.Explanation, 15) {
+	// Quality gate: validate explanation and fix are both non-empty.
+	if !validateGuardianResponse(r.Explanation, r.Fix) {
 		b.cb.recordFailure("guardian")
-		fmt.Fprintf(os.Stderr, "brain: guardian response below quality threshold\n")
+		b.stats.record("guardian", false, latency)
+		fmt.Fprintf(os.Stderr, "brain: guardian response missing explanation or fix\n")
 		return ViolationResponse{}, nil
 	}
 
 	b.cb.recordSuccess("guardian")
+	b.stats.record("guardian", true, latency)
 	return ViolationResponse{Explanation: r.Explanation, Fix: r.Fix}, nil
 }
 
@@ -506,57 +608,54 @@ func (b *impl) Coordinate(ctx context.Context, req CoordinateRequest) (Coordinat
 			ScopeType: c.ScopeType,
 		}
 	}
+	start := time.Now()
 	r, err := b.orchestrator.Coordinate(ctx, orchestrator.Request{
 		NewAgentID:        req.NewAgentID,
 		NewScope:          req.NewScope,
 		ConflictingClaims: claims,
 	})
+	latency := time.Since(start).Milliseconds()
+
 	if err != nil {
 		b.cb.recordFailure("orchestrate")
+		b.stats.record("orchestrate", false, latency)
 		return CoordinateResponse{}, err
 	}
 
-	// Quality gate: discard low-quality responses from borrowed peer models.
-	if !validateResponse(r.Suggestion, 15) {
+	// Quality gate: validate suggestion is non-empty.
+	if !validateCoordinateResponse(r.Suggestion) {
 		b.cb.recordFailure("orchestrate")
-		fmt.Fprintf(os.Stderr, "brain: orchestrate response below quality threshold\n")
+		b.stats.record("orchestrate", false, latency)
+		fmt.Fprintf(os.Stderr, "brain: orchestrate response empty suggestion\n")
 		return CoordinateResponse{}, nil
 	}
 
 	b.cb.recordSuccess("orchestrate")
+	b.stats.record("orchestrate", true, latency)
 	return CoordinateResponse{
 		Suggestion:       r.Suggestion,
 		AlternativeScope: r.AlternativeScope,
 	}, nil
 }
 
-// coordinateFallback tries the T2 then T0 fallback orchestrators when the
-// primary orchestrate circuit is open. Returns degraded=true on success.
-func (b *impl) coordinateFallback(ctx context.Context, req CoordinateRequest) (CoordinateResponse, error) {
+// coordinateFallback is called when the primary orchestrate circuit is open.
+// It returns a deterministic rule-based response via DeterministicCoordinate —
+// no LLM call, no external dependencies, guaranteed non-empty result.
+// LLM-backed fallbacks (T2/T0 models) are intentionally absent: Librarian and
+// Sentry are code-graph FT models with no conflict-resolution capability; sending
+// orchestration prompts to them produces garbage that corrupts downstream agents.
+func (b *impl) coordinateFallback(_ context.Context, req CoordinateRequest) (CoordinateResponse, error) {
 	claims := make([]orchestrator.WorkClaim, len(req.ConflictingClaims))
 	for i, c := range req.ConflictingClaims {
 		claims[i] = orchestrator.WorkClaim{AgentID: c.AgentID, Scope: c.Scope, ScopeType: c.ScopeType}
 	}
-	orcReq := orchestrator.Request{
+	r := orchestrator.DeterministicCoordinate(orchestrator.Request{
 		NewAgentID:        req.NewAgentID,
 		NewScope:          req.NewScope,
 		ConflictingClaims: claims,
-	}
-	// Try T2 fallback (enrich-tier model).
-	if b.fallbackOrchestratorT2 != nil && !b.cb.isOpen("enrich") {
-		if r, err := b.fallbackOrchestratorT2.Coordinate(ctx, orcReq); err == nil && validateResponse(r.Suggestion, 15) {
-			fmt.Fprintf(os.Stderr, "brain: orchestrate degraded — using T2 fallback\n")
-			return CoordinateResponse{Suggestion: r.Suggestion, AlternativeScope: r.AlternativeScope, Degraded: true}, nil
-		}
-	}
-	// Try T0 fallback (ingest-tier model).
-	if b.fallbackOrchestratorT0 != nil && !b.cb.isOpen("ingest") {
-		if r, err := b.fallbackOrchestratorT0.Coordinate(ctx, orcReq); err == nil && validateResponse(r.Suggestion, 15) {
-			fmt.Fprintf(os.Stderr, "brain: orchestrate degraded — using T0 fallback\n")
-			return CoordinateResponse{Suggestion: r.Suggestion, AlternativeScope: r.AlternativeScope, Degraded: true}, nil
-		}
-	}
-	return CoordinateResponse{}, nil
+	})
+	fmt.Fprintf(os.Stderr, "brain: orchestrate circuit open — using deterministic fallback\n")
+	return CoordinateResponse{Suggestion: r.Suggestion, AlternativeScope: r.AlternativeScope, Degraded: true}, nil
 }
 
 func (b *impl) Prune(ctx context.Context, content string) (string, error) {
@@ -573,10 +672,21 @@ func (b *impl) Memorize(ctx context.Context, req archivist.MemorizeRequest) (arc
 	resp, err := b.archivist.Memorize(ctx, req)
 	if err != nil {
 		b.cb.recordFailure("archivist")
-	} else {
-		b.cb.recordSuccess("archivist")
+		b.stats.record("archivist", false, 0)
+		return resp, err
 	}
-	return resp, err
+	// Retry once if the response is completely empty (model returned garbage
+	// that parsed to empty arrays). Non-trivial sessions should produce at
+	// least one memory or annotation.
+	if len(req.SessionEvents) > 1 && len(resp.NewMemories) == 0 && len(resp.Annotations) == 0 {
+		resp2, err2 := b.archivist.Memorize(ctx, req)
+		if err2 == nil && (len(resp2.NewMemories) > 0 || len(resp2.Annotations) > 0) {
+			resp = resp2
+		}
+	}
+	b.cb.recordSuccess("archivist")
+	b.stats.record("archivist", true, 0)
+	return resp, nil
 }
 
 func (b *impl) Summary(projectID, nodeID string) string {
@@ -842,6 +952,26 @@ func validateResponse(resp string, minLen int) bool {
 	return true
 }
 
+// validateEnrichResponse checks the enricher output has non-empty insight.
+func validateEnrichResponse(insight string, concerns []string) bool {
+	return strings.TrimSpace(insight) != ""
+}
+
+// validateGuardianResponse checks the guardian output has non-empty explanation and fix.
+func validateGuardianResponse(explanation, fix string) bool {
+	return strings.TrimSpace(explanation) != "" && strings.TrimSpace(fix) != ""
+}
+
+// validateCoordinateResponse checks the orchestrator output has non-empty suggestion.
+func validateCoordinateResponse(suggestion string) bool {
+	return strings.TrimSpace(suggestion) != ""
+}
+
+// validateIngestResponse checks the ingestor output has non-empty summary.
+func validateIngestResponse(summary string) bool {
+	return strings.TrimSpace(summary) != "" && len(summary) >= 10
+}
+
 // circuitBreaker tracks consecutive failures per operation tier and temporarily
 // disables a tier after too many failures, preventing cascading retries.
 type circuitBreaker struct {
@@ -920,4 +1050,9 @@ func (cb *circuitBreaker) status() map[string]TierState {
 // TierStatus implements TierStatusProvider for the /v1/health/tiers endpoint.
 func (b *impl) TierStatus() map[string]TierState {
 	return b.cb.status()
+}
+
+// BrainStats implements BrainStatsProvider — cumulative telemetry counters.
+func (b *impl) BrainStats() map[string]interface{} {
+	return b.stats.snapshot()
 }

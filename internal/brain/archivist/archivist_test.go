@@ -3,6 +3,7 @@ package archivist
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -199,6 +200,67 @@ func TestMemorize_PromptContainsEvents(t *testing.T) {
 	}
 }
 
+// --- Memorize: markdown-fenced JSON (ExtractJSON regression) ---
+// This is the regression test for the silent parse failure bug:
+// Without llm.ExtractJSON, a ```json ... ``` wrapped response would fail
+// json.Unmarshal silently, returning empty memories with no circuit breaker trip.
+
+func TestMemorize_MarkdownFencedJSON_ParsesCorrectly(t *testing.T) {
+	t.Parallel()
+
+	// Simulate a model that wraps JSON in markdown fences despite format:json being set.
+	// This can happen with older Ollama versions or when the model falls back.
+	fencedResponse := "```json\n" +
+		`{"new_memories":[{"key":"fence-test","content":"fenced memory content","entities":["FooService"]}],"annotations":[]}` +
+		"\n```"
+
+	client := llm.NewMockClient(fencedResponse)
+	a := New(client, 5*time.Second)
+
+	resp, err := a.Memorize(context.Background(), MemorizeRequest{
+		SessionEvents: []SessionEvent{{Tool: "get_context", Entity: "FooService"}},
+	})
+	if err != nil {
+		t.Fatalf("expected no error for markdown-fenced JSON, got: %v", err)
+	}
+	// Without ExtractJSON the unmarshal would fail silently and return empty.
+	// With the fix, the memory must be parsed correctly.
+	if len(resp.NewMemories) != 1 {
+		t.Fatalf("NewMemories len = %d, want 1 — ExtractJSON is not stripping markdown fences", len(resp.NewMemories))
+	}
+	if resp.NewMemories[0].Key != "fence-test" {
+		t.Errorf("Key = %q, want fence-test", resp.NewMemories[0].Key)
+	}
+	if resp.NewMemories[0].Content != "fenced memory content" {
+		t.Errorf("Content = %q", resp.NewMemories[0].Content)
+	}
+	if len(resp.NewMemories[0].Entities) != 1 || resp.NewMemories[0].Entities[0] != "FooService" {
+		t.Errorf("Entities = %v, want [FooService]", resp.NewMemories[0].Entities)
+	}
+}
+
+func TestMemorize_PreambleTextBeforeJSON_ParsesCorrectly(t *testing.T) {
+	t.Parallel()
+
+	// Some models emit a preamble sentence before the JSON object.
+	responseWithPreamble := `Here is the session summary: {"new_memories":[{"key":"preamble-test","content":"preamble memory","entities":[]}],"annotations":[]}`
+	client := llm.NewMockClient(responseWithPreamble)
+	a := New(client, 5*time.Second)
+
+	resp, err := a.Memorize(context.Background(), MemorizeRequest{
+		SessionEvents: []SessionEvent{{Tool: "search", Entity: "Store"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.NewMemories) != 1 {
+		t.Fatalf("NewMemories len = %d, want 1 — ExtractJSON is not stripping preamble text", len(resp.NewMemories))
+	}
+	if resp.NewMemories[0].Key != "preamble-test" {
+		t.Errorf("Key = %q, want preamble-test", resp.NewMemories[0].Key)
+	}
+}
+
 // --- UnavailableMockClient does not prevent Memorize from being called ---
 // (LLMClient.Available is not checked by Memorize — it delegates straight to Generate)
 
@@ -217,5 +279,104 @@ func TestMemorize_UnavailableMock_StillCallsGenerate(t *testing.T) {
 	// Empty string is not valid JSON → falls through to empty response.
 	if len(resp.NewMemories) != 0 || len(resp.Annotations) != 0 {
 		t.Errorf("expected empty response from unavailable mock, got: %+v", resp)
+	}
+}
+
+// --- Entities parsing: string vs array ---
+
+func TestMemorize_EntitiesAsString_ParsedCorrectly(t *testing.T) {
+	t.Parallel()
+	response := `{"new_memories":[{"key":"hub","content":"hub node","entities":"AuthService,TokenStore"}],"annotations":[]}`
+	client := llm.NewMockClient(response)
+	a := New(client, 5*time.Second)
+
+	resp, err := a.Memorize(context.Background(), MemorizeRequest{
+		SessionEvents: []SessionEvent{{Tool: "get_context", Entity: "AuthService"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.NewMemories) != 1 {
+		t.Fatalf("NewMemories len = %d, want 1", len(resp.NewMemories))
+	}
+	entities := resp.NewMemories[0].Entities
+	if len(entities) != 2 || entities[0] != "AuthService" || entities[1] != "TokenStore" {
+		t.Errorf("Entities = %v, want [AuthService TokenStore]", entities)
+	}
+}
+
+func TestMemorize_EntitiesAsArray_StillWorks(t *testing.T) {
+	t.Parallel()
+	response := `{"new_memories":[{"key":"hub","content":"hub node","entities":["AuthService"]}],"annotations":[]}`
+	client := llm.NewMockClient(response)
+	a := New(client, 5*time.Second)
+
+	resp, err := a.Memorize(context.Background(), MemorizeRequest{
+		SessionEvents: []SessionEvent{{Tool: "get_context", Entity: "AuthService"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.NewMemories) != 1 {
+		t.Fatalf("NewMemories len = %d, want 1", len(resp.NewMemories))
+	}
+	entities := resp.NewMemories[0].Entities
+	if len(entities) != 1 || entities[0] != "AuthService" {
+		t.Errorf("Entities = %v, want [AuthService]", entities)
+	}
+}
+
+// --- Retry-on-empty test (via counting mock) ---
+
+// retryMockClient returns empty JSON on the first call, valid JSON on the second.
+type retryMockClient struct {
+	calls int
+}
+
+func (c *retryMockClient) Generate(_ context.Context, _ string) (string, error) {
+	c.calls++
+	if c.calls == 1 {
+		return `{"new_memories":[],"annotations":[]}`, nil
+	}
+	return `{"new_memories":[{"key":"retry-hit","content":"found on retry","entities":"Foo"}],"annotations":[]}`, nil
+}
+
+func (c *retryMockClient) Available(_ context.Context) bool            { return true }
+func (c *retryMockClient) ModelPulled(_ context.Context) bool          { return true }
+func (c *retryMockClient) ModelName() string                           { return "mock" }
+func (c *retryMockClient) PullModel(_ context.Context, _ io.Writer) error { return nil }
+
+func TestMemorize_RetryMock_SecondCallReturnsData(t *testing.T) {
+	t.Parallel()
+
+	mock := &retryMockClient{}
+	a := New(mock, 5*time.Second)
+
+	// First call returns empty.
+	resp1, err := a.Memorize(context.Background(), MemorizeRequest{
+		SessionEvents: []SessionEvent{{Tool: "get_context", Entity: "Foo"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp1.NewMemories) != 0 {
+		t.Errorf("first call should return empty, got %d memories", len(resp1.NewMemories))
+	}
+	if mock.calls != 1 {
+		t.Errorf("expected 1 LLM call, got %d", mock.calls)
+	}
+
+	// Second call returns data (simulates retry at brain_impl level).
+	resp2, err := a.Memorize(context.Background(), MemorizeRequest{
+		SessionEvents: []SessionEvent{{Tool: "get_context", Entity: "Foo"}, {Tool: "search", Entity: "Bar"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp2.NewMemories) != 1 {
+		t.Fatalf("second call should return 1 memory, got %d", len(resp2.NewMemories))
+	}
+	if resp2.NewMemories[0].Key != "retry-hit" {
+		t.Errorf("Key = %q, want retry-hit", resp2.NewMemories[0].Key)
 	}
 }

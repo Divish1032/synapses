@@ -155,6 +155,15 @@ type Server struct {
 	stopCh    chan struct{}
 	startOnce sync.Once
 
+	// orientMu protects the orientation result cache (explain_codebase, get_repo_map).
+	// Stored separately from the 20-slot packet cache so that heavy get_context
+	// traffic cannot evict orientation results. Invalidated whenever the graph
+	// structure changes (see InvalidatePacketCacheForFile in resources.go).
+	orientMu          sync.RWMutex
+	orientExplain     *string // nil = not yet computed or invalidated
+	orientRepoCompact *string
+	orientRepoFull    *string
+
 	// B28: scale-aware tool registration.
 	// repoScale is determined from g.NodeCount() in New() and controls which
 	// tools are registered at startup vs. deferred for on-demand loading.

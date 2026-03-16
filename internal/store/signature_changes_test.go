@@ -1,8 +1,8 @@
 package store_test
 
 // Tests for Store.GetSignatureChanges — verifies that SaveGraph correctly
-// tracks prev_signature and GetSignatureChanges returns only actually-changed
-// exported entities.
+// tracks prev_signature and GetSignatureChanges returns actually-changed
+// entities (both exported and unexported).
 
 import (
 	"testing"
@@ -133,9 +133,11 @@ func TestGetSignatureChanges_NewNode(t *testing.T) {
 	}
 }
 
-// TestGetSignatureChanges_UnexportedIgnored verifies that unexported entities
-// are never returned even if their signature changed.
-func TestGetSignatureChanges_UnexportedIgnored(t *testing.T) {
+// TestGetSignatureChanges_UnexportedChanged verifies that unexported entities
+// ARE returned when their signature changes — test-file callers in the same
+// package call unexported functions directly and break compilation when their
+// signature changes. FIX-R20A: removed the exported=1 filter.
+func TestGetSignatureChanges_UnexportedChanged(t *testing.T) {
 	st := openTestStore(t)
 
 	g1 := graph.New("test-repo")
@@ -163,8 +165,13 @@ func TestGetSignatureChanges_UnexportedIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSignatureChanges: %v", err)
 	}
-	if len(changes) != 0 {
-		t.Errorf("expected 0 changes for unexported entity, got %d", len(changes))
+	// Unexported entities WITH a signature change MUST be returned so that
+	// their callers (e.g. _test.go files) can be reported as broken.
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change for unexported entity with changed sig, got %d", len(changes))
+	}
+	if changes[0].Name != "helper" {
+		t.Errorf("expected Name=helper, got %q", changes[0].Name)
 	}
 }
 

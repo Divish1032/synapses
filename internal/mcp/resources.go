@@ -394,6 +394,15 @@ func (s *Server) InvalidatePacketCacheForFile(changedFile string) {
 	s.packetCache = make(map[string]*packetCacheEntry, packetCacheMax)
 	s.packetCacheMu.Unlock()
 
+	// Invalidate the orientation cache (explain_codebase, get_repo_map).
+	// These are stored separately from the packet cache to survive LRU eviction,
+	// but they must be cleared on any structural graph change.
+	s.orientMu.Lock()
+	s.orientExplain = nil
+	s.orientRepoCompact = nil
+	s.orientRepoFull = nil
+	s.orientMu.Unlock()
+
 	s.notifyResourceChanged("synapses://active-context")
 	s.notifyResourceChanged("synapses://violations")
 	if changedFile != "" {
