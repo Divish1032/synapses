@@ -156,6 +156,50 @@ func TestCarveConfig_OverridesApplied(t *testing.T) {
 	}
 }
 
+// FIX-RESOLVER-1: use_go_types should default to true when go.mod is present.
+func TestLoad_UseGoTypes_DefaultsTrueWhenGoModPresent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.UseGoTypes {
+		t.Error("expected UseGoTypes=true when go.mod is present, got false")
+	}
+}
+
+func TestLoad_UseGoTypes_FalseWhenNoGoMod(t *testing.T) {
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UseGoTypes {
+		t.Error("expected UseGoTypes=false when no go.mod, got true")
+	}
+}
+
+func TestLoad_UseGoTypes_ExplicitFalseRespected(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// synapses.json with explicit use_go_types: false — should override the go.mod default.
+	cfgJSON := []byte(`{"use_go_types": false}`)
+	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), cfgJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UseGoTypes {
+		t.Error("explicit use_go_types=false in synapses.json should not be overridden by go.mod detection")
+	}
+}
+
 func TestCheckViolations_NoRules(t *testing.T) {
 	cfg, _ := config.Load(t.TempDir()) // empty dir → no rules
 	g := buildViolationGraph(t)

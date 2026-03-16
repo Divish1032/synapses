@@ -379,7 +379,13 @@ func Load(dir string) (*Config, error) {
 	path := filepath.Join(dir, configFileName)
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return defaultConfig(), nil
+		cfg := defaultConfig()
+		// No synapses.json — user has not explicitly set anything.
+		// Auto-enable use_go_types for Go projects.
+		if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
+			cfg.UseGoTypes = true
+		}
+		return cfg, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -395,6 +401,22 @@ func Load(dir string) (*Config, error) {
 	}
 
 	cfg.applyDefaults()
+
+	// FIX-RESOLVER-1: auto-enable use_go_types for Go projects unless the user
+	// explicitly set it in synapses.json. A plain bool can't distinguish
+	// "not set" from "set to false", so we re-parse the raw JSON with a *bool
+	// to detect the explicit-false case and respect the user's intent.
+	if !cfg.UseGoTypes {
+		var rawGoTypes struct {
+			UseGoTypes *bool `json:"use_go_types"`
+		}
+		if json.Unmarshal(data, &rawGoTypes) == nil && rawGoTypes.UseGoTypes == nil {
+			// Field absent from JSON — apply go.mod auto-default.
+			if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
+				cfg.UseGoTypes = true
+			}
+		}
+	}
 
 	// Resolve env var tokens for peers. SYNAPSES_PEER_TOKEN_<NAME> always wins
 	// over the JSON value, making it safe for CI/CD environments.

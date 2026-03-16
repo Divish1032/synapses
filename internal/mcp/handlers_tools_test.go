@@ -461,6 +461,62 @@ func TestHandleGetContext_CompactFormat(t *testing.T) {
 	_ = result
 }
 
+// DIAG-3: caller-count confidence warning for methods with use_go_types=false.
+func TestHandleGetContext_CallerCountWarning_MethodNoCallers(t *testing.T) {
+	st := openTestStore(t)
+	g := graph.New("test-repo")
+	// cfg from a temp dir that has no go.mod → UseGoTypes stays false.
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	// Verify the test precondition: use_go_types must be false.
+	if cfg.UseGoTypes {
+		t.Skip("use_go_types=true (go.mod found in TempDir?); DIAG-3 warning only fires when false")
+	}
+	// Add a NodeMethod with no callers.
+	id := g.MakeNodeID("pkg/db/store.go", "Store.Close")
+	g.AddNode(&graph.Node{
+		ID:      id,
+		Type:    graph.NodeMethod,
+		Name:    "Store.Close",
+		File:    "pkg/db/store.go",
+		Package: "db",
+	})
+	s := New(g, cfg, st)
+	req := callTool(map[string]any{"entity": "Store.Close"})
+	result, err := s.handleGetContext(ctx, req)
+	m := mustResult(t, result, err)
+	if _, ok := m["caller_count_warning"]; !ok {
+		t.Error("expected caller_count_warning in response for zero-caller method with use_go_types=false")
+	}
+}
+
+func TestHandleGetContext_NoCallerWarning_WhenUseGoTypesTrue(t *testing.T) {
+	st := openTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	cfg.UseGoTypes = true // explicitly enabled
+	id := g.MakeNodeID("pkg/db/store.go", "Store.Close")
+	g.AddNode(&graph.Node{
+		ID:      id,
+		Type:    graph.NodeMethod,
+		Name:    "Store.Close",
+		File:    "pkg/db/store.go",
+		Package: "db",
+	})
+	s := New(g, cfg, st)
+	req := callTool(map[string]any{"entity": "Store.Close"})
+	result, err := s.handleGetContext(ctx, req)
+	m := mustResult(t, result, err)
+	if _, ok := m["caller_count_warning"]; ok {
+		t.Error("expected no caller_count_warning when use_go_types=true")
+	}
+}
+
 // ── toDirectionalContext ──────────────────────────────────────────────────────
 
 func TestToDirectionalContext_WithEdges(t *testing.T) {

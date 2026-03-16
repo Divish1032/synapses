@@ -140,6 +140,7 @@ type directionalContext struct {
 	EntityMemories         []entityMemoryHint            `json:"entity_memories,omitempty"`          // R10: institutional knowledge attached to this entity
 	QualityGaps            []store.QualityGap            `json:"quality_gaps,omitempty"`             // R32: open quality gaps on this entity
 	EntityHash             string                        `json:"entity_hash,omitempty"`              // R14: SHA1 of node+neighbor IDs; stable cache key for clients
+	CallerCountWarning     string                        `json:"caller_count_warning,omitempty"`     // DIAG-3: set when caller count is 0 for a method and use_go_types=false
 }
 
 // computeEntityHash returns a short SHA1 hex digest that identifies the
@@ -680,6 +681,14 @@ func (s *Server) handleGetContext(
 
 	// Wait for all enrichment goroutines to complete.
 	enrichWg.Wait()
+
+	// DIAG-3: warn when caller count is 0 for a method and use_go_types is disabled.
+	// Method calls via local variables (e.g. g.Method()) are silently unresolved
+	// without use_go_types, so "0 callers" is often false rather than accurate.
+	if len(dc.Callers) == 0 && best != nil && best.Type == graph.NodeMethod &&
+		s.config != nil && !s.config.UseGoTypes {
+		dc.CallerCountWarning = "⚠ caller_confidence: incomplete — this is a method and use_go_types=false in synapses.json; callers invoked via local variables (e.g. v.Method()) are not in the graph. Actual caller count may be higher. Enable use_go_types: true for complete Go method call tracking."
+	}
 
 	// R32: surface open quality gaps on this entity.
 	if s.store != nil && dc.Root != nil {
