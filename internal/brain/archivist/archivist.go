@@ -84,10 +84,18 @@ func (a *Archivist) Memorize(ctx context.Context, req MemorizeRequest) (Memorize
 func buildMemorizePrompt(req MemorizeRequest) string {
 	eventsJSON, _ := json.Marshal(req.SessionEvents)
 	memoryJSON, _ := json.Marshal(req.ExistingMemory)
-	return fmt.Sprintf(`Analyze this agent session and extract what is worth remembering.
+	return fmt.Sprintf(`Analyze this agent session and extract what is worth remembering long-term.
 Session events: %s
 Existing memory: %s
-Return JSON: {"new_memories":[{"key":"...","content":"...","entities":["..."]}],"annotations":[{"node":"...","note":"..."}]}
-Only return JSON, no explanation. Return {"new_memories":[],"annotations":[]} if nothing is worth saving.`,
+
+Rules:
+- Only save architectural discoveries, non-obvious relationships, or decisions that will matter in future sessions.
+- If the session is trivial (a single lookup, no new discoveries, or only routine tool calls), return empty arrays.
+- Do not duplicate entries already present in existing_memory.
+- Keep each memory concise (one sentence for content).
+- Only annotate entities that were meaningfully analyzed, not just mentioned.
+
+Return JSON only: {"new_memories":[{"key":"short_snake_case_key","content":"what to remember","entities":["EntityName"]}],"annotations":[{"node":"EntityName","note":"observation"}]}
+Return {"new_memories":[],"annotations":[]} if nothing is worth saving.`,
 		string(eventsJSON), string(memoryJSON))
 }
