@@ -43,6 +43,16 @@ type Memory struct {
 	Source         string `json:"source"`
 }
 
+// InvalidatedMemory is a stale memory surfaced once at session start (AM-3).
+// After surfacing, surfaced_at is set so the memory is not returned again.
+type InvalidatedMemory struct {
+	ID            string `json:"id"`
+	Content       string `json:"content"`
+	Tier          string `json:"tier"`
+	StaleReason   string `json:"stale_reason"`
+	InvalidatedAt string `json:"invalidated_at"` // when the memory was created (for context)
+}
+
 // InsertMemory writes a new memory, applying tier-based TTL and noise filtering.
 // Returns the memory ID. Deduplicates against existing memories with similar content.
 func (s *Store) InsertMemory(m Memory) (string, error) {
@@ -257,40 +267,97 @@ func (s *Store) ExpireMemories() (int64, error) {
 }
 
 // MarkEntityMemoriesStale marks all entity-tier memories for the given entity
-// as expiring in 30 days. Called when a node is tombstoned (deleted from graph).
-func (s *Store) MarkEntityMemoriesStale(entityID string) error {
+// as stale (stale=1) and shortens their TTL to 30 days.
+// Called when a single node is tombstoned (deleted from graph).
+// For bulk node removal use MarkEntityMemoriesStaleForNodes.
+func (s *Store) MarkEntityMemoriesStale(entityID, reason string) error {
 	staleExpiry := time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339)
 	_, err := s.db.Exec(`
-		UPDATE memories SET expires_at = ?
+		UPDATE memories SET stale = 1, stale_reason = ?, expires_at = ?
 		WHERE tier = 'entity' AND entity_id = ?`,
-		staleExpiry, entityID)
+		reason, staleExpiry, entityID)
 	return err
+}
+
+// MarkEntityMemoriesStaleForNodes marks entity-tier memories stale (stale=1) for
+// all entity IDs in nodeIDs in a single batch. Covers non-anchored entity memories
+// (written with entity_id but no anchor_nodes) that MarkAnchoredMemoriesStale
+// does not reach. nodeIDs is processed in batches of ≤500 to respect SQLite's
+// SQLITE_MAX_VARIABLE_NUMBER limit. reason is stored in stale_reason.
+// A no-op when nodeIDs is empty.
+func (s *Store) MarkEntityMemoriesStaleForNodes(nodeIDs []string, reason string) error {
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store.MarkEntityMemoriesStaleForNodes begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	staleExpiry := time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339)
+	const batchSize = 500
+	for i := 0; i < len(nodeIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(nodeIDs) {
+			end = len(nodeIDs)
+		}
+		batch := nodeIDs[i:end]
+		placeholders := strings.Repeat("?,", len(batch))
+		placeholders = placeholders[:len(placeholders)-1]
+		args := make([]any, 0, len(batch)+2)
+		args = append(args, reason, staleExpiry)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		if _, err := tx.Exec(`
+			UPDATE memories SET stale = 1, stale_reason = ?, expires_at = ?
+			WHERE tier = 'entity' AND entity_id IN (`+placeholders+`)`,
+			args...); err != nil {
+			return fmt.Errorf("store.MarkEntityMemoriesStaleForNodes: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // MarkAnchoredMemoriesStale sets stale=1 on all memories that have at least one
 // anchor in nodeIDs. Idempotent: calling twice with the same IDs is safe.
 // reason is stored in stale_reason for surfacing in session_init (AM-3).
 // A no-op when nodeIDs is empty.
+//
+// nodeIDs is processed in batches of ≤500 to stay under SQLite's default
+// SQLITE_MAX_VARIABLE_NUMBER limit of 999 (Gap 5 fix).
 func (s *Store) MarkAnchoredMemoriesStale(nodeIDs []string, reason string) error {
 	if len(nodeIDs) == 0 {
 		return nil
 	}
-	placeholders := strings.Repeat("?,", len(nodeIDs))
-	placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
-	args := make([]any, 0, len(nodeIDs)+1)
-	args = append(args, reason)
-	for _, id := range nodeIDs {
-		args = append(args, id)
-	}
-	_, err := s.db.Exec(`
-		UPDATE memories SET stale = 1, stale_reason = ?
-		WHERE id IN (
-			SELECT memory_id FROM memory_anchors WHERE node_id IN (`+placeholders+`)
-		)`, args...)
+	tx, err := s.db.Begin()
 	if err != nil {
-		return fmt.Errorf("store.MarkAnchoredMemoriesStale: %w", err)
+		return fmt.Errorf("store.MarkAnchoredMemoriesStale begin tx: %w", err)
 	}
-	return nil
+	defer tx.Rollback() //nolint:errcheck
+	const batchSize = 500
+	for i := 0; i < len(nodeIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(nodeIDs) {
+			end = len(nodeIDs)
+		}
+		batch := nodeIDs[i:end]
+		placeholders := strings.Repeat("?,", len(batch))
+		placeholders = placeholders[:len(placeholders)-1]
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, reason)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		if _, err := tx.Exec(`
+			UPDATE memories SET stale = 1, stale_reason = ?
+			WHERE id IN (
+				SELECT memory_id FROM memory_anchors WHERE node_id IN (`+placeholders+`)
+			)`, args...); err != nil {
+			return fmt.Errorf("store.MarkAnchoredMemoriesStale: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // SearchMemories performs FTS5 BM25 full-text search over memory content.
@@ -403,6 +470,36 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 	return m.ID, nil
 }
 
+// queryFreshMemoriesForDedup returns non-expired, non-stale memories for dedup
+// comparison. Excludes stale memories (stale=1) so that TouchMemory can never
+// resurrect an AM-2-invalidated memory by deduplicating a new write against it.
+func (s *Store) queryFreshMemoriesForDedup(tier, entityID, agentID string) ([]Memory, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
+	             created_at, expires_at, last_accessed_at, source
+	      FROM memories WHERE expires_at > ? AND stale = 0`
+	args := []interface{}{now}
+	if tier != "" {
+		q += ` AND tier = ?`
+		args = append(args, tier)
+	}
+	if entityID != "" {
+		q += ` AND entity_id = ?`
+		args = append(args, entityID)
+	}
+	if agentID != "" {
+		q += ` AND agent_id = ?`
+		args = append(args, agentID)
+	}
+	q += ` ORDER BY last_accessed_at DESC LIMIT 5`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
 // prepareMemory applies defaults, validates, and checks dedup for a Memory.
 // Returns the prepared Memory, the deduped ID if a duplicate was found (empty if new),
 // and any validation error. Does NOT insert — caller decides how to write.
@@ -446,12 +543,14 @@ func (s *Store) prepareMemory(m Memory) (Memory, string, error) {
 		m.Content = string(runes[:2000]) + "…[truncated]"
 	}
 
-	// Dedup check.
+	// Dedup check — only compare against fresh (non-stale) memories.
+	// Comparing against stale memories would cause TouchMemory to resurrect
+	// invalidated data and extend its TTL indefinitely (Gap 2 fix).
 	var dupCandidates []Memory
 	if m.EntityID != "" {
-		dupCandidates, _ = s.QueryMemories(m.Tier, m.EntityID, "", 5)
+		dupCandidates, _ = s.queryFreshMemoriesForDedup(m.Tier, m.EntityID, "")
 	} else if m.AgentID != "" {
-		dupCandidates, _ = s.QueryMemories(m.Tier, "", m.AgentID, 5)
+		dupCandidates, _ = s.queryFreshMemoriesForDedup(m.Tier, "", m.AgentID)
 	}
 	for _, ex := range dupCandidates {
 		if stringSimilarity(ex.Content, m.Content) > 0.85 {

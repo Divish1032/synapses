@@ -280,9 +280,13 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 			}
 		}
 		// AM-2: cascade stale flag to memories anchored to the removed nodes.
+		// Gap-4: also stale entity-tier memories written with entity_id but no anchors.
 		if w.store != nil && len(removedIDs) > 0 {
 			if err := w.store.MarkAnchoredMemoriesStale(removedIDs, "anchor node removed"); err != nil {
 				fmt.Fprintf(os.Stderr, "synapses/watcher: cascade memory stale: %v\n", err)
+			}
+			if err := w.store.MarkEntityMemoriesStaleForNodes(removedIDs, "entity node removed"); err != nil {
+				fmt.Fprintf(os.Stderr, "synapses/watcher: cascade entity memory stale: %v\n", err)
 			}
 		}
 		w.persistAsync("")
@@ -418,6 +422,10 @@ func (w *Watcher) reparseFile(path, _ string) {
 		if len(removedIDs) > 0 {
 			if err := w.store.MarkAnchoredMemoriesStale(removedIDs, "anchor node removed"); err != nil {
 				fmt.Fprintf(os.Stderr, "synapses/watcher: cascade memory stale: %v\n", err)
+			}
+			// Gap-4: also stale entity-tier memories written with entity_id but no anchors.
+			if err := w.store.MarkEntityMemoriesStaleForNodes(removedIDs, "entity node removed"); err != nil {
+				fmt.Fprintf(os.Stderr, "synapses/watcher: cascade entity memory stale: %v\n", err)
 			}
 		}
 	}

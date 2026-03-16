@@ -685,6 +685,11 @@ func (p *GoParser) extractDeclarations(
 		if n == nil {
 			return
 		}
+		// Don't descend into function/method bodies — local consts are noise.
+		switch n.Type() {
+		case "function_declaration", "method_declaration", "func_literal":
+			return
+		}
 		if n.Type() == "const_declaration" {
 			for i := 0; i < int(n.ChildCount()); i++ {
 				spec := n.Child(i)
@@ -744,6 +749,11 @@ func (p *GoParser) extractDeclarations(
 	var walkVar func(n *sitter.Node)
 	walkVar = func(n *sitter.Node) {
 		if n == nil {
+			return
+		}
+		// Don't descend into function/method bodies — local vars are noise.
+		switch n.Type() {
+		case "function_declaration", "method_declaration", "func_literal":
 			return
 		}
 		if n.Type() == "var_declaration" {
@@ -851,6 +861,13 @@ func runQuery(
 		m, ok := qc.NextMatch()
 		if !ok {
 			break
+		}
+		// Apply predicate filters (e.g. #eq?, #match?) so that queries using
+		// these predicates are correctly evaluated. Without this, predicates
+		// are silently ignored, causing false-positive matches.
+		m = qc.FilterPredicates(m, src)
+		if len(m.Captures) == 0 {
+			continue
 		}
 		captures := make(map[string]string, len(m.Captures))
 		startLine := 0
