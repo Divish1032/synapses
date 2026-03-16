@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"io"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/config"
@@ -424,7 +425,7 @@ func TestCountIndexedFiles_AfterSaveFileMtimes(t *testing.T) {
 func TestR32_AllHotQueriesUseIndexes(t *testing.T) {
 	st := openTestStore(t)
 
-	stats := st.CollectQueryStats()
+	stats := st.CollectQueryStats(io.Discard)
 
 	if stats.FullScans > 0 {
 		t.Errorf("R32: %d hot queries use full table scans — expected 0 (missing indexes?)", stats.FullScans)
@@ -455,7 +456,7 @@ func TestR32_IndexesIdempotentOnUpgrade(t *testing.T) {
 	defer st2.Close()
 
 	// Indexes must still work after re-open.
-	stats := st2.CollectQueryStats()
+	stats := st2.CollectQueryStats(io.Discard)
 	if stats.FullScans > 0 {
 		t.Errorf("R32 after re-open: %d full scans (indexes lost on upgrade path?)", stats.FullScans)
 	}
