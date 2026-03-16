@@ -619,6 +619,14 @@ func Open(path string) (*Store, error) {
 		`CREATE INDEX IF NOT EXISTS idx_watched_symbols_entity ON agent_watched_symbols(entity_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_watched_symbols_agent  ON agent_watched_symbols(agent_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_events_agent           ON events(agent_id)`,
+		// AM-1: Memory anchors — links memories to graph node IDs for cascade invalidation.
+		`CREATE TABLE IF NOT EXISTS memory_anchors (
+			memory_id  TEXT NOT NULL,
+			node_id    TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (memory_id, node_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_anchors_node ON memory_anchors(node_id)`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
 			db.Close()

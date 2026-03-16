@@ -332,6 +332,45 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 	return scanMemories(rows)
 }
 
+// InsertMemoryAnchors links a memory to one or more graph node IDs.
+// Used by AM-1: agents pass anchor_nodes when calling remember() to bind
+// codebase-derived beliefs to the graph. AM-2 cascades invalidation via node_id index.
+func (s *Store) InsertMemoryAnchors(memoryID string, nodeIDs []string) error {
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, nid := range nodeIDs {
+		if nid == "" {
+			continue
+		}
+		_, err := s.db.Exec(`INSERT OR IGNORE INTO memory_anchors (memory_id, node_id, created_at) VALUES (?, ?, ?)`,
+			memoryID, nid, now)
+		if err != nil {
+			return fmt.Errorf("insert memory anchor: %w", err)
+		}
+	}
+	return nil
+}
+
+// GetMemoryAnchors returns the node IDs anchored to a memory.
+func (s *Store) GetMemoryAnchors(memoryID string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT node_id FROM memory_anchors WHERE memory_id = ? ORDER BY node_id`, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("get memory anchors: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var nid string
+		if err := rows.Scan(&nid); err != nil {
+			return nil, fmt.Errorf("scan memory anchor: %w", err)
+		}
+		out = append(out, nid)
+	}
+	return out, rows.Err()
+}
+
 // CountMemories returns total memory count by tier.
 func (s *Store) CountMemories() (map[string]int, error) {
 	rows, err := s.db.Query(`SELECT tier, COUNT(*) FROM memories GROUP BY tier`)

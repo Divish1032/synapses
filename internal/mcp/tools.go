@@ -1855,7 +1855,7 @@ var toolCatalog = []toolCatalogEntry{
 	{Name: "get_agents", Category: "coordination", Description: "List all agents in this repository", Keywords: []string{"agents", "who", "list", "working", "active"}, Example: `get_agents()`},
 
 	// Memory
-	{Name: "remember", Category: "memory", Description: "Record a decision or failure as an episode", Keywords: []string{"remember", "record", "episode", "decision", "failure", "learn"}, Example: `remember(agent_id="...", decision="...", episode_type="failure")`},
+	{Name: "remember", Category: "memory", Description: "Record a decision or failure as an episode. Use anchor_nodes to bind codebase-derived beliefs to graph nodes for auto-invalidation.", Keywords: []string{"remember", "record", "episode", "decision", "failure", "learn", "anchor", "bind", "memory", "belief"}, Example: `remember(agent_id="...", decision="...", episode_type="failure", anchor_nodes='["repo::file.go::Func"]')`},
 	{Name: "recall", Category: "memory", Description: "Search or browse episodic memory (empty query=chronological, query=FTS5 search)", Keywords: []string{"recall", "remember", "past", "history", "episode", "memory", "similar", "browse", "episodes"}, Example: `recall(query="auth handler redirect loop")`},
 	{Name: "check_plan_safety", Category: "memory", Description: "Check if similar plans failed before", Keywords: []string{"safety", "check", "failed", "before", "similar", "risk", "interjection"}, Example: `check_plan_safety(plan_description="modify auth login flow")`},
 

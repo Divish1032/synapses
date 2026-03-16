@@ -51,6 +51,40 @@ func TestHandleRemember_NoStore_ReturnsError(t *testing.T) {
 	mustErrorResult(t, res, err)
 }
 
+// ── AM-1: anchor_nodes ────────────────────────────────────────────────────────
+
+func TestHandleRemember_WithAnchorNodes(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleRemember(ctx, callTool(map[string]any{
+		"agent_id":     "anchor-agent",
+		"decision":     "AuthService handles all authentication flows via middleware",
+		"rationale":    "centralize auth logic",
+		"outcome":      "success",
+		"anchor_nodes": `["repo::auth.go::AuthService","repo::auth.go::AuthMiddleware"]`,
+	}))
+	m := mustResult(t, res, err)
+	hasKey(t, m, "episode_id")
+	// Verify anchored_to count is in response.
+	if v, ok := m["anchored_to"]; !ok {
+		t.Error("expected anchored_to in response")
+	} else if v.(float64) != 2 {
+		t.Errorf("expected anchored_to=2, got %v", v)
+	}
+}
+
+func TestHandleRemember_WithoutAnchorNodes_NoAnchoredField(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleRemember(ctx, callTool(map[string]any{
+		"agent_id": "no-anchor-agent",
+		"decision": "use interface abstraction for testing",
+		"outcome":  "success",
+	}))
+	m := mustResult(t, res, err)
+	if _, ok := m["anchored_to"]; ok {
+		t.Error("expected no anchored_to field when anchor_nodes not provided")
+	}
+}
+
 // ── handleRecall ──────────────────────────────────────────────────────────────
 
 func TestHandleRecall_FindsMatch(t *testing.T) {

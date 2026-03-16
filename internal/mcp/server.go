@@ -1790,6 +1790,14 @@ func (s *Server) registerTools() {
 			mcp.WithString("project_id",
 				mcp.Description("Repo context (leave empty to use current project)."),
 			),
+			mcp.WithString("anchor_nodes",
+				mcp.Description("JSON array of graph node IDs to anchor this memory to. "+
+					"When anchored nodes change or disappear from the graph, the memory is "+
+					"automatically flagged as stale. Use for codebase-derived facts: "+
+					"architecture decisions, component status, API signatures. "+
+					"Example: '[\"repo::pkg/auth.go::AuthService\"]'. "+
+					"Omit for durable facts (user preferences, feedback) that have no codebase anchor."),
+			),
 		),
 		s.handleRemember,
 	)
