@@ -4,6 +4,7 @@ package mcp
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/config"
@@ -1568,8 +1569,9 @@ func TestHandleVerifyImplementation_SignatureImpact_ExportedFuncWithCallers(t *t
 }
 
 // TestHandleVerifyImplementation_SignatureImpact_UnexportedNoImpact checks that
-// unexported symbols do not produce signature_impact entries even when their
-// signature changes — GetSignatureChanges filters exported=1 only.
+// unexported symbols with no callers do not produce signature_impact entries —
+// GetSignatureChanges now detects them (FIX-R20A), but ImpactAnalysis returns
+// TotalAffected=0 when no callers exist, so no warning is emitted.
 func TestHandleVerifyImplementation_SignatureImpact_UnexportedNoImpact(t *testing.T) {
 	st := openMCPTestStore(t)
 	g := graph.New("test-repo")
@@ -1604,11 +1606,107 @@ func TestHandleVerifyImplementation_SignatureImpact_UnexportedNoImpact(t *testin
 	res, err := s.handleVerifyImplementation(ctx, req)
 	m := mustResult(t, res, err)
 
-	// internalHelper is unexported — GetSignatureChanges never returns it.
+	// internalHelper is unexported with no callers — ImpactAnalysis returns TotalAffected=0, so no warning.
 	if w, _ := m["impact_warnings"].(float64); w != 0 {
 		t.Errorf("expected 0 impact_warnings for unexported entity, got %v", w)
 	}
 	noKey(t, m, "impact_hint")
+}
+
+// TestHandleVerifyImplementation_SignatureImpact_UnexportedWithTestCaller verifies
+// FIX-R20A: an unexported function whose signature changes reports its test-file
+// caller in signature_impact so the agent knows to update the test.
+func TestHandleVerifyImplementation_SignatureImpact_UnexportedWithTestCaller(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
+
+	targetID := g.MakeNodeID("pkg/mcp/explain.go", "buildExplanation")
+	callerID := g.MakeNodeID("pkg/mcp/explain_test.go", "TestBuildExplanation")
+
+	// SaveGraph 1: original signature.
+	g1 := graph.New("test-repo")
+	g1.AddNode(&graph.Node{
+		ID: targetID, Name: "buildExplanation", Type: graph.NodeFunction,
+		File: "pkg/mcp/explain.go", Package: "mcp", Exported: false, Line: 10,
+		Metadata: map[string]string{"signature": "func buildExplanation(identity *ProjectIdentity, nodes []*Node, edges map[NodeID]int, repoRoot string) string"},
+	})
+	g1.AddNode(&graph.Node{
+		ID: callerID, Name: "TestBuildExplanation", Type: graph.NodeFunction,
+		File: "pkg/mcp/explain_test.go", Package: "mcp", Exported: false, Line: 5,
+		Metadata: map[string]string{"signature": "func TestBuildExplanation(t *testing.T)"},
+	})
+	// Test file calls the unexported function.
+	g1.AddEdge(&graph.Edge{From: callerID, To: targetID, Type: graph.EdgeCalls})
+	if err := st.SaveGraph(g1); err != nil {
+		t.Fatalf("SaveGraph 1: %v", err)
+	}
+
+	// SaveGraph 2: signature changed — dropped the edges param.
+	g2 := graph.New("test-repo")
+	g2.AddNode(&graph.Node{
+		ID: targetID, Name: "buildExplanation", Type: graph.NodeFunction,
+		File: "pkg/mcp/explain.go", Package: "mcp", Exported: false, Line: 10,
+		Metadata: map[string]string{"signature": "func buildExplanation(identity *ProjectIdentity, nodes []*Node, repoRoot string) string"},
+	})
+	g2.AddNode(&graph.Node{
+		ID: callerID, Name: "TestBuildExplanation", Type: graph.NodeFunction,
+		File: "pkg/mcp/explain_test.go", Package: "mcp", Exported: false, Line: 5,
+		Metadata: map[string]string{"signature": "func TestBuildExplanation(t *testing.T)"},
+	})
+	g2.AddEdge(&graph.Edge{From: callerID, To: targetID, Type: graph.EdgeCalls})
+	if err := st.SaveGraph(g2); err != nil {
+		t.Fatalf("SaveGraph 2: %v", err)
+	}
+
+	// Sync the live graph with same edges so ImpactAnalysis can traverse them.
+	s.graph.AddNode(&graph.Node{
+		ID: targetID, Name: "buildExplanation", Type: graph.NodeFunction,
+		File: "pkg/mcp/explain.go", Package: "mcp", Exported: false, Line: 10,
+	})
+	s.graph.AddNode(&graph.Node{
+		ID: callerID, Name: "TestBuildExplanation", Type: graph.NodeFunction,
+		File: "pkg/mcp/explain_test.go", Package: "mcp", Exported: false, Line: 5,
+	})
+	s.graph.AddEdge(&graph.Edge{From: callerID, To: targetID, Type: graph.EdgeCalls})
+
+	req := callTool(map[string]any{
+		"files_written": `["pkg/mcp/explain.go"]`,
+	})
+	res, err := s.handleVerifyImplementation(ctx, req)
+	m := mustResult(t, res, err)
+
+	// Must report 1 impact warning — the test file caller is now visible.
+	if w, _ := m["impact_warnings"].(float64); w != 1 {
+		t.Errorf("expected 1 impact_warning for unexported entity with test caller, got %v", w)
+	}
+	files, _ := m["files"].([]any)
+	if len(files) == 0 {
+		t.Fatal("expected file report")
+	}
+	fileEntry, _ := files[0].(map[string]any)
+	si, ok := fileEntry["signature_impact"].([]any)
+	if !ok || len(si) == 0 {
+		t.Fatalf("expected signature_impact entry, got %v", fileEntry["signature_impact"])
+	}
+	entry, _ := si[0].(map[string]any)
+	callers, _ := entry["callers"].([]any)
+	if len(callers) == 0 {
+		t.Fatal("expected at least 1 caller (the test file)")
+	}
+	// Verify the test file caller is present.
+	found := false
+	for _, c := range callers {
+		caller, _ := c.(map[string]any)
+		if f, _ := caller["file"].(string); strings.Contains(f, "_test.go") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a _test.go file in callers, got %v", callers)
+	}
 }
 
 // TestHandleVerifyImplementation_SignatureImpact_ExportedStructWithCallers checks

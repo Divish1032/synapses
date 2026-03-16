@@ -152,6 +152,9 @@ type ollamaChatRequest struct {
 	Messages  []ollamaMessage `json:"messages"`
 	Stream    bool            `json:"stream"`
 	KeepAlive *int            `json:"keep_alive,omitempty"`
+	// Think controls extended thinking mode (Ollama ≥0.6, Qwen3.x models).
+	// omitempty: nil = not sent. Use &false to suppress chain-of-thought.
+	Think *bool `json:"think,omitempty"`
 	// Format constrains output to a specific format. Set to "json" to force
 	// valid JSON output. omitempty: empty string = not sent (free-form output).
 	Format  string        `json:"format,omitempty"`
@@ -201,14 +204,12 @@ func (c *OllamaClient) generateRaw(ctx context.Context, prompt string) (string, 
 		reqBody.Format = "json"
 	}
 
-	// Set think: bool for Qwen3.x models via the Ollama ≥0.6 API field.
-	// The old /think and /no_think prompt prefixes are intentionally removed:
-	// Ollama 0.17.6+ ignores them for qwen3.5 models and returns an empty
-	// response field when the prefix is present.
-	if strings.HasPrefix(strings.ToLower(c.model), "qwen3") {
-		think := c.think
-		reqBody.Think = &think
-	}
+	// Set think: bool for all models via the Ollama ≥0.6 API field.
+	// Non-Qwen3 models ignore this field. Sending it for all models avoids
+	// needing to detect model family — synapses/* models are Qwen3-based but
+	// don't start with "qwen3", so a name-prefix check would miss them.
+	think := c.think
+	reqBody.Think = &think
 
 	data, err := json.Marshal(reqBody)
 	if err != nil {
@@ -267,6 +268,8 @@ func (c *OllamaClient) generateChat(ctx context.Context, prompt string) (string,
 	if c.useJSON {
 		reqBody.Format = "json"
 	}
+	think := c.think
+	reqBody.Think = &think
 
 	data, err := json.Marshal(reqBody)
 	if err != nil {
@@ -303,17 +306,25 @@ func (c *OllamaClient) generateChat(ctx context.Context, prompt string) (string,
 	return strings.TrimSpace(response), nil
 }
 
-// WarmUp pre-loads the model into Ollama's memory by sending an empty prompt
-// with keep_alive=-1 (pin indefinitely). The model weights are loaded without
-// generating output, eliminating cold-start latency on the first real request.
+// WarmUp pre-loads the model into Ollama's memory by sending an empty prompt.
+// Uses the client's configured keepAlive so that the warm model respects the
+// same RAM residency policy as live requests. Pinned tiers (keepAlive=-1) stay
+// loaded; JIT tiers (keepAlive=0) get pre-loaded but are evicted on first real
+// request — this avoids warmup overriding the intended Optimal-mode RAM budget.
 // Implements ModelWarmer. Called in background goroutines at brain startup.
 func (c *OllamaClient) WarmUp(ctx context.Context) error {
-	pinForever := -1
+	// Use the client's configured keep_alive. If not set, default to -1 (pin)
+	// to preserve the historical warmup behaviour for unconfigured clients.
+	keepAlive := c.keepAlive
+	if keepAlive == nil {
+		pinForever := -1
+		keepAlive = &pinForever
+	}
 	reqBody := ollamaRequest{
 		Model:     c.model,
 		Prompt:    "",
 		Stream:    false,
-		KeepAlive: &pinForever,
+		KeepAlive: keepAlive,
 		Options: ollamaOptions{
 			Temperature: 0.0,
 			NumPredict:  1, // minimal tokens — just enough to confirm the model loaded

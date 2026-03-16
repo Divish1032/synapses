@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -34,6 +35,27 @@ func ExtractJSON(s string) string {
 		s = s[:end+1]
 	}
 	return strings.TrimSpace(s)
+}
+
+// RepairJSON attempts to fix common JSON bracket mismatches produced by
+// Qwen3.5 models. The most frequent issue is nested arrays-of-objects where
+// the model writes "]]" instead of "]}]" (dropping the closing "}" of the
+// inner object before the outer array bracket).
+//
+// Only modifies the input when it fails json.Unmarshal AND the fix produces
+// valid JSON — never corrupts already-valid output.
+func RepairJSON(s string) string {
+	s = strings.TrimSpace(s)
+	var probe json.RawMessage
+	if json.Unmarshal([]byte(s), &probe) == nil {
+		return s // already valid
+	}
+	// Fix 1: ]] → ]}] — missing object-close before outer array-close.
+	fixed := strings.ReplaceAll(s, "]]", "]}]")
+	if json.Unmarshal([]byte(fixed), &probe) == nil {
+		return fixed
+	}
+	return s // couldn't fix
 }
 
 // Truncate shortens s to at most n bytes for use in error messages.

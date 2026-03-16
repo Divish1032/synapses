@@ -16,20 +16,19 @@ import (
 type IntelligenceMode string
 
 const (
-	// ModeOptimal targets 8 GB RAM systems (<800 MB brain budget).
-	// Sentry is always pinned. Librarian, Navigator, and Archivist are loaded
-	// on demand and evicted immediately after each request.
-	// Guardian falls back to Librarian (no separate Critic slot).
+	// ModeOptimal targets 8 GB RAM systems.
+	// Guardian shares Librarian's identity (no separate Critic).
+	// All identities share qwen3.5:2b weights (~2.7GB), always pinned.
 	ModeOptimal IntelligenceMode = "optimal"
 
-	// ModeStandard targets 16 GB RAM systems (~2.2 GB brain budget).
-	// Sentry and Librarian are pinned. Critic, Navigator, and Archivist share
-	// a single rotating slot with a 5-minute TTL.
+	// ModeStandard targets 16 GB+ RAM systems.
+	// Critic gets its own identity for violation explanations.
+	// All identities share qwen3.5:2b weights (~2.7GB), always pinned.
 	ModeStandard IntelligenceMode = "standard"
 
-	// ModeFull targets 32 GB+ RAM systems (~4.5 GB brain budget).
-	// All tiers are pinned in RAM for zero cold-start latency.
-	// Q8_0 quantization used for maximum quality.
+	// ModeFull is identical to ModeStandard. Kept for config compatibility.
+	// Originally planned for Q8 quantization, but all identities now share
+	// the same base model and Q8/Q4 distinction was dropped.
 	ModeFull IntelligenceMode = "full"
 )
 
@@ -195,6 +194,7 @@ func DefaultConfig() BrainConfig {
 		ModelGuardian:    "qwen3.5:2b",
 		ModelEnrich:      "qwen3.5:2b",
 		ModelOrchestrate: "qwen3.5:2b",
+		ModelArchivist:   "qwen3.5:2b",
 		TimeoutMS:        60000,
 		DBPath:           filepath.Join(home, ".synapses", "brain.sqlite"),
 		ModelDir:         filepath.Join(home, ".synapses", "models"),
@@ -205,6 +205,7 @@ func DefaultConfig() BrainConfig {
 		Enrich:           true,
 		Guardian:         true,
 		Orchestrate:      true,
+		Memorize:         true,
 		ContextBuilder:   true,
 		LearningEnabled:  true,
 		DefaultPhase:     "development",
@@ -361,58 +362,41 @@ func (c *BrainConfig) applyDefaults() {
 
 // AutoConfigureModels sets per-tier model tags based on IntelligenceMode.
 //
-// The three modes map to the specialist/generalist split:
-//   - Fine-tuned (FT) models handle code-structural tasks: Sentry, Librarian, Critic.
-//   - Base Qwen 3.5 2B handles general reasoning tasks: Navigator, Archivist (always).
+// All tiers use base Qwen 3.5 2B (Q8, ~2.7GB) with different Ollama Modelfile
+// identities (system prompts). FT models were evaluated and found to underperform
+// the base model — catastrophic forgetting destroyed task capability while the
+// base model with system prompt + format:json produces correct output for all tiers.
 //
-// Model tag conventions:
+// Ollama deduplicates weights: all 5 identities share the same 2.7GB of RAM.
+// Modes differ only in keep_alive (RAM residency), not model quality.
 //
-//	synapses/sentry:q4   — Sentry 0.5B FT, Q4_K_M quantization
-//	synapses/sentry:q8   — Sentry 0.5B FT, Q8_0 quantization
-//	synapses/librarian:q4 — Librarian 1.5B FT, Q4_K_M
-//	synapses/librarian:q8 — Librarian 1.5B FT, Q8_0
-//	synapses/critic:q4   — Critic 1.5B FT, Q4_K_M
-//	synapses/critic:q8   — Critic 1.5B FT, Q8_0
-//	qwen3.5:2b           — Base Qwen 3.5 2B (Navigator + Archivist always)
+// Model tags (all backed by qwen3.5:2b):
 //
-// Mode summary:
+//	synapses/sentry    — Gate & Router (classify entities)
+//	synapses/librarian — Enricher (analyze graph slices)
+//	synapses/critic    — Guardian (review diffs for violations)
+//	synapses/navigator — Orchestrator (resolve scope conflicts)
+//	synapses/archivist — Memory synthesizer (session summaries)
 //
-//	| Tier      | Optimal (8GB)          | Standard (16GB)        | Full (32GB+)           |
-//	|-----------|------------------------|------------------------|------------------------|
-//	| Sentry T0 | synapses/sentry:q4     | synapses/sentry:q4     | synapses/sentry:q8     |
-//	| Librarian | synapses/librarian:q4  | synapses/librarian:q4  | synapses/librarian:q8  |
-//	| Guardian  | synapses/librarian:q4  | synapses/critic:q4     | synapses/critic:q8     |
-//	| Navigator | qwen3.5:2b             | qwen3.5:2b             | qwen3.5:2b             |
-//	| Archivist | qwen3.5:2b             | qwen3.5:2b             | qwen3.5:2b             |
-//
-// In Optimal mode Guardian shares Librarian's model slot (sequential queue,
-// rarely contended in practice). In Standard/Full, Critic gets its own slot.
+// In Optimal mode Guardian reuses Librarian's identity (same model, different
+// system prompt would be wasted — they share weights anyway).
 //
 // totalRAMGB is used only when IntelligenceMode is "" (legacy auto-scaling path).
 func (c *BrainConfig) AutoConfigureModels(totalRAMGB float64) {
 	switch c.IntelligenceMode {
 	case ModeOptimal:
-		c.ModelIngest = "synapses/sentry:q4"
-		c.ModelEnrich = "synapses/librarian:q4"
-		// Guardian shares Librarian's model in Optimal mode — same Ollama slot,
-		// sequential queue. Saves ~1.1 GB vs running a separate Critic model.
-		c.ModelGuardian = "synapses/librarian:q4"
-		c.ModelOrchestrate = "qwen3.5:2b"
-		c.ModelArchivist = "qwen3.5:2b"
+		c.ModelIngest = "synapses/sentry"
+		c.ModelEnrich = "synapses/librarian"
+		c.ModelGuardian = "synapses/librarian" // shares slot in Optimal
+		c.ModelOrchestrate = "synapses/navigator"
+		c.ModelArchivist = "synapses/archivist"
 
-	case ModeStandard:
-		c.ModelIngest = "synapses/sentry:q4"
-		c.ModelEnrich = "synapses/librarian:q4"
-		c.ModelGuardian = "synapses/critic:q4"
-		c.ModelOrchestrate = "qwen3.5:2b"
-		c.ModelArchivist = "qwen3.5:2b"
-
-	case ModeFull:
-		c.ModelIngest = "synapses/sentry:q8"
-		c.ModelEnrich = "synapses/librarian:q8"
-		c.ModelGuardian = "synapses/critic:q8"
-		c.ModelOrchestrate = "qwen3.5:2b"
-		c.ModelArchivist = "qwen3.5:2b"
+	case ModeStandard, ModeFull:
+		c.ModelIngest = "synapses/sentry"
+		c.ModelEnrich = "synapses/librarian"
+		c.ModelGuardian = "synapses/critic"
+		c.ModelOrchestrate = "synapses/navigator"
+		c.ModelArchivist = "synapses/archivist"
 
 	default:
 		// Legacy auto-scaling: no IntelligenceMode set.
@@ -482,29 +466,24 @@ func (c *BrainConfig) ProbeAndDowngradeModels(ctx context.Context, ollamaURL str
 	return nil
 }
 
-// keepAliveValues returns the keep_alive seconds for enrich, orchestrate, and
-// archivist tiers based on the configured IntelligenceMode.
+// KeepAliveValues returns the keep_alive seconds for guardian, enrich,
+// orchestrate, and archivist tiers based on the configured IntelligenceMode.
 //
-//   - Optimal  : Librarian JIT (0), Navigator/Archivist JIT (0)
-//   - Standard : Librarian pinned (-1), Navigator/Archivist 5-min TTL (300)
-//   - Full     : all pinned (-1)
-//   - ""       : legacy behaviour — Librarian pinned, others use Ollama default
-func (c *BrainConfig) KeepAliveValues() (kaEnrich, kaOrchestrate, kaArchivist int) {
-	switch c.IntelligenceMode {
-	case ModeOptimal:
-		return 0, 0, 0
-	case ModeStandard:
-		return -1, 300, 300
-	case ModeFull:
-		return -1, -1, -1
-	default:
-		// No mode set — preserve existing behaviour: Librarian pinned,
-		// Navigator/Archivist use Ollama's server-side default (5 min).
-		// Return -1 for enrich and 0 for the others as a safe sentinel;
-		// callers that want "use server default" should not call WithKeepAlive.
-		// We return -1 / 0 / 0 which matches the pre-mode hardcoded values.
-		return -1, 0, 0
-	}
+// IMPORTANT: Since all 5 Ollama identities (synapses/sentry, synapses/librarian,
+// etc.) share the same base model weights (qwen3.5:2b), Ollama treats them as
+// a single loaded model in memory. Setting different keep_alive per identity
+// is effectively a no-op — evicting one evicts all.
+//
+// Because of this, we pin in all modes. The 2.7GB shared model stays resident.
+// The only difference between modes is whether Critic is enabled (Optimal: no).
+//
+// For 8GB machines (Optimal): 2.7GB model + OS leaves ~3GB for user apps — tight
+// but workable since macOS uses swap for inactive pages. If RAM pressure becomes
+// an issue, users can set keep_alive=300 (5-min TTL) in brain.json manually.
+func (c *BrainConfig) KeepAliveValues() (kaGuardian, kaEnrich, kaOrchestrate, kaArchivist int) {
+	// All modes pin the shared model. Modes differ in which tiers are enabled,
+	// not in memory residency.
+	return -1, -1, -1, -1
 }
 
 // ModelsToInstall returns a deduplicated, sorted list of model tags needed

@@ -47,7 +47,41 @@ type MemorizeRequest struct {
 type Memory struct {
 	Key      string   `json:"key"`
 	Content  string   `json:"content"`
-	Entities []string `json:"entities,omitempty"`
+	Entities []string `json:"-"` // populated by custom parsing, not direct unmarshal
+}
+
+// rawMemory is the flexible intermediate type for JSON unmarshaling.
+// The LLM may return entities as either a comma-separated string
+// (requested to avoid nested arrays that Qwen3.5 frequently malforms)
+// or as a JSON array (if the model ignores the instruction).
+type rawMemory struct {
+	Key      string          `json:"key"`
+	Content  string          `json:"content"`
+	Entities json.RawMessage `json:"entities,omitempty"`
+}
+
+func parseEntities(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	// Try array first: ["A","B"]
+	var arr []string
+	if json.Unmarshal(raw, &arr) == nil {
+		return arr
+	}
+	// Try string: "A,B"
+	var s string
+	if json.Unmarshal(raw, &s) == nil && s != "" {
+		parts := strings.Split(s, ",")
+		result := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if t := strings.TrimSpace(p); t != "" {
+				result = append(result, t)
+			}
+		}
+		return result
+	}
+	return nil
 }
 
 // Annotation is a synthesized note for a code entity.
@@ -73,10 +107,39 @@ func (a *Archivist) Memorize(ctx context.Context, req MemorizeRequest) (Memorize
 		return MemorizeResponse{}, fmt.Errorf("archivist: %w", err)
 	}
 
-	var resp MemorizeResponse
-	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &resp); err != nil {
+	// Strip markdown fences before parsing — some Ollama versions or fallback
+	// models emit ```json ... ``` even when format:"json" is set. Without this,
+	// the unmarshal fails silently and the circuit breaker never trips.
+	raw = llm.ExtractJSON(strings.TrimSpace(raw))
+	raw = llm.RepairJSON(raw)
+
+	resp, parseErr := parseMemorizeResponse(raw)
+	if parseErr != nil {
 		// Return empty on parse failure — non-fatal, agent continues without new memories.
 		return MemorizeResponse{}, nil
+	}
+	return resp, nil
+}
+
+// parseMemorizeResponse handles the flexible entities field (string or array).
+func parseMemorizeResponse(raw string) (MemorizeResponse, error) {
+	var intermediate struct {
+		NewMemories []rawMemory  `json:"new_memories"`
+		Annotations []Annotation `json:"annotations"`
+	}
+	if err := json.Unmarshal([]byte(raw), &intermediate); err != nil {
+		return MemorizeResponse{}, err
+	}
+	resp := MemorizeResponse{
+		Annotations: intermediate.Annotations,
+		NewMemories: make([]Memory, len(intermediate.NewMemories)),
+	}
+	for i, rm := range intermediate.NewMemories {
+		resp.NewMemories[i] = Memory{
+			Key:      rm.Key,
+			Content:  rm.Content,
+			Entities: parseEntities(rm.Entities),
+		}
 	}
 	return resp, nil
 }
@@ -95,7 +158,7 @@ Rules:
 - Keep each memory concise (one sentence for content).
 - Only annotate entities that were meaningfully analyzed, not just mentioned.
 
-Return JSON only: {"new_memories":[{"key":"short_snake_case_key","content":"what to remember","entities":["EntityName"]}],"annotations":[{"node":"EntityName","note":"observation"}]}
+Return JSON only: {"new_memories":[{"key":"short_snake_case_key","content":"what to remember","entities":"EntityName1,EntityName2"}],"annotations":[{"node":"EntityName","note":"observation"}]}
 Return {"new_memories":[],"annotations":[]} if nothing is worth saving.`,
 		string(eventsJSON), string(memoryJSON))
 }

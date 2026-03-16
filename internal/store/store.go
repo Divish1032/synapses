@@ -1051,11 +1051,13 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		}
 	}
 
-	// R20: Snapshot current signatures before the wipe so we can detect which
-	// exported entity signatures actually changed. Only non-empty signatures are
-	// captured — new nodes (not in this map) are treated as additions, not changes.
+	// R20/FIX-R20A: Snapshot current signatures before the wipe so we can detect
+	// which entity signatures actually changed. Both exported and unexported
+	// entities are captured — test files call unexported functions directly and
+	// break compilation when their signature changes. Only non-empty signatures
+	// are captured — new nodes (not in this map) are treated as additions, not changes.
 	oldSigs := make(map[string]string)
-	if sigRows, err := s.db.Query(`SELECT id, signature FROM nodes WHERE exported=1 AND signature != ''`); err == nil {
+	if sigRows, err := s.db.Query(`SELECT id, signature FROM nodes WHERE signature != ''`); err == nil {
 		defer sigRows.Close()
 		for sigRows.Next() {
 			var nid, sig string
@@ -1389,7 +1391,6 @@ func (s *Store) GetSignatureChanges(file string) ([]SignatureChange, error) {
 		SELECT id, name, type, file, line, signature, prev_signature
 		FROM nodes
 		WHERE (file = ? OR file LIKE '%' || ?)
-		  AND exported = 1
 		  AND prev_signature != ''
 		  AND type IN ('function', 'method', 'struct', 'interface')
 	`, file, file)

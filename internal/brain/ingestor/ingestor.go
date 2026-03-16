@@ -74,10 +74,65 @@ func New(client llm.LLMClient, st *store.Store, timeout time.Duration) *Ingestor
 	return &Ingestor{llm: client, store: st, timeout: timeout}
 }
 
+// deterministicSummary returns a summary and tags for trivial nodes that don't
+// need LLM analysis — test helpers, generated code, trivial getters/setters.
+// Returns ("", nil, false) when the node is non-trivial and needs LLM.
+// This fast path avoids ~900ms per node for the ~60% of entities that are trivial.
+func deterministicSummary(req Request) (string, []string, bool) {
+	name := strings.ToLower(req.NodeName)
+	nodeType := strings.ToLower(req.NodeType)
+	pkg := strings.ToLower(req.Package)
+	code := strings.ToLower(req.Code)
+
+	// Test helpers: *_test.go entities, Test* functions, mock* types
+	if strings.HasSuffix(pkg, "_test") || strings.HasPrefix(name, "test") ||
+		strings.HasPrefix(name, "mock") || strings.HasPrefix(name, "fake") ||
+		strings.HasPrefix(name, "stub") {
+		return fmt.Sprintf("Test helper %s in package %s.", req.NodeName, req.Package),
+			[]string{"test"}, true
+	}
+
+	// Generated code markers
+	if strings.Contains(code, "do not edit") || strings.Contains(code, "code generated") ||
+		strings.Contains(code, "auto-generated") {
+		return fmt.Sprintf("Generated code: %s in package %s.", req.NodeName, req.Package),
+			[]string{"generated"}, true
+	}
+
+	// Trivial getters/setters: short functions with simple bodies
+	if (nodeType == "function" || nodeType == "method") && len(req.Code) < 80 {
+		if strings.HasPrefix(name, "get") || strings.HasPrefix(name, "set") ||
+			strings.HasPrefix(name, "is") || strings.HasPrefix(name, "has") {
+			return fmt.Sprintf("Accessor %s in package %s.", req.NodeName, req.Package),
+				[]string{"util"}, true
+		}
+	}
+
+	// init() functions
+	if name == "init" {
+		return fmt.Sprintf("Package initializer for %s.", req.Package),
+			[]string{"config"}, true
+	}
+
+	return "", nil, false
+}
+
 // Summarize generates and stores a 1-sentence summary for the given code entity.
+// Uses a deterministic fast path for trivial nodes (test helpers, generated code,
+// getters/setters) that skips the LLM entirely. For non-trivial nodes, calls the
+// LLM to generate a prose summary.
 // If the LLM is unavailable or returns an unparseable response, an error is returned
 // but the call is non-fatal — callers should log and continue.
 func (ing *Ingestor) Summarize(ctx context.Context, req Request) (Response, error) {
+	// Fast path: skip LLM for trivial nodes.
+	if summary, tags, ok := deterministicSummary(req); ok {
+		if err := ing.store.UpsertSummary(req.ProjectID, req.NodeID, req.NodeName, summary, tags); err != nil {
+			return Response{NodeID: req.NodeID, Summary: summary, Tags: tags},
+				fmt.Errorf("store summary: %w", err)
+		}
+		return Response{NodeID: req.NodeID, Summary: summary, Tags: tags}, nil
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, ing.timeout)
 	defer cancel()
 
