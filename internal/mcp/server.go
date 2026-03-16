@@ -150,6 +150,10 @@ type Server struct {
 	sessionCallsMu sync.Mutex
 	sessionCalls   map[string]*sessionCallEntry
 
+	// startTime records when the server was constructed, used by session_init
+	// to report daemon uptime in the daemon_health field (IMP-EVAL-3).
+	startTime time.Time
+
 	// stopCh is closed by Close() to signal background goroutines to exit.
 	// startOnce ensures StartBackground() is truly idempotent.
 	stopCh    chan struct{}
@@ -249,6 +253,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		logToolCalls:     true, // default on
 		logSessions:      true,
 		cacheWebSearches: true,
+		startTime:        time.Now(),
 	}
 
 	// Load app-level settings from ~/.synapses/app_settings.json.
@@ -675,7 +680,10 @@ func (s *Server) registerTools() {
 					"their tool usage to repo size. Call this INSTEAD of the three individual tools. "+
 					"Incremental mode: when agent_id is provided and the agent has called "+
 					"session_init before, unchanged sections are skipped to save tokens "+
-					"(e.g. project_identity is omitted if the graph hasn't changed).",
+					"(e.g. project_identity is omitted if the graph hasn't changed). "+
+					"Also surfaces invalidated_memories — beliefs anchored to graph nodes that "+
+					"were removed or changed since the last session. Per-agent: each agent sees "+
+					"invalidations independently.",
 			),
 			mcp.WithString("agent_id",
 				mcp.Description("Self-declared agent identifier. Enables incremental delivery: "+
