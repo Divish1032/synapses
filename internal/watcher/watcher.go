@@ -262,6 +262,13 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 
 	// File removed or renamed: prune its nodes from the graph immediately.
 	if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+		// AM-2: snapshot node IDs before removal so we can cascade memory invalidation.
+		var removedIDs []string
+		if w.store != nil {
+			for _, n := range w.graph.NodesForFile(path) {
+				removedIDs = append(removedIDs, string(n.ID))
+			}
+		}
 		w.graph.RemoveFile(path)
 		w.graph.RemoveCallSitesForFile(path)
 		w.graph.InvalidateCache()
@@ -270,6 +277,12 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 		if w.store != nil {
 			if err := w.store.UpdateCallSitesForFile(path, nil); err != nil {
 				fmt.Fprintf(os.Stderr, "synapses/watcher: remove call sites for %s: %v\n", path, err)
+			}
+		}
+		// AM-2: cascade stale flag to memories anchored to the removed nodes.
+		if w.store != nil && len(removedIDs) > 0 {
+			if err := w.store.MarkAnchoredMemoriesStale(removedIDs, "anchor node removed"); err != nil {
+				fmt.Fprintf(os.Stderr, "synapses/watcher: cascade memory stale: %v\n", err)
 			}
 		}
 		w.persistAsync("")
@@ -364,6 +377,14 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// the re-parsed nodes (preserving cross-project references across renames).
 	w.graph.SnapshotFileStableIDs(path)
 
+	// AM-2: capture node IDs before removal to detect disappeared nodes after re-parse.
+	var beforeNodeIDs []string
+	if w.store != nil {
+		for _, n := range w.graph.NodesForFile(path) {
+			beforeNodeIDs = append(beforeNodeIDs, string(n.ID))
+		}
+	}
+
 	// Remove stale graph data and call sites for this file before re-parsing.
 	w.graph.RemoveFile(path)
 	w.graph.RemoveCallSitesForFile(path)
@@ -380,6 +401,26 @@ func (w *Watcher) reparseFile(path, _ string) {
 		w.graph.MigrateStableID(n)
 	}
 	w.graph.ClearFileSnapshot(path)
+
+	// AM-2: cascade stale flag to memories anchored to nodes that disappeared
+	// during re-parse (functions renamed or deleted within the file).
+	if w.store != nil && len(beforeNodeIDs) > 0 {
+		afterIDs := make(map[string]struct{}, len(beforeNodeIDs))
+		for _, n := range w.graph.NodesForFile(path) {
+			afterIDs[string(n.ID)] = struct{}{}
+		}
+		var removedIDs []string
+		for _, id := range beforeNodeIDs {
+			if _, ok := afterIDs[id]; !ok {
+				removedIDs = append(removedIDs, id)
+			}
+		}
+		if len(removedIDs) > 0 {
+			if err := w.store.MarkAnchoredMemoriesStale(removedIDs, "anchor node removed"); err != nil {
+				fmt.Fprintf(os.Stderr, "synapses/watcher: cascade memory stale: %v\n", err)
+			}
+		}
+	}
 
 	// Peek the newly-registered call sites from the re-parsed file before the
 	// resolver drains them. We need these to update the stored call-site table.

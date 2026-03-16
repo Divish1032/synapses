@@ -338,26 +338,9 @@ func TestIsBuiltinPython_CustomFunc(t *testing.T) {
 	}
 }
 
-// ── isJavaPublic ──────────────────────────────────────────────────────────────
-
-func TestIsJavaPublic_EmptyName(t *testing.T) {
-	// empty name → false (the name == "" branch)
-	if isJavaPublic("") {
-		t.Error("isJavaPublic(\"\") = true, want false")
-	}
-}
-
-func TestIsJavaPublic_UpperCase(t *testing.T) {
-	if !isJavaPublic("Login") {
-		t.Error("isJavaPublic(\"Login\") = false, want true")
-	}
-}
-
-func TestIsJavaPublic_LowerCase(t *testing.T) {
-	if isJavaPublic("internalMethod") {
-		t.Error("isJavaPublic(\"internalMethod\") = true, want false")
-	}
-}
+// ── isJavaPublicNode ─────────────────────────────────────────────────────────
+// isJavaPublicNode now inspects AST modifier children, so it cannot be tested
+// with simple string arguments. Integration tests in languages_test.go cover it.
 
 // ── extractLineDoc ────────────────────────────────────────────────────────────
 

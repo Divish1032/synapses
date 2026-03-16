@@ -24,7 +24,7 @@ func extractTSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 			return
 		}
 		switch n.Type() {
-		case "function_declaration", "function_expression":
+		case "function_declaration", "function_expression", "function_signature":
 			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
@@ -181,14 +181,14 @@ func (p *TypeScriptParser) extractDeclarations(
 		return err
 	}
 
-	// --- Function declarations ---
-	funcQuery := `(function_declaration name: (identifier) @func_name)`
-	if err := runQuery(lang, root, src, funcQuery, func(captures map[string]string, startLine int) {
-		name := captures["func_name"]
-		if name == "" {
+	// --- Function declarations (regular and ambient/declare) ---
+	// function_declaration: function foo() { ... }
+	// function_signature:   declare function foo(): void;  (no body, used in .d.ts)
+	addFuncNode := func(name string, startLine int) {
+		nodeID := g.MakeNodeID(filePath, name)
+		if g.GetNode(nodeID) != nil {
 			return
 		}
-		nodeID := g.MakeNodeID(filePath, name)
 		g.AddNode(&graph.Node{
 			ID:       nodeID,
 			Type:     graph.NodeFunction,
@@ -200,9 +200,22 @@ func (p *TypeScriptParser) extractDeclarations(
 			Metadata: buildLangMeta(declInfo[name]),
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}
+	funcQuery := `(function_declaration name: (identifier) @func_name)`
+	if err := runQuery(lang, root, src, funcQuery, func(captures map[string]string, startLine int) {
+		if name := captures["func_name"]; name != "" {
+			addFuncNode(name, startLine)
+		}
 	}); err != nil {
 		return err
 	}
+	// Ambient function signatures: declare function foo(): void;
+	funcSigQuery := `(function_signature name: (identifier) @func_name)`
+	_ = runQuery(lang, root, src, funcSigQuery, func(captures map[string]string, startLine int) {
+		if name := captures["func_name"]; name != "" {
+			addFuncNode(name, startLine)
+		}
+	})
 
 	// --- Exported arrow functions: export const foo = () => {} ---
 	arrowQuery := `
@@ -307,7 +320,7 @@ func (p *TypeScriptParser) extractDeclarations(
 		if meta == nil {
 			meta = make(map[string]string, 1)
 		}
-		meta["abstract"] = "true"
+		meta["kind"] = "abstract"
 		g.AddNode(&graph.Node{
 			ID:       nodeID,
 			Type:     graph.NodeStruct,
@@ -402,6 +415,34 @@ func (p *TypeScriptParser) extractDeclarations(
 		return err
 	}
 
+	// --- Enum members (individual values like Color.Red) ---
+	// TS grammar: enum_declaration → enum_body → property_identifier children.
+	extractTSEnumMembers(g, root, src, filePath, fileNodeID)
+
+	// --- Namespace / module declarations: namespace Foo {} or module Foo {} ---
+	// The TypeScript grammar represents these as internal_module nodes.
+	nsQuery := `(internal_module (identifier) @ns_name)`
+	_ = runQuery(lang, root, src, nsQuery, func(captures map[string]string, startLine int) {
+		name := captures["ns_name"]
+		if name == "" {
+			return
+		}
+		nodeID := g.MakeNodeID(filePath, name)
+		if g.GetNode(nodeID) != nil {
+			return // already registered as a class/interface
+		}
+		g.AddNode(&graph.Node{
+			ID:       nodeID,
+			Type:     graph.NodePackage,
+			Name:     name,
+			Package:  moduleName,
+			File:     filePath,
+			Line:     startLine,
+			Exported: isExported(name),
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	})
+
 	// --- Method definitions (class-qualified) ---
 	p.extractClassMethods(g, root, src, filePath, moduleName, fileNodeID, declInfo)
 
@@ -427,7 +468,69 @@ func (p *TypeScriptParser) extractClassMethods(
 			return
 		}
 		switch n.Type() {
+		case "export_statement":
+			// Exported decorated class: decorator sibling + class_declaration child.
+			var decs []string
+			var exportedClassName string
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child == nil {
+					continue
+				}
+				if child.Type() == "decorator" {
+					if name := tsDecoratorName(child, src); name != "" {
+						decs = append(decs, name)
+					}
+				}
+				if child.Type() == "class_declaration" || child.Type() == "abstract_class_declaration" {
+					if nameNode := child.ChildByFieldName("name"); nameNode != nil {
+						exportedClassName = string(src[nameNode.StartByte():nameNode.EndByte()])
+					}
+				}
+			}
+			if exportedClassName != "" && len(decs) > 0 {
+				nodeID := g.MakeNodeID(filePath, exportedClassName)
+				if classNode := g.GetNode(nodeID); classNode != nil {
+					if classNode.Metadata == nil {
+						classNode.Metadata = make(map[string]string)
+					}
+					classNode.Metadata["decorators"] = strings.Join(decs, ",")
+				}
+			}
+			// Continue recursing into children.
+
 		case "class_declaration", "abstract_class_declaration":
+			className := ""
+			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+				className = string(src[nameNode.StartByte():nameNode.EndByte()])
+			}
+			// Collect decorators that are direct children (non-exported class).
+			if className != "" {
+				var decs []string
+				for i := 0; i < int(n.ChildCount()); i++ {
+					child := n.Child(i)
+					if child != nil && child.Type() == "decorator" {
+						if name := tsDecoratorName(child, src); name != "" {
+							decs = append(decs, name)
+						}
+					}
+				}
+				if len(decs) > 0 {
+					nodeID := g.MakeNodeID(filePath, className)
+					if classNode := g.GetNode(nodeID); classNode != nil {
+						if classNode.Metadata == nil {
+							classNode.Metadata = make(map[string]string)
+						}
+						classNode.Metadata["decorators"] = strings.Join(decs, ",")
+					}
+				}
+			}
+			for i := 0; i < int(n.ChildCount()); i++ {
+				walk(n.Child(i), className)
+			}
+			return
+		case "interface_declaration":
+			// Walk interface body for method_signature and property_signature.
 			className := ""
 			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -436,7 +539,7 @@ func (p *TypeScriptParser) extractClassMethods(
 				walk(n.Child(i), className)
 			}
 			return
-		case "method_definition":
+		case "method_definition", "method_signature", "abstract_method_signature":
 			if enclosingClass == "" {
 				break
 			}
@@ -447,6 +550,16 @@ func (p *TypeScriptParser) extractClassMethods(
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
 			qualName := enclosingClass + "." + name
 			nodeID := g.MakeNodeID(filePath, qualName)
+			if g.GetNode(nodeID) != nil {
+				break // already added (e.g. class + interface share a name)
+			}
+			meta := buildLangMeta(declInfo[qualName])
+			if n.Type() == "abstract_method_signature" {
+				if meta == nil {
+					meta = make(map[string]string, 1)
+				}
+				meta["kind"] = "abstract"
+			}
 			g.AddNode(&graph.Node{
 				ID:       nodeID,
 				Type:     graph.NodeMethod,
@@ -455,10 +568,98 @@ func (p *TypeScriptParser) extractClassMethods(
 				File:     filePath,
 				Line:     int(n.StartPoint().Row) + 1,
 				Exported: isExported(name),
-				Metadata: buildLangMeta(declInfo[qualName]),
+				Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			// Link class → method
+			// Link class/interface → method
+			classID := g.MakeNodeID(filePath, enclosingClass)
+			if g.GetNode(classID) != nil {
+				g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
+			}
+		case "property_signature":
+			// Interface property signature: e.g. readonly userId: string
+			if enclosingClass == "" {
+				break
+			}
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				break
+			}
+			name := string(src[nameNode.StartByte():nameNode.EndByte()])
+			qualName := enclosingClass + "." + name
+			nodeID := g.MakeNodeID(filePath, qualName)
+			if g.GetNode(nodeID) != nil {
+				break
+			}
+			meta := map[string]string{"kind": "property"}
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeMethod,
+				Name:     qualName,
+				Package:  moduleName,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: isExported(name),
+				Metadata: meta,
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			classID := g.MakeNodeID(filePath, enclosingClass)
+			if g.GetNode(classID) != nil {
+				g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
+			}
+
+		case "public_field_definition":
+			// TypeScript class field: name: string = ''; private age: number;
+			if enclosingClass == "" {
+				break
+			}
+			// Name is a property_identifier child (after optional accessibility_modifier / readonly).
+			nameNode := firstChildOfType(n, "property_identifier")
+			if nameNode == nil {
+				break
+			}
+			name := string(src[nameNode.StartByte():nameNode.EndByte()])
+			qualName := enclosingClass + "." + name
+			nodeID := g.MakeNodeID(filePath, qualName)
+			if g.GetNode(nodeID) != nil {
+				break
+			}
+			// Detect accessibility modifier for kind metadata.
+			fieldKind := "field"
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child == nil {
+					continue
+				}
+				if child.Type() == "accessibility_modifier" {
+					text := string(src[child.StartByte():child.EndByte()])
+					if text == "private" || text == "protected" {
+						fieldKind = text
+					}
+					break
+				}
+				if child.Type() == "readonly" {
+					fieldKind = "readonly"
+					break
+				}
+				if child.Type() == "property_identifier" {
+					break // no modifier
+				}
+			}
+			fieldMeta := map[string]string{"kind": fieldKind}
+			// Determine exported: private/protected fields are not exported.
+			exported := fieldKind != "private" && fieldKind != "protected"
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeMethod,
+				Name:     qualName,
+				Package:  moduleName,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: exported,
+				Metadata: fieldMeta,
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 			classID := g.MakeNodeID(filePath, enclosingClass)
 			if g.GetNode(classID) != nil {
 				g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
@@ -471,38 +672,108 @@ func (p *TypeScriptParser) extractClassMethods(
 	walk(root, "")
 }
 
-// collectTSCallSites walks the AST and adds call sites for function and method
-// calls so the cross-file resolver can link them as CALLS edges.
-func collectTSCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
-	// Direct calls: foo(...)
-	directQuery := `(call_expression function: (identifier) @callee)`
-	_ = runQuery(lang, root, src, directQuery, func(captures map[string]string, _ int) {
-		callee := captures["callee"]
-		if callee == "" || isTSBuiltin(callee) {
-			return
-		}
-		g.AddCallSite(graph.CallSite{
-			CallerID:   fileNodeID,
-			CallerFile: filePath,
-			FuncName:   callee,
-			PkgAlias:   "",
-		})
+// collectTSCallSites performs a depth-first AST walk to collect call sites with
+// function-level caller resolution.
+func collectTSCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
+		ClassTypes: map[string]bool{
+			"class_declaration":          true,
+			"abstract_class_declaration": true,
+		},
+		FuncTypes: map[string]bool{
+			"function_declaration": true,
+			"method_definition":   true,
+			"arrow_function":      true,
+			"function_expression":  true,
+		},
+		CallTypes: map[string]bool{"call_expression": true},
+		NameExtractor: func(n *sitter.Node, src []byte) string {
+			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+				return string(src[nameNode.StartByte():nameNode.EndByte()])
+			}
+			return ""
+		},
+		CalleeExtractor: jsCalleeExtractor, // TS uses the same call expression structure as JS.
+		IsBuiltin:       isTSBuiltin,
 	})
+}
 
-	// Method calls: obj.method(...) — collect the method name for cross-module resolution.
-	memberQuery := `(call_expression function: (member_expression property: (property_identifier) @method_name))`
-	_ = runQuery(lang, root, src, memberQuery, func(captures map[string]string, _ int) {
-		name := captures["method_name"]
-		if name == "" || isTSBuiltin(name) {
+// extractTSEnumMembers walks the AST for enum_declaration nodes and emits
+// individual enum member nodes (e.g. Color.Red, Color.Green).
+// TS grammar: enum_declaration → enum_body → property_identifier children.
+func extractTSEnumMembers(g *graph.Graph, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	var walk func(n *sitter.Node)
+	walk = func(n *sitter.Node) {
+		if n == nil {
 			return
 		}
-		g.AddCallSite(graph.CallSite{
-			CallerID:   fileNodeID,
-			CallerFile: filePath,
-			FuncName:   name,
-			PkgAlias:   "",
-		})
-	})
+		if n.Type() == "enum_declaration" {
+			// Get enum name.
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				return
+			}
+			enumName := string(src[nameNode.StartByte():nameNode.EndByte()])
+			enumNodeID := g.MakeNodeID(filePath, enumName)
+			// Walk enum_body for property_identifier children (the member names).
+			for i := 0; i < int(n.ChildCount()); i++ {
+				body := n.Child(i)
+				if body == nil || body.Type() != "enum_body" {
+					continue
+				}
+				for j := 0; j < int(body.ChildCount()); j++ {
+					member := body.Child(j)
+					if member == nil {
+						continue
+					}
+					// Direct property_identifier (no value) or enum_assignment → property_identifier.
+					var nameNode *sitter.Node
+					if member.Type() == "property_identifier" {
+						nameNode = member
+					} else if member.Type() == "enum_assignment" {
+						nameNode = firstChildOfType(member, "property_identifier")
+					}
+					if nameNode == nil {
+						continue
+					}
+					memberName := string(src[nameNode.StartByte():nameNode.EndByte()])
+					qualName := enumName + "." + memberName
+					nodeID := g.MakeNodeID(filePath, qualName)
+					if g.GetNode(nodeID) != nil {
+						continue
+					}
+					meta := map[string]string{"kind": "enum_member"}
+					g.AddNode(&graph.Node{
+						ID: nodeID, Type: graph.NodeMethod, Name: qualName, File: filePath,
+						Line: int(member.StartPoint().Row) + 1, Exported: true, Metadata: meta,
+					})
+					g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+					if g.GetNode(enumNodeID) != nil {
+						g.AddEdge(&graph.Edge{From: enumNodeID, To: nodeID, Type: graph.EdgeDefines})
+					}
+				}
+			}
+			return
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+}
+
+// tsDecoratorName extracts the decorator identifier from a decorator node.
+// Handles both @Component() (call_expression) and @Component (bare identifier).
+func tsDecoratorName(decorator *sitter.Node, src []byte) string {
+	if ce := firstChildOfType(decorator, "call_expression"); ce != nil {
+		if ident := firstChildOfType(ce, "identifier"); ident != nil {
+			return string(src[ident.StartByte():ident.EndByte()])
+		}
+	}
+	if ident := firstChildOfType(decorator, "identifier"); ident != nil {
+		return string(src[ident.StartByte():ident.EndByte()])
+	}
+	return ""
 }
 
 // isTSBuiltin returns true for TypeScript/JavaScript built-in methods and

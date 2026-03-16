@@ -208,11 +208,13 @@ func ParseGoMod(projectPath string) (map[string]string, error) {
 			continue
 		}
 		// Single-line require: require github.com/foo/bar v1.2.3
-		if strings.HasPrefix(line, "require ") {
+		isSingleRequire := false
+		if strings.HasPrefix(line, "require ") && !strings.HasSuffix(line, "(") {
 			line = strings.TrimPrefix(line, "require ")
 			line = strings.TrimSpace(line)
+			isSingleRequire = true
 		}
-		if inRequire || strings.HasPrefix(line, "require ") {
+		if inRequire || isSingleRequire {
 			// Strip inline comment
 			if idx := strings.Index(line, "//"); idx >= 0 {
 				line = strings.TrimSpace(line[:idx])

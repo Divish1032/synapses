@@ -50,7 +50,8 @@ func NewWalker() *Walker {
 	w.Register(NewCSharpParser()) // deep: .cs
 	w.Register(NewSwiftParser())  // deep: .swift
 	// Scripting
-	w.Register(NewRubyParser()) // deep: .rb
+	w.Register(NewRubyParser()) // deep: .rb .rbi (Sorbet type stubs)
+	w.Register(NewRBSParser())  // deep: .rbs (Ruby type signatures)
 	w.Register(NewPHPParser())  // deep: .php
 	w.Register(NewLuaParser())  // deep: .lua
 	// Functional

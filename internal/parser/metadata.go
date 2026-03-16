@@ -5,14 +5,17 @@ import (
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
+
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // declMeta holds the enriched metadata extracted for any declaration node.
 // It is language-agnostic and used by all non-Go parsers.
 type declMeta struct {
-	Signature string
-	Doc       string
-	LineCount int
+	Signature   string
+	Doc         string
+	LineCount   int
+	IfdefGuard  string // non-empty when symbol is inside a #ifdef/#if/#else block
 }
 
 // langCallSite is the language-agnostic equivalent of rawCallSite used by
@@ -20,6 +23,26 @@ type declMeta struct {
 type langCallSite struct {
 	pkgAlias string
 	funcName string
+}
+
+// callSiteConfig tells the generic call-site collector which AST node types
+// represent class-like and function-like declarations, and which node types
+// are call expressions. This allows a single AST walk to resolve function-level
+// callers for any language.
+type callSiteConfig struct {
+	// ClassTypes are node types that establish a class context (e.g. "class_declaration").
+	ClassTypes map[string]bool
+	// FuncTypes are node types that establish a function context (e.g. "function_declaration").
+	FuncTypes map[string]bool
+	// CallTypes are node types that represent call expressions (e.g. "call_expression").
+	CallTypes map[string]bool
+	// NameExtractor returns the name from a class or function node.
+	// For class: returns "ClassName". For function: returns "funcName".
+	NameExtractor func(n *sitter.Node, src []byte) string
+	// CalleeExtractor returns the callee name from a call expression node, or "" to skip.
+	CalleeExtractor func(n *sitter.Node, src []byte) string
+	// IsBuiltin returns true if a callee name should be filtered out.
+	IsBuiltin func(name string) bool
 }
 
 // extractSigToBody extracts the declaration signature by finding the body block
@@ -226,6 +249,84 @@ func extractSigToBodyMulti(declNode *sitter.Node, src []byte, bodyTypes []string
 	return strings.TrimSpace(string(src[declNode.StartByte():declNode.EndByte()]))
 }
 
+// collectCallSitesWalk performs a depth-first AST walk to collect call sites
+// with function-level caller resolution. Instead of attributing all calls to the
+// file node, each call is attributed to its enclosing function/method.
+//
+// The walk tracks (enclosingClass, enclosingFunc) context. When a call expression
+// is found, the caller is resolved to the graph node matching the enclosing function.
+// If no enclosing function exists (module-level call), fileNodeID is used.
+//
+// This produces the same quality of CALLS edges as the Go parser, enabling
+// accurate get_call_chain and get_impact for all supported languages.
+func collectCallSitesWalk(
+	g *graph.Graph,
+	root *sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+	cfg callSiteConfig,
+) {
+	var walk func(n *sitter.Node, enclosingClass, enclosingFunc string)
+	walk = func(n *sitter.Node, enclosingClass, enclosingFunc string) {
+		if n == nil {
+			return
+		}
+		nt := n.Type()
+
+		// Track class context.
+		if cfg.ClassTypes[nt] {
+			className := cfg.NameExtractor(n, src)
+			if className != "" {
+				for i := 0; i < int(n.ChildCount()); i++ {
+					walk(n.Child(i), className, enclosingFunc)
+				}
+				return
+			}
+		}
+
+		// Track function context.
+		if cfg.FuncTypes[nt] {
+			funcName := cfg.NameExtractor(n, src)
+			if funcName != "" {
+				qualFunc := funcName
+				if enclosingClass != "" {
+					qualFunc = enclosingClass + "." + funcName
+				}
+				for i := 0; i < int(n.ChildCount()); i++ {
+					walk(n.Child(i), enclosingClass, qualFunc)
+				}
+				return
+			}
+		}
+
+		// Collect call site.
+		if cfg.CallTypes[nt] {
+			callee := cfg.CalleeExtractor(n, src)
+			if callee != "" && !cfg.IsBuiltin(callee) {
+				// Resolve caller: use enclosing function node if available, else file.
+				callerID := fileNodeID
+				if enclosingFunc != "" {
+					funcNodeID := g.MakeNodeID(filePath, enclosingFunc)
+					if g.GetNode(funcNodeID) != nil {
+						callerID = funcNodeID
+					}
+				}
+				g.AddCallSite(graph.CallSite{
+					CallerID:   callerID,
+					CallerFile: filePath,
+					FuncName:   callee,
+				})
+			}
+		}
+
+		for i := 0; i < int(n.ChildCount()); i++ {
+			walk(n.Child(i), enclosingClass, enclosingFunc)
+		}
+	}
+	walk(root, "", "")
+}
+
 // firstChildOfType returns the first direct child of n whose type matches typ,
 // or nil if none is found. Used by language parsers that lack named fields.
 func firstChildOfType(n *sitter.Node, typ string) *sitter.Node {
@@ -241,10 +342,10 @@ func firstChildOfType(n *sitter.Node, typ string) *sitter.Node {
 // buildLangMeta converts a declMeta into a Node.Metadata map.
 // Returns nil if all fields are zero/empty (avoids empty map allocations).
 func buildLangMeta(m declMeta) map[string]string {
-	if m.Signature == "" && m.Doc == "" && m.LineCount == 0 {
+	if m.Signature == "" && m.Doc == "" && m.LineCount == 0 && m.IfdefGuard == "" {
 		return nil
 	}
-	result := make(map[string]string, 3)
+	result := make(map[string]string, 4)
 	if m.Signature != "" {
 		result["signature"] = m.Signature
 	}
@@ -253,6 +354,9 @@ func buildLangMeta(m declMeta) map[string]string {
 	}
 	if m.LineCount > 0 {
 		result["line_count"] = strconv.Itoa(m.LineCount)
+	}
+	if m.IfdefGuard != "" {
+		result["ifdef"] = m.IfdefGuard
 	}
 	return result
 }

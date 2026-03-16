@@ -365,6 +365,58 @@ func (p *JavaScriptParser) extractClassMethods(
 			if g.GetNode(classID) != nil {
 				g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
 			}
+		case "field_definition":
+			// Modern JS class field: name = ''; or #privateField = 0;
+			if enclosingClass == "" {
+				break
+			}
+			// Name is property_identifier (public) or private_property_identifier (#name).
+			var name string
+			isPrivate := false
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child == nil {
+					continue
+				}
+				if child.Type() == "property_identifier" {
+					name = string(src[child.StartByte():child.EndByte()])
+					break
+				}
+				if child.Type() == "private_property_identifier" {
+					raw := string(src[child.StartByte():child.EndByte()])
+					name = strings.TrimPrefix(raw, "#")
+					isPrivate = true
+					break
+				}
+			}
+			if name == "" {
+				break
+			}
+			qualName := enclosingClass + "." + name
+			nodeID := g.MakeNodeID(filePath, qualName)
+			if g.GetNode(nodeID) != nil {
+				break
+			}
+			fieldKind := "field"
+			if isPrivate {
+				fieldKind = "private"
+			}
+			fieldMeta := map[string]string{"kind": fieldKind}
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeMethod,
+				Name:     qualName,
+				Package:  moduleName,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: !isPrivate,
+				Metadata: fieldMeta,
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			classID := g.MakeNodeID(filePath, enclosingClass)
+			if g.GetNode(classID) != nil {
+				g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
+			}
 		}
 		for i := 0; i < int(n.ChildCount()); i++ {
 			walk(n.Child(i), enclosingClass)
@@ -373,36 +425,51 @@ func (p *JavaScriptParser) extractClassMethods(
 	walk(root, "")
 }
 
-// collectJSCallSites walks the AST and adds call sites for function and method
-// calls so the cross-file resolver can link them as CALLS edges.
-func collectJSCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
-	// Direct calls: foo(...)
-	directQuery := `(call_expression function: (identifier) @callee)`
-	_ = runQuery(lang, root, src, directQuery, func(captures map[string]string, _ int) {
-		callee := captures["callee"]
-		if callee == "" || isTSBuiltin(callee) || callee == "require" {
-			return
-		}
-		g.AddCallSite(graph.CallSite{
-			CallerID:   fileNodeID,
-			CallerFile: filePath,
-			FuncName:   callee,
-			PkgAlias:   "",
-		})
+// collectJSCallSites performs a depth-first AST walk to collect call sites with
+// function-level caller resolution, matching the Go parser's accuracy.
+func collectJSCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
+		ClassTypes: map[string]bool{"class_declaration": true},
+		FuncTypes: map[string]bool{
+			"function_declaration": true,
+			"method_definition":   true,
+			"arrow_function":      true,
+			"function_expression":  true,
+		},
+		CallTypes: map[string]bool{"call_expression": true},
+		NameExtractor: func(n *sitter.Node, src []byte) string {
+			// For functions/methods: try "name" field first.
+			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+				return string(src[nameNode.StartByte():nameNode.EndByte()])
+			}
+			// For arrow functions assigned to variables, the name is on the parent
+			// variable_declarator node, not on the arrow_function itself.
+			// The walk will use "" which falls back to file-level — acceptable for
+			// anonymous lambdas since they have no graph node to attribute to.
+			return ""
+		},
+		CalleeExtractor: jsCalleeExtractor,
+		IsBuiltin: func(name string) bool {
+			return isTSBuiltin(name) || name == "require"
+		},
 	})
+}
 
-	// Method calls: obj.method(...)
-	memberQuery := `(call_expression function: (member_expression property: (property_identifier) @method_name))`
-	_ = runQuery(lang, root, src, memberQuery, func(captures map[string]string, _ int) {
-		name := captures["method_name"]
-		if name == "" || isTSBuiltin(name) {
-			return
+// jsCalleeExtractor extracts callee names from JS/TS call expressions.
+// Handles: foo(...), obj.method(...), and obj?.method(...).
+func jsCalleeExtractor(n *sitter.Node, src []byte) string {
+	fn := n.ChildByFieldName("function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		return string(src[fn.StartByte():fn.EndByte()])
+	case "member_expression":
+		prop := fn.ChildByFieldName("property")
+		if prop != nil {
+			return string(src[prop.StartByte():prop.EndByte()])
 		}
-		g.AddCallSite(graph.CallSite{
-			CallerID:   fileNodeID,
-			CallerFile: filePath,
-			FuncName:   name,
-			PkgAlias:   "",
-		})
-	})
+	}
+	return ""
 }

@@ -627,6 +627,12 @@ func Open(path string) (*Store, error) {
 			PRIMARY KEY (memory_id, node_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_anchors_node ON memory_anchors(node_id)`,
+		// AM-2: Cascade invalidation — stale flag set when anchor nodes are removed or structurally changed.
+		// stale_reason describes why (e.g. "anchor node removed"). surfaced_at tracks when first shown to agent (AM-3).
+		`ALTER TABLE memories ADD COLUMN stale INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE memories ADD COLUMN stale_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memories ADD COLUMN surfaced_at TEXT DEFAULT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_stale ON memories(stale) WHERE stale = 1`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
 			db.Close()
@@ -1259,6 +1265,10 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		}
 		if len(staleIDs) > 0 {
 			_ = s.MarkAnnotationsStale(staleIDs)
+			// AM-2: cascade stale flag to any memories anchored to these structurally-changed nodes.
+			// Error discarded intentionally — this goroutine is fire-and-forget post-save; a failure
+			// here is non-fatal (stale memories will be re-detected on next session via AM-3).
+			_ = s.MarkAnchoredMemoriesStale(staleIDs, "anchor node structural change (fanin delta >20%)")
 		}
 	}()
 
