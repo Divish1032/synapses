@@ -11,16 +11,14 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
-// repomapCacheKeyCompact / Full are packet-cache keys for get_repo_map.
-const (
-	repomapCacheKeyCompact = "repomap:compact"
-	repomapCacheKeyFull    = "repomap:full"
-)
-
 // handleGetRepoMap returns a navigable text overview of the repository,
-// grouped by package and sorted by fanin. Two detail levels:
+// grouped by package and sorted by connectivity. Two detail levels:
+//
 //   - compact (~500 tokens): top 3 entities per package
 //   - full    (~2000 tokens): top 10 entities per package
+//
+// Results are stored in a dedicated orientation cache (not the shared 20-slot
+// packet cache) so heavy get_context traffic cannot evict them.
 func (s *Server) handleGetRepoMap(
 	_ context.Context,
 	req mcp.CallToolRequest,
@@ -29,72 +27,79 @@ func (s *Server) handleGetRepoMap(
 	if detail == "" {
 		detail = "compact"
 	}
-	cacheKey := repomapCacheKeyCompact
-	if detail == "full" {
-		cacheKey = repomapCacheKeyFull
-	}
 
-	if cached := s.getPacketFromCache(cacheKey); cached != nil {
-		if txt, ok := cached.(string); ok {
-			return mcp.NewToolResultText(txt), nil
+	// Read from dedicated orient cache — never evicted by LRU packet cache.
+	s.orientMu.RLock()
+	if detail == "full" {
+		if s.orientRepoFull != nil {
+			cached := *s.orientRepoFull
+			s.orientMu.RUnlock()
+			return mcp.NewToolResultText(cached), nil
+		}
+	} else {
+		if s.orientRepoCompact != nil {
+			cached := *s.orientRepoCompact
+			s.orientMu.RUnlock()
+			return mcp.NewToolResultText(cached), nil
 		}
 	}
+	s.orientMu.RUnlock()
 
 	nodes := s.graph.AllNodes()
 	edges := s.graph.AllEdges()
 	repoRoot := s.graph.Root()
 
-	// Build fanin map.
-	fanin := make(map[graph.NodeID]int, len(nodes))
-	for _, e := range edges {
-		fanin[e.To]++
-	}
+	// Use connectivity map that excludes DEFINES/IMPORTS edges — same metric
+	// as explain_codebase so scores are consistent across tools.
+	refs := connectivityMap(edges)
 
 	topN := 3
 	if detail == "full" {
 		topN = 10
 	}
 
-	result := buildRepoMap(nodes, fanin, repoRoot, topN)
+	result := buildRepoMap(nodes, refs, repoRoot, topN)
 
-	s.setPacketCache(cacheKey, result)
+	s.orientMu.Lock()
+	if detail == "full" {
+		s.orientRepoFull = &result
+	} else {
+		s.orientRepoCompact = &result
+	}
+	s.orientMu.Unlock()
+
 	return mcp.NewToolResultText(result), nil
 }
 
 // repoMapPackage holds one package's top entities for the map.
 type repoMapPackage struct {
-	dir        string // relative directory path
-	layer      string // architectural layer label
-	topNodes   []repoMapEntity
-	totalFanin int
+	dir       string // relative directory path
+	layer     string // architectural layer label
+	topNodes  []repoMapEntity
+	totalRefs int
 }
 
 // repoMapEntity is a single entity line in the repo map.
 type repoMapEntity struct {
-	name   string
-	fanin  int
-	fanout int
-	typ    graph.NodeType
+	name string
+	refs int
+	typ  graph.NodeType
 }
 
 // buildRepoMap assembles the text repo map.
 func buildRepoMap(
 	nodes []*graph.Node,
-	fanin map[graph.NodeID]int,
+	refs map[graph.NodeID]int,
 	repoRoot string,
 	topN int,
 ) string {
 	// Group nodes by directory (relative path).
 	type nodeScore struct {
-		node   *graph.Node
-		fanin  int
-		fanout int
+		node *graph.Node
+		refs int
 	}
 	dirNodes := make(map[string][]nodeScore)
 
-	// Build fanout from nodes (count outgoing by iterating — we already have edges
-	// snapshotted into fanin; for fanout we estimate from node metadata complexity
-	// or just use 0; for the map display only fanin is required per spec).
 	for _, n := range nodes {
 		if n.Type == graph.NodeFile || n.Type == graph.NodePackage || n.Type == graph.NodeRoute {
 			continue
@@ -107,18 +112,18 @@ func buildRepoMap(
 		}
 		dir := relPath(repoRoot, dirOf(n.File))
 		dirNodes[dir] = append(dirNodes[dir], nodeScore{
-			node:  n,
-			fanin: fanin[n.ID],
+			node: n,
+			refs: refs[n.ID],
 		})
 	}
 
-	// Build per-directory packages sorted by total fanin descending.
+	// Build per-directory packages sorted by total refs descending.
 	var pkgs []repoMapPackage
 	for dir, ns := range dirNodes {
-		// Sort nodes in this dir by fanin desc.
+		// Sort nodes in this dir by refs desc, then name asc for stability.
 		sort.Slice(ns, func(i, j int) bool {
-			if ns[i].fanin != ns[j].fanin {
-				return ns[i].fanin > ns[j].fanin
+			if ns[i].refs != ns[j].refs {
+				return ns[i].refs > ns[j].refs
 			}
 			return ns[i].node.Name < ns[j].node.Name
 		})
@@ -127,24 +132,24 @@ func buildRepoMap(
 			top = top[:topN]
 		}
 		var entities []repoMapEntity
-		var totalFanin int
-		for _, ns := range top {
+		var totalRefs int
+		for _, s := range top {
 			entities = append(entities, repoMapEntity{
-				name:  ns.node.Name,
-				fanin: ns.fanin,
-				typ:   ns.node.Type,
+				name: s.node.Name,
+				refs: s.refs,
+				typ:  s.node.Type,
 			})
-			totalFanin += ns.fanin
+			totalRefs += s.refs
 		}
 		pkgs = append(pkgs, repoMapPackage{
-			dir:        dir,
-			layer:      detectLayerLabel(dir),
-			topNodes:   entities,
-			totalFanin: totalFanin,
+			dir:       dir,
+			layer:     detectLayerLabel(dir),
+			topNodes:  entities,
+			totalRefs: totalRefs,
 		})
 	}
 
-	// Group packages by architectural layer, then sort within layer by totalFanin desc.
+	// Group packages by architectural layer, then sort within layer by totalRefs desc.
 	layerOrder := []string{"[entry point]", "[api surface]", "[core logic]", "[persistence]", "[config]", "[test support]", "[external]"}
 	layerGroups := make(map[string][]repoMapPackage)
 	for _, p := range pkgs {
@@ -152,38 +157,47 @@ func buildRepoMap(
 	}
 	for lbl := range layerGroups {
 		sort.Slice(layerGroups[lbl], func(i, j int) bool {
-			return layerGroups[lbl][i].totalFanin > layerGroups[lbl][j].totalFanin
+			return layerGroups[lbl][i].totalRefs > layerGroups[lbl][j].totalRefs
 		})
 	}
 
 	var sb strings.Builder
 	sb.WriteString("# Repository Map\n\n")
 
-	written := 0
+	layerWritten := false
 	for _, lbl := range layerOrder {
 		group := layerGroups[lbl]
 		if len(group) == 0 {
 			continue
 		}
-		// Emit packages in this layer.
+		// Check whether any package in this layer actually has entities to show.
+		anyVisible := false
+		for _, p := range group {
+			if len(p.topNodes) > 0 {
+				anyVisible = true
+				break
+			}
+		}
+		if !anyVisible {
+			continue
+		}
+		// Blank line between non-empty layers.
+		if layerWritten {
+			sb.WriteString("\n")
+		}
 		for _, p := range group {
 			if len(p.topNodes) == 0 {
 				continue
 			}
-			line := fmt.Sprintf("%-60s %s\n", p.dir+"/", lbl)
-			sb.WriteString(line)
+			sb.WriteString(fmt.Sprintf("%-60s %s\n", p.dir+"/", lbl))
 			for _, e := range p.topNodes {
-				if e.fanin > 0 {
-					sb.WriteString(fmt.Sprintf("  %s (%d callers)\n", e.name, e.fanin))
+				if e.refs > 0 {
+					sb.WriteString(fmt.Sprintf("  %s (%d refs)\n", e.name, e.refs))
 				} else {
 					sb.WriteString(fmt.Sprintf("  %s\n", e.name))
 				}
 			}
-			written++
-		}
-		// Blank line between layers.
-		if written > 0 {
-			sb.WriteString("\n")
+			layerWritten = true
 		}
 		delete(layerGroups, lbl)
 	}
@@ -194,12 +208,19 @@ func buildRepoMap(
 			if len(p.topNodes) == 0 {
 				continue
 			}
+			if layerWritten {
+				sb.WriteString("\n")
+			}
 			sb.WriteString(fmt.Sprintf("%-60s\n", p.dir+"/"))
 			for _, e := range p.topNodes {
-				sb.WriteString(fmt.Sprintf("  %s (%d callers)\n", e.name, e.fanin))
+				if e.refs > 0 {
+					sb.WriteString(fmt.Sprintf("  %s (%d refs)\n", e.name, e.refs))
+				} else {
+					sb.WriteString(fmt.Sprintf("  %s\n", e.name))
+				}
 			}
+			layerWritten = true
 		}
-		sb.WriteString("\n")
 	}
 
 	return sb.String()
