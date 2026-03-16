@@ -1579,7 +1579,8 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 |---|---|
 | Save a plan with tasks for future sessions | ` + "`create_plan(title=\"...\", tasks=[...])`" + ` |
 | List all plans and completion counts | ` + "`get_plans()`" + ` |
-| Get your own pending tasks | ` + "`get_my_tasks(agent_id=\"...\")`" + ` |
+| Get your own pending tasks | ` + "`get_pending_tasks(agent_id=\"...\", suggest_next=true)`" + ` |
+| Browse episodic memory chronologically | ` + "`recall()`" + ` (empty query = newest-first browse) |
 | Link a task to relevant code entities | ` + "`link_task_nodes(task_id=\"...\", node_ids=[...])`" + ` |
 | Mark a task as done or add notes | ` + "`update_task(id=\"...\", status=\"done\", notes=\"...\")`" + ` |
 | Save progress so next session can resume | ` + "`save_session_state(task_id=\"...\")`" + ` |
