@@ -12,22 +12,23 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
-// explainCacheKey is the packet-cache key for explain_codebase results.
-const explainCacheKey = "explain_codebase"
-
 // handleExplainCodebase returns a ~1000 token natural-language orientation
 // covering entry points, key types, detected architectural patterns, package
 // structure, and tech stack. Built entirely from the live graph — no LLM
 // required for the base case.
+//
+// Results are stored in a dedicated orientation cache (not the shared 20-slot
+// packet cache) so that heavy get_context traffic cannot evict them. The cache
+// is invalidated via InvalidatePacketCacheForFile on every graph structural change.
 func (s *Server) handleExplainCodebase(
 	_ context.Context,
 	_ mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
-	// Serve from packet cache when available (invalidated on graph structural change).
-	if cached := s.getPacketFromCache(explainCacheKey); cached != nil {
-		if txt, ok := cached.(string); ok {
-			return mcp.NewToolResultText(txt), nil
-		}
+	s.orientMu.RLock()
+	cached := s.orientExplain
+	s.orientMu.RUnlock()
+	if cached != nil {
+		return mcp.NewToolResultText(*cached), nil
 	}
 
 	identity := s.graph.ProjectIdentity()
@@ -35,24 +36,37 @@ func (s *Server) handleExplainCodebase(
 	edges := s.graph.AllEdges()
 	repoRoot := s.graph.Root()
 
-	// Build fanin map from edge snapshot.
-	fanin := make(map[graph.NodeID]int, len(nodes))
-	for _, e := range edges {
-		fanin[e.To]++
-	}
+	refs := connectivityMap(edges)
+	result := buildExplanation(identity, nodes, refs, repoRoot)
 
-	result := buildExplanation(identity, nodes, edges, fanin, repoRoot)
+	s.orientMu.Lock()
+	s.orientExplain = &result
+	s.orientMu.Unlock()
 
-	s.setPacketCache(explainCacheKey, result)
 	return mcp.NewToolResultText(result), nil
+}
+
+// connectivityMap builds a node→count map of meaningful incoming references.
+// DEFINES (file→entity) and IMPORTS (file→package) edges are excluded because
+// every entity has exactly one DEFINES edge regardless of its actual usage —
+// including them would add uniform noise to every node's score and make the
+// top-N selection meaningless.
+func connectivityMap(edges []*graph.Edge) map[graph.NodeID]int {
+	m := make(map[graph.NodeID]int, len(edges)/2)
+	for _, e := range edges {
+		if e.Type == graph.EdgeDefines || e.Type == graph.EdgeImports {
+			continue
+		}
+		m[e.To]++
+	}
+	return m
 }
 
 // buildExplanation assembles the narrative text for explain_codebase.
 func buildExplanation(
 	identity *graph.ProjectIdentity,
 	nodes []*graph.Node,
-	edges []*graph.Edge,
-	fanin map[graph.NodeID]int,
+	refs map[graph.NodeID]int, // connectivity score per node (excl. DEFINES/IMPORTS)
 	repoRoot string,
 ) string {
 	var sb strings.Builder
@@ -87,7 +101,7 @@ func buildExplanation(
 	sb.WriteString("\n")
 
 	// ── Architectural Pattern ─────────────────────────────────────────────────
-	pattern := detectArchPattern(nodes, edges)
+	pattern := detectArchPattern(nodes)
 	sb.WriteString(fmt.Sprintf("**Architectural pattern**: %s\n\n", pattern))
 
 	// ── Entry Points ──────────────────────────────────────────────────────────
@@ -98,13 +112,15 @@ func buildExplanation(
 			shown = shown[:8]
 		}
 		for _, ep := range shown {
-			relFile := relPath(repoRoot, ep.File)
-			sb.WriteString(fmt.Sprintf("- `%s` — %s:%d\n", ep.Name, relFile, ep.Line))
+			// ep.File is already relative (stripped by Graph.ProjectIdentity via
+			// Graph.relPath). Using it directly avoids a double-relPath call that
+			// would fail when the path is already relative.
+			sb.WriteString(fmt.Sprintf("- `%s` — %s:%d\n", ep.Name, ep.File, ep.Line))
 		}
 		sb.WriteString("\n")
 	}
 
-	// ── Key Types by Fanin ────────────────────────────────────────────────────
+	// ── Key Types by Connectivity ─────────────────────────────────────────────
 	sb.WriteString("## Key Types (highest connectivity)\n\n")
 	type scored struct {
 		node  *graph.Node
@@ -121,9 +137,9 @@ func buildExplanation(
 		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
 			continue
 		}
-		s := fanin[n.ID]
-		if s > 0 {
-			candidates = append(candidates, scored{n, s})
+		score := refs[n.ID]
+		if score > 0 {
+			candidates = append(candidates, scored{n, score})
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
@@ -137,7 +153,10 @@ func buildExplanation(
 	} else {
 		for _, c := range candidates {
 			relFile := relPath(repoRoot, c.node.File)
-			sb.WriteString(fmt.Sprintf("- `%s` (%s) — %d callers — %s:%d\n",
+			// "N refs" is accurate for all node types: structs get IMPLEMENTS/
+			// DATA_FLOWS/EMBEDS references, not CALLS. Using "callers" would be
+			// misleading for non-function types.
+			sb.WriteString(fmt.Sprintf("- `%s` (%s) — %d refs — %s:%d\n",
 				c.node.Name, c.node.Type, c.score, relFile, c.node.Line))
 		}
 	}
@@ -145,10 +164,9 @@ func buildExplanation(
 
 	// ── Package Structure ─────────────────────────────────────────────────────
 	sb.WriteString("## Package Structure\n\n")
-	pkgStats := buildPackageStats(nodes, fanin, repoRoot)
-	// Sort by total fanin descending.
+	pkgStats := buildPackageStats(nodes, refs, repoRoot)
 	sort.Slice(pkgStats, func(i, j int) bool {
-		return pkgStats[i].totalFanin > pkgStats[j].totalFanin
+		return pkgStats[i].totalRefs > pkgStats[j].totalRefs
 	})
 	shown := pkgStats
 	if len(shown) > 12 {
@@ -160,22 +178,19 @@ func buildExplanation(
 	}
 	sb.WriteString("\n")
 
-	// ── Conventions / Memories ────────────────────────────────────────────────
-	// (memories would be injected by the caller layer if available — left as
-	// a hook; not implemented in this pure-graph pass)
-
 	return sb.String()
 }
 
 // packageStats holds per-package aggregated connectivity data.
 type packageStats struct {
-	pkg        string
-	nodeCount  int
-	totalFanin int
+	pkg       string
+	nodeCount int
+	totalRefs int
 }
 
-// buildPackageStats groups non-test, non-vendored nodes by package and sums fanin.
-func buildPackageStats(nodes []*graph.Node, fanin map[graph.NodeID]int, repoRoot string) []packageStats {
+// buildPackageStats groups non-test, non-vendored nodes by relative directory
+// path (unique per package location) and sums their connectivity scores.
+func buildPackageStats(nodes []*graph.Node, refs map[graph.NodeID]int, repoRoot string) []packageStats {
 	pkgMap := make(map[string]*packageStats)
 	for _, n := range nodes {
 		if n.Type == graph.NodeFile || n.Type == graph.NodePackage || n.Type == graph.NodeRoute {
@@ -187,9 +202,8 @@ func buildPackageStats(nodes []*graph.Node, fanin map[graph.NodeID]int, repoRoot
 		if n.Provenance == graph.ProvenanceVendored {
 			continue
 		}
-		// Group by relative directory path (unique per package location) rather
-		// than n.Package (short name) to avoid merging unrelated packages that
-		// happen to share the same short name (e.g. two "mcp" packages).
+		// Group by relative directory path — unique, unlike n.Package (short name)
+		// which can be shared by unrelated packages in different directories.
 		pkg := relPath(repoRoot, filepath.Dir(n.File))
 		if pkg == "." || pkg == "" {
 			pkg = n.Package
@@ -200,7 +214,7 @@ func buildPackageStats(nodes []*graph.Node, fanin map[graph.NodeID]int, repoRoot
 			pkgMap[pkg] = ps
 		}
 		ps.nodeCount++
-		ps.totalFanin += fanin[n.ID]
+		ps.totalRefs += refs[n.ID]
 	}
 	out := make([]packageStats, 0, len(pkgMap))
 	for _, ps := range pkgMap {
@@ -246,11 +260,11 @@ func detectTechStack(nodes []*graph.Node) (langs []string, externalImports []str
 			langSet["C"] = true
 		}
 
-		// Collect external import names from IMPORTS-type nodes.
+		// NodePackage nodes have Name = full import path (e.g. "github.com/foo/bar")
+		// as set by the Go parser. Only count external (non-stdlib) packages.
 		if n.Type == graph.NodePackage && !strings.Contains(n.File, "vendor") {
-			pkg := n.Name
-			if isExternalPkg(pkg) {
-				importCounts[pkg]++
+			if isExternalPkg(n.Name) {
+				importCounts[n.Name]++
 			}
 		}
 	}
@@ -276,22 +290,21 @@ func detectTechStack(nodes []*graph.Node) (langs []string, externalImports []str
 }
 
 // isExternalPkg returns true for import paths that look like third-party packages.
+// stdlib packages have no dot in the first path segment (e.g. "net/http" → "net").
 func isExternalPkg(pkg string) bool {
 	if pkg == "" {
 		return false
 	}
-	// stdlib packages have no dot in the first segment.
 	parts := strings.SplitN(pkg, "/", 2)
 	return strings.Contains(parts[0], ".")
 }
 
 // detectArchPattern heuristically identifies the high-level architecture type
-// from import names present in the graph nodes.
-func detectArchPattern(nodes []*graph.Node, _ []*graph.Edge) string {
+// from NodePackage nodes in the graph. NodePackage.Name is the full import path
+// as set by the Go parser (and equivalent parsers for other languages).
+func detectArchPattern(nodes []*graph.Node) string {
 	imports := make(map[string]bool)
 	for _, n := range nodes {
-		// NodePackage nodes have Name = full import path (e.g. "github.com/foo/bar")
-		// as set by the Go parser. Other language parsers follow the same convention.
 		if n.Type == graph.NodePackage {
 			imports[n.Name] = true
 		}
@@ -299,7 +312,6 @@ func detectArchPattern(nodes []*graph.Node, _ []*graph.Edge) string {
 
 	var patterns []string
 
-	// Web server / HTTP API
 	if imports["net/http"] || imports["github.com/gin-gonic/gin"] ||
 		imports["github.com/gorilla/mux"] || imports["github.com/labstack/echo/v4"] ||
 		imports["github.com/go-chi/chi/v5"] || imports["fastapi"] || imports["flask"] ||
@@ -307,28 +319,23 @@ func detectArchPattern(nodes []*graph.Node, _ []*graph.Edge) string {
 		patterns = append(patterns, "HTTP server / web API")
 	}
 
-	// CLI tool
 	if imports["github.com/spf13/cobra"] || imports["github.com/urfave/cli/v2"] ||
 		imports["flag"] || imports["os/exec"] {
 		patterns = append(patterns, "CLI tool")
 	}
 
-	// gRPC service
 	if imports["google.golang.org/grpc"] || imports["github.com/grpc-ecosystem/grpc-gateway/v2"] {
 		patterns = append(patterns, "gRPC service")
 	}
 
-	// MCP server
 	if imports["github.com/mark3labs/mcp-go/mcp"] || imports["github.com/mark3labs/mcp-go/server"] {
 		patterns = append(patterns, "MCP server")
 	}
 
-	// Library / SDK
 	if imports["testing"] {
 		patterns = append(patterns, "library / SDK")
 	}
 
-	// Event-driven
 	if imports["github.com/nats-io/nats.go"] || imports["github.com/confluentinc/confluent-kafka-go/kafka"] ||
 		imports["github.com/streadway/amqp"] {
 		patterns = append(patterns, "event-driven")
@@ -366,6 +373,8 @@ func detectLayerLabel(pkg string) string {
 }
 
 // relPath trims the repo root prefix from an absolute file path.
+// Returns abs unchanged when root is empty or when filepath.Rel returns an error
+// (e.g. when abs is already a relative path).
 func relPath(root, abs string) string {
 	if root == "" {
 		return abs
