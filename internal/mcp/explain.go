@@ -145,7 +145,7 @@ func buildExplanation(
 
 	// ── Package Structure ─────────────────────────────────────────────────────
 	sb.WriteString("## Package Structure\n\n")
-	pkgStats := buildPackageStats(nodes, fanin)
+	pkgStats := buildPackageStats(nodes, fanin, repoRoot)
 	// Sort by total fanin descending.
 	sort.Slice(pkgStats, func(i, j int) bool {
 		return pkgStats[i].totalFanin > pkgStats[j].totalFanin
@@ -175,7 +175,7 @@ type packageStats struct {
 }
 
 // buildPackageStats groups non-test, non-vendored nodes by package and sums fanin.
-func buildPackageStats(nodes []*graph.Node, fanin map[graph.NodeID]int) []packageStats {
+func buildPackageStats(nodes []*graph.Node, fanin map[graph.NodeID]int, repoRoot string) []packageStats {
 	pkgMap := make(map[string]*packageStats)
 	for _, n := range nodes {
 		if n.Type == graph.NodeFile || n.Type == graph.NodePackage || n.Type == graph.NodeRoute {
@@ -187,9 +187,12 @@ func buildPackageStats(nodes []*graph.Node, fanin map[graph.NodeID]int) []packag
 		if n.Provenance == graph.ProvenanceVendored {
 			continue
 		}
-		pkg := n.Package
-		if pkg == "" {
-			pkg = filepath.Dir(n.File)
+		// Group by relative directory path (unique per package location) rather
+		// than n.Package (short name) to avoid merging unrelated packages that
+		// happen to share the same short name (e.g. two "mcp" packages).
+		pkg := relPath(repoRoot, filepath.Dir(n.File))
+		if pkg == "." || pkg == "" {
+			pkg = n.Package
 		}
 		ps, ok := pkgMap[pkg]
 		if !ok {
@@ -214,6 +217,9 @@ func detectTechStack(nodes []*graph.Node) (langs []string, externalImports []str
 
 	for _, n := range nodes {
 		if n.Provenance == graph.ProvenanceVendored {
+			continue
+		}
+		if n.File == "" {
 			continue
 		}
 		ext := strings.ToLower(filepath.Ext(n.File))
@@ -284,12 +290,10 @@ func isExternalPkg(pkg string) bool {
 func detectArchPattern(nodes []*graph.Node, _ []*graph.Edge) string {
 	imports := make(map[string]bool)
 	for _, n := range nodes {
+		// NodePackage nodes have Name = full import path (e.g. "github.com/foo/bar")
+		// as set by the Go parser. Other language parsers follow the same convention.
 		if n.Type == graph.NodePackage {
 			imports[n.Name] = true
-		}
-		// Also check metadata for import paths recorded during parsing.
-		if ip, ok := n.Metadata["import_path"]; ok {
-			imports[ip] = true
 		}
 	}
 
