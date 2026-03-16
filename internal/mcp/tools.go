@@ -1817,6 +1817,8 @@ var toolCatalog = []toolCatalogEntry{
 	{Name: "session_init", Category: "session", Description: "Single-call session bootstrap", Keywords: []string{"start", "begin", "init", "session", "bootstrap", "startup"}, Example: `session_init(agent_id="my-agent")`},
 
 	// Code exploration
+	{Name: "explain_codebase", Category: "exploration", Description: "First-5-minutes orientation: entry points, key types, patterns, packages, tech stack", Keywords: []string{"explain", "codebase", "orientation", "overview", "introduce", "what is", "architecture", "summary", "new", "unfamiliar", "onboard"}, Example: `explain_codebase()`},
+	{Name: "get_repo_map", Category: "exploration", Description: "Navigable package+entity map grouped by architectural layer", Keywords: []string{"repo", "map", "packages", "layout", "navigate", "overview", "structure", "where", "layers"}, Example: `get_repo_map(detail="compact")`},
 	{Name: "get_context", Category: "exploration", Description: "Relevance-ranked subgraph around an entity", Keywords: []string{"context", "understand", "entity", "function", "struct", "interface", "subgraph", "explore", "code", "definition"}, Example: `get_context(entity="AuthService")`},
 	{Name: "find_entity", Category: "exploration", Description: "Locate nodes by name or substring", Keywords: []string{"find", "search", "locate", "entity", "name", "symbol", "discover"}, Example: `find_entity(query="Auth")`},
 	{Name: "get_file_context", Category: "exploration", Description: "All entities in a file", Keywords: []string{"file", "entities", "overview", "list", "defined"}, Example: `get_file_context(file="internal/store/tasks.go")`},

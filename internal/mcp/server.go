@@ -721,6 +721,40 @@ func (s *Server) registerTools() {
 		s.handleReportUsage,
 	)
 
+	// explain_codebase: first-5-minutes orientation narrative (R11)
+	s.addOrDefer(
+		mcp.NewTool(
+			"explain_codebase",
+			mcp.WithDescription(
+				"Returns a ~1000 token natural-language orientation of the codebase: "+
+					"entry points, key types by fanin, architectural patterns detected, "+
+					"package structure, and tech stack. Built entirely from the graph — no LLM required. "+
+					"Cached until a structural change occurs. "+
+					"Use this at the start of a session on an unfamiliar repo instead of 5-10 Grep/Read calls.",
+			),
+		),
+		s.handleExplainCodebase,
+	)
+
+	// get_repo_map: navigable package+entity overview (R12)
+	s.addOrDefer(
+		mcp.NewTool(
+			"get_repo_map",
+			mcp.WithDescription(
+				"Returns a navigable text map of the repository: packages grouped by architectural layer "+
+					"(entry points, api surface, core logic, persistence, config) with their top entities by fanin. "+
+					"detail=\"compact\" (~500 tokens, top 3 entities per package — default). "+
+					"detail=\"full\" (~2000 tokens, top 10 entities per package). "+
+					"Pure graph query — no LLM. Cached until structural change. "+
+					"Use to explore an unfamiliar area of the codebase without burning tokens on Glob/Read.",
+			),
+			mcp.WithString("detail",
+				mcp.Description("Output verbosity: \"compact\" (top 3 entities/package, default) or \"full\" (top 10)."),
+			),
+		),
+		s.handleGetRepoMap,
+	)
+
 	// discover_tools: lightweight tool finder
 	s.addOrDefer(
 		mcp.NewTool(
