@@ -1572,6 +1572,8 @@ func (s *Server) registerTools() {
 				"Creates or updates an Architectural Decision Record (ADR) in the brain. "+
 					"ADRs are persistent cold-memory entries for significant design choices — "+
 					"they appear in get_context compact output when linked_files match the entity's file. "+
+					"IMPORTANT: always pass linked_files=[\"path/to/file.go\"] when creating an ADR — "+
+					"without it, get_adrs(file=...) will never return this ADR for that file. "+
 					"Requires brain.url to be configured in synapses.json.",
 			),
 			mcp.WithString("id",

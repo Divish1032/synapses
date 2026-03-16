@@ -97,6 +97,9 @@ func (s *Server) handleGetADRs(
 	}
 	if fileFilter != "" {
 		result["file_filter"] = fileFilter
+		if len(adrs) == 0 {
+			result["hint"] = "No ADRs linked to this file. When creating ADRs with upsert_adr, pass linked_files=[\"" + fileFilter + "\"] to enable file-based filtering."
+		}
 	}
 	return jsonResult(result)
 }
