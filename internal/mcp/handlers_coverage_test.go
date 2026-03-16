@@ -1478,20 +1478,51 @@ func TestHandleVerifyImplementation_WithFreshnessWarning(t *testing.T) {
 // ── handleVerifyImplementation — signature impact ─────────────────────────────
 
 // TestHandleVerifyImplementation_SignatureImpact_ExportedFuncWithCallers checks
-// that an exported function with a caller produces a signature_impact entry.
+// that an exported function whose signature actually changed AND has callers
+// produces a signature_impact entry (v2: requires prev_signature in store).
 func TestHandleVerifyImplementation_SignatureImpact_ExportedFuncWithCallers(t *testing.T) {
-	s := newTestServer(t)
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
 
-	// Add exported function in the file under test.
-	targetID := s.graph.MakeNodeID("pkg/api/api.go", "HandleRequest")
+	targetID := g.MakeNodeID("pkg/api/api.go", "HandleRequest")
+
+	// First SaveGraph: original signature.
+	g1 := graph.New("test-repo")
+	g1.AddNode(&graph.Node{
+		ID: targetID, Name: "HandleRequest", Type: graph.NodeFunction,
+		File: "pkg/api/api.go", Package: "api", Exported: true, Line: 10,
+		Metadata: map[string]string{"signature": "func HandleRequest(w http.ResponseWriter)"},
+	})
+	if err := st.SaveGraph(g1); err != nil {
+		t.Fatalf("SaveGraph 1: %v", err)
+	}
+
+	// Second SaveGraph: signature changed — new param added.
+	g2 := graph.New("test-repo")
+	g2.AddNode(&graph.Node{
+		ID: targetID, Name: "HandleRequest", Type: graph.NodeFunction,
+		File: "pkg/api/api.go", Package: "api", Exported: true, Line: 10,
+		Metadata: map[string]string{"signature": "func HandleRequest(w http.ResponseWriter, r *http.Request)"},
+	})
+	// Add caller edge so ImpactAnalysis finds a result.
+	callerID := g2.MakeNodeID("pkg/main/main.go", "main")
+	g2.AddNode(&graph.Node{
+		ID: callerID, Name: "main", Type: graph.NodeFunction,
+		File: "pkg/main/main.go", Package: "main", Exported: false, Line: 5,
+	})
+	g2.AddEdge(&graph.Edge{From: callerID, To: targetID, Type: graph.EdgeCalls})
+	if err := st.SaveGraph(g2); err != nil {
+		t.Fatalf("SaveGraph 2: %v", err)
+	}
+
+	// Mirror graph state into the in-memory graph used by the server.
 	s.graph.AddNode(&graph.Node{
 		ID: targetID, Name: "HandleRequest", Type: graph.NodeFunction,
 		File: "pkg/api/api.go", Package: "api", Exported: true, Line: 10,
 		Metadata: map[string]string{"signature": "func HandleRequest(w http.ResponseWriter, r *http.Request)"},
 	})
-
-	// Add a caller of the exported function.
-	callerID := s.graph.MakeNodeID("pkg/main/main.go", "main")
 	s.graph.AddNode(&graph.Node{
 		ID: callerID, Name: "main", Type: graph.NodeFunction,
 		File: "pkg/main/main.go", Package: "main", Exported: false, Line: 5,
@@ -1504,7 +1535,7 @@ func TestHandleVerifyImplementation_SignatureImpact_ExportedFuncWithCallers(t *t
 	res, err := s.handleVerifyImplementation(ctx, req)
 	m := mustResult(t, res, err)
 
-	// impact_warnings should be > 0 since HandleRequest has a caller.
+	// impact_warnings should be > 0 since HandleRequest has a changed sig + caller.
 	impactWarnings, ok := m["impact_warnings"].(float64)
 	if !ok || impactWarnings == 0 {
 		t.Errorf("expected impact_warnings > 0, got %v", m["impact_warnings"])
@@ -1537,22 +1568,35 @@ func TestHandleVerifyImplementation_SignatureImpact_ExportedFuncWithCallers(t *t
 }
 
 // TestHandleVerifyImplementation_SignatureImpact_UnexportedNoImpact checks that
-// unexported symbols do not produce signature_impact entries.
+// unexported symbols do not produce signature_impact entries even when their
+// signature changes — GetSignatureChanges filters exported=1 only.
 func TestHandleVerifyImplementation_SignatureImpact_UnexportedNoImpact(t *testing.T) {
-	s := newTestServer(t)
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
 
-	// Add unexported function with a caller.
-	targetID := s.graph.MakeNodeID("pkg/api/api.go", "internalHelper")
-	s.graph.AddNode(&graph.Node{
+	targetID := g.MakeNodeID("pkg/api/api.go", "internalHelper")
+
+	// SaveGraph twice — signature changes but entity is unexported.
+	g1 := graph.New("test-repo")
+	g1.AddNode(&graph.Node{
 		ID: targetID, Name: "internalHelper", Type: graph.NodeFunction,
 		File: "pkg/api/api.go", Package: "api", Exported: false, Line: 20,
+		Metadata: map[string]string{"signature": "func internalHelper(x int)"},
 	})
-	callerID := s.graph.MakeNodeID("pkg/api/api.go", "PublicFunc")
-	s.graph.AddNode(&graph.Node{
-		ID: callerID, Name: "PublicFunc", Type: graph.NodeFunction,
-		File: "pkg/api/api.go", Package: "api", Exported: true, Line: 30,
+	if err := st.SaveGraph(g1); err != nil {
+		t.Fatalf("SaveGraph 1: %v", err)
+	}
+	g2 := graph.New("test-repo")
+	g2.AddNode(&graph.Node{
+		ID: targetID, Name: "internalHelper", Type: graph.NodeFunction,
+		File: "pkg/api/api.go", Package: "api", Exported: false, Line: 20,
+		Metadata: map[string]string{"signature": "func internalHelper(x int, y string)"},
 	})
-	s.graph.AddEdge(&graph.Edge{From: callerID, To: targetID, Type: graph.EdgeCalls})
+	if err := st.SaveGraph(g2); err != nil {
+		t.Fatalf("SaveGraph 2: %v", err)
+	}
 
 	req := callTool(map[string]any{
 		"files_written": `["pkg/api/api.go"]`,
@@ -1560,25 +1604,56 @@ func TestHandleVerifyImplementation_SignatureImpact_UnexportedNoImpact(t *testin
 	res, err := s.handleVerifyImplementation(ctx, req)
 	m := mustResult(t, res, err)
 
-	// internalHelper is unexported — no impact entry for it.
-	// PublicFunc has no callers — no impact entry for it either.
+	// internalHelper is unexported — GetSignatureChanges never returns it.
 	if w, _ := m["impact_warnings"].(float64); w != 0 {
-		t.Errorf("expected 0 impact_warnings for unexported+no-caller, got %v", w)
+		t.Errorf("expected 0 impact_warnings for unexported entity, got %v", w)
 	}
 	noKey(t, m, "impact_hint")
 }
 
 // TestHandleVerifyImplementation_SignatureImpact_ExportedStructWithCallers checks
-// that exported struct types also produce signature_impact entries.
+// that exported struct types with a signature change produce signature_impact entries.
 func TestHandleVerifyImplementation_SignatureImpact_ExportedStructWithCallers(t *testing.T) {
-	s := newTestServer(t)
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
 
-	structID := s.graph.MakeNodeID("pkg/store/store.go", "Config")
+	structID := g.MakeNodeID("pkg/store/store.go", "Config")
+	callerID := g.MakeNodeID("pkg/main/main.go", "Run")
+
+	// First SaveGraph: original struct signature.
+	g1 := graph.New("test-repo")
+	g1.AddNode(&graph.Node{
+		ID: structID, Name: "Config", Type: graph.NodeStruct,
+		File: "pkg/store/store.go", Package: "store", Exported: true, Line: 5,
+		Metadata: map[string]string{"signature": "type Config struct { Host string }"},
+	})
+	if err := st.SaveGraph(g1); err != nil {
+		t.Fatalf("SaveGraph 1: %v", err)
+	}
+
+	// Second SaveGraph: struct gains new field.
+	g2 := graph.New("test-repo")
+	g2.AddNode(&graph.Node{
+		ID: structID, Name: "Config", Type: graph.NodeStruct,
+		File: "pkg/store/store.go", Package: "store", Exported: true, Line: 5,
+		Metadata: map[string]string{"signature": "type Config struct { Host string; Port int }"},
+	})
+	g2.AddNode(&graph.Node{
+		ID: callerID, Name: "Run", Type: graph.NodeFunction,
+		File: "pkg/main/main.go", Package: "main", Exported: true, Line: 1,
+	})
+	g2.AddEdge(&graph.Edge{From: callerID, To: structID, Type: graph.EdgeCalls})
+	if err := st.SaveGraph(g2); err != nil {
+		t.Fatalf("SaveGraph 2: %v", err)
+	}
+
+	// Mirror into in-memory graph.
 	s.graph.AddNode(&graph.Node{
 		ID: structID, Name: "Config", Type: graph.NodeStruct,
 		File: "pkg/store/store.go", Package: "store", Exported: true, Line: 5,
 	})
-	callerID := s.graph.MakeNodeID("pkg/main/main.go", "Run")
 	s.graph.AddNode(&graph.Node{
 		ID: callerID, Name: "Run", Type: graph.NodeFunction,
 		File: "pkg/main/main.go", Package: "main", Exported: true, Line: 1,
@@ -1592,16 +1667,42 @@ func TestHandleVerifyImplementation_SignatureImpact_ExportedStructWithCallers(t 
 	m := mustResult(t, res, err)
 
 	if w, _ := m["impact_warnings"].(float64); w == 0 {
-		t.Error("expected impact_warnings > 0 for struct with caller")
+		t.Error("expected impact_warnings > 0 for struct with changed sig + caller")
 	}
 }
 
 // TestHandleVerifyImplementation_SignatureImpact_ZeroCallerNoEntry checks that
-// an exported function with no callers does NOT produce a signature_impact entry.
+// an exported function whose signature changed but has NO callers does NOT produce
+// a signature_impact entry (ImpactAnalysis returns TotalAffected=0).
 func TestHandleVerifyImplementation_SignatureImpact_ZeroCallerNoEntry(t *testing.T) {
-	s := newTestServer(t)
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
 
-	loneID := s.graph.MakeNodeID("pkg/util/util.go", "LoneFunc")
+	loneID := g.MakeNodeID("pkg/util/util.go", "LoneFunc")
+
+	// SaveGraph twice — sig changes but nobody calls LoneFunc.
+	g1 := graph.New("test-repo")
+	g1.AddNode(&graph.Node{
+		ID: loneID, Name: "LoneFunc", Type: graph.NodeFunction,
+		File: "pkg/util/util.go", Package: "util", Exported: true, Line: 1,
+		Metadata: map[string]string{"signature": "func LoneFunc() int"},
+	})
+	if err := st.SaveGraph(g1); err != nil {
+		t.Fatalf("SaveGraph 1: %v", err)
+	}
+	g2 := graph.New("test-repo")
+	g2.AddNode(&graph.Node{
+		ID: loneID, Name: "LoneFunc", Type: graph.NodeFunction,
+		File: "pkg/util/util.go", Package: "util", Exported: true, Line: 1,
+		Metadata: map[string]string{"signature": "func LoneFunc() string"},
+	})
+	if err := st.SaveGraph(g2); err != nil {
+		t.Fatalf("SaveGraph 2: %v", err)
+	}
+
+	// Mirror into in-memory graph (no caller edges).
 	s.graph.AddNode(&graph.Node{
 		ID: loneID, Name: "LoneFunc", Type: graph.NodeFunction,
 		File: "pkg/util/util.go", Package: "util", Exported: true, Line: 1,
@@ -1614,7 +1715,7 @@ func TestHandleVerifyImplementation_SignatureImpact_ZeroCallerNoEntry(t *testing
 	m := mustResult(t, res, err)
 
 	if w, _ := m["impact_warnings"].(float64); w != 0 {
-		t.Errorf("expected 0 impact_warnings for no-caller export, got %v", w)
+		t.Errorf("expected 0 impact_warnings for changed-sig with no callers, got %v", w)
 	}
 }
 

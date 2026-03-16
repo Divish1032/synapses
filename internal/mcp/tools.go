@@ -1359,11 +1359,12 @@ func (s *Server) handleVerifyImplementation(
 		Line int    `json:"line"`
 	}
 
-	// signatureImpactEntry reports callers of one exported symbol.
+	// signatureImpactEntry reports callers of one exported symbol whose signature changed.
 	type signatureImpactEntry struct {
 		Symbol    string      `json:"symbol"`
 		Type      string      `json:"type"`
-		Signature string      `json:"signature,omitempty"`
+		Before    string      `json:"before,omitempty"`    // signature before the change
+		Signature string      `json:"signature,omitempty"` // current signature
 		Callers   []callerRef `json:"callers"`
 	}
 
@@ -1381,14 +1382,6 @@ func (s *Server) handleVerifyImplementation(
 	var reports []fileReport
 	totalViolations := 0
 	totalImpactWarnings := 0
-
-	// nodeTypesWithImpact are the entity types whose signature changes can break callers.
-	nodeTypesWithImpact := map[graph.NodeType]bool{
-		graph.NodeFunction:  true,
-		graph.NodeMethod:    true,
-		graph.NodeStruct:    true,
-		graph.NodeInterface: true,
-	}
 
 	for _, f := range files {
 		r := fileReport{File: f}
@@ -1410,58 +1403,54 @@ func (s *Server) handleVerifyImplementation(
 			totalViolations += len(violations)
 		}
 
-		// Signature impact: for each exported symbol in this file, find direct callers.
-		// This tells the agent which call sites may be broken if the signature changed.
-		// Cap: 15 symbols per file, 30 callers per symbol to keep token usage bounded.
-		const maxSymbolsPerFile = 15
+		// Signature impact: find exported entities in this file whose signature
+		// actually changed since the last graph save. Only symbols with real changes
+		// are reported — no noise for files where nothing changed.
+		// Falls back to no-op when store is unavailable.
 		const maxCallersPerSymbol = 30
 
-		exportedCount := 0
-		for _, n := range nodes {
-			if !n.Exported || !nodeTypesWithImpact[n.Type] {
-				continue
+		if s.store != nil {
+			sigChanges, err := s.store.GetSignatureChanges(f)
+			if err != nil {
+				log.Printf("mcp: GetSignatureChanges(%s): %v", f, err)
 			}
-			if exportedCount >= maxSymbolsPerFile {
-				break
-			}
-			exportedCount++
-
-			impact, err := s.graph.ImpactAnalysis(n.ID, 1)
-			if err != nil || impact == nil || impact.TotalAffected == 0 {
-				continue
-			}
-
-			// Collect direct callers (depth-1 tier only).
-			var callers []callerRef
-			for _, tier := range impact.Tiers {
-				if tier.Depth != 1 {
+			for _, sc := range sigChanges {
+				nid := graph.NodeID(sc.NodeID)
+				impact, err := s.graph.ImpactAnalysis(nid, 1)
+				if err != nil || impact == nil || impact.TotalAffected == 0 {
 					continue
 				}
-				for i, ref := range tier.Nodes {
-					if i >= maxCallersPerSymbol {
-						break
-					}
-					callers = append(callers, callerRef{
-						Name: ref.Name,
-						File: ref.File,
-						Line: ref.Line,
-					})
-				}
-			}
-			if len(callers) == 0 {
-				continue
-			}
 
-			entry := signatureImpactEntry{
-				Symbol:  n.Name,
-				Type:    string(n.Type),
-				Callers: callers,
+				// Collect direct callers (depth-1 tier only).
+				var callers []callerRef
+				for _, tier := range impact.Tiers {
+					if tier.Depth != 1 {
+						continue
+					}
+					for i, ref := range tier.Nodes {
+						if i >= maxCallersPerSymbol {
+							break
+						}
+						callers = append(callers, callerRef{
+							Name: ref.Name,
+							File: ref.File,
+							Line: ref.Line,
+						})
+					}
+				}
+				if len(callers) == 0 {
+					continue
+				}
+
+				r.SignatureImpact = append(r.SignatureImpact, signatureImpactEntry{
+					Symbol:    sc.Name,
+					Type:      sc.NodeType,
+					Signature: sc.NewSig,
+					Before:    sc.OldSig,
+					Callers:   callers,
+				})
+				totalImpactWarnings++
 			}
-			if sig, ok := n.Metadata["signature"]; ok {
-				entry.Signature = sig
-			}
-			r.SignatureImpact = append(r.SignatureImpact, entry)
-			totalImpactWarnings++
 		}
 
 		// Freshness check.
