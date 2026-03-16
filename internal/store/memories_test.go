@@ -688,6 +688,27 @@ func TestInsertMemoryAnchors_DedupedMemory_AddsAnchors(t *testing.T) {
 	}
 }
 
+func TestInsertMemoryWithAnchors_RollsBackOnAnchorFailure(t *testing.T) {
+	st := openMemTestStore(t)
+	// Drop the memory_anchors table so anchor INSERT fails inside the tx.
+	if _, err := st.db.Exec(`DROP TABLE memory_anchors`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := st.InsertMemoryWithAnchors(Memory{
+		Tier: TierProject, Content: "this memory should NOT exist after rollback", AgentID: "a", Source: SourceManual,
+	}, []string{"repo::file.go::Func"})
+	if err == nil {
+		t.Fatal("expected error when memory_anchors table is missing")
+	}
+	// Verify the memory was NOT inserted (tx rolled back).
+	mems, _ := st.QueryMemories(TierProject, "", "a", 10)
+	for _, m := range mems {
+		if m.Content == "this memory should NOT exist after rollback" {
+			t.Error("memory should not exist after tx rollback — atomicity violated")
+		}
+	}
+}
+
 // TestSearchMemories_NoResults verifies a query with no matches returns empty
 // slice (not an error).
 func TestSearchMemories_NoResults(t *testing.T) {

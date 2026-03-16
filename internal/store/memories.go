@@ -46,70 +46,15 @@ type Memory struct {
 // InsertMemory writes a new memory, applying tier-based TTL and noise filtering.
 // Returns the memory ID. Deduplicates against existing memories with similar content.
 func (s *Store) InsertMemory(m Memory) (string, error) {
-	if m.ID == "" {
-		m.ID = newID()
+	m, deduped, err := s.prepareMemory(m)
+	if err != nil {
+		return "", err
 	}
-	now := time.Now().UTC()
-	if m.CreatedAt == "" {
-		m.CreatedAt = now.Format(time.RFC3339)
-	}
-	if m.LastAccessedAt == "" {
-		m.LastAccessedAt = m.CreatedAt
-	}
-	if m.Source == "" {
-		m.Source = SourceManual
-	}
-	if m.Tags == "" {
-		m.Tags = "[]"
+	if deduped != "" {
+		return deduped, nil
 	}
 
-	// Compute expires_at based on tier TTL (entity memories don't expire by time).
-	if m.ExpiresAt == "" {
-		switch m.Tier {
-		case TierSessionLog:
-			m.ExpiresAt = now.Add(ttlSessionLog).Format(time.RFC3339)
-		case TierProject:
-			m.ExpiresAt = now.Add(ttlProject).Format(time.RFC3339)
-		case TierEntity:
-			// Entity memories don't expire by time — they live until the node dies.
-			// Use a far-future sentinel.
-			m.ExpiresAt = now.Add(365 * 10 * 24 * time.Hour).Format(time.RFC3339)
-		default:
-			m.ExpiresAt = now.Add(ttlProject).Format(time.RFC3339)
-		}
-	}
-
-	// Noise filter: reject memories that are too short to be useful.
-	content := strings.TrimSpace(m.Content)
-	if len(content) < 10 {
-		return "", fmt.Errorf("memory content too short (min 10 chars)")
-	}
-	m.Content = content
-
-	// Size cap: truncate memories > 2000 Unicode code points (~500 tokens).
-	// Uses rune slicing (not byte slicing) to avoid cutting multi-byte characters.
-	if runes := []rune(m.Content); len(runes) > 2000 {
-		m.Content = string(runes[:2000]) + "…[truncated]"
-	}
-
-	// Dedup check: query recent same-scope memories and skip if too similar.
-	// Entity memories: scope = tier + entityID.
-	// Non-entity memories: scope = tier + agentID (prevents end_session duplicates).
-	var dupCandidates []Memory
-	if m.EntityID != "" {
-		dupCandidates, _ = s.QueryMemories(m.Tier, m.EntityID, "", 5)
-	} else if m.AgentID != "" {
-		dupCandidates, _ = s.QueryMemories(m.Tier, "", m.AgentID, 5)
-	}
-	for _, ex := range dupCandidates {
-		if stringSimilarity(ex.Content, m.Content) > 0.85 {
-			// Touch the existing memory instead of creating a duplicate.
-			_ = s.TouchMemory(ex.ID)
-			return ex.ID, nil
-		}
-	}
-
-	_, err := s.db.Exec(`
+	_, err = s.db.Exec(`
 		INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
 		                      created_at, expires_at, last_accessed_at, source)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -349,23 +294,47 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 }
 
 // InsertMemoryWithAnchors atomically inserts a memory and its anchor links in a
-// single transaction. If the memory deduplicates against an existing one, the
-// anchors are still added to the existing memory (additive enrichment).
-// Returns the memory ID (new or deduped) and whether anchors were written.
+// single transaction. Both the memory INSERT and all anchor INSERTs run inside
+// the same tx — if any step fails, the entire operation rolls back cleanly.
+// If the memory deduplicates against an existing one, anchors are still added
+// to the existing memory (additive enrichment) outside the tx.
 func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string, error) {
-	memID, err := s.InsertMemory(m)
+	// No anchors → delegate to non-transactional path (avoids tx overhead).
+	if len(anchorNodes) == 0 {
+		return s.InsertMemory(m)
+	}
+
+	// ── Phase 1: Validate and check dedup OUTSIDE the tx ──────────────────
+	// SetMaxOpenConns(1) means a tx holds the only conn. Any s.db.Query inside
+	// a tx would deadlock. So we run all reads (dedup, defaults) first.
+	m, deduped, err := s.prepareMemory(m)
 	if err != nil {
 		return "", err
 	}
-	if len(anchorNodes) == 0 || memID == "" {
-		return memID, nil
+	if deduped != "" {
+		// Memory deduped — existing memory was touched. Add anchors additively
+		// (no tx needed: memory already committed, anchors are INSERT OR IGNORE).
+		_ = s.InsertMemoryAnchors(deduped, anchorNodes)
+		return deduped, nil
 	}
 
+	// ── Phase 2: Insert memory + anchors in one tx ────────────────────────
 	tx, err := s.db.Begin()
 	if err != nil {
-		return memID, fmt.Errorf("begin anchor tx: %w", err)
+		return "", fmt.Errorf("begin memory+anchor tx: %w", err)
 	}
-	defer tx.Rollback() // no-op after commit
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`
+		INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
+		                      created_at, expires_at, last_accessed_at, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.ID, m.Tier, m.Content, m.EntityID, m.AgentID, m.TaskID, m.Tags,
+		m.CreatedAt, m.ExpiresAt, m.LastAccessedAt, m.Source,
+	)
+	if err != nil {
+		return "", fmt.Errorf("insert memory in tx: %w", err)
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, nid := range anchorNodes {
@@ -373,14 +342,75 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 			continue
 		}
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO memory_anchors (memory_id, node_id, created_at) VALUES (?, ?, ?)`,
-			memID, nid, now); err != nil {
-			return memID, fmt.Errorf("insert anchor in tx: %w", err)
+			m.ID, nid, now); err != nil {
+			return "", fmt.Errorf("insert anchor in tx: %w", err)
 		}
 	}
+
 	if err := tx.Commit(); err != nil {
-		return memID, fmt.Errorf("commit anchor tx: %w", err)
+		return "", fmt.Errorf("commit memory+anchor tx: %w", err)
 	}
-	return memID, nil
+	return m.ID, nil
+}
+
+// prepareMemory applies defaults, validates, and checks dedup for a Memory.
+// Returns the prepared Memory, the deduped ID if a duplicate was found (empty if new),
+// and any validation error. Does NOT insert — caller decides how to write.
+func (s *Store) prepareMemory(m Memory) (Memory, string, error) {
+	if m.ID == "" {
+		m.ID = newID()
+	}
+	now := time.Now().UTC()
+	if m.CreatedAt == "" {
+		m.CreatedAt = now.Format(time.RFC3339)
+	}
+	if m.LastAccessedAt == "" {
+		m.LastAccessedAt = m.CreatedAt
+	}
+	if m.Source == "" {
+		m.Source = SourceManual
+	}
+	if m.Tags == "" {
+		m.Tags = "[]"
+	}
+	if m.ExpiresAt == "" {
+		switch m.Tier {
+		case TierSessionLog:
+			m.ExpiresAt = now.Add(ttlSessionLog).Format(time.RFC3339)
+		case TierProject:
+			m.ExpiresAt = now.Add(ttlProject).Format(time.RFC3339)
+		case TierEntity:
+			m.ExpiresAt = now.Add(365 * 10 * 24 * time.Hour).Format(time.RFC3339)
+		default:
+			m.ExpiresAt = now.Add(ttlProject).Format(time.RFC3339)
+		}
+	}
+
+	content := strings.TrimSpace(m.Content)
+	if len(content) < 10 {
+		return m, "", fmt.Errorf("memory content too short (min 10 chars)")
+	}
+	m.Content = content
+
+	if runes := []rune(m.Content); len(runes) > 2000 {
+		m.Content = string(runes[:2000]) + "…[truncated]"
+	}
+
+	// Dedup check.
+	var dupCandidates []Memory
+	if m.EntityID != "" {
+		dupCandidates, _ = s.QueryMemories(m.Tier, m.EntityID, "", 5)
+	} else if m.AgentID != "" {
+		dupCandidates, _ = s.QueryMemories(m.Tier, "", m.AgentID, 5)
+	}
+	for _, ex := range dupCandidates {
+		if stringSimilarity(ex.Content, m.Content) > 0.85 {
+			_ = s.TouchMemory(ex.ID)
+			return m, ex.ID, nil
+		}
+	}
+
+	return m, "", nil
 }
 
 // InsertMemoryAnchors links a memory to one or more graph node IDs.
