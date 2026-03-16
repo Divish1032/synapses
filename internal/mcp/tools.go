@@ -1352,18 +1352,43 @@ func (s *Server) handleVerifyImplementation(
 	taskID := stringArg(req, "task_id")
 	repoRoot := s.graph.Root()
 
+	// callerRef is a minimal reference to a node that calls an exported symbol.
+	type callerRef struct {
+		Name string `json:"name"`
+		File string `json:"file"`
+		Line int    `json:"line"`
+	}
+
+	// signatureImpactEntry reports callers of one exported symbol.
+	type signatureImpactEntry struct {
+		Symbol    string      `json:"symbol"`
+		Type      string      `json:"type"`
+		Signature string      `json:"signature,omitempty"`
+		Callers   []callerRef `json:"callers"`
+	}
+
 	// Per-file analysis.
 	type fileReport struct {
-		File             string              `json:"file"`
-		InGraph          bool                `json:"in_graph"`
-		NodeCount        int                 `json:"node_count"`
-		Entities         []string            `json:"entities,omitempty"`
-		Violations       []config.Violation  `json:"violations,omitempty"`
-		FreshnessWarning string              `json:"freshness_warning,omitempty"`
+		File             string                 `json:"file"`
+		InGraph          bool                   `json:"in_graph"`
+		NodeCount        int                    `json:"node_count"`
+		Entities         []string               `json:"entities,omitempty"`
+		Violations       []config.Violation     `json:"violations,omitempty"`
+		SignatureImpact  []signatureImpactEntry `json:"signature_impact,omitempty"`
+		FreshnessWarning string                 `json:"freshness_warning,omitempty"`
 	}
 
 	var reports []fileReport
 	totalViolations := 0
+	totalImpactWarnings := 0
+
+	// nodeTypesWithImpact are the entity types whose signature changes can break callers.
+	nodeTypesWithImpact := map[graph.NodeType]bool{
+		graph.NodeFunction:  true,
+		graph.NodeMethod:    true,
+		graph.NodeStruct:    true,
+		graph.NodeInterface: true,
+	}
 
 	for _, f := range files {
 		r := fileReport{File: f}
@@ -1383,6 +1408,60 @@ func (s *Server) handleVerifyImplementation(
 			s.rulesMu.RUnlock()
 			r.Violations = violations
 			totalViolations += len(violations)
+		}
+
+		// Signature impact: for each exported symbol in this file, find direct callers.
+		// This tells the agent which call sites may be broken if the signature changed.
+		// Cap: 15 symbols per file, 30 callers per symbol to keep token usage bounded.
+		const maxSymbolsPerFile = 15
+		const maxCallersPerSymbol = 30
+
+		exportedCount := 0
+		for _, n := range nodes {
+			if !n.Exported || !nodeTypesWithImpact[n.Type] {
+				continue
+			}
+			if exportedCount >= maxSymbolsPerFile {
+				break
+			}
+			exportedCount++
+
+			impact, err := s.graph.ImpactAnalysis(n.ID, 1)
+			if err != nil || impact == nil || impact.TotalAffected == 0 {
+				continue
+			}
+
+			// Collect direct callers (depth-1 tier only).
+			var callers []callerRef
+			for _, tier := range impact.Tiers {
+				if tier.Depth != 1 {
+					continue
+				}
+				for i, ref := range tier.Nodes {
+					if i >= maxCallersPerSymbol {
+						break
+					}
+					callers = append(callers, callerRef{
+						Name: ref.Name,
+						File: ref.File,
+						Line: ref.Line,
+					})
+				}
+			}
+			if len(callers) == 0 {
+				continue
+			}
+
+			entry := signatureImpactEntry{
+				Symbol:  n.Name,
+				Type:    string(n.Type),
+				Callers: callers,
+			}
+			if sig, ok := n.Metadata["signature"]; ok {
+				entry.Signature = sig
+			}
+			r.SignatureImpact = append(r.SignatureImpact, entry)
+			totalImpactWarnings++
 		}
 
 		// Freshness check.
@@ -1440,6 +1519,7 @@ func (s *Server) handleVerifyImplementation(
 	result := map[string]interface{}{
 		"status":           status,
 		"total_violations": totalViolations,
+		"impact_warnings":  totalImpactWarnings,
 		"files":            reports,
 	}
 	if taskVerification != nil {
@@ -1447,6 +1527,9 @@ func (s *Server) handleVerifyImplementation(
 	}
 	if notIndexed > 0 {
 		result["indexing_hint"] = fmt.Sprintf("%d file(s) not yet in graph — wait for indexing or re-run verify_implementation.", notIndexed)
+	}
+	if totalImpactWarnings > 0 {
+		result["impact_hint"] = fmt.Sprintf("%d exported symbol(s) have callers — review signature_impact in each file to ensure call sites are still valid.", totalImpactWarnings)
 	}
 
 	// Auto-record episode when post-implementation violations are found.
