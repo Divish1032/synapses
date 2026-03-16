@@ -1475,6 +1475,149 @@ func TestHandleVerifyImplementation_WithFreshnessWarning(t *testing.T) {
 	hasKey(t, m, "files")
 }
 
+// ── handleVerifyImplementation — signature impact ─────────────────────────────
+
+// TestHandleVerifyImplementation_SignatureImpact_ExportedFuncWithCallers checks
+// that an exported function with a caller produces a signature_impact entry.
+func TestHandleVerifyImplementation_SignatureImpact_ExportedFuncWithCallers(t *testing.T) {
+	s := newTestServer(t)
+
+	// Add exported function in the file under test.
+	targetID := s.graph.MakeNodeID("pkg/api/api.go", "HandleRequest")
+	s.graph.AddNode(&graph.Node{
+		ID: targetID, Name: "HandleRequest", Type: graph.NodeFunction,
+		File: "pkg/api/api.go", Package: "api", Exported: true, Line: 10,
+		Metadata: map[string]string{"signature": "func HandleRequest(w http.ResponseWriter, r *http.Request)"},
+	})
+
+	// Add a caller of the exported function.
+	callerID := s.graph.MakeNodeID("pkg/main/main.go", "main")
+	s.graph.AddNode(&graph.Node{
+		ID: callerID, Name: "main", Type: graph.NodeFunction,
+		File: "pkg/main/main.go", Package: "main", Exported: false, Line: 5,
+	})
+	s.graph.AddEdge(&graph.Edge{From: callerID, To: targetID, Type: graph.EdgeCalls})
+
+	req := callTool(map[string]any{
+		"files_written": `["pkg/api/api.go"]`,
+	})
+	res, err := s.handleVerifyImplementation(ctx, req)
+	m := mustResult(t, res, err)
+
+	// impact_warnings should be > 0 since HandleRequest has a caller.
+	impactWarnings, ok := m["impact_warnings"].(float64)
+	if !ok || impactWarnings == 0 {
+		t.Errorf("expected impact_warnings > 0, got %v", m["impact_warnings"])
+	}
+
+	// impact_hint should be present.
+	hasKey(t, m, "impact_hint")
+
+	// files[0].signature_impact should have one entry.
+	files, ok := m["files"].([]any)
+	if !ok || len(files) == 0 {
+		t.Fatal("expected files array")
+	}
+	fileEntry, ok := files[0].(map[string]any)
+	if !ok {
+		t.Fatal("expected file entry to be a map")
+	}
+	si, ok := fileEntry["signature_impact"].([]any)
+	if !ok || len(si) == 0 {
+		t.Fatalf("expected signature_impact entries, got %v", fileEntry["signature_impact"])
+	}
+	entry := si[0].(map[string]any)
+	if entry["symbol"] != "HandleRequest" {
+		t.Errorf("expected symbol HandleRequest, got %v", entry["symbol"])
+	}
+	callers, ok := entry["callers"].([]any)
+	if !ok || len(callers) == 0 {
+		t.Error("expected callers list")
+	}
+}
+
+// TestHandleVerifyImplementation_SignatureImpact_UnexportedNoImpact checks that
+// unexported symbols do not produce signature_impact entries.
+func TestHandleVerifyImplementation_SignatureImpact_UnexportedNoImpact(t *testing.T) {
+	s := newTestServer(t)
+
+	// Add unexported function with a caller.
+	targetID := s.graph.MakeNodeID("pkg/api/api.go", "internalHelper")
+	s.graph.AddNode(&graph.Node{
+		ID: targetID, Name: "internalHelper", Type: graph.NodeFunction,
+		File: "pkg/api/api.go", Package: "api", Exported: false, Line: 20,
+	})
+	callerID := s.graph.MakeNodeID("pkg/api/api.go", "PublicFunc")
+	s.graph.AddNode(&graph.Node{
+		ID: callerID, Name: "PublicFunc", Type: graph.NodeFunction,
+		File: "pkg/api/api.go", Package: "api", Exported: true, Line: 30,
+	})
+	s.graph.AddEdge(&graph.Edge{From: callerID, To: targetID, Type: graph.EdgeCalls})
+
+	req := callTool(map[string]any{
+		"files_written": `["pkg/api/api.go"]`,
+	})
+	res, err := s.handleVerifyImplementation(ctx, req)
+	m := mustResult(t, res, err)
+
+	// internalHelper is unexported — no impact entry for it.
+	// PublicFunc has no callers — no impact entry for it either.
+	if w, _ := m["impact_warnings"].(float64); w != 0 {
+		t.Errorf("expected 0 impact_warnings for unexported+no-caller, got %v", w)
+	}
+	noKey(t, m, "impact_hint")
+}
+
+// TestHandleVerifyImplementation_SignatureImpact_ExportedStructWithCallers checks
+// that exported struct types also produce signature_impact entries.
+func TestHandleVerifyImplementation_SignatureImpact_ExportedStructWithCallers(t *testing.T) {
+	s := newTestServer(t)
+
+	structID := s.graph.MakeNodeID("pkg/store/store.go", "Config")
+	s.graph.AddNode(&graph.Node{
+		ID: structID, Name: "Config", Type: graph.NodeStruct,
+		File: "pkg/store/store.go", Package: "store", Exported: true, Line: 5,
+	})
+	callerID := s.graph.MakeNodeID("pkg/main/main.go", "Run")
+	s.graph.AddNode(&graph.Node{
+		ID: callerID, Name: "Run", Type: graph.NodeFunction,
+		File: "pkg/main/main.go", Package: "main", Exported: true, Line: 1,
+	})
+	s.graph.AddEdge(&graph.Edge{From: callerID, To: structID, Type: graph.EdgeCalls})
+
+	req := callTool(map[string]any{
+		"files_written": `["pkg/store/store.go"]`,
+	})
+	res, err := s.handleVerifyImplementation(ctx, req)
+	m := mustResult(t, res, err)
+
+	if w, _ := m["impact_warnings"].(float64); w == 0 {
+		t.Error("expected impact_warnings > 0 for struct with caller")
+	}
+}
+
+// TestHandleVerifyImplementation_SignatureImpact_ZeroCallerNoEntry checks that
+// an exported function with no callers does NOT produce a signature_impact entry.
+func TestHandleVerifyImplementation_SignatureImpact_ZeroCallerNoEntry(t *testing.T) {
+	s := newTestServer(t)
+
+	loneID := s.graph.MakeNodeID("pkg/util/util.go", "LoneFunc")
+	s.graph.AddNode(&graph.Node{
+		ID: loneID, Name: "LoneFunc", Type: graph.NodeFunction,
+		File: "pkg/util/util.go", Package: "util", Exported: true, Line: 1,
+	})
+
+	req := callTool(map[string]any{
+		"files_written": `["pkg/util/util.go"]`,
+	})
+	res, err := s.handleVerifyImplementation(ctx, req)
+	m := mustResult(t, res, err)
+
+	if w, _ := m["impact_warnings"].(float64); w != 0 {
+		t.Errorf("expected 0 impact_warnings for no-caller export, got %v", w)
+	}
+}
+
 // ── handleGetImpact (struct with methods) ─────────────────────────────────────
 
 func TestHandleGetImpact_StructWithMethods(t *testing.T) {
