@@ -61,6 +61,12 @@ func (s *Server) handleRemember(
 		if err := json.Unmarshal([]byte(raw), &anchorNodes); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("anchor_nodes must be a JSON array of strings: %v", err)), nil
 		}
+		// Validate node ID format: must contain "::" separator (e.g. "repo::file.go::FuncName").
+		for _, nid := range anchorNodes {
+			if nid != "" && !strings.Contains(nid, "::") {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid anchor node ID %q: must contain '::' separator (e.g. 'repo::pkg/file.go::FuncName')", nid)), nil
+			}
+		}
 	}
 
 	e := store.Episode{
@@ -99,7 +105,7 @@ func (s *Server) handleRemember(
 		var affectedNodes []string
 		_ = json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes)
 		for _, nodeID := range affectedNodes {
-			memID, _ := s.store.InsertMemory(store.Memory{
+			_, _ = s.store.InsertMemoryWithAnchors(store.Memory{
 				Tier:     store.TierEntity,
 				Content:  memContent,
 				EntityID: nodeID,
@@ -107,25 +113,19 @@ func (s *Server) handleRemember(
 				TaskID:   e.ProjectID,
 				Source:   store.SourceManual,
 				Tags:     memTags,
-			})
-			if memID != "" && len(anchorNodes) > 0 {
-				_ = s.store.InsertMemoryAnchors(memID, anchorNodes)
-			}
+			}, anchorNodes)
 		}
 	}
 
 	// Project-tier: always write the episode as project knowledge.
-	projMemID, _ := s.store.InsertMemory(store.Memory{
+	_, _ = s.store.InsertMemoryWithAnchors(store.Memory{
 		Tier:    store.TierProject,
 		Content: memContent,
 		AgentID: agentID,
 		TaskID:  e.ProjectID,
 		Source:  store.SourceManual,
 		Tags:    memTags,
-	})
-	if projMemID != "" && len(anchorNodes) > 0 {
-		_ = s.store.InsertMemoryAnchors(projMemID, anchorNodes)
-	}
+	}, anchorNodes)
 
 	if episodeType == "failure" {
 		if err := s.store.AppendEvent("failure_recorded", agentID,

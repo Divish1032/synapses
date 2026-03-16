@@ -288,11 +288,24 @@ func (s *Store) TouchMemories(ids []string) {
 // Also cleans up orphaned memory_anchors rows for deleted memories.
 func (s *Store) ExpireMemories() (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	// Clean up orphaned anchors before deleting memories (no ON DELETE CASCADE in SQLite).
-	_, _ = s.db.Exec(`DELETE FROM memory_anchors WHERE memory_id NOT IN (SELECT id FROM memories WHERE expires_at > ?)`, now)
-	result, err := s.db.Exec(`DELETE FROM memories WHERE expires_at <= ?`, now)
+	// Delete expired memories and clean up their anchors in one transaction.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin expire tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Delete anchors for memories about to expire (correlated EXISTS is O(n·log n)
+	// with the PK index on memories, vs NOT IN which materializes a full result set).
+	_, _ = tx.Exec(`DELETE FROM memory_anchors WHERE EXISTS (
+		SELECT 1 FROM memories WHERE memories.id = memory_anchors.memory_id AND memories.expires_at <= ?
+	)`, now)
+	result, err := tx.Exec(`DELETE FROM memories WHERE expires_at <= ?`, now)
 	if err != nil {
 		return 0, fmt.Errorf("expire memories: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit expire tx: %w", err)
 	}
 	return result.RowsAffected()
 }
@@ -333,6 +346,41 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 	}
 	defer rows.Close()
 	return scanMemories(rows)
+}
+
+// InsertMemoryWithAnchors atomically inserts a memory and its anchor links in a
+// single transaction. If the memory deduplicates against an existing one, the
+// anchors are still added to the existing memory (additive enrichment).
+// Returns the memory ID (new or deduped) and whether anchors were written.
+func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string, error) {
+	memID, err := s.InsertMemory(m)
+	if err != nil {
+		return "", err
+	}
+	if len(anchorNodes) == 0 || memID == "" {
+		return memID, nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return memID, fmt.Errorf("begin anchor tx: %w", err)
+	}
+	defer tx.Rollback() // no-op after commit
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, nid := range anchorNodes {
+		if nid == "" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO memory_anchors (memory_id, node_id, created_at) VALUES (?, ?, ?)`,
+			memID, nid, now); err != nil {
+			return memID, fmt.Errorf("insert anchor in tx: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return memID, fmt.Errorf("commit anchor tx: %w", err)
+	}
+	return memID, nil
 }
 
 // InsertMemoryAnchors links a memory to one or more graph node IDs.

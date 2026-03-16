@@ -96,6 +96,17 @@ func TestHandleRemember_MalformedAnchorNodes_ReturnsError(t *testing.T) {
 	mustErrorResult(t, res, err)
 }
 
+func TestHandleRemember_InvalidNodeIDFormat_ReturnsError(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleRemember(ctx, callTool(map[string]any{
+		"agent_id":     "anchor-agent",
+		"decision":     "some decision that references code entities",
+		"outcome":      "success",
+		"anchor_nodes": `["no_separator_here"]`,
+	}))
+	mustErrorResult(t, res, err)
+}
+
 // ── handleRecall ──────────────────────────────────────────────────────────────
 
 func TestHandleRecall_FindsMatch(t *testing.T) {

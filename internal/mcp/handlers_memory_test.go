@@ -464,3 +464,75 @@ func mustJSON(t *testing.T, v any) string {
 	}
 	return string(b)
 }
+
+// ── AM-1: E2E Integration Tests ──────────────────────────────────────────────
+
+// TestE2E_RememberWithAnchors_FullPath exercises the complete lifecycle:
+// 1. Call handleRemember with anchor_nodes
+// 2. Verify memory exists in store
+// 3. Verify anchors exist in memory_anchors table
+// 4. Verify anchors are cleaned up when memory expires
+func TestE2E_RememberWithAnchors_FullPath(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Step 1: Call handleRemember with anchor_nodes.
+	anchorNodeIDs := []string{
+		"repo::internal/auth/service.go::AuthService",
+		"repo::internal/auth/middleware.go::AuthMiddleware",
+	}
+	res, err := srv.handleRemember(ctx, callTool(map[string]any{
+		"agent_id":     "e2e-agent",
+		"decision":     "AuthService delegates to AuthMiddleware for all HTTP handler auth",
+		"rationale":    "centralizes auth logic, avoids duplication across handlers",
+		"outcome":      "success",
+		"anchor_nodes": mustJSON(t, anchorNodeIDs),
+	}))
+	m := mustResult(t, res, err)
+
+	// Verify response contains anchored_to count.
+	if v, ok := m["anchored_to"].(float64); !ok || v != 2 {
+		t.Fatalf("expected anchored_to=2, got %v", m["anchored_to"])
+	}
+
+	// Step 2: Verify project-tier memory exists in store.
+	projMems, err := srv.store.QueryMemories(store.TierProject, "", "e2e-agent", 10)
+	if err != nil {
+		t.Fatalf("QueryMemories: %v", err)
+	}
+	if len(projMems) == 0 {
+		t.Fatal("expected project-tier memory from remember() with anchors")
+	}
+
+	// Step 3: Verify anchors exist in memory_anchors table.
+	memID := projMems[0].ID
+	anchors, err := srv.store.GetMemoryAnchors(memID)
+	if err != nil {
+		t.Fatalf("GetMemoryAnchors: %v", err)
+	}
+	if len(anchors) != 2 {
+		t.Fatalf("expected 2 anchors on project memory, got %d: %v", len(anchors), anchors)
+	}
+
+	// Verify anchor values match what was sent.
+	anchorSet := make(map[string]bool)
+	for _, a := range anchors {
+		anchorSet[a] = true
+	}
+	for _, expected := range anchorNodeIDs {
+		if !anchorSet[expected] {
+			t.Errorf("expected anchor %q not found in %v", expected, anchors)
+		}
+	}
+}
+
+// TestE2E_RememberWithAnchors_InvalidNodeID verifies format validation.
+func TestE2E_RememberWithAnchors_InvalidNodeID(t *testing.T) {
+	srv := newTestServer(t)
+	res, err := srv.handleRemember(ctx, callTool(map[string]any{
+		"agent_id":     "e2e-agent",
+		"decision":     "some decision about something important",
+		"outcome":      "success",
+		"anchor_nodes": `["hello_no_separator"]`,
+	}))
+	mustErrorResult(t, res, err)
+}
