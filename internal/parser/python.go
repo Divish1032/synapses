@@ -13,60 +13,75 @@ import (
 
 // extractPythonDeclInfo walks the Python AST and builds a name→declMeta map
 // for function_definition and class_definition nodes at any nesting depth.
+// Method names are class-qualified (ClassName.method_name).
 func extractPythonDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
 
-	var walk func(n *sitter.Node, depth int)
-	walk = func(n *sitter.Node, depth int) {
-		if n == nil || depth > 6 {
+	var walk func(n *sitter.Node, enclosingClass string, depth int)
+	walk = func(n *sitter.Node, enclosingClass string, depth int) {
+		if n == nil || depth > 8 {
 			return
 		}
 		switch n.Type() {
 		case "function_definition":
 			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
+				qualName := name
+				if enclosingClass != "" {
+					qualName = enclosingClass + "." + name
+				}
 				sl := int(n.StartPoint().Row) + 1
-				result[name] = declMeta{
+				// Try docstring first, then # comments.
+				doc := extractPythonDocstring(lines, sl)
+				if doc == "" {
+					doc = extractLineDoc(lines, sl, "#")
+				}
+				result[qualName] = declMeta{
 					Signature: extractSigToBody(n, src),
-					Doc:       extractLineDoc(lines, sl, "#"),
+					Doc:       doc,
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 			}
 		case "class_definition":
+			className := ""
 			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
-				name := string(src[nameNode.StartByte():nameNode.EndByte()])
+				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
-				result[name] = declMeta{
-					Doc:       extractLineDoc(lines, sl, "#"),
+				doc := extractPythonDocstring(lines, sl)
+				if doc == "" {
+					doc = extractLineDoc(lines, sl, "#")
+				}
+				result[className] = declMeta{
+					Doc:       doc,
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 			}
+			// Walk children with class context.
+			body := n.ChildByFieldName("body")
+			if body != nil {
+				for i := 0; i < int(body.ChildCount()); i++ {
+					walk(body.Child(i), className, depth+1)
+				}
+			}
+			return
 		case "decorated_definition":
-			// @decorator\ndef foo(): ... — use decorator start for doc lookup
 			for j := 0; j < int(n.ChildCount()); j++ {
 				inner := n.Child(j)
 				if inner == nil {
 					continue
 				}
 				if inner.Type() == "function_definition" || inner.Type() == "class_definition" {
-					if nameNode := inner.ChildByFieldName("name"); nameNode != nil {
-						name := string(src[nameNode.StartByte():nameNode.EndByte()])
-						sl := int(n.StartPoint().Row) + 1
-						result[name] = declMeta{
-							Signature: extractSigToBody(inner, src),
-							Doc:       extractLineDoc(lines, sl, "#"),
-							LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
-						}
-					}
+					walk(inner, enclosingClass, depth+1)
 				}
 			}
+			return
 		}
 		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i), depth+1)
+			walk(n.Child(i), enclosingClass, depth+1)
 		}
 	}
-	walk(root, 0)
+	walk(root, "", 0)
 	return result
 }
 
@@ -86,13 +101,7 @@ func (p *PythonParser) Extensions() []string {
 }
 
 // Parse extracts code entities from a single Python file and merges them
-// into the provided graph. The following constructs are captured:
-//
-//   - import statements        → IMPORTS edges
-//   - from X import Y          → IMPORTS edges
-//   - function definitions     → NodeFunction (module-level) or NodeMethod (inside class)
-//   - class definitions        → NodeStruct
-//   - function call sites      → stored for resolver (produces CALLS edges)
+// into the provided graph.
 func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
@@ -100,7 +109,6 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 	tree, _ := parser.ParseCtx(context.Background(), nil, src)
 	root := tree.RootNode()
 
-	// Module name = basename without extension (e.g. "worker" for worker.py).
 	moduleName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -116,8 +124,8 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 	lang := p.language
 	declInfo := extractPythonDeclInfo(root, src)
 
-	// Track which names are inside a class body (to classify as methods).
-	classBodyFuncs := buildPythonClassMethods(root, src)
+	// Build class→methods mapping with class-qualified names.
+	classMethodMap := buildPythonClassMethodsQualified(root, src)
 
 	// --- import X / import X.Y ---
 	importQuery := `(import_statement name: (dotted_name) @import_path)`
@@ -159,32 +167,8 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		return err
 	}
 
-	// --- Function / method definitions ---
-	funcQuery := `(function_definition name: (identifier) @func_name)`
-	if err := runQuery(lang, root, src, funcQuery, func(captures map[string]string, startLine int) {
-		name := captures["func_name"]
-		if name == "" {
-			return
-		}
-		nodeID := g.MakeNodeID(filePath, name)
-		nodeType := graph.NodeFunction
-		if classBodyFuncs[name] {
-			nodeType = graph.NodeMethod
-		}
-		g.AddNode(&graph.Node{
-			ID:       nodeID,
-			Type:     nodeType,
-			Name:     name,
-			Package:  moduleName,
-			File:     filePath,
-			Line:     startLine,
-			Exported: isPythonPublic(name),
-			Metadata: buildLangMeta(declInfo[name]),
-		})
-		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-	}); err != nil {
-		return err
-	}
+	// --- Function / method definitions (class-qualified via AST walk) ---
+	p.extractFunctionsAndMethods(g, root, src, filePath, moduleName, fileNodeID, declInfo, classMethodMap)
 
 	// --- Class definitions ---
 	classQuery := `(class_definition name: (identifier) @class_name)`
@@ -209,23 +193,114 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		return err
 	}
 
-	// --- Call sites: direct calls e.g. Worker(config), compute_hash(data) ---
-	// These are collected now and resolved into CALLS edges after all files are parsed.
+	// --- Call sites ---
 	collectPythonCallSites(g, lang, root, src, filePath, moduleName)
 
 	return nil
 }
 
-// buildPythonClassMethods returns a set of method names that appear directly
-// inside a class body (i.e. are methods, not module-level functions).
-func buildPythonClassMethods(root *sitter.Node, src []byte) map[string]bool {
-	result := make(map[string]bool)
+// extractFunctionsAndMethods walks the AST to emit function and method nodes
+// with class-qualified names for methods inside class bodies.
+func (p *PythonParser) extractFunctionsAndMethods(
+	g *graph.Graph,
+	root *sitter.Node,
+	src []byte,
+	filePath, moduleName string,
+	fileNodeID graph.NodeID,
+	declInfo map[string]declMeta,
+	classMethodMap map[string]string, // funcName → ClassName (for qualification)
+) {
+	var walk func(n *sitter.Node, enclosingClass string)
+	walk = func(n *sitter.Node, enclosingClass string) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "class_definition":
+			className := ""
+			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+				className = string(src[nameNode.StartByte():nameNode.EndByte()])
+			}
+			body := n.ChildByFieldName("body")
+			if body != nil {
+				for i := 0; i < int(body.ChildCount()); i++ {
+					walk(body.Child(i), className)
+				}
+			}
+			return
+		case "decorated_definition":
+			for j := 0; j < int(n.ChildCount()); j++ {
+				inner := n.Child(j)
+				if inner != nil && (inner.Type() == "function_definition" || inner.Type() == "class_definition") {
+					walk(inner, enclosingClass)
+				}
+			}
+			return
+		case "function_definition":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				break
+			}
+			name := string(src[nameNode.StartByte():nameNode.EndByte()])
+			startLine := int(n.StartPoint().Row) + 1
+
+			if enclosingClass != "" {
+				// This is a method inside a class.
+				qualName := enclosingClass + "." + name
+				nodeID := g.MakeNodeID(filePath, qualName)
+				g.AddNode(&graph.Node{
+					ID:       nodeID,
+					Type:     graph.NodeMethod,
+					Name:     qualName,
+					Package:  moduleName,
+					File:     filePath,
+					Line:     startLine,
+					Exported: isPythonPublic(name),
+					Metadata: buildLangMeta(declInfo[qualName]),
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+				// Link class → method.
+				classID := g.MakeNodeID(filePath, enclosingClass)
+				if g.GetNode(classID) != nil {
+					g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
+				}
+			} else {
+				// Module-level function.
+				nodeID := g.MakeNodeID(filePath, name)
+				g.AddNode(&graph.Node{
+					ID:       nodeID,
+					Type:     graph.NodeFunction,
+					Name:     name,
+					Package:  moduleName,
+					File:     filePath,
+					Line:     startLine,
+					Exported: isPythonPublic(name),
+					Metadata: buildLangMeta(declInfo[name]),
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			}
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			walk(n.Child(i), enclosingClass)
+		}
+	}
+	walk(root, "")
+}
+
+// buildPythonClassMethodsQualified returns a map of method name → class name
+// for methods that appear directly inside a class body.
+func buildPythonClassMethodsQualified(root *sitter.Node, src []byte) map[string]string {
+	result := make(map[string]string)
 	var walk func(n *sitter.Node)
 	walk = func(n *sitter.Node) {
 		if n == nil {
 			return
 		}
 		if n.Type() == "class_definition" {
+			className := ""
+			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+				className = string(src[nameNode.StartByte():nameNode.EndByte()])
+			}
 			body := n.ChildByFieldName("body")
 			if body != nil {
 				for i := 0; i < int(body.ChildCount()); i++ {
@@ -237,7 +312,7 @@ func buildPythonClassMethods(root *sitter.Node, src []byte) map[string]bool {
 					if target.Type() == "decorated_definition" {
 						for j := 0; j < int(target.ChildCount()); j++ {
 							inner := target.Child(j)
-							if inner != nil && (inner.Type() == "function_definition") {
+							if inner != nil && inner.Type() == "function_definition" {
 								target = inner
 								break
 							}
@@ -245,7 +320,7 @@ func buildPythonClassMethods(root *sitter.Node, src []byte) map[string]bool {
 					}
 					if target.Type() == "function_definition" {
 						if nameNode := target.ChildByFieldName("name"); nameNode != nil {
-							result[string(src[nameNode.StartByte():nameNode.EndByte()])] = true
+							result[string(src[nameNode.StartByte():nameNode.EndByte()])] = className
 						}
 					}
 				}
@@ -260,22 +335,11 @@ func buildPythonClassMethods(root *sitter.Node, src []byte) map[string]bool {
 }
 
 // collectPythonCallSites walks the AST and adds call sites for every direct
-// function/class call (identifier calls). These are resolved later by the
-// cross-file resolver into CALLS edges.
+// function/class call.
 func collectPythonCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath, moduleName string) {
-	// Map function names → node IDs for the current file (to find the enclosing caller).
-	// Use module-level and method nodes; pick the closest enclosing function as caller.
-	funcNodeIDs := make(map[string]graph.NodeID)
-	for _, n := range g.AllNodes() {
-		if n.File == filePath && (n.Type == graph.NodeFunction || n.Type == graph.NodeMethod) {
-			funcNodeIDs[n.Name] = n.ID
-		}
-	}
-
-	// Use file node as default caller for module-level calls.
 	fileNodeID := g.MakeNodeID(filePath, filePath)
 
-	// Query: simple identifier calls — Func(...) or Class(...)
+	// Direct calls: Func(...) or Class(...)
 	callQuery := `(call function: (identifier) @callee)`
 	_ = runQuery(lang, root, src, callQuery, func(captures map[string]string, _ int) {
 		callee := captures["callee"]
@@ -290,8 +354,7 @@ func collectPythonCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.
 		})
 	})
 
-	// Query: attribute/method calls — self.method(), obj.func()
-	// Captures the method name portion so the resolver can link to the target.
+	// Attribute calls: self.method(), obj.func()
 	attrCallQuery := `(call function: (attribute attribute: (identifier) @callee))`
 	_ = runQuery(lang, root, src, attrCallQuery, func(captures map[string]string, _ int) {
 		callee := captures["callee"]
@@ -308,7 +371,6 @@ func collectPythonCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.
 }
 
 // isPythonPublic returns true if the name is not prefixed with an underscore.
-// In Python, _name and __name are private/dunder by convention.
 func isPythonPublic(name string) bool {
 	return !strings.HasPrefix(name, "_")
 }
@@ -324,7 +386,13 @@ func isBuiltinPython(name string) bool {
 		"abs", "max", "min", "sum", "any", "all", "next", "iter",
 		"repr", "hash", "id", "callable", "vars", "dir", "object",
 		"Exception", "ValueError", "TypeError", "KeyError", "IndexError",
-		"RuntimeError", "StopIteration", "NotImplementedError", "IOError":
+		"RuntimeError", "StopIteration", "NotImplementedError", "IOError",
+		"input", "format", "round", "ord", "chr", "hex", "oct", "bin",
+		"reversed", "frozenset", "memoryview", "bytearray", "complex",
+		"delattr", "compile", "eval", "exec", "globals", "locals",
+		"breakpoint", "help", "ascii", "pow", "divmod", "slice",
+		"AttributeError", "FileNotFoundError", "PermissionError",
+		"OSError", "ImportError", "ModuleNotFoundError":
 		return true
 	}
 	return false
