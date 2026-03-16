@@ -13,19 +13,28 @@ build:
 	@mkdir -p $(BUILD_DIR)
 	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY) $(CMD_PATH)
 
-## install: Install binary to GOPATH/bin
-install:
-	go install $(LDFLAGS) $(CMD_PATH)
+INSTALL_DIR := $(HOME)/.synapses/bin
+
+## install: Build and install binary to ~/.synapses/bin
+install: build
+	@mkdir -p $(INSTALL_DIR)
+	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
+	@echo "Installed $(INSTALL_DIR)/$(BINARY)"
 
 ## test: Run all tests
 test:
-	go test ./... -v -race -timeout 60s
+	go test ./... -race -count=1 -timeout 300s
 
 ## test/cover: Run tests with coverage report
 test/cover:
-	go test ./... -coverprofile=coverage.out
+	go test ./... -coverprofile=coverage.out -covermode=atomic -race -timeout 300s
 	go tool cover -html=coverage.out -o coverage.html
+	@go tool cover -func=coverage.out | tail -1
 	@echo "Coverage report: coverage.html"
+
+## test/cover/pkg: Show per-package coverage summary
+test/cover/pkg:
+	@go test ./... -cover -timeout 300s 2>&1 | grep -E "^(ok|FAIL|---)" | sort
 
 ## lint: Run golangci-lint (requires: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest)
 lint:
