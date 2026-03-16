@@ -126,6 +126,11 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		b.WriteString("Called by: (none)\n")
 	}
 
+	// DIAG-3: caller-count confidence warning.
+	if dc.CallerCountWarning != "" {
+		fmt.Fprintf(&b, "%s\n", dc.CallerCountWarning)
+	}
+
 	// Warnings: combine brain concerns + graph warnings.
 	var warnings []string
 	if dc.ContextPacket != nil {
