@@ -43,14 +43,15 @@ type Memory struct {
 	Source         string `json:"source"`
 }
 
-// InvalidatedMemory is a stale memory surfaced once at session start (AM-3).
-// After surfacing, surfaced_at is set so the memory is not returned again.
+// InvalidatedMemory is a stale memory surfaced once per agent at session start (AM-3).
+// Per-agent tracking via memory_surfaced table ensures every agent sees each
+// invalidation independently.
 type InvalidatedMemory struct {
 	ID            string `json:"id"`
 	Content       string `json:"content"`
 	Tier          string `json:"tier"`
 	StaleReason   string `json:"stale_reason"`
-	InvalidatedAt string `json:"invalidated_at"` // when the memory was created (for context)
+	InvalidatedAt string `json:"invalidated_at"` // when the memory was invalidated (staled_at)
 }
 
 // InsertMemory writes a new memory, applying tier-based TTL and noise filtering.
@@ -273,11 +274,13 @@ func (s *Store) ExpireMemories() (int64, error) {
 // Called when a single node is tombstoned (deleted from graph).
 // For bulk node removal use MarkEntityMemoriesStaleForNodes.
 func (s *Store) MarkEntityMemoriesStale(entityID, reason string) error {
-	staleExpiry := time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339)
+	now := time.Now().UTC()
+	staleExpiry := now.Add(30 * 24 * time.Hour).Format(time.RFC3339)
+	staledAt := now.Format(time.RFC3339)
 	_, err := s.db.Exec(`
-		UPDATE memories SET stale = 1, stale_reason = ?, expires_at = ?
+		UPDATE memories SET stale = 1, stale_reason = ?, expires_at = ?, staled_at = ?
 		WHERE tier = 'entity' AND entity_id = ?`,
-		reason, staleExpiry, entityID)
+		reason, staleExpiry, staledAt, entityID)
 	return err
 }
 
@@ -296,7 +299,9 @@ func (s *Store) MarkEntityMemoriesStaleForNodes(nodeIDs []string, reason string)
 		return fmt.Errorf("store.MarkEntityMemoriesStaleForNodes begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
-	staleExpiry := time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339)
+	now := time.Now().UTC()
+	staleExpiry := now.Add(30 * 24 * time.Hour).Format(time.RFC3339)
+	staledAt := now.Format(time.RFC3339)
 	const batchSize = 500
 	for i := 0; i < len(nodeIDs); i += batchSize {
 		end := i + batchSize
@@ -306,13 +311,13 @@ func (s *Store) MarkEntityMemoriesStaleForNodes(nodeIDs []string, reason string)
 		batch := nodeIDs[i:end]
 		placeholders := strings.Repeat("?,", len(batch))
 		placeholders = placeholders[:len(placeholders)-1]
-		args := make([]any, 0, len(batch)+2)
-		args = append(args, reason, staleExpiry)
+		args := make([]any, 0, len(batch)+3)
+		args = append(args, reason, staleExpiry, staledAt)
 		for _, id := range batch {
 			args = append(args, id)
 		}
 		if _, err := tx.Exec(`
-			UPDATE memories SET stale = 1, stale_reason = ?, expires_at = ?
+			UPDATE memories SET stale = 1, stale_reason = ?, expires_at = ?, staled_at = ?
 			WHERE tier = 'entity' AND entity_id IN (`+placeholders+`)`,
 			args...); err != nil {
 			return fmt.Errorf("store.MarkEntityMemoriesStaleForNodes: %w", err)
@@ -337,6 +342,7 @@ func (s *Store) MarkAnchoredMemoriesStale(nodeIDs []string, reason string) error
 		return fmt.Errorf("store.MarkAnchoredMemoriesStale begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+	staledAt := time.Now().UTC().Format(time.RFC3339)
 	const batchSize = 500
 	for i := 0; i < len(nodeIDs); i += batchSize {
 		end := i + batchSize
@@ -346,13 +352,13 @@ func (s *Store) MarkAnchoredMemoriesStale(nodeIDs []string, reason string) error
 		batch := nodeIDs[i:end]
 		placeholders := strings.Repeat("?,", len(batch))
 		placeholders = placeholders[:len(placeholders)-1]
-		args := make([]any, 0, len(batch)+1)
-		args = append(args, reason)
+		args := make([]any, 0, len(batch)+2)
+		args = append(args, reason, staledAt)
 		for _, id := range batch {
 			args = append(args, id)
 		}
 		if _, err := tx.Exec(`
-			UPDATE memories SET stale = 1, stale_reason = ?
+			UPDATE memories SET stale = 1, stale_reason = ?, staled_at = ?
 			WHERE id IN (
 				SELECT memory_id FROM memory_anchors WHERE node_id IN (`+placeholders+`)
 			)`, args...); err != nil {
@@ -363,21 +369,42 @@ func (s *Store) MarkAnchoredMemoriesStale(nodeIDs []string, reason string) error
 }
 
 // QueryInvalidatedMemories returns stale memories that have not yet been
-// surfaced to any agent (surfaced_at IS NULL). Capped at limit rows, ordered
-// by created_at DESC so the most recent invalidations appear first.
+// surfaced to the given agent. Per-agent tracking: each agent has its own
+// surfacing record in memory_surfaced, so every agent sees invalidated
+// memories independently. Capped at limit rows, ordered by staled_at DESC
+// so the most recently invalidated beliefs appear first.
 // Used by AM-3: session_init surfaces these once, then MarkMemoriesSurfaced
-// sets surfaced_at so they don't re-appear.
-func (s *Store) QueryInvalidatedMemories(limit int) ([]InvalidatedMemory, error) {
+// records the (memory_id, agent_id) pair so they don't re-appear for that agent.
+func (s *Store) QueryInvalidatedMemories(agentID string, limit int) ([]InvalidatedMemory, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.db.Query(`
-		SELECT id, content, tier, stale_reason, created_at
-		FROM memories
-		WHERE stale = 1 AND surfaced_at IS NULL AND expires_at > ?
-		ORDER BY created_at DESC
-		LIMIT ?`, now, limit)
+
+	// When agentID is empty (anonymous session), fall back to global surfaced_at
+	// on the memories table so invalidations are still surfaced at least once.
+	var rows *sql.Rows
+	var err error
+	if agentID != "" {
+		rows, err = s.db.Query(`
+			SELECT m.id, m.content, m.tier, m.stale_reason, m.staled_at
+			FROM memories m
+			LEFT JOIN memory_surfaced ms ON m.id = ms.memory_id AND ms.agent_id = ?
+			WHERE m.stale = 1
+			  AND ms.memory_id IS NULL
+			  AND m.expires_at > ?
+			ORDER BY CASE WHEN m.staled_at = '' THEN m.created_at ELSE m.staled_at END DESC
+			LIMIT ?`, agentID, now, limit)
+	} else {
+		rows, err = s.db.Query(`
+			SELECT m.id, m.content, m.tier, m.stale_reason, m.staled_at
+			FROM memories m
+			WHERE m.stale = 1
+			  AND m.surfaced_at IS NULL
+			  AND m.expires_at > ?
+			ORDER BY CASE WHEN m.staled_at = '' THEN m.created_at ELSE m.staled_at END DESC
+			LIMIT ?`, now, limit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("query invalidated memories: %w", err)
 	}
@@ -389,19 +416,41 @@ func (s *Store) QueryInvalidatedMemories(limit int) ([]InvalidatedMemory, error)
 		if err := rows.Scan(&m.ID, &m.Content, &m.Tier, &m.StaleReason, &m.InvalidatedAt); err != nil {
 			return nil, fmt.Errorf("scan invalidated memory: %w", err)
 		}
+		// Fallback: if staled_at was empty (pre-migration data), use empty string
+		// rather than a misleading created_at value.
 		out = append(out, m)
 	}
 	return out, rows.Err()
 }
 
-// MarkMemoriesSurfaced sets surfaced_at to the current time for the given
-// memory IDs, preventing them from being returned by QueryInvalidatedMemories
-// again. Idempotent: calling twice with the same IDs is safe.
-func (s *Store) MarkMemoriesSurfaced(ids []string) error {
+// MarkMemoriesSurfaced records that the given agent has seen these invalidated
+// memories. Per-agent: each agent gets an independent surfacing record in the
+// memory_surfaced table. Also sets the legacy surfaced_at column on the memories
+// table for backward compatibility with anonymous sessions.
+// Idempotent: INSERT OR IGNORE on the composite PK.
+func (s *Store) MarkMemoriesSurfaced(agentID string, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("mark memories surfaced begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Per-agent surfacing record.
+	if agentID != "" {
+		for _, id := range ids {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO memory_surfaced (memory_id, agent_id, surfaced_at)
+				VALUES (?, ?, ?)`, id, agentID, now); err != nil {
+				return fmt.Errorf("mark memories surfaced: %w", err)
+			}
+		}
+	}
+
+	// Legacy global surfaced_at for anonymous fallback path.
 	placeholders := strings.Repeat("?,", len(ids))
 	placeholders = placeholders[:len(placeholders)-1]
 	args := make([]any, 0, len(ids)+1)
@@ -409,11 +458,10 @@ func (s *Store) MarkMemoriesSurfaced(ids []string) error {
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	_, err := s.db.Exec(`UPDATE memories SET surfaced_at = ? WHERE id IN (`+placeholders+`)`, args...)
-	if err != nil {
-		return fmt.Errorf("mark memories surfaced: %w", err)
+	if _, err := tx.Exec(`UPDATE memories SET surfaced_at = ? WHERE id IN (`+placeholders+`)`, args...); err != nil {
+		return fmt.Errorf("mark memories surfaced (legacy): %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // SearchMemories performs FTS5 BM25 full-text search over memory content.

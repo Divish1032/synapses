@@ -633,6 +633,18 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE memories ADD COLUMN stale_reason TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE memories ADD COLUMN surfaced_at TEXT DEFAULT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_stale ON memories(stale) WHERE stale = 1`,
+		// AM-3: staled_at records WHEN a memory was invalidated (distinct from created_at).
+		// Without this, ordering by created_at gives misleading "invalidated_at" values.
+		`ALTER TABLE memories ADD COLUMN staled_at TEXT NOT NULL DEFAULT ''`,
+		// AM-3: Per-agent surfacing log. Each agent gets their own surfacing record
+		// so multi-agent setups don't lose invalidation signals when one agent runs first.
+		`CREATE TABLE IF NOT EXISTS memory_surfaced (
+			memory_id TEXT NOT NULL,
+			agent_id  TEXT NOT NULL,
+			surfaced_at TEXT NOT NULL,
+			PRIMARY KEY (memory_id, agent_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_surfaced_agent ON memory_surfaced(agent_id)`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
 			db.Close()
