@@ -1139,6 +1139,73 @@ func TestMarkMemoriesSurfaced_EmptyIDsNoop(t *testing.T) {
 	}
 }
 
+// TestQueryMemories_ExcludesStaleMemories verifies that QueryMemories,
+// QueryMemoriesForEntities, and SearchMemories all filter out stale=1 memories.
+// This is the Gap 1 fix: stale memories must NOT appear as active truth.
+func TestQueryMemories_ExcludesStaleMemories(t *testing.T) {
+	st := openMemTestStore(t)
+
+	entityID := "repo::store.go::Store.Close"
+	_, err := st.InsertMemory(Memory{
+		Tier:     TierEntity,
+		Content:  "Store.Close was refactored to accept projectID parameter for this entity",
+		EntityID: entityID,
+		AgentID:  "agent-1",
+		Source:   SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Before staling: all queries return the memory.
+	mems, err := st.QueryMemories(TierEntity, entityID, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 1 {
+		t.Fatalf("before staling: expected 1 from QueryMemories, got %d", len(mems))
+	}
+
+	entMems, err := st.QueryMemoriesForEntities([]string{entityID}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entMems[entityID]) != 1 {
+		t.Fatalf("before staling: expected 1 from QueryMemoriesForEntities, got %d", len(entMems[entityID]))
+	}
+
+	// Mark stale.
+	if err := st.MarkEntityMemoriesStale(entityID, "node removed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// After staling: all queries must return 0.
+	mems, err = st.QueryMemories(TierEntity, entityID, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 0 {
+		t.Fatalf("after staling: expected 0 from QueryMemories, got %d", len(mems))
+	}
+
+	entMems, err = st.QueryMemoriesForEntities([]string{entityID}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entMems[entityID]) != 0 {
+		t.Fatalf("after staling: expected 0 from QueryMemoriesForEntities, got %d", len(entMems[entityID]))
+	}
+
+	// SearchMemories should also exclude stale.
+	searchRes, err := st.SearchMemories("refactored projectID", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(searchRes) != 0 {
+		t.Fatalf("after staling: expected 0 from SearchMemories, got %d", len(searchRes))
+	}
+}
+
 func TestQueryInvalidatedMemories_CapsAt10(t *testing.T) {
 	st := openMemTestStore(t)
 

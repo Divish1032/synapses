@@ -90,7 +90,7 @@ func (s *Store) QueryMemories(tier, entityID, agentID string, limit int) ([]Memo
 	now := time.Now().UTC().Format(time.RFC3339)
 	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
 	             created_at, expires_at, last_accessed_at, source
-	      FROM memories WHERE expires_at > ?`
+	      FROM memories WHERE expires_at > ? AND stale = 0`
 	args := []interface{}{now}
 
 	if tier != "" {
@@ -141,6 +141,7 @@ func (s *Store) QueryMemoriesForEntities(entityIDs []string, limit int) (map[str
 		WHERE tier = 'entity'
 		  AND entity_id IN (%s)
 		  AND expires_at > ?
+		  AND stale = 0
 		ORDER BY last_accessed_at DESC`, strings.Join(placeholders, ","))
 
 	rows, err := s.db.Query(q, args...)
@@ -177,6 +178,7 @@ func (s *Store) QueryRecentSessionMemories(agentID string, limit int) ([]Memory,
 	      WHERE tier = 'session_log'
 	        AND agent_id = ?
 	        AND expires_at > ?
+	        AND stale = 0
 	      ORDER BY created_at DESC LIMIT ?`
 
 	rows, err := s.db.Query(q, agentID, now, limit)
@@ -369,12 +371,13 @@ func (s *Store) QueryInvalidatedMemories(limit int) ([]InvalidatedMemory, error)
 	if limit <= 0 {
 		limit = 10
 	}
+	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.db.Query(`
 		SELECT id, content, tier, stale_reason, created_at
 		FROM memories
-		WHERE stale = 1 AND surfaced_at IS NULL
+		WHERE stale = 1 AND surfaced_at IS NULL AND expires_at > ?
 		ORDER BY created_at DESC
-		LIMIT ?`, limit)
+		LIMIT ?`, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query invalidated memories: %w", err)
 	}
@@ -431,6 +434,7 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 		JOIN memories_fts f ON m.rowid = f.rowid
 		WHERE memories_fts MATCH ?
 		  AND m.expires_at > ?
+		  AND m.stale = 0
 		ORDER BY rank
 		LIMIT ?`, query, now, limit)
 	if err != nil {
