@@ -70,28 +70,37 @@ func fileChurn(repoRoot string, days int) (map[string]int, error) {
 }
 
 // CommitInfo holds a summary of a single git commit, as surfaced by
-// get_context's recent_changes field (GAP-7: the "why" layer).
+// get_context's recent_changes field (R34: the "why" layer).
 type CommitInfo struct {
 	Hash    string `json:"hash"`
 	Author  string `json:"author"`
 	Date    string `json:"date"`
 	Message string `json:"message"`
+	// Body is the first 200 characters of the commit body (everything after the
+	// subject line). Empty when the commit has no body. Gives agents the "why"
+	// beyond the one-line subject — e.g. "Temporary workaround — revert before prod".
+	Body string `json:"body,omitempty"`
 }
 
 // RecentCommitsForFile returns the last [limit] commits that touched filePath,
 // using git log relative to repoRoot. Returns nil when not a git repo or when
 // no commits exist for the file. Errors are silently swallowed — caller treats
 // this as an optional enrichment.
+//
+// Each CommitInfo includes Hash (short), Author, Date, Message (subject), and
+// Body (first 200 chars of commit body, empty when none).
 func RecentCommitsForFile(repoRoot, filePath string, limit int) []CommitInfo {
 	if limit <= 0 {
 		limit = 3
 	}
-	// git log: %H=hash %an=author name %ad=author date (short) %s=subject
-	// --follow tracks renames; -- separates the file path from flags.
+	// Use \x1f (unit separator) between fields and \x1e (record separator) to
+	// terminate each commit record. This handles multi-line commit bodies cleanly:
+	// split by \x1e first, then by \x1f — body newlines don't interfere.
+	// %H=hash %an=author %ad=date(short) %s=subject %b=body
 	out, err := exec.Command(
 		"git", "-C", repoRoot,
 		"log", fmt.Sprintf("-n%d", limit),
-		"--format=%H\x1f%an\x1f%ad\x1f%s",
+		"--format=%H\x1f%an\x1f%ad\x1f%s\x1f%b\x1e",
 		"--date=short",
 		"--follow",
 		"--", filePath,
@@ -100,16 +109,30 @@ func RecentCommitsForFile(repoRoot, filePath string, limit int) []CommitInfo {
 		return nil
 	}
 	var commits []CommitInfo
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, "\x1f", 4)
-		if len(parts) != 4 {
+	for _, record := range strings.Split(string(out), "\x1e") {
+		record = strings.TrimSpace(record)
+		if record == "" {
 			continue
 		}
+		parts := strings.SplitN(record, "\x1f", 5)
+		if len(parts) < 4 {
+			continue
+		}
+		body := ""
+		if len(parts) == 5 {
+			// Collapse internal newlines to spaces; trim surrounding whitespace.
+			body = strings.TrimSpace(strings.ReplaceAll(parts[4], "\n", " "))
+			if len(body) > 200 {
+				body = body[:200]
+			}
+		}
+		hash := parts[0]
 		commits = append(commits, CommitInfo{
-			Hash:    parts[0][:min(7, len(parts[0]))], // short hash
+			Hash:    hash[:min(7, len(hash))],
 			Author:  parts[1],
 			Date:    parts[2],
 			Message: parts[3],
+			Body:    body,
 		})
 	}
 	return commits

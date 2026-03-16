@@ -11,10 +11,37 @@ import (
 	"strings"
 )
 
+// IntelligenceMode controls which models are loaded and how they are cached,
+// allowing the brain to fit different RAM budgets.
+type IntelligenceMode string
+
+const (
+	// ModeOptimal targets 8 GB RAM systems (<800 MB brain budget).
+	// Sentry is always pinned. Librarian, Navigator, and Archivist are loaded
+	// on demand and evicted immediately after each request.
+	// Guardian falls back to Librarian (no separate Critic slot).
+	ModeOptimal IntelligenceMode = "optimal"
+
+	// ModeStandard targets 16 GB RAM systems (~2.2 GB brain budget).
+	// Sentry and Librarian are pinned. Critic, Navigator, and Archivist share
+	// a single rotating slot with a 5-minute TTL.
+	ModeStandard IntelligenceMode = "standard"
+
+	// ModeFull targets 32 GB+ RAM systems (~4.5 GB brain budget).
+	// All tiers are pinned in RAM for zero cold-start latency.
+	// Q8_0 quantization used for maximum quality.
+	ModeFull IntelligenceMode = "full"
+)
+
 // BrainConfig holds all configuration for the thinking brain.
 type BrainConfig struct {
 	// Enabled controls whether the brain is active. Default: false.
 	Enabled bool `json:"enabled"`
+
+	// IntelligenceMode controls RAM residency and model quality tier.
+	// "optimal" (<800 MB, 8 GB systems), "standard" (~2.2 GB, 16 GB systems),
+	// "full" (~4.5 GB, 32 GB+ systems). Leave empty to use legacy auto-scaling.
+	IntelligenceMode IntelligenceMode `json:"intelligence_mode,omitempty"`
 
 	// OllamaURL is the base URL of the Ollama server. Default: "http://localhost:11434".
 	OllamaURL string `json:"ollama_url,omitempty"`
@@ -403,6 +430,31 @@ func (c *BrainConfig) ProbeAndDowngradeModels(ctx context.Context, ollamaURL str
 		}
 	}
 	return nil
+}
+
+// keepAliveValues returns the keep_alive seconds for enrich, orchestrate, and
+// archivist tiers based on the configured IntelligenceMode.
+//
+//   - Optimal  : Librarian JIT (0), Navigator/Archivist JIT (0)
+//   - Standard : Librarian pinned (-1), Navigator/Archivist 5-min TTL (300)
+//   - Full     : all pinned (-1)
+//   - ""       : legacy behaviour — Librarian pinned, others use Ollama default
+func (c *BrainConfig) KeepAliveValues() (kaEnrich, kaOrchestrate, kaArchivist int) {
+	switch c.IntelligenceMode {
+	case ModeOptimal:
+		return 0, 0, 0
+	case ModeStandard:
+		return -1, 300, 300
+	case ModeFull:
+		return -1, -1, -1
+	default:
+		// No mode set — preserve existing behaviour: Librarian pinned,
+		// Navigator/Archivist use Ollama's server-side default (5 min).
+		// Return -1 for enrich and 0 for the others as a safe sentinel;
+		// callers that want "use server default" should not call WithKeepAlive.
+		// We return -1 / 0 / 0 which matches the pre-mode hardcoded values.
+		return -1, 0, 0
+	}
 }
 
 // ModelsToInstall returns a deduplicated, sorted list of model tags needed

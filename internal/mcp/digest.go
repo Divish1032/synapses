@@ -52,7 +52,7 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		}
 	}
 
-	// R34: Commit context — the "why" layer: last 3 commit subjects for this function.
+	// R34: Commit context — the "why" layer: last 3 commit subjects + optional body.
 	if cc := dc.Root.Metadata["commit_context"]; cc != "" {
 		var commits []metrics.CommitInfo
 		if json.Unmarshal([]byte(cc), &commits) == nil && len(commits) > 0 {
@@ -64,6 +64,10 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 			}
 			if len(subjects) > 0 {
 				fmt.Fprintf(&b, "📝 last changes: %s\n", strings.Join(subjects, " · "))
+			}
+			// Surface body of the most recent commit when it adds context beyond the subject.
+			if commits[0].Body != "" {
+				fmt.Fprintf(&b, "  └ %q\n", commits[0].Body)
 			}
 		}
 	}

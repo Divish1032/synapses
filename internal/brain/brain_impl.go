@@ -205,17 +205,39 @@ func New(cfg config.BrainConfig) Brain {
 
 	// Ollama path (default): per-tier model assignment via Ollama HTTP API.
 	if cfg.Backend == "ollama" && ingestClient == nil {
-		// Hot tiers (T0 Sentry, T2 Librarian) are called on every file-save event.
-		// WithKeepAlive(-1) pins them in Ollama's RAM indefinitely, eliminating
-		// the 3-8s cold-load penalty on each request during an active session.
-		ingestClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelIngest, cfg.TimeoutMS).WithThinking(false).WithKeepAlive(-1)
-		guardianClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelGuardian, cfg.TimeoutMS).WithThinking(false)
-		enrichClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelEnrich, cfg.TimeoutMS).WithThinking(supportsThinking(cfg.ModelEnrich)).WithKeepAlive(-1)
-		// Navigator and Archivist are fine-tuned Qwen3.5 models: they require
-		// chat-template formatting (/api/chat) to follow instructions correctly.
-		// Raw /api/generate prompts cause them to echo training examples.
-		orchestrateClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelOrchestrate, cfg.TimeoutMS).WithThinking(false).WithChatMode(needsChatMode(cfg.ModelOrchestrate))
-		archivistClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelArchivist, cfg.TimeoutMS).WithThinking(false).WithChatMode(needsChatMode(cfg.ModelArchivist))
+		// Compute keep_alive values based on intelligence mode.
+		// Sentry (T0) is always pinned — it is called on every file-save event.
+		// Librarian (T2) is pinned in Standard/Full; JIT in Optimal to save RAM.
+		// Navigator/Archivist (T3/cold) are JIT in Optimal, TTL in Standard, pinned in Full.
+		kaEnrich, kaOrchestrate, kaArchivist := cfg.KeepAliveValues()
+
+		ingestClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelIngest, cfg.TimeoutMS).
+			WithThinking(false).
+			WithKeepAlive(-1) // Sentry always pinned regardless of mode
+
+		guardianClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelGuardian, cfg.TimeoutMS).
+			WithThinking(false)
+
+		enrichClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelEnrich, cfg.TimeoutMS).
+			WithThinking(supportsThinking(cfg.ModelEnrich)).
+			WithKeepAlive(kaEnrich)
+
+		// Navigator (T3) and Archivist always use Qwen 3.5 models (base or named
+		// identity). Chat-template formatting (/api/chat) improves structured JSON
+		// output adherence for both base and fine-tuned Qwen 3.5 models.
+		// JSON format constraint ensures valid output even from base models.
+		orchestrateClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelOrchestrate, cfg.TimeoutMS).
+			WithThinking(false).
+			WithChatMode(true).
+			WithJSONFormat(true).
+			WithKeepAlive(kaOrchestrate)
+
+		archivistClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelArchivist, cfg.TimeoutMS).
+			WithThinking(false).
+			WithChatMode(true).
+			WithJSONFormat(true).
+			WithNumPredict(1024). // session summaries need more tokens than default 400
+			WithKeepAlive(kaArchivist)
 	}
 
 	// No backend could be configured — degrade gracefully.
