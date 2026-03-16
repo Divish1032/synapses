@@ -588,6 +588,21 @@ func brainWriteConfig(ollamaURL, mode string) (string, error) {
 	existing["ollama_url"] = ollamaURL
 	existing["intelligence_mode"] = mode
 
+	// Write explicit tier model assignments so the daemon uses the registered
+	// synapses/* personas and not the raw "qwen3.5:2b" base model.
+	// Without these, applyDefaults() falls back to DefaultConfig values and the
+	// personas are never called even though they were registered in Ollama.
+	existing["model_ingest"] = "synapses/sentry"
+	existing["model_enrich"] = "synapses/librarian"
+	existing["model_orchestrate"] = "synapses/navigator"
+	existing["model_archivist"] = "synapses/archivist"
+	// Guardian depends on mode: Optimal reuses Librarian, Standard/Full uses Critic.
+	if mode == "optimal" {
+		existing["model_guardian"] = "synapses/librarian"
+	} else {
+		existing["model_guardian"] = "synapses/critic"
+	}
+
 	out, err := json.MarshalIndent(existing, "", "  ")
 	if err != nil {
 		return "", err
