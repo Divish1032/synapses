@@ -58,7 +58,9 @@ func (s *Server) handleRemember(
 	// AM-1: Parse optional anchor_nodes for binding memories to graph nodes.
 	var anchorNodes []string
 	if raw := stringArg(req, "anchor_nodes"); raw != "" {
-		_ = json.Unmarshal([]byte(raw), &anchorNodes)
+		if err := json.Unmarshal([]byte(raw), &anchorNodes); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("anchor_nodes must be a JSON array of strings: %v", err)), nil
+		}
 	}
 
 	e := store.Episode{

@@ -285,8 +285,11 @@ func (s *Store) TouchMemories(ids []string) {
 }
 
 // ExpireMemories deletes memories past their expires_at. Call periodically.
+// Also cleans up orphaned memory_anchors rows for deleted memories.
 func (s *Store) ExpireMemories() (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
+	// Clean up orphaned anchors before deleting memories (no ON DELETE CASCADE in SQLite).
+	_, _ = s.db.Exec(`DELETE FROM memory_anchors WHERE memory_id NOT IN (SELECT id FROM memories WHERE expires_at > ?)`, now)
 	result, err := s.db.Exec(`DELETE FROM memories WHERE expires_at <= ?`, now)
 	if err != nil {
 		return 0, fmt.Errorf("expire memories: %w", err)
