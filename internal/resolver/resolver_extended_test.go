@@ -235,3 +235,75 @@ func TestResolveImplementsEdges_MultipleInterfaces(t *testing.T) {
 		t.Errorf("expected 2 IMPLEMENTS edges (Reader + Writer), got %d", n)
 	}
 }
+
+// TestResolveCallEdges_PrePopulateSeenFromExistingEdges verifies that when the
+// graph already contains a CALLS edge before ResolveCallEdges is called, the
+// pre-populate loop (seen[edgeKey{e.From,e.To}] = true) is exercised and the
+// duplicate edge is silently skipped.
+func TestResolveCallEdges_PrePopulateSeenFromExistingEdges(t *testing.T) {
+	g := graph.New("testrepo")
+
+	callerID := g.MakeNodeID("a.go", "Caller")
+	calleeID := g.MakeNodeID("a.go", "Callee")
+	g.AddNode(&graph.Node{ID: callerID, Type: graph.NodeFunction, Name: "Caller", Package: "p", File: "a.go"})
+	g.AddNode(&graph.Node{ID: calleeID, Type: graph.NodeFunction, Name: "Callee", Package: "p", File: "a.go"})
+
+	// Add a CALLS edge directly — pre-populate loop must pick this up.
+	g.AddEdge(&graph.Edge{From: callerID, To: calleeID, Type: graph.EdgeCalls})
+
+	// Add a call site for the same pair — should be deduplicated.
+	g.AddCallSite(graph.CallSite{
+		CallerID:   callerID,
+		CallerFile: "a.go",
+		PkgAlias:   "",
+		FuncName:   "Callee",
+	})
+
+	n := resolver.ResolveCallEdges(g)
+	// The existing edge was pre-seeded so this call site is skipped → 0 new edges.
+	if n != 0 {
+		t.Errorf("expected 0 new edges (duplicate suppressed), got %d", n)
+	}
+}
+
+// TestResolveCallEdges_QualifiedFallbackThroughAllImports tests that when a
+// qualified alias is not found in the caller's own package but IS found through
+// scanning all of the file's imports, the correct CALLS edge is created.
+// This covers the inner loop at resolver.go lines 70-78.
+func TestResolveCallEdges_QualifiedFallbackThroughAllImports(t *testing.T) {
+	g := graph.New("testrepo")
+
+	// util package.
+	utilFileID := g.MakeNodeID("util.go", "util.go")
+	utilPkgID := g.MakeNodeID("util", "util")
+	utilFuncID := g.MakeNodeID("util.go", "Process")
+	g.AddNode(&graph.Node{ID: utilFileID, Type: graph.NodeFile, Name: "util.go", File: "util.go", Package: "util"})
+	g.AddNode(&graph.Node{ID: utilPkgID, Type: graph.NodePackage, Name: "util"})
+	g.AddNode(&graph.Node{ID: utilFuncID, Type: graph.NodeFunction, Name: "Process", Package: "util", File: "util.go"})
+
+	// svc package — caller.
+	svcFileID := g.MakeNodeID("svc.go", "svc.go")
+	svcPkgID := g.MakeNodeID("svc", "svc")
+	svcFuncID := g.MakeNodeID("svc.go", "Run")
+	g.AddNode(&graph.Node{ID: svcFileID, Type: graph.NodeFile, Name: "svc.go", File: "svc.go", Package: "svc"})
+	g.AddNode(&graph.Node{ID: svcPkgID, Type: graph.NodePackage, Name: "svc"})
+	g.AddNode(&graph.Node{ID: svcFuncID, Type: graph.NodeFunction, Name: "Run", Package: "svc", File: "svc.go"})
+
+	// svc.go imports util.
+	g.AddEdge(&graph.Edge{From: svcFileID, To: utilPkgID, Type: graph.EdgeImports})
+
+	// Qualified call: alias "u" is NOT the import alias ("util" is), so
+	// aliases["u"] won't be found directly. "Process" is also NOT in "svc".
+	// The fallback loop scanning all imports finds "Process" in "util".
+	g.AddCallSite(graph.CallSite{
+		CallerID:   svcFuncID,
+		CallerFile: "svc.go",
+		PkgAlias:   "u", // alias not in importMap — triggers fallback scan
+		FuncName:   "Process",
+	})
+
+	n := resolver.ResolveCallEdges(g)
+	if n == 0 {
+		t.Error("expected CALLS edge via qualified fallback through all imports")
+	}
+}
