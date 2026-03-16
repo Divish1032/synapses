@@ -597,6 +597,10 @@ func Open(path string) (*Store, error) {
 		// OF-H1: Generic entity schema — domain field enables non-code nodes (infra, api, docs, issues).
 		// Existing rows default to 'code' (zero regression: all current nodes are code entities).
 		`ALTER TABLE nodes ADD COLUMN domain TEXT NOT NULL DEFAULT 'code'`,
+		// R20: Signature change tracking — prev_signature stores the prior signature of an exported
+		// entity so verify_implementation can diff actual changes instead of reporting all callers.
+		// Set to the old signature when SaveGraph detects a change; '' when unchanged or new node.
+		`ALTER TABLE nodes ADD COLUMN prev_signature TEXT NOT NULL DEFAULT ''`,
 		// B29: Inter-agent communication — richer focus tracking for peer awareness.
 		`ALTER TABLE agents ADD COLUMN focus_file  TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE agents ADD COLUMN focus_since TEXT NOT NULL DEFAULT ''`,
@@ -1047,6 +1051,20 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		}
 	}
 
+	// R20: Snapshot current signatures before the wipe so we can detect which
+	// exported entity signatures actually changed. Only non-empty signatures are
+	// captured — new nodes (not in this map) are treated as additions, not changes.
+	oldSigs := make(map[string]string)
+	if sigRows, err := s.db.Query(`SELECT id, signature FROM nodes WHERE exported=1 AND signature != ''`); err == nil {
+		defer sigRows.Close()
+		for sigRows.Next() {
+			var nid, sig string
+			if sigRows.Scan(&nid, &sig) == nil {
+				oldSigs[nid] = sig
+			}
+		}
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -1063,8 +1081,8 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 
 	// Insert nodes in batches.
 	nodeStmt, err := tx.Prepare(`
-        INSERT INTO nodes (id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance, domain)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO nodes (id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance, domain, prev_signature)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 	if err != nil {
 		return fmt.Errorf("prepare node stmt: %w", err)
@@ -1113,10 +1131,17 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		if domain == "" {
 			domain = "code"
 		}
+		// R20: compute prev_signature — set to old signature when it changed,
+		// '' when the node is new or the signature is unchanged.
+		prevSig := ""
+		if oldSig, existed := oldSigs[string(n.ID)]; existed && oldSig != sig {
+			prevSig = oldSig
+		}
+
 		if _, err := nodeStmt.Exec(
 			string(n.ID), string(n.Type),
 			n.Name, n.Package, n.File, n.Line,
-			exported, string(meta), doc, sig, lineCount, n.StableID, prov, domain,
+			exported, string(meta), doc, sig, lineCount, n.StableID, prov, domain, prevSig,
 		); err != nil {
 			return fmt.Errorf("insert node %s: %w", n.ID, err)
 		}
@@ -1341,6 +1366,50 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 	}
 
 	return g, nil
+}
+
+// SignatureChange records an exported entity whose signature changed in the last SaveGraph.
+type SignatureChange struct {
+	NodeID    string // graph node ID
+	Name      string
+	NodeType  string
+	File      string
+	Line      int
+	OldSig    string // signature before the last SaveGraph
+	NewSig    string // current signature
+}
+
+// GetSignatureChanges returns exported entities in the given file whose signature
+// changed during the last SaveGraph call. The file argument is matched as a suffix
+// (same semantics as Graph.FindByFile) so callers may pass either a relative or an
+// absolute path. Returns an empty slice — not an error — when nothing changed.
+func (s *Store) GetSignatureChanges(file string) ([]SignatureChange, error) {
+	// Use suffix matching: '%' || file handles both absolute and relative paths.
+	rows, err := s.db.Query(`
+		SELECT id, name, type, file, line, signature, prev_signature
+		FROM nodes
+		WHERE (file = ? OR file LIKE '%' || ?)
+		  AND exported = 1
+		  AND prev_signature != ''
+		  AND type IN ('function', 'method', 'struct', 'interface')
+	`, file, file)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetSignatureChanges: %w", err)
+	}
+	defer rows.Close()
+
+	var changes []SignatureChange
+	for rows.Next() {
+		var c SignatureChange
+		if err := rows.Scan(&c.NodeID, &c.Name, &c.NodeType, &c.File, &c.Line, &c.NewSig, &c.OldSig); err != nil {
+			return nil, fmt.Errorf("store.GetSignatureChanges scan: %w", err)
+		}
+		changes = append(changes, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store.GetSignatureChanges iterate: %w", err)
+	}
+	return changes, nil
 }
 
 // SavedAt returns the timestamp of the last SaveGraph call, or zero if absent.
