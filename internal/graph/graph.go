@@ -309,6 +309,19 @@ func (g *Graph) PeekCallSites() []CallSite {
 	return out
 }
 
+// BulkAddCallSites appends multiple call sites in a single lock acquisition.
+// Used by the watcher to re-register stored call sites from other files before
+// a resolver pass so that ResolveCallEdges can recreate CALLS edges pointing
+// into a file that was just re-parsed (those edges were deleted by RemoveFile).
+func (g *Graph) BulkAddCallSites(sites []CallSite) {
+	if len(sites) == 0 {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.callSites = append(g.callSites, sites...)
+}
+
 // DrainCallSites returns all pending call sites and clears the internal list.
 // Called by the resolver after all files have been parsed.
 func (g *Graph) DrainCallSites() []CallSite {

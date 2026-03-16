@@ -124,6 +124,35 @@ func TestCallSites_PeekAndDrain(t *testing.T) {
 	}
 }
 
+// ── BulkAddCallSites ──────────────────────────────────────────────────────────
+
+func TestBulkAddCallSites_AppendsToExisting(t *testing.T) {
+	g := graph.New("repo")
+	g.AddCallSite(graph.CallSite{CallerID: "existing", CallerFile: "a.go", FuncName: "FA"})
+
+	bulk := []graph.CallSite{
+		{CallerID: "b1", CallerFile: "b.go", FuncName: "FB1"},
+		{CallerID: "b2", CallerFile: "b.go", FuncName: "FB2"},
+	}
+	g.BulkAddCallSites(bulk)
+
+	sites := g.PeekCallSites()
+	if len(sites) != 3 {
+		t.Fatalf("expected 3 call sites after bulk add, got %d", len(sites))
+	}
+}
+
+func TestBulkAddCallSites_EmptySliceIsNoop(t *testing.T) {
+	g := graph.New("repo")
+	g.AddCallSite(graph.CallSite{CallerID: "x", CallerFile: "x.go", FuncName: "FX"})
+	g.BulkAddCallSites(nil)
+	g.BulkAddCallSites([]graph.CallSite{})
+
+	if len(g.PeekCallSites()) != 1 {
+		t.Error("empty BulkAddCallSites should not change existing call sites")
+	}
+}
+
 // ── InvalidateCache ───────────────────────────────────────────────────────────
 
 func TestInvalidateCache_DoesNotCrash(t *testing.T) {

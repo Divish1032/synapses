@@ -66,6 +66,94 @@ func TestLoadCallSites_Empty(t *testing.T) {
 	}
 }
 
+// ── UpdateCallSitesForFile ────────────────────────────────────────────────────
+
+func TestUpdateCallSitesForFile_ReplacesOnlyTargetFile(t *testing.T) {
+	st := openTestStore(t)
+
+	// Seed call sites for two different files.
+	initial := []graph.CallSite{
+		{CallerID: "a", CallerFile: "a.go", FuncName: "FA"},
+		{CallerID: "b", CallerFile: "b.go", FuncName: "FB"},
+		{CallerID: "b2", CallerFile: "b.go", FuncName: "FB2"},
+	}
+	if err := st.SaveCallSites(initial); err != nil {
+		t.Fatalf("SaveCallSites: %v", err)
+	}
+
+	// Update only b.go with a single new site.
+	newB := []graph.CallSite{
+		{CallerID: "b-new", CallerFile: "b.go", FuncName: "FBNew"},
+	}
+	if err := st.UpdateCallSitesForFile("b.go", newB); err != nil {
+		t.Fatalf("UpdateCallSitesForFile: %v", err)
+	}
+
+	loaded, err := st.LoadCallSites()
+	if err != nil {
+		t.Fatalf("LoadCallSites: %v", err)
+	}
+	// Should have a.go's 1 site + b.go's 1 new site = 2 total.
+	if len(loaded) != 2 {
+		t.Fatalf("expected 2 call sites, got %d", len(loaded))
+	}
+	var foundA, foundBNew bool
+	for _, cs := range loaded {
+		if cs.CallerID == "a" {
+			foundA = true
+		}
+		if cs.CallerID == "b-new" && cs.FuncName == "FBNew" {
+			foundBNew = true
+		}
+	}
+	if !foundA {
+		t.Error("a.go call site should be unchanged")
+	}
+	if !foundBNew {
+		t.Error("b.go should have the new call site")
+	}
+}
+
+func TestUpdateCallSitesForFile_EmptyNewSites_DeletesOld(t *testing.T) {
+	st := openTestStore(t)
+
+	_ = st.SaveCallSites([]graph.CallSite{
+		{CallerID: "a", CallerFile: "a.go", FuncName: "F"},
+		{CallerID: "b", CallerFile: "b.go", FuncName: "G"},
+	})
+
+	// Update b.go with no new sites — should delete b.go's entries.
+	if err := st.UpdateCallSitesForFile("b.go", nil); err != nil {
+		t.Fatalf("UpdateCallSitesForFile nil: %v", err)
+	}
+
+	loaded, _ := st.LoadCallSites()
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 call site (a.go only), got %d", len(loaded))
+	}
+	if loaded[0].CallerFile != "a.go" {
+		t.Errorf("expected a.go call site, got %q", loaded[0].CallerFile)
+	}
+}
+
+func TestUpdateCallSitesForFile_NonexistentFile_IsNoop(t *testing.T) {
+	st := openTestStore(t)
+
+	_ = st.SaveCallSites([]graph.CallSite{
+		{CallerID: "x", CallerFile: "x.go", FuncName: "FX"},
+	})
+
+	// Updating a file that has no stored sites should not error or change others.
+	if err := st.UpdateCallSitesForFile("missing.go", nil); err != nil {
+		t.Fatalf("UpdateCallSitesForFile missing file: %v", err)
+	}
+
+	loaded, _ := st.LoadCallSites()
+	if len(loaded) != 1 {
+		t.Errorf("expected 1 call site unchanged, got %d", len(loaded))
+	}
+}
+
 // ── LoadFileMtimes / SaveFileMtimes / UpsertFileMtime ─────────────────────────
 
 func TestSaveAndLoadFileMtimes_RoundTrip(t *testing.T) {
