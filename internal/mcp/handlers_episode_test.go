@@ -85,6 +85,17 @@ func TestHandleRemember_WithoutAnchorNodes_NoAnchoredField(t *testing.T) {
 	}
 }
 
+func TestHandleRemember_MalformedAnchorNodes_ReturnsError(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleRemember(ctx, callTool(map[string]any{
+		"agent_id":     "anchor-agent",
+		"decision":     "some decision about auth",
+		"outcome":      "success",
+		"anchor_nodes": `not valid json`,
+	}))
+	mustErrorResult(t, res, err)
+}
+
 // ── handleRecall ──────────────────────────────────────────────────────────────
 
 func TestHandleRecall_FindsMatch(t *testing.T) {

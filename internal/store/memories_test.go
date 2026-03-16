@@ -619,6 +619,75 @@ func TestInsertMemoryAnchors_EmptyNodeIDSkipped(t *testing.T) {
 	}
 }
 
+func TestExpireMemories_CleansOrphanedAnchors(t *testing.T) {
+	st := openMemTestStore(t)
+	// Insert a memory with a very short TTL (already expired).
+	id, err := st.InsertMemory(Memory{
+		Tier:      TierProject,
+		Content:   "this memory will expire and its anchors should be cleaned",
+		AgentID:   "a",
+		Source:    SourceManual,
+		ExpiresAt: time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertMemoryAnchors(id, []string{"repo::a.go::Foo"}); err != nil {
+		t.Fatal(err)
+	}
+	// Verify anchor exists before expiry.
+	anchors, _ := st.GetMemoryAnchors(id)
+	if len(anchors) != 1 {
+		t.Fatalf("expected 1 anchor before expiry, got %d", len(anchors))
+	}
+	// Expire memories — should also clean up anchors.
+	n, err := st.ExpireMemories()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 expired memory, got %d", n)
+	}
+	// Verify anchor was cleaned up.
+	anchors, _ = st.GetMemoryAnchors(id)
+	if len(anchors) != 0 {
+		t.Errorf("expected 0 anchors after expiry cleanup, got %d", len(anchors))
+	}
+}
+
+func TestInsertMemoryAnchors_DedupedMemory_AddsAnchors(t *testing.T) {
+	st := openMemTestStore(t)
+	// Insert original memory with anchors.
+	id1, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: "AuthService handles all authentication flows in the system", AgentID: "a", Source: SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertMemoryAnchors(id1, []string{"repo::auth.go::AuthService"}); err != nil {
+		t.Fatal(err)
+	}
+	// Insert near-duplicate memory — should dedup and return id1.
+	id2, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: "AuthService handles all authentication flows in the system today", AgentID: "a", Source: SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id2 != id1 {
+		t.Fatalf("expected dedup to return same ID %s, got %s", id1, id2)
+	}
+	// Add additional anchors to the deduped memory.
+	if err := st.InsertMemoryAnchors(id2, []string{"repo::auth.go::Login"}); err != nil {
+		t.Fatal(err)
+	}
+	// Both anchors should exist.
+	anchors, _ := st.GetMemoryAnchors(id1)
+	if len(anchors) != 2 {
+		t.Errorf("expected 2 anchors (original + dedup additive), got %d: %v", len(anchors), anchors)
+	}
+}
+
 // TestSearchMemories_NoResults verifies a query with no matches returns empty
 // slice (not an error).
 func TestSearchMemories_NoResults(t *testing.T) {
