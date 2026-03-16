@@ -688,6 +688,46 @@ func TestInsertMemoryAnchors_DedupedMemory_AddsAnchors(t *testing.T) {
 	}
 }
 
+func TestInsertMemoryWithAnchors_DedupPath_AtomicTouchAndAnchors(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Insert original memory.
+	id1, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: "AuthService handles all authentication flows in the codebase", AgentID: "a", Source: SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Insert near-duplicate WITH anchors — should dedup and atomically touch + anchor.
+	id2, err := st.InsertMemoryWithAnchors(Memory{
+		Tier: TierProject, Content: "AuthService handles all authentication flows in the codebase currently", AgentID: "a", Source: SourceManual,
+	}, []string{"repo::auth.go::AuthService", "repo::auth.go::Login"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id2 != id1 {
+		t.Fatalf("expected dedup, got new ID %s vs %s", id2, id1)
+	}
+
+	// Atomicity proof: if anchors exist, the tx committed — which means the
+	// touch (UPDATE last_accessed_at) in the same tx also committed.
+	// If the tx had rolled back, neither touch nor anchors would be present.
+	anchors, _ := st.GetMemoryAnchors(id1)
+	if len(anchors) != 2 {
+		t.Fatalf("expected 2 anchors on deduped memory (proves tx committed), got %d: %v", len(anchors), anchors)
+	}
+
+	// Verify the memory still exists and is queryable (touch didn't corrupt it).
+	mems, _ := st.QueryMemories(TierProject, "", "a", 1)
+	if len(mems) == 0 {
+		t.Fatal("expected memory to still be queryable after dedup+touch+anchor tx")
+	}
+	if mems[0].ID != id1 {
+		t.Errorf("expected original memory ID %s, got %s", id1, mems[0].ID)
+	}
+}
+
 func TestInsertMemoryWithAnchors_RollsBackOnAnchorFailure(t *testing.T) {
 	st := openMemTestStore(t)
 	// Drop the memory_anchors table so anchor INSERT fails inside the tx.

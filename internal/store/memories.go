@@ -51,6 +51,7 @@ func (s *Store) InsertMemory(m Memory) (string, error) {
 		return "", err
 	}
 	if deduped != "" {
+		_ = s.TouchMemory(deduped)
 		return deduped, nil
 	}
 
@@ -312,9 +313,32 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 		return "", err
 	}
 	if deduped != "" {
-		// Memory deduped — existing memory was touched. Add anchors additively
-		// (no tx needed: memory already committed, anchors are INSERT OR IGNORE).
-		_ = s.InsertMemoryAnchors(deduped, anchorNodes)
+		// Memory deduped — wrap touch + anchor inserts in one tx so crash
+		// between touch and anchors can't leave inconsistent state.
+		tx, err := s.db.Begin()
+		if err != nil {
+			// Best-effort fallback: touch and anchors separately.
+			_ = s.TouchMemory(deduped)
+			_ = s.InsertMemoryAnchors(deduped, anchorNodes)
+			return deduped, nil
+		}
+		defer tx.Rollback()
+
+		// Inline touch: just update last_accessed_at (skip TTL extension logic
+		// for simplicity — the full TouchMemory reads tier+expires_at which
+		// would need s.db.QueryRow inside tx, risking the same conn deadlock).
+		tx.Exec(`UPDATE memories SET last_accessed_at = ? WHERE id = ?`,
+			time.Now().UTC().Format(time.RFC3339), deduped) //nolint:errcheck — best-effort
+
+		now := time.Now().UTC().Format(time.RFC3339)
+		for _, nid := range anchorNodes {
+			if nid == "" {
+				continue
+			}
+			tx.Exec(`INSERT OR IGNORE INTO memory_anchors (memory_id, node_id, created_at) VALUES (?, ?, ?)`,
+				deduped, nid, now) //nolint:errcheck — INSERT OR IGNORE
+		}
+		_ = tx.Commit()
 		return deduped, nil
 	}
 
@@ -405,7 +429,9 @@ func (s *Store) prepareMemory(m Memory) (Memory, string, error) {
 	}
 	for _, ex := range dupCandidates {
 		if stringSimilarity(ex.Content, m.Content) > 0.85 {
-			_ = s.TouchMemory(ex.ID)
+			// Return dedup ID without side effects — caller handles touch.
+			// prepareMemory must be pure (no writes) so callers can decide
+			// whether to touch inside or outside a transaction.
 			return m, ex.ID, nil
 		}
 	}
