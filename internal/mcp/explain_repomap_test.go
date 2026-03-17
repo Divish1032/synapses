@@ -415,3 +415,99 @@ func TestRelPath_EmptyRoot(t *testing.T) {
 		t.Errorf("relPath with empty root should return abs path, got %q", got)
 	}
 }
+
+// ── IMP-EVAL-6: entry point ranking in buildExplanation ──────────────────────
+
+// TestBuildExplanation_EntryPointRanking verifies that cmd/main always surfaces
+// before archived or script entry points.
+func TestBuildExplanation_EntryPointRanking(t *testing.T) {
+	identity := &graph.ProjectIdentity{
+		Scale: graph.ScaleSmall,
+		EntryPoints: []graph.EntityRef{
+			// These three should be demoted — archived/scripts paths.
+			{Name: "RunScript", Type: graph.NodeFunction, File: "archive/scripts/run.go", Line: 1},
+			{Name: "OldMain", Type: graph.NodeFunction, File: "archive/cmd/old_main.go", Line: 1},
+			// This is the real daemon entry point — must appear first.
+			{Name: "main", Type: graph.NodeFunction, File: "cmd/synapses/main.go", Line: 1},
+			// Exported function not in archive — tier 2.
+			{Name: "ServeHTTP", Type: graph.NodeFunction, File: "internal/server/server.go", Line: 5},
+		},
+	}
+
+	out := buildExplanation(identity, nil, nil, "")
+
+	// Find positions of the two entries we care most about.
+	mainPos := strings.Index(out, "cmd/synapses/main.go")
+	archivePos := strings.Index(out, "archive/scripts/run.go")
+
+	if mainPos == -1 {
+		t.Fatal("expected cmd/synapses/main.go in output")
+	}
+	if archivePos == -1 {
+		t.Fatal("expected archive/scripts/run.go in output")
+	}
+	if mainPos >= archivePos {
+		t.Errorf("cmd/main should appear before archived scripts: mainPos=%d archivePos=%d\nout=%q", mainPos, archivePos, out)
+	}
+}
+
+// TestBuildExplanation_EntryPointRanking_NoFalsePositives verifies that paths
+// containing "script", "archive", or "tools" as substrings of OTHER words are
+// NOT incorrectly demoted (e.g. "subscriptions", "archivist", "dev-tools").
+func TestBuildExplanation_EntryPointRanking_NoFalsePositives(t *testing.T) {
+	identity := &graph.ProjectIdentity{
+		Scale: graph.ScaleSmall,
+		EntryPoints: []graph.EntityRef{
+			// These should NOT be demoted — "script" appears inside "subscriptions",
+			// "archive" inside "archivist", and "tools" as part of "build-toolset".
+			{Name: "HandleSubscriptions", Type: graph.NodeFunction, File: "internal/subscriptions/handler.go", Line: 1},
+			{Name: "NewArchivist", Type: graph.NodeFunction, File: "internal/brain/archivist/archivist.go", Line: 1},
+			{Name: "RunBuildToolset", Type: graph.NodeFunction, File: "internal/build-toolset/runner.go", Line: 1},
+			// This one IS truly archived — must be demoted.
+			{Name: "OldMigrate", Type: graph.NodeFunction, File: "archive/migrations/v1.go", Line: 1},
+		},
+	}
+
+	out := buildExplanation(identity, nil, nil, "")
+
+	// All three legitimate functions should appear (not cut by the 8-entry cap for 4 items).
+	for _, name := range []string{"HandleSubscriptions", "NewArchivist", "RunBuildToolset"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("expected %q in output (should not be demoted), got: %q", name, out)
+		}
+	}
+
+	// OldMigrate should appear too (only 4 total, all fit in 8-cap), but must be last.
+	oldPos := strings.Index(out, "archive/migrations/v1.go")
+	subsPos := strings.Index(out, "internal/subscriptions/handler.go")
+	if oldPos != -1 && subsPos != -1 && oldPos < subsPos {
+		t.Errorf("truly archived entry should rank after legitimate exports; archivePos=%d subsPos=%d", oldPos, subsPos)
+	}
+}
+
+// TestBuildExplanation_EntryPointRanking_TierOrder verifies the
+// complete tier ordering: cmd/main < other main < non-archived exports < archived.
+func TestBuildExplanation_EntryPointRanking_TierOrder(t *testing.T) {
+	identity := &graph.ProjectIdentity{
+		Scale: graph.ScaleSmall,
+		EntryPoints: []graph.EntityRef{
+			{Name: "ArchivedFn", Type: graph.NodeFunction, File: "archive/old/helper.go", Line: 1},
+			{Name: "ExportedFn", Type: graph.NodeFunction, File: "internal/service/service.go", Line: 1},
+			{Name: "main", Type: graph.NodeFunction, File: "cmd/server/main.go", Line: 1},
+		},
+	}
+
+	out := buildExplanation(identity, nil, nil, "")
+
+	cmdPos := strings.Index(out, "cmd/server/main.go")
+	svcPos := strings.Index(out, "internal/service/service.go")
+	archPos := strings.Index(out, "archive/old/helper.go")
+
+	if cmdPos == -1 || svcPos == -1 || archPos == -1 {
+		t.Fatalf("all three entry points should appear in output; got %q", out)
+	}
+	if !(cmdPos < svcPos && svcPos < archPos) {
+		t.Errorf("expected tier order cmd < service < archive; positions: cmd=%d svc=%d arch=%d\nout=%q",
+			cmdPos, svcPos, archPos, out)
+	}
+}
