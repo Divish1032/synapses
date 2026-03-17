@@ -370,6 +370,25 @@ func (g *Graph) NodesForFile(file string) []*Node {
 	return out
 }
 
+// UpdateFileNodeMetadata calls update(n) for every node whose File matches
+// absFile, holding the graph write lock for the duration. The callback may
+// safely read and write n.Metadata — no structural graph changes (add/remove
+// nodes or edges) should be made inside update.
+//
+// This is the correct way to write node metadata from a background goroutine
+// while the MCP server is live: git I/O should happen before calling this
+// method; the write lock is held only for the in-memory metadata writes
+// (typically microseconds).
+func (g *Graph) UpdateFileNodeMetadata(absFile string, update func(n *Node)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, n := range g.nodes {
+		if n.File == absFile {
+			update(n)
+		}
+	}
+}
+
 // AllEdges returns a snapshot of every edge in the graph.
 func (g *Graph) AllEdges() []*Edge {
 	g.mu.RLock()
