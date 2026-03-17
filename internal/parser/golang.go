@@ -668,7 +668,7 @@ func (p *GoParser) extractDeclarations(
 				meta := map[string]string{"kind": "const"}
 				g.AddNode(&graph.Node{
 					ID:       nodeID,
-					Type:     graph.NodeStruct,
+					Type:     graph.NodeVariable,
 					Name:     name,
 					Package:  pkg,
 					File:     filePath,
@@ -734,7 +734,7 @@ func (p *GoParser) extractDeclarations(
 				meta := map[string]string{"kind": "var"}
 				g.AddNode(&graph.Node{
 					ID:       nodeID,
-					Type:     graph.NodeStruct,
+					Type:     graph.NodeVariable,
 					Name:     name,
 					Package:  pkg,
 					File:     filePath,

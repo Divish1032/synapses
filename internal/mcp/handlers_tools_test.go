@@ -8,7 +8,10 @@ package mcp
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -627,4 +630,194 @@ func TestHandleSearch_WithKeywordMode(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	_ = result
+}
+
+// ── handleDiscoverTools keyword scoring (IMP-EVAL-5) ─────────────────────────
+
+// TestDiscoverTools_KeywordScoring verifies that specific natural-language queries
+// rank the correct tool first. This catches regressions if keywords are changed.
+func TestDiscoverTools_KeywordScoring(t *testing.T) {
+	s := newTestServer(t)
+
+	cases := []struct {
+		query   string
+		wantTop string // expected name of the top-ranked tool
+	}{
+		// find_entity: locate/find/where/defined
+		{"where is AuthService defined", "find_entity"},
+		{"locate symbol named Store", "find_entity"},
+		{"find function HandleRequest", "find_entity"}, // avoids "file" which scores get_file_context
+
+		// get_impact: blast/radius/breaks/callers/dependents/downstream
+		{"what callers depend on Store.Close", "get_impact"},
+		{"blast radius of CarveEgoGraph", "get_impact"},
+		{"what breaks when changing this symbol", "get_impact"},
+		{"downstream dependents of Handler", "get_impact"},
+
+		// upsert_rule: rule/architectural/constraint/forbid/enforce/ban/policy/restrict
+		{"add architectural constraint forbid direct imports", "upsert_rule"},
+		{"ban handler database access restrict policy", "upsert_rule"},
+		{"enforce architectural rule circular imports", "upsert_rule"},
+
+		// upsert_rule: natural-language architectural phrasing (expanded keyword coverage)
+		{"ensure handlers never access the database directly", "upsert_rule"},
+		{"disallow direct imports from handlers to the store", "upsert_rule"},
+		{"never allow the service to access the store directly", "upsert_rule"},
+
+		// get_impact: natural-language dependency questions (expanded keyword coverage)
+		{"who depends on this function", "get_impact"},
+		{"downstream impact of changing this", "get_impact"},
+		{"will this change break callers", "get_impact"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.query, func(t *testing.T) {
+			res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{"query": tc.query}))
+			if err != nil {
+				t.Fatalf("handleDiscoverTools error: %v", err)
+			}
+			m := mustResult(t, res, nil)
+			matches, ok := m["matches"].([]any)
+			if !ok || len(matches) == 0 {
+				t.Fatalf("query %q: expected matches, got %v", tc.query, m["matches"])
+			}
+			top, ok := matches[0].(map[string]any)
+			if !ok {
+				t.Fatalf("query %q: expected map in matches[0], got %T", tc.query, matches[0])
+			}
+			gotName, _ := top["name"].(string)
+			if gotName != tc.wantTop {
+				t.Errorf("query %q: want top=%q got top=%q (full matches: %v)",
+					tc.query, tc.wantTop, gotName, matches)
+			}
+		})
+	}
+}
+
+// ── handleGetContext disambiguation (BUG-EVAL-9) ─────────────────────────────
+
+// TestHandleGetContext_Disambiguation_CompactFormat_ShowsShownMarker verifies
+// that when multiple nodes share a name, the compact format output includes a
+// "← shown" marker on the file that was actually selected, and that all file
+// paths in the disambiguation block are repo-relative (not absolute).
+func TestHandleGetContext_Disambiguation_CompactFormat_ShowsShownMarker(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	// Set a real repo root so TrimPrefix produces relative paths.
+	repoRoot := t.TempDir()
+	g.SetRoot(repoRoot)
+
+	// Two nodes with the same name in different files.
+	fileA := filepath.Join(repoRoot, "pkg/a/a.go")
+	fileB := filepath.Join(repoRoot, "pkg/b/b.go")
+
+	idA := g.MakeNodeID(fileA, "DupFunc")
+	g.AddNode(&graph.Node{
+		ID: idA, Type: graph.NodeFunction, Name: "DupFunc",
+		File: fileA, Line: 1, Package: "a", Exported: true,
+	})
+	idB := g.MakeNodeID(fileB, "DupFunc")
+	g.AddNode(&graph.Node{
+		ID: idB, Type: graph.NodeFunction, Name: "DupFunc",
+		File: fileB, Line: 1, Package: "b", Exported: true,
+	})
+
+	s := New(g, cfg, st)
+	res, err := s.handleGetContext(ctx, callTool(map[string]any{
+		"entity": "DupFunc",
+		"format": "compact",
+	}))
+	if err != nil {
+		t.Fatalf("handleGetContext error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %v", res.Content)
+	}
+
+	// Extract the raw text (compact format is plain text, not JSON).
+	tc, ok := res.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", res.Content[0])
+	}
+	text := tc.Text
+
+	// Must have the disambiguation block with "\u2190 shown".
+	if !strings.Contains(text, "\u2190 shown") {
+		t.Errorf("compact output missing '\u2190 shown' marker;\ngot:\n%s", text)
+	}
+
+	// All paths in the block must be relative — no absolute repoRoot prefix.
+	if strings.Contains(text, repoRoot) {
+		t.Errorf("compact output contains absolute path %q; want repo-relative paths only;\ngot:\n%s", repoRoot, text)
+	}
+}
+
+// TestHandleGetContext_Disambiguation_JSONFormat_RelativePaths verifies that
+// other_candidates[].file in the JSON response contains repo-relative paths,
+// not absolute paths. Agents use these values directly as the file= argument
+// in a follow-up get_context call, so absolute paths would be unusable.
+func TestHandleGetContext_Disambiguation_JSONFormat_RelativePaths(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	repoRoot := t.TempDir()
+	g.SetRoot(repoRoot)
+
+	fileA := filepath.Join(repoRoot, "pkg/a/a.go")
+	fileB := filepath.Join(repoRoot, "pkg/b/b.go")
+
+	idA := g.MakeNodeID(fileA, "DupFunc")
+	g.AddNode(&graph.Node{
+		ID: idA, Type: graph.NodeFunction, Name: "DupFunc",
+		File: fileA, Line: 1, Package: "a", Exported: true,
+	})
+	idB := g.MakeNodeID(fileB, "DupFunc")
+	g.AddNode(&graph.Node{
+		ID: idB, Type: graph.NodeFunction, Name: "DupFunc",
+		File: fileB, Line: 1, Package: "b", Exported: true,
+	})
+
+	s := New(g, cfg, st)
+	res, err := s.handleGetContext(ctx, callTool(map[string]any{
+		"entity": "DupFunc",
+		// default format = json
+	}))
+	if err != nil {
+		t.Fatalf("handleGetContext error: %v", err)
+	}
+	m := mustResult(t, res, nil)
+
+	otherCandidates, ok := m["other_candidates"].([]any)
+	if !ok || len(otherCandidates) < 2 {
+		t.Fatalf("expected other_candidates with \u22652 entries, got %v", m["other_candidates"])
+	}
+
+	for i, c := range otherCandidates {
+		candidate, ok := c.(map[string]any)
+		if !ok {
+			t.Fatalf("other_candidates[%d]: expected map, got %T", i, c)
+		}
+		file, _ := candidate["file"].(string)
+		if file == "" {
+			t.Errorf("other_candidates[%d]: empty file path", i)
+			continue
+		}
+		// Must be relative — must not start with the absolute repoRoot.
+		if strings.HasPrefix(file, repoRoot) {
+			t.Errorf("other_candidates[%d]: file=%q is absolute (contains repoRoot %q); want repo-relative", i, file, repoRoot)
+		}
+		// Sanity: relative path should look like pkg/a/a.go or pkg/b/b.go.
+		if !strings.HasPrefix(file, "pkg/") {
+			t.Errorf("other_candidates[%d]: file=%q doesn't look repo-relative (expected pkg/... prefix)", i, file)
+		}
+	}
 }
