@@ -341,7 +341,15 @@ func (p *GoParser) Extensions() []string {
 //   - Method declarations  → NodeMethod
 //   - Type declarations (struct) → NodeStruct
 //   - Type declarations (interface) → NodeInterface
+//   - Type aliases and named types → NodeStruct (metadata kind=type_alias)
+//   - Package-level const declarations → NodeVariable (metadata kind=const)
+//   - Package-level var declarations → NodeVariable (metadata kind=var)
 //   - Function/method call expressions → CALLS edges
+//
+// Package-level var nodes use the line of the "var" keyword, not the line of
+// any inferred type. For slice/map vars (var foo = []BarType{...}), the node
+// name is "foo", the type is NodeVariable, and the element type does not affect
+// classification (FIX-PARSER-2).
 func (p *GoParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
@@ -662,9 +670,9 @@ func (p *GoParser) extractDeclarations(
 			if child.Type() == "identifier" {
 				name := string(src[child.StartByte():child.EndByte()])
 				nodeID := g.MakeNodeID(filePath, name)
-				if g.GetNode(nodeID) != nil {
-					continue
-				}
+				// No existence check: Graph.AddNode overwrites stale nodes from prior parses.
+				// An existence guard here would prevent re-indexing from correcting a
+				// misclassified node (e.g. a var previously stored as struct).
 				meta := map[string]string{"kind": "const"}
 				g.AddNode(&graph.Node{
 					ID:       nodeID,
@@ -728,9 +736,9 @@ func (p *GoParser) extractDeclarations(
 			if child.Type() == "identifier" {
 				name := string(src[child.StartByte():child.EndByte()])
 				nodeID := g.MakeNodeID(filePath, name)
-				if g.GetNode(nodeID) != nil {
-					continue
-				}
+				// No existence check: Graph.AddNode overwrites stale nodes from prior parses.
+				// An existence guard here would prevent re-indexing from correcting a
+				// misclassified node (e.g. a var previously stored as struct — FIX-PARSER-2).
 				meta := map[string]string{"kind": "var"}
 				g.AddNode(&graph.Node{
 					ID:       nodeID,

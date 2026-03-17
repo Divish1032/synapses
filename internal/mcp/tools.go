@@ -2040,7 +2040,8 @@ type toolCatalogEntry struct {
 }
 
 // toolCatalog is the static catalog of all major Synapses tools, grouped by
-// category and annotated with keywords for lightweight matching.
+// category and annotated with keywords for lightweight keyword matching.
+// See handleDiscoverTools for usage. Indexed as NodeVariable (FIX-PARSER-2).
 var toolCatalog = []toolCatalogEntry{
 	// Session
 	{Name: "session_init", Category: "session", Description: "Single-call session bootstrap", Keywords: []string{"start", "begin", "init", "session", "bootstrap"}, Example: `session_init(agent_id="my-agent")`},
