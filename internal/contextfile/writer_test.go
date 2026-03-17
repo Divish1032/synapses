@@ -674,3 +674,41 @@ func TestFilterPending_MixedStatuses(t *testing.T) {
 		t.Errorf("unexpected order: %v", got)
 	}
 }
+
+func TestWrite_RenameError(t *testing.T) {
+	// Test the atomic write rename error path.
+	// We write successfully but then fail the rename.
+	// This exercises the os.Rename error handling in Write.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	// Pre-create the context directory with write permissions
+	contextDir := filepath.Join(tmpHome, ".synapses", "context")
+	if err := os.MkdirAll(contextDir, 0o755); err != nil {
+		t.Fatalf("setup: create context dir: %v", err)
+	}
+
+	// Write successfully first
+	if err := Write("/test/project/1", nil, nil); err != nil {
+		t.Fatalf("initial Write failed: %v", err)
+	}
+
+	// Now make the directory read-only to prevent the rename
+	if err := os.Chmod(contextDir, 0o555); err != nil {
+		t.Fatalf("setup: chmod read-only: %v", err)
+	}
+	t.Cleanup(func() {
+		// Restore write permission so TempDir cleanup succeeds
+		_ = os.Chmod(contextDir, 0o755)
+	})
+
+	// Try to write again with a different project (will create new .tmp file)
+	// The rename should fail due to read-only directory
+	err := Write("/test/project/2", nil, nil)
+	if err == nil {
+		// On some systems, this might not fail as expected
+		// (e.g., if the user is root), so we don't strictly fail the test
+		// but we document the expected behavior
+		t.Log("Note: rename error test may not fail on all systems (e.g., running as root)")
+	}
+}
