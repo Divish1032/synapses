@@ -1578,6 +1578,22 @@ Call ` + "`session_init()`" + ` at the start of every session — returns pendin
 - **NEVER** skip ` + "`validate_plan()`" + ` before multi-file changes — it catches architecture violations before any code is written
 - **NEVER** leave discovered bugs untracked — add them as tasks via ` + "`create_plan()`" + ` immediately
 
+### Memory Tiers
+
+Synapses memory is organized in three tiers. Use ` + "`remember()`" + ` to save persistent knowledge about your work:
+
+| Tier | Purpose | Persistence | Scope |
+|------|---------|-----------|-------|
+| **Tier 1 — Live** | In-session work tracking, todo lists, blocked tasks. Use ` + "`TodoWrite`" + ` for current work. | Session-only | This conversation |
+| **Tier 2 — Anchored** | Code insights, discovered bugs, architecture decisions linked to graph nodes. Use ` + "`remember(anchor_nodes=...)`" + ` to tie memory to code entities. | Persistent; auto-flagged stale if linked node changes | All sessions |
+| **Tier 3 — Durable** | User preferences, feedback, project context, external references. No code links — survives refactoring. Use ` + "`remember(decision=...)`" + ` without ` + "`anchor_nodes`" + ` for durable facts. | Persistent | All sessions |
+
+**Memory storage rules:**
+- Write memory to separate ` + "`.md`" + ` files in the project's ` + "`/Users/itachi/.claude/projects/{{project}}/memory/`" + ` directory, not to MEMORY.md.
+- Never write these to MEMORY.md: code patterns, file paths, function signatures, architecture, git blame data. These belong in the living code, not memory.
+- Index all memories in ` + "`MEMORY.md`" + ` with brief descriptions and links to the actual ` + "`.md`" + ` files.
+- When a user asks you to remember something, always save it immediately as the correct tier.
+
 ### Workflow
 ` + "`session_init`" + ` → explore (` + "`get_context`" + `, ` + "`find_entity`" + `) → ` + "`validate_plan`" + ` → edit files → ` + "`verify_implementation`" + `
 ` + synapsesSectionEnd
