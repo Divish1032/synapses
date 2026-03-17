@@ -204,7 +204,11 @@ func (p *SvelteParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		// extractLineDoc expects 1-based line number within the lines array.
 		doc := extractLineDoc(scriptLines, scriptLineIdx+1, "//")
 		nodeID := g.MakeNodeID(filePath, name)
-		meta := declMeta{Doc: doc}
+		nodeMeta := buildLangMeta(declMeta{Doc: doc})
+		if nodeMeta == nil {
+			nodeMeta = map[string]string{}
+		}
+		nodeMeta["kind"] = "function"
 		g.AddNode(&graph.Node{
 			ID:       nodeID,
 			Type:     graph.NodeFunction,
@@ -212,7 +216,7 @@ func (p *SvelteParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 			File:     filePath,
 			Line:     line,
 			Exported: exported,
-			Metadata: buildLangMeta(meta),
+			Metadata: nodeMeta,
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 	}
@@ -229,6 +233,10 @@ func (p *SvelteParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 			if existing := g.GetNode(nodeID); existing != nil && existing.Type == graph.NodeVariable {
 				existing.Type = graph.NodeFunction
 				existing.Exported = exported
+				if existing.Metadata == nil {
+					existing.Metadata = map[string]string{}
+				}
+				existing.Metadata["kind"] = "function"
 			}
 			continue
 		}
@@ -242,6 +250,7 @@ func (p *SvelteParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 			File:     filePath,
 			Line:     line,
 			Exported: exported,
+			Metadata: map[string]string{"kind": "function"},
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 	}
@@ -274,6 +283,7 @@ func (p *SvelteParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 			File:     filePath,
 			Line:     line,
 			Exported: false,
+			Metadata: map[string]string{"kind": "variable"},
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 	}

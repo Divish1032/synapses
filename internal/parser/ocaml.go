@@ -884,12 +884,23 @@ func collectOCamlCallSites(g *graph.Graph, root *sitter.Node, src []byte, filePa
 		if n == nil {
 			return
 		}
-		if n.Type() == "application" {
-			// The first child of an application is the function being called.
+		if n.Type() == "application_expression" {
+			// The first child of an application_expression is the function being called
+			// (a value_path containing a value_name, or a field_expression for method calls).
 			if n.ChildCount() > 0 {
 				funcNode := n.Child(0)
 				if funcNode != nil {
-					callee := childText(funcNode, src)
+					// Prefer value_name grandchild (e.g. value_path > value_name).
+					var callee string
+					if funcNode.Type() == "value_path" || funcNode.Type() == "module_path" {
+						if vn := firstChildOfType(funcNode, "value_name"); vn != nil {
+							callee = strings.TrimSpace(childText(vn, src))
+						} else {
+							callee = strings.TrimSpace(childText(funcNode, src))
+						}
+					} else if funcNode.Type() == "value_name" {
+						callee = strings.TrimSpace(childText(funcNode, src))
+					}
 					// Only record simple identifiers and qualified names as call sites.
 					if callee != "" && !isOCamlBuiltin(callee) &&
 						!strings.ContainsAny(callee, " \t\n(){}[];,=") {

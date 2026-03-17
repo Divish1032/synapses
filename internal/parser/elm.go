@@ -450,18 +450,101 @@ func collectElmCallSites(
 // should not generate call-site edges (too common/noisy).
 func isElmBuiltin(name string) bool {
 	switch name {
+	// Keywords
 	case "if", "then", "else", "case", "of", "let", "in", "type", "alias",
-		"module", "import", "exposing", "as", "port", "effect",
-		"True", "False", "Nothing", "Just",
-		"not", "negate", "abs", "sqrt", "ceiling", "floor", "round", "truncate",
-		"toString", "toFloat", "toInt",
-		"identity", "always", "never",
-		"++", "+", "-", "*", "/", "//", "^", "==", "/=", "<", ">", "<=", ">=",
-		"&&", "||", "|>", "<|", ">>", "<<",
-		"Debug", "todo", "crash",
-		"Html", "Svg", "Http", "Json", "Task", "Platform", "Browser",
-		"text", "div", "span", "button", "input", "img", "a", "p", "h1", "h2", "h3",
-		"ul", "li", "table", "tr", "td", "th", "form", "label", "select", "option":
+		"module", "import", "exposing", "as", "port", "effect":
+		return true
+	// Core types / constructors
+	case "True", "False", "Nothing", "Just", "Ok", "Err":
+		return true
+	// Basics stdlib
+	case "not", "negate", "abs", "sqrt", "ceiling", "floor", "round", "truncate",
+		"toString", "toFloat", "toInt", "identity", "always", "never",
+		"compare", "max", "min", "modBy", "remainderBy", "isNaN", "isInfinite",
+		"xor", "clamp":
+		return true
+	// Operators
+	case "++", "+", "-", "*", "/", "//", "^", "==", "/=", "<", ">", "<=", ">=",
+		"&&", "||", "|>", "<|", ">>", "<<":
+		return true
+	// Debug
+	case "Debug", "todo", "crash", "log":
+		return true
+	// Module names (qualified prefix, stripped by parser)
+	case "Html", "Svg", "Http", "Json", "Task", "Platform", "Browser",
+		"List", "Dict", "Set", "Array", "Maybe", "Result", "String", "Tuple",
+		"Basics", "Cmd", "Sub", "Process", "Random", "Time", "Regex":
+		return true
+	// Html.* elements — stripping module prefix leaves bare element names
+	case "text", "node", "map",
+		"div", "span", "p", "a", "button", "input", "textarea", "img",
+		"h1", "h2", "h3", "h4", "h5", "h6",
+		"ul", "ol", "li", "dl", "dt", "dd",
+		"table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col",
+		"form", "label", "select", "option", "optgroup", "fieldset", "legend",
+		"header", "footer", "main", "nav", "section", "article", "aside",
+		"blockquote", "pre", "code", "em", "strong", "small", "s", "cite", "q",
+		"sup", "sub", "br", "hr", "figure", "figcaption", "address",
+		"canvas", "audio", "video", "source", "track", "embed", "iframe",
+		"details", "summary", "menu", "progress", "meter",
+		"i", "b", "u":
+		return true
+	// Html.Attributes.* — stripping module prefix
+	case "class", "id", "style", "href", "src", "alt", "title", "type_",
+		"value", "placeholder", "name", "action", "method", "target",
+		"disabled", "checked", "selected", "readonly", "required",
+		"autofocus", "multiple", "width", "height", "rows", "cols",
+		"maxlength", "minlength", "step", "pattern",
+		"autocomplete", "novalidate", "enctype", "accept", "acceptCharset",
+		"attribute", "classList", "property", "tabindex",
+		"rel", "media", "lang", "dir", "hidden":
+		return true
+	// Html.Events.* — stripping module prefix
+	case "onClick", "onInput", "onChange", "onSubmit", "onFocus", "onBlur",
+		"onMouseOver", "onMouseOut", "onMouseDown", "onMouseUp", "onMouseMove",
+		"onKeyDown", "onKeyUp", "onKeyPress", "on", "onWithOptions",
+		"onCheck", "onDoubleClick", "preventDefaultOn", "stopPropagationOn":
+		return true
+	// Json.Decode.* / Json.Decode.Pipeline.*
+	case "succeed", "fail", "field", "at", "index", "maybe", "nullable",
+		"oneOf", "list", "array", "dict", "keyValuePairs", "value_",
+		"string", "bool", "int", "float", "null",
+		"object", "encode",
+		"andThen", "map2", "map3", "map4", "map5", "map6", "map7", "map8",
+		"decodeString", "decodeValue", "errorToString":
+		return true
+	// Json.Decode.Pipeline.*
+	case "decode", "required_", "optional", "hardcoded", "custom", "resolve":
+		return true
+	// List.* / String.* / Maybe.* commonly stripped
+	case "filter", "foldl", "foldr", "sortBy", "sortWith", "sort",
+		"head", "tail", "take", "drop", "reverse", "length", "isEmpty",
+		"member", "any", "all", "indexedMap", "filterMap", "concatMap", "concat",
+		"intersperse", "partition", "unzip", "append", "singleton",
+		"trim", "trimLeft", "trimRight", "split", "join", "words", "lines",
+		"contains", "startsWith", "endsWith", "indexes", "indices",
+		"toUpper", "toLower", "pad", "padLeft", "padRight", "repeat",
+		"left", "right", "dropLeft", "dropRight", "slice",
+		"fromChar", "toList", "fromList", "cons",
+		"fromInt", "fromFloat", "toInt_", "toFloat_":
+		return true
+	// Http.*
+	case "send", "get", "post", "request", "emptyBody", "jsonBody",
+		"stringBody", "expectJson", "expectString", "expectStringResponse",
+		"multipartBody", "toTask":
+		return true
+	// Browser.Navigation.*
+	case "pushUrl", "replaceUrl", "back", "forward", "load", "reload", "key":
+		return true
+	// Url.Parser.*
+	case "parse", "top", "oneOf_", "map_", "custom_":
+		return true
+	// Task.*
+	case "perform", "attempt", "andThen_", "succeed_", "fail_", "sequence",
+		"map_task":
+		return true
+	// Common app-level but too generic to be useful
+	case "update", "view", "init", "subscriptions":
 		return true
 	}
 	return false
