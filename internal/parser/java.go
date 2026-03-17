@@ -484,12 +484,15 @@ func (p *JavaParser) extractAllDeclarations(
 // collectJavaCallSites performs a depth-first AST walk to collect call sites
 // with function-level caller resolution.
 func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	// Collect variable type declarations for cross-file obj.method() resolution.
+	collectJavaVarTypes(g, root, src, filePath)
+
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{
-			"class_declaration":          true,
-			"interface_declaration":      true,
-			"enum_declaration":           true,
-			"record_declaration":         true,
+			"class_declaration":           true,
+			"interface_declaration":       true,
+			"enum_declaration":            true,
+			"record_declaration":          true,
 			"annotation_type_declaration": true,
 		},
 		FuncTypes: map[string]bool{
@@ -497,7 +500,7 @@ func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, 
 			"constructor_declaration": true,
 		},
 		CallTypes: map[string]bool{
-			"method_invocation":        true,
+			"method_invocation":          true,
 			"object_creation_expression": true,
 		},
 		NameExtractor: func(n sitter.Node, src []byte) string {
@@ -506,21 +509,78 @@ func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, 
 			}
 			return ""
 		},
-		CalleeExtractor: func(n sitter.Node, src []byte) string {
+		// AliasedCalleeExtractor extracts (object, method) for method_invocation nodes
+		// so the resolver can use the object name to narrow cross-file type resolution.
+		AliasedCalleeExtractor: func(n sitter.Node, src []byte) (alias, name string) {
 			switch n.Type() {
 			case "method_invocation":
-				if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
-					return string(src[nameNode.StartByte():nameNode.EndByte()])
+				nameNode := n.ChildByFieldName("name")
+				if nameNode.IsNull() {
+					return "", ""
 				}
+				methodName := string(src[nameNode.StartByte():nameNode.EndByte()])
+				objNode := n.ChildByFieldName("object")
+				var objName string
+				if !objNode.IsNull() {
+					// Use only simple identifiers as alias — skip chained or complex expressions.
+					if objNode.Type() == "identifier" {
+						objName = string(src[objNode.StartByte():objNode.EndByte()])
+					}
+				}
+				return objName, methodName
 			case "object_creation_expression":
-				if typeNode := n.ChildByFieldName("type"); !typeNode.IsNull() {
-					return string(src[typeNode.StartByte():typeNode.EndByte()])
+				typeNode := n.ChildByFieldName("type")
+				if typeNode.IsNull() {
+					return "", ""
 				}
+				return "", string(src[typeNode.StartByte():typeNode.EndByte()])
 			}
-			return ""
+			return "", ""
 		},
 		IsBuiltin: isJavaBuiltin,
 	})
+}
+
+// collectJavaVarTypes walks the AST to extract variable → type mappings for
+// cross-file call resolution. Records field declarations and local variable declarations.
+func collectJavaVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePath string) {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "field_declaration", "local_variable_declaration":
+			typeNode := n.ChildByFieldName("type")
+			if typeNode.IsNull() {
+				break
+			}
+			typeName := string(src[typeNode.StartByte():typeNode.EndByte()])
+			// Skip primitive types and common stdlib generics.
+			if typeName == "" || isJavaBuiltin(typeName) {
+				break
+			}
+			// Walk declarators to get variable names.
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if child.IsNull() || child.Type() != "variable_declarator" {
+					continue
+				}
+				nameNode := child.ChildByFieldName("name")
+				if nameNode.IsNull() {
+					continue
+				}
+				varName := string(src[nameNode.StartByte():nameNode.EndByte()])
+				if varName != "" {
+					g.AddVarType(filePath, varName, typeName)
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
 }
 
 // isJavaBuiltin returns true for common Java stdlib types/methods that should

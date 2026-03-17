@@ -423,7 +423,10 @@ func (p *PythonParser) extractFunctionsAndMethods(
 
 // collectPythonCallSites performs a depth-first AST walk to collect call sites
 // with function-level caller resolution.
-func collectPythonCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath, _ string) {
+func collectPythonCallSites(g *graph.Graph, lang *sitter.Language, root sitter.Node, src []byte, filePath, _ string) {
+	// Collect variable type annotations for cross-file obj.method() resolution.
+	collectPythonVarTypes(g, lang, root, src, filePath)
+
 	fileNodeID := g.MakeNodeID(filePath, filePath)
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{"class_definition": true},
@@ -438,24 +441,107 @@ func collectPythonCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node
 			}
 			return ""
 		},
-		CalleeExtractor: func(n sitter.Node, src []byte) string {
+		// AliasedCalleeExtractor extracts (object, method) so the resolver can
+		// distinguish `repo.save()` (PkgAlias="repo") from bare `save()` (PkgAlias="").
+		AliasedCalleeExtractor: func(n sitter.Node, src []byte) (alias, name string) {
 			fn := n.ChildByFieldName("function")
 			if fn.IsNull() {
-				return ""
+				return "", ""
 			}
 			switch fn.Type() {
 			case "identifier":
-				return string(src[fn.StartByte():fn.EndByte()])
+				return "", string(src[fn.StartByte():fn.EndByte()])
 			case "attribute":
+				obj := fn.ChildByFieldName("object")
 				attr := fn.ChildByFieldName("attribute")
 				if !attr.IsNull() {
-					return string(src[attr.StartByte():attr.EndByte()])
+					var objName string
+					if !obj.IsNull() {
+						objName = string(src[obj.StartByte():obj.EndByte()])
+					}
+					return objName, string(src[attr.StartByte():attr.EndByte()])
 				}
 			}
-			return ""
+			return "", ""
 		},
 		IsBuiltin: isBuiltinPython,
 	})
+}
+
+// collectPythonVarTypes walks the AST to extract variable → type mappings for
+// cross-file call resolution. Records two patterns:
+//   - Annotated assignments:  obj: ClassName = ...
+//   - Constructor assignments: obj = ClassName(...)
+func collectPythonVarTypes(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string) {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
+			return
+		}
+		if n.Type() == "assignment" {
+			left := n.ChildByFieldName("left")
+			right := n.ChildByFieldName("right")
+			typeAnnot := n.ChildByFieldName("type")
+
+			if !left.IsNull() && left.Type() == "identifier" {
+				varName := string(src[left.StartByte():left.EndByte()])
+				if varName == "self" || varName == "cls" {
+					goto recurse
+				}
+
+				// Pattern 1: obj: TypeName = ...
+				if !typeAnnot.IsNull() {
+					typeName := extractPythonTypeName(typeAnnot, src)
+					if typeName != "" {
+						g.AddVarType(filePath, varName, typeName)
+						goto recurse
+					}
+				}
+
+				// Pattern 2: obj = TypeName(...) — constructor call
+				if !right.IsNull() && right.Type() == "call" {
+					fn := right.ChildByFieldName("function")
+					if !fn.IsNull() && fn.Type() == "identifier" {
+						typeName := string(src[fn.StartByte():fn.EndByte()])
+						// Only record if it looks like a class name (starts with uppercase).
+						if typeName != "" && typeName[0] >= 'A' && typeName[0] <= 'Z' {
+							g.AddVarType(filePath, varName, typeName)
+						}
+					}
+				}
+			}
+		}
+	recurse:
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+}
+
+// extractPythonTypeName extracts the simple type name from a Python type annotation node.
+// Handles bare identifiers (ClassName) and optional types (Optional[ClassName]).
+func extractPythonTypeName(typeNode sitter.Node, src []byte) string {
+	if typeNode.IsNull() {
+		return ""
+	}
+	// The type annotation node wraps the actual type expression.
+	for i := uint32(0); i < typeNode.ChildCount(); i++ {
+		child := typeNode.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		switch child.Type() {
+		case "identifier":
+			return string(src[child.StartByte():child.EndByte()])
+		case "subscript": // Optional[X], List[X], etc. — take the value part
+			val := child.ChildByFieldName("value")
+			if !val.IsNull() && val.Type() == "identifier" {
+				return string(src[val.StartByte():val.EndByte()])
+			}
+		}
+	}
+	return ""
 }
 
 // isPythonPublic returns true if the name is not prefixed with an underscore.

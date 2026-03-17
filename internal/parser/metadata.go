@@ -40,7 +40,13 @@ type callSiteConfig struct {
 	// For class: returns "ClassName". For function: returns "funcName".
 	NameExtractor func(n sitter.Node, src []byte) string
 	// CalleeExtractor returns the callee name from a call expression node, or "" to skip.
+	// Mutually exclusive with AliasedCalleeExtractor — only one should be set.
 	CalleeExtractor func(n sitter.Node, src []byte) string
+	// AliasedCalleeExtractor returns both the receiver/object alias and the callee name
+	// from a call expression node. Use this instead of CalleeExtractor for languages
+	// that distinguish obj.method() from bare function() calls. Returns ("", "") to skip.
+	// The alias is stored as PkgAlias in the CallSite for import-guided resolution.
+	AliasedCalleeExtractor func(n sitter.Node, src []byte) (alias, name string)
 	// IsBuiltin returns true if a callee name should be filtered out.
 	IsBuiltin func(name string) bool
 }
@@ -302,7 +308,12 @@ func collectCallSitesWalk(
 
 		// Collect call site.
 		if cfg.CallTypes[nt] {
-			callee := cfg.CalleeExtractor(n, src)
+			var alias, callee string
+			if cfg.AliasedCalleeExtractor != nil {
+				alias, callee = cfg.AliasedCalleeExtractor(n, src)
+			} else if cfg.CalleeExtractor != nil {
+				callee = cfg.CalleeExtractor(n, src)
+			}
 			if callee != "" && !cfg.IsBuiltin(callee) {
 				// Resolve caller: use enclosing function node if available, else file.
 				callerID := fileNodeID
@@ -315,6 +326,7 @@ func collectCallSitesWalk(
 				g.AddCallSite(graph.CallSite{
 					CallerID:   callerID,
 					CallerFile: filePath,
+					PkgAlias:   alias,
 					FuncName:   callee,
 				})
 			}

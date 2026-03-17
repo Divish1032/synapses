@@ -51,6 +51,11 @@ type Graph struct {
 	// pool is the shared string interning pool used by GraphIndex.
 	// Kept on Graph so it persists across index rebuilds (strings stay interned).
 	pool *StringPool
+
+	// varTypes stores per-file variable type annotations collected during parsing.
+	// Maps file path → variable name → type name (e.g. "repo" → "Repository").
+	// Used by the resolver to resolve obj.method() call sites cross-file.
+	varTypes map[string]map[string]string
 }
 
 // generateStableID returns a random UUID v4 using crypto/rand (no external deps).
@@ -330,6 +335,32 @@ func (g *Graph) DrainCallSites() []CallSite {
 	cs := g.callSites
 	g.callSites = nil
 	return cs
+}
+
+// AddVarType records that variable varName in file has type typeName.
+// Called by language parsers during AST traversal to enable cross-file
+// obj.method() resolution in the post-parse resolver pass.
+func (g *Graph) AddVarType(file, varName, typeName string) {
+	if varName == "" || typeName == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.varTypes == nil {
+		g.varTypes = make(map[string]map[string]string)
+	}
+	if g.varTypes[file] == nil {
+		g.varTypes[file] = make(map[string]string)
+	}
+	g.varTypes[file][varName] = typeName
+}
+
+// GetVarTypes returns the variable → type map for the given file.
+// Returns nil if no type annotations were recorded for the file.
+func (g *Graph) GetVarTypes(file string) map[string]string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.varTypes[file]
 }
 
 // AllNodes returns a snapshot of every node in the graph.
