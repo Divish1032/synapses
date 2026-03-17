@@ -91,6 +91,8 @@ func (p *ThriftParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 			p.extractConst(g, child, src, filePath, fileNodeID)
 		case "service_definition":
 			p.extractService(g, child, src, filePath, fileNodeID)
+		case "include_statement":
+			p.extractInclude(g, child, src, filePath, fileNodeID)
 		}
 	}
 
@@ -446,17 +448,34 @@ func (p *ThriftParser) extractConst(g *graph.Graph, n sitter.Node, src []byte, f
 //   [type][identifier][parameters][throws?][,?]
 //   where type is the return type (or [void]).
 func (p *ThriftParser) extractService(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
-	// First identifier child = service name.
+	// First identifier child = service name. If "extends" keyword appears,
+	// the next identifier is the parent service.
 	serviceName := ""
+	parentService := ""
+	seenExtends := false
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "identifier" {
-			serviceName = string(src[child.StartByte():child.EndByte()])
-			break
+		if child.IsNull() {
+			continue
+		}
+		switch child.Type() {
+		case "identifier":
+			if serviceName == "" {
+				serviceName = string(src[child.StartByte():child.EndByte()])
+			} else if seenExtends && parentService == "" {
+				parentService = string(src[child.StartByte():child.EndByte()])
+			}
+		case "extends":
+			seenExtends = true
 		}
 	}
 	if serviceName == "" {
 		return
+	}
+
+	meta := map[string]string{"kind": "service"}
+	if parentService != "" {
+		meta["extends"] = parentService
 	}
 
 	serviceNodeID := g.MakeNodeID(filePath, serviceName)
@@ -467,9 +486,26 @@ func (p *ThriftParser) extractService(g *graph.Graph, n sitter.Node, src []byte,
 		File:     filePath,
 		Line:     int(n.StartPoint().Row) + 1,
 		Exported: true,
-		Metadata: map[string]string{"kind": "service"},
+		Metadata: meta,
 	})
 	g.AddEdge(&graph.Edge{From: fileNodeID, To: serviceNodeID, Type: graph.EdgeDefines})
+
+	// Create extends edge if parent service is known.
+	if parentService != "" {
+		parentNodeID := g.MakeNodeID(filePath, parentService)
+		if g.GetNode(parentNodeID) == nil {
+			// Forward reference — create a placeholder node.
+			g.AddNode(&graph.Node{
+				ID:       parentNodeID,
+				Type:     graph.NodeInterface,
+				Name:     parentService,
+				File:     filePath,
+				Exported: true,
+				Metadata: map[string]string{"kind": "service"},
+			})
+		}
+		g.AddEdge(&graph.Edge{From: serviceNodeID, To: parentNodeID, Type: graph.EdgeImplements})
+	}
 
 	// Extract function_definitions.
 	for i := uint32(0); i < n.ChildCount(); i++ {
@@ -489,6 +525,7 @@ func (p *ThriftParser) extractService(g *graph.Graph, n sitter.Node, src []byte,
 func (p *ThriftParser) extractServiceFunction(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID, serviceNodeID graph.NodeID, serviceName string) {
 	funcName := ""
 	returnType := ""
+	modifier := ""
 	var throwsTypes []string
 
 	// First collect the type (return type) and the identifier (function name).
@@ -500,6 +537,8 @@ func (p *ThriftParser) extractServiceFunction(g *graph.Graph, n sitter.Node, src
 			continue
 		}
 		switch child.Type() {
+		case "function_modifier":
+			modifier = strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
 		case "type":
 			returnType = strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
 			typeSeenBeforeName = true
@@ -544,6 +583,9 @@ func (p *ThriftParser) extractServiceFunction(g *graph.Graph, n sitter.Node, src
 	if returnType != "" {
 		meta["return_type"] = returnType
 	}
+	if modifier != "" {
+		meta["modifier"] = modifier
+	}
 	if len(throwsTypes) > 0 {
 		meta["throws"] = strings.Join(throwsTypes, ", ")
 	}
@@ -560,4 +602,37 @@ func (p *ThriftParser) extractServiceFunction(g *graph.Graph, n sitter.Node, src
 	})
 	g.AddEdge(&graph.Edge{From: fileNodeID, To: funcNodeID, Type: graph.EdgeDefines})
 	g.AddEdge(&graph.Edge{From: serviceNodeID, To: funcNodeID, Type: graph.EdgeDefines})
+}
+
+// extractInclude handles include_statement nodes.
+// AST: [include]["path/to/file.thrift"]
+// Emits a NodePackage with EdgeImports from the file.
+func (p *ThriftParser) extractInclude(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		if child.Type() == "string" || child.Type() == "string_literal" {
+			raw := string(src[child.StartByte():child.EndByte()])
+			// Strip quotes.
+			raw = strings.Trim(raw, `"'`)
+			if raw == "" {
+				continue
+			}
+			includeNodeID := g.MakeNodeID(raw, raw)
+			if g.GetNode(includeNodeID) == nil {
+				g.AddNode(&graph.Node{
+					ID:      includeNodeID,
+					Type:    graph.NodePackage,
+					Name:    raw,
+					Package: raw,
+					File:    filePath,
+					Line:    int(n.StartPoint().Row) + 1,
+				})
+			}
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: includeNodeID, Type: graph.EdgeImports})
+			return
+		}
+	}
 }

@@ -374,6 +374,7 @@ func (p *ZigParser) extractZigVarDecl(
 				Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			extractZigStructMethods(g, child, src, filePath, fileNodeID, bindingName, nodeID)
 			return
 
 		case "union_declaration":
@@ -388,6 +389,7 @@ func (p *ZigParser) extractZigVarDecl(
 				Metadata: map[string]string{"kind": "union"},
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			extractZigStructMethods(g, child, src, filePath, fileNodeID, bindingName, nodeID)
 			return
 
 		case "error_set_declaration":
@@ -420,15 +422,28 @@ func (p *ZigParser) extractZigVarDecl(
 			importPath := ""
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				sub := child.Child(j)
-				if !sub.IsNull() && sub.Type() == "string" {
+				if sub.IsNull() {
+					continue
+				}
+				st := sub.Type()
+				// Try common string node type names across grammar versions.
+				if st == "string" || st == "string_literal" || st == "string_literal_single" {
 					raw := string(src[sub.StartByte():sub.EndByte()])
 					importPath = strings.Trim(raw, `"`)
 					break
 				}
 			}
 			if importPath == "" {
-				// Try identifier children (should not happen but fallback).
-				importPath = builtinText
+				// Fallback: extract path from @import("...") text.
+				if idx := strings.Index(builtinText, `"`); idx >= 0 {
+					end := strings.LastIndex(builtinText, `"`)
+					if end > idx {
+						importPath = builtinText[idx+1 : end]
+					}
+				}
+			}
+			if importPath == "" {
+				importPath = bindingName
 			}
 			meta := map[string]string{"path": importPath}
 			importNodeID := g.MakeNodeID(filePath, bindingName)
@@ -442,6 +457,21 @@ func (p *ZigParser) extractZigVarDecl(
 				Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeDependsOn})
+			return
+
+		default:
+			// Plain variable/constant (literal, type alias, comptime block, field access, etc.)
+			nodeID := g.MakeNodeID(filePath, bindingName)
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeVariable,
+				Name:     bindingName,
+				File:     filePath,
+				Line:     int(n.StartPoint().Row) + 1,
+				Exported: isPub,
+				Metadata: map[string]string{"kind": "variable"},
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 			return
 		}
 		// Only check the first non-trivial value node.

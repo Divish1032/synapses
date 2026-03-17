@@ -99,6 +99,22 @@ func (p *BicepParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			p.handleOutput(g, child, src, filePath, fileNodeID)
 			pendingDecorators = nil
 
+		case "type_declaration":
+			p.handleTypeDecl(g, child, src, filePath, fileNodeID, pendingDecorators)
+			pendingDecorators = nil
+
+		case "function_declaration":
+			p.handleFuncDecl(g, child, src, filePath, fileNodeID, pendingDecorators)
+			pendingDecorators = nil
+
+		case "target_scope_assignment":
+			p.handleTargetScope(g, child, src, filePath, fileNodeID)
+			pendingDecorators = nil
+
+		case "metadata_declaration":
+			p.handleMetadata(g, child, src, filePath, fileNodeID)
+			pendingDecorators = nil
+
 		default:
 			// Unknown node type — reset decorator accumulator.
 			pendingDecorators = nil
@@ -209,6 +225,14 @@ func (p *BicepParser) handleResource(
 		meta["decorators"] = strings.Join(decorators, "; ")
 	}
 
+	// Detect `existing` keyword.
+	for j := uint32(0); j < n.ChildCount(); j++ {
+		if c := n.Child(j); !c.IsNull() && c.Type() == "existing" {
+			meta["existing"] = "true"
+			break
+		}
+	}
+
 	// Extract name and location from object body.
 	objNode := bicepFindObjectBody(n, src)
 	if !objNode.IsNull() {
@@ -307,6 +331,124 @@ func (p *BicepParser) handleOutput(
 		ID: nodeID, Type: graph.NodeVariable, Name: name,
 		File: filePath, Line: startLine,
 		Exported: true, Metadata: meta,
+	})
+	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+}
+
+// handleTypeDecl processes: type fizz = string
+// AST: type_declaration → type + identifier + = + type_expression
+func (p *BicepParser) handleTypeDecl(
+	g *graph.Graph,
+	n sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+	decorators []string,
+) {
+	idNode := firstChildOfType(n, "identifier")
+	if idNode.IsNull() {
+		return
+	}
+	name := childText(idNode, src)
+	if name == "" {
+		return
+	}
+	startLine := int(n.StartPoint().Row) + 1
+	meta := map[string]string{"kind": "type"}
+	if len(decorators) > 0 {
+		meta["decorators"] = strings.Join(decorators, "; ")
+	}
+	nodeID := g.MakeNodeID(filePath, "type_"+name)
+	g.AddNode(&graph.Node{
+		ID: nodeID, Type: graph.NodeStruct, Name: name,
+		File: filePath, Line: startLine,
+		Exported: true, Metadata: meta,
+	})
+	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+}
+
+// handleFuncDecl processes: func sayHello(name string) string => '...'
+// AST: function_declaration → func + identifier + typed_lambda_expression
+func (p *BicepParser) handleFuncDecl(
+	g *graph.Graph,
+	n sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+	decorators []string,
+) {
+	idNode := firstChildOfType(n, "identifier")
+	if idNode.IsNull() {
+		return
+	}
+	name := childText(idNode, src)
+	if name == "" {
+		return
+	}
+	startLine := int(n.StartPoint().Row) + 1
+	meta := map[string]string{"kind": "function"}
+	if len(decorators) > 0 {
+		meta["decorators"] = strings.Join(decorators, "; ")
+	}
+	nodeID := g.MakeNodeID(filePath, "func_"+name)
+	g.AddNode(&graph.Node{
+		ID: nodeID, Type: graph.NodeFunction, Name: name,
+		File: filePath, Line: startLine,
+		Exported: true, Metadata: meta,
+	})
+	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+}
+
+// handleTargetScope processes: targetScope = 'subscription'
+func (p *BicepParser) handleTargetScope(
+	g *graph.Graph,
+	n sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+) {
+	scopeVal := bicepExtractStringValue(n, src)
+	if scopeVal == "" {
+		return
+	}
+	startLine := int(n.StartPoint().Row) + 1
+	nodeID := g.MakeNodeID(filePath, "targetScope")
+	g.AddNode(&graph.Node{
+		ID: nodeID, Type: graph.NodeVariable, Name: "targetScope",
+		File: filePath, Line: startLine,
+		Exported: true,
+		Metadata: map[string]string{"kind": "targetScope", "value": scopeVal},
+	})
+	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+}
+
+// handleMetadata processes: metadata name = 'value'
+func (p *BicepParser) handleMetadata(
+	g *graph.Graph,
+	n sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+) {
+	idNode := firstChildOfType(n, "identifier")
+	if idNode.IsNull() {
+		return
+	}
+	name := childText(idNode, src)
+	if name == "" {
+		return
+	}
+	startLine := int(n.StartPoint().Row) + 1
+	meta := map[string]string{"kind": "metadata"}
+	// Try to extract value from string child.
+	if val := bicepExtractStringValue(n, src); val != "" {
+		meta["value"] = val
+	}
+	nodeID := g.MakeNodeID(filePath, "metadata_"+name)
+	g.AddNode(&graph.Node{
+		ID: nodeID, Type: graph.NodeVariable, Name: name,
+		File: filePath, Line: startLine,
+		Exported: false, Metadata: meta,
 	})
 	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 }
@@ -430,11 +572,24 @@ func bicepExtractStringValue(n sitter.Node, src []byte) string {
 }
 
 // bicepFindObjectBody finds the object node in a resource or module declaration.
+// The object may be a direct child, or nested inside an if_statement (conditional
+// resource) or for_statement (loop resource).
 func bicepFindObjectBody(n sitter.Node, src []byte) sitter.Node {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "object" {
+		if child.IsNull() {
+			continue
+		}
+		if child.Type() == "object" {
 			return child
+		}
+		if child.Type() == "if_statement" || child.Type() == "for_statement" {
+			for j := uint32(0); j < child.ChildCount(); j++ {
+				gc := child.Child(j)
+				if !gc.IsNull() && gc.Type() == "object" {
+					return gc
+				}
+			}
 		}
 	}
 	return sitter.Node{}

@@ -11,8 +11,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
-// ObjCParser parses Objective-C (.m) source files.
-// Only claims .m — .mm is left to C++ and .h is left to C to avoid false positives.
+// ObjCParser parses Objective-C (.m, .h) source files.
 //
 // Extracted entities:
 //   - @interface blocks → NodeStruct (classes) with superclass and protocol metadata
@@ -20,11 +19,8 @@ import (
 //   - @property declarations inside @interface → NodeMethod (kind=property)
 //   - @protocol declarations → NodeInterface
 //   - Method declarations inside @protocol → NodeMethod
+//   - @implementation blocks → NodeStruct (if not already from @interface) + methods
 //   - #import / #include directives → NodePackage with EdgeImports
-//
-// @implementation blocks are intentionally skipped — their method_definition nodes
-// would duplicate the method_declaration nodes already extracted from @interface.
-// The @interface is the API surface; @implementation is the body.
 //
 // NS_ENUM / typedef enum are not extracted (complex to parse cleanly from tree-sitter).
 type ObjCParser struct {
@@ -38,7 +34,7 @@ func NewObjCParser() *ObjCParser {
 
 // Extensions returns the file extensions handled by this parser.
 func (p *ObjCParser) Extensions() []string {
-	return []string{".m"}
+	return []string{".m", ".h"}
 }
 
 // Parse extracts code entities from a single Objective-C file and merges them into the graph.
@@ -74,6 +70,10 @@ func (p *ObjCParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		case "category_interface":
 			// @interface ClassName (CategoryName) — extract methods but link to class
 			p.extractClassInterface(g, child, src, filePath, fileNodeID)
+		case "class_implementation":
+			p.extractImplementation(g, child, src, filePath, fileNodeID)
+		case "category_implementation":
+			p.extractImplementation(g, child, src, filePath, fileNodeID)
 		}
 	}
 
@@ -286,11 +286,31 @@ func (p *ObjCParser) extractProtocol(g *graph.Graph, n sitter.Node, src []byte, 
 	})
 	g.AddEdge(&graph.Edge{From: fileNodeID, To: protoNodeID, Type: graph.EdgeDefines})
 
-	// Extract method declarations.
+	// Extract method declarations — may be direct children or nested inside
+	// qualified_protocol_interface_declaration or other container nodes.
+	p.extractProtocolMethods(g, n, src, filePath, fileNodeID, protocolName)
+}
+
+// extractProtocolMethods recursively walks protocol children to find method_declaration
+// and property_declaration nodes, which may be nested inside container nodes like
+// qualified_protocol_interface_declaration.
+func (p *ObjCParser) extractProtocolMethods(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID, protocolName string) {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "method_declaration" {
+		if child.IsNull() {
+			continue
+		}
+		switch child.Type() {
+		case "method_declaration":
 			p.extractMethod(g, child, src, filePath, fileNodeID, protocolName)
+		case "property_declaration":
+			p.extractProperty(g, child, src, filePath, fileNodeID, protocolName)
+		default:
+			// Recurse into container nodes (e.g., qualified_protocol_interface_declaration,
+			// optional, required sections).
+			if child.ChildCount() > 0 && child.Type() != "identifier" && child.Type() != "protocol_reference_list" {
+				p.extractProtocolMethods(g, child, src, filePath, fileNodeID, protocolName)
+			}
 		}
 	}
 }
@@ -513,6 +533,180 @@ func (p *ObjCParser) extractProperty(g *graph.Graph, n sitter.Node, src []byte, 
 	classNodeID := g.MakeNodeID(filePath, enclosingClass)
 	if g.GetNode(classNodeID) != nil {
 		g.AddEdge(&graph.Edge{From: classNodeID, To: propNodeID, Type: graph.EdgeDefines})
+	}
+}
+
+// extractImplementation handles @implementation blocks (class_implementation, category_implementation).
+// Creates a NodeStruct for the class (if not already from @interface) and extracts method_definition
+// children as NodeMethod. This ensures .m files without a corresponding .h still produce nodes.
+func (p *ObjCParser) extractImplementation(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	// First identifier child = class name.
+	className := ""
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if !child.IsNull() && child.Type() == "identifier" {
+			className = string(src[child.StartByte():child.EndByte()])
+			break
+		}
+	}
+	if className == "" {
+		return
+	}
+
+	// Ensure the class node exists (may already exist from @interface in .h).
+	classNodeID := g.MakeNodeID(filePath, className)
+	if g.GetNode(classNodeID) == nil {
+		g.AddNode(&graph.Node{
+			ID:       classNodeID,
+			Type:     graph.NodeStruct,
+			Name:     className,
+			File:     filePath,
+			Line:     int(n.StartPoint().Row) + 1,
+			Exported: true,
+			Metadata: map[string]string{"kind": "implementation"},
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: classNodeID, Type: graph.EdgeDefines})
+	}
+
+	// Walk children for method_definition (implementation methods) and function_definition.
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		switch child.Type() {
+		case "method_definition":
+			p.extractMethodDef(g, child, src, filePath, fileNodeID, className)
+		case "function_definition":
+			p.extractCFunction(g, child, src, filePath, fileNodeID)
+		}
+	}
+}
+
+// extractMethodDef handles method_definition nodes inside @implementation.
+// Uses the same selector extraction as extractMethod but from method_definition grammar.
+func (p *ObjCParser) extractMethodDef(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID, enclosingClass string) {
+	// Determine instance (-) or class (+) method.
+	scope := "instance"
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		if child.Type() == "+" {
+			scope = "class"
+			break
+		}
+		if child.Type() == "-" {
+			break
+		}
+	}
+
+	// Build selector from identifier + method_parameter pattern (same as extractMethod).
+	var selectorParts []string
+	pendingIdent := ""
+
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		switch child.Type() {
+		case "identifier":
+			pendingIdent = string(src[child.StartByte():child.EndByte()])
+		case "keyword_argument_list":
+			// method_definition may use keyword_argument_list for parameters.
+			p.extractSelectorFromKeywordArgs(child, src, &selectorParts)
+			pendingIdent = ""
+		case "method_parameter":
+			if pendingIdent != "" {
+				selectorParts = append(selectorParts, pendingIdent+":")
+				pendingIdent = ""
+			}
+		}
+	}
+
+	if len(selectorParts) == 0 && pendingIdent != "" {
+		selectorParts = []string{pendingIdent}
+	}
+	if len(selectorParts) == 0 {
+		return
+	}
+
+	selector := strings.Join(selectorParts, "")
+	qualName := enclosingClass + "." + selector
+
+	// Don't duplicate if already extracted from @interface.
+	methodNodeID := g.MakeNodeID(filePath, qualName)
+	if g.GetNode(methodNodeID) != nil {
+		return
+	}
+
+	meta := map[string]string{"scope": scope}
+	g.AddNode(&graph.Node{
+		ID:       methodNodeID,
+		Type:     graph.NodeMethod,
+		Name:     qualName,
+		File:     filePath,
+		Line:     int(n.StartPoint().Row) + 1,
+		Exported: true,
+		Metadata: meta,
+	})
+	g.AddEdge(&graph.Edge{From: fileNodeID, To: methodNodeID, Type: graph.EdgeDefines})
+	classNodeID := g.MakeNodeID(filePath, enclosingClass)
+	if g.GetNode(classNodeID) != nil {
+		g.AddEdge(&graph.Edge{From: classNodeID, To: methodNodeID, Type: graph.EdgeDefines})
+	}
+}
+
+// extractSelectorFromKeywordArgs extracts selector parts from a keyword_argument_list node
+// used in method_definition grammar.
+func (p *ObjCParser) extractSelectorFromKeywordArgs(n sitter.Node, src []byte, parts *[]string) {
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		if child.Type() == "keyword_declarator" {
+			// keyword_declarator contains: identifier ":" type identifier
+			for j := uint32(0); j < child.ChildCount(); j++ {
+				kc := child.Child(j)
+				if !kc.IsNull() && kc.Type() == "identifier" {
+					*parts = append(*parts, string(src[kc.StartByte():kc.EndByte()])+":")
+					break // first identifier is the keyword
+				}
+			}
+		}
+	}
+}
+
+// extractCFunction handles standalone C function_definition nodes inside @implementation.
+func (p *ObjCParser) extractCFunction(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	// Look for the function declarator to get the name.
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		if child.Type() == "function_declarator" {
+			if ident := firstChildOfType(child, "identifier"); !ident.IsNull() {
+				name := string(src[ident.StartByte():ident.EndByte()])
+				funcNodeID := g.MakeNodeID(filePath, name)
+				if g.GetNode(funcNodeID) != nil {
+					return
+				}
+				g.AddNode(&graph.Node{
+					ID:       funcNodeID,
+					Type:     graph.NodeFunction,
+					Name:     name,
+					File:     filePath,
+					Line:     int(n.StartPoint().Row) + 1,
+					Exported: true,
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: funcNodeID, Type: graph.EdgeDefines})
+				return
+			}
+		}
 	}
 }
 

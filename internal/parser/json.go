@@ -123,6 +123,22 @@ func (p *JSONParser) parsePackageJSON(
 			p.extractPackageDepSection(g, kv.valueNode, src, filePath, fileNodeID, "peer_dependency")
 		case "scripts":
 			p.extractScriptsSection(g, kv.valueNode, src, filePath, fileNodeID)
+		case "workspaces":
+			startLine := kv.startLine
+			if startLine == 0 {
+				startLine = 1
+			}
+			fieldNodeID := g.MakeNodeID(filePath, "config:workspaces")
+			g.AddNode(&graph.Node{
+				ID:       fieldNodeID,
+				Type:     graph.NodeVariable,
+				Name:     "workspaces",
+				File:     filePath,
+				Line:     startLine,
+				Exported: true,
+				Metadata: map[string]string{"kind": "config"},
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: fieldNodeID, Type: graph.EdgeDefines})
 		}
 	}
 }
@@ -144,7 +160,10 @@ func (p *JSONParser) extractPackageDepSection(
 		if kv.key == "" {
 			continue
 		}
-		startLine := int(obj.StartPoint().Row) + 1
+		startLine := kv.startLine
+		if startLine == 0 {
+			startLine = int(obj.StartPoint().Row) + 1
+		}
 		meta := map[string]string{"kind": kind}
 		if kv.valueStr != "" {
 			meta["version"] = kv.valueStr
@@ -179,7 +198,10 @@ func (p *JSONParser) extractScriptsSection(
 		if kv.key == "" {
 			continue
 		}
-		startLine := int(obj.StartPoint().Row) + 1
+		startLine := kv.startLine
+		if startLine == 0 {
+			startLine = int(obj.StartPoint().Row) + 1
+		}
 		meta := map[string]string{"kind": "script"}
 		if kv.valueStr != "" {
 			meta["value"] = kv.valueStr
@@ -218,7 +240,10 @@ func (p *JSONParser) parseTSConfig(
 					if sub.key == "" {
 						continue
 					}
-					startLine := int(kv.valueNode.StartPoint().Row) + 1
+					startLine := sub.startLine
+					if startLine == 0 {
+						startLine = int(kv.valueNode.StartPoint().Row) + 1
+					}
 					meta := map[string]string{"kind": "compiler_option"}
 					if sub.valueStr != "" {
 						meta["value"] = sub.valueStr
@@ -276,7 +301,10 @@ func (p *JSONParser) parseSchemaJSON(
 					if def.key == "" {
 						continue
 					}
-					startLine := int(kv.valueNode.StartPoint().Row) + 1
+					startLine := def.startLine
+					if startLine == 0 {
+						startLine = int(kv.valueNode.StartPoint().Row) + 1
+					}
 					structNodeID := g.MakeNodeID(filePath, "def:"+def.key)
 					g.AddNode(&graph.Node{
 						ID:       structNodeID,
@@ -297,7 +325,10 @@ func (p *JSONParser) parseSchemaJSON(
 					if prop.key == "" {
 						continue
 					}
-					startLine := int(kv.valueNode.StartPoint().Row) + 1
+					startLine := prop.startLine
+					if startLine == 0 {
+						startLine = int(kv.valueNode.StartPoint().Row) + 1
+					}
 					fieldNodeID := g.MakeNodeID(filePath, "prop:"+prop.key)
 					g.AddNode(&graph.Node{
 						ID:       fieldNodeID,

@@ -30,8 +30,8 @@ func TestObjCParser(t *testing.T) {
 `)
 
 	p := parser.NewObjCParser()
-	if exts := p.Extensions(); len(exts) != 1 || exts[0] != ".m" {
-		t.Errorf("expected extensions [.m], got %v", exts)
+	if exts := p.Extensions(); len(exts) != 2 || exts[0] != ".m" || exts[1] != ".h" {
+		t.Errorf("expected extensions [.m .h], got %v", exts)
 	}
 
 	g := graph.New("testrepo")

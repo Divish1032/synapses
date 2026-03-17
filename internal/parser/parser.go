@@ -117,6 +117,10 @@ func NewWalker() *Walker {
 	w.Register(NewSolidityParser()) // deep: .sol
 	// Configuration scripting
 	w.Register(NewJsonnetParser()) // deep: .jsonnet .libsonnet
+	// Scripting
+	w.Register(NewPerlParser())   // deep: .pl .pm .t
+	// Scientific computing
+	w.Register(NewMATLABParser()) // deep: .m (MATLAB/Octave)
 	// Documentation
 	w.Register(NewMarkdownParser()) // deep: .md .markdown .mdx (overrides generic)
 	// Frontend
