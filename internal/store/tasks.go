@@ -97,46 +97,50 @@ type PlanSummary struct {
 // CreatePlan persists a plan and its initial tasks atomically.
 // agentID is optional — if non-empty it records which agent created the plan.
 // Returns the plan ID.
-func (s *Store) CreatePlan(title, description, agentID string, tasks []TaskInput) (string, error) {
-	planID := newID()
+// CreatePlan persists a plan and its initial tasks atomically. agentID is optional —
+// if non-empty it records which agent created the plan. Returns the plan ID and
+// the IDs of all created tasks (for session-task linkage).
+func (s *Store) CreatePlan(title, description, agentID string, tasks []TaskInput) (planID string, taskIDs []string, err error) {
+	planID = newID()
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return "", fmt.Errorf("begin tx: %w", err)
+	tx, txErr := s.db.Begin()
+	if txErr != nil {
+		return "", nil, fmt.Errorf("begin tx: %w", txErr)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	_, err = tx.Exec(
+	_, txErr = tx.Exec(
 		`INSERT INTO plans (id, title, description, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		planID, title, description, agentID, now, now,
 	)
-	if err != nil {
-		return "", fmt.Errorf("insert plan: %w", err)
+	if txErr != nil {
+		return "", nil, fmt.Errorf("insert plan: %w", txErr)
 	}
 
 	for _, t := range tasks {
 		taskID := newID()
+		taskIDs = append(taskIDs, taskID)
 		priority := t.Priority
 		if priority == "" {
 			priority = "p2"
 		}
 		linked, _ := json.Marshal(t.LinkedNodes)
 		deps, _ := json.Marshal(t.DependsOn)
-		_, err = tx.Exec(
+		_, txErr = tx.Exec(
 			`INSERT INTO tasks (id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, '', ?, ?)`,
 			taskID, planID, t.Title, t.Description, priority, string(linked), string(deps), now, now,
 		)
-		if err != nil {
-			return "", fmt.Errorf("insert task %q: %w", t.Title, err)
+		if txErr != nil {
+			return "", nil, fmt.Errorf("insert task %q: %w", t.Title, txErr)
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("commit: %w", err)
+	if txErr = tx.Commit(); txErr != nil {
+		return "", nil, fmt.Errorf("commit: %w", txErr)
 	}
-	return planID, nil
+	return planID, taskIDs, nil
 }
 
 // GetPendingTasks returns all tasks with status 'pending' or 'in_progress',

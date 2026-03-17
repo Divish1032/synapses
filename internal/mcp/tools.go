@@ -3176,7 +3176,7 @@ func hashIdentity(identity *graph.ProjectIdentity) string {
 // session_init before, unchanged sections are omitted to save tokens.
 // The agent's context profile is updated after each call.
 func (s *Server) handleSessionInit(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	agentID, _ := req.GetArguments()["agent_id"].(string)
@@ -3228,6 +3228,34 @@ func (s *Server) handleSessionInit(
 	if s.store != nil && agentID != "" {
 		_ = s.store.AppendEvent("agent_session_start", agentID,
 			fmt.Sprintf(`{"agent_id":%q}`, agentID))
+	}
+
+	// ── Session Intelligence: get or resume session record ───────────────
+	// GetOrResumeSession uses mcpSessionID (MCP transport connection ID) as
+	// the authoritative discriminator — NOT the self-declared agentID — so
+	// two concurrent agents (e.g. two Claude Code windows) on the same project
+	// never collide even if both declare the same agent_id string.
+	// Stale detection runs later (after recentChanges). Skipped on resume.
+	var synapseSessionID string
+	var sessionResumed bool
+	if s.store != nil {
+		effectiveAgentID := agentID
+		if effectiveAgentID == "" {
+			effectiveAgentID = "anonymous"
+		}
+		mcpSessionID := synapseSessionKey(SessionIDFromContext(ctx)) // normalise "" → "stdio"
+		reconnectWindow := 0
+		if s.config != nil {
+			reconnectWindow = s.config.Session.ReconnectWindowSecs
+		}
+		if id, resumed, sessErr := s.store.GetOrResumeSession(effectiveAgentID, s.projectID, mcpSessionID, intent, reconnectWindow); sessErr == nil {
+			synapseSessionID = id
+			sessionResumed = resumed
+			s.registerSynapseSession(mcpSessionID, synapseSessionID, effectiveAgentID)
+			// Prune tool_calls older than 7 days on session start — debounced inside,
+			// so concurrent session_init calls are safe and only one prune runs/hour.
+			go s.store.PruneToolCallsOlderThan(7 * 24 * time.Hour) //nolint:errcheck
+		}
 	}
 
 	// ── Look up agent context profile for incremental delivery ───────────
@@ -3389,6 +3417,31 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// ── 3b. Stale session detection ──────────────────────────────────────
+	// Find sessions that went silent > 30 min ago without a clean end_session.
+	// For each, collect orphaned tasks and infer likely completion status from
+	// file-change evidence. Results are advisory — never auto-resolved.
+	var staleSessions []store.StaleSession
+	// Skip stale detection on reconnect: sessionResumed means this is the
+	// same live session as before — it cannot be stale from its own perspective.
+	staleThreshold := 30 * time.Minute
+	if s.config != nil && s.config.Session.StaleThresholdMins > 0 {
+		staleThreshold = time.Duration(s.config.Session.StaleThresholdMins) * time.Minute
+	}
+	if s.store != nil && synapseSessionID != "" && !sessionResumed {
+		if stale, err := s.store.GetStaleSessions(s.projectID, synapseSessionID, staleThreshold); err == nil && len(stale) > 0 {
+			for i := range stale {
+				if orphans, err := s.store.GetOrphanedTasks(stale[i].SessionID); err == nil && len(orphans) > 0 {
+					for j := range orphans {
+						orphans[j] = s.inferOrphanEvidence(orphans[j], recentChanges)
+					}
+					stale[i].OrphanedTasks = orphans
+				}
+			}
+			staleSessions = stale
+		}
+	}
+
 	// ── 4. Recent agent events ───────────────────────────────────────────
 	// In incremental mode, only return events since the agent's last known seq.
 	var recentEvents []store.Event
@@ -3538,6 +3591,15 @@ func (s *Server) handleSessionInit(
 	}
 	if recentFailure != nil {
 		resp["recent_failure"] = recentFailure
+	}
+	// Session Intelligence: surface stale sessions with orphaned tasks.
+	// Only included when stale sessions exist — zero-noise by default.
+	if len(staleSessions) > 0 {
+		resp["stale_sessions"] = map[string]interface{}{
+			"count":    len(staleSessions),
+			"sessions": staleSessions,
+			"hint":     "Previous session(s) ended without clean shutdown. Review orphaned tasks — confirm done or reset to pending. Synapses never auto-closes tasks.",
+		}
 	}
 	if len(crossProjectAlerts) > 0 {
 		resp["cross_project_alerts"] = map[string]interface{}{
@@ -4007,6 +4069,62 @@ func (s *Server) handleSessionInit(
 	}
 
 	return jsonResult(resp)
+}
+
+// inferOrphanEvidence classifies an orphaned task's likely completion status
+// using heuristic file-change evidence from the watcher's recent-change window.
+// It checks whether any file linked to the task was modified after the task was
+// started — a strong (but not conclusive) signal that work was completed.
+//
+// Returns the task with LikelyStatus and Evidence populated:
+//   - "likely_done"      — files linked to the task were modified
+//   - "unclear"          — no file evidence available (default)
+//   - "likely_abandoned" — task was only created (never claimed)
+func (s *Server) inferOrphanEvidence(ot store.OrphanedTask, recentChanges []changeEntry) store.OrphanedTask {
+	// Tasks that were only created but never claimed are likely abandoned.
+	if ot.Action == "created" && ot.Status == "pending" {
+		ot.LikelyStatus = "likely_abandoned"
+		ot.Evidence = "task was created but never claimed in the stale session"
+		return ot
+	}
+
+	if s.graph == nil || s.store == nil {
+		return ot
+	}
+
+	// Look up the task to get its linked nodes.
+	task, err := s.store.GetTask(ot.TaskID)
+	if err != nil || task == nil || len(task.LinkedNodes) == 0 {
+		return ot
+	}
+
+	// Build a set of recently changed files for O(1) lookup.
+	changedFileSet := make(map[string]bool, len(recentChanges))
+	for _, rc := range recentChanges {
+		changedFileSet[rc.File] = true
+	}
+
+	// Check if any linked node's file was recently modified.
+	var modifiedFiles []string
+	for _, nodeID := range task.LinkedNodes {
+		n := s.graph.GetNode(graph.NodeID(nodeID))
+		if n == nil || n.File == "" {
+			continue
+		}
+		if changedFileSet[n.File] {
+			modifiedFiles = append(modifiedFiles, n.File)
+		}
+	}
+
+	if len(modifiedFiles) > 0 {
+		ot.LikelyStatus = "likely_done"
+		if len(modifiedFiles) == 1 {
+			ot.Evidence = fmt.Sprintf("linked file %s was modified after task started", modifiedFiles[0])
+		} else {
+			ot.Evidence = fmt.Sprintf("%d linked files were modified after task started (%s, ...)", len(modifiedFiles), modifiedFiles[0])
+		}
+	}
+	return ot
 }
 
 // jsonResult marshals v to JSON and wraps it in a text tool result.

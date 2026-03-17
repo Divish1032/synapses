@@ -11,7 +11,7 @@ import (
 func TestGetTask_ExistingTask(t *testing.T) {
 	st := openTestStore(t)
 
-	planID, _ := st.CreatePlan("get-task plan", "", "", []store.TaskInput{
+	planID, _, _ := st.CreatePlan("get-task plan", "", "", []store.TaskInput{
 		{Title: "my task", Priority: "p1"},
 	})
 	tasks, _ := st.GetPendingTasks(planID, "")
@@ -52,7 +52,7 @@ func TestGetTask_NotFound_ReturnsError(t *testing.T) {
 func TestUpdateLinkedNodes_StoredAndRetrieved(t *testing.T) {
 	st := openTestStore(t)
 
-	planID, _ := st.CreatePlan("link plan", "", "", []store.TaskInput{
+	planID, _, _ := st.CreatePlan("link plan", "", "", []store.TaskInput{
 		{Title: "linkable task", Priority: "p1"},
 	})
 	tasks, _ := st.GetPendingTasks(planID, "")
@@ -78,7 +78,7 @@ func TestUpdateLinkedNodes_StoredAndRetrieved(t *testing.T) {
 func TestUpsertAndGetSessionState_RoundTrip(t *testing.T) {
 	st := openTestStore(t)
 
-	planID, _ := st.CreatePlan("state plan", "", "", []store.TaskInput{
+	planID, _, _ := st.CreatePlan("state plan", "", "", []store.TaskInput{
 		{Title: "stateful task", Priority: "p1"},
 	})
 	tasks, _ := st.GetPendingTasks(planID, "")
@@ -133,7 +133,7 @@ func TestGetSessionState_NotFound_ReturnsNil(t *testing.T) {
 func TestUpsertSessionState_UpdatesExisting(t *testing.T) {
 	st := openTestStore(t)
 
-	planID, _ := st.CreatePlan("update state plan", "", "", []store.TaskInput{
+	planID, _, _ := st.CreatePlan("update state plan", "", "", []store.TaskInput{
 		{Title: "update task", Priority: "p1"},
 	})
 	tasks, _ := st.GetPendingTasks(planID, "")
@@ -162,7 +162,7 @@ func TestUpsertSessionState_UpdatesExisting(t *testing.T) {
 func TestGetSessionStateForTasks_MultipleIDs(t *testing.T) {
 	st := openTestStore(t)
 
-	planID, _ := st.CreatePlan("multi-state plan", "", "", []store.TaskInput{
+	planID, _, _ := st.CreatePlan("multi-state plan", "", "", []store.TaskInput{
 		{Title: "task-1", Priority: "p1"},
 		{Title: "task-2", Priority: "p2"},
 	})
@@ -206,7 +206,8 @@ func TestTaskInput_UnmarshalJSON(t *testing.T) {
 	// CreatePlan accepts []TaskInput with string dependencies.
 	st := openTestStore(t)
 
-	planID, err := st.CreatePlan("dep plan", "", "", []store.TaskInput{
+	planID, _,
+		err := st.CreatePlan("dep plan", "", "", []store.TaskInput{
 		{Title: "first", Priority: "p0"},
 		{Title: "second", Priority: "p1", DependsOn: []string{}},
 	})

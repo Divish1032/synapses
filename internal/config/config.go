@@ -210,6 +210,25 @@ type SessionConfig struct {
 	// (roughly 40 minutes of session time at ~2 calls/minute).
 	// Example: auto_end_threshold_calls: 80
 	AutoEndThresholdCalls int `json:"auto_end_threshold_calls,omitempty"`
+
+	// ReconnectWindowSecs is the number of seconds within which a new session_init
+	// from the same agent on the same MCP connection is treated as a reconnect
+	// (resume) rather than a new session. This prevents duplicate session rows when
+	// an agent restarts or the MCP transport reconnects briefly.
+	//
+	// Default: 300 (5 minutes). Must be > 0 to enable resume behaviour; set to 0
+	// to always create a new session on every session_init call.
+	// Example: reconnect_window_secs: 300
+	ReconnectWindowSecs int `json:"reconnect_window_secs,omitempty"`
+
+	// StaleThresholdMins is the number of minutes of inactivity after which a
+	// session without a clean end_session is surfaced as stale at the next
+	// session_init. Stale sessions are advisory — never auto-closed.
+	//
+	// Default: 30 minutes. Tune down for high-churn teams, up for long-running
+	// background agents.
+	// Example: stale_threshold_mins: 30
+	StaleThresholdMins int `json:"stale_threshold_mins,omitempty"`
 }
 
 // PeerConfig describes a remote synapses peer instance to connect to.

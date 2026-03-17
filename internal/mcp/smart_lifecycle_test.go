@@ -26,7 +26,8 @@ func makePlan(t *testing.T, s *Server, planTitle string, taskTitles ...string) (
 		inputs[i] = store.TaskInput{Title: title, Priority: "p2"}
 	}
 	var err error
-	planID, err = s.store.CreatePlan(planTitle, "", "agent-test", inputs)
+	planID, _,
+		err = s.store.CreatePlan(planTitle, "", "agent-test", inputs)
 	if err != nil {
 		t.Fatalf("CreatePlan: %v", err)
 	}
@@ -421,7 +422,8 @@ func TestFailureResumption_NoSessionState_FailureContextStillPresent(t *testing.
 func TestFailureResumption_UnassignedTask_NoFailureContext(t *testing.T) {
 	// A task with no assigned agent has no agent to look up failures for.
 	s := newTestServer(t)
-	planID, err := s.store.CreatePlan("Unassigned Plan", "", "", []store.TaskInput{{Title: "Unassigned Task"}})
+	planID, _,
+		err := s.store.CreatePlan("Unassigned Plan", "", "", []store.TaskInput{{Title: "Unassigned Task"}})
 	if err != nil {
 		t.Fatalf("CreatePlan: %v", err)
 	}
