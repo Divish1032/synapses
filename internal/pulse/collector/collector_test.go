@@ -482,6 +482,57 @@ func TestWriteBatch_WithAgentLLMUsage(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 }
 
+func TestComputeCostSaved_ZeroPricing(t *testing.T) {
+	s := testStore(t)
+	c := New(s, 100, 500)
+
+	// Insert pricing with 0 inputPer1M — should return 0 even for positive tokens
+	if err := s.UpsertPricing("gpt-4o", 0.0, 10.00, "test"); err != nil {
+		t.Fatalf("UpsertPricing: %v", err)
+	}
+
+	cost := c.computeCostSaved(1_000_000)
+	if cost != 0.0 {
+		t.Errorf("zero pricing: got %.6f, want 0", cost)
+	}
+}
+
+func TestWriteBatch_ContextDelivery_EmptyAgentID(t *testing.T) {
+	s := testStore(t)
+	c := New(s, 10, 50)
+	c.Start()
+	defer c.Stop()
+
+	// Empty AgentID should default to "default" in writeBatch
+	c.RecordContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName:       "get_context",
+		AgentID:        "", // empty — triggers the default branch
+		ProjectID:      "proj-1",
+		ResponseTokens: 50,
+		BaselineTokens: 200,
+	})
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestWriteBatch_ToolCall_EmptyAgentID(t *testing.T) {
+	s := testStore(t)
+	c := New(s, 10, 50)
+	c.Start()
+	defer c.Stop()
+
+	// Empty AgentID should default to "default" in writeBatch
+	c.RecordToolCall(pulsetypes.ToolCallEvent{
+		ToolName:   "get_context",
+		AgentID:    "", // empty — triggers the default branch
+		ProjectID:  "proj-1",
+		DurationMs: 10,
+		Success:    true,
+	})
+
+	time.Sleep(100 * time.Millisecond)
+}
+
 func TestComputeCostSaved_WithPricingLookup(t *testing.T) {
 	s := testStore(t)
 	c := New(s, 100, 500)
