@@ -5,27 +5,27 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	tsxsitter "github.com/smacker/go-tree-sitter/typescript/tsx"
-	tssitter "github.com/smacker/go-tree-sitter/typescript/typescript"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	tsxsitter "github.com/alexaandru/go-sitter-forest/tsx"
+	tssitter "github.com/alexaandru/go-sitter-forest/typescript"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // extractTSDeclInfo walks the TypeScript/TSX AST and builds a name→declMeta map
 // for all function, class, interface, type alias, and enum declarations.
-func extractTSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractTSDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
 
-	var walk func(n *sitter.Node, enclosingClass string, depth int)
-	walk = func(n *sitter.Node, enclosingClass string, depth int) {
-		if n == nil || depth > 8 {
+	var walk func(n sitter.Node, enclosingClass string, depth int)
+	walk = func(n sitter.Node, enclosingClass string, depth int) {
+		if n.IsNull() || depth > 8 {
 			return
 		}
 		switch n.Type() {
 		case "function_declaration", "function_expression", "function_signature":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -35,7 +35,7 @@ func extractTSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "method_definition":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if enclosingClass != "" {
@@ -50,7 +50,7 @@ func extractTSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 			}
 		case "class_declaration", "abstract_class_declaration":
 			className := ""
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[className] = declMeta{
@@ -58,12 +58,12 @@ func extractTSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 			}
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				walk(n.Child(i), className, depth+1)
 			}
 			return
 		case "interface_declaration", "type_alias_declaration", "enum_declaration":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -75,7 +75,7 @@ func extractTSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 			// export const foo = () => {}
 			nameNode := n.ChildByFieldName("name")
 			valueNode := n.ChildByFieldName("value")
-			if nameNode != nil && valueNode != nil {
+			if !nameNode.IsNull() && !valueNode.IsNull() {
 				vt := valueNode.Type()
 				if vt == "arrow_function" || vt == "function_expression" {
 					name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -87,7 +87,7 @@ func extractTSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass, depth+1)
 		}
 	}
@@ -104,8 +104,8 @@ type TypeScriptParser struct {
 // NewTypeScriptParser creates a ready-to-use TypeScriptParser.
 func NewTypeScriptParser() *TypeScriptParser {
 	return &TypeScriptParser{
-		tsLang:  tssitter.GetLanguage(),
-		tsxLang: tsxsitter.GetLanguage(),
+		tsLang:  sitter.NewLanguage(tssitter.GetLanguage()),
+		tsxLang: sitter.NewLanguage(tsxsitter.GetLanguage()),
 	}
 }
 
@@ -122,7 +122,7 @@ func (p *TypeScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 	tsParser := sitter.NewParser()
 	tsParser.SetLanguage(lang)
 
-	tree, _ := tsParser.ParseCtx(context.Background(), nil, src)
+	tree, _ := tsParser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	// Module name = basename without extension.
@@ -153,7 +153,7 @@ func (p *TypeScriptParser) langForFile(filePath string) *sitter.Language {
 func (p *TypeScriptParser) extractDeclarations(
 	g *graph.Graph,
 	lang *sitter.Language,
-	root *sitter.Node,
+	root sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
@@ -456,15 +456,15 @@ func (p *TypeScriptParser) extractDeclarations(
 // and creates class-qualified method nodes.
 func (p *TypeScriptParser) extractClassMethods(
 	g *graph.Graph,
-	root *sitter.Node,
+	root sitter.Node,
 	src []byte,
 	filePath, moduleName string,
 	fileNodeID graph.NodeID,
 	declInfo map[string]declMeta,
 ) {
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
@@ -472,9 +472,9 @@ func (p *TypeScriptParser) extractClassMethods(
 			// Exported decorated class: decorator sibling + class_declaration child.
 			var decs []string
 			var exportedClassName string
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				if child.Type() == "decorator" {
@@ -483,7 +483,7 @@ func (p *TypeScriptParser) extractClassMethods(
 					}
 				}
 				if child.Type() == "class_declaration" || child.Type() == "abstract_class_declaration" {
-					if nameNode := child.ChildByFieldName("name"); nameNode != nil {
+					if nameNode := child.ChildByFieldName("name"); !nameNode.IsNull() {
 						exportedClassName = string(src[nameNode.StartByte():nameNode.EndByte()])
 					}
 				}
@@ -501,15 +501,15 @@ func (p *TypeScriptParser) extractClassMethods(
 
 		case "class_declaration", "abstract_class_declaration":
 			className := ""
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
 			// Collect decorators that are direct children (non-exported class).
 			if className != "" {
 				var decs []string
-				for i := 0; i < int(n.ChildCount()); i++ {
+				for i := uint32(0); i < n.ChildCount(); i++ {
 					child := n.Child(i)
-					if child != nil && child.Type() == "decorator" {
+					if !child.IsNull() && child.Type() == "decorator" {
 						if name := tsDecoratorName(child, src); name != "" {
 							decs = append(decs, name)
 						}
@@ -525,17 +525,17 @@ func (p *TypeScriptParser) extractClassMethods(
 					}
 				}
 			}
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				walk(n.Child(i), className)
 			}
 			return
 		case "interface_declaration":
 			// Walk interface body for method_signature and property_signature.
 			className := ""
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				walk(n.Child(i), className)
 			}
 			return
@@ -544,7 +544,7 @@ func (p *TypeScriptParser) extractClassMethods(
 				break
 			}
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -582,7 +582,7 @@ func (p *TypeScriptParser) extractClassMethods(
 				break
 			}
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -615,7 +615,7 @@ func (p *TypeScriptParser) extractClassMethods(
 			}
 			// Name is a property_identifier child (after optional accessibility_modifier / readonly).
 			nameNode := firstChildOfType(n, "property_identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -626,9 +626,9 @@ func (p *TypeScriptParser) extractClassMethods(
 			}
 			// Detect accessibility modifier for kind metadata.
 			fieldKind := "field"
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				if child.Type() == "accessibility_modifier" {
@@ -665,7 +665,7 @@ func (p *TypeScriptParser) extractClassMethods(
 				g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -674,7 +674,7 @@ func (p *TypeScriptParser) extractClassMethods(
 
 // collectTSCallSites performs a depth-first AST walk to collect call sites with
 // function-level caller resolution.
-func collectTSCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectTSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{
 			"class_declaration":          true,
@@ -687,8 +687,8 @@ func collectTSCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, s
 			"function_expression":  true,
 		},
 		CallTypes: map[string]bool{"call_expression": true},
-		NameExtractor: func(n *sitter.Node, src []byte) string {
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+		NameExtractor: func(n sitter.Node, src []byte) string {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				return string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
 			return ""
@@ -701,39 +701,39 @@ func collectTSCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, s
 // extractTSEnumMembers walks the AST for enum_declaration nodes and emits
 // individual enum member nodes (e.g. Color.Red, Color.Green).
 // TS grammar: enum_declaration → enum_body → property_identifier children.
-func extractTSEnumMembers(g *graph.Graph, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
+func extractTSEnumMembers(g *graph.Graph, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "enum_declaration" {
 			// Get enum name.
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				return
 			}
 			enumName := string(src[nameNode.StartByte():nameNode.EndByte()])
 			enumNodeID := g.MakeNodeID(filePath, enumName)
 			// Walk enum_body for property_identifier children (the member names).
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				body := n.Child(i)
-				if body == nil || body.Type() != "enum_body" {
+				if body.IsNull() || body.Type() != "enum_body" {
 					continue
 				}
-				for j := 0; j < int(body.ChildCount()); j++ {
+				for j := uint32(0); j < body.ChildCount(); j++ {
 					member := body.Child(j)
-					if member == nil {
+					if member.IsNull() {
 						continue
 					}
 					// Direct property_identifier (no value) or enum_assignment → property_identifier.
-					var nameNode *sitter.Node
+					var nameNode sitter.Node
 					if member.Type() == "property_identifier" {
 						nameNode = member
 					} else if member.Type() == "enum_assignment" {
 						nameNode = firstChildOfType(member, "property_identifier")
 					}
-					if nameNode == nil {
+					if nameNode.IsNull() {
 						continue
 					}
 					memberName := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -755,7 +755,7 @@ func extractTSEnumMembers(g *graph.Graph, root *sitter.Node, src []byte, filePat
 			}
 			return
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
@@ -764,13 +764,13 @@ func extractTSEnumMembers(g *graph.Graph, root *sitter.Node, src []byte, filePat
 
 // tsDecoratorName extracts the decorator identifier from a decorator node.
 // Handles both @Component() (call_expression) and @Component (bare identifier).
-func tsDecoratorName(decorator *sitter.Node, src []byte) string {
-	if ce := firstChildOfType(decorator, "call_expression"); ce != nil {
-		if ident := firstChildOfType(ce, "identifier"); ident != nil {
+func tsDecoratorName(decorator sitter.Node, src []byte) string {
+	if ce := firstChildOfType(decorator, "call_expression"); !ce.IsNull() {
+		if ident := firstChildOfType(ce, "identifier"); !ident.IsNull() {
 			return string(src[ident.StartByte():ident.EndByte()])
 		}
 	}
-	if ident := firstChildOfType(decorator, "identifier"); ident != nil {
+	if ident := firstChildOfType(decorator, "identifier"); !ident.IsNull() {
 		return string(src[ident.StartByte():ident.EndByte()])
 	}
 	return ""

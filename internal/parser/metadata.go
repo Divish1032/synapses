@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -38,9 +38,9 @@ type callSiteConfig struct {
 	CallTypes map[string]bool
 	// NameExtractor returns the name from a class or function node.
 	// For class: returns "ClassName". For function: returns "funcName".
-	NameExtractor func(n *sitter.Node, src []byte) string
+	NameExtractor func(n sitter.Node, src []byte) string
 	// CalleeExtractor returns the callee name from a call expression node, or "" to skip.
-	CalleeExtractor func(n *sitter.Node, src []byte) string
+	CalleeExtractor func(n sitter.Node, src []byte) string
 	// IsBuiltin returns true if a callee name should be filtered out.
 	IsBuiltin func(name string) bool
 }
@@ -49,10 +49,10 @@ type callSiteConfig struct {
 // and returning source text from the declaration start up to (but not including)
 // the body. Handles "block" (Python, Rust, Java) and "statement_block" (TypeScript).
 // Falls back to the full declaration text if no body block is found.
-func extractSigToBody(declNode *sitter.Node, src []byte) string {
-	for i := 0; i < int(declNode.ChildCount()); i++ {
+func extractSigToBody(declNode sitter.Node, src []byte) string {
+	for i := uint32(0); i < declNode.ChildCount(); i++ {
 		child := declNode.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "block" || child.Type() == "statement_block" {
@@ -188,19 +188,19 @@ func extractPythonDocstring(lines []string, startLine int) string {
 	return ""
 }
 
-// childText returns the text content of a node, or "" if the node is nil.
-func childText(n *sitter.Node, src []byte) string {
-	if n == nil {
+// childText returns the text content of a node, or "" if the node is null.
+func childText(n sitter.Node, src []byte) string {
+	if n.IsNull() {
 		return ""
 	}
 	return string(src[n.StartByte():n.EndByte()])
 }
 
 // hasChildToken checks if a node has a direct child whose source text matches token.
-func hasChildToken(n *sitter.Node, src []byte, token string) bool {
-	for i := 0; i < int(n.ChildCount()); i++ {
+func hasChildToken(n sitter.Node, src []byte, token string) bool {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child != nil && string(src[child.StartByte():child.EndByte()]) == token {
+		if !child.IsNull() && string(src[child.StartByte():child.EndByte()]) == token {
 			return true
 		}
 	}
@@ -211,16 +211,16 @@ func hasChildToken(n *sitter.Node, src []byte, token string) bool {
 // enclosing class/struct name. This is used for class-qualifying method names.
 // classTypes is the set of node types that represent classes (e.g. "class_declaration",
 // "class_definition", "struct_specifier").
-func findEnclosingClass(n *sitter.Node, src []byte, classTypes map[string]bool) string {
-	for p := n.Parent(); p != nil; p = p.Parent() {
+func findEnclosingClass(n sitter.Node, src []byte, classTypes map[string]bool) string {
+	for p := n.Parent(); !p.IsNull(); p = p.Parent() {
 		if classTypes[p.Type()] {
 			nameNode := p.ChildByFieldName("name")
-			if nameNode != nil {
+			if !nameNode.IsNull() {
 				return string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
 			// Some grammars use unnamed children — try first type_identifier or identifier.
 			for _, typ := range []string{"type_identifier", "identifier", "constant", "name"} {
-				if ch := firstChildOfType(p, typ); ch != nil {
+				if ch := firstChildOfType(p, typ); !ch.IsNull() {
 					return string(src[ch.StartByte():ch.EndByte()])
 				}
 			}
@@ -231,14 +231,14 @@ func findEnclosingClass(n *sitter.Node, src []byte, classTypes map[string]bool) 
 
 // extractSigToBodyMulti tries multiple body block type names when extracting
 // signatures. Used for languages with varied body block types.
-func extractSigToBodyMulti(declNode *sitter.Node, src []byte, bodyTypes []string) string {
+func extractSigToBodyMulti(declNode sitter.Node, src []byte, bodyTypes []string) string {
 	bodySet := make(map[string]bool, len(bodyTypes))
 	for _, bt := range bodyTypes {
 		bodySet[bt] = true
 	}
-	for i := 0; i < int(declNode.ChildCount()); i++ {
+	for i := uint32(0); i < declNode.ChildCount(); i++ {
 		child := declNode.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if bodySet[child.Type()] {
@@ -261,15 +261,15 @@ func extractSigToBodyMulti(declNode *sitter.Node, src []byte, bodyTypes []string
 // accurate get_call_chain and get_impact for all supported languages.
 func collectCallSitesWalk(
 	g *graph.Graph,
-	root *sitter.Node,
+	root sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
 	cfg callSiteConfig,
 ) {
-	var walk func(n *sitter.Node, enclosingClass, enclosingFunc string)
-	walk = func(n *sitter.Node, enclosingClass, enclosingFunc string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass, enclosingFunc string)
+	walk = func(n sitter.Node, enclosingClass, enclosingFunc string) {
+		if n.IsNull() {
 			return
 		}
 		nt := n.Type()
@@ -278,7 +278,7 @@ func collectCallSitesWalk(
 		if cfg.ClassTypes[nt] {
 			className := cfg.NameExtractor(n, src)
 			if className != "" {
-				for i := 0; i < int(n.ChildCount()); i++ {
+				for i := uint32(0); i < n.ChildCount(); i++ {
 					walk(n.Child(i), className, enclosingFunc)
 				}
 				return
@@ -293,7 +293,7 @@ func collectCallSitesWalk(
 				if enclosingClass != "" {
 					qualFunc = enclosingClass + "." + funcName
 				}
-				for i := 0; i < int(n.ChildCount()); i++ {
+				for i := uint32(0); i < n.ChildCount(); i++ {
 					walk(n.Child(i), enclosingClass, qualFunc)
 				}
 				return
@@ -320,7 +320,7 @@ func collectCallSitesWalk(
 			}
 		}
 
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass, enclosingFunc)
 		}
 	}
@@ -329,14 +329,14 @@ func collectCallSitesWalk(
 
 // firstChildOfType returns the first direct child of n whose type matches typ,
 // or nil if none is found. Used by language parsers that lack named fields.
-func firstChildOfType(n *sitter.Node, typ string) *sitter.Node {
-	for i := 0; i < int(n.ChildCount()); i++ {
+func firstChildOfType(n sitter.Node, typ string) sitter.Node {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child != nil && child.Type() == typ {
+		if !child.IsNull() && child.Type() == typ {
 			return child
 		}
 	}
-	return nil
+	return sitter.Node{}
 }
 
 // buildLangMeta converts a declMeta into a Node.Metadata map.

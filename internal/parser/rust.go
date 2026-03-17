@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/rust"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/rust"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -14,18 +14,18 @@ import (
 // extractRustDeclInfo walks the Rust AST collecting metadata for function,
 // struct, enum, trait, type alias, and macro declarations.
 // Methods inside impl blocks are qualified as Type.method_name.
-func extractRustDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractRustDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
 
-	var walk func(n *sitter.Node, implType string, depth int)
-	walk = func(n *sitter.Node, implType string, depth int) {
-		if n == nil || depth > 8 {
+	var walk func(n sitter.Node, implType string, depth int)
+	walk = func(n sitter.Node, implType string, depth int) {
+		if n.IsNull() || depth > 8 {
 			return
 		}
 		switch n.Type() {
 		case "function_item":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if implType != "" {
@@ -39,7 +39,7 @@ func extractRustDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "struct_item", "enum_item", "trait_item":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -48,7 +48,7 @@ func extractRustDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "type_item", "const_item", "static_item":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -57,7 +57,7 @@ func extractRustDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "macro_definition":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -69,18 +69,18 @@ func extractRustDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 			// Determine the impl target type.
 			typeNode := n.ChildByFieldName("type")
 			typeName := ""
-			if typeNode != nil {
+			if !typeNode.IsNull() {
 				typeName = string(src[typeNode.StartByte():typeNode.EndByte()])
 			}
 			// Walk the impl body with the type context.
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), typeName, depth+1)
 				}
 			}
 			return
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), implType, depth+1)
 		}
 	}
@@ -89,13 +89,13 @@ func extractRustDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 }
 
 // isRustPub checks if a Rust item has the `pub` visibility modifier.
-func isRustPub(n *sitter.Node, src []byte) bool {
-	if n == nil {
+func isRustPub(n sitter.Node, src []byte) bool {
+	if n.IsNull() {
 		return false
 	}
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		ct := child.Type()
@@ -117,7 +117,7 @@ type RustParser struct {
 
 // NewRustParser creates a ready-to-use RustParser.
 func NewRustParser() *RustParser {
-	return &RustParser{language: rust.GetLanguage()}
+	return &RustParser{language: sitter.NewLanguage(rust.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -130,7 +130,7 @@ func (p *RustParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -214,21 +214,21 @@ func (p *RustParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 // traits, type aliases, macros, and impl methods with proper qualification.
 func (p *RustParser) extractAllDeclarations(
 	g *graph.Graph,
-	root *sitter.Node,
+	root sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
 	declInfo map[string]declMeta,
 ) {
-	var walk func(n *sitter.Node, implType string)
-	walk = func(n *sitter.Node, implType string) {
-		if n == nil {
+	var walk func(n sitter.Node, implType string)
+	walk = func(n sitter.Node, implType string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "function_item":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -259,7 +259,7 @@ func (p *RustParser) extractAllDeclarations(
 
 		case "struct_item":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -277,7 +277,7 @@ func (p *RustParser) extractAllDeclarations(
 
 		case "enum_item":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -299,21 +299,21 @@ func (p *RustParser) extractAllDeclarations(
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 			// Walk enum_variant_list to emit individual variant nodes.
 			enumPub := isRustPub(n, src)
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				vl := n.Child(i)
-				if vl == nil || vl.Type() != "enum_variant_list" {
+				if vl.IsNull() || vl.Type() != "enum_variant_list" {
 					continue
 				}
-				for j := 0; j < int(vl.ChildCount()); j++ {
+				for j := uint32(0); j < vl.ChildCount(); j++ {
 					v := vl.Child(j)
-					if v == nil || v.Type() != "enum_variant" {
+					if v.IsNull() || v.Type() != "enum_variant" {
 						continue
 					}
 					vNameNode := v.ChildByFieldName("name")
-					if vNameNode == nil {
+					if vNameNode.IsNull() {
 						vNameNode = firstChildOfType(v, "identifier")
 					}
-					if vNameNode == nil {
+					if vNameNode.IsNull() {
 						continue
 					}
 					variantName := string(src[vNameNode.StartByte():vNameNode.EndByte()])
@@ -339,7 +339,7 @@ func (p *RustParser) extractAllDeclarations(
 
 		case "trait_item":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -357,7 +357,7 @@ func (p *RustParser) extractAllDeclarations(
 
 		case "type_item":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -380,7 +380,7 @@ func (p *RustParser) extractAllDeclarations(
 
 		case "const_item", "static_item":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -407,7 +407,7 @@ func (p *RustParser) extractAllDeclarations(
 
 		case "macro_definition":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -430,7 +430,7 @@ func (p *RustParser) extractAllDeclarations(
 
 		case "mod_item":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -449,18 +449,18 @@ func (p *RustParser) extractAllDeclarations(
 			// Determine the type being implemented.
 			typeNode := n.ChildByFieldName("type")
 			typeName := ""
-			if typeNode != nil {
+			if !typeNode.IsNull() {
 				typeName = string(src[typeNode.StartByte():typeNode.EndByte()])
 			}
 			// Walk body with type context.
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), typeName)
 				}
 			}
 			return
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), implType)
 		}
 	}
@@ -469,7 +469,7 @@ func (p *RustParser) extractAllDeclarations(
 
 // collectRustCallSites performs a depth-first AST walk to collect call sites
 // with function-level caller resolution.
-func collectRustCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectRustCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{
 			"impl_item": true,
@@ -480,33 +480,33 @@ func collectRustCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node,
 		CallTypes: map[string]bool{
 			"call_expression": true,
 		},
-		NameExtractor: func(n *sitter.Node, src []byte) string {
+		NameExtractor: func(n sitter.Node, src []byte) string {
 			if n.Type() == "impl_item" {
 				// For impl blocks, the "class" name is the type being implemented.
-				if typeNode := n.ChildByFieldName("type"); typeNode != nil {
+				if typeNode := n.ChildByFieldName("type"); !typeNode.IsNull() {
 					return string(src[typeNode.StartByte():typeNode.EndByte()])
 				}
 				return ""
 			}
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				return string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
 			return ""
 		},
-		CalleeExtractor: func(n *sitter.Node, src []byte) string {
+		CalleeExtractor: func(n sitter.Node, src []byte) string {
 			fn := n.ChildByFieldName("function")
-			if fn == nil {
+			if fn.IsNull() {
 				return ""
 			}
 			switch fn.Type() {
 			case "identifier":
 				return string(src[fn.StartByte():fn.EndByte()])
 			case "field_expression":
-				if field := fn.ChildByFieldName("field"); field != nil {
+				if field := fn.ChildByFieldName("field"); !field.IsNull() {
 					return string(src[field.StartByte():field.EndByte()])
 				}
 			case "scoped_identifier":
-				if nameNode := fn.ChildByFieldName("name"); nameNode != nil {
+				if nameNode := fn.ChildByFieldName("name"); !nameNode.IsNull() {
 					return string(src[nameNode.StartByte():nameNode.EndByte()])
 				}
 			}

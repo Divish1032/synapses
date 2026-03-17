@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"testing"
 
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
@@ -399,7 +400,7 @@ func TestExtractDocComment_WithComment(t *testing.T) {
 // ── extractReceiverType ───────────────────────────────────────────────────────
 
 func TestExtractReceiverType_Nil(t *testing.T) {
-	result := extractReceiverType(nil, nil)
+	result := extractReceiverType(sitter.Node{}, nil)
 	if result != "" {
 		t.Errorf("expected empty for nil receiver, got %q", result)
 	}

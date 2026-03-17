@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/javascript"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/javascript"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -18,7 +18,7 @@ type JavaScriptParser struct {
 
 // NewJavaScriptParser creates a ready-to-use JavaScriptParser.
 func NewJavaScriptParser() *JavaScriptParser {
-	return &JavaScriptParser{language: javascript.GetLanguage()}
+	return &JavaScriptParser{language: sitter.NewLanguage(javascript.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -28,18 +28,18 @@ func (p *JavaScriptParser) Extensions() []string {
 
 // extractJSDeclInfo walks the JavaScript AST and builds a name→declMeta map
 // for all function, class, and method declarations.
-func extractJSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractJSDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
 
-	var walk func(n *sitter.Node, enclosingClass string, depth int)
-	walk = func(n *sitter.Node, enclosingClass string, depth int) {
-		if n == nil || depth > 8 {
+	var walk func(n sitter.Node, enclosingClass string, depth int)
+	walk = func(n sitter.Node, enclosingClass string, depth int) {
+		if n.IsNull() || depth > 8 {
 			return
 		}
 		switch n.Type() {
 		case "function_declaration", "function_expression":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -49,7 +49,7 @@ func extractJSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "method_definition":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if enclosingClass != "" {
@@ -64,7 +64,7 @@ func extractJSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 			}
 		case "class_declaration":
 			className := ""
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[className] = declMeta{
@@ -73,14 +73,14 @@ func extractJSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 			// Walk children with class context for method qualification.
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				walk(n.Child(i), className, depth+1)
 			}
 			return
 		case "variable_declarator":
 			nameNode := n.ChildByFieldName("name")
 			valueNode := n.ChildByFieldName("value")
-			if nameNode != nil && valueNode != nil {
+			if !nameNode.IsNull() && !valueNode.IsNull() {
 				vt := valueNode.Type()
 				if vt == "arrow_function" || vt == "function_expression" {
 					name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -92,7 +92,7 @@ func extractJSDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass, depth+1)
 		}
 	}
@@ -114,7 +114,7 @@ func (p *JavaScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	moduleName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
@@ -295,24 +295,24 @@ func (p *JavaScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 // and creates class-qualified method nodes (ClassName.methodName).
 func (p *JavaScriptParser) extractClassMethods(
 	g *graph.Graph,
-	root *sitter.Node,
+	root sitter.Node,
 	src []byte,
 	filePath, moduleName string,
 	fileNodeID graph.NodeID,
 	declInfo map[string]declMeta,
 ) {
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "class_declaration":
 			className := ""
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				walk(n.Child(i), className)
 			}
 			return
@@ -321,7 +321,7 @@ func (p *JavaScriptParser) extractClassMethods(
 				break
 			}
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -373,9 +373,9 @@ func (p *JavaScriptParser) extractClassMethods(
 			// Name is property_identifier (public) or private_property_identifier (#name).
 			var name string
 			isPrivate := false
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				if child.Type() == "property_identifier" {
@@ -418,7 +418,7 @@ func (p *JavaScriptParser) extractClassMethods(
 				g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -427,7 +427,7 @@ func (p *JavaScriptParser) extractClassMethods(
 
 // collectJSCallSites performs a depth-first AST walk to collect call sites with
 // function-level caller resolution, matching the Go parser's accuracy.
-func collectJSCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectJSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{"class_declaration": true},
 		FuncTypes: map[string]bool{
@@ -437,9 +437,9 @@ func collectJSCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, s
 			"function_expression":  true,
 		},
 		CallTypes: map[string]bool{"call_expression": true},
-		NameExtractor: func(n *sitter.Node, src []byte) string {
+		NameExtractor: func(n sitter.Node, src []byte) string {
 			// For functions/methods: try "name" field first.
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				return string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
 			// For arrow functions assigned to variables, the name is on the parent
@@ -457,9 +457,9 @@ func collectJSCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, s
 
 // jsCalleeExtractor extracts callee names from JS/TS call expressions.
 // Handles: foo(...), obj.method(...), and obj?.method(...).
-func jsCalleeExtractor(n *sitter.Node, src []byte) string {
+func jsCalleeExtractor(n sitter.Node, src []byte) string {
 	fn := n.ChildByFieldName("function")
-	if fn == nil {
+	if fn.IsNull() {
 		return ""
 	}
 	switch fn.Type() {
@@ -467,7 +467,7 @@ func jsCalleeExtractor(n *sitter.Node, src []byte) string {
 		return string(src[fn.StartByte():fn.EndByte()])
 	case "member_expression":
 		prop := fn.ChildByFieldName("property")
-		if prop != nil {
+		if !prop.IsNull() {
 			return string(src[prop.StartByte():prop.EndByte()])
 		}
 	}

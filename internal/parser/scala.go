@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/scala"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/scala"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -18,7 +18,7 @@ type ScalaParser struct {
 
 // NewScalaParser creates a ready-to-use ScalaParser.
 func NewScalaParser() *ScalaParser {
-	return &ScalaParser{language: scala.GetLanguage()}
+	return &ScalaParser{language: sitter.NewLanguage(scala.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -27,17 +27,17 @@ func (p *ScalaParser) Extensions() []string {
 }
 
 // extractScalaDeclInfo performs a pre-pass for metadata.
-func extractScalaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractScalaDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "function_definition":
-			if nameNode := firstChildOfType(n, "identifier"); nameNode != nil {
+			if nameNode := firstChildOfType(n, "identifier"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if enclosingClass != "" {
@@ -51,7 +51,7 @@ func extractScalaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "class_definition", "object_definition", "trait_definition":
-			if nameNode := firstChildOfType(n, "identifier"); nameNode != nil {
+			if nameNode := firstChildOfType(n, "identifier"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -59,15 +59,15 @@ func extractScalaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 				// Walk body with class context.
-				if body := firstChildOfType(n, "template_body"); body != nil {
-					for i := 0; i < int(body.ChildCount()); i++ {
+				if body := firstChildOfType(n, "template_body"); !body.IsNull() {
+					for i := uint32(0); i < body.ChildCount(); i++ {
 						walk(body.Child(i), name)
 					}
 				}
 				return
 			}
 		case "type_definition":
-			if nameNode := firstChildOfType(n, "identifier"); nameNode != nil {
+			if nameNode := firstChildOfType(n, "identifier"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -76,7 +76,7 @@ func extractScalaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "given_definition":
-			if nameNode := firstChildOfType(n, "identifier"); nameNode != nil {
+			if nameNode := firstChildOfType(n, "identifier"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if enclosingClass != "" {
@@ -90,7 +90,7 @@ func extractScalaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 			}
 		case "enum_definition":
 			// Scala 3 enum: enum Color: case Red, case Green, ...
-			if nameNode := firstChildOfType(n, "identifier"); nameNode != nil {
+			if nameNode := firstChildOfType(n, "identifier"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -99,7 +99,7 @@ func extractScalaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -112,7 +112,7 @@ func (p *ScalaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -128,16 +128,16 @@ func (p *ScalaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	declInfo := extractScalaDeclInfo(root, src)
 
 	// --- package declaration ---
-	var walkPackage func(n *sitter.Node)
-	walkPackage = func(n *sitter.Node) {
-		if n == nil {
+	var walkPackage func(n sitter.Node)
+	walkPackage = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "package_clause" {
 			// package_clause → package_identifier (full dotted name)
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				if child.Type() == "package_identifier" {
@@ -154,7 +154,7 @@ func (p *ScalaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walkPackage(n.Child(i))
 		}
 	}
@@ -183,18 +183,18 @@ func (p *ScalaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 
 // extractAllDeclarations walks Scala AST with class qualification.
 func (p *ScalaParser) extractAllDeclarations(
-	g *graph.Graph, root *sitter.Node, src []byte,
+	g *graph.Graph, root sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID, declInfo map[string]declMeta,
 ) {
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "class_definition":
 			nameNode := firstChildOfType(n, "identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -217,8 +217,8 @@ func (p *ScalaParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isExported(name), Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := firstChildOfType(n, "template_body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := firstChildOfType(n, "template_body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -226,7 +226,7 @@ func (p *ScalaParser) extractAllDeclarations(
 
 		case "object_definition":
 			nameNode := firstChildOfType(n, "identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -244,8 +244,8 @@ func (p *ScalaParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isExported(name), Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := firstChildOfType(n, "template_body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := firstChildOfType(n, "template_body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -253,7 +253,7 @@ func (p *ScalaParser) extractAllDeclarations(
 
 		case "trait_definition":
 			nameNode := firstChildOfType(n, "identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -263,8 +263,8 @@ func (p *ScalaParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isExported(name), Metadata: buildLangMeta(declInfo[name]),
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := firstChildOfType(n, "template_body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := firstChildOfType(n, "template_body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -272,7 +272,7 @@ func (p *ScalaParser) extractAllDeclarations(
 
 		case "type_definition":
 			nameNode := firstChildOfType(n, "identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -290,7 +290,7 @@ func (p *ScalaParser) extractAllDeclarations(
 
 		case "function_definition":
 			nameNode := firstChildOfType(n, "identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -323,7 +323,7 @@ func (p *ScalaParser) extractAllDeclarations(
 		case "given_definition":
 			// Scala 3 given instances: given intOrdering: Ordering[Int] = ...
 			nameNode := firstChildOfType(n, "identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -355,7 +355,7 @@ func (p *ScalaParser) extractAllDeclarations(
 			// Scala 3 enum: enum Color: case Red \n case Green
 			// AST: enum_definition → identifier (name) + enum_body → enum_case_definitions → simple_enum_case → identifier
 			nameNode := firstChildOfType(n, "identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			enumName := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -371,19 +371,19 @@ func (p *ScalaParser) extractAllDeclarations(
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: enumNodeID, Type: graph.EdgeDefines})
 			// Walk enum_body → enum_case_definitions → simple_enum_case → identifier
-			if body := firstChildOfType(n, "enum_body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := firstChildOfType(n, "enum_body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					caseDefs := body.Child(i)
-					if caseDefs == nil || caseDefs.Type() != "enum_case_definitions" {
+					if caseDefs.IsNull() || caseDefs.Type() != "enum_case_definitions" {
 						continue
 					}
-					for j := 0; j < int(caseDefs.ChildCount()); j++ {
+					for j := uint32(0); j < caseDefs.ChildCount(); j++ {
 						sc := caseDefs.Child(j)
-						if sc == nil || sc.Type() != "simple_enum_case" {
+						if sc.IsNull() || sc.Type() != "simple_enum_case" {
 							continue
 						}
 						caseNameNode := firstChildOfType(sc, "identifier")
-						if caseNameNode == nil {
+						if caseNameNode.IsNull() {
 							continue
 						}
 						caseName := string(src[caseNameNode.StartByte():caseNameNode.EndByte()])
@@ -404,7 +404,7 @@ func (p *ScalaParser) extractAllDeclarations(
 		case "val_definition", "var_definition":
 			// Capture val/var declarations as function nodes if they're in a class.
 			nameNode := firstChildOfType(n, "identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -424,7 +424,7 @@ func (p *ScalaParser) extractAllDeclarations(
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -432,7 +432,7 @@ func (p *ScalaParser) extractAllDeclarations(
 }
 
 // collectScalaCallSites collects call sites.
-func collectScalaCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectScalaCallSites(g *graph.Graph, lang *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	callQuery := `(call_expression function: (identifier) @callee)`
 	_ = runQuery(lang, root, src, callQuery, func(captures map[string]string, _ int) {
 		callee := captures["callee"]
@@ -445,16 +445,16 @@ func collectScalaCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.N
 
 // hasScalaModifier checks if a Scala declaration node has a specific modifier
 // (e.g. "implicit", "override", "lazy") in its modifiers child.
-func hasScalaModifier(n *sitter.Node, src []byte, modifier string) bool {
-	for i := 0; i < int(n.ChildCount()); i++ {
+func hasScalaModifier(n sitter.Node, src []byte, modifier string) bool {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "modifiers" {
-			for j := 0; j < int(child.ChildCount()); j++ {
+			for j := uint32(0); j < child.ChildCount(); j++ {
 				mod := child.Child(j)
-				if mod != nil && string(src[mod.StartByte():mod.EndByte()]) == modifier {
+				if !mod.IsNull() && string(src[mod.StartByte():mod.EndByte()]) == modifier {
 					return true
 				}
 			}

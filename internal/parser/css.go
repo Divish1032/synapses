@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/css"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/css"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -18,7 +18,7 @@ type CSSParser struct {
 
 // NewCSSParser creates a ready-to-use CSSParser.
 func NewCSSParser() *CSSParser {
-	return &CSSParser{language: css.GetLanguage()}
+	return &CSSParser{language: sitter.NewLanguage(css.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -41,7 +41,7 @@ func (p *CSSParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -55,9 +55,9 @@ func (p *CSSParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 
 	// Walk the entire AST. The recursive walk handles nesting inside
 	// @media, @supports, @layer and any other at-rule blocks automatically.
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 
@@ -78,7 +78,7 @@ func (p *CSSParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			extractCSSAtRule(g, n, src, filePath, fileNodeID)
 		}
 
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
@@ -91,16 +91,16 @@ func (p *CSSParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 // Multiple selectors on one line (.a, .b { }) are both extracted.
 // Selectors nested inside @media, @supports, and @layer blocks are found
 // automatically by the recursive walk.
-func extractCSSRuleSet(g *graph.Graph, n *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func extractCSSRuleSet(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	selectorsNode := firstChildOfType(n, "selectors")
-	if selectorsNode == nil {
+	if selectorsNode.IsNull() {
 		return
 	}
 	line := int(n.StartPoint().Row) + 1
 
-	for i := 0; i < int(selectorsNode.ChildCount()); i++ {
+	for i := uint32(0); i < selectorsNode.ChildCount(); i++ {
 		child := selectorsNode.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		var name string
@@ -138,12 +138,12 @@ func extractCSSRuleSet(g *graph.Graph, n *sitter.Node, src []byte, filePath stri
 
 // extractCSSImport handles an import_statement node, creating an import edge.
 // Supports both @import "file.css" and @import url("file.css").
-func extractCSSImport(g *graph.Graph, n *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func extractCSSImport(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	var importPath string
 
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		switch child.Type() {
@@ -170,12 +170,12 @@ func extractCSSImport(g *graph.Graph, n *sitter.Node, src []byte, filePath strin
 }
 
 // extractCSSKeyframes handles a keyframes_statement node, creating a NodeFunction.
-func extractCSSKeyframes(g *graph.Graph, n *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func extractCSSKeyframes(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	var name string
 
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		switch child.Type() {
@@ -208,13 +208,13 @@ func extractCSSKeyframes(g *graph.Graph, n *sitter.Node, src []byte, filePath st
 //  1. Custom property definition (--var: value) → NodeVariable kind="custom-property"
 //  2. animation / animation-name reference → EdgeCalls to keyframes node
 //  3. var(--name) usage in any property value → EdgeCalls to custom-property node
-func extractCSSDeclaration(g *graph.Graph, n *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func extractCSSDeclaration(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	var propName string
 	propLine := int(n.StartPoint().Row) + 1
 
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "property_name" {
@@ -245,9 +245,9 @@ func extractCSSDeclaration(g *graph.Graph, n *sitter.Node, src []byte, filePath 
 	propLower := strings.ToLower(propName)
 	if propLower == "animation" || propLower == "animation-name" {
 		seenColon := false
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			child := n.Child(i)
-			if child == nil {
+			if child.IsNull() {
 				continue
 			}
 			if child.Type() == ":" {
@@ -273,27 +273,27 @@ func extractCSSDeclaration(g *graph.Graph, n *sitter.Node, src []byte, filePath 
 
 // extractCSSVarRefs walks a node's children looking for call_expression nodes
 // where function_name == "var" and creates EdgeCalls to the referenced custom property.
-func extractCSSVarRefs(g *graph.Graph, n *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
-	if n == nil {
+func extractCSSVarRefs(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	if n.IsNull() {
 		return
 	}
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() != "call_expression" {
 			continue
 		}
 		fnNode := firstChildOfType(child, "function_name")
-		if fnNode == nil {
+		if fnNode.IsNull() {
 			continue
 		}
 		if strings.ToLower(strings.TrimSpace(childText(fnNode, src))) != "var" {
 			continue
 		}
 		argsNode := firstChildOfType(child, "arguments")
-		if argsNode == nil {
+		if argsNode.IsNull() {
 			continue
 		}
 		varRef := strings.Trim(strings.TrimSpace(childText(argsNode, src)), "()")
@@ -314,11 +314,11 @@ func extractCSSVarRefs(g *graph.Graph, n *sitter.Node, src []byte, filePath stri
 
 // extractCSSAtRule handles generic @-rules.
 // Currently handles @font-face (extracts font-family name as NodeVariable).
-func extractCSSAtRule(g *graph.Graph, n *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func extractCSSAtRule(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	var atKeyword string
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "at_keyword" {
@@ -331,24 +331,24 @@ func extractCSSAtRule(g *graph.Graph, n *sitter.Node, src []byte, filePath strin
 		return
 	}
 
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() != "block" && child.Type() != "stylesheet" {
 			continue
 		}
-		for j := 0; j < int(child.ChildCount()); j++ {
+		for j := uint32(0); j < child.ChildCount(); j++ {
 			decl := child.Child(j)
-			if decl == nil || decl.Type() != "declaration" {
+			if decl.IsNull() || decl.Type() != "declaration" {
 				continue
 			}
 			propName := ""
 			var propValue string
-			for k := 0; k < int(decl.ChildCount()); k++ {
+			for k := uint32(0); k < decl.ChildCount(); k++ {
 				dChild := decl.Child(k)
-				if dChild == nil {
+				if dChild.IsNull() {
 					continue
 				}
 				switch dChild.Type() {
@@ -408,14 +408,14 @@ func stripCSSQuotes(s string) string {
 }
 
 // extractCSSURLArg extracts the path from a url() call expression.
-func extractCSSURLArg(callNode *sitter.Node, src []byte) string {
-	if callNode == nil {
+func extractCSSURLArg(callNode sitter.Node, src []byte) string {
+	if callNode.IsNull() {
 		return ""
 	}
-	if args := firstChildOfType(callNode, "arguments"); args != nil {
-		for i := 0; i < int(args.ChildCount()); i++ {
+	if args := firstChildOfType(callNode, "arguments"); !args.IsNull() {
+		for i := uint32(0); i < args.ChildCount(); i++ {
 			child := args.Child(i)
-			if child == nil {
+			if child.IsNull() {
 				continue
 			}
 			if child.Type() == "string_value" {
@@ -427,9 +427,9 @@ func extractCSSURLArg(callNode *sitter.Node, src []byte) string {
 		}
 	}
 
-	for i := 0; i < int(callNode.ChildCount()); i++ {
+	for i := uint32(0); i < callNode.ChildCount(); i++ {
 		child := callNode.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "string_value" {

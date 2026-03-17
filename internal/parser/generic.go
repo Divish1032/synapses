@@ -28,7 +28,7 @@ func newGenericParser() *genericParser {
 			".mdx",   // MDX (Markdown + JSX)
 			".wasm",  // WebAssembly
 
-			// ── Systems (no smacker grammar) ─────────────────────────────────
+			// ── Systems (no dedicated parser) ─────────────────────────────────
 			// NOTE: .c .h .ino → CParser; .cpp .cc .cxx .hpp .hh .hxx .mm → CppParser
 			//       .cs → CSharpParser; .rs → RustParser; .swift → SwiftParser
 			".zig",       // Zig

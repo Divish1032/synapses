@@ -5,20 +5,20 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/c"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/c"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // extractCDeclInfo walks the C AST collecting metadata for function definitions,
 // structs, enums, unions, and typedefs.
-func extractCDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractCDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
@@ -33,7 +33,7 @@ func extractCDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "struct_specifier", "enum_specifier", "union_specifier":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -43,7 +43,7 @@ func extractCDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
@@ -52,25 +52,25 @@ func extractCDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 }
 
 // extractCFuncName extracts the function name from a C function definition.
-func extractCFuncName(n *sitter.Node, src []byte) string {
+func extractCFuncName(n sitter.Node, src []byte) string {
 	declarator := n.ChildByFieldName("declarator")
-	if declarator == nil {
+	if declarator.IsNull() {
 		return ""
 	}
 	// function_declarator → declarator (identifier)
 	if declarator.Type() == "function_declarator" {
 		inner := declarator.ChildByFieldName("declarator")
-		if inner != nil && inner.Type() == "identifier" {
+		if !inner.IsNull() && inner.Type() == "identifier" {
 			return string(src[inner.StartByte():inner.EndByte()])
 		}
 		// Could be pointer_declarator wrapping function_declarator
-		if inner != nil && inner.Type() == "parenthesized_declarator" {
-			for i := 0; i < int(inner.ChildCount()); i++ {
+		if !inner.IsNull() && inner.Type() == "parenthesized_declarator" {
+			for i := uint32(0); i < inner.ChildCount(); i++ {
 				child := inner.Child(i)
-				if child != nil && child.Type() == "pointer_declarator" {
-					for j := 0; j < int(child.ChildCount()); j++ {
+				if !child.IsNull() && child.Type() == "pointer_declarator" {
+					for j := uint32(0); j < child.ChildCount(); j++ {
 						grandchild := child.Child(j)
-						if grandchild != nil && grandchild.Type() == "identifier" {
+						if !grandchild.IsNull() && grandchild.Type() == "identifier" {
 							return string(src[grandchild.StartByte():grandchild.EndByte()])
 						}
 					}
@@ -85,32 +85,32 @@ func extractCFuncName(n *sitter.Node, src []byte) string {
 // condition text if n is nested inside a preproc_ifdef, preproc_if, preproc_else,
 // or preproc_elif block. Returns "" when the node is unconditionally compiled.
 // This lets callers annotate symbols with meta["ifdef"] = "WIN32" etc.
-func extractCIfdefGuard(n *sitter.Node, src []byte) string {
-	if n == nil {
+func extractCIfdefGuard(n sitter.Node, src []byte) string {
+	if n.IsNull() {
 		return ""
 	}
 	cur := n.Parent()
-	for cur != nil {
+	for !cur.IsNull() {
 		switch cur.Type() {
 		case "preproc_ifdef":
 			// #ifdef FOO  — the condition identifier is the 2nd child.
-			for i := 0; i < int(cur.ChildCount()); i++ {
+			for i := uint32(0); i < cur.ChildCount(); i++ {
 				child := cur.Child(i)
-				if child != nil && child.Type() == "identifier" {
+				if !child.IsNull() && child.Type() == "identifier" {
 					return string(src[child.StartByte():child.EndByte()])
 				}
 			}
 		case "preproc_if":
 			// #if EXPR — grab the raw condition text.
-			for i := 0; i < int(cur.ChildCount()); i++ {
+			for i := uint32(0); i < cur.ChildCount(); i++ {
 				child := cur.Child(i)
-				if child != nil && child.Type() == "preproc_expression" {
+				if !child.IsNull() && child.Type() == "preproc_expression" {
 					return string(src[child.StartByte():child.EndByte()])
 				}
 			}
 			// Fallback: second child is usually the expression.
 			if cur.ChildCount() >= 2 {
-				if c2 := cur.Child(1); c2 != nil {
+				if c2 := cur.Child(1); !c2.IsNull() {
 					cond := strings.TrimSpace(string(src[c2.StartByte():c2.EndByte()]))
 					if cond != "" {
 						return cond
@@ -119,19 +119,19 @@ func extractCIfdefGuard(n *sitter.Node, src []byte) string {
 			}
 		case "preproc_else":
 			// #else branch — negate the parent preproc_ifdef/preproc_if condition.
-			if parent := cur.Parent(); parent != nil {
+			if parent := cur.Parent(); !parent.IsNull() {
 				switch parent.Type() {
 				case "preproc_ifdef":
-					for i := 0; i < int(parent.ChildCount()); i++ {
+					for i := uint32(0); i < parent.ChildCount(); i++ {
 						child := parent.Child(i)
-						if child != nil && child.Type() == "identifier" {
+						if !child.IsNull() && child.Type() == "identifier" {
 							return "!" + string(src[child.StartByte():child.EndByte()])
 						}
 					}
 				case "preproc_if":
-					for i := 0; i < int(parent.ChildCount()); i++ {
+					for i := uint32(0); i < parent.ChildCount(); i++ {
 						child := parent.Child(i)
-						if child != nil && child.Type() == "preproc_expression" {
+						if !child.IsNull() && child.Type() == "preproc_expression" {
 							return "!(" + strings.TrimSpace(string(src[child.StartByte():child.EndByte()])) + ")"
 						}
 					}
@@ -139,9 +139,9 @@ func extractCIfdefGuard(n *sitter.Node, src []byte) string {
 			}
 			return "else"
 		case "preproc_elif":
-			for i := 0; i < int(cur.ChildCount()); i++ {
+			for i := uint32(0); i < cur.ChildCount(); i++ {
 				child := cur.Child(i)
-				if child != nil && child.Type() == "preproc_expression" {
+				if !child.IsNull() && child.Type() == "preproc_expression" {
 					return string(src[child.StartByte():child.EndByte()])
 				}
 			}
@@ -152,13 +152,13 @@ func extractCIfdefGuard(n *sitter.Node, src []byte) string {
 }
 
 // isCStatic checks if a C declaration has the `static` storage class specifier.
-func isCStatic(n *sitter.Node, src []byte) bool {
-	if n == nil {
+func isCStatic(n sitter.Node, src []byte) bool {
+	if n.IsNull() {
 		return false
 	}
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "storage_class_specifier" {
@@ -178,7 +178,7 @@ type CParser struct {
 
 // NewCParser creates a ready-to-use CParser.
 func NewCParser() *CParser {
-	return &CParser{language: c.GetLanguage()}
+	return &CParser{language: sitter.NewLanguage(c.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -191,7 +191,7 @@ func (p *CParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -391,9 +391,9 @@ func (p *CParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	// --- typedef declarations ---
 	// Walk the AST so we can inspect the underlying type (struct/enum/union/other)
 	// and set metadata["kind"] accordingly.
-	var walkTypedefs func(n *sitter.Node)
-	walkTypedefs = func(n *sitter.Node) {
-		if n == nil {
+	var walkTypedefs func(n sitter.Node)
+	walkTypedefs = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "type_definition" {
@@ -401,33 +401,33 @@ func (p *CParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			var typedefName string
 			var startLine int
 			typeKind := ""
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				switch child.Type() {
 				case "struct_specifier":
 					// Anonymous struct iff no name field: typedef struct { ... } MyType;
-					if child.ChildByFieldName("name") == nil {
+					if child.ChildByFieldName("name").IsNull() {
 						typeKind = "struct"
 					}
 				case "enum_specifier":
 					// Anonymous enum iff no name field.
-					if child.ChildByFieldName("name") == nil {
+					if child.ChildByFieldName("name").IsNull() {
 						typeKind = "enum"
 					}
 				case "union_specifier":
-					if child.ChildByFieldName("name") == nil {
+					if child.ChildByFieldName("name").IsNull() {
 						typeKind = "union"
 					}
 				case "function_declarator":
 					// typedef int (*callback_fn)(int x, int y);
 					// function_declarator → parenthesized_declarator → pointer_declarator → type_identifier
 					typeKind = "function_pointer"
-					if pd := firstChildOfType(child, "parenthesized_declarator"); pd != nil {
-						if ptr := firstChildOfType(pd, "pointer_declarator"); ptr != nil {
-							if ti := firstChildOfType(ptr, "type_identifier"); ti != nil {
+					if pd := firstChildOfType(child, "parenthesized_declarator"); !pd.IsNull() {
+						if ptr := firstChildOfType(pd, "pointer_declarator"); !ptr.IsNull() {
+							if ti := firstChildOfType(ptr, "type_identifier"); !ti.IsNull() {
 								typedefName = string(src[ti.StartByte():ti.EndByte()])
 								startLine = int(ti.StartPoint().Row) + 1
 							}
@@ -459,7 +459,7 @@ func (p *CParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walkTypedefs(n.Child(i))
 		}
 	}
@@ -522,17 +522,17 @@ func (p *CParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 }
 
 // collectCCallSites performs function-level call site collection for C.
-func collectCCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectCCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{}, // C has no classes
 		FuncTypes:  map[string]bool{"function_definition": true},
 		CallTypes:  map[string]bool{"call_expression": true},
-		NameExtractor: func(n *sitter.Node, src []byte) string {
+		NameExtractor: func(n sitter.Node, src []byte) string {
 			return extractCFuncName(n, src)
 		},
-		CalleeExtractor: func(n *sitter.Node, src []byte) string {
+		CalleeExtractor: func(n sitter.Node, src []byte) string {
 			fn := n.ChildByFieldName("function")
-			if fn != nil && fn.Type() == "identifier" {
+			if !fn.IsNull() && fn.Type() == "identifier" {
 				return string(src[fn.StartByte():fn.EndByte()])
 			}
 			return ""

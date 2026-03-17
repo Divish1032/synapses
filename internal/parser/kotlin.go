@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/kotlin"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/kotlin"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -18,7 +18,7 @@ type KotlinParser struct {
 
 // NewKotlinParser creates a ready-to-use KotlinParser.
 func NewKotlinParser() *KotlinParser {
-	return &KotlinParser{language: kotlin.GetLanguage()}
+	return &KotlinParser{language: sitter.NewLanguage(kotlin.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -27,20 +27,23 @@ func (p *KotlinParser) Extensions() []string {
 }
 
 // extractKotlinDeclInfo performs a pre-pass to collect metadata.
-func extractKotlinDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractKotlinDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "function_declaration":
-			if nameNode := firstChildOfType(n, "simple_identifier"); nameNode != nil {
+			if nameNode := firstChildOfType(n, "simple_identifier"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
-				if enclosingClass != "" {
+				// Check for extension function receiver type.
+				if recv := extractKotlinReceiverType(n, src); recv != "" {
+					qualName = recv + "." + name
+				} else if enclosingClass != "" {
 					qualName = enclosingClass + "." + name
 				}
 				sl := int(n.StartPoint().Row) + 1
@@ -52,11 +55,11 @@ func extractKotlinDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 			}
 		case "class_declaration", "object_declaration":
 			className := ""
-			if nameNode := firstChildOfType(n, "type_identifier"); nameNode != nil {
+			if nameNode := firstChildOfType(n, "type_identifier"); !nameNode.IsNull() {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
 			if className == "" {
-				if nameNode := firstChildOfType(n, "simple_identifier"); nameNode != nil {
+				if nameNode := firstChildOfType(n, "simple_identifier"); !nameNode.IsNull() {
 					className = string(src[nameNode.StartByte():nameNode.EndByte()])
 				}
 			}
@@ -68,14 +71,14 @@ func extractKotlinDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 			// Walk body.
-			if body := firstChildOfType(n, "class_body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := firstChildOfType(n, "class_body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), className)
 				}
 			}
 			return
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -85,10 +88,10 @@ func extractKotlinDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 
 // isKotlinInterface checks if a class_declaration is actually an interface
 // by looking for the "interface" keyword token among its children.
-func isKotlinInterface(n *sitter.Node, src []byte) bool {
-	for i := 0; i < int(n.ChildCount()); i++ {
+func isKotlinInterface(n sitter.Node, src []byte) bool {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		text := string(src[child.StartByte():child.EndByte()])
@@ -104,10 +107,10 @@ func isKotlinInterface(n *sitter.Node, src []byte) bool {
 }
 
 // isKotlinEnum checks for "enum" keyword.
-func isKotlinEnum(n *sitter.Node, src []byte) bool {
-	for i := 0; i < int(n.ChildCount()); i++ {
+func isKotlinEnum(n sitter.Node, src []byte) bool {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		text := string(src[child.StartByte():child.EndByte()])
@@ -122,10 +125,10 @@ func isKotlinEnum(n *sitter.Node, src []byte) bool {
 }
 
 // isKotlinData checks for "data" keyword.
-func isKotlinData(n *sitter.Node, src []byte) bool {
-	for i := 0; i < int(n.ChildCount()); i++ {
+func isKotlinData(n sitter.Node, src []byte) bool {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		text := string(src[child.StartByte():child.EndByte()])
@@ -140,10 +143,10 @@ func isKotlinData(n *sitter.Node, src []byte) bool {
 }
 
 // isKotlinSealed checks for "sealed" keyword.
-func isKotlinSealed(n *sitter.Node, src []byte) bool {
-	for i := 0; i < int(n.ChildCount()); i++ {
+func isKotlinSealed(n sitter.Node, src []byte) bool {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		text := string(src[child.StartByte():child.EndByte()])
@@ -161,18 +164,25 @@ func isKotlinSealed(n *sitter.Node, src []byte) bool {
 // function declaration (e.g. `fun String.foo()` → "String"), or "" if none.
 // In the Kotlin tree-sitter grammar, the receiver type is a child of function_declaration
 // whose type is "type_reference" and appears before the "simple_identifier" name node.
-func extractKotlinReceiverType(n *sitter.Node, src []byte) string {
+func extractKotlinReceiverType(n sitter.Node, src []byte) string {
 	// Walk children of function_declaration in order.
-	// If we see a type_reference (or nullable_type) BEFORE the simple_identifier,
+	// If we see a receiver type BEFORE the simple_identifier,
 	// it is the receiver type.
-	for i := 0; i < int(n.ChildCount()); i++ {
+	//
+	// Old grammar: type_reference / nullable_type / user_type appear directly.
+	// New grammar (go-sitter-forest): a dedicated "receiver_type" wrapper node
+	// contains the user_type / nullable_type child.
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		switch child.Type() {
+		case "receiver_type":
+			// New grammar: unwrap the receiver_type node.
+			return extractSimpleTypeName(child, src)
 		case "type_reference", "nullable_type", "user_type":
-			// This is a receiver type — extract the simple name.
+			// Old grammar: receiver type appears directly.
 			return extractSimpleTypeName(child, src)
 		case "simple_identifier":
 			// Reached the function name without seeing a receiver type.
@@ -183,12 +193,12 @@ func extractKotlinReceiverType(n *sitter.Node, src []byte) string {
 }
 
 // extractSimpleTypeName extracts the base type name from a type node.
-func extractSimpleTypeName(n *sitter.Node, src []byte) string {
-	if n == nil {
+func extractSimpleTypeName(n sitter.Node, src []byte) string {
+	if n.IsNull() {
 		return ""
 	}
 	// For user_type: contains type_identifier children.
-	if ident := firstChildOfType(n, "type_identifier"); ident != nil {
+	if ident := firstChildOfType(n, "type_identifier"); !ident.IsNull() {
 		return string(src[ident.StartByte():ident.EndByte()])
 	}
 	// For simple type_reference: the text itself may be the identifier.
@@ -207,7 +217,7 @@ func (p *KotlinParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -245,18 +255,18 @@ func (p *KotlinParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 
 // extractAllDeclarations walks the Kotlin AST.
 func (p *KotlinParser) extractAllDeclarations(
-	g *graph.Graph, root *sitter.Node, src []byte,
+	g *graph.Graph, root sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID, declInfo map[string]declMeta,
 ) {
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "class_declaration":
 			nameNode := firstChildOfType(n, "type_identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -286,14 +296,14 @@ func (p *KotlinParser) extractAllDeclarations(
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 			// Walk primary_constructor for val/var constructor parameter properties.
-			if ctor := firstChildOfType(n, "primary_constructor"); ctor != nil {
-				for i := 0; i < int(ctor.ChildCount()); i++ {
+			if ctor := firstChildOfType(n, "primary_constructor"); !ctor.IsNull() {
+				for i := uint32(0); i < ctor.ChildCount(); i++ {
 					walk(ctor.Child(i), name)
 				}
 			}
 			// Walk body.
-			if body := firstChildOfType(n, "class_body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := firstChildOfType(n, "class_body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -306,9 +316,9 @@ func (p *KotlinParser) extractAllDeclarations(
 				break
 			}
 			hasBinding := false
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child != nil && child.Type() == "binding_pattern_kind" {
+				if !child.IsNull() && child.Type() == "binding_pattern_kind" {
 					hasBinding = true
 					break
 				}
@@ -317,7 +327,7 @@ func (p *KotlinParser) extractAllDeclarations(
 				break
 			}
 			nameNode := firstChildOfType(n, "simple_identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			propName := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -328,9 +338,9 @@ func (p *KotlinParser) extractAllDeclarations(
 			}
 			// Detect val vs var from binding_pattern_kind child text.
 			kind := "val"
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				if child.Type() == "binding_pattern_kind" {
@@ -359,8 +369,8 @@ func (p *KotlinParser) extractAllDeclarations(
 			if enclosingClass == "" {
 				break
 			}
-			if body := firstChildOfType(n, "class_body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := firstChildOfType(n, "class_body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), enclosingClass)
 				}
 			}
@@ -368,7 +378,7 @@ func (p *KotlinParser) extractAllDeclarations(
 
 		case "object_declaration":
 			nameNode := firstChildOfType(n, "type_identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -383,8 +393,8 @@ func (p *KotlinParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isExported(name), Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := firstChildOfType(n, "class_body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := firstChildOfType(n, "class_body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -392,7 +402,7 @@ func (p *KotlinParser) extractAllDeclarations(
 
 		case "function_declaration":
 			nameNode := firstChildOfType(n, "simple_identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -442,7 +452,7 @@ func (p *KotlinParser) extractAllDeclarations(
 		case "type_alias":
 			// typealias Callback = (String) -> Unit
 			nameNode := firstChildOfType(n, "type_identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -464,14 +474,14 @@ func (p *KotlinParser) extractAllDeclarations(
 			}
 			// The property name is: variable_declaration → simple_identifier
 			var propName string
-			if varDecl := firstChildOfType(n, "variable_declaration"); varDecl != nil {
-				if nameNode := firstChildOfType(varDecl, "simple_identifier"); nameNode != nil {
+			if varDecl := firstChildOfType(n, "variable_declaration"); !varDecl.IsNull() {
+				if nameNode := firstChildOfType(varDecl, "simple_identifier"); !nameNode.IsNull() {
 					propName = string(src[nameNode.StartByte():nameNode.EndByte()])
 				}
 			}
 			// Fallback: direct simple_identifier child (multivar_declaration pattern)
 			if propName == "" {
-				if nameNode := firstChildOfType(n, "simple_identifier"); nameNode != nil {
+				if nameNode := firstChildOfType(n, "simple_identifier"); !nameNode.IsNull() {
 					propName = string(src[nameNode.StartByte():nameNode.EndByte()])
 				}
 			}
@@ -485,9 +495,9 @@ func (p *KotlinParser) extractAllDeclarations(
 			}
 			// Determine val vs var from first child keyword.
 			kind := "val"
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				text := string(src[child.StartByte():child.EndByte()])
@@ -515,7 +525,7 @@ func (p *KotlinParser) extractAllDeclarations(
 				g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -523,7 +533,7 @@ func (p *KotlinParser) extractAllDeclarations(
 }
 
 // collectKotlinCallSites collects call sites.
-func collectKotlinCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectKotlinCallSites(g *graph.Graph, lang *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	callQuery := `(call_expression (simple_identifier) @callee)`
 	_ = runQuery(lang, root, src, callQuery, func(captures map[string]string, _ int) {
 		callee := captures["callee"]

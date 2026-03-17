@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/php"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/php"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -18,7 +18,7 @@ type PHPParser struct {
 
 // NewPHPParser creates a ready-to-use PHPParser.
 func NewPHPParser() *PHPParser {
-	return &PHPParser{language: php.GetLanguage()}
+	return &PHPParser{language: sitter.NewLanguage(php.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -27,17 +27,17 @@ func (p *PHPParser) Extensions() []string {
 }
 
 // extractPHPDeclInfo collects metadata for PHP declarations.
-func extractPHPDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractPHPDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "method_declaration", "function_definition":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if enclosingClass != "" {
@@ -51,22 +51,22 @@ func extractPHPDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "class_declaration", "interface_declaration", "trait_declaration", "enum_declaration":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
 					Doc:       extractDocMulti(lines, sl, "//"),
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
-				if body := n.ChildByFieldName("body"); body != nil {
-					for i := 0; i < int(body.ChildCount()); i++ {
+				if body := n.ChildByFieldName("body"); !body.IsNull() {
+					for i := uint32(0); i < body.ChildCount(); i++ {
 						walk(body.Child(i), name)
 					}
 				}
 				return
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -79,7 +79,7 @@ func (p *PHPParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -132,27 +132,27 @@ func (p *PHPParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 
 // extractAllDeclarations walks PHP AST with class qualification.
 func (p *PHPParser) extractAllDeclarations(
-	g *graph.Graph, root *sitter.Node, src []byte,
+	g *graph.Graph, root sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID, declInfo map[string]declMeta,
 ) {
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "class_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
 			nodeID := g.MakeNodeID(filePath, name)
 			meta := buildLangMeta(declInfo[name])
 			// Detect abstract/final class modifiers.
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				if child.Type() == "class_modifier" || child.Type() == "abstract_modifier" {
@@ -175,8 +175,8 @@ func (p *PHPParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isExported(name), Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -184,7 +184,7 @@ func (p *PHPParser) extractAllDeclarations(
 
 		case "interface_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -194,8 +194,8 @@ func (p *PHPParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isExported(name), Metadata: buildLangMeta(declInfo[name]),
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -203,7 +203,7 @@ func (p *PHPParser) extractAllDeclarations(
 
 		case "trait_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -218,8 +218,8 @@ func (p *PHPParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isExported(name), Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -227,7 +227,7 @@ func (p *PHPParser) extractAllDeclarations(
 
 		case "enum_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -242,8 +242,8 @@ func (p *PHPParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isExported(name), Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -256,11 +256,11 @@ func (p *PHPParser) extractAllDeclarations(
 				break
 			}
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				// Fallback: find first "name" type child.
 				nameNode = firstChildOfType(n, "name")
 			}
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			caseName := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -282,7 +282,7 @@ func (p *PHPParser) extractAllDeclarations(
 
 		case "function_definition":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -295,7 +295,7 @@ func (p *PHPParser) extractAllDeclarations(
 
 		case "method_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -322,16 +322,16 @@ func (p *PHPParser) extractAllDeclarations(
 				break
 			}
 			// Walk children to find const_element nodes with name
-			for k := 0; k < int(n.ChildCount()); k++ {
+			for k := uint32(0); k < n.ChildCount(); k++ {
 				elem := n.Child(k)
-				if elem == nil {
+				if elem.IsNull() {
 					continue
 				}
 				// const_element has a name child (identifier) and value
 				var constName string
-				for m := 0; m < int(elem.ChildCount()); m++ {
+				for m := uint32(0); m < elem.ChildCount(); m++ {
 					c := elem.Child(m)
-					if c == nil {
+					if c.IsNull() {
 						continue
 					}
 					if c.Type() == "name" || c.Type() == "identifier" {
@@ -369,9 +369,9 @@ func (p *PHPParser) extractAllDeclarations(
 				break
 			}
 			// property_declaration contains property_element children with variable_name
-			for k := 0; k < int(n.ChildCount()); k++ {
+			for k := uint32(0); k < n.ChildCount(); k++ {
 				elem := n.Child(k)
-				if elem == nil {
+				if elem.IsNull() {
 					continue
 				}
 				if elem.Type() == "property_element" || elem.Type() == "variable_name" {
@@ -381,9 +381,9 @@ func (p *PHPParser) extractAllDeclarations(
 						// Strip leading $
 						propName = strings.TrimPrefix(string(src[elem.StartByte():elem.EndByte()]), "$")
 					} else {
-						for m := 0; m < int(elem.ChildCount()); m++ {
+						for m := uint32(0); m < elem.ChildCount(); m++ {
 							c := elem.Child(m)
-							if c != nil && c.Type() == "variable_name" {
+							if !c.IsNull() && c.Type() == "variable_name" {
 								propName = strings.TrimPrefix(string(src[c.StartByte():c.EndByte()]), "$")
 								break
 							}
@@ -408,7 +408,7 @@ func (p *PHPParser) extractAllDeclarations(
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -416,7 +416,7 @@ func (p *PHPParser) extractAllDeclarations(
 }
 
 // collectPHPCallSites collects call sites.
-func collectPHPCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectPHPCallSites(g *graph.Graph, lang *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	// Function calls: foo(...)
 	callQuery := `(function_call_expression function: (name) @callee)`
 	_ = runQuery(lang, root, src, callQuery, func(captures map[string]string, _ int) {

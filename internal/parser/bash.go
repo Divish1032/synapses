@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/bash"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/bash"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -18,7 +18,7 @@ type BashParser struct {
 
 // NewBashParser creates a ready-to-use BashParser.
 func NewBashParser() *BashParser {
-	return &BashParser{language: bash.GetLanguage()}
+	return &BashParser{language: sitter.NewLanguage(bash.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -28,12 +28,12 @@ func (p *BashParser) Extensions() []string {
 
 // extractBashDeclInfo performs a pre-pass collecting metadata for function
 // definitions. It extracts doc comments (# lines above functions) and line counts.
-func extractBashDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractBashDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "function_definition" {
@@ -46,7 +46,7 @@ func extractBashDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
@@ -57,13 +57,13 @@ func extractBashDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 // extractBashFuncName extracts the function name from a function_definition node.
 // Handles both `function foo() { ... }` and `foo() { ... }` styles.
 // The bash grammar uses the "name" field for the function name.
-func extractBashFuncName(n *sitter.Node, src []byte) string {
+func extractBashFuncName(n sitter.Node, src []byte) string {
 	// Try the "name" field first (tree-sitter bash grammar uses this).
-	if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+	if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 		return strings.TrimSpace(string(src[nameNode.StartByte():nameNode.EndByte()]))
 	}
 	// Fallback: look for a "word" child (the function name token).
-	if wordNode := firstChildOfType(n, "word"); wordNode != nil {
+	if wordNode := firstChildOfType(n, "word"); !wordNode.IsNull() {
 		return strings.TrimSpace(string(src[wordNode.StartByte():wordNode.EndByte()]))
 	}
 	return ""
@@ -74,7 +74,7 @@ func (p *BashParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -108,12 +108,12 @@ func (p *BashParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 
 // extractFunctions walks the AST extracting function definitions.
 func (p *BashParser) extractFunctions(
-	g *graph.Graph, root *sitter.Node, src []byte,
+	g *graph.Graph, root sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID, declInfo map[string]declMeta,
 ) {
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "function_definition" {
@@ -134,7 +134,7 @@ func (p *BashParser) extractFunctions(
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
@@ -144,12 +144,12 @@ func (p *BashParser) extractFunctions(
 // extractSourceImports walks the AST looking for `source` and `.` commands
 // that import other shell files.
 func (p *BashParser) extractSourceImports(
-	g *graph.Graph, root *sitter.Node, src []byte,
+	g *graph.Graph, root sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID,
 ) {
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "command" {
@@ -172,7 +172,7 @@ func (p *BashParser) extractSourceImports(
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
@@ -184,13 +184,13 @@ func (p *BashParser) extractSourceImports(
 // with command_name "alias" and arguments. We also handle the
 // `variable_assignment` form inside alias commands.
 func (p *BashParser) extractAliases(
-	g *graph.Graph, root *sitter.Node, src []byte,
+	g *graph.Graph, root sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID,
 ) {
 	lines := strings.Split(string(src), "\n")
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "command" {
@@ -198,9 +198,9 @@ func (p *BashParser) extractAliases(
 			if cmdName == "alias" {
 				// Each argument after "alias" is a name=value assignment.
 				// In the bash grammar these appear as children of the command node.
-				for i := 0; i < int(n.ChildCount()); i++ {
+				for i := uint32(0); i < n.ChildCount(); i++ {
 					child := n.Child(i)
-					if child == nil {
+					if child.IsNull() {
 						continue
 					}
 					// Skip the command_name node itself.
@@ -235,7 +235,7 @@ func (p *BashParser) extractAliases(
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
@@ -245,13 +245,13 @@ func (p *BashParser) extractAliases(
 // extractBashCommandName returns the command name from a command node.
 // In the bash grammar, command has a "name" field containing command_name,
 // which itself contains a word child.
-func extractBashCommandName(n *sitter.Node, src []byte) string {
+func extractBashCommandName(n sitter.Node, src []byte) string {
 	// Try field-based access first.
-	if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+	if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 		return strings.TrimSpace(string(src[nameNode.StartByte():nameNode.EndByte()]))
 	}
 	// Fallback: look for command_name child.
-	if cmdNameNode := firstChildOfType(n, "command_name"); cmdNameNode != nil {
+	if cmdNameNode := firstChildOfType(n, "command_name"); !cmdNameNode.IsNull() {
 		return strings.TrimSpace(string(src[cmdNameNode.StartByte():cmdNameNode.EndByte()]))
 	}
 	return ""
@@ -259,11 +259,11 @@ func extractBashCommandName(n *sitter.Node, src []byte) string {
 
 // extractBashFirstArg returns the text of the first argument to a command,
 // skipping the command_name node.
-func extractBashFirstArg(n *sitter.Node, src []byte) string {
+func extractBashFirstArg(n sitter.Node, src []byte) string {
 	seenName := false
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "command_name" {
@@ -283,7 +283,7 @@ func extractBashFirstArg(n *sitter.Node, src []byte) string {
 // collectBashCallSites collects call sites from command invocations within
 // function bodies, with function-level caller resolution.
 func collectBashCallSites(
-	g *graph.Graph, root *sitter.Node, src []byte,
+	g *graph.Graph, root sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID,
 ) {
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
@@ -294,13 +294,13 @@ func collectBashCallSites(
 		CallTypes: map[string]bool{
 			"command": true,
 		},
-		NameExtractor: func(n *sitter.Node, s []byte) string {
+		NameExtractor: func(n sitter.Node, s []byte) string {
 			if n.Type() == "function_definition" {
 				return extractBashFuncName(n, s)
 			}
 			return ""
 		},
-		CalleeExtractor: func(n *sitter.Node, s []byte) string {
+		CalleeExtractor: func(n sitter.Node, s []byte) string {
 			cmdName := extractBashCommandName(n, s)
 			return cmdName
 		},

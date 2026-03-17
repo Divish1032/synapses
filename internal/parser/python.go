@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/python"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/python"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -14,18 +14,18 @@ import (
 // extractPythonDeclInfo walks the Python AST and builds a name→declMeta map
 // for function_definition and class_definition nodes at any nesting depth.
 // Method names are class-qualified (ClassName.method_name).
-func extractPythonDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractPythonDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
 
-	var walk func(n *sitter.Node, enclosingClass string, depth int)
-	walk = func(n *sitter.Node, enclosingClass string, depth int) {
-		if n == nil || depth > 8 {
+	var walk func(n sitter.Node, enclosingClass string, depth int)
+	walk = func(n sitter.Node, enclosingClass string, depth int) {
+		if n.IsNull() || depth > 8 {
 			return
 		}
 		switch n.Type() {
 		case "function_definition":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if enclosingClass != "" {
@@ -45,7 +45,7 @@ func extractPythonDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 			}
 		case "class_definition":
 			className := ""
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				doc := extractPythonDocstring(lines, sl)
@@ -59,16 +59,16 @@ func extractPythonDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 			}
 			// Walk children with class context.
 			body := n.ChildByFieldName("body")
-			if body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), className, depth+1)
 				}
 			}
 			return
 		case "decorated_definition":
-			for j := 0; j < int(n.ChildCount()); j++ {
+			for j := uint32(0); j < n.ChildCount(); j++ {
 				inner := n.Child(j)
-				if inner == nil {
+				if inner.IsNull() {
 					continue
 				}
 				if inner.Type() == "function_definition" || inner.Type() == "class_definition" {
@@ -77,7 +77,7 @@ func extractPythonDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 			}
 			return
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass, depth+1)
 		}
 	}
@@ -92,7 +92,7 @@ type PythonParser struct {
 
 // NewPythonParser creates a ready-to-use PythonParser.
 func NewPythonParser() *PythonParser {
-	return &PythonParser{language: python.GetLanguage()}
+	return &PythonParser{language: sitter.NewLanguage(python.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -106,7 +106,7 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	moduleName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
@@ -194,20 +194,20 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 
 	// --- Module-level ALL_CAPS constants (e.g. MAX_RETRIES = 3, DEFAULT_TIMEOUT = 30) ---
 	// Walk top-level assignment nodes; if the name is ALL_CAPS, emit a const node.
-	var walkPyConst func(n *sitter.Node)
-	walkPyConst = func(n *sitter.Node) {
-		if n == nil {
+	var walkPyConst func(n sitter.Node)
+	walkPyConst = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		// Only look at top-level: children of the module root.
 		if n.Type() == "expression_statement" {
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil || child.Type() != "assignment" {
+				if child.IsNull() || child.Type() != "assignment" {
 					continue
 				}
 				lhs := child.ChildByFieldName("left")
-				if lhs == nil {
+				if lhs.IsNull() {
 					continue
 				}
 				var name string
@@ -237,7 +237,7 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		}
 	}
 	// Only walk direct children of the module root (depth=1 only).
-	for i := 0; i < int(root.ChildCount()); i++ {
+	for i := uint32(0); i < root.ChildCount(); i++ {
 		walkPyConst(root.Child(i))
 	}
 
@@ -251,7 +251,7 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 // with class-qualified names for methods inside class bodies.
 func (p *PythonParser) extractFunctionsAndMethods(
 	g *graph.Graph,
-	root *sitter.Node,
+	root sitter.Node,
 	src []byte,
 	filePath, moduleName string,
 	fileNodeID graph.NodeID,
@@ -259,9 +259,9 @@ func (p *PythonParser) extractFunctionsAndMethods(
 ) {
 	// emitFunc creates a function/method node for a function_definition node,
 	// applying any decorator metadata (property, classmethod, staticmethod).
-	emitFunc := func(n *sitter.Node, enclosingClass string, decorators []string) {
+	emitFunc := func(n sitter.Node, enclosingClass string, decorators []string) {
 		nameNode := n.ChildByFieldName("name")
-		if nameNode == nil {
+		if nameNode.IsNull() {
 			return
 		}
 		name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -328,20 +328,20 @@ func (p *PythonParser) extractFunctionsAndMethods(
 		}
 	}
 
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "class_definition":
 			className := ""
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
 			body := n.ChildByFieldName("body")
-			if body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), className)
 				}
 			}
@@ -350,17 +350,17 @@ func (p *PythonParser) extractFunctionsAndMethods(
 			// Type-annotated class fields: name: Type (= value)?
 			// AST: expression_statement → assignment → identifier, ":", type[, "=", value]
 			if enclosingClass != "" {
-				for i := 0; i < int(n.ChildCount()); i++ {
+				for i := uint32(0); i < n.ChildCount(); i++ {
 					assign := n.Child(i)
-					if assign == nil || assign.Type() != "assignment" {
+					if assign.IsNull() || assign.Type() != "assignment" {
 						continue
 					}
 					// Must have a "type" child to be a type-annotated field.
-					if firstChildOfType(assign, "type") == nil {
+					if firstChildOfType(assign, "type").IsNull() {
 						continue
 					}
 					nameNode := firstChildOfType(assign, "identifier")
-					if nameNode == nil {
+					if nameNode.IsNull() {
 						continue
 					}
 					fieldName := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -386,9 +386,9 @@ func (p *PythonParser) extractFunctionsAndMethods(
 		case "decorated_definition":
 			// Collect decorator names then dispatch to the inner definition.
 			var decorators []string
-			for j := 0; j < int(n.ChildCount()); j++ {
+			for j := uint32(0); j < n.ChildCount(); j++ {
 				child := n.Child(j)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				if child.Type() == "decorator" {
@@ -399,9 +399,9 @@ func (p *PythonParser) extractFunctionsAndMethods(
 					decorators = append(decorators, strings.TrimSpace(decText))
 				}
 			}
-			for j := 0; j < int(n.ChildCount()); j++ {
+			for j := uint32(0); j < n.ChildCount(); j++ {
 				child := n.Child(j)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				if child.Type() == "function_definition" {
@@ -414,7 +414,7 @@ func (p *PythonParser) extractFunctionsAndMethods(
 		case "function_definition":
 			emitFunc(n, enclosingClass, nil)
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -423,7 +423,7 @@ func (p *PythonParser) extractFunctionsAndMethods(
 
 // collectPythonCallSites performs a depth-first AST walk to collect call sites
 // with function-level caller resolution.
-func collectPythonCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, src []byte, filePath, _ string) {
+func collectPythonCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath, _ string) {
 	fileNodeID := g.MakeNodeID(filePath, filePath)
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{"class_definition": true},
@@ -432,15 +432,15 @@ func collectPythonCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Nod
 			"decorated_definition": false, // walk through decorators, not into them
 		},
 		CallTypes: map[string]bool{"call": true},
-		NameExtractor: func(n *sitter.Node, src []byte) string {
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+		NameExtractor: func(n sitter.Node, src []byte) string {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				return string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
 			return ""
 		},
-		CalleeExtractor: func(n *sitter.Node, src []byte) string {
+		CalleeExtractor: func(n sitter.Node, src []byte) string {
 			fn := n.ChildByFieldName("function")
-			if fn == nil {
+			if fn.IsNull() {
 				return ""
 			}
 			switch fn.Type() {
@@ -448,7 +448,7 @@ func collectPythonCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Nod
 				return string(src[fn.StartByte():fn.EndByte()])
 			case "attribute":
 				attr := fn.ChildByFieldName("attribute")
-				if attr != nil {
+				if !attr.IsNull() {
 					return string(src[attr.StartByte():attr.EndByte()])
 				}
 			}

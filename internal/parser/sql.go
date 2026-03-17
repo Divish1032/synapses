@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/sql"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/sql"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -21,7 +21,7 @@ type SQLParser struct {
 
 // NewSQLParser creates a ready-to-use SQLParser.
 func NewSQLParser() *SQLParser {
-	return &SQLParser{language: sql.GetLanguage()}
+	return &SQLParser{language: sitter.NewLanguage(sql.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -40,7 +40,7 @@ func (p *SQLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -63,9 +63,9 @@ func (p *SQLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	// and stop recursing into that subtree (the entity has been captured).
 	// We skip the root node itself (depth 0) since its text spans the entire
 	// file and would greedily match only the first CREATE statement.
-	var walk func(n *sitter.Node, depth int)
-	walk = func(n *sitter.Node, depth int) {
-		if n == nil || depth > 50 {
+	var walk func(n sitter.Node, depth int)
+	walk = func(n sitter.Node, depth int) {
+		if n.IsNull() || depth > 50 {
 			return
 		}
 
@@ -109,7 +109,7 @@ func (p *SQLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			}
 		}
 
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), depth+1)
 		}
 	}

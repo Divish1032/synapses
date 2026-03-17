@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/elm"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/elm"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -18,7 +18,7 @@ type ElmParser struct {
 
 // NewElmParser creates a ready-to-use ElmParser.
 func NewElmParser() *ElmParser {
-	return &ElmParser{language: elm.GetLanguage()}
+	return &ElmParser{language: sitter.NewLanguage(elm.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -28,7 +28,7 @@ func (p *ElmParser) Extensions() []string {
 
 // extractElmDeclInfo does a pre-pass to collect metadata (doc comments,
 // type annotations, line counts) for Elm declarations.
-func extractElmDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractElmDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
 
@@ -36,9 +36,9 @@ func extractElmDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 	annotations := make(map[string]string) // name → signature text
 	annotationLines := make(map[string]int) // name → 1-indexed start line of type_annotation
 
-	for i := 0; i < int(root.ChildCount()); i++ {
+	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		switch child.Type() {
@@ -164,12 +164,12 @@ func extractElmBlockDoc(lines []string, endIdx int) string {
 
 // extractElmTypeAnnotation extracts the name and full signature from a type_annotation node.
 // Returns (name, signature) where signature is the full annotation text.
-func extractElmTypeAnnotation(n *sitter.Node, src []byte) (string, string) {
+func extractElmTypeAnnotation(n sitter.Node, src []byte) (string, string) {
 	sig := strings.TrimSpace(string(src[n.StartByte():n.EndByte()]))
 	// The name is the first lower_case_identifier child.
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "lower_case_identifier" {
@@ -182,15 +182,15 @@ func extractElmTypeAnnotation(n *sitter.Node, src []byte) (string, string) {
 
 // extractElmValueDeclName extracts the function name from a value_declaration node.
 // The name is the first lower_case_identifier in the function_declaration_left child.
-func extractElmValueDeclName(n *sitter.Node, src []byte) string {
+func extractElmValueDeclName(n sitter.Node, src []byte) string {
 	// Try function_declaration_left first.
-	if fdl := firstChildOfType(n, "function_declaration_left"); fdl != nil {
-		if ident := firstChildOfType(fdl, "lower_case_identifier"); ident != nil {
+	if fdl := firstChildOfType(n, "function_declaration_left"); !fdl.IsNull() {
+		if ident := firstChildOfType(fdl, "lower_case_identifier"); !ident.IsNull() {
 			return string(src[ident.StartByte():ident.EndByte()])
 		}
 	}
 	// Fallback: direct lower_case_identifier (simple value binding).
-	if ident := firstChildOfType(n, "lower_case_identifier"); ident != nil {
+	if ident := firstChildOfType(n, "lower_case_identifier"); !ident.IsNull() {
 		return string(src[ident.StartByte():ident.EndByte()])
 	}
 	return ""
@@ -198,16 +198,16 @@ func extractElmValueDeclName(n *sitter.Node, src []byte) string {
 
 // extractElmTypeName extracts the type name (upper_case_identifier) from a
 // type_alias_declaration or type_declaration node.
-func extractElmTypeName(n *sitter.Node, src []byte) string {
-	if ident := firstChildOfType(n, "upper_case_identifier"); ident != nil {
+func extractElmTypeName(n sitter.Node, src []byte) string {
+	if ident := firstChildOfType(n, "upper_case_identifier"); !ident.IsNull() {
 		return string(src[ident.StartByte():ident.EndByte()])
 	}
 	return ""
 }
 
 // extractElmPortName extracts the port name from a port_annotation node.
-func extractElmPortName(n *sitter.Node, src []byte) string {
-	if ident := firstChildOfType(n, "lower_case_identifier"); ident != nil {
+func extractElmPortName(n sitter.Node, src []byte) string {
+	if ident := firstChildOfType(n, "lower_case_identifier"); !ident.IsNull() {
 		return string(src[ident.StartByte():ident.EndByte()])
 	}
 	return ""
@@ -215,25 +215,25 @@ func extractElmPortName(n *sitter.Node, src []byte) string {
 
 // extractElmModuleName extracts the module name from a module_declaration node.
 // Elm module names can be dotted: "module Html.Attributes exposing (...)".
-func extractElmModuleName(n *sitter.Node, src []byte) string {
+func extractElmModuleName(n sitter.Node, src []byte) string {
 	// The module name is in an upper_case_qid child (qualified identifier).
-	if qid := firstChildOfType(n, "upper_case_qid"); qid != nil {
+	if qid := firstChildOfType(n, "upper_case_qid"); !qid.IsNull() {
 		return string(src[qid.StartByte():qid.EndByte()])
 	}
 	// Fallback: try upper_case_identifier.
-	if ident := firstChildOfType(n, "upper_case_identifier"); ident != nil {
+	if ident := firstChildOfType(n, "upper_case_identifier"); !ident.IsNull() {
 		return string(src[ident.StartByte():ident.EndByte()])
 	}
 	return ""
 }
 
 // extractElmImportName extracts the module name from an import_clause node.
-func extractElmImportName(n *sitter.Node, src []byte) string {
+func extractElmImportName(n sitter.Node, src []byte) string {
 	// import_clause has an upper_case_qid for the module name.
-	if qid := firstChildOfType(n, "upper_case_qid"); qid != nil {
+	if qid := firstChildOfType(n, "upper_case_qid"); !qid.IsNull() {
 		return string(src[qid.StartByte():qid.EndByte()])
 	}
-	if ident := firstChildOfType(n, "upper_case_identifier"); ident != nil {
+	if ident := firstChildOfType(n, "upper_case_identifier"); !ident.IsNull() {
 		return string(src[ident.StartByte():ident.EndByte()])
 	}
 	return ""
@@ -244,7 +244,7 @@ func (p *ElmParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -261,9 +261,9 @@ func (p *ElmParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	// Track type annotations so we can pair them with the next value_declaration.
 	pendingAnnotations := make(map[string]string) // name → signature
 
-	for i := 0; i < int(root.ChildCount()); i++ {
+	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 
@@ -278,7 +278,7 @@ func (p *ElmParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 					}
 					fileNode.Metadata["module"] = moduleName
 					// Extract exposing list if present.
-					if exposing := firstChildOfType(child, "exposing_list"); exposing != nil {
+					if exposing := firstChildOfType(child, "exposing_list"); !exposing.IsNull() {
 						fileNode.Metadata["exposing"] = strings.TrimSpace(string(src[exposing.StartByte():exposing.EndByte()]))
 					}
 				}
@@ -410,7 +410,7 @@ func (p *ElmParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 // collectElmCallSites walks the AST extracting function call expressions
 // and emits EdgeCalls from the enclosing function to the callee.
 func collectElmCallSites(
-	g *graph.Graph, root *sitter.Node, src []byte,
+	g *graph.Graph, root sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID,
 ) {
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
@@ -421,17 +421,17 @@ func collectElmCallSites(
 		CallTypes: map[string]bool{
 			"function_call_expr": true,
 		},
-		NameExtractor: func(n *sitter.Node, s []byte) string {
+		NameExtractor: func(n sitter.Node, s []byte) string {
 			return extractElmValueDeclName(n, s)
 		},
-		CalleeExtractor: func(n *sitter.Node, s []byte) string {
+		CalleeExtractor: func(n sitter.Node, s []byte) string {
 			// function_call_expr: first child is the function being called.
 			// It may be a value_expr, value_qid, or direct identifier.
 			if n.ChildCount() == 0 {
 				return ""
 			}
 			first := n.Child(0)
-			if first == nil {
+			if first.IsNull() {
 				return ""
 			}
 			text := strings.TrimSpace(string(s[first.StartByte():first.EndByte()]))

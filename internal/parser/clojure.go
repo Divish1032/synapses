@@ -10,7 +10,7 @@ import (
 
 // ClojureParser parses Clojure (.clj, .cljs, .cljc, .edn) source files.
 // Used in data engineering, fintech backend systems, and JVM functional programming.
-// Uses regex-based extraction (Clojure is not in smacker/go-tree-sitter).
+// Uses regex-based extraction (Clojure is not in go-tree-sitter).
 //
 // Extracts:
 //   - (defn fn-name [args] body)          → NodeFunction (Exported: true)

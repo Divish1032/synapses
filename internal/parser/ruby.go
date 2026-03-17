@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/ruby"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/ruby"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -18,7 +18,7 @@ type RubyParser struct {
 
 // NewRubyParser creates a ready-to-use RubyParser.
 func NewRubyParser() *RubyParser {
-	return &RubyParser{language: ruby.GetLanguage()}
+	return &RubyParser{language: sitter.NewLanguage(ruby.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -29,17 +29,17 @@ func (p *RubyParser) Extensions() []string {
 }
 
 // extractRubyDeclInfo performs a pre-pass for metadata.
-func extractRubyDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractRubyDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "method", "singleton_method":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if enclosingClass != "" {
@@ -53,7 +53,7 @@ func extractRubyDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "class":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -61,15 +61,15 @@ func extractRubyDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 				// Walk body with class context.
-				if body := firstChildOfType(n, "body_statement"); body != nil {
-					for i := 0; i < int(body.ChildCount()); i++ {
+				if body := firstChildOfType(n, "body_statement"); !body.IsNull() {
+					for i := uint32(0); i < body.ChildCount(); i++ {
 						walk(body.Child(i), name)
 					}
 				}
 				return
 			}
 		case "module":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -78,7 +78,7 @@ func extractRubyDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -91,7 +91,7 @@ func (p *RubyParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -134,18 +134,18 @@ func (p *RubyParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 
 // extractAllDeclarations walks Ruby AST with class qualification.
 func (p *RubyParser) extractAllDeclarations(
-	g *graph.Graph, root *sitter.Node, src []byte,
+	g *graph.Graph, root sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID, declInfo map[string]declMeta,
 ) {
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "class":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -155,8 +155,8 @@ func (p *RubyParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isRubyPublic(name), Metadata: buildLangMeta(declInfo[name]),
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := firstChildOfType(n, "body_statement"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := firstChildOfType(n, "body_statement"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -164,7 +164,7 @@ func (p *RubyParser) extractAllDeclarations(
 
 		case "module":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -174,8 +174,8 @@ func (p *RubyParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isRubyPublic(name), Metadata: buildLangMeta(declInfo[name]),
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := firstChildOfType(n, "body_statement"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := firstChildOfType(n, "body_statement"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -183,7 +183,7 @@ func (p *RubyParser) extractAllDeclarations(
 
 		case "method":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -206,7 +206,7 @@ func (p *RubyParser) extractAllDeclarations(
 
 		case "singleton_method":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -240,7 +240,7 @@ func (p *RubyParser) extractAllDeclarations(
 				break
 			}
 			methodNode := n.ChildByFieldName("method")
-			if methodNode == nil {
+			if methodNode.IsNull() {
 				break
 			}
 			methodName := string(src[methodNode.StartByte():methodNode.EndByte()])
@@ -248,13 +248,13 @@ func (p *RubyParser) extractAllDeclarations(
 				break
 			}
 			argsNode := n.ChildByFieldName("arguments")
-			if argsNode == nil {
+			if argsNode.IsNull() {
 				break
 			}
 			// Collect all simple_symbol children (e.g. :name → "name")
-			for k := 0; k < int(argsNode.ChildCount()); k++ {
+			for k := uint32(0); k < argsNode.ChildCount(); k++ {
 				arg := argsNode.Child(k)
-				if arg == nil {
+				if arg.IsNull() {
 					continue
 				}
 				var attrName string
@@ -284,7 +284,7 @@ func (p *RubyParser) extractAllDeclarations(
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -292,7 +292,7 @@ func (p *RubyParser) extractAllDeclarations(
 }
 
 // collectRubyCallSites collects call sites.
-func collectRubyCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectRubyCallSites(g *graph.Graph, lang *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	callQuery := `(call method: (identifier) @callee)`
 	_ = runQuery(lang, root, src, callQuery, func(captures map[string]string, _ int) {
 		callee := captures["callee"]

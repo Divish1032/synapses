@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/hcl"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/hcl"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -25,7 +25,7 @@ type HCLParser struct {
 
 // NewHCLParser creates a ready-to-use HCLParser.
 func NewHCLParser() *HCLParser {
-	return &HCLParser{language: hcl.GetLanguage()}
+	return &HCLParser{language: sitter.NewLanguage(hcl.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -38,12 +38,12 @@ func (p *HCLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	if tree == nil {
 		return nil
 	}
 	root := tree.RootNode()
-	if root == nil {
+	if root.IsNull() {
 		return nil
 	}
 
@@ -59,14 +59,14 @@ func (p *HCLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	lines := strings.Split(string(src), "\n")
 
 	// Walk root → body → children looking for block nodes.
-	var walkBody func(n *sitter.Node)
-	walkBody = func(n *sitter.Node) {
-		if n == nil {
+	var walkBody func(n sitter.Node)
+	walkBody = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			child := n.Child(i)
-			if child == nil {
+			if child.IsNull() {
 				continue
 			}
 			switch child.Type() {
@@ -89,7 +89,7 @@ func (p *HCLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 // graph node(s) based on the block type (resource, data, module, etc.).
 func (p *HCLParser) handleBlock(
 	g *graph.Graph,
-	block *sitter.Node,
+	block sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
@@ -98,11 +98,11 @@ func (p *HCLParser) handleBlock(
 	// Collect identifiers and string_lit children to determine block type and labels.
 	var identifiers []string
 	var labels []string
-	var bodyNode *sitter.Node
+	var bodyNode sitter.Node
 
-	for i := 0; i < int(block.ChildCount()); i++ {
+	for i := uint32(0); i < block.ChildCount(); i++ {
 		child := block.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		switch child.Type() {
@@ -143,7 +143,7 @@ func (p *HCLParser) handleBlock(
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 			// Extract references to var.x, local.x, module.x etc.
-			if bodyNode != nil {
+			if !bodyNode.IsNull() {
 				extractHCLReferences(g, bodyNode, src, filePath, nodeID)
 			}
 		}
@@ -163,7 +163,7 @@ func (p *HCLParser) handleBlock(
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 			// Extract references to var.x, local.x, module.x etc.
-			if bodyNode != nil {
+			if !bodyNode.IsNull() {
 				extractHCLReferences(g, bodyNode, src, filePath, nodeID)
 			}
 		}
@@ -184,7 +184,7 @@ func (p *HCLParser) handleBlock(
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 
 			// Scan body for source attribute → EdgeImports.
-			if bodyNode != nil {
+			if !bodyNode.IsNull() {
 				if source := hclFindAttribute(bodyNode, src, "source"); source != "" {
 					importNodeID := g.MakeNodeID(source, source)
 					g.AddNode(&graph.Node{
@@ -229,14 +229,14 @@ func (p *HCLParser) handleBlock(
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 			// Extract references to var.x, local.x, module.x etc.
-			if bodyNode != nil {
+			if !bodyNode.IsNull() {
 				extractHCLReferences(g, bodyNode, src, filePath, nodeID)
 			}
 		}
 
 	case "locals":
 		// locals { name = value ... } → one NodeVariable per key inside body.
-		if bodyNode != nil {
+		if !bodyNode.IsNull() {
 			p.extractLocals(g, bodyNode, src, filePath, fileNodeID, lines)
 		}
 
@@ -266,21 +266,21 @@ func (p *HCLParser) handleBlock(
 // a NodeVariable for each key.
 func (p *HCLParser) extractLocals(
 	g *graph.Graph,
-	bodyNode *sitter.Node,
+	bodyNode sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
 	lines []string,
 ) {
-	for i := 0; i < int(bodyNode.ChildCount()); i++ {
+	for i := uint32(0); i < bodyNode.ChildCount(); i++ {
 		child := bodyNode.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "attribute" {
 			// attribute: identifier "=" expression
 			ident := firstChildOfType(child, "identifier")
-			if ident == nil {
+			if ident.IsNull() {
 				continue
 			}
 			key := childText(ident, src)
@@ -311,14 +311,14 @@ func (p *HCLParser) extractLocals(
 // Each top-level attribute becomes a NodeVariable with kind="tfvar".
 func (p *HCLParser) handleTopLevelAttribute(
 	g *graph.Graph,
-	attr *sitter.Node,
+	attr sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
 	lines []string,
 ) {
 	ident := firstChildOfType(attr, "identifier")
-	if ident == nil {
+	if ident.IsNull() {
 		return
 	}
 	key := childText(ident, src)
@@ -360,21 +360,21 @@ func hclStripQuotes(s string) string {
 
 // hclFindAttribute scans a body node for an attribute with the given key name
 // and returns the attribute value as a stripped string. Returns "" if not found.
-func hclFindAttribute(bodyNode *sitter.Node, src []byte, key string) string {
-	for i := 0; i < int(bodyNode.ChildCount()); i++ {
+func hclFindAttribute(bodyNode sitter.Node, src []byte, key string) string {
+	for i := uint32(0); i < bodyNode.ChildCount(); i++ {
 		child := bodyNode.Child(i)
-		if child == nil || child.Type() != "attribute" {
+		if child.IsNull() || child.Type() != "attribute" {
 			continue
 		}
 		ident := firstChildOfType(child, "identifier")
-		if ident == nil || childText(ident, src) != key {
+		if ident.IsNull() || childText(ident, src) != key {
 			continue
 		}
 		// The value is in an expression child. Extract the full text and strip quotes.
 		// Walk children looking for the expression or template_expr or literal_value.
-		for j := 0; j < int(child.ChildCount()); j++ {
+		for j := uint32(0); j < child.ChildCount(); j++ {
 			valChild := child.Child(j)
-			if valChild == nil {
+			if valChild.IsNull() {
 				continue
 			}
 			vt := valChild.Type()
@@ -394,12 +394,12 @@ func hclFindAttribute(bodyNode *sitter.Node, src []byte, key string) string {
 // EdgeCalls from fromNodeID to the referenced entity within the same file.
 func extractHCLReferences(
 	g *graph.Graph,
-	bodyNode *sitter.Node,
+	bodyNode sitter.Node,
 	src []byte,
 	filePath string,
 	fromNodeID graph.NodeID,
 ) {
-	if bodyNode == nil {
+	if bodyNode.IsNull() {
 		return
 	}
 	bodyText := childText(bodyNode, src)
