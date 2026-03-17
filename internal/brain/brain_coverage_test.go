@@ -1635,3 +1635,36 @@ func TestImpl_New_LocalBackendWithoutGGUFPath(t *testing.T) {
 	}
 }
 
+// --- Additional coverage tests ---
+
+// TestImpl_TierStatus_Integration tests that TierStatus returns circuit breaker state
+func TestImpl_TierStatus_Integration(t *testing.T) {
+	b := &impl{
+		cb: newCircuitBreaker(3, 5*time.Minute),
+	}
+
+	status := b.TierStatus()
+	if status == nil {
+		t.Error("TierStatus should return non-nil map")
+	}
+}
+
+// TestImpl_BrainStats_Integration tests that BrainStats returns snapshot
+func TestImpl_BrainStats_Integration(t *testing.T) {
+	stats := &brainStats{}
+	stats.record("ingest", true, 50)
+	stats.record("enrich", false, 100)
+
+	b := &impl{
+		stats: *stats,
+	}
+
+	result := b.BrainStats()
+	if result == nil {
+		t.Error("BrainStats should return non-nil map")
+	}
+	if count, ok := result["ingest_success"]; !ok || count != int64(1) {
+		t.Errorf("ingest_success: got %v, want 1", count)
+	}
+}
+
