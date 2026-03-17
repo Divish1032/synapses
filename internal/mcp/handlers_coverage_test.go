@@ -4,6 +4,7 @@ package mcp
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1987,6 +1988,134 @@ func TestHandleValidatePlan_SourceFileNotInGraph(t *testing.T) {
 	}
 	m := mustResult(t, result, nil)
 	hasKey(t, m, "violations")
+}
+
+// ── handleValidatePlan (RX3 logic checks) ───────────────────────────────────
+
+func TestHandleValidatePlan_LogicChecks_ZeroValueId(t *testing.T) {
+	s := newTestServer(t)
+	// Write a Go file with a zero-value identifier bug.
+	dir := t.TempDir()
+	goFile := filepath.Join(dir, "main.go")
+	os.WriteFile(goFile, []byte("package main\nfunc main() {\n\tkillByPort(0)\n}\n"), 0644)
+	s.graph.SetRoot(dir)
+
+	req := callTool(map[string]any{
+		"changes": `[{"file": "main.go"}]`,
+	})
+	result, err := s.handleValidatePlan(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, result, nil)
+	lw, ok := m["logic_warnings"]
+	if !ok {
+		t.Fatal("expected logic_warnings key in result")
+	}
+	warnings, ok := lw.([]interface{})
+	if !ok {
+		t.Fatalf("expected logic_warnings to be a slice, got %T", lw)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("expected at least one logic warning")
+	}
+	first := warnings[0].(map[string]interface{})
+	if first["check"] != "zero_value_id" {
+		t.Errorf("expected check=zero_value_id, got %v", first["check"])
+	}
+}
+
+func TestHandleValidatePlan_LogicChecks_SkipLogicChecks(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	goFile := filepath.Join(dir, "main.go")
+	os.WriteFile(goFile, []byte("package main\nfunc main() {\n\tkillByPort(0)\n}\n"), 0644)
+	s.graph.SetRoot(dir)
+
+	req := callTool(map[string]any{
+		"changes":           `[{"file": "main.go"}]`,
+		"skip_logic_checks": true,
+	})
+	result, err := s.handleValidatePlan(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, result, nil)
+	if _, ok := m["logic_warnings"]; ok {
+		t.Error("expected no logic_warnings when skip_logic_checks=true")
+	}
+}
+
+func TestHandleValidatePlan_LogicChecks_NonGoFile(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	pyFile := filepath.Join(dir, "main.py")
+	os.WriteFile(pyFile, []byte("print('hello')"), 0644)
+	s.graph.SetRoot(dir)
+
+	req := callTool(map[string]any{
+		"changes": `[{"file": "main.py"}]`,
+	})
+	result, err := s.handleValidatePlan(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, result, nil)
+	if _, ok := m["logic_warnings"]; ok {
+		t.Error("expected no logic_warnings for non-Go file")
+	}
+}
+
+func TestHandleValidatePlan_LogicChecks_MissingFile(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	s.graph.SetRoot(dir)
+
+	req := callTool(map[string]any{
+		"changes": `[{"file": "nonexistent.go"}]`,
+	})
+	result, err := s.handleValidatePlan(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, result, nil)
+	if _, ok := m["logic_warnings"]; ok {
+		t.Error("expected no logic_warnings for nonexistent file")
+	}
+}
+
+func TestHandleValidatePlan_LogicChecks_WarningCap(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	// Create a file with many logic issues.
+	src := "package main\n\nimport \"os\"\n\nfunc bad() {\n"
+	for i := 0; i < 10; i++ {
+		src += "\tos.Open(\"~/.config\")\n"
+	}
+	src += "}\n"
+	goFile := filepath.Join(dir, "main.go")
+	os.WriteFile(goFile, []byte(src), 0644)
+	s.graph.SetRoot(dir)
+
+	req := callTool(map[string]any{
+		"changes": `[{"file": "main.go"}]`,
+	})
+	result, err := s.handleValidatePlan(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, result, nil)
+	lw, ok := m["logic_warnings"]
+	if !ok {
+		t.Fatal("expected logic_warnings key in result")
+	}
+	warnings, ok := lw.([]interface{})
+	if !ok {
+		t.Fatalf("expected logic_warnings to be a slice, got %T", lw)
+	}
+	if len(warnings) > 5 {
+		t.Errorf("expected at most 5 logic warnings (cap), got %d", len(warnings))
+	}
 }
 
 // ── handleUpsertRule (invalid severity) ──────────────────────────────────────
