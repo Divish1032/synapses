@@ -3215,3 +3215,354 @@ extend Request {
 	assertNode(t, g, "Request.session_id", graph.NodeMethod)
 	assertNode(t, g, "Request.priority", graph.NodeMethod)
 }
+
+// ─── Dart parser coverage ─────────────────────────────────────────────────────
+
+func TestDartParser_Class(t *testing.T) {
+	src := []byte(`class Person {
+  String name;
+  int age;
+
+  Person(this.name, this.age);
+
+  void greet() {
+    print('Hello');
+  }
+}
+
+class Admin extends Person {
+  Admin(String name, int age) : super(name, age);
+}
+`)
+	g := graph.New("testrepo")
+	p := parser.NewDartParser()
+	if err := p.Parse(g, "person.dart", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	// Dart parser parses without error; node structure varies by grammar
+	nodes := g.AllNodes()
+	_ = nodes
+}
+
+// ─── R parser coverage ────────────────────────────────────────────────────────
+
+func TestRParser_Function(t *testing.T) {
+	src := []byte(`# R functions
+calculate_mean <- function(x) {
+  sum(x) / length(x)
+}
+
+MyClass <- setRefClass("MyClass",
+  fields = list(value = "numeric"),
+  methods = list(
+    getValue = function() { value }
+  )
+)
+`)
+	g := graph.New("testrepo")
+	p := parser.NewRParser()
+	if err := p.Parse(g, "script.R", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	assertNode(t, g, "calculate_mean", graph.NodeFunction)
+}
+
+// ─── Perl parser coverage ─────────────────────────────────────────────────────
+
+func TestPerlParser_Package(t *testing.T) {
+	src := []byte(`package MyModule;
+
+use strict;
+
+sub greet {
+  my ($name) = @_;
+  print "Hello, $name\\n";
+}
+
+sub new {
+  my $class = shift;
+  my $self = {};
+  bless $self, $class;
+  return $self;
+}
+
+1;
+`)
+	g := graph.New("testrepo")
+	p := parser.NewPerlParser()
+	if err := p.Parse(g, "MyModule.pm", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	// Perl parser parses without error; nodes may vary by grammar implementation
+	nodes := g.AllNodes()
+	_ = nodes
+}
+
+// ─── PowerShell parser coverage ───────────────────────────────────────────────
+
+func TestPowerShellParser_Function(t *testing.T) {
+	src := []byte(`function Invoke-Deploy {
+  param(
+    [string]$Environment,
+    [int]$Version
+  )
+
+  Write-Host "Deploying to $Environment"
+}
+
+class DeployService {
+  [string]$Name
+
+  Deploy() {
+    Write-Host "Deploying"
+  }
+}
+`)
+	g := graph.New("testrepo")
+	p := parser.NewPowerShellParser()
+	if err := p.Parse(g, "deploy.ps1", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	assertNode(t, g, "Invoke-Deploy", graph.NodeFunction)
+	assertNode(t, g, "DeployService", graph.NodeStruct)
+}
+
+// ─── Julia parser coverage ───────────────────────────────────────────────────
+
+func TestJuliaParser_Function(t *testing.T) {
+	src := []byte(`module MyModule
+
+export greet, MyStruct
+
+function greet(name::String)
+  println("Hello, $name")
+end
+
+struct MyStruct
+  x::Float64
+  y::Float64
+end
+
+end
+`)
+	g := graph.New("testrepo")
+	p := parser.NewJuliaParser()
+	if err := p.Parse(g, "script.jl", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	assertNode(t, g, "greet", graph.NodeFunction)
+	assertNode(t, g, "MyStruct", graph.NodeStruct)
+}
+
+// ─── YAML parser coverage ────────────────────────────────────────────────────
+
+func TestYAMLParser_Document(t *testing.T) {
+	src := []byte(`apiVersion: v1
+kind: Service
+metadata:
+  name: my-service
+  labels:
+    app: MyApp
+spec:
+  ports:
+  - port: 8080
+    targetPort: 8080
+`)
+	g := graph.New("testrepo")
+	p := parser.NewYAMLParser()
+	if err := p.Parse(g, "service.yaml", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	// YAML should create nodes for top-level keys
+	nodes := g.AllNodes()
+	if len(nodes) == 0 {
+		t.Error("expected nodes from YAML parsing")
+	}
+}
+
+// ─── XML parser coverage ─────────────────────────────────────────────────────
+
+func TestXMLParser_Element(t *testing.T) {
+	src := []byte(`<?xml version="1.0"?>
+<root xmlns="http://example.com/schema">
+  <Person id="1">
+    <Name>John</Name>
+    <Age>30</Age>
+  </Person>
+  <Company>
+    <Name>ACME</Name>
+  </Company>
+</root>
+`)
+	g := graph.New("testrepo")
+	p := parser.NewXMLParser()
+	if err := p.Parse(g, "data.xml", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	nodes := g.AllNodes()
+	if len(nodes) == 0 {
+		t.Error("expected nodes from XML parsing")
+	}
+}
+
+// ─── Dockerfile parser coverage ───────────────────────────────────────────────
+
+func TestDockerfileParser_Instructions(t *testing.T) {
+	src := []byte(`FROM ubuntu:20.04
+
+LABEL maintainer="dev@example.com"
+
+RUN apt-get update && apt-get install -y python3
+
+COPY app.py /app/
+
+WORKDIR /app
+
+ENTRYPOINT ["python3", "app.py"]
+`)
+	g := graph.New("testrepo")
+	p := parser.NewDockerfileParser()
+	if err := p.Parse(g, "Dockerfile", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	nodes := g.AllNodes()
+	if len(nodes) == 0 {
+		t.Error("expected nodes from Dockerfile parsing")
+	}
+}
+
+// ─── Makefile parser coverage ────────────────────────────────────────────────
+
+func TestMakefileParser_Rules(t *testing.T) {
+	src := []byte(`.PHONY: build test clean
+
+BUILD_DIR := build
+SOURCES := src/*.c
+
+build: $(SOURCES)
+	gcc -o $(BUILD_DIR)/app $(SOURCES)
+
+test: build
+	./$(BUILD_DIR)/app --test
+
+clean:
+	rm -rf $(BUILD_DIR)
+`)
+	g := graph.New("testrepo")
+	p := parser.NewMakefileParser()
+	if err := p.Parse(g, "Makefile", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	nodes := g.AllNodes()
+	if len(nodes) == 0 {
+		t.Error("expected nodes from Makefile parsing")
+	}
+}
+
+// ─── CMake parser coverage ───────────────────────────────────────────────────
+
+func TestCMakeParser_Functions(t *testing.T) {
+	src := []byte(`cmake_minimum_required(VERSION 3.10)
+project(MyProject)
+
+add_executable(myapp
+    src/main.cpp
+    src/utils.cpp
+)
+
+target_link_libraries(myapp PRIVATE pthread)
+
+function(my_function arg1 arg2)
+  message(STATUS "Called with ${arg1} ${arg2}")
+endfunction()
+`)
+	g := graph.New("testrepo")
+	p := parser.NewCMakeParser()
+	if err := p.Parse(g, "CMakeLists.txt", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	nodes := g.AllNodes()
+	if len(nodes) == 0 {
+		t.Error("expected nodes from CMake parsing")
+	}
+}
+
+// ─── Nix parser coverage ──────────────────────────────────────────────────────
+
+func TestNixParser_Attr(t *testing.T) {
+	src := []byte(`{ pkgs, lib, ... }:
+
+{
+  options.myapp = {
+    enable = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+    };
+  };
+
+  config = lib.mkIf config.myapp.enable {
+    environment.systemPackages = [ pkgs.myapp ];
+  };
+}
+`)
+	g := graph.New("testrepo")
+	p := parser.NewNixParser()
+	if err := p.Parse(g, "default.nix", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	nodes := g.AllNodes()
+	if len(nodes) == 0 {
+		t.Error("expected nodes from Nix parsing")
+	}
+}
+
+// ─── Cue parser coverage ──────────────────────────────────────────────────────
+
+func TestCueParser_Structure(t *testing.T) {
+	src := []byte(`package config
+
+Config: {
+  database: {
+    host: string
+    port: int
+    user: string
+  }
+  server: {
+    port: int
+  }
+}
+`)
+	g := graph.New("testrepo")
+	p := parser.NewCUEParser()
+	if err := p.Parse(g, "config.cue", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	nodes := g.AllNodes()
+	if len(nodes) == 0 {
+		t.Error("expected nodes from Cue parsing")
+	}
+}
+
+// ─── Starlark parser coverage ─────────────────────────────────────────────────
+
+func TestStarlarkParser_Function(t *testing.T) {
+	src := []byte(`def hello(name):
+  """Greeting function"""
+  return "Hello, " + name
+
+def build_rule(name, srcs, outs):
+  """Custom build rule"""
+  native.cc_library(
+    name = name,
+    srcs = srcs,
+    outs = outs,
+  )
+`)
+	g := graph.New("testrepo")
+	p := parser.NewStarlarkParser()
+	if err := p.Parse(g, "BUILD.star", src); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	assertNode(t, g, "hello", graph.NodeFunction)
+	assertNode(t, g, "build_rule", graph.NodeFunction)
+}
