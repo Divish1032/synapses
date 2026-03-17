@@ -448,3 +448,217 @@ main "$@"
 		}
 	}
 }
+
+// ─── Edge cases for function and command name extraction ──────────────────────
+
+func TestBashParser_FunctionNameWithUnderscores(t *testing.T) {
+	src := `
+function my_long_func_name() {
+  echo "test"
+}
+
+_private_func() {
+  true
+}
+`
+	g := parseBash(t, src)
+
+	// Check my_long_func_name
+	nodes := g.FindByName("my_long_func_name")
+	if len(nodes) == 0 {
+		t.Error("expected my_long_func_name function")
+	}
+
+	// Check _private_func
+	privNodes := g.FindByName("_private_func")
+	if len(privNodes) == 0 {
+		t.Error("expected _private_func function")
+	}
+}
+
+func TestBashParser_FunctionNameWithNumbers(t *testing.T) {
+	src := `
+function func123() {
+  echo "test"
+}
+
+run2deploy() {
+  echo "deploy"
+}
+`
+	g := parseBash(t, src)
+
+	nodes := g.FindByName("func123")
+	if len(nodes) == 0 {
+		t.Error("expected func123 function")
+	}
+
+	nodes2 := g.FindByName("run2deploy")
+	if len(nodes2) == 0 {
+		t.Error("expected run2deploy function")
+	}
+}
+
+func TestBashParser_ComplexFunctionNames(t *testing.T) {
+	src := `
+# Complex naming scenarios
+function handle_error_and_retry() {
+  echo "retrying"
+}
+
+test_foo_bar_baz() {
+  true
+}
+
+a() {
+  echo "single letter"
+}
+`
+	g := parseBash(t, src)
+
+	for _, name := range []string{"handle_error_and_retry", "test_foo_bar_baz", "a"} {
+		nodes := g.FindByName(name)
+		if len(nodes) == 0 {
+			t.Errorf("expected function %q", name)
+		}
+	}
+}
+
+func TestBashParser_CommandCallsVariants(t *testing.T) {
+	src := `
+deploy() {
+  # Various command call patterns
+  echo "message"
+  ls -la /tmp
+  cd /var/log || exit 1
+  command -v python3
+
+  # Builtin commands
+  if true; then
+    echo "true"
+  fi
+
+  # Functions and external commands
+  my_func arg1 arg2
+  sudo service nginx restart
+}
+
+my_func() {
+  echo "in my_func"
+}
+`
+	g := parseBash(t, src)
+
+	// Verify function exists
+	nodes := g.FindByName("deploy")
+	if len(nodes) == 0 {
+		t.Fatal("expected deploy function")
+	}
+
+	// Check call sites were extracted
+	sites := g.PeekCallSites()
+	if len(sites) == 0 {
+		t.Error("expected some call sites from command invocations")
+	}
+}
+
+func TestBashParser_FunctionAndCommandMixed(t *testing.T) {
+	src := `
+# Define multiple functions with different styles
+setup_app() {
+  echo "Setting up"
+  init_db
+  load_config
+}
+
+function teardown_app() {
+  echo "Tearing down"
+  cleanup_db
+}
+
+function helper_utility() {
+  echo "utility"
+}
+
+# Commands called from main
+main() {
+  setup_app
+  teardown_app
+  echo "Done"
+}
+
+# Execute
+main
+`
+	g := parseBash(t, src)
+
+	// Check all functions are defined
+	for _, name := range []string{"setup_app", "teardown_app", "helper_utility", "main"} {
+		nodes := g.FindByName(name)
+		if len(nodes) == 0 {
+			t.Errorf("expected function %q", name)
+		}
+	}
+
+	// Check call relationships
+	sites := g.PeekCallSites()
+	found := make(map[string]bool)
+	for _, cs := range sites {
+		found[cs.FuncName] = true
+	}
+
+	expectedCalls := []string{"init_db", "load_config", "cleanup_db", "setup_app", "teardown_app"}
+	for _, call := range expectedCalls {
+		if !found[call] {
+			t.Errorf("expected call site for %q", call)
+		}
+	}
+}
+
+func TestBashParser_EdgeCaseEmptyFunctions(t *testing.T) {
+	src := `
+# Empty function
+empty_func() {
+  :
+}
+
+# Function with just whitespace
+whitespace_func() {
+
+}
+
+# Minimal function
+min() { echo "x"; }
+`
+	g := parseBash(t, src)
+
+	for _, name := range []string{"empty_func", "whitespace_func", "min"} {
+		nodes := g.FindByName(name)
+		if len(nodes) == 0 {
+			t.Errorf("expected function %q", name)
+		}
+	}
+}
+
+func TestBashParser_CommandsWithOptions(t *testing.T) {
+	src := `
+work() {
+  # Commands with various option patterns
+  ls -la -h
+  grep -r "pattern" --include="*.go"
+  docker run --rm -it ubuntu bash
+  find . -name "*.txt" -type f
+}
+`
+	g := parseBash(t, src)
+
+	nodes := g.FindByName("work")
+	if len(nodes) == 0 {
+		t.Fatal("expected work function")
+	}
+
+	// Verify parse completes without error
+	if nodes[0].Type != graph.NodeFunction {
+		t.Errorf("work: type = %q, want NodeFunction", nodes[0].Type)
+	}
+}
