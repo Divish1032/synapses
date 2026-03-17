@@ -2,6 +2,8 @@ package brain
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -1383,6 +1385,253 @@ func TestImpl_LogDecision_WithOutcome(t *testing.T) {
 	err := b.LogDecision(ctx, req)
 	if err != nil {
 		t.Fatalf("LogDecision failed: %v", err)
+	}
+}
+
+// --- impl with mocked LLM clients ---
+
+type mockLLMClient struct {
+	modelName    string
+	isAvailable  bool
+	modelPulled  bool
+	shouldError  bool
+}
+
+func (m *mockLLMClient) ModelName() string                              { return m.modelName }
+func (m *mockLLMClient) Available(context.Context) bool                { return m.isAvailable }
+func (m *mockLLMClient) ModelPulled(context.Context) bool              { return m.modelPulled }
+func (m *mockLLMClient) PullModel(context.Context, io.Writer) error {
+	if m.shouldError {
+		return fmt.Errorf("mock pull error")
+	}
+	return nil
+}
+func (m *mockLLMClient) Generate(context.Context, string) (string, error) {
+	return "", nil
+}
+
+// --- Test impl methods with mock LLM ---
+
+func TestImpl_Available_WithMockLLM(t *testing.T) {
+	b := &impl{
+		llm: &mockLLMClient{isAvailable: true},
+	}
+	if !b.Available() {
+		t.Error("expected brain to be available")
+	}
+}
+
+func TestImpl_Available_Unavailable(t *testing.T) {
+	b := &impl{
+		llm: &mockLLMClient{isAvailable: false},
+	}
+	if b.Available() {
+		t.Error("expected brain to be unavailable")
+	}
+}
+
+func TestImpl_ModelName_WithMockLLM(t *testing.T) {
+	expectedModel := "qwen3.5:2b"
+	b := &impl{
+		llm: &mockLLMClient{modelName: expectedModel},
+	}
+	if b.ModelName() != expectedModel {
+		t.Errorf("ModelName: got %q, want %q", b.ModelName(), expectedModel)
+	}
+}
+
+func TestImpl_EnsureModel_AlreadyPulled(t *testing.T) {
+	b := &impl{
+		llm: &mockLLMClient{modelPulled: true},
+	}
+	err := b.EnsureModel(context.Background(), os.Stdout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestImpl_EnsureModel_NeedsPull(t *testing.T) {
+	b := &impl{
+		llm: &mockLLMClient{modelPulled: false, shouldError: false},
+	}
+	err := b.EnsureModel(context.Background(), os.Stdout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestImpl_EnsureModel_PullFails(t *testing.T) {
+	b := &impl{
+		llm: &mockLLMClient{modelPulled: false, shouldError: true},
+	}
+	err := b.EnsureModel(context.Background(), os.Stdout)
+	if err == nil {
+		t.Error("expected error when pull fails")
+	}
+}
+
+func TestImpl_Summary_WithNilStore(t *testing.T) {
+	b := &impl{
+		store: nil,
+	}
+	summary := b.Summary("proj", "node")
+	if summary != "" {
+		t.Errorf("expected empty summary, got %q", summary)
+	}
+}
+
+func TestImpl_CoordinateFallback_Basic(t *testing.T) {
+	b := &impl{}
+	req := CoordinateRequest{
+		NewAgentID: "agent-2",
+		NewScope:   "internal/auth",
+		ConflictingClaims: []WorkClaim{
+			{AgentID: "agent-1", Scope: "internal/auth", ScopeType: "package"},
+		},
+	}
+	resp, err := b.coordinateFallback(context.Background(), req)
+	if err != nil {
+		t.Fatalf("coordinateFallback: %v", err)
+	}
+	if resp.Suggestion == "" {
+		t.Error("expected non-empty suggestion from deterministic coordinator")
+	}
+	if !resp.Degraded {
+		t.Error("expected Degraded flag to be true")
+	}
+}
+
+func TestImpl_CoordinateFallback_MultipleConflicts(t *testing.T) {
+	b := &impl{}
+	req := CoordinateRequest{
+		NewAgentID: "agent-3",
+		NewScope:   "internal/auth",
+		ConflictingClaims: []WorkClaim{
+			{AgentID: "agent-1", Scope: "internal/auth", ScopeType: "package"},
+			{AgentID: "agent-2", Scope: "internal/auth", ScopeType: "package"},
+		},
+	}
+	resp, err := b.coordinateFallback(context.Background(), req)
+	if err != nil {
+		t.Fatalf("coordinateFallback: %v", err)
+	}
+	if resp.Suggestion == "" {
+		t.Error("expected non-empty suggestion from deterministic coordinator")
+	}
+}
+
+func TestImpl_CoordinateFallback_EmptyClaims(t *testing.T) {
+	b := &impl{}
+	req := CoordinateRequest{
+		NewAgentID:        "agent-1",
+		NewScope:          "internal/auth",
+		ConflictingClaims: []WorkClaim{},
+	}
+	resp, err := b.coordinateFallback(context.Background(), req)
+	if err != nil {
+		t.Fatalf("coordinateFallback: %v", err)
+	}
+	if resp.Suggestion == "" {
+		t.Error("expected non-empty suggestion even with no conflicts")
+	}
+}
+
+func TestCircuitBreaker_Snapshot(t *testing.T) {
+	cb := newCircuitBreaker(3, 5*time.Minute)
+	cb.recordFailure("ingest")
+	status := cb.status()
+
+	if status["ingest"].Open {
+		t.Error("should not be open after 1 failure")
+	}
+	if status["ingest"].Failures != 1 {
+		t.Errorf("failures: got %d, want 1", status["ingest"].Failures)
+	}
+}
+
+func TestCircuitBreaker_DifferentTiers(t *testing.T) {
+	cb := newCircuitBreaker(2, 5*time.Minute)
+
+	// Trip ingest
+	cb.recordFailure("ingest")
+	cb.recordFailure("ingest")
+
+	// Enrich should still be fine
+	if cb.isOpen("enrich") {
+		t.Error("enrich should not be affected by ingest failures")
+	}
+
+	// Trip guardian
+	cb.recordFailure("guardian")
+	cb.recordFailure("guardian")
+
+	if !cb.isOpen("ingest") {
+		t.Error("ingest should be open")
+	}
+	if !cb.isOpen("guardian") {
+		t.Error("guardian should be open")
+	}
+	if cb.isOpen("enrich") {
+		t.Error("enrich should not be open")
+	}
+}
+
+func TestImpl_WarmUpModels_Empty(t *testing.T) {
+	// Should not panic with empty client list
+	warmUpModels()
+}
+
+func TestImpl_WarmUpModels_WithNilClients(t *testing.T) {
+	// Should not panic with nil clients mixed in
+	warmUpModels(nil, nil)
+}
+
+func TestImpl_ValidateResponse_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name      string
+		response  string
+		minLen    int
+		expected  bool
+	}{
+		{"empty", "", 10, false},
+		{"single word", "test", 5, false},
+		{"minimal valid", "hello world", 5, true},
+		// Only checks repetition if > 10 words
+		{"all same word (>10)", "test test test test test test test test test test test", 5, false},
+		{"mostly same word (>10)", "test test test test test test test test test word1 word2", 5, false},
+		{"varied", "the quick brown fox jumps over lazy dog and more text", 5, true},
+		{"with whitespace", "   test content here and more   ", 5, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := validateResponse(tt.response, tt.minLen)
+			if result != tt.expected {
+				t.Errorf("validateResponse(%q, %d) = %v, want %v",
+					tt.response, tt.minLen, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestImpl_New_NilConfig(t *testing.T) {
+	// Using empty config should return NullBrain since Enabled defaults to false
+	cfg := brainconfig.BrainConfig{}
+	b := New(cfg)
+	if _, ok := b.(*NullBrain); !ok {
+		t.Errorf("expected NullBrain, got %T", b)
+	}
+}
+
+func TestImpl_New_LocalBackendWithoutGGUFPath(t *testing.T) {
+	cfg := brainconfig.BrainConfig{
+		Enabled: true,
+		Backend: "local",
+	}
+	b := New(cfg)
+	// Should fall back to NullBrain since no GGUF path
+	if _, ok := b.(*NullBrain); !ok {
+		t.Errorf("expected NullBrain fallback, got %T", b)
 	}
 }
 
