@@ -58,6 +58,8 @@ require (
 )
 
 require (
+	github.com/alexaandru/go-sitter-forest/matlab v1.9.4 // indirect
+	github.com/alexaandru/go-sitter-forest/perl v1.9.9 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect

@@ -66,7 +66,7 @@ func (p *XMLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		p.parsePom(g, filePath, fileNodeID, rootElement, src)
 	case base == "AndroidManifest.xml":
 		p.parseAndroidManifest(g, filePath, fileNodeID, rootElement, src)
-	case strings.Contains(base, "context.xml") || strings.Contains(base, "config.xml"):
+	case strings.Contains(strings.ToLower(base), "context.xml") || strings.Contains(strings.ToLower(base), "config.xml"):
 		p.parseSpringContext(g, filePath, fileNodeID, rootElement, src)
 	default:
 		p.parseGeneric(g, filePath, fileNodeID, rootElement, src)
@@ -135,6 +135,23 @@ func (p *XMLParser) parsePom(
 			p.parsePomPlugins(g, filePath, fileNodeID, child, src)
 		case "modules":
 			p.parsePomModules(g, filePath, fileNodeID, child, src)
+		case "build":
+			// Recurse into <build> to find nested <plugins> and <dependencies>.
+			buildContent := xmlGetContent(child, src)
+			if !buildContent.IsNull() {
+				for j := uint32(0); j < buildContent.ChildCount(); j++ {
+					bc := buildContent.Child(j)
+					if bc.IsNull() || bc.Type() != "element" {
+						continue
+					}
+					switch xmlElementTagName(bc, src) {
+					case "plugins":
+						p.parsePomPlugins(g, filePath, fileNodeID, bc, src)
+					case "dependencies":
+						p.parsePomDependencies(g, filePath, fileNodeID, bc, src)
+					}
+				}
+			}
 		}
 	}
 }
@@ -292,7 +309,7 @@ func (p *XMLParser) parseAndroidManifest(
 			startLine := int(child.StartPoint().Row) + 1
 
 			switch tagName {
-			case "activity", "service", "receiver":
+			case "activity", "service", "receiver", "provider":
 				if androidName == "" {
 					androidName = tagName
 				}
@@ -458,41 +475,75 @@ func (p *XMLParser) parseGeneric(
 			})
 			g.AddEdge(&graph.Edge{From: rootNodeID, To: nodeID, Type: graph.EdgeContains})
 		} else if knownSemantic[childTag] {
-			text := xmlGetElementText(child, src)
-			name := text
-			if name == "" {
-				name = childTag
-			}
-			nodeID := g.MakeNodeID(filePath, childTag+"_"+name)
+			text := xmlCleanElementName(child, childTag, src)
+			nodeID := g.MakeNodeID(filePath, childTag+"_"+text)
 			if g.GetNode(nodeID) == nil {
 				g.AddNode(&graph.Node{
-					ID: nodeID, Type: graph.NodeVariable, Name: name,
+					ID: nodeID, Type: graph.NodeVariable, Name: text,
 					File: filePath, Line: startLine,
 					Metadata: map[string]string{"kind": childTag},
 				})
 				g.AddEdge(&graph.Edge{From: rootNodeID, To: nodeID, Type: graph.EdgeContains})
 			}
 		} else {
-			// For repeating elements, sample first 3.
-			seenTags[childTag]++
-			if seenTags[childTag] <= 3 {
-				text := xmlGetElementText(child, src)
-				name := text
-				if name == "" {
-					name = childTag
+			// Walk one level deeper: if child has children with id/name attrs, emit them.
+			childContent := xmlGetContent(child, src)
+			emittedChildren := false
+			if !childContent.IsNull() {
+				for j := uint32(0); j < childContent.ChildCount(); j++ {
+					gc := childContent.Child(j)
+					if gc.IsNull() || gc.Type() != "element" {
+						continue
+					}
+					gcAttrs := xmlGetAttributes(gc, src)
+					gcName := gcAttrs["id"]
+					if gcName == "" {
+						gcName = gcAttrs["name"]
+					}
+					if gcName != "" {
+						gcTag := xmlElementTagName(gc, src)
+						gcLine := int(gc.StartPoint().Row) + 1
+						gcNodeID := g.MakeNodeID(filePath, gcTag+"_"+gcName)
+						if g.GetNode(gcNodeID) == nil {
+							g.AddNode(&graph.Node{
+								ID: gcNodeID, Type: graph.NodeStruct, Name: gcName,
+								File: filePath, Line: gcLine,
+								Exported: true, Metadata: map[string]string{"kind": gcTag},
+							})
+							g.AddEdge(&graph.Edge{From: rootNodeID, To: gcNodeID, Type: graph.EdgeContains})
+							emittedChildren = true
+						}
+					}
 				}
-				nodeID := g.MakeNodeID(filePath, childTag+"_"+name+"_"+string(rune('0'+seenTags[childTag]-1)))
-				if g.GetNode(nodeID) == nil {
-					g.AddNode(&graph.Node{
-						ID: nodeID, Type: graph.NodeVariable, Name: name,
-						File: filePath, Line: startLine,
-						Metadata: map[string]string{"kind": childTag},
-					})
-					g.AddEdge(&graph.Edge{From: rootNodeID, To: nodeID, Type: graph.EdgeContains})
+			}
+			if !emittedChildren {
+				// For repeating elements, sample first 3.
+				seenTags[childTag]++
+				if seenTags[childTag] <= 3 {
+					name := xmlCleanElementName(child, childTag, src)
+					nodeID := g.MakeNodeID(filePath, childTag+"_"+name+"_"+string(rune('0'+seenTags[childTag]-1)))
+					if g.GetNode(nodeID) == nil {
+						g.AddNode(&graph.Node{
+							ID: nodeID, Type: graph.NodeVariable, Name: name,
+							File: filePath, Line: startLine,
+							Metadata: map[string]string{"kind": childTag},
+						})
+						g.AddEdge(&graph.Edge{From: rootNodeID, To: nodeID, Type: graph.EdgeContains})
+					}
 				}
 			}
 		}
 	}
+}
+
+// xmlCleanElementName extracts a usable name from an element.
+// Falls back to tag name if text content is multi-line or too long (container elements).
+func xmlCleanElementName(elem sitter.Node, tagName string, src []byte) string {
+	text := xmlGetElementText(elem, src)
+	if text == "" || strings.ContainsAny(text, "\n\r") || len(text) > 100 {
+		return tagName
+	}
+	return text
 }
 
 // ─── XML AST helper functions ─────────────────────────────────────────────────

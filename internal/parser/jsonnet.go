@@ -108,11 +108,18 @@ func (p *JsonnetParser) walkLocalBindChain(
 				p.walkLocalBindChain(g, child, src, filePath, fileNodeID)
 			case "object":
 				p.extractObjectMembers(g, child, src, filePath, fileNodeID)
+			case "function", "anonymous_function":
+				// function(params) { fields... } — extract the object body inside.
+				p.extractFunctionBody(g, child, src, filePath, fileNodeID)
 			}
 		}
 
 	case "object":
 		p.extractObjectMembers(g, n, src, filePath, fileNodeID)
+
+	case "function", "anonymous_function":
+		// Top-level function(params) { fields... } pattern.
+		p.extractFunctionBody(g, n, src, filePath, fileNodeID)
 	}
 }
 
@@ -170,16 +177,39 @@ func (p *JsonnetParser) handleBind(
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
 		} else {
-			// local x = value — emit as NodeVariable.
-			nodeID := g.MakeNodeID(filePath, name)
-			if g.GetNode(nodeID) == nil {
-				g.AddNode(&graph.Node{
-					ID: nodeID, Type: graph.NodeVariable, Name: name,
-					File: filePath, Line: startLine,
-					Exported: false,
-					Metadata: map[string]string{"kind": "local"},
-				})
-				g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			// Check if this bind has params (i.e., local function).
+			hasParams := false
+			for j := uint32(0); j < bind.ChildCount(); j++ {
+				if bc := bind.Child(j); !bc.IsNull() && bc.Type() == "params" {
+					hasParams = true
+					break
+				}
+			}
+
+			if hasParams {
+				// local f(x) = expr — emit as NodeFunction.
+				fnNodeID := g.MakeNodeID(filePath, "fn_"+name)
+				if g.GetNode(fnNodeID) == nil {
+					g.AddNode(&graph.Node{
+						ID: fnNodeID, Type: graph.NodeFunction, Name: name,
+						File: filePath, Line: startLine,
+						Exported: false,
+						Metadata: map[string]string{"kind": "local_function"},
+					})
+					g.AddEdge(&graph.Edge{From: fileNodeID, To: fnNodeID, Type: graph.EdgeDefines})
+				}
+			} else {
+				// local x = value — emit as NodeVariable.
+				nodeID := g.MakeNodeID(filePath, name)
+				if g.GetNode(nodeID) == nil {
+					g.AddNode(&graph.Node{
+						ID: nodeID, Type: graph.NodeVariable, Name: name,
+						File: filePath, Line: startLine,
+						Exported: false,
+						Metadata: map[string]string{"kind": "local"},
+					})
+					g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+				}
 			}
 		}
 		break
@@ -313,7 +343,7 @@ func (p *JsonnetParser) handleField(
 		g.AddNode(&graph.Node{
 			ID: nodeID, Type: graph.NodeFunction, Name: name,
 			File: filePath, Line: startLine,
-			Exported: true,
+			Exported: !isHidden,
 			Metadata: map[string]string{"kind": kind},
 		})
 	} else {
@@ -329,6 +359,77 @@ func (p *JsonnetParser) handleField(
 		})
 	}
 	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+}
+
+// extractFunctionBody handles top-level `function(params) body` expressions.
+// The body is typically an object whose members should be extracted as exports.
+// It also extracts the function's parameters as NodeVariable nodes.
+func (p *JsonnetParser) extractFunctionBody(
+	g *graph.Graph,
+	fn sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+) {
+	if fn.IsNull() {
+		return
+	}
+	// Extract parameters from the params node.
+	for i := uint32(0); i < fn.ChildCount(); i++ {
+		child := fn.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		switch child.Type() {
+		case "params":
+			p.extractFunctionParams(g, child, src, filePath, fileNodeID)
+		case "object":
+			p.extractObjectMembers(g, child, src, filePath, fileNodeID)
+		case "local_bind":
+			p.walkLocalBindChain(g, child, src, filePath, fileNodeID)
+		}
+	}
+}
+
+// extractFunctionParams extracts parameter names from a params node as NodeVariable.
+func (p *JsonnetParser) extractFunctionParams(
+	g *graph.Graph,
+	params sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+) {
+	if params.IsNull() {
+		return
+	}
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		child := params.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		// param nodes contain an id child.
+		if child.Type() == "param" {
+			idNode := firstChildOfType(child, "id")
+			if idNode.IsNull() {
+				continue
+			}
+			name := childText(idNode, src)
+			if name == "" {
+				continue
+			}
+			startLine := int(child.StartPoint().Row) + 1
+			nodeID := g.MakeNodeID(filePath, "param_"+name)
+			if g.GetNode(nodeID) == nil {
+				g.AddNode(&graph.Node{
+					ID: nodeID, Type: graph.NodeVariable, Name: name,
+					File: filePath, Line: startLine,
+					Exported: true,
+					Metadata: map[string]string{"kind": "parameter"},
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			}
+		}
+	}
 }
 
 // jsonnetExtractImportPath returns the import path string from an import node.

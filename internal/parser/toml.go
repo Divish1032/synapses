@@ -380,6 +380,9 @@ func tomlExtractDottedKey(node sitter.Node, src []byte) string {
 			parts = append(parts, childText(child, src))
 		case "quoted_key":
 			parts = append(parts, tomlStripQuotes(childText(child, src)))
+		case "dotted_key":
+			// Recurse into nested dotted_key (3+ part keys nest left-recursively).
+			parts = append(parts, tomlExtractDottedKey(child, src))
 		}
 	}
 	return strings.Join(parts, ".")

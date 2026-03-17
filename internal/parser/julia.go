@@ -52,23 +52,49 @@ func juliaExtractTypeHeadName(typeHead sitter.Node, src []byte) (name string, su
 		case "identifier":
 			name = string(src[child.StartByte():child.EndByte()])
 			return name, ""
+		case "parametrized_type_expression":
+			// Point{T} — first identifier child is the name.
+			name = juliaFirstIdentifier(child, src)
+			return name, ""
 		case "binary_expression":
-			// Left child is the name, right child is the supertype.
+			// Name <: SuperType — left is name (identifier or parametrized_type_expression),
+			// right is supertype (identifier or parametrized_type_expression).
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				sub := child.Child(j)
 				if sub.IsNull() {
 					continue
 				}
-				if sub.Type() == "identifier" && name == "" {
-					name = string(src[sub.StartByte():sub.EndByte()])
-				} else if sub.Type() == "identifier" && name != "" && supertype == "" {
-					supertype = string(src[sub.StartByte():sub.EndByte()])
+				switch sub.Type() {
+				case "identifier":
+					if name == "" {
+						name = string(src[sub.StartByte():sub.EndByte()])
+					} else if supertype == "" {
+						supertype = string(src[sub.StartByte():sub.EndByte()])
+					}
+				case "parametrized_type_expression":
+					ident := juliaFirstIdentifier(sub, src)
+					if name == "" {
+						name = ident
+					} else if supertype == "" {
+						supertype = ident
+					}
 				}
 			}
 			return name, supertype
 		}
 	}
 	return "", ""
+}
+
+// juliaFirstIdentifier returns the first identifier text in a node's children.
+func juliaFirstIdentifier(n sitter.Node, src []byte) string {
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if !child.IsNull() && child.Type() == "identifier" {
+			return string(src[child.StartByte():child.EndByte()])
+		}
+	}
+	return ""
 }
 
 // juliaExtractFuncName extracts the function name from a signature node.
@@ -78,7 +104,7 @@ func juliaExtractFuncName(sig sitter.Node, src []byte) string {
 	if sig.IsNull() {
 		return ""
 	}
-	// Walk down: signature → (typed_expression →) call_expression → identifier
+	// Walk down: signature → (typed_expression / where_expression →) call_expression → identifier
 	for i := uint32(0); i < sig.ChildCount(); i++ {
 		child := sig.Child(i)
 		if child.IsNull() {
@@ -86,13 +112,7 @@ func juliaExtractFuncName(sig sitter.Node, src []byte) string {
 		}
 		switch child.Type() {
 		case "call_expression":
-			// First identifier child is the function name.
-			for j := uint32(0); j < child.ChildCount(); j++ {
-				sub := child.Child(j)
-				if !sub.IsNull() && sub.Type() == "identifier" {
-					return string(src[sub.StartByte():sub.EndByte()])
-				}
-			}
+			return juliaCallExprName(child, src)
 		case "typed_expression":
 			// typed_expression wraps call_expression with "::" return type.
 			for j := uint32(0); j < child.ChildCount(); j++ {
@@ -101,17 +121,64 @@ func juliaExtractFuncName(sig sitter.Node, src []byte) string {
 					continue
 				}
 				if sub.Type() == "call_expression" {
-					for k := uint32(0); k < sub.ChildCount(); k++ {
-						sub2 := sub.Child(k)
-						if !sub2.IsNull() && sub2.Type() == "identifier" {
-							return string(src[sub2.StartByte():sub2.EndByte()])
-						}
+					return juliaCallExprName(sub, src)
+				}
+				if sub.Type() == "where_expression" {
+					if name := juliaExtractFromWhere(sub, src); name != "" {
+						return name
 					}
 				}
 			}
+		case "where_expression":
+			// function transform(x::T) where {T <: Number} ... end
+			if name := juliaExtractFromWhere(child, src); name != "" {
+				return name
+			}
 		case "identifier":
-			// Direct identifier child of signature (rare but possible).
 			return string(src[child.StartByte():child.EndByte()])
+		}
+	}
+	return ""
+}
+
+// juliaCallExprName extracts the function name from a call_expression node.
+// Handles both plain identifiers and field_expression (Base.show).
+func juliaCallExprName(n sitter.Node, src []byte) string {
+	for j := uint32(0); j < n.ChildCount(); j++ {
+		sub := n.Child(j)
+		if sub.IsNull() {
+			continue
+		}
+		switch sub.Type() {
+		case "identifier":
+			return string(src[sub.StartByte():sub.EndByte()])
+		case "field_expression":
+			// Base.show → extract the full qualified name.
+			return string(src[sub.StartByte():sub.EndByte()])
+		}
+	}
+	return ""
+}
+
+// juliaExtractFromWhere extracts function name from a where_expression.
+// where_expression contains a call_expression and the where clause.
+func juliaExtractFromWhere(n sitter.Node, src []byte) string {
+	for j := uint32(0); j < n.ChildCount(); j++ {
+		sub := n.Child(j)
+		if sub.IsNull() {
+			continue
+		}
+		if sub.Type() == "call_expression" {
+			return juliaCallExprName(sub, src)
+		}
+		if sub.Type() == "typed_expression" {
+			// Recurse into typed_expression inside where.
+			for k := uint32(0); k < sub.ChildCount(); k++ {
+				sub2 := sub.Child(k)
+				if !sub2.IsNull() && sub2.Type() == "call_expression" {
+					return juliaCallExprName(sub2, src)
+				}
+			}
 		}
 	}
 	return ""
@@ -177,6 +244,13 @@ func extractJuliaBody(
 
 		case "const_statement":
 			extractJuliaConst(g, child, src, filePath, fileNodeID)
+
+		case "assignment":
+			// Short-form function: f(x) = expr — LHS is call_expression.
+			extractJuliaShortFunc(g, child, src, filePath, fileNodeID)
+
+		case "using_statement", "import_statement":
+			extractJuliaImport(g, child, src, filePath, fileNodeID)
 
 		default:
 			// Recurse into other container nodes (e.g. if/begin/let blocks).
@@ -442,5 +516,108 @@ func extractJuliaConst(
 			}
 		}
 		break
+	}
+}
+
+// extractJuliaShortFunc handles assignment nodes that represent short-form functions.
+// f(x) = expr → the LHS is a call_expression.
+func extractJuliaShortFunc(
+	g *graph.Graph,
+	n sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+) {
+	if n.ChildCount() == 0 {
+		return
+	}
+	// First child must be a call_expression (LHS of assignment).
+	lhs := n.Child(0)
+	if lhs.IsNull() {
+		return
+	}
+
+	var name string
+	switch lhs.Type() {
+	case "call_expression":
+		name = juliaCallExprName(lhs, src)
+	case "where_expression":
+		// f(x::T) where T = expr
+		name = juliaExtractFromWhere(lhs, src)
+	case "typed_expression":
+		// f(x)::Int = expr
+		for i := uint32(0); i < lhs.ChildCount(); i++ {
+			sub := lhs.Child(i)
+			if !sub.IsNull() && sub.Type() == "call_expression" {
+				name = juliaCallExprName(sub, src)
+				break
+			}
+		}
+	default:
+		return // Not a function assignment (e.g., plain x = 5).
+	}
+
+	if name == "" {
+		return
+	}
+
+	nodeID := g.MakeNodeID(filePath, name)
+	if g.GetNode(nodeID) != nil {
+		return // Already extracted (e.g., from function_definition).
+	}
+	g.AddNode(&graph.Node{
+		ID:       nodeID,
+		Type:     graph.NodeFunction,
+		Name:     name,
+		File:     filePath,
+		Line:     int(n.StartPoint().Row) + 1,
+		Exported: juliaIsUppercase(name),
+		Metadata: map[string]string{"kind": "function"},
+	})
+	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+}
+
+// extractJuliaImport handles using_statement and import_statement nodes.
+// using LinearAlgebra: norm, dot → creates import nodes.
+// import JSON → creates import node.
+func extractJuliaImport(
+	g *graph.Graph,
+	n sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+) {
+	// Walk children to find module names (identifiers or selected_import nodes).
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		var modName string
+		switch child.Type() {
+		case "identifier":
+			modName = string(src[child.StartByte():child.EndByte()])
+		case "selected_import":
+			// selected_import: ModuleName : symbol1, symbol2
+			modName = juliaFirstIdentifier(child, src)
+		case "scoped_identifier":
+			// Pkg.SubModule
+			modName = string(src[child.StartByte():child.EndByte()])
+		}
+		if modName == "" || modName == "using" || modName == "import" {
+			continue
+		}
+		importNodeID := g.MakeNodeID(modName, modName)
+		if g.GetNode(importNodeID) == nil {
+			g.AddNode(&graph.Node{
+				ID:      importNodeID,
+				Type:    graph.NodePackage,
+				Name:    modName,
+				Package: modName,
+				File:    filePath,
+				Line:    int(n.StartPoint().Row) + 1,
+			})
+		}
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
 	}
 }
