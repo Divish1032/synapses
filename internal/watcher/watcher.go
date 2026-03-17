@@ -121,7 +121,9 @@ func (w *Watcher) SetPacketInvalidator(pi PacketCacheInvalidator) {
 // synapses.json changes on disk. The callback receives the newly parsed config.
 // This enables hot-reload of brain/scout client settings without restarting.
 func (w *Watcher) SetConfigChangeHandler(fn ConfigChangeHandler) {
+	w.mu.Lock()
 	w.cfgHandler = fn
+	w.mu.Unlock()
 }
 
 // Start begins watching root recursively. It returns immediately; the event
@@ -355,11 +357,17 @@ func (w *Watcher) reloadConfig(configPath string) {
 		return
 	}
 	// Update the watcher's own violation-checking config so future file changes
-	// use the freshly loaded rules.
+	// use the freshly loaded rules. Snapshot handler under the same lock so
+	// reads of w.cfg and w.cfgHandler from concurrent reparseFile goroutines
+	// don't race with this timer-goroutine write.
+	w.mu.Lock()
 	w.cfg = newCfg
+	handler := w.cfgHandler
+	w.mu.Unlock()
+
 	fmt.Fprintf(os.Stderr, "synapses/watcher: config reloaded from %s\n", configPath)
-	if w.cfgHandler != nil {
-		w.cfgHandler(newCfg)
+	if handler != nil {
+		handler(newCfg)
 	}
 }
 
@@ -522,7 +530,14 @@ func (w *Watcher) reparseFile(path, _ string) {
 // checkViolations runs the rule engine against edges touching path and emits
 // events for violations that were not already present in the log.
 func (w *Watcher) checkViolations(path string) {
-	if w.cfg == nil || w.store == nil || len(w.cfg.Rules) == 0 {
+	// Snapshot cfg under lock — reloadConfig may write w.cfg concurrently from
+	// a debounce timer goroutine while reparseFile (which calls checkViolations)
+	// runs under reparseMu on a different goroutine.
+	w.mu.Lock()
+	cfg := w.cfg
+	w.mu.Unlock()
+
+	if cfg == nil || w.store == nil || len(cfg.Rules) == 0 {
 		return
 	}
 
@@ -533,7 +548,7 @@ func (w *Watcher) checkViolations(path string) {
 		existingIDs = make(map[string]struct{}) // safe fallback: treat all as new
 	}
 
-	violations := w.cfg.CheckViolationsForFile(w.graph, path)
+	violations := cfg.CheckViolationsForFile(w.graph, path)
 	if len(violations) == 0 {
 		return
 	}
