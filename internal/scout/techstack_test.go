@@ -516,3 +516,117 @@ func TestDetectTechStack_MultipleManifests(t *testing.T) {
 	}
 }
 
+// ── Edge cases for parsing functions ───────────────────────────────────────────
+
+func TestParseCargoToml_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	content := ""
+	if err := os.WriteFile(filepath.Join(dir, "Cargo.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries := parseCargoToml(dir)
+	if entries != nil && len(entries) != 0 {
+		t.Errorf("expected empty or nil for empty Cargo.toml, got %d entries", len(entries))
+	}
+}
+
+func TestParseCargoToml_NoEqualsSign(t *testing.T) {
+	dir := t.TempDir()
+	content := `[dependencies]
+invalid-line-without-equals
+another-invalid`
+	if err := os.WriteFile(filepath.Join(dir, "Cargo.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries := parseCargoToml(dir)
+	if entries != nil && len(entries) != 0 {
+		t.Errorf("expected no entries for invalid deps, got %d", len(entries))
+	}
+}
+
+func TestParseCargoToml_MixedSections(t *testing.T) {
+	dir := t.TempDir()
+	content := `[dependencies]
+serde = "1.0"
+
+[dev-dependencies]
+test-lib = "0.5"
+
+[build-dependencies]
+build-tool = "2.0"
+`
+	if err := os.WriteFile(filepath.Join(dir, "Cargo.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries := parseCargoToml(dir)
+	if len(entries) != 2 {
+		t.Errorf("expected 2 entries (serde + test-lib), got %d", len(entries))
+	}
+}
+
+func TestParsePyprojectToml_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	content := ""
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries := parsePyprojectToml(dir)
+	if entries != nil && len(entries) != 0 {
+		t.Errorf("expected empty or nil for empty pyproject.toml, got %d entries", len(entries))
+	}
+}
+
+func TestParsePyprojectToml_ProjectDepsWithSkipped(t *testing.T) {
+	dir := t.TempDir()
+	content := `[project]
+name = "myproject"
+version = "1.0.0"
+description = "A test project"
+python = "3.11"
+dependencies = [
+    "requests==2.31.0"
+]
+`
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries := parsePyprojectToml(dir)
+	// Should skip name, version, description, python entries
+	for _, e := range entries {
+		if e.Name == "name" || e.Name == "version" || e.Name == "description" || e.Name == "python" {
+			t.Errorf("should skip %q entry", e.Name)
+		}
+	}
+}
+
+func TestParsePyprojectToml_NoEqualsSign(t *testing.T) {
+	dir := t.TempDir()
+	content := `[tool.poetry.dependencies]
+invalid-line-no-equals
+another-invalid
+requests = "2.31.0"
+`
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries := parsePyprojectToml(dir)
+	// Should only have requests
+	if len(entries) != 1 || entries[0].Name != "requests" {
+		t.Errorf("expected only requests entry, got %d entries", len(entries))
+	}
+}
+
+func TestModuleShortName_EmptyString(t *testing.T) {
+	got := moduleShortName("")
+	if got != "" {
+		t.Errorf("empty string should return empty string, got %q", got)
+	}
+}
+
+func TestModuleShortName_SingleSlash(t *testing.T) {
+	got := moduleShortName("a/b")
+	if got != "b" {
+		t.Errorf("expected %q, got %q", "b", got)
+	}
+}
+
