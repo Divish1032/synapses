@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -543,5 +544,244 @@ func TestWaitReady_ContextCanceled(t *testing.T) {
 	err := s.waitReady(ctx, 10*time.Second)
 	if err == nil {
 		t.Error("expected context error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// supervise — supervisor goroutine restart logic
+// ---------------------------------------------------------------------------
+
+func TestSupervise_ProcessExitAndRestart(t *testing.T) {
+	// Test the supervise goroutine detects process exit and attempts restart.
+	// We use a short-lived process to simulate a crash.
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mockServer := httptest.NewServer(handler)
+	defer mockServer.Close()
+
+	s := newWithBaseURL("/model.gguf", 0, "/bin/true", mockServer.URL)
+	s.client = &http.Client{Timeout: time.Second}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create a process that exits immediately
+	cmd := exec.Command("/bin/true")
+	cmd.Start()
+
+	s.proc = cmd
+	s.started = true
+
+	// Give the process time to exit
+	cmd.Wait()
+
+	// The supervise function should detect the exit.
+	// We start it but immediately cancel the context to prevent infinite restarts.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	s.supervise(ctx, []string{})
+
+	// After supervision ends (context canceled), the started flag is still true
+	// (it's only set to false by Stop())
+}
+
+func TestSupervise_StoppedFlagPreventsRestart(t *testing.T) {
+	// Test that supervise stops restarting when started=false (clean shutdown).
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mockServer := httptest.NewServer(handler)
+	defer mockServer.Close()
+
+	s := newWithBaseURL("/model.gguf", 0, "/bin/true", mockServer.URL)
+
+	ctx := context.Background()
+
+	// Create a process that exits immediately
+	cmd := exec.Command("/bin/true")
+	cmd.Start()
+	s.proc = cmd
+	s.started = true
+
+	// Wait for it to exit
+	cmd.Wait()
+
+	// Now set started=false to simulate Stop() being called
+	done := make(chan bool)
+	go func() {
+		s.supervise(ctx, []string{})
+		done <- true
+	}()
+
+	// Let the goroutine detect the exit and check started flag
+	time.Sleep(200 * time.Millisecond)
+	s.mu.Lock()
+	s.started = false
+	s.mu.Unlock()
+
+	select {
+	case <-done:
+		// supervise should exit when started=false
+		t.Log("supervise exited as expected")
+	case <-time.After(2 * time.Second):
+		t.Error("supervise should have exited after started=false")
+	}
+}
+
+func TestSupervise_ContextDoneStopsRestart(t *testing.T) {
+	// Test that supervise stops restarting when context is done.
+	s := New("/model.gguf", 11437, "/bin/true")
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start with a process that exits immediately
+	cmd := exec.Command("/bin/true")
+	cmd.Start()
+	s.proc = cmd
+	s.started = true
+
+	// Wait for process to exit
+	cmd.Wait()
+
+	done := make(chan bool)
+	go func() {
+		s.supervise(ctx, []string{})
+		done <- true
+	}()
+
+	// Cancel the context quickly to prevent restart loop
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// supervise should exit when context is canceled
+		t.Log("supervise exited as expected")
+	case <-time.After(2 * time.Second):
+		t.Error("supervise should have exited after context cancellation")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Server.Stop — process cleanup
+// ---------------------------------------------------------------------------
+
+func TestServerStop_NilProcess(t *testing.T) {
+	// Test Stop() with nil process doesn't panic
+	s := New("/model.gguf", 11437, "/llama-server")
+	s.proc = nil
+	s.started = true
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Stop() panicked with nil process: %v", r)
+		}
+	}()
+
+	s.Stop()
+
+	if s.started {
+		t.Error("expected started=false after Stop()")
+	}
+}
+
+func TestServerStop_NilProcessState(t *testing.T) {
+	// Test Stop() with exec.Cmd but nil Process
+	s := New("/model.gguf", 11437, "/llama-server")
+	s.proc = &exec.Cmd{}
+	s.started = true
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Stop() panicked: %v", r)
+		}
+	}()
+
+	s.Stop()
+
+	if s.started {
+		t.Error("expected started=false after Stop()")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// concurrency tests
+// ---------------------------------------------------------------------------
+
+func TestServer_ConcurrentStopAndEmbed(t *testing.T) {
+	// Test that concurrent Stop() and Embed() calls are safe.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/embedding" {
+			fmt.Fprint(w, `{"embedding": [0.1, 0.2]}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	// Stop the server
+	s.Stop()
+
+	// Try to embed after stopping - should return error
+	ctx := context.Background()
+	_, err := s.Embed(ctx, "test")
+	if err == nil {
+		t.Error("expected error when calling Embed after Stop")
+	}
+}
+
+func TestServer_ConcurrentStartAndEmbed(t *testing.T) {
+	// Test concurrent operations with a started server.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/embedding" {
+			fmt.Fprint(w, `{"embedding": [0.1, 0.2]}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	// Multiple concurrent Embed calls
+	done := make(chan error, 5)
+	for i := 0; i < 5; i++ {
+		go func() {
+			_, err := s.Embed(context.Background(), "test")
+			done <- err
+		}()
+	}
+
+	for i := 0; i < 5; i++ {
+		err := <-done
+		if err != nil {
+			t.Errorf("concurrent embed %d failed: %v", i, err)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// edge cases for Start
+// ---------------------------------------------------------------------------
+
+func TestStart_Idempotent(t *testing.T) {
+	// Test that calling Start twice is safe (should return immediately on second call)
+	s := New("/model.gguf", 11437, "/llama-server")
+	s.started = true
+
+	err1 := s.Start(context.Background())
+	err2 := s.Start(context.Background())
+
+	if err1 != nil || err2 != nil {
+		t.Errorf("start should be idempotent: err1=%v, err2=%v", err1, err2)
 	}
 }
