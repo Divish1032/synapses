@@ -143,6 +143,8 @@ func (s *Server) handleRemember(
 	}
 	if len(anchorNodes) > 0 {
 		resp["anchored_to"] = len(anchorNodes)
+	} else {
+		resp["tier_hint"] = "If this memory describes a code entity, architecture fact, or task context derived from the graph, add anchor_nodes=[\"node_id\"] so it auto-invalidates when the code changes. Use find_entity() to get a node ID first."
 	}
 
 	// F12: Auto-create a fix task when:

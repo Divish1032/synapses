@@ -465,6 +465,51 @@ func mustJSON(t *testing.T, v any) string {
 	return string(b)
 }
 
+// ── AM-5: tier_hint enforcement tests ────────────────────────────────────────
+
+// TestRemember_TierHint_WhenNoAnchorNodes verifies that remember() without
+// anchor_nodes returns a tier_hint guiding agents toward Tier 2 storage.
+func TestRemember_TierHint_WhenNoAnchorNodes(t *testing.T) {
+	srv := newTestServer(t)
+	result, err := srv.handleRemember(ctx, callTool(map[string]any{
+		"agent_id":     "agent-1",
+		"decision":     "Use JWT for auth",
+		"episode_type": "decision",
+		"outcome":      "success",
+	}))
+	m := mustResult(t, result, err)
+
+	hint, ok := m["tier_hint"].(string)
+	if !ok || hint == "" {
+		t.Error("expected tier_hint in response when anchor_nodes is absent")
+	}
+	if m["anchored_to"] != nil {
+		t.Error("anchored_to should be absent when no anchor_nodes provided")
+	}
+}
+
+// TestRemember_NoTierHint_WhenAnchorNodesProvided verifies that remember()
+// with anchor_nodes returns anchored_to and omits tier_hint.
+func TestRemember_NoTierHint_WhenAnchorNodesProvided(t *testing.T) {
+	srv := newTestServer(t)
+	result, err := srv.handleRemember(ctx, callTool(map[string]any{
+		"agent_id":     "agent-1",
+		"decision":     "AuthService uses JWT",
+		"episode_type": "pattern",
+		"outcome":      "success",
+		"anchor_nodes": `["repo::internal/auth/service.go::AuthService"]`,
+	}))
+	m := mustResult(t, result, err)
+
+	if m["tier_hint"] != nil {
+		t.Error("tier_hint should be absent when anchor_nodes is provided")
+	}
+	anchored, ok := m["anchored_to"].(float64)
+	if !ok || anchored != 1 {
+		t.Errorf("expected anchored_to=1, got %v", m["anchored_to"])
+	}
+}
+
 // ── AM-1: E2E Integration Tests ──────────────────────────────────────────────
 
 // TestE2E_RememberWithAnchors_FullPath exercises the complete lifecycle:
