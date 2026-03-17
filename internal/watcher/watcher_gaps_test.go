@@ -14,7 +14,9 @@ package watcher
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -155,8 +157,8 @@ func TestHandleEvent_Write_ConfigPath_TriggersConfigReload(t *testing.T) {
 	defer w.Stop()
 	w.configPath = cfgPath
 
-	called := false
-	w.SetConfigChangeHandler(func(_ *config.Config) { called = true })
+	var called atomic.Bool
+	w.SetConfigChangeHandler(func(_ *config.Config) { called.Store(true) })
 
 	// handleEvent with Write for the config file should debounce config reload.
 	w.handleEvent(fsnotify.Event{Name: cfgPath, Op: fsnotify.Write}, root)
@@ -164,7 +166,7 @@ func TestHandleEvent_Write_ConfigPath_TriggersConfigReload(t *testing.T) {
 	// Wait for debounce + reload.
 	time.Sleep(debounceDelay + 100*time.Millisecond)
 
-	if !called {
+	if !called.Load() {
 		t.Error("expected config change handler to be called")
 	}
 }
@@ -318,5 +320,89 @@ func TestHandleEvent_Remove_WithStore_ClearsCallSites(t *testing.T) {
 	// Node should be gone.
 	if hasNode(g, "Gone") {
 		t.Error("Gone node should be removed")
+	}
+}
+
+// ── reparseFile → blame pipeline (end-to-end integration) ────────────────────
+
+// TestReparseFile_SetsBlameMetadata is the full end-to-end integration test for
+// BUG-EVAL-6. It proves that after reparseFile runs on a file that exists in
+// git, all function nodes carry blame_author, blame_date, blame_commit, churn,
+// and staleness_score — even when the nodes were freshly created by the reparse
+// (no prior metadata from a startup EnrichChurn/EnrichBlame pass).
+func TestReparseFile_SetsBlameMetadata(t *testing.T) {
+	root := t.TempDir()
+
+	// Helper: run a git command in root, skip test if git unavailable.
+	gitRun := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if err := cmd.Run(); err != nil {
+			t.Skipf("git %v failed: %v — skipping blame integration test", args, err)
+		}
+	}
+
+	// Initialise a real git repository with one committed Go file.
+	gitRun("init")
+	gitRun("config", "user.email", "test@example.com")
+	gitRun("config", "user.name", "Test")
+
+	goFile := filepath.Join(root, "svc.go")
+	if err := os.WriteFile(goFile, []byte("package p\nfunc Serve() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun("add", ".")
+	gitRun("commit", "-m", "initial commit")
+
+	// Build a graph and watcher with root set — mirrors the daemon startup path.
+	g := graph.New(root)
+	g.SetRoot(root)
+
+	w, err := New(g, parser.NewWalker(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer w.Stop()
+
+	// reparseFile is what the watcher calls on every file-change event.
+	// It must: parse the file into nodes, then call EnrichBlameForFile +
+	// EnrichCommitContextForFile before returning.
+	w.reparseFile(goFile, root)
+
+	// The Serve function node must exist after reparse.
+	if !hasNode(g, "Serve") {
+		t.Fatal("expected Serve node after reparseFile — parse step failed")
+	}
+
+	// Find the Serve node and assert all blame fields are populated.
+	var serveNode *graph.Node
+	for _, n := range g.AllNodes() {
+		if n.Name == "Serve" && n.Type == graph.NodeFunction {
+			serveNode = n
+			break
+		}
+	}
+	if serveNode == nil {
+		t.Fatal("Serve function node not found in graph")
+	}
+	if serveNode.Metadata == nil {
+		t.Fatal("Serve node has nil Metadata — EnrichBlameForFile did not run")
+	}
+
+	// Core blame fields — must be non-empty after a real git commit.
+	for _, field := range []string{"blame_author", "blame_date", "blame_commit"} {
+		if serveNode.Metadata[field] == "" {
+			t.Errorf("Serve node missing %s after reparseFile on a git-tracked file", field)
+		}
+	}
+
+	// churn must be set by EnrichBlameForFile (not left absent as before the fix).
+	if serveNode.Metadata["churn"] == "" {
+		t.Error("Serve node missing churn — EnrichBlameForFile did not set it for fresh node")
+	}
+
+	// staleness_score must be present (may be "0.0" for a brand-new commit, but must exist).
+	if serveNode.Metadata["staleness_score"] == "" {
+		t.Error("Serve node missing staleness_score after reparseFile")
 	}
 }
