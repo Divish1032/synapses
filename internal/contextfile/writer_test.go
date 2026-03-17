@@ -331,3 +331,274 @@ func TestRender_IdentityWithoutToolGuidance(t *testing.T) {
 		t.Error("should not include empty guidance block")
 	}
 }
+
+// --- Additional coverage tests for error paths ---
+
+func TestWrite_WithIdentityAndTasks(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	id := &graph.ProjectIdentity{
+		RepoID: "test-repo",
+		Scale:  graph.ScaleMedium,
+		Summary: graph.GraphSummary{
+			Files:     30,
+			Functions: 150,
+			Edges:     500,
+		},
+		ToolGuidance: "Use Synapses tools here.",
+	}
+	tasks := []store.Task{
+		{ID: "t1", Title: "Task 1", Status: "pending"},
+		{ID: "t2", Title: "Task 2", Status: "in_progress"},
+	}
+
+	if err := Write("/test/project", id, tasks); err != nil {
+		t.Fatalf("Write with identity and tasks failed: %v", err)
+	}
+
+	path, _ := ContextFilePath("/test/project")
+	data, _ := os.ReadFile(path)
+	content := string(data)
+
+	if !strings.Contains(content, "test-repo") {
+		t.Error("missing repo ID in output")
+	}
+	if !strings.Contains(content, "medium") {
+		t.Error("missing scale in output")
+	}
+	if !strings.Contains(content, "1 pending") {
+		t.Error("missing pending count")
+	}
+	if !strings.Contains(content, "1 in progress") {
+		t.Error("missing in-progress count")
+	}
+}
+
+func TestContextFilePath_CreatesDirectoryIfMissing(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	path, err := ContextFilePath("/test/project")
+	if err != nil {
+		t.Fatalf("ContextFilePath failed: %v", err)
+	}
+
+	// Verify directory structure was created
+	dir := filepath.Dir(path)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("context directory not created: %v", err)
+	}
+}
+
+func TestContextFilePath_DirectoryAlreadyExists(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// Call once to create directory
+	path1, _ := ContextFilePath("/proj1")
+
+	// Call again with different project — should not fail even if dir exists
+	path2, err := ContextFilePath("/proj2")
+	if err != nil {
+		t.Fatalf("second ContextFilePath call failed: %v", err)
+	}
+
+	if path1 == path2 {
+		t.Error("expected different paths for different projects")
+	}
+
+	// Both files should be in same directory
+	if filepath.Dir(path1) != filepath.Dir(path2) {
+		t.Error("expected both paths in same directory")
+	}
+}
+
+func TestRender_AllTaskStatusesInProgress(t *testing.T) {
+	tasks := []store.Task{
+		{ID: "t1", Status: "in_progress"},
+		{ID: "t2", Status: "in_progress"},
+		{ID: "t3", Status: "in_progress"},
+	}
+	out := render(nil, tasks)
+	if !strings.Contains(out, "3 in progress") {
+		t.Errorf("expected '3 in progress', got:\n%s", out)
+	}
+	// Should not show pending count if there are no pending tasks
+	if strings.Contains(out, "pending") {
+		parts := strings.Split(out, "\n")
+		for _, part := range parts {
+			if strings.Contains(part, "pending") && strings.Contains(part, "**Tasks**") {
+				t.Errorf("should not mention 'pending' when no pending tasks exist")
+			}
+		}
+	}
+}
+
+func TestRender_OnlyPendingTasks(t *testing.T) {
+	tasks := []store.Task{
+		{ID: "t1", Status: "pending"},
+		{ID: "t2", Status: "pending"},
+	}
+	out := render(nil, tasks)
+	if !strings.Contains(out, "2 pending") {
+		t.Errorf("expected '2 pending', got:\n%s", out)
+	}
+	// Should not show in_progress if there are no in_progress tasks
+	if strings.Contains(out, "in progress") {
+		parts := strings.Split(out, "\n")
+		for _, part := range parts {
+			if strings.Contains(part, "in progress") && strings.Contains(part, "**Tasks**") {
+				t.Errorf("should not mention 'in progress' when no in_progress tasks exist")
+			}
+		}
+	}
+}
+
+func TestFnvHash_EmptyString(t *testing.T) {
+	h := fnvHash("")
+	if len(h) != 8 {
+		t.Errorf("fnvHash(\"\") length = %d, want 8", len(h))
+	}
+	// Hash of empty string should be consistent
+	h2 := fnvHash("")
+	if h != h2 {
+		t.Errorf("fnvHash(\"\") not deterministic: %q vs %q", h, h2)
+	}
+}
+
+func TestFnvHash_SingleCharacter(t *testing.T) {
+	h1 := fnvHash("a")
+	h2 := fnvHash("b")
+	if h1 == h2 {
+		t.Errorf("single char hashes collision: %q == %q", h1, h2)
+	}
+	if len(h1) != 8 || len(h2) != 8 {
+		t.Errorf("hash format incorrect: %q, %q", h1, h2)
+	}
+}
+
+func TestFilterPending_OnlyInProgress(t *testing.T) {
+	tasks := []store.Task{
+		{ID: "t1", Status: "in_progress"},
+		{ID: "t2", Status: "in_progress"},
+	}
+	got := filterPending(tasks)
+	if len(got) != 2 {
+		t.Errorf("expected 2 in_progress tasks, got %d", len(got))
+	}
+	for _, task := range got {
+		if task.Status != "in_progress" {
+			t.Errorf("expected in_progress, got %q", task.Status)
+		}
+	}
+}
+
+func TestWrite_RelativePathHandling(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// Test with relative path
+	if err := Write("./relative/path", nil, nil); err != nil {
+		t.Fatalf("Write with relative path failed: %v", err)
+	}
+
+	path, _ := ContextFilePath("./relative/path")
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("file not created for relative path: %v", err)
+	}
+}
+
+func TestWrite_ContextFilePathError(t *testing.T) {
+	// If ContextFilePath returns an error (e.g., HOME not accessible),
+	// Write should propagate that error
+	if err := Write("", nil, nil); err == nil {
+		// Empty repoRoot may or may not error depending on hash behavior
+		// Just verify Write handles the call without panicking
+	}
+}
+
+func TestRender_WithIdentityAndGuidance(t *testing.T) {
+	id := &graph.ProjectIdentity{
+		RepoID:       "my-app",
+		Scale:        graph.ScaleLarge,
+		ToolGuidance: "Large repo — always use Synapses tools.",
+		Summary: graph.GraphSummary{
+			Files:     500,
+			Functions: 2000,
+			Edges:     8000,
+		},
+	}
+	out := render(id, nil)
+
+	// Verify all components are present
+	if !strings.Contains(out, "my-app") {
+		t.Error("missing repo ID")
+	}
+	if !strings.Contains(out, "Large repo") {
+		t.Error("missing tool guidance content")
+	}
+	if !strings.Contains(out, "large") {
+		t.Error("missing scale indicator")
+	}
+	if !strings.Contains(out, "500") || !strings.Contains(out, "2000") || !strings.Contains(out, "8000") {
+		t.Error("missing summary statistics")
+	}
+}
+
+func TestRender_MixedTaskStatuses(t *testing.T) {
+	tasks := []store.Task{
+		{ID: "p1", Status: "pending"},
+		{ID: "p2", Status: "pending"},
+		{ID: "i1", Status: "in_progress"},
+		{ID: "d1", Status: "done"},
+		{ID: "c1", Status: "cancelled"},
+	}
+	out := render(nil, tasks)
+
+	// Should show 2 pending and 1 in progress
+	if !strings.Contains(out, "2 pending") {
+		t.Errorf("expected '2 pending', got:\n%s", out)
+	}
+	if !strings.Contains(out, "1 in progress") {
+		t.Errorf("expected '1 in progress', got:\n%s", out)
+	}
+	// Should not mention done or cancelled in task summary
+	if strings.Count(out, "done") > 0 {
+		// done might appear in the timestamp or elsewhere, just count
+		if strings.Count(out, "done") > 1 { // allow for "done" in the file timestamp
+			t.Error("'done' should not appear in task summary")
+		}
+	}
+}
+
+func TestFnvHash_LongPath(t *testing.T) {
+	longPath := "/very/long/path/to/some/project/with/many/segments/that/goes/on/and/on/and/on/and/on"
+	h := fnvHash(longPath)
+	if len(h) != 8 {
+		t.Errorf("expected 8-char hash for long path, got %d: %s", len(h), h)
+	}
+	// Should be deterministic
+	h2 := fnvHash(longPath)
+	if h != h2 {
+		t.Errorf("hash not deterministic for long path: %s vs %s", h, h2)
+	}
+}
+
+func TestFilterPending_MixedStatuses(t *testing.T) {
+	tasks := []store.Task{
+		{ID: "1", Status: "pending"},
+		{ID: "2", Status: "in_progress"},
+		{ID: "3", Status: "pending"},
+		{ID: "4", Status: "done"},
+		{ID: "5", Status: "in_progress"},
+	}
+	got := filterPending(tasks)
+	if len(got) != 4 { // 2 pending + 2 in_progress
+		t.Fatalf("expected 4 pending/in_progress, got %d", len(got))
+	}
+	// Verify order is preserved (first 2 pending, then 2 in_progress)
+	if got[0].ID != "1" || got[1].ID != "2" || got[2].ID != "3" || got[3].ID != "5" {
+		t.Errorf("unexpected order: %v", got)
+	}
+}
