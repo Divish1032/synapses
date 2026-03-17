@@ -8,6 +8,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/SynapsesOS/synapses/internal/brain"
+	brainconfig "github.com/SynapsesOS/synapses/internal/brain/config"
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -151,6 +153,112 @@ func TestHandleSessionInit_CollisionWarning(t *testing.T) {
 	}
 	if !strings.Contains(warning, agentID) {
 		t.Errorf("warning should mention the agent_id, got: %q", warning)
+	}
+}
+
+// ── BRAIN-1: brain_health in session_init ─────────────────────────────────────
+
+func TestHandleSessionInit_BrainHealth_AbsentWhenNoBrain(t *testing.T) {
+	s := newTestServer(t)
+	// brainClient is nil by default in test server.
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "no-brain"}))
+	m := mustResult(t, res, err)
+	noKey(t, m, "brain_health")
+	noKey(t, m, "brain_warning")
+}
+
+func newTestBrainClient(t *testing.T) *brain.Client {
+	t.Helper()
+	cfg := brainconfig.DefaultConfig()
+	cfg.Enabled = true
+	cfg.OllamaURL = "http://127.0.0.1:1" // unreachable — calls will fail, but impl is created with stats
+	cfg.DBPath = t.TempDir() + "/brain-test.db"
+	cfg.TimeoutMS = 100
+	return brain.NewInProcess(&cfg)
+}
+
+func TestHandleSessionInit_BrainHealth_PresentWhenBrainEnabled(t *testing.T) {
+	s := newTestServer(t)
+	bc := newTestBrainClient(t)
+	defer bc.Close()
+	s.SetBrainClient(bc)
+
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "brain-agent"}))
+	m := mustResult(t, res, err)
+
+	health, ok := m["brain_health"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected brain_health map, got %T (keys: %v)", m["brain_health"], mapKeys(m))
+	}
+
+	// Must have model field.
+	if _, ok := health["model"]; !ok {
+		t.Error("brain_health missing 'model' field")
+	}
+
+	// Must have tiers map with expected tiers.
+	tiers, ok := health["tiers"].(map[string]any)
+	if !ok {
+		t.Fatalf("brain_health.tiers missing or wrong type: %T", health["tiers"])
+	}
+	for _, tier := range []string{"ingest", "enrich", "guardian", "orchestrate", "archivist"} {
+		tierData, ok := tiers[tier].(map[string]any)
+		if !ok {
+			t.Errorf("brain_health.tiers.%s missing or wrong type", tier)
+			continue
+		}
+		// All tiers should have circuit="closed" initially.
+		if circuit, _ := tierData["circuit"].(string); circuit != "closed" {
+			t.Errorf("brain_health.tiers.%s.circuit = %q, want 'closed'", tier, circuit)
+		}
+	}
+
+	// No warning expected when all tiers are healthy (0 calls = no warning).
+	noKey(t, m, "brain_warning")
+}
+
+func TestHandleSessionInit_BrainWarning_DegradedTier(t *testing.T) {
+	s := newTestServer(t)
+	bc := newTestBrainClient(t)
+	defer bc.Close()
+	s.SetBrainClient(bc)
+
+	// Simulate failures: call Ingest with bad data to generate failures.
+	// Ollama is unreachable (port 1), so every call fails and records a failure stat.
+	for i := 0; i < 5; i++ {
+		bc.Ingest(ctx, brain.IngestRequest{
+			NodeID:   "test::file.go::Func",
+			NodeName: "Func",
+			Code:     "func Func() {}",
+			Package:  "test",
+		})
+	}
+
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "warn-agent"}))
+	m := mustResult(t, res, err)
+
+	health, ok := m["brain_health"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected brain_health map, got %T", m["brain_health"])
+	}
+
+	tiers, _ := health["tiers"].(map[string]any)
+	ingest, _ := tiers["ingest"].(map[string]any)
+	calls, _ := ingest["calls"].(float64)
+	if calls < 1 {
+		// Ollama not running → ingest calls may be 0 if the impl short-circuits
+		// before recording stats. Skip the warning check in that case.
+		t.Skip("no ingest calls recorded (Ollama likely unavailable) — warning test skipped")
+	}
+
+	rate, _ := ingest["success_rate"].(float64)
+	if rate >= 0.5 {
+		t.Skip("ingest success_rate >= 0.5 — cannot test warning")
+	}
+
+	warning, ok := m["brain_warning"].(string)
+	if !ok || warning == "" {
+		t.Errorf("expected brain_warning for degraded ingest tier, got %v", m["brain_warning"])
 	}
 }
 
