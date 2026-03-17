@@ -3521,11 +3521,11 @@ func (s *Server) handleSessionInit(
 					}
 					rate, _ := tier["success_rate"].(float64)
 					circuit, _ := tier["circuit"].(string)
-					if rate < 0.5 {
-						warnings = append(warnings, fmt.Sprintf("brain tier %q has %.0f%% success rate — model may be misconfigured", name, rate*100))
-					}
 					if circuit == "open" {
+						// Circuit open subsumes the rate warning — one message per tier.
 						warnings = append(warnings, fmt.Sprintf("brain tier %q circuit breaker is open — tier temporarily disabled", name))
+					} else if rate < 0.5 {
+						warnings = append(warnings, fmt.Sprintf("brain tier %q has %.0f%% success rate — model may be misconfigured", name, rate*100))
 					}
 				}
 				if len(warnings) > 0 {
