@@ -332,6 +332,15 @@ func (p *NixParser) extractSingleBinding(
 		Metadata: meta,
 	})
 	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+
+	// If the binding value is an import expression, track it as an import edge.
+	// This catches patterns like: pkg = import ./pkg.nix;
+	for i := uint32(0); i < node.ChildCount(); i++ {
+		child := node.Child(i)
+		if !child.IsNull() && child.Type() == "apply_expression" {
+			p.handleApplyExpression(g, child, src, filePath, fileNodeID)
+		}
+	}
 }
 
 // handleInherit processes `inherit name1 name2;` and `inherit (expr) name1;` nodes.
@@ -431,6 +440,7 @@ func (p *NixParser) handleApplyExpression(
 		Name:    importPath,
 		Package: importPath,
 		File:    filePath,
+		Line:    int(node.StartPoint().Row) + 1,
 	})
 	g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
 }
