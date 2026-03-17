@@ -1543,6 +1543,49 @@ func TestGoParser_SliceLiteralVar_GroupedVars(t *testing.T) {
 	assertNode(t, g, "maxRetries", graph.NodeVariable)
 }
 
+// TestGoParser_SliceLiteralVar_OverwritesStaleNode verifies that re-parsing a
+// file corrects a stale misclassification. Before FIX-PARSER-2 the emitVar
+// guard (if g.GetNode(nodeID) != nil { continue }) prevented re-indexing from
+// fixing a var that was previously stored as struct. This test simulates that
+// by manually inserting a wrong struct node before parsing.
+func TestGoParser_SliceLiteralVar_OverwritesStaleNode(t *testing.T) {
+	g := graph.New("testrepo")
+
+	// Simulate the stale state: an old parse stored toolCatalog as struct.
+	staleID := g.MakeNodeID("internal/mcp/tools.go", "toolCatalog")
+	g.AddNode(&graph.Node{
+		ID:   staleID,
+		Type: graph.NodeStruct,
+		Name: "toolCatalog",
+		File: "internal/mcp/tools.go",
+		Line: 999, // wrong line from old parse
+	})
+	if node := g.GetNode(staleID); node == nil || node.Type != graph.NodeStruct {
+		t.Fatal("precondition failed: stale struct node not inserted")
+	}
+
+	// Re-parse the file — emitVar must overwrite the stale struct node.
+	p := parser.NewGoParser()
+	if err := p.Parse(g, "internal/mcp/tools.go", []byte(goSliceVarSource)); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	// toolCatalog must now be NodeVariable, not NodeStruct.
+	assertNode(t, g, "toolCatalog", graph.NodeVariable)
+	assertMetaKind(t, g, "toolCatalog", "var")
+
+	// Line must reflect the var keyword line, not the stale 999.
+	nodes := g.FindByName("toolCatalog")
+	for _, n := range nodes {
+		if n.Name == "toolCatalog" {
+			if n.Line == 999 {
+				t.Errorf("toolCatalog still has stale line 999 — overwrite did not apply")
+			}
+			break
+		}
+	}
+}
+
 // ─── Python decorator metadata ────────────────────────────────────────────
 
 const pyDecoratorSource = `class MyModel:
