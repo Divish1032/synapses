@@ -10,7 +10,7 @@ import (
 
 // FSharpParser parses F# (.fs, .fsi, .fsx) source files.
 // Used heavily in fintech (.NET ecosystem), financial modeling, and functional teams.
-// Uses regex-based extraction — F# is not in smacker/go-tree-sitter.
+// Uses regex-based extraction — F# is not in go-tree-sitter.
 //
 // Extracts:
 //   - Let bindings (functions and values)   → NodeFunction

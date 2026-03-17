@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/groovy"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/groovy"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -18,7 +18,7 @@ type GroovyParser struct {
 
 // NewGroovyParser creates a ready-to-use GroovyParser.
 func NewGroovyParser() *GroovyParser {
-	return &GroovyParser{language: groovy.GetLanguage()}
+	return &GroovyParser{language: sitter.NewLanguage(groovy.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -27,17 +27,17 @@ func (p *GroovyParser) Extensions() []string {
 }
 
 // extractGroovyDeclInfo performs a pre-pass for metadata.
-func extractGroovyDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractGroovyDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "function_definition":
-			if nameNode := firstChildOfType(n, "identifier"); nameNode != nil {
+			if nameNode := firstChildOfType(n, "identifier"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if enclosingClass != "" {
@@ -51,7 +51,7 @@ func extractGroovyDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "class_definition":
-			if nameNode := firstChildOfType(n, "identifier"); nameNode != nil {
+			if nameNode := firstChildOfType(n, "identifier"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -59,13 +59,13 @@ func extractGroovyDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 				// Walk all children with class context.
-				for i := 0; i < int(n.ChildCount()); i++ {
+				for i := uint32(0); i < n.ChildCount(); i++ {
 					walk(n.Child(i), name)
 				}
 				return
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -78,7 +78,7 @@ func (p *GroovyParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -94,15 +94,15 @@ func (p *GroovyParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 	declInfo := extractGroovyDeclInfo(root, src)
 
 	// --- package declaration ---
-	var walkGroovyPkg func(n *sitter.Node)
-	walkGroovyPkg = func(n *sitter.Node) {
-		if n == nil {
+	var walkGroovyPkg func(n sitter.Node)
+	walkGroovyPkg = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "groovy_package" {
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				if child.Type() == "qualified_name" {
@@ -119,7 +119,7 @@ func (p *GroovyParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walkGroovyPkg(n.Child(i))
 		}
 	}
@@ -157,18 +157,18 @@ func (p *GroovyParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 
 // extractAllDeclarations walks Groovy AST.
 func (p *GroovyParser) extractAllDeclarations(
-	g *graph.Graph, root *sitter.Node, src []byte,
+	g *graph.Graph, root sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID, declInfo map[string]declMeta,
 ) {
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "class_definition":
 			nameNode := firstChildOfType(n, "identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -198,14 +198,14 @@ func (p *GroovyParser) extractAllDeclarations(
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 			// Walk all children with class context — Groovy grammar may not have
 			// a named body node, so walk everything.
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				walk(n.Child(i), name)
 			}
 			return
 
 		case "function_definition":
 			nameNode := firstChildOfType(n, "identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -228,7 +228,7 @@ func (p *GroovyParser) extractAllDeclarations(
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -246,7 +246,7 @@ func (p *GroovyParser) extractAllDeclarations(
 //	id 'com.foo.plugin'                   → NodePackage  kind="gradle_plugin"
 //	implementation 'com.foo:bar:1.0'      → NodePackage  kind="gradle_dep"
 //	api / compile / runtimeOnly / etc.
-func extractGradleDSL(g *graph.Graph, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func extractGradleDSL(g *graph.Graph, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	lines := strings.Split(string(src), "\n")
 
 	// Gradle dependency configuration keywords.
@@ -394,7 +394,7 @@ func extractGradleStringArg(line string) string {
 
 // collectGroovyCallSites collects call sites. The Groovy grammar may not have
 // standard call_expression nodes, so we try multiple query patterns.
-func collectGroovyCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectGroovyCallSites(g *graph.Graph, lang *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	for _, queryStr := range []string{
 		`(call_expression (identifier) @callee)`,
 		`(juxt_expression (identifier) @callee)`,

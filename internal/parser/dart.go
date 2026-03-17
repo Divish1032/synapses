@@ -10,7 +10,7 @@ import (
 
 // DartParser parses Dart (.dart) source files.
 // Used in Flutter mobile apps, server-side Dart, and CLI tools.
-// Uses regex-based extraction since Dart is not in smacker/go-tree-sitter.
+// Uses regex-based extraction since Dart is not in go-tree-sitter.
 type DartParser struct{}
 
 // NewDartParser creates a ready-to-use DartParser.

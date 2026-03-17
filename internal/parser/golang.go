@@ -9,8 +9,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	gositter "github.com/smacker/go-tree-sitter/golang"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	gositter "github.com/alexaandru/go-sitter-forest/go"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -41,36 +41,36 @@ type goFuncInfo struct {
 // declarations and returns a map of interface name → list of declared method names.
 // This is stored as metadata on interface nodes so the resolver can later detect
 // which structs implement which interfaces without re-parsing the source.
-func extractInterfaceMethods(root *sitter.Node, src []byte) map[string][]string {
+func extractInterfaceMethods(root sitter.Node, src []byte) map[string][]string {
 	result := make(map[string][]string)
-	for i := 0; i < int(root.ChildCount()); i++ {
+	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
-		if child == nil || child.Type() != "type_declaration" {
+		if child.IsNull() || child.Type() != "type_declaration" {
 			continue
 		}
-		for j := 0; j < int(child.ChildCount()); j++ {
+		for j := uint32(0); j < child.ChildCount(); j++ {
 			spec := child.Child(j)
-			if spec == nil || spec.Type() != "type_spec" {
+			if spec.IsNull() || spec.Type() != "type_spec" {
 				continue
 			}
 			nameNode := spec.ChildByFieldName("name")
 			typeNode := spec.ChildByFieldName("type")
-			if nameNode == nil || typeNode == nil || typeNode.Type() != "interface_type" {
+			if nameNode.IsNull() || typeNode.IsNull() || typeNode.Type() != "interface_type" {
 				continue
 			}
 			ifaceName := string(src[nameNode.StartByte():nameNode.EndByte()])
 			var methods []string
-			for k := 0; k < int(typeNode.ChildCount()); k++ {
+			for k := uint32(0); k < typeNode.ChildCount(); k++ {
 				// Interface method declarations are "method_elem" nodes in the
 				// tree-sitter Go grammar. The method name is the first
 				// field_identifier child of the method_elem.
 				methodElem := typeNode.Child(k)
-				if methodElem == nil || methodElem.Type() != "method_elem" {
+				if methodElem.IsNull() || methodElem.Type() != "method_elem" {
 					continue
 				}
-				for l := 0; l < int(methodElem.ChildCount()); l++ {
+				for l := uint32(0); l < methodElem.ChildCount(); l++ {
 					nameNode := methodElem.Child(l)
-					if nameNode != nil && nameNode.Type() == "field_identifier" {
+					if !nameNode.IsNull() && nameNode.Type() == "field_identifier" {
 						if m := string(src[nameNode.StartByte():nameNode.EndByte()]); m != "" {
 							methods = append(methods, m)
 						}
@@ -91,20 +91,20 @@ func extractInterfaceMethods(root *sitter.Node, src []byte) map[string][]string 
 // method, and struct/interface declaration.  The returned map is keyed by the
 // unqualified name (for functions/types) or "ReceiverType.MethodName" (for
 // methods) — matching the name strings used when creating graph nodes.
-func extractGoDeclarationInfo(root *sitter.Node, src []byte) map[string]goFuncInfo {
+func extractGoDeclarationInfo(root sitter.Node, src []byte) map[string]goFuncInfo {
 	result := make(map[string]goFuncInfo)
 	lines := strings.Split(string(src), "\n")
 
-	for i := 0; i < int(root.ChildCount()); i++ {
+	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 
 		switch child.Type() {
 		case "function_declaration":
 			nameNode := child.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				continue
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -112,7 +112,7 @@ func extractGoDeclarationInfo(root *sitter.Node, src []byte) map[string]goFuncIn
 			endLine := int(child.EndPoint().Row) + 1
 			var calls []rawCallSite
 			var complexity int
-			if body := child.ChildByFieldName("body"); body != nil {
+			if body := child.ChildByFieldName("body"); !body.IsNull() {
 				calls = extractCallSites(body, src)
 				complexity = 1 + countComplexity(body)
 			}
@@ -127,7 +127,7 @@ func extractGoDeclarationInfo(root *sitter.Node, src []byte) map[string]goFuncIn
 		case "method_declaration":
 			nameNode := child.ChildByFieldName("name")
 			receiverNode := child.ChildByFieldName("receiver")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				continue
 			}
 			methodName := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -137,7 +137,7 @@ func extractGoDeclarationInfo(root *sitter.Node, src []byte) map[string]goFuncIn
 			endLine := int(child.EndPoint().Row) + 1
 			var calls []rawCallSite
 			var complexity int
-			if body := child.ChildByFieldName("body"); body != nil {
+			if body := child.ChildByFieldName("body"); !body.IsNull() {
 				calls = extractCallSites(body, src)
 				complexity = 1 + countComplexity(body)
 			}
@@ -152,14 +152,14 @@ func extractGoDeclarationInfo(root *sitter.Node, src []byte) map[string]goFuncIn
 		case "type_declaration":
 			// Handles struct and interface type declarations.
 			typeSpec := child.Child(0)
-			if typeSpec == nil || typeSpec.Type() != "type_spec" {
+			if typeSpec.IsNull() || typeSpec.Type() != "type_spec" {
 				// Multi-spec: (type_declaration (type_spec) (type_spec)...)
 				// Walk children to find type_spec nodes.
-				for j := 0; j < int(child.ChildCount()); j++ {
+				for j := uint32(0); j < child.ChildCount(); j++ {
 					spec := child.Child(j)
-					if spec != nil && spec.Type() == "type_spec" {
+					if !spec.IsNull() && spec.Type() == "type_spec" {
 						nameNode := spec.ChildByFieldName("name")
-						if nameNode == nil {
+						if nameNode.IsNull() {
 							continue
 						}
 						name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -174,7 +174,7 @@ func extractGoDeclarationInfo(root *sitter.Node, src []byte) map[string]goFuncIn
 				continue
 			}
 			nameNode := typeSpec.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				continue
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -191,11 +191,11 @@ func extractGoDeclarationInfo(root *sitter.Node, src []byte) map[string]goFuncIn
 
 // extractSignature returns the declaration signature (everything before the
 // function body opening brace), normalised to a single line.
-func extractSignature(declNode *sitter.Node, src []byte) string {
+func extractSignature(declNode sitter.Node, src []byte) string {
 	// Find the body block child — the signature is everything before it.
-	for i := 0; i < int(declNode.ChildCount()); i++ {
+	for i := uint32(0); i < declNode.ChildCount(); i++ {
 		child := declNode.Child(i)
-		if child != nil && child.Type() == "block" {
+		if !child.IsNull() && child.Type() == "block" {
 			sig := string(src[declNode.StartByte():child.StartByte()])
 			// Collapse newlines / excess whitespace in multi-line signatures.
 			sig = strings.Join(strings.Fields(sig), " ")
@@ -208,25 +208,25 @@ func extractSignature(declNode *sitter.Node, src []byte) string {
 
 // extractReceiverType returns the base type name from a method receiver
 // parameter list, e.g. "(g *Graph)" → "Graph".
-func extractReceiverType(receiverNode *sitter.Node, src []byte) string {
-	if receiverNode == nil {
+func extractReceiverType(receiverNode sitter.Node, src []byte) string {
+	if receiverNode.IsNull() {
 		return ""
 	}
-	for i := 0; i < int(receiverNode.ChildCount()); i++ {
+	for i := uint32(0); i < receiverNode.ChildCount(); i++ {
 		param := receiverNode.Child(i)
-		if param == nil || param.Type() != "parameter_declaration" {
+		if param.IsNull() || param.Type() != "parameter_declaration" {
 			continue
 		}
 		typeNode := param.ChildByFieldName("type")
-		if typeNode == nil {
+		if typeNode.IsNull() {
 			continue
 		}
 		switch typeNode.Type() {
 		case "pointer_type":
 			// *T — find the inner type_identifier
-			for j := 0; j < int(typeNode.ChildCount()); j++ {
+			for j := uint32(0); j < typeNode.ChildCount(); j++ {
 				inner := typeNode.Child(j)
-				if inner != nil && inner.Type() == "type_identifier" {
+				if !inner.IsNull() && inner.Type() == "type_identifier" {
 					return string(src[inner.StartByte():inner.EndByte()])
 				}
 			}
@@ -268,21 +268,21 @@ func extractDocComment(lines []string, startLine int) string {
 //   - Func()             (plain identifier)                    → pkgAlias empty
 //
 // Deeper chains (a.b.c.d()) are skipped.
-func extractCallSites(node *sitter.Node, src []byte) []rawCallSite {
+func extractCallSites(node sitter.Node, src []byte) []rawCallSite {
 	var calls []rawCallSite
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "call_expression" {
 			fn := n.ChildByFieldName("function")
-			if fn != nil {
+			if !fn.IsNull() {
 				switch fn.Type() {
 				case "selector_expression":
 					operand := fn.ChildByFieldName("operand")
 					field := fn.ChildByFieldName("field")
-					if operand != nil && field != nil {
+					if !operand.IsNull() && !field.IsNull() {
 						name := string(src[field.StartByte():field.EndByte()])
 						switch operand.Type() {
 						case "identifier":
@@ -293,7 +293,7 @@ func extractCallSites(node *sitter.Node, src []byte) []rawCallSite {
 							// 2-level: a.field.Method() — use inner field as alias
 							// Handles s.graph.CarveEgoGraph(), self.db.Query(), etc.
 							innerField := operand.ChildByFieldName("field")
-							if innerField != nil {
+							if !innerField.IsNull() {
 								alias := string(src[innerField.StartByte():innerField.EndByte()])
 								calls = append(calls, rawCallSite{pkgAlias: alias, funcName: name})
 							}
@@ -307,7 +307,7 @@ func extractCallSites(node *sitter.Node, src []byte) []rawCallSite {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
@@ -323,7 +323,7 @@ type GoParser struct {
 // NewGoParser creates a ready-to-use GoParser.
 func NewGoParser() *GoParser {
 	return &GoParser{
-		language: gositter.GetLanguage(),
+		language: sitter.NewLanguage(gositter.GetLanguage()),
 	}
 }
 
@@ -346,7 +346,7 @@ func (p *GoParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	// First pass: extract package name.
@@ -368,16 +368,16 @@ func (p *GoParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 }
 
 // extractPackageName walks child nodes to find the package clause identifier.
-func extractPackageName(root *sitter.Node, src []byte) string {
+func extractPackageName(root sitter.Node, src []byte) string {
 	for i := uint32(0); i < root.ChildCount(); i++ {
-		child := root.Child(int(i))
-		if child == nil {
+		child := root.Child(i)
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "package_clause" {
 			for j := uint32(0); j < child.ChildCount(); j++ {
-				ident := child.Child(int(j))
-				if ident != nil && ident.Type() == "package_identifier" {
+				ident := child.Child(j)
+				if !ident.IsNull() && ident.Type() == "package_identifier" {
 					return string(src[ident.StartByte():ident.EndByte()])
 				}
 			}
@@ -389,7 +389,7 @@ func extractPackageName(root *sitter.Node, src []byte) string {
 // extractDeclarations walks the top-level statements and emits nodes/edges.
 func (p *GoParser) extractDeclarations(
 	g *graph.Graph,
-	root *sitter.Node,
+	root sitter.Node,
 	src []byte,
 	filePath, pkg string,
 	fileNodeID graph.NodeID,
@@ -653,10 +653,10 @@ func (p *GoParser) extractDeclarations(
 	// --- Package-level const declarations ---
 	// Handles both single: `const Foo = 1` and grouped: `const ( A = 1; B = 2 )`
 	// In grouped form the grammar wraps specs in a const_spec_list container node.
-	emitConst := func(spec *sitter.Node) {
-		for j := 0; j < int(spec.ChildCount()); j++ {
+	emitConst := func(spec sitter.Node) {
+		for j := uint32(0); j < spec.ChildCount(); j++ {
 			child := spec.Child(j)
-			if child == nil {
+			if child.IsNull() {
 				continue
 			}
 			if child.Type() == "identifier" {
@@ -680,9 +680,9 @@ func (p *GoParser) extractDeclarations(
 			}
 		}
 	}
-	var walkConst func(n *sitter.Node)
-	walkConst = func(n *sitter.Node) {
-		if n == nil {
+	var walkConst func(n sitter.Node)
+	walkConst = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		// Don't descend into function/method bodies — local consts are noise.
@@ -691,9 +691,9 @@ func (p *GoParser) extractDeclarations(
 			return
 		}
 		if n.Type() == "const_declaration" {
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				spec := n.Child(i)
-				if spec == nil {
+				if spec.IsNull() {
 					continue
 				}
 				switch spec.Type() {
@@ -701,16 +701,16 @@ func (p *GoParser) extractDeclarations(
 					emitConst(spec)
 				case "const_spec_list":
 					// Grouped: const ( A = 1; B = 2 ) — specs are children of the list.
-					for k := 0; k < int(spec.ChildCount()); k++ {
+					for k := uint32(0); k < spec.ChildCount(); k++ {
 						inner := spec.Child(k)
-						if inner != nil && inner.Type() == "const_spec" {
+						if !inner.IsNull() && inner.Type() == "const_spec" {
 							emitConst(inner)
 						}
 					}
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walkConst(n.Child(i))
 		}
 	}
@@ -719,10 +719,10 @@ func (p *GoParser) extractDeclarations(
 	// --- Package-level var declarations ---
 	// Handles both single: `var Foo = 1` and grouped: `var ( A = 1; B = 2 )`
 	// In grouped form the grammar wraps specs in a var_spec_list container node.
-	emitVar := func(spec *sitter.Node) {
-		for j := 0; j < int(spec.ChildCount()); j++ {
+	emitVar := func(spec sitter.Node) {
+		for j := uint32(0); j < spec.ChildCount(); j++ {
 			child := spec.Child(j)
-			if child == nil {
+			if child.IsNull() {
 				continue
 			}
 			if child.Type() == "identifier" {
@@ -746,9 +746,9 @@ func (p *GoParser) extractDeclarations(
 			}
 		}
 	}
-	var walkVar func(n *sitter.Node)
-	walkVar = func(n *sitter.Node) {
-		if n == nil {
+	var walkVar func(n sitter.Node)
+	walkVar = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		// Don't descend into function/method bodies — local vars are noise.
@@ -757,9 +757,9 @@ func (p *GoParser) extractDeclarations(
 			return
 		}
 		if n.Type() == "var_declaration" {
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				spec := n.Child(i)
-				if spec == nil {
+				if spec.IsNull() {
 					continue
 				}
 				switch spec.Type() {
@@ -767,16 +767,16 @@ func (p *GoParser) extractDeclarations(
 					emitVar(spec)
 				case "var_spec_list":
 					// Grouped: var ( A = 1; B = 2 ) — specs are children of the list.
-					for k := 0; k < int(spec.ChildCount()); k++ {
+					for k := uint32(0); k < spec.ChildCount(); k++ {
 						inner := spec.Child(k)
-						if inner != nil && inner.Type() == "var_spec" {
+						if !inner.IsNull() && inner.Type() == "var_spec" {
 							emitVar(inner)
 						}
 					}
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walkVar(n.Child(i))
 		}
 	}
@@ -785,16 +785,16 @@ func (p *GoParser) extractDeclarations(
 	// --- True type aliases: type Foo = Bar (uses type_alias node in some grammar versions) ---
 	// In certain go-tree-sitter versions, `type X = Y` is a `type_alias` node,
 	// not a `type_spec`, so the query above misses them.  Walk the AST directly.
-	var walkTypeAlias func(n *sitter.Node)
-	walkTypeAlias = func(n *sitter.Node) {
-		if n == nil {
+	var walkTypeAlias func(n sitter.Node)
+	walkTypeAlias = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "type_alias" {
 			// Structure varies by grammar version; look for the first type_identifier.
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				if child.Type() == "type_identifier" {
@@ -822,7 +822,7 @@ func (p *GoParser) extractDeclarations(
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walkTypeAlias(n.Child(i))
 		}
 	}
@@ -841,38 +841,34 @@ func (p *GoParser) extractDeclarations(
 // without breaking every downstream consumer.
 func runQuery(
 	lang *sitter.Language,
-	root *sitter.Node,
+	root sitter.Node,
 	src []byte,
 	queryStr string,
 	fn func(captures map[string]string, startLine int),
 ) error {
-	q, err := sitter.NewQuery([]byte(queryStr), lang)
-	if err != nil {
+	q, qerr := sitter.NewQuery(lang, []byte(queryStr))
+	if qerr != nil {
 		// Log to stderr so developers can see which queries need updating, but
 		// treat this as a non-fatal degradation — we still produce a file node.
-		fmt.Fprintf(os.Stderr, "synapses: tree-sitter query degraded (query compile error): %v\n", err)
+		fmt.Fprintf(os.Stderr, "synapses: tree-sitter query degraded (query compile error): %v\n", qerr)
 		return nil
 	}
 
 	qc := sitter.NewQueryCursor()
-	qc.Exec(q, root)
+	iter := qc.Matches(q, root, src)
 
 	for {
-		m, ok := qc.NextMatch()
-		if !ok {
+		m := iter.Next()
+		if m == nil {
 			break
 		}
-		// Apply predicate filters (e.g. #eq?, #match?) so that queries using
-		// these predicates are correctly evaluated. Without this, predicates
-		// are silently ignored, causing false-positive matches.
-		m = qc.FilterPredicates(m, src)
 		if len(m.Captures) == 0 {
 			continue
 		}
 		captures := make(map[string]string, len(m.Captures))
 		startLine := 0
 		for _, c := range m.Captures {
-			name := q.CaptureNameForId(c.Index)
+			name := q.CaptureNameForID(c.Index)
 			text := string(src[c.Node.StartByte():c.Node.EndByte()])
 			captures[name] = text
 			if startLine == 0 {
@@ -921,8 +917,8 @@ func buildMeta(info goFuncInfo) map[string]string {
 // Counts: if, for, expression_case, type_case, communication_case, and binary
 // expressions using && or ||. Struct/interface bodies return 0 because they
 // contain no control flow.
-func countComplexity(node *sitter.Node) int {
-	if node == nil {
+func countComplexity(node sitter.Node) int {
+	if node.IsNull() {
 		return 0
 	}
 	count := 0
@@ -934,15 +930,15 @@ func countComplexity(node *sitter.Node) int {
 		count = 1
 	case "binary_expression":
 		// Short-circuit operators introduce an implicit branch.
-		for i := 0; i < int(node.ChildCount()); i++ {
+		for i := uint32(0); i < node.ChildCount(); i++ {
 			ch := node.Child(i)
-			if ch != nil && (ch.Type() == "&&" || ch.Type() == "||") {
+			if !ch.IsNull() && (ch.Type() == "&&" || ch.Type() == "||") {
 				count = 1
 				break
 			}
 		}
 	}
-	for i := 0; i < int(node.ChildCount()); i++ {
+	for i := uint32(0); i < node.ChildCount(); i++ {
 		count += countComplexity(node.Child(i))
 	}
 	return count

@@ -10,7 +10,7 @@ import (
 
 // RParser parses R (.r, .R) source files.
 // Used extensively in data science, statistics, bioinformatics, finance, and pharma.
-// Uses regex-based extraction since R is not in smacker/go-tree-sitter.
+// Uses regex-based extraction since R is not in go-tree-sitter.
 //
 // Extracts:
 //   - Function assignments (<-, =, <<-) → NodeFunction

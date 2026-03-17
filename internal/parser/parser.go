@@ -100,10 +100,17 @@ func NewWalker() *Walker {
 	// Infrastructure
 	w.Register(NewHCLParser())        // deep: .tf .tfvars .hcl
 	w.Register(NewDockerfileParser()) // deep: .dockerfile
+	w.Register(NewMakefileParser())  // deep: .mk, Makefile
+	w.Register(NewCMakeParser())     // deep: .cmake, CMakeLists.txt
+	w.Register(NewNixParser())       // deep: .nix
+	w.Register(NewStarlarkParser())  // deep: .bzl .star, BUILD
 	w.Register(NewCUEParser())        // deep: .cue
 	w.Register(NewYAMLParser())       // deep: .yaml .yml (overrides generic)
 	// Schema / API
 	w.Register(NewProtobufParser()) // deep: .proto
+	w.Register(NewGraphQLParser())  // deep: .graphql .gql
+	// Smart Contracts
+	w.Register(NewSolidityParser()) // deep: .sol
 	// Documentation
 	w.Register(NewMarkdownParser()) // deep: .md .markdown .mdx (overrides generic)
 	return w

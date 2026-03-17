@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/cue"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/cue"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -21,7 +21,7 @@ type CUEParser struct {
 
 // NewCUEParser creates a ready-to-use CUEParser.
 func NewCUEParser() *CUEParser {
-	return &CUEParser{language: cue.GetLanguage()}
+	return &CUEParser{language: sitter.NewLanguage(cue.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -34,12 +34,12 @@ func (p *CUEParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	if tree == nil {
 		return nil
 	}
 	root := tree.RootNode()
-	if root == nil {
+	if root.IsNull() {
 		return nil
 	}
 
@@ -55,9 +55,9 @@ func (p *CUEParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	lines := strings.Split(string(src), "\n")
 
 	// Walk root children.
-	for i := 0; i < int(root.ChildCount()); i++ {
+	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		switch child.Type() {
@@ -82,19 +82,19 @@ func (p *CUEParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 // the file node. CUE: `package mypackage`
 func (p *CUEParser) handlePackageClause(
 	g *graph.Graph,
-	node *sitter.Node,
+	node sitter.Node,
 	src []byte,
 	fileNodeID graph.NodeID,
 ) {
 	// package_clause has an identifier child containing the package name.
 	ident := firstChildOfType(node, "identifier")
-	if ident == nil {
+	if ident.IsNull() {
 		// Fallback: try the second child (first is "package" keyword).
 		if node.ChildCount() >= 2 {
 			ident = node.Child(1)
 		}
 	}
-	if ident == nil {
+	if ident.IsNull() {
 		return
 	}
 	pkgName := childText(ident, src)
@@ -115,20 +115,20 @@ func (p *CUEParser) handlePackageClause(
 // imports (`import "path"`) and grouped imports (`import ( "a" \n "b" )`).
 func (p *CUEParser) handleImportDecl(
 	g *graph.Graph,
-	node *sitter.Node,
+	node sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
 ) {
 	// Walk children looking for import_spec nodes.
-	var walkImports func(n *sitter.Node)
-	walkImports = func(n *sitter.Node) {
-		if n == nil {
+	var walkImports func(n sitter.Node)
+	walkImports = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			child := n.Child(i)
-			if child == nil {
+			if child.IsNull() {
 				continue
 			}
 			switch child.Type() {
@@ -153,16 +153,16 @@ func (p *CUEParser) handleImportDecl(
 // handleImportSpec processes a single import_spec node.
 func (p *CUEParser) handleImportSpec(
 	g *graph.Graph,
-	node *sitter.Node,
+	node sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
 ) {
 	// import_spec may contain: optional alias identifier + string path.
 	// Walk children to find the string literal.
-	for i := 0; i < int(node.ChildCount()); i++ {
+	for i := uint32(0); i < node.ChildCount(); i++ {
 		child := node.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		text := childText(child, src)
@@ -198,7 +198,7 @@ func (p *CUEParser) addImportNode(
 // `#` it is a CUE definition (NodeStruct), otherwise it is a regular field (NodeVariable).
 func (p *CUEParser) handleTopLevelField(
 	g *graph.Graph,
-	node *sitter.Node,
+	node sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
@@ -256,7 +256,7 @@ func (p *CUEParser) handleTopLevelField(
 // handleLetClause processes a let_clause: `let x = expr`.
 func (p *CUEParser) handleLetClause(
 	g *graph.Graph,
-	node *sitter.Node,
+	node sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
@@ -264,7 +264,7 @@ func (p *CUEParser) handleLetClause(
 ) {
 	// let_clause children: "let" keyword, identifier, "=", expression.
 	ident := firstChildOfType(node, "identifier")
-	if ident == nil {
+	if ident.IsNull() {
 		return
 	}
 	name := childText(ident, src)
@@ -296,14 +296,14 @@ func (p *CUEParser) handleLetClause(
 // cueExtractFieldName extracts the field name from a field node.
 // CUE fields have a label child that may be an identifier, a string, or a
 // definition identifier (starting with #).
-func cueExtractFieldName(fieldNode *sitter.Node, src []byte) string {
+func cueExtractFieldName(fieldNode sitter.Node, src []byte) string {
 	// The first child of a field is the label.
 	label := firstChildOfType(fieldNode, "label")
-	if label == nil {
+	if label.IsNull() {
 		// Fallback: check direct children.
-		for i := 0; i < int(fieldNode.ChildCount()); i++ {
+		for i := uint32(0); i < fieldNode.ChildCount(); i++ {
 			child := fieldNode.Child(i)
-			if child == nil {
+			if child.IsNull() {
 				continue
 			}
 			ct := child.Type()
@@ -316,9 +316,9 @@ func cueExtractFieldName(fieldNode *sitter.Node, src []byte) string {
 	}
 
 	// Walk label children to find the actual name.
-	for i := 0; i < int(label.ChildCount()); i++ {
+	for i := uint32(0); i < label.ChildCount(); i++ {
 		child := label.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		ct := child.Type()

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/csharp"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/c_sharp"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -18,7 +18,7 @@ type CSharpParser struct {
 
 // NewCSharpParser creates a ready-to-use CSharpParser.
 func NewCSharpParser() *CSharpParser {
-	return &CSharpParser{language: csharp.GetLanguage()}
+	return &CSharpParser{language: sitter.NewLanguage(c_sharp.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -27,17 +27,17 @@ func (p *CSharpParser) Extensions() []string {
 }
 
 // extractCSharpDeclInfo performs a pre-pass over the AST to collect metadata.
-func extractCSharpDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractCSharpDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "method_declaration":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if enclosingClass != "" {
@@ -62,7 +62,7 @@ func extractCSharpDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 			}
 		case "delegate_declaration":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -73,7 +73,7 @@ func extractCSharpDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 		case "class_declaration", "struct_declaration", "interface_declaration",
 			"enum_declaration", "record_declaration", "namespace_declaration":
 			className := ""
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[className] = declMeta{
@@ -81,14 +81,14 @@ func extractCSharpDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 			}
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), className)
 				}
 			}
 			return
 		case "property_declaration":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if enclosingClass != "" {
@@ -101,7 +101,7 @@ func extractCSharpDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -110,13 +110,13 @@ func extractCSharpDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 }
 
 // isCSharpPublic checks if a declaration node has the "public" modifier.
-func isCSharpPublic(n *sitter.Node, src []byte) bool {
-	if n == nil {
+func isCSharpPublic(n sitter.Node, src []byte) bool {
+	if n.IsNull() {
 		return false
 	}
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "modifier" {
@@ -132,24 +132,24 @@ func isCSharpPublic(n *sitter.Node, src []byte) bool {
 // isCSharpExtensionMethod returns true when the method_declaration's first
 // parameter has a "this" modifier — the C# extension method marker.
 // AST: method_declaration → parameter_list → parameter → modifier("this")
-func isCSharpExtensionMethod(n *sitter.Node, src []byte) bool {
+func isCSharpExtensionMethod(n sitter.Node, src []byte) bool {
 	paramList := n.ChildByFieldName("parameters")
-	if paramList == nil {
+	if paramList.IsNull() {
 		paramList = firstChildOfType(n, "parameter_list")
 	}
-	if paramList == nil {
+	if paramList.IsNull() {
 		return false
 	}
 	// Find the first parameter child.
-	for i := 0; i < int(paramList.ChildCount()); i++ {
+	for i := uint32(0); i < paramList.ChildCount(); i++ {
 		child := paramList.Child(i)
-		if child == nil || child.Type() != "parameter" {
+		if child.IsNull() || child.Type() != "parameter" {
 			continue
 		}
 		// Check if this parameter has a modifier child with value "this".
-		for j := 0; j < int(child.ChildCount()); j++ {
+		for j := uint32(0); j < child.ChildCount(); j++ {
 			mod := child.Child(j)
-			if mod != nil && mod.Type() == "modifier" &&
+			if !mod.IsNull() && mod.Type() == "modifier" &&
 				string(src[mod.StartByte():mod.EndByte()]) == "this" {
 				return true
 			}
@@ -164,7 +164,7 @@ func (p *CSharpParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -214,18 +214,18 @@ func (p *CSharpParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 
 // extractAllDeclarations walks the AST for all C# declarations with class qualification.
 func (p *CSharpParser) extractAllDeclarations(
-	g *graph.Graph, root *sitter.Node, src []byte,
+	g *graph.Graph, root sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID, declInfo map[string]declMeta,
 ) {
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "namespace_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -238,16 +238,16 @@ func (p *CSharpParser) extractAllDeclarations(
 
 		case "class_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
 			nodeID := g.MakeNodeID(filePath, name)
 			meta := buildLangMeta(declInfo[name])
 			// Detect abstract/sealed class modifiers.
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				if child.Type() == "modifier" {
@@ -266,8 +266,8 @@ func (p *CSharpParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isCSharpPublic(n, src), Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -275,7 +275,7 @@ func (p *CSharpParser) extractAllDeclarations(
 
 		case "struct_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -290,8 +290,8 @@ func (p *CSharpParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isCSharpPublic(n, src), Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -299,7 +299,7 @@ func (p *CSharpParser) extractAllDeclarations(
 
 		case "interface_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -309,8 +309,8 @@ func (p *CSharpParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isCSharpPublic(n, src), Metadata: buildLangMeta(declInfo[name]),
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -318,7 +318,7 @@ func (p *CSharpParser) extractAllDeclarations(
 
 		case "enum_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -336,7 +336,7 @@ func (p *CSharpParser) extractAllDeclarations(
 
 		case "record_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -351,8 +351,8 @@ func (p *CSharpParser) extractAllDeclarations(
 				Line: int(n.StartPoint().Row) + 1, Exported: isCSharpPublic(n, src), Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -360,7 +360,7 @@ func (p *CSharpParser) extractAllDeclarations(
 
 		case "method_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -409,7 +409,7 @@ func (p *CSharpParser) extractAllDeclarations(
 
 		case "property_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -432,7 +432,7 @@ func (p *CSharpParser) extractAllDeclarations(
 		case "delegate_declaration":
 			// public delegate void Handler(int x);
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -457,18 +457,18 @@ func (p *CSharpParser) extractAllDeclarations(
 			if enclosingClass == "" {
 				break
 			}
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				vd := n.Child(i)
-				if vd == nil || vd.Type() != "variable_declaration" {
+				if vd.IsNull() || vd.Type() != "variable_declaration" {
 					continue
 				}
-				for j := 0; j < int(vd.ChildCount()); j++ {
+				for j := uint32(0); j < vd.ChildCount(); j++ {
 					declarator := vd.Child(j)
-					if declarator == nil || declarator.Type() != "variable_declarator" {
+					if declarator.IsNull() || declarator.Type() != "variable_declarator" {
 						continue
 					}
 					nameNode := firstChildOfType(declarator, "identifier")
-					if nameNode == nil {
+					if nameNode.IsNull() {
 						continue
 					}
 					evtName := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -511,7 +511,7 @@ func (p *CSharpParser) extractAllDeclarations(
 				g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -520,7 +520,7 @@ func (p *CSharpParser) extractAllDeclarations(
 
 // collectCSharpCallSites performs a depth-first AST walk to collect call sites
 // with function-level caller resolution.
-func collectCSharpCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectCSharpCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{
 			"class_declaration":     true,
@@ -536,29 +536,29 @@ func collectCSharpCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Nod
 			"invocation_expression":    true,
 			"object_creation_expression": true,
 		},
-		NameExtractor: func(n *sitter.Node, src []byte) string {
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+		NameExtractor: func(n sitter.Node, src []byte) string {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				return string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
 			return ""
 		},
-		CalleeExtractor: func(n *sitter.Node, src []byte) string {
+		CalleeExtractor: func(n sitter.Node, src []byte) string {
 			switch n.Type() {
 			case "invocation_expression":
 				fn := n.ChildByFieldName("function")
-				if fn == nil {
+				if fn.IsNull() {
 					return ""
 				}
 				switch fn.Type() {
 				case "identifier":
 					return string(src[fn.StartByte():fn.EndByte()])
 				case "member_access_expression":
-					if nameNode := fn.ChildByFieldName("name"); nameNode != nil {
+					if nameNode := fn.ChildByFieldName("name"); !nameNode.IsNull() {
 						return string(src[nameNode.StartByte():nameNode.EndByte()])
 					}
 				}
 			case "object_creation_expression":
-				if typeNode := n.ChildByFieldName("type"); typeNode != nil {
+				if typeNode := n.ChildByFieldName("type"); !typeNode.IsNull() {
 					return string(src[typeNode.StartByte():typeNode.EndByte()])
 				}
 			}

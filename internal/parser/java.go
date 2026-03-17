@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/java"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/java"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -14,18 +14,18 @@ import (
 // extractJavaDeclInfo walks the Java AST collecting metadata for method,
 // constructor, class, interface, enum, and record declarations.
 // Method names are class-qualified (ClassName.methodName).
-func extractJavaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractJavaDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
 
-	var walk func(n *sitter.Node, enclosingClass string, depth int)
-	walk = func(n *sitter.Node, enclosingClass string, depth int) {
-		if n == nil || depth > 8 {
+	var walk func(n sitter.Node, enclosingClass string, depth int)
+	walk = func(n sitter.Node, enclosingClass string, depth int) {
+		if n.IsNull() || depth > 8 {
 			return
 		}
 		switch n.Type() {
 		case "method_declaration":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if enclosingClass != "" {
@@ -39,7 +39,7 @@ func extractJavaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "constructor_declaration":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				qualName := name
 				if enclosingClass != "" {
@@ -56,7 +56,7 @@ func extractJavaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 		case "class_declaration", "interface_declaration", "enum_declaration", "record_declaration",
 			"annotation_type_declaration":
 			className := ""
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[className] = declMeta{
@@ -65,14 +65,14 @@ func extractJavaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 			// Walk body with class context.
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), className, depth+1)
 				}
 			}
 			return
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass, depth+1)
 		}
 	}
@@ -87,7 +87,7 @@ type JavaParser struct {
 
 // NewJavaParser creates a ready-to-use JavaParser.
 func NewJavaParser() *JavaParser {
-	return &JavaParser{language: java.GetLanguage()}
+	return &JavaParser{language: sitter.NewLanguage(java.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -98,26 +98,26 @@ func (p *JavaParser) Extensions() []string {
 // isJavaPublicNode checks if a declaration node has the "public" modifier
 // by inspecting its modifier children. Falls back to true for top-level
 // declarations (Java default package-private is still accessible within package).
-func isJavaPublicNode(n *sitter.Node, src []byte) bool {
-	if n == nil {
+func isJavaPublicNode(n sitter.Node, src []byte) bool {
+	if n.IsNull() {
 		return false
 	}
 	// Check for modifiers child.
 	modifiers := n.ChildByFieldName("modifiers")
-	if modifiers == nil {
+	if modifiers.IsNull() {
 		// Try finding a "modifiers" node among children.
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			child := n.Child(i)
-			if child != nil && child.Type() == "modifiers" {
+			if !child.IsNull() && child.Type() == "modifiers" {
 				modifiers = child
 				break
 			}
 		}
 	}
-	if modifiers != nil {
-		for i := 0; i < int(modifiers.ChildCount()); i++ {
+	if !modifiers.IsNull() {
+		for i := uint32(0); i < modifiers.ChildCount(); i++ {
 			mod := modifiers.Child(i)
-			if mod != nil {
+			if !mod.IsNull() {
 				text := string(src[mod.StartByte():mod.EndByte()])
 				if text == "public" {
 					return true
@@ -135,7 +135,7 @@ func (p *JavaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -196,42 +196,42 @@ func (p *JavaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 // records, methods, and constructors with proper class-qualification.
 func (p *JavaParser) extractAllDeclarations(
 	g *graph.Graph,
-	root *sitter.Node,
+	root sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
 	declInfo map[string]declMeta,
 ) {
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
 		case "class_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
 			nodeID := g.MakeNodeID(filePath, name)
 			meta := buildLangMeta(declInfo[name])
 			// Detect sealed modifier — check modifiers child (field or direct).
-			var mods *sitter.Node
+			var mods sitter.Node
 			mods = n.ChildByFieldName("modifiers")
-			if mods == nil {
-				for k := 0; k < int(n.ChildCount()); k++ {
+			if mods.IsNull() {
+				for k := uint32(0); k < n.ChildCount(); k++ {
 					child := n.Child(k)
-					if child != nil && child.Type() == "modifiers" {
+					if !child.IsNull() && child.Type() == "modifiers" {
 						mods = child
 						break
 					}
 				}
 			}
-			if mods != nil {
-				for k := 0; k < int(mods.ChildCount()); k++ {
+			if !mods.IsNull() {
+				for k := uint32(0); k < mods.ChildCount(); k++ {
 					mod := mods.Child(k)
-					if mod != nil && string(src[mod.StartByte():mod.EndByte()]) == "sealed" {
+					if !mod.IsNull() && string(src[mod.StartByte():mod.EndByte()]) == "sealed" {
 						if meta == nil {
 							meta = make(map[string]string, 1)
 						}
@@ -251,15 +251,15 @@ func (p *JavaParser) extractAllDeclarations(
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 			// Extract permitted subclasses from "permits" clause.
-			for k := 0; k < int(n.ChildCount()); k++ {
+			for k := uint32(0); k < n.ChildCount(); k++ {
 				child := n.Child(k)
-				if child == nil || child.Type() != "permits" {
+				if child.IsNull() || child.Type() != "permits" {
 					continue
 				}
-				if tl := firstChildOfType(child, "type_list"); tl != nil {
-					for j := 0; j < int(tl.ChildCount()); j++ {
+				if tl := firstChildOfType(child, "type_list"); !tl.IsNull() {
+					for j := uint32(0); j < tl.ChildCount(); j++ {
 						ti := tl.Child(j)
-						if ti == nil || ti.Type() != "type_identifier" {
+						if ti.IsNull() || ti.Type() != "type_identifier" {
 							continue
 						}
 						subName := string(src[ti.StartByte():ti.EndByte()])
@@ -276,8 +276,8 @@ func (p *JavaParser) extractAllDeclarations(
 				}
 			}
 			// Walk body with class context.
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -285,7 +285,7 @@ func (p *JavaParser) extractAllDeclarations(
 
 		case "interface_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -300,8 +300,8 @@ func (p *JavaParser) extractAllDeclarations(
 				Metadata: buildLangMeta(declInfo[name]),
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -309,7 +309,7 @@ func (p *JavaParser) extractAllDeclarations(
 
 		case "enum_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -329,8 +329,8 @@ func (p *JavaParser) extractAllDeclarations(
 				Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -338,7 +338,7 @@ func (p *JavaParser) extractAllDeclarations(
 
 		case "record_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -358,8 +358,8 @@ func (p *JavaParser) extractAllDeclarations(
 				Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -367,7 +367,7 @@ func (p *JavaParser) extractAllDeclarations(
 
 		case "annotation_type_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -390,7 +390,7 @@ func (p *JavaParser) extractAllDeclarations(
 
 		case "method_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -419,7 +419,7 @@ func (p *JavaParser) extractAllDeclarations(
 
 		case "constructor_declaration":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			qualName := "constructor"
@@ -449,7 +449,7 @@ func (p *JavaParser) extractAllDeclarations(
 				break
 			}
 			nameNode := firstChildOfType(n, "identifier")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			constName := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -474,7 +474,7 @@ func (p *JavaParser) extractAllDeclarations(
 				g.AddEdge(&graph.Edge{From: classID, To: nodeID, Type: graph.EdgeDefines})
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -483,7 +483,7 @@ func (p *JavaParser) extractAllDeclarations(
 
 // collectJavaCallSites performs a depth-first AST walk to collect call sites
 // with function-level caller resolution.
-func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{
 			"class_declaration":          true,
@@ -500,20 +500,20 @@ func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node,
 			"method_invocation":        true,
 			"object_creation_expression": true,
 		},
-		NameExtractor: func(n *sitter.Node, src []byte) string {
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+		NameExtractor: func(n sitter.Node, src []byte) string {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				return string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
 			return ""
 		},
-		CalleeExtractor: func(n *sitter.Node, src []byte) string {
+		CalleeExtractor: func(n sitter.Node, src []byte) string {
 			switch n.Type() {
 			case "method_invocation":
-				if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+				if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 					return string(src[nameNode.StartByte():nameNode.EndByte()])
 				}
 			case "object_creation_expression":
-				if typeNode := n.ChildByFieldName("type"); typeNode != nil {
+				if typeNode := n.ChildByFieldName("type"); !typeNode.IsNull() {
 					return string(src[typeNode.StartByte():typeNode.EndByte()])
 				}
 			}

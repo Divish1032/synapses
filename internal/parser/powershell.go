@@ -10,7 +10,7 @@ import (
 )
 
 // PowerShellParser parses PowerShell (.ps1, .psm1, .psd1) source files.
-// Uses regex-based extraction since PowerShell is not in smacker/go-tree-sitter.
+// Uses regex-based extraction since PowerShell is not in go-tree-sitter.
 type PowerShellParser struct{}
 
 // NewPowerShellParser creates a ready-to-use PowerShellParser.

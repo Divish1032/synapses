@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/lua"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/lua"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -18,7 +18,7 @@ type LuaParser struct {
 
 // NewLuaParser creates a ready-to-use LuaParser.
 func NewLuaParser() *LuaParser {
-	return &LuaParser{language: lua.GetLanguage()}
+	return &LuaParser{language: sitter.NewLanguage(lua.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -166,24 +166,30 @@ func extractLuaCATS(g *graph.Graph, src []byte, filePath string, fileNodeID grap
 }
 
 // extractLuaDeclInfo collects metadata for Lua declarations.
-func extractLuaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractLuaDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
-		if n.Type() == "function_statement" {
+		if n.Type() == "function_declaration" {
 			sl := int(n.StartPoint().Row) + 1
 			// Try to extract function name from various children.
-			if fnName := firstChildOfType(n, "function_name"); fnName != nil {
-				name := string(src[fnName.StartByte():fnName.EndByte()])
+			if dotIdx := firstChildOfType(n, "dot_index_expression"); !dotIdx.IsNull() {
+				name := string(src[dotIdx.StartByte():dotIdx.EndByte()])
 				result[name] = declMeta{
 					Doc:       extractLineDoc(lines, sl, "--"),
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
-			} else if ident := firstChildOfType(n, "identifier"); ident != nil {
+			} else if methIdx := firstChildOfType(n, "method_index_expression"); !methIdx.IsNull() {
+				name := string(src[methIdx.StartByte():methIdx.EndByte()])
+				result[name] = declMeta{
+					Doc:       extractLineDoc(lines, sl, "--"),
+					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
+				}
+			} else if ident := firstChildOfType(n, "identifier"); !ident.IsNull() {
 				name := string(src[ident.StartByte():ident.EndByte()])
 				result[name] = declMeta{
 					Doc:       extractLineDoc(lines, sl, "--"),
@@ -191,7 +197,7 @@ func extractLuaDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
@@ -204,7 +210,7 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -225,18 +231,18 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	// --- require() calls as imports ---
 	// The Lua grammar wraps string args in function_arguments, so we walk
 	// function_call nodes directly rather than using a query.
-	var walkRequire func(n *sitter.Node)
-	walkRequire = func(n *sitter.Node) {
-		if n == nil {
+	var walkRequire func(n sitter.Node)
+	walkRequire = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "function_call" {
 			// Check if the callee identifier is "require".
 			isRequire := false
 			var reqPath string
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child == nil {
+				if child.IsNull() {
 					continue
 				}
 				if child.Type() == "identifier" {
@@ -244,10 +250,10 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 						isRequire = true
 					}
 				}
-				if child.Type() == "function_arguments" {
-					for j := 0; j < int(child.ChildCount()); j++ {
+				if child.Type() == "function_arguments" || child.Type() == "arguments" {
+					for j := uint32(0); j < child.ChildCount(); j++ {
 						arg := child.Child(j)
-						if arg == nil {
+						if arg.IsNull() {
 							continue
 						}
 						if arg.Type() == "string" {
@@ -263,7 +269,7 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 				g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walkRequire(n.Child(i))
 		}
 	}
@@ -274,7 +280,7 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	// function_name (e.g. "Vector2" and "new" for `function Vector2.new()`).
 	// We skip if the node was already added (e.g. by the LuaCATS pre-pass) to
 	// avoid overwriting class/alias nodes with empty function nodes.
-	globalFuncQuery := `(function_statement (function_name (identifier) @func_name))`
+	globalFuncQuery := `(function_declaration (identifier) @func_name)`
 	if err := runQuery(lang, root, src, globalFuncQuery, func(captures map[string]string, startLine int) {
 		name := captures["func_name"]
 		if name == "" {
@@ -294,8 +300,7 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	}
 
 	// --- method-style functions: function Foo.bar() or function Foo:bar() ---
-	methodFuncQuery := `(function_statement (function_name) @full_name)`
-	_ = runQuery(lang, root, src, methodFuncQuery, func(captures map[string]string, startLine int) {
+	methodHandler := func(captures map[string]string, startLine int) {
 		fullName := captures["full_name"]
 		if fullName == "" || !strings.ContainsAny(fullName, ".:") {
 			return // Already captured by global func query.
@@ -312,10 +317,12 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			Line: startLine, Exported: true, Metadata: buildLangMeta(declInfo[fullName]),
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-	})
+	}
+	_ = runQuery(lang, root, src, `(function_declaration (dot_index_expression) @full_name)`, methodHandler)
+	_ = runQuery(lang, root, src, `(function_declaration (method_index_expression) @full_name)`, methodHandler)
 
 	// --- local function declarations: local function foo() end ---
-	localFuncQuery := `(function_statement (local) (identifier) @func_name)`
+	localFuncQuery := `(function_declaration "local" (identifier) @func_name)`
 	if err := runQuery(lang, root, src, localFuncQuery, func(captures map[string]string, startLine int) {
 		name := captures["func_name"]
 		if name == "" {
@@ -335,48 +342,59 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	}
 
 	// --- Table field function assignments: M.foo = function() end ---
-	// In the Lua grammar this is a variable_declaration with:
-	//   variable_declarator (identifier "." identifier) = function(...)...end
-	var walkTableFuncs func(n *sitter.Node)
-	walkTableFuncs = func(n *sitter.Node) {
-		if n == nil {
+	// In the new grammar this is an assignment_statement (possibly inside variable_declaration):
+	//   assignment_statement > variable_list > dot_index_expression/bracket_index_expression
+	//   assignment_statement > expression_list > function_definition
+	var walkTableFuncs func(n sitter.Node)
+	walkTableFuncs = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
-		if n.Type() == "variable_declaration" {
-			// Find variable_declarator children followed by a function value.
+		nt := n.Type()
+		if nt == "assignment_statement" {
+			// Check if expression_list contains a function_definition.
+			exprList := firstChildOfType(n, "expression_list")
 			hasFuncVal := false
-			for i := 0; i < int(n.ChildCount()); i++ {
-				child := n.Child(i)
-				if child != nil && child.Type() == "function" {
-					hasFuncVal = true
-					break
+			if !exprList.IsNull() {
+				for i := uint32(0); i < exprList.ChildCount(); i++ {
+					c := exprList.Child(i)
+					if !c.IsNull() && c.Type() == "function_definition" {
+						hasFuncVal = true
+						break
+					}
 				}
 			}
 			if hasFuncVal {
-				for i := 0; i < int(n.ChildCount()); i++ {
-					varNode := n.Child(i)
-					if varNode == nil || varNode.Type() != "variable_declarator" {
-						continue
+				varList := firstChildOfType(n, "variable_list")
+				if !varList.IsNull() {
+					for i := uint32(0); i < varList.ChildCount(); i++ {
+						varNode := varList.Child(i)
+						if varNode.IsNull() {
+							continue
+						}
+						vt := varNode.Type()
+						var qualName string
+						if vt == "dot_index_expression" || vt == "bracket_index_expression" {
+							qualName = extractLuaTableFieldName(varNode, src)
+						}
+						if qualName == "" {
+							continue
+						}
+						nodeID := g.MakeNodeID(filePath, qualName)
+						if g.GetNode(nodeID) != nil {
+							continue
+						}
+						g.AddNode(&graph.Node{
+							ID: nodeID, Type: graph.NodeFunction, Name: qualName, File: filePath,
+							Line: int(varNode.StartPoint().Row) + 1, Exported: true,
+							Metadata: map[string]string{"kind": "table_func"},
+						})
+						g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 					}
-					// variable_declarator: could be M.foo (dot) or M["foo"] (bracket)
-					qualName := extractLuaTableFieldName(varNode, src)
-					if qualName == "" {
-						continue
-					}
-					nodeID := g.MakeNodeID(filePath, qualName)
-					if g.GetNode(nodeID) != nil {
-						continue
-					}
-					g.AddNode(&graph.Node{
-						ID: nodeID, Type: graph.NodeFunction, Name: qualName, File: filePath,
-						Line: int(varNode.StartPoint().Row) + 1, Exported: true,
-						Metadata: map[string]string{"kind": "table_func"},
-					})
-					g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walkTableFuncs(n.Child(i))
 		}
 	}
@@ -392,16 +410,16 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 // variable_declarator node. Handles both dot notation (M.foo) and bracket
 // notation with string literals (M["foo"]). Returns "" for plain identifiers
 // or non-string bracket keys (e.g. M[i]).
-func extractLuaTableFieldName(varNode *sitter.Node, src []byte) string {
-	if varNode == nil {
+func extractLuaTableFieldName(varNode sitter.Node, src []byte) string {
+	if varNode.IsNull() {
 		return ""
 	}
 	// Collect children skipping punctuation (. [ ] ,).
 	var parts []string
 	hasBracket := false
-	for i := 0; i < int(varNode.ChildCount()); i++ {
+	for i := uint32(0); i < varNode.ChildCount(); i++ {
 		child := varNode.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		switch child.Type() {
@@ -413,9 +431,9 @@ func extractLuaTableFieldName(varNode *sitter.Node, src []byte) string {
 		case "string":
 			hasBracket = true
 			// Extract the string_content child (strips quotes).
-			for j := 0; j < int(child.ChildCount()); j++ {
+			for j := uint32(0); j < child.ChildCount(); j++ {
 				sc := child.Child(j)
-				if sc != nil && sc.Type() == "string_content" {
+				if !sc.IsNull() && sc.Type() == "string_content" {
 					parts = append(parts, string(src[sc.StartByte():sc.EndByte()]))
 					break
 				}
@@ -430,7 +448,7 @@ func extractLuaTableFieldName(varNode *sitter.Node, src []byte) string {
 }
 
 // collectLuaCallSites collects call sites.
-func collectLuaCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectLuaCallSites(g *graph.Graph, lang *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	callQuery := `(function_call (identifier) @callee)`
 	_ = runQuery(lang, root, src, callQuery, func(captures map[string]string, _ int) {
 		callee := captures["callee"]

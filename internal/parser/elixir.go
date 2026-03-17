@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/elixir"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/elixir"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -18,7 +18,7 @@ type ElixirParser struct {
 
 // NewElixirParser creates a ready-to-use ElixirParser.
 func NewElixirParser() *ElixirParser {
-	return &ElixirParser{language: elixir.GetLanguage()}
+	return &ElixirParser{language: sitter.NewLanguage(elixir.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -27,21 +27,21 @@ func (p *ElixirParser) Extensions() []string {
 }
 
 // extractElixirDeclInfo performs a pre-pass for metadata.
-func extractElixirDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractElixirDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "call" {
 			targetNode := n.ChildByFieldName("target")
-			if targetNode != nil {
+			if !targetNode.IsNull() {
 				keyword := string(src[targetNode.StartByte():targetNode.EndByte()])
 				switch keyword {
 				case "def", "defp", "defmacro", "defmacrop":
-					if argsNode := firstChildOfType(n, "arguments"); argsNode != nil {
+					if argsNode := firstChildOfType(n, "arguments"); !argsNode.IsNull() {
 						funcName := extractElixirFuncName(argsNode, src)
 						if funcName != "" {
 							sl := int(n.StartPoint().Row) + 1
@@ -52,8 +52,8 @@ func extractElixirDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 						}
 					}
 				case "defmodule":
-					if argsNode := firstChildOfType(n, "arguments"); argsNode != nil {
-						if aliasNode := firstChildOfType(argsNode, "alias"); aliasNode != nil {
+					if argsNode := firstChildOfType(n, "arguments"); !argsNode.IsNull() {
+						if aliasNode := firstChildOfType(argsNode, "alias"); !aliasNode.IsNull() {
 							name := string(src[aliasNode.StartByte():aliasNode.EndByte()])
 							sl := int(n.StartPoint().Row) + 1
 							result[name] = declMeta{
@@ -65,7 +65,7 @@ func extractElixirDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
@@ -174,15 +174,15 @@ func extractElixirAtDoc(lines []string, startLine int) string {
 }
 
 // extractElixirFuncName gets the function name from def/defp arguments.
-func extractElixirFuncName(argsNode *sitter.Node, src []byte) string {
+func extractElixirFuncName(argsNode sitter.Node, src []byte) string {
 	// First try: call child (def foo(args) do ... end)
-	if callNode := firstChildOfType(argsNode, "call"); callNode != nil {
-		if nameNode := callNode.ChildByFieldName("target"); nameNode != nil {
+	if callNode := firstChildOfType(argsNode, "call"); !callNode.IsNull() {
+		if nameNode := callNode.ChildByFieldName("target"); !nameNode.IsNull() {
 			return string(src[nameNode.StartByte():nameNode.EndByte()])
 		}
 	}
 	// Second try: identifier child (def foo do ... end)
-	if nameNode := firstChildOfType(argsNode, "identifier"); nameNode != nil {
+	if nameNode := firstChildOfType(argsNode, "identifier"); !nameNode.IsNull() {
 		return string(src[nameNode.StartByte():nameNode.EndByte()])
 	}
 	return ""
@@ -193,7 +193,7 @@ func (p *ElixirParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -438,7 +438,7 @@ func (p *ElixirParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 }
 
 // collectElixirCallSites collects call sites.
-func collectElixirCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectElixirCallSites(g *graph.Graph, lang *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	callQuery := `(call target: (identifier) @callee)`
 	_ = runQuery(lang, root, src, callQuery, func(captures map[string]string, _ int) {
 		callee := captures["callee"]
@@ -454,48 +454,48 @@ func collectElixirCallSites(g *graph.Graph, lang *sitter.Language, root *sitter.
 // AST: call(target="defstruct") → arguments → keywords → pair → keyword("name: ")
 // The walk tracks the enclosing defmodule so field names are qualified as
 // "ModuleName.field_name" instead of bare "field_name".
-func extractElixirStructFields(g *graph.Graph, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
-	var walk func(n *sitter.Node, moduleName string)
-	walk = func(n *sitter.Node, moduleName string) {
-		if n == nil {
+func extractElixirStructFields(g *graph.Graph, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	var walk func(n sitter.Node, moduleName string)
+	walk = func(n sitter.Node, moduleName string) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "call" {
 			targetNode := n.ChildByFieldName("target")
-			if targetNode == nil {
+			if targetNode.IsNull() {
 				targetNode = firstChildOfType(n, "identifier")
 			}
-			if targetNode != nil {
+			if !targetNode.IsNull() {
 				keyword := string(src[targetNode.StartByte():targetNode.EndByte()])
 				switch keyword {
 				case "defmodule":
 					// Track the current module name for child nodes.
 					argsNode := n.ChildByFieldName("arguments")
-					if argsNode == nil {
+					if argsNode.IsNull() {
 						argsNode = firstChildOfType(n, "arguments")
 					}
 					newModule := moduleName
-					if argsNode != nil {
-						if aliasNode := firstChildOfType(argsNode, "alias"); aliasNode != nil {
+					if !argsNode.IsNull() {
+						if aliasNode := firstChildOfType(argsNode, "alias"); !aliasNode.IsNull() {
 							newModule = string(src[aliasNode.StartByte():aliasNode.EndByte()])
 						}
 					}
-					for i := 0; i < int(n.ChildCount()); i++ {
+					for i := uint32(0); i < n.ChildCount(); i++ {
 						walk(n.Child(i), newModule)
 					}
 					return
 				case "defstruct":
 					argsNode := n.ChildByFieldName("arguments")
-					if argsNode == nil {
+					if argsNode.IsNull() {
 						argsNode = firstChildOfType(n, "arguments")
 					}
-					if argsNode != nil {
+					if !argsNode.IsNull() {
 						extractStructFieldsFromArgs(g, argsNode, src, filePath, fileNodeID, moduleName)
 					}
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), moduleName)
 		}
 	}
@@ -504,16 +504,16 @@ func extractElixirStructFields(g *graph.Graph, root *sitter.Node, src []byte, fi
 
 // extractStructFieldsFromArgs extracts field names from defstruct keyword arguments
 // and qualifies them with the enclosing module name (e.g. "Plug.Conn.status").
-func extractStructFieldsFromArgs(g *graph.Graph, argsNode *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID, moduleName string) {
-	var walkArgs func(n *sitter.Node)
-	walkArgs = func(n *sitter.Node) {
-		if n == nil {
+func extractStructFieldsFromArgs(g *graph.Graph, argsNode sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID, moduleName string) {
+	var walkArgs func(n sitter.Node)
+	walkArgs = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "pair" {
 			// First child is keyword (e.g. "name: ")
 			kw := firstChildOfType(n, "keyword")
-			if kw != nil {
+			if !kw.IsNull() {
 				fieldName := strings.TrimSpace(string(src[kw.StartByte():kw.EndByte()]))
 				fieldName = strings.TrimSuffix(fieldName, ":")
 				fieldName = strings.TrimSpace(fieldName)
@@ -535,7 +535,7 @@ func extractStructFieldsFromArgs(g *graph.Graph, argsNode *sitter.Node, src []by
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walkArgs(n.Child(i))
 		}
 	}
@@ -545,15 +545,15 @@ func extractStructFieldsFromArgs(g *graph.Graph, argsNode *sitter.Node, src []by
 // extractElixirGuards walks the AST for defguard/defguardp declarations.
 // AST: call(target="defguard", arguments(binary_operator(call(identifier("name")), when, ...)))
 // Also handles the simpler form: defguard name(args)
-func extractElixirGuards(g *graph.Graph, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
+func extractElixirGuards(g *graph.Graph, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
 			return
 		}
 		if n.Type() == "call" {
 			targetNode := n.ChildByFieldName("target")
-			if targetNode != nil {
+			if !targetNode.IsNull() {
 				keyword := string(src[targetNode.StartByte():targetNode.EndByte()])
 				if keyword == "defguard" || keyword == "defguardp" {
 					name := extractElixirGuardName(n, src)
@@ -571,7 +571,7 @@ func extractElixirGuards(g *graph.Graph, root *sitter.Node, src []byte, filePath
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
@@ -582,37 +582,37 @@ func extractElixirGuards(g *graph.Graph, root *sitter.Node, src []byte, filePath
 // It handles two forms:
 //   - defguard is_positive(x) when x > 0  → arguments → binary_operator → call → identifier
 //   - defguard is_positive(x)              → arguments → call → identifier (target)
-func extractElixirGuardName(callNode *sitter.Node, src []byte) string {
+func extractElixirGuardName(callNode sitter.Node, src []byte) string {
 	// Try field name first, then fallback to firstChildOfType.
 	argsNode := callNode.ChildByFieldName("arguments")
-	if argsNode == nil {
+	if argsNode.IsNull() {
 		argsNode = firstChildOfType(callNode, "arguments")
 	}
-	if argsNode == nil {
+	if argsNode.IsNull() {
 		return ""
 	}
 	// Try binary_operator form first (has "when" clause).
-	if binOp := firstChildOfType(argsNode, "binary_operator"); binOp != nil {
-		if innerCall := firstChildOfType(binOp, "call"); innerCall != nil {
+	if binOp := firstChildOfType(argsNode, "binary_operator"); !binOp.IsNull() {
+		if innerCall := firstChildOfType(binOp, "call"); !innerCall.IsNull() {
 			// Try field name first, then fall back to first identifier child.
-			if target := innerCall.ChildByFieldName("target"); target != nil {
+			if target := innerCall.ChildByFieldName("target"); !target.IsNull() {
 				return string(src[target.StartByte():target.EndByte()])
 			}
-			if ident := firstChildOfType(innerCall, "identifier"); ident != nil {
+			if ident := firstChildOfType(innerCall, "identifier"); !ident.IsNull() {
 				return string(src[ident.StartByte():ident.EndByte()])
 			}
 		}
 		// Fallback: binary_operator → call (without field) → identifier
-		if ident := firstChildOfType(binOp, "identifier"); ident != nil {
+		if ident := firstChildOfType(binOp, "identifier"); !ident.IsNull() {
 			return string(src[ident.StartByte():ident.EndByte()])
 		}
 	}
 	// Try direct call form (no when clause).
-	if innerCall := firstChildOfType(argsNode, "call"); innerCall != nil {
-		if target := innerCall.ChildByFieldName("target"); target != nil {
+	if innerCall := firstChildOfType(argsNode, "call"); !innerCall.IsNull() {
+		if target := innerCall.ChildByFieldName("target"); !target.IsNull() {
 			return string(src[target.StartByte():target.EndByte()])
 		}
-		if ident := firstChildOfType(innerCall, "identifier"); ident != nil {
+		if ident := firstChildOfType(innerCall, "identifier"); !ident.IsNull() {
 			return string(src[ident.StartByte():ident.EndByte()])
 		}
 	}
@@ -662,7 +662,7 @@ var otpBehaviourCallbacks = map[string][]string{
 // and injects virtual callback nodes for any callbacks not already defined.
 // The module node gets meta["behaviours"] = comma-separated behaviour list.
 func injectElixirBehaviourCallbacks(
-	g *graph.Graph, lang *sitter.Language, root *sitter.Node, src []byte,
+	g *graph.Graph, lang *sitter.Language, root sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID,
 ) {
 	// First pass: collect which behaviours are used and the module name.

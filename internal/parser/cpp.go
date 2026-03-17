@@ -5,19 +5,19 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/cpp"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/cpp"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // extractCppDeclInfo walks the C++ AST collecting metadata for all declarations.
-func extractCppDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
+func extractCppDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)
 	lines := strings.Split(string(src), "\n")
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
@@ -37,7 +37,7 @@ func extractCppDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 			}
 		case "class_specifier", "struct_specifier":
 			className := ""
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[className] = declMeta{
@@ -46,14 +46,14 @@ func extractCppDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 					IfdefGuard: extractCIfdefGuard(n, src),
 				}
 			}
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), className)
 				}
 			}
 			return
 		case "enum_specifier":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -63,7 +63,7 @@ func extractCppDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		case "namespace_definition":
-			if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
@@ -72,7 +72,7 @@ func extractCppDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -82,9 +82,9 @@ func extractCppDeclInfo(root *sitter.Node, src []byte) map[string]declMeta {
 
 // extractCppFuncName extracts the function name from a C++ function definition,
 // handling scope-qualified names (Foo::bar) and regular names.
-func extractCppFuncName(n *sitter.Node, src []byte) string {
+func extractCppFuncName(n sitter.Node, src []byte) string {
 	declarator := n.ChildByFieldName("declarator")
-	if declarator == nil {
+	if declarator.IsNull() {
 		return ""
 	}
 	// Walk through layers: function_declarator wrapping identifier or qualified_identifier.
@@ -92,8 +92,8 @@ func extractCppFuncName(n *sitter.Node, src []byte) string {
 }
 
 // extractNameFromDeclarator recursively extracts the identifier name from a C/C++ declarator.
-func extractNameFromDeclarator(n *sitter.Node, src []byte) string {
-	if n == nil {
+func extractNameFromDeclarator(n sitter.Node, src []byte) string {
+	if n.IsNull() {
 		return ""
 	}
 	switch n.Type() {
@@ -102,16 +102,16 @@ func extractNameFromDeclarator(n *sitter.Node, src []byte) string {
 	case "qualified_identifier":
 		// Foo::bar → return "bar" (the name part).
 		nameNode := n.ChildByFieldName("name")
-		if nameNode != nil {
+		if !nameNode.IsNull() {
 			return string(src[nameNode.StartByte():nameNode.EndByte()])
 		}
 	case "function_declarator":
 		inner := n.ChildByFieldName("declarator")
 		return extractNameFromDeclarator(inner, src)
 	case "reference_declarator", "pointer_declarator":
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			child := n.Child(i)
-			if child != nil && child.Type() != "*" && child.Type() != "&" {
+			if !child.IsNull() && child.Type() != "*" && child.Type() != "&" {
 				if name := extractNameFromDeclarator(child, src); name != "" {
 					return name
 				}
@@ -126,16 +126,16 @@ func extractNameFromDeclarator(n *sitter.Node, src []byte) string {
 
 // extractCppScopeQualifier extracts the scope qualifier (class/namespace) from a
 // qualified function definition like Foo::bar().
-func extractCppScopeQualifier(n *sitter.Node, src []byte) string {
+func extractCppScopeQualifier(n sitter.Node, src []byte) string {
 	declarator := n.ChildByFieldName("declarator")
-	if declarator == nil {
+	if declarator.IsNull() {
 		return ""
 	}
 	if declarator.Type() == "function_declarator" {
 		inner := declarator.ChildByFieldName("declarator")
-		if inner != nil && inner.Type() == "qualified_identifier" {
+		if !inner.IsNull() && inner.Type() == "qualified_identifier" {
 			scope := inner.ChildByFieldName("scope")
-			if scope != nil {
+			if !scope.IsNull() {
 				text := string(src[scope.StartByte():scope.EndByte()])
 				// Remove trailing ::
 				text = strings.TrimSuffix(text, "::")
@@ -153,7 +153,7 @@ type CppParser struct {
 
 // NewCppParser creates a ready-to-use CppParser.
 func NewCppParser() *CppParser {
-	return &CppParser{language: cpp.GetLanguage()}
+	return &CppParser{language: sitter.NewLanguage(cpp.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -166,7 +166,7 @@ func (p *CppParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -220,15 +220,15 @@ func (p *CppParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 // extractAllDeclarations walks the C++ AST extracting all declarations.
 func (p *CppParser) extractAllDeclarations(
 	g *graph.Graph,
-	root *sitter.Node,
+	root sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
 	declInfo map[string]declMeta,
 ) {
-	var walk func(n *sitter.Node, enclosingClass string)
-	walk = func(n *sitter.Node, enclosingClass string) {
-		if n == nil {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
 			return
 		}
 		switch n.Type() {
@@ -273,7 +273,7 @@ func (p *CppParser) extractAllDeclarations(
 
 		case "class_specifier":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -288,8 +288,8 @@ func (p *CppParser) extractAllDeclarations(
 				Metadata: buildLangMeta(declInfo[name]),
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -297,7 +297,7 @@ func (p *CppParser) extractAllDeclarations(
 
 		case "struct_specifier":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -315,8 +315,8 @@ func (p *CppParser) extractAllDeclarations(
 				Metadata: buildLangMeta(declInfo[name]),
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			if body := n.ChildByFieldName("body"); body != nil {
-				for i := 0; i < int(body.ChildCount()); i++ {
+			if body := n.ChildByFieldName("body"); !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
 					walk(body.Child(i), name)
 				}
 			}
@@ -324,7 +324,7 @@ func (p *CppParser) extractAllDeclarations(
 
 		case "enum_specifier":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -350,7 +350,7 @@ func (p *CppParser) extractAllDeclarations(
 
 		case "namespace_definition":
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -369,7 +369,7 @@ func (p *CppParser) extractAllDeclarations(
 		case "type_alias_declaration", "alias_declaration":
 			// using MyType = std::vector<int>;
 			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil {
+			if nameNode.IsNull() {
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -391,9 +391,9 @@ func (p *CppParser) extractAllDeclarations(
 
 		case "template_declaration":
 			// Walk into the template's body to find the actual declaration.
-			for i := 0; i < int(n.ChildCount()); i++ {
+			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child != nil && child.Type() != "template_parameter_list" {
+				if !child.IsNull() && child.Type() != "template_parameter_list" {
 					walk(child, enclosingClass)
 				}
 			}
@@ -402,7 +402,7 @@ func (p *CppParser) extractAllDeclarations(
 		case "declaration":
 			// Function prototypes: void foo(int x);
 			declarator := n.ChildByFieldName("declarator")
-			if declarator != nil && declarator.Type() == "function_declarator" {
+			if !declarator.IsNull() && declarator.Type() == "function_declarator" {
 				name := extractNameFromDeclarator(declarator, src)
 				if name != "" {
 					nodeID := g.MakeNodeID(filePath, name)
@@ -420,7 +420,7 @@ func (p *CppParser) extractAllDeclarations(
 				}
 			}
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), enclosingClass)
 		}
 	}
@@ -429,7 +429,7 @@ func (p *CppParser) extractAllDeclarations(
 
 // collectCppCallSites performs function-level call site collection for C++,
 // attributing each call to its enclosing function/method node.
-func collectCppCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+func collectCppCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{
 			"class_specifier":  true,
@@ -441,10 +441,10 @@ func collectCppCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, 
 		CallTypes: map[string]bool{
 			"call_expression": true,
 		},
-		NameExtractor: func(n *sitter.Node, src []byte) string {
+		NameExtractor: func(n sitter.Node, src []byte) string {
 			switch n.Type() {
 			case "class_specifier", "struct_specifier":
-				if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+				if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 					return string(src[nameNode.StartByte():nameNode.EndByte()])
 				}
 			case "function_definition":
@@ -458,20 +458,20 @@ func collectCppCallSites(g *graph.Graph, _ *sitter.Language, root *sitter.Node, 
 			}
 			return ""
 		},
-		CalleeExtractor: func(n *sitter.Node, src []byte) string {
+		CalleeExtractor: func(n sitter.Node, src []byte) string {
 			fn := n.ChildByFieldName("function")
-			if fn == nil {
+			if fn.IsNull() {
 				return ""
 			}
 			switch fn.Type() {
 			case "identifier":
 				return string(src[fn.StartByte():fn.EndByte()])
 			case "field_expression":
-				if field := fn.ChildByFieldName("field"); field != nil {
+				if field := fn.ChildByFieldName("field"); !field.IsNull() {
 					return string(src[field.StartByte():field.EndByte()])
 				}
 			case "qualified_identifier":
-				if nameNode := fn.ChildByFieldName("name"); nameNode != nil {
+				if nameNode := fn.ChildByFieldName("name"); !nameNode.IsNull() {
 					return string(src[nameNode.StartByte():nameNode.EndByte()])
 				}
 			}

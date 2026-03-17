@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/dockerfile"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
+	"github.com/alexaandru/go-sitter-forest/dockerfile"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -26,7 +26,7 @@ type DockerfileParser struct {
 
 // NewDockerfileParser creates a ready-to-use DockerfileParser.
 func NewDockerfileParser() *DockerfileParser {
-	return &DockerfileParser{language: dockerfile.GetLanguage()}
+	return &DockerfileParser{language: sitter.NewLanguage(dockerfile.GetLanguage())}
 }
 
 // Extensions returns the file extensions handled by this parser.
@@ -64,12 +64,12 @@ func (p *DockerfileParser) Parse(g *graph.Graph, filePath string, src []byte) er
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseCtx(context.Background(), nil, src)
+	tree, _ := parser.ParseString(context.Background(), nil, src)
 	if tree == nil {
 		return nil
 	}
 	root := tree.RootNode()
-	if root == nil {
+	if root.IsNull() {
 		return nil
 	}
 
@@ -90,9 +90,9 @@ func (p *DockerfileParser) Parse(g *graph.Graph, filePath string, src []byte) er
 	var currentStage graph.NodeID
 
 	// Walk top-level instructions.
-	for i := 0; i < int(root.ChildCount()); i++ {
+	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 
@@ -141,7 +141,7 @@ func (p *DockerfileParser) Parse(g *graph.Graph, filePath string, src []byte) er
 // handleFrom processes a FROM instruction, creating a stage node and base image import.
 func (p *DockerfileParser) handleFrom(
 	g *graph.Graph,
-	n *sitter.Node,
+	n sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
@@ -155,18 +155,18 @@ func (p *DockerfileParser) handleFrom(
 	// Extract image spec and alias from the FROM instruction.
 	var imageName, imageTag, alias string
 
-	for j := 0; j < int(n.ChildCount()); j++ {
+	for j := uint32(0); j < n.ChildCount(); j++ {
 		child := n.Child(j)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		switch child.Type() {
 		case "image_spec":
 			// image_spec contains image_name and optionally image_tag.
-			if nameNode := firstChildOfType(child, "image_name"); nameNode != nil {
+			if nameNode := firstChildOfType(child, "image_name"); !nameNode.IsNull() {
 				imageName = childText(nameNode, src)
 			}
-			if tagNode := firstChildOfType(child, "image_tag"); tagNode != nil {
+			if tagNode := firstChildOfType(child, "image_tag"); !tagNode.IsNull() {
 				imageTag = childText(tagNode, src)
 			}
 			// If we didn't find image_name as a child type, try the full text.
@@ -239,7 +239,7 @@ func (p *DockerfileParser) handleFrom(
 // handleCopy processes a COPY instruction, creating edges for --from references.
 func (p *DockerfileParser) handleCopy(
 	g *graph.Graph,
-	n *sitter.Node,
+	n sitter.Node,
 	src []byte,
 	filePath string,
 	stages []dockerfileStage,
@@ -251,9 +251,9 @@ func (p *DockerfileParser) handleCopy(
 
 	// Look for --from=<stage> parameter.
 	var fromStage string
-	for j := 0; j < int(n.ChildCount()); j++ {
+	for j := uint32(0); j < n.ChildCount(); j++ {
 		child := n.Child(j)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "param" {
@@ -304,7 +304,7 @@ func (p *DockerfileParser) handleCopy(
 // handleArg processes an ARG instruction, creating a NodeVariable with kind="arg".
 func (p *DockerfileParser) handleArg(
 	g *graph.Graph,
-	n *sitter.Node,
+	n sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
@@ -352,7 +352,7 @@ func (p *DockerfileParser) handleArg(
 // handleEnv processes an ENV instruction, creating NodeVariable(s) with kind="env".
 func (p *DockerfileParser) handleEnv(
 	g *graph.Graph,
-	n *sitter.Node,
+	n sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
@@ -364,19 +364,19 @@ func (p *DockerfileParser) handleEnv(
 	// Extract env pairs. In the dockerfile grammar, env_instruction may contain
 	// env_pair children, or we fall back to parsing the instruction text.
 	found := false
-	for j := 0; j < int(n.ChildCount()); j++ {
+	for j := uint32(0); j < n.ChildCount(); j++ {
 		child := n.Child(j)
-		if child == nil {
+		if child.IsNull() {
 			continue
 		}
 		if child.Type() == "env_pair" {
 			key := ""
-			if keyNode := firstChildOfType(child, "env_key"); keyNode != nil {
+			if keyNode := firstChildOfType(child, "env_key"); !keyNode.IsNull() {
 				key = strings.TrimSpace(childText(keyNode, src))
 			}
 			// Fallback: try unquoted_string as the key.
 			if key == "" {
-				if keyNode := firstChildOfType(child, "unquoted_string"); keyNode != nil {
+				if keyNode := firstChildOfType(child, "unquoted_string"); !keyNode.IsNull() {
 					key = strings.TrimSpace(childText(keyNode, src))
 				}
 			}
@@ -440,7 +440,7 @@ func (p *DockerfileParser) handleEnv(
 }
 
 // handleExpose collects EXPOSE port declarations into the file metadata.
-func (p *DockerfileParser) handleExpose(n *sitter.Node, src []byte, meta map[string]string) {
+func (p *DockerfileParser) handleExpose(n sitter.Node, src []byte, meta map[string]string) {
 	exposeText := strings.TrimSpace(childText(n, src))
 	exposeText = strings.TrimPrefix(exposeText, "EXPOSE ")
 	exposeText = strings.TrimPrefix(exposeText, "expose ")
@@ -458,7 +458,7 @@ func (p *DockerfileParser) handleExpose(n *sitter.Node, src []byte, meta map[str
 }
 
 // handleLabel collects LABEL metadata into the file metadata.
-func (p *DockerfileParser) handleLabel(n *sitter.Node, src []byte, meta map[string]string) {
+func (p *DockerfileParser) handleLabel(n sitter.Node, src []byte, meta map[string]string) {
 	labelText := strings.TrimSpace(childText(n, src))
 	labelText = strings.TrimPrefix(labelText, "LABEL ")
 	labelText = strings.TrimPrefix(labelText, "label ")
@@ -488,7 +488,7 @@ func (p *DockerfileParser) handleLabel(n *sitter.Node, src []byte, meta map[stri
 // creating a NodeFunction with the instruction kind.
 func (p *DockerfileParser) handleCmdOrEntrypoint(
 	g *graph.Graph,
-	n *sitter.Node,
+	n sitter.Node,
 	src []byte,
 	filePath string,
 	fileNodeID graph.NodeID,
