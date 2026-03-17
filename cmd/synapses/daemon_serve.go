@@ -254,9 +254,10 @@ func cmdDaemonServe(args []string) error {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":   "ok",
-			"version":  version,
-			"projects": paths,
+			"status":            "ok",
+			"version":           version,
+			"projects":          paths,
+			"indexing_progress": globalProgress.Snapshot(),
 		})
 	})
 
@@ -462,6 +463,10 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	}
 	go st.PruneStaleData(30)
 
+	// Signal indexing in progress so health endpoint and status command can
+	// report live state. Reset on completion (Done/Reset are called inside
+	// loadOrBuildGraphWithStore for the full-reindex path).
+	globalProgress.Reset()
 	g, err := loadOrBuildGraphWithStore(absPath, st, false, cfg.Plugins)
 	if err != nil {
 		st.Close()
