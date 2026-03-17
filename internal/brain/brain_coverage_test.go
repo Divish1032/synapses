@@ -410,6 +410,114 @@ func TestClient_GetSDLC_DefaultPhase(t *testing.T) {
 	}
 }
 
+// --- Mock Brain for testing BrainStatsProvider ---
+
+type mockBrainWithStats struct {
+	*NullBrain
+	stats map[string]interface{}
+}
+
+func (m *mockBrainWithStats) BrainStats() map[string]interface{} {
+	return m.stats
+}
+
+type mockBrainWithTierStatus struct {
+	*NullBrain
+	stats     map[string]interface{}
+	tierState map[string]TierState
+}
+
+func (m *mockBrainWithTierStatus) BrainStats() map[string]interface{} {
+	return m.stats
+}
+
+func (m *mockBrainWithTierStatus) TierStatus() map[string]TierState {
+	return m.tierState
+}
+
+// --- Client.BrainHealth() tests ---
+
+func TestClient_BrainHealth_WithoutStats(t *testing.T) {
+	c := NewClient("", 0)
+	health := c.BrainHealth()
+	if health != nil {
+		t.Error("expected nil health for NullBrain (no BrainStatsProvider)")
+	}
+}
+
+func TestClient_BrainHealth_WithStats(t *testing.T) {
+	mockBrain := &mockBrainWithStats{
+		NullBrain: &NullBrain{},
+		stats: map[string]interface{}{
+			"ingest_calls":      int64(10),
+			"ingest_success":    int64(8),
+			"ingest_avg_ms":     int64(50),
+			"enrich_calls":      int64(5),
+			"enrich_success":    int64(5),
+			"enrich_avg_ms":     int64(100),
+			"guardian_calls":    int64(0),
+			"orchestrate_calls": int64(0),
+			"archivist_calls":   int64(0),
+			"context_builder_calls": int64(0),
+		},
+	}
+	c := &Client{brain: mockBrain}
+	health := c.BrainHealth()
+
+	if health == nil {
+		t.Fatal("expected non-nil health")
+	}
+	if model, ok := health["model"]; !ok {
+		t.Error("missing 'model' key in health response")
+	} else if _, isString := model.(string); !isString {
+		t.Error("model should be a string")
+	}
+	if tiers, ok := health["tiers"].(map[string]interface{}); !ok {
+		t.Fatal("expected 'tiers' map in health response")
+	} else {
+		if ingest, ok := tiers["ingest"].(map[string]interface{}); ok {
+			if calls, _ := ingest["calls"].(int64); calls != 10 {
+				t.Errorf("ingest calls: got %d, want 10", calls)
+			}
+			if rate, _ := ingest["success_rate"].(float64); rate != 0.8 {
+				t.Errorf("ingest success_rate: got %f, want 0.8", rate)
+			}
+		}
+	}
+}
+
+func TestClient_BrainHealth_WithTierStatus(t *testing.T) {
+	mockBrain := &mockBrainWithTierStatus{
+		NullBrain: &NullBrain{},
+		stats: map[string]interface{}{
+			"ingest_calls":      int64(1),
+			"ingest_success":    int64(0),
+			"ingest_avg_ms":     int64(0),
+			"enrich_calls":      int64(0),
+			"guardian_calls":    int64(0),
+			"orchestrate_calls": int64(0),
+			"archivist_calls":   int64(0),
+			"context_builder_calls": int64(0),
+		},
+		tierState: map[string]TierState{
+			"ingest": {Open: true, Failures: 3, CooldownRemaining: 10000},
+		},
+	}
+	c := &Client{brain: mockBrain}
+	health := c.BrainHealth()
+
+	if health == nil {
+		t.Fatal("expected non-nil health")
+	}
+	if tiers, ok := health["tiers"].(map[string]interface{}); ok {
+		if ingest, ok := tiers["ingest"].(map[string]interface{}); ok {
+			if circuit, _ := ingest["circuit"].(string); circuit != "open" {
+				t.Errorf("ingest circuit: got %q, want open", circuit)
+			}
+		}
+	}
+}
+
 // --- Circuit breaker tests ---
 
 func TestCircuitBreaker_InitialState(t *testing.T) {
