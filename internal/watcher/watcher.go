@@ -452,8 +452,18 @@ func (w *Watcher) reparseFile(path, _ string) {
 
 	resolver.ResolveCallEdges(w.graph)
 	resolver.ResolveImplementsEdges(w.graph)
-	// R31: re-resolve doc edges after markdown reparse.
-	resolver.ResolveDocEdges(w.graph)
+	// R31: re-resolve doc edges. For markdown files only the newly parsed
+	// sections need linking (code entities are unchanged), so use the
+	// file-scoped variant to avoid O(all_sections) work on every file save.
+	// For code file changes, all sections may reference the new entities,
+	// so a full scan is required.
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".md", ".markdown", ".mdx":
+		resolver.ResolveDocEdgesForFile(w.graph, path)
+	default:
+		resolver.ResolveDocEdges(w.graph)
+	}
 
 	// Keep the stored call-site table consistent with the re-parsed file.
 	if w.store != nil {

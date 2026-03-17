@@ -295,6 +295,102 @@ func TestMarkdownParser_TildeFenceBlock(t *testing.T) {
 	}
 }
 
+func TestMarkdownParser_YAMLFrontmatter(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("---\ntitle: My Docs\ndate: 2024-01-01\n---\n# Real Heading\nBody text.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section (frontmatter skipped), got %d", len(sections))
+	}
+	if sections[0].Metadata["title"] != "Real Heading" {
+		t.Errorf("title = %q, want 'Real Heading'", sections[0].Metadata["title"])
+	}
+}
+
+func TestMarkdownParser_TOMLFrontmatter(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("+++\ntitle = \"My Docs\"\n+++\n# Heading\nContent.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section (TOML frontmatter skipped), got %d", len(sections))
+	}
+}
+
+func TestMarkdownParser_SetextH1(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("My Title\n========\nSome body text.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 setext H1 section, got %d", len(sections))
+	}
+	if sections[0].Metadata["title"] != "My Title" {
+		t.Errorf("title = %q, want 'My Title'", sections[0].Metadata["title"])
+	}
+	if sections[0].Metadata["depth"] != "1" {
+		t.Errorf("depth = %q, want '1'", sections[0].Metadata["depth"])
+	}
+	if !strings.Contains(sections[0].Metadata["body_preview"], "Some body text") {
+		t.Errorf("body_preview missing body: %q", sections[0].Metadata["body_preview"])
+	}
+}
+
+func TestMarkdownParser_SetextH2(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("Subtitle\n--------\nBody here.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 setext H2 section, got %d", len(sections))
+	}
+	if sections[0].Metadata["depth"] != "2" {
+		t.Errorf("depth = %q, want '2'", sections[0].Metadata["depth"])
+	}
+}
+
+func TestMarkdownParser_SetextAndATXMixed(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("Top Section\n===========\nIntro.\n## Sub Heading\nDetails.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 2 {
+		t.Fatalf("expected 2 sections, got %d", len(sections))
+	}
+}
+
+func TestMarkdownParser_FrontmatterThenSetextH1(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("---\ntitle: Doc\n---\nReal Title\n==========\nContent.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section (frontmatter skipped, setext parsed), got %d", len(sections))
+	}
+	if sections[0].Metadata["title"] != "Real Title" {
+		t.Errorf("title = %q, want 'Real Title'", sections[0].Metadata["title"])
+	}
+}
+
 // assertEdge checks that an edge exists from→to with the given type.
 func assertEdge(t *testing.T, g *graph.Graph, from, to graph.NodeID, edgeType graph.EdgeType) {
 	t.Helper()
