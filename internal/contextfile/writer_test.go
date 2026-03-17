@@ -543,6 +543,53 @@ func TestWrite_ContextFilePathError(t *testing.T) {
 	}
 }
 
+func TestWrite_WriteFileError(t *testing.T) {
+	// Write uses an atomic write: it creates a .tmp file first, then renames it.
+	// If the context directory is read-only, os.WriteFile will fail.
+	// Write must propagate that error rather than silently swallowing it.
+	//
+	// Setup: create the ~/.synapses/context dir, then chmod it read-only
+	// so the .tmp write fails.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	// Pre-create the directory so ContextFilePath succeeds.
+	contextDir := filepath.Join(tmpHome, ".synapses", "context")
+	if err := os.MkdirAll(contextDir, 0o755); err != nil {
+		t.Fatalf("setup: create context dir: %v", err)
+	}
+	// Make it read-only — subsequent writes into this dir must fail.
+	if err := os.Chmod(contextDir, 0o444); err != nil {
+		t.Fatalf("setup: chmod read-only: %v", err)
+	}
+	t.Cleanup(func() {
+		// Restore write permission so TempDir cleanup succeeds.
+		_ = os.Chmod(contextDir, 0o755)
+	})
+
+	err := Write("/some/project", nil, nil)
+	if err == nil {
+		t.Error("Write into a read-only directory should return an error")
+	}
+}
+
+func TestContextFilePath_MkdirAllError(t *testing.T) {
+	// If HOME points to a regular file (not a directory), os.MkdirAll will fail
+	// when it tries to create the ~/.synapses/context/ sub-path.
+	// ContextFilePath must return that error rather than panic.
+	tmpDir := t.TempDir()
+	fileAsHome := filepath.Join(tmpDir, "not-a-dir")
+	if err := os.WriteFile(fileAsHome, []byte("I am a file"), 0o644); err != nil {
+		t.Fatalf("setup: create fake HOME file: %v", err)
+	}
+	t.Setenv("HOME", fileAsHome)
+
+	_, err := ContextFilePath("/project/root")
+	if err == nil {
+		t.Error("ContextFilePath should error when HOME is a file (MkdirAll fails)")
+	}
+}
+
 func TestRender_WithIdentityAndGuidance(t *testing.T) {
 	id := &graph.ProjectIdentity{
 		RepoID:       "my-app",
