@@ -30,7 +30,7 @@ func TestActivePrompts_InjectedInGetContext(t *testing.T) {
 	})
 
 	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]interface{}{"entity": "AuthService"}
+	req.Params.Arguments = map[string]interface{}{"entity": "AuthService", "format": "json"}
 
 	result, err := srv.handleGetContext(context.Background(), req)
 	if err != nil {
@@ -65,7 +65,7 @@ func TestActivePrompts_NoneWhenNoTemplates(t *testing.T) {
 	// No SetPromptTemplates call
 
 	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]interface{}{"entity": "main"}
+	req.Params.Arguments = map[string]interface{}{"entity": "main", "format": "json"}
 
 	result, err := srv.handleGetContext(context.Background(), req)
 	if err != nil {

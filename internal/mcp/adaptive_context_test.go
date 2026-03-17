@@ -285,6 +285,7 @@ func TestHandleGetContext_AdaptiveHint_SetAfterUnhelpfulFeedback(t *testing.T) {
 	req := callTool(map[string]any{
 		"entity":   "AuthService",
 		"agent_id": "agent-x",
+		"format": "json",
 	})
 	result, err := s.handleGetContext(context.Background(), req)
 	if err != nil {
@@ -307,6 +308,7 @@ func TestHandleGetContext_NoAdaptiveHint_WhenNoFeedback(t *testing.T) {
 	req := callTool(map[string]any{
 		"entity":   "AuthService",
 		"agent_id": "fresh-agent",
+		"format": "json",
 	})
 	result, err := s.handleGetContext(context.Background(), req)
 	if err != nil {
@@ -340,6 +342,7 @@ func TestHandleGetContext_ExplicitDepthOverridesAdaptive(t *testing.T) {
 		"entity":   "AuthService",
 		"agent_id": "agent-y",
 		"depth":    float64(1),
+		"format": "json",
 	})
 	// We can't directly inspect cfg.MaxDepth from outside, but if the explicit
 	// depth wins the BFS won't error and the result should be valid (not deeper).
@@ -439,6 +442,7 @@ func TestHandleGetContext_NoAgentID_AdaptiveSkipped(t *testing.T) {
 	req := callTool(map[string]any{
 		"entity": "AuthService",
 		// no agent_id
+		"format": "json",
 	})
 	result, err := s.handleGetContext(context.Background(), req)
 	if err != nil {

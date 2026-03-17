@@ -700,6 +700,12 @@ func (s *Server) registerTools() {
 			mcp.WithString("intent",
 				mcp.Description("Optional. Short free-text declaration of what you are working on — visible to peer agents as a Tier 2/3 signal. E.g. 'implementing R1 framework edge injection'. Pass empty string to clear."),
 			),
+			mcp.WithString("scope",
+				mcp.Description("Optional. Controls response verbosity. "+
+					"\"full\" (default): all sections, backward compatible. "+
+					"\"quick\": tasks + working_state + scale_guidance only (~500 tokens). "+
+					"\"resume\": tasks with session states + working_state only."),
+			),
 		),
 		s.handleSessionInit,
 	)

@@ -67,6 +67,7 @@ func TestE2E_GetContext_ShowsOpenGap(t *testing.T) {
 	// get_context (default JSON format).
 	res, err := srv.handleGetContext(ctx, callTool(map[string]any{
 		"entity": "AuthLogin",
+		"format": "json",
 	}))
 	raw := rawText(t, res, err)
 
@@ -108,6 +109,7 @@ func TestE2E_GetContext_NoGapOnOtherEntity(t *testing.T) {
 	// get_context for AuthLogout — must NOT contain the gap.
 	res, err := srv.handleGetContext(ctx, callTool(map[string]any{
 		"entity": "AuthLogout",
+		"format": "json",
 	}))
 	raw := rawText(t, res, err)
 

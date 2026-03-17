@@ -1547,111 +1547,38 @@ const (
 // any agent-specific frontmatter differ.
 var synapsesSection = synapsesSectionStart + `## Synapses — Code Intelligence (MCP)
 
-This project is indexed by **Synapses**, a graph-based code intelligence server.
-
 ### Session Start
-Call **one tool** at the start of every session:
-` + "```" + `
-session_init()   ← replaces get_pending_tasks + get_project_identity + get_working_state
-` + "```" + `
-Returns: pending tasks, project identity, working state, recent agent events, and **scale_guidance** — a repo-size-aware recommendation on which tools to prefer.
+Call ` + "`session_init()`" + ` at the start of every session — returns pending tasks, project identity, scale guidance, and working state in one round-trip.
 
-### Tool Selection — follow scale_guidance from session_init
+### Tool Selection (follow scale_guidance from session_init)
 
-| Repo scale | When to use Synapses | When to use Read/Grep |
+| Scale | Use Synapses for | Use Read/Grep for |
 |---|---|---|
-| micro (<100 nodes) | Structural analysis, multi-file understanding | Simple targeted edits to a known file |
-| small (100–499) | Code exploration, cross-file analysis | Targeted single-file edits |
-| medium (500–1999) | All code exploration — Glob/Grep surfaces too much noise | Writing to a specific file you already identified |
-| large (2000+) | Always — direct scanning is too noisy at this scale | Writing to a specific file you already identified |
+| micro/small | Structural analysis, cross-file understanding | Targeted single-file edits |
+| medium/large | All code exploration — direct scan is too noisy at this scale | Writing to a specific file you already identified |
 
-### Code Exploration
+### Key Tools
 
-| When you want to... | Use this |
+| Goal | Tool |
 |---|---|
-| Not sure which tool to use | ` + "`discover_tools(query=\"what I'm trying to do\")`" + ` |
 | Understand a function, struct, or interface | ` + "`get_context(entity=\"Name\")`" + ` |
-| Pin to a specific file (avoids wrong-entity picks) | ` + "`get_context(entity=\"Name\", file=\"cmd/server/main.go\")`" + ` |
-| Skip re-fetching unchanged context (auto in daemon) | In daemon mode the server auto-detects unchanged context per session — no action needed. For stdio or explicit override: ` + "`get_context(entity=\"Name\", known_hash=\"<prev entity_hash>\")`" + ` → ` + "`{unchanged: true}`" + ` |
-| Query by package-qualified name | ` + "`get_context(entity=\"graph.New\")`" + ` — works for both standalone functions and methods; use ` + "`file=`" + ` to disambiguate further |
-| Boost nodes linked to current task | ` + "`get_context(entity=\"Name\", task_id=\"...\")`" + ` |
+| Pin to a specific file (avoids ambiguity) | ` + "`get_context(entity=\"Name\", file=\"path/suffix.go\")`" + ` |
 | Find a symbol by name or substring | ` + "`find_entity(query=\"name\")`" + ` |
-| Search by concept ("auth", "rate limiting") | ` + "`search(query=\"...\", mode=\"semantic\")`" + ` |
-| List all entities in a file | ` + "`get_file_context(file=\"path/to/file\")`" + ` |
-| Trace how function A calls function B | ` + "`get_call_chain(from=\"A\", to=\"B\")`" + ` |
+| Search by concept ("auth", "caching") | ` + "`search(query=\"...\", mode=\"semantic\")`" + ` |
 | Find what breaks if a symbol changes | ` + "`get_impact(symbol=\"Name\")`" + ` |
-
-### Before Writing Code
-
-| When you want to... | Use this |
-|---|---|
 | Check proposed changes against architecture rules | ` + "`validate_plan(changes=[...])`" + ` |
-| Verify written files against rules after implementation | ` + "`verify_implementation(files_written=[\"...\"])`" + ` |
-| View current architecture violations | ` + "`get_violations()`" + ` |
-| Create or update an architectural constraint | ` + "`upsert_rule(rule_id=\"...\", description=\"...\", severity=\"error\")`" + ` |
-| Reserve a scope before editing (multi-agent) | ` + "`claim_work(agent_id=\"...\", scope=\"pkg/auth\")`" + ` |
-| Check for conflicting edits by other agents | ` + "`get_conflicts(agent_id=\"...\")`" + ` |
-| Release locks when done | ` + "`release_claims(agent_id=\"...\")`" + ` |
-
-### Task & Session Management
-
-| When you want to... | Use this |
-|---|---|
+| Verify written files against rules | ` + "`verify_implementation(files_written=[\"...\"])`" + ` |
 | Save a plan with tasks for future sessions | ` + "`create_plan(title=\"...\", tasks=[...])`" + ` |
-| List all plans and completion counts | ` + "`get_plans()`" + ` |
-| Get your own pending tasks | ` + "`get_pending_tasks(agent_id=\"...\", suggest_next=true)`" + ` |
-| Browse episodic memory chronologically | ` + "`recall()`" + ` (empty query = newest-first browse) |
-| Link a task to relevant code entities | ` + "`link_task_nodes(task_id=\"...\", node_ids=[...])`" + ` |
-| Mark a task as done or add notes | ` + "`update_task(id=\"...\", status=\"done\", notes=\"...\")`" + ` |
-| Save progress so next session can resume | ` + "`save_session_state(task_id=\"...\")`" + ` |
-| Resume from exact saved state | ` + "`get_session_state(task_id=\"...\")`" + ` |
-| Leave a note on a code entity for other agents | ` + "`annotate_node(node_id=\"...\", note=\"...\")`" + ` |
-| See recent file/task/annotation events | ` + "`get_events(since_seq=N)`" + ` (use latest_event_seq from session_init) |
-| See all active agents | ` + "`get_agents()`" + ` |
+| Resume a saved session | ` + "`get_session_state(task_id=\"...\")`" + ` |
+| Not sure which tool fits | ` + "`discover_tools(query=\"what I'm trying to do\")`" + ` |
 
-### Memory Tiers
+### Anti-patterns
+- **NEVER** use Grep/Glob to understand code structure or find callers — use ` + "`get_context`" + ` or ` + "`get_impact`" + `
+- **NEVER** skip ` + "`validate_plan()`" + ` before multi-file changes — it catches architecture violations before any code is written
+- **NEVER** leave discovered bugs untracked — add them as tasks via ` + "`create_plan()`" + ` immediately
 
-Three tiers govern where information lives. Use the wrong tier and data goes stale silently or costs an unnecessary tool call.
-
-| Tier | What belongs here | How to store | How to query |
-|---|---|---|---|
-| **Tier 1 — Live** | Project structure, active components, file topology, recent changes | Never store — always live | ` + "`session_init()`" + `, ` + "`get_repo_map()`" + `, ` + "`get_file_context()`" + ` |
-| **Tier 2 — Anchored** | Knowledge about code entities, architectural facts derived from the graph, task context | ` + "`remember(decision=\"...\", anchor_nodes=[\"node_id\"])`" + ` | ` + "`recall(query=\"...\")`" + ` |
-| **Tier 3 — Durable** | User preferences, feedback, non-derivable motivations and decisions | Write to ` + "`MEMORY.md`" + ` | Loaded automatically into every session |
-
-Tier 2 memories auto-invalidate when their anchored graph nodes change or disappear — surfaced as ` + "`invalidated_memories`" + ` in ` + "`session_init`" + `.
-
-**Never write these to MEMORY.md (wrong tier):**
-- ` + "❌" + ` Which sub-projects or components are active/archived — query ` + "`session_init()`" + ` or ` + "`get_repo_map()`" + `
-- ` + "❌" + ` Function signatures, package structure, API shapes — use ` + "`get_context()`" + ` or ` + "`find_entity()`" + `
-- ` + "❌" + ` Anything ` + "`session_init`" + `, ` + "`get_context`" + `, or ` + "`get_repo_map`" + ` can answer live
-- ` + "❌" + ` Task status or recent changes — use ` + "`get_pending_tasks()`" + ` and ` + "`working_state`" + ` from ` + "`session_init`" + `
-
-### Web Intelligence (requires synapses-scout sidecar)
-
-| When you want to... | Use this |
-|---|---|
-| Search for docs, error solutions, API references | ` + "`web_search(query=\"...\")`" + ` |
-| Fetch and read a documentation page | ` + "`web_fetch(input=\"https://...\")`" + ` |
-| Deep multi-query research on a topic | ` + "`web_deep_search(query=\"...\")`" + ` |
-| Persist web findings to a code entity | ` + "`web_annotate(node_id=\"...\", note=\"...\", hits=[...])`" + ` |
-
-### NEVER do these (anti-patterns)
-- **NEVER** use ` + "`Grep`" + ` to understand code structure, find what calls a function, or explore cross-file relationships — use ` + "`get_context`" + ` or ` + "`get_impact`" + ` instead.
-- **NEVER** use ` + "`Glob`" + ` to discover where a symbol is defined — use ` + "`find_entity(query=\"name\")`" + ` instead.
-- **NEVER** use ` + "`Read`" + ` to explore unfamiliar code — use ` + "`get_context(entity=\"Name\")`" + ` instead. Reserve ` + "`Read`" + ` for writing to a specific file you have already identified.
-- **NEVER** use ` + "`Bash`" + ` + ` + "`grep`" + ` as a substitute for ` + "`search(mode=\"semantic\")`" + ` when looking for a concept across the codebase.
-- **NEVER** skip ` + "`validate_plan()`" + ` before a multi-file change — it catches architecture violations before any code is written.
-- **NEVER** leave bugs or discovered issues untracked — always add them as tasks via ` + "`create_plan()`" + ` so future sessions can find them.
-
-### Rules
-- **Read/Grep** are for *writing* code (editing a specific file you have already found). For *understanding* code structure, always prefer Synapses tools.
-- **Call ` + "`session_init()`" + `** at the start of every session. It replaces the 3-call startup ritual.
-- **Workflow:** ` + "`session_init`" + ` → ` + "`prepare_context`" + ` (or specific tools) → ` + "`validate_plan`" + ` → edit files → ` + "`verify_implementation`" + `.
-- **When unsure** which tool to use, call ` + "`discover_tools(query=\"...\")`" + ` — it returns the right tool + example in one call.
-- **Call ` + "`validate_plan()`" + `** before implementing multi-file changes.
-- When ` + "`get_context`" + ` returns ` + "`other_candidates`" + `, re-call with ` + "`file=`" + ` to pin to the right entity.
-- **Track all bugs and tasks** via ` + "`create_plan()`" + ` immediately when discovered — do not rely on memory across sessions.
+### Workflow
+` + "`session_init`" + ` → explore (` + "`get_context`" + `, ` + "`find_entity`" + `) → ` + "`validate_plan`" + ` → edit files → ` + "`verify_implementation`" + `
 ` + synapsesSectionEnd
 
 // writeProjectCLAUDE writes (or updates) a Synapses-managed section in

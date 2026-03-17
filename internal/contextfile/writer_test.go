@@ -85,29 +85,29 @@ func TestRender_AlwaysContainsAutoGenComment(t *testing.T) {
 
 func TestRender_AlwaysContainsWorkflowSection(t *testing.T) {
 	out := render(nil, nil)
+	// Minimal format: "session_init()" is referenced in the task count hint.
+	// The workflow steps are no longer inlined — kept in CLAUDE.md instead.
 	if !strings.Contains(out, "session_init") {
-		t.Error("missing workflow section")
-	}
-	if !strings.Contains(out, "verify_implementation") {
-		t.Error("missing verify_implementation in workflow")
+		t.Error("missing session_init reference")
 	}
 }
 
-func TestRender_AlwaysContainsKeyToolsTable(t *testing.T) {
+func TestRender_NoToolTableInMinimalFormat(t *testing.T) {
+	// The context file is now minimal — tool tables live in CLAUDE.md, not here.
 	out := render(nil, nil)
-	for _, tool := range []string{"get_context", "find_entity", "validate_plan", "claim_work"} {
-		if !strings.Contains(out, tool) {
-			t.Errorf("missing tool %q in key tools table", tool)
+	for _, tool := range []string{"claim_work", "verify_implementation"} {
+		if strings.Contains(out, tool) {
+			t.Errorf("tool %q should not be in minimal context file", tool)
 		}
 	}
 }
 
 func TestRender_NoIdentity_NoPendingTasks(t *testing.T) {
 	out := render(nil, nil)
-	if !strings.Contains(out, "No pending tasks.") {
-		t.Errorf("expected 'No pending tasks.' when tasks=nil, got:\n%s", out)
+	// Minimal format: no "No pending tasks." message, no identity header.
+	if strings.Contains(out, "No pending tasks.") {
+		t.Errorf("minimal format should not include 'No pending tasks.', got:\n%s", out)
 	}
-	// No identity section should appear.
 	if strings.Contains(out, "# Synapses —") {
 		t.Error("unexpected identity header when identity=nil")
 	}
@@ -145,7 +145,7 @@ func TestRender_WithIdentity(t *testing.T) {
 	}
 }
 
-func TestRender_WithTasks_PendingAndInProgress(t *testing.T) {
+func TestRender_WithTasks_ShowsCountNotDetails(t *testing.T) {
 	tasks := []store.Task{
 		{ID: "t1", Title: "Fix auth bug", Status: "pending", Priority: "p0"},
 		{ID: "t2", Title: "Add logging", Status: "in_progress", Description: "Use structured logs"},
@@ -153,41 +153,39 @@ func TestRender_WithTasks_PendingAndInProgress(t *testing.T) {
 	}
 	out := render(nil, tasks)
 
-	// pending task with p0 priority
-	if !strings.Contains(out, "[ ]") {
-		t.Error("missing '[ ]' marker for pending task")
+	// Minimal format: shows count + hint to call session_init(), not full task list.
+	if !strings.Contains(out, "2 pending") {
+		t.Errorf("expected '2 pending' task count, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Fix auth bug") {
-		t.Error("missing pending task title")
+	if !strings.Contains(out, "1 in progress") {
+		t.Errorf("expected '1 in progress' count, got:\n%s", out)
 	}
-	if !strings.Contains(out, "priority: p0") {
-		t.Error("missing priority p0")
-	}
-
-	// in_progress task
-	if !strings.Contains(out, "[~]") {
-		t.Error("missing '[~]' marker for in_progress task")
-	}
-	if !strings.Contains(out, "Add logging") {
-		t.Error("missing in_progress task title")
-	}
-	if !strings.Contains(out, "Use structured logs") {
-		t.Error("missing task description")
+	if !strings.Contains(out, "session_init()") {
+		t.Errorf("expected session_init() hint, got:\n%s", out)
 	}
 
-	// done task should not appear
-	if strings.Contains(out, "Old task") {
-		t.Error("done task should not appear in output")
+	// Task titles and descriptions must NOT appear — full list lives in session_init().
+	for _, detail := range []string{"Fix auth bug", "Add logging", "Use structured logs", "Old task", "[ ]", "[~]"} {
+		if strings.Contains(out, detail) {
+			t.Errorf("task detail %q should not appear in minimal context file", detail)
+		}
 	}
 }
 
-func TestRender_DefaultPriority_NotShown(t *testing.T) {
+func TestRender_SinglePendingTask_ShowsCount(t *testing.T) {
 	tasks := []store.Task{
 		{ID: "t1", Title: "Normal task", Status: "pending", Priority: "p2"},
 	}
 	out := render(nil, tasks)
+	if !strings.Contains(out, "1 pending") {
+		t.Errorf("expected '1 pending' count, got:\n%s", out)
+	}
+	// Neither the title nor priority should appear in minimal format.
+	if strings.Contains(out, "Normal task") {
+		t.Error("task title should not appear in minimal format")
+	}
 	if strings.Contains(out, "priority:") {
-		t.Error("p2 (default) priority should not be shown")
+		t.Error("priority should not appear in minimal format")
 	}
 }
 
