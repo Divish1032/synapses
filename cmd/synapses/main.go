@@ -626,6 +626,8 @@ func cmdLogs(args []string) error {
 }
 
 // cmdStatus loads the cached graph (without re-parsing) and prints statistics.
+// If the singleton daemon is running, it first queries /api/admin/health to
+// surface live indexing progress before falling back to the SQLite snapshot.
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Path to the repository root")
@@ -636,6 +638,25 @@ func cmdStatus(args []string) error {
 	absPath, err := filepath.Abs(*repoPath)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	// If the daemon is running, check for live indexing state first.
+	if IsSingletonDaemonRunning() {
+		client := &http.Client{Timeout: 2 * time.Second}
+		resp, err := client.Get("http://" + DaemonHTTPAddr + "/api/admin/health")
+		if err == nil {
+			defer resp.Body.Close()
+			var health struct {
+				IndexingProgress IndexingSnapshot `json:"indexing_progress"`
+			}
+			if jsonErr := json.NewDecoder(resp.Body).Decode(&health); jsonErr == nil {
+				p := health.IndexingProgress
+				if p.State == "indexing" {
+					fmt.Printf("indexing: %d/%d files (%d%%)\n", p.Done, p.Total, p.Pct)
+					return nil
+				}
+			}
+		}
 	}
 
 	dbPath, err := store.DefaultPath(absPath)
@@ -887,14 +908,25 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 	}
 
 	// No cache or smart reindex skipped: full parse from scratch.
-	fmt.Fprintf(os.Stderr, "synapses: indexing %s...\n", repoRoot)
+	quiet := os.Getenv("SYNAPSES_QUIET") == "1"
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "[synapses] indexing... 0/? files\n")
+	}
+	globalProgress.Start(0) // total unknown until WalkDir Phase 1 completes; updated via ProgressFunc
 	start := time.Now()
 	g, err = buildGraph(repoRoot, st, plugins)
 	if err != nil {
+		globalProgress.Reset()
 		return nil, err
 	}
-	fmt.Fprintf(os.Stderr, "synapses: indexed %d nodes in %s\n",
-		g.NodeCount(), time.Since(start).Round(time.Millisecond))
+	elapsed := time.Since(start).Round(time.Millisecond)
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "[synapses] indexing... %d/%d files — %d functions, %d edges (%s)\n",
+			globalProgress.filesDone.Load(), globalProgress.filesTotal.Load(),
+			g.NodeCount(), g.EdgeCount(), elapsed)
+		fmt.Fprintf(os.Stderr, "[synapses] ready.\n")
+	}
+	globalProgress.Done()
 
 	if err := st.SaveGraph(g); err != nil {
 		fmt.Fprintf(os.Stderr, "synapses: cache save failed: %v\n", err)
@@ -1007,6 +1039,66 @@ func applyTSTypesIfEnabled(g *graph.Graph, root string, cfg *config.Config) {
 // buildGraph parses the repo at root into a new graph.
 // If st is non-nil the parsed file mtimes are saved for future incremental reindexes.
 // plugins registers any external parser plugins before the walk begins.
+// extDisplayName maps common file extensions to short language names for the
+// progress line, e.g. ".go" → "Go". Unknown extensions fall back to the
+// extension string itself (uppercased, dot stripped).
+func extDisplayName(ext string) string {
+	switch ext {
+	case ".go":
+		return "Go"
+	case ".ts", ".tsx":
+		return "TS"
+	case ".js", ".jsx", ".mjs", ".cjs":
+		return "JS"
+	case ".py":
+		return "Py"
+	case ".rs":
+		return "Rust"
+	case ".java":
+		return "Java"
+	case ".rb":
+		return "Ruby"
+	case ".swift":
+		return "Swift"
+	case ".kt", ".kts":
+		return "Kotlin"
+	case ".cs":
+		return "C#"
+	case ".cpp", ".cc", ".cxx":
+		return "C++"
+	case ".c":
+		return "C"
+	case ".sh", ".bash":
+		return "Shell"
+	case ".php":
+		return "PHP"
+	case ".scala":
+		return "Scala"
+	case ".zig":
+		return "Zig"
+	case ".lua":
+		return "Lua"
+	case ".ml", ".mli":
+		return "OCaml"
+	case ".ex", ".exs":
+		return "Elixir"
+	case ".json":
+		return "JSON"
+	case ".yaml", ".yml":
+		return "YAML"
+	case ".toml":
+		return "TOML"
+	case ".proto":
+		return "Proto"
+	default:
+		name := strings.TrimPrefix(ext, ".")
+		if name == "" {
+			return ext
+		}
+		return strings.ToUpper(name[:1]) + name[1:]
+	}
+}
+
 func buildGraph(root string, st *store.Store, plugins []config.PluginConfig) (*graph.Graph, error) {
 	repoID := filepath.Base(root)
 	g := graph.New(repoID)
@@ -1015,6 +1107,49 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig) (*g
 	for _, p := range plugins {
 		w.RegisterPlugin(p.Extensions, p.Command)
 	}
+
+	// Wire up progress reporting unless SYNAPSES_QUIET=1 is set.
+	quiet := os.Getenv("SYNAPSES_QUIET") == "1"
+	if !quiet {
+		w.ProgressFunc = func(done, total int, byExt map[string]int) {
+			// Update the daemon-wide atomic state (read by /api/admin/health).
+			// filesTotal is set here because total is only known after Phase 1
+			// (the filesystem scan inside WalkDir).
+			globalProgress.filesTotal.Store(int64(total))
+			globalProgress.filesDone.Store(int64(done))
+
+			// Build compact language breakdown: top 3 extensions by count.
+			type langCount struct {
+				name  string
+				count int
+			}
+			langs := make([]langCount, 0, len(byExt))
+			for ext, cnt := range byExt {
+				langs = append(langs, langCount{extDisplayName(ext), cnt})
+			}
+			// Sort descending by count for consistent top-3.
+			for i := 0; i < len(langs); i++ {
+				for j := i + 1; j < len(langs); j++ {
+					if langs[j].count > langs[i].count {
+						langs[i], langs[j] = langs[j], langs[i]
+					}
+				}
+			}
+			var langParts []string
+			for i, lc := range langs {
+				if i >= 3 {
+					break
+				}
+				langParts = append(langParts, fmt.Sprintf("%s: %d", lc.name, lc.count))
+			}
+			suffix := ""
+			if len(langParts) > 0 {
+				suffix = " (" + strings.Join(langParts, ", ") + ")"
+			}
+			fmt.Fprintf(os.Stderr, "[synapses] indexing... %d/%d files%s\n", done, total, suffix)
+		}
+	}
+
 	mtimes, err := w.WalkDir(g, root)
 	if err != nil {
 		return nil, fmt.Errorf("parse repo: %w", err)

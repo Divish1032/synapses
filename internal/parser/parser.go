@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -45,9 +47,17 @@ type filenamePrefixEntry struct {
 
 // Walker orchestrates multi-language parsing over a directory tree.
 type Walker struct {
-	parsers              map[string]LanguageParser // extension → parser
-	filenameParsers      map[string]LanguageParser // base filename → parser
-	filenamePrefixParsers []filenamePrefixEntry     // base filename prefix → parser
+	parsers               map[string]LanguageParser // extension → parser
+	filenameParsers       map[string]LanguageParser // base filename → parser
+	filenamePrefixParsers []filenamePrefixEntry      // base filename prefix → parser
+
+	// ProgressFunc is an optional callback invoked after each file is parsed.
+	// done is the number of files completed so far; total is the full count
+	// (known after the filesystem scan). byExt maps file extension (e.g. ".go")
+	// to the number of files of that type parsed so far.
+	// The callback is called from multiple goroutines; implementations must be
+	// goroutine-safe. Set to nil to disable progress reporting.
+	ProgressFunc func(done, total int, byExt map[string]int)
 }
 
 // NewWalker creates a Walker pre-loaded with all built-in language parsers.
@@ -269,6 +279,37 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 	var heuristicFiles []parsedFile
 	var heuristicMu sync.Mutex
 
+	// Progress tracking — only active when ProgressFunc is set.
+	total := len(jobs)
+	var doneCount atomic.Int64   // files completed (read+parsed)
+	var byExtMu sync.Mutex
+	byExt := make(map[string]int, 16)
+	var lastEmitNs atomic.Int64  // UnixNano of last ProgressFunc call (throttle)
+
+	emitProgress := func(final bool) {
+		if w.ProgressFunc == nil {
+			return
+		}
+		now := time.Now().UnixNano()
+		if !final {
+			last := lastEmitNs.Load()
+			if now-last < int64(200*time.Millisecond) {
+				return
+			}
+			if !lastEmitNs.CompareAndSwap(last, now) {
+				return // another goroutine won the CAS — skip this tick
+			}
+		}
+		done := int(doneCount.Load())
+		byExtMu.Lock()
+		snapshot := make(map[string]int, len(byExt))
+		for k, v := range byExt {
+			snapshot[k] = v
+		}
+		byExtMu.Unlock()
+		w.ProgressFunc(done, total, snapshot)
+	}
+
 	for _, job := range jobs {
 		job := job // capture loop variable
 		wg.Add(1)
@@ -296,10 +337,23 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 				mtimes[job.path] = job.mtime
 				mtimesMu.Unlock()
 			}
+
+			// Progress: increment counter, update byExt, maybe emit tick.
+			if w.ProgressFunc != nil {
+				ext := strings.ToLower(filepath.Ext(job.path))
+				byExtMu.Lock()
+				byExt[ext]++
+				byExtMu.Unlock()
+				doneCount.Add(1)
+				emitProgress(false)
+			}
 		}()
 	}
 
 	wg.Wait()
+
+	// Emit final progress tick (done == total).
+	emitProgress(true)
 
 	// R1: serial heuristic pass — all AST nodes are now present in the graph.
 	for _, pf := range heuristicFiles {
