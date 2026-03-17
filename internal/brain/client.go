@@ -142,6 +142,58 @@ func (c *Client) GetADRs(_ context.Context, fileFilter string) ([]ADR, error) {
 	return c.brain.AllADRs()
 }
 
+// BrainHealth returns structured per-tier health data for session_init.
+// Returns nil if the underlying Brain does not implement BrainStatsProvider
+// (e.g. NullBrain when brain is disabled).
+func (c *Client) BrainHealth() map[string]interface{} {
+	sp, ok := c.brain.(BrainStatsProvider)
+	if !ok {
+		return nil
+	}
+	stats := sp.BrainStats()
+
+	// Gather circuit breaker state (optional — NullBrain won't have it).
+	var tierStatus map[string]TierState
+	if tp, ok := c.brain.(TierStatusProvider); ok {
+		tierStatus = tp.TierStatus()
+	}
+
+	tiers := []string{"ingest", "enrich", "guardian", "orchestrate", "archivist", "context_builder"}
+	tierMap := make(map[string]interface{}, len(tiers))
+
+	for _, tier := range tiers {
+		callsKey := tier + "_calls"
+		successKey := tier + "_success"
+		avgKey := tier + "_avg_ms"
+
+		calls, _ := stats[callsKey].(int64)
+		success, _ := stats[successKey].(int64)
+		avgMS, _ := stats[avgKey].(int64)
+
+		var successRate float64
+		if calls > 0 {
+			successRate = float64(success) / float64(calls)
+		}
+
+		circuit := "closed"
+		if ts, ok := tierStatus[tier]; ok && ts.Open {
+			circuit = "open"
+		}
+
+		tierMap[tier] = map[string]interface{}{
+			"calls":        calls,
+			"success_rate": successRate,
+			"avg_ms":       avgMS,
+			"circuit":      circuit,
+		}
+	}
+
+	return map[string]interface{}{
+		"model": c.brain.ModelName(),
+		"tiers": tierMap,
+	}
+}
+
 // Close shuts down the in-process brain, releasing resources.
 func (c *Client) Close() {
 	if closer, ok := c.brain.(io.Closer); ok {

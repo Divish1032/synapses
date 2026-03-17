@@ -23,6 +23,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/metrics"
+	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
@@ -144,6 +145,8 @@ type directionalContext struct {
 	QualityGaps            []store.QualityGap            `json:"quality_gaps,omitempty"`             // R32: open quality gaps on this entity
 	EntityHash             string                        `json:"entity_hash,omitempty"`              // R14: SHA1 of node+neighbor IDs; stable cache key for clients
 	CallerCountWarning     string                        `json:"caller_count_warning,omitempty"`     // DIAG-3: set when caller count is 0 for a method and use_go_types=false
+	// R31: documentation sections linked to this code entity via DOCUMENTED_BY edges.
+	Documentation []graph.CarvedNode `json:"documentation,omitempty"`
 	// BUG-EVAL-9: disambiguation — present when multiple entities share the same name
 	// and no file= hint was provided. Available in both JSON and compact formats.
 	OtherCandidates []map[string]interface{} `json:"other_candidates,omitempty"` // all matching entities (including the one shown)
@@ -998,17 +1001,29 @@ func matchRulesForFile(cfg *config.Config, file string) []brain.RuleInput {
 func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	// Build sets of nodes directly called by / directly calling the root.
 	// R1: also include HANDLES edges so route nodes surface as callees.
+	// R31: also track DOCUMENTED_BY targets (section nodes documenting root).
 	calleesOfRoot := make(map[graph.NodeID]bool)
 	callersOfRoot := make(map[graph.NodeID]bool)
+	docsOfRoot := make(map[graph.NodeID]bool)
 	for _, e := range sg.Edges {
-		if e.Type != graph.EdgeCalls && e.Type != graph.EdgeHandles {
-			continue
-		}
-		if e.From == sg.Root {
-			calleesOfRoot[e.To] = true
-		}
-		if e.To == sg.Root {
-			callersOfRoot[e.From] = true
+		switch e.Type {
+		case graph.EdgeCalls, graph.EdgeHandles:
+			if e.From == sg.Root {
+				calleesOfRoot[e.To] = true
+			}
+			if e.To == sg.Root {
+				callersOfRoot[e.From] = true
+			}
+		case graph.EdgeDocumentedBy:
+			// code entity → section: section is a doc of root
+			if e.From == sg.Root {
+				docsOfRoot[e.To] = true
+			}
+		case graph.EdgeExplains:
+			// section → code entity: section explains root
+			if e.To == sg.Root {
+				docsOfRoot[e.From] = true
+			}
 		}
 	}
 
@@ -1022,6 +1037,8 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 		switch {
 		case id == sg.Root:
 			dc.Root = cn.Node
+		case docsOfRoot[id]:
+			dc.Documentation = append(dc.Documentation, cn)
 		case calleesOfRoot[id]:
 			dc.Callees = append(dc.Callees, cn)
 		case callersOfRoot[id]:
@@ -1044,6 +1061,7 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	sort.Slice(dc.Callees, func(i, j int) bool { return byRelevance(dc.Callees[i], dc.Callees[j]) < 0 })
 	sort.Slice(dc.Callers, func(i, j int) bool { return byRelevance(dc.Callers[i], dc.Callers[j]) < 0 })
 	sort.Slice(dc.Related, func(i, j int) bool { return byRelevance(dc.Related[i], dc.Related[j]) < 0 })
+	sort.Slice(dc.Documentation, func(i, j int) bool { return byRelevance(dc.Documentation[i], dc.Documentation[j]) < 0 })
 
 	return dc
 }
@@ -1320,6 +1338,32 @@ func (s *Server) handleValidatePlan(
 		}()
 	}
 
+	// RX3: Logic-level anomaly detection — heuristic AST checks on files in the
+	// changes array. Each check is a pure tree-sitter pattern match, no LLM needed.
+	const maxLogicWarnings = 5
+	var logicWarnings []parser.LogicWarning
+	if skipLogic, _ := req.GetArguments()["skip_logic_checks"].(bool); !skipLogic {
+		for _, c := range changes {
+			if c.File == "" {
+				continue
+			}
+			absFile := c.File
+			if repoRoot != "" && !filepath.IsAbs(absFile) {
+				absFile = filepath.Join(repoRoot, absFile)
+			}
+			src, err := os.ReadFile(absFile)
+			if err != nil {
+				continue // file may not exist yet (proposed new file)
+			}
+			w := parser.RunLogicChecks(c.File, src)
+			logicWarnings = append(logicWarnings, w...)
+			if len(logicWarnings) >= maxLogicWarnings {
+				logicWarnings = logicWarnings[:maxLogicWarnings]
+				break
+			}
+		}
+	}
+
 	result := map[string]interface{}{
 		"status":     status,
 		"violations": violations,
@@ -1338,6 +1382,9 @@ func (s *Server) handleValidatePlan(
 	}
 	if len(freshWarnings) > 0 {
 		result["graph_freshness"] = fmt.Sprintf("⚠ %d file(s) modified very recently — graph may not reflect latest changes. Consider re-indexing: %s", len(freshWarnings), strings.Join(freshWarnings, "; "))
+	}
+	if len(logicWarnings) > 0 {
+		result["logic_warnings"] = logicWarnings
 	}
 	return jsonResult(result)
 }
@@ -1502,10 +1549,24 @@ func (s *Server) handleVerifyImplementation(
 				}
 				sortedNodes = append(sortedNodes, n)
 			}
+			// callFanin counts CALLS and IMPLEMENTS incoming edges — the same two edge
+			// types that ImpactAnalysis traverses — so the sort key matches what the
+			// blast-radius check actually measures. EMBEDS edges are excluded because
+			// they don’t represent callers or implementors (just struct composition)
+			// and would inflate the score of struct nodes with no real dependents.
+			callFanin := func(id graph.NodeID) int {
+				n := 0
+				for _, e := range s.graph.InEdges(id) {
+					if e.Type == graph.EdgeCalls || e.Type == graph.EdgeImplements {
+						n++
+					}
+				}
+				return n
+			}
 			sort.Slice(sortedNodes, func(i, j int) bool {
-				fi, fj := s.graph.Fanin(sortedNodes[i].ID), s.graph.Fanin(sortedNodes[j].ID)
+				fi, fj := callFanin(sortedNodes[i].ID), callFanin(sortedNodes[j].ID)
 				if fi != fj {
-					return fi > fj // highest fanin first — most important symbols scanned first
+					return fi > fj // highest CALLS-fanin first — most important symbols scanned first
 				}
 				return sortedNodes[i].Name < sortedNodes[j].Name // stable alphabetical tiebreaker
 			})
@@ -1916,14 +1977,14 @@ var toolCatalog = []toolCatalogEntry{
 	{Name: "find_entity", Category: "exploration", Description: "Locate nodes by name or substring", Keywords: []string{"find", "search", "locate", "entity", "name", "symbol", "discover", "where", "defined", "definition", "which", "contains", "method", "function", "class", "type", "has"}, Example: `find_entity(query="Auth")`},
 	{Name: "get_file_context", Category: "exploration", Description: "All entities in a file", Keywords: []string{"file", "entities", "overview", "list", "defined"}, Example: `get_file_context(file="internal/store/tasks.go")`},
 	{Name: "search", Category: "exploration", Description: "Keyword/fulltext search across entities", Keywords: []string{"search", "keyword", "concept", "fulltext", "semantic", "grep"}, Example: `search(query="rate limiting", mode="fulltext")`},
-	{Name: "get_call_chain", Category: "exploration", Description: "Shortest call path between two entities", Keywords: []string{"call", "chain", "path", "trace", "reach", "how", "calls"}, Example: `get_call_chain(from="Handler", to="Repository")`},
-	{Name: "get_impact", Category: "exploration", Description: "Blast-radius analysis of what breaks if entity changes", Keywords: []string{"impact", "blast", "radius", "breaks", "change", "depends", "dependents", "affected", "callers", "usage", "uses", "downstream", "refactor", "safe", "remove", "delete"}, Example: `get_impact(symbol="CarveEgoGraph")`},
+	{Name: "get_call_chain", Category: "exploration", Description: "Shortest call path between two entities", Keywords: []string{"call", "chain", "path", "trace", "reach", "how"}, Example: `get_call_chain(from="Handler", to="Repository")`},
+	{Name: "get_impact", Category: "exploration", Description: "Blast-radius analysis of what breaks if entity changes", Keywords: []string{"impact", "blast", "radius", "breaks", "change", "depends", "dependents", "affected", "callers", "usage", "uses", "downstream", "refactor", "safe", "remove", "delete", "who", "using", "touching"}, Example: `get_impact(symbol="CarveEgoGraph")`},
 
 	// Architecture
 	{Name: "validate_plan", Category: "architecture", Description: "Check changes against architectural rules", Keywords: []string{"validate", "plan", "check", "rules", "architecture", "violations", "before"}, Example: `validate_plan(changes=[{"file":"auth.go","adds_call_to":"DB"}])`},
 	{Name: "verify_implementation", Category: "architecture", Description: "Post-write check: verify written files against rules and task expectations", Keywords: []string{"verify", "implementation", "after", "written", "check", "post", "validate", "confirm"}, Example: `verify_implementation(files_written=["internal/auth/service.go"])`},
 	{Name: "get_violations", Category: "architecture", Description: "List current architectural violations", Keywords: []string{"violations", "rules", "broken", "forbidden", "architecture"}, Example: `get_violations()`},
-	{Name: "upsert_rule", Category: "architecture", Description: "Create or update an architectural constraint", Keywords: []string{"rule", "create", "constraint", "forbid", "enforce", "pattern", "add", "ban", "prevent", "restrict", "policy", "architectural"}, Example: `upsert_rule(rule_id="no-db-in-handler", description="...", severity="error")`},
+	{Name: "upsert_rule", Category: "architecture", Description: "Create or update an architectural constraint", Keywords: []string{"rule", "create", "constraint", "forbid", "enforce", "pattern", "add", "ban", "prevent", "restrict", "policy", "architectural", "ensure", "access", "never", "allow", "disallow"}, Example: `upsert_rule(rule_id="no-db-in-handler", description="...", severity="error")`},
 
 	// Task management
 	{Name: "create_plan", Category: "tasks", Description: "Save a plan with tasks for future sessions", Keywords: []string{"plan", "create", "tasks", "save", "work", "implement"}, Example: `create_plan(title="v1.1 improvements", tasks=[...])`},
@@ -2102,6 +2163,28 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 		}
 	}
 
+	// kwMatch returns true when kw and qw are the same word or share a stem prefix.
+	// Whole-word matching prevents short query fragments ("add", "ban") from matching
+	// unrelated longer words as substrings — the core IMP-EVAL-5 fix.
+	// Rules:
+	//   - exact: kw == qw
+	//   - qw is prefix of kw (len(qw)≥4): "call" → "callers", "arch" → "architectural"
+	//   - kw is prefix of qw (len(kw)≥4): "impact" → "impacts", "rule" → "rules"
+	// The 4-char minimum prevents 3-char tokens like "add", "ban", "api" from
+	// matching "added", "banning", "application" via prefix.
+	kwMatch := func(kw, qw string) bool {
+		if kw == qw {
+			return true
+		}
+		if len(qw) >= 4 && strings.HasPrefix(kw, qw) {
+			return true
+		}
+		if len(kw) >= 4 && strings.HasPrefix(qw, kw) {
+			return true
+		}
+		return false
+	}
+
 	// Score each tool by keyword overlap.
 	type scored struct {
 		entry toolCatalogEntry
@@ -2112,16 +2195,22 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 		score := 0
 		for _, qw := range queryWords {
 			for _, kw := range tool.Keywords {
-				if strings.Contains(kw, qw) || strings.Contains(qw, kw) {
+				if kwMatch(kw, qw) {
 					score++
 				}
 			}
-			// Also check tool name and description.
-			if strings.Contains(tool.Name, qw) {
-				score += 2
+			// Also check tool name (tokenized on underscores) and description.
+			for _, nw := range strings.Split(tool.Name, "_") {
+				if nw == qw {
+					score += 2
+					break
+				}
 			}
-			if strings.Contains(strings.ToLower(tool.Description), qw) {
-				score++
+			for _, dw := range strings.FieldsFunc(strings.ToLower(tool.Description), func(r rune) bool { return r < 'a' || r > 'z' }) {
+				if kwMatch(dw, qw) {
+					score++
+					break
+				}
 			}
 		}
 		if score > 0 {
@@ -2175,12 +2264,15 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 		score := 0
 		for _, qw := range queryWords {
 			for _, kw := range wf.Keywords {
-				if strings.Contains(kw, qw) || strings.Contains(qw, kw) {
+				if kwMatch(kw, qw) {
 					score++
 				}
 			}
-			if strings.Contains(strings.ToLower(wf.Intent), qw) {
-				score++
+			for _, dw := range strings.FieldsFunc(strings.ToLower(wf.Intent), func(r rune) bool { return r < 'a' || r > 'z' }) {
+				if kwMatch(dw, qw) {
+					score++
+					break
+				}
 			}
 		}
 		if score > bestWfScore {
@@ -3396,6 +3488,41 @@ func (s *Server) handleSessionInit(
 			"available": s.getPulseClient() != nil,
 			"note":      "enables agent analytics and token tracking",
 		},
+	}
+
+	// ── BRAIN-1: Brain tier health ───────────────────────────────────────
+	// Surface per-tier success rate, latency, and circuit breaker state so agents
+	// discover broken models at session start instead of after getting garbage.
+	if bc := s.getBrainClient(); bc != nil {
+		if health := bc.BrainHealth(); health != nil {
+			resp["brain_health"] = health
+			// Generate warnings for degraded tiers.
+			if tiers, ok := health["tiers"].(map[string]interface{}); ok {
+				var warnings []string
+				for name, raw := range tiers {
+					tier, ok := raw.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					calls, _ := tier["calls"].(int64)
+					if calls == 0 {
+						continue // no data yet — no warning
+					}
+					rate, _ := tier["success_rate"].(float64)
+					circuit, _ := tier["circuit"].(string)
+					if rate < 0.5 {
+						warnings = append(warnings, fmt.Sprintf("brain tier %q has %.0f%% success rate — model may be misconfigured", name, rate*100))
+					}
+					if circuit == "open" {
+						warnings = append(warnings, fmt.Sprintf("brain tier %q circuit breaker is open — tier temporarily disabled", name))
+					}
+				}
+				if len(warnings) > 0 {
+					sort.Strings(warnings)
+					resp["brain_warning"] = strings.Join(warnings, "; ")
+				}
+			}
+		}
 	}
 
 	// R29: surface effectiveness hints for low-scoring entities so agents
