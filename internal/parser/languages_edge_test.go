@@ -1384,9 +1384,9 @@ func TestGoParser_PackageLevelConst(t *testing.T) {
 	if err := p.Parse(g, "config/config.go", []byte(goConstVarSource)); err != nil {
 		t.Fatalf("Parse error: %v", err)
 	}
-	assertNode(t, g, "MaxRetries", graph.NodeStruct)
+	assertNode(t, g, "MaxRetries", graph.NodeVariable)
 	assertMetaKind(t, g, "MaxRetries", "const")
-	assertNode(t, g, "DefaultTimeout", graph.NodeStruct)
+	assertNode(t, g, "DefaultTimeout", graph.NodeVariable)
 	assertMetaKind(t, g, "DefaultTimeout", "const")
 }
 
@@ -1396,9 +1396,9 @@ func TestGoParser_PackageLevelConstGroup(t *testing.T) {
 	if err := p.Parse(g, "config/config.go", []byte(goConstVarSource)); err != nil {
 		t.Fatalf("Parse error: %v", err)
 	}
-	assertNode(t, g, "StatusOK", graph.NodeStruct)
+	assertNode(t, g, "StatusOK", graph.NodeVariable)
 	assertMetaKind(t, g, "StatusOK", "const")
-	assertNode(t, g, "StatusError", graph.NodeStruct)
+	assertNode(t, g, "StatusError", graph.NodeVariable)
 }
 
 func TestGoParser_PackageLevelVar(t *testing.T) {
@@ -1407,7 +1407,7 @@ func TestGoParser_PackageLevelVar(t *testing.T) {
 	if err := p.Parse(g, "config/config.go", []byte(goConstVarSource)); err != nil {
 		t.Fatalf("Parse error: %v", err)
 	}
-	assertNode(t, g, "ErrNotFound", graph.NodeStruct)
+	assertNode(t, g, "ErrNotFound", graph.NodeVariable)
 	assertMetaKind(t, g, "ErrNotFound", "var")
 }
 
@@ -1417,9 +1417,9 @@ func TestGoParser_PackageLevelVarGroup(t *testing.T) {
 	if err := p.Parse(g, "config/config.go", []byte(goConstVarSource)); err != nil {
 		t.Fatalf("Parse error: %v", err)
 	}
-	assertNode(t, g, "GlobalCounter", graph.NodeStruct)
+	assertNode(t, g, "GlobalCounter", graph.NodeVariable)
 	assertMetaKind(t, g, "GlobalCounter", "var")
-	assertNode(t, g, "GlobalPrefix", graph.NodeStruct)
+	assertNode(t, g, "GlobalPrefix", graph.NodeVariable)
 }
 
 // ─── Python decorator metadata ────────────────────────────────────────────
