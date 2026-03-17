@@ -19,11 +19,19 @@ type LogicWarning struct {
 	Severity string `json:"severity"` // "warning"
 }
 
-// identifierParams contains parameter-name substrings that indicate an identifier
-// where zero is almost certainly wrong.
-var identifierParams = []string{"port", "pid", "id", "count", "index", "fd", "num"}
+// identifierWords are exact camelCase word matches (case-insensitive) that
+// indicate an identifier parameter where zero is almost certainly wrong.
+// These are matched against individual words produced by splitting the function
+// name on camelCase boundaries — NOT as substrings — to avoid false positives
+// on common words like "validate" (contains "id"), "account" (contains "count").
+var identifierWords = map[string]bool{
+	"port": true, "pid": true, "id": true, "count": true,
+	"index": true, "fd": true, "num": true,
+}
 
 // cleanupPairs maps resource-acquiring call names to their expected cleanup counterparts.
+// NewReader is intentionally excluded: bufio.Reader has no Close method and requires
+// no explicit cleanup — closing the underlying reader is sufficient.
 var cleanupPairs = map[string][]string{
 	"Open":      {"Close"},
 	"OpenFile":  {"Close"},
@@ -33,7 +41,6 @@ var cleanupPairs = map[string][]string{
 	"DialTCP":   {"Close"},
 	"DialUDP":   {"Close"},
 	"DialUnix":  {"Close"},
-	"NewReader": {"Close"},
 	"NewWriter": {"Close", "Flush"},
 	"Lock":      {"Unlock"},
 	"RLock":     {"RUnlock"},
@@ -121,16 +128,9 @@ func checkZeroValueIdentifier(filePath string, body *sitter.Node, src []byte) []
 			return
 		}
 		funcName := nodeText(fnNode, src)
-		// Check if the function name contains an identifier-like substring.
-		funcLower := strings.ToLower(funcName)
-		matchesIdentifier := false
-		for _, param := range identifierParams {
-			if strings.Contains(funcLower, param) {
-				matchesIdentifier = true
-				break
-			}
-		}
-		if !matchesIdentifier {
+		// Split on camelCase boundaries and check each word independently.
+		// Substring matching (e.g. "id" in "validate") produces too many false positives.
+		if !funcNameMatchesIdentifier(funcName) {
 			return
 		}
 		// Check if any argument is literal 0.
@@ -260,43 +260,50 @@ func checkPathExpansion(filePath string, body *sitter.Node, src []byte) []LogicW
 }
 
 // checkNilMethodCall detects method calls on variables that were explicitly
-// assigned nil in the same scope without an intervening nil check.
-// This is a conservative heuristic — it only flags direct nil assignments
-// followed by method calls on the same variable name.
+// assigned nil at the TOP LEVEL of the function body (not inside a conditional
+// branch) without an intervening nil check.
+//
+// Intentionally conservative: nil assignments inside if/for/select blocks are
+// skipped because they are almost always inside an error-handling branch that
+// returns early (e.g. `if err != nil { x = nil; return err }`). Tracking those
+// would produce false positives on the standard Go error-handling pattern.
 func checkNilMethodCall(filePath string, body *sitter.Node, src []byte) []LogicWarning {
-	// Collect variables assigned nil via short_var_declaration or assignment_statement.
+	// Only collect nil assignments that are DIRECT children of the function body
+	// block — not assignments nested inside if/for/select/switch blocks.
+	// This avoids false positives for the common pattern:
+	//   if err != nil { svc = nil; return err }
+	//   svc.Start()  ← safe: unreachable when svc is nil
 	nilVars := make(map[string]int) // var name → line of nil assignment
-	walkAST(body, func(n *sitter.Node) {
-		if n.Type() == "short_var_declaration" || n.Type() == "assignment_statement" {
+	for i := 0; i < int(body.NamedChildCount()); i++ {
+		n := body.NamedChild(i)
+		if n == nil {
+			continue
+		}
+		switch n.Type() {
+		case "short_var_declaration", "assignment_statement":
 			right := n.ChildByFieldName("right")
 			if right == nil {
-				return
+				continue
 			}
-			// Check if right side is nil.
-			rightText := strings.TrimSpace(nodeText(right, src))
-			if rightText != "nil" {
-				return
+			if strings.TrimSpace(nodeText(right, src)) != "nil" {
+				continue
 			}
 			left := n.ChildByFieldName("left")
 			if left == nil {
-				return
+				continue
 			}
-			// Extract variable names from left side.
-			leftText := nodeText(left, src)
-			for _, name := range strings.Split(leftText, ",") {
+			for _, name := range strings.Split(nodeText(left, src), ",") {
 				name = strings.TrimSpace(name)
 				if name != "" && name != "_" {
 					nilVars[name] = int(n.StartPoint().Row) + 1
 				}
 			}
-		}
-		// If we see a nil check (if x != nil / if x == nil), remove from nilVars.
-		if n.Type() == "if_statement" {
+		case "if_statement":
+			// A top-level nil check removes the variable from suspicion.
 			cond := n.ChildByFieldName("condition")
 			if cond != nil {
 				condText := nodeText(cond, src)
 				if strings.Contains(condText, "!= nil") || strings.Contains(condText, "== nil") {
-					// Extract the variable being checked.
 					parts := strings.Fields(condText)
 					if len(parts) >= 1 {
 						delete(nilVars, parts[0])
@@ -304,7 +311,7 @@ func checkNilMethodCall(filePath string, body *sitter.Node, src []byte) []LogicW
 				}
 			}
 		}
-	})
+	}
 
 	if len(nilVars) == 0 {
 		return nil
@@ -403,6 +410,63 @@ func checkConcurrentMapWrite(filePath string, body *sitter.Node, src []byte) []L
 	})
 	return warnings
 }
+
+// funcNameMatchesIdentifier returns true if any camelCase word in the function
+// name exactly matches one of the identifierWords (port, pid, id, count, etc.).
+// Uses word-level matching to avoid substring false positives:
+//   "validateInput"  → ["validate","Input"]  → none match  → false ✓
+//   "killByPort"     → ["kill","By","Port"]   → "Port"→"port" match → true ✓
+//   "accountBalance" → ["account","Balance"]  → none match  → false ✓
+func funcNameMatchesIdentifier(funcName string) bool {
+	// Strip package qualifier: "pkg.Func" → "Func"
+	if dot := strings.LastIndex(funcName, "."); dot >= 0 {
+		funcName = funcName[dot+1:]
+	}
+	for _, word := range splitCamelWords(funcName) {
+		if identifierWords[strings.ToLower(word)] {
+			return true
+		}
+	}
+	return false
+}
+
+// splitCamelWords splits a camelCase or PascalCase identifier into its
+// constituent words. Consecutive uppercase runs (acronyms) are kept together.
+// Examples:
+//   "killByPort"    → ["kill","By","Port"]
+//   "setHTTPPort"   → ["set","HTTP","Port"]
+//   "getID"         → ["get","ID"]
+//   "validateInput" → ["validate","Input"]
+func splitCamelWords(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var words []string
+	start := 0
+	runes := []rune(s)
+	n := len(runes)
+	for i := 1; i < n; i++ {
+		curr := runes[i]
+		prev := runes[i-1]
+		// Transition: lower→upper or digit→upper starts a new word.
+		if isUpper(curr) && (isLower(prev) || isDigit(prev)) {
+			words = append(words, string(runes[start:i]))
+			start = i
+			continue
+		}
+		// Transition: upper-run followed by upper+lower (e.g. "HTTPPort" → "HTTP","Port").
+		if i+1 < n && isUpper(curr) && isUpper(prev) && isLower(runes[i+1]) {
+			words = append(words, string(runes[start:i]))
+			start = i
+		}
+	}
+	words = append(words, string(runes[start:]))
+	return words
+}
+
+func isUpper(r rune) bool { return r >= 'A' && r <= 'Z' }
+func isLower(r rune) bool { return r >= 'a' && r <= 'z' }
+func isDigit(r rune) bool { return r >= '0' && r <= '9' }
 
 // walkAST recursively visits every node in the subtree rooted at n.
 func walkAST(n *sitter.Node, visit func(*sitter.Node)) {

@@ -412,6 +412,208 @@ func doWork() {
 	}
 }
 
+// ── Bug regression tests (found in adversarial review) ───────────────────────
+
+// Bug 1: zero_value_id substring matching — "id" used to match "validate",
+// "provide", "consider", "divided", "account" contained "count", etc.
+func TestCheckZeroValueIdentifier_NoFalsePositive_Validate(t *testing.T) {
+	src := []byte(`package main
+func main() {
+	validateInput(0)
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "zero_value_id")
+	if found != nil {
+		t.Errorf("false positive: zero_value_id should not fire for validateInput(0), got: %s", found.Message)
+	}
+}
+
+func TestCheckZeroValueIdentifier_NoFalsePositive_Provide(t *testing.T) {
+	src := []byte(`package main
+func main() {
+	provideDefault(0)
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "zero_value_id")
+	if found != nil {
+		t.Errorf("false positive: zero_value_id should not fire for provideDefault(0)")
+	}
+}
+
+func TestCheckZeroValueIdentifier_NoFalsePositive_Account(t *testing.T) {
+	src := []byte(`package main
+func main() {
+	accountBalance(0)
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "zero_value_id")
+	if found != nil {
+		t.Errorf("false positive: zero_value_id should not fire for accountBalance(0) — 'account' is not 'count'")
+	}
+}
+
+func TestCheckZeroValueIdentifier_NoFalsePositive_Consider(t *testing.T) {
+	src := []byte(`package main
+func main() {
+	consider(0)
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "zero_value_id")
+	if found != nil {
+		t.Errorf("false positive: zero_value_id should not fire for consider(0) — 'id' is not a camelCase word in 'consider'")
+	}
+}
+
+func TestCheckZeroValueIdentifier_NoFalsePositive_Enumerate(t *testing.T) {
+	src := []byte(`package main
+func main() {
+	enumerate(0)
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "zero_value_id")
+	if found != nil {
+		t.Errorf("false positive: zero_value_id should not fire for enumerate(0) — 'num' is not a camelCase word in 'enumerate'")
+	}
+}
+
+// Verify that camelCase words like "ID", "Port", "Count" still match.
+func TestCheckZeroValueIdentifier_CamelWordGetID(t *testing.T) {
+	src := []byte(`package main
+func main() {
+	getID(0)
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "zero_value_id")
+	if found == nil {
+		t.Fatal("expected zero_value_id warning for getID(0) — 'ID' is a camelCase word")
+	}
+}
+
+func TestCheckZeroValueIdentifier_CamelWordSetHTTPPort(t *testing.T) {
+	src := []byte(`package main
+func main() {
+	setHTTPPort(0)
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "zero_value_id")
+	if found == nil {
+		t.Fatal("expected zero_value_id warning for setHTTPPort(0) — 'Port' is a camelCase word")
+	}
+}
+
+// Bug 2: NewReader in cleanupPairs — bufio.NewReader has no Close method.
+func TestCheckMissingCleanup_NewReader_NoFalsePositive(t *testing.T) {
+	src := []byte(`package main
+
+import (
+	"bufio"
+	"os"
+)
+
+func readLines() {
+	r := bufio.NewReader(os.Stdin)
+	_ = r
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "missing_cleanup")
+	if found != nil {
+		t.Errorf("false positive: missing_cleanup should not fire for bufio.NewReader (no Close method): %s", found.Message)
+	}
+}
+
+// Bug 3: nil_method_call flat walk — common Go error-handling pattern produces
+// a false positive when nil is assigned inside an early-return error branch.
+func TestCheckNilMethodCall_NoFalsePositive_ErrorBranch(t *testing.T) {
+	src := []byte(`package main
+
+type Service struct{}
+func (s *Service) Start() {}
+func newService() (*Service, error) { return nil, nil }
+
+func run() error {
+	svc, err := newService()
+	if err != nil {
+		svc = nil
+		return err
+	}
+	svc.Start()
+	return nil
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "nil_method_call")
+	if found != nil {
+		t.Errorf("false positive: nil_method_call should not fire when nil is assigned inside an error branch that returns early: %s", found.Message)
+	}
+}
+
+// Bug 4 (known limitation — documented): concurrent_map_write fires on slice
+// index writes in goroutines even though parallel slice writes to distinct
+// indices are safe. This test documents the limitation as expected behaviour.
+func TestCheckConcurrentMapWrite_SliceWrite_KnownFalsePositive(t *testing.T) {
+	src := []byte(`package main
+
+func parallel(items []int) []int {
+	results := make([]int, len(items))
+	for i, v := range items {
+		go func(idx, val int) {
+			results[idx] = val * 2
+		}(i, v)
+	}
+	return results
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "concurrent_map_write")
+	// This is a known false positive — slice index writes cannot be distinguished
+	// from map writes without type information. The test documents the behaviour.
+	if found == nil {
+		t.Log("concurrent_map_write: slice[idx] write in goroutine not flagged — if this changes, update the known-limitation note in SHIPPED.md")
+	} else {
+		t.Logf("concurrent_map_write: known false positive for slice[idx] write in goroutine (expected, documented limitation): line %d", found.Line)
+	}
+}
+
+// ── splitCamelWords unit tests ────────────────────────────────────────────────
+
+func TestSplitCamelWords(t *testing.T) {
+	cases := []struct {
+		input string
+		want  []string
+	}{
+		{"killByPort", []string{"kill", "By", "Port"}},
+		{"setHTTPPort", []string{"set", "HTTP", "Port"}},
+		{"getID", []string{"get", "ID"}},
+		{"validateInput", []string{"validate", "Input"}},
+		{"accountBalance", []string{"account", "Balance"}},
+		{"consider", []string{"consider"}},
+		{"enumerate", []string{"enumerate"}},
+		{"sendSignalToPid", []string{"send", "Signal", "To", "Pid"}},
+		{"setRetryCount", []string{"set", "Retry", "Count"}},
+		{"", nil},
+	}
+	for _, tc := range cases {
+		got := splitCamelWords(tc.input)
+		if len(got) != len(tc.want) {
+			t.Errorf("splitCamelWords(%q): got %v, want %v", tc.input, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("splitCamelWords(%q)[%d]: got %q, want %q", tc.input, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
 // ── General / edge cases ─────────────────────────────────────────────────────
 
 func TestRunLogicChecks_NonGoFile(t *testing.T) {
