@@ -1614,22 +1614,24 @@ func TestServeMCPConn_SessionAutoCacheE2E(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected result object, got: %v", resp1)
 	}
-	// MCP tool result is in result.content[0].text (JSON string).
+	// MCP tool result is in result.content[0].text (compact text format by default).
 	content1, _ := result1["content"].([]interface{})
 	if len(content1) == 0 {
 		t.Fatalf("empty content in first response")
 	}
 	text1, _ := content1[0].(map[string]interface{})["text"].(string)
-	var payload1 map[string]interface{}
-	if err := json.Unmarshal([]byte(text1), &payload1); err != nil {
-		t.Fatalf("unmarshal payload1: %v (text: %s)", err, text1)
+
+	// Parse compact text format to extract entity_hash.
+	// Format includes "entity_hash:<hash>" at the end.
+	entityHash := ""
+	for _, line := range strings.Split(text1, "\n") {
+		if strings.HasPrefix(line, "entity_hash:") {
+			entityHash = strings.TrimPrefix(line, "entity_hash:")
+			break
+		}
 	}
-	if payload1["unchanged"] == true {
-		t.Fatal("first get_context call must not return unchanged")
-	}
-	entityHash, _ := payload1["entity_hash"].(string)
 	if entityHash == "" {
-		t.Fatal("first get_context call must include entity_hash")
+		t.Fatalf("first get_context call must include entity_hash (text: %s)", text1)
 	}
 
 	// Step 3: second get_context call — same entity, same session, no known_hash.
@@ -1651,18 +1653,20 @@ func TestServeMCPConn_SessionAutoCacheE2E(t *testing.T) {
 		t.Fatalf("empty content in second response")
 	}
 	text2, _ := content2[0].(map[string]interface{})["text"].(string)
-	var payload2 map[string]interface{}
-	if err := json.Unmarshal([]byte(text2), &payload2); err != nil {
-		t.Fatalf("unmarshal payload2: %v (text: %s)", err, text2)
+
+	// Parse plain text cache response format:
+	// unchanged: true
+	// entity_hash: <hash>
+	// entity: <name>
+	// cache_source: session
+	if !strings.Contains(text2, "unchanged: true") {
+		t.Errorf("second get_context must return 'unchanged: true' via session auto-cache, got: %s", text2)
 	}
-	if payload2["unchanged"] != true {
-		t.Errorf("second get_context must return unchanged=true via session auto-cache, got: %v", payload2)
+	if !strings.Contains(text2, "cache_source: session") {
+		t.Errorf("expected cache_source: session in response, got: %s", text2)
 	}
-	if payload2["cache_source"] != "session" {
-		t.Errorf("expected cache_source=session, got: %v", payload2["cache_source"])
-	}
-	if payload2["entity_hash"] != entityHash {
-		t.Errorf("entity_hash mismatch: got %v want %v", payload2["entity_hash"], entityHash)
+	if !strings.Contains(text2, "entity_hash: "+entityHash) {
+		t.Errorf("entity_hash mismatch in response: %s", text2)
 	}
 }
 
