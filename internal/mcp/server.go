@@ -901,6 +901,9 @@ func (s *Server) registerTools() {
 			mcp.WithString("plan_description",
 				mcp.Description("Natural language description of the plan (used for safety check). Auto-derived from changed files if omitted."),
 			),
+			mcp.WithBoolean("skip_logic_checks",
+				mcp.Description("When true, skips heuristic logic-level anomaly checks (zero-value identifiers, missing cleanup, tilde paths, nil method calls, concurrent map writes). Default false."),
+			),
 		),
 		s.handleValidatePlan,
 	)
