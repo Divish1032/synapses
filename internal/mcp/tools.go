@@ -1968,7 +1968,7 @@ type toolCatalogEntry struct {
 // category and annotated with keywords for lightweight matching.
 var toolCatalog = []toolCatalogEntry{
 	// Session
-	{Name: "session_init", Category: "session", Description: "Single-call session bootstrap", Keywords: []string{"start", "begin", "init", "session", "bootstrap", "startup"}, Example: `session_init(agent_id="my-agent")`},
+	{Name: "session_init", Category: "session", Description: "Single-call session bootstrap", Keywords: []string{"start", "begin", "init", "session", "bootstrap"}, Example: `session_init(agent_id="my-agent")`},
 
 	// Code exploration
 	{Name: "explain_codebase", Category: "exploration", Description: "First-5-minutes orientation: entry points, key types, patterns, packages, tech stack", Keywords: []string{"explain", "codebase", "orientation", "overview", "introduce", "what is", "architecture", "summary", "new", "unfamiliar", "onboard"}, Example: `explain_codebase()`},
@@ -1978,7 +1978,7 @@ var toolCatalog = []toolCatalogEntry{
 	{Name: "get_file_context", Category: "exploration", Description: "All entities in a file", Keywords: []string{"file", "entities", "overview", "list", "defined"}, Example: `get_file_context(file="internal/store/tasks.go")`},
 	{Name: "search", Category: "exploration", Description: "Keyword/fulltext search across entities", Keywords: []string{"search", "keyword", "concept", "fulltext", "semantic", "grep"}, Example: `search(query="rate limiting", mode="fulltext")`},
 	{Name: "get_call_chain", Category: "exploration", Description: "Shortest call path between two entities", Keywords: []string{"call", "chain", "path", "trace", "reach", "how"}, Example: `get_call_chain(from="Handler", to="Repository")`},
-	{Name: "get_impact", Category: "exploration", Description: "Blast-radius analysis of what breaks if entity changes", Keywords: []string{"impact", "blast", "radius", "breaks", "change", "depends", "dependents", "affected", "callers", "usage", "uses", "downstream", "refactor", "safe", "remove", "delete", "who", "using", "touching"}, Example: `get_impact(symbol="CarveEgoGraph")`},
+	{Name: "get_impact", Category: "exploration", Description: "Blast-radius analysis of what breaks if entity changes", Keywords: []string{"impact", "blast", "radius", "breaks", "change", "depends", "affected", "callers", "usage", "uses", "downstream", "refactor", "safe", "remove", "delete", "who", "using", "touching"}, Example: `get_impact(symbol="CarveEgoGraph")`},
 
 	// Architecture
 	{Name: "validate_plan", Category: "architecture", Description: "Check changes against architectural rules", Keywords: []string{"validate", "plan", "check", "rules", "architecture", "violations", "before"}, Example: `validate_plan(changes=[{"file":"auth.go","adds_call_to":"DB"}])`},
@@ -2001,7 +2001,7 @@ var toolCatalog = []toolCatalogEntry{
 
 	// Memory
 	{Name: "remember", Category: "memory", Description: "Record a decision or failure as an episode. Use anchor_nodes to bind codebase-derived beliefs to graph nodes for auto-invalidation.", Keywords: []string{"remember", "record", "episode", "decision", "failure", "learn", "anchor", "bind", "memory", "belief"}, Example: `remember(agent_id="...", decision="...", episode_type="failure", anchor_nodes='["repo::file.go::Func"]')`},
-	{Name: "recall", Category: "memory", Description: "Search or browse episodic memory (empty query=chronological, query=FTS5 search)", Keywords: []string{"recall", "remember", "past", "history", "episode", "memory", "similar", "browse", "episodes"}, Example: `recall(query="auth handler redirect loop")`},
+	{Name: "recall", Category: "memory", Description: "Search or browse episodic memory (empty query=chronological, query=FTS5 search)", Keywords: []string{"recall", "remember", "past", "history", "episode", "memory", "similar", "browse"}, Example: `recall(query="auth handler redirect loop")`},
 	{Name: "check_plan_safety", Category: "memory", Description: "Check if similar plans failed before", Keywords: []string{"safety", "check", "failed", "before", "similar", "risk", "interjection"}, Example: `check_plan_safety(plan_description="modify auth login flow")`},
 
 	// Messaging
@@ -2092,7 +2092,7 @@ var workflowRecipes = []workflowRecipe{
 	{
 		ID:       "check_impact",
 		Intent:   "Assess what breaks if an entity is changed or removed",
-		Keywords: []string{"impact", "blast", "radius", "breaks", "change", "refactor", "remove", "depends", "dependents", "safe"},
+		Keywords: []string{"impact", "blast", "radius", "breaks", "change", "refactor", "remove", "depends", "safe"},
 		Steps: []workflowStep{
 			{Tool: "get_impact", ArgsHint: `symbol="{entity}"`, Expects: "Reverse-BFS: all dependents and their distance from the entity.", UsesOutput: ""},
 			{Tool: "validate_plan", ArgsHint: `changes=[{"file":"{entity_file}","adds_call_to":"..."}], check_safety=true`, Expects: "violations + safety_check from episodic memory.", UsesOutput: "Use affected files from get_impact to build your changes array"},

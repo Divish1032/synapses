@@ -452,6 +452,8 @@ func (w *Watcher) reparseFile(path, _ string) {
 
 	resolver.ResolveCallEdges(w.graph)
 	resolver.ResolveImplementsEdges(w.graph)
+	// R31: re-resolve doc edges after markdown reparse.
+	resolver.ResolveDocEdges(w.graph)
 
 	// Keep the stored call-site table consistent with the re-parsed file.
 	if w.store != nil {

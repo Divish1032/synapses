@@ -54,10 +54,24 @@ func NewWalker() *Walker {
 	w.Register(NewRBSParser())  // deep: .rbs (Ruby type signatures)
 	w.Register(NewPHPParser())  // deep: .php
 	w.Register(NewLuaParser())  // deep: .lua
+	w.Register(NewBashParser()) // deep: .sh .bash
 	// Functional
 	w.Register(NewElixirParser()) // deep: .ex .exs
+	w.Register(NewOCamlParser())  // deep: .ml .mli
+	w.Register(NewElmParser())    // deep: .elm
+	// Database
+	w.Register(NewSQLParser()) // deep: .sql
+	// Frontend
+	w.Register(NewCSSParser())    // deep: .css
+	w.Register(NewSvelteParser()) // deep: .svelte
+	// Infrastructure
+	w.Register(NewHCLParser())        // deep: .tf .tfvars .hcl
+	w.Register(NewDockerfileParser()) // deep: .dockerfile
+	w.Register(NewCUEParser())        // deep: .cue
 	// Schema / API
 	w.Register(NewProtobufParser()) // deep: .proto
+	// Documentation
+	w.Register(NewMarkdownParser()) // deep: .md .markdown .mdx (overrides generic)
 	return w
 }
 
