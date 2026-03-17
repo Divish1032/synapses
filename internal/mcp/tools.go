@@ -1340,12 +1340,20 @@ func (s *Server) handleValidatePlan(
 
 	// RX3: Logic-level anomaly detection — heuristic AST checks on files in the
 	// changes array. Each check is a pure tree-sitter pattern match, no LLM needed.
+	// Both caps are intentional: maxLogicWarnings prevents response bloat;
+	// maxLogicFiles prevents O(N) file-read latency on large validate_plan calls
+	// (agents occasionally pass 30+ files in a single call during big refactors).
 	const maxLogicWarnings = 5
+	const maxLogicFiles = 10
 	var logicWarnings []parser.LogicWarning
 	if skipLogic, _ := req.GetArguments()["skip_logic_checks"].(bool); !skipLogic {
+		filesScanned := 0
 		for _, c := range changes {
 			if c.File == "" {
 				continue
+			}
+			if filesScanned >= maxLogicFiles {
+				break
 			}
 			absFile := c.File
 			if repoRoot != "" && !filepath.IsAbs(absFile) {
@@ -1355,6 +1363,7 @@ func (s *Server) handleValidatePlan(
 			if err != nil {
 				continue // file may not exist yet (proposed new file)
 			}
+			filesScanned++
 			w := parser.RunLogicChecks(c.File, src)
 			logicWarnings = append(logicWarnings, w...)
 			if len(logicWarnings) >= maxLogicWarnings {
