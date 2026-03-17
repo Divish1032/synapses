@@ -58,7 +58,17 @@ func ResolveCallEdges(g *graph.Graph) int {
 				}
 			}
 
-			// Fallback: alias was not an import — treat as var.Method().
+			// Second try: var type map — Python/Java obj.method() where obj has a
+			// known declared type (e.g. repo: Repository = ... or Repository repo = ...).
+			// Resolve the type name then look for TypeName.method across all packages.
+			if targetID == "" {
+				varTypes := g.GetVarTypes(site.CallerFile)
+				if typeName, hasType := varTypes[site.PkgAlias]; hasType {
+					targetID = findByTypedMethod(pkgIndex, typeName, site.FuncName)
+				}
+			}
+
+			// Fallback: alias was not an import or a typed var — treat as var.Method().
 			// Search the caller's own package and all imported packages
 			// for a method matching ".FuncName" (e.g. Graph.CarveEgoGraph).
 			if targetID == "" {
@@ -172,6 +182,21 @@ func findInPackage(idx map[string][]*graph.Node, pkg, name string) graph.NodeID 
 	for _, n := range idx[pkg] {
 		if n.Name == name || strings.HasSuffix(n.Name, suffix) {
 			return n.ID
+		}
+	}
+	return ""
+}
+
+// findByTypedMethod searches all packages for a method matching "TypeName.MethodName".
+// Used for Python/Java var type resolution: when obj is known to be type T,
+// resolve obj.method() as T.method across the full package index.
+func findByTypedMethod(idx map[string][]*graph.Node, typeName, methodName string) graph.NodeID {
+	qualified := typeName + "." + methodName
+	for _, nodes := range idx {
+		for _, n := range nodes {
+			if n.Name == qualified {
+				return n.ID
+			}
 		}
 	}
 	return ""
