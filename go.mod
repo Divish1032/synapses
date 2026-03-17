@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/alexaandru/go-sitter-forest/bash v1.9.6
+	github.com/alexaandru/go-sitter-forest/bicep v1.9.1
 	github.com/alexaandru/go-sitter-forest/c v1.9.4
 	github.com/alexaandru/go-sitter-forest/c_sharp v1.9.6
 	github.com/alexaandru/go-sitter-forest/cmake v1.9.5
@@ -19,10 +20,14 @@ require (
 	github.com/alexaandru/go-sitter-forest/hcl v1.9.3
 	github.com/alexaandru/go-sitter-forest/java v1.9.5
 	github.com/alexaandru/go-sitter-forest/javascript v1.9.2
+	github.com/alexaandru/go-sitter-forest/json v1.9.1
+	github.com/alexaandru/go-sitter-forest/jsonnet v1.9.1
+	github.com/alexaandru/go-sitter-forest/julia v1.9.10
 	github.com/alexaandru/go-sitter-forest/kotlin v1.9.4
 	github.com/alexaandru/go-sitter-forest/lua v1.9.3
 	github.com/alexaandru/go-sitter-forest/make v1.9.1
 	github.com/alexaandru/go-sitter-forest/nix v1.9.4
+	github.com/alexaandru/go-sitter-forest/objc v1.9.1
 	github.com/alexaandru/go-sitter-forest/ocaml v1.9.6
 	github.com/alexaandru/go-sitter-forest/php v1.9.5
 	github.com/alexaandru/go-sitter-forest/python v1.9.10
@@ -33,8 +38,13 @@ require (
 	github.com/alexaandru/go-sitter-forest/sql v1.9.13
 	github.com/alexaandru/go-sitter-forest/starlark v1.9.2
 	github.com/alexaandru/go-sitter-forest/swift v1.9.5
+	github.com/alexaandru/go-sitter-forest/thrift v1.9.1
+	github.com/alexaandru/go-sitter-forest/toml v1.9.2
 	github.com/alexaandru/go-sitter-forest/tsx v1.9.2
 	github.com/alexaandru/go-sitter-forest/typescript v1.9.4
+	github.com/alexaandru/go-sitter-forest/vue v1.9.0
+	github.com/alexaandru/go-sitter-forest/xml v1.9.5
+	github.com/alexaandru/go-sitter-forest/zig v1.9.4
 	github.com/alexaandru/go-tree-sitter-bare v1.11.0
 	github.com/emicklei/proto v1.14.3
 	github.com/fsnotify/fsnotify v1.7.0

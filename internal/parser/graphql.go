@@ -192,22 +192,31 @@ func (p *GraphQLParser) extractUnionType(
 	}
 
 	// Collect member type names for metadata.
+	// The grammar represents union_member_types recursively:
+	//   union_member_types → union_member_types "|" named_type
+	// so we recurse to collect all members regardless of nesting depth.
 	var members []string
-	for i := uint32(0); i < n.ChildCount(); i++ {
-		child := n.Child(i)
-		if child.IsNull() || child.Type() != "union_member_types" {
-			continue
-		}
-		for j := uint32(0); j < child.ChildCount(); j++ {
-			mt := child.Child(j)
-			if mt.IsNull() {
+	var collectMembers func(node sitter.Node)
+	collectMembers = func(node sitter.Node) {
+		for i := uint32(0); i < node.ChildCount(); i++ {
+			child := node.Child(i)
+			if child.IsNull() {
 				continue
 			}
-			// Union members are named_type or type nodes.
-			mtName := graphqlExtractTypeName(mt, src)
-			if mtName != "" {
-				members = append(members, mtName)
+			switch child.Type() {
+			case "union_member_types":
+				collectMembers(child)
+			case "named_type":
+				if name := graphqlExtractTypeName(child, src); name != "" {
+					members = append(members, name)
+				}
 			}
+		}
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if !child.IsNull() && child.Type() == "union_member_types" {
+			collectMembers(child)
 		}
 	}
 
@@ -321,6 +330,7 @@ func (p *GraphQLParser) extractFragment(
 	meta := map[string]string{"kind": "fragment"}
 
 	// Extract "on TypeName" — the type_condition.
+	var fragmentOnType string
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
 		if child.IsNull() || child.Type() != "type_condition" {
@@ -329,17 +339,13 @@ func (p *GraphQLParser) extractFragment(
 		typeName := graphqlExtractTypeName(child, src)
 		if typeName != "" {
 			meta["on"] = typeName
-
-			// Create EdgeDependsOn to the target type.
-			targetID := g.MakeNodeID(filePath, typeName)
-			nodeID := g.MakeNodeID(filePath, name)
-			if g.GetNode(targetID) != nil {
-				g.AddEdge(&graph.Edge{From: nodeID, To: targetID, Type: graph.EdgeDependsOn})
-			}
+			fragmentOnType = typeName
 		}
 		break
 	}
 
+	// Add the fragment node first so AddEdge (which requires both endpoints)
+	// can succeed when creating the DependsOn edge below.
 	nodeID := g.MakeNodeID(filePath, name)
 	g.AddNode(&graph.Node{
 		ID:       nodeID,
@@ -351,6 +357,14 @@ func (p *GraphQLParser) extractFragment(
 		Metadata: meta,
 	})
 	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+
+	// Create EdgeDependsOn to the target type (after the fragment node exists).
+	if fragmentOnType != "" {
+		targetID := g.MakeNodeID(filePath, fragmentOnType)
+		if g.GetNode(targetID) != nil {
+			g.AddEdge(&graph.Edge{From: nodeID, To: targetID, Type: graph.EdgeDependsOn})
+		}
+	}
 }
 
 // extractDirectiveDefinition handles directive_definition nodes.
@@ -468,6 +482,18 @@ func (p *GraphQLParser) extractFields(
 
 // extractImplements looks for implements_interfaces children in a type definition
 // and creates EdgeImplements edges to the referenced interface types.
+//
+// The grammar uses left-recursive nesting for multiple interfaces:
+//
+//	implements_interfaces (implements Node & Auditable)
+//	  implements_interfaces (implements Node)   ← recursive child
+//	    implements
+//	    named_type (Node)
+//	  &
+//	  named_type (Auditable)
+//
+// So we recurse into child implements_interfaces nodes and only extract
+// named_type children directly.
 func (p *GraphQLParser) extractImplements(
 	g *graph.Graph, n sitter.Node, src []byte,
 	filePath string, nodeID graph.NodeID,
@@ -477,19 +503,42 @@ func (p *GraphQLParser) extractImplements(
 		if child.IsNull() || child.Type() != "implements_interfaces" {
 			continue
 		}
-		for j := uint32(0); j < child.ChildCount(); j++ {
-			iface := child.Child(j)
-			if iface.IsNull() {
-				continue
-			}
-			ifaceName := graphqlExtractTypeName(iface, src)
-			if ifaceName == "" || ifaceName == "&" || ifaceName == "implements" {
+		p.collectImplementsInterfaces(g, child, src, filePath, nodeID)
+	}
+}
+
+// collectImplementsInterfaces recursively walks implements_interfaces nodes,
+// extracting named_type children and creating EdgeImplements edges.
+func (p *GraphQLParser) collectImplementsInterfaces(
+	g *graph.Graph, n sitter.Node, src []byte,
+	filePath string, nodeID graph.NodeID,
+) {
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		switch child.Type() {
+		case "implements_interfaces":
+			// Recurse into nested implements_interfaces (left-recursive grammar).
+			p.collectImplementsInterfaces(g, child, src, filePath, nodeID)
+		case "named_type":
+			ifaceName := graphqlExtractTypeName(child, src)
+			if ifaceName == "" {
 				continue
 			}
 			ifaceID := g.MakeNodeID(filePath, ifaceName)
-			if g.GetNode(ifaceID) != nil {
-				g.AddEdge(&graph.Edge{From: nodeID, To: ifaceID, Type: graph.EdgeImplements})
+			// Create a stub node if the interface hasn't been parsed yet (forward reference).
+			if g.GetNode(ifaceID) == nil {
+				g.AddNode(&graph.Node{
+					ID:       ifaceID,
+					Type:     graph.NodeInterface,
+					Name:     ifaceName,
+					File:     filePath,
+					Exported: true,
+				})
 			}
+			g.AddEdge(&graph.Edge{From: nodeID, To: ifaceID, Type: graph.EdgeImplements})
 		}
 	}
 }

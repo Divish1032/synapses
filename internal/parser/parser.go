@@ -106,13 +106,28 @@ func NewWalker() *Walker {
 	w.Register(NewStarlarkParser())  // deep: .bzl .star, BUILD
 	w.Register(NewCUEParser())        // deep: .cue
 	w.Register(NewYAMLParser())       // deep: .yaml .yml (overrides generic)
+	w.Register(NewTOMLParser())       // deep: .toml
+	w.Register(NewXMLParser())        // deep: .xml (pom.xml, AndroidManifest.xml, Spring context)
+	w.Register(NewBicepParser())      // deep: .bicep (Azure IaC)
 	// Schema / API
 	w.Register(NewProtobufParser()) // deep: .proto
 	w.Register(NewGraphQLParser())  // deep: .graphql .gql
+	w.Register(NewThriftParser())   // deep: .thrift (Apache Thrift IDL)
 	// Smart Contracts
 	w.Register(NewSolidityParser()) // deep: .sol
+	// Configuration scripting
+	w.Register(NewJsonnetParser()) // deep: .jsonnet .libsonnet
 	// Documentation
 	w.Register(NewMarkdownParser()) // deep: .md .markdown .mdx (overrides generic)
+	// Frontend
+	w.Register(NewVueParser()) // deep: .vue (SFC, delegates script to JS/TS)
+	// Data formats
+	w.Register(NewJSONParser()) // deep: .json (scoped to package.json, tsconfig.json, *.schema.json)
+	// Systems
+	w.Register(NewZigParser())  // deep: .zig
+	w.Register(NewObjCParser()) // deep: .m (Objective-C)
+	// Scientific
+	w.Register(NewJuliaParser()) // deep: .jl
 	return w
 }
 
