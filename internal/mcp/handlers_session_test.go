@@ -359,7 +359,7 @@ func TestHandleAnnotateNode_MissingNodeID_ReturnsError(t *testing.T) {
 
 func TestHandleGetContext_KnownEntity(t *testing.T) {
 	s, _, _ := newPopulatedServer(t)
-	res, err := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res, err := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "root")
 	root, _ := m["root"].(map[string]any)
@@ -434,7 +434,7 @@ func TestHandleGetContext_WithCallers(t *testing.T) {
 	s, loginID, _ := newPopulatedServer(t)
 	_ = loginID
 	// AuthLogin is called by HandleRequest — callers bucket should be non-empty.
-	res, err := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res, err := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m := mustResult(t, res, err)
 	callers, _ := m["callers"].([]any)
 	if len(callers) == 0 {
@@ -595,7 +595,7 @@ func TestHandleGetImpact_MissingSymbol_ReturnsError(t *testing.T) {
 
 func TestHandleGetContext_EntityHashPresent(t *testing.T) {
 	s, _, _ := newPopulatedServer(t)
-	res, err := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res, err := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m := mustResult(t, res, err)
 	hash, ok := m["entity_hash"].(string)
 	if !ok || len(hash) != 12 {
@@ -606,7 +606,7 @@ func TestHandleGetContext_EntityHashPresent(t *testing.T) {
 func TestHandleGetContext_KnownHash_ReturnsUnchanged(t *testing.T) {
 	s, _, _ := newPopulatedServer(t)
 	// First call — get the hash.
-	res1, err1 := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res1, err1 := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m1 := mustResult(t, res1, err1)
 	hash, _ := m1["entity_hash"].(string)
 	if hash == "" {
@@ -657,7 +657,7 @@ func TestHandleGetContext_SessionAutoCache_ReturnsUnchanged(t *testing.T) {
 	sctx := sessionCtx("agent-session-1")
 
 	// First call: full response expected; server stores hash in session cache.
-	res1, err1 := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res1, err1 := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m1 := mustResult(t, res1, err1)
 	if m1["unchanged"] == true {
 		t.Fatal("first call should not return unchanged")
@@ -669,7 +669,7 @@ func TestHandleGetContext_SessionAutoCache_ReturnsUnchanged(t *testing.T) {
 
 	// Second call with same session and same entity — no known_hash passed.
 	// Auto-cache should detect unchanged graph and return {unchanged: true}.
-	res2, err2 := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res2, err2 := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m2 := mustResult(t, res2, err2)
 	if m2["unchanged"] != true {
 		t.Errorf("expected unchanged=true on second session call, got %v", m2)
@@ -687,11 +687,11 @@ func TestHandleGetContext_SessionAutoCache_NoSessionID_ReturnsFull(t *testing.T)
 	// ctx with NO session ID — auto-cache must be disabled.
 	plain := context.Background()
 
-	res1, err1 := s.handleGetContext(plain, callTool(map[string]any{"entity": "AuthLogin"}))
+	res1, err1 := s.handleGetContext(plain, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	mustResult(t, res1, err1)
 
 	// Second call — still no session ID. Must return full response, not unchanged.
-	res2, err2 := s.handleGetContext(plain, callTool(map[string]any{"entity": "AuthLogin"}))
+	res2, err2 := s.handleGetContext(plain, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m2 := mustResult(t, res2, err2)
 	if m2["unchanged"] == true {
 		t.Error("auto-cache must be disabled when no session ID is in context")
@@ -705,14 +705,14 @@ func TestHandleGetContext_SessionAutoCache_DifferentSessions_Isolated(t *testing
 	sctx2 := sessionCtx("session-B")
 
 	// Populate session A cache.
-	res1, err1 := s.handleGetContext(sctx1, callTool(map[string]any{"entity": "AuthLogin"}))
+	res1, err1 := s.handleGetContext(sctx1, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m1 := mustResult(t, res1, err1)
 	if m1["unchanged"] == true {
 		t.Fatal("session A first call should not be unchanged")
 	}
 
 	// Session B calls same entity — must get full response (different session cache).
-	res2, err2 := s.handleGetContext(sctx2, callTool(map[string]any{"entity": "AuthLogin"}))
+	res2, err2 := s.handleGetContext(sctx2, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m2 := mustResult(t, res2, err2)
 	if m2["unchanged"] == true {
 		t.Error("session B should not see session A's cached hash — sessions must be isolated")
@@ -725,7 +725,7 @@ func TestHandleGetContext_SessionAutoCache_DifferentFormat_DifferentKey(t *testi
 	sctx := sessionCtx("format-session")
 
 	// First call: JSON format → populates JSON cache key.
-	res1, err1 := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res1, err1 := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m1 := mustResult(t, res1, err1)
 	if m1["unchanged"] == true {
 		t.Fatal("first call (json) should not be unchanged")
@@ -763,7 +763,7 @@ func TestHandleGetContext_SessionAutoCache_ModeImpact_NotCached(t *testing.T) {
 
 	// Subsequent normal get_context for same entity (mode="") — must return full
 	// response because the impact call must NOT have populated the session cache.
-	res2, err2 := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res2, err2 := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m2 := mustResult(t, res2, err2)
 	if m2["unchanged"] == true {
 		t.Error("mode=impact call must not populate session cache for mode='' calls")
@@ -776,7 +776,7 @@ func TestHandleGetContext_SessionAutoCache_ManualKnownHashTakesPrecedence(t *tes
 	sctx := sessionCtx("priority-session")
 
 	// Populate the session cache.
-	res1, _ := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res1, _ := s.handleGetContext(sctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m1 := mustResult(t, res1, nil)
 	hash := m1["entity_hash"].(string)
 
@@ -815,21 +815,21 @@ func TestClearSessionHashes_OnlyRemovesTargetSession(t *testing.T) {
 	sctxB := sessionCtx("clear-session-B")
 
 	// Populate both sessions.
-	s.handleGetContext(sctxA, callTool(map[string]any{"entity": "AuthLogin"})) //nolint
-	s.handleGetContext(sctxB, callTool(map[string]any{"entity": "AuthLogin"})) //nolint
+	s.handleGetContext(sctxA, callTool(map[string]any{"entity": "AuthLogin", "format": "json"})) //nolint
+	s.handleGetContext(sctxB, callTool(map[string]any{"entity": "AuthLogin", "format": "json"})) //nolint
 
 	// Clear only session A.
 	s.ClearSessionHashes("clear-session-A")
 
 	// Session A: should get full response (cache cleared).
-	resA2, errA2 := s.handleGetContext(sctxA, callTool(map[string]any{"entity": "AuthLogin"}))
+	resA2, errA2 := s.handleGetContext(sctxA, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	mA2 := mustResult(t, resA2, errA2)
 	if mA2["unchanged"] == true {
 		t.Error("session A cache should have been cleared — expected full response")
 	}
 
 	// Session B: should still get {unchanged:true} (cache intact).
-	resB2, errB2 := s.handleGetContext(sctxB, callTool(map[string]any{"entity": "AuthLogin"}))
+	resB2, errB2 := s.handleGetContext(sctxB, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	mB2 := mustResult(t, resB2, errB2)
 	if mB2["unchanged"] != true {
 		t.Error("session B cache should be intact after clearing session A")
@@ -929,11 +929,11 @@ func TestHandleGetEvents_AfterSessionInit(t *testing.T) {
 func TestHandleGetContext_EntityHashStable(t *testing.T) {
 	// Two consecutive calls with the same graph must return the same hash.
 	s, _, _ := newPopulatedServer(t)
-	res1, err1 := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res1, err1 := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m1 := mustResult(t, res1, err1)
 	hash1, _ := m1["entity_hash"].(string)
 
-	res2, err2 := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res2, err2 := s.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	m2 := mustResult(t, res2, err2)
 	hash2, _ := m2["entity_hash"].(string)
 

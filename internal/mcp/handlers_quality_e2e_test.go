@@ -309,7 +309,7 @@ func TestE2E_FullLifecycle_OpenToFixed(t *testing.T) {
 	}))
 
 	// Step 2: verify it surfaces in get_context.
-	res1, err1 := srv.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res1, err1 := srv.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	raw1 := rawText(t, res1, err1)
 	var dc1 map[string]any
 	if err := json.Unmarshal([]byte(raw1), &dc1); err != nil {
@@ -338,7 +338,7 @@ func TestE2E_FullLifecycle_OpenToFixed(t *testing.T) {
 	}))
 
 	// Step 5: gap must be gone from get_context.
-	res3, err3 := srv.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin"}))
+	res3, err3 := srv.handleGetContext(ctx, callTool(map[string]any{"entity": "AuthLogin", "format": "json"}))
 	raw3 := rawText(t, res3, err3)
 	var dc3 map[string]any
 	if err := json.Unmarshal([]byte(raw3), &dc3); err != nil {

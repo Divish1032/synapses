@@ -488,7 +488,7 @@ func TestHandleGetContext_CallerCountWarning_MethodNoCallers(t *testing.T) {
 		Package: "db",
 	})
 	s := New(g, cfg, st)
-	req := callTool(map[string]any{"entity": "Store.Close"})
+	req := callTool(map[string]any{"entity": "Store.Close", "format": "json"})
 	result, err := s.handleGetContext(ctx, req)
 	m := mustResult(t, result, err)
 	if _, ok := m["caller_count_warning"]; !ok {
@@ -513,7 +513,7 @@ func TestHandleGetContext_NoCallerWarning_WhenUseGoTypesTrue(t *testing.T) {
 		Package: "db",
 	})
 	s := New(g, cfg, st)
-	req := callTool(map[string]any{"entity": "Store.Close"})
+	req := callTool(map[string]any{"entity": "Store.Close", "format": "json"})
 	result, err := s.handleGetContext(ctx, req)
 	m := mustResult(t, result, err)
 	if _, ok := m["caller_count_warning"]; ok {
