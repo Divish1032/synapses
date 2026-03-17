@@ -1,0 +1,103 @@
+name: Brain Integration Tests
+
+on:
+  # Run on demand or when the 'integration-test' label is added to a PR.
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  # Fast path: unit + contract tests — always run, no Ollama required.
+  brain-unit:
+    name: Brain Unit Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'integration-test'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: synapses/go.mod
+          cache-dependency-path: synapses/go.sum
+
+      - name: Unit + contract tests (no Ollama)
+        working-directory: synapses
+        run: go test ./internal/brain/... -count=1 -race -timeout 120s
+
+      - name: Shell script syntax + dry-run tests
+        working-directory: synapses-fine-distilling/quantization
+        run: |
+          chmod +x register_models.sh register_models_test.sh
+          bash register_models_test.sh
+
+  # Slow path: live Ollama inference tests — runs after unit tests pass.
+  brain-ollama-integration:
+    name: Brain Ollama Integration Tests
+    runs-on: ubuntu-latest
+    needs: brain-unit
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'integration-test'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: synapses/go.mod
+          cache-dependency-path: synapses/go.sum
+
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama server
+        run: |
+          ollama serve &
+          # Wait for server to be ready (up to 30s)
+          for i in $(seq 1 30); do
+            ollama list 2>/dev/null && break || sleep 1
+          done
+          ollama list
+
+      - name: Pull qwen3.5:2b
+        run: |
+          ollama pull qwen3.5:2b
+        timeout-minutes: 10
+
+      - name: Run Ollama integration tests
+        working-directory: synapses
+        env:
+          OLLAMA_INTEGRATION: "1"
+          OLLAMA_URL: "http://localhost:11434"
+        run: |
+          go test ./internal/brain/llm/... \
+            -run TestIntegration \
+            -count=1 \
+            -timeout 300s \
+            -v
+
+      - name: Register Modelfile identities (dry-run — no GGUFs in CI)
+        working-directory: synapses-fine-distilling/quantization
+        run: |
+          # Verify registration script works end-to-end in dry-run mode.
+          # Real ollama create requires FT GGUFs which are not in the repo.
+          bash register_models.sh --dry-run --mode standard --skip-smoke
+
+      - name: Register navigator + archivist (base model only — no GGUF needed)
+        working-directory: synapses-fine-distilling/quantization
+        run: |
+          ollama create synapses/navigator -f Modelfile.navigator
+          ollama create synapses/archivist -f Modelfile.archivist
+          ollama list | grep synapses/
+
+      - name: Run navigator + archivist integration tests
+        working-directory: synapses
+        env:
+          OLLAMA_INTEGRATION: "1"
+          OLLAMA_URL: "http://localhost:11434"
+        run: |
+          go test ./internal/brain/llm/... \
+            -run "TestIntegration_Navigator|TestIntegration_Archivist|TestIntegration_WithChatMode" \
+            -count=1 \
+            -timeout 300s \
+            -v
