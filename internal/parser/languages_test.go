@@ -1,10 +1,13 @@
 package parser_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/parser"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ─── shared helpers ───────────────────────────────────────────────────────────
@@ -26,10 +29,20 @@ func assertNode(t *testing.T, g *graph.Graph, name string, wantType graph.NodeTy
 	if len(nodes) == 0 {
 		t.Fatalf("node %q not found", name)
 	}
-	if nodes[0].Type != wantType {
-		t.Errorf("node %q: type = %q, want %q", name, nodes[0].Type, wantType)
+	// Prefer exact name match over qualified-name match (e.g. "Tree" vs "Data.Tree").
+	// FindByName returns both because it fuzzy-matches qualified names.
+	best := nodes[0]
+	nameLower := strings.ToLower(name)
+	for _, n := range nodes {
+		if strings.ToLower(n.Name) == nameLower {
+			best = n
+			break
+		}
 	}
-	return nodes[0]
+	if best.Type != wantType {
+		t.Errorf("node %q: type = %q, want %q", name, best.Type, wantType)
+	}
+	return best
 }
 
 func assertDefinesEdge(t *testing.T, g *graph.Graph, fileNodeID graph.NodeID, entityName string) {
@@ -948,4 +961,59 @@ func TestProtobufParser_DefinesEdges(t *testing.T) {
 
 func TestProtobufParser_EmptyFile(t *testing.T) {
 	assertNoCrash(t, parser.NewProtobufParser(), ".proto", `syntax = "proto3";`)
+}
+
+// ─── SCSS ─────────────────────────────────────────────────────────────────────
+
+func TestSCSSParser_BasicExtraction(t *testing.T) {
+	src := []byte(`
+$primary-color: #333;
+$font-size: 16px;
+
+@mixin flex-center {
+  display: flex;
+  align-items: center;
+}
+
+@function rem($px) {
+  @return $px / 16 * 1rem;
+}
+
+@use 'sass:math';
+@import './variables';
+
+.container {
+  color: $primary-color;
+}
+`)
+	g := graph.New("testrepo")
+	p := parser.NewSCSSParser()
+	err := p.Parse(g, "styles.scss", src)
+	require.NoError(t, err)
+
+	nodes := g.FindByType(graph.NodeFunction)
+	names := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		names = append(names, n.Name)
+	}
+	assert.Contains(t, names, "flex-center")
+	assert.Contains(t, names, "rem")
+
+	vars := g.FindByType(graph.NodeVariable)
+	varNames := make([]string, 0, len(vars))
+	for _, n := range vars {
+		varNames = append(varNames, n.Name)
+	}
+	assert.Contains(t, varNames, "$primary-color")
+	assert.Contains(t, varNames, "$font-size")
+
+	edges := g.AllEdges()
+	hasImport := false
+	for _, e := range edges {
+		if e.Type == graph.EdgeImports {
+			hasImport = true
+			break
+		}
+	}
+	assert.True(t, hasImport, "expected EdgeImports from @use/@import")
 }

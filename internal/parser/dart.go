@@ -98,6 +98,7 @@ func (p *DartParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		if importPath == "" {
 			continue
 		}
+		importLine := countNewlines(content[:m[0]]) + 1
 		importNodeID := g.MakeNodeID(importPath, importPath)
 		g.AddNode(&graph.Node{
 			ID:      importNodeID,
@@ -105,6 +106,7 @@ func (p *DartParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			Name:    importPath,
 			Package: importPath,
 			File:    filePath,
+			Line:    importLine,
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
 	}
@@ -115,6 +117,7 @@ func (p *DartParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		if exportPath == "" {
 			continue
 		}
+		exportLine := countNewlines(content[:m[0]]) + 1
 		exportNodeID := g.MakeNodeID(exportPath, exportPath)
 		g.AddNode(&graph.Node{
 			ID:      exportNodeID,
@@ -122,6 +125,7 @@ func (p *DartParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			Name:    exportPath,
 			Package: exportPath,
 			File:    filePath,
+			Line:    exportLine,
 			Metadata: map[string]string{"kind": "export"},
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: exportNodeID, Type: graph.EdgeImports})
@@ -352,11 +356,33 @@ func (p *DartParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		return ""
 	}
 
+	// knownClassNames contains all class/mixin/extension names in this file.
+	// Used to filter out constructor calls inside class bodies (e.g. const Foo())
+	// that would otherwise be misidentified as method declarations.
+	knownClassNames := make(map[string]bool)
+	for _, cr := range classRanges {
+		knownClassNames[cr.name] = true
+	}
+	for _, m := range reDartMixin.FindAllStringSubmatchIndex(content, -1) {
+		if m[2] >= 0 {
+			knownClassNames[content[m[2]:m[3]]] = true
+		}
+	}
+	for _, m := range reDartEnum.FindAllStringSubmatchIndex(content, -1) {
+		if m[2] >= 0 {
+			knownClassNames[content[m[2]:m[3]]] = true
+		}
+	}
+
 	// Dart function/method declaration pattern applied line-by-line.
 	// We look for lines that look like function/method signatures.
+	// Return type: any identifier (including user-defined types like Node, Iterable<Node>?, etc.)
+	// followed by optional generics, optional nullable ?, optional [].
+	// We accept any \w+ as the return type to avoid false negatives from
+	// a hardcoded whitelist of known types.
 	reFuncLine := regexp.MustCompile(
 		`^[ \t]*(?:(?:static|async|external|factory|override|abstract|get|set|operator)\s+)*` +
-			`(?:(?:void|bool|int|double|String|num|dynamic|var|final|const|Never|Object|Null|Future|Stream|List|Map|Set|Iterable|Widget|State|BuildContext|Key|Color|Icon|Text|Container|Column|Row|Scaffold|AppBar|MaterialApp|StatelessWidget|StatefulWidget)(?:<[^>]*>)?(?:\?)?(?:\[\])?\s+)?` +
+			`(?:\w[\w<>\[\]?,\s]*\s+)?` +
 			`([a-zA-Z_]\w*)\s*\(`,
 	)
 
@@ -373,6 +399,9 @@ func (p *DartParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		"extension": true, "on": true, "operator": true, "get": true, "set": true,
 		"async": true, "sync": true, "covariant": true, "sealed": true, "base": true,
 		"interface": true, "when": true, "case": true,
+		// Common Dart SDK class names that appear frequently as constructor calls
+		// inside method bodies and should not be mistaken for method declarations.
+		"Function": true, "RegExp": true, "File": true,
 	}
 
 	// --- Typedefs ---
@@ -496,6 +525,12 @@ func (p *DartParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			// Skip constructors: Dart constructors share the class name (e.g. CounterWidget(...)).
 			// They are already represented by the class node itself.
 			if funcName == ownerClass {
+				continue
+			}
+			// Skip constructor calls of OTHER known classes used as field initializers
+			// or list literals (e.g. const OrderedListSyntax() inside another class body).
+			// These are call expressions, not method declarations.
+			if knownClassNames[funcName] {
 				continue
 			}
 			// Method inside a class.

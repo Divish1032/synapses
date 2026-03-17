@@ -69,18 +69,22 @@ var (
 	reClojureDefalias = regexp.MustCompile(`(?m)^\s*\((?:\w+/)?defalias\s+([\w?!*+/.<>=-]+)`)
 
 	// (defrecord Name [field1 field2])
+	// Optional Clojure metadata before the name: ^:keyword, ^{:key val}, ^TypeHint
 	reClojureDefrecord = regexp.MustCompile(
-		`(?m)^\s*\(defrecord\s+([A-Za-z][A-Za-z0-9_\-]*)`,
+		`(?m)^\s*\(defrecord\s+(?:\^(?:[^\s\{]+|\{[^\}]*\})\s+)*([A-Za-z][A-Za-z0-9_\-]*)`,
 	)
 
 	// (defprotocol Name ...)
+	// Optional Clojure metadata before the name: ^:keyword, ^{:key val}, ^TypeHint
+	// e.g. (defprotocol ^{:added "1.6"} StreamableResponseBody ...)
 	reClojureDefprotocol = regexp.MustCompile(
-		`(?m)^\s*\(defprotocol\s+([A-Za-z][A-Za-z0-9_\-]*)`,
+		`(?m)^\s*\(defprotocol\s+(?:\^(?:[^\s\{]+|\{[^\}]*\})\s+)*([A-Za-z][A-Za-z0-9_\-]*)`,
 	)
 
 	// (deftype Name [fields] ...)
+	// Optional Clojure metadata before the name: ^:keyword, ^{:key val}, ^TypeHint
 	reClojureDeftype = regexp.MustCompile(
-		`(?m)^\s*\(deftype\s+([A-Za-z][A-Za-z0-9_\-]*)`,
+		`(?m)^\s*\(deftype\s+(?:\^(?:[^\s\{]+|\{[^\}]*\})\s+)*([A-Za-z][A-Za-z0-9_\-]*)`,
 	)
 
 	// (ns my.namespace ...) — namespace declaration
@@ -100,9 +104,11 @@ var (
 		`(?m)^\s*\(require\s+'?\[([A-Za-z][A-Za-z0-9_\-\.]*(?:\.[A-Za-z][A-Za-z0-9_\-\.]*)*)`,
 	)
 
-	// (def name value) or (def ^:private name value)
+	// (def name value) or (def ^:private name value) or (def ^{:added "1.4"} name value)
+	// Group 1: optional metadata (^:private or ^{...})
+	// Group 2: var name
 	reClojureDef = regexp.MustCompile(
-		`(?m)^\s*\(def\s+(\^:private\s+)?([A-Za-z_\-\?!><=\+\*/\.][A-Za-z0-9_\-\?!><=\+\*/\.]*)`,
+		`(?m)^\s*\(def\s+(?:(\^:private|\^[^\s\)]+|\^\{[^\}]*\})\s+)*([A-Za-z_\-\?!><=\+\*/\.][A-Za-z0-9_\-\?!><=\+\*/\.]*)`,
 	)
 
 	// Docstring: the first string literal after the name + args vector in defn/defmacro.
@@ -165,7 +171,8 @@ func (p *ClojureParser) Parse(g *graph.Graph, filePath string, src []byte) error
 	importedPkgs := make(map[string]bool)
 
 	// ── Helper: emit a package import node + EdgeImports ──────────────────────
-	emitImport := func(pkgName string) {
+	// lineNum is the 1-based source line where the import was found (0 = unknown).
+	emitImport := func(pkgName string, lineNum int) {
 		if pkgName == "" || importedPkgs[pkgName] {
 			return
 		}
@@ -177,6 +184,7 @@ func (p *ClojureParser) Parse(g *graph.Graph, filePath string, src []byte) error
 			Name:    pkgName,
 			Package: pkgName,
 			File:    filePath,
+			Line:    lineNum,
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: pkgNodeID, Type: graph.EdgeImports})
 	}
@@ -228,6 +236,7 @@ func (p *ClojureParser) Parse(g *graph.Graph, filePath string, src []byte) error
 
 		// Extract :require inside the ns form.
 		// Find the ns form's body and look for (:require [...]) sections.
+		nsLine := lineOfOffset(m[0])
 		nsFormEnd := findFormEnd(content, m[0])
 		if nsFormEnd > m[0] {
 			nsBody := content[m[0]:nsFormEnd]
@@ -243,7 +252,9 @@ func (p *ClojureParser) Parse(g *graph.Graph, filePath string, src []byte) error
 				for _, vm := range reClojureRequireVec.FindAllStringSubmatchIndex(requireBlock, -1) {
 					ns := requireBlock[vm[2]:vm[3]]
 					if ns != "" && ns != namespaceName {
-						emitImport(ns)
+						// Use the ns form's line as the line number for its requirements —
+						// the exact per-require line would require tracking substring offsets.
+						emitImport(ns, nsLine)
 					}
 				}
 			}
@@ -254,7 +265,7 @@ func (p *ClojureParser) Parse(g *graph.Graph, filePath string, src []byte) error
 	// ── 2. Standalone (require '[...]) forms ──────────────────────────────────
 	for _, m := range reClojureRequire.FindAllStringSubmatchIndex(content, -1) {
 		ns := content[m[2]:m[3]]
-		emitImport(ns)
+		emitImport(ns, lineOfOffset(m[0]))
 	}
 
 	// ── 3. defn / defn- ───────────────────────────────────────────────────────
@@ -451,11 +462,11 @@ func (p *ClojureParser) Parse(g *graph.Graph, filePath string, src []byte) error
 
 	// ── 10. def (top-level vars) ──────────────────────────────────────────────
 	for _, m := range reClojureDef.FindAllStringSubmatchIndex(content, -1) {
-		// Group 1: "^:private " (may be -1 when optional group did not match)
+		// Group 1: metadata like "^:private" or "^{:added "1.4"}" (may be -1)
 		// Group 2: var name
-		var privateFlag string
+		var metaFlag string
 		if m[2] >= 0 && m[3] >= 0 {
-			privateFlag = content[m[2]:m[3]]
+			metaFlag = content[m[2]:m[3]]
 		}
 		name := content[m[4]:m[5]]
 		if emitted[name] {
@@ -463,7 +474,7 @@ func (p *ClojureParser) Parse(g *graph.Graph, filePath string, src []byte) error
 		}
 		emitted[name] = true
 		lineNum := lineOfOffset(m[0])
-		isPrivate := strings.TrimSpace(privateFlag) == "^:private"
+		isPrivate := metaFlag == "^:private"
 		exported := !isPrivate
 
 		nodeID := g.MakeNodeID(filePath, name)

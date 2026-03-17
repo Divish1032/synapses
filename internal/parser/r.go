@@ -72,6 +72,11 @@ var (
 	// Group 1: package name
 	reRNamespace = regexp.MustCompile(`(?m)\b([A-Za-z][A-Za-z0-9._]*):::?[A-Za-z]`)
 
+	// S3 class registration via setOldClass.
+	// Matches: setOldClass("ClassName") or setOldClass(c("ClassName", "baseClass"))
+	// Group 1: the primary (most-derived) class name.
+	reRSetOldClass = regexp.MustCompile(`(?m)^setOldClass\s*\(\s*(?:c\s*\(\s*)?[\"']([A-Za-z][A-Za-z0-9._]*)[\"']`)
+
 	// Roxygen2 doc comment: #' text
 	reRRoxygen = regexp.MustCompile(`^#'(.*)$`)
 
@@ -245,6 +250,30 @@ func (p *RParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	}
 
 	// -------------------------------------------------------------------------
+	// 2b. setOldClass() — S3 class registration
+	// -------------------------------------------------------------------------
+	for _, m := range reRSetOldClass.FindAllStringSubmatchIndex(content, -1) {
+		className := content[m[2]:m[3]]
+		if emitted[className] {
+			continue
+		}
+		emitted[className] = true
+		lineIdx := strings.Count(content[:m[0]], "\n")
+		line := lineIdx + 1
+		nodeID := g.MakeNodeID(filePath, className)
+		g.AddNode(&graph.Node{
+			ID:       nodeID,
+			Type:     graph.NodeStruct,
+			Name:     className,
+			File:     filePath,
+			Line:     line,
+			Exported: true,
+			Metadata: map[string]string{"kind": "s3class"},
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}
+
+	// -------------------------------------------------------------------------
 	// 3. S4 setGeneric()
 	// -------------------------------------------------------------------------
 	for _, m := range reRSetGeneric.FindAllStringSubmatchIndex(content, -1) {
@@ -404,11 +433,32 @@ func (p *RParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	// -------------------------------------------------------------------------
 	// 7. Namespace pkg::func references in top-level code
 	//    These are weaker import signals — emit only packages not already imported.
+	//    Scan only non-comment lines to avoid extracting package names from
+	//    Roxygen (#') and plain (#) comment examples.
 	// -------------------------------------------------------------------------
-	for _, m := range reRNamespace.FindAllStringSubmatchIndex(content, -1) {
-		pkgName := content[m[2]:m[3]]
+	nonCommentContent := rStripCommentLines(lines)
+	for _, m := range reRNamespace.FindAllStringSubmatchIndex(nonCommentContent, -1) {
+		pkgName := nonCommentContent[m[2]:m[3]]
 		emitImport(pkgName)
 	}
 
 	return nil
+}
+
+// rStripCommentLines returns a string where every line that is a pure comment
+// (starts with optional whitespace then # — covering both Roxygen #' and plain #)
+// is replaced by an empty line.  All other lines are kept verbatim.  This
+// preserves line numbering while preventing the namespace regex from matching
+// pkg::func patterns that appear only inside comment text.
+func rStripCommentLines(lines []string) string {
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "#") {
+			out[i] = ""
+		} else {
+			out[i] = line
+		}
+	}
+	return strings.Join(out, "\n")
 }

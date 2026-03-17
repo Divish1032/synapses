@@ -574,3 +574,63 @@ let serialize x = JsonConvert.SerializeObject(x)
 		}
 	}
 }
+
+func TestFSharpParserMembers(t *testing.T) {
+	src := []byte(`module MyModule
+
+type Shape =
+    abstract member Area: unit -> float
+    abstract Perimeter: unit -> float
+
+type Circle(radius: float) =
+    member this.Radius = radius
+    member this.Area() = System.Math.PI * radius * radius
+    override this.ToString() = sprintf "Circle(%f)" radius
+    static member UnitCircle() = Circle(1.0)
+
+type Rectangle(w: float, h: float) =
+    member this.Width = w
+    member this.Height = h
+    override this.ToString() = sprintf "Rect(%f x %f)" w h
+`)
+	g := graph.New("testrepo")
+	p := parser.NewFSharpParser()
+	if err := p.Parse(g, "/src/Shapes.fs", src); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Abstract member
+	nodes := g.FindByName("Area")
+	if len(nodes) == 0 {
+		t.Error("expected abstract member 'Area'")
+	} else if nodes[0].Metadata["kind"] != "abstract_member" {
+		t.Errorf("Area kind = %q, want abstract_member", nodes[0].Metadata["kind"])
+	}
+
+	// Instance member
+	radiusNodes := g.FindByName("Radius")
+	if len(radiusNodes) == 0 {
+		t.Error("expected member 'Radius'")
+	}
+
+	// Override
+	toStringNodes := g.FindByName("ToString")
+	found := false
+	for _, n := range toStringNodes {
+		if n.Metadata["kind"] == "override" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected override node 'ToString'")
+	}
+
+	// Static member
+	unitNodes := g.FindByName("UnitCircle")
+	if len(unitNodes) == 0 {
+		t.Error("expected static member 'UnitCircle'")
+	} else if unitNodes[0].Metadata["kind"] != "static_member" {
+		t.Errorf("UnitCircle kind = %q, want static_member", unitNodes[0].Metadata["kind"])
+	}
+}
