@@ -381,10 +381,28 @@ func (s *Server) handleGetContext(
 		// Auto-fuzzy: surface candidates inline so agents don't need an extra find_entity round-trip.
 		candidates := s.inlineFindEntity(entityName)
 		if len(candidates) == 0 {
+			if format == "compact" {
+				return mcp.NewToolResultText(fmt.Sprintf(
+					"entity not found: %q\nHint: no substring match. Try search(query=\"...\", mode=\"semantic\") for concept-based lookup.",
+					entityName,
+				)), nil
+			}
 			return jsonResult(map[string]interface{}{
 				"error": fmt.Sprintf("entity not found: %q", entityName),
 				"hint":  "No substring match. Try search(query=\"...\", mode=\"semantic\") for concept-based lookup.",
 			})
+		}
+		if format == "compact" {
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "entity not found: %q\nDid you mean one of these?\n", entityName)
+			for _, c := range candidates {
+				name, _ := c["name"].(string)
+				file, _ := c["file"].(string)
+				typ, _ := c["type"].(string)
+				fmt.Fprintf(&sb, "  • %s (%s) in %s\n", name, typ, file)
+			}
+			sb.WriteString("Re-call get_context with entity= set to one of the exact names above. Add file= to pin if multiple files match.")
+			return mcp.NewToolResultText(sb.String()), nil
 		}
 		return jsonResult(map[string]interface{}{
 			"entity_not_found": entityName,

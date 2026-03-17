@@ -1548,7 +1548,7 @@ const (
 var synapsesSection = synapsesSectionStart + `## Synapses — Code Intelligence (MCP)
 
 ### Session Start
-Call ` + "`session_init()`" + ` at the start of every session — returns pending tasks, project identity, scale guidance, and working state in one round-trip.
+Call ` + "`session_init()`" + ` at the start of every session — returns pending tasks, project identity, scale guidance, and working state in one round-trip. Use ` + "`scope=\"quick\"`" + ` for lightweight sessions (~500 tokens instead of full response).
 
 ### Tool Selection (follow scale_guidance from session_init)
 
@@ -1561,7 +1561,8 @@ Call ` + "`session_init()`" + ` at the start of every session — returns pendin
 
 | Goal | Tool |
 |---|---|
-| Understand a function, struct, or interface | ` + "`get_context(entity=\"Name\")`" + ` |
+| Understand a function, struct, or interface | ` + "`get_context(entity=\"Name\")`" + ` — returns compact summary by default |
+| Need full callee/caller sub-tree detail | ` + "`get_context(entity=\"Name\", detail_level=\"full\")`" + ` |
 | Pin to a specific file (avoids ambiguity) | ` + "`get_context(entity=\"Name\", file=\"path/suffix.go\")`" + ` |
 | Find a symbol by name or substring | ` + "`find_entity(query=\"name\")`" + ` |
 | Search by concept ("auth", "caching") | ` + "`search(query=\"...\", mode=\"semantic\")`" + ` |
