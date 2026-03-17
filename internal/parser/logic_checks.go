@@ -20,18 +20,23 @@ type LogicWarning struct {
 }
 
 // identifierWords are exact camelCase word matches (case-insensitive) that
-// indicate an identifier parameter where zero is almost certainly wrong.
-// These are matched against individual words produced by splitting the function
-// name on camelCase boundaries — NOT as substrings — to avoid false positives
-// on common words like "validate" (contains "id"), "account" (contains "count").
+// indicate a parameter where literal zero is almost certainly a bug. These are
+// matched against EVERY word produced by camelCase-splitting the function name
+// (not as substrings) to avoid false positives on "validate"->["validate"],
+// "account"->["account","Balance"], etc.
+//
+// "index" is intentionally excluded: slice index 0 is the first valid element
+// and is ubiquitous in Go code -- it would produce enormous false-positive noise.
 var identifierWords = map[string]bool{
-	"port": true, "pid": true, "id": true, "count": true,
-	"index": true, "fd": true, "num": true,
+	"port": true, "pid": true, "id": true, "count": true, "fd": true, "num": true,
 }
 
 // cleanupPairs maps resource-acquiring call names to their expected cleanup counterparts.
-// NewReader is intentionally excluded: bufio.Reader has no Close method and requires
-// no explicit cleanup — closing the underlying reader is sufficient.
+//
+// Intentional exclusions:
+//   - NewReader: bufio.Reader has no Close method; closing the underlying reader suffices.
+//   - NewWriter "Close": bufio.Writer has no Close method (only Flush); including "Close"
+//     produced a false-negative when an unrelated Close() was present.
 var cleanupPairs = map[string][]string{
 	"Open":      {"Close"},
 	"OpenFile":  {"Close"},
@@ -41,7 +46,7 @@ var cleanupPairs = map[string][]string{
 	"DialTCP":   {"Close"},
 	"DialUDP":   {"Close"},
 	"DialUnix":  {"Close"},
-	"NewWriter": {"Close", "Flush"},
+	"NewWriter": {"Flush"},
 	"Lock":      {"Unlock"},
 	"RLock":     {"RUnlock"},
 	"NewTicker": {"Stop"},
@@ -82,7 +87,6 @@ func runGoLogicChecks(filePath string, src []byte) []LogicWarning {
 
 	var warnings []LogicWarning
 
-	// Walk all function/method bodies for checks.
 	for i := 0; i < int(root.ChildCount()); i++ {
 		child := root.Child(i)
 		if child == nil {
@@ -94,11 +98,34 @@ func runGoLogicChecks(filePath string, src []byte) []LogicWarning {
 			if body == nil {
 				continue
 			}
-			w := checkFunctionBody(filePath, body, src)
-			warnings = append(warnings, w...)
+			warnings = append(warnings, checkFunctionBody(filePath, body, src)...)
+			// checkMissingCleanup uses walkASTNoFuncLit so closure-internal
+			// resource leaks are invisible from the outer body. Analyse every
+			// nested closure as its own independent scope to catch those leaks.
+			warnings = append(warnings, checkClosureCleanup(filePath, body, src)...)
 		}
 	}
 
+	return warnings
+}
+
+// checkClosureCleanup finds every func_literal nested within body and runs
+// checkMissingCleanup on each as its own independent scope.
+// walkASTNoFuncLit ensures each level only sees DIRECT child closures;
+// deeper nesting is handled by the recursive call.
+func checkClosureCleanup(filePath string, body *sitter.Node, src []byte) []LogicWarning {
+	var warnings []LogicWarning
+	walkASTNoFuncLit(body, func(n *sitter.Node) {
+		if n.Type() != "func_literal" {
+			return
+		}
+		innerBody := n.ChildByFieldName("body")
+		if innerBody == nil {
+			return
+		}
+		warnings = append(warnings, checkMissingCleanup(filePath, innerBody, src)...)
+		warnings = append(warnings, checkClosureCleanup(filePath, innerBody, src)...)
+	})
 	return warnings
 }
 
@@ -128,12 +155,9 @@ func checkZeroValueIdentifier(filePath string, body *sitter.Node, src []byte) []
 			return
 		}
 		funcName := nodeText(fnNode, src)
-		// Split on camelCase boundaries and check each word independently.
-		// Substring matching (e.g. "id" in "validate") produces too many false positives.
 		if !funcNameMatchesIdentifier(funcName) {
 			return
 		}
-		// Check if any argument is literal 0.
 		for j := 0; j < int(argsNode.ChildCount()); j++ {
 			arg := argsNode.Child(j)
 			if arg != nil && arg.Type() == "int_literal" && nodeText(arg, src) == "0" {
@@ -141,7 +165,7 @@ func checkZeroValueIdentifier(filePath string, body *sitter.Node, src []byte) []
 					Check:    "zero_value_id",
 					File:     filePath,
 					Line:     int(arg.StartPoint().Row) + 1,
-					Message:  fmt.Sprintf("%s called with literal 0 — likely unintentional (port/pid/id should not be zero)", funcName),
+					Message:  fmt.Sprintf("%s called with literal 0 -- likely unintentional (port/pid/id should not be zero)", funcName),
 					Severity: "warning",
 				})
 			}
@@ -152,59 +176,133 @@ func checkZeroValueIdentifier(filePath string, body *sitter.Node, src []byte) []
 
 // checkMissingCleanup detects resource-acquiring calls (Open, Create, Listen, Lock, etc.)
 // without a corresponding cleanup call (Close, Unlock, etc.) in the same function body.
+//
+// Per-variable tracking: when the acquire result is captured in a variable
+// (e.g. f, err := os.Open(...)), the check looks for f.Close() specifically
+// rather than any Close() call. This prevents a different file's Close() from
+// silently satisfying an unrelated leaked resource's requirement.
+//
+// Closure isolation: walkASTNoFuncLit is used for acquire detection so that
+// resources acquired inside a nested closure are not attributed to the enclosing
+// function. Cleanup detection uses plain walkAST so that defer func() { f.Close() }()
+// patterns are still recognised.
 func checkMissingCleanup(filePath string, body *sitter.Node, src []byte) []LogicWarning {
 	type acquireInfo struct {
-		name string
-		line int
+		acquireName string
+		varName     string // resource variable ("f" from f,err:=os.Open); "" if untracked
+		line        int
 	}
 	var acquires []acquireInfo
-	cleanupSeen := make(map[string]bool)
+	trackedLines := make(map[int]bool)
 
+	// Walk 1: assignments whose RHS contains an acquire call.
+	walkASTNoFuncLit(body, func(n *sitter.Node) {
+		if n.Type() != "short_var_declaration" && n.Type() != "assignment_statement" {
+			return
+		}
+		right := n.ChildByFieldName("right")
+		if right == nil {
+			return
+		}
+		var foundCall *sitter.Node
+		walkAST(right, func(rn *sitter.Node) {
+			if foundCall != nil {
+				return
+			}
+			if rn.Type() != "call_expression" {
+				return
+			}
+			fn := rn.ChildByFieldName("function")
+			if fn == nil {
+				return
+			}
+			if _, ok := cleanupPairs[lastIdentifier(fn, src)]; ok {
+				foundCall = rn
+			}
+		})
+		if foundCall == nil {
+			return
+		}
+		fn := foundCall.ChildByFieldName("function")
+		acquireName := lastIdentifier(fn, src)
+		line := int(foundCall.StartPoint().Row) + 1
+		trackedLines[line] = true
+		left := n.ChildByFieldName("left")
+		varName := ""
+		if left != nil {
+			varName = firstAssignVar(left, src)
+		}
+		acquires = append(acquires, acquireInfo{acquireName: acquireName, varName: varName, line: line})
+	})
+
+	// Walk 2: bare call_expressions -- method-style acquires (mu.Lock()) and
+	// unassigned opens. Skips lines already captured in Walk 1.
+	walkASTNoFuncLit(body, func(n *sitter.Node) {
+		if n.Type() != "call_expression" {
+			return
+		}
+		fn := n.ChildByFieldName("function")
+		if fn == nil {
+			return
+		}
+		acquireName := lastIdentifier(fn, src)
+		if _, ok := cleanupPairs[acquireName]; !ok {
+			return
+		}
+		line := int(n.StartPoint().Row) + 1
+		if trackedLines[line] {
+			return
+		}
+		varName := ""
+		if fn.Type() == "selector_expression" {
+			if operand := fn.ChildByFieldName("operand"); operand != nil {
+				varName = nodeText(operand, src)
+			}
+		}
+		acquires = append(acquires, acquireInfo{acquireName: acquireName, varName: varName, line: line})
+	})
+
+	if len(acquires) == 0 {
+		return nil
+	}
+
+	varsCleaned := make(map[string]bool)
+	anyCleanupSeen := make(map[string]bool)
 	walkAST(body, func(n *sitter.Node) {
 		if n.Type() != "call_expression" {
 			return
 		}
-		fnNode := n.ChildByFieldName("function")
-		if fnNode == nil {
+		fn := n.ChildByFieldName("function")
+		if fn == nil {
 			return
 		}
-		callName := lastIdentifier(fnNode, src)
-		if callName == "" {
-			return
-		}
-		if _, ok := cleanupPairs[callName]; ok {
-			acquires = append(acquires, acquireInfo{name: callName, line: int(n.StartPoint().Row) + 1})
-		}
-		// Track all function calls as potential cleanup.
-		cleanupSeen[callName] = true
-	})
-
-	// Also check for defer statements containing cleanup calls.
-	walkAST(body, func(n *sitter.Node) {
-		if n.Type() != "defer_statement" {
-			return
-		}
-		walkAST(n, func(inner *sitter.Node) {
-			if inner.Type() == "call_expression" {
-				fnNode := inner.ChildByFieldName("function")
-				if fnNode != nil {
-					callName := lastIdentifier(fnNode, src)
-					if callName != "" {
-						cleanupSeen[callName] = true
-					}
-				}
+		if fn.Type() == "selector_expression" {
+			operand := fn.ChildByFieldName("operand")
+			field := fn.ChildByFieldName("field")
+			if operand != nil && field != nil {
+				varsCleaned[nodeText(operand, src)+"."+nodeText(field, src)] = true
+				anyCleanupSeen[nodeText(field, src)] = true
 			}
-		})
+		} else {
+			anyCleanupSeen[lastIdentifier(fn, src)] = true
+		}
 	})
 
 	var warnings []LogicWarning
 	for _, acq := range acquires {
-		expectedCleanups := cleanupPairs[acq.name]
+		expectedCleanups := cleanupPairs[acq.acquireName]
 		found := false
 		for _, cleanup := range expectedCleanups {
-			if cleanupSeen[cleanup] {
-				found = true
-				break
+			if acq.varName != "" {
+				if varsCleaned[acq.varName+"."+cleanup] {
+					found = true
+					break
+				}
+			} else {
+				if anyCleanupSeen[cleanup] {
+					found = true
+					break
+				}
 			}
 		}
 		if !found {
@@ -212,7 +310,7 @@ func checkMissingCleanup(filePath string, body *sitter.Node, src []byte) []Logic
 				Check:    "missing_cleanup",
 				File:     filePath,
 				Line:     acq.line,
-				Message:  fmt.Sprintf("%s() called without corresponding %s in the same function — possible resource leak", acq.name, strings.Join(expectedCleanups, "/")),
+				Message:  fmt.Sprintf("%s() called without corresponding %s in the same function -- possible resource leak", acq.acquireName, strings.Join(expectedCleanups, "/")),
 				Severity: "warning",
 			})
 		}
@@ -249,7 +347,7 @@ func checkPathExpansion(filePath string, body *sitter.Node, src []byte) []LogicW
 						Check:    "path_no_expand",
 						File:     filePath,
 						Line:     int(arg.StartPoint().Row) + 1,
-						Message:  fmt.Sprintf("path %s passed to %s() without tilde/env expansion — use os.UserHomeDir() or os.ExpandEnv()", text, callName),
+						Message:  fmt.Sprintf("path %s passed to %s() without tilde/env expansion -- use os.UserHomeDir() or os.ExpandEnv()", text, callName),
 						Severity: "warning",
 					})
 				}
@@ -259,21 +357,10 @@ func checkPathExpansion(filePath string, body *sitter.Node, src []byte) []LogicW
 	return warnings
 }
 
-// checkNilMethodCall detects method calls on variables that were explicitly
-// assigned nil at the TOP LEVEL of the function body (not inside a conditional
-// branch) without an intervening nil check.
-//
-// Intentionally conservative: nil assignments inside if/for/select blocks are
-// skipped because they are almost always inside an error-handling branch that
-// returns early (e.g. `if err != nil { x = nil; return err }`). Tracking those
-// would produce false positives on the standard Go error-handling pattern.
+// checkNilMethodCall detects method calls on variables explicitly assigned nil
+// at the TOP LEVEL of the function body (not inside a conditional branch).
 func checkNilMethodCall(filePath string, body *sitter.Node, src []byte) []LogicWarning {
-	// Only collect nil assignments that are DIRECT children of the function body
-	// block — not assignments nested inside if/for/select/switch blocks.
-	// This avoids false positives for the common pattern:
-	//   if err != nil { svc = nil; return err }
-	//   svc.Start()  ← safe: unreachable when svc is nil
-	nilVars := make(map[string]int) // var name → line of nil assignment
+	nilVars := make(map[string]int)
 	for i := 0; i < int(body.NamedChildCount()); i++ {
 		n := body.NamedChild(i)
 		if n == nil {
@@ -299,7 +386,6 @@ func checkNilMethodCall(filePath string, body *sitter.Node, src []byte) []LogicW
 				}
 			}
 		case "if_statement":
-			// A top-level nil check removes the variable from suspicion.
 			cond := n.ChildByFieldName("condition")
 			if cond != nil {
 				condText := nodeText(cond, src)
@@ -317,7 +403,6 @@ func checkNilMethodCall(filePath string, body *sitter.Node, src []byte) []LogicW
 		return nil
 	}
 
-	// Find method calls on nil-assigned variables.
 	var warnings []LogicWarning
 	walkAST(body, func(n *sitter.Node) {
 		if n.Type() != "call_expression" {
@@ -363,7 +448,6 @@ func checkConcurrentMapWrite(filePath string, body *sitter.Node, src []byte) []L
 		if n.Type() != "go_statement" {
 			return
 		}
-		// Check if there's a sync primitive in the goroutine body.
 		hasSyncPrimitive := false
 		walkAST(n, func(inner *sitter.Node) {
 			if inner.Type() == "call_expression" {
@@ -381,7 +465,6 @@ func checkConcurrentMapWrite(filePath string, body *sitter.Node, src []byte) []L
 			return
 		}
 
-		// Look for map index assignments inside the goroutine.
 		walkAST(n, func(inner *sitter.Node) {
 			if inner.Type() != "assignment_statement" {
 				return
@@ -390,10 +473,9 @@ func checkConcurrentMapWrite(filePath string, body *sitter.Node, src []byte) []L
 			if left == nil {
 				return
 			}
-			// Check if left side contains an index_expression (map[key] = value).
 			hasMapWrite := false
 			walkAST(left, func(lhs *sitter.Node) {
-				if lhs.Type() == "index_expression" {
+				if lhs.Type() == "index_expression" && !isSliceIndex(lhs, src) {
 					hasMapWrite = true
 				}
 			})
@@ -402,7 +484,7 @@ func checkConcurrentMapWrite(filePath string, body *sitter.Node, src []byte) []L
 					Check:    "concurrent_map_write",
 					File:     filePath,
 					Line:     int(inner.StartPoint().Row) + 1,
-					Message:  "map write inside goroutine without sync primitive — use sync.Mutex or sync.Map",
+					Message:  "map write inside goroutine without sync primitive -- use sync.Mutex or sync.Map",
 					Severity: "warning",
 				})
 			}
@@ -411,14 +493,13 @@ func checkConcurrentMapWrite(filePath string, body *sitter.Node, src []byte) []L
 	return warnings
 }
 
-// funcNameMatchesIdentifier returns true if any camelCase word in the function
+// funcNameMatchesIdentifier returns true if ANY camelCase word in the function
 // name exactly matches one of the identifierWords (port, pid, id, count, etc.).
-// Uses word-level matching to avoid substring false positives:
-//   "validateInput"  → ["validate","Input"]  → none match  → false ✓
-//   "killByPort"     → ["kill","By","Port"]   → "Port"→"port" match → true ✓
-//   "accountBalance" → ["account","Balance"]  → none match  → false ✓
+// Word-level matching (not substring) avoids false positives on names like
+// "validateInput", "accountBalance", "consider".
+// All-words is intentional: an identifier keyword anywhere in the name is
+// semantically meaningful (connectToPort, SetPortNumber, bindPortAddress).
 func funcNameMatchesIdentifier(funcName string) bool {
-	// Strip package qualifier: "pkg.Func" → "Func"
 	if dot := strings.LastIndex(funcName, "."); dot >= 0 {
 		funcName = funcName[dot+1:]
 	}
@@ -432,11 +513,6 @@ func funcNameMatchesIdentifier(funcName string) bool {
 
 // splitCamelWords splits a camelCase or PascalCase identifier into its
 // constituent words. Consecutive uppercase runs (acronyms) are kept together.
-// Examples:
-//   "killByPort"    → ["kill","By","Port"]
-//   "setHTTPPort"   → ["set","HTTP","Port"]
-//   "getID"         → ["get","ID"]
-//   "validateInput" → ["validate","Input"]
 func splitCamelWords(s string) []string {
 	if s == "" {
 		return nil
@@ -448,13 +524,11 @@ func splitCamelWords(s string) []string {
 	for i := 1; i < n; i++ {
 		curr := runes[i]
 		prev := runes[i-1]
-		// Transition: lower→upper or digit→upper starts a new word.
 		if isUpper(curr) && (isLower(prev) || isDigit(prev)) {
 			words = append(words, string(runes[start:i]))
 			start = i
 			continue
 		}
-		// Transition: upper-run followed by upper+lower (e.g. "HTTPPort" → "HTTP","Port").
 		if i+1 < n && isUpper(curr) && isUpper(prev) && isLower(runes[i+1]) {
 			words = append(words, string(runes[start:i]))
 			start = i
@@ -479,13 +553,113 @@ func walkAST(n *sitter.Node, visit func(*sitter.Node)) {
 	}
 }
 
+// walkASTNoFuncLit is like walkAST but does not descend into func_literal nodes.
+// Prevents nested closures from being analysed as part of the enclosing function.
+func walkASTNoFuncLit(n *sitter.Node, visit func(*sitter.Node)) {
+	if n == nil {
+		return
+	}
+	visit(n)
+	for i := 0; i < int(n.ChildCount()); i++ {
+		child := n.Child(i)
+		if child == nil {
+			continue
+		}
+		if child.Type() == "func_literal" {
+			visit(child) // visit the closure node itself but do not recurse into it
+			continue
+		}
+		walkASTNoFuncLit(child, visit)
+	}
+}
+
+// firstAssignVar returns the first non-"_" identifier on the LHS of an
+// assignment or short_var_declaration.
+func firstAssignVar(left *sitter.Node, src []byte) string {
+	text := nodeText(left, src)
+	parts := strings.SplitN(text, ",", 2)
+	if len(parts) == 0 {
+		return ""
+	}
+	name := strings.TrimSpace(parts[0])
+	if name == "_" {
+		return ""
+	}
+	return name
+}
+
+// isSliceIndex reports whether an index_expression's index looks like a numeric
+// slice access rather than a map key, delegating to looksLikeIntegerExpr.
+func isSliceIndex(indexExpr *sitter.Node, src []byte) bool {
+	idx := indexExpr.ChildByFieldName("index")
+	if idx == nil && int(indexExpr.ChildCount()) >= 3 {
+		idx = indexExpr.Child(2)
+	}
+	return looksLikeIntegerExpr(idx, src)
+}
+
+// looksLikeIntegerExpr returns true when a node is almost certainly an integer
+// expression rather than a map key. Handles: integer literals, common loop
+// counter identifiers, integer type conversions, len/cap, binary arithmetic,
+// unary negation, and parenthesised expressions.
+func looksLikeIntegerExpr(n *sitter.Node, src []byte) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Type() {
+	case "int_literal":
+		return true
+
+	case "identifier":
+		switch nodeText(n, src) {
+		case "i", "j", "k", "l", "m", "n",
+			"x", "y", "z",
+			"idx", "index", "pos", "off", "offset",
+			"row", "col", "r", "c",
+			"start", "end", "cur", "head", "tail",
+			"cnt", "count", "num", "step", "stride":
+			return true
+		}
+		return false
+
+	case "binary_expression":
+		left := n.ChildByFieldName("left")
+		right := n.ChildByFieldName("right")
+		return looksLikeIntegerExpr(left, src) || looksLikeIntegerExpr(right, src)
+
+	case "unary_expression":
+		operand := n.ChildByFieldName("operand")
+		return looksLikeIntegerExpr(operand, src)
+
+	case "call_expression":
+		fn := n.ChildByFieldName("function")
+		if fn == nil {
+			return false
+		}
+		switch nodeText(fn, src) {
+		case "int", "int8", "int16", "int32", "int64",
+			"uint", "uint8", "uint16", "uint32", "uint64",
+			"uintptr", "byte", "rune",
+			"len", "cap":
+			return true
+		}
+		return false
+
+	case "parenthesized_expression":
+		if int(n.ChildCount()) >= 2 {
+			return looksLikeIntegerExpr(n.Child(1), src)
+		}
+		return false
+	}
+	return false
+}
+
 // nodeText returns the source text for a tree-sitter node.
 func nodeText(n *sitter.Node, src []byte) string {
 	return string(src[n.StartByte():n.EndByte()])
 }
 
 // lastIdentifier extracts the rightmost identifier from a function expression.
-// For "pkg.Func" returns "Func", for "a.b.Method" returns "Method", for "Func" returns "Func".
 func lastIdentifier(fnNode *sitter.Node, src []byte) string {
 	switch fnNode.Type() {
 	case "selector_expression":

@@ -62,6 +62,10 @@ func main() {
 }
 
 func TestCheckZeroValueIdentifier_MethodCall(t *testing.T) {
+	// All-words matching: "SetPortNumber" → ["Set","Port","Number"] → "port" matches.
+	// camelCase word splitting already prevents the original false positives
+	// (validate, account, consider); all-words preserves true positives like
+	// "connectToPort", "SetPortNumber", "bindPortAddress".
 	src := []byte(`package main
 func main() {
 	svc.SetPortNumber(0)
@@ -70,7 +74,35 @@ func main() {
 	warnings := RunLogicChecks("main.go", src)
 	found := findCheck(warnings, "zero_value_id")
 	if found == nil {
-		t.Fatal("expected zero_value_id warning for svc.SetPortNumber(0)")
+		t.Fatal("expected zero_value_id warning for svc.SetPortNumber(0) — 'Port' is a camelCase word in the name")
+	}
+}
+
+func TestCheckZeroValueIdentifier_AllWords_ConnectToPort(t *testing.T) {
+	// "port" appears in the middle — all-words catches it; last-word-only would miss it.
+	src := []byte(`package main
+func main() {
+	connectToPort(0)
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "zero_value_id")
+	if found == nil {
+		t.Fatal("expected zero_value_id warning for connectToPort(0) — 'Port' is a camelCase word in the name")
+	}
+}
+
+func TestCheckZeroValueIdentifier_NoIndex_NoFalsePositive(t *testing.T) {
+	// "index" was removed from identifierWords — index 0 is the first valid element.
+	src := []byte(`package main
+func main() {
+	setIndexFrom(0)
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "zero_value_id")
+	if found != nil {
+		t.Errorf("zero_value_id should not fire for setIndexFrom(0) — 'index' is not in identifierWords: %s", found.Message)
 	}
 }
 
@@ -555,10 +587,10 @@ func run() error {
 	}
 }
 
-// Bug 4 (known limitation — documented): concurrent_map_write fires on slice
-// index writes in goroutines even though parallel slice writes to distinct
-// indices are safe. This test documents the limitation as expected behaviour.
-func TestCheckConcurrentMapWrite_SliceWrite_KnownFalsePositive(t *testing.T) {
+// Fix 3: concurrent_map_write no longer fires on slice[loopVar] writes inside
+// goroutines. The isSliceIndex heuristic skips indices that are integer literals
+// or common loop-counter names (i, j, k, n, idx, index, pos).
+func TestCheckConcurrentMapWrite_SliceWrite_NoFalsePositive(t *testing.T) {
 	src := []byte(`package main
 
 func parallel(items []int) []int {
@@ -573,12 +605,289 @@ func parallel(items []int) []int {
 `)
 	warnings := RunLogicChecks("main.go", src)
 	found := findCheck(warnings, "concurrent_map_write")
-	// This is a known false positive — slice index writes cannot be distinguished
-	// from map writes without type information. The test documents the behaviour.
+	if found != nil {
+		t.Errorf("Fix 3: concurrent_map_write should not fire for slice[idx] write in goroutine (idx is a loop counter): line %d — %s", found.Line, found.Message)
+	}
+}
+
+func TestCheckConcurrentMapWrite_SliceWrite_IntLiteral_NoFalsePositive(t *testing.T) {
+	src := []byte(`package main
+
+func set(results []int) {
+	go func() {
+		results[0] = 42
+	}()
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "concurrent_map_write")
+	if found != nil {
+		t.Errorf("Fix 3: integer literal index should not trigger concurrent_map_write: %s", found.Message)
+	}
+}
+
+func TestCheckConcurrentMapWrite_StringKey_StillWarns(t *testing.T) {
+	// String-literal keys are unambiguously map writes — should still warn.
+	src := []byte(`package main
+
+func doWork() {
+	m := make(map[string]int)
+	go func() {
+		m["key"] = 1
+	}()
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "concurrent_map_write")
 	if found == nil {
-		t.Log("concurrent_map_write: slice[idx] write in goroutine not flagged — if this changes, update the known-limitation note in SHIPPED.md")
-	} else {
-		t.Logf("concurrent_map_write: known false positive for slice[idx] write in goroutine (expected, documented limitation): line %d", found.Line)
+		t.Fatal("concurrent_map_write should still fire for m[\"key\"] = 1 in goroutine")
+	}
+}
+
+// ── NewWriter/Flush fix (cleanupPairs correction) ────────────────────────────
+
+// bufio.Writer has no Close method — only Flush. The old cleanupPairs entry
+// had {"Close","Flush"} which caused false-negatives (any Close() satisfied it).
+func TestCheckMissingCleanup_NewWriter_WithFlush_NoWarn(t *testing.T) {
+	src := []byte(`package main
+
+import (
+	"bufio"
+	"os"
+)
+
+func write() {
+	w := bufio.NewWriter(os.Stdout)
+	w.WriteString("hello")
+	w.Flush()
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "missing_cleanup")
+	if found != nil {
+		t.Errorf("NewWriter with Flush() should not warn: %s", found.Message)
+	}
+}
+
+func TestCheckMissingCleanup_NewWriter_WithoutFlush_Warns(t *testing.T) {
+	src := []byte(`package main
+
+import (
+	"bufio"
+	"os"
+)
+
+func write() {
+	w := bufio.NewWriter(os.Stdout)
+	w.WriteString("hello")
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "missing_cleanup")
+	if found == nil {
+		t.Fatal("expected missing_cleanup warning for NewWriter without Flush() — buffered writes would be silently lost")
+	}
+}
+
+// Critical: with the old {"Close","Flush"} and per-variable tracking, an
+// unrelated f.Close() must NOT satisfy w's Flush requirement.
+func TestCheckMissingCleanup_NewWriter_UnrelatedClose_StillWarns(t *testing.T) {
+	src := []byte(`package main
+
+import (
+	"bufio"
+	"os"
+)
+
+func write() {
+	f, _ := os.Open("input.txt")
+	defer f.Close()
+	w := bufio.NewWriter(os.Stdout)
+	w.WriteString("hello")
+	// w.Flush() missing — f.Close() should NOT satisfy w's cleanup
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	// Expect exactly one missing_cleanup for w (not for f which has f.Close()).
+	count := 0
+	for _, ww := range warnings {
+		if ww.Check == "missing_cleanup" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 missing_cleanup warning (w missing Flush), got %d", count)
+	}
+}
+
+// ── Fix 1: closure isolation in checkMissingCleanup ──────────────────────────
+
+// Closure with proper cleanup — neither outer nor closure analysis should warn.
+func TestCheckMissingCleanup_ClosureAcquire_NoFalsePositive(t *testing.T) {
+	src := []byte(`package main
+
+import "os"
+
+func startWorker() {
+	go func() {
+		f, _ := os.Open("data.txt")
+		defer f.Close()
+	}()
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "missing_cleanup")
+	if found != nil {
+		t.Errorf("Fix 1: missing_cleanup should not fire for acquire inside goroutine closure — enclosing function has no open resource: %s", found.Message)
+	}
+}
+
+// ── Fix 4: per-variable cleanup tracking ─────────────────────────────────────
+
+// Two files opened; only one is closed. The unclosed one should warn.
+func TestCheckMissingCleanup_PerVariable_OneLeaked(t *testing.T) {
+	src := []byte(`package main
+
+import "os"
+
+func bad() {
+	f, _ := os.Open("a.txt")
+	g, _ := os.Open("b.txt")
+	defer g.Close()
+	_ = f
+	_ = g
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	count := 0
+	for _, w := range warnings {
+		if w.Check == "missing_cleanup" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("Fix 4: expected exactly 1 missing_cleanup warning (f leaked, g closed), got %d", count)
+	}
+}
+
+// Closing a DIFFERENT variable with the same method should not satisfy the check.
+func TestCheckMissingCleanup_PerVariable_WrongVar(t *testing.T) {
+	src := []byte(`package main
+
+import "os"
+
+func bad() {
+	f, _ := os.Open("a.txt")
+	_ = f
+	// conn closes something else — not f
+	conn.Close()
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "missing_cleanup")
+	if found == nil {
+		t.Fatal("Fix 4: missing_cleanup should fire when only a different object's Close() is called, not f.Close()")
+	}
+}
+
+// ── Closure-internal resource leak detection (checkClosureCleanup) ────────────
+
+// A resource leaked INSIDE a goroutine closure is caught by closure-level analysis.
+func TestCheckMissingCleanup_ClosureInternalLeak_Caught(t *testing.T) {
+	src := []byte(`package main
+
+import "os"
+
+func startWorker() {
+	go func() {
+		f, _ := os.Open("data.txt")
+		_ = f
+		// f.Close() never called inside closure — resource leak
+	}()
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "missing_cleanup")
+	if found == nil {
+		t.Fatal("closure-level analysis: missing_cleanup should fire for resource leaked inside goroutine closure")
+	}
+}
+
+// Deeply nested closure leak is caught recursively.
+func TestCheckMissingCleanup_DeeplyNestedClosure_Caught(t *testing.T) {
+	src := []byte(`package main
+
+import "os"
+
+func outer() {
+	go func() {
+		go func() {
+			f, _ := os.Open("deep.txt")
+			_ = f
+			// leaked two levels deep
+		}()
+	}()
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "missing_cleanup")
+	if found == nil {
+		t.Fatal("recursive closure analysis: missing_cleanup should fire for resource leaked two closures deep")
+	}
+}
+
+// ── Expanded isSliceIndex / looksLikeIntegerExpr ──────────────────────────────
+
+func TestCheckConcurrentMapWrite_TypeCastIndex_NoFalsePositive(t *testing.T) {
+	// uint32(i) is an integer type conversion — should not trigger.
+	src := []byte(`package main
+
+func set(results []int, items []int) {
+	for i := range items {
+		go func(idx int) {
+			results[uint32(idx)] = 42
+		}(i)
+	}
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "concurrent_map_write")
+	if found != nil {
+		t.Errorf("looksLikeIntegerExpr: uint32(idx) should not trigger concurrent_map_write: %s", found.Message)
+	}
+}
+
+func TestCheckConcurrentMapWrite_LenMinusOne_NoFalsePositive(t *testing.T) {
+	// results[len(items)-1] = ... — computed integer index, not a map key.
+	src := []byte(`package main
+
+func last(results []int, items []int) {
+	go func() {
+		results[len(items)-1] = 99
+	}()
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "concurrent_map_write")
+	if found != nil {
+		t.Errorf("looksLikeIntegerExpr: len(items)-1 should not trigger concurrent_map_write: %s", found.Message)
+	}
+}
+
+func TestCheckConcurrentMapWrite_RowColIndex_NoFalsePositive(t *testing.T) {
+	// results[row] — "row" is in the expanded loop-var list.
+	src := []byte(`package main
+
+func fill(grid []int, row int) {
+	go func(r int) {
+		grid[r] = 1
+	}(row)
+}
+`)
+	warnings := RunLogicChecks("main.go", src)
+	found := findCheck(warnings, "concurrent_map_write")
+	if found != nil {
+		t.Errorf("looksLikeIntegerExpr: grid[r] should not trigger concurrent_map_write: %s", found.Message)
 	}
 }
 
