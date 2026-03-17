@@ -34,18 +34,25 @@ func (p *MarkdownParser) Extensions() []string {
 // Creates: file node, Section nodes (one per heading), CONTAINS edges (hierarchy),
 // and LINKS_TO edges for relative markdown links.
 func (p *MarkdownParser) Parse(g *graph.Graph, filePath string, src []byte) error {
-	// File node (same as genericParser).
+	// File node. Frontmatter title (if present) is stored in metadata so that
+	// resolver.ResolveDocEdges can create EXPLAINS edges from the file to the
+	// entities it documents (highest-confidence doc-code signal per arxiv:2506.16440).
 	fileNodeID := g.MakeNodeID(filePath, filePath)
+	sections, fmTitle := extractSections(src)
+	var fileMeta map[string]string
+	if fmTitle != "" {
+		fileMeta = map[string]string{"frontmatter_title": fmTitle}
+	}
 	g.AddNode(&graph.Node{
-		ID:     fileNodeID,
-		Type:   graph.NodeFile,
-		Name:   filepath.Base(filePath),
-		File:   filePath,
-		Line:   1,
-		Domain: graph.DomainDocs,
+		ID:       fileNodeID,
+		Type:     graph.NodeFile,
+		Name:     filepath.Base(filePath),
+		File:     filePath,
+		Line:     1,
+		Domain:   graph.DomainDocs,
+		Metadata: fileMeta,
 	})
 
-	sections := extractSections(src)
 	if len(sections) == 0 {
 		return nil
 	}
@@ -143,21 +150,19 @@ type section struct {
 
 // extractSections parses ATX and setext headings and collects body text.
 //
-// Correctness rules applied:
-//  1. YAML/TOML frontmatter (--- at very start of file) is skipped entirely.
-//  2. Headings inside fenced code blocks (``` or ~~~, 3+ chars) are skipped.
-//  3. Setext headings (Title\n=== or Title\n---) are detected after ATX pass.
-//  4. Duplicate heading titles in the same file are disambiguated with a
-//     counter suffix: "Intro", "Intro (2)", etc.
-func extractSections(src []byte) []section {
+// extractSections parses ATX and setext headings and collects body text.
+// Returns the list of sections and the frontmatter title (if the file starts
+// with YAML/TOML frontmatter that contains a `title:` / `title =` field).
+func extractSections(src []byte) ([]section, string) {
 	lines := strings.Split(string(src), "\n")
 	if len(lines) == 0 {
-		return nil
+		return nil, ""
 	}
 
-	// ── Step 1: skip YAML/TOML frontmatter ──────────────────────────────────
+	// ── Step 1: skip YAML/TOML frontmatter, extract title field ─────────────
 	// Frontmatter is a --- or +++ block at the VERY start of the file.
 	startIdx := 0
+	var frontmatterTitle string
 	if len(lines) > 0 {
 		first := strings.TrimSpace(lines[0])
 		if first == "---" || first == "+++" {
@@ -166,6 +171,17 @@ func extractSections(src []byte) []section {
 				if strings.TrimSpace(lines[i]) == closer {
 					startIdx = i + 1 // resume after closing delimiter
 					break
+				}
+				// Extract title from YAML (`title: "..."`) or TOML (`title = "..."`).
+				line := strings.TrimSpace(lines[i])
+				var val string
+				if strings.HasPrefix(line, "title:") {
+					val = strings.TrimSpace(strings.TrimPrefix(line, "title:"))
+				} else if strings.HasPrefix(line, "title =") {
+					val = strings.TrimSpace(strings.TrimPrefix(line, "title ="))
+				}
+				if val != "" {
+					frontmatterTitle = strings.TrimSpace(strings.Trim(val, `"'`))
 				}
 			}
 		}
@@ -269,7 +285,7 @@ func extractSections(src []byte) []section {
 		}
 	}
 
-	return sections
+	return sections, frontmatterTitle
 }
 
 // isSetextUnderline returns true for a setext heading underline:

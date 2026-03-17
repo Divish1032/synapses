@@ -391,6 +391,48 @@ func TestMarkdownParser_FrontmatterThenSetextH1(t *testing.T) {
 	}
 }
 
+func TestMarkdownParser_FrontmatterTitleExtracted(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("---\ntitle: \"FlatGraph Architecture\"\nauthor: foo\n---\n# Intro\nBody.\n")
+	if err := p.Parse(g, "/repo/README.md", src); err != nil {
+		t.Fatal(err)
+	}
+	fileNodeID := g.MakeNodeID("/repo/README.md", "/repo/README.md")
+	var fileNode *graph.Node
+	for _, n := range g.AllNodes() {
+		if n.ID == fileNodeID {
+			fileNode = n
+			break
+		}
+	}
+	if fileNode == nil {
+		t.Fatal("file node not found")
+	}
+	if fileNode.Metadata["frontmatter_title"] != "FlatGraph Architecture" {
+		t.Errorf("frontmatter_title = %q, want %q", fileNode.Metadata["frontmatter_title"], "FlatGraph Architecture")
+	}
+}
+
+func TestMarkdownParser_TOMLFrontmatterTitleExtracted(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("+++\ntitle = \"Walker Subsystem\"\n+++\n# Docs\nContent.\n")
+	if err := p.Parse(g, "/repo/README.md", src); err != nil {
+		t.Fatal(err)
+	}
+	fileNodeID := g.MakeNodeID("/repo/README.md", "/repo/README.md")
+	for _, n := range g.AllNodes() {
+		if n.ID == fileNodeID {
+			if n.Metadata["frontmatter_title"] != "Walker Subsystem" {
+				t.Errorf("frontmatter_title = %q, want %q", n.Metadata["frontmatter_title"], "Walker Subsystem")
+			}
+			return
+		}
+	}
+	t.Fatal("file node not found")
+}
+
 // assertEdge checks that an edge exists from→to with the given type.
 func assertEdge(t *testing.T, g *graph.Graph, from, to graph.NodeID, edgeType graph.EdgeType) {
 	t.Helper()
