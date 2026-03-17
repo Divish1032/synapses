@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode"
@@ -8,21 +9,55 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
-// ResolveDocEdges scans all Section nodes in the graph and creates
+// ResolveDocEdges scans ALL Section nodes in the graph and creates
 // EXPLAINS (section→code) and DOCUMENTED_BY (code→section) edges
 // for identifiers found in section body text.
 //
 // Must be called after all files are parsed so code entity nodes exist.
 // Returns the number of EXPLAINS edges created.
+//
+// Use ResolveDocEdgesForFile for incremental updates when only a single
+// markdown file changed (avoids rescanning the entire graph).
 func ResolveDocEdges(g *graph.Graph) int {
 	sections := g.FindByType(graph.NodeSection)
 	if len(sections) == 0 {
 		return 0
 	}
+	codeNames := buildCodeNames(g)
+	return linkSections(g, sections, codeNames)
+}
 
-	// Build a set of candidate code entity names for fast lookup.
-	// Only include names ≥ 4 chars to avoid false positives on
-	// common short identifiers ("New", "Run", "Get", "Set", "err").
+// ResolveDocEdgesForFile resolves doc edges only for Section nodes that
+// belong to filePath. All other sections' edges are left intact.
+//
+// Use this in the watcher when a single markdown file is reparsed:
+// code entities are unchanged so only the new file's sections need linking.
+// Returns the number of EXPLAINS edges created.
+func ResolveDocEdgesForFile(g *graph.Graph, filePath string) int {
+	all := g.FindByType(graph.NodeSection)
+	if len(all) == 0 {
+		return 0
+	}
+	// Filter to only sections belonging to the changed file.
+	abs := filepath.Clean(filePath)
+	var sections []*graph.Node
+	for _, s := range all {
+		if filepath.Clean(s.File) == abs {
+			sections = append(sections, s)
+		}
+	}
+	if len(sections) == 0 {
+		return 0
+	}
+	codeNames := buildCodeNames(g)
+	return linkSections(g, sections, codeNames)
+}
+
+// buildCodeNames builds a lookup map from identifier name → code nodes.
+// Only includes names ≥ 4 chars to avoid false positives on short names
+// like "New", "Run", "Get", "err". Qualified names like "Store.Close"
+// are indexed under both the full name and the method suffix "Close".
+func buildCodeNames(g *graph.Graph) map[string][]*graph.Node {
 	allNodes := g.AllNodes()
 	codeNames := make(map[string][]*graph.Node, len(allNodes)/2)
 	for _, n := range allNodes {
@@ -30,8 +65,6 @@ func ResolveDocEdges(g *graph.Graph) int {
 			continue
 		}
 		name := n.Name
-		// For qualified method names like "Store.Close", index both
-		// the full name and the method-only part.
 		if len(name) < 4 {
 			continue
 		}
@@ -43,7 +76,11 @@ func ResolveDocEdges(g *graph.Graph) int {
 			}
 		}
 	}
+	return codeNames
+}
 
+// linkSections creates EXPLAINS and DOCUMENTED_BY edges for the given sections.
+func linkSections(g *graph.Graph, sections []*graph.Node, codeNames map[string][]*graph.Node) int {
 	var created int
 	for _, sec := range sections {
 		body := sec.Metadata["body"]
@@ -51,10 +88,7 @@ func ResolveDocEdges(g *graph.Graph) int {
 			continue
 		}
 
-		// Extract identifiers from the section body.
 		refs := extractEntityRefs(body)
-
-		// Deduplicate edges per section: one EXPLAINS edge per unique target.
 		seen := make(map[graph.NodeID]bool)
 
 		for _, ref := range refs {
@@ -68,55 +102,48 @@ func ResolveDocEdges(g *graph.Graph) int {
 				}
 				seen[target.ID] = true
 
-				// EXPLAINS: section → code entity
-				g.AddEdge(&graph.Edge{
-					From: sec.ID,
-					To:   target.ID,
-					Type: graph.EdgeExplains,
-				})
-				// DOCUMENTED_BY: code entity → section
-				g.AddEdge(&graph.Edge{
-					From: target.ID,
-					To:   sec.ID,
-					Type: graph.EdgeDocumentedBy,
-				})
+				g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeExplains})
+				g.AddEdge(&graph.Edge{From: target.ID, To: sec.ID, Type: graph.EdgeDocumentedBy})
 				created++
 			}
 		}
 	}
-
 	return created
 }
 
-// backtickRe matches backtick-wrapped identifiers: `FunctionName`
-var backtickRe = regexp.MustCompile("`([A-Za-z_][A-Za-z0-9_.]*)`")
+// ── Regex patterns ────────────────────────────────────────────────────────────
 
-// extractEntityRefs extracts potential code entity names from doc text.
-// Two strategies (per research — explicit mentions have 3x higher precision):
-//  1. Backtick-wrapped identifiers: `Store.Close` (highest confidence)
-//  2. CamelCase/PascalCase tokens in prose: FlatGraph, AddNode (moderate confidence)
+// backtickRe matches the full content of a backtick span: `...`
+// We capture everything inside and extract the leading identifier separately,
+// so that `Store.Close(ctx)` yields "Store.Close" rather than being rejected.
+var backtickRe = regexp.MustCompile("`([^`]+)`")
+
+// htmlCodeRe matches <code>identifier</code> and <code class="...">identifier</code>.
+// Only captures simple single-word content (no nested tags) to stay high-precision.
+var htmlCodeRe = regexp.MustCompile(`<code[^>]*>([A-Za-z_][A-Za-z0-9_.(<[^<]*>]*?)</code>`)
+
+// extractEntityRefs extracts potential code entity names from doc body text.
 //
-// Returns deduplicated list of candidate names, all ≥ 4 chars.
+// Three strategies in descending confidence:
+//  1. Backtick spans `Store.Close(ctx)` → extracts leading identifier "Store.Close"
+//  2. HTML <code>FunctionName</code> → extracts the identifier directly
+//  3. CamelCase/PascalCase tokens in prose: FlatGraph, AddNode (moderate confidence)
+//
+// Returns a deduplicated list of candidate names, all ≥ 4 chars.
 func extractEntityRefs(body string) []string {
 	seen := make(map[string]bool)
 	var refs []string
 
-	// Strategy 1: backtick-wrapped identifiers.
-	for _, m := range backtickRe.FindAllStringSubmatch(body, -1) {
-		if len(m) < 2 {
-			continue
+	addRef := func(ident string) {
+		ident = strings.TrimRight(ident, "._,;:")
+		if len(ident) < 4 || seen[ident] {
+			return
 		}
-		ident := m[1]
-		if len(ident) < 4 {
-			continue
-		}
-		if !seen[ident] {
-			seen[ident] = true
-			refs = append(refs, ident)
-		}
-		// Also add the last dot-segment for qualified names.
+		seen[ident] = true
+		refs = append(refs, ident)
+		// Also index the last dot-segment for qualified names like "Store.Close".
 		if dot := strings.LastIndexByte(ident, '.'); dot >= 0 {
-			short := ident[dot+1:]
+			short := strings.TrimRight(ident[dot+1:], "._,;:")
 			if len(short) >= 4 && !seen[short] {
 				seen[short] = true
 				refs = append(refs, short)
@@ -124,9 +151,31 @@ func extractEntityRefs(body string) []string {
 		}
 	}
 
-	// Strategy 2: CamelCase/PascalCase words in prose (not inside backticks).
-	// Strip backtick spans first to avoid double-counting.
+	// ── Strategy 1: backtick spans ──────────────────────────────────────────
+	// Capture the full span content, then extract the leading identifier
+	// before any `(`, `[`, ` `, `<` so that `AddNode(n *Node)` → "AddNode".
+	for _, m := range backtickRe.FindAllStringSubmatch(body, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		content := strings.TrimSpace(m[1])
+		// Extract leading identifier (stop at first non-identifier character).
+		ident := leadingIdentifier(content)
+		addRef(ident)
+	}
+
+	// ── Strategy 2: HTML <code> tags ───────────────────────────────────────
+	for _, m := range htmlCodeRe.FindAllStringSubmatch(body, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		addRef(leadingIdentifier(strings.TrimSpace(m[1])))
+	}
+
+	// ── Strategy 3: CamelCase/PascalCase prose tokens ──────────────────────
+	// Strip backtick and HTML-code spans first to avoid double-counting.
 	stripped := backtickRe.ReplaceAllString(body, " ")
+	stripped = htmlCodeRe.ReplaceAllString(stripped, " ")
 	for _, word := range splitWords(stripped) {
 		if len(word) < 4 {
 			continue
@@ -142,6 +191,25 @@ func extractEntityRefs(body string) []string {
 	}
 
 	return refs
+}
+
+// leadingIdentifier extracts the identifier prefix from a string by stopping
+// at the first character that cannot appear in a Go/multi-language identifier.
+// Examples:
+//
+//	"Store.Close(ctx)" → "Store.Close"
+//	"AddNode(n)"       → "AddNode"
+//	"graph.New"        → "graph.New"
+//	"err"              → "err"
+func leadingIdentifier(s string) string {
+	end := len(s)
+	for i, r := range s {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '.' {
+			end = i
+			break
+		}
+	}
+	return strings.TrimRight(s[:end], "._")
 }
 
 // splitWords splits text into words on whitespace and common punctuation.

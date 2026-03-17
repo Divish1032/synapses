@@ -10,10 +10,17 @@ import (
 )
 
 // MarkdownParser extracts structural sections from Markdown files (.md, .markdown, .mdx).
-// Each ATX heading becomes a Section node with CONTAINS edges forming a tree.
+// Each ATX or setext heading becomes a Section node with CONTAINS edges forming a tree.
 // Cross-document [text](path.md) links become LINKS_TO edges.
 // Entity linking (EXPLAINS/DOCUMENTED_BY) is deferred to resolver.ResolveDocEdges
 // which runs after all files are parsed, ensuring code entities are available.
+//
+// Handles:
+//   - ATX headings (# H1 through ###### H6) per CommonMark
+//   - Setext headings (underline-style === and ---) per CommonMark
+//   - YAML/TOML frontmatter (--- block at top of file) is skipped
+//   - Headings inside fenced code blocks (``` or ~~~) are skipped
+//   - Duplicate heading titles disambiguated with counter suffix
 type MarkdownParser struct{}
 
 // NewMarkdownParser returns a parser for Markdown documentation files.
@@ -126,72 +133,105 @@ func (p *MarkdownParser) Parse(g *graph.Graph, filePath string, src []byte) erro
 
 // section represents a parsed heading section from a markdown file.
 type section struct {
-	Title       string // heading text (without # prefix)
-	Depth       int    // heading level (1-6)
-	Line        int    // 1-based line number
-	Body        string // full body text between this heading and the next (max 2000 chars)
-	BodyPreview string // first 200 chars of body
+	Title        string // heading text (without # prefix)
+	Depth        int    // heading level (1-6)
+	Line         int    // 1-based line number of heading text
+	bodyStartIdx int    // 0-based index into lines[] where body begins (after heading + underline)
+	Body         string // full body text between this heading and the next (max 2000 chars)
+	BodyPreview  string // first 200 chars of body
 }
 
-// extractSections parses ATX headings and collects body text between them.
-// Headings inside fenced code blocks (``` or ~~~) are skipped per CommonMark.
-// Duplicate heading names within a file are disambiguated by appending a
-// counter suffix so each Section gets a stable, unique node ID.
+// extractSections parses ATX and setext headings and collects body text.
+//
+// Correctness rules applied:
+//  1. YAML/TOML frontmatter (--- at very start of file) is skipped entirely.
+//  2. Headings inside fenced code blocks (``` or ~~~, 3+ chars) are skipped.
+//  3. Setext headings (Title\n=== or Title\n---) are detected after ATX pass.
+//  4. Duplicate heading titles in the same file are disambiguated with a
+//     counter suffix: "Intro", "Intro (2)", etc.
 func extractSections(src []byte) []section {
 	lines := strings.Split(string(src), "\n")
-	var sections []section
+	if len(lines) == 0 {
+		return nil
+	}
 
+	// ── Step 1: skip YAML/TOML frontmatter ──────────────────────────────────
+	// Frontmatter is a --- or +++ block at the VERY start of the file.
+	startIdx := 0
+	if len(lines) > 0 {
+		first := strings.TrimSpace(lines[0])
+		if first == "---" || first == "+++" {
+			closer := first
+			for i := 1; i < len(lines); i++ {
+				if strings.TrimSpace(lines[i]) == closer {
+					startIdx = i + 1 // resume after closing delimiter
+					break
+				}
+			}
+		}
+	}
+
+	// ── Step 2: collect headings (ATX + setext), skip fenced blocks ─────────
+	var sections []section
 	inFence := false
 	var fenceChar byte // '`' or '~'
-	for i, line := range lines {
+
+	for i := startIdx; i < len(lines); i++ {
+		line := lines[i]
 		trimmed := strings.TrimSpace(line)
-		// Detect fenced code block open/close (``` or ~~~, 3+ chars).
+
+		// Detect fenced code block boundaries.
 		if !inFence {
 			if len(trimmed) >= 3 && (trimmed[0] == '`' || trimmed[0] == '~') {
-				allSame := true
 				ch := trimmed[0]
-				for j := 1; j < 3; j++ {
-					if trimmed[j] != ch {
-						allSame = false
-						break
-					}
-				}
-				if allSame {
+				if trimmed[1] == ch && trimmed[2] == ch {
 					inFence = true
 					fenceChar = ch
 					continue
 				}
 			}
 		} else {
-			// Inside a fence: look for the closing delimiter (same char, 3+).
-			if len(trimmed) >= 3 && trimmed[0] == fenceChar {
-				allSame := true
-				for j := 1; j < 3; j++ {
-					if trimmed[j] != fenceChar {
-						allSame = false
-						break
-					}
-				}
-				if allSame {
-					inFence = false
-					fenceChar = 0
-				}
+			if len(trimmed) >= 3 && trimmed[0] == fenceChar &&
+				trimmed[1] == fenceChar && trimmed[2] == fenceChar {
+				inFence = false
+				fenceChar = 0
 			}
-			continue // skip all lines inside a fence
-		}
-		depth, title := parseATXHeading(line)
-		if depth == 0 {
 			continue
 		}
-		sections = append(sections, section{
-			Title: title,
-			Depth: depth,
-			Line:  i + 1, // 1-based
-		})
+
+		// ATX heading: `# Title`
+		if depth, title := parseATXHeading(line); depth > 0 {
+			sections = append(sections, section{
+				Title:        title,
+				Depth:        depth,
+				Line:         i + 1, // 1-based
+				bodyStartIdx: i + 1, // lines[i+1] = line after heading
+			})
+			continue
+		}
+
+		// Setext heading: non-empty text line followed by === (H1) or --- (H2).
+		// The NEXT line must be the underline — peek ahead.
+		if trimmed != "" && i+1 < len(lines) {
+			next := strings.TrimSpace(lines[i+1])
+			if isSetextUnderline(next) {
+				depth := 1
+				if next[0] == '-' {
+					depth = 2
+				}
+				sections = append(sections, section{
+					Title:        strings.TrimSpace(line),
+					Depth:        depth,
+					Line:         i + 1,     // 1-based: the text line
+					bodyStartIdx: i + 2,     // skip both text and underline lines
+				})
+				i++ // consume the underline line
+				continue
+			}
+		}
 	}
 
-	// Disambiguate duplicate heading titles within the file so each section
-	// gets a unique name (and thus a unique node ID).
+	// ── Step 3: disambiguate duplicate titles ────────────────────────────────
 	titleCount := make(map[string]int, len(sections))
 	for i := range sections {
 		base := sections[i].Title
@@ -201,20 +241,18 @@ func extractSections(src []byte) []section {
 		}
 	}
 
-	// Fill in body text for each section: everything between this heading
-	// and the next heading (or end of file).
+	// ── Step 4: fill body text for each section ──────────────────────────────
 	for i := range sections {
-		startLine := sections[i].Line // heading line (1-based)
 		var endLine int
 		if i+1 < len(sections) {
+			// End just before the text line of the next heading.
 			endLine = sections[i+1].Line - 1
 		} else {
 			endLine = len(lines)
 		}
 
-		// Body starts on the line after the heading.
 		var bodyLines []string
-		for li := startLine; li < endLine && li < len(lines); li++ {
+		for li := sections[i].bodyStartIdx; li < endLine && li < len(lines); li++ {
 			bodyLines = append(bodyLines, lines[li])
 		}
 		body := strings.TrimSpace(strings.Join(bodyLines, "\n"))
@@ -224,7 +262,6 @@ func extractSections(src []byte) []section {
 		} else {
 			sections[i].Body = body
 		}
-
 		if len(body) > 200 {
 			sections[i].BodyPreview = body[:200]
 		} else {
@@ -235,8 +272,26 @@ func extractSections(src []byte) []section {
 	return sections
 }
 
+// isSetextUnderline returns true for a setext heading underline:
+// three or more = characters (H1) or - characters (H2), nothing else.
+func isSetextUnderline(s string) bool {
+	if len(s) < 3 {
+		return false
+	}
+	ch := s[0]
+	if ch != '=' && ch != '-' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] != ch {
+			return false
+		}
+	}
+	return true
+}
+
 // parseATXHeading returns (depth, title) for an ATX heading line.
-// Returns (0, "") if the line is not a heading.
+// Returns (0, "") if the line is not a valid ATX heading.
 func parseATXHeading(line string) (int, string) {
 	trimmed := strings.TrimSpace(line)
 	if !strings.HasPrefix(trimmed, "#") {
