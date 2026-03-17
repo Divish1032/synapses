@@ -9,9 +9,9 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
-// ResolveDocEdges scans ALL Section nodes in the graph and creates
-// EXPLAINS (section→code) and DOCUMENTED_BY (code→section) edges
-// for identifiers found in section body text.
+// ResolveDocEdges scans ALL Section nodes and markdown file nodes in the graph
+// and creates EXPLAINS (doc→code) and DOCUMENTED_BY (code→doc) edges for
+// identifiers found in section body text, section titles, and frontmatter titles.
 //
 // Must be called after all files are parsed so code entity nodes exist.
 // Returns the number of EXPLAINS edges created.
@@ -20,37 +20,82 @@ import (
 // markdown file changed (avoids rescanning the entire graph).
 func ResolveDocEdges(g *graph.Graph) int {
 	sections := g.FindByType(graph.NodeSection)
-	if len(sections) == 0 {
+	files := g.FindByType(graph.NodeFile)
+	if len(sections) == 0 && len(files) == 0 {
 		return 0
 	}
 	codeNames := buildCodeNames(g)
-	return linkSections(g, sections, codeNames)
+	return linkSections(g, sections, codeNames) + linkDocFiles(g, files, codeNames)
 }
 
-// ResolveDocEdgesForFile resolves doc edges only for Section nodes that
-// belong to filePath. All other sections' edges are left intact.
+// ResolveDocEdgesForFile resolves doc edges only for Section nodes and the
+// file node that belong to filePath. All other sections' edges are left intact.
 //
 // Use this in the watcher when a single markdown file is reparsed:
 // code entities are unchanged so only the new file's sections need linking.
 // Returns the number of EXPLAINS edges created.
 func ResolveDocEdgesForFile(g *graph.Graph, filePath string) int {
-	all := g.FindByType(graph.NodeSection)
-	if len(all) == 0 {
-		return 0
-	}
-	// Filter to only sections belonging to the changed file.
 	abs := filepath.Clean(filePath)
+
+	// Filter sections to this file only.
 	var sections []*graph.Node
-	for _, s := range all {
+	for _, s := range g.FindByType(graph.NodeSection) {
 		if filepath.Clean(s.File) == abs {
 			sections = append(sections, s)
 		}
 	}
-	if len(sections) == 0 {
+
+	// Filter file nodes to this file only (for frontmatter title).
+	var files []*graph.Node
+	for _, f := range g.FindByType(graph.NodeFile) {
+		if filepath.Clean(f.File) == abs {
+			files = append(files, f)
+		}
+	}
+
+	if len(sections) == 0 && len(files) == 0 {
 		return 0
 	}
 	codeNames := buildCodeNames(g)
-	return linkSections(g, sections, codeNames)
+	return linkSections(g, sections, codeNames) + linkDocFiles(g, files, codeNames)
+}
+
+// linkDocFiles creates EXPLAINS and DOCUMENTED_BY edges from markdown file nodes
+// that declare their topic via a frontmatter title field. Handles:
+//
+//	YAML: title: "FlatGraph Architecture"
+//	TOML: title = "FlatGraph Architecture"
+//
+// This is the highest-confidence doc-code signal when no in-body references exist.
+func linkDocFiles(g *graph.Graph, files []*graph.Node, codeNames map[string][]*graph.Node) int {
+	var created int
+	for _, f := range files {
+		if f.Domain != graph.DomainDocs {
+			continue
+		}
+		fmTitle := f.Metadata["frontmatter_title"]
+		if fmTitle == "" {
+			continue
+		}
+		refs := extractEntityRefs(fmTitle)
+		seen := make(map[graph.NodeID]bool)
+		for _, ref := range refs {
+			targets, ok := codeNames[ref]
+			if !ok {
+				continue
+			}
+			for _, target := range targets {
+				if seen[target.ID] {
+					continue
+				}
+				seen[target.ID] = true
+				g.AddEdge(&graph.Edge{From: f.ID, To: target.ID, Type: graph.EdgeExplains})
+				g.AddEdge(&graph.Edge{From: target.ID, To: f.ID, Type: graph.EdgeDocumentedBy})
+				created++
+			}
+		}
+	}
+	return created
 }
 
 // buildCodeNames builds a lookup map from identifier name → code nodes.
@@ -218,12 +263,15 @@ func leadingIdentifier(s string) string {
 }
 
 // splitWords splits text into words on whitespace and common punctuation.
+// '*' and '_' are included as delimiters so that Markdown bold (**Name**)
+// and italic (*Name* / _Name_) markers are stripped before CamelCase matching.
 func splitWords(text string) []string {
 	return strings.FieldsFunc(text, func(r rune) bool {
 		return unicode.IsSpace(r) || r == ',' || r == ';' || r == ':' ||
 			r == '(' || r == ')' || r == '[' || r == ']' || r == '{' || r == '}' ||
 			r == '"' || r == '\'' || r == '/' || r == '|' || r == '=' ||
-			r == '<' || r == '>' || r == '!' || r == '?'
+			r == '<' || r == '>' || r == '!' || r == '?' ||
+			r == '*' || r == '_' // bold/italic markdown markers
 	})
 }
 

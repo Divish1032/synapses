@@ -501,6 +501,78 @@ func TestResolveDocEdges_EntityInTitle(t *testing.T) {
 	}
 }
 
+func TestExtractEntityRefs_BoldMarkup(t *testing.T) {
+	// **FlatGraph** should yield FlatGraph after * delimiters strip the markers.
+	body := "The **FlatGraph** is the core data structure."
+	refs := extractEntityRefs(body)
+	has := make(map[string]bool, len(refs))
+	for _, r := range refs {
+		has[r] = true
+	}
+	if !has["FlatGraph"] {
+		t.Error("expected FlatGraph extracted from **FlatGraph**")
+	}
+}
+
+func TestExtractEntityRefs_ItalicMarkup(t *testing.T) {
+	// _Walker_ and *ParseFile* should both be extracted.
+	body := "The _Walker_ orchestrates parsing. Use *ParseFile* on each file."
+	refs := extractEntityRefs(body)
+	has := make(map[string]bool, len(refs))
+	for _, r := range refs {
+		has[r] = true
+	}
+	if !has["Walker"] {
+		t.Error("expected Walker extracted from _Walker_")
+	}
+	if !has["ParseFile"] {
+		t.Error("expected ParseFile extracted from *ParseFile*")
+	}
+}
+
+func TestResolveDocEdges_FrontmatterTitle(t *testing.T) {
+	g := newDocTestGraph()
+
+	funcID := g.MakeNodeID("/repo/main.go", "FlatGraph")
+	g.AddNode(&graph.Node{
+		ID:   funcID,
+		Type: graph.NodeStruct,
+		Name: "FlatGraph",
+		File: "/repo/main.go",
+		Line: 10,
+	})
+
+	// A markdown file node with frontmatter_title — no sections, no body.
+	// This simulates: `title: "FlatGraph Storage Layer"` in the frontmatter.
+	fileID := g.MakeNodeID("/repo/README.md", "/repo/README.md")
+	g.AddNode(&graph.Node{
+		ID:   fileID,
+		Type: graph.NodeFile,
+		Name: "README.md",
+		File: "/repo/README.md",
+		Line: 1,
+		Metadata: map[string]string{
+			"frontmatter_title": "FlatGraph Storage Layer",
+		},
+		Domain: graph.DomainDocs,
+	})
+
+	n := ResolveDocEdges(g)
+	if n != 1 {
+		t.Fatalf("expected 1 edge from frontmatter title, got %d", n)
+	}
+	edges := g.OutEdges(fileID)
+	var found bool
+	for _, e := range edges {
+		if e.To == funcID && e.Type == graph.EdgeExplains {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("missing EXPLAINS edge from file node with frontmatter_title")
+	}
+}
+
 func TestResolveDocEdges_NoSections(t *testing.T) {
 	g := newDocTestGraph()
 	// No section nodes at all.
