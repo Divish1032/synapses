@@ -327,7 +327,7 @@ func TestSessionInit_SurfacesTaskLinkedEntityMemories(t *testing.T) {
 	srv, loginID, _ := newPopulatedServer(t)
 
 	// Create a plan with one task linked to loginID.
-	planID, err := srv.store.CreatePlan("Fix auth", "Fix auth login", "agent-task", []store.TaskInput{{
+	planID, _, err := srv.store.CreatePlan("Fix auth", "Fix auth login", "agent-task", []store.TaskInput{{
 		Title:       "Fix auth login concurrency",
 		Description: "Fix the race condition in AuthLogin",
 		Priority:    "p0",

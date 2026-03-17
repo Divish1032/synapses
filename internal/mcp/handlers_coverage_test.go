@@ -2421,7 +2421,7 @@ func TestHandleGetContext_WithLinkedTaskNodes(t *testing.T) {
 	s, loginID, _ := newPopulatedServer(t)
 
 	// Create a task with linked nodes in the store.
-	planID, _ := s.store.CreatePlan("linked-test", "", "agent", []store.TaskInput{{Title: "linked task"}})
+	planID, _, _ := s.store.CreatePlan("linked-test", "", "agent", []store.TaskInput{{Title: "linked task"}})
 	tasks, _ := s.store.GetPendingTasks(planID, "")
 	if len(tasks) == 0 {
 		t.Skip("no tasks created")
@@ -2750,7 +2750,7 @@ func TestHandleSessionInit_WithPendingTasks(t *testing.T) {
 	s := New(g, cfg, st)
 
 	// Create a task so session_init returns a non-empty pending section.
-	_, _ = st.CreatePlan("Test plan", "", "task-agent", []store.TaskInput{{Title: "Fix auth bug"}})
+	_, _, _ = st.CreatePlan("Test plan", "", "task-agent", []store.TaskInput{{Title: "Fix auth bug"}})
 
 	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
 		"agent_id": "task-agent",

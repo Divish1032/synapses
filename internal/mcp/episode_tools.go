@@ -165,7 +165,7 @@ func (s *Server) handleRemember(
 		if e.Rationale != "" {
 			fixDesc += "\nRationale: " + e.Rationale
 		}
-		planID, perr := s.store.CreatePlan(fixTitle, fixDesc, agentID, []store.TaskInput{{
+		planID, _, perr := s.store.CreatePlan(fixTitle, fixDesc, agentID, []store.TaskInput{{
 			Title:       fixTitle,
 			Description: fixDesc,
 			Priority:    "p1",

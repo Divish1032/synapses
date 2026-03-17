@@ -306,9 +306,9 @@ func TestRecordToolCall_AndToolUsageStats(t *testing.T) {
 	st := openTestStore(t)
 
 	// Record some tool calls.
-	st.RecordToolCall("get_context", "agent-1", "AuthService", 10, true)
-	st.RecordToolCall("get_context", "agent-1", "LoginHandler", 20, true)
-	st.RecordToolCall("find_entity", "agent-1", "", 5, false) // 1 error
+	st.RecordToolCall("get_context", "agent-1", "", "AuthService", 10, true)
+	st.RecordToolCall("get_context", "agent-1", "", "LoginHandler", 20, true)
+	st.RecordToolCall("find_entity", "agent-1", "", "", 5, false) // 1 error
 
 	stats, err := st.ToolUsageStats(7, 10)
 	if err != nil {
@@ -353,7 +353,7 @@ func TestPruneStaleData_DoesNotCrash(t *testing.T) {
 	st := openTestStore(t)
 
 	// Record some data first.
-	st.RecordToolCall("get_context", "a", "", 5, true)
+	st.RecordToolCall("get_context", "a", "", "", 5, true)
 	_, _ = st.SendMessage("a", "b", "ping", `{}`, "")
 
 	// Should not panic or error.

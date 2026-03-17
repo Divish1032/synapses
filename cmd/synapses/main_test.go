@@ -1027,7 +1027,7 @@ func TestDetachedSysProcAttr(t *testing.T) {
 
 func TestBuildGraph_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
-	g, err := buildGraph(dir, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1039,7 +1039,7 @@ func TestBuildGraph_EmptyDir(t *testing.T) {
 func TestBuildGraph_WithGoFile(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644)
-	g, err := buildGraph(dir, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1694,7 +1694,7 @@ func buildTestIndexedDir(t *testing.T) (string, *store.Store, *graph.Graph) {
 		t.Fatalf("store open: %v", err)
 	}
 
-	g, err := buildGraph(dir, st, nil)
+	g, err := buildGraph(dir, st, nil, false, nil)
 	if err != nil {
 		st.Close()
 		t.Fatalf("build graph: %v", err)
@@ -2103,7 +2103,7 @@ func TestCmdBrief_WithAgentsAndTasks(t *testing.T) {
 	_ = st.UpsertAgent("test-agent", nil)
 
 	// Create a plan with one task.
-	_, _ = st.CreatePlan("Test Plan", "description", "test-agent", []store.TaskInput{
+	_, _, _ = st.CreatePlan("Test Plan", "description", "test-agent", []store.TaskInput{
 		{Title: "Fix login bug", Priority: "p0"},
 		{Title: "Refactor auth", Priority: "p1"},
 		{Title: "Add tests", Priority: "p2"},

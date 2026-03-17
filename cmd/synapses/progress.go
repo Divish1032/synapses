@@ -1,66 +1,66 @@
-// progress.go — daemon-wide indexing progress state.
+// progress.go — per-project indexing progress tracking.
 //
-// IndexingState holds atomic counters updated by buildGraph during a full
-// reindex. The /api/admin/health endpoint reads these to expose live progress
-// to callers (synapses status, Tauri app after B29).
+// IndexingState is created per project (not a global singleton) and registered
+// in activeIndexes for the duration of a full reindex. The /api/admin/health
+// endpoint calls ActiveSnapshot() to surface live progress to callers.
 package main
 
 import (
-	"sync/atomic"
+	"sync"
 )
 
-// indexingPhase is the current state of the daemon's indexing pass.
-type indexingPhase int32
+// indexingPhase is the lifecycle state of one indexing pass.
+type indexingPhase int
 
 const (
-	indexingPhaseIdle    indexingPhase = 0
-	indexingPhaseActive  indexingPhase = 1
-	indexingPhaseReady   indexingPhase = 2
+	indexingPhaseIdle   indexingPhase = 0
+	indexingPhaseActive indexingPhase = 1
+	indexingPhaseReady  indexingPhase = 2
 )
 
-// IndexingState is a lightweight, lock-free progress tracker for the initial
-// full-index pass. It is written by the indexing goroutine and read by the
-// HTTP health handler — all fields use atomic operations so no mutex is needed.
+// IndexingState tracks progress for one full reindex pass.
+// All methods are safe for concurrent use.
 type IndexingState struct {
-	phase      atomic.Int32 // indexingPhase
-	filesDone  atomic.Int64
-	filesTotal atomic.Int64
+	mu         sync.Mutex
+	phase      indexingPhase
+	filesDone  int64
+	filesTotal int64
 }
 
-// globalProgress is the singleton shared between buildGraph and the HTTP
-// health handler. Safe for concurrent access.
-var globalProgress IndexingState
-
-// Reset clears all counters and sets phase to idle.
-func (s *IndexingState) Reset() {
-	s.phase.Store(int32(indexingPhaseIdle))
-	s.filesDone.Store(0)
-	s.filesTotal.Store(0)
+// Start records the real total file count (known after Phase 1 filesystem scan)
+// and transitions the state to active. Must be called before SetDone.
+func (s *IndexingState) Start(total int64) {
+	s.mu.Lock()
+	s.phase = indexingPhaseActive
+	s.filesTotal = total
+	s.filesDone = 0
+	s.mu.Unlock()
 }
 
-// Start marks the beginning of an indexing pass with total files to process.
-func (s *IndexingState) Start(total int) {
-	s.filesDone.Store(0)
-	s.filesTotal.Store(int64(total))
-	s.phase.Store(int32(indexingPhaseActive))
+// SetDone updates the count of files parsed so far.
+func (s *IndexingState) SetDone(done int64) {
+	s.mu.Lock()
+	s.filesDone = done
+	s.mu.Unlock()
 }
 
-// Inc increments the done counter by one.
-func (s *IndexingState) Inc() {
-	s.filesDone.Add(1)
-}
-
-// Done marks the pass as complete.
+// Done transitions the state to ready (indexing complete).
 func (s *IndexingState) Done() {
-	s.phase.Store(int32(indexingPhaseReady))
+	s.mu.Lock()
+	s.phase = indexingPhaseReady
+	s.mu.Unlock()
 }
 
-// Snapshot returns a point-in-time view of the current state.
-// Safe to call from any goroutine.
+// Snapshot returns a consistent, point-in-time view of all fields.
+// All three values are read under the same lock, so callers never observe
+// a mixed state (e.g. phase=ready but filesDone < filesTotal).
 func (s *IndexingState) Snapshot() IndexingSnapshot {
-	phase := indexingPhase(s.phase.Load())
-	done := s.filesDone.Load()
-	total := s.filesTotal.Load()
+	s.mu.Lock()
+	phase := s.phase
+	done := s.filesDone
+	total := s.filesTotal
+	s.mu.Unlock()
+
 	var pct int64
 	if total > 0 {
 		pct = done * 100 / total
@@ -80,10 +80,45 @@ func (s *IndexingState) Snapshot() IndexingSnapshot {
 	}
 }
 
-// IndexingSnapshot is the JSON-serialisable view of IndexingState.
+// IndexingSnapshot is the JSON-serialisable view returned by the health endpoint.
 type IndexingSnapshot struct {
-	State string `json:"state"`           // "idle" | "indexing" | "ready"
+	State string `json:"state"`       // "idle" | "indexing" | "ready"
 	Done  int64  `json:"files_done"`
 	Total int64  `json:"files_total"`
-	Pct   int64  `json:"pct"`             // 0–100
+	Pct   int64  `json:"pct"` // 0–100
+}
+
+// activeIndexes maps absPath → *IndexingState for all projects currently
+// performing a full reindex. Using sync.Map so reads (health endpoint) never
+// block writers (indexing goroutines).
+var activeIndexes sync.Map // string → *IndexingState
+
+// RegisterIndexing creates and registers an IndexingState for absPath.
+// The caller must call UnregisterIndexing(absPath) when indexing completes
+// or fails, typically via defer.
+func RegisterIndexing(absPath string) *IndexingState {
+	s := &IndexingState{}
+	activeIndexes.Store(absPath, s)
+	return s
+}
+
+// UnregisterIndexing removes the IndexingState for absPath from the registry.
+func UnregisterIndexing(absPath string) {
+	activeIndexes.Delete(absPath)
+}
+
+// ActiveSnapshot returns the IndexingSnapshot for the first project currently
+// in an active indexing pass, or an idle snapshot if none are indexing.
+// For the common solo-dev case of one project at a time this is exact.
+func ActiveSnapshot() IndexingSnapshot {
+	var found IndexingSnapshot
+	activeIndexes.Range(func(_, v interface{}) bool {
+		snap := v.(*IndexingState).Snapshot()
+		if snap.State == "indexing" {
+			found = snap
+			return false // stop after first active
+		}
+		return true
+	})
+	return found
 }

@@ -51,10 +51,18 @@ type Walker struct {
 	filenameParsers       map[string]LanguageParser // base filename → parser
 	filenamePrefixParsers []filenamePrefixEntry      // base filename prefix → parser
 
-	// ProgressFunc is an optional callback invoked after each file is parsed.
-	// done is the number of files completed so far; total is the full count
-	// (known after the filesystem scan). byExt maps file extension (e.g. ".go")
-	// to the number of files of that type parsed so far.
+	// BeginFunc is called once, on the main goroutine, after the filesystem
+	// scan completes and the total file count is known, but before any parsing
+	// begins. Use this to initialise progress state with the real total.
+	// Set to nil to disable.
+	BeginFunc func(total int)
+
+	// ProgressFunc is called from worker goroutines after each file is parsed.
+	// done is the number of files completed so far; total is the same value
+	// passed to BeginFunc. byExt maps file extension (e.g. ".go") to the
+	// number of files of that type parsed so far (snapshot copy — safe to read
+	// without locking). Calls are throttled to at most 1 per 200ms via an
+	// atomic CAS; the final call (done==total) always fires.
 	// The callback is called from multiple goroutines; implementations must be
 	// goroutine-safe. Set to nil to disable progress reporting.
 	ProgressFunc func(done, total int, byExt map[string]int)
@@ -279,8 +287,11 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 	var heuristicFiles []parsedFile
 	var heuristicMu sync.Mutex
 
-	// Progress tracking — only active when ProgressFunc is set.
+	// Phase 1 complete: total is now known. Notify before goroutines start.
 	total := len(jobs)
+	if w.BeginFunc != nil {
+		w.BeginFunc(total)
+	}
 	var doneCount atomic.Int64   // files completed (read+parsed)
 	var byExtMu sync.Mutex
 	byExt := make(map[string]int, 16)

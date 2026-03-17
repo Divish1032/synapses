@@ -88,7 +88,7 @@ func TestStaleContextHints_TaskLinkedNodes(t *testing.T) {
 	s.SetChangeSource(newStubChangeSource("pkg/auth/auth.go"))
 
 	// Create a plan with a task linked to the node.
-	planID, err := s.store.CreatePlan("test", "", "agent-a", []store.TaskInput{
+	planID, _, err := s.store.CreatePlan("test", "", "agent-a", []store.TaskInput{
 		{Title: "fix auth", Priority: "p0", LinkedNodes: []string{string(nodeID)}},
 	})
 	if err != nil {
@@ -172,7 +172,7 @@ func TestStaleContextHints_FreshEntities(t *testing.T) {
 	// Changed file is different from the node's file.
 	s.SetChangeSource(newStubChangeSource("pkg/store/store.go"))
 
-	_, err := s.store.CreatePlan("test", "", "agent-d", []store.TaskInput{
+	_, _, err := s.store.CreatePlan("test", "", "agent-d", []store.TaskInput{
 		{Title: "fix auth", Priority: "p0", LinkedNodes: []string{string(nodeID)}},
 	})
 	if err != nil {
@@ -203,7 +203,7 @@ func TestStaleContextHints_Cap10(t *testing.T) {
 	}
 	s.graph = g
 
-	planID, err := s.store.CreatePlan("test", "", "agent-e", []store.TaskInput{
+	planID, _, err := s.store.CreatePlan("test", "", "agent-e", []store.TaskInput{
 		{Title: "big task", Priority: "p0", LinkedNodes: nodeIDs},
 	})
 	if err != nil {
@@ -232,7 +232,7 @@ func TestStaleContextHints_MalformedNodeID(t *testing.T) {
 	s.SetChangeSource(newStubChangeSource("any/file.go"))
 
 	// Create a task with a malformed node ID (missing "::" separators).
-	planID, err := s.store.CreatePlan("test", "", "agent-f", []store.TaskInput{
+	planID, _, err := s.store.CreatePlan("test", "", "agent-f", []store.TaskInput{
 		{Title: "task", Priority: "p0", LinkedNodes: []string{"not-a-valid-node-id"}},
 	})
 	if err != nil {
@@ -263,7 +263,7 @@ func TestStaleContextHints_DeduplicatesNodeIDs(t *testing.T) {
 	s.SetChangeSource(newStubChangeSource("pkg/auth/auth.go"))
 
 	// Task linked to the same node.
-	planID, err := s.store.CreatePlan("test", "", "agent-g", []store.TaskInput{
+	planID, _, err := s.store.CreatePlan("test", "", "agent-g", []store.TaskInput{
 		{Title: "fix", Priority: "p0", LinkedNodes: []string{string(nodeID)}},
 	})
 	if err != nil {
