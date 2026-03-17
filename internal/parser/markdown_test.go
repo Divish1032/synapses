@@ -238,6 +238,63 @@ func TestMarkdownParser_SelfRefAnchorLink(t *testing.T) {
 	}
 }
 
+func TestMarkdownParser_FencedCodeBlockHeadingSkipped(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// The # inside the fenced block must NOT be parsed as a section heading.
+	src := []byte("# Real Section\nSome text.\n```yaml\n# This is YAML comment, not a heading\nkey: value\n```\n## Sub Section\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 2 {
+		t.Fatalf("expected 2 sections (Real Section + Sub Section), got %d", len(sections))
+	}
+	for _, s := range sections {
+		if s.Metadata["title"] == "This is YAML comment, not a heading" {
+			t.Error("heading inside fenced code block should not create a section")
+		}
+	}
+}
+
+func TestMarkdownParser_DuplicateHeadingNames(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// Two sections with the same title → should get disambiguated names, no data loss.
+	src := []byte("# Introduction\nFirst intro.\n# Introduction\nSecond intro.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 2 {
+		t.Fatalf("expected 2 sections (disambiguated), got %d", len(sections))
+	}
+	titles := make(map[string]bool)
+	for _, s := range sections {
+		titles[s.Metadata["title"]] = true
+	}
+	if !titles["Introduction"] {
+		t.Error("first section should have title 'Introduction'")
+	}
+	if !titles["Introduction (2)"] {
+		t.Error("second duplicate section should be disambiguated to 'Introduction (2)'")
+	}
+}
+
+func TestMarkdownParser_TildeFenceBlock(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// ~~~-fenced blocks should also suppress heading detection inside.
+	src := []byte("# Top\n~~~\n# Not a heading\n~~~\n## Sub\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 2 {
+		t.Fatalf("expected 2 sections (Top + Sub), got %d", len(sections))
+	}
+}
+
 // assertEdge checks that an edge exists from→to with the given type.
 func assertEdge(t *testing.T, g *graph.Graph, from, to graph.NodeID, edgeType graph.EdgeType) {
 	t.Helper()

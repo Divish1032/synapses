@@ -379,8 +379,9 @@ func TestSerializeCompact_WithDocumentation(t *testing.T) {
 				File: "docs.md",
 				Line: 5,
 				Metadata: map[string]string{
-					"title": "Architecture",
-					"depth": "2",
+					"title":        "Architecture",
+					"depth":        "2",
+					"body_preview": "The core data structure is FlatGraph which uses SoA layout.",
 				},
 				Domain: graph.DomainDocs,
 			},
@@ -389,14 +390,18 @@ func TestSerializeCompact_WithDocumentation(t *testing.T) {
 		},
 	}
 	out := serializeCompact(dc, "full")
-	if !strings.Contains(out, "📖 Docs:") {
-		t.Error("expected 📖 Docs section in output")
+	// New format: one line per doc entry with body_preview.
+	if !strings.Contains(out, "📖") {
+		t.Error("expected 📖 doc line in output")
 	}
 	if !strings.Contains(out, "\"Architecture\"") {
 		t.Error("expected section title in output")
 	}
 	if !strings.Contains(out, "docs.md") {
 		t.Error("expected file name in output")
+	}
+	if !strings.Contains(out, "FlatGraph") {
+		t.Error("expected body_preview content in output")
 	}
 }
 
@@ -422,8 +427,11 @@ func TestSerializeCompact_WithDocumentation_SummaryLevel(t *testing.T) {
 	}
 	// Documentation should appear even at summary level.
 	out := serializeCompact(dc, "summary")
-	if !strings.Contains(out, "📖 Docs:") {
-		t.Error("expected 📖 Docs section at summary level")
+	if !strings.Contains(out, "📖") {
+		t.Error("expected 📖 doc line at summary level")
+	}
+	if !strings.Contains(out, "\"API\"") {
+		t.Error("expected section title at summary level")
 	}
 }
 
