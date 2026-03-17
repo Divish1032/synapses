@@ -14,6 +14,15 @@ import (
 	"time"
 )
 
+// HTTPDoer is the interface for making HTTP requests.
+// *http.Client satisfies this interface. Expose it so callers can inject
+// custom transports (retry, tracing, rate-limiting) or test doubles without
+// needing a real network. This is the same pattern used by AWS SDK v2,
+// google-cloud-go, and stripe-go.
+type HTTPDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
 // Client calls an embedding endpoint to convert text into float32 vectors.
 // Supports three formats, auto-detected from the endpoint URL:
 //   - Brain  (/v1/embed)        — synapses-intelligence native (Ollama-free)
@@ -22,27 +31,46 @@ import (
 //
 // A nil Client is safe to use — Embed returns (nil, nil).
 type Client struct {
-	endpoint string
-	model    string
-	http     *http.Client
+	endpoint   string
+	model      string
+	httpClient HTTPDoer
+}
+
+// Option is a functional option for Client construction.
+type Option func(*Client)
+
+// WithHTTPDoer replaces the default *http.Client with a custom HTTPDoer.
+// Use this to inject retry wrappers, custom transports, or test doubles.
+//
+//	// Production: add tracing
+//	embed.NewClient(url, model, embed.WithHTTPDoer(tracedClient))
+//
+//	// Tests: inject a mock without needing a real HTTP server
+//	embed.NewClient(url, model, embed.WithHTTPDoer(myMock))
+func WithHTTPDoer(d HTTPDoer) Option {
+	return func(c *Client) { c.httpClient = d }
 }
 
 // NewClient creates a Client for the given endpoint. Returns nil if endpoint
 // is empty (embedding disabled). model defaults to "nomic-embed-text" when
 // empty, which produces 768-dimensional vectors and is available in Ollama
 // without any extra setup.
-func NewClient(endpoint, model string) *Client {
+func NewClient(endpoint, model string, opts ...Option) *Client {
 	if endpoint == "" {
 		return nil
 	}
 	if model == "" {
 		model = "nomic-embed-text"
 	}
-	return &Client{
-		endpoint: endpoint,
-		model:    model,
-		http:     &http.Client{Timeout: 10 * time.Second},
+	c := &Client{
+		endpoint:   endpoint,
+		model:      model,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // NewBrainClient creates a Client that calls synapses-intelligence's native
@@ -51,15 +79,19 @@ func NewClient(endpoint, model string) *Client {
 //
 // brainURL is the base URL of the brain server, e.g. "http://localhost:11435".
 // Returns nil if brainURL is empty.
-func NewBrainClient(brainURL string) *Client {
+func NewBrainClient(brainURL string, opts ...Option) *Client {
 	if brainURL == "" {
 		return nil
 	}
-	return &Client{
-		endpoint: strings.TrimRight(brainURL, "/") + "/v1/embed",
-		model:    "nomic-embed-text-v1.5.Q4_K_M",
-		http:     &http.Client{Timeout: 10 * time.Second},
+	c := &Client{
+		endpoint:   strings.TrimRight(brainURL, "/") + "/v1/embed",
+		model:      "nomic-embed-text-v1.5.Q4_K_M",
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // Embed returns a vector embedding for text.
@@ -101,7 +133,7 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("embed request: %w", err)
 	}
@@ -174,7 +206,7 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("embed batch request: %w", err)
 	}
