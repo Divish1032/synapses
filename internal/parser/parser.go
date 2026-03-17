@@ -23,16 +23,41 @@ type LanguageParser interface {
 	Parse(g *graph.Graph, filePath string, src []byte) error
 }
 
+// FilenameParser is an optional interface that parsers can implement
+// if they handle files matched by base filename rather than extension.
+// The Walker checks this interface when no extension-based match is found.
+type FilenameParser interface {
+	Filenames() []string
+}
+
+// FilenamePatternParser is an optional interface for parsers that handle
+// files whose base name matches a prefix (e.g. "Dockerfile" handles
+// "Dockerfile.staging", "Dockerfile.ci", etc.).
+type FilenamePatternParser interface {
+	FilenamePrefixes() []string
+}
+
+// filenamePrefixEntry associates a filename prefix with the parser that handles it.
+type filenamePrefixEntry struct {
+	prefix string
+	parser LanguageParser
+}
+
 // Walker orchestrates multi-language parsing over a directory tree.
 type Walker struct {
-	parsers map[string]LanguageParser // extension → parser
+	parsers              map[string]LanguageParser // extension → parser
+	filenameParsers      map[string]LanguageParser // base filename → parser
+	filenamePrefixParsers []filenamePrefixEntry     // base filename prefix → parser
 }
 
 // NewWalker creates a Walker pre-loaded with all built-in language parsers.
 // Registration order matters: generic (file-only) is registered first so that
 // dedicated AST parsers registered afterward take precedence for their extensions.
 func NewWalker() *Walker {
-	w := &Walker{parsers: make(map[string]LanguageParser)}
+	w := &Walker{
+		parsers:         make(map[string]LanguageParser),
+		filenameParsers: make(map[string]LanguageParser),
+	}
 	w.Register(newGenericParser())    // file-level fallback for all other languages
 	w.Register(NewGoParser())         // deep: .go
 	w.Register(NewTypeScriptParser()) // deep: .ts .tsx
@@ -50,24 +75,33 @@ func NewWalker() *Walker {
 	w.Register(NewCSharpParser()) // deep: .cs
 	w.Register(NewSwiftParser())  // deep: .swift
 	// Scripting
-	w.Register(NewRubyParser()) // deep: .rb .rbi (Sorbet type stubs)
-	w.Register(NewRBSParser())  // deep: .rbs (Ruby type signatures)
-	w.Register(NewPHPParser())  // deep: .php
-	w.Register(NewLuaParser())  // deep: .lua
-	w.Register(NewBashParser()) // deep: .sh .bash
+	w.Register(NewRubyParser())      // deep: .rb .rbi (Sorbet type stubs)
+	w.Register(NewRBSParser())       // deep: .rbs (Ruby type signatures)
+	w.Register(NewPHPParser())       // deep: .php
+	w.Register(NewLuaParser())       // deep: .lua
+	w.Register(NewBashParser())      // deep: .sh .bash
+	w.Register(NewPowerShellParser()) // deep: .ps1 .psm1 .psd1
 	// Functional
-	w.Register(NewElixirParser()) // deep: .ex .exs
-	w.Register(NewOCamlParser())  // deep: .ml .mli
-	w.Register(NewElmParser())    // deep: .elm
+	w.Register(NewElixirParser())  // deep: .ex .exs
+	w.Register(NewOCamlParser())   // deep: .ml .mli
+	w.Register(NewElmParser())     // deep: .elm
+	w.Register(NewHaskellParser()) // deep: .hs .lhs
+	w.Register(NewErlangParser())  // deep: .erl .hrl
+	w.Register(NewFSharpParser())  // deep: .fs .fsi .fsx
+	w.Register(NewClojureParser()) // deep: .clj .cljs .cljc .edn
 	// Database
 	w.Register(NewSQLParser()) // deep: .sql
 	// Frontend
 	w.Register(NewCSSParser())    // deep: .css
+	w.Register(NewSCSSParser())   // deep: .scss .sass
 	w.Register(NewSvelteParser()) // deep: .svelte
+	w.Register(NewRParser())      // deep: .r .R
+	w.Register(NewDartParser())   // deep: .dart
 	// Infrastructure
 	w.Register(NewHCLParser())        // deep: .tf .tfvars .hcl
 	w.Register(NewDockerfileParser()) // deep: .dockerfile
 	w.Register(NewCUEParser())        // deep: .cue
+	w.Register(NewYAMLParser())       // deep: .yaml .yml (overrides generic)
 	// Schema / API
 	w.Register(NewProtobufParser()) // deep: .proto
 	// Documentation
@@ -80,6 +114,16 @@ func NewWalker() *Walker {
 func (w *Walker) Register(p LanguageParser) {
 	for _, ext := range p.Extensions() {
 		w.parsers[ext] = p
+	}
+	if fp, ok := p.(FilenameParser); ok {
+		for _, name := range fp.Filenames() {
+			w.filenameParsers[name] = p
+		}
+	}
+	if fpp, ok := p.(FilenamePatternParser); ok {
+		for _, prefix := range fpp.FilenamePrefixes() {
+			w.filenamePrefixParsers = append(w.filenamePrefixParsers, filenamePrefixEntry{prefix: prefix, parser: p})
+		}
 	}
 }
 
@@ -148,9 +192,23 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 		ext := strings.ToLower(filepath.Ext(path))
 		p, ok := w.parsers[ext]
 		if !ok {
+			// Try filename-based match for files like "Dockerfile" (no extension).
+			base := filepath.Base(path)
+			p, ok = w.filenameParsers[base]
+			if !ok {
+				// Try prefix-based match (e.g. Dockerfile.staging → DockerfileParser).
+				for _, entry := range w.filenamePrefixParsers {
+					if strings.HasPrefix(base, entry.prefix) {
+						p, ok = entry.parser, true
+						break
+					}
+				}
+			}
+		}
+		if !ok {
 			return nil
 		}
-		
+
 		mtime := info.ModTime().UnixNano()
 		jobs = append(jobs, fileJob{path: path, parser: p, mtime: mtime})
 		return nil
@@ -252,7 +310,21 @@ func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[strin
 		ext := strings.ToLower(filepath.Ext(path))
 		p, ok := w.parsers[ext]
 		if !ok {
-			return nil // unsupported extension
+			// Try filename-based match for files like "Dockerfile" (no extension).
+			base := filepath.Base(path)
+			p, ok = w.filenameParsers[base]
+			if !ok {
+				// Try prefix-based match (e.g. Dockerfile.staging → DockerfileParser).
+				for _, entry := range w.filenamePrefixParsers {
+					if strings.HasPrefix(base, entry.prefix) {
+						p, ok = entry.parser, true
+						break
+					}
+				}
+			}
+		}
+		if !ok {
+			return nil // unsupported extension or filename
 		}
 
 		info, statErr := d.Info()
@@ -304,6 +376,20 @@ func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[strin
 func (w *Walker) ParseFile(g *graph.Graph, path string) error {
 	ext := strings.ToLower(filepath.Ext(path))
 	p, ok := w.parsers[ext]
+	if !ok {
+		// Try filename-based match for files like "Dockerfile" (no extension).
+		base := filepath.Base(path)
+		p, ok = w.filenameParsers[base]
+		if !ok {
+			// Try prefix-based match (e.g. Dockerfile.staging → DockerfileParser).
+			for _, entry := range w.filenamePrefixParsers {
+				if strings.HasPrefix(base, entry.prefix) {
+					p, ok = entry.parser, true
+					break
+				}
+			}
+		}
+	}
 	if !ok {
 		return nil
 	}

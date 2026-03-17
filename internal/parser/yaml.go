@@ -531,11 +531,12 @@ func (p *YAMLParser) extractOpenAPIPaths(
 			nodeID := g.MakeNodeID(filePath, "endpoint:"+strings.ToUpper(method)+":"+pathStr)
 			if g.GetNode(nodeID) == nil {
 				g.AddNode(&graph.Node{
-					ID:   nodeID,
-					Type: graph.NodeFunction,
-					Name: nodeName,
-					File: filePath,
-					Line: line,
+					ID:       nodeID,
+					Type:     graph.NodeFunction,
+					Name:     nodeName,
+					File:     filePath,
+					Line:     line,
+					Exported: true, // OpenAPI endpoints are public API surface
 					Metadata: map[string]string{
 						"kind":   "openapi_endpoint",
 						"method": strings.ToUpper(method),

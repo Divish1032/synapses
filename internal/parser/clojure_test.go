@@ -210,6 +210,24 @@ func TestClojureParser_Defprotocol_NodeStruct(t *testing.T) {
 	}
 }
 
+// Metadata annotation before protocol name: (defprotocol ^{:added "1.6"} Name ...)
+// This is a real-world pattern used by ring-core-protocols (StreamableResponseBody).
+func TestClojureParser_Defprotocol_MetadataAnnotation(t *testing.T) {
+	src := `(ns mylib.core)
+(defprotocol ^{:added "1.6"} StreamableResponseBody
+  "Writes response body to a stream."
+  (write-body-to-stream [body response output-stream]))
+(defprotocol ^:deprecated LegacyProtocol
+  (old-method [x]))
+`
+	g := parseClojure(t, src, "core.clj")
+	n := assertNode(t, g, "StreamableResponseBody", graph.NodeStruct)
+	if n.Metadata == nil || n.Metadata["kind"] != "protocol" {
+		t.Errorf("StreamableResponseBody kind = %q, want 'protocol'", n.Metadata["kind"])
+	}
+	assertNode(t, g, "LegacyProtocol", graph.NodeStruct)
+}
+
 // ─── deftype ─────────────────────────────────────────────────────────────────
 
 func TestClojureParser_Deftype_NodeStruct(t *testing.T) {
@@ -535,6 +553,65 @@ func TestClojureParserReframeAndSpec(t *testing.T) {
 	}
 }
 
+// ─── defmulti, defmethod, defalias ───────────────────────────────────────────
+
+func TestClojureParserMultimethods(t *testing.T) {
+	src := `(ns myapp.shapes)
+
+;; Declare the multimethod
+(defmulti area :shape)
+(defmulti describe "Returns a description" :kind)
+
+;; Implementations for area
+(defmethod area :circle
+  [{:keys [radius]}]
+  (* Math/PI radius radius))
+
+(defmethod area :square
+  [{:keys [side]}]
+  (* side side))
+
+(defmethod area :default
+  [_]
+  0)
+
+;; An alias
+(defalias my-area area)
+`
+	g := parseClojure(t, src, "shapes.clj")
+
+	// defmulti
+	multis := g.FindByName("area")
+	if len(multis) == 0 {
+		t.Error("expected defmulti node 'area'")
+	} else if multis[0].Metadata["kind"] != "defmulti" {
+		t.Errorf("area kind = %q, want defmulti", multis[0].Metadata["kind"])
+	}
+
+	// defmethod nodes: "area.circle", "area.square", "area.default"
+	for _, methodName := range []string{"area.circle", "area.square", "area.default"} {
+		nodes := g.FindByName(methodName)
+		if len(nodes) == 0 {
+			t.Errorf("expected defmethod node %q", methodName)
+			continue
+		}
+		if nodes[0].Metadata["kind"] != "defmethod" {
+			t.Errorf("%q kind = %q, want defmethod", methodName, nodes[0].Metadata["kind"])
+		}
+		if nodes[0].Metadata["multimethod"] != "area" {
+			t.Errorf("%q multimethod = %q, want area", methodName, nodes[0].Metadata["multimethod"])
+		}
+	}
+
+	// defalias
+	aliasNodes := g.FindByName("my-area")
+	if len(aliasNodes) == 0 {
+		t.Error("expected defalias node 'my-area'")
+	} else if aliasNodes[0].Metadata["kind"] != "alias" {
+		t.Errorf("my-area kind = %q, want alias", aliasNodes[0].Metadata["kind"])
+	}
+}
+
 // ─── Realistic data pipeline ──────────────────────────────────────────────────
 
 func TestClojureParser_DataPipeline_AllEntitiesPresent(t *testing.T) {
@@ -587,8 +664,8 @@ func TestClojureParser_DataPipeline_AllEntitiesPresent(t *testing.T) {
 		{"TransformResult", graph.NodeStruct},
 		{"Transformer", graph.NodeStruct},
 		{"apply-rule", graph.NodeFunction},
-		{"apply-rule/:filter", graph.NodeFunction},
-		{"apply-rule/:map", graph.NodeFunction},
+		{"apply-rule.filter", graph.NodeFunction},
+		{"apply-rule.map", graph.NodeFunction},
 		{"validate-schema", graph.NodeFunction},
 		{"transform-batch", graph.NodeFunction},
 		{"with-transform-context", graph.NodeFunction},

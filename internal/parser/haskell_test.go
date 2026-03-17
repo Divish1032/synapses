@@ -519,6 +519,41 @@ func TestHaskellParserTypeAliasAndOperators(t *testing.T) {
 	}
 }
 
+// ─── Foreign import (FFI) extraction ─────────────────────────────────────────
+
+func TestHaskellParserForeignImport(t *testing.T) {
+	src := `module FFIBindings where
+
+import Foreign.C.Types
+import Foreign.Ptr
+
+-- | C sin function
+foreign import ccall "math.h sin"
+    c_sin :: Double -> Double
+
+foreign import ccall "string.h strlen"
+    c_strlen :: CString -> IO CSize
+
+foreign import ccall safe "free"
+    c_free :: Ptr a -> IO ()
+`
+	g := parseHaskell(t, src, "/src/FFIBindings.hs")
+
+	for _, name := range []string{"c_sin", "c_strlen", "c_free"} {
+		nodes := g.FindByName(name)
+		if len(nodes) == 0 {
+			t.Errorf("expected foreign import node %q", name)
+			continue
+		}
+		if nodes[0].Metadata["kind"] != "foreign_import" {
+			t.Errorf("%q: kind = %q, want foreign_import", name, nodes[0].Metadata["kind"])
+		}
+		if nodes[0].Type != graph.NodeFunction {
+			t.Errorf("%q: type = %v, want NodeFunction", name, nodes[0].Type)
+		}
+	}
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func containsSubstr(s, sub string) bool {
