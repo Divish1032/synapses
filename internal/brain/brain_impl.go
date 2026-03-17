@@ -147,9 +147,11 @@ type brainStats struct {
 	guardianSuccess      int64
 	orchestrateCalls     int64
 	orchestrateSuccess   int64
-	archivistCalls       int64
-	archivistSuccess     int64
-	archivistRepairs     int64 // JSON bracket repairs
+	archivistCalls          int64
+	archivistSuccess        int64
+	archivistRepairs        int64 // JSON bracket repairs
+	contextBuilderCalls     int64
+	contextBuilderSuccess   int64
 }
 
 func (s *brainStats) record(tier string, success bool, latencyMS int64) {
@@ -183,6 +185,11 @@ func (s *brainStats) record(tier string, success bool, latencyMS int64) {
 		if success {
 			s.archivistSuccess++
 		}
+	case "context_builder":
+		s.contextBuilderCalls++
+		if success {
+			s.contextBuilderSuccess++
+		}
 	}
 }
 
@@ -209,9 +216,11 @@ func (s *brainStats) snapshot() map[string]interface{} {
 		"guardian_success":     s.guardianSuccess,
 		"orchestrate_calls":    s.orchestrateCalls,
 		"orchestrate_success":  s.orchestrateSuccess,
-		"archivist_calls":      s.archivistCalls,
-		"archivist_success":    s.archivistSuccess,
-		"archivist_repairs":    s.archivistRepairs,
+		"archivist_calls":            s.archivistCalls,
+		"archivist_success":          s.archivistSuccess,
+		"archivist_repairs":          s.archivistRepairs,
+		"context_builder_calls":      s.contextBuilderCalls,
+		"context_builder_success":    s.contextBuilderSuccess,
 	}
 }
 
@@ -723,6 +732,7 @@ func (b *impl) BuildContextPacket(ctx context.Context, req ContextPacketRequest)
 		return nil, nil
 	}
 
+	start := time.Now()
 	pkt, err := b.builder.Build(ctx, contextbuilder.Request{
 		ProjectID:       req.ProjectID,
 		AgentID:         req.AgentID,
@@ -744,13 +754,16 @@ func (b *impl) BuildContextPacket(ctx context.Context, req ContextPacketRequest)
 		FanIn:           req.Snapshot.FanIn,
 		RootDoc:         req.Snapshot.RootDoc,
 	})
+	latency := time.Since(start).Milliseconds()
 	if err != nil || pkt == nil {
 		if err != nil {
 			b.cb.recordFailure("context_builder")
+			b.stats.record("context_builder", false, latency)
 		}
 		return nil, err
 	}
 	b.cb.recordSuccess("context_builder")
+	b.stats.record("context_builder", true, latency)
 	return toContextPacket(pkt), nil
 }
 
