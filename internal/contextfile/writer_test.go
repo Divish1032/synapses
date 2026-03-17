@@ -202,10 +202,10 @@ func TestRender_ContainsUpdatedTimestamp(t *testing.T) {
 
 // ── Write + ContextFilePath ───────────────────────────────────────────────────
 
+// TestWrite_CreatesFileAndContent tests that Write successfully creates a context file
+// with the expected auto-generated marker. This is a basic smoke test of the write path.
 func TestWrite_CreatesFileAndContent(t *testing.T) {
-	// Override HOME so we don't pollute the real ~/.synapses/context/.
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setupTestEnv(t)
 
 	repoRoot := "/tmp/test-project"
 	if err := Write(repoRoot, nil, nil); err != nil {
@@ -226,9 +226,11 @@ func TestWrite_CreatesFileAndContent(t *testing.T) {
 	}
 }
 
+// TestWrite_AtomicNoPanicOnDoubleWrite tests that Write is idempotent and atomic:
+// writing the same context file multiple times should not error, and intermediate
+// states with partial writes should not be observable by readers.
 func TestWrite_AtomicNoPanicOnDoubleWrite(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setupTestEnv(t)
 
 	repoRoot := "/tmp/test-project-atomic"
 	for i := 0; i < 3; i++ {
@@ -238,9 +240,10 @@ func TestWrite_AtomicNoPanicOnDoubleWrite(t *testing.T) {
 	}
 }
 
+// TestContextFilePath_IsInsideSynapsesContext verifies that context files are created
+// in the correct location: ~/.synapses/context/<hash>.md
 func TestContextFilePath_IsInsideSynapsesContext(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	tmp := setupTestEnv(t)
 
 	path, err := ContextFilePath("/some/project")
 	if err != nil {
@@ -255,9 +258,10 @@ func TestContextFilePath_IsInsideSynapsesContext(t *testing.T) {
 	}
 }
 
+// TestContextFilePath_DifferentProjectsDifferentFiles verifies that different projects
+// get different context files, using hash-based filenames.
 func TestContextFilePath_DifferentProjectsDifferentFiles(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setupTestEnv(t)
 
 	p1, _ := ContextFilePath("/project/alpha")
 	p2, _ := ContextFilePath("/project/beta")
@@ -266,9 +270,10 @@ func TestContextFilePath_DifferentProjectsDifferentFiles(t *testing.T) {
 	}
 }
 
+// TestContextFilePath_SameProjectSamePath verifies that the function is deterministic:
+// calling it with the same project path always returns the same file path.
 func TestContextFilePath_SameProjectSamePath(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setupTestEnv(t)
 
 	p1, _ := ContextFilePath("/project/gamma")
 	p2, _ := ContextFilePath("/project/gamma")
@@ -332,11 +337,20 @@ func TestRender_IdentityWithoutToolGuidance(t *testing.T) {
 	}
 }
 
-// --- Additional coverage tests for error paths ---
+// --- Additional coverage tests for error paths and integration ---
 
-func TestWrite_WithIdentityAndTasks(t *testing.T) {
+// setupTestEnv creates a temporary directory for testing and sets HOME to it.
+// Returns the temp directory path. Caller should ensure cleanup via t.Cleanup or defer.
+func setupTestEnv(t *testing.T) string {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	return tmp
+}
+
+// TestWrite_WithIdentityAndTasks tests Write with full project identity and task list.
+// Verifies that the rendered output includes all key information (repo ID, scale, task counts).
+func TestWrite_WithIdentityAndTasks(t *testing.T) {
+	setupTestEnv(t)
 
 	id := &graph.ProjectIdentity{
 		RepoID: "test-repo",
@@ -361,6 +375,7 @@ func TestWrite_WithIdentityAndTasks(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	content := string(data)
 
+	// Integration check: all components rendered correctly
 	if !strings.Contains(content, "test-repo") {
 		t.Error("missing repo ID in output")
 	}
@@ -375,9 +390,11 @@ func TestWrite_WithIdentityAndTasks(t *testing.T) {
 	}
 }
 
+// TestContextFilePath_CreatesDirectoryIfMissing tests that ContextFilePath creates
+// the ~/.synapses/context directory if it doesn't exist. This is important for
+// first-run scenarios where the user has never run Synapses before.
 func TestContextFilePath_CreatesDirectoryIfMissing(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	tmp := setupTestEnv(t)
 
 	path, err := ContextFilePath("/test/project")
 	if err != nil {
@@ -389,11 +406,19 @@ func TestContextFilePath_CreatesDirectoryIfMissing(t *testing.T) {
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("context directory not created: %v", err)
 	}
+
+	// Verify it's in the expected location
+	expectedDir := filepath.Join(tmp, ".synapses", "context")
+	if dir != expectedDir {
+		t.Errorf("directory created in wrong location: got %s, want %s", dir, expectedDir)
+	}
 }
 
+// TestContextFilePath_DirectoryAlreadyExists tests that ContextFilePath is idempotent:
+// calling it multiple times should not error even if the directory already exists.
+// This is important for reliable long-running daemons that write context files repeatedly.
 func TestContextFilePath_DirectoryAlreadyExists(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setupTestEnv(t)
 
 	// Call once to create directory
 	path1, _ := ContextFilePath("/proj1")

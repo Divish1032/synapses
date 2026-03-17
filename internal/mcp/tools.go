@@ -2198,6 +2198,7 @@ var workflowRecipes = []workflowRecipe{
 // the right tool without scanning all tool definitions.
 func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	query := strings.ToLower(stringArg(req, "query"))
+	debug, _ := req.GetArguments()["debug"].(bool)
 
 	// Empty query: return categorized overview of all tools.
 	if query == "" {
@@ -2261,65 +2262,88 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 	}
 
 	// Score each tool by keyword overlap.
+	type breakdown struct {
+		KeywordsMatched []string `json:"keywords_matched"`
+		NameHits        []string `json:"name_hits"`
+		DescHits        []string `json:"desc_hits"`
+	}
 	type scored struct {
-		entry toolCatalogEntry
-		score int
+		entry     toolCatalogEntry
+		score     int
+		breakdown breakdown
 	}
 	var results []scored
 	for _, tool := range toolCatalog {
 		score := 0
+		var bd breakdown
 		for _, qw := range queryWords {
 			for _, kw := range tool.Keywords {
 				if kwMatch(kw, qw) {
 					score++
+					if debug {
+						bd.KeywordsMatched = append(bd.KeywordsMatched, kw)
+					}
 				}
 			}
 			// Also check tool name (tokenized on underscores) and description.
 			for _, nw := range strings.Split(tool.Name, "_") {
 				if nw == qw {
 					score += 2
+					if debug {
+						bd.NameHits = append(bd.NameHits, nw)
+					}
 					break
 				}
 			}
 			for _, dw := range strings.FieldsFunc(strings.ToLower(tool.Description), func(r rune) bool { return r < 'a' || r > 'z' }) {
 				if kwMatch(dw, qw) {
 					score++
+					if debug {
+						bd.DescHits = append(bd.DescHits, dw)
+					}
 					break
 				}
 			}
 		}
-		if score > 0 {
-			results = append(results, scored{tool, score})
+		if score > 0 || debug {
+			results = append(results, scored{tool, score, bd})
 		}
 	}
 
 	// Sort by score descending.
 	sort.Slice(results, func(i, j int) bool { return results[i].score > results[j].score })
 
-	// Return top 3.
-	limit := 3
-	if len(results) < limit {
-		limit = len(results)
+	// In debug mode return all tools; otherwise cap at top 3.
+	if !debug {
+		limit := 3
+		if len(results) < limit {
+			limit = len(results)
+		}
+		results = results[:limit]
 	}
-	results = results[:limit]
 
 	// Format output.
 	type toolMatch struct {
-		Name        string `json:"name"`
-		Category    string `json:"category"`
-		Description string `json:"description"`
-		Example     string `json:"example"`
-		Score       int    `json:"score"`
+		Name        string     `json:"name"`
+		Category    string     `json:"category"`
+		Description string     `json:"description"`
+		Example     string     `json:"example"`
+		Score       int        `json:"score"`
+		Breakdown   *breakdown `json:"breakdown,omitempty"`
 	}
 	matches := make([]toolMatch, len(results))
 	for i, r := range results {
-		matches[i] = toolMatch{
+		m := toolMatch{
 			Name:        r.entry.Name,
 			Category:    r.entry.Category,
 			Description: r.entry.Description,
 			Example:     r.entry.Example,
 			Score:       r.score,
 		}
+		if debug {
+			m.Breakdown = &r.breakdown
+		}
+		matches[i] = m
 	}
 
 	resp := map[string]interface{}{
