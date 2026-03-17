@@ -80,6 +80,38 @@ func TestParsePromptFile_QuotedValues(t *testing.T) {
 	}
 }
 
+func TestParsePromptFile_EmptyFrontmatter(t *testing.T) {
+	// Frontmatter with no keys
+	data := []byte("---\n\n---\nBody content")
+	pt := parsePromptFile(data, "builtin")
+	if pt.Body != "Body content" {
+		t.Errorf("Body: got %q, want Body content", pt.Body)
+	}
+	if pt.ID != "" {
+		t.Errorf("ID should be empty, got %q", pt.ID)
+	}
+}
+
+func TestParsePromptFile_InvalidKeyValue(t *testing.T) {
+	// Line with no colon should be skipped
+	data := []byte("---\nno-colon-here\nid: test\n---\nbody")
+	pt := parsePromptFile(data, "builtin")
+	if pt.ID != "test" {
+		t.Errorf("ID: got %q, want test", pt.ID)
+	}
+}
+
+func TestParsePromptFile_UnquotedValues(t *testing.T) {
+	data := []byte("---\nid: unquoted-id\nauto_load: true\n---\nBody")
+	pt := parsePromptFile(data, "builtin")
+	if pt.ID != "unquoted-id" {
+		t.Errorf("ID: got %q, want unquoted-id", pt.ID)
+	}
+	if !pt.AutoLoad {
+		t.Error("AutoLoad should be true")
+	}
+}
+
 // --- matchGlob ---
 
 func TestMatchGlob_DoubleStar(t *testing.T) {
@@ -367,5 +399,91 @@ func TestLoadPromptDir_FallbackIDFromFilename(t *testing.T) {
 	}
 	if pts[0].ID != "my-guide" {
 		t.Errorf("ID fallback: got %q, want %q", pts[0].ID, "my-guide")
+	}
+}
+
+func TestLoadPromptDir_SkipNonMarkdownFiles(t *testing.T) {
+	dir := t.TempDir()
+	// Create a .md file and a non-.md file
+	if err := os.WriteFile(filepath.Join(dir, "guide.md"), []byte("---\nid: guide\n---\nbody"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("txt content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pts, err := LoadPromptDir(dir, "user")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should only load guide.md, skip readme.txt
+	if len(pts) != 1 {
+		t.Fatalf("expected 1 prompt (skip .txt), got %d", len(pts))
+	}
+	if pts[0].ID != "guide" {
+		t.Errorf("expected guide, got %q", pts[0].ID)
+	}
+}
+
+func TestLoadPromptDir_SkipDirectories(t *testing.T) {
+	dir := t.TempDir()
+	// Create a .md file and a subdirectory
+	if err := os.WriteFile(filepath.Join(dir, "guide.md"), []byte("---\nid: guide\n---\nbody"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(dir, "subdir")
+	if err := os.Mkdir(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subdir, "nested.md"), []byte("nested"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pts, err := LoadPromptDir(dir, "user")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should only load guide.md from top level, skip subdirs
+	if len(pts) != 1 {
+		t.Fatalf("expected 1 prompt (skip subdir), got %d", len(pts))
+	}
+	if pts[0].ID != "guide" {
+		t.Errorf("expected guide, got %q", pts[0].ID)
+	}
+}
+
+func TestMatchesAll_ModulePattern_Empty(t *testing.T) {
+	// Template with module_pattern but empty pkg input should not match
+	pt := PromptTemplate{
+		ID:            "module-guide",
+		ModulePattern: "internal/*",
+	}
+	result := matchesAll(pt, "file.go", "Type", "")
+	if result {
+		t.Error("expected no match for empty pkg with module_pattern requirement")
+	}
+}
+
+func TestMatchesAll_FilePattern_Empty(t *testing.T) {
+	// Template with file_pattern but empty file input should not match
+	pt := PromptTemplate{
+		ID:          "file-guide",
+		FilePattern: "**/*.go",
+	}
+	result := matchesAll(pt, "", "Type", "internal/pkg")
+	if result {
+		t.Error("expected no match for empty file with file_pattern requirement")
+	}
+}
+
+func TestMatchesAll_EntityPattern_Empty(t *testing.T) {
+	// Template with entity_pattern but empty entity input should not match
+	pt := PromptTemplate{
+		ID:            "entity-guide",
+		EntityPattern: ".*Service",
+	}
+	result := matchesAll(pt, "file.go", "", "internal/pkg")
+	if result {
+		t.Error("expected no match for empty entity with entity_pattern requirement")
 	}
 }

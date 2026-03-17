@@ -202,3 +202,28 @@ func TestExecutor_MergedOutput(t *testing.T) {
 		t.Errorf("merged output: %q", result.MergedOutput)
 	}
 }
+
+func TestExecutor_ExtraCallerParams(t *testing.T) {
+	caller := newMockCaller()
+	exec := NewExecutor(caller, nil)
+	recipe := Recipe{
+		ID:     "test-extra",
+		Output: "structured",
+		Params: []RecipeParam{{Name: "target", Type: "string", Required: true}},
+		Steps: []RecipeStep{
+			{Tool: "get_context", Args: map[string]interface{}{"entity": "$target", "extra": "$extra_param"}, OutputKey: "ctx"},
+		},
+	}
+
+	// Provide both required and extra params
+	result, err := exec.Execute(context.Background(), recipe, map[string]interface{}{
+		"target":      "Graph",
+		"extra_param": "bonus_value",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Steps) != 1 {
+		t.Errorf("expected 1 step, got %d", len(result.Steps))
+	}
+}
