@@ -466,3 +466,172 @@ func TestCollectDepNames_Empty(t *testing.T) {
 		t.Errorf("collectDepNames(empty) = %v, want empty", names)
 	}
 }
+
+func TestCollectDepNames_LimitCapping(t *testing.T) {
+	req := Request{
+		CalleeNames: []string{"A", "B", "C", "D", "E"},
+		CallerNames: []string{"F", "G", "H"},
+	}
+	// With limit=3, should return first 3 (callees have priority)
+	names := collectDepNames(req, 3)
+	if len(names) != 3 {
+		t.Errorf("collectDepNames with limit=3: got %d names, want 3", len(names))
+	}
+	if names[0] != "A" || names[1] != "B" || names[2] != "C" {
+		t.Errorf("collectDepNames limit should prioritize callees, got %v", names)
+	}
+}
+
+func TestCollectDepNames_RootNameExcluded(t *testing.T) {
+	req := Request{
+		RootName:    "MyFunc",
+		CalleeNames: []string{"MyFunc", "Helper", "Service"},
+		CallerNames: []string{"Main"},
+	}
+	names := collectDepNames(req, 20)
+	for _, n := range names {
+		if n == "MyFunc" {
+			t.Errorf("RootName 'MyFunc' should be excluded, but found in: %v", names)
+		}
+	}
+}
+
+func TestCollectDepNames_EmptyNameStringsSkipped(t *testing.T) {
+	req := Request{
+		CalleeNames: []string{"A", "", "B"},
+		CallerNames: []string{"", "C"},
+	}
+	names := collectDepNames(req, 20)
+	for _, n := range names {
+		if n == "" {
+			t.Errorf("Empty name strings should be skipped, but found in: %v", names)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// patternTriggers — unexported
+// ---------------------------------------------------------------------------
+
+func TestPatternTriggers_RootOnly(t *testing.T) {
+	req := Request{RootName: "Validate"}
+	triggers := patternTriggers(req)
+	if len(triggers) != 1 || triggers[0] != "Validate" {
+		t.Errorf("patternTriggers(root only) = %v, want [Validate]", triggers)
+	}
+}
+
+func TestPatternTriggers_RootAndCallees(t *testing.T) {
+	req := Request{
+		RootName:    "Main",
+		CalleeNames: []string{"Helper1", "Helper2", "Helper3"},
+	}
+	triggers := patternTriggers(req)
+	// Should have root + up to 4 callees = 1 + 3 = 4
+	if len(triggers) != 4 {
+		t.Errorf("patternTriggers: expected 4 triggers (root + 3 callees), got %d: %v", len(triggers), triggers)
+	}
+	if triggers[0] != "Main" {
+		t.Errorf("first trigger should be root 'Main', got %q", triggers[0])
+	}
+}
+
+func TestPatternTriggers_CalleesCappedAt4(t *testing.T) {
+	req := Request{
+		RootName:    "Root",
+		CalleeNames: []string{"A", "B", "C", "D", "E", "F"},
+	}
+	triggers := patternTriggers(req)
+	// Should have root + max 4 callees = 5 total
+	if len(triggers) != 5 {
+		t.Errorf("patternTriggers: expected 5 triggers (root + 4 callees capped), got %d", len(triggers))
+	}
+}
+
+func TestPatternTriggers_EmptyRootName(t *testing.T) {
+	req := Request{
+		RootName:    "",
+		CalleeNames: []string{"A", "B"},
+	}
+	triggers := patternTriggers(req)
+	// Should skip empty root name, just callees
+	if len(triggers) != 2 {
+		t.Errorf("patternTriggers with empty root: expected 2 triggers, got %d", len(triggers))
+	}
+}
+
+func TestPatternTriggers_EmptyCalleeNamesSkipped(t *testing.T) {
+	req := Request{
+		RootName:    "Root",
+		CalleeNames: []string{"", "A", "", "B", "C"},
+	}
+	triggers := patternTriggers(req)
+	for _, trigger := range triggers {
+		if trigger == "" {
+			t.Error("empty callee names should be skipped")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildTeamStatus — unexported
+// ---------------------------------------------------------------------------
+
+func TestBuildTeamStatus_EmptyClaims(t *testing.T) {
+	status := buildTeamStatus("self", []ClaimRef{}, 10)
+	if len(status) != 0 {
+		t.Errorf("buildTeamStatus(empty claims) = %v, want empty", status)
+	}
+}
+
+func TestBuildTeamStatus_ExcludesSelfAgent(t *testing.T) {
+	claims := []ClaimRef{
+		{AgentID: "self", Scope: "pkg1"},
+		{AgentID: "other", Scope: "pkg2"},
+		{AgentID: "self", Scope: "pkg3"},
+	}
+	status := buildTeamStatus("self", claims, 10)
+	if len(status) != 1 {
+		t.Errorf("buildTeamStatus should exclude self agent: expected 1, got %d", len(status))
+	}
+	if status[0].AgentID != "other" {
+		t.Errorf("expected 'other' agent, got %q", status[0].AgentID)
+	}
+}
+
+func TestBuildTeamStatus_LimitCapping(t *testing.T) {
+	claims := []ClaimRef{
+		{AgentID: "agent1", Scope: "pkg1"},
+		{AgentID: "agent2", Scope: "pkg2"},
+		{AgentID: "agent3", Scope: "pkg3"},
+		{AgentID: "agent4", Scope: "pkg4"},
+	}
+	status := buildTeamStatus("self", claims, 2)
+	if len(status) != 2 {
+		t.Errorf("buildTeamStatus with limit=2: got %d, want 2", len(status))
+	}
+}
+
+func TestBuildTeamStatus_ParsesExpiresAt(t *testing.T) {
+	futureTime := time.Now().Add(30 * time.Minute).Format(time.RFC3339)
+	pastTime := time.Now().Add(-5 * time.Minute).Format(time.RFC3339)
+
+	claims := []ClaimRef{
+		{AgentID: "agent1", Scope: "pkg1", ExpiresAt: futureTime},
+		{AgentID: "agent2", Scope: "pkg2", ExpiresAt: pastTime},
+		{AgentID: "agent3", Scope: "pkg3", ExpiresAt: "invalid-time"},
+	}
+	status := buildTeamStatus("self", claims, 10)
+
+	// agent1 should have positive ExpiresIn
+	if status[0].AgentID == "agent1" && status[0].ExpiresIn <= 0 {
+		t.Errorf("agent1 with future expiry should have positive ExpiresIn, got %d", status[0].ExpiresIn)
+	}
+
+	// agent2 with past time should have zero/no ExpiresIn
+	for _, s := range status {
+		if s.AgentID == "agent2" && s.ExpiresIn > 0 {
+			t.Errorf("agent2 with past expiry should not have positive ExpiresIn")
+		}
+	}
+}
