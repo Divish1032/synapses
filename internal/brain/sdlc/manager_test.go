@@ -151,5 +151,120 @@ func TestResolveMode_FallbackToStored(t *testing.T) {
 	}
 }
 
+func TestResolveMode_InvalidOverrideFallsBack(t *testing.T) {
+	mgr := newTestManager(t)
+	got := mgr.ResolveMode("garbage")
+	if got != ModeStandard {
+		t.Errorf("ResolveMode with invalid override should fall back to stored default %q, got %q", ModeStandard, got)
+	}
+}
+
+func TestGetConfig_InvalidPhaseInStore(t *testing.T) {
+	st := newTestStore(t)
+	mgr := NewManager(st)
+
+	// Directly insert an invalid phase into the store to test the validation fallback
+	err := st.UpsertSDLCConfig("badphase", ModeStandard, "test-agent")
+	if err != nil {
+		t.Fatalf("UpsertSDLCConfig: %v", err)
+	}
+
+	row := mgr.GetConfig()
+	// Should fall back to default development phase
+	if row.Phase != PhaseDevelopment {
+		t.Errorf("GetConfig should fix invalid phase, got %q", row.Phase)
+	}
+	if row.QualityMode != ModeStandard {
+		t.Errorf("GetConfig should preserve valid mode, got %q", row.QualityMode)
+	}
+}
+
+func TestGetConfig_InvalidModeInStore(t *testing.T) {
+	st := newTestStore(t)
+	mgr := NewManager(st)
+
+	// Directly insert an invalid mode into the store to test the validation fallback
+	err := st.UpsertSDLCConfig(PhaseTesting, "badmode", "test-agent")
+	if err != nil {
+		t.Fatalf("UpsertSDLCConfig: %v", err)
+	}
+
+	row := mgr.GetConfig()
+	if row.Phase != PhaseTesting {
+		t.Errorf("GetConfig should preserve valid phase, got %q", row.Phase)
+	}
+	// Should fall back to default standard mode
+	if row.QualityMode != ModeStandard {
+		t.Errorf("GetConfig should fix invalid mode, got %q", row.QualityMode)
+	}
+}
+
+func TestGetConfig_BothInvalidInStore(t *testing.T) {
+	st := newTestStore(t)
+	mgr := NewManager(st)
+
+	// Directly insert both invalid values into the store
+	err := st.UpsertSDLCConfig("badphase", "badmode", "test-agent")
+	if err != nil {
+		t.Fatalf("UpsertSDLCConfig: %v", err)
+	}
+
+	row := mgr.GetConfig()
+	if row.Phase != PhaseDevelopment {
+		t.Errorf("GetConfig should fix invalid phase, got %q", row.Phase)
+	}
+	if row.QualityMode != ModeStandard {
+		t.Errorf("GetConfig should fix invalid mode, got %q", row.QualityMode)
+	}
+}
+
+func TestSetPhase_InvalidModeDoesntBreak(t *testing.T) {
+	st := newTestStore(t)
+	mgr := NewManager(st)
+
+	// Corrupt the store with invalid mode
+	err := st.UpsertSDLCConfig(PhaseDevelopment, "badmode", "test-agent")
+	if err != nil {
+		t.Fatalf("UpsertSDLCConfig: %v", err)
+	}
+
+	// SetPhase should fix the invalid mode to standard
+	if err := mgr.SetPhase(PhaseTesting, "agent-1"); err != nil {
+		t.Fatalf("SetPhase: %v", err)
+	}
+
+	row := mgr.GetConfig()
+	if row.Phase != PhaseTesting {
+		t.Errorf("SetPhase should set phase to %q, got %q", PhaseTesting, row.Phase)
+	}
+	if row.QualityMode != ModeStandard {
+		t.Errorf("SetPhase should fix invalid mode to %q, got %q", ModeStandard, row.QualityMode)
+	}
+}
+
+func TestSetQualityMode_InvalidPhaseDoesntBreak(t *testing.T) {
+	st := newTestStore(t)
+	mgr := NewManager(st)
+
+	// Corrupt the store with invalid phase
+	err := st.UpsertSDLCConfig("badphase", ModeStandard, "test-agent")
+	if err != nil {
+		t.Fatalf("UpsertSDLCConfig: %v", err)
+	}
+
+	// SetQualityMode should fix the invalid phase to development
+	if err := mgr.SetQualityMode(ModeEnterprise, "agent-1"); err != nil {
+		t.Fatalf("SetQualityMode: %v", err)
+	}
+
+	row := mgr.GetConfig()
+	if row.Phase != PhaseDevelopment {
+		t.Errorf("SetQualityMode should fix invalid phase to %q, got %q", PhaseDevelopment, row.Phase)
+	}
+	if row.QualityMode != ModeEnterprise {
+		t.Errorf("SetQualityMode should set mode to %q, got %q", ModeEnterprise, row.QualityMode)
+	}
+}
+
 // Ensure unused os import doesn't cause issues — os.DevNull check as smoke test.
 var _ = os.DevNull
