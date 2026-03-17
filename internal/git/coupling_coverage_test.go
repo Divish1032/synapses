@@ -303,3 +303,64 @@ func TestAnalyzeChangeCoupling_ZeroMinConfidence(t *testing.T) {
 		t.Error("expected to find fa.go+fb.go pair with minConfidence=0.0")
 	}
 }
+
+// TestAnalyzeChangeCoupling_FilterLowCoChanges tests that pairs with coChanges < 3 are filtered.
+// This exercises the count < 3 continue branch.
+func TestAnalyzeChangeCoupling_FilterLowCoChanges(t *testing.T) {
+	dir, run := initCouplingBaseRepo(t)
+
+	// Create two separate file pairs:
+	// Pair 1: fa.go and fb.go co-change only 2 times → coChanges=2 < 3 (filtered).
+	// Pair 2: fc.go and fd.go co-change 3 times → coChanges=3 ≥ 3 (included).
+
+	// First 2 commits: fa.go and fb.go together
+	for i := 0; i < 2; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "fa.go"), []byte(fmt.Sprintf("package p\nfunc A%d(){}\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "fb.go"), []byte(fmt.Sprintf("package p\nfunc B%d(){}\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("git", "add", ".")
+		run("git", "commit", "-m", fmt.Sprintf("ab %d", i))
+	}
+
+	// Next 3 commits: fc.go and fd.go together → qualifies with coChanges=3
+	for i := 0; i < 3; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "fc.go"), []byte(fmt.Sprintf("package p\nfunc C%d(){}\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "fd.go"), []byte(fmt.Sprintf("package p\nfunc D%d(){}\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("git", "add", ".")
+		run("git", "commit", "-m", fmt.Sprintf("cd %d", i))
+	}
+
+	pairs, err := git.AnalyzeChangeCoupling(dir, 30, 0.0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// fa+fb should NOT appear (coChanges < 3).
+	// fc+fd SHOULD appear (coChanges = 3 ≥ 3).
+	foundAB := false
+	foundCD := false
+	for _, p := range pairs {
+		if (p.FileA == "fa.go" && p.FileB == "fb.go") ||
+			(p.FileA == "fb.go" && p.FileB == "fa.go") {
+			foundAB = true
+		}
+		if (p.FileA == "fc.go" && p.FileB == "fd.go") ||
+			(p.FileA == "fd.go" && p.FileB == "fc.go") {
+			foundCD = true
+		}
+	}
+
+	if foundAB {
+		t.Error("expected fa+fb pair to be filtered (coChanges < 3)")
+	}
+	if !foundCD {
+		t.Error("expected fc+fd pair to be included (coChanges ≥ 3)")
+	}
+}
