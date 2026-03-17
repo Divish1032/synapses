@@ -119,6 +119,70 @@ func (s *Store) QueryMemories(tier, entityID, agentID string, limit int) ([]Memo
 	return scanMemories(rows)
 }
 
+// QueryMemoriesIncludingStale is like QueryMemories but returns both active and stale
+// memories. Use for audit scenarios (e.g. recall(include_stale=true)) where the agent
+// explicitly wants to see the full history including invalidated entries.
+func (s *Store) QueryMemoriesIncludingStale(tier, entityID, agentID string, limit int) ([]Memory, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
+	             created_at, expires_at, last_accessed_at, source
+	      FROM memories WHERE expires_at > ?`
+	args := []interface{}{now}
+
+	if tier != "" {
+		q += ` AND tier = ?`
+		args = append(args, tier)
+	}
+	if entityID != "" {
+		q += ` AND entity_id = ?`
+		args = append(args, entityID)
+	}
+	if agentID != "" {
+		q += ` AND agent_id = ?`
+		args = append(args, agentID)
+	}
+
+	q += ` ORDER BY last_accessed_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query memories including stale: %w", err)
+	}
+	defer rows.Close()
+
+	return scanMemories(rows)
+}
+
+// QueryRecentSessionMemoriesIncludingStale is like QueryRecentSessionMemories but
+// returns both active and stale session-log memories for explicit audit queries.
+func (s *Store) QueryRecentSessionMemoriesIncludingStale(agentID string, limit int) ([]Memory, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
+	             created_at, expires_at, last_accessed_at, source
+	      FROM memories
+	      WHERE tier = 'session_log'
+	        AND agent_id = ?
+	        AND expires_at > ?
+	      ORDER BY created_at DESC LIMIT ?`
+
+	rows, err := s.db.Query(q, agentID, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query session memories including stale: %w", err)
+	}
+	defer rows.Close()
+
+	return scanMemories(rows)
+}
+
 // QueryMemoriesForEntities retrieves entity-tier memories for multiple entity IDs.
 // Returns a map of entityID → []Memory. Non-expired only.
 func (s *Store) QueryMemoriesForEntities(entityIDs []string, limit int) (map[string][]Memory, error) {
@@ -364,7 +428,9 @@ func (s *Store) MarkAnchoredMemoriesStale(nodeIDs []string, reason string) error
 		if _, err := tx.Exec(`
 			UPDATE memories SET stale = 1, stale_reason = ?, staled_at = ?
 			WHERE id IN (
-				SELECT memory_id FROM memory_anchors WHERE node_id IN (`+placeholders+`)
+				SELECT memory_id FROM memory_anchors
+				GROUP BY memory_id
+				HAVING COUNT(*) = SUM(CASE WHEN node_id IN (`+placeholders+`) THEN 1 ELSE 0 END)
 			)`, args...); err != nil {
 			return fmt.Errorf("store.MarkAnchoredMemoriesStale: %w", err)
 		}
@@ -495,6 +561,32 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 		LIMIT ?`, query, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search memories: %w", err)
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
+// SearchMemoriesIncludingStale is like SearchMemories but also returns stale memories.
+// Use for audit scenarios where the agent explicitly passes include_stale=true to recall().
+func (s *Store) SearchMemoriesIncludingStale(query string, limit int) ([]Memory, error) {
+	if query == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	rows, err := s.db.Query(`
+		SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
+		       m.created_at, m.expires_at, m.last_accessed_at, m.source
+		FROM memories m
+		JOIN memories_fts f ON m.rowid = f.rowid
+		WHERE memories_fts MATCH ?
+		  AND m.expires_at > ?
+		ORDER BY rank
+		LIMIT ?`, query, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search memories including stale: %w", err)
 	}
 	defer rows.Close()
 	return scanMemories(rows)

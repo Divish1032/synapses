@@ -1413,6 +1413,249 @@ func TestQueryMemories_ExcludesStaleMemories(t *testing.T) {
 	}
 }
 
+// ── AM-4: include_stale audit methods ────────────────────────────────────────
+
+// TestQueryMemoriesIncludingStale_ReturnsStaledMemory verifies that
+// QueryMemoriesIncludingStale surfaces stale memories that QueryMemories hides.
+func TestQueryMemoriesIncludingStale_ReturnsStaledMemory(t *testing.T) {
+	st := openMemTestStore(t)
+
+	entityID := "repo::audit.go::AuditFunc"
+	_, err := st.InsertMemory(Memory{
+		Tier:     TierEntity,
+		Content:  "AuditFunc was refactored to drop the legacy parameter",
+		EntityID: entityID,
+		AgentID:  "agent-audit",
+		Source:   SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mark stale: normal query returns 0, audit query returns 1.
+	if err := st.MarkEntityMemoriesStale(entityID, "node removed"); err != nil {
+		t.Fatal(err)
+	}
+
+	normal, err := st.QueryMemories(TierEntity, entityID, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(normal) != 0 {
+		t.Fatalf("QueryMemories: expected 0 stale results, got %d", len(normal))
+	}
+
+	audit, err := st.QueryMemoriesIncludingStale(TierEntity, entityID, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audit) != 1 {
+		t.Fatalf("QueryMemoriesIncludingStale: expected 1, got %d", len(audit))
+	}
+}
+
+// TestQueryMemoriesIncludingStale_EmptyDB_ReturnsNil verifies no panic on empty store.
+func TestQueryMemoriesIncludingStale_EmptyDB_ReturnsNil(t *testing.T) {
+	st := openMemTestStore(t)
+
+	mems, err := st.QueryMemoriesIncludingStale("", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 0 {
+		t.Fatalf("expected 0, got %d", len(mems))
+	}
+}
+
+// TestSearchMemoriesIncludingStale_ReturnsStaledMemory verifies FTS also surfaces stale
+// when using the audit variant.
+func TestSearchMemoriesIncludingStale_ReturnsStaledMemory(t *testing.T) {
+	st := openMemTestStore(t)
+
+	_, err := st.InsertMemory(Memory{
+		Tier:    TierProject,
+		Content: "legacy auth handler was archived and removed from active codebase",
+		AgentID: "agent-audit",
+		Source:  SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Stale the memory directly via SQL (no entity anchor).
+	_, dbErr := st.db.Exec(`UPDATE memories SET stale = 1 WHERE content LIKE '%legacy auth handler%'`)
+	if dbErr != nil {
+		t.Fatal(dbErr)
+	}
+
+	// Normal search: 0 results.
+	normal, err := st.SearchMemories("legacy auth handler", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(normal) != 0 {
+		t.Fatalf("SearchMemories: expected 0 stale results, got %d", len(normal))
+	}
+
+	// Audit search: 1 result.
+	audit, err := st.SearchMemoriesIncludingStale("legacy auth handler", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audit) != 1 {
+		t.Fatalf("SearchMemoriesIncludingStale: expected 1, got %d", len(audit))
+	}
+}
+
+// TestQueryRecentSessionMemoriesIncludingStale_ReturnsStaledSession verifies the
+// session-log audit variant surfaces stale session memories.
+func TestQueryRecentSessionMemoriesIncludingStale_ReturnsStaledSession(t *testing.T) {
+	st := openMemTestStore(t)
+
+	_, err := st.InsertMemory(Memory{
+		Tier:    TierSessionLog,
+		Content: "session log: worked on deprecated auth module",
+		AgentID: "agent-audit",
+		Source:  SourceAuto,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Manually stale the session-log memory.
+	_, dbErr := st.db.Exec(`UPDATE memories SET stale = 1 WHERE tier = 'session_log'`)
+	if dbErr != nil {
+		t.Fatal(dbErr)
+	}
+
+	normal, err := st.QueryRecentSessionMemories("agent-audit", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(normal) != 0 {
+		t.Fatalf("QueryRecentSessionMemories: expected 0 stale, got %d", len(normal))
+	}
+
+	audit, err := st.QueryRecentSessionMemoriesIncludingStale("agent-audit", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audit) != 1 {
+		t.Fatalf("QueryRecentSessionMemoriesIncludingStale: expected 1, got %d", len(audit))
+	}
+}
+
+// TestMarkAnchoredMemoriesStale_PartialAnchorSurvival verifies that a memory with
+// two anchors is NOT staled when only one anchor is removed (the surviving anchor
+// means the belief is still partially valid).
+func TestMarkAnchoredMemoriesStale_PartialAnchorSurvival(t *testing.T) {
+	st := openMemTestStore(t)
+
+	memID, err := st.InsertMemoryWithAnchors(Memory{
+		Tier:    TierProject,
+		Content: "Store.Close and Graph.New share a lifecycle dependency",
+		Source:  SourceManual,
+	}, []string{"nodeA", "nodeB"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove only nodeA — nodeB still exists. Memory must NOT stale.
+	if err := st.MarkAnchoredMemoriesStale([]string{"nodeA"}, "nodeA removed"); err != nil {
+		t.Fatal(err)
+	}
+
+	mems, err := st.QueryMemories(TierProject, "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range mems {
+		if m.ID == memID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("memory with a surviving anchor should NOT be staled when only one anchor is removed")
+	}
+}
+
+// TestMarkAnchoredMemoriesStale_AllAnchorsRemoved verifies that a memory IS staled
+// when ALL its anchor nodes are in the removal batch.
+func TestMarkAnchoredMemoriesStale_AllAnchorsRemoved(t *testing.T) {
+	st := openMemTestStore(t)
+
+	memID, err := st.InsertMemoryWithAnchors(Memory{
+		Tier:    TierProject,
+		Content: "Store.Close and Graph.New share a lifecycle dependency",
+		Source:  SourceManual,
+	}, []string{"nodeA", "nodeB"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove both nodeA and nodeB in one batch — memory must stale.
+	if err := st.MarkAnchoredMemoriesStale([]string{"nodeA", "nodeB"}, "both nodes removed"); err != nil {
+		t.Fatal(err)
+	}
+
+	mems, err := st.QueryMemories(TierProject, "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range mems {
+		if m.ID == memID {
+			t.Fatal("memory with all anchors removed should be staled")
+		}
+	}
+
+	// Confirm it appears in audit query.
+	audit, err := st.QueryMemoriesIncludingStale(TierProject, "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range audit {
+		if m.ID == memID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("staled memory should appear in QueryMemoriesIncludingStale")
+	}
+}
+
+// TestMarkAnchoredMemoriesStale_SingleAnchorStales verifies that a memory with
+// exactly one anchor IS staled when that anchor is removed (single anchor = all anchors).
+func TestMarkAnchoredMemoriesStale_SingleAnchorStales(t *testing.T) {
+	st := openMemTestStore(t)
+
+	memID, err := st.InsertMemoryWithAnchors(Memory{
+		Tier:    TierProject,
+		Content: "Only anchored to nodeX",
+		Source:  SourceManual,
+	}, []string{"nodeX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.MarkAnchoredMemoriesStale([]string{"nodeX"}, "nodeX removed"); err != nil {
+		t.Fatal(err)
+	}
+
+	mems, err := st.QueryMemories(TierProject, "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range mems {
+		if m.ID == memID {
+			t.Fatal("single-anchor memory should be staled when its anchor is removed")
+		}
+	}
+}
+
 func TestQueryInvalidatedMemories_CapsAt10(t *testing.T) {
 	st := openMemTestStore(t)
 

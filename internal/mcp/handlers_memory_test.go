@@ -639,3 +639,111 @@ func TestSessionInit_InvalidatedMemories_PerAgentIsolation(t *testing.T) {
 		t.Error("agent-A should NOT see invalidated_memories on second call")
 	}
 }
+
+// ── AM-4: include_stale param on recall ──────────────────────────────────────
+
+// TestRecall_IncludeStale_False_ExcludesStaled verifies that recall() without
+// include_stale (default false) never returns stale memories — even when query matches.
+func TestRecall_IncludeStale_False_ExcludesStaled(t *testing.T) {
+	srv := newTestServer(t)
+
+	const entityID = "repo::sidecar.go::SidecarPort"
+	_, err := srv.store.InsertMemory(store.Memory{
+		Tier:     store.TierEntity,
+		Content:  "Deprecated sidecar port was 9090 before port remapping in v2.",
+		EntityID: entityID,
+		AgentID:  "agent-1",
+		Source:   store.SourceManual,
+	})
+	if err != nil {
+		t.Fatalf("InsertMemory: %v", err)
+	}
+
+	// Stale the memory via entity ID.
+	if err := srv.store.MarkEntityMemoriesStale(entityID, "node removed"); err != nil {
+		t.Fatalf("MarkEntityMemoriesStale: %v", err)
+	}
+
+	// recall without include_stale — should return nothing.
+	result, err := srv.handleRecall(ctx, callTool(map[string]any{
+		"query": "sidecar port",
+	}))
+	m := mustResult(t, result, err)
+	if m["memories"] != nil {
+		t.Errorf("recall(include_stale=false) should not return stale memories, got: %v", m["memories"])
+	}
+}
+
+// TestRecall_IncludeStale_True_ReturnsStaledMemory verifies that
+// recall(include_stale=true) returns stale memories for explicit audit.
+func TestRecall_IncludeStale_True_ReturnsStaledMemory(t *testing.T) {
+	srv := newTestServer(t)
+
+	const entityID = "repo::sidecar.go::SidecarPortV2"
+	_, err := srv.store.InsertMemory(store.Memory{
+		Tier:     store.TierEntity,
+		Content:  "Deprecated sidecar port was 9090 before port remapping in v2.",
+		EntityID: entityID,
+		AgentID:  "agent-1",
+		Source:   store.SourceManual,
+	})
+	if err != nil {
+		t.Fatalf("InsertMemory: %v", err)
+	}
+
+	// Stale the memory.
+	if err := srv.store.MarkEntityMemoriesStale(entityID, "node removed"); err != nil {
+		t.Fatalf("MarkEntityMemoriesStale: %v", err)
+	}
+
+	// recall with include_stale=true — should return the stale memory.
+	result, err := srv.handleRecall(ctx, callTool(map[string]any{
+		"query":         "sidecar port",
+		"include_stale": true,
+	}))
+	m := mustResult(t, result, err)
+	mems, ok := m["memories"].([]any)
+	if !ok || len(mems) == 0 {
+		t.Fatalf("recall(include_stale=true) expected stale memory in results, got: %v", m["memories"])
+	}
+}
+
+// TestRecall_Browse_IncludeStale_True_ReturnsStaledMemory verifies that
+// recall in browse mode (empty query) with include_stale=true also returns stale.
+func TestRecall_Browse_IncludeStale_True_ReturnsStaledMemory(t *testing.T) {
+	srv := newTestServer(t)
+
+	const entityID = "repo::config.go::OldConfig"
+	_, err := srv.store.InsertMemory(store.Memory{
+		Tier:     store.TierEntity,
+		Content:  "Old component config that was archived in refactor.",
+		EntityID: entityID,
+		AgentID:  "agent-browse",
+		Source:   store.SourceManual,
+	})
+	if err != nil {
+		t.Fatalf("InsertMemory: %v", err)
+	}
+
+	// Stale the memory.
+	if err := srv.store.MarkEntityMemoriesStale(entityID, "node removed"); err != nil {
+		t.Fatalf("MarkEntityMemoriesStale: %v", err)
+	}
+
+	// Browse without include_stale — stale memory absent.
+	result, err := srv.handleRecall(ctx, callTool(map[string]any{}))
+	m := mustResult(t, result, err)
+	if mems, ok := m["memories"].([]any); ok && len(mems) > 0 {
+		t.Errorf("browse(include_stale=false) should not return stale memories, got %d", len(mems))
+	}
+
+	// Browse with include_stale=true — stale memory present.
+	result2, err2 := srv.handleRecall(ctx, callTool(map[string]any{
+		"include_stale": true,
+	}))
+	m2 := mustResult(t, result2, err2)
+	mems2, ok2 := m2["memories"].([]any)
+	if !ok2 || len(mems2) == 0 {
+		t.Fatalf("browse(include_stale=true) expected stale memory in results, got: %v", m2["memories"])
+	}
+}

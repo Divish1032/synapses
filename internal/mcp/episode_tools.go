@@ -205,6 +205,8 @@ func (s *Server) handleRecall(
 		sinceDays = int(v)
 	}
 
+	includeStale, _ := req.GetArguments()["include_stale"].(bool)
+
 	// Browse mode: empty query = list chronologically (newest first).
 	if query == "" {
 		// Parse tags: accept comma-separated string or JSON array.
@@ -232,7 +234,12 @@ func (s *Server) handleRecall(
 		// Filter by agentID when provided (agent browsing their own history),
 		// otherwise return recent project/entity memories across all agents.
 		agentID := stringArg(req, "agent_id")
-		recentMems, _ := s.store.QueryMemories("", "", agentID, limit)
+		var recentMems []store.Memory
+		if includeStale {
+			recentMems, _ = s.store.QueryMemoriesIncludingStale("", "", agentID, limit)
+		} else {
+			recentMems, _ = s.store.QueryMemories("", "", agentID, limit)
+		}
 
 		summary := "no episodes found"
 		if len(episodes) > 0 || len(recentMems) > 0 {
@@ -275,7 +282,12 @@ func (s *Server) handleRecall(
 	// Search unified memories table (session_log, entity, project tiers).
 	// This surfaces everything written by end_session, annotate_node, remember(),
 	// which is invisible to the episodes-only search above.
-	memories, _ := s.store.SearchMemories(query, searchLimit)
+	var memories []store.Memory
+	if includeStale {
+		memories, _ = s.store.SearchMemoriesIncludingStale(query, searchLimit)
+	} else {
+		memories, _ = s.store.SearchMemories(query, searchLimit)
+	}
 
 	// Touch surfaced memories in background to renew TTL.
 	if len(memories) > 0 {
