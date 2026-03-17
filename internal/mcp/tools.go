@@ -1096,6 +1096,8 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 }
 
 // handleFindEntity returns all nodes whose name matches the query string.
+// Default format is "compact" (one line per match: "Name · type · file:line").
+// Pass format="json" for the full structured response.
 func (s *Server) handleFindEntity(
 	_ context.Context,
 	req mcp.CallToolRequest,
@@ -1103,6 +1105,10 @@ func (s *Server) handleFindEntity(
 	query, ok := req.GetArguments()["query"].(string)
 	if !ok || query == "" {
 		return mcp.NewToolResultError("query is required"), nil
+	}
+	format, _ := req.GetArguments()["format"].(string)
+	if format == "" {
+		format = "compact"
 	}
 
 	// Exact match first, then substring.
@@ -1178,6 +1184,24 @@ func (s *Server) handleFindEntity(
 		}
 		return results[i].File < results[j].File
 	})
+
+	if format == "compact" {
+		var sb strings.Builder
+		if len(results) == 0 {
+			sb.WriteString(fmt.Sprintf("No matches for %q.\nHint: try search(query=%q, mode=\"semantic\") for concept-based lookup, or get_file_context(file=\"...\") for a specific file.", query, query))
+			return mcp.NewToolResultText(sb.String()), nil
+		}
+		fmt.Fprintf(&sb, "%d match(es) for %q:\n", len(results), query)
+		for _, r := range results {
+			testMark := ""
+			if isTestFile(r.File) {
+				testMark = " (test)"
+			}
+			fmt.Fprintf(&sb, "  [%s] %s · %s:%d%s\n", r.Name, r.Type, r.File, r.Line, testMark)
+		}
+		sb.WriteString("Re-call get_context(entity=\"Name\") or add file= to pin to a specific file.")
+		return mcp.NewToolResultText(sb.String()), nil
+	}
 
 	result := map[string]interface{}{
 		"query":   query,
@@ -3903,6 +3927,15 @@ func (s *Server) handleSessionInit(
 		}); err != nil {
 			log.Printf("mcp: upsert agent context: %v", err)
 		}
+	}
+
+	// R6: response_tokens — estimate token cost of this response so agents can
+	// track how much context budget session_init is consuming. Computed by
+	// marshaling the response once, applying the 3.5 chars/token heuristic
+	// (len*2/7), then including the estimate in the final response.
+	// The field itself adds ~30 bytes (~9 tokens) — negligible vs the total.
+	if jsonBytes, err := json.Marshal(resp); err == nil {
+		resp["response_tokens"] = len(jsonBytes) * 2 / 7
 	}
 
 	return jsonResult(resp)

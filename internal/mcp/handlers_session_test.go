@@ -446,7 +446,7 @@ func TestHandleGetContext_WithCallers(t *testing.T) {
 
 func TestHandleFindEntity_ExactName(t *testing.T) {
 	s, _, _ := newPopulatedServer(t)
-	res, err := s.handleFindEntity(ctx, callTool(map[string]any{"query": "AuthLogin"}))
+	res, err := s.handleFindEntity(ctx, callTool(map[string]any{"query": "AuthLogin", "format": "json"}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "matches")
 	matches, _ := m["matches"].([]any)
@@ -457,7 +457,7 @@ func TestHandleFindEntity_ExactName(t *testing.T) {
 
 func TestHandleFindEntity_PartialName(t *testing.T) {
 	s, _, _ := newPopulatedServer(t)
-	res, err := s.handleFindEntity(ctx, callTool(map[string]any{"query": "Auth"}))
+	res, err := s.handleFindEntity(ctx, callTool(map[string]any{"query": "Auth", "format": "json"}))
 	m := mustResult(t, res, err)
 	matches, _ := m["matches"].([]any)
 	if len(matches) < 2 {
@@ -467,7 +467,7 @@ func TestHandleFindEntity_PartialName(t *testing.T) {
 
 func TestHandleFindEntity_NoResults_EmptyList(t *testing.T) {
 	s := newTestServer(t)
-	res, err := s.handleFindEntity(ctx, callTool(map[string]any{"query": "ZZZNoSuchEntity"}))
+	res, err := s.handleFindEntity(ctx, callTool(map[string]any{"query": "ZZZNoSuchEntity", "format": "json"}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "matches")
 }
