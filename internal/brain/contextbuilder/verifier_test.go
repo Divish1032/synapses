@@ -168,3 +168,109 @@ func TestVerifyPacket_InsightContradictionGoesToGraphWarnings(t *testing.T) {
 		t.Errorf("expected UNVERIFIED in concern for no-test claim when test exists, got: %s", pkt.Concerns[0])
 	}
 }
+
+// --- Additional coverage tests ---
+
+func TestVerifyClaim_HighCoupling_Verified(t *testing.T) {
+	topo := buildTopo(Request{CalleeNames: []string{"A", "B", "C", "D", "E", "F"}})
+
+	got := verifyClaim("This function has too many dependencies and is tightly coupled", topo)
+	if !strings.Contains(got, "[✓") {
+		t.Errorf("expected [✓] for verified high coupling, got: %s", got)
+	}
+	if !strings.Contains(got, "6 direct callee") {
+		t.Errorf("expected callees count in annotation, got: %s", got)
+	}
+}
+
+func TestVerifyClaim_HighCoupling_Contradicted(t *testing.T) {
+	topo := buildTopo(Request{CalleeNames: []string{"A", "B"}})
+
+	got := verifyClaim("This is tightly coupled with many dependencies", topo)
+	if !strings.Contains(got, "UNVERIFIED") {
+		t.Errorf("expected UNVERIFIED for low-coupling claim, got: %s", got)
+	}
+}
+
+func TestVerifyClaim_BlastRadius_Verified(t *testing.T) {
+	topo := buildTopo(Request{FanIn: 10, CallerNames: []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J"}})
+
+	got := verifyClaim("Changes to this function have wide ripple effect", topo)
+	if !strings.Contains(got, "[✓") {
+		t.Errorf("expected [✓] for verified blast radius, got: %s", got)
+	}
+}
+
+func TestVerifyClaim_BlastRadius_Contradicted(t *testing.T) {
+	topo := buildTopo(Request{FanIn: 1, CallerNames: []string{"A"}})
+
+	got := verifyClaim("This causes a wide ripple effect when changed", topo)
+	if !strings.Contains(got, "UNVERIFIED") {
+		t.Errorf("expected UNVERIFIED for low-fanin blast claim, got: %s", got)
+	}
+}
+
+func TestInsightContradictions_OrphanClaim_Contradicted(t *testing.T) {
+	topo := buildTopo(Request{FanIn: 5, CalleeNames: []string{"A", "B"}})
+	warn := insightContradictions("This orphan node has no dependencies or callers.", topo)
+	if warn == "" {
+		t.Error("expected contradiction for false orphan claim, got empty")
+	}
+	if !strings.Contains(warn, "INSIGHT UNVERIFIED") {
+		t.Errorf("expected INSIGHT UNVERIFIED, got: %s", warn)
+	}
+}
+
+func TestInsightContradictions_MultipleContradictions(t *testing.T) {
+	topo := buildTopo(Request{FanIn: 1, HasTests: false, CalleeNames: []string{"A"}})
+	// Claim both "hub" (false) and "no tests" (true)
+	warn := insightContradictions("This is a hub with many callers and no test coverage.", topo)
+	if !strings.Contains(warn, "INSIGHT UNVERIFIED") {
+		t.Errorf("expected INSIGHT UNVERIFIED for multiple contradictions, got: %s", warn)
+	}
+	// Should contain hub contradiction but not test contradiction
+	if !strings.Contains(warn, "hub") {
+		t.Errorf("expected hub contradiction mentioned, got: %s", warn)
+	}
+}
+
+func TestInsightContradictions_NoTestClaimFalse(t *testing.T) {
+	topo := buildTopo(Request{HasTests: true})
+	warn := insightContradictions("This function is untested and has no test file.", topo)
+	if !strings.Contains(warn, "INSIGHT UNVERIFIED") {
+		t.Errorf("expected contradiction for no-test claim when tests exist, got: %s", warn)
+	}
+	if !strings.Contains(warn, "no-test") {
+		t.Errorf("expected no-test in warning, got: %s", warn)
+	}
+}
+
+func TestContainsAny_MultipleMatches(t *testing.T) {
+	result := containsAny("This function is tightly coupled and has high coupling issues", "coupling", "tightly")
+	if !result {
+		t.Error("expected containsAny to return true when multiple substrings match")
+	}
+}
+
+func TestContainsAny_NoMatches(t *testing.T) {
+	result := containsAny("This is a simple function", "cycle", "hub", "gravity")
+	if result {
+		t.Error("expected containsAny to return false when no substrings match")
+	}
+}
+
+func TestContainsAny_EmptyString(t *testing.T) {
+	result := containsAny("", "anything")
+	if result {
+		t.Error("expected containsAny to return false for empty string")
+	}
+}
+
+func TestVerifyClaim_CaseInsensitive(t *testing.T) {
+	topo := buildTopo(Request{HasTests: false})
+	// Test with mixed case
+	got := verifyClaim("NO TEST coverage exists here", topo)
+	if !strings.Contains(got, "[✓") {
+		t.Errorf("expected case-insensitive matching, got: %s", got)
+	}
+}

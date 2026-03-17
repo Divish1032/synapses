@@ -2,6 +2,7 @@ package contextbuilder
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/brain/store"
@@ -215,4 +216,74 @@ func TestBuildReason_BothEmpty(t *testing.T) {
 	// buildReason should not panic and should return a string (possibly empty)
 	reason := buildReason(req)
 	_ = reason // value may be empty; just verify no panic
+}
+
+func TestBuildReason_ActionAndPhaseFormatting(t *testing.T) {
+	req := DecisionInput{
+		Action: "test",
+		Phase:  "verification",
+	}
+	reason := buildReason(req)
+	if reason != "test during verification" {
+		t.Errorf("expected 'test during verification', got: %q", reason)
+	}
+}
+
+func TestRecordDecision_UpsertPatternErrors(t *testing.T) {
+	// Test that pattern upsert errors are aggregated and returned
+	st := openTestStore(t)
+	l := NewLearner(st)
+
+	// Close the store to trigger errors on UpsertPattern calls
+	st.Close()
+
+	req := DecisionInput{
+		AgentID:         "agent-error",
+		Phase:           "implement",
+		EntityName:      "ErrorFunc",
+		Action:          "edit",
+		RelatedEntities: []string{"OtherFunc"},
+		Outcome:         "success",
+		Notes:           "",
+	}
+
+	err := l.RecordDecision(req)
+	// Should return an error due to closed store
+	if err == nil {
+		t.Error("expected error when store is closed, got nil")
+	}
+	if !strings.Contains(err.Error(), "pattern upsert errors") {
+		t.Errorf("expected 'pattern upsert errors' in message, got: %v", err)
+	}
+}
+
+func TestRecordDecision_MultipleRelatedEntities(t *testing.T) {
+	st := openTestStore(t)
+	l := NewLearner(st)
+
+	req := DecisionInput{
+		AgentID:         "agent-multi",
+		Phase:           "implement",
+		EntityName:      "MainEntity",
+		Action:          "refactor",
+		RelatedEntities: []string{"RelatedA", "RelatedB", "RelatedC", "RelatedD"},
+		Outcome:         "success",
+		Notes:           "multiple related entities",
+	}
+
+	err := l.RecordDecision(req)
+	if err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+
+	// Verify bidirectional patterns were written
+	patterns := st.GetPatternsForTriggers([]string{"MainEntity", "RelatedA", "RelatedB", "RelatedC", "RelatedD"}, 100)
+	if len(patterns) == 0 {
+		t.Error("expected patterns to be written for multiple related entities")
+	}
+
+	// Should have at least 8 patterns: 4 related entities × 2 directions
+	if len(patterns) < 8 {
+		t.Errorf("expected at least 8 patterns (4×2), got %d", len(patterns))
+	}
 }
