@@ -134,11 +134,51 @@ type section struct {
 }
 
 // extractSections parses ATX headings and collects body text between them.
+// Headings inside fenced code blocks (``` or ~~~) are skipped per CommonMark.
+// Duplicate heading names within a file are disambiguated by appending a
+// counter suffix so each Section gets a stable, unique node ID.
 func extractSections(src []byte) []section {
 	lines := strings.Split(string(src), "\n")
 	var sections []section
 
+	inFence := false
+	var fenceChar byte // '`' or '~'
 	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Detect fenced code block open/close (``` or ~~~, 3+ chars).
+		if !inFence {
+			if len(trimmed) >= 3 && (trimmed[0] == '`' || trimmed[0] == '~') {
+				allSame := true
+				ch := trimmed[0]
+				for j := 1; j < 3; j++ {
+					if trimmed[j] != ch {
+						allSame = false
+						break
+					}
+				}
+				if allSame {
+					inFence = true
+					fenceChar = ch
+					continue
+				}
+			}
+		} else {
+			// Inside a fence: look for the closing delimiter (same char, 3+).
+			if len(trimmed) >= 3 && trimmed[0] == fenceChar {
+				allSame := true
+				for j := 1; j < 3; j++ {
+					if trimmed[j] != fenceChar {
+						allSame = false
+						break
+					}
+				}
+				if allSame {
+					inFence = false
+					fenceChar = 0
+				}
+			}
+			continue // skip all lines inside a fence
+		}
 		depth, title := parseATXHeading(line)
 		if depth == 0 {
 			continue
@@ -148,6 +188,17 @@ func extractSections(src []byte) []section {
 			Depth: depth,
 			Line:  i + 1, // 1-based
 		})
+	}
+
+	// Disambiguate duplicate heading titles within the file so each section
+	// gets a unique name (and thus a unique node ID).
+	titleCount := make(map[string]int, len(sections))
+	for i := range sections {
+		base := sections[i].Title
+		titleCount[base]++
+		if titleCount[base] > 1 {
+			sections[i].Title = fmt.Sprintf("%s (%d)", base, titleCount[base])
+		}
 	}
 
 	// Fill in body text for each section: everything between this heading

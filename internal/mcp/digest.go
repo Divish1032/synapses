@@ -104,16 +104,24 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 	}
 
 	// R31: Documentation sections linked to this code entity.
-	if len(dc.Documentation) > 0 {
-		parts := make([]string, 0, len(dc.Documentation))
-		for _, d := range dc.Documentation {
-			title := d.Node.Metadata["title"]
-			if title == "" {
-				title = d.Node.Name
-			}
-			parts = append(parts, fmt.Sprintf("%q (%s)", title, filepath.Base(d.Node.File)))
+	// Each entry shows: title (file) — body_preview so agents can read the content.
+	for _, d := range dc.Documentation {
+		title := d.Node.Metadata["title"]
+		if title == "" {
+			title = d.Node.Name
 		}
-		fmt.Fprintf(&b, "📖 Docs: %s\n", strings.Join(parts, " · "))
+		preview := d.Node.Metadata["body_preview"]
+		if preview == "" {
+			preview = d.Node.Metadata["body"]
+		}
+		if len(preview) > 120 {
+			preview = preview[:120] + "…"
+		}
+		if preview != "" {
+			fmt.Fprintf(&b, "📖 %q (%s): %s\n", title, filepath.Base(d.Node.File), preview)
+		} else {
+			fmt.Fprintf(&b, "📖 %q (%s)\n", title, filepath.Base(d.Node.File))
+		}
 	}
 
 	// "summary" level: just the root header + warnings. Stop here.
