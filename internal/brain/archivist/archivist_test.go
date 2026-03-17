@@ -380,3 +380,125 @@ func TestMemorize_RetryMock_SecondCallReturnsData(t *testing.T) {
 		t.Errorf("Key = %q, want retry-hit", resp2.NewMemories[0].Key)
 	}
 }
+
+// --- parseEntities: direct unit tests ---
+
+func TestParseEntities_EmptyRaw(t *testing.T) {
+	t.Parallel()
+	result := parseEntities(nil)
+	if result != nil {
+		t.Errorf("parseEntities(nil) = %v, want nil", result)
+	}
+	result = parseEntities([]byte{})
+	if result != nil {
+		t.Errorf("parseEntities([]) = %v, want nil", result)
+	}
+}
+
+func TestParseEntities_ArrayFormat(t *testing.T) {
+	t.Parallel()
+	// Valid JSON array of strings.
+	raw := []byte(`["Service1","Service2","Service3"]`)
+	result := parseEntities(raw)
+	if len(result) != 3 || result[0] != "Service1" || result[1] != "Service2" || result[2] != "Service3" {
+		t.Errorf("parseEntities(array) = %v, want [Service1 Service2 Service3]", result)
+	}
+}
+
+func TestParseEntities_ArrayWithEmptyStrings(t *testing.T) {
+	t.Parallel()
+	// Array with empty strings should still be returned as-is.
+	raw := []byte(`["Service1","","Service2"]`)
+	result := parseEntities(raw)
+	if len(result) != 3 {
+		t.Errorf("parseEntities(array with empty) = len %d, want 3", len(result))
+	}
+	if result[1] != "" {
+		t.Errorf("result[1] = %q, want empty string", result[1])
+	}
+}
+
+func TestParseEntities_EmptyArray(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`[]`)
+	result := parseEntities(raw)
+	if result == nil {
+		t.Error("parseEntities([]) should return empty slice, not nil")
+	}
+	if len(result) != 0 {
+		t.Errorf("parseEntities([]) = len %d, want 0", len(result))
+	}
+}
+
+func TestParseEntities_StringFormatNoWhitespace(t *testing.T) {
+	t.Parallel()
+	// Simple comma-separated string.
+	raw := []byte(`"Service1,Service2,Service3"`)
+	result := parseEntities(raw)
+	if len(result) != 3 || result[0] != "Service1" || result[1] != "Service2" || result[2] != "Service3" {
+		t.Errorf("parseEntities(string) = %v, want [Service1 Service2 Service3]", result)
+	}
+}
+
+func TestParseEntities_StringFormatWithWhitespace(t *testing.T) {
+	t.Parallel()
+	// String with leading/trailing spaces in parts.
+	raw := []byte(`"Service1 , Service2 , Service3"`)
+	result := parseEntities(raw)
+	if len(result) != 3 || result[0] != "Service1" || result[1] != "Service2" || result[2] != "Service3" {
+		t.Errorf("parseEntities(string with spaces) = %v, want [Service1 Service2 Service3]", result)
+	}
+}
+
+func TestParseEntities_StringWithEmptyParts(t *testing.T) {
+	t.Parallel()
+	// String with empty parts (multiple commas) should skip empty after trim.
+	raw := []byte(`"Service1,,Service2, , Service3"`)
+	result := parseEntities(raw)
+	if len(result) != 3 || result[0] != "Service1" || result[1] != "Service2" || result[2] != "Service3" {
+		t.Errorf("parseEntities(string with empty parts) = %v, want [Service1 Service2 Service3]", result)
+	}
+}
+
+func TestParseEntities_EmptyStringValue(t *testing.T) {
+	t.Parallel()
+	// Empty string should not enter the split logic (caught by s != "" check).
+	raw := []byte(`""`)
+	result := parseEntities(raw)
+	if result != nil {
+		t.Errorf("parseEntities(\"\") = %v, want nil", result)
+	}
+}
+
+func TestParseEntities_StringWithOnlyWhitespace(t *testing.T) {
+	t.Parallel()
+	// String with only whitespace parts.
+	raw := []byte(`"   ,  ,   "`)
+	result := parseEntities(raw)
+	if result == nil {
+		t.Error("parseEntities(whitespace-only string) should return empty slice, not nil")
+	}
+	if len(result) != 0 {
+		t.Errorf("parseEntities(whitespace-only) = len %d, want 0", len(result))
+	}
+}
+
+func TestParseEntities_InvalidJSON(t *testing.T) {
+	t.Parallel()
+	// Invalid JSON that unmarshal can't parse (neither array nor string).
+	raw := []byte(`{not valid json}`)
+	result := parseEntities(raw)
+	if result != nil {
+		t.Errorf("parseEntities(invalid) = %v, want nil", result)
+	}
+}
+
+func TestParseEntities_NumericJSON(t *testing.T) {
+	t.Parallel()
+	// JSON number (not string, not array) should fail both unmarshal attempts.
+	raw := []byte(`123`)
+	result := parseEntities(raw)
+	if result != nil {
+		t.Errorf("parseEntities(numeric) = %v, want nil", result)
+	}
+}
