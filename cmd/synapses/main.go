@@ -1032,6 +1032,10 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig) (*g
 	if ni := resolver.ResolveImplementsEdges(g); ni > 0 {
 		fmt.Fprintf(os.Stderr, "synapses: resolved %d IMPLEMENTS edges\n", ni)
 	}
+	// R31: resolve documentation → code entity links (EXPLAINS/DOCUMENTED_BY).
+	if nd := resolver.ResolveDocEdges(g); nd > 0 {
+		fmt.Fprintf(os.Stderr, "synapses: resolved %d EXPLAINS edges\n", nd)
+	}
 
 	if st != nil && len(mtimes) > 0 {
 		if saveErr := st.SaveFileMtimes(mtimes); saveErr != nil {
@@ -1087,6 +1091,10 @@ func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfi
 		fmt.Fprintf(os.Stderr, "synapses: resolved %d CALLS edges\n", n)
 		if ni := resolver.ResolveImplementsEdges(g); ni > 0 {
 			fmt.Fprintf(os.Stderr, "synapses: resolved %d IMPLEMENTS edges\n", ni)
+		}
+		// R31: re-resolve doc edges after incremental reparse.
+		if nd := resolver.ResolveDocEdges(g); nd > 0 {
+			fmt.Fprintf(os.Stderr, "synapses: resolved %d EXPLAINS edges\n", nd)
 		}
 	}
 

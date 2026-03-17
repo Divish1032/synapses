@@ -35,10 +35,20 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 	// Root entity header + summary.
 	writeNodeHeader(&b, dc.Root, getRootSummary(dc.Root, dc.ContextPacket))
 
-	// BUG-EVAL-9: disambiguation warning — shown when multiple entities share the same name.
+	// BUG-EVAL-9: disambiguation — list all candidate files so the agent has
+	// exact file= values to copy into a follow-up get_context call.
+	// dc.Root.File is repo-relative (normalizeSubgraph strips repoRoot prefix);
+	// OtherCandidates["file"] is also repo-relative (stripped at build time).
 	if len(dc.OtherCandidates) > 0 {
-		fmt.Fprintf(&b, "⚠ %d entities named %q — showing best match (file=%s). Re-call with file= to pin.\n",
-			len(dc.OtherCandidates), dc.Root.Name, filepath.Base(dc.Root.File))
+		fmt.Fprintf(&b, "⚠ %d entities named %q — re-call with file= to pin:\n", len(dc.OtherCandidates), dc.Root.Name)
+		for _, c := range dc.OtherCandidates {
+			file, _ := c["file"].(string)
+			marker := ""
+			if file == dc.Root.File {
+				marker = " ← shown"
+			}
+			fmt.Fprintf(&b, "  • file=%q%s\n", file, marker)
+		}
 	}
 
 	// R3: Git blame line — who last touched this function and how stale it is.
@@ -91,6 +101,19 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		for _, a := range anns {
 			fmt.Fprintf(&b, "\U0001f4dd %s\n", a.Note)
 		}
+	}
+
+	// R31: Documentation sections linked to this code entity.
+	if len(dc.Documentation) > 0 {
+		parts := make([]string, 0, len(dc.Documentation))
+		for _, d := range dc.Documentation {
+			title := d.Node.Metadata["title"]
+			if title == "" {
+				title = d.Node.Name
+			}
+			parts = append(parts, fmt.Sprintf("%q (%s)", title, filepath.Base(d.Node.File)))
+		}
+		fmt.Fprintf(&b, "📖 Docs: %s\n", strings.Join(parts, " · "))
 	}
 
 	// "summary" level: just the root header + warnings. Stop here.

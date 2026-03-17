@@ -368,6 +368,74 @@ func TestSerializeCompact_WithAnnotations(t *testing.T) {
 	}
 }
 
+func TestSerializeCompact_WithDocumentation(t *testing.T) {
+	dc := newTestDC()
+	dc.Documentation = []graph.CarvedNode{
+		{
+			Node: &graph.Node{
+				ID:   "test::docs.md::docs.md § Architecture",
+				Type: graph.NodeSection,
+				Name: "docs.md § Architecture",
+				File: "docs.md",
+				Line: 5,
+				Metadata: map[string]string{
+					"title": "Architecture",
+					"depth": "2",
+				},
+				Domain: graph.DomainDocs,
+			},
+			Relevance: 0.6,
+			Hop:       1,
+		},
+	}
+	out := serializeCompact(dc, "full")
+	if !strings.Contains(out, "📖 Docs:") {
+		t.Error("expected 📖 Docs section in output")
+	}
+	if !strings.Contains(out, "\"Architecture\"") {
+		t.Error("expected section title in output")
+	}
+	if !strings.Contains(out, "docs.md") {
+		t.Error("expected file name in output")
+	}
+}
+
+func TestSerializeCompact_WithDocumentation_SummaryLevel(t *testing.T) {
+	dc := newTestDC()
+	dc.Documentation = []graph.CarvedNode{
+		{
+			Node: &graph.Node{
+				ID:   "test::docs.md::docs.md § API",
+				Type: graph.NodeSection,
+				Name: "docs.md § API",
+				File: "docs.md",
+				Line: 1,
+				Metadata: map[string]string{
+					"title": "API",
+					"depth": "1",
+				},
+				Domain: graph.DomainDocs,
+			},
+			Relevance: 0.5,
+			Hop:       1,
+		},
+	}
+	// Documentation should appear even at summary level.
+	out := serializeCompact(dc, "summary")
+	if !strings.Contains(out, "📖 Docs:") {
+		t.Error("expected 📖 Docs section at summary level")
+	}
+}
+
+func TestSerializeCompact_NoDocumentation(t *testing.T) {
+	dc := newTestDC()
+	dc.Documentation = nil
+	out := serializeCompact(dc, "full")
+	if strings.Contains(out, "📖 Docs:") {
+		t.Error("📖 Docs should not appear when no documentation")
+	}
+}
+
 // ── brain_tools.go: nil-brain paths ──────────────────────────────────────────
 
 func TestHandleUpsertADR_NoBrain(t *testing.T) {

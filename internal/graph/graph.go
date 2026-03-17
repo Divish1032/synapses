@@ -343,6 +343,19 @@ func (g *Graph) AllNodes() []*Node {
 	return out
 }
 
+// FindByType returns all nodes of the given NodeType.
+func (g *Graph) FindByType(t NodeType) []*Node {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var out []*Node
+	for _, n := range g.nodes {
+		if n.Type == t {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // NodesForFile returns all nodes whose source file matches the given path.
 // Used by the watcher to migrate stable IDs after a re-parse.
 func (g *Graph) NodesForFile(file string) []*Node {

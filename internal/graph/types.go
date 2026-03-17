@@ -19,6 +19,10 @@ const (
 	// It represents an HTTP/RPC route registration (e.g. "GET /api/users").
 	// Not present in the AST — synthesised from framework registration patterns.
 	NodeRoute NodeType = "route"
+	// NodeSection is a documentation section extracted from a markdown file (R31).
+	// Each ATX heading (# through ######) becomes a Section node with metadata:
+	// title, depth (1-6), body_preview (first 200 chars), body (up to 2000 chars).
+	NodeSection NodeType = "section"
 )
 
 // EdgeType classifies the relationship between two nodes.
@@ -39,6 +43,19 @@ const (
 	// Represents framework routing registration: "this route dispatches to this handler."
 	// Confidence is stored in the route node's metadata (key "confidence").
 	EdgeHandles EdgeType = "HANDLES"
+	// R31: Documentation graph edges.
+	// EdgeContains links a document file to its section nodes (doc→section)
+	// and parent sections to child subsections (section→subsection).
+	EdgeContains EdgeType = "CONTAINS"
+	// EdgeExplains links a documentation section to a code entity it describes.
+	// Direction: Section → code entity. Created by ResolveDocEdges post-parse.
+	EdgeExplains EdgeType = "EXPLAINS"
+	// EdgeDocumentedBy is the reverse of EXPLAINS: code entity → Section.
+	// Enables get_context to surface documentation for any queried code entity.
+	EdgeDocumentedBy EdgeType = "DOCUMENTED_BY"
+	// EdgeLinksTo connects document nodes via markdown [text](path.md) links.
+	// Direction: source document/section → target document node.
+	EdgeLinksTo EdgeType = "LINKS_TO"
 )
 
 // DefaultEdgeWeights defines the semantic significance of each edge type.
@@ -59,6 +76,16 @@ var DefaultEdgeWeights = map[EdgeType]float64{
 	// EdgeHandles: inferred framework routing edges. High weight so that
 	// route→handler paths surface prominently in context carving.
 	EdgeHandles: 0.9,
+	// R31: Documentation edge weights.
+	// CONTAINS is structural (doc→section), low weight like DEFINES.
+	EdgeContains: 0.15,
+	// EXPLAINS has moderate weight: doc sections explaining code are valuable context.
+	EdgeExplains: 0.7,
+	// DOCUMENTED_BY is the reverse: code entity → doc section. Slightly lower
+	// so code-to-code edges are preferred when the token budget is tight.
+	EdgeDocumentedBy: 0.6,
+	// LINKS_TO is cross-doc navigation, lowest semantic weight.
+	EdgeLinksTo: 0.3,
 }
 
 // NodeID is a composite identifier with the format: "repoID::file::name".
@@ -192,84 +219,91 @@ type CarveConfig struct {
 // Agents modifying code need to see what they will break (dependencies).
 // IMPLEMENTS is reduced — the focus is behavioral, not contractual.
 var intentModifyWeights = map[EdgeType]float64{
-	EdgeCalls:      1.0,
-	EdgeDataFlows:  0.95,
-	EdgeImplements: 0.6,
-	EdgeEmbeds:     0.75,
-	EdgeDependsOn:  0.8,
-	EdgeImports:    0.6,
-	EdgeExports:    0.4,
-	EdgeDefines:    0.15,
-	EdgeHandles:    0.9,
+	EdgeCalls:        1.0,
+	EdgeDataFlows:    0.95,
+	EdgeImplements:   0.6,
+	EdgeEmbeds:       0.75,
+	EdgeDependsOn:    0.8,
+	EdgeImports:      0.6,
+	EdgeExports:      0.4,
+	EdgeDefines:      0.15,
+	EdgeHandles:      0.9,
+	EdgeContains:     0.15,
+	EdgeExplains:     0.5,
+	EdgeDocumentedBy: 0.4,
+	EdgeLinksTo:      0.2,
 }
 
 // intentDebugWeights boosts DATA_FLOWS and DEPENDS_ON for the "debug" intent.
 // Combined with negative DirectionBoost, callers (upstream triggers) are preferred.
 var intentDebugWeights = map[EdgeType]float64{
-	EdgeCalls:      1.0,
-	EdgeDataFlows:  1.1,
-	EdgeImplements: 0.7,
-	EdgeEmbeds:     0.65,
-	EdgeDependsOn:  0.95,
-	EdgeImports:    0.5,
-	EdgeExports:    0.4,
-	EdgeDefines:    0.15,
-	EdgeHandles:    0.9,
+	EdgeCalls:        1.0,
+	EdgeDataFlows:    1.1,
+	EdgeImplements:   0.7,
+	EdgeEmbeds:       0.65,
+	EdgeDependsOn:    0.95,
+	EdgeImports:      0.5,
+	EdgeExports:      0.4,
+	EdgeDefines:      0.15,
+	EdgeHandles:      0.9,
+	EdgeContains:     0.15,
+	EdgeExplains:     0.5,
+	EdgeDocumentedBy: 0.4,
+	EdgeLinksTo:      0.2,
 }
 
 // intentReviewWeights boosts IMPLEMENTS and EMBEDS for the "review" intent.
 // Code review is about contract surface, interface compliance, and test coverage.
 var intentReviewWeights = map[EdgeType]float64{
-	EdgeCalls:      0.8,
-	EdgeDataFlows:  1.0,
-	EdgeImplements: 1.2,
-	EdgeEmbeds:     1.0,
-	EdgeDependsOn:  0.7,
-	EdgeImports:    0.5,
-	EdgeExports:    0.6,
-	EdgeDefines:    0.15,
-	EdgeHandles:    0.9,
-}
-
-// intentUnderstandWeights is the same as DefaultEdgeWeights — balanced for exploration.
-var intentUnderstandWeights = map[EdgeType]float64{
-	EdgeCalls:      1.0,
-	EdgeDataFlows:  0.95,
-	EdgeImplements: 0.9,
-	EdgeEmbeds:     0.85,
-	EdgeDependsOn:  0.8,
-	EdgeImports:    0.7,
-	EdgeExports:    0.5,
-	EdgeDefines:    0.15,
-	EdgeHandles:    0.9,
+	EdgeCalls:        0.8,
+	EdgeDataFlows:    1.0,
+	EdgeImplements:   1.2,
+	EdgeEmbeds:       1.0,
+	EdgeDependsOn:    0.7,
+	EdgeImports:      0.5,
+	EdgeExports:      0.6,
+	EdgeDefines:      0.15,
+	EdgeHandles:      0.9,
+	EdgeContains:     0.15,
+	EdgeExplains:     0.7,
+	EdgeDocumentedBy: 0.6,
+	EdgeLinksTo:      0.3,
 }
 
 // intentAddWeights boosts IMPORTS and IMPLEMENTS for the "add" intent.
 // Agents adding new code need to follow existing import patterns and interfaces.
 var intentAddWeights = map[EdgeType]float64{
-	EdgeCalls:      0.7,
-	EdgeDataFlows:  0.8,
-	EdgeImplements: 1.0,
-	EdgeEmbeds:     0.9,
-	EdgeDependsOn:  0.9,
-	EdgeImports:    0.85,
-	EdgeExports:    0.65,
-	EdgeDefines:    0.15,
-	EdgeHandles:    0.9,
+	EdgeCalls:        0.7,
+	EdgeDataFlows:    0.8,
+	EdgeImplements:   1.0,
+	EdgeEmbeds:       0.9,
+	EdgeDependsOn:    0.9,
+	EdgeImports:      0.85,
+	EdgeExports:      0.65,
+	EdgeDefines:      0.15,
+	EdgeHandles:      0.9,
+	EdgeContains:     0.15,
+	EdgeExplains:     0.7,
+	EdgeDocumentedBy: 0.6,
+	EdgeLinksTo:      0.3,
 }
 
 // intentPlanWeights boosts IMPLEMENTS and DEPENDS_ON for the "plan" intent.
 // Planning requires understanding interface contracts and dependency scope.
 var intentPlanWeights = map[EdgeType]float64{
-	EdgeCalls:      1.0,
-	EdgeDataFlows:  0.9,
-	EdgeImplements: 1.1,
-	EdgeEmbeds:     0.85,
-	EdgeDependsOn:  0.95,
-	EdgeImports:    0.7,
-	EdgeExports:    0.6,
-	EdgeDefines:    0.15,
-	EdgeHandles:    0.9,
+	EdgeCalls:        1.0,
+	EdgeDataFlows:    0.9,
+	EdgeImplements:   1.1,
+	EdgeEmbeds:       0.85,
+	EdgeDependsOn:    0.95,
+	EdgeImports:      0.7,
+	EdgeExports:      0.6,
+	EdgeDefines:      0.15,
+	EdgeHandles:      0.9,
+	EdgeContains:     0.15,
+	EdgeExplains:     0.8,
+	EdgeDocumentedBy: 0.7,
+	EdgeLinksTo:      0.3,
 }
 
 // IntentCarveWeights returns the pre-allocated edge weight map for the given
@@ -284,7 +318,7 @@ func IntentCarveWeights(intent string) map[EdgeType]float64 {
 	case "review":
 		return intentReviewWeights
 	case "understand":
-		return intentUnderstandWeights
+		return DefaultEdgeWeights
 	case "add":
 		return intentAddWeights
 	case "plan":
