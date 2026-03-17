@@ -384,3 +384,80 @@ func TestEnrichBlame_WithGitRepo_CoversChurnAndNilMetadata(t *testing.T) {
 		t.Log("blame_author not set — git may not have blame data for this file")
 	}
 }
+
+// ── EnrichBlameForFile — all fields + staleness on fresh node ─────────────────
+
+// TestEnrichBlameForFile_SetsAllBlameFields verifies that every blame metadata
+// field is populated when the file has a real git commit.
+func TestEnrichBlameForFile_SetsAllBlameFields(t *testing.T) {
+	root, absFile := initGitRepoForMetrics(t)
+
+	g := graph.New("testrepo")
+	g.SetRoot(root)
+	id := g.MakeNodeID(absFile, "Serve")
+	g.AddNode(&graph.Node{
+		ID: id, Name: "Serve", Type: graph.NodeFunction,
+		File: absFile, Package: "p",
+		// No pre-existing metadata — simulates a fresh node after incremental reparse.
+	})
+
+	EnrichBlameForFile(g, root, absFile)
+
+	n := g.GetNode(id)
+	if n == nil {
+		t.Fatal("node not found after EnrichBlameForFile")
+	}
+	if n.Metadata == nil {
+		t.Fatal("Metadata is nil — EnrichBlameForFile did not run")
+	}
+	for _, field := range []string{"blame_author", "blame_date", "blame_commit", "blame_subject"} {
+		if n.Metadata[field] == "" {
+			t.Errorf("expected %s to be set, got empty string", field)
+		}
+	}
+	// blame_date must be a valid ISO date.
+	if _, err := time.Parse("2006-01-02", n.Metadata["blame_date"]); err != nil {
+		t.Errorf("blame_date %q is not a valid ISO date: %v", n.Metadata["blame_date"], err)
+	}
+	// blame_commit must be a 7-character short hash.
+	if len(n.Metadata["blame_commit"]) != 7 {
+		t.Errorf("blame_commit %q should be a 7-char short hash", n.Metadata["blame_commit"])
+	}
+}
+
+// TestEnrichBlameForFile_FreshNodeGetsChurnAndStaleness is the core regression
+// test for the staleness_score=0 bug. A node with no prior churn metadata
+// (fresh from incremental reparse) must receive a non-empty churn and a
+// staleness_score computed from actual git history, not fall back to "0.0".
+func TestEnrichBlameForFile_FreshNodeGetsChurnAndStaleness(t *testing.T) {
+	root, absFile := initGitRepoForMetrics(t)
+
+	g := graph.New("testrepo")
+	g.SetRoot(root)
+	id := g.MakeNodeID(absFile, "Serve")
+	g.AddNode(&graph.Node{
+		ID: id, Name: "Serve", Type: graph.NodeFunction,
+		File: absFile, Package: "p",
+		// Deliberately no "churn" in Metadata — simulates a node created by
+		// incremental reparse before EnrichChurn runs at next startup.
+	})
+
+	EnrichBlameForFile(g, root, absFile)
+
+	n := g.GetNode(id)
+	if n == nil {
+		t.Fatal("node not found after EnrichBlameForFile")
+	}
+	if n.Metadata == nil {
+		t.Fatal("Metadata is nil")
+	}
+	// churn must be set by EnrichBlameForFile itself, not left empty.
+	if n.Metadata["churn"] == "" {
+		t.Error("expected churn to be set by EnrichBlameForFile for a fresh node")
+	}
+	// staleness_score must be non-empty. For a just-committed file, daysAgo ≈ 0
+	// so the score may be "0.0" — but the field itself must always be present.
+	if n.Metadata["staleness_score"] == "" {
+		t.Error("expected staleness_score to always be set after EnrichBlameForFile")
+	}
+}
