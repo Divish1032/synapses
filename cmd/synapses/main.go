@@ -1609,6 +1609,24 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 | See recent file/task/annotation events | ` + "`get_events(since_seq=N)`" + ` (use latest_event_seq from session_init) |
 | See all active agents | ` + "`get_agents()`" + ` |
 
+### Memory Tiers
+
+Three tiers govern where information lives. Use the wrong tier and data goes stale silently or costs an unnecessary tool call.
+
+| Tier | What belongs here | How to store | How to query |
+|---|---|---|---|
+| **Tier 1 — Live** | Project structure, active components, file topology, recent changes | Never store — always live | ` + "`session_init()`" + `, ` + "`get_repo_map()`" + `, ` + "`get_file_context()`" + ` |
+| **Tier 2 — Anchored** | Knowledge about code entities, architectural facts derived from the graph, task context | ` + "`remember(content=\"...\", anchor_nodes=[\"node_id\"])`" + ` | ` + "`recall(query=\"...\")`" + ` |
+| **Tier 3 — Durable** | User preferences, feedback, non-derivable motivations and decisions | Write to ` + "`MEMORY.md`" + ` | Loaded automatically into every session |
+
+Tier 2 memories auto-invalidate when their anchored graph nodes change or disappear — surfaced as ` + "`invalidated_memories`" + ` in ` + "`session_init`" + `.
+
+**Never write these to MEMORY.md (wrong tier):**
+- ` + "❌" + ` Which sub-projects or components are active/archived — query ` + "`session_init()`" + ` or ` + "`get_repo_map()`" + `
+- ` + "❌" + ` Function signatures, package structure, API shapes — use ` + "`get_context()`" + ` or ` + "`find_entity()`" + `
+- ` + "❌" + ` Anything ` + "`session_init`" + `, ` + "`get_context`" + `, or ` + "`get_repo_map`" + ` can answer live
+- ` + "❌" + ` Task status or recent changes — use ` + "`get_pending_tasks()`" + ` and ` + "`working_state`" + ` from ` + "`session_init`" + `
+
 ### Web Intelligence (requires synapses-scout sidecar)
 
 | When you want to... | Use this |
