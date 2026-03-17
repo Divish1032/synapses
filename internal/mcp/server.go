@@ -880,6 +880,10 @@ func (s *Server) registerTools() {
 				mcp.Required(),
 				mcp.Description("Name or substring to search for (case-insensitive)."),
 			),
+			mcp.WithString("format",
+				mcp.Description("Output format. \"compact\" (default): one line per match â \"[Name] type Â· file:line\". "+
+					"\"json\": full structured response with IDs and metadata."),
+			),
 		),
 		s.handleFindEntity,
 	)

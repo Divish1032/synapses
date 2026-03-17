@@ -304,7 +304,7 @@ func TestHandleFindEntity_NoQuery(t *testing.T) {
 
 func TestHandleFindEntity_NotFound(t *testing.T) {
 	s := newTestServer(t)
-	req := callTool(map[string]any{"query": "NotExistsXYZ"})
+	req := callTool(map[string]any{"query": "NotExistsXYZ", "format": "json"})
 	result, err := s.handleFindEntity(ctx, req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -320,7 +320,7 @@ func TestHandleFindEntity_NotFound(t *testing.T) {
 
 func TestHandleFindEntity_Found(t *testing.T) {
 	s, _, _ := newPopulatedServer(t)
-	req := callTool(map[string]any{"query": "AuthLogin"})
+	req := callTool(map[string]any{"query": "AuthLogin", "format": "json"})
 	result, err := s.handleFindEntity(ctx, req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
