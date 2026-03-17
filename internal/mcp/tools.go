@@ -3493,8 +3493,19 @@ func (s *Server) handleSessionInit(
 	// ── BRAIN-1: Brain tier health ───────────────────────────────────────
 	// Surface per-tier success rate, latency, and circuit breaker state so agents
 	// discover broken models at session start instead of after getting garbage.
+	// Wrapped in a recover so a brain panic never crashes the session_init handler.
 	if bc := s.getBrainClient(); bc != nil {
-		if health := bc.BrainHealth(); health != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Brain panic — degrade silently, don't crash session_init.
+					resp["brain_warning"] = fmt.Sprintf("brain health unavailable (internal error: %v)", r)
+				}
+			}()
+			health := bc.BrainHealth()
+			if health == nil {
+				return
+			}
 			resp["brain_health"] = health
 			// Generate warnings for degraded tiers.
 			if tiers, ok := health["tiers"].(map[string]interface{}); ok {
@@ -3522,7 +3533,7 @@ func (s *Server) handleSessionInit(
 					resp["brain_warning"] = strings.Join(warnings, "; ")
 				}
 			}
-		}
+		}()
 	}
 
 	// R29: surface effectiveness hints for low-scoring entities so agents
