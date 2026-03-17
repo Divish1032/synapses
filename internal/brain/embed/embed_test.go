@@ -110,11 +110,8 @@ func TestStart_AlreadyStarted(t *testing.T) {
 }
 
 func TestEmbed_ConnectionRefused(t *testing.T) {
-	s := &Server{
-		started: true,
-		client:  &http.Client{},
-		port:    49999, // unlikely to have anything running
-	}
+	s := newWithBaseURL("/model.gguf", 49999, "/llama-server", "http://127.0.0.1:49999")
+	s.started = true
 	_, err := s.Embed(context.Background(), "test")
 	if err == nil {
 		t.Error("expected connection error")
@@ -122,11 +119,8 @@ func TestEmbed_ConnectionRefused(t *testing.T) {
 }
 
 func TestEmbedBatch_ConnectionRefused(t *testing.T) {
-	s := &Server{
-		started: true,
-		client:  &http.Client{},
-		port:    49999,
-	}
+	s := newWithBaseURL("/model.gguf", 49999, "/llama-server", "http://127.0.0.1:49999")
+	s.started = true
 	_, err := s.EmbedBatch(context.Background(), []string{"a"})
 	if err == nil {
 		t.Error("expected connection error")
@@ -242,11 +236,9 @@ func TestEmbed_ContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // immediately cancel
 
-	s := &Server{
-		started: true,
-		client:  &http.Client{Timeout: time.Second},
-		port:    49999,
-	}
+	s := newWithBaseURL("/model.gguf", 49999, "/llama-server", "http://127.0.0.1:49999")
+	s.client = &http.Client{Timeout: time.Second}
+	s.started = true
 
 	_, err := s.Embed(ctx, "test")
 	if err == nil {
@@ -259,11 +251,9 @@ func TestEmbedBatch_ContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	s := &Server{
-		started: true,
-		client:  &http.Client{Timeout: time.Second},
-		port:    49999,
-	}
+	s := newWithBaseURL("/model.gguf", 49999, "/llama-server", "http://127.0.0.1:49999")
+	s.client = &http.Client{Timeout: time.Second}
+	s.started = true
 
 	_, err := s.EmbedBatch(ctx, []string{"text"})
 	if err == nil {
@@ -273,12 +263,8 @@ func TestEmbedBatch_ContextCanceled(t *testing.T) {
 
 func TestStop_ClearsStartedFlag(t *testing.T) {
 	// Test that Stop() sets started=false.
-	s := &Server{
-		modelPath: "/model.gguf",
-		port:      11437,
-		llamaBin:  "/llama-server",
-		started:   true,
-	}
+	s := New("/model.gguf", 11437, "/llama-server")
+	s.started = true
 
 	s.Stop()
 
@@ -288,28 +274,22 @@ func TestStop_ClearsStartedFlag(t *testing.T) {
 }
 
 func TestEmbed_MarshallError(t *testing.T) {
-	// Test json.Marshal of request body (normally succeeds, but verify path).
-	s := &Server{
-		started: true,
-		client:  &http.Client{},
-		port:    11437,
-	}
+	// json.Marshal of the request body always succeeds for string content.
+	// The call fails at the TCP level — verifies the marshal→request→send path.
+	s := newWithBaseURL("/model.gguf", 11437, "/llama-server", "http://127.0.0.1:11437")
+	s.started = true
 
-	// Normal case should marshal without error
 	_, err := s.Embed(context.Background(), "valid text")
-	// Will fail on connection, but marshalling succeeds
+	// Will fail on connection; just verify it doesn't panic
 	if err == nil {
 		t.Error("expected connection error (port 11437 unused)")
 	}
 }
 
-func TestEmbedBatch_EdgeCases(t *testing.T) {
-	// Test EmbedBatch with single item.
-	s := &Server{
-		started: true,
-		client:  &http.Client{},
-		port:    49999,
-	}
+func TestEmbedBatch_SingleItem(t *testing.T) {
+	// Test EmbedBatch with single item reaches the HTTP call path.
+	s := newWithBaseURL("/model.gguf", 49999, "/llama-server", "http://127.0.0.1:49999")
+	s.started = true
 
 	_, err := s.EmbedBatch(context.Background(), []string{"single"})
 	if err == nil {
@@ -318,45 +298,29 @@ func TestEmbedBatch_EdgeCases(t *testing.T) {
 }
 
 func TestAvailable_WithTimeout(t *testing.T) {
-	// Test Available() with very short timeout.
-	s := &Server{
-		started: true,
-		client:  &http.Client{Timeout: 1 * time.Millisecond},
-		port:    49999, // unused port → timeout
-		host:    "127.0.0.1",
-	}
+	// Test Available() with very short timeout — unused port guarantees failure.
+	s := newWithBaseURL("/model.gguf", 49999, "/llama-server", "http://127.0.0.1:49999")
+	s.client = &http.Client{Timeout: 1 * time.Millisecond}
+	s.started = true
 
-	available := s.Available()
-	if available {
+	if s.Available() {
 		t.Error("expected available=false on timeout")
 	}
 }
 
 // --- Test helpers for httptest integration ---
 
-// newTestServerWithHandler creates a test Server with injected host/port pointing to httptest server.
+// newTestServerWithHandler creates a Server backed by an httptest.Server.
+// Uses the unexported newWithBaseURL constructor — invisible to all callers
+// outside this package. Production code always goes through New().
 func newTestServerWithHandler(t *testing.T, handler http.HandlerFunc) *Server {
 	testServer := httptest.NewServer(handler)
 	t.Cleanup(func() { testServer.Close() })
 
-	// Extract host and port from test server URL (e.g., "http://127.0.0.1:54321")
-	addr := strings.TrimPrefix(testServer.URL, "http://")
-	parts := strings.Split(addr, ":")
-	if len(parts) != 2 {
-		t.Fatalf("invalid test server URL: %s", testServer.URL)
-	}
-	host := parts[0]
-	port := 0
-	fmt.Sscanf(parts[1], "%d", &port)
-
-	return &Server{
-		modelPath: "/model.gguf",
-		port:      port,
-		host:      host, // injected from test server
-		llamaBin:  "/llama-server",
-		client:    &http.Client{Timeout: 5 * time.Second},
-		started:   true,
-	}
+	s := newWithBaseURL("/model.gguf", 0, "/llama-server", testServer.URL)
+	s.client = &http.Client{Timeout: 5 * time.Second}
+	s.started = true
+	return s
 }
 
 // --- Integration tests with mocked HTTP server ---

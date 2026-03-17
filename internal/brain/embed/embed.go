@@ -33,8 +33,8 @@ import (
 type Server struct {
 	mu        sync.Mutex
 	modelPath string
-	port      int
-	host      string // network address (default 127.0.0.1 for security)
+	port      int    // subprocess bind port — passed to llama-server --port
+	baseURL   string // base URL for HTTP calls, set once at construction, never mutated
 	llamaBin  string
 
 	proc    *exec.Cmd
@@ -42,18 +42,34 @@ type Server struct {
 	started bool
 }
 
-// New creates an embedding Server with secure defaults (localhost only).
+// New creates an embedding Server.
 //   - modelPath is the absolute path to the GGUF embedding model.
 //   - port is the internal TCP port the subprocess will listen on (e.g. 11437).
 //   - llamaBin is the path to the llama-server executable.
 //
-// The server only accepts connections from 127.0.0.1 to prevent accidental
-// exposure of the embedding model to the network.
+// Security: the HTTP base URL is permanently fixed to http://127.0.0.1:<port>
+// at construction time. It cannot be changed after creation. The subprocess is
+// also told to bind to 127.0.0.1 only (--host 127.0.0.1 in Start), so the
+// model is never reachable from outside the local machine.
 func New(modelPath string, port int, llamaBin string) *Server {
 	return &Server{
 		modelPath: modelPath,
 		port:      port,
-		host:      "127.0.0.1", // secure by default — localhost only
+		baseURL:   fmt.Sprintf("http://127.0.0.1:%d", port), // locked at construction
+		llamaBin:  llamaBin,
+		client:    &http.Client{Timeout: 15 * time.Second},
+	}
+}
+
+// newWithBaseURL creates a Server with an explicit base URL.
+// This constructor is intentionally unexported — it exists solely for
+// package-internal tests that inject an httptest.Server address.
+// Production code must use New(), which always locks to 127.0.0.1.
+func newWithBaseURL(modelPath string, port int, llamaBin string, baseURL string) *Server {
+	return &Server{
+		modelPath: modelPath,
+		port:      port,
+		baseURL:   baseURL,
 		llamaBin:  llamaBin,
 		client:    &http.Client{Timeout: 15 * time.Second},
 	}
@@ -183,7 +199,7 @@ func (s *Server) Embed(ctx context.Context, text string) ([]float32, error) {
 
 	body, _ := json.Marshal(map[string]string{"content": text})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("http://%s:%d/embedding", s.host, s.port),
+		s.baseURL+"/embedding",
 		bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -232,7 +248,7 @@ func (s *Server) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 
 	body, _ := json.Marshal(map[string]interface{}{"content": texts})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("http://%s:%d/embedding", s.host, s.port),
+		s.baseURL+"/embedding",
 		bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -274,7 +290,7 @@ func (s *Server) Available() bool {
 	if !s.started {
 		return false
 	}
-	resp, err := s.client.Get(fmt.Sprintf("http://%s:%d/health", s.host, s.port))
+	resp, err := s.client.Get(s.baseURL + "/health")
 	if err != nil {
 		return false
 	}
@@ -295,7 +311,7 @@ func (s *Server) Stop() {
 
 // waitReady polls the /health endpoint until it responds OK or timeout.
 func (s *Server) waitReady(ctx context.Context, timeout time.Duration) error {
-	url := fmt.Sprintf("http://%s:%d/health", s.host, s.port)
+	url := s.baseURL + "/health"
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		select {
