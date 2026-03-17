@@ -473,6 +473,28 @@ func TestWriteClaudeSettings_PreservesExisting(t *testing.T) {
 	}
 }
 
+// ── synapsesSection content guard ─────────────────────────────────────────────
+
+// TestSynapsesSection_ContainsMemoryTiers guards the template content injected
+// into every project's .claude/CLAUDE.md. If the Memory Tiers section is
+// accidentally removed or renamed, this test fails immediately.
+func TestSynapsesSection_ContainsMemoryTiers(t *testing.T) {
+	required := []string{
+		"### Memory Tiers",
+		"Tier 1 — Live",
+		"Tier 2 — Anchored",
+		"Tier 3 — Durable",
+		`remember(decision=`, // guards correct param name — NOT "content=" which is invalid
+		"anchor_nodes",
+		"Never write these to MEMORY.md",
+	}
+	for _, want := range required {
+		if !strings.Contains(synapsesSection, want) {
+			t.Errorf("synapsesSection missing required content: %q", want)
+		}
+	}
+}
+
 // ── upsertHookEntry ───────────────────────────────────────────────────────────
 
 func TestUpsertHookEntry_New(t *testing.T) {

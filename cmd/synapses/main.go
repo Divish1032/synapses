@@ -1616,7 +1616,7 @@ Three tiers govern where information lives. Use the wrong tier and data goes sta
 | Tier | What belongs here | How to store | How to query |
 |---|---|---|---|
 | **Tier 1 — Live** | Project structure, active components, file topology, recent changes | Never store — always live | ` + "`session_init()`" + `, ` + "`get_repo_map()`" + `, ` + "`get_file_context()`" + ` |
-| **Tier 2 — Anchored** | Knowledge about code entities, architectural facts derived from the graph, task context | ` + "`remember(content=\"...\", anchor_nodes=[\"node_id\"])`" + ` | ` + "`recall(query=\"...\")`" + ` |
+| **Tier 2 — Anchored** | Knowledge about code entities, architectural facts derived from the graph, task context | ` + "`remember(decision=\"...\", anchor_nodes=[\"node_id\"])`" + ` | ` + "`recall(query=\"...\")`" + ` |
 | **Tier 3 — Durable** | User preferences, feedback, non-derivable motivations and decisions | Write to ` + "`MEMORY.md`" + ` | Loaded automatically into every session |
 
 Tier 2 memories auto-invalidate when their anchored graph nodes change or disappear — surfaced as ` + "`invalidated_memories`" + ` in ` + "`session_init`" + `.
