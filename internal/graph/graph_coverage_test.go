@@ -398,3 +398,68 @@ func TestRemoveFile_NonExistent(t *testing.T) {
 		t.Errorf("expected no change for non-existent file, before=%d after=%d", before, after)
 	}
 }
+
+// ── FindByType ────────────────────────────────────────────────────────────────
+
+func TestFindByType_Functions(t *testing.T) {
+	g := graph.New("test")
+
+	fID := g.MakeNodeID("test.go", "MyFunc")
+	sID := g.MakeNodeID("test.go", "MyStruct")
+
+	g.AddNode(&graph.Node{ID: fID, Type: graph.NodeFunction, Name: "MyFunc", File: "test.go"})
+	g.AddNode(&graph.Node{ID: sID, Type: graph.NodeStruct, Name: "MyStruct", File: "test.go"})
+
+	funcs := g.FindByType(graph.NodeFunction)
+	if len(funcs) == 0 {
+		t.Error("expected at least one function")
+	}
+	foundMyFunc := false
+	for _, n := range funcs {
+		if n.Name == "MyFunc" {
+			foundMyFunc = true
+			break
+		}
+	}
+	if !foundMyFunc {
+		t.Error("MyFunc not found in function results")
+	}
+}
+
+func TestFindByType_Structs(t *testing.T) {
+	g := graph.New("test")
+
+	sID1 := g.MakeNodeID("test.go", "StructA")
+	sID2 := g.MakeNodeID("test.go", "StructB")
+	fID := g.MakeNodeID("test.go", "Func")
+
+	g.AddNode(&graph.Node{ID: sID1, Type: graph.NodeStruct, Name: "StructA", File: "test.go"})
+	g.AddNode(&graph.Node{ID: sID2, Type: graph.NodeStruct, Name: "StructB", File: "test.go"})
+	g.AddNode(&graph.Node{ID: fID, Type: graph.NodeFunction, Name: "Func", File: "test.go"})
+
+	structs := g.FindByType(graph.NodeStruct)
+	if len(structs) != 2 {
+		t.Errorf("expected 2 structs, got %d", len(structs))
+	}
+	for _, n := range structs {
+		if n.Type != graph.NodeStruct {
+			t.Errorf("found non-struct node: %v", n)
+		}
+	}
+}
+
+func TestFindByType_Empty(t *testing.T) {
+	g := graph.New("test")
+	g.AddNode(&graph.Node{
+		ID:   g.MakeNodeID("test.go", "OnlyFunc"),
+		Type: graph.NodeFunction,
+		Name: "OnlyFunc",
+		File: "test.go",
+	})
+
+	// No structs added
+	structs := g.FindByType(graph.NodeStruct)
+	if len(structs) != 0 {
+		t.Errorf("expected no structs, got %d", len(structs))
+	}
+}
