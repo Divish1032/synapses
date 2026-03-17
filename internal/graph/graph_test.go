@@ -425,3 +425,146 @@ func TestUpdateFileNodeMetadata_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+// ─── Variable Type Tracking ──────────────────────────────────────────────────
+
+func TestAddVarType_StoresVarType(t *testing.T) {
+	g := graph.New("testrepo")
+	g.AddVarType("app.go", "db", "*Database")
+
+	types := g.GetVarTypes("app.go")
+	if types == nil {
+		t.Fatal("expected GetVarTypes to return map, got nil")
+	}
+	if types["db"] != "*Database" {
+		t.Errorf("expected var type *Database, got %q", types["db"])
+	}
+}
+
+func TestGetVarTypes_ReturnsNilForUnknownFile(t *testing.T) {
+	g := graph.New("testrepo")
+	types := g.GetVarTypes("nonexistent.go")
+	if types != nil {
+		t.Errorf("expected nil for unknown file, got %v", types)
+	}
+}
+
+func TestAddVarType_IgnoresEmptyVarName(t *testing.T) {
+	g := graph.New("testrepo")
+	g.AddVarType("app.go", "", "*Database")
+
+	types := g.GetVarTypes("app.go")
+	if types != nil && len(types) > 0 {
+		t.Error("expected empty entry for empty var name")
+	}
+}
+
+func TestAddVarType_IgnoresEmptyTypeName(t *testing.T) {
+	g := graph.New("testrepo")
+	g.AddVarType("app.go", "db", "")
+
+	types := g.GetVarTypes("app.go")
+	if types != nil && len(types) > 0 {
+		t.Error("expected empty entry for empty type name")
+	}
+}
+
+func TestAddVarType_MultipleVars(t *testing.T) {
+	g := graph.New("testrepo")
+	g.AddVarType("app.go", "db", "*Database")
+	g.AddVarType("app.go", "cache", "Cache")
+	g.AddVarType("app.go", "logger", "Logger")
+
+	types := g.GetVarTypes("app.go")
+	if len(types) != 3 {
+		t.Errorf("expected 3 types, got %d", len(types))
+	}
+	if types["db"] != "*Database" {
+		t.Errorf("db type mismatch")
+	}
+	if types["cache"] != "Cache" {
+		t.Errorf("cache type mismatch")
+	}
+	if types["logger"] != "Logger" {
+		t.Errorf("logger type mismatch")
+	}
+}
+
+func TestAddVarType_OverwritesExisting(t *testing.T) {
+	g := graph.New("testrepo")
+	g.AddVarType("app.go", "db", "*Database")
+	g.AddVarType("app.go", "db", "*sql.DB")
+
+	types := g.GetVarTypes("app.go")
+	if types["db"] != "*sql.DB" {
+		t.Errorf("expected overwritten type *sql.DB, got %q", types["db"])
+	}
+}
+
+// ─── SetIndex Coverage ───────────────────────────────────────────────────────
+
+func TestSetIndex_SetsIndexProvider(t *testing.T) {
+	g := graph.New("testrepo")
+	if g.Index() != nil {
+		t.Fatal("expected nil index initially")
+	}
+
+	// Create and set an index
+	index := &graph.GraphIndex{}
+	g.SetIndex(index)
+
+	if g.Index() == nil {
+		t.Error("expected non-nil index after SetIndex")
+	}
+}
+
+// ─── RemoveFile Coverage ────────────────────────────────────────────────────
+
+func TestRemoveFile_RemovesFileAndDependentEdges(t *testing.T) {
+	g := buildFixture(t)
+
+	// Verify file exists
+	authFile := g.MakeNodeID("auth.go", "auth.go")
+	nodes := g.FindByName("auth.go")
+	if len(nodes) == 0 {
+		t.Fatal("auth.go not found before removal")
+	}
+
+	// Remove file
+	g.RemoveFile("auth.go")
+
+	// Verify file is gone
+	nodes = g.FindByName("auth.go")
+	if len(nodes) != 0 {
+		t.Error("auth.go should be removed")
+	}
+
+	// Verify edges are cleaned up
+	outEdges := g.OutEdges(authFile)
+	if len(outEdges) != 0 {
+		t.Errorf("expected 0 outgoing edges after removal, got %d", len(outEdges))
+	}
+}
+
+// ─── MergeFrom Coverage ──────────────────────────────────────────────────────
+
+func TestMergeFrom_MergesGraphs(t *testing.T) {
+	g1 := graph.New("repo1")
+	g2 := graph.New("repo2")
+
+	// Add nodes to g1
+	id1 := g1.MakeNodeID("file1.go", "Func1")
+	g1.AddNode(&graph.Node{ID: id1, Type: graph.NodeFunction, Name: "Func1", File: "file1.go"})
+
+	// Add nodes to g2
+	id2 := g2.MakeNodeID("file2.go", "Func2")
+	g2.AddNode(&graph.Node{ID: id2, Type: graph.NodeFunction, Name: "Func2", File: "file2.go"})
+
+	initialCount := g1.NodeCount()
+	g1.MergeFrom(g2)
+	finalCount := g1.NodeCount()
+
+	if finalCount <= initialCount {
+		t.Errorf("expected node count to increase after merge, got %d → %d", initialCount, finalCount)
+	}
+}
