@@ -81,7 +81,7 @@ func render(identity *graph.ProjectIdentity, tasks []store.Task) string {
 		}
 	}
 
-	// Show in-progress task count only — full task list comes from session_init().
+	// Show accurate task counts — full task list comes from session_init().
 	pending := filterPending(tasks)
 	inProgress := 0
 	for _, t := range pending {
@@ -89,11 +89,15 @@ func render(identity *graph.ProjectIdentity, tasks []store.Task) string {
 			inProgress++
 		}
 	}
+	trulyPending := len(pending) - inProgress
 	if len(pending) > 0 {
-		if inProgress > 0 {
-			b.WriteString(fmt.Sprintf("**Tasks**: %d pending (%d in progress) — call `session_init()` for details.\n\n", len(pending), inProgress))
-		} else {
-			b.WriteString(fmt.Sprintf("**Tasks**: %d pending — call `session_init()` for details.\n\n", len(pending)))
+		switch {
+		case trulyPending > 0 && inProgress > 0:
+			b.WriteString(fmt.Sprintf("**Tasks**: %d pending + %d in progress — call `session_init()` for details.\n\n", trulyPending, inProgress))
+		case inProgress > 0:
+			b.WriteString(fmt.Sprintf("**Tasks**: %d in progress — call `session_init()` for details.\n\n", inProgress))
+		default:
+			b.WriteString(fmt.Sprintf("**Tasks**: %d pending — call `session_init()` for details.\n\n", trulyPending))
 		}
 	}
 

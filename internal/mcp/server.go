@@ -703,8 +703,9 @@ func (s *Server) registerTools() {
 			mcp.WithString("scope",
 				mcp.Description("Optional. Controls response verbosity. "+
 					"\"full\" (default): all sections, backward compatible. "+
-					"\"quick\": tasks + working_state + scale_guidance only (~500 tokens). "+
-					"\"resume\": tasks with session states + working_state only."),
+					"\"quick\": tasks + working_state + scale_guidance (~500 tokens for single-repo; "+
+					"safety-critical alerts like cross_project_alerts and agent_awareness are always included). "+
+					"\"resume\": tasks with session states + working_state + relevant_memories (for task context continuity)."),
 			),
 		),
 		s.handleSessionInit,

@@ -513,6 +513,14 @@ func (s *Server) handleGetContext(
 				go s.emitContextDelivery("get_context", cacheAgentID, entityName, best.File,
 					cacheResp, sg.Nodes, sg.Edges, sg.TruncatedCount, sg.Truncated,
 					false, true, time.Since(handlerStart).Milliseconds())
+				// Respect the requested format — agent expected compact text, not JSON.
+				// Explicit known_hash paths stay JSON (agent manages their own cache protocol).
+				if format == "compact" {
+					return mcp.NewToolResultText(fmt.Sprintf(
+						"unchanged: true\nentity_hash: %s\nentity: %s\ncache_source: session",
+						entityHash, entityName,
+					)), nil
+				}
 				return jsonResult(cacheResp)
 			}
 		}
@@ -1199,7 +1207,12 @@ func (s *Server) handleFindEntity(
 			}
 			fmt.Fprintf(&sb, "  [%s] %s · %s:%d%s\n", r.Name, r.Type, r.File, r.Line, testMark)
 		}
-		sb.WriteString("Re-call get_context(entity=\"Name\") or add file= to pin to a specific file.")
+		// Context-aware footer: single match → exact call; multiple → disambiguation hint.
+		if len(results) == 1 {
+			fmt.Fprintf(&sb, "Call get_context(entity=%q) to explore.", results[0].Name)
+		} else {
+			sb.WriteString("Call get_context(entity=\"Name\", file=\"path/suffix\") to pin to a specific result.")
+		}
 		return mcp.NewToolResultText(sb.String()), nil
 	}
 
@@ -3929,13 +3942,43 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
-	// R6: response_tokens — estimate token cost of this response so agents can
-	// track how much context budget session_init is consuming. Computed by
-	// marshaling the response once, applying the 3.5 chars/token heuristic
-	// (len*2/7), then including the estimate in the final response.
-	// The field itself adds ~30 bytes (~9 tokens) — negligible vs the total.
+	// R6: response_tokens + context_window_pct — measure token cost of this
+	// response and express it as a fraction of the agent's context window.
+	// Strategy: marshal once to count bytes, add the two fields (their combined
+	// size is ~60 bytes / ~17 tokens — negligible), return final marshal via
+	// jsonResult. This means response_tokens is accurate to within ~1%.
 	if jsonBytes, err := json.Marshal(resp); err == nil {
-		resp["response_tokens"] = len(jsonBytes) * 2 / 7
+		responseTokens := len(jsonBytes) * 2 / 7
+		resp["response_tokens"] = responseTokens
+		// context_window_pct: how much of the agent's context window this response
+		// consumes. Only computed when the model is known so we can look up window size.
+		// Covers Claude 3/4 families, GPT-4 family, and Gemini. Falls back to omitting
+		// the field when the model is unrecognised — no guessing.
+		modelWindowTokens := map[string]int{
+			// Claude 4 family
+			"claude-opus-4-6":           200000,
+			"claude-sonnet-4-6":         200000,
+			"claude-haiku-4-5":          200000,
+			"claude-haiku-4-5-20251001": 200000,
+			// Claude 3 family
+			"claude-3-5-sonnet-20241022": 200000,
+			"claude-3-5-haiku-20241022":  200000,
+			"claude-3-opus-20240229":     200000,
+			// GPT-4 family
+			"gpt-4o":       128000,
+			"gpt-4o-mini":  128000,
+			"gpt-4-turbo":  128000,
+			"gpt-4":        8192,
+			"o1":           200000,
+			"o3-mini":      200000,
+			// Gemini
+			"gemini-2.0-flash": 1000000,
+			"gemini-1.5-pro":   2000000,
+		}
+		if window, ok := modelWindowTokens[model]; ok {
+			pct := math.Round(float64(responseTokens)/float64(window)*1000) / 10 // one decimal
+			resp["context_window_pct"] = pct
+		}
 	}
 
 	return jsonResult(resp)

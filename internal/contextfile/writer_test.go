@@ -153,12 +153,16 @@ func TestRender_WithTasks_ShowsCountNotDetails(t *testing.T) {
 	}
 	out := render(nil, tasks)
 
-	// Minimal format: shows count + hint to call session_init(), not full task list.
-	if !strings.Contains(out, "2 pending") {
-		t.Errorf("expected '2 pending' task count, got:\n%s", out)
+	// Minimal format: shows accurate counts separately — "1 pending + 1 in progress".
+	if !strings.Contains(out, "1 pending") {
+		t.Errorf("expected '1 pending' task count, got:\n%s", out)
 	}
 	if !strings.Contains(out, "1 in progress") {
 		t.Errorf("expected '1 in progress' count, got:\n%s", out)
+	}
+	// Must NOT say "2 pending" — that conflates in-progress tasks with pending.
+	if strings.Contains(out, "2 pending") {
+		t.Errorf("should not conflate in-progress tasks into pending count, got:\n%s", out)
 	}
 	if !strings.Contains(out, "session_init()") {
 		t.Errorf("expected session_init() hint, got:\n%s", out)
