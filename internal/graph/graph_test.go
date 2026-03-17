@@ -1,6 +1,7 @@
 package graph_test
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -324,4 +325,103 @@ func TestMigrateStableID_NoMatchGetsNewUUID(t *testing.T) {
 	if newID == original {
 		t.Error("completely different function should not reuse the original StableID")
 	}
+}
+
+// ── UpdateFileNodeMetadata ────────────────────────────────────────────────────
+
+// TestUpdateFileNodeMetadata_OnlyMatchingFile verifies that the callback is
+// invoked for every node whose File matches and never for nodes in other files.
+func TestUpdateFileNodeMetadata_OnlyMatchingFile(t *testing.T) {
+	g := graph.New("repo")
+	g.AddNode(&graph.Node{ID: "r::a.go::Foo", Type: graph.NodeFunction, Name: "Foo", Package: "p", File: "a.go"})
+	g.AddNode(&graph.Node{ID: "r::a.go::Bar", Type: graph.NodeFunction, Name: "Bar", Package: "p", File: "a.go"})
+	g.AddNode(&graph.Node{ID: "r::b.go::Baz", Type: graph.NodeFunction, Name: "Baz", Package: "p", File: "b.go"})
+
+	g.UpdateFileNodeMetadata("a.go", func(n *graph.Node) {
+		if n.Metadata == nil {
+			n.Metadata = make(map[string]string)
+		}
+		n.Metadata["touched"] = "yes"
+	})
+
+	for _, n := range g.NodesForFile("a.go") {
+		if n.Metadata["touched"] != "yes" {
+			t.Errorf("node %s in a.go was not updated", n.Name)
+		}
+	}
+	for _, n := range g.NodesForFile("b.go") {
+		if n.Metadata["touched"] == "yes" {
+			t.Errorf("node %s in b.go was incorrectly updated", n.Name)
+		}
+	}
+}
+
+// TestUpdateFileNodeMetadata_NoMatchIsNoop verifies that calling with a file
+// that has no nodes does not panic and returns cleanly.
+func TestUpdateFileNodeMetadata_NoMatchIsNoop(t *testing.T) {
+	g := graph.New("repo")
+	g.AddNode(&graph.Node{ID: "r::a.go::Foo", Type: graph.NodeFunction, Name: "Foo", Package: "p", File: "a.go"})
+
+	// Should not panic on a file with no nodes.
+	g.UpdateFileNodeMetadata("nonexistent.go", func(n *graph.Node) {
+		t.Error("callback should not be called for a file with no nodes")
+	})
+}
+
+// TestUpdateFileNodeMetadata_NilMetadataInitialisedByCaller verifies that the
+// callback can safely initialise a nil Metadata map — the write lock ensures
+// no other goroutine observes the intermediate nil state.
+func TestUpdateFileNodeMetadata_NilMetadataInitialisedByCaller(t *testing.T) {
+	g := graph.New("repo")
+	g.AddNode(&graph.Node{ID: "r::a.go::Foo", Type: graph.NodeFunction, Name: "Foo", Package: "p", File: "a.go"})
+
+	g.UpdateFileNodeMetadata("a.go", func(n *graph.Node) {
+		if n.Metadata == nil {
+			n.Metadata = make(map[string]string)
+		}
+		n.Metadata["k"] = "v"
+	})
+
+	nodes := g.NodesForFile("a.go")
+	if len(nodes) == 0 || nodes[0].Metadata["k"] != "v" {
+		t.Error("metadata not set after UpdateFileNodeMetadata with nil initial map")
+	}
+}
+
+// TestUpdateFileNodeMetadata_ConcurrentAccess exercises UpdateFileNodeMetadata
+// concurrently with AllNodes (which takes an RLock) to verify the write lock
+// prevents data races. Run with -race to catch violations.
+func TestUpdateFileNodeMetadata_ConcurrentAccess(t *testing.T) {
+	g := graph.New("repo")
+	for i := 0; i < 20; i++ {
+		id := graph.NodeID("r::a.go::F" + string(rune('A'+i)))
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: string(rune('A' + i)), Package: "p", File: "a.go"})
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	wg.Add(workers * 2)
+
+	// Writers: update metadata concurrently.
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			g.UpdateFileNodeMetadata("a.go", func(n *graph.Node) {
+				if n.Metadata == nil {
+					n.Metadata = make(map[string]string)
+				}
+				n.Metadata["writer"] = "1"
+			})
+		}(i)
+	}
+
+	// Readers: read all nodes concurrently.
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			_ = g.AllNodes()
+		}()
+	}
+
+	wg.Wait()
 }
