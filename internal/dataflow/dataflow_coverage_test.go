@@ -382,6 +382,77 @@ func TestAnnotateGraph_PatternSigMatch(t *testing.T) {
 	}
 }
 
+// TestAnnotateGraph_PatternNameMatch verifies NamePattern matching branch
+// (case-insensitive substring match).
+func TestAnnotateGraph_PatternNameMatch(t *testing.T) {
+	g := graph.New("/repo")
+
+	// Source name: "readUserData" — pattern "userdata" (lowercase, partial match).
+	srcID := addFn(g, "/repo/h.go", "readUserData", "api", "func readUserData() []byte")
+	sinkID := addFn(g, "/repo/db.go", "insertRow", "db", "func insertRow(db *sql.DB, v string)")
+	g.GetNode(sinkID).Metadata["signature"] = "func insertRow(db *sql.DB, v string)"
+	g.AddEdge(&graph.Edge{From: srcID, To: sinkID, Type: graph.EdgeCalls})
+
+	// Pattern with NamePattern that should match (case-insensitive).
+	cfg := &config.Config{
+		DataFlowSources: []config.DataFlowPattern{
+			{NamePattern: "userdata"}, // matches "readUserData" case-insensitively
+		},
+	}
+	dataflow.AnnotateGraph(g, cfg)
+
+	src := g.GetNode(srcID)
+	if src.Metadata["data_role"] != "source" {
+		t.Error("expected NamePattern substring match to detect source")
+	}
+}
+
+// TestAnnotateGraph_PatternNameMismatch verifies NamePattern mismatch branch.
+func TestAnnotateGraph_PatternNameMismatch(t *testing.T) {
+	g := graph.New("/repo")
+
+	srcID := addFn(g, "/repo/h.go", "readData", "api", "func readData() []byte")
+	sinkID := addFn(g, "/repo/db.go", "insertRow", "db", "func insertRow(db *sql.DB, v string)")
+	g.GetNode(sinkID).Metadata["signature"] = "func insertRow(db *sql.DB, v string)"
+	g.AddEdge(&graph.Edge{From: srcID, To: sinkID, Type: graph.EdgeCalls})
+
+	// Pattern with NamePattern that does NOT match.
+	cfg := &config.Config{
+		DataFlowSources: []config.DataFlowPattern{
+			{NamePattern: "upload"}, // "readData" does not contain "upload"
+		},
+	}
+	dataflow.AnnotateGraph(g, cfg)
+
+	src := g.GetNode(srcID)
+	if src.Metadata["data_role"] == "source" {
+		t.Error("expected NamePattern mismatch to NOT detect source")
+	}
+}
+
+// TestAnnotateGraph_PatternFilePathNoGlob verifies FilePattern non-glob matching
+// (substring in full path).
+func TestAnnotateGraph_PatternFilePathNoGlob(t *testing.T) {
+	g := graph.New("/repo")
+
+	srcID := addFn(g, "/repo/api/v2/handler.go", "readData", "api", "func readData() []byte")
+	sinkID := addFn(g, "/repo/db/db.go", "insertRow", "db", "func insertRow(db *sql.DB, v string)")
+	g.GetNode(sinkID).Metadata["signature"] = "func insertRow(db *sql.DB, v string)"
+	g.AddEdge(&graph.Edge{From: srcID, To: sinkID, Type: graph.EdgeCalls})
+
+	cfg := &config.Config{
+		DataFlowSources: []config.DataFlowPattern{
+			{NamePattern: "readData", FilePattern: "api/v2"}, // substring match in full path
+		},
+	}
+	dataflow.AnnotateGraph(g, cfg)
+
+	src := g.GetNode(srcID)
+	if src.Metadata["data_role"] != "source" {
+		t.Error("expected FilePattern substring match to detect source")
+	}
+}
+
 // TestAnnotateGraph_DiamondGraph verifies that BFS correctly handles a diamond
 // call graph (source → A → sink AND source → B → sink), exercising the
 // "already visited" skip path.
