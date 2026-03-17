@@ -247,6 +247,25 @@ func TestNewInProcess_Disabled(t *testing.T) {
 	}
 }
 
+func TestNewInProcess_Enabled_UnknownBackend(t *testing.T) {
+	cfg := &brainconfig.BrainConfig{
+		Enabled: true,
+		Backend: "nonexistent",
+	}
+	c := NewInProcess(cfg)
+	if c == nil {
+		t.Fatal("NewInProcess returned nil")
+	}
+	// With unknown backend, should fall back to NullBrain
+	status, err := c.HealthCheck(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "" {
+		t.Errorf("expected empty status from NullBrain fallback, got %q", status)
+	}
+}
+
 func TestClient_Ingest(t *testing.T) {
 	c := NewClient("", 0)
 	c.Ingest(context.Background(), IngestRequest{NodeID: "n1"})
@@ -351,6 +370,44 @@ func TestClient_GetADRs(t *testing.T) {
 func TestClient_Close(t *testing.T) {
 	c := NewClient("", 0)
 	c.Close()
+}
+
+func TestClient_Close_WithEnabledBrain(t *testing.T) {
+	cfg := &brainconfig.BrainConfig{Enabled: false}
+	c := NewInProcess(cfg)
+	if c == nil {
+		t.Fatal("NewInProcess returned nil")
+	}
+	c.Close()
+	// Should not panic even though NullBrain.Close() may do nothing
+}
+
+func TestClient_BulkIngest_Empty(t *testing.T) {
+	c := NewClient("", 0)
+	// BulkIngest with empty slice should not panic
+	c.BulkIngest(context.Background(), []IngestRequest{})
+}
+
+func TestClient_BuildContextPacket_WithEnabledBrain(t *testing.T) {
+	cfg := &brainconfig.BrainConfig{Enabled: false}
+	c := NewInProcess(cfg)
+	pkt := c.BuildContextPacket(context.Background(), ContextPacketRequest{})
+	if pkt != nil {
+		t.Error("expected nil packet from disabled brain")
+	}
+}
+
+func TestClient_GetSDLC_DefaultPhase(t *testing.T) {
+	cfg := &brainconfig.BrainConfig{Enabled: false}
+	c := NewInProcess(cfg)
+	phase, mode := c.GetSDLC(context.Background())
+	// Disabled brain should return defaults
+	if phase != "development" {
+		t.Errorf("expected development phase, got %q", phase)
+	}
+	if mode != "standard" {
+		t.Errorf("expected standard mode, got %q", mode)
+	}
 }
 
 // --- Circuit breaker tests ---
@@ -477,6 +534,31 @@ func TestBrainStats_ZeroCalls(t *testing.T) {
 	snap := s.snapshot()
 	if snap["ingest_avg_ms"].(int64) != 0 {
 		t.Error("expected 0 avg with no calls")
+	}
+}
+
+func TestBrainStats_ContextBuilderTier(t *testing.T) {
+	s := &brainStats{}
+	s.record("context_builder", true, 120)
+	s.record("context_builder", false, 80)
+	s.record("context_builder", true, 100)
+
+	snap := s.snapshot()
+	if snap["context_builder_calls"].(int64) != 3 {
+		t.Errorf("context_builder_calls: got %v, want 3", snap["context_builder_calls"])
+	}
+	if snap["context_builder_success"].(int64) != 2 {
+		t.Errorf("context_builder_success: got %v, want 2", snap["context_builder_success"])
+	}
+}
+
+func TestBrainStats_UnknownTier(t *testing.T) {
+	s := &brainStats{}
+	s.record("unknown_tier", true, 100)
+	snap := s.snapshot()
+	// Unknown tier should be silently ignored — no panic
+	if snap["unknown_tier_calls"] != nil {
+		t.Error("unknown tier should not be recorded")
 	}
 }
 
