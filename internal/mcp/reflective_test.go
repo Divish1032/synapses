@@ -72,7 +72,7 @@ func TestWriteRetrospectiveAnnotations(t *testing.T) {
 	srv := New(g, cfg, st)
 
 	// Create a task linked to both nodes.
-	planID, err := st.CreatePlan("refactor", "", "", []store.TaskInput{
+	planID, _, err := st.CreatePlan("refactor", "", "", []store.TaskInput{
 		{
 			Title:       "Refactor auth handler",
 			Priority:    "p1",
@@ -135,7 +135,7 @@ func TestWriteRetrospectiveAnnotations_NoLinkedNodes(t *testing.T) {
 
 	srv := New(g, cfg, st)
 
-	planID, err := st.CreatePlan("empty", "", "", []store.TaskInput{
+	planID, _, err := st.CreatePlan("empty", "", "", []store.TaskInput{
 		{Title: "No linked nodes", Priority: "p2"},
 	})
 	if err != nil {

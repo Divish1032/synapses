@@ -198,7 +198,7 @@ func TestNotifyIntraProjectImpact_TaskNodeAlert_SendsToAssignedAgent(t *testing.
 	w, nodeID, changedFile := buildIntraFixture(t, st)
 
 	// Create a plan with a task linked to the node that will change.
-	_, err := st.CreatePlan("my-plan", "", "", []store.TaskInput{
+	_, _, err := st.CreatePlan("my-plan", "", "", []store.TaskInput{
 		{Title: "Fix auth", Priority: "p1", LinkedNodes: []string{string(nodeID)}},
 	})
 	if err != nil {
@@ -238,7 +238,7 @@ func TestNotifyIntraProjectImpact_TaskNodeAlert_UnlinkedNode_NoMessage(t *testin
 	w, _, changedFile := buildIntraFixture(t, st)
 
 	// Task linked to a completely different node ID.
-	_, err := st.CreatePlan("unrelated", "", "", []store.TaskInput{
+	_, _, err := st.CreatePlan("unrelated", "", "", []store.TaskInput{
 		{Title: "unrelated task", Priority: "p2", LinkedNodes: []string{"other-repo::other.go::OtherFunc"}},
 	})
 	if err != nil {
@@ -262,7 +262,7 @@ func TestNotifyIntraProjectImpact_TaskNodeAlert_UnassignedTask_NoMessage(t *test
 	w, nodeID, changedFile := buildIntraFixture(t, st)
 
 	// Create a task but never assign it to anyone.
-	_, err := st.CreatePlan("unassigned-plan", "", "", []store.TaskInput{
+	_, _, err := st.CreatePlan("unassigned-plan", "", "", []store.TaskInput{
 		{Title: "unassigned task", Priority: "p1", LinkedNodes: []string{string(nodeID)}},
 	})
 	if err != nil {
@@ -290,7 +290,7 @@ func TestNotifyIntraProjectImpact_BothProbesFire(t *testing.T) {
 	_, _ = st.ClaimWork("claimer", "internal/auth", "directory", 30)
 
 	// Agent "tasker" owns an in-progress task linked to the node.
-	_, err := st.CreatePlan("dual-plan", "", "", []store.TaskInput{
+	_, _, err := st.CreatePlan("dual-plan", "", "", []store.TaskInput{
 		{Title: "dual task", Priority: "p0", LinkedNodes: []string{string(nodeID)}},
 	})
 	if err != nil {
@@ -377,7 +377,7 @@ func TestNotifyIntraProjectImpact_TaskNodeAlert_PayloadChangedFileIsRelative(t *
 	st := openTestStore(t)
 	w, nodeID, changedFile := buildIntraFixture(t, st)
 
-	_, _ = st.CreatePlan("relpath-plan", "", "", []store.TaskInput{
+	_, _, _ = st.CreatePlan("relpath-plan", "", "", []store.TaskInput{
 		{Title: "rel task", Priority: "p1", LinkedNodes: []string{string(nodeID)}},
 	})
 	_, _ = st.GetPendingTasks("", "rel-task-agent")
@@ -429,7 +429,7 @@ func TestNotifyIntraProjectImpact_TaskNodeAlert_OnlyMatchingNodes_InAffectedNode
 
 	// Task has two linked nodes: nodeID (in changedFile) and a foreign node (not in it).
 	foreignID := "other-project::other.go::ForeignFunc"
-	_, err := st.CreatePlan("mixed-plan", "", "", []store.TaskInput{
+	_, _, err := st.CreatePlan("mixed-plan", "", "", []store.TaskInput{
 		{Title: "mixed task", Priority: "p1", LinkedNodes: []string{string(nodeID), foreignID}},
 	})
 	if err != nil {
@@ -464,7 +464,7 @@ func TestNotifyIntraProjectImpact_TaskNodeAlert_InProgressTask_Fires(t *testing.
 	st := openTestStore(t)
 	w, nodeID, changedFile := buildIntraFixture(t, st)
 
-	_, err := st.CreatePlan("inprog-plan", "", "", []store.TaskInput{
+	_, _, err := st.CreatePlan("inprog-plan", "", "", []store.TaskInput{
 		{Title: "in-progress task", Priority: "p0", LinkedNodes: []string{string(nodeID)}},
 	})
 	if err != nil {
@@ -494,7 +494,7 @@ func TestNotifyIntraProjectImpact_SameAgentClaimerAndTaskOwner_ReceivesBothMessa
 
 	// The same agent holds a claim AND owns a task linked to the changed node.
 	_, _ = st.ClaimWork("dual-agent", "internal/auth", "directory", 30)
-	_, _ = st.CreatePlan("dual-agent-plan", "", "", []store.TaskInput{
+	_, _, _ = st.CreatePlan("dual-agent-plan", "", "", []store.TaskInput{
 		{Title: "dual agent task", Priority: "p1", LinkedNodes: []string{string(nodeID)}},
 	})
 	_, _ = st.GetPendingTasks("", "dual-agent")
@@ -517,10 +517,10 @@ func TestNotifyIntraProjectImpact_MultipleTasks_EachAssigneeNotified(t *testing.
 	w, nodeID, changedFile := buildIntraFixture(t, st)
 
 	// Two separate plans, each with a task linked to the same node but assigned to different agents.
-	_, _ = st.CreatePlan("plan-x", "", "", []store.TaskInput{
+	_, _, _ = st.CreatePlan("plan-x", "", "", []store.TaskInput{
 		{Title: "task-x", Priority: "p1", LinkedNodes: []string{string(nodeID)}},
 	})
-	_, _ = st.CreatePlan("plan-y", "", "", []store.TaskInput{
+	_, _, _ = st.CreatePlan("plan-y", "", "", []store.TaskInput{
 		{Title: "task-y", Priority: "p1", LinkedNodes: []string{string(nodeID)}},
 	})
 	// Assign task-x to agent-x and task-y to agent-y.

@@ -640,22 +640,25 @@ func cmdStatus(args []string) error {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
-	// If the daemon is running, check for live indexing state first.
+	// If the daemon is running and a reindex is active, show live progress
+	// before the cached stats. We do NOT return early — the caller also sees
+	// the last-known index snapshot so they have full context (e.g. when
+	// re-indexing a previously indexed repo).
 	if IsSingletonDaemonRunning() {
 		client := &http.Client{Timeout: 2 * time.Second}
-		resp, err := client.Get("http://" + DaemonHTTPAddr + "/api/admin/health")
-		if err == nil {
-			defer resp.Body.Close()
+		resp, httpErr := client.Get("http://" + DaemonHTTPAddr + "/api/admin/health")
+		if httpErr == nil {
 			var health struct {
 				IndexingProgress IndexingSnapshot `json:"indexing_progress"`
 			}
 			if jsonErr := json.NewDecoder(resp.Body).Decode(&health); jsonErr == nil {
 				p := health.IndexingProgress
 				if p.State == "indexing" {
-					fmt.Printf("indexing: %d/%d files (%d%%)\n", p.Done, p.Total, p.Pct)
-					return nil
+					fmt.Printf("indexing: %d/%d files (%d%%)\n\n", p.Done, p.Total, p.Pct)
+					// Fall through to show last-known cached stats below.
 				}
 			}
+			resp.Body.Close()
 		}
 	}
 
@@ -908,25 +911,30 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 	}
 
 	// No cache or smart reindex skipped: full parse from scratch.
+	// Evaluate SYNAPSES_QUIET once here so both the progress display and
+	// buildGraph use the same value without redundant env lookups.
 	quiet := os.Getenv("SYNAPSES_QUIET") == "1"
-	if !quiet {
-		fmt.Fprintf(os.Stderr, "[synapses] indexing... 0/? files\n")
-	}
-	globalProgress.Start(0) // total unknown until WalkDir Phase 1 completes; updated via ProgressFunc
+
+	// Register per-project progress state so the health endpoint can report
+	// live indexing state without a global singleton. BeginFunc (called by
+	// WalkDir after Phase 1) will call progress.Start(total) with the real
+	// file count, so no placeholder Start(0) call is needed here.
+	progress := RegisterIndexing(repoRoot)
+	defer UnregisterIndexing(repoRoot)
+
 	start := time.Now()
-	g, err = buildGraph(repoRoot, st, plugins)
+	g, err = buildGraph(repoRoot, st, plugins, quiet, progress)
 	if err != nil {
-		globalProgress.Reset()
 		return nil, err
 	}
 	elapsed := time.Since(start).Round(time.Millisecond)
+	snap := progress.Snapshot()
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "[synapses] indexing... %d/%d files — %d functions, %d edges (%s)\n",
-			globalProgress.filesDone.Load(), globalProgress.filesTotal.Load(),
-			g.NodeCount(), g.EdgeCount(), elapsed)
+			snap.Done, snap.Total, g.NodeCount(), g.EdgeCount(), elapsed)
 		fmt.Fprintf(os.Stderr, "[synapses] ready.\n")
 	}
-	globalProgress.Done()
+	progress.Done()
 
 	if err := st.SaveGraph(g); err != nil {
 		fmt.Fprintf(os.Stderr, "synapses: cache save failed: %v\n", err)
@@ -1099,7 +1107,10 @@ func extDisplayName(ext string) string {
 	}
 }
 
-func buildGraph(root string, st *store.Store, plugins []config.PluginConfig) (*graph.Graph, error) {
+// buildGraph performs a full parse from scratch.
+// quiet suppresses stderr progress output (SYNAPSES_QUIET=1).
+// progress, if non-nil, receives live done/total updates for the health endpoint.
+func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, quiet bool, progress *IndexingState) (*graph.Graph, error) {
 	repoID := filepath.Base(root)
 	g := graph.New(repoID)
 	g.SetRoot(root)
@@ -1108,43 +1119,40 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig) (*g
 		w.RegisterPlugin(p.Extensions, p.Command)
 	}
 
-	// Wire up progress reporting unless SYNAPSES_QUIET=1 is set.
-	quiet := os.Getenv("SYNAPSES_QUIET") == "1"
-	if !quiet {
-		w.ProgressFunc = func(done, total int, byExt map[string]int) {
-			// Update the daemon-wide atomic state (read by /api/admin/health).
-			// filesTotal is set here because total is only known after Phase 1
-			// (the filesystem scan inside WalkDir).
-			globalProgress.filesTotal.Store(int64(total))
-			globalProgress.filesDone.Store(int64(done))
+	// BeginFunc fires after Phase 1 (filesystem scan) with the real total.
+	// This is the correct moment to initialise progress state — not before,
+	// when total is unknown.
+	if progress != nil {
+		w.BeginFunc = func(total int) {
+			progress.Start(int64(total))
+		}
+	}
 
+	// ProgressFunc fires from worker goroutines after each file, throttled
+	// to 200ms. Writes done count to the progress state and, if not quiet,
+	// emits a structured line to stderr.
+	if progress != nil || !quiet {
+		w.ProgressFunc = func(done, total int, byExt map[string]int) {
+			if progress != nil {
+				progress.SetDone(int64(done))
+			}
+			if quiet {
+				return
+			}
 			// Build compact language breakdown: top 3 extensions by count.
-			type langCount struct {
-				name  string
-				count int
-			}
-			langs := make([]langCount, 0, len(byExt))
+			type lc struct{ name string; count int }
+			langs := make([]lc, 0, len(byExt))
 			for ext, cnt := range byExt {
-				langs = append(langs, langCount{extDisplayName(ext), cnt})
+				langs = append(langs, lc{extDisplayName(ext), cnt})
 			}
-			// Sort descending by count for consistent top-3.
-			for i := 0; i < len(langs); i++ {
-				for j := i + 1; j < len(langs); j++ {
-					if langs[j].count > langs[i].count {
-						langs[i], langs[j] = langs[j], langs[i]
-					}
-				}
-			}
-			var langParts []string
-			for i, lc := range langs {
-				if i >= 3 {
-					break
-				}
-				langParts = append(langParts, fmt.Sprintf("%s: %d", lc.name, lc.count))
+			sort.Slice(langs, func(i, j int) bool { return langs[i].count > langs[j].count })
+			var parts []string
+			for i := 0; i < len(langs) && i < 3; i++ {
+				parts = append(parts, fmt.Sprintf("%s: %d", langs[i].name, langs[i].count))
 			}
 			suffix := ""
-			if len(langParts) > 0 {
-				suffix = " (" + strings.Join(langParts, ", ") + ")"
+			if len(parts) > 0 {
+				suffix = " (" + strings.Join(parts, ", ") + ")"
 			}
 			fmt.Fprintf(os.Stderr, "[synapses] indexing... %d/%d files%s\n", done, total, suffix)
 		}
