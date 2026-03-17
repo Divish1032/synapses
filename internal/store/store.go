@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver; no CGo required
@@ -300,13 +301,50 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     tool_name   TEXT    NOT NULL,
     agent_id    TEXT    NOT NULL DEFAULT '',
+    session_id  TEXT    NOT NULL DEFAULT '',  -- Synapses session UUID; '' for pre-init calls
     entity      TEXT    NOT NULL DEFAULT '',
     duration_ms INTEGER NOT NULL DEFAULT 0,
     success     INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
-CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool_name);
-CREATE INDEX IF NOT EXISTS idx_tool_calls_ts   ON tool_calls(created_at);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_tool    ON tool_calls(tool_name);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_ts      ON tool_calls(created_at);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id) WHERE session_id != '';
+
+-- Session lifecycle tracking (Layer 1 of Session Intelligence).
+-- A session starts on session_init() and ends on end_session() or after 30 min inactivity.
+-- last_seen_at is updated on every tool call (heartbeat piggyback) so stale detection
+-- needs no background goroutine — just check: last_seen_at < now - 30 minutes.
+CREATE TABLE IF NOT EXISTS sessions (
+    id              TEXT    PRIMARY KEY,  -- Synapses-generated UUID
+    agent_id        TEXT    NOT NULL,
+    project_id      TEXT    NOT NULL,
+    mcp_session_id  TEXT    NOT NULL DEFAULT '', -- MCP transport connection ID; "stdio" for stdio mode
+    intent          TEXT    NOT NULL DEFAULT '', -- declared at session_init
+    started_at      INTEGER NOT NULL,     -- Unix epoch seconds (UTC)
+    last_seen_at    INTEGER NOT NULL,     -- Unix epoch seconds; updated on every tool call
+    ended_at        INTEGER,              -- Unix epoch seconds; NULL = not cleanly closed
+    end_reason      TEXT    NOT NULL DEFAULT '', -- clean | timeout | reconciled | superseded
+    outcome         TEXT    NOT NULL DEFAULT '', -- success | failure | partial | unknown
+    summary         TEXT    NOT NULL DEFAULT '', -- from end_session or reconciliation
+    tool_calls      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_agent   ON sessions(agent_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_active  ON sessions(ended_at) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_mcp     ON sessions(mcp_session_id, agent_id, project_id);
+
+-- Links sessions to the tasks they created, claimed, or completed.
+-- Enables orphaned task detection: tasks with action 'created' or 'claimed'
+-- in a stale session but no corresponding 'completed' action.
+CREATE TABLE IF NOT EXISTS session_tasks (
+    session_id TEXT    NOT NULL,
+    task_id    TEXT    NOT NULL,
+    action     TEXT    NOT NULL,  -- created | claimed | completed | abandoned
+    at         INTEGER NOT NULL   -- Unix epoch seconds (UTC)
+);
+CREATE INDEX IF NOT EXISTS idx_session_tasks_session ON session_tasks(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_tasks_task    ON session_tasks(task_id);
 
 -- Agent Message Bus: direct and broadcast messaging between agents.
 -- Enables inter-agent communication without requiring persistent HTTP endpoints.
@@ -441,6 +479,10 @@ END;
 // Store wraps a SQLite database and provides graph serialisation.
 type Store struct {
 	db *sql.DB
+
+	// lastPruneMu guards lastPruneAt to prevent redundant concurrent prunes.
+	lastPruneMu sync.Mutex
+	lastPruneAt time.Time
 }
 
 // CacheDir returns the canonical directory where synapses stores all project
@@ -645,6 +687,67 @@ func Open(path string) (*Store, error) {
 			PRIMARY KEY (memory_id, agent_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_surfaced_agent ON memory_surfaced(agent_id)`,
+		// Session Intelligence (Layer 1): session lifecycle + tool call audit tables.
+		// Added for existing databases that were created before this schema was introduced.
+		`ALTER TABLE tool_calls ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id) WHERE session_id != ''`,
+		// Initial sessions/session_tasks tables (TEXT timestamps — superseded below).
+		`CREATE TABLE IF NOT EXISTS sessions (
+			id           TEXT PRIMARY KEY,
+			agent_id     TEXT NOT NULL,
+			project_id   TEXT NOT NULL,
+			intent       TEXT NOT NULL DEFAULT '',
+			started_at   TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL,
+			ended_at     TEXT,
+			end_reason   TEXT NOT NULL DEFAULT '',
+			outcome      TEXT NOT NULL DEFAULT '',
+			summary      TEXT NOT NULL DEFAULT '',
+			tool_calls   INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_agent   ON sessions(agent_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_active  ON sessions(ended_at) WHERE ended_at IS NULL`,
+		`CREATE TABLE IF NOT EXISTS session_tasks (
+			session_id TEXT NOT NULL,
+			task_id    TEXT NOT NULL,
+			action     TEXT NOT NULL,
+			at         TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_tasks_session ON session_tasks(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_tasks_task    ON session_tasks(task_id)`,
+		// Session Intelligence schema upgrade: migrate timestamps from TEXT (RFC3339)
+		// to INTEGER (Unix epoch). Sessions are ephemeral — dropped and recreated safely.
+		// Any rows in the old TEXT-schema tables are discarded (sessions don't persist
+		// meaningful agent state; memories and tasks are unaffected).
+		`DROP TABLE IF EXISTS session_tasks`,
+		`DROP TABLE IF EXISTS sessions`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+			id              TEXT    PRIMARY KEY,
+			agent_id        TEXT    NOT NULL,
+			project_id      TEXT    NOT NULL,
+			mcp_session_id  TEXT    NOT NULL DEFAULT '',
+			intent          TEXT    NOT NULL DEFAULT '',
+			started_at      INTEGER NOT NULL,
+			last_seen_at    INTEGER NOT NULL,
+			ended_at        INTEGER,
+			end_reason      TEXT    NOT NULL DEFAULT '',
+			outcome         TEXT    NOT NULL DEFAULT '',
+			summary         TEXT    NOT NULL DEFAULT '',
+			tool_calls      INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_agent      ON sessions(agent_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_project    ON sessions(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_active     ON sessions(ended_at) WHERE ended_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_mcp        ON sessions(mcp_session_id, agent_id, project_id)`,
+		`CREATE TABLE IF NOT EXISTS session_tasks (
+			session_id TEXT    NOT NULL,
+			task_id    TEXT    NOT NULL,
+			action     TEXT    NOT NULL,
+			at         INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_tasks_session ON session_tasks(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_tasks_task    ON session_tasks(task_id)`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
 			db.Close()
@@ -2876,14 +2979,15 @@ type ToolUsageStat struct {
 
 // RecordToolCall inserts one row into the tool_calls table. All errors are
 // silently discarded — observability must never block the hot path.
-func (s *Store) RecordToolCall(toolName, agentID, entity string, durationMs int64, success bool) {
+// sessionID is the Synapses session UUID from CreateSession; empty for pre-init calls.
+func (s *Store) RecordToolCall(toolName, agentID, sessionID, entity string, durationMs int64, success bool) {
 	succ := 1
 	if !success {
 		succ = 0
 	}
 	_, _ = s.db.Exec(
-		`INSERT INTO tool_calls(tool_name,agent_id,entity,duration_ms,success) VALUES(?,?,?,?,?)`,
-		toolName, agentID, entity, durationMs, succ,
+		`INSERT INTO tool_calls(tool_name,agent_id,session_id,entity,duration_ms,success) VALUES(?,?,?,?,?,?)`,
+		toolName, agentID, sessionID, entity, durationMs, succ,
 	)
 }
 

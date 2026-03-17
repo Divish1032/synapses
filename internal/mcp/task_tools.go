@@ -107,7 +107,7 @@ func (s *Server) upsertAgentWithActivity(agentID string, activity *store.AgentAc
 // handleCreatePlan persists a new plan and its tasks to the store so future
 // LLM sessions can resume the agreed work via get_pending_tasks.
 func (s *Server) handleCreatePlan(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
@@ -179,9 +179,19 @@ func (s *Server) handleCreatePlan(
 		}
 	}
 
-	planID, err := s.store.CreatePlan(title, description, agentID, taskInputs)
+	planID, taskIDs, err := s.store.CreatePlan(title, description, agentID, taskInputs)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("create plan: %v", err)), nil
+	}
+
+	// Session Intelligence: link each created task to the current session.
+	// Fire-and-forget: silently skipped when no active session (e.g. tests).
+	if mcpSessionID := SessionIDFromContext(ctx); s.store != nil {
+		if synapseSessionID := s.getSynapseSessionID(mcpSessionID); synapseSessionID != "" {
+			for _, taskID := range taskIDs {
+				s.store.LinkSessionTask(synapseSessionID, taskID, store.SessionTaskCreated)
+			}
+		}
 	}
 
 	return jsonResult(map[string]interface{}{
@@ -397,7 +407,7 @@ func (s *Server) handleGetSessionState(
 // handleUpdateTask marks a task as done, in_progress, or cancelled, and
 // optionally appends timestamped notes for the next session to read.
 func (s *Server) handleUpdateTask(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
@@ -432,6 +442,24 @@ func (s *Server) handleUpdateTask(
 	unblocked, planCompleted, err := s.store.UpdateTask(id, status, notes, agentID)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("update task: %v", err)), nil
+	}
+
+	// Session Intelligence: record session-task relationship.
+	if mcpSessionID := SessionIDFromContext(ctx); s.store != nil {
+		if synapseSessionID := s.getSynapseSessionID(mcpSessionID); synapseSessionID != "" {
+			var action store.SessionTaskAction
+			switch status {
+			case "in_progress":
+				action = store.SessionTaskClaimed
+			case "done":
+				action = store.SessionTaskCompleted
+			case "cancelled":
+				action = store.SessionTaskAbandoned
+			}
+			if action != "" {
+				s.store.LinkSessionTask(synapseSessionID, id, action)
+			}
+		}
 	}
 
 	// Track agent activity: update or clear current task fields.

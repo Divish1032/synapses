@@ -15,12 +15,13 @@ import (
 
 // endSessionResult is the response from end_session.
 type endSessionResult struct {
-	Status          string          `json:"status"`
-	AgentID         string          `json:"agent_id"`
-	SessionDuration string          `json:"session_duration,omitempty"`
-	MemoriesSaved   int             `json:"memories_saved"`
-	SessionSummary  *sessionSummary `json:"session_summary,omitempty"`
-	MemoriesExpired int64           `json:"memories_expired"`
+	Status          string                  `json:"status"`
+	AgentID         string                  `json:"agent_id"`
+	SessionDuration string                  `json:"session_duration,omitempty"`
+	MemoriesSaved   int                     `json:"memories_saved"`
+	SessionSummary  *sessionSummary         `json:"session_summary,omitempty"`
+	MemoriesExpired int64                   `json:"memories_expired"`
+	Retrospective   *store.ToolCallSummary  `json:"retrospective,omitempty"`
 }
 
 // sessionSummary captures the structured extraction from a session.
@@ -65,8 +66,25 @@ func (s *Server) handleEndSession(
 	// agent after a manual end_session call. The existing dedup logic in
 	// InsertMemory (stringSimilarity) handles the case where an auto-log was
 	// already written — manual end_session just touches it rather than duplicating.
-	sessionID := SessionIDFromContext(ctx)
-	s.clearSessionCallEntry(sessionID, agentID)
+	mcpSessionID := SessionIDFromContext(ctx)
+	s.clearSessionCallEntry(mcpSessionID, agentID)
+
+	// Session Intelligence: close the Synapses session record.
+	// Outcome is "unknown" by default; the agent may provide context via summary.
+	outcome := "unknown"
+	if summary != "" {
+		outcome = "success" // agent provided a summary — treat as intentional close
+	}
+	synapseSessionID := s.getSynapseSessionID(mcpSessionID)
+	var retro *store.ToolCallSummary
+	if s.store != nil && synapseSessionID != "" {
+		_ = s.store.EndSession(synapseSessionID, "clean", outcome, summary)
+		// Build retrospective from the tool call audit trail.
+		if ts, err := s.store.GetToolCallSummary(synapseSessionID); err == nil && ts.TotalCalls > 0 {
+			retro = &ts
+		}
+		s.ClearSynapseSession(mcpSessionID)
+	}
 
 	result := endSessionResult{
 		Status:  "ok",
@@ -150,6 +168,7 @@ func (s *Server) handleEndSession(
 	expired, _ := s.store.ExpireMemories()
 	result.MemoriesExpired = expired
 	result.MemoriesSaved = memoriesSaved
+	result.Retrospective = retro
 
 	// ── Step 6: Compute session duration from agent registry ──
 	if agents, err := s.store.GetAgents(); err == nil {

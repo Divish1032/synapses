@@ -218,3 +218,88 @@ func TestAnalyzeChangeCoupling_CapAt50(t *testing.T) {
 		t.Errorf("expected ≤50 pairs (capped), got %d", len(pairs))
 	}
 }
+
+// TestAnalyzeChangeCoupling_EmptyRepo tests with a fresh repo with only seed commit.
+// This exercises the len(shas) > 0 path where no actual file changes exist.
+func TestAnalyzeChangeCoupling_EmptyRepo(t *testing.T) {
+	dir, _ := initCouplingBaseRepo(t)
+	// Only seed commit, no additional changes.
+
+	pairs, err := git.AnalyzeChangeCoupling(dir, 100, 0.3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Seed commit only touches .gitkeep; no co-changes expected.
+	if pairs != nil && len(pairs) > 0 {
+		t.Errorf("expected no pairs from single-file seed commit, got %d", len(pairs))
+	}
+}
+
+// TestAnalyzeChangeCoupling_SingleFileCommits tests repo where each commit touches exactly one file.
+// No pairs can form (need at least 2 files per commit for co-change).
+func TestAnalyzeChangeCoupling_SingleFileCommits(t *testing.T) {
+	dir, run := initCouplingBaseRepo(t)
+
+	// 5 commits, each touching a single distinct file.
+	for i := 0; i < 5; i++ {
+		name := filepath.Join(dir, fmt.Sprintf("single%d.go", i))
+		if err := os.WriteFile(name, []byte(fmt.Sprintf("package p\nfunc F%d(){}\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("git", "add", ".")
+		run("git", "commit", "-m", fmt.Sprintf("single %d", i))
+	}
+
+	pairs, err := git.AnalyzeChangeCoupling(dir, 20, 0.3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Single-file commits produce no pairs.
+	if pairs != nil && len(pairs) > 0 {
+		t.Errorf("expected no pairs from single-file commits, got %d", len(pairs))
+	}
+}
+
+// TestAnalyzeChangeCoupling_ZeroMinConfidence tests with minConfidence=0.0.
+// All pairs with coChanges >= 3 should be included.
+func TestAnalyzeChangeCoupling_ZeroMinConfidence(t *testing.T) {
+	dir, run := initCouplingBaseRepo(t)
+
+	// Create weak coupling: fa.go and fb.go co-change 3 times,
+	// but fa.go appears in 10 commits total → confidence = 3/10 = 0.3.
+	for i := 0; i < 3; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "fa.go"), []byte(fmt.Sprintf("package p\nfunc A%d(){}\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "fb.go"), []byte(fmt.Sprintf("package p\nfunc B%d(){}\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("git", "add", ".")
+		run("git", "commit", "-m", fmt.Sprintf("co %d", i))
+	}
+	// 7 solo commits of fa.go
+	for i := 0; i < 7; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "fa.go"), []byte(fmt.Sprintf("package p\nfunc ASolo%d(){}\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("git", "add", ".")
+		run("git", "commit", "-m", fmt.Sprintf("fa solo %d", i))
+	}
+
+	// With minConfidence=0.0, even low-confidence pairs are included.
+	pairs, err := git.AnalyzeChangeCoupling(dir, 30, 0.0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should find the fa+fb pair (confidence 3/10 = 0.3 > 0).
+	found := false
+	for _, p := range pairs {
+		if (p.FileA == "fa.go" && p.FileB == "fb.go") ||
+			(p.FileA == "fb.go" && p.FileB == "fa.go") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected to find fa.go+fb.go pair with minConfidence=0.0")
+	}
+}

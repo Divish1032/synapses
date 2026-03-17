@@ -150,6 +150,13 @@ type Server struct {
 	sessionCallsMu sync.Mutex
 	sessionCalls   map[string]*sessionCallEntry
 
+	// Session Intelligence (Layer 1): maps MCP connection session ID → Synapses session UUID.
+	// Created on session_init(); used to attribute every subsequent tool call to a session.
+	// Key: MCP sessionID (from SessionIDFromContext) or "stdio" for single-connection mode.
+	// Protected by synapseSessionsMu.
+	synapseSessionsMu sync.RWMutex
+	synapsesSessions  map[string]*synapseSessionEntry
+
 	// startTime records when the server was constructed, used by session_init
 	// to report daemon uptime in the daemon_health field (IMP-EVAL-3).
 	startTime time.Time
@@ -215,6 +222,55 @@ func (s *Server) ClearSessionHashes(sessionID string) {
 	})
 }
 
+// synapseSessionEntry maps an MCP connection to its Synapses session UUID.
+// One entry exists per active connection; keyed by MCP sessionID (or "stdio").
+type synapseSessionEntry struct {
+	id      string // UUID in the sessions table
+	agentID string
+}
+
+// synapseSessionKey returns the map key for a given MCP session ID.
+// Stdio mode passes "" as the MCP session ID; we normalise to "stdio" so the
+// map key is never empty (empty key causes ambiguous lookups in daemon mode).
+func synapseSessionKey(mcpSessionID string) string {
+	if mcpSessionID == "" {
+		return "stdio"
+	}
+	return mcpSessionID
+}
+
+// getSynapseSessionID returns the Synapses session UUID for the given MCP
+// connection, or "" when no session_init has been called on that connection yet.
+func (s *Server) getSynapseSessionID(mcpSessionID string) string {
+	s.synapseSessionsMu.RLock()
+	entry, ok := s.synapsesSessions[synapseSessionKey(mcpSessionID)]
+	s.synapseSessionsMu.RUnlock()
+	if !ok {
+		return ""
+	}
+	return entry.id
+}
+
+// registerSynapseSession associates a newly created Synapses session with an
+// MCP connection. Called from handleSessionInit after CreateSession succeeds.
+func (s *Server) registerSynapseSession(mcpSessionID, synapseSessionID, agentID string) {
+	s.synapseSessionsMu.Lock()
+	s.synapsesSessions[synapseSessionKey(mcpSessionID)] = &synapseSessionEntry{
+		id:      synapseSessionID,
+		agentID: agentID,
+	}
+	s.synapseSessionsMu.Unlock()
+}
+
+// ClearSynapseSession removes the session mapping for an MCP connection.
+// Should be called when a connection closes (daemon) or end_session fires.
+// Safe to call with an empty or unknown session ID.
+func (s *Server) ClearSynapseSession(mcpSessionID string) {
+	s.synapseSessionsMu.Lock()
+	delete(s.synapsesSessions, synapseSessionKey(mcpSessionID))
+	s.synapseSessionsMu.Unlock()
+}
+
 // ctxCallEntry tracks how many times an agent requested context for an entity.
 type ctxCallEntry struct {
 	count   int
@@ -249,6 +305,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		store:            st,
 		packetCache:      make(map[string]*packetCacheEntry, 20),
 		sessionCalls:     make(map[string]*sessionCallEntry),
+		synapsesSessions: make(map[string]*synapseSessionEntry),
 		stopCh:           make(chan struct{}),
 		logToolCalls:     true, // default on
 		logSessions:      true,
@@ -325,6 +382,18 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		if entity == "" {
 			entity, _ = req.GetArguments()["query"].(string)
 		}
+
+		// Session Intelligence: touch heartbeat and record audit row.
+		// Both ops are fire-and-forget — never block the response path.
+		mcpSessionID := SessionIDFromContext(ctx)
+		synapseSessionID := s.getSynapseSessionID(mcpSessionID)
+		if s.store != nil && synapseSessionID != "" {
+			s.store.TouchSession(synapseSessionID)
+			if s.logToolCalls {
+				go s.store.RecordToolCall(req.Params.Name, agentID, synapseSessionID, entity, elapsed.Milliseconds(), success)
+			}
+		}
+
 		// Fire-and-forget telemetry to synapses-pulse (if configured).
 		if pc := s.getPulseClient(); pc != nil && s.logToolCalls {
 			var responseBytes int

@@ -9,7 +9,8 @@ import (
 func TestCreatePlan_AndGetPendingTasks(t *testing.T) {
 	st := openTestStore(t)
 
-	planID, err := st.CreatePlan("test plan", "desc", "", []store.TaskInput{
+	planID, _,
+		err := st.CreatePlan("test plan", "desc", "", []store.TaskInput{
 		{Title: "Task A", Priority: "p0"},
 		{Title: "Task B", Priority: "p1"},
 		{Title: "Task C", Priority: "p2"},
@@ -40,8 +41,8 @@ func TestCreatePlan_AndGetPendingTasks(t *testing.T) {
 func TestGetPendingTasks_FilterByPlanID(t *testing.T) {
 	st := openTestStore(t)
 
-	planA, _ := st.CreatePlan("plan A", "", "", []store.TaskInput{{Title: "A1", Priority: "p1"}})
-	_, _ = st.CreatePlan("plan B", "", "", []store.TaskInput{{Title: "B1", Priority: "p1"}})
+	planA, _, _ := st.CreatePlan("plan A", "", "", []store.TaskInput{{Title: "A1", Priority: "p1"}})
+	_, _, _ = st.CreatePlan("plan B", "", "", []store.TaskInput{{Title: "B1", Priority: "p1"}})
 
 	tasksA, err := st.GetPendingTasks(planA, "")
 	if err != nil {
@@ -58,7 +59,7 @@ func TestGetPendingTasks_FilterByPlanID(t *testing.T) {
 func TestUpdateTask_StatusAndNotes(t *testing.T) {
 	st := openTestStore(t)
 
-	_, _ = st.CreatePlan("plan", "", "", []store.TaskInput{
+	_, _, _ = st.CreatePlan("plan", "", "", []store.TaskInput{
 		{Title: "My task", Priority: "p0"},
 	})
 
@@ -85,7 +86,7 @@ func TestUpdateTask_StatusAndNotes(t *testing.T) {
 func TestGetPlans_Summary(t *testing.T) {
 	st := openTestStore(t)
 
-	planID, _ := st.CreatePlan("summary plan", "", "", []store.TaskInput{
+	planID, _, _ := st.CreatePlan("summary plan", "", "", []store.TaskInput{
 		{Title: "T1", Priority: "p0"},
 		{Title: "T2", Priority: "p1"},
 	})

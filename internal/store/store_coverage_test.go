@@ -24,7 +24,7 @@ func TestUpdateTask_UnblocksDependent(t *testing.T) {
 	st := openTestStore(t)
 
 	// Create task A.
-	planID, err := st.CreatePlan("dep-plan", "", "", []store.TaskInput{
+	planID, _, err := st.CreatePlan("dep-plan", "", "", []store.TaskInput{
 		{Title: "task-A", Priority: "p1"},
 	})
 	if err != nil {
@@ -37,7 +37,7 @@ func TestUpdateTask_UnblocksDependent(t *testing.T) {
 	taskAID := tasks[0].ID
 
 	// Create task B with dependency on A.
-	_, err = st.CreatePlan("dep-plan-b", "", "", []store.TaskInput{
+	_, _, err = st.CreatePlan("dep-plan-b", "", "", []store.TaskInput{
 		{Title: "task-B", Priority: "p2", DependsOn: []string{taskAID}},
 	})
 	if err != nil {
@@ -57,7 +57,7 @@ func TestUpdateTask_TwoDeps_OnlyOneComplete(t *testing.T) {
 	st := openTestStore(t)
 
 	// Create task A and task C.
-	planID, _ := st.CreatePlan("two-dep-plan", "", "", []store.TaskInput{
+	planID, _, _ := st.CreatePlan("two-dep-plan", "", "", []store.TaskInput{
 		{Title: "task-A2", Priority: "p1"},
 		{Title: "task-C2", Priority: "p1"},
 	})
@@ -69,7 +69,7 @@ func TestUpdateTask_TwoDeps_OnlyOneComplete(t *testing.T) {
 	taskCID := tasks[1].ID
 
 	// Create task B depending on both A and C.
-	_, _ = st.CreatePlan("b-plan", "", "", []store.TaskInput{
+	_, _, _ = st.CreatePlan("b-plan", "", "", []store.TaskInput{
 		{Title: "task-B2", Priority: "p2", DependsOn: []string{taskAID, taskCID}},
 	})
 
@@ -83,7 +83,7 @@ func TestUpdateTask_TwoDeps_OnlyOneComplete(t *testing.T) {
 
 func TestUpdateTask_NotDone_NoUnblocked(t *testing.T) {
 	st := openTestStore(t)
-	planID, _ := st.CreatePlan("in-prog plan", "", "", []store.TaskInput{
+	planID, _, _ := st.CreatePlan("in-prog plan", "", "", []store.TaskInput{
 		{Title: "task-ip", Priority: "p1"},
 	})
 	tasks, _ := st.GetPendingTasks(planID, "")
@@ -605,7 +605,7 @@ func TestSaveCallSites_EmptySlice(t *testing.T) {
 
 func TestGetPendingTasks_WithAgentID(t *testing.T) {
 	st := openTestStore(t)
-	planID, err := st.CreatePlan("agent-plan", "", "", []store.TaskInput{
+	planID, _, err := st.CreatePlan("agent-plan", "", "", []store.TaskInput{
 		{Title: "task-unclaimed", Priority: "p1"},
 		{Title: "task-unclaimed-2", Priority: "p2"},
 	})
@@ -632,7 +632,7 @@ func TestGetPendingTasks_WithDependencies(t *testing.T) {
 	st := openTestStore(t)
 
 	// Create a blocker task.
-	planID, err := st.CreatePlan("dep-blocker-plan", "", "", []store.TaskInput{
+	planID, _, err := st.CreatePlan("dep-blocker-plan", "", "", []store.TaskInput{
 		{Title: "blocker", Priority: "p0"},
 	})
 	if err != nil {
@@ -645,7 +645,7 @@ func TestGetPendingTasks_WithDependencies(t *testing.T) {
 	blockerID := blockerTasks[0].ID
 
 	// Create a dependent task that depends on the blocker.
-	plan2ID, err := st.CreatePlan("dep-waiting-plan", "", "", []store.TaskInput{
+	plan2ID, _, err := st.CreatePlan("dep-waiting-plan", "", "", []store.TaskInput{
 		{Title: "waiter", Priority: "p1", DependsOn: []string{blockerID}},
 	})
 	if err != nil {
@@ -667,7 +667,7 @@ func TestGetPendingTasks_WithDependencies(t *testing.T) {
 
 func TestGetPendingTasks_NoFilter(t *testing.T) {
 	st := openTestStore(t)
-	_, _ = st.CreatePlan("no-filter-plan", "", "", []store.TaskInput{
+	_, _, _ = st.CreatePlan("no-filter-plan", "", "", []store.TaskInput{
 		{Title: "task-nf", Priority: "p1"},
 	})
 
