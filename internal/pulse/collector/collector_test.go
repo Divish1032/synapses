@@ -195,3 +195,98 @@ func TestComputeCostSaved(t *testing.T) {
 		t.Errorf("cost for negative tokens: got %.2f, want 0", cost)
 	}
 }
+
+func TestFlush_WithEmptyBuffer(t *testing.T) {
+	s := testStore(t)
+	c := New(s, 100, 500)
+	c.Start()
+	defer c.Stop()
+
+	// Immediately flush with no events — should be a no-op
+	c.mu.Lock()
+	initialLen := len(c.buf)
+	c.mu.Unlock()
+
+	if initialLen != 0 {
+		t.Errorf("expected empty buffer, got %d events", initialLen)
+	}
+}
+
+func TestFlushLoop_OnTicker(t *testing.T) {
+	s := testStore(t)
+	c := New(s, 100, 50) // 50ms flush interval (short for testing)
+
+	c.Start()
+	defer c.Stop()
+
+	// Record an event and wait for periodic flush
+	c.RecordToolCall(pulsetypes.ToolCallEvent{ToolName: "test", Success: true})
+
+	// Wait for timer to fire and flush
+	time.Sleep(150 * time.Millisecond)
+
+	// Buffer should be empty after flush
+	if c.Len() > 0 {
+		t.Errorf("expected buffer flushed by ticker, len=%d", c.Len())
+	}
+}
+
+func TestWriteBatch_WithBrainUsage(t *testing.T) {
+	s := testStore(t)
+	c := New(s, 100, 500)
+	c.Start()
+	defer c.Stop()
+
+	c.RecordBrainUsage(pulsetypes.BrainUsageEvent{
+		Model:            "test-model",
+		PromptTokens:     100,
+		CompletionTokens: 50,
+		DurationMs:       42,
+		CostUSD:          0.01,
+	})
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestWriteBatch_WithAgentLLMUsage(t *testing.T) {
+	s := testStore(t)
+	c := New(s, 100, 500)
+	c.Start()
+	defer c.Stop()
+
+	c.RecordAgentLLMUsage(pulsetypes.AgentLLMUsageEvent{
+		SessionID:   "sess-1",
+		AgentID:     "agent-1",
+		ProjectID:   "proj-1",
+		Model:       "gpt-4o",
+		Provider:    "openai",
+		InputTokens: 1000,
+		OutputTokens: 500,
+		CostUSD:     0.05,
+	})
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestComputeCostSaved_WithPricingLookup(t *testing.T) {
+	s := testStore(t)
+	c := New(s, 100, 500)
+
+	// Test with various token amounts
+	tests := []struct {
+		tokens int
+		want   float64
+	}{
+		{0, 0},
+		{500_000, 1.25},    // 500k tokens * 2.50 / 1M
+		{1_000_000, 2.50},  // 1M tokens
+		{2_000_000, 5.00},  // 2M tokens
+	}
+
+	for _, tt := range tests {
+		cost := c.computeCostSaved(tt.tokens)
+		if cost != tt.want {
+			t.Errorf("computeCostSaved(%d) = %.2f, want %.2f", tt.tokens, cost, tt.want)
+		}
+	}
+}
