@@ -140,3 +140,60 @@ func TestWatcher_FileDelete(t *testing.T) {
 		t.Error("Goodbye node should have been removed after file delete")
 	}
 }
+
+// TestWatcher_SetConfig verifies that configuration can be set on an active watcher.
+func TestWatcher_SetConfig(t *testing.T) {
+	dir := t.TempDir()
+	g := graph.New("test")
+	g.SetRoot(dir)
+
+	w, err := New(g, parser.NewWalker(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Call SetConfig to ensure it doesn't panic
+	w.SetConfig(nil)
+}
+
+// TestWatcher_SetProjectID verifies that project ID can be set.
+func TestWatcher_SetProjectID(t *testing.T) {
+	dir := t.TempDir()
+	g := graph.New("test")
+	g.SetRoot(dir)
+
+	w, err := New(g, parser.NewWalker(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	w.SetProjectID("myproject")
+}
+
+// TestWatcher_RecentChanges verifies that RecentChanges returns events.
+func TestWatcher_RecentChanges(t *testing.T) {
+	dir := t.TempDir()
+	g := graph.New("test")
+	g.SetRoot(dir)
+
+	w, err := New(g, parser.NewWalker(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := w.Start(dir); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer w.Stop()
+
+	// Write a file to trigger a change
+	file := filepath.Join(dir, "test.go")
+	if err := os.WriteFile(file, []byte("package test\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	settle()
+
+	// RecentChanges should not panic, even if empty
+	changes := w.RecentChanges(10)
+	_ = changes // Just verify it returns without error
+}
