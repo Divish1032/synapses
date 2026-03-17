@@ -1844,6 +1844,9 @@ func (s *Server) registerTools() {
 			mcp.WithNumber("limit",
 				mcp.Description("Max episodes to return. Default 5 (search) or 20 (browse)."),
 			),
+			mcp.WithBoolean("include_stale",
+				mcp.Description("When true, include stale (invalidated) memories in results. Default false. Use for audit queries to review full history including beliefs that were invalidated by graph changes."),
+			),
 		),
 		s.handleRecall,
 	)
