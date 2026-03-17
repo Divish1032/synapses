@@ -115,7 +115,7 @@ func TestE2E_GetContextWithEdges(t *testing.T) {
 	srv := New(g, &config.Config{}, nil)
 
 	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]interface{}{"entity": "ProcessData"}
+	req.Params.Arguments = map[string]interface{}{"entity": "ProcessData", "format": "json"}
 
 	result, err := srv.handleGetContext(context.Background(), req)
 	if err != nil {

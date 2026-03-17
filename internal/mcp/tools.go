@@ -221,7 +221,14 @@ func (s *Server) handleGetContext(
 	// Extract format/detailLevel early so they can be included in the session cache key.
 	// These same values are used again at rendering time — reading from the same request,
 	// so values are identical. Declaring here avoids a second GetArguments call later.
+	//
+	// Default format: "compact" (natural-language, ~200-600 tokens) rather than "json"
+	// (~2000-3800 tokens). JSON is 4-6x larger with no benefit for agents that read text.
+	// Agents that need structured JSON can pass format="json" explicitly.
 	format, _ := req.GetArguments()["format"].(string)
+	if format == "" {
+		format = "compact"
+	}
 	detailLevel, _ := req.GetArguments()["detail_level"].(string)
 
 	// GAP-1: Feedback loop.
@@ -798,12 +805,16 @@ func (s *Server) handleGetContext(
 	}
 
 	// format=compact returns a natural-language briefing instead of the default JSON blob.
-	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t, default).
+	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t).
 	// format and detailLevel were extracted early for the session cache key; reused here.
 	if format == "compact" {
-		// F17: if no explicit detail_level given, honour the adaptive expansion.
+		// F17: if no explicit detail_level given, honour the adaptive expansion first.
+		// Otherwise default to "neighbors" (~200 tokens) — leans lean; agents can
+		// pass detail_level="full" explicitly when they need callee detail blocks.
 		if detailLevel == "" && adaptiveForceFullDetail {
 			detailLevel = "full"
+		} else if detailLevel == "" {
+			detailLevel = "neighbors"
 		}
 		s.setSessionHash(sessionID, entityCacheKey, entityHash)
 		return mcp.NewToolResultText(serializeCompact(dc, detailLevel)), nil
@@ -3092,6 +3103,16 @@ func (s *Server) handleSessionInit(
 	model, _    := req.GetArguments()["model"].(string)
 	provider, _ := req.GetArguments()["provider"].(string)
 	intent, _   := req.GetArguments()["intent"].(string)
+	// scope controls response verbosity:
+	//   "full"   (default) — all sections, backward compatible
+	//   "quick"  — tasks + working_state + scale_guidance only (~500 tokens)
+	//   "resume" — tasks with session states + working_state + stale hints only
+	scope, _ := req.GetArguments()["scope"].(string)
+	if scope == "" {
+		scope = "full"
+	}
+	quickMode  := scope == "quick"
+	resumeMode := scope == "resume"
 	s.upsertAgentIfNeeded(agentID)
 	// B29: Store declared intent so peers can see what this agent is working on.
 	if agentID != "" && intent != "" && s.store != nil {
@@ -3400,14 +3421,21 @@ func (s *Server) handleSessionInit(
 	}
 
 	// ── Assemble response ─────────────────────────────────────────────────
+	// quickMode (scope="quick"): tasks + working_state + scale_guidance only.
+	// resumeMode (scope="resume"): tasks with session states + working_state only.
+	// Full mode (default): all sections, backward compatible.
 	resp := map[string]interface{}{
-		"project_identity": projectSection,
-		"pending_tasks":    pendingSection,
-		"working_state":    workingSection,
-		"recent_events":    recentEvents,
-		"latest_event_seq": latestEventSeq,
-		"scale_guidance":   identity.ToolGuidance,
-		"session_hint":     "Pass latest_event_seq to get_events on the next call to receive only new events. Use scale_guidance to decide when to use Synapses tools vs Read/Grep.",
+		"pending_tasks":  pendingSection,
+		"working_state":  workingSection,
+		"scale_guidance": identity.ToolGuidance,
+	}
+	if !quickMode && !resumeMode {
+		resp["project_identity"] = projectSection
+		resp["recent_events"] = recentEvents
+		resp["latest_event_seq"] = latestEventSeq
+		resp["session_hint"] = "Pass latest_event_seq to get_events on the next call to receive only new events. Use scale_guidance to decide when to use Synapses tools vs Read/Grep."
+	} else {
+		resp["latest_event_seq"] = latestEventSeq
 	}
 	if incremental {
 		resp["incremental"] = true
@@ -3484,6 +3512,8 @@ func (s *Server) handleSessionInit(
 
 	// ── 7. Sidecar availability ───────────────────────────────────────────
 	// Let agents skip tool calls for unavailable sidecars without trial-and-error.
+	// Skipped in quick/resume mode — not critical for lightweight sessions.
+	if !quickMode && !resumeMode {
 	resp["sidecars"] = map[string]interface{}{
 		"brain": map[string]interface{}{
 			"available": s.getBrainClient() != nil,
@@ -3587,6 +3617,7 @@ func (s *Server) handleSessionInit(
 			// Pulse sidecar is slow or unavailable — skip hints rather than blocking.
 		}
 	}
+	} // end !quickMode && !resumeMode
 
 	// ── 8. Agent constraints (behavioral rules) ───────────────────────────
 	// Surface all agent-type rules (no ForbiddenEdge, conversation-level constraints)
@@ -3619,7 +3650,8 @@ func (s *Server) handleSessionInit(
 	//   2. Project-tier memories (always relevant)
 	//   3. Session logs from this agent's recent sessions
 	// Capped at ~500 chars total; all surfaced memories get touched (TTL renewal).
-	if s.store != nil {
+	// Skipped in quick mode — caller gets a lighter response.
+	if s.store != nil && !quickMode {
 		const memCap = 500
 		var memoryItems []map[string]string
 		var touchIDs []string
@@ -3817,6 +3849,8 @@ func (s *Server) handleSessionInit(
 	// ── Daemon health (IMP-EVAL-3) ────────────────────────────────────────
 	// Surface uptime, CPU%, and goroutine count so agents can detect an
 	// overloaded or long-running daemon without external tooling.
+	// Skipped in quick mode.
+	if !quickMode && !resumeMode {
 	{
 		uptimeMin := int(time.Since(s.startTime).Minutes())
 		health := map[string]interface{}{
@@ -3838,6 +3872,7 @@ func (s *Server) handleSessionInit(
 		}
 		resp["daemon_health"] = health
 	}
+	} // end !quickMode && !resumeMode (daemon_health)
 
 	// ── Update agent context profile ─────────────────────────────────────
 	// Record what this agent now knows so the next session_init can be incremental.

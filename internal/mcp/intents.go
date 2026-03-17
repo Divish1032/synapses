@@ -16,8 +16,12 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
-// tokensUsed estimates the token count of s using the ~4 chars/token heuristic.
-func tokensUsed(b *strings.Builder) int { return b.Len() / 4 }
+// tokensUsed estimates the token count of s.
+// Code-heavy responses (identifiers, brackets, punctuation) tokenize more
+// densely than prose: ~3.5 chars/token measured vs the naive 4 chars/token.
+// Using 3.5 (integer: *2/7) gives a conservative estimate — we'd rather
+// prune a few tokens early than silently over-budget on code contexts.
+func tokensUsed(b *strings.Builder) int { return b.Len() * 2 / 7 }
 
 // applyIntentCarveConfig stamps intent-specific edge weights and directional
 // bias onto a CarveConfig returned by s.config.CarveConfig(). The per-intent

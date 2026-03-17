@@ -443,6 +443,7 @@ func TestHandleGetContext_WithTaskID(t *testing.T) {
 	req := callTool(map[string]any{
 		"entity":  "AuthLogin",
 		"task_id": "task-123",
+		"format": "json",
 	})
 	result, err := s.handleGetContext(ctx, req)
 	if err != nil {
@@ -1174,6 +1175,7 @@ func TestHandleGetContext_Disambiguation(t *testing.T) {
 	req := callTool(map[string]any{
 		"entity": "SharedHelper",
 		// no file= hint → disambiguation candidates should be surfaced
+		"format": "json",
 	})
 	result, err := s.handleGetContext(ctx, req)
 	if err != nil {
@@ -1189,6 +1191,7 @@ func TestHandleGetContext_WithHelpfulFeedback(t *testing.T) {
 		"entity":   "AuthLogin",
 		"agent_id": "feedback-agent",
 		"helpful":  true,
+		"format": "json",
 	})
 	result, err := s.handleGetContext(ctx, req)
 	if err != nil {
@@ -1203,6 +1206,7 @@ func TestHandleGetContext_WithHelpfulFalse(t *testing.T) {
 		"entity":   "AuthLogin",
 		"agent_id": "feedback-agent2",
 		"helpful":  false,
+		"format": "json",
 	})
 	result, err := s.handleGetContext(ctx, req)
 	if err != nil {
@@ -1216,6 +1220,7 @@ func TestHandleGetContext_ImpactMode(t *testing.T) {
 	req := callTool(map[string]any{
 		"entity": "AuthLogin",
 		"mode":   "impact",
+		"format": "json",
 	})
 	result, err := s.handleGetContext(ctx, req)
 	if err != nil {
@@ -2322,6 +2327,7 @@ func TestHandleGetContext_WithDepthAndBudget(t *testing.T) {
 		"entity":       "AuthLogin",
 		"depth":        float64(2),
 		"token_budget": float64(1000),
+		"format": "json",
 	}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "root")
@@ -2335,6 +2341,7 @@ func TestHandleGetContext_WithAnnotations(t *testing.T) {
 
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity": "AuthLogin",
+		"format": "json",
 	}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "root")
@@ -2360,6 +2367,7 @@ func TestHandleGetContext_WithApplicableRules(t *testing.T) {
 
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity": "AuthLogin",
+		"format": "json",
 	}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "root")
@@ -2381,6 +2389,7 @@ func TestHandleGetContext_WithRecentFailures(t *testing.T) {
 
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity": "AuthLogin",
+		"format": "json",
 	}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "root")
@@ -2402,6 +2411,7 @@ func TestHandleGetContext_WithConstitution(t *testing.T) {
 
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity": "AuthLogin",
+		"format": "json",
 	}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "root")
@@ -2423,6 +2433,7 @@ func TestHandleGetContext_WithLinkedTaskNodes(t *testing.T) {
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":  "AuthLogin",
 		"task_id": taskID,
+		"format": "json",
 	}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "root")
@@ -2436,6 +2447,7 @@ func TestHandleGetContext_MultipleCallees(t *testing.T) {
 	s, _, _ := newPopulatedServer(t)
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity": "HandleRequest",
+		"format": "json",
 	}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "callees")
@@ -2878,6 +2890,7 @@ func TestHandleGetContext_IncludeInferred_FiltersRouteNodes(t *testing.T) {
 	resTrue, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":           "GetUsers",
 		"include_inferred": true,
+		"format": "json",
 	}))
 	if err != nil {
 		t.Fatalf("include_inferred=true: unexpected error: %v", err)
@@ -2900,6 +2913,7 @@ func TestHandleGetContext_IncludeInferred_FiltersRouteNodes(t *testing.T) {
 	resFalse, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":           "GetUsers",
 		"include_inferred": false,
+		"format": "json",
 	}))
 	if err != nil {
 		t.Fatalf("include_inferred=false: unexpected error: %v", err)

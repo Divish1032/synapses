@@ -443,6 +443,7 @@ func TestHandleGetContext_WithFilePin(t *testing.T) {
 	req := callTool(map[string]any{
 		"entity": "AuthLogin",
 		"file":   "pkg/auth/auth.go",
+		"format": "json",
 	})
 	result, err := s.handleGetContext(ctx, req)
 	if err != nil {
@@ -790,6 +791,7 @@ func TestHandleGetContext_Disambiguation_JSONFormat_RelativePaths(t *testing.T) 
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity": "DupFunc",
 		// default format = json
+		"format": "json",
 	}))
 	if err != nil {
 		t.Fatalf("handleGetContext error: %v", err)

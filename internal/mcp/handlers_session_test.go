@@ -411,6 +411,7 @@ func TestHandleGetContext_UpdatesAgentFocus(t *testing.T) {
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":   "AuthLogin",
 		"agent_id": "focus-agent",
+		"format": "json",
 	}))
 	mustResult(t, res, err)
 
@@ -616,6 +617,7 @@ func TestHandleGetContext_KnownHash_ReturnsUnchanged(t *testing.T) {
 	res2, err2 := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":     "AuthLogin",
 		"known_hash": hash,
+		"format": "json",
 	}))
 	m2 := mustResult(t, res2, err2)
 	if m2["unchanged"] != true {
@@ -631,6 +633,7 @@ func TestHandleGetContext_WrongKnownHash_ReturnsFull(t *testing.T) {
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":     "AuthLogin",
 		"known_hash": "000000000000",
+		"format": "json",
 	}))
 	m := mustResult(t, res, err)
 	// Hash mismatch → full response with root and entity_hash.
@@ -751,6 +754,7 @@ func TestHandleGetContext_SessionAutoCache_ModeImpact_NotCached(t *testing.T) {
 	res1, err1 := s.handleGetContext(sctx, callTool(map[string]any{
 		"entity": "AuthLogin",
 		"mode":   "impact",
+		"format": "json",
 	}))
 	if err1 != nil {
 		t.Fatalf("impact call error: %v", err1)
@@ -781,6 +785,7 @@ func TestHandleGetContext_SessionAutoCache_ManualKnownHashTakesPrecedence(t *tes
 	res2, err2 := s.handleGetContext(sctx, callTool(map[string]any{
 		"entity":     "AuthLogin",
 		"known_hash": "000000000000",
+		"format": "json",
 	}))
 	m2 := mustResult(t, res2, err2)
 	if m2["unchanged"] == true {
@@ -792,6 +797,7 @@ func TestHandleGetContext_SessionAutoCache_ManualKnownHashTakesPrecedence(t *tes
 	res3, err3 := s.handleGetContext(sctx, callTool(map[string]any{
 		"entity":     "AuthLogin",
 		"known_hash": hash,
+		"format": "json",
 	}))
 	m3 := mustResult(t, res3, err3)
 	if m3["unchanged"] != true {

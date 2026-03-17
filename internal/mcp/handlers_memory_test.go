@@ -122,6 +122,7 @@ func TestGetContext_SurfacesEntityMemories(t *testing.T) {
 
 	result, err := srv.handleGetContext(ctx, callTool(map[string]any{
 		"entity": "AuthLogin",
+		"format": "json",
 	}))
 	m := mustResult(t, result, err)
 
@@ -145,6 +146,7 @@ func TestGetContext_NoEntityMemories(t *testing.T) {
 
 	result, err := srv.handleGetContext(ctx, callTool(map[string]any{
 		"entity": "AuthLogin",
+		"format": "json",
 	}))
 	m := mustResult(t, result, err)
 
