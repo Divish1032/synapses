@@ -2,6 +2,7 @@ package archivist
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -381,124 +382,119 @@ func TestMemorize_RetryMock_SecondCallReturnsData(t *testing.T) {
 	}
 }
 
-// --- parseEntities: direct unit tests ---
+// --- parseEntities: table-driven tests ---
 
-func TestParseEntities_EmptyRaw(t *testing.T) {
-	t.Parallel()
-	result := parseEntities(nil)
-	if result != nil {
-		t.Errorf("parseEntities(nil) = %v, want nil", result)
+func TestParseEntities(t *testing.T) {
+	// Table-driven tests for comprehensive parseEntities coverage.
+	// Tests cover all major branches: nil/empty input, array parsing, string parsing,
+	// whitespace handling, and invalid input.
+	tests := []struct {
+		name    string
+		raw     json.RawMessage
+		want    []string
+		wantNil bool // Set true if expecting nil (not empty slice)
+	}{
+		{
+			name:    "nil_input",
+			raw:     nil,
+			wantNil: true,
+		},
+		{
+			name:    "empty_byte_slice",
+			raw:     []byte{},
+			wantNil: true,
+		},
+		{
+			name: "array_format_three_items",
+			raw:  []byte(`["Service1","Service2","Service3"]`),
+			want: []string{"Service1", "Service2", "Service3"},
+		},
+		{
+			name: "array_with_empty_strings",
+			raw:  []byte(`["Service1","","Service2"]`),
+			want: []string{"Service1", "", "Service2"},
+		},
+		{
+			name: "empty_array",
+			raw:  []byte(`[]`),
+			want: []string{}, // empty slice, not nil
+		},
+		{
+			name: "string_format_no_whitespace",
+			raw:  []byte(`"Service1,Service2,Service3"`),
+			want: []string{"Service1", "Service2", "Service3"},
+		},
+		{
+			name: "string_format_with_whitespace",
+			raw:  []byte(`"Service1 , Service2 , Service3"`),
+			want: []string{"Service1", "Service2", "Service3"},
+		},
+		{
+			name: "string_with_empty_parts_multiple_commas",
+			raw:  []byte(`"Service1,,Service2, , Service3"`),
+			want: []string{"Service1", "Service2", "Service3"},
+		},
+		{
+			name:    "empty_string_value",
+			raw:     []byte(`""`),
+			wantNil: true,
+		},
+		{
+			name: "string_with_only_whitespace",
+			raw:  []byte(`"   ,  ,   "`),
+			want: []string{}, // empty slice after trimming whitespace-only parts
+		},
+		{
+			name:    "invalid_json",
+			raw:     []byte(`{not valid json}`),
+			wantNil: true,
+		},
+		{
+			name:    "numeric_json",
+			raw:     []byte(`123`),
+			wantNil: true,
+		},
+		{
+			name: "single_item_array",
+			raw:  []byte(`["OnlyOne"]`),
+			want: []string{"OnlyOne"},
+		},
+		{
+			name: "single_item_string",
+			raw:  []byte(`"OnlyOne"`),
+			want: []string{"OnlyOne"},
+		},
 	}
-	result = parseEntities([]byte{})
-	if result != nil {
-		t.Errorf("parseEntities([]) = %v, want nil", result)
-	}
-}
 
-func TestParseEntities_ArrayFormat(t *testing.T) {
-	t.Parallel()
-	// Valid JSON array of strings.
-	raw := []byte(`["Service1","Service2","Service3"]`)
-	result := parseEntities(raw)
-	if len(result) != 3 || result[0] != "Service1" || result[1] != "Service2" || result[2] != "Service3" {
-		t.Errorf("parseEntities(array) = %v, want [Service1 Service2 Service3]", result)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := parseEntities(tt.raw)
 
-func TestParseEntities_ArrayWithEmptyStrings(t *testing.T) {
-	t.Parallel()
-	// Array with empty strings should still be returned as-is.
-	raw := []byte(`["Service1","","Service2"]`)
-	result := parseEntities(raw)
-	if len(result) != 3 {
-		t.Errorf("parseEntities(array with empty) = len %d, want 3", len(result))
-	}
-	if result[1] != "" {
-		t.Errorf("result[1] = %q, want empty string", result[1])
-	}
-}
+			if tt.wantNil {
+				if result != nil {
+					t.Errorf("parseEntities(%q): got %v, want nil", string(tt.raw), result)
+				}
+				return
+			}
 
-func TestParseEntities_EmptyArray(t *testing.T) {
-	t.Parallel()
-	raw := []byte(`[]`)
-	result := parseEntities(raw)
-	if result == nil {
-		t.Error("parseEntities([]) should return empty slice, not nil")
-	}
-	if len(result) != 0 {
-		t.Errorf("parseEntities([]) = len %d, want 0", len(result))
-	}
-}
+			if result == nil {
+				t.Errorf("parseEntities(%q): got nil, want %v", string(tt.raw), tt.want)
+				return
+			}
 
-func TestParseEntities_StringFormatNoWhitespace(t *testing.T) {
-	t.Parallel()
-	// Simple comma-separated string.
-	raw := []byte(`"Service1,Service2,Service3"`)
-	result := parseEntities(raw)
-	if len(result) != 3 || result[0] != "Service1" || result[1] != "Service2" || result[2] != "Service3" {
-		t.Errorf("parseEntities(string) = %v, want [Service1 Service2 Service3]", result)
-	}
-}
+			if len(result) != len(tt.want) {
+				t.Errorf("parseEntities(%q): got len %d, want %d. Result: %v",
+					string(tt.raw), len(result), len(tt.want), result)
+				return
+			}
 
-func TestParseEntities_StringFormatWithWhitespace(t *testing.T) {
-	t.Parallel()
-	// String with leading/trailing spaces in parts.
-	raw := []byte(`"Service1 , Service2 , Service3"`)
-	result := parseEntities(raw)
-	if len(result) != 3 || result[0] != "Service1" || result[1] != "Service2" || result[2] != "Service3" {
-		t.Errorf("parseEntities(string with spaces) = %v, want [Service1 Service2 Service3]", result)
-	}
-}
-
-func TestParseEntities_StringWithEmptyParts(t *testing.T) {
-	t.Parallel()
-	// String with empty parts (multiple commas) should skip empty after trim.
-	raw := []byte(`"Service1,,Service2, , Service3"`)
-	result := parseEntities(raw)
-	if len(result) != 3 || result[0] != "Service1" || result[1] != "Service2" || result[2] != "Service3" {
-		t.Errorf("parseEntities(string with empty parts) = %v, want [Service1 Service2 Service3]", result)
-	}
-}
-
-func TestParseEntities_EmptyStringValue(t *testing.T) {
-	t.Parallel()
-	// Empty string should not enter the split logic (caught by s != "" check).
-	raw := []byte(`""`)
-	result := parseEntities(raw)
-	if result != nil {
-		t.Errorf("parseEntities(\"\") = %v, want nil", result)
-	}
-}
-
-func TestParseEntities_StringWithOnlyWhitespace(t *testing.T) {
-	t.Parallel()
-	// String with only whitespace parts.
-	raw := []byte(`"   ,  ,   "`)
-	result := parseEntities(raw)
-	if result == nil {
-		t.Error("parseEntities(whitespace-only string) should return empty slice, not nil")
-	}
-	if len(result) != 0 {
-		t.Errorf("parseEntities(whitespace-only) = len %d, want 0", len(result))
-	}
-}
-
-func TestParseEntities_InvalidJSON(t *testing.T) {
-	t.Parallel()
-	// Invalid JSON that unmarshal can't parse (neither array nor string).
-	raw := []byte(`{not valid json}`)
-	result := parseEntities(raw)
-	if result != nil {
-		t.Errorf("parseEntities(invalid) = %v, want nil", result)
-	}
-}
-
-func TestParseEntities_NumericJSON(t *testing.T) {
-	t.Parallel()
-	// JSON number (not string, not array) should fail both unmarshal attempts.
-	raw := []byte(`123`)
-	result := parseEntities(raw)
-	if result != nil {
-		t.Errorf("parseEntities(numeric) = %v, want nil", result)
+			for i, item := range result {
+				if item != tt.want[i] {
+					t.Errorf("parseEntities(%q)[%d]: got %q, want %q",
+						string(tt.raw), i, item, tt.want[i])
+				}
+			}
+		})
 	}
 }

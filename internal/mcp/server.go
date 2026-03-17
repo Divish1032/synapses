@@ -792,6 +792,9 @@ func (s *Server) registerTools() {
 				mcp.Required(),
 				mcp.Description("Natural language description of what you need, e.g. 'check what calls this function' or 'save my progress'."),
 			),
+			mcp.WithBoolean("debug",
+				mcp.Description("When true, returns all scored tools (not just top 3) with per-tool score breakdowns showing which keywords, name tokens, and description words matched. Useful for tuning and auditing scoring logic."),
+			),
 		),
 		s.handleDiscoverTools,
 	)

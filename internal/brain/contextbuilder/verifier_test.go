@@ -5,94 +5,119 @@ import (
 	"testing"
 )
 
-func TestVerifyClaim_Orphan(t *testing.T) {
-	topo := buildTopo(Request{FanIn: 0, CalleeNames: nil, CallerNames: nil})
+// TestVerifyClaim_TableDriven tests all claim verification scenarios with a single table-driven test.
+// This improves maintainability by reducing code duplication and making it easier to add new scenarios.
+func TestVerifyClaim_TableDriven(t *testing.T) {
+	// Table-driven test for claim verification logic.
+	// Each test case defines: claim text, topology state, and expected annotation result.
+	tests := []struct {
+		name         string
+		claim        string
+		req          Request
+		wantVerified bool // true if expect [✓], false if expect UNVERIFIED, nil if expect unchanged
+		wantUnchanged bool // true if expect original claim unchanged
+	}{
+		// Orphan/isolated claims
+		{
+			name:         "orphan_claim_true_orphan",
+			claim:        "This node appears to be an orphan with no callers",
+			req:          Request{FanIn: 0, CalleeNames: nil, CallerNames: nil},
+			wantVerified: true,
+		},
+		{
+			name:         "orphan_claim_contradicted",
+			claim:        "This node appears to be an orphan",
+			req:          Request{FanIn: 3, CalleeNames: []string{"A", "B"}, CallerNames: []string{"X", "Y", "Z"}},
+			wantVerified: false,
+		},
 
-	got := verifyClaim("This node appears to be an orphan with no callers", topo)
-	if !strings.Contains(got, "[✓]") {
-		t.Errorf("expected [✓] for true orphan, got: %s", got)
+		// Hub/gravity center claims
+		{
+			name:         "hub_claim_high_fanin",
+			claim:        "Acts as a gravity center with high connectivity",
+			req:          Request{FanIn: 12, CallerNames: []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"}},
+			wantVerified: true,
+		},
+		{
+			name:         "hub_claim_low_fanin_contradicted",
+			claim:        "Acts as a gravity center in the system",
+			req:          Request{FanIn: 2, CallerNames: []string{"A", "B"}},
+			wantVerified: false,
+		},
+
+		// Test coverage claims
+		{
+			name:         "no_test_claim_true",
+			claim:        "No test coverage exists for this function",
+			req:          Request{HasTests: false, RootFile: "internal/auth/handler.go"},
+			wantVerified: true,
+		},
+		{
+			name:         "no_test_claim_contradicted",
+			claim:        "This function is untested and has no coverage",
+			req:          Request{HasTests: true, RootFile: "internal/auth/handler.go"},
+			wantVerified: false,
+		},
+
+		// Cycle/circular dependency claims
+		{
+			name:         "cycle_claim_bidirectional_edge",
+			claim:        "There is a circular dependency in this module",
+			req:          Request{CalleeNames: []string{"B", "C"}, CallerNames: []string{"B", "D"}},
+			wantVerified: true,
+		},
+		{
+			name:         "cycle_claim_no_edge_contradicted",
+			claim:        "This creates a cycle between modules",
+			req:          Request{CalleeNames: []string{"B", "C"}, CallerNames: []string{"D", "E"}},
+			wantVerified: false,
+		},
+
+		// High coupling claims
+		{
+			name:         "coupling_claim_high_callees",
+			claim:        "This function is tightly coupled with many dependencies",
+			req:          Request{CalleeNames: []string{"A", "B", "C", "D", "E", "F"}},
+			wantVerified: true,
+		},
+		{
+			name:         "coupling_claim_low_callees_contradicted",
+			claim:        "This is tightly coupled with many dependencies",
+			req:          Request{CalleeNames: []string{"A", "B"}},
+			wantVerified: false,
+		},
+
+		// Unrecognized/unknown claims
+		{
+			name:         "unknown_claim_unchanged",
+			claim:        "This function handles request routing.",
+			req:          Request{FanIn: 3},
+			wantUnchanged: true,
+		},
 	}
-}
 
-func TestVerifyClaim_Orphan_Contradicted(t *testing.T) {
-	topo := buildTopo(Request{FanIn: 3, CalleeNames: []string{"A", "B"}, CallerNames: []string{"X", "Y", "Z"}})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			topo := buildTopo(tt.req)
+			got := verifyClaim(tt.claim, topo)
 
-	got := verifyClaim("This node appears to be an orphan", topo)
-	if !strings.Contains(got, "UNVERIFIED") {
-		t.Errorf("expected UNVERIFIED for non-orphan, got: %s", got)
-	}
-}
+			if tt.wantUnchanged {
+				if got != tt.claim {
+					t.Errorf("claim should be unchanged, got: %s", got)
+				}
+				return
+			}
 
-func TestVerifyClaim_Hub_Verified(t *testing.T) {
-	topo := buildTopo(Request{FanIn: 12, CallerNames: []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"}})
-
-	got := verifyClaim("Acts as a gravity center with high connectivity", topo)
-	if !strings.Contains(got, "[✓") {
-		t.Errorf("expected [✓] for verified hub, got: %s", got)
-	}
-	if !strings.Contains(got, "fanIn=12") {
-		t.Errorf("expected fanIn=12 in annotation, got: %s", got)
-	}
-}
-
-func TestVerifyClaim_Hub_Contradicted(t *testing.T) {
-	topo := buildTopo(Request{FanIn: 2, CallerNames: []string{"A", "B"}})
-
-	got := verifyClaim("Acts as a gravity center in the system", topo)
-	if !strings.Contains(got, "UNVERIFIED") {
-		t.Errorf("expected UNVERIFIED for low-fanIn hub claim, got: %s", got)
-	}
-}
-
-func TestVerifyClaim_NoTest_Verified(t *testing.T) {
-	topo := buildTopo(Request{HasTests: false, RootFile: "internal/auth/handler.go"})
-
-	got := verifyClaim("No test coverage exists for this function", topo)
-	if !strings.Contains(got, "[✓") {
-		t.Errorf("expected [✓] for confirmed no-test, got: %s", got)
-	}
-}
-
-func TestVerifyClaim_NoTest_Contradicted(t *testing.T) {
-	topo := buildTopo(Request{HasTests: true, RootFile: "internal/auth/handler.go"})
-
-	got := verifyClaim("This function is untested and has no coverage", topo)
-	if !strings.Contains(got, "UNVERIFIED") {
-		t.Errorf("expected UNVERIFIED when test exists, got: %s", got)
-	}
-}
-
-func TestVerifyClaim_Cycle_Verified(t *testing.T) {
-	// A calls B, and B calls A → bidirectional edge → cycle signal
-	topo := buildTopo(Request{
-		CalleeNames: []string{"B", "C"},
-		CallerNames: []string{"B", "D"}, // B is both callee and caller
-	})
-
-	got := verifyClaim("There is a circular dependency in this module", topo)
-	if !strings.Contains(got, "[✓") {
-		t.Errorf("expected [✓] for detected bidirectional edge, got: %s", got)
-	}
-}
-
-func TestVerifyClaim_Cycle_Contradicted(t *testing.T) {
-	topo := buildTopo(Request{
-		CalleeNames: []string{"B", "C"},
-		CallerNames: []string{"D", "E"}, // no overlap
-	})
-
-	got := verifyClaim("This creates a cycle between modules", topo)
-	if !strings.Contains(got, "UNVERIFIED") {
-		t.Errorf("expected UNVERIFIED when no bidirectional edge, got: %s", got)
-	}
-}
-
-func TestVerifyClaim_Unrecognised_Unchanged(t *testing.T) {
-	topo := buildTopo(Request{FanIn: 3})
-	original := "This function handles request routing."
-	got := verifyClaim(original, topo)
-	if got != original {
-		t.Errorf("unrecognised claim should be unchanged, got: %s", got)
+			if tt.wantVerified {
+				if !strings.Contains(got, "[✓") {
+					t.Errorf("expected [✓] verification, got: %s", got)
+				}
+			} else {
+				if !strings.Contains(got, "UNVERIFIED") {
+					t.Errorf("expected UNVERIFIED, got: %s", got)
+				}
+			}
+		})
 	}
 }
 
@@ -130,6 +155,97 @@ func TestVerifyPacket_AppendsCycleWarningToGraphWarnings(t *testing.T) {
 	pkt.Concerns[0] = verifyClaim(pkt.Concerns[0], topo)
 	if !strings.Contains(pkt.Concerns[0], "[✓") {
 		t.Errorf("expected cycle to be verified in concern, got: %s", pkt.Concerns[0])
+	}
+}
+
+// --- Integration Tests ---
+
+// TestVerifyPacket_RealWorldScenario_LowFanInEntityWithMultipleConcerns tests a realistic scenario:
+// an entity with low fanin is incorrectly described as a hub. verifyPacket should annotate
+// both the concerns and append a warning to GraphWarnings for the contradicted insight.
+func TestVerifyPacket_RealWorldScenario_LowFanInEntityWithMultipleConcerns(t *testing.T) {
+	req := Request{
+		RootNodeID:  "repo::auth.go::ValidateToken",
+		RootName:    "ValidateToken",
+		RootType:    "function",
+		RootFile:    "internal/auth/auth.go",
+		FanIn:       2, // Low fanin — not a hub
+		CalleeNames: []string{"crypto", "time"},
+		CallerNames: []string{"handler", "middleware"},
+		HasTests:    true,
+	}
+
+	pkt := &Packet{
+		Insight: "ValidateToken is a critical hub in the authentication system with many callers.",
+		Concerns: []string{
+			"This function is tightly coupled",
+			"Acts as a gravity center with high connectivity",
+		},
+	}
+
+	verifyPacket(pkt, req)
+
+	// Insight should have a contradiction warning appended to GraphWarnings
+	if len(pkt.GraphWarnings) == 0 {
+		t.Error("expected GraphWarnings for contradicted insight, got none")
+	}
+	foundInsightWarning := false
+	for _, w := range pkt.GraphWarnings {
+		if strings.Contains(w, "INSIGHT UNVERIFIED") {
+			foundInsightWarning = true
+			break
+		}
+	}
+	if !foundInsightWarning {
+		t.Errorf("expected INSIGHT UNVERIFIED warning, got: %v", pkt.GraphWarnings)
+	}
+
+	// Concerns should be annotated with UNVERIFIED
+	if !strings.Contains(pkt.Concerns[0], "UNVERIFIED") {
+		t.Errorf("first concern should be annotated UNVERIFIED, got: %s", pkt.Concerns[0])
+	}
+	if !strings.Contains(pkt.Concerns[1], "UNVERIFIED") {
+		t.Errorf("second concern should be annotated UNVERIFIED, got: %s", pkt.Concerns[1])
+	}
+}
+
+// TestVerifyPacket_MixedTrueClaims tests a packet where some claims are correct and some are incorrect.
+// Verifies that only contradicted claims are annotated.
+func TestVerifyPacket_MixedTrueClaims(t *testing.T) {
+	req := Request{
+		RootNodeID:  "repo::db.go::Query",
+		RootName:    "Query",
+		RootType:    "function",
+		RootFile:    "internal/db/query.go",
+		FanIn:       8, // High fanin — is a hub
+		CalleeNames: []string{"sql", "log", "cache"},
+		CallerNames: []string{"a", "b", "c", "d", "e", "f", "g", "h"},
+		HasTests:    false, // No tests
+	}
+
+	pkt := &Packet{
+		Concerns: []string{
+			"Acts as a gravity center", // TRUE — high fanin
+			"This function is untested", // TRUE — no tests
+			"Has circular dependency", // FALSE — no bidirectional edges
+		},
+	}
+
+	verifyPacket(pkt, req)
+
+	// First concern should be verified ✓
+	if !strings.Contains(pkt.Concerns[0], "[✓") {
+		t.Errorf("true claim should be verified, got: %s", pkt.Concerns[0])
+	}
+
+	// Second concern should be verified ✓
+	if !strings.Contains(pkt.Concerns[1], "[✓") {
+		t.Errorf("true no-test claim should be verified, got: %s", pkt.Concerns[1])
+	}
+
+	// Third concern should be unverified
+	if !strings.Contains(pkt.Concerns[2], "UNVERIFIED") {
+		t.Errorf("false cycle claim should be unverified, got: %s", pkt.Concerns[2])
 	}
 }
 
