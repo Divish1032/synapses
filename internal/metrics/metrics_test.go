@@ -839,3 +839,56 @@ func TestEnrichCommitContextForFile_NoGitRepo(t *testing.T) {
 		}
 	}
 }
+
+// --- Additional EnrichCoverage edge cases ---
+
+func TestEnrichCoverage_NoOverlapBlocks(t *testing.T) {
+	g := buildMetricsGraph(t, t.TempDir())
+	repoRoot := t.TempDir()
+
+	// Create a cover profile with blocks that don't overlap with function lines.
+	profilePath := filepath.Join(repoRoot, "cover.out")
+	content := `mode: set
+github.com/foo/bar/pkg/svc.go:999:1000,5 1 0
+github.com/foo/bar/pkg/svc.go:1001:1002,5 1 0`
+	if err := os.WriteFile(profilePath, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Should not panic when blocks don't overlap with any functions.
+	// The functions are at lines 10-12, blocks are at 999-1002.
+	metrics.EnrichCoverage(g, repoRoot, profilePath)
+
+	// Verify no coverage metadata was set (since no blocks overlapped).
+	for _, n := range g.AllNodes() {
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		if n.Metadata != nil && n.Metadata["coverage"] != "" {
+			t.Errorf("node %s should not have coverage (no overlap)", n.Name)
+		}
+	}
+}
+
+func TestEnrichCoverage_NoStatementsFunctionsIgnored(t *testing.T) {
+	g := buildMetricsGraph(t, t.TempDir())
+	repoRoot := t.TempDir()
+
+	// Create cover profile with blocks that don't align to any function.
+	profilePath := filepath.Join(repoRoot, "cover.out")
+	content := `mode: set
+github.com/foo/bar/pkg/svc.go:50:60,5 1 1`
+	if err := os.WriteFile(profilePath, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Should not crash when handling functions with no overlapping blocks.
+	metrics.EnrichCoverage(g, repoRoot, profilePath)
+
+	// Verify no coverage metadata was incorrectly set.
+	for _, n := range g.AllNodes() {
+		if n.Metadata != nil && n.Metadata["coverage"] != "" {
+			t.Errorf("node %s should not have coverage (no overlap)", n.Name)
+		}
+	}
+}
