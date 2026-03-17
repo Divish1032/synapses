@@ -5,6 +5,7 @@ package metrics
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -27,7 +28,9 @@ import (
 // Callers that iterate over many files should cache results by directory
 // to avoid repeated subprocess spawns.
 func gitRootForDir(dir string) string {
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel").Output()
 	if err != nil || len(out) == 0 {
 		return ""
 	}
@@ -124,7 +127,9 @@ func EnrichChurn(g *graph.Graph, repoRoot string, days int) {
 // repo in the last [days] calendar days. Returns a map of relative path → count.
 func fileChurn(repoRoot string, days int) (map[string]int, error) {
 	since := fmt.Sprintf("--since=%d.days.ago", days)
-	out, err := exec.Command(
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx,
 		"git", "-C", repoRoot,
 		"log", since, "--name-only", "--format=",
 	).Output()
@@ -170,7 +175,9 @@ func RecentCommitsForFile(repoRoot, filePath string, limit int) []CommitInfo {
 	// terminate each commit record. This handles multi-line commit bodies cleanly:
 	// split by \x1e first, then by \x1f — body newlines don't interfere.
 	// %H=hash %an=author %ad=date(short) %s=subject %b=body
-	out, err := exec.Command(
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx,
 		"git", "-C", repoRoot,
 		"log", fmt.Sprintf("-n%d", limit),
 		"--format=%H\x1f%an\x1f%ad\x1f%s\x1f%b\x1e",
@@ -480,7 +487,9 @@ type blameResult struct {
 // fileBlame runs git log -1 to get the most-recent commit that touched absFile,
 // relative to repoRoot. Returns nil when git is unavailable or the file has no commits.
 func fileBlame(repoRoot, absFile string) *blameResult {
-	out, err := exec.Command(
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx,
 		"git", "-C", repoRoot,
 		"log", "-1",
 		"--format=%an\x1f%ad\x1f%H\x1f%s",
@@ -506,6 +515,31 @@ func fileBlame(repoRoot, absFile string) *blameResult {
 		Commit:  hash,
 		Subject: parts[3],
 	}
+}
+
+// fileChurnCount returns the number of commits that touched absFile in the last
+// [days] calendar days, relative to repoRoot. Returns 0 when git is unavailable,
+// the file has no commits in the window, or the 5-second timeout expires.
+// Callers should hold no locks — this spawns a subprocess.
+func fileChurnCount(repoRoot, absFile string, days int) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx,
+		"git", "-C", repoRoot,
+		"log", fmt.Sprintf("--since=%d.days.ago", days),
+		"--follow", "--oneline",
+		"--", absFile,
+	).Output()
+	if err != nil || len(out) == 0 {
+		return 0
+	}
+	count := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 // BlameAgeLabel converts an ISO short date ("2025-01-15") to a human-readable age
@@ -625,18 +659,20 @@ func EnrichBlame(g *graph.Graph, repoRoot string) {
 	}
 }
 
-// EnrichBlameForFile updates blame metadata for all function/method nodes in a
-// single file. Called by the watcher after a file is re-parsed to keep blame
-// data current without a full re-blame of the entire graph.
+// EnrichBlameForFile updates blame and churn metadata for all function/method
+// nodes in a single file. Called by the watcher after a file is re-parsed to
+// keep blame data current without a full re-blame of the entire graph.
 // It is a no-op when git is unavailable, when the file has no commits, or when
 // no function/method nodes exist in the file.
-// Note: churn metadata may be absent on incrementally re-parsed nodes (EnrichChurn
-// runs only at startup); staleness_score gracefully falls back to 0 in that case.
+//
+// Unlike EnrichBlame (startup batch), this also computes per-file churn so that
+// staleness_score is accurate even for nodes that were just created by an
+// incremental reparse (which would otherwise have no churn metadata from the
+// startup EnrichChurn scan).
 func EnrichBlameForFile(g *graph.Graph, repoRoot, absFile string) {
-	nodes := g.NodesForFile(absFile)
-	if len(nodes) == 0 {
-		return
-	}
+	// Phase 1: all git I/O — no lock held. Subprocess calls can take 10–100 ms
+	// and must never block the graph's read lock or any other MCP caller.
+
 	// Detect the actual git root for this file — repoRoot may be an umbrella
 	// workspace directory that is not itself a git repository.
 	gr := gitRootForDir(filepath.Dir(absFile))
@@ -645,14 +681,32 @@ func EnrichBlameForFile(g *graph.Graph, repoRoot, absFile string) {
 	}
 	bi := fileBlame(gr, absFile)
 	if bi == nil {
+		// File has no git history yet (new uncommitted file) or git unavailable.
+		// Not an error — nodes simply carry no blame metadata.
 		return
 	}
-	for _, n := range nodes {
+
+	// Pre-compute the date-based staleness component (pure arithmetic, no lock).
+	// Graceful: unparseable date → 0 days → staleness_score treated as fresh.
+	daysAgo := 0.0
+	if t, err := time.Parse("2006-01-02", bi.Date); err == nil {
+		daysAgo = time.Since(t).Hours() / 24
+	}
+
+	// Compute per-file churn outside the lock so staleness_score is accurate
+	// for nodes created by incremental reparse (which have no startup churn).
+	churnCount := fileChurnCount(gr, absFile, 90)
+
+	// Phase 2: metadata writes — held under the graph write lock to prevent a
+	// concurrent map read+write panic with get_context / CarveEgoGraph callers.
+	// The lock is held only for in-memory writes (microseconds); all git I/O is
+	// already complete above.
+	g.UpdateFileNodeMetadata(absFile, func(n *graph.Node) {
 		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
-			continue
+			return
 		}
 		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
-			continue
+			return
 		}
 		if n.Metadata == nil {
 			n.Metadata = make(map[string]string)
@@ -662,19 +716,14 @@ func EnrichBlameForFile(g *graph.Graph, repoRoot, absFile string) {
 		n.Metadata["blame_commit"] = bi.Commit
 		n.Metadata["blame_subject"] = bi.Subject
 
-		daysAgo := 0.0
-		// Graceful: unparseable date → 0 days → staleness_score = 0.
-		if t, err := time.Parse("2006-01-02", bi.Date); err == nil {
-			daysAgo = time.Since(t).Hours() / 24
-		}
-		churn := 0.0
-		// Graceful: churn absent or non-numeric → 0 → score = 0.
-		if c, err := strconv.ParseFloat(n.Metadata["churn"], 64); err == nil {
-			churn = c
-		}
-		score := daysAgo * math.Log(1+churn)
+		// Write churn and staleness_score together so they are always consistent
+		// with each other. This overrides any startup EnrichChurn value for this
+		// file with a freshly computed count — acceptable since both use the same
+		// 90-day window and the fresh count is more accurate post-edit.
+		n.Metadata["churn"] = strconv.Itoa(churnCount)
+		score := daysAgo * math.Log(1+float64(churnCount))
 		n.Metadata["staleness_score"] = fmt.Sprintf("%.1f", score)
-	}
+	})
 }
 
 // EnrichCommitContext annotates every function/method node with the last 3
@@ -737,10 +786,8 @@ func EnrichCommitContext(g *graph.Graph, repoRoot string) {
 // It is a no-op when git is unavailable, when the file has no commits, or when
 // no function/method nodes exist in the file.
 func EnrichCommitContextForFile(g *graph.Graph, repoRoot, absFile string) {
-	nodes := g.NodesForFile(absFile)
-	if len(nodes) == 0 {
-		return
-	}
+	// Phase 1: git I/O — no lock held.
+
 	// Detect the actual git root for this file — repoRoot may be an umbrella
 	// workspace directory that is not itself a git repository.
 	gr := gitRootForDir(filepath.Dir(absFile))
@@ -749,6 +796,8 @@ func EnrichCommitContextForFile(g *graph.Graph, repoRoot, absFile string) {
 	}
 	commits := RecentCommitsForFile(gr, absFile, 3)
 	if len(commits) == 0 {
+		// No commits yet or git unavailable — not an error, nodes carry no
+		// commit_context metadata.
 		return
 	}
 	raw, err := json.Marshal(commits)
@@ -756,18 +805,21 @@ func EnrichCommitContextForFile(g *graph.Graph, repoRoot, absFile string) {
 		return
 	}
 	encoded := string(raw)
-	for _, n := range nodes {
+
+	// Phase 2: metadata writes — under graph write lock to prevent concurrent
+	// map read+write panic. Lock is held only for in-memory writes (microseconds).
+	g.UpdateFileNodeMetadata(absFile, func(n *graph.Node) {
 		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
-			continue
+			return
 		}
 		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
-			continue
+			return
 		}
 		if n.Metadata == nil {
 			n.Metadata = make(map[string]string)
 		}
 		n.Metadata["commit_context"] = encoded
-	}
+	})
 }
 
 // pprofShortName converts a fully-qualified pprof function name to the short
