@@ -80,15 +80,20 @@ func buildCodeNames(g *graph.Graph) map[string][]*graph.Node {
 }
 
 // linkSections creates EXPLAINS and DOCUMENTED_BY edges for the given sections.
+// Scans both the section title (primary signal) and body text (secondary signal).
+// Research shows heading text is the highest-confidence doc-code link signal:
+// `## FlatGraph Architecture` → FlatGraph entity even with no body text.
 func linkSections(g *graph.Graph, sections []*graph.Node, codeNames map[string][]*graph.Node) int {
 	var created int
 	for _, sec := range sections {
+		title := sec.Metadata["title"]
 		body := sec.Metadata["body"]
-		if body == "" {
+		text := strings.TrimSpace(title + " " + body)
+		if text == "" {
 			continue
 		}
 
-		refs := extractEntityRefs(body)
+		refs := extractEntityRefs(text)
 		seen := make(map[graph.NodeID]bool)
 
 		for _, ref := range refs {

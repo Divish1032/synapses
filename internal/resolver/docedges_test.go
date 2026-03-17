@@ -456,6 +456,51 @@ func TestResolveDocEdgesForFile_OnlyLinksTargetFile(t *testing.T) {
 	}
 }
 
+func TestResolveDocEdges_EntityInTitle(t *testing.T) {
+	g := newDocTestGraph()
+
+	funcID := g.MakeNodeID("/repo/main.go", "FlatGraph")
+	g.AddNode(&graph.Node{
+		ID:   funcID,
+		Type: graph.NodeStruct,
+		Name: "FlatGraph",
+		File: "/repo/main.go",
+		Line: 10,
+	})
+
+	// Section title names the entity; body is empty.
+	// Research: section heading = highest-confidence doc-code signal (weight 0.80).
+	secID := g.MakeNodeID("/repo/README.md", "README.md § FlatGraph Architecture")
+	g.AddNode(&graph.Node{
+		ID:   secID,
+		Type: graph.NodeSection,
+		Name: "README.md § FlatGraph Architecture",
+		File: "/repo/README.md",
+		Line: 5,
+		Metadata: map[string]string{
+			"title": "FlatGraph Architecture",
+			"depth": "2",
+			// No body — entity reference is solely in the heading.
+		},
+		Domain: graph.DomainDocs,
+	})
+
+	n := ResolveDocEdges(g)
+	if n != 1 {
+		t.Fatalf("expected 1 edge from section title match, got %d", n)
+	}
+	edges := g.OutEdges(secID)
+	var found bool
+	for _, e := range edges {
+		if e.To == funcID && e.Type == graph.EdgeExplains {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("missing EXPLAINS edge from section with entity name in title")
+	}
+}
+
 func TestResolveDocEdges_NoSections(t *testing.T) {
 	g := newDocTestGraph()
 	// No section nodes at all.
