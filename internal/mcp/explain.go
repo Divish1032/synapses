@@ -117,9 +117,16 @@ func buildExplanation(
 		entryPointTier := func(ep graph.EntityRef) int {
 			f := strings.ToLower(ep.File)
 			isMain := ep.Name == "main"
-			isArchived := strings.Contains(f, "archive") || strings.Contains(f, "script") ||
-				strings.Contains(f, "tools/") || strings.Contains(f, "_archive")
-			inCmd := strings.Contains(f, "cmd/") || strings.Contains(f, "/cmd")
+			// Use path-segment-aware patterns to avoid false positives:
+			//   "script"  would match "subscriptions", "description", "transcript"
+			//   "archive" would match "archivist", "archiver"
+			// Anchor each pattern to a path segment boundary (leading /, trailing /, or prefix).
+			isArchived := strings.HasPrefix(f, "scripts/") || strings.Contains(f, "/scripts/") || strings.HasSuffix(f, "/scripts") ||
+				strings.HasPrefix(f, "archive/") || strings.Contains(f, "/archive/") || strings.HasSuffix(f, "/archive") ||
+				strings.HasPrefix(f, "archived/") || strings.Contains(f, "/archived/") ||
+				strings.Contains(f, "_archive/") || strings.HasSuffix(f, "_archive") ||
+				strings.HasPrefix(f, "tools/") || strings.Contains(f, "/tools/") || strings.HasSuffix(f, "/tools")
+			inCmd := strings.HasPrefix(f, "cmd/") || strings.Contains(f, "/cmd/") || strings.HasSuffix(f, "/cmd")
 			switch {
 			case isMain && inCmd:
 				return 0
