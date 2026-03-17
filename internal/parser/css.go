@@ -11,7 +11,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
-// CSSParser parses CSS (.css) source files.
+// CSSParser parses CSS (.css) source files using tree-sitter.
 type CSSParser struct {
 	language *sitter.Language
 }
@@ -29,9 +29,14 @@ func (p *CSSParser) Extensions() []string {
 // Parse extracts code entities from a single CSS file and merges them into the graph.
 //
 // Extracts:
-//   - @import rules → EdgeImports edges to NodePackage nodes
+//   - @import rules → EdgeImports to NodePackage nodes
+//   - Rule-set selectors (.class, #id) → NodeStruct with kind="selector"
 //   - @keyframes definitions → NodeFunction with kind="keyframes"
-//   - CSS custom property definitions (--var) in :root → NodeVariable with kind="custom-property"
+//   - CSS custom property definitions (--var) → NodeVariable with kind="custom-property"
+//   - @font-face font-family names → NodeVariable with kind="font-face"
+//   - animation / animation-name references → EdgeCalls to keyframes nodes
+//   - var(--name) references → EdgeCalls to custom-property nodes
+//   - Selectors inside @media, @supports, @layer are fully handled (recursive walk)
 func (p *CSSParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
@@ -48,7 +53,8 @@ func (p *CSSParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		Line: 1,
 	})
 
-	// Walk the AST once, extracting all entity types.
+	// Walk the entire AST. The recursive walk handles nesting inside
+	// @media, @supports, @layer and any other at-rule blocks automatically.
 	var walk func(n *sitter.Node)
 	walk = func(n *sitter.Node) {
 		if n == nil {
@@ -59,12 +65,14 @@ func (p *CSSParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		case "import_statement":
 			extractCSSImport(g, n, src, filePath, fileNodeID)
 
+		case "rule_set":
+			extractCSSRuleSet(g, n, src, filePath, fileNodeID)
+
 		case "keyframes_statement":
 			extractCSSKeyframes(g, n, src, filePath, fileNodeID)
 
 		case "declaration":
-			// Check if this is a custom property definition (--variable).
-			extractCSSCustomProperty(g, n, src, filePath, fileNodeID)
+			extractCSSDeclaration(g, n, src, filePath, fileNodeID)
 
 		case "at_rule":
 			extractCSSAtRule(g, n, src, filePath, fileNodeID)
@@ -79,6 +87,55 @@ func (p *CSSParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	return nil
 }
 
+// extractCSSRuleSet handles a rule_set node, extracting .class and #id selectors.
+// Multiple selectors on one line (.a, .b { }) are both extracted.
+// Selectors nested inside @media, @supports, and @layer blocks are found
+// automatically by the recursive walk.
+func extractCSSRuleSet(g *graph.Graph, n *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	selectorsNode := firstChildOfType(n, "selectors")
+	if selectorsNode == nil {
+		return
+	}
+	line := int(n.StartPoint().Row) + 1
+
+	for i := 0; i < int(selectorsNode.ChildCount()); i++ {
+		child := selectorsNode.Child(i)
+		if child == nil {
+			continue
+		}
+		var name string
+		switch child.Type() {
+		case "class_selector":
+			// Full text includes the leading dot: ".button"
+			name = strings.TrimSpace(childText(child, src))
+		case "id_selector":
+			// Full text includes the leading hash: "#header"
+			name = strings.TrimSpace(childText(child, src))
+		default:
+			// Skip pseudo_class_selector, attribute_selector, tag_name (element noise).
+			continue
+		}
+		if name == "" {
+			continue
+		}
+
+		nodeID := g.MakeNodeID(filePath, name)
+		if g.GetNode(nodeID) != nil {
+			continue
+		}
+		g.AddNode(&graph.Node{
+			ID:       nodeID,
+			Type:     graph.NodeStruct,
+			Name:     name,
+			File:     filePath,
+			Line:     line,
+			Exported: true,
+			Metadata: map[string]string{"kind": "selector"},
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}
+}
+
 // extractCSSImport handles an import_statement node, creating an import edge.
 // Supports both @import "file.css" and @import url("file.css").
 func extractCSSImport(g *graph.Graph, n *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
@@ -89,15 +146,10 @@ func extractCSSImport(g *graph.Graph, n *sitter.Node, src []byte, filePath strin
 		if child == nil {
 			continue
 		}
-
 		switch child.Type() {
 		case "string_value":
-			// @import "file.css"
 			importPath = stripCSSQuotes(childText(child, src))
-
 		case "call_expression":
-			// @import url("file.css")
-			// The call_expression has a function_name "url" and arguments with a string.
 			importPath = extractCSSURLArg(child, src)
 		}
 	}
@@ -126,8 +178,6 @@ func extractCSSKeyframes(g *graph.Graph, n *sitter.Node, src []byte, filePath st
 		if child == nil {
 			continue
 		}
-		// The keyframes name can appear as "keyframes_name" or "plain_value" or "identifier"
-		// depending on the grammar version.
 		switch child.Type() {
 		case "keyframes_name", "plain_value", "identifier":
 			name = strings.TrimSpace(childText(child, src))
@@ -154,10 +204,13 @@ func extractCSSKeyframes(g *graph.Graph, n *sitter.Node, src []byte, filePath st
 	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 }
 
-// extractCSSCustomProperty checks if a declaration node defines a CSS custom property
-// (property name starting with "--") and creates a NodeVariable for it.
-func extractCSSCustomProperty(g *graph.Graph, n *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+// extractCSSDeclaration handles a declaration node. It covers three cases:
+//  1. Custom property definition (--var: value) → NodeVariable kind="custom-property"
+//  2. animation / animation-name reference → EdgeCalls to keyframes node
+//  3. var(--name) usage in any property value → EdgeCalls to custom-property node
+func extractCSSDeclaration(g *graph.Graph, n *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	var propName string
+	propLine := int(n.StartPoint().Row) + 1
 
 	for i := 0; i < int(n.ChildCount()); i++ {
 		child := n.Child(i)
@@ -170,30 +223,98 @@ func extractCSSCustomProperty(g *graph.Graph, n *sitter.Node, src []byte, filePa
 		}
 	}
 
-	if !strings.HasPrefix(propName, "--") {
-		return
+	// 1. Custom property definition.
+	if strings.HasPrefix(propName, "--") {
+		nodeID := g.MakeNodeID(filePath, propName)
+		if g.GetNode(nodeID) == nil {
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeVariable,
+				Name:     propName,
+				File:     filePath,
+				Line:     propLine,
+				Exported: true,
+				Metadata: map[string]string{"kind": "custom-property"},
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+		}
+		// Still fall through to check for var() in the value side of custom properties.
 	}
 
-	nodeID := g.MakeNodeID(filePath, propName)
-	if g.GetNode(nodeID) != nil {
-		return
+	// 2. Animation reference: the first plain_value after ":" is the keyframes name.
+	propLower := strings.ToLower(propName)
+	if propLower == "animation" || propLower == "animation-name" {
+		seenColon := false
+		for i := 0; i < int(n.ChildCount()); i++ {
+			child := n.Child(i)
+			if child == nil {
+				continue
+			}
+			if child.Type() == ":" {
+				seenColon = true
+				continue
+			}
+			if seenColon && child.Type() == "plain_value" {
+				animName := strings.TrimSpace(childText(child, src))
+				if animName != "" && !isCSSKeyword(animName) {
+					kfID := g.MakeNodeID(filePath, animName)
+					if g.GetNode(kfID) != nil {
+						g.AddEdge(&graph.Edge{From: fileNodeID, To: kfID, Type: graph.EdgeCalls})
+					}
+				}
+				break // only the first plain_value is the animation name
+			}
+		}
 	}
-	g.AddNode(&graph.Node{
-		ID:       nodeID,
-		Type:     graph.NodeVariable,
-		Name:     propName,
-		File:     filePath,
-		Line:     int(n.StartPoint().Row) + 1,
-		Exported: true,
-		Metadata: map[string]string{"kind": "custom-property"},
-	})
-	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+
+	// 3. var(--name) usages anywhere in the declaration value.
+	extractCSSVarRefs(g, n, src, filePath, fileNodeID)
 }
 
-// extractCSSAtRule handles @-rules that contain named entities.
+// extractCSSVarRefs walks a node's children looking for call_expression nodes
+// where function_name == "var" and creates EdgeCalls to the referenced custom property.
+func extractCSSVarRefs(g *graph.Graph, n *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	if n == nil {
+		return
+	}
+	for i := 0; i < int(n.ChildCount()); i++ {
+		child := n.Child(i)
+		if child == nil {
+			continue
+		}
+		if child.Type() != "call_expression" {
+			continue
+		}
+		fnNode := firstChildOfType(child, "function_name")
+		if fnNode == nil {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(childText(fnNode, src))) != "var" {
+			continue
+		}
+		argsNode := firstChildOfType(child, "arguments")
+		if argsNode == nil {
+			continue
+		}
+		varRef := strings.Trim(strings.TrimSpace(childText(argsNode, src)), "()")
+		varRef = strings.TrimSpace(varRef)
+		// var(--name, fallback) → take only the part before the comma.
+		if idx := strings.Index(varRef, ","); idx >= 0 {
+			varRef = strings.TrimSpace(varRef[:idx])
+		}
+		if !strings.HasPrefix(varRef, "--") {
+			continue
+		}
+		varNodeID := g.MakeNodeID(filePath, varRef)
+		if g.GetNode(varNodeID) != nil {
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: varNodeID, Type: graph.EdgeCalls})
+		}
+	}
+}
+
+// extractCSSAtRule handles generic @-rules.
 // Currently handles @font-face (extracts font-family name as NodeVariable).
 func extractCSSAtRule(g *graph.Graph, n *sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
-	// Check if this is a @font-face rule by looking for the at-keyword.
 	var atKeyword string
 	for i := 0; i < int(n.ChildCount()); i++ {
 		child := n.Child(i)
@@ -210,56 +331,69 @@ func extractCSSAtRule(g *graph.Graph, n *sitter.Node, src []byte, filePath strin
 		return
 	}
 
-	// Find the block/rule-set child and look for a font-family declaration.
 	for i := 0; i < int(n.ChildCount()); i++ {
 		child := n.Child(i)
 		if child == nil {
 			continue
 		}
-		if child.Type() == "block" || child.Type() == "stylesheet" {
-			// Walk declarations inside the block.
-			for j := 0; j < int(child.ChildCount()); j++ {
-				decl := child.Child(j)
-				if decl == nil || decl.Type() != "declaration" {
+		if child.Type() != "block" && child.Type() != "stylesheet" {
+			continue
+		}
+		for j := 0; j < int(child.ChildCount()); j++ {
+			decl := child.Child(j)
+			if decl == nil || decl.Type() != "declaration" {
+				continue
+			}
+			propName := ""
+			var propValue string
+			for k := 0; k < int(decl.ChildCount()); k++ {
+				dChild := decl.Child(k)
+				if dChild == nil {
 					continue
 				}
-				// Check if property is font-family.
-				propName := ""
-				var propValue string
-				for k := 0; k < int(decl.ChildCount()); k++ {
-					dChild := decl.Child(k)
-					if dChild == nil {
-						continue
-					}
-					switch dChild.Type() {
-					case "property_name":
-						propName = strings.ToLower(strings.TrimSpace(childText(dChild, src)))
-					case "string_value", "plain_value":
-						if propValue == "" {
-							propValue = stripCSSQuotes(childText(dChild, src))
-						}
+				switch dChild.Type() {
+				case "property_name":
+					propName = strings.ToLower(strings.TrimSpace(childText(dChild, src)))
+				case "string_value", "plain_value":
+					if propValue == "" {
+						propValue = stripCSSQuotes(childText(dChild, src))
 					}
 				}
-				if propName == "font-family" && propValue != "" {
-					nodeID := g.MakeNodeID(filePath, propValue)
-					if g.GetNode(nodeID) != nil {
-						return
-					}
-					g.AddNode(&graph.Node{
-						ID:       nodeID,
-						Type:     graph.NodeVariable,
-						Name:     propValue,
-						File:     filePath,
-						Line:     int(n.StartPoint().Row) + 1,
-						Exported: true,
-						Metadata: map[string]string{"kind": "font-face"},
-					})
-					g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			}
+			if propName == "font-family" && propValue != "" {
+				nodeID := g.MakeNodeID(filePath, propValue)
+				if g.GetNode(nodeID) != nil {
 					return
 				}
+				g.AddNode(&graph.Node{
+					ID:       nodeID,
+					Type:     graph.NodeVariable,
+					Name:     propValue,
+					File:     filePath,
+					Line:     int(n.StartPoint().Row) + 1,
+					Exported: true,
+					Metadata: map[string]string{"kind": "font-face"},
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+				return
 			}
 		}
 	}
+}
+
+// isCSSKeyword returns true for CSS animation timing and global keywords that
+// should not be treated as keyframes names.
+func isCSSKeyword(s string) bool {
+	switch s {
+	case "none", "inherit", "initial", "unset", "revert", "revert-layer",
+		"ease", "linear", "ease-in", "ease-out", "ease-in-out", "step-start", "step-end",
+		"normal", "reverse", "alternate", "alternate-reverse",
+		"forwards", "backwards", "both",
+		"running", "paused",
+		"infinite":
+		return true
+	}
+	return false
 }
 
 // stripCSSQuotes removes surrounding single or double quotes from a string.
@@ -274,13 +408,10 @@ func stripCSSQuotes(s string) string {
 }
 
 // extractCSSURLArg extracts the path from a url() call expression.
-// Handles url("file.css"), url('file.css'), and url(file.css).
 func extractCSSURLArg(callNode *sitter.Node, src []byte) string {
-	// Walk the call_expression children looking for arguments/string_value.
 	if callNode == nil {
 		return ""
 	}
-	// The arguments node contains the actual URL value.
 	if args := firstChildOfType(callNode, "arguments"); args != nil {
 		for i := 0; i < int(args.ChildCount()); i++ {
 			child := args.Child(i)
@@ -290,14 +421,12 @@ func extractCSSURLArg(callNode *sitter.Node, src []byte) string {
 			if child.Type() == "string_value" {
 				return stripCSSQuotes(childText(child, src))
 			}
-			// Unquoted URL: plain_value inside arguments.
 			if child.Type() == "plain_value" {
 				return strings.TrimSpace(childText(child, src))
 			}
 		}
 	}
 
-	// Fallback: look for any string_value or plain_value direct child.
 	for i := 0; i < int(callNode.ChildCount()); i++ {
 		child := callNode.Child(i)
 		if child == nil {
@@ -311,7 +440,6 @@ func extractCSSURLArg(callNode *sitter.Node, src []byte) string {
 		}
 	}
 
-	// Last resort: extract text between parentheses from the raw source.
 	raw := childText(callNode, src)
 	if idx := strings.Index(raw, "("); idx >= 0 {
 		if end := strings.LastIndex(raw, ")"); end > idx {

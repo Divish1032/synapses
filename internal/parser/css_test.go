@@ -213,3 +213,150 @@ func TestCSSParser_MinimalKeyframes(t *testing.T) {
 		t.Errorf("spin metadata kind = %q, want keyframes", n.Metadata["kind"])
 	}
 }
+
+// ─── CSS selector extraction tests (added 2026-03-17) ────────────────────────
+
+func TestCSSParser_ExtractsClassSelector(t *testing.T) {
+	src := `.button { display: inline-block; }`
+	g := parseCSS(t, src)
+	n := assertNode(t, g, ".button", graph.NodeStruct)
+	if n.Metadata["kind"] != "selector" {
+		t.Errorf("kind = %q, want selector", n.Metadata["kind"])
+	}
+	if !n.Exported {
+		t.Error("selector should be exported=true")
+	}
+}
+
+func TestCSSParser_ExtractsIDSelector(t *testing.T) {
+	src := `#header { background: blue; }`
+	g := parseCSS(t, src)
+	n := assertNode(t, g, "#header", graph.NodeStruct)
+	if n.Metadata["kind"] != "selector" {
+		t.Errorf("kind = %q, want selector", n.Metadata["kind"])
+	}
+}
+
+func TestCSSParser_MultipleSelectorsOneLine(t *testing.T) {
+	src := `.btn, .btn-primary { display: inline-block; }`
+	g := parseCSS(t, src)
+	assertNode(t, g, ".btn", graph.NodeStruct)
+	assertNode(t, g, ".btn-primary", graph.NodeStruct)
+}
+
+func TestCSSParser_SkipsElementSelectors(t *testing.T) {
+	src := `html { box-sizing: border-box; } body { margin: 0; }`
+	g := parseCSS(t, src)
+	for _, n := range g.AllNodes() {
+		if n.Name == "html" || n.Name == "body" {
+			t.Errorf("element selector %q should not be extracted", n.Name)
+		}
+	}
+}
+
+func TestCSSParser_MediaNestedSelector(t *testing.T) {
+	src := `@media (max-width: 768px) { .container { width: 100%; } #sidebar { display: none; } }`
+	g := parseCSS(t, src)
+	assertNode(t, g, ".container", graph.NodeStruct)
+	assertNode(t, g, "#sidebar", graph.NodeStruct)
+}
+
+func TestCSSParser_SupportsNestedSelector(t *testing.T) {
+	src := `@supports (display: grid) { .grid { display: grid; } }`
+	g := parseCSS(t, src)
+	assertNode(t, g, ".grid", graph.NodeStruct)
+}
+
+func TestCSSParser_AnimationEdgeCalls(t *testing.T) {
+	src := `
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+.animated { animation: fade-in 0.3s ease; }
+`
+	g := parseCSS(t, src)
+	assertNode(t, g, "fade-in", graph.NodeFunction)
+	hasCall := false
+	for _, e := range g.AllEdges() {
+		if e.Type == graph.EdgeCalls {
+			hasCall = true
+		}
+	}
+	if !hasCall {
+		t.Error("expected EdgeCalls from animation property to keyframes node")
+	}
+}
+
+func TestCSSParser_AnimationNameEdgeCalls(t *testing.T) {
+	src := `
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner { animation-name: spin; }
+`
+	g := parseCSS(t, src)
+	hasCall := false
+	for _, e := range g.AllEdges() {
+		if e.Type == graph.EdgeCalls {
+			hasCall = true
+		}
+	}
+	if !hasCall {
+		t.Error("expected EdgeCalls from animation-name to keyframes node")
+	}
+}
+
+func TestCSSParser_VarRefEdgeCalls(t *testing.T) {
+	src := `
+:root { --primary: blue; }
+.button { color: var(--primary); }
+`
+	g := parseCSS(t, src)
+	assertNode(t, g, "--primary", graph.NodeVariable)
+	hasCall := false
+	for _, e := range g.AllEdges() {
+		if e.Type == graph.EdgeCalls {
+			hasCall = true
+		}
+	}
+	if !hasCall {
+		t.Error("expected EdgeCalls from var(--primary) to custom property node")
+	}
+}
+
+func TestCSSParser_VarRefWithFallback(t *testing.T) {
+	src := `
+:root { --size: 16px; }
+.text { font-size: var(--size, 14px); }
+`
+	g := parseCSS(t, src)
+	assertNode(t, g, "--size", graph.NodeVariable)
+	hasCall := false
+	for _, e := range g.AllEdges() {
+		if e.Type == graph.EdgeCalls {
+			hasCall = true
+		}
+	}
+	if !hasCall {
+		t.Error("expected EdgeCalls from var(--size, 14px) to custom property node")
+	}
+}
+
+func TestCSSParser_SelectorLineNumber(t *testing.T) {
+	src := "\n\n.card { border: 1px solid; }"
+	g := parseCSS(t, src)
+	n := assertNode(t, g, ".card", graph.NodeStruct)
+	if n.Line != 3 {
+		t.Errorf("line = %d, want 3", n.Line)
+	}
+}
+
+func TestCSSParser_SelectorDeduplication(t *testing.T) {
+	src := `.item { color: red; } .item { background: blue; }`
+	g := parseCSS(t, src)
+	count := 0
+	for _, n := range g.AllNodes() {
+		if n.Name == ".item" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("duplicate .item nodes: got %d, want 1", count)
+	}
+}

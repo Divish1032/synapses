@@ -507,9 +507,10 @@ func (p *DockerfileParser) handleCmdOrEntrypoint(
 	// CMD ["executable", "arg1"] or CMD executable arg1
 	name := raw
 	if strings.HasPrefix(name, "[") {
-		// JSON array form: ["executable", ...]
+		// JSON array form: ["executable", ...] — take first element only.
 		name = strings.TrimPrefix(name, "[")
-		name = strings.Trim(strings.SplitN(name, ",", 2)[0], ` "`)
+		name = strings.SplitN(name, ",", 2)[0]
+		name = strings.Trim(name, ` "[]`) // strip quotes, spaces, stray brackets
 	} else {
 		// Shell form: executable arg1 arg2
 		if spIdx := strings.IndexAny(name, " \t"); spIdx > 0 {

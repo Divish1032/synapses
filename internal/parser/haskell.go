@@ -82,6 +82,14 @@ var (
 
 	// Bird-track style in literate Haskell (.lhs): lines starting with >
 	reHaskellBirdTrack = regexp.MustCompile(`(?m)^>\s*(.*)$`)
+
+	// foreign import: foreign import callconv [safe|unsafe] ["header"] funcName :: Type
+	// The calling convention may be a single word (ccall) or two words (ccall safe).
+	// The optional quoted C name may span to the next line when the Haskell name is
+	// on the following indented line.
+	// Pattern: foreign import <word(s)> [optional "string"] <haskellName>
+	// Group 1: Haskell function name
+	reForeignImport = regexp.MustCompile(`(?m)^foreign\s+import\s+(?:\w+\s+)*(?:"[^"]*"\s+)?([a-zA-Z_][\w']*)`)
 )
 
 // Parse extracts code entities from a single Haskell (.hs or .lhs) source file.
@@ -102,6 +110,9 @@ func (p *HaskellParser) Parse(g *graph.Graph, filePath string, src []byte) error
 	}
 
 	lines := strings.Split(content, "\n")
+
+	// Strip block comments for pattern matching (preserves newlines for line counting).
+	codeContent := stripHaskellBlockComments(content)
 
 	// --- Module declaration ---
 	moduleName, exportList, hasExplicitExports := extractHaskellModule(content)
@@ -138,13 +149,16 @@ func (p *HaskellParser) Parse(g *graph.Graph, filePath string, src []byte) error
 	}
 
 	// --- Collect type signatures (function name → line) ---
+	// Use codeContent (block comments stripped) to avoid matching type-sig-like
+	// text inside commented-out code.  Line numbers remain valid because
+	// stripHaskellBlockComments preserves all newlines.
 	typeSigLines := make(map[string]int)
 	typeSigDocs := make(map[string]string)
-	for _, m := range reHaskellTypeSig.FindAllStringSubmatchIndex(content, -1) {
-		name := content[m[2]:m[3]]
-		lineNum := 1 + countNewlines(content[:m[0]])
+	for _, m := range reHaskellTypeSig.FindAllStringSubmatchIndex(codeContent, -1) {
+		name := codeContent[m[2]:m[3]]
+		lineNum := 1 + countNewlines(codeContent[:m[0]])
 		typeSigLines[name] = lineNum
-		// Extract Haddock doc comment immediately above this line.
+		// Extract Haddock doc comment from original content (comments not stripped).
 		doc := extractHaskellHaddockDoc(lines, lineNum)
 		if doc != "" {
 			typeSigDocs[name] = doc
@@ -157,8 +171,9 @@ func (p *HaskellParser) Parse(g *graph.Graph, filePath string, src []byte) error
 	emitted := make(map[string]bool)
 
 	// Process type signatures first: each is a function declaration.
-	for _, m := range reHaskellTypeSig.FindAllStringSubmatchIndex(content, -1) {
-		name := content[m[2]:m[3]]
+	// Run on codeContent to skip type sigs inside block comments.
+	for _, m := range reHaskellTypeSig.FindAllStringSubmatchIndex(codeContent, -1) {
+		name := codeContent[m[2]:m[3]]
 		if emitted[name] {
 			continue
 		}
@@ -167,11 +182,13 @@ func (p *HaskellParser) Parse(g *graph.Graph, filePath string, src []byte) error
 			continue
 		}
 		emitted[name] = true
-		lineNum := 1 + countNewlines(content[:m[0]])
+		lineNum := 1 + countNewlines(codeContent[:m[0]])
 		doc := typeSigDocs[name]
 
 		exported := isHaskellExported(name, moduleName, exportList, hasExplicitExports)
 		nodeID := g.MakeNodeID(filePath, name)
+		// extractAfterSig reads from original content (same text at this position
+		// since block-comment stripping preserves character offsets).
 		meta := buildLangMeta(declMeta{Doc: doc, Signature: name + " ::" + extractAfterSig(content, m[0])})
 		g.AddNode(&graph.Node{
 			ID:       nodeID,
@@ -186,8 +203,9 @@ func (p *HaskellParser) Parse(g *graph.Graph, filePath string, src []byte) error
 	}
 
 	// Process function definitions for names not already covered by type signatures.
-	for _, m := range reHaskellFuncDef.FindAllStringSubmatchIndex(content, -1) {
-		name := content[m[2]:m[3]]
+	// Run on codeContent to skip definitions inside block comments.
+	for _, m := range reHaskellFuncDef.FindAllStringSubmatchIndex(codeContent, -1) {
+		name := codeContent[m[2]:m[3]]
 		if emitted[name] {
 			continue
 		}
@@ -196,7 +214,7 @@ func (p *HaskellParser) Parse(g *graph.Graph, filePath string, src []byte) error
 			continue
 		}
 		emitted[name] = true
-		lineNum := 1 + countNewlines(content[:m[0]])
+		lineNum := 1 + countNewlines(codeContent[:m[0]])
 		doc := extractHaskellHaddockDoc(lines, lineNum)
 
 		exported := isHaskellExported(name, moduleName, exportList, hasExplicitExports)
@@ -358,15 +376,16 @@ func (p *HaskellParser) Parse(g *graph.Graph, filePath string, src []byte) error
 	}
 
 	// --- Operator type signatures: (+++) :: Foo -> Foo -> Foo ---
-	for _, m := range reHaskellOpTypeSig.FindAllStringSubmatchIndex(content, -1) {
-		opText := strings.TrimSpace(content[m[2]:m[3]])
+	// Run on codeContent to skip operators defined inside block comments.
+	for _, m := range reHaskellOpTypeSig.FindAllStringSubmatchIndex(codeContent, -1) {
+		opText := strings.TrimSpace(codeContent[m[2]:m[3]])
 		// Use "(op)" as the node name to distinguish from regular functions.
 		nodeName := "(" + opText + ")"
 		if emitted[nodeName] {
 			continue
 		}
 		emitted[nodeName] = true
-		lineNum := 1 + countNewlines(content[:m[0]])
+		lineNum := 1 + countNewlines(codeContent[:m[0]])
 		doc := extractHaskellHaddockDoc(lines, lineNum)
 
 		exported := isHaskellExported(nodeName, moduleName, exportList, hasExplicitExports)
@@ -383,6 +402,36 @@ func (p *HaskellParser) Parse(g *graph.Graph, filePath string, src []byte) error
 			ID:       nodeID,
 			Type:     graph.NodeFunction,
 			Name:     nodeName,
+			File:     filePath,
+			Line:     lineNum,
+			Exported: exported,
+			Metadata: meta,
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}
+
+	// --- Foreign imports (FFI declarations) ---
+	// Run on codeContent to skip foreign imports inside block comments.
+	for _, m := range reForeignImport.FindAllStringSubmatchIndex(codeContent, -1) {
+		name := codeContent[m[2]:m[3]]
+		if emitted[name] {
+			continue
+		}
+		emitted[name] = true
+		lineNum := 1 + countNewlines(codeContent[:m[0]])
+		doc := extractHaskellHaddockDoc(lines, lineNum)
+
+		exported := isHaskellExported(name, moduleName, exportList, hasExplicitExports)
+		nodeID := g.MakeNodeID(filePath, name)
+		meta := buildLangMeta(declMeta{Doc: doc})
+		if meta == nil {
+			meta = make(map[string]string)
+		}
+		meta["kind"] = "foreign_import"
+		g.AddNode(&graph.Node{
+			ID:       nodeID,
+			Type:     graph.NodeFunction,
+			Name:     name,
 			File:     filePath,
 			Line:     lineNum,
 			Exported: exported,
@@ -681,4 +730,86 @@ func isHaskellKeyword(name string) bool {
 		return true
 	}
 	return false
+}
+
+// stripHaskellBlockComments returns a copy of src with all non-pragma block
+// comments ({- ... -}) replaced by spaces.  All newlines are preserved so
+// that byte offsets and line numbers computed from the returned string remain
+// identical to those from the original.
+//
+// Rules:
+//   - Pragmas {-# ... #-} are kept unchanged.
+//   - Haddock module docs {-| ... -} are stripped (they contain prose, not code).
+//   - Box-style decorators like {---------} are stripped.
+//   - Block comments nest in Haskell ({- {- inner -} outer -}).
+//
+// This prevents the regex-based type-sig and function-def scanners from
+// matching identifiers that appear in commented-out code.
+func stripHaskellBlockComments(src string) string {
+	b := []byte(src)
+	i := 0
+	depth := 0
+	for i < len(b) {
+		// Start of a block comment or pragma?
+		if i+1 < len(b) && b[i] == '{' && b[i+1] == '-' {
+			// Peek: is it a pragma {-# ... #-}?
+			if i+2 < len(b) && b[i+2] == '#' {
+				// Pragma: skip past the closing #-} without blanking.
+				i += 3
+				for i+2 < len(b) {
+					if b[i] == '#' && b[i+1] == '-' && b[i+2] == '}' {
+						i += 3
+						break
+					}
+					i++
+				}
+				continue
+			}
+			// Non-pragma block comment — start blanking.
+			depth++
+			// Replace opening {- with spaces.
+			if b[i] != '\n' {
+				b[i] = ' '
+			}
+			if b[i+1] != '\n' {
+				b[i+1] = ' '
+			}
+			i += 2
+			continue
+		}
+		if depth > 0 {
+			if i+1 < len(b) && b[i] == '{' && b[i+1] == '-' {
+				// Nested block comment start.
+				depth++
+				if b[i] != '\n' {
+					b[i] = ' '
+				}
+				if b[i+1] != '\n' {
+					b[i+1] = ' '
+				}
+				i += 2
+				continue
+			}
+			if i+1 < len(b) && b[i] == '-' && b[i+1] == '}' {
+				// End of a block comment level.
+				depth--
+				if b[i] != '\n' {
+					b[i] = ' '
+				}
+				if b[i+1] != '\n' {
+					b[i+1] = ' '
+				}
+				i += 2
+				continue
+			}
+			// Inside a block comment: blank out non-newline characters.
+			if b[i] != '\n' {
+				b[i] = ' '
+			}
+			i++
+			continue
+		}
+		i++
+	}
+	return string(b)
 }

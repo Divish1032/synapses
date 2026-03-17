@@ -32,21 +32,34 @@ func (p *FSharpParser) Extensions() []string {
 // ── Compiled regex patterns ───────────────────────────────────────────────────
 
 var (
-	// Top-level let bindings. Must start at column 0 (no leading whitespace).
+	// Let bindings at module level. F# module members are indented by exactly
+	// 4 spaces under the enclosing namespace/module declaration; top-level
+	// scripts may also have unindented (column-0) let bindings. We match
+	// either form (0 or 4 leading spaces) to capture module-level functions
+	// while excluding deeply-nested local let bindings (8+ spaces).
+	//
 	// Group 1: optional "rec "
 	// Group 2: optional "inline "
 	// Group 3: optional access modifier ("private " | "internal " | "public ")
 	// Group 4: function/value name
-	reFSharpLet = regexp.MustCompile(`(?m)^let\s+(rec\s+)?(inline\s+)?(private\s+|internal\s+|public\s+)?(\w+)`)
+	reFSharpLet = regexp.MustCompile(`(?m)^(?:    )?let\s+(rec\s+)?(inline\s+)?(private\s+|internal\s+|public\s+)?(\w+)`)
 
 	// Active pattern: let (|Even|Odd|) n =
+	// Also matches module-indented active patterns (4 leading spaces).
 	// Group 1: full active pattern name including pipes and parens
-	reFSharpActivePattern = regexp.MustCompile(`(?m)^let\s+(\(\|[^|)][^)]*\|[^)]*\))`)
+	reFSharpActivePattern = regexp.MustCompile(`(?m)^(?:    )?let\s+(\(\|[^|)][^)]*\|[^)]*\))`)
 
 	// F# instance/static member: member [this|self|qualifier.]Name
-	// Group 1: optional "override " or "static " modifier (include trailing space)
+	// Group 1: optional "static " modifier (include trailing space)
 	// Group 2: member name (after optional qualifier like "this.")
-	reFSharpMember = regexp.MustCompile(`(?m)^[ \t]+((?:override|static)\s+)?member\s+(?:\w+\.)?(\w+)`)
+	// Note: "override" members use reFSharpOverride below — no "member" keyword.
+	// The optional access modifier (private|internal|public) may appear between
+	// "member" and the self-identifier/name, so we skip it explicitly.
+	reFSharpMember = regexp.MustCompile(`(?m)^[ \t]+(static\s+)?member\s+(?:(?:private|internal|public)\s+)?(?:\w+\.)?(\w+)`)
+
+	// F# override without "member" keyword: override this.Name or override this.Name()
+	// Group 1: member name (after qualifier like "this.")
+	reFSharpOverride = regexp.MustCompile(`(?m)^[ \t]+override\s+\w+\.(\w+)`)
 
 	// F# abstract member: abstract [member] Name
 	// Captures abstract declarations in type definitions.
@@ -156,6 +169,7 @@ func (p *FSharpParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 			continue
 		}
 		openSeen[importPath] = true
+		openLine := 1 + strings.Count(content[:m[0]], "\n")
 		importNodeID := g.MakeNodeID(importPath, importPath)
 		g.AddNode(&graph.Node{
 			ID:      importNodeID,
@@ -163,6 +177,7 @@ func (p *FSharpParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 			Name:    importPath,
 			Package: importPath,
 			File:    filePath,
+			Line:    openLine,
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
 	}
@@ -190,6 +205,7 @@ func (p *FSharpParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 				refName = strings.TrimSuffix(refName, ".dll")
 				refName = strings.TrimSuffix(refName, ".DLL")
 			}
+			refLine := 1 + strings.Count(content[:m[0]], "\n")
 			importNodeID := g.MakeNodeID(refName, refName)
 			g.AddNode(&graph.Node{
 				ID:      importNodeID,
@@ -197,6 +213,7 @@ func (p *FSharpParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 				Name:    refName,
 				Package: refName,
 				File:    filePath,
+				Line:    refLine,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
 		}
@@ -362,42 +379,9 @@ func (p *FSharpParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 	}
 
-	// ── 6. Member methods (inside type definitions) ───────────────────────────
-	for _, m := range reFSharpMember.FindAllStringSubmatchIndex(content, -1) {
-		modifierRaw := ""
-		if m[2] >= 0 {
-			modifierRaw = strings.TrimSpace(content[m[2]:m[3]])
-		}
-		memberName := content[m[4]:m[5]]
-		if emitted[memberName] {
-			continue
-		}
-		emitted[memberName] = true
-		lineIdx := strings.Count(content[:m[0]], "\n")
-		line := lineIdx + 1
-
-		kind := "member"
-		if strings.HasPrefix(modifierRaw, "override") {
-			kind = "override"
-		} else if strings.HasPrefix(modifierRaw, "static") {
-			kind = "static_member"
-		}
-
-		meta := map[string]string{"kind": kind}
-		nodeID := g.MakeNodeID(filePath, memberName)
-		g.AddNode(&graph.Node{
-			ID:       nodeID,
-			Type:     graph.NodeFunction,
-			Name:     memberName,
-			File:     filePath,
-			Line:     line,
-			Exported: !strings.HasPrefix(memberName, "_"),
-			Metadata: meta,
-		})
-		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-	}
-
-	// ── 6b. Abstract member declarations ──────────────────────────────────────
+	// ── 6. Abstract member declarations ───────────────────────────────────────
+	// Process abstract members FIRST so they take priority in deduplication over
+	// concrete implementations with the same name in subclasses.
 	for _, m := range reFSharpAbstractMember.FindAllStringSubmatchIndex(content, -1) {
 		memberName := content[m[2]:m[3]]
 		if emitted[memberName] {
@@ -420,7 +404,64 @@ func (p *FSharpParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 	}
 
-	// ── 6c. Default member implementations ────────────────────────────────────
+	// ── 6b. Override methods (override this.Name) ─────────────────────────────
+	// Process overrides before regular members so they take correct kind.
+	for _, m := range reFSharpOverride.FindAllStringSubmatchIndex(content, -1) {
+		memberName := content[m[2]:m[3]]
+		if emitted[memberName] {
+			continue
+		}
+		emitted[memberName] = true
+		lineIdx := strings.Count(content[:m[0]], "\n")
+		line := lineIdx + 1
+
+		nodeID := g.MakeNodeID(filePath, memberName)
+		g.AddNode(&graph.Node{
+			ID:       nodeID,
+			Type:     graph.NodeFunction,
+			Name:     memberName,
+			File:     filePath,
+			Line:     line,
+			Exported: !strings.HasPrefix(memberName, "_"),
+			Metadata: map[string]string{"kind": "override"},
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}
+
+	// ── 6c. Instance and static member methods ────────────────────────────────
+	for _, m := range reFSharpMember.FindAllStringSubmatchIndex(content, -1) {
+		modifierRaw := ""
+		if m[2] >= 0 {
+			modifierRaw = strings.TrimSpace(content[m[2]:m[3]])
+		}
+		memberName := content[m[4]:m[5]]
+		if emitted[memberName] {
+			continue
+		}
+		emitted[memberName] = true
+		lineIdx := strings.Count(content[:m[0]], "\n")
+		line := lineIdx + 1
+
+		kind := "member"
+		if strings.HasPrefix(modifierRaw, "static") {
+			kind = "static_member"
+		}
+
+		meta := map[string]string{"kind": kind}
+		nodeID := g.MakeNodeID(filePath, memberName)
+		g.AddNode(&graph.Node{
+			ID:       nodeID,
+			Type:     graph.NodeFunction,
+			Name:     memberName,
+			File:     filePath,
+			Line:     line,
+			Exported: !strings.HasPrefix(memberName, "_"),
+			Metadata: meta,
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}
+
+	// ── 6d. Default member implementations ────────────────────────────────────
 	for _, m := range reFSharpDefaultMember.FindAllStringSubmatchIndex(content, -1) {
 		memberName := content[m[2]:m[3]]
 		nodeKey := "default:" + memberName
