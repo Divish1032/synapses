@@ -46,9 +46,23 @@ func (p *GraphQLParser) Parse(g *graph.Graph, filePath string, src []byte) error
 		Line: 1,
 	})
 
-	// Walk all top-level definitions in the document.
-	for i := uint32(0); i < root.ChildCount(); i++ {
-		child := root.Child(i)
+	// The go-sitter-forest GraphQL grammar wraps definitions:
+	//   root → document → definition → type_system_definition → type_definition → actual_node
+	// We recursively unwrap to find the actual definition nodes.
+	p.walkDefinitions(g, root, src, filePath, fileNodeID)
+
+	return nil
+}
+
+// walkDefinitions recursively unwraps the grammar's nested wrapper nodes
+// (document, definition, type_system_definition, executable_definition,
+// type_definition) to find the actual definition nodes and dispatch them.
+func (p *GraphQLParser) walkDefinitions(
+	g *graph.Graph, n sitter.Node, src []byte,
+	filePath string, fileNodeID graph.NodeID,
+) {
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
 		if child.IsNull() {
 			continue
 		}
@@ -71,10 +85,12 @@ func (p *GraphQLParser) Parse(g *graph.Graph, filePath string, src []byte) error
 			p.extractFragment(g, child, src, filePath, fileNodeID)
 		case "directive_definition":
 			p.extractDirectiveDefinition(g, child, src, filePath, fileNodeID)
+		case "document", "definition", "type_system_definition",
+			"executable_definition", "type_definition":
+			// Wrapper nodes — recurse to find actual definitions.
+			p.walkDefinitions(g, child, src, filePath, fileNodeID)
 		}
 	}
-
-	return nil
 }
 
 // extractObjectType handles object_type_definition, input_object_type_definition,
@@ -253,17 +269,29 @@ func (p *GraphQLParser) extractSchemaDefinition(
 	meta := map[string]string{"kind": "schema"}
 
 	// Extract root operation types (query, mutation, subscription).
+	// Grammar structure: root_operation_type_definition → operation_type + named_type
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
 		if child.IsNull() || child.Type() != "root_operation_type_definition" {
 			continue
 		}
-		// Root operation type definitions have the form: query: Query
-		text := strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
-		parts := strings.SplitN(text, ":", 2)
-		if len(parts) == 2 {
-			opName := strings.TrimSpace(parts[0])
-			typeName := strings.TrimSpace(parts[1])
+		var opName, typeName string
+		for j := uint32(0); j < child.ChildCount(); j++ {
+			gc := child.Child(j)
+			if gc.IsNull() {
+				continue
+			}
+			switch gc.Type() {
+			case "operation_type":
+				opName = strings.TrimSpace(string(src[gc.StartByte():gc.EndByte()]))
+			case "named_type":
+				typeName = graphqlNodeName(gc, src)
+				if typeName == "" {
+					typeName = strings.TrimSpace(string(src[gc.StartByte():gc.EndByte()]))
+				}
+			}
+		}
+		if opName != "" && typeName != "" {
 			meta[opName] = typeName
 		}
 	}
@@ -339,21 +367,30 @@ func (p *GraphQLParser) extractDirectiveDefinition(
 	qualName := "@" + name
 
 	// Extract locations (e.g. FIELD_DEFINITION, OBJECT).
+	// directive_locations can be recursive in this grammar.
 	var locations []string
-	for i := uint32(0); i < n.ChildCount(); i++ {
-		child := n.Child(i)
-		if child.IsNull() || child.Type() != "directive_locations" {
-			continue
-		}
-		for j := uint32(0); j < child.ChildCount(); j++ {
-			loc := child.Child(j)
-			if loc.IsNull() || loc.Type() != "directive_location" {
+	var collectLocations func(node sitter.Node)
+	collectLocations = func(node sitter.Node) {
+		for i := uint32(0); i < node.ChildCount(); i++ {
+			child := node.Child(i)
+			if child.IsNull() {
 				continue
 			}
-			locText := strings.TrimSpace(string(src[loc.StartByte():loc.EndByte()]))
-			if locText != "" && locText != "|" {
-				locations = append(locations, locText)
+			switch child.Type() {
+			case "directive_locations":
+				collectLocations(child)
+			case "directive_location":
+				locText := strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
+				if locText != "" && locText != "|" {
+					locations = append(locations, locText)
+				}
 			}
+		}
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if !child.IsNull() && child.Type() == "directive_locations" {
+			collectLocations(child)
 		}
 	}
 
@@ -384,12 +421,20 @@ func (p *GraphQLParser) extractFields(
 ) {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "fields_definition" {
+		if child.IsNull() {
+			continue
+		}
+		ct := child.Type()
+		if ct != "fields_definition" && ct != "input_fields_definition" {
 			continue
 		}
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			field := child.Child(j)
-			if field.IsNull() || field.Type() != "field_definition" {
+			if field.IsNull() {
+				continue
+			}
+			ft := field.Type()
+			if ft != "field_definition" && ft != "input_value_definition" {
 				continue
 			}
 			fieldName := graphqlNodeName(field, src)
@@ -457,14 +502,28 @@ func graphqlNodeName(n sitter.Node, src []byte) string {
 	if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 		return strings.TrimSpace(string(src[nameNode.StartByte():nameNode.EndByte()]))
 	}
-	// Walk children looking for a "name" type node.
+	// Walk children looking for a "name" type node or wrapper nodes like "fragment_name".
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "name" {
+		ct := child.Type()
+		if ct == "name" {
 			return strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
+		}
+		// Handle wrapper nodes like fragment_name that contain a name child.
+		if strings.HasSuffix(ct, "_name") {
+			if inner := child.ChildByFieldName("name"); !inner.IsNull() {
+				return strings.TrimSpace(string(src[inner.StartByte():inner.EndByte()]))
+			}
+			// Try direct name child.
+			for j := uint32(0); j < child.ChildCount(); j++ {
+				gc := child.Child(j)
+				if !gc.IsNull() && gc.Type() == "name" {
+					return strings.TrimSpace(string(src[gc.StartByte():gc.EndByte()]))
+				}
+			}
 		}
 	}
 	return ""
