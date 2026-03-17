@@ -34,6 +34,7 @@ type Server struct {
 	mu        sync.Mutex
 	modelPath string
 	port      int
+	host      string // network address (default 127.0.0.1 for security)
 	llamaBin  string
 
 	proc    *exec.Cmd
@@ -41,14 +42,18 @@ type Server struct {
 	started bool
 }
 
-// New creates an embedding Server.
+// New creates an embedding Server with secure defaults (localhost only).
 //   - modelPath is the absolute path to the GGUF embedding model.
 //   - port is the internal TCP port the subprocess will listen on (e.g. 11437).
 //   - llamaBin is the path to the llama-server executable.
+//
+// The server only accepts connections from 127.0.0.1 to prevent accidental
+// exposure of the embedding model to the network.
 func New(modelPath string, port int, llamaBin string) *Server {
 	return &Server{
 		modelPath: modelPath,
 		port:      port,
+		host:      "127.0.0.1", // secure by default — localhost only
 		llamaBin:  llamaBin,
 		client:    &http.Client{Timeout: 15 * time.Second},
 	}
@@ -178,7 +183,7 @@ func (s *Server) Embed(ctx context.Context, text string) ([]float32, error) {
 
 	body, _ := json.Marshal(map[string]string{"content": text})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("http://127.0.0.1:%d/embedding", s.port),
+		fmt.Sprintf("http://%s:%d/embedding", s.host, s.port),
 		bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -227,7 +232,7 @@ func (s *Server) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 
 	body, _ := json.Marshal(map[string]interface{}{"content": texts})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("http://127.0.0.1:%d/embedding", s.port),
+		fmt.Sprintf("http://%s:%d/embedding", s.host, s.port),
 		bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -269,7 +274,7 @@ func (s *Server) Available() bool {
 	if !s.started {
 		return false
 	}
-	resp, err := s.client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", s.port))
+	resp, err := s.client.Get(fmt.Sprintf("http://%s:%d/health", s.host, s.port))
 	if err != nil {
 		return false
 	}
@@ -290,7 +295,7 @@ func (s *Server) Stop() {
 
 // waitReady polls the /health endpoint until it responds OK or timeout.
 func (s *Server) waitReady(ctx context.Context, timeout time.Duration) error {
-	url := fmt.Sprintf("http://127.0.0.1:%d/health", s.port)
+	url := fmt.Sprintf("http://%s:%d/health", s.host, s.port)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		select {

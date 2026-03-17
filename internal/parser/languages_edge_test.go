@@ -1422,6 +1422,127 @@ func TestGoParser_PackageLevelVarGroup(t *testing.T) {
 	assertNode(t, g, "GlobalPrefix", graph.NodeVariable)
 }
 
+// ─── Go slice-literal var (FIX-PARSER-2) ─────────────────────────────────
+// Regression tests for the bug where package-level var declarations whose
+// initialiser is a composite slice literal (e.g. []SomeStruct{...}) were
+// misclassified as NodeStruct, using the element type's classification instead
+// of the var declaration's own type.
+
+// goSliceVarSource replicates the exact pattern that triggered FIX-PARSER-2:
+// a struct type followed immediately by a package-level var holding a slice of
+// that struct type, each element being a composite literal.
+const goSliceVarSource = `package mcp
+
+// toolCatalogEntry describes a single tool for discovery.
+type toolCatalogEntry struct {
+	Name     string
+	Category string
+	Keywords []string
+}
+
+// toolCatalog is the static list — the triggering case from FIX-PARSER-2.
+var toolCatalog = []toolCatalogEntry{
+	{Name: "session_init", Category: "session", Keywords: []string{"start", "init"}},
+	{Name: "get_context", Category: "exploration", Keywords: []string{"context"}},
+}
+
+// errorRegistry is a second slice-literal var to verify the pattern generalises.
+var errorRegistry = []string{"err1", "err2"}
+
+var (
+	defaultTimeout = 30
+	maxRetries     = 3
+)
+`
+
+// TestGoParser_SliceLiteralVar_IsVariable verifies that a package-level var
+// whose value is a []StructType composite literal is classified as NodeVariable,
+// not NodeStruct. This is the core regression from FIX-PARSER-2.
+func TestGoParser_SliceLiteralVar_IsVariable(t *testing.T) {
+	g := graph.New("testrepo")
+	p := parser.NewGoParser()
+	if err := p.Parse(g, "internal/mcp/tools.go", []byte(goSliceVarSource)); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	assertNode(t, g, "toolCatalog", graph.NodeVariable)
+	assertMetaKind(t, g, "toolCatalog", "var")
+}
+
+// TestGoParser_SliceLiteralVar_LineAccuracy verifies that the var node's line
+// is the line of the "var" keyword, not the element struct's definition line.
+func TestGoParser_SliceLiteralVar_LineAccuracy(t *testing.T) {
+	g := graph.New("testrepo")
+	p := parser.NewGoParser()
+	if err := p.Parse(g, "internal/mcp/tools.go", []byte(goSliceVarSource)); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	nodes := g.FindByName("toolCatalog")
+	var varNode *graph.Node
+	for _, n := range nodes {
+		if n.Name == "toolCatalog" {
+			varNode = n
+			break
+		}
+	}
+	if varNode == nil {
+		t.Fatal("toolCatalog not found in graph")
+	}
+	// toolCatalog is declared on line 11 of goSliceVarSource.
+	// toolCatalogEntry struct is declared on lines 4–8 — the line must NOT be
+	// in that range, proving the parser uses the var keyword's line.
+	const wantLine = 11
+	if varNode.Line != wantLine {
+		t.Errorf("toolCatalog line=%d, want %d (var keyword line, not struct definition line)",
+			varNode.Line, wantLine)
+	}
+}
+
+// TestGoParser_SliceLiteralVar_StructUnaffected verifies that the element struct
+// type (toolCatalogEntry) is still correctly classified as NodeStruct with its
+// own line — the var fix must not disturb the struct node.
+func TestGoParser_SliceLiteralVar_StructUnaffected(t *testing.T) {
+	g := graph.New("testrepo")
+	p := parser.NewGoParser()
+	if err := p.Parse(g, "internal/mcp/tools.go", []byte(goSliceVarSource)); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	assertNode(t, g, "toolCatalogEntry", graph.NodeStruct)
+	// toolCatalogEntry struct starts at line 4.
+	nodes := g.FindByName("toolCatalogEntry")
+	if len(nodes) == 0 {
+		t.Fatal("toolCatalogEntry not found")
+	}
+	const wantLine = 4
+	if nodes[0].Line != wantLine {
+		t.Errorf("toolCatalogEntry line=%d, want %d", nodes[0].Line, wantLine)
+	}
+}
+
+// TestGoParser_SliceLiteralVar_NonStructElement verifies that the pattern also
+// works when the element type is a primitive ([]string) — not just structs.
+func TestGoParser_SliceLiteralVar_NonStructElement(t *testing.T) {
+	g := graph.New("testrepo")
+	p := parser.NewGoParser()
+	if err := p.Parse(g, "internal/mcp/tools.go", []byte(goSliceVarSource)); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	assertNode(t, g, "errorRegistry", graph.NodeVariable)
+	assertMetaKind(t, g, "errorRegistry", "var")
+}
+
+// TestGoParser_SliceLiteralVar_GroupedVars verifies that grouped var blocks
+// (var ( ... )) adjacent to slice-literal vars are correctly indexed.
+func TestGoParser_SliceLiteralVar_GroupedVars(t *testing.T) {
+	g := graph.New("testrepo")
+	p := parser.NewGoParser()
+	if err := p.Parse(g, "internal/mcp/tools.go", []byte(goSliceVarSource)); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	assertNode(t, g, "defaultTimeout", graph.NodeVariable)
+	assertMetaKind(t, g, "defaultTimeout", "var")
+	assertNode(t, g, "maxRetries", graph.NodeVariable)
+}
+
 // ─── Python decorator metadata ────────────────────────────────────────────
 
 const pyDecoratorSource = `class MyModel:

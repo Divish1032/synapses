@@ -3,10 +3,13 @@ package embed
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -320,10 +323,261 @@ func TestAvailable_WithTimeout(t *testing.T) {
 		started: true,
 		client:  &http.Client{Timeout: 1 * time.Millisecond},
 		port:    49999, // unused port → timeout
+		host:    "127.0.0.1",
 	}
 
 	available := s.Available()
 	if available {
 		t.Error("expected available=false on timeout")
+	}
+}
+
+// --- Test helpers for httptest integration ---
+
+// newTestServerWithHandler creates a test Server with injected host/port pointing to httptest server.
+func newTestServerWithHandler(t *testing.T, handler http.HandlerFunc) *Server {
+	testServer := httptest.NewServer(handler)
+	t.Cleanup(func() { testServer.Close() })
+
+	// Extract host and port from test server URL (e.g., "http://127.0.0.1:54321")
+	addr := strings.TrimPrefix(testServer.URL, "http://")
+	parts := strings.Split(addr, ":")
+	if len(parts) != 2 {
+		t.Fatalf("invalid test server URL: %s", testServer.URL)
+	}
+	host := parts[0]
+	port := 0
+	fmt.Sscanf(parts[1], "%d", &port)
+
+	return &Server{
+		modelPath: "/model.gguf",
+		port:      port,
+		host:      host, // injected from test server
+		llamaBin:  "/llama-server",
+		client:    &http.Client{Timeout: 5 * time.Second},
+		started:   true,
+	}
+}
+
+// --- Integration tests with mocked HTTP server ---
+
+func TestEmbed_SuccessfulEmbedding(t *testing.T) {
+	// Test successful embedding with mock HTTP server.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/embedding" {
+			t.Errorf("expected /embedding, got %s", r.URL.Path)
+		}
+		// Return 384-dimensional embedding vector
+		fmt.Fprint(w, `{"embedding": [0.1, 0.2, 0.3`)
+		for i := 3; i < 384; i++ {
+			fmt.Fprint(w, ", 0.0")
+		}
+		fmt.Fprint(w, `]}`)
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	vec, err := s.Embed(context.Background(), "test text")
+	if err != nil {
+		t.Fatalf("Embed failed: %v", err)
+	}
+	if len(vec) != 384 {
+		t.Errorf("expected 384 dimensions, got %d", len(vec))
+	}
+	if vec[0] != 0.1 || vec[1] != 0.2 || vec[2] != 0.3 {
+		t.Errorf("embedding values incorrect: %v", vec[:3])
+	}
+}
+
+func TestEmbed_HTTPError(t *testing.T) {
+	// Test error handling for non-200 HTTP responses.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	_, err := s.Embed(context.Background(), "test")
+	if err == nil {
+		t.Error("expected error on HTTP 503")
+	}
+	if !strings.Contains(err.Error(), "HTTP") {
+		t.Errorf("error should mention HTTP status, got: %v", err)
+	}
+}
+
+func TestEmbed_MalformedJSON(t *testing.T) {
+	// Test error handling for invalid JSON response.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("not valid json at all"))
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	_, err := s.Embed(context.Background(), "test")
+	if err == nil {
+		t.Error("expected error on malformed JSON")
+	}
+	if !strings.Contains(err.Error(), "decode") {
+		t.Errorf("error should mention decode, got: %v", err)
+	}
+}
+
+func TestEmbed_EmptyVector(t *testing.T) {
+	// Test error when embedding array is empty.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"embedding": []}`))
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	_, err := s.Embed(context.Background(), "test")
+	if err == nil {
+		t.Error("expected error on empty embedding")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error should mention empty, got: %v", err)
+	}
+}
+
+func TestEmbedBatch_SuccessfulBatch(t *testing.T) {
+	// Test successful batch embedding.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return array of embeddings matching input count
+		fmt.Fprint(w, `[`)
+		for i := 0; i < 3; i++ {
+			if i > 0 {
+				fmt.Fprint(w, ",")
+			}
+			fmt.Fprint(w, `{"embedding": [0.1, 0.2, 0.3]}`)
+		}
+		fmt.Fprint(w, `]`)
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	vecs, err := s.EmbedBatch(context.Background(), []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("EmbedBatch failed: %v", err)
+	}
+	if len(vecs) != 3 {
+		t.Errorf("expected 3 vectors, got %d", len(vecs))
+	}
+	for i, vec := range vecs {
+		if len(vec) != 3 {
+			t.Errorf("vector %d has %d dims, want 3", i, len(vec))
+		}
+	}
+}
+
+func TestEmbedBatch_LengthMismatch(t *testing.T) {
+	// Test error when response count doesn't match input count.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return only 1 embedding instead of 2 expected
+		fmt.Fprint(w, `[{"embedding": [0.1, 0.2]}]`)
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	_, err := s.EmbedBatch(context.Background(), []string{"text1", "text2"})
+	if err == nil {
+		t.Error("expected error on length mismatch")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("error should mention mismatch, got: %v", err)
+	}
+}
+
+func TestEmbedBatch_MalformedResponse(t *testing.T) {
+	// Test error handling for invalid batch response.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("invalid"))
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	_, err := s.EmbedBatch(context.Background(), []string{"a"})
+	if err == nil {
+		t.Error("expected error on malformed response")
+	}
+}
+
+func TestAvailable_HealthCheckSuccess(t *testing.T) {
+	// Test successful health check.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	if !s.Available() {
+		t.Error("expected available=true on health OK")
+	}
+}
+
+func TestAvailable_HealthCheckFailure(t *testing.T) {
+	// Test failed health check.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	if s.Available() {
+		t.Error("expected available=false on health failure")
+	}
+}
+
+func TestWaitReady_SuccessfulReady(t *testing.T) {
+	// Test waitReady succeeds when health check passes.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	err := s.waitReady(context.Background(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("waitReady failed: %v", err)
+	}
+}
+
+func TestWaitReady_Timeout(t *testing.T) {
+	// Test waitReady times out when health check never passes.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	err := s.waitReady(context.Background(), 100*time.Millisecond)
+	if err == nil {
+		t.Error("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timeout") {
+		t.Errorf("error should mention timeout, got: %v", err)
+	}
+}
+
+func TestWaitReady_ContextCanceled(t *testing.T) {
+	// Test waitReady respects context cancellation.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Intentionally delay to let context cancel
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+
+	s := newTestServerWithHandler(t, handler)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	err := s.waitReady(ctx, 10*time.Second)
+	if err == nil {
+		t.Error("expected context error")
 	}
 }
