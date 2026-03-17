@@ -2,6 +2,7 @@ package brain
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -524,3 +525,231 @@ func TestToBuilderClaims(t *testing.T) {
 		t.Error("toBuilderClaims failed")
 	}
 }
+
+// --- impl struct tests ---
+
+func TestImpl_Available(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	if b.Available() {
+		t.Error("expected brain to be unavailable when disabled")
+	}
+}
+
+func TestImpl_ModelName(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	name := b.ModelName()
+	// ModelName may be empty or set based on config
+	_ = name
+}
+
+func TestImpl_Summary(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	summary := b.Summary("test-project", "test-node")
+	// Summary should be empty for disabled brain
+	if summary != "" {
+		t.Errorf("expected empty summary for disabled brain, got %q", summary)
+	}
+}
+
+func TestImpl_Ingest_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	ctx := context.Background()
+	resp, err := b.Ingest(ctx, IngestRequest{NodeID: "test"})
+	if err != nil {
+		t.Fatalf("Ingest failed: %v", err)
+	}
+	if resp.NodeID != "test" {
+		t.Errorf("NodeID mismatch: got %q, want test", resp.NodeID)
+	}
+}
+
+func TestImpl_Enrich_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	ctx := context.Background()
+	resp, err := b.Enrich(ctx, EnrichRequest{})
+	if err != nil {
+		t.Fatalf("Enrich failed: %v", err)
+	}
+	if resp.Summaries == nil {
+		t.Error("expected non-nil summaries map")
+	}
+}
+
+func TestImpl_ExplainViolation_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	ctx := context.Background()
+	resp, err := b.ExplainViolation(ctx, ViolationRequest{RuleID: "test"})
+	if err != nil {
+		t.Fatalf("ExplainViolation failed: %v", err)
+	}
+	// Disabled brain should return empty response
+	if resp.Explanation != "" || resp.Fix != "" {
+		t.Error("expected empty explanation and fix for disabled brain")
+	}
+}
+
+func TestImpl_Coordinate_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	ctx := context.Background()
+	resp, err := b.Coordinate(ctx, CoordinateRequest{NewAgentID: "agent-1"})
+	if err != nil {
+		t.Fatalf("Coordinate failed: %v", err)
+	}
+	// Disabled brain should return empty suggestion
+	if resp.Suggestion != "" {
+		t.Error("expected empty suggestion for disabled brain")
+	}
+}
+
+func TestImpl_Prune_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	ctx := context.Background()
+	content := "test content"
+	result, err := b.Prune(ctx, content)
+	if err != nil {
+		t.Fatalf("Prune failed: %v", err)
+	}
+	if result != content {
+		t.Errorf("Prune should return unchanged content, got %q", result)
+	}
+}
+
+func TestImpl_GetSDLCConfig_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	sdlc := b.GetSDLCConfig()
+	if sdlc.Phase != PhaseDevelopment {
+		t.Errorf("expected PhaseDevelopment, got %q", sdlc.Phase)
+	}
+	if sdlc.QualityMode != QualityStandard {
+		t.Errorf("expected QualityStandard, got %q", sdlc.QualityMode)
+	}
+}
+
+func TestImpl_SetSDLCPhase_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	err := b.SetSDLCPhase(PhaseReview, "agent-1")
+	if err != nil {
+		t.Fatalf("SetSDLCPhase failed: %v", err)
+	}
+}
+
+func TestImpl_SetQualityMode_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	err := b.SetQualityMode(QualityEnterprise, "agent-1")
+	if err != nil {
+		t.Fatalf("SetQualityMode failed: %v", err)
+	}
+}
+
+func TestImpl_GetPatterns_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	patterns := b.GetPatterns("test-trigger", 10)
+	if patterns != nil {
+		t.Error("expected nil patterns for disabled brain")
+	}
+}
+
+func TestImpl_LogDecision_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	ctx := context.Background()
+	err := b.LogDecision(ctx, DecisionRequest{AgentID: "agent-1"})
+	if err != nil {
+		t.Fatalf("LogDecision failed: %v", err)
+	}
+}
+
+func TestImpl_EnsureModel_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	ctx := context.Background()
+	// Use os.Stdout as the writer
+	err := b.EnsureModel(ctx, os.Stdout)
+	if err != nil {
+		t.Fatalf("EnsureModel failed: %v", err)
+	}
+}
+
+func TestImpl_BuildContextPacket_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	ctx := context.Background()
+	pkt, err := b.BuildContextPacket(ctx, ContextPacketRequest{})
+	if err != nil {
+		t.Fatalf("BuildContextPacket failed: %v", err)
+	}
+	if pkt != nil {
+		t.Error("expected nil packet for disabled brain")
+	}
+}
+
+func TestImpl_Memorize_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	ctx := context.Background()
+	resp, err := b.Memorize(ctx, archivist.MemorizeRequest{})
+	if err != nil {
+		t.Fatalf("Memorize failed: %v", err)
+	}
+	if len(resp.NewMemories) != 0 {
+		t.Error("expected no memories for disabled brain")
+	}
+}
+
+func TestImpl_UpsertADR_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	err := b.UpsertADR(ADRRequest{ID: "adr-1", Title: "Test ADR"})
+	if err != nil {
+		t.Fatalf("UpsertADR failed: %v", err)
+	}
+}
+
+func TestImpl_GetADR_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	adr, err := b.GetADR("adr-1")
+	if err != nil {
+		t.Fatalf("GetADR failed: %v", err)
+	}
+	if adr.ID != "" {
+		t.Error("expected empty ADR for disabled brain")
+	}
+}
+
+func TestImpl_AllADRs_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	adrs, err := b.AllADRs()
+	if err != nil {
+		t.Fatalf("AllADRs failed: %v", err)
+	}
+	if adrs != nil {
+		t.Error("expected nil ADRs for disabled brain")
+	}
+}
+
+func TestImpl_GetADRsForFile_Disabled(t *testing.T) {
+	cfg := brainconfig.BrainConfig{Enabled: false}
+	b := New(cfg)
+	adrs, err := b.GetADRsForFile("test.go", 10)
+	if err != nil {
+		t.Fatalf("GetADRsForFile failed: %v", err)
+	}
+	if adrs != nil {
+		t.Error("expected nil ADRs for disabled brain")
+	}
+}
+
