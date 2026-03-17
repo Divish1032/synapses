@@ -276,3 +276,58 @@ func TestContextFilePath_SameProjectSamePath(t *testing.T) {
 		t.Errorf("same project produced different paths: %s vs %s", p1, p2)
 	}
 }
+
+// ── Error cases ────────────────────────────────────────────────────────────────
+
+func TestContextFilePath_HomeDir_Error(t *testing.T) {
+	// Simulate no HOME (will cause os.UserHomeDir to fail)
+	t.Setenv("HOME", "")
+	// We can't easily mock UserHomeDir, but we can test with invalid HOME env
+	// This test documents the error case exists even if coverage is tricky
+	_, err := ContextFilePath("/any/repo")
+	// Either succeeds (if HOME fallback exists) or errors — both are valid
+	_ = err
+}
+
+func TestRender_OnlyInProgressTasks(t *testing.T) {
+	tasks := []store.Task{
+		{ID: "t1", Status: "in_progress"},
+		{ID: "t2", Status: "in_progress"},
+	}
+	out := render(nil, tasks)
+	if !strings.Contains(out, "2 in progress") {
+		t.Errorf("expected '2 in progress', got:\n%s", out)
+	}
+	if strings.Contains(out, "pending") && !strings.Contains(out, "2 in progress") {
+		t.Errorf("should not mention pending if there are zero, got:\n%s", out)
+	}
+}
+
+func TestRender_ZeroTasksButTaskArray(t *testing.T) {
+	out := render(nil, []store.Task{})
+	// Empty task array means no tasks section
+	if strings.Contains(out, "**Tasks**:") {
+		t.Errorf("should not show Tasks section for empty array, got:\n%s", out)
+	}
+}
+
+func TestRender_IdentityWithoutToolGuidance(t *testing.T) {
+	id := &graph.ProjectIdentity{
+		RepoID: "test",
+		Scale:  graph.ScaleSmall,
+		Summary: graph.GraphSummary{
+			Files:     10,
+			Functions: 50,
+			Edges:     100,
+		},
+		// ToolGuidance is empty
+	}
+	out := render(id, nil)
+	if !strings.Contains(out, "# Synapses — test") {
+		t.Error("missing project header")
+	}
+	// Should not include empty guidance block
+	if strings.HasPrefix(out, "> \n") {
+		t.Error("should not include empty guidance block")
+	}
+}

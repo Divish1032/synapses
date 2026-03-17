@@ -14,24 +14,66 @@ import (
 // knownBazelRules is the set of Bazel/Starlark rule function names that
 // should be recognized as build targets when invoked at the top level.
 var knownBazelRules = map[string]bool{
-	"go_binary":     true,
-	"go_library":    true,
-	"go_test":       true,
-	"cc_binary":     true,
-	"cc_library":    true,
-	"cc_test":       true,
-	"java_binary":   true,
-	"java_library":  true,
-	"java_test":     true,
-	"py_binary":     true,
-	"py_library":    true,
-	"py_test":       true,
-	"rust_binary":   true,
-	"rust_library":  true,
-	"rust_test":     true,
+	// Go
+	"go_binary":        true,
+	"go_library":       true,
+	"go_test":          true,
+	"go_proto_library": true,
+	// C/C++
+	"cc_binary":        true,
+	"cc_library":       true,
+	"cc_test":          true,
+	"cc_proto_library": true,
+	// Java
+	"java_binary":        true,
+	"java_library":       true,
+	"java_test":          true,
+	"java_proto_library": true,
+	// Python
+	"py_binary":  true,
+	"py_library": true,
+	"py_test":    true,
+	"py_wheel":   true,
+	// Rust
+	"rust_binary":  true,
+	"rust_library": true,
+	"rust_test":    true,
+	// Shell
+	"sh_binary":  true,
+	"sh_library": true,
+	"sh_test":    true,
+	// TypeScript / JavaScript
+	"ts_project":     true,
+	"ts_library":     true,
+	"js_library":     true,
+	"npm_package":    true,
+	"web_test_suite": true,
+	// Proto
 	"proto_library": true,
-	"sh_binary":     true,
-	"sh_test":       true,
+	// OCI / containers
+	"oci_image":       true,
+	"oci_push":        true,
+	"container_image": true,
+	"container_push":  true,
+	// Repository rules (WORKSPACE)
+	"http_archive":         true,
+	"http_file":            true,
+	"git_repository":       true,
+	"local_repository":     true,
+	"new_local_repository": true,
+	// Toolchain / platform
+	"alias":              true,
+	"register_toolchains": true,
+	"platform":           true,
+	"constraint_value":   true,
+	"constraint_setting": true,
+	"toolchain":          true,
+	// Config
+	"config_setting": true,
+	"bool_flag":      true,
+	"string_flag":    true,
+	"string_setting": true,
+	// Misc
 	"genrule":       true,
 	"filegroup":     true,
 	"test_suite":    true,
@@ -311,12 +353,18 @@ func (p *StarlarkParser) handleLoad(
 	for _, sym := range stringArgs[1:] {
 		symNodeID := g.MakeNodeID(label, sym)
 		g.AddNode(&graph.Node{
-			ID:      symNodeID,
-			Type:    graph.NodeFunction,
-			Name:    sym,
-			Package: label,
-			File:    filePath,
-			Line:    startLine,
+			ID:       symNodeID,
+			Type:     graph.NodeFunction,
+			Name:     sym,
+			Package:  label,
+			File:     filePath,
+			Line:     startLine,
+			Exported: true,
+			Metadata: map[string]string{
+				"source":    label,
+				"kind":      "load",
+				"signature": sym + "(...)",
+			},
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: symNodeID, Type: graph.EdgeImports})
 	}

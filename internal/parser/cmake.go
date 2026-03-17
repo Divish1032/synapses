@@ -117,6 +117,13 @@ func (p *CMakeParser) handleCommand(
 		p.handleInclude(g, n, src, filePath, fileNodeID)
 	case "find_package":
 		p.handleFindPackage(g, n, src, filePath, fileNodeID)
+	case "foreach":
+		p.handleForeach(g, n, src, filePath, fileNodeID, lines)
+	case "if", "elseif", "else", "endif",
+		"endforeach", "while", "endwhile",
+		"break", "continue", "return":
+		// Control flow commands — bodies are already walked by the recursive walker.
+		// No entity to extract.
 	}
 }
 
@@ -344,6 +351,10 @@ func (p *CMakeParser) handleVariable(
 	}
 
 	name := args[0]
+	// Skip variable references like ${VAR} — they are dereferences, not definitions.
+	if strings.HasPrefix(name, "${") {
+		return
+	}
 	startLine := int(n.StartPoint().Row) + 1
 	doc := extractLineDoc(lines, startLine, "#")
 
@@ -397,6 +408,46 @@ func (p *CMakeParser) handleInclude(
 		Line:    int(n.StartPoint().Row) + 1,
 	})
 	g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
+}
+
+// handleForeach processes foreach() commands, extracting the loop variable
+// as a NodeVariable so that iteration variables are queryable in the graph.
+// Syntax: foreach(VAR IN LISTS ...) or foreach(VAR range) or foreach(VAR item1 item2 ...)
+func (p *CMakeParser) handleForeach(
+	g *graph.Graph,
+	n sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+	lines []string,
+) {
+	args := p.extractArguments(n, src)
+	if len(args) == 0 {
+		return
+	}
+
+	loopVar := args[0]
+	// Skip variable references — the loop variable must be a plain identifier.
+	if strings.HasPrefix(loopVar, "${") || loopVar == "" {
+		return
+	}
+
+	startLine := int(n.StartPoint().Row) + 1
+
+	nodeID := g.MakeNodeID(filePath, "foreach:"+loopVar)
+	if g.GetNode(nodeID) != nil {
+		return
+	}
+
+	g.AddNode(&graph.Node{
+		ID:       nodeID,
+		Type:     graph.NodeVariable,
+		Name:     loopVar,
+		File:     filePath,
+		Line:     startLine,
+		Metadata: map[string]string{"kind": "loop_var"},
+	})
+	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 }
 
 // handleFindPackage processes find_package() commands, creating an import edge.
