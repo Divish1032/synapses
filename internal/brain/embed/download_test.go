@@ -2,7 +2,9 @@ package embed
 
 import (
 	"bytes"
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -588,5 +590,161 @@ func TestEnsureEmbedModel_CreatesModelDir(t *testing.T) {
 	}
 	if got != modelPath {
 		t.Errorf("want %q, got %q", modelPath, got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// downloadBytes tests
+// ---------------------------------------------------------------------------
+
+func TestDownloadBytes_Success(t *testing.T) {
+	expectedData := []byte("test download data")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(expectedData)
+	}))
+	defer server.Close()
+
+	client := &http.Client{}
+	ctx := context.Background()
+
+	data, err := downloadBytes(ctx, client, server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !bytes.Equal(data, expectedData) {
+		t.Errorf("want %q, got %q", expectedData, data)
+	}
+}
+
+func TestDownloadBytes_HTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := &http.Client{}
+	ctx := context.Background()
+
+	_, err := downloadBytes(ctx, client, server.URL)
+	if err == nil {
+		t.Error("expected error for HTTP 404, got nil")
+	}
+	if !strings.Contains(err.Error(), "HTTP") {
+		t.Errorf("expected HTTP error, got %q", err)
+	}
+}
+
+func TestDownloadBytes_LargeData(t *testing.T) {
+	largeData := bytes.Repeat([]byte("test"), 1000) // ~4KB
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(largeData)
+	}))
+	defer server.Close()
+
+	client := &http.Client{}
+	ctx := context.Background()
+
+	data, err := downloadBytes(ctx, client, server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(data) != len(largeData) {
+		t.Errorf("want %d bytes, got %d", len(largeData), len(data))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// downloadFile tests
+// ---------------------------------------------------------------------------
+
+func TestDownloadFile_Success(t *testing.T) {
+	expectedData := []byte("file content")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(expectedData)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "test-file.bin")
+	client := &http.Client{}
+	ctx := context.Background()
+
+	err := downloadFile(ctx, client, server.URL, destPath, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify file was created and contains correct data
+	data, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatalf("failed to read file: %v", err)
+	}
+
+	if !bytes.Equal(data, expectedData) {
+		t.Errorf("want %q, got %q", expectedData, data)
+	}
+}
+
+func TestDownloadFile_HTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "test-file.bin")
+	client := &http.Client{}
+	ctx := context.Background()
+
+	err := downloadFile(ctx, client, server.URL, destPath, nil)
+	if err == nil {
+		t.Error("expected error for HTTP error, got nil")
+	}
+}
+
+func TestDownloadFile_InvalidDestPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data"))
+	}))
+	defer server.Close()
+
+	// Try to write to invalid path
+	destPath := "/nonexistent/directory/that/does/not/exist/file.bin"
+	client := &http.Client{}
+	ctx := context.Background()
+
+	err := downloadFile(ctx, client, server.URL, destPath, nil)
+	if err == nil {
+		t.Error("expected error for invalid destination path, got nil")
+	}
+}
+
+func TestDownloadFile_WithProgress(t *testing.T) {
+	expectedData := []byte("test data with progress")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(expectedData)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "test-file.bin")
+	client := &http.Client{}
+	ctx := context.Background()
+
+	var progressBuf bytes.Buffer
+	err := downloadFile(ctx, client, server.URL, destPath, &progressBuf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !fileExists(destPath) {
+		t.Error("expected file to be created")
 	}
 }
