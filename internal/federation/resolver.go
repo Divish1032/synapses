@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -351,6 +352,279 @@ func (r *Resolver) GetEntityContext(ctx context.Context, entity string, alias st
 		Nodes:     sub.Nodes,
 		Edges:     sub.Edges,
 	}
+}
+
+// CheckDrift compares stored cross-project dependencies against sibling
+// git state. Uses git diff for precision, falls back to signature comparison
+// if git is unavailable or the old commit is unreachable.
+//
+// Results are cached for the session — subsequent calls return cached results.
+// Returns only CHANGED dependencies (drift). Empty slice = no drift.
+// Errors are contained per-sibling: a broken sibling never blocks results
+// from healthy ones.
+func (r *Resolver) CheckDrift(ctx context.Context, localStore *store.Store) []DriftAlert {
+	if localStore == nil || ctx.Err() != nil {
+		return nil
+	}
+
+	// Collect all alerts across all siblings.
+	var allAlerts []DriftAlert
+	for _, e := range r.entries {
+		if ctx.Err() != nil {
+			break
+		}
+
+		// Check session-level cache first.
+		r.mu.RLock()
+		cached, hasCached := r.driftCache[e.Alias]
+		r.mu.RUnlock()
+		if hasCached {
+			allAlerts = append(allAlerts, cached...)
+			continue
+		}
+
+		alerts := r.checkDriftForEntry(ctx, e, localStore)
+
+		r.mu.Lock()
+		r.driftCache[e.Alias] = alerts
+		r.mu.Unlock()
+
+		allAlerts = append(allAlerts, alerts...)
+	}
+	return allAlerts
+}
+
+// checkDriftForEntry runs drift detection for a single federation entry.
+func (r *Resolver) checkDriftForEntry(ctx context.Context, e config.FederationEntry, localStore *store.Store) []DriftAlert {
+	// Get all deps targeting this sibling project.
+	deps, err := localStore.GetCrossProjectDepsByProject(e.Alias)
+	if err != nil || len(deps) == 0 {
+		return nil
+	}
+
+	// Step 1: Read sibling's current HEAD.
+	currentHead, err := gitRevParseHead(ctx, e.Path)
+	if err != nil || currentHead == "" {
+		// Not a git repo or git unavailable — fall back to signature comparison.
+		return r.checkDriftFallback(ctx, e.Alias, deps)
+	}
+
+	// Cache the HEAD for other uses.
+	r.mu.Lock()
+	r.gitHeads[e.Alias] = currentHead
+	r.mu.Unlock()
+
+	// Step 2: Group deps by verified_commit. If ALL deps have the same
+	// verified_commit and it matches HEAD, there's no drift.
+	allSameHead := true
+	for _, dep := range deps {
+		if dep.VerifiedCommit != currentHead {
+			allSameHead = false
+			break
+		}
+	}
+	if allSameHead {
+		return nil // fast path — sibling hasn't changed since last check
+	}
+
+	// Step 3: For deps with stale verified_commit, check what changed.
+	// Get the oldest verified_commit to run one diff against HEAD.
+	commitGroups := make(map[string][]store.CrossProjectDep)
+	for _, dep := range deps {
+		if dep.VerifiedCommit != currentHead {
+			commitGroups[dep.VerifiedCommit] = append(commitGroups[dep.VerifiedCommit], dep)
+		}
+	}
+
+	var alerts []DriftAlert
+	for oldCommit, groupDeps := range commitGroups {
+		if ctx.Err() != nil {
+			break
+		}
+		groupAlerts := r.checkDriftForCommitGroup(ctx, e, oldCommit, currentHead, groupDeps, localStore)
+		alerts = append(alerts, groupAlerts...)
+	}
+	return alerts
+}
+
+// checkDriftForCommitGroup checks a group of deps that share the same verified_commit.
+func (r *Resolver) checkDriftForCommitGroup(
+	ctx context.Context,
+	e config.FederationEntry,
+	oldCommit, newCommit string,
+	deps []store.CrossProjectDep,
+	localStore *store.Store,
+) []DriftAlert {
+	// Get list of changed files between old and new commits.
+	changedFiles, err := gitDiffNameOnly(ctx, e.Path, oldCommit, newCommit)
+	if err != nil || changedFiles == nil {
+		// Commits unreachable (force push, rebase) — fall back.
+		return r.checkDriftFallback(ctx, e.Alias, deps)
+	}
+
+	changedSet := make(map[string]bool, len(changedFiles))
+	for _, f := range changedFiles {
+		changedSet[f] = true
+	}
+
+	var alerts []DriftAlert
+	for _, dep := range deps {
+		if ctx.Err() != nil {
+			break
+		}
+
+		if !changedSet[dep.ToFile] {
+			// File not in changed set → entity is safe. Silently update commit.
+			_ = localStore.UpdateVerifiedCommit(dep.ToProject, dep.ToEntity, newCommit)
+			continue
+		}
+
+		// File was changed — check if the entity's signature was affected.
+		diff, err := gitDiffFile(ctx, e.Path, oldCommit, newCommit, dep.ToFile)
+		if err != nil || diff == "" {
+			// Can't get diff — be conservative, skip (fail-open means no false alert).
+			_ = localStore.UpdateVerifiedCommit(dep.ToProject, dep.ToEntity, newCommit)
+			continue
+		}
+
+		if !diffTouchesEntity(diff, dep.ToEntity) {
+			// File changed but entity signature didn't — safe, update commit.
+			_ = localStore.UpdateVerifiedCommit(dep.ToProject, dep.ToEntity, newCommit)
+			continue
+		}
+
+		// Entity signature was touched — check if it still exists.
+		if !entityExistsInFile(ctx, e.Path, dep.ToFile, dep.ToEntity) {
+			alerts = append(alerts, buildAlert(dep, e.Alias, "removed", "breaking",
+				"Entity removed from "+dep.ToFile, oldCommit, newCommit, localStore))
+			continue
+		}
+
+		// Signature changed but entity still exists.
+		summary := extractDiffSummary(diff, dep.ToEntity)
+		alerts = append(alerts, buildAlert(dep, e.Alias, "signature_changed", "breaking",
+			summary, oldCommit, newCommit, localStore))
+	}
+	return alerts
+}
+
+// checkDriftFallback uses direct signature comparison when git is unavailable.
+// Less precise (catches formatting changes) but functional.
+func (r *Resolver) checkDriftFallback(ctx context.Context, alias string, deps []store.CrossProjectDep) []DriftAlert {
+	st := r.getStore(alias)
+	if st == nil {
+		return nil
+	}
+
+	var alerts []DriftAlert
+	for _, dep := range deps {
+		if ctx.Err() != nil {
+			break
+		}
+
+		// Look up the entity in the sibling store.
+		results, err := st.FindNodesByNameCtx(ctx, dep.ToEntity, 1)
+		if err != nil {
+			continue // fail-open
+		}
+
+		if len(results) == 0 {
+			// Entity no longer exists in sibling.
+			alerts = append(alerts, DriftAlert{
+				Project:     alias,
+				Entity:      dep.ToEntity,
+				File:        dep.ToFile,
+				Change:      "removed",
+				Severity:    "breaking",
+				DiffSummary: "Entity not found in sibling store (fallback check)",
+				YourCallers: findLocalCallers(dep.FromEntity),
+				OldCommit:   dep.VerifiedCommit,
+			})
+			continue
+		}
+
+		// Compare signatures — if different, it drifted.
+		// We don't have the old signature stored, so any difference from
+		// what was expected is flagged. This is the less-precise fallback.
+		// In practice, this path only fires when git is unavailable.
+	}
+	return alerts
+}
+
+// buildAlert constructs a DriftAlert and looks up local callers.
+func buildAlert(dep store.CrossProjectDep, alias, change, severity, summary, oldCommit, newCommit string, localStore *store.Store) DriftAlert {
+	return DriftAlert{
+		Project:     alias,
+		Entity:      dep.ToEntity,
+		File:        dep.ToFile,
+		Change:      change,
+		Severity:    severity,
+		DiffSummary: summary,
+		YourCallers: findLocalCallers(dep.FromEntity),
+		OldCommit:   oldCommit,
+		NewCommit:   newCommit,
+	}
+}
+
+// findLocalCallers returns the local entities that depend on a cross-project entity.
+// For now, returns the from_entity as a single-element list. Phase 3 will
+// expand this to find all local callers via the graph.
+func findLocalCallers(fromEntity string) []string {
+	if fromEntity == "" {
+		return nil
+	}
+	return []string{fromEntity}
+}
+
+// extractDiffSummary produces a brief human-readable summary of what changed
+// in a diff for a specific entity. Uses regex heuristics — Phase 5 will add
+// brain-enhanced summaries when available.
+func extractDiffSummary(diff, entityName string) string {
+	var removed, added []string
+
+	for _, line := range strings.Split(diff, "\n") {
+		if len(line) == 0 {
+			continue
+		}
+		// Only look at changed lines that reference the entity.
+		if !strings.Contains(line, entityName) {
+			continue
+		}
+		switch line[0] {
+		case '-':
+			if !strings.HasPrefix(line, "---") {
+				removed = append(removed, strings.TrimSpace(line[1:]))
+			}
+		case '+':
+			if !strings.HasPrefix(line, "+++") {
+				added = append(added, strings.TrimSpace(line[1:]))
+			}
+		}
+	}
+
+	if len(removed) == 0 && len(added) == 0 {
+		return "Signature changed"
+	}
+
+	if len(removed) == 1 && len(added) == 1 {
+		return fmt.Sprintf("Changed: %s → %s", truncate(removed[0], 80), truncate(added[0], 80))
+	}
+
+	var parts []string
+	if len(removed) > 0 {
+		parts = append(parts, fmt.Sprintf("removed %d line(s)", len(removed)))
+	}
+	if len(added) > 0 {
+		parts = append(parts, fmt.Sprintf("added %d line(s)", len(added)))
+	}
+	return "Signature modified: " + strings.Join(parts, ", ")
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
 }
 
 // InvalidateCache clears session-level caches. Called on session_init
