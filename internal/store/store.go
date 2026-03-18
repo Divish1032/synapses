@@ -894,6 +894,43 @@ func splitCamelCase(s string) string {
 	return b.String()
 }
 
+// NodeExistsByName reports whether a node with the given name exists in the store.
+// The match is case-insensitive. Used by federation to validate cross-project deps.
+func (s *Store) NodeExistsByName(name string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT count(*) FROM nodes WHERE name = ? COLLATE NOCASE`, name).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("node exists check: %w", err)
+	}
+	return count > 0, nil
+}
+
+// FindNodesByName returns lightweight node references matching the given name
+// (case-insensitive). Used by federation for cross-project entity lookup.
+func (s *Store) FindNodesByName(name string, limit int) ([]SearchResult, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(
+		`SELECT id, name, signature, doc FROM nodes WHERE name = ? COLLATE NOCASE LIMIT ?`,
+		name, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find nodes by name: %w", err)
+	}
+	defer rows.Close()
+
+	var results []SearchResult
+	for rows.Next() {
+		var r SearchResult
+		if err := rows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc); err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
 // SearchResult is a node that matched a semantic_search query,
 // annotated with its BM25 relevance rank.
 type SearchResult struct {
