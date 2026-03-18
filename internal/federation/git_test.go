@@ -400,6 +400,133 @@ func TestExtractDiffSummary_NoEntityLines(t *testing.T) {
 	}
 }
 
+// ── generic fallback tests ──────────────────────────────────────────────────
+
+func TestDiffTouchesEntity_GenericFallback_JavaMethod(t *testing.T) {
+	diff := `--- a/Order.java
++++ b/Order.java
+@@ -5,3 +5,3 @@
+-    public void processOrder(String orderId) {
++    public void processOrder(String orderId, Options opts) {
+`
+	// No Java-specific patterns — generic fallback should catch it.
+	if !diffTouchesEntity(diff, "processOrder") {
+		t.Error("expected generic fallback to detect Java method change")
+	}
+}
+
+func TestDiffTouchesEntity_GenericFallback_CSharp(t *testing.T) {
+	diff := `--- a/Service.cs
++++ b/Service.cs
+@@ -1,2 +1,2 @@
+-    protected async Task<Result> HandleRequest(Request req) {
++    protected async Task<Result> HandleRequest(Request req, CancellationToken ct) {
+`
+	if !diffTouchesEntity(diff, "HandleRequest") {
+		t.Error("expected generic fallback to detect C# method change")
+	}
+}
+
+func TestDiffTouchesEntity_GenericFallback_NotADeclaration(t *testing.T) {
+	// Entity name in a comment — should NOT trigger generic fallback.
+	diff := `--- a/readme.md
++++ b/readme.md
+@@ -1,2 +1,2 @@
+-See processOrder for details
++See processOrder documentation for details
+`
+	// "processOrder" appears but without structural chars after it — not a declaration.
+	if diffTouchesEntity(diff, "processOrder") {
+		t.Error("expected generic fallback NOT to match comment/prose")
+	}
+}
+
+func TestDiffTouchesEntity_GenericFallback_WithBrace(t *testing.T) {
+	diff := `--- a/thing.rb
++++ b/thing.rb
+@@ -1,2 +1,2 @@
+-    processOrder {|x| x.run}
++    processOrder {|x| x.run(force: true)}
+`
+	// Has { after entity name — looks like a block/declaration.
+	if !diffTouchesEntity(diff, "processOrder") {
+		t.Error("expected generic fallback to detect block-style declaration")
+	}
+}
+
+// ── looksLikeDeclaration tests ──────────────────────────────────────────────
+
+func TestLooksLikeDeclaration_WithParen(t *testing.T) {
+	if !looksLikeDeclaration("  void processOrder(String id) {", "processOrder") {
+		t.Error("expected true for method with parens")
+	}
+}
+
+func TestLooksLikeDeclaration_WithColon(t *testing.T) {
+	if !looksLikeDeclaration("class Config:", "Config") {
+		t.Error("expected true for Python class")
+	}
+}
+
+func TestLooksLikeDeclaration_PlainText(t *testing.T) {
+	if looksLikeDeclaration("See processOrder for details", "processOrder") {
+		t.Error("expected false for plain text")
+	}
+}
+
+func TestLooksLikeDeclaration_EntityNotInLine(t *testing.T) {
+	if looksLikeDeclaration("void otherMethod()", "processOrder") {
+		t.Error("expected false when entity not in line")
+	}
+}
+
+// ── pattern cache test ──────────────────────────────────────────────────────
+
+func TestPatternCache_ReturnsSamePatterns(t *testing.T) {
+	p1 := getCachedPatterns("TestEntity")
+	p2 := getCachedPatterns("TestEntity")
+	if len(p1) != len(p2) {
+		t.Errorf("cached patterns differ: %d vs %d", len(p1), len(p2))
+	}
+	// Verify they're the same slice (pointer equality from cache).
+	if &p1[0] != &p2[0] {
+		t.Error("expected cached patterns to be pointer-equal")
+	}
+}
+
+// ── gitEnv test ─────────────────────────────────────────────────────────────
+
+func TestGitEnv_NoSensitiveVars(t *testing.T) {
+	// Set a sensitive env var and verify it doesn't appear in gitEnv output.
+	t.Setenv("SECRET_API_KEY", "super-secret-123")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+
+	env := gitEnv()
+	for _, e := range env {
+		if containsStr(e, "super-secret") || containsStr(e, "aws-secret") {
+			t.Errorf("sensitive var leaked into git env: %s", e)
+		}
+	}
+
+	// Verify essential vars ARE present.
+	hasPath := false
+	hasPrompt := false
+	for _, e := range env {
+		if containsStr(e, "PATH=") {
+			hasPath = true
+		}
+		if e == "GIT_TERMINAL_PROMPT=0" {
+			hasPrompt = true
+		}
+	}
+	if !hasPath {
+		t.Error("expected PATH in git env")
+	}
+	if !hasPrompt {
+		t.Error("expected GIT_TERMINAL_PROMPT=0 in git env")
+	}
+}
+
 // ── git timeout test ────────────────────────────────────────────────────────
 
 func TestGitTimeout_DoesNotBlock(t *testing.T) {

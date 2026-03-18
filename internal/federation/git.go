@@ -3,9 +3,11 @@ package federation
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,14 +42,7 @@ func gitDiffNameOnly(ctx context.Context, repoPath, oldCommit, newCommit string)
 
 	out, err := gitCmd(ctx, repoPath, "diff", "--name-only", oldCommit+".."+newCommit)
 	if err != nil {
-		// Old commit is unreachable (force push, squash merge, rebase).
-		// Git reports various messages: "bad revision", "unknown revision",
-		// "Invalid revision range", "bad object".
-		errStr := err.Error()
-		if strings.Contains(errStr, "bad revision") ||
-			strings.Contains(errStr, "unknown revision") ||
-			strings.Contains(errStr, "Invalid revision") ||
-			strings.Contains(errStr, "bad object") {
+		if isUnreachableCommitErr(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("diff --name-only: %w", err)
@@ -68,11 +63,7 @@ func gitDiffFile(ctx context.Context, repoPath, oldCommit, newCommit, filePath s
 
 	out, err := gitCmd(ctx, repoPath, "diff", oldCommit+".."+newCommit, "--", filePath)
 	if err != nil {
-		errStr := err.Error()
-		if strings.Contains(errStr, "bad revision") ||
-			strings.Contains(errStr, "unknown revision") ||
-			strings.Contains(errStr, "Invalid revision") ||
-			strings.Contains(errStr, "bad object") {
+		if isUnreachableCommitErr(err) {
 			return "", nil
 		}
 		return "", fmt.Errorf("diff file %s: %w", filePath, err)
@@ -80,16 +71,42 @@ func gitDiffFile(ctx context.Context, repoPath, oldCommit, newCommit, filePath s
 	return out, nil
 }
 
-// gitCmd runs a git command with minimal environment to prevent interactive
-// prompts and credential helpers from blocking.
+// isUnreachableCommitErr checks if a git error indicates the commit is
+// unreachable (force push, squash merge, rebase). Git reports various
+// messages across versions; we match all known variants.
+func isUnreachableCommitErr(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "bad revision") ||
+		strings.Contains(s, "unknown revision") ||
+		strings.Contains(s, "Invalid revision") ||
+		strings.Contains(s, "bad object")
+}
+
+// gitEnv returns a curated environment for git subprocesses. Only variables
+// git needs for local operations are included — no API keys, tokens, or
+// other sensitive values leak to the subprocess.
+func gitEnv() []string {
+	env := []string{
+		"GIT_TERMINAL_PROMPT=0", // never prompt for credentials
+		"GIT_ASKPASS=",          // disable credential helpers
+		"SSH_ASKPASS=",          // disable SSH credential prompts
+	}
+	// Git needs PATH (to find itself + helpers), HOME (for ~/.gitconfig),
+	// and TMPDIR (for temp files during diff).
+	for _, key := range []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL"} {
+		if v := os.Getenv(key); v != "" {
+			env = append(env, key+"="+v)
+		}
+	}
+	return env
+}
+
+// gitCmd runs a git command with a curated environment to prevent
+// interactive prompts and sensitive env var leakage.
 func gitCmd(ctx context.Context, repoPath string, args ...string) (string, error) {
 	fullArgs := append([]string{"-C", repoPath}, args...)
 	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	cmd.Env = append(cmd.Environ(),
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS=",
-		"SSH_ASKPASS=",
-	)
+	cmd.Env = gitEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		// Include stderr in the error for diagnostics.
@@ -101,9 +118,29 @@ func gitCmd(ctx context.Context, repoPath string, args ...string) (string, error
 	return string(out), nil
 }
 
+// ── Pattern cache ───────────────────────────────────────────────────────────
+
+// patternCache caches compiled regex patterns per entity name. Patterns are
+// deterministic per name so the cache is correct. sync.Map is used for
+// concurrent safety without external locking.
+var patternCache sync.Map // entityName → []*regexp.Regexp
+
+// getCachedPatterns returns compiled signature patterns for the entity name,
+// using the cache to avoid recompilation on repeated lookups.
+func getCachedPatterns(entityName string) []*regexp.Regexp {
+	if cached, ok := patternCache.Load(entityName); ok {
+		return cached.([]*regexp.Regexp)
+	}
+	patterns := compileSignaturePatterns(entityName)
+	patternCache.Store(entityName, patterns)
+	return patterns
+}
+
+// ── Signature detection ─────────────────────────────────────────────────────
+
 // diffTouchesEntity checks if a unified diff contains changes to a specific
-// entity's signature line. Uses language-aware patterns to detect function,
-// method, class, and type declarations.
+// entity's signature line. Uses language-aware patterns first, then falls
+// back to a generic name check on changed lines.
 //
 // Only changed lines (starting with + or -) are checked, so unchanged context
 // lines don't produce false positives.
@@ -112,15 +149,17 @@ func diffTouchesEntity(diff string, entityName string) bool {
 		return false
 	}
 
-	// Build language-aware patterns for the entity name.
-	patterns := entitySignaturePatterns(entityName)
+	patterns := getCachedPatterns(entityName)
+
+	// Extract the unqualified name for generic fallback.
+	// "Server.Validate" → "Validate"
+	genericName := entityName
+	if idx := strings.LastIndex(entityName, "."); idx >= 0 {
+		genericName = entityName[idx+1:]
+	}
 
 	for _, line := range strings.Split(diff, "\n") {
-		// Only inspect changed lines (added or removed).
-		if len(line) == 0 {
-			continue
-		}
-		if line[0] != '+' && line[0] != '-' {
+		if len(line) == 0 || (line[0] != '+' && line[0] != '-') {
 			continue
 		}
 		// Skip diff headers (+++ and ---).
@@ -129,23 +168,59 @@ func diffTouchesEntity(diff string, entityName string) bool {
 		}
 
 		content := line[1:] // strip the +/- prefix
+
+		// Language-specific patterns (high precision).
 		for _, p := range patterns {
 			if p.MatchString(content) {
 				return true
 			}
 		}
+
+		// Generic fallback: entity name appears in a changed line that looks
+		// like a declaration (contains parentheses, braces, or colons after
+		// the name — heuristic to filter out pure comments/strings).
+		if strings.Contains(content, genericName) && looksLikeDeclaration(content, genericName) {
+			return true
+		}
 	}
 	return false
 }
 
-// entitySignaturePatterns returns compiled regexes that match function/method/
+// looksLikeDeclaration checks whether a line containing entityName looks like
+// a function/type/class declaration rather than a comment or string literal.
+// This is the generic fallback for languages not covered by specific patterns.
+func looksLikeDeclaration(line, entityName string) bool {
+	idx := strings.Index(line, entityName)
+	if idx < 0 {
+		return false
+	}
+	after := line[idx+len(entityName):]
+	// Declaration heuristic: something structural follows the name.
+	// "func Foo(" → has (
+	// "class Foo:" → has :
+	// "type Foo {" → has {
+	// "def foo(self):" → has (
+	// "pub fn foo<T>" → has <
+	for _, ch := range after {
+		switch ch {
+		case '(', '{', ':', '<':
+			return true
+		case ' ', '\t':
+			continue // skip whitespace before the structural char
+		default:
+			return false // non-structural char — likely not a declaration
+		}
+	}
+	return false
+}
+
+// compileSignaturePatterns returns compiled regexes that match function/method/
 // class/type signature lines for the given entity name across common languages.
-func entitySignaturePatterns(entityName string) []*regexp.Regexp {
-	// Escape the entity name for use in regex.
+func compileSignaturePatterns(entityName string) []*regexp.Regexp {
 	escaped := regexp.QuoteMeta(entityName)
 
-	// If the entity is qualified (e.g. "Server.Validate"), also match
-	// the unqualified part in method signatures.
+	// If qualified (e.g. "Server.Validate"), also match the unqualified
+	// part in method receiver signatures.
 	unqualified := escaped
 	if idx := strings.LastIndex(entityName, "."); idx >= 0 {
 		unqualified = regexp.QuoteMeta(entityName[idx+1:])
@@ -172,6 +247,9 @@ func entitySignaturePatterns(entityName string) []*regexp.Regexp {
 		// Python: def name(, class Name
 		`def\s+` + escaped + `\s*\(`,
 		`class\s+` + escaped + `[\s:(]`,
+
+		// Java/C#/Kotlin: public/private/protected ... Name(
+		`(public|private|protected|internal)\s+.*` + escaped + `\s*\(`,
 	}
 
 	var compiled []*regexp.Regexp
@@ -190,18 +268,25 @@ func entityExistsInFile(ctx context.Context, repoPath, filePath, entityName stri
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 
-	// Use git show HEAD:<file> to read the file content without checking it out.
 	out, err := gitCmd(ctx, repoPath, "show", "HEAD:"+filePath)
 	if err != nil {
 		return false // file doesn't exist or git error
 	}
 
-	patterns := entitySignaturePatterns(entityName)
+	patterns := getCachedPatterns(entityName)
+	genericName := entityName
+	if idx := strings.LastIndex(entityName, "."); idx >= 0 {
+		genericName = entityName[idx+1:]
+	}
+
 	for _, line := range strings.Split(out, "\n") {
 		for _, p := range patterns {
 			if p.MatchString(line) {
 				return true
 			}
+		}
+		if strings.Contains(line, genericName) && looksLikeDeclaration(line, genericName) {
+			return true
 		}
 	}
 	return false
