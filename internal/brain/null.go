@@ -81,6 +81,9 @@ func (n *NullBrain) AllADRs() ([]ADR, error) { return nil, nil }
 // GetADRsForFile returns nil — no brain is configured.
 func (n *NullBrain) GetADRsForFile(_ string, _ int) ([]ADR, error) { return nil, nil }
 
+// Generate returns an empty string — no LLM is available.
+func (n *NullBrain) Generate(_ context.Context, _ string) (string, error) { return "", nil }
+
 // Memorize is a no-op implementation.
 func (n *NullBrain) Memorize(_ context.Context, _ archivist.MemorizeRequest) (archivist.MemorizeResponse, error) {
 	return archivist.MemorizeResponse{}, nil

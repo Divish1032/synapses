@@ -625,6 +625,10 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	brainCli := brain.NewInProcess(cfg.Brain.ToBrainConfig())
 	if cfg.Brain.Enabled {
 		srv.SetBrainClient(brainCli)
+		if fedResolver != nil {
+			fedResolver.SetBrain(brainCli)
+			fedResolver.SetBrainGenerate(brainCli.Generate)
+		}
 		go func() {
 			go fetchTopNSummaries(projCtx, brainCli, g, st, 20)
 			bulkIngestToBrain(brainCli, g, pathProjectID(absPath))
@@ -683,6 +687,16 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			if fedResolver != nil {
 				tracker := federation.NewDeterministicDetector(cfg.Federation, fedResolver)
 				fw.SetCrossProjectTracker(tracker)
+				// Tier 2: brain-enhanced cross-project detection for languages
+				// Tier 1 doesn't cover well (Python, Ruby, Java, etc.).
+				if cfg.Brain.Enabled {
+					aliases := fedResolver.Aliases()
+					brainDet := federation.NewBrainDetector(brainCli.Generate, fedResolver, aliases)
+					brainAdapter := federation.NewBrainTrackerAdapter(brainDet, tracker)
+					if brainAdapter != nil {
+						fw.SetBrainCrossProjectTracker(brainAdapter)
+					}
+				}
 			}
 		}
 	}

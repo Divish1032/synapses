@@ -2417,23 +2417,33 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 		results = results[:limit]
 	}
 
-	// Format output.
+	// Format output with status indicator (Phase 6: tool discoverability).
 	type toolMatch struct {
 		Name        string     `json:"name"`
 		Category    string     `json:"category"`
 		Description string     `json:"description"`
 		Example     string     `json:"example"`
 		Score       int        `json:"score"`
+		Status      string     `json:"status"`
 		Breakdown   *breakdown `json:"breakdown,omitempty"`
 	}
 	matches := make([]toolMatch, len(results))
 	for i, r := range results {
+		status := "core — always available"
+		if !coreTierTools[r.entry.Name] {
+			if s.IsDeferredTool(r.entry.Name) {
+				status = "promoted — ready to call"
+			} else {
+				status = "available — ready to call"
+			}
+		}
 		m := toolMatch{
 			Name:        r.entry.Name,
 			Category:    r.entry.Category,
 			Description: r.entry.Description,
 			Example:     r.entry.Example,
 			Score:       r.score,
+			Status:      status,
 		}
 		if debug {
 			m.Breakdown = &r.breakdown
@@ -3744,6 +3754,20 @@ func (s *Server) handleSessionInit(
 				"count":  len(driftAlerts),
 				"alerts": driftAlerts,
 				"hint":   "Functions you depend on in sibling projects have changed. Review before building against them.",
+			}
+		}
+	}
+
+	// ── 5b. Proactive tool suggestions (Phase 6) ─────────────────────────
+	// When the agent declares an intent, suggest relevant deferred tools and
+	// auto-promote them so MCP clients see them in the tool list immediately.
+	// Zero tokens when no intent is declared.
+	if intent != "" {
+		if suggestions := s.SuggestAndPromoteTools(intent); len(suggestions) > 0 {
+			resp["suggested_tools"] = map[string]interface{}{
+				"for_intent": intent,
+				"promoted":   suggestions,
+				"note":       "These tools are now available. Call discover_tools(query='...') to find others.",
 			}
 		}
 	}

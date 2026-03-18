@@ -84,6 +84,25 @@ func (c *Client) GetSummary(_ context.Context, nodeID string) string {
 	return c.brain.Summary("", nodeID)
 }
 
+// Summary returns the brain-generated summary for a node, scoped by projectID.
+// Implements the federation.BrainSummaryProvider interface.
+func (c *Client) Summary(projectID, nodeID string) string {
+	return c.brain.Summary(projectID, nodeID)
+}
+
+// Available reports whether the brain LLM backend is accessible.
+// Implements the federation.BrainSummaryProvider interface.
+func (c *Client) Available() bool {
+	return c.brain.Available()
+}
+
+// Generate sends a prompt to the brain's LLM and returns the raw response.
+// Returns ("", error) if brain is unavailable. Used for brain-enhanced
+// drift summaries in the federation resolver.
+func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
+	return c.brain.Generate(ctx, prompt)
+}
+
 // LogDecision records a reasoning decision. Fire-and-forget.
 func (c *Client) LogDecision(ctx context.Context, req DecisionRequest) {
 	_ = c.brain.LogDecision(ctx, req)
