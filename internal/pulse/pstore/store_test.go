@@ -1,6 +1,7 @@
 package pulsestore
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -406,4 +407,229 @@ func TestMigrateColumns_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrateColumns (2nd): %v", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for Low-Coverage Functions
+// ---------------------------------------------------------------------------
+
+func TestMergeSummaries_Basic(t *testing.T) {
+	// Test mergeSummaries basic functionality
+	hist := &Summary{
+		TotalToolCalls:    10,
+		TokensDelivered:   100,
+		BaselineTokens:    400,
+		ContextDeliveries: 5,
+		CostSavedUSD:      1.00,
+		Sessions:          2,
+		TasksCompleted:    1,
+	}
+
+	today := &Summary{
+		TotalToolCalls:    5,
+		TokensDelivered:   50,
+		BaselineTokens:    200,
+		ContextDeliveries: 3,
+		CostSavedUSD:      0.50,
+		Sessions:          1,
+		TasksCompleted:    1,
+	}
+
+	result := mergeSummaries(hist, today)
+
+	if result.TotalToolCalls != 15 {
+		t.Errorf("TotalToolCalls: got %d, want 15", result.TotalToolCalls)
+	}
+	if result.TokensDelivered != 150 {
+		t.Errorf("TokensDelivered: got %d, want 150", result.TokensDelivered)
+	}
+	if result.BaselineTokens != 600 {
+		t.Errorf("BaselineTokens: got %d, want 600", result.BaselineTokens)
+	}
+	if result.TokensSaved != 450 {
+		t.Errorf("TokensSaved: got %d, want 450", result.TokensSaved)
+	}
+	if result.ContextDeliveries != 8 {
+		t.Errorf("ContextDeliveries: got %d, want 8", result.ContextDeliveries)
+	}
+	if result.CostSavedUSD != 1.50 {
+		t.Errorf("CostSavedUSD: got %.2f, want 1.50", result.CostSavedUSD)
+	}
+	if result.Sessions != 3 {
+		t.Errorf("Sessions: got %d, want 3", result.Sessions)
+	}
+	if result.TasksCompleted != 2 {
+		t.Errorf("TasksCompleted: got %d, want 2", result.TasksCompleted)
+	}
+}
+
+func TestMergeSummaries_TokensSavedCapped(t *testing.T) {
+	// Test that negative TokensSaved is capped at 0
+	hist := &Summary{
+		TokensDelivered: 500,
+		BaselineTokens:  200,
+	}
+	today := &Summary{}
+
+	result := mergeSummaries(hist, today)
+	if result.TokensSaved != 0 {
+		t.Errorf("TokensSaved should be capped at 0, got %d", result.TokensSaved)
+	}
+}
+
+func TestMergeSummaries_CompressionRatio(t *testing.T) {
+	// Test compression ratio calculation
+	hist := &Summary{
+		TokensDelivered: 100,
+		BaselineTokens:  400,
+	}
+	today := &Summary{}
+
+	result := mergeSummaries(hist, today)
+	expected := 400.0 / 100.0
+	if result.CompressionRatio != expected {
+		t.Errorf("CompressionRatio: got %.2f, want %.2f", result.CompressionRatio, expected)
+	}
+}
+
+func TestMergeSummaries_SavingsPct(t *testing.T) {
+	// Test savings percentage calculation
+	hist := &Summary{
+		TokensDelivered: 100,
+		BaselineTokens:  400,
+	}
+	today := &Summary{}
+
+	result := mergeSummaries(hist, today)
+	// TokensSaved = 400 - 100 = 300
+	// SavingsPct = 300 / 400 * 100 = 75%
+	expected := 75.0
+	if result.SavingsPct != expected {
+		t.Errorf("SavingsPct: got %.2f, want %.2f", result.SavingsPct, expected)
+	}
+}
+
+func TestMergeSummaries_ZeroDeliveries(t *testing.T) {
+	// Test with zero context deliveries
+	hist := &Summary{
+		TotalToolCalls: 10,
+	}
+	today := &Summary{
+		TotalToolCalls: 5,
+	}
+
+	result := mergeSummaries(hist, today)
+	if result.TotalToolCalls != 15 {
+		t.Errorf("TotalToolCalls: got %d, want 15", result.TotalToolCalls)
+	}
+	// CacheHitRate should remain 0 when there are no deliveries
+	if result.CacheHitRate != 0 {
+		t.Errorf("CacheHitRate should be 0, got %.2f", result.CacheHitRate)
+	}
+}
+
+func TestGetSummary_EmptyDatabase(t *testing.T) {
+	// Test GetSummary on empty database
+	s := testStore(t)
+	sum, err := s.GetSummary(7)
+	if err != nil {
+		t.Fatalf("GetSummary: %v", err)
+	}
+	if sum.TotalToolCalls != 0 {
+		t.Errorf("expected empty summary, got %+v", sum)
+	}
+}
+
+func TestGetSummary_WithMultipleEvents(t *testing.T) {
+	// Test GetSummary with varied events
+	s := testStore(t)
+
+	// Add multiple events
+	_ = s.InsertToolCall(pulsetypes.ToolCallEvent{
+		ToolName:   "get_context",
+		DurationMs: 100,
+		Success:    true,
+	})
+	_ = s.InsertToolCall(pulsetypes.ToolCallEvent{
+		ToolName:   "get_context",
+		DurationMs: 50,
+		Success:    false,
+	})
+	_ = s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName:       "get_context",
+		ResponseTokens: 150,
+		BaselineTokens: 600,
+		CacheHit:       true,
+	})
+
+	sum, err := s.GetSummary(7)
+	if err != nil {
+		t.Fatalf("GetSummary: %v", err)
+	}
+
+	if sum.TotalToolCalls != 2 {
+		t.Errorf("TotalToolCalls: got %d, want 2", sum.TotalToolCalls)
+	}
+	if sum.ContextDeliveries != 1 {
+		t.Errorf("ContextDeliveries: got %d, want 1", sum.ContextDeliveries)
+	}
+}
+
+
+func TestOpen_CreatesDatabase(t *testing.T) {
+	// Test that Open creates a database file
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	// Verify database was created
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("database file not created: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("database file is empty")
+	}
+}
+
+func TestMergeSummaries_WeightedAverages(t *testing.T) {
+	// Test weighted average calculations for rate fields
+	hist := &Summary{
+		ContextDeliveries: 10,
+		CacheHitRate:      0.8,  // 80%
+		TotalToolCalls:    20,
+		AvgLatencyMs:      100.0,
+	}
+	today := &Summary{
+		ContextDeliveries: 5,
+		CacheHitRate:      0.6,  // 60%
+		TotalToolCalls:    10,
+		AvgLatencyMs:      50.0,
+	}
+
+	result := mergeSummaries(hist, today)
+
+	// Expected weighted cache hit rate: (0.8*10 + 0.6*5) / 15 = 10/15 ≈ 0.667
+	expectedCacheHit := (0.8*10 + 0.6*5) / 15.0
+	if abs(result.CacheHitRate-expectedCacheHit) > 0.001 {
+		t.Errorf("CacheHitRate: got %.3f, want %.3f", result.CacheHitRate, expectedCacheHit)
+	}
+
+	// Expected weighted avg latency: (100*20 + 50*10) / 30 = 3000/30 = 100
+	expectedLatency := (100.0*20 + 50.0*10) / 30.0
+	if abs(result.AvgLatencyMs-expectedLatency) > 0.001 {
+		t.Errorf("AvgLatencyMs: got %.1f, want %.1f", result.AvgLatencyMs, expectedLatency)
+	}
+}
+
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
