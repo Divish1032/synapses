@@ -91,37 +91,12 @@ func init() {
 	sort.Strings(intentKeywordKeys)
 }
 
-// stripSuffix removes common English verb inflection suffixes to normalize
-// an inflected word back to (approximately) its base form. Handles:
-//
-//	implementing→implement, debugging→debug, reviewed→review,
-//	exploring→explor, investigated→investigat, refactoring→refactor
-//
-// Not a full Porter stemmer — just the suffixes needed for intent matching.
-// Minimum 3-char stem to avoid stripping too aggressively on short words.
-func stripSuffix(word string) string {
-	// Ordered longest-first so "ation" matches before "tion" before "ion".
-	suffixes := []string{
-		"ation", "tion", "sion",
-		"ment", "ness", "ious", "eous", "ous",
-		"ize", "ise", "ful",
-		"ing", "ely", "ly",
-		"ed", "er",
-	}
-	for _, sfx := range suffixes {
-		if strings.HasSuffix(word, sfx) && len(word)-len(sfx) >= 3 {
-			stem := word[:len(word)-len(sfx)]
-			// Handle doubled consonant from suffix removal:
-			// "debugging"→"debugg"→"debug", "debugger"→"debugg"→"debug",
-			// "planned"→"plann"→"plan", "planning"→"plann"→"plan"
-			if (sfx == "ing" || sfx == "er" || sfx == "ed") &&
-				len(stem) >= 2 && stem[len(stem)-1] == stem[len(stem)-2] {
-				stem = stem[:len(stem)-1]
-			}
-			return stem
-		}
-	}
-	return word
+// stemWord applies the Porter stemming algorithm to normalize an inflected
+// word to its base form. Uses the inlined Porter stemmer in porterstemmer.go.
+// Handles all English inflections: implementing→implement, exploring→explor,
+// debugging→debug, investigation→investig, reviewed→review, etc.
+func stemWord(word string) string {
+	return porterStem(word)
 }
 
 // suggestToolsForIntent parses the intent string for keywords and returns
@@ -156,11 +131,14 @@ func suggestToolsForIntent(intent string) []ToolSuggestion {
 		}
 	}
 
-	// Pass 2: stem matching — strip suffixes from intent words, then match.
-	// Uses sorted keys for deterministic iteration order.
+	// Pass 2: Porter stem matching — stem both intent words and keywords,
+	// then compare stems. Porter stemmer normalizes inflected forms to a
+	// common root: "implementing"→"implement", "exploring"→"explor",
+	// "explore"→"explor". Uses sorted keys for deterministic iteration.
 	if len(result) < 5 {
 		for _, keyword := range intentKeywordKeys {
 			suggestions := intentKeywords[keyword]
+			stemK := stemWord(keyword)
 			matched := false
 			for _, w := range words {
 				if w == keyword {
@@ -168,17 +146,7 @@ func suggestToolsForIntent(intent string) []ToolSuggestion {
 					matched = false
 					break
 				}
-				stemW := stripSuffix(w)
-				if stemW == keyword {
-					matched = true
-					break
-				}
-				// Handle partial stem matches: "explor" (from "exploring") vs "explore".
-				shorter, longer := stemW, keyword
-				if len(shorter) > len(longer) {
-					shorter, longer = longer, shorter
-				}
-				if len(shorter) >= 4 && strings.HasPrefix(longer, shorter) {
+				if stemWord(w) == stemK {
 					matched = true
 					break
 				}
