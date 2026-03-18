@@ -422,7 +422,7 @@ func (s *Server) assembleModifyContext(
 
 	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
 	// Each collector runs in parallel with its own recover boundary.
-	sections, debugResults := s.collectTieredSections(ctx, string(node.ID), node.File, pkt, nil)
+	sections, debugResults := s.collectTieredSections(ctx, s.getLastAgent(), string(node.ID), node.File, pkt, nil)
 	sections = append(sections, tieredSection{
 		Tier: "available", Heading: "Historical failures, full impact analysis",
 	})
@@ -476,7 +476,7 @@ func (s *Server) assembleUnderstandContext(
 
 	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
 	understandWhich := map[string]bool{"gaps": true, "annotations": true, "cross_project": true}
-	sections, debugResults := s.collectTieredSections(ctx, string(node.ID), node.File, nil, understandWhich)
+	sections, debugResults := s.collectTieredSections(ctx, s.getLastAgent(), string(node.ID), node.File, nil, understandWhich)
 	sections = append(sections, tieredSection{
 		Tier: "available", Heading: "Full impact analysis, historical failures, peer activity",
 	})
@@ -561,7 +561,7 @@ func (s *Server) assembleReviewContext(
 	_ = dc // used for pkt building above
 
 	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
-	sections, debugResults := s.collectTieredSections(ctx, string(node.ID), node.File, pkt, nil)
+	sections, debugResults := s.collectTieredSections(ctx, s.getLastAgent(), string(node.ID), node.File, pkt, nil)
 	sections = append(sections, tieredSection{
 		Tier: "available", Heading: "Historical failures, full peer activity, violation audit log",
 	})
@@ -639,7 +639,7 @@ func (s *Server) assembleDebugContext(
 
 	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
 	debugWhich := map[string]bool{"brain": true, "annotations": true, "cross_project": true}
-	sections, debugResults := s.collectTieredSections(ctx, string(node.ID), node.File, pkt, debugWhich)
+	sections, debugResults := s.collectTieredSections(ctx, s.getLastAgent(), string(node.ID), node.File, pkt, debugWhich)
 	sections = append(sections, tieredSection{
 		Tier: "available", Heading: "Full impact analysis, architecture rules, quality gaps",
 	})
@@ -841,7 +841,7 @@ func (s *Server) assemblePlanContext(
 
 	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
 	planWhich := map[string]bool{"violations": true, "gaps": true, "cross_project": true}
-	sections, debugResults := s.collectTieredSections(ctx, string(node.ID), node.File, nil, planWhich)
+	sections, debugResults := s.collectTieredSections(ctx, s.getLastAgent(), string(node.ID), node.File, nil, planWhich)
 	sections = append(sections, tieredSection{
 		Tier: "available", Heading: "Full impact analysis, historical failures",
 	})
@@ -1111,6 +1111,13 @@ func (s *Server) handlePlanContext(
 // It receives a context with a per-component timeout already applied.
 type componentCollector func(ctx context.Context) []tieredSection
 
+// componentSpec defines one pluggable unit of context assembly with its own timeout.
+type componentSpec struct {
+	name      string
+	collector componentCollector
+	timeoutMs int // per-component deadline (design doc Section 8.4)
+}
+
 // componentResult is the output of one collector goroutine.
 type componentResult struct {
 	Name      string
@@ -1121,77 +1128,86 @@ type componentResult struct {
 }
 
 // componentHealthTracker tracks per-component failure counts for auto-disable.
+// Per-agent scoped — concurrent agents don't interfere with each other.
 // Components that panic or timeout 3+ times in a session are auto-disabled.
 type componentHealthTracker struct {
 	mu       sync.Mutex
-	failures map[string]int
+	failures map[string]map[string]int // agentID → componentName → count
 }
 
-func (h *componentHealthTracker) recordFailure(name string) {
+func (h *componentHealthTracker) recordFailure(agentID, name string) {
 	h.mu.Lock()
 	if h.failures == nil {
-		h.failures = make(map[string]int)
+		h.failures = make(map[string]map[string]int)
 	}
-	h.failures[name]++
+	if h.failures[agentID] == nil {
+		h.failures[agentID] = make(map[string]int)
+	}
+	h.failures[agentID][name]++
 	h.mu.Unlock()
 }
 
-func (h *componentHealthTracker) isDisabled(name string) bool {
+func (h *componentHealthTracker) isDisabled(agentID, name string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.failures[name] >= 3
+	if h.failures == nil {
+		return false
+	}
+	return h.failures[agentID][name] >= 3
 }
 
-func (h *componentHealthTracker) reset() {
+func (h *componentHealthTracker) reset(agentID string) {
 	h.mu.Lock()
-	h.failures = nil
+	if h.failures != nil {
+		delete(h.failures, agentID)
+	}
 	h.mu.Unlock()
 }
 
-// runComponents executes collectors in parallel with per-component recover
-// boundaries and timeout. Returns collected sections and a debug summary.
-func runComponents(ctx context.Context, health *componentHealthTracker, components map[string]componentCollector, timeoutMs int) ([]tieredSection, []componentResult) {
-	if len(components) == 0 {
+// runComponents executes component specs in parallel with per-component recover
+// boundaries and individual timeouts. Returns collected sections and debug info.
+func runComponents(ctx context.Context, health *componentHealthTracker, agentID string, specs []componentSpec) ([]tieredSection, []componentResult) {
+	if len(specs) == 0 {
 		return nil, nil
 	}
-	ch := make(chan componentResult, len(components))
-	for name, collector := range components {
-		if health != nil && health.isDisabled(name) {
-			ch <- componentResult{Name: name, TimedOut: true}
+	ch := make(chan componentResult, len(specs))
+	for _, spec := range specs {
+		if health != nil && health.isDisabled(agentID, spec.name) {
+			ch <- componentResult{Name: spec.name, TimedOut: true}
 			continue
 		}
-		go func(n string, fn componentCollector) {
+		go func(sp componentSpec) {
 			start := time.Now()
-			compCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
+			compCtx, cancel := context.WithTimeout(ctx, time.Duration(sp.timeoutMs)*time.Millisecond)
 			defer cancel()
 
 			var res componentResult
-			res.Name = n
+			res.Name = sp.name
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
 						res.Panicked = true
 						if health != nil {
-							health.recordFailure(n)
+							health.recordFailure(agentID, sp.name)
 						}
 					}
 				}()
-				res.Sections = fn(compCtx)
+				res.Sections = sp.collector(compCtx)
 			}()
 			res.LatencyMs = time.Since(start).Milliseconds()
 			if compCtx.Err() != nil && len(res.Sections) == 0 {
 				res.TimedOut = true
 				if health != nil {
-					health.recordFailure(n)
+					health.recordFailure(agentID, sp.name)
 				}
 			}
 			ch <- res
-		}(name, collector)
+		}(spec)
 	}
 
 	var allSections []tieredSection
 	var debugResults []componentResult
-	for i := 0; i < len(components); i++ {
+	for i := 0; i < len(specs); i++ {
 		res := <-ch
 		debugResults = append(debugResults, res)
 		allSections = append(allSections, res.Sections...)
@@ -1199,18 +1215,34 @@ func runComponents(ctx context.Context, health *componentHealthTracker, componen
 	return allSections, debugResults
 }
 
-// buildDebugSection creates the _debug content from component results.
-// Zero-data components are omitted. Returns nil if no debug info worth showing.
-func buildDebugSection(results []componentResult) map[string]interface{} {
+// buildDebugMarkdown creates a human-readable _debug section from component results.
+// Returns "" if no debug info worth showing.
+func buildDebugMarkdown(results []componentResult) string {
 	if len(results) == 0 {
-		return nil
+		return ""
 	}
-	latencies := make(map[string]int64)
-	var timedOut, panicked []string
+	// Sort by name for deterministic output.
+	sort.Slice(results, func(i, j int) bool { return results[i].Name < results[j].Name })
+
+	var b strings.Builder
+	b.WriteString("## _debug\n- latencies: ")
+	first := true
 	for _, r := range results {
 		if r.LatencyMs > 0 {
-			latencies[r.Name] = r.LatencyMs
+			if !first {
+				b.WriteString(" | ")
+			}
+			fmt.Fprintf(&b, "%s: %dms", r.Name, r.LatencyMs)
+			first = false
 		}
+	}
+	if first {
+		b.WriteString("(none)")
+	}
+	b.WriteString("\n")
+
+	var timedOut, panicked []string
+	for _, r := range results {
 		if r.TimedOut {
 			timedOut = append(timedOut, r.Name)
 		}
@@ -1218,73 +1250,72 @@ func buildDebugSection(results []componentResult) map[string]interface{} {
 			panicked = append(panicked, r.Name)
 		}
 	}
-	debug := map[string]interface{}{
-		"latencies_ms": latencies,
-	}
 	if len(timedOut) > 0 {
-		debug["timed_out"] = timedOut
+		fmt.Fprintf(&b, "- timed_out: %s\n", strings.Join(timedOut, ", "))
 	}
 	if len(panicked) > 0 {
-		debug["panicked"] = panicked
+		fmt.Fprintf(&b, "- panicked: %s\n", strings.Join(panicked, ", "))
 	}
-	return debug
+	if len(timedOut) == 0 && len(panicked) == 0 {
+		b.WriteString("- timed_out: none | panicked: none\n")
+	}
+	return b.String()
 }
 
-// collectTieredSections runs all applicable supplementary collectors in parallel
-// using the component pipeline. Returns the collected sections and debug info.
+// collectTieredSections runs applicable supplementary collectors in parallel
+// using the component pipeline. Per-component timeouts from design doc Section 8.4.
 // The which parameter selects which collectors to run (nil = all).
-func (s *Server) collectTieredSections(ctx context.Context, nodeID, nodeFile string, pkt *brain.ContextPacket, which map[string]bool) ([]tieredSection, []componentResult) {
+func (s *Server) collectTieredSections(ctx context.Context, agentID, nodeID, nodeFile string, pkt *brain.ContextPacket, which map[string]bool) ([]tieredSection, []componentResult) {
 	cfg2 := s.config
 	st := s.store
-	allComponents := map[string]componentCollector{
-		"violations": func(_ context.Context) []tieredSection {
+	allSpecs := []componentSpec{
+		{name: "violations", timeoutMs: 50, collector: func(_ context.Context) []tieredSection {
 			if vs := collectViolationSection(cfg2, nodeFile); vs != nil {
 				return []tieredSection{*vs}
 			}
 			return nil
-		},
-		"gaps": func(_ context.Context) []tieredSection {
+		}},
+		{name: "gaps", timeoutMs: 50, collector: func(_ context.Context) []tieredSection {
 			if gs := collectGapSection(st, nodeID); gs != nil {
 				return []tieredSection{*gs}
 			}
 			return nil
-		},
-		"brain": func(_ context.Context) []tieredSection {
+		}},
+		{name: "brain", timeoutMs: 200, collector: func(_ context.Context) []tieredSection {
 			if bs := collectBrainSection(pkt); bs != nil {
 				return []tieredSection{*bs}
 			}
 			return nil
-		},
-		"annotations": func(_ context.Context) []tieredSection {
+		}},
+		{name: "annotations", timeoutMs: 50, collector: func(_ context.Context) []tieredSection {
 			if as := collectAnnotationSection(st, nodeID); as != nil {
 				return []tieredSection{*as}
 			}
 			return nil
-		},
-		"cross_project": func(cCtx context.Context) []tieredSection {
+		}},
+		{name: "cross_project", timeoutMs: 500, collector: func(cCtx context.Context) []tieredSection {
 			return s.collectCrossProjectSections(cCtx, nodeID)
-		},
+		}},
 	}
 	// Filter to requested components if which is specified.
-	components := allComponents
+	var specs []componentSpec
 	if which != nil {
-		components = make(map[string]componentCollector, len(which))
-		for name := range which {
-			if fn, ok := allComponents[name]; ok {
-				components[name] = fn
+		for _, sp := range allSpecs {
+			if which[sp.name] {
+				specs = append(specs, sp)
 			}
 		}
+	} else {
+		specs = allSpecs
 	}
-	return runComponents(ctx, &s.componentHealth, components, 500)
+	return runComponents(ctx, &s.componentHealth, agentID, specs)
 }
 
 // appendDebugIfBudget writes the _debug section if there's budget remaining.
 func appendDebugIfBudget(b *strings.Builder, debugResults []componentResult, budget int) {
-	if debugInfo := buildDebugSection(debugResults); debugInfo != nil {
+	if md := buildDebugMarkdown(debugResults); md != "" {
 		if budgetLeft(b, budget) > 50 {
-			if raw, err := json.Marshal(debugInfo); err == nil {
-				fmt.Fprintf(b, "\n_debug: %s\n", raw)
-			}
+			fmt.Fprintf(b, "\n%s", md)
 		}
 	}
 }

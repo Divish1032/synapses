@@ -2429,13 +2429,11 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 	}
 	matches := make([]toolMatch, len(results))
 	for i, r := range results {
-		status := "core — always available"
-		if !coreTierTools[r.entry.Name] {
-			if s.IsDeferredTool(r.entry.Name) {
-				status = "promoted — ready to call"
-			} else {
-				status = "available — ready to call"
-			}
+		status := "available — ready to call"
+		if coreTierTools[r.entry.Name] {
+			status = "core — always available"
+		} else if standardTierTools[r.entry.Name] {
+			status = "standard — always available"
 		}
 		m := toolMatch{
 			Name:        r.entry.Name,
@@ -2486,23 +2484,6 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 	}
 	if bestWorkflow != nil && bestWfScore > 0 {
 		resp["recommended_workflow"] = bestWorkflow
-	}
-
-	// B28: promote any matched tools that are currently deferred (not yet
-	// registered at startup due to repo scale) so the agent can call them
-	// immediately after this response. Triggers notifications/tools/list_changed
-	// to all connected clients.
-	matchedNames := make([]string, len(matches))
-	for i, m := range matches {
-		matchedNames[i] = m.Name
-	}
-	if newlyRegistered := s.RegisterDeferredTools(matchedNames); len(newlyRegistered) > 0 {
-		resp["newly_registered"] = newlyRegistered
-		resp["registration_hint"] = fmt.Sprintf(
-			"%d tool(s) newly registered: %v. They are now available in this session. "+
-				"If using Claude Code: reconnect the MCP client to see them in the tool list "+
-				"(known issue: github.com/anthropics/claude-code/issues/4118).",
-			len(newlyRegistered), newlyRegistered)
 	}
 
 	return jsonResult(resp)
@@ -3267,6 +3248,10 @@ func (s *Server) handleGetWorkingState(
 			if len(seenFiles) > limit {
 				break
 			}
+			// FindByFile uses suffix matching: strings.HasSuffix(n.File, "/"+filePath).
+			// Graph stores absolute paths; watcher ChangeEvent.File is repo-relative.
+			// Suffix match correctly bridges this: "/repo/internal/auth.go" has suffix
+			// "/internal/auth.go". Tested in TestEntityImpact_RelativePathMatchesAbsoluteGraph.
 			nodes := s.graph.FindByFile(ev.File)
 			for _, n := range nodes {
 				fanin := s.graph.Fanin(n.ID)
@@ -3369,9 +3354,11 @@ func (s *Server) handleSessionInit(
 	quickMode  := scope == "quick"
 	resumeMode := scope == "resume"
 	s.upsertAgentIfNeeded(agentID)
-	// Phase 6: reset component health tracker on new session so auto-disabled
-	// components get a fresh chance.
-	s.componentHealth.reset()
+	// Phase 6: reset component health tracker for this agent on new session
+	// so auto-disabled components get a fresh chance. Per-agent scoped.
+	if agentID != "" {
+		s.componentHealth.reset(agentID)
+	}
 	// B29: Store declared intent so peers can see what this agent is working on.
 	if agentID != "" && intent != "" && s.store != nil {
 		s.upsertAgentWithActivity(agentID, &store.AgentActivity{Intent: intent})
@@ -3814,11 +3801,11 @@ func (s *Server) handleSessionInit(
 	// auto-promote them so MCP clients see them in the tool list immediately.
 	// Zero tokens when no intent is declared.
 	if intent != "" {
-		if suggestions := s.SuggestAndPromoteTools(intent); len(suggestions) > 0 {
+		if suggestions := s.SuggestToolsForIntent(intent); len(suggestions) > 0 {
 			resp["suggested_tools"] = map[string]interface{}{
 				"for_intent": intent,
-				"promoted":   suggestions,
-				"note":       "These tools are now available. Call discover_tools(query='...') to find others.",
+				"tools":      suggestions,
+				"note":       "These tools are recommended for your intent. Call discover_tools(query='...') to find others.",
 			}
 		}
 	}

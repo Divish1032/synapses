@@ -1,6 +1,9 @@
 package mcp
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // ToolSuggestion is returned in session_init's suggested_tools section.
 // It recommends a tool the agent may want to use based on their declared intent.
@@ -76,31 +79,54 @@ var intentKeywords = map[string][]ToolSuggestion{
 	},
 }
 
-// stemMatch returns true if word and keyword share a common prefix of at
-// least 4 characters. This catches inflected forms: "implementing"→"implement",
-// "exploring"→"explore", "debugging"→"debug". The 4-char minimum prevents
-// false positives from short words like "add"→"address".
-func stemMatch(word, keyword string) bool {
-	minLen := len(word)
-	if len(keyword) < minLen {
-		minLen = len(keyword)
+// intentKeywordKeys is a sorted slice of intentKeywords map keys.
+// Deterministic iteration order guarantees reproducible suggestion output.
+var intentKeywordKeys []string
+
+func init() {
+	intentKeywordKeys = make([]string, 0, len(intentKeywords))
+	for k := range intentKeywords {
+		intentKeywordKeys = append(intentKeywordKeys, k)
 	}
-	if minLen < 4 {
-		return false
+	sort.Strings(intentKeywordKeys)
+}
+
+// stripSuffix removes common English verb inflection suffixes to normalize
+// an inflected word back to (approximately) its base form. Handles:
+//
+//	implementing→implement, debugging→debug, reviewed→review,
+//	exploring→explor, investigated→investigat, refactoring→refactor
+//
+// Not a full Porter stemmer — just the suffixes needed for intent matching.
+// Minimum 3-char stem to avoid stripping too aggressively on short words.
+func stripSuffix(word string) string {
+	// Ordered longest-first so "ation" matches before "tion" before "ion".
+	suffixes := []string{
+		"ation", "tion", "sion",
+		"ment", "ness", "ious", "eous", "ous",
+		"ize", "ise", "ful",
+		"ing", "ely", "ly",
+		"ed", "er",
 	}
-	// Find common prefix length.
-	common := 0
-	for i := 0; i < minLen; i++ {
-		if word[i] != keyword[i] {
-			break
+	for _, sfx := range suffixes {
+		if strings.HasSuffix(word, sfx) && len(word)-len(sfx) >= 3 {
+			stem := word[:len(word)-len(sfx)]
+			// Handle doubled consonant from suffix removal:
+			// "debugging"→"debugg"→"debug", "debugger"→"debugg"→"debug",
+			// "planned"→"plann"→"plan", "planning"→"plann"→"plan"
+			if (sfx == "ing" || sfx == "er" || sfx == "ed") &&
+				len(stem) >= 2 && stem[len(stem)-1] == stem[len(stem)-2] {
+				stem = stem[:len(stem)-1]
+			}
+			return stem
 		}
-		common++
 	}
-	return common >= 4
+	return word
 }
 
 // suggestToolsForIntent parses the intent string for keywords and returns
 // matching tool suggestions. Deduplicates by tool name. Max 5 suggestions.
+// Uses deterministic iteration order for reproducible output.
 func suggestToolsForIntent(intent string) []ToolSuggestion {
 	if intent == "" {
 		return nil
@@ -112,6 +138,7 @@ func suggestToolsForIntent(intent string) []ToolSuggestion {
 	seen := make(map[string]bool)
 	var result []ToolSuggestion
 
+	// Pass 1: exact word match against keyword map (O(1) lookups, deterministic).
 	for _, word := range words {
 		suggestions, ok := intentKeywords[word]
 		if !ok {
@@ -129,19 +156,29 @@ func suggestToolsForIntent(intent string) []ToolSuggestion {
 		}
 	}
 
-	// Also check for stem matching — "implementing" shares stem "implement" with
-	// keyword "implement", "exploring" shares stem "explor" with keyword "explore".
-	// Uses a ≥4 char common prefix to avoid short-word false positives.
+	// Pass 2: stem matching — strip suffixes from intent words, then match.
+	// Uses sorted keys for deterministic iteration order.
 	if len(result) < 5 {
-		for keyword, suggestions := range intentKeywords {
+		for _, keyword := range intentKeywordKeys {
+			suggestions := intentKeywords[keyword]
 			matched := false
 			for _, w := range words {
 				if w == keyword {
-					// Already handled in exact match above — skip to avoid double-counting.
+					// Already handled in exact-match pass above.
 					matched = false
 					break
 				}
-				if stemMatch(w, keyword) {
+				stemW := stripSuffix(w)
+				if stemW == keyword {
+					matched = true
+					break
+				}
+				// Handle partial stem matches: "explor" (from "exploring") vs "explore".
+				shorter, longer := stemW, keyword
+				if len(shorter) > len(longer) {
+					shorter, longer = longer, shorter
+				}
+				if len(shorter) >= 4 && strings.HasPrefix(longer, shorter) {
 					matched = true
 					break
 				}
