@@ -17,6 +17,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/embed"
+	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/skills"
@@ -87,7 +88,8 @@ type Server struct {
 	config       *config.Config
 	store        *store.Store  // nil if started without a persistent store
 	changeSource ChangeSource  // nil if started without a file watcher
-	peerManager  interface{}   // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
+	peerManager         interface{}            // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
+	federationResolver  *federation.Resolver   // nil if no federation configured — set via SetFederationResolver
 	brainClient  interface{}   // *brain.Client — set via SetBrainClient; nil if brain not configured
 	webCache     *webcache.Cache // nil if webcache not configured
 	pulseClient  interface{}    // *pulse.Client — set via SetPulseClient; nil if pulse not configured
@@ -515,6 +517,15 @@ func (s *Server) SetChangeSource(cs ChangeSource) {
 // Using interface{} avoids an import cycle (peer imports graph/store but not mcp).
 func (s *Server) SetPeerManager(pm interface{}) {
 	s.peerManager = pm
+}
+
+// SetFederationResolver wires a federation.Resolver into the server for
+// cross-project dependency tracking and drift detection. When set,
+// session_init includes federation health and drift alerts, prepare_context
+// enriches responses with cross-project dependency data.
+// Pass nil to disable federation features.
+func (s *Server) SetFederationResolver(fr *federation.Resolver) {
+	s.federationResolver = fr
 }
 
 // SetBrainClient wires a *brain.Client into the server so that get_context
