@@ -35,15 +35,16 @@ type EntryStatus struct {
 
 // DriftAlert represents a cross-project dependency whose sibling entity changed.
 type DriftAlert struct {
-	Project     string   `json:"project"`      // federation alias
-	Entity      string   `json:"entity"`       // entity name in sibling
-	File        string   `json:"file"`         // file in sibling
-	Change      string   `json:"change"`       // "signature_changed" | "removed" | "file_deleted"
-	Severity    string   `json:"severity"`     // "breaking" | "info"
-	DiffSummary string   `json:"diff_summary"` // human-readable change description
-	YourCallers []string `json:"your_callers"` // local entities that depend on this
-	OldCommit   string   `json:"old_commit"`   // commit when dep was verified
-	NewCommit   string   `json:"new_commit"`   // sibling's current HEAD
+	Project      string   `json:"project"`       // federation alias
+	Entity       string   `json:"entity"`        // entity name in sibling
+	File         string   `json:"file"`          // file in sibling
+	Change       string   `json:"change"`        // "signature_changed" | "removed" | "file_deleted"
+	Severity     string   `json:"severity"`      // "breaking" | "info"
+	DiffSummary  string   `json:"diff_summary"`  // human-readable change description
+	YourCallers  []string `json:"your_callers"`  // which local entities depend on this
+	OldCommit    string   `json:"old_commit"`    // commit when dep was verified
+	NewCommit    string   `json:"new_commit"`    // sibling's current HEAD
+	LastVerified string   `json:"last_verified"` // RFC3339 timestamp of last verification
 }
 
 // CrossProjectDepStatus is used in prepare_context enrichment.
@@ -444,7 +445,8 @@ func (r *Resolver) checkDriftForEntry(ctx context.Context, e config.FederationEn
 		groupAlerts := r.checkDriftForCommitGroup(ctx, e, oldCommit, currentHead, groupDeps, localStore)
 		alerts = append(alerts, groupAlerts...)
 	}
-	return alerts
+	// Merge alerts for the same entity — combine YourCallers into one alert.
+	return mergeAlerts(alerts)
 }
 
 // checkDriftForCommitGroup checks a group of deps that share the same verified_commit.
@@ -496,20 +498,23 @@ func (r *Resolver) checkDriftForCommitGroup(
 		// Entity signature was touched — check if it still exists.
 		if !entityExistsInFile(ctx, e.Path, dep.ToFile, dep.ToEntity) {
 			alerts = append(alerts, buildAlert(dep, e.Alias, "removed", "breaking",
-				"Entity removed from "+dep.ToFile, oldCommit, newCommit, localStore))
+				"Entity removed from "+dep.ToFile, oldCommit, newCommit))
 			continue
 		}
 
 		// Signature changed but entity still exists.
 		summary := extractDiffSummary(diff, dep.ToEntity)
 		alerts = append(alerts, buildAlert(dep, e.Alias, "signature_changed", "breaking",
-			summary, oldCommit, newCommit, localStore))
+			summary, oldCommit, newCommit))
 	}
 	return alerts
 }
 
 // checkDriftFallback uses direct signature comparison when git is unavailable.
-// Less precise (catches formatting changes) but functional.
+// Compares the stored verified_signature against the current sibling store
+// signature. Less precise than git diff (catches formatting changes) but
+// functional. If verified_signature is empty (legacy dep without stored
+// signature), only removal is detectable.
 func (r *Resolver) checkDriftFallback(ctx context.Context, alias string, deps []store.CrossProjectDep) []DriftAlert {
 	st := r.getStore(alias)
 	if st == nil {
@@ -522,58 +527,110 @@ func (r *Resolver) checkDriftFallback(ctx context.Context, alias string, deps []
 			break
 		}
 
-		// Look up the entity in the sibling store.
 		results, err := st.FindNodesByNameCtx(ctx, dep.ToEntity, 1)
 		if err != nil {
 			continue // fail-open
 		}
 
 		if len(results) == 0 {
-			// Entity no longer exists in sibling.
 			alerts = append(alerts, DriftAlert{
-				Project:     alias,
-				Entity:      dep.ToEntity,
-				File:        dep.ToFile,
-				Change:      "removed",
-				Severity:    "breaking",
-				DiffSummary: "Entity not found in sibling store (fallback check)",
-				YourCallers: findLocalCallers(dep.FromEntity),
-				OldCommit:   dep.VerifiedCommit,
+				Project:      alias,
+				Entity:       dep.ToEntity,
+				File:         dep.ToFile,
+				Change:       "removed",
+				Severity:     "breaking",
+				DiffSummary:  "Entity not found in sibling store (fallback check)",
+				YourCallers:  []string{dep.FromEntity},
+				OldCommit:    dep.VerifiedCommit,
+				LastVerified: dep.VerifiedAt,
 			})
 			continue
 		}
 
-		// Compare signatures — if different, it drifted.
-		// We don't have the old signature stored, so any difference from
-		// what was expected is flagged. This is the less-precise fallback.
-		// In practice, this path only fires when git is unavailable.
+		// Compare stored signature against current signature.
+		if dep.VerifiedSignature != "" && results[0].Signature != dep.VerifiedSignature {
+			alerts = append(alerts, DriftAlert{
+				Project:      alias,
+				Entity:       dep.ToEntity,
+				File:         dep.ToFile,
+				Change:       "signature_changed",
+				Severity:     "breaking",
+				DiffSummary:  fmt.Sprintf("Signature changed (fallback): %s → %s", truncate(dep.VerifiedSignature, 60), truncate(results[0].Signature, 60)),
+				YourCallers:  []string{dep.FromEntity},
+				OldCommit:    dep.VerifiedCommit,
+				LastVerified: dep.VerifiedAt,
+			})
+			continue
+		}
+
+		// Signature matches or no stored signature → no drift detectable.
 	}
-	return alerts
+	return mergeAlerts(alerts)
 }
 
-// buildAlert constructs a DriftAlert and looks up local callers.
-func buildAlert(dep store.CrossProjectDep, alias, change, severity, summary, oldCommit, newCommit string, localStore *store.Store) DriftAlert {
+// buildAlert constructs a DriftAlert with local callers and verification timestamp.
+func buildAlert(dep store.CrossProjectDep, alias, change, severity, summary, oldCommit, newCommit string) DriftAlert {
 	return DriftAlert{
-		Project:     alias,
-		Entity:      dep.ToEntity,
-		File:        dep.ToFile,
-		Change:      change,
-		Severity:    severity,
-		DiffSummary: summary,
-		YourCallers: findLocalCallers(dep.FromEntity),
-		OldCommit:   oldCommit,
-		NewCommit:   newCommit,
+		Project:      alias,
+		Entity:       dep.ToEntity,
+		File:         dep.ToFile,
+		Change:       change,
+		Severity:     severity,
+		DiffSummary:  summary,
+		YourCallers:  []string{dep.FromEntity},
+		OldCommit:    oldCommit,
+		NewCommit:    newCommit,
+		LastVerified: dep.VerifiedAt,
 	}
 }
 
-// findLocalCallers returns the local entities that depend on a cross-project entity.
-// For now, returns the from_entity as a single-element list. Phase 3 will
-// expand this to find all local callers via the graph.
-func findLocalCallers(fromEntity string) []string {
-	if fromEntity == "" {
-		return nil
+// mergeAlerts deduplicates alerts for the same (entity, file) by combining
+// their YourCallers lists. This handles the case where multiple local
+// entities depend on the same sibling entity — one alert with all callers
+// instead of N alerts with one caller each.
+func mergeAlerts(alerts []DriftAlert) []DriftAlert {
+	if len(alerts) <= 1 {
+		return alerts
 	}
-	return []string{fromEntity}
+
+	type key struct{ entity, file string }
+	merged := make(map[key]*DriftAlert, len(alerts))
+	order := make([]key, 0, len(alerts))
+
+	for i := range alerts {
+		k := key{alerts[i].Entity, alerts[i].File}
+		if existing, ok := merged[k]; ok {
+			existing.YourCallers = append(existing.YourCallers, alerts[i].YourCallers...)
+		} else {
+			a := alerts[i] // copy
+			merged[k] = &a
+			order = append(order, k)
+		}
+	}
+
+	result := make([]DriftAlert, 0, len(merged))
+	for _, k := range order {
+		a := merged[k]
+		a.YourCallers = dedupStrings(a.YourCallers)
+		result = append(result, *a)
+	}
+	return result
+}
+
+// dedupStrings removes duplicate strings from a slice, preserving order.
+func dedupStrings(ss []string) []string {
+	if len(ss) <= 1 {
+		return ss
+	}
+	seen := make(map[string]bool, len(ss))
+	result := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if !seen[s] {
+			seen[s] = true
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 // extractDiffSummary produces a brief human-readable summary of what changed

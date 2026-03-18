@@ -703,6 +703,132 @@ func TestCheckDrift_CachedResults(t *testing.T) {
 	}
 }
 
+func TestCheckDrift_SignatureChanged_HasLastVerified(t *testing.T) {
+	sibDir := t.TempDir()
+	oldHead := initGitRepoExt(t, sibDir, map[string]string{
+		"pkg/auth.go": "package auth\nfunc Validate(token string) bool { return true }",
+	})
+	commitChangeExt(t, sibDir, "pkg/auth.go",
+		"package auth\nfunc Validate(token string, opts ...Option) bool { return true }",
+		"change validate")
+	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+
+	localStore := openTestStore(t)
+	verifiedAt := "2026-03-18T10:00:00Z"
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sibling",
+		ToEntity: "Validate", ToFile: "pkg/auth.go",
+		VerifiedCommit: oldHead, VerifiedAt: verifiedAt, DetectionTier: "tier1",
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), localStore)
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(alerts))
+	}
+	if alerts[0].LastVerified != verifiedAt {
+		t.Errorf("expected LastVerified %q, got %q", verifiedAt, alerts[0].LastVerified)
+	}
+}
+
+func TestCheckDrift_MultipleCallers_MergedIntoOneAlert(t *testing.T) {
+	sibDir := t.TempDir()
+	oldHead := initGitRepoExt(t, sibDir, map[string]string{
+		"pkg/auth.go": "package auth\nfunc Validate(token string) bool { return true }",
+	})
+	commitChangeExt(t, sibDir, "pkg/auth.go",
+		"package auth\nfunc Validate(token string, opts ...Option) bool { return true }",
+		"change validate")
+	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	// 3 local entities depend on the same sibling entity.
+	for _, caller := range []string{"local::a.go::HandlerA", "local::b.go::HandlerB", "local::c.go::HandlerC"} {
+		localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+			FromEntity: caller, ToProject: "sibling",
+			ToEntity: "Validate", ToFile: "pkg/auth.go",
+			VerifiedCommit: oldHead, VerifiedAt: now, DetectionTier: "tier1",
+		})
+	}
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), localStore)
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 merged alert, got %d: %+v", len(alerts), alerts)
+	}
+	if len(alerts[0].YourCallers) != 3 {
+		t.Errorf("expected 3 callers merged, got %d: %v", len(alerts[0].YourCallers), alerts[0].YourCallers)
+	}
+}
+
+func TestCheckDrift_FallbackSignatureChanged(t *testing.T) {
+	// Non-git dir — forces fallback path.
+	sibDir := t.TempDir()
+	// Create sibling store with a node whose signature differs from verified.
+	nodes := []*graph.Node{
+		{ID: graph.NodeID("sib::pkg/auth.go::Validate"), Name: "Validate",
+			Type: graph.NodeFunction, File: "pkg/auth.go", Line: 1, Exported: true,
+			Metadata: map[string]string{"signature": "func Validate(token string, opts ...Option) bool"}},
+	}
+	createSiblingWithDefaultPath(t, sibDir, "sib", nodes)
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sib",
+		ToEntity: "Validate", ToFile: "pkg/auth.go",
+		VerifiedCommit: "oldcommit", VerifiedAt: now, DetectionTier: "tier1",
+		VerifiedSignature: "func Validate(token string) bool", // old signature
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sib"}})
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), localStore)
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 fallback alert, got %d: %+v", len(alerts), alerts)
+	}
+	if alerts[0].Change != "signature_changed" {
+		t.Errorf("expected signature_changed, got %q", alerts[0].Change)
+	}
+	if alerts[0].DiffSummary == "" {
+		t.Error("expected non-empty DiffSummary in fallback alert")
+	}
+}
+
+func TestCheckDrift_FallbackNoStoredSignature_NoAlert(t *testing.T) {
+	// Non-git dir with empty verified_signature — can't detect changes.
+	sibDir := t.TempDir()
+	nodes := []*graph.Node{
+		{ID: graph.NodeID("sib::pkg/auth.go::Validate"), Name: "Validate",
+			Type: graph.NodeFunction, File: "pkg/auth.go", Line: 1, Exported: true,
+			Metadata: map[string]string{"signature": "func Validate(token string, opts ...Option) bool"}},
+	}
+	createSiblingWithDefaultPath(t, sibDir, "sib", nodes)
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sib",
+		ToEntity: "Validate", ToFile: "pkg/auth.go",
+		VerifiedCommit: "oldcommit", VerifiedAt: now, DetectionTier: "tier1",
+		VerifiedSignature: "", // no stored signature — legacy dep
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sib"}})
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), localStore)
+	if len(alerts) != 0 {
+		t.Errorf("expected 0 alerts (no stored sig), got %d: %+v", len(alerts), alerts)
+	}
+}
+
 // ── drift test helpers ──────────────────────────────────────────────────────
 
 func initGitRepoExt(t *testing.T, dir string, files map[string]string) string {

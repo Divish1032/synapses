@@ -481,13 +481,14 @@ END;
 -- federation tracker (Tier 1: deterministic, Tier 2: brain LLM).
 -- Used by session_init for git-based drift detection.
 CREATE TABLE IF NOT EXISTS cross_project_deps (
-    from_entity     TEXT NOT NULL,
-    to_project      TEXT NOT NULL,
-    to_entity       TEXT NOT NULL,
-    to_file         TEXT NOT NULL,
-    verified_commit TEXT NOT NULL,
-    verified_at     TEXT NOT NULL,
-    detection_tier  TEXT NOT NULL DEFAULT 'tier1',
+    from_entity          TEXT NOT NULL,
+    to_project           TEXT NOT NULL,
+    to_entity            TEXT NOT NULL,
+    to_file              TEXT NOT NULL,
+    verified_commit      TEXT NOT NULL,
+    verified_at          TEXT NOT NULL,
+    detection_tier       TEXT NOT NULL DEFAULT 'tier1',
+    verified_signature   TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (from_entity, to_project, to_entity)
 );
 CREATE INDEX IF NOT EXISTS idx_cross_deps_project ON cross_project_deps(to_project);
@@ -768,17 +769,20 @@ func Open(path string) (*Store, error) {
 		`CREATE INDEX IF NOT EXISTS idx_session_tasks_task    ON session_tasks(task_id)`,
 		// RX2: Cross-project federation — dependency tracking table.
 		`CREATE TABLE IF NOT EXISTS cross_project_deps (
-			from_entity     TEXT NOT NULL,
-			to_project      TEXT NOT NULL,
-			to_entity       TEXT NOT NULL,
-			to_file         TEXT NOT NULL,
-			verified_commit TEXT NOT NULL,
-			verified_at     TEXT NOT NULL,
-			detection_tier  TEXT NOT NULL DEFAULT 'tier1',
+			from_entity          TEXT NOT NULL,
+			to_project           TEXT NOT NULL,
+			to_entity            TEXT NOT NULL,
+			to_file              TEXT NOT NULL,
+			verified_commit      TEXT NOT NULL,
+			verified_at          TEXT NOT NULL,
+			detection_tier       TEXT NOT NULL DEFAULT 'tier1',
+			verified_signature   TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (from_entity, to_project, to_entity)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_cross_deps_project ON cross_project_deps(to_project)`,
 		`CREATE INDEX IF NOT EXISTS idx_cross_deps_file    ON cross_project_deps(to_project, to_file)`,
+		// RX2 Phase 2: store entity signature at verification time for fallback comparison.
+		`ALTER TABLE cross_project_deps ADD COLUMN verified_signature TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
 			db.Close()
@@ -967,20 +971,30 @@ func (s *Store) FindNodesByNameCtx(ctx context.Context, name string, limit int) 
 
 // CrossProjectDep represents a stored dependency on an entity in a sibling project.
 type CrossProjectDep struct {
-	FromEntity    string `json:"from_entity"`
-	ToProject     string `json:"to_project"`
-	ToEntity      string `json:"to_entity"`
-	ToFile        string `json:"to_file"`
-	VerifiedCommit string `json:"verified_commit"`
-	VerifiedAt    string `json:"verified_at"`
-	DetectionTier string `json:"detection_tier"`
+	FromEntity        string `json:"from_entity"`
+	ToProject         string `json:"to_project"`
+	ToEntity          string `json:"to_entity"`
+	ToFile            string `json:"to_file"`
+	VerifiedCommit    string `json:"verified_commit"`
+	VerifiedAt        string `json:"verified_at"`
+	DetectionTier     string `json:"detection_tier"`
+	VerifiedSignature string `json:"verified_signature"` // entity signature at verification time; used for fallback comparison
+}
+
+// crossDepCols is the column list for cross_project_deps queries.
+const crossDepCols = `from_entity, to_project, to_entity, to_file, verified_commit, verified_at, detection_tier, verified_signature`
+
+func scanCrossDep(scanner interface{ Scan(...interface{}) error }) (CrossProjectDep, error) {
+	var d CrossProjectDep
+	err := scanner.Scan(&d.FromEntity, &d.ToProject, &d.ToEntity, &d.ToFile,
+		&d.VerifiedCommit, &d.VerifiedAt, &d.DetectionTier, &d.VerifiedSignature)
+	return d, err
 }
 
 // GetCrossProjectDeps returns all cross-project dependencies for a local entity.
 func (s *Store) GetCrossProjectDeps(fromEntity string) ([]CrossProjectDep, error) {
 	rows, err := s.db.Query(
-		`SELECT from_entity, to_project, to_entity, to_file, verified_commit, verified_at, detection_tier
-		 FROM cross_project_deps WHERE from_entity = ?`,
+		`SELECT `+crossDepCols+` FROM cross_project_deps WHERE from_entity = ?`,
 		fromEntity,
 	)
 	if err != nil {
@@ -990,8 +1004,8 @@ func (s *Store) GetCrossProjectDeps(fromEntity string) ([]CrossProjectDep, error
 
 	var deps []CrossProjectDep
 	for rows.Next() {
-		var d CrossProjectDep
-		if err := rows.Scan(&d.FromEntity, &d.ToProject, &d.ToEntity, &d.ToFile, &d.VerifiedCommit, &d.VerifiedAt, &d.DetectionTier); err != nil {
+		d, err := scanCrossDep(rows)
+		if err != nil {
 			return nil, err
 		}
 		deps = append(deps, d)
@@ -1002,8 +1016,7 @@ func (s *Store) GetCrossProjectDeps(fromEntity string) ([]CrossProjectDep, error
 // GetCrossProjectDepsByProject returns all deps targeting a specific sibling project.
 func (s *Store) GetCrossProjectDepsByProject(project string) ([]CrossProjectDep, error) {
 	rows, err := s.db.Query(
-		`SELECT from_entity, to_project, to_entity, to_file, verified_commit, verified_at, detection_tier
-		 FROM cross_project_deps WHERE to_project = ?`,
+		`SELECT `+crossDepCols+` FROM cross_project_deps WHERE to_project = ?`,
 		project,
 	)
 	if err != nil {
@@ -1013,8 +1026,8 @@ func (s *Store) GetCrossProjectDepsByProject(project string) ([]CrossProjectDep,
 
 	var deps []CrossProjectDep
 	for rows.Next() {
-		var d CrossProjectDep
-		if err := rows.Scan(&d.FromEntity, &d.ToProject, &d.ToEntity, &d.ToFile, &d.VerifiedCommit, &d.VerifiedAt, &d.DetectionTier); err != nil {
+		d, err := scanCrossDep(rows)
+		if err != nil {
 			return nil, err
 		}
 		deps = append(deps, d)
@@ -1025,11 +1038,11 @@ func (s *Store) GetCrossProjectDepsByProject(project string) ([]CrossProjectDep,
 // UpsertCrossProjectDep inserts or updates a cross-project dependency.
 func (s *Store) UpsertCrossProjectDep(dep CrossProjectDep) error {
 	_, err := s.db.Exec(
-		`INSERT INTO cross_project_deps (from_entity, to_project, to_entity, to_file, verified_commit, verified_at, detection_tier)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO cross_project_deps (from_entity, to_project, to_entity, to_file, verified_commit, verified_at, detection_tier, verified_signature)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (from_entity, to_project, to_entity)
-		 DO UPDATE SET to_file=excluded.to_file, verified_commit=excluded.verified_commit, verified_at=excluded.verified_at, detection_tier=excluded.detection_tier`,
-		dep.FromEntity, dep.ToProject, dep.ToEntity, dep.ToFile, dep.VerifiedCommit, dep.VerifiedAt, dep.DetectionTier,
+		 DO UPDATE SET to_file=excluded.to_file, verified_commit=excluded.verified_commit, verified_at=excluded.verified_at, detection_tier=excluded.detection_tier, verified_signature=excluded.verified_signature`,
+		dep.FromEntity, dep.ToProject, dep.ToEntity, dep.ToFile, dep.VerifiedCommit, dep.VerifiedAt, dep.DetectionTier, dep.VerifiedSignature,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert cross-project dep: %w", err)
