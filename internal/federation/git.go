@@ -118,6 +118,30 @@ func gitCmd(ctx context.Context, repoPath string, args ...string) (string, error
 	return string(out), nil
 }
 
+// gitCommitTime returns the author date of a specific commit as a time.Time.
+// Used to compare against store SavedAt for freshness checks.
+func gitCommitTime(ctx context.Context, repoPath, commitHash string) (time.Time, error) {
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+
+	// %aI = author date, strict ISO 8601 format
+	out, err := gitCmd(ctx, repoPath, "log", "-1", "--format=%aI", commitHash)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("commit time for %s: %w", commitHash[:min(8, len(commitHash))], err)
+	}
+
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" {
+		return time.Time{}, fmt.Errorf("empty output for commit %s", commitHash[:min(8, len(commitHash))])
+	}
+
+	t, err := time.Parse(time.RFC3339, trimmed)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse commit time %q: %w", trimmed, err)
+	}
+	return t, nil
+}
+
 // ── Pattern cache ───────────────────────────────────────────────────────────
 
 // patternCache caches compiled regex patterns per entity name. Patterns are

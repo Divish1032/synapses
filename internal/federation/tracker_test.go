@@ -706,4 +706,144 @@ func TestLangFromExt(t *testing.T) {
 	}
 }
 
+// ── Blank import tests (Gap 2) ──────────────────────────────────────────────
+
+func TestDetectDeps_Go_BlankImport_Skipped(t *testing.T) {
+	sibDir := t.TempDir()
+	writeFile(t, filepath.Join(sibDir, "go.mod"), "module github.com/user/sibling\n\ngo 1.21\n")
+	createSiblingWithDefaultPath(t, sibDir, "sib",
+		sampleNodeWithSig("sib", "Driver", "pkg/driver/driver.go", "func Driver() *D"))
+
+	localDir := t.TempDir()
+	goFile := filepath.Join(localDir, "handler.go")
+	// Blank import — should NOT trigger entity scanning.
+	writeFile(t, goFile, `package main
+
+import (
+	_ "github.com/user/sibling/pkg/driver"
+)
+
+func Handle() {
+	// This mentions driver.Driver but it's a blank import — no refs.
+}
+`)
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sib"}})
+	defer r.Close()
+	d := federation.NewDeterministicDetector(
+		[]config.FederationEntry{{Path: sibDir, Alias: "sib"}}, r,
+	)
+
+	deps := d.DetectDeps(bg(), goFile, nil)
+	if len(deps) != 0 {
+		t.Errorf("expected 0 deps (blank import should be skipped), got %d: %+v", len(deps), deps)
+	}
+}
+
+// ── Comment/string false positive tests (Gap 3) ─────────────────────────────
+
+func TestDetectDeps_Go_CommentReference_NotDetected(t *testing.T) {
+	sibDir := t.TempDir()
+	writeFile(t, filepath.Join(sibDir, "go.mod"), "module github.com/user/sibling\n\ngo 1.21\n")
+	// Only AuthService exists in sibling store (not Validate).
+	createSiblingWithDefaultPath(t, sibDir, "sib",
+		sampleNodeWithSig("sib", "AuthService", "pkg/auth/service.go", "func AuthService() *Service"))
+
+	localDir := t.TempDir()
+	goFile := filepath.Join(localDir, "handler.go")
+	// auth.AuthService is used in code → should be detected.
+	// auth.Validate is only in a comment → should NOT be detected.
+	// auth.Login is only in a string → should NOT be detected.
+	writeFile(t, goFile, `package main
+
+import "github.com/user/sibling/pkg/auth"
+
+// TODO: also fix auth.AuthService for timeouts
+func Handle() {
+	svc := auth.AuthService()
+	_ = svc
+	// auth.Validate needs to handle edge cases
+	msg := "auth.Login failed"
+	_ = msg
+}
+`)
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sib"}})
+	defer r.Close()
+	d := federation.NewDeterministicDetector(
+		[]config.FederationEntry{{Path: sibDir, Alias: "sib"}}, r,
+	)
+
+	deps := d.DetectDeps(bg(), goFile, nil)
+	// AuthService should be detected (from code usage on line 7).
+	// Validate and Login should NOT be detected (only in comments/strings,
+	// and Validate isn't in the sibling store anyway).
+	if len(deps) != 1 {
+		t.Fatalf("expected 1 dep, got %d: %+v", len(deps), deps)
+	}
+	if deps[0].ToEntity != "AuthService" {
+		t.Errorf("expected AuthService, got %q", deps[0].ToEntity)
+	}
+}
+
+func TestStripGoCommentsAndStrings(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(string) bool // returns true if output is correct
+	}{
+		{
+			name:  "line comment stripped",
+			input: `x := auth.Validate("t") // auth.Login here`,
+			check: func(s string) bool { return !containsIdent(s, "Login") && containsIdent(s, "Validate") },
+		},
+		{
+			name:  "block comment stripped",
+			input: `x := 1 /* auth.Validate */`,
+			check: func(s string) bool { return !containsIdent(s, "Validate") },
+		},
+		{
+			name:  "string literal stripped",
+			input: `msg := "auth.Validate failed"`,
+			check: func(s string) bool { return !containsIdent(s, "Validate") },
+		},
+		{
+			name:  "raw string stripped",
+			input: "msg := `auth.Validate`",
+			check: func(s string) bool { return !containsIdent(s, "Validate") },
+		},
+		{
+			name:  "code preserved",
+			input: `auth.Validate("token")`,
+			check: func(s string) bool { return containsIdent(s, "Validate") },
+		},
+		{
+			name:  "escaped quote in string",
+			input: `msg := "auth.\"Validate\""`,
+			check: func(s string) bool { return !containsIdent(s, "Validate") },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := federation.StripGoCommentsAndStrings(tt.input)
+			if !tt.check(result) {
+				t.Errorf("check failed for input %q → output %q", tt.input, result)
+			}
+		})
+	}
+}
+
+func containsIdent(s, ident string) bool {
+	return len(s) > 0 && len(ident) > 0 && contains(s, ident)
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 // openTestStore is defined in resolver_test.go — shared across test files.

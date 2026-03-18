@@ -530,8 +530,12 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// RX2 Phase 3: detect cross-project dependencies in the changed file.
 	// Runs after parsing so sibling entity resolution has fresh graph data.
 	// Fail-open: errors logged inside tracker, never blocks the watcher.
+	// 2-second timeout ensures federation work never blocks the watcher loop
+	// (sibling stores use SQLite with 5s busy_timeout; 2s caps our exposure).
 	if w.cpTracker != nil && w.store != nil {
-		w.cpTracker.DetectAndStore(context.Background(), path, w.store)
+		cpCtx, cpCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		w.cpTracker.DetectAndStore(cpCtx, path, w.store)
+		cpCancel()
 	}
 
 	// Cross-project reactive propagation: if any linked-project node depends on
