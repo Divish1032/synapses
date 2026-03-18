@@ -1115,6 +1115,9 @@ func (s *Server) registerTools() {
 				mcp.Required(),
 				mcp.Description("File path or suffix, e.g. 'internal/store/tasks.go' or 'tasks.go'."),
 			),
+			mcp.WithNumber("token_budget",
+				mcp.Description("Max response size in tokens (default 4000). When exceeded, entities are dropped from the bottom of the file (highest line numbers first). Response includes truncated=true and total_entities=N when trimmed."),
+			),
 		),
 		s.handleGetFileContext,
 	)

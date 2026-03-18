@@ -2581,6 +2581,11 @@ func (s *Server) handleGetFileContext(
 		fileSet[n.File] = struct{}{}
 	}
 
+	fileTokenBudget := 4000
+	if tb, ok := req.GetArguments()["token_budget"].(float64); ok && tb > 0 {
+		fileTokenBudget = int(tb)
+	}
+
 	agentIDFC, _ := req.GetArguments()["agent_id"].(string)
 	if agentIDFC == "" {
 		agentIDFC = s.getLastAgent()
@@ -2597,11 +2602,30 @@ func (s *Server) handleGetFileContext(
 		for i, n := range matches {
 			out[i] = fileEntity{Type: n.Type, Name: n.Name, Line: n.Line, Exported: n.Exported, Metadata: n.Metadata}
 		}
+		totalEntities := len(out)
+		// IMP-EVAL-10: truncate to token budget by dropping highest-line entities first.
+		truncated := false
+		if fileTokenBudget > 0 {
+			// Estimate: each entity averages ~100 chars of JSON ≈ 25 tokens.
+			// Binary-search approach: keep dropping from the end until within budget.
+			for len(out) > 0 {
+				raw, err := json.Marshal(out)
+				if err != nil || len(raw) <= fileTokenBudget*4 {
+					break
+				}
+				out = out[:len(out)-1]
+				truncated = true
+			}
+		}
 		payload := map[string]interface{}{
 			"file":     strings.TrimPrefix(matches[0].File, prefix),
 			"package":  matches[0].Package,
 			"count":    len(out),
 			"entities": out,
+		}
+		if truncated {
+			payload["truncated"] = true
+			payload["total_entities"] = totalEntities
 		}
 		s.emitFileContextDelivery(agentIDFC, filePath, matches, payload, time.Since(handlerStart).Milliseconds())
 		return jsonResult(payload)

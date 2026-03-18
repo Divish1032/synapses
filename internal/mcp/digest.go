@@ -163,6 +163,28 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		b.WriteString("Called by: (none)\n")
 	}
 
+	// IMP-IMPL-2: For struct nodes, list field names and types from metadata.
+	// Fields are stored as "Name type,Name type,..." by the Go parser.
+	if dc.Root.Type == graph.NodeStruct {
+		if fieldMeta, ok := dc.Root.Metadata["fields"]; ok && fieldMeta != "" {
+			parts := strings.Split(fieldMeta, ",")
+			b.WriteString("Fields:")
+			total := 0
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if p == "" {
+					continue
+				}
+				fmt.Fprintf(&b, "\n  %s", p)
+				total++
+			}
+			if total == 15 && len(parts) > 15 {
+				fmt.Fprintf(&b, "\n  ... and more")
+			}
+			b.WriteString("\n")
+		}
+	}
+
 	// DIAG-3: caller-count confidence warning.
 	if dc.CallerCountWarning != "" {
 		fmt.Fprintf(&b, "%s\n", dc.CallerCountWarning)
