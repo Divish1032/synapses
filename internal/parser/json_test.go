@@ -652,6 +652,177 @@ func TestJSONParser_CustomSchemaJson(t *testing.T) {
 	}
 }
 
+// ─── Edge cases and error handling ──────────────────────────────────────────
+
+func TestJSONParser_NestedPackageJson(t *testing.T) {
+	src := `{
+  "name": "nested-app",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "^4.18.0",
+    "body-parser": "^1.20.0",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0",
+    "eslint": "^8.0.0",
+    "prettier": "^2.8.0"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "jest",
+    "lint": "eslint src/",
+    "format": "prettier --write src/"
+  }
+}
+`
+	g := parseJsonWithFilename(t, "package.json", src)
+
+	// Verify dependencies are extracted
+	expressNodes := g.FindByName("express")
+	if len(expressNodes) == 0 {
+		t.Fatal("expected express dependency")
+	}
+
+	bodyParserNodes := g.FindByName("body-parser")
+	if len(bodyParserNodes) == 0 {
+		t.Fatal("expected body-parser dependency")
+	}
+
+	// Verify scripts are extracted
+	devNodes := g.FindByName("dev")
+	if len(devNodes) == 0 {
+		t.Fatal("expected dev script")
+	}
+}
+
+func TestJSONParser_TsconfigWithPaths(t *testing.T) {
+	src := `{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@components/*": ["src/components/*"],
+      "@utils/*": ["src/utils/*"]
+    },
+    "target": "ES2020",
+    "module": "ESNext"
+  }
+}
+`
+	g := parseJsonWithFilename(t, "tsconfig.json", src)
+
+	// Verify compiler options are extracted
+	baseUrlNodes := g.FindByName("baseUrl")
+	if len(baseUrlNodes) == 0 {
+		t.Fatal("expected baseUrl compiler option")
+	}
+
+	pathsNodes := g.FindByName("paths")
+	if len(pathsNodes) == 0 {
+		t.Fatal("expected paths compiler option")
+	}
+
+	targetNodes := g.FindByName("target")
+	if len(targetNodes) == 0 {
+		t.Fatal("expected target compiler option")
+	}
+}
+
+func TestJSONParser_SchemaWithReferences(t *testing.T) {
+	src := `{
+  "definitions": {
+    "Person": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "age": {"type": "number"},
+        "address": {"$ref": "#/definitions/Address"}
+      }
+    },
+    "Address": {
+      "type": "object",
+      "properties": {
+        "street": {"type": "string"},
+        "city": {"type": "string"},
+        "country": {"type": "string"}
+      }
+    },
+    "Company": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "employees": {"type": "array", "items": {"$ref": "#/definitions/Person"}}
+      }
+    }
+  },
+  "properties": {
+    "person": {"$ref": "#/definitions/Person"},
+    "company": {"$ref": "#/definitions/Company"}
+  }
+}
+`
+	g := parseJsonWithFilename(t, "api.schema.json", src)
+
+	// Verify all definitions are extracted
+	personNodes := g.FindByName("Person")
+	if len(personNodes) == 0 {
+		t.Fatal("expected Person schema type")
+	}
+
+	addressNodes := g.FindByName("Address")
+	if len(addressNodes) == 0 {
+		t.Fatal("expected Address schema type")
+	}
+
+	companyNodes := g.FindByName("Company")
+	if len(companyNodes) == 0 {
+		t.Fatal("expected Company schema type")
+	}
+
+	// Verify properties are extracted
+	personPropNodes := g.FindByName("person")
+	if len(personPropNodes) == 0 {
+		t.Fatal("expected person property")
+	}
+
+	companyPropNodes := g.FindByName("company")
+	if len(companyPropNodes) == 0 {
+		t.Fatal("expected company property")
+	}
+}
+
+func TestJSONParser_SpecialCharactersInJson(t *testing.T) {
+	src := `{
+  "name": "special-chars",
+  "description": "App with special characters: @, #, $, %, ^, &, *, (, ), -, _, =, +",
+  "dependencies": {
+    "package-with-dash": "^1.0.0",
+    "package.with.dots": "^2.0.0",
+    "package_with_underscore": "^3.0.0"
+  }
+}
+`
+	g := parseJsonWithFilename(t, "package.json", src)
+
+	// Verify dependencies with special characters
+	dashPackageNodes := g.FindByName("package-with-dash")
+	if len(dashPackageNodes) == 0 {
+		t.Fatal("expected package with dash")
+	}
+
+	dotPackageNodes := g.FindByName("package.with.dots")
+	if len(dotPackageNodes) == 0 {
+		t.Fatal("expected package with dots")
+	}
+
+	underscorePackageNodes := g.FindByName("package_with_underscore")
+	if len(underscorePackageNodes) == 0 {
+		t.Fatal("expected package with underscore")
+	}
+}
+
 // ─── Large JSON with many fields ────────────────────────────────────────────
 
 func TestJSONParser_LargePackageJson(t *testing.T) {
