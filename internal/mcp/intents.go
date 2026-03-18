@@ -12,6 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -255,6 +256,7 @@ func (s *Server) handlePrepareContext(
 	target := stringArg(req, "target")
 	fileHint := stringArg(req, "file")
 	taskID := stringArg(req, "task_id")
+	projectsParam := stringArg(req, "projects")
 
 	if target == "" {
 		return mcp.NewToolResultError("target is required"), nil
@@ -271,6 +273,31 @@ func (s *Server) handlePrepareContext(
 	resolved := s.resolveTarget(target, fileHint)
 
 	if resolved.isConcept {
+		// When projects= is specified and local resolution failed, try sibling stores.
+		if projectsParam != "" && s.federationResolver != nil {
+			var aliases []string
+			if projectsParam != "*" {
+				for _, a := range strings.Split(projectsParam, ",") {
+					if a = strings.TrimSpace(a); a != "" {
+						aliases = append(aliases, a)
+					}
+				}
+			}
+			fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
+			fedResults := s.federationResolver.FindEntities(fedCtx, target, aliases, 5)
+			fedCancel()
+			if len(fedResults) > 0 {
+				var sb strings.Builder
+				fmt.Fprintf(&sb, "## Not found locally: %q\n\nFound in sibling projects:\n", target)
+				for _, fr := range fedResults {
+					for _, r := range fr.Results {
+						fmt.Fprintf(&sb, "- [%s] %s::%s\n", fr.Alias, fr.Alias, r.Name)
+					}
+				}
+				sb.WriteString("\nUse get_context(entity=\"Name\", projects=\"alias\") to explore.")
+				return mcp.NewToolResultText(sb.String()), nil
+			}
+		}
 		// No graph match at all — return helpful hint.
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"## No Match: %q\n\nNo entity or file found matching %q.\n"+
@@ -366,18 +393,7 @@ func (s *Server) assembleModifyContext(
 		b.WriteString("No compile-time callers tracked (may be invoked via interface or dispatcher).\n")
 	}
 
-	// Architecture rules.
-	rules := matchRulesForFile(s.config, node.File)
-	b.WriteString("\n## Architecture Rules\n")
-	if len(rules) == 0 {
-		b.WriteString("OK: no rules apply to this file\n")
-	} else {
-		for _, r := range rules {
-			fmt.Fprintf(b, "%s [%s]: %s\n", strings.ToUpper(r.Severity), r.RuleID, r.Description)
-		}
-	}
-
-	// Optional tier 1: Dependencies (callees) — strip first when budget is tight.
+	// Dependencies (callees) — always relevant, write directly.
 	if budgetLeft(b, budget) > 200 && len(dc.Callees) > 0 {
 		names := make([]string, 0, len(dc.Callees))
 		for _, c := range dc.Callees {
@@ -386,17 +402,7 @@ func (s *Server) assembleModifyContext(
 		fmt.Fprintf(b, "\n## Dependencies (callees)\n%s\n", strings.Join(names, " · "))
 	}
 
-	// Optional tier 1: Brain warnings + concerns.
-	if budgetLeft(b, budget) > 150 {
-		writeWarnings(b, pkt)
-	}
-
-	// Optional tier 1: Agent annotations.
-	if budgetLeft(b, budget) > 150 {
-		writeAnnotations(b, dc.Annotations, node.ID)
-	}
-
-	// Optional tier 2: Pre-edit checklist (compact — always fits if we got here).
+	// Pre-edit checklist — always relevant, write directly.
 	if budgetLeft(b, budget) > 80 {
 		b.WriteString("\n## Pre-Edit Checklist\n")
 		callerCount := impact.TotalAffected
@@ -413,9 +419,31 @@ func (s *Server) assembleModifyContext(
 		}
 	}
 
-	// Cross-project enrichment: surface drifted dependencies before the
-	// developer starts modifying this entity.
-	s.enrichCrossProject(ctx, b, string(node.ID), budget)
+	// ── Tiered supplementary sections ────────────────────────────────────
+	// Architecture rules, quality gaps, brain warnings, annotations, and
+	// cross-project deps are all rendered via the tiered visibility system.
+	// Critical items (error-severity violations, high/critical gaps, drifted
+	// deps) are always shown. Relevant items are 1-line summaries within
+	// budget. Available items are a single discover_tools hint.
+	var sections []tieredSection
+	if vs := collectViolationSection(s.config, node.File); vs != nil {
+		sections = append(sections, *vs)
+	}
+	if gs := collectGapSection(s.store, string(node.ID)); gs != nil {
+		sections = append(sections, *gs)
+	}
+	if bs := collectBrainSection(pkt); bs != nil {
+		sections = append(sections, *bs)
+	}
+	if as := collectAnnotationSection(s.store, string(node.ID)); as != nil {
+		sections = append(sections, *as)
+	}
+	sections = append(sections, s.collectCrossProjectSections(ctx, string(node.ID))...)
+	// Available tier: historical failure episodes and full impact analysis.
+	sections = append(sections, tieredSection{
+		Tier: "available", Heading: "Historical failures, full impact analysis",
+	})
+	renderTiered(b, sections, budget)
 }
 
 // assembleUnderstandContext builds the "understand" intent response:
@@ -511,27 +539,7 @@ func (s *Server) assembleReviewContext(
 		fmt.Fprintf(b, "Summary: %s\n", pkt.RootSummary)
 	}
 
-	// Concerns from brain.
-	if pkt != nil && (len(pkt.Concerns) > 0 || len(pkt.GraphWarnings) > 0) {
-		b.WriteString("\n## Concerns\n")
-		for _, c := range pkt.Concerns {
-			fmt.Fprintf(b, "- %s\n", c)
-		}
-		for _, w := range pkt.GraphWarnings {
-			fmt.Fprintf(b, "- %s\n", w)
-		}
-	}
-
-	// Rule violations.
-	rules := matchRulesForFile(s.config, node.File)
-	if len(rules) > 0 {
-		b.WriteString("\n## Violations\n")
-		for _, r := range rules {
-			fmt.Fprintf(b, "%s [%s]: %s\n", strings.ToUpper(r.Severity), r.RuleID, r.Description)
-		}
-	}
-
-	// Coupling metrics.
+	// Coupling metrics — core content, always shown.
 	fanIn := s.graph.Fanin(node.ID)
 	b.WriteString("\n## Coupling\n")
 	fmt.Fprintf(b, "Fan-in (callers): %d | Callees: %d | Related: %d\n",
@@ -542,7 +550,7 @@ func (s *Server) assembleReviewContext(
 		b.WriteString("Test coverage: NO test file found\n")
 	}
 
-	// Blast radius (broad: depth 3) — struct aggregation applied.
+	// Blast radius — core content, always shown.
 	impact := s.aggregatedImpact(node, 3)
 	fmt.Fprintf(b, "\n## Blast Radius (%d total across %d files)\n",
 		impact.TotalAffected, len(impact.AffectedFiles))
@@ -557,18 +565,27 @@ func (s *Server) assembleReviewContext(
 	if len(impact.Tiers) == 0 && fanIn == 0 {
 		b.WriteString("No compile-time callers tracked.\n")
 	}
-
-	// Optional: Agent annotations (strip when budget is tight).
-	if budgetLeft(b, budget) > 150 && s.store != nil {
-		nodeIDs := []string{string(node.ID)}
-		if annMap, annErr := s.store.GetAnnotationsForNodes(nodeIDs); annErr == nil {
-			writeAnnotations(b, annMap, node.ID)
-		}
-	}
 	_ = dc // used for pkt building above
 
-	// Cross-project enrichment: surface drifted dependencies in review.
-	s.enrichCrossProject(ctx, b, string(node.ID), budget)
+	// ── Tiered supplementary sections ────────────────────────────────────
+	var sections []tieredSection
+	if vs := collectViolationSection(s.config, node.File); vs != nil {
+		sections = append(sections, *vs)
+	}
+	if gs := collectGapSection(s.store, string(node.ID)); gs != nil {
+		sections = append(sections, *gs)
+	}
+	if bs := collectBrainSection(pkt); bs != nil {
+		sections = append(sections, *bs)
+	}
+	if as := collectAnnotationSection(s.store, string(node.ID)); as != nil {
+		sections = append(sections, *as)
+	}
+	sections = append(sections, s.collectCrossProjectSections(ctx, string(node.ID))...)
+	sections = append(sections, tieredSection{
+		Tier: "available", Heading: "Historical failures, full peer activity, violation audit log",
+	})
+	renderTiered(b, sections, budget)
 }
 
 // assembleDebugContext builds the "debug" intent response:
@@ -806,15 +823,6 @@ func (s *Server) assemblePlanContext(
 		}
 	}
 
-	// Architecture rules.
-	rules := matchRulesForFile(s.config, node.File)
-	if len(rules) > 0 {
-		b.WriteString("\n## Architecture Rules\n")
-		for _, r := range rules {
-			fmt.Fprintf(b, "- %s: %s\n", r.RuleID, r.Description)
-		}
-	}
-
 	// Scope assessment and risk.
 	b.WriteString("\n## Scope Assessment\n")
 	directCallers := 0
@@ -854,8 +862,19 @@ func (s *Server) assemblePlanContext(
 		}
 	}
 
-	// Cross-project enrichment: surface drifted dependencies in planning.
-	s.enrichCrossProject(ctx, b, string(node.ID), budget)
+	// ── Tiered supplementary sections ────────────────────────────────────
+	var sections []tieredSection
+	if vs := collectViolationSection(s.config, node.File); vs != nil {
+		sections = append(sections, *vs)
+	}
+	if gs := collectGapSection(s.store, string(node.ID)); gs != nil {
+		sections = append(sections, *gs)
+	}
+	sections = append(sections, s.collectCrossProjectSections(ctx, string(node.ID))...)
+	sections = append(sections, tieredSection{
+		Tier: "available", Heading: "Full impact analysis, historical failures",
+	})
+	renderTiered(b, sections, budget)
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,6 +1112,200 @@ func (s *Server) handlePlanContext(
 	}
 
 	return jsonResult(result)
+}
+
+// ── Tiered visibility ────────────────────────────────────────────────────
+// Tiered visibility applies to ALL prepare_context responses, not just
+// federation-enriched ones. Every supplementary section is tagged with a
+// visibility tier:
+//   - critical: always shown, never budget-trimmed
+//   - relevant: 1-line summary within budget, agent decides to explore
+//   - available: single hint line pointing to discover_tools
+//
+// The core BFS context (header + ego-graph) is always rendered first.
+// Tiered sections are rendered after, in priority order.
+
+// tieredSection represents one supplementary section in a prepare_context
+// response, tagged with its visibility tier for budget-aware rendering.
+type tieredSection struct {
+	Tier    string // "critical" | "relevant" | "available"
+	Heading string // section heading (e.g., "⚠ Alerts", "Quality Gaps")
+	Content string // pre-rendered content for this section
+}
+
+// renderTiered writes tiered sections to the builder in priority order:
+// all critical sections first (never trimmed), then relevant sections
+// (within budget), then a single available hint if any sections exist.
+func renderTiered(b *strings.Builder, sections []tieredSection, budget int) {
+	if len(sections) == 0 {
+		return
+	}
+
+	// Critical: always shown, never trimmed.
+	for _, s := range sections {
+		if s.Tier == "critical" {
+			fmt.Fprintf(b, "\n## %s\n%s", s.Heading, s.Content)
+		}
+	}
+
+	// Relevant: 1-line summaries within budget.
+	for _, s := range sections {
+		if s.Tier == "relevant" && budgetLeft(b, budget) > 50 {
+			fmt.Fprintf(b, "\n## %s\n%s", s.Heading, s.Content)
+		}
+	}
+
+	// Available: single hint line if there are any available-tier sections.
+	var availNames []string
+	for _, s := range sections {
+		if s.Tier == "available" {
+			availNames = append(availNames, s.Heading)
+		}
+	}
+	if len(availNames) > 0 && budgetLeft(b, budget) > 30 {
+		fmt.Fprintf(b, "\n## More Available\n- %s → discover_tools(query=\"...\")\n",
+			strings.Join(availNames, ", "))
+	}
+}
+
+// collectViolationSection builds a tiered section for architecture rule
+// violations. Violations with severity "error" are critical; "warning" is relevant.
+func collectViolationSection(cfg *config.Config, file string) *tieredSection {
+	rules := matchRulesForFile(cfg, file)
+	if len(rules) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	hasCritical := false
+	for _, r := range rules {
+		fmt.Fprintf(&sb, "%s [%s]: %s\n", strings.ToUpper(r.Severity), r.RuleID, r.Description)
+		if r.Severity == "error" {
+			hasCritical = true
+		}
+	}
+	tier := "relevant"
+	if hasCritical {
+		tier = "critical"
+	}
+	return &tieredSection{Tier: tier, Heading: "Architecture Rules", Content: sb.String()}
+}
+
+// collectGapSection builds a tiered section for open quality gaps on an entity.
+func collectGapSection(st *store.Store, nodeID string) *tieredSection {
+	if st == nil {
+		return nil
+	}
+	gaps, err := st.GetGaps(store.GapFilter{NodeID: nodeID, Status: "open"})
+	if err != nil || len(gaps) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	for _, g := range gaps {
+		sev := g.Severity
+		if sev == "" {
+			sev = "medium"
+		}
+		fmt.Fprintf(&sb, "- [%s] %s: %s\n", sev, g.GapID, g.Description)
+	}
+	tier := "relevant"
+	for _, g := range gaps {
+		if g.Severity == "critical" || g.Severity == "high" {
+			tier = "critical"
+			break
+		}
+	}
+	return &tieredSection{Tier: tier, Heading: fmt.Sprintf("Quality Gaps (%d open)", len(gaps)), Content: sb.String()}
+}
+
+// collectBrainSection builds a tiered section for brain warnings/concerns.
+func collectBrainSection(pkt *brain.ContextPacket) *tieredSection {
+	if pkt == nil {
+		return nil
+	}
+	var items []string
+	for _, w := range pkt.GraphWarnings {
+		items = append(items, w)
+	}
+	for _, c := range pkt.Concerns {
+		items = append(items, c)
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	for _, item := range items {
+		fmt.Fprintf(&sb, "- %s\n", item)
+	}
+	return &tieredSection{Tier: "relevant", Heading: "Warnings & Concerns", Content: sb.String()}
+}
+
+// collectAnnotationSection builds a tiered section for agent annotations.
+func collectAnnotationSection(st *store.Store, nodeID string) *tieredSection {
+	if st == nil {
+		return nil
+	}
+	annMap, err := st.GetAnnotationsForNodes([]string{nodeID})
+	if err != nil || len(annMap) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	for _, anns := range annMap {
+		for _, ann := range anns {
+			fmt.Fprintf(&sb, "- %s\n", ann.Note)
+		}
+	}
+	if sb.Len() == 0 {
+		return nil
+	}
+	return &tieredSection{Tier: "relevant", Heading: "Agent Notes", Content: sb.String()}
+}
+
+// collectCrossProjectSection builds tiered sections for cross-project deps.
+func (s *Server) collectCrossProjectSections(ctx context.Context, entityID string) []tieredSection {
+	if s.federationResolver == nil || s.store == nil {
+		return nil
+	}
+	fedCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	deps := s.federationResolver.GetDepsForEntity(fedCtx, entityID, s.store)
+	if len(deps) == 0 {
+		return nil
+	}
+
+	var sections []tieredSection
+	var criticalDeps, relevantDeps []federation.CrossProjectDepStatus
+	for _, dep := range deps {
+		if dep.Drifted {
+			criticalDeps = append(criticalDeps, dep)
+		} else {
+			relevantDeps = append(relevantDeps, dep)
+		}
+	}
+
+	if len(criticalDeps) > 0 {
+		var sb strings.Builder
+		for _, dep := range criticalDeps {
+			fmt.Fprintf(&sb, "- BREAKING: %s::%s — %s\n", dep.Project, dep.Entity, dep.DiffSummary)
+		}
+		sections = append(sections, tieredSection{
+			Tier: "critical", Heading: "⚠ Cross-Project Alerts", Content: sb.String(),
+		})
+	}
+
+	if len(relevantDeps) > 0 {
+		var sb strings.Builder
+		for _, dep := range relevantDeps {
+			fmt.Fprintf(&sb, "- %s::%s (%s) [current]\n", dep.Project, dep.Entity, dep.File)
+		}
+		sections = append(sections, tieredSection{
+			Tier:    "relevant",
+			Heading: fmt.Sprintf("Cross-Project Dependencies (%d current)", len(relevantDeps)),
+			Content: sb.String(),
+		})
+	}
+
+	return sections
 }
 
 // ── Cross-project enrichment ─────────────────────────────────────────────

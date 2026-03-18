@@ -152,6 +152,8 @@ type directionalContext struct {
 	// and no file= hint was provided. Available in both JSON and compact formats.
 	OtherCandidates []map[string]interface{} `json:"other_candidates,omitempty"` // all matching entities (including the one shown)
 	DisambigHint    string                   `json:"disambig_hint,omitempty"`    // human-readable re-call instruction
+	// RX2 Phase 4: cross-project BFS context from sibling stores (opt-in via projects= parameter).
+	FederatedContexts []*federation.FederatedContext `json:"federated_contexts,omitempty"`
 }
 
 // computeEntityHash returns a short SHA1 hex digest that identifies the
@@ -832,6 +834,29 @@ func (s *Server) handleGetContext(
 	}
 
 	// format=compact returns a natural-language briefing instead of the default JSON blob.
+	// Cross-project context: when projects= is specified, include BFS context
+	// from sibling stores. This is opt-in for deep cross-project exploration.
+	projectsParam, _ := req.GetArguments()["projects"].(string)
+	if projectsParam != "" && s.federationResolver != nil {
+		var aliases []string
+		if projectsParam != "*" {
+			for _, a := range strings.Split(projectsParam, ",") {
+				if a = strings.TrimSpace(a); a != "" {
+					aliases = append(aliases, a)
+				}
+			}
+		} else {
+			aliases = s.federationResolver.Aliases()
+		}
+		fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
+		for _, alias := range aliases {
+			if fc := s.federationResolver.GetEntityContext(fedCtx, entityName, alias, cfg.MaxDepth); fc != nil {
+				dc.FederatedContexts = append(dc.FederatedContexts, fc)
+			}
+		}
+		fedCancel()
+	}
+
 	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t).
 	// format and detailLevel were extracted early for the session cache key; reused here.
 	if format == "compact" {
@@ -4393,7 +4418,7 @@ func (s *Server) trimRepoRoot(paths []string) []string {
 // Returns nodes grouped by depth tier: direct (depth 1, confidence 1.0),
 // indirect (depth 2, confidence 0.6), peripheral (depth 3+, confidence 0.3).
 func (s *Server) handleGetImpact(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	symbol, _ := req.GetArguments()["symbol"].(string)
@@ -4515,7 +4540,25 @@ func (s *Server) handleGetImpact(
 	result.TestCoverage = s.trimRepoRoot(s.graph.FindTestsFor(root.ID))
 	applyImpactTokenBudget(result, tokenBudget)
 
-	return jsonResult(result)
+	// Cross-project impact: when projects= is specified, include cross-project
+	// dependency status so the agent sees the full blast radius including siblings.
+	resp := map[string]interface{}{
+		"impact": result,
+	}
+	projectsParam, _ := req.GetArguments()["projects"].(string)
+	if projectsParam != "" && s.federationResolver != nil && s.store != nil {
+		fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
+		crossDeps := s.federationResolver.GetDepsForEntity(fedCtx, string(root.ID), s.store)
+		fedCancel()
+		if len(crossDeps) > 0 {
+			resp["cross_project_deps"] = crossDeps
+		}
+	}
+	if len(resp) == 1 {
+		// No federation data — return the impact result directly (backward compat).
+		return jsonResult(result)
+	}
+	return jsonResult(resp)
 }
 
 // applyImpactTokenBudget truncates an ImpactResult to fit within the token budget
