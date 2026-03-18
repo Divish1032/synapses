@@ -21,6 +21,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/metrics"
 	"github.com/SynapsesOS/synapses/internal/parser"
@@ -1107,7 +1108,7 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 // Default format is "compact" (one line per match: "Name · type · file:line").
 // Pass format="json" for the full structured response.
 func (s *Server) handleFindEntity(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	query, ok := req.GetArguments()["query"].(string)
@@ -1118,6 +1119,8 @@ func (s *Server) handleFindEntity(
 	if format == "" {
 		format = "compact"
 	}
+	// Optional: search sibling projects when projects= is specified.
+	projectsRaw, _ := req.GetArguments()["projects"].(string)
 
 	// Exact match first, then substring.
 	nodes := s.graph.FindByName(query)
@@ -1193,13 +1196,36 @@ func (s *Server) handleFindEntity(
 		return results[i].File < results[j].File
 	})
 
+	// Federation search: when projects= is specified and federation is configured,
+	// search sibling stores for matching entities. Results are appended with
+	// an [alias] prefix to distinguish them from local matches.
+	var fedResults []federation.FederatedSearchResult
+	if projectsRaw != "" && s.federationResolver != nil {
+		var aliases []string
+		if projectsRaw != "*" {
+			for _, a := range strings.Split(projectsRaw, ",") {
+				if a = strings.TrimSpace(a); a != "" {
+					aliases = append(aliases, a)
+				}
+			}
+		}
+		fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
+		fedResults = s.federationResolver.FindEntities(fedCtx, query, aliases, 20)
+		fedCancel()
+	}
+
 	if format == "compact" {
 		var sb strings.Builder
-		if len(results) == 0 {
+		if len(results) == 0 && len(fedResults) == 0 {
 			sb.WriteString(fmt.Sprintf("No matches for %q.\nHint: try search(query=%q, mode=\"semantic\") for concept-based lookup, or get_file_context(file=\"...\") for a specific file.", query, query))
 			return mcp.NewToolResultText(sb.String()), nil
 		}
-		fmt.Fprintf(&sb, "%d match(es) for %q:\n", len(results), query)
+		localCount := len(results)
+		fedCount := 0
+		for _, fr := range fedResults {
+			fedCount += len(fr.Results)
+		}
+		fmt.Fprintf(&sb, "%d match(es) for %q:\n", localCount+fedCount, query)
 		for _, r := range results {
 			testMark := ""
 			if isTestFile(r.File) {
@@ -1207,8 +1233,15 @@ func (s *Server) handleFindEntity(
 			}
 			fmt.Fprintf(&sb, "  [%s] %s · %s:%d%s\n", r.Name, r.Type, r.File, r.Line, testMark)
 		}
+		// Federation results (compact format).
+		for _, fr := range fedResults {
+			for _, r := range fr.Results {
+				fmt.Fprintf(&sb, "  [%s] [%s] %s\n", r.Name, fr.Alias, r.ID)
+			}
+		}
 		// Context-aware footer: single match → exact call; multiple → disambiguation hint.
-		if len(results) == 1 {
+		totalResults := localCount + fedCount
+		if totalResults == 1 && localCount == 1 {
 			fmt.Fprintf(&sb, "Call get_context(entity=%q) to explore.", results[0].Name)
 		} else {
 			sb.WriteString("Call get_context(entity=\"Name\", file=\"path/suffix\") to pin to a specific result.")
@@ -1221,7 +1254,10 @@ func (s *Server) handleFindEntity(
 		"count":   len(results),
 		"matches": results,
 	}
-	if len(results) == 0 {
+	if len(fedResults) > 0 {
+		result["federated"] = fedResults
+	}
+	if len(results) == 0 && len(fedResults) == 0 {
 		result["hint"] = "No exact or substring match. Try search(mode=semantic) for concept-based lookup, or check get_file_context for a specific file."
 	}
 	return jsonResult(result)
@@ -1461,6 +1497,39 @@ func (s *Server) handleValidatePlan(
 	if len(logicWarnings) > 0 {
 		result["logic_warnings"] = logicWarnings
 	}
+
+	// Cross-project drift check: if any changed file has entities with
+	// cross-project dependencies, check for drift in those dependencies.
+	// This catches "planning to modify a function that depends on a changed
+	// sibling entity" before any code is written.
+	if s.federationResolver != nil && s.store != nil {
+		fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
+		var driftedDeps []federation.CrossProjectDepStatus
+		for _, change := range changes {
+			if change.File == "" {
+				continue
+			}
+			// Find entities in the changed file.
+			fileNodes := s.graph.FindByFile(change.File)
+			for _, fn := range fileNodes {
+				deps := s.federationResolver.GetDepsForEntity(fedCtx, string(fn.ID), s.store)
+				for _, dep := range deps {
+					if dep.Drifted {
+						driftedDeps = append(driftedDeps, dep)
+					}
+				}
+			}
+		}
+		fedCancel()
+		if len(driftedDeps) > 0 {
+			result["cross_project_drift"] = map[string]interface{}{
+				"count":   len(driftedDeps),
+				"drifted": driftedDeps,
+				"warning": "⚠ Entities in these files depend on sibling project functions whose signatures have changed. Review drift before implementing.",
+			}
+		}
+	}
+
 	return jsonResult(result)
 }
 
@@ -3629,6 +3698,28 @@ func (s *Server) handleSessionInit(
 			"count":    len(crossProjectAlerts),
 			"messages": crossProjectAlerts,
 			"warning":  fmt.Sprintf("%d unread cross-project impact alert(s). A recent change may have broken dependencies in a linked project. Review before proceeding.", len(crossProjectAlerts)),
+		}
+	}
+	// Federation drift detection: proactive alerts when sibling project
+	// entities that this project depends on have changed signatures.
+	// Only fires when federation is configured AND deps exist AND drift is detected.
+	// Zero tokens when no drift — the entire section is omitted.
+	if s.federationResolver != nil && s.store != nil && !quickMode {
+		fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
+		// Federation summary: sibling project health.
+		fedStatus := s.federationResolver.Status(fedCtx)
+		if len(fedStatus) > 0 {
+			resp["federation_summary"] = fedStatus
+		}
+		// Drift detection: compare stored deps against sibling state.
+		driftAlerts := s.federationResolver.CheckDrift(fedCtx, s.store)
+		fedCancel()
+		if len(driftAlerts) > 0 {
+			resp["cross_project_drift"] = map[string]interface{}{
+				"count":  len(driftAlerts),
+				"alerts": driftAlerts,
+				"hint":   "Functions you depend on in sibling projects have changed. Review before building against them.",
+			}
 		}
 	}
 

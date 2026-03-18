@@ -12,6 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
@@ -411,6 +412,10 @@ func (s *Server) assembleModifyContext(
 			fmt.Fprintf(b, "- ⚠ No test file found — consider adding tests before changing\n")
 		}
 	}
+
+	// Cross-project enrichment: surface drifted dependencies before the
+	// developer starts modifying this entity.
+	s.enrichCrossProject(ctx, b, string(node.ID), budget)
 }
 
 // assembleUnderstandContext builds the "understand" intent response:
@@ -561,6 +566,9 @@ func (s *Server) assembleReviewContext(
 		}
 	}
 	_ = dc // used for pkt building above
+
+	// Cross-project enrichment: surface drifted dependencies in review.
+	s.enrichCrossProject(ctx, b, string(node.ID), budget)
 }
 
 // assembleDebugContext builds the "debug" intent response:
@@ -709,7 +717,7 @@ func (s *Server) assembleAddContext(
 // Returns the list of files, interfaces, rules, and risk level for a proposed
 // change WITHOUT giving code context. "Think before you leap."
 func (s *Server) assemblePlanContext(
-	_ context.Context,
+	ctx context.Context,
 	b *strings.Builder,
 	resolved *resolvedTarget,
 	_ string,
@@ -845,6 +853,9 @@ func (s *Server) assemblePlanContext(
 			b.WriteString("HIGH risk: run prepare_context(intent=\"modify\") before editing.\n")
 		}
 	}
+
+	// Cross-project enrichment: surface drifted dependencies in planning.
+	s.enrichCrossProject(ctx, b, string(node.ID), budget)
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,4 +1093,52 @@ func (s *Server) handlePlanContext(
 	}
 
 	return jsonResult(result)
+}
+
+// ── Cross-project enrichment ─────────────────────────────────────────────
+// enrichCrossProject appends cross-project dependency data to a prepare_context
+// response. Called from modify/review/plan assemblers. Produces zero output
+// when the entity has no cross-project dependencies or federation is not
+// configured. Separates drifted deps (critical tier) from current deps
+// (relevant tier) per the tiered visibility model.
+func (s *Server) enrichCrossProject(ctx context.Context, b *strings.Builder, entityID string, budget int) {
+	if s.federationResolver == nil || s.store == nil {
+		return
+	}
+	if budgetLeft(b, budget) < 100 {
+		return // not enough budget for cross-project section
+	}
+
+	fedCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	deps := s.federationResolver.GetDepsForEntity(fedCtx, entityID, s.store)
+	if len(deps) == 0 {
+		return
+	}
+
+	var critical, relevant []federation.CrossProjectDepStatus
+	for _, dep := range deps {
+		if dep.Drifted {
+			critical = append(critical, dep)
+		} else {
+			relevant = append(relevant, dep)
+		}
+	}
+
+	// Critical: always shown — breaking drift alerts.
+	if len(critical) > 0 {
+		b.WriteString("\n## ⚠ Cross-Project Alerts\n")
+		for _, dep := range critical {
+			fmt.Fprintf(b, "- BREAKING: %s::%s — %s\n", dep.Project, dep.Entity, dep.DiffSummary)
+		}
+	}
+
+	// Relevant: brief summary with explore hint.
+	if len(relevant) > 0 && budgetLeft(b, budget) > 50 {
+		fmt.Fprintf(b, "\n## Cross-Project Dependencies (%d current, no drift)\n", len(relevant))
+		for _, dep := range relevant {
+			fmt.Fprintf(b, "- %s::%s (%s) [current]\n", dep.Project, dep.Entity, dep.File)
+		}
+	}
 }

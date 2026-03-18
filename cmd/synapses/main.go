@@ -33,6 +33,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/contextfile"
 	"github.com/SynapsesOS/synapses/internal/dataflow"
 	"github.com/SynapsesOS/synapses/internal/embed"
+	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/metrics"
@@ -319,6 +320,14 @@ func cmdStartDirect(args []string) error {
 		srv.SetPeerManager(pm)
 	}
 
+	// Federation resolver: cross-project drift detection + dependency tracking.
+	var fedResolver *federation.Resolver
+	if len(cfg.Federation) > 0 {
+		fedResolver = federation.NewResolver(cfg.Federation, cfgDir)
+		srv.SetFederationResolver(fedResolver)
+		defer fedResolver.Close()
+	}
+
 	// Brain — now in-process; no external sidecar or port required.
 	brainCli := brain.NewInProcess(cfg.Brain.ToBrainConfig())
 	if cfg.Brain.Enabled {
@@ -398,6 +407,11 @@ func cmdStartDirect(args []string) error {
 				srv.SetChangeSource(fw)               // wire change log into get_working_state
 				fw.SetPacketInvalidator(srv)          // clear brain packet cache on file change
 				fw.SetBrainClient(brainCli)           // wire incremental ingest
+				// Federation: wire cross-project dependency tracker into watcher.
+				if fedResolver != nil {
+					tracker := federation.NewDeterministicDetector(cfg.Federation, fedResolver)
+					fw.SetCrossProjectTracker(tracker)
+				}
 				// Hot-reload synapses.json: reconnect brain when config changes.
 				fw.SetConfigChangeHandler(func(newCfg *config.Config) {
 					newBrain := brain.NewInProcess(newCfg.Brain.ToBrainConfig())

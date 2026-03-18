@@ -58,6 +58,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/contextfile"
 	"github.com/SynapsesOS/synapses/internal/embed"
+	"github.com/SynapsesOS/synapses/internal/federation"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/peer"
@@ -607,6 +608,19 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		}()
 	}
 
+	// Federation resolver: cross-project drift detection + dependency tracking.
+	// Only created when federation entries are configured in synapses.json.
+	// The dependency tracker is wired into the watcher later (after watcher creation).
+	var fedResolver *federation.Resolver
+	if len(cfg.Federation) > 0 {
+		fedResolver = federation.NewResolver(cfg.Federation, cfgDir)
+		srv.SetFederationResolver(fedResolver)
+		go func() {
+			<-projCtx.Done()
+			fedResolver.Close()
+		}()
+	}
+
 	// Brain.
 	brainCli := brain.NewInProcess(cfg.Brain.ToBrainConfig())
 	if cfg.Brain.Enabled {
@@ -664,6 +678,12 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 				srv.SetBrainClient(newBrain)
 				fw.SetBrainClient(newBrain)
 			})
+			// Wire federation dependency tracker into the watcher so
+			// cross-project imports are detected on every file re-parse.
+			if fedResolver != nil {
+				tracker := federation.NewDeterministicDetector(cfg.Federation, fedResolver)
+				fw.SetCrossProjectTracker(tracker)
+			}
 		}
 	}
 
