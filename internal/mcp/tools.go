@@ -4295,6 +4295,11 @@ func (s *Server) handleGetImpact(
 		}
 	}
 
+	tokenBudget := 2000
+	if tb, ok := req.GetArguments()["token_budget"].(float64); ok && tb > 0 {
+		tokenBudget = int(tb)
+	}
+
 	// Resolve symbol name → node. Fall back to pattern match (same as get_context).
 	candidates := s.graph.FindByName(symbol)
 	if len(candidates) == 0 {
@@ -4378,6 +4383,7 @@ func (s *Server) handleGetImpact(
 		}
 		merged.TestCoverage = s.trimRepoRoot(merged.TestCoverage)
 		sort.Strings(merged.TestCoverage)
+		applyImpactTokenBudget(merged, tokenBudget)
 		return jsonResult(merged)
 	}
 
@@ -4393,8 +4399,48 @@ func (s *Server) handleGetImpact(
 	// trimRepoRoot converts absolute paths to repo-relative paths for consistency
 	// with all other file references in get_context/get_impact responses.
 	result.TestCoverage = s.trimRepoRoot(s.graph.FindTestsFor(root.ID))
+	applyImpactTokenBudget(result, tokenBudget)
 
 	return jsonResult(result)
+}
+
+// applyImpactTokenBudget truncates an ImpactResult to fit within the token budget
+// (1 token ≈ 4 bytes of JSON). Drops peripheral (depth 3+) tiers first, then
+// indirect (depth 2), always keeping direct (depth 1) callers.
+// Sets result.Truncated=true when any tier is dropped.
+func applyImpactTokenBudget(result *graph.ImpactResult, tokenBudget int) {
+	if tokenBudget <= 0 {
+		return
+	}
+	raw, err := json.Marshal(result)
+	if err != nil || len(raw) <= tokenBudget*4 {
+		return // within budget
+	}
+	// Drop tiers from highest depth first until within budget.
+	// Order: peripheral (depth≥3), then indirect (depth=2). Never drop depth=1.
+	for pass := 0; pass < 2; pass++ {
+		minDropDepth := 3
+		if pass == 1 {
+			minDropDepth = 2
+		}
+		filtered := result.Tiers[:0]
+		dropped := false
+		for _, tier := range result.Tiers {
+			if tier.Depth >= minDropDepth {
+				dropped = true
+				continue
+			}
+			filtered = append(filtered, tier)
+		}
+		if dropped {
+			result.Tiers = filtered
+			result.Truncated = true
+			raw, err = json.Marshal(result)
+			if err != nil || len(raw) <= tokenBudget*4 {
+				return
+			}
+		}
+	}
 }
 
 // handleSemanticSearch runs a two-path search and merges results:
