@@ -304,6 +304,35 @@ func (s *Server) handleRecall(
 		}()
 	}
 
+	// Cross-project episode search when projects= is provided.
+	var crossProjectEpisodes []map[string]interface{}
+	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.federationResolver != nil {
+		var aliases []string
+		for _, a := range strings.Split(projectsParam, ",") {
+			if a = strings.TrimSpace(a); a != "" {
+				aliases = append(aliases, a)
+			}
+		}
+		if len(aliases) > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			fedEpisodes := s.federationResolver.SearchEpisodes(ctx, query, aliases, searchLimit)
+			for _, fe := range fedEpisodes {
+				crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
+					"source":       fmt.Sprintf("[%s]", fe.Alias),
+					"id":           fe.Episode.ID,
+					"decision":     fe.Episode.Decision,
+					"rationale":    fe.Episode.Rationale,
+					"episode_type": fe.Episode.EpisodeType,
+					"outcome":      fe.Episode.Outcome,
+					"trigger":      fe.Episode.Trigger,
+					"tags":         fe.Episode.Tags,
+					"created_at":   fe.Episode.CreatedAt,
+				})
+			}
+		}
+	}
+
 	// Surface any dynamic rules derived from matching failure episodes.
 	var relatedRules []string
 	for _, ep := range episodes {
@@ -312,11 +341,11 @@ func (s *Server) handleRecall(
 		}
 	}
 
-	totalMatches := len(episodes) + len(memories)
+	totalMatches := len(episodes) + len(memories) + len(crossProjectEpisodes)
 	summary := "no matching results"
 	if totalMatches > 0 {
-		summary = fmt.Sprintf("%d result(s) matching %q (%d episode(s), %d memory/memories)",
-			totalMatches, query, len(episodes), len(memories))
+		summary = fmt.Sprintf("%d result(s) matching %q (%d local episode(s), %d memory/memories, %d cross-project)",
+			totalMatches, query, len(episodes), len(memories), len(crossProjectEpisodes))
 	}
 
 	resp := map[string]interface{}{
@@ -328,6 +357,9 @@ func (s *Server) handleRecall(
 	}
 	if len(memories) > 0 {
 		resp["memories"] = memories
+	}
+	if len(crossProjectEpisodes) > 0 {
+		resp["cross_project_episodes"] = crossProjectEpisodes
 	}
 	return jsonResult(resp)
 }

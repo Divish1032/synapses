@@ -1311,7 +1311,13 @@ func (s *Server) collectCrossProjectSections(ctx context.Context, entityID strin
 	if len(relevantDeps) > 0 {
 		var sb strings.Builder
 		for _, dep := range relevantDeps {
-			fmt.Fprintf(&sb, "- %s::%s (%s) [current]\n", dep.Project, dep.Entity, dep.File)
+			// Enrich with brain summary if available.
+			summary := s.federationResolver.GetEntitySummary(fedCtx, dep.Project, dep.Entity)
+			if summary != "" {
+				fmt.Fprintf(&sb, "- %s::%s — %s\n", dep.Project, dep.Entity, truncateStr(summary, 120))
+			} else {
+				fmt.Fprintf(&sb, "- %s::%s (%s) [current]\n", dep.Project, dep.Entity, dep.File)
+			}
 		}
 		sections = append(sections, tieredSection{
 			Tier:    "relevant",
@@ -1320,7 +1326,41 @@ func (s *Server) collectCrossProjectSections(ctx context.Context, entityID strin
 		})
 	}
 
+	// Memory hints: check if sibling projects have memories about any dep entity.
+	// Only unique entity names to avoid redundant searches.
+	entityNames := make(map[string]bool, len(deps))
+	for _, dep := range deps {
+		entityNames[dep.Entity] = true
+	}
+	for entityName := range entityNames {
+		if fedCtx.Err() != nil {
+			break
+		}
+		hints := s.federationResolver.SearchMemoriesForEntity(fedCtx, entityName, nil)
+		if len(hints) > 0 {
+			var sb strings.Builder
+			for _, h := range hints {
+				fmt.Fprintf(&sb, "- [%s] %s → recall(query=%q, projects=%q)\n",
+					h.Alias, h.Summary, h.Query, h.Alias)
+			}
+			sections = append(sections, tieredSection{
+				Tier:    "relevant",
+				Heading: fmt.Sprintf("Related Memories (%d from sibling projects)", len(hints)),
+				Content: sb.String(),
+			})
+			break // one memory hint section is enough
+		}
+	}
+
 	return sections
+}
+
+// truncateStr truncates s to max characters, adding "..." if truncated.
+func truncateStr(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
 }
 
 

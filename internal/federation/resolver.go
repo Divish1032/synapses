@@ -9,6 +9,7 @@ package federation
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"os"
 	"path/filepath"
@@ -71,6 +72,15 @@ type FederatedContext struct {
 	Edges     []*graph.Edge     `json:"edges,omitempty"`
 }
 
+// BrainSummaryProvider retrieves brain summaries for cross-project entities.
+// Decoupled from the brain package so federation doesn't import it directly.
+type BrainSummaryProvider interface {
+	// Summary returns the brain-generated summary for a node, or "".
+	Summary(projectID, nodeID string) string
+	// Available reports whether the brain LLM is accessible.
+	Available() bool
+}
+
 // staleThreshold is how long since last index before a sibling is "stale".
 const staleThreshold = 24 * time.Hour
 
@@ -85,6 +95,13 @@ type Resolver struct {
 	entries   []config.FederationEntry
 	configDir string // directory containing synapses.json
 	clock     Clock  // time source (defaults to time.Now)
+	brain     BrainSummaryProvider // optional, for cross-project summaries
+
+	// brainGenerate is an optional LLM generate function for brain-enhanced
+	// drift summaries. When set, BrainDriftSummary feeds the structural diff
+	// to the LLM for a natural-language explanation of impact on callers.
+	// Injected via SetBrainGenerate. Nil = structural diff only.
+	brainGenerate func(ctx context.Context, prompt string) (string, error)
 
 	mu         sync.RWMutex
 	stores     map[string]*store.Store // alias → read-only store (lazy-opened)
@@ -235,19 +252,7 @@ func (r *Resolver) FindEntities(ctx context.Context, query string, aliases []str
 		limit = 20
 	}
 
-	targets := r.entries
-	if len(aliases) > 0 {
-		aliasSet := make(map[string]bool, len(aliases))
-		for _, a := range aliases {
-			aliasSet[a] = true
-		}
-		targets = nil
-		for _, e := range r.entries {
-			if aliasSet[e.Alias] {
-				targets = append(targets, e)
-			}
-		}
-	}
+	targets := r.filterEntries(aliases)
 
 	var results []FederatedSearchResult
 	for _, e := range targets {
@@ -995,6 +1000,156 @@ func truncate(s string, max int) string {
 	return s[:max-3] + "..."
 }
 
+// FederatedEpisode wraps a store.Episode with its source project alias.
+type FederatedEpisode struct {
+	Alias   string        `json:"alias"`
+	Episode store.Episode `json:"episode"`
+}
+
+// FederatedMemoryHint is a 1-line summary of a sibling memory relevant to an entity.
+// Used in prepare_context's Relevant tier to hint at cross-project knowledge.
+type FederatedMemoryHint struct {
+	Alias   string `json:"alias"`
+	Summary string `json:"summary"` // 1-line: "AuthService rewrite driven by compliance"
+	Query   string `json:"query"`   // recall query to get full context
+}
+
+// SearchEpisodes queries sibling stores' episodes tables using FTS5 search.
+// Results are labeled with their source alias. If aliases is nil or empty,
+// all siblings are searched. Errors on individual siblings are silently skipped.
+func (r *Resolver) SearchEpisodes(ctx context.Context, query string, aliases []string, limit int) []FederatedEpisode {
+	if limit <= 0 {
+		limit = 5
+	}
+
+	targets := r.filterEntries(aliases)
+	var results []FederatedEpisode
+
+	for _, e := range targets {
+		if ctx.Err() != nil {
+			break
+		}
+		st := r.getStore(e.Alias)
+		if st == nil {
+			continue
+		}
+
+		// Check if the sibling store has the episodes_fts table.
+		// Older stores might not have episodic memory tables.
+		if !r.hasEpisodesTable(st) {
+			continue
+		}
+
+		episodes, err := st.RecallEpisodes(query, "", "", "", "", limit, 0)
+		if err != nil {
+			log.Printf("federation: search episodes in %q: %v", e.Alias, err)
+			continue
+		}
+
+		for _, ep := range episodes {
+			results = append(results, FederatedEpisode{
+				Alias:   e.Alias,
+				Episode: ep,
+			})
+		}
+	}
+	return results
+}
+
+// SearchMemoriesForEntity searches sibling stores for episodic memories
+// related to a specific entity. Uses graph-anchored search (node ID in
+// affected_nodes) as the primary path — more precise than text matching.
+// Falls back to FTS text search if no node ID is found.
+// Returns 1-line hints for prepare_context. At most 3 hints per sibling.
+func (r *Resolver) SearchMemoriesForEntity(ctx context.Context, entityName string, aliases []string) []FederatedMemoryHint {
+	targets := r.filterEntries(aliases)
+	var hints []FederatedMemoryHint
+
+	for _, e := range targets {
+		if ctx.Err() != nil {
+			break
+		}
+		st := r.getStore(e.Alias)
+		if st == nil {
+			continue
+		}
+		if !r.hasEpisodesTable(st) {
+			continue
+		}
+
+		// Primary: graph-anchored search via node ID in affected_nodes.
+		// This is precise — finds only memories explicitly linked to the entity,
+		// not just any memory that mentions the name in text.
+		var episodes []store.Episode
+		nodes, err := st.FindNodesByNameCtx(ctx, entityName, 1)
+		if err == nil && len(nodes) > 0 {
+			episodes, _ = st.FindEpisodesByNodeID(nodes[0].ID, 3)
+		}
+
+		// Fallback: FTS text search on entity name.
+		// Used when the entity has no node in the sibling store (e.g., removed
+		// entity with memories still referencing it by name).
+		if len(episodes) == 0 {
+			episodes, _ = st.RecallEpisodes(entityName, "", "", "", "", 3, 0)
+		}
+
+		for _, ep := range episodes {
+			summary := ep.Decision
+			if len(summary) > 120 {
+				summary = summary[:117] + "..."
+			}
+			hints = append(hints, FederatedMemoryHint{
+				Alias:   e.Alias,
+				Summary: summary,
+				Query:   entityName,
+			})
+		}
+	}
+	return hints
+}
+
+// SiblingProjectID derives the brain-compatible projectID for a sibling.
+// Uses the same FNV32a hash of the absolute path as the main project.
+func (r *Resolver) SiblingProjectID(alias string) string {
+	path := r.entryPath(alias)
+	if path == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(abs))
+	return fmt.Sprintf("%x", h.Sum32())
+}
+
+// hasEpisodesTable checks if a sibling store has the episodes and
+// episodes_fts tables required for cross-project memory search.
+// Uses sqlite_master introspection — no probe queries, no side effects.
+func (r *Resolver) hasEpisodesTable(st *store.Store) bool {
+	return st.HasTable("episodes") && st.HasTable("episodes_fts")
+}
+
+// filterEntries returns federation entries matching the given aliases.
+// If aliases is nil or empty, returns all entries.
+func (r *Resolver) filterEntries(aliases []string) []config.FederationEntry {
+	if len(aliases) == 0 {
+		return r.entries
+	}
+	aliasSet := make(map[string]bool, len(aliases))
+	for _, a := range aliases {
+		aliasSet[a] = true
+	}
+	var targets []config.FederationEntry
+	for _, e := range r.entries {
+		if aliasSet[e.Alias] {
+			targets = append(targets, e)
+		}
+	}
+	return targets
+}
+
 // InvalidateCache clears session-level caches. Called on session_init
 // to ensure fresh data each session.
 func (r *Resolver) InvalidateCache() {
@@ -1068,6 +1223,131 @@ func (r *Resolver) cachedHead(alias string) string {
 	r.gitHeads[alias] = h
 	r.mu.Unlock()
 	return h
+}
+
+// SetBrain attaches a brain summary provider for cross-project summarization.
+// Optional — when nil, cross-project summaries use raw entity signatures.
+func (r *Resolver) SetBrain(brain BrainSummaryProvider) {
+	r.brain = brain
+}
+
+// SetBrainGenerate attaches an LLM generate function for brain-enhanced
+// drift summaries. When set and brain is available, BrainDriftSummary
+// feeds the structural diff to the LLM for a natural-language explanation.
+// Typically wired to the brain's ingestor LLM client.
+func (r *Resolver) SetBrainGenerate(fn func(ctx context.Context, prompt string) (string, error)) {
+	r.brainGenerate = fn
+}
+
+// GetEntitySummary returns a brain-generated summary for a sibling entity.
+// Falls back to the entity's raw signature if brain is unavailable or has
+// no summary. This is the cross-project context summarization path.
+func (r *Resolver) GetEntitySummary(ctx context.Context, alias, entityName string) string {
+	if ctx.Err() != nil {
+		return ""
+	}
+
+	// Try brain summary first (zero LLM calls — reads from brain.sqlite).
+	if r.brain != nil {
+		projectID := r.SiblingProjectID(alias)
+		if projectID != "" {
+			// Brain summaries are indexed by nodeID. We need to find the
+			// entity's nodeID in the sibling store first.
+			st := r.getStore(alias)
+			if st != nil {
+				results, err := st.FindNodesByNameCtx(ctx, entityName, 1)
+				if err == nil && len(results) > 0 {
+					summary := r.brain.Summary(projectID, results[0].ID)
+					if summary != "" {
+						return summary
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback: raw entity signature from sibling store.
+	st := r.getStore(alias)
+	if st == nil {
+		return ""
+	}
+	results, err := st.FindNodesByNameCtx(ctx, entityName, 1)
+	if err != nil || len(results) == 0 {
+		return ""
+	}
+	if results[0].Signature != "" {
+		return results[0].Signature
+	}
+	return results[0].Name
+}
+
+// driftSummaryPrompt is the prompt template for brain-enhanced drift summaries.
+const driftSummaryPrompt = `Given this function signature change:
+Old: %s
+New: %s
+Structural diff: %s
+
+Summarize in ONE sentence what changed and how it affects callers. Focus on whether existing callers need updating. Output only the summary sentence, no other text.`
+
+// BrainDriftSummary generates a brain-enhanced drift summary for a changed
+// entity. When brain is available and brainGenerate is set, produces a
+// human-readable natural-language explanation. When unavailable, uses
+// structuralSignatureDiff (the existing graph-based heuristic).
+func (r *Resolver) BrainDriftSummary(ctx context.Context, oldSig, newSig, entityName string) string {
+	structural := structuralSignatureDiff(oldSig, newSig)
+
+	// If brain generate is unavailable, return structural diff.
+	if r.brainGenerate == nil || r.brain == nil || !r.brain.Available() {
+		return structural
+	}
+
+	// Feed the structural diff to the brain for natural-language explanation.
+	// Use a short timeout — brain enhancement is best-effort.
+	brainCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	prompt := fmt.Sprintf(driftSummaryPrompt, oldSig, newSig, structural)
+	response, err := r.brainGenerate(brainCtx, prompt)
+	if err != nil || response == "" {
+		return structural // fail-open: brain error → structural diff
+	}
+
+	// Clean up the response — remove quotes, trim whitespace.
+	response = strings.TrimSpace(response)
+	response = strings.Trim(response, `"'`)
+	response = strings.TrimSpace(response)
+
+	// Validate: response should be a reasonable prose sentence, not code or garbage.
+	if !isValidDriftSummary(response) {
+		return structural
+	}
+
+	return response
+}
+
+// isValidDriftSummary checks that a brain-generated drift summary looks like
+// a natural-language sentence, not code, JSON, or garbage. Returns false
+// if the response should be discarded in favor of the structural diff.
+func isValidDriftSummary(s string) bool {
+	if len(s) < 10 || len(s) > 500 {
+		return false
+	}
+	// Must contain at least one space (sentences have spaces).
+	if !strings.Contains(s, " ") {
+		return false
+	}
+	// Reject responses that look like code.
+	codePrefixes := []string{"{", "func ", "def ", "fn ", "class ", "import ", "package ", "```"}
+	for _, prefix := range codePrefixes {
+		if strings.HasPrefix(s, prefix) {
+			return false
+		}
+	}
+	// Reject responses that are just the signatures echoed back.
+	if strings.HasPrefix(s, "Old:") || strings.HasPrefix(s, "New:") {
+		return false
+	}
+	return true
 }
 
 // HasAlias reports whether the resolver has an entry for the given alias.

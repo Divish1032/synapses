@@ -4,109 +4,54 @@ import (
 	"testing"
 
 	"github.com/mark3labs/mcp-go/server"
-
-	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
-// TestToolInTier_Core verifies that the core tier contains exactly the 10
-// expected tools and nothing else.
-func TestToolInTier_Core(t *testing.T) {
-	s := &Server{repoScale: graph.ScaleMicro, deferredTools: make(map[string]server.ServerTool)}
-
-	wantIn := []string{
-		"session_init", "get_context", "find_entity", "search",
-		"validate_plan", "verify_implementation", "create_plan",
-		"update_task", "discover_tools", "end_session",
-	}
-	for _, name := range wantIn {
-		if !s.toolInTier(name) {
-			t.Errorf("toolInTier(%q) = false for micro; want true", name)
-		}
-	}
-
-	// Tools outside core must be deferred for micro repos.
-	wantOut := []string{
-		"get_pending_tasks", "get_file_context", "get_impact",
-		"get_call_chain", "claim_work", "release_claims", "remember",
-		"recall", "get_working_state", "get_violations",
-		"annotate_node", "get_events", "upsert_rule", "send_message",
-	}
-	for _, name := range wantOut {
-		if s.toolInTier(name) {
-			t.Errorf("toolInTier(%q) = true for micro; want false", name)
-		}
-	}
-}
-
-// TestToolInTier_Standard verifies that the standard tier contains all 20
-// expected tools (10 core + 10 additions) and defers the rest.
-func TestToolInTier_Standard(t *testing.T) {
-	s := &Server{repoScale: graph.ScaleSmall, deferredTools: make(map[string]server.ServerTool)}
-
-	wantIn := []string{
-		// core
-		"session_init", "get_context", "find_entity", "search",
-		"validate_plan", "verify_implementation", "create_plan",
-		"update_task", "discover_tools", "end_session",
-		// standard additions
-		"get_pending_tasks", "get_file_context", "get_impact",
-		"get_call_chain", "claim_work", "release_claims", "remember",
-		"recall", "get_working_state", "get_violations",
-	}
-	for _, name := range wantIn {
-		if !s.toolInTier(name) {
-			t.Errorf("toolInTier(%q) = false for small; want true", name)
-		}
-	}
-
-	// Medium scale uses the same standard tier.
-	s.repoScale = graph.ScaleMedium
-	for _, name := range wantIn {
-		if !s.toolInTier(name) {
-			t.Errorf("toolInTier(%q) = false for medium; want true", name)
-		}
-	}
-
-	// Extended tools are still deferred for standard tier.
-	wantOut := []string{"annotate_node", "get_events", "upsert_rule", "send_message", "execute_skill"}
-	for _, name := range wantOut {
-		if s.toolInTier(name) {
-			t.Errorf("toolInTier(%q) = true for small/medium; want false", name)
-		}
-	}
-}
-
-// TestToolInTier_Full verifies that all tools are in-tier for large repos.
-func TestToolInTier_Full(t *testing.T) {
-	s := &Server{repoScale: graph.ScaleLarge, deferredTools: make(map[string]server.ServerTool)}
-
-	allTools := []string{
-		"session_init", "get_context", "find_entity", "search",
-		"validate_plan", "verify_implementation", "create_plan", "update_task",
-		"discover_tools", "end_session", "get_pending_tasks", "get_file_context",
-		"get_impact", "get_call_chain", "claim_work", "release_claims",
-		"remember", "recall", "get_working_state", "get_violations",
-		"annotate_node", "get_events", "upsert_rule", "send_message",
-		"get_messages", "check_plan_safety", "get_adrs", "upsert_adr",
-		"web_annotate", "lookup_docs", "execute_skill", "list_skills",
-	}
-	for _, name := range allTools {
-		if !s.toolInTier(name) {
-			t.Errorf("toolInTier(%q) = false for large; want true", name)
-		}
-	}
-}
-
-// TestToolInTier_ZeroNodesFull verifies that a server with an unset/empty
-// scale (pre-index, NodeCount == 0 scenario) defaults to full tier.
-func TestToolInTier_ZeroNodesFull(t *testing.T) {
-	// Empty string scale (not yet set) must default to full tier.
+// TestToolInTier_AllToolsAlwaysAvailable verifies that Phase 6 ensures all
+// tools are registered at all scales (auto-promotion backwards compatibility).
+func TestToolInTier_AllToolsAlwaysAvailable(t *testing.T) {
 	s := &Server{deferredTools: make(map[string]server.ServerTool)}
-
-	extended := []string{"annotate_node", "get_events", "upsert_rule", "execute_skill"}
-	for _, name := range extended {
+	tools := []string{
+		// Core (Phase 6)
+		"session_init", "prepare_context", "search", "validate_plan",
+		"verify_implementation", "remember", "recall", "create_plan",
+		"update_task", "end_session", "discover_tools", "annotate_node",
+		// Previously standard/extended
+		"get_context", "find_entity", "get_pending_tasks", "get_file_context",
+		"get_impact", "get_call_chain", "claim_work", "release_claims",
+		"get_working_state", "get_violations",
+		"get_events", "upsert_rule", "send_message", "execute_skill",
+	}
+	for _, name := range tools {
 		if !s.toolInTier(name) {
-			t.Errorf("toolInTier(%q) = false for unset scale; want true (safe default)", name)
+			t.Errorf("toolInTier(%q) = false; Phase 6 requires all tools always available", name)
+		}
+	}
+}
+
+// TestCoreTierTools_DesignDocSet verifies the core tier categorization matches
+// the design doc's ~12 tool set (used for status labels in discover_tools).
+func TestCoreTierTools_DesignDocSet(t *testing.T) {
+	expected := []string{
+		"session_init", "prepare_context", "search", "validate_plan",
+		"verify_implementation", "remember", "recall", "create_plan",
+		"update_task", "end_session", "discover_tools", "annotate_node",
+	}
+	for _, name := range expected {
+		if !coreTierTools[name] {
+			t.Errorf("expected %q in coreTierTools", name)
+		}
+	}
+	if len(coreTierTools) != len(expected) {
+		t.Errorf("coreTierTools has %d entries, expected %d", len(coreTierTools), len(expected))
+	}
+}
+
+// TestStandardTierTools_IncludesCore verifies that the standard tier is a
+// superset of the core tier (every core tool is also standard).
+func TestStandardTierTools_IncludesCore(t *testing.T) {
+	for name := range coreTierTools {
+		if !standardTierTools[name] {
+			t.Errorf("core tool %q missing from standardTierTools", name)
 		}
 	}
 }
@@ -114,19 +59,21 @@ func TestToolInTier_ZeroNodesFull(t *testing.T) {
 // TestRegisterDeferredTools verifies that a deferred tool is promoted and
 // removed from the deferred set correctly.
 func TestRegisterDeferredTools(t *testing.T) {
-	s := &Server{repoScale: graph.ScaleMicro, deferredTools: make(map[string]server.ServerTool)}
+	// Use a real server so s.mcp is initialized and AddTool works.
+	s := newTestServer(t)
 
-	// Manually insert a deferred entry (mimics addOrDefer storing it).
-	import_server_pkg := server.ServerTool{} // zero value; handler nil is OK for this test
-	s.deferredTools["get_violations"] = import_server_pkg
+	// Manually insert a deferred entry.
+	s.deferredToolsMu.Lock()
+	s.deferredTools["test_promoted_tool"] = server.ServerTool{}
+	s.deferredToolsMu.Unlock()
 
-	registered := s.RegisterDeferredTools([]string{"get_violations", "nonexistent"})
+	registered := s.RegisterDeferredTools([]string{"test_promoted_tool", "nonexistent"})
 
-	if len(registered) != 1 || registered[0] != "get_violations" {
-		t.Errorf("RegisterDeferredTools returned %v; want [get_violations]", registered)
+	if len(registered) != 1 || registered[0] != "test_promoted_tool" {
+		t.Errorf("RegisterDeferredTools returned %v; want [test_promoted_tool]", registered)
 	}
-	if _, still := s.deferredTools["get_violations"]; still {
-		t.Error("get_violations still in deferredTools after promotion; should be removed")
+	if _, still := s.deferredTools["test_promoted_tool"]; still {
+		t.Error("test_promoted_tool still in deferredTools after promotion; should be removed")
 	}
 }
 
@@ -143,25 +90,34 @@ func TestRegisterDeferredTools_Empty(t *testing.T) {
 	}
 }
 
-// TestAddOrDefer_MicroDefers verifies that addOrDefer stores extended tools in
-// the deferred map rather than registering them on a micro-scale server.
-func TestAddOrDefer_MicroDefers(t *testing.T) {
-	// Build a minimal server without a real mcp.MCPServer so we can inspect
-	// the deferred map directly without full server setup.
-	s := &Server{repoScale: graph.ScaleMicro, deferredTools: make(map[string]server.ServerTool)}
+// TestIsDeferredTool verifies the helper correctly reports deferred state.
+func TestIsDeferredTool(t *testing.T) {
+	s := &Server{deferredTools: make(map[string]server.ServerTool)}
+	s.deferredTools["test_tool"] = server.ServerTool{}
 
-	// annotate_node is not in core tier — it should be deferred, not panicking.
-	// We call toolInTier instead of addOrDefer to avoid needing s.mcp initialised.
-	if s.toolInTier("annotate_node") {
-		t.Error("annotate_node should not be in micro tier")
+	if !s.IsDeferredTool("test_tool") {
+		t.Error("expected test_tool to be deferred")
 	}
+	if s.IsDeferredTool("nonexistent") {
+		t.Error("nonexistent should not be deferred")
+	}
+}
 
-	// Verify we can store and retrieve a deferred entry manually.
-	s.deferredToolsMu.Lock()
-	s.deferredTools["annotate_node"] = server.ServerTool{}
-	s.deferredToolsMu.Unlock()
+// TestGetDeferredToolNames verifies the helper returns correct names.
+func TestGetDeferredToolNames(t *testing.T) {
+	s := &Server{deferredTools: make(map[string]server.ServerTool)}
+	s.deferredTools["tool_a"] = server.ServerTool{}
+	s.deferredTools["tool_b"] = server.ServerTool{}
 
-	if _, ok := s.deferredTools["annotate_node"]; !ok {
-		t.Error("deferred tool not stored in deferredTools map")
+	names := s.GetDeferredToolNames()
+	if len(names) != 2 {
+		t.Fatalf("expected 2 deferred tools, got %d", len(names))
+	}
+	nameSet := make(map[string]bool)
+	for _, n := range names {
+		nameSet[n] = true
+	}
+	if !nameSet["tool_a"] || !nameSet["tool_b"] {
+		t.Errorf("expected tool_a and tool_b, got %v", names)
 	}
 }

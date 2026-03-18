@@ -2,6 +2,7 @@ package federation_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,20 @@ import (
 )
 
 // ── helpers ─────────────────────────────────────────────────────────────────
+
+// TestMain sets HOME to a temp directory for all federation tests.
+// This prevents SiblingDBPath (which uses ~/.synapses/cache/) from
+// writing to the real home dir and ensures test isolation.
+func TestMain(m *testing.M) {
+	tmpHome, err := os.MkdirTemp("", "federation-test-home-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create test home: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(tmpHome)
+	os.Setenv("HOME", tmpHome)
+	os.Exit(m.Run())
+}
 
 func createSiblingWithDefaultPath(t *testing.T, projectDir, repoID string, nodes []*graph.Node) {
 	t.Helper()

@@ -636,61 +636,65 @@ func (s *Server) memoryExpiryLoop() {
 
 // ── B28: Scale-aware tool registration ───────────────────────────────────────
 
-// coreTierTools are the 10 tools registered at every repo scale (micro+).
+// coreTierTools are the ~12 tools registered at every repo scale (micro+).
 // They cover the minimal viable session: bootstrap, navigate, plan, implement,
 // and finish. Always available regardless of repo size.
+// Phase 6 (Proactive Context Engine): updated to match the design doc's core set.
+// All other tools are deferred and auto-promoted on first call.
 var coreTierTools = map[string]bool{
 	"session_init":          true,
-	"get_context":           true,
-	"find_entity":           true,
+	"prepare_context":       true,
 	"search":                true,
 	"validate_plan":         true,
 	"verify_implementation": true,
+	"remember":              true,
+	"recall":                true,
 	"create_plan":           true,
 	"update_task":           true,
-	"discover_tools":        true,
 	"end_session":           true,
+	"discover_tools":        true,
+	"annotate_node":         true,
 }
 
-// standardTierTools are the 20 tools registered for small and medium repos.
+// standardTierTools are the ~20 tools registered for small and medium repos.
 // Adds coordination, memory, and exploration tools on top of the core set.
 var standardTierTools = map[string]bool{
 	// Core (same as above, duplicated for O(1) lookup).
 	"session_init":          true,
-	"get_context":           true,
-	"find_entity":           true,
+	"prepare_context":       true,
 	"search":                true,
 	"validate_plan":         true,
 	"verify_implementation": true,
+	"remember":              true,
+	"recall":                true,
 	"create_plan":           true,
 	"update_task":           true,
-	"discover_tools":        true,
 	"end_session":           true,
+	"discover_tools":        true,
+	"annotate_node":         true,
 	// Standard additions.
+	"get_context":       true,
+	"find_entity":       true,
 	"get_pending_tasks": true,
 	"get_file_context":  true,
 	"get_impact":        true,
 	"get_call_chain":    true,
 	"claim_work":        true,
 	"release_claims":    true,
-	"remember":          true,
-	"recall":            true,
 	"get_working_state": true,
 	"get_violations":    true,
 }
 
 // toolInTier reports whether name should be registered at startup given
-// s.repoScale. Returns true (register immediately) for ScaleLarge or any
-// unrecognised value so that the default is always safe (all tools available).
-func (s *Server) toolInTier(name string) bool {
-	switch s.repoScale {
-	case graph.ScaleMicro:
-		return coreTierTools[name]
-	case graph.ScaleSmall, graph.ScaleMedium:
-		return standardTierTools[name]
-	default: // ScaleLarge, or "" (unset / pre-index)
-		return true
-	}
+// s.repoScale. Phase 6 (Proactive Context Engine): all tools are always
+// registered at all scales. The design doc mandates "the agent NEVER sees
+// 'tool not found' for any previously-existing tool" (Section 5.2).
+// Scale-aware discoverability is now handled via suggested_tools in
+// session_init and the status field in discover_tools, not via tool hiding.
+// The coreTierTools and standardTierTools maps are retained for
+// categorization purposes (e.g. discover_tools status field).
+func (s *Server) toolInTier(_ string) bool {
+	return true
 }
 
 // addOrDefer either registers tool t immediately (when it belongs to the
@@ -739,6 +743,44 @@ func (s *Server) RegisterDeferredTools(names []string) []string {
 		s.addOrDefer(st.Tool, st.Handler)
 	}
 	return registered
+}
+
+// IsDeferredTool returns true if the named tool exists in the deferred set
+// (not yet promoted to the live MCP session).
+func (s *Server) IsDeferredTool(name string) bool {
+	s.deferredToolsMu.Lock()
+	_, ok := s.deferredTools[name]
+	s.deferredToolsMu.Unlock()
+	return ok
+}
+
+// GetDeferredToolNames returns the names of all currently deferred tools.
+// Used by tests and discover_tools to enumerate the full tool surface.
+func (s *Server) GetDeferredToolNames() []string {
+	s.deferredToolsMu.Lock()
+	defer s.deferredToolsMu.Unlock()
+	names := make([]string, 0, len(s.deferredTools))
+	for name := range s.deferredTools {
+		names = append(names, name)
+	}
+	return names
+}
+
+// SuggestAndPromoteTools generates tool suggestions based on the agent's
+// declared intent, then promotes suggested tools from deferred to live.
+// Returns the suggestions (nil if no intent or no matches).
+func (s *Server) SuggestAndPromoteTools(intent string) []ToolSuggestion {
+	suggestions := suggestToolsForIntent(intent)
+	if len(suggestions) == 0 {
+		return nil
+	}
+	// Auto-promote suggested tools so they appear in the MCP tool list.
+	names := make([]string, len(suggestions))
+	for i, sg := range suggestions {
+		names[i] = sg.Tool
+	}
+	s.RegisterDeferredTools(names)
+	return suggestions
 }
 
 // registerTools wires all Synapses tool definitions to their handlers.
@@ -1329,7 +1371,8 @@ func (s *Server) registerTools() {
 		s.handleSaveSessionState,
 	)
 
-	// end_session
+	// end_session: enhanced in Phase 6 to absorb release_claims + report_usage.
+	// Agents no longer need separate calls — end_session handles cleanup in one round-trip.
 	s.addOrDefer(
 		mcp.NewTool(
 			"end_session",
@@ -1338,7 +1381,9 @@ func (s *Server) registerTools() {
 					"Call at the end of a session to automatically extract: files touched, "+
 					"entities examined, tasks updated. Saves session-log, entity, and project "+
 					"memories that future sessions will see in session_init and get_context. "+
-					"This is how institutional knowledge accumulates across sessions.",
+					"This is how institutional knowledge accumulates across sessions. "+
+					"Also automatically releases all work claims (absorbs release_claims) and "+
+					"optionally reports LLM token usage (absorbs report_usage) if model is provided.",
 			),
 			mcp.WithString("agent_id",
 				mcp.Required(),
@@ -1350,6 +1395,22 @@ func (s *Server) registerTools() {
 			mcp.WithString("summary",
 				mcp.Description("Optional. High-level summary of what was accomplished. "+
 					"Saved as a project-tier memory visible to all future sessions."),
+			),
+			mcp.WithString("model",
+				mcp.Description("Optional. Model name for usage reporting (e.g. 'claude-sonnet-4-6'). "+
+					"When provided, token usage is reported to pulse analytics (absorbs report_usage)."),
+			),
+			mcp.WithString("provider",
+				mcp.Description("Optional. Model provider: 'anthropic', 'openai', etc. Used with model for usage reporting."),
+			),
+			mcp.WithNumber("input_tokens",
+				mcp.Description("Optional. Total input tokens consumed during this session."),
+			),
+			mcp.WithNumber("output_tokens",
+				mcp.Description("Optional. Total output tokens generated during this session."),
+			),
+			mcp.WithNumber("cost_usd",
+				mcp.Description("Optional. Total USD cost for this session if known."),
 			),
 		),
 		s.handleEndSession,
@@ -1946,6 +2007,9 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithBoolean("include_stale",
 				mcp.Description("When true, include stale (invalidated) memories in results. Default false. Use for audit queries to review full history including beliefs that were invalidated by graph changes."),
+			),
+			mcp.WithString("projects",
+				mcp.Description("Comma-separated list of federation aliases to also search. When provided, searches sibling projects' memories too, labeling results with [alias]. Without this parameter, only local memories are searched."),
 			),
 		),
 		s.handleRecall,

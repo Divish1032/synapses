@@ -96,6 +96,12 @@ type Brain interface {
 	// Returns empty response (no error) when the Archivist LLM is unavailable.
 	Memorize(ctx context.Context, req archivist.MemorizeRequest) (archivist.MemorizeResponse, error)
 
+	// Generate sends a raw prompt to the brain's primary LLM and returns the
+	// response. Used for one-off LLM calls (e.g., brain-enhanced drift summaries)
+	// that don't fit into the ingest/enrich/guardian pipeline.
+	// Returns ("", err) if the LLM is unavailable.
+	Generate(ctx context.Context, prompt string) (string, error)
+
 	// --- v0.6.0: ADRs ---
 
 	// UpsertADR creates or updates an Architectural Decision Record.
@@ -696,6 +702,13 @@ func (b *impl) Memorize(ctx context.Context, req archivist.MemorizeRequest) (arc
 	b.cb.recordSuccess("archivist")
 	b.stats.record("archivist", true, 0)
 	return resp, nil
+}
+
+func (b *impl) Generate(ctx context.Context, prompt string) (string, error) {
+	if b.llm == nil {
+		return "", fmt.Errorf("brain: no LLM available")
+	}
+	return b.llm.Generate(ctx, prompt)
 }
 
 func (b *impl) Summary(projectID, nodeID string) string {

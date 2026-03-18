@@ -233,6 +233,33 @@ func (s *Store) CheckPlanSafety(planDesc, projectID string) (*Episode, error) {
 	return episodes, nil
 }
 
+// FindEpisodesByNodeID searches episodes where affected_nodes contains the
+// given node ID. Used by federation to find memories anchored to specific
+// entities, which is more precise than text-based FTS search on entity names.
+// Returns up to limit results ordered by recency (newest first).
+func (s *Store) FindEpisodesByNodeID(nodeID string, limit int) ([]Episode, error) {
+	if nodeID == "" || limit <= 0 {
+		return nil, nil
+	}
+	// Use LIKE with the node ID substring. The affected_nodes column stores
+	// a JSON array like '["repo::file.go::Name"]'. We search for the node ID
+	// within it. escapeLike handles % and _ in node IDs.
+	pattern := "%" + escapeLike(nodeID) + "%"
+	rows, err := s.db.Query(`
+		SELECT id, agent_id, project_id, created_at, episode_type, outcome,
+		       trigger, decision, rationale, affected_files, affected_nodes,
+		       tags, importance, promoted_rule
+		FROM episodes
+		WHERE affected_nodes LIKE ? ESCAPE '\'
+		ORDER BY created_at DESC
+		LIMIT ?`, pattern, limit)
+	if err != nil {
+		return nil, fmt.Errorf("find episodes by node: %w", err)
+	}
+	defer rows.Close()
+	return scanEpisodes(rows)
+}
+
 // GetRuleCandidates returns failure episodes that have appeared ≥minOccurrences
 // times (matched by decision similarity) and have not yet been promoted to a rule.
 // Uses exact decision-text grouping as a v1 approximation; FTS/vector grouping later.

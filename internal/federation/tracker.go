@@ -31,9 +31,11 @@ import (
 // analysis. The tracker resolves these against the sibling store before
 // converting to store.CrossProjectDep for storage.
 type RawCrossDep struct {
-	FromFile  string // local file path containing the import
-	ToProject string // federation alias
-	ToEntity  string // entity name referenced in the import
+	FromFile      string // local file path containing the import
+	FromImport    string // the import path that matched
+	ToProject     string // federation alias
+	ToEntity      string // entity name referenced in the import
+	DetectionTier string // "deterministic" or "brain"
 }
 
 // moduleEntry maps an import prefix to a federation sibling.
@@ -165,6 +167,70 @@ func (d *DeterministicDetector) DetectDeps(ctx context.Context, filePath string,
 			DetectionTier:     "tier1",
 			VerifiedSignature: results[0].Signature,
 		})
+	}
+	return deps
+}
+
+// ResolveBrainDeps takes deps detected by the brain detector and converts
+// them to fully populated CrossProjectDep structs with entity resolution
+// and verified signatures. Deduplicates against existing Tier 1 deps.
+func (d *DeterministicDetector) ResolveBrainDeps(
+	ctx context.Context,
+	brainDeps []RawCrossDep,
+	tier1Deps []store.CrossProjectDep,
+	filePath string,
+) []store.CrossProjectDep {
+	if len(brainDeps) == 0 {
+		return nil
+	}
+
+	// Build a set of already-detected (project, entity) pairs from Tier 1.
+	existing := make(map[string]bool, len(tier1Deps))
+	for _, d := range tier1Deps {
+		existing[d.ToProject+"::"+d.ToEntity] = true
+	}
+
+	relPath := filePath
+	now := time.Now().UTC().Format(time.RFC3339)
+	var deps []store.CrossProjectDep
+
+	for _, raw := range brainDeps {
+		if ctx.Err() != nil {
+			break
+		}
+
+		// Skip if Tier 1 already detected this dep.
+		key := raw.ToProject + "::" + raw.ToEntity
+		if existing[key] {
+			continue
+		}
+
+		// Entity was already validated by BrainDetector.validateBrainDeps,
+		// but we still need the signature for drift detection.
+		sibStore := d.resolver.getStore(raw.ToProject)
+		if sibStore == nil {
+			continue
+		}
+
+		results, err := sibStore.FindNodesByNameCtx(ctx, raw.ToEntity, 1)
+		if err != nil || len(results) == 0 {
+			continue
+		}
+
+		toFile := fileFromNodeID(results[0].ID)
+		head := d.getSiblingHead(ctx, raw.ToProject)
+
+		deps = append(deps, store.CrossProjectDep{
+			FromEntity:        "file:" + relPath,
+			ToProject:         raw.ToProject,
+			ToEntity:          raw.ToEntity,
+			ToFile:            toFile,
+			VerifiedCommit:    head,
+			VerifiedAt:        now,
+			DetectionTier:     "tier2",
+			VerifiedSignature: results[0].Signature,
+		})
+		existing[key] = true // prevent duplicates within brain results
 	}
 	return deps
 }

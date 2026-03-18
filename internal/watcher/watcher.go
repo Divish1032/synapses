@@ -61,6 +61,18 @@ type CrossProjectTracker interface {
 	DetectAndStore(ctx context.Context, filePath string, localStore *store.Store)
 }
 
+// BrainCrossProjectTracker provides Tier 2 brain-enhanced cross-project
+// dependency detection for languages that Tier 1 can't handle well.
+// Runs asynchronously after Tier 1 detection. Implemented by a wrapper
+// that calls federation.BrainDetector + DeterministicDetector.ResolveBrainDeps.
+type BrainCrossProjectTracker interface {
+	// DetectAndStoreBrain reads the file content, calls the brain LLM for
+	// cross-project dependency detection, validates results against sibling
+	// stores, and persists any new deps not already found by Tier 1.
+	// Runs fire-and-forget — errors are logged, never propagated.
+	DetectAndStoreBrain(ctx context.Context, filePath string, localStore *store.Store)
+}
+
 type Watcher struct {
 	fw          *fsnotify.Watcher
 	graph       *graph.Graph
@@ -72,7 +84,8 @@ type Watcher struct {
 	cfgHandler  ConfigChangeHandler    // called when synapses.json changes; may be nil
 	configPath  string                 // absolute path to synapses.json (set by Start)
 	projectID   string                 // stable project identifier (FNV hash of project root path)
-	cpTracker   CrossProjectTracker    // set via SetCrossProjectTracker; may be nil
+	cpTracker      CrossProjectTracker      // set via SetCrossProjectTracker; may be nil
+	cpBrainTracker BrainCrossProjectTracker // set via SetBrainCrossProjectTracker; may be nil
 
 	mu        sync.Mutex
 	timers    map[string]*time.Timer // debounce timers keyed by absolute file path
@@ -133,6 +146,14 @@ func (w *Watcher) SetPacketInvalidator(pi PacketCacheInvalidator) {
 // Must be called before Start. tracker may be nil to disable.
 func (w *Watcher) SetCrossProjectTracker(tracker CrossProjectTracker) {
 	w.cpTracker = tracker
+}
+
+// SetBrainCrossProjectTracker wires a Tier 2 brain-enhanced dependency tracker.
+// When set, after Tier 1 detection, the watcher runs brain detection in a
+// fire-and-forget goroutine for files whose language isn't well-covered by Tier 1.
+// Must be called before Start. tracker may be nil to disable.
+func (w *Watcher) SetBrainCrossProjectTracker(tracker BrainCrossProjectTracker) {
+	w.cpBrainTracker = tracker
 }
 
 // SetConfigChangeHandler registers a callback that is invoked whenever
@@ -536,6 +557,17 @@ func (w *Watcher) reparseFile(path, _ string) {
 		cpCtx, cpCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		w.cpTracker.DetectAndStore(cpCtx, path, w.store)
 		cpCancel()
+
+		// Tier 2: brain-enhanced detection runs async for languages Tier 1
+		// handles poorly (Python, dynamic imports, transitive deps).
+		// Fire-and-forget goroutine — never blocks the watcher loop.
+		if w.cpBrainTracker != nil {
+			go func(filePath string) {
+				brainCtx, brainCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer brainCancel()
+				w.cpBrainTracker.DetectAndStoreBrain(brainCtx, filePath, w.store)
+			}(path)
+		}
 	}
 
 	// Cross-project reactive propagation: if any linked-project node depends on

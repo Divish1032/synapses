@@ -1770,6 +1770,17 @@ func (s *Store) SavedAt() (time.Time, error) {
 	return time.Parse(time.RFC3339, raw)
 }
 
+// HasTable reports whether the given table exists in the SQLite database.
+// Used by federation to check if a sibling store has specific tables
+// (e.g., episodes, episodes_fts) without running probe queries.
+func (s *Store) HasTable(name string) bool {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','view') AND name = ?`, name,
+	).Scan(&n)
+	return err == nil && n > 0
+}
+
 // Stat reads only the meta key-value table and returns a ProjectStat without
 // loading any nodes or edges. This is the fast path used by 'synapses list'.
 func (s *Store) Stat(dbPath string) (*ProjectStat, error) {

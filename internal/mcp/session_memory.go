@@ -10,6 +10,7 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -22,6 +23,7 @@ type endSessionResult struct {
 	SessionSummary  *sessionSummary         `json:"session_summary,omitempty"`
 	MemoriesExpired int64                   `json:"memories_expired"`
 	Retrospective   *store.ToolCallSummary  `json:"retrospective,omitempty"`
+	ClaimsReleased  bool                    `json:"claims_released"`
 }
 
 // sessionSummary captures the structured extraction from a session.
@@ -86,9 +88,42 @@ func (s *Server) handleEndSession(
 		s.ClearSynapseSession(mcpSessionID)
 	}
 
+	// ── Phase 6: absorb release_claims ───────────────────────────────────
+	// Automatically release all work claims for this agent at session end.
+	// This saves agents from needing a separate release_claims call.
+	var claimsReleased bool
+	if err := s.store.ReleaseClaims(agentID); err == nil {
+		claimsReleased = true
+	}
+
+	// ── Phase 6: absorb report_usage ─────────────────────────────────────
+	// If the agent provided model/token data, report it to pulse in one call.
+	// This saves agents from needing a separate report_usage call at session end.
+	if pc := s.getPulseClient(); pc != nil {
+		usageModel, _ := req.GetArguments()["model"].(string)
+		usageProvider, _ := req.GetArguments()["provider"].(string)
+		inputTokens, _ := req.GetArguments()["input_tokens"].(float64)
+		outputTokens, _ := req.GetArguments()["output_tokens"].(float64)
+		costUSD, _ := req.GetArguments()["cost_usd"].(float64)
+		if usageModel != "" {
+			sessionID := agentID + ":" + s.projectID + ":" + time.Now().UTC().Format("2006-01-02")
+			go pc.RecordAgentLLMUsage(pulse.AgentLLMUsageEvent{
+				SessionID:    sessionID,
+				AgentID:      agentID,
+				ProjectID:    s.projectID,
+				Model:        usageModel,
+				Provider:     usageProvider,
+				InputTokens:  int(inputTokens),
+				OutputTokens: int(outputTokens),
+				CostUSD:      costUSD,
+			})
+		}
+	}
+
 	result := endSessionResult{
-		Status:  "ok",
-		AgentID: agentID,
+		Status:         "ok",
+		AgentID:        agentID,
+		ClaimsReleased: claimsReleased,
 	}
 
 	var memoriesSaved int
