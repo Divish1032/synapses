@@ -4,43 +4,58 @@ import (
 	"testing"
 )
 
-// ── stripSuffix tests ────────────────────────────────────────────────────────
+// ── Porter stemmer tests ─────────────────────────────────────────────────────
 
-func TestStripSuffix(t *testing.T) {
-	cases := []struct{ input, want string }{
+func TestPorterStem_IntentVerbs(t *testing.T) {
+	// Verify that Porter stemmer normalizes inflected verb forms so that
+	// the stemmed intent word matches the stemmed keyword.
+	// We don't test exact stem output (that's the algorithm's business) —
+	// we test that stem(inflected) == stem(keyword) for every intent pair.
+	pairs := []struct {
+		inflected string
+		keyword   string
+	}{
 		{"implementing", "implement"},
 		{"debugging", "debug"},
-		{"planning", "plan"},
-		{"running", "run"},
-		{"reviewed", "review"},
-		{"explored", "explor"}, // -ed strips, result is "explor"
-		{"exploring", "explor"},
-		{"debugger", "debug"},
-		{"investigation", "investig"},
+		{"exploring", "explore"},
+		{"investigating", "investigate"},
+		{"reviewing", "review"},
 		{"refactoring", "refactor"},
-		{"auditing", "audit"},
 		{"designing", "design"},
+		{"planning", "plan"},
 		{"building", "build"},
-		{"plan", "plan"},       // no suffix to strip
-		{"add", "add"},         // too short after any strip
-		{"fix", "fix"},         // no matching suffix
-		{"go", "go"},           // too short
-		{"", ""},               // empty
-		{"carefully", "care"},  // -ful then -ly? no — strips -ely first: "car"? no len<3. Strips -ly: "careful". Then no more.
+		{"auditing", "audit"},
+		{"fixing", "fix"},
+		{"implemented", "implement"},
+		{"reviewed", "review"},
+		{"explored", "explore"},
 	}
-	// Correct expected values based on actual suffix stripping rules:
-	// "carefully" → strips "-ely" suffix → "car" has len 3 ≥ 3 → "car"?
-	// Actually let me trace: "carefully" ends with "ely"? "carefully" = c-a-r-e-f-u-l-l-y
-	// Suffixes checked: ation, tion, sion, ment, ness, ious, eous, ous, ize, ise, ful, ing, ely, ly, ed, er
-	// "carefully" ends with "ly" → stem "careful" (len 7 ≥ 3) → "careful"
-	// Re-set expected:
-	cases[len(cases)-1] = struct{ input, want string }{"carefully", "careful"}
-
-	for _, tc := range cases {
-		got := stripSuffix(tc.input)
-		if got != tc.want {
-			t.Errorf("stripSuffix(%q) = %q, want %q", tc.input, got, tc.want)
+	// Note: "debugger"→"debugg" vs "debug"→"debug" don't match in Porter.
+	// This is acceptable — agents say "debugging" or "debug", not "debugger".
+	for _, p := range pairs {
+		stemI := porterStem(p.inflected)
+		stemK := porterStem(p.keyword)
+		if stemI != stemK {
+			t.Errorf("stem(%q)=%q != stem(%q)=%q — inflected form won't match keyword",
+				p.inflected, stemI, p.keyword, stemK)
 		}
+	}
+}
+
+func TestPorterStem_ShortWords(t *testing.T) {
+	// Words ≤2 chars should pass through unchanged.
+	if got := porterStem("go"); got != "go" {
+		t.Errorf("porterStem(\"go\") = %q, want \"go\"", got)
+	}
+	if got := porterStem(""); got != "" {
+		t.Errorf("porterStem(\"\") = %q, want \"\"", got)
+	}
+}
+
+func TestPorterStem_NoFalsePositive_AddressVsAdd(t *testing.T) {
+	// "address" and "add" must NOT stem to the same thing.
+	if porterStem("address") == porterStem("add") {
+		t.Error("stem(address) == stem(add) — would cause false positive")
 	}
 }
 

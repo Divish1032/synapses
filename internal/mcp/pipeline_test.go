@@ -282,6 +282,35 @@ func TestBuildDebugMarkdown_Deterministic(t *testing.T) {
 	}
 }
 
+// ── Benchmarks ───────────────────────────────────────────────────────────────
+
+func BenchmarkRunComponents_5Collectors(b *testing.B) {
+	// Measure goroutine overhead for the standard 5-component pipeline.
+	// Each collector does zero work — we're measuring pure scheduling cost.
+	noop := func(_ context.Context) []tieredSection { return nil }
+	specs := []componentSpec{
+		{name: "violations", timeoutMs: 50, collector: noop},
+		{name: "gaps", timeoutMs: 50, collector: noop},
+		{name: "brain", timeoutMs: 200, collector: noop},
+		{name: "annotations", timeoutMs: 50, collector: noop},
+		{name: "cross_project", timeoutMs: 500, collector: noop},
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		runComponents(context.Background(), nil, "bench", specs)
+	}
+}
+
+func BenchmarkRunComponents_SingleCollector(b *testing.B) {
+	// Fast-path: single collector should have minimal overhead.
+	noop := func(_ context.Context) []tieredSection { return nil }
+	specs := []componentSpec{{name: "only", timeoutMs: 50, collector: noop}}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		runComponents(context.Background(), nil, "bench", specs)
+	}
+}
+
 // ── get_working_state entity impact enrichment ───────────────────────────────
 
 func TestGetWorkingState_EntityImpactEnrichment(t *testing.T) {
