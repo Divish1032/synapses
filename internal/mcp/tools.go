@@ -4542,23 +4542,26 @@ func (s *Server) handleGetImpact(
 
 	// Cross-project impact: when projects= is specified, include cross-project
 	// dependency status so the agent sees the full blast radius including siblings.
-	resp := map[string]interface{}{
-		"impact": result,
-	}
+	// Uses an embedding wrapper to preserve the flat ImpactResult JSON shape
+	// (all existing fields at top level) while adding cross_project_deps.
 	projectsParam, _ := req.GetArguments()["projects"].(string)
 	if projectsParam != "" && s.federationResolver != nil && s.store != nil {
 		fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
 		crossDeps := s.federationResolver.GetDepsForEntity(fedCtx, string(root.ID), s.store)
 		fedCancel()
 		if len(crossDeps) > 0 {
-			resp["cross_project_deps"] = crossDeps
+			type impactWithFederation struct {
+				*graph.ImpactResult
+				CrossProjectDeps []federation.CrossProjectDepStatus `json:"cross_project_deps,omitempty"`
+			}
+			return jsonResult(impactWithFederation{
+				ImpactResult:     result,
+				CrossProjectDeps: crossDeps,
+			})
 		}
 	}
-	if len(resp) == 1 {
-		// No federation data — return the impact result directly (backward compat).
-		return jsonResult(result)
-	}
-	return jsonResult(resp)
+
+	return jsonResult(result)
 }
 
 // applyImpactTokenBudget truncates an ImpactResult to fit within the token budget
