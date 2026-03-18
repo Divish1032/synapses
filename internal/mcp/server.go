@@ -1209,6 +1209,9 @@ func (s *Server) registerTools() {
 			mcp.WithNumber("depth",
 				mcp.Description("Max hop depth. Default 3, max 10."),
 			),
+			mcp.WithNumber("token_budget",
+				mcp.Description("Max response size in tokens (default 2000). When exceeded, peripheral (depth 3+) nodes are dropped first, then indirect (depth 2). Direct callers (depth 1) are always kept. Response includes truncated=true when trimmed."),
+			),
 		),
 		s.handleGetImpact,
 	)
