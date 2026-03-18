@@ -88,8 +88,10 @@ var (
 	reGoAddOrDefer = regexp.MustCompile(`\baddOrDefer\s*\(`)
 	// Extracts tool name from: mcp.NewTool("tool_name", or NewTool("tool_name",
 	reGoNewTool = regexp.MustCompile(`NewTool\s*\(\s*"([^"]+)"`)
-	// Extracts handler method reference: s.handleXxx, or s.handleXxx)
-	reGoHandlerRef = regexp.MustCompile(`\b(?:s|server)\.(handle\w+)\s*[,)]`)
+	// Extracts handler method reference on its own token boundary.
+	// Anchored to beginning-of-token (not start-of-line) so it matches both
+	// single-line and multi-line addOrDefer calls.
+	reGoHandlerRef = regexp.MustCompile(`\b(?:s|server)\.(handle\w+)\b`)
 )
 
 // ExtractRouteRegistrations scans src for handler registration patterns and
@@ -255,64 +257,70 @@ func extractGoRoutes(filePath string, src []byte) []RouteRegistration {
 	return out
 }
 
+// mcpBlockWindow is the maximum number of lines to scan forward from an
+// addOrDefer call when looking for the tool name and handler reference.
+// 60 lines comfortably covers any real mcp.NewTool() call with long descriptions.
+const mcpBlockWindow = 60
+
 // extractMCPHandlerRegistrations scans for addOrDefer(mcp.NewTool("name",...), s.handleXxx)
 // patterns and returns RouteRegistration entries with Method="mcp" and Path=toolName.
+//
+// Design: uses a forward window (mcpBlockWindow lines) instead of paren-depth
+// counting so that parentheses inside string literals — e.g.
+// mcp.WithDescription("foo (bar)") — do not confuse block-end detection.
+//
+// Block isolation guarantee: if the window encounters a second addOrDefer before
+// finding a handler reference, the current block is considered handler-less and
+// scanning stops. The outer loop resumes at that new addOrDefer naturally, so no
+// block is skipped and no handler is stolen across block boundaries.
 func extractMCPHandlerRegistrations(filePath string, lines [][]byte, reEnclosing *regexp.Regexp) []RouteRegistration {
 	var out []RouteRegistration
-	inBlock := false
-	toolName := ""
-	startLine := 0
-	depth := 0
 
 	for i, rawLine := range lines {
-		line := string(rawLine)
+		if !reGoAddOrDefer.MatchString(string(rawLine)) {
+			continue
+		}
+		startLine := i + 1
+		toolName := ""
 
-		if !inBlock {
-			if reGoAddOrDefer.MatchString(line) {
-				inBlock = true
-				depth = strings.Count(line, "(") - strings.Count(line, ")")
-				startLine = i + 1
-				if m := reGoNewTool.FindStringSubmatch(line); m != nil {
+		// Scan this line and up to mcpBlockWindow following lines.
+		limit := i + mcpBlockWindow
+		if limit > len(lines) {
+			limit = len(lines)
+		}
+		for j := i; j < limit; j++ {
+			wline := string(lines[j])
+
+			// Block-boundary sentinel: a new addOrDefer on a subsequent line
+			// means the current block ended without a handler. Stop here so
+			// the outer loop picks up the new block at index j without
+			// cross-contaminating handlers between adjacent blocks.
+			if j > i && reGoAddOrDefer.MatchString(wline) {
+				break
+			}
+
+			// Collect tool name from the first NewTool("...") seen in the window.
+			if toolName == "" {
+				if m := reGoNewTool.FindStringSubmatch(wline); m != nil {
 					toolName = m[1]
 				}
 			}
-			continue
-		}
 
-		// Track brace depth to detect end of addOrDefer block.
-		depth += strings.Count(line, "(") - strings.Count(line, ")")
-
-		// Collect tool name if not yet found.
-		if toolName == "" {
-			if m := reGoNewTool.FindStringSubmatch(line); m != nil {
-				toolName = m[1]
+			// Handler reference terminates this block.
+			if m := reGoHandlerRef.FindStringSubmatch(wline); m != nil {
+				if toolName != "" {
+					out = append(out, RouteRegistration{
+						File:        filePath,
+						Line:        startLine,
+						Method:      "mcp",
+						Path:        toolName,
+						Handler:     m[1],
+						EnclosingFn: findEnclosingFunc(lines, i, reEnclosing),
+						Confidence:  0.85,
+					})
+				}
+				break
 			}
-		}
-
-		// Look for handler reference: s.handleXxx, or s.handleXxx)
-		if m := reGoHandlerRef.FindStringSubmatch(line); m != nil {
-			if toolName != "" {
-				out = append(out, RouteRegistration{
-					File:        filePath,
-					Line:        startLine,
-					Method:      "mcp",
-					Path:        toolName,
-					Handler:     m[1],
-					EnclosingFn: findEnclosingFunc(lines, i, reEnclosing),
-					Confidence:  0.85,
-				})
-			}
-			inBlock = false
-			toolName = ""
-			depth = 0
-			continue
-		}
-
-		// End of block with no handler found.
-		if depth <= 0 {
-			inBlock = false
-			toolName = ""
-			depth = 0
 		}
 	}
 	return out

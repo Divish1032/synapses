@@ -79,25 +79,20 @@ func extractGoStructFields(root sitter.Node, src []byte) map[string][]string {
 					if fieldDecl.IsNull() || fieldDecl.Type() != "field_declaration" {
 						continue
 					}
-					// Collect field_identifier children (the names) and the type node.
+					// Collect all field_identifier children (the names).
 					var names []string
-					var typeText string
 					for m := uint32(0); m < fieldDecl.ChildCount(); m++ {
 						fc := fieldDecl.Child(m)
-						if fc.IsNull() {
-							continue
-						}
-						switch fc.Type() {
-						case "field_identifier":
+						if !fc.IsNull() && fc.Type() == "field_identifier" {
 							names = append(names, string(src[fc.StartByte():fc.EndByte()]))
-						case "raw_string_literal", "interpreted_string_literal":
-							// struct tag — skip
-						default:
-							if len(names) > 0 && typeText == "" {
-								// First non-name, non-tag child after names is the type.
-								typeText = strings.Join(strings.Fields(string(src[fc.StartByte():fc.EndByte()])), " ")
-							}
 						}
+					}
+					// Use the named "type" field for reliable type extraction — avoids
+					// guessing by position and correctly handles pointer, slice, map,
+					// chan, and func types whose child ordering varies.
+					var typeText string
+					if tn := fieldDecl.ChildByFieldName("type"); !tn.IsNull() {
+						typeText = strings.Join(strings.Fields(string(src[tn.StartByte():tn.EndByte()])), " ")
 					}
 					if len(names) == 0 {
 						// Embedded/anonymous field: the whole declaration text is the type.

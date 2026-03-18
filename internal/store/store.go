@@ -474,6 +474,23 @@ CREATE TRIGGER IF NOT EXISTS episodes_au AFTER UPDATE ON episodes BEGIN
     INSERT INTO episodes_fts(rowid, decision, rationale, trigger, tags)
     VALUES (new.rowid, new.decision, new.rationale, new.trigger, new.tags);
 END;
+
+-- Cross-project dependency tracking: records which local entities depend on
+-- entities in federated sibling projects. Populated at index time by the
+-- federation tracker (Tier 1: deterministic, Tier 2: brain LLM).
+-- Used by session_init for git-based drift detection.
+CREATE TABLE IF NOT EXISTS cross_project_deps (
+    from_entity     TEXT NOT NULL,
+    to_project      TEXT NOT NULL,
+    to_entity       TEXT NOT NULL,
+    to_file         TEXT NOT NULL,
+    verified_commit TEXT NOT NULL,
+    verified_at     TEXT NOT NULL,
+    detection_tier  TEXT NOT NULL DEFAULT 'tier1',
+    PRIMARY KEY (from_entity, to_project, to_entity)
+);
+CREATE INDEX IF NOT EXISTS idx_cross_deps_project ON cross_project_deps(to_project);
+CREATE INDEX IF NOT EXISTS idx_cross_deps_file    ON cross_project_deps(to_project, to_file);
 `
 
 // Store wraps a SQLite database and provides graph serialisation.
@@ -748,6 +765,19 @@ func Open(path string) (*Store, error) {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_tasks_session ON session_tasks(session_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_tasks_task    ON session_tasks(task_id)`,
+		// RX2: Cross-project federation — dependency tracking table.
+		`CREATE TABLE IF NOT EXISTS cross_project_deps (
+			from_entity     TEXT NOT NULL,
+			to_project      TEXT NOT NULL,
+			to_entity       TEXT NOT NULL,
+			to_file         TEXT NOT NULL,
+			verified_commit TEXT NOT NULL,
+			verified_at     TEXT NOT NULL,
+			detection_tier  TEXT NOT NULL DEFAULT 'tier1',
+			PRIMARY KEY (from_entity, to_project, to_entity)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_cross_deps_project ON cross_project_deps(to_project)`,
+		`CREATE INDEX IF NOT EXISTS idx_cross_deps_file    ON cross_project_deps(to_project, to_file)`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
 			db.Close()

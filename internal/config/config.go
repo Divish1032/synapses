@@ -108,6 +108,13 @@ type Config struct {
 	// set via the SYNAPSES_PEER_API_TOKEN environment variable (env wins).
 	PeerAPIToken string `json:"peer_api_token,omitempty"`
 
+	// Federation is a list of local sibling projects whose SQLite stores are
+	// queried read-only for cross-project dependency tracking and drift detection.
+	// Unlike Peers (HTTP-based), federation uses direct filesystem access — no
+	// running daemon required. Paths may be absolute or relative to the directory
+	// containing synapses.json.
+	Federation []FederationEntry `json:"federation,omitempty"`
+
 	// Peers is the list of remote synapses instances this project connects to.
 	Peers []PeerConfig `json:"peers,omitempty"`
 
@@ -229,6 +236,18 @@ type SessionConfig struct {
 	// background agents.
 	// Example: stale_threshold_mins: 30
 	StaleThresholdMins int `json:"stale_threshold_mins,omitempty"`
+}
+
+// FederationEntry describes a local sibling project to query across.
+// Unlike Peers (HTTP-based remote instances), federation entries use
+// direct SQLite read-only access — no running daemon required.
+type FederationEntry struct {
+	// Path is the filesystem path to the sibling project root.
+	// May be absolute or relative to the directory containing synapses.json.
+	Path string `json:"path"`
+	// Alias is a short name used in MCP tool params and response labels.
+	// Must not contain whitespace. Must be unique across all entries.
+	Alias string `json:"alias"`
 }
 
 // PeerConfig describes a remote synapses peer instance to connect to.
@@ -457,6 +476,13 @@ func Load(dir string) (*Config, error) {
 			cfg.Linked[i] = filepath.Join(dir, p)
 		}
 	}
+
+	// Resolve relative Federation paths against the directory that holds the config.
+	for i, f := range cfg.Federation {
+		if !filepath.IsAbs(f.Path) {
+			cfg.Federation[i].Path = filepath.Join(dir, f.Path)
+		}
+	}
 	return &cfg, nil
 }
 
@@ -629,6 +655,23 @@ func (c *Config) validate() error {
 		if r.Severity != "error" && r.Severity != "warning" {
 			return fmt.Errorf("rule %q: severity must be 'error' or 'warning'", r.ID)
 		}
+	}
+	// Validate federation entries: alias must be non-empty and unique.
+	seen := make(map[string]bool, len(c.Federation))
+	for i, f := range c.Federation {
+		if f.Alias == "" {
+			return fmt.Errorf("federation[%d]: alias is required", i)
+		}
+		if f.Path == "" {
+			return fmt.Errorf("federation[%d] %q: path is required", i, f.Alias)
+		}
+		if strings.ContainsAny(f.Alias, " \t\n\r") {
+			return fmt.Errorf("federation[%d] %q: alias must not contain whitespace", i, f.Alias)
+		}
+		if seen[f.Alias] {
+			return fmt.Errorf("federation[%d] %q: duplicate alias", i, f.Alias)
+		}
+		seen[f.Alias] = true
 	}
 	return nil
 }
