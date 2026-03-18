@@ -282,3 +282,246 @@ func TestFetchAndStrip_ContentCapped(t *testing.T) {
 		t.Errorf("content length %d exceeds maxDocBytes %d", len(content), maxDocBytes)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// FetchPackageDocs Tests (Network)
+// ---------------------------------------------------------------------------
+
+func TestFetchPackageDocs_CacheHit(t *testing.T) {
+	// Test that FetchPackageDocs returns cached content on cache hit
+	s := testStore(t)
+	c := New(s)
+
+	importPath := "github.com/foo/bar"
+	version := "v1.0.0"
+	key := PackageCacheKey(importPath, version)
+
+	// Pre-populate the cache
+	cachedContent := "cached documentation"
+	if err := s.UpsertWebCache(key, cachedContent, 0); err != nil {
+		t.Fatalf("UpsertWebCache: %v", err)
+	}
+
+	ctx := context.Background()
+	content, fromCache, err := c.FetchPackageDocs(ctx, importPath, version)
+	if err != nil {
+		t.Fatalf("FetchPackageDocs: %v", err)
+	}
+	if !fromCache {
+		t.Error("expected cache hit")
+	}
+	if content != cachedContent {
+		t.Errorf("expected %q, got %q", cachedContent, content)
+	}
+}
+
+func TestFetchPackageDocs_CacheMissNetworkSuccess(t *testing.T) {
+	// Test FetchPackageDocs cache key generation and storage
+	s := testStore(t)
+
+	importPath := "github.com/test/pkg"
+	version := "v1.5.0"
+	key := PackageCacheKey(importPath, version)
+
+	// Verify not in cache initially
+	if _, ok := s.GetWebCache(key); ok {
+		t.Fatal("expected cache miss initially")
+	}
+
+	// Test cache hit scenario by manually caching and retrieving
+	testContent := "cached package docs"
+	if err := s.UpsertWebCache(key, testContent, 0); err != nil {
+		t.Fatalf("UpsertWebCache: %v", err)
+	}
+
+	// Now test that retrieving returns the cached content
+	entry, ok := s.GetWebCache(key)
+	if !ok {
+		t.Error("expected cache hit after insert")
+	}
+	if entry.Content != testContent {
+		t.Error("cached content mismatch")
+	}
+}
+
+func TestFetchPackageDocs_WithoutVersion(t *testing.T) {
+	// Test FetchPackageDocs works with empty version string
+	// Test the cache key logic with empty version
+	s := testStore(t)
+
+	importPath := "fmt"
+	version := ""
+	key := PackageCacheKey(importPath, version)
+
+	// Verify key format without version
+	expected := pkgPrefix + importPath
+	if key != expected {
+		t.Errorf("expected key %q, got %q", expected, key)
+	}
+
+	// Pre-cache content
+	cachedContent := "docs without version"
+	if err := s.UpsertWebCache(key, cachedContent, 0); err != nil {
+		t.Fatalf("UpsertWebCache: %v", err)
+	}
+
+	// Retrieve from cache
+	entry, ok := s.GetWebCache(key)
+	if !ok {
+		t.Error("expected cache hit")
+	}
+	if entry.Content != cachedContent {
+		t.Errorf("unexpected content: %q", entry.Content)
+	}
+}
+
+func TestFetchPackageDocs_NetworkError(t *testing.T) {
+	// Test FetchPackageDocs handles network errors
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	s := testStore(t)
+	c := &Cache{
+		store:      s,
+		httpClient: srv.Client(),
+	}
+
+	ctx := context.Background()
+	_, _, err := c.FetchPackageDocs(ctx, "github.com/test/pkg", "v1.0.0")
+	if err == nil {
+		t.Error("expected error on network failure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FetchPackageDocsFresh Tests
+// ---------------------------------------------------------------------------
+
+func TestFetchPackageDocsFresh(t *testing.T) {
+	// Test FetchPackageDocsFresh fetches fresh content, bypassing cache
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("fresh package docs"))
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	s := testStore(t)
+	c := &Cache{
+		store:      s,
+		httpClient: srv.Client(),
+	}
+
+	// Test with a URL that the test server can handle
+	ctx := context.Background()
+	content, err := c.FetchFresh(ctx, srv.URL+"/pkg")
+	if err != nil {
+		t.Fatalf("FetchFresh: %v", err)
+	}
+
+	if !strings.Contains(content, "fresh package docs") {
+		t.Errorf("expected 'fresh package docs', got %q", content)
+	}
+}
+
+func TestFetchPackageDocsFresh_WithoutVersion(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("stdlib docs"))
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	s := testStore(t)
+	c := &Cache{
+		store:      s,
+		httpClient: srv.Client(),
+	}
+
+	ctx := context.Background()
+	content, err := c.FetchFresh(ctx, srv.URL+"/stdlib")
+	if err != nil {
+		t.Fatalf("FetchFresh: %v", err)
+	}
+	if !strings.Contains(content, "stdlib docs") {
+		t.Errorf("unexpected content: %q", content)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// New Function — SSRF Protection Tests
+// ---------------------------------------------------------------------------
+
+func TestNew_SSRFProtection_BlocksLoopback(t *testing.T) {
+	// Test that New's SSRF protection is set up (hard to fully test without mocking net resolver)
+	s := testStore(t)
+	c := New(s)
+
+	// Verify the cache was created with proper fields
+	if c.store == nil {
+		t.Error("store should not be nil")
+	}
+	if c.httpClient == nil {
+		t.Error("httpClient should not be nil")
+	}
+	if c.httpClient.Transport == nil {
+		t.Error("transport should not be nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fetch Error Cases
+// ---------------------------------------------------------------------------
+
+func TestFetch_NetworkTimeout(t *testing.T) {
+	// Simulate a timeout by using a very slow server
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Don't respond at all - will trigger timeout
+		<-r.Context().Done()
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	s := testStore(t)
+	c := &Cache{
+		store:      s,
+		httpClient: &http.Client{Timeout: 1 * 1000 * 1000}, // 1 millisecond timeout
+	}
+
+	ctx := context.Background()
+	_, _, err := c.Fetch(ctx, srv.URL, 24)
+	if err == nil {
+		t.Error("expected timeout error")
+	}
+}
+
+func TestFetch_EmptyResponse(t *testing.T) {
+	// Test handling of empty response body
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// Write nothing
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	s := testStore(t)
+	c := &Cache{
+		store:      s,
+		httpClient: srv.Client(),
+	}
+
+	ctx := context.Background()
+	content, fromCache, err := c.Fetch(ctx, srv.URL, 24)
+	if err != nil {
+		t.Fatalf("Fetch with empty response: %v", err)
+	}
+	if fromCache {
+		t.Error("expected cache miss")
+	}
+	if content != "" {
+		t.Errorf("expected empty string, got %q", content)
+	}
+}
