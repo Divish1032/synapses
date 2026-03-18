@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,9 +40,21 @@ func createSiblingWithDefaultPath(t *testing.T, projectDir, repoID string, nodes
 
 func sampleNodesFor(repoID string) []*graph.Node {
 	return []*graph.Node{
-		{ID: graph.NodeID(repoID + "::pkg/auth.go::AuthService"), Name: "AuthService", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 10, Exported: true},
-		{ID: graph.NodeID(repoID + "::pkg/auth.go::Server.Validate"), Name: "Server.Validate", Type: graph.NodeMethod, File: "pkg/auth.go", Line: 50, Exported: true},
-		{ID: graph.NodeID(repoID + "::pkg/db.go::Connect"), Name: "Connect", Type: graph.NodeFunction, File: "pkg/db.go", Line: 5, Exported: true},
+		{ID: graph.NodeID(repoID + "::pkg/auth.go::AuthService"), Name: "AuthService", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 10, Exported: true,
+			Metadata: map[string]string{"signature": "func AuthService()"}},
+		{ID: graph.NodeID(repoID + "::pkg/auth.go::Server.Validate"), Name: "Server.Validate", Type: graph.NodeMethod, File: "pkg/auth.go", Line: 50, Exported: true,
+			Metadata: map[string]string{"signature": "func (s *Server) Validate(token string) bool"}},
+		{ID: graph.NodeID(repoID + "::pkg/db.go::Connect"), Name: "Connect", Type: graph.NodeFunction, File: "pkg/db.go", Line: 5, Exported: true,
+			Metadata: map[string]string{"signature": "func Connect() (*DB, error)"}},
+	}
+}
+
+// sampleNodesWithSig creates a sibling node with a specific signature.
+func sampleNodeWithSig(repoID, name, file string, sig string) []*graph.Node {
+	return []*graph.Node{
+		{ID: graph.NodeID(repoID + "::" + file + "::" + name), Name: name,
+			Type: graph.NodeFunction, File: file, Line: 1, Exported: true,
+			Metadata: map[string]string{"signature": sig}},
 	}
 }
 
@@ -510,22 +523,26 @@ func TestCheckDrift_SameHead_NoDrift(t *testing.T) {
 	}
 }
 
-func TestCheckDrift_HeadChanged_NoAffectedFiles(t *testing.T) {
+func TestCheckDrift_HeadChanged_NoAffectedFiles_GraphFirst(t *testing.T) {
 	sibDir := t.TempDir()
 	oldHead := initGitRepoExt(t, sibDir, map[string]string{
 		"pkg/auth.go": "package auth\nfunc Validate(token string) bool { return true }",
 		"pkg/db.go":   "package db\nfunc Connect() {}",
 	})
-	// Change db.go (not auth.go which is the dep file).
 	commitChangeExt(t, sibDir, "pkg/db.go", "package db\nfunc Connect(ctx context.Context) {}", "change db")
-	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+	// Sibling store has same Validate signature.
+	createSiblingWithDefaultPath(t, sibDir, "sibling",
+		sampleNodeWithSig("sibling", "Validate", "pkg/auth.go", "func Validate(token string) bool"))
 
 	localStore := openTestStore(t)
 	now := time.Now().UTC().Format(time.RFC3339)
 	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
 		FromEntity: "local::main.go::Handler", ToProject: "sibling",
 		ToEntity: "Validate", ToFile: "pkg/auth.go",
-		VerifiedCommit: oldHead, VerifiedAt: now, DetectionTier: "tier1",
+		VerifiedCommit:    oldHead,
+		VerifiedAt:        now,
+		DetectionTier:     "tier1",
+		VerifiedSignature: "func Validate(token string) bool",
 	})
 
 	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
@@ -533,11 +550,13 @@ func TestCheckDrift_HeadChanged_NoAffectedFiles(t *testing.T) {
 
 	alerts := r.CheckDrift(bg(), localStore)
 	if len(alerts) != 0 {
-		t.Errorf("expected 0 alerts (dep file unchanged), got %d: %+v", len(alerts), alerts)
+		t.Errorf("expected 0 alerts (signature unchanged in graph), got %d: %+v", len(alerts), alerts)
 	}
 }
 
-func TestCheckDrift_SignatureChanged_Alert(t *testing.T) {
+func TestCheckDrift_SignatureChanged_GraphFirst(t *testing.T) {
+	// Graph-first: sibling store has new signature, dep has old verified_signature.
+	// No git diff needed — graph comparison detects the change.
 	sibDir := t.TempDir()
 	oldHead := initGitRepoExt(t, sibDir, map[string]string{
 		"pkg/auth.go": "package auth\nfunc Validate(token string) bool { return true }",
@@ -545,14 +564,19 @@ func TestCheckDrift_SignatureChanged_Alert(t *testing.T) {
 	commitChangeExt(t, sibDir, "pkg/auth.go",
 		"package auth\nfunc Validate(token string, opts ...Option) bool { return true }",
 		"add opts param")
-	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+	// Sibling store has the NEW signature (as if sibling was re-indexed after the change).
+	createSiblingWithDefaultPath(t, sibDir, "sibling",
+		sampleNodeWithSig("sibling", "Validate", "pkg/auth.go", "func Validate(token string, opts ...Option) bool"))
 
 	localStore := openTestStore(t)
 	now := time.Now().UTC().Format(time.RFC3339)
 	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
 		FromEntity: "local::main.go::Handler", ToProject: "sibling",
 		ToEntity: "Validate", ToFile: "pkg/auth.go",
-		VerifiedCommit: oldHead, VerifiedAt: now, DetectionTier: "tier1",
+		VerifiedCommit:    oldHead,
+		VerifiedAt:        now,
+		DetectionTier:     "tier1",
+		VerifiedSignature: "func Validate(token string) bool", // OLD signature
 	})
 
 	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
@@ -571,23 +595,32 @@ func TestCheckDrift_SignatureChanged_Alert(t *testing.T) {
 	if alerts[0].Entity != "Validate" {
 		t.Errorf("expected entity Validate, got %q", alerts[0].Entity)
 	}
+	// Graph-first produces structural diff, not raw diff text.
+	if !strings.Contains(alerts[0].DiffSummary, "Params:") {
+		t.Errorf("expected structural diff summary with 'Params:', got %q", alerts[0].DiffSummary)
+	}
 }
 
-func TestCheckDrift_EntityRemoved_Alert(t *testing.T) {
+func TestCheckDrift_EntityRemoved_GraphFirst(t *testing.T) {
 	sibDir := t.TempDir()
 	oldHead := initGitRepoExt(t, sibDir, map[string]string{
 		"pkg/auth.go": "package auth\nfunc Validate(token string) bool { return true }",
 	})
-	// Remove the function from the file (but keep the file).
 	commitChangeExt(t, sibDir, "pkg/auth.go", "package auth\n// Validate was removed\n", "remove validate")
-	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+	// Sibling store does NOT have Validate anymore (re-indexed after removal).
+	// Use nodes that don't include Validate.
+	createSiblingWithDefaultPath(t, sibDir, "sibling",
+		sampleNodeWithSig("sibling", "OtherFunc", "pkg/auth.go", "func OtherFunc()"))
 
 	localStore := openTestStore(t)
 	now := time.Now().UTC().Format(time.RFC3339)
 	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
 		FromEntity: "local::main.go::Handler", ToProject: "sibling",
 		ToEntity: "Validate", ToFile: "pkg/auth.go",
-		VerifiedCommit: oldHead, VerifiedAt: now, DetectionTier: "tier1",
+		VerifiedCommit:    oldHead,
+		VerifiedAt:        now,
+		DetectionTier:     "tier1",
+		VerifiedSignature: "func Validate(token string) bool",
 	})
 
 	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
@@ -602,23 +635,27 @@ func TestCheckDrift_EntityRemoved_Alert(t *testing.T) {
 	}
 }
 
-func TestCheckDrift_FileChangedEntityUntouched_NoAlert(t *testing.T) {
+func TestCheckDrift_FileChangedEntityUntouched_GraphFirst_NoAlert(t *testing.T) {
 	sibDir := t.TempDir()
 	oldHead := initGitRepoExt(t, sibDir, map[string]string{
 		"pkg/auth.go": "package auth\n\nfunc Validate(token string) bool { return true }\n\nfunc Other() {}\n",
 	})
-	// Change Other() but not Validate().
 	commitChangeExt(t, sibDir, "pkg/auth.go",
 		"package auth\n\nfunc Validate(token string) bool { return true }\n\nfunc Other(ctx context.Context) {}\n",
 		"change other")
-	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+	// Sibling store has same Validate signature (unchanged).
+	createSiblingWithDefaultPath(t, sibDir, "sibling",
+		sampleNodeWithSig("sibling", "Validate", "pkg/auth.go", "func Validate(token string) bool"))
 
 	localStore := openTestStore(t)
 	now := time.Now().UTC().Format(time.RFC3339)
 	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
 		FromEntity: "local::main.go::Handler", ToProject: "sibling",
 		ToEntity: "Validate", ToFile: "pkg/auth.go",
-		VerifiedCommit: oldHead, VerifiedAt: now, DetectionTier: "tier1",
+		VerifiedCommit:    oldHead,
+		VerifiedAt:        now,
+		DetectionTier:     "tier1",
+		VerifiedSignature: "func Validate(token string) bool", // same as current
 	})
 
 	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
@@ -626,7 +663,7 @@ func TestCheckDrift_FileChangedEntityUntouched_NoAlert(t *testing.T) {
 
 	alerts := r.CheckDrift(bg(), localStore)
 	if len(alerts) != 0 {
-		t.Errorf("expected 0 alerts (entity untouched), got %d: %+v", len(alerts), alerts)
+		t.Errorf("expected 0 alerts (signature unchanged in graph), got %d: %+v", len(alerts), alerts)
 	}
 }
 
@@ -682,14 +719,18 @@ func TestCheckDrift_CachedResults(t *testing.T) {
 	commitChangeExt(t, sibDir, "pkg/auth.go",
 		"package auth\nfunc Validate(token string, opts ...Option) bool { return true }",
 		"change validate")
-	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+	createSiblingWithDefaultPath(t, sibDir, "sibling",
+		sampleNodeWithSig("sibling", "Validate", "pkg/auth.go", "func Validate(token string, opts ...Option) bool"))
 
 	localStore := openTestStore(t)
 	now := time.Now().UTC().Format(time.RFC3339)
 	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
 		FromEntity: "local::main.go::Handler", ToProject: "sibling",
 		ToEntity: "Validate", ToFile: "pkg/auth.go",
-		VerifiedCommit: oldHead, VerifiedAt: now, DetectionTier: "tier1",
+		VerifiedCommit:    oldHead,
+		VerifiedAt:        now,
+		DetectionTier:     "tier1",
+		VerifiedSignature: "func Validate(token string) bool",
 	})
 
 	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
@@ -711,14 +752,18 @@ func TestCheckDrift_SignatureChanged_HasLastVerified(t *testing.T) {
 	commitChangeExt(t, sibDir, "pkg/auth.go",
 		"package auth\nfunc Validate(token string, opts ...Option) bool { return true }",
 		"change validate")
-	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+	createSiblingWithDefaultPath(t, sibDir, "sibling",
+		sampleNodeWithSig("sibling", "Validate", "pkg/auth.go", "func Validate(token string, opts ...Option) bool"))
 
 	localStore := openTestStore(t)
 	verifiedAt := "2026-03-18T10:00:00Z"
 	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
 		FromEntity: "local::main.go::Handler", ToProject: "sibling",
 		ToEntity: "Validate", ToFile: "pkg/auth.go",
-		VerifiedCommit: oldHead, VerifiedAt: verifiedAt, DetectionTier: "tier1",
+		VerifiedCommit:    oldHead,
+		VerifiedAt:        verifiedAt,
+		DetectionTier:     "tier1",
+		VerifiedSignature: "func Validate(token string) bool",
 	})
 
 	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
@@ -741,16 +786,19 @@ func TestCheckDrift_MultipleCallers_MergedIntoOneAlert(t *testing.T) {
 	commitChangeExt(t, sibDir, "pkg/auth.go",
 		"package auth\nfunc Validate(token string, opts ...Option) bool { return true }",
 		"change validate")
-	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+	createSiblingWithDefaultPath(t, sibDir, "sibling",
+		sampleNodeWithSig("sibling", "Validate", "pkg/auth.go", "func Validate(token string, opts ...Option) bool"))
 
 	localStore := openTestStore(t)
 	now := time.Now().UTC().Format(time.RFC3339)
-	// 3 local entities depend on the same sibling entity.
 	for _, caller := range []string{"local::a.go::HandlerA", "local::b.go::HandlerB", "local::c.go::HandlerC"} {
 		localStore.UpsertCrossProjectDep(store.CrossProjectDep{
 			FromEntity: caller, ToProject: "sibling",
 			ToEntity: "Validate", ToFile: "pkg/auth.go",
-			VerifiedCommit: oldHead, VerifiedAt: now, DetectionTier: "tier1",
+			VerifiedCommit:    oldHead,
+			VerifiedAt:        now,
+			DetectionTier:     "tier1",
+			VerifiedSignature: "func Validate(token string) bool",
 		})
 	}
 
@@ -826,6 +874,194 @@ func TestCheckDrift_FallbackNoStoredSignature_NoAlert(t *testing.T) {
 	alerts := r.CheckDrift(bg(), localStore)
 	if len(alerts) != 0 {
 		t.Errorf("expected 0 alerts (no stored sig), got %d: %+v", len(alerts), alerts)
+	}
+}
+
+// ── Graph-first specific tests ──────────────────────────────────────────────
+
+func TestCheckDrift_GraphFirst_SibStoreUnavailable_FallsBackToGitDiff(t *testing.T) {
+	// Sibling has a git repo but NO store → should fall back to git diff + regex.
+	sibDir := t.TempDir()
+	oldHead := initGitRepoExt(t, sibDir, map[string]string{
+		"pkg/auth.go": "package auth\nfunc Validate(token string) bool { return true }",
+	})
+	commitChangeExt(t, sibDir, "pkg/auth.go",
+		"package auth\nfunc Validate(token string, opts ...Option) bool { return true }",
+		"change validate")
+	// Do NOT create sibling store — forces git diff fallback.
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sibling",
+		ToEntity: "Validate", ToFile: "pkg/auth.go",
+		VerifiedCommit:    oldHead,
+		VerifiedAt:        now,
+		DetectionTier:     "tier1",
+		VerifiedSignature: "func Validate(token string) bool",
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), localStore)
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert from git diff fallback, got %d: %+v", len(alerts), alerts)
+	}
+	if alerts[0].Change != "signature_changed" {
+		t.Errorf("expected signature_changed, got %q", alerts[0].Change)
+	}
+}
+
+func TestCheckDrift_GraphFirst_LegacyDep_SilentlyUpdated(t *testing.T) {
+	// Dep with empty VerifiedSignature (legacy) — graph-first can't compare,
+	// silently updates verified_commit.
+	sibDir := t.TempDir()
+	oldHead := initGitRepoExt(t, sibDir, map[string]string{
+		"pkg/auth.go": "package auth\nfunc Validate(token string) bool { return true }",
+	})
+	commitChangeExt(t, sibDir, "pkg/auth.go",
+		"package auth\nfunc Validate(token string, opts ...Option) bool { return true }",
+		"change validate")
+	createSiblingWithDefaultPath(t, sibDir, "sibling",
+		sampleNodeWithSig("sibling", "Validate", "pkg/auth.go", "func Validate(token string, opts ...Option) bool"))
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sibling",
+		ToEntity: "Validate", ToFile: "pkg/auth.go",
+		VerifiedCommit:    oldHead,
+		VerifiedAt:        now,
+		DetectionTier:     "tier1",
+		VerifiedSignature: "", // legacy — no stored signature
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), localStore)
+	if len(alerts) != 0 {
+		t.Errorf("expected 0 alerts for legacy dep, got %d: %+v", len(alerts), alerts)
+	}
+}
+
+func TestCheckDrift_GraphFirst_ReturnTypeChanged(t *testing.T) {
+	sibDir := t.TempDir()
+	oldHead := initGitRepoExt(t, sibDir, map[string]string{
+		"pkg/auth.go": "package auth\nfunc Validate(token string) error { return nil }",
+	})
+	commitChangeExt(t, sibDir, "pkg/auth.go",
+		"package auth\nfunc Validate(token string) (bool, error) { return true, nil }",
+		"change return type")
+	createSiblingWithDefaultPath(t, sibDir, "sibling",
+		sampleNodeWithSig("sibling", "Validate", "pkg/auth.go", "func Validate(token string) (bool, error)"))
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sibling",
+		ToEntity: "Validate", ToFile: "pkg/auth.go",
+		VerifiedCommit:    oldHead,
+		VerifiedAt:        now,
+		DetectionTier:     "tier1",
+		VerifiedSignature: "func Validate(token string) error",
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), localStore)
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d: %+v", len(alerts), alerts)
+	}
+	// Should mention return type change.
+	if !strings.Contains(alerts[0].DiffSummary, "Returns:") {
+		t.Errorf("expected structural diff mentioning Returns, got %q", alerts[0].DiffSummary)
+	}
+}
+
+// ── structuralSignatureDiff tests ───────────────────────────────────────────
+
+func TestStructuralSignatureDiff_GoParamAdded(t *testing.T) {
+	old := "func Validate(token string) bool"
+	new_ := "func Validate(token string, opts ...Option) bool"
+	result := federation.StructuralSignatureDiff(old, new_)
+	if !strings.Contains(result, "Params:") {
+		t.Errorf("expected param diff, got %q", result)
+	}
+	if !strings.Contains(result, "opts ...Option") {
+		t.Errorf("expected 'opts ...Option' in diff, got %q", result)
+	}
+}
+
+func TestStructuralSignatureDiff_GoReturnTypeChanged(t *testing.T) {
+	old := "func Validate(token string) error"
+	new_ := "func Validate(token string) (bool, error)"
+	result := federation.StructuralSignatureDiff(old, new_)
+	if !strings.Contains(result, "Returns:") {
+		t.Errorf("expected return diff, got %q", result)
+	}
+	if !strings.Contains(result, "error") && !strings.Contains(result, "(bool, error)") {
+		t.Errorf("expected return types in diff, got %q", result)
+	}
+}
+
+func TestStructuralSignatureDiff_GoParamRemovedAndReturnChanged(t *testing.T) {
+	old := "func Login(ctx context.Context, user string, pass string) error"
+	new_ := "func Login(ctx context.Context) (Token, error)"
+	result := federation.StructuralSignatureDiff(old, new_)
+	if !strings.Contains(result, "Params:") || !strings.Contains(result, "Returns:") {
+		t.Errorf("expected both param and return diff, got %q", result)
+	}
+}
+
+func TestStructuralSignatureDiff_PythonSignature(t *testing.T) {
+	old := "def validate(self, token: str) -> bool"
+	new_ := "def validate(self, token: str, strict: bool) -> Optional[bool]"
+	result := federation.StructuralSignatureDiff(old, new_)
+	if !strings.Contains(result, "Params:") {
+		t.Errorf("expected param diff for Python sig, got %q", result)
+	}
+}
+
+func TestStructuralSignatureDiff_RustSignature(t *testing.T) {
+	old := "fn validate(&self, token: &str) -> bool"
+	new_ := "fn validate(&self, token: &str, opts: Options) -> Result<bool, Error>"
+	result := federation.StructuralSignatureDiff(old, new_)
+	if !strings.Contains(result, "Params:") || !strings.Contains(result, "Returns:") {
+		t.Errorf("expected both param and return diff for Rust sig, got %q", result)
+	}
+}
+
+func TestStructuralSignatureDiff_TypeDeclaration(t *testing.T) {
+	// Type declarations without params — falls back to raw diff.
+	old := "type AuthConfig struct"
+	new_ := "type AuthConfig interface"
+	result := federation.StructuralSignatureDiff(old, new_)
+	if !strings.Contains(result, "Changed:") {
+		t.Errorf("expected raw 'Changed:' for type decl, got %q", result)
+	}
+}
+
+func TestStructuralSignatureDiff_IdenticalSignatures(t *testing.T) {
+	old := "func Validate(token string) bool"
+	result := federation.StructuralSignatureDiff(old, old)
+	// Should never be called with identical sigs in practice, but shouldn't crash.
+	// Falls through to raw change (params and returns both match).
+	if result == "" {
+		t.Error("expected non-empty result")
+	}
+}
+
+func TestStructuralSignatureDiff_EmptyOldOrNew(t *testing.T) {
+	r1 := federation.StructuralSignatureDiff("", "func Foo()")
+	if !strings.Contains(r1, "Changed:") {
+		t.Errorf("expected raw changed for empty old, got %q", r1)
+	}
+	r2 := federation.StructuralSignatureDiff("func Foo()", "")
+	if !strings.Contains(r2, "Changed:") {
+		t.Errorf("expected raw changed for empty new, got %q", r2)
 	}
 }
 
