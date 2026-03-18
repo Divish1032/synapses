@@ -2,26 +2,26 @@ package mcp
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
 
-// ── Component pipeline tests (Phase 6, Section 8.4) ──────────────────────────
+// ── Component pipeline tests ─────────────────────────────────────────────────
 
 func TestRunComponents_ParallelExecution(t *testing.T) {
-	// Two slow-ish components should run in parallel, not sequentially.
-	components := map[string]componentCollector{
-		"slow1": func(_ context.Context) []tieredSection {
+	specs := []componentSpec{
+		{name: "slow1", timeoutMs: 500, collector: func(_ context.Context) []tieredSection {
 			time.Sleep(50 * time.Millisecond)
 			return []tieredSection{{Tier: "relevant", Heading: "Slow1", Content: "data1\n"}}
-		},
-		"slow2": func(_ context.Context) []tieredSection {
+		}},
+		{name: "slow2", timeoutMs: 500, collector: func(_ context.Context) []tieredSection {
 			time.Sleep(50 * time.Millisecond)
 			return []tieredSection{{Tier: "relevant", Heading: "Slow2", Content: "data2\n"}}
-		},
+		}},
 	}
 	start := time.Now()
-	sections, results := runComponents(context.Background(), nil, components, 500)
+	sections, results := runComponents(context.Background(), nil, "test", specs)
 	elapsed := time.Since(start)
 
 	if len(sections) != 2 {
@@ -30,28 +30,25 @@ func TestRunComponents_ParallelExecution(t *testing.T) {
 	if len(results) != 2 {
 		t.Errorf("expected 2 results, got %d", len(results))
 	}
-	// If truly parallel, should complete in ~50-80ms, not ~100ms+.
 	if elapsed > 150*time.Millisecond {
-		t.Errorf("components ran too slowly (%v) — likely sequential instead of parallel", elapsed)
+		t.Errorf("likely sequential (%v) — should complete in ~50-80ms", elapsed)
 	}
 }
 
 func TestRunComponents_RecoverFromPanic(t *testing.T) {
-	components := map[string]componentCollector{
-		"panicker": func(_ context.Context) []tieredSection {
+	specs := []componentSpec{
+		{name: "panicker", timeoutMs: 500, collector: func(_ context.Context) []tieredSection {
 			panic("intentional test panic")
-		},
-		"healthy": func(_ context.Context) []tieredSection {
+		}},
+		{name: "healthy", timeoutMs: 500, collector: func(_ context.Context) []tieredSection {
 			return []tieredSection{{Tier: "relevant", Heading: "OK", Content: "works\n"}}
-		},
+		}},
 	}
-	sections, results := runComponents(context.Background(), nil, components, 500)
+	sections, results := runComponents(context.Background(), nil, "test", specs)
 
-	// The healthy component should still produce its section.
 	if len(sections) != 1 {
-		t.Errorf("expected 1 section from healthy component, got %d", len(sections))
+		t.Errorf("expected 1 section from healthy, got %d", len(sections))
 	}
-	// The panicking component should be recorded.
 	var foundPanic bool
 	for _, r := range results {
 		if r.Name == "panicker" && r.Panicked {
@@ -59,34 +56,62 @@ func TestRunComponents_RecoverFromPanic(t *testing.T) {
 		}
 	}
 	if !foundPanic {
-		t.Error("expected panicker to be recorded as panicked")
+		t.Error("panicker not recorded as panicked")
 	}
 }
 
 func TestRunComponents_Timeout(t *testing.T) {
-	components := map[string]componentCollector{
-		"sleeper": func(ctx context.Context) []tieredSection {
+	specs := []componentSpec{
+		{name: "sleeper", timeoutMs: 50, collector: func(ctx context.Context) []tieredSection {
 			select {
 			case <-time.After(2 * time.Second):
 				return []tieredSection{{Tier: "relevant", Heading: "Late", Content: "late\n"}}
 			case <-ctx.Done():
 				return nil
 			}
-		},
+		}},
 	}
-	sections, results := runComponents(context.Background(), nil, components, 50) // 50ms timeout
+	sections, results := runComponents(context.Background(), nil, "test", specs)
 
-	// Should timeout and produce no sections.
 	if len(sections) != 0 {
-		t.Errorf("expected 0 sections from timed out component, got %d", len(sections))
+		t.Errorf("expected 0 sections, got %d", len(sections))
 	}
 	if len(results) != 1 || !results[0].TimedOut {
-		t.Error("expected sleeper to be recorded as timed out")
+		t.Error("expected sleeper to be timed out")
 	}
 }
 
-func TestRunComponents_EmptyComponents(t *testing.T) {
-	sections, results := runComponents(context.Background(), nil, nil, 500)
+func TestRunComponents_PerComponentTimeout(t *testing.T) {
+	specs := []componentSpec{
+		{name: "fast", timeoutMs: 500, collector: func(_ context.Context) []tieredSection {
+			return []tieredSection{{Tier: "relevant", Heading: "Fast", Content: "ok\n"}}
+		}},
+		{name: "slow", timeoutMs: 20, collector: func(ctx context.Context) []tieredSection {
+			select {
+			case <-time.After(time.Second):
+				return []tieredSection{{Tier: "relevant", Heading: "Slow", Content: "late\n"}}
+			case <-ctx.Done():
+				return nil
+			}
+		}},
+	}
+	sections, results := runComponents(context.Background(), nil, "test", specs)
+
+	if len(sections) != 1 {
+		t.Errorf("expected 1 section (fast only), got %d", len(sections))
+	}
+	for _, r := range results {
+		if r.Name == "slow" && !r.TimedOut {
+			t.Error("slow should have timed out with 20ms limit")
+		}
+		if r.Name == "fast" && r.TimedOut {
+			t.Error("fast should not have timed out")
+		}
+	}
+}
+
+func TestRunComponents_Empty(t *testing.T) {
+	sections, results := runComponents(context.Background(), nil, "test", nil)
 	if sections != nil {
 		t.Errorf("expected nil sections, got %v", sections)
 	}
@@ -96,85 +121,92 @@ func TestRunComponents_EmptyComponents(t *testing.T) {
 }
 
 func TestRunComponents_NilReturningCollector(t *testing.T) {
-	components := map[string]componentCollector{
-		"empty": func(_ context.Context) []tieredSection {
-			return nil
-		},
+	specs := []componentSpec{
+		{name: "empty", timeoutMs: 500, collector: func(_ context.Context) []tieredSection { return nil }},
 	}
-	sections, _ := runComponents(context.Background(), nil, components, 500)
+	sections, _ := runComponents(context.Background(), nil, "test", specs)
 	if len(sections) != 0 {
-		t.Errorf("expected 0 sections from nil-returning collector, got %d", len(sections))
+		t.Errorf("expected 0 sections, got %d", len(sections))
 	}
 }
 
-// ── Health tracker tests ─────────────────────────────────────────────────────
+// ── Per-agent health tracker tests ───────────────────────────────────────────
 
 func TestComponentHealthTracker_DisableAfterThreeFailures(t *testing.T) {
 	var health componentHealthTracker
-
-	if health.isDisabled("test") {
-		t.Error("should not be disabled before any failures")
+	if health.isDisabled("agent", "test") {
+		t.Error("should not be disabled initially")
 	}
-
-	health.recordFailure("test")
-	health.recordFailure("test")
-	if health.isDisabled("test") {
+	health.recordFailure("agent", "test")
+	health.recordFailure("agent", "test")
+	if health.isDisabled("agent", "test") {
 		t.Error("should not be disabled after 2 failures")
 	}
-
-	health.recordFailure("test")
-	if !health.isDisabled("test") {
+	health.recordFailure("agent", "test")
+	if !health.isDisabled("agent", "test") {
 		t.Error("should be disabled after 3 failures")
 	}
 }
 
 func TestComponentHealthTracker_Reset(t *testing.T) {
 	var health componentHealthTracker
-	health.recordFailure("test")
-	health.recordFailure("test")
-	health.recordFailure("test")
-	if !health.isDisabled("test") {
-		t.Fatal("should be disabled")
-	}
-
-	health.reset()
-	if health.isDisabled("test") {
+	health.recordFailure("agent", "test")
+	health.recordFailure("agent", "test")
+	health.recordFailure("agent", "test")
+	health.reset("agent")
+	if health.isDisabled("agent", "test") {
 		t.Error("should not be disabled after reset")
 	}
 }
 
 func TestComponentHealthTracker_IndependentComponents(t *testing.T) {
 	var health componentHealthTracker
-	health.recordFailure("a")
-	health.recordFailure("a")
-	health.recordFailure("a")
-
-	if !health.isDisabled("a") {
+	health.recordFailure("agent", "a")
+	health.recordFailure("agent", "a")
+	health.recordFailure("agent", "a")
+	if !health.isDisabled("agent", "a") {
 		t.Error("a should be disabled")
 	}
-	if health.isDisabled("b") {
-		t.Error("b should not be disabled — failures are per-component")
+	if health.isDisabled("agent", "b") {
+		t.Error("b should not be disabled")
+	}
+}
+
+func TestComponentHealthTracker_PerAgentIsolation(t *testing.T) {
+	var health componentHealthTracker
+	health.recordFailure("agent-a", "violations")
+	health.recordFailure("agent-a", "violations")
+	health.recordFailure("agent-a", "violations")
+
+	if !health.isDisabled("agent-a", "violations") {
+		t.Error("agent-a violations should be disabled")
+	}
+	if health.isDisabled("agent-b", "violations") {
+		t.Error("agent-b violations should NOT be disabled")
+	}
+
+	health.reset("agent-a")
+	if health.isDisabled("agent-a", "violations") {
+		t.Error("agent-a should be cleared after reset")
 	}
 }
 
 func TestRunComponents_HealthAutoDisables(t *testing.T) {
 	var health componentHealthTracker
-	// Pre-disable a component.
-	health.recordFailure("broken")
-	health.recordFailure("broken")
-	health.recordFailure("broken")
+	health.recordFailure("test", "broken")
+	health.recordFailure("test", "broken")
+	health.recordFailure("test", "broken")
 
-	components := map[string]componentCollector{
-		"broken": func(_ context.Context) []tieredSection {
+	specs := []componentSpec{
+		{name: "broken", timeoutMs: 500, collector: func(_ context.Context) []tieredSection {
 			return []tieredSection{{Tier: "relevant", Heading: "Should Not Run", Content: "x\n"}}
-		},
-		"healthy": func(_ context.Context) []tieredSection {
+		}},
+		{name: "healthy", timeoutMs: 500, collector: func(_ context.Context) []tieredSection {
 			return []tieredSection{{Tier: "relevant", Heading: "OK", Content: "y\n"}}
-		},
+		}},
 	}
-	sections, results := runComponents(context.Background(), &health, components, 500)
+	sections, results := runComponents(context.Background(), &health, "test", specs)
 
-	// Only healthy should produce a section.
 	if len(sections) != 1 {
 		t.Errorf("expected 1 section, got %d", len(sections))
 	}
@@ -183,78 +215,81 @@ func TestRunComponents_HealthAutoDisables(t *testing.T) {
 			t.Error("disabled component should not produce output")
 		}
 	}
-	// Broken should show as timed out in debug.
 	for _, r := range results {
 		if r.Name == "broken" && !r.TimedOut {
-			t.Error("disabled component should be marked as timed out in debug")
+			t.Error("disabled component should be marked as timed out")
 		}
 	}
 }
 
-// ── buildDebugSection tests ──────────────────────────────────────────────────
+// ── buildDebugMarkdown tests ─────────────────────────────────────────────────
 
-func TestBuildDebugSection_Normal(t *testing.T) {
+func TestBuildDebugMarkdown_Normal(t *testing.T) {
 	results := []componentResult{
 		{Name: "violations", LatencyMs: 5},
 		{Name: "gaps", LatencyMs: 12},
 	}
-	debug := buildDebugSection(results)
-	if debug == nil {
-		t.Fatal("expected debug info")
+	md := buildDebugMarkdown(results)
+	if !strings.Contains(md, "## _debug") {
+		t.Error("expected markdown heading")
 	}
-	latencies, ok := debug["latencies_ms"].(map[string]int64)
-	if !ok {
-		t.Fatal("expected latencies_ms map")
+	if !strings.Contains(md, "gaps: 12ms") {
+		t.Error("expected gaps latency")
 	}
-	if latencies["violations"] != 5 {
-		t.Errorf("violations latency = %d, want 5", latencies["violations"])
+	if !strings.Contains(md, "violations: 5ms") {
+		t.Error("expected violations latency")
 	}
-	if _, hasTimed := debug["timed_out"]; hasTimed {
-		t.Error("should not have timed_out when no timeouts")
+	if !strings.Contains(md, "timed_out: none") {
+		t.Error("expected no timeouts")
 	}
 }
 
-func TestBuildDebugSection_WithTimeoutAndPanic(t *testing.T) {
+func TestBuildDebugMarkdown_WithTimeoutAndPanic(t *testing.T) {
 	results := []componentResult{
 		{Name: "slow", LatencyMs: 500, TimedOut: true},
 		{Name: "broken", LatencyMs: 1, Panicked: true},
 		{Name: "ok", LatencyMs: 10},
 	}
-	debug := buildDebugSection(results)
-	if debug == nil {
-		t.Fatal("expected debug info")
+	md := buildDebugMarkdown(results)
+	if !strings.Contains(md, "timed_out: slow") {
+		t.Errorf("expected timed_out: slow, got:\n%s", md)
 	}
-	timedOut, ok := debug["timed_out"].([]string)
-	if !ok || len(timedOut) != 1 || timedOut[0] != "slow" {
-		t.Errorf("timed_out = %v, want [slow]", debug["timed_out"])
-	}
-	panicked, ok := debug["panicked"].([]string)
-	if !ok || len(panicked) != 1 || panicked[0] != "broken" {
-		t.Errorf("panicked = %v, want [broken]", debug["panicked"])
+	if !strings.Contains(md, "panicked: broken") {
+		t.Errorf("expected panicked: broken, got:\n%s", md)
 	}
 }
 
-func TestBuildDebugSection_Empty(t *testing.T) {
-	debug := buildDebugSection(nil)
-	if debug != nil {
-		t.Errorf("expected nil for empty results, got %v", debug)
+func TestBuildDebugMarkdown_Empty(t *testing.T) {
+	md := buildDebugMarkdown(nil)
+	if md != "" {
+		t.Errorf("expected empty for nil results, got %q", md)
 	}
 }
 
-// ── get_working_state entity impact enrichment tests ─────────────────────────
+func TestBuildDebugMarkdown_Deterministic(t *testing.T) {
+	results := []componentResult{
+		{Name: "zzz", LatencyMs: 1},
+		{Name: "aaa", LatencyMs: 2},
+		{Name: "mmm", LatencyMs: 3},
+	}
+	md := buildDebugMarkdown(results)
+	// Components should be sorted alphabetically.
+	aIdx := strings.Index(md, "aaa")
+	mIdx := strings.Index(md, "mmm")
+	zIdx := strings.Index(md, "zzz")
+	if aIdx > mIdx || mIdx > zIdx {
+		t.Errorf("expected alphabetical order, got:\n%s", md)
+	}
+}
+
+// ── get_working_state entity impact enrichment ───────────────────────────────
 
 func TestGetWorkingState_EntityImpactEnrichment(t *testing.T) {
 	s, _, _ := newPopulatedServer(t)
-
-	// The populated server has HandleRequest calling AuthLogin/AuthLogout.
-	// AuthLogin has fanin >= 1 (from HandleRequest). We need fanin > 3 to trigger.
-	// Let's just test that the handler doesn't crash and returns valid JSON.
 	res, err := s.handleGetWorkingState(ctx, callTool(map[string]any{
 		"window_minutes": float64(60),
 	}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "recent_changes")
 	hasKey(t, m, "suggested_tools")
-	// modified_entities may or may not be present depending on recent changes.
-	// The key test is that the handler doesn't crash.
 }

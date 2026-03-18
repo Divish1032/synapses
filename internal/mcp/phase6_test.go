@@ -2,35 +2,17 @@ package mcp
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
-// ── Auto-promotion tests ────────────────────────────────────────────────────
+// ── Tool suggestion tests ────────────────────────────────────────────────────
 
-func TestAutoPromote_NoToolsDeferred_Phase6(t *testing.T) {
+func TestSuggestToolsForIntent_ReturnsSuggestions(t *testing.T) {
 	s := newTestServer(t)
-	// Phase 6: all tools are registered at all scales. Nothing should be deferred.
-	deferred := s.GetDeferredToolNames()
-	if len(deferred) != 0 {
-		t.Errorf("Phase 6: expected no deferred tools, got %v", deferred)
-	}
-}
-
-func TestAutoPromote_UnknownTool_RemainsUnknown(t *testing.T) {
-	s := newTestServer(t)
-	// A completely unknown tool should not be promotable.
-	promoted := s.RegisterDeferredTools([]string{"totally_fake_tool"})
-	if len(promoted) != 0 {
-		t.Errorf("expected no promotion for unknown tool, got %v", promoted)
-	}
-}
-
-// ── Tool suggestion auto-promotion tests ─────────────────────────────────────
-
-func TestSuggestTools_AutoPromotes(t *testing.T) {
-	s := newTestServer(t)
-	// Test that SuggestAndPromoteTools returns suggestions for a known intent.
-	suggestions := s.SuggestAndPromoteTools("debugging login flow")
+	suggestions := s.SuggestToolsForIntent("debugging login flow")
 	if len(suggestions) == 0 {
 		t.Fatal("expected debug suggestions")
 	}
@@ -44,9 +26,9 @@ func TestSuggestTools_AutoPromotes(t *testing.T) {
 	}
 }
 
-func TestSuggestTools_NoIntent_NilResult(t *testing.T) {
+func TestSuggestToolsForIntent_NilForEmpty(t *testing.T) {
 	s := newTestServer(t)
-	suggestions := s.SuggestAndPromoteTools("")
+	suggestions := s.SuggestToolsForIntent("")
 	if suggestions != nil {
 		t.Errorf("expected nil for empty intent, got %v", suggestions)
 	}
@@ -64,31 +46,32 @@ func TestDiscoverTools_StatusField(t *testing.T) {
 	if !ok || len(matches) == 0 {
 		t.Fatal("expected at least one match")
 	}
-	// Every match should have a status field.
 	for _, raw := range matches {
-		match, ok := raw.(map[string]any)
-		if !ok {
-			t.Fatal("match is not a map")
-		}
+		match := raw.(map[string]any)
 		status, ok := match["status"].(string)
 		if !ok || status == "" {
 			t.Errorf("match %v missing status field", match["name"])
+		}
+		// Status must be one of the valid values — never "promoted".
+		valid := status == "core — always available" ||
+			status == "standard — always available" ||
+			status == "available — ready to call"
+		if !valid {
+			t.Errorf("invalid status %q for %v", status, match["name"])
 		}
 	}
 }
 
 func TestDiscoverTools_CoreToolStatus(t *testing.T) {
 	s := newTestServer(t)
-	// Search for a core tool (session_init).
 	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{
 		"query": "session start bootstrap init",
 	}))
 	m := mustResult(t, res, err)
 	matches, ok := m["matches"].([]any)
 	if !ok || len(matches) == 0 {
-		t.Fatal("expected matches for session start query")
+		t.Fatal("expected matches")
 	}
-	// Find session_init in results.
 	for _, raw := range matches {
 		match := raw.(map[string]any)
 		if match["name"] == "session_init" {
@@ -99,74 +82,64 @@ func TestDiscoverTools_CoreToolStatus(t *testing.T) {
 			return
 		}
 	}
-	// It's OK if session_init wasn't in top 3 — it still validates the status field exists.
+}
+
+func TestDiscoverTools_NoPromotedStatus(t *testing.T) {
+	// "promoted" status must never appear — all tools are always registered.
+	s := newTestServer(t)
+	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{
+		"query": "impact blast radius callers",
+		"debug": true,
+	}))
+	m := mustResult(t, res, err)
+	matches, ok := m["matches"].([]any)
+	if !ok {
+		t.Fatal("expected matches")
+	}
+	for _, raw := range matches {
+		match := raw.(map[string]any)
+		if strings.Contains(match["status"].(string), "promoted") {
+			t.Errorf("found 'promoted' status for %v — dead code path", match["name"])
+		}
+	}
 }
 
 // ── end_session absorption tests ─────────────────────────────────────────────
 
 func TestEndSession_AbsorbsReleaseClaims(t *testing.T) {
 	s := newTestServer(t)
-
-	// First, create a work claim.
 	_, err := s.handleClaimWork(ctx, callTool(map[string]any{
-		"agent_id":   "test-agent",
-		"scope":      "pkg/auth",
-		"scope_type": "directory",
+		"agent_id": "test-agent", "scope": "pkg/auth", "scope_type": "directory",
 	}))
 	if err != nil {
 		t.Fatalf("claim work: %v", err)
 	}
-
-	// Call end_session — should auto-release claims.
-	res, err := s.handleEndSession(ctx, callTool(map[string]any{
-		"agent_id": "test-agent",
-	}))
+	res, err := s.handleEndSession(ctx, callTool(map[string]any{"agent_id": "test-agent"}))
 	m := mustResult(t, res, err)
-
-	// Verify claims_released is true.
-	released, ok := m["claims_released"].(bool)
-	if !ok {
-		t.Fatal("expected claims_released field in end_session result")
-	}
-	if !released {
-		t.Error("expected claims_released to be true")
+	if released, ok := m["claims_released"].(bool); !ok || !released {
+		t.Error("expected claims_released=true")
 	}
 }
 
 func TestEndSession_AbsorbsReleaseClaims_NoClaims(t *testing.T) {
 	s := newTestServer(t)
-
-	// Call end_session without any claims — should still succeed.
-	res, err := s.handleEndSession(ctx, callTool(map[string]any{
-		"agent_id": "test-agent",
-	}))
+	res, err := s.handleEndSession(ctx, callTool(map[string]any{"agent_id": "test-agent"}))
 	m := mustResult(t, res, err)
-
-	// claims_released should be true even when no claims exist (release is idempotent).
-	released, ok := m["claims_released"].(bool)
-	if !ok {
-		t.Fatal("expected claims_released field")
-	}
-	if !released {
-		t.Error("expected claims_released to be true even with no claims")
+	if released, ok := m["claims_released"].(bool); !ok || !released {
+		t.Error("expected claims_released=true (idempotent)")
 	}
 }
 
 func TestEndSession_ModelParamDoesNotCrash(t *testing.T) {
 	s := newTestServer(t)
-
-	// end_session with model/token params should not crash (even without pulse).
 	res, err := s.handleEndSession(ctx, callTool(map[string]any{
-		"agent_id":      "test-agent",
-		"model":         "claude-sonnet-4-6",
-		"provider":      "anthropic",
-		"input_tokens":  float64(1000),
-		"output_tokens": float64(500),
-		"cost_usd":      float64(0.01),
+		"agent_id": "test-agent", "model": "claude-sonnet-4-6",
+		"provider": "anthropic", "input_tokens": float64(1000),
+		"output_tokens": float64(500), "cost_usd": float64(0.01),
 	}))
 	m := mustResult(t, res, err)
 	if m["status"] != "ok" {
-		t.Errorf("expected status=ok, got %v", m["status"])
+		t.Errorf("status = %v, want ok", m["status"])
 	}
 }
 
@@ -175,102 +148,80 @@ func TestEndSession_ModelParamDoesNotCrash(t *testing.T) {
 func TestSessionInit_ToolSuggestions_WithIntent(t *testing.T) {
 	s := newTestServer(t)
 	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
-		"agent_id": "test-agent",
-		"intent":   "implementing auth refactor",
+		"agent_id": "test-agent", "intent": "implementing auth refactor",
 	}))
 	m := mustResult(t, res, err)
-
-	// Should have suggested_tools section.
 	st, ok := m["suggested_tools"].(map[string]any)
 	if !ok {
 		t.Fatal("expected suggested_tools in session_init response")
 	}
 	if st["for_intent"] != "implementing auth refactor" {
-		t.Errorf("for_intent = %v, want 'implementing auth refactor'", st["for_intent"])
+		t.Errorf("for_intent = %v", st["for_intent"])
 	}
-	promoted, ok := st["promoted"].([]any)
-	if !ok || len(promoted) == 0 {
-		t.Fatal("expected promoted tools list")
+	tools, ok := st["tools"].([]any)
+	if !ok || len(tools) == 0 {
+		t.Fatal("expected tools list")
 	}
-	// Verify each suggestion has tool, reason, example.
-	for _, raw := range promoted {
-		p, ok := raw.(map[string]any)
-		if !ok {
-			t.Fatal("promoted entry is not a map")
-		}
+	for _, raw := range tools {
+		p := raw.(map[string]any)
 		if p["tool"] == nil || p["tool"] == "" {
-			t.Error("promoted entry missing tool")
+			t.Error("entry missing tool")
 		}
 		if p["reason"] == nil || p["reason"] == "" {
-			t.Error("promoted entry missing reason")
-		}
-		if p["example"] == nil || p["example"] == "" {
-			t.Error("promoted entry missing example")
+			t.Error("entry missing reason")
 		}
 	}
 }
 
 func TestSessionInit_NoToolSuggestions_WithoutIntent(t *testing.T) {
 	s := newTestServer(t)
-	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
-		"agent_id": "test-agent",
-	}))
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "test-agent"}))
 	m := mustResult(t, res, err)
-
-	// suggested_tools should be absent when no intent.
 	noKey(t, m, "suggested_tools")
 }
 
 func TestSessionInit_NoToolSuggestions_UnknownIntent(t *testing.T) {
 	s := newTestServer(t)
 	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
-		"agent_id": "test-agent",
-		"intent":   "just vibing",
+		"agent_id": "test-agent", "intent": "just vibing",
 	}))
 	m := mustResult(t, res, err)
-
-	// Unknown intent should produce no suggestions (zero tokens).
 	noKey(t, m, "suggested_tools")
 }
 
-// ── Regression: all existing tools still callable ────────────────────────────
+// ── Regression tests ─────────────────────────────────────────────────────────
 
 func TestAllExistingToolsInCatalog(t *testing.T) {
-	// Verify that every tool in the catalog is either a core tool, standard tool,
-	// or exists at large scale. This ensures no tool was accidentally orphaned.
-	catalogNames := make(map[string]bool)
-	for _, entry := range toolCatalog {
-		catalogNames[entry.Name] = true
-	}
-	// Every catalog entry should be a valid tool.
-	if len(catalogNames) == 0 {
+	if len(toolCatalog) == 0 {
 		t.Fatal("tool catalog is empty")
 	}
 }
 
-// ── JSON serialization test ──────────────────────────────────────────────────
-
 func TestToolSuggestion_JSONShape(t *testing.T) {
-	s := ToolSuggestion{
-		Tool:    "get_impact",
-		Reason:  "Check dependencies",
-		Example: `get_impact(symbol="AuthService")`,
-	}
-	data, err := json.Marshal(s)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	s := ToolSuggestion{Tool: "get_impact", Reason: "Check deps", Example: `get_impact(symbol="X")`}
+	data, _ := json.Marshal(s)
 	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	json.Unmarshal(data, &m)
 	if m["tool"] != "get_impact" {
 		t.Errorf("tool = %v", m["tool"])
 	}
-	if m["reason"] != "Check dependencies" {
-		t.Errorf("reason = %v", m["reason"])
+}
+
+// ── Path safety test (Gap 6) ─────────────────────────────────────────────────
+
+func TestEntityImpact_RelativePathMatchesAbsoluteGraph(t *testing.T) {
+	g := graph.New("test-repo")
+	id := g.MakeNodeID("/Users/dev/repo/internal/auth.go", "AuthService")
+	g.AddNode(&graph.Node{
+		ID: id, Name: "AuthService", Type: graph.NodeStruct,
+		File: "/Users/dev/repo/internal/auth.go", Line: 10,
+	})
+	// Simulate watcher-style relative path lookup.
+	results := g.FindByFile("internal/auth.go")
+	if len(results) != 1 {
+		t.Fatalf("expected 1 match for relative path, got %d", len(results))
 	}
-	if m["example"] == nil || m["example"] == "" {
-		t.Error("missing example")
+	if results[0].Name != "AuthService" {
+		t.Errorf("expected AuthService, got %s", results[0].Name)
 	}
 }

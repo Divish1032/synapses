@@ -177,17 +177,13 @@ type Server struct {
 	orientRepoCompact *string
 	orientRepoFull    *string
 
-	// B28: scale-aware tool registration.
-	// repoScale is determined from g.NodeCount() in New() and controls which
-	// tools are registered at startup vs. deferred for on-demand loading.
-	// deferredTools holds ServerTool definitions for tools not yet registered.
-	repoScale      graph.Scale
-	deferredTools  map[string]server.ServerTool
-	deferredToolsMu sync.Mutex
+	// B28: repo scale (micro/small/medium/large) computed from node count.
+	// Used by coreTierTools/standardTierTools for discover_tools status labels.
+	repoScale graph.Scale
 
 	// Phase 6: component health tracker for prepare_context pipeline.
 	// Components that panic or timeout ≥3 times in a session are auto-disabled.
-	// Reset on each session_init call.
+	// Per-agent scoped — concurrent agents don't interfere.
 	componentHealth componentHealthTracker
 }
 
@@ -369,8 +365,6 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 			s.repoScale = graph.ScaleLarge
 		}
 	}
-	s.deferredTools = make(map[string]server.ServerTool)
-
 	// Usage observability: wire before/after hooks to record every tool call
 	// timing and success status into the tool_calls SQLite table.
 	hooks := &server.Hooks{}
@@ -702,90 +696,16 @@ func (s *Server) toolInTier(_ string) bool {
 	return true
 }
 
-// addOrDefer either registers tool t immediately (when it belongs to the
-// current repo-scale tier) or stores it in s.deferredTools for later
-// promotion via RegisterDeferredTools. Called by registerTools and
-// registerSkillTools instead of s.mcp.AddTool directly.
+// addOrDefer registers tool t with the MCP server. The name is historical —
+// all tools are always registered (see ADR on toolInTier above).
 func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
-	if s.toolInTier(t.Name) {
-		s.mcp.AddTool(t, h)
-		return
-	}
-	s.deferredToolsMu.Lock()
-	s.deferredTools[t.Name] = server.ServerTool{Tool: t, Handler: h}
-	s.deferredToolsMu.Unlock()
+	s.mcp.AddTool(t, h)
 }
 
-// RegisterDeferredTools promotes the named tools from the deferred set to the
-// live MCP session. Returns the names of tools that were actually promoted
-// (subset of names that were in the deferred set). Thread-safe; idempotent for
-// names that are already registered or unknown.
-//
-// Calling this triggers mcp-go's notifications/tools/list_changed broadcast to
-// all connected clients. Clients that implement this notification (Cursor,
-// VSCode) will re-fetch the tool list automatically. Claude Code requires a
-// manual MCP reconnect due to a known issue (github.com/anthropics/claude-code/issues/4118).
-func (s *Server) RegisterDeferredTools(names []string) []string {
-	if len(names) == 0 {
-		return nil
-	}
-	// Collect and remove from deferred map under the lock, then register
-	// outside the lock to avoid holding deferredToolsMu while AddTool
-	// acquires mcp-go's toolsMu and writes a network notification.
-	s.deferredToolsMu.Lock()
-	var toRegister []server.ServerTool
-	var registered []string
-	for _, name := range names {
-		if st, ok := s.deferredTools[name]; ok {
-			toRegister = append(toRegister, st)
-			delete(s.deferredTools, name)
-			registered = append(registered, name)
-		}
-	}
-	s.deferredToolsMu.Unlock()
-
-	for _, st := range toRegister {
-		s.addOrDefer(st.Tool, st.Handler)
-	}
-	return registered
-}
-
-// IsDeferredTool returns true if the named tool exists in the deferred set
-// (not yet promoted to the live MCP session).
-func (s *Server) IsDeferredTool(name string) bool {
-	s.deferredToolsMu.Lock()
-	_, ok := s.deferredTools[name]
-	s.deferredToolsMu.Unlock()
-	return ok
-}
-
-// GetDeferredToolNames returns the names of all currently deferred tools.
-// Used by tests and discover_tools to enumerate the full tool surface.
-func (s *Server) GetDeferredToolNames() []string {
-	s.deferredToolsMu.Lock()
-	defer s.deferredToolsMu.Unlock()
-	names := make([]string, 0, len(s.deferredTools))
-	for name := range s.deferredTools {
-		names = append(names, name)
-	}
-	return names
-}
-
-// SuggestAndPromoteTools generates tool suggestions based on the agent's
-// declared intent, then promotes suggested tools from deferred to live.
-// Returns the suggestions (nil if no intent or no matches).
-func (s *Server) SuggestAndPromoteTools(intent string) []ToolSuggestion {
-	suggestions := suggestToolsForIntent(intent)
-	if len(suggestions) == 0 {
-		return nil
-	}
-	// Auto-promote suggested tools so they appear in the MCP tool list.
-	names := make([]string, len(suggestions))
-	for i, sg := range suggestions {
-		names[i] = sg.Tool
-	}
-	s.RegisterDeferredTools(names)
-	return suggestions
+// SuggestToolsForIntent returns tool suggestions based on the agent's declared
+// intent. Does not modify server state — pure query.
+func (s *Server) SuggestToolsForIntent(intent string) []ToolSuggestion {
+	return suggestToolsForIntent(intent)
 }
 
 // registerTools wires all Synapses tool definitions to their handlers.
