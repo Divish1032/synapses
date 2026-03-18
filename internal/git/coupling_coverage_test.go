@@ -364,3 +364,16 @@ func TestAnalyzeChangeCoupling_FilterLowCoChanges(t *testing.T) {
 		t.Error("expected fc+fd pair to be included (coChanges ≥ 3)")
 	}
 }
+
+// TestAnalyzeChangeCoupling_GitLogError tests error handling when git log fails
+// with a non-existent repository.
+func TestAnalyzeChangeCoupling_GitLogError(t *testing.T) {
+	// Non-existent repo path - git log should fail
+	pairs, err := git.AnalyzeChangeCoupling("/nonexistent/repo/path", 10, 0.3)
+	if err == nil {
+		t.Error("expected error for non-existent repo, got nil")
+	}
+	if pairs != nil {
+		t.Errorf("expected nil pairs on error, got %v", pairs)
+	}
+}
