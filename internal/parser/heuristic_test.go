@@ -509,3 +509,184 @@ func TestInjectHandlesEdges_NoFuzzyFallback(t *testing.T) {
 		t.Errorf("expected 0 HANDLES edges (no exact match), got %d", injected)
 	}
 }
+
+// ── MCP handler registrations (BUG-EVAL-20 / IMP-EVAL-11) ────────────────────
+
+// TestExtractMCPHandlerRegistrations_Basic verifies that a typical
+// addOrDefer(mcp.NewTool("name",...), s.handleXxx) block is detected.
+func TestExtractMCPHandlerRegistrations_Basic(t *testing.T) {
+	src := []byte(`package mcp
+
+func (s *Server) registerTools() {
+	s.addOrDefer(mcp.NewTool("get_context",
+		mcp.WithDescription("Returns context for an entity."),
+	), s.handleGetContext)
+	s.addOrDefer(mcp.NewTool("get_impact",
+		mcp.WithDescription("Returns impact analysis."),
+	), s.handleGetImpact)
+}
+`)
+	regs := ExtractRouteRegistrations("server.go", src)
+	// Filter to MCP registrations only.
+	var mcpRegs []RouteRegistration
+	for _, r := range regs {
+		if r.Method == "mcp" {
+			mcpRegs = append(mcpRegs, r)
+		}
+	}
+	if len(mcpRegs) != 2 {
+		t.Fatalf("expected 2 MCP registrations, got %d: %+v", len(mcpRegs), mcpRegs)
+	}
+	assertReg(t, mcpRegs[0], "mcp", "get_context", "handleGetContext", "registerTools")
+	assertReg(t, mcpRegs[1], "mcp", "get_impact", "handleGetImpact", "registerTools")
+}
+
+// TestExtractMCPHandlerRegistrations_DescriptionWithParens verifies that
+// parentheses inside mcp.WithDescription() strings do not confuse block detection.
+func TestExtractMCPHandlerRegistrations_DescriptionWithParens(t *testing.T) {
+	src := []byte(`package mcp
+
+func (s *Server) registerTools() {
+	s.addOrDefer(mcp.NewTool("find_entity",
+		mcp.WithDescription("Find an entity (function, struct, or interface) by name."),
+		mcp.WithString("query", mcp.Required(), mcp.Description("The name (or partial name) to search for.")),
+	), s.handleFindEntity)
+}
+`)
+	regs := ExtractRouteRegistrations("server.go", src)
+	var mcpRegs []RouteRegistration
+	for _, r := range regs {
+		if r.Method == "mcp" {
+			mcpRegs = append(mcpRegs, r)
+		}
+	}
+	if len(mcpRegs) != 1 {
+		t.Fatalf("expected 1 MCP registration, got %d: %+v", len(mcpRegs), mcpRegs)
+	}
+	assertReg(t, mcpRegs[0], "mcp", "find_entity", "handleFindEntity", "registerTools")
+}
+
+// TestExtractMCPHandlerRegistrations_SingleLine verifies detection when the
+// entire addOrDefer call fits on one line.
+func TestExtractMCPHandlerRegistrations_SingleLine(t *testing.T) {
+	src := []byte(`func (s *Server) registerTools() {
+	s.addOrDefer(mcp.NewTool("search"), s.handleSearch)
+}
+`)
+	regs := ExtractRouteRegistrations("server.go", src)
+	var mcpRegs []RouteRegistration
+	for _, r := range regs {
+		if r.Method == "mcp" {
+			mcpRegs = append(mcpRegs, r)
+		}
+	}
+	if len(mcpRegs) != 1 {
+		t.Fatalf("expected 1 MCP registration, got %d: %+v", len(mcpRegs), mcpRegs)
+	}
+	assertReg(t, mcpRegs[0], "mcp", "search", "handleSearch", "registerTools")
+}
+
+// TestExtractMCPHandlerRegistrations_NoMatch verifies that ordinary Go code
+// without addOrDefer produces no MCP registrations.
+func TestExtractMCPHandlerRegistrations_NoMatch(t *testing.T) {
+	src := []byte(`package main
+
+func init() {
+	http.HandleFunc("/users", listUsers)
+	log.Println("started")
+}
+`)
+	regs := ExtractRouteRegistrations("main.go", src)
+	for _, r := range regs {
+		if r.Method == "mcp" {
+			t.Errorf("unexpected MCP registration: %+v", r)
+		}
+	}
+}
+
+// TestExtractMCPHandlerRegistrations_NoCrossBlockContamination is the critical
+// correctness test: a block that has no handler reference (e.g. a non-MCP
+// addOrDefer overload) must NOT steal the handler from the next block.
+//
+// Before the block-boundary sentinel was added, the sliding window would scan
+// past the end of block A into block B and emit toolA→handleB — a false edge.
+func TestExtractMCPHandlerRegistrations_NoCrossBlockContamination(t *testing.T) {
+	// Block 1: addOrDefer with no s.handle* arg (non-MCP overload or typo).
+	// Block 2: valid addOrDefer that immediately follows.
+	src := []byte(`package mcp
+
+func (s *Server) registerTools() {
+	// Block 1: non-standard addOrDefer with no handler reference.
+	s.addOrDefer(mcp.NewTool("orphan",
+		mcp.WithDescription("This tool has no handler arg."),
+	))
+	// Block 2: well-formed registration that must NOT be claimed by block 1.
+	s.addOrDefer(mcp.NewTool("search",
+		mcp.WithDescription("Full-text search."),
+	), s.handleSearch)
+}
+`)
+	regs := ExtractRouteRegistrations("server.go", src)
+	var mcpRegs []RouteRegistration
+	for _, r := range regs {
+		if r.Method == "mcp" {
+			mcpRegs = append(mcpRegs, r)
+		}
+	}
+
+	// Must detect exactly one registration: "search" → handleSearch.
+	// "orphan" has no handler so it must be silently skipped.
+	if len(mcpRegs) != 1 {
+		t.Fatalf("expected 1 MCP registration, got %d: %+v", len(mcpRegs), mcpRegs)
+	}
+	if mcpRegs[0].Path != "search" {
+		t.Errorf("Path: want %q, got %q", "search", mcpRegs[0].Path)
+	}
+	if mcpRegs[0].Handler != "handleSearch" {
+		t.Errorf("Handler: want %q, got %q", "handleSearch", mcpRegs[0].Handler)
+	}
+}
+
+// TestExtractMCPHandlerRegistrations_AdjacentBlocks verifies that two consecutive
+// well-formed addOrDefer blocks each bind to their own handler when they sit
+// within the same mcpBlockWindow of each other.
+func TestExtractMCPHandlerRegistrations_AdjacentBlocks(t *testing.T) {
+	src := []byte(`package mcp
+
+func (s *Server) registerTools() {
+	s.addOrDefer(mcp.NewTool("tool_a"), s.handleToolA)
+	s.addOrDefer(mcp.NewTool("tool_b"), s.handleToolB)
+	s.addOrDefer(mcp.NewTool("tool_c"), s.handleToolC)
+}
+`)
+	regs := ExtractRouteRegistrations("server.go", src)
+	var mcpRegs []RouteRegistration
+	for _, r := range regs {
+		if r.Method == "mcp" {
+			mcpRegs = append(mcpRegs, r)
+		}
+	}
+	if len(mcpRegs) != 3 {
+		t.Fatalf("expected 3 MCP registrations, got %d: %+v", len(mcpRegs), mcpRegs)
+	}
+	// Each tool must be paired with its own handler.
+	want := map[string]string{
+		"tool_a": "handleToolA",
+		"tool_b": "handleToolB",
+		"tool_c": "handleToolC",
+	}
+	for _, r := range mcpRegs {
+		wantHandler, ok := want[r.Path]
+		if !ok {
+			t.Errorf("unexpected registration path %q", r.Path)
+			continue
+		}
+		if r.Handler != wantHandler {
+			t.Errorf("tool %q: handler want %q, got %q", r.Path, wantHandler, r.Handler)
+		}
+		delete(want, r.Path)
+	}
+	if len(want) > 0 {
+		t.Errorf("missing registrations: %v", want)
+	}
+}

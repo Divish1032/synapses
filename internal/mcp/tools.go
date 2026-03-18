@@ -2604,16 +2604,15 @@ func (s *Server) handleGetFileContext(
 		}
 		totalEntities := len(out)
 		// IMP-EVAL-10: truncate to token budget by dropping highest-line entities first.
+		// Proportional truncation: marshal once, compute keep ratio in O(n).
 		truncated := false
 		if fileTokenBudget > 0 {
-			// Estimate: each entity averages ~100 chars of JSON ≈ 25 tokens.
-			// Binary-search approach: keep dropping from the end until within budget.
-			for len(out) > 0 {
-				raw, err := json.Marshal(out)
-				if err != nil || len(raw) <= fileTokenBudget*4 {
-					break
+			if raw, err := json.Marshal(out); err == nil && len(raw) > fileTokenBudget*4 {
+				keep := len(out) * (fileTokenBudget * 4) / len(raw)
+				if keep < 1 {
+					keep = 1
 				}
-				out = out[:len(out)-1]
+				out = out[:keep]
 				truncated = true
 			}
 		}
