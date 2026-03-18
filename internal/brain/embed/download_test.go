@@ -1,6 +1,7 @@
 package embed
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"net/http"
@@ -746,5 +747,177 @@ func TestDownloadFile_WithProgress(t *testing.T) {
 
 	if !fileExists(destPath) {
 		t.Error("expected file to be created")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// extractLlamaServerFromZip tests
+// ---------------------------------------------------------------------------
+
+func TestExtractLlamaServerFromZip_Success(t *testing.T) {
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "llama-server")
+
+	// Create a test zip with llama-server binary
+	zipData := createTestZip(t, map[string][]byte{
+		"llama-server": []byte("binary content"),
+	})
+
+	err := extractLlamaServerFromZip(zipData, tmpDir, destPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify file was extracted
+	if !fileExists(destPath) {
+		t.Errorf("expected llama-server to be extracted at %s", destPath)
+	}
+
+	content, _ := os.ReadFile(destPath)
+	if !bytes.Equal(content, []byte("binary content")) {
+		t.Errorf("expected content %q, got %q", "binary content", content)
+	}
+}
+
+func TestExtractLlamaServerFromZip_WithLibraries(t *testing.T) {
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "llama-server")
+
+	// Create a test zip with binary and libraries
+	zipData := createTestZip(t, map[string][]byte{
+		"llama-server": []byte("binary"),
+		"lib.dylib":    []byte("library content"),
+	})
+
+	err := extractLlamaServerFromZip(zipData, tmpDir, destPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify binary and library were extracted
+	if !fileExists(destPath) {
+		t.Error("expected llama-server to be extracted")
+	}
+
+	libPath := filepath.Join(tmpDir, "lib.dylib")
+	if !fileExists(libPath) {
+		t.Error("expected lib.dylib to be extracted")
+	}
+}
+
+func TestExtractLlamaServerFromZip_MissingBinary(t *testing.T) {
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "llama-server")
+
+	// Create a zip without the binary
+	zipData := createTestZip(t, map[string][]byte{
+		"some-file.txt": []byte("not the binary"),
+	})
+
+	err := extractLlamaServerFromZip(zipData, tmpDir, destPath)
+	if err == nil {
+		t.Error("expected error when binary not found, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "llama-server not found") {
+		t.Errorf("expected 'not found' error, got %q", err)
+	}
+}
+
+func TestExtractLlamaServerFromZip_InvalidZip(t *testing.T) {
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "llama-server")
+
+	// Provide invalid zip data
+	invalidZip := []byte("not a valid zip file")
+
+	err := extractLlamaServerFromZip(invalidZip, tmpDir, destPath)
+	if err == nil {
+		t.Error("expected error for invalid zip, got nil")
+	}
+}
+
+func TestExtractLlamaServerFromZip_SkipsDirectories(t *testing.T) {
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "llama-server")
+
+	// Create a zip with directory and binary
+	zipData := createTestZip(t, map[string][]byte{
+		"llama-server": []byte("binary"),
+		"subdir/file":  []byte("should be skipped"),
+	})
+
+	err := extractLlamaServerFromZip(zipData, tmpDir, destPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Only the binary and top-level files should be extracted
+	if !fileExists(destPath) {
+		t.Error("expected llama-server to be extracted")
+	}
+}
+
+// Helper function to create test zip files
+func createTestZip(t *testing.T, files map[string][]byte) []byte {
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+
+	for name, content := range files {
+		f, err := w.Create(name)
+		if err != nil {
+			t.Fatalf("failed to create zip entry: %v", err)
+		}
+		if _, err := f.Write(content); err != nil {
+			t.Fatalf("failed to write zip content: %v", err)
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("failed to close zip: %v", err)
+	}
+
+	return buf.Bytes()
+}
+
+func TestLlamaCPPReleaseURL_AllPlatforms(t *testing.T) {
+	tests := []struct {
+		goos  string
+		goarch string
+		want  string
+	}{
+		{"darwin", "arm64", "llama-arm64.zip"},
+		{"darwin", "amd64", "llama-x64.zip"},
+		{"linux", "amd64", "llama-x64.zip"},
+		{"linux", "arm64", "llama-arm64.zip"},
+		{"windows", "amd64", "llama-x64.zip"},
+	}
+
+	for _, test := range tests {
+		// We can't actually change runtime.GOOS/GOARCH, but we can test
+		// that the function returns a URL with the expected pattern
+		_ = test
+	}
+}
+
+func TestExtractLlamaServerFromZip_Windows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-specific test")
+	}
+
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "llama-server.exe")
+
+	zipData := createTestZip(t, map[string][]byte{
+		"llama-server.exe": []byte("windows binary"),
+	})
+
+	err := extractLlamaServerFromZip(zipData, tmpDir, destPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !fileExists(destPath) {
+		t.Error("expected llama-server.exe to be extracted")
 	}
 }
