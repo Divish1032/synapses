@@ -1705,33 +1705,34 @@ const (
 var synapsesSection = synapsesSectionStart + `## Synapses — Code Intelligence (MCP)
 
 ### Session Start
-Call ` + "`session_init()`" + ` at the start of every session — returns pending tasks, project identity, scale guidance, and working state in one round-trip. Use ` + "`scope=\"quick\"`" + ` for lightweight sessions (~500 tokens instead of full response).
-
-### Tool Selection (follow scale_guidance from session_init)
-
-| Scale | Use Synapses for | Use Read/Grep for |
-|---|---|---|
-| micro/small | Structural analysis, cross-file understanding | Targeted single-file edits |
-| medium/large | All code exploration — direct scan is too noisy at this scale | Writing to a specific file you already identified |
+Call ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` at the start of every session. Returns pending tasks, project identity, scale guidance, working state, and proactive tool suggestions in one round-trip. Declare your intent to get relevant tool suggestions automatically.
 
 ### Key Tools
 
+These 12 core tools cover 95% of workflows. All 45+ tools remain available — call ` + "`discover_tools(query=\"...\")`" + ` to find specialized ones.
+
 | Goal | Tool |
 |---|---|
-| Understand a function, struct, or interface | ` + "`get_context(entity=\"Name\")`" + ` — returns compact summary by default |
-| Need full callee/caller sub-tree detail | ` + "`get_context(entity=\"Name\", detail_level=\"full\")`" + ` |
-| Pin to a specific file (avoids ambiguity) | ` + "`get_context(entity=\"Name\", file=\"path/suffix.go\")`" + ` |
-| Find a symbol by name or substring | ` + "`find_entity(query=\"name\")`" + ` — returns compact list by default |
-| Search by concept ("auth", "caching") | ` + "`search(query=\"...\", mode=\"semantic\")`" + ` |
-| Find what breaks if a symbol changes | ` + "`get_impact(symbol=\"Name\")`" + ` |
-| Check proposed changes against architecture rules | ` + "`validate_plan(changes=[...])`" + ` |
-| Verify written files against rules | ` + "`verify_implementation(files_written=[\"...\"])`" + ` |
-| Save a plan with tasks for future sessions | ` + "`create_plan(title=\"...\", tasks=[...])`" + ` |
-| Resume a saved session | ` + "`get_session_state(task_id=\"...\")`" + ` |
-| Not sure which tool fits | ` + "`discover_tools(query=\"what I'm trying to do\")`" + ` |
+| Start session | ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` |
+| Understand code | ` + "`prepare_context(intent=\"understand\", target=\"EntityName\")`" + ` |
+| Prepare to modify | ` + "`prepare_context(intent=\"modify\", target=\"EntityName\")`" + ` |
+| Find a symbol | ` + "`search(query=\"name\")`" + ` |
+| Search by concept | ` + "`search(query=\"auth caching\", mode=\"semantic\")`" + ` |
+| Check before implementing | ` + "`validate_plan(changes=[...])`" + ` |
+| Verify after writing | ` + "`verify_implementation(files_written=[\"...\"])`" + ` |
+| Save knowledge | ` + "`remember(decision=\"...\", agent_id=\"...\")`" + ` |
+| Retrieve knowledge | ` + "`recall(query=\"...\")`" + ` |
+| Plan tasks | ` + "`create_plan(title=\"...\", tasks=[...])`" + ` |
+| Update task | ` + "`update_task(id=\"...\", status=\"done\")`" + ` |
+| End session | ` + "`end_session(agent_id=\"...\")`" + ` — also releases claims and reports usage |
+
+### Need more?
+
+` + "`session_init`" + ` suggests specialized tools based on your declared intent (e.g. ` + "`get_impact`" + `, ` + "`get_file_context`" + `, ` + "`claim_work`" + `).
+Call ` + "`discover_tools(query=\"what you need\")`" + ` to find any tool by description.
 
 ### Anti-patterns
-- **NEVER** use Grep/Glob to understand code structure or find callers — use ` + "`get_context`" + ` or ` + "`get_impact`" + `
+- **NEVER** use Grep/Glob to understand code structure or find callers — use ` + "`prepare_context`" + ` or ` + "`search`" + `
 - **NEVER** skip ` + "`validate_plan()`" + ` before multi-file changes — it catches architecture violations before any code is written
 - **NEVER** leave discovered bugs untracked — add them as tasks via ` + "`create_plan()`" + ` immediately
 
@@ -1752,7 +1753,7 @@ Synapses memory is organized in three tiers. Use ` + "`remember()`" + ` to save 
 - When a user asks you to remember something, always save it immediately as the correct tier.
 
 ### Workflow
-` + "`session_init`" + ` → explore (` + "`get_context`" + `, ` + "`find_entity`" + `) → ` + "`validate_plan`" + ` → edit files → ` + "`verify_implementation`" + `
+` + "`session_init`" + ` → explore (` + "`prepare_context`" + `, ` + "`search`" + `) → ` + "`validate_plan`" + ` → edit files → ` + "`verify_implementation`" + ` → ` + "`end_session`" + `
 ` + synapsesSectionEnd
 
 // writeProjectCLAUDE writes (or updates) a Synapses-managed section in
