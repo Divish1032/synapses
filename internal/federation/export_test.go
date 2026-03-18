@@ -1,3 +1,4 @@
 package federation
 
-// No exports needed — Clock is injected via NewResolverWithClock.
+// StructuralSignatureDiff is exported for testing.
+var StructuralSignatureDiff = structuralSignatureDiff
