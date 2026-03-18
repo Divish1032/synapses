@@ -184,6 +184,11 @@ type Server struct {
 	repoScale      graph.Scale
 	deferredTools  map[string]server.ServerTool
 	deferredToolsMu sync.Mutex
+
+	// Phase 6: component health tracker for prepare_context pipeline.
+	// Components that panic or timeout ≥3 times in a session are auto-disabled.
+	// Reset on each session_init call.
+	componentHealth componentHealthTracker
 }
 
 // getSessionHash returns the last stored entity_hash for this session+entityKey, or "".
@@ -989,6 +994,10 @@ func (s *Server) registerTools() {
 					"subsequently edits that file, a dependency_alert will surface in your next session_init. "+
 					"Omit in read-only or exploratory sessions where you don't want peer tracking."),
 			),
+			mcp.WithString("projects",
+				mcp.Description("Optional. Comma-separated federation aliases to include sibling project results "+
+					"(e.g. 'core,app'). When provided, also returns matching entities from sibling stores."),
+			),
 		),
 		s.handleGetContext,
 	)
@@ -1267,6 +1276,10 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithNumber("token_budget",
 				mcp.Description("Max response size in tokens (default 2000). When exceeded, peripheral (depth 3+) nodes are dropped first, then indirect (depth 2). Direct callers (depth 1) are always kept. Response includes truncated=true when trimmed."),
+			),
+			mcp.WithString("projects",
+				mcp.Description("Optional. Comma-separated federation aliases to also check sibling project dependents "+
+					"(e.g. 'app'). Returns cross-project callers alongside local ones."),
 			),
 		),
 		s.handleGetImpact,
@@ -1848,6 +1861,10 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithNumber("token_budget",
 				mcp.Description("Max tokens for the response. Defaults vary by intent (1500–3500)."),
+			),
+			mcp.WithString("projects",
+				mcp.Description("Optional. Comma-separated federation aliases to include cross-project context "+
+					"(e.g. 'core'). Enriches response with sibling entity data, memories, and drift status."),
 			),
 		),
 		s.handlePrepareContext,

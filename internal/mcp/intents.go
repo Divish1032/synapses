@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -419,31 +420,14 @@ func (s *Server) assembleModifyContext(
 		}
 	}
 
-	// ── Tiered supplementary sections ────────────────────────────────────
-	// Architecture rules, quality gaps, brain warnings, annotations, and
-	// cross-project deps are all rendered via the tiered visibility system.
-	// Critical items (error-severity violations, high/critical gaps, drifted
-	// deps) are always shown. Relevant items are 1-line summaries within
-	// budget. Available items are a single discover_tools hint.
-	var sections []tieredSection
-	if vs := collectViolationSection(s.config, node.File); vs != nil {
-		sections = append(sections, *vs)
-	}
-	if gs := collectGapSection(s.store, string(node.ID)); gs != nil {
-		sections = append(sections, *gs)
-	}
-	if bs := collectBrainSection(pkt); bs != nil {
-		sections = append(sections, *bs)
-	}
-	if as := collectAnnotationSection(s.store, string(node.ID)); as != nil {
-		sections = append(sections, *as)
-	}
-	sections = append(sections, s.collectCrossProjectSections(ctx, string(node.ID))...)
-	// Available tier: historical failure episodes and full impact analysis.
+	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
+	// Each collector runs in parallel with its own recover boundary.
+	sections, debugResults := s.collectTieredSections(ctx, string(node.ID), node.File, pkt, nil)
 	sections = append(sections, tieredSection{
 		Tier: "available", Heading: "Historical failures, full impact analysis",
 	})
 	renderTiered(b, sections, budget)
+	appendDebugIfBudget(b, debugResults, budget)
 }
 
 // assembleUnderstandContext builds the "understand" intent response:
@@ -490,19 +474,14 @@ func (s *Server) assembleUnderstandContext(
 	}
 	b.WriteString(serializeCompact(dc, detailLevel))
 
-	// ── Tiered supplementary sections ────────────────────────────────────
-	var sections []tieredSection
-	if gs := collectGapSection(s.store, string(node.ID)); gs != nil {
-		sections = append(sections, *gs)
-	}
-	if as := collectAnnotationSection(s.store, string(node.ID)); as != nil {
-		sections = append(sections, *as)
-	}
-	sections = append(sections, s.collectCrossProjectSections(ctx, string(node.ID))...)
+	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
+	understandWhich := map[string]bool{"gaps": true, "annotations": true, "cross_project": true}
+	sections, debugResults := s.collectTieredSections(ctx, string(node.ID), node.File, nil, understandWhich)
 	sections = append(sections, tieredSection{
 		Tier: "available", Heading: "Full impact analysis, historical failures, peer activity",
 	})
 	renderTiered(b, sections, budget)
+	appendDebugIfBudget(b, debugResults, budget)
 }
 
 // assembleReviewContext builds the "review" intent response:
@@ -581,25 +560,13 @@ func (s *Server) assembleReviewContext(
 	}
 	_ = dc // used for pkt building above
 
-	// ── Tiered supplementary sections ────────────────────────────────────
-	var sections []tieredSection
-	if vs := collectViolationSection(s.config, node.File); vs != nil {
-		sections = append(sections, *vs)
-	}
-	if gs := collectGapSection(s.store, string(node.ID)); gs != nil {
-		sections = append(sections, *gs)
-	}
-	if bs := collectBrainSection(pkt); bs != nil {
-		sections = append(sections, *bs)
-	}
-	if as := collectAnnotationSection(s.store, string(node.ID)); as != nil {
-		sections = append(sections, *as)
-	}
-	sections = append(sections, s.collectCrossProjectSections(ctx, string(node.ID))...)
+	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
+	sections, debugResults := s.collectTieredSections(ctx, string(node.ID), node.File, pkt, nil)
 	sections = append(sections, tieredSection{
 		Tier: "available", Heading: "Historical failures, full peer activity, violation audit log",
 	})
 	renderTiered(b, sections, budget)
+	appendDebugIfBudget(b, debugResults, budget)
 }
 
 // assembleDebugContext builds the "debug" intent response:
@@ -670,19 +637,14 @@ func (s *Server) assembleDebugContext(
 		}
 	}
 
-	// ── Tiered supplementary sections ────────────────────────────────────
-	var sections []tieredSection
-	if bs := collectBrainSection(pkt); bs != nil {
-		sections = append(sections, *bs)
-	}
-	if as := collectAnnotationSection(s.store, string(node.ID)); as != nil {
-		sections = append(sections, *as)
-	}
-	sections = append(sections, s.collectCrossProjectSections(ctx, string(node.ID))...)
+	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
+	debugWhich := map[string]bool{"brain": true, "annotations": true, "cross_project": true}
+	sections, debugResults := s.collectTieredSections(ctx, string(node.ID), node.File, pkt, debugWhich)
 	sections = append(sections, tieredSection{
 		Tier: "available", Heading: "Full impact analysis, architecture rules, quality gaps",
 	})
 	renderTiered(b, sections, budget)
+	appendDebugIfBudget(b, debugResults, budget)
 }
 
 // assembleAddContext builds the "add" intent response:
@@ -877,19 +839,14 @@ func (s *Server) assemblePlanContext(
 		}
 	}
 
-	// ── Tiered supplementary sections ────────────────────────────────────
-	var sections []tieredSection
-	if vs := collectViolationSection(s.config, node.File); vs != nil {
-		sections = append(sections, *vs)
-	}
-	if gs := collectGapSection(s.store, string(node.ID)); gs != nil {
-		sections = append(sections, *gs)
-	}
-	sections = append(sections, s.collectCrossProjectSections(ctx, string(node.ID))...)
+	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
+	planWhich := map[string]bool{"violations": true, "gaps": true, "cross_project": true}
+	sections, debugResults := s.collectTieredSections(ctx, string(node.ID), node.File, nil, planWhich)
 	sections = append(sections, tieredSection{
 		Tier: "available", Heading: "Full impact analysis, historical failures",
 	})
 	renderTiered(b, sections, budget)
+	appendDebugIfBudget(b, debugResults, budget)
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,6 +1096,198 @@ func (s *Server) handlePlanContext(
 //
 // The core BFS context (header + ego-graph) is always rendered first.
 // Tiered sections are rendered after, in priority order.
+
+// ── Component Pipeline (Phase 6, Section 8.4) ────────────────────────────────
+//
+// Each supplementary section (violations, gaps, annotations, cross-project,
+// brain) is collected via a componentCollector that runs with:
+//   - its own recover() boundary (panic in one never crashes the response)
+//   - a per-component timeout (never blocks the agent)
+//   - latency tracking for the _debug section
+//
+// Components run in parallel when multiple are needed for the same intent.
+
+// componentCollector is a function that produces zero or more tiered sections.
+// It receives a context with a per-component timeout already applied.
+type componentCollector func(ctx context.Context) []tieredSection
+
+// componentResult is the output of one collector goroutine.
+type componentResult struct {
+	Name      string
+	Sections  []tieredSection
+	LatencyMs int64
+	TimedOut  bool
+	Panicked  bool
+}
+
+// componentHealthTracker tracks per-component failure counts for auto-disable.
+// Components that panic or timeout 3+ times in a session are auto-disabled.
+type componentHealthTracker struct {
+	mu       sync.Mutex
+	failures map[string]int
+}
+
+func (h *componentHealthTracker) recordFailure(name string) {
+	h.mu.Lock()
+	if h.failures == nil {
+		h.failures = make(map[string]int)
+	}
+	h.failures[name]++
+	h.mu.Unlock()
+}
+
+func (h *componentHealthTracker) isDisabled(name string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.failures[name] >= 3
+}
+
+func (h *componentHealthTracker) reset() {
+	h.mu.Lock()
+	h.failures = nil
+	h.mu.Unlock()
+}
+
+// runComponents executes collectors in parallel with per-component recover
+// boundaries and timeout. Returns collected sections and a debug summary.
+func runComponents(ctx context.Context, health *componentHealthTracker, components map[string]componentCollector, timeoutMs int) ([]tieredSection, []componentResult) {
+	if len(components) == 0 {
+		return nil, nil
+	}
+	ch := make(chan componentResult, len(components))
+	for name, collector := range components {
+		if health != nil && health.isDisabled(name) {
+			ch <- componentResult{Name: name, TimedOut: true}
+			continue
+		}
+		go func(n string, fn componentCollector) {
+			start := time.Now()
+			compCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
+			defer cancel()
+
+			var res componentResult
+			res.Name = n
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						res.Panicked = true
+						if health != nil {
+							health.recordFailure(n)
+						}
+					}
+				}()
+				res.Sections = fn(compCtx)
+			}()
+			res.LatencyMs = time.Since(start).Milliseconds()
+			if compCtx.Err() != nil && len(res.Sections) == 0 {
+				res.TimedOut = true
+				if health != nil {
+					health.recordFailure(n)
+				}
+			}
+			ch <- res
+		}(name, collector)
+	}
+
+	var allSections []tieredSection
+	var debugResults []componentResult
+	for i := 0; i < len(components); i++ {
+		res := <-ch
+		debugResults = append(debugResults, res)
+		allSections = append(allSections, res.Sections...)
+	}
+	return allSections, debugResults
+}
+
+// buildDebugSection creates the _debug content from component results.
+// Zero-data components are omitted. Returns nil if no debug info worth showing.
+func buildDebugSection(results []componentResult) map[string]interface{} {
+	if len(results) == 0 {
+		return nil
+	}
+	latencies := make(map[string]int64)
+	var timedOut, panicked []string
+	for _, r := range results {
+		if r.LatencyMs > 0 {
+			latencies[r.Name] = r.LatencyMs
+		}
+		if r.TimedOut {
+			timedOut = append(timedOut, r.Name)
+		}
+		if r.Panicked {
+			panicked = append(panicked, r.Name)
+		}
+	}
+	debug := map[string]interface{}{
+		"latencies_ms": latencies,
+	}
+	if len(timedOut) > 0 {
+		debug["timed_out"] = timedOut
+	}
+	if len(panicked) > 0 {
+		debug["panicked"] = panicked
+	}
+	return debug
+}
+
+// collectTieredSections runs all applicable supplementary collectors in parallel
+// using the component pipeline. Returns the collected sections and debug info.
+// The which parameter selects which collectors to run (nil = all).
+func (s *Server) collectTieredSections(ctx context.Context, nodeID, nodeFile string, pkt *brain.ContextPacket, which map[string]bool) ([]tieredSection, []componentResult) {
+	cfg2 := s.config
+	st := s.store
+	allComponents := map[string]componentCollector{
+		"violations": func(_ context.Context) []tieredSection {
+			if vs := collectViolationSection(cfg2, nodeFile); vs != nil {
+				return []tieredSection{*vs}
+			}
+			return nil
+		},
+		"gaps": func(_ context.Context) []tieredSection {
+			if gs := collectGapSection(st, nodeID); gs != nil {
+				return []tieredSection{*gs}
+			}
+			return nil
+		},
+		"brain": func(_ context.Context) []tieredSection {
+			if bs := collectBrainSection(pkt); bs != nil {
+				return []tieredSection{*bs}
+			}
+			return nil
+		},
+		"annotations": func(_ context.Context) []tieredSection {
+			if as := collectAnnotationSection(st, nodeID); as != nil {
+				return []tieredSection{*as}
+			}
+			return nil
+		},
+		"cross_project": func(cCtx context.Context) []tieredSection {
+			return s.collectCrossProjectSections(cCtx, nodeID)
+		},
+	}
+	// Filter to requested components if which is specified.
+	components := allComponents
+	if which != nil {
+		components = make(map[string]componentCollector, len(which))
+		for name := range which {
+			if fn, ok := allComponents[name]; ok {
+				components[name] = fn
+			}
+		}
+	}
+	return runComponents(ctx, &s.componentHealth, components, 500)
+}
+
+// appendDebugIfBudget writes the _debug section if there's budget remaining.
+func appendDebugIfBudget(b *strings.Builder, debugResults []componentResult, budget int) {
+	if debugInfo := buildDebugSection(debugResults); debugInfo != nil {
+		if budgetLeft(b, budget) > 50 {
+			if raw, err := json.Marshal(debugInfo); err == nil {
+				fmt.Fprintf(b, "\n_debug: %s\n", raw)
+			}
+		}
+	}
+}
 
 // tieredSection represents one supplementary section in a prepare_context
 // response, tagged with its visibility tier for budget-aware rendering.

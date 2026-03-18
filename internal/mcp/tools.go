@@ -3246,6 +3246,54 @@ func (s *Server) handleGetWorkingState(
 		}
 	}
 
+	// Phase 6: entity-level impact enrichment for recently changed files.
+	// Shows which high-impact entities were modified so the agent knows what
+	// to check. Capped at top 5 files, entities with fanin > 3 only.
+	if s.graph != nil && len(events) > 0 {
+		type entityImpact struct {
+			Name    string `json:"name"`
+			File    string `json:"file"`
+			Fanin   int    `json:"fanin"`
+			Type    string `json:"type"`
+		}
+		var impacts []entityImpact
+		seenFiles := make(map[string]bool)
+		limit := 5
+		for _, ev := range events {
+			if ev.File == "" || seenFiles[ev.File] {
+				continue
+			}
+			seenFiles[ev.File] = true
+			if len(seenFiles) > limit {
+				break
+			}
+			nodes := s.graph.FindByFile(ev.File)
+			for _, n := range nodes {
+				fanin := s.graph.Fanin(n.ID)
+				if fanin > 3 {
+					impacts = append(impacts, entityImpact{
+						Name:  n.Name,
+						File:  ev.File,
+						Fanin: fanin,
+						Type:  string(n.Type),
+					})
+				}
+			}
+		}
+		if len(impacts) > 0 {
+			// Sort by fanin descending, cap at 10.
+			sort.Slice(impacts, func(i, j int) bool { return impacts[i].Fanin > impacts[j].Fanin })
+			if len(impacts) > 10 {
+				impacts = impacts[:10]
+			}
+			result["modified_entities"] = map[string]interface{}{
+				"count":    len(impacts),
+				"entities": impacts,
+				"hint":     "High-impact entities modified recently. Consider running get_impact(symbol=\"Name\") to assess blast radius.",
+			}
+		}
+	}
+
 	// Context-aware suggestions based on what was recently changed.
 	result["suggested_tools"] = suggestToolsForChanges(events)
 
@@ -3321,6 +3369,9 @@ func (s *Server) handleSessionInit(
 	quickMode  := scope == "quick"
 	resumeMode := scope == "resume"
 	s.upsertAgentIfNeeded(agentID)
+	// Phase 6: reset component health tracker on new session so auto-disabled
+	// components get a fresh chance.
+	s.componentHealth.reset()
 	// B29: Store declared intent so peers can see what this agent is working on.
 	if agentID != "" && intent != "" && s.store != nil {
 		s.upsertAgentWithActivity(agentID, &store.AgentActivity{Intent: intent})
