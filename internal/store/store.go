@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
@@ -894,19 +895,33 @@ func splitCamelCase(s string) string {
 	return b.String()
 }
 
+// escapeLike escapes SQLite LIKE wildcards (% and _) in a literal string
+// so it can be used safely in a LIKE pattern. Uses \ as the escape char,
+// which requires ESCAPE '\' in the LIKE clause.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
+
 // NodeExistsByName reports whether a node with the given name exists in the store.
 // The match is case-insensitive and also matches qualified names: searching
 // "Close" will match a node named "Store.Close" (suffix after the last dot).
 // This mirrors graph.Graph.FindByName behaviour.
 func (s *Store) NodeExistsByName(name string) (bool, error) {
-	// Exact match OR suffix match after the last dot (qualified names).
-	// "Close" matches both "Close" and "Store.Close".
+	return s.NodeExistsByNameCtx(context.Background(), name)
+}
+
+// NodeExistsByNameCtx is the context-aware variant of NodeExistsByName.
+// The context is threaded into the SQL query — if the context expires,
+// the query is cancelled.
+func (s *Store) NodeExistsByNameCtx(ctx context.Context, name string) (bool, error) {
+	escaped := escapeLike(name)
 	var count int
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM nodes
 		 WHERE name = ? COLLATE NOCASE
-		    OR name LIKE ? COLLATE NOCASE`,
-		name, "%."+name,
+		    OR name LIKE ? ESCAPE '\' COLLATE NOCASE`,
+		name, "%."+escaped,
 	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("node exists check: %w", err)
@@ -918,15 +933,21 @@ func (s *Store) NodeExistsByName(name string) (bool, error) {
 // (case-insensitive). Also matches qualified names: searching "Close" finds
 // both "Close" and "Store.Close". This mirrors graph.Graph.FindByName behaviour.
 func (s *Store) FindNodesByName(name string, limit int) ([]SearchResult, error) {
+	return s.FindNodesByNameCtx(context.Background(), name, limit)
+}
+
+// FindNodesByNameCtx is the context-aware variant of FindNodesByName.
+func (s *Store) FindNodesByNameCtx(ctx context.Context, name string, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.db.Query(
+	escaped := escapeLike(name)
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, name, signature, doc FROM nodes
 		 WHERE name = ? COLLATE NOCASE
-		    OR name LIKE ? COLLATE NOCASE
+		    OR name LIKE ? ESCAPE '\' COLLATE NOCASE
 		 LIMIT ?`,
-		name, "%."+name, limit,
+		name, "%."+escaped, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("find nodes by name: %w", err)
