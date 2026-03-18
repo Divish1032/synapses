@@ -1,0 +1,34 @@
+{
+  "version": "1",
+  "rules": [
+    {
+      "id": "no-db-in-handler",
+      "description": "Handlers must not call database functions directly — use a service layer",
+      "severity": "warning",
+      "forbidden_edge": {
+        "from_file_pattern": "*/handlers/*",
+        "to_file_pattern": "*/db/*",
+        "edge_type": "CALLS"
+      }
+    }
+  ],
+  "context_carve": {
+    "default_depth": 2,
+    "token_budget": 4000
+  },
+  "federation": [
+    {
+      "path": "../sibling-project",
+      "alias": "sibling"
+    }
+  ],
+  "brain": {
+    "enabled": false,
+    "ollama_url": "http://localhost:11434",
+    "model": "qwen3.5:2b"
+  },
+  "session": {
+    "auto_end_threshold_calls": 80,
+    "reconnect_window_secs": 300
+  }
+}
