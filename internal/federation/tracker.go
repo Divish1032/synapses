@@ -123,17 +123,10 @@ func (d *DeterministicDetector) DetectDeps(ctx context.Context, filePath string,
 		return nil
 	}
 
-	// Compute relative file path for FromEntity.
+	// Use the absolute file path for FromEntity. A relative path would be
+	// cleaner but requires knowing the local project root, which isn't
+	// available here (the resolver only knows sibling paths).
 	relPath := filePath
-	if d.resolver != nil {
-		// Try to make path relative to project root for cleaner FromEntity.
-		for _, e := range d.resolver.entries {
-			if dir := filepath.Dir(e.Path); dir != "" {
-				// The local project root is the parent of any sibling.
-				// This heuristic works for typical monorepo layouts.
-			}
-		}
-	}
 
 	// Get sibling HEAD commits for VerifiedCommit.
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -246,7 +239,10 @@ func (d *DeterministicDetector) extractGoRefs(content string) []crossProjectRef 
 			aliasName := m[1]
 			importPath := m[2]
 
-			if aliasName == "" || aliasName == "_" {
+			if aliasName == "_" {
+				continue // blank imports are for side effects (init) — no entity refs
+			}
+			if aliasName == "" {
 				// Use last segment of import path as alias.
 				parts := strings.Split(importPath, "/")
 				aliasName = parts[len(parts)-1]
@@ -280,6 +276,10 @@ func (d *DeterministicDetector) extractGoRefs(content string) []crossProjectRef 
 	}
 
 	// Step 3: Scan for entity references: `alias.EntityName`
+	// Strip comments and string literals to avoid false positives from
+	// `// auth.Validate handles tokens` or `"auth.Validate failed"`.
+	codeOnly := stripGoCommentsAndStrings(content)
+
 	seen := make(map[string]bool) // dedup: "alias:Entity"
 	var refs []crossProjectRef
 
@@ -287,7 +287,7 @@ func (d *DeterministicDetector) extractGoRefs(content string) []crossProjectRef 
 		// Build regex for this import's alias: `alias.ExportedName`
 		// Go exported names start with uppercase.
 		pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(imp.alias) + `\.([A-Z]\w*)`)
-		matches := pattern.FindAllStringSubmatch(content, -1)
+		matches := pattern.FindAllStringSubmatch(codeOnly, -1)
 		for _, m := range matches {
 			entityName := m[1]
 			key := imp.fedAlias + ":" + entityName
@@ -302,6 +302,90 @@ func (d *DeterministicDetector) extractGoRefs(content string) []crossProjectRef 
 		}
 	}
 	return refs
+}
+
+// stripGoCommentsAndStrings removes Go comments and string/rune literals from
+// source code, replacing them with whitespace. This prevents false positive
+// entity reference detection from comments like `// auth.Validate handles...`
+// or strings like `"auth.Validate failed"`.
+//
+// Handles: // line comments, /* block comments */, "strings", `raw strings`, 'runes'
+func stripGoCommentsAndStrings(src string) string {
+	var b strings.Builder
+	b.Grow(len(src))
+
+	i := 0
+	for i < len(src) {
+		// Line comment: //
+		if i+1 < len(src) && src[i] == '/' && src[i+1] == '/' {
+			b.WriteByte(' ')
+			i += 2
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		// Block comment: /* ... */
+		if i+1 < len(src) && src[i] == '/' && src[i+1] == '*' {
+			b.WriteByte(' ')
+			i += 2
+			for i+1 < len(src) {
+				if src[i] == '*' && src[i+1] == '/' {
+					i += 2
+					break
+				}
+				i++
+			}
+			continue
+		}
+		// Double-quoted string: "..."
+		if src[i] == '"' {
+			b.WriteByte(' ')
+			i++
+			for i < len(src) && src[i] != '"' {
+				if src[i] == '\\' && i+1 < len(src) {
+					i += 2 // skip escaped char
+				} else {
+					i++
+				}
+			}
+			if i < len(src) {
+				i++ // skip closing "
+			}
+			continue
+		}
+		// Raw string: `...`
+		if src[i] == '`' {
+			b.WriteByte(' ')
+			i++
+			for i < len(src) && src[i] != '`' {
+				i++
+			}
+			if i < len(src) {
+				i++ // skip closing `
+			}
+			continue
+		}
+		// Rune literal: '...'
+		if src[i] == '\'' {
+			b.WriteByte(' ')
+			i++
+			for i < len(src) && src[i] != '\'' {
+				if src[i] == '\\' && i+1 < len(src) {
+					i += 2
+				} else {
+					i++
+				}
+			}
+			if i < len(src) {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(src[i])
+		i++
+	}
+	return b.String()
 }
 
 // ── TypeScript/JavaScript import extraction ─────────────────────────────────

@@ -1403,6 +1403,110 @@ func saveNodes(t *testing.T, st *store.Store, repoID string, nodes ...*graph.Nod
 	}
 }
 
+// ── Sibling store freshness tests (Gap 1) ───────────────────────────────────
+
+func TestIsSiblingStoreFresh_StoreAfterCommit(t *testing.T) {
+	// Create a git repo with a commit.
+	dir := t.TempDir()
+	runGitHelper(t, dir, "init")
+	runGitHelper(t, dir, "config", "user.email", "test@test.com")
+	runGitHelper(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "auth.go"), "package auth\n")
+	runGitHelper(t, dir, "add", ".")
+	runGitHelper(t, dir, "commit", "-m", "initial")
+
+	head := strings.TrimSpace(gitOutputHelper(t, dir, "rev-parse", "HEAD"))
+
+	// Create sibling store and save (SavedAt will be "now" = after the commit).
+	dbPath, _ := federation.SiblingDBPath(dir)
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := graph.New("test")
+	if err := st.SaveGraph(g); err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// Store was saved after the commit → fresh.
+	r := newResolver([]config.FederationEntry{{Path: dir, Alias: "sib"}})
+	defer r.Close()
+
+	sibStore := r.GetStore("sib")
+	if sibStore == nil {
+		t.Fatal("expected sibling store to open")
+	}
+	if !federation.IsSiblingStoreFresh(r, sibStore, head, dir) {
+		t.Error("expected store to be fresh (saved after commit)")
+	}
+}
+
+func TestIsSiblingStoreFresh_StoreBeforeCommit(t *testing.T) {
+	// Create a git repo and save the store BEFORE making a new commit.
+	dir := t.TempDir()
+	runGitHelper(t, dir, "init")
+	runGitHelper(t, dir, "config", "user.email", "test@test.com")
+	runGitHelper(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "auth.go"), "package auth\n")
+	runGitHelper(t, dir, "add", ".")
+	runGitHelper(t, dir, "commit", "-m", "initial")
+
+	// Create sibling store and save now.
+	dbPath, _ := federation.SiblingDBPath(dir)
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := graph.New("test")
+	if err := st.SaveGraph(g); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	// Wait briefly so the next commit has a later timestamp.
+	time.Sleep(1100 * time.Millisecond)
+
+	// Make a new commit (after the store was saved).
+	writeFile(t, filepath.Join(dir, "auth.go"), "package auth\nfunc Validate() {}\n")
+	runGitHelper(t, dir, "add", ".")
+	runGitHelper(t, dir, "commit", "-m", "add validate")
+	newHead := strings.TrimSpace(gitOutputHelper(t, dir, "rev-parse", "HEAD"))
+
+	// Re-open store read-only.
+	roStore, err := store.OpenReadOnly(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer roStore.Close()
+
+	r := newResolver([]config.FederationEntry{{Path: dir, Alias: "sib"}})
+	defer r.Close()
+
+	if federation.IsSiblingStoreFresh(r, roStore, newHead, dir) {
+		t.Error("expected store to be NOT fresh (saved before the new commit)")
+	}
+}
+
+func runGitHelper(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func gitOutputHelper(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return string(out)
+}
+
 func assertExists(t *testing.T, st *store.Store, name string, want bool) {
 	t.Helper()
 	got, err := st.NodeExistsByName(name)

@@ -466,8 +466,14 @@ func (r *Resolver) checkDriftForEntry(ctx context.Context, e config.FederationEn
 	// Step 4: Graph-first — use the sibling's parsed graph for comparison.
 	// This is the primary path: no git subprocess, no regex, works for all
 	// 49 languages Synapses can parse.
+	//
+	// IMPORTANT: Only trust graph comparison when the sibling store is fresh.
+	// If the store hasn't been re-indexed since HEAD moved, the stored
+	// signatures are stale and comparing them against verified_signature
+	// would produce false negatives (both are old → "no drift" → advance
+	// verified_commit → permanently missed drift).
 	siblingStore := r.getStore(e.Alias)
-	if siblingStore != nil {
+	if siblingStore != nil && r.isSiblingStoreFresh(siblingStore, currentHead, e.Path) {
 		alerts := r.checkDriftGraphFirst(ctx, e.Alias, currentHead, staleDeps, siblingStore, localStore)
 		return mergeAlerts(alerts)
 	}
@@ -487,6 +493,39 @@ func (r *Resolver) checkDriftForEntry(ctx context.Context, e config.FederationEn
 		alerts = append(alerts, groupAlerts...)
 	}
 	return mergeAlerts(alerts)
+}
+
+// isSiblingStoreFresh checks whether the sibling's store was re-indexed
+// recently enough to trust its signatures for graph-based drift detection.
+//
+// Strategy: compare the sibling store's SavedAt timestamp against the HEAD
+// commit's author date. If the store was saved AFTER the commit, the parser
+// has seen the latest code and signatures are trustworthy. If the store is
+// older than the commit, the signatures may be stale — fall through to git
+// diff which compares actual file content between commits.
+//
+// This prevents the "permanently missed drift" bug: when a sibling's HEAD
+// moves but its daemon hasn't re-indexed yet, graph comparison would see
+// old signatures matching verified_signature and silently advance the
+// verified_commit past the real change.
+func (r *Resolver) isSiblingStoreFresh(siblingStore *store.Store, currentHead, repoPath string) bool {
+	savedAt, err := siblingStore.SavedAt()
+	if err != nil || savedAt.IsZero() {
+		return false // can't determine freshness — don't trust
+	}
+
+	// Get the HEAD commit's timestamp.
+	commitTime, err := gitCommitTime(context.Background(), repoPath, currentHead)
+	if err != nil || commitTime.IsZero() {
+		// Can't get commit time — if store was saved very recently (within
+		// 5 minutes), trust it. Otherwise fall back to git diff.
+		return r.clock().Sub(savedAt) < 5*time.Minute
+	}
+
+	// Store was saved at or after the commit → parser has seen the latest code.
+	// Using !Before instead of After so that same-second timestamps (common
+	// when commit and re-index happen rapidly) are treated as fresh.
+	return !savedAt.Before(commitTime)
 }
 
 // checkDriftGraphFirst uses the sibling's parsed graph to detect signature
