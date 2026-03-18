@@ -489,6 +489,20 @@ func (s *Server) assembleUnderstandContext(
 		detailLevel = "summary"
 	}
 	b.WriteString(serializeCompact(dc, detailLevel))
+
+	// ── Tiered supplementary sections ────────────────────────────────────
+	var sections []tieredSection
+	if gs := collectGapSection(s.store, string(node.ID)); gs != nil {
+		sections = append(sections, *gs)
+	}
+	if as := collectAnnotationSection(s.store, string(node.ID)); as != nil {
+		sections = append(sections, *as)
+	}
+	sections = append(sections, s.collectCrossProjectSections(ctx, string(node.ID))...)
+	sections = append(sections, tieredSection{
+		Tier: "available", Heading: "Full impact analysis, historical failures, peer activity",
+	})
+	renderTiered(b, sections, budget)
 }
 
 // assembleReviewContext builds the "review" intent response:
@@ -646,7 +660,7 @@ func (s *Server) assembleDebugContext(
 		}
 	}
 
-	// Optional tier 2: Related state + annotations.
+	// Related state — core content for debug.
 	if budgetLeft(b, budget) > 100 {
 		b.WriteString("\n## Related State\n")
 		if fileHasTests(node.File) {
@@ -654,20 +668,21 @@ func (s *Server) assembleDebugContext(
 		} else {
 			b.WriteString("Test file: none\n")
 		}
-		if pkt != nil && len(pkt.GraphWarnings) > 0 {
-			for _, w := range pkt.GraphWarnings {
-				fmt.Fprintf(b, "⚠ %s\n", w)
-			}
-		}
 	}
 
-	// Annotations can hold past debugging notes.
-	if budgetLeft(b, budget) > 150 && s.store != nil {
-		nodeIDs := []string{string(node.ID)}
-		if annMap, annErr := s.store.GetAnnotationsForNodes(nodeIDs); annErr == nil {
-			writeAnnotations(b, annMap, node.ID)
-		}
+	// ── Tiered supplementary sections ────────────────────────────────────
+	var sections []tieredSection
+	if bs := collectBrainSection(pkt); bs != nil {
+		sections = append(sections, *bs)
 	}
+	if as := collectAnnotationSection(s.store, string(node.ID)); as != nil {
+		sections = append(sections, *as)
+	}
+	sections = append(sections, s.collectCrossProjectSections(ctx, string(node.ID))...)
+	sections = append(sections, tieredSection{
+		Tier: "available", Heading: "Full impact analysis, architecture rules, quality gaps",
+	})
+	renderTiered(b, sections, budget)
 }
 
 // assembleAddContext builds the "add" intent response:
@@ -1308,50 +1323,4 @@ func (s *Server) collectCrossProjectSections(ctx context.Context, entityID strin
 	return sections
 }
 
-// ── Cross-project enrichment ─────────────────────────────────────────────
-// enrichCrossProject appends cross-project dependency data to a prepare_context
-// response. Called from modify/review/plan assemblers. Produces zero output
-// when the entity has no cross-project dependencies or federation is not
-// configured. Separates drifted deps (critical tier) from current deps
-// (relevant tier) per the tiered visibility model.
-func (s *Server) enrichCrossProject(ctx context.Context, b *strings.Builder, entityID string, budget int) {
-	if s.federationResolver == nil || s.store == nil {
-		return
-	}
-	if budgetLeft(b, budget) < 100 {
-		return // not enough budget for cross-project section
-	}
 
-	fedCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-
-	deps := s.federationResolver.GetDepsForEntity(fedCtx, entityID, s.store)
-	if len(deps) == 0 {
-		return
-	}
-
-	var critical, relevant []federation.CrossProjectDepStatus
-	for _, dep := range deps {
-		if dep.Drifted {
-			critical = append(critical, dep)
-		} else {
-			relevant = append(relevant, dep)
-		}
-	}
-
-	// Critical: always shown — breaking drift alerts.
-	if len(critical) > 0 {
-		b.WriteString("\n## ⚠ Cross-Project Alerts\n")
-		for _, dep := range critical {
-			fmt.Fprintf(b, "- BREAKING: %s::%s — %s\n", dep.Project, dep.Entity, dep.DiffSummary)
-		}
-	}
-
-	// Relevant: brief summary with explore hint.
-	if len(relevant) > 0 && budgetLeft(b, budget) > 50 {
-		fmt.Fprintf(b, "\n## Cross-Project Dependencies (%d current, no drift)\n", len(relevant))
-		for _, dep := range relevant {
-			fmt.Fprintf(b, "- %s::%s (%s) [current]\n", dep.Project, dep.Entity, dep.File)
-		}
-	}
-}
