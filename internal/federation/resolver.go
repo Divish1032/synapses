@@ -7,6 +7,7 @@
 package federation
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -22,7 +23,7 @@ import (
 type EntryStatus struct {
 	Alias     string    `json:"alias"`
 	Path      string    `json:"path"`
-	Status    string    `json:"status"` // "indexed" | "stale" | "not_indexed" | "not_found" | "incompatible_version"
+	Status    string    `json:"status"` // "indexed" | "stale" | "not_indexed" | "not_found" | "incompatible"
 	NodeCount int       `json:"node_count,omitempty"`
 	FileCount int       `json:"file_count,omitempty"`
 	IndexedAt time.Time `json:"indexed_at,omitempty"`
@@ -58,6 +59,12 @@ type FederatedSearchResult struct {
 	Results []store.SearchResult `json:"results"`
 }
 
+// staleThreshold is how long since last index before a sibling is "stale".
+const staleThreshold = 24 * time.Hour
+
+// nowFunc is the time source — overridable in tests for deterministic staleness.
+var nowFunc = time.Now
+
 // Resolver provides cross-project query capabilities over local sibling
 // SQLite stores. Stores are opened lazily on first access and cached for
 // the session lifetime.
@@ -66,9 +73,10 @@ type Resolver struct {
 	configDir string // directory containing synapses.json
 
 	mu         sync.RWMutex
-	stores     map[string]*store.Store // alias → read-only store (lazy-opened)
-	driftCache map[string][]DriftAlert // alias → cached drift results (session-level)
-	gitHeads   map[string]string       // alias → cached HEAD commit hash
+	stores     map[string]*store.Store   // alias → read-only store (lazy-opened)
+	storeErr   map[string]error          // alias → last open error (prevents retry loops)
+	driftCache map[string][]DriftAlert   // alias → cached drift results (session-level)
+	gitHeads   map[string]string         // alias → cached HEAD commit hash
 }
 
 // NewResolver creates a Resolver for the given federation entries.
@@ -79,6 +87,7 @@ func NewResolver(entries []config.FederationEntry, configDir string) *Resolver {
 		entries:    entries,
 		configDir:  configDir,
 		stores:     make(map[string]*store.Store, len(entries)),
+		storeErr:   make(map[string]error, len(entries)),
 		driftCache: make(map[string][]DriftAlert),
 		gitHeads:   make(map[string]string),
 	}
@@ -87,9 +96,21 @@ func NewResolver(entries []config.FederationEntry, configDir string) *Resolver {
 // Status returns health info for each federation entry.
 // Errors on individual entries are contained — a broken sibling returns
 // a status entry with Error set, never a top-level error.
-func (r *Resolver) Status() []EntryStatus {
+// ctx is used for timeout; if the deadline expires, remaining entries
+// are reported as-is.
+func (r *Resolver) Status(ctx context.Context) []EntryStatus {
 	results := make([]EntryStatus, 0, len(r.entries))
 	for _, e := range r.entries {
+		if ctx.Err() != nil {
+			// Context expired — report remaining as unknown.
+			results = append(results, EntryStatus{
+				Alias:  e.Alias,
+				Path:   e.Path,
+				Status: "not_indexed",
+				Error:  "timeout",
+			})
+			continue
+		}
 		es := r.statusForEntry(e)
 		results = append(results, es)
 	}
@@ -125,13 +146,25 @@ func (r *Resolver) statusForEntry(e config.FederationEntry) EntryStatus {
 		return es
 	}
 
+	// Schema compatibility check: verify the sibling's DB has the
+	// critical tables we need. If it's from a wildly different version
+	// of Synapses (or a different tool entirely), we skip it.
+	if err := checkSchemaCompatibility(dbPath); err != nil {
+		es.Status = "incompatible"
+		es.Error = err.Error()
+		return es
+	}
+
 	// Open the sibling store read-only.
-	st, err := r.openStore(e.Alias, dbPath)
+	// Note: we do NOT cache the store during Status() — status is
+	// a diagnostic check. Caching happens on first query via getStore().
+	st, err := store.OpenReadOnly(dbPath)
 	if err != nil {
 		es.Status = "not_indexed"
 		es.Error = err.Error()
 		return es
 	}
+	defer st.Close()
 
 	// Read project stats.
 	stat, err := st.Stat(dbPath)
@@ -148,7 +181,7 @@ func (r *Resolver) statusForEntry(e config.FederationEntry) EntryStatus {
 	es.IndexedAt = stat.SavedAt
 
 	// Staleness: consider stale if indexed more than 24 hours ago.
-	if time.Since(stat.SavedAt) > 24*time.Hour {
+	if nowFunc().Sub(stat.SavedAt) > staleThreshold {
 		es.Status = "stale"
 	} else {
 		es.Status = "indexed"
@@ -157,11 +190,46 @@ func (r *Resolver) statusForEntry(e config.FederationEntry) EntryStatus {
 	return es
 }
 
+// checkSchemaCompatibility opens the DB briefly to verify that the tables
+// we need for federation queries exist. Returns an error if the DB is
+// incompatible (missing critical tables).
+func checkSchemaCompatibility(dbPath string) error {
+	db, err := openRawReadOnly(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Check that the 'nodes' and 'meta' tables exist — these are the
+	// minimum for any federation query.
+	for _, table := range []string{"nodes", "meta"} {
+		var name string
+		err := db.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table,
+		).Scan(&name)
+		if err != nil {
+			return fmt.Errorf("missing table %q — incompatible store version", table)
+		}
+	}
+	return nil
+}
+
+// openRawReadOnly opens a SQLite DB in read-only mode without going through
+// store.Open (which runs migrations). Used for schema compatibility checks.
+func openRawReadOnly(path string) (rawDB, error) {
+	// We use the sql package directly here. Import is already available
+	// transitively via store, but we need a direct reference.
+	return newRawDB(path)
+}
+
 // EntityExists checks if an entity name exists in a sibling's store.
 // Returns false on any error (fail-open).
-func (r *Resolver) EntityExists(alias string, entityName string) bool {
+func (r *Resolver) EntityExists(ctx context.Context, alias string, entityName string) bool {
 	st := r.getStore(alias)
 	if st == nil {
+		return false
+	}
+	if ctx.Err() != nil {
 		return false
 	}
 	exists, err := st.NodeExistsByName(entityName)
@@ -174,7 +242,7 @@ func (r *Resolver) EntityExists(alias string, entityName string) bool {
 // FindEntities searches sibling stores for entities matching query.
 // If aliases is nil or empty, all siblings are searched.
 // Errors on individual siblings are silently skipped.
-func (r *Resolver) FindEntities(query string, aliases []string, limit int) []FederatedSearchResult {
+func (r *Resolver) FindEntities(ctx context.Context, query string, aliases []string, limit int) []FederatedSearchResult {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -195,6 +263,9 @@ func (r *Resolver) FindEntities(query string, aliases []string, limit int) []Fed
 
 	var results []FederatedSearchResult
 	for _, e := range targets {
+		if ctx.Err() != nil {
+			break
+		}
 		st := r.getStore(e.Alias)
 		if st == nil {
 			continue
@@ -217,6 +288,33 @@ func (r *Resolver) FindEntities(query string, aliases []string, limit int) []Fed
 	return results
 }
 
+// GetDepsForEntity returns cross-project deps for a specific local entity.
+// Used by prepare_context to enrich responses. Returns nil when the entity
+// has no cross-project dependencies or the local store is unavailable.
+func (r *Resolver) GetDepsForEntity(ctx context.Context, entityID string, localStore *store.Store) []CrossProjectDepStatus {
+	if localStore == nil || ctx.Err() != nil {
+		return nil
+	}
+	deps, err := localStore.GetCrossProjectDeps(entityID)
+	if err != nil || len(deps) == 0 {
+		return nil
+	}
+
+	var results []CrossProjectDepStatus
+	for _, dep := range deps {
+		if ctx.Err() != nil {
+			break
+		}
+		results = append(results, CrossProjectDepStatus{
+			Project: dep.ToProject,
+			Entity:  dep.ToEntity,
+			File:    dep.ToFile,
+			// Drifted/DiffSummary will be populated by CheckDrift in Phase 2.
+		})
+	}
+	return results
+}
+
 // InvalidateCache clears session-level caches. Called on session_init
 // to ensure fresh data each session.
 func (r *Resolver) InvalidateCache() {
@@ -224,6 +322,8 @@ func (r *Resolver) InvalidateCache() {
 	defer r.mu.Unlock()
 	r.driftCache = make(map[string][]DriftAlert)
 	r.gitHeads = make(map[string]string)
+	// Clear store errors so stale failures are retried.
+	r.storeErr = make(map[string]error, len(r.entries))
 }
 
 // Close releases all open sibling stores.
@@ -262,40 +362,22 @@ func (r *Resolver) HasAlias(alias string) bool {
 	return false
 }
 
-// openStore opens a sibling store read-only, caching the result.
-func (r *Resolver) openStore(alias, dbPath string) (*store.Store, error) {
-	r.mu.RLock()
-	if st, ok := r.stores[alias]; ok {
-		r.mu.RUnlock()
-		return st, nil
-	}
-	r.mu.RUnlock()
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// Double-check after acquiring write lock.
-	if st, ok := r.stores[alias]; ok {
-		return st, nil
-	}
-
-	st, err := store.OpenReadOnly(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("open sibling store %q: %w", alias, err)
-	}
-	r.stores[alias] = st
-	return st, nil
-}
-
 // getStore returns the cached store for the alias, opening it lazily if needed.
-// Returns nil on any error (fail-open).
+// Returns nil on any error (fail-open). Once a store fails to open, the error
+// is cached to avoid retry storms — call InvalidateCache to reset.
 func (r *Resolver) getStore(alias string) *store.Store {
 	r.mu.RLock()
 	st, ok := r.stores[alias]
-	r.mu.RUnlock()
 	if ok {
+		r.mu.RUnlock()
 		return st
 	}
+	// Check if we already failed to open this store.
+	if _, errCached := r.storeErr[alias]; errCached {
+		r.mu.RUnlock()
+		return nil
+	}
+	r.mu.RUnlock()
 
 	// Find the entry.
 	var entry *config.FederationEntry
@@ -311,14 +393,39 @@ func (r *Resolver) getStore(alias string) *store.Store {
 
 	dbPath, err := SiblingDBPath(entry.Path)
 	if err != nil {
+		r.mu.Lock()
+		r.storeErr[alias] = err
+		r.mu.Unlock()
 		return nil
 	}
 
-	st, err = r.openStore(alias, dbPath)
-	if err != nil {
-		log.Printf("federation: lazy open %q: %v", alias, err)
+	// Schema check before opening.
+	if err := checkSchemaCompatibility(dbPath); err != nil {
+		r.mu.Lock()
+		r.storeErr[alias] = err
+		r.mu.Unlock()
+		log.Printf("federation: incompatible store %q: %v", alias, err)
 		return nil
 	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Double-check after acquiring write lock.
+	if st, ok := r.stores[alias]; ok {
+		return st
+	}
+	if _, errCached := r.storeErr[alias]; errCached {
+		return nil
+	}
+
+	st, err = store.OpenReadOnly(dbPath)
+	if err != nil {
+		r.storeErr[alias] = err
+		log.Printf("federation: open store %q: %v", alias, err)
+		return nil
+	}
+	r.stores[alias] = st
 	return st
 }
 

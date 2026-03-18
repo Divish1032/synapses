@@ -1,9 +1,11 @@
 package federation_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/federation"
@@ -13,38 +15,15 @@ import (
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-// createSiblingStore creates a temp store with some nodes, simulating a sibling
-// project's index. Returns the DB path.
-func createSiblingStore(t *testing.T, repoID string, nodes []*graph.Node) string {
-	t.Helper()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	st, err := store.Open(dbPath)
-	if err != nil {
-		t.Fatalf("open sibling store: %v", err)
-	}
-	defer st.Close()
-
-	g := graph.New(repoID)
-	for _, n := range nodes {
-		g.AddNode(n)
-	}
-	if err := st.SaveGraph(g); err != nil {
-		t.Fatalf("save sibling graph: %v", err)
-	}
-	return dbPath
-}
-
 // createSiblingWithDefaultPath creates a sibling store at the path that
 // store.DefaultPath would derive for projectDir. This makes the resolver
 // able to discover it via SiblingDBPath.
-func createSiblingWithDefaultPath(t *testing.T, projectDir string, repoID string, nodes []*graph.Node) {
+func createSiblingWithDefaultPath(t *testing.T, projectDir, repoID string, nodes []*graph.Node) {
 	t.Helper()
 	dbPath, err := federation.SiblingDBPath(projectDir)
 	if err != nil {
 		t.Fatalf("SiblingDBPath: %v", err)
 	}
-
 	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open store at default path: %v", err)
@@ -60,14 +39,15 @@ func createSiblingWithDefaultPath(t *testing.T, projectDir string, repoID string
 	}
 }
 
-// sampleNodesFor returns nodes with IDs prefixed by repoID so SaveGraph persists them.
 func sampleNodesFor(repoID string) []*graph.Node {
 	return []*graph.Node{
 		{ID: graph.NodeID(repoID + "::pkg/auth.go::AuthService"), Name: "AuthService", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 10, Exported: true},
-		{ID: graph.NodeID(repoID + "::pkg/auth.go::Validate"), Name: "Validate", Type: graph.NodeMethod, File: "pkg/auth.go", Line: 50, Exported: true},
+		{ID: graph.NodeID(repoID + "::pkg/auth.go::Server.Validate"), Name: "Server.Validate", Type: graph.NodeMethod, File: "pkg/auth.go", Line: 50, Exported: true},
 		{ID: graph.NodeID(repoID + "::pkg/db.go::Connect"), Name: "Connect", Type: graph.NodeFunction, File: "pkg/db.go", Line: 5, Exported: true},
 	}
 }
+
+func bg() context.Context { return context.Background() }
 
 // ── Status tests ────────────────────────────────────────────────────────────
 
@@ -77,7 +57,7 @@ func TestResolverStatus_NotFound(t *testing.T) {
 	}, t.TempDir())
 	defer r.Close()
 
-	statuses := r.Status()
+	statuses := r.Status(bg())
 	if len(statuses) != 1 {
 		t.Fatalf("expected 1 status, got %d", len(statuses))
 	}
@@ -90,14 +70,13 @@ func TestResolverStatus_NotFound(t *testing.T) {
 }
 
 func TestResolverStatus_NotIndexed(t *testing.T) {
-	// Directory exists but no store DB.
 	dir := t.TempDir()
 	r := federation.NewResolver([]config.FederationEntry{
 		{Path: dir, Alias: "empty"},
 	}, t.TempDir())
 	defer r.Close()
 
-	statuses := r.Status()
+	statuses := r.Status(bg())
 	if len(statuses) != 1 {
 		t.Fatalf("expected 1 status, got %d", len(statuses))
 	}
@@ -115,7 +94,7 @@ func TestResolverStatus_Indexed(t *testing.T) {
 	}, t.TempDir())
 	defer r.Close()
 
-	statuses := r.Status()
+	statuses := r.Status(bg())
 	if len(statuses) != 1 {
 		t.Fatalf("expected 1 status, got %d", len(statuses))
 	}
@@ -130,11 +109,67 @@ func TestResolverStatus_Indexed(t *testing.T) {
 	}
 }
 
+func TestResolverStatus_Stale(t *testing.T) {
+	dir := t.TempDir()
+	createSiblingWithDefaultPath(t, dir, "old", sampleNodesFor("old"))
+
+	// Override nowFunc to simulate 48 hours in the future.
+	original := federation.ExportNowFunc()
+	federation.SetNowFunc(func() time.Time {
+		return time.Now().Add(48 * time.Hour)
+	})
+	defer federation.SetNowFunc(original)
+
+	r := federation.NewResolver([]config.FederationEntry{
+		{Path: dir, Alias: "old"},
+	}, t.TempDir())
+	defer r.Close()
+
+	statuses := r.Status(bg())
+	if len(statuses) != 1 {
+		t.Fatalf("expected 1 status, got %d", len(statuses))
+	}
+	if statuses[0].Status != "stale" {
+		t.Errorf("expected stale, got %q", statuses[0].Status)
+	}
+}
+
+func TestResolverStatus_Incompatible(t *testing.T) {
+	dir := t.TempDir()
+	// Create a DB file that has no 'nodes' or 'meta' tables — just junk.
+	dbPath, err := federation.SiblingDBPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Create a valid SQLite DB but with no synapses tables.
+	db, err := store.Open(filepath.Join(t.TempDir(), "dummy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	// Write an empty SQLite file at the expected path.
+	if err := os.WriteFile(dbPath, []byte("SQLite format 3\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := federation.NewResolver([]config.FederationEntry{
+		{Path: dir, Alias: "incompat"},
+	}, t.TempDir())
+	defer r.Close()
+
+	statuses := r.Status(bg())
+	if len(statuses) != 1 {
+		t.Fatalf("expected 1 status, got %d", len(statuses))
+	}
+	if statuses[0].Status != "incompatible" {
+		t.Errorf("expected incompatible, got %q (err: %s)", statuses[0].Status, statuses[0].Error)
+	}
+}
+
 func TestResolverStatus_MultipleSiblings(t *testing.T) {
 	dir1 := t.TempDir()
 	dir2 := t.TempDir()
 	createSiblingWithDefaultPath(t, dir1, "proj-a", sampleNodesFor("proj-a"))
-	// dir2 has no store — not indexed
 
 	r := federation.NewResolver([]config.FederationEntry{
 		{Path: dir1, Alias: "a"},
@@ -143,7 +178,7 @@ func TestResolverStatus_MultipleSiblings(t *testing.T) {
 	}, t.TempDir())
 	defer r.Close()
 
-	statuses := r.Status()
+	statuses := r.Status(bg())
 	if len(statuses) != 3 {
 		t.Fatalf("expected 3 statuses, got %d", len(statuses))
 	}
@@ -158,6 +193,24 @@ func TestResolverStatus_MultipleSiblings(t *testing.T) {
 	}
 }
 
+func TestResolverStatus_CancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(bg())
+	cancel() // immediately cancelled
+
+	r := federation.NewResolver([]config.FederationEntry{
+		{Path: "/a", Alias: "a"},
+	}, t.TempDir())
+	defer r.Close()
+
+	statuses := r.Status(ctx)
+	if len(statuses) != 1 {
+		t.Fatalf("expected 1 status, got %d", len(statuses))
+	}
+	if statuses[0].Error != "timeout" {
+		t.Errorf("expected timeout error, got %q", statuses[0].Error)
+	}
+}
+
 // ── EntityExists tests ──────────────────────────────────────────────────────
 
 func TestEntityExists_Found(t *testing.T) {
@@ -169,8 +222,23 @@ func TestEntityExists_Found(t *testing.T) {
 	}, t.TempDir())
 	defer r.Close()
 
-	if !r.EntityExists("sibling", "AuthService") {
+	if !r.EntityExists(bg(), "sibling", "AuthService") {
 		t.Error("expected AuthService to exist")
+	}
+}
+
+func TestEntityExists_QualifiedName(t *testing.T) {
+	dir := t.TempDir()
+	createSiblingWithDefaultPath(t, dir, "sibling", sampleNodesFor("sibling"))
+
+	r := federation.NewResolver([]config.FederationEntry{
+		{Path: dir, Alias: "sibling"},
+	}, t.TempDir())
+	defer r.Close()
+
+	// "Validate" should match "Server.Validate" (suffix after last dot).
+	if !r.EntityExists(bg(), "sibling", "Validate") {
+		t.Error("expected Validate to match Server.Validate via suffix matching")
 	}
 }
 
@@ -183,7 +251,7 @@ func TestEntityExists_NotFound(t *testing.T) {
 	}, t.TempDir())
 	defer r.Close()
 
-	if r.EntityExists("sibling", "NonExistent") {
+	if r.EntityExists(bg(), "sibling", "NonExistent") {
 		t.Error("expected NonExistent to not exist")
 	}
 }
@@ -192,24 +260,39 @@ func TestEntityExists_UnknownAlias(t *testing.T) {
 	r := federation.NewResolver(nil, t.TempDir())
 	defer r.Close()
 
-	// Should return false for unknown alias — fail-open.
-	if r.EntityExists("unknown", "anything") {
+	if r.EntityExists(bg(), "unknown", "anything") {
 		t.Error("expected false for unknown alias")
 	}
 }
 
-func TestEntityExists_BrokenStore(t *testing.T) {
-	// Point to a directory that exists but has no valid store.
+func TestEntityExists_BrokenStore_FailOpen(t *testing.T) {
 	dir := t.TempDir()
-
 	r := federation.NewResolver([]config.FederationEntry{
 		{Path: dir, Alias: "broken"},
 	}, t.TempDir())
 	defer r.Close()
 
 	// Fail-open: returns false, no panic.
-	if r.EntityExists("broken", "anything") {
+	if r.EntityExists(bg(), "broken", "anything") {
 		t.Error("expected false for unindexed sibling")
+	}
+}
+
+func TestEntityExists_CancelledContext(t *testing.T) {
+	dir := t.TempDir()
+	createSiblingWithDefaultPath(t, dir, "sibling", sampleNodesFor("sibling"))
+
+	r := federation.NewResolver([]config.FederationEntry{
+		{Path: dir, Alias: "sibling"},
+	}, t.TempDir())
+	defer r.Close()
+
+	ctx, cancel := context.WithCancel(bg())
+	cancel()
+
+	// Should return false when context is cancelled — fail-open.
+	if r.EntityExists(ctx, "sibling", "AuthService") {
+		t.Error("expected false when context cancelled")
 	}
 }
 
@@ -224,7 +307,7 @@ func TestFindEntities_CrossProject(t *testing.T) {
 	}, t.TempDir())
 	defer r.Close()
 
-	results := r.FindEntities("AuthService", nil, 10)
+	results := r.FindEntities(bg(), "AuthService", nil, 10)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result group, got %d", len(results))
 	}
@@ -233,6 +316,25 @@ func TestFindEntities_CrossProject(t *testing.T) {
 	}
 	if len(results[0].Results) != 1 {
 		t.Errorf("expected 1 match, got %d", len(results[0].Results))
+	}
+}
+
+func TestFindEntities_QualifiedSuffix(t *testing.T) {
+	dir := t.TempDir()
+	createSiblingWithDefaultPath(t, dir, "sibling", sampleNodesFor("sibling"))
+
+	r := federation.NewResolver([]config.FederationEntry{
+		{Path: dir, Alias: "sibling"},
+	}, t.TempDir())
+	defer r.Close()
+
+	// "Validate" should find "Server.Validate" via suffix matching.
+	results := r.FindEntities(bg(), "Validate", nil, 10)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result group, got %d", len(results))
+	}
+	if len(results[0].Results) != 1 {
+		t.Errorf("expected 1 match for suffix 'Validate', got %d", len(results[0].Results))
 	}
 }
 
@@ -248,8 +350,7 @@ func TestFindEntities_FilterByAlias(t *testing.T) {
 	}, t.TempDir())
 	defer r.Close()
 
-	// Search only in alias "a".
-	results := r.FindEntities("Connect", []string{"a"}, 10)
+	results := r.FindEntities(bg(), "Connect", []string{"a"}, 10)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result group (only 'a'), got %d", len(results))
 	}
@@ -267,7 +368,7 @@ func TestFindEntities_NoMatch(t *testing.T) {
 	}, t.TempDir())
 	defer r.Close()
 
-	results := r.FindEntities("NonExistentEntity", nil, 10)
+	results := r.FindEntities(bg(), "NonExistentEntity", nil, 10)
 	if len(results) != 0 {
 		t.Errorf("expected 0 result groups, got %d", len(results))
 	}
@@ -283,13 +384,84 @@ func TestFindEntities_BrokenSibling_Skipped(t *testing.T) {
 	}, t.TempDir())
 	defer r.Close()
 
-	// Broken sibling should be silently skipped.
-	results := r.FindEntities("AuthService", nil, 10)
+	results := r.FindEntities(bg(), "AuthService", nil, 10)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result group (only 'good'), got %d", len(results))
 	}
 	if results[0].Alias != "good" {
 		t.Errorf("expected alias 'good', got %q", results[0].Alias)
+	}
+}
+
+// ── GetDepsForEntity tests ──────────────────────────────────────────────────
+
+func TestGetDepsForEntity_NoDeps(t *testing.T) {
+	st := openTestStore(t)
+
+	r := federation.NewResolver(nil, t.TempDir())
+	defer r.Close()
+
+	deps := r.GetDepsForEntity(bg(), "some::entity", st)
+	if deps != nil {
+		t.Errorf("expected nil deps, got %v", deps)
+	}
+}
+
+func TestGetDepsForEntity_WithDeps(t *testing.T) {
+	st := openTestStore(t)
+
+	// Insert a cross-project dep.
+	err := st.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity:     "local::main.go::Handler",
+		ToProject:      "core",
+		ToEntity:       "AuthService",
+		ToFile:         "pkg/auth.go",
+		VerifiedCommit: "abc123",
+		VerifiedAt:     time.Now().UTC().Format(time.RFC3339),
+		DetectionTier:  "tier1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := federation.NewResolver(nil, t.TempDir())
+	defer r.Close()
+
+	deps := r.GetDepsForEntity(bg(), "local::main.go::Handler", st)
+	if len(deps) != 1 {
+		t.Fatalf("expected 1 dep, got %d", len(deps))
+	}
+	if deps[0].Project != "core" {
+		t.Errorf("expected project 'core', got %q", deps[0].Project)
+	}
+	if deps[0].Entity != "AuthService" {
+		t.Errorf("expected entity 'AuthService', got %q", deps[0].Entity)
+	}
+}
+
+func TestGetDepsForEntity_NilStore(t *testing.T) {
+	r := federation.NewResolver(nil, t.TempDir())
+	defer r.Close()
+
+	// Nil store should return nil — fail-open.
+	deps := r.GetDepsForEntity(bg(), "entity", nil)
+	if deps != nil {
+		t.Errorf("expected nil for nil store, got %v", deps)
+	}
+}
+
+func TestGetDepsForEntity_CancelledContext(t *testing.T) {
+	st := openTestStore(t)
+
+	r := federation.NewResolver(nil, t.TempDir())
+	defer r.Close()
+
+	ctx, cancel := context.WithCancel(bg())
+	cancel()
+
+	deps := r.GetDepsForEntity(ctx, "entity", st)
+	if deps != nil {
+		t.Errorf("expected nil for cancelled context, got %v", deps)
 	}
 }
 
@@ -299,8 +471,34 @@ func TestInvalidateCache_ClearsState(t *testing.T) {
 	r := federation.NewResolver(nil, t.TempDir())
 	defer r.Close()
 
-	// Should not panic even with empty resolver.
+	r.InvalidateCache() // should not panic
+}
+
+func TestInvalidateCache_RetriesFailedStores(t *testing.T) {
+	dir := t.TempDir()
+	r := federation.NewResolver([]config.FederationEntry{
+		{Path: dir, Alias: "retry"},
+	}, t.TempDir())
+	defer r.Close()
+
+	// First call fails — no store exists.
+	if r.EntityExists(bg(), "retry", "Foo") {
+		t.Error("expected false on first attempt")
+	}
+
+	// Create the store now.
+	createSiblingWithDefaultPath(t, dir, "retry", sampleNodesFor("retry"))
+
+	// Without InvalidateCache, the error is cached — still fails.
+	if r.EntityExists(bg(), "retry", "AuthService") {
+		t.Error("expected false — error should still be cached")
+	}
+
+	// After cache reset, it should find the entity.
 	r.InvalidateCache()
+	if !r.EntityExists(bg(), "retry", "AuthService") {
+		t.Error("expected true after InvalidateCache + store creation")
+	}
 }
 
 // ── Aliases / HasAlias tests ────────────────────────────────────────────────
@@ -313,10 +511,7 @@ func TestAliases(t *testing.T) {
 	defer r.Close()
 
 	aliases := r.Aliases()
-	if len(aliases) != 2 {
-		t.Fatalf("expected 2 aliases, got %d", len(aliases))
-	}
-	if aliases[0] != "alpha" || aliases[1] != "beta" {
+	if len(aliases) != 2 || aliases[0] != "alpha" || aliases[1] != "beta" {
 		t.Errorf("unexpected aliases: %v", aliases)
 	}
 }
@@ -339,17 +534,13 @@ func TestHasAlias(t *testing.T) {
 
 func TestConfigValidation_DuplicateAlias(t *testing.T) {
 	dir := t.TempDir()
-	cfgJSON := `{
+	writeFile(t, filepath.Join(dir, "synapses.json"), `{
 		"version": "1",
 		"federation": [
 			{"path": "../a", "alias": "dup"},
 			{"path": "../b", "alias": "dup"}
 		]
-	}`
-	cfgPath := filepath.Join(dir, "synapses.json")
-	if err := writeFile(cfgPath, cfgJSON); err != nil {
-		t.Fatal(err)
-	}
+	}`)
 
 	_, err := config.Load(dir)
 	if err == nil {
@@ -359,16 +550,10 @@ func TestConfigValidation_DuplicateAlias(t *testing.T) {
 
 func TestConfigValidation_EmptyAlias(t *testing.T) {
 	dir := t.TempDir()
-	cfgJSON := `{
+	writeFile(t, filepath.Join(dir, "synapses.json"), `{
 		"version": "1",
-		"federation": [
-			{"path": "../a", "alias": ""}
-		]
-	}`
-	cfgPath := filepath.Join(dir, "synapses.json")
-	if err := writeFile(cfgPath, cfgJSON); err != nil {
-		t.Fatal(err)
-	}
+		"federation": [{"path": "../a", "alias": ""}]
+	}`)
 
 	_, err := config.Load(dir)
 	if err == nil {
@@ -378,16 +563,10 @@ func TestConfigValidation_EmptyAlias(t *testing.T) {
 
 func TestConfigValidation_WhitespaceAlias(t *testing.T) {
 	dir := t.TempDir()
-	cfgJSON := `{
+	writeFile(t, filepath.Join(dir, "synapses.json"), `{
 		"version": "1",
-		"federation": [
-			{"path": "../a", "alias": "has space"}
-		]
-	}`
-	cfgPath := filepath.Join(dir, "synapses.json")
-	if err := writeFile(cfgPath, cfgJSON); err != nil {
-		t.Fatal(err)
-	}
+		"federation": [{"path": "../a", "alias": "has space"}]
+	}`)
 
 	_, err := config.Load(dir)
 	if err == nil {
@@ -395,19 +574,28 @@ func TestConfigValidation_WhitespaceAlias(t *testing.T) {
 	}
 }
 
+func TestConfigValidation_EmptyPath(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "synapses.json"), `{
+		"version": "1",
+		"federation": [{"path": "", "alias": "nopath"}]
+	}`)
+
+	_, err := config.Load(dir)
+	if err == nil {
+		t.Error("expected error for empty federation path")
+	}
+}
+
 func TestConfigValidation_ValidFederation(t *testing.T) {
 	dir := t.TempDir()
-	cfgJSON := `{
+	writeFile(t, filepath.Join(dir, "synapses.json"), `{
 		"version": "1",
 		"federation": [
 			{"path": "../a", "alias": "alpha"},
 			{"path": "../b", "alias": "beta"}
 		]
-	}`
-	cfgPath := filepath.Join(dir, "synapses.json")
-	if err := writeFile(cfgPath, cfgJSON); err != nil {
-		t.Fatal(err)
-	}
+	}`)
 
 	cfg, err := config.Load(dir)
 	if err != nil {
@@ -416,7 +604,6 @@ func TestConfigValidation_ValidFederation(t *testing.T) {
 	if len(cfg.Federation) != 2 {
 		t.Errorf("expected 2 federation entries, got %d", len(cfg.Federation))
 	}
-	// Paths should be resolved to absolute.
 	if !filepath.IsAbs(cfg.Federation[0].Path) {
 		t.Errorf("expected absolute path, got %q", cfg.Federation[0].Path)
 	}
@@ -424,20 +611,9 @@ func TestConfigValidation_ValidFederation(t *testing.T) {
 
 // ── Store.NodeExistsByName / FindNodesByName tests ──────────────────────────
 
-func TestNodeExistsByName(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	st, err := store.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	g := graph.New("test")
-	g.AddNode(&graph.Node{ID: "test::main.go::Foo", Name: "Foo", Type: graph.NodeFunction, File: "main.go"})
-	if err := st.SaveGraph(g); err != nil {
-		t.Fatal(err)
-	}
+func TestNodeExistsByName_ExactMatch(t *testing.T) {
+	st := openTestStore(t)
+	saveNodes(t, st, "test", &graph.Node{ID: "test::main.go::Foo", Name: "Foo", Type: graph.NodeFunction, File: "main.go"})
 
 	exists, err := st.NodeExistsByName("Foo")
 	if err != nil {
@@ -446,17 +622,13 @@ func TestNodeExistsByName(t *testing.T) {
 	if !exists {
 		t.Error("expected Foo to exist")
 	}
+}
 
-	exists, err = st.NodeExistsByName("Bar")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if exists {
-		t.Error("expected Bar to not exist")
-	}
+func TestNodeExistsByName_CaseInsensitive(t *testing.T) {
+	st := openTestStore(t)
+	saveNodes(t, st, "test", &graph.Node{ID: "test::main.go::Foo", Name: "Foo", Type: graph.NodeFunction, File: "main.go"})
 
-	// Case insensitive.
-	exists, err = st.NodeExistsByName("foo")
+	exists, err := st.NodeExistsByName("foo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,22 +637,40 @@ func TestNodeExistsByName(t *testing.T) {
 	}
 }
 
-func TestFindNodesByName(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	st, err := store.Open(dbPath)
+func TestNodeExistsByName_QualifiedSuffix(t *testing.T) {
+	st := openTestStore(t)
+	saveNodes(t, st, "test", &graph.Node{ID: "test::main.go::Store.Close", Name: "Store.Close", Type: graph.NodeMethod, File: "main.go"})
+
+	// "Close" should match "Store.Close" via suffix.
+	exists, err := st.NodeExistsByName("Close")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	if !exists {
+		t.Error("expected 'Close' to match 'Store.Close' via suffix")
+	}
+}
 
-	g := graph.New("test")
-	g.AddNode(&graph.Node{ID: "test::a.go::Foo", Name: "Foo", Type: graph.NodeFunction, File: "a.go"})
-	g.AddNode(&graph.Node{ID: "test::b.go::Foo", Name: "Foo", Type: graph.NodeFunction, File: "b.go"})
-	g.AddNode(&graph.Node{ID: "test::c.go::Bar", Name: "Bar", Type: graph.NodeFunction, File: "c.go"})
-	if err := st.SaveGraph(g); err != nil {
+func TestNodeExistsByName_NotFound(t *testing.T) {
+	st := openTestStore(t)
+	saveNodes(t, st, "test", &graph.Node{ID: "test::main.go::Foo", Name: "Foo", Type: graph.NodeFunction, File: "main.go"})
+
+	exists, err := st.NodeExistsByName("Bar")
+	if err != nil {
 		t.Fatal(err)
 	}
+	if exists {
+		t.Error("expected Bar to not exist")
+	}
+}
+
+func TestFindNodesByName_MultipleMatches(t *testing.T) {
+	st := openTestStore(t)
+	saveNodes(t, st, "test",
+		&graph.Node{ID: "test::a.go::Foo", Name: "Foo", Type: graph.NodeFunction, File: "a.go"},
+		&graph.Node{ID: "test::b.go::Foo", Name: "Foo", Type: graph.NodeFunction, File: "b.go"},
+		&graph.Node{ID: "test::c.go::Bar", Name: "Bar", Type: graph.NodeFunction, File: "c.go"},
+	)
 
 	results, err := st.FindNodesByName("Foo", 10)
 	if err != nil {
@@ -489,18 +679,196 @@ func TestFindNodesByName(t *testing.T) {
 	if len(results) != 2 {
 		t.Errorf("expected 2 results for Foo, got %d", len(results))
 	}
+}
 
-	results, err = st.FindNodesByName("NotThere", 10)
+func TestFindNodesByName_QualifiedSuffix(t *testing.T) {
+	st := openTestStore(t)
+	saveNodes(t, st, "test",
+		&graph.Node{ID: "test::a.go::Server.Handle", Name: "Server.Handle", Type: graph.NodeMethod, File: "a.go"},
+		&graph.Node{ID: "test::b.go::Handle", Name: "Handle", Type: graph.NodeFunction, File: "b.go"},
+	)
+
+	results, err := st.FindNodesByName("Handle", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Errorf("expected 2 results (exact + suffix), got %d", len(results))
+	}
+}
+
+func TestFindNodesByName_NoMatch(t *testing.T) {
+	st := openTestStore(t)
+	saveNodes(t, st, "test", &graph.Node{ID: "test::a.go::Foo", Name: "Foo", Type: graph.NodeFunction, File: "a.go"})
+
+	results, err := st.FindNodesByName("NotThere", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(results) != 0 {
-		t.Errorf("expected 0 results for NotThere, got %d", len(results))
+		t.Errorf("expected 0 results, got %d", len(results))
+	}
+}
+
+// ── Store cross_project_deps CRUD tests ─────────────────────────────────────
+
+func TestCrossProjectDeps_UpsertAndGet(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	dep := store.CrossProjectDep{
+		FromEntity:     "local::main.go::Handler",
+		ToProject:      "core",
+		ToEntity:       "AuthService",
+		ToFile:         "pkg/auth.go",
+		VerifiedCommit: "abc123",
+		VerifiedAt:     now,
+		DetectionTier:  "tier1",
+	}
+	if err := st.UpsertCrossProjectDep(dep); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, err := st.GetCrossProjectDeps("local::main.go::Handler")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("expected 1 dep, got %d", len(deps))
+	}
+	if deps[0].ToProject != "core" || deps[0].ToEntity != "AuthService" {
+		t.Errorf("unexpected dep: %+v", deps[0])
+	}
+}
+
+func TestCrossProjectDeps_UpsertOverwrite(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	dep := store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "core", ToEntity: "AuthService",
+		ToFile: "pkg/auth.go", VerifiedCommit: "abc123", VerifiedAt: now, DetectionTier: "tier1",
+	}
+	if err := st.UpsertCrossProjectDep(dep); err != nil {
+		t.Fatal(err)
+	}
+
+	// Update the commit.
+	dep.VerifiedCommit = "def456"
+	if err := st.UpsertCrossProjectDep(dep); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, err := st.GetCrossProjectDeps("local::main.go::Handler")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("expected 1 dep after upsert, got %d", len(deps))
+	}
+	if deps[0].VerifiedCommit != "def456" {
+		t.Errorf("expected updated commit 'def456', got %q", deps[0].VerifiedCommit)
+	}
+}
+
+func TestCrossProjectDeps_GetByProject(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	for _, e := range []string{"A", "B"} {
+		st.UpsertCrossProjectDep(store.CrossProjectDep{
+			FromEntity: "local::x.go::" + e, ToProject: "core", ToEntity: e,
+			ToFile: "f.go", VerifiedCommit: "aaa", VerifiedAt: now, DetectionTier: "tier1",
+		})
+	}
+	st.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::y.go::C", ToProject: "other", ToEntity: "C",
+		ToFile: "g.go", VerifiedCommit: "bbb", VerifiedAt: now, DetectionTier: "tier1",
+	})
+
+	deps, err := st.GetCrossProjectDepsByProject("core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 2 {
+		t.Errorf("expected 2 deps for project 'core', got %d", len(deps))
+	}
+}
+
+func TestCrossProjectDeps_Delete(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	st.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "core", ToEntity: "Auth",
+		ToFile: "a.go", VerifiedCommit: "aaa", VerifiedAt: now, DetectionTier: "tier1",
+	})
+
+	if err := st.DeleteCrossProjectDeps("local::main.go::Handler"); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, err := st.GetCrossProjectDeps("local::main.go::Handler")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 0 {
+		t.Errorf("expected 0 deps after delete, got %d", len(deps))
+	}
+}
+
+func TestCrossProjectDeps_UpdateVerifiedCommit(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	st.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "core", ToEntity: "Auth",
+		ToFile: "a.go", VerifiedCommit: "old", VerifiedAt: now, DetectionTier: "tier1",
+	})
+
+	if err := st.UpdateVerifiedCommit("core", "Auth", "new"); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, err := st.GetCrossProjectDeps("local::main.go::Handler")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("expected 1 dep, got %d", len(deps))
+	}
+	if deps[0].VerifiedCommit != "new" {
+		t.Errorf("expected commit 'new', got %q", deps[0].VerifiedCommit)
 	}
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-func writeFile(path, content string) error {
-	return os.WriteFile(path, []byte(content), 0o644)
+func openTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return st
+}
+
+func saveNodes(t *testing.T, st *store.Store, repoID string, nodes ...*graph.Node) {
+	t.Helper()
+	g := graph.New(repoID)
+	for _, n := range nodes {
+		g.AddNode(n)
+	}
+	if err := st.SaveGraph(g); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

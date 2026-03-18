@@ -895,10 +895,19 @@ func splitCamelCase(s string) string {
 }
 
 // NodeExistsByName reports whether a node with the given name exists in the store.
-// The match is case-insensitive. Used by federation to validate cross-project deps.
+// The match is case-insensitive and also matches qualified names: searching
+// "Close" will match a node named "Store.Close" (suffix after the last dot).
+// This mirrors graph.Graph.FindByName behaviour.
 func (s *Store) NodeExistsByName(name string) (bool, error) {
+	// Exact match OR suffix match after the last dot (qualified names).
+	// "Close" matches both "Close" and "Store.Close".
 	var count int
-	err := s.db.QueryRow(`SELECT count(*) FROM nodes WHERE name = ? COLLATE NOCASE`, name).Scan(&count)
+	err := s.db.QueryRow(
+		`SELECT count(*) FROM nodes
+		 WHERE name = ? COLLATE NOCASE
+		    OR name LIKE ? COLLATE NOCASE`,
+		name, "%."+name,
+	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("node exists check: %w", err)
 	}
@@ -906,14 +915,18 @@ func (s *Store) NodeExistsByName(name string) (bool, error) {
 }
 
 // FindNodesByName returns lightweight node references matching the given name
-// (case-insensitive). Used by federation for cross-project entity lookup.
+// (case-insensitive). Also matches qualified names: searching "Close" finds
+// both "Close" and "Store.Close". This mirrors graph.Graph.FindByName behaviour.
 func (s *Store) FindNodesByName(name string, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	rows, err := s.db.Query(
-		`SELECT id, name, signature, doc FROM nodes WHERE name = ? COLLATE NOCASE LIMIT ?`,
-		name, limit,
+		`SELECT id, name, signature, doc FROM nodes
+		 WHERE name = ? COLLATE NOCASE
+		    OR name LIKE ? COLLATE NOCASE
+		 LIMIT ?`,
+		name, "%."+name, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("find nodes by name: %w", err)
@@ -929,6 +942,102 @@ func (s *Store) FindNodesByName(name string, limit int) ([]SearchResult, error) 
 		results = append(results, r)
 	}
 	return results, rows.Err()
+}
+
+// CrossProjectDep represents a stored dependency on an entity in a sibling project.
+type CrossProjectDep struct {
+	FromEntity    string `json:"from_entity"`
+	ToProject     string `json:"to_project"`
+	ToEntity      string `json:"to_entity"`
+	ToFile        string `json:"to_file"`
+	VerifiedCommit string `json:"verified_commit"`
+	VerifiedAt    string `json:"verified_at"`
+	DetectionTier string `json:"detection_tier"`
+}
+
+// GetCrossProjectDeps returns all cross-project dependencies for a local entity.
+func (s *Store) GetCrossProjectDeps(fromEntity string) ([]CrossProjectDep, error) {
+	rows, err := s.db.Query(
+		`SELECT from_entity, to_project, to_entity, to_file, verified_commit, verified_at, detection_tier
+		 FROM cross_project_deps WHERE from_entity = ?`,
+		fromEntity,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get cross-project deps: %w", err)
+	}
+	defer rows.Close()
+
+	var deps []CrossProjectDep
+	for rows.Next() {
+		var d CrossProjectDep
+		if err := rows.Scan(&d.FromEntity, &d.ToProject, &d.ToEntity, &d.ToFile, &d.VerifiedCommit, &d.VerifiedAt, &d.DetectionTier); err != nil {
+			return nil, err
+		}
+		deps = append(deps, d)
+	}
+	return deps, rows.Err()
+}
+
+// GetCrossProjectDepsByProject returns all deps targeting a specific sibling project.
+func (s *Store) GetCrossProjectDepsByProject(project string) ([]CrossProjectDep, error) {
+	rows, err := s.db.Query(
+		`SELECT from_entity, to_project, to_entity, to_file, verified_commit, verified_at, detection_tier
+		 FROM cross_project_deps WHERE to_project = ?`,
+		project,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get cross-project deps by project: %w", err)
+	}
+	defer rows.Close()
+
+	var deps []CrossProjectDep
+	for rows.Next() {
+		var d CrossProjectDep
+		if err := rows.Scan(&d.FromEntity, &d.ToProject, &d.ToEntity, &d.ToFile, &d.VerifiedCommit, &d.VerifiedAt, &d.DetectionTier); err != nil {
+			return nil, err
+		}
+		deps = append(deps, d)
+	}
+	return deps, rows.Err()
+}
+
+// UpsertCrossProjectDep inserts or updates a cross-project dependency.
+func (s *Store) UpsertCrossProjectDep(dep CrossProjectDep) error {
+	_, err := s.db.Exec(
+		`INSERT INTO cross_project_deps (from_entity, to_project, to_entity, to_file, verified_commit, verified_at, detection_tier)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (from_entity, to_project, to_entity)
+		 DO UPDATE SET to_file=excluded.to_file, verified_commit=excluded.verified_commit, verified_at=excluded.verified_at, detection_tier=excluded.detection_tier`,
+		dep.FromEntity, dep.ToProject, dep.ToEntity, dep.ToFile, dep.VerifiedCommit, dep.VerifiedAt, dep.DetectionTier,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert cross-project dep: %w", err)
+	}
+	return nil
+}
+
+// DeleteCrossProjectDeps removes all cross-project deps for a local entity.
+func (s *Store) DeleteCrossProjectDeps(fromEntity string) error {
+	_, err := s.db.Exec(`DELETE FROM cross_project_deps WHERE from_entity = ?`, fromEntity)
+	if err != nil {
+		return fmt.Errorf("delete cross-project deps: %w", err)
+	}
+	return nil
+}
+
+// UpdateVerifiedCommit updates the verified_commit for a dependency after
+// confirming the sibling entity hasn't drifted.
+func (s *Store) UpdateVerifiedCommit(toProject, toEntity, newCommit string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`UPDATE cross_project_deps SET verified_commit = ?, verified_at = ?
+		 WHERE to_project = ? AND to_entity = ?`,
+		newCommit, now, toProject, toEntity,
+	)
+	if err != nil {
+		return fmt.Errorf("update verified commit: %w", err)
+	}
+	return nil
 }
 
 // SearchResult is a node that matched a semantic_search query,
