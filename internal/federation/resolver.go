@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -59,11 +60,21 @@ type FederatedSearchResult struct {
 	Results []store.SearchResult `json:"results"`
 }
 
+// FederatedContext holds BFS context carved from a sibling's graph.
+type FederatedContext struct {
+	Alias     string            `json:"alias"`
+	Entity    string            `json:"entity"`
+	NodeCount int               `json:"node_count"`
+	Nodes     []graph.CarvedNode `json:"nodes"`
+	Edges     []*graph.Edge     `json:"edges,omitempty"`
+}
+
 // staleThreshold is how long since last index before a sibling is "stale".
 const staleThreshold = 24 * time.Hour
 
-// nowFunc is the time source — overridable in tests for deterministic staleness.
-var nowFunc = time.Now
+// Clock is a function that returns the current time. Injected into Resolver
+// for deterministic staleness testing.
+type Clock func() time.Time
 
 // Resolver provides cross-project query capabilities over local sibling
 // SQLite stores. Stores are opened lazily on first access and cached for
@@ -71,23 +82,37 @@ var nowFunc = time.Now
 type Resolver struct {
 	entries   []config.FederationEntry
 	configDir string // directory containing synapses.json
+	clock     Clock  // time source (defaults to time.Now)
 
 	mu         sync.RWMutex
-	stores     map[string]*store.Store   // alias → read-only store (lazy-opened)
-	storeErr   map[string]error          // alias → last open error (prevents retry loops)
-	driftCache map[string][]DriftAlert   // alias → cached drift results (session-level)
-	gitHeads   map[string]string         // alias → cached HEAD commit hash
+	stores     map[string]*store.Store // alias → read-only store (lazy-opened)
+	storeErr   map[string]error        // alias → last open error (prevents retry loops)
+	compatible map[string]bool         // alias → schema compat result (cached)
+	driftCache map[string][]DriftAlert // alias → cached drift results (session-level)
+	gitHeads   map[string]string       // alias → cached HEAD commit hash
 }
 
 // NewResolver creates a Resolver for the given federation entries.
 // configDir is the directory containing synapses.json (paths are already
 // resolved to absolute by config.Load).
 func NewResolver(entries []config.FederationEntry, configDir string) *Resolver {
+	return newResolverWithClock(entries, configDir, time.Now)
+}
+
+// NewResolverWithClock creates a Resolver with a custom time source.
+// Used in tests for deterministic staleness checks.
+func NewResolverWithClock(entries []config.FederationEntry, configDir string, clock Clock) *Resolver {
+	return newResolverWithClock(entries, configDir, clock)
+}
+
+func newResolverWithClock(entries []config.FederationEntry, configDir string, clock Clock) *Resolver {
 	return &Resolver{
 		entries:    entries,
 		configDir:  configDir,
+		clock:      clock,
 		stores:     make(map[string]*store.Store, len(entries)),
 		storeErr:   make(map[string]error, len(entries)),
+		compatible: make(map[string]bool, len(entries)),
 		driftCache: make(map[string][]DriftAlert),
 		gitHeads:   make(map[string]string),
 	}
@@ -96,13 +121,10 @@ func NewResolver(entries []config.FederationEntry, configDir string) *Resolver {
 // Status returns health info for each federation entry.
 // Errors on individual entries are contained — a broken sibling returns
 // a status entry with Error set, never a top-level error.
-// ctx is used for timeout; if the deadline expires, remaining entries
-// are reported as-is.
 func (r *Resolver) Status(ctx context.Context) []EntryStatus {
 	results := make([]EntryStatus, 0, len(r.entries))
 	for _, e := range r.entries {
 		if ctx.Err() != nil {
-			// Context expired — report remaining as unknown.
 			results = append(results, EntryStatus{
 				Alias:  e.Alias,
 				Path:   e.Path,
@@ -146,28 +168,25 @@ func (r *Resolver) statusForEntry(e config.FederationEntry) EntryStatus {
 		return es
 	}
 
-	// Schema compatibility check: verify the sibling's DB has the
-	// critical tables we need. If it's from a wildly different version
-	// of Synapses (or a different tool entirely), we skip it.
-	if err := checkSchemaCompatibility(dbPath); err != nil {
-		es.Status = "incompatible"
-		es.Error = err.Error()
-		return es
-	}
-
-	// Open the sibling store read-only.
-	// Note: we do NOT cache the store during Status() — status is
-	// a diagnostic check. Caching happens on first query via getStore().
-	st, err := store.OpenReadOnly(dbPath)
+	// Single open: use rawDB for both schema check and stats read.
+	// This avoids the double-open penalty of checking compat then opening again.
+	db, err := newRawDB(dbPath)
 	if err != nil {
 		es.Status = "not_indexed"
 		es.Error = err.Error()
 		return es
 	}
-	defer st.Close()
+	defer db.Close()
 
-	// Read project stats.
-	stat, err := st.Stat(dbPath)
+	// Schema compatibility: verify critical tables exist.
+	if err := db.checkTables("nodes", "meta"); err != nil {
+		es.Status = "incompatible"
+		es.Error = err.Error()
+		return es
+	}
+
+	// Read stats from meta table (same queries as store.Stat).
+	stat, err := db.readProjectStat(dbPath)
 	if err != nil || stat == nil {
 		es.Status = "not_indexed"
 		if err != nil {
@@ -180,8 +199,7 @@ func (r *Resolver) statusForEntry(e config.FederationEntry) EntryStatus {
 	es.FileCount = stat.FileCount
 	es.IndexedAt = stat.SavedAt
 
-	// Staleness: consider stale if indexed more than 24 hours ago.
-	if nowFunc().Sub(stat.SavedAt) > staleThreshold {
+	if r.clock().Sub(stat.SavedAt) > staleThreshold {
 		es.Status = "stale"
 	} else {
 		es.Status = "indexed"
@@ -190,49 +208,17 @@ func (r *Resolver) statusForEntry(e config.FederationEntry) EntryStatus {
 	return es
 }
 
-// checkSchemaCompatibility opens the DB briefly to verify that the tables
-// we need for federation queries exist. Returns an error if the DB is
-// incompatible (missing critical tables).
-func checkSchemaCompatibility(dbPath string) error {
-	db, err := openRawReadOnly(dbPath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	// Check that the 'nodes' and 'meta' tables exist — these are the
-	// minimum for any federation query.
-	for _, table := range []string{"nodes", "meta"} {
-		var name string
-		err := db.QueryRow(
-			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table,
-		).Scan(&name)
-		if err != nil {
-			return fmt.Errorf("missing table %q — incompatible store version", table)
-		}
-	}
-	return nil
-}
-
-// openRawReadOnly opens a SQLite DB in read-only mode without going through
-// store.Open (which runs migrations). Used for schema compatibility checks.
-func openRawReadOnly(path string) (rawDB, error) {
-	// We use the sql package directly here. Import is already available
-	// transitively via store, but we need a direct reference.
-	return newRawDB(path)
-}
-
 // EntityExists checks if an entity name exists in a sibling's store.
 // Returns false on any error (fail-open).
 func (r *Resolver) EntityExists(ctx context.Context, alias string, entityName string) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	st := r.getStore(alias)
 	if st == nil {
 		return false
 	}
-	if ctx.Err() != nil {
-		return false
-	}
-	exists, err := st.NodeExistsByName(entityName)
+	exists, err := st.NodeExistsByNameCtx(ctx, entityName)
 	if err != nil {
 		return false
 	}
@@ -271,7 +257,7 @@ func (r *Resolver) FindEntities(ctx context.Context, query string, aliases []str
 			continue
 		}
 
-		nodes, err := st.FindNodesByName(query, limit)
+		nodes, err := st.FindNodesByNameCtx(ctx, query, limit)
 		if err != nil {
 			log.Printf("federation: find_entity in %q: %v", e.Alias, err)
 			continue
@@ -315,6 +301,58 @@ func (r *Resolver) GetDepsForEntity(ctx context.Context, entityID string, localS
 	return results
 }
 
+// GetEntityContext loads a sibling graph and carves BFS context for an entity.
+// This is the "full BFS" option — opt-in via projects= parameter on tools.
+// NOT called automatically during enrichment. Returns nil on any error.
+func (r *Resolver) GetEntityContext(ctx context.Context, entity string, alias string, depth int) *FederatedContext {
+	if ctx.Err() != nil {
+		return nil
+	}
+	st := r.getStore(alias)
+	if st == nil {
+		return nil
+	}
+
+	g, err := st.LoadGraph()
+	if err != nil || g == nil {
+		if err != nil {
+			log.Printf("federation: load graph for %q: %v", alias, err)
+		}
+		return nil
+	}
+
+	nodes := g.FindByName(entity)
+	if len(nodes) == 0 {
+		return nil
+	}
+
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	// Carve BFS context around the first matching node.
+	root := nodes[0]
+	cfg := graph.DefaultCarveConfig()
+	if depth > 0 {
+		cfg.MaxDepth = depth
+	}
+	sub, err := g.CarveEgoGraph(root.ID, cfg)
+	if err != nil || sub == nil {
+		if err != nil {
+			log.Printf("federation: carve ego graph for %q in %q: %v", entity, alias, err)
+		}
+		return nil
+	}
+
+	return &FederatedContext{
+		Alias:     alias,
+		Entity:    entity,
+		NodeCount: len(sub.Nodes),
+		Nodes:     sub.Nodes,
+		Edges:     sub.Edges,
+	}
+}
+
 // InvalidateCache clears session-level caches. Called on session_init
 // to ensure fresh data each session.
 func (r *Resolver) InvalidateCache() {
@@ -322,8 +360,9 @@ func (r *Resolver) InvalidateCache() {
 	defer r.mu.Unlock()
 	r.driftCache = make(map[string][]DriftAlert)
 	r.gitHeads = make(map[string]string)
-	// Clear store errors so stale failures are retried.
+	// Clear store errors and compat cache so stale failures are retried.
 	r.storeErr = make(map[string]error, len(r.entries))
+	r.compatible = make(map[string]bool, len(r.entries))
 }
 
 // Close releases all open sibling stores.
@@ -372,7 +411,6 @@ func (r *Resolver) getStore(alias string) *store.Store {
 		r.mu.RUnlock()
 		return st
 	}
-	// Check if we already failed to open this store.
 	if _, errCached := r.storeErr[alias]; errCached {
 		r.mu.RUnlock()
 		return nil
@@ -399,12 +437,26 @@ func (r *Resolver) getStore(alias string) *store.Store {
 		return nil
 	}
 
-	// Schema check before opening.
-	if err := checkSchemaCompatibility(dbPath); err != nil {
+	// Check cached compat result first, then check on disk.
+	r.mu.RLock()
+	compat, compatKnown := r.compatible[alias]
+	r.mu.RUnlock()
+
+	if !compatKnown {
+		if err := checkSchemaCompatibility(dbPath); err != nil {
+			r.mu.Lock()
+			r.storeErr[alias] = err
+			r.compatible[alias] = false
+			r.mu.Unlock()
+			log.Printf("federation: incompatible store %q: %v", alias, err)
+			return nil
+		}
 		r.mu.Lock()
-		r.storeErr[alias] = err
+		r.compatible[alias] = true
 		r.mu.Unlock()
-		log.Printf("federation: incompatible store %q: %v", alias, err)
+		compat = true
+	}
+	if !compat {
 		return nil
 	}
 
@@ -427,6 +479,17 @@ func (r *Resolver) getStore(alias string) *store.Store {
 	}
 	r.stores[alias] = st
 	return st
+}
+
+// checkSchemaCompatibility opens the DB briefly to verify that the tables
+// we need for federation queries exist.
+func checkSchemaCompatibility(dbPath string) error {
+	db, err := newRawDB(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.checkTables("nodes", "meta")
 }
 
 // SiblingDBPath derives the store DB path for a sibling project using
