@@ -52,6 +52,15 @@ type PacketCacheInvalidator interface {
 type ConfigChangeHandler func(newCfg *config.Config)
 
 // Watcher watches a directory tree and keeps a Graph current as files change.
+// CrossProjectTracker detects cross-project dependencies in parsed files.
+// Implemented by federation.DeterministicDetector.
+type CrossProjectTracker interface {
+	// DetectAndStore scans a file for cross-project imports, resolves entities
+	// against sibling stores, and persists the results. Errors are logged and
+	// skipped (fail-open). ctx controls cancellation and timeout.
+	DetectAndStore(ctx context.Context, filePath string, localStore *store.Store)
+}
+
 type Watcher struct {
 	fw          *fsnotify.Watcher
 	graph       *graph.Graph
@@ -63,6 +72,7 @@ type Watcher struct {
 	cfgHandler  ConfigChangeHandler    // called when synapses.json changes; may be nil
 	configPath  string                 // absolute path to synapses.json (set by Start)
 	projectID   string                 // stable project identifier (FNV hash of project root path)
+	cpTracker   CrossProjectTracker    // set via SetCrossProjectTracker; may be nil
 
 	mu        sync.Mutex
 	timers    map[string]*time.Timer // debounce timers keyed by absolute file path
@@ -115,6 +125,14 @@ func (w *Watcher) SetProjectID(id string) {
 // stale brain context packets are not returned to agents.
 func (w *Watcher) SetPacketInvalidator(pi PacketCacheInvalidator) {
 	w.pktInval = pi
+}
+
+// SetCrossProjectTracker wires a federation dependency tracker into the watcher.
+// When set, every file re-parse triggers cross-project import detection and
+// stores discovered dependencies for drift checking by session_init.
+// Must be called before Start. tracker may be nil to disable.
+func (w *Watcher) SetCrossProjectTracker(tracker CrossProjectTracker) {
+	w.cpTracker = tracker
 }
 
 // SetConfigChangeHandler registers a callback that is invoked whenever
@@ -508,6 +526,13 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// in the violation log). This lets agents discover rule breaks in real time
 	// by polling get_events, without manually calling get_violations.
 	w.checkViolations(path)
+
+	// RX2 Phase 3: detect cross-project dependencies in the changed file.
+	// Runs after parsing so sibling entity resolution has fresh graph data.
+	// Fail-open: errors logged inside tracker, never blocks the watcher.
+	if w.cpTracker != nil && w.store != nil {
+		w.cpTracker.DetectAndStore(context.Background(), path, w.store)
+	}
 
 	// Cross-project reactive propagation: if any linked-project node depends on
 	// a node we just changed, broadcast a cross_project_impact message so agents
