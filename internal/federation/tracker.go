@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/config"
@@ -195,6 +196,21 @@ func (d *DeterministicDetector) extractCrossProjectRefs(content, lang string) []
 // goImportRe matches individual import lines: `"path"` or `alias "path"`
 var goImportRe = regexp.MustCompile(`^\s*(?:(\w+)\s+)?"([^"]+)"`)
 
+// aliasPatternCache caches compiled regex patterns for Go import alias
+// entity reference scanning. Key: alias name, Value: compiled regex.
+// sync.Map is used for concurrent safety (watcher may reparse files in parallel).
+var aliasPatternCache sync.Map
+
+// getAliasPattern returns a cached regex for scanning `alias.ExportedName` references.
+func getAliasPattern(alias string) *regexp.Regexp {
+	if cached, ok := aliasPatternCache.Load(alias); ok {
+		return cached.(*regexp.Regexp)
+	}
+	pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(alias) + `\.([A-Z]\w*)`)
+	aliasPatternCache.Store(alias, pattern)
+	return pattern
+}
+
 // extractGoRefs parses Go import statements and scans for entity references.
 //
 // Strategy:
@@ -286,7 +302,8 @@ func (d *DeterministicDetector) extractGoRefs(content string) []crossProjectRef 
 	for _, imp := range matchedImports {
 		// Build regex for this import's alias: `alias.ExportedName`
 		// Go exported names start with uppercase.
-		pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(imp.alias) + `\.([A-Z]\w*)`)
+		// Cache compiled patterns per alias to avoid recompilation across files.
+		pattern := getAliasPattern(imp.alias)
 		matches := pattern.FindAllStringSubmatch(codeOnly, -1)
 		for _, m := range matches {
 			entityName := m[1]
