@@ -3,6 +3,7 @@ package federation_test
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -479,6 +480,276 @@ func TestInvalidateCache_RetriesFailedStores(t *testing.T) {
 	r.InvalidateCache()
 	if !r.EntityExists(bg(), "retry", "AuthService") {
 		t.Error("expected true after InvalidateCache + store creation")
+	}
+}
+
+// ── CheckDrift tests ────────────────────────────────────────────────────────
+
+func TestCheckDrift_SameHead_NoDrift(t *testing.T) {
+	sibDir := t.TempDir()
+	initGitRepoExt(t, sibDir, map[string]string{
+		"pkg/auth.go": "package auth\nfunc Validate(token string) bool { return true }",
+	})
+	head := getHeadExt(t, sibDir)
+	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sibling",
+		ToEntity: "Validate", ToFile: "pkg/auth.go",
+		VerifiedCommit: head, VerifiedAt: now, DetectionTier: "tier1",
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), localStore)
+	if len(alerts) != 0 {
+		t.Errorf("expected 0 alerts (same HEAD), got %d: %+v", len(alerts), alerts)
+	}
+}
+
+func TestCheckDrift_HeadChanged_NoAffectedFiles(t *testing.T) {
+	sibDir := t.TempDir()
+	oldHead := initGitRepoExt(t, sibDir, map[string]string{
+		"pkg/auth.go": "package auth\nfunc Validate(token string) bool { return true }",
+		"pkg/db.go":   "package db\nfunc Connect() {}",
+	})
+	// Change db.go (not auth.go which is the dep file).
+	commitChangeExt(t, sibDir, "pkg/db.go", "package db\nfunc Connect(ctx context.Context) {}", "change db")
+	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sibling",
+		ToEntity: "Validate", ToFile: "pkg/auth.go",
+		VerifiedCommit: oldHead, VerifiedAt: now, DetectionTier: "tier1",
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), localStore)
+	if len(alerts) != 0 {
+		t.Errorf("expected 0 alerts (dep file unchanged), got %d: %+v", len(alerts), alerts)
+	}
+}
+
+func TestCheckDrift_SignatureChanged_Alert(t *testing.T) {
+	sibDir := t.TempDir()
+	oldHead := initGitRepoExt(t, sibDir, map[string]string{
+		"pkg/auth.go": "package auth\nfunc Validate(token string) bool { return true }",
+	})
+	commitChangeExt(t, sibDir, "pkg/auth.go",
+		"package auth\nfunc Validate(token string, opts ...Option) bool { return true }",
+		"add opts param")
+	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sibling",
+		ToEntity: "Validate", ToFile: "pkg/auth.go",
+		VerifiedCommit: oldHead, VerifiedAt: now, DetectionTier: "tier1",
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), localStore)
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d: %+v", len(alerts), alerts)
+	}
+	if alerts[0].Change != "signature_changed" {
+		t.Errorf("expected signature_changed, got %q", alerts[0].Change)
+	}
+	if alerts[0].Severity != "breaking" {
+		t.Errorf("expected breaking, got %q", alerts[0].Severity)
+	}
+	if alerts[0].Entity != "Validate" {
+		t.Errorf("expected entity Validate, got %q", alerts[0].Entity)
+	}
+}
+
+func TestCheckDrift_EntityRemoved_Alert(t *testing.T) {
+	sibDir := t.TempDir()
+	oldHead := initGitRepoExt(t, sibDir, map[string]string{
+		"pkg/auth.go": "package auth\nfunc Validate(token string) bool { return true }",
+	})
+	// Remove the function from the file (but keep the file).
+	commitChangeExt(t, sibDir, "pkg/auth.go", "package auth\n// Validate was removed\n", "remove validate")
+	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sibling",
+		ToEntity: "Validate", ToFile: "pkg/auth.go",
+		VerifiedCommit: oldHead, VerifiedAt: now, DetectionTier: "tier1",
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), localStore)
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d: %+v", len(alerts), alerts)
+	}
+	if alerts[0].Change != "removed" {
+		t.Errorf("expected removed, got %q", alerts[0].Change)
+	}
+}
+
+func TestCheckDrift_FileChangedEntityUntouched_NoAlert(t *testing.T) {
+	sibDir := t.TempDir()
+	oldHead := initGitRepoExt(t, sibDir, map[string]string{
+		"pkg/auth.go": "package auth\n\nfunc Validate(token string) bool { return true }\n\nfunc Other() {}\n",
+	})
+	// Change Other() but not Validate().
+	commitChangeExt(t, sibDir, "pkg/auth.go",
+		"package auth\n\nfunc Validate(token string) bool { return true }\n\nfunc Other(ctx context.Context) {}\n",
+		"change other")
+	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sibling",
+		ToEntity: "Validate", ToFile: "pkg/auth.go",
+		VerifiedCommit: oldHead, VerifiedAt: now, DetectionTier: "tier1",
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), localStore)
+	if len(alerts) != 0 {
+		t.Errorf("expected 0 alerts (entity untouched), got %d: %+v", len(alerts), alerts)
+	}
+}
+
+func TestCheckDrift_NotAGitRepo_FallbackWorks(t *testing.T) {
+	sibDir := t.TempDir() // no git init
+	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sibling",
+		ToEntity: "AuthService", ToFile: "pkg/auth.go",
+		VerifiedCommit: "fakecommit", VerifiedAt: now, DetectionTier: "tier1",
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
+	defer r.Close()
+
+	// Should not panic — falls back to signature comparison.
+	alerts := r.CheckDrift(bg(), localStore)
+	// Fallback can't compare signatures without stored old sig, so no alerts expected.
+	_ = alerts
+}
+
+func TestCheckDrift_NilStore(t *testing.T) {
+	r := newResolver(nil)
+	defer r.Close()
+
+	alerts := r.CheckDrift(bg(), nil)
+	if alerts != nil {
+		t.Errorf("expected nil for nil store")
+	}
+}
+
+func TestCheckDrift_CancelledContext(t *testing.T) {
+	r := newResolver(nil)
+	defer r.Close()
+
+	ctx, cancel := context.WithCancel(bg())
+	cancel()
+
+	alerts := r.CheckDrift(ctx, openTestStore(t))
+	if alerts != nil {
+		t.Errorf("expected nil for cancelled context")
+	}
+}
+
+func TestCheckDrift_CachedResults(t *testing.T) {
+	sibDir := t.TempDir()
+	oldHead := initGitRepoExt(t, sibDir, map[string]string{
+		"pkg/auth.go": "package auth\nfunc Validate(token string) bool { return true }",
+	})
+	commitChangeExt(t, sibDir, "pkg/auth.go",
+		"package auth\nfunc Validate(token string, opts ...Option) bool { return true }",
+		"change validate")
+	createSiblingWithDefaultPath(t, sibDir, "sibling", sampleNodesFor("sibling"))
+
+	localStore := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	localStore.UpsertCrossProjectDep(store.CrossProjectDep{
+		FromEntity: "local::main.go::Handler", ToProject: "sibling",
+		ToEntity: "Validate", ToFile: "pkg/auth.go",
+		VerifiedCommit: oldHead, VerifiedAt: now, DetectionTier: "tier1",
+	})
+
+	r := newResolver([]config.FederationEntry{{Path: sibDir, Alias: "sibling"}})
+	defer r.Close()
+
+	alerts1 := r.CheckDrift(bg(), localStore)
+	alerts2 := r.CheckDrift(bg(), localStore)
+
+	if len(alerts1) != len(alerts2) {
+		t.Errorf("cached results differ: %d vs %d", len(alerts1), len(alerts2))
+	}
+}
+
+// ── drift test helpers ──────────────────────────────────────────────────────
+
+func initGitRepoExt(t *testing.T, dir string, files map[string]string) string {
+	t.Helper()
+	runGitExt(t, dir, "init")
+	runGitExt(t, dir, "config", "user.email", "test@test.com")
+	runGitExt(t, dir, "config", "user.name", "Test")
+	for path, content := range files {
+		full := filepath.Join(dir, path)
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		os.WriteFile(full, []byte(content), 0o644)
+	}
+	runGitExt(t, dir, "add", ".")
+	runGitExt(t, dir, "commit", "-m", "initial")
+	return getHeadExt(t, dir)
+}
+
+func commitChangeExt(t *testing.T, dir, filePath, newContent, msg string) string {
+	t.Helper()
+	full := filepath.Join(dir, filePath)
+	os.MkdirAll(filepath.Dir(full), 0o755)
+	os.WriteFile(full, []byte(newContent), 0o644)
+	runGitExt(t, dir, "add", filePath)
+	runGitExt(t, dir, "commit", "-m", msg)
+	return getHeadExt(t, dir)
+}
+
+func getHeadExt(t *testing.T, dir string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("get HEAD: %v", err)
+	}
+	s := string(out)
+	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r') {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+func runGitExt(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
 
