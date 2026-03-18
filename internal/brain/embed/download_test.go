@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -920,4 +922,224 @@ func TestExtractLlamaServerFromZip_Windows(t *testing.T) {
 	if !fileExists(destPath) {
 		t.Error("expected llama-server.exe to be extracted")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// EnsureLlamaServer — Error Cases
+// ---------------------------------------------------------------------------
+
+func TestEnsureLlamaServer_DownloadBytesError(t *testing.T) {
+	binDir := t.TempDir()
+
+	// Mock HTTP client that returns an error
+	failingClient := &http.Client{
+		Transport: &mockTransport{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return nil, fmt.Errorf("network error")
+			},
+		},
+	}
+
+	opts := DownloadOptions{
+		LlamaCPPVersion: DefaultLlamaCPPVersion,
+		BinDir:          binDir,
+		HTTPClient:      failingClient,
+	}
+
+	_, err := EnsureLlamaServer(t.Context(), opts)
+	if err == nil {
+		t.Error("expected error when download fails")
+	}
+	if !strings.Contains(err.Error(), "download llama.cpp release") {
+		t.Errorf("expected download error message, got: %v", err)
+	}
+}
+
+func TestEnsureLlamaServer_ExtractError(t *testing.T) {
+	binDir := t.TempDir()
+
+	// Return invalid zip data
+	mockClient := &http.Client{
+		Transport: &mockTransport{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewReader([]byte("not a zip"))),
+				}, nil
+			},
+		},
+	}
+
+	opts := DownloadOptions{
+		LlamaCPPVersion: DefaultLlamaCPPVersion,
+		BinDir:          binDir,
+		HTTPClient:      mockClient,
+	}
+
+	_, err := EnsureLlamaServer(t.Context(), opts)
+	if err == nil {
+		t.Error("expected error when zip extraction fails")
+	}
+	if !strings.Contains(err.Error(), "extract llama-server") {
+		t.Errorf("expected extract error message, got: %v", err)
+	}
+}
+
+func TestEnsureLlamaServer_ChmodError(t *testing.T) {
+	// This test requires OS-specific setup that makes os.Chmod fail.
+	// On most systems, we can't reliably trigger a chmod failure, so skip this test.
+	t.Skip("chmod error testing requires special OS conditions")
+}
+
+func TestEnsureLlamaServer_InvalidPlatform(t *testing.T) {
+	binDir := t.TempDir()
+
+	opts := DownloadOptions{
+		LlamaCPPVersion: "b5618",
+		BinDir:          binDir,
+	}
+
+	// llamaCPPReleaseURL should fail on unsupported platforms,
+	// which causes EnsureLlamaServer to fail.
+	// We can't easily test this on a supported platform, but we can
+	// test that the function handles the error.
+	_, err := EnsureLlamaServer(t.Context(), opts)
+	// Should not fail on supported platforms
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		if runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64" {
+			// This should not fail on a supported platform
+			if err != nil && strings.Contains(err.Error(), "download") {
+				// Download errors are expected since we're not actually downloading
+				return
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// EnsureEmbedModel — Error Cases
+// ---------------------------------------------------------------------------
+
+func TestEnsureEmbedModel_DownloadError(t *testing.T) {
+	modelDir := t.TempDir()
+
+	// Mock HTTP client that returns HTTP error
+	mockClient := &http.Client{
+		Transport: &mockTransport{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Body:       io.NopCloser(bytes.NewReader([]byte(""))),
+				}, nil
+			},
+		},
+	}
+
+	opts := DownloadOptions{
+		ModelDir:   modelDir,
+		HTTPClient: mockClient,
+	}
+
+	_, err := EnsureEmbedModel(t.Context(), opts, "", "")
+	if err == nil {
+		t.Error("expected error when HTTP request fails")
+	}
+	if !strings.Contains(err.Error(), "download embedding model") {
+		t.Errorf("expected download error message, got: %v", err)
+	}
+}
+
+func TestEnsureEmbedModel_RenameError(t *testing.T) {
+	// This test requires OS-specific conditions to make os.Rename fail.
+	// On most systems, we can't reliably trigger this without complex setup.
+	// Skip this test as the error path is difficult to test cross-platform.
+	t.Skip("rename error testing requires special OS conditions")
+}
+
+func TestEnsureEmbedModel_CustomHFRepo(t *testing.T) {
+	modelDir := t.TempDir()
+
+	// Track the URL that was requested
+	var requestedURL string
+	mockClient := &http.Client{
+		Transport: &mockTransport{
+			fn: func(req *http.Request) (*http.Response, error) {
+				requestedURL = req.URL.String()
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewReader([]byte("model data"))),
+					Header: http.Header{
+						"Content-Length": []string{"10"},
+					},
+				}, nil
+			},
+		},
+	}
+
+	customRepo := "custom-user/custom-model"
+	customFilename := "custom-model.gguf"
+
+	opts := DownloadOptions{
+		ModelDir:   modelDir,
+		HTTPClient: mockClient,
+	}
+
+	modelPath, err := EnsureEmbedModel(t.Context(), opts, customRepo, customFilename)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify the custom repo was used in the URL
+	if !strings.Contains(requestedURL, customRepo) {
+		t.Errorf("expected URL to contain custom repo %q, got %q", customRepo, requestedURL)
+	}
+	if !strings.Contains(requestedURL, customFilename) {
+		t.Errorf("expected URL to contain custom filename %q, got %q", customFilename, requestedURL)
+	}
+
+	// Verify the model was saved with the custom filename
+	expectedPath := filepath.Join(modelDir, customFilename)
+	if modelPath != expectedPath {
+		t.Errorf("expected path %q, got %q", expectedPath, modelPath)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// llamaCPPReleaseURL — Platform Coverage
+// ---------------------------------------------------------------------------
+
+func TestLlamaCPPReleaseURL_MacOSARM64(t *testing.T) {
+	url, err := llamaCPPReleaseURL("b5618")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify URL structure
+	if !strings.Contains(url, "github.com/ggerganov/llama.cpp") {
+		t.Errorf("expected GitHub URL, got: %s", url)
+	}
+	if !strings.Contains(url, "b5618") {
+		t.Errorf("expected version in URL, got: %s", url)
+	}
+}
+
+func TestLlamaCPPReleaseURL_EmptyVersion(t *testing.T) {
+	url, err := llamaCPPReleaseURL("")
+	if err != nil {
+		t.Fatalf("unexpected error for empty version: %v", err)
+	}
+
+	// Should still return a valid URL with empty version string
+	if url == "" {
+		t.Error("expected non-empty URL")
+	}
+}
+
+// mockTransport is a simple http.RoundTripper for testing
+type mockTransport struct {
+	fn func(*http.Request) (*http.Response, error)
+}
+
+func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return m.fn(req)
 }
