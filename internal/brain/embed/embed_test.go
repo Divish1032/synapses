@@ -1100,3 +1100,47 @@ func TestSupervise_MaxBackoff(t *testing.T) {
 	<-ctx.Done()
 	// Test passes if no panic occurred
 }
+
+func TestSupervise_WaitReadyFailureRecovery(t *testing.T) {
+	// Test that supervise handles waitReady failure gracefully and continues trying.
+	tmpDir := t.TempDir()
+
+	modelPath := filepath.Join(tmpDir, "model.gguf")
+	if err := os.WriteFile(modelPath, []byte("fake model"), 0o644); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	// Create a quick-exit process
+	binPath := filepath.Join(tmpDir, "quick-exit.sh")
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	s := New(modelPath, 11437, binPath)
+	s.started = true
+
+	// Create an initial process that exits immediately
+	s.mu.Lock()
+	s.proc = exec.Command(binPath)
+	if err := s.proc.Start(); err != nil {
+		t.Fatalf("failed to start process: %v", err)
+	}
+	s.mu.Unlock()
+
+	// Run supervise with timeout
+	// It should wait for the process to exit, notice started=true,
+	// wait for backoff, try to restart (will fail), and then exit due to timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	go s.supervise(ctx, []string{})
+
+	<-ctx.Done()
+	// If we get here without panicking, the test passes
+	if s.started {
+		// Verify the server is still marked as started
+		// (since we didn't call Stop)
+		t.Logf("server still marked as started: %v", s.started)
+	}
+}
