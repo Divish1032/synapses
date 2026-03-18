@@ -82,6 +82,14 @@ var (
 	reEnclosingTS  = regexp.MustCompile(`^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*[(<]`)
 	reEnclosingPy  = regexp.MustCompile(`^\s*(?:async\s+)?def\s+(\w+)\s*\(`)
 	reEnclosingAny = regexp.MustCompile(`^\s*(?:func|function|def|sub|fn)\s+(\w+)\s*[\((\[]`)
+
+	// MCP tool registration: addOrDefer(mcp.NewTool("name", ...), s.handleXxx)
+	// Matches the opening of an addOrDefer call.
+	reGoAddOrDefer = regexp.MustCompile(`\baddOrDefer\s*\(`)
+	// Extracts tool name from: mcp.NewTool("tool_name", or NewTool("tool_name",
+	reGoNewTool = regexp.MustCompile(`NewTool\s*\(\s*"([^"]+)"`)
+	// Extracts handler method reference: s.handleXxx, or s.handleXxx)
+	reGoHandlerRef = regexp.MustCompile(`\b(?:s|server)\.(handle\w+)\s*[,)]`)
 )
 
 // ExtractRouteRegistrations scans src for handler registration patterns and
@@ -237,6 +245,75 @@ func extractGoRoutes(filePath string, src []byte) []RouteRegistration {
 			continue
 		}
 
+	}
+
+	// MCP tool registration: scan for addOrDefer blocks and extract
+	// (tool_name, handlerMethod) pairs. These create:
+	//   enclosingFn --CALLS--> mcp:tool_name --HANDLES--> handlerMethod
+	out = append(out, extractMCPHandlerRegistrations(filePath, lines, reEnclosingGo)...)
+
+	return out
+}
+
+// extractMCPHandlerRegistrations scans for addOrDefer(mcp.NewTool("name",...), s.handleXxx)
+// patterns and returns RouteRegistration entries with Method="mcp" and Path=toolName.
+func extractMCPHandlerRegistrations(filePath string, lines [][]byte, reEnclosing *regexp.Regexp) []RouteRegistration {
+	var out []RouteRegistration
+	inBlock := false
+	toolName := ""
+	startLine := 0
+	depth := 0
+
+	for i, rawLine := range lines {
+		line := string(rawLine)
+
+		if !inBlock {
+			if reGoAddOrDefer.MatchString(line) {
+				inBlock = true
+				depth = strings.Count(line, "(") - strings.Count(line, ")")
+				startLine = i + 1
+				if m := reGoNewTool.FindStringSubmatch(line); m != nil {
+					toolName = m[1]
+				}
+			}
+			continue
+		}
+
+		// Track brace depth to detect end of addOrDefer block.
+		depth += strings.Count(line, "(") - strings.Count(line, ")")
+
+		// Collect tool name if not yet found.
+		if toolName == "" {
+			if m := reGoNewTool.FindStringSubmatch(line); m != nil {
+				toolName = m[1]
+			}
+		}
+
+		// Look for handler reference: s.handleXxx, or s.handleXxx)
+		if m := reGoHandlerRef.FindStringSubmatch(line); m != nil {
+			if toolName != "" {
+				out = append(out, RouteRegistration{
+					File:        filePath,
+					Line:        startLine,
+					Method:      "mcp",
+					Path:        toolName,
+					Handler:     m[1],
+					EnclosingFn: findEnclosingFunc(lines, i, reEnclosing),
+					Confidence:  0.85,
+				})
+			}
+			inBlock = false
+			toolName = ""
+			depth = 0
+			continue
+		}
+
+		// End of block with no handler found.
+		if depth <= 0 {
+			inBlock = false
+			toolName = ""
+			depth = 0
+		}
 	}
 	return out
 }
