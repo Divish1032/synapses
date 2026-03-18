@@ -299,11 +299,15 @@ func (r *Resolver) GetDepsForEntity(ctx context.Context, entityID string, localS
 			File:    dep.ToFile,
 		}
 
-		// Enrich with graph-based drift check if sibling store is available
-		// and we have a stored signature to compare against.
+		// Enrich with graph-based drift check if sibling store is available,
+		// fresh (re-indexed after latest commit), and we have a stored
+		// signature to compare against. If the store is stale, skip
+		// enrichment entirely — the agent gets no false confidence, and
+		// the authoritative CheckDrift from session_init handles it.
 		if dep.VerifiedSignature != "" {
 			sibStore := r.getStore(dep.ToProject)
-			if sibStore != nil {
+			repoPath := r.entryPath(dep.ToProject)
+			if sibStore != nil && repoPath != "" && r.isSiblingStoreFresh(sibStore, r.cachedHead(dep.ToProject), repoPath) {
 				nodes, findErr := sibStore.FindNodesByNameCtx(ctx, dep.ToEntity, 1)
 				if findErr == nil && len(nodes) > 0 {
 					if nodes[0].Signature != dep.VerifiedSignature {
@@ -1027,6 +1031,43 @@ func (r *Resolver) Aliases() []string {
 		aliases[i] = e.Alias
 	}
 	return aliases
+}
+
+// entryPath returns the filesystem path for a federation alias.
+// Returns "" if the alias is not configured.
+func (r *Resolver) entryPath(alias string) string {
+	for _, e := range r.entries {
+		if e.Alias == alias {
+			return e.Path
+		}
+	}
+	return ""
+}
+
+// cachedHead returns the cached git HEAD for an alias, or fetches it fresh.
+// Returns "" if git is unavailable. Used by GetDepsForEntity to avoid
+// redundant git calls when CheckDrift already cached the HEAD.
+func (r *Resolver) cachedHead(alias string) string {
+	r.mu.RLock()
+	head, ok := r.gitHeads[alias]
+	r.mu.RUnlock()
+	if ok && head != "" {
+		return head
+	}
+
+	// Fetch fresh HEAD.
+	path := r.entryPath(alias)
+	if path == "" {
+		return ""
+	}
+	h, err := gitRevParseHead(context.Background(), path)
+	if err != nil || h == "" {
+		return ""
+	}
+	r.mu.Lock()
+	r.gitHeads[alias] = h
+	r.mu.Unlock()
+	return h
 }
 
 // HasAlias reports whether the resolver has an entry for the given alias.
