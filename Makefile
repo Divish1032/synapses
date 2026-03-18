@@ -25,12 +25,12 @@ install: build
 test:
 	go test ./... -race -count=1 -timeout 300s
 
-## test/cover: Run tests with coverage report
+## test/cover: Run tests with coverage report (excludes CLI-only packages: bicep_edge, debug_callsites)
 test/cover:
-	go test ./... -coverprofile=coverage.out -covermode=atomic -race -timeout 300s
+	go test ./internal ./cmd/synapses -coverprofile=coverage.out -covermode=atomic -race -timeout 300s
 	go tool cover -html=coverage.out -o coverage.html
 	@go tool cover -func=coverage.out | tail -1
-	@echo "Coverage report: coverage.html"
+	@echo "Coverage report: coverage.html (excludes cmd/bicep_edge, cmd/debug_callsites)"
 
 ## test/cover/pkg: Show per-package coverage summary
 test/cover/pkg:
