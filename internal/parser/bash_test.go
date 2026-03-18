@@ -662,3 +662,201 @@ work() {
 		t.Errorf("work: type = %q, want NodeFunction", nodes[0].Type)
 	}
 }
+
+// ─── Command name extraction tests ─────────────────────────────────────────
+
+func TestBashParser_CommandExtraction(t *testing.T) {
+	src := `function test_command() {
+  my_cmd arg1 arg2
+  another_cmd
+  echo "done"
+}
+
+test_command
+`
+	g := parseBash(t, src)
+	nodes := g.FindByName("test_command")
+	if len(nodes) == 0 {
+		t.Fatal("expected test_command function")
+	}
+}
+
+// ─── Alias extraction ──────────────────────────────────────────────────────
+
+func TestBashParser_AliasExtraction(t *testing.T) {
+	src := `alias ll='ls -la'
+alias gs='git status'
+alias gc='git commit'
+
+function work() {
+  ll
+  gs
+}
+`
+	g := parseBash(t, src)
+	// Verify aliases and functions are extracted
+	nodes := g.FindByName("work")
+	if len(nodes) == 0 {
+		t.Fatal("expected work function")
+	}
+}
+
+// ─── Sourced files and includes ────────────────────────────────────────────
+
+func TestBashParser_SourceIncludes(t *testing.T) {
+	src := `source ./lib/helpers.sh
+. /etc/profile
+
+source ${BASH_COMPLETION:-/usr/share/bash-completion/bash_completion}
+
+function main() {
+  helper_func
+}
+`
+	g := parseBash(t, src)
+	nodes := g.FindByName("main")
+	if len(nodes) == 0 {
+		t.Fatal("expected main function")
+	}
+}
+
+// ─── Function declaration styles ──────────────────────────────────────────
+
+func TestBashParser_MultipleFunctionStyles(t *testing.T) {
+	src := `function func1() {
+  echo "function style"
+}
+
+func2() {
+  echo "bare style"
+}
+
+function func3 {
+  echo "no parens style"
+}
+`
+	g := parseBash(t, src)
+	
+	styles := []string{"func1", "func2", "func3"}
+	for _, style := range styles {
+		nodes := g.FindByName(style)
+		if len(nodes) == 0 {
+			t.Errorf("expected %s function", style)
+		}
+	}
+}
+
+// ─── Local variables and exports ───────────────────────────────────────────
+
+func TestBashParser_VariableDeclarations(t *testing.T) {
+	src := `VAR1=value1
+export VAR2=value2
+local VAR3=value3
+
+function test_var() {
+  local local_var="local"
+  echo ${local_var}
+}
+`
+	g := parseBash(t, src)
+	nodes := g.FindByName("test_var")
+	if len(nodes) == 0 {
+		t.Fatal("expected test_var function")
+	}
+}
+
+// ─── Command substitution and pipes ────────────────────────────────────────
+
+func TestBashParser_CommandSubstitution(t *testing.T) {
+	src := `function process() {
+  result=$(some_command arg)
+  output=$(another_cmd)
+
+  ls -la | grep file | wc -l
+}
+`
+	g := parseBash(t, src)
+	nodes := g.FindByName("process")
+	if len(nodes) == 0 {
+		t.Fatal("expected process function")
+	}
+}
+
+// ─── Conditionals and loops ───────────────────────────────────────────────
+
+func TestBashParser_ConditionalLogic(t *testing.T) {
+	src := `function check() {
+  if [ -f file.txt ]; then
+    do_something
+  fi
+
+  for item in a b c; do
+    process_item
+  done
+}
+`
+	g := parseBash(t, src)
+	nodes := g.FindByName("check")
+	if len(nodes) == 0 {
+		t.Fatal("expected check function")
+	}
+}
+
+// ─── Complex nested functions ─────────────────────────────────────────────
+
+func TestBashParser_NestedFunctions(t *testing.T) {
+	src := `function outer() {
+  function inner() {
+    echo "inner logic"
+  }
+  
+  inner
+  echo "outer logic"
+}
+
+outer
+`
+	g := parseBash(t, src)
+	
+	outerNodes := g.FindByName("outer")
+	if len(outerNodes) == 0 {
+		t.Fatal("expected outer function")
+	}
+}
+
+// ─── Return codes and exit handling ────────────────────────────────────────
+
+func TestBashParser_ErrorHandling(t *testing.T) {
+	src := `function safe_exec() {
+  if ! command -v program &>/dev/null; then
+    return 1
+  fi
+  
+  program "$@" || exit $?
+  return 0
+}
+`
+	g := parseBash(t, src)
+	nodes := g.FindByName("safe_exec")
+	if len(nodes) == 0 {
+		t.Fatal("expected safe_exec function")
+	}
+}
+
+// ─── String manipulation ──────────────────────────────────────────────────
+
+func TestBashParser_StringOperations(t *testing.T) {
+	src := `function string_ops() {
+  str="hello world"
+  echo ${str:0:5}
+  echo ${str#hello }
+  echo ${str%world}
+  echo ${str//world/universe}
+}
+`
+	g := parseBash(t, src)
+	nodes := g.FindByName("string_ops")
+	if len(nodes) == 0 {
+		t.Fatal("expected string_ops function")
+	}
+}

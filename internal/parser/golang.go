@@ -41,6 +41,96 @@ type goFuncInfo struct {
 // declarations and returns a map of interface name → list of declared method names.
 // This is stored as metadata on interface nodes so the resolver can later detect
 // which structs implement which interfaces without re-parsing the source.
+// extractGoStructFields walks the top-level type declarations and collects
+// field name + type strings for each struct. Returns a map from struct name
+// to a slice of "FieldName type" strings (at most 15 fields per struct to keep
+// metadata compact). Embedded fields (anonymous fields) use just the type name
+// as the field name. Struct tags are stripped from the output.
+func extractGoStructFields(root sitter.Node, src []byte) map[string][]string {
+	result := make(map[string][]string)
+	for i := uint32(0); i < root.ChildCount(); i++ {
+		child := root.Child(i)
+		if child.IsNull() || child.Type() != "type_declaration" {
+			continue
+		}
+		for j := uint32(0); j < child.ChildCount(); j++ {
+			spec := child.Child(j)
+			if spec.IsNull() || spec.Type() != "type_spec" {
+				continue
+			}
+			nameNode := spec.ChildByFieldName("name")
+			typeNode := spec.ChildByFieldName("type")
+			if nameNode.IsNull() || typeNode.IsNull() || typeNode.Type() != "struct_type" {
+				continue
+			}
+			structName := string(src[nameNode.StartByte():nameNode.EndByte()])
+			var fields []string
+			// Walk struct_type children to find field_declaration_list.
+			for k := uint32(0); k < typeNode.ChildCount(); k++ {
+				listNode := typeNode.Child(k)
+				if listNode.IsNull() || listNode.Type() != "field_declaration_list" {
+					continue
+				}
+				for l := uint32(0); l < listNode.ChildCount(); l++ {
+					if len(fields) >= 15 {
+						break
+					}
+					fieldDecl := listNode.Child(l)
+					if fieldDecl.IsNull() || fieldDecl.Type() != "field_declaration" {
+						continue
+					}
+					// Collect field_identifier children (the names) and the type node.
+					var names []string
+					var typeText string
+					for m := uint32(0); m < fieldDecl.ChildCount(); m++ {
+						fc := fieldDecl.Child(m)
+						if fc.IsNull() {
+							continue
+						}
+						switch fc.Type() {
+						case "field_identifier":
+							names = append(names, string(src[fc.StartByte():fc.EndByte()]))
+						case "raw_string_literal", "interpreted_string_literal":
+							// struct tag — skip
+						default:
+							if len(names) > 0 && typeText == "" {
+								// First non-name, non-tag child after names is the type.
+								typeText = strings.Join(strings.Fields(string(src[fc.StartByte():fc.EndByte()])), " ")
+							}
+						}
+					}
+					if len(names) == 0 {
+						// Embedded/anonymous field: the whole declaration text is the type.
+						raw := strings.TrimSpace(string(src[fieldDecl.StartByte():fieldDecl.EndByte()]))
+						// Remove trailing struct tag.
+						if idx := strings.Index(raw, "`"); idx > 0 {
+							raw = strings.TrimSpace(raw[:idx])
+						}
+						if raw != "" {
+							fields = append(fields, raw)
+						}
+						continue
+					}
+					for _, n := range names {
+						if len(fields) >= 15 {
+							break
+						}
+						if typeText != "" {
+							fields = append(fields, n+" "+typeText)
+						} else {
+							fields = append(fields, n)
+						}
+					}
+				}
+			}
+			if len(fields) > 0 {
+				result[structName] = fields
+			}
+		}
+	}
+	return result
+}
+
 func extractInterfaceMethods(root sitter.Node, src []byte) map[string][]string {
 	result := make(map[string][]string)
 	for i := uint32(0); i < root.ChildCount(); i++ {
@@ -413,6 +503,9 @@ func (p *GoParser) extractDeclarations(
 	// interface nodes, enabling ResolveImplementsEdges to detect struct satisfaction.
 	ifaceMethods := extractInterfaceMethods(root, src)
 
+	// Pre-collect struct field info for IMP-IMPL-2: compact format shows fields.
+	structFields := extractGoStructFields(root, src)
+
 	// --- Import declarations ---
 	importQuery := `(import_spec path: (interpreted_string_literal) @import_path)`
 	if err := runQuery(lang, root, src, importQuery, func(captures map[string]string, startLine int) {
@@ -545,6 +638,12 @@ func (p *GoParser) extractDeclarations(
 		}
 		nodeID := g.MakeNodeID(filePath, name)
 		meta := buildMeta(declInfo[name])
+		if fields, ok := structFields[name]; ok && len(fields) > 0 {
+			if meta == nil {
+				meta = make(map[string]string)
+			}
+			meta["fields"] = strings.Join(fields, ",")
+		}
 		g.AddNode(&graph.Node{
 			ID:       nodeID,
 			Type:     graph.NodeStruct,
