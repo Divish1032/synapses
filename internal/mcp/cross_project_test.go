@@ -229,12 +229,12 @@ func TestSessionInit_CrossProjectStatus(t *testing.T) {
 func TestResolveProjectStores_ExcludesSelf(t *testing.T) {
 	s := newTestServer(t)
 
-	selfStore := openTestStore(t)
 	siblingStore := openTestStore(t)
 
+	// Use s.store as the self store so pointer comparison works.
 	s.SetProjectRegistry(&mockProjectRegistry{
 		stores: map[string]*store.Store{
-			"myproject": selfStore,
+			"myproject": s.store,
 			"sibling":   siblingStore,
 		},
 	})

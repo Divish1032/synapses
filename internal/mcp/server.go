@@ -602,21 +602,23 @@ func (s *Server) resolveProjectStores(projectsParam string) (map[string]*store.S
 		}
 	}
 
-	// Get current project's name to exclude it.
-	currentName := filepath.Base(s.projectPath)
-
 	result := make(map[string]*store.Store)
 	var notFound []string
 	for name := range wanted {
-		if name == currentName {
-			continue // skip self
+		st := s.projectRegistry.GetStore(name)
+		if st == nil {
+			if projectsParam != "*" {
+				// Only report not-found for explicit names, not wildcard.
+				notFound = append(notFound, name)
+			}
+			continue
 		}
-		if st := s.projectRegistry.GetStore(name); st != nil {
-			result[name] = st
-		} else if projectsParam != "*" {
-			// Only report not-found for explicit names, not wildcard.
-			notFound = append(notFound, name)
+		// Skip self: compare store pointers rather than names to handle
+		// disambiguated names like "api (work)" correctly.
+		if st == s.store {
+			continue
 		}
+		result[name] = st
 	}
 	return result, notFound
 }

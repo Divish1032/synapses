@@ -2511,6 +2511,17 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 		resp["recommended_workflow"] = bestWorkflow
 	}
 
+	// When multiple projects are registered, hint about cross-project queries.
+	if s.projectRegistry != nil {
+		projects := s.projectRegistry.ListProjects()
+		if len(projects) > 0 {
+			resp["cross_project_hint"] = fmt.Sprintf(
+				"Multiple projects registered: %s. Add projects=\"*\" to recall, get_events, get_messages, or get_agents to query across them.",
+				strings.Join(projects, ", "),
+			)
+		}
+	}
+
 	return jsonResult(resp)
 }
 

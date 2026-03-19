@@ -197,11 +197,8 @@ Synapses registers **42 MCP tools** across 9 categories. All are available in yo
 ### Agent Coordination
 | Tool | Params | Description |
 |------|--------|-------------|
-| `get_agents` | — | List all active agents sorted by last-seen. |
-| `claim_work` | `agent_id`, `scope`, `scope_type`, `ttl_minutes` | Reserve a scope; conflicts returned immediately. |
-| `release_claims` | `agent_id` | Release all work claims. |
-| `get_conflicts` | `agent_id` | All overlapping claims by other agents. |
-| `get_events` | `since_seq`, `types`, `limit` | Event log with cursor: file_change, task_update, annotation_added, agent_activity. |
+| `get_agents` | `projects` (optional) | List all active agents sorted by last-seen. Cross-project with `projects="*"`. |
+| `get_events` | `since_seq`, `types`, `limit`, `projects` (optional) | Event log with cursor: file_change, task_update, annotation_added. Cross-project with `projects="*"`. |
 
 ### Agent Message Bus
 | Tool | Params | Description |
