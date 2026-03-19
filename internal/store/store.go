@@ -1607,9 +1607,10 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 // This reduces write amplification from O(total graph) to O(changed file)
 // — roughly 95% fewer writes for a typical single-file edit.
 //
-// Dangling incoming edges (edges from other files pointing to nodes deleted
-// from changedFile) are left in place; AddEdge silently ignores them on
-// LoadGraph since their target node IDs no longer exist.
+// Incoming edges to nodes that were deleted from changedFile are also removed
+// (to prevent unbounded accumulation over long sessions). Incoming edges to
+// nodes that still exist in changedFile are preserved — their from_id is in
+// another file and unaffected by this delta.
 //
 // If changedFile is empty, falls back to the full SaveGraph.
 func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
@@ -1705,6 +1706,32 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 		`DELETE FROM edges WHERE from_id IN (SELECT id FROM nodes WHERE file = ?)`, changedFile,
 	); err != nil {
 		return fmt.Errorf("delta: delete outgoing edges: %w", err)
+	}
+
+	// Delete incoming edges to nodes that were REMOVED from changedFile (not just
+	// changed). Without this, edges from other files pointing to deleted functions
+	// accumulate as dangling rows indefinitely — unlike full SaveGraph which wipes
+	// everything. Identified by: old node IDs that are absent from the new graph.
+	//
+	// Batched IN clause (900 items/batch) avoids SQLITE_LIMIT_VARIABLE_NUMBER.
+	// For typical file edits (<100 node deletions), this is a single fast query.
+	var deletedNodeIDs []string
+	for _, id := range oldNodeIDs {
+		if !newNodeIDSet[id] {
+			deletedNodeIDs = append(deletedNodeIDs, id)
+		}
+	}
+	const incomingDeleteBatch = 900
+	for i := 0; i < len(deletedNodeIDs); i += incomingDeleteBatch {
+		batch := deletedNodeIDs[i:min(i+incomingDeleteBatch, len(deletedNodeIDs))]
+		ph := strings.Repeat("?,", len(batch)-1) + "?"
+		args := make([]interface{}, len(batch))
+		for j, id := range batch {
+			args[j] = id
+		}
+		if _, err := tx.Exec(`DELETE FROM edges WHERE to_id IN (`+ph+`)`, args...); err != nil {
+			return fmt.Errorf("delta: delete incoming edges to removed nodes: %w", err)
+		}
 	}
 
 	// Delete old nodes for changedFile.
