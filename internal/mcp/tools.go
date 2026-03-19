@@ -3924,19 +3924,59 @@ func (s *Server) handleSessionInit(
 	// Zero tokens when no drift — the entire section is omitted.
 	if s.federationResolver != nil && s.store != nil && !quickMode {
 		fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
-		// Federation summary: sibling project health.
+
+		// Federation health summary: counts of entries, healthy, stale.
 		fedStatus := s.federationResolver.Status(fedCtx)
 		if len(fedStatus) > 0 {
-			resp["federation_summary"] = fedStatus
+			healthy, stale := 0, 0
+			for _, es := range fedStatus {
+				switch es.Status {
+				case "indexed", "ok":
+					healthy++
+				default:
+					stale++
+				}
+			}
+			resp["federation_health"] = map[string]interface{}{
+				"entries": len(fedStatus),
+				"healthy": healthy,
+				"stale":   stale,
+				"details": fedStatus,
+			}
 		}
+
 		// Drift detection: compare stored deps against sibling state.
 		driftAlerts := s.federationResolver.CheckDrift(fedCtx, s.store)
 		fedCancel()
 		if len(driftAlerts) > 0 {
+			// Surface as top-level warnings array so agents can't miss them.
+			warnings := make([]string, 0, len(driftAlerts))
+			for _, da := range driftAlerts {
+				warnings = append(warnings, fmt.Sprintf(
+					"⚠ Entity %s in project '%s' has changed (%s). Run prepare_context(target='%s', projects='%s') to review.",
+					da.Entity, da.Project, da.Change, da.Entity, da.Project,
+				))
+			}
+			resp["warnings"] = warnings
+			// Also keep the structured alerts for programmatic use.
 			resp["cross_project_drift"] = map[string]interface{}{
 				"count":  len(driftAlerts),
 				"alerts": driftAlerts,
-				"hint":   "Functions you depend on in sibling projects have changed. Review before building against them.",
+			}
+		}
+	}
+
+	// Federation auto-discovery: suggest sibling projects when no federation is configured.
+	if s.federationResolver == nil && s.projectPath != "" && !quickMode {
+		if siblings := federation.DiscoverSiblings(s.projectPath); len(siblings) > 0 {
+			names := make([]string, len(siblings))
+			for i, sib := range siblings {
+				names[i] = sib.Name
+			}
+			resp["federation_suggestions"] = map[string]interface{}{
+				"discovered": siblings,
+				"hint": fmt.Sprintf("Discovered %d sibling project(s) with Synapses indexes: %s. Add to federation config for cross-project awareness.",
+					len(siblings), strings.Join(names, ", ")),
 			}
 		}
 	}
