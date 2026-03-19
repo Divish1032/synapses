@@ -330,6 +330,19 @@ func (s *Server) handlePrepareContext(
 		s.assembleUnderstandContext(ctx, &b, resolved, taskID, tokenBudget)
 	}
 
+	// Sprint 6.7: passive context delivery instrumentation for Sprint 11 feedback loop.
+	// Fire-and-forget — no latency added to hot path. agent_id not part of prepare_context
+	// API so it is left empty; session_id provides the session correlation anchor.
+	if s.store != nil {
+		mcpSessID := SessionIDFromContext(ctx)
+		synapseSessionID := s.getSynapseSessionID(mcpSessID)
+		go s.store.InsertContextDelivery(store.ContextDelivery{
+			SessionID: synapseSessionID,
+			ToolName:  "prepare_context",
+			Entity:    target,
+		})
+	}
+
 	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
 }
 
