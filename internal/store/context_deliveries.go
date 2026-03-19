@@ -10,14 +10,19 @@ type ContextDelivery struct {
 	ToolName    string // "get_context" or "prepare_context"
 	Entity      string // entity/target queried
 	Refetched   bool   // true when this is a repeat request for the same entity in the same session
-	TaskOutcome string // "", "success", "abandoned" — populated at end_session
+	TaskOutcome string // "", "success", "unknown" — populated at end_session via CorrelateSessionOutcome
 }
 
 // InsertContextDelivery records a context delivery row in knowledge.db.
-// Safe to call from a goroutine — uses the single knowledgeDB connection.
+// Safe to call from a goroutine — uses the single knowledgeDB connection (WAL mode).
 // Errors are silently swallowed: instrumentation must never affect hot-path callers.
+// Rows with empty ToolName are skipped to prevent dirty data in quality analysis.
 func (s *Store) InsertContextDelivery(cd ContextDelivery) {
 	if s == nil || s.knowledgeDB == nil {
+		return
+	}
+	// ToolName is the primary grouping key for Sprint 11 analysis; skip rows without it.
+	if cd.ToolName == "" {
 		return
 	}
 	refetchedInt := 0
@@ -33,10 +38,12 @@ func (s *Store) InsertContextDelivery(cd ContextDelivery) {
 }
 
 // CorrelateSessionOutcome updates all context_deliveries rows for the given
-// session with the resolved task outcome ("success" or "abandoned").
+// session with the resolved task outcome ("success" or "unknown").
 // Called synchronously from handleEndSession — outcome must be persisted before
-// the session record is closed so Sprint 11 queries see consistent state.
+// the session record is cleared so Sprint 11 queries see consistent state.
 // sessionID must be the Synapses session UUID (not the MCP protocol session ID).
+// Only rows with task_outcome='' are updated, making this safe to call multiple
+// times (idempotent: already-correlated rows are never overwritten).
 // Returns the number of rows updated and any database error.
 func (s *Store) CorrelateSessionOutcome(sessionID, outcome string) (int64, error) {
 	if s == nil || s.knowledgeDB == nil || sessionID == "" {
@@ -54,11 +61,15 @@ func (s *Store) CorrelateSessionOutcome(sessionID, outcome string) (int64, error
 }
 
 // GetContextDeliveriesForSession returns all recorded deliveries for a session,
-// ordered by creation time. Used by tests and Sprint 11 analysis queries.
+// ordered by insertion order (id ASC). Used by tests and Sprint 11 analysis queries.
+// Returns (nil, nil) when the store is not available.
 func (s *Store) GetContextDeliveriesForSession(sessionID string) ([]ContextDelivery, error) {
+	if s == nil || s.knowledgeDB == nil {
+		return nil, nil
+	}
 	rows, err := s.knowledgeDB.Query(
 		`SELECT session_id, agent_id, tool_name, entity, refetched, task_outcome
-		 FROM context_deliveries WHERE session_id = ? ORDER BY created_at ASC`,
+		 FROM context_deliveries WHERE session_id = ? ORDER BY id ASC`,
 		sessionID,
 	)
 	if err != nil {

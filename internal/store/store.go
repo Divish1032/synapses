@@ -412,24 +412,6 @@ CREATE INDEX IF NOT EXISTS idx_memories_agent      ON memories(agent_id) WHERE a
 CREATE INDEX IF NOT EXISTS idx_memories_expires    ON memories(expires_at);
 CREATE INDEX IF NOT EXISTS idx_cross_deps_project  ON cross_project_deps(to_project);
 CREATE INDEX IF NOT EXISTS idx_cross_deps_file     ON cross_project_deps(to_project, to_file);
-
--- context_deliveries: passive instrumentation for Sprint 11 context-quality feedback loop.
--- Records every get_context / prepare_context call with entity, session, and refetch signal.
--- task_outcome is populated at end_session via CorrelateSessionOutcome.
--- No behavioral changes — pure collection.
-CREATE TABLE IF NOT EXISTS context_deliveries (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id   TEXT    NOT NULL DEFAULT '',
-    agent_id     TEXT    NOT NULL DEFAULT '',
-    tool_name    TEXT    NOT NULL,
-    entity       TEXT    NOT NULL DEFAULT '',
-    refetched    INTEGER NOT NULL DEFAULT 0,
-    task_outcome TEXT    NOT NULL DEFAULT '',
-    created_at   INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_cd_session ON context_deliveries(session_id) WHERE session_id != '';
-CREATE INDEX IF NOT EXISTS idx_cd_entity  ON context_deliveries(entity, agent_id);
-CREATE INDEX IF NOT EXISTS idx_cd_created ON context_deliveries(created_at);
 `
 
 // Store wraps two SQLite databases — one for the code graph (nodes, edges,
