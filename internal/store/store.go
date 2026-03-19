@@ -1222,6 +1222,10 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	s.knowledgeDB.Exec(`DELETE FROM memories WHERE expires_at != '' AND expires_at < ?`, time.Now().UTC().Format(time.RFC3339))
 	s.knowledgeDB.Exec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at < ?`, cutoff)
 
+	// context_deliveries: instrumentation data for Sprint 11 feedback loop.
+	// Rows older than retention window have been analyzed and have no further value.
+	s.knowledgeDB.Exec(`DELETE FROM context_deliveries WHERE created_at < ?`, cutoffUnix)
+
 	// proposals: resolved proposals have no further value after retention period.
 	s.knowledgeDB.Exec(`DELETE FROM proposals WHERE status IN ('accepted','rejected','withdrawn') AND updated_at < ?`, cutoff)
 	s.knowledgeDB.Exec(`DELETE FROM proposal_votes WHERE proposal_id NOT IN (SELECT id FROM proposals)`)
