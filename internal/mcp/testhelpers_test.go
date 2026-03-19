@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -12,6 +14,21 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
+
+// TestMain redirects the synapses cache for all mcp package tests.
+// handlers_federation_test.go calls federation.SiblingDBPath which resolves
+// to store.DefaultPath, writing DB files into ~/.synapses/cache/. Without
+// this, running the test suite pollutes the user's real project list.
+func TestMain(m *testing.M) {
+	tmp, err := os.MkdirTemp("", "synapses-mcp-test-cache-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create test cache dir: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(tmp)
+	os.Setenv("SYNAPSES_CACHE_DIR", tmp)
+	os.Exit(m.Run())
+}
 
 // ── Server constructors ───────────────────────────────────────────────────────
 
