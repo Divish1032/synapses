@@ -95,12 +95,12 @@ type Resolver struct {
 	entries   []config.FederationEntry
 	configDir string // directory containing synapses.json
 	clock     Clock  // time source (defaults to time.Now)
-	brain     BrainSummaryProvider // optional, for cross-project summaries
 
-	// brainGenerate is an optional LLM generate function for brain-enhanced
-	// drift summaries. When set, BrainDriftSummary feeds the structural diff
-	// to the LLM for a natural-language explanation of impact on callers.
-	// Injected via SetBrainGenerate. Nil = structural diff only.
+	// brainMu guards brain and brainGenerate. A dedicated mutex is used
+	// (rather than r.mu) because readers call r.getStore() while holding
+	// brainMu.RLock, and getStore takes r.mu.Lock — mixing them would deadlock.
+	brainMu      sync.RWMutex
+	brain        BrainSummaryProvider // optional, for cross-project summaries
 	brainGenerate func(ctx context.Context, prompt string) (string, error)
 
 	mu         sync.RWMutex
@@ -312,7 +312,7 @@ func (r *Resolver) GetDepsForEntity(ctx context.Context, entityID string, localS
 		if dep.VerifiedSignature != "" {
 			sibStore := r.getStore(dep.ToProject)
 			repoPath := r.entryPath(dep.ToProject)
-			if sibStore != nil && repoPath != "" && r.isSiblingStoreFresh(sibStore, r.cachedHead(dep.ToProject), repoPath) {
+			if sibStore != nil && repoPath != "" && r.isSiblingStoreFresh(ctx, sibStore, r.cachedHead(ctx, dep.ToProject), repoPath) {
 				nodes, findErr := sibStore.FindNodesByNameCtx(ctx, dep.ToEntity, 1)
 				if findErr == nil && len(nodes) > 0 {
 					if nodes[0].Signature != dep.VerifiedSignature {
@@ -482,7 +482,7 @@ func (r *Resolver) checkDriftForEntry(ctx context.Context, e config.FederationEn
 	// would produce false negatives (both are old → "no drift" → advance
 	// verified_commit → permanently missed drift).
 	siblingStore := r.getStore(e.Alias)
-	if siblingStore != nil && r.isSiblingStoreFresh(siblingStore, currentHead, e.Path) {
+	if siblingStore != nil && r.isSiblingStoreFresh(ctx, siblingStore, currentHead, e.Path) {
 		alerts := r.checkDriftGraphFirst(ctx, e.Alias, currentHead, staleDeps, siblingStore, localStore)
 		return mergeAlerts(alerts)
 	}
@@ -517,14 +517,14 @@ func (r *Resolver) checkDriftForEntry(ctx context.Context, e config.FederationEn
 // moves but its daemon hasn't re-indexed yet, graph comparison would see
 // old signatures matching verified_signature and silently advance the
 // verified_commit past the real change.
-func (r *Resolver) isSiblingStoreFresh(siblingStore *store.Store, currentHead, repoPath string) bool {
+func (r *Resolver) isSiblingStoreFresh(ctx context.Context, siblingStore *store.Store, currentHead, repoPath string) bool {
 	savedAt, err := siblingStore.SavedAt()
 	if err != nil || savedAt.IsZero() {
 		return false // can't determine freshness — don't trust
 	}
 
 	// Get the HEAD commit's timestamp.
-	commitTime, err := gitCommitTime(context.Background(), repoPath, currentHead)
+	commitTime, err := gitCommitTime(ctx, repoPath, currentHead)
 	if err != nil || commitTime.IsZero() {
 		// Can't get commit time — if store was saved very recently (within
 		// 5 minutes), trust it. Otherwise fall back to git diff.
@@ -1152,9 +1152,22 @@ func (r *Resolver) filterEntries(aliases []string) []config.FederationEntry {
 
 // InvalidateCache clears session-level caches. Called on session_init
 // to ensure fresh data each session.
+//
+// This also closes and clears all open sibling store handles. After a
+// session_init, sibling daemons may have run schema migrations — keeping
+// stale handles open can cause "no such table" or "wrong schema" errors.
+// Stores are reopened lazily on next access.
 func (r *Resolver) InvalidateCache() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Close and clear existing sibling store handles before resetting caches.
+	// This ensures any schema upgrades in sibling daemons take effect on next open.
+	for alias, st := range r.stores {
+		if err := st.Close(); err != nil {
+			log.Printf("federation: InvalidateCache close store %q: %v", alias, err)
+		}
+	}
+	r.stores = make(map[string]*store.Store, len(r.entries))
 	r.driftCache = make(map[string][]DriftAlert)
 	r.gitHeads = make(map[string]string)
 	// Clear store errors and compat cache so stale failures are retried.
@@ -1202,7 +1215,7 @@ func (r *Resolver) entryPath(alias string) string {
 // cachedHead returns the cached git HEAD for an alias, or fetches it fresh.
 // Returns "" if git is unavailable. Used by GetDepsForEntity to avoid
 // redundant git calls when CheckDrift already cached the HEAD.
-func (r *Resolver) cachedHead(alias string) string {
+func (r *Resolver) cachedHead(ctx context.Context, alias string) string {
 	r.mu.RLock()
 	head, ok := r.gitHeads[alias]
 	r.mu.RUnlock()
@@ -1215,7 +1228,7 @@ func (r *Resolver) cachedHead(alias string) string {
 	if path == "" {
 		return ""
 	}
-	h, err := gitRevParseHead(context.Background(), path)
+	h, err := gitRevParseHead(ctx, path)
 	if err != nil || h == "" {
 		return ""
 	}
@@ -1225,18 +1238,32 @@ func (r *Resolver) cachedHead(alias string) string {
 	return h
 }
 
+// CachedHead is the exported counterpart of cachedHead. It returns the cached
+// git HEAD commit hash for a sibling project, fetching it fresh if not cached.
+// Returns "" if the alias is unknown, not a git repo, or git is unavailable.
+// Safe for concurrent use.
+func (r *Resolver) CachedHead(ctx context.Context, alias string) string {
+	return r.cachedHead(ctx, alias)
+}
+
 // SetBrain attaches a brain summary provider for cross-project summarization.
 // Optional — when nil, cross-project summaries use raw entity signatures.
+// Thread-safe: may be called concurrently with readers.
 func (r *Resolver) SetBrain(brain BrainSummaryProvider) {
+	r.brainMu.Lock()
 	r.brain = brain
+	r.brainMu.Unlock()
 }
 
 // SetBrainGenerate attaches an LLM generate function for brain-enhanced
 // drift summaries. When set and brain is available, BrainDriftSummary
 // feeds the structural diff to the LLM for a natural-language explanation.
 // Typically wired to the brain's ingestor LLM client.
+// Thread-safe: may be called concurrently with readers.
 func (r *Resolver) SetBrainGenerate(fn func(ctx context.Context, prompt string) (string, error)) {
+	r.brainMu.Lock()
 	r.brainGenerate = fn
+	r.brainMu.Unlock()
 }
 
 // GetEntitySummary returns a brain-generated summary for a sibling entity.
@@ -1248,7 +1275,10 @@ func (r *Resolver) GetEntitySummary(ctx context.Context, alias, entityName strin
 	}
 
 	// Try brain summary first (zero LLM calls — reads from brain.sqlite).
-	if r.brain != nil {
+	r.brainMu.RLock()
+	brain := r.brain
+	r.brainMu.RUnlock()
+	if brain != nil {
 		projectID := r.SiblingProjectID(alias)
 		if projectID != "" {
 			// Brain summaries are indexed by nodeID. We need to find the
@@ -1257,7 +1287,7 @@ func (r *Resolver) GetEntitySummary(ctx context.Context, alias, entityName strin
 			if st != nil {
 				results, err := st.FindNodesByNameCtx(ctx, entityName, 1)
 				if err == nil && len(results) > 0 {
-					summary := r.brain.Summary(projectID, results[0].ID)
+					summary := brain.Summary(projectID, results[0].ID)
 					if summary != "" {
 						return summary
 					}
@@ -1297,7 +1327,11 @@ func (r *Resolver) BrainDriftSummary(ctx context.Context, oldSig, newSig, entity
 	structural := structuralSignatureDiff(oldSig, newSig)
 
 	// If brain generate is unavailable, return structural diff.
-	if r.brainGenerate == nil || r.brain == nil || !r.brain.Available() {
+	r.brainMu.RLock()
+	bg := r.brainGenerate
+	brain := r.brain
+	r.brainMu.RUnlock()
+	if bg == nil || brain == nil || !brain.Available() {
 		return structural
 	}
 
@@ -1307,7 +1341,7 @@ func (r *Resolver) BrainDriftSummary(ctx context.Context, oldSig, newSig, entity
 	defer cancel()
 
 	prompt := fmt.Sprintf(driftSummaryPrompt, oldSig, newSig, structural)
-	response, err := r.brainGenerate(brainCtx, prompt)
+	response, err := bg(brainCtx, prompt)
 	if err != nil || response == "" {
 		return structural // fail-open: brain error → structural diff
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -82,23 +83,35 @@ func isUnreachableCommitErr(err error) bool {
 		strings.Contains(s, "bad object")
 }
 
+// cachedGitEnvOnce guards one-time computation of cachedGitEnvSlice.
+var (
+	cachedGitEnvOnce  sync.Once
+	cachedGitEnvSlice []string
+)
+
 // gitEnv returns a curated environment for git subprocesses. Only variables
 // git needs for local operations are included — no API keys, tokens, or
 // other sensitive values leak to the subprocess.
+//
+// The result is computed once at first call and cached — the environment
+// variables git needs (PATH, HOME, TMPDIR) are stable for the daemon lifetime.
 func gitEnv() []string {
-	env := []string{
-		"GIT_TERMINAL_PROMPT=0", // never prompt for credentials
-		"GIT_ASKPASS=",          // disable credential helpers
-		"SSH_ASKPASS=",          // disable SSH credential prompts
-	}
-	// Git needs PATH (to find itself + helpers), HOME (for ~/.gitconfig),
-	// and TMPDIR (for temp files during diff).
-	for _, key := range []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL"} {
-		if v := os.Getenv(key); v != "" {
-			env = append(env, key+"="+v)
+	cachedGitEnvOnce.Do(func() {
+		env := []string{
+			"GIT_TERMINAL_PROMPT=0", // never prompt for credentials
+			"GIT_ASKPASS=",          // disable credential helpers
+			"SSH_ASKPASS=",          // disable SSH credential prompts
 		}
-	}
-	return env
+		// Git needs PATH (to find itself + helpers), HOME (for ~/.gitconfig),
+		// and TMPDIR (for temp files during diff).
+		for _, key := range []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL"} {
+			if v := os.Getenv(key); v != "" {
+				env = append(env, key+"="+v)
+			}
+		}
+		cachedGitEnvSlice = env
+	})
+	return cachedGitEnvSlice
 }
 
 // gitCmd runs a git command with a curated environment to prevent
@@ -285,12 +298,28 @@ func compileSignaturePatterns(entityName string) []*regexp.Regexp {
 	return compiled
 }
 
+// entityExistsFileSizeLimit is the maximum file size (in bytes) that
+// entityExistsInFile will read via git show. Files larger than this are
+// typically generated or vendored — skipping them avoids 100MB+ allocations.
+const entityExistsFileSizeLimit = 1 * 1024 * 1024 // 1 MB
+
 // entityExistsInFile checks whether an entity name appears in a file's content
 // at a signature-level position. Used as fallback when git diff is unavailable
 // to determine if an entity was removed from a file.
 func entityExistsInFile(ctx context.Context, repoPath, filePath, entityName string) bool {
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
+
+	// Check file size before reading to avoid huge allocations.
+	// git cat-file -s <object> prints the byte size of the object.
+	sizeOut, sizeErr := gitCmd(ctx, repoPath, "cat-file", "-s", "HEAD:"+filePath)
+	if sizeErr == nil {
+		if size, parseErr := strconv.ParseInt(strings.TrimSpace(sizeOut), 10, 64); parseErr == nil {
+			if size > entityExistsFileSizeLimit {
+				return false // file too large — skip to prevent excessive allocation
+			}
+		}
+	}
 
 	out, err := gitCmd(ctx, repoPath, "show", "HEAD:"+filePath)
 	if err != nil {

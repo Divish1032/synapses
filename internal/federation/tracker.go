@@ -115,6 +115,12 @@ func (d *DeterministicDetector) DetectDeps(ctx context.Context, filePath string,
 		return nil // unsupported language
 	}
 
+	// Skip files larger than 1MB — they are typically generated or vendored
+	// and cause excessive allocation with no meaningful import signal.
+	if info, statErr := os.Stat(filePath); statErr == nil && info.Size() > 1*1024*1024 {
+		return nil
+	}
+
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil // fail-open
@@ -798,29 +804,9 @@ func fileFromNodeID(id string) string {
 }
 
 // getSiblingHead returns the cached or fresh HEAD commit for a sibling.
+// Delegates to Resolver.CachedHead to avoid direct access to resolver internals.
 func (d *DeterministicDetector) getSiblingHead(ctx context.Context, alias string) string {
-	// Check resolver's cached heads first.
-	d.resolver.mu.RLock()
-	head, ok := d.resolver.gitHeads[alias]
-	d.resolver.mu.RUnlock()
-	if ok && head != "" {
-		return head
-	}
-
-	// Fetch fresh HEAD.
-	for _, e := range d.resolver.entries {
-		if e.Alias == alias {
-			h, err := gitRevParseHead(ctx, e.Path)
-			if err == nil && h != "" {
-				d.resolver.mu.Lock()
-				d.resolver.gitHeads[alias] = h
-				d.resolver.mu.Unlock()
-				return h
-			}
-			break
-		}
-	}
-	return "" // not a git repo or unavailable — dep stored without commit
+	return d.resolver.CachedHead(ctx, alias)
 }
 
 // DetectAndStore scans a file for cross-project imports, resolves entities

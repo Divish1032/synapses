@@ -1,6 +1,10 @@
 package federation
 
-import "github.com/SynapsesOS/synapses/internal/store"
+import (
+	"context"
+
+	"github.com/SynapsesOS/synapses/internal/store"
+)
 
 // StructuralSignatureDiff is exported for testing.
 var StructuralSignatureDiff = structuralSignatureDiff
@@ -15,7 +19,10 @@ var LangFromExt = langFromExt
 var StripGoCommentsAndStrings = stripGoCommentsAndStrings
 
 // IsSiblingStoreFresh is exported for testing.
-var IsSiblingStoreFresh = (*Resolver).isSiblingStoreFresh
+// Signature matches isSiblingStoreFresh: (ctx, store, head, repoPath).
+func IsSiblingStoreFresh(r *Resolver, st *store.Store, head, repoPath string) bool {
+	return r.isSiblingStoreFresh(context.Background(), st, head, repoPath)
+}
 
 // GetStore exports getStore for testing.
 func (r *Resolver) GetStore(alias string) *store.Store {

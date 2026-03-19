@@ -3145,7 +3145,7 @@ type changeEntry struct {
 // plus an optional git diff stat for the working tree.
 // Answers "what was the developer just working on before calling this agent?"
 func (s *Server) handleGetWorkingState(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	windowMinutes := 15
@@ -3210,23 +3210,28 @@ func (s *Server) handleGetWorkingState(
 	}
 
 	// Best-effort git diff stat — omitted when git is unavailable or not a git repo.
+	// Use a 2s timeout to prevent blocking when git hangs (e.g. network mounts).
 	if root != "" {
-		if out, err := exec.Command("git", "-C", root, "diff", "--stat", "HEAD").Output(); err == nil {
+		gitCtx, gitCancel := context.WithTimeout(ctx, 2*time.Second)
+		if out, err := exec.CommandContext(gitCtx, "git", "-C", root, "diff", "--stat", "HEAD").Output(); err == nil {
 			if stat := strings.TrimSpace(string(out)); stat != "" {
 				result["git_diff_stat"] = stat
 			}
 		}
+		gitCancel()
 	}
 
 	// When no recent file watcher changes, fall back to recent git log so agents
 	// always get meaningful orientation rather than an empty response.
 	if len(events) == 0 && root != "" {
-		if out, err := exec.Command("git", "-C", root, "log", "--oneline", "-7").Output(); err == nil {
+		gitCtx, gitCancel := context.WithTimeout(ctx, 2*time.Second)
+		if out, err := exec.CommandContext(gitCtx, "git", "-C", root, "log", "--oneline", "-7").Output(); err == nil {
 			if log := strings.TrimSpace(string(out)); log != "" {
 				result["fallback_git_log"] = log
 				result["fallback_note"] = fmt.Sprintf("No file changes in the last %d minutes. Showing recent git commits for context.", windowMinutes)
 			}
 		}
+		gitCancel()
 	}
 
 	// Phase 6: entity-level impact enrichment for recently changed files.
@@ -3569,18 +3574,23 @@ func (s *Server) handleSessionInit(
 	}
 	root := s.graph.Root()
 	if root != "" {
-		if out, err := exec.Command("git", "-C", root, "diff", "--stat", "HEAD").Output(); err == nil {
+		// Use a 2s timeout to prevent blocking when git hangs (e.g. network mounts).
+		gitCtx, gitCancel := context.WithTimeout(ctx, 2*time.Second)
+		if out, err := exec.CommandContext(gitCtx, "git", "-C", root, "diff", "--stat", "HEAD").Output(); err == nil {
 			if stat := strings.TrimSpace(string(out)); stat != "" {
 				workingSection["git_diff_stat"] = stat
 			}
 		}
+		gitCancel()
 		if len(recentChanges) == 0 {
-			if out, err := exec.Command("git", "-C", root, "log", "--oneline", "-7").Output(); err == nil {
+			gitCtx2, gitCancel2 := context.WithTimeout(ctx, 2*time.Second)
+			if out, err := exec.CommandContext(gitCtx2, "git", "-C", root, "log", "--oneline", "-7").Output(); err == nil {
 				if log := strings.TrimSpace(string(out)); log != "" {
 					workingSection["fallback_git_log"] = log
 					workingSection["fallback_note"] = fmt.Sprintf("No file changes in the last %d minutes. Showing recent git commits for context.", windowMinutes)
 				}
 			}
+			gitCancel2()
 		}
 	}
 
