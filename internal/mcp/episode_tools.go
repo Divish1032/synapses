@@ -72,6 +72,12 @@ func (s *Server) handleRemember(
 		}
 	}
 
+	// rationale is concatenated with decision before embedding — needs same tight limit.
+	rationale, rationaleErr := stringArgLimited(req, "rationale", maxArgLengthRationale)
+	if rationaleErr != nil {
+		return mcp.NewToolResultError(rationaleErr.Error()), nil
+	}
+
 	e := store.Episode{
 		AgentID:       agentID,
 		ProjectID:     stringArg(req, "project_id"),
@@ -80,7 +86,7 @@ func (s *Server) handleRemember(
 		Outcome:       outcome,
 		Trigger:       stringArg(req, "trigger"),
 		Decision:      decision,
-		Rationale:     stringArg(req, "rationale"),
+		Rationale:     rationale,
 		AffectedFiles: stringArgDefault(req, "affected_files", "[]"),
 		AffectedNodes: stringArgDefault(req, "affected_nodes", "[]"),
 		Tags:          stringArgDefault(req, "tags", "[]"),

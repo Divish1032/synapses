@@ -119,7 +119,7 @@ func (s *Server) handleCreatePlan(
 	if title == "" {
 		return mcp.NewToolResultError("title is required"), nil
 	}
-	description, _ := req.GetArguments()["description"].(string)
+	description := stringArg(req, "description")
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 
 	var taskInputs []store.TaskInput
@@ -430,7 +430,7 @@ func (s *Server) handleUpdateTask(
 		return mcp.NewToolResultError(fmt.Sprintf("invalid status %q — must be one of: pending, in_progress, done, cancelled", status)), nil
 	}
 
-	notes, _ := req.GetArguments()["notes"].(string)
+	notes := stringArg(req, "notes")
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 	intent, _ := req.GetArguments()["intent"].(string)
 
