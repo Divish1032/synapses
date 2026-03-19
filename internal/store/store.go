@@ -791,6 +791,9 @@ func Open(path string) (*Store, error) {
 		// R22: Branch-aware context — track the last-seen git branch per session
 		// so session_init can detect branch changes between sessions.
 		`ALTER TABLE sessions ADD COLUMN last_branch TEXT NOT NULL DEFAULT ''`,
+		// R21: Commit-to-task linking — capture HEAD SHA at in_progress, git log at done.
+		`ALTER TABLE tasks ADD COLUMN start_commit TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN commits TEXT NOT NULL DEFAULT '[]'`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
 			db.Close()

@@ -39,6 +39,12 @@ type Task struct {
 	Notes         string   `json:"notes"`        // append-only notes from each session
 	AssignedTo    string   `json:"assigned_to,omitempty"`
 	LastUpdatedBy string   `json:"last_updated_by,omitempty"`
+	// R21: Commit tracking — populated when git is available in the project root.
+	// StartCommit is the HEAD SHA captured when the task was set to in_progress.
+	// CommitsSinceStart is the git log since StartCommit, captured at done time.
+	// Both are empty when git is unavailable. Commits are repo-wide (not per-agent).
+	StartCommit       string   `json:"start_commit,omitempty"`
+	CommitsSinceStart []string `json:"commits_since_start,omitempty"`
 	// Computed fields — not stored in DB; set by GetPendingTasks.
 	Blocked   bool     `json:"blocked,omitempty"`
 	BlockedBy []string `json:"blocked_by,omitempty"`
@@ -151,7 +157,7 @@ func (s *Store) CreatePlan(title, description, agentID string, tasks []TaskInput
 func (s *Store) GetPendingTasks(planID, agentID string) ([]Task, error) {
 	query := `
 		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
-		       assigned_to, last_updated_by, created_at, updated_at
+		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits
 		FROM tasks
 		WHERE status IN ('pending', 'in_progress')
 	`
@@ -435,19 +441,49 @@ func (s *Store) findNewlyUnblocked(completedID string) ([]string, error) {
 	return unblocked, nil
 }
 
+// SetTaskStartCommit records the git HEAD SHA captured when a task was set to in_progress.
+// It is a no-op (not an error) when sha is empty, ensuring graceful degradation when
+// git is unavailable.
+func (s *Store) SetTaskStartCommit(taskID, sha string) error {
+	if sha == "" {
+		return nil
+	}
+	_, err := s.db.Exec(
+		`UPDATE tasks SET start_commit = ?, updated_at = ? WHERE id = ?`,
+		sha, time.Now().UTC().Format(time.RFC3339), taskID,
+	)
+	return err
+}
+
+// SetTaskCommits stores the git log lines captured at task completion.
+// commits may be nil (no commits made, or git unavailable) — stored as '[]'.
+// This is a write-once operation per task: called once at update_task(done).
+func (s *Store) SetTaskCommits(taskID string, commits []string) error {
+	if commits == nil {
+		commits = []string{}
+	}
+	raw, _ := json.Marshal(commits)
+	_, err := s.db.Exec(
+		`UPDATE tasks SET commits = ?, updated_at = ? WHERE id = ?`,
+		string(raw), time.Now().UTC().Format(time.RFC3339), taskID,
+	)
+	return err
+}
+
 // GetTask retrieves a single task by ID. Returns an error wrapping sql.ErrNoRows if not found.
 func (s *Store) GetTask(id string) (*Task, error) {
 	row := s.db.QueryRow(`
 		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
-		       assigned_to, last_updated_by, created_at, updated_at
+		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits
 		FROM tasks WHERE id = ?`, id)
 	var t Task
-	var linkedJSON, depsJSON string
+	var linkedJSON, depsJSON, commitsJSON string
 	if err := row.Scan(
 		&t.ID, &t.PlanID, &t.Title, &t.Description,
 		&t.Status, &t.Priority, &linkedJSON, &depsJSON, &t.Notes,
 		&t.AssignedTo, &t.LastUpdatedBy,
 		&t.CreatedAt, &t.UpdatedAt,
+		&t.StartCommit, &commitsJSON,
 	); err != nil {
 		return nil, fmt.Errorf("get task %q: %w", id, err)
 	}
@@ -459,6 +495,7 @@ func (s *Store) GetTask(id string) (*Task, error) {
 	if t.DependsOn == nil {
 		t.DependsOn = []string{}
 	}
+	_ = json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart)
 	return &t, nil
 }
 
@@ -536,12 +573,13 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		var linkedJSON, depsJSON string
+		var linkedJSON, depsJSON, commitsJSON string
 		if err := rows.Scan(
 			&t.ID, &t.PlanID, &t.Title, &t.Description,
 			&t.Status, &t.Priority, &linkedJSON, &depsJSON, &t.Notes,
 			&t.AssignedTo, &t.LastUpdatedBy,
 			&t.CreatedAt, &t.UpdatedAt,
+			&t.StartCommit, &commitsJSON,
 		); err != nil {
 			return nil, err
 		}
@@ -553,6 +591,7 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 		if t.DependsOn == nil {
 			t.DependsOn = []string{}
 		}
+		_ = json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart)
 		tasks = append(tasks, t)
 	}
 	return tasks, rows.Err()
