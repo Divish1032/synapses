@@ -4324,6 +4324,25 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// ── RX4: Previous session work summary ───────────────────────────────
+	// Surface the package-grouped work from the most recent end_session call.
+	// Zero tokens when no summary exists — not a new agent, not a first session.
+	// Skipped in quick mode (not critical for lightweight sessions).
+	if s.store != nil && agentID != "" && !quickMode {
+		if workMem, wErr := s.store.GetLatestWorkSummary(agentID); wErr == nil && workMem != nil {
+			var pkgs []PackageWork
+			if json.Unmarshal([]byte(workMem.Content), &pkgs) == nil && len(pkgs) > 0 {
+				resp["previous_session_work"] = map[string]interface{}{
+					"packages": pkgs,
+					"note":     "Work grouped by package from the previous session. Use this to quickly re-orient — these are the files and entities you were actively changing.",
+				}
+				// Touch in background to renew TTL (same pattern as relevant_memories).
+				wid := workMem.ID
+				go func() { s.store.TouchMemory(wid) }()
+			}
+		}
+	}
+
 	// ── Activation-context prompts (auto_load: true) ──────────────────────
 	// Surface project-wide conventions so agents apply them from the first message.
 	// Only prompts with auto_load: true are included here; entity-specific prompts
