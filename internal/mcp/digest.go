@@ -96,6 +96,19 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		}
 	}
 
+	// R19: Proactive rule alerts — actual violations found in the carved subgraph.
+	if dc.Enrichment != nil && len(dc.Enrichment.RuleAlerts) > 0 {
+		fmt.Fprintf(&b, "⚠ %d rule violation(s) in context:\n", len(dc.Enrichment.RuleAlerts))
+		for _, ra := range dc.Enrichment.RuleAlerts {
+			fromShort := shortName(ra.FromNode)
+			toShort := shortName(ra.ToNode)
+			fmt.Fprintf(&b, "  [%s] %s: %s → %s (%s)\n", ra.Severity, ra.RuleID, fromShort, toShort, ra.EdgeType)
+			if ra.SuggestedFix != "" {
+				fmt.Fprintf(&b, "    fix: %s\n", ra.SuggestedFix)
+			}
+		}
+	}
+
 	// Annotations: show agent/system notes for this entity (multi-agent visibility).
 	if anns, ok := dc.Annotations[string(dc.Root.ID)]; ok && len(anns) > 0 {
 		for _, a := range anns {
@@ -122,6 +135,11 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		} else {
 			fmt.Fprintf(&b, "📖 %q (%s)\n", title, filepath.Base(d.Node.File))
 		}
+	}
+
+	// Brain hint: tell agents whether brain enrichment is in progress or unavailable.
+	if dc.BrainHint != "" && dc.ContextPacket == nil {
+		fmt.Fprintf(&b, "brain: %s\n", dc.BrainHint)
 	}
 
 	// "summary" level: just the root header + warnings. Stop here.
@@ -359,6 +377,14 @@ func filterInferredNodes(nodes []graph.CarvedNode) []graph.CarvedNode {
 
 // getRootSummary returns the best available prose summary for the root node.
 // Priority: brain RootSummary > AST doc metadata > "".
+// shortName extracts a readable name from a full node ID (e.g. "repo::file.go::Func" → "Func").
+func shortName(nodeID string) string {
+	if idx := strings.LastIndex(nodeID, "::"); idx >= 0 {
+		return nodeID[idx+2:]
+	}
+	return nodeID
+}
+
 func getRootSummary(n *graph.Node, pkt *brain.ContextPacket) string {
 	if pkt != nil && pkt.RootSummary != "" {
 		return pkt.RootSummary
