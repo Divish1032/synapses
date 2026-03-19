@@ -88,6 +88,142 @@ var DefaultEdgeWeights = map[EdgeType]float64{
 	EdgeLinksTo: 0.3,
 }
 
+// EdgeTypeDescriptor captures the semantic metadata for a single edge type.
+// The catalog is the authoritative source for BFS weights, domain tags, and
+// human-readable descriptions — avoiding the need to scatter this information
+// across multiple maps and comments throughout the codebase.
+type EdgeTypeDescriptor struct {
+	// Name is the EdgeType constant value (e.g. "CALLS").
+	Name EdgeType `json:"name"`
+	// Description is a human-readable explanation of what this edge means.
+	Description string `json:"description"`
+	// SemanticWeight is the default BFS traversal weight (matches DefaultEdgeWeights).
+	// Higher weight = edge traversed first and contributes more relevance to reachable nodes.
+	SemanticWeight float64 `json:"semantic_weight"`
+	// Direction is always "directed" for the current graph model.
+	// Reserved for future bidirectional edge types (e.g. cross-domain MENTIONS).
+	Direction string `json:"direction"`
+	// Domain classifies which knowledge domain this edge belongs to.
+	// Uses the same string values as DomainType: "code", "docs", "infra", "api", "knowledge".
+	// Sprint 9 and 12 will add edges with "infra", "api", and "knowledge" domains.
+	Domain string `json:"domain"`
+	// Synthetic marks edges injected by heuristic passes rather than derived from the AST.
+	// Synthetic edges carry an inherent confidence < 1.0 (stored in node metadata).
+	Synthetic bool `json:"synthetic,omitempty"`
+}
+
+// EdgeTypeCatalog is the authoritative registry of all edge types in the graph.
+// Every entry in DefaultEdgeWeights must have a corresponding descriptor here —
+// the TestEdgeTypeCatalogCompleteness test enforces this invariant at test time.
+//
+// Sprint 9 adds: DEPLOYS, CONSUMES, CONFIGURED_BY (code-to-infra/api).
+// Sprint 12 adds: MENTIONS (cross-domain name match), DOCUMENTS (docs-to-code).
+// When new edge types are added, append a descriptor here AND add to DefaultEdgeWeights.
+var EdgeTypeCatalog = []EdgeTypeDescriptor{
+	{
+		Name:           EdgeCalls,
+		Description:    "Function or method invocation. Direction: caller → callee. Highest BFS weight — runtime behaviour flows along CALLS edges.",
+		SemanticWeight: 1.0,
+		Direction:      "directed",
+		Domain:         "code",
+	},
+	{
+		Name:           EdgeDataFlows,
+		Description:    "Data dependency between entities: a value produced by one entity is consumed by another. Near-highest weight — data-flow edges are critical for debugging and impact analysis.",
+		SemanticWeight: 0.95,
+		Direction:      "directed",
+		Domain:         "code",
+	},
+	{
+		Name:           EdgeImplements,
+		Description:    "Struct or type implements an interface. Direction: concrete type → interface. High weight — interface compliance is central to code review and contract analysis.",
+		SemanticWeight: 0.9,
+		Direction:      "directed",
+		Domain:         "code",
+	},
+	{
+		Name:           EdgeHandles,
+		Description:    "HTTP/RPC route dispatches to a handler function. Direction: route node → handler. Injected by the R1 heuristic pass (not AST-derived). Confidence stored in route node metadata.",
+		SemanticWeight: 0.9,
+		Direction:      "directed",
+		Domain:         "code",
+		Synthetic:      true,
+	},
+	{
+		Name:           EdgeEmbeds,
+		Description:    "Struct embeds another struct (Go embedding / composition). Direction: outer struct → embedded struct. High weight — embedding propagates the full method set.",
+		SemanticWeight: 0.85,
+		Direction:      "directed",
+		Domain:         "code",
+	},
+	{
+		Name:           EdgeDependsOn,
+		Description:    "Explicit dependency relationship between entities or modules. Broader than CALLS — captures package-level or declarative dependencies not visible as direct call sites.",
+		SemanticWeight: 0.8,
+		Direction:      "directed",
+		Domain:         "code",
+	},
+	{
+		Name:           EdgeImports,
+		Description:    "Source file or package imports another package. Direction: importer → imported package node. Lower weight than CALLS — import edges are structurally noisy (every file that uses a stdlib type gets an edge).",
+		SemanticWeight: 0.7,
+		Direction:      "directed",
+		Domain:         "code",
+	},
+	{
+		Name:           EdgeExplains,
+		Description:    "Documentation section describes a code entity (R31). Direction: Section node → code entity. Moderate weight — doc context is valuable but secondary to structural code edges.",
+		SemanticWeight: 0.7,
+		Direction:      "directed",
+		Domain:         "docs",
+		Synthetic:      true,
+	},
+	{
+		Name:           EdgeDocumentedBy,
+		Description:    "Reverse of EXPLAINS: code entity references its documentation section (R31). Direction: code entity → Section node. Slightly lower than EXPLAINS so code-to-code edges are preferred under token budget pressure.",
+		SemanticWeight: 0.6,
+		Direction:      "directed",
+		Domain:         "docs",
+		Synthetic:      true,
+	},
+	{
+		Name:           EdgeExports,
+		Description:    "Module or file exports an identifier. Direction: file/module → exported symbol. Medium-low weight — captures public API surface without dominating BFS traversal.",
+		SemanticWeight: 0.5,
+		Direction:      "directed",
+		Domain:         "code",
+	},
+	{
+		Name:           EdgeLinksTo,
+		Description:    "Markdown cross-document link (R31). Direction: source document/section → target document node. Lowest semantic weight among doc edges — navigation structure, not content relationship.",
+		SemanticWeight: 0.3,
+		Direction:      "directed",
+		Domain:         "docs",
+		Synthetic:      true,
+	},
+	{
+		Name:           EdgeContains,
+		Description:    "Document file contains a section, or parent section contains a subsection (R31). Direction: doc file/section → child section. Structural edge — same intentionally low weight as DEFINES to avoid hub inflation.",
+		SemanticWeight: 0.15,
+		Direction:      "directed",
+		Domain:         "docs",
+		Synthetic:      true,
+	},
+	{
+		Name:           EdgeDefines,
+		Description:    "Source file defines a code entity. Direction: file node → entity node. Lowest weight — every entity has exactly one DEFINES edge, so including it at higher weight would uniformly equalise all siblings in a file.",
+		SemanticWeight: 0.15,
+		Direction:      "directed",
+		Domain:         "code",
+	},
+}
+
+// GetEdgeTypes returns the full EdgeTypeCatalog slice.
+// The returned slice is the package-level variable — callers must not mutate it.
+func GetEdgeTypes() []EdgeTypeDescriptor {
+	return EdgeTypeCatalog
+}
+
 // NodeID is a composite identifier with the format: "repoID::file::name".
 // Using a named type (not a plain string) enforces intent at compile time.
 type NodeID string

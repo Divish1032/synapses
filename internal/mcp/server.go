@@ -1060,6 +1060,24 @@ func (s *Server) registerTools() {
 		s.handleGetProjectIdentity,
 	)
 
+	// get_edge_types: semantic catalog of all graph edge types (R36)
+	s.addOrDefer(
+		mcp.NewTool(
+			"get_edge_types",
+			mcp.WithDescription(
+				"Returns the semantic catalog of all graph edge types: name, BFS weight, direction, domain tag (code/docs/infra/api), "+
+					"and human-readable description. "+
+					"Foundation for multi-domain BFS — use this to understand how traversal weights are assigned "+
+					"or to select domain-specific edges for cross-domain queries (Sprint 12). "+
+					"format=\"json\" (default): full structured catalog. format=\"compact\": aligned text table.",
+			),
+			mcp.WithString("format",
+				mcp.Description("Output format: \"json\" (default, full structured catalog) or \"compact\" (text table, ~200 tokens)."),
+			),
+		),
+		s.handleGetEdgeTypes,
+	)
+
 	// get_context
 	s.addOrDefer(
 		mcp.NewTool(

@@ -219,6 +219,24 @@ func buildExplanation(
 	}
 	sb.WriteString("\n")
 
+	// ── Edge Type Semantics (footnote) ────────────────────────────────────────
+	// Compact BFS weight reference so agents understand traversal priority
+	// without a separate get_edge_types() call during orientation.
+	sb.WriteString("## BFS Edge Weights (highest → lowest)\n\n")
+	sb.WriteString("```\n")
+	for i, d := range graph.EdgeTypeCatalog {
+		synMark := ""
+		if d.Synthetic {
+			synMark = "*"
+		}
+		if i > 0 {
+			sb.WriteString(" > ")
+		}
+		sb.WriteString(fmt.Sprintf("%s(%.2f)%s", d.Name, d.SemanticWeight, synMark))
+	}
+	sb.WriteString("\n```\n")
+	sb.WriteString("_* = synthetic/heuristic edge. Domain tags and descriptions: `get_edge_types()`._\n")
+
 	return sb.String()
 }
 
