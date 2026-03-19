@@ -721,7 +721,7 @@ func (w *Watcher) persistAsync(changedFile string) {
 	}
 	mtime := time.Now().UnixNano()
 	go func() {
-		if err := w.store.SaveGraph(w.graph); err != nil {
+		if err := w.store.SaveGraphDelta(changedFile, w.graph); err != nil {
 			fmt.Fprintf(os.Stderr, "synapses/watcher: cache save: %v\n", err)
 		}
 		if changedFile != "" {
