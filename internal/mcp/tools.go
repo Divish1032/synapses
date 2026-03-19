@@ -3631,6 +3631,59 @@ func (s *Server) handleSessionInit(
 			}
 			gitCancel2()
 		}
+
+		// R22: Branch-aware context — detect current branch and surface it.
+		// Detached HEAD returns "HEAD" — surfaced as-is (no branch diff in that case).
+		gitCtxBranch, gitCancelBranch := context.WithTimeout(ctx, 2*time.Second)
+		if out, err := exec.CommandContext(gitCtxBranch, "git", "-C", root, "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+			currentBranch := strings.TrimSpace(string(out))
+			if currentBranch != "" {
+				workingSection["current_branch"] = currentBranch
+
+				// Persist branch for future change detection.
+				if s.store != nil && synapseSessionID != "" {
+					s.store.SetSessionBranch(synapseSessionID, currentBranch)
+				}
+
+				// Detect branch change: compare with previous session's branch.
+				// Skip on detached HEAD (no meaningful diff target) and on session resume
+				// (same session, no branch change to detect).
+				if currentBranch != "HEAD" && !sessionResumed && s.store != nil {
+					effectiveAgent := agentID
+					if effectiveAgent == "" {
+						effectiveAgent = "anonymous"
+					}
+					if prevBranch := s.store.GetLastBranch(effectiveAgent); prevBranch != "" && prevBranch != currentBranch {
+						workingSection["branch_changed"] = true
+						workingSection["previous_branch"] = prevBranch
+
+						// Surface which files differ between branches so the agent
+						// knows what context may have changed. Capped at 50 files.
+						gitCtxDiff, gitCancelDiff := context.WithTimeout(ctx, 2*time.Second)
+						if diffOut, diffErr := exec.CommandContext(gitCtxDiff, "git", "-C", root, "diff", "--name-only", prevBranch+"..."+currentBranch).Output(); diffErr == nil {
+							diffFiles := strings.Split(strings.TrimSpace(string(diffOut)), "\n")
+							// Filter empty strings from split.
+							var files []string
+							for _, f := range diffFiles {
+								if f != "" {
+									files = append(files, f)
+								}
+							}
+							if len(files) > 50 {
+								workingSection["branch_diff_truncated"] = true
+								files = files[:50]
+							}
+							if len(files) > 0 {
+								workingSection["branch_diff_files"] = files
+								workingSection["branch_diff_note"] = fmt.Sprintf("Switched from %s to %s. %d file(s) differ between branches. The file watcher handles re-indexing automatically.", prevBranch, currentBranch, len(files))
+							}
+						}
+						gitCancelDiff()
+					}
+				}
+			}
+		}
+		gitCancelBranch()
 	}
 
 	// ── 3b. Stale session detection ──────────────────────────────────────

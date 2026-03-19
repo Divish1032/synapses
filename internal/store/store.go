@@ -788,6 +788,9 @@ func Open(path string) (*Store, error) {
 		`CREATE INDEX IF NOT EXISTS idx_cross_deps_file    ON cross_project_deps(to_project, to_file)`,
 		// RX2 Phase 2: store entity signature at verification time for fallback comparison.
 		`ALTER TABLE cross_project_deps ADD COLUMN verified_signature TEXT NOT NULL DEFAULT ''`,
+		// R22: Branch-aware context — track the last-seen git branch per session
+		// so session_init can detect branch changes between sessions.
+		`ALTER TABLE sessions ADD COLUMN last_branch TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
 			db.Close()
