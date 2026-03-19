@@ -603,7 +603,7 @@ func TestSaveGraphDelta_WithoutPriorFullSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadGraph: %v", err)
 	}
-	// No repo_id in meta since no full SaveGraph was called — LoadGraph returns nil.
-	// This is expected: delta without full save has no meta. Just verify no crash.
+	// SaveGraphDelta writes repo_id/repo_root to meta, so LoadGraph returns a
+	// non-nil graph. Just verify no crash — the loaded graph may have nodes.
 	_ = loaded
 }

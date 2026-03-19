@@ -2,6 +2,7 @@ package graph
 
 import (
 	"crypto/rand"
+	"crypto/sha1" //nolint:gosec // SHA1 used for structural fingerprint, not cryptographic security
 	"fmt"
 	"math"
 	"path"
@@ -347,6 +348,50 @@ func (g *Graph) InvalidateCacheForFile(file string) {
 	g.cache.invalidateForFile(file)
 }
 
+// nodeFingerprintLocked computes a structural fingerprint for the node with
+// the given ID.  The fingerprint encodes the node's signature and its
+// direct structural neighbourhood (sorted neighbour IDs + edge types) so that
+// it changes when and only when the node's observable structure changes.
+//
+// Comment-only edits do not alter the signature or the edge set, so the
+// fingerprint stays the same and cached subgraphs built around this node
+// remain valid.
+//
+// Format: SHA1(nodeType:signature|from:edgeType:to|from:edgeType:to|...)
+// where the edge tokens are sorted lexicographically for determinism.
+//
+// Must be called with g.mu.RLock (or g.mu.Lock) already held.
+// Returns an empty string if the node does not exist.
+func (g *Graph) nodeFingerprintLocked(id NodeID) string {
+	n, ok := g.nodes[id]
+	if !ok {
+		return ""
+	}
+
+	// Collect edge tokens: each edge is represented as "from:edgeType:to".
+	// Collecting both out-edges and in-edges gives a complete structural view.
+	var tokens []string
+	for _, e := range g.outEdges[id] {
+		tokens = append(tokens, string(e.From)+":"+string(e.Type)+":"+string(e.To))
+	}
+	for _, e := range g.inEdges[id] {
+		tokens = append(tokens, string(e.From)+":"+string(e.Type)+":"+string(e.To))
+	}
+	sort.Strings(tokens)
+
+	// Build the fingerprint input: nodeType, signature, then sorted edge tokens.
+	sig := ""
+	if n.Metadata != nil {
+		sig = n.Metadata["signature"]
+	}
+	h := sha1.New() //nolint:gosec
+	_, _ = fmt.Fprintf(h, "%s:%s", string(n.Type), sig)
+	for _, tok := range tokens {
+		_, _ = fmt.Fprintf(h, "|%s", tok)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
 // PeekCallSites returns a copy of all pending call sites without clearing them.
 // Used to persist call sites to the store before the resolver drains them.
 func (g *Graph) PeekCallSites() []CallSite {
@@ -470,6 +515,21 @@ func (g *Graph) AllEdges() []*Edge {
 	var out []*Edge
 	for _, edges := range g.outEdges {
 		out = append(out, edges...)
+	}
+	return out
+}
+
+// OutEdgesForFile returns all outgoing edges from nodes whose File matches
+// the given path. Complexity is O(total_nodes + file_out_edges), which is
+// significantly cheaper than AllEdges() + filter when only one file changed.
+func (g *Graph) OutEdgesForFile(file string) []*Edge {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var out []*Edge
+	for id, n := range g.nodes {
+		if n.File == file {
+			out = append(out, g.outEdges[id]...)
+		}
 	}
 	return out
 }

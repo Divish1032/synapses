@@ -512,6 +512,11 @@ type Store struct {
 // gives a single, discoverable, cross-platform path that is not subject to
 // OS or tool-driven cache eviction.
 func CacheDir() (string, error) {
+	// Allow tests to override the cache directory so they don't pollute the
+	// user's ~/.synapses/cache with temp-path DBs that persist after cleanup.
+	if override := os.Getenv("SYNAPSES_CACHE_DIR"); override != "" {
+		return override, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("locate home dir: %w", err)
@@ -1669,13 +1674,11 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 	}
 
 	// Collect outgoing edges for new changedFile nodes from the in-memory graph.
+	// OutEdgesForFile is O(total_nodes + file_out_edges), avoiding the O(all_edges)
+	// scan that AllEdges() + filter would require.
 	var newEdges []*graph.Edge
-	if len(newNodeIDSet) > 0 {
-		for _, e := range g.AllEdges() {
-			if newNodeIDSet[string(e.From)] {
-				newEdges = append(newEdges, e)
-			}
-		}
+	if len(newNodes) > 0 {
+		newEdges = g.OutEdgesForFile(changedFile)
 	}
 
 	tx, err := s.db.Begin()
@@ -1822,15 +1825,27 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 		}
 	}
 
-	// Update metadata. Use in-memory graph counts (authoritative source of truth).
-	// file_count is queried from the DB since the in-memory graph does not expose it directly.
+	// Update metadata. Count nodes/edges directly from the DB (inside the
+	// transaction) so that federated/linked-project nodes — which live only in
+	// memory and are not written to the primary DB — are excluded. This matches
+	// what LoadGraph reads back and avoids inflated counts.
 	now := time.Now().UTC().Format(time.RFC3339)
-	var fileCount int
-	_ = tx.QueryRow(`SELECT COUNT(*) FROM nodes WHERE type = 'file'`).Scan(&fileCount)
+	var nodeCount, edgeCount, fileCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&nodeCount); err != nil {
+		return fmt.Errorf("delta: count nodes: %w", err)
+	}
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM edges`).Scan(&edgeCount); err != nil {
+		return fmt.Errorf("delta: count edges: %w", err)
+	}
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM nodes WHERE type = 'file'`).Scan(&fileCount); err != nil {
+		return fmt.Errorf("delta: count files: %w", err)
+	}
 	metaKVs := [][2]string{
+		{"repo_id", g.RepoID()},
+		{"repo_root", g.Root()},
 		{"saved_at", now},
-		{"node_count", strconv.Itoa(g.NodeCount())},
-		{"edge_count", strconv.Itoa(g.EdgeCount())},
+		{"node_count", strconv.Itoa(nodeCount)},
+		{"edge_count", strconv.Itoa(edgeCount)},
 		{"file_count", strconv.Itoa(fileCount)},
 	}
 	for _, kv := range metaKVs {
@@ -2148,6 +2163,14 @@ func ScanAll() ([]ProjectStat, error) {
 		}
 		if stat == nil {
 			continue // empty / uninitialised DB — not an error
+		}
+		// Skip stale entries: path no longer exists on disk (e.g. test temp dirs
+		// that were indexed and then cleaned up by the OS or test framework).
+		if stat.RepoRoot == "" {
+			continue
+		}
+		if _, err := os.Stat(stat.RepoRoot); os.IsNotExist(err) {
+			continue
 		}
 		stats = append(stats, *stat)
 	}
