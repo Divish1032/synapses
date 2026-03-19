@@ -699,6 +699,19 @@ func OpenReadOnly(path string) (*Store, error) {
 			knowledgeDB.Close()
 			return nil, fmt.Errorf("configure knowledge read-only: %w", err)
 		}
+	} else {
+		// Knowledge DB doesn't exist yet (sibling not fully initialized).
+		// Open an in-memory DB with knowledge schema so knowledge queries
+		// return empty results instead of panicking on nil dereference.
+		// This is critical: federation code calls FindEpisodesByNodeID,
+		// RecallEpisodes, SearchMemories etc. on read-only sibling stores.
+		knowledgeDB, err = sql.Open("sqlite", ":memory:")
+		if err != nil {
+			graphDB.Close()
+			return nil, fmt.Errorf("open in-memory knowledge db: %w", err)
+		}
+		knowledgeDB.SetMaxOpenConns(1)
+		_, _ = knowledgeDB.Exec(knowledgeSchema)
 	}
 	return &Store{graphDB: graphDB, knowledgeDB: knowledgeDB}, nil
 }
