@@ -167,7 +167,7 @@ func (s *Store) GetOrResumeSession(agentID, projectID, mcpSessionID, intent stri
 	// for one mcp_session_id.
 	// sql.LevelSerializable maps to BEGIN IMMEDIATE in the modernc SQLite driver,
 	// acquiring a reserved write lock upfront so the check-supersede-insert is atomic.
-	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := s.knowledgeDB.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return "", false, nil, fmt.Errorf("begin session tx: %w", err)
 	}
@@ -330,7 +330,7 @@ func (s *Store) TouchSession(sessionID string) {
 		return
 	}
 	now := time.Now().UTC().Unix()
-	_, _ = s.db.Exec(
+	_, _ = s.knowledgeDB.Exec(
 		`UPDATE sessions SET last_seen_at = ?, tool_calls = tool_calls + 1, state = 'active'
 		 WHERE id = ? AND ended_at IS NULL`,
 		now, sessionID)
@@ -341,7 +341,7 @@ func (s *Store) TouchSession(sessionID string) {
 // outcome: "success" | "failure" | "partial" | "unknown".
 func (s *Store) EndSession(sessionID, reason, outcome, summary string) error {
 	now := time.Now().UTC().Unix()
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`UPDATE sessions SET ended_at = ?, end_reason = ?, outcome = ?, summary = ?, state = 'closed'
 		 WHERE id = ?`,
 		now, reason, outcome, summary, sessionID)
@@ -357,7 +357,7 @@ func (s *Store) GetStaleSessions(projectID, currentSessionID string, staleThresh
 	// Lazily mark dormant sessions as 'hibernated' so the Tauri app and any
 	// observer can see accurate state without a separate reconciliation pass.
 	// Scoped to this project; error silently ignored (non-critical side effect).
-	_, _ = s.db.Exec(`
+	_, _ = s.knowledgeDB.Exec(`
 		UPDATE sessions
 		SET state = 'hibernated'
 		WHERE project_id = ?
@@ -365,7 +365,7 @@ func (s *Store) GetStaleSessions(projectID, currentSessionID string, staleThresh
 		  AND state = 'active'
 		  AND last_seen_at < ?`, projectID, cutoff)
 
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
 		SELECT id, agent_id, started_at, last_seen_at, intent, tool_calls
 		FROM sessions
 		WHERE project_id = ?
@@ -405,7 +405,7 @@ func (s *Store) GetOrphanedTasks(sessionID string) ([]OrphanedTask, error) {
 	// this session ordered by 'at' DESC — so 'claimed' (written after 'created')
 	// is correctly returned when both exist, reflecting that the agent was actively
 	// working on it. This is intentional, not alphabetical accident.
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
 		SELECT st.task_id,
 		       (SELECT st2.action FROM session_tasks st2
 		        WHERE st2.task_id = st.task_id
@@ -452,7 +452,7 @@ func (s *Store) LinkSessionTask(sessionID, taskID string, action SessionTaskActi
 		return
 	}
 	now := time.Now().UTC().Unix()
-	_, _ = s.db.Exec(
+	_, _ = s.knowledgeDB.Exec(
 		`INSERT INTO session_tasks(session_id, task_id, action, at) VALUES (?, ?, ?, ?)`,
 		sessionID, taskID, string(action), now)
 }
@@ -465,7 +465,7 @@ func (s *Store) LinkSessionTask(sessionID, taskID string, action SessionTaskActi
 func (s *Store) GetToolCallSummary(sessionID string) (ToolCallSummary, error) {
 	var summary ToolCallSummary
 
-	row := s.db.QueryRow(`
+	row := s.knowledgeDB.QueryRow(`
 		SELECT COUNT(*),
 		       COALESCE(1.0 - AVG(CAST(success AS REAL)), 0.0),
 		       COALESCE(SUM(duration_ms), 0)
@@ -478,7 +478,7 @@ func (s *Store) GetToolCallSummary(sessionID string) (ToolCallSummary, error) {
 		return summary, nil
 	}
 
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
 		SELECT tool_name, COUNT(*) as cnt
 		FROM tool_calls
 		WHERE session_id = ?
@@ -504,7 +504,7 @@ func (s *Store) SetSessionBranch(sessionID, branch string) {
 	if sessionID == "" || branch == "" {
 		return
 	}
-	_, _ = s.db.Exec(
+	_, _ = s.knowledgeDB.Exec(
 		`UPDATE sessions SET last_branch = ? WHERE id = ?`,
 		branch, sessionID)
 }
@@ -517,7 +517,7 @@ func (s *Store) GetLastBranch(agentID string) string {
 		return ""
 	}
 	var branch string
-	err := s.db.QueryRow(`
+	err := s.knowledgeDB.QueryRow(`
 		SELECT last_branch FROM sessions
 		WHERE agent_id = ? AND ended_at IS NOT NULL AND last_branch != ''
 		ORDER BY ended_at DESC, started_at DESC
@@ -543,7 +543,7 @@ func (s *Store) PruneToolCallsOlderThan(age time.Duration) (int64, error) {
 	s.lastPruneMu.Unlock()
 
 	cutoff := time.Now().UTC().Add(-age).Format(time.RFC3339)
-	res, err := s.db.Exec(`DELETE FROM tool_calls WHERE created_at < ?`, cutoff)
+	res, err := s.knowledgeDB.Exec(`DELETE FROM tool_calls WHERE created_at < ?`, cutoff)
 	if err != nil {
 		return 0, err
 	}
@@ -572,7 +572,7 @@ func (s *Store) PruneOldSessions(age time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-age).Unix()
 	// Only prune rows that are fully closed or hibernated past the age window.
 	// Active sessions are never touched regardless of age.
-	res, err := s.db.Exec(`
+	res, err := s.knowledgeDB.Exec(`
 		DELETE FROM sessions
 		WHERE state IN ('closed', 'hibernated')
 		  AND last_seen_at < ?`, cutoff)

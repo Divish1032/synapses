@@ -64,7 +64,7 @@ func (s *Store) RememberEpisode(e Episode) (string, error) {
 		e.Importance = 0.5
 	}
 
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`INSERT INTO episodes
 		 (id, agent_id, project_id, created_at, episode_type, outcome,
 		  trigger, decision, rationale, affected_files, affected_nodes,
@@ -135,7 +135,7 @@ func (s *Store) RecallEpisodes(query, projectID, agentID, episodeType, outcomeFi
 	baseQuery += ` ORDER BY rank LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.db.Query(baseQuery, args...)
+	rows, err := s.knowledgeDB.Query(baseQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("recall episodes: %w", err)
 	}
@@ -184,7 +184,7 @@ func (s *Store) GetEpisodes(projectID, agentID, episodeType string, tags []strin
 	query += ` ORDER BY created_at DESC LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.knowledgeDB.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get episodes: %w", err)
 	}
@@ -222,7 +222,7 @@ func (s *Store) CheckPlanSafety(planDesc, projectID string) (*Episode, error) {
 	}
 	query += ` ORDER BY rank LIMIT 1`
 
-	row := s.db.QueryRow(query, args...)
+	row := s.knowledgeDB.QueryRow(query, args...)
 	episodes, err := scanEpisodeRow(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -245,7 +245,7 @@ func (s *Store) FindEpisodesByNodeID(nodeID string, limit int) ([]Episode, error
 	// a JSON array like '["repo::file.go::Name"]'. We search for the node ID
 	// within it. escapeLike handles % and _ in node IDs.
 	pattern := "%" + escapeLike(nodeID) + "%"
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
 		SELECT id, agent_id, project_id, created_at, episode_type, outcome,
 		       trigger, decision, rationale, affected_files, affected_nodes,
 		       tags, importance, promoted_rule
@@ -268,7 +268,7 @@ func (s *Store) GetRuleCandidates(minOccurrences int) ([]RuleCandidate, error) {
 		minOccurrences = 2
 	}
 
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
 		SELECT decision, trigger, COUNT(*) as occurrences,
 		       json_group_array(id) as episode_ids
 		FROM episodes
@@ -298,7 +298,7 @@ func (s *Store) GetRuleCandidates(minOccurrences int) ([]RuleCandidate, error) {
 // MarkEpisodePromoted sets promoted_rule on an episode after it has been
 // converted to a dynamic_rule via upsert_rule().
 func (s *Store) MarkEpisodePromoted(episodeID, ruleID string) error {
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`UPDATE episodes SET promoted_rule = ? WHERE id = ?`,
 		ruleID, episodeID,
 	)

@@ -46,7 +46,7 @@ func (s *Store) CreateProposal(agentID, title, description string, affectedNodes
 	now := time.Now().UTC().Format(time.RFC3339)
 	nodesJSON, _ := json.Marshal(affectedNodes)
 
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`INSERT INTO proposals (id, agent_id, title, description, affected_nodes, status, vote_threshold, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
 		id, agentID, title, description, string(nodesJSON), voteThreshold, now, now,
@@ -84,7 +84,7 @@ func (s *Store) VoteOnProposal(proposalID, agentID, vote, rationale string) (*Pr
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	// Upsert the vote (each agent can change their mind until the proposal closes).
-	_, err = s.db.Exec(
+	_, err = s.knowledgeDB.Exec(
 		`INSERT INTO proposal_votes (proposal_id, agent_id, vote, rationale, created_at)
 		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(proposal_id, agent_id) DO UPDATE SET
@@ -111,7 +111,7 @@ func (s *Store) VoteOnProposal(proposalID, agentID, vote, rationale string) (*Pr
 	}
 
 	if newStatus != "" {
-		if _, err := s.db.Exec(
+		if _, err := s.knowledgeDB.Exec(
 			`UPDATE proposals SET status = ?, updated_at = ? WHERE id = ?`,
 			newStatus, now, proposalID,
 		); err != nil {
@@ -143,7 +143,7 @@ func (s *Store) WithdrawProposal(proposalID, agentID string) (*Proposal, error) 
 		return nil, fmt.Errorf("proposal %q is already %s", proposalID, p.Status)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := s.db.Exec(
+	if _, err := s.knowledgeDB.Exec(
 		`UPDATE proposals SET status = 'withdrawn', updated_at = ? WHERE id = ?`, now, proposalID,
 	); err != nil {
 		return nil, fmt.Errorf("withdraw proposal: %w", err)
@@ -164,7 +164,7 @@ func (s *Store) GetProposals(status string) ([]Proposal, error) {
 	}
 	q += ` ORDER BY created_at DESC`
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.knowledgeDB.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query proposals: %w", err)
 	}
@@ -205,7 +205,7 @@ func (s *Store) GetProposals(status string) ([]Proposal, error) {
 
 // getProposal loads a single proposal with its votes by ID.
 func (s *Store) getProposal(id string) (*Proposal, error) {
-	row := s.db.QueryRow(
+	row := s.knowledgeDB.QueryRow(
 		`SELECT id, agent_id, title, description, affected_nodes, status, vote_threshold, created_at, updated_at
 		 FROM proposals WHERE id = ?`, id,
 	)
@@ -233,7 +233,7 @@ func (s *Store) getProposal(id string) (*Proposal, error) {
 
 // loadVotes returns all votes for a proposal plus approve/reject tallies.
 func (s *Store) loadVotes(proposalID string) ([]Vote, int, int, error) {
-	rows, err := s.db.Query(
+	rows, err := s.knowledgeDB.Query(
 		`SELECT agent_id, vote, rationale, created_at FROM proposal_votes WHERE proposal_id = ? ORDER BY created_at ASC`,
 		proposalID,
 	)
