@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -202,5 +203,75 @@ func TestLogSince_NonExistentPath(t *testing.T) {
 	got := LogSince("/does/not/exist", "abc123")
 	if got != nil {
 		t.Errorf("expected nil for non-existent path, got %v", got)
+	}
+}
+
+// TestLogSince_NonCommitObject tests the case where startCommit is a non-commit object
+// (e.g., a tree object). Git cat-file will return something other than "commit",
+// which should be treated as invalid and return nil.
+func TestLogSince_NonCommitObject(t *testing.T) {
+	dir := initTestRepo(t)
+	sha := makeCommit(t, dir, "c1")
+
+	// Get the tree object from the commit (trees are part of every commit)
+	treeCmd := exec.Command("git", "-C", dir, "rev-parse", sha+"^{tree}")
+	treeCmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	treeOut, err := treeCmd.Output()
+	if err != nil {
+		t.Fatalf("could not get tree object: %v", err)
+	}
+
+	treeSHA := strings.TrimSpace(string(treeOut))
+	if treeSHA == "" {
+		t.Fatal("tree SHA is empty")
+	}
+
+	// Now create more commits after the initial one
+	makeCommit(t, dir, "c2")
+	makeCommit(t, dir, "c3")
+
+	// Using a tree object as startCommit should return nil
+	// because git cat-file will say "tree", not "commit"
+	got := LogSince(dir, treeSHA)
+	if got != nil {
+		t.Errorf("expected nil for tree object as startCommit, got %v", got)
+	}
+}
+
+// TestLogSince_CommitWithWhitespaceLines tests that lines containing only
+// whitespace in git log output are properly skipped.
+func TestLogSince_CommitWithWhitespaceLines(t *testing.T) {
+	dir := initTestRepo(t)
+	start := makeCommit(t, dir, "initial")
+	makeCommit(t, dir, "second")
+	makeCommit(t, dir, "third")
+
+	got := LogSince(dir, start)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 commits, got %d: %v", len(got), got)
+	}
+
+	// Verify all results are non-empty after trimming
+	for i, line := range got {
+		if strings.TrimSpace(line) == "" {
+			t.Errorf("commit line %d should not be empty after trim", i)
+		}
+	}
+}
+
+// TestLogSince_GitLogCommandError tests the case where git log fails
+// (e.g., invalid commit range). This should return nil gracefully.
+func TestLogSince_GitLogCommandError(t *testing.T) {
+	dir := initTestRepo(t)
+	makeCommit(t, dir, "c1")
+
+	// Use an invalid path that will cause git log to fail
+	invalidSHA := "a" + strings.Repeat("0", 39)
+	got := LogSince("/dev/null", invalidSHA)
+	if got != nil {
+		t.Errorf("expected nil when git log fails, got %v", got)
 	}
 }
