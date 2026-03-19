@@ -155,21 +155,61 @@ func gitCommitTime(ctx context.Context, repoPath, commitHash string) (time.Time,
 	return t, nil
 }
 
+// ── Bounded cache ────────────────────────────────────────────────────────────
+
+// boundedCache is a generic mutex-protected map with a hard entry cap.
+// When the cap is reached, the map is cleared and rebuilt from scratch.
+// This prevents unbounded memory growth for caches whose key space is
+// open-ended (e.g. one entry per unique entity name in the graph).
+// The clear-on-full strategy is correct for deterministic caches: evicted
+// entries are recomputed on next access with identical results.
+type boundedCache[K comparable, V any] struct {
+	mu  sync.RWMutex
+	m   map[K]V
+	max int
+}
+
+func newBoundedCache[K comparable, V any](max int) *boundedCache[K, V] {
+	return &boundedCache[K, V]{m: make(map[K]V, max), max: max}
+}
+
+// load retrieves a value using a read lock, allowing concurrent cache reads.
+func (c *boundedCache[K, V]) load(key K) (V, bool) {
+	c.mu.RLock()
+	v, ok := c.m[key]
+	c.mu.RUnlock()
+	return v, ok
+}
+
+// store adds a value under an exclusive write lock. When the map reaches max
+// entries, it is cleared before the new entry is added. Evicted entries are
+// recomputed on next access; the deterministic nature of all cached values
+// (regex patterns) makes this safe.
+func (c *boundedCache[K, V]) store(key K, val V) {
+	c.mu.Lock()
+	if len(c.m) >= c.max {
+		c.m = make(map[K]V, c.max)
+	}
+	c.m[key] = val
+	c.mu.Unlock()
+}
+
 // ── Pattern cache ───────────────────────────────────────────────────────────
 
 // patternCache caches compiled regex patterns per entity name. Patterns are
-// deterministic per name so the cache is correct. sync.Map is used for
-// concurrent safety without external locking.
-var patternCache sync.Map // entityName → []*regexp.Regexp
+// deterministic per name so the cache is correct. Bounded at 10 K entries to
+// prevent unbounded growth in very large repos — evicted entries are
+// recomputed on next access.
+var patternCache = newBoundedCache[string, []*regexp.Regexp](10_000)
 
 // getCachedPatterns returns compiled signature patterns for the entity name,
 // using the cache to avoid recompilation on repeated lookups.
 func getCachedPatterns(entityName string) []*regexp.Regexp {
-	if cached, ok := patternCache.Load(entityName); ok {
-		return cached.([]*regexp.Regexp)
+	if cached, ok := patternCache.load(entityName); ok {
+		return cached
 	}
 	patterns := compileSignaturePatterns(entityName)
-	patternCache.Store(entityName, patterns)
+	patternCache.store(entityName, patterns)
 	return patterns
 }
 

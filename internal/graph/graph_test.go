@@ -56,6 +56,82 @@ func TestEdgeCount(t *testing.T) {
 	}
 }
 
+func TestNodeCountsByRepo_SingleRepo(t *testing.T) {
+	g := buildFixture(t)
+	// buildFixture creates graph.New("testrepo") and uses MakeNodeID which
+	// generates "testrepo::file::name" IDs. All 5 nodes should be under "testrepo".
+	counts := g.NodeCountsByRepo()
+	if counts["testrepo"] != 5 {
+		t.Errorf("NodeCountsByRepo()[testrepo] = %d, want 5; full map: %v", counts["testrepo"], counts)
+	}
+	if len(counts) != 1 {
+		t.Errorf("NodeCountsByRepo() has %d repos, want 1; full map: %v", len(counts), counts)
+	}
+}
+
+func TestNodeCountsByRepo_FederatedNodes(t *testing.T) {
+	g := graph.New("primary")
+	// Add nodes with federated IDs: "repoA::file.go::Func"
+	g.AddNode(&graph.Node{ID: "repoA::auth.go::Login", Type: graph.NodeFunction, Name: "Login", File: "auth.go"})
+	g.AddNode(&graph.Node{ID: "repoA::auth.go::Service", Type: graph.NodeStruct, Name: "Service", File: "auth.go"})
+	g.AddNode(&graph.Node{ID: "repoB::db.go::Repo", Type: graph.NodeStruct, Name: "Repo", File: "db.go"})
+	g.AddNode(&graph.Node{ID: "plain", Type: graph.NodeFunction, Name: "plain", File: "x.go"}) // no "::"
+	counts := g.NodeCountsByRepo()
+	if counts["repoA"] != 2 {
+		t.Errorf("counts[repoA] = %d, want 2", counts["repoA"])
+	}
+	if counts["repoB"] != 1 {
+		t.Errorf("counts[repoB] = %d, want 1", counts["repoB"])
+	}
+}
+
+func TestCrossRepoCalls_NoFederation(t *testing.T) {
+	g := buildFixture(t)
+	count, repos := g.CrossRepoCalls("testrepo")
+	if count != 0 {
+		t.Errorf("CrossRepoCalls count = %d, want 0 (no federated edges)", count)
+	}
+	if len(repos) != 0 {
+		t.Errorf("CrossRepoCalls repos = %v, want empty", repos)
+	}
+}
+
+func TestCrossRepoCalls_WithFederation(t *testing.T) {
+	g := graph.New("primary")
+	// primary repo calls into repoA and repoB.
+	g.AddNode(&graph.Node{ID: "primary::a.go::Caller", Type: graph.NodeFunction, Name: "Caller", File: "a.go"})
+	g.AddNode(&graph.Node{ID: "repoA::b.go::Callee", Type: graph.NodeFunction, Name: "Callee", File: "b.go"})
+	g.AddNode(&graph.Node{ID: "repoB::c.go::Other", Type: graph.NodeFunction, Name: "Other", File: "c.go"})
+	g.AddEdge(&graph.Edge{From: "primary::a.go::Caller", To: "repoA::b.go::Callee", Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: "primary::a.go::Caller", To: "repoB::c.go::Other", Type: graph.EdgeCalls})
+
+	count, repos := g.CrossRepoCalls("primary")
+	if count != 2 {
+		t.Errorf("CrossRepoCalls count = %d, want 2", count)
+	}
+	if len(repos) != 2 {
+		t.Errorf("CrossRepoCalls repos = %v, want [repoA repoB]", repos)
+	}
+	// Returned slice must be sorted.
+	if len(repos) == 2 && (repos[0] != "repoA" || repos[1] != "repoB") {
+		t.Errorf("CrossRepoCalls repos = %v, want [repoA repoB] (sorted)", repos)
+	}
+}
+
+func TestCrossRepoCalls_PrimaryExcludedFromLinkedRepos(t *testing.T) {
+	g := graph.New("primary")
+	g.AddNode(&graph.Node{ID: "primary::a.go::Caller", Type: graph.NodeFunction, Name: "Caller", File: "a.go"})
+	g.AddNode(&graph.Node{ID: "sibling::b.go::Callee", Type: graph.NodeFunction, Name: "Callee", File: "b.go"})
+	g.AddEdge(&graph.Edge{From: "primary::a.go::Caller", To: "sibling::b.go::Callee", Type: graph.EdgeCalls})
+
+	_, repos := g.CrossRepoCalls("primary")
+	for _, r := range repos {
+		if r == "primary" {
+			t.Errorf("CrossRepoCalls linkedRepos should not include primaryRepoID %q", r)
+		}
+	}
+}
+
 func TestFaninFanout(t *testing.T) {
 	g := buildFixture(t)
 	svcID := g.MakeNodeID("auth.go", "AuthService")

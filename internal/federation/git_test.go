@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -541,6 +542,73 @@ func TestGitTimeout_DoesNotBlock(t *testing.T) {
 	elapsed := time.Since(start)
 	if elapsed > 2*time.Second {
 		t.Errorf("git command blocked for %v — expected <2s", elapsed)
+	}
+}
+
+// ── boundedCache tests ───────────────────────────────────────────────────────
+
+func TestBoundedCache_StoreAndLoad(t *testing.T) {
+	c := newBoundedCache[string, int](5)
+	c.store("a", 1)
+	c.store("b", 2)
+	if v, ok := c.load("a"); !ok || v != 1 {
+		t.Errorf("load(a) = %v, %v; want 1, true", v, ok)
+	}
+	if v, ok := c.load("b"); !ok || v != 2 {
+		t.Errorf("load(b) = %v, %v; want 2, true", v, ok)
+	}
+	if _, ok := c.load("missing"); ok {
+		t.Error("load(missing) should return false")
+	}
+}
+
+func TestBoundedCache_EvictsAtCap(t *testing.T) {
+	c := newBoundedCache[string, int](3)
+	c.store("a", 1)
+	c.store("b", 2)
+	c.store("c", 3)
+	// Fourth store exceeds cap — map is cleared, then "d" is stored.
+	c.store("d", 4)
+	if _, ok := c.load("a"); ok {
+		t.Error("after eviction, 'a' should be gone")
+	}
+	if v, ok := c.load("d"); !ok || v != 4 {
+		t.Errorf("load(d) = %v, %v; want 4, true", v, ok)
+	}
+}
+
+func TestBoundedCache_ConcurrentSafe(t *testing.T) {
+	c := newBoundedCache[int, int](100)
+	var wg sync.WaitGroup
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c.store(i, i*2)
+			c.load(i)
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestPatternCache_Consistent(t *testing.T) {
+	p1 := getCachedPatterns("AuthService")
+	p2 := getCachedPatterns("AuthService")
+	if len(p1) != len(p2) {
+		t.Errorf("getCachedPatterns returned different length slices on second call")
+	}
+	for i := range p1 {
+		if p1[i].String() != p2[i].String() {
+			t.Errorf("pattern[%d] mismatch: %q vs %q", i, p1[i].String(), p2[i].String())
+		}
+	}
+}
+
+func TestAliasPatternCache_Consistent(t *testing.T) {
+	r1 := getAliasPattern("log")
+	r2 := getAliasPattern("log")
+	if r1.String() != r2.String() {
+		t.Errorf("getAliasPattern returned different patterns: %q vs %q", r1, r2)
 	}
 }
 
