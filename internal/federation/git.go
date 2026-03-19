@@ -307,12 +307,16 @@ const entityExistsFileSizeLimit = 1 * 1024 * 1024 // 1 MB
 // at a signature-level position. Used as fallback when git diff is unavailable
 // to determine if an entity was removed from a file.
 func entityExistsInFile(ctx context.Context, repoPath, filePath, entityName string) bool {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
-	defer cancel()
+	// Each git call gets its own independent timeout derived from the parent ctx.
+	// A shared timeout would let the size-check call consume budget from the
+	// content-read call — two separate gitTimeout windows ensures each has the
+	// full budget regardless of how fast the other completes.
 
 	// Check file size before reading to avoid huge allocations.
 	// git cat-file -s <object> prints the byte size of the object.
-	sizeOut, sizeErr := gitCmd(ctx, repoPath, "cat-file", "-s", "HEAD:"+filePath)
+	sizeCtx, sizeCancel := context.WithTimeout(ctx, gitTimeout)
+	sizeOut, sizeErr := gitCmd(sizeCtx, repoPath, "cat-file", "-s", "HEAD:"+filePath)
+	sizeCancel()
 	if sizeErr == nil {
 		if size, parseErr := strconv.ParseInt(strings.TrimSpace(sizeOut), 10, 64); parseErr == nil {
 			if size > entityExistsFileSizeLimit {
@@ -321,7 +325,9 @@ func entityExistsInFile(ctx context.Context, repoPath, filePath, entityName stri
 		}
 	}
 
-	out, err := gitCmd(ctx, repoPath, "show", "HEAD:"+filePath)
+	showCtx, showCancel := context.WithTimeout(ctx, gitTimeout)
+	defer showCancel()
+	out, err := gitCmd(showCtx, repoPath, "show", "HEAD:"+filePath)
 	if err != nil {
 		return false // file doesn't exist or git error
 	}
