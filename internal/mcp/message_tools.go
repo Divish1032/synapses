@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 )
@@ -147,7 +148,7 @@ func (s *Server) handleGetMessages(
 	// Cross-project messages via daemon registry.
 	var crossProjectMsgs []map[string]interface{}
 	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.projectRegistry != nil {
-		stores := s.resolveProjectStores(projectsParam)
+		stores, notFound := s.resolveProjectStores(projectsParam)
 		for projName, projStore := range stores {
 			projMsgs, _, pErr := projStore.GetMessages(agentID, sinceSeq, topicFilter, unreadOnly, limit)
 			if pErr != nil {
@@ -164,6 +165,11 @@ func (s *Server) handleGetMessages(
 					"created_at": m.CreatedAt,
 				})
 			}
+		}
+		if len(notFound) > 0 {
+			crossProjectMsgs = append(crossProjectMsgs, map[string]interface{}{
+				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.projectRegistry.ListProjects(), ", ")),
+			})
 		}
 	}
 

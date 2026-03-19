@@ -240,7 +240,7 @@ func TestResolveProjectStores_ExcludesSelf(t *testing.T) {
 	})
 	s.projectPath = "/test/myproject"
 
-	result := s.resolveProjectStores("*")
+	result, _ := s.resolveProjectStores("*")
 	if _, ok := result["myproject"]; ok {
 		t.Error("resolveProjectStores should exclude the current project")
 	}
@@ -251,7 +251,7 @@ func TestResolveProjectStores_ExcludesSelf(t *testing.T) {
 
 func TestResolveProjectStores_NilRegistry(t *testing.T) {
 	s := newTestServer(t)
-	result := s.resolveProjectStores("*")
+	result, _ := s.resolveProjectStores("*")
 	if result != nil {
 		t.Error("expected nil when registry is nil")
 	}
@@ -262,9 +262,25 @@ func TestResolveProjectStores_EmptyParam(t *testing.T) {
 	s.SetProjectRegistry(&mockProjectRegistry{
 		stores: map[string]*store.Store{"a": s.store},
 	})
-	result := s.resolveProjectStores("")
+	result, _ := s.resolveProjectStores("")
 	if result != nil {
 		t.Error("expected nil when param is empty")
+	}
+}
+
+func TestResolveProjectStores_UnknownProject(t *testing.T) {
+	s := newTestServer(t)
+	s.SetProjectRegistry(&mockProjectRegistry{
+		stores: map[string]*store.Store{"backend": s.store},
+	})
+	s.projectPath = "/test/frontend"
+
+	result, notFound := s.resolveProjectStores("nonexistent")
+	if len(result) != 0 {
+		t.Error("expected empty result for unknown project")
+	}
+	if len(notFound) != 1 || notFound[0] != "nonexistent" {
+		t.Errorf("expected notFound=[nonexistent], got %v", notFound)
 	}
 }
 

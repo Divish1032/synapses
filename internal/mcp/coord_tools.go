@@ -136,7 +136,7 @@ func (s *Server) handleGetAgents(
 	// Cross-project agents via daemon registry.
 	var crossProjectAgents []map[string]interface{}
 	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.projectRegistry != nil {
-		stores := s.resolveProjectStores(projectsParam)
+		stores, notFound := s.resolveProjectStores(projectsParam)
 		for projName, projStore := range stores {
 			projAgents, pErr := projStore.GetAgents()
 			if pErr != nil {
@@ -151,6 +151,11 @@ func (s *Server) handleGetAgents(
 					"intent":    a.Intent,
 				})
 			}
+		}
+		if len(notFound) > 0 {
+			crossProjectAgents = append(crossProjectAgents, map[string]interface{}{
+				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.projectRegistry.ListProjects(), ", ")),
+			})
 		}
 	}
 
@@ -230,7 +235,7 @@ func (s *Server) handleGetEvents(
 	// Returned in a separate field so latest_seq remains a clean local cursor.
 	var crossProjectEvents []map[string]interface{}
 	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.projectRegistry != nil {
-		stores := s.resolveProjectStores(projectsParam)
+		stores, notFound := s.resolveProjectStores(projectsParam)
 		for projName, projStore := range stores {
 			projEvents, _, pErr := projStore.GetEvents(sinceSeq, types, agentIDFilter, limit)
 			if pErr != nil {
@@ -246,6 +251,11 @@ func (s *Server) handleGetEvents(
 					"created_at": e.CreatedAt,
 				})
 			}
+		}
+		if len(notFound) > 0 {
+			crossProjectEvents = append(crossProjectEvents, map[string]interface{}{
+				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.projectRegistry.ListProjects(), ", ")),
+			})
 		}
 	}
 
