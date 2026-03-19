@@ -73,7 +73,7 @@ type FederatedContext struct {
 	Entity    string             `json:"entity"`
 	NodeCount int                `json:"node_count"`
 	Nodes     []graph.CarvedNode `json:"nodes"`
-	Edges     []*graph.Edge      `json:"edges"`
+	Edges     []*graph.Edge     `json:"edges,omitempty"`
 }
 
 // BrainSummaryProvider retrieves brain summaries for cross-project entities.
@@ -83,8 +83,8 @@ type BrainSummaryProvider interface {
 	Available() bool
 }
 
-// staleThreshold is the maximum age of a sibling store before it's considered stale.
-var staleThreshold = 24 * time.Hour
+// staleThreshold is how long since last index before a sibling is "stale".
+const staleThreshold = 24 * time.Hour
 
 // Clock is a function that returns the current time.
 // Injected into Resolver for deterministic staleness testing.
@@ -254,7 +254,13 @@ func (r *Resolver) statusForEntry(e config.FederationEntry) EntryStatus {
 // InvalidateCache clears all cached state — stores, drift results, git heads,
 // and compatibility results. Existing store handles are closed.
 func (r *Resolver) InvalidateCache() {
+	// Clear drift cache first — CheckDrift checks cache before touching stores,
+	// so clearing cache first ensures any concurrent CheckDrift sees empty cache
+	// and starts fresh rather than returning stale results.
+	r.drift.InvalidateCache()
+
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	// Close and clear existing sibling store handles before resetting caches.
 	// This ensures any schema upgrades in sibling daemons take effect on next open.
 	for alias, st := range r.stores {
@@ -267,10 +273,6 @@ func (r *Resolver) InvalidateCache() {
 	// Clear store errors and compat cache so stale failures are retried.
 	r.storeErr = make(map[string]error, len(r.entries))
 	r.compatible = make(map[string]bool, len(r.entries))
-	r.mu.Unlock()
-
-	// Clear component caches.
-	r.drift.InvalidateCache()
 }
 
 // Close releases all open sibling stores.
