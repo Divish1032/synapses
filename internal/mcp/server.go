@@ -165,8 +165,11 @@ type Server struct {
 
 	// stopCh is closed by Close() to signal background goroutines to exit.
 	// startOnce ensures StartBackground() is truly idempotent.
+	// wg tracks all goroutines started by StartBackground so Close() can
+	// wait for them to finish before returning.
 	stopCh    chan struct{}
 	startOnce sync.Once
+	wg        sync.WaitGroup
 
 	// orientMu protects the orientation result cache (explain_codebase, get_repo_map).
 	// Stored separately from the 20-slot packet cache so that heavy get_context
@@ -445,10 +448,22 @@ type callStartTimes struct {
 	data map[*mcp.CallToolRequest]time.Time
 }
 
+// callStartTimesGCThreshold is how long an entry can sit in callStartTimes
+// before being considered leaked (from a panic that skipped the after-hook).
+// Normal tool calls complete in well under 5 minutes.
+const callStartTimesGCThreshold = 5 * time.Minute
+
 func (c *callStartTimes) push(req *mcp.CallToolRequest, t time.Time) {
 	c.mu.Lock()
 	if c.data == nil {
 		c.data = make(map[*mcp.CallToolRequest]time.Time)
+	}
+	// GC entries that are suspiciously old — these are leaked by panics that
+	// caused the after-hook to be skipped. O(n) over concurrent calls (≪100).
+	for k, v := range c.data {
+		if t.Sub(v) > callStartTimesGCThreshold {
+			delete(c.data, k)
+		}
 	}
 	c.data[req] = t
 	c.mu.Unlock()
@@ -597,24 +612,31 @@ func (s *Server) MCPServer() *server.MCPServer {
 }
 
 // StartBackground launches background maintenance goroutines.
-// Call Close() to stop them. Idempotent — safe to call multiple times.
+// Call Close() to stop them and wait for graceful completion.
+// Idempotent — safe to call multiple times.
 func (s *Server) StartBackground() {
 	if s.store == nil {
 		return
 	}
 	s.startOnce.Do(func() {
-		go s.memoryExpiryLoop()
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.memoryExpiryLoop()
+		}()
 	})
 }
 
-// Close signals all background goroutines to stop.
+// Close signals all background goroutines to stop and waits for them to finish.
+// Safe to call multiple times — subsequent calls are no-ops.
 func (s *Server) Close() {
 	select {
 	case <-s.stopCh:
-		// already closed
+		// already closed — wg.Wait still correct (goroutines already done)
 	default:
 		close(s.stopCh)
 	}
+	s.wg.Wait()
 }
 
 // memoryExpiryLoop runs ExpireMemories every 6 hours until stopCh is closed.

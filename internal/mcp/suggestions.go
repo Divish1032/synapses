@@ -77,11 +77,37 @@ var intentKeywords = map[string][]ToolSuggestion{
 		{Tool: "get_violations", Reason: "Current rule state", Example: `get_violations()`},
 		{Tool: "get_plans", Reason: "See existing plans", Example: `get_plans()`},
 	},
+	"test": {
+		{Tool: "verify_implementation", Reason: "Check files against architectural rules before testing", Example: `verify_implementation(files_written=["file.go"])`},
+		{Tool: "get_gaps", Reason: "View known quality issues to prioritize test coverage", Example: `get_gaps()`},
+		{Tool: "get_impact", Reason: "Find what depends on the code under test", Example: `get_impact(symbol="FunctionName")`},
+	},
+	"document": {
+		{Tool: "get_context", Reason: "Get full context for the entity you're documenting", Example: `get_context(entity="FunctionName")`},
+		{Tool: "get_adrs", Reason: "Review past architectural decisions to document rationale", Example: `get_adrs()`},
+		{Tool: "explain_codebase", Reason: "Generate architectural overview for documentation", Example: `explain_codebase()`},
+	},
+	"optimize": {
+		{Tool: "get_impact", Reason: "Understand blast radius before optimizing", Example: `get_impact(symbol="SlowFunction")`},
+		{Tool: "get_file_context", Reason: "See all entities in files you're optimizing", Example: `get_file_context(file="internal/hot/path.go")`},
+		{Tool: "get_gaps", Reason: "View known performance issues", Example: `get_gaps()`},
+	},
+	"profile": {
+		{Tool: "get_impact", Reason: "Identify high-fanin hot paths worth profiling", Example: `get_impact(symbol="HotFunction")`},
+		{Tool: "get_file_context", Reason: "See all entities in the hot path", Example: `get_file_context(file="internal/hot/path.go")`},
+		{Tool: "get_gaps", Reason: "View known performance issues", Example: `get_gaps()`},
+	},
 }
 
 // intentKeywordKeys is a sorted slice of intentKeywords map keys.
 // Deterministic iteration order guarantees reproducible suggestion output.
 var intentKeywordKeys []string
+
+// stemmedKeywordSuggestions maps pre-computed Porter stems of intent keywords
+// to their tool suggestions. Built once at init to avoid redundant stemWord()
+// calls during suggestToolsForIntent's Pass 2. If two keywords share the same
+// stem, the last one (by sorted key order) wins — collisions are rare and benign.
+var stemmedKeywordSuggestions map[string][]ToolSuggestion
 
 func init() {
 	intentKeywordKeys = make([]string, 0, len(intentKeywords))
@@ -89,6 +115,12 @@ func init() {
 		intentKeywordKeys = append(intentKeywordKeys, k)
 	}
 	sort.Strings(intentKeywordKeys)
+
+	// Pre-compute Porter stems for all intent keywords.
+	stemmedKeywordSuggestions = make(map[string][]ToolSuggestion, len(intentKeywords))
+	for _, k := range intentKeywordKeys {
+		stemmedKeywordSuggestions[porterStem(k)] = intentKeywords[k]
+	}
 }
 
 // stemWord applies the Porter stemming algorithm to normalize an inflected
@@ -131,27 +163,17 @@ func suggestToolsForIntent(intent string) []ToolSuggestion {
 		}
 	}
 
-	// Pass 2: Porter stem matching — stem both intent words and keywords,
-	// then compare stems. Porter stemmer normalizes inflected forms to a
-	// common root: "implementing"→"implement", "exploring"→"explor",
-	// "explore"→"explor". Uses sorted keys for deterministic iteration.
+	// Pass 2: Porter stem matching — stem each intent word and look it up in
+	// the pre-computed stemmedKeywordSuggestions map. Porter stemmer normalizes
+	// inflected forms: "implementing"→"implement", "exploring"→"explor".
+	// Pre-computed stems avoid redundant stemWord() calls on keywords per call.
 	if len(result) < 5 {
-		for _, keyword := range intentKeywordKeys {
-			suggestions := intentKeywords[keyword]
-			stemK := stemWord(keyword)
-			matched := false
-			for _, w := range words {
-				if w == keyword {
-					// Already handled in exact-match pass above.
-					matched = false
-					break
-				}
-				if stemWord(w) == stemK {
-					matched = true
-					break
-				}
+		for _, word := range words {
+			if _, exact := intentKeywords[word]; exact {
+				continue // already handled in exact-match pass above
 			}
-			if !matched {
+			suggestions, ok := stemmedKeywordSuggestions[stemWord(word)]
+			if !ok {
 				continue
 			}
 			for _, s := range suggestions {
