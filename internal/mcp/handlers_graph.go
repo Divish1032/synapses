@@ -1248,6 +1248,49 @@ func (s *Server) inlineFindEntity(query string) []map[string]interface{} {
 	return results
 }
 
+// handleGetEdgeTypes returns the full EdgeTypeCatalog: every edge type registered
+// in the graph with its semantic weight, BFS direction, domain tag, and description.
+// The catalog is the foundation for multi-domain BFS (Sprint 12) — agents can
+// query it to understand traversal semantics or to select domain-specific edge filters.
+//
+// Response format: {"edge_types": [EdgeTypeDescriptor...], "total": N}
+// The array is sorted by descending semantic_weight (highest-impact edges first).
+func (s *Server) handleGetEdgeTypes(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	format, _ := req.GetArguments()["format"].(string)
+
+	catalog := graph.GetEdgeTypes()
+
+	if format == "compact" {
+		// Compact: one line per edge type, sorted by weight descending.
+		// Useful for quick orientation without token budget pressure.
+		var sb strings.Builder
+		sb.WriteString("# Edge Type Catalog\n\n")
+		sb.WriteString("Sorted by BFS semantic weight (descending). Higher weight = traversed first.\n\n")
+		sb.WriteString(fmt.Sprintf("%-20s %-8s %-10s %s\n", "TYPE", "WEIGHT", "DOMAIN", "DESCRIPTION"))
+		sb.WriteString(strings.Repeat("-", 80) + "\n")
+		for _, d := range catalog {
+			synMark := ""
+			if d.Synthetic {
+				synMark = "*"
+			}
+			sb.WriteString(fmt.Sprintf("%-20s %-8.2f %-10s %s%s\n",
+				string(d.Name), d.SemanticWeight, d.Domain, d.Description[:min(len(d.Description), 60)], synMark))
+		}
+		sb.WriteString("\n* = synthetic edge (heuristic-injected, not AST-derived)\n")
+		sb.WriteString("\nUse format=\"json\" for full descriptions and machine-readable output.\n")
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+
+	return jsonResult(map[string]interface{}{
+		"edge_types": catalog,
+		"total":      len(catalog),
+		"note":       "Sorted by semantic_weight descending. Synthetic edges are heuristic-injected (not AST-derived). Sprint 9 adds infra/api domain edges; Sprint 12 adds cross-domain edges.",
+	})
+}
+
 // adaptiveCarveConfig adjusts cfg in-place based on stored feedback episodes
 // for the given entity+agent pair. Returns true when the detail level should
 // be forced to "full" (caller handles compact-format override).
