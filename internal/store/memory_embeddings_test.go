@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -474,6 +475,172 @@ func TestExpireMemories_CleansEmbeddings(t *testing.T) {
 	// Embedding should be cleaned up.
 	if count := st.MemoryEmbeddingCount(); count != 0 {
 		t.Errorf("expected 0 embeddings after expire, got %d", count)
+	}
+}
+
+func TestMemoryVectorSearch_DimensionMismatch_ReturnsNoResults(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+	ids := seedMultipleMemories(t, st)
+
+	// Store 4-dim embeddings.
+	_ = st.UpsertMemoryEmbedding(ids[0], "test", []float32{1, 0, 0, 0})
+	_ = st.UpsertMemoryEmbedding(ids[1], "test", []float32{0, 1, 0, 0})
+
+	// Query with 2-dim vector — dimension mismatch.
+	results, err := st.MemoryVectorSearch([]float32{1, 0}, 5)
+	if err != nil {
+		t.Fatalf("MemoryVectorSearch with dim mismatch: %v", err)
+	}
+	// cosineSimilarity returns 0 for mismatched dims → all filtered by score <= 0.
+	if len(results) != 0 {
+		t.Errorf("expected 0 results for dimension mismatch, got %d", len(results))
+	}
+}
+
+func TestMemoryVectorSearchWithThreshold_ScansAllCandidates(t *testing.T) {
+	// Regression test: WithThreshold must examine ALL embeddings, not just top-N.
+	// If the old limit*2 hack were used, this would fail by missing valid results.
+	st, _ := openMemEmbedTestStore(t)
+
+	// Create 8 memories with maximally distinct content to avoid dedup.
+	// Each describes a completely different domain to keep Jaccard similarity < 0.85.
+	distinctContents := []string{
+		"Kubernetes pod autoscaler watches CPU utilization thresholds on deployments",
+		"PostgreSQL vacuum analyzes table bloat and reclaims dead tuple storage pages",
+		"Redis sentinel monitors primary replica failover with quorum voting protocol",
+		"Terraform provider lifecycle manages resource creation drift detection reconciliation",
+		"GraphQL resolver batching aggregates DataLoader queries into single database call",
+		"Prometheus alertmanager routes firing alerts through inhibition silencing grouping",
+		"Elasticsearch shard allocation rebalances replicas across cluster data nodes",
+		"RabbitMQ consumer prefetch acknowledgement ensures exactly once message delivery",
+	}
+
+	var allIDs []string
+	for _, c := range distinctContents {
+		id, err := st.InsertMemory(Memory{
+			Tier:    TierProject,
+			Content: c,
+			AgentID: "test-agent",
+		})
+		if err != nil {
+			t.Fatalf("InsertMemory: %v", err)
+		}
+		allIDs = append(allIDs, id)
+		// All embeddings point mostly in the same direction with slight variation.
+		vec := []float32{1.0, float32(len(allIDs)) * 0.01, 0, 0}
+		_ = st.UpsertMemoryEmbedding(id, "test", vec)
+	}
+
+	// Query with limit=3, threshold=0.9. All 8 should have score > 0.9 (similar direction).
+	results, err := st.MemoryVectorSearchWithThreshold([]float32{1, 0, 0, 0}, 3, 0.9)
+	if err != nil {
+		t.Fatalf("MemoryVectorSearchWithThreshold: %v", err)
+	}
+	// Must return exactly 3 (the limit), not fewer due to truncation bug.
+	if len(results) != 3 {
+		t.Errorf("expected 3 results (limit), got %d", len(results))
+	}
+	// All scores should be above threshold.
+	for _, r := range results {
+		if r.Score < 0.9 {
+			t.Errorf("result score %f below threshold 0.9", r.Score)
+		}
+	}
+}
+
+func TestMarkMemoryEmbeddingsStale_LargeBatch(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+
+	// Insert 550 rows directly into memories + memory_embeddings to avoid dedup.
+	// This bypasses InsertMemory's similarity check, which is correct because
+	// we're testing the embedding batch logic, not memory insertion.
+	var ids []string
+	now := time.Now().UTC()
+	expires := now.Add(365 * 24 * time.Hour).Format(time.RFC3339)
+	nowStr := now.Format(time.RFC3339)
+	for i := 0; i < 550; i++ {
+		id := fmt.Sprintf("batch-stale-%d", i)
+		ids = append(ids, id)
+		st.knowledgeDB.Exec(`INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
+			created_at, expires_at, last_accessed_at, source)
+			VALUES (?, 'project', ?, '', 'test', '', '[]', ?, ?, ?, 'manual')`,
+			id, fmt.Sprintf("Unique content for stale batch test item number %d with extra words to be distinct", i),
+			nowStr, expires, nowStr)
+		st.knowledgeDB.Exec(`INSERT INTO memory_embeddings (memory_id, model, embedding, content_hash, stale, embedded_at)
+			VALUES (?, 'test', ?, 'hash', 0, ?)`,
+			id, vecToBlob([]float32{1, 0}), now.Unix())
+	}
+	if count := st.MemoryEmbeddingCount(); count != 550 {
+		t.Fatalf("expected 550 embeddings, got %d", count)
+	}
+
+	// Mark all stale — this crosses the 500-item batch boundary.
+	if err := st.MarkMemoryEmbeddingsStale(ids); err != nil {
+		t.Fatalf("MarkMemoryEmbeddingsStale large batch: %v", err)
+	}
+
+	// Verify all are stale.
+	var staleCount int
+	_ = st.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM memory_embeddings WHERE stale = 1`).Scan(&staleCount)
+	if staleCount != 550 {
+		t.Errorf("expected 550 stale, got %d", staleCount)
+	}
+}
+
+func TestDeleteMemoryEmbeddings_LargeBatch(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+
+	// Insert 550 rows directly to avoid dedup (same approach as stale batch test).
+	var ids []string
+	now := time.Now().UTC()
+	expires := now.Add(365 * 24 * time.Hour).Format(time.RFC3339)
+	nowStr := now.Format(time.RFC3339)
+	for i := 0; i < 550; i++ {
+		id := fmt.Sprintf("batch-delete-%d", i)
+		ids = append(ids, id)
+		st.knowledgeDB.Exec(`INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
+			created_at, expires_at, last_accessed_at, source)
+			VALUES (?, 'project', ?, '', 'test', '', '[]', ?, ?, ?, 'manual')`,
+			id, fmt.Sprintf("Unique content for delete batch test item number %d with additional unique words", i),
+			nowStr, expires, nowStr)
+		st.knowledgeDB.Exec(`INSERT INTO memory_embeddings (memory_id, model, embedding, content_hash, stale, embedded_at)
+			VALUES (?, 'test', ?, 'hash', 0, ?)`,
+			id, vecToBlob([]float32{0, 1}), now.Unix())
+	}
+	if count := st.MemoryEmbeddingCount(); count != 550 {
+		t.Fatalf("expected 550 embeddings, got %d", count)
+	}
+
+	if err := st.DeleteMemoryEmbeddings(ids); err != nil {
+		t.Fatalf("DeleteMemoryEmbeddings large batch: %v", err)
+	}
+	if count := st.MemoryEmbeddingCount(); count != 0 {
+		t.Errorf("expected 0 after large delete, got %d", count)
+	}
+}
+
+func TestUpsertMemoryEmbedding_NonExistentMemory_NoOrphanInSearch(t *testing.T) {
+	// Even if an embedding is created for a nonexistent memory_id (shouldn't happen
+	// in practice), MemoryVectorSearch filters it out via JOIN with memories table.
+	st, _ := openMemEmbedTestStore(t)
+
+	// Force-insert an orphan embedding (bypassing validation).
+	_, _ = st.knowledgeDB.Exec(`
+		INSERT INTO memory_embeddings (memory_id, model, embedding, content_hash, stale, embedded_at)
+		VALUES (?, ?, ?, ?, 0, ?)`,
+		"nonexistent-memory", "test", vecToBlob([]float32{1, 0}), "deadbeef", time.Now().Unix())
+
+	if count := st.MemoryEmbeddingCount(); count != 1 {
+		t.Fatalf("expected 1 orphan embedding, got %d", count)
+	}
+
+	// Search should return nothing — orphan is filtered by JOIN.
+	results, err := st.MemoryVectorSearch([]float32{1, 0}, 5)
+	if err != nil {
+		t.Fatalf("MemoryVectorSearch: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("orphan embedding should not appear in search results, got %d results", len(results))
 	}
 }
 

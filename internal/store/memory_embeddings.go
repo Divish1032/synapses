@@ -254,25 +254,75 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 	return results, nil
 }
 
-// MemoryVectorSearchWithThreshold is like MemoryVectorSearch but also applies
-// a minimum similarity threshold. Results below the threshold are excluded.
+// MemoryVectorSearchWithThreshold performs brute-force cosine similarity search
+// with a minimum similarity threshold. Results below the threshold are excluded.
 // Useful for recall() where low-confidence matches should not pollute results.
+// Unlike MemoryVectorSearch, this scans all embeddings before applying the limit
+// so threshold filtering does not miss valid matches ranked beyond an arbitrary cutoff.
 func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, minScore float64) ([]MemorySearchResult, error) {
-	results, err := s.MemoryVectorSearch(queryVec, limit*2) // fetch extra to compensate for filtering
-	if err != nil {
-		return nil, err
+	if limit <= 0 {
+		limit = 20
+	}
+	if len(queryVec) == 0 {
+		return nil, nil
 	}
 
-	var filtered []MemorySearchResult
-	for _, r := range results {
-		if r.Score >= minScore {
-			filtered = append(filtered, r)
-		}
-		if len(filtered) >= limit {
-			break
-		}
+	now := time.Now().UTC().Format(time.RFC3339)
+	rows, err := s.knowledgeDB.Query(`
+		SELECT e.memory_id, m.content, m.tier, m.entity_id, e.embedding
+		FROM memory_embeddings e
+		JOIN memories m ON e.memory_id = m.id
+		WHERE e.stale = 0
+		  AND m.stale = 0
+		  AND m.expires_at > ?`, now)
+	if err != nil {
+		return nil, fmt.Errorf("memory vector search with threshold: %w", err)
 	}
-	return filtered, nil
+	defer rows.Close()
+
+	type candidate struct {
+		result MemorySearchResult
+		score  float32
+	}
+	var candidates []candidate
+
+	threshold := float32(minScore)
+	for rows.Next() {
+		var r MemorySearchResult
+		var blob []byte
+		if err := rows.Scan(&r.MemoryID, &r.Content, &r.Tier, &r.EntityID, &blob); err != nil {
+			return nil, fmt.Errorf("scan memory embedding row: %w", err)
+		}
+		vec := blobToVec(blob)
+		if len(vec) == 0 {
+			continue
+		}
+		score := cosineSimilarity(queryVec, vec)
+		if score < threshold {
+			continue
+		}
+		candidates = append(candidates, candidate{r, score})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+
+	results := make([]MemorySearchResult, len(candidates))
+	for i, c := range candidates {
+		results[i] = c.result
+		results[i].Score = float64(c.score)
+	}
+	return results, nil
 }
 
 // memoryEmbeddingDimensions returns the dimensionality of stored embeddings
