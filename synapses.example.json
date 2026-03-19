@@ -1,5 +1,6 @@
 {
   "version": "1",
+  "mode": "full",
   "rules": [
     {
       "id": "no-db-in-handler",
