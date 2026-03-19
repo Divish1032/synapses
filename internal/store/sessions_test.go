@@ -691,3 +691,118 @@ func TestSessionLifecycle_ParallelSessions(t *testing.T) {
 		t.Error("open session C must appear in stale results")
 	}
 }
+
+// ── R22: Branch-aware context ─────────────────────────────────────────────────
+
+func TestSetSessionBranch_StoresAndRetrieves(t *testing.T) {
+	st := openTestStore(t)
+	sid := createTestSession(t, st, "agent-branch", "proj-1", "test")
+	st.SetSessionBranch(sid, "feature/login")
+	// End the session so GetLastBranch can find it (queries ended sessions).
+	if err := st.EndSession(sid, "clean", "success", ""); err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+	got := st.GetLastBranch("agent-branch")
+	if got != "feature/login" {
+		t.Errorf("GetLastBranch: got %q, want %q", got, "feature/login")
+	}
+}
+
+func TestSetSessionBranch_EmptyInputsAreNoop(t *testing.T) {
+	st := openTestStore(t)
+	// Neither call should panic or error.
+	st.SetSessionBranch("", "main")
+	st.SetSessionBranch("some-session", "")
+}
+
+func TestGetLastBranch_NoPriorSession_ReturnsEmpty(t *testing.T) {
+	st := openTestStore(t)
+	got := st.GetLastBranch("nonexistent-agent")
+	if got != "" {
+		t.Errorf("expected empty branch for unknown agent, got %q", got)
+	}
+}
+
+func TestGetLastBranch_EmptyAgentID_ReturnsEmpty(t *testing.T) {
+	st := openTestStore(t)
+	got := st.GetLastBranch("")
+	if got != "" {
+		t.Errorf("expected empty branch for empty agent ID, got %q", got)
+	}
+}
+
+func TestGetLastBranch_ReturnsLatestEndedSession(t *testing.T) {
+	st := openTestStore(t)
+	// Session 1: branch "main", ended at t=1000
+	s1 := createTestSession(t, st, "agent-multi", "proj-1", "")
+	st.SetSessionBranch(s1, "main")
+	if err := st.EndSession(s1, "clean", "success", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Backdate session 1's ended_at so session 2 is definitively newer.
+	st.db.Exec(`UPDATE sessions SET ended_at = 1000 WHERE id = ?`, s1) //nolint:errcheck
+
+	// Session 2: branch "feature/auth", ended at current time (newer)
+	s2 := createTestSession(t, st, "agent-multi", "proj-1", "")
+	st.SetSessionBranch(s2, "feature/auth")
+	if err := st.EndSession(s2, "clean", "success", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	got := st.GetLastBranch("agent-multi")
+	if got != "feature/auth" {
+		t.Errorf("GetLastBranch: got %q, want %q", got, "feature/auth")
+	}
+}
+
+func TestGetLastBranch_IgnoresActiveSession(t *testing.T) {
+	st := openTestStore(t)
+	// Ended session on "main"
+	s1 := createTestSession(t, st, "agent-active", "proj-1", "")
+	st.SetSessionBranch(s1, "main")
+	if err := st.EndSession(s1, "clean", "success", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Active (not ended) session on "develop" — should be ignored
+	s2 := createTestSession(t, st, "agent-active", "proj-1", "")
+	st.SetSessionBranch(s2, "develop")
+	got := st.GetLastBranch("agent-active")
+	if got != "main" {
+		t.Errorf("GetLastBranch should ignore active sessions: got %q, want %q", got, "main")
+	}
+}
+
+func TestGetLastBranch_IgnoresPreR22Sessions(t *testing.T) {
+	st := openTestStore(t)
+	// Pre-R22 session: no branch set (default empty string)
+	s1 := createTestSession(t, st, "agent-legacy", "proj-1", "")
+	if err := st.EndSession(s1, "clean", "success", ""); err != nil {
+		t.Fatal(err)
+	}
+	got := st.GetLastBranch("agent-legacy")
+	if got != "" {
+		t.Errorf("expected empty for pre-R22 session, got %q", got)
+	}
+}
+
+func TestGetLastBranch_IsolatedByAgent(t *testing.T) {
+	st := openTestStore(t)
+	// Agent A on "feature/a"
+	sA := createTestSession(t, st, "agent-A", "proj-1", "")
+	st.SetSessionBranch(sA, "feature/a")
+	if err := st.EndSession(sA, "clean", "success", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Agent B on "feature/b"
+	sB := createTestSession(t, st, "agent-B", "proj-1", "")
+	st.SetSessionBranch(sB, "feature/b")
+	if err := st.EndSession(sB, "clean", "success", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.GetLastBranch("agent-A"); got != "feature/a" {
+		t.Errorf("agent-A branch: got %q want %q", got, "feature/a")
+	}
+	if got := st.GetLastBranch("agent-B"); got != "feature/b" {
+		t.Errorf("agent-B branch: got %q want %q", got, "feature/b")
+	}
+}

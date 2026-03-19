@@ -342,6 +342,36 @@ func (s *Store) GetToolCallSummary(sessionID string) (ToolCallSummary, error) {
 	return summary, nil
 }
 
+// SetSessionBranch records the current git branch for a session.
+// Fire-and-forget: used by session_init to persist branch state.
+func (s *Store) SetSessionBranch(sessionID, branch string) {
+	if sessionID == "" || branch == "" {
+		return
+	}
+	_, _ = s.db.Exec(
+		`UPDATE sessions SET last_branch = ? WHERE id = ?`,
+		branch, sessionID)
+}
+
+// GetLastBranch returns the git branch from the most recent ended session
+// for the given agent. Returns "" if no prior session exists or if the
+// previous session never recorded a branch (pre-R22 sessions).
+func (s *Store) GetLastBranch(agentID string) string {
+	if agentID == "" {
+		return ""
+	}
+	var branch string
+	err := s.db.QueryRow(`
+		SELECT last_branch FROM sessions
+		WHERE agent_id = ? AND ended_at IS NOT NULL AND last_branch != ''
+		ORDER BY ended_at DESC, started_at DESC
+		LIMIT 1`, agentID).Scan(&branch)
+	if err != nil {
+		return ""
+	}
+	return branch
+}
+
 // PruneToolCallsOlderThan deletes tool_calls rows older than age.
 // Returns the number of rows deleted. Safe to call concurrently — a built-in
 // 1-hour debounce ensures at most one prune runs per hour regardless of how
