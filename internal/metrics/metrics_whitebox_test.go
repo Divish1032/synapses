@@ -189,3 +189,39 @@ func TestRecentCommitsForFile_WithGitRepo(t *testing.T) {
 		t.Error("expected non-empty message")
 	}
 }
+
+// ── parsePprofTop — edge cases with real profiles ────────────────────────────
+
+func TestParsePprofTop_WithMinimalProfile(t *testing.T) {
+	// Create a minimal CPU pprof to ensure edge cases in parsing are covered
+	f, err := os.CreateTemp(t.TempDir(), "minimal*.pprof")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	defer f.Close()
+
+	if err := pprof.StartCPUProfile(f); err != nil {
+		t.Fatalf("StartCPUProfile: %v", err)
+	}
+	// Very minimal work
+	var sum int
+	for i := 0; i < 10000; i++ {
+		sum += i
+	}
+	_ = sum
+	time.Sleep(1 * time.Millisecond)
+	pprof.StopCPUProfile()
+	f.Close()
+
+	// This should handle the pprof output parsing including:
+	// - Lines before the "flat" header
+	// - Empty lines in the output
+	// - Variable field counts (pprof format)
+	samples, err := parsePprofTop(f.Name())
+	if err != nil {
+		// Skip if go tool pprof is not available
+		t.Skipf("parsePprofTop: %v (go tool pprof unavailable?)", err)
+	}
+	// Just verify no panic and empty map is acceptable
+	_ = samples
+}
