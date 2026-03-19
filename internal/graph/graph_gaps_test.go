@@ -13,9 +13,9 @@ func TestCacheKeyFor_DeterministicAndDistinct(t *testing.T) {
 	cfg1 := CarveConfig{MaxDepth: 2, TokenBudget: 100, MinRelevance: 0.1, DecayFactor: 0.5, DirectionBoost: 0.3, IntentID: "debug"}
 	cfg2 := CarveConfig{MaxDepth: 3, TokenBudget: 100, MinRelevance: 0.1, DecayFactor: 0.5, DirectionBoost: 0.3, IntentID: "debug"}
 
-	k1a := cacheKeyFor("root1", cfg1)
-	k1b := cacheKeyFor("root1", cfg1)
-	k2 := cacheKeyFor("root1", cfg2)
+	k1a := cacheKeyFor("root1", cfg1, "fp1")
+	k1b := cacheKeyFor("root1", cfg1, "fp1")
+	k2 := cacheKeyFor("root1", cfg2, "fp1")
 
 	if k1a != k1b {
 		t.Fatal("same inputs should produce same key")
@@ -29,7 +29,7 @@ func TestCacheKeyFor_IntentIDIsolation(t *testing.T) {
 	cfg := CarveConfig{MaxDepth: 2, TokenBudget: 100}
 	cfgIntent := CarveConfig{MaxDepth: 2, TokenBudget: 100, IntentID: "review"}
 
-	if cacheKeyFor("n", cfg) == cacheKeyFor("n", cfgIntent) {
+	if cacheKeyFor("n", cfg, "fp") == cacheKeyFor("n", cfgIntent, "fp") {
 		t.Fatal("different IntentIDs must produce different cache keys")
 	}
 }
@@ -60,9 +60,10 @@ func TestSubgraphCache_PutAndGet(t *testing.T) {
 	c := newSubgraphCache()
 	cfg := CarveConfig{MaxDepth: 2}
 	sub := &SubGraph{Root: "r1", Nodes: []CarvedNode{{Node: &Node{File: "x.go"}}}}
+	fp := "testfingerprint"
 
-	c.put("r1", cfg, sub)
-	got, ok := c.get("r1", cfg)
+	c.put("r1", cfg, fp, sub)
+	got, ok := c.get("r1", cfg, fp)
 	if !ok {
 		t.Fatal("expected cache hit")
 	}
@@ -73,7 +74,7 @@ func TestSubgraphCache_PutAndGet(t *testing.T) {
 
 func TestSubgraphCache_MissForUnknownKey(t *testing.T) {
 	c := newSubgraphCache()
-	_, ok := c.get("unknown", CarveConfig{})
+	_, ok := c.get("unknown", CarveConfig{}, "")
 	if ok {
 		t.Fatal("expected cache miss for unknown key")
 	}
@@ -82,9 +83,10 @@ func TestSubgraphCache_MissForUnknownKey(t *testing.T) {
 func TestSubgraphCache_Invalidate(t *testing.T) {
 	c := newSubgraphCache()
 	cfg := CarveConfig{MaxDepth: 1}
-	c.put("r1", cfg, &SubGraph{Root: "r1"})
+	fp := "fp1"
+	c.put("r1", cfg, fp, &SubGraph{Root: "r1"})
 	c.invalidate()
-	_, ok := c.get("r1", cfg)
+	_, ok := c.get("r1", cfg, fp)
 	if ok {
 		t.Fatal("expected miss after full invalidation")
 	}
@@ -92,10 +94,10 @@ func TestSubgraphCache_Invalidate(t *testing.T) {
 
 func TestSubgraphCache_EvictsOldestWhenFull(t *testing.T) {
 	c := newSubgraphCache()
-	// Fill to capacity
+	// Fill to capacity — each entry has a unique depth and fingerprint.
 	for i := 0; i < cacheMaxSize+5; i++ {
 		cfg := CarveConfig{MaxDepth: i}
-		c.put(NodeID("root"), cfg, &SubGraph{Root: "root"})
+		c.put(NodeID("root"), cfg, "fp", &SubGraph{Root: "root"})
 	}
 	if len(c.entries) > cacheMaxSize {
 		t.Fatalf("cache should not exceed max size %d, got %d", cacheMaxSize, len(c.entries))
@@ -107,15 +109,15 @@ func TestSubgraphCache_InvalidateForFile_EvictsOnlyMatching(t *testing.T) {
 	cfgA := CarveConfig{MaxDepth: 1}
 	cfgB := CarveConfig{MaxDepth: 2}
 
-	c.put("a", cfgA, &SubGraph{Root: "a", Nodes: []CarvedNode{{Node: &Node{File: "pkg/foo.go"}}}})
-	c.put("b", cfgB, &SubGraph{Root: "b", Nodes: []CarvedNode{{Node: &Node{File: "pkg/bar.go"}}}})
+	c.put("a", cfgA, "fpa", &SubGraph{Root: "a", Nodes: []CarvedNode{{Node: &Node{File: "pkg/foo.go"}}}})
+	c.put("b", cfgB, "fpb", &SubGraph{Root: "b", Nodes: []CarvedNode{{Node: &Node{File: "pkg/bar.go"}}}})
 
 	c.invalidateForFile("pkg/foo.go")
 
-	if _, ok := c.get("a", cfgA); ok {
+	if _, ok := c.get("a", cfgA, "fpa"); ok {
 		t.Fatal("entry referencing foo.go should have been evicted")
 	}
-	if _, ok := c.get("b", cfgB); !ok {
+	if _, ok := c.get("b", cfgB, "fpb"); !ok {
 		t.Fatal("entry referencing bar.go should survive")
 	}
 }
@@ -142,15 +144,16 @@ func TestEntryReferencesFile_SuffixMatch(t *testing.T) {
 func TestSubgraphCache_ExpiredEntryNotReturned(t *testing.T) {
 	c := newSubgraphCache()
 	cfg := CarveConfig{MaxDepth: 1}
-	c.put("r", cfg, &SubGraph{Root: "r"})
+	fp := "fpexpiry"
+	c.put("r", cfg, fp, &SubGraph{Root: "r"})
 
-	// Force expiry
+	// Force expiry by rewriting the expiresAt field directly.
 	c.mu.Lock()
-	key := cacheKeyFor("r", cfg)
+	key := cacheKeyFor("r", cfg, fp)
 	c.entries[key].expiresAt = time.Now().Add(-1 * time.Second)
 	c.mu.Unlock()
 
-	_, ok := c.get("r", cfg)
+	_, ok := c.get("r", cfg, fp)
 	if ok {
 		t.Fatal("expired entry should not be returned")
 	}

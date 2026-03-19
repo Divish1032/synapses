@@ -27,14 +27,14 @@ test:
 
 ## test/cover: Run tests with coverage report (excludes CLI-only packages: bicep_edge, debug_callsites)
 test/cover:
-	go test ./internal ./cmd/synapses -coverprofile=coverage.out -covermode=atomic -race -timeout 300s
+	go test ./internal/... ./cmd/synapses -coverprofile=coverage.out -covermode=atomic -race -timeout 300s
 	go tool cover -html=coverage.out -o coverage.html
 	@go tool cover -func=coverage.out | tail -1
 	@echo "Coverage report: coverage.html (excludes cmd/bicep_edge, cmd/debug_callsites)"
 
-## test/cover/pkg: Show per-package coverage summary
+## test/cover/pkg: Show per-package coverage summary (excludes CLI-only packages: bicep_edge, debug_callsites)
 test/cover/pkg:
-	@go test ./... -cover -timeout 300s 2>&1 | grep -E "^(ok|FAIL|---)" | sort
+	@go test ./internal/... ./cmd/synapses -cover -timeout 300s 2>&1 | grep -E "^(ok|FAIL|---)" | sort
 
 ## lint: Run golangci-lint (requires: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest)
 lint:

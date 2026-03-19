@@ -83,16 +83,22 @@ func (g *Graph) outInEdges(id NodeID, idx *GraphIndex) []*Edge {
 //     nodes are pruned (highest-hop, lowest-weight first).
 //  5. Only edges where both endpoints survived pruning are included.
 func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error) {
-	// Fast path: return a cached result without acquiring the heavier graph lock.
-	if sub, ok := g.cache.get(rootID, cfg); ok {
-		return sub, nil
-	}
-
+	// Acquire the read lock first so we can compute the structural fingerprint
+	// of the root node.  The fingerprint is included in the cache key, which
+	// means a comment-only edit (same signature, same edges) produces the same
+	// fingerprint → same key → cache hit, with no explicit invalidation needed.
+	// A structural change (new signature, edge added/removed) produces a
+	// different fingerprint → new key → automatic cache miss → BFS recomputes.
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
 	if _, ok := g.nodes[rootID]; !ok {
 		return nil, ErrNodeNotFound(rootID)
+	}
+
+	fp := g.nodeFingerprintLocked(rootID)
+	if sub, ok := g.cache.get(rootID, cfg, fp); ok {
+		return sub, nil
 	}
 
 	// Grab index once under the read lock; nil if not yet built.
@@ -315,7 +321,7 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		Truncated:      truncated,
 		TruncatedCount: truncatedCount,
 	}
-	g.cache.put(rootID, cfg, result)
+	g.cache.put(rootID, cfg, fp, result)
 	return result, nil
 }
 

@@ -34,15 +34,25 @@ func newSubgraphCache() *subgraphCache {
 	}
 }
 
-// cacheKeyFor produces a compact string key from a root node ID and the
-// CarveConfig fields that affect BFS output.
+// cacheKeyFor produces a compact string key from a root node ID, the
+// CarveConfig fields that affect BFS output, and the structural fingerprint
+// of the root node.
+//
+// The fingerprint encodes the root node's signature and direct neighbourhood
+// (see Graph.nodeFingerprintLocked).  Including it in the key means that a
+// cache entry is only reused when the root node's observable structure is
+// unchanged — comment-only edits do not change the fingerprint, so the
+// cached subgraph remains valid across such edits without any explicit
+// invalidation.  Structural changes (signature update, edge added/removed)
+// produce a different fingerprint → new key → automatic cache miss.
+//
 // DirectionBoost is included because intent-specific configs vary it.
 // IntentID is included to prevent intent-specific weight overrides from
 // colliding with each other or with the default (non-intent) subgraph.
-func cacheKeyFor(rootID NodeID, cfg CarveConfig) string {
-	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s",
+func cacheKeyFor(rootID NodeID, cfg CarveConfig, fingerprint string) string {
+	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s",
 		rootID, cfg.MaxDepth, cfg.TokenBudget, cfg.MinRelevance, cfg.DecayFactor,
-		cfg.DirectionBoost, cfg.IntentID)
+		cfg.DirectionBoost, cfg.IntentID, fingerprint)
 }
 
 // extractFiles collects the set of source files referenced by nodes in the subgraph.
@@ -57,11 +67,15 @@ func extractFiles(sub *SubGraph) map[string]struct{} {
 }
 
 // get returns a cached SubGraph if one exists and has not expired.
-func (c *subgraphCache) get(rootID NodeID, cfg CarveConfig) (*SubGraph, bool) {
+// fingerprint is the structural fingerprint of the root node computed by
+// Graph.nodeFingerprintLocked; it is included in the cache key so that a
+// structural change to the root node automatically produces a cache miss
+// without requiring explicit invalidation.
+func (c *subgraphCache) get(rootID NodeID, cfg CarveConfig, fingerprint string) (*SubGraph, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	key := cacheKeyFor(rootID, cfg)
+	key := cacheKeyFor(rootID, cfg, fingerprint)
 	e, ok := c.entries[key]
 	if !ok {
 		return nil, false
@@ -75,11 +89,12 @@ func (c *subgraphCache) get(rootID NodeID, cfg CarveConfig) (*SubGraph, bool) {
 
 // put stores a SubGraph in the cache. If the cache is at capacity the oldest
 // entry (by insertion order) is evicted first.
-func (c *subgraphCache) put(rootID NodeID, cfg CarveConfig, sub *SubGraph) {
+// fingerprint is the structural fingerprint of the root node (see get).
+func (c *subgraphCache) put(rootID NodeID, cfg CarveConfig, fingerprint string, sub *SubGraph) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	key := cacheKeyFor(rootID, cfg)
+	key := cacheKeyFor(rootID, cfg, fingerprint)
 	if _, exists := c.entries[key]; !exists {
 		// New entry: evict the oldest if we are at capacity.
 		for len(c.entries) >= cacheMaxSize && len(c.order) > 0 {
