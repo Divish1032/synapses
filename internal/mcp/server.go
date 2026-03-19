@@ -106,7 +106,7 @@ type Server struct {
 	cacheWebSearches bool // controls web_cache inserts (default: true)
 
 	// Context-packet cache: 20 slots max, 30s TTL. Keyed by "entityName:depth".
-	packetCacheMu sync.Mutex
+	packetCacheMu sync.RWMutex
 	packetCache   map[string]*packetCacheEntry
 
 	// Brain cache warming debounce: prevents hammering the brain on rapid saves.
@@ -483,13 +483,13 @@ const (
 )
 
 // getPacketFromCache returns a cached context packet for the given key, or nil
-// if the entry is absent or expired.
+// if the entry is absent or expired. Uses a read lock so concurrent reads do
+// not serialise; expired entries are lazily evicted by setPacketCache.
 func (s *Server) getPacketFromCache(key string) interface{} {
-	s.packetCacheMu.Lock()
-	defer s.packetCacheMu.Unlock()
+	s.packetCacheMu.RLock()
+	defer s.packetCacheMu.RUnlock()
 	e, ok := s.packetCache[key]
 	if !ok || time.Now().After(e.expiresAt) {
-		delete(s.packetCache, key)
 		return nil
 	}
 	return e.pkt
