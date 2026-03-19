@@ -247,6 +247,9 @@ var toolCatalog = []toolCatalogEntry{
 	{Name: "get_call_chain", Category: "exploration", Description: "Shortest call path between two entities", Keywords: []string{"call", "chain", "path", "trace", "reach", "how"}, Example: `get_call_chain(from="Handler", to="Repository")`},
 	{Name: "get_impact", Category: "exploration", Description: "Blast-radius analysis of what breaks if entity changes", Keywords: []string{"impact", "blast", "radius", "breaks", "change", "depends", "affected", "callers", "usage", "uses", "downstream", "refactor", "safe", "remove", "delete", "who", "using", "touching"}, Example: `get_impact(symbol="CarveEgoGraph")`},
 
+	// Graph metadata
+	{Name: "get_edge_types", Category: "graph", Description: "Semantic catalog of all graph edge types: BFS weight, domain tag (code/docs/infra/api/knowledge), meaning", Keywords: []string{"edge", "types", "catalog", "bfs", "weights", "traversal", "domain", "semantic", "graph", "edges", "relationship", "relationships", "explained"}, Example: `get_edge_types(format="compact")`},
+
 	// Architecture
 	{Name: "validate_plan", Category: "architecture", Description: "Check changes against architectural rules", Keywords: []string{"validate", "plan", "check", "rules", "architecture", "violations", "before"}, Example: `validate_plan(changes=[{"file":"auth.go","adds_call_to":"DB"}])`},
 	{Name: "verify_implementation", Category: "architecture", Description: "Post-write check: verify written files against rules and task expectations", Keywords: []string{"verify", "implementation", "after", "written", "check", "post", "validate", "confirm"}, Example: `verify_implementation(files_written=["internal/auth/service.go"])`},
@@ -1248,6 +1251,26 @@ func (s *Server) inlineFindEntity(query string) []map[string]interface{} {
 	return results
 }
 
+// truncateAtWord shortens s to at most maxChars Unicode code points, breaking
+// at the last space before the limit and appending "…" when truncation occurs.
+// Safe for multi-byte UTF-8 (operates on runes, not bytes).
+func truncateAtWord(s string, maxChars int) string {
+	runes := []rune(s)
+	if len(runes) <= maxChars {
+		return s
+	}
+	// Walk backward from maxChars-1 to find the last space.
+	cut := maxChars - 1 // leave room for ellipsis rune
+	for cut > 0 && runes[cut] != ' ' {
+		cut--
+	}
+	if cut == 0 {
+		// No space found — hard cut at maxChars-1 to fit the ellipsis.
+		cut = maxChars - 1
+	}
+	return string(runes[:cut]) + "…"
+}
+
 // handleGetEdgeTypes returns the full EdgeTypeCatalog: every edge type registered
 // in the graph with its semantic weight, BFS direction, domain tag, and description.
 // The catalog is the foundation for multi-domain BFS (Sprint 12) — agents can
@@ -1277,7 +1300,7 @@ func (s *Server) handleGetEdgeTypes(
 				synMark = "*"
 			}
 			sb.WriteString(fmt.Sprintf("%-20s %-8.2f %-10s %s%s\n",
-				string(d.Name), d.SemanticWeight, d.Domain, d.Description[:min(len(d.Description), 60)], synMark))
+				string(d.Name), d.SemanticWeight, d.Domain, truncateAtWord(d.Description, 60), synMark))
 		}
 		sb.WriteString("\n* = synthetic edge (heuristic-injected, not AST-derived)\n")
 		sb.WriteString("\nUse format=\"json\" for full descriptions and machine-readable output.\n")
