@@ -25,6 +25,7 @@
 //	│  POST /api/admin/projects                │
 //	│  GET  /api/admin/pulse/summary[?days=N]  │  analytics
 //	│  POST|GET|DELETE /mcp?project=<path>     │  HTTP MCP transport
+//	│  POST /v1/tools/{name}?project=<path>    │  REST tool API (B29)
 //	│  ~/.synapses/daemons/<hash>.sock per-proj │  stdio proxy compat
 //	└─────────────────────────────────────────┘
 //
@@ -73,6 +74,10 @@ import (
 // DaemonHTTPPort is the fixed port for the singleton daemon HTTP server.
 // Port 11434 is Ollama's default — we use 11435 to avoid conflicts.
 const DaemonHTTPPort = "11435"
+
+// restSessionCounter generates unique per-request session IDs for REST API calls.
+// Each POST /v1/tools/{name} request gets an isolated "rest-N" session context.
+var restSessionCounter atomic.Int64
 
 // DaemonHTTPAddr is the loopback address the singleton daemon binds to.
 const DaemonHTTPAddr = "127.0.0.1:" + DaemonHTTPPort
@@ -385,6 +390,94 @@ func cmdDaemonServe(args []string) error {
 		r2.URL.RawQuery = q.Encode()
 
 		pi.HTTPHandler.ServeHTTP(w, r2)
+	})
+
+	// REST API: POST /v1/tools/{name}?project=<abs-path>
+	// Thin HTTP wrapper around MCP tool handlers. Same Go functions as the MCP path.
+	// Request body: JSON object of tool arguments (empty body treated as {}).
+	// Response: {"content":[...],"isError":bool} on success.
+	// HTTP status: 200 ok, 400 bad request, 404 unknown tool, 405 method not allowed,
+	//              500 internal error.
+	// Note: auth (bearer token) ships in Sprint 6.2. Until then, localhost-only
+	// binding (127.0.0.1) limits exposure to local processes only.
+	mux.HandleFunc("/v1/tools/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed, use POST"}) //nolint:errcheck
+			return
+		}
+
+		// Extract tool name — everything after "/v1/tools/".
+		toolName := strings.TrimPrefix(r.URL.Path, "/v1/tools/")
+		if toolName == "" || strings.Contains(toolName, "/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid tool path; use /v1/tools/{name}"}) //nolint:errcheck
+			return
+		}
+
+		// Resolve project.
+		projectPath := r.URL.Query().Get("project")
+		if projectPath == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "missing ?project= query parameter"}) //nolint:errcheck
+			return
+		}
+		if decoded, err := url.QueryUnescape(projectPath); err == nil {
+			projectPath = decoded
+		}
+		absPath, err := canonicalPath(projectPath)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid project path: " + err.Error()}) //nolint:errcheck
+			return
+		}
+
+		pi, initErr := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
+			return initProjectInstance(appCtx, absPath, sharedPulse, reg)
+		})
+		if initErr != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "init project: " + initErr.Error()}) //nolint:errcheck
+			return
+		}
+
+		// Parse request body as tool arguments. Empty or absent body → empty args.
+		args := make(map[string]interface{})
+		if r.ContentLength != 0 {
+			if decodeErr := json.NewDecoder(r.Body).Decode(&args); decodeErr != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON body: " + decodeErr.Error()}) //nolint:errcheck
+				return
+			}
+		}
+
+		// Inject a per-request session ID so handlers that use SessionIDFromContext
+		// get an isolated context. Each REST call is stateless — no session is shared
+		// across calls. The session ID is "rest-N" where N is a monotonic counter.
+		sessionID := fmt.Sprintf("rest-%d", restSessionCounter.Add(1))
+		ctx := mcpsrv.WithSessionID(r.Context(), sessionID)
+
+		result, dispatchErr := pi.MCPServer.DispatchTool(ctx, toolName, args)
+		if dispatchErr != nil {
+			w.Header().Set("Content-Type", "application/json")
+			if _, ok := dispatchErr.(*mcpsrv.ErrUnknownTool); ok {
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]string{"error": dispatchErr.Error()}) //nolint:errcheck
+			} else {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": dispatchErr.Error()}) //nolint:errcheck
+			}
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result) //nolint:errcheck
 	})
 
 	// ── HTTP server ───────────────────────────────────────────────────────────

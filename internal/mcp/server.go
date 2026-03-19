@@ -183,6 +183,13 @@ type Server struct {
 	startOnce sync.Once
 	wg        sync.WaitGroup
 
+	// toolHandlers is the dispatch table for the REST API (POST /v1/tools/{name}).
+	// Populated in addOrDefer alongside mcp-go registration so REST and MCP share
+	// the exact same handler functions. In knowledge mode, graph-tool entries hold
+	// the knowledge-mode stub (same as what mcp-go has).
+	toolHandlersMu sync.RWMutex
+	toolHandlers   map[string]server.ToolHandlerFunc
+
 	// orientMu protects the orientation result cache (explain_codebase, get_repo_map).
 	// Stored separately from the 20-slot packet cache so that heavy get_context
 	// traffic cannot evict orientation results. Invalidated whenever the graph
@@ -324,6 +331,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		packetCache:      make(map[string]*packetCacheEntry, 20),
 		sessionCalls:     make(map[string]*sessionCallEntry),
 		synapsesSessions: make(map[string]*synapseSessionEntry),
+		toolHandlers:     make(map[string]server.ToolHandlerFunc),
 		stopCh:           make(chan struct{}),
 		logToolCalls:     true, // default on
 		logSessions:      true,
@@ -843,19 +851,54 @@ func (s *Server) toolInTier(_ string) bool {
 
 // addOrDefer registers tool t with the MCP server. In knowledge mode,
 // non-knowledge tools are replaced with a stub returning a clear error message.
+// Always populates the REST dispatch table (toolHandlers) with the effective handler
+// so POST /v1/tools/{name} calls the same function as the MCP path.
 func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 	if s.knowledgeMode && !knowledgeTools[t.Name] {
 		// In knowledge mode, register a stub that returns a clear error.
-		s.mcp.AddTool(t, func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		stub := func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return mcp.NewToolResultError(fmt.Sprintf(
 				"Tool %q is not available in knowledge mode (no code graph). "+
 					"Available tools: session_init, remember, recall, create_plan, "+
 					"update_task, get_pending_tasks, send_message, get_messages, "+
 					"get_agents, get_events, discover_tools, end_session.", t.Name)), nil
-		})
+		}
+		s.mcp.AddTool(t, stub)
+		s.toolHandlersMu.Lock()
+		s.toolHandlers[t.Name] = stub
+		s.toolHandlersMu.Unlock()
 		return
 	}
 	s.mcp.AddTool(t, h)
+	s.toolHandlersMu.Lock()
+	s.toolHandlers[t.Name] = h
+	s.toolHandlersMu.Unlock()
+}
+
+// DispatchTool calls a registered tool handler directly by name.
+// Used by the REST API (POST /v1/tools/{name}) to bypass the JSON-RPC layer.
+// Returns (nil, ErrUnknownTool) when name is not registered.
+// The caller is responsible for injecting the session ID into ctx if needed.
+func (s *Server) DispatchTool(ctx context.Context, name string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+	s.toolHandlersMu.RLock()
+	h, ok := s.toolHandlers[name]
+	s.toolHandlersMu.RUnlock()
+	if !ok {
+		return nil, &ErrUnknownTool{Name: name}
+	}
+	req := mcp.CallToolRequest{}
+	req.Params.Name = name
+	req.Params.Arguments = args
+	return h(ctx, req)
+}
+
+// ErrUnknownTool is returned by DispatchTool when the tool name is not registered.
+type ErrUnknownTool struct {
+	Name string
+}
+
+func (e *ErrUnknownTool) Error() string {
+	return "unknown tool: " + e.Name
 }
 
 // SuggestToolsForIntent returns tool suggestions based on the agent's declared
