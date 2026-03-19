@@ -109,9 +109,9 @@ func TestSessionInit_Federation_Healthy_NoDrift(t *testing.T) {
 	}
 	text := extractText(t, result)
 
-	// Should include federation_summary (sibling health).
-	if !strings.Contains(text, "federation_summary") {
-		t.Error("expected federation_summary in session_init response")
+	// Should include federation_health (sibling health summary).
+	if !strings.Contains(text, "federation_health") {
+		t.Error("expected federation_health in session_init response")
 	}
 	// Should include sibling alias.
 	if !strings.Contains(text, "sib") {
