@@ -583,6 +583,10 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 	if query == "" {
 		return nil, nil
 	}
+	safeQuery := sanitizeFTSQuery(query)
+	if safeQuery == "" {
+		return nil, nil
+	}
 	if limit <= 0 {
 		limit = 10
 	}
@@ -596,7 +600,7 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 		  AND m.expires_at > ?
 		  AND m.stale = 0
 		ORDER BY rank
-		LIMIT ?`, query, now, limit)
+		LIMIT ?`, safeQuery, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search memories: %w", err)
 	}
@@ -608,6 +612,10 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 // Use for audit scenarios where the agent explicitly passes include_stale=true to recall().
 func (s *Store) SearchMemoriesIncludingStale(query string, limit int) ([]Memory, error) {
 	if query == "" {
+		return nil, nil
+	}
+	safeQuery := sanitizeFTSQuery(query)
+	if safeQuery == "" {
 		return nil, nil
 	}
 	if limit <= 0 {
@@ -622,7 +630,7 @@ func (s *Store) SearchMemoriesIncludingStale(query string, limit int) ([]Memory,
 		WHERE memories_fts MATCH ?
 		  AND m.expires_at > ?
 		ORDER BY rank
-		LIMIT ?`, query, now, limit)
+		LIMIT ?`, safeQuery, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search memories including stale: %w", err)
 	}
