@@ -123,7 +123,7 @@ func (s *Server) handleLinkTaskNodes(
 // and current task/focus.
 func (s *Server) handleGetAgents(
 	_ context.Context,
-	_ mcp.CallToolRequest,
+	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
 		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
@@ -131,6 +131,27 @@ func (s *Server) handleGetAgents(
 	agents, err := s.store.GetAgents()
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("get agents: %v", err)), nil
+	}
+
+	// Cross-project agents via daemon registry.
+	var crossProjectAgents []map[string]interface{}
+	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.projectRegistry != nil {
+		stores := s.resolveProjectStores(projectsParam)
+		for projName, projStore := range stores {
+			projAgents, pErr := projStore.GetAgents()
+			if pErr != nil {
+				continue
+			}
+			for _, a := range projAgents {
+				crossProjectAgents = append(crossProjectAgents, map[string]interface{}{
+					"source":    fmt.Sprintf("[%s]", projName),
+					"agent_id":  a.ID,
+					"presence":  a.Presence,
+					"last_seen": a.LastSeen,
+					"intent":    a.Intent,
+				})
+			}
+		}
 	}
 
 	active := 0
@@ -144,10 +165,14 @@ func (s *Server) handleGetAgents(
 	if len(agents) > 0 {
 		summary = fmt.Sprintf("%d agent(s) known (%d currently active/idle)", len(agents), active)
 	}
-	return jsonResult(map[string]interface{}{
+	resp := map[string]interface{}{
 		"summary": summary,
 		"agents":  agents,
-	})
+	}
+	if len(crossProjectAgents) > 0 {
+		resp["cross_project_agents"] = crossProjectAgents
+	}
+	return jsonResult(resp)
 }
 
 // handleGetEvents returns events from the pull-based event log with seq >
@@ -201,14 +226,41 @@ func (s *Server) handleGetEvents(
 		return mcp.NewToolResultError(fmt.Sprintf("get events: %v", err)), nil
 	}
 
+	// Cross-project events via daemon registry.
+	// Returned in a separate field so latest_seq remains a clean local cursor.
+	var crossProjectEvents []map[string]interface{}
+	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.projectRegistry != nil {
+		stores := s.resolveProjectStores(projectsParam)
+		for projName, projStore := range stores {
+			projEvents, _, pErr := projStore.GetEvents(sinceSeq, types, agentIDFilter, limit)
+			if pErr != nil {
+				continue
+			}
+			for _, e := range projEvents {
+				crossProjectEvents = append(crossProjectEvents, map[string]interface{}{
+					"source":     fmt.Sprintf("[%s]", projName),
+					"seq":        e.Seq,
+					"type":       e.Type,
+					"agent_id":   e.AgentID,
+					"payload":    e.Payload,
+					"created_at": e.CreatedAt,
+				})
+			}
+		}
+	}
+
 	summary := "no new events"
 	if len(events) > 0 {
 		summary = fmt.Sprintf("%d event(s) since seq %d", len(events), sinceSeq)
 	}
-	return jsonResult(map[string]interface{}{
+	resp := map[string]interface{}{
 		"summary":    summary,
 		"events":     events,
 		"latest_seq": latestSeq,
 		"hint":       "Store latest_seq and pass as since_seq on next poll to get only new events.",
-	})
+	}
+	if len(crossProjectEvents) > 0 {
+		resp["cross_project_events"] = crossProjectEvents
+	}
+	return jsonResult(resp)
 }

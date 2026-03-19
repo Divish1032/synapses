@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -152,4 +153,27 @@ func (r *projectRegistry) Close() {
 	for _, pi := range projects {
 		pi.Close()
 	}
+}
+
+// registryAdapter wraps projectRegistry to implement mcp.ProjectStoreProvider.
+type registryAdapter struct {
+	reg *projectRegistry
+}
+
+func (a *registryAdapter) ListProjects() []string {
+	projects := a.reg.All()
+	names := make([]string, 0, len(projects))
+	for _, p := range projects {
+		names = append(names, filepath.Base(p.AbsPath))
+	}
+	return names
+}
+
+func (a *registryAdapter) GetStore(name string) *store.Store {
+	for _, p := range a.reg.All() {
+		if filepath.Base(p.AbsPath) == name {
+			return p.Store
+		}
+	}
+	return nil
 }

@@ -69,6 +69,16 @@ type ChangeSource interface {
 	RecentChanges(windowMinutes int) []watcher.ChangeEvent
 }
 
+// ProjectStoreProvider gives access to a sibling project's store for cross-project queries.
+// Implemented by the daemon's project registry; nil in single-project (stdio) mode.
+type ProjectStoreProvider interface {
+	// ListProjects returns human-readable names of all registered projects.
+	ListProjects() []string
+	// GetStore returns the store for the named project, or nil if not found.
+	// The name is the directory basename (e.g. "backend" for /Users/x/code/backend).
+	GetStore(name string) *store.Store
+}
+
 const serverName = "synapses"
 
 // Version is the server version advertised to MCP clients.
@@ -89,6 +99,7 @@ type Server struct {
 	store        *store.Store  // nil if started without a persistent store
 	changeSource ChangeSource  // nil if started without a file watcher
 	federationResolver  *federation.Resolver   // nil if no federation configured — set via SetFederationResolver
+	projectRegistry     ProjectStoreProvider   // nil in single-project mode — set via SetProjectRegistry
 	brainClient  interface{}   // *brain.Client — set via SetBrainClient; nil if brain not configured
 	webCache     *webcache.Cache // nil if webcache not configured
 	pulseClient  interface{}    // *pulse.Client — set via SetPulseClient; nil if pulse not configured
@@ -534,6 +545,53 @@ func (s *Server) SetChangeSource(cs ChangeSource) {
 // Pass nil to disable federation features.
 func (s *Server) SetFederationResolver(fr *federation.Resolver) {
 	s.federationResolver = fr
+}
+
+// SetProjectRegistry wires a cross-project store provider so that recall,
+// get_events, get_messages, and get_agents can query sibling projects.
+func (s *Server) SetProjectRegistry(pr ProjectStoreProvider) {
+	s.projectRegistry = pr
+}
+
+// resolveProjectStores parses a comma-separated projects param (or "*" for all)
+// and returns a map of projectName → *store.Store. Excludes the current project.
+func (s *Server) resolveProjectStores(projectsParam string) map[string]*store.Store {
+	if s.projectRegistry == nil || projectsParam == "" {
+		return nil
+	}
+	projectsParam = strings.TrimSpace(projectsParam)
+
+	allNames := s.projectRegistry.ListProjects()
+
+	var wanted map[string]bool
+	if projectsParam == "*" {
+		wanted = make(map[string]bool, len(allNames))
+		for _, n := range allNames {
+			wanted[n] = true
+		}
+	} else {
+		parts := strings.Split(projectsParam, ",")
+		wanted = make(map[string]bool, len(parts))
+		for _, p := range parts {
+			if p = strings.TrimSpace(p); p != "" {
+				wanted[p] = true
+			}
+		}
+	}
+
+	// Get current project's name to exclude it.
+	currentName := filepath.Base(s.projectPath)
+
+	result := make(map[string]*store.Store)
+	for name := range wanted {
+		if name == currentName {
+			continue // skip self
+		}
+		if st := s.projectRegistry.GetStore(name); st != nil {
+			result[name] = st
+		}
+	}
+	return result
 }
 
 // SetBrainClient wires a *brain.Client into the server so that get_context
@@ -1473,6 +1531,9 @@ func (s *Server) registerTools() {
 				"Returns all agents that have interacted with Synapses, ordered by last-seen timestamp. "+
 					"Useful for understanding who else is working in this repository.",
 			),
+			mcp.WithString("projects",
+				mcp.Description("Comma-separated project names (or \"*\" for all) to also query agents from sibling daemon-registered projects. Only works in daemon mode."),
+			),
 		),
 		s.handleGetAgents,
 	)
@@ -1497,6 +1558,9 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("agent_id",
 				mcp.Description("Optional. Filter events to only those emitted by this agent ID. Use to view a specific peer's activity stream (Tier 3 on-demand signal)."),
+			),
+			mcp.WithString("projects",
+				mcp.Description("Comma-separated project names (or \"*\" for all) to also query from sibling daemon-registered projects. Only works in daemon mode."),
 			),
 		),
 		s.handleGetEvents,
@@ -1769,6 +1833,9 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("mark_read_ids",
 				mcp.Description("JSON array of message IDs to mark as read in the same call, e.g. [\"id1\",\"id2\"]. Replaces separate mark_read calls."),
+			),
+			mcp.WithString("projects",
+				mcp.Description("Comma-separated project names (or \"*\" for all) to also query messages from sibling daemon-registered projects. Only works in daemon mode."),
 			),
 		),
 		s.handleGetMessages,

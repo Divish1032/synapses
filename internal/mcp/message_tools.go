@@ -139,6 +139,29 @@ func (s *Server) handleGetMessages(
 		}
 	}
 
+	// Cross-project messages via daemon registry.
+	var crossProjectMsgs []map[string]interface{}
+	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.projectRegistry != nil {
+		stores := s.resolveProjectStores(projectsParam)
+		for projName, projStore := range stores {
+			projMsgs, _, pErr := projStore.GetMessages(agentID, sinceSeq, topicFilter, unreadOnly, limit)
+			if pErr != nil {
+				continue
+			}
+			for _, m := range projMsgs {
+				crossProjectMsgs = append(crossProjectMsgs, map[string]interface{}{
+					"source":     fmt.Sprintf("[%s]", projName),
+					"id":         m.ID,
+					"from_agent": m.FromAgent,
+					"to_agent":   m.ToAgent,
+					"topic":      m.Topic,
+					"payload":    m.Payload,
+					"created_at": m.CreatedAt,
+				})
+			}
+		}
+	}
+
 	summary := fmt.Sprintf("no messages for agent %q", agentID)
 	if len(msgs) > 0 {
 		summary = fmt.Sprintf("%d message(s) for agent %q", len(msgs), agentID)
@@ -151,6 +174,9 @@ func (s *Server) handleGetMessages(
 	}
 	if markedCount > 0 {
 		resp["marked_read"] = markedCount
+	}
+	if len(crossProjectMsgs) > 0 {
+		resp["cross_project_messages"] = crossProjectMsgs
 	}
 	return jsonResult(resp)
 }
