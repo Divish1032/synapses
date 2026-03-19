@@ -177,8 +177,12 @@ func (s *Server) handleGetContext(
 	//     auto-records a pattern episode: initial context wasn't sufficient.
 	// (b) Optional explicit feedback via helpful=true/false.
 	agentIDForFeedback, _ := req.GetArguments()["agent_id"].(string)
+	// contextRefetched is set true when this is a repeat request for the same entity
+	// in the same session. Captured here so it can be written to context_deliveries below.
+	contextRefetched := false
 	if agentIDForFeedback != "" && s.store != nil {
 		repeatCount := s.trackContextCall(agentIDForFeedback, entityName)
+		contextRefetched = repeatCount > 1
 		// R29: disambiguate entity name for pulse signals when same name exists
 		// in multiple packages. Resolves to "Name@dir/file" format.
 		// Use pickBestNode (same scoring used by the main resolution path) for
@@ -805,6 +809,19 @@ func (s *Server) handleGetContext(
 			}
 		}
 		fedCancel()
+	}
+
+	// Sprint 6.7: passive context delivery instrumentation for Sprint 11 feedback loop.
+	// Fire-and-forget — no latency added to hot path.
+	if s.store != nil {
+		synapseSessionID := s.getSynapseSessionID(sessionID)
+		go s.store.InsertContextDelivery(store.ContextDelivery{
+			SessionID: synapseSessionID,
+			AgentID:   agentIDForFeedback,
+			ToolName:  "get_context",
+			Entity:    entityName,
+			Refetched: contextRefetched,
+		})
 	}
 
 	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t).

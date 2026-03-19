@@ -181,6 +181,9 @@ func (s *Server) handleEndSession(
 		if ts, err := s.store.GetToolCallSummary(synapseSessionID); err == nil && ts.TotalCalls > 0 {
 			retro = &ts
 		}
+		// Sprint 6.7: correlate all context deliveries for this session with the outcome.
+		// Synchronous — must complete before session record is cleared.
+		_, _ = s.store.CorrelateSessionOutcome(synapseSessionID, outcome)
 		s.ClearSynapseSession(mcpSessionID)
 	}
 
