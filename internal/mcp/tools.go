@@ -1874,7 +1874,7 @@ func (s *Server) handleVerifyImplementation(
 // handleGetViolations returns all current architectural rule violations.
 // Optional rule_id filters to a specific rule. Optional include_log=true appends the historical log.
 func (s *Server) handleGetViolations(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	ruleIDFilter := stringArg(req, "rule_id")
@@ -1890,7 +1890,7 @@ func (s *Server) handleGetViolations(
 
 	// Apply optional rule_id filter.
 	if ruleIDFilter != "" {
-		filtered := violations[:0]
+		filtered := make([]config.Violation, 0, len(violations))
 		for _, v := range violations {
 			if v.RuleID == ruleIDFilter {
 				filtered = append(filtered, v)
@@ -1920,13 +1920,15 @@ func (s *Server) handleGetViolations(
 			if toNode != nil {
 				targetName = toNode.Name
 			}
-			explanation, fix := bc.ExplainViolation(context.Background(), brain.ViolationRequest{
+			violCtx, violCancel := context.WithTimeout(ctx, 3*time.Second)
+			explanation, fix := bc.ExplainViolation(violCtx, brain.ViolationRequest{
 				RuleID:       v.RuleID,
 				RuleSeverity: v.Severity,
 				Description:  v.Description,
 				SourceFile:   sourceFile,
 				TargetName:   targetName,
 			})
+			violCancel()
 			if explanation != "" {
 				v.Explanation = explanation
 			}

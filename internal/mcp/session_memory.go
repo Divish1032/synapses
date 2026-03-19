@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -68,7 +69,14 @@ func (s *Server) handleEndSession(
 	// agent after a manual end_session call. The existing dedup logic in
 	// InsertMemory (stringSimilarity) handles the case where an auto-log was
 	// already written — manual end_session just touches it rather than duplicating.
+	// Capture session start time before clearing the entry (used in Step 6).
 	mcpSessionID := SessionIDFromContext(ctx)
+	var sessionStartedAt time.Time
+	s.sessionCallsMu.Lock()
+	if entry, ok := s.sessionCalls[mcpSessionID+"::"+agentID]; ok {
+		sessionStartedAt = entry.startedAt
+	}
+	s.sessionCallsMu.Unlock()
 	s.clearSessionCallEntry(mcpSessionID, agentID)
 
 	// Session Intelligence: close the Synapses session record.
@@ -205,16 +213,12 @@ func (s *Server) handleEndSession(
 	result.MemoriesSaved = memoriesSaved
 	result.Retrospective = retro
 
-	// ── Step 6: Compute session duration from agent registry ──
-	if agents, err := s.store.GetAgents(); err == nil {
-		for _, a := range agents {
-			if a.ID == agentID {
-				if start, err := time.Parse(time.RFC3339, a.LastSeen); err == nil {
-					result.SessionDuration = time.Since(start).Round(time.Second).String()
-				}
-				break
-			}
-		}
+	// ── Step 6: Compute session duration from session start time ──
+	// sessionStartedAt is captured before clearSessionCallEntry — it records
+	// when session_init first fired for this (sessionID, agentID) pair.
+	// Using a.LastSeen was wrong: LastSeen is the last heartbeat, not session start.
+	if !sessionStartedAt.IsZero() {
+		result.SessionDuration = time.Since(sessionStartedAt).Round(time.Second).String()
 	}
 
 	return jsonResult(result)
@@ -277,12 +281,15 @@ func (s *Server) extractSessionSummary(agentID string) *sessionSummary {
 	for f := range filesSet {
 		summary.FilesTouched = append(summary.FilesTouched, f)
 	}
+	sort.Strings(summary.FilesTouched)
 	for e := range entitiesSet {
 		summary.EntitiesExamined = append(summary.EntitiesExamined, e)
 	}
+	sort.Strings(summary.EntitiesExamined)
 	for t := range tasksSet {
 		summary.TasksUpdated = append(summary.TasksUpdated, t)
 	}
+	sort.Strings(summary.TasksUpdated)
 
 	return summary
 }

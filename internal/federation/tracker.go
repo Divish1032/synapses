@@ -763,6 +763,22 @@ func langFromExt(path string) string {
 		return "typescript"
 	case ".rs":
 		return "rust"
+	case ".py":
+		return "python"
+	case ".java":
+		return "java"
+	case ".rb":
+		return "ruby"
+	case ".c", ".h":
+		return "c"
+	case ".cpp", ".cc", ".cxx", ".hpp":
+		return "cpp"
+	case ".swift":
+		return "swift"
+	case ".kt", ".kts":
+		return "kotlin"
+	case ".php":
+		return "php"
 	default:
 		return ""
 	}
