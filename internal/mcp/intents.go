@@ -875,6 +875,7 @@ func (s *Server) buildBrainPacket(
 ) *brain.ContextPacket {
 	bc := s.getBrainClient()
 	if bc == nil {
+		dc.BrainHint = "not configured — add brain.url to synapses.json for semantic enrichment"
 		return nil
 	}
 
@@ -884,6 +885,7 @@ func (s *Server) buildBrainPacket(
 	}
 
 	// Async enrichment: fire background goroutine, return nil for this call.
+	dc.BrainHint = "enrichment in progress — call again in a few seconds for brain-enriched results"
 	go s.asyncEnrichContext(bc, cacheKey, dc, node, taskID)
 	return nil
 }

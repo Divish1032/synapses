@@ -415,6 +415,54 @@ func TestCheckViolations_PathComponentPatterns(t *testing.T) {
 	}
 }
 
+func TestCheckViolationsForEdges_MatchesSubset(t *testing.T) {
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-calls",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				EdgeType: graph.EdgeCalls,
+			},
+		}},
+	}
+	g := buildViolationGraph(t)
+	edges := g.AllEdges() // one CALLS edge: handler.tsx → Login
+
+	violations := cfg.CheckViolationsForEdges(edges, g.GetNode)
+	if len(violations) != 1 {
+		t.Fatalf("expected 1 violation, got %d", len(violations))
+	}
+	if violations[0].RuleID != "no-calls" {
+		t.Errorf("violation RuleID = %q, want 'no-calls'", violations[0].RuleID)
+	}
+}
+
+func TestCheckViolationsForEdges_NoEdges(t *testing.T) {
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-calls",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				EdgeType: graph.EdgeCalls,
+			},
+		}},
+	}
+	violations := cfg.CheckViolationsForEdges(nil, func(_ graph.NodeID) *graph.Node { return nil })
+	if len(violations) != 0 {
+		t.Errorf("expected no violations for nil edges, got %d", len(violations))
+	}
+}
+
+func TestCheckViolationsForEdges_NoRules(t *testing.T) {
+	cfg := &config.Config{}
+	g := buildViolationGraph(t)
+	edges := g.AllEdges()
+	violations := cfg.CheckViolationsForEdges(edges, g.GetNode)
+	if len(violations) != 0 {
+		t.Errorf("expected no violations with no rules, got %d", len(violations))
+	}
+}
+
 // buildViolationGraph creates a small graph with a .tsx file calling a function.
 func buildViolationGraph(t *testing.T) *graph.Graph {
 	t.Helper()
