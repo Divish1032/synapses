@@ -376,16 +376,14 @@ func cmdDaemonServe(args []string) error {
 
 	// Admin: health
 	mux.HandleFunc("/api/admin/health", func(w http.ResponseWriter, r *http.Request) {
-		projects := reg.All()
-		paths := make([]string, 0, len(projects))
-		for _, p := range projects {
-			paths = append(paths, p.AbsPath)
-		}
+		// Health endpoint is exempt from auth for liveness checks.
+		// Only return project_count (not paths) to avoid information disclosure.
+		// Full project details available at /api/admin/projects (auth-protected).
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":            "ok",
 			"version":           version,
-			"projects":          paths,
+			"project_count":     len(reg.All()),
 			"indexing_progress": ActiveSnapshot(),
 		})
 	})

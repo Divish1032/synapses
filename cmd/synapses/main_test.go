@@ -2309,7 +2309,7 @@ func TestCmdStartProxy_WithLiveDaemon(t *testing.T) {
 	httpMux := http.NewServeMux()
 	httpMux.HandleFunc("/api/admin/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok","version":"dev","projects":[]}`)) //nolint:errcheck
+		w.Write([]byte(`{"status":"ok","version":"dev","project_count":0}`)) //nolint:errcheck
 	})
 	httpMux.HandleFunc("/api/admin/projects", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
