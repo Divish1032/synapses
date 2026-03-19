@@ -11,6 +11,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/SynapsesOS/synapses/internal/git"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -439,9 +440,35 @@ func (s *Server) handleUpdateTask(
 		s.upsertAgentWithActivity(agentID, &store.AgentActivity{Intent: intent})
 	}
 
+	// R21: Commit-to-task linking — capture git state before status transitions.
+	// For done/cancelled: read start_commit now (before UpdateTask) so we can compute
+	// the range log. This is safe because UpdateTask never modifies start_commit.
+	var taskStartCommit string
+	if (status == "done" || status == "cancelled") && s.projectPath != "" {
+		if t, gtErr := s.store.GetTask(id); gtErr == nil {
+			taskStartCommit = t.StartCommit
+		}
+	}
+
 	unblocked, planCompleted, err := s.store.UpdateTask(id, status, notes, agentID)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("update task: %v", err)), nil
+	}
+
+	// R21: Capture HEAD SHA on in_progress; capture git log range on done/cancelled.
+	// Both are best-effort: git errors are silently ignored so the task update
+	// always succeeds regardless of git availability.
+	var capturedCommits []string
+	if s.projectPath != "" {
+		switch status {
+		case "in_progress":
+			if sha := git.HeadSHA(s.projectPath); sha != "" {
+				_ = s.store.SetTaskStartCommit(id, sha)
+			}
+		case "done", "cancelled":
+			capturedCommits = git.LogSince(s.projectPath, taskStartCommit)
+			_ = s.store.SetTaskCommits(id, capturedCommits)
+		}
 	}
 
 	// Session Intelligence: record session-task relationship.
@@ -569,6 +596,10 @@ func (s *Server) handleUpdateTask(
 		result["plan_completed"] = true
 		result["message"] = result["message"].(string) + " All tasks in the plan are now complete."
 	}
+	// R21: surface commits made during this task so agents see what shipped.
+	if len(capturedCommits) > 0 {
+		result["commits_since_start"] = capturedCommits
+	}
 	return jsonResult(result)
 }
 
@@ -653,6 +684,12 @@ func (s *Server) handleHandoffTask(
 	}
 	if _, _, err := s.store.UpdateTask(taskID, "in_progress", handoffNote, toAgent); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("update task: %v", err)), nil
+	}
+	// R21: capture HEAD SHA for the receiving agent's commit tracking window.
+	if s.projectPath != "" {
+		if sha := git.HeadSHA(s.projectPath); sha != "" {
+			_ = s.store.SetTaskStartCommit(taskID, sha)
+		}
 	}
 
 	// Emit event for multi-agent awareness.
