@@ -24,7 +24,4 @@ func IsSiblingStoreFresh(r *Resolver, st *store.Store, head, repoPath string) bo
 	return r.isSiblingStoreFresh(context.Background(), st, head, repoPath)
 }
 
-// GetStore exports getStore for testing.
-func (r *Resolver) GetStore(alias string) *store.Store {
-	return r.getStore(alias)
-}
+// GetStore is now exported directly on Resolver — no test export needed.
