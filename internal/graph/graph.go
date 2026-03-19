@@ -165,9 +165,32 @@ func (g *Graph) GetNode(id NodeID) *Node {
 // (case-insensitive). Also matches qualified names: searching "Close" will
 // match a node named "Store.Close" (suffix after the last dot). An empty
 // slice is returned if nothing matches.
+//
+// Uses the secondary index for O(1) lookup when available; falls back to O(N)
+// scan during initial parsing when the index is not yet ready.
 func (g *Graph) FindByName(name string) []*Node {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+
+	// Try fast path: use secondary index if ready
+	if g.index != nil && g.index.Ready() {
+		seqs := g.index.FindByNameSeqs(name)
+		if len(seqs) == 0 {
+			return []*Node{}
+		}
+		results := make([]*Node, 0, len(seqs))
+		for _, seq := range seqs {
+			if int(seq) < len(g.index.SeqIDs) {
+				nodeID := g.index.SeqIDs[seq]
+				if n := g.nodes[nodeID]; n != nil {
+					results = append(results, n)
+				}
+			}
+		}
+		return results
+	}
+
+	// Fallback: linear scan (during parsing before index is ready)
 	lower := strings.ToLower(name)
 	var results []*Node
 	for _, n := range g.nodes {
@@ -177,7 +200,7 @@ func (g *Graph) FindByName(name string) []*Node {
 			continue
 		}
 		// Also match qualified names like "Store.Close" when query is "Close".
-		if idx := strings.LastIndex(nodeLower, "."); idx >= 0 && nodeLower[idx+1:] == lower {
+		if dotPos := strings.LastIndex(nodeLower, "."); dotPos >= 0 && nodeLower[dotPos+1:] == lower {
 			results = append(results, n)
 		}
 	}
@@ -203,9 +226,32 @@ func (g *Graph) FindByPattern(pattern string) []*Node {
 // The match is suffix-based so callers may pass either a full absolute path or
 // a relative path such as "internal/graph/graph.go"; both resolve correctly
 // against the absolute paths that the parser stores on each node.
+//
+// Uses the secondary index for O(1) lookup when available; falls back to O(N)
+// scan during initial parsing when the index is not yet ready.
 func (g *Graph) FindByFile(filePath string) []*Node {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+
+	// Try fast path: use secondary index if ready
+	if g.index != nil && g.index.Ready() {
+		seqs := g.index.FindByFileSeqs(filePath)
+		if len(seqs) == 0 {
+			return []*Node{}
+		}
+		results := make([]*Node, 0, len(seqs))
+		for _, seq := range seqs {
+			if int(seq) < len(g.index.SeqIDs) {
+				nodeID := g.index.SeqIDs[seq]
+				if n := g.nodes[nodeID]; n != nil {
+					results = append(results, n)
+				}
+			}
+		}
+		return results
+	}
+
+	// Fallback: linear scan with suffix matching (during parsing before index is ready)
 	var results []*Node
 	for _, n := range g.nodes {
 		if n.File == filePath || strings.HasSuffix(n.File, "/"+filePath) {

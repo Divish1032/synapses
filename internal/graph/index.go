@@ -1,6 +1,8 @@
 package graph
 
 import (
+	"path"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -55,6 +57,14 @@ type GraphIndex struct {
 	// IDToSeq maps NodeID strings → seq for O(1) lookup in the BFS hot path.
 	IDToSeq map[NodeID]uint32
 
+	// nameIndex maps lowercase name (including qualified names) → list of seq IDs.
+	// Populated during buildIndex. Enables O(1) FindByName lookups.
+	nameIndex map[string][]uint32
+
+	// fileIndex maps file path suffixes → list of seq IDs.
+	// Populated during buildIndex. Enables O(1) FindByFile lookups.
+	fileIndex map[string][]uint32
+
 	// CSR adjacency lists for outgoing edges.
 	// Node with seq i has outgoing edges in OutTargets[OutStart[i]:OutEnd[i]].
 	OutStart   []uint32   // len = node count + 2 (1-indexed, sentinel at 0)
@@ -76,8 +86,10 @@ type GraphIndex struct {
 // newGraphIndex returns an empty, unready GraphIndex with a shared StringPool.
 func newGraphIndex(pool *StringPool) *GraphIndex {
 	idx := &GraphIndex{
-		Pool:    pool,
-		IDToSeq: make(map[NodeID]uint32),
+		Pool:      pool,
+		IDToSeq:   make(map[NodeID]uint32),
+		nameIndex: make(map[string][]uint32),
+		fileIndex: make(map[string][]uint32),
 	}
 	// Append sentinel at position 0 for all slices.
 	idx.SeqIDs = append(idx.SeqIDs, "")
@@ -183,6 +195,25 @@ func (idx *GraphIndex) TombstoneRatio() float64 {
 	return float64(atomic.LoadInt32(&idx.TombstoneCount)) / float64(total)
 }
 
+// FindByNameSeqs returns the seq IDs for all nodes matching the given name
+// (case-insensitive, including qualified name suffixes). Returns nil if no matches.
+// This is the O(1) hot-path lookup used by graph.FindByName when the index is ready.
+func (idx *GraphIndex) FindByNameSeqs(name string) []uint32 {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	nameLower := strings.ToLower(name)
+	return idx.nameIndex[nameLower]
+}
+
+// FindByFileSeqs returns the seq IDs for all nodes matching the given file path.
+// Supports suffix matching: "graph.go" matches absolute paths ending in "graph.go".
+// This is the O(1) hot-path lookup used by graph.FindByFile when the index is ready.
+func (idx *GraphIndex) FindByFileSeqs(filePath string) []uint32 {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.fileIndex[filePath]
+}
+
 // ---------------------------------------------------------------------------
 // buildIndex — construct a fresh GraphIndex from the current Graph map state.
 //
@@ -253,6 +284,43 @@ func buildIndex(g *Graph, pool *StringPool) *GraphIndex {
 		idx.Lines = append(idx.Lines, int32(ns.line))
 		idx.Exported = append(idx.Exported, ns.exported)
 		idx.Tombstone = append(idx.Tombstone, false)
+	}
+
+	// --- Phase 2b: build secondary indexes for FindByName and FindByFile ---
+	for i, ns := range nodeSnaps {
+		seq := uint32(i + 1)
+
+		// nameIndex: map lowercase name → seq IDs
+		// Also map qualified name suffixes (e.g., "Store.Close" also matches "Close")
+		nameLower := strings.ToLower(ns.name)
+		idx.nameIndex[nameLower] = append(idx.nameIndex[nameLower], seq)
+
+		// For qualified names, also add the suffix after the last dot
+		if dotPos := strings.LastIndex(ns.name, "."); dotPos >= 0 {
+			suffix := ns.name[dotPos+1:]
+			suffixLower := strings.ToLower(suffix)
+			idx.nameIndex[suffixLower] = append(idx.nameIndex[suffixLower], seq)
+		}
+
+		// fileIndex: map file path → seq IDs
+		// Store both absolute path and all possible suffixes for flexible matching
+		file := ns.file
+		idx.fileIndex[file] = append(idx.fileIndex[file], seq)
+
+		// Also add basename (e.g., "graph.go")
+		baseName := path.Base(file)
+		if baseName != file {
+			idx.fileIndex[baseName] = append(idx.fileIndex[baseName], seq)
+		}
+
+		// Also add all parent-relative suffixes for path flexibility
+		// e.g., for "/Users/you/synapses/internal/graph/graph.go", also add:
+		// "internal/graph/graph.go", "graph/graph.go"
+		parts := strings.Split(file, "/")
+		for j := 1; j < len(parts); j++ {
+			suffix := strings.Join(parts[j:], "/")
+			idx.fileIndex[suffix] = append(idx.fileIndex[suffix], seq)
+		}
 	}
 
 	// --- Phase 3: build CSR adjacency lists ---
