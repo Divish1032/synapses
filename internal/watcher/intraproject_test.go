@@ -13,47 +13,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
-// ── fileInScope unit tests ─────────────────────────────────────────────────────
-
-func TestFileInScope_ExactMatch(t *testing.T) {
-	if !fileInScope("internal/watcher/watcher.go", "internal/watcher/watcher.go") {
-		t.Error("exact path should match scope")
-	}
-}
-
-func TestFileInScope_DirectoryPrefix(t *testing.T) {
-	if !fileInScope("internal/watcher/watcher.go", "internal/watcher") {
-		t.Error("file inside directory scope should match")
-	}
-}
-
-func TestFileInScope_DirectoryScopeWithTrailingSlash(t *testing.T) {
-	if !fileInScope("internal/watcher/watcher.go", "internal/watcher/") {
-		t.Error("scope with trailing slash should match file inside directory")
-	}
-}
-
-func TestFileInScope_NoMatch_DifferentDirectory(t *testing.T) {
-	if fileInScope("internal/parser/parser.go", "internal/watcher") {
-		t.Error("file outside scope directory should not match")
-	}
-}
-
-func TestFileInScope_NoMatch_PrefixSubstring(t *testing.T) {
-	// "internal/watch" must NOT match "internal/watcher/watcher.go"
-	// because it is a substring, not a directory prefix.
-	if fileInScope("internal/watcher/watcher.go", "internal/watch") {
-		t.Error("partial directory name substring should not match")
-	}
-}
-
-func TestFileInScope_EmptyScope_NoMatch(t *testing.T) {
-	// An empty scope should only match an empty relFile.
-	if fileInScope("internal/watcher/watcher.go", "") {
-		t.Error("empty scope should not match non-empty relFile")
-	}
-}
-
 // ── notifyIntraProjectImpact integration tests ────────────────────────────────
 
 // buildIntraFixture creates an in-memory watcher with a single node in changedFile.
@@ -94,105 +53,6 @@ func TestNotifyIntraProjectImpact_NilStore_NoPanic(t *testing.T) {
 	w.notifyIntraProjectImpact(filepath.Join(dir, "foo.go"))
 }
 
-func TestNotifyIntraProjectImpact_ScopeAlert_SendsTargetedMessage(t *testing.T) {
-	st := openTestStore(t)
-	w, _, changedFile := buildIntraFixture(t, st)
-
-	// Agent "agent-alpha" claims the directory that contains changedFile.
-	// Scope is relative: "internal/auth" — changedFile's relFile will be
-	// "internal/auth/service.go" after stripping the graph root prefix.
-	_, err := st.ClaimWork("agent-alpha", "internal/auth", "directory", 30)
-	if err != nil {
-		t.Fatalf("ClaimWork: %v", err)
-	}
-
-	w.notifyIntraProjectImpact(changedFile)
-
-	msgs, _, err := st.GetMessages("agent-alpha", 0, "scope_change_alert", false, 50)
-	if err != nil {
-		t.Fatalf("GetMessages: %v", err)
-	}
-	if len(msgs) == 0 {
-		t.Fatal("expected scope_change_alert message for agent-alpha, got none")
-	}
-	if msgs[0].ToAgent != "agent-alpha" {
-		t.Errorf("message addressed to %q, want agent-alpha", msgs[0].ToAgent)
-	}
-
-	var payload map[string]interface{}
-	if err := json.Unmarshal([]byte(msgs[0].Payload), &payload); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
-	}
-	if payload["claimed_scope"] != "internal/auth" {
-		t.Errorf("claimed_scope = %v, want internal/auth", payload["claimed_scope"])
-	}
-	if payload["project"] != "my-project" {
-		t.Errorf("project = %v, want my-project", payload["project"])
-	}
-}
-
-func TestNotifyIntraProjectImpact_ScopeAlert_OutsideScope_NoMessage(t *testing.T) {
-	st := openTestStore(t)
-	w, _, changedFile := buildIntraFixture(t, st)
-
-	// Agent claims a different directory — changedFile is in internal/auth,
-	// not internal/parser.
-	_, err := st.ClaimWork("agent-beta", "internal/parser", "directory", 30)
-	if err != nil {
-		t.Fatalf("ClaimWork: %v", err)
-	}
-
-	w.notifyIntraProjectImpact(changedFile)
-
-	msgs, _, err := st.GetMessages("agent-beta", 0, "scope_change_alert", false, 50)
-	if err != nil {
-		t.Fatalf("GetMessages: %v", err)
-	}
-	if len(msgs) != 0 {
-		t.Errorf("expected no scope_change_alert for out-of-scope agent, got %d", len(msgs))
-	}
-}
-
-func TestNotifyIntraProjectImpact_ScopeAlert_DeduplicatesSameAgent(t *testing.T) {
-	st := openTestStore(t)
-	w, _, changedFile := buildIntraFixture(t, st)
-
-	// Same agent claims two overlapping scopes that both cover the changed file.
-	_, _ = st.ClaimWork("agent-gamma", "internal/auth", "directory", 30)
-	_, _ = st.ClaimWork("agent-gamma", "internal", "directory", 30)
-
-	w.notifyIntraProjectImpact(changedFile)
-
-	msgs, _, err := st.GetMessages("agent-gamma", 0, "scope_change_alert", false, 50)
-	if err != nil {
-		t.Fatalf("GetMessages: %v", err)
-	}
-	if len(msgs) != 1 {
-		t.Errorf("expected exactly 1 scope_change_alert (deduplicated), got %d", len(msgs))
-	}
-}
-
-func TestNotifyIntraProjectImpact_ScopeAlert_ExactFileMatch(t *testing.T) {
-	st := openTestStore(t)
-	w, _, changedFile := buildIntraFixture(t, st)
-
-	// Agent claims the exact relative file path.
-	_, err := st.ClaimWork("agent-delta", "internal/auth/service.go", "file", 30)
-	if err != nil {
-		t.Fatalf("ClaimWork: %v", err)
-	}
-
-	w.notifyIntraProjectImpact(changedFile)
-
-	msgs, _, err := st.GetMessages("agent-delta", 0, "scope_change_alert", false, 50)
-	if err != nil {
-		t.Fatalf("GetMessages: %v", err)
-	}
-	if len(msgs) == 0 {
-		t.Fatal("expected scope_change_alert for exact file claim, got none")
-	}
-}
-
 func TestNotifyIntraProjectImpact_TaskNodeAlert_SendsToAssignedAgent(t *testing.T) {
 	st := openTestStore(t)
 	w, nodeID, changedFile := buildIntraFixture(t, st)
@@ -217,7 +77,7 @@ func TestNotifyIntraProjectImpact_TaskNodeAlert_SendsToAssignedAgent(t *testing.
 		t.Fatal("expected task_node_changed message for agent-omega, got none")
 	}
 	if msgs[0].ToAgent != "agent-omega" {
-		t.Errorf("message ToAgent = %q, want agent-omega", msgs[0].ToAgent)
+		t.Errorf("message addressed to %q, want agent-omega", msgs[0].ToAgent)
 	}
 
 	var payload map[string]interface{}
@@ -282,97 +142,6 @@ func TestNotifyIntraProjectImpact_TaskNodeAlert_UnassignedTask_NoMessage(t *test
 	}
 }
 
-func TestNotifyIntraProjectImpact_BothProbesFire(t *testing.T) {
-	st := openTestStore(t)
-	w, nodeID, changedFile := buildIntraFixture(t, st)
-
-	// Agent "claimer" holds a scope covering the changed file.
-	_, _ = st.ClaimWork("claimer", "internal/auth", "directory", 30)
-
-	// Agent "tasker" owns an in-progress task linked to the node.
-	_, _, err := st.CreatePlan("dual-plan", "", "", []store.TaskInput{
-		{Title: "dual task", Priority: "p0", LinkedNodes: []string{string(nodeID)}},
-	})
-	if err != nil {
-		t.Fatalf("CreatePlan: %v", err)
-	}
-	_, _ = st.GetPendingTasks("", "tasker")
-
-	w.notifyIntraProjectImpact(changedFile)
-
-	scopeMsgs, _, err := st.GetMessages("claimer", 0, "scope_change_alert", false, 50)
-	if err != nil {
-		t.Fatalf("GetMessages scope: %v", err)
-	}
-	if len(scopeMsgs) == 0 {
-		t.Error("expected scope_change_alert for claimer agent")
-	}
-
-	taskMsgs, _, err := st.GetMessages("tasker", 0, "task_node_changed", false, 50)
-	if err != nil {
-		t.Fatalf("GetMessages task: %v", err)
-	}
-	if len(taskMsgs) == 0 {
-		t.Error("expected task_node_changed for tasker agent")
-	}
-}
-
-func TestNotifyIntraProjectImpact_NoNodesInFile_ScopeProbeStillFires(t *testing.T) {
-	st := openTestStore(t)
-	dir := t.TempDir()
-	changedFile := filepath.Join(dir, "internal", "auth", "empty.go")
-
-	// Graph has no node for changedFile — simulates an empty or non-Go file.
-	g := graph.New("proj-empty")
-	g.SetRoot(dir)
-	w, err := New(g, parser.NewWalker(), st)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	_, _ = st.ClaimWork("guard-agent", "internal/auth", "directory", 30)
-
-	// Scope probe should still fire even if changedNodes is empty.
-	w.notifyIntraProjectImpact(changedFile)
-
-	msgs, _, err := st.GetMessages("guard-agent", 0, "scope_change_alert", false, 50)
-	if err != nil {
-		t.Fatalf("GetMessages: %v", err)
-	}
-	if len(msgs) == 0 {
-		t.Error("expected scope_change_alert even when file has no parsed nodes")
-	}
-}
-
-func TestNotifyIntraProjectImpact_ScopeAlert_PayloadChangedFileIsRelative(t *testing.T) {
-	st := openTestStore(t)
-	w, _, changedFile := buildIntraFixture(t, st)
-
-	_, _ = st.ClaimWork("rel-agent", "internal/auth", "directory", 30)
-	w.notifyIntraProjectImpact(changedFile)
-
-	msgs, _, err := st.GetMessages("rel-agent", 0, "scope_change_alert", false, 50)
-	if err != nil {
-		t.Fatalf("GetMessages: %v", err)
-	}
-	if len(msgs) == 0 {
-		t.Fatal("expected scope_change_alert")
-	}
-
-	var payload map[string]interface{}
-	if err := json.Unmarshal([]byte(msgs[0].Payload), &payload); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	cf, _ := payload["changed_file"].(string)
-	// Must be relative ("internal/auth/service.go"), not an absolute path.
-	if filepath.IsAbs(cf) {
-		t.Errorf("changed_file should be relative, got absolute path %q", cf)
-	}
-	if cf != "internal/auth/service.go" {
-		t.Errorf("changed_file = %q, want internal/auth/service.go", cf)
-	}
-}
-
 func TestNotifyIntraProjectImpact_TaskNodeAlert_PayloadChangedFileIsRelative(t *testing.T) {
 	st := openTestStore(t)
 	w, nodeID, changedFile := buildIntraFixture(t, st)
@@ -399,27 +168,6 @@ func TestNotifyIntraProjectImpact_TaskNodeAlert_PayloadChangedFileIsRelative(t *
 	cf, _ := payload["changed_file"].(string)
 	if filepath.IsAbs(cf) {
 		t.Errorf("task_node_changed changed_file should be relative, got %q", cf)
-	}
-}
-
-func TestNotifyIntraProjectImpact_ScopeAlert_TwoAgents_BothNotified(t *testing.T) {
-	st := openTestStore(t)
-	w, _, changedFile := buildIntraFixture(t, st)
-
-	// Two different agents each claim scopes that cover the changed file.
-	_, _ = st.ClaimWork("agent-one", "internal/auth", "directory", 30)
-	_, _ = st.ClaimWork("agent-two", "internal", "directory", 30)
-
-	w.notifyIntraProjectImpact(changedFile)
-
-	for _, agentID := range []string{"agent-one", "agent-two"} {
-		msgs, _, err := st.GetMessages(agentID, 0, "scope_change_alert", false, 50)
-		if err != nil {
-			t.Fatalf("GetMessages(%s): %v", agentID, err)
-		}
-		if len(msgs) == 0 {
-			t.Errorf("expected scope_change_alert for %s, got none", agentID)
-		}
 	}
 }
 
@@ -485,30 +233,6 @@ func TestNotifyIntraProjectImpact_TaskNodeAlert_InProgressTask_Fires(t *testing.
 	}
 	if len(msgs) == 0 {
 		t.Error("expected task_node_changed for in_progress task")
-	}
-}
-
-func TestNotifyIntraProjectImpact_SameAgentClaimerAndTaskOwner_ReceivesBothMessages(t *testing.T) {
-	st := openTestStore(t)
-	w, nodeID, changedFile := buildIntraFixture(t, st)
-
-	// The same agent holds a claim AND owns a task linked to the changed node.
-	_, _ = st.ClaimWork("dual-agent", "internal/auth", "directory", 30)
-	_, _, _ = st.CreatePlan("dual-agent-plan", "", "", []store.TaskInput{
-		{Title: "dual agent task", Priority: "p1", LinkedNodes: []string{string(nodeID)}},
-	})
-	_, _ = st.GetPendingTasks("", "dual-agent")
-
-	w.notifyIntraProjectImpact(changedFile)
-
-	scopeMsgs, _, _ := st.GetMessages("dual-agent", 0, "scope_change_alert", false, 50)
-	if len(scopeMsgs) == 0 {
-		t.Error("expected scope_change_alert for dual-agent")
-	}
-
-	taskMsgs, _, _ := st.GetMessages("dual-agent", 0, "task_node_changed", false, 50)
-	if len(taskMsgs) == 0 {
-		t.Error("expected task_node_changed for dual-agent")
 	}
 }
 

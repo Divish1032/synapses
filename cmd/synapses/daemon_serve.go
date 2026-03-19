@@ -61,7 +61,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/federation"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/parser"
-	"github.com/SynapsesOS/synapses/internal/peer"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/scout"
@@ -585,27 +584,6 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		}
 		allRecipes = skills.DeduplicateRecipes(allRecipes)
 		srv.SetSkillRecipes(allRecipes)
-	}
-
-	// Peer API.
-	if cfg.PeerAPIPort > 0 {
-		peerSrv := peer.NewPeerServer(g, cfg, st)
-		if err := peerSrv.Start(cfg.PeerAPIPort); err == nil {
-			// Stopped when projCtx is cancelled via peerSrv.Stop() — we rely on
-			// the ProjectInstance.Close() calling projCancel() which signals the
-			// peer server through its context.
-			_ = peerSrv
-		}
-	}
-	if len(cfg.Peers) > 0 {
-		pm := peer.NewPeerManager(cfg, g, st)
-		pm.Connect()
-		pm.StartHealthMonitor(30 * time.Second)
-		srv.SetPeerManager(pm)
-		go func() {
-			<-projCtx.Done()
-			pm.Stop()
-		}()
 	}
 
 	// Federation resolver: cross-project drift detection + dependency tracking.

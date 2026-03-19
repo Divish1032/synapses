@@ -241,9 +241,8 @@ func PhaseGuidance(phase, mode string) string {
 			"create_plan, link tasks to code nodes via link_task_nodes. Propose architectural " +
 			"boundaries via propose_change if needed. Do NOT write implementation code yet."
 	case PhaseDevelopment:
-		return "You are in development phase. Implement per the plan. Claim work before editing " +
-			"(claim_work). Respect all active constraints. Run validate_plan before major changes. " +
-			"Mark tasks done via update_task as you complete them."
+		return "You are in development phase. Implement per the plan. Respect all active constraints. " +
+			"Run validate_plan before major changes. Mark tasks done via update_task as you complete them."
 	case PhaseTesting:
 		return "You are in testing phase. Write tests for every modified entity. Run get_violations " +
 			"to check for architectural drift. Focus on test coverage — do NOT add new features. " +
@@ -256,8 +255,7 @@ func PhaseGuidance(phase, mode string) string {
 		return base + "Run get_violations to confirm no active errors. Vote on open proposals via vote_on_proposal."
 	case PhaseDeployment:
 		return "You are in deployment phase. Do NOT modify source files. Monitor events via " +
-			"get_events. Release your work claims via release_claims when deployment is confirmed. " +
-			"Flag any issues as new tasks via update_task."
+			"get_events. Flag any issues as new tasks via update_task."
 	default:
 		return "Run get_project_identity to orient yourself, then get_pending_tasks to find your work."
 	}

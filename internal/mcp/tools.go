@@ -433,11 +433,8 @@ func (s *Server) handleGetContext(
 
 	best := pickBestNode(nodes, s.graph)
 
-	// B29: Auto-track watched symbol for dependency alert detection.
-	// When a peer later modifies the same file, session_init will surface a Tier 2 alert.
 	if agentIDForFeedback != "" && s.store != nil {
 		relFile := strings.TrimPrefix(best.File, s.graph.Root()+"/")
-		s.store.WatchSymbol(agentIDForFeedback, string(best.ID), best.Name, relFile)
 		s.upsertAgentWithActivity(agentIDForFeedback, &store.AgentActivity{
 			Focus:      best.Name,
 			FocusFile:  relFile,
@@ -804,16 +801,16 @@ func (s *Server) handleGetContext(
 		time.Since(handlerStart).Milliseconds(),
 	)
 
-	// Multi-agent awareness: fire-and-forget event so peers can see this via get_peer_activity.
+	// Multi-agent awareness: fire-and-forget event so peers can see this via get_events.
 	// Uses agentIDForFeedback (same value as agentID when provided). upsertAgentWithActivity
-	// is NOT called here — it already ran synchronously above in the WatchSymbol block with
-	// the full Focus+FocusFile+FocusSince payload, making a second call redundant.
+	// is NOT called here — it already ran synchronously above with the full
+	// Focus+FocusFile+FocusSince payload, making a second call redundant.
 	if agentIDForFeedback != "" && s.store != nil {
 		relFileForEvent := strings.TrimPrefix(best.File, s.graph.Root()+"/")
 		go func() {
 			payload, _ := json.Marshal(map[string]string{
 				"entity": entityName,
-				"file":   relFileForEvent, // repo-relative, consistent with agent_watched_symbols
+				"file":   relFileForEvent, // repo-relative path
 			})
 			if err := s.store.AppendEvent("agent_examining", agentIDForFeedback, string(payload)); err != nil {
 				log.Printf("mcp: append agent_examining event: %v", err)
@@ -938,20 +935,6 @@ func (s *Server) asyncEnrichContext(
 
 	rules := matchRulesForFile(s.config, best.File)
 
-	var claims []brain.ClaimInput
-	if s.store != nil {
-		if allClaims, err := s.store.GetAllClaims(); err == nil {
-			for _, c := range allClaims {
-				claims = append(claims, brain.ClaimInput{
-					AgentID:   c.AgentID,
-					Scope:     c.Scope,
-					ScopeType: c.ScopeType,
-					ExpiresAt: c.ExpiresAt.Format(time.RFC3339),
-				})
-			}
-		}
-	}
-
 	hasTests := fileHasTests(best.File)
 	fanIn := s.graph.Fanin(best.ID)
 
@@ -972,7 +955,7 @@ func (s *Server) asyncEnrichContext(
 			CalleeNames:     calleeNames,
 			CallerNames:     callerNames,
 			ApplicableRules: rules,
-			ActiveClaims:    claims,
+			ActiveClaims:    nil,
 			TaskID:          taskID,
 			HasTests:        hasTests,
 			FanIn:           fanIn,
@@ -2175,9 +2158,6 @@ var toolCatalog = []toolCatalogEntry{
 	{Name: "get_session_state", Category: "tasks", Description: "Resume from saved session state", Keywords: []string{"get", "session", "state", "resume", "restore"}, Example: `get_session_state(task_id="...")`},
 
 	// Coordination
-	{Name: "claim_work", Category: "coordination", Description: "Register work scope to prevent conflicts", Keywords: []string{"claim", "lock", "scope", "editing", "conflict", "reserve"}, Example: `claim_work(agent_id="...", scope="pkg/auth")`},
-	{Name: "release_claims", Category: "coordination", Description: "Release work claims when done", Keywords: []string{"release", "unlock", "free", "claims", "done"}, Example: `release_claims(agent_id="...")`},
-	{Name: "get_conflicts", Category: "coordination", Description: "Check for conflicting work claims", Keywords: []string{"conflicts", "overlap", "other", "agents", "clash"}, Example: `get_conflicts(agent_id="...")`},
 	{Name: "get_agents", Category: "coordination", Description: "List all agents in this repository", Keywords: []string{"agents", "who", "list", "working", "active"}, Example: `get_agents()`},
 
 	// Memory
@@ -2244,9 +2224,8 @@ var workflowRecipes = []workflowRecipe{
 		Steps: []workflowStep{
 			{Tool: "get_context", ArgsHint: `entity="{target}"`, Expects: "Current structure, callers/callees, annotations, and applicable rules.", UsesOutput: ""},
 			{Tool: "plan_context", ArgsHint: `target="{target}", changes=[{"file":"...","adds_call_to":"..."}]`, Expects: "verdict: clear|warnings|violations|blocked + safety check + scope assessment.", UsesOutput: "Use the entity's file and planned dependencies from get_context"},
-			{Tool: "claim_work", ArgsHint: `agent_id="...", scope="{file}"`, Expects: "Confirmation of scope reservation.", UsesOutput: "Use files from your plan"},
 			{Tool: "verify_implementation", ArgsHint: `files_written=["file1.go","file2.go"]`, Expects: "pass|violations_found|pending_indexing + per-file entity counts and violations.", UsesOutput: "After writing code: verify the implementation matches expectations"},
-			{Tool: "update_task", ArgsHint: `id="...", status="done"`, Expects: "Task marked complete.", UsesOutput: "After verify passes: mark the task done and release_claims"},
+			{Tool: "update_task", ArgsHint: `id="...", status="done"`, Expects: "Task marked complete.", UsesOutput: "After verify passes: mark the task done"},
 		},
 	},
 	{
@@ -3759,29 +3738,13 @@ func (s *Server) handleSessionInit(
 		recentEvents = []store.Event{}
 	}
 
-	// ── 4b. Agent awareness — 3-tier signal system (B29) ─────────────────
+	// ── 4b. Agent awareness ─────────────────────────────────────────────
 	// Zero noise by default. agent_awareness is omitted entirely when the calling
-	// agent has no scope conflicts and no dependency alerts. Most solo sessions
+	// agent has no active peers and no unread messages. Most solo sessions
 	// produce no output here at all.
-	//
-	// Tier 1 — conflicts: another agent has a claim overlapping this agent's scope.
-	// Tier 2 — dependency_alerts: a peer modified a symbol this agent examined.
-	// active_count: integer, not a list — use get_peer_activity for the full digest.
 	var agentAwareness map[string]interface{}
 	var unreadMsgs []store.Message
 	if s.store != nil && agentID != "" {
-		// Tier 1: scope conflicts (always surface when present).
-		var conflicts []store.WorkClaim
-		if cls, err := s.store.GetConflicts(agentID); err == nil {
-			conflicts = cls
-		}
-
-		// Tier 2: dependency alerts (surface when a peer touched a watched symbol).
-		var depAlerts []store.DependencyAlert
-		if alerts, err := s.store.GetDependencyAlerts(agentID); err == nil {
-			depAlerts = alerts
-		}
-
 		// active_count: peers present (integer only — no list surfaced here).
 		var activeCount int
 		if n, err := s.store.CountActiveAgents(agentID); err == nil {
@@ -3789,17 +3752,9 @@ func (s *Server) handleSessionInit(
 		}
 
 		// Only build agent_awareness when there is a signal worth surfacing.
-		if len(conflicts) > 0 || len(depAlerts) > 0 || activeCount > 0 {
-			agentAwareness = map[string]interface{}{}
-			if len(conflicts) > 0 {
-				agentAwareness["conflicts"] = conflicts
-			}
-			if len(depAlerts) > 0 {
-				agentAwareness["dependency_alerts"] = depAlerts
-			}
-			if activeCount > 0 {
-				agentAwareness["active_count"] = activeCount
-				agentAwareness["hint"] = "Call get_peer_activity(agent_id='<id>') or get_events(agent_id='<id>', types=['agent_examining','claim_work']) for a peer's activity stream."
+		if activeCount > 0 {
+			agentAwareness = map[string]interface{}{
+				"active_count": activeCount,
 			}
 		}
 

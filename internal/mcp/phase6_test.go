@@ -106,30 +106,6 @@ func TestDiscoverTools_NoPromotedStatus(t *testing.T) {
 
 // ── end_session absorption tests ─────────────────────────────────────────────
 
-func TestEndSession_AbsorbsReleaseClaims(t *testing.T) {
-	s := newTestServer(t)
-	_, err := s.handleClaimWork(ctx, callTool(map[string]any{
-		"agent_id": "test-agent", "scope": "pkg/auth", "scope_type": "directory",
-	}))
-	if err != nil {
-		t.Fatalf("claim work: %v", err)
-	}
-	res, err := s.handleEndSession(ctx, callTool(map[string]any{"agent_id": "test-agent"}))
-	m := mustResult(t, res, err)
-	if released, ok := m["claims_released"].(bool); !ok || !released {
-		t.Error("expected claims_released=true")
-	}
-}
-
-func TestEndSession_AbsorbsReleaseClaims_NoClaims(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleEndSession(ctx, callTool(map[string]any{"agent_id": "test-agent"}))
-	m := mustResult(t, res, err)
-	if released, ok := m["claims_released"].(bool); !ok || !released {
-		t.Error("expected claims_released=true (idempotent)")
-	}
-}
-
 func TestEndSession_ModelParamDoesNotCrash(t *testing.T) {
 	s := newTestServer(t)
 	res, err := s.handleEndSession(ctx, callTool(map[string]any{

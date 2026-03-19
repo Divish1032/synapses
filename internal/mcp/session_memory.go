@@ -25,7 +25,6 @@ type endSessionResult struct {
 	SessionSummary  *sessionSummary         `json:"session_summary,omitempty"`
 	MemoriesExpired int64                   `json:"memories_expired"`
 	Retrospective   *store.ToolCallSummary  `json:"retrospective,omitempty"`
-	ClaimsReleased  bool                    `json:"claims_released"`
 }
 
 // sessionSummary captures the structured extraction from a session.
@@ -185,14 +184,6 @@ func (s *Server) handleEndSession(
 		s.ClearSynapseSession(mcpSessionID)
 	}
 
-	// ── Phase 6: absorb release_claims ───────────────────────────────────
-	// Automatically release all work claims for this agent at session end.
-	// This saves agents from needing a separate release_claims call.
-	var claimsReleased bool
-	if err := s.store.ReleaseClaims(agentID); err == nil {
-		claimsReleased = true
-	}
-
 	// ── Phase 6: absorb report_usage ─────────────────────────────────────
 	// If the agent provided model/token data, report it to pulse in one call.
 	// This saves agents from needing a separate report_usage call at session end.
@@ -220,7 +211,6 @@ func (s *Server) handleEndSession(
 	result := endSessionResult{
 		Status:         "ok",
 		AgentID:        agentID,
-		ClaimsReleased: claimsReleased,
 	}
 
 	var memoriesSaved int

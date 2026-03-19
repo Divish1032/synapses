@@ -485,22 +485,4 @@ func TestHandleUpsertRule_BlocksGeneratedContextSource(t *testing.T) {
 	mustErrorResult(t, res, err)
 }
 
-// R28: claim_work warns (does not block) when scope is a vendored path.
-func TestHandleClaimWork_WarnsOnVendoredScope(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleClaimWork(ctx, callTool(map[string]any{
-		"agent_id": "test-agent",
-		"scope":    "vendor/github.com/foo/bar",
-	}))
-	m := mustResult(t, res, err)
-	// claim succeeds but message carries the provenance warning
-	msg, _ := m["message"].(string)
-	if msg == "" {
-		t.Fatal("expected non-empty message")
-	}
-	// The claim should still succeed (not blocked) — warning, not rejection.
-	if _, ok := m["claimed"]; !ok {
-		t.Fatal("expected 'claimed' key in response")
-	}
-}
 

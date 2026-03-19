@@ -887,15 +887,9 @@ func (w *Watcher) notifyCrossProjectImpact(changedFile string) {
 }
 
 // notifyIntraProjectImpact fires targeted messages to agents that are directly
-// affected by the re-parsed file within the same project. Two probes run:
-//
-//  1. Claimed-scope probe: if the changed file is inside an agent's claimed
-//     scope, that agent receives a "scope_change_alert" message so it knows
-//     its active work area was touched.
-//
-//  2. Task-node probe: if any in-progress task has linked nodes that live in
-//     the changed file, the task's assigned agent receives a "task_node_changed"
-//     message.
+// affected by the re-parsed file within the same project. If any in-progress
+// task has linked nodes that live in the changed file, the task's assigned
+// agent receives a "task_node_changed" message.
 //
 // Fail-silent: any error is ignored so the watcher loop is never interrupted.
 func (w *Watcher) notifyIntraProjectImpact(changedFile string) {
@@ -917,53 +911,14 @@ func (w *Watcher) notifyIntraProjectImpact(changedFile string) {
 		}
 	}
 
-	// Collect changed symbol names and node IDs for payloads.
+	// Collect changed node IDs for task-node probes.
 	changedNodes := w.graph.NodesForFile(changedFile)
-	changedNames := make([]string, 0, len(changedNodes))
 	changedNodeIDs := make(map[string]struct{}, len(changedNodes))
 	for _, n := range changedNodes {
-		changedNames = append(changedNames, n.Name)
 		changedNodeIDs[string(n.ID)] = struct{}{}
 	}
-	symbols := dedup(changedNames)
 
-	// ── 1. Claimed-scope probe ─────────────────────────────────────────────
-	claims, err := w.store.GetAllClaims()
-	if err == nil && len(claims) > 0 {
-		notifiedAgent := make(map[string]struct{})
-		for _, claim := range claims {
-			if !fileInScope(relFile, claim.Scope) {
-				continue
-			}
-			if _, seen := notifiedAgent[claim.AgentID]; seen {
-				continue
-			}
-			notifiedAgent[claim.AgentID] = struct{}{}
-
-			payload, merr := json.Marshal(map[string]interface{}{
-				"changed_file":    relFile,
-				"project":         primaryRepoID,
-				"claimed_scope":   claim.Scope,
-				"changed_symbols": symbols,
-				"hint": fmt.Sprintf(
-					"File %q (inside your claimed scope %q) was just modified. %d symbol(s) changed.",
-					relFile, claim.Scope, len(symbols),
-				),
-			})
-			if merr != nil {
-				continue
-			}
-			_, _ = w.store.SendMessage(
-				"synapses-watcher",
-				claim.AgentID,
-				"scope_change_alert",
-				string(payload),
-				primaryRepoID,
-			)
-		}
-	}
-
-	// ── 2. Task-node probe ─────────────────────────────────────────────────
+	// ── Task-node probe ──────────────────────────────────────────────────
 	if len(changedNodeIDs) == 0 {
 		return
 	}
@@ -1006,19 +961,6 @@ func (w *Watcher) notifyIntraProjectImpact(changedFile string) {
 			primaryRepoID,
 		)
 	}
-}
-
-// fileInScope reports whether relFile is covered by the given claim scope.
-// scope may be an exact relative file path or a directory prefix.
-func fileInScope(relFile, scope string) bool {
-	if relFile == scope {
-		return true
-	}
-	dir := scope
-	if !strings.HasSuffix(dir, "/") {
-		dir += "/"
-	}
-	return strings.HasPrefix(relFile, dir)
 }
 
 // repoIDOfNodeID extracts the repoID prefix from a NodeID of the form

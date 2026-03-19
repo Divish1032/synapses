@@ -160,24 +160,6 @@ func TestApplyDefaults_ConstitutionPrinciples(t *testing.T) {
 	}
 }
 
-func TestApplyDefaults_PeerTrustLevel(t *testing.T) {
-	raw := map[string]interface{}{
-		"version": "1",
-		"peers": []interface{}{
-			map[string]interface{}{"name": "remote", "url": "http://peer:9999"},
-		},
-		"rules": []interface{}{},
-	}
-	dir := writeCoverageConfig(t, raw)
-	cfg, err := config.Load(dir)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(cfg.Peers) == 0 || cfg.Peers[0].TrustLevel != "read_only" {
-		t.Error("expected peer TrustLevel defaulted to read_only")
-	}
-}
-
 // ── matchesForbidden edge cases (via CheckViolations) ─────────────────────────
 
 func TestMatchesForbidden_EdgeTypeFilter(t *testing.T) {

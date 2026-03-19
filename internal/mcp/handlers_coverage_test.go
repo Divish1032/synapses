@@ -1048,28 +1048,6 @@ func TestStringArgDefault_WithDefault(t *testing.T) {
 	}
 }
 
-// ── handleGetConflicts (with actual conflict) ─────────────────────────────────
-
-func TestHandleGetConflicts_WithActualConflict(t *testing.T) {
-	s := newTestServer(t)
-	// Agent A claims a scope.
-	_, _ = s.handleClaimWork(ctx, callTool(map[string]any{
-		"agent_id": "agent-a",
-		"scope":    "internal/auth",
-	}))
-	// Agent B claims the same scope.
-	_, _ = s.handleClaimWork(ctx, callTool(map[string]any{
-		"agent_id": "agent-b",
-		"scope":    "internal/auth",
-	}))
-	// Agent A checks conflicts — should see agent-b's claim.
-	res, err := s.handleGetConflicts(ctx, callTool(map[string]any{
-		"agent_id": "agent-a",
-	}))
-	m := mustResult(t, res, err)
-	hasKey(t, m, "conflicts")
-}
-
 // ── handleSendMessage (invalid JSON payload, with to_agent) ──────────────────
 
 func TestHandleSendMessage_InvalidJSONPayload(t *testing.T) {
@@ -1096,20 +1074,6 @@ func TestHandleSendMessage_WithToAgent(t *testing.T) {
 	}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "message_id")
-}
-
-// ── handleGetAgents (with claims) ────────────────────────────────────────────
-
-func TestHandleGetAgents_WithClaims(t *testing.T) {
-	s := newTestServer(t)
-	// Register an agent with a claim.
-	_, _ = s.handleClaimWork(ctx, callTool(map[string]any{
-		"agent_id": "claimed-agent",
-		"scope":    "pkg/auth",
-	}))
-	res, err := s.handleGetAgents(ctx, callTool(map[string]any{}))
-	m := mustResult(t, res, err)
-	hasKey(t, m, "agents")
 }
 
 // ── handleLinkTaskNodes (JSON string path) ────────────────────────────────────
@@ -2173,30 +2137,6 @@ func TestHandleGetAgents_NoStore(t *testing.T) {
 	mustErrorResult(t, res, err)
 }
 
-func TestHandleClaimWork_NoStore(t *testing.T) {
-	s := newTestServer(t)
-	s.store = nil
-	res, err := s.handleClaimWork(ctx, callTool(map[string]any{
-		"agent_id": "a",
-		"scope":    "pkg/auth",
-	}))
-	mustErrorResult(t, res, err)
-}
-
-func TestHandleReleaseClaims_NoStore(t *testing.T) {
-	s := newTestServer(t)
-	s.store = nil
-	res, err := s.handleReleaseClaims(ctx, callTool(map[string]any{"agent_id": "a"}))
-	mustErrorResult(t, res, err)
-}
-
-func TestHandleGetConflicts_NoStore(t *testing.T) {
-	s := newTestServer(t)
-	s.store = nil
-	res, err := s.handleGetConflicts(ctx, callTool(map[string]any{"agent_id": "a"}))
-	mustErrorResult(t, res, err)
-}
-
 func TestHandleGetEvents_NoStore(t *testing.T) {
 	s := newTestServer(t)
 	s.store = nil
@@ -2304,17 +2244,6 @@ func TestHandleUpdateTask_NoStore(t *testing.T) {
 	res, err := s.handleUpdateTask(ctx, callTool(map[string]any{
 		"id":     "t1",
 		"status": "done",
-	}))
-	mustErrorResult(t, res, err)
-}
-
-func TestHandleHandoffTask_NoStore(t *testing.T) {
-	s := newTestServer(t)
-	s.store = nil
-	res, err := s.handleHandoffTask(ctx, callTool(map[string]any{
-		"task_id":    "t1",
-		"from_agent": "a",
-		"to_agent":   "b",
 	}))
 	mustErrorResult(t, res, err)
 }

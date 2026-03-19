@@ -13,7 +13,7 @@ func TestToolInTier_AllToolsAlwaysAvailable(t *testing.T) {
 		"verify_implementation", "remember", "recall", "create_plan",
 		"update_task", "end_session", "discover_tools", "annotate_node",
 		"get_context", "find_entity", "get_pending_tasks", "get_file_context",
-		"get_impact", "get_call_chain", "claim_work", "release_claims",
+		"get_impact", "get_call_chain",
 		"get_working_state", "get_violations",
 		"get_events", "upsert_rule", "send_message", "execute_skill",
 	}

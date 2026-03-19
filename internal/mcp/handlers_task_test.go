@@ -305,26 +305,3 @@ func TestHandleGetSessionState_Missing_ReturnsEmpty(t *testing.T) {
 	_ = res
 }
 
-// ── handleHandoffTask ─────────────────────────────────────────────────────────
-
-func TestHandleHandoffTask_UpdatesAssignee(t *testing.T) {
-	s := newTestServer(t)
-	taskID := makeTask(t, s, "handoff task")
-
-	res, err := s.handleHandoffTask(ctx, callTool(map[string]any{
-		"task_id":    taskID,
-		"to_agent":   "new-agent",
-		"from_agent": "old-agent",
-		"notes":      "handing off because I'm done",
-	}))
-	mustResult(t, res, err)
-}
-
-func TestHandleHandoffTask_MissingFields_ReturnsError(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleHandoffTask(ctx, callTool(map[string]any{
-		"task_id": "some-id",
-		// missing to_agent_id
-	}))
-	mustErrorResult(t, res, err)
-}
