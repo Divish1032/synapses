@@ -338,7 +338,7 @@ func cmdStartDirect(args []string) error {
 		fmt.Fprintf(os.Stderr, "synapses: pulse analytics enabled at %s\n", cfg.Pulse.URL)
 	}
 
-	// Optional: vector embedding for semantic search.
+	// Optional: vector embedding for semantic search (node embeddings).
 	// Priority: (1) brain /v1/embed when brain is connected and embedding is available,
 	//           (2) explicit embedding_endpoint in synapses.json (Ollama/OpenAI compat),
 	//           (3) FTS5-only fallback (no embeddings).
@@ -352,6 +352,19 @@ func cmdStartDirect(args []string) error {
 		if embedCli != nil {
 			srv.SetEmbedClient(embedCli)
 			go embedAllNodes(appCtx, embedCli, g, st)
+		}
+	}
+
+	// Memory embeddings: generate embeddings for memories on remember() writes
+	// and provide vector search in recall(). Three modes:
+	//   "builtin" (default) — pure-Go all-MiniLM-L6-v2, auto-downloads model
+	//   "ollama"            — delegates to local Ollama instance
+	//   "off"               — disabled, FTS5-only recall
+	{
+		memEmbedder := createMemoryEmbedder(cfg)
+		if memEmbedder != nil {
+			srv.SetMemoryEmbedder(memEmbedder)
+			go embedAllMemories(appCtx, memEmbedder, st)
 		}
 	}
 
@@ -2957,6 +2970,48 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 	}
 
 	fmt.Fprintf(os.Stderr, "synapses: embedding complete (%d/%d nodes indexed)\n", done, len(nodeIDs))
+}
+
+// createMemoryEmbedder creates a memory Embedder based on the config's Embeddings mode.
+// Returns nil if embeddings are disabled.
+func createMemoryEmbedder(cfg *config.Config) embed.Embedder {
+	mode := cfg.Embeddings
+	if mode == "" {
+		mode = "builtin" // default
+	}
+	switch mode {
+	case "off":
+		return nil
+	case "ollama":
+		endpoint := cfg.EmbeddingEndpoint
+		if endpoint == "" {
+			endpoint = "http://localhost:11434/api/embeddings"
+		}
+		e := embed.NewOllamaEmbedder(endpoint, "")
+		if e == nil {
+			return nil
+		}
+		fmt.Fprintf(os.Stderr, "synapses: memory embeddings via ollama (%s)\n", endpoint)
+		return e
+	case "builtin":
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "synapses: cannot determine home dir for builtin embeddings: %v\n", err)
+			return nil
+		}
+		modelsDir := filepath.Join(homeDir, ".synapses", "models")
+		fmt.Fprintf(os.Stderr, "synapses: memory embeddings via builtin all-MiniLM-L6-v2\n")
+		return embed.NewBuiltinEmbedder(modelsDir)
+	default:
+		fmt.Fprintf(os.Stderr, "synapses: unknown embeddings mode %q, disabling\n", mode)
+		return nil
+	}
+}
+
+// embedAllMemories generates embeddings for all un-embedded memories.
+// Wraps the mcp package helper for use from main.
+func embedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.Store) {
+	mcpsrv.EmbedAllMemories(ctx, embedder, st)
 }
 
 // pathProjectID returns a stable 8-hex-char project identifier derived from the project root path.
