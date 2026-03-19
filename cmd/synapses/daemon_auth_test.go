@@ -295,58 +295,76 @@ func TestAuthMiddleware_AdminEndpointsProtectedForNonLocalhost(t *testing.T) {
 	}
 }
 
-// TestFinalHandler_CORSHeadersPresentOn401 verifies that the production
-// handler composition (CORS outermost → authMiddleware → mux) always
-// includes Access-Control-Allow-Origin on 401 responses.
-//
-// Without this ordering, browsers see an opaque CORS error instead of a
-// clear 401 when a non-localhost caller sends a request without a token.
-func TestFinalHandler_CORSHeadersPresentOn401(t *testing.T) {
-	const validToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-	// Reproduce the exact composition used in cmdDaemonServe.
+// buildFinalHandler reproduces the exact handler composition used in cmdDaemonServe.
+// Returns a handler where CORS is outermost → authMiddleware → mux.
+func buildFinalHandler(token string) http.Handler {
 	inner := http.NewServeMux()
 	inner.Handle("/v1/tools/", okHandler)
-	authProtected := authMiddleware(validToken, inner)
-	finalHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	authProtected := authMiddleware(token, inner)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if isCORSAllowedOrigin(origin) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Vary", "Origin")
+			}
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		authProtected.ServeHTTP(w, r)
 	})
+}
+
+// TestFinalHandler_CORSHeadersPresentOn401 verifies that allowed-origin browser
+// requests get CORS headers on 401 responses, so the browser can surface the
+// auth error rather than an opaque CORS error.
+func TestFinalHandler_CORSHeadersPresentOn401(t *testing.T) {
+	const validToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	finalHandler := buildFinalHandler(validToken)
 
 	tests := []struct {
 		name       string
 		path       string
 		remoteAddr string
-		header     string
+		origin     string
+		authHeader string
 		wantStatus int
-		wantCORS   bool
+		wantCORS   bool // whether ACAO header should be present
 	}{
 		{
-			name: "non-localhost no token gets 401 with CORS headers",
-			path: "/v1/tools/session_init", remoteAddr: "10.0.0.1:9999",
-			wantStatus: http.StatusUnauthorized, wantCORS: true,
+			name:       "allowed origin no token gets 401 with CORS headers",
+			path:       "/v1/tools/session_init",
+			remoteAddr: "10.0.0.1:9999",
+			origin:     "tauri://localhost",
+			wantStatus: http.StatusUnauthorized,
+			wantCORS:   true,
 		},
 		{
-			name: "non-localhost wrong token gets 401 with CORS headers",
-			path: "/v1/tools/session_init", remoteAddr: "10.0.0.1:9999",
-			header:     "Bearer " + strings.Repeat("b", 64),
-			wantStatus: http.StatusUnauthorized, wantCORS: true,
+			name:       "allowed origin wrong token gets 401 with CORS headers",
+			path:       "/v1/tools/session_init",
+			remoteAddr: "10.0.0.1:9999",
+			origin:     "http://localhost:3000",
+			authHeader: "Bearer " + strings.Repeat("b", 64),
+			wantStatus: http.StatusUnauthorized,
+			wantCORS:   true,
 		},
 		{
-			name: "localhost no token gets 200",
-			path: "/v1/tools/session_init", remoteAddr: "127.0.0.1:9999",
-			wantStatus: http.StatusOK, wantCORS: true,
+			name:       "localhost no token gets 200 (no origin header needed)",
+			path:       "/v1/tools/session_init",
+			remoteAddr: "127.0.0.1:9999",
+			wantStatus: http.StatusOK,
+			wantCORS:   false, // no Origin header → no CORS headers needed
 		},
 		{
-			name: "OPTIONS preflight gets 204 with CORS headers",
-			path: "/v1/tools/session_init", remoteAddr: "10.0.0.1:9999",
-			wantStatus: http.StatusNoContent, wantCORS: true,
+			name:       "OPTIONS preflight from allowed origin gets 204 with CORS headers",
+			path:       "/v1/tools/session_init",
+			remoteAddr: "10.0.0.1:9999",
+			origin:     "tauri://localhost",
+			wantStatus: http.StatusNoContent,
+			wantCORS:   true,
 		},
 	}
 
@@ -358,8 +376,11 @@ func TestFinalHandler_CORSHeadersPresentOn401(t *testing.T) {
 			}
 			req := httptest.NewRequest(method, tc.path, nil)
 			req.RemoteAddr = tc.remoteAddr
-			if tc.header != "" {
-				req.Header.Set("Authorization", tc.header)
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.authHeader != "" {
+				req.Header.Set("Authorization", tc.authHeader)
 			}
 			w := httptest.NewRecorder()
 			finalHandler.ServeHTTP(w, req)
@@ -367,15 +388,128 @@ func TestFinalHandler_CORSHeadersPresentOn401(t *testing.T) {
 			if w.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d", w.Code, tc.wantStatus)
 			}
+			acao := w.Header().Get("Access-Control-Allow-Origin")
 			if tc.wantCORS {
-				if acao := w.Header().Get("Access-Control-Allow-Origin"); acao != "*" {
-					t.Errorf("Access-Control-Allow-Origin = %q, want * (must be set even on %d)", acao, tc.wantStatus)
+				if acao == "" {
+					t.Errorf("Access-Control-Allow-Origin missing, want %q", tc.origin)
+				}
+				if acao == "*" {
+					t.Errorf("Access-Control-Allow-Origin = *, want specific origin (wildcard is the attack vector)")
 				}
 				if acah := w.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(acah, "Authorization") {
 					t.Errorf("Access-Control-Allow-Headers = %q, must include Authorization", acah)
 				}
+			} else {
+				if acao != "" {
+					t.Errorf("Access-Control-Allow-Origin = %q, want empty (no Origin in request)", acao)
+				}
 			}
 		})
+	}
+}
+
+// ── isCORSAllowedOrigin ───────────────────────────────────────────────────────
+
+// TestIsCORSAllowedOrigin_AllowedOrigins verifies that legitimate browser
+// origins (Tauri, localhost) are accepted.
+func TestIsCORSAllowedOrigin_AllowedOrigins(t *testing.T) {
+	allowed := []string{
+		"tauri://localhost",
+		"http://localhost",
+		"https://localhost",
+		"http://localhost:3000",
+		"https://localhost:8080",
+		"http://127.0.0.1",
+		"https://127.0.0.1",
+		"http://127.0.0.1:11435",
+		"https://127.0.0.1:9000",
+	}
+	for _, origin := range allowed {
+		if !isCORSAllowedOrigin(origin) {
+			t.Errorf("isCORSAllowedOrigin(%q) = false, want true", origin)
+		}
+	}
+}
+
+// TestIsCORSAllowedOrigin_BlockedOrigins verifies that malicious or
+// non-local origins are rejected — this is the security guarantee.
+func TestIsCORSAllowedOrigin_BlockedOrigins(t *testing.T) {
+	blocked := []string{
+		"https://evil.com",
+		"http://attacker.local",
+		"http://notlocalhost",
+		"http://localhost.evil.com",
+		"tauri://remote",
+		"http://192.168.1.1",
+		"null",
+		"",
+		"file://",
+	}
+	for _, origin := range blocked {
+		if isCORSAllowedOrigin(origin) {
+			t.Errorf("isCORSAllowedOrigin(%q) = true, want false (this origin should be blocked)", origin)
+		}
+	}
+}
+
+// TestCORSAttackVector_BrowserCannotCallAPIFromArbitraryPage is the security
+// proof: a page at https://evil.com sends a fetch() to the local API.
+// The attack relies on the browser sending Origin: https://evil.com and the
+// server responding with Access-Control-Allow-Origin: * (old behavior).
+// After this fix, the server must NOT set ACAO for disallowed origins.
+func TestCORSAttackVector_BrowserCannotCallAPIFromArbitraryPage(t *testing.T) {
+	const validToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	finalHandler := buildFinalHandler(validToken)
+
+	// Attacker's page sends a preflight.
+	preflightReq := httptest.NewRequest(http.MethodOptions, "/v1/tools/session_init", nil)
+	preflightReq.RemoteAddr = "127.0.0.1:9999" // browser is on the user's machine (loopback)
+	preflightReq.Header.Set("Origin", "https://evil.com")
+	preflightReq.Header.Set("Access-Control-Request-Method", "POST")
+	w := httptest.NewRecorder()
+	finalHandler.ServeHTTP(w, preflightReq)
+
+	// Server returns 204, but MUST NOT include Access-Control-Allow-Origin.
+	// Without ACAO, the browser blocks the follow-up POST.
+	if acao := w.Header().Get("Access-Control-Allow-Origin"); acao != "" {
+		t.Errorf("SECURITY: Access-Control-Allow-Origin = %q for disallowed origin; attack vector is open", acao)
+	}
+
+	// Also verify the actual POST is blocked (no ACAO → browser rejects it,
+	// but server-side we also verify no CORS header is set).
+	actualReq := httptest.NewRequest(http.MethodPost, "/v1/tools/session_init", nil)
+	actualReq.RemoteAddr = "127.0.0.1:9999"
+	actualReq.Header.Set("Origin", "https://evil.com")
+	w2 := httptest.NewRecorder()
+	finalHandler.ServeHTTP(w2, actualReq)
+
+	if acao := w2.Header().Get("Access-Control-Allow-Origin"); acao != "" {
+		t.Errorf("SECURITY: Access-Control-Allow-Origin = %q on actual request from disallowed origin", acao)
+	}
+}
+
+// TestCORSWildcardNeverSet proves that the wildcard is never returned,
+// regardless of origin. This is the invariant that closes F3.
+func TestCORSWildcardNeverSet(t *testing.T) {
+	const validToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	finalHandler := buildFinalHandler(validToken)
+
+	origins := []string{
+		"https://evil.com",
+		"http://attacker.local",
+		"tauri://localhost",        // allowed, but should reflect, not *
+		"http://localhost:3000",    // allowed, but should reflect, not *
+	}
+	for _, origin := range origins {
+		req := httptest.NewRequest(http.MethodPost, "/v1/tools/session_init", nil)
+		req.RemoteAddr = "127.0.0.1:9999"
+		req.Header.Set("Origin", origin)
+		w := httptest.NewRecorder()
+		finalHandler.ServeHTTP(w, req)
+
+		if acao := w.Header().Get("Access-Control-Allow-Origin"); acao == "*" {
+			t.Errorf("origin %q: Access-Control-Allow-Origin = *, wildcard must never be returned", origin)
+		}
 	}
 }
 
