@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/config"
@@ -270,16 +269,17 @@ var goImportRe = regexp.MustCompile(`^\s*(?:(\w+)\s+)?"([^"]+)"`)
 
 // aliasPatternCache caches compiled regex patterns for Go import alias
 // entity reference scanning. Key: alias name, Value: compiled regex.
-// sync.Map is used for concurrent safety (watcher may reparse files in parallel).
-var aliasPatternCache sync.Map
+// Bounded at 10 K entries (alias cardinality is low but unbounded in
+// theory) — evicted entries are recomputed on next access.
+var aliasPatternCache = newBoundedCache[string, *regexp.Regexp](10_000)
 
 // getAliasPattern returns a cached regex for scanning `alias.ExportedName` references.
 func getAliasPattern(alias string) *regexp.Regexp {
-	if cached, ok := aliasPatternCache.Load(alias); ok {
-		return cached.(*regexp.Regexp)
+	if cached, ok := aliasPatternCache.load(alias); ok {
+		return cached
 	}
 	pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(alias) + `\.([A-Z]\w*)`)
-	aliasPatternCache.Store(alias, pattern)
+	aliasPatternCache.store(alias, pattern)
 	return pattern
 }
 
