@@ -43,7 +43,7 @@ func TestGetNodesWithoutEmbeddings_DetectsStaleHash(t *testing.T) {
 	}
 
 	// Simulate a code change: update the node's doc column directly.
-	if _, err := st.db.Exec(`UPDATE nodes SET doc = 'new doc text' WHERE id = ?`, string(nid)); err != nil {
+	if _, err := st.graphDB.Exec(`UPDATE nodes SET doc = 'new doc text' WHERE id = ?`, string(nid)); err != nil {
 		t.Fatalf("UPDATE nodes: %v", err)
 	}
 

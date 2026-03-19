@@ -66,7 +66,7 @@ func (s *Store) InsertMemory(m Memory) (string, error) {
 		return deduped, nil
 	}
 
-	_, err = s.db.Exec(`
+	_, err = s.knowledgeDB.Exec(`
 		INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
 		                      created_at, expires_at, last_accessed_at, source)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -110,7 +110,7 @@ func (s *Store) QueryMemories(tier, entityID, agentID string, limit int) ([]Memo
 	q += ` ORDER BY last_accessed_at DESC LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.knowledgeDB.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query memories: %w", err)
 	}
@@ -149,7 +149,7 @@ func (s *Store) QueryMemoriesIncludingStale(tier, entityID, agentID string, limi
 	q += ` ORDER BY last_accessed_at DESC LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.knowledgeDB.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query memories including stale: %w", err)
 	}
@@ -174,7 +174,7 @@ func (s *Store) QueryRecentSessionMemoriesIncludingStale(agentID string, limit i
 	        AND expires_at > ?
 	      ORDER BY created_at DESC LIMIT ?`
 
-	rows, err := s.db.Query(q, agentID, now, limit)
+	rows, err := s.knowledgeDB.Query(q, agentID, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query session memories including stale: %w", err)
 	}
@@ -209,7 +209,7 @@ func (s *Store) QueryMemoriesForEntities(entityIDs []string, limit int) (map[str
 		  AND stale = 0
 		ORDER BY last_accessed_at DESC`, strings.Join(placeholders, ","))
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.knowledgeDB.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query memories for entities: %w", err)
 	}
@@ -246,7 +246,7 @@ func (s *Store) QueryRecentSessionMemories(agentID string, limit int) ([]Memory,
 	        AND stale = 0
 	      ORDER BY created_at DESC LIMIT ?`
 
-	rows, err := s.db.Query(q, agentID, now, limit)
+	rows, err := s.knowledgeDB.Query(q, agentID, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query session memories: %w", err)
 	}
@@ -264,7 +264,7 @@ func (s *Store) GetLatestWorkSummary(agentID string) (*Memory, error) {
 		return nil, nil
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	row := s.db.QueryRow(`
+	row := s.knowledgeDB.QueryRow(`
 		SELECT id, tier, content, entity_id, agent_id, task_id, tags,
 		       created_at, expires_at, last_accessed_at, source
 		FROM memories
@@ -299,7 +299,7 @@ func (s *Store) TouchMemory(id string) error {
 
 	// Read current tier to compute extension.
 	var tier, expiresAt string
-	err := s.db.QueryRow(`SELECT tier, expires_at FROM memories WHERE id = ?`, id).Scan(&tier, &expiresAt)
+	err := s.knowledgeDB.QueryRow(`SELECT tier, expires_at FROM memories WHERE id = ?`, id).Scan(&tier, &expiresAt)
 	if err != nil {
 		return fmt.Errorf("touch memory: %w", err)
 	}
@@ -316,7 +316,7 @@ func (s *Store) TouchMemory(id string) error {
 		maxExpiry = now.Add(2 * ttlProject)
 	default:
 		// Entity memories: no meaningful extension needed, just update access time.
-		_, err := s.db.Exec(`UPDATE memories SET last_accessed_at = ? WHERE id = ?`, nowStr, id)
+		_, err := s.knowledgeDB.Exec(`UPDATE memories SET last_accessed_at = ? WHERE id = ?`, nowStr, id)
 		return err
 	}
 
@@ -330,7 +330,7 @@ func (s *Store) TouchMemory(id string) error {
 		newExpiry = maxExpiry
 	}
 
-	_, err = s.db.Exec(`UPDATE memories SET last_accessed_at = ?, expires_at = ? WHERE id = ?`,
+	_, err = s.knowledgeDB.Exec(`UPDATE memories SET last_accessed_at = ?, expires_at = ? WHERE id = ?`,
 		nowStr, newExpiry.Format(time.RFC3339), id)
 	return err
 }
@@ -347,7 +347,7 @@ func (s *Store) TouchMemories(ids []string) {
 func (s *Store) ExpireMemories() (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	// Delete expired memories and clean up their anchors in one transaction.
-	tx, err := s.db.Begin()
+	tx, err := s.knowledgeDB.Begin()
 	if err != nil {
 		return 0, fmt.Errorf("begin expire tx: %w", err)
 	}
@@ -380,7 +380,7 @@ func (s *Store) MarkEntityMemoriesStale(entityID, reason string) error {
 	now := time.Now().UTC()
 	staleExpiry := now.Add(30 * 24 * time.Hour).Format(time.RFC3339)
 	staledAt := now.Format(time.RFC3339)
-	_, err := s.db.Exec(`
+	_, err := s.knowledgeDB.Exec(`
 		UPDATE memories SET stale = 1, stale_reason = ?, expires_at = ?, staled_at = ?
 		WHERE tier = 'entity' AND entity_id = ?`,
 		reason, staleExpiry, staledAt, entityID)
@@ -397,7 +397,7 @@ func (s *Store) MarkEntityMemoriesStaleForNodes(nodeIDs []string, reason string)
 	if len(nodeIDs) == 0 {
 		return nil
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.knowledgeDB.Begin()
 	if err != nil {
 		return fmt.Errorf("store.MarkEntityMemoriesStaleForNodes begin tx: %w", err)
 	}
@@ -440,7 +440,7 @@ func (s *Store) MarkAnchoredMemoriesStale(nodeIDs []string, reason string) error
 	if len(nodeIDs) == 0 {
 		return nil
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.knowledgeDB.Begin()
 	if err != nil {
 		return fmt.Errorf("store.MarkAnchoredMemoriesStale begin tx: %w", err)
 	}
@@ -491,7 +491,7 @@ func (s *Store) QueryInvalidatedMemories(agentID string, limit int) ([]Invalidat
 	var rows *sql.Rows
 	var err error
 	if agentID != "" {
-		rows, err = s.db.Query(`
+		rows, err = s.knowledgeDB.Query(`
 			SELECT m.id, m.content, m.tier, m.stale_reason, m.staled_at
 			FROM memories m
 			LEFT JOIN memory_surfaced ms ON m.id = ms.memory_id AND ms.agent_id = ?
@@ -501,7 +501,7 @@ func (s *Store) QueryInvalidatedMemories(agentID string, limit int) ([]Invalidat
 			ORDER BY CASE WHEN m.staled_at = '' THEN m.created_at ELSE m.staled_at END DESC
 			LIMIT ?`, agentID, now, limit)
 	} else {
-		rows, err = s.db.Query(`
+		rows, err = s.knowledgeDB.Query(`
 			SELECT m.id, m.content, m.tier, m.stale_reason, m.staled_at
 			FROM memories m
 			WHERE m.stale = 1
@@ -543,7 +543,7 @@ func (s *Store) MarkMemoriesSurfaced(agentID string, ids []string) error {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	tx, err := s.db.Begin()
+	tx, err := s.knowledgeDB.Begin()
 	if err != nil {
 		return fmt.Errorf("mark memories surfaced begin tx: %w", err)
 	}
@@ -584,7 +584,7 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 		limit = 10
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
 		SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
 		       m.created_at, m.expires_at, m.last_accessed_at, m.source
 		FROM memories m
@@ -611,7 +611,7 @@ func (s *Store) SearchMemoriesIncludingStale(query string, limit int) ([]Memory,
 		limit = 10
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
 		SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
 		       m.created_at, m.expires_at, m.last_accessed_at, m.source
 		FROM memories m
@@ -639,7 +639,7 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 	}
 
 	// ── Phase 1: Validate and check dedup OUTSIDE the tx ──────────────────
-	// SetMaxOpenConns(1) means a tx holds the only conn. Any s.db.Query inside
+	// SetMaxOpenConns(1) means a tx holds the only conn. Any s.knowledgeDB.Query inside
 	// a tx would deadlock. So we run all reads (dedup, defaults) first.
 	m, deduped, err := s.prepareMemory(m)
 	if err != nil {
@@ -648,7 +648,7 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 	if deduped != "" {
 		// Memory deduped — wrap touch + anchor inserts in one tx so crash
 		// between touch and anchors can't leave inconsistent state.
-		tx, err := s.db.Begin()
+		tx, err := s.knowledgeDB.Begin()
 		if err != nil {
 			// Best-effort fallback: touch and anchors separately.
 			_ = s.TouchMemory(deduped)
@@ -659,7 +659,7 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 
 		// Inline touch: just update last_accessed_at (skip TTL extension logic
 		// for simplicity — the full TouchMemory reads tier+expires_at which
-		// would need s.db.QueryRow inside tx, risking the same conn deadlock).
+		// would need s.knowledgeDB.QueryRow inside tx, risking the same conn deadlock).
 		tx.Exec(`UPDATE memories SET last_accessed_at = ? WHERE id = ?`,
 			time.Now().UTC().Format(time.RFC3339), deduped) //nolint:errcheck — best-effort
 
@@ -676,7 +676,7 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 	}
 
 	// ── Phase 2: Insert memory + anchors in one tx ────────────────────────
-	tx, err := s.db.Begin()
+	tx, err := s.knowledgeDB.Begin()
 	if err != nil {
 		return "", fmt.Errorf("begin memory+anchor tx: %w", err)
 	}
@@ -732,7 +732,7 @@ func (s *Store) queryFreshMemoriesForDedup(tier, entityID, agentID string) ([]Me
 		args = append(args, agentID)
 	}
 	q += ` ORDER BY last_accessed_at DESC LIMIT 5`
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.knowledgeDB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -816,7 +816,7 @@ func (s *Store) InsertMemoryAnchors(memoryID string, nodeIDs []string) error {
 		if nid == "" {
 			continue
 		}
-		_, err := s.db.Exec(`INSERT OR IGNORE INTO memory_anchors (memory_id, node_id, created_at) VALUES (?, ?, ?)`,
+		_, err := s.knowledgeDB.Exec(`INSERT OR IGNORE INTO memory_anchors (memory_id, node_id, created_at) VALUES (?, ?, ?)`,
 			memoryID, nid, now)
 		if err != nil {
 			return fmt.Errorf("insert memory anchor: %w", err)
@@ -827,7 +827,7 @@ func (s *Store) InsertMemoryAnchors(memoryID string, nodeIDs []string) error {
 
 // GetMemoryAnchors returns the node IDs anchored to a memory.
 func (s *Store) GetMemoryAnchors(memoryID string) ([]string, error) {
-	rows, err := s.db.Query(`SELECT node_id FROM memory_anchors WHERE memory_id = ? ORDER BY node_id`, memoryID)
+	rows, err := s.knowledgeDB.Query(`SELECT node_id FROM memory_anchors WHERE memory_id = ? ORDER BY node_id`, memoryID)
 	if err != nil {
 		return nil, fmt.Errorf("get memory anchors: %w", err)
 	}
@@ -845,7 +845,7 @@ func (s *Store) GetMemoryAnchors(memoryID string) ([]string, error) {
 
 // CountMemories returns total memory count by tier.
 func (s *Store) CountMemories() (map[string]int, error) {
-	rows, err := s.db.Query(`SELECT tier, COUNT(*) FROM memories GROUP BY tier`)
+	rows, err := s.knowledgeDB.Query(`SELECT tier, COUNT(*) FROM memories GROUP BY tier`)
 	if err != nil {
 		return nil, err
 	}

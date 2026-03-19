@@ -44,7 +44,7 @@ func (s *Store) SendMessage(fromAgent, toAgent, topic, payload, projectID string
 		toAgentVal = toAgent
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.knowledgeDB.Begin()
 	if err != nil {
 		return "", fmt.Errorf("send message: begin tx: %w", err)
 	}
@@ -106,7 +106,7 @@ func (s *Store) GetMessages(agentID string, sinceSeq int64, topicFilter string, 
 	query += ` ORDER BY seq ASC LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.knowledgeDB.Query(query, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("get messages: %w", err)
 	}
@@ -143,7 +143,7 @@ func (s *Store) GetMessages(agentID string, sinceSeq int64, topicFilter string, 
 // (direct messages to the agent or broadcasts). Fast indexed count query.
 func (s *Store) CountUnreadMessages(agentID string) (int, error) {
 	var count int
-	err := s.db.QueryRow(`
+	err := s.knowledgeDB.QueryRow(`
 		SELECT COUNT(*) FROM agent_messages
 		WHERE read_at IS NULL
 		  AND (to_agent = ? OR to_agent IS NULL)`, agentID).Scan(&count)
@@ -155,7 +155,7 @@ func (s *Store) CountUnreadMessages(agentID string) (int, error) {
 // Calling MarkRead on an already-read message is a no-op (idempotent).
 func (s *Store) MarkRead(messageID, agentID string) error {
 	now := time.Now().Unix()
-	res, err := s.db.Exec(
+	res, err := s.knowledgeDB.Exec(
 		`UPDATE agent_messages
 		 SET read_at = ?
 		 WHERE id = ?

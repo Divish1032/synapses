@@ -50,11 +50,11 @@ func (s *Store) UpsertEmbedding(nodeID, model string, vec []float32) error {
 	// or renamed, the query returns empty strings and the hash reflects that —
 	// the embedding will be marked stale on the next re-index pass.
 	var name, sig, doc string
-	_ = s.db.QueryRow(`SELECT name, signature, doc FROM nodes WHERE id = ?`, nodeID).
+	_ = s.graphDB.QueryRow(`SELECT name, signature, doc FROM nodes WHERE id = ?`, nodeID).
 		Scan(&name, &sig, &doc)
 	hash := nodeContentHash(name, sig, doc)
 
-	_, err := s.db.Exec(`
+	_, err := s.graphDB.Exec(`
 		INSERT INTO node_embeddings (node_id, model, embedding, content_hash, indexed_at)
 		VALUES (?, ?, ?, ?, strftime('%s','now'))
 		ON CONFLICT(node_id) DO UPDATE SET
@@ -73,7 +73,7 @@ func (s *Store) UpsertEmbedding(nodeID, model string, vec []float32) error {
 // EmbeddingCount returns the total number of stored embeddings.
 func (s *Store) EmbeddingCount() int {
 	var count int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM node_embeddings`).Scan(&count)
+	_ = s.graphDB.QueryRow(`SELECT COUNT(*) FROM node_embeddings`).Scan(&count)
 	return count
 }
 
@@ -83,7 +83,7 @@ func (s *Store) EmbeddingCount() int {
 // Pass limit=0 to return all matching nodes (no cap).
 func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 	// Fetch all non-file/package nodes with their stored hash (NULL when no embedding exists).
-	rows, err := s.db.Query(`
+	rows, err := s.graphDB.Query(`
 		SELECT n.id, n.name, n.signature, n.doc, COALESCE(e.content_hash, '') AS stored_hash
 		FROM nodes n
 		LEFT JOIN node_embeddings e ON n.id = e.node_id
@@ -115,7 +115,7 @@ func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 // "name signature doc". Returns ("", false) if the node does not exist.
 func (s *Store) GetNodeTextForEmbedding(nodeID string) (text string, ok bool) {
 	var name, sig, doc string
-	err := s.db.QueryRow(
+	err := s.graphDB.QueryRow(
 		`SELECT name, signature, doc FROM nodes WHERE id = ?`, nodeID,
 	).Scan(&name, &sig, &doc)
 	if err != nil {
@@ -135,7 +135,7 @@ func (s *Store) VectorSearch(queryVec []float32, limit int) ([]SearchResult, err
 		return nil, nil
 	}
 
-	rows, err := s.db.Query(`
+	rows, err := s.graphDB.Query(`
 		SELECT e.node_id, n.name, n.signature, n.doc, e.embedding
 		FROM node_embeddings e
 		JOIN nodes n ON e.node_id = n.id`)

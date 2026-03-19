@@ -36,7 +36,10 @@ type ProjectStat struct {
 	DBPath    string
 }
 
-const schema = `
+// graphSchema contains tables for the code-domain graph: nodes, edges,
+// call sites, file modification times, and node embeddings. Code-mode
+// projects open this database; knowledge-mode projects do not.
+const graphSchema = `
 CREATE TABLE IF NOT EXISTS nodes (
     id         TEXT PRIMARY KEY,
     type       TEXT NOT NULL,
@@ -63,9 +66,61 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
--- Agent Task Memory tables: persist plans and actionable tasks across LLM sessions.
--- This is the foundation for Synapses as an inter-agent communication layer —
--- future sessions call get_pending_tasks() to resume exactly where they left off.
+-- File modification-time table for incremental reindex.
+-- Stores path → mtime (Unix nanoseconds) for every file that was successfully
+-- parsed during the last full index. Used by smartReindex to skip unchanged files.
+CREATE TABLE IF NOT EXISTS file_hashes (
+    path     TEXT PRIMARY KEY,
+    mod_time INTEGER NOT NULL
+);
+
+-- Unresolved call sites collected during parsing. Persisted so that cross-project
+-- CALLS edges can be re-resolved on every start after linked project graphs are
+-- merged via MergeFrom. Truncated and replaced on each full index.
+CREATE TABLE IF NOT EXISTS call_sites (
+    caller_id   TEXT NOT NULL,
+    caller_file TEXT NOT NULL,
+    pkg_alias   TEXT NOT NULL DEFAULT '',
+    func_name   TEXT NOT NULL
+);
+
+-- Vector embeddings for graph nodes. Stored separately from the nodes table
+-- to keep the main table lean — embeddings are optional and can be regenerated.
+-- embedding is a little-endian float32 BLOB; indexed_at is Unix seconds.
+CREATE TABLE IF NOT EXISTS node_embeddings (
+    node_id      TEXT PRIMARY KEY,
+    model        TEXT NOT NULL DEFAULT '',
+    embedding    BLOB NOT NULL,
+    content_hash TEXT NOT NULL DEFAULT '',
+    indexed_at   INTEGER NOT NULL
+);
+
+-- FTS5 full-text search index over node names, signatures, and doc comments.
+CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+    node_id   UNINDEXED,
+    name,
+    split_name,
+    signature,
+    doc,
+    tokenize = "unicode61 remove_diacritics 2"
+);
+
+CREATE INDEX IF NOT EXISTS idx_nodes_file      ON nodes(file);
+CREATE INDEX IF NOT EXISTS idx_nodes_name      ON nodes(name);
+CREATE INDEX IF NOT EXISTS idx_edges_from      ON edges(from_id);
+CREATE INDEX IF NOT EXISTS idx_edges_to        ON edges(to_id);
+CREATE INDEX IF NOT EXISTS idx_call_sites_caller ON call_sites(caller_id);
+CREATE INDEX IF NOT EXISTS idx_embeddings_node ON node_embeddings(node_id);
+CREATE INDEX IF NOT EXISTS idx_nodes_type_pkg  ON nodes(type, package);
+CREATE INDEX IF NOT EXISTS idx_edges_to_type   ON edges(to_id, type);
+CREATE INDEX IF NOT EXISTS idx_edges_type_to   ON edges(type, to_id);
+CREATE INDEX IF NOT EXISTS idx_nodes_pkg       ON nodes(package);
+`
+
+// knowledgeSchema contains tables for universal knowledge: memories, episodes,
+// sessions, events, messages, tasks, annotations, rules, gaps, and all agent
+// coordination state. Knowledge-mode projects open ONLY this database.
+const knowledgeSchema = `
 CREATE TABLE IF NOT EXISTS plans (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
@@ -87,48 +142,22 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at   TEXT NOT NULL
 );
 
--- Session state table: captures exact work state so future LLM sessions can
--- resume from the precise point where the previous session stopped.
--- Unlike task.notes (append-only audit trail), session_state is a single mutable
--- row per task that always reflects the latest working state.
 CREATE TABLE IF NOT EXISTS session_state (
     id               TEXT NOT NULL,
-    task_id          TEXT NOT NULL,          -- one state per task (UNIQUE enforced as PK)
+    task_id          TEXT NOT NULL,
     agent_id         TEXT NOT NULL DEFAULT '',
-    approach         TEXT NOT NULL DEFAULT '',      -- current strategy being taken
-    files_modified   TEXT NOT NULL DEFAULT '[]',   -- JSON array of file paths
-    completed_steps  TEXT NOT NULL DEFAULT '[]',   -- JSON array of step descriptions
-    remaining_steps  TEXT NOT NULL DEFAULT '[]',   -- JSON array of step descriptions
-    blockers         TEXT NOT NULL DEFAULT '[]',   -- JSON array of blocker descriptions
-    decisions        TEXT NOT NULL DEFAULT '[]',   -- JSON array of decision records
-    context_snapshot TEXT NOT NULL DEFAULT '',     -- free-form context dump for resumption
+    approach         TEXT NOT NULL DEFAULT '',
+    files_modified   TEXT NOT NULL DEFAULT '[]',
+    completed_steps  TEXT NOT NULL DEFAULT '[]',
+    remaining_steps  TEXT NOT NULL DEFAULT '[]',
+    blockers         TEXT NOT NULL DEFAULT '[]',
+    decisions        TEXT NOT NULL DEFAULT '[]',
+    context_snapshot TEXT NOT NULL DEFAULT '',
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL,
-    PRIMARY KEY (task_id)                    -- one row per task; upsert on task_id
+    PRIMARY KEY (task_id)
 );
 
--- File modification-time table for incremental reindex.
--- Stores path → mtime (Unix nanoseconds) for every file that was successfully
--- parsed during the last full index. Used by smartReindex to skip unchanged files.
-CREATE TABLE IF NOT EXISTS file_hashes (
-    path     TEXT PRIMARY KEY,
-    mod_time INTEGER NOT NULL
-);
-
--- Unresolved call sites collected during parsing. Persisted so that cross-project
--- CALLS edges can be re-resolved on every start after linked project graphs are
--- merged via MergeFrom. Truncated and replaced on each full index.
-CREATE TABLE IF NOT EXISTS call_sites (
-    caller_id   TEXT NOT NULL,
-    caller_file TEXT NOT NULL,
-    pkg_alias   TEXT NOT NULL DEFAULT '',
-    func_name   TEXT NOT NULL
-);
-
--- Dynamic rules table: stores architectural constraints added/modified by AI
--- agents at runtime. Uses CREATE TABLE IF NOT EXISTS so existing databases
--- pick this up automatically the next time Open() runs the schema — no explicit
--- migration needed.
 CREATE TABLE IF NOT EXISTS dynamic_rules (
     id                TEXT PRIMARY KEY,
     description       TEXT NOT NULL DEFAULT '',
@@ -143,9 +172,6 @@ CREATE TABLE IF NOT EXISTS dynamic_rules (
     updated_at        TEXT NOT NULL
 );
 
--- Violation audit log: records every violation detected by get_violations.
--- Same violation (rule+from+to+edge) is deduped by a stable SHA-1 ID;
--- re-detection updates last_seen and increments occurrences.
 CREATE TABLE IF NOT EXISTS violation_log (
     id          TEXT PRIMARY KEY,
     rule_id     TEXT NOT NULL,
@@ -158,44 +184,12 @@ CREATE TABLE IF NOT EXISTS violation_log (
     occurrences INTEGER NOT NULL DEFAULT 1
 );
 
-CREATE INDEX IF NOT EXISTS idx_nodes_file      ON nodes(file);
-CREATE INDEX IF NOT EXISTS idx_nodes_name      ON nodes(name);
-CREATE INDEX IF NOT EXISTS idx_edges_from      ON edges(from_id);
-CREATE INDEX IF NOT EXISTS idx_edges_to        ON edges(to_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_status    ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_plan_id   ON tasks(plan_id);
-CREATE INDEX IF NOT EXISTS idx_call_sites_caller ON call_sites(caller_id);
-CREATE INDEX IF NOT EXISTS idx_dynamic_rules_id  ON dynamic_rules(id);
-CREATE INDEX IF NOT EXISTS idx_vlog_rule       ON violation_log(rule_id);
-CREATE INDEX IF NOT EXISTS idx_vlog_last_seen  ON violation_log(last_seen);
-
--- R32: Compound indexes for sub-linear access at federation scale (30k+ nodes).
--- All use IF NOT EXISTS — safe to apply to existing databases without migration.
---
--- idx_nodes_type_pkg: type-filtered package queries ("all functions in package X").
---   Used by future get_repo_map and explain_codebase tools.
--- idx_edges_to_type:  inbound edge lookup by type ("who CALLS X?", "what IMPLEMENTS X?").
---   Compound supersedes the single-column idx_edges_to for type-filtered lookups.
--- idx_edges_type_to:  covering index for edge type aggregation ("COUNT(*) WHERE type='CALLS'
---   GROUP BY to_id" in SaveGraph). Covering = both columns in the index, no table fetch.
--- idx_nodes_pkg:      package-only queries ("all nodes in package X", package-local recency).
-CREATE INDEX IF NOT EXISTS idx_nodes_type_pkg ON nodes(type, package);
-CREATE INDEX IF NOT EXISTS idx_edges_to_type  ON edges(to_id, type);
-CREATE INDEX IF NOT EXISTS idx_edges_type_to  ON edges(type, to_id);
-CREATE INDEX IF NOT EXISTS idx_nodes_pkg      ON nodes(package);
-
--- Agent registry: tracks which agents have interacted with Synapses.
--- Self-declared identity (no auth); upserted on every call with agent_id.
 CREATE TABLE IF NOT EXISTS agents (
     id        TEXT PRIMARY KEY,
     last_seen TEXT NOT NULL,
     metadata  TEXT NOT NULL DEFAULT '{}'
 );
 
--- Agent context profile: tracks what each agent already knows so session_init
--- can skip unchanged sections and avoid redundant token delivery.
--- identity_hash is SHA-1 of the serialized ProjectIdentity; when it matches
--- the current hash, project_identity is omitted from session_init responses.
 CREATE TABLE IF NOT EXISTS agent_context (
     agent_id       TEXT PRIMARY KEY,
     last_event_seq INTEGER NOT NULL DEFAULT 0,
@@ -203,11 +197,7 @@ CREATE TABLE IF NOT EXISTS agent_context (
     last_session   TEXT    NOT NULL DEFAULT '',
     task_seq       INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_agent_context_id ON agent_context(agent_id);
 
--- Pull-based event log: agents poll this table to discover what happened since
--- their last check. Append-only; rows older than 24 hours are pruned automatically.
--- Sequence number (seq) acts as a cursor — agents pass since_seq on each call.
 CREATE TABLE IF NOT EXISTS events (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
     type       TEXT NOT NULL,
@@ -215,24 +205,14 @@ CREATE TABLE IF NOT EXISTS events (
     payload    TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
-CREATE INDEX IF NOT EXISTS idx_events_type    ON events(type);
 
--- Web documentation cache: stores fetched HTML-stripped content from pkg.go.dev
--- and arbitrary URLs. Go package docs are keyed by "pkg:<importPath>@<version>"
--- with ttl_hours=0 (never expire — valid until go.mod bumps the version).
--- Arbitrary URL cache uses ttl_hours>0 (e.g., 24h). Expiry check:
---   ttl_hours=0 OR datetime(fetched_at, '+' || ttl_hours || ' hours') > datetime('now')
 CREATE TABLE IF NOT EXISTS web_cache (
     url        TEXT PRIMARY KEY,
     content    TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
     ttl_hours  INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_web_cache_fetched ON web_cache(fetched_at);
 
--- Shared annotations: agents can attach notes to graph nodes that are visible
--- to all other agents via get_context and find_entity responses.
 CREATE TABLE IF NOT EXISTS annotations (
     id         TEXT PRIMARY KEY,
     node_id    TEXT NOT NULL,
@@ -241,11 +221,8 @@ CREATE TABLE IF NOT EXISTS annotations (
     created_at TEXT NOT NULL,
     source     TEXT NOT NULL DEFAULT 'agent'
 );
-CREATE INDEX IF NOT EXISTS idx_annotations_node ON annotations(node_id);
 
--- DEPRECATED: work_claims is no longer queried (within-project coordination removed
--- in the knowledge substrate pivot). Table definition preserved so existing databases
--- with data in this table can still be opened without schema errors.
+-- DEPRECATED: preserved for existing databases.
 CREATE TABLE IF NOT EXISTS work_claims (
     agent_id   TEXT NOT NULL,
     scope      TEXT NOT NULL,
@@ -254,224 +231,130 @@ CREATE TABLE IF NOT EXISTS work_claims (
     expires_at TEXT NOT NULL,
     PRIMARY KEY (agent_id, scope)
 );
-CREATE INDEX IF NOT EXISTS idx_work_claims_scope   ON work_claims(scope);
-CREATE INDEX IF NOT EXISTS idx_work_claims_expires ON work_claims(expires_at);
 
--- FTS5 full-text search index over node names, signatures, and doc comments.
--- Enables semantic_search queries like "find code that handles authentication"
--- without knowing exact function names. Uses the unicode61 tokenizer; camelCase
--- names are also indexed as space-split words (split_name column) so a query
--- for "carve" finds "CarveEgoGraph".
-CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-    node_id   UNINDEXED,
-    name,
-    split_name,
-    signature,
-    doc,
-    tokenize = "unicode61 remove_diacritics 2"
-);
-
--- Agent consensus protocol: agents can propose architectural changes and vote
--- on each other's proposals. A proposal is resolved when approve or reject votes
--- reach the threshold. Moves Synapses from a coordination layer to a governance layer.
 CREATE TABLE IF NOT EXISTS proposals (
     id             TEXT PRIMARY KEY,
     agent_id       TEXT NOT NULL,
     title          TEXT NOT NULL,
     description    TEXT NOT NULL DEFAULT '',
-    affected_nodes TEXT NOT NULL DEFAULT '[]',  -- JSON array of node IDs
-    status         TEXT NOT NULL DEFAULT 'open', -- open | accepted | rejected | withdrawn
-    vote_threshold INTEGER NOT NULL DEFAULT 2,   -- votes needed to decide
+    affected_nodes TEXT NOT NULL DEFAULT '[]',
+    status         TEXT NOT NULL DEFAULT 'open',
+    vote_threshold INTEGER NOT NULL DEFAULT 2,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_proposals_status    ON proposals(status);
-CREATE INDEX IF NOT EXISTS idx_proposals_agent     ON proposals(agent_id);
 
 CREATE TABLE IF NOT EXISTS proposal_votes (
     proposal_id TEXT NOT NULL,
     agent_id    TEXT NOT NULL,
-    vote        TEXT NOT NULL,  -- approve | reject | abstain
+    vote        TEXT NOT NULL,
     rationale   TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL,
     PRIMARY KEY (proposal_id, agent_id)
 );
-CREATE INDEX IF NOT EXISTS idx_pvotes_proposal ON proposal_votes(proposal_id);
 
 CREATE TABLE IF NOT EXISTS tool_calls (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     tool_name   TEXT    NOT NULL,
     agent_id    TEXT    NOT NULL DEFAULT '',
-    session_id  TEXT    NOT NULL DEFAULT '',  -- Synapses session UUID; '' for pre-init calls
+    session_id  TEXT    NOT NULL DEFAULT '',
     entity      TEXT    NOT NULL DEFAULT '',
     duration_ms INTEGER NOT NULL DEFAULT 0,
     success     INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
-CREATE INDEX IF NOT EXISTS idx_tool_calls_tool    ON tool_calls(tool_name);
-CREATE INDEX IF NOT EXISTS idx_tool_calls_ts      ON tool_calls(created_at);
-CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id) WHERE session_id != '';
 
--- Session lifecycle tracking (Layer 1 of Session Intelligence).
--- A session starts on session_init() and ends on end_session() or after 30 min inactivity.
--- last_seen_at is updated on every tool call (heartbeat piggyback) so stale detection
--- needs no background goroutine — just check: last_seen_at < now - 30 minutes.
--- NOTE: state and parent_session_id columns are added by migrations (lines 805-806)
--- to support both fresh and upgraded databases uniformly.
 CREATE TABLE IF NOT EXISTS sessions (
-    id                TEXT    PRIMARY KEY,  -- Synapses-generated UUID
+    id                TEXT    PRIMARY KEY,
     agent_id          TEXT    NOT NULL,
     project_id        TEXT    NOT NULL,
-    mcp_session_id    TEXT    NOT NULL DEFAULT '', -- MCP transport connection ID; "stdio" for stdio mode
-    intent            TEXT    NOT NULL DEFAULT '', -- declared at session_init
-    started_at        INTEGER NOT NULL,     -- Unix epoch seconds (UTC)
-    last_seen_at      INTEGER NOT NULL,     -- Unix epoch seconds; updated on every tool call
-    ended_at          INTEGER,              -- Unix epoch seconds; NULL = not cleanly closed
-    end_reason        TEXT    NOT NULL DEFAULT '', -- clean | timeout | reconciled | superseded
-    outcome           TEXT    NOT NULL DEFAULT '', -- success | failure | partial | unknown
-    summary           TEXT    NOT NULL DEFAULT '', -- from end_session or reconciliation
+    mcp_session_id    TEXT    NOT NULL DEFAULT '',
+    intent            TEXT    NOT NULL DEFAULT '',
+    started_at        INTEGER NOT NULL,
+    last_seen_at      INTEGER NOT NULL,
+    ended_at          INTEGER,
+    end_reason        TEXT    NOT NULL DEFAULT '',
+    outcome           TEXT    NOT NULL DEFAULT '',
+    summary           TEXT    NOT NULL DEFAULT '',
     tool_calls        INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_sessions_agent   ON sessions(agent_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_active  ON sessions(ended_at) WHERE ended_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_sessions_mcp     ON sessions(mcp_session_id, agent_id, project_id);
--- idx_sessions_state is created by migrations (line 807) after state column exists
 
--- Links sessions to the tasks they created, claimed, or completed.
--- Enables orphaned task detection: tasks with action 'created' or 'claimed'
--- in a stale session but no corresponding 'completed' action.
 CREATE TABLE IF NOT EXISTS session_tasks (
     session_id TEXT    NOT NULL,
     task_id    TEXT    NOT NULL,
-    action     TEXT    NOT NULL,  -- created | claimed | completed | abandoned
-    at         INTEGER NOT NULL   -- Unix epoch seconds (UTC)
+    action     TEXT    NOT NULL,
+    at         INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_session_tasks_session ON session_tasks(session_id);
-CREATE INDEX IF NOT EXISTS idx_session_tasks_task    ON session_tasks(task_id);
 
--- Agent Message Bus: direct and broadcast messaging between agents.
--- Enables inter-agent communication without requiring persistent HTTP endpoints.
--- Agents are ephemeral LLM sessions; SQLite acts as the message broker.
--- to_agent NULL = broadcast (all agents receive it).
--- seq is the cursor for get_messages polling (same pattern as events table).
 CREATE TABLE IF NOT EXISTS agent_messages (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
     id         TEXT    NOT NULL UNIQUE,
     from_agent TEXT    NOT NULL,
-    to_agent   TEXT,                        -- NULL = broadcast to all agents
-    topic      TEXT    NOT NULL,            -- e.g. "api_changed", "task_blocked"
-    payload    TEXT    NOT NULL DEFAULT '{}', -- arbitrary JSON
-    project_id TEXT    NOT NULL DEFAULT '', -- repo context (empty = global)
-    created_at INTEGER NOT NULL,            -- Unix seconds
-    read_at    INTEGER                      -- NULL = unread; set by mark_read
+    to_agent   TEXT,
+    topic      TEXT    NOT NULL,
+    payload    TEXT    NOT NULL DEFAULT '{}',
+    project_id TEXT    NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    read_at    INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_messages_to_agent ON agent_messages(to_agent, read_at);
-CREATE INDEX IF NOT EXISTS idx_messages_created  ON agent_messages(created_at);
-CREATE INDEX IF NOT EXISTS idx_messages_seq      ON agent_messages(seq);
 
--- Episodic memory: agents record decisions and failures so future sessions can
--- recall them. episode_type distinguishes decisions from failures; outcome tracks
--- whether the approach worked. promoted_rule links a failure to the dynamic_rule
--- it eventually spawned (closes the failure→pattern→constraint feedback loop).
 CREATE TABLE IF NOT EXISTS episodes (
     id              TEXT PRIMARY KEY,
     agent_id        TEXT NOT NULL,
     project_id      TEXT NOT NULL DEFAULT '',
-    created_at      INTEGER NOT NULL,            -- Unix seconds
-    episode_type    TEXT NOT NULL DEFAULT 'decision', -- 'decision' | 'failure' | 'pattern' | 'rule_proposal'
-    outcome         TEXT NOT NULL DEFAULT 'unknown',  -- 'success' | 'failure' | 'partial' | 'unknown'
-    trigger         TEXT NOT NULL DEFAULT '',    -- what prompted this episode
-    decision        TEXT NOT NULL,               -- the decision or observation (concise)
-    rationale       TEXT NOT NULL DEFAULT '',    -- why (1-3 sentences)
-    affected_files  TEXT NOT NULL DEFAULT '[]',  -- JSON array of file paths
-    affected_nodes  TEXT NOT NULL DEFAULT '[]',  -- JSON array of graph node IDs
-    tags            TEXT NOT NULL DEFAULT '[]',  -- JSON array e.g. ["auth", "breaking"]
-    importance      REAL NOT NULL DEFAULT 0.5,   -- 0.0-1.0; reserved for future decay/pruning
-    promoted_rule   TEXT NOT NULL DEFAULT ''     -- rule_id if promoted to a dynamic_rule
+    created_at      INTEGER NOT NULL,
+    episode_type    TEXT NOT NULL DEFAULT 'decision',
+    outcome         TEXT NOT NULL DEFAULT 'unknown',
+    trigger         TEXT NOT NULL DEFAULT '',
+    decision        TEXT NOT NULL,
+    rationale       TEXT NOT NULL DEFAULT '',
+    affected_files  TEXT NOT NULL DEFAULT '[]',
+    affected_nodes  TEXT NOT NULL DEFAULT '[]',
+    tags            TEXT NOT NULL DEFAULT '[]',
+    importance      REAL NOT NULL DEFAULT 0.5,
+    promoted_rule   TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_episodes_agent   ON episodes(agent_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_episodes_project ON episodes(project_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_episodes_type    ON episodes(episode_type, outcome);
 
--- R32: Quality Intelligence — agent-discovered quality gaps on code entities.
--- Unlike architecture violations (deterministic rule checks), quality gaps are
--- agent-asserted findings discovered through reasoning about a specific entity.
--- They persist across sessions, have a severity/status lifecycle, and surface
--- in get_violations() and get_context() so future agents never re-discover them.
 CREATE TABLE IF NOT EXISTS quality_gaps (
-    id          TEXT PRIMARY KEY,            -- "{node_id}:{gap_id}" stable slug
+    id          TEXT PRIMARY KEY,
     node_id     TEXT NOT NULL,
-    gap_id      TEXT NOT NULL,               -- human slug: "dist-relative-path"
+    gap_id      TEXT NOT NULL,
     description TEXT NOT NULL,
-    severity    TEXT NOT NULL DEFAULT 'medium',  -- low | medium | high | critical
-    status      TEXT NOT NULL DEFAULT 'open',    -- open | fixed | wontfix
+    severity    TEXT NOT NULL DEFAULT 'medium',
+    status      TEXT NOT NULL DEFAULT 'open',
     found_by    TEXT NOT NULL DEFAULT '',
     found_at    TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
     fix_notes   TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_quality_gaps_node   ON quality_gaps(node_id);
-CREATE INDEX IF NOT EXISTS idx_quality_gaps_status ON quality_gaps(status);
 
--- Vector embeddings for graph nodes. Stored separately from the nodes table
--- to keep the main table lean — embeddings are optional and can be regenerated.
--- embedding is a little-endian float32 BLOB; indexed_at is Unix seconds.
-CREATE TABLE IF NOT EXISTS node_embeddings (
-    node_id      TEXT PRIMARY KEY,
-    model        TEXT NOT NULL DEFAULT '',
-    embedding    BLOB NOT NULL,
-    content_hash TEXT NOT NULL DEFAULT '',
-    indexed_at   INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_embeddings_node ON node_embeddings(node_id);
-
--- Unified memories table: 3-tier memory model (session_log, entity, project).
--- Graph-attached memories that survive across sessions and agents.
 CREATE TABLE IF NOT EXISTS memories (
     id               TEXT PRIMARY KEY,
-    tier             TEXT NOT NULL,          -- 'session_log' | 'entity' | 'project'
+    tier             TEXT NOT NULL,
     content          TEXT NOT NULL,
-    entity_id        TEXT DEFAULT '',        -- node_id for entity tier, empty otherwise
+    entity_id        TEXT DEFAULT '',
     agent_id         TEXT DEFAULT '',
     task_id          TEXT DEFAULT '',
-    tags             TEXT NOT NULL DEFAULT '[]', -- JSON array
+    tags             TEXT NOT NULL DEFAULT '[]',
     created_at       TEXT NOT NULL,
     expires_at       TEXT NOT NULL,
     last_accessed_at TEXT NOT NULL,
-    source           TEXT NOT NULL DEFAULT 'manual' -- 'auto' | 'manual' | 'extracted'
+    source           TEXT NOT NULL DEFAULT 'manual'
 );
-CREATE INDEX IF NOT EXISTS idx_memories_tier      ON memories(tier);
-CREATE INDEX IF NOT EXISTS idx_memories_entity    ON memories(entity_id) WHERE entity_id != '';
-CREATE INDEX IF NOT EXISTS idx_memories_agent     ON memories(agent_id) WHERE agent_id != '';
-CREATE INDEX IF NOT EXISTS idx_memories_expires   ON memories(expires_at);
 
--- FTS5 over episode content for check_plan_safety and recall().
--- content='episodes' makes this an external-content FTS5 table: FTS stores its
--- own index but reads content from the episodes table on demand.
--- Triggers below keep the FTS index atomically in sync on every INSERT/UPDATE/DELETE.
+-- FTS5 for episodes.
 CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(
-    decision,
-    rationale,
-    trigger,
-    tags,
-    content='episodes',
-    content_rowid='rowid'
+    decision, rationale, trigger, tags,
+    content='episodes', content_rowid='rowid'
 );
-
--- Keep episodes_fts in sync automatically. Without these triggers the FTS index
--- goes stale whenever episodes are inserted or deleted, making recall() and
--- check_plan_safety() silently return no results.
 CREATE TRIGGER IF NOT EXISTS episodes_ai AFTER INSERT ON episodes BEGIN
     INSERT INTO episodes_fts(rowid, decision, rationale, trigger, tags)
     VALUES (new.rowid, new.decision, new.rationale, new.trigger, new.tags);
 END;
-
 CREATE TRIGGER IF NOT EXISTS episodes_ad AFTER DELETE ON episodes BEGIN
     INSERT INTO episodes_fts(episodes_fts, rowid, decision, rationale, trigger, tags)
     VALUES ('delete', old.rowid, old.decision, old.rationale, old.trigger, old.tags);
 END;
-
 CREATE TRIGGER IF NOT EXISTS episodes_au AFTER UPDATE ON episodes BEGIN
     INSERT INTO episodes_fts(episodes_fts, rowid, decision, rationale, trigger, tags)
     VALUES ('delete', old.rowid, old.decision, old.rationale, old.trigger, old.tags);
@@ -479,10 +362,6 @@ CREATE TRIGGER IF NOT EXISTS episodes_au AFTER UPDATE ON episodes BEGIN
     VALUES (new.rowid, new.decision, new.rationale, new.trigger, new.tags);
 END;
 
--- Cross-project dependency tracking: records which local entities depend on
--- entities in federated sibling projects. Populated at index time by the
--- federation tracker (Tier 1: deterministic, Tier 2: brain LLM).
--- Used by session_init for git-based drift detection.
 CREATE TABLE IF NOT EXISTS cross_project_deps (
     from_entity          TEXT NOT NULL,
     to_project           TEXT NOT NULL,
@@ -494,13 +373,54 @@ CREATE TABLE IF NOT EXISTS cross_project_deps (
     verified_signature   TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (from_entity, to_project, to_entity)
 );
-CREATE INDEX IF NOT EXISTS idx_cross_deps_project ON cross_project_deps(to_project);
-CREATE INDEX IF NOT EXISTS idx_cross_deps_file    ON cross_project_deps(to_project, to_file);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_status        ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_plan_id       ON tasks(plan_id);
+CREATE INDEX IF NOT EXISTS idx_dynamic_rules_id    ON dynamic_rules(id);
+CREATE INDEX IF NOT EXISTS idx_vlog_rule           ON violation_log(rule_id);
+CREATE INDEX IF NOT EXISTS idx_vlog_last_seen      ON violation_log(last_seen);
+CREATE INDEX IF NOT EXISTS idx_agent_context_id    ON agent_context(agent_id);
+CREATE INDEX IF NOT EXISTS idx_events_created      ON events(created_at);
+CREATE INDEX IF NOT EXISTS idx_events_type         ON events(type);
+CREATE INDEX IF NOT EXISTS idx_web_cache_fetched   ON web_cache(fetched_at);
+CREATE INDEX IF NOT EXISTS idx_annotations_node    ON annotations(node_id);
+CREATE INDEX IF NOT EXISTS idx_work_claims_scope   ON work_claims(scope);
+CREATE INDEX IF NOT EXISTS idx_work_claims_expires ON work_claims(expires_at);
+CREATE INDEX IF NOT EXISTS idx_proposals_status    ON proposals(status);
+CREATE INDEX IF NOT EXISTS idx_proposals_agent     ON proposals(agent_id);
+CREATE INDEX IF NOT EXISTS idx_pvotes_proposal     ON proposal_votes(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_tool     ON tool_calls(tool_name);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_ts       ON tool_calls(created_at);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_session  ON tool_calls(session_id) WHERE session_id != '';
+CREATE INDEX IF NOT EXISTS idx_sessions_agent      ON sessions(agent_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_project    ON sessions(project_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_active     ON sessions(ended_at) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_mcp        ON sessions(mcp_session_id, agent_id, project_id);
+CREATE INDEX IF NOT EXISTS idx_session_tasks_session ON session_tasks(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_tasks_task  ON session_tasks(task_id);
+CREATE INDEX IF NOT EXISTS idx_messages_to_agent   ON agent_messages(to_agent, read_at);
+CREATE INDEX IF NOT EXISTS idx_messages_created    ON agent_messages(created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_seq        ON agent_messages(seq);
+CREATE INDEX IF NOT EXISTS idx_episodes_agent      ON episodes(agent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_episodes_project    ON episodes(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_episodes_type       ON episodes(episode_type, outcome);
+CREATE INDEX IF NOT EXISTS idx_quality_gaps_node   ON quality_gaps(node_id);
+CREATE INDEX IF NOT EXISTS idx_quality_gaps_status ON quality_gaps(status);
+CREATE INDEX IF NOT EXISTS idx_memories_tier       ON memories(tier);
+CREATE INDEX IF NOT EXISTS idx_memories_entity     ON memories(entity_id) WHERE entity_id != '';
+CREATE INDEX IF NOT EXISTS idx_memories_agent      ON memories(agent_id) WHERE agent_id != '';
+CREATE INDEX IF NOT EXISTS idx_memories_expires    ON memories(expires_at);
+CREATE INDEX IF NOT EXISTS idx_cross_deps_project  ON cross_project_deps(to_project);
+CREATE INDEX IF NOT EXISTS idx_cross_deps_file     ON cross_project_deps(to_project, to_file);
 `
 
-// Store wraps a SQLite database and provides graph serialisation.
+// Store wraps two SQLite databases — one for the code graph (nodes, edges,
+// call sites, file hashes) and one for universal knowledge (memories, episodes,
+// sessions, events, messages, tasks, annotations, rules, gaps). Knowledge-mode
+// projects open only the knowledgeDB; code-mode projects open both.
 type Store struct {
-	db *sql.DB
+	graphDB     *sql.DB // code-domain: nodes, edges, meta, file_hashes, call_sites, node_embeddings
+	knowledgeDB *sql.DB // universal: memories, episodes, sessions, events, tasks, agents, ...
 
 	// lastPruneMu guards both prune timestamps to prevent redundant concurrent prunes.
 	lastPruneMu        sync.Mutex
@@ -547,72 +467,103 @@ func DefaultPath(repoRoot string) (string, error) {
 	return filepath.Join(dir, safe+".db"), nil
 }
 
-// Open opens (or creates) the SQLite store at the given path and applies
-// the schema migrations.
+// Open opens (or creates) both the graph and knowledge SQLite databases at
+// the given path and applies schema migrations. The graph database lives at
+// path; the knowledge database lives at KnowledgePath(path).
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	graphDB, err := openSQLiteDB(path)
 	if err != nil {
-		return nil, fmt.Errorf("open db %s: %w", path, err)
+		return nil, fmt.Errorf("open graph db: %w", err)
 	}
-	db.SetMaxOpenConns(1) // SQLite is single-writer
-	// WAL journal mode: allows concurrent readers alongside the single writer,
-	// so `synapses query` can run while the MCP server holds the connection.
-	// Safe to call on existing DBs — SQLite applies it transparently.
-	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
-		// Non-fatal: old DBs without WAL still work, just without concurrent reads.
-		fmt.Fprintf(os.Stderr, "synapses: store: enable WAL: %v\n", err)
+	if _, err := graphDB.Exec(graphSchema); err != nil {
+		graphDB.Close()
+		return nil, fmt.Errorf("apply graph schema: %w", err)
 	}
-	// busy_timeout: under heavy watcher load (rapid file changes) the write
-	// connection can hit SQLITE_BUSY. Waiting up to 5 s before failing avoids
-	// spurious errors without stalling the daemon noticeably.
-	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: store: set busy_timeout: %v\n", err)
+
+	kPath := KnowledgePath(path)
+	knowledgeDB, err := openSQLiteDB(kPath)
+	if err != nil {
+		graphDB.Close()
+		return nil, fmt.Errorf("open knowledge db: %w", err)
 	}
-	if _, err := db.Exec(schema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
+	if _, err := knowledgeDB.Exec(knowledgeSchema); err != nil {
+		graphDB.Close()
+		knowledgeDB.Close()
+		return nil, fmt.Errorf("apply knowledge schema: %w", err)
 	}
-	// Migrate existing databases: promote metadata fields to first-class columns.
+	// ── Graph migrations ─────────────────────────────────────────────────
 	// "duplicate column name" errors are safe to ignore — they mean the column
 	// was already created by CREATE TABLE (fresh DB) or a previous migration run.
 	for _, m := range []string{
 		`ALTER TABLE nodes ADD COLUMN doc TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN signature TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN line_count INTEGER NOT NULL DEFAULT 0`,
-		// v1.0.4: Agent identity columns
+		`ALTER TABLE nodes ADD COLUMN stable_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE nodes ADD COLUMN provenance TEXT NOT NULL DEFAULT 'user-authored'`,
+		`ALTER TABLE nodes ADD COLUMN domain TEXT NOT NULL DEFAULT 'code'`,
+		`ALTER TABLE nodes ADD COLUMN prev_signature TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE node_embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := graphDB.Exec(m); err != nil && !isDupColumnErr(err) {
+			graphDB.Close()
+			knowledgeDB.Close()
+			return nil, fmt.Errorf("migrate graph schema: %w", err)
+		}
+	}
+
+	// ── Knowledge migrations ─────────────────────────────────────────────
+	for _, m := range []string{
 		`ALTER TABLE plans ADD COLUMN created_by TEXT NOT NULL DEFAULT ''`,
-		// F11: Smart Task Lifecycle — plan auto-completion timestamp (unix seconds, 0=active).
 		`ALTER TABLE plans ADD COLUMN completed_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE tasks ADD COLUMN assigned_to TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE tasks ADD COLUMN last_updated_by TEXT NOT NULL DEFAULT ''`,
-		// v1.0.4: Task dependencies
 		`ALTER TABLE tasks ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]'`,
-		// v0.2.0: Stable cross-project node identity (survives file renames).
-		`ALTER TABLE nodes ADD COLUMN stable_id TEXT NOT NULL DEFAULT ''`,
-		// B1: Reflective Synthesis — distinguish agent vs system-generated annotations.
+		`ALTER TABLE tasks ADD COLUMN start_commit TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN commits TEXT NOT NULL DEFAULT '[]'`,
 		`ALTER TABLE annotations ADD COLUMN source TEXT NOT NULL DEFAULT 'agent'`,
-		// R5: Unified memories table — 3-tier memory model for session continuity.
-		`CREATE TABLE IF NOT EXISTS memories (
-			id               TEXT PRIMARY KEY,
-			tier             TEXT NOT NULL,
-			content          TEXT NOT NULL,
-			entity_id        TEXT DEFAULT '',
-			agent_id         TEXT DEFAULT '',
-			task_id          TEXT DEFAULT '',
-			tags             TEXT NOT NULL DEFAULT '[]',
-			created_at       TEXT NOT NULL,
-			expires_at       TEXT NOT NULL,
-			last_accessed_at TEXT NOT NULL,
-			source           TEXT NOT NULL DEFAULT 'manual'
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_annotations_system_dedup ON annotations(node_id, note) WHERE source='system'`,
+		`ALTER TABLE annotations ADD COLUMN stale INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE agents ADD COLUMN current_task_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN current_task_title TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN current_focus TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN current_scope TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN project_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN focus_file  TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN focus_since TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN intent      TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE dynamic_rules ADD COLUMN rule_type TEXT NOT NULL DEFAULT 'structural'`,
+		`CREATE TABLE IF NOT EXISTS agent_watched_symbols (
+			agent_id    TEXT NOT NULL,
+			entity_id   TEXT NOT NULL,
+			entity_name TEXT NOT NULL,
+			entity_file TEXT NOT NULL,
+			watched_at  TEXT NOT NULL,
+			PRIMARY KEY (agent_id, entity_id)
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_tier    ON memories(tier)`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_entity  ON memories(entity_id) WHERE entity_id != ''`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_agent   ON memories(agent_id) WHERE agent_id != ''`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at)`,
-		// FTS5 over unified memory content so recall() can search across all tiers.
-		// content='memories' makes this an external-content table: FTS stores its own
-		// index but reads content from the memories table on demand. Triggers below
-		// keep the FTS index atomically in sync on every INSERT/UPDATE/DELETE.
+		`CREATE INDEX IF NOT EXISTS idx_watched_symbols_entity ON agent_watched_symbols(entity_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_watched_symbols_agent  ON agent_watched_symbols(agent_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_agent           ON events(agent_id)`,
+		`CREATE TABLE IF NOT EXISTS memory_anchors (
+			memory_id  TEXT NOT NULL,
+			node_id    TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (memory_id, node_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_anchors_node ON memory_anchors(node_id)`,
+		`ALTER TABLE memories ADD COLUMN stale INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE memories ADD COLUMN stale_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memories ADD COLUMN surfaced_at TEXT DEFAULT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_stale ON memories(stale) WHERE stale = 1`,
+		`ALTER TABLE memories ADD COLUMN staled_at TEXT NOT NULL DEFAULT ''`,
+		`CREATE TABLE IF NOT EXISTS memory_surfaced (
+			memory_id TEXT NOT NULL,
+			agent_id  TEXT NOT NULL,
+			surfaced_at TEXT NOT NULL,
+			PRIMARY KEY (memory_id, agent_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_surfaced_agent ON memory_surfaced(agent_id)`,
+		`ALTER TABLE tool_calls ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id) WHERE session_id != ''`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
 			content,
 			content='memories',
@@ -630,215 +581,58 @@ func Open(path string) (*Store, error) {
 			VALUES ('delete', old.rowid, old.content);
 			INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
 		END`,
-		// Note: memories_fts backfill is handled after migration loop (conditional,
-		// like nodes_fts) rather than here, to avoid rebuilding on every startup.
-		// B11: Content-hash invalidation — detect stale embeddings when code changes.
-		`ALTER TABLE node_embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
-		// Dedup system annotations: prevent identical auditor notes from accumulating
-		// on the same node when update_task(done) is called more than once.
-		// Partial index (WHERE source='system') leaves agent annotations unrestricted.
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_annotations_system_dedup ON annotations(node_id, note) WHERE source='system'`,
-		// GAP-3: Annotation staleness — marks annotations written against a node
-		// whose call graph has changed significantly (fan-in delta >20% or node removed).
-		`ALTER TABLE annotations ADD COLUMN stale INTEGER NOT NULL DEFAULT 0`,
-		// Cross-agent awareness: track what each agent is currently doing so
-		// peers can see activity in real time via session_init and get_agents.
-		`ALTER TABLE agents ADD COLUMN current_task_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE agents ADD COLUMN current_task_title TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE agents ADD COLUMN current_focus TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE agents ADD COLUMN current_scope TEXT NOT NULL DEFAULT ''`,
-		// project_id marks agents synced from federated peer projects.
-		// Local agents have project_id = ''. Used for cross-project agent visibility.
-		`ALTER TABLE agents ADD COLUMN project_id TEXT NOT NULL DEFAULT ''`,
-		// Context Efficiency Layer: agent context profile for incremental session_init.
-		`CREATE TABLE IF NOT EXISTS agent_context (
-			agent_id       TEXT PRIMARY KEY,
-			last_event_seq INTEGER NOT NULL DEFAULT 0,
-			identity_hash  TEXT    NOT NULL DEFAULT '',
-			last_session   TEXT    NOT NULL DEFAULT '',
-			task_seq       INTEGER NOT NULL DEFAULT 0
-		)`,
-		// Agent behavioral rules: distinguish code-graph (structural) rules from
-		// conversation-level (agent) constraints. Existing rows default to 'structural'.
-		`ALTER TABLE dynamic_rules ADD COLUMN rule_type TEXT NOT NULL DEFAULT 'structural'`,
-		// R28: Provenance labels — trust tier for each node (user-authored | generated | vendored | external).
-		// Existing rows default to 'user-authored' (safe: old code has no generated/vendored nodes tagged).
-		`ALTER TABLE nodes ADD COLUMN provenance TEXT NOT NULL DEFAULT 'user-authored'`,
-		// OF-H1: Generic entity schema — domain field enables non-code nodes (infra, api, docs, issues).
-		// Existing rows default to 'code' (zero regression: all current nodes are code entities).
-		`ALTER TABLE nodes ADD COLUMN domain TEXT NOT NULL DEFAULT 'code'`,
-		// R20: Signature change tracking — prev_signature stores the prior signature of an exported
-		// entity so verify_implementation can diff actual changes instead of reporting all callers.
-		// Set to the old signature when SaveGraph detects a change; '' when unchanged or new node.
-		`ALTER TABLE nodes ADD COLUMN prev_signature TEXT NOT NULL DEFAULT ''`,
-		// B29: Inter-agent communication — richer focus tracking for peer awareness.
-		`ALTER TABLE agents ADD COLUMN focus_file  TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE agents ADD COLUMN focus_since TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE agents ADD COLUMN intent      TEXT NOT NULL DEFAULT ''`,
-		// DEPRECATED: agent_watched_symbols is no longer queried (within-project coordination
-		// removed in the knowledge substrate pivot). Migration preserved for existing databases.
-		`CREATE TABLE IF NOT EXISTS agent_watched_symbols (
-			agent_id    TEXT NOT NULL,
-			entity_id   TEXT NOT NULL,
-			entity_name TEXT NOT NULL,
-			entity_file TEXT NOT NULL,
-			watched_at  TEXT NOT NULL,
-			PRIMARY KEY (agent_id, entity_id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_watched_symbols_entity ON agent_watched_symbols(entity_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_watched_symbols_agent  ON agent_watched_symbols(agent_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_events_agent           ON events(agent_id)`,
-		// AM-1: Memory anchors — links memories to graph node IDs for cascade invalidation.
-		`CREATE TABLE IF NOT EXISTS memory_anchors (
-			memory_id  TEXT NOT NULL,
-			node_id    TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			PRIMARY KEY (memory_id, node_id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_memory_anchors_node ON memory_anchors(node_id)`,
-		// AM-2: Cascade invalidation — stale flag set when anchor nodes are removed or structurally changed.
-		// stale_reason describes why (e.g. "anchor node removed"). surfaced_at tracks when first shown to agent (AM-3).
-		`ALTER TABLE memories ADD COLUMN stale INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE memories ADD COLUMN stale_reason TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE memories ADD COLUMN surfaced_at TEXT DEFAULT NULL`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_stale ON memories(stale) WHERE stale = 1`,
-		// AM-3: staled_at records WHEN a memory was invalidated (distinct from created_at).
-		// Without this, ordering by created_at gives misleading "invalidated_at" values.
-		`ALTER TABLE memories ADD COLUMN staled_at TEXT NOT NULL DEFAULT ''`,
-		// AM-3: Per-agent surfacing log. Each agent gets their own surfacing record
-		// so multi-agent setups don't lose invalidation signals when one agent runs first.
-		`CREATE TABLE IF NOT EXISTS memory_surfaced (
-			memory_id TEXT NOT NULL,
-			agent_id  TEXT NOT NULL,
-			surfaced_at TEXT NOT NULL,
-			PRIMARY KEY (memory_id, agent_id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_memory_surfaced_agent ON memory_surfaced(agent_id)`,
-		// Session Intelligence (Layer 1): session lifecycle + tool call audit tables.
-		// Added for existing databases that were created before this schema was introduced.
-		`ALTER TABLE tool_calls ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`,
-		`CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id) WHERE session_id != ''`,
-		// Initial sessions/session_tasks tables (TEXT timestamps — superseded below).
-		`CREATE TABLE IF NOT EXISTS sessions (
-			id           TEXT PRIMARY KEY,
-			agent_id     TEXT NOT NULL,
-			project_id   TEXT NOT NULL,
-			intent       TEXT NOT NULL DEFAULT '',
-			started_at   TEXT NOT NULL,
-			last_seen_at TEXT NOT NULL,
-			ended_at     TEXT,
-			end_reason   TEXT NOT NULL DEFAULT '',
-			outcome      TEXT NOT NULL DEFAULT '',
-			summary      TEXT NOT NULL DEFAULT '',
-			tool_calls   INTEGER NOT NULL DEFAULT 0
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_agent   ON sessions(agent_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_active  ON sessions(ended_at) WHERE ended_at IS NULL`,
-		`CREATE TABLE IF NOT EXISTS session_tasks (
-			session_id TEXT NOT NULL,
-			task_id    TEXT NOT NULL,
-			action     TEXT NOT NULL,
-			at         TEXT NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_session_tasks_session ON session_tasks(session_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_session_tasks_task    ON session_tasks(task_id)`,
-		// Session Intelligence schema upgrade: migrate timestamps from TEXT (RFC3339)
-		// to INTEGER (Unix epoch). Sessions are ephemeral — dropped and recreated safely.
-		// Any rows in the old TEXT-schema tables are discarded (sessions don't persist
-		// meaningful agent state; memories and tasks are unaffected).
-		`DROP TABLE IF EXISTS session_tasks`,
-		`DROP TABLE IF EXISTS sessions`,
-		`CREATE TABLE IF NOT EXISTS sessions (
-			id              TEXT    PRIMARY KEY,
-			agent_id        TEXT    NOT NULL,
-			project_id      TEXT    NOT NULL,
-			mcp_session_id  TEXT    NOT NULL DEFAULT '',
-			intent          TEXT    NOT NULL DEFAULT '',
-			started_at      INTEGER NOT NULL,
-			last_seen_at    INTEGER NOT NULL,
-			ended_at        INTEGER,
-			end_reason      TEXT    NOT NULL DEFAULT '',
-			outcome         TEXT    NOT NULL DEFAULT '',
-			summary         TEXT    NOT NULL DEFAULT '',
-			tool_calls      INTEGER NOT NULL DEFAULT 0
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_agent      ON sessions(agent_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_project    ON sessions(project_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_active     ON sessions(ended_at) WHERE ended_at IS NULL`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_mcp        ON sessions(mcp_session_id, agent_id, project_id)`,
-		`CREATE TABLE IF NOT EXISTS session_tasks (
-			session_id TEXT    NOT NULL,
-			task_id    TEXT    NOT NULL,
-			action     TEXT    NOT NULL,
-			at         INTEGER NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_session_tasks_session ON session_tasks(session_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_session_tasks_task    ON session_tasks(task_id)`,
-		// RX2: Cross-project federation — dependency tracking table.
-		`CREATE TABLE IF NOT EXISTS cross_project_deps (
-			from_entity          TEXT NOT NULL,
-			to_project           TEXT NOT NULL,
-			to_entity            TEXT NOT NULL,
-			to_file              TEXT NOT NULL,
-			verified_commit      TEXT NOT NULL,
-			verified_at          TEXT NOT NULL,
-			detection_tier       TEXT NOT NULL DEFAULT 'tier1',
-			verified_signature   TEXT NOT NULL DEFAULT '',
-			PRIMARY KEY (from_entity, to_project, to_entity)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_cross_deps_project ON cross_project_deps(to_project)`,
-		`CREATE INDEX IF NOT EXISTS idx_cross_deps_file    ON cross_project_deps(to_project, to_file)`,
-		// RX2 Phase 2: store entity signature at verification time for fallback comparison.
 		`ALTER TABLE cross_project_deps ADD COLUMN verified_signature TEXT NOT NULL DEFAULT ''`,
-		// R22: Branch-aware context — track the last-seen git branch per session
-		// so session_init can detect branch changes between sessions.
 		`ALTER TABLE sessions ADD COLUMN last_branch TEXT NOT NULL DEFAULT ''`,
-		// R21: Commit-to-task linking — capture HEAD SHA at in_progress, git log at done.
-		`ALTER TABLE tasks ADD COLUMN start_commit TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE tasks ADD COLUMN commits TEXT NOT NULL DEFAULT '[]'`,
-		// Session continuity: state tracks lifecycle so agents can see session health
-		// and the Tauri app can display it. parent_session_id links cross-connection
-		// resumes to their predecessor for continuity chains.
-		// DEFAULT 'active' is correct for live sessions; historical closed sessions
-		// are fixed by the UPDATE below (outside this loop).
 		`ALTER TABLE sessions ADD COLUMN state TEXT NOT NULL DEFAULT 'active'`,
 		`ALTER TABLE sessions ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state, agent_id, project_id)`,
 	} {
-		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
-			db.Close()
-			return nil, fmt.Errorf("migrate schema: %w", err)
+		if _, err := knowledgeDB.Exec(m); err != nil && !isDupColumnErr(err) {
+			graphDB.Close()
+			knowledgeDB.Close()
+			return nil, fmt.Errorf("migrate knowledge schema: %w", err)
 		}
 	}
-	// Fix historical rows: sessions with ended_at already set must be 'closed'.
-	// This runs outside the migration loop because it's an UPDATE, not a DDL
-	// statement, and errors here are non-fatal (worst case: cosmetic state mismatch).
-	_, _ = db.Exec(`UPDATE sessions SET state = 'closed' WHERE ended_at IS NOT NULL AND state = 'active'`)
 
-	st := &Store{db: db}
+	// Fix historical rows: sessions with ended_at already set must be 'closed'.
+	_, _ = knowledgeDB.Exec(`UPDATE sessions SET state = 'closed' WHERE ended_at IS NOT NULL AND state = 'active'`)
+
+	// Migrate data from legacy single-DB if this is the first split.
+	// Only runs when knowledgeDB is empty (fresh) and graphDB has legacy knowledge tables.
+	var knowledgeRowCount int
+	_ = knowledgeDB.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&knowledgeRowCount)
+	if knowledgeRowCount == 0 {
+		// Check if legacy DB has knowledge tables with data.
+		var legacyHasMemories int
+		legacyHasErr := graphDB.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories'`,
+		).Scan(&legacyHasMemories)
+		if legacyHasErr == nil && legacyHasMemories > 0 {
+			if err := migrateKnowledgeFromLegacy(knowledgeDB, path); err != nil {
+				fmt.Fprintf(os.Stderr, "synapses: store: legacy migration: %v\n", err)
+			}
+		}
+	}
+
+	st := &Store{graphDB: graphDB, knowledgeDB: knowledgeDB}
 
 	// Rebuild FTS index for existing databases where nodes_fts is empty but
-	// the nodes table already has data. This happens when upgrading from a
-	// version without FTS support — the user gets search without re-indexing.
+	// the nodes table already has data.
 	var ftsCount, nodeCount int
-	_ = db.QueryRow(`SELECT count(*) FROM nodes_fts`).Scan(&ftsCount)
-	_ = db.QueryRow(`SELECT count(*) FROM nodes`).Scan(&nodeCount)
+	_ = graphDB.QueryRow(`SELECT count(*) FROM nodes_fts`).Scan(&ftsCount)
+	_ = graphDB.QueryRow(`SELECT count(*) FROM nodes`).Scan(&nodeCount)
 	if ftsCount == 0 && nodeCount > 0 {
-		_ = st.rebuildFTS() // best-effort; non-fatal
+		_ = st.rebuildFTS()
 	}
 
-	// Backfill memories_fts for existing databases upgraded from before the
-	// FTS table was created. Only runs when memories exist but FTS is empty,
-	// not on every startup.
+	// Backfill memories_fts for upgraded databases.
 	var memFtsCount, memCount int
-	_ = db.QueryRow(`SELECT count(*) FROM memories_fts`).Scan(&memFtsCount)
-	_ = db.QueryRow(`SELECT count(*) FROM memories`).Scan(&memCount)
+	_ = knowledgeDB.QueryRow(`SELECT count(*) FROM memories_fts`).Scan(&memFtsCount)
+	_ = knowledgeDB.QueryRow(`SELECT count(*) FROM memories`).Scan(&memCount)
 	if memFtsCount == 0 && memCount > 0 {
-		_, _ = db.Exec(`INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')`) // best-effort
+		_, _ = knowledgeDB.Exec(`INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')`)
 	}
 
-	// R32: Emit query plan stats when SYNAPSES_QUERY_STATS=1 is set. Non-fatal.
 	if os.Getenv("SYNAPSES_QUERY_STATS") == "1" {
 		st.CollectQueryStats(os.Stderr)
 	}
@@ -846,33 +640,73 @@ func Open(path string) (*Store, error) {
 	return st, nil
 }
 
+// openSQLiteDB opens a single SQLite DB with WAL mode and busy timeout.
+func openSQLiteDB(path string) (*sql.DB, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create parent dir for %s: %w", path, err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open db %s: %w", path, err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
+		fmt.Fprintf(os.Stderr, "synapses: store: enable WAL on %s: %v\n", path, err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
+		fmt.Fprintf(os.Stderr, "synapses: store: set busy_timeout on %s: %v\n", path, err)
+	}
+	return db, nil
+}
+
+// isDupColumnErr returns true if the error is a benign "duplicate column" error.
+func isDupColumnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already has a column")
+}
+
 // OpenReadOnly opens an existing SQLite store at path in query-only mode.
 // It does NOT run schema migrations or FTS rebuilds, making it safe to call
-// concurrently with a running MCP server. When the server has WAL mode enabled
-// (set in Open), multiple concurrent readers work without contention.
-// Returns an error if the file does not exist.
+// concurrently with a running MCP server.
 func OpenReadOnly(path string) (*Store, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil, fmt.Errorf("no index at %s — run 'synapses index' first", path)
 	}
-	db, err := sql.Open("sqlite", path)
+	graphDB, err := sql.Open("sqlite", path)
 	if err != nil {
-		return nil, fmt.Errorf("open db (ro) %s: %w", path, err)
+		return nil, fmt.Errorf("open graph db (ro) %s: %w", path, err)
 	}
-	db.SetMaxOpenConns(4)
-	// query_only prevents accidental writes; busy_timeout lets us wait if the
-	// server is mid-commit rather than failing immediately.
-	if _, err := db.Exec("PRAGMA query_only=true; PRAGMA busy_timeout=5000;"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("configure read-only: %w", err)
+	graphDB.SetMaxOpenConns(4)
+	if _, err := graphDB.Exec("PRAGMA query_only=true; PRAGMA busy_timeout=5000;"); err != nil {
+		graphDB.Close()
+		return nil, fmt.Errorf("configure graph read-only: %w", err)
 	}
-	return &Store{db: db}, nil
+
+	kPath := KnowledgePath(path)
+	var knowledgeDB *sql.DB
+	if _, err := os.Stat(kPath); err == nil {
+		knowledgeDB, err = sql.Open("sqlite", kPath)
+		if err != nil {
+			graphDB.Close()
+			return nil, fmt.Errorf("open knowledge db (ro) %s: %w", kPath, err)
+		}
+		knowledgeDB.SetMaxOpenConns(4)
+		if _, err := knowledgeDB.Exec("PRAGMA query_only=true; PRAGMA busy_timeout=5000;"); err != nil {
+			graphDB.Close()
+			knowledgeDB.Close()
+			return nil, fmt.Errorf("configure knowledge read-only: %w", err)
+		}
+	}
+	return &Store{graphDB: graphDB, knowledgeDB: knowledgeDB}, nil
 }
 
 // rebuildFTS repopulates the nodes_fts table from the current nodes table.
 // Called once on Open() for existing databases and after SaveGraph().
 func (s *Store) rebuildFTS() error {
-	tx, err := s.db.Begin()
+	tx, err := s.graphDB.Begin()
 	if err != nil {
 		return err
 	}
@@ -948,7 +782,7 @@ func (s *Store) NodeExistsByName(name string) (bool, error) {
 func (s *Store) NodeExistsByNameCtx(ctx context.Context, name string) (bool, error) {
 	escaped := escapeLike(name)
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := s.graphDB.QueryRowContext(ctx,
 		`SELECT count(*) FROM nodes
 		 WHERE name = ? COLLATE NOCASE
 		    OR name LIKE ? ESCAPE '\' COLLATE NOCASE`,
@@ -973,7 +807,7 @@ func (s *Store) FindNodesByNameCtx(ctx context.Context, name string, limit int) 
 		limit = 20
 	}
 	escaped := escapeLike(name)
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.graphDB.QueryContext(ctx,
 		`SELECT id, name, signature, doc FROM nodes
 		 WHERE name = ? COLLATE NOCASE
 		    OR name LIKE ? ESCAPE '\' COLLATE NOCASE
@@ -1020,7 +854,7 @@ func scanCrossDep(scanner interface{ Scan(...interface{}) error }) (CrossProject
 
 // GetCrossProjectDeps returns all cross-project dependencies for a local entity.
 func (s *Store) GetCrossProjectDeps(fromEntity string) ([]CrossProjectDep, error) {
-	rows, err := s.db.Query(
+	rows, err := s.knowledgeDB.Query(
 		`SELECT `+crossDepCols+` FROM cross_project_deps WHERE from_entity = ?`,
 		fromEntity,
 	)
@@ -1042,7 +876,7 @@ func (s *Store) GetCrossProjectDeps(fromEntity string) ([]CrossProjectDep, error
 
 // GetCrossProjectDepsByProject returns all deps targeting a specific sibling project.
 func (s *Store) GetCrossProjectDepsByProject(project string) ([]CrossProjectDep, error) {
-	rows, err := s.db.Query(
+	rows, err := s.knowledgeDB.Query(
 		`SELECT `+crossDepCols+` FROM cross_project_deps WHERE to_project = ?`,
 		project,
 	)
@@ -1064,7 +898,7 @@ func (s *Store) GetCrossProjectDepsByProject(project string) ([]CrossProjectDep,
 
 // UpsertCrossProjectDep inserts or updates a cross-project dependency.
 func (s *Store) UpsertCrossProjectDep(dep CrossProjectDep) error {
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`INSERT INTO cross_project_deps (from_entity, to_project, to_entity, to_file, verified_commit, verified_at, detection_tier, verified_signature)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (from_entity, to_project, to_entity)
@@ -1079,7 +913,7 @@ func (s *Store) UpsertCrossProjectDep(dep CrossProjectDep) error {
 
 // DeleteCrossProjectDeps removes all cross-project deps for a local entity.
 func (s *Store) DeleteCrossProjectDeps(fromEntity string) error {
-	_, err := s.db.Exec(`DELETE FROM cross_project_deps WHERE from_entity = ?`, fromEntity)
+	_, err := s.knowledgeDB.Exec(`DELETE FROM cross_project_deps WHERE from_entity = ?`, fromEntity)
 	if err != nil {
 		return fmt.Errorf("delete cross-project deps: %w", err)
 	}
@@ -1090,7 +924,7 @@ func (s *Store) DeleteCrossProjectDeps(fromEntity string) error {
 // confirming the sibling entity hasn't drifted.
 func (s *Store) UpdateVerifiedCommit(toProject, toEntity, newCommit string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`UPDATE cross_project_deps SET verified_commit = ?, verified_at = ?
 		 WHERE to_project = ? AND to_entity = ?`,
 		newCommit, now, toProject, toEntity,
@@ -1134,7 +968,7 @@ func (s *Store) SemanticSearch(query string, limit int) ([]SearchResult, error) 
         ORDER BY score DESC
         LIMIT ?`
 
-	rows, err := s.db.Query(ftsSQL, q, limit)
+	rows, err := s.graphDB.Query(ftsSQL, q, limit)
 	if err != nil {
 		// FTS5 syntax error — fall back to LIKE search on name.
 		return s.likeSearch(query, limit)
@@ -1176,7 +1010,7 @@ func (s *Store) likeSearch(query string, limit int) ([]SearchResult, error) {
 		args = append(args, pat, pat)
 	}
 	args = append(args, limit)
-	rows, err := s.db.Query(fmt.Sprintf(`
+	rows, err := s.graphDB.Query(fmt.Sprintf(`
         SELECT id, name, signature, doc
         FROM nodes
         WHERE %s
@@ -1225,10 +1059,28 @@ func sanitizeFTSQuery(q string) string {
 	return strings.Join(terms, " OR ")
 }
 
-// Close releases the database connection.
+// Close releases both database connections.
 func (s *Store) Close() error {
-	return s.db.Close()
+	var firstErr error
+	if s.graphDB != nil {
+		if err := s.graphDB.Close(); err != nil {
+			firstErr = err
+		}
+	}
+	if s.knowledgeDB != nil {
+		if err := s.knowledgeDB.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
+
+// GraphDB returns the underlying graph database connection. Used by callers
+// that need direct graph DB access (e.g., tests, federation read-only probes).
+func (s *Store) GraphDB() *sql.DB { return s.graphDB }
+
+// KnowledgeDB returns the underlying knowledge database connection.
+func (s *Store) KnowledgeDB() *sql.DB { return s.knowledgeDB }
 
 // QueryStats reports index coverage for a set of representative hot-path queries.
 // It runs EXPLAIN QUERY PLAN on each query and classifies each step as either an
@@ -1279,7 +1131,7 @@ func (s *Store) CollectQueryStats(w io.Writer) QueryStats {
 
 	var stats QueryStats
 	for _, p := range probes {
-		rows, err := s.db.Query(`EXPLAIN QUERY PLAN ` + p.sql)
+		rows, err := s.graphDB.Query(`EXPLAIN QUERY PLAN ` + p.sql)
 		if err != nil {
 			continue
 		}
@@ -1317,32 +1169,65 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	cutoffUnix := time.Now().AddDate(0, 0, -retentionDays).Unix()
 
 	// tool_calls: one row per MCP tool invocation — can reach millions.
-	s.db.Exec(`DELETE FROM tool_calls WHERE created_at < ?`, cutoff)
+	s.knowledgeDB.Exec(`DELETE FROM tool_calls WHERE created_at < ?`, cutoff)
 
 	// agent_messages: no built-in TTL.
-	s.db.Exec(`DELETE FROM agent_messages WHERE created_at < ?`, cutoff)
+	s.knowledgeDB.Exec(`DELETE FROM agent_messages WHERE created_at < ?`, cutoff)
 
 	// events: coordination/observability stream — pruned to retention window.
-	s.db.Exec(`DELETE FROM events WHERE created_at < ?`, cutoff)
+	s.knowledgeDB.Exec(`DELETE FROM events WHERE created_at < ?`, cutoff)
 
 	// episodes: stored as Unix seconds (INTEGER).
-	s.db.Exec(`DELETE FROM episodes WHERE created_at < ?`, cutoffUnix)
+	s.knowledgeDB.Exec(`DELETE FROM episodes WHERE created_at < ?`, cutoffUnix)
 
 	// memories: honour their own expires_at field; also remove session_log entries
 	// older than the retention window regardless of their expires_at.
-	s.db.Exec(`DELETE FROM memories WHERE expires_at != '' AND expires_at < ?`, time.Now().UTC().Format(time.RFC3339))
-	s.db.Exec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at < ?`, cutoff)
+	s.knowledgeDB.Exec(`DELETE FROM memories WHERE expires_at != '' AND expires_at < ?`, time.Now().UTC().Format(time.RFC3339))
+	s.knowledgeDB.Exec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at < ?`, cutoff)
 
 	// proposals: resolved proposals have no further value after retention period.
-	s.db.Exec(`DELETE FROM proposals WHERE status IN ('accepted','rejected','withdrawn') AND updated_at < ?`, cutoff)
-	s.db.Exec(`DELETE FROM proposal_votes WHERE proposal_id NOT IN (SELECT id FROM proposals)`)
+	s.knowledgeDB.Exec(`DELETE FROM proposals WHERE status IN ('accepted','rejected','withdrawn') AND updated_at < ?`, cutoff)
+	s.knowledgeDB.Exec(`DELETE FROM proposal_votes WHERE proposal_id NOT IN (SELECT id FROM proposals)`)
 
-	// Stale annotations for nodes that no longer exist — actively misleading,
-	// safe to remove once the retention window has passed.
-	s.db.Exec(`DELETE FROM annotations WHERE stale=1 AND node_id NOT IN (SELECT id FROM nodes)`)
+	// Stale annotations for nodes that no longer exist — actively misleading.
+	// Cross-DB: annotations are in knowledgeDB, nodes are in graphDB.
+	// Collect existing node IDs from graphDB, then delete annotations referencing absent nodes.
+	if s.graphDB != nil {
+		nodeIDs := make(map[string]struct{})
+		if rows, err := s.graphDB.Query(`SELECT id FROM nodes`); err == nil {
+			for rows.Next() {
+				var id string
+				if rows.Scan(&id) == nil {
+					nodeIDs[id] = struct{}{}
+				}
+			}
+			rows.Close()
+		}
+		if len(nodeIDs) > 0 {
+			// Delete stale annotations whose node no longer exists in the graph.
+			if annRows, err := s.knowledgeDB.Query(`SELECT id, node_id FROM annotations WHERE stale=1`); err == nil {
+				var toDelete []string
+				for annRows.Next() {
+					var annID, nodeID string
+					if annRows.Scan(&annID, &nodeID) == nil {
+						if _, exists := nodeIDs[nodeID]; !exists {
+							toDelete = append(toDelete, annID)
+						}
+					}
+				}
+				annRows.Close()
+				for _, id := range toDelete {
+					s.knowledgeDB.Exec(`DELETE FROM annotations WHERE id = ?`, id)
+				}
+			}
+		}
+	}
 
-	// SQLite housekeeping.
-	s.db.Exec(`PRAGMA optimize`)
+	// SQLite housekeeping for both databases.
+	s.knowledgeDB.Exec(`PRAGMA optimize`)
+	if s.graphDB != nil {
+		s.graphDB.Exec(`PRAGMA optimize`)
+	}
 }
 
 // ── Web cache ──────────────────────────────────────────────────────────────
@@ -1358,7 +1243,7 @@ type WebCacheEntry struct {
 // UpsertWebCache inserts or replaces a web cache entry.
 // ttlHours=0 means never expire (used for version-pinned package docs).
 func (s *Store) UpsertWebCache(url, content string, ttlHours int) error {
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`INSERT OR REPLACE INTO web_cache(url, content, fetched_at, ttl_hours)
 		 VALUES (?, ?, ?, ?)`,
 		url, content, time.Now().UTC().Format(time.RFC3339), ttlHours,
@@ -1368,7 +1253,7 @@ func (s *Store) UpsertWebCache(url, content string, ttlHours int) error {
 
 // GetWebCache returns the cached entry for url, or (nil, false) if missing or expired.
 func (s *Store) GetWebCache(url string) (*WebCacheEntry, bool) {
-	row := s.db.QueryRow(
+	row := s.knowledgeDB.QueryRow(
 		`SELECT url, content, fetched_at, ttl_hours FROM web_cache WHERE url = ?
 		 AND (ttl_hours = 0
 		      OR datetime(fetched_at, '+' || ttl_hours || ' hours') > datetime('now'))`,
@@ -1386,13 +1271,13 @@ func (s *Store) GetWebCache(url string) (*WebCacheEntry, bool) {
 // DeleteWebCachePrefix removes all cache entries whose URL starts with prefix.
 // Used to invalidate version-pinned entries when go.mod bumps a package version.
 func (s *Store) DeleteWebCachePrefix(prefix string) error {
-	_, err := s.db.Exec(`DELETE FROM web_cache WHERE url LIKE ?`, prefix+"%")
+	_, err := s.knowledgeDB.Exec(`DELETE FROM web_cache WHERE url LIKE ?`, prefix+"%")
 	return err
 }
 
 // PruneExpiredWebCache removes all entries whose TTL has elapsed.
 func (s *Store) PruneExpiredWebCache() error {
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`DELETE FROM web_cache
 		 WHERE ttl_hours > 0
 		   AND datetime(fetched_at, '+' || ttl_hours || ' hours') <= datetime('now')`,
@@ -1406,7 +1291,7 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	// GAP-3: Snapshot CALLS fan-in counts before the wipe so we can detect nodes
 	// whose call structure changed significantly and mark their annotations stale.
 	oldFanIn := make(map[string]int)
-	if fanRows, err := s.db.Query(`SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id`); err == nil {
+	if fanRows, err := s.graphDB.Query(`SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id`); err == nil {
 		defer fanRows.Close()
 		for fanRows.Next() {
 			var nid string
@@ -1423,7 +1308,7 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	// break compilation when their signature changes. Only non-empty signatures
 	// are captured — new nodes (not in this map) are treated as additions, not changes.
 	oldSigs := make(map[string]string)
-	if sigRows, err := s.db.Query(`SELECT id, signature FROM nodes WHERE signature != ''`); err == nil {
+	if sigRows, err := s.graphDB.Query(`SELECT id, signature FROM nodes WHERE signature != ''`); err == nil {
 		defer sigRows.Close()
 		for sigRows.Next() {
 			var nid, sig string
@@ -1433,7 +1318,7 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		}
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.graphDB.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
@@ -1585,7 +1470,7 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	// annotations stale where the call structure changed by >20% or node removed.
 	go func() {
 		newFanIn := make(map[string]int)
-		if fanRows, err := s.db.Query(`SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id`); err == nil {
+		if fanRows, err := s.graphDB.Query(`SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id`); err == nil {
 			defer fanRows.Close()
 			for fanRows.Next() {
 				var nid string
@@ -1663,7 +1548,7 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 	// can use the nodes table while it still holds the old rows.
 	oldNodeIDs := make([]string, 0)
 	oldSigs := make(map[string]string)
-	if rows, err := s.db.Query(`SELECT id, signature FROM nodes WHERE file = ?`, changedFile); err == nil {
+	if rows, err := s.graphDB.Query(`SELECT id, signature FROM nodes WHERE file = ?`, changedFile); err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var nid, sig string
@@ -1678,7 +1563,7 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 
 	// Snapshot CALLS fan-in for changedFile nodes (for stale annotation detection).
 	oldFanIn := make(map[string]int)
-	if fanRows, err := s.db.Query(`
+	if fanRows, err := s.graphDB.Query(`
 		SELECT e.to_id, COUNT(*)
 		FROM edges e
 		WHERE e.type = 'CALLS'
@@ -1703,7 +1588,7 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 		newEdges = g.OutEdgesForFile(changedFile)
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.graphDB.Begin()
 	if err != nil {
 		return fmt.Errorf("delta: begin tx: %w", err)
 	}
@@ -1886,7 +1771,7 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 	// Same logic as SaveGraph but scoped to changedFile via subquery.
 	go func() {
 		newFanIn := make(map[string]int)
-		if fanRows, err := s.db.Query(`
+		if fanRows, err := s.graphDB.Query(`
 			SELECT e.to_id, COUNT(*)
 			FROM edges e
 			WHERE e.type = 'CALLS'
@@ -1935,7 +1820,7 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 // Returns (nil, nil) if the store is empty (first run).
 func (s *Store) LoadGraph() (*graph.Graph, error) {
 	// Read lightweight meta (repo_id, repo_root) in one pass.
-	metaRows, err := s.db.Query(`SELECT key, value FROM meta WHERE key IN ('repo_id', 'repo_root')`)
+	metaRows, err := s.graphDB.Query(`SELECT key, value FROM meta WHERE key IN ('repo_id', 'repo_root')`)
 	if err != nil {
 		return nil, fmt.Errorf("read meta: %w", err)
 	}
@@ -1964,7 +1849,7 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 	}
 
 	// Load nodes.
-	rows, err := s.db.Query(`
+	rows, err := s.graphDB.Query(`
         SELECT id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance, domain FROM nodes
     `)
 	if err != nil {
@@ -2020,7 +1905,7 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 	}
 
 	// Load edges.
-	erows, err := s.db.Query(`SELECT from_id, to_id, type FROM edges`)
+	erows, err := s.graphDB.Query(`SELECT from_id, to_id, type FROM edges`)
 	if err != nil {
 		return nil, fmt.Errorf("query edges: %w", err)
 	}
@@ -2061,7 +1946,7 @@ type SignatureChange struct {
 // absolute path. Returns an empty slice — not an error — when nothing changed.
 func (s *Store) GetSignatureChanges(file string) ([]SignatureChange, error) {
 	// Use suffix matching: '%' || file handles both absolute and relative paths.
-	rows, err := s.db.Query(`
+	rows, err := s.graphDB.Query(`
 		SELECT id, name, type, file, line, signature, prev_signature
 		FROM nodes
 		WHERE (file = ? OR file LIKE '%' || ?)
@@ -2090,7 +1975,7 @@ func (s *Store) GetSignatureChanges(file string) ([]SignatureChange, error) {
 // SavedAt returns the timestamp of the last SaveGraph call, or zero if absent.
 func (s *Store) SavedAt() (time.Time, error) {
 	var raw string
-	row := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'saved_at'`)
+	row := s.graphDB.QueryRow(`SELECT value FROM meta WHERE key = 'saved_at'`)
 	if err := row.Scan(&raw); err == sql.ErrNoRows {
 		return time.Time{}, nil
 	} else if err != nil {
@@ -2099,21 +1984,29 @@ func (s *Store) SavedAt() (time.Time, error) {
 	return time.Parse(time.RFC3339, raw)
 }
 
-// HasTable reports whether the given table exists in the SQLite database.
-// Used by federation to check if a sibling store has specific tables
-// (e.g., episodes, episodes_fts) without running probe queries.
+// HasTable reports whether the given table exists in either the graph or
+// knowledge SQLite database. Used by federation to check if a sibling store
+// has specific tables (e.g., episodes, episodes_fts).
 func (s *Store) HasTable(name string) bool {
+	q := `SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','view') AND name = ?`
 	var n int
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','view') AND name = ?`, name,
-	).Scan(&n)
-	return err == nil && n > 0
+	if s.graphDB != nil {
+		if err := s.graphDB.QueryRow(q, name).Scan(&n); err == nil && n > 0 {
+			return true
+		}
+	}
+	if s.knowledgeDB != nil {
+		if err := s.knowledgeDB.QueryRow(q, name).Scan(&n); err == nil && n > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Stat reads only the meta key-value table and returns a ProjectStat without
 // loading any nodes or edges. This is the fast path used by 'synapses list'.
 func (s *Store) Stat(dbPath string) (*ProjectStat, error) {
-	rows, err := s.db.Query(`SELECT key, value FROM meta`)
+	rows, err := s.graphDB.Query(`SELECT key, value FROM meta`)
 	if err != nil {
 		return nil, fmt.Errorf("read meta: %w", err)
 	}
@@ -2171,6 +2064,10 @@ func ScanAll() ([]ProjectStat, error) {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".db" {
 			continue
 		}
+		// Skip knowledge DB files — they are opened as part of their graph DB.
+		if strings.HasSuffix(e.Name(), "_knowledge.db") {
+			continue
+		}
 		dbPath := filepath.Join(dir, e.Name())
 		st, err := Open(dbPath)
 		if err != nil {
@@ -2206,7 +2103,7 @@ func ScanAll() ([]ProjectStat, error) {
 // LoadFileMtimes returns the stored path→mtime (UnixNano) map from the last
 // successful index. Returns an empty map (not nil) if no data is stored yet.
 func (s *Store) LoadFileMtimes() (map[string]int64, error) {
-	rows, err := s.db.Query(`SELECT path, mod_time FROM file_hashes`)
+	rows, err := s.graphDB.Query(`SELECT path, mod_time FROM file_hashes`)
 	if err != nil {
 		return nil, fmt.Errorf("query file_hashes: %w", err)
 	}
@@ -2227,7 +2124,7 @@ func (s *Store) LoadFileMtimes() (map[string]int64, error) {
 // SaveFileMtimes replaces the stored file-mtime table with the provided map.
 // m maps absolute file path → mtime in UnixNano.
 func (s *Store) SaveFileMtimes(m map[string]int64) error {
-	tx, err := s.db.Begin()
+	tx, err := s.graphDB.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
@@ -2255,7 +2152,7 @@ func (s *Store) SaveFileMtimes(m map[string]int64) error {
 // Used by the watcher after a hot-reload to keep file_hashes current without
 // rewriting the entire table (which would require loading all other entries).
 func (s *Store) UpsertFileMtime(path string, mtime int64) error {
-	_, err := s.db.Exec(
+	_, err := s.graphDB.Exec(
 		`INSERT INTO file_hashes (path, mod_time) VALUES (?, ?)
          ON CONFLICT(path) DO UPDATE SET mod_time = excluded.mod_time`,
 		path, mtime,
@@ -2267,7 +2164,7 @@ func (s *Store) UpsertFileMtime(path string, mtime int64) error {
 // Called after every full parse so cross-project CALLS can be re-resolved
 // on subsequent starts once linked project graphs have been merged.
 func (s *Store) SaveCallSites(sites []graph.CallSite) error {
-	tx, err := s.db.Begin()
+	tx, err := s.graphDB.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
@@ -2294,7 +2191,7 @@ func (s *Store) SaveCallSites(sites []graph.CallSite) error {
 // LoadCallSites returns all persisted call sites from the last full index.
 // Returns nil (not an error) if the table is empty.
 func (s *Store) LoadCallSites() ([]graph.CallSite, error) {
-	rows, err := s.db.Query(`SELECT caller_id, caller_file, pkg_alias, func_name FROM call_sites`)
+	rows, err := s.graphDB.Query(`SELECT caller_id, caller_file, pkg_alias, func_name FROM call_sites`)
 	if err != nil {
 		return nil, fmt.Errorf("query call_sites: %w", err)
 	}
@@ -2318,7 +2215,7 @@ func (s *Store) LoadCallSites() ([]graph.CallSite, error) {
 // an incremental re-parse so the stored call-site table stays consistent with
 // the live graph without a full table replacement.
 func (s *Store) UpdateCallSitesForFile(file string, newSites []graph.CallSite) error {
-	tx, err := s.db.Begin()
+	tx, err := s.graphDB.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
@@ -2354,7 +2251,7 @@ func (s *Store) UpsertDynamicRule(r config.Rule) error {
 	if ruleType == "" {
 		ruleType = "structural"
 	}
-	_, err := s.db.Exec(`
+	_, err := s.knowledgeDB.Exec(`
         INSERT INTO dynamic_rules
             (id, description, severity, from_file_pattern, to_file_pattern,
              from_type, to_type, edge_type, to_name_pattern, rule_type, created_at, updated_at)
@@ -2381,7 +2278,7 @@ func (s *Store) UpsertDynamicRule(r config.Rule) error {
 // by creation time. Called at server startup to restore rules from previous
 // sessions so agents don't need to re-declare them after a restart.
 func (s *Store) LoadDynamicRules() ([]config.Rule, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
         SELECT id, description, severity,
             from_file_pattern, to_file_pattern, from_type, to_type,
             edge_type, to_name_pattern, rule_type
@@ -2455,7 +2352,7 @@ func violationID(ruleID, fromNode, toNode, edgeType string) string {
 // and increments occurrences instead of creating a duplicate row.
 func (s *Store) LogViolations(vs []config.Violation) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	tx, err := s.db.Begin()
+	tx, err := s.knowledgeDB.Begin()
 	if err != nil {
 		return err
 	}
@@ -2490,7 +2387,7 @@ func (s *Store) LogViolations(vs []config.Violation) error {
 // (which should trigger an event) from pre-existing ones (which should not).
 func (s *Store) ViolationIDsForFile(file string) (map[string]struct{}, error) {
 	pattern := "%" + file + "%"
-	rows, err := s.db.Query(
+	rows, err := s.knowledgeDB.Query(
 		`SELECT id FROM violation_log WHERE from_node LIKE ? OR to_node LIKE ?`,
 		pattern, pattern,
 	)
@@ -2520,12 +2417,12 @@ func (s *Store) GetViolationLog(ruleID string, limit int) ([]ViolationLogEntry, 
 	var rows *sql.Rows
 	var err error
 	if ruleID != "" {
-		rows, err = s.db.Query(`
+		rows, err = s.knowledgeDB.Query(`
             SELECT id, rule_id, severity, from_node, to_node, edge_type, first_seen, last_seen, occurrences
             FROM violation_log WHERE rule_id = ? ORDER BY last_seen DESC LIMIT ?`,
 			ruleID, limit)
 	} else {
-		rows, err = s.db.Query(`
+		rows, err = s.knowledgeDB.Query(`
             SELECT id, rule_id, severity, from_node, to_node, edge_type, first_seen, last_seen, occurrences
             FROM violation_log ORDER BY last_seen DESC LIMIT ?`,
 			limit)
@@ -2592,7 +2489,7 @@ func (s *Store) UpsertGap(g QualityGap) (QualityGap, error) {
 		g.FoundAt = now
 	}
 	g.UpdatedAt = now
-	_, err := s.db.Exec(`
+	_, err := s.knowledgeDB.Exec(`
 		INSERT INTO quality_gaps
 			(id, node_id, gap_id, description, severity, status, found_by, found_at, updated_at, fix_notes)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2646,29 +2543,29 @@ func (s *Store) GetGaps(f GapFilter) ([]QualityGap, error) {
 	switch {
 	// Compound: NodeID + Severity (most specific — must come before single-field cases).
 	case f.NodeID != "" && f.Severity != "" && status != "all":
-		rows, err = s.db.Query(base+` WHERE node_id = ? AND severity = ? AND status = ? ORDER BY`+severityOrder, f.NodeID, f.Severity, status)
+		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? AND severity = ? AND status = ? ORDER BY`+severityOrder, f.NodeID, f.Severity, status)
 	case f.NodeID != "" && f.Severity != "":
-		rows, err = s.db.Query(base+` WHERE node_id = ? AND severity = ? ORDER BY`+severityOrder, f.NodeID, f.Severity)
+		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? AND severity = ? ORDER BY`+severityOrder, f.NodeID, f.Severity)
 	// Compound: File + Severity.
 	case f.File != "" && f.Severity != "" && status != "all":
-		rows, err = s.db.Query(fileWhere(` AND severity = ? AND status = ?`), "%/"+f.File+"::%", "%::"+f.File+"::%", f.Severity, status)
+		rows, err = s.knowledgeDB.Query(fileWhere(` AND severity = ? AND status = ?`), "%/"+f.File+"::%", "%::"+f.File+"::%", f.Severity, status)
 	case f.File != "" && f.Severity != "":
-		rows, err = s.db.Query(fileWhere(` AND severity = ?`), "%/"+f.File+"::%", "%::"+f.File+"::%", f.Severity)
+		rows, err = s.knowledgeDB.Query(fileWhere(` AND severity = ?`), "%/"+f.File+"::%", "%::"+f.File+"::%", f.Severity)
 	// Single-field cases.
 	case f.NodeID != "" && status != "all":
-		rows, err = s.db.Query(base+` WHERE node_id = ? AND status = ? ORDER BY`+severityOrder, f.NodeID, status)
+		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? AND status = ? ORDER BY`+severityOrder, f.NodeID, status)
 	case f.NodeID != "":
-		rows, err = s.db.Query(base+` WHERE node_id = ? ORDER BY`+severityOrder, f.NodeID)
+		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? ORDER BY`+severityOrder, f.NodeID)
 	case f.File != "" && status != "all":
-		rows, err = s.db.Query(fileWhere(` AND status = ?`), "%/"+f.File+"::%", "%::"+f.File+"::%", status)
+		rows, err = s.knowledgeDB.Query(fileWhere(` AND status = ?`), "%/"+f.File+"::%", "%::"+f.File+"::%", status)
 	case f.File != "":
-		rows, err = s.db.Query(fileWhere(``), "%/"+f.File+"::%", "%::"+f.File+"::%")
+		rows, err = s.knowledgeDB.Query(fileWhere(``), "%/"+f.File+"::%", "%::"+f.File+"::%")
 	case f.Severity != "" && status != "all":
-		rows, err = s.db.Query(base+` WHERE severity = ? AND status = ? ORDER BY`+severityOrder, f.Severity, status)
+		rows, err = s.knowledgeDB.Query(base+` WHERE severity = ? AND status = ? ORDER BY`+severityOrder, f.Severity, status)
 	case status != "all":
-		rows, err = s.db.Query(base+` WHERE status = ? ORDER BY`+severityOrder, status)
+		rows, err = s.knowledgeDB.Query(base+` WHERE status = ? ORDER BY`+severityOrder, status)
 	default:
-		rows, err = s.db.Query(base + ` ORDER BY` + severityOrder)
+		rows, err = s.knowledgeDB.Query(base + ` ORDER BY` + severityOrder)
 	}
 	if err != nil {
 		return nil, err
@@ -2698,7 +2595,7 @@ func (s *Store) CountOpenGaps(nodeIDs []string) (int, error) {
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	row := s.db.QueryRow(
+	row := s.knowledgeDB.QueryRow(
 		`SELECT COUNT(*) FROM quality_gaps WHERE status = 'open' AND node_id IN (`+
 			strings.Join(placeholders, ",")+`)`,
 		args...)
@@ -2769,14 +2666,14 @@ type AgentContext struct {
 func (s *Store) UpsertAgent(id string, activity *AgentActivity) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	if activity == nil {
-		_, err := s.db.Exec(`
+		_, err := s.knowledgeDB.Exec(`
 			INSERT INTO agents (id, last_seen) VALUES (?, ?)
 			ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen`,
 			id, now,
 		)
 		return err
 	}
-	_, err := s.db.Exec(`
+	_, err := s.knowledgeDB.Exec(`
 		INSERT INTO agents (id, last_seen, current_task_id, current_task_title, current_focus, focus_file, focus_since, intent)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -2801,7 +2698,7 @@ func (s *Store) UpsertAgent(id string, activity *AgentActivity) error {
 // ClearAgentTask zeroes the current task fields for the given agent.
 // Call when a task transitions to done/cancelled.
 func (s *Store) ClearAgentTask(agentID string) error {
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`UPDATE agents SET current_task_id = '', current_task_title = '' WHERE id = ?`,
 		agentID,
 	)
@@ -2811,7 +2708,7 @@ func (s *Store) ClearAgentTask(agentID string) error {
 // GetAgents returns all known agents ordered by last_seen descending.
 // Presence is computed from last_seen: active (≤5min), idle (5–15min), inactive (>15min).
 func (s *Store) GetAgents() ([]Agent, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
 		SELECT id, last_seen, metadata,
 		       current_task_id, current_task_title, current_focus, project_id,
 		       focus_file, focus_since, intent
@@ -2841,7 +2738,7 @@ func (s *Store) GetAgents() ([]Agent, error) {
 func (s *Store) CountActiveAgents(excludeAgentID string) (int, error) {
 	cutoff := time.Now().UTC().Add(-15 * time.Minute).Format(time.RFC3339)
 	var n int
-	err := s.db.QueryRow(`
+	err := s.knowledgeDB.QueryRow(`
 		SELECT COUNT(*) FROM agents
 		WHERE last_seen > ? AND id != ?`,
 		cutoff, excludeAgentID,
@@ -2852,7 +2749,7 @@ func (s *Store) CountActiveAgents(excludeAgentID string) (int, error) {
 // CountIndexedFiles returns the number of files currently tracked in the index.
 func (s *Store) CountIndexedFiles() (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM file_hashes`).Scan(&n)
+	err := s.graphDB.QueryRow(`SELECT COUNT(*) FROM file_hashes`).Scan(&n)
 	return n, err
 }
 
@@ -2863,7 +2760,7 @@ func (s *Store) CountIndexedFiles() (int, error) {
 // Returns nil if no profile exists yet (first session).
 func (s *Store) GetAgentContext(agentID string) (*AgentContext, error) {
 	var ac AgentContext
-	err := s.db.QueryRow(
+	err := s.knowledgeDB.QueryRow(
 		`SELECT agent_id, last_event_seq, identity_hash, last_session, task_seq
 		 FROM agent_context WHERE agent_id = ?`, agentID,
 	).Scan(&ac.AgentID, &ac.LastEventSeq, &ac.IdentityHash, &ac.LastSession, &ac.TaskSeq)
@@ -2879,7 +2776,7 @@ func (s *Store) GetAgentContext(agentID string) (*AgentContext, error) {
 // UpsertAgentContext creates or updates the context profile for an agent.
 // Called after session_init to record what the agent has received.
 func (s *Store) UpsertAgentContext(ac *AgentContext) error {
-	_, err := s.db.Exec(`
+	_, err := s.knowledgeDB.Exec(`
 		INSERT INTO agent_context (agent_id, last_event_seq, identity_hash, last_session, task_seq)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(agent_id) DO UPDATE SET
@@ -2910,7 +2807,7 @@ func (s *Store) AppendEvent(typ, agentID, payload string) error {
 	nowStr := now.Format(time.RFC3339)
 	cutoff := now.Add(-24 * time.Hour).Format(time.RFC3339)
 
-	tx, err := s.db.Begin()
+	tx, err := s.knowledgeDB.Begin()
 	if err != nil {
 		return err
 	}
@@ -2955,7 +2852,7 @@ func (s *Store) GetEvents(sinceSeq int64, types []string, agentIDFilter string, 
 	query += ` ORDER BY seq ASC LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.knowledgeDB.Query(query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2978,7 +2875,7 @@ func (s *Store) GetEvents(sinceSeq int64, types []string, agentIDFilter string, 
 	}
 	if latestSeq == 0 {
 		// Return the current max seq so the caller always has a valid cursor.
-		_ = s.db.QueryRow(`SELECT COALESCE(MAX(seq),0) FROM events`).Scan(&latestSeq)
+		_ = s.knowledgeDB.QueryRow(`SELECT COALESCE(MAX(seq),0) FROM events`).Scan(&latestSeq)
 	}
 	return events, latestSeq, nil
 }
@@ -3005,7 +2902,7 @@ type Annotation struct {
 func (s *Store) AddAnnotation(nodeID, agentID, note string) (string, error) {
 	id := fmt.Sprintf("%x", time.Now().UnixNano())
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`INSERT INTO annotations (id, node_id, agent_id, note, created_at, source) VALUES (?, ?, ?, ?, ?, 'agent')`,
 		id, nodeID, agentID, note, now,
 	)
@@ -3020,7 +2917,7 @@ func (s *Store) AddAnnotationIfNew(nodeID, agentID, note string, dedupeWindow ti
 	id := fmt.Sprintf("%x", time.Now().UnixNano())
 	now := time.Now().UTC().Format(time.RFC3339)
 	windowSec := fmt.Sprintf("-%d seconds", int(dedupeWindow.Seconds()))
-	result, err := s.db.Exec(
+	result, err := s.knowledgeDB.Exec(
 		`INSERT INTO annotations (id, node_id, agent_id, note, created_at, source)
 		 SELECT ?, ?, ?, ?, ?, 'agent'
 		 WHERE NOT EXISTS (
@@ -3046,7 +2943,7 @@ func (s *Store) AddAnnotationIfNew(nodeID, agentID, note string, dedupeWindow ti
 func (s *Store) AddSystemAnnotation(nodeID, note string) (string, error) {
 	id := fmt.Sprintf("%x", time.Now().UnixNano())
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`INSERT OR IGNORE INTO annotations (id, node_id, agent_id, note, created_at, source) VALUES (?, ?, '', ?, ?, 'system')`,
 		id, nodeID, note, now,
 	)
@@ -3065,7 +2962,7 @@ func (s *Store) GetAnnotationsForNodes(nodeIDs []string) (map[string][]Annotatio
 	for i, id := range nodeIDs {
 		args[i] = id
 	}
-	rows, err := s.db.Query(
+	rows, err := s.knowledgeDB.Query(
 		`SELECT id, node_id, agent_id, note, created_at, source, stale FROM annotations WHERE node_id IN (`+placeholders+`) ORDER BY created_at ASC`,
 		args...,
 	)
@@ -3100,7 +2997,7 @@ func (s *Store) MarkAnnotationsStale(nodeIDs []string) error {
 	for i, id := range nodeIDs {
 		args[i] = id
 	}
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`UPDATE annotations SET stale=1 WHERE node_id IN (`+placeholders+`) AND stale=0`,
 		args...,
 	)
@@ -3126,7 +3023,7 @@ func (s *Store) RecordToolCall(toolName, agentID, sessionID, entity string, dura
 	if !success {
 		succ = 0
 	}
-	_, _ = s.db.Exec(
+	_, _ = s.knowledgeDB.Exec(
 		`INSERT INTO tool_calls(tool_name,agent_id,session_id,entity,duration_ms,success) VALUES(?,?,?,?,?,?)`,
 		toolName, agentID, sessionID, entity, durationMs, succ,
 	)
@@ -3138,7 +3035,7 @@ func (s *Store) ToolUsageStats(days, limit int) ([]ToolUsageStat, error) {
 		limit = 10
 	}
 	since := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02T15:04:05Z")
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
         SELECT tool_name,
                COUNT(*) AS calls,
                AVG(duration_ms) AS avg_ms,
@@ -3174,7 +3071,7 @@ func (s *Store) ToolUsageStats(days, limit int) ([]ToolUsageStat, error) {
 
 // SaveIndexSnapshot persists a zstd-compressed GraphIndex BLOB to the meta table.
 func (s *Store) SaveIndexSnapshot(blob []byte) error {
-	_, err := s.db.Exec(
+	_, err := s.graphDB.Exec(
 		`INSERT OR REPLACE INTO meta (key, value) VALUES ('graph_snapshot', ?)`,
 		blob,
 	)
@@ -3185,7 +3082,7 @@ func (s *Store) SaveIndexSnapshot(blob []byte) error {
 // or (nil, nil) if no snapshot exists.
 func (s *Store) LoadIndexSnapshot() ([]byte, error) {
 	var blob []byte
-	err := s.db.QueryRow(
+	err := s.graphDB.QueryRow(
 		`SELECT value FROM meta WHERE key = 'graph_snapshot'`,
 	).Scan(&blob)
 	if err == sql.ErrNoRows {

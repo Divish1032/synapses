@@ -110,7 +110,7 @@ func (s *Store) CreatePlan(title, description, agentID string, tasks []TaskInput
 	planID = newID()
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	tx, txErr := s.db.Begin()
+	tx, txErr := s.knowledgeDB.Begin()
 	if txErr != nil {
 		return "", nil, fmt.Errorf("begin tx: %w", txErr)
 	}
@@ -176,7 +176,7 @@ func (s *Store) GetPendingTasks(planID, agentID string) ([]Task, error) {
 		CASE priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,
 		created_at ASC`
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.knowledgeDB.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query pending tasks: %w", err)
 	}
@@ -192,7 +192,7 @@ func (s *Store) GetPendingTasks(planID, agentID string) ([]Task, error) {
 	if agentID != "" {
 		for _, t := range tasks {
 			if t.AssignedTo == "" {
-				_, _ = s.db.Exec(
+				_, _ = s.knowledgeDB.Exec(
 					`UPDATE tasks SET assigned_to = ?, updated_at = ? WHERE id = ? AND (assigned_to = '' OR assigned_to IS NULL)`,
 					agentID, time.Now().UTC(), t.ID,
 				)
@@ -249,7 +249,7 @@ func (s *Store) UpdateLinkedNodes(taskID string, nodeIDs []string) error {
 		nodeIDs = []string{}
 	}
 	linked, _ := json.Marshal(nodeIDs)
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`UPDATE tasks SET linked_nodes = ?, updated_at = ? WHERE id = ?`,
 		string(linked), time.Now().UTC().Format(time.RFC3339), taskID,
 	)
@@ -275,7 +275,7 @@ func (s *Store) UpdateTask(id, status, appendNotes, agentID string) (unblocked [
 
 	if appendNotes != "" {
 		var existing string
-		row := s.db.QueryRow(`SELECT notes FROM tasks WHERE id = ?`, id)
+		row := s.knowledgeDB.QueryRow(`SELECT notes FROM tasks WHERE id = ?`, id)
 		if scanErr := row.Scan(&existing); scanErr != nil && scanErr != sql.ErrNoRows {
 			return nil, false, fmt.Errorf("read task notes: %w", scanErr)
 		}
@@ -286,14 +286,14 @@ func (s *Store) UpdateTask(id, status, appendNotes, agentID string) (unblocked [
 			existing = newNote
 		}
 		if assignedTo != "" {
-			if _, execErr := s.db.Exec(
+			if _, execErr := s.knowledgeDB.Exec(
 				`UPDATE tasks SET status = ?, notes = ?, assigned_to = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
 				status, existing, assignedTo, agentID, now, id,
 			); execErr != nil {
 				return nil, false, execErr
 			}
 		} else {
-			if _, execErr := s.db.Exec(
+			if _, execErr := s.knowledgeDB.Exec(
 				`UPDATE tasks SET status = ?, notes = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
 				status, existing, agentID, now, id,
 			); execErr != nil {
@@ -302,14 +302,14 @@ func (s *Store) UpdateTask(id, status, appendNotes, agentID string) (unblocked [
 		}
 	} else {
 		if assignedTo != "" {
-			if _, execErr := s.db.Exec(
+			if _, execErr := s.knowledgeDB.Exec(
 				`UPDATE tasks SET status = ?, assigned_to = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
 				status, assignedTo, agentID, now, id,
 			); execErr != nil {
 				return nil, false, execErr
 			}
 		} else {
-			if _, execErr := s.db.Exec(
+			if _, execErr := s.knowledgeDB.Exec(
 				`UPDATE tasks SET status = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
 				status, agentID, now, id,
 			); execErr != nil {
@@ -322,7 +322,7 @@ func (s *Store) UpdateTask(id, status, appendNotes, agentID string) (unblocked [
 	if status == "done" || status == "cancelled" {
 		// Fetch the plan_id of this task so we can check plan completion.
 		var planID string
-		_ = s.db.QueryRow(`SELECT plan_id FROM tasks WHERE id = ?`, id).Scan(&planID)
+		_ = s.knowledgeDB.QueryRow(`SELECT plan_id FROM tasks WHERE id = ?`, id).Scan(&planID)
 
 		if status == "done" {
 			unblocked, err = s.findNewlyUnblocked(id)
@@ -330,7 +330,7 @@ func (s *Store) UpdateTask(id, status, appendNotes, agentID string) (unblocked [
 				return nil, false, err
 			}
 		}
-		planCompleted, err = checkAndCompletePlan(s.db, planID)
+		planCompleted, err = checkAndCompletePlan(s.knowledgeDB, planID)
 		if err != nil {
 			return unblocked, false, err
 		}
@@ -374,7 +374,7 @@ func checkAndCompletePlan(db *sql.DB, planID string) (bool, error) {
 // their only blocking dependency (i.e. all other deps are now done too).
 func (s *Store) findNewlyUnblocked(completedID string) ([]string, error) {
 	// Find all pending/in_progress tasks that depend on completedID.
-	rows, err := s.db.Query(
+	rows, err := s.knowledgeDB.Query(
 		`SELECT id, depends_on FROM tasks WHERE status IN ('pending','in_progress') AND depends_on LIKE ?`,
 		"%"+completedID+"%",
 	)
@@ -448,7 +448,7 @@ func (s *Store) SetTaskStartCommit(taskID, sha string) error {
 	if sha == "" {
 		return nil
 	}
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`UPDATE tasks SET start_commit = ?, updated_at = ? WHERE id = ?`,
 		sha, time.Now().UTC().Format(time.RFC3339), taskID,
 	)
@@ -463,7 +463,7 @@ func (s *Store) SetTaskCommits(taskID string, commits []string) error {
 		commits = []string{}
 	}
 	raw, _ := json.Marshal(commits)
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`UPDATE tasks SET commits = ?, updated_at = ? WHERE id = ?`,
 		string(raw), time.Now().UTC().Format(time.RFC3339), taskID,
 	)
@@ -472,7 +472,7 @@ func (s *Store) SetTaskCommits(taskID string, commits []string) error {
 
 // GetTask retrieves a single task by ID. Returns an error wrapping sql.ErrNoRows if not found.
 func (s *Store) GetTask(id string) (*Task, error) {
-	row := s.db.QueryRow(`
+	row := s.knowledgeDB.QueryRow(`
 		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
 		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits
 		FROM tasks WHERE id = ?`, id)
@@ -515,7 +515,7 @@ func (s *Store) taskStatusByID(ids []string) (map[string]string, error) {
 		placeholders = append(placeholders, '?')
 		args[i] = id
 	}
-	rows, err := s.db.Query(
+	rows, err := s.knowledgeDB.Query(
 		`SELECT id, status FROM tasks WHERE id IN (`+string(placeholders)+`)`,
 		args...,
 	)
@@ -536,7 +536,7 @@ func (s *Store) taskStatusByID(ids []string) (map[string]string, error) {
 
 // GetPlans returns all plans with task completion summaries, ordered by creation time desc.
 func (s *Store) GetPlans() ([]PlanSummary, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
 		SELECT p.id, p.title, p.description, p.created_by, p.created_at, p.updated_at,
 		       p.completed_at,
 		       COUNT(t.id)                                           AS total,
@@ -644,7 +644,7 @@ func (s *Store) UpsertSessionState(state SessionState) error {
 		id = state.ID
 	}
 
-	_, err := s.db.Exec(`
+	_, err := s.knowledgeDB.Exec(`
 		INSERT INTO session_state
 			(id, task_id, agent_id, approach, files_modified, completed_steps,
 			 remaining_steps, blockers, decisions, context_snapshot, created_at, updated_at)
@@ -669,7 +669,7 @@ func (s *Store) UpsertSessionState(state SessionState) error {
 
 // GetSessionState returns the session state for a task, or nil if none exists.
 func (s *Store) GetSessionState(taskID string) (*SessionState, error) {
-	row := s.db.QueryRow(`
+	row := s.knowledgeDB.QueryRow(`
 		SELECT id, task_id, agent_id, approach,
 		       files_modified, completed_steps, remaining_steps,
 		       blockers, decisions, context_snapshot, created_at, updated_at
@@ -710,7 +710,7 @@ func (s *Store) GetSessionStateForTasks(taskIDs []string) (map[string]*SessionSt
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	rows, err := s.db.Query(
+	rows, err := s.knowledgeDB.Query(
 		`SELECT id, task_id, agent_id, approach,
 		        files_modified, completed_steps, remaining_steps,
 		        blockers, decisions, context_snapshot, created_at, updated_at

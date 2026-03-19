@@ -93,7 +93,7 @@ func TestGetOrResumeSession_NewSessionAfterWindow(t *testing.T) {
 
 	// Manually expire the session by setting last_seen_at outside the default window.
 	past := time.Now().UTC().Unix() - 400
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
 
 	id2, resumed, _, err := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0, -1)
 	if err != nil {
@@ -125,13 +125,13 @@ func TestGetOrResumeSession_SupersedesOwnPriorSession(t *testing.T) {
 	st := openTestStore(t)
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0, -1)
 	past := time.Now().UTC().Unix() - 400
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
 
 	id2, _, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0, -1)
 
 	var endReason string
 	var endedAt *int64
-	err := st.db.QueryRow(`SELECT ended_at, end_reason FROM sessions WHERE id = ?`, id1).Scan(&endedAt, &endReason)
+	err := st.knowledgeDB.QueryRow(`SELECT ended_at, end_reason FROM sessions WHERE id = ?`, id1).Scan(&endedAt, &endReason)
 	if err != nil {
 		t.Fatalf("query old session: %v", err)
 	}
@@ -150,13 +150,13 @@ func TestGetOrResumeSession_DoesNotSupersedeConcurrentConnection(t *testing.T) {
 
 	// Expire Window A's session so it's outside the reconnect window.
 	past := time.Now().UTC().Unix() - 400
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, idA) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, idA) //nolint:errcheck
 
 	// Window B starts fresh (hibernate disabled) — must NOT supersede Window A's session.
 	st.GetOrResumeSession("claude-code", "proj-1", "mcp-conn-B", "work", 300, -1) //nolint:errcheck
 
 	var endedAt *int64
-	st.db.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, idA).Scan(&endedAt) //nolint:errcheck
+	st.knowledgeDB.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, idA).Scan(&endedAt) //nolint:errcheck
 	if endedAt != nil {
 		t.Errorf("Window B must not supersede Window A's session (different mcp_session_id)")
 	}
@@ -191,7 +191,7 @@ func TestGetOrResumeSession_ConcurrentCallsSameMCPSession(t *testing.T) {
 	}
 
 	var count int
-	st.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE mcp_session_id = 'mcp-conn-c' AND ended_at IS NULL`).Scan(&count) //nolint:errcheck
+	st.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM sessions WHERE mcp_session_id = 'mcp-conn-c' AND ended_at IS NULL`).Scan(&count) //nolint:errcheck
 	if count != 1 {
 		t.Errorf("expected exactly 1 live session for mcp-conn-c, got %d", count)
 	}
@@ -210,7 +210,7 @@ func TestGetOrResumeSession_HibernateResume_SameAgentNewConnection(t *testing.T)
 
 	// Backdate last_seen_at to simulate a 1-hour break (past reconnect window, within hibernate window).
 	past := time.Now().UTC().Unix() - 3600
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
 
 	// Same agent, same project, NEW connection (editor restarted after break).
 	id2, resumed, hibCtx, err := st.GetOrResumeSession("agent-1", "proj-h", "mcp-conn-B", "", 300, 14400)
@@ -242,7 +242,7 @@ func TestGetOrResumeSession_HibernateResume_PreservesIntentWhenNewIntentEmpty(t 
 
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-h2", "mcp-conn-A", "fix auth bug", 300, 14400)
 	past := time.Now().UTC().Unix() - 3600
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
 
 	// Resume with no new intent — prior intent must be preserved.
 	_, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-h2", "mcp-conn-B", "", 300, 14400)
@@ -251,7 +251,7 @@ func TestGetOrResumeSession_HibernateResume_PreservesIntentWhenNewIntentEmpty(t 
 	}
 
 	var storedIntent string
-	st.db.QueryRow(`SELECT intent FROM sessions WHERE id = ?`, id1).Scan(&storedIntent) //nolint:errcheck
+	st.knowledgeDB.QueryRow(`SELECT intent FROM sessions WHERE id = ?`, id1).Scan(&storedIntent) //nolint:errcheck
 	if storedIntent != "fix auth bug" {
 		t.Errorf("intent should be preserved when new intent is empty; got %q", storedIntent)
 	}
@@ -262,12 +262,12 @@ func TestGetOrResumeSession_HibernateResume_NewIntentOverridesPrior(t *testing.T
 
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-h3", "mcp-conn-A", "old intent", 300, 14400)
 	past := time.Now().UTC().Unix() - 3600
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
 
 	_, _, _, _ = st.GetOrResumeSession("agent-1", "proj-h3", "mcp-conn-B", "new intent", 300, 14400)
 
 	var storedIntent string
-	st.db.QueryRow(`SELECT intent FROM sessions WHERE id = ?`, id1).Scan(&storedIntent) //nolint:errcheck
+	st.knowledgeDB.QueryRow(`SELECT intent FROM sessions WHERE id = ?`, id1).Scan(&storedIntent) //nolint:errcheck
 	if storedIntent != "new intent" {
 		t.Errorf("new intent should override prior; got %q", storedIntent)
 	}
@@ -279,7 +279,7 @@ func TestGetOrResumeSession_HibernateResume_DisabledWhenWindowNegative(t *testin
 	// Hibernate disabled via -1.
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-hd", "mcp-conn-A", "work", 300, -1)
 	past := time.Now().UTC().Unix() - 3600
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
 
 	id2, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-hd", "mcp-conn-B", "work", 300, -1)
 	if hibCtx != nil {
@@ -296,7 +296,7 @@ func TestGetOrResumeSession_HibernateResume_ExpiredSessionNotResumed(t *testing.
 	// Session last seen 5 hours ago — outside the 4-hour hibernate window.
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-he", "mcp-conn-A", "work", 300, 14400)
 	wayPast := time.Now().UTC().Unix() - 18001 // >5 hours ago
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, wayPast, id1) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, wayPast, id1) //nolint:errcheck
 
 	id2, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-he", "mcp-conn-B", "work", 300, 14400)
 	if hibCtx != nil {
@@ -332,7 +332,7 @@ func TestGetOrResumeSession_HibernateResume_StateBecomesActive(t *testing.T) {
 
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-hs", "mcp-conn-A", "work", 300, 14400)
 	past := time.Now().UTC().Unix() - 3600
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
 
 	_, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-hs", "mcp-conn-B", "work", 300, 14400)
 	if hibCtx == nil {
@@ -340,7 +340,7 @@ func TestGetOrResumeSession_HibernateResume_StateBecomesActive(t *testing.T) {
 	}
 
 	var state string
-	st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id1).Scan(&state) //nolint:errcheck
+	st.knowledgeDB.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id1).Scan(&state) //nolint:errcheck
 	if state != "active" {
 		t.Errorf("state after hibernate resume: got %q want %q", state, "active")
 	}
@@ -351,7 +351,7 @@ func TestGetOrResumeSession_HibernateResume_MCPSessionIDUpdated(t *testing.T) {
 
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-hm", "mcp-conn-A", "work", 300, 14400)
 	past := time.Now().UTC().Unix() - 3600
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
 
 	_, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-hm", "mcp-conn-B", "work", 300, 14400)
 	if hibCtx == nil {
@@ -359,7 +359,7 @@ func TestGetOrResumeSession_HibernateResume_MCPSessionIDUpdated(t *testing.T) {
 	}
 
 	var mcpSessID string
-	st.db.QueryRow(`SELECT mcp_session_id FROM sessions WHERE id = ?`, id1).Scan(&mcpSessID) //nolint:errcheck
+	st.knowledgeDB.QueryRow(`SELECT mcp_session_id FROM sessions WHERE id = ?`, id1).Scan(&mcpSessID) //nolint:errcheck
 	if mcpSessID != "mcp-conn-B" {
 		t.Errorf("mcp_session_id after hibernate resume: got %q want %q", mcpSessID, "mcp-conn-B")
 	}
@@ -374,8 +374,8 @@ func TestGetOrResumeSession_HibernateResume_PicksMostRecentSession(t *testing.T)
 
 	olderPast := time.Now().UTC().Unix() - 7200 // 2 hours ago
 	recentPast := time.Now().UTC().Unix() - 3600 // 1 hour ago
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, olderPast, id1) //nolint:errcheck
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, recentPast, id2) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, olderPast, id1) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, recentPast, id2) //nolint:errcheck
 
 	resumedID, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-hpick", "mcp-conn-C", "work", 300, 14400)
 	if hibCtx == nil {
@@ -393,7 +393,7 @@ func TestSession_StateIsActiveOnCreate(t *testing.T) {
 	id := createTestSession(t, st, "agent-1", "proj-state", "")
 
 	var state string
-	st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&state) //nolint:errcheck
+	st.knowledgeDB.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&state) //nolint:errcheck
 	if state != "active" {
 		t.Errorf("new session state: got %q want %q", state, "active")
 	}
@@ -405,7 +405,7 @@ func TestSession_StateIsClosedAfterEndSession(t *testing.T) {
 	_ = st.EndSession(id, "clean", "success", "done")
 
 	var state string
-	st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&state) //nolint:errcheck
+	st.knowledgeDB.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&state) //nolint:errcheck
 	if state != "closed" {
 		t.Errorf("ended session state: got %q want %q", state, "closed")
 	}
@@ -417,7 +417,7 @@ func TestSession_StateRemainsActiveAfterTouch(t *testing.T) {
 	st.TouchSession(id)
 
 	var state string
-	st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&state) //nolint:errcheck
+	st.knowledgeDB.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&state) //nolint:errcheck
 	if state != "active" {
 		t.Errorf("touched session state: got %q want %q", state, "active")
 	}
@@ -431,7 +431,7 @@ func TestTouchSession_UpdatesLastSeen(t *testing.T) {
 
 	// Backdate so it appears stale.
 	past := time.Now().UTC().Unix() - 120
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id) //nolint:errcheck
 
 	st.TouchSession(id)
 
@@ -485,7 +485,7 @@ func TestGetStaleSessions_DetectsStale(t *testing.T) {
 
 	id := createTestSession(t, st, "agent-stale", "proj-s", "working")
 	past := time.Now().UTC().Unix() - 120
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id) //nolint:errcheck
 
 	stale, err := st.GetStaleSessions("proj-s", "different-current", time.Minute)
 	if err != nil {
@@ -509,7 +509,7 @@ func TestGetStaleSessions_ExcludesCurrentSession(t *testing.T) {
 	st := openTestStore(t)
 	id := createTestSession(t, st, "agent-1", "proj-s", "")
 	past := time.Now().UTC().Unix() - 120
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id) //nolint:errcheck
 
 	stale, _ := st.GetStaleSessions("proj-s", id, time.Minute)
 	for _, s := range stale {
@@ -549,7 +549,7 @@ func TestGetStaleSessions_CappedAtFive(t *testing.T) {
 	past := time.Now().UTC().Unix() - 120
 	for i := 0; i < 8; i++ {
 		id := createTestSession(t, st, "agent-x", "proj-cap", "")
-		st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id) //nolint:errcheck
+		st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id) //nolint:errcheck
 	}
 	stale, _ := st.GetStaleSessions("proj-cap", "other", time.Minute)
 	if len(stale) > 5 {
@@ -561,7 +561,7 @@ func TestGetStaleSessions_TimestampsAreRFC3339(t *testing.T) {
 	st := openTestStore(t)
 	id := createTestSession(t, st, "agent-1", "proj-ts", "")
 	past := time.Now().UTC().Unix() - 120
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id) //nolint:errcheck
 
 	stale, _ := st.GetStaleSessions("proj-ts", "other", time.Minute)
 	for _, s := range stale {
@@ -778,7 +778,7 @@ func TestPruneToolCallsOlderThan_RemovesOldRows(t *testing.T) {
 	st := openTestStore(t)
 	sessID := createTestSession(t, st, "agent-1", "proj-1", "")
 
-	st.db.Exec( //nolint:errcheck
+	st.knowledgeDB.Exec( //nolint:errcheck
 		`INSERT INTO tool_calls(tool_name, agent_id, session_id, entity, duration_ms, success, created_at)
 		 VALUES ('old_tool', 'agent-1', ?, '', 10, 1, '2020-01-01T00:00:00Z')`, sessID)
 	st.RecordToolCall("recent_tool", "agent-1", sessID, "", 10, true)
@@ -797,7 +797,7 @@ func TestPruneToolCallsOlderThan_RemovesOldRows(t *testing.T) {
 	}
 
 	var count int
-	st.db.QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE tool_name = 'recent_tool'`).Scan(&count) //nolint:errcheck
+	st.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE tool_name = 'recent_tool'`).Scan(&count) //nolint:errcheck
 	if count == 0 {
 		t.Error("recent tool_call was incorrectly pruned")
 	}
@@ -906,7 +906,7 @@ func TestSessionLifecycle_ParallelSessions(t *testing.T) {
 
 	past := time.Now().UTC().Unix() - 120
 	for _, sid := range []string{sessA, sessB, sessC} {
-		st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, sid) //nolint:errcheck
+		st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, sid) //nolint:errcheck
 	}
 
 	stale, _ := st.GetStaleSessions("proj-parallel", "other", time.Minute)
@@ -972,7 +972,7 @@ func TestGetLastBranch_ReturnsLatestEndedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Backdate session 1's ended_at so session 2 is definitively newer.
-	st.db.Exec(`UPDATE sessions SET ended_at = 1000 WHERE id = ?`, s1) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET ended_at = 1000 WHERE id = ?`, s1) //nolint:errcheck
 
 	// Session 2: branch "feature/auth", ended at current time (newer)
 	s2 := createTestSession(t, st, "agent-multi", "proj-1", "")
@@ -1050,7 +1050,7 @@ func TestSessionLifecycle_HibernateResumeFullFlow(t *testing.T) {
 
 	// 2. Agent goes away for 2 hours (past reconnect window, within hibernate window).
 	past := time.Now().UTC().Unix() - 7200
-	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
 
 	// 3. Agent comes back on a new connection (editor restarted).
 	id2, resumed, hibCtx, err := st.GetOrResumeSession("agent-1", "proj-flow", "mcp-conn-2", "", 300, 14400)
@@ -1114,7 +1114,7 @@ func TestGetOrResumeSession_FreshSession_SetsParentSessionID(t *testing.T) {
 
 	// parent_session_id on the new row must point to id1.
 	var parent string
-	if err := st.db.QueryRow(`SELECT parent_session_id FROM sessions WHERE id = ?`, id2).Scan(&parent); err != nil {
+	if err := st.knowledgeDB.QueryRow(`SELECT parent_session_id FROM sessions WHERE id = ?`, id2).Scan(&parent); err != nil {
 		t.Fatalf("querying parent_session_id: %v", err)
 	}
 	if parent != id1 {
@@ -1132,7 +1132,7 @@ func TestGetOrResumeSession_FreshSession_ParentEmptyWhenNoPrior(t *testing.T) {
 	}
 
 	var parent string
-	if err := st.db.QueryRow(`SELECT parent_session_id FROM sessions WHERE id = ?`, id).Scan(&parent); err != nil {
+	if err := st.knowledgeDB.QueryRow(`SELECT parent_session_id FROM sessions WHERE id = ?`, id).Scan(&parent); err != nil {
 		t.Fatalf("querying parent_session_id: %v", err)
 	}
 	if parent != "" {
@@ -1147,12 +1147,12 @@ func TestGetStaleSessions_LazilyMarksSessionsHibernated(t *testing.T) {
 
 	// Create a session then back-date last_seen_at to make it stale.
 	id := createTestSession(t, st, "agent-hib", "proj-hib", "idle work")
-	_, _ = st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`,
+	_, _ = st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`,
 		time.Now().Add(-2*time.Hour).Unix(), id)
 
 	// State should still be 'active' before GetStaleSessions runs.
 	var stateBefore string
-	_ = st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&stateBefore)
+	_ = st.knowledgeDB.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&stateBefore)
 	if stateBefore != "active" {
 		t.Fatalf("expected state=active before GetStaleSessions, got %q", stateBefore)
 	}
@@ -1167,7 +1167,7 @@ func TestGetStaleSessions_LazilyMarksSessionsHibernated(t *testing.T) {
 	}
 
 	var stateAfter string
-	_ = st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&stateAfter)
+	_ = st.knowledgeDB.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&stateAfter)
 	if stateAfter != "hibernated" {
 		t.Errorf("state after GetStaleSessions: got %q want %q", stateAfter, "hibernated")
 	}
@@ -1186,7 +1186,7 @@ func TestGetStaleSessions_DoesNotHibernateActiveSessions(t *testing.T) {
 
 	// Live session must remain 'active'.
 	var state string
-	_ = st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&state)
+	_ = st.knowledgeDB.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&state)
 	if state != "active" {
 		t.Errorf("live session state: got %q want %q", state, "active")
 	}
@@ -1208,7 +1208,7 @@ func TestGetOrResumeSession_IdleActiveSession_NotStolenByPhase2(t *testing.T) {
 	// This simulates an editor window that is open but hasn't made a tool call
 	// recently. It should NOT be resumed by a new connection.
 	idleSessID := newID()
-	_, err := st.db.Exec(`
+	_, err := st.knowledgeDB.Exec(`
 		INSERT INTO sessions(id, agent_id, project_id, mcp_session_id, intent,
 		                     started_at, last_seen_at, state, parent_session_id)
 		VALUES (?, 'agent-idle', 'proj-idle', 'mcp-old-conn', 'old intent',
@@ -1242,7 +1242,7 @@ func TestGetOrResumeSession_IdleActiveSession_NotStolenByPhase2(t *testing.T) {
 		}
 		// Confirm the session is now active (not stuck as hibernated).
 		var state string
-		_ = st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, idleSessID).Scan(&state)
+		_ = st.knowledgeDB.QueryRow(`SELECT state FROM sessions WHERE id = ?`, idleSessID).Scan(&state)
 		if state != "active" {
 			t.Errorf("resumed session state: got %q want %q", state, "active")
 		}
@@ -1253,7 +1253,7 @@ func TestGetOrResumeSession_IdleActiveSession_NotStolenByPhase2(t *testing.T) {
 		}
 		// The idle session must now be 'hibernated' (lazy update side-effect).
 		var state string
-		_ = st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, idleSessID).Scan(&state)
+		_ = st.knowledgeDB.QueryRow(`SELECT state FROM sessions WHERE id = ?`, idleSessID).Scan(&state)
 		if state != "hibernated" {
 			t.Errorf("idle session state after lazy update: got %q want %q", state, "hibernated")
 		}
@@ -1274,7 +1274,7 @@ func TestGetOrResumeSession_Phase2_FiltersOnHibernatedState(t *testing.T) {
 	// A: state='closed' (should never be resumed)
 	// B: state='active' but idle (will be promoted to 'hibernated' by lazy update — expected to resume)
 	closedID := newID()
-	_, err := st.db.Exec(`
+	_, err := st.knowledgeDB.Exec(`
 		INSERT INTO sessions(id, agent_id, project_id, mcp_session_id, intent,
 		                     started_at, last_seen_at, state, parent_session_id, ended_at)
 		VALUES (?, 'agent-p2', 'proj-p2', 'mcp-closed', 'closed',
@@ -1284,7 +1284,7 @@ func TestGetOrResumeSession_Phase2_FiltersOnHibernatedState(t *testing.T) {
 		t.Fatalf("insert closed session: %v", err)
 	}
 	activeID := newID()
-	_, err = st.db.Exec(`
+	_, err = st.knowledgeDB.Exec(`
 		INSERT INTO sessions(id, agent_id, project_id, mcp_session_id, intent,
 		                     started_at, last_seen_at, state, parent_session_id)
 		VALUES (?, 'agent-p2', 'proj-p2', 'mcp-idle', 'working on auth',

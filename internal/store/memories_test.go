@@ -157,7 +157,7 @@ func TestTouchMemory_ExtendsExpiry(t *testing.T) {
 
 	// Read initial expires_at.
 	var expiresBefore string
-	st.db.QueryRow(`SELECT expires_at FROM memories WHERE id = ?`, id).Scan(&expiresBefore)
+	st.knowledgeDB.QueryRow(`SELECT expires_at FROM memories WHERE id = ?`, id).Scan(&expiresBefore)
 
 	// Touch it.
 	time.Sleep(10 * time.Millisecond) // ensure time advances
@@ -167,7 +167,7 @@ func TestTouchMemory_ExtendsExpiry(t *testing.T) {
 	}
 
 	var expiresAfter, accessedAt string
-	st.db.QueryRow(`SELECT expires_at, last_accessed_at FROM memories WHERE id = ?`, id).
+	st.knowledgeDB.QueryRow(`SELECT expires_at, last_accessed_at FROM memories WHERE id = ?`, id).
 		Scan(&expiresAfter, &accessedAt)
 
 	if expiresAfter == expiresBefore {
@@ -183,7 +183,7 @@ func TestExpireMemories_DeletesExpired(t *testing.T) {
 
 	// Insert a memory with already-expired timestamp.
 	past := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339)
-	st.db.Exec(`INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
+	st.knowledgeDB.Exec(`INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
 		created_at, expires_at, last_accessed_at, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		"expired-1", TierSessionLog, "old session data that should expire",
 		"", "agent-1", "", "[]", past, past, past, SourceAuto)
@@ -237,7 +237,7 @@ func TestMarkEntityMemoriesStale(t *testing.T) {
 	// Must set stale=1 and stale_reason.
 	var stale int
 	var reason, expiresAt string
-	st.db.QueryRow(`SELECT stale, stale_reason, expires_at FROM memories WHERE entity_id = ?`, "dead-node").Scan(&stale, &reason, &expiresAt)
+	st.knowledgeDB.QueryRow(`SELECT stale, stale_reason, expires_at FROM memories WHERE entity_id = ?`, "dead-node").Scan(&stale, &reason, &expiresAt)
 	if stale != 1 {
 		t.Errorf("expected stale=1, got %d", stale)
 	}
@@ -271,7 +271,7 @@ func TestMarkEntityMemoriesStaleForNodes_BatchCoversEntityIDMemories(t *testing.
 	check := func(id string, wantStale int) {
 		t.Helper()
 		var stale int
-		st.db.QueryRow(`SELECT stale FROM memories WHERE id = ?`, id).Scan(&stale)
+		st.knowledgeDB.QueryRow(`SELECT stale FROM memories WHERE id = ?`, id).Scan(&stale)
 		if stale != wantStale {
 			t.Errorf("id=%s: expected stale=%d, got %d", id, wantStale, stale)
 		}
@@ -304,7 +304,7 @@ func TestMarkEntityMemoriesStaleForNodes_NonEntityTierUntouched(t *testing.T) {
 	}
 
 	var stale int
-	st.db.QueryRow(`SELECT stale FROM memories WHERE id = ?`, idProj).Scan(&stale)
+	st.knowledgeDB.QueryRow(`SELECT stale FROM memories WHERE id = ?`, idProj).Scan(&stale)
 	if stale != 0 {
 		t.Errorf("project-tier memory should be untouched, got stale=%d", stale)
 	}
@@ -796,7 +796,7 @@ func TestInsertMemoryWithAnchors_DedupPath_AtomicTouchAndAnchors(t *testing.T) {
 func TestInsertMemoryWithAnchors_RollsBackOnAnchorFailure(t *testing.T) {
 	st := openMemTestStore(t)
 	// Drop the memory_anchors table so anchor INSERT fails inside the tx.
-	if _, err := st.db.Exec(`DROP TABLE memory_anchors`); err != nil {
+	if _, err := st.knowledgeDB.Exec(`DROP TABLE memory_anchors`); err != nil {
 		t.Fatal(err)
 	}
 	_, err := st.InsertMemoryWithAnchors(Memory{
@@ -835,7 +835,7 @@ func TestMarkAnchoredMemoriesStale_NoAnchors(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// Memory should not be stale.
-	rows, err := st.db.Query(`SELECT stale FROM memories WHERE id = ?`, id)
+	rows, err := st.knowledgeDB.Query(`SELECT stale FROM memories WHERE id = ?`, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -864,7 +864,7 @@ func TestMarkAnchoredMemoriesStale_MarksAnchored(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	rows, err := st.db.Query(`SELECT stale, stale_reason FROM memories WHERE id = ?`, id)
+	rows, err := st.knowledgeDB.Query(`SELECT stale, stale_reason FROM memories WHERE id = ?`, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -901,7 +901,7 @@ func TestMarkAnchoredMemoriesStale_BatchNodes(t *testing.T) {
 		{id1, 1}, {id2, 1}, {id3, 0},
 	} {
 		var stale int
-		_ = st.db.QueryRow(`SELECT stale FROM memories WHERE id = ?`, tc.id).Scan(&stale)
+		_ = st.knowledgeDB.QueryRow(`SELECT stale FROM memories WHERE id = ?`, tc.id).Scan(&stale)
 		if stale != tc.wantStale {
 			t.Errorf("id=%s: expected stale=%d, got %d", tc.id, tc.wantStale, stale)
 		}
@@ -922,7 +922,7 @@ func TestMarkAnchoredMemoriesStale_Idempotent(t *testing.T) {
 		t.Fatalf("idempotent second call failed: %v", err)
 	}
 	var stale int
-	_ = st.db.QueryRow(`SELECT stale FROM memories WHERE id = ?`, id).Scan(&stale)
+	_ = st.knowledgeDB.QueryRow(`SELECT stale FROM memories WHERE id = ?`, id).Scan(&stale)
 	if stale != 1 {
 		t.Errorf("expected stale=1 after idempotent call, got %d", stale)
 	}
@@ -963,7 +963,7 @@ func TestInsertMemory_Dedup_SkipsStaleMemories(t *testing.T) {
 	}
 
 	// Simulate AM-2 cascade: manually set stale=1 on the memory.
-	_, err = st.db.Exec(`UPDATE memories SET stale = 1, stale_reason = 'anchor node removed' WHERE id = ?`, id1)
+	_, err = st.knowledgeDB.Exec(`UPDATE memories SET stale = 1, stale_reason = 'anchor node removed' WHERE id = ?`, id1)
 	if err != nil {
 		t.Fatalf("force stale: %v", err)
 	}
@@ -985,7 +985,7 @@ func TestInsertMemory_Dedup_SkipsStaleMemories(t *testing.T) {
 
 	// Verify id1 is still stale (TouchMemory was NOT called on it).
 	var stale int
-	st.db.QueryRow(`SELECT stale FROM memories WHERE id = ?`, id1).Scan(&stale)
+	st.knowledgeDB.QueryRow(`SELECT stale FROM memories WHERE id = ?`, id1).Scan(&stale)
 	if stale != 1 {
 		t.Errorf("stale memory should remain stale=1, got stale=%d", stale)
 	}
@@ -1021,7 +1021,7 @@ func TestMarkAnchoredMemoriesStale_LargeBatch(t *testing.T) {
 	// Memory anchored to node-0 must be stale.
 	var stale int
 	var reason string
-	st.db.QueryRow(`SELECT stale, stale_reason FROM memories WHERE id = ?`, id).Scan(&stale, &reason)
+	st.knowledgeDB.QueryRow(`SELECT stale, stale_reason FROM memories WHERE id = ?`, id).Scan(&stale, &reason)
 	if stale != 1 {
 		t.Errorf("expected stale=1, got %d", stale)
 	}
@@ -1323,13 +1323,13 @@ func TestExpireMemories_CleansOrphanedSurfacedRows(t *testing.T) {
 
 	// Verify memory_surfaced row exists.
 	var surfCount int
-	st.db.QueryRow(`SELECT count(*) FROM memory_surfaced WHERE memory_id = ?`, id).Scan(&surfCount)
+	st.knowledgeDB.QueryRow(`SELECT count(*) FROM memory_surfaced WHERE memory_id = ?`, id).Scan(&surfCount)
 	if surfCount != 1 {
 		t.Fatalf("expected 1 memory_surfaced row, got %d", surfCount)
 	}
 
 	// Force-expire by setting expires_at to the past.
-	st.db.Exec(`UPDATE memories SET expires_at = '2020-01-01T00:00:00Z' WHERE id = ?`, id)
+	st.knowledgeDB.Exec(`UPDATE memories SET expires_at = '2020-01-01T00:00:00Z' WHERE id = ?`, id)
 
 	n, err := st.ExpireMemories()
 	if err != nil {
@@ -1340,7 +1340,7 @@ func TestExpireMemories_CleansOrphanedSurfacedRows(t *testing.T) {
 	}
 
 	// memory_surfaced row should be cleaned up.
-	st.db.QueryRow(`SELECT count(*) FROM memory_surfaced WHERE memory_id = ?`, id).Scan(&surfCount)
+	st.knowledgeDB.QueryRow(`SELECT count(*) FROM memory_surfaced WHERE memory_id = ?`, id).Scan(&surfCount)
 	if surfCount != 0 {
 		t.Fatalf("expected 0 orphaned memory_surfaced rows, got %d", surfCount)
 	}
@@ -1483,7 +1483,7 @@ func TestSearchMemoriesIncludingStale_ReturnsStaledMemory(t *testing.T) {
 	}
 
 	// Stale the memory directly via SQL (no entity anchor).
-	_, dbErr := st.db.Exec(`UPDATE memories SET stale = 1 WHERE content LIKE '%legacy auth handler%'`)
+	_, dbErr := st.knowledgeDB.Exec(`UPDATE memories SET stale = 1 WHERE content LIKE '%legacy auth handler%'`)
 	if dbErr != nil {
 		t.Fatal(dbErr)
 	}
@@ -1523,7 +1523,7 @@ func TestQueryRecentSessionMemoriesIncludingStale_ReturnsStaledSession(t *testin
 	}
 
 	// Manually stale the session-log memory.
-	_, dbErr := st.db.Exec(`UPDATE memories SET stale = 1 WHERE tier = 'session_log'`)
+	_, dbErr := st.knowledgeDB.Exec(`UPDATE memories SET stale = 1 WHERE tier = 'session_log'`)
 	if dbErr != nil {
 		t.Fatal(dbErr)
 	}
