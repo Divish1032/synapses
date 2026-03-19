@@ -36,6 +36,7 @@ type IndexingState struct {
 	phase      indexingPhase
 	filesDone  int64
 	filesTotal int64
+	label      string // optional phase label shown after file parsing (e.g. "Resolving edges…")
 }
 
 // Start records the real total file count (known after Phase 1 filesystem scan)
@@ -57,6 +58,17 @@ func (s *IndexingState) SetDone(done int64) {
 	writeProgressFile(s.Snapshot())
 }
 
+// SetLabel sets a human-readable phase label (e.g. "Resolving edges…") that the
+// frontend displays after file parsing is complete but before the state transitions
+// to ready. This prevents the progress bar from showing 100% while post-parse
+// work (edge resolution, cache saves) is still ongoing.
+func (s *IndexingState) SetLabel(label string) {
+	s.mu.Lock()
+	s.label = label
+	s.mu.Unlock()
+	writeProgressFile(s.Snapshot())
+}
+
 // Done transitions the state to ready (indexing complete).
 func (s *IndexingState) Done() {
 	s.mu.Lock()
@@ -66,13 +78,18 @@ func (s *IndexingState) Done() {
 }
 
 // Snapshot returns a consistent, point-in-time view of all fields.
-// All three values are read under the same lock, so callers never observe
+// All values are read under the same lock, so callers never observe
 // a mixed state (e.g. phase=ready but filesDone < filesTotal).
+//
+// While still in the active phase, pct is capped at 99 so the progress bar
+// never shows 100% while post-parse work (edge resolution, cache saves) is
+// ongoing. It only reaches 100 when state transitions to "ready".
 func (s *IndexingState) Snapshot() IndexingSnapshot {
 	s.mu.Lock()
 	phase := s.phase
 	done := s.filesDone
 	total := s.filesTotal
+	label := s.label
 	s.mu.Unlock()
 
 	var pct int64
@@ -83,23 +100,29 @@ func (s *IndexingState) Snapshot() IndexingSnapshot {
 	switch phase {
 	case indexingPhaseActive:
 		stateStr = "indexing"
+		if pct > 99 {
+			pct = 99 // reserve 100% for the ready transition
+		}
 	case indexingPhaseReady:
 		stateStr = "ready"
+		pct = 100
 	}
 	return IndexingSnapshot{
 		State: stateStr,
 		Done:  done,
 		Total: total,
 		Pct:   pct,
+		Label: label,
 	}
 }
 
 // IndexingSnapshot is the JSON-serialisable view returned by the health endpoint.
 type IndexingSnapshot struct {
-	State string `json:"state"`       // "idle" | "indexing" | "ready"
+	State string `json:"state"`        // "idle" | "indexing" | "ready"
 	Done  int64  `json:"files_done"`
 	Total int64  `json:"files_total"`
-	Pct   int64  `json:"pct"` // 0–100
+	Pct   int64  `json:"pct"`          // 0–100; capped at 99 while still indexing
+	Label string `json:"label,omitempty"` // phase label shown after file parsing (e.g. "Resolving edges…")
 }
 
 // activeIndexes maps absPath → *IndexingState for all projects currently

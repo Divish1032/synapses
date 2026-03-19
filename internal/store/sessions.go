@@ -11,17 +11,38 @@ import (
 // Created on session_init(); heartbeat updated on every tool call;
 // closed cleanly on end_session() or marked stale after 30 min of inactivity.
 type AgentSession struct {
-	ID          string
-	AgentID     string
-	ProjectID   string
-	Intent      string
-	StartedAt   time.Time
-	LastSeenAt  time.Time
-	EndedAt     *time.Time // nil = still active
-	EndReason   string     // "clean" | "timeout" | "reconciled" | ""
-	Outcome     string     // "success" | "failure" | "partial" | "unknown"
-	Summary     string
-	ToolCalls   int
+	ID               string
+	AgentID          string
+	ProjectID        string
+	Intent           string
+	State            string     // "active" | "hibernated" | "closed"
+	ParentSessionID  string     // ID of prior session on cross-connection resume; "" = first
+	StartedAt        time.Time
+	LastSeenAt       time.Time
+	EndedAt          *time.Time // nil = still active
+	EndReason        string     // "clean" | "timeout" | "reconciled" | "superseded" | ""
+	Outcome          string     // "success" | "failure" | "partial" | "unknown"
+	Summary          string
+	ToolCalls        int
+}
+
+// HibernateResumeContext carries prior session information surfaced when a
+// cross-connection resume occurs (agent restarts editor and calls session_init).
+// Non-nil only when GetOrResumeSession performs a Phase 2 hibernate resume.
+type HibernateResumeContext struct {
+	// PriorIntent is the intent declared in the hibernated session (may be empty).
+	PriorIntent string
+	// PriorSummary is from end_session or an auto-log (may be empty).
+	PriorSummary string
+	// PriorToolCalls is the total tool calls made in the prior session segment.
+	PriorToolCalls int
+	// GapSeconds is how long the session was dormant before this resume.
+	GapSeconds int64
+	// StartedAt is the original session.started_at (Unix epoch), so the MCP
+	// handler can display total session age across all resume cycles.
+	StartedAt int64
+	// ParentID is the sessions.id row that was resumed (now the current session).
+	ParentID string
 }
 
 // SessionTaskAction is the relationship between a session and a task.
@@ -50,7 +71,7 @@ type OrphanedTask struct {
 type StaleSession struct {
 	SessionID     string         `json:"session_id"`
 	AgentID       string         `json:"agent_id"`
-	StartedAt     string         `json:"started_at"`  // RFC3339 for JSON consumers
+	StartedAt     string         `json:"started_at"`   // RFC3339 for JSON consumers
 	LastSeenAt    string         `json:"last_seen_at"` // RFC3339 for JSON consumers
 	Intent        string         `json:"intent,omitempty"`
 	ToolCalls     int            `json:"tool_calls"`
@@ -79,33 +100,64 @@ type ToolCallSummary struct {
 //   - Slow machine cold start:        < 5 min
 const defaultReconnectWindowSec int64 = 5 * 60
 
+// defaultHibernateWindowSec is the fallback hibernate window: 4 hours.
+// Covers the "went for lunch / meeting / overnight" pattern without being
+// so large that it causes confusion on the next working day.
+const defaultHibernateWindowSec int64 = 4 * 60 * 60
+
 // GetOrResumeSession is the single entry point for session creation at
-// session_init time. It solves two problems:
+// session_init time. It handles three scenarios in priority order:
 //
-//  1. Duplicate rows on reconnect — if the same MCP connection (identified by
-//     mcpSessionID) reconnects within the reconnect window, the existing session
-//     is resumed rather than a new row created. mcpSessionID is the transport-level
-//     connection UUID assigned by the MCP framework (unique per physical connection),
-//     NOT the agent's self-declared agentID. This means two simultaneous Claude Code
-//     windows on the same project are always treated as separate sessions even if
-//     they both declare agent_id="claude-code".
+//  1. Same-connection resume (Phase 1): if the same MCP connection
+//     (identified by mcpSessionID) reconnects within the reconnect window,
+//     the existing session is resumed rather than a new row created. Handles
+//     MCP transport hiccups and rapid reconnects without creating duplicate rows.
 //
-//  2. Dirty state from prior unclosed sessions — when a fresh session IS created,
-//     any previously unclosed sessions for the same (agentID, projectID) are
-//     immediately closed with end_reason="superseded". This prevents them from
-//     lingering as false stale-session alerts for up to 30 min.
+//  2. Cross-connection hibernate resume (Phase 2): if no same-connection match
+//     is found AND hibernateWindow > 0, Synapses looks for a recent session
+//     from the same (agentID, projectID) that went dormant for more than the
+//     reconnect window (i.e. not currently live on another connection) but less
+//     than the hibernate window (i.e. still within the resumable period). This
+//     covers the "user took a break / restarted editor" pattern. On a match,
+//     the session's mcp_session_id is updated to the new connection and the row
+//     is reactivated. A non-nil HibernateResumeContext is returned so the MCP
+//     handler can surface prior intent, summary, and gap duration to the agent.
+//
+//  3. Fresh session (Phase 3+4): supersede any unclosed sessions for THIS
+//     physical connection and create a new row. Concurrent windows on the
+//     same project with different mcp_session_ids are never touched.
 //
 // Parameters:
 //   - agentID:          self-declared agent name (e.g. "claude-code"). May be "anonymous".
 //   - projectID:        stable FNV hash of the project root path.
 //   - mcpSessionID:     MCP transport connection ID ("stdio" for stdio mode).
 //   - intent:           optional declared goal from session_init (may be empty).
-//   - reconnectWindow:  from config.Session.ReconnectWindowSecs; 0 → default (300 s).
-func (s *Store) GetOrResumeSession(agentID, projectID, mcpSessionID, intent string, reconnectWindow int) (sessionID string, resumed bool, err error) {
+//   - reconnectWindow:  from config.Session.ReconnectWindowSecs; 0 or negative → default (300 s).
+//   - hibernateWindow:  from config.Session.HibernateWindowSecs.
+//     0 → default (14400 s / 4 h).
+//     Positive → use that value as the window.
+//     Negative (e.g. -1) → disable cross-connection resume entirely.
+func (s *Store) GetOrResumeSession(agentID, projectID, mcpSessionID, intent string, reconnectWindow, hibernateWindow int) (sessionID string, resumed bool, hibernateCtx *HibernateResumeContext, err error) {
 	windowSec := int64(reconnectWindow)
 	if windowSec <= 0 {
 		windowSec = defaultReconnectWindowSec
 	}
+	hibWindowSec := int64(hibernateWindow)
+	switch {
+	case hibWindowSec < 0:
+		// Negative: cross-connection resume explicitly disabled.
+		hibWindowSec = -1
+	case hibWindowSec == 0:
+		// Zero / unset: apply built-in default.
+		hibWindowSec = defaultHibernateWindowSec
+	}
+	// Guard: hibernate window must be strictly greater than the reconnect window.
+	// If not, the Phase 2 query range (last_seen_at > hibCutoff AND < reconnectCutoff)
+	// would be empty or inverted, silently matching nothing. Treat as disabled.
+	if hibWindowSec > 0 && hibWindowSec <= windowSec {
+		hibWindowSec = -1
+	}
+
 	now := time.Now().UTC().Unix()
 	cutoff := now - windowSec
 
@@ -117,7 +169,7 @@ func (s *Store) GetOrResumeSession(agentID, projectID, mcpSessionID, intent stri
 	// acquiring a reserved write lock upfront so the check-supersede-insert is atomic.
 	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return "", false, fmt.Errorf("begin session tx: %w", err)
+		return "", false, nil, fmt.Errorf("begin session tx: %w", err)
 	}
 	defer func() {
 		if err != nil {
@@ -125,70 +177,144 @@ func (s *Store) GetOrResumeSession(agentID, projectID, mcpSessionID, intent stri
 		}
 	}()
 
-	// ── Try resume: same MCP connection, same agent, same project, still active ──
-	// mcpSessionID is the authoritative discriminator: two concurrent agents on the
-	// same project but different connections have different mcpSessionIDs, so they
-	// never steal each other's sessions.
+	// ── Phase 1: Same-connection resume ──────────────────────────────────
+	// mcpSessionID is the authoritative discriminator: two concurrent agents on
+	// the same project but different connections have different mcpSessionIDs,
+	// so they never steal each other's sessions.
 	var existing string
 	queryErr := tx.QueryRow(`
 		SELECT id FROM sessions
-		WHERE agent_id      = ?
-		  AND project_id    = ?
+		WHERE agent_id       = ?
+		  AND project_id     = ?
 		  AND mcp_session_id = ?
-		  AND ended_at      IS NULL
-		  AND last_seen_at  > ?
+		  AND ended_at       IS NULL
+		  AND state         != 'closed'
+		  AND last_seen_at   > ?
 		ORDER BY last_seen_at DESC
 		LIMIT 1`,
 		agentID, projectID, mcpSessionID, cutoff).Scan(&existing)
 
 	if queryErr == nil && existing != "" {
-		// Resume: refresh the heartbeat without resetting tool_calls or intent.
+		// Resume: refresh heartbeat and ensure state is active.
 		_, _ = tx.Exec(
-			`UPDATE sessions SET last_seen_at = ? WHERE id = ?`,
+			`UPDATE sessions SET last_seen_at = ?, state = 'active' WHERE id = ?`,
 			now, existing)
 		err = tx.Commit()
 		if err != nil {
-			return "", false, fmt.Errorf("commit resume: %w", err)
+			return "", false, nil, fmt.Errorf("commit resume: %w", err)
 		}
-		return existing, true, nil
+		return existing, true, nil, nil
 	}
 
-	// ── No resumable session — supersede prior unclosed sessions for THIS connection ──
-	// Scope to mcp_session_id so we only close sessions from THIS physical connection's
-	// prior runs. Sessions from other concurrent connections (different mcp_session_id)
-	// are live and must not be touched — closing them would be a critical correctness bug
-	// for multi-window setups (two Claude Code windows on the same project).
+	// ── Phase 2: Cross-connection hibernate resume ────────────────────────
+	// Look for a prior session from the same (agent_id, project_id) that:
+	//   - Is within the hibernate window (not yet expired)
+	//   - last_seen_at < reconnect cutoff: older than reconnect window, so we
+	//     know it is NOT a currently-live concurrent editor window. A session
+	//     seen within the last 5 minutes is still being used by another connection
+	//     and must not be stolen.
+	//   - Not already cleanly closed (ended_at IS NULL).
+	// We pick the most recently active candidate (ORDER BY last_seen_at DESC).
+	if hibWindowSec > 0 {
+		hibCutoff := now - hibWindowSec
+		var priorID, priorIntent, priorSummary string
+		var priorToolCalls int
+		var priorStartedAt, priorLastSeen int64
+
+		hibErr := tx.QueryRow(`
+			SELECT id, intent, summary, tool_calls, started_at, last_seen_at
+			FROM sessions
+			WHERE agent_id   = ?
+			  AND project_id = ?
+			  AND state     != 'closed'
+			  AND ended_at   IS NULL
+			  AND last_seen_at > ?
+			  AND last_seen_at < ?
+			ORDER BY last_seen_at DESC
+			LIMIT 1`,
+			agentID, projectID, hibCutoff, cutoff).Scan(
+			&priorID, &priorIntent, &priorSummary, &priorToolCalls,
+			&priorStartedAt, &priorLastSeen)
+
+		if hibErr == nil && priorID != "" {
+			// Found a hibernated session — reactivate it on the new connection.
+			gapSecs := now - priorLastSeen
+			// Use the new intent if provided; fall back to the prior intent so
+			// the agent's declared goal is preserved across breaks.
+			activeIntent := intent
+			if activeIntent == "" {
+				activeIntent = priorIntent
+			}
+			_, err = tx.Exec(`
+				UPDATE sessions
+				SET mcp_session_id = ?,
+				    last_seen_at   = ?,
+				    state          = 'active',
+				    intent         = ?
+				WHERE id = ?`,
+				mcpSessionID, now, activeIntent, priorID)
+			if err != nil {
+				_ = tx.Rollback()
+				return "", false, nil, fmt.Errorf("hibernate resume update: %w", err)
+			}
+			if err = tx.Commit(); err != nil {
+				return "", false, nil, fmt.Errorf("commit hibernate resume: %w", err)
+			}
+			return priorID, false, &HibernateResumeContext{
+				PriorIntent:    priorIntent,
+				PriorSummary:   priorSummary,
+				PriorToolCalls: priorToolCalls,
+				GapSeconds:     gapSecs,
+				StartedAt:      priorStartedAt,
+				ParentID:       priorID,
+			}, nil
+		}
+	}
+
+	// ── Phase 3: Supersede prior unclosed sessions for THIS connection ────
+	// Scope to mcp_session_id so we only close sessions from THIS physical
+	// connection's prior runs. Sessions from other concurrent connections
+	// (different mcp_session_id) are live and must not be touched.
 	_, _ = tx.Exec(`
 		UPDATE sessions
-		SET ended_at = ?, end_reason = 'superseded', outcome = 'unknown'
+		SET ended_at = ?, end_reason = 'superseded', outcome = 'unknown', state = 'closed'
 		WHERE agent_id = ? AND project_id = ? AND mcp_session_id = ? AND ended_at IS NULL`,
 		now, agentID, projectID, mcpSessionID)
 
-	// ── Create fresh session ──
+	// ── Phase 4: Create fresh session ──────────────────────────────────────
+	// Find the most recent closed session for this (agent_id, project_id) to
+	// set as parent, giving a traceable ancestry chain across restarts.
+	var parentID string
+	_ = tx.QueryRow(`
+		SELECT id FROM sessions
+		WHERE agent_id = ? AND project_id = ? AND ended_at IS NOT NULL
+		ORDER BY ended_at DESC
+		LIMIT 1`, agentID, projectID).Scan(&parentID)
+
 	sessionID = newID()
 	_, err = tx.Exec(
-		`INSERT INTO sessions(id, agent_id, project_id, mcp_session_id, intent, started_at, last_seen_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		sessionID, agentID, projectID, mcpSessionID, intent, now, now)
+		`INSERT INTO sessions(id, agent_id, project_id, mcp_session_id, intent, started_at, last_seen_at, state, parent_session_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
+		sessionID, agentID, projectID, mcpSessionID, intent, now, now, parentID)
 	if err != nil {
-		return "", false, fmt.Errorf("insert session: %w", err)
+		return "", false, nil, fmt.Errorf("insert session: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
-		return "", false, fmt.Errorf("commit new session: %w", err)
+		return "", false, nil, fmt.Errorf("commit new session: %w", err)
 	}
-	return sessionID, false, nil
+	return sessionID, false, nil, nil
 }
 
-// TouchSession updates last_seen_at and increments the tool_calls counter for
-// an active session. Fire-and-forget: all errors are silently discarded so this
-// can never block the hot path (< 0.5 ms per call).
+// TouchSession updates last_seen_at, increments tool_calls, and ensures the
+// session state is 'active' (a hibernated session becomes active again on first
+// tool call). Fire-and-forget: all errors silently discarded (< 0.5 ms per call).
 func (s *Store) TouchSession(sessionID string) {
 	if sessionID == "" {
 		return
 	}
 	now := time.Now().UTC().Unix()
 	_, _ = s.db.Exec(
-		`UPDATE sessions SET last_seen_at = ?, tool_calls = tool_calls + 1
+		`UPDATE sessions SET last_seen_at = ?, tool_calls = tool_calls + 1, state = 'active'
 		 WHERE id = ? AND ended_at IS NULL`,
 		now, sessionID)
 }
@@ -199,7 +325,7 @@ func (s *Store) TouchSession(sessionID string) {
 func (s *Store) EndSession(sessionID, reason, outcome, summary string) error {
 	now := time.Now().UTC().Unix()
 	_, err := s.db.Exec(
-		`UPDATE sessions SET ended_at = ?, end_reason = ?, outcome = ?, summary = ?
+		`UPDATE sessions SET ended_at = ?, end_reason = ?, outcome = ?, summary = ?, state = 'closed'
 		 WHERE id = ?`,
 		now, reason, outcome, summary, sessionID)
 	return err
@@ -210,11 +336,24 @@ func (s *Store) EndSession(sessionID, reason, outcome, summary string) error {
 // so the caller never surfaces its own session. Results are capped at 5.
 func (s *Store) GetStaleSessions(projectID, currentSessionID string, staleThreshold time.Duration) ([]StaleSession, error) {
 	cutoff := time.Now().UTC().Add(-staleThreshold).Unix()
+
+	// Lazily mark dormant sessions as 'hibernated' so the Tauri app and any
+	// observer can see accurate state without a separate reconciliation pass.
+	// Scoped to this project; error silently ignored (non-critical side effect).
+	_, _ = s.db.Exec(`
+		UPDATE sessions
+		SET state = 'hibernated'
+		WHERE project_id = ?
+		  AND ended_at IS NULL
+		  AND state = 'active'
+		  AND last_seen_at < ?`, projectID, cutoff)
+
 	rows, err := s.db.Query(`
 		SELECT id, agent_id, started_at, last_seen_at, intent, tool_calls
 		FROM sessions
 		WHERE project_id = ?
 		  AND ended_at IS NULL
+		  AND state    != 'closed'
 		  AND last_seen_at < ?
 		  AND id != ?
 		ORDER BY last_seen_at DESC
@@ -388,6 +527,38 @@ func (s *Store) PruneToolCallsOlderThan(age time.Duration) (int64, error) {
 
 	cutoff := time.Now().UTC().Add(-age).Format(time.RFC3339)
 	res, err := s.db.Exec(`DELETE FROM tool_calls WHERE created_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// PruneOldSessions deletes sessions (and their linked session_tasks rows via
+// CASCADE) that have been closed or hibernated for longer than age. This
+// prevents unbounded growth in long-running installations.
+//
+// Safe to call on every startup or from a periodic goroutine — a built-in
+// 24-hour debounce ensures the DELETE runs at most once per day regardless of
+// how many callers invoke it.
+//
+// At ~5 sessions/day a 90-day window keeps fewer than 450 rows; the DELETE
+// itself is effectively instantaneous at that scale.
+func (s *Store) PruneOldSessions(age time.Duration) (int64, error) {
+	s.lastPruneMu.Lock()
+	if time.Since(s.lastSessionPruneAt) < 24*time.Hour {
+		s.lastPruneMu.Unlock()
+		return 0, nil
+	}
+	s.lastSessionPruneAt = time.Now()
+	s.lastPruneMu.Unlock()
+
+	cutoff := time.Now().UTC().Add(-age).Unix()
+	// Only prune rows that are fully closed or hibernated past the age window.
+	// Active sessions are never touched regardless of age.
+	res, err := s.db.Exec(`
+		DELETE FROM sessions
+		WHERE state IN ('closed', 'hibernated')
+		  AND last_seen_at < ?`, cutoff)
 	if err != nil {
 		return 0, err
 	}

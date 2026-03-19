@@ -1068,7 +1068,8 @@ func shouldSkipDir(name string) bool {
 	// --- Temporary / cache ---
 	case "tmp",
 		"temp",
-		"cache":
+		"cache",
+		"__pycache__": // Python bytecode cache
 		return true
 
 	// --- Generated code ---

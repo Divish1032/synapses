@@ -236,6 +236,24 @@ type SessionConfig struct {
 	// background agents.
 	// Example: stale_threshold_mins: 30
 	StaleThresholdMins int `json:"stale_threshold_mins,omitempty"`
+
+	// HibernateWindowSecs is the number of seconds a session can be dormant
+	// before it is no longer resumable across a new MCP connection. When an
+	// agent calls session_init on a new physical connection (e.g. after
+	// restarting the editor or taking a break), Synapses looks for a prior
+	// session from the same agent+project within this window and resumes it
+	// transparently — carrying over intent, tool call count, and summary.
+	//
+	// Only sessions older than ReconnectWindowSecs (i.e. not currently live
+	// on another connection) are candidates. This prevents two concurrent
+	// editor windows from stealing each other's sessions.
+	//
+	// Default: 0 (uses built-in default of 14400 s / 4 hours). Set to a
+	// positive value to override the default window. Set to a negative value
+	// (e.g. -1) to disable cross-connection resume entirely.
+	// Example: hibernate_window_secs: 7200   # 2-hour window
+	// Example: hibernate_window_secs: -1      # disable
+	HibernateWindowSecs int `json:"hibernate_window_secs,omitempty"`
 }
 
 // FederationEntry describes a local sibling project to query across.

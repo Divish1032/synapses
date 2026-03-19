@@ -3356,6 +3356,24 @@ func suggestToolsForChanges(events []changeEntry) []toolSuggestion {
 // hashIdentity produces a SHA-1 hex digest of the serialised ProjectIdentity.
 // Used to detect whether the project structure has changed since the last
 // session_init call, allowing incremental responses that skip unchanged data.
+// formatSessionDuration returns a human-readable duration string for session
+// gap and age display. Uses the largest meaningful unit (hours/minutes/seconds).
+func formatSessionDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh%dm", h, m)
+}
+
 func hashIdentity(identity *graph.ProjectIdentity) string {
 	b, err := json.Marshal(identity)
 	if err != nil {
@@ -3435,12 +3453,16 @@ func (s *Server) handleSessionInit(
 
 	// ── Session Intelligence: get or resume session record ───────────────
 	// GetOrResumeSession uses mcpSessionID (MCP transport connection ID) as
-	// the authoritative discriminator — NOT the self-declared agentID — so
-	// two concurrent agents (e.g. two Claude Code windows) on the same project
-	// never collide even if both declare the same agent_id string.
-	// Stale detection runs later (after recentChanges). Skipped on resume.
+	// the primary discriminator for same-connection resumes. For cross-connection
+	// resumes (e.g. user restarted editor after a break), it looks for a recent
+	// session from the same (agentID, projectID) within the hibernate window,
+	// provided its last_seen_at is older than the reconnect window (not a live
+	// concurrent editor window). Two concurrent Claude Code windows on the same
+	// project always get independent sessions — never steal from each other.
+	// Stale detection runs later (after recentChanges). Skipped on same-connection resume.
 	var synapseSessionID string
 	var sessionResumed bool
+	var hibernateCtx *store.HibernateResumeContext
 	if s.store != nil {
 		effectiveAgentID := agentID
 		if effectiveAgentID == "" {
@@ -3448,16 +3470,21 @@ func (s *Server) handleSessionInit(
 		}
 		mcpSessionID := synapseSessionKey(SessionIDFromContext(ctx)) // normalise "" → "stdio"
 		reconnectWindow := 0
+		hibernateWindow := 0
 		if s.config != nil {
 			reconnectWindow = s.config.Session.ReconnectWindowSecs
+			hibernateWindow = s.config.Session.HibernateWindowSecs
 		}
-		if id, resumed, sessErr := s.store.GetOrResumeSession(effectiveAgentID, s.projectID, mcpSessionID, intent, reconnectWindow); sessErr == nil {
+		if id, resumed, hibCtx, sessErr := s.store.GetOrResumeSession(effectiveAgentID, s.projectID, mcpSessionID, intent, reconnectWindow, hibernateWindow); sessErr == nil {
 			synapseSessionID = id
 			sessionResumed = resumed
+			hibernateCtx = hibCtx
 			s.registerSynapseSession(mcpSessionID, synapseSessionID, effectiveAgentID)
 			// Prune tool_calls older than 7 days on session start — debounced inside,
 			// so concurrent session_init calls are safe and only one prune runs/hour.
 			go s.store.PruneToolCallsOlderThan(7 * 24 * time.Hour) //nolint:errcheck
+			// Prune closed/hibernated sessions older than 90 days — debounced to once/day.
+			go s.store.PruneOldSessions(90 * 24 * time.Hour) //nolint:errcheck
 		}
 	}
 
@@ -3869,6 +3896,30 @@ func (s *Server) handleSessionInit(
 			"sessions": staleSessions,
 			"hint":     "Previous session(s) ended without clean shutdown. Review orphaned tasks — confirm done or reset to pending. Synapses never auto-closes tasks.",
 		}
+	}
+	// Cross-connection hibernate resume: surface prior context when the agent
+	// returns after a break and Synapses resumes the dormant session transparently.
+	// Only included on hibernate resume — zero-noise for same-connection resumes
+	// and fresh sessions.
+	if hibernateCtx != nil {
+		gapStr := formatSessionDuration(time.Duration(hibernateCtx.GapSeconds) * time.Second)
+		resumeBlock := map[string]interface{}{
+			"status":       "resumed",
+			"gap":          gapStr,
+			"tool_calls":   hibernateCtx.PriorToolCalls,
+			"hint":         "Your session was resumed after a break. Tool call history and memories are intact — no need to re-initialize.",
+		}
+		if hibernateCtx.PriorIntent != "" {
+			resumeBlock["prior_intent"] = hibernateCtx.PriorIntent
+		}
+		if hibernateCtx.PriorSummary != "" {
+			resumeBlock["prior_summary"] = hibernateCtx.PriorSummary
+		}
+		if hibernateCtx.StartedAt > 0 {
+			totalAge := formatSessionDuration(time.Since(time.Unix(hibernateCtx.StartedAt, 0)))
+			resumeBlock["session_age"] = totalAge
+		}
+		resp["session_resumed"] = resumeBlock
 	}
 	if len(crossProjectAlerts) > 0 {
 		resp["cross_project_alerts"] = map[string]interface{}{

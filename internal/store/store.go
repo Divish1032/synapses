@@ -317,23 +317,26 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id) WHER
 -- last_seen_at is updated on every tool call (heartbeat piggyback) so stale detection
 -- needs no background goroutine — just check: last_seen_at < now - 30 minutes.
 CREATE TABLE IF NOT EXISTS sessions (
-    id              TEXT    PRIMARY KEY,  -- Synapses-generated UUID
-    agent_id        TEXT    NOT NULL,
-    project_id      TEXT    NOT NULL,
-    mcp_session_id  TEXT    NOT NULL DEFAULT '', -- MCP transport connection ID; "stdio" for stdio mode
-    intent          TEXT    NOT NULL DEFAULT '', -- declared at session_init
-    started_at      INTEGER NOT NULL,     -- Unix epoch seconds (UTC)
-    last_seen_at    INTEGER NOT NULL,     -- Unix epoch seconds; updated on every tool call
-    ended_at        INTEGER,              -- Unix epoch seconds; NULL = not cleanly closed
-    end_reason      TEXT    NOT NULL DEFAULT '', -- clean | timeout | reconciled | superseded
-    outcome         TEXT    NOT NULL DEFAULT '', -- success | failure | partial | unknown
-    summary         TEXT    NOT NULL DEFAULT '', -- from end_session or reconciliation
-    tool_calls      INTEGER NOT NULL DEFAULT 0
+    id                TEXT    PRIMARY KEY,  -- Synapses-generated UUID
+    agent_id          TEXT    NOT NULL,
+    project_id        TEXT    NOT NULL,
+    mcp_session_id    TEXT    NOT NULL DEFAULT '', -- MCP transport connection ID; "stdio" for stdio mode
+    intent            TEXT    NOT NULL DEFAULT '', -- declared at session_init
+    started_at        INTEGER NOT NULL,     -- Unix epoch seconds (UTC)
+    last_seen_at      INTEGER NOT NULL,     -- Unix epoch seconds; updated on every tool call
+    ended_at          INTEGER,              -- Unix epoch seconds; NULL = not cleanly closed
+    end_reason        TEXT    NOT NULL DEFAULT '', -- clean | timeout | reconciled | superseded
+    outcome           TEXT    NOT NULL DEFAULT '', -- success | failure | partial | unknown
+    summary           TEXT    NOT NULL DEFAULT '', -- from end_session or reconciliation
+    tool_calls        INTEGER NOT NULL DEFAULT 0,
+    state             TEXT    NOT NULL DEFAULT 'active', -- active | idle | hibernated | closed
+    parent_session_id TEXT    NOT NULL DEFAULT ''  -- ID of prior session on cross-connection resume; '' = first
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_agent   ON sessions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_active  ON sessions(ended_at) WHERE ended_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_mcp     ON sessions(mcp_session_id, agent_id, project_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_state   ON sessions(state, agent_id, project_id);
 
 -- Links sessions to the tasks they created, claimed, or completed.
 -- Enables orphaned task detection: tasks with action 'created' or 'claimed'
@@ -499,9 +502,10 @@ CREATE INDEX IF NOT EXISTS idx_cross_deps_file    ON cross_project_deps(to_proje
 type Store struct {
 	db *sql.DB
 
-	// lastPruneMu guards lastPruneAt to prevent redundant concurrent prunes.
-	lastPruneMu sync.Mutex
-	lastPruneAt time.Time
+	// lastPruneMu guards both prune timestamps to prevent redundant concurrent prunes.
+	lastPruneMu        sync.Mutex
+	lastPruneAt        time.Time // tool_calls prune (hourly debounce)
+	lastSessionPruneAt time.Time // sessions prune (daily debounce)
 }
 
 // CacheDir returns the canonical directory where synapses stores all project
@@ -794,12 +798,25 @@ func Open(path string) (*Store, error) {
 		// R21: Commit-to-task linking — capture HEAD SHA at in_progress, git log at done.
 		`ALTER TABLE tasks ADD COLUMN start_commit TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE tasks ADD COLUMN commits TEXT NOT NULL DEFAULT '[]'`,
+		// Session continuity: state tracks lifecycle so agents can see session health
+		// and the Tauri app can display it. parent_session_id links cross-connection
+		// resumes to their predecessor for continuity chains.
+		// DEFAULT 'active' is correct for live sessions; historical closed sessions
+		// are fixed by the UPDATE below (outside this loop).
+		`ALTER TABLE sessions ADD COLUMN state TEXT NOT NULL DEFAULT 'active'`,
+		`ALTER TABLE sessions ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state, agent_id, project_id)`,
 	} {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already has a column") {
 			db.Close()
 			return nil, fmt.Errorf("migrate schema: %w", err)
 		}
 	}
+	// Fix historical rows: sessions with ended_at already set must be 'closed'.
+	// This runs outside the migration loop because it's an UPDATE, not a DDL
+	// statement, and errors here are non-fatal (worst case: cosmetic state mismatch).
+	_, _ = db.Exec(`UPDATE sessions SET state = 'closed' WHERE ended_at IS NOT NULL AND state = 'active'`)
+
 	st := &Store{db: db}
 
 	// Rebuild FTS index for existing databases where nodes_fts is empty but
