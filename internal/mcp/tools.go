@@ -2310,15 +2310,24 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 	if query == "" {
 		categories := make(map[string][]map[string]string)
 		for _, t := range toolCatalog {
+			// In knowledge mode, only show knowledge-mode tools.
+			if s.knowledgeMode && !knowledgeTools[t.Name] {
+				continue
+			}
 			categories[t.Category] = append(categories[t.Category], map[string]string{
 				"name":        t.Name,
 				"description": t.Description,
 			})
 		}
-		return jsonResult(map[string]interface{}{
+		resp := map[string]interface{}{
 			"hint":       "Pass a query to get targeted results, e.g. discover_tools(query=\"check what calls this function\")",
 			"categories": categories,
-		})
+		}
+		if s.knowledgeMode {
+			resp["mode"] = "knowledge"
+			resp["note"] = "Running in knowledge mode — only memory, task, and messaging tools are available."
+		}
+		return jsonResult(resp)
 	}
 
 	// Tokenize query, removing stop words.
@@ -2380,6 +2389,10 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 	}
 	var results []scored
 	for _, tool := range toolCatalog {
+		// In knowledge mode, only score knowledge-mode tools.
+		if s.knowledgeMode && !knowledgeTools[tool.Name] {
+			continue
+		}
 		score := 0
 		var bd breakdown
 		for _, qw := range queryWords {
@@ -3492,36 +3505,49 @@ func (s *Server) handleSessionInit(
 	}
 
 	// ── 1. Project identity + scale guidance ─────────────────────────────
-	identity := s.graph.ProjectIdentity()
-	currentHash := hashIdentity(identity)
-
-	// Enrich with federation summary (mirrors handleGetProjectIdentity).
-	primaryRepoID := s.graph.RepoID()
+	var identity *graph.ProjectIdentity
+	var currentHash string
 	crossCallCount := 0
-	linkedSet := make(map[string]bool)
 	var linkedRepos []string
-	for _, e := range s.graph.AllEdges() {
-		if e.Type != graph.EdgeCalls {
-			continue
-		}
-		fromIdx := strings.Index(string(e.From), "::")
-		toIdx := strings.Index(string(e.To), "::")
-		if fromIdx < 0 || toIdx < 0 {
-			continue
-		}
-		fromRepo := string(e.From)[:fromIdx]
-		toRepo := string(e.To)[:toIdx]
-		if fromRepo != toRepo {
-			crossCallCount++
-			for _, r := range []string{fromRepo, toRepo} {
-				if r != primaryRepoID && !linkedSet[r] {
-					linkedSet[r] = true
-					linkedRepos = append(linkedRepos, r)
+	var primaryRepoID string
+
+	if s.graph != nil {
+		identity = s.graph.ProjectIdentity()
+		currentHash = hashIdentity(identity)
+
+		// Enrich with federation summary (mirrors handleGetProjectIdentity).
+		primaryRepoID = s.graph.RepoID()
+		linkedSet := make(map[string]bool)
+		for _, e := range s.graph.AllEdges() {
+			if e.Type != graph.EdgeCalls {
+				continue
+			}
+			fromIdx := strings.Index(string(e.From), "::")
+			toIdx := strings.Index(string(e.To), "::")
+			if fromIdx < 0 || toIdx < 0 {
+				continue
+			}
+			fromRepo := string(e.From)[:fromIdx]
+			toRepo := string(e.To)[:toIdx]
+			if fromRepo != toRepo {
+				crossCallCount++
+				for _, r := range []string{fromRepo, toRepo} {
+					if r != primaryRepoID && !linkedSet[r] {
+						linkedSet[r] = true
+						linkedRepos = append(linkedRepos, r)
+					}
 				}
 			}
 		}
+		sort.Strings(linkedRepos)
+	} else {
+		// Knowledge mode: no graph, build minimal identity.
+		primaryRepoID = filepath.Base(s.projectPath)
+		identity = &graph.ProjectIdentity{
+			RepoID:       primaryRepoID,
+			ToolGuidance: "Knowledge mode — no code graph. Use remember, recall, create_plan, update_task, send_message, get_messages.",
+		}
 	}
-	sort.Strings(linkedRepos)
 
 	// In incremental mode, skip project_identity if the hash hasn't changed.
 	identitySkipped := false
@@ -3533,7 +3559,7 @@ func (s *Server) handleSessionInit(
 			"reason":  "unchanged since last session — identity_hash matches",
 		}
 	} else {
-		projectSection = map[string]interface{}{
+		idPayload := map[string]interface{}{
 			"identity": identity,
 			"federation": map[string]interface{}{
 				"is_federated":        len(linkedRepos) > 0,
@@ -3541,6 +3567,10 @@ func (s *Server) handleSessionInit(
 				"cross_project_edges": crossCallCount,
 			},
 		}
+		if s.knowledgeMode {
+			idPayload["mode"] = "knowledge"
+		}
+		projectSection = idPayload
 	}
 
 	// ── 2. Pending tasks ──────────────────────────────────────────────────
@@ -3617,7 +3647,12 @@ func (s *Server) handleSessionInit(
 			workingSection["active_violations"] = len(vlog)
 		}
 	}
-	root := s.graph.Root()
+	var root string
+	if s.graph != nil {
+		root = s.graph.Root()
+	} else if s.projectPath != "" {
+		root = s.projectPath
+	}
 	if root != "" {
 		// Use a 2s timeout to prevent blocking when git hangs (e.g. network mounts).
 		gitCtx, gitCancel := context.WithTimeout(ctx, 2*time.Second)
@@ -4227,7 +4262,7 @@ func (s *Server) handleSessionInit(
 
 		// 2. Augment with entity register from the most recent session log.
 		// The session log embeds "Examined: X, Y, Z." — resolve names to node IDs.
-		if s.store != nil && agentID != "" {
+		if s.store != nil && agentID != "" && s.graph != nil {
 			if regMems, _ := s.store.QueryRecentSessionMemories(agentID, 1); len(regMems) > 0 {
 				for _, name := range parseExaminedEntities(regMems[0].Content) {
 					if nodes := s.graph.FindByName(name); len(nodes) > 0 {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 )
@@ -31,7 +32,11 @@ func (s *Server) handleSendMessage(
 	toAgent := stringArg(req, "to_agent") // empty = broadcast
 	projectID := stringArg(req, "project_id")
 	if projectID == "" {
-		projectID = s.graph.RepoID()
+		if s.graph != nil {
+			projectID = s.graph.RepoID()
+		} else {
+			projectID = filepath.Base(s.projectPath)
+		}
 	}
 
 	// payload must be valid JSON; default to empty object if omitted.

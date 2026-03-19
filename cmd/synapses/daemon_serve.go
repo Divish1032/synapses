@@ -451,6 +451,15 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
+	// Auto-detect knowledge mode: if no synapses.json AND no supported source
+	// files in the project directory, default to knowledge mode.
+	if cfg.Mode == "" && !found {
+		if !hasSourceFiles(absPath) {
+			cfg.Mode = "knowledge"
+			fmt.Fprintf(os.Stderr, "synapses [%s]: no source files detected, starting in knowledge mode\n", projectHash(absPath))
+		}
+	}
+
 	dbPath, err := store.DefaultPath(absPath)
 	if err != nil {
 		projCancel()
@@ -462,6 +471,78 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 	go st.PruneStaleData(30)
+
+	// ── Knowledge mode: skip graph, parsing, watcher, federation ──────────
+	if cfg.Mode == "knowledge" {
+		mcpsrv.Version = version
+		srv := mcpsrv.NewKnowledge(cfg, st)
+		srv.SetProjectID(pathProjectID(absPath))
+		srv.SetProjectPath(absPath)
+		srv.SetProjectRegistry(&registryAdapter{reg: reg})
+		srv.StartBackground()
+
+		if sharedPulse != nil {
+			srv.SetPulseClient(sharedPulse)
+		}
+
+		// Skills / prompts (same as full mode).
+		{
+			var allPrompts []skills.PromptTemplate
+			allPrompts = append(allPrompts, skills.BuiltinPrompts()...)
+			if homeDir, err := os.UserHomeDir(); err == nil {
+				userDir := filepath.Join(homeDir, ".synapses", "prompts")
+				if pts, err := skills.LoadPromptDir(userDir, "user"); err == nil {
+					allPrompts = append(allPrompts, pts...)
+				}
+			}
+			projectDir := filepath.Join(absPath, ".synapses", "prompts")
+			if pts, err := skills.LoadPromptDir(projectDir, "project"); err == nil {
+				allPrompts = append(allPrompts, pts...)
+			}
+			allPrompts = skills.DeduplicatePrompts(allPrompts)
+			if len(allPrompts) > 0 {
+				srv.SetPromptTemplates(allPrompts)
+			}
+		}
+		{
+			allRecipes := skills.BuiltinRecipes()
+			if homeDir, err := os.UserHomeDir(); err == nil {
+				userDir := filepath.Join(homeDir, ".synapses", "skills")
+				if rs, err := skills.LoadRecipeDir(userDir, "user"); err == nil {
+					allRecipes = append(allRecipes, rs...)
+				}
+			}
+			projectDir := filepath.Join(absPath, ".synapses", "skills")
+			if rs, err := skills.LoadRecipeDir(projectDir, "project"); err == nil {
+				allRecipes = append(allRecipes, rs...)
+			}
+			allRecipes = skills.DeduplicateRecipes(allRecipes)
+			srv.SetSkillRecipes(allRecipes)
+		}
+
+		httpHandler := mcpserver.NewStreamableHTTPServer(srv.MCPServer())
+
+		// Per-project Unix socket.
+		sockPath, sockErr := daemonSocketPath(absPath)
+		if sockErr == nil {
+			os.Remove(sockPath)
+			listener, listenErr := net.Listen("unix", sockPath)
+			if listenErr == nil {
+				os.Chmod(sockPath, 0o700) //nolint:errcheck
+				go serveProjectSocket(projCtx, srv, listener)
+			}
+		}
+
+		fmt.Fprintf(os.Stderr, "synapses: project ready — %s (knowledge mode)\n", filepath.Base(absPath))
+
+		return &ProjectInstance{
+			AbsPath:     absPath,
+			Store:       st,
+			MCPServer:   srv,
+			HTTPHandler: httpHandler,
+			cancel:      projCancel,
+		}, nil
+	}
 
 	g, err := loadOrBuildGraphWithStore(absPath, st, false, cfg.Plugins)
 	if err != nil {
@@ -842,4 +923,42 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcps
 			}
 		}
 	}
+}
+
+// hasSourceFiles checks if the directory contains any files with extensions
+// supported by Synapses parsers. Scans top-level and one level deep to keep it fast.
+func hasSourceFiles(dir string) bool {
+	sourceExts := map[string]bool{
+		".go": true, ".py": true, ".js": true, ".ts": true, ".tsx": true, ".jsx": true,
+		".rs": true, ".java": true, ".kt": true, ".swift": true, ".c": true, ".cpp": true,
+		".cs": true, ".rb": true, ".php": true, ".scala": true, ".dart": true,
+		".vue": true, ".svelte": true, ".zig": true, ".lua": true, ".ex": true, ".erl": true,
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			// Check one level deep.
+			subEntries, err := os.ReadDir(filepath.Join(dir, e.Name()))
+			if err != nil {
+				continue
+			}
+			for _, se := range subEntries {
+				if !se.IsDir() {
+					ext := filepath.Ext(se.Name())
+					if sourceExts[ext] {
+						return true
+					}
+				}
+			}
+			continue
+		}
+		ext := filepath.Ext(e.Name())
+		if sourceExts[ext] {
+			return true
+		}
+	}
+	return false
 }

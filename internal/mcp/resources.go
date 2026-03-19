@@ -21,6 +21,11 @@ import (
 //	synapses://file/{path}     — entity map for a specific file
 //	synapses://violations      — current architectural violations
 func (s *Server) registerResources() {
+	// Knowledge mode: skip graph-dependent resources.
+	if s.knowledgeMode {
+		return
+	}
+
 	// synapses://active-context
 	s.mcp.AddResource(
 		mcp.NewResource(
