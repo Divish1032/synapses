@@ -866,6 +866,30 @@ func (s *Store) CountMemories() (map[string]int, error) {
 	return counts, rows.Err()
 }
 
+// GetMemoriesByIDs returns full Memory structs for the given IDs.
+// Missing IDs are silently skipped. Used by recall() to hydrate vector
+// search results that only contain partial fields.
+func (s *Store) GetMemoriesByIDs(ids []string) ([]Memory, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
+	                 created_at, expires_at, last_accessed_at, source
+	          FROM memories WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := s.knowledgeDB.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get memories by IDs: %w", err)
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
 // scanMemories reads rows into a Memory slice.
 func scanMemories(rows *sql.Rows) ([]Memory, error) {
 	var out []Memory

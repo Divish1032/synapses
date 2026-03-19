@@ -34,8 +34,8 @@ func (s *Server) embedMemory(embedder embed.Embedder, st *store.Store, memoryID,
 }
 
 // EmbedAllMemories generates embeddings for all un-embedded memories in the
-// background. Rate-limited to avoid CPU contention. Called at startup and
-// periodically to lazy-migrate legacy memories.
+// background. Rate-limited to ~2 embeddings/second for builtin mode to avoid
+// CPU contention. Called at startup to lazy-migrate legacy memories.
 func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.Store) {
 	if embedder == nil || st == nil {
 		return
@@ -48,12 +48,30 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 
 	fmt.Fprintf(os.Stderr, "synapses: embedding %d memories (model: %s) …\n", len(ids), embedder.Model())
 	done := 0
+	errors := 0
 
-	for _, memID := range ids {
+	// Rate limit: pause between embeddings to avoid saturating CPU.
+	// Builtin mode is CPU-bound; Ollama mode has its own throughput limits.
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for i, memID := range ids {
 		select {
 		case <-ctx.Done():
+			if done > 0 {
+				fmt.Fprintf(os.Stderr, "synapses: memory embedding interrupted (%d/%d done)\n", done, len(ids))
+			}
 			return
 		default:
+		}
+
+		// Rate limit: wait between embeddings (skip for first one).
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 		}
 
 		text, ok := st.GetMemoryTextForEmbedding(memID)
@@ -66,7 +84,13 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 		cancel()
 
 		if embedErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: embed memory %s: %v\n", memID, embedErr)
+			errors++
+			// Log first 3 errors, then suppress to avoid log spam.
+			if errors <= 3 {
+				fmt.Fprintf(os.Stderr, "synapses: embed memory %s: %v\n", memID, embedErr)
+			} else if errors == 4 {
+				fmt.Fprintf(os.Stderr, "synapses: suppressing further embedding errors (%d so far)\n", errors)
+			}
 			continue
 		}
 		if len(vec) == 0 {
@@ -78,7 +102,7 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 		done++
 	}
 
-	if done > 0 {
-		fmt.Fprintf(os.Stderr, "synapses: memory embedding complete (%d/%d memories indexed)\n", done, len(ids))
+	if done > 0 || errors > 0 {
+		fmt.Fprintf(os.Stderr, "synapses: memory embedding complete (%d/%d indexed, %d errors)\n", done, len(ids), errors)
 	}
 }
