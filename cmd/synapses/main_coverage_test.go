@@ -10,6 +10,19 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
+// TestMain redirects the synapses cache to a temporary directory for the
+// entire test binary so that cmdIndex / loadOrBuildGraph do not write DB
+// files into the user's real ~/.synapses/cache and pollute `synapses list`.
+func TestMain(m *testing.M) {
+	tmp, err := os.MkdirTemp("", "synapses-test-cache-*")
+	if err != nil {
+		panic("could not create test cache dir: " + err.Error())
+	}
+	defer os.RemoveAll(tmp)
+	os.Setenv("SYNAPSES_CACHE_DIR", tmp)
+	os.Exit(m.Run())
+}
+
 // goRepoDir2 creates a minimal Go module directory for indexing tests.
 // Named goRepoDir2 to avoid collision with any helper in main_test.go.
 func goRepoDir2(t *testing.T) string {
