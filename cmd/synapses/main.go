@@ -1687,14 +1687,14 @@ const (
 // into every agent guidance file: .claude/CLAUDE.md, .cursor/rules/synapses.mdc,
 // .windsurfrules. Content is identical for all agents; only the file path and
 // any agent-specific frontmatter differ.
-var synapsesSection = synapsesSectionStart + `## Synapses — Code Intelligence (MCP)
+var synapsesSection = synapsesSectionStart + `## Synapses — Knowledge Substrate (MCP)
 
 ### Session Start
 Call ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` at the start of every session. Returns pending tasks, project identity, scale guidance, working state, and proactive tool suggestions in one round-trip. Declare your intent to get relevant tool suggestions automatically.
 
 ### Key Tools
 
-These 12 core tools cover 95% of workflows. All 45+ tools remain available — call ` + "`discover_tools(query=\"...\")`" + ` to find specialized ones.
+These 12 core tools cover 95% of workflows. All 40+ tools remain available — call ` + "`discover_tools(query=\"...\")`" + ` to find specialized ones.
 
 | Goal | Tool |
 |---|---|
@@ -1709,12 +1709,20 @@ These 12 core tools cover 95% of workflows. All 45+ tools remain available — c
 | Retrieve knowledge | ` + "`recall(query=\"...\")`" + ` |
 | Plan tasks | ` + "`create_plan(title=\"...\", tasks=[...])`" + ` |
 | Update task | ` + "`update_task(id=\"...\", status=\"done\")`" + ` |
-| End session | ` + "`end_session(agent_id=\"...\")`" + ` — also releases claims and reports usage |
+| End session | ` + "`end_session(agent_id=\"...\")`" + ` — persists session knowledge, optionally reports usage |
 
 ### Need more?
 
 ` + "`session_init`" + ` suggests specialized tools based on your declared intent (e.g. ` + "`get_impact`" + `, ` + "`get_file_context`" + `).
 Call ` + "`discover_tools(query=\"what you need\")`" + ` to find any tool by description.
+
+### Cross-Project Queries
+When multiple projects are registered with the daemon, query knowledge across them:
+- ` + "`recall(query=\"...\", projects=\"*\")`" + ` — search memories across all projects
+- ` + "`get_events(projects=\"backend\")`" + ` — events from a specific sibling
+- ` + "`get_messages(agent_id=\"...\", projects=\"*\")`" + ` — messages across projects
+- ` + "`get_agents(projects=\"*\")`" + ` — see who's working across all projects
+Cross-project results appear in separate response fields (e.g. ` + "`cross_project_episodes`" + `).
 
 ### Anti-patterns
 - **Prefer** Synapses tools over Grep/Glob for code exploration — they return callers, callees, and architecture rules that raw file scanning misses
