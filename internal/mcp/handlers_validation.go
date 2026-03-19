@@ -22,11 +22,22 @@ import (
 )
 
 // pathWithinRoot reports whether path is inside (or equal to) root.
-// It prevents directory traversal attacks by comparing cleaned absolute
-// paths. Always returns true when root is empty (no project root set).
+// It prevents directory traversal attacks by comparing cleaned absolute paths.
+//
+// When root is empty the project boundary is unknown; filesystem access is
+// blocked (returns false) rather than allowing arbitrary paths — fail-closed.
+//
+// Note: this check uses filepath.Clean, which resolves ".." components but
+// does NOT follow symlinks. A symlink inside root pointing outside would pass
+// this check; EvalSymlinks-based resolution is not done here because
+// (a) proposed files may not exist yet and EvalSymlinks requires existence,
+// (b) creating a malicious symlink requires prior filesystem write access —
+// a higher attack bar than the MCP input traversal this guard targets.
 func pathWithinRoot(root, path string) bool {
 	if root == "" {
-		return true
+		// No project root configured — we have no boundary to enforce.
+		// Block all filesystem access rather than allowing arbitrary paths.
+		return false
 	}
 	cleanRoot := filepath.Clean(root)
 	cleanPath := filepath.Clean(path)
