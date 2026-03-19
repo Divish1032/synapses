@@ -333,6 +333,53 @@ func (s *Server) handleRecall(
 		}
 	}
 
+	// Cross-project recall via daemon project registry (covers all registered projects,
+	// not just explicitly federated ones). This is the primary cross-project path.
+	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.projectRegistry != nil {
+		stores := s.resolveProjectStores(projectsParam)
+		for projName, projStore := range stores {
+			// Skip projects already covered by federation.
+			alreadyCovered := false
+			for _, ep := range crossProjectEpisodes {
+				if src, ok := ep["source"].(string); ok && src == fmt.Sprintf("[%s]", projName) {
+					alreadyCovered = true
+					break
+				}
+			}
+			if alreadyCovered {
+				continue
+			}
+
+			eps, err := projStore.RecallEpisodes(query, "", "", "", "", searchLimit, sinceDays)
+			if err == nil {
+				for _, ep := range eps {
+					crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
+						"source":       fmt.Sprintf("[%s]", projName),
+						"id":           ep.ID,
+						"decision":     ep.Decision,
+						"rationale":    ep.Rationale,
+						"episode_type": ep.EpisodeType,
+						"outcome":      ep.Outcome,
+						"trigger":      ep.Trigger,
+						"tags":         ep.Tags,
+						"created_at":   ep.CreatedAt,
+					})
+				}
+			}
+			// Also search memories.
+			mems, _ := projStore.SearchMemories(query, searchLimit)
+			for _, m := range mems {
+				crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
+					"source":     fmt.Sprintf("[%s]", projName),
+					"id":         m.ID,
+					"decision":   m.Content,
+					"tier":       m.Tier,
+					"created_at": m.CreatedAt,
+				})
+			}
+		}
+	}
+
 	// Surface any dynamic rules derived from matching failure episodes.
 	var relatedRules []string
 	for _, ep := range episodes {

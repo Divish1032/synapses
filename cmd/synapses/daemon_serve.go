@@ -303,7 +303,7 @@ func cmdDaemonServe(args []string) error {
 			}
 			// GetOrSet: lazy-initialize the project if not already registered.
 			_, initErr := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
-				return initProjectInstance(appCtx, absPath, sharedPulse)
+				return initProjectInstance(appCtx, absPath, sharedPulse, reg)
 			})
 			if initErr != nil {
 				http.Error(w, "init project: "+initErr.Error(), http.StatusInternalServerError)
@@ -370,7 +370,7 @@ func cmdDaemonServe(args []string) error {
 		}
 
 		pi, initErr := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
-			return initProjectInstance(appCtx, absPath, sharedPulse)
+			return initProjectInstance(appCtx, absPath, sharedPulse, reg)
 		})
 		if initErr != nil {
 			http.Error(w, "init project: "+initErr.Error(), http.StatusInternalServerError)
@@ -438,7 +438,7 @@ func cmdDaemonServe(args []string) error {
 // initProjectInstance loads/builds all resources for one project and starts
 // its per-project Unix socket listener (for stdio proxy backward compat)
 // and registers an HTTP MCP handler for the project.
-func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pulse.Client) (*ProjectInstance, error) {
+func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pulse.Client, reg *projectRegistry) (*ProjectInstance, error) {
 	projCtx, projCancel := context.WithCancel(appCtx)
 
 	cfgDir, found := config.FindConfigDir(absPath)
@@ -549,6 +549,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	mcpsrv.Version = version
 	srv := mcpsrv.New(g, cfg, st)
 	srv.SetProjectID(pathProjectID(absPath))
+	srv.SetProjectRegistry(&registryAdapter{reg: reg})
 	srv.StartBackground()
 
 	// Skills / prompts.

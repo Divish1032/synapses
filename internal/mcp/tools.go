@@ -4353,6 +4353,17 @@ func (s *Server) handleSessionInit(
 	}
 	} // end !quickMode && !resumeMode (daemon_health)
 
+	// Cross-project status: show registered daemon projects.
+	if s.projectRegistry != nil {
+		allProjects := s.projectRegistry.ListProjects()
+		if len(allProjects) > 1 { // only include if there are siblings
+			resp["cross_project_status"] = map[string]interface{}{
+				"registered_projects": len(allProjects),
+				"projects":           allProjects,
+			}
+		}
+	}
+
 	// ── Update agent context profile ─────────────────────────────────────
 	// Record what this agent now knows so the next session_init can be incremental.
 	if agentID != "" && s.store != nil {
