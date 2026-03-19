@@ -143,7 +143,7 @@ func TestCorrelateSessionOutcome_IdempotentOnAlreadySet(t *testing.T) {
 	}
 
 	// Second call with a different outcome — rows already set should not change.
-	n2, err := st.CorrelateSessionOutcome("sess-4", "abandoned")
+	n2, err := st.CorrelateSessionOutcome("sess-4", "unknown")
 	if err != nil {
 		t.Fatalf("second correlate: %v", err)
 	}
@@ -155,6 +155,60 @@ func TestCorrelateSessionOutcome_IdempotentOnAlreadySet(t *testing.T) {
 	rows, _ := st.GetContextDeliveriesForSession("sess-4")
 	if len(rows) != 1 || rows[0].TaskOutcome != "success" {
 		t.Errorf("outcome should still be %q, got %q", "success", rows[0].TaskOutcome)
+	}
+}
+
+// TestCorrelateSessionOutcome_PartialUpdate covers the case where a session has
+// some rows already correlated (e.g., from a prior interrupted end_session) and
+// new rows without an outcome. Only uncorrelated rows must be updated.
+func TestCorrelateSessionOutcome_PartialUpdate(t *testing.T) {
+	st := openTestStore(t)
+
+	// Row 1: already correlated from a prior call.
+	st.InsertContextDelivery(store.ContextDelivery{
+		SessionID: "sess-partial",
+		ToolName:  "get_context",
+		Entity:    "AlreadyDone",
+	})
+	// Manually set its outcome to simulate a prior partial correlation.
+	_, err := st.CorrelateSessionOutcome("sess-partial", "success")
+	if err != nil {
+		t.Fatalf("setup correlate: %v", err)
+	}
+
+	// Row 2: inserted after the first correlate (e.g., race between goroutine and end_session).
+	st.InsertContextDelivery(store.ContextDelivery{
+		SessionID: "sess-partial",
+		ToolName:  "prepare_context",
+		Entity:    "NewEntity",
+	})
+
+	// Second correlate — should only touch the new row.
+	n, err := st.CorrelateSessionOutcome("sess-partial", "unknown")
+	if err != nil {
+		t.Fatalf("second correlate: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("second correlate: want 1 row updated (new row only), got %d", n)
+	}
+
+	rows, err := st.GetContextDeliveriesForSession("sess-partial")
+	if err != nil {
+		t.Fatalf("GetContextDeliveriesForSession: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+
+	// Row 1 must still be "success" — not overwritten.
+	if rows[0].Entity != "AlreadyDone" || rows[0].TaskOutcome != "success" {
+		t.Errorf("row[0]: want entity=AlreadyDone outcome=success, got entity=%q outcome=%q",
+			rows[0].Entity, rows[0].TaskOutcome)
+	}
+	// Row 2 must now be "unknown".
+	if rows[1].Entity != "NewEntity" || rows[1].TaskOutcome != "unknown" {
+		t.Errorf("row[1]: want entity=NewEntity outcome=unknown, got entity=%q outcome=%q",
+			rows[1].Entity, rows[1].TaskOutcome)
 	}
 }
 
@@ -179,10 +233,38 @@ func TestInsertContextDelivery_EmptySessionID(t *testing.T) {
 	}
 }
 
+func TestInsertContextDelivery_EmptyToolName_Skipped(t *testing.T) {
+	st := openTestStore(t)
+
+	// Empty ToolName must be silently skipped — no row inserted.
+	st.InsertContextDelivery(store.ContextDelivery{
+		SessionID: "sess-bad",
+		ToolName:  "",
+		Entity:    "SomeEntity",
+	})
+
+	rows, err := st.GetContextDeliveriesForSession("sess-bad")
+	if err != nil {
+		t.Fatalf("GetContextDeliveriesForSession: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected 0 rows for empty ToolName, got %d", len(rows))
+	}
+}
+
 func TestInsertContextDelivery_NilStore(t *testing.T) {
 	// Must not panic when store is nil.
 	var st *store.Store
 	st.InsertContextDelivery(store.ContextDelivery{ToolName: "get_context", Entity: "X"})
+
+	rows, err := st.GetContextDeliveriesForSession("sess")
+	if err != nil {
+		t.Errorf("nil store GetContextDeliveriesForSession: unexpected error: %v", err)
+	}
+	if rows != nil {
+		t.Errorf("nil store GetContextDeliveriesForSession: expected nil slice, got %v", rows)
+	}
+
 	n, err := st.CorrelateSessionOutcome("sess", "success")
 	if err != nil {
 		t.Errorf("nil store CorrelateSessionOutcome: unexpected error: %v", err)
@@ -192,10 +274,12 @@ func TestInsertContextDelivery_NilStore(t *testing.T) {
 	}
 }
 
-func TestGetContextDeliveriesForSession_OrderByCreatedAt(t *testing.T) {
+func TestGetContextDeliveriesForSession_OrderByInsertionOrder(t *testing.T) {
 	st := openTestStore(t)
 
-	// Insert three deliveries with the same session — order must be creation order.
+	// Insert three deliveries with the same session.
+	// ORDER BY id ASC (not created_at) guarantees stable insertion order
+	// even when all rows have the same Unix-second timestamp.
 	entities := []string{"Alpha", "Beta", "Gamma"}
 	for _, e := range entities {
 		st.InsertContextDelivery(store.ContextDelivery{
@@ -214,7 +298,7 @@ func TestGetContextDeliveriesForSession_OrderByCreatedAt(t *testing.T) {
 	}
 	for i, e := range entities {
 		if rows[i].Entity != e {
-			t.Errorf("row[%d]: want entity %q, got %q", i, e, rows[i].Entity)
+			t.Errorf("row[%d]: want entity %q, got %q (ORDER BY id not stable?)", i, e, rows[i].Entity)
 		}
 	}
 }
