@@ -220,6 +220,55 @@ func loadOrCreateAuthToken() (string, error) {
 	return token, nil
 }
 
+// isValidProjectPath reports whether absPath is a legitimate project root.
+// A path is considered legitimate if it contains a `.git` directory or a
+// `synapses.json` file as a direct child. This prevents a malicious browser
+// page from registering `/`, `/etc`, or other sensitive system directories as
+// projects via the REST API, which would cause the daemon to index and expose
+// their contents.
+//
+// Returns a non-nil error (suitable for use in HTTP responses) when the path
+// fails validation.
+func isValidProjectPath(absPath string) error {
+	markers := []string{".git", "synapses.json"}
+	for _, marker := range markers {
+		info, err := os.Stat(filepath.Join(absPath, marker))
+		if err == nil && info != nil {
+			return nil // found a valid marker
+		}
+	}
+	return fmt.Errorf("path %q is not a valid project root (missing .git or synapses.json)", absPath)
+}
+
+// isCORSAllowedOrigin reports whether origin is in the explicit allowlist of
+// browser origins permitted to make cross-origin requests to the REST API.
+// The allowlist covers:
+//   - tauri://localhost    — Synapses desktop app
+//   - http(s)://localhost  — local browser dev tools
+//   - http(s)://127.0.0.1 — explicit loopback variant
+//
+// Wildcard (*) is intentionally not used — it would allow any webpage to
+// silently call the API via the trusted loopback connection (loopback is
+// exempt from bearer-token auth, so CORS wildcard = unauthenticated access
+// from any browser tab on the user's machine).
+//
+// Non-browser clients (curl, MCP stdio proxy) send no Origin header and are
+// unaffected by CORS headers entirely.
+func isCORSAllowedOrigin(origin string) bool {
+	if origin == "tauri://localhost" {
+		return true
+	}
+	for _, prefix := range []string{
+		"http://localhost", "https://localhost",
+		"http://127.0.0.1", "https://127.0.0.1",
+	} {
+		if origin == prefix || strings.HasPrefix(origin, prefix+":") {
+			return true
+		}
+	}
+	return false
+}
+
 // authMiddleware enforces bearer-token authentication for non-localhost clients.
 //
 // Localhost connections (RemoteAddr resolving to a loopback IP) are always
@@ -423,6 +472,10 @@ func cmdDaemonServe(args []string) error {
 				http.Error(w, "invalid path: "+err.Error(), http.StatusBadRequest)
 				return
 			}
+			if err := isValidProjectPath(absPath); err != nil {
+				http.Error(w, "invalid project path: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 			sockPath, err := daemonSocketPath(absPath)
 			if err != nil {
 				http.Error(w, "socket path error: "+err.Error(), http.StatusInternalServerError)
@@ -495,6 +548,10 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "invalid project path: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if err := isValidProjectPath(absPath); err != nil {
+			http.Error(w, "invalid project path: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		pi, initErr := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
 			return initProjectInstance(appCtx, absPath, sharedPulse, reg)
@@ -552,6 +609,12 @@ func cmdDaemonServe(args []string) error {
 		}
 		absPath, err := canonicalPath(projectPath)
 		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid project path: " + err.Error()}) //nolint:errcheck
+			return
+		}
+		if err := isValidProjectPath(absPath); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": "invalid project path: " + err.Error()}) //nolint:errcheck
@@ -630,13 +693,27 @@ func cmdDaemonServe(args []string) error {
 	// opaque CORS errors to the caller.
 	authProtected := authMiddleware(authToken, mux)
 	finalHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// CORS headers on every response — including error responses.
-		// Authorization is included so non-localhost callers can pass the
-		// Bearer token in both preflight and actual requests.
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		// CORS: reflect origin only for known-safe origins (explicit allowlist).
+		// Wildcard (*) is intentionally not used — see isCORSAllowedOrigin.
+		//
+		// Layer order: CORS headers set here (outermost) so that 401 rejections
+		// from authMiddleware carry the correct ACAO header, letting browsers
+		// surface the auth error rather than an opaque CORS error.
+		//
+		// Non-browser clients (curl, MCP stdio proxy) send no Origin header;
+		// they bypass this block entirely and are unaffected.
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if isCORSAllowedOrigin(origin) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Vary", "Origin")
+			}
+			// Disallowed origin: no CORS headers set → browser blocks the request.
+		}
 		if r.Method == http.MethodOptions {
+			// Always 204 for OPTIONS. If origin is disallowed, ACAO was not set
+			// above, so the browser will block the follow-up actual request.
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
