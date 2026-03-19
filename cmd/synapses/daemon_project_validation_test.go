@@ -99,7 +99,7 @@ func TestIsValidProjectPath_NonExistentPath(t *testing.T) {
 	}
 }
 
-// TestIsValidProjectPath_FileNotDirectory verifies that passing a file path
+// TestIsValidProjectPath_FileAsPath verifies that passing a file path
 // (rather than a directory) is rejected.
 func TestIsValidProjectPath_FileAsPath(t *testing.T) {
 	dir := t.TempDir()
@@ -110,5 +110,48 @@ func TestIsValidProjectPath_FileAsPath(t *testing.T) {
 	// filePath points to a file, not a directory. Stat of filePath/.git will fail.
 	if err := isValidProjectPath(filePath); err == nil {
 		t.Errorf("expected error for file path used as project root, got nil")
+	}
+}
+
+// TestIsValidProjectPath_SynapsesJSONDirectory verifies that a directory named
+// "synapses.json" does NOT count as a valid marker. This closes the bypass
+// where an attacker with local filesystem write access could `mkdir synapses.json`
+// in a sensitive directory to manufacture a fake project marker.
+func TestIsValidProjectPath_SynapsesJSONDirectory(t *testing.T) {
+	dir := t.TempDir()
+	// Create a *directory* named synapses.json — this must NOT pass validation.
+	if err := os.Mkdir(filepath.Join(dir, "synapses.json"), 0o755); err != nil {
+		t.Fatalf("mkdir synapses.json: %v", err)
+	}
+	if err := isValidProjectPath(dir); err == nil {
+		t.Errorf("SECURITY: directory named synapses.json accepted as valid marker — fake-marker bypass is open")
+	}
+}
+
+// TestIsValidProjectPath_GitWorktreeFile verifies that a regular file named
+// ".git" (used by git worktrees and submodules) is accepted as a valid marker.
+// In worktrees, .git is a plain text file like "gitdir: ../.git/worktrees/foo"
+// — not a directory. Rejecting it would break all git worktree users.
+func TestIsValidProjectPath_GitWorktreeFile(t *testing.T) {
+	dir := t.TempDir()
+	// Simulate a git worktree: .git is a regular file, not a directory.
+	worktreeRef := "gitdir: /some/repo/.git/worktrees/feature\n"
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte(worktreeRef), 0o644); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+	if err := isValidProjectPath(dir); err != nil {
+		t.Errorf("git worktree (.git as regular file) should be accepted, got error: %v", err)
+	}
+}
+
+// TestIsValidProjectPath_GitDirectoryIsDirectory verifies that a *directory*
+// named ".git" (normal git repo, not worktree) is accepted.
+func TestIsValidProjectPath_GitDirectoryIsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	if err := isValidProjectPath(dir); err != nil {
+		t.Errorf("normal git repo (.git as directory) should be accepted, got error: %v", err)
 	}
 }

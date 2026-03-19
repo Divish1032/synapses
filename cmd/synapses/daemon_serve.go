@@ -221,20 +221,34 @@ func loadOrCreateAuthToken() (string, error) {
 }
 
 // isValidProjectPath reports whether absPath is a legitimate project root.
-// A path is considered legitimate if it contains a `.git` directory or a
-// `synapses.json` file as a direct child. This prevents a malicious browser
-// page from registering `/`, `/etc`, or other sensitive system directories as
-// projects via the REST API, which would cause the daemon to index and expose
-// their contents.
+// A path is considered legitimate if it contains a `.git` entry (directory
+// for normal repos, regular file for git worktrees) or a `synapses.json`
+// regular file as a direct child. This prevents a malicious browser page from
+// registering `/`, `/etc`, or other sensitive system directories as projects
+// via the REST API, which would cause the daemon to index and expose their
+// contents.
+//
+// Validation rules:
+//   - `.git`:         accepted as a directory OR regular file (git worktrees
+//     use a plain text file pointing at the shared git dir)
+//   - `synapses.json`: accepted only as a regular file, NOT a directory.
+//     Accepting a directory named `synapses.json` would allow an attacker
+//     with local filesystem access to manufacture a fake marker by running
+//     `mkdir synapses.json`. A real config file must be a regular file.
 //
 // Returns a non-nil error (suitable for use in HTTP responses) when the path
 // fails validation.
 func isValidProjectPath(absPath string) error {
-	markers := []string{".git", "synapses.json"}
-	for _, marker := range markers {
-		info, err := os.Stat(filepath.Join(absPath, marker))
-		if err == nil && info != nil {
-			return nil // found a valid marker
+	// Check for .git — valid as directory (normal repo) or regular file (worktree).
+	if info, err := os.Stat(filepath.Join(absPath, ".git")); err == nil {
+		if info.IsDir() || info.Mode().IsRegular() {
+			return nil
+		}
+	}
+	// Check for synapses.json — must be a regular file, not a directory.
+	if info, err := os.Stat(filepath.Join(absPath, "synapses.json")); err == nil {
+		if info.Mode().IsRegular() {
+			return nil
 		}
 	}
 	return fmt.Errorf("path %q is not a valid project root (missing .git or synapses.json)", absPath)
