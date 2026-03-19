@@ -64,6 +64,33 @@ func TestLoadOrCreateAuthToken_CreatesTokenWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestLoadOrCreateAuthToken_CreatesDirIfMissing(t *testing.T) {
+	// synapsesHome() returns the path without creating it.
+	// loadOrCreateAuthToken must create ~/.synapses itself via MkdirAll.
+	origHome := os.Getenv("HOME")
+	tmpDir := t.TempDir()
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	// Deliberately do NOT create ~/.synapses — simulate a fresh install.
+	synapsesDir := filepath.Join(tmpDir, ".synapses")
+	if _, err := os.Stat(synapsesDir); err == nil {
+		t.Fatal("test setup error: .synapses should not exist yet")
+	}
+
+	token, err := loadOrCreateAuthToken()
+	if err != nil {
+		t.Fatalf("unexpected error on fresh install: %v", err)
+	}
+	if len(token) != 64 {
+		t.Errorf("token length = %d, want 64", len(token))
+	}
+	// Directory must have been created.
+	if _, err := os.Stat(synapsesDir); os.IsNotExist(err) {
+		t.Error("~/.synapses was not created by loadOrCreateAuthToken")
+	}
+}
+
 func TestLoadOrCreateAuthToken_ReadsExistingToken(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	tmpDir := t.TempDir()
@@ -265,6 +292,90 @@ func TestAuthMiddleware_AdminEndpointsProtectedForNonLocalhost(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("/api/admin/projects status = %d, want 401 for non-localhost without token", w.Code)
+	}
+}
+
+// TestFinalHandler_CORSHeadersPresentOn401 verifies that the production
+// handler composition (CORS outermost → authMiddleware → mux) always
+// includes Access-Control-Allow-Origin on 401 responses.
+//
+// Without this ordering, browsers see an opaque CORS error instead of a
+// clear 401 when a non-localhost caller sends a request without a token.
+func TestFinalHandler_CORSHeadersPresentOn401(t *testing.T) {
+	const validToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// Reproduce the exact composition used in cmdDaemonServe.
+	inner := http.NewServeMux()
+	inner.Handle("/v1/tools/", okHandler)
+	authProtected := authMiddleware(validToken, inner)
+	finalHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		authProtected.ServeHTTP(w, r)
+	})
+
+	tests := []struct {
+		name       string
+		path       string
+		remoteAddr string
+		header     string
+		wantStatus int
+		wantCORS   bool
+	}{
+		{
+			name: "non-localhost no token gets 401 with CORS headers",
+			path: "/v1/tools/session_init", remoteAddr: "10.0.0.1:9999",
+			wantStatus: http.StatusUnauthorized, wantCORS: true,
+		},
+		{
+			name: "non-localhost wrong token gets 401 with CORS headers",
+			path: "/v1/tools/session_init", remoteAddr: "10.0.0.1:9999",
+			header:     "Bearer " + strings.Repeat("b", 64),
+			wantStatus: http.StatusUnauthorized, wantCORS: true,
+		},
+		{
+			name: "localhost no token gets 200",
+			path: "/v1/tools/session_init", remoteAddr: "127.0.0.1:9999",
+			wantStatus: http.StatusOK, wantCORS: true,
+		},
+		{
+			name: "OPTIONS preflight gets 204 with CORS headers",
+			path: "/v1/tools/session_init", remoteAddr: "10.0.0.1:9999",
+			wantStatus: http.StatusNoContent, wantCORS: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			method := http.MethodPost
+			if tc.wantStatus == http.StatusNoContent {
+				method = http.MethodOptions
+			}
+			req := httptest.NewRequest(method, tc.path, nil)
+			req.RemoteAddr = tc.remoteAddr
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			w := httptest.NewRecorder()
+			finalHandler.ServeHTTP(w, req)
+
+			if w.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tc.wantStatus)
+			}
+			if tc.wantCORS {
+				if acao := w.Header().Get("Access-Control-Allow-Origin"); acao != "*" {
+					t.Errorf("Access-Control-Allow-Origin = %q, want * (must be set even on %d)", acao, tc.wantStatus)
+				}
+				if acah := w.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(acah, "Authorization") {
+					t.Errorf("Access-Control-Allow-Headers = %q, must include Authorization", acah)
+				}
+			}
+		})
 	}
 }
 
