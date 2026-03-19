@@ -69,15 +69,10 @@ func (s *Server) handleEndSession(
 	// agent after a manual end_session call. The existing dedup logic in
 	// InsertMemory (stringSimilarity) handles the case where an auto-log was
 	// already written — manual end_session just touches it rather than duplicating.
-	// Capture session start time before clearing the entry (used in Step 6).
+	// clearAndGetStartTime captures startedAt and deletes the entry atomically,
+	// avoiding two separate lock acquisitions.
 	mcpSessionID := SessionIDFromContext(ctx)
-	var sessionStartedAt time.Time
-	s.sessionCallsMu.Lock()
-	if entry, ok := s.sessionCalls[mcpSessionID+"::"+agentID]; ok {
-		sessionStartedAt = entry.startedAt
-	}
-	s.sessionCallsMu.Unlock()
-	s.clearSessionCallEntry(mcpSessionID, agentID)
+	sessionStartedAt := s.clearAndGetStartTime(mcpSessionID, agentID)
 
 	// Session Intelligence: close the Synapses session record.
 	// Outcome is "unknown" by default; the agent may provide context via summary.
@@ -214,7 +209,7 @@ func (s *Server) handleEndSession(
 	result.Retrospective = retro
 
 	// ── Step 6: Compute session duration from session start time ──
-	// sessionStartedAt is captured before clearSessionCallEntry — it records
+	// sessionStartedAt is captured atomically via clearAndGetStartTime — it records
 	// when session_init first fired for this (sessionID, agentID) pair.
 	// Using a.LastSeen was wrong: LastSeen is the last heartbeat, not session start.
 	if !sessionStartedAt.IsZero() {
@@ -389,17 +384,22 @@ func (s *Server) triggerAutoSessionLog(agentID string) {
 	})
 }
 
-// clearSessionCallEntry removes the call counter for (sessionID, agentID).
-// Called by handleEndSession so that a manual end_session resets the counter
-// and prevents a duplicate auto-log from firing later in the same session.
-func (s *Server) clearSessionCallEntry(sessionID, agentID string) {
+// clearAndGetStartTime removes the call counter for (sessionID, agentID) and
+// returns the session's startedAt time in a single atomic lock acquisition.
+// Returns zero time if no entry exists.
+func (s *Server) clearAndGetStartTime(sessionID, agentID string) time.Time {
 	if sessionID == "" && agentID == "" {
-		return
+		return time.Time{}
 	}
 	key := sessionID + "::" + agentID
 	s.sessionCallsMu.Lock()
-	delete(s.sessionCalls, key)
-	s.sessionCallsMu.Unlock()
+	defer s.sessionCallsMu.Unlock()
+	var t time.Time
+	if entry, ok := s.sessionCalls[key]; ok {
+		t = entry.startedAt
+		delete(s.sessionCalls, key)
+	}
+	return t
 }
 
 // ── end RX1 ────────────────────────────────────────────────────────────────
