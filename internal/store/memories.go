@@ -255,6 +255,41 @@ func (s *Store) QueryRecentSessionMemories(agentID string, limit int) ([]Memory,
 	return scanMemories(rows)
 }
 
+// GetLatestWorkSummary returns the most recent session-log work-summary memory
+// for the given agent. Work summaries are stored by handleEndSession with the
+// tag "work_summary" and contain a JSON array of PackageWork entries.
+// Returns nil, nil when no unexpired work summary exists.
+func (s *Store) GetLatestWorkSummary(agentID string) (*Memory, error) {
+	if agentID == "" {
+		return nil, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	row := s.db.QueryRow(`
+		SELECT id, tier, content, entity_id, agent_id, task_id, tags,
+		       created_at, expires_at, last_accessed_at, source
+		FROM memories
+		WHERE tier = 'session_log'
+		  AND agent_id = ?
+		  AND tags LIKE '%"work_summary"%'
+		  AND stale = 0
+		  AND expires_at > ?
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, agentID, now)
+
+	var m Memory
+	err := row.Scan(
+		&m.ID, &m.Tier, &m.Content, &m.EntityID, &m.AgentID, &m.TaskID,
+		&m.Tags, &m.CreatedAt, &m.ExpiresAt, &m.LastAccessedAt, &m.Source,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get latest work summary: %w", err)
+	}
+	return &m, nil
+}
+
 // TouchMemory updates last_accessed_at and extends expires_at by 50% of the
 // tier's base TTL (capped at 2x base). This implements access-based decay
 // renewal — memories that prove useful stay alive longer.

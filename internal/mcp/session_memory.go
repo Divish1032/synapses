@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -32,6 +33,84 @@ type sessionSummary struct {
 	FilesTouched     []string `json:"files_touched,omitempty"`
 	EntitiesExamined []string `json:"entities_examined,omitempty"`
 	TasksUpdated     []string `json:"tasks_updated,omitempty"`
+}
+
+// PackageWork is one entry in the per-package work summary produced at
+// end_session. Grouped by package directory so agents can see at a glance
+// which packages were touched and which specific entities were examined there.
+type PackageWork struct {
+	Package  string   `json:"package"`
+	Files    []string `json:"files"`
+	Entities []string `json:"entities,omitempty"`
+}
+
+// buildPackageWorkSummary groups the session's file and entity data by package
+// (directory). Only files from sessSummary.FilesTouched are included; entities
+// are assigned to a package when their graph node lives in a touched file.
+// Returns nil when no files were touched (nothing meaningful to store).
+func buildPackageWorkSummary(sess *sessionSummary, g *graph.Graph) []PackageWork {
+	if sess == nil || len(sess.FilesTouched) == 0 {
+		return nil
+	}
+
+	// Build a set of touched files for O(1) lookup.
+	touchedSet := make(map[string]bool, len(sess.FilesTouched))
+	for _, f := range sess.FilesTouched {
+		touchedSet[f] = true
+	}
+
+	// Map package-dir → *PackageWork (accumulator).
+	pkgMap := make(map[string]*PackageWork, len(sess.FilesTouched))
+	for _, f := range sess.FilesTouched {
+		dir := filepath.Dir(f)
+		if dir == "." {
+			dir = "<root>"
+		}
+		pw, ok := pkgMap[dir]
+		if !ok {
+			pw = &PackageWork{Package: dir}
+			pkgMap[dir] = pw
+		}
+		pw.Files = append(pw.Files, f)
+	}
+
+	// Assign entities to packages via graph lookup.
+	if g != nil {
+		for _, entityName := range sess.EntitiesExamined {
+			nodes := g.FindByName(entityName)
+			if len(nodes) == 0 {
+				continue
+			}
+			node := nodes[0]
+			if node.File == "" || !touchedSet[node.File] {
+				continue
+			}
+			dir := filepath.Dir(node.File)
+			if dir == "." {
+				dir = "<root>"
+			}
+			if pw, ok := pkgMap[dir]; ok {
+				pw.Entities = append(pw.Entities, entityName)
+			}
+		}
+	}
+
+	// Sort files and entities within each package, then sort packages.
+	result := make([]PackageWork, 0, len(pkgMap))
+	for _, pw := range pkgMap {
+		sort.Strings(pw.Files)
+		sort.Strings(pw.Entities)
+		result = append(result, *pw)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Package < result[j].Package
+	})
+
+	// Cap at 20 packages to bound memory content size.
+	if len(result) > 20 {
+		result = result[:20]
+	}
+	return result
 }
 
 // sessionCallEntry tracks per-connection tool call depth for RX1 auto-end detection.
@@ -134,6 +213,26 @@ func (s *Server) handleEndSession(
 	// ── Step 1: Structured extraction from events ──
 	sessSummary := s.extractSessionSummary(agentID)
 	result.SessionSummary = sessSummary
+
+	// ── Step 1b: Package-grouped work summary (RX4) ──
+	// Group file changes by package directory. Stored as a separate session-log
+	// memory so session_init can surface it as previous_session_work on the next
+	// session — a continuity signal, not a task.
+	pkgWork := buildPackageWorkSummary(sessSummary, s.graph)
+	if len(pkgWork) > 0 && s.store != nil {
+		if pkgJSON, jsonErr := json.Marshal(pkgWork); jsonErr == nil {
+			_, _ = s.store.InsertMemory(store.Memory{
+				Tier:    store.TierSessionLog,
+				Content: string(pkgJSON),
+				AgentID: agentID,
+				TaskID:  taskID,
+				Source:  store.SourceAuto,
+				Tags:    `["work_summary","session_end","auto"]`,
+			})
+			// memoriesSaved is intentionally not incremented — this is a
+			// structured record, not a human-readable institutional memory.
+		}
+	}
 
 	// ── Step 2: Save session-log memory ──
 	sessionContent := buildSessionLogContent(agentID, taskID, summary, sessSummary)
