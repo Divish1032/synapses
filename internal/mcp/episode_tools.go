@@ -136,13 +136,15 @@ func (s *Server) handleRemember(
 		memoryIDs = append(memoryIDs, mid)
 	}
 
-	// Fire-and-forget: embed newly written memories.
+	// Fire-and-forget: embed newly written memories in background.
+	// Timeout protects against slow model init (first call downloads ~23MB).
 	if s.memoryEmbedder != nil && len(memoryIDs) > 0 {
 		embedder := s.memoryEmbedder
 		st := s.store
+		content := memContent // capture for goroutine
 		go func() {
 			for _, memID := range memoryIDs {
-				s.embedMemory(embedder, st, memID, memContent)
+				s.embedMemory(embedder, st, memID, content)
 			}
 		}()
 	}
@@ -314,6 +316,7 @@ func (s *Server) handleRecall(
 	// Vector search: embed the query and find semantically similar memories.
 	// This catches fuzzy matches that BM25 misses (e.g. "JWT middleware" matches
 	// query "auth changes"). Results are merged with BM25 hits, deduped by ID.
+	// Full memory details are hydrated from the store to ensure complete structs.
 	if s.memoryEmbedder != nil {
 		embedCtx, embedCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		queryVec, embedErr := s.memoryEmbedder.Embed(embedCtx, query)
@@ -321,22 +324,24 @@ func (s *Server) handleRecall(
 		if embedErr == nil && len(queryVec) > 0 {
 			vecResults, vecErr := s.store.MemoryVectorSearchWithThreshold(queryVec, searchLimit, 0.3)
 			if vecErr == nil && len(vecResults) > 0 {
-				// Merge: add vector results that aren't already in BM25 results.
+				// Collect IDs that aren't already in BM25 results.
 				existing := make(map[string]bool, len(memories))
 				for _, m := range memories {
 					existing[m.ID] = true
 				}
+				var newIDs []string
 				for _, vr := range vecResults {
-					if existing[vr.MemoryID] {
-						continue
+					if !existing[vr.MemoryID] {
+						newIDs = append(newIDs, vr.MemoryID)
+						existing[vr.MemoryID] = true
 					}
-					memories = append(memories, store.Memory{
-						ID:       vr.MemoryID,
-						Content:  vr.Content,
-						Tier:     vr.Tier,
-						EntityID: vr.EntityID,
-					})
-					existing[vr.MemoryID] = true
+				}
+				// Hydrate full Memory structs from store (includes CreatedAt, Source, etc.)
+				if len(newIDs) > 0 {
+					fullMems, hydErr := s.store.GetMemoriesByIDs(newIDs)
+					if hydErr == nil {
+						memories = append(memories, fullMems...)
+					}
 				}
 			}
 		}

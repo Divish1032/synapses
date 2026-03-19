@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	hugot "github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
@@ -29,14 +30,16 @@ const (
 //
 // Thread-safe: all Embed calls are serialized by a mutex because the
 // underlying hugot pipeline is not goroutine-safe per-call.
+//
+// Init retry: if model download fails (e.g., no internet), subsequent
+// Embed() calls will retry initialization — not permanently broken.
 type BuiltinEmbedder struct {
 	modelsDir string
 
 	mu       sync.Mutex
 	session  *hugot.Session
 	pipeline *pipelines.FeatureExtractionPipeline
-	initOnce sync.Once
-	initErr  error
+	ready    bool
 }
 
 // NewBuiltinEmbedder creates a BuiltinEmbedder that stores its model in
@@ -47,8 +50,13 @@ func NewBuiltinEmbedder(modelsDir string) *BuiltinEmbedder {
 }
 
 // ensureModel downloads the model if not already cached, and initializes the
-// hugot session and pipeline. Called once via sync.Once.
+// hugot session and pipeline. Must be called under b.mu lock.
+// Returns nil on success. On failure, the caller should retry next time.
 func (b *BuiltinEmbedder) ensureModel() error {
+	if b.ready {
+		return nil
+	}
+
 	modelPath := filepath.Join(b.modelsDir, builtinModelDirName)
 	onnxPath := filepath.Join(modelPath, builtinModelFile)
 
@@ -61,6 +69,8 @@ func (b *BuiltinEmbedder) ensureModel() error {
 		}
 		opts := hugot.NewDownloadOptions()
 		opts.Verbose = false
+		opts.MaxRetries = 3
+		opts.RetryInterval = 2
 		if _, err := hugot.DownloadModel(builtinModelName, b.modelsDir, opts); err != nil {
 			return fmt.Errorf("download embedding model: %w", err)
 		}
@@ -94,21 +104,36 @@ func (b *BuiltinEmbedder) ensureModel() error {
 
 	b.session = session
 	b.pipeline = pipeline
+	b.ready = true
 	return nil
 }
 
 // Embed generates a 384-dimensional embedding for text using the builtin
 // all-MiniLM-L6-v2 model. Thread-safe but serialized.
-func (b *BuiltinEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
-	b.initOnce.Do(func() {
-		b.initErr = b.ensureModel()
-	})
-	if b.initErr != nil {
-		return nil, b.initErr
+//
+// If model initialization fails (e.g., no internet for download), subsequent
+// calls will retry — the embedder is never permanently broken.
+func (b *BuiltinEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	// Check context before acquiring lock to fail fast on cancelled contexts.
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
 	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	// Check context again after acquiring lock (may have waited).
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	if err := b.ensureModel(); err != nil {
+		return nil, err
+	}
 
 	result, err := b.pipeline.RunPipeline([]string{text})
 	if err != nil {
@@ -130,7 +155,14 @@ func (b *BuiltinEmbedder) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.session != nil {
-		return b.session.Destroy()
+		err := b.session.Destroy()
+		b.session = nil
+		b.pipeline = nil
+		b.ready = false
+		return err
 	}
 	return nil
 }
+
+// lastInitLog is used to throttle init failure logging to once per 5 minutes.
+var lastInitLog time.Time
