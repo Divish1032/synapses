@@ -575,20 +575,23 @@ func (s *Server) SetProjectRegistry(pr ProjectStoreProvider) {
 
 // resolveProjectStores parses a comma-separated projects param (or "*" for all)
 // and returns a map of projectName → *store.Store. Excludes the current project.
-func (s *Server) resolveProjectStores(projectsParam string) map[string]*store.Store {
+// The second return value lists any requested project names that were not found
+// (empty for "*" queries). Callers can surface this to help agents fix typos.
+func (s *Server) resolveProjectStores(projectsParam string) (map[string]*store.Store, []string) {
 	if s.projectRegistry == nil || projectsParam == "" {
-		return nil
+		return nil, nil
 	}
 	projectsParam = strings.TrimSpace(projectsParam)
 
 	allNames := s.projectRegistry.ListProjects()
+	allSet := make(map[string]bool, len(allNames))
+	for _, n := range allNames {
+		allSet[n] = true
+	}
 
 	var wanted map[string]bool
 	if projectsParam == "*" {
-		wanted = make(map[string]bool, len(allNames))
-		for _, n := range allNames {
-			wanted[n] = true
-		}
+		wanted = allSet
 	} else {
 		parts := strings.Split(projectsParam, ",")
 		wanted = make(map[string]bool, len(parts))
@@ -603,15 +606,19 @@ func (s *Server) resolveProjectStores(projectsParam string) map[string]*store.St
 	currentName := filepath.Base(s.projectPath)
 
 	result := make(map[string]*store.Store)
+	var notFound []string
 	for name := range wanted {
 		if name == currentName {
 			continue // skip self
 		}
 		if st := s.projectRegistry.GetStore(name); st != nil {
 			result[name] = st
+		} else if projectsParam != "*" {
+			// Only report not-found for explicit names, not wildcard.
+			notFound = append(notFound, name)
 		}
 	}
-	return result
+	return result, notFound
 }
 
 // SetBrainClient wires a *brain.Client into the server so that get_context

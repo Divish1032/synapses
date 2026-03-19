@@ -243,9 +243,9 @@ CREATE TABLE IF NOT EXISTS annotations (
 );
 CREATE INDEX IF NOT EXISTS idx_annotations_node ON annotations(node_id);
 
--- Work claims: agents declare which files/packages/directories they are actively
--- working on so other agents can detect conflicts before starting overlapping work.
--- Claims expire automatically (TTL set by caller). Pruned on read.
+-- DEPRECATED: work_claims is no longer queried (within-project coordination removed
+-- in the knowledge substrate pivot). Table definition preserved so existing databases
+-- with data in this table can still be opened without schema errors.
 CREATE TABLE IF NOT EXISTS work_claims (
     agent_id   TEXT NOT NULL,
     scope      TEXT NOT NULL,
@@ -675,9 +675,8 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE agents ADD COLUMN focus_file  TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE agents ADD COLUMN focus_since TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE agents ADD COLUMN intent      TEXT NOT NULL DEFAULT ''`,
-		// B29: Watched symbols — track what each agent has examined via get_context (30-min TTL).
-		// Used to compute dependency_alerts in session_init: when another agent edits a symbol
-		// this agent was recently examining, that's worth surfacing as a Tier 2 signal.
+		// DEPRECATED: agent_watched_symbols is no longer queried (within-project coordination
+		// removed in the knowledge substrate pivot). Migration preserved for existing databases.
 		`CREATE TABLE IF NOT EXISTS agent_watched_symbols (
 			agent_id    TEXT NOT NULL,
 			entity_id   TEXT NOT NULL,

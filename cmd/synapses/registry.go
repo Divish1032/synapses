@@ -156,22 +156,49 @@ func (r *projectRegistry) Close() {
 }
 
 // registryAdapter wraps projectRegistry to implement mcp.ProjectStoreProvider.
+// Handles name collisions: if two projects share a basename (e.g. /code/api and
+// /work/api), the second gets "api (work)" — parent dir appended for disambiguation.
 type registryAdapter struct {
 	reg *projectRegistry
 }
 
+// projectDisplayName returns a unique human-readable name for a project.
+// Uses filepath.Base, with parent dir appended on collision.
+func projectDisplayNames(projects []*ProjectInstance) map[string]string {
+	// First pass: count basenames.
+	baseCount := make(map[string]int)
+	for _, p := range projects {
+		baseCount[filepath.Base(p.AbsPath)]++
+	}
+	// Second pass: assign names, disambiguating collisions.
+	names := make(map[string]string, len(projects))
+	for _, p := range projects {
+		base := filepath.Base(p.AbsPath)
+		if baseCount[base] > 1 {
+			parent := filepath.Base(filepath.Dir(p.AbsPath))
+			names[p.AbsPath] = base + " (" + parent + ")"
+		} else {
+			names[p.AbsPath] = base
+		}
+	}
+	return names
+}
+
 func (a *registryAdapter) ListProjects() []string {
 	projects := a.reg.All()
+	nameMap := projectDisplayNames(projects)
 	names := make([]string, 0, len(projects))
 	for _, p := range projects {
-		names = append(names, filepath.Base(p.AbsPath))
+		names = append(names, nameMap[p.AbsPath])
 	}
 	return names
 }
 
 func (a *registryAdapter) GetStore(name string) *store.Store {
-	for _, p := range a.reg.All() {
-		if filepath.Base(p.AbsPath) == name {
+	projects := a.reg.All()
+	nameMap := projectDisplayNames(projects)
+	for _, p := range projects {
+		if nameMap[p.AbsPath] == name {
 			return p.Store
 		}
 	}

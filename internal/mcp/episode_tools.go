@@ -336,7 +336,12 @@ func (s *Server) handleRecall(
 	// Cross-project recall via daemon project registry (covers all registered projects,
 	// not just explicitly federated ones). This is the primary cross-project path.
 	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.projectRegistry != nil {
-		stores := s.resolveProjectStores(projectsParam)
+		stores, notFound := s.resolveProjectStores(projectsParam)
+		if len(notFound) > 0 {
+			crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
+				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.projectRegistry.ListProjects(), ", ")),
+			})
+		}
 		for projName, projStore := range stores {
 			// Skip projects already covered by federation.
 			alreadyCovered := false
