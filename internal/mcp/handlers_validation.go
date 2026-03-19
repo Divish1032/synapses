@@ -21,6 +21,19 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
+// pathWithinRoot reports whether path is inside (or equal to) root.
+// It prevents directory traversal attacks by comparing cleaned absolute
+// paths. Always returns true when root is empty (no project root set).
+func pathWithinRoot(root, path string) bool {
+	if root == "" {
+		return true
+	}
+	cleanRoot := filepath.Clean(root)
+	cleanPath := filepath.Clean(path)
+	return cleanPath == cleanRoot ||
+		strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator))
+}
+
 // ProposedChange is a single entry in a validate_plan request.
 type ProposedChange struct {
 	File          string `json:"file"`
@@ -105,6 +118,10 @@ func (s *Server) handleValidatePlan(
 		absFile := c.File
 		if repoRoot != "" && !filepath.IsAbs(absFile) {
 			absFile = filepath.Join(repoRoot, absFile)
+		}
+		// Security: reject paths that escape the project root.
+		if !pathWithinRoot(repoRoot, absFile) {
+			continue
 		}
 		if fi, err := os.Stat(absFile); err == nil {
 			if age := time.Since(fi.ModTime()); age < 10*time.Second {
@@ -218,6 +235,10 @@ func (s *Server) handleValidatePlan(
 			absFile := c.File
 			if repoRoot != "" && !filepath.IsAbs(absFile) {
 				absFile = filepath.Join(repoRoot, absFile)
+			}
+			// Security: reject paths that escape the project root.
+			if !pathWithinRoot(repoRoot, absFile) {
+				continue
 			}
 			src, err := os.ReadFile(absFile)
 			if err != nil {
@@ -513,6 +534,11 @@ func (s *Server) handleVerifyImplementation(
 		absFile := f
 		if repoRoot != "" && !filepath.IsAbs(absFile) {
 			absFile = filepath.Join(repoRoot, absFile)
+		}
+		// Security: reject paths that escape the project root.
+		if !pathWithinRoot(repoRoot, absFile) {
+			reports = append(reports, r)
+			continue
 		}
 		if fi, err := os.Stat(absFile); err == nil {
 			if age := time.Since(fi.ModTime()); age < 10*time.Second {
