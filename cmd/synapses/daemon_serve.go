@@ -39,6 +39,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -447,14 +448,16 @@ func cmdDaemonServe(args []string) error {
 		}
 
 		// Parse request body as tool arguments. Empty or absent body → empty args.
+		// Cap at 1 MiB to prevent unbounded memory allocation from malformed requests.
+		// Use io.LimitReader regardless of Content-Length: handles chunked transfer
+		// encoding (Content-Length == -1) correctly without skipping the body.
 		args := make(map[string]interface{})
-		if r.ContentLength != 0 {
-			if decodeErr := json.NewDecoder(r.Body).Decode(&args); decodeErr != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON body: " + decodeErr.Error()}) //nolint:errcheck
-				return
-			}
+		limited := io.LimitReader(r.Body, 1<<20) // 1 MiB
+		if decodeErr := json.NewDecoder(limited).Decode(&args); decodeErr != nil && decodeErr != io.EOF {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON body: " + decodeErr.Error()}) //nolint:errcheck
+			return
 		}
 
 		// Inject a per-request session ID so handlers that use SessionIDFromContext
