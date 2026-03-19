@@ -4331,7 +4331,14 @@ func (s *Server) handleSessionInit(
 	if s.store != nil && agentID != "" && !quickMode {
 		if workMem, wErr := s.store.GetLatestWorkSummary(agentID); wErr == nil && workMem != nil {
 			var pkgs []PackageWork
-			if json.Unmarshal([]byte(workMem.Content), &pkgs) == nil && len(pkgs) > 0 {
+			// Try envelope format first (new); fall back to raw array (legacy).
+			var env workSummaryEnvelope
+			if json.Unmarshal([]byte(workMem.Content), &env) == nil && len(env.Packages) > 0 {
+				pkgs = env.Packages
+			} else {
+				_ = json.Unmarshal([]byte(workMem.Content), &pkgs)
+			}
+			if len(pkgs) > 0 {
 				resp["previous_session_work"] = map[string]interface{}{
 					"packages": pkgs,
 					"note":     "Work grouped by package from the previous session. Use this to quickly re-orient — these are the files and entities you were actively changing.",

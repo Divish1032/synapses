@@ -44,6 +44,21 @@ type PackageWork struct {
 	Entities []string `json:"entities,omitempty"`
 }
 
+// workSummaryEnvelope wraps the per-package work list with a session timestamp.
+// The SessionAt field makes every work-summary JSON payload unique across
+// sessions — without it, two sessions that touched identical files and entities
+// would produce byte-for-byte identical content, triggering the Jaccard-based
+// dedup in InsertMemory (threshold 0.85) and silently discarding the second
+// work summary.
+// SessionAt is stored as a Unix timestamp (int64 seconds). A large opaque
+// integer tokenizes to a single unique token in the Jaccard word-overlap
+// similarity function, guaranteeing distinctness between any two sessions
+// (unlike ISO 8601 strings which share most tokens and can still exceed 0.85).
+type workSummaryEnvelope struct {
+	Packages  []PackageWork `json:"packages"`
+	SessionAt int64         `json:"session_at"` // Unix seconds — uniqueness nonce
+}
+
 // buildPackageWorkSummary groups the session's file and entity data by package
 // (directory). Only files from sessSummary.FilesTouched are included; entities
 // are assigned to a package when their graph node lives in a touched file.
@@ -211,7 +226,7 @@ func (s *Server) handleEndSession(
 	var memoriesSaved int
 
 	// ── Step 1: Structured extraction from events ──
-	sessSummary := s.extractSessionSummary(agentID)
+	sessSummary := s.extractSessionSummary(agentID, sessionStartedAt)
 	result.SessionSummary = sessSummary
 
 	// ── Step 1b: Package-grouped work summary (RX4) ──
@@ -220,7 +235,11 @@ func (s *Server) handleEndSession(
 	// session — a continuity signal, not a task.
 	pkgWork := buildPackageWorkSummary(sessSummary, s.graph)
 	if len(pkgWork) > 0 && s.store != nil {
-		if pkgJSON, jsonErr := json.Marshal(pkgWork); jsonErr == nil {
+		env := workSummaryEnvelope{
+			Packages:  pkgWork,
+			SessionAt: time.Now().Unix(),
+		}
+		if pkgJSON, jsonErr := json.Marshal(env); jsonErr == nil {
 			_, _ = s.store.InsertMemory(store.Memory{
 				Tier:    store.TierSessionLog,
 				Content: string(pkgJSON),
@@ -320,7 +339,10 @@ func (s *Server) handleEndSession(
 
 // extractSessionSummary collects structured data about what happened during
 // this agent's session from the event log.
-func (s *Server) extractSessionSummary(agentID string) *sessionSummary {
+// sessionStart is the time the session began; it widens the watcher look-back
+// window to the full session duration. Pass zero time to use the 30-minute
+// default (used by triggerAutoSessionLog which doesn't have a start time).
+func (s *Server) extractSessionSummary(agentID string, sessionStart time.Time) *sessionSummary {
 	summary := &sessionSummary{}
 
 	if s.store == nil {
@@ -363,7 +385,7 @@ func (s *Server) extractSessionSummary(agentID string) *sessionSummary {
 	// recently modified. This gives proper agent attribution: file_change events
 	// from the watcher are unattributed (any agent or external tool), so we
 	// intersect agent-examined entities with the watcher's recent-change list.
-	modifiedFiles := s.getRecentlyModifiedFiles()
+	modifiedFiles := s.getRecentlyModifiedFiles(sessionStart)
 	filesSet := make(map[string]bool)
 	for entityName := range entitiesSet {
 		nodes := s.graph.FindByName(entityName)
@@ -467,7 +489,7 @@ func (s *Server) triggerAutoSessionLog(agentID string) {
 		return
 	}
 
-	sessSummary := s.extractSessionSummary(agentID)
+	sessSummary := s.extractSessionSummary(agentID, time.Time{}) // zero = 30-min fallback
 	content := buildSessionLogContent(agentID, "", "", sessSummary)
 	if content == "" {
 		return
@@ -503,12 +525,24 @@ func (s *Server) clearAndGetStartTime(sessionID, agentID string) time.Time {
 
 // ── end RX1 ────────────────────────────────────────────────────────────────
 
-// getRecentlyModifiedFiles returns files changed recently (from watcher events).
-func (s *Server) getRecentlyModifiedFiles() []string {
+// getRecentlyModifiedFiles returns files changed since the session started (from
+// watcher events). When sessionStart is zero the window defaults to 30 minutes.
+// Passing the actual session start ensures long sessions (> 30 min) don't miss
+// file changes made at the beginning of the session.
+func (s *Server) getRecentlyModifiedFiles(sessionStart time.Time) []string {
 	if s.changeSource == nil {
 		return nil
 	}
-	changes := s.changeSource.RecentChanges(30) // last 30 minutes
+	windowMin := 30
+	if !sessionStart.IsZero() {
+		// Add a 5-minute buffer so changes made just before session_init
+		// (e.g. editor startup writing config files) are included.
+		elapsed := int(time.Since(sessionStart).Minutes()) + 5
+		if elapsed > windowMin {
+			windowMin = elapsed
+		}
+	}
+	changes := s.changeSource.RecentChanges(windowMin)
 	files := make([]string, 0, len(changes))
 	for _, c := range changes {
 		files = append(files, c.File)

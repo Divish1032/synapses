@@ -5,9 +5,11 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/store"
+	"github.com/SynapsesOS/synapses/internal/watcher"
 )
 
 // ── buildPackageWorkSummary unit tests ─────────────────────────────────────
@@ -394,10 +396,15 @@ func TestRX4_HandleEndSession_StoresWorkSummary(t *testing.T) {
 	if m == nil {
 		t.Fatal("expected work summary to be stored after end_session")
 	}
-	var pkgs []PackageWork
-	if err := json.Unmarshal([]byte(m.Content), &pkgs); err != nil {
-		t.Fatalf("unmarshal work summary: %v", err)
+	// handleEndSession now stores a workSummaryEnvelope (not raw []PackageWork).
+	var env workSummaryEnvelope
+	if err := json.Unmarshal([]byte(m.Content), &env); err != nil {
+		t.Fatalf("unmarshal work summary envelope: %v", err)
 	}
+	if env.SessionAt == 0 {
+		t.Error("expected non-zero session_at in work summary envelope")
+	}
+	pkgs := env.Packages
 	if len(pkgs) == 0 {
 		t.Fatal("expected at least 1 package in work summary")
 	}
@@ -415,4 +422,90 @@ func TestRX4_HandleEndSession_StoresWorkSummary(t *testing.T) {
 	if !found {
 		t.Errorf("expected pkg/auth package in work summary, got: %v", pkgs)
 	}
+}
+
+// TestWorkSummaryEnvelope_PreventsDedup verifies that two consecutive
+// end_session calls that touch identical files+entities both persist a work
+// summary. Without the SessionAt timestamp nonce the Jaccard dedup in
+// InsertMemory (threshold 0.85) would silently drop the second one.
+func TestWorkSummaryEnvelope_PreventsDedup(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	pkgs := []PackageWork{{Package: "internal/store", Files: []string{"store.go"}}}
+
+	const ts1 int64 = 1710835200 // 2026-03-19 10:00:00 UTC
+	const ts2 int64 = 1710849600 // 2026-03-19 14:00:00 UTC
+
+	env1 := workSummaryEnvelope{Packages: pkgs, SessionAt: ts1}
+	env2 := workSummaryEnvelope{Packages: pkgs, SessionAt: ts2}
+
+	j1, _ := json.Marshal(env1)
+	j2, _ := json.Marshal(env2)
+
+	// Both should be stored without dedup collision.
+	id1, err := st.InsertMemory(store.Memory{
+		Tier: store.TierSessionLog, Content: string(j1), AgentID: "agent-1",
+		Source: store.SourceAuto, Tags: `["work_summary","session_end","auto"]`,
+	})
+	if err != nil {
+		t.Fatalf("insert 1: %v", err)
+	}
+	id2, err := st.InsertMemory(store.Memory{
+		Tier: store.TierSessionLog, Content: string(j2), AgentID: "agent-1",
+		Source: store.SourceAuto, Tags: `["work_summary","session_end","auto"]`,
+	})
+	if err != nil {
+		t.Fatalf("insert 2: %v", err)
+	}
+	if id1 == id2 {
+		t.Error("dedup fired: second work summary merged into first (SessionAt nonce not distinctive enough)")
+	}
+
+	// GetLatestWorkSummary should return the second one.
+	m, err := st.GetLatestWorkSummary("agent-1")
+	if err != nil || m == nil {
+		t.Fatalf("GetLatestWorkSummary: err=%v mem=%v", err, m)
+	}
+	var got workSummaryEnvelope
+	if json.Unmarshal([]byte(m.Content), &got) != nil || got.SessionAt != ts2 {
+		t.Errorf("expected second envelope (ts2=%d), got: %v", ts2, m.Content)
+	}
+}
+
+// TestGetRecentlyModifiedFiles_UsesSessionWindow verifies that a session older
+// than 30 minutes produces a window wider than 30 minutes, so file changes made
+// at the start of a long session are not silently dropped.
+func TestGetRecentlyModifiedFiles_UsesSessionWindow(t *testing.T) {
+	// Stub that records the windowMinutes it was called with.
+	called := 0
+	gotWindow := 0
+	stub := &capturingChangeSource{onRecentChanges: func(w int) []watcher.ChangeEvent {
+		called++
+		gotWindow = w
+		return nil
+	}}
+
+	srv := newTestServer(t)
+	srv.SetChangeSource(stub)
+
+	// Session started 90 minutes ago.
+	sessionStart := time.Now().Add(-90 * time.Minute)
+	srv.getRecentlyModifiedFiles(sessionStart)
+
+	if called != 1 {
+		t.Fatalf("RecentChanges called %d times, expected 1", called)
+	}
+	// Window must be at least 90+5 = 95 minutes (session elapsed + 5-min buffer).
+	if gotWindow < 95 {
+		t.Errorf("expected window >= 95 min for 90-min session, got %d", gotWindow)
+	}
+}
+
+// capturingChangeSource is a test double that records the windowMinutes argument.
+type capturingChangeSource struct {
+	onRecentChanges func(int) []watcher.ChangeEvent
+}
+
+func (c *capturingChangeSource) RecentChanges(windowMinutes int) []watcher.ChangeEvent {
+	return c.onRecentChanges(windowMinutes)
 }

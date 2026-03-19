@@ -217,6 +217,23 @@ func (s *Store) GetOrResumeSession(agentID, projectID, mcpSessionID, intent stri
 	// We pick the most recently active candidate (ORDER BY last_seen_at DESC).
 	if hibWindowSec > 0 {
 		hibCutoff := now - hibWindowSec
+
+		// Lazily promote idle-active sessions to 'hibernated' within this
+		// BEGIN IMMEDIATE transaction before Phase 2 queries on state. Without
+		// this, a session left open in a dormant editor window (state='active'
+		// but last_seen_at older than the reconnect window) could satisfy the
+		// Phase 2 time predicates and be stolen — even though the editor is
+		// still open. Marking it 'hibernated' here (atomically, under the write
+		// lock) ensures Phase 2 can safely filter on state = 'hibernated'.
+		_, _ = tx.Exec(`
+			UPDATE sessions SET state = 'hibernated'
+			WHERE agent_id   = ?
+			  AND project_id = ?
+			  AND state      = 'active'
+			  AND ended_at   IS NULL
+			  AND last_seen_at < ?`,
+			agentID, projectID, cutoff)
+
 		var priorID, priorIntent, priorSummary string
 		var priorToolCalls int
 		var priorStartedAt, priorLastSeen int64
@@ -226,7 +243,7 @@ func (s *Store) GetOrResumeSession(agentID, projectID, mcpSessionID, intent stri
 			FROM sessions
 			WHERE agent_id   = ?
 			  AND project_id = ?
-			  AND state     != 'closed'
+			  AND state      = 'hibernated'
 			  AND ended_at   IS NULL
 			  AND last_seen_at > ?
 			  AND last_seen_at < ?
