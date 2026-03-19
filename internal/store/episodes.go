@@ -349,10 +349,15 @@ func buildORQuery(s string) string {
 	if sanitized == "" {
 		return ""
 	}
-	// sanitizeFTSQuery returns `"word1"* "word2"*`; split on space and rejoin with OR.
+	// sanitizeFTSQuery returns `"word1"* OR "word2"* OR "word3"*`.
+	// Split on whitespace to get term tokens interleaved with "OR" separators.
 	parts := strings.Fields(sanitized)
 	var kept []string
 	for _, p := range parts {
+		// Skip "OR" separator tokens injected by sanitizeFTSQuery.
+		if p == "OR" {
+			continue
+		}
 		// Strip quotes and * to measure raw word length for stop-word filter.
 		raw := strings.Trim(p, `"*`)
 		if len(raw) > 3 {
@@ -361,7 +366,16 @@ func buildORQuery(s string) string {
 	}
 	if len(kept) == 0 {
 		// All words were short — fall back to including them anyway.
-		kept = parts
+		// Collect term tokens only (skip "OR" separators) to avoid
+		// producing invalid FTS5 like `"go" OR OR OR "is"`.
+		for _, p := range parts {
+			if p != "OR" {
+				kept = append(kept, p)
+			}
+		}
+	}
+	if len(kept) == 0 {
+		return ""
 	}
 	return strings.Join(kept, " OR ")
 }
