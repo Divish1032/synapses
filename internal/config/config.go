@@ -43,6 +43,15 @@ type Config struct {
 	// Example: "http://localhost:11434/api/embeddings"
 	EmbeddingEndpoint string `json:"embedding_endpoint,omitempty"`
 
+	// Embeddings controls memory embedding generation mode.
+	// "builtin" (default): pure-Go sentence-transformer inference using a
+	// bundled all-MiniLM-L6-v2 ONNX model (~23MB). Zero external dependencies.
+	// "ollama": delegates to a local Ollama instance (requires Ollama running).
+	// Uses EmbeddingEndpoint or defaults to http://localhost:11434/api/embeddings.
+	// "off": disabled, FTS5-only recall.
+	// Embeddings are computed locally and never sent anywhere (Privacy value).
+	Embeddings string `json:"embeddings,omitempty"`
+
 	// ApiEntries defines custom patterns for identifying API entry points via
 	// get_api_contract. These supplement built-in convention detection (net/http,
 	// gin, echo, fiber, gRPC, proto RPC). All non-empty fields in a pattern are

@@ -959,11 +959,18 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		srv.SetPulseClient(sharedPulse)
 	}
 
-	// Embeddings.
+	// Node embeddings (semantic search).
 	if cfg.EmbeddingEndpoint != "" {
 		embedCli := embed.NewClient(cfg.EmbeddingEndpoint, "")
 		srv.SetEmbedClient(embedCli)
 		go embedAllNodes(projCtx, embedCli, g, st)
+	}
+
+	// Memory embeddings (recall vector search).
+	memEmbedder := createMemoryEmbedder(cfg)
+	if memEmbedder != nil {
+		srv.SetMemoryEmbedder(memEmbedder)
+		go embedAllMemories(projCtx, memEmbedder, st)
 	}
 
 	// File watcher.

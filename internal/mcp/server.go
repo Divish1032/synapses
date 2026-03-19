@@ -104,7 +104,8 @@ type Server struct {
 	brainClient  interface{}   // *brain.Client — set via SetBrainClient; nil if brain not configured
 	webCache     *webcache.Cache // nil if webcache not configured
 	pulseClient  interface{}    // *pulse.Client — set via SetPulseClient; nil if pulse not configured
-	embedClient  *embed.Client  // nil if embedding_endpoint not configured
+	embedClient    *embed.Client  // nil if embedding_endpoint not configured
+	memoryEmbedder embed.Embedder // nil if embeddings mode is "off" — set via SetMemoryEmbedder
 	techStack    interface{}    // []TechStackEntry — set via SetTechStack after autosubscribe
 	knowledgeMode bool          // when true, only knowledge tools are registered (no code graph)
 	projectID    string         // stable project identifier (FNV hash of project root path)
@@ -683,6 +684,13 @@ func (s *Server) SetTechStack(ts interface{}) {
 // Pass nil to disable vector search (falls back to FTS5-only).
 func (s *Server) SetEmbedClient(ec *embed.Client) {
 	s.embedClient = ec
+}
+
+// SetMemoryEmbedder wires an embedder for generating memory embeddings
+// on remember() writes and for vector search in recall(). Pass nil to
+// disable memory embeddings (FTS5-only recall).
+func (s *Server) SetMemoryEmbedder(e embed.Embedder) {
+	s.memoryEmbedder = e
 }
 
 // ServeStdio starts the MCP server on stdin/stdout. This call blocks until

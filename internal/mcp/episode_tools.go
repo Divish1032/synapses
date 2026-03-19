@@ -100,12 +100,15 @@ func (s *Server) handleRemember(
 	}
 	memTags := fmt.Sprintf(`["episode","%s"]`, episodeType)
 
+	// Collect written memory IDs for embedding.
+	var memoryIDs []string
+
 	// Entity-tier: one memory per affected node (failures & patterns only).
 	if episodeType == "failure" || episodeType == "pattern" {
 		var affectedNodes []string
 		_ = json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes)
 		for _, nodeID := range affectedNodes {
-			_, _ = s.store.InsertMemoryWithAnchors(store.Memory{
+			mid, merr := s.store.InsertMemoryWithAnchors(store.Memory{
 				Tier:     store.TierEntity,
 				Content:  memContent,
 				EntityID: nodeID,
@@ -114,11 +117,14 @@ func (s *Server) handleRemember(
 				Source:   store.SourceManual,
 				Tags:     memTags,
 			}, anchorNodes)
+			if merr == nil && mid != "" {
+				memoryIDs = append(memoryIDs, mid)
+			}
 		}
 	}
 
 	// Project-tier: always write the episode as project knowledge.
-	_, _ = s.store.InsertMemoryWithAnchors(store.Memory{
+	mid, merr := s.store.InsertMemoryWithAnchors(store.Memory{
 		Tier:    store.TierProject,
 		Content: memContent,
 		AgentID: agentID,
@@ -126,6 +132,20 @@ func (s *Server) handleRemember(
 		Source:  store.SourceManual,
 		Tags:    memTags,
 	}, anchorNodes)
+	if merr == nil && mid != "" {
+		memoryIDs = append(memoryIDs, mid)
+	}
+
+	// Fire-and-forget: embed newly written memories.
+	if s.memoryEmbedder != nil && len(memoryIDs) > 0 {
+		embedder := s.memoryEmbedder
+		st := s.store
+		go func() {
+			for _, memID := range memoryIDs {
+				s.embedMemory(embedder, st, memID, memContent)
+			}
+		}()
+	}
 
 	if episodeType == "failure" {
 		if err := s.store.AppendEvent("failure_recorded", agentID,
@@ -289,6 +309,37 @@ func (s *Server) handleRecall(
 		memories, _ = s.store.SearchMemoriesIncludingStale(query, searchLimit)
 	} else {
 		memories, _ = s.store.SearchMemories(query, searchLimit)
+	}
+
+	// Vector search: embed the query and find semantically similar memories.
+	// This catches fuzzy matches that BM25 misses (e.g. "JWT middleware" matches
+	// query "auth changes"). Results are merged with BM25 hits, deduped by ID.
+	if s.memoryEmbedder != nil {
+		embedCtx, embedCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		queryVec, embedErr := s.memoryEmbedder.Embed(embedCtx, query)
+		embedCancel()
+		if embedErr == nil && len(queryVec) > 0 {
+			vecResults, vecErr := s.store.MemoryVectorSearchWithThreshold(queryVec, searchLimit, 0.3)
+			if vecErr == nil && len(vecResults) > 0 {
+				// Merge: add vector results that aren't already in BM25 results.
+				existing := make(map[string]bool, len(memories))
+				for _, m := range memories {
+					existing[m.ID] = true
+				}
+				for _, vr := range vecResults {
+					if existing[vr.MemoryID] {
+						continue
+					}
+					memories = append(memories, store.Memory{
+						ID:       vr.MemoryID,
+						Content:  vr.Content,
+						Tier:     vr.Tier,
+						EntityID: vr.EntityID,
+					})
+					existing[vr.MemoryID] = true
+				}
+			}
+		}
 	}
 
 	// Touch surfaced memories in background to renew TTL.
