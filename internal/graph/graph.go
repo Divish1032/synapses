@@ -988,10 +988,10 @@ func (g *Graph) ProjectIdentity() *ProjectIdentity {
 		toolGuidance = "Small repo (100–499 nodes): prefer Synapses for exploration (get_context, search), use Read/Grep for targeted single-file edits. Use validate_plan before multi-file changes."
 	case semanticNodes < 2000:
 		scale = ScaleMedium
-		toolGuidance = "Medium repo (500–1999 nodes): strongly prefer Synapses tools for all code exploration — Glob/Grep surfaces too much noise. Use Read only when you know the exact file to edit."
+		toolGuidance = "Medium repo (500–1999 nodes): Synapses tools recommended for exploration — they surface callers, callees, and architecture rules that Glob/Grep miss. Use Read/Grep when you know the exact file to edit."
 	default:
 		scale = ScaleLarge
-		toolGuidance = "Large repo (2000+ nodes): always use Synapses tools for exploration. Direct file scanning is too noisy at this scale. Reserve Read/Grep for writing specific files you have already identified."
+		toolGuidance = "Large repo (2000+ nodes): Synapses tools recommended — graph queries return richer context (callers, callees, rules, violations) than file scanning at this scale. Use Read/Grep for targeted edits to files you have already identified."
 	}
 
 	result := &ProjectIdentity{

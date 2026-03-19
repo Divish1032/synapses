@@ -1176,6 +1176,13 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 	if err != nil {
 		return nil, fmt.Errorf("parse repo: %w", err)
 	}
+
+	// File parsing is complete. Switch the progress label so the frontend
+	// shows "Resolving edges…" instead of a confusing "99%" that never moves.
+	if progress != nil {
+		progress.SetLabel("Resolving edges…")
+	}
+
 	// Persist call sites BEFORE draining them so they can be reloaded and
 	// re-resolved after MergeFrom for cross-project CALLS edge resolution.
 	if st != nil {
@@ -1732,9 +1739,9 @@ These 12 core tools cover 95% of workflows. All 45+ tools remain available — c
 Call ` + "`discover_tools(query=\"what you need\")`" + ` to find any tool by description.
 
 ### Anti-patterns
-- **NEVER** use Grep/Glob to understand code structure or find callers — use ` + "`prepare_context`" + ` or ` + "`search`" + `
-- **NEVER** skip ` + "`validate_plan()`" + ` before multi-file changes — it catches architecture violations before any code is written
-- **NEVER** leave discovered bugs untracked — add them as tasks via ` + "`create_plan()`" + ` immediately
+- **Prefer** Synapses tools over Grep/Glob for code exploration — they return callers, callees, and architecture rules that raw file scanning misses
+- **Always** run ` + "`validate_plan()`" + ` before multi-file changes — it catches architecture violations before any code is written
+- **Always** track discovered bugs as tasks via ` + "`create_plan()`" + ` immediately
 
 ### Memory Tiers
 
@@ -1824,7 +1831,6 @@ func writeProjectCLAUDE(repoRoot string) error {
 // writeClaudeSettings writes (or updates) .claude/settings.json to add hooks
 // that guide LLMs to use Synapses tools:
 //   - SessionStart: cats the context file (auto-injected real data, no tool call needed)
-//   - PreToolUse on Glob|Grep: blocks with exit 2 — forces use of Synapses tools
 //   - PostToolUse on Write|Edit: nudges agent to call verify_implementation
 func writeClaudeSettings(repoRoot string) error {
 	dir := filepath.Join(repoRoot, ".claude")
@@ -1849,6 +1855,13 @@ func writeClaudeSettings(repoRoot string) error {
 		raw["hooks"] = hooks
 	}
 
+	// ── Clean up stale hooks from previous versions ──────────────────────
+	// The Glob|Grep hard block and low-value PostToolUse confirmations were
+	// removed — clean them from already-connected projects on re-connect.
+	removeHookEntry(hooks, "PreToolUse", "Glob|Grep")
+	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__validate_plan")
+	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__create_plan")
+
 	// ── SessionStart: cat the daemon-written context file instead of a static echo.
 	// The context file contains project identity, pending tasks, and tool cheat sheet.
 	// If the daemon is not running the file won't exist and the fallback echo fires.
@@ -1870,33 +1883,11 @@ func writeClaudeSettings(repoRoot string) error {
 		"command": sessionStartCmd,
 	})
 
-	// ── PreToolUse: BLOCK Glob|Grep with exit 2 (not just advisory).
-	// exit 2 causes Claude Code to reject the tool call and show the message.
-	upsertHookEntry(hooks, "PreToolUse", "Glob|Grep", map[string]interface{}{
-		"type": "command",
-		"command": "echo '[Synapses] BLOCKED — this project is indexed. Use Synapses tools instead: " +
-			"find_entity(query) to locate a symbol, get_context(entity) to understand it, " +
-			"search(query, mode=semantic) to find by concept, get_impact(symbol) to find dependents. " +
-			"Grep/Glob are only for WRITING to a specific file you have already identified.' && exit 2",
-	})
-
 	// ── PostToolUse: nudge verify_implementation after any file write/edit.
 	upsertHookEntry(hooks, "PostToolUse", "Write|Edit", map[string]interface{}{
 		"type": "command",
 		"command": "echo '[Synapses] Files written. Now call verify_implementation(files_written=[\"<path>\"]) " +
 			"to check your changes against architecture rules before continuing.'",
-	})
-
-	// ── PostToolUse: confirm after validate_plan so agent knows it is safe to edit.
-	upsertHookEntry(hooks, "PostToolUse", "mcp__synapses__validate_plan", map[string]interface{}{
-		"type":    "command",
-		"command": "echo '[Synapses] Plan validated. Proceed with edits.'",
-	})
-
-	// ── PostToolUse: after create_plan remind agent to claim work before editing.
-	upsertHookEntry(hooks, "PostToolUse", "mcp__synapses__create_plan", map[string]interface{}{
-		"type":    "command",
-		"command": "echo '[Synapses] Plan created. Call claim_work(agent_id=\"...\", scope=\"pkg/...\") before starting edits to prevent conflicts.'",
 	})
 
 	// ── Pre-allow all Synapses MCP tools so users are never prompted ─────
@@ -1924,6 +1915,23 @@ func writeClaudeSettings(repoRoot string) error {
 		return err
 	}
 	return os.WriteFile(settingsPath, append(out, '\n'), 0o644)
+}
+
+// removeHookEntry removes a hook entry from a given event type list by matcher.
+// Used to clean up stale hooks from previously-connected projects on re-connect.
+func removeHookEntry(hooks map[string]interface{}, eventType, matcher string) {
+	list, _ := hooks[eventType].([]interface{})
+	for i, existing := range list {
+		if m, ok := existing.(map[string]interface{}); ok && m["matcher"] == matcher {
+			list = append(list[:i], list[i+1:]...)
+			break
+		}
+	}
+	if len(list) == 0 {
+		delete(hooks, eventType)
+	} else {
+		hooks[eventType] = list
+	}
 }
 
 // upsertHookEntry adds or replaces a hook entry in a given event type list,

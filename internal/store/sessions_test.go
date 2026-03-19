@@ -10,10 +10,10 @@ import (
 
 // createTestSession is a test-only convenience that calls GetOrResumeSession
 // with a unique mcp_session_id so each call produces a fresh independent session row.
-// This keeps tests isolated without exposing a footgun in the production API.
+// Hibernate resume is disabled (-1) to keep tests isolated.
 func createTestSession(t *testing.T, st *Store, agentID, projectID, intent string) string {
 	t.Helper()
-	id, _, err := st.GetOrResumeSession(agentID, projectID, newID(), intent, 0)
+	id, _, _, err := st.GetOrResumeSession(agentID, projectID, newID(), intent, 0, -1)
 	if err != nil {
 		t.Fatalf("createTestSession(%s, %s): %v", agentID, projectID, err)
 	}
@@ -42,7 +42,7 @@ func mustGetFirstTask(t *testing.T, st *Store, planID string) string {
 
 func TestGetOrResumeSession_CreatesNewSession(t *testing.T) {
 	st := openTestStore(t)
-	id, resumed, err := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "fix bug", 300)
+	id, resumed, hibCtx, err := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "fix bug", 300, -1)
 	if err != nil {
 		t.Fatalf("GetOrResumeSession: %v", err)
 	}
@@ -52,11 +52,14 @@ func TestGetOrResumeSession_CreatesNewSession(t *testing.T) {
 	if resumed {
 		t.Error("expected resumed=false for first call")
 	}
+	if hibCtx != nil {
+		t.Error("expected nil hibernateCtx for first call")
+	}
 }
 
 func TestGetOrResumeSession_EmptyIntent(t *testing.T) {
 	st := openTestStore(t)
-	id, _, err := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "", 300)
+	id, _, _, err := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "", 300, -1)
 	if err != nil {
 		t.Fatalf("GetOrResumeSession with empty intent: %v", err)
 	}
@@ -67,9 +70,9 @@ func TestGetOrResumeSession_EmptyIntent(t *testing.T) {
 
 func TestGetOrResumeSession_ResumesWithinWindow(t *testing.T) {
 	st := openTestStore(t)
-	id1, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 300)
+	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 300, -1)
 
-	id2, resumed, err := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 300)
+	id2, resumed, hibCtx, err := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 300, -1)
 	if err != nil {
 		t.Fatalf("second GetOrResumeSession: %v", err)
 	}
@@ -79,17 +82,20 @@ func TestGetOrResumeSession_ResumesWithinWindow(t *testing.T) {
 	if id2 != id1 {
 		t.Errorf("expected same session ID on resume: got %q want %q", id2, id1)
 	}
+	if hibCtx != nil {
+		t.Error("expected nil hibernateCtx on same-connection resume")
+	}
 }
 
 func TestGetOrResumeSession_NewSessionAfterWindow(t *testing.T) {
 	st := openTestStore(t)
-	id1, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0)
+	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0, -1)
 
 	// Manually expire the session by setting last_seen_at outside the default window.
 	past := time.Now().UTC().Unix() - 400
 	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
 
-	id2, resumed, err := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0)
+	id2, resumed, _, err := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0, -1)
 	if err != nil {
 		t.Fatalf("GetOrResumeSession after window: %v", err)
 	}
@@ -104,8 +110,8 @@ func TestGetOrResumeSession_NewSessionAfterWindow(t *testing.T) {
 func TestGetOrResumeSession_DifferentConnectionsNeverCollide(t *testing.T) {
 	st := openTestStore(t)
 	// Two simultaneous connections with same agentID — must be independent sessions.
-	idA, resumedA, _ := st.GetOrResumeSession("claude-code", "proj-1", "mcp-conn-A", "work", 300)
-	idB, resumedB, _ := st.GetOrResumeSession("claude-code", "proj-1", "mcp-conn-B", "work", 300)
+	idA, resumedA, _, _ := st.GetOrResumeSession("claude-code", "proj-1", "mcp-conn-A", "work", 300, -1)
+	idB, resumedB, _, _ := st.GetOrResumeSession("claude-code", "proj-1", "mcp-conn-B", "work", 300, -1)
 
 	if idA == idB {
 		t.Errorf("different MCP connections must get different session IDs, both got %q", idA)
@@ -117,11 +123,11 @@ func TestGetOrResumeSession_DifferentConnectionsNeverCollide(t *testing.T) {
 
 func TestGetOrResumeSession_SupersedesOwnPriorSession(t *testing.T) {
 	st := openTestStore(t)
-	id1, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0)
+	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0, -1)
 	past := time.Now().UTC().Unix() - 400
 	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
 
-	id2, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0)
+	id2, _, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0, -1)
 
 	var endReason string
 	var endedAt *int64
@@ -140,14 +146,14 @@ func TestGetOrResumeSession_SupersedesOwnPriorSession(t *testing.T) {
 
 func TestGetOrResumeSession_DoesNotSupersedeConcurrentConnection(t *testing.T) {
 	st := openTestStore(t)
-	idA, _, _ := st.GetOrResumeSession("claude-code", "proj-1", "mcp-conn-A", "work", 300)
+	idA, _, _, _ := st.GetOrResumeSession("claude-code", "proj-1", "mcp-conn-A", "work", 300, -1)
 
 	// Expire Window A's session so it's outside the reconnect window.
 	past := time.Now().UTC().Unix() - 400
 	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, idA) //nolint:errcheck
 
-	// Window B starts fresh — must NOT supersede Window A's session.
-	st.GetOrResumeSession("claude-code", "proj-1", "mcp-conn-B", "work", 300) //nolint:errcheck
+	// Window B starts fresh (hibernate disabled) — must NOT supersede Window A's session.
+	st.GetOrResumeSession("claude-code", "proj-1", "mcp-conn-B", "work", 300, -1) //nolint:errcheck
 
 	var endedAt *int64
 	st.db.QueryRow(`SELECT ended_at FROM sessions WHERE id = ?`, idA).Scan(&endedAt) //nolint:errcheck
@@ -168,7 +174,7 @@ func TestGetOrResumeSession_ConcurrentCallsSameMCPSession(t *testing.T) {
 		i := i
 		go func() {
 			defer wg.Done()
-			id, _, _ := st.GetOrResumeSession("agent-c", "proj-c", "mcp-conn-c", "work", 300)
+			id, _, _, _ := st.GetOrResumeSession("agent-c", "proj-c", "mcp-conn-c", "work", 300, -1)
 			ids[i] = id
 		}()
 	}
@@ -188,6 +194,232 @@ func TestGetOrResumeSession_ConcurrentCallsSameMCPSession(t *testing.T) {
 	st.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE mcp_session_id = 'mcp-conn-c' AND ended_at IS NULL`).Scan(&count) //nolint:errcheck
 	if count != 1 {
 		t.Errorf("expected exactly 1 live session for mcp-conn-c, got %d", count)
+	}
+}
+
+// ── Cross-connection hibernate resume (Phase 2) ───────────────────────────────
+
+func TestGetOrResumeSession_HibernateResume_SameAgentNewConnection(t *testing.T) {
+	st := openTestStore(t)
+
+	// Session started on conn-A with intent.
+	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-h", "mcp-conn-A", "implement feature X", 300, 14400)
+	if id1 == "" {
+		t.Fatal("expected non-empty session ID for conn-A")
+	}
+
+	// Backdate last_seen_at to simulate a 1-hour break (past reconnect window, within hibernate window).
+	past := time.Now().UTC().Unix() - 3600
+	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+
+	// Same agent, same project, NEW connection (editor restarted after break).
+	id2, resumed, hibCtx, err := st.GetOrResumeSession("agent-1", "proj-h", "mcp-conn-B", "", 300, 14400)
+	if err != nil {
+		t.Fatalf("hibernate resume GetOrResumeSession: %v", err)
+	}
+	if resumed {
+		t.Error("expected resumed=false (not a same-connection resume)")
+	}
+	if hibCtx == nil {
+		t.Fatal("expected non-nil hibernateCtx for cross-connection resume")
+	}
+	if id2 != id1 {
+		t.Errorf("expected same session ID on hibernate resume: got %q want %q", id2, id1)
+	}
+	if hibCtx.PriorIntent != "implement feature X" {
+		t.Errorf("prior intent: got %q want %q", hibCtx.PriorIntent, "implement feature X")
+	}
+	if hibCtx.GapSeconds < 3590 {
+		t.Errorf("gap should be ~3600s, got %d", hibCtx.GapSeconds)
+	}
+	if hibCtx.ParentID != id1 {
+		t.Errorf("ParentID: got %q want %q", hibCtx.ParentID, id1)
+	}
+}
+
+func TestGetOrResumeSession_HibernateResume_PreservesIntentWhenNewIntentEmpty(t *testing.T) {
+	st := openTestStore(t)
+
+	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-h2", "mcp-conn-A", "fix auth bug", 300, 14400)
+	past := time.Now().UTC().Unix() - 3600
+	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+
+	// Resume with no new intent — prior intent must be preserved.
+	_, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-h2", "mcp-conn-B", "", 300, 14400)
+	if hibCtx == nil {
+		t.Fatal("expected hibernate resume")
+	}
+
+	var storedIntent string
+	st.db.QueryRow(`SELECT intent FROM sessions WHERE id = ?`, id1).Scan(&storedIntent) //nolint:errcheck
+	if storedIntent != "fix auth bug" {
+		t.Errorf("intent should be preserved when new intent is empty; got %q", storedIntent)
+	}
+}
+
+func TestGetOrResumeSession_HibernateResume_NewIntentOverridesPrior(t *testing.T) {
+	st := openTestStore(t)
+
+	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-h3", "mcp-conn-A", "old intent", 300, 14400)
+	past := time.Now().UTC().Unix() - 3600
+	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+
+	_, _, _, _ = st.GetOrResumeSession("agent-1", "proj-h3", "mcp-conn-B", "new intent", 300, 14400)
+
+	var storedIntent string
+	st.db.QueryRow(`SELECT intent FROM sessions WHERE id = ?`, id1).Scan(&storedIntent) //nolint:errcheck
+	if storedIntent != "new intent" {
+		t.Errorf("new intent should override prior; got %q", storedIntent)
+	}
+}
+
+func TestGetOrResumeSession_HibernateResume_DisabledWhenWindowNegative(t *testing.T) {
+	st := openTestStore(t)
+
+	// Hibernate disabled via -1.
+	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-hd", "mcp-conn-A", "work", 300, -1)
+	past := time.Now().UTC().Unix() - 3600
+	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+
+	id2, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-hd", "mcp-conn-B", "work", 300, -1)
+	if hibCtx != nil {
+		t.Error("expected no hibernate resume when window is -1")
+	}
+	if id2 == id1 {
+		t.Error("expected fresh session when hibernate is disabled")
+	}
+}
+
+func TestGetOrResumeSession_HibernateResume_ExpiredSessionNotResumed(t *testing.T) {
+	st := openTestStore(t)
+
+	// Session last seen 5 hours ago — outside the 4-hour hibernate window.
+	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-he", "mcp-conn-A", "work", 300, 14400)
+	wayPast := time.Now().UTC().Unix() - 18001 // >5 hours ago
+	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, wayPast, id1) //nolint:errcheck
+
+	id2, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-he", "mcp-conn-B", "work", 300, 14400)
+	if hibCtx != nil {
+		t.Error("expected no hibernate resume for session outside hibernate window")
+	}
+	if id2 == id1 {
+		t.Error("expected fresh session for expired dormant session")
+	}
+}
+
+func TestGetOrResumeSession_HibernateResume_DoesNotStealLiveConcurrentSession(t *testing.T) {
+	st := openTestStore(t)
+
+	// conn-A is a live concurrent session (seen within reconnect window).
+	idA, _, _, _ := st.GetOrResumeSession("claude-code", "proj-hc", "mcp-conn-A", "work", 300, 14400)
+	if idA == "" {
+		t.Fatal("expected non-empty session for conn-A")
+	}
+	// conn-A is LIVE (last_seen_at = now, within reconnect window).
+	// conn-B must NOT steal it.
+
+	idB, _, hibCtx, _ := st.GetOrResumeSession("claude-code", "proj-hc", "mcp-conn-B", "work", 300, 14400)
+	if hibCtx != nil {
+		t.Error("must not hibernate-resume a currently-live session from another connection")
+	}
+	if idB == idA {
+		t.Error("conn-B must get its own session, not steal conn-A's live session")
+	}
+}
+
+func TestGetOrResumeSession_HibernateResume_StateBecomesActive(t *testing.T) {
+	st := openTestStore(t)
+
+	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-hs", "mcp-conn-A", "work", 300, 14400)
+	past := time.Now().UTC().Unix() - 3600
+	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+
+	_, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-hs", "mcp-conn-B", "work", 300, 14400)
+	if hibCtx == nil {
+		t.Fatal("expected hibernate resume")
+	}
+
+	var state string
+	st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id1).Scan(&state) //nolint:errcheck
+	if state != "active" {
+		t.Errorf("state after hibernate resume: got %q want %q", state, "active")
+	}
+}
+
+func TestGetOrResumeSession_HibernateResume_MCPSessionIDUpdated(t *testing.T) {
+	st := openTestStore(t)
+
+	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-hm", "mcp-conn-A", "work", 300, 14400)
+	past := time.Now().UTC().Unix() - 3600
+	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+
+	_, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-hm", "mcp-conn-B", "work", 300, 14400)
+	if hibCtx == nil {
+		t.Fatal("expected hibernate resume")
+	}
+
+	var mcpSessID string
+	st.db.QueryRow(`SELECT mcp_session_id FROM sessions WHERE id = ?`, id1).Scan(&mcpSessID) //nolint:errcheck
+	if mcpSessID != "mcp-conn-B" {
+		t.Errorf("mcp_session_id after hibernate resume: got %q want %q", mcpSessID, "mcp-conn-B")
+	}
+}
+
+func TestGetOrResumeSession_HibernateResume_PicksMostRecentSession(t *testing.T) {
+	st := openTestStore(t)
+
+	// Two old sessions for the same agent+project — hibernate should resume the newest.
+	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-hpick", "mcp-conn-A", "old work", 300, 14400)
+	id2, _, _, _ := st.GetOrResumeSession("agent-1", "proj-hpick", "mcp-conn-B", "recent work", 300, 14400)
+
+	olderPast := time.Now().UTC().Unix() - 7200 // 2 hours ago
+	recentPast := time.Now().UTC().Unix() - 3600 // 1 hour ago
+	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, olderPast, id1) //nolint:errcheck
+	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, recentPast, id2) //nolint:errcheck
+
+	resumedID, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-hpick", "mcp-conn-C", "work", 300, 14400)
+	if hibCtx == nil {
+		t.Fatal("expected hibernate resume")
+	}
+	if resumedID != id2 {
+		t.Errorf("expected most recent session %q to be resumed, got %q", id2, resumedID)
+	}
+}
+
+// ── State column ──────────────────────────────────────────────────────────────
+
+func TestSession_StateIsActiveOnCreate(t *testing.T) {
+	st := openTestStore(t)
+	id := createTestSession(t, st, "agent-1", "proj-state", "")
+
+	var state string
+	st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&state) //nolint:errcheck
+	if state != "active" {
+		t.Errorf("new session state: got %q want %q", state, "active")
+	}
+}
+
+func TestSession_StateIsClosedAfterEndSession(t *testing.T) {
+	st := openTestStore(t)
+	id := createTestSession(t, st, "agent-1", "proj-state2", "")
+	_ = st.EndSession(id, "clean", "success", "done")
+
+	var state string
+	st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&state) //nolint:errcheck
+	if state != "closed" {
+		t.Errorf("ended session state: got %q want %q", state, "closed")
+	}
+}
+
+func TestSession_StateRemainsActiveAfterTouch(t *testing.T) {
+	st := openTestStore(t)
+	id := createTestSession(t, st, "agent-1", "proj-state3", "")
+	st.TouchSession(id)
+
+	var state string
+	st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&state) //nolint:errcheck
+	if state != "active" {
+		t.Errorf("touched session state: got %q want %q", state, "active")
 	}
 }
 
@@ -804,5 +1036,158 @@ func TestGetLastBranch_IsolatedByAgent(t *testing.T) {
 	}
 	if got := st.GetLastBranch("agent-B"); got != "feature/b" {
 		t.Errorf("agent-B branch: got %q want %q", got, "feature/b")
+	}
+}
+
+func TestSessionLifecycle_HibernateResumeFullFlow(t *testing.T) {
+	st := openTestStore(t)
+
+	// 1. Agent starts a session, does work, then goes idle.
+	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-flow", "mcp-conn-1", "refactor auth module", 300, 14400)
+	for i := 0; i < 10; i++ {
+		st.TouchSession(id1)
+	}
+
+	// 2. Agent goes away for 2 hours (past reconnect window, within hibernate window).
+	past := time.Now().UTC().Unix() - 7200
+	st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, past, id1) //nolint:errcheck
+
+	// 3. Agent comes back on a new connection (editor restarted).
+	id2, resumed, hibCtx, err := st.GetOrResumeSession("agent-1", "proj-flow", "mcp-conn-2", "", 300, 14400)
+	if err != nil {
+		t.Fatalf("hibernate resume: %v", err)
+	}
+	if resumed {
+		t.Error("expected resumed=false for cross-connection resume")
+	}
+	if hibCtx == nil {
+		t.Fatal("expected non-nil hibernateCtx")
+	}
+	if id2 != id1 {
+		t.Errorf("expected same session ID, got %q want %q", id2, id1)
+	}
+	if hibCtx.PriorIntent != "refactor auth module" {
+		t.Errorf("prior intent: got %q", hibCtx.PriorIntent)
+	}
+	if hibCtx.GapSeconds < 7190 {
+		t.Errorf("gap should be ~7200s, got %d", hibCtx.GapSeconds)
+	}
+
+	// 4. Agent continues work — tool calls accumulate on same session.
+	for i := 0; i < 5; i++ {
+		st.TouchSession(id2)
+	}
+
+	// 5. Agent cleanly ends the session.
+	if err := st.EndSession(id2, "clean", "success", "auth module refactored"); err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+
+	// 6. Session must not appear stale.
+	stale, _ := st.GetStaleSessions("proj-flow", "other", time.Minute)
+	for _, s := range stale {
+		if s.SessionID == id1 {
+			t.Errorf("ended session must not appear as stale")
+		}
+	}
+}
+
+// ── parent_session_id (Bug Fix 3) ─────────────────────────────────────────────
+
+func TestGetOrResumeSession_FreshSession_SetsParentSessionID(t *testing.T) {
+	st := openTestStore(t)
+
+	// First session — created and cleanly closed.
+	id1, _, _, err := st.GetOrResumeSession("agent-par", "proj-par", "conn-1", "initial work", 300, -1)
+	if err != nil {
+		t.Fatalf("first session: %v", err)
+	}
+	if err := st.EndSession(id1, "clean", "success", "done"); err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+
+	// Second session — fresh (hibernate disabled, different mcp_session_id).
+	id2, _, _, err := st.GetOrResumeSession("agent-par", "proj-par", "conn-2", "follow-up", 300, -1)
+	if err != nil {
+		t.Fatalf("second session: %v", err)
+	}
+
+	// parent_session_id on the new row must point to id1.
+	var parent string
+	if err := st.db.QueryRow(`SELECT parent_session_id FROM sessions WHERE id = ?`, id2).Scan(&parent); err != nil {
+		t.Fatalf("querying parent_session_id: %v", err)
+	}
+	if parent != id1 {
+		t.Errorf("parent_session_id: got %q want %q", parent, id1)
+	}
+}
+
+func TestGetOrResumeSession_FreshSession_ParentEmptyWhenNoPrior(t *testing.T) {
+	st := openTestStore(t)
+
+	// Very first session for this agent — no prior closed session exists.
+	id, _, _, err := st.GetOrResumeSession("agent-noprior", "proj-noprior", "conn-1", "first ever", 300, -1)
+	if err != nil {
+		t.Fatalf("GetOrResumeSession: %v", err)
+	}
+
+	var parent string
+	if err := st.db.QueryRow(`SELECT parent_session_id FROM sessions WHERE id = ?`, id).Scan(&parent); err != nil {
+		t.Fatalf("querying parent_session_id: %v", err)
+	}
+	if parent != "" {
+		t.Errorf("parent_session_id: got %q want empty string for first-ever session", parent)
+	}
+}
+
+// ── lazy state=hibernated in GetStaleSessions (Bug Fix 4) ────────────────────
+
+func TestGetStaleSessions_LazilyMarksSessionsHibernated(t *testing.T) {
+	st := openTestStore(t)
+
+	// Create a session then back-date last_seen_at to make it stale.
+	id := createTestSession(t, st, "agent-hib", "proj-hib", "idle work")
+	_, _ = st.db.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Hour).Unix(), id)
+
+	// State should still be 'active' before GetStaleSessions runs.
+	var stateBefore string
+	_ = st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&stateBefore)
+	if stateBefore != "active" {
+		t.Fatalf("expected state=active before GetStaleSessions, got %q", stateBefore)
+	}
+
+	// GetStaleSessions must mark the session as 'hibernated' as a side effect.
+	stale, err := st.GetStaleSessions("proj-hib", "other-session", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("GetStaleSessions: %v", err)
+	}
+	if len(stale) == 0 {
+		t.Fatal("expected stale session in results")
+	}
+
+	var stateAfter string
+	_ = st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&stateAfter)
+	if stateAfter != "hibernated" {
+		t.Errorf("state after GetStaleSessions: got %q want %q", stateAfter, "hibernated")
+	}
+}
+
+func TestGetStaleSessions_DoesNotHibernateActiveSessions(t *testing.T) {
+	st := openTestStore(t)
+
+	// Live session — last_seen_at is recent.
+	id := createTestSession(t, st, "agent-live", "proj-live", "current work")
+
+	_, err := st.GetStaleSessions("proj-live", "other", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("GetStaleSessions: %v", err)
+	}
+
+	// Live session must remain 'active'.
+	var state string
+	_ = st.db.QueryRow(`SELECT state FROM sessions WHERE id = ?`, id).Scan(&state)
+	if state != "active" {
+		t.Errorf("live session state: got %q want %q", state, "active")
 	}
 }
