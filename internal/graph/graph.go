@@ -172,17 +172,16 @@ func (g *Graph) FindByName(name string) []*Node {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	// Try fast path: use secondary index if ready
-	if g.index != nil && g.index.Ready() {
-		seqs := g.index.FindByNameSeqs(name)
+	// Fast path: index is built and immutable — no extra locking needed.
+	if idx := g.index; idx != nil && idx.Ready() {
+		seqs := idx.nameSeqs(name)
 		if len(seqs) == 0 {
 			return []*Node{}
 		}
 		results := make([]*Node, 0, len(seqs))
 		for _, seq := range seqs {
-			if int(seq) < len(g.index.SeqIDs) {
-				nodeID := g.index.SeqIDs[seq]
-				if n := g.nodes[nodeID]; n != nil {
+			if int(seq) < len(idx.SeqIDs) {
+				if n := g.nodes[idx.SeqIDs[seq]]; n != nil {
 					results = append(results, n)
 				}
 			}
@@ -190,7 +189,7 @@ func (g *Graph) FindByName(name string) []*Node {
 		return results
 	}
 
-	// Fallback: linear scan (during parsing before index is ready)
+	// Fallback: linear scan (during parsing before index is ready).
 	lower := strings.ToLower(name)
 	var results []*Node
 	for _, n := range g.nodes {
@@ -199,7 +198,6 @@ func (g *Graph) FindByName(name string) []*Node {
 			results = append(results, n)
 			continue
 		}
-		// Also match qualified names like "Store.Close" when query is "Close".
 		if dotPos := strings.LastIndex(nodeLower, "."); dotPos >= 0 && nodeLower[dotPos+1:] == lower {
 			results = append(results, n)
 		}
@@ -233,17 +231,16 @@ func (g *Graph) FindByFile(filePath string) []*Node {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	// Try fast path: use secondary index if ready
-	if g.index != nil && g.index.Ready() {
-		seqs := g.index.FindByFileSeqs(filePath)
+	// Fast path: index is built and immutable — no extra locking needed.
+	if idx := g.index; idx != nil && idx.Ready() {
+		seqs := idx.fileSeqs(filePath)
 		if len(seqs) == 0 {
 			return []*Node{}
 		}
 		results := make([]*Node, 0, len(seqs))
 		for _, seq := range seqs {
-			if int(seq) < len(g.index.SeqIDs) {
-				nodeID := g.index.SeqIDs[seq]
-				if n := g.nodes[nodeID]; n != nil {
+			if int(seq) < len(idx.SeqIDs) {
+				if n := g.nodes[idx.SeqIDs[seq]]; n != nil {
 					results = append(results, n)
 				}
 			}
@@ -251,7 +248,7 @@ func (g *Graph) FindByFile(filePath string) []*Node {
 		return results
 	}
 
-	// Fallback: linear scan with suffix matching (during parsing before index is ready)
+	// Fallback: linear scan with suffix matching (during parsing before index is ready).
 	var results []*Node
 	for _, n := range g.nodes {
 		if n.File == filePath || strings.HasSuffix(n.File, "/"+filePath) {

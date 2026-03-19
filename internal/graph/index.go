@@ -1,7 +1,6 @@
 package graph
 
 import (
-	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,12 +56,19 @@ type GraphIndex struct {
 	// IDToSeq maps NodeID strings → seq for O(1) lookup in the BFS hot path.
 	IDToSeq map[NodeID]uint32
 
-	// nameIndex maps lowercase name (including qualified names) → list of seq IDs.
-	// Populated during buildIndex. Enables O(1) FindByName lookups.
+	// nameIndex maps lowercase name → list of seq IDs for O(1) FindByName.
+	// Keys include both the full lowercase name and, for qualified names like
+	// "Store.Close", the unqualified suffix ("close"). This means a lookup for
+	// "close" returns nodes named "close" AND nodes named "Store.Close" — matching
+	// the original linear-scan semantics. Conversely, looking up "store.close"
+	// returns only the exact match, not via suffix (also matching linear-scan).
 	nameIndex map[string][]uint32
 
-	// fileIndex maps file path suffixes → list of seq IDs.
-	// Populated during buildIndex. Enables O(1) FindByFile lookups.
+	// fileIndex maps file path → list of seq IDs for O(1) FindByFile.
+	// Only two keys per node: the full file path and the basename (e.g. "graph.go").
+	// For intermediate suffix queries like "internal/graph/graph.go", the lookup
+	// method falls back to a scan over the ~N_files unique file keys (typically
+	// 100–500, far fewer than the ~N_nodes that the old linear scan touched).
 	fileIndex map[string][]uint32
 
 	// CSR adjacency lists for outgoing edges.
@@ -195,23 +201,35 @@ func (idx *GraphIndex) TombstoneRatio() float64 {
 	return float64(atomic.LoadInt32(&idx.TombstoneCount)) / float64(total)
 }
 
-// FindByNameSeqs returns the seq IDs for all nodes matching the given name
-// (case-insensitive, including qualified name suffixes). Returns nil if no matches.
-// This is the O(1) hot-path lookup used by graph.FindByName when the index is ready.
-func (idx *GraphIndex) FindByNameSeqs(name string) []uint32 {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	nameLower := strings.ToLower(name)
-	return idx.nameIndex[nameLower]
+// nameSeqs returns seq IDs matching name (case-insensitive, including qualified
+// suffixes). The caller MUST already hold either g.mu.RLock or idx.mu.RLock —
+// this method does no locking itself to avoid redundant nested locks.
+func (idx *GraphIndex) nameSeqs(name string) []uint32 {
+	return idx.nameIndex[strings.ToLower(name)]
 }
 
-// FindByFileSeqs returns the seq IDs for all nodes matching the given file path.
-// Supports suffix matching: "graph.go" matches absolute paths ending in "graph.go".
-// This is the O(1) hot-path lookup used by graph.FindByFile when the index is ready.
-func (idx *GraphIndex) FindByFileSeqs(filePath string) []uint32 {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	return idx.fileIndex[filePath]
+// fileSeqs returns seq IDs matching filePath. Tries an exact map hit first
+// (covers full-path and basename lookups). On miss, falls back to a suffix scan
+// over unique file-path keys — O(unique_files), typically 100–500 entries, far
+// cheaper than the O(N_nodes) scan it replaces.
+//
+// The caller MUST already hold either g.mu.RLock or idx.mu.RLock.
+func (idx *GraphIndex) fileSeqs(filePath string) []uint32 {
+	// Fast path: exact hit (covers full absolute path and basename).
+	if seqs := idx.fileIndex[filePath]; len(seqs) > 0 {
+		return seqs
+	}
+	// Slow path: caller passed a relative suffix like "internal/graph/graph.go".
+	// Scan unique file keys for a suffix match. Each key is a unique file path
+	// (at most one entry per distinct file), so this is O(unique_files).
+	suffix := "/" + filePath
+	var merged []uint32
+	for key, seqs := range idx.fileIndex {
+		if strings.HasSuffix(key, suffix) {
+			merged = append(merged, seqs...)
+		}
+	}
+	return merged
 }
 
 // ---------------------------------------------------------------------------
@@ -272,7 +290,8 @@ func buildIndex(g *Graph, pool *StringPool) *GraphIndex {
 	idx := newGraphIndex(pool)
 	n := len(nodeSnaps)
 
-	// Assign sequential IDs (1-based; 0 is the sentinel).
+	// Assign sequential IDs (1-based; 0 is the sentinel) and build secondary
+	// indexes for FindByName and FindByFile in the same pass.
 	for i, ns := range nodeSnaps {
 		seq := uint32(i + 1)
 		idx.IDToSeq[ns.id] = seq
@@ -284,42 +303,28 @@ func buildIndex(g *Graph, pool *StringPool) *GraphIndex {
 		idx.Lines = append(idx.Lines, int32(ns.line))
 		idx.Exported = append(idx.Exported, ns.exported)
 		idx.Tombstone = append(idx.Tombstone, false)
-	}
 
-	// --- Phase 2b: build secondary indexes for FindByName and FindByFile ---
-	for i, ns := range nodeSnaps {
-		seq := uint32(i + 1)
-
-		// nameIndex: map lowercase name → seq IDs
-		// Also map qualified name suffixes (e.g., "Store.Close" also matches "Close")
+		// --- nameIndex: lowercase full name + unqualified suffix ---
 		nameLower := strings.ToLower(ns.name)
 		idx.nameIndex[nameLower] = append(idx.nameIndex[nameLower], seq)
-
-		// For qualified names, also add the suffix after the last dot
 		if dotPos := strings.LastIndex(ns.name, "."); dotPos >= 0 {
-			suffix := ns.name[dotPos+1:]
-			suffixLower := strings.ToLower(suffix)
-			idx.nameIndex[suffixLower] = append(idx.nameIndex[suffixLower], seq)
+			suffixLower := strings.ToLower(ns.name[dotPos+1:])
+			// Avoid duplicate entry when the suffix equals the full lowercase name
+			// (can't happen — dotPos >= 0 means there is a prefix — but guard anyway).
+			if suffixLower != nameLower {
+				idx.nameIndex[suffixLower] = append(idx.nameIndex[suffixLower], seq)
+			}
 		}
 
-		// fileIndex: map file path → seq IDs
-		// Store both absolute path and all possible suffixes for flexible matching
-		file := ns.file
-		idx.fileIndex[file] = append(idx.fileIndex[file], seq)
-
-		// Also add basename (e.g., "graph.go")
-		baseName := path.Base(file)
-		if baseName != file {
-			idx.fileIndex[baseName] = append(idx.fileIndex[baseName], seq)
-		}
-
-		// Also add all parent-relative suffixes for path flexibility
-		// e.g., for "/Users/you/synapses/internal/graph/graph.go", also add:
-		// "internal/graph/graph.go", "graph/graph.go"
-		parts := strings.Split(file, "/")
-		for j := 1; j < len(parts); j++ {
-			suffix := strings.Join(parts[j:], "/")
-			idx.fileIndex[suffix] = append(idx.fileIndex[suffix], seq)
+		// --- fileIndex: full path + basename only (2 entries per node max) ---
+		// Intermediate suffix queries ("internal/graph/graph.go") are handled at
+		// lookup time by fileSeqs via a scan over unique file keys.
+		idx.fileIndex[ns.file] = append(idx.fileIndex[ns.file], seq)
+		if slashPos := strings.LastIndex(ns.file, "/"); slashPos >= 0 {
+			base := ns.file[slashPos+1:]
+			if base != ns.file { // guard: file is not already a bare name
+				idx.fileIndex[base] = append(idx.fileIndex[base], seq)
+			}
 		}
 	}
 
