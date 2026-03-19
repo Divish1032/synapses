@@ -353,7 +353,7 @@ func (s *Store) ExpireMemories() (int64, error) {
 	}
 	defer tx.Rollback()
 
-	// Delete anchors and surfacing records for memories about to expire.
+	// Delete anchors, surfacing records, and embeddings for memories about to expire.
 	// Correlated EXISTS is O(n·log n) with the PK index on memories,
 	// vs NOT IN which materializes a full result set.
 	_, _ = tx.Exec(`DELETE FROM memory_anchors WHERE EXISTS (
@@ -361,6 +361,9 @@ func (s *Store) ExpireMemories() (int64, error) {
 	)`, now)
 	_, _ = tx.Exec(`DELETE FROM memory_surfaced WHERE EXISTS (
 		SELECT 1 FROM memories WHERE memories.id = memory_surfaced.memory_id AND memories.expires_at <= ?
+	)`, now)
+	_, _ = tx.Exec(`DELETE FROM memory_embeddings WHERE EXISTS (
+		SELECT 1 FROM memories WHERE memories.id = memory_embeddings.memory_id AND memories.expires_at <= ?
 	)`, now)
 	result, err := tx.Exec(`DELETE FROM memories WHERE expires_at <= ?`, now)
 	if err != nil {

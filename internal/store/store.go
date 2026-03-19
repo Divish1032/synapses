@@ -600,6 +600,16 @@ func Open(path string) (*Store, error) {
 		`CREATE INDEX IF NOT EXISTS idx_cd_session ON context_deliveries(session_id) WHERE session_id != ''`,
 		`CREATE INDEX IF NOT EXISTS idx_cd_entity  ON context_deliveries(entity, agent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_cd_created ON context_deliveries(created_at)`,
+		// Sprint 6.8: vector storage for memory embeddings (quad-retrieval foundation).
+		`CREATE TABLE IF NOT EXISTS memory_embeddings (
+			memory_id    TEXT PRIMARY KEY,
+			model        TEXT NOT NULL DEFAULT '',
+			embedding    BLOB NOT NULL,
+			content_hash TEXT NOT NULL DEFAULT '',
+			stale        INTEGER NOT NULL DEFAULT 0,
+			embedded_at  INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memembed_stale ON memory_embeddings(stale) WHERE stale = 1`,
 	} {
 		if _, err := knowledgeDB.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
