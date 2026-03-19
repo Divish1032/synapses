@@ -359,8 +359,10 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 			s.repoScale = graph.ScaleLarge // not yet indexed — register all tools
 		case nc < 100:
 			s.repoScale = graph.ScaleMicro
+		case nc < 500:
+			s.repoScale = graph.ScaleSmall
 		case nc < 2000:
-			s.repoScale = graph.ScaleSmall // small + medium both get standard tier
+			s.repoScale = graph.ScaleMedium
 		default:
 			s.repoScale = graph.ScaleLarge
 		}
@@ -891,7 +893,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Optional file path suffix to pin the lookup to a specific file (e.g. 'cmd/synapses/main.go'). Use when entity names are ambiguous across multiple files."),
 			),
 			mcp.WithString("format",
-				mcp.Description("Output format: 'json' (default, full JSON blob ~2000-3800 tokens) or 'compact' (natural-language briefing ~400-600 tokens). Use 'compact' to reduce token usage when brain summaries are available."),
+				mcp.Description("Output format: 'compact' (default, natural-language briefing ~400-600 tokens) or 'json' (full JSON blob ~2000-3800 tokens). Use 'json' when you need structured machine-readable data."),
 			),
 			mcp.WithString("detail_level",
 				mcp.Description("Only used with format='compact'. Controls verbosity: 'summary' (~50 tokens, root entity header + warnings only), 'neighbors' (~200 tokens, adds Calls/Called-by name lists), 'full' (default, ~400-600 tokens, adds callee detail blocks and insight)."),

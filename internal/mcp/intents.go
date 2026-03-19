@@ -406,7 +406,10 @@ func (s *Server) assembleModifyContext(
 	// Pre-edit checklist — always relevant, write directly.
 	if budgetLeft(b, budget) > 80 {
 		b.WriteString("\n## Pre-Edit Checklist\n")
-		callerCount := impact.TotalAffected
+		callerCount := 0
+		if impact != nil {
+			callerCount = impact.TotalAffected
+		}
 		if callerCount == 0 {
 			callerCount = len(dc.Callers)
 		}
@@ -545,18 +548,22 @@ func (s *Server) assembleReviewContext(
 
 	// Blast radius — core content, always shown.
 	impact := s.aggregatedImpact(node, 3)
-	fmt.Fprintf(b, "\n## Blast Radius (%d total across %d files)\n",
-		impact.TotalAffected, len(impact.AffectedFiles))
-	for _, tier := range impact.Tiers {
-		names := make([]string, 0, len(tier.Nodes))
-		for _, ref := range tier.Nodes {
-			names = append(names, ref.Name)
+	if impact != nil {
+		fmt.Fprintf(b, "\n## Blast Radius (%d total across %d files)\n",
+			impact.TotalAffected, len(impact.AffectedFiles))
+		for _, tier := range impact.Tiers {
+			names := make([]string, 0, len(tier.Nodes))
+			for _, ref := range tier.Nodes {
+				names = append(names, ref.Name)
+			}
+			label := strings.ToUpper(tier.Label)
+			fmt.Fprintf(b, "%s (%d): %s\n", label, tier.TotalNodes, strings.Join(names, ", "))
 		}
-		label := strings.ToUpper(tier.Label)
-		fmt.Fprintf(b, "%s (%d): %s\n", label, tier.TotalNodes, strings.Join(names, ", "))
-	}
-	if len(impact.Tiers) == 0 && fanIn == 0 {
-		b.WriteString("No compile-time callers tracked.\n")
+		if len(impact.Tiers) == 0 && fanIn == 0 {
+			b.WriteString("No compile-time callers tracked.\n")
+		}
+	} else {
+		b.WriteString("\n## Blast Radius\nNo compile-time callers tracked (may be invoked via interface or dispatcher).\n")
 	}
 	_ = dc // used for pkt building above
 
@@ -779,13 +786,15 @@ func (s *Server) assemblePlanContext(
 		}
 	}
 
-	// Interface contracts.
+	// Interface contracts — carve once and reuse for both interface listing and ifaceCount.
 	cfg := s.config.CarveConfig()
 	cfg.MaxDepth = 1
 	applyIntentCarveConfig(&cfg, "plan")
-	if sg, sgErr := s.graph.CarveEgoGraph(node.ID, cfg); sgErr == nil {
+	planSG, _ := s.graph.CarveEgoGraph(node.ID, cfg)
+
+	if planSG != nil {
 		var interfaces []string
-		for _, cn := range sg.Nodes {
+		for _, cn := range planSG.Nodes {
 			if cn.Node.Type == graph.NodeInterface {
 				rfIface := strings.TrimPrefix(cn.Node.File, prefix)
 				interfaces = append(interfaces, fmt.Sprintf("%s (%s:%d)", cn.Node.Name, rfIface, cn.Node.Line))
@@ -811,8 +820,8 @@ func (s *Server) assemblePlanContext(
 		testMark = "1"
 	}
 	ifaceCount := 0
-	if sg, sgErr := s.graph.CarveEgoGraph(node.ID, cfg); sgErr == nil {
-		for _, cn := range sg.Nodes {
+	if planSG != nil {
+		for _, cn := range planSG.Nodes {
 			if cn.Node.Type == graph.NodeInterface {
 				ifaceCount++
 			}
