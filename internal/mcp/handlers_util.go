@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -16,21 +17,34 @@ import (
 // string args; tighter per-field limits apply to content stored in SQLite or
 // passed to the embedder.
 const (
-	maxArgLength         = 64 * 1024 // default cap for all string args
-	maxArgLengthDecision = 4 * 1024  // episodic memory / remember() decision field
-	maxArgLengthNote     = 8 * 1024  // annotation note field (annotate_node, web_annotate)
-	maxArgLengthPayload  = 16 * 1024 // message bus payload field
+	maxArgLength           = 64 * 1024 // default cap for all string args
+	maxArgLengthDecision   = 4 * 1024  // episodic memory / remember() decision field
+	maxArgLengthRationale  = 4 * 1024  // remember() rationale — concatenated with decision before embedding
+	maxArgLengthNote       = 8 * 1024  // annotation note field (annotate_node, web_annotate)
+	maxArgLengthPayload    = 16 * 1024 // message bus payload field
 )
 
 // stringArg extracts a string argument from a CallToolRequest by key.
 // Returns "" if the key is absent or not a string.
-// Silently truncates to maxArgLength as a default size guard.
+// Silently truncates to maxArgLength at a valid UTF-8 rune boundary.
 func stringArg(req mcp.CallToolRequest, key string) string {
 	v, _ := req.GetArguments()[key].(string)
-	if len(v) > maxArgLength {
-		v = v[:maxArgLength]
+	return truncateUTF8(v, maxArgLength)
+}
+
+// truncateUTF8 truncates s to at most maxBytes while preserving valid UTF-8.
+// It walks back from the cut point to avoid splitting a multi-byte character.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
 	}
-	return v
+	s = s[:maxBytes]
+	// Walk back at most 3 bytes (max UTF-8 continuation bytes in a 4-byte seq)
+	// to find the last complete rune boundary.
+	for !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // stringArgLimited extracts a string argument and returns an error if it
