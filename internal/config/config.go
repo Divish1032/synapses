@@ -591,6 +591,38 @@ func (c *Config) CheckViolationsForFile(g *graph.Graph, file string) []Violation
 	return violations
 }
 
+// CheckViolationsForEdges checks a specific set of edges (typically from a
+// carved subgraph) against all rules. getNode resolves NodeIDs to *Node for
+// pattern matching. This avoids the AllEdges() allocation of CheckViolations
+// when only a subset of edges needs checking.
+func (c *Config) CheckViolationsForEdges(edges []*graph.Edge, getNode func(graph.NodeID) *graph.Node) []Violation {
+	if len(c.Rules) == 0 || len(edges) == 0 {
+		return nil
+	}
+	var violations []Violation
+	for _, e := range edges {
+		fromNode := getNode(e.From)
+		toNode := getNode(e.To)
+		if fromNode == nil || toNode == nil {
+			continue
+		}
+		for _, rule := range c.Rules {
+			if matchesForbidden(rule.ForbiddenEdge, e, fromNode, toNode) {
+				violations = append(violations, Violation{
+					RuleID:       rule.ID,
+					Severity:     rule.Severity,
+					Description:  rule.Description,
+					FromNode:     e.From,
+					ToNode:       e.To,
+					EdgeType:     e.Type,
+					SuggestedFix: suggestFix(rule, e.Type, fromNode, toNode),
+				})
+			}
+		}
+	}
+	return violations
+}
+
 // matchFilePath returns true if filePath matches pattern.
 // It tries progressively shorter path suffixes so that path-component patterns
 // like "*/mcp/*" correctly match "synapses/internal/mcp/tools.go", while simple
