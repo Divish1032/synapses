@@ -6,6 +6,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +106,7 @@ type Server struct {
 	pulseClient  interface{}    // *pulse.Client — set via SetPulseClient; nil if pulse not configured
 	embedClient  *embed.Client  // nil if embedding_endpoint not configured
 	techStack    interface{}    // []TechStackEntry — set via SetTechStack after autosubscribe
+	knowledgeMode bool          // when true, only knowledge tools are registered (no code graph)
 	projectID    string         // stable project identifier (FNV hash of project root path)
 	projectPath  string         // absolute path to the project root (for go.mod parsing)
 	rulesMu      sync.RWMutex  // protects s.config.Rules for concurrent dynamic upserts
@@ -442,11 +444,29 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		server.WithPromptCapabilities(false),         // static prompts; no listChanged notifications
 		server.WithHooks(hooks),
 	)
+
+	// Knowledge mode detection: explicit config setting.
+	// Must be set BEFORE registerTools() so addOrDefer sees knowledgeMode=true
+	// and registers stubs for graph-dependent tools.
+	if cfg != nil && cfg.Mode == "knowledge" {
+		s.knowledgeMode = true
+	}
+
 	s.registerTools()
 	s.registerResources()
 	s.registerPrompts()      // no-op until SetPromptTemplates is called
 	s.registerSkillTools()   // no-op until SetSkillRecipes is called
 	return s
+}
+
+// NewKnowledge creates a Server in knowledge mode — memory, events, tasks, and
+// messages only, no code graph. Used for non-code domains (marketing, ops, QA).
+func NewKnowledge(cfg *config.Config, st *store.Store) *Server {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	cfg.Mode = "knowledge"
+	return New(nil, cfg, st)
 }
 
 // callStartTimes tracks per-tool-call start timestamps keyed by request pointer.
@@ -775,6 +795,31 @@ var standardTierTools = map[string]bool{
 	"get_violations":    true,
 }
 
+// knowledgeTools are the tools available when the server runs in knowledge mode
+// (no code graph). All other tools return a clear error message.
+var knowledgeTools = map[string]bool{
+	"session_init":       true,
+	"end_session":        true,
+	"remember":           true,
+	"recall":             true,
+	"send_message":       true,
+	"get_messages":       true,
+	"create_plan":        true,
+	"get_pending_tasks":  true,
+	"update_task":        true,
+	"save_session_state": true,
+	"get_session_state":  true,
+	"get_agents":         true,
+	"get_events":         true,
+	"discover_tools":     true,
+	"get_plans":          true,
+	"get_my_tasks":       true,
+	"link_task_nodes":    true,
+	"check_plan_safety":  true,
+	"report_usage":       true,
+	"mark_read":          true,
+}
+
 // toolInTier reports whether name should be registered at startup given
 // s.repoScale. Phase 6 (Proactive Context Engine): all tools are always
 // registered at all scales. The design doc mandates "the agent NEVER sees
@@ -787,9 +832,20 @@ func (s *Server) toolInTier(_ string) bool {
 	return true
 }
 
-// addOrDefer registers tool t with the MCP server. The name is historical —
-// all tools are always registered (see ADR on toolInTier above).
+// addOrDefer registers tool t with the MCP server. In knowledge mode,
+// non-knowledge tools are replaced with a stub returning a clear error message.
 func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
+	if s.knowledgeMode && !knowledgeTools[t.Name] {
+		// In knowledge mode, register a stub that returns a clear error.
+		s.mcp.AddTool(t, func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"Tool %q is not available in knowledge mode (no code graph). "+
+					"Available tools: session_init, remember, recall, create_plan, "+
+					"update_task, get_pending_tasks, send_message, get_messages, "+
+					"get_agents, get_events, discover_tools, end_session.", t.Name)), nil
+		})
+		return
+	}
 	s.mcp.AddTool(t, h)
 }
 

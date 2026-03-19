@@ -516,16 +516,18 @@ func (s *Server) handleUpdateTask(
 				st := s.store
 				go func() {
 					var emitted bool
-					if task, err := st.GetTask(taskID); err == nil {
-						for _, nodeID := range task.LinkedNodes {
-							if n := sg.GetNode(graph.NodeID(nodeID)); n != nil && n.Name != "" {
-								pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
-									ProjectID:  projID,
-									AgentID:    agentID,
-									Entity:     entityWithPath(n.Name, n.File),
-									SignalType: signalType,
-								})
-								emitted = true
+					if sg != nil {
+						if task, err := st.GetTask(taskID); err == nil {
+							for _, nodeID := range task.LinkedNodes {
+								if n := sg.GetNode(graph.NodeID(nodeID)); n != nil && n.Name != "" {
+									pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
+										ProjectID:  projID,
+										AgentID:    agentID,
+										Entity:     entityWithPath(n.Name, n.File),
+										SignalType: signalType,
+									})
+									emitted = true
+								}
 							}
 						}
 					}

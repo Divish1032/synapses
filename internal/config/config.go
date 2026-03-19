@@ -19,6 +19,11 @@ const configFileName = "synapses.json"
 type Config struct {
 	// Version is the config schema version. Currently "1".
 	Version string `json:"version"`
+	// Mode controls the project's operational mode.
+	// "full" (default): full code intelligence with graph, parsing, file watching.
+	// "knowledge": memory, events, tasks, and messages only — no code graph.
+	// Knowledge mode is useful for non-code domains (marketing, ops, QA).
+	Mode string `json:"mode,omitempty"`
 	// Rules defines the architectural constraints the rule engine enforces.
 	Rules []Rule `json:"rules"`
 	// EdgeWeights overrides the default relevance weights for context carving.

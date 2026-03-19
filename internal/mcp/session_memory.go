@@ -263,7 +263,7 @@ func (s *Server) handleEndSession(
 	// Only for entities examined AND whose files were modified (anti-noise).
 	// FilesTouched is already the agent-attributed intersection, computed in
 	// extractSessionSummary. Reuse it here instead of querying watcher again.
-	if sessSummary != nil {
+	if sessSummary != nil && s.graph != nil {
 		for _, entityName := range sessSummary.EntitiesExamined {
 			// Best-effort lookup: find the node by name.
 			nodes := s.graph.FindByName(entityName)
@@ -377,10 +377,12 @@ func (s *Server) extractSessionSummary(agentID string, sessionStart time.Time) *
 	// intersect agent-examined entities with the watcher's recent-change list.
 	modifiedFiles := s.getRecentlyModifiedFiles(sessionStart)
 	filesSet := make(map[string]bool)
-	for entityName := range entitiesSet {
-		nodes := s.graph.FindByName(entityName)
-		if len(nodes) > 0 && nodes[0].File != "" && containsFile(modifiedFiles, nodes[0].File) {
-			filesSet[nodes[0].File] = true
+	if s.graph != nil {
+		for entityName := range entitiesSet {
+			nodes := s.graph.FindByName(entityName)
+			if len(nodes) > 0 && nodes[0].File != "" && containsFile(modifiedFiles, nodes[0].File) {
+				filesSet[nodes[0].File] = true
+			}
 		}
 	}
 
