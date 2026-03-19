@@ -88,7 +88,6 @@ type Server struct {
 	config       *config.Config
 	store        *store.Store  // nil if started without a persistent store
 	changeSource ChangeSource  // nil if started without a file watcher
-	peerManager         interface{}            // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
 	federationResolver  *federation.Resolver   // nil if no federation configured — set via SetFederationResolver
 	brainClient  interface{}   // *brain.Client — set via SetBrainClient; nil if brain not configured
 	webCache     *webcache.Cache // nil if webcache not configured
@@ -528,13 +527,6 @@ func (s *Server) SetChangeSource(cs ChangeSource) {
 	s.changeSource = cs
 }
 
-// SetPeerManager wires a *peer.PeerManager into the server so that the
-// list_peers, get_peer_context, and get_dependency_graph tools are functional.
-// Using interface{} avoids an import cycle (peer imports graph/store but not mcp).
-func (s *Server) SetPeerManager(pm interface{}) {
-	s.peerManager = pm
-}
-
 // SetFederationResolver wires a federation.Resolver into the server for
 // cross-project dependency tracking and drift detection. When set,
 // session_init includes federation health and drift alerts, prepare_context
@@ -721,8 +713,6 @@ var standardTierTools = map[string]bool{
 	"get_file_context":  true,
 	"get_impact":        true,
 	"get_call_chain":    true,
-	"claim_work":        true,
-	"release_claims":    true,
 	"get_working_state": true,
 	"get_violations":    true,
 }
@@ -1347,8 +1337,7 @@ func (s *Server) registerTools() {
 		s.handleSaveSessionState,
 	)
 
-	// end_session: enhanced in Phase 6 to absorb release_claims + report_usage.
-	// Agents no longer need separate calls — end_session handles cleanup in one round-trip.
+	// end_session: captures session knowledge and optionally reports usage.
 	s.addOrDefer(
 		mcp.NewTool(
 			"end_session",
@@ -1358,8 +1347,7 @@ func (s *Server) registerTools() {
 					"entities examined, tasks updated. Saves session-log, entity, and project "+
 					"memories that future sessions will see in session_init and get_context. "+
 					"This is how institutional knowledge accumulates across sessions. "+
-					"Also automatically releases all work claims (absorbs release_claims) and "+
-					"optionally reports LLM token usage (absorbs report_usage) if model is provided.",
+					"Optionally reports LLM token usage (absorbs report_usage) if model is provided.",
 			),
 			mcp.WithString("agent_id",
 				mcp.Required(),
@@ -1440,34 +1428,6 @@ func (s *Server) registerTools() {
 		s.handleUpdateTask,
 	)
 
-	// handoff_task: transfer task ownership between agents with session state.
-	s.addOrDefer(
-		mcp.NewTool(
-			"handoff_task",
-			mcp.WithDescription(
-				"Transfers a task to another agent with context. The departing agent's session "+
-					"state is preserved so the receiving agent can resume seamlessly. Use this when "+
-					"handing off work between agents or LLM sessions.",
-			),
-			mcp.WithString("task_id",
-				mcp.Required(),
-				mcp.Description("The task ID to hand off."),
-			),
-			mcp.WithString("from_agent",
-				mcp.Required(),
-				mcp.Description("The agent currently owning the task."),
-			),
-			mcp.WithString("to_agent",
-				mcp.Required(),
-				mcp.Description("The agent receiving the task."),
-			),
-			mcp.WithString("notes",
-				mcp.Description("Optional handoff notes explaining current state, blockers, or next steps."),
-			),
-		),
-		s.handleHandoffTask,
-	)
-
 	// ── Coordination & Multi-Agent Tools ────────────────────────────────────
 
 	// get_plans
@@ -1517,66 +1477,6 @@ func (s *Server) registerTools() {
 		s.handleGetAgents,
 	)
 
-	// claim_work
-	s.addOrDefer(
-		mcp.NewTool(
-			"claim_work",
-			mcp.WithDescription(
-				"Registers active work on a file, package, directory, or entity. "+
-					"Returns any conflicting claims by other agents immediately. "+
-					"Call before editing to coordinate with other agents. "+
-					"Claims expire automatically after ttl_minutes (default 30).",
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The agent's self-declared identifier."),
-			),
-			mcp.WithString("scope",
-				mcp.Required(),
-				mcp.Description("Path or entity being claimed, e.g. 'internal/auth' or 'cmd/server/main.go'."),
-			),
-			mcp.WithString("scope_type",
-				mcp.Description("Type of scope: 'file', 'package', 'directory', 'entity'. Defaults to 'path'."),
-			),
-			mcp.WithNumber("ttl_minutes",
-				mcp.Description("How long to hold the claim in minutes. Defaults to 30."),
-			),
-		),
-		s.handleClaimWork,
-	)
-
-	// release_claims
-	s.addOrDefer(
-		mcp.NewTool(
-			"release_claims",
-			mcp.WithDescription(
-				"Releases all active work claims for the given agent. "+
-					"Call this when done editing to immediately free scopes for other agents.",
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The agent's self-declared identifier."),
-			),
-		),
-		s.handleReleaseClaims,
-	)
-
-	// get_conflicts
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_conflicts",
-			mcp.WithDescription(
-				"Returns all work claims by other agents that overlap with the calling agent's current claims. "+
-					"Check this before starting large edits if you are working in a multi-agent environment.",
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The agent's self-declared identifier."),
-			),
-		),
-		s.handleGetConflicts,
-	)
-
 	// get_events
 	s.addOrDefer(
 		mcp.NewTool(
@@ -1600,32 +1500,6 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleGetEvents,
-	)
-
-	// get_peer_activity (B29): structured digest of a specific peer agent's recent actions.
-	// Tier 3 on-demand signal — never auto-injected; call explicitly when you need peer context.
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_peer_activity",
-			mcp.WithDescription(
-				"Returns a structured digest of a specific peer agent's recent actions: "+
-					"what entities they examined, files they changed, tasks they started, and scopes they claimed. "+
-					"This is the Tier 3 on-demand signal — call it when session_init surfaced a conflict or "+
-					"dependency_alert and you need to understand what the peer is actually doing. "+
-					"Never injected automatically; you pull it explicitly.",
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("ID of the peer agent to inspect."),
-			),
-			mcp.WithNumber("since_seq",
-				mcp.Description("Return only events with seq greater than this value. Use 0 for recent history. Pass the latest_seq from the previous call to get only new activity."),
-			),
-			mcp.WithNumber("limit",
-				mcp.Description("Maximum recent actions to return. Defaults to 10."),
-			),
-		),
-		s.handleGetPeerActivity,
 	)
 
 	// ── Rule Management Tools ────────────────────────────────────────────────

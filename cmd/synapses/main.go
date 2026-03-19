@@ -39,7 +39,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/metrics"
 	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/parser"
-	"github.com/SynapsesOS/synapses/internal/peer"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/scout"
@@ -297,27 +296,6 @@ func cmdStartDirect(args []string) error {
 		allRecipes = skills.DeduplicateRecipes(allRecipes) // project overrides user, user overrides builtin
 		srv.SetSkillRecipes(allRecipes)
 		fmt.Fprintf(os.Stderr, "synapses: loaded %d skill recipes\n", len(allRecipes))
-	}
-
-	// Start the peer API server if configured. Non-fatal on failure.
-	if cfg.PeerAPIPort > 0 {
-		peerSrv := peer.NewPeerServer(g, cfg, st)
-		if err := peerSrv.Start(cfg.PeerAPIPort); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: peer API: %v\n", err)
-		} else {
-			defer peerSrv.Stop()
-			fmt.Fprintf(os.Stderr, "synapses: peer API listening on :%d\n", cfg.PeerAPIPort)
-		}
-	}
-
-	// Connect to configured peers (non-blocking, 5s timeout per peer).
-	// Start a health monitor that reconnects every 30s.
-	if len(cfg.Peers) > 0 {
-		pm := peer.NewPeerManager(cfg, g, st)
-		pm.Connect()
-		pm.StartHealthMonitor(30 * time.Second)
-		defer pm.Stop()
-		srv.SetPeerManager(pm)
 	}
 
 	// Federation resolver: cross-project drift detection + dependency tracking.
@@ -1735,7 +1713,7 @@ These 12 core tools cover 95% of workflows. All 45+ tools remain available — c
 
 ### Need more?
 
-` + "`session_init`" + ` suggests specialized tools based on your declared intent (e.g. ` + "`get_impact`" + `, ` + "`get_file_context`" + `, ` + "`claim_work`" + `).
+` + "`session_init`" + ` suggests specialized tools based on your declared intent (e.g. ` + "`get_impact`" + `, ` + "`get_file_context`" + `).
 Call ` + "`discover_tools(query=\"what you need\")`" + ` to find any tool by description.
 
 ### Anti-patterns

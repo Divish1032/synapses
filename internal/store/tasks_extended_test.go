@@ -220,7 +220,7 @@ func TestTaskInput_UnmarshalJSON(t *testing.T) {
 	}
 }
 
-// ── ClearAgentTask / ClearAgentScope ─────────────────────────────────────────
+// ── ClearAgentTask ───────────────────────────────────────────────────────────
 
 func TestClearAgentTask(t *testing.T) {
 	st := openTestStore(t)
@@ -256,15 +256,3 @@ func TestClearAgentTask(t *testing.T) {
 	}
 }
 
-func TestClearAgentScope(t *testing.T) {
-	st := openTestStore(t)
-
-	_ = st.UpsertAgent("scope-agent", &store.AgentActivity{
-		Focus: "pkg/auth",
-	})
-
-	if err := st.ClearAgentScope("scope-agent"); err != nil {
-		t.Fatalf("ClearAgentScope: %v", err)
-	}
-	// No error = pass; the column isn't exposed in GetAgents so just verify no crash.
-}

@@ -842,7 +842,7 @@ func (s *Server) assemblePlanContext(
 	// Optional: Recommendation (strip only if extremely tight).
 	if budgetLeft(b, budget) > 50 {
 		b.WriteString("\n## Recommendation\n")
-		fmt.Fprintf(b, "Consider using claim_work(scope=%q) before starting.\n", relFile)
+		fmt.Fprintf(b, "Run validate_plan() before implementing changes to %s.\n", relFile)
 		if risk == "HIGH" {
 			b.WriteString("HIGH risk: run prepare_context(intent=\"modify\") before editing.\n")
 		}

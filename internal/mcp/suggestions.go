@@ -20,17 +20,14 @@ var intentKeywords = map[string][]ToolSuggestion{
 	"implement": {
 		{Tool: "get_impact", Reason: "Check what depends on entities you'll modify", Example: `get_impact(symbol="AuthService")`},
 		{Tool: "get_file_context", Reason: "See all entities in files you'll change", Example: `get_file_context(file="internal/auth/service.go")`},
-		{Tool: "claim_work", Reason: "Prevent conflicts with other agents", Example: `claim_work(agent_id="...", scope="internal/auth")`},
 	},
 	"build": {
 		{Tool: "get_impact", Reason: "Check what depends on entities you'll modify", Example: `get_impact(symbol="AuthService")`},
 		{Tool: "get_file_context", Reason: "See all entities in files you'll change", Example: `get_file_context(file="internal/auth/service.go")`},
-		{Tool: "claim_work", Reason: "Prevent conflicts with other agents", Example: `claim_work(agent_id="...", scope="internal/auth")`},
 	},
 	"add": {
 		{Tool: "get_impact", Reason: "Check what depends on entities you'll modify", Example: `get_impact(symbol="AuthService")`},
 		{Tool: "get_file_context", Reason: "See all entities in files you'll change", Example: `get_file_context(file="internal/auth/service.go")`},
-		{Tool: "claim_work", Reason: "Prevent conflicts with other agents", Example: `claim_work(agent_id="...", scope="internal/auth")`},
 	},
 	"debug": {
 		{Tool: "get_call_chain", Reason: "Trace execution path to find the bug", Example: `get_call_chain(from="Handler", to="Repository")`},
@@ -57,7 +54,6 @@ var intentKeywords = map[string][]ToolSuggestion{
 	"refactor": {
 		{Tool: "get_impact", Reason: "Blast radius analysis before refactoring", Example: `get_impact(symbol="AuthService")`},
 		{Tool: "get_file_context", Reason: "See all entities in scope", Example: `get_file_context(file="internal/auth/service.go")`},
-		{Tool: "claim_work", Reason: "Prevent conflicts during refactor", Example: `claim_work(agent_id="...", scope="internal/auth")`},
 	},
 	"explore": {
 		{Tool: "get_repo_map", Reason: "Navigate the codebase by package and layer", Example: `get_repo_map(detail="compact")`},

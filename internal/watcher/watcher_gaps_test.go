@@ -1,7 +1,6 @@
 package watcher
 
 // Tests targeting remaining uncovered watcher branches:
-// - fileInScope exact match and directory prefix
 // - repoIDOfNodeID with and without "::"
 // - dedup with duplicates and empty input
 // - shouldSkipDir for tmp_repos and dot-prefixed dirs
@@ -27,21 +26,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
-
-// ── fileInScope (additional edge cases) ───────────────────────────────────────
-
-func TestFileInScope_NestedDirMatch(t *testing.T) {
-	if !fileInScope("pkg/auth/internal/handler.go", "pkg/auth") {
-		t.Error("deeply nested file under directory scope should return true")
-	}
-}
-
-func TestFileInScope_ScopeIsFile_NoDir(t *testing.T) {
-	// Scope is an exact file, different file should not match.
-	if fileInScope("pkg/auth/other.go", "pkg/auth/handler.go") {
-		t.Error("different file should not match file scope")
-	}
-}
 
 // ── repoIDOfNodeID ────────────────────────────────────────────────────────────
 

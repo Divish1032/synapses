@@ -526,36 +526,6 @@ func TestSendMessage_BroadcastNoTarget(t *testing.T) {
 	}
 }
 
-// ── ClaimWork success path ─────────────────────────────────────────────────────
-
-func TestClaimWork_SuccessPath(t *testing.T) {
-	st := openTestStore(t)
-
-	_, err := st.ClaimWork("agent-claimer", "pkg/auth", "directory", 30)
-	if err != nil {
-		t.Fatalf("ClaimWork: %v", err)
-	}
-}
-
-func TestClaimWork_MultipleScopes(t *testing.T) {
-	st := openTestStore(t)
-
-	scopes := []struct {
-		scope     string
-		scopeType string
-	}{
-		{"pkg/handler.go", "file"},
-		{"pkg/db", "directory"},
-		{"MyService", "symbol"},
-	}
-
-	for _, s := range scopes {
-		if _, err := st.ClaimWork("agent-multi", s.scope, s.scopeType, 15); err != nil {
-			t.Fatalf("ClaimWork %s/%s: %v", s.scope, s.scopeType, err)
-		}
-	}
-}
-
 // ── ScanAll (package-level) ────────────────────────────────────────────────────
 
 func TestScanAll_ReturnsNoError(t *testing.T) {

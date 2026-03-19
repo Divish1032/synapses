@@ -106,12 +106,6 @@ func TestServer_Setters(t *testing.T) {
 	// SetChangeSource — nil is fine.
 	s.SetChangeSource(nil)
 
-	// SetPeerManager.
-	s.SetPeerManager("fake-peer-manager")
-	if s.peerManager != "fake-peer-manager" {
-		t.Error("SetPeerManager did not store value")
-	}
-
 	// SetBrainClient.
 	s.SetBrainClient("fake-brain")
 	if s.brainClient != "fake-brain" {

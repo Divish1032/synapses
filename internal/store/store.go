@@ -2738,30 +2738,6 @@ type AgentActivity struct {
 	Intent     string
 }
 
-// AgentSummary is the compact view of a peer agent returned in session_init's
-// agent_awareness section. Includes active claims so the caller can avoid conflicts.
-type AgentSummary struct {
-	ID       string   `json:"id"`
-	Presence string   `json:"presence"`
-	Project  string   `json:"project,omitempty"` // non-empty for remote (federated) agents
-	Task     string   `json:"task,omitempty"`
-	Focus    string   `json:"focus,omitempty"`
-	// B29: richer focus fields surfaced to peers.
-	FocusFile    string `json:"focus_file,omitempty"`
-	FocusAgeSecs int    `json:"focus_age_seconds,omitempty"` // how long on current entity
-	Intent       string `json:"intent,omitempty"`
-	Scopes       []string `json:"scopes,omitempty"` // for local agents: from work_claims; for remote: from peer sync
-}
-
-// DependencyAlert is emitted when a peer agent recently changed a file containing
-// a symbol the calling agent was actively examining (via get_context).
-type DependencyAlert struct {
-	PeerAgentID string `json:"peer_agent_id"`
-	EntityName  string `json:"entity_name"`
-	EntityFile  string `json:"entity_file"`
-	ChangedAt   string `json:"changed_at"` // RFC3339
-}
-
 // classifyPresence derives active/idle/inactive from a RFC3339 last_seen timestamp.
 func classifyPresence(lastSeen string, now time.Time) string {
 	t, err := time.Parse(time.RFC3339, lastSeen)
@@ -2833,50 +2809,6 @@ func (s *Store) ClearAgentTask(agentID string) error {
 	return err
 }
 
-// ClearAgentScope zeroes the current_scope field for the given agent.
-// Kept for compatibility; the column is not surfaced in API responses —
-// use work_claims (local) or metadata (remote) for scope visibility.
-func (s *Store) ClearAgentScope(agentID string) error {
-	_, err := s.db.Exec(
-		`UPDATE agents SET current_scope = '' WHERE id = ?`,
-		agentID,
-	)
-	return err
-}
-
-// UpsertRemoteAgent registers or refreshes an agent synced from a federated peer.
-// projectID is the peer's repo name (e.g. "backend-repo"). scopes are the peer's
-// active work claims at the time of sync — stored in metadata as JSON for display.
-// Remote agents age out naturally via the same presence thresholds as local agents.
-func (s *Store) UpsertRemoteAgent(id, projectID string, activity *AgentActivity, scopes []string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	scopesJSON := "[]"
-	if len(scopes) > 0 {
-		if b, err := json.Marshal(scopes); err == nil {
-			scopesJSON = string(b)
-		}
-	}
-	// Store scopes in metadata JSON: {"scopes":["internal/auth","cmd/server"]}
-	meta := `{"scopes":` + scopesJSON + `}`
-	task, focus := "", ""
-	if activity != nil {
-		task = activity.TaskTitle
-		focus = activity.Focus
-	}
-	_, err := s.db.Exec(`
-		INSERT INTO agents (id, last_seen, metadata, current_task_title, current_focus, project_id)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-			last_seen          = excluded.last_seen,
-			metadata           = excluded.metadata,
-			current_task_title = excluded.current_task_title,
-			current_focus      = excluded.current_focus,
-			project_id         = excluded.project_id`,
-		id, now, meta, task, focus, projectID,
-	)
-	return err
-}
-
 // GetAgents returns all known agents ordered by last_seen descending.
 // Presence is computed from last_seen: active (≤5min), idle (5–15min), inactive (>15min).
 func (s *Store) GetAgents() ([]Agent, error) {
@@ -2905,111 +2837,15 @@ func (s *Store) GetAgents() ([]Agent, error) {
 	return agents, rows.Err()
 }
 
-// GetActiveAgents returns a compact summary of agents seen within the last 15
-// minutes (active or idle), excluding the caller. Active claims are attached so
-// the caller can immediately spot scope conflicts. Capped at 10 peers.
-// For local agents scopes come from work_claims; for remote (project_id != "")
-// they are read from the metadata JSON stored during peer sync.
-func (s *Store) GetActiveAgents(excludeAgentID string) ([]AgentSummary, error) {
-	cutoff := time.Now().UTC().Add(-15 * time.Minute).Format(time.RFC3339)
-	now := time.Now().UTC()
-	expiry := now.Format(time.RFC3339)
-
-	// Include agents seen in the last 15 minutes OR holding a non-expired work
-	// claim. The second condition covers LLMs in long thinking loops: if they
-	// claimed a scope before going silent, they are still in-flight.
-	rows, err := s.db.Query(`
-		SELECT id, last_seen, current_task_title, current_focus, project_id, metadata,
-		       focus_file, focus_since, intent
-		FROM agents
-		WHERE (last_seen > ? OR id IN (
-			SELECT DISTINCT agent_id FROM work_claims WHERE expires_at > ? AND agent_id != ?
-		)) AND id != ?
-		ORDER BY last_seen DESC
-		LIMIT 10`, cutoff, expiry, excludeAgentID, excludeAgentID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var peers []AgentSummary
-	for rows.Next() {
-		var p AgentSummary
-		var lastSeen, meta, focusSince string
-		if err := rows.Scan(&p.ID, &lastSeen, &p.Task, &p.Focus, &p.Project, &meta,
-			&p.FocusFile, &focusSince, &p.Intent); err != nil {
-			return nil, err
-		}
-		p.Presence = classifyPresence(lastSeen, now)
-		// Compute how long the agent has been on its current entity.
-		if focusSince != "" {
-			if t, err := time.Parse(time.RFC3339, focusSince); err == nil {
-				p.FocusAgeSecs = int(now.Sub(t).Seconds())
-			}
-		}
-		// Remote agents carry their scopes in metadata JSON: {"scopes":[...]}.
-		if p.Project != "" && meta != "" && meta != "{}" {
-			var m struct {
-				Scopes []string `json:"scopes"`
-			}
-			if json.Unmarshal([]byte(meta), &m) == nil && len(m.Scopes) > 0 {
-				p.Scopes = m.Scopes
-			}
-		}
-		peers = append(peers, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(peers) == 0 {
-		return nil, nil
-	}
-
-	// Attach active local claims keyed by agent_id in a single indexed query.
-	claimRows, err := s.db.Query(`
-		SELECT agent_id, scope FROM work_claims
-		WHERE expires_at > ? AND agent_id != ?`,
-		expiry, excludeAgentID)
-	if err == nil {
-		defer claimRows.Close()
-		claimMap := make(map[string][]string)
-		for claimRows.Next() {
-			var aid, scope string
-			if claimRows.Scan(&aid, &scope) == nil {
-				claimMap[aid] = append(claimMap[aid], scope)
-			}
-		}
-		for i := range peers {
-			// Only override scopes for local agents (remote scopes come from metadata).
-			if peers[i].Project == "" {
-				if scopes, ok := claimMap[peers[i].ID]; ok {
-					peers[i].Scopes = scopes
-					// Claim-based presence override: an agent holding a live claim is
-					// provably in-flight regardless of how long ago it last called a tool.
-					// This covers LLMs in long thinking loops between tool calls.
-					if peers[i].Presence != "active" {
-						peers[i].Presence = "active"
-					}
-				}
-			}
-		}
-	}
-	return peers, nil
-}
-
-// CountActiveAgents returns the number of agents (excluding agentID) that are
-// either seen within the last 15 minutes OR hold a non-expired work claim.
-// Cheaper than GetActiveAgents — a single COUNT query with no claims join.
+// CountActiveAgents returns the number of agents (excluding agentID) seen
+// within the last 15 minutes.
 func (s *Store) CountActiveAgents(excludeAgentID string) (int, error) {
 	cutoff := time.Now().UTC().Add(-15 * time.Minute).Format(time.RFC3339)
-	expiry := time.Now().UTC().Format(time.RFC3339)
 	var n int
 	err := s.db.QueryRow(`
 		SELECT COUNT(*) FROM agents
-		WHERE (last_seen > ? OR id IN (
-			SELECT DISTINCT agent_id FROM work_claims WHERE expires_at > ? AND agent_id != ?
-		)) AND id != ?`,
-		cutoff, expiry, excludeAgentID, excludeAgentID,
+		WHERE last_seen > ? AND id != ?`,
+		cutoff, excludeAgentID,
 	).Scan(&n)
 	return n, err
 }
@@ -3021,83 +2857,6 @@ func (s *Store) CountIndexedFiles() (int, error) {
 	return n, err
 }
 
-// ── B29: Watched Symbols ──────────────────────────────────────────────────────
-
-// WatchSymbol records that agentID recently examined the given entity via get_context.
-// Subsequent calls refresh watched_at (resetting the 30-minute TTL).
-// Old entries for this agent older than 30 minutes are pruned inline.
-// Non-fatal: errors are silently discarded to keep the hot path unaffected.
-func (s *Store) WatchSymbol(agentID, entityID, entityName, entityFile string) {
-	now := time.Now().UTC().Format(time.RFC3339)
-	cutoff := time.Now().UTC().Add(-30 * time.Minute).Format(time.RFC3339)
-	_, _ = s.db.Exec(`
-		INSERT INTO agent_watched_symbols (agent_id, entity_id, entity_name, entity_file, watched_at)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(agent_id, entity_id) DO UPDATE SET watched_at = excluded.watched_at`,
-		agentID, entityID, entityName, entityFile, now,
-	)
-	_, _ = s.db.Exec(
-		`DELETE FROM agent_watched_symbols WHERE agent_id = ? AND watched_at < ?`,
-		agentID, cutoff,
-	)
-}
-
-// GetDependencyAlerts returns alerts for symbols this agent has watched (via get_context)
-// that were recently changed in a scope claimed by another agent.
-// Returns nil when there are no alerts.
-//
-// Design note: file_change events are emitted by the file watcher with agent_id=""
-// (no agent attribution). Rather than relying on the event's agent_id, we join against
-// work_claims to find which peer agent currently holds a claim over the changed file's
-// directory. This correctly attributes watcher-detected changes to the agent who declared
-// intent to work in that scope — the only reliable source of file-to-agent mapping.
-//
-// Tier 2 signal: only surfaces when a peer's claimed scope overlaps a file you were examining.
-func (s *Store) GetDependencyAlerts(agentID string) ([]DependencyAlert, error) {
-	now := time.Now().UTC()
-	eventCutoff := now.Add(-60 * time.Minute).Format(time.RFC3339)
-	watchCutoff := now.Add(-30 * time.Minute).Format(time.RFC3339)
-	claimsExpiry := now.Format(time.RFC3339)
-	rows, err := s.db.Query(`
-		SELECT wc.agent_id, aws.entity_name, aws.entity_file, e.created_at
-		FROM events e
-		JOIN agent_watched_symbols aws
-		     ON json_extract(e.payload, '$.file') = aws.entity_file
-		JOIN work_claims wc
-		     ON (aws.entity_file = wc.scope
-		         OR aws.entity_file LIKE wc.scope || '/%'
-		         OR wc.scope LIKE aws.entity_file || '/%')
-		WHERE aws.agent_id  = ?
-		  AND wc.agent_id   != ?
-		  AND wc.expires_at  > ?
-		  AND e.type         = 'file_change'
-		  AND e.created_at   > ?
-		  AND aws.watched_at > ?
-		ORDER BY e.created_at DESC
-		LIMIT 20`,
-		agentID, agentID, claimsExpiry, eventCutoff, watchCutoff,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	seen := make(map[string]struct{})
-	var alerts []DependencyAlert
-	for rows.Next() {
-		var a DependencyAlert
-		if err := rows.Scan(&a.PeerAgentID, &a.EntityName, &a.EntityFile, &a.ChangedAt); err != nil {
-			return nil, err
-		}
-		key := a.PeerAgentID + "|" + a.EntityFile
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		alerts = append(alerts, a)
-	}
-	return alerts, rows.Err()
-}
 
 // ── Agent Context Profile ────────────────────────────────────────────────────
 
@@ -3166,12 +2925,6 @@ func (s *Store) AppendEvent(typ, agentID, payload string) error {
 	}
 	// Prune old events (bounded table).
 	if _, err := tx.Exec(`DELETE FROM events WHERE created_at < ?`, cutoff); err != nil {
-		return err
-	}
-	// Prune globally expired watched symbols. WatchSymbol only prunes per-agent inline,
-	// so agents who stopped connecting would leave orphaned rows forever without this.
-	watchCutoff := now.Add(-30 * time.Minute).Format(time.RFC3339)
-	if _, err := tx.Exec(`DELETE FROM agent_watched_symbols WHERE watched_at < ?`, watchCutoff); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -3355,176 +3108,6 @@ func (s *Store) MarkAnnotationsStale(nodeIDs []string) error {
 	return err
 }
 
-// ─── Work Claims ──────────────────────────────────────────────────────────────
-
-// WorkClaim describes one agent's active lock on a scope of work.
-type WorkClaim struct {
-	AgentID   string    `json:"agent_id"`
-	Scope     string    `json:"scope"`
-	ScopeType string    `json:"scope_type"`
-	ClaimedAt time.Time `json:"claimed_at"`
-	ExpiresAt time.Time `json:"expires_at"`
-}
-
-// pruneExpiredClaims removes all claims whose expires_at is in the past.
-func (s *Store) pruneExpiredClaims() {
-	_, _ = s.db.Exec(`DELETE FROM work_claims WHERE expires_at < ?`,
-		time.Now().UTC().Format(time.RFC3339))
-}
-
-// ClaimWork upserts a claim for agentID over scope. ttlMinutes must be > 0.
-// Returns any active claims by OTHER agents that conflict with the same scope
-// (exact match or directory-prefix overlap). Caller should inspect conflicts
-// before starting work if coordination matters.
-func (s *Store) ClaimWork(agentID, scope, scopeType string, ttlMinutes int) ([]WorkClaim, error) {
-	s.pruneExpiredClaims()
-	if ttlMinutes <= 0 {
-		ttlMinutes = 30
-	}
-	now := time.Now().UTC()
-	exp := now.Add(time.Duration(ttlMinutes) * time.Minute)
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO work_claims (agent_id, scope, scope_type, claimed_at, expires_at) VALUES (?,?,?,?,?)`,
-		agentID, scope, scopeType, now.Format(time.RFC3339), exp.Format(time.RFC3339),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	// Find conflicts: other agents claiming the same scope exactly, or whose
-	// scope is a directory-prefix of (or is prefixed by) the new claim's scope.
-	rows, err := s.db.Query(
-		`SELECT agent_id, scope, scope_type, claimed_at, expires_at
-         FROM work_claims
-         WHERE agent_id != ? AND expires_at > ?
-           AND (scope = ? OR scope LIKE ? OR ? LIKE scope || '/%')`,
-		agentID, now.Format(time.RFC3339),
-		scope,
-		scope+"/%", // other agent claims a sub-path of scope
-		scope,      // other agent claims a parent directory of scope
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanWorkClaims(rows)
-}
-
-// GetConflicts returns all work claims by other agents that overlap with any
-// scope the given agent currently holds. Expired claims are pruned first.
-func (s *Store) GetConflicts(agentID string) ([]WorkClaim, error) {
-	s.pruneExpiredClaims()
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	// Get the agent's own active scopes.
-	myRows, err := s.db.Query(
-		`SELECT scope FROM work_claims WHERE agent_id = ? AND expires_at > ?`,
-		agentID, now,
-	)
-	if err != nil {
-		return nil, err
-	}
-	var myScopes []string
-	for myRows.Next() {
-		var sc string
-		if err := myRows.Scan(&sc); err != nil {
-			myRows.Close()
-			return nil, err
-		}
-		myScopes = append(myScopes, sc)
-	}
-	myRows.Close()
-
-	if len(myScopes) == 0 {
-		return nil, nil
-	}
-
-	// For each of the agent's scopes, find other agents' conflicting claims.
-	seen := make(map[string]struct{})
-	var conflicts []WorkClaim
-	for _, sc := range myScopes {
-		rows, err := s.db.Query(
-			`SELECT agent_id, scope, scope_type, claimed_at, expires_at
-             FROM work_claims
-             WHERE agent_id != ? AND expires_at > ?
-               AND (scope = ? OR scope LIKE ? OR ? LIKE scope || '/%')`,
-			agentID, now,
-			sc,
-			sc+"/%",
-			sc,
-		)
-		if err != nil {
-			return nil, err
-		}
-		cls, err := scanWorkClaims(rows)
-		if err != nil {
-			return nil, err
-		}
-		for _, c := range cls {
-			key := c.AgentID + "|" + c.Scope
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			conflicts = append(conflicts, c)
-		}
-	}
-	return conflicts, nil
-}
-
-// ReleaseClaims removes all active claims for the given agent. Call this when
-// work is complete to immediately free scopes for other agents.
-func (s *Store) ReleaseClaims(agentID string) error {
-	_, err := s.db.Exec(`DELETE FROM work_claims WHERE agent_id = ?`, agentID)
-	return err
-}
-
-// GetMyClaims returns all non-expired claims for the given agent.
-func (s *Store) GetMyClaims(agentID string) ([]WorkClaim, error) {
-	s.pruneExpiredClaims()
-	rows, err := s.db.Query(
-		`SELECT agent_id, scope, scope_type, claimed_at, expires_at
-         FROM work_claims WHERE agent_id = ? AND expires_at > ?
-         ORDER BY claimed_at DESC`,
-		agentID, time.Now().UTC().Format(time.RFC3339),
-	)
-	if err != nil {
-		return nil, err
-	}
-	return scanWorkClaims(rows)
-}
-
-// GetAllClaims returns every non-expired work claim across all agents.
-// Used by the peer API /claims endpoint to expose active work state to peers.
-func (s *Store) GetAllClaims() ([]WorkClaim, error) {
-	s.pruneExpiredClaims()
-	rows, err := s.db.Query(
-		`SELECT agent_id, scope, scope_type, claimed_at, expires_at
-         FROM work_claims WHERE expires_at > ?
-         ORDER BY claimed_at DESC`,
-		time.Now().UTC().Format(time.RFC3339),
-	)
-	if err != nil {
-		return nil, err
-	}
-	return scanWorkClaims(rows)
-}
-
-func scanWorkClaims(rows *sql.Rows) ([]WorkClaim, error) {
-	defer rows.Close()
-	var claims []WorkClaim
-	for rows.Next() {
-		var c WorkClaim
-		var claimedStr, expiresStr string
-		if err := rows.Scan(&c.AgentID, &c.Scope, &c.ScopeType, &claimedStr, &expiresStr); err != nil {
-			return nil, err
-		}
-		c.ClaimedAt, _ = time.Parse(time.RFC3339, claimedStr)
-		c.ExpiresAt, _ = time.Parse(time.RFC3339, expiresStr)
-		claims = append(claims, c)
-	}
-	return claims, rows.Err()
-}
 
 // ── Tool Call Observability ───────────────────────────────────────────────────
 
