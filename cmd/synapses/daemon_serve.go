@@ -187,10 +187,18 @@ func authTokenPath() (string, error) {
 // loadOrCreateAuthToken reads the auth token from disk, creating one if absent or invalid.
 // The token is 32 random bytes encoded as a 64-character hex string.
 // File is written with mode 0600 (owner read/write only).
+//
+// The function ensures ~/.synapses exists before writing: synapsesHome() returns
+// the path without creating it, so a fresh install would fail without MkdirAll.
 func loadOrCreateAuthToken() (string, error) {
 	path, err := authTokenPath()
 	if err != nil {
 		return "", err
+	}
+	// Ensure the parent directory exists. synapsesHome() returns the path
+	// without creating it, so we must do it ourselves for robustness.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("create auth token dir: %w", err)
 	}
 	// Try to read an existing valid token.
 	if data, err := os.ReadFile(path); err == nil {
@@ -222,11 +230,20 @@ func loadOrCreateAuthToken() (string, error) {
 // The /api/admin/health endpoint is always exempt so that liveness checks
 // (IsSingletonDaemonRunning, Tauri health poll) never require credentials.
 //
-// OPTIONS (CORS preflight) requests are always forwarded so that the upstream
-// CORS handler can respond correctly without requiring auth.
+// OPTIONS (CORS preflight) requests are always forwarded — the caller is
+// expected to have already set CORS headers before calling this middleware,
+// so the preflight response will include them even without auth.
 //
 // If token is empty, auth is disabled entirely (daemon logs a warning at
 // startup; localhost-only binding remains the primary protection).
+//
+// IMPORTANT: this middleware must be called AFTER CORS headers have been set
+// on the ResponseWriter.  The canonical composition in cmdDaemonServe is:
+//
+//	finalHandler (sets CORS headers) → authMiddleware → mux
+//
+// This ensures that 401 rejections carry the Access-Control-Allow-* headers
+// a browser needs to surface the auth error rather than a generic CORS error.
 func authMiddleware(token string, next http.Handler) http.Handler {
 	if token == "" {
 		return next // disabled — no-op pass-through
@@ -237,9 +254,9 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// CORS preflight is always forwarded — the CORS handler replies with
-		// 204 No Content; the browser will then send the real request with
-		// credentials.
+		// OPTIONS preflight: always forward.  The outer CORS handler sets
+		// the required headers before reaching this middleware, so the
+		// preflight response is already correct.
 		if r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
 			return
@@ -257,6 +274,7 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 		// Non-localhost: require a valid Bearer token.
 		authHeader := r.Header.Get("Authorization")
 		if !strings.HasPrefix(authHeader, "Bearer ") {
+			fmt.Fprintf(os.Stderr, "synapses: auth: missing token from %s %s\n", r.RemoteAddr, r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("WWW-Authenticate", `Bearer realm="synapses"`)
 			w.WriteHeader(http.StatusUnauthorized)
@@ -265,6 +283,7 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 		}
 		provided := strings.TrimPrefix(authHeader, "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+			fmt.Fprintf(os.Stderr, "synapses: auth: invalid token from %s %s\n", r.RemoteAddr, r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("WWW-Authenticate", `Bearer realm="synapses"`)
 			w.WriteHeader(http.StatusUnauthorized)
@@ -602,11 +621,20 @@ func cmdDaemonServe(args []string) error {
 	}
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
-	// Wrap the mux with a CORS handler so the Tauri WebView (origin tauri://localhost)
-	// can call /api/admin/* endpoints directly from the frontend.
-	// Authorization is included in the allowed headers so that non-localhost
-	// callers can pass the Bearer token in preflight + actual requests.
-	corsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Layer order (outermost → innermost):
+	//
+	//   finalHandler (CORS headers + OPTIONS)
+	//     └─ authProtected (authMiddleware → mux)
+	//
+	// CORS headers are set BEFORE the auth check runs.  This guarantees that
+	// 401 rejections carry the Access-Control-Allow-* headers a browser needs
+	// to surface the auth error; without this ordering, auth failures look like
+	// opaque CORS errors to the caller.
+	authProtected := authMiddleware(authToken, mux)
+	finalHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// CORS headers on every response — including error responses.
+		// Authorization is included so non-localhost callers can pass the
+		// Bearer token in both preflight and actual requests.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -614,12 +642,8 @@ func cmdDaemonServe(args []string) error {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		mux.ServeHTTP(w, r)
+		authProtected.ServeHTTP(w, r)
 	})
-	// Auth middleware wraps the CORS handler: non-localhost connections must
-	// present a valid Bearer token.  Localhost and the health endpoint are
-	// always exempt.  See authMiddleware for full policy details.
-	finalHandler := authMiddleware(authToken, corsHandler)
 	httpSrv := &http.Server{
 		Addr:         DaemonHTTPAddr,
 		Handler:      finalHandler,
