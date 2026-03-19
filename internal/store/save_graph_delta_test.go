@@ -497,6 +497,63 @@ func TestSaveGraphDelta_ChangedFileNotInGraph_NoExtraNodes(t *testing.T) {
 	}
 }
 
+// ── Dangling incoming edges to DELETED nodes are cleaned up ───────────────────
+// Regression: without this fix, edges from other files pointing to functions
+// that were deleted accumulate indefinitely (unlike full SaveGraph which wipes
+// the edge table completely on every save).
+
+func TestSaveGraphDelta_CleansDanglingIncomingEdges(t *testing.T) {
+	st := openTestStore(t)
+	g := graph.New("dangling-repo")
+	g.SetRoot("/tmp/dangling")
+
+	// File A: Caller calls Target (in file B).
+	callerID := g.MakeNodeID("/tmp/dangling/A.go", "Caller")
+	targetID := g.MakeNodeID("/tmp/dangling/B.go", "Target")
+
+	g.AddNode(&graph.Node{
+		ID: callerID, Type: graph.NodeFunction, Name: "Caller",
+		File: "/tmp/dangling/A.go", Package: "pkg", Exported: true,
+	})
+	g.AddNode(&graph.Node{
+		ID: targetID, Type: graph.NodeFunction, Name: "Target",
+		File: "/tmp/dangling/B.go", Package: "pkg", Exported: true,
+	})
+	g.AddEdge(&graph.Edge{From: callerID, To: targetID, Type: graph.EdgeCalls})
+
+	// Full save: both nodes and the Caller→Target edge are in DB.
+	if err := st.SaveGraph(g); err != nil {
+		t.Fatalf("SaveGraph: %v", err)
+	}
+
+	// Target is deleted from B.go (e.g., function removed by developer).
+	// The watcher calls RemoveFile which also removes the Caller→Target in-memory edge.
+	g.RemoveFile("/tmp/dangling/B.go")
+	// B.go now gets a new function; Target is gone for good.
+	newFuncID := g.MakeNodeID("/tmp/dangling/B.go", "NewFunc")
+	g.AddNode(&graph.Node{
+		ID: newFuncID, Type: graph.NodeFunction, Name: "NewFunc",
+		File: "/tmp/dangling/B.go", Package: "pkg", Exported: true,
+	})
+
+	// Delta save for B.go: Target is in deletedNodeIDs, so Caller→Target
+	// must be deleted from the DB to prevent dangling edge accumulation.
+	if err := st.SaveGraphDelta("/tmp/dangling/B.go", g); err != nil {
+		t.Fatalf("SaveGraphDelta: %v", err)
+	}
+
+	// Load and verify the Caller→Target edge is gone.
+	loaded, err := st.LoadGraph()
+	if err != nil {
+		t.Fatalf("LoadGraph: %v", err)
+	}
+	for _, e := range loaded.AllEdges() {
+		if string(e.To) == string(targetID) {
+			t.Errorf("dangling edge to deleted Target node still present: %v→%v", e.From, e.To)
+		}
+	}
+}
+
 // ── SaveGraphDelta idempotent: calling twice with same data is stable ──────────
 
 func TestSaveGraphDelta_Idempotent(t *testing.T) {
