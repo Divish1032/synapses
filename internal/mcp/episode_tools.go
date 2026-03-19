@@ -27,7 +27,10 @@ func (s *Server) handleRemember(
 	if agentID == "" {
 		return mcp.NewToolResultError("agent_id is required"), nil
 	}
-	decision := stringArg(req, "decision")
+	decision, err := stringArgLimited(req, "decision", maxArgLengthDecision)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 	if decision == "" {
 		return mcp.NewToolResultError("decision is required"), nil
 	}

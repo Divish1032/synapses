@@ -11,11 +11,37 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
+// MCP input size limits. These prevent unbounded memory growth, SQLite bloat,
+// and OOM from embedding oversized strings. The default cap applies to all
+// string args; tighter per-field limits apply to content stored in SQLite or
+// passed to the embedder.
+const (
+	maxArgLength         = 64 * 1024 // default cap for all string args
+	maxArgLengthDecision = 4 * 1024  // episodic memory / remember() decision field
+	maxArgLengthNote     = 8 * 1024  // annotation note field (annotate_node, web_annotate)
+	maxArgLengthPayload  = 16 * 1024 // message bus payload field
+)
+
 // stringArg extracts a string argument from a CallToolRequest by key.
 // Returns "" if the key is absent or not a string.
+// Silently truncates to maxArgLength as a default size guard.
 func stringArg(req mcp.CallToolRequest, key string) string {
 	v, _ := req.GetArguments()[key].(string)
+	if len(v) > maxArgLength {
+		v = v[:maxArgLength]
+	}
 	return v
+}
+
+// stringArgLimited extracts a string argument and returns an error if it
+// exceeds maxLen bytes. Use for fields stored in SQLite or passed to the
+// embedder where silent truncation would produce silently corrupt data.
+func stringArgLimited(req mcp.CallToolRequest, key string, maxLen int) (string, error) {
+	v, _ := req.GetArguments()[key].(string)
+	if len(v) > maxLen {
+		return "", fmt.Errorf("%s exceeds maximum length of %d bytes (got %d bytes)", key, maxLen, len(v))
+	}
+	return v, nil
 }
 
 // camelWords splits a CamelCase or mixedCase identifier into lowercase words.
