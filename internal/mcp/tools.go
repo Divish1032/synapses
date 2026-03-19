@@ -599,62 +599,49 @@ func (s *Server) handleGetContext(
 		}
 		var enrichment contextEnrichment
 
+		// Load all rules once (config + dynamic) to avoid redundant SQLite queries.
+		var allRules []config.Rule
 		if s.config != nil {
-			for _, r := range s.config.Rules {
-				matched := r.ForbiddenEdge.FromFilePattern == ""
-				if !matched {
-					matched, _ = filepath.Match(r.ForbiddenEdge.FromFilePattern, filepath.Base(best.File))
-				}
-				if matched {
-					enrichment.ApplicableRules = append(enrichment.ApplicableRules, ruleHint{
-						RuleID:      r.ID,
-						Description: r.Description,
-						Severity:    r.Severity,
-					})
-				}
+			allRules = append(allRules, s.config.Rules...)
+		}
+		if dynRules, err := s.store.LoadDynamicRules(); err == nil {
+			allRules = append(allRules, dynRules...)
+		}
+
+		// ApplicableRules: which rules match this entity's file (informational).
+		for _, r := range allRules {
+			matched := r.ForbiddenEdge.FromFilePattern == ""
+			if !matched {
+				matched, _ = filepath.Match(r.ForbiddenEdge.FromFilePattern, filepath.Base(best.File))
 			}
-			if dynRules, err := s.store.LoadDynamicRules(); err == nil {
-				for _, dr := range dynRules {
-					matched := dr.ForbiddenEdge.FromFilePattern == ""
-					if !matched {
-						matched, _ = filepath.Match(dr.ForbiddenEdge.FromFilePattern, filepath.Base(best.File))
-					}
-					if matched {
-						enrichment.ApplicableRules = append(enrichment.ApplicableRules, ruleHint{
-							RuleID:      dr.ID,
-							Description: dr.Description,
-							Severity:    dr.Severity,
-						})
-					}
-				}
+			if matched {
+				enrichment.ApplicableRules = append(enrichment.ApplicableRules, ruleHint{
+					RuleID:      r.ID,
+					Description: r.Description,
+					Severity:    r.Severity,
+				})
 			}
 		}
 
 		// R19: Proactive rule alerts — check carved subgraph edges against all rules.
 		// This surfaces actual violations in the entity's neighborhood, not just
 		// which rules apply to the file. Cap at 5 to avoid overwhelming the response.
-		if s.config != nil && len(sg.Edges) > 0 {
-			allRules := append([]config.Rule(nil), s.config.Rules...)
-			if dynRules, drErr := s.store.LoadDynamicRules(); drErr == nil {
-				allRules = append(allRules, dynRules...)
-			}
-			if len(allRules) > 0 {
-				checker := &config.Config{Rules: allRules}
-				violations := checker.CheckViolationsForEdges(sg.Edges, s.graph.GetNode)
-				for i, v := range violations {
-					if i >= 5 {
-						break
-					}
-					enrichment.RuleAlerts = append(enrichment.RuleAlerts, ruleAlert{
-						RuleID:       v.RuleID,
-						Description:  v.Description,
-						Severity:     v.Severity,
-						FromNode:     string(v.FromNode),
-						ToNode:       string(v.ToNode),
-						EdgeType:     string(v.EdgeType),
-						SuggestedFix: v.SuggestedFix,
-					})
+		if len(allRules) > 0 && len(sg.Edges) > 0 {
+			checker := &config.Config{Rules: allRules}
+			violations := checker.CheckViolationsForEdges(sg.Edges, s.graph.GetNode)
+			for i, v := range violations {
+				if i >= 5 {
+					break
 				}
+				enrichment.RuleAlerts = append(enrichment.RuleAlerts, ruleAlert{
+					RuleID:       v.RuleID,
+					Description:  v.Description,
+					Severity:     v.Severity,
+					FromNode:     string(v.FromNode),
+					ToNode:       string(v.ToNode),
+					EdgeType:     string(v.EdgeType),
+					SuggestedFix: v.SuggestedFix,
+				})
 			}
 		}
 
@@ -1192,6 +1179,8 @@ func (s *Server) handleFindEntity(
 		Line      int            `json:"line"`
 		Doc       string         `json:"doc,omitempty"`
 		Signature string         `json:"signature,omitempty"`
+		Callers   int            `json:"callers,omitempty"`
+		Callees   int            `json:"callees,omitempty"`
 	}
 	results := make([]entityMatch, 0, len(nodes))
 	for _, n := range nodes {
@@ -1210,6 +1199,8 @@ func (s *Server) handleFindEntity(
 			m.Doc = n.Metadata["doc"]
 			m.Signature = n.Metadata["signature"]
 		}
+		m.Callers = s.graph.Fanin(n.ID)
+		m.Callees = s.graph.Fanout(n.ID)
 		results = append(results, m)
 	}
 
@@ -1264,7 +1255,11 @@ func (s *Server) handleFindEntity(
 			if isTestFile(r.File) {
 				testMark = " (test)"
 			}
+			if r.Callers > 0 || r.Callees > 0 {
+			fmt.Fprintf(&sb, "  [%s] %s · %s:%d%s · %d callers, %d callees\n", r.Name, r.Type, r.File, r.Line, testMark, r.Callers, r.Callees)
+		} else {
 			fmt.Fprintf(&sb, "  [%s] %s · %s:%d%s\n", r.Name, r.Type, r.File, r.Line, testMark)
+		}
 		}
 		// Federation results (compact format).
 		for _, fr := range fedResults {
@@ -3606,6 +3601,14 @@ func (s *Server) handleSessionInit(
 	if s.store != nil {
 		if gaps, err := s.store.GetGaps(store.GapFilter{Status: "open"}); err == nil {
 			workingSection["open_quality_gaps"] = len(gaps)
+		}
+	}
+	// Surface active architecture violations so agents see them at session start.
+	// Zero noise when no violations exist (field is 0, not omitted — consistent with open_quality_gaps).
+	workingSection["active_violations"] = 0
+	if s.store != nil {
+		if vlog, err := s.store.GetViolationLog("", 0); err == nil {
+			workingSection["active_violations"] = len(vlog)
 		}
 	}
 	root := s.graph.Root()
