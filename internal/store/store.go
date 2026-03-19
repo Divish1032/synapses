@@ -316,6 +316,8 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id) WHER
 -- A session starts on session_init() and ends on end_session() or after 30 min inactivity.
 -- last_seen_at is updated on every tool call (heartbeat piggyback) so stale detection
 -- needs no background goroutine — just check: last_seen_at < now - 30 minutes.
+-- NOTE: state and parent_session_id columns are added by migrations (lines 805-806)
+-- to support both fresh and upgraded databases uniformly.
 CREATE TABLE IF NOT EXISTS sessions (
     id                TEXT    PRIMARY KEY,  -- Synapses-generated UUID
     agent_id          TEXT    NOT NULL,
@@ -328,15 +330,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     end_reason        TEXT    NOT NULL DEFAULT '', -- clean | timeout | reconciled | superseded
     outcome           TEXT    NOT NULL DEFAULT '', -- success | failure | partial | unknown
     summary           TEXT    NOT NULL DEFAULT '', -- from end_session or reconciliation
-    tool_calls        INTEGER NOT NULL DEFAULT 0,
-    state             TEXT    NOT NULL DEFAULT 'active', -- active | idle | hibernated | closed
-    parent_session_id TEXT    NOT NULL DEFAULT ''  -- ID of prior session on cross-connection resume; '' = first
+    tool_calls        INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_agent   ON sessions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_active  ON sessions(ended_at) WHERE ended_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_mcp     ON sessions(mcp_session_id, agent_id, project_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_state   ON sessions(state, agent_id, project_id);
+-- idx_sessions_state is created by migrations (line 807) after state column exists
 
 -- Links sessions to the tasks they created, claimed, or completed.
 -- Enables orphaned task detection: tasks with action 'created' or 'claimed'
