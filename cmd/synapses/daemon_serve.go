@@ -36,7 +36,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -169,6 +171,108 @@ func cleanStaleSingletonPID() {
 	if err != nil || !processAlive(pid) {
 		os.Remove(pidPath)
 	}
+}
+
+// ── Auth token ────────────────────────────────────────────────────────────────
+
+// authTokenPath returns the path to the daemon auth token file (~/.synapses/auth_token).
+func authTokenPath() (string, error) {
+	base, err := synapsesHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "auth_token"), nil
+}
+
+// loadOrCreateAuthToken reads the auth token from disk, creating one if absent or invalid.
+// The token is 32 random bytes encoded as a 64-character hex string.
+// File is written with mode 0600 (owner read/write only).
+func loadOrCreateAuthToken() (string, error) {
+	path, err := authTokenPath()
+	if err != nil {
+		return "", err
+	}
+	// Try to read an existing valid token.
+	if data, err := os.ReadFile(path); err == nil {
+		token := strings.TrimSpace(string(data))
+		if len(token) == 64 {
+			return token, nil
+		}
+		// File exists but is invalid (truncated, corrupted) — regenerate.
+	}
+	// Generate a new 32-byte random token.
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate auth token: %w", err)
+	}
+	token := fmt.Sprintf("%x", b)
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		return "", fmt.Errorf("write auth token: %w", err)
+	}
+	return token, nil
+}
+
+// authMiddleware enforces bearer-token authentication for non-localhost clients.
+//
+// Localhost connections (RemoteAddr resolving to a loopback IP) are always
+// allowed — they represent trusted local tools (Claude Code, Cursor, Tauri app)
+// that have no need to manage tokens.  Non-localhost connections must present
+// a valid "Authorization: Bearer <token>" header.
+//
+// The /api/admin/health endpoint is always exempt so that liveness checks
+// (IsSingletonDaemonRunning, Tauri health poll) never require credentials.
+//
+// OPTIONS (CORS preflight) requests are always forwarded so that the upstream
+// CORS handler can respond correctly without requiring auth.
+//
+// If token is empty, auth is disabled entirely (daemon logs a warning at
+// startup; localhost-only binding remains the primary protection).
+func authMiddleware(token string, next http.Handler) http.Handler {
+	if token == "" {
+		return next // disabled — no-op pass-through
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Health endpoint is always exempt.
+		if r.URL.Path == "/api/admin/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// CORS preflight is always forwarded — the CORS handler replies with
+		// 204 No Content; the browser will then send the real request with
+		// credentials.
+		if r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Determine the client IP.
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		// Loopback (127.x.x.x, ::1) → trusted, no token needed.
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Non-localhost: require a valid Bearer token.
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("WWW-Authenticate", `Bearer realm="synapses"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "missing Authorization header; use Bearer token"}) //nolint:errcheck
+			return
+		}
+		provided := strings.TrimPrefix(authHeader, "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("WWW-Authenticate", `Bearer realm="synapses"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid Bearer token"}) //nolint:errcheck
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ── connSession: per-connection MCP session (used for Unix socket serving) ───
@@ -483,22 +587,42 @@ func cmdDaemonServe(args []string) error {
 		json.NewEncoder(w).Encode(result) //nolint:errcheck
 	})
 
+	// ── Auth token ────────────────────────────────────────────────────────────
+	// Generated on first start, persisted at ~/.synapses/auth_token.
+	// Required only for non-localhost connections; localhost is always trusted.
+	authToken, authErr := loadOrCreateAuthToken()
+	if authErr != nil {
+		// Non-fatal: log a warning and continue. Localhost-only binding
+		// (127.0.0.1) is the primary protection; auth is defence-in-depth.
+		fmt.Fprintf(os.Stderr, "synapses: warning: could not load/create auth token: %v\n", authErr)
+		authToken = ""
+	} else {
+		tokenPath, _ := authTokenPath()
+		fmt.Fprintf(os.Stderr, "synapses: auth token stored at %s\n", tokenPath)
+	}
+
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	// Wrap the mux with a CORS handler so the Tauri WebView (origin tauri://localhost)
 	// can call /api/admin/* endpoints directly from the frontend.
+	// Authorization is included in the allowed headers so that non-localhost
+	// callers can pass the Bearer token in preflight + actual requests.
 	corsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		mux.ServeHTTP(w, r)
 	})
+	// Auth middleware wraps the CORS handler: non-localhost connections must
+	// present a valid Bearer token.  Localhost and the health endpoint are
+	// always exempt.  See authMiddleware for full policy details.
+	finalHandler := authMiddleware(authToken, corsHandler)
 	httpSrv := &http.Server{
 		Addr:         DaemonHTTPAddr,
-		Handler:      corsHandler,
+		Handler:      finalHandler,
 		ReadTimeout:  60 * time.Second,
 		WriteTimeout: 0, // SSE streams can be indefinite
 		IdleTimeout:  120 * time.Second,
