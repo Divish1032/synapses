@@ -1651,13 +1651,9 @@ func TestImpl_TierStatus_Integration(t *testing.T) {
 
 // TestImpl_BrainStats_Integration tests that BrainStats returns snapshot
 func TestImpl_BrainStats_Integration(t *testing.T) {
-	stats := &brainStats{}
-	stats.record("ingest", true, 50)
-	stats.record("enrich", false, 100)
-
-	b := &impl{
-		stats: *stats,
-	}
+	b := &impl{}
+	b.stats.record("ingest", true, 50)
+	b.stats.record("enrich", false, 100)
 
 	result := b.BrainStats()
 	if result == nil {
