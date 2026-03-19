@@ -1071,13 +1071,15 @@ func (s *Store) likeSearch(query string, limit int) ([]SearchResult, error) {
 }
 
 // sanitizeFTSQuery converts a raw user query into a safe FTS5 MATCH expression.
-// Each word becomes an unquoted prefix term (word*) joined by OR so that
+// Each word becomes a quoted phrase prefix ("word"*) joined by OR so that
 // "traverse BFS ego" finds any node matching ANY of the three tokens.
-// Unquoted prefix syntax is simpler and more portable than "word"* phrase syntax.
+// Quoting prevents FTS5 keywords (NOT, AND, OR, NEAR) from being interpreted
+// as operators when they appear in user-supplied input.
 // Empty result means the query had no usable terms.
 func sanitizeFTSQuery(q string) string {
 	// Strip FTS5 special characters to prevent syntax errors.
-	replacer := strings.NewReplacer(`"`, " ", `'`, " ", `(`, " ", `)`, " ", `:`, " ", `*`, " ", `.`, " ", `-`, " ", `/`, " ")
+	// Include backslash to prevent escape sequence injection.
+	replacer := strings.NewReplacer(`"`, " ", `'`, " ", `(`, " ", `)`, " ", `:`, " ", `*`, " ", `.`, " ", `-`, " ", `/`, " ", `\`, " ")
 	q = strings.TrimSpace(replacer.Replace(q))
 	words := strings.Fields(q)
 	if len(words) == 0 {
@@ -1085,12 +1087,14 @@ func sanitizeFTSQuery(q string) string {
 	}
 	terms := make([]string, len(words))
 	for i, w := range words {
-		// Prefix match (*) so "carver" finds "carve", "carving", "CarveEgoGraph".
+		// Quote each term so FTS5 treats it as a literal phrase, not an operator
+		// keyword. "word"* is phrase-prefix syntax: matches any document
+		// containing a token starting with the given characters.
 		// Short words (≤2 chars) skip prefix to avoid broad noise matches.
 		if len(w) > 2 {
-			terms[i] = w + "*"
+			terms[i] = `"` + w + `"*`
 		} else {
-			terms[i] = w
+			terms[i] = `"` + w + `"`
 		}
 	}
 	return strings.Join(terms, " OR ")

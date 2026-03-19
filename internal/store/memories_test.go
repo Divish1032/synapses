@@ -1683,3 +1683,91 @@ func TestQueryInvalidatedMemories_CapsAt10(t *testing.T) {
 		t.Fatalf("expected cap at 10, got %d", len(mems))
 	}
 }
+
+// TestSearchMemories_FTS5Injection verifies that malicious FTS5 syntax in the
+// query does not cause a crash or SQL error in SearchMemories and
+// SearchMemoriesIncludingStale. Before the fix, raw queries like "NOT *" were
+// passed directly to FTS5 MATCH, which caused a parse error in SQLite.
+func TestSearchMemories_FTS5Injection(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Seed one memory so the FTS index is non-empty and queries execute fully.
+	_, err := st.InsertMemory(Memory{
+		Tier:    TierProject,
+		Content: "auth service switched to OAuth2",
+		AgentID: "agent-sec",
+		Source:  SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	maliciousQueries := []string{
+		"NOT *",
+		`"unclosed`,
+		`(unbalanced`,
+		`* * *`,
+		`-- DROP TABLE memories`,
+		`OR OR OR`,
+		`auth) AND (1=1`,
+		`\x00null`,
+	}
+
+	for _, q := range maliciousQueries {
+		q := q
+		t.Run("SearchMemories/"+q, func(t *testing.T) {
+			results, err := st.SearchMemories(q, 10)
+			if err != nil {
+				t.Errorf("SearchMemories(%q) returned error: %v", q, err)
+			}
+			_ = results // nil or empty is fine — no crash is the requirement
+		})
+		t.Run("SearchMemoriesIncludingStale/"+q, func(t *testing.T) {
+			results, err := st.SearchMemoriesIncludingStale(q, 10)
+			if err != nil {
+				t.Errorf("SearchMemoriesIncludingStale(%q) returned error: %v", q, err)
+			}
+			_ = results
+		})
+	}
+}
+
+// TestSearchMemories_FTS5InjectionAttackVector confirms that the specific
+// attack vector from the council finding (query: "NOT *") is closed.
+// Without the fix, this would cause: "fts5: syntax error near "*"".
+func TestSearchMemories_FTS5InjectionAttackVector(t *testing.T) {
+	st := openMemTestStore(t)
+
+	_, err := st.InsertMemory(Memory{
+		Tier:    TierProject,
+		Content: "sensitive data that should not be dumped",
+		AgentID: "agent-sec",
+		Source:  SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// "NOT *" is the council-specified attack vector. Before the fix it caused:
+	// "fts5: syntax error near "NOT"" — an error that could crash callers.
+	// After the fix, "NOT *" is sanitized to a quoted prefix search "NOT"*
+	// (words starting with "NOT"), which is valid FTS5 and returns at most
+	// the rows that genuinely contain such a word — not all rows.
+	results, err := st.SearchMemories("NOT *", 100)
+	if err != nil {
+		t.Fatalf("SearchMemories(\"NOT *\") must not return error, got: %v", err)
+	}
+	// The store has 1 seeded memory. "NOT *" → "NOT"* may match "not" in the content
+	// (legitimate prefix match), but must never exceed the total document count.
+	if len(results) > 1 {
+		t.Errorf("SearchMemories(\"NOT *\") returned %d results, expected ≤1 (only 1 document seeded)", len(results))
+	}
+
+	results, err = st.SearchMemoriesIncludingStale("NOT *", 100)
+	if err != nil {
+		t.Fatalf("SearchMemoriesIncludingStale(\"NOT *\") must not return error, got: %v", err)
+	}
+	if len(results) > 1 {
+		t.Errorf("SearchMemoriesIncludingStale(\"NOT *\") returned %d results, expected ≤1 (only 1 document seeded)", len(results))
+	}
+}
