@@ -1046,13 +1046,49 @@ func dedup(ss []string) []string {
 // shouldSkipDir matches the same exclusion list used by the parser walker.
 func shouldSkipDir(name string) bool {
 	switch name {
-	case "vendor", "node_modules", "dist", "build", ".git",
-		".idea", ".vscode", "__pycache__", "testdata",
-		"tmp_repos": // synapses-fine-distilling: cloned training repos — never index
+	// --- Dependency managers ---
+	case "node_modules", // Node.js
+		"vendor",           // Go / PHP / Ruby
+		"bower_components", // Bower (legacy JS)
+		"jspm_packages",    // JSPM
+		"Pods":             // iOS CocoaPods
+		return true
+
+	// --- Build / compiled output ---
+	case "dist",
+		"build",
+		"out",
+		"target", // Rust (Cargo), Java (Maven)
+		"obj",    // C/C++
+		"storybook-static",
+		"coverage",
+		".nyc_output":
+		return true
+
+	// --- Temporary / cache ---
+	case "tmp",
+		"temp",
+		"cache":
+		return true
+
+	// --- Generated code ---
+	case "generated",
+		"gen",
+		"__generated__",
+		"__mocks__": // Jest mock directories
+		return true
+
+	// --- Third-party bundled sources ---
+	case "third_party",
+		"vendor_ruby",
+		"testdata": // Go test fixtures rarely need indexing
+		return true
+
+	// --- Synapses-specific ---
+	case "tmp_repos": // synapses-fine-distilling: cloned training repos — never index
 		return true
 	}
-	if len(name) > 0 && name[0] == '.' {
-		return true
-	}
-	return false
+
+	// Skip all hidden directories (e.g. .next, .nuxt, .turbo, .cache, .gradle).
+	return strings.HasPrefix(name, ".")
 }
