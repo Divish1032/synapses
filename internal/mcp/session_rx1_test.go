@@ -116,9 +116,9 @@ func TestTrackSessionCall_NoDoubleLog(t *testing.T) {
 	}
 }
 
-// ── TestClearSessionCallEntry_ResetsCounter ───────────────────────────────
+// ── TestClearAndGetStartTime_ResetsCounter ────────────────────────────────
 
-func TestClearSessionCallEntry_ResetsCounter(t *testing.T) {
+func TestClearAndGetStartTime_ResetsCounter(t *testing.T) {
 	s := newServerWithThreshold(t, 10)
 
 	// Partial progress (5/10).
@@ -127,7 +127,7 @@ func TestClearSessionCallEntry_ResetsCounter(t *testing.T) {
 	}
 
 	// Simulate manual end_session clearing the entry.
-	s.clearSessionCallEntry("sess1", "agent-e")
+	s.clearAndGetStartTime("sess1", "agent-e")
 
 	// Verify entry removed.
 	s.sessionCallsMu.Lock()
@@ -138,9 +138,9 @@ func TestClearSessionCallEntry_ResetsCounter(t *testing.T) {
 	}
 }
 
-// ── TestClearSessionCallEntry_EmptyArgs ───────────────────────────────────
+// ── TestClearAndGetStartTime_EmptyArgs ────────────────────────────────────
 
-func TestClearSessionCallEntry_EmptyArgs(t *testing.T) {
+func TestClearAndGetStartTime_EmptyArgs(t *testing.T) {
 	s := newServerWithThreshold(t, 10)
 
 	// Insert an entry manually.
@@ -150,7 +150,7 @@ func TestClearSessionCallEntry_EmptyArgs(t *testing.T) {
 
 	// Clear with both empty — should not panic, and should remove the "::" key.
 	// The function returns early when both are empty, so the map entry remains.
-	s.clearSessionCallEntry("", "")
+	s.clearAndGetStartTime("", "")
 
 	s.sessionCallsMu.Lock()
 	_, exists := s.sessionCalls["::"]

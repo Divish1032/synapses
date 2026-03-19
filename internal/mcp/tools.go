@@ -1908,6 +1908,9 @@ func (s *Server) handleGetViolations(
 
 	// Brain enrichment: add plain-English LLM explanations for each violation.
 	if bc := s.getBrainClient(); bc != nil && len(violations) > 0 {
+		// Single shared deadline for all ExplainViolation calls: 3s total budget,
+		// not 3s per violation. Avoids N context allocations in the hot path.
+		deadline := time.Now().Add(3 * time.Second)
 		for i := range violations {
 			v := &violations[i]
 			fromNode := s.graph.GetNode(v.FromNode)
@@ -1920,7 +1923,7 @@ func (s *Server) handleGetViolations(
 			if toNode != nil {
 				targetName = toNode.Name
 			}
-			violCtx, violCancel := context.WithTimeout(ctx, 3*time.Second)
+			violCtx, violCancel := context.WithDeadline(ctx, deadline)
 			explanation, fix := bc.ExplainViolation(violCtx, brain.ViolationRequest{
 				RuleID:       v.RuleID,
 				RuleSeverity: v.Severity,
