@@ -30,7 +30,10 @@ func (s *Server) handleWebAnnotate(
 		return mcpgo.NewToolResultError("node_id is required"), nil
 	}
 	agentID, _ := req.GetArguments()["agent_id"].(string)
-	note, _ := req.GetArguments()["note"].(string)
+	note, noteErr := stringArgLimited(req, "note", maxArgLengthNote)
+	if noteErr != nil {
+		return mcpgo.NewToolResultError(noteErr.Error()), nil
+	}
 
 	// Optional: structured hits JSON to format as a readable annotation.
 	type searchHit struct {

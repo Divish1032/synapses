@@ -41,7 +41,10 @@ func (s *Server) handleSendMessage(
 	}
 
 	// payload must be valid JSON; default to empty object if omitted.
-	payload := stringArg(req, "payload")
+	payload, payloadErr := stringArgLimited(req, "payload", maxArgLengthPayload)
+	if payloadErr != nil {
+		return mcp.NewToolResultError(payloadErr.Error()), nil
+	}
 	if payload == "" {
 		payload = "{}"
 	}

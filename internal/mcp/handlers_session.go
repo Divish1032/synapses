@@ -1495,7 +1495,10 @@ func (s *Server) handleAnnotateNode(
 	if nodeID == "" {
 		return mcp.NewToolResultError("node_id is required"), nil
 	}
-	note, _ := req.GetArguments()["note"].(string)
+	note, noteErr := stringArgLimited(req, "note", maxArgLengthNote)
+	if noteErr != nil {
+		return mcp.NewToolResultError(noteErr.Error()), nil
+	}
 	if note == "" {
 		return mcp.NewToolResultError("note is required"), nil
 	}
