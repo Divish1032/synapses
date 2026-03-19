@@ -483,10 +483,21 @@ func TestSaveGraphDelta_WithoutPriorFullSave(t *testing.T) {
 	}
 
 	// SaveGraphDelta writes repo_id/repo_root to meta, so LoadGraph returns a
-	// non-nil graph. Just verify no crash — the loaded graph may have nodes.
+	// real graph — not nil. Verify the inserted node survived the round-trip.
 	loaded, err := st.LoadGraph()
 	if err != nil {
 		t.Fatalf("LoadGraph: %v", err)
 	}
-	_ = loaded
+	if loaded == nil {
+		t.Fatal("expected non-nil graph after cold-start delta (repo_id written by delta)")
+	}
+	found := false
+	for _, n := range loaded.AllNodes() {
+		if n.Name == "Main" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("Main should be present in graph after cold-start delta")
+	}
 }
