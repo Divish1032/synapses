@@ -769,11 +769,11 @@ func TestHandleGetSessionState_Found(t *testing.T) {
 
 func TestHandleGetEvents_WithTypesStringFilter(t *testing.T) {
 	s := newTestServer(t)
-	_ = s.store.AppendEvent("claim_work", "agent-a", `{"scope":"pkg/auth"}`)
-	_ = s.store.AppendEvent("claim_released", "agent-a", `{"agent_id":"agent-a"}`)
+	_ = s.store.AppendEvent("file_change", "agent-a", `{"file":"pkg/auth/auth.go"}`)
+	_ = s.store.AppendEvent("task_update", "agent-a", `{"task_id":"t1"}`)
 
 	req := callTool(map[string]any{
-		"types":     "claim_work,claim_released",
+		"types":     "file_change,task_update",
 		"since_seq": float64(0),
 	})
 	result, err := s.handleGetEvents(ctx, req)
@@ -786,10 +786,10 @@ func TestHandleGetEvents_WithTypesStringFilter(t *testing.T) {
 
 func TestHandleGetEvents_WithTypesArrayFilter(t *testing.T) {
 	s := newTestServer(t)
-	_ = s.store.AppendEvent("claim_work", "agent-b", `{"scope":"pkg/db"}`)
+	_ = s.store.AppendEvent("file_change", "agent-b", `{"file":"pkg/db/store.go"}`)
 
 	req := callTool(map[string]any{
-		"types": []interface{}{"claim_work"},
+		"types": []interface{}{"file_change"},
 		"limit": float64(10),
 	})
 	result, err := s.handleGetEvents(ctx, req)

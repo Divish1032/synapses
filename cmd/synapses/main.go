@@ -1749,6 +1749,41 @@ Synapses memory is organized in three tiers. Use ` + "`remember()`" + ` to save 
 ` + "`session_init`" + ` → explore (` + "`prepare_context`" + `, ` + "`search`" + `) → ` + "`validate_plan`" + ` → edit files → ` + "`verify_implementation`" + ` → ` + "`end_session`" + `
 ` + synapsesSectionEnd
 
+// knowledgeSynapsesSection is the guidance block for knowledge-mode projects
+// (no code graph). Focuses on memory, tasks, and cross-project collaboration.
+var knowledgeSynapsesSection = synapsesSectionStart + `## Synapses — Knowledge Substrate (MCP)
+
+This project runs in **knowledge mode** — no code graph, just memory, tasks, events, and cross-project collaboration.
+
+### Session Start
+Call ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` at the start of every session. Returns pending tasks, project identity, and proactive tool suggestions.
+
+### Key Tools
+
+| Goal | Tool |
+|---|---|
+| Start session | ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` |
+| Save knowledge | ` + "`remember(decision=\"...\", agent_id=\"...\")`" + ` |
+| Retrieve knowledge | ` + "`recall(query=\"...\")`" + ` |
+| Plan tasks | ` + "`create_plan(title=\"...\", tasks=[...])`" + ` |
+| Update task | ` + "`update_task(id=\"...\", status=\"done\")`" + ` |
+| Get pending tasks | ` + "`get_pending_tasks()`" + ` |
+| Send message | ` + "`send_message(from_agent=\"...\", topic=\"...\")`" + ` |
+| Get messages | ` + "`get_messages(agent_id=\"...\")`" + ` |
+| End session | ` + "`end_session(agent_id=\"...\")`" + ` |
+
+### Cross-Project Queries
+When multiple projects are registered with the daemon, query knowledge across them:
+- ` + "`recall(query=\"...\", projects=\"*\")`" + ` — search memories across all projects
+- ` + "`get_events(projects=\"backend\")`" + ` — events from a specific sibling
+- ` + "`get_messages(agent_id=\"...\", projects=\"*\")`" + ` — messages across projects
+- ` + "`get_agents(projects=\"*\")`" + ` — see who's working across all projects
+Cross-project results appear in separate response fields (e.g. ` + "`cross_project_episodes`" + `).
+
+### Workflow
+` + "`session_init`" + ` → ` + "`recall`" + ` / ` + "`get_pending_tasks`" + ` → work → ` + "`remember`" + ` / ` + "`update_task`" + ` → ` + "`end_session`" + `
+` + synapsesSectionEnd
+
 // writeProjectCLAUDE writes (or updates) a Synapses-managed section in
 // .claude/CLAUDE.md (preferred by Claude Code). The section is delimited by
 // HTML comments so it can be safely updated on subsequent connect runs without
@@ -1756,7 +1791,11 @@ Synapses memory is organized in three tiers. Use ` + "`remember()`" + ` to save 
 // Synapses section it is migrated to .claude/CLAUDE.md and the section is
 // removed from the root file.
 func writeProjectCLAUDE(repoRoot string) error {
+	// Choose template based on project mode from config.
 	section := synapsesSection
+	if cfg, err := config.Load(repoRoot); err == nil && cfg.Mode == "knowledge" {
+		section = knowledgeSynapsesSection
+	}
 
 	clauDir := filepath.Join(repoRoot, ".claude")
 	if err := os.MkdirAll(clauDir, 0o755); err != nil {
@@ -2087,11 +2126,14 @@ func writeVSCodeMCPConfig(repoRoot string) error {
 // writeGuidanceFile writes (or updates) the Synapses guidance section in a
 // plain-markdown rules file (e.g. .windsurfrules). frontmatter is prepended
 // only on first creation; subsequent runs update only the synapses section.
-func writeGuidanceFile(file, frontmatter string) error {
+func writeGuidanceFile(repoRoot, file, frontmatter string) error {
 	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		return err
 	}
 	section := synapsesSection
+	if cfg, err := config.Load(repoRoot); err == nil && cfg.Mode == "knowledge" {
+		section = knowledgeSynapsesSection
+	}
 	existing, _ := os.ReadFile(file)
 	content := string(existing)
 	if si := strings.Index(content, synapsesSectionStart); si != -1 {
@@ -2158,13 +2200,13 @@ func cmdConnect(args []string) error {
 		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
 		rulesFile := filepath.Join(absPath, ".cursor", "rules", "synapses.mdc")
 		frontmatter := "---\ndescription: Synapses code intelligence — always use these MCP tools for code exploration\nalwaysApply: true\n---\n\n"
-		add(rulesFile, writeGuidanceFile(rulesFile, frontmatter))
+		add(rulesFile, writeGuidanceFile(absPath, rulesFile, frontmatter))
 
 	case "windsurf":
 		mcpFile := filepath.Join(absPath, ".windsurf", "mcp_config.json")
 		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
 		rulesFile := filepath.Join(absPath, ".windsurfrules")
-		add(rulesFile, writeGuidanceFile(rulesFile, ""))
+		add(rulesFile, writeGuidanceFile(absPath, rulesFile, ""))
 
 	case "zed":
 		settingsFile := filepath.Join(absPath, ".zed", "settings.json")
@@ -2180,7 +2222,7 @@ func cmdConnect(args []string) error {
 		mcpFile := filepath.Join(absPath, ".agent", "mcp.json")
 		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
 		rulesFile := filepath.Join(absPath, ".agent", "rules", "synapses.md")
-		add(rulesFile, writeGuidanceFile(rulesFile, ""))
+		add(rulesFile, writeGuidanceFile(absPath, rulesFile, ""))
 
 	default:
 		return fmt.Errorf("unknown agent %q — supported: claude, cursor, windsurf, zed, vscode, antigravity", *agent)
