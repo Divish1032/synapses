@@ -96,9 +96,10 @@ type Resolver struct {
 	configDir string // directory containing synapses.json
 	clock     Clock  // time source (defaults to time.Now)
 
-	// brainMu guards brain and brainGenerate. A dedicated mutex is used
-	// (rather than r.mu) because readers call r.getStore() while holding
-	// brainMu.RLock, and getStore takes r.mu.Lock — mixing them would deadlock.
+	// brainMu guards brain and brainGenerate. A dedicated mutex is used rather
+	// than r.mu to keep lock scope narrow: SetBrain/SetBrainGenerate are init-time
+	// setters that don't need the full store lock, and readers snapshot these fields
+	// quickly before releasing brainMu — no overlap with r.mu operations.
 	brainMu      sync.RWMutex
 	brain        BrainSummaryProvider // optional, for cross-project summaries
 	brainGenerate func(ctx context.Context, prompt string) (string, error)

@@ -627,16 +627,35 @@ func (s *Server) StartBackground() {
 	})
 }
 
-// Close signals all background goroutines to stop and waits for them to finish.
+// closeGracefulTimeout is how long Close() waits for background goroutines
+// before giving up. memoryExpiryLoop calls store.ExpireMemories() — a fast
+// SQLite DELETE in practice — but we cap the wait to prevent daemon shutdown
+// from hanging if the store is locked or unresponsive.
+const closeGracefulTimeout = 5 * time.Second
+
+// Close signals all background goroutines to stop and waits up to 5 seconds
+// for graceful completion. If goroutines don't finish in time, Close returns
+// anyway — they will be abandoned when the process exits.
 // Safe to call multiple times — subsequent calls are no-ops.
 func (s *Server) Close() {
 	select {
 	case <-s.stopCh:
-		// already closed — wg.Wait still correct (goroutines already done)
+		// already closed
 	default:
 		close(s.stopCh)
 	}
-	s.wg.Wait()
+	// Wait with timeout: prevents blocking forever if a background goroutine
+	// is stuck in a slow store operation (e.g., SQLite busy under heavy load).
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(closeGracefulTimeout):
+		// goroutines didn't finish in time — proceed anyway
+	}
 }
 
 // memoryExpiryLoop runs ExpireMemories every 6 hours until stopCh is closed.
