@@ -74,8 +74,18 @@ func (s *Server) handleGetProjectIdentity(
 // appended to get_context responses without requiring extra tool calls.
 type contextEnrichment struct {
 	ApplicableRules []ruleHint    `json:"applicable_rules,omitempty"` // architectural rules for this entity's file
+	RuleAlerts      []ruleAlert   `json:"rule_alerts,omitempty"`      // R19: actual violations found in the carved subgraph
 	RecentFailures  []failureHint `json:"recent_failures,omitempty"`  // relevant failure episodes
 	ActiveTask      *taskHint     `json:"active_task,omitempty"`      // linked task context
+}
+type ruleAlert struct {
+	RuleID       string `json:"rule_id"`
+	Description  string `json:"description"`
+	Severity     string `json:"severity"`
+	FromNode     string `json:"from_node"`
+	ToNode       string `json:"to_node"`
+	EdgeType     string `json:"edge_type"`
+	SuggestedFix string `json:"suggested_fix,omitempty"`
 }
 type ruleHint struct {
 	RuleID      string `json:"rule_id"`
@@ -620,6 +630,34 @@ func (s *Server) handleGetContext(
 			}
 		}
 
+		// R19: Proactive rule alerts — check carved subgraph edges against all rules.
+		// This surfaces actual violations in the entity's neighborhood, not just
+		// which rules apply to the file. Cap at 5 to avoid overwhelming the response.
+		if s.config != nil && len(sg.Edges) > 0 {
+			allRules := append([]config.Rule(nil), s.config.Rules...)
+			if dynRules, drErr := s.store.LoadDynamicRules(); drErr == nil {
+				allRules = append(allRules, dynRules...)
+			}
+			if len(allRules) > 0 {
+				checker := &config.Config{Rules: allRules}
+				violations := checker.CheckViolationsForEdges(sg.Edges, s.graph.GetNode)
+				for i, v := range violations {
+					if i >= 5 {
+						break
+					}
+					enrichment.RuleAlerts = append(enrichment.RuleAlerts, ruleAlert{
+						RuleID:       v.RuleID,
+						Description:  v.Description,
+						Severity:     v.Severity,
+						FromNode:     string(v.FromNode),
+						ToNode:       string(v.ToNode),
+						EdgeType:     string(v.EdgeType),
+						SuggestedFix: v.SuggestedFix,
+					})
+				}
+			}
+		}
+
 		if matches, err := s.store.RecallEpisodes(
 			best.Name, s.graph.RepoID(), "", "failure", "", 2, 0,
 		); err == nil {
@@ -642,7 +680,7 @@ func (s *Server) handleGetContext(
 			}
 		}
 
-		if len(enrichment.ApplicableRules) > 0 || len(enrichment.RecentFailures) > 0 || enrichment.ActiveTask != nil {
+		if len(enrichment.ApplicableRules) > 0 || len(enrichment.RuleAlerts) > 0 || len(enrichment.RecentFailures) > 0 || enrichment.ActiveTask != nil {
 			dc.Enrichment = &enrichment
 		}
 	}()
