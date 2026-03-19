@@ -604,6 +604,62 @@ func (g *Graph) EdgeCount() int {
 	return total
 }
 
+// NodeCountsByRepo returns the number of nodes per repository prefix.
+// It iterates the internal node map directly without allocating a snapshot
+// slice, making it O(N) in nodes with zero slice allocation overhead.
+// Node IDs are expected to be of the form "repoID::...".
+func (g *Graph) NodeCountsByRepo() map[string]int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	counts := make(map[string]int)
+	for id := range g.nodes {
+		if idx := strings.Index(string(id), "::"); idx >= 0 {
+			counts[string(id)[:idx]]++
+		}
+	}
+	return counts
+}
+
+// CrossRepoCalls returns statistics about cross-repository CALLS edges.
+// It iterates the internal edge map directly without allocating a snapshot
+// slice. The returned linkedRepos slice is sorted and excludes primaryRepoID.
+func (g *Graph) CrossRepoCalls(primaryRepoID string) (crossCallCount int, linkedRepos []string) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	linkedSet := make(map[string]bool)
+	for from, edges := range g.outEdges {
+		fromIdx := strings.Index(string(from), "::")
+		if fromIdx < 0 {
+			continue
+		}
+		fromRepo := string(from)[:fromIdx]
+		for _, e := range edges {
+			if e.Type != EdgeCalls {
+				continue
+			}
+			toIdx := strings.Index(string(e.To), "::")
+			if toIdx < 0 {
+				continue
+			}
+			toRepo := string(e.To)[:toIdx]
+			if fromRepo != toRepo {
+				crossCallCount++
+				if fromRepo != primaryRepoID && !linkedSet[fromRepo] {
+					linkedSet[fromRepo] = true
+				}
+				if toRepo != primaryRepoID && !linkedSet[toRepo] {
+					linkedSet[toRepo] = true
+				}
+			}
+		}
+	}
+	for repo := range linkedSet {
+		linkedRepos = append(linkedRepos, repo)
+	}
+	sort.Strings(linkedRepos)
+	return crossCallCount, linkedRepos
+}
+
 // EdgeCountsByType returns the number of edges per edge type.
 func (g *Graph) EdgeCountsByType() map[EdgeType]int {
 	g.mu.RLock()

@@ -38,40 +38,10 @@ func (s *Server) handleGetProjectIdentity(
 	identity := s.graph.ProjectIdentity()
 
 	// Enrich with federation status (absorbed from get_federation_status).
+	// CrossRepoCalls iterates the internal graph edge map directly, avoiding
+	// the ~500 KB slice allocation that AllEdges() would produce on a large graph.
 	primaryRepoID := s.graph.RepoID()
-	repoNodeCounts := make(map[string]int)
-	for _, n := range s.graph.AllNodes() {
-		if idx := strings.Index(string(n.ID), "::"); idx >= 0 {
-			repoNodeCounts[string(n.ID)[:idx]]++
-		}
-	}
-	crossCallCount := 0
-	var linkedRepos []string
-	linkedSet := make(map[string]bool)
-	for _, e := range s.graph.AllEdges() {
-		if e.Type != graph.EdgeCalls {
-			continue
-		}
-		fromIdx := strings.Index(string(e.From), "::")
-		toIdx := strings.Index(string(e.To), "::")
-		if fromIdx < 0 || toIdx < 0 {
-			continue
-		}
-		fromRepo := string(e.From)[:fromIdx]
-		toRepo := string(e.To)[:toIdx]
-		if fromRepo != toRepo {
-			crossCallCount++
-			if fromRepo != primaryRepoID && !linkedSet[fromRepo] {
-				linkedSet[fromRepo] = true
-				linkedRepos = append(linkedRepos, fromRepo)
-			}
-			if toRepo != primaryRepoID && !linkedSet[toRepo] {
-				linkedSet[toRepo] = true
-				linkedRepos = append(linkedRepos, toRepo)
-			}
-		}
-	}
-	sort.Strings(linkedRepos)
+	crossCallCount, linkedRepos := s.graph.CrossRepoCalls(primaryRepoID)
 
 	// Build the enriched result as a map so we can add fields.
 	out := map[string]interface{}{
@@ -2136,6 +2106,9 @@ type toolCatalogEntry struct {
 	Description string
 	Keywords    []string
 	Example     string
+	// Pre-tokenized at init time to avoid repeated string ops per discover_tools call.
+	descWords []string // lowercase alphabetic tokens from Description
+	nameWords []string // Name split on underscores
 }
 
 // toolCatalog is the static catalog of all major Synapses tools, grouped by
@@ -2213,10 +2186,11 @@ type workflowStep struct {
 // Returned by discover_tools when the query matches the intent keywords,
 // so agents don't have to reason about tool chaining from scratch.
 type workflowRecipe struct {
-	ID       string         `json:"id"`
-	Intent   string         `json:"intent"`
-	Keywords []string       `json:"-"`
-	Steps    []workflowStep `json:"steps"`
+	ID          string         `json:"id"`
+	Intent      string         `json:"intent"`
+	Keywords    []string       `json:"-"`
+	Steps       []workflowStep `json:"steps"`
+	intentWords []string       // lowercase alphabetic tokens from Intent, pre-computed at init
 }
 
 var workflowRecipes = []workflowRecipe{
@@ -2292,6 +2266,26 @@ var workflowRecipes = []workflowRecipe{
 			{Tool: "get_context", ArgsHint: `entity="{top_result}"`, Expects: "Full subgraph around the best match.", UsesOutput: "Use the top result's name and file"},
 		},
 	},
+}
+
+// splitAlpha tokenizes s into lowercase alphabetic words (same split rule as
+// in handleDiscoverTools description matching). Used by init() to pre-compute
+// descWords and intentWords so discover_tools avoids repeated string ops.
+func splitAlpha(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return r < 'a' || r > 'z' })
+}
+
+func init() {
+	// Pre-tokenize tool catalog entries so handleDiscoverTools doesn't repeat
+	// strings.FieldsFunc + strings.ToLower on every query.
+	for i := range toolCatalog {
+		toolCatalog[i].descWords = splitAlpha(toolCatalog[i].Description)
+		toolCatalog[i].nameWords = strings.Split(toolCatalog[i].Name, "_")
+	}
+	// Pre-tokenize workflow recipe intents for the same reason.
+	for i := range workflowRecipes {
+		workflowRecipes[i].intentWords = splitAlpha(workflowRecipes[i].Intent)
+	}
 }
 
 // handleDiscoverTools is a lightweight keyword matcher that helps agents find
@@ -2386,7 +2380,8 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 				}
 			}
 			// Also check tool name (tokenized on underscores) and description.
-			for _, nw := range strings.Split(tool.Name, "_") {
+			// descWords and nameWords are pre-computed at init time.
+			for _, nw := range tool.nameWords {
 				if nw == qw {
 					score += 2
 					if debug {
@@ -2395,7 +2390,7 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 					break
 				}
 			}
-			for _, dw := range strings.FieldsFunc(strings.ToLower(tool.Description), func(r rune) bool { return r < 'a' || r > 'z' }) {
+			for _, dw := range tool.descWords {
 				if kwMatch(dw, qw) {
 					score++
 					if debug {
@@ -2475,7 +2470,7 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 					score++
 				}
 			}
-			for _, dw := range strings.FieldsFunc(strings.ToLower(wf.Intent), func(r rune) bool { return r < 'a' || r > 'z' }) {
+			for _, dw := range wf.intentWords {
 				if kwMatch(dw, qw) {
 					score++
 					break
