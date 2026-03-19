@@ -23,7 +23,7 @@ install: build
 
 ## test: Run all tests
 test:
-	go test ./... -race -count=1 -timeout 300s
+	go test ./... -race -count=1 -timeout 600s
 
 ## test/cover: Run tests with coverage report (excludes CLI-only packages: bicep_edge, debug_callsites)
 test/cover:

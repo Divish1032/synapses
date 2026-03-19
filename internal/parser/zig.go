@@ -474,7 +474,5 @@ func (p *ZigParser) extractZigVarDecl(
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 			return
 		}
-		// Only check the first non-trivial value node.
-		return
 	}
 }
