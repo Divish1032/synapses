@@ -256,3 +256,89 @@ func TestClearAgentTask(t *testing.T) {
 	}
 }
 
+// ── FindTasksByNodeID ────────────────────────────────────────────────────────
+
+func TestFindTasksByNodeID_MatchesLinkedNode(t *testing.T) {
+	st := openTestStore(t)
+
+	nodeID := "repo::auth.go::AuthService"
+	_, _, _ = st.CreatePlan("history plan", "", "", []store.TaskInput{
+		{Title: "fix auth", Priority: "p1", LinkedNodes: []string{nodeID}},
+		{Title: "unrelated", Priority: "p2", LinkedNodes: []string{"repo::other.go::Other"}},
+	})
+
+	tasks, err := st.FindTasksByNodeID(nodeID, 10)
+	if err != nil {
+		t.Fatalf("FindTasksByNodeID: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	if tasks[0].Title != "fix auth" {
+		t.Errorf("expected 'fix auth', got %q", tasks[0].Title)
+	}
+}
+
+func TestFindTasksByNodeID_EmptyNodeID(t *testing.T) {
+	st := openTestStore(t)
+
+	tasks, err := st.FindTasksByNodeID("", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tasks != nil {
+		t.Errorf("expected nil for empty nodeID, got %v", tasks)
+	}
+}
+
+func TestFindTasksByNodeID_ZeroLimit(t *testing.T) {
+	st := openTestStore(t)
+
+	tasks, err := st.FindTasksByNodeID("repo::auth.go::AuthService", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tasks != nil {
+		t.Errorf("expected nil for zero limit, got %v", tasks)
+	}
+}
+
+func TestFindTasksByNodeID_NoMatch(t *testing.T) {
+	st := openTestStore(t)
+
+	_, _, _ = st.CreatePlan("no match plan", "", "", []store.TaskInput{
+		{Title: "task A", Priority: "p1", LinkedNodes: []string{"repo::foo.go::Foo"}},
+	})
+
+	tasks, err := st.FindTasksByNodeID("repo::bar.go::Bar", 10)
+	if err != nil {
+		t.Fatalf("FindTasksByNodeID: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Errorf("expected 0 tasks, got %d", len(tasks))
+	}
+}
+
+func TestFindTasksByNodeID_LIKEMetacharacterEscaped(t *testing.T) {
+	st := openTestStore(t)
+
+	// Node ID with LIKE metacharacters — must not match unrelated tasks.
+	nodeID := "repo::auth_%.go::Auth_Service"
+	_, _, _ = st.CreatePlan("meta plan", "", "", []store.TaskInput{
+		{Title: "meta task", Priority: "p1", LinkedNodes: []string{nodeID}},
+		{Title: "wild task", Priority: "p2", LinkedNodes: []string{"repo::auth_X.go::Auth_Service"}},
+	})
+
+	tasks, err := st.FindTasksByNodeID(nodeID, 10)
+	if err != nil {
+		t.Fatalf("FindTasksByNodeID: %v", err)
+	}
+	// Should match only the exact node ID, not the "wild" one where % would wildcard-match.
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task (exact match only), got %d", len(tasks))
+	}
+	if tasks[0].Title != "meta task" {
+		t.Errorf("expected 'meta task', got %q", tasks[0].Title)
+	}
+}
+

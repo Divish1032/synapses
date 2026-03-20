@@ -1,0 +1,374 @@
+package mcp
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	mcp "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/SynapsesOS/synapses/internal/graph"
+)
+
+// timelineEvent is a single entry in the entity history timeline.
+// All data sources are normalised into this format before merging.
+type timelineEvent struct {
+	Type      string `json:"type"`      // memory, episode, annotation, task, git_change
+	Timestamp int64  `json:"timestamp"` // Unix seconds — used for sorting
+	Date      string `json:"date"`      // Human-readable RFC3339
+	Summary   string `json:"summary"`
+	Detail    string `json:"detail,omitempty"`
+}
+
+// handleGetEntityHistory returns a chronological timeline compositing memories,
+// episodes, annotations, task references, and git changes for a named entity.
+// One tool call replaces five. Serves Speed.
+func (s *Server) handleGetEntityHistory(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	entityName, _ := req.GetArguments()["entity"].(string)
+	entityName = strings.TrimSpace(entityName)
+	if entityName == "" {
+		return mcp.NewToolResultError(
+			"entity is required (e.g., 'AuthService', 'handleLogin'). " +
+				"Pass the name of a code entity to see its full history timeline.",
+		), nil
+	}
+
+	if s.graph == nil {
+		return mcp.NewToolResultError(
+			"get_entity_history requires a code graph. " +
+				"This tool is not available in knowledge-only mode.",
+		), nil
+	}
+
+	fileHint, _ := req.GetArguments()["file"].(string)
+
+	limitF, _ := req.GetArguments()["limit"].(float64)
+	limit := int(limitF)
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	// ── Resolve entity name to node(s) ──────────────────────────────────────
+	node, ambiguousMsg := s.resolveEntityNode(entityName, fileHint)
+	if node == nil {
+		return mcp.NewToolResultText(ambiguousMsg), nil
+	}
+
+	nodeID := string(node.ID)
+
+	// ── Collect from all 5 sources in parallel ──────────────────────────────
+	var (
+		mu     sync.Mutex
+		events []timelineEvent
+		wg     sync.WaitGroup
+	)
+
+	appendEvents := func(evts []timelineEvent) {
+		if len(evts) == 0 {
+			return
+		}
+		mu.Lock()
+		events = append(events, evts...)
+		mu.Unlock()
+	}
+
+	// 1. Memories
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if s.store == nil {
+			return
+		}
+		mems, err := s.store.QueryMemories("entity", nodeID, "", limit)
+		if err != nil {
+			return
+		}
+		var evts []timelineEvent
+		for _, m := range mems {
+			ts := parseTimestamp(m.CreatedAt)
+			evts = append(evts, timelineEvent{
+				Type:      "memory",
+				Timestamp: ts,
+				Date:      m.CreatedAt,
+				Summary:   truncate(m.Content, 200),
+				Detail:    fmt.Sprintf("tier=%s source=%s agent=%s", m.Tier, m.Source, m.AgentID),
+			})
+		}
+		appendEvents(evts)
+	}()
+
+	// 2. Episodes
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if s.store == nil {
+			return
+		}
+		eps, err := s.store.FindEpisodesByNodeID(nodeID, limit)
+		if err != nil {
+			return
+		}
+		var evts []timelineEvent
+		for _, e := range eps {
+			evts = append(evts, timelineEvent{
+				Type:      "episode",
+				Timestamp: e.CreatedAt,
+				Date:      time.Unix(e.CreatedAt, 0).UTC().Format(time.RFC3339),
+				Summary:   truncate(e.Decision, 200),
+				Detail:    fmt.Sprintf("type=%s outcome=%s trigger=%s", e.EpisodeType, e.Outcome, truncate(e.Trigger, 80)),
+			})
+		}
+		appendEvents(evts)
+	}()
+
+	// 3. Annotations
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if s.store == nil {
+			return
+		}
+		annMap, err := s.store.GetAnnotationsForNodes([]string{nodeID})
+		if err != nil {
+			return
+		}
+		var evts []timelineEvent
+		for _, anns := range annMap {
+			for _, a := range anns {
+				ts := parseTimestamp(a.CreatedAt)
+				src := a.Source
+				if a.Stale {
+					src += " (stale)"
+				}
+				evts = append(evts, timelineEvent{
+					Type:      "annotation",
+					Timestamp: ts,
+					Date:      a.CreatedAt,
+					Summary:   truncate(a.Note, 200),
+					Detail:    fmt.Sprintf("source=%s agent=%s", src, a.AgentID),
+				})
+			}
+		}
+		appendEvents(evts)
+	}()
+
+	// 4. Task references
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if s.store == nil {
+			return
+		}
+		tasks, err := s.store.FindTasksByNodeID(nodeID, limit)
+		if err != nil {
+			return
+		}
+		var evts []timelineEvent
+		for _, t := range tasks {
+			ts := parseTimestamp(t.UpdatedAt)
+			evts = append(evts, timelineEvent{
+				Type:      "task",
+				Timestamp: ts,
+				Date:      t.UpdatedAt,
+				Summary:   fmt.Sprintf("[%s] %s", t.Status, t.Title),
+				Detail:    fmt.Sprintf("priority=%s assigned=%s plan=%s", t.Priority, t.AssignedTo, t.PlanID),
+			})
+		}
+		appendEvents(evts)
+	}()
+
+	// 5. Git changes (for the entity's file)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		repoRoot := s.graph.Root()
+		if repoRoot == "" || node.File == "" {
+			return
+		}
+		evts := s.gitFileHistory(repoRoot, node.File, 20)
+		appendEvents(evts)
+	}()
+
+	wg.Wait()
+
+	// ── Merge and sort by timestamp descending ──────────────────────────────
+	sort.Slice(events, func(i, j int) bool {
+		return events[i].Timestamp > events[j].Timestamp
+	})
+	if len(events) > limit {
+		events = events[:limit]
+	}
+
+	// ── Format as compact natural-language timeline ─────────────────────────
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "## Entity History: %s\n", node.Name)
+	fmt.Fprintf(&sb, "**File:** %s:%d  **Type:** %s\n\n", node.File, node.Line, node.Type)
+
+	if len(events) == 0 {
+		sb.WriteString("No history found for this entity. It has no memories, episodes, annotations, task references, or git changes.\n")
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+
+	fmt.Fprintf(&sb, "%d events (newest first):\n\n", len(events))
+
+	for _, e := range events {
+		// Use short date for compactness: "2026-03-20 12:00"
+		shortDate := e.Date
+		if t, err := time.Parse(time.RFC3339, e.Date); err == nil {
+			shortDate = t.Format("2006-01-02 15:04")
+		}
+		fmt.Fprintf(&sb, "- **[%s]** %s — %s", e.Type, shortDate, e.Summary)
+		if e.Detail != "" {
+			fmt.Fprintf(&sb, " (%s)", e.Detail)
+		}
+		sb.WriteByte('\n')
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+// resolveEntityNode resolves an entity name (with optional file hint) to a
+// single graph node. Returns (nil, message) when resolution fails; the message
+// is a user-facing error or disambiguation prompt.
+func (s *Server) resolveEntityNode(entityName, fileHint string) (*graph.Node, string) {
+	nodes := s.graph.FindByName(entityName)
+	if len(nodes) == 0 {
+		nodes = s.graph.FindByPattern(entityName)
+	}
+	// Dotted-name resolution: "Graph.New" → find "New" filtered by prefix.
+	if len(nodes) == 0 && strings.Contains(entityName, ".") {
+		parts := strings.SplitN(entityName, ".", 2)
+		prefix, method := strings.ToLower(parts[0]), parts[1]
+		for _, n := range s.graph.FindByName(method) {
+			if strings.Contains(strings.ToLower(string(n.ID)), prefix) ||
+				strings.Contains(strings.ToLower(n.File), prefix) {
+				nodes = append(nodes, n)
+			}
+		}
+	}
+	if len(nodes) == 0 {
+		candidates := s.inlineFindEntity(entityName)
+		if len(candidates) == 0 {
+			return nil, fmt.Sprintf(
+				"entity not found: %q\nHint: no substring match. Try search(query=\"...\", mode=\"semantic\") for concept-based lookup.",
+				entityName,
+			)
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "entity not found: %q\nDid you mean one of these?\n", entityName)
+		for _, c := range candidates {
+			name, _ := c["name"].(string)
+			file, _ := c["file"].(string)
+			typ, _ := c["type"].(string)
+			fmt.Fprintf(&sb, "  • %s (%s) in %s\n", name, typ, file)
+		}
+		sb.WriteString("Re-call get_entity_history with entity= set to one of the exact names above. Add file= to pin if multiple files match.")
+		return nil, sb.String()
+	}
+
+	// File hint filtering.
+	if fileHint != "" {
+		var filtered []*graph.Node
+		for _, n := range nodes {
+			if strings.HasSuffix(n.File, fileHint) || strings.Contains(n.File, fileHint) {
+				filtered = append(filtered, n)
+			}
+		}
+		if len(filtered) > 0 {
+			nodes = filtered
+		}
+	}
+
+	// Ambiguity: multiple nodes remain — show disambiguation prompt.
+	if len(nodes) > 1 {
+		// Try pickBestNode for automatic disambiguation.
+		best := pickBestNode(nodes, s.graph)
+		return best, ""
+	}
+
+	return nodes[0], ""
+}
+
+// gitFileHistory returns git log entries for a specific file as timeline events.
+// Limited to maxEntries commits. Uses a 5-second timeout.
+func (s *Server) gitFileHistory(repoRoot, relFile string, maxEntries int) []timelineEvent {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx,
+		"git", "-C", repoRoot,
+		"log", fmt.Sprintf("-%d", maxEntries),
+		"--format=%H\x1f%an\x1f%ad\x1f%s",
+		"--date=iso-strict",
+		"--follow",
+		"--", relFile,
+	).Output()
+	if err != nil || len(out) == 0 {
+		return nil
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var evts []timelineEvent
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\x1f", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		hash, author, dateStr, subject := parts[0], parts[1], parts[2], parts[3]
+		ts := parseTimestamp(dateStr)
+		shortHash := hash
+		if len(shortHash) > 7 {
+			shortHash = shortHash[:7]
+		}
+		evts = append(evts, timelineEvent{
+			Type:      "git_change",
+			Timestamp: ts,
+			Date:      dateStr,
+			Summary:   fmt.Sprintf("%s %s", shortHash, subject),
+			Detail:    fmt.Sprintf("author=%s", author),
+		})
+	}
+	return evts
+}
+
+// parseTimestamp attempts to parse an RFC3339, ISO-8601, or Unix timestamp string
+// into Unix seconds. Returns 0 on failure (sorts to the end).
+func parseTimestamp(s string) int64 {
+	// Try RFC3339 first (most common in our store).
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.Unix()
+	}
+	// Try ISO-8601 with timezone offset (git --date=iso-strict).
+	if t, err := time.Parse("2006-01-02T15:04:05-07:00", s); err == nil {
+		return t.Unix()
+	}
+	// Try date-only.
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t.Unix()
+	}
+	return 0
+}
+
+// truncate returns at most maxLen runes of s, appending "…" if truncated.
+// Safe for multi-byte UTF-8 (CJK, emoji, etc.).
+func truncate(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen]) + "…"
+}

@@ -243,6 +243,59 @@ func (s *Store) GetPendingTasks(planID, agentID string) ([]Task, error) {
 	return tasks, nil
 }
 
+// FindTasksByNodeID searches tasks where linked_nodes contains the given node ID.
+// Returns up to limit results ordered by most recently updated first.
+// Uses LIKE with escapeLike for safe substring matching in the JSON array column.
+func (s *Store) FindTasksByNodeID(nodeID string, limit int) ([]Task, error) {
+	if nodeID == "" || limit <= 0 {
+		return nil, nil
+	}
+	pattern := "%" + escapeLike(nodeID) + "%"
+	rows, err := s.knowledgeDB.Query(`
+		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
+		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits
+		FROM tasks
+		WHERE linked_nodes LIKE ? ESCAPE '\'
+		ORDER BY updated_at DESC
+		LIMIT ?`, pattern, limit)
+	if err != nil {
+		return nil, fmt.Errorf("find tasks by node: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		var t Task
+		var linkedJSON, depsJSON, commitsJSON string
+		if err := rows.Scan(
+			&t.ID, &t.PlanID, &t.Title, &t.Description,
+			&t.Status, &t.Priority, &linkedJSON, &depsJSON, &t.Notes,
+			&t.AssignedTo, &t.LastUpdatedBy,
+			&t.CreatedAt, &t.UpdatedAt,
+			&t.StartCommit, &commitsJSON,
+		); err != nil {
+			return nil, fmt.Errorf("scan task by node: %w", err)
+		}
+		if err := json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal linked_nodes for task %q: %v\n", t.ID, err)
+		}
+		if t.LinkedNodes == nil {
+			t.LinkedNodes = []string{}
+		}
+		if err := json.Unmarshal([]byte(depsJSON), &t.DependsOn); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal depends_on for task %q: %v\n", t.ID, err)
+		}
+		if t.DependsOn == nil {
+			t.DependsOn = []string{}
+		}
+		if err := json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal commits for task %q: %v\n", t.ID, err)
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
 // UpdateLinkedNodes replaces the linked_nodes for a task with nodeIDs.
 // Call with the full desired set (existing + newly detected); deduplication is
 // the caller's responsibility. Used by handleLinkTaskNodes and autoLinkNodes.
