@@ -4,17 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
-
-	"github.com/SynapsesOS/synapses/internal/logutil"
 )
-
-// maxVectorScanCap is the maximum number of embedding rows loaded into memory
-// during a brute-force cosine similarity scan. Prevents unbounded heap
-// allocation (≈15 MB per 10K memories). Proper ANN fix ships in Sprint 10.
-const maxVectorScanCap = 10_000
 
 // MemorySearchResult represents a memory matched by vector similarity search.
 type MemorySearchResult struct {
@@ -191,11 +183,19 @@ func (s *Store) DeleteMemoryEmbeddings(memoryIDs []string) error {
 	return nil
 }
 
-// MemoryVectorSearch performs brute-force cosine similarity search over memory
-// embeddings. Returns up to limit results ordered by descending similarity.
+// MemoryVectorSearch performs cosine similarity search over memory embeddings.
+// Returns up to limit results ordered by descending similarity.
 // Only non-expired, non-stale memories are included. Stale embeddings (stale=1)
 // are excluded from results — they need re-embedding first.
 // Falls back gracefully with (nil, nil) when no embeddings are stored yet.
+//
+// Uses a two-pass approach for memory efficiency:
+//
+//	Pass 1: Scan only (memory_id, embedding) with a min-heap of size K to
+//	         select the top-K candidates. Content is NOT loaded during the scan,
+//	         keeping peak memory at O(K) instead of O(N).
+//	Pass 2: Fetch full memory data (content, tier, entity_id) only for the
+//	         K winning candidates.
 func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearchResult, error) {
 	if limit <= 0 {
 		limit = 20
@@ -204,32 +204,25 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 		return nil, nil
 	}
 
+	// Pass 1: Lightweight scan — IDs and embeddings only.
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.knowledgeDB.Query(`
-		SELECT e.memory_id, m.content, m.tier, m.entity_id, e.embedding
+		SELECT e.memory_id, e.embedding
 		FROM memory_embeddings e
 		JOIN memories m ON e.memory_id = m.id
 		WHERE e.stale = 0
 		  AND m.stale = 0
-		  AND m.expires_at > ?
-		LIMIT 10000`, now)
+		  AND m.expires_at > ?`, now)
 	if err != nil {
 		return nil, fmt.Errorf("memory vector search: %w", err)
 	}
 	defer rows.Close()
 
-	type candidate struct {
-		result MemorySearchResult
-		score  float32
-	}
-	var candidates []candidate
-
-	scanned := 0
+	h := &topKHeap{k: limit}
 	for rows.Next() {
-		scanned++
-		var r MemorySearchResult
+		var memID string
 		var blob []byte
-		if err := rows.Scan(&r.MemoryID, &r.Content, &r.Tier, &r.EntityID, &blob); err != nil {
+		if err := rows.Scan(&memID, &blob); err != nil {
 			return nil, fmt.Errorf("scan memory embedding row: %w", err)
 		}
 		vec := blobToVec(blob)
@@ -238,42 +231,30 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 		}
 		score := cosineSimilarity(queryVec, vec)
 		if score <= 0 {
-			continue // skip negatively or zero correlated results
+			continue
 		}
-		candidates = append(candidates, candidate{r, score})
+		h.tryPush(memID, score)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if scanned == maxVectorScanCap {
-		s.vectorCapWarnOnce.Do(func() {
-			logutil.Warn("synapses: vector search cap triggered (%d embeddings scanned); results may be incomplete. Upgrade to sqlite-vec ANN (Sprint 10) for full recall.\n", maxVectorScanCap)
-		})
-	}
-	if len(candidates) == 0 {
+
+	winners := h.drain()
+	if len(winners) == 0 {
 		return nil, nil
 	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].score > candidates[j].score
-	})
-	if len(candidates) > limit {
-		candidates = candidates[:limit]
-	}
-
-	results := make([]MemorySearchResult, len(candidates))
-	for i, c := range candidates {
-		results[i] = c.result
-		results[i].Score = float64(c.score)
-	}
-	return results, nil
+	// Pass 2: Fetch content for winners only.
+	return s.fetchMemorySearchResults(winners)
 }
 
-// MemoryVectorSearchWithThreshold performs brute-force cosine similarity search
-// with a minimum similarity threshold. Results below the threshold are excluded.
+// MemoryVectorSearchWithThreshold performs cosine similarity search with a
+// minimum similarity threshold. Results below the threshold are excluded.
 // Useful for recall() where low-confidence matches should not pollute results.
-// Unlike MemoryVectorSearch, this scans all embeddings before applying the limit
-// so threshold filtering does not miss valid matches ranked beyond an arbitrary cutoff.
+//
+// Uses the same two-pass approach as MemoryVectorSearch: lightweight scan with
+// min-heap, then content fetch for winners only. The threshold is applied
+// during the scan so sub-threshold candidates never enter the heap.
 func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, minScore float64) ([]MemorySearchResult, error) {
 	if limit <= 0 {
 		limit = 20
@@ -282,33 +263,26 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 		return nil, nil
 	}
 
+	// Pass 1: Lightweight scan with threshold filter.
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.knowledgeDB.Query(`
-		SELECT e.memory_id, m.content, m.tier, m.entity_id, e.embedding
+		SELECT e.memory_id, e.embedding
 		FROM memory_embeddings e
 		JOIN memories m ON e.memory_id = m.id
 		WHERE e.stale = 0
 		  AND m.stale = 0
-		  AND m.expires_at > ?
-		LIMIT 10000`, now)
+		  AND m.expires_at > ?`, now)
 	if err != nil {
 		return nil, fmt.Errorf("memory vector search with threshold: %w", err)
 	}
 	defer rows.Close()
 
-	type candidate struct {
-		result MemorySearchResult
-		score  float32
-	}
-	var candidates []candidate
-
 	threshold := float32(minScore)
-	scanned := 0
+	h := &topKHeap{k: limit}
 	for rows.Next() {
-		scanned++
-		var r MemorySearchResult
+		var memID string
 		var blob []byte
-		if err := rows.Scan(&r.MemoryID, &r.Content, &r.Tier, &r.EntityID, &blob); err != nil {
+		if err := rows.Scan(&memID, &blob); err != nil {
 			return nil, fmt.Errorf("scan memory embedding row: %w", err)
 		}
 		vec := blobToVec(blob)
@@ -319,33 +293,74 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 		if score < threshold {
 			continue
 		}
-		candidates = append(candidates, candidate{r, score})
+		h.tryPush(memID, score)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if scanned == maxVectorScanCap {
-		s.vectorCapWarnOnce.Do(func() {
-			logutil.Warn("synapses: vector search cap triggered (%d embeddings scanned); results may be incomplete. Upgrade to sqlite-vec ANN (Sprint 10) for full recall.\n", maxVectorScanCap)
-		})
-	}
-	if len(candidates) == 0 {
+
+	winners := h.drain()
+	if len(winners) == 0 {
 		return nil, nil
 	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].score > candidates[j].score
-	})
-	if len(candidates) > limit {
-		candidates = candidates[:limit]
+	// Pass 2: Fetch content for winners only.
+	return s.fetchMemorySearchResults(winners)
+}
+
+// fetchMemorySearchResults performs the second pass of the two-pass vector
+// search: given the top-K (id, score) pairs from the scan pass, it fetches
+// the full memory content, tier, and entity_id in a single query.
+// Results are returned in the same descending-score order as winners.
+func (s *Store) fetchMemorySearchResults(winners []scoredID) ([]MemorySearchResult, error) {
+	// Build id → score+position map for reassembly.
+	type posScore struct {
+		pos   int
+		score float64
+	}
+	lookup := make(map[string]posScore, len(winners))
+	placeholders := make([]string, len(winners))
+	args := make([]any, len(winners))
+	for i, w := range winners {
+		lookup[w.id] = posScore{pos: i, score: float64(w.score)}
+		placeholders[i] = "?"
+		args[i] = w.id
 	}
 
-	results := make([]MemorySearchResult, len(candidates))
-	for i, c := range candidates {
-		results[i] = c.result
-		results[i].Score = float64(c.score)
+	rows, err := s.knowledgeDB.Query(
+		`SELECT id, content, tier, entity_id FROM memories WHERE id IN (`+
+			strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("fetch memory search results: %w", err)
 	}
-	return results, nil
+	defer rows.Close()
+
+	results := make([]MemorySearchResult, len(winners))
+	for rows.Next() {
+		var r MemorySearchResult
+		if err := rows.Scan(&r.MemoryID, &r.Content, &r.Tier, &r.EntityID); err != nil {
+			return nil, fmt.Errorf("scan memory result: %w", err)
+		}
+		ps, ok := lookup[r.MemoryID]
+		if !ok {
+			continue // should not happen
+		}
+		r.Score = ps.score
+		results[ps.pos] = r
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Filter out any zero-value entries (memories deleted between pass 1 and 2).
+	n := 0
+	for _, r := range results {
+		if r.MemoryID != "" {
+			results[n] = r
+			n++
+		}
+	}
+	return results[:n], nil
 }
 
 // memoryEmbeddingDimensions returns the dimensionality of stored embeddings
@@ -360,4 +375,3 @@ func (s *Store) memoryEmbeddingDimensions() int {
 	// Each float32 is 4 bytes.
 	return len(blob) / 4
 }
-

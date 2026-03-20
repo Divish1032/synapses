@@ -645,16 +645,16 @@ func TestUpsertMemoryEmbedding_NonExistentMemory_NoOrphanInSearch(t *testing.T) 
 	}
 }
 
-func TestMemoryVectorSearch_CapTriggersWarning(t *testing.T) {
-	// Verify that inserting more than maxVectorScanCap embeddings triggers the
-	// LIMIT, causing a warning on stderr. Uses direct DB inserts for speed.
+func TestMemoryVectorSearch_LargeDataset_NoCap(t *testing.T) {
+	// Verify that all embeddings are searched without any truncation cap.
+	// The two-pass min-heap approach searches ALL rows with bounded memory.
 	st, _ := openMemEmbedTestStore(t)
 
+	const totalRows = 500 // large enough to exceed any legacy cap thinking
 	now := time.Now().UTC()
 	expires := now.Add(365 * 24 * time.Hour).Format(time.RFC3339)
 	nowStr := now.Format(time.RFC3339)
 
-	// Insert maxVectorScanCap+1 memories and embeddings directly (no dedup).
 	tx, err := st.knowledgeDB.Begin()
 	if err != nil {
 		t.Fatalf("begin tx: %v", err)
@@ -670,13 +670,16 @@ func TestMemoryVectorSearch_CapTriggersWarning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare emb stmt: %v", err)
 	}
-	for i := 0; i < maxVectorScanCap+1; i++ {
-		id := fmt.Sprintf("cap-test-%d", i)
-		if _, err := memStmt.Exec(id, fmt.Sprintf("cap test content %d", i), nowStr, expires, nowStr); err != nil {
+
+	// Insert totalRows embeddings. The LAST one has the best score.
+	for i := 0; i < totalRows; i++ {
+		id := fmt.Sprintf("scale-test-%d", i)
+		if _, err := memStmt.Exec(id, fmt.Sprintf("scale test content %d", i), nowStr, expires, nowStr); err != nil {
 			t.Fatalf("insert memory %d: %v", i, err)
 		}
-		// All embeddings point in direction {1, 0} so they are valid candidates.
-		if _, err := embStmt.Exec(id, vecToBlob([]float32{1, 0}), now.Unix()); err != nil {
+		// All point roughly in {1, 0} direction, but the last one is closest.
+		vec := []float32{1.0, float32(totalRows-i) * 0.001}
+		if _, err := embStmt.Exec(id, vecToBlob(vec), now.Unix()); err != nil {
 			t.Fatalf("insert embedding %d: %v", i, err)
 		}
 	}
@@ -686,44 +689,29 @@ func TestMemoryVectorSearch_CapTriggersWarning(t *testing.T) {
 		t.Fatalf("commit tx: %v", err)
 	}
 
-	// Capture stderr to verify warning.
-	oldStderr := os.Stderr
-	r, w, pipeErr := os.Pipe()
-	if pipeErr != nil {
-		t.Fatalf("os.Pipe: %v", pipeErr)
+	// Search — the best match (closest to {1,0}) should be the last inserted.
+	results, err := st.MemoryVectorSearch([]float32{1, 0}, 5)
+	if err != nil {
+		t.Fatalf("MemoryVectorSearch: %v", err)
 	}
-	os.Stderr = w
-
-	results, searchErr := st.MemoryVectorSearch([]float32{1, 0}, 5)
-
-	w.Close()
-	os.Stderr = oldStderr
-
-	buf := make([]byte, 512)
-	n, _ := r.Read(buf)
-	r.Close()
-	output := string(buf[:n])
-
-	if searchErr != nil {
-		t.Fatalf("MemoryVectorSearch: %v", searchErr)
+	if len(results) != 5 {
+		t.Fatalf("expected 5 results, got %d", len(results))
 	}
-	// Results should still be returned (cap doesn't break search correctness).
-	if len(results) == 0 {
-		t.Error("expected results despite cap, got none")
+	// The top result should be the last row (smallest offset from {1,0}).
+	if results[0].MemoryID != fmt.Sprintf("scale-test-%d", totalRows-1) {
+		t.Errorf("expected last-inserted memory as top result, got %s", results[0].MemoryID)
 	}
-	// Warning must mention the cap and be WARN level.
-	if output == "" {
-		t.Error("expected WARN message on stderr when cap triggered, got nothing")
-	}
-	if !contains(output, "WARN") || !contains(output, "cap triggered") {
-		t.Errorf("expected WARN cap triggered message, got: %q", output)
+	// Verify content was fetched correctly (two-pass: content comes from pass 2).
+	if results[0].Content == "" {
+		t.Error("expected non-empty content from second pass fetch")
 	}
 }
 
-func TestMemoryVectorSearchWithThreshold_CapTriggersWarning(t *testing.T) {
-	// Same as above but for MemoryVectorSearchWithThreshold.
+func TestMemoryVectorSearchWithThreshold_LargeDataset_NoCap(t *testing.T) {
+	// Same verification for threshold variant — all rows searched, no truncation.
 	st, _ := openMemEmbedTestStore(t)
 
+	const totalRows = 500
 	now := time.Now().UTC()
 	expires := now.Add(365 * 24 * time.Hour).Format(time.RFC3339)
 	nowStr := now.Format(time.RFC3339)
@@ -743,9 +731,9 @@ func TestMemoryVectorSearchWithThreshold_CapTriggersWarning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare emb stmt: %v", err)
 	}
-	for i := 0; i < maxVectorScanCap+1; i++ {
-		id := fmt.Sprintf("cap-thresh-test-%d", i)
-		if _, err := memStmt.Exec(id, fmt.Sprintf("cap threshold test content %d", i), nowStr, expires, nowStr); err != nil {
+	for i := 0; i < totalRows; i++ {
+		id := fmt.Sprintf("scale-thresh-%d", i)
+		if _, err := memStmt.Exec(id, fmt.Sprintf("scale threshold test content %d", i), nowStr, expires, nowStr); err != nil {
 			t.Fatalf("insert memory %d: %v", i, err)
 		}
 		if _, err := embStmt.Exec(id, vecToBlob([]float32{1, 0}), now.Unix()); err != nil {
@@ -758,34 +746,22 @@ func TestMemoryVectorSearchWithThreshold_CapTriggersWarning(t *testing.T) {
 		t.Fatalf("commit tx: %v", err)
 	}
 
-	oldStderr := os.Stderr
-	r, w, pipeErr := os.Pipe()
-	if pipeErr != nil {
-		t.Fatalf("os.Pipe: %v", pipeErr)
+	results, err := st.MemoryVectorSearchWithThreshold([]float32{1, 0}, 5, 0.5)
+	if err != nil {
+		t.Fatalf("MemoryVectorSearchWithThreshold: %v", err)
 	}
-	os.Stderr = w
-
-	results, searchErr := st.MemoryVectorSearchWithThreshold([]float32{1, 0}, 5, 0.5)
-
-	w.Close()
-	os.Stderr = oldStderr
-
-	buf := make([]byte, 512)
-	n, _ := r.Read(buf)
-	r.Close()
-	output := string(buf[:n])
-
-	if searchErr != nil {
-		t.Fatalf("MemoryVectorSearchWithThreshold: %v", searchErr)
+	if len(results) != 5 {
+		t.Fatalf("expected 5 results, got %d", len(results))
 	}
-	if len(results) == 0 {
-		t.Error("expected results despite cap, got none")
+	// All scores should be above threshold.
+	for _, r := range results {
+		if r.Score < 0.5 {
+			t.Errorf("result score %f below threshold 0.5", r.Score)
+		}
 	}
-	if output == "" {
-		t.Error("expected WARN message on stderr when cap triggered, got nothing")
-	}
-	if !contains(output, "WARN") || !contains(output, "cap triggered") {
-		t.Errorf("expected WARN cap triggered message, got: %q", output)
+	// Verify content was fetched (two-pass correctness).
+	if results[0].Content == "" {
+		t.Error("expected non-empty content from second pass fetch")
 	}
 }
 
