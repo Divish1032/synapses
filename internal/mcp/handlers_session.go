@@ -1372,6 +1372,21 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// OF-S4: tool description integrity check.
+	// Re-derive the hash of all tool descriptions from the live toolDescs map
+	// and compare against the baseline computed at startup. A mismatch means
+	// a description was modified in memory after startup — surface a warning.
+	if s.toolDescBaseline != "" {
+		if current := hashToolDescs(s.toolDescs); current != s.toolDescBaseline {
+			resp["tool_integrity_alert"] = map[string]interface{}{
+				"severity": "HIGH",
+				"message":  "Tool description hash mismatch — one or more tool descriptions were modified after server startup. This may indicate runtime tampering.",
+				"expected": s.toolDescBaseline,
+				"actual":   current,
+			}
+		}
+	}
+
 	// R6: response_tokens + context_window_pct — measure token cost of this
 	// response and express it as a fraction of the agent's context window.
 	// Strategy: marshal once to count bytes, add the two fields (their combined
