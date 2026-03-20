@@ -560,6 +560,43 @@ func TestPruneStaleData_Annotations_NoGraphDB(t *testing.T) {
 	}
 }
 
+// TestPruneStaleData_Annotations_EmptyGraph verifies that when graphDB exists
+// but has zero nodes, stale annotations are preserved (not nuked). This is the
+// fail-safe for full-reindex scenarios where the graph is momentarily empty.
+func TestPruneStaleData_Annotations_EmptyGraph(t *testing.T) {
+	st := openTestStore(t)
+	resetDebounce(st)
+
+	// graphDB exists but has no nodes (empty graph).
+	// Insert a stale annotation referencing a non-existent node.
+	_, err := st.knowledgeDB.Exec(
+		`INSERT INTO annotations(id, node_id, agent_id, note, created_at, source, stale)
+		 VALUES('ann-emptygraph', 'some::repo::file.go::Func', 'agent', 'orphan note', ?, 'agent', 1)`,
+		time.Now().UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		t.Fatalf("insert annotation: %v", err)
+	}
+
+	// Verify graphDB is not nil but has 0 nodes.
+	if st.graphDB == nil {
+		t.Fatal("graphDB should not be nil")
+	}
+	var nodeCount int
+	_ = st.graphDB.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&nodeCount)
+	if nodeCount != 0 {
+		t.Fatalf("expected 0 nodes in empty graph, got %d", nodeCount)
+	}
+
+	st.PruneStaleData(30)
+
+	// Annotation must survive — empty graph means skip reconciliation.
+	after := pruneCountRows(t, st, "annotations")
+	if after != 1 {
+		t.Errorf("expected stale annotation to survive when graph is empty (reindex safety), got %d", after)
+	}
+}
+
 // TestPruneStaleData_AllTables_IntegrationRoundTrip seeds data across ALL
 // tables that PruneStaleData targets, runs prune with specific retention,
 // and verifies the exact surviving row counts.
