@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,40 +13,51 @@ import (
 	"github.com/SynapsesOS/synapses/internal/config"
 )
 
-// okHandler is a trivial handler that returns success. Used to verify that
-// rate-limit checks don't interfere with normal calls.
+// okHandler is a trivial handler that always returns success.
 var okHandler server.ToolHandlerFunc = func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return mcp.NewToolResultText("ok"), nil
 }
 
-// ── tokenBucket ────────────────────────────────────────────────────────────
+// allowBucket is a single-goroutine test helper that simulates one allow() call
+// using the refill+hasToken+consumeOne sequence. tokenBucket is not self-locking
+// (callers hold sessionBuckets.mu in production); in unit tests we run
+// single-goroutine, so no lock is needed.
+func allowBucket(b *tokenBucket) (bool, time.Duration) {
+	now := time.Now()
+	b.refill(now)
+	ok, ra := b.hasToken()
+	if ok {
+		b.consumeOne()
+	}
+	return ok, ra
+}
+
+// ── tokenBucket unit tests ─────────────────────────────────────────────────
 
 func TestTokenBucket_allowsUpToCapacity(t *testing.T) {
-	// With capacity=3, the first 3 calls must be allowed.
 	b := newTokenBucket(3)
 	for i := range 3 {
-		ok, _ := b.allow()
+		ok, _ := allowBucket(&b)
 		if !ok {
-			t.Fatalf("call %d: expected allowed (bucket has tokens), got denied", i+1)
+			t.Fatalf("call %d: expected allowed, got denied", i+1)
 		}
 	}
 }
 
 func TestTokenBucket_deniesWhenEmpty(t *testing.T) {
 	b := newTokenBucket(2)
-	b.allow() //nolint:errcheck
-	b.allow() //nolint:errcheck
+	allowBucket(&b) //nolint:errcheck
+	allowBucket(&b) //nolint:errcheck
 
-	ok, retryAfter := b.allow()
+	ok, retryAfter := allowBucket(&b)
 	if ok {
-		t.Fatal("expected denied on 3rd call (bucket empty), got allowed")
+		t.Fatal("expected denied on 3rd call (bucket empty)")
 	}
 	if retryAfter <= 0 {
 		t.Fatalf("expected positive retryAfter, got %v", retryAfter)
 	}
-	// With capacity=2, rate = 2/60 tokens/sec.
-	// From 0 tokens, need 1 → wait = 30s.
-	// Allow some slack for clock jitter (29s–31s).
+	// capacity=2 → rate = 2/60 tokens/sec → 1 token takes 30s.
+	// Allow ±1s slack for clock jitter.
 	if retryAfter < 29*time.Second || retryAfter > 31*time.Second {
 		t.Errorf("retryAfter %v outside expected range [29s, 31s] for 2/min bucket", retryAfter)
 	}
@@ -54,40 +66,37 @@ func TestTokenBucket_deniesWhenEmpty(t *testing.T) {
 func TestTokenBucket_disabledAllowsAll(t *testing.T) {
 	b := newTokenBucket(-1)
 	for range 100 {
-		if ok, _ := b.allow(); !ok {
-			t.Fatal("disabled bucket (perMinute=-1) should always allow")
+		if ok, _ := allowBucket(&b); !ok {
+			t.Fatal("disabled bucket (perMinute=-1) must always allow")
 		}
 	}
 }
 
 func TestTokenBucket_zeroPerMinuteDisabled(t *testing.T) {
-	// Zero means "use default" at the config layer, but newTokenBucket(0)
-	// should behave as disabled (capacity ≤ 0).
+	// Zero is treated as "use default" at the config layer but newTokenBucket(0)
+	// produces capacity ≤ 0 → disabled.
 	b := newTokenBucket(0)
 	for range 10 {
-		if ok, _ := b.allow(); !ok {
+		if ok, _ := allowBucket(&b); !ok {
 			t.Fatal("zero-rate bucket should be disabled (always allow)")
 		}
 	}
 }
 
 func TestTokenBucket_refillsOverTime(t *testing.T) {
-	b := newTokenBucket(1) // 1/min → 1 token per 60s
+	b := newTokenBucket(1) // 1/min → one token per 60s, starts with 1
 
-	// Exhaust the single token.
-	b.allow() //nolint:errcheck
-	ok, _ := b.allow()
+	// Consume the initial token.
+	allowBucket(&b) //nolint:errcheck
+	ok, _ := allowBucket(&b)
 	if ok {
-		t.Fatal("bucket should be empty after 1 call with capacity=1")
+		t.Fatal("bucket should be empty after exhausting the single token")
 	}
 
-	// Manually advance lastRefill by 61s to simulate ~1 minute of wall time.
-	b.mu.Lock()
+	// Advance lastRefill by 61s (simulates idle time without sleeping).
 	b.lastRefill = b.lastRefill.Add(-61 * time.Second)
-	b.mu.Unlock()
 
-	// Now allow() should refill ~1 token and succeed.
-	ok, _ = b.allow()
+	ok, _ = allowBucket(&b)
 	if !ok {
 		t.Fatal("expected allowed after simulated 61s refill")
 	}
@@ -96,82 +105,69 @@ func TestTokenBucket_refillsOverTime(t *testing.T) {
 func TestTokenBucket_noBurstBeyondCapacity(t *testing.T) {
 	b := newTokenBucket(5)
 
-	// Simulate 10 minutes of idle (600s). Tokens should cap at capacity (5).
-	b.mu.Lock()
+	// Simulate 10 minutes of idle — tokens must cap at 5, not reach 50.
 	b.lastRefill = b.lastRefill.Add(-600 * time.Second)
-	b.mu.Unlock()
 
-	// Drain the bucket — exactly 5 calls should succeed.
 	allowed := 0
 	for range 10 {
-		if ok, _ := b.allow(); ok {
+		if ok, _ := allowBucket(&b); ok {
 			allowed++
 		}
 	}
 	if allowed != 5 {
-		t.Errorf("expected exactly 5 allowed calls (capacity), got %d", allowed)
+		t.Errorf("expected exactly 5 allowed calls (capacity cap), got %d", allowed)
 	}
 }
 
-func TestTokenBucket_peekDoesNotConsume(t *testing.T) {
+func TestTokenBucket_hasTokenDoesNotConsume(t *testing.T) {
 	b := newTokenBucket(1)
+	now := time.Now()
+	b.refill(now)
 
-	// Peek twice — both should see the token as available.
-	ok1, _ := b.peek()
-	ok2, _ := b.peek()
+	// Calling hasToken multiple times must not reduce the token count.
+	ok1, _ := b.hasToken()
+	ok2, _ := b.hasToken()
 	if !ok1 || !ok2 {
-		t.Fatal("two consecutive peeks should both succeed (peek must not consume)")
+		t.Fatal("hasToken must not consume: repeated calls on a full bucket should all return true")
 	}
 
-	// Now consume — first allow() should succeed.
-	ok, _ := b.allow()
-	if !ok {
-		t.Fatal("allow() after peek should succeed (token was not consumed by peek)")
-	}
-
-	// Bucket is now empty.
-	ok, _ = b.allow()
+	// A single consume brings it to zero.
+	b.consumeOne()
+	ok, _ := b.hasToken()
 	if ok {
-		t.Fatal("second allow() should fail (bucket is now empty)")
+		t.Fatal("after consumeOne the bucket should be empty")
 	}
 }
 
-func TestTokenBucket_peekAfterEmpty(t *testing.T) {
-	b := newTokenBucket(1)
-	b.allow() //nolint:errcheck
+func TestTokenBucket_refillUsesProvidedTime(t *testing.T) {
+	b := newTokenBucket(60) // 1 token/sec, start full at 60
 
-	ok, retryAfter := b.peek()
+	// Drain all 60 tokens.
+	for range 60 {
+		allowBucket(&b)
+	}
+	ok, _ := allowBucket(&b)
 	if ok {
-		t.Fatal("peek on empty bucket should return false")
+		t.Fatal("bucket should be empty after 61 calls with capacity=60")
 	}
-	if retryAfter <= 0 {
-		t.Errorf("peek retryAfter should be positive, got %v", retryAfter)
-	}
-}
 
-func TestTokenBucket_consumeAfterPeek(t *testing.T) {
-	b := newTokenBucket(3)
+	// Advance time by exactly 5s → should get exactly 5 tokens back.
+	future := time.Now().Add(5 * time.Second)
+	b.refill(future)
 
-	ok, _ := b.peek()
-	if !ok {
-		t.Fatal("peek should succeed on fresh bucket")
-	}
-	b.consume()
-
-	// Only 2 tokens remain after one consume.
-	for range 2 {
-		ok, _ := b.allow()
-		if !ok {
-			t.Fatal("should still have 2 tokens after one consume")
+	allowed := 0
+	for range 10 {
+		if ok, _ := b.hasToken(); ok {
+			b.consumeOne()
+			allowed++
 		}
 	}
-	ok, _ = b.allow()
-	if ok {
-		t.Fatal("4th call should fail (3 tokens total, 3 consumed)")
+	if allowed != 5 {
+		t.Errorf("expected 5 tokens after 5s refill at 1/sec, got %d", allowed)
 	}
 }
 
-// ── newRateLimiter ─────────────────────────────────────────────────────────
+// ── newRateLimiter config ──────────────────────────────────────────────────
 
 func TestNewRateLimiter_defaultsApplied(t *testing.T) {
 	rl := newRateLimiter(config.RateLimitConfig{})
@@ -206,16 +202,17 @@ func TestNewRateLimiter_configOverridesDefaults(t *testing.T) {
 func TestNewRateLimiter_negativeOneDisablesCategory(t *testing.T) {
 	rl := newRateLimiter(config.RateLimitConfig{WriteOpsPerMinute: -1})
 	if rl.writeLimitPerMin != -1 {
-		t.Errorf("expected -1, got %d", rl.writeLimitPerMin)
+		t.Errorf("expected -1 (disabled), got %d", rl.writeLimitPerMin)
 	}
 }
 
-// ── rateLimiter.check — peek-then-consume ─────────────────────────────────
+// ── rateLimiter.check correctness ─────────────────────────────────────────
 
-// Critical correctness property: a multi-category call that fails on a later
-// category must NOT consume tokens from earlier categories.
+// TestRateLimiter_check_noTokenBleedOnFailure is the critical correctness test:
+// a multi-category call that fails on the second category must not consume
+// tokens from the first category (true peek-then-consume under a single lock).
 func TestRateLimiter_check_noTokenBleedOnFailure(t *testing.T) {
-	// write limit=10 (plenty), cross-project limit=1 (tight).
+	// write=10 (plenty), cross_project=1 (tight).
 	rl := newRateLimiter(config.RateLimitConfig{
 		WriteOpsPerMinute:     10,
 		CrossProjectPerMinute: 1,
@@ -223,27 +220,26 @@ func TestRateLimiter_check_noTokenBleedOnFailure(t *testing.T) {
 
 	args := map[string]interface{}{"projects": "*"}
 
-	// First call: both write and cross-project pass; tokens consumed from both.
+	// First call: write + cross_project both pass; tokens consumed from both.
 	res := rl.check("sess", "remember", args)
 	if !res.allowed {
 		t.Fatal("first call should be allowed")
 	}
 
-	// Second call: cross-project is exhausted.
-	// CRITICAL: write tokens must NOT have been consumed on the first rejection.
+	// Second call: cross_project is exhausted.
+	// CRITICAL: the write bucket must NOT have been charged for this rejection.
 	res = rl.check("sess", "remember", args)
 	if res.allowed {
-		t.Fatal("second call should be denied (cross-project exhausted)")
+		t.Fatal("second call should be denied (cross_project exhausted)")
 	}
 	if res.category != "cross_project" {
-		t.Errorf("expected category cross_project, got %q", res.category)
+		t.Errorf("expected cross_project category, got %q", res.category)
 	}
 
-	// Verify write bucket was NOT charged for the failed second call.
-	// A plain (non-cross-project) write should still succeed.
+	// A plain write (no projects=) must still succeed: 9 write tokens remain.
 	res = rl.check("sess", "remember", nil)
 	if !res.allowed {
-		t.Fatal("write-only call should succeed — write tokens must not have been charged on the failed cross-project call")
+		t.Fatal("plain write should succeed — write bucket must not have been charged on the rejected cross_project call")
 	}
 }
 
@@ -310,7 +306,7 @@ func TestRateLimiter_separateSessionsIndependent(t *testing.T) {
 
 	res = rl.check("sess2", "remember", nil)
 	if !res.allowed {
-		t.Fatal("sess2 should have independent budget")
+		t.Fatal("sess2 must have an independent budget")
 	}
 }
 
@@ -323,11 +319,10 @@ func TestRateLimiter_clearSession(t *testing.T) {
 		t.Fatal("sess1 should be rate limited")
 	}
 
-	// After clear, the session entry is removed. Next call creates a fresh bucket.
 	rl.clearSession("sess1")
 	res = rl.check("sess1", "remember", nil)
 	if !res.allowed {
-		t.Fatal("after clearSession, a new full budget should be created")
+		t.Fatal("after clearSession a fresh bucket with full budget should be created")
 	}
 }
 
@@ -343,17 +338,60 @@ func TestRateLimiter_nonRateLimitedToolsNotChecked(t *testing.T) {
 	rl.check("sess1", "recall", nil)
 	rl.check("sess1", "get_context", map[string]interface{}{"projects": "*"})
 
-	// A tool not in any rate-limited set, with no projects= arg, must always pass.
+	// A tool not in any rate-limited set, with no projects= arg, must pass freely.
 	res := rl.check("sess1", "get_context", nil)
 	if !res.allowed {
-		t.Fatal("get_context (no projects=) must not be rate limited, even when other buckets are full")
+		t.Fatal("get_context (no projects=) must not be rate limited even when other buckets are full")
 	}
 }
 
-// ── rateLimiter.wrap — attack vector tests ─────────────────────────────────
+// ── Concurrency: TOCTOU absence test ──────────────────────────────────────
+
+// TestRateLimiter_check_concurrentSameSession verifies that concurrent calls
+// from the same session never exceed the limit — proving the single-lock
+// peek+consume design eliminates the TOCTOU race.
+//
+// With limit=5 and 50 goroutines all calling check() simultaneously, exactly 5
+// must be allowed and the rest denied. Any count > 5 would indicate the TOCTOU
+// bug (two goroutines both peeking a token before either consumes it).
+func TestRateLimiter_check_concurrentSameSession(t *testing.T) {
+	const limit = 5
+	const goroutines = 50
+
+	rl := newRateLimiter(config.RateLimitConfig{WriteOpsPerMinute: limit})
+
+	var wg sync.WaitGroup
+	allowed := make([]bool, goroutines)
+	start := make(chan struct{})
+
+	for i := range goroutines {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start // all goroutines start simultaneously
+			res := rl.check("shared-session", "remember", nil)
+			allowed[idx] = res.allowed
+		}(i)
+	}
+
+	close(start) // release all goroutines at once
+	wg.Wait()
+
+	count := 0
+	for _, ok := range allowed {
+		if ok {
+			count++
+		}
+	}
+	if count != limit {
+		t.Errorf("expected exactly %d allowed calls, got %d — TOCTOU race detected", limit, count)
+	}
+}
+
+// ── wrap — attack vector and integration tests ─────────────────────────────
 
 // TestRateLimiter_wrap_blocksFloodingRemember is the primary security proof:
-// the attack vector (flooding write tools) must be closed.
+// flooding write tools must be rejected after the budget is exhausted.
 func TestRateLimiter_wrap_blocksFloodingRemember(t *testing.T) {
 	rl := newRateLimiter(config.RateLimitConfig{WriteOpsPerMinute: 2})
 	wrapped := rl.wrap("remember", okHandler)
@@ -362,28 +400,24 @@ func TestRateLimiter_wrap_blocksFloodingRemember(t *testing.T) {
 	makeReq := func() mcp.CallToolRequest {
 		req := mcp.CallToolRequest{}
 		req.Params.Name = "remember"
-		req.Params.Arguments = map[string]interface{}{"decision": "important fact"}
+		req.Params.Arguments = map[string]interface{}{"decision": "fact"}
 		return req
 	}
 
-	// First two calls: allowed (budget = 2).
 	for i := range 2 {
 		result, err := wrapped(ctx, makeReq())
-		if err != nil {
-			t.Fatalf("call %d: unexpected error: %v", i+1, err)
-		}
-		if result.IsError {
-			t.Fatalf("call %d: expected success, got error: %v", i+1, result.Content)
+		if err != nil || result.IsError {
+			t.Fatalf("call %d: expected success, got err=%v isError=%v", i+1, err, result.IsError)
 		}
 	}
 
-	// Third call: must be rate-limited. Attack vector closed.
+	// Third call: must be rate-limited (attack vector closed).
 	result, err := wrapped(ctx, makeReq())
 	if err != nil {
-		t.Fatalf("wrap must not return a Go error, got: %v", err)
+		t.Fatalf("wrap must not return a Go error: %v", err)
 	}
 	if !result.IsError {
-		t.Fatal("3rd call should be rate-limited but was allowed — attack vector still open")
+		t.Fatal("3rd call should be rate-limited — attack vector still open")
 	}
 
 	tc, ok := result.Content[0].(mcp.TextContent)
@@ -417,14 +451,9 @@ func TestRateLimiter_wrap_blocksFloodingRecall(t *testing.T) {
 	if result.IsError {
 		t.Fatal("first recall should be allowed")
 	}
-
-	// Second call: denied. Attack vector closed.
 	result, err := wrapped(ctx, makeReq())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !result.IsError {
-		t.Fatal("second recall should be rate-limited")
+	if err != nil || !result.IsError {
+		t.Fatalf("second recall should be rate-limited: err=%v isError=%v", err, result.IsError)
 	}
 	tc := result.Content[0].(mcp.TextContent)
 	if !strings.Contains(tc.Text, "expensive_reads") {
@@ -434,7 +463,6 @@ func TestRateLimiter_wrap_blocksFloodingRecall(t *testing.T) {
 
 func TestRateLimiter_wrap_blocksCrossProjectFlooding(t *testing.T) {
 	rl := newRateLimiter(config.RateLimitConfig{CrossProjectPerMinute: 1})
-	// Use a non-write, non-expensive-read tool to isolate the cross-project path.
 	wrapped := rl.wrap("get_events", okHandler)
 
 	ctx := context.Background()
@@ -449,13 +477,9 @@ func TestRateLimiter_wrap_blocksCrossProjectFlooding(t *testing.T) {
 	if result.IsError {
 		t.Fatal("first cross-project call should be allowed")
 	}
-
 	result, err := wrapped(ctx, makeReq())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !result.IsError {
-		t.Fatal("second cross-project call should be rate-limited")
+	if err != nil || !result.IsError {
+		t.Fatalf("second cross-project call should be rate-limited: err=%v isError=%v", err, result.IsError)
 	}
 	tc := result.Content[0].(mcp.TextContent)
 	if !strings.Contains(tc.Text, "cross_project") {
@@ -470,7 +494,6 @@ func TestRateLimiter_wrap_nonRateLimitedPassThrough(t *testing.T) {
 		CrossProjectPerMinute:   1,
 	})
 
-	// get_context with no projects= arg is not in any rate-limited set.
 	wrapped := rl.wrap("get_context", okHandler)
 	ctx := context.Background()
 	for i := range 5 {
@@ -492,7 +515,6 @@ func TestRateLimiter_wrap_sessionIsolationViaContext(t *testing.T) {
 	req.Params.Name = "remember"
 	req.Params.Arguments = map[string]interface{}{"decision": "x"}
 
-	// Session A: exhaust its budget.
 	ctxA := WithSessionID(context.Background(), "session-A")
 	wrapped(ctxA, req) //nolint:errcheck
 	resultA, _ := wrapped(ctxA, req)
@@ -500,16 +522,13 @@ func TestRateLimiter_wrap_sessionIsolationViaContext(t *testing.T) {
 		t.Fatal("session-A second call should be denied")
 	}
 
-	// Session B: must be completely independent.
 	ctxB := WithSessionID(context.Background(), "session-B")
 	resultB, _ := wrapped(ctxB, req)
 	if resultB.IsError {
-		t.Fatal("session-B should not be affected by session-A's exhausted budget")
+		t.Fatal("session-B must have an independent budget, unaffected by session-A")
 	}
 }
 
-// TestRateLimiter_wrap_nilArgsNoRace verifies that a tool call with nil
-// arguments (valid in MCP) does not panic or data-race.
 func TestRateLimiter_wrap_nilArgsNoRace(t *testing.T) {
 	rl := newRateLimiter(config.RateLimitConfig{WriteOpsPerMinute: 5})
 	wrapped := rl.wrap("remember", okHandler)
@@ -517,19 +536,14 @@ func TestRateLimiter_wrap_nilArgsNoRace(t *testing.T) {
 	ctx := context.Background()
 	req := mcp.CallToolRequest{}
 	req.Params.Name = "remember"
-	req.Params.Arguments = nil // nil args — must not panic
+	req.Params.Arguments = nil // nil args: valid in MCP; must not panic
 
 	result, err := wrapped(ctx, req)
-	if err != nil {
-		t.Fatalf("nil args must not produce a Go error: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("nil args should not be rate-limited (first call): %v", result.Content)
+	if err != nil || result.IsError {
+		t.Fatalf("nil args must not produce an error: err=%v isError=%v", err, result.IsError)
 	}
 }
 
-// TestRateLimiter_wrap_disabledCategoryAlwaysAllows verifies that setting a
-// category to -1 in config disables it for that tool, regardless of call count.
 func TestRateLimiter_wrap_disabledCategoryAlwaysAllows(t *testing.T) {
 	rl := newRateLimiter(config.RateLimitConfig{WriteOpsPerMinute: -1})
 	wrapped := rl.wrap("remember", okHandler)
@@ -541,7 +555,7 @@ func TestRateLimiter_wrap_disabledCategoryAlwaysAllows(t *testing.T) {
 		req.Params.Arguments = map[string]interface{}{"decision": "x"}
 		result, _ := wrapped(ctx, req)
 		if result.IsError {
-			t.Fatalf("call %d: disabled category should always allow", i+1)
+			t.Fatalf("call %d: disabled category must always allow", i+1)
 		}
 	}
 }

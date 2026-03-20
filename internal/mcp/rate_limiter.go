@@ -40,34 +40,28 @@ var expensiveReadTools = map[string]bool{
 
 // tokenBucket implements a continuous token-bucket rate limiter.
 //
-// Tokens accumulate at a constant rate (perMinute/60 per second) up to a
-// maximum capacity equal to perMinute. Each allowed call consumes one token.
-// When the bucket is empty, calls are rejected with a retryAfter hint equal to
-// the time until the next token is available.
+// NOT thread-safe on its own. All methods must be called while the caller
+// holds sessionBuckets.mu. This is intentional: it allows the check+consume
+// sequence across multiple buckets to be atomic under a single session lock,
+// eliminating the TOCTOU race that would arise if each bucket had its own mutex
+// (two goroutines could both peek successfully, then both consume from the same
+// 1-token bucket, letting two calls through when only one should be allowed).
 //
-// This is strictly better than a fixed-window limiter for our use case:
-//   - No double-burst at window boundaries (a fixed-window allows 2× the limit
-//     in the 2 seconds straddling a window reset).
-//   - retryAfter is exact: it reflects the actual wait time, not "some time
-//     before the next window".
-//   - An idle session that returns after minutes gets tokens back gradually
-//     (capped at capacity), which matches natural agent usage patterns.
+// Design: tokens accumulate continuously at ratePerSec = capacity/60. Starting
+// full means the first burst (up to capacity calls) is always granted. Idle
+// sessions regain tokens over time, capped at capacity.
 type tokenBucket struct {
-	mu         sync.Mutex
 	tokens     float64   // current token count (fractional for precision)
-	lastRefill time.Time // timestamp of last refill computation
-	ratePerSec float64   // tokens added per second = perMinute / 60
-	capacity   float64   // maximum token count = perMinute; ≤0 means disabled
+	lastRefill time.Time // time of last refill, used to compute elapsed
+	ratePerSec float64   // tokens per second = perMinute / 60
+	capacity   float64   // maximum token count = perMinute; ≤ 0 means disabled
 }
 
-// newTokenBucket creates a full token bucket for the given per-minute rate.
-// The bucket starts full so the first burst (up to perMinute calls) is always
-// allowed — sessions start with their complete budget, not an empty one.
-// perMinute ≤ 0 disables rate limiting for this category (always allow).
+// newTokenBucket creates a full token bucket for the given per-minute limit.
+// perMinute ≤ 0 disables rate limiting for this category (all calls allowed).
 func newTokenBucket(perMinute int) tokenBucket {
 	if perMinute <= 0 {
-		// capacity ≤ 0 signals "disabled" — allow() always returns true.
-		return tokenBucket{capacity: float64(perMinute)}
+		return tokenBucket{capacity: float64(perMinute)} // capacity ≤ 0 → disabled
 	}
 	cap := float64(perMinute)
 	return tokenBucket{
@@ -78,61 +72,75 @@ func newTokenBucket(perMinute int) tokenBucket {
 	}
 }
 
-// allow returns (true, 0) when a token is available, consuming it.
-// Returns (false, retryAfter) when the bucket is empty; retryAfter is the
-// exact duration until one token accumulates at the current refill rate.
-func (b *tokenBucket) allow() (bool, time.Duration) {
+// refill adds tokens earned since lastRefill, capping at capacity.
+// Must be called before hasToken or consumeOne. Accepts an external 'now'
+// so a single check() call uses consistent time across all three buckets.
+func (b *tokenBucket) refill(now time.Time) {
 	if b.capacity <= 0 {
-		return true, 0 // disabled — always allow
+		return
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	// Refill tokens proportional to elapsed wall time.
-	now := time.Now()
 	elapsed := now.Sub(b.lastRefill).Seconds()
 	b.tokens += elapsed * b.ratePerSec
 	if b.tokens > b.capacity {
 		b.tokens = b.capacity
 	}
 	b.lastRefill = now
+}
 
+// hasToken reports whether the bucket holds at least 1 token.
+// Returns (true, 0) when available. Returns (false, retryAfter) when empty,
+// where retryAfter is the exact time until one token accumulates.
+// Caller must call refill(now) before this.
+func (b *tokenBucket) hasToken() (bool, time.Duration) {
+	if b.capacity <= 0 {
+		return true, 0 // disabled — always available
+	}
 	if b.tokens >= 1.0 {
-		b.tokens--
 		return true, 0
 	}
-
-	// Exact wait until the bucket holds 1.0 tokens, plus a 1 ms safety buffer
-	// so the agent doesn't retry a millisecond too early.
 	tokensNeeded := 1.0 - b.tokens
 	waitSecs := tokensNeeded / b.ratePerSec
-	retryAfter := time.Duration(waitSecs*float64(time.Second)) + time.Millisecond
-	return false, retryAfter
+	// Add 1ms safety buffer so agents don't retry a millisecond too early.
+	return false, time.Duration(waitSecs*float64(time.Second)) + time.Millisecond
+}
+
+// consumeOne removes one token. Must only be called after hasToken returned
+// true within the same critical section (i.e. while sessionBuckets.mu is held).
+func (b *tokenBucket) consumeOne() {
+	if b.capacity <= 0 {
+		return
+	}
+	b.tokens--
+	if b.tokens < 0 {
+		b.tokens = 0 // guard against floating-point underflow
+	}
 }
 
 // sessionBuckets holds the three independent rate-limit buckets for one MCP
-// connection (identified by its session key). Created lazily on first access.
+// connection. mu serialises ALL bucket operations for this session — this is
+// the key invariant that makes peek-then-consume atomic (no TOCTOU).
 type sessionBuckets struct {
+	mu            sync.Mutex // guards write, expensiveRead, crossProject atomically
 	write         tokenBucket
 	expensiveRead tokenBucket
 	crossProject  tokenBucket
 }
 
-// rateLimiter manages per-session rate limit state. It is embedded in Server
-// and wired into addOrDefer so every applicable tool is protected without
-// per-handler boilerplate. Thread-safe.
+// rateLimiter manages per-session rate limit state. Embedded in Server and
+// wired into addOrDefer so every applicable tool is protected uniformly.
+// Thread-safe: getOrCreate serialises session creation; each session's mu
+// serialises all bucket access within that session.
 type rateLimiter struct {
 	mu       sync.Mutex
 	sessions map[string]*sessionBuckets
 
-	writeLimitPerMin        int
+	writeLimitPerMin         int
 	expensiveReadLimitPerMin int
 	crossProjectLimitPerMin  int
 }
 
-// newRateLimiter constructs a rateLimiter from synapses.json config.
-// Any zero-value field in cfg falls back to the built-in default.
-// A field set to exactly -1 disables that category (limit ≤ 0 → always allow).
+// newRateLimiter constructs a rateLimiter from config. Zero fields fall back to
+// built-in defaults. A field set to -1 disables that category entirely.
 func newRateLimiter(cfg config.RateLimitConfig) *rateLimiter {
 	rl := &rateLimiter{
 		sessions:                 make(map[string]*sessionBuckets),
@@ -153,7 +161,6 @@ func newRateLimiter(cfg config.RateLimitConfig) *rateLimiter {
 }
 
 // getOrCreate returns the bucket set for sessionKey, creating it if absent.
-// Caller must NOT hold rl.mu.
 func (rl *rateLimiter) getOrCreate(sessionKey string) *sessionBuckets {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -179,20 +186,23 @@ func (rl *rateLimiter) clearSession(sessionKey string) {
 
 // checkResult holds the outcome of a multi-category rate-limit check.
 type checkResult struct {
-	allowed     bool
-	retryAfter  time.Duration
-	category    string
+	allowed    bool
+	retryAfter time.Duration
+	category   string
 }
 
-// check evaluates all applicable rate-limit categories for the given tool call
-// using a peek-then-consume strategy: all applicable limits are verified before
-// any tokens are consumed, so a failure in one category never silently charges
-// tokens from another.
+// check evaluates all applicable rate-limit categories for a tool call.
 //
-// Categories checked:
-//   - write: if toolName is in writeRateLimitedTools
-//   - expensiveRead: if toolName is in expensiveReadTools
-//   - crossProject: if args["projects"] is non-empty (any cross-project query)
+// The entire peek+consume sequence for all applicable buckets runs under a
+// single session-level lock (sb.mu), making it atomically correct even when
+// multiple goroutines serve the same session concurrently (possible in daemon
+// mode where REST and MCP handlers run in parallel goroutine pools).
+//
+// A single 'now' timestamp is shared across all bucket refills so that time
+// does not drift between category checks within the same call.
+//
+// Failure in one category never charges tokens from another (true
+// peek-then-consume: all buckets are verified before any token is consumed).
 func (rl *rateLimiter) check(sessionKey, toolName string, args map[string]interface{}) checkResult {
 	isWrite := writeRateLimitedTools[toolName]
 	isExpensive := expensiveReadTools[toolName]
@@ -205,107 +215,61 @@ func (rl *rateLimiter) check(sessionKey, toolName string, args map[string]interf
 
 	sb := rl.getOrCreate(sessionKey)
 
-	// Phase 1 — peek: verify all applicable limits without consuming tokens.
-	// This prevents charging a write token when a cross-project limit would
-	// reject the call anyway (e.g. recall(projects="*") exhausts cross_project
-	// first, without burning an expensive_read token for a call that won't run).
+	// Single lock for the entire peek+consume sequence.
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
+	now := time.Now()
+
+	// Phase 1 — peek: refill then verify all applicable buckets. No tokens
+	// are consumed yet. First failing category returns immediately so the
+	// agent gets the most actionable limit name and retry hint.
 	if isWrite {
-		if ok, ra := sb.write.peek(); !ok {
+		sb.write.refill(now)
+		if ok, ra := sb.write.hasToken(); !ok {
 			return checkResult{allowed: false, retryAfter: ra, category: "write_ops"}
 		}
 	}
 	if isExpensive {
-		if ok, ra := sb.expensiveRead.peek(); !ok {
+		sb.expensiveRead.refill(now)
+		if ok, ra := sb.expensiveRead.hasToken(); !ok {
 			return checkResult{allowed: false, retryAfter: ra, category: "expensive_reads"}
 		}
 	}
 	if isCrossProject {
-		if ok, ra := sb.crossProject.peek(); !ok {
+		sb.crossProject.refill(now)
+		if ok, ra := sb.crossProject.hasToken(); !ok {
 			return checkResult{allowed: false, retryAfter: ra, category: "cross_project"}
 		}
 	}
 
-	// Phase 2 — consume: all checks passed; consume one token per applicable bucket.
+	// Phase 2 — consume: all checks passed; deduct one token per applicable
+	// bucket. Still under sb.mu so no other goroutine can interleave.
 	if isWrite {
-		sb.write.consume()
+		sb.write.consumeOne()
 	}
 	if isExpensive {
-		sb.expensiveRead.consume()
+		sb.expensiveRead.consumeOne()
 	}
 	if isCrossProject {
-		sb.crossProject.consume()
+		sb.crossProject.consumeOne()
 	}
 
 	return checkResult{allowed: true}
 }
 
-// peek checks whether the bucket has at least 1 token without consuming it.
-// Returns (true, 0) if a token is available, (false, retryAfter) otherwise.
-// Thread-safe; uses the same lock as allow().
-func (b *tokenBucket) peek() (bool, time.Duration) {
-	if b.capacity <= 0 {
-		return true, 0
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	now := time.Now()
-	elapsed := now.Sub(b.lastRefill).Seconds()
-	current := b.tokens + elapsed*b.ratePerSec
-	if current > b.capacity {
-		current = b.capacity
-	}
-
-	if current >= 1.0 {
-		return true, 0
-	}
-	tokensNeeded := 1.0 - current
-	waitSecs := tokensNeeded / b.ratePerSec
-	return false, time.Duration(waitSecs*float64(time.Second)) + time.Millisecond
-}
-
-// consume removes one token. Must only be called after a successful peek()
-// within the same logical operation. It re-runs the refill so the time elapsed
-// between peek() and consume() is accounted for (always safe: more elapsed
-// time means more tokens, never fewer).
-func (b *tokenBucket) consume() {
-	if b.capacity <= 0 {
-		return
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	now := time.Now()
-	elapsed := now.Sub(b.lastRefill).Seconds()
-	b.tokens += elapsed * b.ratePerSec
-	if b.tokens > b.capacity {
-		b.tokens = b.capacity
-	}
-	b.lastRefill = now
-
-	// Guaranteed ≥ 1 token because we peeked successfully; clamp to zero on
-	// the rare nanosecond-level race where elapsed rounds down to exactly 0.
-	b.tokens--
-	if b.tokens < 0 {
-		b.tokens = 0
-	}
-}
-
 // wrap returns a handler that applies rate limiting before calling h.
 //
-// For tools not subject to any limit (not write, not expensive-read, and no
-// projects= arg), the call is forwarded immediately with zero overhead beyond
-// a map lookup and a type assertion.
+// Fast path: if the tool is not in any rate-limited set and the call carries
+// no projects= arg, the handler is called directly with zero mutex overhead.
 //
-// When a limit is exceeded, the original handler is NOT called; a 429-style
-// error is returned with tool name, limit category, and retry_after hint.
-// This matches the "429 with retry_after hint" behaviour specified in ROADMAP.
+// When a limit is exceeded the underlying handler is NOT called; a 429-style
+// error result is returned with the limit category and retry_after hint.
 func (rl *rateLimiter) wrap(toolName string, h server.ToolHandlerFunc) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args, _ := req.Params.Arguments.(map[string]interface{})
 
-		// Fast path: tool is not in any rate-limited set and the call has no
-		// projects= arg — no rate limiting applies, no mutex acquired.
+		// Fast path: not rate-limited and no cross-project arg.
 		isWrite := writeRateLimitedTools[toolName]
 		isExpensive := expensiveReadTools[toolName]
 		projects, _ := args["projects"].(string)
@@ -321,7 +285,7 @@ func (rl *rateLimiter) wrap(toolName string, h server.ToolHandlerFunc) server.To
 			secs := int(res.retryAfter.Seconds()) + 1
 			return mcp.NewToolResultError(fmt.Sprintf(
 				"rate_limit_exceeded: tool %q has exceeded the %s rate limit for this session. "+
-					"retry_after=%ds. Limits reset gradually (token bucket). "+
+					"retry_after=%ds. Limits refill continuously (token bucket). "+
 					"Configure rate_limits in synapses.json to adjust.",
 				toolName, res.category, secs,
 			)), nil
