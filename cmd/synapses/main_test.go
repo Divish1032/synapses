@@ -1365,7 +1365,7 @@ func TestEmbedAllNodes_NilClient(t *testing.T) {
 
 func TestFetchAndWriteBackSummaries_NilStore(t *testing.T) {
 	// Nil store → early return immediately.
-	fetchAndWriteBackSummaries(nil, graph.New("test"), nil)
+	fetchAndWriteBackSummaries(context.Background(), nil, graph.New("test"), nil)
 }
 
 // ── applyGoTypesIfEnabled / applyTSTypesIfEnabled enabled paths ───────────────
@@ -1965,7 +1965,7 @@ func TestBulkIngestToBrain_WithGraph(t *testing.T) {
 	})
 
 	// Should complete without panicking regardless of brain response.
-	bulkIngestToBrain(bc, g, "test-project")
+	bulkIngestToBrain(context.Background(), bc, g, "test-project")
 }
 
 // ── cmdStartProxy and cmdStartDirect flag errors ──────────────────────────────

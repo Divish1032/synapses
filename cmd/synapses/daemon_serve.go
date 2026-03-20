@@ -1036,8 +1036,8 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		}
 		go func() {
 			go fetchTopNSummaries(projCtx, brainCli, g, st, 20)
-			bulkIngestToBrain(brainCli, g, pathProjectID(absPath))
-			fetchAndWriteBackSummaries(brainCli, g, st)
+			bulkIngestToBrain(projCtx, brainCli, g, pathProjectID(absPath))
+			fetchAndWriteBackSummaries(projCtx, brainCli, g, st)
 		}()
 	}
 
