@@ -29,6 +29,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // ── Embedded Modelfile content ────────────────────────────────────────────────
@@ -577,8 +579,7 @@ func brainWriteConfig(ollamaURL, mode string) (string, error) {
 	existing := map[string]interface{}{}
 	if data, err := os.ReadFile(cfgPath); err == nil {
 		if jsonErr := json.Unmarshal(data, &existing); jsonErr != nil {
-			fmt.Fprintf(os.Stderr,
-				"  warning: brain.json could not be parsed (%v) — existing keys will be overwritten\n",
+			logutil.Warn("brain.json could not be parsed (%v) — existing keys will be overwritten\n",
 				jsonErr)
 			existing = map[string]interface{}{}
 		}

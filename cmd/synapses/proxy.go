@@ -24,6 +24,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // cmdStartProxy is the new implementation of "synapses start". It ensures the
@@ -54,7 +56,7 @@ func cmdStartProxy(args []string) error {
 
 	// ── Check for binary version mismatch ────────────────────────────────────
 	if err := checkSingletonDaemonVersion(); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses proxy: %v — restarting daemon\n", err)
+		logutil.Error("synapses proxy: %v — restarting daemon\n", err)
 		if err := restartSingletonDaemon(absPath); err != nil {
 			return fmt.Errorf("restart daemon: %w", err)
 		}
@@ -110,7 +112,7 @@ func ensureSingletonDaemon(absPath string) error {
 
 	cleanStaleSingletonPID()
 
-	fmt.Fprintf(os.Stderr, "synapses proxy: starting singleton daemon\n")
+	logutil.Info("synapses proxy: starting singleton daemon\n")
 
 	self, err := os.Executable()
 	if err != nil {
@@ -148,7 +150,7 @@ func ensureSingletonDaemon(absPath string) error {
 	for time.Now().Before(deadline) {
 		time.Sleep(backoff)
 		if IsSingletonDaemonRunning() {
-			fmt.Fprintf(os.Stderr, "synapses proxy: daemon ready\n")
+			logutil.Info("synapses proxy: daemon ready\n")
 			return nil
 		}
 		// Check if daemon process died.

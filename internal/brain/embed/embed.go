@@ -27,6 +27,8 @@ import (
 	"runtime"
 	"sync"
 	"time"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // Server manages a llama-server subprocess running in embedding-only mode.
@@ -164,23 +166,23 @@ func (s *Server) supervise(ctx context.Context, args []string) {
 			backoff *= 2
 		}
 
-		fmt.Fprintf(os.Stderr, "synapses-intelligence/embed: llama-server exited unexpectedly; restarting (backoff %s)…\n", backoff)
+		logutil.Error("synapses-intelligence/embed: llama-server exited unexpectedly; restarting (backoff %s)…\n", backoff)
 
 		s.mu.Lock()
 		newProc := exec.CommandContext(ctx, s.llamaBin, args...)
 		newProc.Stderr = os.Stderr
 		if err := newProc.Start(); err != nil {
 			s.mu.Unlock()
-			fmt.Fprintf(os.Stderr, "synapses-intelligence/embed: restart failed: %v\n", err)
+			logutil.Error("synapses-intelligence/embed: restart failed: %v\n", err)
 			continue
 		}
 		s.proc = newProc
 		s.mu.Unlock()
 
 		if err := s.waitReady(ctx, 60*time.Second); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses-intelligence/embed: restarted server not ready: %v\n", err)
+			logutil.Error("synapses-intelligence/embed: restarted server not ready: %v\n", err)
 		} else {
-			fmt.Fprintf(os.Stderr, "synapses-intelligence/embed: llama-server restarted successfully\n")
+			logutil.Info("synapses-intelligence/embed: llama-server restarted successfully\n")
 			backoff = time.Second // reset backoff on successful restart
 		}
 	}

@@ -2,9 +2,10 @@ package mcp
 
 import (
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // ScanMode controls the scanner's response when injection patterns are detected.
@@ -243,7 +244,7 @@ func (s *InjectionScanner) compilePatterns() {
 		re, err := regexp.Compile(d.pattern)
 		if err != nil {
 			// Compile errors are programming bugs — log and skip.
-			fmt.Fprintf(os.Stderr, "synapses: injection scanner: bad pattern %q: %v\n", d.name, err)
+			logutil.Error("synapses: injection scanner: bad pattern %q: %v\n", d.name, err)
 			continue
 		}
 		s.patterns = append(s.patterns, injectionPattern{
@@ -299,7 +300,7 @@ func (s *Server) scanContent(fieldName, text string) (*scanContentResult, error)
 	}
 
 	warning := FormatWarning(matches)
-	fmt.Fprintf(os.Stderr, "synapses: [%s] %s in field %q\n", s.injectionScanner.Mode(), warning, fieldName)
+	logutil.Warn("synapses: [%s] %s in field %q\n", s.injectionScanner.Mode(), warning, fieldName)
 
 	switch s.injectionScanner.Mode() {
 	case ScanModeReject:

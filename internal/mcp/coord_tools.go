@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // handleGetPlans lists all plans with task completion counts.
@@ -97,7 +98,7 @@ func (s *Server) handleLinkTaskNodes(
 	switch v := req.GetArguments()["node_ids"].(type) {
 	case string:
 		if err := json.Unmarshal([]byte(v), &nodeIDs); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: coord: unmarshal node_ids from request: %v\n", err)
+			logutil.Debug("synapses: coord: unmarshal node_ids from request: %v\n", err)
 		}
 	case []interface{}:
 		for _, item := range v {

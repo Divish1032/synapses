@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // LanguageParser is implemented by each language-specific parser.
@@ -182,7 +183,7 @@ func (w *Walker) Register(p LanguageParser) {
 func (w *Walker) RegisterPlugin(extensions []string, command string, checker *PluginChecker) {
 	if checker != nil {
 		if err := checker.IsAllowed(command); err != nil {
-			fmt.Fprintf(os.Stderr, "WARNING: skipping plugin for %v: %v\n", extensions, err)
+			logutil.Warn("skipping plugin for %v: %v\n", extensions, err)
 			return
 		}
 	}
@@ -238,7 +239,7 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 			}
 			absResolved, resErr := filepath.Abs(resolved)
 			if resErr != nil || !strings.HasPrefix(absResolved, absRoot) {
-				fmt.Fprintf(os.Stderr, "synapses/security: skipped symlink resolving outside repo root: %s -> %s\n", path, resolved)
+				logutil.Warn("synapses/security: skipped symlink resolving outside repo root: %s -> %s\n", path, resolved)
 				return nil
 			}
 		}
@@ -341,9 +342,9 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 
 			src, err := os.ReadFile(job.path)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "synapses: read %s: %v\n", job.path, err)
+				logutil.Error("synapses: read %s: %v\n", job.path, err)
 			} else if parseErr := job.parser.Parse(g, job.path, src); parseErr != nil {
-				fmt.Fprintf(os.Stderr, "synapses: parse %s: %v\n", job.path, parseErr)
+				logutil.Error("synapses: parse %s: %v\n", job.path, parseErr)
 			} else {
 				// R28: stamp provenance on all nodes produced by this file.
 				ApplyProvenance(g, job.path, src)
@@ -443,11 +444,11 @@ func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[strin
 		g.RemoveFile(path)
 		src, readErr := os.ReadFile(path)
 		if readErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: read %s: %v\n", path, readErr)
+			logutil.Error("synapses: read %s: %v\n", path, readErr)
 			return nil
 		}
 		if parseErr := p.Parse(g, path, src); parseErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: parse %s: %v\n", path, parseErr)
+			logutil.Error("synapses: parse %s: %v\n", path, parseErr)
 		} else {
 			// R28: stamp provenance on all nodes produced by this file.
 			ApplyProvenance(g, path, src)

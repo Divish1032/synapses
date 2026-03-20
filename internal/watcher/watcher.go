@@ -18,6 +18,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/metrics"
 	"github.com/SynapsesOS/synapses/internal/parser"
@@ -283,7 +284,7 @@ func (w *Watcher) loop(root string) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Fprintf(os.Stderr, "synapses/watcher: panic in loop (attempt %d/%d): %v\n", attempt+1, maxRestarts+1, r)
+					logutil.Error("synapses/watcher: panic in loop (attempt %d/%d): %v\n", attempt+1, maxRestarts+1, r)
 					panicked = true
 				}
 			}()
@@ -300,7 +301,7 @@ func (w *Watcher) loop(root string) {
 					if !ok {
 						return
 					}
-					fmt.Fprintf(os.Stderr, "synapses/watcher: %v\n", err)
+					logutil.Error("synapses/watcher: %v\n", err)
 				}
 			}
 		}()
@@ -318,12 +319,12 @@ func (w *Watcher) loop(root string) {
 		}
 
 		if attempt < maxRestarts {
-			fmt.Fprintf(os.Stderr, "synapses/watcher: restarting event loop in %v\n", backoff)
+			logutil.Info("synapses/watcher: restarting event loop in %v\n", backoff)
 			time.Sleep(backoff)
 			backoff *= 2
 		}
 	}
-	fmt.Fprintf(os.Stderr, "synapses/watcher: loop exhausted all %d restart attempts, file watching disabled\n", maxRestarts)
+	logutil.Error("synapses/watcher: loop exhausted all %d restart attempts, file watching disabled\n", maxRestarts)
 }
 
 // handleEvent processes a single fsnotify event.
@@ -356,17 +357,17 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 		// not reloaded by future reparseFile calls for other files.
 		if w.store != nil {
 			if err := w.store.UpdateCallSitesForFile(path, nil); err != nil {
-				fmt.Fprintf(os.Stderr, "synapses/watcher: remove call sites for %s: %v\n", path, err)
+				logutil.Error("synapses/watcher: remove call sites for %s: %v\n", path, err)
 			}
 		}
 		// AM-2: cascade stale flag to memories anchored to the removed nodes.
 		// Gap-4: also stale entity-tier memories written with entity_id but no anchors.
 		if w.store != nil && len(removedIDs) > 0 {
 			if err := w.store.MarkAnchoredMemoriesStale(removedIDs, "anchor node removed"); err != nil {
-				fmt.Fprintf(os.Stderr, "synapses/watcher: cascade memory stale: %v\n", err)
+				logutil.Warn("synapses/watcher: cascade memory stale: %v\n", err)
 			}
 			if err := w.store.MarkEntityMemoriesStaleForNodes(removedIDs, "entity node removed"); err != nil {
-				fmt.Fprintf(os.Stderr, "synapses/watcher: cascade entity memory stale: %v\n", err)
+				logutil.Warn("synapses/watcher: cascade entity memory stale: %v\n", err)
 			}
 		}
 		w.persistAsync("")
@@ -435,7 +436,7 @@ func (w *Watcher) reloadConfig(configPath string) {
 	dir := filepath.Dir(configPath)
 	newCfg, err := config.Load(dir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "synapses/watcher: reload %s: %v\n", configPath, err)
+		logutil.Error("synapses/watcher: reload %s: %v\n", configPath, err)
 		return
 	}
 	// Update the watcher's own violation-checking config so future file changes
@@ -447,7 +448,7 @@ func (w *Watcher) reloadConfig(configPath string) {
 	handler := w.cfgHandler
 	w.mu.Unlock()
 
-	fmt.Fprintf(os.Stderr, "synapses/watcher: config reloaded from %s\n", configPath)
+	logutil.Info("synapses/watcher: config reloaded from %s\n", configPath)
 	if handler != nil {
 		handler(newCfg)
 	}
@@ -484,7 +485,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 	w.graph.RemoveCallSitesForFile(path)
 
 	if err := w.walker.ParseFile(w.graph, path); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses/watcher: re-parse %s: %v\n", path, err)
+		logutil.Error("synapses/watcher: re-parse %s: %v\n", path, err)
 		w.graph.ClearFileSnapshot(path)
 		return
 	}
@@ -511,11 +512,11 @@ func (w *Watcher) reparseFile(path, _ string) {
 		}
 		if len(removedIDs) > 0 {
 			if err := w.store.MarkAnchoredMemoriesStale(removedIDs, "anchor node removed"); err != nil {
-				fmt.Fprintf(os.Stderr, "synapses/watcher: cascade memory stale: %v\n", err)
+				logutil.Warn("synapses/watcher: cascade memory stale: %v\n", err)
 			}
 			// Gap-4: also stale entity-tier memories written with entity_id but no anchors.
 			if err := w.store.MarkEntityMemoriesStaleForNodes(removedIDs, "entity node removed"); err != nil {
-				fmt.Fprintf(os.Stderr, "synapses/watcher: cascade entity memory stale: %v\n", err)
+				logutil.Warn("synapses/watcher: cascade entity memory stale: %v\n", err)
 			}
 		}
 	}
@@ -558,7 +559,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// Keep the stored call-site table consistent with the re-parsed file.
 	if w.store != nil {
 		if err := w.store.UpdateCallSitesForFile(path, newSites); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses/watcher: update call sites for %s: %v\n", path, err)
+			logutil.Error("synapses/watcher: update call sites for %s: %v\n", path, err)
 		}
 	}
 
@@ -622,7 +623,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// changed file, and agents whose in-progress task has nodes in the changed file.
 	w.notifyIntraProjectImpact(path)
 
-	fmt.Fprintf(os.Stderr, "synapses/watcher: updated %s\n", path)
+	logutil.Info("synapses/watcher: updated %s\n", path)
 	w.persistAsync(path)
 
 	// Ingest changed nodes to brain for semantic summarization.
@@ -659,7 +660,7 @@ func (w *Watcher) checkViolations(path string) {
 
 	// Persist to violation_log (upsert — safe to call repeatedly).
 	if err := w.store.LogViolations(violations); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses/watcher: log violations: %v\n", err)
+		logutil.Error("synapses/watcher: log violations: %v\n", err)
 	}
 
 	// Emit an event only for violations that weren't already in the log.
@@ -765,11 +766,11 @@ func (w *Watcher) persistAsync(changedFile string) {
 	mtime := time.Now().UnixNano()
 	w.trackGo(func() {
 		if err := w.store.SaveGraphDelta(changedFile, w.graph); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses/watcher: cache save: %v\n", err)
+			logutil.Error("synapses/watcher: cache save: %v\n", err)
 		}
 		if changedFile != "" {
 			if err := w.store.UpsertFileMtime(changedFile, mtime); err != nil {
-				fmt.Fprintf(os.Stderr, "synapses/watcher: update mtime %s: %v\n", changedFile, err)
+				logutil.Error("synapses/watcher: update mtime %s: %v\n", changedFile, err)
 			}
 		}
 	})
@@ -922,7 +923,7 @@ func (w *Watcher) notifyCrossProjectImpact(changedFile string) {
 			),
 		})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "synapses/watcher: marshal cross_project_impact: %v\n", err)
+			logutil.Error("synapses/watcher: marshal cross_project_impact: %v\n", err)
 			continue
 		}
 		_, _ = w.store.SendMessage(

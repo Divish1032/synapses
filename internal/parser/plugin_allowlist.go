@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // allowlistFileName is the per-machine file that stores approved plugin commands.
@@ -51,7 +53,7 @@ func (pc *PluginChecker) IsAllowed(command string) error {
 	if os.Getenv(allowlistEnvOverride) == "1" {
 		pc.mu.Lock()
 		if !pc.envWarnLogged {
-			fmt.Fprintf(os.Stderr, "WARNING: %s=1 — all plugin parsers are allowed (bypass mode)\n", allowlistEnvOverride)
+			logutil.Warn("%s=1 — all plugin parsers are allowed (bypass mode)\n", allowlistEnvOverride)
 			pc.envWarnLogged = true
 		}
 		pc.mu.Unlock()
@@ -131,7 +133,7 @@ func (pc *PluginChecker) loadAllowlist() {
 
 	var al pluginAllowlist
 	if err := json.Unmarshal(data, &al); err != nil {
-		fmt.Fprintf(os.Stderr, "WARNING: failed to parse %s: %v (all plugins rejected)\n", path, err)
+		logutil.Warn("failed to parse %s: %v (all plugins rejected)\n", path, err)
 		return
 	}
 

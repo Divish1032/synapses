@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // handleSendMessage sends a message from one agent to another (or broadcasts
@@ -99,7 +100,7 @@ func (s *Server) handleSendMessage(
 	if err := s.store.AppendEvent("agent_message", fromAgent,
 		fmt.Sprintf(`{"message_id":%q,"topic":%q,"to_agent":%q,"project_id":%q}`,
 			msgID, topic, toAgent, projectID)); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: append agent_message event: %v\n", err)
+		logutil.Warn("synapses: append agent_message event: %v\n", err)
 	}
 
 	audience := "all agents (broadcast)"

@@ -4,10 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 var idCounter uint64
@@ -396,7 +397,7 @@ func (s *Store) findNewlyUnblocked(completedID string) ([]string, error) {
 		}
 		var deps []string
 		if err := json.Unmarshal([]byte(depsJSON), &deps); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal depends_on for task %q: %v\n", tid, err)
+			logutil.Debug("synapses: tasks: unmarshal depends_on for task %q: %v\n", tid, err)
 		}
 		// Filter to only tasks that actually list completedID.
 		for _, d := range deps {
@@ -491,19 +492,19 @@ func (s *Store) GetTask(id string) (*Task, error) {
 		return nil, fmt.Errorf("get task %q: %w", id, err)
 	}
 	if err := json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes); err != nil {
-		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal linked_nodes for task %q: %v\n", t.ID, err)
+		logutil.Debug("synapses: tasks: unmarshal linked_nodes for task %q: %v\n", t.ID, err)
 	}
 	if t.LinkedNodes == nil {
 		t.LinkedNodes = []string{}
 	}
 	if err := json.Unmarshal([]byte(depsJSON), &t.DependsOn); err != nil {
-		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal depends_on for task %q: %v\n", t.ID, err)
+		logutil.Debug("synapses: tasks: unmarshal depends_on for task %q: %v\n", t.ID, err)
 	}
 	if t.DependsOn == nil {
 		t.DependsOn = []string{}
 	}
 	if err := json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart); err != nil {
-		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal commits_since_start for task %q: %v\n", t.ID, err)
+		logutil.Debug("synapses: tasks: unmarshal commits_since_start for task %q: %v\n", t.ID, err)
 	}
 	return &t, nil
 }
@@ -593,19 +594,19 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal linked_nodes for task %q: %v\n", t.ID, err)
+			logutil.Debug("synapses: tasks: unmarshal linked_nodes for task %q: %v\n", t.ID, err)
 		}
 		if t.LinkedNodes == nil {
 			t.LinkedNodes = []string{}
 		}
 		if err := json.Unmarshal([]byte(depsJSON), &t.DependsOn); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal depends_on for task %q: %v\n", t.ID, err)
+			logutil.Debug("synapses: tasks: unmarshal depends_on for task %q: %v\n", t.ID, err)
 		}
 		if t.DependsOn == nil {
 			t.DependsOn = []string{}
 		}
 		if err := json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal commits_since_start for task %q: %v\n", t.ID, err)
+			logutil.Debug("synapses: tasks: unmarshal commits_since_start for task %q: %v\n", t.ID, err)
 		}
 		tasks = append(tasks, t)
 	}
@@ -705,19 +706,19 @@ func (s *Store) GetSessionState(taskID string) (*SessionState, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(filesJSON), &st.FilesModified); err != nil {
-		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal files_modified for session state %q: %v\n", st.ID, err)
+		logutil.Debug("synapses: tasks: unmarshal files_modified for session state %q: %v\n", st.ID, err)
 	}
 	if err := json.Unmarshal([]byte(completedJSON), &st.CompletedSteps); err != nil {
-		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal completed_steps for session state %q: %v\n", st.ID, err)
+		logutil.Debug("synapses: tasks: unmarshal completed_steps for session state %q: %v\n", st.ID, err)
 	}
 	if err := json.Unmarshal([]byte(remainingJSON), &st.RemainingSteps); err != nil {
-		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal remaining_steps for session state %q: %v\n", st.ID, err)
+		logutil.Debug("synapses: tasks: unmarshal remaining_steps for session state %q: %v\n", st.ID, err)
 	}
 	if err := json.Unmarshal([]byte(blockersJSON), &st.Blockers); err != nil {
-		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal blockers for session state %q: %v\n", st.ID, err)
+		logutil.Debug("synapses: tasks: unmarshal blockers for session state %q: %v\n", st.ID, err)
 	}
 	if err := json.Unmarshal([]byte(decisionsJSON), &st.Decisions); err != nil {
-		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal decisions for session state %q: %v\n", st.ID, err)
+		logutil.Debug("synapses: tasks: unmarshal decisions for session state %q: %v\n", st.ID, err)
 	}
 	return &st, nil
 }
@@ -759,19 +760,19 @@ func (s *Store) GetSessionStateForTasks(taskIDs []string) (map[string]*SessionSt
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(filesJSON), &st.FilesModified); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal files_modified for session state %q: %v\n", st.ID, err)
+			logutil.Debug("synapses: tasks: unmarshal files_modified for session state %q: %v\n", st.ID, err)
 		}
 		if err := json.Unmarshal([]byte(completedJSON), &st.CompletedSteps); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal completed_steps for session state %q: %v\n", st.ID, err)
+			logutil.Debug("synapses: tasks: unmarshal completed_steps for session state %q: %v\n", st.ID, err)
 		}
 		if err := json.Unmarshal([]byte(remainingJSON), &st.RemainingSteps); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal remaining_steps for session state %q: %v\n", st.ID, err)
+			logutil.Debug("synapses: tasks: unmarshal remaining_steps for session state %q: %v\n", st.ID, err)
 		}
 		if err := json.Unmarshal([]byte(blockersJSON), &st.Blockers); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal blockers for session state %q: %v\n", st.ID, err)
+			logutil.Debug("synapses: tasks: unmarshal blockers for session state %q: %v\n", st.ID, err)
 		}
 		if err := json.Unmarshal([]byte(decisionsJSON), &st.Decisions); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal decisions for session state %q: %v\n", st.ID, err)
+			logutil.Debug("synapses: tasks: unmarshal decisions for session state %q: %v\n", st.ID, err)
 		}
 		result[st.TaskID] = &st
 	}

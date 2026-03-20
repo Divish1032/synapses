@@ -3,7 +3,6 @@ package parser
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -13,6 +12,7 @@ import (
 	gositter "github.com/alexaandru/go-sitter-forest/go"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // rawCallSite is an unresolved call captured during AST walk.
@@ -952,7 +952,7 @@ func runQuery(
 	if qerr != nil {
 		// Log to stderr so developers can see which queries need updating, but
 		// treat this as a non-fatal degradation — we still produce a file node.
-		fmt.Fprintf(os.Stderr, "synapses: tree-sitter query degraded (query compile error): %v\n", qerr)
+		logutil.Warn("synapses: tree-sitter query degraded (query compile error): %v\n", qerr)
 		return nil
 	}
 

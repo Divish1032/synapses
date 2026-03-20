@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -168,7 +168,7 @@ func (s *Server) handleRemember(
 	if episodeType == "failure" || episodeType == "pattern" {
 		var affectedNodes []string
 		if err := json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: episodes: unmarshal affected_nodes for episode %q: %v\n", id, err)
+			logutil.Debug("synapses: episodes: unmarshal affected_nodes for episode %q: %v\n", id, err)
 		}
 		for _, nodeID := range affectedNodes {
 			mid, merr := s.store.InsertMemoryWithAnchors(store.Memory{
@@ -218,7 +218,7 @@ func (s *Server) handleRemember(
 		if err := s.store.AppendEvent("failure_recorded", agentID,
 			fmt.Sprintf(`{"episode_id":%q,"outcome":%q,"trigger":%q}`,
 				id, outcome, e.Trigger)); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: append failure_recorded event: %v\n", err)
+			logutil.Warn("synapses: append failure_recorded event: %v\n", err)
 		}
 	}
 
@@ -246,7 +246,7 @@ func (s *Server) handleRemember(
 	if s.store != nil && episodeType == "failure" && (createFixTask || importance >= 0.7) {
 		var affectedNodes []string
 		if err := json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: episodes: unmarshal affected_nodes for fix task (episode %q): %v\n", id, err)
+			logutil.Debug("synapses: episodes: unmarshal affected_nodes for fix task (episode %q): %v\n", id, err)
 		}
 
 		fixTitle := "Fix: " + e.Decision
@@ -670,7 +670,7 @@ func (s *Server) handleCheckPlanSafety(
 			Importance:  0.6,
 		}
 		if _, err := s.store.RememberEpisode(interjection); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: record interjection episode: %v\n", err)
+			logutil.Warn("synapses: record interjection episode: %v\n", err)
 		}
 	}
 

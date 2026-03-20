@@ -2,11 +2,10 @@ package mcp
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/embed"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -22,14 +21,14 @@ func (s *Server) embedMemory(embedder embed.Embedder, st *store.Store, memoryID,
 
 	vec, err := embedder.Embed(ctx, content)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: embed memory %s: %v\n", memoryID, err)
+		logutil.Error("synapses: embed memory %s: %v\n", memoryID, err)
 		return
 	}
 	if len(vec) == 0 {
 		return
 	}
 	if err := st.UpsertMemoryEmbedding(memoryID, embedder.Model(), vec); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: store memory embedding %s: %v\n", memoryID, err)
+		logutil.Error("synapses: store memory embedding %s: %v\n", memoryID, err)
 	}
 }
 
@@ -46,7 +45,7 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "synapses: embedding %d memories (model: %s) …\n", len(ids), embedder.Model())
+	logutil.Info("synapses: embedding %d memories (model: %s) …\n", len(ids), embedder.Model())
 	done := 0
 	errors := 0
 
@@ -59,7 +58,7 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 		select {
 		case <-ctx.Done():
 			if done > 0 {
-				fmt.Fprintf(os.Stderr, "synapses: memory embedding interrupted (%d/%d done)\n", done, len(ids))
+				logutil.Warn("synapses: memory embedding interrupted (%d/%d done)\n", done, len(ids))
 			}
 			return
 		default:
@@ -87,9 +86,9 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 			errors++
 			// Log first 3 errors, then suppress to avoid log spam.
 			if errors <= 3 {
-				fmt.Fprintf(os.Stderr, "synapses: embed memory %s: %v\n", memID, embedErr)
+				logutil.Error("synapses: embed memory %s: %v\n", memID, embedErr)
 			} else if errors == 4 {
-				fmt.Fprintf(os.Stderr, "synapses: suppressing further embedding errors (%d so far)\n", errors)
+				logutil.Warn("synapses: suppressing further embedding errors (%d so far)\n", errors)
 			}
 			continue
 		}
@@ -97,12 +96,12 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 			continue
 		}
 		if err := st.UpsertMemoryEmbedding(memID, embedder.Model(), vec); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: store memory embedding %s: %v\n", memID, err)
+			logutil.Error("synapses: store memory embedding %s: %v\n", memID, err)
 		}
 		done++
 	}
 
 	if done > 0 || errors > 0 {
-		fmt.Fprintf(os.Stderr, "synapses: memory embedding complete (%d/%d indexed, %d errors)\n", done, len(ids), errors)
+		logutil.Info("synapses: memory embedding complete (%d/%d indexed, %d errors)\n", done, len(ids), errors)
 	}
 }
