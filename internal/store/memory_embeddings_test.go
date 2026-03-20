@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -642,6 +643,155 @@ func TestUpsertMemoryEmbedding_NonExistentMemory_NoOrphanInSearch(t *testing.T) 
 	if len(results) != 0 {
 		t.Errorf("orphan embedding should not appear in search results, got %d results", len(results))
 	}
+}
+
+func TestMemoryVectorSearch_CapTriggersWarning(t *testing.T) {
+	// Verify that inserting more than maxVectorScanCap embeddings triggers the
+	// LIMIT, causing a warning on stderr. Uses direct DB inserts for speed.
+	st, _ := openMemEmbedTestStore(t)
+
+	now := time.Now().UTC()
+	expires := now.Add(365 * 24 * time.Hour).Format(time.RFC3339)
+	nowStr := now.Format(time.RFC3339)
+
+	// Insert maxVectorScanCap+1 memories and embeddings directly (no dedup).
+	tx, err := st.knowledgeDB.Begin()
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	memStmt, err := tx.Prepare(`INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
+		created_at, expires_at, last_accessed_at, source)
+		VALUES (?, 'project', ?, '', 'test', '', '[]', ?, ?, ?, 'manual')`)
+	if err != nil {
+		t.Fatalf("prepare mem stmt: %v", err)
+	}
+	embStmt, err := tx.Prepare(`INSERT INTO memory_embeddings (memory_id, model, embedding, content_hash, stale, embedded_at)
+		VALUES (?, 'test', ?, 'hash', 0, ?)`)
+	if err != nil {
+		t.Fatalf("prepare emb stmt: %v", err)
+	}
+	for i := 0; i < maxVectorScanCap+1; i++ {
+		id := fmt.Sprintf("cap-test-%d", i)
+		if _, err := memStmt.Exec(id, fmt.Sprintf("cap test content %d", i), nowStr, expires, nowStr); err != nil {
+			t.Fatalf("insert memory %d: %v", i, err)
+		}
+		// All embeddings point in direction {1, 0} so they are valid candidates.
+		if _, err := embStmt.Exec(id, vecToBlob([]float32{1, 0}), now.Unix()); err != nil {
+			t.Fatalf("insert embedding %d: %v", i, err)
+		}
+	}
+	memStmt.Close()
+	embStmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit tx: %v", err)
+	}
+
+	// Capture stderr to verify warning.
+	oldStderr := os.Stderr
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("os.Pipe: %v", pipeErr)
+	}
+	os.Stderr = w
+
+	results, searchErr := st.MemoryVectorSearch([]float32{1, 0}, 5)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	buf := make([]byte, 512)
+	n, _ := r.Read(buf)
+	r.Close()
+	output := string(buf[:n])
+
+	if searchErr != nil {
+		t.Fatalf("MemoryVectorSearch: %v", searchErr)
+	}
+	// Results should still be returned (cap doesn't break search correctness).
+	if len(results) == 0 {
+		t.Error("expected results despite cap, got none")
+	}
+	// Warning must mention the cap and be WARN level.
+	if output == "" {
+		t.Error("expected WARN message on stderr when cap triggered, got nothing")
+	}
+	if !contains(output, "WARN") || !contains(output, "cap triggered") {
+		t.Errorf("expected WARN cap triggered message, got: %q", output)
+	}
+}
+
+func TestMemoryVectorSearchWithThreshold_CapTriggersWarning(t *testing.T) {
+	// Same as above but for MemoryVectorSearchWithThreshold.
+	st, _ := openMemEmbedTestStore(t)
+
+	now := time.Now().UTC()
+	expires := now.Add(365 * 24 * time.Hour).Format(time.RFC3339)
+	nowStr := now.Format(time.RFC3339)
+
+	tx, err := st.knowledgeDB.Begin()
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	memStmt, err := tx.Prepare(`INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
+		created_at, expires_at, last_accessed_at, source)
+		VALUES (?, 'project', ?, '', 'test', '', '[]', ?, ?, ?, 'manual')`)
+	if err != nil {
+		t.Fatalf("prepare mem stmt: %v", err)
+	}
+	embStmt, err := tx.Prepare(`INSERT INTO memory_embeddings (memory_id, model, embedding, content_hash, stale, embedded_at)
+		VALUES (?, 'test', ?, 'hash', 0, ?)`)
+	if err != nil {
+		t.Fatalf("prepare emb stmt: %v", err)
+	}
+	for i := 0; i < maxVectorScanCap+1; i++ {
+		id := fmt.Sprintf("cap-thresh-test-%d", i)
+		if _, err := memStmt.Exec(id, fmt.Sprintf("cap threshold test content %d", i), nowStr, expires, nowStr); err != nil {
+			t.Fatalf("insert memory %d: %v", i, err)
+		}
+		if _, err := embStmt.Exec(id, vecToBlob([]float32{1, 0}), now.Unix()); err != nil {
+			t.Fatalf("insert embedding %d: %v", i, err)
+		}
+	}
+	memStmt.Close()
+	embStmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit tx: %v", err)
+	}
+
+	oldStderr := os.Stderr
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("os.Pipe: %v", pipeErr)
+	}
+	os.Stderr = w
+
+	results, searchErr := st.MemoryVectorSearchWithThreshold([]float32{1, 0}, 5, 0.5)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	buf := make([]byte, 512)
+	n, _ := r.Read(buf)
+	r.Close()
+	output := string(buf[:n])
+
+	if searchErr != nil {
+		t.Fatalf("MemoryVectorSearchWithThreshold: %v", searchErr)
+	}
+	if len(results) == 0 {
+		t.Error("expected results despite cap, got none")
+	}
+	if output == "" {
+		t.Error("expected WARN message on stderr when cap triggered, got nothing")
+	}
+	if !contains(output, "WARN") || !contains(output, "cap triggered") {
+		t.Errorf("expected WARN cap triggered message, got: %q", output)
+	}
+}
+
+// contains is a simple helper for substring checks in test assertions.
+func contains(s, sub string) bool {
+	return strings.Contains(s, sub)
 }
 
 func TestMemoryContentHash_Deterministic(t *testing.T) {
