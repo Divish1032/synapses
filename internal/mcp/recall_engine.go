@@ -28,7 +28,7 @@ func (s *Server) quadRecallSearch(
 	limit int,
 	includeStale bool,
 	sinceDays int,
-) ([]store.Memory, map[string][]string) {
+) ([]store.Memory, map[string][]string, []string) {
 	if limit <= 0 {
 		limit = 5
 	}
@@ -41,9 +41,10 @@ func (s *Server) quadRecallSearch(
 	}
 
 	var (
-		mu       sync.Mutex
-		channels = make(map[string][]string)
-		memMap   = make(map[string]store.Memory) // id → full memory for hydration
+		mu              sync.Mutex
+		channels        = make(map[string][]string)
+		memMap          = make(map[string]store.Memory) // id → full memory for hydration
+		staleEmbeddings = make(map[string]bool)         // memory IDs with stale embeddings (entity changed)
 	)
 
 	collectMemories := func(name string, mems []store.Memory) {
@@ -96,36 +97,6 @@ func (s *Server) quadRecallSearch(
 			chCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 
-			// Sprint 10.7: lazy re-embedding pass for stale embeddings.
-			// When the file watcher detects a changed entity, it marks the
-			// embeddings of anchored memories as stale=1 without deleting them.
-			// Here we refresh up to 10 stale embeddings before running the
-			// vector search, so they participate in scoring instead of being
-			// silently excluded.
-			//
-			// Time budget: the re-embed pass is capped at 2s (reEmbedCtx) to
-			// guarantee at least 3s remain for the query embed + vector search.
-			// This protects against slow embedders (Ollama can be 500ms+/call):
-			// if the 2s budget expires, remaining stale embeddings are skipped
-			// and will be retried on the next recall() call.
-			const lazyRebatchLimit = 10
-			reEmbedCtx, reEmbedCancel := context.WithTimeout(chCtx, 2*time.Second)
-			if staleIDs, sErr := s.store.GetStaleEmbeddingMemoryIDs(lazyRebatchLimit); sErr == nil {
-				model := s.memoryEmbedder.Model()
-				for _, memID := range staleIDs {
-					text, ok := s.store.GetMemoryTextForEmbedding(memID)
-					if !ok {
-						continue
-					}
-					vec, embErr := s.memoryEmbedder.Embed(reEmbedCtx, text)
-					if embErr != nil || len(vec) == 0 {
-						continue // timeout or embedder failure — retry next recall
-					}
-					_ = s.store.UpsertMemoryEmbedding(memID, model, vec)
-				}
-			}
-			reEmbedCancel()
-
 			queryVec, embedErr := s.memoryEmbedder.Embed(chCtx, query)
 			if embedErr != nil || len(queryVec) == 0 {
 				if embedErr != nil {
@@ -134,6 +105,10 @@ func (s *Server) quadRecallSearch(
 				return
 			}
 
+			// Sprint 10.7: stale embeddings (entity changed) participate in
+			// scoring — their vector is still valid (memory text unchanged).
+			// MemoryVectorSearchWithThreshold no longer filters e.stale=0;
+			// stale results carry StaleEmbedding=true for agent annotation.
 			vecResults, vecErr := s.store.MemoryVectorSearchWithThreshold(queryVec, channelLimit, 0.3)
 			if vecErr != nil {
 				logRecallChannelError("semantic", vecErr)
@@ -141,9 +116,15 @@ func (s *Server) quadRecallSearch(
 			}
 
 			// Hydrate full Memory structs for results, preserving cosine-similarity order.
+			// Track stale embedding IDs for the recall response annotation.
 			ids := make([]string, len(vecResults))
 			for i, vr := range vecResults {
 				ids[i] = vr.MemoryID
+				if vr.StaleEmbedding {
+					mu.Lock()
+					staleEmbeddings[vr.MemoryID] = true
+					mu.Unlock()
+				}
 			}
 			if len(ids) > 0 {
 				fullMems, hydErr := s.store.GetMemoriesByIDs(ids)
@@ -239,12 +220,12 @@ func (s *Server) quadRecallSearch(
 
 	// ── RRF Merge ─────────────────────────────────────────────────────────
 	if len(channels) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	rankedIDs, attribution := store.RRFMergeWeighted(channels, limit, 60, store.DefaultRRFWeights)
 	if len(rankedIDs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Hydrate results from memMap. Any missing IDs (from semantic fallback
@@ -276,7 +257,16 @@ func (s *Server) quadRecallSearch(
 		}
 	}
 
-	return result, attribution
+	// Sprint 10.7: collect stale embedding IDs that survived RRF merge.
+	// Only include IDs that are in the final result set.
+	var staleEmbIDs []string
+	for _, id := range rankedIDs {
+		if staleEmbeddings[id] {
+			staleEmbIDs = append(staleEmbIDs, id)
+		}
+	}
+
+	return result, attribution, staleEmbIDs
 }
 
 // graphBFS performs breadth-first search from seed node IDs following

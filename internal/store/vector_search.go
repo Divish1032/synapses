@@ -8,6 +8,7 @@ import "container/heap"
 type scoredID struct {
 	id    string
 	score float32
+	stale bool // true when the embedding was marked stale (anchored entity changed)
 }
 
 // topKHeap is a min-heap of scoredID capped at size k.
@@ -36,17 +37,20 @@ func (h *topKHeap) Pop() any {
 
 // tryPush adds a candidate to the heap if it belongs in the top-K.
 // Returns true if the candidate was accepted.
-func (h *topKHeap) tryPush(id string, score float32) bool {
+// stale indicates the embedding was marked stale by the file watcher
+// (anchored entity changed) — propagated to MemorySearchResult so
+// agents know to verify the memory before trusting it.
+func (h *topKHeap) tryPush(id string, score float32, stale bool) bool {
 	if h.k <= 0 {
 		return false
 	}
 	if len(h.items) < h.k {
-		heap.Push(h, scoredID{id: id, score: score})
+		heap.Push(h, scoredID{id: id, score: score, stale: stale})
 		return true
 	}
 	// Heap is full — only accept if better than current minimum.
 	if score > h.items[0].score {
-		h.items[0] = scoredID{id: id, score: score}
+		h.items[0] = scoredID{id: id, score: score, stale: stale}
 		heap.Fix(h, 0)
 		return true
 	}

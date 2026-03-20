@@ -305,25 +305,64 @@ func TestMemoryVectorSearch_ReturnsMostSimilar(t *testing.T) {
 	}
 }
 
-func TestMemoryVectorSearch_ExcludesStaleEmbeddings(t *testing.T) {
+func TestMemoryVectorSearch_IncludesStaleEmbeddings_WithFlag(t *testing.T) {
 	st, _ := openMemEmbedTestStore(t)
 	ids := seedMultipleMemories(t, st)
 
 	_ = st.UpsertMemoryEmbedding(ids[0], "test", []float32{1, 0})
 	_ = st.UpsertMemoryEmbedding(ids[1], "test", []float32{0.9, 0.1})
 
-	// Mark first as stale.
+	// Mark first as stale (anchored entity changed).
 	_ = st.MarkMemoryEmbeddingsStale([]string{ids[0]})
 
 	results, err := st.MemoryVectorSearch([]float32{1, 0}, 5)
 	if err != nil {
 		t.Fatalf("MemoryVectorSearch: %v", err)
 	}
-	// Stale embedding should be excluded.
+	// Stale embedding should be INCLUDED (Sprint 10.7 redesign) with flag set.
+	found := false
 	for _, r := range results {
 		if r.MemoryID == ids[0] {
-			t.Error("stale embedding should not appear in search results")
+			found = true
+			if !r.StaleEmbedding {
+				t.Error("stale embedding should have StaleEmbedding=true")
+			}
 		}
+		if r.MemoryID == ids[1] {
+			if r.StaleEmbedding {
+				t.Error("fresh embedding should have StaleEmbedding=false")
+			}
+		}
+	}
+	if !found {
+		t.Error("stale embedding should appear in search results with StaleEmbedding flag")
+	}
+}
+
+func TestMemoryVectorSearchWithThreshold_StaleEmbedding_FlagSet(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+	ids := seedMultipleMemories(t, st)
+
+	_ = st.UpsertMemoryEmbedding(ids[0], "test", []float32{1, 0})
+	_ = st.UpsertMemoryEmbedding(ids[1], "test", []float32{0.9, 0.1})
+
+	_ = st.MarkMemoryEmbeddingsStale([]string{ids[0]})
+
+	results, err := st.MemoryVectorSearchWithThreshold([]float32{1, 0}, 5, 0.3)
+	if err != nil {
+		t.Fatalf("MemoryVectorSearchWithThreshold: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.MemoryID == ids[0] {
+			found = true
+			if !r.StaleEmbedding {
+				t.Error("stale embedding should have StaleEmbedding=true in threshold search")
+			}
+		}
+	}
+	if !found {
+		t.Error("stale embedding should appear in threshold search results")
 	}
 }
 

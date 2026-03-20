@@ -13,11 +13,11 @@ import (
 
 func TestTopKHeap_Basic(t *testing.T) {
 	h := &topKHeap{k: 3}
-	h.tryPush("a", 0.5)
-	h.tryPush("b", 0.9)
-	h.tryPush("c", 0.7)
-	h.tryPush("d", 0.3) // should NOT enter (below min of 0.5)
-	h.tryPush("e", 0.95) // should replace "a" (0.5)
+	h.tryPush("a", 0.5, false)
+	h.tryPush("b", 0.9, false)
+	h.tryPush("c", 0.7, false)
+	h.tryPush("d", 0.3, false) // should NOT enter (below min of 0.5)
+	h.tryPush("e", 0.95, false) // should replace "a" (0.5)
 
 	if h.Len() != 3 {
 		t.Fatalf("expected heap size 3, got %d", h.Len())
@@ -43,9 +43,9 @@ func TestTopKHeap_EmptyDrain(t *testing.T) {
 
 func TestTopKHeap_SingleElement(t *testing.T) {
 	h := &topKHeap{k: 1}
-	h.tryPush("a", 0.5)
-	h.tryPush("b", 0.9)
-	h.tryPush("c", 0.3)
+	h.tryPush("a", 0.5, false)
+	h.tryPush("b", 0.9, false)
+	h.tryPush("c", 0.3, false)
 
 	results := h.drain()
 	if len(results) != 1 {
@@ -58,9 +58,9 @@ func TestTopKHeap_SingleElement(t *testing.T) {
 
 func TestTopKHeap_ExactlyK(t *testing.T) {
 	h := &topKHeap{k: 3}
-	h.tryPush("a", 0.1)
-	h.tryPush("b", 0.2)
-	h.tryPush("c", 0.3)
+	h.tryPush("a", 0.1, false)
+	h.tryPush("b", 0.2, false)
+	h.tryPush("c", 0.3, false)
 
 	results := h.drain()
 	if len(results) != 3 {
@@ -74,7 +74,7 @@ func TestTopKHeap_ExactlyK(t *testing.T) {
 func TestTopKHeap_DescendingOrder(t *testing.T) {
 	h := &topKHeap{k: 100}
 	for i := 0; i < 50; i++ {
-		h.tryPush(fmt.Sprintf("item-%d", i), float32(i)*0.01)
+		h.tryPush(fmt.Sprintf("item-%d", i), float32(i)*0.01, false)
 	}
 	results := h.drain()
 	for i := 1; i < len(results); i++ {
@@ -89,7 +89,7 @@ func TestTopKHeap_HeapInterface(t *testing.T) {
 	h := &topKHeap{k: 5}
 	heap.Init(h)
 	for i := 0; i < 20; i++ {
-		h.tryPush(fmt.Sprintf("n-%d", i), float32(i)*0.05+0.01)
+		h.tryPush(fmt.Sprintf("n-%d", i), float32(i)*0.05+0.01, false)
 	}
 	// The heap should contain the 5 highest scores.
 	if h.Len() != 5 {
@@ -107,7 +107,7 @@ func TestTopKHeap_HeapInterface(t *testing.T) {
 func TestTopKHeap_ZeroK_NoPanic(t *testing.T) {
 	// k=0 should never accept any items (defensive guard).
 	h := &topKHeap{k: 0}
-	accepted := h.tryPush("a", 0.9)
+	accepted := h.tryPush("a", 0.9, false)
 	if accepted {
 		t.Error("expected rejection with k=0")
 	}
@@ -123,10 +123,10 @@ func TestTopKHeap_ZeroK_NoPanic(t *testing.T) {
 func TestTopKHeap_TieBreaking(t *testing.T) {
 	// When scores are equal, both should be in the heap (no silent drops).
 	h := &topKHeap{k: 3}
-	h.tryPush("a", 0.5)
-	h.tryPush("b", 0.5)
-	h.tryPush("c", 0.5)
-	h.tryPush("d", 0.5) // same score as min — NOT accepted (not strictly greater)
+	h.tryPush("a", 0.5, false)
+	h.tryPush("b", 0.5, false)
+	h.tryPush("c", 0.5, false)
+	h.tryPush("d", 0.5, false) // same score as min — NOT accepted (not strictly greater)
 
 	if h.Len() != 3 {
 		t.Fatalf("expected 3, got %d", h.Len())
