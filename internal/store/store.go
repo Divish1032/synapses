@@ -1377,9 +1377,15 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	// episodes: stored as Unix seconds (INTEGER).
 	pruneExec(`DELETE FROM episodes WHERE created_at < ?`, cutoffUnix)
 
-	// memories: honour their own expires_at field; also remove session_log entries
-	// older than the retention window regardless of their expires_at.
-	pruneExec(`DELETE FROM memories WHERE expires_at != '' AND expires_at < ?`, time.Now().UTC().Format(time.RFC3339))
+	// memories: honour their own expires_at field; capture count for lifecycle event.
+	memNow := time.Now().UTC().Format(time.RFC3339)
+	if res, execErr := s.knowledgeDB.Exec(`DELETE FROM memories WHERE expires_at != '' AND expires_at < ?`, memNow); execErr == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			_ = s.AppendEvent("knowledge_expired", "system", fmt.Sprintf(`{"count":%d}`, n))
+		}
+	} else {
+		logutil.Debug("synapses: store: prune expired memories: %v\n", execErr)
+	}
 	pruneExec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at < ?`, cutoff)
 
 	// context_deliveries: instrumentation data for Sprint 11 feedback loop.

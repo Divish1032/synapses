@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // MemoryTier classifies the scope and lifespan of a memory.
@@ -63,6 +65,10 @@ func (s *Store) InsertMemory(m Memory) (string, error) {
 	}
 	if deduped != "" {
 		_ = s.TouchMemory(deduped)
+		if err := s.AppendEvent("knowledge_updated", m.AgentID,
+			fmt.Sprintf(`{"memory_id":%q,"reason":"dedup"}`, deduped)); err != nil {
+			logutil.Warn("synapses: store: append knowledge_updated event: %v\n", err)
+		}
 		return deduped, nil
 	}
 
@@ -75,6 +81,10 @@ func (s *Store) InsertMemory(m Memory) (string, error) {
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert memory: %w", err)
+	}
+	if err := s.AppendEvent("knowledge_created", m.AgentID,
+		fmt.Sprintf(`{"memory_id":%q,"tier":%q,"source":%q}`, m.ID, m.Tier, m.Source)); err != nil {
+		logutil.Warn("synapses: store: append knowledge_created event: %v\n", err)
 	}
 	return m.ID, nil
 }
@@ -664,6 +674,11 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 			// Best-effort fallback: touch and anchors separately.
 			_ = s.TouchMemory(deduped)
 			_ = s.InsertMemoryAnchors(deduped, anchorNodes)
+			// Emit outside any tx — connection is free after fallback ops.
+			if evErr := s.AppendEvent("knowledge_updated", m.AgentID,
+				fmt.Sprintf(`{"memory_id":%q,"reason":"dedup"}`, deduped)); evErr != nil {
+				logutil.Warn("synapses: store: append knowledge_updated event: %v\n", evErr)
+			}
 			return deduped, nil
 		}
 		defer tx.Rollback()
@@ -682,7 +697,13 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 			tx.Exec(`INSERT OR IGNORE INTO memory_anchors (memory_id, node_id, created_at) VALUES (?, ?, ?)`,
 				deduped, nid, now) //nolint:errcheck — INSERT OR IGNORE
 		}
-		_ = tx.Commit()
+		if commitErr := tx.Commit(); commitErr == nil {
+			// Emit after commit — connection is released back to pool at this point.
+			if evErr := s.AppendEvent("knowledge_updated", m.AgentID,
+				fmt.Sprintf(`{"memory_id":%q,"reason":"dedup","anchors":%d}`, deduped, len(anchorNodes))); evErr != nil {
+				logutil.Warn("synapses: store: append knowledge_updated event: %v\n", evErr)
+			}
+		}
 		return deduped, nil
 	}
 
@@ -717,6 +738,11 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit memory+anchor tx: %w", err)
+	}
+	// Emit after commit — connection is released back to pool at this point.
+	if evErr := s.AppendEvent("knowledge_created", m.AgentID,
+		fmt.Sprintf(`{"memory_id":%q,"tier":%q,"source":%q,"anchors":%d}`, m.ID, m.Tier, m.Source, len(anchorNodes))); evErr != nil {
+		logutil.Warn("synapses: store: append knowledge_created event: %v\n", evErr)
 	}
 	return m.ID, nil
 }
