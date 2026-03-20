@@ -227,4 +227,48 @@ func TestGetEpisodes_TagLIKEEscaping(t *testing.T) {
 	if results[0].Tags != `["auth"]` {
 		t.Errorf("unexpected tags: %s", results[0].Tags)
 	}
+
+	// A tag containing LIKE metacharacters that appear in real data (e.g. "c++", "100%").
+	// escapeLike must escape them so the pattern matches only episodes with that exact tag.
+	_, err = st.RememberEpisode(store.Episode{
+		AgentID:     "agent-escape",
+		EpisodeType: "decision",
+		Outcome:     "success",
+		Decision:    "tagged with literal percent",
+		Tags:        `["100%"]`,
+	})
+	if err != nil {
+		t.Fatalf("RememberEpisode 100%%: %v", err)
+	}
+	results, err = st.GetEpisodes("", "", "", []string{"100%"}, 10, 0)
+	if err != nil {
+		t.Fatalf("GetEpisodes with tag=100%%: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("tag=100%% returned %d episode(s); want 1 (only the exact match)", len(results))
+	}
+}
+
+// TestGetEpisodes_EmptyTagSkipped verifies that an empty string in the tags
+// slice is ignored rather than producing "%%" which would match all episodes.
+// An empty tag is not a filter — skipping it means all episodes are returned
+// (same as passing no tags), not zero episodes.
+func TestGetEpisodes_EmptyTagSkipped(t *testing.T) {
+	st := openTestStore(t)
+
+	_, _ = st.RememberEpisode(store.Episode{AgentID: "a", EpisodeType: "decision", Outcome: "success", Decision: "ep1", Tags: `["x"]`})
+	_, _ = st.RememberEpisode(store.Episode{AgentID: "a", EpisodeType: "decision", Outcome: "success", Decision: "ep2", Tags: `["y"]`})
+
+	// Empty tag is skipped → no tag filter → same result as tags=nil.
+	withEmpty, err := st.GetEpisodes("", "", "", []string{""}, 10, 0)
+	if err != nil {
+		t.Fatalf("GetEpisodes with empty tag: %v", err)
+	}
+	withNil, err := st.GetEpisodes("", "", "", nil, 10, 0)
+	if err != nil {
+		t.Fatalf("GetEpisodes with nil tags: %v", err)
+	}
+	if len(withEmpty) != len(withNil) {
+		t.Errorf("empty tag slice returned %d rows, nil tag slice returned %d rows; want equal (empty tag must be skipped)", len(withEmpty), len(withNil))
+	}
 }
