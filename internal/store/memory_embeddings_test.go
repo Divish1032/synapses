@@ -61,6 +61,7 @@ func seedMultipleMemories(t *testing.T, st *Store) []string {
 }
 
 func TestUpsertMemoryEmbedding_StoresCount(t *testing.T) {
+	t.Parallel()
 	st, memID := openMemEmbedTestStore(t)
 
 	if err := st.UpsertMemoryEmbedding(memID, "all-MiniLM-L6-v2", []float32{0.1, 0.2, 0.3}); err != nil {
@@ -72,6 +73,7 @@ func TestUpsertMemoryEmbedding_StoresCount(t *testing.T) {
 }
 
 func TestUpsertMemoryEmbedding_Idempotent(t *testing.T) {
+	t.Parallel()
 	st, memID := openMemEmbedTestStore(t)
 
 	_ = st.UpsertMemoryEmbedding(memID, "model-a", []float32{1, 0, 0})
@@ -83,6 +85,7 @@ func TestUpsertMemoryEmbedding_Idempotent(t *testing.T) {
 }
 
 func TestUpsertMemoryEmbedding_ClearsStaleFlag(t *testing.T) {
+	t.Parallel()
 	st, memID := openMemEmbedTestStore(t)
 
 	// Insert embedding, then mark stale, then upsert again.
@@ -105,6 +108,7 @@ func TestUpsertMemoryEmbedding_ClearsStaleFlag(t *testing.T) {
 }
 
 func TestUpsertMemoryEmbedding_EmptyID_ReturnsError(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	err := st.UpsertMemoryEmbedding("", "test", []float32{1, 0})
 	if err == nil {
@@ -113,6 +117,7 @@ func TestUpsertMemoryEmbedding_EmptyID_ReturnsError(t *testing.T) {
 }
 
 func TestUpsertMemoryEmbedding_EmptyVec_ReturnsError(t *testing.T) {
+	t.Parallel()
 	st, memID := openMemEmbedTestStore(t)
 	err := st.UpsertMemoryEmbedding(memID, "test", nil)
 	if err == nil {
@@ -121,6 +126,7 @@ func TestUpsertMemoryEmbedding_EmptyVec_ReturnsError(t *testing.T) {
 }
 
 func TestMemoryEmbeddingCount_EmptyStore(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	if count := st.MemoryEmbeddingCount(); count != 0 {
 		t.Errorf("expected 0, got %d", count)
@@ -128,6 +134,7 @@ func TestMemoryEmbeddingCount_EmptyStore(t *testing.T) {
 }
 
 func TestGetMemoriesWithoutEmbeddings_ReturnsUnembedded(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids := seedMultipleMemories(t, st)
 
@@ -152,6 +159,7 @@ func TestGetMemoriesWithoutEmbeddings_ReturnsUnembedded(t *testing.T) {
 }
 
 func TestGetMemoriesWithoutEmbeddings_DetectsStaleHash(t *testing.T) {
+	t.Parallel()
 	st, memID := openMemEmbedTestStore(t)
 
 	// Embed the memory.
@@ -187,6 +195,7 @@ func TestGetMemoriesWithoutEmbeddings_DetectsStaleHash(t *testing.T) {
 }
 
 func TestGetMemoriesWithoutEmbeddings_LimitRespected(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	_ = seedMultipleMemories(t, st)
 
@@ -200,6 +209,7 @@ func TestGetMemoriesWithoutEmbeddings_LimitRespected(t *testing.T) {
 }
 
 func TestGetMemoryTextForEmbedding_ReturnsContent(t *testing.T) {
+	t.Parallel()
 	st, memID := openMemEmbedTestStore(t)
 
 	text, ok := st.GetMemoryTextForEmbedding(memID)
@@ -212,6 +222,7 @@ func TestGetMemoryTextForEmbedding_ReturnsContent(t *testing.T) {
 }
 
 func TestGetMemoryTextForEmbedding_NonExistent_ReturnsFalse(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	_, ok := st.GetMemoryTextForEmbedding("nonexistent-id")
 	if ok {
@@ -220,6 +231,7 @@ func TestGetMemoryTextForEmbedding_NonExistent_ReturnsFalse(t *testing.T) {
 }
 
 func TestMarkMemoryEmbeddingsStale_SetsFlag(t *testing.T) {
+	t.Parallel()
 	st, memID := openMemEmbedTestStore(t)
 
 	_ = st.UpsertMemoryEmbedding(memID, "test", []float32{1, 0, 0})
@@ -235,6 +247,7 @@ func TestMarkMemoryEmbeddingsStale_SetsFlag(t *testing.T) {
 }
 
 func TestMarkMemoryEmbeddingsStale_EmptyIDs_Noop(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	err := st.MarkMemoryEmbeddingsStale(nil)
 	if err != nil {
@@ -243,6 +256,7 @@ func TestMarkMemoryEmbeddingsStale_EmptyIDs_Noop(t *testing.T) {
 }
 
 func TestMarkMemoryEmbeddingsStale_Idempotent(t *testing.T) {
+	t.Parallel()
 	st, memID := openMemEmbedTestStore(t)
 	_ = st.UpsertMemoryEmbedding(memID, "test", []float32{1, 0})
 
@@ -256,6 +270,7 @@ func TestMarkMemoryEmbeddingsStale_Idempotent(t *testing.T) {
 }
 
 func TestDeleteMemoryEmbeddings_RemovesRows(t *testing.T) {
+	t.Parallel()
 	st, memID := openMemEmbedTestStore(t)
 	_ = st.UpsertMemoryEmbedding(memID, "test", []float32{1, 0})
 
@@ -272,6 +287,7 @@ func TestDeleteMemoryEmbeddings_RemovesRows(t *testing.T) {
 }
 
 func TestDeleteMemoryEmbeddings_EmptyIDs_Noop(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	err := st.DeleteMemoryEmbeddings(nil)
 	if err != nil {
@@ -280,6 +296,7 @@ func TestDeleteMemoryEmbeddings_EmptyIDs_Noop(t *testing.T) {
 }
 
 func TestMemoryVectorSearch_ReturnsMostSimilar(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids := seedMultipleMemories(t, st)
 
@@ -306,6 +323,7 @@ func TestMemoryVectorSearch_ReturnsMostSimilar(t *testing.T) {
 }
 
 func TestMemoryVectorSearch_IncludesStaleEmbeddings_WithFlag(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids := seedMultipleMemories(t, st)
 
@@ -340,6 +358,7 @@ func TestMemoryVectorSearch_IncludesStaleEmbeddings_WithFlag(t *testing.T) {
 }
 
 func TestMemoryVectorSearchWithThreshold_StaleEmbedding_FlagSet(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids := seedMultipleMemories(t, st)
 
@@ -367,6 +386,7 @@ func TestMemoryVectorSearchWithThreshold_StaleEmbedding_FlagSet(t *testing.T) {
 }
 
 func TestMemoryVectorSearch_ExcludesExpiredMemories(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids := seedMultipleMemories(t, st)
 
@@ -389,6 +409,7 @@ func TestMemoryVectorSearch_ExcludesExpiredMemories(t *testing.T) {
 }
 
 func TestMemoryVectorSearch_ExcludesStaleMemories(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids := seedMultipleMemories(t, st)
 
@@ -410,6 +431,7 @@ func TestMemoryVectorSearch_ExcludesStaleMemories(t *testing.T) {
 }
 
 func TestMemoryVectorSearch_EmptyStore_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	results, err := st.MemoryVectorSearch([]float32{1, 0, 0}, 5)
 	if err != nil {
@@ -421,6 +443,7 @@ func TestMemoryVectorSearch_EmptyStore_ReturnsNil(t *testing.T) {
 }
 
 func TestMemoryVectorSearch_EmptyQuery_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	results, err := st.MemoryVectorSearch(nil, 5)
 	if err != nil {
@@ -432,6 +455,7 @@ func TestMemoryVectorSearch_EmptyQuery_ReturnsNil(t *testing.T) {
 }
 
 func TestMemoryVectorSearch_LimitRespected(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids := seedMultipleMemories(t, st)
 
@@ -451,6 +475,7 @@ func TestMemoryVectorSearch_LimitRespected(t *testing.T) {
 }
 
 func TestMemoryVectorSearchWithThreshold_FiltersLowScores(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids := seedMultipleMemories(t, st)
 
@@ -472,6 +497,7 @@ func TestMemoryVectorSearchWithThreshold_FiltersLowScores(t *testing.T) {
 }
 
 func TestMemoryEmbeddingDimensions_EmptyStore(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	dim := st.memoryEmbeddingDimensions()
 	if dim != 0 {
@@ -480,6 +506,7 @@ func TestMemoryEmbeddingDimensions_EmptyStore(t *testing.T) {
 }
 
 func TestMemoryEmbeddingDimensions_Returns384(t *testing.T) {
+	t.Parallel()
 	st, memID := openMemEmbedTestStore(t)
 
 	vec := make([]float32, 384)
@@ -493,6 +520,7 @@ func TestMemoryEmbeddingDimensions_Returns384(t *testing.T) {
 }
 
 func TestExpireMemories_CleansEmbeddings(t *testing.T) {
+	t.Parallel()
 	st, memID := openMemEmbedTestStore(t)
 
 	_ = st.UpsertMemoryEmbedding(memID, "test", []float32{1, 0})
@@ -519,6 +547,7 @@ func TestExpireMemories_CleansEmbeddings(t *testing.T) {
 }
 
 func TestMemoryVectorSearch_DimensionMismatch_ReturnsNoResults(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids := seedMultipleMemories(t, st)
 
@@ -538,6 +567,7 @@ func TestMemoryVectorSearch_DimensionMismatch_ReturnsNoResults(t *testing.T) {
 }
 
 func TestMemoryVectorSearchWithThreshold_ScansAllCandidates(t *testing.T) {
+	t.Parallel()
 	// Regression test: WithThreshold must examine ALL embeddings, not just top-N.
 	// If the old limit*2 hack were used, this would fail by missing valid results.
 	st, _ := openMemEmbedTestStore(t)
@@ -589,6 +619,7 @@ func TestMemoryVectorSearchWithThreshold_ScansAllCandidates(t *testing.T) {
 }
 
 func TestMarkMemoryEmbeddingsStale_LargeBatch(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 
 	// Insert 550 rows directly into memories + memory_embeddings to avoid dedup.
@@ -628,6 +659,7 @@ func TestMarkMemoryEmbeddingsStale_LargeBatch(t *testing.T) {
 }
 
 func TestDeleteMemoryEmbeddings_LargeBatch(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 
 	// Insert 550 rows directly to avoid dedup (same approach as stale batch test).
@@ -660,6 +692,7 @@ func TestDeleteMemoryEmbeddings_LargeBatch(t *testing.T) {
 }
 
 func TestUpsertMemoryEmbedding_NonExistentMemory_NoOrphanInSearch(t *testing.T) {
+	t.Parallel()
 	// Even if an embedding is created for a nonexistent memory_id (shouldn't happen
 	// in practice), MemoryVectorSearch filters it out via JOIN with memories table.
 	st, _ := openMemEmbedTestStore(t)
@@ -685,6 +718,7 @@ func TestUpsertMemoryEmbedding_NonExistentMemory_NoOrphanInSearch(t *testing.T) 
 }
 
 func TestMemoryVectorSearch_LargeDataset_NoCap(t *testing.T) {
+	t.Parallel()
 	// Verify that all embeddings are searched without any truncation cap.
 	// The two-pass min-heap approach searches ALL rows with bounded memory.
 	st, _ := openMemEmbedTestStore(t)
@@ -747,6 +781,7 @@ func TestMemoryVectorSearch_LargeDataset_NoCap(t *testing.T) {
 }
 
 func TestMemoryVectorSearchWithThreshold_LargeDataset_NoCap(t *testing.T) {
+	t.Parallel()
 	// Same verification for threshold variant — all rows searched, no truncation.
 	st, _ := openMemEmbedTestStore(t)
 
@@ -810,6 +845,7 @@ func contains(s, sub string) bool {
 }
 
 func TestMemoryContentHash_Deterministic(t *testing.T) {
+	t.Parallel()
 	h1 := memoryContentHash("AuthService uses JWT tokens")
 	h2 := memoryContentHash("AuthService uses JWT tokens")
 	if h1 != h2 {
@@ -818,6 +854,7 @@ func TestMemoryContentHash_Deterministic(t *testing.T) {
 }
 
 func TestMemoryContentHash_DifferentContent(t *testing.T) {
+	t.Parallel()
 	h1 := memoryContentHash("AuthService uses JWT tokens")
 	h2 := memoryContentHash("AuthService uses OAuth2 tokens")
 	if h1 == h2 {
@@ -828,6 +865,7 @@ func TestMemoryContentHash_DifferentContent(t *testing.T) {
 // ── GetMemoryIDsByAnchorNodes tests ────────────────────────────────────────
 
 func TestGetMemoryIDsByAnchorNodes_EmptyNodeIDs(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids, err := st.GetMemoryIDsByAnchorNodes(nil, 100)
 	if err != nil {
@@ -839,6 +877,7 @@ func TestGetMemoryIDsByAnchorNodes_EmptyNodeIDs(t *testing.T) {
 }
 
 func TestGetMemoryIDsByAnchorNodes_ZeroLimit(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids, err := st.GetMemoryIDsByAnchorNodes([]string{"node-1"}, 0)
 	if err != nil {
@@ -850,6 +889,7 @@ func TestGetMemoryIDsByAnchorNodes_ZeroLimit(t *testing.T) {
 }
 
 func TestGetMemoryIDsByAnchorNodes_ReturnsAnchoredMemories(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 
 	// Insert a memory anchored to node-a.
@@ -875,6 +915,7 @@ func TestGetMemoryIDsByAnchorNodes_ReturnsAnchoredMemories(t *testing.T) {
 }
 
 func TestGetMemoryIDsByAnchorNodes_StaleMemoryExcluded(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 
 	memID, _ := st.InsertMemory(Memory{
@@ -898,6 +939,7 @@ func TestGetMemoryIDsByAnchorNodes_StaleMemoryExcluded(t *testing.T) {
 }
 
 func TestGetMemoryIDsByAnchorNodes_UnknownNodeReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids, err := st.GetMemoryIDsByAnchorNodes([]string{"no-such-node"}, 100)
 	if err != nil {
@@ -911,6 +953,7 @@ func TestGetMemoryIDsByAnchorNodes_UnknownNodeReturnsEmpty(t *testing.T) {
 // ── GetStaleEmbeddingMemoryIDs tests ──────────────────────────────────────
 
 func TestGetStaleEmbeddingMemoryIDs_EmptyStore(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 	ids, err := st.GetStaleEmbeddingMemoryIDs(50)
 	if err != nil {
@@ -922,6 +965,7 @@ func TestGetStaleEmbeddingMemoryIDs_EmptyStore(t *testing.T) {
 }
 
 func TestGetStaleEmbeddingMemoryIDs_ReturnsStaleOnly(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 
 	// Insert two memories, embed both, mark one stale.
@@ -951,6 +995,7 @@ func TestGetStaleEmbeddingMemoryIDs_ReturnsStaleOnly(t *testing.T) {
 }
 
 func TestGetStaleEmbeddingMemoryIDs_StaleMemoryExcluded(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 
 	// Memory is stale (e.g., anchor removed) AND has a stale embedding.
@@ -974,6 +1019,7 @@ func TestGetStaleEmbeddingMemoryIDs_StaleMemoryExcluded(t *testing.T) {
 }
 
 func TestGetStaleEmbeddingMemoryIDs_LimitRespected(t *testing.T) {
+	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
 
 	// Insert 20 memories, embed all, mark all stale.

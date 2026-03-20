@@ -7,6 +7,7 @@ import (
 )
 
 func TestCreatePlan_AndGetPendingTasks(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	planID, _,
@@ -39,6 +40,7 @@ func TestCreatePlan_AndGetPendingTasks(t *testing.T) {
 }
 
 func TestGetPendingTasks_FilterByPlanID(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	planA, _, _ := st.CreatePlan("plan A", "", "", []store.TaskInput{{Title: "A1", Priority: "p1"}})
@@ -57,6 +59,7 @@ func TestGetPendingTasks_FilterByPlanID(t *testing.T) {
 }
 
 func TestUpdateTask_StatusAndNotes(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _, _ = st.CreatePlan("plan", "", "", []store.TaskInput{
@@ -84,6 +87,7 @@ func TestUpdateTask_StatusAndNotes(t *testing.T) {
 }
 
 func TestGetPlans_Summary(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	planID, _, _ := st.CreatePlan("summary plan", "", "", []store.TaskInput{

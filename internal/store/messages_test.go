@@ -7,6 +7,7 @@ import (
 // ── SendMessage / GetMessages ─────────────────────────────────────────────────
 
 func TestGetMessages_DirectAndBroadcast(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Direct message to "alice".
@@ -37,6 +38,7 @@ func TestGetMessages_DirectAndBroadcast(t *testing.T) {
 }
 
 func TestGetMessages_TopicFilter(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _ = st.SendMessage("src", "dst", "alpha", `{}`, "")
@@ -58,6 +60,7 @@ func TestGetMessages_TopicFilter(t *testing.T) {
 }
 
 func TestGetMessages_UnreadOnly(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	msgID, _ := st.SendMessage("src", "dst", "work", `{}`, "")
@@ -87,6 +90,7 @@ func TestGetMessages_UnreadOnly(t *testing.T) {
 }
 
 func TestGetMessages_SinceCursor(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _ = st.SendMessage("s", "r", "t1", `{}`, "")
@@ -114,6 +118,7 @@ func TestGetMessages_SinceCursor(t *testing.T) {
 // ── CountUnreadMessages ───────────────────────────────────────────────────────
 
 func TestCountUnreadMessages_DirectAndBroadcast(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// 1 direct + 1 broadcast.
@@ -130,6 +135,7 @@ func TestCountUnreadMessages_DirectAndBroadcast(t *testing.T) {
 }
 
 func TestCountUnreadMessages_ZeroAfterMarkRead(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	msgID, _ := st.SendMessage("src", "reader", "ping", `{}`, "")
@@ -147,6 +153,7 @@ func TestCountUnreadMessages_ZeroAfterMarkRead(t *testing.T) {
 // ── MarkRead ──────────────────────────────────────────────────────────────────
 
 func TestMarkRead_Idempotent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	msgID, _ := st.SendMessage("a", "b", "topic", `{}`, "")
@@ -161,6 +168,7 @@ func TestMarkRead_Idempotent(t *testing.T) {
 }
 
 func TestMarkRead_OnlyVisibleMessages(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Message sent to "carol", not "alice".

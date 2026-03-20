@@ -5,6 +5,7 @@ import (
 )
 
 func TestAddAnnotation_SourceIsAgent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	nodeID := "test::file.go::MyFunc"
@@ -33,6 +34,7 @@ func TestAddAnnotation_SourceIsAgent(t *testing.T) {
 }
 
 func TestAddSystemAnnotation_SourceIsSystem(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	nodeID := "test::file.go::MyFunc"
@@ -58,6 +60,7 @@ func TestAddSystemAnnotation_SourceIsSystem(t *testing.T) {
 }
 
 func TestGetAnnotationsForNodes_MixedSources(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	nodeID := "test::file.go::Hub"
@@ -92,6 +95,7 @@ func TestGetAnnotationsForNodes_MixedSources(t *testing.T) {
 }
 
 func TestGetAnnotationsForNodes_EmptyInput(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	m, err := st.GetAnnotationsForNodes(nil)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 // ── SaveCallSites / LoadCallSites ─────────────────────────────────────────────
 
 func TestSaveAndLoadCallSites_RoundTrip(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	sites := []graph.CallSite{
@@ -32,6 +33,7 @@ func TestSaveAndLoadCallSites_RoundTrip(t *testing.T) {
 }
 
 func TestSaveCallSites_Replaces(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Save 3 sites.
@@ -55,6 +57,7 @@ func TestSaveCallSites_Replaces(t *testing.T) {
 }
 
 func TestLoadCallSites_Empty(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	sites, err := st.LoadCallSites()
@@ -69,6 +72,7 @@ func TestLoadCallSites_Empty(t *testing.T) {
 // ── UpdateCallSitesForFile ────────────────────────────────────────────────────
 
 func TestUpdateCallSitesForFile_ReplacesOnlyTargetFile(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Seed call sites for two different files.
@@ -115,6 +119,7 @@ func TestUpdateCallSitesForFile_ReplacesOnlyTargetFile(t *testing.T) {
 }
 
 func TestUpdateCallSitesForFile_EmptyNewSites_DeletesOld(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_ = st.SaveCallSites([]graph.CallSite{
@@ -137,6 +142,7 @@ func TestUpdateCallSitesForFile_EmptyNewSites_DeletesOld(t *testing.T) {
 }
 
 func TestUpdateCallSitesForFile_NonexistentFile_IsNoop(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_ = st.SaveCallSites([]graph.CallSite{
@@ -157,6 +163,7 @@ func TestUpdateCallSitesForFile_NonexistentFile_IsNoop(t *testing.T) {
 // ── LoadFileMtimes / SaveFileMtimes / UpsertFileMtime ─────────────────────────
 
 func TestSaveAndLoadFileMtimes_RoundTrip(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	mtimes := map[string]int64{
@@ -183,6 +190,7 @@ func TestSaveAndLoadFileMtimes_RoundTrip(t *testing.T) {
 }
 
 func TestSaveFileMtimes_Replaces(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_ = st.SaveFileMtimes(map[string]int64{"/a.go": 1, "/b.go": 2})
@@ -198,6 +206,7 @@ func TestSaveFileMtimes_Replaces(t *testing.T) {
 }
 
 func TestUpsertFileMtime_InsertsAndUpdates(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	if err := st.UpsertFileMtime("/project/file.go", 1000); err != nil {
@@ -217,6 +226,7 @@ func TestUpsertFileMtime_InsertsAndUpdates(t *testing.T) {
 // ── UpsertDynamicRule / LoadDynamicRules ──────────────────────────────────────
 
 func TestUpsertAndLoadDynamicRules_RoundTrip(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	rule := config.Rule{
@@ -250,6 +260,7 @@ func TestUpsertAndLoadDynamicRules_RoundTrip(t *testing.T) {
 }
 
 func TestUpsertDynamicRule_UpdatesExisting(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	rule := config.Rule{ID: "rule-1", Description: "old", Severity: "warning"}
@@ -271,6 +282,7 @@ func TestUpsertDynamicRule_UpdatesExisting(t *testing.T) {
 // ── SaveIndexSnapshot / LoadIndexSnapshot ─────────────────────────────────────
 
 func TestSaveAndLoadIndexSnapshot_RoundTrip(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	payload := []byte("fake-zstd-compressed-graph-data")
@@ -289,6 +301,7 @@ func TestSaveAndLoadIndexSnapshot_RoundTrip(t *testing.T) {
 }
 
 func TestLoadIndexSnapshot_Missing(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	blob, err := st.LoadIndexSnapshot()
@@ -303,6 +316,7 @@ func TestLoadIndexSnapshot_Missing(t *testing.T) {
 // ── RecordToolCall / ToolUsageStats ───────────────────────────────────────────
 
 func TestRecordToolCall_AndToolUsageStats(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Record some tool calls.
@@ -336,6 +350,7 @@ func TestRecordToolCall_AndToolUsageStats(t *testing.T) {
 }
 
 func TestToolUsageStats_EmptyDB(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	stats, err := st.ToolUsageStats(7, 10)
@@ -350,6 +365,7 @@ func TestToolUsageStats_EmptyDB(t *testing.T) {
 // ── PruneStaleData ────────────────────────────────────────────────────────────
 
 func TestPruneStaleData_DoesNotCrash(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Record some data first.
@@ -366,6 +382,7 @@ func TestPruneStaleData_DoesNotCrash(t *testing.T) {
 
 // TestDomainField_RoundTrip verifies that Node.Domain survives a SaveGraph/LoadGraph cycle.
 func TestDomainField_RoundTrip(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("testrepo")
 
@@ -399,6 +416,7 @@ func TestDomainField_RoundTrip(t *testing.T) {
 // TestDomainField_DefaultsToCode verifies that nodes without an explicit domain
 // load as "code" (the default set by the migration and SaveGraph normalisation).
 func TestDomainField_DefaultsToCode(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("testrepo")
 
@@ -433,6 +451,7 @@ func TestDomainField_DefaultsToCode(t *testing.T) {
 // TestDomainField_AllDomains verifies that all defined DomainType constants
 // round-trip correctly through SaveGraph/LoadGraph.
 func TestDomainField_AllDomains(t *testing.T) {
+	t.Parallel()
 	domains := []graph.DomainType{
 		graph.DomainCode,
 		graph.DomainInfra,
@@ -479,6 +498,7 @@ func TestDomainField_AllDomains(t *testing.T) {
 // ── CountIndexedFiles ─────────────────────────────────────────────────────────
 
 func TestCountIndexedFiles_AfterSaveFileMtimes(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	n, err := st.CountIndexedFiles()
@@ -511,6 +531,7 @@ func TestCountIndexedFiles_AfterSaveFileMtimes(t *testing.T) {
 // index is missing (CREATE INDEX was not applied) or the query is written in a
 // way that prevents index use — both are bugs.
 func TestR32_AllHotQueriesUseIndexes(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	stats := st.CollectQueryStats(io.Discard)
@@ -527,6 +548,7 @@ func TestR32_AllHotQueriesUseIndexes(t *testing.T) {
 // twice does not fail due to duplicate index errors. All R32 indexes use
 // CREATE INDEX IF NOT EXISTS, so re-applying them is always safe.
 func TestR32_IndexesIdempotentOnUpgrade(t *testing.T) {
+	t.Parallel()
 	path := t.TempDir() + "/upgrade.db"
 
 	// First open: creates schema + R32 indexes.

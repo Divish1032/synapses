@@ -9,6 +9,7 @@ import (
 // ── GetTask ───────────────────────────────────────────────────────────────────
 
 func TestGetTask_ExistingTask(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	planID, _, _ := st.CreatePlan("get-task plan", "", "", []store.TaskInput{
@@ -36,6 +37,7 @@ func TestGetTask_ExistingTask(t *testing.T) {
 }
 
 func TestGetTask_NotFound_ReturnsError(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	task, err := st.GetTask("nonexistent-id")
@@ -50,6 +52,7 @@ func TestGetTask_NotFound_ReturnsError(t *testing.T) {
 // ── UpdateLinkedNodes ─────────────────────────────────────────────────────────
 
 func TestUpdateLinkedNodes_StoredAndRetrieved(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	planID, _, _ := st.CreatePlan("link plan", "", "", []store.TaskInput{
@@ -76,6 +79,7 @@ func TestUpdateLinkedNodes_StoredAndRetrieved(t *testing.T) {
 // ── UpsertSessionState / GetSessionState ──────────────────────────────────────
 
 func TestUpsertAndGetSessionState_RoundTrip(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	planID, _, _ := st.CreatePlan("state plan", "", "", []store.TaskInput{
@@ -119,6 +123,7 @@ func TestUpsertAndGetSessionState_RoundTrip(t *testing.T) {
 }
 
 func TestGetSessionState_NotFound_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	state, err := st.GetSessionState("nonexistent-task")
@@ -131,6 +136,7 @@ func TestGetSessionState_NotFound_ReturnsNil(t *testing.T) {
 }
 
 func TestUpsertSessionState_UpdatesExisting(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	planID, _, _ := st.CreatePlan("update state plan", "", "", []store.TaskInput{
@@ -160,6 +166,7 @@ func TestUpsertSessionState_UpdatesExisting(t *testing.T) {
 // ── GetSessionStateForTasks ───────────────────────────────────────────────────
 
 func TestGetSessionStateForTasks_MultipleIDs(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	planID, _, _ := st.CreatePlan("multi-state plan", "", "", []store.TaskInput{
@@ -188,6 +195,7 @@ func TestGetSessionStateForTasks_MultipleIDs(t *testing.T) {
 }
 
 func TestGetSessionStateForTasks_Empty(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	m, err := st.GetSessionStateForTasks([]string{})
@@ -202,6 +210,7 @@ func TestGetSessionStateForTasks_Empty(t *testing.T) {
 // ── Task UnmarshalJSON (TaskInput deserialization) ────────────────────────────
 
 func TestTaskInput_UnmarshalJSON(t *testing.T) {
+	t.Parallel()
 	// This exercises the custom UnmarshalJSON on TaskInput embedded in JSON.
 	// CreatePlan accepts []TaskInput with string dependencies.
 	st := openTestStore(t)
@@ -223,6 +232,7 @@ func TestTaskInput_UnmarshalJSON(t *testing.T) {
 // ── ClearAgentTask ───────────────────────────────────────────────────────────
 
 func TestClearAgentTask(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Register agent via UpsertAgent, then set a task.
@@ -259,6 +269,7 @@ func TestClearAgentTask(t *testing.T) {
 // ── FindTasksByNodeID ────────────────────────────────────────────────────────
 
 func TestFindTasksByNodeID_MatchesLinkedNode(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	nodeID := "repo::auth.go::AuthService"
@@ -280,6 +291,7 @@ func TestFindTasksByNodeID_MatchesLinkedNode(t *testing.T) {
 }
 
 func TestFindTasksByNodeID_EmptyNodeID(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	tasks, err := st.FindTasksByNodeID("", 10)
@@ -292,6 +304,7 @@ func TestFindTasksByNodeID_EmptyNodeID(t *testing.T) {
 }
 
 func TestFindTasksByNodeID_ZeroLimit(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	tasks, err := st.FindTasksByNodeID("repo::auth.go::AuthService", 0)
@@ -304,6 +317,7 @@ func TestFindTasksByNodeID_ZeroLimit(t *testing.T) {
 }
 
 func TestFindTasksByNodeID_NoMatch(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _, _ = st.CreatePlan("no match plan", "", "", []store.TaskInput{
@@ -320,6 +334,7 @@ func TestFindTasksByNodeID_NoMatch(t *testing.T) {
 }
 
 func TestFindTasksByNodeID_LIKEMetacharacterEscaped(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Node ID with LIKE metacharacters — must not match unrelated tasks.
@@ -343,6 +358,7 @@ func TestFindTasksByNodeID_LIKEMetacharacterEscaped(t *testing.T) {
 }
 
 func TestFindTasksByNodeID_NoSubstringFalsePositive(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// "Auth" must NOT false-match "AuthService" — the JSON quote boundary prevents it.

@@ -11,6 +11,7 @@ import (
 // ── ViolationID ───────────────────────────────────────────────────────────────
 
 func TestViolationID_Deterministic(t *testing.T) {
+	t.Parallel()
 	id1 := store.ViolationID("rule-1", "cmd/main.go:main", "internal/secret.go:Secret", "IMPORTS")
 	id2 := store.ViolationID("rule-1", "cmd/main.go:main", "internal/secret.go:Secret", "IMPORTS")
 	if id1 != id2 {
@@ -19,6 +20,7 @@ func TestViolationID_Deterministic(t *testing.T) {
 }
 
 func TestViolationID_DifferentInputsDifferentIDs(t *testing.T) {
+	t.Parallel()
 	id1 := store.ViolationID("rule-1", "a", "b", "IMPORTS")
 	id2 := store.ViolationID("rule-2", "a", "b", "IMPORTS")
 	if id1 == id2 {
@@ -29,6 +31,7 @@ func TestViolationID_DifferentInputsDifferentIDs(t *testing.T) {
 // ── LogViolations ─────────────────────────────────────────────────────────────
 
 func TestLogViolations_InsertsAndDeduplicates(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	vs := []config.Violation{
@@ -64,6 +67,7 @@ func TestLogViolations_InsertsAndDeduplicates(t *testing.T) {
 }
 
 func TestLogViolations_Empty(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Logging zero violations should not error.
@@ -75,6 +79,7 @@ func TestLogViolations_Empty(t *testing.T) {
 // ── ViolationIDsForFile ───────────────────────────────────────────────────────
 
 func TestViolationIDsForFile_Match(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	vs := []config.Violation{
@@ -98,6 +103,7 @@ func TestViolationIDsForFile_Match(t *testing.T) {
 }
 
 func TestViolationIDsForFile_NoMatch(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	ids, err := st.ViolationIDsForFile("nonexistent.go")
@@ -112,6 +118,7 @@ func TestViolationIDsForFile_NoMatch(t *testing.T) {
 // ── GetViolationLog ───────────────────────────────────────────────────────────
 
 func TestGetViolationLog_FilterByRule(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_ = st.LogViolations([]config.Violation{
@@ -132,6 +139,7 @@ func TestGetViolationLog_FilterByRule(t *testing.T) {
 }
 
 func TestGetViolationLog_AllRules(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_ = st.LogViolations([]config.Violation{

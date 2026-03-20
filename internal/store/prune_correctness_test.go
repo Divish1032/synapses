@@ -196,6 +196,7 @@ func seedOldMemories(t *testing.T, s *Store, prefix, tier string, age time.Durat
 // TestPruneStaleData_ToolCalls_DeletesOldPreservesRecent verifies that old
 // tool_calls are deleted and recent ones survive.
 func TestPruneStaleData_ToolCalls_DeletesOldPreservesRecent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	resetDebounce(st)
 
@@ -222,6 +223,7 @@ func TestPruneStaleData_ToolCalls_DeletesOldPreservesRecent(t *testing.T) {
 // TestPruneStaleData_Events_DeletesOldPreservesRecent verifies event pruning.
 // Note: AppendEvent prunes events >24h inline, so we seed via direct SQL.
 func TestPruneStaleData_Events_DeletesOldPreservesRecent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	resetDebounce(st)
 
@@ -245,6 +247,7 @@ func TestPruneStaleData_Events_DeletesOldPreservesRecent(t *testing.T) {
 // TestPruneStaleData_Episodes_DeletesOldPreservesRecent verifies episode pruning.
 // Episodes use Unix seconds for created_at (INTEGER), not RFC3339.
 func TestPruneStaleData_Episodes_DeletesOldPreservesRecent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	resetDebounce(st)
 
@@ -278,6 +281,7 @@ func TestPruneStaleData_Episodes_DeletesOldPreservesRecent(t *testing.T) {
 // created_at as Unix INTEGER seconds (see SendMessage), so the prune cutoff
 // must also be Unix seconds.
 func TestPruneStaleData_AgentMessages_DeletesOldPreservesRecent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	resetDebounce(st)
 
@@ -300,6 +304,7 @@ func TestPruneStaleData_AgentMessages_DeletesOldPreservesRecent(t *testing.T) {
 // TestPruneStaleData_ContextDeliveries_DeletesOldPreservesRecent verifies
 // context_deliveries pruning (Unix seconds).
 func TestPruneStaleData_ContextDeliveries_DeletesOldPreservesRecent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	resetDebounce(st)
 
@@ -332,6 +337,7 @@ func TestPruneStaleData_ContextDeliveries_DeletesOldPreservesRecent(t *testing.T
 // - session_log memories older than retention are deleted
 // - entity memories (non-session_log, non-expired) survive
 func TestPruneStaleData_Memories_ExpiredAndSessionLog(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	resetDebounce(st)
 
@@ -368,6 +374,7 @@ func TestPruneStaleData_Memories_ExpiredAndSessionLog(t *testing.T) {
 // deleted, while open proposals survive. Also verifies orphaned proposal_votes
 // are cleaned up.
 func TestPruneStaleData_Proposals_DeletesResolvedPreservesOpen(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	resetDebounce(st)
 
@@ -414,6 +421,7 @@ func TestPruneStaleData_Proposals_DeletesResolvedPreservesOpen(t *testing.T) {
 // same-second cutoff race (episodes use Unix seconds, so created_at == cutoff
 // means "not older than cutoff" in the DELETE WHERE created_at < ? predicate).
 func TestPruneStaleData_ZeroRetention_DeletesAll(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	resetDebounce(st)
 
@@ -455,6 +463,7 @@ func TestPruneStaleData_ZeroRetention_DeletesAll(t *testing.T) {
 // graphDB are deleted, while non-stale annotations and annotations for
 // existing nodes survive.
 func TestPruneStaleData_Annotations_OrphanedStaleDeleted(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	resetDebounce(st)
 
@@ -533,6 +542,7 @@ func TestPruneStaleData_Annotations_OrphanedStaleDeleted(t *testing.T) {
 // TestPruneStaleData_Annotations_NoGraphDB verifies that annotation cleanup
 // is safely skipped when graphDB is nil (knowledge-only mode).
 func TestPruneStaleData_Annotations_NoGraphDB(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	resetDebounce(st)
 
@@ -564,6 +574,7 @@ func TestPruneStaleData_Annotations_NoGraphDB(t *testing.T) {
 // but has zero nodes, stale annotations are preserved (not nuked). This is the
 // fail-safe for full-reindex scenarios where the graph is momentarily empty.
 func TestPruneStaleData_Annotations_EmptyGraph(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	resetDebounce(st)
 
@@ -601,6 +612,7 @@ func TestPruneStaleData_Annotations_EmptyGraph(t *testing.T) {
 // tables that PruneStaleData targets, runs prune with specific retention,
 // and verifies the exact surviving row counts.
 func TestPruneStaleData_AllTables_IntegrationRoundTrip(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	resetDebounce(st)
 

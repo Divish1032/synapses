@@ -21,6 +21,7 @@ import (
 // TestUpdateTask_UnblocksDependent creates two plans — A and B where B depends on A.
 // Marking A done should trigger findNewlyUnblocked.
 func TestUpdateTask_UnblocksDependent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Create task A.
@@ -54,6 +55,7 @@ func TestUpdateTask_UnblocksDependent(t *testing.T) {
 }
 
 func TestUpdateTask_TwoDeps_OnlyOneComplete(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Create task A and task C.
@@ -82,6 +84,7 @@ func TestUpdateTask_TwoDeps_OnlyOneComplete(t *testing.T) {
 }
 
 func TestUpdateTask_NotDone_NoUnblocked(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	planID, _, _ := st.CreatePlan("in-prog plan", "", "", []store.TaskInput{
 		{Title: "task-ip", Priority: "p1"},
@@ -102,6 +105,7 @@ func TestUpdateTask_NotDone_NoUnblocked(t *testing.T) {
 // ── OpenReadOnly ──────────────────────────────────────────────────────────────
 
 func TestOpenReadOnly_Success(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "test.db")
 	st, err := store.Open(path)
 	if err != nil {
@@ -117,6 +121,7 @@ func TestOpenReadOnly_Success(t *testing.T) {
 }
 
 func TestOpenReadOnly_Missing(t *testing.T) {
+	t.Parallel()
 	_, err := store.OpenReadOnly(filepath.Join(t.TempDir(), "nonexistent.db"))
 	if err == nil {
 		t.Error("expected error for nonexistent DB")
@@ -126,6 +131,7 @@ func TestOpenReadOnly_Missing(t *testing.T) {
 // ── DefaultPath ───────────────────────────────────────────────────────────────
 
 func TestDefaultPath(t *testing.T) {
+	t.Parallel()
 	path, err := store.DefaultPath("/my/project")
 	if err != nil {
 		t.Fatalf("DefaultPath: %v", err)
@@ -138,6 +144,7 @@ func TestDefaultPath(t *testing.T) {
 // ── SaveFileMtimes / LoadFileMtimes ───────────────────────────────────────────
 
 func TestSaveAndLoadFileMtimes(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	mtimes := map[string]int64{
 		"pkg/auth.go":    1700000000,
@@ -156,6 +163,7 @@ func TestSaveAndLoadFileMtimes(t *testing.T) {
 }
 
 func TestLoadFileMtimes_Empty(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	loaded, err := st.LoadFileMtimes()
 	if err != nil {
@@ -169,6 +177,7 @@ func TestLoadFileMtimes_Empty(t *testing.T) {
 // ── SaveCallSites / LoadCallSites ─────────────────────────────────────────────
 
 func TestSaveAndLoadCallSites_Coverage(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	sites := []graph.CallSite{
@@ -194,6 +203,7 @@ func TestSaveAndLoadCallSites_Coverage(t *testing.T) {
 // ── SaveGraph triggers FTS rebuild ────────────────────────────────────────────
 
 func TestSaveGraph_WithNodesForFTS(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("test")
 
@@ -222,6 +232,7 @@ func TestSaveGraph_WithNodesForFTS(t *testing.T) {
 // ── GetEpisodes with various filters ──────────────────────────────────────────
 
 func TestGetEpisodes_WithAgentFilter(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	for i := 0; i < 3; i++ {
@@ -250,6 +261,7 @@ func TestGetEpisodes_WithAgentFilter(t *testing.T) {
 }
 
 func TestGetEpisodes_WithEpisodeType(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _ = st.RememberEpisode(store.Episode{
@@ -270,6 +282,7 @@ func TestGetEpisodes_WithEpisodeType(t *testing.T) {
 }
 
 func TestGetEpisodes_WithSinceDays(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	_, _ = st.RememberEpisode(store.Episode{
 		AgentID:       "days-agent",
@@ -288,6 +301,7 @@ func TestGetEpisodes_WithSinceDays(t *testing.T) {
 }
 
 func TestGetEpisodes_WithTags(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	_, _ = st.RememberEpisode(store.Episode{
 		AgentID:       "tag-agent",
@@ -309,6 +323,7 @@ func TestGetEpisodes_WithTags(t *testing.T) {
 // ── RecallEpisodes ────────────────────────────────────────────────────────────
 
 func TestRecallEpisodes_WithQuery(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _ = st.RememberEpisode(store.Episode{
@@ -330,6 +345,7 @@ func TestRecallEpisodes_WithQuery(t *testing.T) {
 }
 
 func TestRecallEpisodes_EmptyQuery(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	eps, err := st.RecallEpisodes("", "", "any-agent", "", "", 5, 0)
 	if err != nil {
@@ -339,6 +355,7 @@ func TestRecallEpisodes_EmptyQuery(t *testing.T) {
 }
 
 func TestRecallEpisodes_WithOutcomeFilter(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	_, _ = st.RememberEpisode(store.Episode{
 		AgentID:       "outcome-agent",
@@ -359,6 +376,7 @@ func TestRecallEpisodes_WithOutcomeFilter(t *testing.T) {
 // ── LogViolations ─────────────────────────────────────────────────────────────
 
 func TestLogViolations_WithEntries_Coverage(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	violations := []config.Violation{
 		{
@@ -377,6 +395,7 @@ func TestLogViolations_WithEntries_Coverage(t *testing.T) {
 // ── SaveGraph with edges ───────────────────────────────────────────────────────
 
 func TestSaveGraph_WithEdges(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("edge-repo")
 
@@ -418,6 +437,7 @@ func TestSaveGraph_WithEdges(t *testing.T) {
 // ── LoadGraph after SaveGraph ──────────────────────────────────────────────────
 
 func TestLoadGraph_AfterSave(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("load-repo")
 
@@ -460,6 +480,7 @@ func TestLoadGraph_AfterSave(t *testing.T) {
 // searching for a term that is unlikely to match FTS5 token boundaries but will
 // match via LIKE (partial substring).
 func TestSemanticSearch_LikeSearchFallthrough(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("like-repo")
 
@@ -489,6 +510,7 @@ func TestSemanticSearch_LikeSearchFallthrough(t *testing.T) {
 // Before the fix, likeSearch escaped "%" with "\%" but omitted ESCAPE '\'`, making
 // the backslash a literal — so "\%" still wildcarded. "_" was never escaped.
 func TestSemanticSearch_LikeSearch_MetacharSafety(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("meta-repo")
 
@@ -546,6 +568,7 @@ func TestSemanticSearch_LikeSearch_MetacharSafety(t *testing.T) {
 // ── AppendEvent with payload ───────────────────────────────────────────────────
 
 func TestAppendEvent_WithPayload(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	err := st.AppendEvent("file_changed", "agent-test", `{"file":"pkg/auth.go","action":"modified"}`)
@@ -555,6 +578,7 @@ func TestAppendEvent_WithPayload(t *testing.T) {
 }
 
 func TestAppendEvent_MultipleEvents(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	for i := 0; i < 5; i++ {
@@ -568,6 +592,7 @@ func TestAppendEvent_MultipleEvents(t *testing.T) {
 // ── SendMessage ────────────────────────────────────────────────────────────────
 
 func TestSendMessage_WithTargetAgent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, err := st.SendMessage("agent-alpha", "agent-beta", "review", "please review pkg/auth.go", "proj-1")
@@ -577,6 +602,7 @@ func TestSendMessage_WithTargetAgent(t *testing.T) {
 }
 
 func TestSendMessage_BroadcastNoTarget(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, err := st.SendMessage("agent-alpha", "", "broadcast", "broadcast message to all agents", "proj-1")
@@ -588,6 +614,7 @@ func TestSendMessage_BroadcastNoTarget(t *testing.T) {
 // ── ScanAll (package-level) ────────────────────────────────────────────────────
 
 func TestScanAll_ReturnsNoError(t *testing.T) {
+	t.Parallel()
 	// ScanAll scans the synapses cache dir for *.db files.
 	// It should not error even when the cache dir is empty or absent.
 	_, err := store.ScanAll()
@@ -599,6 +626,7 @@ func TestScanAll_ReturnsNoError(t *testing.T) {
 // ── SaveFileMtimes overwrite path ──────────────────────────────────────────────
 
 func TestSaveFileMtimes_Overwrite(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	first := map[string]int64{"a.go": 100, "b.go": 200}
@@ -624,6 +652,7 @@ func TestSaveFileMtimes_Overwrite(t *testing.T) {
 // ── SaveCallSites empty slice ──────────────────────────────────────────────────
 
 func TestSaveCallSites_EmptySlice(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	if err := st.SaveCallSites([]graph.CallSite{}); err != nil {
 		t.Fatalf("SaveCallSites empty: %v", err)
@@ -633,6 +662,7 @@ func TestSaveCallSites_EmptySlice(t *testing.T) {
 // ── GetPendingTasks with agentID (auto-claim branch) ──────────────────────────
 
 func TestGetPendingTasks_WithAgentID(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	planID, _, err := st.CreatePlan("agent-plan", "", "", []store.TaskInput{
 		{Title: "task-unclaimed", Priority: "p1"},
@@ -658,6 +688,7 @@ func TestGetPendingTasks_WithAgentID(t *testing.T) {
 }
 
 func TestGetPendingTasks_WithDependencies(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Create a blocker task.
@@ -695,6 +726,7 @@ func TestGetPendingTasks_WithDependencies(t *testing.T) {
 }
 
 func TestGetPendingTasks_NoFilter(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	_, _, _ = st.CreatePlan("no-filter-plan", "", "", []store.TaskInput{
 		{Title: "task-nf", Priority: "p1"},
@@ -711,6 +743,7 @@ func TestGetPendingTasks_NoFilter(t *testing.T) {
 // ── ScanAll with a real DB in cache dir ───────────────────────────────────────
 
 func TestScanAll_WithRealDB(t *testing.T) {
+	t.Parallel()
 	// Open a store at a temp path so at least one DB file exists in a real dir.
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test-project.db")
@@ -737,6 +770,7 @@ func TestScanAll_WithRealDB(t *testing.T) {
 // TestRebuildFTS_ViaSemanticSearch saves a graph and then does a search to
 // confirm the FTS table is populated and the rebuild path is exercised.
 func TestRebuildFTS_ViaSemanticSearch(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("fts-repo")
 
@@ -773,6 +807,7 @@ func TestRebuildFTS_ViaSemanticSearch(t *testing.T) {
 // ── likeSearch fallback — empty query ─────────────────────────────────────────
 
 func TestSemanticSearch_EmptyQueryReturnsNil(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	// Empty query should return nil, nil (hits the early-return in SemanticSearch).
 	results, err := st.SemanticSearch("", 10)
@@ -787,6 +822,7 @@ func TestSemanticSearch_EmptyQueryReturnsNil(t *testing.T) {
 // ── AppendEvent — zero-default limit branch in GetEvents ──────────────────────
 
 func TestGetEvents_ZeroLimit(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	_ = st.AppendEvent("test_event", "agent-ev", `{"x":1}`)
 	// limit=0 exercises the `if limit <= 0 { limit = 100 }` branch.
@@ -803,6 +839,7 @@ func TestGetEvents_ZeroLimit(t *testing.T) {
 // ── LoadGraph on empty store returns nil ──────────────────────────────────────
 
 func TestLoadGraph_EmptyStore(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g, err := st.LoadGraph()
 	if err != nil {

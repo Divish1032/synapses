@@ -30,6 +30,7 @@ func corruptFile(t *testing.T, path string) {
 // TestOpenRecoverCorruptGraphDB verifies that store.Open() recovers from a
 // corrupt graph.db by deleting and recreating it, returning a functional store.
 func TestOpenRecoverCorruptGraphDB(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "graph.db")
 
@@ -64,6 +65,7 @@ func TestOpenRecoverCorruptGraphDB(t *testing.T) {
 // TestOpenRecoverCorruptKnowledgeDB verifies that store.Open() continues in
 // degraded mode when knowledge.db is corrupt, backing it up rather than losing it.
 func TestOpenRecoverCorruptKnowledgeDB(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "graph.db")
 	kPath := store.KnowledgePath(dbPath)
@@ -103,6 +105,7 @@ func TestOpenRecoverCorruptKnowledgeDB(t *testing.T) {
 // This is the critical production scenario: WAL checkpoint replay against
 // a fresh empty DB would corrupt it on first open.
 func TestOpenRecoverCorruptKnowledgeDB_WithWALSidecar(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "graph.db")
 	kPath := store.KnowledgePath(dbPath)
@@ -148,6 +151,7 @@ func TestOpenRecoverCorruptKnowledgeDB_WithWALSidecar(t *testing.T) {
 // during corruption recovery, Open() returns a clear actionable error rather
 // than a confusing schema error from reopening the corrupt file.
 func TestOpenGraphDBDeletionFailure(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "graph.db")
 
@@ -186,6 +190,7 @@ func TestOpenGraphDBDeletionFailure(t *testing.T) {
 // TestOpenHealthyDB verifies the happy path: a healthy DB passes quick_check
 // and is opened normally without any recovery side effects.
 func TestOpenHealthyDB(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "graph.db")
 

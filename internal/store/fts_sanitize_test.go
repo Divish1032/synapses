@@ -8,6 +8,7 @@ import (
 // TestSanitizeFTSQuery verifies that sanitizeFTSQuery produces valid FTS5
 // expressions and never passes operator keywords through unquoted.
 func TestSanitizeFTSQuery(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		input    string
 		wantNone bool // true if expected to return ""
@@ -92,6 +93,7 @@ func TestSanitizeFTSQuery(t *testing.T) {
 // Before the fix, this fallback included "OR" separator tokens from
 // sanitizeFTSQuery's output, producing invalid FTS5 like `"go" OR OR OR "is"`.
 func TestBuildORQuery_ShortWordFallback(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		input string
 		// wantValid: if true, the output must be usable as FTS5 MATCH without error

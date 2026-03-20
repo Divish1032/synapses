@@ -29,6 +29,7 @@ import (
 // ── WebCache CRUD ─────────────────────────────────────────────────────────────
 
 func TestUpsertWebCache_InsertAndGet(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	if err := st.UpsertWebCache("https://pkg.go.dev/net/http", "HTTP package docs", 0); err != nil {
@@ -48,6 +49,7 @@ func TestUpsertWebCache_InsertAndGet(t *testing.T) {
 }
 
 func TestUpsertWebCache_Overwrite(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_ = st.UpsertWebCache("https://example.com/api", "v1", 24)
@@ -63,6 +65,7 @@ func TestUpsertWebCache_Overwrite(t *testing.T) {
 }
 
 func TestGetWebCache_Miss(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, ok := st.GetWebCache("https://nonexistent.example.com")
@@ -72,6 +75,7 @@ func TestGetWebCache_Miss(t *testing.T) {
 }
 
 func TestDeleteWebCachePrefix(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_ = st.UpsertWebCache("pkg:net/http@v1.0", "http docs", 0)
@@ -96,6 +100,7 @@ func TestDeleteWebCachePrefix(t *testing.T) {
 }
 
 func TestPruneExpiredWebCache(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Insert a zero-TTL entry (never expires) and a positive-TTL entry.
@@ -115,12 +120,14 @@ func TestPruneExpiredWebCache(t *testing.T) {
 // ── PruneStaleData ────────────────────────────────────────────────────────────
 
 func TestPruneStaleData_NoData_NoPanic(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	// Should not panic on an empty database.
 	st.PruneStaleData(7)
 }
 
 func TestPruneStaleData_WithData(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Seed some data that PruneStaleData targets.
@@ -145,6 +152,7 @@ func TestPruneStaleData_WithData(t *testing.T) {
 //   - open gaps for nodes that still exist
 //   - non-open gaps (fixed/wontfix) for absent nodes (historical records)
 func TestPruneStaleData_OrphanedQualityGaps(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Seed a real node in the graph so we can distinguish "exists" from "absent".
@@ -223,6 +231,7 @@ func TestPruneStaleData_OrphanedQualityGaps(t *testing.T) {
 // ── CollectQueryStats ─────────────────────────────────────────────────────────
 
 func TestCollectQueryStats_ReturnsStats(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// The store has indexes from schema creation; stats should reflect index hits.
@@ -237,6 +246,7 @@ func TestCollectQueryStats_ReturnsStats(t *testing.T) {
 // ── Stat ──────────────────────────────────────────────────────────────────────
 
 func TestStat_PopulatedDB(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	g := graph.New("stat-repo")
@@ -268,6 +278,7 @@ func TestStat_PopulatedDB(t *testing.T) {
 }
 
 func TestStat_EmptyDB(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	stat, err := st.Stat("empty.db")
 	if err != nil {
@@ -281,6 +292,7 @@ func TestStat_EmptyDB(t *testing.T) {
 // ── SavedAt ───────────────────────────────────────────────────────────────────
 
 func TestSavedAt_EmptyDB(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	ts, err := st.SavedAt()
 	if err != nil {
@@ -292,6 +304,7 @@ func TestSavedAt_EmptyDB(t *testing.T) {
 }
 
 func TestSavedAt_AfterSaveGraph(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("saved-at-repo")
 	_ = st.SaveGraph(g)
@@ -308,6 +321,7 @@ func TestSavedAt_AfterSaveGraph(t *testing.T) {
 // ── GetSignatureChanges ───────────────────────────────────────────────────────
 
 func TestGetSignatureChanges_DetectsChange(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Save graph v1 with a function signature.
@@ -344,6 +358,7 @@ func TestGetSignatureChanges_DetectsChange(t *testing.T) {
 }
 
 func TestGetSignatureChanges_NoChanges(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	g := graph.New("nochange-repo")
@@ -367,6 +382,7 @@ func TestGetSignatureChanges_NoChanges(t *testing.T) {
 // ── UpsertDynamicRule / LoadDynamicRules ───────────────────────────────────────
 
 func TestUpsertAndLoadDynamicRules(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	rule := config.Rule{
@@ -396,6 +412,7 @@ func TestUpsertAndLoadDynamicRules(t *testing.T) {
 }
 
 func TestUpsertDynamicRule_Overwrite(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	r1 := config.Rule{ID: "test-rule", Description: "v1", Severity: "warning"}
@@ -416,6 +433,7 @@ func TestUpsertDynamicRule_Overwrite(t *testing.T) {
 // ── UpdateCallSitesForFile ────────────────────────────────────────────────────
 
 func TestUpdateCallSitesForFile_ReplacesPerFile(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Save initial call sites for two files.
@@ -443,6 +461,7 @@ func TestUpdateCallSitesForFile_ReplacesPerFile(t *testing.T) {
 }
 
 func TestUpdateCallSitesForFile_EmptyNewSites(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_ = st.SaveCallSites([]graph.CallSite{
@@ -463,6 +482,7 @@ func TestUpdateCallSitesForFile_EmptyNewSites(t *testing.T) {
 // ── UpsertFileMtime ───────────────────────────────────────────────────────────
 
 func TestUpsertFileMtime_InsertAndUpdate(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	if err := st.UpsertFileMtime("pkg/auth.go", 1000); err != nil {
@@ -481,6 +501,7 @@ func TestUpsertFileMtime_InsertAndUpdate(t *testing.T) {
 // ── ViolationID deterministic ─────────────────────────────────────────────────
 
 func TestViolationID_StableAndDistinct(t *testing.T) {
+	t.Parallel()
 	id1 := store.ViolationID("rule1", "from", "to", "CALLS")
 	id2 := store.ViolationID("rule1", "from", "to", "CALLS")
 	if id1 != id2 {
@@ -502,6 +523,7 @@ func TestViolationID_StableAndDistinct(t *testing.T) {
 // ── SemanticSearch with special characters ────────────────────────────────────
 
 func TestSemanticSearch_SpecialChars_NoError(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	// Queries with FTS5 special chars should be sanitized, not error.
 	for _, q := range []string{
@@ -522,6 +544,7 @@ func TestSemanticSearch_SpecialChars_NoError(t *testing.T) {
 // ── SaveGraph with rich metadata ──────────────────────────────────────────────
 
 func TestSaveAndLoadGraph_RichMetadata(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	g := graph.New("rich-repo")
@@ -581,6 +604,7 @@ func TestSaveAndLoadGraph_RichMetadata(t *testing.T) {
 // ── CacheDir ──────────────────────────────────────────────────────────────────
 
 func TestCacheDir_ReturnsNonEmpty(t *testing.T) {
+	t.Parallel()
 	dir, err := store.CacheDir()
 	if err != nil {
 		t.Fatalf("CacheDir: %v", err)
@@ -593,6 +617,7 @@ func TestCacheDir_ReturnsNonEmpty(t *testing.T) {
 // ── Open re-open (migration idempotency) ──────────────────────────────────────
 
 func TestOpen_Reopen_MigrationIdempotent(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "reopen.db")
 
 	st1, err := store.Open(path)

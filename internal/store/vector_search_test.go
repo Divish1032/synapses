@@ -12,6 +12,7 @@ import (
 // --- topKHeap unit tests ---
 
 func TestTopKHeap_Basic(t *testing.T) {
+	t.Parallel()
 	h := &topKHeap{k: 3}
 	h.tryPush("a", 0.5, false)
 	h.tryPush("b", 0.9, false)
@@ -34,6 +35,7 @@ func TestTopKHeap_Basic(t *testing.T) {
 }
 
 func TestTopKHeap_EmptyDrain(t *testing.T) {
+	t.Parallel()
 	h := &topKHeap{k: 5}
 	results := h.drain()
 	if results != nil {
@@ -42,6 +44,7 @@ func TestTopKHeap_EmptyDrain(t *testing.T) {
 }
 
 func TestTopKHeap_SingleElement(t *testing.T) {
+	t.Parallel()
 	h := &topKHeap{k: 1}
 	h.tryPush("a", 0.5, false)
 	h.tryPush("b", 0.9, false)
@@ -57,6 +60,7 @@ func TestTopKHeap_SingleElement(t *testing.T) {
 }
 
 func TestTopKHeap_ExactlyK(t *testing.T) {
+	t.Parallel()
 	h := &topKHeap{k: 3}
 	h.tryPush("a", 0.1, false)
 	h.tryPush("b", 0.2, false)
@@ -72,6 +76,7 @@ func TestTopKHeap_ExactlyK(t *testing.T) {
 }
 
 func TestTopKHeap_DescendingOrder(t *testing.T) {
+	t.Parallel()
 	h := &topKHeap{k: 100}
 	for i := 0; i < 50; i++ {
 		h.tryPush(fmt.Sprintf("item-%d", i), float32(i)*0.01, false)
@@ -85,6 +90,7 @@ func TestTopKHeap_DescendingOrder(t *testing.T) {
 }
 
 func TestTopKHeap_HeapInterface(t *testing.T) {
+	t.Parallel()
 	// Verify the heap invariant is maintained after operations.
 	h := &topKHeap{k: 5}
 	heap.Init(h)
@@ -105,6 +111,7 @@ func TestTopKHeap_HeapInterface(t *testing.T) {
 }
 
 func TestTopKHeap_ZeroK_NoPanic(t *testing.T) {
+	t.Parallel()
 	// k=0 should never accept any items (defensive guard).
 	h := &topKHeap{k: 0}
 	accepted := h.tryPush("a", 0.9, false)
@@ -121,6 +128,7 @@ func TestTopKHeap_ZeroK_NoPanic(t *testing.T) {
 }
 
 func TestTopKHeap_TieBreaking(t *testing.T) {
+	t.Parallel()
 	// When scores are equal, both should be in the heap (no silent drops).
 	h := &topKHeap{k: 3}
 	h.tryPush("a", 0.5, false)
@@ -136,6 +144,7 @@ func TestTopKHeap_TieBreaking(t *testing.T) {
 // --- Two-pass integration tests ---
 
 func TestMemoryVectorSearch_TwoPass_ContentFetched(t *testing.T) {
+	t.Parallel()
 	// Verify that the second pass correctly fetches content, tier, and entity_id.
 	st, _ := openMemEmbedTestStore(t)
 	ids := seedMultipleMemories(t, st)
@@ -163,6 +172,7 @@ func TestMemoryVectorSearch_TwoPass_ContentFetched(t *testing.T) {
 }
 
 func TestMemoryVectorSearch_TwoPass_DeletedBetweenPasses(t *testing.T) {
+	t.Parallel()
 	// If a memory is deleted between pass 1 and pass 2, it should be silently
 	// filtered out (not cause a panic or return a zero-value entry).
 	st, _ := openMemEmbedTestStore(t)
@@ -189,6 +199,7 @@ func TestMemoryVectorSearch_TwoPass_DeletedBetweenPasses(t *testing.T) {
 }
 
 func TestVectorSearch_TwoPass_NodeMetadataFetched(t *testing.T) {
+	t.Parallel()
 	// Verify that VectorSearch (node embeddings) correctly fetches metadata in pass 2.
 	f, err := os.CreateTemp("", "test-vecsearch-*.db")
 	if err != nil {
@@ -228,6 +239,7 @@ func TestVectorSearch_TwoPass_NodeMetadataFetched(t *testing.T) {
 }
 
 func TestVectorSearch_TwoPass_LargeDataset(t *testing.T) {
+	t.Parallel()
 	// Verify VectorSearch works correctly at scale with the two-pass approach.
 	f, err := os.CreateTemp("", "test-vecsearch-large-*.db")
 	if err != nil {
@@ -282,6 +294,7 @@ func TestVectorSearch_TwoPass_LargeDataset(t *testing.T) {
 }
 
 func TestMemoryVectorSearch_TwoPass_StaleAfterPass1(t *testing.T) {
+	t.Parallel()
 	// Verify that if a memory becomes stale between Pass 1 and Pass 2,
 	// it is excluded from results. This tests the re-applied stale/expired
 	// filter in fetchMemorySearchResults.
@@ -318,6 +331,7 @@ func TestMemoryVectorSearch_TwoPass_StaleAfterPass1(t *testing.T) {
 }
 
 func TestMemoryVectorSearch_TwoPass_ExpiredAfterPass1(t *testing.T) {
+	t.Parallel()
 	// Same as above but for expiry between passes.
 	st, _ := openMemEmbedTestStore(t)
 	ids := seedMultipleMemories(t, st)
@@ -348,6 +362,7 @@ func TestMemoryVectorSearch_TwoPass_ExpiredAfterPass1(t *testing.T) {
 }
 
 func TestMemoryVectorSearch_ScoreOrdering(t *testing.T) {
+	t.Parallel()
 	// Verify that the min-heap produces correct descending order.
 	st, _ := openMemEmbedTestStore(t)
 

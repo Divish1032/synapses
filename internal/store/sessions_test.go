@@ -41,6 +41,7 @@ func mustGetFirstTask(t *testing.T, st *Store, planID string) string {
 // ── GetOrResumeSession (session creation) ────────────────────────────────────
 
 func TestGetOrResumeSession_CreatesNewSession(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id, resumed, hibCtx, err := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "fix bug", 300, -1)
 	if err != nil {
@@ -58,6 +59,7 @@ func TestGetOrResumeSession_CreatesNewSession(t *testing.T) {
 }
 
 func TestGetOrResumeSession_EmptyIntent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id, _, _, err := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "", 300, -1)
 	if err != nil {
@@ -69,6 +71,7 @@ func TestGetOrResumeSession_EmptyIntent(t *testing.T) {
 }
 
 func TestGetOrResumeSession_ResumesWithinWindow(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 300, -1)
 
@@ -88,6 +91,7 @@ func TestGetOrResumeSession_ResumesWithinWindow(t *testing.T) {
 }
 
 func TestGetOrResumeSession_NewSessionAfterWindow(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0, -1)
 
@@ -108,6 +112,7 @@ func TestGetOrResumeSession_NewSessionAfterWindow(t *testing.T) {
 }
 
 func TestGetOrResumeSession_DifferentConnectionsNeverCollide(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	// Two simultaneous connections with same agentID — must be independent sessions.
 	idA, resumedA, _, _ := st.GetOrResumeSession("claude-code", "proj-1", "mcp-conn-A", "work", 300, -1)
@@ -122,6 +127,7 @@ func TestGetOrResumeSession_DifferentConnectionsNeverCollide(t *testing.T) {
 }
 
 func TestGetOrResumeSession_SupersedesOwnPriorSession(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-1", "mcp-conn-1", "work", 0, -1)
 	past := time.Now().UTC().Unix() - 400
@@ -145,6 +151,7 @@ func TestGetOrResumeSession_SupersedesOwnPriorSession(t *testing.T) {
 }
 
 func TestGetOrResumeSession_DoesNotSupersedeConcurrentConnection(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	idA, _, _, _ := st.GetOrResumeSession("claude-code", "proj-1", "mcp-conn-A", "work", 300, -1)
 
@@ -163,6 +170,7 @@ func TestGetOrResumeSession_DoesNotSupersedeConcurrentConnection(t *testing.T) {
 }
 
 func TestGetOrResumeSession_ConcurrentCallsSameMCPSession(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	// Fire 10 concurrent GetOrResumeSession calls for the same connection.
 	// Exactly one fresh session must be created; all others must resume it.
@@ -200,6 +208,7 @@ func TestGetOrResumeSession_ConcurrentCallsSameMCPSession(t *testing.T) {
 // ── Cross-connection hibernate resume (Phase 2) ───────────────────────────────
 
 func TestGetOrResumeSession_HibernateResume_SameAgentNewConnection(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Session started on conn-A with intent.
@@ -238,6 +247,7 @@ func TestGetOrResumeSession_HibernateResume_SameAgentNewConnection(t *testing.T)
 }
 
 func TestGetOrResumeSession_HibernateResume_PreservesIntentWhenNewIntentEmpty(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-h2", "mcp-conn-A", "fix auth bug", 300, 14400)
@@ -258,6 +268,7 @@ func TestGetOrResumeSession_HibernateResume_PreservesIntentWhenNewIntentEmpty(t 
 }
 
 func TestGetOrResumeSession_HibernateResume_NewIntentOverridesPrior(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-h3", "mcp-conn-A", "old intent", 300, 14400)
@@ -274,6 +285,7 @@ func TestGetOrResumeSession_HibernateResume_NewIntentOverridesPrior(t *testing.T
 }
 
 func TestGetOrResumeSession_HibernateResume_DisabledWhenWindowNegative(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Hibernate disabled via -1.
@@ -291,6 +303,7 @@ func TestGetOrResumeSession_HibernateResume_DisabledWhenWindowNegative(t *testin
 }
 
 func TestGetOrResumeSession_HibernateResume_ExpiredSessionNotResumed(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Session last seen 5 hours ago — outside the 4-hour hibernate window.
@@ -308,6 +321,7 @@ func TestGetOrResumeSession_HibernateResume_ExpiredSessionNotResumed(t *testing.
 }
 
 func TestGetOrResumeSession_HibernateResume_DoesNotStealLiveConcurrentSession(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// conn-A is a live concurrent session (seen within reconnect window).
@@ -328,6 +342,7 @@ func TestGetOrResumeSession_HibernateResume_DoesNotStealLiveConcurrentSession(t 
 }
 
 func TestGetOrResumeSession_HibernateResume_StateBecomesActive(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-hs", "mcp-conn-A", "work", 300, 14400)
@@ -347,6 +362,7 @@ func TestGetOrResumeSession_HibernateResume_StateBecomesActive(t *testing.T) {
 }
 
 func TestGetOrResumeSession_HibernateResume_MCPSessionIDUpdated(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-hm", "mcp-conn-A", "work", 300, 14400)
@@ -366,6 +382,7 @@ func TestGetOrResumeSession_HibernateResume_MCPSessionIDUpdated(t *testing.T) {
 }
 
 func TestGetOrResumeSession_HibernateResume_PicksMostRecentSession(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Two old sessions for the same agent+project — hibernate should resume the newest.
@@ -389,6 +406,7 @@ func TestGetOrResumeSession_HibernateResume_PicksMostRecentSession(t *testing.T)
 // ── State column ──────────────────────────────────────────────────────────────
 
 func TestSession_StateIsActiveOnCreate(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id := createTestSession(t, st, "agent-1", "proj-state", "")
 
@@ -400,6 +418,7 @@ func TestSession_StateIsActiveOnCreate(t *testing.T) {
 }
 
 func TestSession_StateIsClosedAfterEndSession(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id := createTestSession(t, st, "agent-1", "proj-state2", "")
 	_ = st.EndSession(id, "clean", "success", "done")
@@ -412,6 +431,7 @@ func TestSession_StateIsClosedAfterEndSession(t *testing.T) {
 }
 
 func TestSession_StateRemainsActiveAfterTouch(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id := createTestSession(t, st, "agent-1", "proj-state3", "")
 	st.TouchSession(id)
@@ -426,6 +446,7 @@ func TestSession_StateRemainsActiveAfterTouch(t *testing.T) {
 // ── TouchSession ──────────────────────────────────────────────────────────────
 
 func TestTouchSession_UpdatesLastSeen(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id := createTestSession(t, st, "agent-1", "proj-1", "")
 
@@ -448,6 +469,7 @@ func TestTouchSession_UpdatesLastSeen(t *testing.T) {
 }
 
 func TestTouchSession_EmptyIDIsNoop(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	st.TouchSession("") // must not panic
 }
@@ -455,6 +477,7 @@ func TestTouchSession_EmptyIDIsNoop(t *testing.T) {
 // ── EndSession ────────────────────────────────────────────────────────────────
 
 func TestEndSession_MarksEnded(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id := createTestSession(t, st, "agent-1", "proj-1", "")
 
@@ -472,6 +495,7 @@ func TestEndSession_MarksEnded(t *testing.T) {
 }
 
 func TestEndSession_UnknownIDIsNoop(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	if err := st.EndSession("nonexistent-id", "clean", "unknown", ""); err != nil {
 		t.Fatalf("EndSession on unknown ID: %v", err)
@@ -481,6 +505,7 @@ func TestEndSession_UnknownIDIsNoop(t *testing.T) {
 // ── GetStaleSessions ──────────────────────────────────────────────────────────
 
 func TestGetStaleSessions_DetectsStale(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id := createTestSession(t, st, "agent-stale", "proj-s", "working")
@@ -506,6 +531,7 @@ func TestGetStaleSessions_DetectsStale(t *testing.T) {
 }
 
 func TestGetStaleSessions_ExcludesCurrentSession(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id := createTestSession(t, st, "agent-1", "proj-s", "")
 	past := time.Now().UTC().Unix() - 120
@@ -520,6 +546,7 @@ func TestGetStaleSessions_ExcludesCurrentSession(t *testing.T) {
 }
 
 func TestGetStaleSessions_ExcludesEndedSessions(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id := createTestSession(t, st, "agent-1", "proj-s", "")
 	_ = st.EndSession(id, "clean", "success", "")
@@ -533,6 +560,7 @@ func TestGetStaleSessions_ExcludesEndedSessions(t *testing.T) {
 }
 
 func TestGetStaleSessions_ExcludesOtherProjects(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	createTestSession(t, st, "agent-1", "proj-A", "") //nolint:errcheck
 
@@ -545,6 +573,7 @@ func TestGetStaleSessions_ExcludesOtherProjects(t *testing.T) {
 }
 
 func TestGetStaleSessions_CappedAtFive(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	past := time.Now().UTC().Unix() - 120
 	for i := 0; i < 8; i++ {
@@ -558,6 +587,7 @@ func TestGetStaleSessions_CappedAtFive(t *testing.T) {
 }
 
 func TestGetStaleSessions_TimestampsAreRFC3339(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	id := createTestSession(t, st, "agent-1", "proj-ts", "")
 	past := time.Now().UTC().Unix() - 120
@@ -583,6 +613,7 @@ func TestGetStaleSessions_TimestampsAreRFC3339(t *testing.T) {
 // ── LinkSessionTask / GetOrphanedTasks ────────────────────────────────────────
 
 func TestGetOrphanedTasks_DetectsCreatedNotCompleted(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	sessID := createTestSession(t, st, "agent-1", "proj-1", "")
 	planID := mustCreatePlan(t, st, "orphan-plan", []TaskInput{{Title: "task-A", Priority: "p0"}})
@@ -606,6 +637,7 @@ func TestGetOrphanedTasks_DetectsCreatedNotCompleted(t *testing.T) {
 }
 
 func TestGetOrphanedTasks_ClaimedAfterCreated_ReturnsLatestAction(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	sessID := createTestSession(t, st, "agent-1", "proj-1", "")
 	planID := mustCreatePlan(t, st, "claimed-plan", []TaskInput{{Title: "task-B", Priority: "p0"}})
@@ -629,6 +661,7 @@ func TestGetOrphanedTasks_ClaimedAfterCreated_ReturnsLatestAction(t *testing.T) 
 }
 
 func TestGetOrphanedTasks_ExcludesCompleted(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	sessID := createTestSession(t, st, "agent-1", "proj-1", "")
 	planID := mustCreatePlan(t, st, "done-plan", []TaskInput{{Title: "task-done", Priority: "p0"}})
@@ -646,6 +679,7 @@ func TestGetOrphanedTasks_ExcludesCompleted(t *testing.T) {
 }
 
 func TestGetOrphanedTasks_ExcludesCompletedByOtherSession(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	sessA := createTestSession(t, st, "agent-A", "proj-1", "")
 	sessB := createTestSession(t, st, "agent-B", "proj-1", "")
@@ -664,6 +698,7 @@ func TestGetOrphanedTasks_ExcludesCompletedByOtherSession(t *testing.T) {
 }
 
 func TestGetOrphanedTasks_EmptySessionHasNoOrphans(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	sessID := createTestSession(t, st, "agent-1", "proj-1", "")
 
@@ -677,6 +712,7 @@ func TestGetOrphanedTasks_EmptySessionHasNoOrphans(t *testing.T) {
 }
 
 func TestLinkSessionTask_EmptyIDsAreNoop(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	st.LinkSessionTask("", "task-1", SessionTaskCreated)
 	st.LinkSessionTask("sess-1", "", SessionTaskCreated)
@@ -686,6 +722,7 @@ func TestLinkSessionTask_EmptyIDsAreNoop(t *testing.T) {
 // ── GetToolCallSummary ────────────────────────────────────────────────────────
 
 func TestGetToolCallSummary_EmptySession(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	sessID := createTestSession(t, st, "agent-1", "proj-1", "")
 
@@ -702,6 +739,7 @@ func TestGetToolCallSummary_EmptySession(t *testing.T) {
 }
 
 func TestGetToolCallSummary_AccumulatesDuration(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	sessID := createTestSession(t, st, "agent-1", "proj-1", "")
 
@@ -728,6 +766,7 @@ func TestGetToolCallSummary_AccumulatesDuration(t *testing.T) {
 }
 
 func TestGetToolCallSummary_TopToolsOrdered(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	sessID := createTestSession(t, st, "agent-1", "proj-1", "")
 
@@ -752,6 +791,7 @@ func TestGetToolCallSummary_TopToolsOrdered(t *testing.T) {
 }
 
 func TestGetToolCallSummary_DoesNotLeakAcrossSessions(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	sessA := createTestSession(t, st, "agent-A", "proj-1", "")
 	sessB := createTestSession(t, st, "agent-B", "proj-1", "")
@@ -775,6 +815,7 @@ func TestGetToolCallSummary_DoesNotLeakAcrossSessions(t *testing.T) {
 // ── PruneToolCallsOlderThan ───────────────────────────────────────────────────
 
 func TestPruneToolCallsOlderThan_RemovesOldRows(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	sessID := createTestSession(t, st, "agent-1", "proj-1", "")
 
@@ -804,6 +845,7 @@ func TestPruneToolCallsOlderThan_RemovesOldRows(t *testing.T) {
 }
 
 func TestPruneToolCallsOlderThan_Debounce(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	st.lastPruneMu.Lock()
@@ -821,6 +863,7 @@ func TestPruneToolCallsOlderThan_Debounce(t *testing.T) {
 }
 
 func TestPruneStaleData_Debounce(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Ensure first call runs by resetting timestamp to zero.
@@ -855,6 +898,7 @@ func TestPruneStaleData_Debounce(t *testing.T) {
 // ── Full lifecycle ────────────────────────────────────────────────────────────
 
 func TestSessionLifecycle_CreateTouchEnd(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	sessID := createTestSession(t, st, "agent-1", "proj-1", "refactor auth")
@@ -884,6 +928,7 @@ func TestSessionLifecycle_CreateTouchEnd(t *testing.T) {
 }
 
 func TestSessionLifecycle_OrphanDetection(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	sessID := createTestSession(t, st, "agent-1", "proj-1", "")
@@ -921,6 +966,7 @@ func TestSessionLifecycle_OrphanDetection(t *testing.T) {
 }
 
 func TestSessionLifecycle_ParallelSessions(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	sessA := createTestSession(t, st, "agent-A", "proj-parallel", "feature-X")
@@ -959,6 +1005,7 @@ func TestSessionLifecycle_ParallelSessions(t *testing.T) {
 // ── R22: Branch-aware context ─────────────────────────────────────────────────
 
 func TestSetSessionBranch_StoresAndRetrieves(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	sid := createTestSession(t, st, "agent-branch", "proj-1", "test")
 	st.SetSessionBranch(sid, "feature/login")
@@ -973,6 +1020,7 @@ func TestSetSessionBranch_StoresAndRetrieves(t *testing.T) {
 }
 
 func TestSetSessionBranch_EmptyInputsAreNoop(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	// Neither call should panic or error.
 	st.SetSessionBranch("", "main")
@@ -980,6 +1028,7 @@ func TestSetSessionBranch_EmptyInputsAreNoop(t *testing.T) {
 }
 
 func TestGetLastBranch_NoPriorSession_ReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	got := st.GetLastBranch("nonexistent-agent")
 	if got != "" {
@@ -988,6 +1037,7 @@ func TestGetLastBranch_NoPriorSession_ReturnsEmpty(t *testing.T) {
 }
 
 func TestGetLastBranch_EmptyAgentID_ReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	got := st.GetLastBranch("")
 	if got != "" {
@@ -996,6 +1046,7 @@ func TestGetLastBranch_EmptyAgentID_ReturnsEmpty(t *testing.T) {
 }
 
 func TestGetLastBranch_ReturnsLatestEndedSession(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	// Session 1: branch "main", ended at t=1000
 	s1 := createTestSession(t, st, "agent-multi", "proj-1", "")
@@ -1020,6 +1071,7 @@ func TestGetLastBranch_ReturnsLatestEndedSession(t *testing.T) {
 }
 
 func TestGetLastBranch_IgnoresActiveSession(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	// Ended session on "main"
 	s1 := createTestSession(t, st, "agent-active", "proj-1", "")
@@ -1037,6 +1089,7 @@ func TestGetLastBranch_IgnoresActiveSession(t *testing.T) {
 }
 
 func TestGetLastBranch_IgnoresPreR22Sessions(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	// Pre-R22 session: no branch set (default empty string)
 	s1 := createTestSession(t, st, "agent-legacy", "proj-1", "")
@@ -1050,6 +1103,7 @@ func TestGetLastBranch_IgnoresPreR22Sessions(t *testing.T) {
 }
 
 func TestGetLastBranch_IsolatedByAgent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	// Agent A on "feature/a"
 	sA := createTestSession(t, st, "agent-A", "proj-1", "")
@@ -1072,6 +1126,7 @@ func TestGetLastBranch_IsolatedByAgent(t *testing.T) {
 }
 
 func TestSessionLifecycle_HibernateResumeFullFlow(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// 1. Agent starts a session, does work, then goes idle.
@@ -1127,6 +1182,7 @@ func TestSessionLifecycle_HibernateResumeFullFlow(t *testing.T) {
 // ── parent_session_id (Bug Fix 3) ─────────────────────────────────────────────
 
 func TestGetOrResumeSession_FreshSession_SetsParentSessionID(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// First session — created and cleanly closed.
@@ -1155,6 +1211,7 @@ func TestGetOrResumeSession_FreshSession_SetsParentSessionID(t *testing.T) {
 }
 
 func TestGetOrResumeSession_FreshSession_ParentEmptyWhenNoPrior(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Very first session for this agent — no prior closed session exists.
@@ -1175,6 +1232,7 @@ func TestGetOrResumeSession_FreshSession_ParentEmptyWhenNoPrior(t *testing.T) {
 // ── lazy state=hibernated in GetStaleSessions (Bug Fix 4) ────────────────────
 
 func TestGetStaleSessions_LazilyMarksSessionsHibernated(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Create a session then back-date last_seen_at to make it stale.
@@ -1206,6 +1264,7 @@ func TestGetStaleSessions_LazilyMarksSessionsHibernated(t *testing.T) {
 }
 
 func TestGetStaleSessions_DoesNotHibernateActiveSessions(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Live session — last_seen_at is recent.
@@ -1230,6 +1289,7 @@ func TestGetStaleSessions_DoesNotHibernateActiveSessions(t *testing.T) {
 // resume. Without the lazy state update inside the BEGIN IMMEDIATE transaction,
 // the idle session satisfies the Phase 2 time predicates and gets stolen.
 func TestGetOrResumeSession_IdleActiveSession_NotStolenByPhase2(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	now := time.Now().UTC().Unix()
@@ -1296,6 +1356,7 @@ func TestGetOrResumeSession_IdleActiveSession_NotStolenByPhase2(t *testing.T) {
 // resumes sessions explicitly in state='hibernated', not state='active'.
 // This is the core invariant introduced by the GAP-3 lazy-update fix.
 func TestGetOrResumeSession_Phase2_FiltersOnHibernatedState(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	now := time.Now().UTC().Unix()

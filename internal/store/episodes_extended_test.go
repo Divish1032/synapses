@@ -9,6 +9,7 @@ import (
 // ── GetRuleCandidates ─────────────────────────────────────────────────────────
 
 func TestGetRuleCandidates_Empty(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	candidates, err := st.GetRuleCandidates(2)
@@ -21,6 +22,7 @@ func TestGetRuleCandidates_Empty(t *testing.T) {
 }
 
 func TestGetRuleCandidates_SurfacesRepeatedFailures(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Record 3 failure episodes with the same decision.
@@ -51,6 +53,7 @@ func TestGetRuleCandidates_SurfacesRepeatedFailures(t *testing.T) {
 }
 
 func TestGetRuleCandidates_SuccessesNotSurfaced(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Record 3 success episodes — should NOT become candidates (only failures do).
@@ -75,6 +78,7 @@ func TestGetRuleCandidates_SuccessesNotSurfaced(t *testing.T) {
 // ── MarkEpisodePromoted ───────────────────────────────────────────────────────
 
 func TestMarkEpisodePromoted_SetsPromotedRule(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Record a failure episode.
@@ -102,6 +106,7 @@ func TestMarkEpisodePromoted_SetsPromotedRule(t *testing.T) {
 }
 
 func TestMarkEpisodePromoted_Idempotent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	episodeID, _ := st.RememberEpisode(store.Episode{EpisodeType: "failure",
@@ -120,6 +125,7 @@ func TestMarkEpisodePromoted_Idempotent(t *testing.T) {
 }
 
 func TestGetRuleCandidates_PromotedEpisodesExcluded(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	var ids []string

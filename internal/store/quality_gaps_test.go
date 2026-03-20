@@ -10,6 +10,7 @@ import (
 // ── UpsertGap ─────────────────────────────────────────────────────────────────
 
 func TestUpsertGap_Create(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	g, err := st.UpsertGap(store.QualityGap{
@@ -38,6 +39,7 @@ func TestUpsertGap_Create(t *testing.T) {
 }
 
 func TestUpsertGap_Idempotent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	first, err := st.UpsertGap(store.QualityGap{
@@ -74,6 +76,7 @@ func TestUpsertGap_Idempotent(t *testing.T) {
 }
 
 func TestUpsertGap_FixedLifecycle(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, err := st.UpsertGap(store.QualityGap{
@@ -109,6 +112,7 @@ func TestUpsertGap_FixedLifecycle(t *testing.T) {
 // ── GetGaps ───────────────────────────────────────────────────────────────────
 
 func TestGetGaps_DefaultOpenOnly(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _ = st.UpsertGap(store.QualityGap{NodeID: "n1", GapID: "g1", Description: "open gap", Severity: "medium", Status: "open"})
@@ -127,6 +131,7 @@ func TestGetGaps_DefaultOpenOnly(t *testing.T) {
 }
 
 func TestGetGaps_FilterByNodeID(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _ = st.UpsertGap(store.QualityGap{NodeID: "node-a", GapID: "gap-1", Description: "d", Severity: "medium", Status: "open"})
@@ -142,6 +147,7 @@ func TestGetGaps_FilterByNodeID(t *testing.T) {
 }
 
 func TestGetGaps_FilterBySeverity(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _ = st.UpsertGap(store.QualityGap{NodeID: "n1", GapID: "g1", Description: "d", Severity: "high", Status: "open"})
@@ -157,6 +163,7 @@ func TestGetGaps_FilterBySeverity(t *testing.T) {
 }
 
 func TestGetGaps_AllStatuses(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _ = st.UpsertGap(store.QualityGap{NodeID: "n1", GapID: "g1", Description: "d", Severity: "medium", Status: "open"})
@@ -173,6 +180,7 @@ func TestGetGaps_AllStatuses(t *testing.T) {
 }
 
 func TestGetGaps_EmptyResult(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	gaps, err := st.GetGaps(store.GapFilter{Status: "open"})
@@ -188,6 +196,7 @@ func TestGetGaps_EmptyResult(t *testing.T) {
 // semantic severity order (critical → high → medium → low), not lexicographic
 // order. Lexicographic DESC would yield medium → low → high → critical (wrong).
 func TestGetGaps_SortOrderIsBySeverity(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	severities := []string{"low", "medium", "critical", "high"}
@@ -232,6 +241,7 @@ func severitiesOf(gaps []store.QualityGap) []string {
 // TestGetGaps_FileFilterAnchored verifies that get_gaps(file="auth.go") does
 // NOT match "unauth.go" — the old LIKE '%auth.go%' pattern was too broad.
 func TestGetGaps_FileFilterAnchored(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Gap on the target file (node_id contains ::auth.go::)
@@ -271,6 +281,7 @@ func gapIDs(gaps []store.QualityGap) []string {
 // are both applied. The old switch fell through to the NodeID-only case and
 // silently ignored the Severity constraint.
 func TestGetGaps_CompoundNodeIDAndSeverity(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _ = st.UpsertGap(store.QualityGap{NodeID: "node-a", GapID: "g1", Description: "d", Severity: "high", Status: "open"})
@@ -292,6 +303,7 @@ func TestGetGaps_CompoundNodeIDAndSeverity(t *testing.T) {
 // TestGetGaps_CompoundFileAndSeverity verifies that File + Severity filters
 // are both applied. The old switch fell through to the File-only case.
 func TestGetGaps_CompoundFileAndSeverity(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _ = st.UpsertGap(store.QualityGap{NodeID: "repo::pkg/auth.go::Login", GapID: "g1", Description: "d", Severity: "critical", Status: "open"})

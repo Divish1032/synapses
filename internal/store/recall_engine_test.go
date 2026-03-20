@@ -19,6 +19,7 @@ func openRecallTestStore(t *testing.T) *Store {
 // ── RecencyDecayScore ─────────────────────────────────────────────────────────
 
 func TestRecencyDecayScore_JustCreated(t *testing.T) {
+	t.Parallel()
 	score := RecencyDecayScore(time.Now(), 168)
 	if score < 0.99 || score > 1.01 {
 		t.Errorf("just-created score = %f, want ~1.0", score)
@@ -26,6 +27,7 @@ func TestRecencyDecayScore_JustCreated(t *testing.T) {
 }
 
 func TestRecencyDecayScore_OneHalfLife(t *testing.T) {
+	t.Parallel()
 	created := time.Now().Add(-168 * time.Hour) // 1 week ago
 	score := RecencyDecayScore(created, 168)
 	if score < 0.49 || score > 0.51 {
@@ -34,6 +36,7 @@ func TestRecencyDecayScore_OneHalfLife(t *testing.T) {
 }
 
 func TestRecencyDecayScore_FutureTimestamp(t *testing.T) {
+	t.Parallel()
 	created := time.Now().Add(1 * time.Hour) // future
 	score := RecencyDecayScore(created, 168)
 	if score < 0.99 || score > 1.01 {
@@ -42,6 +45,7 @@ func TestRecencyDecayScore_FutureTimestamp(t *testing.T) {
 }
 
 func TestRecencyDecayScore_ZeroHalfLife_DefaultsTo168(t *testing.T) {
+	t.Parallel()
 	created := time.Now().Add(-168 * time.Hour)
 	score := RecencyDecayScore(created, 0)
 	if score < 0.49 || score > 0.51 {
@@ -50,6 +54,7 @@ func TestRecencyDecayScore_ZeroHalfLife_DefaultsTo168(t *testing.T) {
 }
 
 func TestRecencyDecayScore_NegativeHalfLife_DefaultsTo168(t *testing.T) {
+	t.Parallel()
 	score := RecencyDecayScore(time.Now(), -10)
 	if score < 0.99 || score > 1.01 {
 		t.Errorf("negative half-life score = %f, want ~1.0", score)
@@ -59,6 +64,7 @@ func TestRecencyDecayScore_NegativeHalfLife_DefaultsTo168(t *testing.T) {
 // ── RRFMerge ──────────────────────────────────────────────────────────────────
 
 func TestRRFMerge_SingleChannel(t *testing.T) {
+	t.Parallel()
 	channels := map[string][]string{
 		"bm25": {"a", "b", "c"},
 	}
@@ -75,6 +81,7 @@ func TestRRFMerge_SingleChannel(t *testing.T) {
 }
 
 func TestRRFMerge_MultiChannelBoost(t *testing.T) {
+	t.Parallel()
 	// "a" appears in both channels → should score higher than "b" (only bm25).
 	channels := map[string][]string{
 		"bm25":     {"b", "a", "c"},
@@ -94,6 +101,7 @@ func TestRRFMerge_MultiChannelBoost(t *testing.T) {
 }
 
 func TestRRFMerge_LimitRespected(t *testing.T) {
+	t.Parallel()
 	channels := map[string][]string{
 		"bm25": {"a", "b", "c", "d", "e"},
 	}
@@ -104,6 +112,7 @@ func TestRRFMerge_LimitRespected(t *testing.T) {
 }
 
 func TestRRFMerge_EmptyChannels(t *testing.T) {
+	t.Parallel()
 	channels := map[string][]string{}
 	ids, attr := RRFMerge(channels, 10, 60)
 	if len(ids) != 0 {
@@ -115,6 +124,7 @@ func TestRRFMerge_EmptyChannels(t *testing.T) {
 }
 
 func TestRRFMerge_DefaultK(t *testing.T) {
+	t.Parallel()
 	channels := map[string][]string{
 		"bm25": {"a"},
 	}
@@ -125,6 +135,7 @@ func TestRRFMerge_DefaultK(t *testing.T) {
 }
 
 func TestRRFMerge_DeterministicTieBreaking(t *testing.T) {
+	t.Parallel()
 	// "a" and "b" both in exactly one channel at rank 0.
 	// Tie should be broken alphabetically (a < b).
 	channels := map[string][]string{
@@ -138,6 +149,7 @@ func TestRRFMerge_DeterministicTieBreaking(t *testing.T) {
 }
 
 func TestRRFMerge_FourChannels(t *testing.T) {
+	t.Parallel()
 	channels := map[string][]string{
 		"bm25":     {"m1", "m2", "m3"},
 		"semantic": {"m2", "m4"},
@@ -161,6 +173,7 @@ func TestRRFMerge_FourChannels(t *testing.T) {
 // ── RecentMemories ────────────────────────────────────────────────────────────
 
 func TestRecentMemories_ReturnsRecentOnly(t *testing.T) {
+	t.Parallel()
 	st := openRecallTestStore(t)
 
 	// Insert a recent memory (just now).
@@ -187,6 +200,7 @@ func TestRecentMemories_ReturnsRecentOnly(t *testing.T) {
 }
 
 func TestRecentMemories_DefaultSinceDays(t *testing.T) {
+	t.Parallel()
 	st := openRecallTestStore(t)
 
 	_, _ = st.InsertMemory(Memory{
@@ -207,6 +221,7 @@ func TestRecentMemories_DefaultSinceDays(t *testing.T) {
 }
 
 func TestRecentMemories_ExcludesStaleByDefault(t *testing.T) {
+	t.Parallel()
 	st := openRecallTestStore(t)
 
 	id, _ := st.InsertMemory(Memory{
@@ -231,6 +246,7 @@ func TestRecentMemories_ExcludesStaleByDefault(t *testing.T) {
 }
 
 func TestRecentMemories_IncludesStaleWhenRequested(t *testing.T) {
+	t.Parallel()
 	st := openRecallTestStore(t)
 
 	_, _ = st.InsertMemory(Memory{
@@ -260,6 +276,7 @@ func TestRecentMemories_IncludesStaleWhenRequested(t *testing.T) {
 // ── GetAnchorNodesByFTSQuery ──────────────────────────────────────────────────
 
 func TestGetAnchorNodesByFTSQuery_FindsAnchorNodes(t *testing.T) {
+	t.Parallel()
 	st := openRecallTestStore(t)
 
 	// Insert a memory with anchor nodes.
@@ -286,6 +303,7 @@ func TestGetAnchorNodesByFTSQuery_FindsAnchorNodes(t *testing.T) {
 }
 
 func TestGetAnchorNodesByFTSQuery_EmptyQuery(t *testing.T) {
+	t.Parallel()
 	st := openRecallTestStore(t)
 	nodes, err := st.GetAnchorNodesByFTSQuery("", 10)
 	if err != nil {
@@ -297,6 +315,7 @@ func TestGetAnchorNodesByFTSQuery_EmptyQuery(t *testing.T) {
 }
 
 func TestGetAnchorNodesByFTSQuery_NoMatch(t *testing.T) {
+	t.Parallel()
 	st := openRecallTestStore(t)
 	_, _ = st.InsertMemoryWithAnchors(Memory{
 		Tier:    TierEntity,
@@ -317,6 +336,7 @@ func TestGetAnchorNodesByFTSQuery_NoMatch(t *testing.T) {
 // ── GetMemoriesByAnchorNodes ──────────────────────────────────────────────────
 
 func TestGetMemoriesByAnchorNodes_FindsMemories(t *testing.T) {
+	t.Parallel()
 	st := openRecallTestStore(t)
 
 	_, _ = st.InsertMemoryWithAnchors(Memory{
@@ -346,6 +366,7 @@ func TestGetMemoriesByAnchorNodes_FindsMemories(t *testing.T) {
 }
 
 func TestGetMemoriesByAnchorNodes_Deduplicates(t *testing.T) {
+	t.Parallel()
 	st := openRecallTestStore(t)
 
 	// Memory anchored to two nodes.
@@ -369,6 +390,7 @@ func TestGetMemoriesByAnchorNodes_Deduplicates(t *testing.T) {
 }
 
 func TestGetMemoriesByAnchorNodes_EmptyInput(t *testing.T) {
+	t.Parallel()
 	st := openRecallTestStore(t)
 	mems, err := st.GetMemoriesByAnchorNodes(nil, 10, false)
 	if err != nil {
@@ -380,6 +402,7 @@ func TestGetMemoriesByAnchorNodes_EmptyInput(t *testing.T) {
 }
 
 func TestGetMemoriesByAnchorNodes_LimitRespected(t *testing.T) {
+	t.Parallel()
 	st := openRecallTestStore(t)
 
 	for i := 0; i < 5; i++ {
