@@ -279,21 +279,25 @@ func TestRecentMemories_UntilBound_ExcludesFuture(t *testing.T) {
 	t.Parallel()
 	st := openRecallTestStore(t)
 
+	// Fix: set cutoff first, then give the memory an explicit created_at
+	// that is deterministically AFTER the cutoff (2 seconds later).
+	// This avoids any RFC3339 second-precision timing races.
+	cutoff := time.Now().UTC()
 	_, _ = st.InsertMemory(Memory{
-		Tier:    TierProject,
-		Content: "past memory — should be included",
-		AgentID: "agent-1",
-		Source:  SourceManual,
+		Tier:      TierProject,
+		Content:   "future memory — should be excluded",
+		AgentID:   "agent-1",
+		Source:    SourceManual,
+		CreatedAt: cutoff.Add(2 * time.Second).Format(time.RFC3339),
 	})
 
-	// until = 1 second ago → current memories (created "just now") are after the cutoff.
-	cutoff := time.Now().UTC().Add(-1 * time.Second)
+	// until=cutoff → the memory (created 2s after cutoff) must not appear.
 	mems, err := st.RecentMemories(10, 7, &cutoff, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, m := range mems {
-		if m.Content == "past memory — should be included" {
+		if m.Content == "future memory — should be excluded" {
 			t.Error("memory created after until= should be excluded")
 		}
 	}
