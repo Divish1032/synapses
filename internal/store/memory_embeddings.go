@@ -232,6 +232,7 @@ func (s *Store) GetStaleEmbeddingMemoryIDs(limit int) ([]string, error) {
 		WHERE me.stale = 1
 		  AND m.stale = 0
 		  AND m.expires_at > ?
+		ORDER BY me.embedded_at DESC
 		LIMIT ?`, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("get stale embedding memory ids: %w", err)

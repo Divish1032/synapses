@@ -101,10 +101,15 @@ func (s *Server) quadRecallSearch(
 			// embeddings of anchored memories as stale=1 without deleting them.
 			// Here we refresh up to 10 stale embeddings before running the
 			// vector search, so they participate in scoring instead of being
-			// silently excluded. Bounded at 10 to keep latency negligible
-			// within the 5s channel budget. Non-fatal: errors are skipped,
-			// stale embeddings simply miss this recall and retry next time.
+			// silently excluded.
+			//
+			// Time budget: the re-embed pass is capped at 2s (reEmbedCtx) to
+			// guarantee at least 3s remain for the query embed + vector search.
+			// This protects against slow embedders (Ollama can be 500ms+/call):
+			// if the 2s budget expires, remaining stale embeddings are skipped
+			// and will be retried on the next recall() call.
 			const lazyRebatchLimit = 10
+			reEmbedCtx, reEmbedCancel := context.WithTimeout(chCtx, 2*time.Second)
 			if staleIDs, sErr := s.store.GetStaleEmbeddingMemoryIDs(lazyRebatchLimit); sErr == nil {
 				model := s.memoryEmbedder.Model()
 				for _, memID := range staleIDs {
@@ -112,13 +117,14 @@ func (s *Server) quadRecallSearch(
 					if !ok {
 						continue
 					}
-					vec, embErr := s.memoryEmbedder.Embed(chCtx, text)
+					vec, embErr := s.memoryEmbedder.Embed(reEmbedCtx, text)
 					if embErr != nil || len(vec) == 0 {
-						continue // embedder failure is non-fatal; try again next recall
+						continue // timeout or embedder failure — retry next recall
 					}
 					_ = s.store.UpsertMemoryEmbedding(memID, model, vec)
 				}
 			}
+			reEmbedCancel()
 
 			queryVec, embedErr := s.memoryEmbedder.Embed(chCtx, query)
 			if embedErr != nil || len(queryVec) == 0 {
