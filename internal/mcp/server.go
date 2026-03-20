@@ -2230,7 +2230,9 @@ func (s *Server) registerTools() {
 				mcp.Description("JSON array of file paths involved, e.g. '[\"cmd/server/main.go\"]'."),
 			),
 			mcp.WithString("affected_nodes",
-				mcp.Description("JSON array of graph node IDs involved (from find_entity or get_context)."),
+				mcp.Description("Documents scope — records which graph entities were involved, for fix-task linking and entity-tier memory creation on failure/pattern episodes. "+
+					"Does NOT create explicit staleness anchors (no entry in memory_anchors table). "+
+					"Use anchor_nodes instead to have this memory auto-invalidate when specific entities change in the graph."),
 			),
 			mcp.WithString("tags",
 				mcp.Description("JSON array of tags for filtering, e.g. '[\"auth\",\"breaking\"]'."),
@@ -2239,10 +2241,9 @@ func (s *Server) registerTools() {
 				mcp.Description("Repo context (leave empty to use current project)."),
 			),
 			mcp.WithString("anchor_nodes",
-				mcp.Description("JSON array of graph node IDs to anchor this memory to. "+
-					"When anchored nodes change or disappear from the graph, the memory is "+
-					"automatically flagged as stale. Use for codebase-derived facts: "+
-					"architecture decisions, component status, API signatures. "+
+				mcp.Description("Enables staleness tracking — when anchored entities change in the code graph, this memory is auto-flagged stale. "+
+					"JSON array of graph node IDs to anchor this memory to. "+
+					"Use for codebase-derived facts: architecture decisions, component status, API signatures. "+
 					"Example: '[\"repo::pkg/auth.go::AuthService\"]'. "+
 					"Omit for durable facts (user preferences, feedback) that have no codebase anchor."),
 			),
