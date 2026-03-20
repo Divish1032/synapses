@@ -1519,7 +1519,7 @@ func (s *Server) handleReportUsage(
 	}
 
 	if model == "" {
-		return mcp.NewToolResultError("model is required"), nil
+		return mcp.NewToolResultError("model is required (e.g., 'claude-sonnet-4-6', 'gpt-4o')"), nil
 	}
 
 	pc := s.getPulseClient()
@@ -1562,19 +1562,19 @@ func (s *Server) handleAnnotateNode(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("annotations unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("annotations unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	nodeID, _ := req.GetArguments()["node_id"].(string)
 	if nodeID == "" {
-		return mcp.NewToolResultError("node_id is required"), nil
+		return mcp.NewToolResultError("node_id is required (use find_entity or search to get node IDs)"), nil
 	}
 	note, noteErr := stringArgLimited(req, "note", maxArgLengthNote)
 	if noteErr != nil {
 		return mcp.NewToolResultError(noteErr.Error()), nil
 	}
 	if note == "" {
-		return mcp.NewToolResultError("note is required"), nil
+		return mcp.NewToolResultError("note is required (a brief annotation, e.g., 'this function has O(n²) complexity')"), nil
 	}
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 

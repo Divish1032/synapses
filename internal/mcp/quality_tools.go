@@ -27,13 +27,13 @@ func (s *Server) handleUpsertGap(
 	description := stringArg(req, "description")
 
 	if nodeID == "" {
-		return mcp.NewToolResultError("node_id is required"), nil
+		return mcp.NewToolResultError("node_id is required (use find_entity or search to get node IDs)"), nil
 	}
 	if gapID == "" {
 		return mcp.NewToolResultError("gap_id is required (use a short slug, e.g. \"dist-relative-path\")"), nil
 	}
 	if description == "" {
-		return mcp.NewToolResultError("description is required"), nil
+		return mcp.NewToolResultError("description is required (e.g., 'auth module lacks input validation for token expiry')"), nil
 	}
 
 	severity := stringArg(req, "severity")

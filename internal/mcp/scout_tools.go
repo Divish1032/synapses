@@ -27,7 +27,7 @@ func (s *Server) handleWebAnnotate(
 
 	nodeID, _ := req.GetArguments()["node_id"].(string)
 	if nodeID == "" {
-		return mcpgo.NewToolResultError("node_id is required"), nil
+		return mcpgo.NewToolResultError("node_id is required (use find_entity or search to get node IDs)"), nil
 	}
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 	note, noteErr := stringArgLimited(req, "note", maxArgLengthNote)

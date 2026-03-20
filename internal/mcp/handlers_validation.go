@@ -62,7 +62,7 @@ func (s *Server) handleValidatePlan(
 ) (*mcp.CallToolResult, error) {
 	changesRaw, ok := req.GetArguments()["changes"].(string)
 	if !ok || changesRaw == "" {
-		return mcp.NewToolResultError("changes is required"), nil
+		return mcp.NewToolResultError(`changes is required (e.g., [{"file": "internal/auth.go", "adds_call_to": "ValidateToken"}])`), nil
 	}
 
 	var changes []ProposedChange
@@ -333,7 +333,7 @@ func (s *Server) handleVerifyImplementation(
 ) (*mcp.CallToolResult, error) {
 	filesRaw := stringArg(req, "files_written")
 	if filesRaw == "" {
-		return mcp.NewToolResultError("files_written is required"), nil
+		return mcp.NewToolResultError(`files_written is required (e.g., ["internal/auth/service.go"])`), nil
 	}
 
 	var files []string

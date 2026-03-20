@@ -18,12 +18,12 @@ func (s *Server) handleSendMessage(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("message bus unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("message bus unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	fromAgent := stringArg(req, "from_agent")
 	if fromAgent == "" {
-		return mcp.NewToolResultError("from_agent is required"), nil
+		return mcp.NewToolResultError("from_agent is required (e.g., 'implementer', 'reviewer')"), nil
 	}
 	topic := stringArg(req, "topic")
 	if topic == "" {
@@ -127,12 +127,12 @@ func (s *Server) handleGetMessages(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("message bus unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("message bus unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	agentID := stringArg(req, "agent_id")
 	if agentID == "" {
-		return mcp.NewToolResultError("agent_id is required"), nil
+		return mcp.NewToolResultError("agent_id is required (e.g., 'implementer', 'reviewer')"), nil
 	}
 
 	var sinceSeq int64
@@ -240,16 +240,16 @@ func (s *Server) handleMarkRead(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("message bus unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("message bus unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	messageID := stringArg(req, "message_id")
 	if messageID == "" {
-		return mcp.NewToolResultError("message_id is required"), nil
+		return mcp.NewToolResultError("message_id is required (use get_messages to list message IDs)"), nil
 	}
 	agentID := stringArg(req, "agent_id")
 	if agentID == "" {
-		return mcp.NewToolResultError("agent_id is required"), nil
+		return mcp.NewToolResultError("agent_id is required (e.g., 'implementer', 'reviewer')"), nil
 	}
 
 	s.upsertAgentIfNeeded(agentID)
