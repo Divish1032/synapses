@@ -2321,7 +2321,8 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"plan_context",
 			mcp.WithDescription(
-				"Power-user tool — most agents should use validate_plan + prepare_context(intent='plan') instead. "+
+				"Power-user tool — for most agents, call check_plan_safety + validate_plan + prepare_context(intent='plan') individually instead. "+
+					"Use this tool only when you want all three steps bundled in one call. "+
 					"Find this tool via discover_tools(query='plan implementation gate'). "+
 					"Single-call pre-implementation gate. Runs three checks in one round-trip: "+
 					"(1) check_plan_safety — searches failure episodes for past matches (500ms cap); "+
