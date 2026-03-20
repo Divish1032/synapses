@@ -319,8 +319,8 @@ var workflowRecipes = []workflowRecipe{
 		Keywords: []string{"understand", "explore", "what", "how", "entity", "function", "struct", "works", "does"},
 		Steps: []workflowStep{
 			{Tool: "find_entity", ArgsHint: `query="{name}"`, Expects: "List of matching nodes with name, type, file, line. Pick the best match.", UsesOutput: ""},
-			{Tool: "get_context", ArgsHint: `entity="{name}", file="{file}"`, Expects: "Subgraph: root entity, callers, callees, annotations, recent_changes (git commits), brain enrichment.", UsesOutput: "Use exact name and file from find_entity results"},
-			{Tool: "get_call_chain", ArgsHint: `from="{entity}", to="{callee}"`, Expects: "Step-by-step call path between two entities.", UsesOutput: "Optional: pick an interesting callee from get_context's callees list to trace deeper"},
+			{Tool: "prepare_context", ArgsHint: `intent="understand", target="{name}", file="{file}"`, Expects: "Subgraph: root entity, callers, callees, annotations, recent_changes (git commits), brain enrichment.", UsesOutput: "Use exact name and file from find_entity results"},
+			{Tool: "get_call_chain", ArgsHint: `from="{entity}", to="{callee}"`, Expects: "Step-by-step call path between two entities.", UsesOutput: "Optional: pick an interesting callee from prepare_context callees list to trace deeper"},
 		},
 	},
 	{
@@ -328,8 +328,8 @@ var workflowRecipes = []workflowRecipe{
 		Intent:   "Safely implement a code change across files",
 		Keywords: []string{"implement", "modify", "change", "edit", "write", "code", "add", "feature", "refactor"},
 		Steps: []workflowStep{
-			{Tool: "get_context", ArgsHint: `entity="{target}"`, Expects: "Current structure, callers/callees, annotations, and applicable rules.", UsesOutput: ""},
-			{Tool: "plan_context", ArgsHint: `target="{target}", changes=[{"file":"...","adds_call_to":"..."}]`, Expects: "verdict: clear|warnings|violations|blocked + safety check + scope assessment.", UsesOutput: "Use the entity's file and planned dependencies from get_context"},
+			{Tool: "prepare_context", ArgsHint: `intent="modify", target="{target}"`, Expects: "Safe-edit briefing: current structure, callers/callees, annotations, applicable rules, and blast radius.", UsesOutput: ""},
+			{Tool: "plan_context", ArgsHint: `target="{target}", changes=[{"file":"...","adds_call_to":"..."}]`, Expects: "verdict: clear|warnings|violations|blocked + safety check + scope assessment.", UsesOutput: "Use the entity's file and planned dependencies from prepare_context"},
 			{Tool: "verify_implementation", ArgsHint: `files_written=["file1.go","file2.go"]`, Expects: "pass|violations_found|pending_indexing + per-file entity counts and violations.", UsesOutput: "After writing code: verify the implementation matches expectations"},
 			{Tool: "update_task", ArgsHint: `id="...", status="done"`, Expects: "Task marked complete.", UsesOutput: "After verify passes: mark the task done"},
 		},
@@ -340,7 +340,7 @@ var workflowRecipes = []workflowRecipe{
 		Keywords: []string{"debug", "bug", "fix", "broken", "error", "issue", "trace", "wrong", "fails"},
 		Steps: []workflowStep{
 			{Tool: "search", ArgsHint: `query="{symptom}", mode="semantic"`, Expects: "Matching entities ranked by relevance.", UsesOutput: ""},
-			{Tool: "get_context", ArgsHint: `entity="{suspect}"`, Expects: "Subgraph around the suspected entity + recent_changes (who modified it last).", UsesOutput: "Pick the most relevant entity from search results"},
+			{Tool: "prepare_context", ArgsHint: `intent="debug", target="{suspect}"`, Expects: "Call-path trace around the suspected entity + recent_changes (who modified it last).", UsesOutput: "Pick the most relevant entity from search results"},
 			{Tool: "get_call_chain", ArgsHint: `from="{entrypoint}", to="{suspect}"`, Expects: "How the entry point reaches the buggy code.", UsesOutput: "Use the caller that triggers the bug as 'from'"},
 			{Tool: "get_impact", ArgsHint: `symbol="{suspect}"`, Expects: "Reverse-BFS: everything that depends on this entity.", UsesOutput: "Assess blast radius before fixing"},
 		},
@@ -353,7 +353,7 @@ var workflowRecipes = []workflowRecipe{
 			{Tool: "session_init", ArgsHint: `agent_id="..."`, Expects: "pending_tasks, project_identity, working_state, sidecars, scale_guidance.", UsesOutput: ""},
 			{Tool: "get_pending_tasks", ArgsHint: `suggest_next=true`, Expects: "Tasks list + suggested_next (first unblocked task).", UsesOutput: "Use suggested_next to decide what to work on"},
 			{Tool: "get_session_state", ArgsHint: `task_id="{suggested_task_id}"`, Expects: "Saved progress: completed_steps, current_step, context_snapshot.", UsesOutput: "Use task ID from suggested_next"},
-			{Tool: "get_context", ArgsHint: `entity="{from_session_state}", task_id="{task_id}"`, Expects: "Fresh context with task-boosted relevance.", UsesOutput: "Use entity from session state's context_snapshot"},
+			{Tool: "prepare_context", ArgsHint: `intent="understand", target="{from_session_state}", task_id="{task_id}"`, Expects: "Fresh context with task-boosted relevance.", UsesOutput: "Use entity from session state's context_snapshot"},
 		},
 	},
 	{
@@ -371,7 +371,7 @@ var workflowRecipes = []workflowRecipe{
 		Keywords: []string{"architecture", "rules", "violations", "enforce", "review", "constraints", "quality"},
 		Steps: []workflowStep{
 			{Tool: "get_violations", ArgsHint: ``, Expects: "List of all current rule violations with severity, suggested_fix.", UsesOutput: ""},
-			{Tool: "get_context", ArgsHint: `entity="{violating_entity}"`, Expects: "Context around the violating entity to understand why the violation exists.", UsesOutput: "Use from_node or to_node from violations list"},
+			{Tool: "prepare_context", ArgsHint: `intent="review", target="{violating_entity}"`, Expects: "Quality/risk context around the violating entity to understand why the violation exists.", UsesOutput: "Use from_node or to_node from violations list"},
 			{Tool: "upsert_rule", ArgsHint: `rule_id="...", description="...", severity="error"`, Expects: "Rule created/updated.", UsesOutput: "Only if you need to add new constraints"},
 		},
 	},
@@ -381,7 +381,7 @@ var workflowRecipes = []workflowRecipe{
 		Keywords: []string{"find", "search", "concept", "feature", "where", "which", "related", "handles", "about"},
 		Steps: []workflowStep{
 			{Tool: "search", ArgsHint: `query="{concept}", mode="semantic"`, Expects: "Entities ranked by relevance. search_mode shows if vector or FTS5 was used.", UsesOutput: ""},
-			{Tool: "get_context", ArgsHint: `entity="{top_result}"`, Expects: "Full subgraph around the best match.", UsesOutput: "Use the top result's name and file"},
+			{Tool: "prepare_context", ArgsHint: `intent="understand", target="{top_result}"`, Expects: "Full context around the best match: structure, callers, callees, annotations.", UsesOutput: "Use the top result's name and file"},
 		},
 	},
 }

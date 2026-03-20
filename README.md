@@ -164,14 +164,14 @@ Synapses registers **42 MCP tools** across 9 categories. All are available in yo
 ### Code Graph
 | Tool | Params | Description |
 |------|--------|-------------|
+| `prepare_context` | `intent`, `target` | **Start here.** Intent-based context assembly. Declare `modify`/`understand`/`review`/`debug`/`add`/`plan` and a target; Synapses composes the right context in one round-trip. Replaces chains like `get_context→get_impact→get_violations`. |
 | `get_project_identity` | — | Compact architectural summary: node/edge counts, entry points, key entities, active rules. |
-| `get_context` | `entity`, `depth`, `token_budget`, `task_id`, `file`, `format`, `detail_level` | BFS ego-subgraph with decay. `format=compact` returns 400-600 token prose; `format=json` returns full JSON. |
+| `get_context` | `entity`, `depth`, `token_budget`, `task_id`, `file`, `format`, `detail_level` | Power-user: raw BFS ego-subgraph with decay. For most use cases, use `prepare_context` instead. `format=compact` returns 400-600 token prose; `format=json` returns full JSON. |
 | `find_entity` | `query` | Locate nodes by name/substring. Returns ID, type, file, line, doc, signature. |
 | `get_file_context` | `file` | All entities in a file ordered by line. |
 | `search` | `query`, `mode`, `limit` | Keyword search or FTS5 BM25 semantic search. CamelCase auto-split. |
 | `get_call_chain` | `from`, `to` | Shortest CALLS path (BFS), follows IMPLEMENTS edges. |
 | `get_impact` | `symbol`, `depth` | Blast-radius reverse-BFS: direct (1.0), indirect (0.6), peripheral (0.3) tiers. |
-| `prepare_context` | `intent`, `target` | Intent-based context assembly. Declare `modify`/`understand`/`review`/`debug`/`add`/`plan` and a target; composes the right context in one round-trip. |
 
 ### Architecture & Rules
 | Tool | Params | Description |
