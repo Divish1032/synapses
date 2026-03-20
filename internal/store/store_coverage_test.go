@@ -484,6 +484,65 @@ func TestSemanticSearch_LikeSearchFallthrough(t *testing.T) {
 	_ = results
 }
 
+// TestSemanticSearch_LikeSearch_MetacharSafety verifies that LIKE metacharacters
+// in search terms do not cause incorrect matches or SQL errors (Security F11 companion).
+// Before the fix, likeSearch escaped "%" with "\%" but omitted ESCAPE '\'`, making
+// the backslash a literal — so "\%" still wildcarded. "_" was never escaped.
+func TestSemanticSearch_LikeSearch_MetacharSafety(t *testing.T) {
+	st := openTestStore(t)
+	g := graph.New("meta-repo")
+
+	// One node with a known name.
+	id := g.MakeNodeID("pkg/auth.go", "AuthService")
+	g.AddNode(&graph.Node{
+		ID:   id,
+		Name: "AuthService",
+		Type: graph.NodeFunction,
+		File: "pkg/auth.go",
+	})
+	if err := st.SaveGraph(g); err != nil {
+		t.Fatalf("SaveGraph: %v", err)
+	}
+
+	// Search for "%" must not return all nodes (would if ESCAPE missing).
+	results, err := st.SemanticSearch("%", 100)
+	if err != nil {
+		t.Fatalf("SemanticSearch %%: %v", err)
+	}
+	for _, r := range results {
+		if r.Name == "AuthService" {
+			// "%" should not match "AuthService" — it contains no literal "%".
+			t.Errorf("SemanticSearch(%%) matched AuthService — LIKE metachar not escaped")
+		}
+	}
+
+	// Search for "_" must not match all single-char-in-name nodes as wildcards.
+	results, err = st.SemanticSearch("_", 100)
+	if err != nil {
+		t.Fatalf("SemanticSearch _: %v", err)
+	}
+	for _, r := range results {
+		if r.Name == "AuthService" {
+			t.Errorf("SemanticSearch(_) matched AuthService — LIKE metachar _ not escaped")
+		}
+	}
+
+	// Sanity: exact term still finds the node.
+	results, err = st.SemanticSearch("AuthService", 10)
+	if err != nil {
+		t.Fatalf("SemanticSearch AuthService: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.Name == "AuthService" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("SemanticSearch(AuthService) did not find AuthService — regression")
+	}
+}
+
 // ── AppendEvent with payload ───────────────────────────────────────────────────
 
 func TestAppendEvent_WithPayload(t *testing.T) {

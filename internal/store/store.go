@@ -1042,8 +1042,8 @@ func (s *Store) likeSearch(query string, limit int) ([]SearchResult, error) {
 	conds := make([]string, len(words))
 	args := make([]interface{}, 0, len(words)*2+1)
 	for i, w := range words {
-		pat := "%" + strings.ReplaceAll(w, "%", "\\%") + "%"
-		conds[i] = "(name LIKE ? OR doc LIKE ?)"
+		pat := "%" + escapeLike(w) + "%"
+		conds[i] = "(name LIKE ? ESCAPE '\\' OR doc LIKE ? ESCAPE '\\')"
 		args = append(args, pat, pat)
 	}
 	args = append(args, limit)
