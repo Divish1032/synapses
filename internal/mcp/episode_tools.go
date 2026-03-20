@@ -376,7 +376,7 @@ func (s *Server) handleRecall(
 
 	// Quad-channel recall: 4 parallel channels merged via RRF.
 	// Replaces the old sequential BM25 + vector search path.
-	memories, _ := s.quadRecallSearch(ctx, query, searchLimit, includeStale, sinceDays)
+	memories, _, staleEmbIDs := s.quadRecallSearch(ctx, query, searchLimit, includeStale, sinceDays)
 
 	// Touch surfaced memories in background to renew TTL.
 	if len(memories) > 0 {
@@ -504,10 +504,16 @@ func (s *Server) handleRecall(
 		"episodes":      episodes,
 		"related_rules": relatedRules,
 		"mode":          "search",
-		"hint":          "Results ordered by relevance. 'episodes' = explicit remember() calls. 'memories' = auto-captured from end_session, annotate_node, and remember() across all tiers (session_log, entity, project). Check related_rules for constraints from past failures.",
+		"hint":          "Results ordered by relevance. 'episodes' = explicit remember() calls. 'memories' = auto-captured from end_session, annotate_node, and remember() across all tiers (session_log, entity, project). Check related_rules for constraints from past failures. stale_embedding_ids lists memories whose anchored code entity changed since the memory was written — verify before trusting.",
 	}
 	if len(memories) > 0 {
 		resp["memories"] = memories
+	}
+	// Sprint 10.7: surface stale embedding IDs so agents know which memories
+	// are about code entities that changed since the memory was written.
+	// Agents should verify these memories before trusting their content.
+	if len(staleEmbIDs) > 0 {
+		resp["stale_embedding_ids"] = staleEmbIDs
 	}
 	if len(crossProjectEpisodes) > 0 {
 		resp["cross_project_episodes"] = crossProjectEpisodes

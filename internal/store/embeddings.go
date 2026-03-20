@@ -165,7 +165,7 @@ func (s *Store) VectorSearch(queryVec []float32, limit int) ([]SearchResult, err
 		if score <= 0 {
 			continue
 		}
-		h.tryPush(nodeID, score)
+		h.tryPush(nodeID, score, false)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

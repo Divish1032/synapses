@@ -10,11 +10,12 @@ import (
 
 // MemorySearchResult represents a memory matched by vector similarity search.
 type MemorySearchResult struct {
-	MemoryID string  `json:"memory_id"`
-	Content  string  `json:"content"`
-	Tier     string  `json:"tier"`
-	EntityID string  `json:"entity_id,omitempty"`
-	Score    float64 `json:"score"` // cosine similarity, higher = more relevant
+	MemoryID       string  `json:"memory_id"`
+	Content        string  `json:"content"`
+	Tier           string  `json:"tier"`
+	EntityID       string  `json:"entity_id,omitempty"`
+	Score          float64 `json:"score"`                      // cosine similarity, higher = more relevant
+	StaleEmbedding bool    `json:"stale_embedding,omitempty"`  // true when anchored entity changed since embedding was computed
 }
 
 // memoryContentHash computes an 8-char hex hash of the memory content
@@ -301,14 +302,17 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 		return nil, nil
 	}
 
-	// Pass 1: Lightweight scan — IDs and embeddings only.
+	// Pass 1: Lightweight scan — IDs, embeddings, and stale flag.
+	// Stale embeddings (e.stale=1) are INCLUDED in scoring — their vector
+	// is still valid (memory text unchanged). StaleEmbedding flag is
+	// propagated to results so agents know the anchored entity changed.
+	// Dead memories (m.stale=1) are still excluded — different concept.
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.knowledgeDB.Query(`
-		SELECT e.memory_id, e.embedding
+		SELECT e.memory_id, e.embedding, e.stale
 		FROM memory_embeddings e
 		JOIN memories m ON e.memory_id = m.id
-		WHERE e.stale = 0
-		  AND m.stale = 0
+		WHERE m.stale = 0
 		  AND m.expires_at > ?`, now)
 	if err != nil {
 		return nil, fmt.Errorf("memory vector search: %w", err)
@@ -319,7 +323,8 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 	for rows.Next() {
 		var memID string
 		var blob []byte
-		if err := rows.Scan(&memID, &blob); err != nil {
+		var embStale int
+		if err := rows.Scan(&memID, &blob, &embStale); err != nil {
 			return nil, fmt.Errorf("scan memory embedding row: %w", err)
 		}
 		vec := blobToVec(blob)
@@ -330,7 +335,7 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 		if score <= 0 {
 			continue
 		}
-		h.tryPush(memID, score)
+		h.tryPush(memID, score, embStale == 1)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -361,13 +366,13 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 	}
 
 	// Pass 1: Lightweight scan with threshold filter.
+	// Stale embeddings included — see MemoryVectorSearch comment.
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.knowledgeDB.Query(`
-		SELECT e.memory_id, e.embedding
+		SELECT e.memory_id, e.embedding, e.stale
 		FROM memory_embeddings e
 		JOIN memories m ON e.memory_id = m.id
-		WHERE e.stale = 0
-		  AND m.stale = 0
+		WHERE m.stale = 0
 		  AND m.expires_at > ?`, now)
 	if err != nil {
 		return nil, fmt.Errorf("memory vector search with threshold: %w", err)
@@ -379,7 +384,8 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 	for rows.Next() {
 		var memID string
 		var blob []byte
-		if err := rows.Scan(&memID, &blob); err != nil {
+		var embStale int
+		if err := rows.Scan(&memID, &blob, &embStale); err != nil {
 			return nil, fmt.Errorf("scan memory embedding row: %w", err)
 		}
 		vec := blobToVec(blob)
@@ -390,7 +396,7 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 		if score < threshold {
 			continue
 		}
-		h.tryPush(memID, score)
+		h.tryPush(memID, score, embStale == 1)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -406,18 +412,20 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 }
 
 // fetchMemorySearchResults performs the second pass of the two-pass vector
-// search: given the top-K (id, score) pairs from the scan pass, it fetches
-// the full memory content, tier, and entity_id in a single query.
+// search: given the top-K (id, score, stale) tuples from the scan pass, it
+// fetches the full memory content, tier, and entity_id in a single query.
 // Results are returned in the same descending-score order as winners.
+// The stale flag from Pass 1 is propagated to MemorySearchResult.StaleEmbedding.
 //
-// Re-applies stale/expired filters to close the consistency gap between
-// passes: a memory valid during Pass 1 could be marked stale or expire
-// before Pass 2 executes.
+// Re-applies expired filter to close the consistency gap between passes:
+// a memory valid during Pass 1 could expire before Pass 2 executes.
+// Memory-level stale (m.stale=1) is also re-checked — dead memories excluded.
 func (s *Store) fetchMemorySearchResults(winners []scoredID) ([]MemorySearchResult, error) {
-	// Build id → score+position map for reassembly.
+	// Build id → score+position+stale map for reassembly.
 	type posScore struct {
 		pos   int
 		score float64
+		stale bool
 	}
 	lookup := make(map[string]posScore, len(winners))
 	placeholders := make([]string, len(winners))
@@ -425,7 +433,7 @@ func (s *Store) fetchMemorySearchResults(winners []scoredID) ([]MemorySearchResu
 	now := time.Now().UTC().Format(time.RFC3339)
 	args[0] = now
 	for i, w := range winners {
-		lookup[w.id] = posScore{pos: i, score: float64(w.score)}
+		lookup[w.id] = posScore{pos: i, score: float64(w.score), stale: w.stale}
 		placeholders[i] = "?"
 		args[i+1] = w.id
 	}
@@ -450,6 +458,7 @@ func (s *Store) fetchMemorySearchResults(winners []scoredID) ([]MemorySearchResu
 			continue // should not happen
 		}
 		r.Score = ps.score
+		r.StaleEmbedding = ps.stale
 		results[ps.pos] = r
 	}
 	if err := rows.Err(); err != nil {

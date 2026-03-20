@@ -29,7 +29,7 @@ func TestQuadRecallSearch_BM25Channel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mems, attr := srv.quadRecallSearch(context.Background(), "auth token", 5, false, 7)
+	mems, attr, _ := srv.quadRecallSearch(context.Background(), "auth token", 5, false, 7)
 	if len(mems) == 0 {
 		t.Fatal("expected at least 1 memory from BM25 channel")
 	}
@@ -64,7 +64,7 @@ func TestQuadRecallSearch_TemporalChannel(t *testing.T) {
 	}
 
 	// Query for "auth" — BM25 won't find "Docker" memory, but temporal should.
-	mems, _ := srv.quadRecallSearch(context.Background(), "auth changes", 10, false, 7)
+	mems, _, _ := srv.quadRecallSearch(context.Background(), "auth changes", 10, false, 7)
 
 	// Temporal channel returns recent memories regardless of text match.
 	foundDocker := false
@@ -102,7 +102,7 @@ func TestQuadRecallSearch_TemporalDoesNotOverwhelmRelevant(t *testing.T) {
 	}
 
 	// Query for "auth" with limit=5.
-	mems, _ := srv.quadRecallSearch(context.Background(), "auth OAuth middleware", 5, false, 7)
+	mems, _, _ := srv.quadRecallSearch(context.Background(), "auth OAuth middleware", 5, false, 7)
 
 	// The 2 auth-relevant memories should rank in the top 3 (multi-channel boost).
 	authCount := 0
@@ -165,7 +165,7 @@ func TestQuadRecallSearch_GraphChannel(t *testing.T) {
 		Source:  store.SourceManual,
 	}, []string{string(tokID)})
 
-	mems, attr := srv.quadRecallSearch(context.Background(), "auth login", 10, false, 7)
+	mems, attr, _ := srv.quadRecallSearch(context.Background(), "auth login", 10, false, 7)
 
 	// Graph channel should find the TokenValidator memory via BFS from AuthLogin.
 	foundJWT := false
@@ -193,7 +193,7 @@ func TestQuadRecallSearch_GraphChannel(t *testing.T) {
 func TestQuadRecallSearch_EmptyResults(t *testing.T) {
 	srv := newTestServer(t)
 
-	mems, attr := srv.quadRecallSearch(context.Background(), "nonexistent query", 5, false, 7)
+	mems, attr, _ := srv.quadRecallSearch(context.Background(), "nonexistent query", 5, false, 7)
 	// Temporal channel may return recent memories, but store is empty.
 	if len(mems) != 0 {
 		t.Errorf("expected 0 memories from empty store, got %d", len(mems))
@@ -215,7 +215,7 @@ func TestQuadRecallSearch_NoGraph_GracefulDegradation(t *testing.T) {
 		Source:  store.SourceManual,
 	})
 
-	mems, _ := srv.quadRecallSearch(context.Background(), "GraphQL", 5, false, 7)
+	mems, _, _ := srv.quadRecallSearch(context.Background(), "GraphQL", 5, false, 7)
 	if len(mems) == 0 {
 		t.Error("expected BM25/temporal results even without graph")
 	}
