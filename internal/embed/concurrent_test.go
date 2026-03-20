@@ -3,15 +3,17 @@ package embed_test
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/SynapsesOS/synapses/internal/embed"
 )
 
 // TestConcurrentEmbed_MutexSerialization verifies that multiple goroutines
-// calling Embed() concurrently are correctly serialized by the mutex and
-// do not panic or corrupt state. Uses a path that forces init failure so
-// the test runs without model download.
+// calling Embed() concurrently are correctly handled by the pipeline pool
+// and do not panic or corrupt state. Uses a path that forces init failure
+// so the test runs without model download.
 func TestConcurrentEmbed_MutexSerialization(t *testing.T) {
 	// Use impossible path to avoid actual model download.
 	e := embed.NewBuiltinEmbedder("/dev/null/impossible/path")
@@ -85,11 +87,6 @@ func TestConcurrentEmbed_ContextCancellation(t *testing.T) {
 			t.Errorf("goroutine %d: expected error, got nil", i)
 		}
 	}
-
-	// Even-numbered goroutines should have context.Canceled.
-	// Odd-numbered should have init failure. But order is non-deterministic
-	// (a cancelled goroutine might acquire the lock after init attempt),
-	// so we just verify all returned errors — no panics.
 }
 
 // TestConcurrentClose verifies that Close() called concurrently with Embed()
@@ -118,4 +115,110 @@ func TestConcurrentClose(t *testing.T) {
 
 	wg.Wait()
 	// If we get here without a panic or race detector failure, the test passes.
+}
+
+// TestPoolSize_Default verifies the default pool size is 3.
+func TestPoolSize_Default(t *testing.T) {
+	e := embed.NewBuiltinEmbedder(t.TempDir())
+	defer e.Close()
+	if got := e.PoolSize(); got != 3 {
+		t.Errorf("default pool size = %d, want 3", got)
+	}
+}
+
+// TestPoolSize_Custom verifies custom pool sizes and clamping.
+func TestPoolSize_Custom(t *testing.T) {
+	tests := []struct {
+		input int
+		want  int
+	}{
+		{1, 1},
+		{2, 2},
+		{5, 5},
+		{8, 8},
+		{0, 1},  // clamped to 1
+		{-1, 1}, // clamped to 1
+		{9, 8},  // clamped to 8
+		{100, 8},
+	}
+	for _, tc := range tests {
+		e := embed.NewBuiltinEmbedderWithPoolSize(t.TempDir(), tc.input)
+		defer e.Close()
+		if got := e.PoolSize(); got != tc.want {
+			t.Errorf("NewBuiltinEmbedderWithPoolSize(_, %d).PoolSize() = %d, want %d", tc.input, got, tc.want)
+		}
+	}
+}
+
+// TestCloseIdempotent verifies that calling Close() multiple times is safe.
+func TestCloseIdempotent(t *testing.T) {
+	e := embed.NewBuiltinEmbedder(t.TempDir())
+
+	// Close twice — should not panic.
+	if err := e.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestEmbedAfterClose verifies that Embed returns an error after Close.
+func TestEmbedAfterClose(t *testing.T) {
+	e := embed.NewBuiltinEmbedder(t.TempDir())
+	e.Close()
+
+	_, err := e.Embed(context.Background(), "hello")
+	if err == nil {
+		t.Fatal("expected error after Close, got nil")
+	}
+	if got := err.Error(); got != "builtin embedder: closed" {
+		t.Errorf("error = %q, want %q", got, "builtin embedder: closed")
+	}
+}
+
+// TestConcurrentClose_Multiple verifies concurrent Close calls are safe.
+func TestConcurrentClose_Multiple(t *testing.T) {
+	e := embed.NewBuiltinEmbedder(t.TempDir())
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e.Close() //nolint:errcheck
+		}()
+	}
+	wg.Wait()
+}
+
+// TestConcurrentEmbed_CloseUnblocksWaiters verifies that Close() unblocks
+// goroutines waiting for a pool slot or failing on init.
+func TestConcurrentEmbed_CloseUnblocksWaiters(t *testing.T) {
+	e := embed.NewBuiltinEmbedderWithPoolSize("/dev/null/impossible/path", 1)
+
+	var wg sync.WaitGroup
+	var errCount atomic.Int32
+
+	// Launch goroutines that will all fail on init (since path is impossible).
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := e.Embed(context.Background(), "test")
+			if err != nil {
+				errCount.Add(1)
+			}
+		}()
+	}
+
+	// Give goroutines time to attempt init, then close.
+	time.Sleep(10 * time.Millisecond)
+	e.Close()
+	wg.Wait()
+
+	// All should have errored (init failure or closed).
+	if got := errCount.Load(); got != 5 {
+		t.Errorf("error count = %d, want 5", got)
+	}
 }
