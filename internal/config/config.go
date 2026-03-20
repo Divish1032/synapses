@@ -120,6 +120,14 @@ type Config struct {
 	// containing synapses.json.
 	Federation []FederationEntry `json:"federation,omitempty"`
 
+	// FederationACL controls which daemon-registered projects this project is
+	// allowed to query via the projects= parameter on cross-project tools
+	// (recall, get_events, get_messages, get_agents, etc.).
+	// Default (nil or empty AllowReadFrom): deny-all — no cross-project reads.
+	// Set AllowReadFrom to ["*"] to allow reading from all registered projects.
+	// Set to specific project names (directory basenames) to allow only those.
+	FederationACL *FederationACLConfig `json:"federation_acl,omitempty"`
+
 	// Constitution defines project-wide principles that are injected into every
 	// agent session and get_context response. Use this to codify architectural
 	// laws, coding standards, and constraints that every AI agent must respect.
@@ -268,6 +276,29 @@ type FederationEntry struct {
 	// Alias is a short name used in MCP tool params and response labels.
 	// Must not contain whitespace. Must be unique across all entries.
 	Alias string `json:"alias"`
+}
+
+// FederationACLConfig controls which daemon-registered projects this project
+// can read from via cross-project queries (projects= parameter).
+type FederationACLConfig struct {
+	// AllowReadFrom is the list of project names (directory basenames) that
+	// this project is allowed to query. An empty or nil list means deny-all
+	// (no cross-project reads). Use ["*"] to allow all registered projects.
+	AllowReadFrom []string `json:"allow_read_from,omitempty"`
+}
+
+// IsAllowed returns true if the given project name is permitted by this ACL.
+// A nil receiver or empty AllowReadFrom means deny-all.
+func (acl *FederationACLConfig) IsAllowed(projectName string) bool {
+	if acl == nil || len(acl.AllowReadFrom) == 0 {
+		return false
+	}
+	for _, allowed := range acl.AllowReadFrom {
+		if allowed == "*" || allowed == projectName {
+			return true
+		}
+	}
+	return false
 }
 
 // PluginConfig describes a single external parser plugin.
