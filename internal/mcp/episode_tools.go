@@ -280,7 +280,7 @@ func (s *Server) handleRemember(
 // When query is provided: FTS5 BM25 semantic search, results ordered by relevance.
 // When query is empty: chronological browse (newest first), same as deprecated get_episodes.
 func (s *Server) handleRecall(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
@@ -351,7 +351,7 @@ func (s *Server) handleRecall(
 		return jsonResult(resp)
 	}
 
-	// Search mode: FTS5 BM25.
+	// Search mode: quad-channel recall (BM25 + semantic + graph + temporal).
 	searchLimit := limit
 	if searchLimit > 5 {
 		searchLimit = 5 // default cap for search mode
@@ -360,6 +360,7 @@ func (s *Server) handleRecall(
 		searchLimit = int(v) // explicit override
 	}
 
+	// Episodes: still searched via FTS5 BM25 separately (not part of RRF).
 	episodes, err := s.store.RecallEpisodes(
 		query,
 		stringArg(req, "project_id"),
@@ -373,49 +374,9 @@ func (s *Server) handleRecall(
 		return mcp.NewToolResultError(fmt.Sprintf("recall episodes: %v", err)), nil
 	}
 
-	// Search unified memories table (session_log, entity, project tiers).
-	// This surfaces everything written by end_session, annotate_node, remember(),
-	// which is invisible to the episodes-only search above.
-	var memories []store.Memory
-	if includeStale {
-		memories, _ = s.store.SearchMemoriesIncludingStale(query, searchLimit)
-	} else {
-		memories, _ = s.store.SearchMemories(query, searchLimit)
-	}
-
-	// Vector search: embed the query and find semantically similar memories.
-	// This catches fuzzy matches that BM25 misses (e.g. "JWT middleware" matches
-	// query "auth changes"). Results are merged with BM25 hits, deduped by ID.
-	// Full memory details are hydrated from the store to ensure complete structs.
-	if s.memoryEmbedder != nil {
-		embedCtx, embedCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		queryVec, embedErr := s.memoryEmbedder.Embed(embedCtx, query)
-		embedCancel()
-		if embedErr == nil && len(queryVec) > 0 {
-			vecResults, vecErr := s.store.MemoryVectorSearchWithThreshold(queryVec, searchLimit, 0.3)
-			if vecErr == nil && len(vecResults) > 0 {
-				// Collect IDs that aren't already in BM25 results.
-				existing := make(map[string]bool, len(memories))
-				for _, m := range memories {
-					existing[m.ID] = true
-				}
-				var newIDs []string
-				for _, vr := range vecResults {
-					if !existing[vr.MemoryID] {
-						newIDs = append(newIDs, vr.MemoryID)
-						existing[vr.MemoryID] = true
-					}
-				}
-				// Hydrate full Memory structs from store (includes CreatedAt, Source, etc.)
-				if len(newIDs) > 0 {
-					fullMems, hydErr := s.store.GetMemoriesByIDs(newIDs)
-					if hydErr == nil {
-						memories = append(memories, fullMems...)
-					}
-				}
-			}
-		}
-	}
+	// Quad-channel recall: 4 parallel channels merged via RRF.
+	// Replaces the old sequential BM25 + vector search path.
+	memories, _ := s.quadRecallSearch(ctx, query, searchLimit, includeStale, sinceDays)
 
 	// Touch surfaced memories in background to renew TTL.
 	if len(memories) > 0 {
