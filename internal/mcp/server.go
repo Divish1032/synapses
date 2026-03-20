@@ -1684,6 +1684,32 @@ func (s *Server) registerTools() {
 		s.handleGetImpact,
 	)
 
+	// get_entity_history: chronological timeline compositing 5 data sources (Sprint 10 #4)
+	s.addOrDefer(
+		mcp.NewTool(
+			"get_entity_history",
+			mcp.WithDescription(
+				"Returns a chronological timeline for a named code entity, compositing "+
+					"memories, episodes, annotations, task references, and git changes. "+
+					"One tool call instead of 5. Answers: 'what happened to this entity?'",
+			),
+			mcp.WithString("entity",
+				mcp.Required(),
+				mcp.Description("Name of the code entity (e.g. 'AuthService', 'handleLogin'). "+
+					"Resolved via FindByName with automatic disambiguation."),
+			),
+			mcp.WithString("file",
+				mcp.Description("Optional file path suffix to disambiguate when multiple entities share the same name "+
+					"(e.g. 'internal/auth/service.go')."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Maximum timeline events to return (default 50, max 200). "+
+					"Events are sorted by timestamp descending (newest first)."),
+			),
+		),
+		s.handleGetEntityHistory,
+	)
+
 	// ── Agent Task Memory Tools ──────────────────────────────────────────────
 	// These tools give Synapses session continuity: plans and tasks agreed in
 	// one LLM conversation are stored in SQLite and surfaced to future sessions.
