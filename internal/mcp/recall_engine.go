@@ -14,9 +14,13 @@ import (
 // graphParentEntry records how a node was discovered during BFS traversal.
 // ParentNodeID is the node from which this node was reached.
 // EdgeType is the relationship type between them in the code graph.
+// IsIncoming is true when this node was discovered via InEdges — meaning
+// THIS node CALLS ParentNodeID in the real code (inverse of traversal direction).
+// IsIncoming=false means ParentNodeID CALLS/IMPORTS/IMPLEMENTS this node.
 type graphParentEntry struct {
 	ParentNodeID string
 	EdgeType     graph.EdgeType
+	IsIncoming   bool
 }
 
 // GraphBFSResult is the output of a BFS traversal from seed nodes.
@@ -33,11 +37,13 @@ type GraphBFSResult struct {
 // TraversalPath describes how a specific memory was reached via graph traversal.
 type TraversalPath struct {
 	MemoryID string `json:"memory_id"`
-	// MemorySnippet is the first ~80 chars of memory content, for quick preview.
+	// MemorySnippet is the first ~80 runes of memory content, for quick preview.
 	MemorySnippet string `json:"memory_snippet"`
-	// Path shows structural connections from query-matching entity to memory anchor point.
-	// Example: "AuthService -[CALLS]- TokenValidator"
-	// -[EDGE_TYPE]- denotes a code graph relationship; both caller and callee directions explored.
+	// Path shows the directed structural path from query-matching entity to memory anchor.
+	// →[EDGE]→ means the left node calls/imports/implements the right node.
+	// ←[EDGE]- means the right node calls/imports/implements the left node.
+	// Example: "AuthService →[CALLS]→ TokenValidator" (AuthService calls TokenValidator)
+	// Example: "AuthService ←[CALLS]- TokenManager" (TokenManager calls AuthService)
 	Path string `json:"path"`
 	Hops int    `json:"hops"`
 }
@@ -342,16 +348,24 @@ func (s *Server) quadRecallSearch(
 			Depth:        depth,
 			AnchorCount:  graphSeedCount,
 			VisitedNodes: len(graphResult.Nodes),
-			Note: "Paths show structural connections from query-matching entities to " +
-				"memory anchor points. Uses CALLS, IMPORTS, and IMPLEMENTS edges from " +
-				"the AST code graph. -[EDGE_TYPE]- denotes a code relationship; both " +
-				"caller and callee directions are explored bidirectionally.",
+			Note: "Paths show directed code relationships from query-matching entities to " +
+				"memory anchor points. →[EDGE]→ means left calls/imports/implements right. " +
+				"←[EDGE]- means right calls/imports/implements left. BFS explores both " +
+				"directions from seed entities.",
 		}
 
 		// Collect memory IDs attributed to the graph channel in the final result.
 		graphMemIDs := graphAttributedMemIDs(result, attribution)
 		if len(graphMemIDs) > 0 && len(graphResult.ParentMap) > 0 {
-			anchorMap, err := s.store.GetMemoryAnchorNodeIDs(graphMemIDs)
+			// Build the set of nodes reachable in this BFS result (parent map keys).
+			// GetMemoryAnchorNodeIDsInSet filters to only anchors that ARE in this set,
+			// fixing the multi-anchor bug where the first-by-date anchor might not be
+			// the BFS-discovered one.
+			bfsNodeSet := make(map[string]bool, len(graphResult.ParentMap))
+			for nid := range graphResult.ParentMap {
+				bfsNodeSet[nid] = true
+			}
+			anchorMap, err := s.store.GetMemoryAnchorNodeIDsInSet(graphMemIDs, bfsNodeSet)
 			if err != nil {
 				logRecallChannelError("graph-traversal", err)
 			} else if len(anchorMap) > 0 {
@@ -411,9 +425,11 @@ func (s *Server) reconstructTraversalPaths(
 			continue // anchor is a seed — no multi-hop path to show
 		}
 
+		// Truncate at rune boundary to avoid splitting multi-byte UTF-8 characters.
 		snippet := m.Content
-		if len(snippet) > 80 {
-			snippet = snippet[:77] + "..."
+		runes := []rune(snippet)
+		if len(runes) > 80 {
+			snippet = string(runes[:77]) + "..."
 		}
 
 		paths = append(paths, TraversalPath{
@@ -426,12 +442,17 @@ func (s *Server) reconstructTraversalPaths(
 	return paths
 }
 
-// buildGraphPath reconstructs the traversal path from a seed to the given anchor
-// node using the BFS parent map. Returns the path string and hop count.
+// buildGraphPath reconstructs the directed traversal path from a seed to the given
+// anchor node using the BFS parent map. Returns the path string and hop count.
 // Returns ("", 0) when:
 //   - the anchor is itself a seed (no interesting path),
 //   - the path cannot be traced back to a seed within maxIter hops,
 //   - the parent map is empty.
+//
+// Path format uses directed arrows:
+//
+//	→[CALLS]→  means left node calls/imports/implements right node
+//	←[CALLS]-  means right node calls/imports/implements left node
 func (s *Server) buildGraphPath(nodeID string, bfsResult GraphBFSResult) (string, int) {
 	const maxIter = 8
 
@@ -440,21 +461,26 @@ func (s *Server) buildGraphPath(nodeID string, bfsResult GraphBFSResult) (string
 	}
 
 	type segment struct {
-		nodeID   string
-		edgeType graph.EdgeType
+		nodeID     string
+		edgeType   graph.EdgeType
+		isIncoming bool // true = nodeID CALLS parentNodeID (inverse of BFS traversal)
 	}
 
 	// Trace from anchor back toward seed, collecting segments.
-	// Each segment records the node ID and the edge type used to discover it.
+	// segs is built in anchor→seed order; reversed before display.
 	var segs []segment
 	current := nodeID
 	for i := 0; i < maxIter; i++ {
 		entry, ok := bfsResult.ParentMap[current]
 		if !ok {
-			// Can't trace further — path is incomplete.
+			// Can't trace further — path is incomplete (anchor not in BFS result).
 			return "", 0
 		}
-		segs = append(segs, segment{nodeID: current, edgeType: entry.EdgeType})
+		segs = append(segs, segment{
+			nodeID:     current,
+			edgeType:   entry.EdgeType,
+			isIncoming: entry.IsIncoming,
+		})
 		current = entry.ParentNodeID
 		if bfsResult.SeedSet[current] {
 			break
@@ -469,19 +495,33 @@ func (s *Server) buildGraphPath(nodeID string, bfsResult GraphBFSResult) (string
 		return "", 0
 	}
 
-	// segs is ordered [anchor, ..., first-node-after-seed].
 	// Reverse to get seed → anchor order for display.
 	for i, j := 0, len(segs)-1; i < j; i, j = i+1, j-1 {
 		segs[i], segs[j] = segs[j], segs[i]
 	}
 
-	// Build: seedName -[EDGE_TYPE]- node1 -[EDGE_TYPE]- ... -[EDGE_TYPE]- anchorName
+	// Build directed path string starting from seed (current).
+	// For each segment in seed→anchor order:
+	//   IsIncoming=false: parentNodeID →[EDGE]→ nodeID (parent calls nodeID)
+	//   IsIncoming=true:  nodeID ←[EDGE]- parentNodeID is WRONG order.
+	//     After reversal, the segment's parent is the seed-side.
+	//     IsIncoming=true means nodeID CALLS parentNodeID — so the arrow points
+	//     from nodeID toward parentNodeID (the seed side), shown as ←[EDGE]-.
 	var sb strings.Builder
 	sb.WriteString(s.graphNodeName(current))
 	for _, seg := range segs {
-		sb.WriteString(" -[")
-		sb.WriteString(string(seg.edgeType))
-		sb.WriteString("]- ")
+		if !seg.isIncoming {
+			// Outgoing: seed-side parent CALLS/IMPORTS anchor-side nodeID
+			sb.WriteString(" →[")
+			sb.WriteString(string(seg.edgeType))
+			sb.WriteString("]→ ")
+		} else {
+			// Incoming: anchor-side nodeID CALLS seed-side parent
+			// Arrow points right-to-left from the agent's perspective
+			sb.WriteString(" ←[")
+			sb.WriteString(string(seg.edgeType))
+			sb.WriteString("]- ")
+		}
 		sb.WriteString(s.graphNodeName(seg.nodeID))
 	}
 	return sb.String(), len(segs)
@@ -558,6 +598,7 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 		var nextFrontier []graph.NodeID
 		for _, nid := range frontier {
 			// Follow outgoing edges (callees, imports, implements).
+			// IsIncoming=false: nid (parent) CALLS/IMPORTS/IMPLEMENTS e.To.
 			for _, e := range s.graph.OutEdges(nid) {
 				if !allowedTypes[e.Type] || visited[e.To] {
 					continue
@@ -566,6 +607,7 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 				parentMap[string(e.To)] = graphParentEntry{
 					ParentNodeID: string(nid),
 					EdgeType:     e.Type,
+					IsIncoming:   false,
 				}
 				nextFrontier = append(nextFrontier, e.To)
 				if len(visited) >= maxNodes {
@@ -576,6 +618,7 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 				break
 			}
 			// Follow incoming edges (callers of this node).
+			// IsIncoming=true: e.From CALLS nid — e.From is the caller, nid the callee.
 			for _, e := range s.graph.InEdges(nid) {
 				if !allowedTypes[e.Type] || visited[e.From] {
 					continue
@@ -584,6 +627,7 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 				parentMap[string(e.From)] = graphParentEntry{
 					ParentNodeID: string(nid),
 					EdgeType:     e.Type,
+					IsIncoming:   true,
 				}
 				nextFrontier = append(nextFrontier, e.From)
 				if len(visited) >= maxNodes {

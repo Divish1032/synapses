@@ -1010,3 +1010,204 @@ func TestHandleRecall_BrowseMode_IncludeStale_BypassesDecay(t *testing.T) {
 		t.Error("include_stale=true should bypass decay filter and show old memory")
 	}
 }
+
+// ── Directed arrow and multi-anchor fixes (v2 hardening) ─────────────────────
+
+func TestGraphBFS_IsIncoming_OutgoingEdge(t *testing.T) {
+	// Outgoing edge (A→B): IsIncoming must be false for B's parent entry.
+	srv := newTestServer(t)
+	aID := srv.graph.MakeNodeID("a.go", "CallerA")
+	bID := srv.graph.MakeNodeID("b.go", "CalleeB")
+	srv.graph.AddNode(&graph.Node{ID: aID, Name: "CallerA", Type: graph.NodeFunction, File: "a.go", Line: 1})
+	srv.graph.AddNode(&graph.Node{ID: bID, Name: "CalleeB", Type: graph.NodeFunction, File: "b.go", Line: 1})
+	srv.graph.AddEdge(&graph.Edge{From: aID, To: bID, Type: graph.EdgeCalls})
+
+	result := srv.graphBFS([]string{string(aID)}, 1)
+
+	entry, ok := result.ParentMap[string(bID)]
+	if !ok {
+		t.Fatal("expected ParentMap entry for CalleeB")
+	}
+	if entry.IsIncoming {
+		t.Error("outgoing edge should set IsIncoming=false on the discovered callee")
+	}
+	if entry.ParentNodeID != string(aID) {
+		t.Errorf("CallerA should be parent of CalleeB, got %q", entry.ParentNodeID)
+	}
+}
+
+func TestGraphBFS_IsIncoming_IncomingEdge(t *testing.T) {
+	// Incoming edge (B→A, seed=A): IsIncoming must be true for B's parent entry.
+	srv := newTestServer(t)
+	aID := srv.graph.MakeNodeID("a.go", "SeedCallee")
+	bID := srv.graph.MakeNodeID("b.go", "Caller")
+	srv.graph.AddNode(&graph.Node{ID: aID, Name: "SeedCallee", Type: graph.NodeFunction, File: "a.go", Line: 1})
+	srv.graph.AddNode(&graph.Node{ID: bID, Name: "Caller", Type: graph.NodeFunction, File: "b.go", Line: 1})
+	// B calls A (incoming from A's perspective).
+	srv.graph.AddEdge(&graph.Edge{From: bID, To: aID, Type: graph.EdgeCalls})
+
+	result := srv.graphBFS([]string{string(aID)}, 1)
+
+	entry, ok := result.ParentMap[string(bID)]
+	if !ok {
+		t.Fatal("expected ParentMap entry for Caller (discovered via InEdges)")
+	}
+	if !entry.IsIncoming {
+		t.Error("incoming edge discovery should set IsIncoming=true on the discovered caller")
+	}
+	if entry.ParentNodeID != string(aID) {
+		t.Errorf("SeedCallee should be parent of Caller, got %q", entry.ParentNodeID)
+	}
+}
+
+func TestBuildGraphPath_DirectedArrow_Outgoing(t *testing.T) {
+	// Outgoing edge: path should use →[CALLS]→ (left calls right).
+	srv := newTestServer(t)
+	authID := srv.graph.MakeNodeID("auth.go", "AuthService")
+	tokID := srv.graph.MakeNodeID("auth.go", "TokenValidator")
+	srv.graph.AddNode(&graph.Node{ID: authID, Name: "AuthService", Type: graph.NodeFunction, File: "auth.go", Line: 1})
+	srv.graph.AddNode(&graph.Node{ID: tokID, Name: "TokenValidator", Type: graph.NodeFunction, File: "auth.go", Line: 50})
+	srv.graph.AddEdge(&graph.Edge{From: authID, To: tokID, Type: graph.EdgeCalls})
+
+	bfsResult := srv.graphBFS([]string{string(authID)}, 2)
+	pathStr, hops := srv.buildGraphPath(string(tokID), bfsResult)
+
+	if hops != 1 {
+		t.Fatalf("expected 1 hop, got %d", hops)
+	}
+	// AuthService calls TokenValidator — outgoing → arrow points right.
+	want := "AuthService →[CALLS]→ TokenValidator"
+	if pathStr != want {
+		t.Errorf("outgoing path: got %q, want %q", pathStr, want)
+	}
+}
+
+func TestBuildGraphPath_DirectedArrow_Incoming(t *testing.T) {
+	// Incoming edge (Caller→Seed): path should use ←[CALLS]- (right calls left).
+	srv := newTestServer(t)
+	seedID := srv.graph.MakeNodeID("auth.go", "AuthService")
+	callerID := srv.graph.MakeNodeID("api.go", "APIHandler")
+	srv.graph.AddNode(&graph.Node{ID: seedID, Name: "AuthService", Type: graph.NodeFunction, File: "auth.go", Line: 1})
+	srv.graph.AddNode(&graph.Node{ID: callerID, Name: "APIHandler", Type: graph.NodeFunction, File: "api.go", Line: 1})
+	// APIHandler calls AuthService (incoming from AuthService's perspective).
+	srv.graph.AddEdge(&graph.Edge{From: callerID, To: seedID, Type: graph.EdgeCalls})
+
+	bfsResult := srv.graphBFS([]string{string(seedID)}, 1)
+	pathStr, hops := srv.buildGraphPath(string(callerID), bfsResult)
+
+	if hops != 1 {
+		t.Fatalf("expected 1 hop, got %d", hops)
+	}
+	// APIHandler calls AuthService — memory at APIHandler, query matched AuthService.
+	// Display: AuthService ←[CALLS]- APIHandler (APIHandler calls AuthService).
+	want := "AuthService ←[CALLS]- APIHandler"
+	if pathStr != want {
+		t.Errorf("incoming path: got %q, want %q", pathStr, want)
+	}
+}
+
+func TestBuildGraphPath_Mixed_Direction(t *testing.T) {
+	// Two-hop mixed: Seed →[CALLS]→ Mid ←[CALLS]- Anchor
+	// Seed calls Mid (outgoing), Anchor calls Mid (incoming to Mid).
+	srv := newTestServer(t)
+	seedID := srv.graph.MakeNodeID("svc.go", "Service")
+	midID := srv.graph.MakeNodeID("core.go", "Core")
+	anchorID := srv.graph.MakeNodeID("util.go", "Util")
+	for _, n := range []*graph.Node{
+		{ID: seedID, Name: "Service", Type: graph.NodeFunction, File: "svc.go", Line: 1},
+		{ID: midID, Name: "Core", Type: graph.NodeFunction, File: "core.go", Line: 1},
+		{ID: anchorID, Name: "Util", Type: graph.NodeFunction, File: "util.go", Line: 1},
+	} {
+		srv.graph.AddNode(n)
+	}
+	srv.graph.AddEdge(&graph.Edge{From: seedID, To: midID, Type: graph.EdgeCalls})   // outgoing
+	srv.graph.AddEdge(&graph.Edge{From: anchorID, To: midID, Type: graph.EdgeCalls}) // incoming to Mid
+
+	bfsResult := srv.graphBFS([]string{string(seedID)}, 2)
+	pathStr, hops := srv.buildGraphPath(string(anchorID), bfsResult)
+
+	if hops != 2 {
+		t.Fatalf("expected 2 hops, got %d (path: %q)", hops, pathStr)
+	}
+	want := "Service →[CALLS]→ Core ←[CALLS]- Util"
+	if pathStr != want {
+		t.Errorf("mixed path: got %q, want %q", pathStr, want)
+	}
+}
+
+func TestGetMemoryAnchorNodeIDsInSet_SingleAnchorInSet(t *testing.T) {
+	srv := newTestServer(t)
+
+	nodeID := string(srv.graph.MakeNodeID("auth.go", "AuthService"))
+	memID, _ := srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "test memory", AgentID: "a1", Source: store.SourceManual,
+	}, []string{nodeID})
+
+	nodeSet := map[string]bool{nodeID: true}
+	result, err := srv.store.GetMemoryAnchorNodeIDsInSet([]string{memID}, nodeSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result[memID] != nodeID {
+		t.Errorf("expected anchor %q, got %q", nodeID, result[memID])
+	}
+}
+
+func TestGetMemoryAnchorNodeIDsInSet_MultiAnchorPicksInSet(t *testing.T) {
+	// Memory with two anchors: first by created_at is NOT in nodeSet.
+	// GetMemoryAnchorNodeIDsInSet must return the SECOND anchor (the one in nodeSet).
+	// This is the multi-anchor bug fix.
+	srv := newTestServer(t)
+
+	firstNodeID := string(srv.graph.MakeNodeID("old.go", "OldNode"))
+	secondNodeID := string(srv.graph.MakeNodeID("bfs.go", "BFSNode"))
+
+	memID, err := srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "multi-anchor memory", AgentID: "a1", Source: store.SourceManual,
+	}, []string{firstNodeID, secondNodeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// nodeSet only contains the SECOND anchor (as if BFS discovered secondNodeID but not firstNodeID).
+	nodeSet := map[string]bool{secondNodeID: true}
+	result, err := srv.store.GetMemoryAnchorNodeIDsInSet([]string{memID}, nodeSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Must return secondNodeID, not firstNodeID.
+	if got := result[memID]; got != secondNodeID {
+		t.Errorf("multi-anchor: expected BFS-discovered anchor %q, got %q (old GetMemoryAnchorNodeIDs bug)", secondNodeID, got)
+	}
+}
+
+func TestGetMemoryAnchorNodeIDsInSet_NoAnchorInSet(t *testing.T) {
+	// None of the memory's anchors are in nodeSet — result should be empty.
+	srv := newTestServer(t)
+
+	nodeID := string(srv.graph.MakeNodeID("x.go", "NotInBFS"))
+	memID, _ := srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "orphan anchor memory", AgentID: "a1", Source: store.SourceManual,
+	}, []string{nodeID})
+
+	nodeSet := map[string]bool{"totally::different::node": true}
+	result, err := srv.store.GetMemoryAnchorNodeIDsInSet([]string{memID}, nodeSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := result[memID]; found {
+		t.Error("expected no result when anchor is not in nodeSet")
+	}
+}
+
+func TestGetMemoryAnchorNodeIDsInSet_EmptyInputs(t *testing.T) {
+	srv := newTestServer(t)
+	r1, err := srv.store.GetMemoryAnchorNodeIDsInSet(nil, map[string]bool{"x": true})
+	if err != nil || r1 != nil {
+		t.Errorf("nil memIDs: expected (nil, nil), got (%v, %v)", r1, err)
+	}
+	r2, err := srv.store.GetMemoryAnchorNodeIDsInSet([]string{"x"}, nil)
+	if err != nil || r2 != nil {
+		t.Errorf("nil nodeSet: expected (nil, nil), got (%v, %v)", r2, err)
+	}
+}
