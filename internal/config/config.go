@@ -179,11 +179,14 @@ func (c ContentSafetyConfig) ContentSafetyEnabled() bool {
 }
 
 // ContentSafetyMode returns the configured scanner mode, defaulting to "warn".
+// Only "warn", "truncate", and "reject" are valid. Invalid values fall back to "warn".
 func (c ContentSafetyConfig) ContentSafetyMode() string {
-	if c.Mode == "" {
+	switch c.Mode {
+	case "warn", "truncate", "reject":
+		return c.Mode
+	default:
 		return "warn"
 	}
-	return c.Mode
 }
 
 // ConstitutionConfig holds project-wide principles that are injected into agent

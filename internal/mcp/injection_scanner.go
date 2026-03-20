@@ -173,7 +173,7 @@ func (s *InjectionScanner) compilePatterns() {
 			"high",
 		},
 		{
-			`(?i)^#{1,3}\s*(system|instruction|response|assistant)\s*$`,
+			`(?im)^#{1,3}\s*(system|instruction|response|assistant)\s*$`,
 			CategoryDelimiterInjection,
 			"markdown_role_header",
 			"medium",
@@ -310,6 +310,16 @@ func (s *Server) scanContent(fieldName, text string) (*scanContentResult, error)
 		)
 	case ScanModeTruncate:
 		sanitized := s.injectionScanner.StripMatches(text)
+		// Guard: if stripping produced empty/whitespace-only content, fall back
+		// to warn behavior. Storing empty content would corrupt the data store
+		// (e.g., empty decision in remember(), empty note in annotate_node()).
+		if strings.TrimSpace(sanitized) == "" {
+			return &scanContentResult{
+				matches:   matches,
+				sanitized: text, // keep original — warn only
+				warning:   warning,
+			}, nil
+		}
 		return &scanContentResult{
 			matches:   matches,
 			sanitized: sanitized,
