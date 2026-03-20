@@ -204,6 +204,11 @@ type Server struct {
 	// Used by coreTierTools/standardTierTools for discover_tools status labels.
 	repoScale graph.Scale
 
+	// OF-S5: per-session loop guard. Tracks fingerprints of the last 20 calls
+	// per session. Warns at 3 identical calls, trips circuit breaker at 5.
+	// Resets on every file-change event.
+	lg *loopGuard
+
 	// Phase 6: component health tracker for prepare_context pipeline.
 	// Components that panic or timeout ≥3 times in a session are auto-disabled.
 	// Per-agent scoped — concurrent agents don't interfere.
@@ -292,9 +297,12 @@ func (s *Server) registerSynapseSession(mcpSessionID, synapseSessionID, agentID 
 // Should be called when a connection closes (daemon) or end_session fires.
 // Safe to call with an empty or unknown session ID.
 func (s *Server) ClearSynapseSession(mcpSessionID string) {
+	key := synapseSessionKey(mcpSessionID)
 	s.synapseSessionsMu.Lock()
-	delete(s.synapsesSessions, synapseSessionKey(mcpSessionID))
+	delete(s.synapsesSessions, key)
 	s.synapseSessionsMu.Unlock()
+	// OF-S5: release loop-guard memory for the closed session.
+	s.lg.clearSession(key)
 }
 
 // ctxCallEntry tracks how many times an agent requested context for an entity.
@@ -338,6 +346,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		logSessions:      true,
 		cacheWebSearches: true,
 		startTime:        time.Now(),
+		lg:               newLoopGuard(),
 	}
 
 	// Load app-level settings from ~/.synapses/app_settings.json.
@@ -910,9 +919,12 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 		s.toolHandlersMu.Unlock()
 		return
 	}
-	s.mcp.AddTool(t, h)
+	// OF-S5: wrap every handler with the loop guard so that agent loops are
+	// detected and rejected uniformly — no per-handler wiring needed.
+	guarded := s.lg.wrap(h)
+	s.mcp.AddTool(t, guarded)
 	s.toolHandlersMu.Lock()
-	s.toolHandlers[t.Name] = h
+	s.toolHandlers[t.Name] = guarded
 	s.toolHandlersMu.Unlock()
 }
 
