@@ -140,7 +140,8 @@ func (pc *PluginChecker) loadAllowlist() {
 	}
 }
 
-// saveAllowlist writes the current approved set to disk.
+// saveAllowlist atomically writes the current approved set to disk.
+// Uses write-to-temp-then-rename to prevent corruption on crash.
 func (pc *PluginChecker) saveAllowlist() error {
 	if err := os.MkdirAll(pc.synapsesDir, 0o700); err != nil {
 		return fmt.Errorf("create synapses dir: %w", err)
@@ -151,9 +152,18 @@ func (pc *PluginChecker) saveAllowlist() error {
 	if err != nil {
 		return fmt.Errorf("marshal allowlist: %w", err)
 	}
+	data = append(data, '\n')
 
 	path := filepath.Join(pc.synapsesDir, allowlistFileName)
-	return os.WriteFile(path, data, 0o600)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write temp allowlist: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp) // clean up on failure
+		return fmt.Errorf("rename allowlist: %w", err)
+	}
+	return nil
 }
 
 // commandHash returns the SHA-256 hex digest of a command string.

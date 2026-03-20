@@ -178,6 +178,7 @@ func cmdStartDirect(args []string) error {
 		sHome, homeErr := synapsesHome()
 		if homeErr != nil {
 			fmt.Fprintf(os.Stderr, "WARNING: cannot determine synapses home: %v (plugins disabled)\n", homeErr)
+			cfg.Plugins = nil // fail-closed: cannot verify plugins → disable them
 		} else {
 			pluginCheck = parser.NewPluginChecker(sHome)
 		}
@@ -494,6 +495,7 @@ func cmdIndex(args []string) error {
 		sHome, homeErr := synapsesHome()
 		if homeErr != nil {
 			fmt.Fprintf(os.Stderr, "WARNING: cannot determine synapses home: %v (plugins disabled)\n", homeErr)
+			cfg.Plugins = nil // fail-closed: cannot verify plugins → disable them
 		} else {
 			pluginCheck2 = parser.NewPluginChecker(sHome)
 		}

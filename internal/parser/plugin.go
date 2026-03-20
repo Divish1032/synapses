@@ -94,7 +94,7 @@ func (p *PluginParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 	ctx, cancel := context.WithTimeout(context.Background(), pluginTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, p.command, p.args...) // #nosec G204 — guarded by PluginChecker allowlist
+	cmd := exec.CommandContext(ctx, p.command, p.args...) //nolint:gosec // command is guarded by PluginChecker allowlist at registration time
 	// stdin: file path on first line, then raw file content.
 	cmd.Stdin = bytes.NewReader(append([]byte(filePath+"\n"), src...))
 	cmd.Stderr = os.Stderr // plugin warnings/errors flow to synapses stderr
