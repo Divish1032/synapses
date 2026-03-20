@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
@@ -452,5 +453,153 @@ func TestHandleRecall_BrowseMode_Unchanged(t *testing.T) {
 	mode, _ := resp["mode"].(string)
 	if mode != "browse" {
 		t.Errorf("empty query should be browse mode, got %q", mode)
+	}
+}
+
+// ── Browse-mode decay filter (Fix: browse mode must honour DecayVisibilityThreshold) ─────
+
+func TestHandleRecall_BrowseMode_HidesDecayedMemory(t *testing.T) {
+	// Regression: before the fix, browse mode (empty query) bypassed the decay
+	// threshold and returned all non-expired, non-stale memories regardless of age.
+	// After the fix, memories whose DecayedImportanceScore < DecayVisibilityThreshold
+	// are excluded from browse results (same as search mode).
+	srv := newTestServer(t)
+
+	// Insert a memory with minimum-importance weight and a very old last_accessed_at,
+	// engineered so DecayedImportanceScore < DecayVisibilityThreshold.
+	// weight=0.05 (threshold floor) × recencyDecay(3200h, 168h) = 0.05 × 0.05 ≈ 0.0025 < 0.05.
+	oldTime := time.Now().Add(-3200 * time.Hour).UTC().Format(time.RFC3339)
+	_, err := srv.store.InsertMemory(store.Memory{
+		Tier:           store.TierProject,
+		Content:        "very old decayed memory that should not appear in browse",
+		AgentID:        "decay-browse-agent",
+		Source:         store.SourceManual,
+		Importance:     "0.05",
+		LastAccessedAt: oldTime,
+		CreatedAt:      oldTime,
+	})
+	if err != nil {
+		t.Fatalf("insert decayed memory: %v", err)
+	}
+
+	// Insert a fresh pinned memory — must always appear.
+	_, err = srv.store.InsertMemory(store.Memory{
+		Tier:       store.TierProject,
+		Content:    "pinned memory that must always appear in browse regardless of age",
+		AgentID:    "decay-browse-agent",
+		Source:     store.SourceManual,
+		Importance: store.ImportancePinned,
+	})
+	if err != nil {
+		t.Fatalf("insert pinned memory: %v", err)
+	}
+
+	ctx := context.Background()
+	res, recallErr := srv.handleRecall(ctx, callTool(map[string]any{
+		"agent_id": "decay-browse-agent",
+	}))
+	if recallErr != nil {
+		t.Fatal(recallErr)
+	}
+
+	var text string
+	for _, c := range res.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			text = tc.Text
+		}
+	}
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	mode, _ := resp["mode"].(string)
+	if mode != "browse" {
+		t.Errorf("expected browse mode, got %q", mode)
+	}
+
+	memories, _ := resp["memories"].([]any)
+
+	// The decayed memory must NOT appear.
+	for _, raw := range memories {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, _ := m["content"].(string)
+		if strings.Contains(content, "very old decayed") {
+			t.Error("decayed memory appeared in browse results — decay threshold not applied in browse mode")
+		}
+	}
+
+	// The pinned memory MUST appear.
+	foundPinned := false
+	for _, raw := range memories {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, _ := m["content"].(string)
+		if strings.Contains(content, "pinned memory that must always appear") {
+			foundPinned = true
+		}
+	}
+	if !foundPinned {
+		t.Error("pinned memory was hidden from browse results — pinned memories must always be visible")
+	}
+}
+
+func TestHandleRecall_BrowseMode_IncludeStale_BypassesDecay(t *testing.T) {
+	// include_stale=true is an explicit override — even decayed memories should appear.
+	srv := newTestServer(t)
+
+	oldTime := time.Now().Add(-3200 * time.Hour).UTC().Format(time.RFC3339)
+	_, err := srv.store.InsertMemory(store.Memory{
+		Tier:           store.TierProject,
+		Content:        "old memory visible when include_stale is true",
+		AgentID:        "stale-browse-agent",
+		Source:         store.SourceManual,
+		Importance:     "0.05",
+		LastAccessedAt: oldTime,
+		CreatedAt:      oldTime,
+	})
+	if err != nil {
+		t.Fatalf("insert old memory: %v", err)
+	}
+
+	ctx := context.Background()
+	res, recallErr := srv.handleRecall(ctx, callTool(map[string]any{
+		"agent_id":      "stale-browse-agent",
+		"include_stale": true,
+	}))
+	if recallErr != nil {
+		t.Fatal(recallErr)
+	}
+
+	var text string
+	for _, c := range res.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			text = tc.Text
+		}
+	}
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	memories, _ := resp["memories"].([]any)
+	found := false
+	for _, raw := range memories {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, _ := m["content"].(string)
+		if strings.Contains(content, "old memory visible when include_stale") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("include_stale=true should bypass decay filter and show old memory")
 	}
 }

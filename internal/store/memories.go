@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -900,6 +901,22 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 	}
 	if m.Importance == "" {
 		m.Importance = "1.0"
+	} else if m.Importance != ImportancePinned {
+		// Validate numeric importance and clamp to a safe minimum.
+		// Values below the visibility threshold (e.g. "0.0", "0.01") would make the
+		// memory permanently invisible on recall immediately after creation — almost
+		// certainly not what the caller intended. We clamp rather than reject to stay
+		// non-breaking.
+		//
+		// Clamp floor is 2× DecayVisibilityThreshold so that a freshly-created memory
+		// always scores comfortably above the threshold (not right at the boundary,
+		// where floating-point rounding of the recency term could dip it below).
+		const minImportanceWeight = DecayVisibilityThreshold * 2 // 0.10
+		if w, err := strconv.ParseFloat(m.Importance, 64); err != nil || w < 0 {
+			m.Importance = "1.0" // invalid/negative — default to normal decay
+		} else if w < minImportanceWeight {
+			m.Importance = strconv.FormatFloat(minImportanceWeight, 'f', -1, 64)
+		}
 	}
 
 	content := strings.TrimSpace(m.Content)
