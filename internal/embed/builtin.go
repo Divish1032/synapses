@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	hugot "github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
@@ -164,5 +163,3 @@ func (b *BuiltinEmbedder) Close() error {
 	return nil
 }
 
-// lastInitLog is used to throttle init failure logging to once per 5 minutes.
-var lastInitLog time.Time
