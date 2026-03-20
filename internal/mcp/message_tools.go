@@ -171,7 +171,7 @@ func (s *Server) handleGetMessages(
 		}
 		if len(notFound) > 0 {
 			crossProjectMsgs = append(crossProjectMsgs, map[string]interface{}{
-				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.projectRegistry.ListProjects(), ", ")),
+				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.allowedProjectNames(), ", ")),
 			})
 		}
 	}

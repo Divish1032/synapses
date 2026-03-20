@@ -154,7 +154,7 @@ func (s *Server) handleGetAgents(
 		}
 		if len(notFound) > 0 {
 			crossProjectAgents = append(crossProjectAgents, map[string]interface{}{
-				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.projectRegistry.ListProjects(), ", ")),
+				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.allowedProjectNames(), ", ")),
 			})
 		}
 	}
@@ -254,7 +254,7 @@ func (s *Server) handleGetEvents(
 		}
 		if len(notFound) > 0 {
 			crossProjectEvents = append(crossProjectEvents, map[string]interface{}{
-				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.projectRegistry.ListProjects(), ", ")),
+				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.allowedProjectNames(), ", ")),
 			})
 		}
 	}
