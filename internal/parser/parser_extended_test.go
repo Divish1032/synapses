@@ -371,7 +371,7 @@ func TestWalker_IncrementalReindex_RemovedFile(t *testing.T) {
 func TestWalker_RegisterPlugin_EmptyCommand(t *testing.T) {
 	w := parser.NewWalker()
 	// Empty command → plugin registered but Parse will return error.
-	w.RegisterPlugin([]string{".graphql"}, "")
+	w.RegisterPlugin([]string{".graphql"}, "", nil)
 }
 
 func TestWalker_RegisterPlugin_ExtensionOverride(t *testing.T) {
@@ -384,7 +384,7 @@ func TestWalker_RegisterPlugin_ExtensionOverride(t *testing.T) {
 	w := parser.NewWalker()
 	// Register a plugin with empty command — ParseFile will call it and get an error,
 	// but the extension is properly registered.
-	w.RegisterPlugin([]string{".graphql"}, "")
+	w.RegisterPlugin([]string{".graphql"}, "", nil)
 
 	g := graph.New("testrepo")
 	// ParseFile should call the plugin and get an error (empty command) — must not panic.

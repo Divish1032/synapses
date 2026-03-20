@@ -175,7 +175,17 @@ func (w *Walker) Register(p LanguageParser) {
 // command is split on whitespace into binary + args (e.g. "node parsers/graphql.js").
 // If two parsers claim the same extension the last one registered wins, so
 // plugins registered here override built-in parsers for their extensions.
-func (w *Walker) RegisterPlugin(extensions []string, command string) {
+//
+// If checker is non-nil, the command is validated against the per-machine
+// allowlist before registration. Unapproved plugins are skipped with a
+// stderr warning.
+func (w *Walker) RegisterPlugin(extensions []string, command string, checker *PluginChecker) {
+	if checker != nil {
+		if err := checker.IsAllowed(command); err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: skipping plugin for %v: %v\n", extensions, err)
+			return
+		}
+	}
 	w.Register(newPluginParser(extensions, command))
 }
 
