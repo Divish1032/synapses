@@ -1,22 +1,93 @@
 {
   "version": "1",
   "mode": "full",
+
   "rules": [
     {
       "id": "no-db-in-handler",
       "description": "Handlers must not call database functions directly — use a service layer",
       "severity": "warning",
+      "rule_type": "structural",
       "forbidden_edge": {
         "from_file_pattern": "*/handlers/*",
         "to_file_pattern": "*/db/*",
-        "edge_type": "CALLS"
+        "edge_type": "CALLS",
+        "from_type": "",
+        "to_type": "",
+        "to_name_pattern": ""
+      }
+    },
+    {
+      "id": "no-logging-secrets",
+      "description": "Functions handling secrets must not call logging functions",
+      "severity": "error",
+      "rule_type": "agent",
+      "forbidden_edge": {
+        "from_file_pattern": "*/secrets/*",
+        "to_name_pattern": "Log"
       }
     }
   ],
+
+  "edge_weights": {
+    "CALLS": 1.0,
+    "IMPLEMENTS": 0.8,
+    "IMPORTS": 0.3
+  },
+
   "context_carve": {
     "default_depth": 2,
-    "token_budget": 4000
+    "decay_factor": 0.6,
+    "token_budget": 4000,
+    "min_relevance": 0.05,
+    "exclude_test_files": true,
+    "direction_boost": 0.2
   },
+
+  "linked": [
+    "../shared-types"
+  ],
+
+  "embedding_endpoint": "",
+  "embeddings": "builtin",
+
+  "api_entries": [
+    {
+      "name_pattern": "Handle",
+      "file_pattern": "*/routes/*",
+      "node_type": "function"
+    }
+  ],
+
+  "use_go_types": false,
+  "use_ts_types": false,
+
+  "metrics_days": 90,
+  "coverage_profile": "",
+  "pprof_profile": "",
+
+  "data_flow_sources": [
+    {
+      "name_pattern": "ParseInput",
+      "sig_pattern": "",
+      "file_pattern": "",
+      "node_type": "function",
+      "role": "source",
+      "label": "custom_input_parser"
+    }
+  ],
+  "data_flow_sinks": [
+    {
+      "name_pattern": "AuditLog",
+      "sig_pattern": "",
+      "file_pattern": "",
+      "node_type": "function",
+      "role": "sink",
+      "label": "audit_log_sink"
+    }
+  ],
+  "data_flow_max_hops": 4,
+
   "federation": [
     {
       "path": "../sibling-project",
@@ -26,13 +97,50 @@
   "federation_acl": {
     "allow_read_from": ["sibling"]
   },
+
+  "constitution": {
+    "principles": [
+      "No CGo — pure Go only",
+      "All handlers must be fail-silent"
+    ],
+    "inject_in_context": true,
+    "inject_in_session_init": true
+  },
+
   "brain": {
     "enabled": false,
     "ollama_url": "http://localhost:11434",
-    "model": "qwen3.5:2b"
+    "model": "qwen3.5:2b",
+    "fast_model": "qwen3.5:2b",
+    "model_ingest": "",
+    "model_enrich": "",
+    "model_orchestrate": "",
+    "db_path": "",
+    "ingest": false,
+    "enrich": false,
+    "context_builder": false
   },
+
+  "pulse": {
+    "url": "",
+    "timeout_sec": 2
+  },
+
   "session": {
     "auto_end_threshold_calls": 80,
-    "reconnect_window_secs": 300
+    "reconnect_window_secs": 300,
+    "stale_threshold_mins": 30,
+    "hibernate_window_secs": 14400
+  },
+
+  "rate_limits": {
+    "write_ops_per_minute": 30,
+    "expensive_reads_per_minute": 20,
+    "cross_project_per_minute": 60
+  },
+
+  "content_safety": {
+    "enabled": true,
+    "mode": "warn"
   }
 }
