@@ -391,6 +391,18 @@ func (s *Server) handleRecall(
 		})
 	}
 
+	// Emit knowledge_accessed lifecycle event when results are found.
+	if len(memories) > 0 || len(episodes) > 0 {
+		agentID := stringArg(req, "agent_id")
+		mCount, eCount := len(memories), len(episodes)
+		s.goBackground(func() {
+			if err := s.store.AppendEvent("knowledge_accessed", agentID,
+				fmt.Sprintf(`{"query":%q,"memories":%d,"episodes":%d}`, query, mCount, eCount)); err != nil {
+				logutil.Warn("synapses: recall: append knowledge_accessed event: %v\n", err)
+			}
+		})
+	}
+
 	// Cross-project episode search when projects= is provided.
 	var crossProjectEpisodes []map[string]interface{}
 	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.federationResolver != nil {
