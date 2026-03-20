@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,6 +21,55 @@ func RecencyDecayScore(createdAt time.Time, halfLifeHours float64) float64 {
 	}
 	return 1.0 / (1.0 + ageHours/halfLifeHours)
 }
+
+// DecayedImportanceScore combines memory importance weight with recency decay.
+//
+// Rules:
+//   - ImportancePinned ("pinned"): returns 1.0. Pinned memories are exempt from
+//     decay and always visible in recall results. Use for security configs,
+//     compliance decisions, architectural invariants.
+//   - Numeric string (e.g. "0.8"): parsed as the importance weight, then
+//     multiplied by RecencyDecayScore(lastAccessedAt, halfLifeHours).
+//   - Invalid or empty string: treated as weight 1.0 (pure recency decay).
+//
+// halfLifeHours controls how fast scores decay. 0 = default 168h (1 week).
+// Result is in (0, 1] for pinned=false, exactly 1.0 for pinned.
+func DecayedImportanceScore(m Memory, halfLifeHours float64) float64 {
+	if m.Importance == ImportancePinned {
+		return 1.0
+	}
+
+	weight := 1.0
+	if m.Importance != "" {
+		if w, err := strconv.ParseFloat(m.Importance, 64); err == nil && w >= 0 {
+			weight = w
+		}
+	}
+
+	// Use last_accessed_at for the recency signal — memories that are actively
+	// used (recalled, touched) maintain their score longer than memories that
+	// were written once and never accessed. This rewards useful knowledge.
+	accessedAt, err := time.Parse(time.RFC3339, m.LastAccessedAt)
+	if err != nil || accessedAt.IsZero() {
+		// Fallback: parse created_at. If both fail, treat as "just created".
+		accessedAt, err = time.Parse(time.RFC3339, m.CreatedAt)
+		if err != nil || accessedAt.IsZero() {
+			accessedAt = time.Now().UTC()
+		}
+	}
+
+	return weight * RecencyDecayScore(accessedAt, halfLifeHours)
+}
+
+// DecayVisibilityThreshold is the minimum DecayedImportanceScore for a memory
+// to be included in recall() results. Memories scoring below this threshold are
+// demoted (excluded from results) but never deleted — they remain in the DB for
+// audit queries (include_stale=true) and as_of temporal lookups.
+//
+// At 0.05, a default-importance memory (weight=1.0, halfLife=168h) decays below
+// threshold after approximately 19 weeks (~4.5 months) without being accessed.
+// Pinned memories always score 1.0 and are never demoted.
+const DecayVisibilityThreshold = 0.05
 
 // RecentMemories returns the N most recent non-expired, non-stale memories
 // regardless of text match. This is the data source for the temporal channel
@@ -39,7 +89,7 @@ func (s *Store) RecentMemories(limit, sinceDays int, includeStale bool) ([]Memor
 	nowStr := now.Format(time.RFC3339)
 
 	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
-	             created_at, expires_at, last_accessed_at, source
+	             created_at, expires_at, last_accessed_at, source, importance
 	      FROM memories
 	      WHERE created_at >= ?
 	        AND expires_at > ?`
@@ -137,7 +187,7 @@ func (s *Store) GetMemoriesByAnchorNodes(nodeIDs []string, limit int, includeSta
 		args = append(args, now) // for expires_at filter
 
 		q := `SELECT DISTINCT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
-		             m.created_at, m.expires_at, m.last_accessed_at, m.source
+		             m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance
 		      FROM memories m
 		      JOIN memory_anchors ma ON m.id = ma.memory_id
 		      WHERE ma.node_id IN (` + strings.Join(placeholders, ",") + `)

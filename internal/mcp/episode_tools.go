@@ -164,6 +164,13 @@ func (s *Server) handleRemember(
 	// Collect written memory IDs for embedding.
 	var memoryIDs []string
 
+	// memory_importance: forwarded from caller, default "1.0".
+	// "pinned" exempts from decay; float strings set the weight multiplier.
+	memImportance := stringArg(req, "memory_importance")
+	if memImportance == "" {
+		memImportance = "1.0"
+	}
+
 	// Entity-tier: one memory per affected node (failures & patterns only).
 	if episodeType == "failure" || episodeType == "pattern" {
 		var affectedNodes []string
@@ -172,13 +179,14 @@ func (s *Server) handleRemember(
 		}
 		for _, nodeID := range affectedNodes {
 			mid, merr := s.store.InsertMemoryWithAnchors(store.Memory{
-				Tier:     store.TierEntity,
-				Content:  memContent,
-				EntityID: nodeID,
-				AgentID:  agentID,
-				TaskID:   e.ProjectID,
-				Source:   store.SourceManual,
-				Tags:     memTags,
+				Tier:       store.TierEntity,
+				Content:    memContent,
+				EntityID:   nodeID,
+				AgentID:    agentID,
+				TaskID:     e.ProjectID,
+				Source:     store.SourceManual,
+				Tags:       memTags,
+				Importance: memImportance,
 			}, anchorNodes)
 			if merr == nil && mid != "" {
 				memoryIDs = append(memoryIDs, mid)
@@ -188,12 +196,13 @@ func (s *Server) handleRemember(
 
 	// Project-tier: always write the episode as project knowledge.
 	mid, merr := s.store.InsertMemoryWithAnchors(store.Memory{
-		Tier:    store.TierProject,
-		Content: memContent,
-		AgentID: agentID,
-		TaskID:  e.ProjectID,
-		Source:  store.SourceManual,
-		Tags:    memTags,
+		Tier:       store.TierProject,
+		Content:    memContent,
+		AgentID:    agentID,
+		TaskID:     e.ProjectID,
+		Source:     store.SourceManual,
+		Tags:       memTags,
+		Importance: memImportance,
 	}, anchorNodes)
 	if merr == nil && mid != "" {
 		memoryIDs = append(memoryIDs, mid)

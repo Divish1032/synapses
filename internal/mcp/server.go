@@ -2318,6 +2318,14 @@ func (s *Server) registerTools() {
 					"Call without this param first to receive an approval token, "+
 					"then re-call with the token after user confirmation. Expires in 5 minutes."),
 			),
+			mcp.WithString("memory_importance",
+				mcp.Description("Importance level for the knowledge memory written alongside this episode. "+
+					"Use 'pinned' for critical long-lived knowledge that must never be demoted by decay scoring "+
+					"(security configs, compliance decisions, architectural invariants). "+
+					"Use a float string (e.g. '0.8') for high-importance but non-critical knowledge. "+
+					"Default '1.0' — decays naturally by time-since-last-access. "+
+					"Pinned memories always appear in recall() regardless of age."),
+			),
 		),
 		s.handleRemember,
 	)
