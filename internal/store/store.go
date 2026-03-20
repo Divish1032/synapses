@@ -418,6 +418,36 @@ CREATE INDEX IF NOT EXISTS idx_cross_deps_file     ON cross_project_deps(to_proj
 // call sites, file hashes) and one for universal knowledge (memories, episodes,
 // sessions, events, messages, tasks, annotations, rules, gaps). Knowledge-mode
 // projects open only the knowledgeDB; code-mode projects open both.
+//
+// # Cross-DB Consistency Model
+//
+// graph.db and knowledge.db have NO cross-database transactional guarantee.
+// SQLite does not support transactions spanning two separate database files, and
+// Synapses deliberately avoids ATTACH DATABASE to prevent WAL-locking
+// interactions between the two journals.
+//
+// Cross-references that span the two databases:
+//
+//   - annotations.node_id    → graphDB nodes.id
+//   - memory_anchors.node_id → graphDB nodes.id  (triggers staleness tracking on node change)
+//
+// These references may briefly point to non-existent node IDs during a reindex:
+// the file watcher deletes stale graph nodes and re-inserts them as parsing
+// completes, while knowledge records referencing those IDs persist in knowledgeDB.
+// This is an intentional eventual-consistency window, not a data-loss event.
+//
+// The fail-open design makes this safe:
+//
+//   - Dangling anchor or annotation references are silently skipped when the
+//     referenced node is absent — callers receive fewer results, not an error.
+//   - PruneStaleData (runs daily) reconciles orphaned annotations by
+//     cross-checking knowledgeDB against the current graphDB node set.
+//   - The staleness-tracking pipeline re-links anchors when the underlying
+//     node is re-added by the watcher after reindex completes.
+//
+// Future improvement: a startup reconciliation pass in Open() that checks all
+// anchor/annotation node_ids against graphDB and flags orphans immediately,
+// rather than waiting for the next daily prune cycle.
 type Store struct {
 	graphDB     *sql.DB // code-domain: nodes, edges, meta, file_hashes, call_sites, node_embeddings
 	knowledgeDB *sql.DB // universal: memories, episodes, sessions, events, tasks, agents, ...
@@ -1350,8 +1380,14 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	s.knowledgeDB.Exec(`DELETE FROM proposal_votes WHERE proposal_id NOT IN (SELECT id FROM proposals)`)
 
 	// Stale annotations for nodes that no longer exist — actively misleading.
-	// Cross-DB: annotations are in knowledgeDB, nodes are in graphDB.
-	// Collect existing node IDs from graphDB, then delete annotations referencing absent nodes.
+	// Cross-DB reconciliation: annotations live in knowledgeDB, nodes live in graphDB.
+	// There is no cross-database transaction guaranteeing consistency between them
+	// (see the Store type comment for the full eventual-consistency model).
+	// This is the daily reconciliation pass: collect current node IDs from graphDB,
+	// then remove annotations in knowledgeDB that reference absent nodes. The read
+	// and delete are not atomic — a node added between the two steps may be deleted,
+	// but will be re-annotated on next use. This narrow race window is acceptable for
+	// a background pruning operation.
 	if s.graphDB != nil {
 		nodeIDs := make(map[string]struct{})
 		if rows, err := s.graphDB.Query(`SELECT id FROM nodes`); err == nil {
