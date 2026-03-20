@@ -312,6 +312,10 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 // search: given the top-K (id, score) pairs from the scan pass, it fetches
 // the full memory content, tier, and entity_id in a single query.
 // Results are returned in the same descending-score order as winners.
+//
+// Re-applies stale/expired filters to close the consistency gap between
+// passes: a memory valid during Pass 1 could be marked stale or expire
+// before Pass 2 executes.
 func (s *Store) fetchMemorySearchResults(winners []scoredID) ([]MemorySearchResult, error) {
 	// Build id → score+position map for reassembly.
 	type posScore struct {
@@ -320,16 +324,19 @@ func (s *Store) fetchMemorySearchResults(winners []scoredID) ([]MemorySearchResu
 	}
 	lookup := make(map[string]posScore, len(winners))
 	placeholders := make([]string, len(winners))
-	args := make([]any, len(winners))
+	args := make([]any, len(winners)+1)
+	now := time.Now().UTC().Format(time.RFC3339)
+	args[0] = now
 	for i, w := range winners {
 		lookup[w.id] = posScore{pos: i, score: float64(w.score)}
 		placeholders[i] = "?"
-		args[i] = w.id
+		args[i+1] = w.id
 	}
 
 	rows, err := s.knowledgeDB.Query(
-		`SELECT id, content, tier, entity_id FROM memories WHERE id IN (`+
-			strings.Join(placeholders, ",")+`)`, args...)
+		`SELECT id, content, tier, entity_id FROM memories
+		 WHERE stale = 0 AND expires_at > ?
+		   AND id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("fetch memory search results: %w", err)
 	}
