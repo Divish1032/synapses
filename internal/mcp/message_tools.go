@@ -57,11 +57,15 @@ func (s *Server) handleSendMessage(
 	var injectionWarning string
 	if scanResult, scanErr := s.scanContent("payload", payload); scanErr != nil {
 		return mcp.NewToolResultError(scanErr.Error()), nil
-	} else {
-		payload = scanResult.sanitized
-		if scanResult.warning != "" {
-			injectionWarning = scanResult.warning
+	} else if scanResult.warning != "" {
+		injectionWarning = scanResult.warning
+		// In truncate mode, stripping regex matches from JSON can produce
+		// invalid JSON. Fall back to original content (warn behavior) if the
+		// sanitized payload is no longer valid JSON.
+		if json.Valid([]byte(scanResult.sanitized)) {
+			payload = scanResult.sanitized
 		}
+		// else: keep original payload, warning is still surfaced
 	}
 
 	// OF-E3: cross-project write approval gate for broadcast messages.
