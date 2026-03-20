@@ -284,6 +284,99 @@ func isCORSAllowedOrigin(origin string) bool {
 	return false
 }
 
+// restToolsHandler returns the HTTP handler for POST /v1/tools/{name}?project=<path>.
+// projectInit is called to lazily initialize a project that is not yet registered.
+// Extracted from cmdDaemonServe to enable HTTP-level testing.
+func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectInstance, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed, use POST"}) //nolint:errcheck
+			return
+		}
+
+		// Extract tool name — everything after "/v1/tools/".
+		toolName := strings.TrimPrefix(r.URL.Path, "/v1/tools/")
+		if toolName == "" || strings.Contains(toolName, "/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid tool path; use /v1/tools/{name}"}) //nolint:errcheck
+			return
+		}
+
+		// Resolve project.
+		projectPath := r.URL.Query().Get("project")
+		if projectPath == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "missing ?project= query parameter"}) //nolint:errcheck
+			return
+		}
+		if decoded, err := url.QueryUnescape(projectPath); err == nil {
+			projectPath = decoded
+		}
+		absPath, err := canonicalPath(projectPath)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid project path: " + err.Error()}) //nolint:errcheck
+			return
+		}
+		if err := isValidProjectPath(absPath); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid project path: " + err.Error()}) //nolint:errcheck
+			return
+		}
+
+		pi, initErr := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
+			return projectInit(absPath)
+		})
+		if initErr != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "init project: " + initErr.Error()}) //nolint:errcheck
+			return
+		}
+
+		// Parse request body as tool arguments. Empty or absent body → empty args.
+		// Cap at 1 MiB to prevent unbounded memory allocation from malformed requests.
+		// Use io.LimitReader regardless of Content-Length: handles chunked transfer
+		// encoding (Content-Length == -1) correctly without skipping the body.
+		args := make(map[string]interface{})
+		limited := io.LimitReader(r.Body, 1<<20) // 1 MiB
+		if decodeErr := json.NewDecoder(limited).Decode(&args); decodeErr != nil && decodeErr != io.EOF {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON body: " + decodeErr.Error()}) //nolint:errcheck
+			return
+		}
+
+		// Inject a per-request session ID so handlers that use SessionIDFromContext
+		// get an isolated context. Each REST call is stateless — no session is shared
+		// across calls. The session ID is "rest-N" where N is a monotonic counter.
+		sessionID := fmt.Sprintf("rest-%d", restSessionCounter.Add(1))
+		ctx := mcpsrv.WithSessionID(r.Context(), sessionID)
+
+		result, dispatchErr := pi.MCPServer.DispatchTool(ctx, toolName, args)
+		if dispatchErr != nil {
+			w.Header().Set("Content-Type", "application/json")
+			if _, ok := dispatchErr.(*mcpsrv.ErrUnknownTool); ok {
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]string{"error": dispatchErr.Error()}) //nolint:errcheck
+			} else {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": dispatchErr.Error()}) //nolint:errcheck
+			}
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result) //nolint:errcheck
+	}
+}
+
 // authMiddleware enforces bearer-token authentication for non-localhost clients.
 //
 // Localhost connections (RemoteAddr resolving to a loopback IP) are always
@@ -594,93 +687,9 @@ func cmdDaemonServe(args []string) error {
 	//              500 internal error.
 	// Note: auth (bearer token) ships in Sprint 6.2. Until then, localhost-only
 	// binding (127.0.0.1) limits exposure to local processes only.
-	mux.HandleFunc("/v1/tools/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed, use POST"}) //nolint:errcheck
-			return
-		}
-
-		// Extract tool name — everything after "/v1/tools/".
-		toolName := strings.TrimPrefix(r.URL.Path, "/v1/tools/")
-		if toolName == "" || strings.Contains(toolName, "/") {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invalid tool path; use /v1/tools/{name}"}) //nolint:errcheck
-			return
-		}
-
-		// Resolve project.
-		projectPath := r.URL.Query().Get("project")
-		if projectPath == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "missing ?project= query parameter"}) //nolint:errcheck
-			return
-		}
-		if decoded, err := url.QueryUnescape(projectPath); err == nil {
-			projectPath = decoded
-		}
-		absPath, err := canonicalPath(projectPath)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invalid project path: " + err.Error()}) //nolint:errcheck
-			return
-		}
-		if err := isValidProjectPath(absPath); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invalid project path: " + err.Error()}) //nolint:errcheck
-			return
-		}
-
-		pi, initErr := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
-			return initProjectInstance(appCtx, absPath, sharedPulse, reg)
-		})
-		if initErr != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "init project: " + initErr.Error()}) //nolint:errcheck
-			return
-		}
-
-		// Parse request body as tool arguments. Empty or absent body → empty args.
-		// Cap at 1 MiB to prevent unbounded memory allocation from malformed requests.
-		// Use io.LimitReader regardless of Content-Length: handles chunked transfer
-		// encoding (Content-Length == -1) correctly without skipping the body.
-		args := make(map[string]interface{})
-		limited := io.LimitReader(r.Body, 1<<20) // 1 MiB
-		if decodeErr := json.NewDecoder(limited).Decode(&args); decodeErr != nil && decodeErr != io.EOF {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON body: " + decodeErr.Error()}) //nolint:errcheck
-			return
-		}
-
-		// Inject a per-request session ID so handlers that use SessionIDFromContext
-		// get an isolated context. Each REST call is stateless — no session is shared
-		// across calls. The session ID is "rest-N" where N is a monotonic counter.
-		sessionID := fmt.Sprintf("rest-%d", restSessionCounter.Add(1))
-		ctx := mcpsrv.WithSessionID(r.Context(), sessionID)
-
-		result, dispatchErr := pi.MCPServer.DispatchTool(ctx, toolName, args)
-		if dispatchErr != nil {
-			w.Header().Set("Content-Type", "application/json")
-			if _, ok := dispatchErr.(*mcpsrv.ErrUnknownTool); ok {
-				w.WriteHeader(http.StatusNotFound)
-				json.NewEncoder(w).Encode(map[string]string{"error": dispatchErr.Error()}) //nolint:errcheck
-			} else {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": dispatchErr.Error()}) //nolint:errcheck
-			}
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result) //nolint:errcheck
-	})
+	mux.HandleFunc("/v1/tools/", restToolsHandler(reg, func(absPath string) (*ProjectInstance, error) {
+		return initProjectInstance(appCtx, absPath, sharedPulse, reg)
+	}))
 
 	// ── Auth token ────────────────────────────────────────────────────────────
 	// Generated on first start, persisted at ~/.synapses/auth_token.
