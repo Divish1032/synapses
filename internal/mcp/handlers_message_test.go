@@ -40,7 +40,8 @@ func TestHandleSendMessage_MissingTopic_ReturnsError(t *testing.T) {
 
 func TestHandleSendMessage_BroadcastNoToAgent(t *testing.T) {
 	s := newTestServer(t)
-	// Broadcasting: to_agent is empty → goes to all agents.
+	// Broadcasting: to_agent is empty → requires approval (OF-E3).
+	// Step 1: get approval token.
 	res, err := s.handleSendMessage(ctx, callTool(map[string]any{
 		"from_agent": "broadcaster",
 		"to_agent":   "",
@@ -48,6 +49,18 @@ func TestHandleSendMessage_BroadcastNoToAgent(t *testing.T) {
 		"payload":    `{"msg":"all hands"}`,
 	}))
 	m := mustResult(t, res, err)
+	hasKey(t, m, "approval_token")
+	token := m["approval_token"].(string)
+
+	// Step 2: re-call with approval token.
+	res, err = s.handleSendMessage(ctx, callTool(map[string]any{
+		"from_agent":     "broadcaster",
+		"to_agent":       "",
+		"topic":          "announcement",
+		"payload":        `{"msg":"all hands"}`,
+		"approval_token": token,
+	}))
+	m = mustResult(t, res, err)
 	hasKey(t, m, "message_id")
 }
 

@@ -105,12 +105,26 @@ func TestKnowledgeMode_CreatePlan(t *testing.T) {
 func TestKnowledgeMode_SendMessage(t *testing.T) {
 	srv := newKnowledgeServer(t)
 
+	// Broadcast requires approval (OF-E3). Step 1: get token.
 	res, err := srv.handleSendMessage(context.Background(), callTool(map[string]any{
 		"from_agent": "marketing-agent",
 		"topic":      "review_needed",
 		"payload":    `{"item":"Q1 copy"}`,
 	}))
 	m := mustResult(t, res, err)
+	token, ok := m["approval_token"].(string)
+	if !ok || token == "" {
+		t.Fatal("expected approval_token for broadcast send_message")
+	}
+
+	// Step 2: re-call with approval token.
+	res, err = srv.handleSendMessage(context.Background(), callTool(map[string]any{
+		"from_agent":     "marketing-agent",
+		"topic":          "review_needed",
+		"payload":        `{"item":"Q1 copy"}`,
+		"approval_token": token,
+	}))
+	m = mustResult(t, res, err)
 	if _, ok := m["message_id"]; !ok {
 		t.Error("expected message_id in send_message response")
 	}

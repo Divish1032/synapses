@@ -53,6 +53,25 @@ func (s *Server) handleSendMessage(
 		return mcp.NewToolResultError("payload must be valid JSON (e.g. '{\"key\":\"value\"}')"), nil
 	}
 
+	// OF-E3: cross-project write approval gate for broadcast messages.
+	// Broadcasts are visible to all agents on all projects via get_messages(projects="*").
+	// Require explicit user approval before sending.
+	if toAgent == "" {
+		approvalToken := stringArg(req, "approval_token")
+		if approvalToken == "" {
+			return s.approvals.requestApproval(
+				"broadcast_message",
+				fmt.Sprintf("Broadcast message from agent %q with topic %q to all agents across all projects", fromAgent, topic),
+				fromAgent,
+			), nil
+		}
+		if !s.approvals.validateAndConsume(approvalToken) {
+			return mcp.NewToolResultError(
+				"approval_token is invalid or expired. Re-request approval by calling send_message without approval_token.",
+			), nil
+		}
+	}
+
 	s.upsertAgentIfNeeded(fromAgent)
 
 	msgID, err := s.store.SendMessage(fromAgent, toAgent, topic, payload, projectID)
