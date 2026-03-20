@@ -1141,9 +1141,9 @@ func TestCmdInit_TempDir(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	// Verify .mcp.json was written.
-	if _, statErr := os.Stat(filepath.Join(dir, ".mcp.json")); os.IsNotExist(statErr) {
-		t.Error(".mcp.json not written by init")
+	// init now creates synapses.json (if missing) and prints golden path.
+	if _, statErr := os.Stat(filepath.Join(dir, "synapses.json")); os.IsNotExist(statErr) {
+		t.Error("synapses.json not written by init")
 	}
 }
 
@@ -1152,7 +1152,10 @@ func TestCmdInit_ExistingConfig(t *testing.T) {
 	// Pre-existing synapses.json should be preserved (not overwritten).
 	os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(`{"existing":true}`+"\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, "app.go"), []byte("package app\n"), 0o644)
-	_ = run([]string{"init", "--path", dir})
+	err := run([]string{"init", "--path", dir})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
 
 	data, _ := os.ReadFile(filepath.Join(dir, "synapses.json"))
 	if !strings.Contains(string(data), "existing") {
@@ -1838,21 +1841,30 @@ func TestCmdList_WithProjects(t *testing.T) {
 	}
 }
 
-// ── cmdSetup without brain in PATH ───────────────────────────────────────────
+// ── cmdSetup ─────────────────────────────────────────────────────────────────
 
-func TestCmdSetup_NoBrainInPath(t *testing.T) {
+func TestCmdSetup_CreatesSynapsesJSON(t *testing.T) {
 	dir := t.TempDir()
 
-	// Clear PATH so brain binary is not found.
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", t.TempDir())
-	defer os.Setenv("PATH", oldPath)
-
 	if err := cmdSetup([]string{"--path", dir}); err != nil {
-		t.Errorf("cmdSetup no-brain: %v", err)
+		t.Errorf("cmdSetup: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "synapses.json")); os.IsNotExist(err) {
 		t.Error("synapses.json not written by cmdSetup")
+	}
+}
+
+func TestCmdSetup_PreservesExistingConfig(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(`{"custom":true}`+"\n"), 0o644)
+
+	if err := cmdSetup([]string{"--path", dir}); err != nil {
+		t.Errorf("cmdSetup: %v", err)
+	}
+	// Existing config should not be overwritten.
+	data, _ := os.ReadFile(filepath.Join(dir, "synapses.json"))
+	if !strings.Contains(string(data), "custom") {
+		t.Error("existing synapses.json should be preserved")
 	}
 }
 
@@ -2127,24 +2139,17 @@ func TestCmdBrief_WithMessages(t *testing.T) {
 	}
 }
 
-// ── cmdSetup with fake brain binary ──────────────────────────────────────────
+// ── cmdSetup backwards compatibility ─────────────────────────────────────────
 
-func TestCmdSetup_WithFakeBrain(t *testing.T) {
-	binDir := t.TempDir()
-	// Create a fake brain script that exits 0.
-	brainScript := filepath.Join(binDir, "brain")
-	if err := os.WriteFile(brainScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir)
-	defer os.Setenv("PATH", oldPath)
-
+func TestCmdSetup_CoreFlagBackwardsCompat(t *testing.T) {
 	dir := t.TempDir()
-	// cmdSetup runs brain setup automatically (no interactive prompt).
-	err := cmdSetup([]string{"--path", dir})
+	// --core flag should be accepted (backwards compat) even though it's a no-op.
+	err := cmdSetup([]string{"--core", "--path", dir})
 	if err != nil {
-		t.Logf("cmdSetup with fake brain: %v (non-fatal)", err)
+		t.Errorf("cmdSetup --core: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "synapses.json")); os.IsNotExist(statErr) {
+		t.Error("synapses.json not written by cmdSetup --core")
 	}
 }
 
