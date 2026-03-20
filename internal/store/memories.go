@@ -414,6 +414,23 @@ func (s *Store) TouchMemories(ids []string) {
 // Also cleans up orphaned memory_anchors and memory_surfaced rows for deleted memories.
 func (s *Store) ExpireMemories() (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Collect expiring memories before deletion so we can emit lifecycle events.
+	// Query outside the tx — connection is free, avoids holding a read lock
+	// across the write transaction.
+	type expiredEntry struct{ id, agentID string }
+	var expiring []expiredEntry
+	if erows, qErr := s.knowledgeDB.Query(
+		`SELECT id, agent_id FROM memories WHERE expires_at <= ?`, now,
+	); qErr == nil {
+		for erows.Next() {
+			var e expiredEntry
+			_ = erows.Scan(&e.id, &e.agentID)
+			expiring = append(expiring, e)
+		}
+		_ = erows.Close()
+	}
+
 	// Delete expired memories and clean up their anchors in one transaction.
 	tx, err := s.knowledgeDB.Begin()
 	if err != nil {
@@ -444,6 +461,16 @@ func (s *Store) ExpireMemories() (int64, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit expire tx: %w", err)
 	}
+
+	// Emit lifecycle events for all deleted memories (Sprint 10.3).
+	// Non-fatal: event failure does not roll back the deletion.
+	for _, e := range expiring {
+		if evErr := s.AppendEvent("knowledge_expired", e.agentID,
+			fmt.Sprintf(`{"memory_id":%q}`, e.id)); evErr != nil {
+			logutil.Warn("synapses: store: append knowledge_expired event: %v\n", evErr)
+		}
+	}
+
 	return result.RowsAffected()
 }
 
