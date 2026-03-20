@@ -440,6 +440,18 @@ func (s *Server) handleRecall(
 		searchLimit = int(v) // explicit override
 	}
 
+	// Sprint 10.5: inflate episode fetch limit when time bounds are active,
+	// same logic as quadLimit for memories. Without inflation, the top-N
+	// episodes by BM25 relevance could all fall outside the time window,
+	// returning 0 episodes even though in-window episodes exist at rank N+1.
+	episodeLimit := searchLimit
+	if sinceTime != nil || untilTime != nil {
+		episodeLimit = searchLimit * 10
+		if episodeLimit < 50 {
+			episodeLimit = 50
+		}
+	}
+
 	// Episodes: still searched via FTS5 BM25 separately (not part of RRF).
 	episodes, err := s.store.RecallEpisodes(
 		query,
@@ -447,7 +459,7 @@ func (s *Server) handleRecall(
 		stringArg(req, "agent_id"),
 		stringArg(req, "episode_type"),
 		stringArg(req, "outcome_filter"),
-		searchLimit,
+		episodeLimit,
 		sinceDays,
 	)
 	if err != nil {
@@ -543,6 +555,10 @@ func (s *Server) handleRecall(
 			filteredEp = append(filteredEp, ep)
 		}
 		episodes = filteredEp
+		// Re-cap episodes at searchLimit (inflated episodeLimit was for candidate fetch only).
+		if len(episodes) > searchLimit {
+			episodes = episodes[:searchLimit]
+		}
 	}
 
 	// Sprint 10.1: apply temporal versioning — swap content with historical version.
