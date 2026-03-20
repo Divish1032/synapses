@@ -4,11 +4,12 @@ package config
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // IntelligenceMode controls which models are loaded and how they are cached,
@@ -458,7 +459,7 @@ func (c *BrainConfig) ProbeAndDowngradeModels(ctx context.Context, ollamaURL str
 	for _, t := range tiers {
 		if *t.value != "" && !present[normalize(*t.value)] {
 			// keep base in canonical form; if it's also missing, nothing we can do
-			fmt.Fprintf(os.Stderr, "brain: tier %q model %q not found in Ollama — downgrading to %q\n",
+			logutil.Warn("brain: tier %q model %q not found in Ollama — downgrading to %q\n",
 				t.name, *t.value, base)
 			*t.value = base
 		}

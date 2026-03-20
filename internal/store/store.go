@@ -22,6 +22,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // ProjectStat holds the lightweight per-project metadata that can be read
@@ -523,7 +524,7 @@ func Open(path string) (*Store, error) {
 	// source, so the safe recovery is to delete the corrupt file and start
 	// fresh — the caller will perform a full re-index automatically.
 	if checkErr := runQuickCheck(graphDB); checkErr != nil {
-		fmt.Fprintf(os.Stderr, "synapses: store: graph.db corrupt (%v) — deleting and re-indexing from source\n", checkErr)
+		logutil.Error("synapses: store: graph.db corrupt (%v) — deleting and re-indexing from source\n", checkErr)
 		graphDB.Close()
 		if recoverErr := recoverGraphDB(path); recoverErr != nil {
 			return nil, recoverErr
@@ -549,7 +550,7 @@ func Open(path string) (*Store, error) {
 	// database rather than refusing to start. The daemon continues in a
 	// degraded-but-functional state.
 	if checkErr := runQuickCheck(knowledgeDB); checkErr != nil {
-		fmt.Fprintf(os.Stderr, "synapses: store: knowledge.db corrupt (%v) — backing up to knowledge.db.corrupt and starting fresh\n", checkErr)
+		logutil.Error("synapses: store: knowledge.db corrupt (%v) — backing up to knowledge.db.corrupt and starting fresh\n", checkErr)
 		knowledgeDB.Close()
 		knowledgeDB, err = recoverKnowledgeDB(kPath)
 		if err != nil {
@@ -704,7 +705,7 @@ func Open(path string) (*Store, error) {
 		).Scan(&legacyHasMemories)
 		if legacyHasErr == nil && legacyHasMemories > 0 {
 			if err := migrateKnowledgeFromLegacy(knowledgeDB, path); err != nil {
-				fmt.Fprintf(os.Stderr, "synapses: store: legacy migration: %v\n", err)
+				logutil.Warn("synapses: store: legacy migration: %v\n", err)
 			}
 		}
 	}
@@ -826,7 +827,7 @@ func recoverKnowledgeDB(kPath string) (*sql.DB, error) {
 	if err := os.Rename(kPath, kPath+".corrupt"); err != nil {
 		// Rename failed — fall back to deletion so we can create a fresh file.
 		// Log the rename error so the user knows the backup was not preserved.
-		fmt.Fprintf(os.Stderr, "synapses: store: could not back up corrupt knowledge.db (%v) — deleting it\n", err)
+		logutil.Warn("synapses: store: could not back up corrupt knowledge.db (%v) — deleting it\n", err)
 		_ = os.Remove(kPath)
 	}
 	// Always remove WAL and SHM sidecars. A leftover -wal file from the corrupt
@@ -1364,7 +1365,7 @@ func (s *Store) PruneStaleData(retentionDays int) {
 
 	pruneExec := func(query string, args ...interface{}) {
 		if _, err := s.knowledgeDB.Exec(query, args...); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: store: prune exec failed (%q): %v\n", query[:min(len(query), 60)], err)
+			logutil.Debug("synapses: store: prune exec failed (%q): %v\n", query[:min(len(query), 60)], err)
 		}
 	}
 
@@ -1461,7 +1462,7 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	pruneExec(`PRAGMA optimize`)
 	if s.graphDB != nil {
 		if _, err := s.graphDB.Exec(`PRAGMA optimize`); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: store: prune graphDB PRAGMA optimize: %v\n", err)
+			logutil.Debug("synapses: store: prune graphDB PRAGMA optimize: %v\n", err)
 		}
 	}
 }
@@ -2108,7 +2109,7 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 		}
 		var meta map[string]string
 		if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG: synapses: store: unmarshal metadata for node %q (%s): %v\n", id, name, err)
+			logutil.Debug("synapses: store: unmarshal metadata for node %q (%s): %v\n", id, name, err)
 		}
 		if meta == nil {
 			meta = make(map[string]string)
@@ -2315,13 +2316,13 @@ func ScanAll() ([]ProjectStat, error) {
 		// against a live daemon. OpenReadOnly() is sufficient — Stat() only reads.
 		st, err := OpenReadOnly(dbPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: skipping corrupt db %s: %v\n", e.Name(), err)
+			logutil.Warn("synapses: skipping corrupt db %s: %v\n", e.Name(), err)
 			continue
 		}
 		stat, err := st.Stat(dbPath)
 		st.Close()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: skipping corrupt db %s: %v\n", e.Name(), err)
+			logutil.Warn("synapses: skipping corrupt db %s: %v\n", e.Name(), err)
 			continue
 		}
 		if stat == nil {

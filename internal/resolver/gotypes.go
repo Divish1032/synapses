@@ -5,11 +5,11 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
-	"os"
 
 	"golang.org/x/tools/go/packages"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // ResolveGoTypesCallEdges performs a type-checked CALLS resolution pass for
@@ -69,7 +69,7 @@ func ResolveGoTypesCallEdges(g *graph.Graph, root string) (int, error) {
 		// Log type errors per package but keep going — partial type info
 		// still yields better coverage than tree-sitter alone.
 		for _, pe := range pkg.Errors {
-			fmt.Fprintf(os.Stderr, "synapses/gotypes: %s: %v\n", pkg.PkgPath, pe)
+			logutil.Warn("synapses/gotypes: %s: %v\n", pkg.PkgPath, pe)
 		}
 
 		for _, file := range pkg.Syntax {

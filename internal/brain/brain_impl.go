@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +19,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/brain/pruner"
 	"github.com/SynapsesOS/synapses/internal/brain/sdlc"
 	"github.com/SynapsesOS/synapses/internal/brain/store"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 
@@ -339,7 +339,7 @@ func New(cfg config.BrainConfig) Brain {
 
 	// No backend could be configured — degrade gracefully.
 	if ingestClient == nil {
-		fmt.Fprintf(os.Stderr, "brain: no LLM backend available (backend=%q, gguf_path=%q) — returning NullBrain\n", cfg.Backend, cfg.GGUFPath)
+		logutil.Warn("brain: no LLM backend available (backend=%q, gguf_path=%q) — returning NullBrain\n", cfg.Backend, cfg.GGUFPath)
 		return &NullBrain{}
 	}
 
@@ -440,9 +440,9 @@ func warmUpModels(clients ...llm.LLMClient) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if err := w.WarmUp(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "brain: warmup %s: %v\n", name, err)
+				logutil.Error("brain: warmup %s: %v\n", name, err)
 			} else {
-				fmt.Fprintf(os.Stderr, "brain: warmup complete: %s\n", name)
+				logutil.Info("brain: warmup complete: %s\n", name)
 			}
 		}(w, name)
 	}
@@ -480,7 +480,7 @@ func (b *impl) Ingest(ctx context.Context, req IngestRequest) (IngestResponse, e
 	if !validateIngestResponse(r.Summary) {
 		b.cb.recordFailure("ingest")
 		b.stats.record("ingest", false, latency)
-		fmt.Fprintf(os.Stderr, "brain: ingest response below quality threshold for node %s\n", req.NodeID)
+		logutil.Warn("brain: ingest response below quality threshold for node %s\n", req.NodeID)
 		return IngestResponse{NodeID: req.NodeID}, nil
 	}
 
@@ -513,7 +513,7 @@ func (b *impl) Enrich(ctx context.Context, req EnrichRequest) (EnrichResponse, e
 				RelatedNames: req.RelatedNames, TaskContext: req.TaskContext,
 			}
 			if r, err := b.fallbackEnricher.Enrich(ctx, enrReq); err == nil && validateResponse(r.Insight, 20) {
-				fmt.Fprintf(os.Stderr, "brain: enrich degraded — using T0 fallback for %s\n", req.RootName)
+				logutil.Warn("brain: enrich degraded — using T0 fallback for %s\n", req.RootName)
 				return EnrichResponse{Insight: r.Insight, Concerns: r.Concerns, Summaries: summaries, LLMUsed: r.LLMUsed, Degraded: true}, nil
 			}
 		}
@@ -542,7 +542,7 @@ func (b *impl) Enrich(ctx context.Context, req EnrichRequest) (EnrichResponse, e
 	if !validateEnrichResponse(r.Insight, r.Concerns) {
 		b.cb.recordFailure("enrich")
 		b.stats.record("enrich", false, latency)
-		fmt.Fprintf(os.Stderr, "brain: enrich response below quality threshold, falling back to raw data\n")
+		logutil.Warn("brain: enrich response below quality threshold, falling back to raw data\n")
 		return EnrichResponse{Summaries: summaries}, nil
 	}
 
@@ -569,7 +569,7 @@ func (b *impl) ExplainViolation(ctx context.Context, req ViolationRequest) (Viol
 				SourceFile: req.SourceFile, TargetName: req.TargetName,
 			}
 			if r, err := b.fallbackGuardian.Explain(ctx, grdReq); err == nil && validateResponse(r.Explanation, 15) {
-				fmt.Fprintf(os.Stderr, "brain: guardian degraded — using T0 fallback for rule %s\n", req.RuleID)
+				logutil.Warn("brain: guardian degraded — using T0 fallback for rule %s\n", req.RuleID)
 				return ViolationResponse{Explanation: r.Explanation, Fix: r.Fix, Degraded: true}, nil
 			}
 		}
@@ -596,7 +596,7 @@ func (b *impl) ExplainViolation(ctx context.Context, req ViolationRequest) (Viol
 	if !validateGuardianResponse(r.Explanation, r.Fix) {
 		b.cb.recordFailure("guardian")
 		b.stats.record("guardian", false, latency)
-		fmt.Fprintf(os.Stderr, "brain: guardian response missing explanation or fix\n")
+		logutil.Warn("brain: guardian response missing explanation or fix\n")
 		return ViolationResponse{}, nil
 	}
 
@@ -641,7 +641,7 @@ func (b *impl) Coordinate(ctx context.Context, req CoordinateRequest) (Coordinat
 	if !validateCoordinateResponse(r.Suggestion) {
 		b.cb.recordFailure("orchestrate")
 		b.stats.record("orchestrate", false, latency)
-		fmt.Fprintf(os.Stderr, "brain: orchestrate response empty suggestion\n")
+		logutil.Warn("brain: orchestrate response empty suggestion\n")
 		return CoordinateResponse{}, nil
 	}
 
@@ -669,7 +669,7 @@ func (b *impl) coordinateFallback(_ context.Context, req CoordinateRequest) (Coo
 		NewScope:          req.NewScope,
 		ConflictingClaims: claims,
 	})
-	fmt.Fprintf(os.Stderr, "brain: orchestrate circuit open — using deterministic fallback\n")
+	logutil.Warn("brain: orchestrate circuit open — using deterministic fallback\n")
 	return CoordinateResponse{Suggestion: r.Suggestion, AlternativeScope: r.AlternativeScope, Degraded: true}, nil
 }
 
@@ -1049,7 +1049,7 @@ func (cb *circuitBreaker) recordFailure(tier string) {
 	cb.failures[tier]++
 	if cb.failures[tier] >= cb.maxFailures {
 		cb.disabledUntil[tier] = time.Now().Add(cb.cooldown)
-		fmt.Fprintf(os.Stderr, "brain: circuit breaker tripped for tier %q — disabling for %v after %d consecutive failures\n",
+		logutil.Error("brain: circuit breaker tripped for tier %q — disabling for %v after %d consecutive failures\n",
 			tier, cb.cooldown, cb.failures[tier])
 	}
 }

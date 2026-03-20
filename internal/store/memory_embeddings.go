@@ -4,10 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // maxVectorScanCap is the maximum number of embedding rows loaded into memory
@@ -246,7 +247,7 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 	}
 	if scanned == maxVectorScanCap {
 		s.vectorCapWarnOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "WARN: synapses: vector search cap triggered (%d embeddings scanned); results may be incomplete. Upgrade to sqlite-vec ANN (Sprint 10) for full recall.\n", maxVectorScanCap)
+			logutil.Warn("synapses: vector search cap triggered (%d embeddings scanned); results may be incomplete. Upgrade to sqlite-vec ANN (Sprint 10) for full recall.\n", maxVectorScanCap)
 		})
 	}
 	if len(candidates) == 0 {
@@ -325,7 +326,7 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 	}
 	if scanned == maxVectorScanCap {
 		s.vectorCapWarnOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "WARN: synapses: vector search cap triggered (%d embeddings scanned); results may be incomplete. Upgrade to sqlite-vec ANN (Sprint 10) for full recall.\n", maxVectorScanCap)
+			logutil.Warn("synapses: vector search cap triggered (%d embeddings scanned); results may be incomplete. Upgrade to sqlite-vec ANN (Sprint 10) for full recall.\n", maxVectorScanCap)
 		})
 	}
 	if len(candidates) == 0 {

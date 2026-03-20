@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/git"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -317,7 +317,7 @@ func (s *Server) handleSaveSessionState(
 			}
 			var arr []string
 			if err := json.Unmarshal([]byte(v), &arr); err != nil {
-				fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal session state field from request: %v\n", err)
+				logutil.Debug("synapses: tasks: unmarshal session state field from request: %v\n", err)
 			}
 			return arr
 		}
@@ -558,7 +558,7 @@ func (s *Server) handleUpdateTask(
 	}
 	if err := s.store.AppendEvent(eventType, agentID,
 		fmt.Sprintf(`{"task_id":%q,"status":%q}`, id, status)); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: append %s event: %v\n", eventType, err)
+		logutil.Warn("synapses: append %s event: %v\n", eventType, err)
 	}
 
 	// F11: If this task completion closed the entire plan, emit a plan_completed
@@ -578,7 +578,7 @@ func (s *Server) handleUpdateTask(
 		}
 		if err := s.store.AppendEvent("plan_completed", agentID,
 			fmt.Sprintf(`{"task_id":%q,"plan_title":%q}`, id, planTitle)); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: append plan_completed event: %v\n", err)
+			logutil.Warn("synapses: append plan_completed event: %v\n", err)
 		}
 	}
 

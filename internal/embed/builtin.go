@@ -9,6 +9,8 @@ import (
 
 	hugot "github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 const (
@@ -64,7 +66,7 @@ func (b *BuiltinEmbedder) ensureModel() error {
 	// Check if model already exists.
 	if _, err := os.Stat(onnxPath); os.IsNotExist(err) {
 		// Download from HuggingFace.
-		fmt.Fprintf(os.Stderr, "synapses: downloading embedding model %s to %s …\n", builtinModelName, b.modelsDir)
+		logutil.Info("synapses: downloading embedding model %s to %s …\n", builtinModelName, b.modelsDir)
 		if err := os.MkdirAll(b.modelsDir, 0o755); err != nil {
 			return fmt.Errorf("create models dir: %w", err)
 		}
@@ -75,7 +77,7 @@ func (b *BuiltinEmbedder) ensureModel() error {
 		if _, err := hugot.DownloadModel(builtinModelName, b.modelsDir, opts); err != nil {
 			return fmt.Errorf("download embedding model: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "synapses: embedding model downloaded\n")
+		logutil.Info("synapses: embedding model downloaded\n")
 	}
 
 	// Verify model file exists after potential download.

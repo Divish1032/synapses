@@ -21,6 +21,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -273,7 +274,7 @@ func (s *Server) goBackground(fn func()) {
 	case s.bgQueue <- fn:
 		// queued successfully
 	default:
-		fmt.Fprintf(os.Stderr, "synapses: background queue full (%d), dropping work\n", bgQueueCap)
+		logutil.Warn("synapses: background queue full (%d), dropping work\n", bgQueueCap)
 	}
 	s.shutdownMu.RUnlock()
 }
@@ -901,7 +902,7 @@ func (s *Server) StartBackground() {
 					func() {
 						defer func() {
 							if r := recover(); r != nil {
-								fmt.Fprintf(os.Stderr, "synapses: background worker panic: %v\nstack:\n%s\n", r, debug.Stack())
+								logutil.Error("synapses: background worker panic: %v\nstack:\n%s\n", r, debug.Stack())
 							}
 						}()
 						fn()
@@ -963,7 +964,7 @@ func (s *Server) Close() {
 	select {
 	case <-done:
 	case <-time.After(closeGracefulTimeout):
-		fmt.Fprintf(os.Stderr, "synapses: background workers did not drain within %v\n", closeGracefulTimeout)
+		logutil.Error("synapses: background workers did not drain within %v\n", closeGracefulTimeout)
 	}
 }
 

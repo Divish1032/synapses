@@ -4,11 +4,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // approvalTTL is the time-to-live for cross-project write approval tokens.
@@ -102,7 +103,7 @@ func (a *approvalStore) validateAndConsume(token string) bool {
 	delete(a.approvals, token)
 
 	// Audit trail.
-	fmt.Fprintf(os.Stderr, "synapses: cross-project write approved — op=%s agent=%s details=%s\n",
+	logutil.Info("synapses: cross-project write approved — op=%s agent=%s details=%s\n",
 		approval.operation, approval.agentID, approval.details)
 
 	return true

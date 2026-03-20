@@ -3,8 +3,9 @@ package store
 import (
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // KnowledgePath derives the knowledge DB path from the graph DB path.
@@ -46,11 +47,11 @@ func migrateKnowledgeFromLegacy(knowledgeDB *sql.DB, graphDBPath string) error {
 	for _, table := range knowledgeTables {
 		n, err := migrateSingleTable(legacyDB, knowledgeDB, table)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: dual_db: migrate %s: %v\n", table, err)
+			logutil.Error("synapses: dual_db: migrate %s: %v\n", table, err)
 			continue
 		}
 		if n > 0 {
-			fmt.Fprintf(os.Stderr, "synapses: dual_db: migrated %d rows from legacy.%s\n", n, table)
+			logutil.Info("synapses: dual_db: migrated %d rows from legacy.%s\n", n, table)
 		}
 	}
 	return nil

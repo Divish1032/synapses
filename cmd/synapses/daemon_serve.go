@@ -59,6 +59,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/contextfile"
 	"github.com/SynapsesOS/synapses/internal/embed"
@@ -337,7 +338,7 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 		// Non-localhost: require a valid Bearer token.
 		authHeader := r.Header.Get("Authorization")
 		if !strings.HasPrefix(authHeader, "Bearer ") {
-			fmt.Fprintf(os.Stderr, "synapses: auth: missing token from %s %s\n", r.RemoteAddr, r.URL.Path)
+			logutil.Warn("synapses: auth: missing token from %s %s\n", r.RemoteAddr, r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("WWW-Authenticate", `Bearer realm="synapses"`)
 			w.WriteHeader(http.StatusUnauthorized)
@@ -346,7 +347,7 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 		}
 		provided := strings.TrimPrefix(authHeader, "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
-			fmt.Fprintf(os.Stderr, "synapses: auth: invalid token from %s %s\n", r.RemoteAddr, r.URL.Path)
+			logutil.Warn("synapses: auth: invalid token from %s %s\n", r.RemoteAddr, r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("WWW-Authenticate", `Bearer realm="synapses"`)
 			w.WriteHeader(http.StatusUnauthorized)
@@ -428,7 +429,7 @@ func cmdDaemonServe(args []string) error {
 		if pulseCli, err := pulse.New(pulseDBPath); err == nil {
 			sharedPulse = pulseCli
 			defer pulseCli.Close()
-			fmt.Fprintf(os.Stderr, "synapses: pulse analytics enabled (in-process, db: %s)\n", pulseDBPath)
+			logutil.Info("synapses: pulse analytics enabled (in-process, db: %s)\n", pulseDBPath)
 		}
 	}
 
@@ -688,11 +689,11 @@ func cmdDaemonServe(args []string) error {
 	if authErr != nil {
 		// Non-fatal: log a warning and continue. Localhost-only binding
 		// (127.0.0.1) is the primary protection; auth is defence-in-depth.
-		fmt.Fprintf(os.Stderr, "synapses: warning: could not load/create auth token: %v\n", authErr)
+		logutil.Warn("synapses: could not load/create auth token: %v\n", authErr)
 		authToken = ""
 	} else {
 		tokenPath, _ := authTokenPath()
-		fmt.Fprintf(os.Stderr, "synapses: auth token stored at %s\n", tokenPath)
+		logutil.Info("synapses: auth token stored at %s\n", tokenPath)
 	}
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
@@ -741,7 +742,7 @@ func cmdDaemonServe(args []string) error {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	fmt.Fprintf(os.Stderr, "synapses %s singleton daemon starting on %s\n", version, DaemonHTTPAddr)
+	logutil.Info("synapses %s singleton daemon starting on %s\n", version, DaemonHTTPAddr)
 
 	// ── Background self-update check (every 6 hours, silent) ─────────────────
 	startSelfUpdateLoop(appCtx)
@@ -751,7 +752,7 @@ func cmdDaemonServe(args []string) error {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		fmt.Fprintf(os.Stderr, "\nsynapses daemon: received %s, shutting down\n", sig)
+		logutil.Info("\nsynapses daemon: received %s, shutting down\n", sig)
 		appCancel()
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutCancel()
@@ -762,7 +763,7 @@ func cmdDaemonServe(args []string) error {
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("http server: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "synapses daemon: stopped\n")
+	logutil.Info("synapses daemon: stopped\n")
 	return nil
 }
 
@@ -776,7 +777,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 
 	cfgDir, found := config.FindConfigDir(absPath)
 	if found && cfgDir != absPath {
-		fmt.Fprintf(os.Stderr, "synapses [%s]: using config from %s\n", projectHash(absPath), cfgDir)
+		logutil.InfoP(projectHash(absPath), "synapses: using config from %s\n", cfgDir)
 	}
 	cfg, err := config.Load(cfgDir)
 	if err != nil {
@@ -789,7 +790,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	if cfg.Mode == "" && !found {
 		if !hasSourceFiles(absPath) {
 			cfg.Mode = "knowledge"
-			fmt.Fprintf(os.Stderr, "synapses [%s]: no source files detected, starting in knowledge mode\n", projectHash(absPath))
+			logutil.InfoP(projectHash(absPath), "synapses: no source files detected, starting in knowledge mode\n")
 		}
 	}
 
@@ -813,7 +814,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Fprintf(os.Stderr, "synapses [%s]: daily prune running (30-day retention)\n", projectHash(absPath))
+				logutil.InfoP(projectHash(absPath), "synapses: daily prune running (30-day retention)\n")
 				st.PruneStaleData(30)
 			case <-projCtx.Done():
 				return
@@ -882,7 +883,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			}
 		}
 
-		fmt.Fprintf(os.Stderr, "synapses: project ready — %s (knowledge mode)\n", filepath.Base(absPath))
+		logutil.Info("synapses: project ready — %s (knowledge mode)\n", filepath.Base(absPath))
 
 		return &ProjectInstance{
 			AbsPath:     absPath,
@@ -898,7 +899,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	if len(cfg.Plugins) > 0 {
 		sHome, homeErr := synapsesHome()
 		if homeErr != nil {
-			fmt.Fprintf(os.Stderr, "WARNING: cannot determine synapses home: %v (plugins disabled)\n", homeErr)
+			logutil.Warn("cannot determine synapses home: %v (plugins disabled)\n", homeErr)
 			cfg.Plugins = nil // fail-closed: cannot verify plugins → disable them
 		} else {
 			pluginCheck = parser.NewPluginChecker(sHome)
@@ -915,8 +916,8 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	// Federation.
 	for _, linkedPath := range cfg.Linked {
 		if mergeErr := mergeLinkedProject(g, linkedPath); mergeErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses [%s]: skipping linked project %s: %v\n",
-				projectHash(absPath), linkedPath, mergeErr)
+			logutil.WarnP(projectHash(absPath), "synapses: skipping linked project %s: %v\n",
+				linkedPath, mergeErr)
 		}
 	}
 	if len(cfg.Linked) > 0 {
@@ -925,8 +926,8 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 				g.AddCallSite(cs)
 			}
 			if n := resolver.ResolveCallEdges(g); n > 0 {
-				fmt.Fprintf(os.Stderr, "synapses [%s]: resolved %d cross-project CALLS edges\n",
-					projectHash(absPath), n)
+				logutil.InfoP(projectHash(absPath), "synapses: resolved %d cross-project CALLS edges\n",
+					n)
 			}
 		}
 	}
@@ -1144,7 +1145,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	}
 
 	identity := g.ProjectIdentity()
-	fmt.Fprintf(os.Stderr, "synapses: project ready — %s (%d nodes, %d edges)\n",
+	logutil.Info("synapses: project ready — %s (%d nodes, %d edges)\n",
 		identity.RepoID,
 		identity.Summary.Files+identity.Summary.Functions+
 			identity.Summary.Structs+identity.Summary.Interfaces,
@@ -1204,7 +1205,7 @@ func serveProjectSocket(ctx context.Context, srv *mcpsrv.Server, listener net.Li
 			if err := serveMCPConn(ctx, srv.MCPServer(), srv, c, sid); err != nil {
 				if !strings.Contains(err.Error(), "EOF") &&
 					!strings.Contains(err.Error(), "use of closed") {
-					fmt.Fprintf(os.Stderr, "synapses socket session %s error: %v\n", sid, err)
+					logutil.Error("synapses socket session %s error: %v\n", sid, err)
 				}
 			}
 		}(conn, sessionID)

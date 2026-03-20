@@ -19,6 +19,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/embed"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/pulse"
@@ -1272,7 +1273,7 @@ func (s *Server) handleSessionInit(
 				pkgs = env.Packages
 			} else {
 				if err := json.Unmarshal([]byte(workMem.Content), &pkgs); err != nil {
-				fmt.Fprintf(os.Stderr, "DEBUG: synapses: session: unmarshal legacy work_summary packages for memory %q: %v\n", workMem.ID, err)
+				logutil.Debug("synapses: session: unmarshal legacy work_summary packages for memory %q: %v\n", workMem.ID, err)
 			}
 			}
 			if len(pkgs) > 0 {
@@ -1380,7 +1381,7 @@ func (s *Server) handleSessionInit(
 	// suppressed by verbosity settings.
 	if s.toolDescBaseline != "" {
 		if current := hashToolDescs(s.toolDescs); current != s.toolDescBaseline {
-			fmt.Fprintf(os.Stderr, "ERROR: [synapses] tool description integrity violation — "+
+			logutil.Error("[synapses] tool description integrity violation — "+
 				"hash mismatch detected at session_init. expected=%s actual=%s\n",
 				s.toolDescBaseline, current)
 			resp["tool_integrity_alert"] = map[string]interface{}{
@@ -1612,7 +1613,7 @@ func (s *Server) handleAnnotateNode(
 	// Emit event.
 	if err := s.store.AppendEvent("annotation_added", agentID,
 		fmt.Sprintf(`{"annotation_id":%q,"node_id":%q}`, id, nodeID)); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: append annotation_added event: %v\n", err)
+		logutil.Warn("synapses: append annotation_added event: %v\n", err)
 	}
 
 	resp := map[string]interface{}{

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/contextfile"
 	"github.com/SynapsesOS/synapses/internal/dataflow"
@@ -60,7 +61,7 @@ func main() {
 	}
 
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		logutil.Error("error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -151,7 +152,7 @@ func cmdStartDirect(args []string) error {
 	// The index path (absPath) stays unchanged — we only adjust where config is loaded from.
 	cfgDir, found := config.FindConfigDir(absPath)
 	if found && cfgDir != absPath {
-		fmt.Fprintf(os.Stderr, "synapses: using config from %s\n", cfgDir)
+		logutil.Info("synapses: using config from %s\n", cfgDir)
 	}
 	cfg, err := config.Load(cfgDir)
 	if err != nil {
@@ -179,7 +180,7 @@ func cmdStartDirect(args []string) error {
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Fprintf(os.Stderr, "synapses: daily prune running (30-day retention)\n")
+				logutil.Info("synapses: daily prune running (30-day retention)\n")
 				st.PruneStaleData(30)
 			case <-appCtx.Done():
 				return
@@ -192,7 +193,7 @@ func cmdStartDirect(args []string) error {
 	if len(cfg.Plugins) > 0 {
 		sHome, homeErr := synapsesHome()
 		if homeErr != nil {
-			fmt.Fprintf(os.Stderr, "WARNING: cannot determine synapses home: %v (plugins disabled)\n", homeErr)
+			logutil.Warn("cannot determine synapses home: %v (plugins disabled)\n", homeErr)
 			cfg.Plugins = nil // fail-closed: cannot verify plugins → disable them
 		} else {
 			pluginCheck = parser.NewPluginChecker(sHome)
@@ -207,7 +208,7 @@ func cmdStartDirect(args []string) error {
 	// Federation: merge linked project graphs (monorepo support).
 	for _, linkedPath := range cfg.Linked {
 		if mergeErr := mergeLinkedProject(g, linkedPath); mergeErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: skipping linked project %s: %v\n", linkedPath, mergeErr)
+			logutil.Warn("synapses: skipping linked project %s: %v\n", linkedPath, mergeErr)
 		}
 	}
 
@@ -220,7 +221,7 @@ func cmdStartDirect(args []string) error {
 				g.AddCallSite(cs)
 			}
 			if n := resolver.ResolveCallEdges(g); n > 0 {
-				fmt.Fprintf(os.Stderr, "synapses: resolved %d cross-project CALLS edges\n", n)
+				logutil.Info("synapses: resolved %d cross-project CALLS edges\n", n)
 			}
 		}
 	}
@@ -276,7 +277,7 @@ func cmdStartDirect(args []string) error {
 				blob, err := g.RebuildIndex()
 				if err == nil && len(blob) > 0 {
 					_ = st.SaveIndexSnapshot(blob)
-					fmt.Fprintf(os.Stderr, "synapses: idle defrag complete (tombstone ratio was %.0f%%)\n",
+					logutil.Info("synapses: idle defrag complete (tombstone ratio was %.0f%%)\n",
 						idx.TombstoneRatio()*100)
 				}
 			}
@@ -308,7 +309,7 @@ func cmdStartDirect(args []string) error {
 		allPrompts = skills.DeduplicatePrompts(allPrompts) // project overrides user, user overrides builtin
 		if len(allPrompts) > 0 {
 			srv.SetPromptTemplates(allPrompts)
-			fmt.Fprintf(os.Stderr, "synapses: loaded %d activation-context prompts\n", len(allPrompts))
+			logutil.Info("synapses: loaded %d activation-context prompts\n", len(allPrompts))
 		}
 	}
 
@@ -328,7 +329,7 @@ func cmdStartDirect(args []string) error {
 		}
 		allRecipes = skills.DeduplicateRecipes(allRecipes) // project overrides user, user overrides builtin
 		srv.SetSkillRecipes(allRecipes)
-		fmt.Fprintf(os.Stderr, "synapses: loaded %d skill recipes\n", len(allRecipes))
+		logutil.Info("synapses: loaded %d skill recipes\n", len(allRecipes))
 	}
 
 	// Federation resolver: cross-project drift detection + dependency tracking.
@@ -343,9 +344,9 @@ func cmdStartDirect(args []string) error {
 	brainCli := brain.NewInProcess(cfg.Brain.ToBrainConfig())
 	if cfg.Brain.Enabled {
 		if model, _ := brainCli.HealthCheck(context.Background()); model != "" {
-			fmt.Fprintf(os.Stderr, "synapses: brain enabled in-process (%s)\n", model)
+			logutil.Info("synapses: brain enabled in-process (%s)\n", model)
 		} else {
-			fmt.Fprintf(os.Stderr, "synapses: brain enabled in-process (Ollama not yet reachable — will retry on use)\n")
+			logutil.Info("synapses: brain enabled in-process (Ollama not yet reachable — will retry on use)\n")
 		}
 		srv.SetBrainClient(brainCli)
 		go func() {
@@ -368,7 +369,7 @@ func cmdStartDirect(args []string) error {
 	if cfg.Pulse.URL != "" {
 		pulseCli := pulse.NewClient(cfg.Pulse.URL, cfg.Pulse.TimeoutSec)
 		srv.SetPulseClient(pulseCli)
-		fmt.Fprintf(os.Stderr, "synapses: pulse analytics enabled at %s\n", cfg.Pulse.URL)
+		logutil.Info("synapses: pulse analytics enabled at %s\n", cfg.Pulse.URL)
 	}
 
 	// Optional: vector embedding for semantic search (node embeddings).
@@ -380,7 +381,7 @@ func cmdStartDirect(args []string) error {
 		var embedCli *embed.Client
 		if cfg.EmbeddingEndpoint != "" {
 			embedCli = embed.NewClient(cfg.EmbeddingEndpoint, "")
-			fmt.Fprintf(os.Stderr, "synapses: embeddings via %s\n", cfg.EmbeddingEndpoint)
+			logutil.Info("synapses: embeddings via %s\n", cfg.EmbeddingEndpoint)
 		}
 		if embedCli != nil {
 			srv.SetEmbedClient(embedCli)
@@ -414,7 +415,7 @@ func cmdStartDirect(args []string) error {
 		default:
 		}
 		srv.SetTechStack(entries)
-		fmt.Fprintf(os.Stderr, "synapses: tech stack detected (%d deps)\n", len(entries))
+		logutil.Info("synapses: tech stack detected (%d deps)\n", len(entries))
 	}()
 
 	// Start the file watcher so the graph stays current as files change.
@@ -426,10 +427,10 @@ func cmdStartDirect(args []string) error {
 		fw, err := watcher.New(g, w, st)
 		if err != nil {
 			// Non-fatal: log and continue without watching.
-			fmt.Fprintf(os.Stderr, "synapses: file watcher unavailable: %v\n", err)
+			logutil.Error("synapses: file watcher unavailable: %v\n", err)
 		} else {
 			if err := fw.Start(absPath); err != nil {
-				fmt.Fprintf(os.Stderr, "synapses: file watcher start failed: %v\n", err)
+				logutil.Error("synapses: file watcher start failed: %v\n", err)
 			} else {
 				defer fw.Stop()
 				fw.SetConfig(cfg)                    // wire rules for proactive violation events
@@ -447,9 +448,9 @@ func cmdStartDirect(args []string) error {
 					newBrain := brain.NewInProcess(newCfg.Brain.ToBrainConfig())
 					srv.SetBrainClient(newBrain)
 					fw.SetBrainClient(newBrain)
-					fmt.Fprintf(os.Stderr, "synapses: brain reloaded (enabled=%v)\n", newCfg.Brain.Enabled)
+					logutil.Info("synapses: brain reloaded (enabled=%v)\n", newCfg.Brain.Enabled)
 				})
-				fmt.Fprintf(os.Stderr, "synapses: watching %s for changes\n", absPath)
+				logutil.Info("synapses: watching %s for changes\n", absPath)
 			}
 		}
 	}
@@ -462,22 +463,22 @@ func cmdStartDirect(args []string) error {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		fmt.Fprintf(os.Stderr, "\nsynapses: received %s, shutting down\n", sig)
+		logutil.Info("\nsynapses: received %s, shutting down\n", sig)
 		appCancel()
 		time.AfterFunc(5*time.Second, func() {
-			fmt.Fprintf(os.Stderr, "synapses: graceful shutdown timed out, forcing exit\n")
+			logutil.Error("synapses: graceful shutdown timed out, forcing exit\n")
 			os.Exit(1)
 		})
 	}()
 
 	// MCP server writes to stdout (protocol messages); all status goes to stderr.
 	identity := g.ProjectIdentity()
-	fmt.Fprintf(os.Stderr, "synapses %s ready — %d nodes, %d edges (repo: %s)\n",
+	logutil.Info("synapses %s ready — %d nodes, %d edges (repo: %s)\n",
 		version,
 		identity.Summary.Files+identity.Summary.Functions+
 			identity.Summary.Structs+identity.Summary.Interfaces,
 		identity.Summary.Edges, identity.RepoID)
-	fmt.Fprintf(os.Stderr, "MCP server starting on stdio...\n")
+	logutil.Info("MCP server starting on stdio...\n")
 
 	return srv.ServeStdio()
 }
@@ -519,7 +520,7 @@ func cmdIndex(args []string) error {
 	if len(cfg.Plugins) > 0 {
 		sHome, homeErr := synapsesHome()
 		if homeErr != nil {
-			fmt.Fprintf(os.Stderr, "WARNING: cannot determine synapses home: %v (plugins disabled)\n", homeErr)
+			logutil.Warn("cannot determine synapses home: %v (plugins disabled)\n", homeErr)
 			cfg.Plugins = nil // fail-closed: cannot verify plugins → disable them
 		} else {
 			pluginCheck2 = parser.NewPluginChecker(sHome)
@@ -534,7 +535,7 @@ func cmdIndex(args []string) error {
 	// Federation: merge linked project graphs.
 	for _, linkedPath := range cfg.Linked {
 		if mergeErr := mergeLinkedProject(g, linkedPath); mergeErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: skipping linked project %s: %v\n", linkedPath, mergeErr)
+			logutil.Warn("synapses: skipping linked project %s: %v\n", linkedPath, mergeErr)
 		}
 	}
 
@@ -545,7 +546,7 @@ func cmdIndex(args []string) error {
 				g.AddCallSite(cs)
 			}
 			if n := resolver.ResolveCallEdges(g); n > 0 {
-				fmt.Fprintf(os.Stderr, "synapses: resolved %d cross-project CALLS edges\n", n)
+				logutil.Info("synapses: resolved %d cross-project CALLS edges\n", n)
 			}
 		}
 	}
@@ -616,7 +617,7 @@ func cmdStop(args []string) error {
 // cmdProjects lists all projects currently registered with the singleton daemon.
 func cmdProjects(args []string) error {
 	if !IsSingletonDaemonRunning() {
-		fmt.Fprintf(os.Stderr, "Daemon not running at %s.\n", DaemonHTTPAddr)
+		logutil.Info("Daemon not running at %s.\n", DaemonHTTPAddr)
 		return nil
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -939,7 +940,7 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 	g, err := smartReindex(repoRoot, st, plugins, pluginCheck)
 	if err == nil {
 		if saveErr := st.SaveGraph(g); saveErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: cache save failed: %v\n", saveErr)
+			logutil.Error("synapses: cache save failed: %v\n", saveErr)
 		}
 		// Warm-boot: try to restore the columnar index from the snapshot blob.
 		// This is best-effort — failure is silent (the index will be rebuilt async).
@@ -953,17 +954,17 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 		// or on repos that predate file-mtime tracking.
 		cached, cacheErr := st.LoadGraph()
 		if cacheErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: cache load failed (%v), re-indexing\n", cacheErr)
+			logutil.Warn("synapses: cache load failed (%v), re-indexing\n", cacheErr)
 		} else if cached != nil {
 			savedAt, _ := st.SavedAt()
-			fmt.Fprintf(os.Stderr, "synapses: loaded from cache (indexed %s)\n",
+			logutil.Info("synapses: loaded from cache (indexed %s)\n",
 				savedAt.Local().Format("2006-01-02 15:04:05"))
 			// Warm-boot: restore columnar index from snapshot blob.
 			tryLoadSnapshot(cached, st)
 			return cached, nil
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "synapses: smart reindex skipped (%v), doing full reindex\n", err)
+		logutil.Warn("synapses: smart reindex skipped (%v), doing full reindex\n", err)
 	}
 
 	// No cache or smart reindex skipped: full parse from scratch.
@@ -986,14 +987,14 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 	elapsed := time.Since(start).Round(time.Millisecond)
 	snap := progress.Snapshot()
 	if !quiet {
-		fmt.Fprintf(os.Stderr, "[synapses] indexing... %d/%d files — %d functions, %d edges (%s)\n",
+		logutil.Info("[synapses] indexing... %d/%d files — %d functions, %d edges (%s)\n",
 			snap.Done, snap.Total, g.NodeCount(), g.EdgeCount(), elapsed)
-		fmt.Fprintf(os.Stderr, "[synapses] ready.\n")
+		logutil.Info("[synapses] ready.\n")
 	}
 	progress.Done()
 
 	if err := st.SaveGraph(g); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: cache save failed: %v\n", err)
+		logutil.Error("synapses: cache save failed: %v\n", err)
 	}
 
 	return g, nil
@@ -1010,11 +1011,11 @@ func tryLoadSnapshot(g *graph.Graph, st *store.Store) {
 	}
 	idx, err := graph.LoadSnapshot(blob, graph.NewStringPool())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: snapshot load failed (%v), will rebuild\n", err)
+		logutil.Warn("synapses: snapshot load failed (%v), will rebuild\n", err)
 		return
 	}
 	g.SetIndex(idx)
-	fmt.Fprintf(os.Stderr, "synapses: warm-boot: columnar index restored from snapshot\n")
+	logutil.Info("synapses: warm-boot: columnar index restored from snapshot\n")
 }
 
 // loadOrBuildGraph opens a temporary store, loads or builds the graph, then
@@ -1037,7 +1038,7 @@ func loadOrBuildGraph(repoRoot string, forceReindex bool) (*graph.Graph, error) 
 // Always runs — built-in heuristics detect common patterns even without config.
 func analyzeDataFlowIfEnabled(g *graph.Graph, cfg *config.Config) {
 	if n := dataflow.AnnotateGraph(g, cfg); n > 0 {
-		fmt.Fprintf(os.Stderr, "synapses: %d DATA_FLOWS edges created\n", n)
+		logutil.Info("synapses: %d DATA_FLOWS edges created\n", n)
 	}
 }
 
@@ -1058,12 +1059,12 @@ func enrichMetricsIfEnabled(g *graph.Graph, root string, cfg *config.Config) {
 
 	if cfg.CoverageProfile != "" {
 		metrics.EnrichCoverage(g, root, cfg.CoverageProfile)
-		fmt.Fprintf(os.Stderr, "synapses: coverage profile loaded: %s\n", cfg.CoverageProfile)
+		logutil.Info("synapses: coverage profile loaded: %s\n", cfg.CoverageProfile)
 	}
 
 	if cfg.PprofProfile != "" {
 		metrics.EnrichPprof(g, root, cfg.PprofProfile)
-		fmt.Fprintf(os.Stderr, "synapses: pprof profile loaded: %s\n", cfg.PprofProfile)
+		logutil.Info("synapses: pprof profile loaded: %s\n", cfg.PprofProfile)
 	}
 }
 
@@ -1074,13 +1075,13 @@ func applyGoTypesIfEnabled(g *graph.Graph, root string, cfg *config.Config) {
 	if !cfg.UseGoTypes {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "synapses: running go/types resolver (use_go_types=true)...\n")
+	logutil.Info("synapses: running go/types resolver (use_go_types=true)...\n")
 	n, err := resolver.ResolveGoTypesCallEdges(g, root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: go/types resolver failed (falling back to tree-sitter results): %v\n", err)
+		logutil.Warn("synapses: go/types resolver failed (falling back to tree-sitter results): %v\n", err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "synapses: go/types added %d new CALLS edges\n", n)
+	logutil.Info("synapses: go/types added %d new CALLS edges\n", n)
 }
 
 // applyTSTypesIfEnabled runs the TypeScript compiler-API resolver when
@@ -1091,13 +1092,13 @@ func applyTSTypesIfEnabled(g *graph.Graph, root string, cfg *config.Config) {
 	if !cfg.UseTSTypes {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "synapses: running TypeScript type resolver (use_ts_types=true)...\n")
+	logutil.Info("synapses: running TypeScript type resolver (use_ts_types=true)...\n")
 	n, err := resolver.ResolveTSTypesCallEdges(g, root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: TS type resolver failed (falling back to tree-sitter results): %v\n", err)
+		logutil.Warn("synapses: TS type resolver failed (falling back to tree-sitter results): %v\n", err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "synapses: ts/types added %d new CALLS edges\n", n)
+	logutil.Info("synapses: ts/types added %d new CALLS edges\n", n)
 }
 
 // buildGraph parses the repo at root into a new graph.
@@ -1210,7 +1211,7 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 			if len(parts) > 0 {
 				suffix = " (" + strings.Join(parts, ", ") + ")"
 			}
-			fmt.Fprintf(os.Stderr, "[synapses] indexing... %d/%d files%s\n", done, total, suffix)
+			logutil.Info("[synapses] indexing... %d/%d files%s\n", done, total, suffix)
 		}
 	}
 
@@ -1229,23 +1230,23 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 	// re-resolved after MergeFrom for cross-project CALLS edge resolution.
 	if st != nil {
 		if saveErr := st.SaveCallSites(g.PeekCallSites()); saveErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: save call sites: %v\n", saveErr)
+			logutil.Error("synapses: save call sites: %v\n", saveErr)
 		}
 	}
 
 	n := resolver.ResolveCallEdges(g)
-	fmt.Fprintf(os.Stderr, "synapses: resolved %d CALLS edges\n", n)
+	logutil.Info("synapses: resolved %d CALLS edges\n", n)
 	if ni := resolver.ResolveImplementsEdges(g); ni > 0 {
-		fmt.Fprintf(os.Stderr, "synapses: resolved %d IMPLEMENTS edges\n", ni)
+		logutil.Info("synapses: resolved %d IMPLEMENTS edges\n", ni)
 	}
 	// R31: resolve documentation → code entity links (EXPLAINS/DOCUMENTED_BY).
 	if nd := resolver.ResolveDocEdges(g); nd > 0 {
-		fmt.Fprintf(os.Stderr, "synapses: resolved %d EXPLAINS edges\n", nd)
+		logutil.Info("synapses: resolved %d EXPLAINS edges\n", nd)
 	}
 
 	if st != nil && len(mtimes) > 0 {
 		if saveErr := st.SaveFileMtimes(mtimes); saveErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: save file mtimes: %v\n", saveErr)
+			logutil.Error("synapses: save file mtimes: %v\n", saveErr)
 		}
 	}
 	return g, nil
@@ -1279,7 +1280,7 @@ func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfi
 	}
 
 	unchanged := len(fresh) - changed
-	fmt.Fprintf(os.Stderr, "synapses: smart reindex: %d changed, %d unchanged, %d removed\n",
+	logutil.Info("synapses: smart reindex: %d changed, %d unchanged, %d removed\n",
 		changed, unchanged, removed)
 
 	if changed+removed > 0 {
@@ -1294,18 +1295,18 @@ func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfi
 			g.BulkAddCallSites(stored)
 		}
 		n := resolver.ResolveCallEdges(g)
-		fmt.Fprintf(os.Stderr, "synapses: resolved %d CALLS edges\n", n)
+		logutil.Info("synapses: resolved %d CALLS edges\n", n)
 		if ni := resolver.ResolveImplementsEdges(g); ni > 0 {
-			fmt.Fprintf(os.Stderr, "synapses: resolved %d IMPLEMENTS edges\n", ni)
+			logutil.Info("synapses: resolved %d IMPLEMENTS edges\n", ni)
 		}
 		// R31: re-resolve doc edges after incremental reparse.
 		if nd := resolver.ResolveDocEdges(g); nd > 0 {
-			fmt.Fprintf(os.Stderr, "synapses: resolved %d EXPLAINS edges\n", nd)
+			logutil.Info("synapses: resolved %d EXPLAINS edges\n", nd)
 		}
 	}
 
 	if saveErr := st.SaveFileMtimes(fresh); saveErr != nil {
-		fmt.Fprintf(os.Stderr, "synapses: save file mtimes: %v\n", saveErr)
+		logutil.Error("synapses: save file mtimes: %v\n", saveErr)
 	}
 	return g, nil
 }
@@ -1338,7 +1339,7 @@ func mergeLinkedProject(g *graph.Graph, linkedPath string) error {
 	}
 
 	g.MergeFrom(linked)
-	fmt.Fprintf(os.Stderr, "synapses: merged linked project %s (%d nodes)\n",
+	logutil.Info("synapses: merged linked project %s (%d nodes)\n",
 		filepath.Base(absLinked), linked.NodeCount())
 	return nil
 }
@@ -1658,13 +1659,13 @@ func cmdInit(args []string) error {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "[deprecated] 'synapses init' is replaced by 'synapses start'.\n\n")
+	logutil.Warn("[deprecated] 'synapses init' is replaced by 'synapses start'.\n\n")
 
 	// Generate synapses.json if missing — the only setup step still useful here.
 	cfgPath := filepath.Join(absPath, "synapses.json")
 	if _, statErr := os.Stat(cfgPath); os.IsNotExist(statErr) {
 		if err := writeOnboardSynapsesJSON(absPath); err != nil {
-			fmt.Fprintf(os.Stderr, "  warning: could not write synapses.json: %v\n", err)
+			logutil.Warn("  warning: could not write synapses.json: %v\n", err)
 		} else {
 			fmt.Printf("  Created %s\n", cfgPath)
 		}
@@ -2280,7 +2281,7 @@ func cmdConnect(args []string) error {
 
 	for _, r := range results {
 		if r.err != nil {
-			fmt.Fprintf(os.Stderr, "  warning: %s: %v\n", r.path, r.err)
+			logutil.Warn("  warning: %s: %v\n", r.path, r.err)
 		} else {
 			fmt.Printf("  wrote %s\n", r.path)
 		}
@@ -2801,7 +2802,7 @@ func cmdMCPSetup(args []string) error {
 				cmd.Stderr = os.Stderr
 				if err := cmd.Run(); err != nil {
 					// Not fatal — Claude Code may not be installed.
-					fmt.Fprintf(os.Stderr, "  ! claude CLI not available (%v). Manual setup: claude mcp add synapses -- synapses start --path .\n", err)
+					logutil.Warn("  ! claude CLI not available (%v). Manual setup: claude mcp add synapses -- synapses start --path .\n", err)
 				}
 				return nil
 			},
@@ -2815,7 +2816,7 @@ func cmdMCPSetup(args []string) error {
 			continue
 		}
 		if err := a.setup(); err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ %-12s %v\n", a.name, err)
+			logutil.Error("  ✗ %-12s %v\n", a.name, err)
 		} else {
 			fmt.Printf("  \033[32m✓\033[0m %-12s %s\n", a.name, a.cfgPath)
 			wrote++
@@ -2920,7 +2921,7 @@ func fetchTopNSummaries(ctx context.Context, bc *brain.Client, g *graph.Graph, s
 		}(node)
 	}
 	wg.Wait()
-	fmt.Fprintf(os.Stderr, "synapses: eager brain write-back complete (%d/%d top entities enriched)\n", written, len(nodes))
+	logutil.Info("synapses: eager brain write-back complete (%d/%d top entities enriched)\n", written, len(nodes))
 }
 
 // bulkIngestToBrain sends all code nodes to the brain sidecar for prose summary generation.
@@ -2943,7 +2944,7 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "synapses: embedding %d nodes (model: %s) …\n", len(nodeIDs), ec.Model())
+	logutil.Info("synapses: embedding %d nodes (model: %s) …\n", len(nodeIDs), ec.Model())
 
 	const batchSize = 16
 	done := 0
@@ -2991,7 +2992,7 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 					continue
 				}
 				if err := st.UpsertEmbedding(nodeID, ec.Model(), vec); err != nil {
-					fmt.Fprintf(os.Stderr, "synapses: embed store error for %s: %v\n", nodeID, err)
+					logutil.Error("synapses: embed store error for %s: %v\n", nodeID, err)
 				}
 				done++
 			}
@@ -3001,13 +3002,13 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 		// Store all batch results.
 		for j, nodeID := range validIDs {
 			if err := st.UpsertEmbedding(nodeID, ec.Model(), vecs[j]); err != nil {
-				fmt.Fprintf(os.Stderr, "synapses: embed store error for %s: %v\n", nodeID, err)
+				logutil.Error("synapses: embed store error for %s: %v\n", nodeID, err)
 			}
 			done++
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "synapses: embedding complete (%d/%d nodes indexed)\n", done, len(nodeIDs))
+	logutil.Info("synapses: embedding complete (%d/%d nodes indexed)\n", done, len(nodeIDs))
 }
 
 // createMemoryEmbedder creates a memory Embedder based on the config's Embeddings mode.
@@ -3029,19 +3030,19 @@ func createMemoryEmbedder(cfg *config.Config) embed.Embedder {
 		if e == nil {
 			return nil
 		}
-		fmt.Fprintf(os.Stderr, "synapses: memory embeddings via ollama (%s)\n", endpoint)
+		logutil.Info("synapses: memory embeddings via ollama (%s)\n", endpoint)
 		return e
 	case "builtin":
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: cannot determine home dir for builtin embeddings: %v\n", err)
+			logutil.Error("synapses: cannot determine home dir for builtin embeddings: %v\n", err)
 			return nil
 		}
 		modelsDir := filepath.Join(homeDir, ".synapses", "models")
-		fmt.Fprintf(os.Stderr, "synapses: memory embeddings via builtin all-MiniLM-L6-v2\n")
+		logutil.Info("synapses: memory embeddings via builtin all-MiniLM-L6-v2\n")
 		return embed.NewBuiltinEmbedder(modelsDir)
 	default:
-		fmt.Fprintf(os.Stderr, "synapses: unknown embeddings mode %q, disabling\n", mode)
+		logutil.Warn("synapses: unknown embeddings mode %q, disabling\n", mode)
 		return nil
 	}
 }
@@ -3104,7 +3105,7 @@ dispatch:
 		}(n)
 	}
 	wg.Wait()
-	fmt.Fprintf(os.Stderr, "synapses: ingested %d nodes to brain (full coverage)\n", len(nodes))
+	logutil.Info("synapses: ingested %d nodes to brain (full coverage)\n", len(nodes))
 }
 
 // fetchAndWriteBackSummaries waits for the brain to process ingested nodes,
@@ -3157,7 +3158,7 @@ dispatch:
 		}(n)
 	}
 	wg.Wait()
-	fmt.Fprintf(os.Stderr, "synapses: brain write-back complete (%d summaries stored)\n", written)
+	logutil.Info("synapses: brain write-back complete (%d summaries stored)\n", written)
 }
 
 // cmdExport loads the cached graph and writes it to stdout as DOT, Mermaid, or
