@@ -313,7 +313,9 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 		FROM memory_embeddings e
 		JOIN memories m ON e.memory_id = m.id
 		WHERE m.stale = 0
-		  AND m.expires_at > ?`, now)
+		  AND m.expires_at > ?
+		ORDER BY e.rowid DESC
+		LIMIT 10000`, now)
 	if err != nil {
 		return nil, fmt.Errorf("memory vector search: %w", err)
 	}
@@ -367,13 +369,17 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 
 	// Pass 1: Lightweight scan with threshold filter.
 	// Stale embeddings included — see MemoryVectorSearch comment.
+	// LIMIT 10000: safety cap so heap allocation stays bounded on large corpora.
+	// ORDER BY e.rowid DESC: recent memories scanned first within the cap.
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.knowledgeDB.Query(`
 		SELECT e.memory_id, e.embedding, e.stale
 		FROM memory_embeddings e
 		JOIN memories m ON e.memory_id = m.id
 		WHERE m.stale = 0
-		  AND m.expires_at > ?`, now)
+		  AND m.expires_at > ?
+		ORDER BY e.rowid DESC
+		LIMIT 10000`, now)
 	if err != nil {
 		return nil, fmt.Errorf("memory vector search with threshold: %w", err)
 	}

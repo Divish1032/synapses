@@ -205,6 +205,63 @@ func TestKnowledgeEvent_Expired(t *testing.T) {
 	}
 }
 
+// TestKnowledgeEvent_ExpiredPerMemory verifies that ExpireMemories emits a
+// per-memory knowledge_expired event (with memory_id payload) for each
+// deleted memory. This is distinct from PruneStaleData which emits a summary
+// event — ExpireMemories is called on a schedule and at end_session and must
+// be observable at the memory level for audit and learning-loop consumers.
+func TestKnowledgeEvent_ExpiredPerMemory(t *testing.T) {
+	t.Parallel()
+	st := openMemTestStore(t)
+
+	// Insert two memories directly with a past expires_at.
+	past := time.Now().Add(-1 * time.Second).UTC().Format(time.RFC3339)
+	ids := []string{"expire-mem-1", "expire-mem-2"}
+	for _, id := range ids {
+		_, err := st.knowledgeDB.Exec(`
+			INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
+			                      created_at, expires_at, last_accessed_at, source)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, TierProject, "expired content "+id,
+			"", "agent-expire-test", "", "[]",
+			past, past, past, SourceManual,
+		)
+		if err != nil {
+			t.Fatalf("seed expired memory %s: %v", id, err)
+		}
+	}
+
+	n, err := st.ExpireMemories()
+	if err != nil {
+		t.Fatalf("ExpireMemories: %v", err)
+	}
+	if n < 2 {
+		t.Fatalf("expected 2 memories deleted, got %d", n)
+	}
+
+	events := eventsOfType(t, st, "knowledge_expired")
+	if len(events) < 2 {
+		t.Fatalf("expected at least 2 knowledge_expired events, got %d", len(events))
+	}
+
+	// Verify each expired memory ID appears in an event payload.
+	seen := make(map[string]bool)
+	for _, ev := range events {
+		var p map[string]string
+		if err := json.Unmarshal([]byte(ev.Payload), &p); err != nil {
+			continue
+		}
+		if mid, ok := p["memory_id"]; ok {
+			seen[mid] = true
+		}
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			t.Errorf("no knowledge_expired event found for memory_id %q; events: %v", id, events)
+		}
+	}
+}
+
 // TestKnowledgeEvent_NoSpuriousCreated verifies that a failed InsertMemory
 // (e.g. store closed) does NOT emit a spurious knowledge_created event.
 func TestKnowledgeEvent_NoSpuriousOnError(t *testing.T) {
