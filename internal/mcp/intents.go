@@ -260,7 +260,7 @@ func (s *Server) handlePrepareContext(
 	projectsParam := stringArg(req, "projects")
 
 	if target == "" {
-		return mcp.NewToolResultError("target is required"), nil
+		return mcp.NewToolResultError("target is required (e.g., 'AuthService', 'handleLogin')"), nil
 	}
 	if intent == "" {
 		intent = "understand"
@@ -982,7 +982,7 @@ func (s *Server) handlePlanContext(
 ) (*mcp.CallToolResult, error) {
 	target := stringArg(req, "target")
 	if target == "" {
-		return mcp.NewToolResultError("target is required"), nil
+		return mcp.NewToolResultError("target is required (e.g., 'AuthService', 'handleLogin')"), nil
 	}
 	fileHint := stringArg(req, "file")
 	taskID := stringArg(req, "task_id")

@@ -152,7 +152,7 @@ func (s *Server) handleGetContext(
 	handlerStart := time.Now()
 	entityName, ok := req.GetArguments()["entity"].(string)
 	if !ok || entityName == "" {
-		return mcp.NewToolResultError("entity is required"), nil
+		return mcp.NewToolResultError("entity is required (e.g., 'AuthService', 'handleLogin')"), nil
 	}
 
 	// Session ID for server-side auto-caching. Empty for stdio/test paths — auto-cache
@@ -1099,7 +1099,7 @@ func (s *Server) handleGetImpact(
 ) (*mcp.CallToolResult, error) {
 	symbol, _ := req.GetArguments()["symbol"].(string)
 	if symbol == "" {
-		return mcp.NewToolResultError("symbol is required"), nil
+		return mcp.NewToolResultError("symbol is required (e.g., 'AuthService', 'handleLogin')"), nil
 	}
 
 	maxDepth := 3

@@ -148,14 +148,14 @@ func (s *Server) handleEndSession(
 ) (*mcplib.CallToolResult, error) {
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 	if agentID == "" {
-		return mcplib.NewToolResultError("agent_id is required"), nil
+		return mcplib.NewToolResultError("agent_id is required (e.g., 'implementer', 'reviewer')"), nil
 	}
 
 	taskID, _ := req.GetArguments()["task_id"].(string)
 	summary, _ := req.GetArguments()["summary"].(string)
 
 	if s.store == nil {
-		return mcplib.NewToolResultError("store not available"), nil
+		return mcplib.NewToolResultError("store not available: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	// RX1: clear call counter so that the auto-log doesn't fire again for this

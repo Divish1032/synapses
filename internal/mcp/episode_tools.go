@@ -21,19 +21,19 @@ func (s *Server) handleRemember(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("episodic memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("episodic memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	agentID := stringArg(req, "agent_id")
 	if agentID == "" {
-		return mcp.NewToolResultError("agent_id is required"), nil
+		return mcp.NewToolResultError("agent_id is required (e.g., 'implementer', 'reviewer')"), nil
 	}
 	decision, err := stringArgLimited(req, "decision", maxArgLengthDecision)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if decision == "" {
-		return mcp.NewToolResultError("decision is required"), nil
+		return mcp.NewToolResultError("decision is required (e.g., 'switched auth to OAuth 2.0')"), nil
 	}
 
 	episodeType := stringArg(req, "episode_type")
@@ -284,7 +284,7 @@ func (s *Server) handleRecall(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("episodic memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("episodic memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	query := stringArg(req, "query")
@@ -549,7 +549,7 @@ func (s *Server) handleGetEpisodes(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("episodic memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("episodic memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	limit := 20
@@ -603,12 +603,12 @@ func (s *Server) handleCheckPlanSafety(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("episodic memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("episodic memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	planDesc := stringArg(req, "plan_description")
 	if planDesc == "" {
-		return mcp.NewToolResultError("plan_description is required"), nil
+		return mcp.NewToolResultError("plan_description is required (e.g., 'refactor auth module to use OAuth 2.0')"), nil
 	}
 
 	agentID := stringArg(req, "agent_id")
@@ -701,7 +701,7 @@ func (s *Server) handleGetRuleCandidates(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("episodic memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("episodic memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	minOccurrences := 2

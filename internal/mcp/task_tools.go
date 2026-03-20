@@ -112,12 +112,12 @@ func (s *Server) handleCreatePlan(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	title, _ := req.GetArguments()["title"].(string)
 	if title == "" {
-		return mcp.NewToolResultError("title is required"), nil
+		return mcp.NewToolResultError("title is required (e.g., 'Implement OAuth flow', 'Fix auth token bug')"), nil
 	}
 	description := stringArg(req, "description")
 	agentID, _ := req.GetArguments()["agent_id"].(string)
@@ -214,7 +214,7 @@ func (s *Server) handleGetPendingTasks(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	planID, _ := req.GetArguments()["plan_id"].(string)
@@ -285,12 +285,12 @@ func (s *Server) handleSaveSessionState(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	taskID := stringArg(req, "task_id")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return mcp.NewToolResultError("task_id is required (use get_pending_tasks to list task IDs)"), nil
 	}
 
 	state := store.SessionState{
@@ -350,12 +350,12 @@ func (s *Server) handleGetSessionState(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	taskID := stringArg(req, "task_id")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return mcp.NewToolResultError("task_id is required (use get_pending_tasks to list task IDs)"), nil
 	}
 
 	state, err := s.store.GetSessionState(taskID)
@@ -415,12 +415,12 @@ func (s *Server) handleUpdateTask(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	id, _ := req.GetArguments()["id"].(string)
 	if id == "" {
-		return mcp.NewToolResultError("id is required"), nil
+		return mcp.NewToolResultError("id is required (task ID — use get_pending_tasks to list)"), nil
 	}
 	status, _ := req.GetArguments()["status"].(string)
 	if status == "" {

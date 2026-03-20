@@ -61,7 +61,7 @@ func (s *Server) handleFindEntity(
 ) (*mcp.CallToolResult, error) {
 	query, ok := req.GetArguments()["query"].(string)
 	if !ok || query == "" {
-		return mcp.NewToolResultError("query is required"), nil
+		return mcp.NewToolResultError("query is required (e.g., 'AuthService', 'handleLogin')"), nil
 	}
 	format, _ := req.GetArguments()["format"].(string)
 	if format == "" {
@@ -645,7 +645,7 @@ func (s *Server) handleGetFileContext(
 	handlerStart := time.Now()
 	filePath, ok := req.GetArguments()["file"].(string)
 	if !ok || filePath == "" {
-		return mcp.NewToolResultError("file is required"), nil
+		return mcp.NewToolResultError("file is required (e.g., 'internal/auth/service.go')"), nil
 	}
 
 	root := s.graph.Root()
@@ -772,7 +772,7 @@ func (s *Server) handleSearch(
 ) (*mcp.CallToolResult, error) {
 	query, ok := req.GetArguments()["query"].(string)
 	if !ok || query == "" {
-		return mcp.NewToolResultError("query is required"), nil
+		return mcp.NewToolResultError("query is required (e.g., 'auth caching', 'UserService login flow')"), nil
 	}
 
 	// R29: track repeated searches for the same query as a confusion signal.
@@ -1135,7 +1135,7 @@ func (s *Server) handleSemanticSearch(
 
 	query := stringArg(req, "query")
 	if query == "" {
-		return mcp.NewToolResultError("query is required"), nil
+		return mcp.NewToolResultError("query is required (e.g., 'auth decisions', 'why we switched to OAuth')"), nil
 	}
 
 	limitRaw, _ := req.GetArguments()["limit"].(float64)
