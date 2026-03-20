@@ -22,37 +22,74 @@ const (
 	builtinModelFile = "model.onnx"
 	// builtinModel is the model identifier used in UpsertMemoryEmbedding.
 	builtinModel = "all-MiniLM-L6-v2"
+
+	// defaultPoolSize is the number of pipeline instances to create.
+	// 3 balances memory (~69 MB total) against concurrency for 50+ sessions.
+	defaultPoolSize = 3
 )
+
+// pipelineSlot is one independently-usable ONNX pipeline instance.
+// Each slot has its own hugot Session so slots can run concurrently.
+type pipelineSlot struct {
+	session  *hugot.Session
+	pipeline *pipelines.FeatureExtractionPipeline
+}
 
 // BuiltinEmbedder uses the pure-Go hugot library to run all-MiniLM-L6-v2
 // inference locally without any external dependencies. The ONNX model
 // (~23MB) is auto-downloaded from HuggingFace on first use and cached
 // in the models directory.
 //
-// Thread-safe: all Embed calls are serialized by a mutex because the
-// underlying hugot pipeline is not goroutine-safe per-call.
+// Concurrent: a pool of pipeline instances allows bounded parallel
+// inference. The pool size defaults to 3 — up to 3 Embed calls run
+// simultaneously; additional callers block (respecting context) until
+// a slot is returned.
 //
 // Init retry: if model download fails (e.g., no internet), subsequent
 // Embed() calls will retry initialization — not permanently broken.
 type BuiltinEmbedder struct {
 	modelsDir string
+	poolSize  int
 
 	mu            sync.Mutex
-	session       *hugot.Session
-	pipeline      *pipelines.FeatureExtractionPipeline
+	pool          chan *pipelineSlot // buffered channel acting as a slot pool
 	ready         bool
 	initAttempted bool // true once ensureModel() has been called at least once
+	closed        bool
+	done          chan struct{}   // closed by Close() to unblock pool waiters
+	inflight      sync.WaitGroup // tracks in-flight Embed calls for graceful shutdown
 }
 
 // NewBuiltinEmbedder creates a BuiltinEmbedder that stores its model in
 // modelsDir (typically ~/.synapses/models). The model is lazily downloaded
-// on the first Embed() call.
+// on the first Embed() call. Uses a pool of 3 pipeline instances for
+// concurrent inference.
 func NewBuiltinEmbedder(modelsDir string) *BuiltinEmbedder {
-	return &BuiltinEmbedder{modelsDir: modelsDir}
+	return &BuiltinEmbedder{
+		modelsDir: modelsDir,
+		poolSize:  defaultPoolSize,
+		done:      make(chan struct{}),
+	}
 }
 
-// ensureModel downloads the model if not already cached, and initializes the
-// hugot session and pipeline. Must be called under b.mu lock.
+// NewBuiltinEmbedderWithPoolSize creates a BuiltinEmbedder with a custom
+// pool size. poolSize is clamped to [1, 8].
+func NewBuiltinEmbedderWithPoolSize(modelsDir string, poolSize int) *BuiltinEmbedder {
+	if poolSize < 1 {
+		poolSize = 1
+	}
+	if poolSize > 8 {
+		poolSize = 8
+	}
+	return &BuiltinEmbedder{
+		modelsDir: modelsDir,
+		poolSize:  poolSize,
+		done:      make(chan struct{}),
+	}
+}
+
+// ensureModel downloads the model if not already cached, and initializes
+// the pipeline pool. Must be called under b.mu lock.
 // Returns nil on success. On failure, the caller should retry next time.
 func (b *BuiltinEmbedder) ensureModel() error {
 	if b.ready {
@@ -85,34 +122,54 @@ func (b *BuiltinEmbedder) ensureModel() error {
 		return fmt.Errorf("embedding model not found at %s: %w", onnxPath, err)
 	}
 
-	// Initialize hugot with pure Go backend.
-	session, err := hugot.NewGoSession()
-	if err != nil {
-		return fmt.Errorf("create Go inference session: %w", err)
+	// Create poolSize pipeline instances, each with its own session.
+	// Collect in a slice first so cleanup on partial failure is simple.
+	slots := make([]*pipelineSlot, 0, b.poolSize)
+	for i := 0; i < b.poolSize; i++ {
+		session, err := hugot.NewGoSession()
+		if err != nil {
+			for _, s := range slots {
+				s.session.Destroy() //nolint:errcheck
+			}
+			return fmt.Errorf("create Go inference session [%d]: %w", i, err)
+		}
+
+		config := hugot.FeatureExtractionConfig{
+			ModelPath:    modelPath,
+			Name:         fmt.Sprintf("memory-embedder-%d", i),
+			OnnxFilename: builtinModelFile,
+			Options: []hugot.FeatureExtractionOption{
+				pipelines.WithNormalization(),
+			},
+		}
+		pipeline, err := hugot.NewPipeline(session, config)
+		if err != nil {
+			session.Destroy() //nolint:errcheck
+			for _, s := range slots {
+				s.session.Destroy() //nolint:errcheck
+			}
+			return fmt.Errorf("create embedding pipeline [%d]: %w", i, err)
+		}
+
+		slots = append(slots, &pipelineSlot{session: session, pipeline: pipeline})
 	}
 
-	config := hugot.FeatureExtractionConfig{
-		ModelPath:    modelPath,
-		Name:         "memory-embedder",
-		OnnxFilename: builtinModelFile,
-		Options: []hugot.FeatureExtractionOption{
-			pipelines.WithNormalization(),
-		},
-	}
-	pipeline, err := hugot.NewPipeline(session, config)
-	if err != nil {
-		session.Destroy() //nolint:errcheck
-		return fmt.Errorf("create embedding pipeline: %w", err)
+	// Move all slots into the buffered channel.
+	pool := make(chan *pipelineSlot, b.poolSize)
+	for _, s := range slots {
+		pool <- s
 	}
 
-	b.session = session
-	b.pipeline = pipeline
+	b.pool = pool
 	b.ready = true
+	logutil.Info("synapses: embedding pool ready (%d pipeline instances)\n", b.poolSize)
 	return nil
 }
 
 // Embed generates a 384-dimensional embedding for text using the builtin
-// all-MiniLM-L6-v2 model. Thread-safe but serialized.
+// all-MiniLM-L6-v2 model. Concurrent: up to poolSize calls run in parallel;
+// additional callers block until a pipeline slot is available (respecting
+// context cancellation and shutdown).
 //
 // If model initialization fails (e.g., no internet for download), subsequent
 // calls will retry — the embedder is never permanently broken.
@@ -124,23 +181,47 @@ func (b *BuiltinEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 	default:
 	}
 
+	// Hold mu to check closed flag and register in-flight.
+	// inflight.Add MUST happen under mu before Close sets closed=true,
+	// so Close().Wait() never returns while an Add is pending.
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	// Check context again after acquiring lock (may have waited).
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
+	if b.closed {
+		b.mu.Unlock()
+		return nil, fmt.Errorf("builtin embedder: closed")
 	}
+	b.inflight.Add(1)
+	err := b.ensureModel()
+	pool := b.pool
+	b.mu.Unlock()
 
-	if err := b.ensureModel(); err != nil {
+	defer b.inflight.Done()
+
+	if err != nil {
 		return nil, err
 	}
 
-	result, err := b.pipeline.RunPipeline([]string{text})
-	if err != nil {
-		return nil, fmt.Errorf("builtin embed: %w", err)
+	// Acquire a pipeline slot from the pool (bounded concurrency).
+	// Respects context cancellation and embedder shutdown.
+	var slot *pipelineSlot
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-b.done:
+		return nil, fmt.Errorf("builtin embedder: closed")
+	case slot = <-pool:
+		// Got a slot — proceed with inference.
+	}
+
+	// Run inference without holding any lock — this is the concurrency win.
+	result, runErr := slot.pipeline.RunPipeline([]string{text})
+
+	// Return slot to pool. The channel always has capacity for our slot
+	// because the total slot count equals the channel buffer size, and
+	// we removed exactly one slot above.
+	pool <- slot
+
+	if runErr != nil {
+		return nil, fmt.Errorf("builtin embed: %w", runErr)
 	}
 	if len(result.Embeddings) == 0 {
 		return nil, fmt.Errorf("builtin embed: empty result")
@@ -154,16 +235,21 @@ func (b *BuiltinEmbedder) Model() string {
 }
 
 // IsReady reports whether the model is downloaded and the inference pipeline
-// is initialized. Thread-safe.
+// pool is initialized. Thread-safe.
 func (b *BuiltinEmbedder) IsReady() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.ready
 }
 
+// PoolSize returns the configured pool size for this embedder.
+func (b *BuiltinEmbedder) PoolSize() int {
+	return b.poolSize
+}
+
 // StatusDetail returns a human-readable string describing the current
 // initialization state. Thread-safe. Three possible values:
-//   - "ready"                    — pipeline initialized, embeddings working
+//   - "ready"                    — pipeline pool initialized, embeddings working
 //   - "model not yet downloaded" — Embed() has never been called; no init attempted
 //   - "unavailable"              — init was attempted but failed (download error,
 //     pipeline error, or air-gapped environment); Embed() will retry automatically
@@ -179,17 +265,41 @@ func (b *BuiltinEmbedder) StatusDetail() string {
 	return "model not yet downloaded"
 }
 
-// Close releases the hugot session resources.
+// Close releases all hugot session resources in the pool. Blocks until all
+// in-flight Embed calls complete and return their slots, then destroys all
+// pipeline instances. Safe to call concurrently; second call is a no-op.
 func (b *BuiltinEmbedder) Close() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.session != nil {
-		err := b.session.Destroy()
-		b.session = nil
-		b.pipeline = nil
-		b.ready = false
-		return err
+	if b.closed {
+		b.mu.Unlock()
+		return nil
 	}
-	return nil
-}
+	b.closed = true
+	close(b.done) // unblock goroutines waiting for a pool slot
+	b.mu.Unlock()
 
+	// Wait for all in-flight Embed calls to finish and return their slots.
+	// Safe because: inflight.Add(1) only happens under mu while closed==false,
+	// and we just set closed=true, so no new Add calls can occur.
+	b.inflight.Wait()
+
+	// All slots are now back in the pool. Drain and destroy.
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.pool == nil {
+		b.ready = false
+		return nil
+	}
+
+	close(b.pool)
+	var firstErr error
+	for slot := range b.pool {
+		if err := slot.session.Destroy(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	b.pool = nil
+	b.ready = false
+	return firstErr
+}
