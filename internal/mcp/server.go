@@ -1390,7 +1390,7 @@ func (s *Server) registerTools() {
 				"Checks a list of proposed code changes against the project's architectural rules. "+
 					"Returns any violations before a single line of code is written. "+
 					"Call this before implementing a plan that touches multiple files. "+
-					"Pass check_safety=true to also run check_plan_safety inline (saves a round-trip).",
+					"Pass check_safety=true to also run a failure-episode safety check inline.",
 			),
 			mcp.WithString("changes",
 				mcp.Required(),
@@ -1400,7 +1400,7 @@ func (s *Server) registerTools() {
 				),
 			),
 			mcp.WithBoolean("check_safety",
-				mcp.Description("When true, also runs check_plan_safety inline and adds safety_check to the response."),
+				mcp.Description("When true, also runs a failure-episode safety check inline and adds safety_check to the response."),
 			),
 			mcp.WithString("plan_description",
 				mcp.Description("Natural language description of the plan (used for safety check). Auto-derived from changed files if omitted."),
@@ -2203,7 +2203,7 @@ func (s *Server) registerTools() {
 			mcp.WithDescription(
 				"Records a decision or failure as an episode in persistent memory. "+
 					"Use episode_type='failure' + outcome='failure' to populate the Hall of Shame "+
-					"so check_plan_safety() can warn future agents. "+
+					"so validate_plan(check_safety=true) can warn future agents. "+
 					"Use episode_type='decision' for general architectural choices.",
 			),
 			mcp.WithString("agent_id",
@@ -2301,10 +2301,10 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"check_plan_safety",
 			mcp.WithDescription(
-				"Searches failure episodes for the closest match to the proposed plan (Reactive Interjection). "+
+				"Prefer validate_plan(check_safety=true) instead — it runs this check inline. "+
+					"Searches failure episodes for the closest match to the proposed plan (Reactive Interjection). "+
 					"Returns a Recovery Packet if a similar past failure is found — the agent decides relevance. "+
-					"Non-blocking: returns 'clear' if no failures recorded yet or on timeout. "+
-					"Call this BEFORE validate_plan() when touching sensitive components.",
+					"Non-blocking: returns 'clear' if no failures recorded yet or on timeout.",
 			),
 			mcp.WithString("plan_description",
 				mcp.Required(),
@@ -2356,14 +2356,14 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"plan_context",
 			mcp.WithDescription(
-				"Power-user tool — for most agents, call check_plan_safety + validate_plan + prepare_context(intent='plan') individually instead. "+
-					"Use this tool only when you want all three steps bundled in one call. "+
-					"Find this tool via discover_tools(query='plan implementation gate'). "+
+				"Power-user compound tool — for most agents, use validate_plan(check_safety=true) + "+
+					"prepare_context(intent='plan') individually instead. "+
 					"Single-call pre-implementation gate. Runs three checks in one round-trip: "+
-					"(1) check_plan_safety — searches failure episodes for past matches (500ms cap); "+
+					"(1) safety check — searches failure episodes for past matches (500ms cap); "+
 					"(2) validate_plan — checks proposed changes against architectural rules; "+
 					"(3) prepare_context(intent=plan) — scope assessment: files, interfaces, risk level. "+
-					"Returns a verdict: 'clear' | 'warnings' | 'violations' | 'blocked'.",
+					"Returns a verdict: 'clear' | 'warnings' | 'violations' | 'blocked'. "+
+					"Find this tool via discover_tools(query='plan implementation gate').",
 			),
 			mcp.WithString("target",
 				mcp.Required(),
