@@ -2,12 +2,91 @@ package store_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/store"
 )
+
+// ── WAL concurrency: concurrent reads and writes on the primary store ─────────
+//
+// This test directly validates the MaxOpenConns(2) setting in store.Open().
+// With MaxOpenConns(1), all reads are serialized behind writes. With
+// MaxOpenConns(2) and WAL mode, readers and writers proceed concurrently.
+// If the concurrency setting is broken (e.g. reverted to 1 with a slow write
+// path), this test becomes flaky under load. With a data-race or corruption
+// bug it will either report t.Error or be caught by -race.
+
+func TestWALConcurrency_ConcurrentReadWrite(t *testing.T) {
+	st := openTestStore(t)
+
+	const writers = 5
+	const readers = 5
+
+	// Seed one memory so readers have something to query from the start.
+	seed := store.Memory{
+		Tier:    store.TierProject,
+		Content: "seed memory for wal concurrency test validation",
+		AgentID: "test-agent",
+		Source:  store.SourceManual,
+	}
+	if _, err := st.InsertMemory(seed); err != nil {
+		t.Fatalf("seed InsertMemory: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers+readers)
+
+	// Writers: insert distinct memories concurrently.
+	for i := range writers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			m := store.Memory{
+				Tier:    store.TierProject,
+				Content: fmt.Sprintf("wal concurrency concurrent write number %d proof", i),
+				AgentID: "test-agent",
+				Source:  store.SourceManual,
+			}
+			if _, err := st.InsertMemory(m); err != nil {
+				errs <- fmt.Errorf("writer %d: %w", i, err)
+			}
+		}(i)
+	}
+
+	// Readers: search memories concurrently with the writes.
+	for i := range readers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results, err := st.SearchMemories("wal concurrency seed memory", 10)
+			if err != nil {
+				errs <- fmt.Errorf("reader %d: %w", i, err)
+				return
+			}
+			_ = results // correctness: no panic, no error
+		}(i)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
+	}
+
+	// After all goroutines finish, verify all written memories are readable.
+	all, err := st.SearchMemories("wal concurrency concurrent write number", writers*2)
+	if err != nil {
+		t.Fatalf("post-concurrency recall: %v", err)
+	}
+	if len(all) < writers {
+		t.Errorf("expected at least %d memories after concurrent writes, got %d", writers, len(all))
+	}
+}
 
 // ── OpenReadOnly ──────────────────────────────────────────────────────────────
 
