@@ -96,6 +96,30 @@ func (s *Server) quadRecallSearch(
 			chCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 
+			// Sprint 10.7: lazy re-embedding pass for stale embeddings.
+			// When the file watcher detects a changed entity, it marks the
+			// embeddings of anchored memories as stale=1 without deleting them.
+			// Here we refresh up to 10 stale embeddings before running the
+			// vector search, so they participate in scoring instead of being
+			// silently excluded. Bounded at 10 to keep latency negligible
+			// within the 5s channel budget. Non-fatal: errors are skipped,
+			// stale embeddings simply miss this recall and retry next time.
+			const lazyRebatchLimit = 10
+			if staleIDs, sErr := s.store.GetStaleEmbeddingMemoryIDs(lazyRebatchLimit); sErr == nil {
+				model := s.memoryEmbedder.Model()
+				for _, memID := range staleIDs {
+					text, ok := s.store.GetMemoryTextForEmbedding(memID)
+					if !ok {
+						continue
+					}
+					vec, embErr := s.memoryEmbedder.Embed(chCtx, text)
+					if embErr != nil || len(vec) == 0 {
+						continue // embedder failure is non-fatal; try again next recall
+					}
+					_ = s.store.UpsertMemoryEmbedding(memID, model, vec)
+				}
+			}
+
 			queryVec, embedErr := s.memoryEmbedder.Embed(chCtx, query)
 			if embedErr != nil || len(queryVec) == 0 {
 				if embedErr != nil {

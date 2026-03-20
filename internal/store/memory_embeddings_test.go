@@ -785,3 +785,179 @@ func TestMemoryContentHash_DifferentContent(t *testing.T) {
 		t.Error("different content should produce different hashes")
 	}
 }
+
+// ── GetMemoryIDsByAnchorNodes tests ────────────────────────────────────────
+
+func TestGetMemoryIDsByAnchorNodes_EmptyNodeIDs(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+	ids, err := st.GetMemoryIDsByAnchorNodes(nil, 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected empty result for nil nodeIDs, got %d", len(ids))
+	}
+}
+
+func TestGetMemoryIDsByAnchorNodes_ZeroLimit(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+	ids, err := st.GetMemoryIDsByAnchorNodes([]string{"node-1"}, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected empty result for limit=0, got %d", len(ids))
+	}
+}
+
+func TestGetMemoryIDsByAnchorNodes_ReturnsAnchoredMemories(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+
+	// Insert a memory anchored to node-a.
+	memID, err := st.InsertMemory(Memory{
+		Tier:    TierProject,
+		Content: "AuthService caches tokens in Redis with 15-minute TTL",
+		AgentID: "test",
+	})
+	if err != nil {
+		t.Fatalf("InsertMemory: %v", err)
+	}
+	if err := st.InsertMemoryAnchors(memID, []string{"node-a"}); err != nil {
+		t.Fatalf("InsertMemoryAnchors: %v", err)
+	}
+
+	ids, err := st.GetMemoryIDsByAnchorNodes([]string{"node-a"}, 100)
+	if err != nil {
+		t.Fatalf("GetMemoryIDsByAnchorNodes: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != memID {
+		t.Errorf("expected [%s], got %v", memID, ids)
+	}
+}
+
+func TestGetMemoryIDsByAnchorNodes_StaleMemoryExcluded(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+
+	memID, _ := st.InsertMemory(Memory{
+		Tier:    TierProject,
+		Content: "Stale auth memory that should not appear in embedding invalidation",
+		AgentID: "test",
+	})
+	_ = st.InsertMemoryAnchors(memID, []string{"node-stale"})
+	// Mark the memory itself stale directly (simulates anchor-node removal).
+	st.knowledgeDB.Exec(`UPDATE memories SET stale = 1 WHERE id = ?`, memID)
+
+	ids, err := st.GetMemoryIDsByAnchorNodes([]string{"node-stale"}, 100)
+	if err != nil {
+		t.Fatalf("GetMemoryIDsByAnchorNodes: %v", err)
+	}
+	for _, id := range ids {
+		if id == memID {
+			t.Error("stale memory should not be returned for embedding invalidation")
+		}
+	}
+}
+
+func TestGetMemoryIDsByAnchorNodes_UnknownNodeReturnsEmpty(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+	ids, err := st.GetMemoryIDsByAnchorNodes([]string{"no-such-node"}, 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected empty result for unknown node, got %v", ids)
+	}
+}
+
+// ── GetStaleEmbeddingMemoryIDs tests ──────────────────────────────────────
+
+func TestGetStaleEmbeddingMemoryIDs_EmptyStore(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+	ids, err := st.GetStaleEmbeddingMemoryIDs(50)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected empty result on store with no stale embeddings, got %d", len(ids))
+	}
+}
+
+func TestGetStaleEmbeddingMemoryIDs_ReturnsStaleOnly(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+
+	// Insert two memories, embed both, mark one stale.
+	freshID, _ := st.InsertMemory(Memory{Tier: TierProject, Content: "Fresh embedding content", AgentID: "t"})
+	staleID, _ := st.InsertMemory(Memory{Tier: TierProject, Content: "Stale embedding content — entity changed", AgentID: "t"})
+
+	_ = st.UpsertMemoryEmbedding(freshID, "test", []float32{1, 0})
+	_ = st.UpsertMemoryEmbedding(staleID, "test", []float32{0, 1})
+	_ = st.MarkMemoryEmbeddingsStale([]string{staleID})
+
+	ids, err := st.GetStaleEmbeddingMemoryIDs(50)
+	if err != nil {
+		t.Fatalf("GetStaleEmbeddingMemoryIDs: %v", err)
+	}
+	found := false
+	for _, id := range ids {
+		if id == freshID {
+			t.Errorf("fresh embedding should not be in stale list")
+		}
+		if id == staleID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("stale embedding %s not found in results", staleID)
+	}
+}
+
+func TestGetStaleEmbeddingMemoryIDs_StaleMemoryExcluded(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+
+	// Memory is stale (e.g., anchor removed) AND has a stale embedding.
+	// GetStaleEmbeddingMemoryIDs should NOT return it — there's no point
+	// re-embedding a memory that is already dead.
+	memID, _ := st.InsertMemory(Memory{Tier: TierEntity, Content: "Dead entity memory", AgentID: "t"})
+	_ = st.UpsertMemoryEmbedding(memID, "test", []float32{1, 0})
+	_ = st.MarkMemoryEmbeddingsStale([]string{memID})
+	// Mark the memory record itself stale (anchor removed) — no point re-embedding it.
+	st.knowledgeDB.Exec(`UPDATE memories SET stale = 1 WHERE id = ?`, memID)
+
+	ids, err := st.GetStaleEmbeddingMemoryIDs(50)
+	if err != nil {
+		t.Fatalf("GetStaleEmbeddingMemoryIDs: %v", err)
+	}
+	for _, id := range ids {
+		if id == memID {
+			t.Error("dead (stale memory) should not appear in stale embeddings list")
+		}
+	}
+}
+
+func TestGetStaleEmbeddingMemoryIDs_LimitRespected(t *testing.T) {
+	st, _ := openMemEmbedTestStore(t)
+
+	// Insert 20 memories, embed all, mark all stale.
+	now := time.Now().UTC()
+	expires := now.Add(365 * 24 * time.Hour).Format(time.RFC3339)
+	nowStr := now.Format(time.RFC3339)
+	for i := 0; i < 20; i++ {
+		id := fmt.Sprintf("stale-embed-limit-%d", i)
+		st.knowledgeDB.Exec(`INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
+			created_at, expires_at, last_accessed_at, source)
+			VALUES (?, 'project', ?, '', 'test', '', '[]', ?, ?, ?, 'manual')`,
+			id, fmt.Sprintf("Embedding limit test content item %d for stale detection", i),
+			nowStr, expires, nowStr)
+		st.knowledgeDB.Exec(`INSERT INTO memory_embeddings (memory_id, model, embedding, content_hash, stale, embedded_at)
+			VALUES (?, 'test', ?, 'hash', 1, ?)`,
+			id, vecToBlob([]float32{float32(i), 0}), now.Unix())
+	}
+
+	ids, err := st.GetStaleEmbeddingMemoryIDs(5)
+	if err != nil {
+		t.Fatalf("GetStaleEmbeddingMemoryIDs: %v", err)
+	}
+	if len(ids) != 5 {
+		t.Errorf("expected exactly 5 results with limit=5, got %d", len(ids))
+	}
+}

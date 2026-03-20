@@ -153,6 +153,102 @@ func (s *Store) MarkMemoryEmbeddingsStale(memoryIDs []string) error {
 	return nil
 }
 
+// GetMemoryIDsByAnchorNodes returns the IDs of non-stale, non-expired memories
+// that are anchored to ANY of the given node IDs via the memory_anchors table.
+// Used by the file watcher to cheaply find which memory embeddings to invalidate
+// after a node changes — we only need IDs, not full Memory structs.
+// Processes in batches of 500 to respect SQLite variable limits.
+// Returns (nil, nil) when nodeIDs is empty.
+func (s *Store) GetMemoryIDsByAnchorNodes(nodeIDs []string, limit int) ([]string, error) {
+	if len(nodeIDs) == 0 || limit <= 0 {
+		return nil, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	seen := make(map[string]struct{})
+	var result []string
+
+	const batchSize = 500
+	for i := 0; i < len(nodeIDs) && len(result) < limit; i += batchSize {
+		end := i + batchSize
+		if end > len(nodeIDs) {
+			end = len(nodeIDs)
+		}
+		batch := nodeIDs[i:end]
+		placeholders := strings.Repeat("?,", len(batch))
+		placeholders = placeholders[:len(placeholders)-1]
+		args := make([]any, 0, len(batch)+1)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		args = append(args, now)
+		rows, err := s.knowledgeDB.Query(`
+			SELECT DISTINCT ma.memory_id
+			FROM memory_anchors ma
+			JOIN memories m ON ma.memory_id = m.id
+			WHERE ma.node_id IN (`+placeholders+`)
+			  AND m.stale = 0
+			  AND m.expires_at > ?`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("get memory ids by anchor nodes: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan anchor memory id: %w", err)
+			}
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				result = append(result, id)
+				if len(result) >= limit {
+					break
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return result, nil
+}
+
+// GetStaleEmbeddingMemoryIDs returns memory IDs whose embeddings are stale
+// (stale=1 in memory_embeddings) but whose memory records are still valid
+// (non-stale, non-expired). Up to limit IDs are returned.
+// Used by the semantic recall channel to drive lazy re-embedding: stale
+// embeddings are refreshed just before the vector search runs so they
+// participate in scoring instead of being silently excluded.
+func (s *Store) GetStaleEmbeddingMemoryIDs(limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	rows, err := s.knowledgeDB.Query(`
+		SELECT me.memory_id
+		FROM memory_embeddings me
+		JOIN memories m ON me.memory_id = m.id
+		WHERE me.stale = 1
+		  AND m.stale = 0
+		  AND m.expires_at > ?
+		LIMIT ?`, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get stale embedding memory ids: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan stale embedding id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // DeleteMemoryEmbeddings removes embeddings for the given memory IDs.
 // Called during memory expiry cleanup. A no-op when memoryIDs is empty.
 // Processes in batches of 500 to respect SQLite variable limits.

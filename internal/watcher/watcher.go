@@ -505,9 +505,12 @@ func (w *Watcher) reparseFile(path, _ string) {
 			afterIDs[string(n.ID)] = struct{}{}
 		}
 		var removedIDs []string
+		var changedIDs []string // nodes that survived re-parse — implementation may have changed
 		for _, id := range beforeNodeIDs {
 			if _, ok := afterIDs[id]; !ok {
 				removedIDs = append(removedIDs, id)
+			} else {
+				changedIDs = append(changedIDs, id)
 			}
 		}
 		if len(removedIDs) > 0 {
@@ -517,6 +520,21 @@ func (w *Watcher) reparseFile(path, _ string) {
 			// Gap-4: also stale entity-tier memories written with entity_id but no anchors.
 			if err := w.store.MarkEntityMemoriesStaleForNodes(removedIDs, "entity node removed"); err != nil {
 				logutil.Warn("synapses/watcher: cascade entity memory stale: %v\n", err)
+			}
+		}
+		// Sprint 10.7: mark EMBEDDINGS stale for surviving (changed) nodes.
+		// The memory records remain valid — the entity still exists — but
+		// its implementation changed, so embeddings computed from the old
+		// content are no longer accurate. They will be re-embedded lazily
+		// on the next recall() semantic channel pass.
+		if len(changedIDs) > 0 {
+			memIDs, err := w.store.GetMemoryIDsByAnchorNodes(changedIDs, 500)
+			if err != nil {
+				logutil.Warn("synapses/watcher: get anchor memory ids for embedding invalidation: %v\n", err)
+			} else if len(memIDs) > 0 {
+				if err := w.store.MarkMemoryEmbeddingsStale(memIDs); err != nil {
+					logutil.Warn("synapses/watcher: invalidate anchor embeddings: %v\n", err)
+				}
 			}
 		}
 	}
