@@ -79,6 +79,28 @@ func (s *Server) handleRemember(
 		return mcp.NewToolResultError(rationaleErr.Error()), nil
 	}
 
+	// OF-S2: scan externally-sourced content for prompt injection patterns.
+	// Covers decision and rationale — the two fields persisted to SQLite and embedded.
+	var injectionWarning string
+	if scanResult, scanErr := s.scanContent("decision", decision); scanErr != nil {
+		return mcp.NewToolResultError(scanErr.Error()), nil
+	} else {
+		decision = scanResult.sanitized
+		if scanResult.warning != "" {
+			injectionWarning = scanResult.warning
+		}
+	}
+	if rationale != "" {
+		if scanResult, scanErr := s.scanContent("rationale", rationale); scanErr != nil {
+			return mcp.NewToolResultError(scanErr.Error()), nil
+		} else {
+			rationale = scanResult.sanitized
+			if scanResult.warning != "" && injectionWarning == "" {
+				injectionWarning = scanResult.warning
+			}
+		}
+	}
+
 	// OF-E3: cross-project write approval gate.
 	// When project_id is explicitly set and differs from the current project,
 	// this is a cross-project write that requires user approval.
@@ -203,6 +225,9 @@ func (s *Server) handleRemember(
 		"episode_type": episodeType,
 		"outcome":      outcome,
 		"message":      "Episode recorded. Use recall() to surface similar past episodes in future sessions.",
+	}
+	if injectionWarning != "" {
+		resp["injection_warning"] = injectionWarning
 	}
 	if len(anchorNodes) > 0 {
 		resp["anchored_to"] = len(anchorNodes)

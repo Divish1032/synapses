@@ -1519,6 +1519,17 @@ func (s *Server) handleAnnotateNode(
 	}
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 
+	// OF-S2: scan note content for prompt injection patterns.
+	var injectionWarning string
+	if scanResult, scanErr := s.scanContent("note", note); scanErr != nil {
+		return mcp.NewToolResultError(scanErr.Error()), nil
+	} else {
+		note = scanResult.sanitized
+		if scanResult.warning != "" {
+			injectionWarning = scanResult.warning
+		}
+	}
+
 	// Verify the node exists in the graph.
 	if s.graph.GetNode(graph.NodeID(nodeID)) == nil {
 		return mcp.NewToolResultError(fmt.Sprintf("node not found: %q", nodeID)), nil
@@ -1545,11 +1556,15 @@ func (s *Server) handleAnnotateNode(
 		fmt.Fprintf(os.Stderr, "synapses: append annotation_added event: %v\n", err)
 	}
 
-	return jsonResult(map[string]interface{}{
+	resp := map[string]interface{}{
 		"annotation_id": id,
 		"node_id":       nodeID,
 		"message":       "Annotation saved. It will appear in get_context responses for this node.",
-	})
+	}
+	if injectionWarning != "" {
+		resp["injection_warning"] = injectionWarning
+	}
+	return jsonResult(resp)
 }
 
 // trimRepoRoot strips the repo root prefix from a slice of absolute file paths,

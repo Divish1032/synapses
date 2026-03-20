@@ -108,6 +108,7 @@ type Server struct {
 	embedClient    *embed.Client  // nil if embedding_endpoint not configured
 	memoryEmbedder embed.Embedder // nil if embeddings mode is "off" — set via SetMemoryEmbedder
 	techStack    interface{}    // []TechStackEntry — set via SetTechStack after autosubscribe
+	injectionScanner *InjectionScanner // prompt injection scanner for externally-sourced content (nil = disabled)
 	knowledgeMode bool          // when true, only knowledge tools are registered (no code graph)
 	projectID    string         // stable project identifier (FNV hash of project root path)
 	projectPath  string         // absolute path to the project root (for go.mod parsing)
@@ -409,6 +410,18 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		s.rl = newRateLimiter(cfg.RateLimits)
 	} else {
 		s.rl = newRateLimiter(config.RateLimitConfig{})
+	}
+
+	// OF-S2: prompt injection scanner for externally-sourced content.
+	// Default: enabled with "warn" mode. Configurable via content_safety in synapses.json.
+	{
+		var csc config.ContentSafetyConfig
+		if cfg != nil {
+			csc = cfg.ContentSafety
+		}
+		if csc.ContentSafetyEnabled() {
+			s.injectionScanner = NewInjectionScanner(ScanMode(csc.ContentSafetyMode()))
+		}
 	}
 
 	// Load app-level settings from ~/.synapses/app_settings.json.
