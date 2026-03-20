@@ -238,28 +238,32 @@ func cmdStartDirect(args []string) error {
 	go func() {
 		const (
 			checkInterval  = 60 * time.Second
-			idleThreshold  = 5 * time.Minute
 			tombstoneLimit = 0.15
 		)
 		ticker := time.NewTicker(checkInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			idx := g.Index()
-			if idx == nil || !idx.Ready() {
-				continue
-			}
-			if idx.TombstoneRatio() < tombstoneLimit {
-				continue
-			}
-			// Only defrag if the watcher reports idle (no changes recently).
-			// We check this by looking at whether the graph's node count is stable
-			// (a rough proxy — the watcher's RecentChanges API would be cleaner but
-			// watcher is not accessible here without a circular import).
-			blob, err := g.RebuildIndex()
-			if err == nil && len(blob) > 0 {
-				_ = st.SaveIndexSnapshot(blob)
-				fmt.Fprintf(os.Stderr, "synapses: idle defrag complete (tombstone ratio was %.0f%%)\n",
-					idx.TombstoneRatio()*100)
+		for {
+			select {
+			case <-appCtx.Done():
+				return
+			case <-ticker.C:
+				idx := g.Index()
+				if idx == nil || !idx.Ready() {
+					continue
+				}
+				if idx.TombstoneRatio() < tombstoneLimit {
+					continue
+				}
+				// Only defrag if the watcher reports idle (no changes recently).
+				// We check this by looking at whether the graph's node count is stable
+				// (a rough proxy — the watcher's RecentChanges API would be cleaner but
+				// watcher is not accessible here without a circular import).
+				blob, err := g.RebuildIndex()
+				if err == nil && len(blob) > 0 {
+					_ = st.SaveIndexSnapshot(blob)
+					fmt.Fprintf(os.Stderr, "synapses: idle defrag complete (tombstone ratio was %.0f%%)\n",
+						idx.TombstoneRatio()*100)
+				}
 			}
 		}
 	}()
@@ -330,8 +334,8 @@ func cmdStartDirect(args []string) error {
 		}
 		srv.SetBrainClient(brainCli)
 		go func() {
-			bulkIngestToBrain(brainCli, g, pathProjectID(absPath))
-			fetchAndWriteBackSummaries(brainCli, g, st)
+			bulkIngestToBrain(appCtx, brainCli, g, pathProjectID(absPath))
+			fetchAndWriteBackSummaries(appCtx, brainCli, g, st)
 		}()
 	}
 
@@ -387,6 +391,12 @@ func cmdStartDirect(args []string) error {
 		entries := scout.DetectTechStack(absPath)
 		if len(entries) == 0 {
 			return
+		}
+		// Skip writing to server if shutdown has started.
+		select {
+		case <-appCtx.Done():
+			return
+		default:
 		}
 		srv.SetTechStack(entries)
 		fmt.Fprintf(os.Stderr, "synapses: tech stack detected (%d deps)\n", len(entries))
@@ -3105,7 +3115,7 @@ func pathProjectID(absPath string) string {
 	return fmt.Sprintf("%x", h.Sum32())
 }
 
-func bulkIngestToBrain(bc *brain.Client, g *graph.Graph, projectID string) {
+func bulkIngestToBrain(ctx context.Context, bc *brain.Client, g *graph.Graph, projectID string) {
 	all := g.AllNodes()
 
 	// Collect all non-structural nodes (skip package/file nodes — no code to summarize).
@@ -3125,13 +3135,19 @@ func bulkIngestToBrain(bc *brain.Client, g *graph.Graph, projectID string) {
 
 	sem := make(chan struct{}, 8) // 8 concurrent — qwen3.5:0.8b is fast enough to handle more
 	var wg sync.WaitGroup
+dispatch:
 	for _, n := range nodes {
+		select {
+		case <-ctx.Done():
+			break dispatch
+		default:
+		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(node *graph.Node) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			bc.Ingest(context.Background(), brain.IngestRequest{
+			bc.Ingest(ctx, brain.IngestRequest{
 				ProjectID: projectID,
 				NodeID:    string(node.ID),
 				NodeName:  node.Name,
@@ -3149,28 +3165,39 @@ func bulkIngestToBrain(bc *brain.Client, g *graph.Graph, projectID string) {
 // then fetches each node's summary and writes it back as a graph annotation.
 // This surfaces brain summaries in get_context.annotations, find_entity, etc.
 // Runs after bulkIngestToBrain completes; all errors are silently discarded.
-func fetchAndWriteBackSummaries(bc *brain.Client, g *graph.Graph, st *store.Store) {
+func fetchAndWriteBackSummaries(ctx context.Context, bc *brain.Client, g *graph.Graph, st *store.Store) {
 	if st == nil {
 		return
 	}
 	// Give the brain time to process the ingest queue before fetching summaries.
-	time.Sleep(10 * time.Second)
+	// Use ctx-aware sleep so shutdown cancels the wait immediately.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(10 * time.Second):
+	}
 
 	nodes := g.AllNodes()
 	sem := make(chan struct{}, 4) // 4 concurrent fetches (brain's LLM is mostly single-threaded)
 	var wg sync.WaitGroup
 	written := 0
 	var mu sync.Mutex
+dispatch:
 	for _, n := range nodes {
 		if string(n.Type) == "package" || string(n.Type) == "file" {
 			continue
+		}
+		select {
+		case <-ctx.Done():
+			break dispatch
+		default:
 		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(node *graph.Node) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			summary := bc.GetSummary(context.Background(), string(node.ID))
+			summary := bc.GetSummary(ctx, string(node.ID))
 			if summary != "" {
 				// Use AddAnnotationIfNew with a 24-hour window to prevent duplicate
 				// brain annotations when the daemon is restarted within a day.
