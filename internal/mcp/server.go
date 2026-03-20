@@ -5,11 +5,14 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -234,6 +237,14 @@ type Server struct {
 	// Stores pending approval tokens for broadcast send_message and
 	// cross-project remember operations. Tokens expire after 5 minutes.
 	approvals *approvalStore
+
+	// OF-S4: tool description integrity.
+	// toolDescs captures name → description at addOrDefer time.
+	// toolDescBaseline is the SHA256 hex of the sorted descriptions, computed
+	// once at the end of registerTools(). handleSessionInit re-derives the hash
+	// from toolDescs and compares it to detect runtime tampering.
+	toolDescs        map[string]string
+	toolDescBaseline string
 }
 
 const (
@@ -403,6 +414,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		startTime:        time.Now(),
 		lg:               newLoopGuard(),
 		approvals:        newApprovalStore(),
+		toolDescs:        make(map[string]string),
 	}
 
 	// Security F10: build rate limiter from config (or defaults if cfg is nil).
@@ -572,7 +584,27 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 	s.registerResources()
 	s.registerPrompts()      // no-op until SetPromptTemplates is called
 	s.registerSkillTools()   // no-op until SetSkillRecipes is called
+	// OF-S4: compute baseline AFTER all registrations so skill tools are included.
+	// handleSessionInit re-derives and compares to detect runtime tampering.
+	s.toolDescBaseline = hashToolDescs(s.toolDescs)
 	return s
+}
+
+// hashToolDescs computes a deterministic SHA256 hex digest of all tool
+// name→description pairs. Names are sorted alphabetically before hashing so
+// the result is independent of registration order. Called once at startup to
+// establish the baseline, and re-called in handleSessionInit to detect drift.
+func hashToolDescs(descs map[string]string) string {
+	names := make([]string, 0, len(descs))
+	for name := range descs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, name := range names {
+		_, _ = fmt.Fprintf(h, "%s\x00%s\x00", name, descs[name])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // NewKnowledge creates a Server in knowledge mode — memory, events, tasks, and
@@ -1060,6 +1092,8 @@ func (s *Server) toolInTier(_ string) bool {
 // Always populates the REST dispatch table (toolHandlers) with the effective handler
 // so POST /v1/tools/{name} calls the same function as the MCP path.
 func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
+	// OF-S4: capture description for integrity baseline.
+	s.toolDescs[t.Name] = t.Description
 	if s.knowledgeMode && !knowledgeTools[t.Name] {
 		// In knowledge mode, register a stub that returns a clear error.
 		stub := func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
