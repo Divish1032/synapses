@@ -223,7 +223,7 @@ func cmdBrainSetup(args []string) error {
 	}
 	validModes := map[string]bool{"optimal": true, "standard": true, "full": true}
 	if !validModes[*mode] {
-		return fmt.Errorf("invalid mode %q â must be one of: optimal, standard, full", *mode)
+		return fmt.Errorf("invalid mode %q — must be one of: optimal, standard, full", *mode)
 	}
 
 	// color helpers — inline so callers stay readable
