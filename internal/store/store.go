@@ -481,6 +481,18 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open graph db: %w", err)
 	}
+	// Detect graph.db corruption early. Graph data is fully regenerable from
+	// source, so the safe recovery is to delete the corrupt file and start
+	// fresh — the caller will perform a full re-index automatically.
+	if checkErr := runQuickCheck(graphDB); checkErr != nil {
+		fmt.Fprintf(os.Stderr, "synapses: store: graph.db corrupt (%v) — deleting and re-indexing from source\n", checkErr)
+		graphDB.Close()
+		deleteDBFiles(path)
+		graphDB, err = openSQLiteDB(path)
+		if err != nil {
+			return nil, fmt.Errorf("open fresh graph db after corruption recovery: %w", err)
+		}
+	}
 	if _, err := graphDB.Exec(graphSchema); err != nil {
 		graphDB.Close()
 		return nil, fmt.Errorf("apply graph schema: %w", err)
@@ -491,6 +503,20 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		graphDB.Close()
 		return nil, fmt.Errorf("open knowledge db: %w", err)
+	}
+	// Detect knowledge.db corruption. Knowledge data (memories, tasks) is NOT
+	// regenerable, so we back up the corrupt file and start with a fresh empty
+	// database rather than refusing to start. The daemon continues in a
+	// degraded-but-functional state.
+	if checkErr := runQuickCheck(knowledgeDB); checkErr != nil {
+		fmt.Fprintf(os.Stderr, "synapses: store: knowledge.db corrupt (%v) — backing up to knowledge.db.corrupt and starting fresh\n", checkErr)
+		knowledgeDB.Close()
+		_ = os.Rename(kPath, kPath+".corrupt")
+		knowledgeDB, err = openSQLiteDB(kPath)
+		if err != nil {
+			graphDB.Close()
+			return nil, fmt.Errorf("open fresh knowledge db after corruption recovery: %w", err)
+		}
 	}
 	if _, err := knowledgeDB.Exec(knowledgeSchema); err != nil {
 		graphDB.Close()
@@ -678,25 +704,30 @@ func Open(path string) (*Store, error) {
 }
 
 // openSQLiteDB opens a single SQLite DB with WAL mode and busy timeout.
+//
+// Pragmas are embedded in the DSN via `_pragma=` rather than run as explicit
+// EXEC calls. This is critical for correctness with MaxOpenConns(2): every
+// connection opened by the database/sql pool inherits the settings, not just
+// the first. Without DSN-level pragmas, lazily-opened second connections get
+// default settings (no busy_timeout) and fail immediately with SQLITE_BUSY
+// on write contention instead of waiting the configured 5 s.
 func openSQLiteDB(path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create parent dir for %s: %w", path, err)
 	}
-	db, err := sql.Open("sqlite", path)
+	// _pragma=journal_mode(WAL) — enable WAL on every connection open.
+	// _pragma=busy_timeout(5000) — wait up to 5 s on write contention.
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db %s: %w", path, err)
 	}
 	// Start with 1 connection during schema initialization. modernc.org/sqlite
-	// deadlocks when two connections race to initialize the same schema. After
-	// migrations complete in store.Open(), this is raised to 2 to allow WAL
-	// concurrent reads alongside writes.
+	// can deadlock when two connections race to initialize the same schema
+	// (both calling _sqlite3InitOne while one holds a schema write-lock).
+	// After store.Open() completes all migrations, this is raised to 2 to
+	// enable WAL's concurrent-reader + single-writer benefit.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: store: enable WAL on %s: %v\n", path, err)
-	}
-	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: store: set busy_timeout on %s: %v\n", path, err)
-	}
 	return db, nil
 }
 
@@ -707,6 +738,34 @@ func isDupColumnErr(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already has a column")
+}
+
+// runQuickCheck executes PRAGMA quick_check(1) and returns an error if the
+// database is corrupt. Returns nil if the DB is healthy ("ok").
+func runQuickCheck(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA quick_check(1)")
+	if err != nil {
+		return fmt.Errorf("pragma quick_check failed: %w", err)
+	}
+	defer rows.Close()
+	var result string
+	if rows.Next() {
+		if scanErr := rows.Scan(&result); scanErr != nil {
+			return fmt.Errorf("scan quick_check result: %w", scanErr)
+		}
+		if result != "ok" {
+			return fmt.Errorf("%s", result)
+		}
+	}
+	return rows.Err()
+}
+
+// deleteDBFiles removes a SQLite database file along with its WAL and SHM
+// sidecar files so a fresh empty DB can be created in its place.
+func deleteDBFiles(path string) {
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		_ = os.Remove(path + suffix)
+	}
 }
 
 // OpenReadOnly opens an existing SQLite store at path in query-only mode.
@@ -2143,7 +2202,10 @@ func ScanAll() ([]ProjectStat, error) {
 			continue
 		}
 		dbPath := filepath.Join(dir, e.Name())
-		st, err := Open(dbPath)
+		// Use OpenReadOnly so ScanAll can run while the daemon holds the database.
+		// Open() runs DDL migrations (requires exclusive lock) and would deadlock
+		// against a live daemon. OpenReadOnly() is sufficient — Stat() only reads.
+		st, err := OpenReadOnly(dbPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "synapses: skipping corrupt db %s: %v\n", e.Name(), err)
 			continue
