@@ -169,8 +169,23 @@ func cmdStartDirect(args []string) error {
 	}
 	defer st.Close()
 
-	// Prune stale operational data in the background (30-day retention).
-	go st.PruneStaleData(30)
+	// Prune stale operational data at startup and then daily.
+	// Prevents unbounded growth of tool_calls, events, agent_messages, and
+	// episodes tables during long stdio process uptime (hours/days).
+	go func() {
+		st.PruneStaleData(30)
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Fprintf(os.Stderr, "synapses: daily prune running (30-day retention)\n")
+				st.PruneStaleData(30)
+			case <-appCtx.Done():
+				return
+			}
+		}
+	}()
 
 	// Plugin security: per-machine opt-in for external parser commands.
 	var pluginCheck *parser.PluginChecker
