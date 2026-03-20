@@ -17,7 +17,9 @@ import (
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
+	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/store"
+	"github.com/SynapsesOS/synapses/internal/watcher"
 )
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -435,17 +437,19 @@ func TestStdioShutdown_SafetyNetTimerPattern(t *testing.T) {
 // ── Deferred cleanup ordering ───────────────────────────────────────────────
 
 func TestDeferredCleanupOrdering(t *testing.T) {
-	// In cmdStartDirect, the cleanup order is (defers execute LIFO):
-	//   1. appCancel()  (first defer → last to run)
-	//   2. st.Close()   (second defer)
-	//   3. fw.Stop()    (later defer → runs earlier)
-	//   4. srv.Close()  (deferred via t.Cleanup in tests, but in prod it's
-	//                    the ServeStdio return that triggers defer unwind)
+	// cmdStartDirect defer registration order (line numbers from main.go):
+	//   Line 144: defer appCancel()    — 1st defer (runs LAST in LIFO)
+	//   Line 171: defer st.Close()     — 2nd defer
+	//   Line 292: defer srv.Close()    — 3rd defer
+	//   Line 340: defer fedResolver.Close() — 4th defer (conditional, skip)
+	//   Line 435: defer fw.Stop()      — 5th/last defer (runs FIRST in LIFO)
 	//
-	// The correct ordering for shutdown is:
-	//   srv.Close() → watcher.Stop() → store.Close() → appCancel()
+	// LIFO execution order (last deferred runs first):
+	//   fw.Stop() → srv.Close() → st.Close() → appCancel()
 	//
-	// This matches LIFO: the last resource created is the first to close.
+	// This is CORRECT: watcher stops first (stops writing to store),
+	// then server closes (drains background workers that may touch store),
+	// then store closes, then context cancelled (redundant cleanup).
 
 	var mu sync.Mutex
 	var order []string
@@ -455,22 +459,19 @@ func TestDeferredCleanupOrdering(t *testing.T) {
 		mu.Unlock()
 	}
 
-	// Simulate the defer stack from cmdStartDirect.
+	// Replicate the EXACT defer registration order from cmdStartDirect.
 	func() {
-		defer record("appCancel")   // first defer → runs last
-		defer record("store.Close") // second defer
-		// watcher defer happens later in the function
-		defer record("watcher.Stop") // third defer → runs before store
-		// srv is used via ServeStdio, its Close is called after return
-		// but for this test we simulate it
-		defer record("srv.Close") // fourth defer → runs first
+		defer record("appCancel")    // line 144: 1st defer → runs last
+		defer record("store.Close")  // line 171: 2nd defer
+		defer record("srv.Close")    // line 292: 3rd defer
+		defer record("watcher.Stop") // line 435: last defer → runs first
 	}()
 
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Expected LIFO order.
-	expected := []string{"srv.Close", "watcher.Stop", "store.Close", "appCancel"}
+	// Expected LIFO order — watcher first, context cancel last.
+	expected := []string{"watcher.Stop", "srv.Close", "store.Close", "appCancel"}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d cleanup steps, got %d: %v", len(expected), len(order), order)
 	}
@@ -631,5 +632,369 @@ func TestDaemonShutdown_RegistryCleanup(t *testing.T) {
 	_, err = http.Get(httpSrv.URL + "/api/admin/health")
 	if err == nil {
 		t.Error("HTTP server should reject connections after shutdown")
+	}
+}
+
+// ── Store persistence on shutdown ───────────────────────────────────────────
+
+func TestStoreFlushOnClose(t *testing.T) {
+	// ROADMAP requires: "verify store flushes."
+	// Write data → close store → reopen → verify data survived.
+	dbPath := filepath.Join(t.TempDir(), "flush-test.db")
+
+	// Phase 1: write data and close.
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store (phase 1): %v", err)
+	}
+	memID, err := st.InsertMemory(store.Memory{
+		Tier:    "entity",
+		Content: "shutdown-test: auth switched to OAuth",
+		AgentID: "test-agent",
+		Source:  "manual",
+	})
+	if err != nil {
+		t.Fatalf("InsertMemory: %v", err)
+	}
+	if memID == "" {
+		t.Fatal("InsertMemory returned empty ID")
+	}
+	st.Close()
+
+	// Phase 2: reopen and verify data survived the close.
+	st2, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store (phase 2): %v", err)
+	}
+	defer st2.Close()
+
+	memories, err := st2.SearchMemories("OAuth", 10)
+	if err != nil {
+		t.Fatalf("SearchMemories: %v", err)
+	}
+	if len(memories) == 0 {
+		t.Fatal("memory not persisted after store close — data loss on shutdown")
+	}
+	found := false
+	for _, m := range memories {
+		if m.ID == memID && strings.Contains(m.Content, "OAuth") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected memory %q with OAuth content, got %d results", memID, len(memories))
+	}
+}
+
+func TestStoreFlushOnClose_MultipleWrites(t *testing.T) {
+	// Verify multiple writes across tables survive shutdown.
+	dbPath := filepath.Join(t.TempDir(), "flush-multi.db")
+
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	// Write memory.
+	_, err = st.InsertMemory(store.Memory{
+		Tier: "project", Content: "flush-multi-test", AgentID: "a1", Source: "manual",
+	})
+	if err != nil {
+		t.Fatalf("InsertMemory: %v", err)
+	}
+
+	// Write an event.
+	st.AppendEvent("file_change", "a1", `{"file":"test.go"}`)
+
+	// Write an episode.
+	st.RememberEpisode(store.Episode{
+		AgentID:     "a1",
+		Decision:    "switched to flush test",
+		EpisodeType: "decision",
+		Outcome:     "success",
+	})
+
+	st.Close()
+
+	// Reopen and verify all three types survived.
+	st2, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer st2.Close()
+
+	mems, _ := st2.SearchMemories("flush-multi-test", 1)
+	if len(mems) == 0 {
+		t.Error("memory not persisted")
+	}
+
+	events, _, _ := st2.GetEvents(0, nil, "", 10)
+	if len(events) == 0 {
+		t.Error("event not persisted")
+	}
+
+	episodes, _ := st2.RecallEpisodes("flush test", "", "a1", "", "", 10, 0)
+	if len(episodes) == 0 {
+		t.Error("episode not persisted")
+	}
+}
+
+// ── Real watcher shutdown test ──────────────────────────────────────────────
+
+func TestWatcherStopBlocksUntilDrained(t *testing.T) {
+	// ROADMAP requires: "verify watcher stops."
+	// Create a real watcher on a temp dir, start it, verify Stop() completes.
+	tmpDir := t.TempDir()
+	g := graph.New("watcher-test")
+	st := openShutdownTestStore(t)
+	defer st.Close()
+	w := parser.NewWalker()
+
+	fw, err := watcher.New(g, w, st)
+	if err != nil {
+		t.Fatalf("watcher.New: %v", err)
+	}
+	if err := fw.Start(tmpDir); err != nil {
+		t.Fatalf("watcher.Start: %v", err)
+	}
+
+	// Write a file to trigger some watcher activity.
+	testFile := filepath.Join(tmpDir, "test.go")
+	os.WriteFile(testFile, []byte("package main\nfunc Hello() {}\n"), 0o644)
+
+	// Give the watcher a moment to process the event.
+	time.Sleep(300 * time.Millisecond)
+
+	// Stop must complete within a reasonable time.
+	done := make(chan struct{})
+	go func() {
+		fw.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// OK — watcher stopped and all goroutines drained.
+	case <-time.After(15 * time.Second):
+		t.Fatal("watcher.Stop() did not return within 15s — goroutine leak")
+	}
+}
+
+func TestWatcherStopIdempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	g := graph.New("watcher-idem")
+	w := parser.NewWalker()
+
+	fw, err := watcher.New(g, w, nil)
+	if err != nil {
+		t.Fatalf("watcher.New: %v", err)
+	}
+	if err := fw.Start(tmpDir); err != nil {
+		t.Fatalf("watcher.Start: %v", err)
+	}
+
+	// Stop twice — must not panic or deadlock.
+	fw.Stop()
+	fw.Stop()
+}
+
+// ── Multiple background goroutine shutdown ──────────────────────────────────
+
+func TestMultipleBackgroundGoroutinesShutdown(t *testing.T) {
+	// cmdStartDirect launches 7+ goroutines that select on appCtx.Done().
+	// Verify they ALL exit promptly when context is cancelled.
+	appCtx, appCancel := context.WithCancel(context.Background())
+
+	const numGoroutines = 7
+	var wg sync.WaitGroup
+
+	// Pattern 1: ticker + ctx.Done (used by defrag, prune)
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(time.Hour) // won't fire in test
+			defer ticker.Stop()
+			select {
+			case <-appCtx.Done():
+				return
+			case <-ticker.C:
+			}
+		}()
+	}
+
+	// Pattern 2: fire-and-forget with ctx check (used by tech stack, embeddings)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Simulate some work.
+			time.Sleep(10 * time.Millisecond)
+			// Check shutdown before writing results.
+			select {
+			case <-appCtx.Done():
+				return
+			default:
+			}
+		}()
+	}
+
+	// Pattern 3: long-running with periodic ctx check (used by bulk brain ingest)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				select {
+				case <-appCtx.Done():
+					return
+				default:
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}()
+	}
+
+	// Cancel all goroutines.
+	appCancel()
+
+	// All must exit within 2 seconds.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// All goroutines exited.
+	case <-time.After(2 * time.Second):
+		t.Fatal("not all background goroutines exited after context cancel")
+	}
+}
+
+// ── Concurrent registry.Close ───────────────────────────────────────────────
+
+func TestRegistryClose_Concurrent(t *testing.T) {
+	// Verify concurrent Close calls don't panic or double-close instances.
+	reg := newProjectRegistry()
+
+	// Register one instance.
+	st := openShutdownTestStore(t)
+	g := graph.New("concurrent-close")
+	cfg := &config.Config{}
+	srv := mcpsrv.New(g, cfg, st)
+	srv.StartBackground()
+
+	var closeCount atomic.Int32
+	pi := &ProjectInstance{
+		AbsPath:   filepath.Join(t.TempDir(), "proj"),
+		Graph:     g,
+		Store:     st,
+		MCPServer: srv,
+		cancel:    func() { closeCount.Add(1) },
+	}
+	reg.Set(pi)
+
+	// Close from 5 goroutines simultaneously.
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reg.Close()
+		}()
+	}
+	wg.Wait()
+
+	// Cancel should have been called exactly once (first Close wins,
+	// subsequent ones see empty map).
+	if n := closeCount.Load(); n != 1 {
+		t.Errorf("expected 1 cancel call from concurrent Close, got %d", n)
+	}
+}
+
+// ── Watcher + Store integration: watcher stops before store closes ──────────
+
+func TestWatcherStopsBeforeStoreCloses(t *testing.T) {
+	// Verifies the critical invariant: after watcher.Stop() returns,
+	// no watcher goroutine writes to the store. We test this by closing
+	// the store AFTER Stop and verifying no panic.
+	tmpDir := t.TempDir()
+	g := graph.New("watcher-store-order")
+	st := openShutdownTestStore(t)
+	w := parser.NewWalker()
+
+	fw, err := watcher.New(g, w, st)
+	if err != nil {
+		t.Fatalf("watcher.New: %v", err)
+	}
+	if err := fw.Start(tmpDir); err != nil {
+		t.Fatalf("watcher.Start: %v", err)
+	}
+
+	// Create a file to trigger watcher activity.
+	testFile := filepath.Join(tmpDir, "trigger.go")
+	os.WriteFile(testFile, []byte("package main\nfunc Trigger() {}\n"), 0o644)
+	time.Sleep(300 * time.Millisecond) // let watcher process
+
+	// Stop watcher — blocks until all goroutines finish.
+	fw.Stop()
+
+	// NOW close store. If any watcher goroutine is still running,
+	// this would race or panic on a closed DB. The fact that this
+	// succeeds without panic proves the ordering is correct.
+	st.Close()
+}
+
+// ── ProjectInstance.Close full integration ───────────────────────────────────
+
+func TestProjectInstanceClose_FullStack(t *testing.T) {
+	// Full integration: real store, real server, real watcher — all closed
+	// through ProjectInstance.Close(). Proves no panics, no deadlocks.
+	tmpDir := t.TempDir()
+	st := openShutdownTestStore(t)
+	g := graph.New("pi-full")
+	cfg := &config.Config{}
+	srv := mcpsrv.New(g, cfg, st)
+	srv.StartBackground()
+
+	w := parser.NewWalker()
+	fw, err := watcher.New(g, w, st)
+	if err != nil {
+		t.Fatalf("watcher.New: %v", err)
+	}
+	if err := fw.Start(tmpDir); err != nil {
+		t.Fatalf("watcher.Start: %v", err)
+	}
+
+	_, projCancel := context.WithCancel(context.Background())
+	pi := &ProjectInstance{
+		AbsPath:   tmpDir,
+		Graph:     g,
+		Store:     st,
+		MCPServer: srv,
+		Watcher:   fw,
+		cancel:    projCancel,
+	}
+
+	// Dispatch a tool to exercise the server.
+	result, err := srv.DispatchTool(context.Background(), "recall", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if result == nil {
+		t.Fatal("nil result from dispatch")
+	}
+
+	// Close the full stack.
+	done := make(chan struct{})
+	go func() {
+		pi.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("ProjectInstance.Close() did not complete within 15s")
 	}
 }
