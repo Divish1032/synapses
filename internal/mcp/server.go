@@ -2330,7 +2330,8 @@ func (s *Server) registerTools() {
 				"Searches or browses episodic memory. "+
 					"With query: FTS5 BM25 semantic search, results ordered by relevance — use before starting work on a component. "+
 					"Without query: chronological browse (newest first), equivalent to the deprecated get_episodes. "+
-					"Also surfaces dynamic_rules derived from similar past failures.",
+					"Also surfaces dynamic_rules derived from similar past failures. "+
+					"Response may include stale_embedding_ids: memory IDs whose anchored code entity changed since the memory was written — verify these before trusting.",
 			),
 			mcp.WithString("query",
 				mcp.Description("Natural language search query, e.g. 'auth handler redirect loop'. Omit for chronological browse."),
