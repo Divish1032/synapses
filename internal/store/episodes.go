@@ -175,10 +175,12 @@ func (s *Store) GetEpisodes(projectID, agentID, episodeType string, tags []strin
 		query += ` AND created_at >= ?`
 		args = append(args, cutoff)
 	}
-	// tag filter: simple substring match on the JSON array string
+	// tag filter: substring match on the JSON array string.
+	// Escape LIKE metacharacters in the user-supplied tag value to prevent
+	// a tag like "%" or "_" from matching unrelated episodes.
 	for _, tag := range tags {
-		query += ` AND tags LIKE ?`
-		args = append(args, "%"+tag+"%")
+		query += ` AND tags LIKE ? ESCAPE '\'`
+		args = append(args, "%"+escapeLIKE(tag)+"%")
 	}
 
 	query += ` ORDER BY created_at DESC LIMIT ?`
@@ -191,6 +193,15 @@ func (s *Store) GetEpisodes(projectID, agentID, episodeType string, tags []strin
 	defer rows.Close()
 
 	return scanEpisodes(rows)
+}
+
+// escapeLIKE escapes SQLite LIKE metacharacters ('%', '_', '\') in s so the
+// value is treated as a literal substring when used with ESCAPE '\'.
+func escapeLIKE(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }
 
 // CheckPlanSafety searches failure episodes for the closest match to planDesc.

@@ -165,3 +165,66 @@ func TestFTSTrigger_DeleteKeepsIndexClean(t *testing.T) {
 	// ensures the 'delete' command removes the entry from the FTS index.
 	// Full delete test would require exposing a DeleteEpisode method (not needed yet).
 }
+
+// TestGetEpisodes_TagLIKEEscaping verifies that LIKE metacharacters in tag values
+// are escaped and do NOT match unrelated episodes (Security F11).
+//
+// Before the fix, tag="%" would construct `tags LIKE "%%%"` which matches every row.
+// After the fix, "%" is escaped to "\%" so only episodes literally tagged "%" match.
+func TestGetEpisodes_TagLIKEEscaping(t *testing.T) {
+	st := openTestStore(t)
+
+	// Episode tagged with a real tag.
+	_, err := st.RememberEpisode(store.Episode{
+		AgentID:     "agent-escape",
+		EpisodeType: "decision",
+		Outcome:     "success",
+		Decision:    "tagged with auth",
+		Tags:        `["auth"]`,
+	})
+	if err != nil {
+		t.Fatalf("RememberEpisode auth: %v", err)
+	}
+
+	// Episode with no matching tags.
+	_, err = st.RememberEpisode(store.Episode{
+		AgentID:     "agent-escape",
+		EpisodeType: "decision",
+		Outcome:     "success",
+		Decision:    "tagged with deploy",
+		Tags:        `["deploy"]`,
+	})
+	if err != nil {
+		t.Fatalf("RememberEpisode deploy: %v", err)
+	}
+
+	// Attack: tag="%" must NOT match both episodes.
+	results, err := st.GetEpisodes("", "", "", []string{"%"}, 10, 0)
+	if err != nil {
+		t.Fatalf("GetEpisodes with tag=%%: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("tag=%% matched %d episode(s); want 0 — LIKE metachar not escaped", len(results))
+	}
+
+	// Attack: tag="_" must NOT match all episodes via single-char wildcard.
+	results, err = st.GetEpisodes("", "", "", []string{"_"}, 10, 0)
+	if err != nil {
+		t.Fatalf("GetEpisodes with tag=_: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("tag=_ matched %d episode(s); want 0 — LIKE metachar not escaped", len(results))
+	}
+
+	// Sanity: exact tag still works after escaping.
+	results, err = st.GetEpisodes("", "", "", []string{"auth"}, 10, 0)
+	if err != nil {
+		t.Fatalf("GetEpisodes with tag=auth: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("tag=auth returned %d episode(s); want 1", len(results))
+	}
+	if results[0].Tags != `["auth"]` {
+		t.Errorf("unexpected tags: %s", results[0].Tags)
+	}
+}
