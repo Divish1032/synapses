@@ -68,17 +68,33 @@ func (s *Server) handleWebAnnotate(
 		return mcpgo.NewToolResultError("note or hits is required"), nil
 	}
 
+	// OF-S2: scan note content for prompt injection patterns.
+	// web_annotate is highest risk — content originates from web pages.
+	var injectionWarning string
+	if scanResult, scanErr := s.scanContent("note", note); scanErr != nil {
+		return mcpgo.NewToolResultError(scanErr.Error()), nil
+	} else {
+		note = scanResult.sanitized
+		if scanResult.warning != "" {
+			injectionWarning = scanResult.warning
+		}
+	}
+
 	id, err := s.store.AddAnnotation(nodeID, agentID, note)
 	if err != nil {
 		return mcpgo.NewToolResultError(fmt.Sprintf("store annotation failed: %v", err)), nil
 	}
 	_ = ctx
-	return jsonResult(map[string]interface{}{
+	resp := map[string]interface{}{
 		"id":      id,
 		"node_id": nodeID,
 		"note":    note,
 		"status":  "annotated — visible in get_context for this node",
-	})
+	}
+	if injectionWarning != "" {
+		resp["injection_warning"] = injectionWarning
+	}
+	return jsonResult(resp)
 }
 
 // handleLookupDocs returns cached Go package documentation or arbitrary URL

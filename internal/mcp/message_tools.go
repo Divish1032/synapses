@@ -53,6 +53,17 @@ func (s *Server) handleSendMessage(
 		return mcp.NewToolResultError("payload must be valid JSON (e.g. '{\"key\":\"value\"}')"), nil
 	}
 
+	// OF-S2: scan payload for prompt injection patterns.
+	var injectionWarning string
+	if scanResult, scanErr := s.scanContent("payload", payload); scanErr != nil {
+		return mcp.NewToolResultError(scanErr.Error()), nil
+	} else {
+		payload = scanResult.sanitized
+		if scanResult.warning != "" {
+			injectionWarning = scanResult.warning
+		}
+	}
+
 	// OF-E3: cross-project write approval gate for broadcast messages.
 	// Broadcasts are visible to all agents on all projects via get_messages(projects="*").
 	// Require explicit user approval before sending.
@@ -91,14 +102,18 @@ func (s *Server) handleSendMessage(
 	if toAgent != "" {
 		audience = fmt.Sprintf("agent %q", toAgent)
 	}
-	return jsonResult(map[string]interface{}{
+	resp := map[string]interface{}{
 		"message_id": msgID,
 		"from_agent": fromAgent,
 		"to_agent":   toAgent,
 		"topic":      topic,
 		"audience":   audience,
 		"message":    fmt.Sprintf("Message sent to %s. Recipient can retrieve it via get_messages(unread_only=true).", audience),
-	})
+	}
+	if injectionWarning != "" {
+		resp["injection_warning"] = injectionWarning
+	}
+	return jsonResult(resp)
 }
 
 // handleGetMessages retrieves messages visible to an agent from the message bus.

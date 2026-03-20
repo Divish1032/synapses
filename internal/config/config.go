@@ -151,6 +151,39 @@ type Config struct {
 	// All limits are per-session (per MCP connection) and measured per minute.
 	// Set any limit to -1 to disable that category. Defaults apply when omitted.
 	RateLimits RateLimitConfig `json:"rate_limits,omitempty"`
+
+	// ContentSafety configures the prompt injection scanner that runs on all
+	// externally-sourced content before storage. Covers remember(), send_message(),
+	// annotate_node(), and web_annotate() inputs.
+	ContentSafety ContentSafetyConfig `json:"content_safety,omitempty"`
+}
+
+// ContentSafetyConfig controls the prompt injection scanner.
+type ContentSafetyConfig struct {
+	// Enabled controls whether the scanner is active. Default: true.
+	Enabled *bool `json:"enabled,omitempty"`
+	// Mode controls the response when injection patterns are detected.
+	// "warn" (default): log + annotate response, allow storage.
+	// "truncate": strip matched content before storage.
+	// "reject": return error, refuse to store.
+	Mode string `json:"mode,omitempty"`
+}
+
+// ContentSafetyEnabled returns whether the content safety scanner is enabled.
+// Defaults to true when Enabled is nil (not explicitly set in config).
+func (c ContentSafetyConfig) ContentSafetyEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// ContentSafetyMode returns the configured scanner mode, defaulting to "warn".
+func (c ContentSafetyConfig) ContentSafetyMode() string {
+	if c.Mode == "" {
+		return "warn"
+	}
+	return c.Mode
 }
 
 // ConstitutionConfig holds project-wide principles that are injected into agent
