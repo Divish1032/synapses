@@ -212,13 +212,15 @@ func (b *BuiltinEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 		// Got a slot — proceed with inference.
 	}
 
+	// Guarantee slot return even if RunPipeline panics (e.g., corrupted
+	// model, ONNX runtime OOM). Without this, a panic would leak the slot
+	// and its ONNX session resources permanently.
+	defer func() {
+		pool <- slot
+	}()
+
 	// Run inference without holding any lock — this is the concurrency win.
 	result, runErr := slot.pipeline.RunPipeline([]string{text})
-
-	// Return slot to pool. The channel always has capacity for our slot
-	// because the total slot count equals the channel buffer size, and
-	// we removed exactly one slot above.
-	pool <- slot
 
 	if runErr != nil {
 		return nil, fmt.Errorf("builtin embed: %w", runErr)
