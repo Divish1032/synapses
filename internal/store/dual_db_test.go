@@ -82,6 +82,16 @@ func createLegacySingleDB(t *testing.T) string {
 		`ALTER TABLE memories ADD COLUMN surfaced_at TEXT DEFAULT NULL`,
 		`ALTER TABLE memories ADD COLUMN staled_at TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE annotations ADD COLUMN stale INTEGER NOT NULL DEFAULT 0`,
+		// Sprint 10.1: memory versioning table.
+		`CREATE TABLE IF NOT EXISTS memory_versions (
+			id              TEXT PRIMARY KEY,
+			memory_id       TEXT NOT NULL,
+			version         INTEGER NOT NULL DEFAULT 1,
+			content         TEXT NOT NULL,
+			superseded_by   TEXT NOT NULL DEFAULT '',
+			created_at      TEXT NOT NULL,
+			superseded_at   TEXT NOT NULL
+		)`,
 	} {
 		_, _ = db.Exec(ddl) // Ignore "duplicate column" errors
 	}

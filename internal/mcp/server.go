@@ -2360,6 +2360,13 @@ func (s *Server) registerTools() {
 			mcp.WithString("projects",
 				mcp.Description("Comma-separated list of federation aliases to also search. When provided, searches sibling projects' memories too, labeling results with [alias]. Without this parameter, only local memories are searched."),
 			),
+			mcp.WithString("as_of",
+				mcp.Description("Return memory content as it existed at this point in time. "+
+					"Accepts RFC3339 (e.g. '2026-03-15T12:00:00Z') or date-only (e.g. '2026-03-15'). "+
+					"Memories created after this time are excluded. "+
+					"For memories with version history (updated via dedup), returns the content that was active at that time. "+
+					"Search mode only."),
+			),
 		),
 		s.handleRecall,
 	)

@@ -43,6 +43,19 @@ type Memory struct {
 	ExpiresAt      string `json:"expires_at,omitempty"`
 	LastAccessedAt string `json:"last_accessed_at,omitempty"`
 	Source         string `json:"source"`
+	Version        int    `json:"version,omitempty"` // Sprint 10.1: current version number (1-indexed)
+}
+
+// MemoryVersion is a historical snapshot preserved when remember() deduplicates.
+// The chain: version N → superseded_by → version N+1 (or current memory ID).
+type MemoryVersion struct {
+	ID           string `json:"id"`
+	MemoryID     string `json:"memory_id"`
+	Version      int    `json:"version"`
+	Content      string `json:"content"`
+	SupersededBy string `json:"superseded_by"`
+	CreatedAt    string `json:"created_at"`    // when this version was originally written
+	SupersededAt string `json:"superseded_at"` // when it was replaced
 }
 
 // InvalidatedMemory is a stale memory surfaced once per agent at session start (AM-3).
@@ -58,22 +71,29 @@ type InvalidatedMemory struct {
 
 // InsertMemory writes a new memory, applying tier-based TTL and noise filtering.
 // Returns the memory ID. Deduplicates against existing memories with similar content.
+// Sprint 10.1: on dedup, snapshots the old content as a version before touching.
 func (s *Store) InsertMemory(m Memory) (string, error) {
-	m, deduped, err := s.prepareMemory(m)
+	m, dedup, err := s.prepareMemory(m)
 	if err != nil {
 		return "", err
 	}
-	if deduped != "" {
+	if dedup.dedupedID != "" {
+		// Sprint 10.1: snapshot old content before overwriting via touch.
+		if dedup.dedupedContent != "" {
+			if _, verr := s.CreateMemoryVersion(dedup.dedupedID, dedup.dedupedContent); verr != nil {
+				logutil.Warn("synapses: store: create memory version on dedup: %v\n", verr)
+			}
+		}
 		// Only emit knowledge_updated if the touch succeeds — a failed touch means
 		// the memory was deleted between the dedup check and now (concurrent prune).
 		// Emitting an event for a non-existent memory would corrupt learning-loop data.
-		if touchErr := s.TouchMemory(deduped); touchErr == nil {
+		if touchErr := s.TouchMemory(dedup.dedupedID); touchErr == nil {
 			if err := s.AppendEvent("knowledge_updated", m.AgentID,
-				fmt.Sprintf(`{"memory_id":%q,"reason":"dedup"}`, deduped)); err != nil {
+				fmt.Sprintf(`{"memory_id":%q,"reason":"dedup"}`, dedup.dedupedID)); err != nil {
 				logutil.Warn("synapses: store: append knowledge_updated event: %v\n", err)
 			}
 		}
-		return deduped, nil
+		return dedup.dedupedID, nil
 	}
 
 	_, err = s.knowledgeDB.Exec(`
@@ -367,7 +387,7 @@ func (s *Store) ExpireMemories() (int64, error) {
 	}
 	defer tx.Rollback()
 
-	// Delete anchors, surfacing records, and embeddings for memories about to expire.
+	// Delete anchors, surfacing records, embeddings, and versions for memories about to expire.
 	// Correlated EXISTS is O(n·log n) with the PK index on memories,
 	// vs NOT IN which materializes a full result set.
 	_, _ = tx.Exec(`DELETE FROM memory_anchors WHERE EXISTS (
@@ -378,6 +398,10 @@ func (s *Store) ExpireMemories() (int64, error) {
 	)`, now)
 	_, _ = tx.Exec(`DELETE FROM memory_embeddings WHERE EXISTS (
 		SELECT 1 FROM memories WHERE memories.id = memory_embeddings.memory_id AND memories.expires_at <= ?
+	)`, now)
+	// Sprint 10.1: cascade delete historical versions when parent memory expires.
+	_, _ = tx.Exec(`DELETE FROM memory_versions WHERE EXISTS (
+		SELECT 1 FROM memories WHERE memories.id = memory_versions.memory_id AND memories.expires_at <= ?
 	)`, now)
 	result, err := tx.Exec(`DELETE FROM memories WHERE expires_at <= ?`, now)
 	if err != nil {
@@ -666,24 +690,30 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 	// ── Phase 1: Validate and check dedup OUTSIDE the tx ──────────────────
 	// SetMaxOpenConns(1) means a tx holds the only conn. Any s.knowledgeDB.Query inside
 	// a tx would deadlock. So we run all reads (dedup, defaults) first.
-	m, deduped, err := s.prepareMemory(m)
+	m, dedup, err := s.prepareMemory(m)
 	if err != nil {
 		return "", err
 	}
-	if deduped != "" {
+	if dedup.dedupedID != "" {
+		// Sprint 10.1: snapshot old content before overwriting via touch.
+		if dedup.dedupedContent != "" {
+			if _, verr := s.CreateMemoryVersion(dedup.dedupedID, dedup.dedupedContent); verr != nil {
+				logutil.Warn("synapses: store: create memory version on dedup (anchored): %v\n", verr)
+			}
+		}
 		// Memory deduped — wrap touch + anchor inserts in one tx so crash
 		// between touch and anchors can't leave inconsistent state.
 		tx, err := s.knowledgeDB.Begin()
 		if err != nil {
 			// Best-effort fallback: touch and anchors separately.
-			_ = s.TouchMemory(deduped)
-			_ = s.InsertMemoryAnchors(deduped, anchorNodes)
+			_ = s.TouchMemory(dedup.dedupedID)
+			_ = s.InsertMemoryAnchors(dedup.dedupedID, anchorNodes)
 			// Emit outside any tx — connection is free after fallback ops.
 			if evErr := s.AppendEvent("knowledge_updated", m.AgentID,
-				fmt.Sprintf(`{"memory_id":%q,"reason":"dedup"}`, deduped)); evErr != nil {
+				fmt.Sprintf(`{"memory_id":%q,"reason":"dedup"}`, dedup.dedupedID)); evErr != nil {
 				logutil.Warn("synapses: store: append knowledge_updated event: %v\n", evErr)
 			}
-			return deduped, nil
+			return dedup.dedupedID, nil
 		}
 		defer tx.Rollback()
 
@@ -691,7 +721,7 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 		// for simplicity — the full TouchMemory reads tier+expires_at which
 		// would need s.knowledgeDB.QueryRow inside tx, risking the same conn deadlock).
 		tx.Exec(`UPDATE memories SET last_accessed_at = ? WHERE id = ?`,
-			time.Now().UTC().Format(time.RFC3339), deduped) //nolint:errcheck — best-effort
+			time.Now().UTC().Format(time.RFC3339), dedup.dedupedID) //nolint:errcheck — best-effort
 
 		now := time.Now().UTC().Format(time.RFC3339)
 		for _, nid := range anchorNodes {
@@ -699,16 +729,16 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 				continue
 			}
 			tx.Exec(`INSERT OR IGNORE INTO memory_anchors (memory_id, node_id, created_at) VALUES (?, ?, ?)`,
-				deduped, nid, now) //nolint:errcheck — INSERT OR IGNORE
+				dedup.dedupedID, nid, now) //nolint:errcheck — INSERT OR IGNORE
 		}
 		if commitErr := tx.Commit(); commitErr == nil {
 			// Emit after commit — connection is released back to pool at this point.
 			if evErr := s.AppendEvent("knowledge_updated", m.AgentID,
-				fmt.Sprintf(`{"memory_id":%q,"reason":"dedup","anchors":%d}`, deduped, len(anchorNodes))); evErr != nil {
+				fmt.Sprintf(`{"memory_id":%q,"reason":"dedup","anchors":%d}`, dedup.dedupedID, len(anchorNodes))); evErr != nil {
 				logutil.Warn("synapses: store: append knowledge_updated event: %v\n", evErr)
 			}
 		}
-		return deduped, nil
+		return dedup.dedupedID, nil
 	}
 
 	// ── Phase 2: Insert memory + anchors in one tx ────────────────────────
@@ -781,10 +811,16 @@ func (s *Store) queryFreshMemoriesForDedup(tier, entityID, agentID string) ([]Me
 	return scanMemories(rows)
 }
 
+// prepareMemoryResult holds the result of prepareMemory dedup check.
+type prepareMemoryResult struct {
+	dedupedID      string // non-empty if dedup matched an existing memory
+	dedupedContent string // the old content of the matched memory (for versioning)
+}
+
 // prepareMemory applies defaults, validates, and checks dedup for a Memory.
-// Returns the prepared Memory, the deduped ID if a duplicate was found (empty if new),
+// Returns the prepared Memory, dedup result (ID + old content if matched),
 // and any validation error. Does NOT insert — caller decides how to write.
-func (s *Store) prepareMemory(m Memory) (Memory, string, error) {
+func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 	if m.ID == "" {
 		m.ID = newID()
 	}
@@ -816,7 +852,7 @@ func (s *Store) prepareMemory(m Memory) (Memory, string, error) {
 
 	content := strings.TrimSpace(m.Content)
 	if len(content) < 10 {
-		return m, "", fmt.Errorf("memory content too short (min 10 chars)")
+		return m, prepareMemoryResult{}, fmt.Errorf("memory content too short (min 10 chars)")
 	}
 	m.Content = content
 
@@ -835,14 +871,14 @@ func (s *Store) prepareMemory(m Memory) (Memory, string, error) {
 	}
 	for _, ex := range dupCandidates {
 		if stringSimilarity(ex.Content, m.Content) > 0.85 {
-			// Return dedup ID without side effects — caller handles touch.
+			// Return dedup result with old content for versioning.
 			// prepareMemory must be pure (no writes) so callers can decide
 			// whether to touch inside or outside a transaction.
-			return m, ex.ID, nil
+			return m, prepareMemoryResult{dedupedID: ex.ID, dedupedContent: ex.Content}, nil
 		}
 	}
 
-	return m, "", nil
+	return m, prepareMemoryResult{}, nil
 }
 
 // InsertMemoryAnchors links a memory to one or more graph node IDs.
@@ -953,6 +989,138 @@ func (s *Store) GetMemoriesByIDs(ids []string) ([]Memory, error) {
 	}
 	defer rows.Close()
 	return scanMemories(rows)
+}
+
+// ── Sprint 10.1: Memory Versioning ──────────────────────────────────────────
+
+// CreateMemoryVersion snapshots the current content of a memory as a historical
+// version before the memory is updated (dedup touch). Returns the version number.
+// Caller provides the current content to snapshot — this avoids a SELECT inside tx.
+//
+// Concurrency safety: uses INSERT ... SELECT to atomically compute the next version
+// number in a single SQL statement, preventing duplicate version numbers under
+// concurrent dedup.
+func (s *Store) CreateMemoryVersion(memoryID, content string) (int, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	versionID := newID()
+
+	// Atomic: compute next version and insert in one statement.
+	// COALESCE(MAX(version), 0) + 1 is evaluated atomically by SQLite's
+	// single-writer serialization (WAL mode + IMMEDIATE tx).
+	_, err := s.knowledgeDB.Exec(`
+		INSERT INTO memory_versions (id, memory_id, version, content, superseded_by, created_at, superseded_at)
+		SELECT ?, ?, COALESCE(MAX(version), 0) + 1, ?, ?, ?, ?
+		FROM memory_versions WHERE memory_id = ?`,
+		versionID, memoryID, content, memoryID, now, now, memoryID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("insert memory version: %w", err)
+	}
+
+	// Read back the version number for the return value.
+	var ver int
+	err = s.knowledgeDB.QueryRow(
+		`SELECT version FROM memory_versions WHERE id = ?`, versionID,
+	).Scan(&ver)
+	if err != nil {
+		return 0, fmt.Errorf("read back version: %w", err)
+	}
+	return ver, nil
+}
+
+// GetMemoryVersions returns all historical versions for a memory, ordered by
+// version number ascending (oldest first). The current live memory is NOT included —
+// it lives in the memories table.
+func (s *Store) GetMemoryVersions(memoryID string) ([]MemoryVersion, error) {
+	rows, err := s.knowledgeDB.Query(`
+		SELECT id, memory_id, version, content, superseded_by, created_at, superseded_at
+		FROM memory_versions
+		WHERE memory_id = ?
+		ORDER BY version ASC`, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("get memory versions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []MemoryVersion
+	for rows.Next() {
+		var v MemoryVersion
+		if err := rows.Scan(&v.ID, &v.MemoryID, &v.Version, &v.Content,
+			&v.SupersededBy, &v.CreatedAt, &v.SupersededAt); err != nil {
+			return nil, fmt.Errorf("scan memory version: %w", err)
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// GetMemoryVersionCount returns the number of historical versions for a memory.
+func (s *Store) GetMemoryVersionCount(memoryID string) (int, error) {
+	var count int
+	err := s.knowledgeDB.QueryRow(
+		`SELECT COUNT(*) FROM memory_versions WHERE memory_id = ?`, memoryID,
+	).Scan(&count)
+	return count, err
+}
+
+// GetMemoryAsOf returns memories that were active at the given point in time.
+// For each memory in the input set, it checks whether a historical version was
+// the active version at `asOf`. If so, it returns that version's content in place
+// of the current content. Memories created after `asOf` are excluded entirely.
+//
+// The logic:
+//   - If memory.created_at > asOf → memory didn't exist yet → exclude
+//   - If no versions exist for the memory → current content was always the content
+//   - If versions exist: find the version whose superseded_at > asOf AND version is
+//     the highest where created_at <= asOf → that was the active content at asOf
+//   - Otherwise the current content is the active one
+func (s *Store) GetMemoryAsOf(memoryIDs []string, asOf time.Time) ([]Memory, error) {
+	if len(memoryIDs) == 0 {
+		return nil, nil
+	}
+
+	asOfStr := asOf.Format(time.RFC3339)
+
+	// Step 1: Fetch current memories.
+	mems, err := s.GetMemoriesByIDs(memoryIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 2: For each memory, check if it existed at asOf and find the right content version.
+	// Note: created_at is always stored in UTC RFC3339 by prepareMemory, so string
+	// comparison is safe for temporal ordering.
+	var result []Memory
+	for _, m := range mems {
+		// Memory didn't exist at asOf.
+		if m.CreatedAt > asOfStr {
+			continue
+		}
+
+		// Check for a historical version that was active at asOf.
+		// The active version at time T is the one with the highest version number
+		// where the version's superseded_at > T (it hadn't been replaced yet).
+		// If no versions exist, the current content is the only content.
+		var vContent sql.NullString
+		var vVersion sql.NullInt64
+		err := s.knowledgeDB.QueryRow(`
+			SELECT content, version FROM memory_versions
+			WHERE memory_id = ? AND superseded_at > ?
+			ORDER BY version DESC LIMIT 1`,
+			m.ID, asOfStr,
+		).Scan(&vContent, &vVersion)
+
+		if err == nil && vContent.Valid {
+			// A historical version was active at asOf.
+			m.Content = vContent.String
+			m.Version = int(vVersion.Int64)
+		}
+		// else: no version was active → current content is correct (or no versions exist).
+
+		result = append(result, m)
+	}
+
+	return result, nil
 }
 
 // scanMemories reads rows into a Memory slice.
