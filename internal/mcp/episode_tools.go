@@ -493,9 +493,18 @@ func (s *Server) handleRecall(
 		}
 		memories = filtered
 
-		// Reconcile staleEmbIDs and traversalInfo.Paths to the filtered set.
+		// Re-cap to searchLimit. The inflated quadLimit was only for fetching
+		// enough candidates before filtering — never for returning more than
+		// the user requested. Without this cap, limit=5 with 40 in-range
+		// memories would return 40, violating the limit contract.
+		if len(memories) > searchLimit {
+			memories = memories[:searchLimit]
+		}
+
+		// Reconcile staleEmbIDs and traversalInfo.Paths to the post-cap set.
 		// They were computed from the pre-filter result; IDs no longer in memories
-		// must be removed to avoid confusing agents with references to absent memories.
+		// (filtered out OR past the limit cap) must be removed to avoid confusing
+		// agents with references to absent memories.
 		if len(staleEmbIDs) > 0 || traversalInfo != nil {
 			survivingIDs := make(map[string]bool, len(memories))
 			for _, m := range memories {
