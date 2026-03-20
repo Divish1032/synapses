@@ -35,10 +35,11 @@ const (
 type BuiltinEmbedder struct {
 	modelsDir string
 
-	mu       sync.Mutex
-	session  *hugot.Session
-	pipeline *pipelines.FeatureExtractionPipeline
-	ready    bool
+	mu            sync.Mutex
+	session       *hugot.Session
+	pipeline      *pipelines.FeatureExtractionPipeline
+	ready         bool
+	initAttempted bool // true once ensureModel() has been called at least once
 }
 
 // NewBuiltinEmbedder creates a BuiltinEmbedder that stores its model in
@@ -55,6 +56,7 @@ func (b *BuiltinEmbedder) ensureModel() error {
 	if b.ready {
 		return nil
 	}
+	b.initAttempted = true
 
 	modelPath := filepath.Join(b.modelsDir, builtinModelDirName)
 	onnxPath := filepath.Join(modelPath, builtinModelFile)
@@ -155,6 +157,24 @@ func (b *BuiltinEmbedder) IsReady() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.ready
+}
+
+// StatusDetail returns a human-readable string describing the current
+// initialization state. Thread-safe. Three possible values:
+//   - "ready"                    — pipeline initialized, embeddings working
+//   - "model not yet downloaded" — Embed() has never been called; no init attempted
+//   - "unavailable"              — init was attempted but failed (download error,
+//     pipeline error, or air-gapped environment); Embed() will retry automatically
+func (b *BuiltinEmbedder) StatusDetail() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ready {
+		return "ready"
+	}
+	if b.initAttempted {
+		return "unavailable"
+	}
+	return "model not yet downloaded"
 }
 
 // Close releases the hugot session resources.
