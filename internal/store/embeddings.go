@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 )
 
@@ -124,9 +123,16 @@ func (s *Store) GetNodeTextForEmbedding(nodeID string) (text string, ok bool) {
 	return nodeText(name, sig, doc), true
 }
 
-// VectorSearch performs brute-force cosine similarity search over all stored
-// embeddings. Returns up to limit results ordered by descending similarity.
+// VectorSearch performs cosine similarity search over all stored node embeddings.
+// Returns up to limit results ordered by descending similarity.
 // Falls back gracefully with (nil, nil) when no embeddings are stored yet.
+//
+// Uses a two-pass approach for memory efficiency:
+//
+//	Pass 1: Scan only (node_id, embedding) with a min-heap of size K.
+//	         Node metadata (name, signature, doc) is NOT loaded during scan,
+//	         keeping peak memory at O(K) instead of O(N).
+//	Pass 2: Fetch full node data only for the K winning candidates.
 func (s *Store) VectorSearch(queryVec []float32, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 20
@@ -135,25 +141,20 @@ func (s *Store) VectorSearch(queryVec []float32, limit int) ([]SearchResult, err
 		return nil, nil
 	}
 
+	// Pass 1: Lightweight scan — IDs and embeddings only.
 	rows, err := s.graphDB.Query(`
-		SELECT e.node_id, n.name, n.signature, n.doc, e.embedding
-		FROM node_embeddings e
-		JOIN nodes n ON e.node_id = n.id`)
+		SELECT e.node_id, e.embedding
+		FROM node_embeddings e`)
 	if err != nil {
 		return nil, fmt.Errorf("vector search: %w", err)
 	}
 	defer rows.Close()
 
-	type candidate struct {
-		result SearchResult
-		score  float32
-	}
-	var candidates []candidate
-
+	h := &topKHeap{k: limit}
 	for rows.Next() {
-		var r SearchResult
+		var nodeID string
 		var blob []byte
-		if err := rows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc, &blob); err != nil {
+		if err := rows.Scan(&nodeID, &blob); err != nil {
 			return nil, fmt.Errorf("scan embedding row: %w", err)
 		}
 		vec := blobToVec(blob)
@@ -161,28 +162,64 @@ func (s *Store) VectorSearch(queryVec []float32, limit int) ([]SearchResult, err
 			continue
 		}
 		score := cosineSimilarity(queryVec, vec)
-		candidates = append(candidates, candidate{r, score})
+		if score <= 0 {
+			continue
+		}
+		h.tryPush(nodeID, score)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(candidates) == 0 {
+
+	winners := h.drain()
+	if len(winners) == 0 {
 		return nil, nil
 	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].score > candidates[j].score
-	})
-	if len(candidates) > limit {
-		candidates = candidates[:limit]
+	// Pass 2: Fetch node metadata for winners only.
+	lookup := make(map[string]struct{ pos int; score float64 }, len(winners))
+	placeholders := make([]string, len(winners))
+	args := make([]any, len(winners))
+	for i, w := range winners {
+		lookup[w.id] = struct{ pos int; score float64 }{pos: i, score: float64(w.score)}
+		placeholders[i] = "?"
+		args[i] = w.id
 	}
 
-	results := make([]SearchResult, len(candidates))
-	for i, c := range candidates {
-		results[i] = c.result
-		results[i].Score = float64(c.score)
+	metaRows, err := s.graphDB.Query(
+		`SELECT id, name, signature, doc FROM nodes WHERE id IN (`+
+			strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("fetch vector search results: %w", err)
 	}
-	return results, nil
+	defer metaRows.Close()
+
+	results := make([]SearchResult, len(winners))
+	for metaRows.Next() {
+		var r SearchResult
+		if err := metaRows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc); err != nil {
+			return nil, fmt.Errorf("scan node result: %w", err)
+		}
+		ps, ok := lookup[r.ID]
+		if !ok {
+			continue
+		}
+		r.Score = ps.score
+		results[ps.pos] = r
+	}
+	if err := metaRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Filter out any zero-value entries (nodes deleted between pass 1 and 2).
+	n := 0
+	for _, r := range results {
+		if r.ID != "" {
+			results[n] = r
+			n++
+		}
+	}
+	return results[:n], nil
 }
 
 // vecToBlob encodes a []float32 slice as a little-endian byte slice.
