@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -253,5 +254,127 @@ func TestInsertMemory_ImportanceFloatWeight(t *testing.T) {
 	}
 	if found.Importance != "0.8" {
 		t.Errorf("importance = %q, want \"0.8\"", found.Importance)
+	}
+}
+
+// ── Importance clamping (Fix 3: footgun prevention) ───────────────────────────
+
+func TestInsertMemory_ImportanceZeroClampedToThreshold(t *testing.T) {
+	// importance "0.0" would make any memory permanently invisible (score=0 < threshold).
+	// prepareMemory must clamp it up to DecayVisibilityThreshold so fresh memories remain visible.
+	st := openMemTestStore(t)
+
+	id, err := st.InsertMemory(Memory{
+		Tier:       TierProject,
+		Content:    "Memory with zero importance — should be clamped to minimum threshold.",
+		AgentID:    "agent-clamp-1",
+		Source:     SourceManual,
+		Tags:       `[]`,
+		Importance: "0.0",
+	})
+	if err != nil {
+		t.Fatalf("insert memory: %v", err)
+	}
+
+	mems, err := st.QueryMemories(TierProject, "", "agent-clamp-1", 10)
+	if err != nil {
+		t.Fatalf("query memories: %v", err)
+	}
+	var found *Memory
+	for i := range mems {
+		if mems[i].ID == id {
+			found = &mems[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("inserted memory not found")
+	}
+	// Must be clamped to the minimum floor (2× threshold = 0.10), not left at zero.
+	const minFloor = DecayVisibilityThreshold * 2
+	if w, err := strconv.ParseFloat(found.Importance, 64); err != nil || w < minFloor {
+		t.Errorf("importance %q should have been clamped to >= %v, got %v", found.Importance, minFloor, w)
+	}
+	// A freshly-inserted memory at the floor must always score above the visibility threshold.
+	score := DecayedImportanceScore(*found, 168)
+	if score < DecayVisibilityThreshold {
+		t.Errorf("clamped importance score = %f, want >= %f (threshold)", score, DecayVisibilityThreshold)
+	}
+}
+
+func TestInsertMemory_ImportanceBelowThresholdClamped(t *testing.T) {
+	// importance "0.01" (below threshold of 0.05) — should be clamped.
+	st := openMemTestStore(t)
+
+	id, err := st.InsertMemory(Memory{
+		Tier:       TierProject,
+		Content:    "Memory with sub-threshold importance — should be clamped to minimum visible.",
+		AgentID:    "agent-clamp-2",
+		Source:     SourceManual,
+		Tags:       `[]`,
+		Importance: "0.01",
+	})
+	if err != nil {
+		t.Fatalf("insert memory: %v", err)
+	}
+
+	mems, err := st.QueryMemories(TierProject, "", "agent-clamp-2", 10)
+	if err != nil {
+		t.Fatalf("query memories: %v", err)
+	}
+	var found *Memory
+	for i := range mems {
+		if mems[i].ID == id {
+			found = &mems[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("inserted memory not found")
+	}
+	// The clamped weight must be at or above the minimum floor (0.10).
+	const minFloor = DecayVisibilityThreshold * 2
+	if w, err := strconv.ParseFloat(found.Importance, 64); err != nil || w < minFloor {
+		t.Errorf("importance %q should have been clamped to >= %v, got %v", found.Importance, minFloor, w)
+	}
+	// A freshly-inserted memory at the floor must score above the visibility threshold.
+	score := DecayedImportanceScore(*found, 168)
+	if score < DecayVisibilityThreshold {
+		t.Errorf("fresh memory with clamped importance score = %f, want >= %f", score, DecayVisibilityThreshold)
+	}
+}
+
+func TestInsertMemory_ImportanceInvalidStringDefaultsToOne(t *testing.T) {
+	// Invalid numeric string falls back to "1.0" (normal decay).
+	st := openMemTestStore(t)
+
+	id, err := st.InsertMemory(Memory{
+		Tier:       TierProject,
+		Content:    "Memory with invalid importance string — should default to 1.0.",
+		AgentID:    "agent-clamp-3",
+		Source:     SourceManual,
+		Tags:       `[]`,
+		Importance: "ultra-high",
+	})
+	if err != nil {
+		t.Fatalf("insert memory: %v", err)
+	}
+
+	mems, err := st.QueryMemories(TierProject, "", "agent-clamp-3", 10)
+	if err != nil {
+		t.Fatalf("query memories: %v", err)
+	}
+	var found *Memory
+	for i := range mems {
+		if mems[i].ID == id {
+			found = &mems[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("inserted memory not found")
+	}
+	if found.Importance != "1.0" {
+		t.Errorf("invalid importance defaulted to %q, want \"1.0\"", found.Importance)
 	}
 }

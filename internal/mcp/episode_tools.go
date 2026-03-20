@@ -308,6 +308,32 @@ func (s *Server) handleRecall(
 		sinceDays = int(v)
 	}
 
+	// Parse absolute time bounds: since / until (Sprint 10 #5).
+	// Accepted formats: RFC3339 ("2026-03-01T00:00:00Z") or date-only ("2026-03-01").
+	var sinceTime, untilTime *time.Time
+	if sinceStr := stringArg(req, "since"); sinceStr != "" {
+		t, err := parseFlexibleTime(sinceStr, false)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("since: %v", err)), nil
+		}
+		sinceTime = &t
+		// Auto-derive sinceDays if the caller didn't set since_days explicitly.
+		// This feeds the temporal channel with the right lookback window.
+		if sinceDays == 0 {
+			days := int(time.Since(t).Hours()/24) + 1
+			if days > 0 {
+				sinceDays = days
+			}
+		}
+	}
+	if untilStr := stringArg(req, "until"); untilStr != "" {
+		t, err := parseFlexibleTime(untilStr, true) // true = end-of-day for date-only
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("until: %v", err)), nil
+		}
+		untilTime = &t
+	}
+
 	includeStale, _ := req.GetArguments()["include_stale"].(bool)
 
 	// Browse mode: empty query = list chronologically (newest first).
@@ -341,7 +367,14 @@ func (s *Server) handleRecall(
 		if includeStale {
 			recentMems, _ = s.store.QueryMemoriesIncludingStale("", "", agentID, limit)
 		} else {
-			recentMems, _ = s.store.QueryMemories("", "", agentID, limit)
+			raw, _ := s.store.QueryMemories("", "", agentID, limit)
+			// Apply decay visibility threshold — same filter as search mode.
+			// Pinned memories always pass; decayed memories are demoted but not deleted.
+			for _, m := range raw {
+				if store.DecayedImportanceScore(m, 0) >= store.DecayVisibilityThreshold {
+					recentMems = append(recentMems, m)
+				}
+			}
 		}
 
 		summary := "no episodes found"
@@ -406,6 +439,34 @@ func (s *Server) handleRecall(
 	// Quad-channel recall: 4 parallel channels merged via RRF.
 	// Replaces the old sequential BM25 + vector search path.
 	memories, _, staleEmbIDs := s.quadRecallSearch(ctx, query, searchLimit, includeStale, sinceDays)
+
+	// Sprint 10.5: apply absolute time bounds (since / until) as post-filters.
+	// sinceTime and untilTime are only set when the caller provided since= / until=.
+	if sinceTime != nil || untilTime != nil {
+		filtered := memories[:0]
+		for _, m := range memories {
+			if sinceTime != nil && m.CreatedAt < sinceTime.UTC().Format(time.RFC3339) {
+				continue
+			}
+			if untilTime != nil && m.CreatedAt > untilTime.UTC().Format(time.RFC3339) {
+				continue
+			}
+			filtered = append(filtered, m)
+		}
+		memories = filtered
+		// Also filter episodes by absolute time bounds (CreatedAt is Unix seconds).
+		filteredEp := episodes[:0]
+		for _, ep := range episodes {
+			if sinceTime != nil && ep.CreatedAt < sinceTime.Unix() {
+				continue
+			}
+			if untilTime != nil && ep.CreatedAt > untilTime.Unix() {
+				continue
+			}
+			filteredEp = append(filteredEp, ep)
+		}
+		episodes = filteredEp
+	}
 
 	// Sprint 10.1: apply temporal versioning — swap content with historical version.
 	if asOfTime != nil && len(memories) > 0 {
@@ -511,9 +572,12 @@ func (s *Server) handleRecall(
 					})
 				}
 			}
-			// Also search memories.
+			// Also search memories; apply decay filter for consistency with local recall.
 			mems, _ := projStore.SearchMemories(query, searchLimit)
 			for _, m := range mems {
+				if store.DecayedImportanceScore(m, 0) < store.DecayVisibilityThreshold {
+					continue // skip decayed memories in cross-project results
+				}
 				crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
 					"source":     fmt.Sprintf("[%s]", projName),
 					"id":         m.ID,
@@ -757,4 +821,23 @@ func stringArgDefault(req mcp.CallToolRequest, name, def string) string {
 		return def
 	}
 	return v
+}
+
+// parseFlexibleTime parses a time string in either RFC3339 or date-only "2006-01-02" format.
+// When endOfDay is true and a date-only string is given, the returned time is set to 23:59:59
+// of that day (useful for "until" bounds). Returns an error if neither format matches.
+func parseFlexibleTime(s string, endOfDay bool) (time.Time, error) {
+	// Try RFC3339 first (most precise).
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC(), nil
+	}
+	// Fall back to date-only "YYYY-MM-DD".
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("expected RFC3339 (e.g. '2026-03-01T00:00:00Z') or date (e.g. '2026-03-01'), got %q", s)
+	}
+	if endOfDay {
+		t = t.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
+	}
+	return t.UTC(), nil
 }
