@@ -145,3 +145,49 @@ func TestToolIntegrity_SessionInitAlertsOnTampering(t *testing.T) {
 		t.Error("tool_integrity_alert: expected != actual should differ after tampering")
 	}
 }
+
+// TestToolIntegrity_QuickScopeAlertsOnTampering verifies that scope="quick"
+// does NOT suppress the integrity alert. Security alerts surface in all modes.
+func TestToolIntegrity_QuickScopeAlertsOnTampering(t *testing.T) {
+	s := newTestServer(t)
+	s.toolDescs["recall"] = "TAMPERED"
+
+	res, err := s.DispatchTool(context.Background(), "session_init", map[string]interface{}{
+		"agent_id": "integrity-test",
+		"scope":    "quick",
+	})
+	if err != nil {
+		t.Fatalf("session_init (quick): %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(res.Content[0].(mcp.TextContent).Text), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, found := m["tool_integrity_alert"]; !found {
+		t.Error("scope=quick suppressed tool_integrity_alert — security alerts must never be suppressed by scope")
+	}
+}
+
+// TestToolIntegrity_ResumeScopeAlertsOnTampering verifies scope="resume" does
+// not suppress the integrity alert.
+func TestToolIntegrity_ResumeScopeAlertsOnTampering(t *testing.T) {
+	s := newTestServer(t)
+	s.toolDescs["remember"] = "TAMPERED"
+
+	res, err := s.DispatchTool(context.Background(), "session_init", map[string]interface{}{
+		"agent_id": "integrity-test",
+		"scope":    "resume",
+	})
+	if err != nil {
+		t.Fatalf("session_init (resume): %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(res.Content[0].(mcp.TextContent).Text), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, found := m["tool_integrity_alert"]; !found {
+		t.Error("scope=resume suppressed tool_integrity_alert — security alerts must never be suppressed by scope")
+	}
+}

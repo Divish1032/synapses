@@ -1376,8 +1376,13 @@ func (s *Server) handleSessionInit(
 	// Re-derive the hash of all tool descriptions from the live toolDescs map
 	// and compare against the baseline computed at startup. A mismatch means
 	// a description was modified in memory after startup — surface a warning.
+	// Runs for all scope modes (full/quick/resume) — security alerts are never
+	// suppressed by verbosity settings.
 	if s.toolDescBaseline != "" {
 		if current := hashToolDescs(s.toolDescs); current != s.toolDescBaseline {
+			fmt.Fprintf(os.Stderr, "ERROR: [synapses] tool description integrity violation — "+
+				"hash mismatch detected at session_init. expected=%s actual=%s\n",
+				s.toolDescBaseline, current)
 			resp["tool_integrity_alert"] = map[string]interface{}{
 				"severity": "HIGH",
 				"message":  "Tool description hash mismatch — one or more tool descriptions were modified after server startup. This may indicate runtime tampering.",
