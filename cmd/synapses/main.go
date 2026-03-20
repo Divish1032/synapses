@@ -3137,13 +3137,15 @@ func bulkIngestToBrain(ctx context.Context, bc *brain.Client, g *graph.Graph, pr
 	var wg sync.WaitGroup
 dispatch:
 	for _, n := range nodes {
+		// Acquire semaphore slot and check cancellation atomically.
+		// A two-step check+block would allow the goroutine to block on sem
+		// after cancellation, holding up shutdown for the duration of LLM calls.
 		select {
 		case <-ctx.Done():
 			break dispatch
-		default:
+		case sem <- struct{}{}:
 		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(node *graph.Node) {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -3187,13 +3189,14 @@ dispatch:
 		if string(n.Type) == "package" || string(n.Type) == "file" {
 			continue
 		}
+		// Acquire semaphore slot and check cancellation atomically so shutdown
+		// cannot be blocked by a slow LLM call holding all semaphore slots.
 		select {
 		case <-ctx.Done():
 			break dispatch
-		default:
+		case sem <- struct{}{}:
 		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(node *graph.Node) {
 			defer wg.Done()
 			defer func() { <-sem }()
