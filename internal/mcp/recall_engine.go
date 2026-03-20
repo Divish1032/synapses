@@ -78,6 +78,7 @@ func (s *Server) quadRecallSearch(
 	limit int,
 	includeStale bool,
 	sinceDays int,
+	untilTime *time.Time, // Sprint 10.5: optional upper time bound for temporal channel
 	depth int,
 ) ([]store.Memory, map[string][]string, []string, *GraphTraversalInfo) {
 	if limit <= 0 {
@@ -270,7 +271,7 @@ func (s *Server) quadRecallSearch(
 		defer cancel()
 		_ = chCtx
 
-		mems, err := s.store.RecentMemories(temporalLimit, sinceDays, includeStale)
+		mems, err := s.store.RecentMemories(temporalLimit, sinceDays, untilTime, includeStale)
 		if err != nil {
 			logRecallChannelError("temporal", err)
 			return

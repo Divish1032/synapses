@@ -75,8 +75,9 @@ const DecayVisibilityThreshold = 0.05
 // regardless of text match. This is the data source for the temporal channel
 // in quad-channel recall — it finds memories relevant by recency alone.
 // sinceDays limits the lookback window (0 = 7 days default).
+// until optionally caps the upper bound on created_at (nil = no upper bound).
 // When includeStale is true, stale memories are also returned.
-func (s *Store) RecentMemories(limit, sinceDays int, includeStale bool) ([]Memory, error) {
+func (s *Store) RecentMemories(limit, sinceDays int, until *time.Time, includeStale bool) ([]Memory, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -94,6 +95,12 @@ func (s *Store) RecentMemories(limit, sinceDays int, includeStale bool) ([]Memor
 	      WHERE created_at >= ?
 	        AND expires_at > ?`
 	args := []interface{}{cutoff, nowStr}
+
+	// Sprint 10.5: optional upper bound for time-bounded queries (since + until).
+	if until != nil {
+		q += ` AND created_at <= ?`
+		args = append(args, until.UTC().Format(time.RFC3339))
+	}
 
 	if !includeStale {
 		q += ` AND stale = 0`

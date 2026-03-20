@@ -2377,6 +2377,18 @@ func (s *Server) registerTools() {
 					"For memories with version history (updated via dedup), returns the content that was active at that time. "+
 					"Search mode only."),
 			),
+			mcp.WithString("since",
+				mcp.Description("Lower bound for memory creation time — only memories created at or after this time are returned. "+
+					"Accepts RFC3339 (e.g. '2026-03-01T00:00:00Z') or date-only (e.g. '2026-03-01'). "+
+					"Combine with until= for a time-window query, e.g. recall(query='auth', since='2026-03-01', until='2026-03-15'). "+
+					"Applied to local memories, local episodes, and cross-project results. Also auto-sets the temporal channel lookback window."),
+			),
+			mcp.WithString("until",
+				mcp.Description("Upper bound for memory creation time — only memories created at or before this time are returned. "+
+					"Accepts RFC3339 (e.g. '2026-03-15T23:59:59Z') or date-only (e.g. '2026-03-15', treated as end-of-day). "+
+					"Use with since= to scope recall to a specific window. "+
+					"Applied to local memories, local episodes, and cross-project results."),
+			),
 			mcp.WithNumber("depth",
 				mcp.Description("Graph traversal depth for multi-hop knowledge discovery (default 2, max 4). " +
 					"depth=2: surfaces memories about entities 2 hops from query-matching anchors " +

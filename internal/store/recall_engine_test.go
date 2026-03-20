@@ -187,7 +187,7 @@ func TestRecentMemories_ReturnsRecentOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mems, err := st.RecentMemories(10, 7, false)
+	mems, err := st.RecentMemories(10, 7, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestRecentMemories_DefaultSinceDays(t *testing.T) {
 	})
 
 	// sinceDays=0 should default to 7.
-	mems, err := st.RecentMemories(10, 0, false)
+	mems, err := st.RecentMemories(10, 0, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestRecentMemories_ExcludesStaleByDefault(t *testing.T) {
 	_ = st.MarkEntityMemoriesStale("repo::test.go::Foo", "node removed")
 	_ = id
 
-	mems, err := st.RecentMemories(10, 7, false)
+	mems, err := st.RecentMemories(10, 7, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestRecentMemories_IncludesStaleWhenRequested(t *testing.T) {
 	})
 	_ = st.MarkEntityMemoriesStale("repo::test.go::Bar", "changed")
 
-	mems, err := st.RecentMemories(10, 7, true)
+	mems, err := st.RecentMemories(10, 7, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,6 +270,87 @@ func TestRecentMemories_IncludesStaleWhenRequested(t *testing.T) {
 	}
 	if !found {
 		t.Error("stale memory should be included when includeStale=true")
+	}
+}
+
+// ── RecentMemories: until bound (Sprint 10 #5) ────────────────────────────────
+
+func TestRecentMemories_UntilBound_ExcludesFuture(t *testing.T) {
+	t.Parallel()
+	st := openRecallTestStore(t)
+
+	_, _ = st.InsertMemory(Memory{
+		Tier:    TierProject,
+		Content: "past memory — should be included",
+		AgentID: "agent-1",
+		Source:  SourceManual,
+	})
+
+	// until = 1 second ago → current memories (created "just now") are after the cutoff.
+	cutoff := time.Now().UTC().Add(-1 * time.Second)
+	mems, err := st.RecentMemories(10, 7, &cutoff, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range mems {
+		if m.Content == "past memory — should be included" {
+			t.Error("memory created after until= should be excluded")
+		}
+	}
+}
+
+func TestRecentMemories_UntilBound_IncludesWithinRange(t *testing.T) {
+	t.Parallel()
+	st := openRecallTestStore(t)
+
+	_, _ = st.InsertMemory(Memory{
+		Tier:    TierProject,
+		Content: "within-range memory",
+		AgentID: "agent-1",
+		Source:  SourceManual,
+	})
+
+	// until = 1 second from now → the just-inserted memory should be included.
+	cutoff := time.Now().UTC().Add(1 * time.Second)
+	mems, err := st.RecentMemories(10, 7, &cutoff, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range mems {
+		if m.Content == "within-range memory" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("memory within the until= bound should be included")
+	}
+}
+
+func TestRecentMemories_NilUntilBound_BehavesLikeBefore(t *testing.T) {
+	t.Parallel()
+	st := openRecallTestStore(t)
+
+	_, _ = st.InsertMemory(Memory{
+		Tier:    TierProject,
+		Content: "nil-until memory",
+		AgentID: "agent-1",
+		Source:  SourceManual,
+	})
+
+	// nil until should not filter anything — same as old 3-arg behavior.
+	mems, err := st.RecentMemories(10, 7, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range mems {
+		if m.Content == "nil-until memory" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("nil until= should not exclude any memories")
 	}
 }
 

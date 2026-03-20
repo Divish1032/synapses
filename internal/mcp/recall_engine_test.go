@@ -30,7 +30,7 @@ func TestQuadRecallSearch_BM25Channel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth token", 5, false, 7, 0)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth token", 5, false, 7, nil, 0)
 	if len(mems) == 0 {
 		t.Fatal("expected at least 1 memory from BM25 channel")
 	}
@@ -65,7 +65,7 @@ func TestQuadRecallSearch_TemporalChannel(t *testing.T) {
 	}
 
 	// Query for "auth" — BM25 won't find "Docker" memory, but temporal should.
-	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth changes", 10, false, 7, 0)
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth changes", 10, false, 7, nil, 0)
 
 	// Temporal channel returns recent memories regardless of text match.
 	foundDocker := false
@@ -103,7 +103,7 @@ func TestQuadRecallSearch_TemporalDoesNotOverwhelmRelevant(t *testing.T) {
 	}
 
 	// Query for "auth" with limit=5.
-	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth OAuth middleware", 5, false, 7, 0)
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth OAuth middleware", 5, false, 7, nil, 0)
 
 	// The 2 auth-relevant memories should rank in the top 3 (multi-channel boost).
 	authCount := 0
@@ -166,7 +166,7 @@ func TestQuadRecallSearch_GraphChannel(t *testing.T) {
 		Source:  store.SourceManual,
 	}, []string{string(tokID)})
 
-	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", 10, false, 7, 0)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", 10, false, 7, nil, 0)
 
 	// Graph channel should find the TokenValidator memory via BFS from AuthLogin.
 	foundJWT := false
@@ -194,7 +194,7 @@ func TestQuadRecallSearch_GraphChannel(t *testing.T) {
 func TestQuadRecallSearch_EmptyResults(t *testing.T) {
 	srv := newTestServer(t)
 
-	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "nonexistent query", 5, false, 7, 0)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "nonexistent query", 5, false, 7, nil, 0)
 	// Temporal channel may return recent memories, but store is empty.
 	if len(mems) != 0 {
 		t.Errorf("expected 0 memories from empty store, got %d", len(mems))
@@ -216,7 +216,7 @@ func TestQuadRecallSearch_NoGraph_GracefulDegradation(t *testing.T) {
 		Source:  store.SourceManual,
 	})
 
-	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "GraphQL", 5, false, 7, 0)
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "GraphQL", 5, false, 7, nil, 0)
 	if len(mems) == 0 {
 		t.Error("expected BM25/temporal results even without graph")
 	}
@@ -756,7 +756,7 @@ func TestQuadRecallSearch_DepthZeroDefaultsToTwo(t *testing.T) {
 	}, []string{string(tokID)})
 
 	// depth=0 → defaults to 2; should find the TokenValidator memory via graph channel.
-	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", 10, false, 7, 0)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", 10, false, 7, nil, 0)
 
 	foundJWT := false
 	for _, m := range mems {
@@ -800,7 +800,7 @@ func TestQuadRecallSearch_ReturnsTraversalInfo_WhenGraphFires(t *testing.T) {
 		AgentID: "a1", Source: store.SourceManual,
 	}, []string{string(tokID)})
 
-	_, _, _, ti := srv.quadRecallSearch(context.Background(), "auth service login", 10, false, 7, 2)
+	_, _, _, ti := srv.quadRecallSearch(context.Background(), "auth service login", 10, false, 7, nil, 2)
 
 	if ti == nil {
 		t.Fatal("expected non-nil GraphTraversalInfo when graph channel was active")
@@ -836,7 +836,7 @@ func TestQuadRecallSearch_TraversalPaths_ShowConnection(t *testing.T) {
 		AgentID: "a1", Source: store.SourceManual,
 	}, []string{string(tokID)})
 
-	_, _, _, ti := srv.quadRecallSearch(context.Background(), "auth service login", 10, false, 7, 2)
+	_, _, _, ti := srv.quadRecallSearch(context.Background(), "auth service login", 10, false, 7, nil, 2)
 
 	if ti == nil {
 		t.Fatal("expected GraphTraversalInfo")
@@ -1210,4 +1210,227 @@ func TestGetMemoryAnchorNodeIDsInSet_EmptyInputs(t *testing.T) {
 	if err != nil || r2 != nil {
 		t.Errorf("nil nodeSet: expected (nil, nil), got (%v, %v)", r2, err)
 	}
+}
+
+// ── Sprint 10.5: temporal cross-domain queries ────────────────────────────────
+
+// TestHandleRecall_SinceBound verifies that since= excludes memories before the cutoff.
+func TestHandleRecall_SinceBound(t *testing.T) {
+	srv := newTestServer(t)
+
+	_, _ = srv.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: "auth refactor with OAuth2",
+		AgentID: "agent-1",
+		Source:  store.SourceManual,
+	})
+
+	// since = 1 hour from now → no memory should be returned (all memories are "old").
+	future := time.Now().UTC().Add(1 * time.Hour).Format("2006-01-02T15:04:05Z")
+	res, err := srv.handleRecall(context.Background(), callTool(map[string]any{
+		"query": "auth",
+		"since": future,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The since= is in the future — 0 memories should match.
+	raw := extractJSON(t, res)
+	if mems, ok := raw["memories"]; ok {
+		if arr, ok := mems.([]interface{}); ok && len(arr) > 0 {
+			t.Errorf("since=future: expected 0 memories, got %d", len(arr))
+		}
+	}
+}
+
+// TestHandleRecall_UntilBound verifies that until= excludes memories after the cutoff.
+func TestHandleRecall_UntilBound(t *testing.T) {
+	srv := newTestServer(t)
+
+	_, _ = srv.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: "auth refactor with OAuth2",
+		AgentID: "agent-1",
+		Source:  store.SourceManual,
+	})
+
+	// until = 1 hour ago → the just-inserted memory was created after the cutoff.
+	past := time.Now().UTC().Add(-1 * time.Hour).Format("2006-01-02T15:04:05Z")
+	res, err := srv.handleRecall(context.Background(), callTool(map[string]any{
+		"query": "auth",
+		"until": past,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := extractJSON(t, res)
+	if mems, ok := raw["memories"]; ok {
+		if arr, ok := mems.([]interface{}); ok && len(arr) > 0 {
+			t.Errorf("until=past: expected 0 memories, got %d", len(arr))
+		}
+	}
+}
+
+// TestHandleRecall_SinceUntilWindow verifies that memories within the window are returned.
+func TestHandleRecall_SinceUntilWindow(t *testing.T) {
+	srv := newTestServer(t)
+
+	_, _ = srv.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: "auth JWT token validation",
+		AgentID: "agent-1",
+		Source:  store.SourceManual,
+	})
+
+	// Window from 1 hour ago to 1 hour from now — the memory should be included.
+	since := time.Now().UTC().Add(-1 * time.Hour).Format("2006-01-02T15:04:05Z")
+	until := time.Now().UTC().Add(1 * time.Hour).Format("2006-01-02T15:04:05Z")
+	res, err := srv.handleRecall(context.Background(), callTool(map[string]any{
+		"query": "auth JWT",
+		"since": since,
+		"until": until,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := extractJSON(t, res)
+	// time_filter should be annotated in the response.
+	if _, ok := raw["time_filter"]; !ok {
+		t.Error("expected time_filter annotation in response when since/until provided")
+	}
+	// The memory should be present.
+	mems, _ := raw["memories"].([]interface{})
+	if len(mems) == 0 {
+		t.Error("expected at least 1 memory within the time window")
+	}
+}
+
+// TestHandleRecall_SinceAfterUntil_ReturnsError verifies validation rejects inverted range.
+func TestHandleRecall_SinceAfterUntil_ReturnsError(t *testing.T) {
+	srv := newTestServer(t)
+
+	since := "2026-03-15"
+	until := "2026-03-01" // before since — invalid
+	res, err := srv.handleRecall(context.Background(), callTool(map[string]any{
+		"query": "auth",
+		"since": since,
+		"until": until,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("expected error result for inverted since/until range")
+	}
+	if !strings.Contains(extractErrorText(t, res), "before") {
+		t.Errorf("error message should mention 'before', got: %s", extractErrorText(t, res))
+	}
+}
+
+// TestHandleRecall_InvalidSinceFormat_ReturnsError verifies that bad format is rejected.
+func TestHandleRecall_InvalidSinceFormat_ReturnsError(t *testing.T) {
+	srv := newTestServer(t)
+
+	res, err := srv.handleRecall(context.Background(), callTool(map[string]any{
+		"query": "auth",
+		"since": "not-a-date",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("expected error for unparseable since= value")
+	}
+}
+
+// TestHandleRecall_DateOnlyFormat verifies "2026-03-01" is accepted without RFC3339 suffix.
+func TestHandleRecall_DateOnlyFormat(t *testing.T) {
+	srv := newTestServer(t)
+
+	_, _ = srv.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: "auth session token cleanup",
+		AgentID: "agent-1",
+		Source:  store.SourceManual,
+	})
+
+	// Date-only format should not return an error.
+	res, err := srv.handleRecall(context.Background(), callTool(map[string]any{
+		"query": "auth session",
+		"since": "2020-01-01", // old date — all memories after this
+		"until": "2099-12-31", // far future — all memories before this
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Errorf("date-only format should be accepted, got error: %s", extractErrorText(t, res))
+	}
+	raw := extractJSON(t, res)
+	if _, ok := raw["time_filter"]; !ok {
+		t.Error("expected time_filter annotation for date-only since/until")
+	}
+}
+
+// TestQuadRecallSearch_UntilBound_TemporalChannel verifies until= gates the temporal channel.
+// The temporal channel is the only channel that respects untilTime directly.
+// BM25 / semantic channels are time-agnostic — post-filtering in handleRecall trims those.
+// This test verifies that a memory that would ONLY appear in the temporal channel
+// (i.e., it contains a noise term that doesn't match the query) is excluded when until=past.
+func TestQuadRecallSearch_UntilBound_TemporalChannel(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Insert a memory that does NOT match the query "zzz_nomatching_query" via BM25,
+	// but IS recent — meaning it can only surface via the temporal channel.
+	_, _ = srv.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: "xyzzy infrastructure background update foobar",
+		AgentID: "agent-1",
+		Source:  store.SourceManual,
+	})
+
+	// until = 1 hour ago — the just-inserted memory was created "now", which is AFTER the cutoff.
+	// With until=past, the temporal channel should not return the memory.
+	past := time.Now().UTC().Add(-1 * time.Hour)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "zzz_nomatching_query", 10, false, 30, &past, 0)
+
+	// The memory should not appear: BM25 won't find it (query doesn't match),
+	// and temporal channel is bounded to past — the memory was created after the cutoff.
+	for _, m := range mems {
+		if m.Content == "xyzzy infrastructure background update foobar" {
+			channels := attr[m.ID]
+			t.Errorf("memory created after until= should not appear; found in channels %v", channels)
+		}
+	}
+}
+
+// ── helpers used in Sprint 10.5 tests ────────────────────────────────────────
+
+func extractJSON(t *testing.T, res *mcp.CallToolResult) map[string]interface{} {
+	t.Helper()
+	if res == nil || len(res.Content) == 0 {
+		return nil
+	}
+	for _, c := range res.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			var out map[string]interface{}
+			if err := json.Unmarshal([]byte(tc.Text), &out); err == nil {
+				return out
+			}
+		}
+	}
+	return nil
+}
+
+func extractErrorText(t *testing.T, res *mcp.CallToolResult) string {
+	t.Helper()
+	if res == nil || len(res.Content) == 0 {
+		return ""
+	}
+	for _, c := range res.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			return tc.Text
+		}
+	}
+	return ""
 }
