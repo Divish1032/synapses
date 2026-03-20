@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -78,9 +79,38 @@ func (s *Server) handleRemember(
 		return mcp.NewToolResultError(rationaleErr.Error()), nil
 	}
 
+	// OF-E3: cross-project write approval gate.
+	// When project_id is explicitly set and differs from the current project,
+	// this is a cross-project write that requires user approval.
+	reqProjectID := stringArg(req, "project_id")
+	if reqProjectID != "" {
+		currentProject := ""
+		if s.graph != nil {
+			currentProject = s.graph.RepoID()
+		}
+		if currentProject == "" {
+			currentProject = filepath.Base(s.projectPath)
+		}
+		if reqProjectID != currentProject {
+			approvalToken := stringArg(req, "approval_token")
+			if approvalToken == "" {
+				return s.approvals.requestApproval(
+					"cross_project_remember",
+					fmt.Sprintf("Agent %q writing memory to project %q (current project: %q)", agentID, reqProjectID, currentProject),
+					agentID,
+				), nil
+			}
+			if !s.approvals.validateAndConsume(approvalToken) {
+				return mcp.NewToolResultError(
+					"approval_token is invalid or expired. Re-request approval by calling remember without approval_token.",
+				), nil
+			}
+		}
+	}
+
 	e := store.Episode{
 		AgentID:       agentID,
-		ProjectID:     stringArg(req, "project_id"),
+		ProjectID:     reqProjectID,
 		CreatedAt:     time.Now().Unix(),
 		EpisodeType:   episodeType,
 		Outcome:       outcome,

@@ -153,6 +153,7 @@ func TestHandleSendMessage_PayloadAtLimit_Accepted(t *testing.T) {
 	}
 	res, err := s.handleSendMessage(ctx, callTool(map[string]any{
 		"from_agent": "agent",
+		"to_agent":   "receiver", // directed message avoids approval gate
 		"topic":      "ok",
 		"payload":    atLimit,
 	}))
