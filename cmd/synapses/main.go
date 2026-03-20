@@ -61,7 +61,7 @@ func main() {
 	}
 
 	if err := run(os.Args[1:]); err != nil {
-		logutil.Error("error: %v\n", err)
+		logutil.Error("%v\n", err)
 		os.Exit(1)
 	}
 }
@@ -463,7 +463,8 @@ func cmdStartDirect(args []string) error {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		logutil.Info("\nsynapses: received %s, shutting down\n", sig)
+		fmt.Fprintln(os.Stderr) // visual separator
+		logutil.Info("synapses: received %s, shutting down\n", sig)
 		appCancel()
 		time.AfterFunc(5*time.Second, func() {
 			logutil.Error("synapses: graceful shutdown timed out, forcing exit\n")
@@ -1665,7 +1666,7 @@ func cmdInit(args []string) error {
 	cfgPath := filepath.Join(absPath, "synapses.json")
 	if _, statErr := os.Stat(cfgPath); os.IsNotExist(statErr) {
 		if err := writeOnboardSynapsesJSON(absPath); err != nil {
-			logutil.Warn("  warning: could not write synapses.json: %v\n", err)
+			logutil.Warn("could not write synapses.json: %v\n", err)
 		} else {
 			fmt.Printf("  Created %s\n", cfgPath)
 		}
@@ -2281,7 +2282,7 @@ func cmdConnect(args []string) error {
 
 	for _, r := range results {
 		if r.err != nil {
-			logutil.Warn("  warning: %s: %v\n", r.path, r.err)
+			logutil.Warn("%s: %v\n", r.path, r.err)
 		} else {
 			fmt.Printf("  wrote %s\n", r.path)
 		}
@@ -2802,7 +2803,7 @@ func cmdMCPSetup(args []string) error {
 				cmd.Stderr = os.Stderr
 				if err := cmd.Run(); err != nil {
 					// Not fatal — Claude Code may not be installed.
-					logutil.Warn("  ! claude CLI not available (%v). Manual setup: claude mcp add synapses -- synapses start --path .\n", err)
+					logutil.Warn("claude CLI not available (%v). Manual setup: claude mcp add synapses -- synapses start --path .\n", err)
 				}
 				return nil
 			},
@@ -2816,7 +2817,7 @@ func cmdMCPSetup(args []string) error {
 			continue
 		}
 		if err := a.setup(); err != nil {
-			logutil.Error("  ✗ %-12s %v\n", a.name, err)
+			logutil.Error("✗ %-12s %v\n", a.name, err)
 		} else {
 			fmt.Printf("  \033[32m✓\033[0m %-12s %s\n", a.name, a.cfgPath)
 			wrote++
