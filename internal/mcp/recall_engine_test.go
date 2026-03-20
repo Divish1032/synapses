@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
@@ -73,6 +75,51 @@ func TestQuadRecallSearch_TemporalChannel(t *testing.T) {
 	}
 	if !foundDocker {
 		t.Error("expected temporal channel to surface recent non-matching memory")
+	}
+}
+
+func TestQuadRecallSearch_TemporalDoesNotOverwhelmRelevant(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Insert 2 relevant memories (match "auth").
+	for _, content := range []string{
+		"AuthService refactored for OAuth2 support",
+		"auth middleware now validates JWT expiry correctly",
+	} {
+		_, _ = srv.store.InsertMemory(store.Memory{
+			Tier: store.TierProject, Content: content,
+			AgentID: "agent-1", Source: store.SourceManual,
+		})
+	}
+
+	// Insert 10 irrelevant recent memories (no text overlap with "auth").
+	for i := 0; i < 10; i++ {
+		content := fmt.Sprintf("unrelated topic %d about infrastructure deployment pipeline number %d", i, i*100)
+		_, _ = srv.store.InsertMemory(store.Memory{
+			Tier: store.TierProject, Content: content,
+			AgentID: "agent-1", Source: store.SourceManual,
+		})
+	}
+
+	// Query for "auth" with limit=5.
+	mems, _ := srv.quadRecallSearch(context.Background(), "auth OAuth middleware", 5, false, 7)
+
+	// The 2 auth-relevant memories should rank in the top 3 (multi-channel boost).
+	authCount := 0
+	for i, m := range mems {
+		if i >= 3 {
+			break
+		}
+		if strings.Contains(m.Content, "auth") || strings.Contains(m.Content, "Auth") ||
+			strings.Contains(m.Content, "OAuth") || strings.Contains(m.Content, "JWT") {
+			authCount++
+		}
+	}
+	if authCount < 2 {
+		t.Errorf("expected at least 2 auth-relevant memories in top 3, got %d", authCount)
+		for i, m := range mems {
+			t.Logf("  rank %d: %s", i+1, m.Content)
+		}
 	}
 }
 
