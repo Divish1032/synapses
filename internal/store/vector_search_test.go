@@ -281,6 +281,72 @@ func TestVectorSearch_TwoPass_LargeDataset(t *testing.T) {
 	}
 }
 
+func TestMemoryVectorSearch_TwoPass_StaleAfterPass1(t *testing.T) {
+	// Verify that if a memory becomes stale between Pass 1 and Pass 2,
+	// it is excluded from results. This tests the re-applied stale/expired
+	// filter in fetchMemorySearchResults.
+	st, _ := openMemEmbedTestStore(t)
+	ids := seedMultipleMemories(t, st)
+
+	_ = st.UpsertMemoryEmbedding(ids[0], "test", []float32{1, 0})
+	_ = st.UpsertMemoryEmbedding(ids[1], "test", []float32{0.9, 0.1})
+
+	// Simulate: memory was valid when embeddings were scanned, but becomes
+	// stale before content fetch. We can't truly race the two passes, but we
+	// can mark it stale and verify it's excluded from the final results by
+	// calling fetchMemorySearchResults directly.
+	_, _ = st.knowledgeDB.Exec(`UPDATE memories SET stale = 1 WHERE id = ?`, ids[0])
+
+	// Build winners as if Pass 1 had seen both (before stale was set).
+	winners := []scoredID{
+		{id: ids[0], score: 0.99},
+		{id: ids[1], score: 0.85},
+	}
+	results, err := st.fetchMemorySearchResults(winners)
+	if err != nil {
+		t.Fatalf("fetchMemorySearchResults: %v", err)
+	}
+	// ids[0] should be excluded because it's now stale.
+	for _, r := range results {
+		if r.MemoryID == ids[0] {
+			t.Error("stale memory should be excluded from Pass 2 results")
+		}
+	}
+	if len(results) != 1 {
+		t.Errorf("expected 1 result (stale excluded), got %d", len(results))
+	}
+}
+
+func TestMemoryVectorSearch_TwoPass_ExpiredAfterPass1(t *testing.T) {
+	// Same as above but for expiry between passes.
+	st, _ := openMemEmbedTestStore(t)
+	ids := seedMultipleMemories(t, st)
+
+	_ = st.UpsertMemoryEmbedding(ids[0], "test", []float32{1, 0})
+	_ = st.UpsertMemoryEmbedding(ids[1], "test", []float32{0.9, 0.1})
+
+	// Expire memory between passes.
+	past := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339)
+	_, _ = st.knowledgeDB.Exec(`UPDATE memories SET expires_at = ? WHERE id = ?`, past, ids[0])
+
+	winners := []scoredID{
+		{id: ids[0], score: 0.99},
+		{id: ids[1], score: 0.85},
+	}
+	results, err := st.fetchMemorySearchResults(winners)
+	if err != nil {
+		t.Fatalf("fetchMemorySearchResults: %v", err)
+	}
+	for _, r := range results {
+		if r.MemoryID == ids[0] {
+			t.Error("expired memory should be excluded from Pass 2 results")
+		}
+	}
+	if len(results) != 1 {
+		t.Errorf("expected 1 result (expired excluded), got %d", len(results))
+	}
+}
+
 func TestMemoryVectorSearch_ScoreOrdering(t *testing.T) {
 	// Verify that the min-heap produces correct descending order.
 	st, _ := openMemEmbedTestStore(t)
