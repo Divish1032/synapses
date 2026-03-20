@@ -140,6 +140,86 @@ func TestPruneStaleData_WithData(t *testing.T) {
 	st.PruneStaleData(0)
 }
 
+// TestPruneStaleData_OrphanedQualityGaps verifies that PruneStaleData removes
+// open quality gaps whose node_id no longer exists in graphDB, while preserving:
+//   - open gaps for nodes that still exist
+//   - non-open gaps (fixed/wontfix) for absent nodes (historical records)
+func TestPruneStaleData_OrphanedQualityGaps(t *testing.T) {
+	st := openTestStore(t)
+
+	// Seed a real node in the graph so we can distinguish "exists" from "absent".
+	g := graph.New("prune-repo")
+	existingNodeID := g.MakeNodeID("auth.go", "Authenticate")
+	g.AddNode(&graph.Node{
+		ID: existingNodeID, Name: "Authenticate", Type: graph.NodeFunction,
+		File: "auth.go", Package: "auth",
+	})
+	if err := st.SaveGraph(g); err != nil {
+		t.Fatalf("SaveGraph: %v", err)
+	}
+
+	absentNodeID := "prune-repo::deleted/old.go::OldFunction"
+
+	existingID := string(existingNodeID)
+
+	// Gap 1: open gap for a node that still exists → must survive prune.
+	_, err := st.UpsertGap(store.QualityGap{
+		NodeID: existingID, GapID: "missing-error-handling",
+		Description: "no error returned", Severity: "high", Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("UpsertGap existing: %v", err)
+	}
+
+	// Gap 2: open gap for an absent node → must be deleted by prune.
+	_, err = st.UpsertGap(store.QualityGap{
+		NodeID: absentNodeID, GapID: "stale-gap",
+		Description: "function no longer exists", Severity: "medium", Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("UpsertGap absent open: %v", err)
+	}
+
+	// Gap 3: fixed gap for an absent node → must survive (historical record).
+	_, err = st.UpsertGap(store.QualityGap{
+		NodeID: absentNodeID, GapID: "already-fixed",
+		Description: "was fixed in refactor", Severity: "low", Status: "fixed",
+	})
+	if err != nil {
+		t.Fatalf("UpsertGap absent fixed: %v", err)
+	}
+
+	// Run prune — fresh store has zero debounce, so this runs immediately.
+	st.PruneStaleData(30)
+
+	// Gap 1 must survive: its node still exists.
+	surviving, err := st.GetGaps(store.GapFilter{NodeID: existingID})
+	if err != nil {
+		t.Fatalf("GetGaps existing: %v", err)
+	}
+	if len(surviving) != 1 {
+		t.Errorf("expected 1 gap for existing node after prune, got %d", len(surviving))
+	}
+
+	// Gap 2 must be gone: open gap for absent node.
+	orphaned, err := st.GetGaps(store.GapFilter{NodeID: absentNodeID, Status: "open"})
+	if err != nil {
+		t.Fatalf("GetGaps absent open: %v", err)
+	}
+	if len(orphaned) != 0 {
+		t.Errorf("expected open orphaned gap to be pruned, got %d gaps", len(orphaned))
+	}
+
+	// Gap 3 must survive: fixed gaps for absent nodes are historical, not pruned.
+	fixed, err := st.GetGaps(store.GapFilter{NodeID: absentNodeID, Status: "fixed"})
+	if err != nil {
+		t.Fatalf("GetGaps absent fixed: %v", err)
+	}
+	if len(fixed) != 1 {
+		t.Errorf("expected fixed gap for absent node to survive prune, got %d", len(fixed))
+	}
+}
+
 // ── CollectQueryStats ─────────────────────────────────────────────────────────
 
 func TestCollectQueryStats_ReturnsStats(t *testing.T) {

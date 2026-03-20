@@ -428,10 +428,18 @@ CREATE INDEX IF NOT EXISTS idx_cross_deps_file     ON cross_project_deps(to_proj
 //
 // Cross-references that span the two databases:
 //
+// Hard references (node_id is the primary lookup key — orphans cause stale results):
+//
 //   - annotations.node_id    → graphDB nodes.id
 //   - memory_anchors.node_id → graphDB nodes.id  (triggers staleness tracking on node change)
+//   - quality_gaps.node_id   → graphDB nodes.id  (gaps for a node persist after the node is renamed/deleted)
 //
-// These references may briefly point to non-existent node IDs during a reindex:
+// Soft references (node IDs stored as JSON in TEXT columns — informational only, not cleaned up):
+//
+//   - episodes.affected_nodes  — historical record; stale IDs do not affect episode retrieval
+//   - proposals.affected_nodes — captures nodes at proposal-creation time; may reference absent nodes
+//
+// These hard references may briefly point to non-existent node IDs during a reindex:
 // the file watcher deletes stale graph nodes and re-inserts them as parsing
 // completes, while knowledge records referencing those IDs persist in knowledgeDB.
 // This is an intentional eventual-consistency window, not a data-loss event.
@@ -440,13 +448,13 @@ CREATE INDEX IF NOT EXISTS idx_cross_deps_file     ON cross_project_deps(to_proj
 //
 //   - Dangling anchor or annotation references are silently skipped when the
 //     referenced node is absent — callers receive fewer results, not an error.
-//   - PruneStaleData (runs daily) reconciles orphaned annotations by
-//     cross-checking knowledgeDB against the current graphDB node set.
+//   - PruneStaleData (runs daily) reconciles orphaned annotations AND quality gaps
+//     by cross-checking knowledgeDB against the current graphDB node set.
 //   - The staleness-tracking pipeline re-links anchors when the underlying
 //     node is re-added by the watcher after reindex completes.
 //
 // Future improvement: a startup reconciliation pass in Open() that checks all
-// anchor/annotation node_ids against graphDB and flags orphans immediately,
+// hard-reference node_ids against graphDB and flags orphans immediately,
 // rather than waiting for the next daily prune cycle.
 type Store struct {
 	graphDB     *sql.DB // code-domain: nodes, edges, meta, file_hashes, call_sites, node_embeddings
@@ -1379,15 +1387,14 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	s.knowledgeDB.Exec(`DELETE FROM proposals WHERE status IN ('accepted','rejected','withdrawn') AND updated_at < ?`, cutoff)
 	s.knowledgeDB.Exec(`DELETE FROM proposal_votes WHERE proposal_id NOT IN (SELECT id FROM proposals)`)
 
-	// Stale annotations for nodes that no longer exist — actively misleading.
-	// Cross-DB reconciliation: annotations live in knowledgeDB, nodes live in graphDB.
-	// There is no cross-database transaction guaranteeing consistency between them
-	// (see the Store type comment for the full eventual-consistency model).
-	// This is the daily reconciliation pass: collect current node IDs from graphDB,
-	// then remove annotations in knowledgeDB that reference absent nodes. The read
-	// and delete are not atomic — a node added between the two steps may be deleted,
-	// but will be re-annotated on next use. This narrow race window is acceptable for
-	// a background pruning operation.
+	// Cross-DB reconciliation for hard node_id references: annotations and quality_gaps
+	// in knowledgeDB reference node IDs from graphDB, but there is no cross-database
+	// transaction guaranteeing consistency (see the Store type comment for the full
+	// eventual-consistency model). This daily pass collects current node IDs from
+	// graphDB and removes knowledgeDB records that reference absent nodes.
+	// The read and delete are not atomic — a node added between the two steps could
+	// be briefly affected — but since the prune runs daily, any node absent at prune
+	// time has been gone for 23+ hours and is permanently deleted, not a reindex transient.
 	if s.graphDB != nil {
 		nodeIDs := make(map[string]struct{})
 		if rows, err := s.graphDB.Query(`SELECT id FROM nodes`); err == nil {
@@ -1401,6 +1408,8 @@ func (s *Store) PruneStaleData(retentionDays int) {
 		}
 		if len(nodeIDs) > 0 {
 			// Delete stale annotations whose node no longer exists in the graph.
+			// Only annotations already flagged stale=1 are candidates — un-flagged
+			// annotations are preserved even during transient reindex windows.
 			if annRows, err := s.knowledgeDB.Query(`SELECT id, node_id FROM annotations WHERE stale=1`); err == nil {
 				var toDelete []string
 				for annRows.Next() {
@@ -1414,6 +1423,29 @@ func (s *Store) PruneStaleData(retentionDays int) {
 				annRows.Close()
 				for _, id := range toDelete {
 					s.knowledgeDB.Exec(`DELETE FROM annotations WHERE id = ?`, id)
+				}
+			}
+
+			// Delete quality gaps whose node no longer exists in the graph.
+			// A quality gap for a deleted or renamed node is misleading — the code
+			// it described no longer exists at that identity. Unlike annotations,
+			// quality_gaps has no stale flag: any gap referencing an absent node is
+			// by definition stale. The prune runs daily, so transient reindex windows
+			// (seconds) are not a concern — if the node is still absent after 23+ hours,
+			// it is permanently gone.
+			if gapRows, err := s.knowledgeDB.Query(`SELECT id, node_id FROM quality_gaps WHERE status = 'open'`); err == nil {
+				var toDelete []string
+				for gapRows.Next() {
+					var gapID, nodeID string
+					if gapRows.Scan(&gapID, &nodeID) == nil {
+						if _, exists := nodeIDs[nodeID]; !exists {
+							toDelete = append(toDelete, gapID)
+						}
+					}
+				}
+				gapRows.Close()
+				for _, id := range toDelete {
+					s.knowledgeDB.Exec(`DELETE FROM quality_gaps WHERE id = ?`, id)
 				}
 			}
 		}
