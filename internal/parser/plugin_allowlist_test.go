@@ -275,6 +275,50 @@ func TestRegisterPlugin_NilChecker_AlwaysRegistered(t *testing.T) {
 	w.RegisterPlugin([]string{".custom"}, "some-command", nil)
 }
 
+// ── Atomic write safety ──────────────────────────────────────────────────────
+
+func TestPluginChecker_AtomicWrite_NoTmpFileLeftBehind(t *testing.T) {
+	dir := t.TempDir()
+	pc := NewPluginChecker(dir)
+
+	if err := pc.ApproveCommand("test-cmd"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify no .tmp file remains after successful write.
+	tmpPath := filepath.Join(dir, allowlistFileName+".tmp")
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+		t.Fatalf("temp file should not exist after successful write, got: %v", err)
+	}
+
+	// Verify the actual file exists and is valid JSON.
+	data, err := os.ReadFile(filepath.Join(dir, allowlistFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var al pluginAllowlist
+	if err := json.Unmarshal(data, &al); err != nil {
+		t.Fatalf("allowlist file is not valid JSON: %v", err)
+	}
+	if len(al.Approved) != 1 {
+		t.Fatalf("expected 1 approved, got %d", len(al.Approved))
+	}
+}
+
+func TestPluginChecker_AtomicWrite_ReadOnlyDirFails(t *testing.T) {
+	dir := t.TempDir()
+	roDir := filepath.Join(dir, "readonly")
+	if err := os.MkdirAll(roDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+
+	pc := NewPluginChecker(roDir)
+	err := pc.ApproveCommand("test-cmd")
+	if err == nil {
+		t.Fatal("ApproveCommand should fail on read-only directory")
+	}
+}
+
 // ── shellescape ──────────────────────────────────────────────────────────────
 
 func TestShellescape(t *testing.T) {
