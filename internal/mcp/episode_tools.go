@@ -339,16 +339,36 @@ func (s *Server) handleRecall(
 		if len(episodes) > 0 || len(recentMems) > 0 {
 			summary = fmt.Sprintf("%d episode(s), %d memory/memories", len(episodes), len(recentMems))
 		}
+		hint := "Ordered by creation time (newest first). 'memories' includes auto-captured memories from end_session and annotate_node. Pass query=... for relevance-ranked search."
+		if stringArg(req, "as_of") != "" {
+			hint += " Note: as_of is only applied in search mode (with query=). Browse mode always shows current content."
+		}
 		resp := map[string]interface{}{
 			"summary":  summary,
 			"episodes": episodes,
 			"mode":     "browse",
-			"hint":     "Ordered by creation time (newest first). 'memories' includes auto-captured memories from end_session and annotate_node. Pass query=... for relevance-ranked search.",
+			"hint":     hint,
 		}
 		if len(recentMems) > 0 {
 			resp["memories"] = recentMems
 		}
 		return jsonResult(resp)
+	}
+
+	// Sprint 10.1: parse optional as_of parameter for temporal versioned recall.
+	var asOfTime *time.Time
+	if asOfStr := stringArg(req, "as_of"); asOfStr != "" {
+		parsed, parseErr := time.Parse(time.RFC3339, asOfStr)
+		if parseErr != nil {
+			// Try date-only format as fallback (e.g. "2026-03-15").
+			parsed, parseErr = time.Parse("2006-01-02", asOfStr)
+			if parseErr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("as_of must be RFC3339 (e.g. '2026-03-15T12:00:00Z') or date (e.g. '2026-03-15'): %v", parseErr)), nil
+			}
+			// Set to end of day in UTC for date-only format.
+			parsed = parsed.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
+		}
+		asOfTime = &parsed
 	}
 
 	// Search mode: quad-channel recall (BM25 + semantic + graph + temporal).
@@ -377,6 +397,18 @@ func (s *Server) handleRecall(
 	// Quad-channel recall: 4 parallel channels merged via RRF.
 	// Replaces the old sequential BM25 + vector search path.
 	memories, _, staleEmbIDs := s.quadRecallSearch(ctx, query, searchLimit, includeStale, sinceDays)
+
+	// Sprint 10.1: apply temporal versioning — swap content with historical version.
+	if asOfTime != nil && len(memories) > 0 {
+		memIDs := make([]string, len(memories))
+		for i, m := range memories {
+			memIDs[i] = m.ID
+		}
+		versioned, verr := s.store.GetMemoryAsOf(memIDs, *asOfTime)
+		if verr == nil && len(versioned) > 0 {
+			memories = versioned
+		}
+	}
 
 	// Touch surfaced memories in background to renew TTL.
 	if len(memories) > 0 {
@@ -517,6 +549,11 @@ func (s *Server) handleRecall(
 	}
 	if len(crossProjectEpisodes) > 0 {
 		resp["cross_project_episodes"] = crossProjectEpisodes
+	}
+	// Sprint 10.1: annotate response when as_of filtering was applied.
+	if asOfTime != nil {
+		resp["as_of"] = asOfTime.Format(time.RFC3339)
+		resp["as_of_note"] = "Memory content shown as it existed at the specified time. Memories with version > 0 show historical content."
 	}
 	return jsonResult(resp)
 }

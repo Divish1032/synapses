@@ -678,6 +678,17 @@ func Open(path string) (*Store, error) {
 			embedded_at  INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memembed_stale ON memory_embeddings(stale) WHERE stale = 1`,
+		// Sprint 10.1: memory versioning — preserve historical snapshots on dedup overwrite.
+		`CREATE TABLE IF NOT EXISTS memory_versions (
+			id              TEXT PRIMARY KEY,
+			memory_id       TEXT NOT NULL,
+			version         INTEGER NOT NULL DEFAULT 1,
+			content         TEXT NOT NULL,
+			superseded_by   TEXT NOT NULL DEFAULT '',
+			created_at      TEXT NOT NULL,
+			superseded_at   TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memver_memory ON memory_versions(memory_id, version)`,
 	} {
 		if _, err := knowledgeDB.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
