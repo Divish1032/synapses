@@ -695,7 +695,9 @@ func scanADR(row *sql.Row) (ADR, error) {
 		&a.Consequences, &linkedRaw, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return ADR{}, err
 	}
-	_ = json.Unmarshal([]byte(linkedRaw), &a.LinkedFiles)
+	if err := json.Unmarshal([]byte(linkedRaw), &a.LinkedFiles); err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG: synapses: brain: unmarshal linked_files for ADR %q: %v\n", a.ID, err)
+	}
 	return a, nil
 }
 
@@ -709,7 +711,9 @@ func scanADRRows(rows *sql.Rows) ([]ADR, error) {
 			&a.Consequences, &linkedRaw, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return out, err
 		}
-		_ = json.Unmarshal([]byte(linkedRaw), &a.LinkedFiles)
+		if err := json.Unmarshal([]byte(linkedRaw), &a.LinkedFiles); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: brain: unmarshal linked_files for ADR %q: %v\n", a.ID, err)
+		}
 		out = append(out, a)
 	}
 	return out, rows.Err()
