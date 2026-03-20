@@ -740,7 +740,7 @@ func (s *Server) handleSessionInit(
 		resp["unread_messages"] = map[string]interface{}{
 			"count":    len(unreadMsgs),
 			"messages": unreadMsgs,
-			"hint":     "Call mark_read(message_id, agent_id) to acknowledge. Messages are NOT auto-marked as read.",
+			"hint":     "Use get_messages(mark_read_ids=[...]) to acknowledge. Messages are NOT auto-marked as read.",
 		}
 	}
 	if collisionWarning != "" {
