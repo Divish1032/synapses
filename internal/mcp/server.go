@@ -1341,7 +1341,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Name or substring to search for (case-insensitive)."),
 			),
 			mcp.WithString("format",
-				mcp.Description("Output format. \"compact\" (default): one line per match â \"[Name] type Â· file:line\". "+
+				mcp.Description("Output format. \"compact\" (default): one line per match — \"[Name] type · file:line\". "+
 					"\"json\": full structured response with IDs and metadata."),
 			),
 		),
