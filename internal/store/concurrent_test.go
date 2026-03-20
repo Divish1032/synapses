@@ -2,11 +2,14 @@ package store_test
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/store"
 )
+
+// ─── Episode concurrency (remember/recall) ──────────────────────────────────
 
 // TestConcurrentRememberRecall verifies that 10 goroutines writing episodes
 // concurrently with 10 goroutines recalling does not lose data or corrupt
@@ -156,6 +159,175 @@ func TestConcurrentRememberRecall_HighContention(t *testing.T) {
 	}
 }
 
+// ─── Memory concurrency (InsertMemory + SearchMemories) ─────────────────────
+
+// TestConcurrentInsertMemory_SearchMemories verifies that 10 goroutines
+// inserting memories concurrently with 10 goroutines searching does not lose
+// data or corrupt the FTS index. Each memory has unique content to avoid
+// dedup collisions.
+func TestConcurrentInsertMemory_SearchMemories(t *testing.T) {
+	st := openTestStore(t)
+
+	const writers = 10
+	const readers = 10
+
+	var wg sync.WaitGroup
+	writtenIDs := make([]string, writers)
+	writeErrs := make([]error, writers)
+
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			m := store.Memory{
+				Tier:    store.TierProject,
+				Content: fmt.Sprintf("concurrent memory content about authentication refactoring iteration number %d with enough length", idx),
+				AgentID: fmt.Sprintf("mem-agent-%d", idx),
+				Source:  store.SourceManual,
+			}
+			id, err := st.InsertMemory(m)
+			writtenIDs[idx] = id
+			writeErrs[idx] = err
+		}(i)
+	}
+
+	readErrs := make([]error, readers)
+	readCounts := make([]int, readers)
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results, err := st.SearchMemories("authentication refactoring", 20)
+			readErrs[idx] = err
+			readCounts[idx] = len(results)
+		}(i)
+	}
+
+	wg.Wait()
+
+	for i, err := range writeErrs {
+		if err != nil {
+			t.Errorf("memory writer %d failed: %v", i, err)
+		}
+	}
+	for i, id := range writtenIDs {
+		if id == "" {
+			t.Errorf("memory writer %d returned empty ID", i)
+		}
+	}
+	for i, err := range readErrs {
+		if err != nil {
+			t.Errorf("memory reader %d failed: %v", i, err)
+		}
+	}
+
+	// Verify all memories persisted via QueryMemories (not FTS).
+	allMems, err := st.QueryMemories(store.TierProject, "", "", 100)
+	if err != nil {
+		t.Fatalf("QueryMemories: %v", err)
+	}
+	if len(allMems) != writers {
+		t.Errorf("expected %d memories, got %d — data was lost", writers, len(allMems))
+	}
+
+	// Verify FTS index is consistent after concurrent writes.
+	searchResults, err := st.SearchMemories("authentication refactoring", 20)
+	if err != nil {
+		t.Fatalf("SearchMemories: %v", err)
+	}
+	if len(searchResults) == 0 {
+		t.Error("SearchMemories returned 0 results — FTS index may be corrupted")
+	}
+
+	// Verify each returned result is one we wrote.
+	idSet := make(map[string]bool, writers)
+	for _, id := range writtenIDs {
+		idSet[id] = true
+	}
+	for _, m := range searchResults {
+		if !idSet[m.ID] {
+			t.Errorf("SearchMemories returned unknown memory ID %s", m.ID)
+		}
+	}
+}
+
+// TestConcurrentInsertMemory_DedupRace verifies that concurrent inserts with
+// very similar content (>85% similarity) correctly handle the dedup path.
+// The dedup check in prepareMemory does a read-then-compare before insert.
+// Under concurrency, two goroutines may both pass the dedup check and both
+// insert — this is acceptable (slightly more data, no corruption).
+// What is NOT acceptable: panic, lost data, or corrupted FTS index.
+func TestConcurrentInsertMemory_DedupRace(t *testing.T) {
+	st := openTestStore(t)
+
+	const goroutines = 10
+	var wg sync.WaitGroup
+	ids := make([]string, goroutines)
+	errs := make([]error, goroutines)
+
+	// All goroutines insert nearly identical content that should trigger dedup.
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			m := store.Memory{
+				Tier:    store.TierProject,
+				Content: "concurrent dedup test: the authentication service was refactored to use OAuth2 tokens instead of session cookies",
+				AgentID: "dedup-agent",
+				Source:  store.SourceManual,
+			}
+			ids[idx], errs[idx] = st.InsertMemory(m)
+		}(i)
+	}
+
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("dedup goroutine %d failed: %v", i, err)
+		}
+	}
+
+	// All should return a non-empty ID (either new insert or dedup match).
+	for i, id := range ids {
+		if id == "" {
+			t.Errorf("dedup goroutine %d returned empty ID", i)
+		}
+	}
+
+	// Count distinct IDs — with perfect dedup, there would be 1.
+	// Under concurrent TOCTOU, there may be more (all goroutines pass dedup
+	// check before any inserts land). Both outcomes are correct — the important
+	// thing is no panics, no errors, and the store is consistent.
+	uniqueIDs := make(map[string]bool)
+	for _, id := range ids {
+		uniqueIDs[id] = true
+	}
+	t.Logf("dedup: %d goroutines produced %d unique IDs (1 = perfect dedup, >1 = TOCTOU race, both acceptable)", goroutines, len(uniqueIDs))
+
+	// Verify store is consistent — QueryMemories should return at least 1.
+	mems, err := st.QueryMemories(store.TierProject, "", "dedup-agent", 100)
+	if err != nil {
+		t.Fatalf("QueryMemories: %v", err)
+	}
+	if len(mems) == 0 {
+		t.Error("no memories found after concurrent dedup inserts")
+	}
+	// Unique IDs returned by InsertMemory must match actual stored memories.
+	storedIDs := make(map[string]bool)
+	for _, m := range mems {
+		storedIDs[m.ID] = true
+	}
+	for id := range uniqueIDs {
+		if !storedIDs[id] {
+			// A returned ID that doesn't exist in the store means data corruption.
+			t.Errorf("InsertMemory returned ID %s but it's not in the store — phantom ID", id)
+		}
+	}
+}
+
+// ─── Task concurrency (UpdateTask) ──────────────────────────────────────────
+
 // TestConcurrentUpdateTask verifies that concurrent updates to different tasks
 // within the same plan do not corrupt data. Each goroutine updates a distinct
 // task, so there should be no contention on the same row — but they share the
@@ -239,6 +411,8 @@ func TestConcurrentUpdateTask(t *testing.T) {
 	}
 
 	// Verify exactly one goroutine saw planCompleted=true.
+	// checkAndCompletePlan uses UPDATE ... WHERE completed_at = 0 which is an
+	// atomic compare-and-swap — exactly one writer wins.
 	completedCount := 0
 	for _, c := range planCompleted {
 		if c {
@@ -259,8 +433,20 @@ func TestConcurrentUpdateTask(t *testing.T) {
 	}
 }
 
-// TestConcurrentUpdateTask_SameTask verifies that concurrent updates to the
-// SAME task (worst-case contention) don't lose note entries.
+// TestConcurrentUpdateTask_SameTask verifies that concurrent note appends to
+// the SAME task are handled safely. UpdateTask does a SELECT notes → string
+// concat → UPDATE which is a read-modify-write without a transaction.
+// With MaxOpenConns(2), this means two goroutines CAN interleave:
+//
+//	G1: SELECT notes → "a"
+//	G2: SELECT notes → "a"
+//	G1: UPDATE notes = "a\nb"    (G1 wins)
+//	G2: UPDATE notes = "a\nc"    (G2 overwrites, "b" is lost)
+//
+// This test documents the actual behavior: some notes may be lost under
+// concurrent same-row updates. It measures the exact count so we know the
+// severity and can track if a future fix (e.g., using UPDATE ... SET notes =
+// notes || ?) resolves it.
 func TestConcurrentUpdateTask_SameTask(t *testing.T) {
 	st := openTestStore(t)
 
@@ -306,13 +492,7 @@ func TestConcurrentUpdateTask_SameTask(t *testing.T) {
 		}
 	}
 
-	// SQLite serializes writes, so each note should be appended.
-	// We can't guarantee all 10 are present due to read-modify-write races
-	// on the notes column (SELECT then UPDATE is not atomic). This is a known
-	// limitation documented here. We verify at minimum:
-	// 1. No errors occurred.
-	// 2. The task is still in a valid state.
-	// 3. At least some notes were appended (not zero).
+	// Read back the task and count how many notes survived.
 	updatedTasks, err := st.GetPendingTasks("", "")
 	if err != nil {
 		t.Fatalf("GetPendingTasks: %v", err)
@@ -321,6 +501,111 @@ func TestConcurrentUpdateTask_SameTask(t *testing.T) {
 		t.Fatal("task disappeared")
 	}
 	if updatedTasks[0].Notes == "" {
-		t.Error("expected notes to be non-empty after concurrent appends")
+		t.Fatal("expected notes to be non-empty after concurrent appends")
+	}
+
+	// Count note lines. Each note is a "[timestamp] note from goroutine N" line.
+	noteLines := 0
+	for _, line := range strings.Split(updatedTasks[0].Notes, "\n") {
+		if strings.Contains(line, "note from goroutine") {
+			noteLines++
+		}
+	}
+
+	t.Logf("note append: %d/%d notes survived concurrent same-row updates", noteLines, noteWriters)
+
+	// At minimum, at least 1 note must survive (the last writer always wins).
+	if noteLines == 0 {
+		t.Error("zero notes survived — this indicates data corruption, not just a race")
+	}
+
+	// Under SQLite WAL with MaxOpenConns(2), we expect some loss due to
+	// the non-atomic read-modify-write. But the store must remain consistent:
+	// no partial lines, no corruption.
+	for _, line := range strings.Split(updatedTasks[0].Notes, "\n") {
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "[") {
+			t.Errorf("malformed note line (no timestamp prefix): %q", line)
+		}
+	}
+}
+
+// TestConcurrentUpdateTask_ReadWriteContention verifies that concurrent
+// readers (GetPendingTasks) and writers (UpdateTask) don't deadlock or
+// produce inconsistent results. Exercises WAL concurrent read/write.
+func TestConcurrentUpdateTask_ReadWriteContention(t *testing.T) {
+	st := openTestStore(t)
+
+	const taskCount = 5
+	inputs := make([]store.TaskInput, taskCount)
+	for i := 0; i < taskCount; i++ {
+		inputs[i] = store.TaskInput{
+			Title:    fmt.Sprintf("rw-contention task %d", i),
+			Priority: "p1",
+		}
+	}
+	_, _, err := st.CreatePlan("rw plan", "", "", inputs)
+	if err != nil {
+		t.Fatalf("CreatePlan: %v", err)
+	}
+
+	tasks, _ := st.GetPendingTasks("", "")
+	if len(tasks) != taskCount {
+		t.Fatalf("expected %d tasks, got %d", taskCount, len(tasks))
+	}
+
+	// Concurrently: writers update different tasks, readers query the list.
+	var wg sync.WaitGroup
+	writeErrs := make([]error, taskCount)
+	readErrs := make([]error, taskCount)
+
+	for i := 0; i < taskCount; i++ {
+		// Writer
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, _, writeErrs[idx] = st.UpdateTask(
+				tasks[idx].ID, "in_progress",
+				fmt.Sprintf("writer %d", idx),
+				fmt.Sprintf("agent-%d", idx),
+			)
+		}(i)
+
+		// Reader
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			result, err := st.GetPendingTasks("", "")
+			readErrs[idx] = err
+			// Each read must see a consistent view — no partial state.
+			for _, task := range result {
+				if task.Status != "pending" && task.Status != "in_progress" {
+					t.Errorf("reader %d saw unexpected status %q for task %s", idx, task.Status, task.ID)
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	for i, err := range writeErrs {
+		if err != nil {
+			t.Errorf("writer %d: %v", i, err)
+		}
+	}
+	for i, err := range readErrs {
+		if err != nil {
+			t.Errorf("reader %d: %v", i, err)
+		}
+	}
+
+	// After all writers finish, all tasks should be in_progress.
+	final, _ := st.GetPendingTasks("", "")
+	for _, task := range final {
+		if task.Status != "in_progress" {
+			t.Errorf("task %s has status %q, expected in_progress", task.ID, task.Status)
+		}
 	}
 }
