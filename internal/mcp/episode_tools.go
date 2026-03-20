@@ -656,7 +656,10 @@ func (s *Server) handleRecall(
 				continue
 			}
 
-			eps, err := projStore.RecallEpisodes(query, "", "", "", "", searchLimit, sinceDays)
+			// Use inflated limits for cross-project search when time bounds active —
+			// same rationale as local search: avoid missing in-window results
+			// ranked just below the unfiltered searchLimit.
+			eps, err := projStore.RecallEpisodes(query, "", "", "", "", episodeLimit, sinceDays)
 			if err == nil {
 				for _, ep := range eps {
 					// Sprint 10.5: apply time bounds to registry episode results.
@@ -681,7 +684,7 @@ func (s *Server) handleRecall(
 				}
 			}
 			// Also search memories; apply decay filter and time bounds for consistency.
-			mems, _ := projStore.SearchMemories(query, searchLimit)
+			mems, _ := projStore.SearchMemories(query, quadLimit)
 			for _, m := range mems {
 				if store.DecayedImportanceScore(m, 0) < store.DecayVisibilityThreshold {
 					continue // skip decayed memories in cross-project results
