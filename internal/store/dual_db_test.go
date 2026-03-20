@@ -298,24 +298,54 @@ func TestDualDBMigration_FTSRebuilt(t *testing.T) {
 	}
 	defer kDB.Close()
 
-	// episodes_fts should find our "switched to OAuth" episode.
+	// episodes_fts should find exactly 1 match for "OAuth" (ep-1 only).
 	var epCount int
 	err = kDB.QueryRow(`SELECT COUNT(*) FROM episodes_fts WHERE episodes_fts MATCH 'OAuth'`).Scan(&epCount)
 	if err != nil {
 		t.Fatalf("query episodes_fts: %v", err)
 	}
-	if epCount == 0 {
-		t.Error("episodes_fts: expected match for 'OAuth', got 0 results")
+	if epCount != 1 {
+		t.Errorf("episodes_fts: expected exactly 1 match for 'OAuth', got %d", epCount)
 	}
 
-	// memories_fts should find our "auth switched to OAuth" memory.
+	// episodes_fts should find ep-2 by "migration" keyword.
+	var ep2Count int
+	err = kDB.QueryRow(`SELECT COUNT(*) FROM episodes_fts WHERE episodes_fts MATCH 'migration'`).Scan(&ep2Count)
+	if err != nil {
+		t.Fatalf("query episodes_fts for migration: %v", err)
+	}
+	if ep2Count != 1 {
+		t.Errorf("episodes_fts: expected exactly 1 match for 'migration', got %d", ep2Count)
+	}
+
+	// Total episodes_fts should have exactly 2 entries (one per migrated episode).
+	var totalEpFTS int
+	err = kDB.QueryRow(`SELECT COUNT(*) FROM episodes_fts`).Scan(&totalEpFTS)
+	if err != nil {
+		t.Fatalf("count episodes_fts: %v", err)
+	}
+	if totalEpFTS != 2 {
+		t.Errorf("episodes_fts total: expected 2, got %d", totalEpFTS)
+	}
+
+	// memories_fts should find exactly 1 match for "OAuth" (mem-1 only).
 	var memCount int
 	err = kDB.QueryRow(`SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'OAuth'`).Scan(&memCount)
 	if err != nil {
 		t.Fatalf("query memories_fts: %v", err)
 	}
-	if memCount == 0 {
-		t.Error("memories_fts: expected match for 'OAuth', got 0 results")
+	if memCount != 1 {
+		t.Errorf("memories_fts: expected exactly 1 match for 'OAuth', got %d", memCount)
+	}
+
+	// Total memories_fts should have exactly 2 entries (one per migrated memory).
+	var totalMemFTS int
+	err = kDB.QueryRow(`SELECT COUNT(*) FROM memories_fts`).Scan(&totalMemFTS)
+	if err != nil {
+		t.Fatalf("count memories_fts: %v", err)
+	}
+	if totalMemFTS != 2 {
+		t.Errorf("memories_fts total: expected 2, got %d", totalMemFTS)
 	}
 }
 
@@ -625,5 +655,385 @@ func TestDualDBMigration_SpecificDataIntegrity(t *testing.T) {
 	}
 	if toProject != "backend" || toEntity != "UserStore" {
 		t.Errorf("cross_project_deps: to_project=%q to_entity=%q", toProject, toEntity)
+	}
+}
+
+// TestDualDBMigration_SchemaMismatch verifies that migration handles a legacy
+// DB with FEWER columns than the destination (simulating an upgrade from an
+// older version). The commonCols intersection logic in migrateSingleTable
+// must only copy columns that exist in both source and destination.
+func TestDualDBMigration_SchemaMismatch(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "oldschema.db")
+
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+
+	// Apply graph schema (required for Open to succeed).
+	if _, err := db.Exec(graphSchema); err != nil {
+		t.Fatalf("apply graph schema: %v", err)
+	}
+
+	// Create a MINIMAL memories table — only the columns from the original
+	// schema, missing the migration-added columns (stale, stale_reason, etc.).
+	// This simulates a very old legacy DB that never got migration-added columns.
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS memories (
+		id               TEXT PRIMARY KEY,
+		tier             TEXT NOT NULL,
+		content          TEXT NOT NULL,
+		entity_id        TEXT DEFAULT '',
+		agent_id         TEXT DEFAULT '',
+		task_id          TEXT DEFAULT '',
+		tags             TEXT NOT NULL DEFAULT '[]',
+		created_at       TEXT NOT NULL,
+		expires_at       TEXT NOT NULL,
+		last_accessed_at TEXT NOT NULL,
+		source           TEXT NOT NULL DEFAULT 'manual'
+	)`)
+	if err != nil {
+		t.Fatalf("create minimal memories: %v", err)
+	}
+
+	// Create a minimal episodes table — missing the promoted_rule column.
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS episodes (
+		id             TEXT PRIMARY KEY,
+		agent_id       TEXT NOT NULL,
+		project_id     TEXT NOT NULL DEFAULT '',
+		created_at     INTEGER NOT NULL,
+		episode_type   TEXT NOT NULL DEFAULT 'decision',
+		outcome        TEXT NOT NULL DEFAULT 'unknown',
+		trigger        TEXT NOT NULL DEFAULT '',
+		decision       TEXT NOT NULL,
+		rationale      TEXT NOT NULL DEFAULT '',
+		affected_files TEXT NOT NULL DEFAULT '[]',
+		affected_nodes TEXT NOT NULL DEFAULT '[]',
+		tags           TEXT NOT NULL DEFAULT '[]',
+		importance     REAL NOT NULL DEFAULT 0.5
+	)`)
+	if err != nil {
+		t.Fatalf("create minimal episodes: %v", err)
+	}
+
+	// Create a minimal tasks table — missing migration-added columns
+	// (assigned_to, last_updated_by, depends_on, start_commit, commits).
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS tasks (
+		id           TEXT PRIMARY KEY,
+		plan_id      TEXT NOT NULL DEFAULT '',
+		title        TEXT NOT NULL,
+		description  TEXT NOT NULL DEFAULT '',
+		status       TEXT NOT NULL DEFAULT 'pending',
+		priority     TEXT NOT NULL DEFAULT 'p2',
+		linked_nodes TEXT NOT NULL DEFAULT '[]',
+		notes        TEXT NOT NULL DEFAULT '',
+		created_at   TEXT NOT NULL,
+		updated_at   TEXT NOT NULL
+	)`)
+	if err != nil {
+		t.Fatalf("create minimal tasks: %v", err)
+	}
+
+	// Seed data into the old-schema tables.
+	mustExec(t, db, `INSERT INTO memories (id, tier, content, created_at, expires_at, last_accessed_at)
+		VALUES ('old-mem', 'project', 'old schema memory', '2026-01-01', '2027-01-01', '2026-01-01')`)
+	mustExec(t, db, `INSERT INTO episodes (id, agent_id, created_at, decision)
+		VALUES ('old-ep', 'agent-1', 1709000000, 'decision from old schema')`)
+	mustExec(t, db, `INSERT INTO tasks (id, title, created_at, updated_at)
+		VALUES ('old-task', 'task from old schema', '2026-01-01', '2026-01-01')`)
+	db.Close()
+
+	// Open — migration must handle the column mismatch gracefully.
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() with old schema: %v", err)
+	}
+	defer st.Close()
+
+	kPath := KnowledgePath(dbPath)
+	kDB, err := sql.Open("sqlite", kPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open knowledge db: %v", err)
+	}
+	defer kDB.Close()
+
+	// Verify memory migrated with old columns preserved, new columns defaulted.
+	var content string
+	var stale int
+	if err := kDB.QueryRow(`SELECT content, stale FROM memories WHERE id = 'old-mem'`).Scan(&content, &stale); err != nil {
+		t.Fatalf("query old-mem: %v", err)
+	}
+	if content != "old schema memory" {
+		t.Errorf("old-mem content: got %q", content)
+	}
+	if stale != 0 {
+		t.Errorf("old-mem stale: expected 0 (default), got %d", stale)
+	}
+
+	// Verify episode migrated.
+	var decision string
+	if err := kDB.QueryRow(`SELECT decision FROM episodes WHERE id = 'old-ep'`).Scan(&decision); err != nil {
+		t.Fatalf("query old-ep: %v", err)
+	}
+	if decision != "decision from old schema" {
+		t.Errorf("old-ep decision: got %q", decision)
+	}
+
+	// Verify task migrated with old columns, new columns get defaults.
+	var title, assignedTo string
+	if err := kDB.QueryRow(`SELECT title, assigned_to FROM tasks WHERE id = 'old-task'`).Scan(&title, &assignedTo); err != nil {
+		t.Fatalf("query old-task: %v", err)
+	}
+	if title != "task from old schema" {
+		t.Errorf("old-task title: got %q", title)
+	}
+	if assignedTo != "" {
+		t.Errorf("old-task assigned_to: expected empty default, got %q", assignedTo)
+	}
+}
+
+// TestDualDBMigration_LegacyNoMemoryRows verifies that migration is still
+// triggered when the legacy DB has knowledge tables but ZERO rows in the
+// memories table specifically. The guard checks knowledgeDB.memories count,
+// not legacyDB.memories count.
+func TestDualDBMigration_LegacyNoMemoryRows(t *testing.T) {
+	dbPath := createLegacySingleDB(t)
+
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open for seeding: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+
+	// Seed episodes and tasks but NOT memories — 0 rows in memories.
+	mustExec(t, db, `INSERT INTO episodes (id, agent_id, created_at, decision)
+		VALUES ('no-mem-ep', 'agent-1', 1709251200, 'decision without memory')`)
+	mustExec(t, db, `INSERT INTO tasks (id, title, created_at, updated_at)
+		VALUES ('no-mem-task', 'task without memory', '2026-03-01', '2026-03-01')`)
+	mustExec(t, db, `INSERT INTO plans (id, title, created_at, updated_at)
+		VALUES ('no-mem-plan', 'plan without memory', '2026-03-01', '2026-03-01')`)
+	db.Close()
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer st.Close()
+
+	kPath := KnowledgePath(dbPath)
+	kDB, err := sql.Open("sqlite", kPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open knowledge db: %v", err)
+	}
+	defer kDB.Close()
+
+	// Migration should fire (knowledgeDB has 0 memories, legacyDB has memories table).
+	// Episodes and tasks should be migrated.
+	var epCount int
+	if err := kDB.QueryRow(`SELECT COUNT(*) FROM episodes`).Scan(&epCount); err != nil {
+		t.Fatalf("count episodes: %v", err)
+	}
+	if epCount != 1 {
+		t.Errorf("episodes: expected 1 migrated row, got %d", epCount)
+	}
+
+	var taskCount int
+	if err := kDB.QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&taskCount); err != nil {
+		t.Fatalf("count tasks: %v", err)
+	}
+	if taskCount != 1 {
+		t.Errorf("tasks: expected 1 migrated row, got %d", taskCount)
+	}
+
+	var planCount int
+	if err := kDB.QueryRow(`SELECT COUNT(*) FROM plans`).Scan(&planCount); err != nil {
+		t.Fatalf("count plans: %v", err)
+	}
+	if planCount != 1 {
+		t.Errorf("plans: expected 1 migrated row, got %d", planCount)
+	}
+}
+
+// TestDualDBMigration_MultiRowStress seeds multiple rows per table to verify
+// that row iteration doesn't break mid-batch (e.g., early close, scan errors).
+func TestDualDBMigration_MultiRowStress(t *testing.T) {
+	dbPath := createLegacySingleDB(t)
+
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open for seeding: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+
+	const rowCount = 50
+
+	// Seed 50 memories.
+	for i := 0; i < rowCount; i++ {
+		mustExec(t, db, fmt.Sprintf(
+			`INSERT INTO memories (id, tier, content, created_at, expires_at, last_accessed_at)
+			VALUES ('stress-mem-%d', 'project', 'memory content %d', '2026-03-01', '2027-03-01', '2026-03-01')`, i, i))
+	}
+	// Seed 50 episodes.
+	for i := 0; i < rowCount; i++ {
+		mustExec(t, db, fmt.Sprintf(
+			`INSERT INTO episodes (id, agent_id, created_at, decision, tags)
+			VALUES ('stress-ep-%d', 'agent-1', %d, 'decision %d', '["tag-%d"]')`, i, 1709251200+i, i, i))
+	}
+	// Seed 50 events (AUTOINCREMENT PK — tests seq handling).
+	for i := 0; i < rowCount; i++ {
+		mustExec(t, db, fmt.Sprintf(
+			`INSERT INTO events (type, agent_id, payload, created_at)
+			VALUES ('file_change', 'agent-1', '{"i":%d}', '2026-03-01')`, i))
+	}
+	// Seed 50 session_tasks (NO explicit PK — tests INSERT OR IGNORE on pkless table).
+	for i := 0; i < rowCount; i++ {
+		mustExec(t, db, fmt.Sprintf(
+			`INSERT INTO session_tasks (session_id, task_id, action, at)
+			VALUES ('sess-stress', 'task-%d', 'started', %d)`, i, 1709251200+i))
+	}
+	db.Close()
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer st.Close()
+
+	kPath := KnowledgePath(dbPath)
+	kDB, err := sql.Open("sqlite", kPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open knowledge db: %v", err)
+	}
+	defer kDB.Close()
+
+	// Verify all 50 memories migrated.
+	memCount, err := countRows(kDB, "memories")
+	if err != nil {
+		t.Fatalf("count memories: %v", err)
+	}
+	if memCount != rowCount {
+		t.Errorf("memories: expected %d, got %d", rowCount, memCount)
+	}
+
+	// Verify all 50 episodes migrated.
+	epCount, err := countRows(kDB, "episodes")
+	if err != nil {
+		t.Fatalf("count episodes: %v", err)
+	}
+	if epCount != rowCount {
+		t.Errorf("episodes: expected %d, got %d", rowCount, epCount)
+	}
+
+	// Verify all 50 events migrated.
+	evCount, err := countRows(kDB, "events")
+	if err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if evCount != rowCount {
+		t.Errorf("events: expected %d, got %d", rowCount, evCount)
+	}
+
+	// Verify all 50 session_tasks migrated.
+	stCount, err := countRows(kDB, "session_tasks")
+	if err != nil {
+		t.Fatalf("count session_tasks: %v", err)
+	}
+	if stCount != rowCount {
+		t.Errorf("session_tasks: expected %d, got %d", rowCount, stCount)
+	}
+
+	// Verify FTS is correctly populated for all 50 memories and episodes.
+	var ftsMem int
+	if err := kDB.QueryRow(`SELECT COUNT(*) FROM memories_fts`).Scan(&ftsMem); err != nil {
+		t.Fatalf("count memories_fts: %v", err)
+	}
+	if ftsMem != rowCount {
+		t.Errorf("memories_fts: expected %d entries, got %d", rowCount, ftsMem)
+	}
+
+	var ftsEp int
+	if err := kDB.QueryRow(`SELECT COUNT(*) FROM episodes_fts`).Scan(&ftsEp); err != nil {
+		t.Fatalf("count episodes_fts: %v", err)
+	}
+	if ftsEp != rowCount {
+		t.Errorf("episodes_fts: expected %d entries, got %d", rowCount, ftsEp)
+	}
+
+	// Verify individual rows have correct content (spot check first and last).
+	var first, last string
+	if err := kDB.QueryRow(`SELECT content FROM memories WHERE id = 'stress-mem-0'`).Scan(&first); err != nil {
+		t.Fatalf("query first memory: %v", err)
+	}
+	if first != "memory content 0" {
+		t.Errorf("first memory content: got %q", first)
+	}
+	if err := kDB.QueryRow(`SELECT content FROM memories WHERE id = 'stress-mem-49'`).Scan(&last); err != nil {
+		t.Fatalf("query last memory: %v", err)
+	}
+	if last != "memory content 49" {
+		t.Errorf("last memory content: got %q", last)
+	}
+}
+
+// TestDualDBMigration_IdempotentGuardPreventsDoubleRun verifies that the
+// migration guard (knowledgeDB.memories count > 0) correctly prevents the
+// migration from running a second time. This is critical for session_tasks
+// which has no PRIMARY KEY — without the guard, duplicates would appear.
+func TestDualDBMigration_IdempotentGuardPreventsDoubleRun(t *testing.T) {
+	dbPath := createLegacySingleDB(t)
+
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open for seeding: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+
+	// Seed memories (needed to trigger migration) and session_tasks (no PK).
+	mustExec(t, db, `INSERT INTO memories (id, tier, content, created_at, expires_at, last_accessed_at)
+		VALUES ('guard-mem', 'project', 'guard test', '2026-03-01', '2027-03-01', '2026-03-01')`)
+	mustExec(t, db, `INSERT INTO session_tasks (session_id, task_id, action, at)
+		VALUES ('guard-sess', 'guard-task', 'started', 1709251200)`)
+	mustExec(t, db, `INSERT INTO session_tasks (session_id, task_id, action, at)
+		VALUES ('guard-sess', 'guard-task-2', 'started', 1709251201)`)
+	db.Close()
+
+	// First open — triggers migration.
+	st1, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open (first): %v", err)
+	}
+	st1.Close()
+
+	// Second open — migration guard should prevent re-run.
+	st2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open (second): %v", err)
+	}
+	defer st2.Close()
+
+	// Third open — extra paranoia.
+	st2.Close()
+	st3, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open (third): %v", err)
+	}
+	defer st3.Close()
+
+	kPath := KnowledgePath(dbPath)
+	kDB, err := sql.Open("sqlite", kPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open knowledge db: %v", err)
+	}
+	defer kDB.Close()
+
+	// session_tasks has no PK — if migration ran 3 times, we'd have 6 rows.
+	// Expect exactly 2 (one migration, guard prevents repeats).
+	var count int
+	if err := kDB.QueryRow(`SELECT COUNT(*) FROM session_tasks`).Scan(&count); err != nil {
+		t.Fatalf("count session_tasks: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("session_tasks: expected 2 (single migration), got %d (migration ran multiple times?)", count)
 	}
 }
