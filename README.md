@@ -5,7 +5,7 @@
 [![CI](https://github.com/SynapsesOS/synapses/actions/workflows/ci.yml/badge.svg)](https://github.com/SynapsesOS/synapses/actions)
 [![VS Code](https://img.shields.io/visual-studio-marketplace/v/SynapsesOS.synapses?style=for-the-badge&label=VS%20Code&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=SynapsesOS.synapses)
 
-**Synapses** is a graph-based code intelligence server that gives AI coding agents structured understanding of large codebases. Replace ad-hoc grep with typed graph queries. Supports 18 languages. Works with Claude Code, Cursor, Zed, Windsurf, Gemini, and any editor via [MCP](https://modelcontextprotocol.io).
+**Synapses** is a graph-based code intelligence server that gives AI coding agents structured understanding of large codebases. Replace ad-hoc grep with typed graph queries. Supports 49+ languages. Works with Claude Code, Cursor, Zed, Windsurf, Gemini, and any editor via [MCP](https://modelcontextprotocol.io).
 
 ```
 IDE → MCP Tools → Synapses (Graph+SQLite)
@@ -37,7 +37,7 @@ Synapses maintains **episodic memory** (past decisions, failures), an **agent me
 ## Features
 
 ✅ **42 MCP Tools** — session management, code graph queries, task memory, agent coordination, episodic memory, web intelligence, architecture enforcement
-✅ **18-Language Parser** — Go, TypeScript, Python, Java, Rust, C, C++, C#, Swift, Ruby, PHP, Kotlin, Scala, Lua, Elixir, Protobuf, Groovy, and a generic fallback
+✅ **49+ Language Parsers** — Go, TypeScript, Python, Java, Rust, C/C++, C#, Swift, Ruby, PHP, Kotlin, Scala, Dart, Zig, Haskell, Terraform, Nix, and 30+ more with generic fallback
 ✅ **Episodic Memory** — persist past decisions and failures; future sessions query them to avoid repeating mistakes
 ✅ **Agent Message Bus** — broadcast work status across agents; unread messages surface on session start
 ✅ **Vector Embeddings** — semantic search via content-hash invalidation (detect stale embeddings automatically)
@@ -111,7 +111,7 @@ synapses init
 ```
 
 This:
-- Parses your codebase into a graph (18-language support)
+- Parses your codebase into a graph (49+ language support)
 - Creates SQLite cache at `~/.cache/synapses/`
 - Writes `.claude/CLAUDE.md` with navigation rules
 - Writes `.mcp.json` for IDE integration
@@ -380,7 +380,7 @@ Serialized to SQLite: full graph snapshot for recovery, FTS5 for semantic search
 
 - **Language**: Go 1.26
 - **Graph DB**: SQLite (modernc.org/sqlite, pure Go)
-- **Parser**: Tree-sitter (18 languages)
+- **Parser**: Tree-sitter (49+ languages)
 - **MCP**: mark3labs/mcp-go (stdio transport)
 - **Compression**: klauspost/compress (snapshot blobs)
 
