@@ -316,7 +316,9 @@ func (s *Server) handleSaveSessionState(
 				return nil
 			}
 			var arr []string
-			_ = json.Unmarshal([]byte(v), &arr)
+			if err := json.Unmarshal([]byte(v), &arr); err != nil {
+				fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal session state field from request: %v\n", err)
+			}
 			return arr
 		}
 		return nil

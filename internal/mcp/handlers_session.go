@@ -1271,7 +1271,9 @@ func (s *Server) handleSessionInit(
 			if json.Unmarshal([]byte(workMem.Content), &env) == nil && len(env.Packages) > 0 {
 				pkgs = env.Packages
 			} else {
-				_ = json.Unmarshal([]byte(workMem.Content), &pkgs)
+				if err := json.Unmarshal([]byte(workMem.Content), &pkgs); err != nil {
+				fmt.Fprintf(os.Stderr, "DEBUG: synapses: session: unmarshal legacy work_summary packages for memory %q: %v\n", workMem.ID, err)
+			}
 			}
 			if len(pkgs) > 0 {
 				resp["previous_session_work"] = map[string]interface{}{

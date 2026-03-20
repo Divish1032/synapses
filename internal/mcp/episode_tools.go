@@ -167,7 +167,9 @@ func (s *Server) handleRemember(
 	// Entity-tier: one memory per affected node (failures & patterns only).
 	if episodeType == "failure" || episodeType == "pattern" {
 		var affectedNodes []string
-		_ = json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes)
+		if err := json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: episodes: unmarshal affected_nodes for episode %q: %v\n", id, err)
+		}
 		for _, nodeID := range affectedNodes {
 			mid, merr := s.store.InsertMemoryWithAnchors(store.Memory{
 				Tier:     store.TierEntity,
@@ -243,7 +245,9 @@ func (s *Server) handleRemember(
 	createFixTask, _ := req.GetArguments()["create_fix_task"].(bool)
 	if s.store != nil && episodeType == "failure" && (createFixTask || importance >= 0.7) {
 		var affectedNodes []string
-		_ = json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes)
+		if err := json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: episodes: unmarshal affected_nodes for fix task (episode %q): %v\n", id, err)
+		}
 
 		fixTitle := "Fix: " + e.Decision
 		if len(fixTitle) > 120 {
