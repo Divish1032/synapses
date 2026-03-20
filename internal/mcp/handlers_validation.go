@@ -190,40 +190,40 @@ func (s *Server) handleValidatePlan(
 	// episode so check_plan_safety surfaces this warning for similar future plans.
 	// This fills episodic memory without requiring agents to call remember() manually.
 	if len(violations) > 0 && s.store != nil {
-		go func() {
-			agentIDForEp := stringArg(req, "agent_id")
-			planDescForEp := stringArg(req, "plan_description")
-			if planDescForEp == "" {
-				var files []string
-				for _, c := range changes {
-					if c.File != "" {
-						files = append(files, c.File)
-					}
+		agentIDForEp := stringArg(req, "agent_id")
+		planDescForEp := stringArg(req, "plan_description")
+		if planDescForEp == "" {
+			var files []string
+			for _, c := range changes {
+				if c.File != "" {
+					files = append(files, c.File)
 				}
-				planDescForEp = strings.Join(files, ", ")
 			}
-			var sb strings.Builder
-			for i, v := range violations {
-				if i >= 3 {
-					fmt.Fprintf(&sb, "... and %d more", len(violations)-3)
-					break
-				}
-				fmt.Fprintf(&sb, "[%s] %s; ", v.RuleID, v.Description)
+			planDescForEp = strings.Join(files, ", ")
+		}
+		var sb strings.Builder
+		for i, v := range violations {
+			if i >= 3 {
+				fmt.Fprintf(&sb, "... and %d more", len(violations)-3)
+				break
 			}
-			ep := store.Episode{
-				AgentID:     agentIDForEp,
-				EpisodeType: "failure",
-				Outcome:     "failure",
-				Trigger:     fmt.Sprintf("validate_plan: %d violation(s) for: %s", len(violations), planDescForEp),
-				Decision:    fmt.Sprintf("Plan failed validation: %s", sb.String()),
-				Rationale:   "Auto-recorded when validate_plan detected violations. check_plan_safety will surface this for similar future plans.",
-				Tags:        `["auto","validate_plan","violation"]`,
-				Importance:  0.6,
-			}
+			fmt.Fprintf(&sb, "[%s] %s; ", v.RuleID, v.Description)
+		}
+		ep := store.Episode{
+			AgentID:     agentIDForEp,
+			EpisodeType: "failure",
+			Outcome:     "failure",
+			Trigger:     fmt.Sprintf("validate_plan: %d violation(s) for: %s", len(violations), planDescForEp),
+			Decision:    fmt.Sprintf("Plan failed validation: %s", sb.String()),
+			Rationale:   "Auto-recorded when validate_plan detected violations. check_plan_safety will surface this for similar future plans.",
+			Tags:        `["auto","validate_plan","violation"]`,
+			Importance:  0.6,
+		}
+		s.goBackground(func() {
 			if _, err := s.store.RememberEpisode(ep); err != nil {
 				log.Printf("mcp: auto-record validate_plan episode: %v", err)
 			}
-		}()
+		})
 	}
 
 	// RX3: Logic-level anomaly detection — heuristic AST checks on files in the
@@ -616,26 +616,26 @@ func (s *Server) handleVerifyImplementation(
 
 	// Auto-record episode when post-implementation violations are found.
 	if totalViolations > 0 && s.store != nil {
-		go func() {
-			var fileSummary []string
-			for _, r := range reports {
-				if len(r.Violations) > 0 {
-					fileSummary = append(fileSummary, fmt.Sprintf("%s: %d violation(s)", r.File, len(r.Violations)))
-				}
+		var fileSummary []string
+		for _, r := range reports {
+			if len(r.Violations) > 0 {
+				fileSummary = append(fileSummary, fmt.Sprintf("%s: %d violation(s)", r.File, len(r.Violations)))
 			}
-			ep := store.Episode{
-				EpisodeType: "failure",
-				Outcome:     "failure",
-				Trigger:     "verify_implementation found post-write violations",
-				Decision:    fmt.Sprintf("Post-implementation violations in: %s", strings.Join(fileSummary, "; ")),
-				Rationale:   "Code was written that violates architectural rules. Fix violations or update rules.",
-				Tags:        `["auto","verify_implementation","violation"]`,
-				Importance:  0.7,
-			}
+		}
+		ep := store.Episode{
+			EpisodeType: "failure",
+			Outcome:     "failure",
+			Trigger:     "verify_implementation found post-write violations",
+			Decision:    fmt.Sprintf("Post-implementation violations in: %s", strings.Join(fileSummary, "; ")),
+			Rationale:   "Code was written that violates architectural rules. Fix violations or update rules.",
+			Tags:        `["auto","verify_implementation","violation"]`,
+			Importance:  0.7,
+		}
+		s.goBackground(func() {
 			if _, err := s.store.RememberEpisode(ep); err != nil {
 				log.Printf("mcp: auto-record verify_implementation episode: %v", err)
 			}
-		}()
+		})
 	}
 
 	return jsonResult(result)
@@ -849,7 +849,8 @@ func (s *Server) handleUpsertRule(
 	// requiring a new validate_plan call.
 	// Agent rules have no ForbiddenEdge, so skip the graph scan for them.
 	if s.store != nil && ruleType == "structural" {
-		go func(r config.Rule) {
+		r := rule
+		s.goBackground(func() {
 			snapshot := config.Config{Rules: []config.Rule{r}}
 			violations := snapshot.CheckViolations(s.graph)
 			if len(violations) > 0 {
@@ -857,7 +858,7 @@ func (s *Server) handleUpsertRule(
 					log.Printf("mcp: log violations (upsert_rule): %v", err)
 				}
 			}
-		}(rule)
+		})
 	}
 
 	return jsonResult(map[string]interface{}{

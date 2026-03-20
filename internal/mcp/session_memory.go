@@ -197,9 +197,9 @@ func (s *Server) handleEndSession(
 		outputTokens, _ := req.GetArguments()["output_tokens"].(float64)
 		costUSD, _ := req.GetArguments()["cost_usd"].(float64)
 		if usageModel != "" {
-			sessionID := agentID + ":" + s.projectID + ":" + time.Now().UTC().Format("2006-01-02")
-			go pc.RecordAgentLLMUsage(pulse.AgentLLMUsageEvent{
-				SessionID:    sessionID,
+			sessID := agentID + ":" + s.projectID + ":" + time.Now().UTC().Format("2006-01-02")
+			evt := pulse.AgentLLMUsageEvent{
+				SessionID:    sessID,
 				AgentID:      agentID,
 				ProjectID:    s.projectID,
 				Model:        usageModel,
@@ -207,7 +207,8 @@ func (s *Server) handleEndSession(
 				InputTokens:  int(inputTokens),
 				OutputTokens: int(outputTokens),
 				CostUSD:      costUSD,
-			})
+			}
+			s.goBackground(func() { pc.RecordAgentLLMUsage(evt) })
 		}
 	}
 
@@ -470,7 +471,8 @@ func (s *Server) trackSessionCall(sessionID, agentID string) {
 	s.sessionCallsMu.Unlock()
 
 	if shouldFire {
-		go s.triggerAutoSessionLog(agentID)
+		aid := agentID
+		s.goBackground(func() { s.triggerAutoSessionLog(aid) })
 	}
 }
 

@@ -150,12 +150,14 @@ func (s *Server) handleRemember(
 	if s.memoryEmbedder != nil && len(memoryIDs) > 0 {
 		embedder := s.memoryEmbedder
 		st := s.store
-		content := memContent // capture for goroutine
-		go func() {
-			for _, memID := range memoryIDs {
+		content := memContent
+		ids := make([]string, len(memoryIDs))
+		copy(ids, memoryIDs)
+		s.goBackground(func() {
+			for _, memID := range ids {
 				s.embedMemory(embedder, st, memID, content)
 			}
-		}()
+		})
 	}
 
 	if episodeType == "failure" {
@@ -362,11 +364,11 @@ func (s *Server) handleRecall(
 		for i, m := range memories {
 			ids[i] = m.ID
 		}
-		go func() {
+		s.goBackground(func() {
 			for _, id := range ids {
 				s.store.TouchMemory(id)
 			}
-		}()
+		})
 	}
 
 	// Cross-project episode search when projects= is provided.

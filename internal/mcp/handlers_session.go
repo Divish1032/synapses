@@ -296,12 +296,16 @@ func (s *Server) handleSessionInit(
 
 	// Notify pulse of session start and record the model if provided (Option A).
 	if pc := s.getPulseClient(); pc != nil && agentID != "" && s.logSessions {
-		go func() {
-			pc.RecordSessionEvent(agentID, s.projectID, "start")
-			if model != "" {
-				pc.RecordSessionModel(agentID, s.projectID, model, provider)
+		aid := agentID
+		projID := s.projectID
+		mdl := model
+		prov := provider
+		s.goBackground(func() {
+			pc.RecordSessionEvent(aid, projID, "start")
+			if mdl != "" {
+				pc.RecordSessionModel(aid, projID, mdl, prov)
 			}
-		}()
+		})
 	}
 
 	// Emit session-start event so peers polling get_events see a new agent arrive.
@@ -341,9 +345,9 @@ func (s *Server) handleSessionInit(
 			s.registerSynapseSession(mcpSessionID, synapseSessionID, effectiveAgentID)
 			// Prune tool_calls older than 7 days on session start — debounced inside,
 			// so concurrent session_init calls are safe and only one prune runs/hour.
-			go s.store.PruneToolCallsOlderThan(7 * 24 * time.Hour) //nolint:errcheck
+			s.goBackground(func() { s.store.PruneToolCallsOlderThan(7 * 24 * time.Hour) }) //nolint:errcheck
 			// Prune closed/hibernated sessions older than 90 days — debounced to once/day.
-			go s.store.PruneOldSessions(90 * 24 * time.Hour) //nolint:errcheck
+			s.goBackground(func() { s.store.PruneOldSessions(90 * 24 * time.Hour) }) //nolint:errcheck
 		}
 	}
 
@@ -897,11 +901,13 @@ func (s *Server) handleSessionInit(
 			}
 		}
 		if len(warmFiles) > 0 {
-			go func() {
-				for _, f := range warmFiles {
+			files := make([]string, len(warmFiles))
+			copy(files, warmFiles)
+			s.goBackground(func() {
+				for _, f := range files {
 					s.warmBrainCache(f)
 				}
-			}()
+			})
 		}
 	}
 
@@ -1124,11 +1130,11 @@ func (s *Server) handleSessionInit(
 			if len(touchIDs) > 0 {
 				ids := make([]string, len(touchIDs))
 				copy(ids, touchIDs)
-				go func() {
+				s.goBackground(func() {
 					for _, id := range ids {
 						s.store.TouchMemory(id)
 					}
-				}()
+				})
 			}
 		}
 	}
@@ -1149,8 +1155,8 @@ func (s *Server) handleSessionInit(
 			for i, m := range invalMems {
 				surfaceIDs[i] = m.ID
 			}
-			aid := agentID // capture for goroutine
-			go func() { _ = s.store.MarkMemoriesSurfaced(aid, surfaceIDs) }()
+			aid := agentID
+			s.goBackground(func() { _ = s.store.MarkMemoriesSurfaced(aid, surfaceIDs) })
 		}
 	}
 
@@ -1242,7 +1248,7 @@ func (s *Server) handleSessionInit(
 				}
 				// Touch in background to renew TTL (same pattern as relevant_memories).
 				wid := workMem.ID
-				go func() { s.store.TouchMemory(wid) }()
+				s.goBackground(func() { s.store.TouchMemory(wid) })
 			}
 		}
 	}
@@ -1459,9 +1465,9 @@ func (s *Server) handleReportUsage(
 
 	pc := s.getPulseClient()
 	if pc != nil {
-		sessionID := agentID + ":" + s.projectID + ":" + time.Now().UTC().Format("2006-01-02")
-		go pc.RecordAgentLLMUsage(pulse.AgentLLMUsageEvent{
-			SessionID:    sessionID,
+		sessID := agentID + ":" + s.projectID + ":" + time.Now().UTC().Format("2006-01-02")
+		evt := pulse.AgentLLMUsageEvent{
+			SessionID:    sessID,
 			AgentID:      agentID,
 			ProjectID:    s.projectID,
 			Model:        model,
@@ -1469,7 +1475,8 @@ func (s *Server) handleReportUsage(
 			InputTokens:  inputTokens,
 			OutputTokens: outputTokens,
 			CostUSD:      costUSD,
-		})
+		}
+		s.goBackground(func() { pc.RecordAgentLLMUsage(evt) })
 	}
 
 	return jsonResult(map[string]interface{}{

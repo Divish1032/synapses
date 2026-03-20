@@ -43,7 +43,10 @@ func newTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	return New(g, cfg, st)
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+	return srv
 }
 
 // newPopulatedServer creates a Server with a small graph containing two
@@ -81,7 +84,10 @@ func newPopulatedServer(t *testing.T) (*Server, graph.NodeID, graph.NodeID) {
 	g.AddEdge(&graph.Edge{From: callerID, To: loginID, Type: graph.EdgeCalls})
 	g.AddEdge(&graph.Edge{From: callerID, To: logoutID, Type: graph.EdgeCalls})
 
-	return New(g, cfg, st), loginID, logoutID
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+	return srv, loginID, logoutID
 }
 
 // ── CallToolRequest builder ───────────────────────────────────────────────────

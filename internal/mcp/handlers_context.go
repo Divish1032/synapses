@@ -196,60 +196,60 @@ func (s *Server) handleGetContext(
 		if repeatCount == 2 {
 			// R29: correction signal — second fetch of same entity in session.
 			if pc := s.getPulseClient(); pc != nil {
-				go pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
+				evt := pulse.OutcomeSignalEvent{
 					ProjectID:  s.projectID,
 					AgentID:    agentIDForFeedback,
 					Entity:     pulseEntity,
 					SignalType: "correction",
 					Count:      repeatCount,
-				})
+				}
+				s.goBackground(func() { pc.RecordOutcomeSignal(evt) })
 			}
 		}
 		if repeatCount == 3 {
 			// R29: escalation signal — three or more fetches.
 			if pc := s.getPulseClient(); pc != nil {
-				go pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
+				evt := pulse.OutcomeSignalEvent{
 					ProjectID:  s.projectID,
 					AgentID:    agentIDForFeedback,
 					Entity:     pulseEntity,
 					SignalType: "escalation",
 					Count:      repeatCount,
-				})
-			}
-			go func() {
-				ep := store.Episode{
-					AgentID:     agentIDForFeedback,
-					EpisodeType: "pattern",
-					Outcome:     "partial",
-					Trigger:     fmt.Sprintf("get_context called %dx for %q", repeatCount, entityName),
-					Decision:    fmt.Sprintf("Repeated context requests for %q — initial slice may be too shallow or entity is large", entityName),
-					Rationale:   "Three or more get_context calls for the same entity in one session signals the initial BFS depth or token budget wasn't sufficient. Consider increasing depth or using get_call_chain for deep traces.",
-					Tags:        `["feedback","repeated_context","auto"]`,
-					Importance:  0.3,
 				}
-				if _, err := s.store.RememberEpisode(ep); err != nil {
-					log.Printf("mcp: auto-record repeat context episode: %v", err)
-				}
-			}()
-		}
-	}
-	if helpful, ok := req.GetArguments()["helpful"].(bool); ok && agentIDForFeedback != "" && s.store != nil {
-		go func() {
-			outcome, decision := "success", fmt.Sprintf("Context for %q was helpful", entityName)
-			if !helpful {
-				outcome, decision = "failure", fmt.Sprintf("Context for %q was not helpful — agent signalled miss", entityName)
+				s.goBackground(func() { pc.RecordOutcomeSignal(evt) })
 			}
 			ep := store.Episode{
 				AgentID:     agentIDForFeedback,
 				EpisodeType: "pattern",
-				Outcome:     outcome,
-				Trigger:     fmt.Sprintf("explicit feedback on get_context(%q)", entityName),
-				Decision:    decision,
-				Tags:        `["feedback","context_quality","explicit"]`,
-				Importance:  0.4,
+				Outcome:     "partial",
+				Trigger:     fmt.Sprintf("get_context called %dx for %q", repeatCount, entityName),
+				Decision:    fmt.Sprintf("Repeated context requests for %q — initial slice may be too shallow or entity is large", entityName),
+				Rationale:   "Three or more get_context calls for the same entity in one session signals the initial BFS depth or token budget wasn't sufficient. Consider increasing depth or using get_call_chain for deep traces.",
+				Tags:        `["feedback","repeated_context","auto"]`,
+				Importance:  0.3,
 			}
-			_, _ = s.store.RememberEpisode(ep)
-		}()
+			s.goBackground(func() {
+				if _, err := s.store.RememberEpisode(ep); err != nil {
+					log.Printf("mcp: auto-record repeat context episode: %v", err)
+				}
+			})
+		}
+	}
+	if helpful, ok := req.GetArguments()["helpful"].(bool); ok && agentIDForFeedback != "" && s.store != nil {
+		outcome, decision := "success", fmt.Sprintf("Context for %q was helpful", entityName)
+		if !helpful {
+			outcome, decision = "failure", fmt.Sprintf("Context for %q was not helpful — agent signalled miss", entityName)
+		}
+		ep := store.Episode{
+			AgentID:     agentIDForFeedback,
+			EpisodeType: "pattern",
+			Outcome:     outcome,
+			Trigger:     fmt.Sprintf("explicit feedback on get_context(%q)", entityName),
+			Decision:    decision,
+			Tags:        `["feedback","context_quality","explicit"]`,
+			Importance:  0.4,
+		}
+		s.goBackground(func() { _, _ = s.store.RememberEpisode(ep) })
 	}
 
 	cfg := s.config.CarveConfig()
@@ -436,9 +436,12 @@ func (s *Server) handleGetContext(
 					cacheAgentID = s.getLastAgent()
 				}
 				cacheResp := map[string]interface{}{"unchanged": true, "entity_hash": entityHash, "entity": entityName}
-				go s.emitContextDelivery("get_context", cacheAgentID, entityName, best.File,
-					cacheResp, sg.Nodes, sg.Edges, sg.TruncatedCount, sg.Truncated,
-					false, true, time.Since(handlerStart).Milliseconds())
+				durationMs := time.Since(handlerStart).Milliseconds()
+				s.goBackground(func() {
+					s.emitContextDelivery("get_context", cacheAgentID, entityName, best.File,
+						cacheResp, sg.Nodes, sg.Edges, sg.TruncatedCount, sg.Truncated,
+						false, true, durationMs)
+				})
 				return jsonResult(cacheResp)
 			}
 		} else if sessionID != "" {
@@ -452,9 +455,12 @@ func (s *Server) handleGetContext(
 					cacheAgentID = s.getLastAgent()
 				}
 				cacheResp := map[string]interface{}{"unchanged": true, "entity_hash": entityHash, "entity": entityName, "cache_source": "session"}
-				go s.emitContextDelivery("get_context", cacheAgentID, entityName, best.File,
-					cacheResp, sg.Nodes, sg.Edges, sg.TruncatedCount, sg.Truncated,
-					false, true, time.Since(handlerStart).Milliseconds())
+				durationMs := time.Since(handlerStart).Milliseconds()
+				s.goBackground(func() {
+					s.emitContextDelivery("get_context", cacheAgentID, entityName, best.File,
+						cacheResp, sg.Nodes, sg.Edges, sg.TruncatedCount, sg.Truncated,
+						false, true, durationMs)
+				})
 				// Respect the requested format — agent expected compact text, not JSON.
 				// Explicit known_hash paths stay JSON (agent manages their own cache protocol).
 				if format == "compact" {
@@ -508,7 +514,7 @@ func (s *Server) handleGetContext(
 		} else {
 			// Async enrichment: return raw graph now, enrich in background.
 			dc.BrainHint = "enrichment in progress — call get_context again in a few seconds for brain-enriched results"
-			go s.asyncEnrichContext(bc, cacheKey, dc, best, taskID)
+			s.goBackground(func() { s.asyncEnrichContext(bc, cacheKey, dc, best, taskID) })
 		}
 	} else {
 		dc.BrainHint = "not configured — add brain.url to synapses.json for semantic enrichment"
@@ -753,15 +759,19 @@ func (s *Server) handleGetContext(
 	if agentID == "" {
 		agentID = s.getLastAgent()
 	}
-	go s.emitContextDelivery(
-		"get_context", agentID, entityName, best.File,
-		dc, sg.Nodes, sg.Edges,
-		sg.TruncatedCount,
-		sg.Truncated,
-		dc.ContextPacket != nil,
-		false,
-		time.Since(handlerStart).Milliseconds(),
-	)
+	durationMs := time.Since(handlerStart).Milliseconds()
+	hasBrain := dc.ContextPacket != nil
+	s.goBackground(func() {
+		s.emitContextDelivery(
+			"get_context", agentID, entityName, best.File,
+			dc, sg.Nodes, sg.Edges,
+			sg.TruncatedCount,
+			sg.Truncated,
+			hasBrain,
+			false,
+			durationMs,
+		)
+	})
 
 	// Multi-agent awareness: fire-and-forget event so peers can see this via get_events.
 	// Uses agentIDForFeedback (same value as agentID when provided). upsertAgentWithActivity
@@ -769,15 +779,16 @@ func (s *Server) handleGetContext(
 	// Focus+FocusFile+FocusSince payload, making a second call redundant.
 	if agentIDForFeedback != "" && s.store != nil {
 		relFileForEvent := strings.TrimPrefix(best.File, s.graph.Root()+"/")
-		go func() {
+		aid := agentIDForFeedback
+		s.goBackground(func() {
 			payload, _ := json.Marshal(map[string]string{
 				"entity": entityName,
-				"file":   relFileForEvent, // repo-relative path
+				"file":   relFileForEvent,
 			})
-			if err := s.store.AppendEvent("agent_examining", agentIDForFeedback, string(payload)); err != nil {
+			if err := s.store.AppendEvent("agent_examining", aid, string(payload)); err != nil {
 				log.Printf("mcp: append agent_examining event: %v", err)
 			}
-		}()
+		})
 	}
 
 	// BUG-EVAL-9: populate disambiguation fields on dc BEFORE format dispatch
@@ -815,13 +826,14 @@ func (s *Server) handleGetContext(
 	// Fire-and-forget — no latency added to hot path.
 	if s.store != nil {
 		synapseSessionID := s.getSynapseSessionID(sessionID)
-		go s.store.InsertContextDelivery(store.ContextDelivery{
+		cd := store.ContextDelivery{
 			SessionID: synapseSessionID,
 			AgentID:   agentIDForFeedback,
 			ToolName:  "get_context",
 			Entity:    entityName,
 			Refetched: contextRefetched,
-		})
+		}
+		s.goBackground(func() { s.store.InsertContextDelivery(cd) })
 	}
 
 	// detail_level controls depth: "summary" (~50t), "neighbors" (~200t), "full" (~400-600t).

@@ -336,11 +336,12 @@ func (s *Server) handlePrepareContext(
 	if s.store != nil {
 		mcpSessID := SessionIDFromContext(ctx)
 		synapseSessionID := s.getSynapseSessionID(mcpSessID)
-		go s.store.InsertContextDelivery(store.ContextDelivery{
+		cd := store.ContextDelivery{
 			SessionID: synapseSessionID,
 			ToolName:  "prepare_context",
 			Entity:    target,
-		})
+		}
+		s.goBackground(func() { s.store.InsertContextDelivery(cd) })
 	}
 
 	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
@@ -899,7 +900,7 @@ func (s *Server) buildBrainPacket(
 
 	// Async enrichment: fire background goroutine, return nil for this call.
 	dc.BrainHint = "enrichment in progress — call again in a few seconds for brain-enriched results"
-	go s.asyncEnrichContext(bc, cacheKey, dc, node, taskID)
+	s.goBackground(func() { s.asyncEnrichContext(bc, cacheKey, dc, node, taskID) })
 	return nil
 }
 
