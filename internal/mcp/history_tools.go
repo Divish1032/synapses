@@ -27,6 +27,13 @@ type timelineEvent struct {
 // handleGetEntityHistory returns a chronological timeline compositing memories,
 // episodes, annotations, task references, and git changes for a named entity.
 // One tool call replaces five. Serves Speed.
+//
+// Memory lookup uses BOTH paths:
+//   - entity_id column (QueryMemories): direct 1:1 entity-tier memories
+//   - memory_anchors table (GetMemoriesByAnchorNode): memories linked via anchor_nodes=
+//
+// Results are deduplicated by memory ID to prevent doubles when a memory is linked
+// through both entity_id and anchor_nodes.
 func (s *Server) handleGetEntityHistory(
 	_ context.Context,
 	req mcp.CallToolRequest,
@@ -66,7 +73,10 @@ func (s *Server) handleGetEntityHistory(
 
 	nodeID := string(node.ID)
 
-	// ── Collect from all 5 sources in parallel ──────────────────────────────
+	// ── Collect from all sources in parallel ─────────────────────────────────
+	// 6 goroutines: entity memories, anchored memories, episodes, annotations,
+	// tasks, git changes. Each writes to its own local slice — no shared state
+	// until appendEvents grabs the mutex.
 	var (
 		mu     sync.Mutex
 		events []timelineEvent
@@ -82,7 +92,30 @@ func (s *Server) handleGetEntityHistory(
 		mu.Unlock()
 	}
 
-	// 1. Memories
+	// Track seen memory IDs to deduplicate across entity_id and anchor paths.
+	var seenMu sync.Mutex
+	seenMemIDs := make(map[string]bool)
+
+	memoryToEvent := func(id, content, createdAt, tier, source, agentID string) (timelineEvent, bool) {
+		seenMu.Lock()
+		if seenMemIDs[id] {
+			seenMu.Unlock()
+			return timelineEvent{}, false
+		}
+		seenMemIDs[id] = true
+		seenMu.Unlock()
+
+		ts := parseTimestamp(createdAt)
+		return timelineEvent{
+			Type:      "memory",
+			Timestamp: ts,
+			Date:      createdAt,
+			Summary:   truncate(content, 200),
+			Detail:    compactDetail("tier", tier, "source", source, "agent", agentID),
+		}, true
+	}
+
+	// 1a. Entity-tier memories (via entity_id column)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -95,14 +128,29 @@ func (s *Server) handleGetEntityHistory(
 		}
 		var evts []timelineEvent
 		for _, m := range mems {
-			ts := parseTimestamp(m.CreatedAt)
-			evts = append(evts, timelineEvent{
-				Type:      "memory",
-				Timestamp: ts,
-				Date:      m.CreatedAt,
-				Summary:   truncate(m.Content, 200),
-				Detail:    fmt.Sprintf("tier=%s source=%s agent=%s", m.Tier, m.Source, m.AgentID),
-			})
+			if evt, ok := memoryToEvent(m.ID, m.Content, m.CreatedAt, m.Tier, m.Source, m.AgentID); ok {
+				evts = append(evts, evt)
+			}
+		}
+		appendEvents(evts)
+	}()
+
+	// 1b. Anchored memories (via memory_anchors junction table)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if s.store == nil {
+			return
+		}
+		mems, err := s.store.GetMemoriesByAnchorNode(nodeID, limit)
+		if err != nil {
+			return
+		}
+		var evts []timelineEvent
+		for _, m := range mems {
+			if evt, ok := memoryToEvent(m.ID, m.Content, m.CreatedAt, m.Tier, m.Source, m.AgentID); ok {
+				evts = append(evts, evt)
+			}
 		}
 		appendEvents(evts)
 	}()
@@ -125,7 +173,7 @@ func (s *Server) handleGetEntityHistory(
 				Timestamp: e.CreatedAt,
 				Date:      time.Unix(e.CreatedAt, 0).UTC().Format(time.RFC3339),
 				Summary:   truncate(e.Decision, 200),
-				Detail:    fmt.Sprintf("type=%s outcome=%s trigger=%s", e.EpisodeType, e.Outcome, truncate(e.Trigger, 80)),
+				Detail:    compactDetail("type", e.EpisodeType, "outcome", e.Outcome, "trigger", truncate(e.Trigger, 80)),
 			})
 		}
 		appendEvents(evts)
@@ -155,7 +203,7 @@ func (s *Server) handleGetEntityHistory(
 					Timestamp: ts,
 					Date:      a.CreatedAt,
 					Summary:   truncate(a.Note, 200),
-					Detail:    fmt.Sprintf("source=%s agent=%s", src, a.AgentID),
+					Detail:    compactDetail("source", src, "agent", a.AgentID),
 				})
 			}
 		}
@@ -181,7 +229,7 @@ func (s *Server) handleGetEntityHistory(
 				Timestamp: ts,
 				Date:      t.UpdatedAt,
 				Summary:   fmt.Sprintf("[%s] %s", t.Status, t.Title),
-				Detail:    fmt.Sprintf("priority=%s assigned=%s plan=%s", t.Priority, t.AssignedTo, t.PlanID),
+				Detail:    compactDetail("priority", t.Priority, "assigned", t.AssignedTo, "plan", t.PlanID),
 			})
 		}
 		appendEvents(evts)
@@ -201,8 +249,8 @@ func (s *Server) handleGetEntityHistory(
 
 	wg.Wait()
 
-	// ── Merge and sort by timestamp descending ──────────────────────────────
-	sort.Slice(events, func(i, j int) bool {
+	// ── Merge and sort by timestamp descending (stable for determinism) ─────
+	sort.SliceStable(events, func(i, j int) bool {
 		return events[i].Timestamp > events[j].Timestamp
 	})
 	if len(events) > limit {
@@ -289,9 +337,8 @@ func (s *Server) resolveEntityNode(entityName, fileHint string) (*graph.Node, st
 		}
 	}
 
-	// Ambiguity: multiple nodes remain — show disambiguation prompt.
+	// Ambiguity: multiple nodes remain — use pickBestNode for automatic disambiguation.
 	if len(nodes) > 1 {
-		// Try pickBestNode for automatic disambiguation.
 		best := pickBestNode(nodes, s.graph)
 		return best, ""
 	}
@@ -364,11 +411,27 @@ func parseTimestamp(s string) int64 {
 }
 
 // truncate returns at most maxLen runes of s, appending "…" if truncated.
-// Safe for multi-byte UTF-8 (CJK, emoji, etc.).
+// Safe for multi-byte UTF-8 (CJK, emoji, etc.). Returns "" for maxLen <= 0.
 func truncate(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
 	runes := []rune(s)
 	if len(runes) <= maxLen {
 		return s
 	}
 	return string(runes[:maxLen]) + "…"
+}
+
+// compactDetail builds a key=value detail string, omitting pairs where the value is empty.
+// Example: compactDetail("tier", "entity", "agent", "") → "tier=entity"
+func compactDetail(pairs ...string) string {
+	var parts []string
+	for i := 0; i+1 < len(pairs); i += 2 {
+		k, v := pairs[i], pairs[i+1]
+		if v != "" {
+			parts = append(parts, k+"="+v)
+		}
+	}
+	return strings.Join(parts, " ")
 }

@@ -1771,3 +1771,74 @@ func TestSearchMemories_FTS5InjectionAttackVector(t *testing.T) {
 		t.Errorf("SearchMemoriesIncludingStale(\"NOT *\") returned %d results, expected ≤1 (only 1 document seeded)", len(results))
 	}
 }
+
+// ── GetMemoriesByAnchorNode ─────────────────────────────────────────────────
+
+func TestGetMemoriesByAnchorNode_BasicRoundTrip(t *testing.T) {
+	st := openMemTestStore(t)
+	nodeID := "repo::auth.go::AuthService"
+
+	memID, _ := st.InsertMemory(Memory{
+		Tier: TierProject, Content: "Auth redesign planned", AgentID: "a", Source: SourceManual,
+	})
+	_ = st.InsertMemoryAnchors(memID, []string{nodeID})
+
+	mems, err := st.GetMemoriesByAnchorNode(nodeID, 10)
+	if err != nil {
+		t.Fatalf("GetMemoriesByAnchorNode: %v", err)
+	}
+	if len(mems) != 1 {
+		t.Fatalf("expected 1 memory, got %d", len(mems))
+	}
+	if mems[0].Content != "Auth redesign planned" {
+		t.Errorf("expected content match, got %q", mems[0].Content)
+	}
+}
+
+func TestGetMemoriesByAnchorNode_EmptyNodeID(t *testing.T) {
+	st := openMemTestStore(t)
+	mems, err := st.GetMemoriesByAnchorNode("", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mems != nil {
+		t.Errorf("expected nil for empty nodeID, got %v", mems)
+	}
+}
+
+func TestGetMemoriesByAnchorNode_ExcludesStale(t *testing.T) {
+	st := openMemTestStore(t)
+	nodeID := "repo::auth.go::AuthService"
+
+	memID, _ := st.InsertMemory(Memory{
+		Tier: TierProject, Content: "Stale memory", AgentID: "a", Source: SourceManual,
+	})
+	_ = st.InsertMemoryAnchors(memID, []string{nodeID})
+
+	// Mark memory as stale.
+	_, _ = st.knowledgeDB.Exec(`UPDATE memories SET stale = 1 WHERE id = ?`, memID)
+
+	mems, err := st.GetMemoriesByAnchorNode(nodeID, 10)
+	if err != nil {
+		t.Fatalf("GetMemoriesByAnchorNode: %v", err)
+	}
+	if len(mems) != 0 {
+		t.Errorf("expected 0 memories (stale excluded), got %d", len(mems))
+	}
+}
+
+func TestGetMemoriesByAnchorNode_NoMatch(t *testing.T) {
+	st := openMemTestStore(t)
+	memID, _ := st.InsertMemory(Memory{
+		Tier: TierProject, Content: "Unrelated memory", AgentID: "a", Source: SourceManual,
+	})
+	_ = st.InsertMemoryAnchors(memID, []string{"repo::other.go::Other"})
+
+	mems, err := st.GetMemoriesByAnchorNode("repo::auth.go::AuthService", 10)
+	if err != nil {
+		t.Fatalf("GetMemoriesByAnchorNode: %v", err)
+	}
+	if len(mems) != 0 {
+		t.Errorf("expected 0 memories for unmatched node, got %d", len(mems))
+	}
+}

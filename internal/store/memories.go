@@ -854,6 +854,33 @@ func (s *Store) GetMemoryAnchors(memoryID string) ([]string, error) {
 	return out, rows.Err()
 }
 
+// GetMemoriesByAnchorNode returns memories anchored to the given node ID via the
+// memory_anchors junction table. This finds memories linked through anchor_nodes=
+// in remember(), which are NOT discoverable via QueryMemories(entityID=...) alone.
+// Uses the idx_memory_anchors_node index for O(log N) lookup.
+// Only returns non-expired, non-stale memories. Ordered by created_at DESC.
+func (s *Store) GetMemoriesByAnchorNode(nodeID string, limit int) ([]Memory, error) {
+	if nodeID == "" || limit <= 0 {
+		return nil, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	rows, err := s.knowledgeDB.Query(`
+		SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
+		       m.created_at, m.expires_at, m.last_accessed_at, m.source
+		FROM memories m
+		JOIN memory_anchors ma ON m.id = ma.memory_id
+		WHERE ma.node_id = ?
+		  AND m.expires_at > ?
+		  AND m.stale = 0
+		ORDER BY m.created_at DESC
+		LIMIT ?`, nodeID, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get memories by anchor node: %w", err)
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
 // CountMemories returns total memory count by tier.
 func (s *Store) CountMemories() (map[string]int, error) {
 	rows, err := s.knowledgeDB.Query(`SELECT tier, COUNT(*) FROM memories GROUP BY tier`)
