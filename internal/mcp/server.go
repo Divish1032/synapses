@@ -1013,7 +1013,6 @@ var knowledgeTools = map[string]bool{
 	"link_task_nodes":    true,
 	"check_plan_safety":  true,
 	"report_usage":       true,
-	"mark_read":          true,
 }
 
 // toolInTier reports whether name should be registered at startup given
@@ -1269,7 +1268,10 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"get_context",
 			mcp.WithDescription(
-				"Returns a relevance-ranked subgraph centred on the named entity. "+
+				"For most use cases, use prepare_context instead — "+
+					"it provides intent-based context assembly in one structured call "+
+					"(e.g. prepare_context(intent='modify', target='AuthService')). "+
+					"Returns a relevance-ranked subgraph centred on the named entity. "+
 					"Uses BFS with edge-type-weighted decay so the closest, most semantically "+
 					"significant relationships appear first. This replaces grep: ask for what you "+
 					"need structurally, not textually.",
@@ -2051,7 +2053,8 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"prepare_context",
 			mcp.WithDescription(
-				"Intent-based context assembly. Declare WHAT you need and a target; "+
+				"THE canonical context tool — start here for all code exploration tasks. "+
+					"Intent-based context assembly: declare WHAT you need and a target; "+
 					"Synapses composes the right context in one round-trip. "+
 					"Replaces chains like get_context→get_impact→get_violations.\n"+
 					"Intents: 'modify' (safe-edit briefing), 'understand' (structure), "+
@@ -2318,12 +2321,13 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"plan_context",
 			mcp.WithDescription(
-				"Single-call pre-implementation gate. Runs three checks in one round-trip: "+
+				"Power-user tool — most agents should use validate_plan + prepare_context(intent='plan') instead. "+
+					"Find this tool via discover_tools(query='plan implementation gate'). "+
+					"Single-call pre-implementation gate. Runs three checks in one round-trip: "+
 					"(1) check_plan_safety — searches failure episodes for past matches (500ms cap); "+
 					"(2) validate_plan — checks proposed changes against architectural rules; "+
 					"(3) prepare_context(intent=plan) — scope assessment: files, interfaces, risk level. "+
-					"Returns a verdict: 'clear' | 'warnings' | 'violations' | 'blocked'. "+
-					"Use this BEFORE implementing any multi-file plan.",
+					"Returns a verdict: 'clear' | 'warnings' | 'violations' | 'blocked'.",
 			),
 			mcp.WithString("target",
 				mcp.Required(),

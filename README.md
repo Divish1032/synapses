@@ -204,8 +204,7 @@ Synapses registers **42 MCP tools** across 9 categories. All are available in yo
 | Tool | Params | Description |
 |------|--------|-------------|
 | `send_message` | `from_agent`, `topic`, `payload`, `to_agent` (optional), `project_id` (optional) | Direct or broadcast message via SQLite. Broadcast to all: set `to_agent=""`. |
-| `get_messages` | `agent_id`, `since_seq`, `topic_filter`, `unread_only`, `limit` | Retrieve messages. Unread surface automatically in `session_init`. |
-| `mark_read` | `message_id`, `agent_id` | Mark message as read. |
+| `get_messages` | `agent_id`, `since_seq`, `topic_filter`, `unread_only`, `limit`, `mark_read_ids` (optional) | Retrieve messages. Pass `mark_read_ids=["id1","id2"]` to batch-acknowledge in the same call. Unread messages surface automatically in `session_init`. |
 
 ### Episodic Memory
 | Tool | Params | Description |
