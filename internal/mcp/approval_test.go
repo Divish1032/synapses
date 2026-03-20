@@ -229,6 +229,22 @@ func TestSendMessage_Directed_NoApproval(t *testing.T) {
 	}
 }
 
+func TestSendMessage_WhitespaceToAgent_TreatedAsBroadcast(t *testing.T) {
+	s := newTestServer(t)
+
+	// to_agent=" " (whitespace) should be treated as broadcast and require approval.
+	result, err := s.handleSendMessage(context.Background(), callTool(map[string]any{
+		"from_agent": "test-agent",
+		"topic":      "test",
+		"to_agent":   "   ",
+	}))
+	data := mustResult(t, result, err)
+
+	if data["requires_approval"] != true {
+		t.Error("expected whitespace-only to_agent to be treated as broadcast and require approval")
+	}
+}
+
 // ── Integration tests for remember approval gate ─────────────────────────────
 
 func TestRemember_CrossProject_RequiresApproval(t *testing.T) {

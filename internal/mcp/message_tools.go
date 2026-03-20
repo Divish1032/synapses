@@ -30,7 +30,7 @@ func (s *Server) handleSendMessage(
 		return mcp.NewToolResultError("topic is required (e.g. 'api_changed', 'task_blocked')"), nil
 	}
 
-	toAgent := stringArg(req, "to_agent") // empty = broadcast
+	toAgent := strings.TrimSpace(stringArg(req, "to_agent")) // empty = broadcast
 	projectID := stringArg(req, "project_id")
 	if projectID == "" {
 		if s.graph != nil {
