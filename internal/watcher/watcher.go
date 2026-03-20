@@ -93,6 +93,8 @@ type Watcher struct {
 	stopped   bool
 	reparseMu sync.Mutex // serialises concurrent reparseFile goroutines (debounce timers)
 
+	wg sync.WaitGroup // tracks fire-and-forget goroutines so Stop() can drain them
+
 	changeMu  sync.RWMutex
 	changeLog []ChangeEvent // bounded log of recent file events (max changeLogCap)
 }
@@ -191,11 +193,14 @@ func (w *Watcher) Start(root string) error {
 	return nil
 }
 
-// Stop shuts down the watcher and releases resources.
+// Stop shuts down the watcher and releases resources. It blocks until all
+// fire-and-forget goroutines (persistAsync, ingestToBrain, brain summary
+// write-back, cross-project brain detection, index rebuild) have returned,
+// preventing writes to a closed SQLite store after Stop returns.
 func (w *Watcher) Stop() {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.stopped {
+		w.mu.Unlock()
 		return
 	}
 	w.stopped = true
@@ -206,6 +211,12 @@ func (w *Watcher) Stop() {
 	for _, t := range w.timers {
 		t.Stop()
 	}
+	w.mu.Unlock()
+
+	// Wait for all in-flight goroutines to finish. This must happen AFTER
+	// closing stopCh (so goroutines checking stopCh can exit) and OUTSIDE
+	// the mutex (goroutines may call methods that take mu).
+	w.wg.Wait()
 }
 
 // RecentChanges returns all ChangeEvents recorded within the last windowMinutes.
@@ -532,7 +543,11 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// Rebuild the columnar GraphIndex asynchronously so BFS reads pick up the
 	// latest graph state without blocking the watcher loop.
 	// Snapshot is saved by main.go via the store; watcher discards the bytes.
-	go func() { w.graph.RebuildIndex() }() //nolint:errcheck
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		w.graph.RebuildIndex()
+	}()
 	if w.pktInval != nil {
 		w.pktInval.InvalidatePacketCacheForFile(path)
 	}
@@ -560,9 +575,11 @@ func (w *Watcher) reparseFile(path, _ string) {
 
 		// Tier 2: brain-enhanced detection runs async for languages Tier 1
 		// handles poorly (Python, dynamic imports, transitive deps).
-		// Fire-and-forget goroutine — never blocks the watcher loop.
+		// Fire-and-forget goroutine — tracked by wg so Stop() drains it.
 		if w.cpBrainTracker != nil {
+			w.wg.Add(1)
 			go func(filePath string) {
+				defer w.wg.Done()
 				brainCtx, brainCancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer brainCancel()
 				w.cpBrainTracker.DetectAndStoreBrain(brainCtx, filePath, w.store)
@@ -582,9 +599,14 @@ func (w *Watcher) reparseFile(path, _ string) {
 	fmt.Fprintf(os.Stderr, "synapses/watcher: updated %s\n", path)
 	w.persistAsync(path)
 
-	// Fire-and-forget: ingest changed nodes to brain for semantic summarization.
+	// Ingest changed nodes to brain for semantic summarization.
+	// Tracked by wg so Stop() drains it before closing the store.
 	if w.brainClient != nil {
-		go w.ingestToBrain(path)
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.ingestToBrain(path)
+		}()
 	}
 }
 
@@ -720,7 +742,9 @@ func (w *Watcher) persistAsync(changedFile string) {
 		return
 	}
 	mtime := time.Now().UnixNano()
+	w.wg.Add(1)
 	go func() {
+		defer w.wg.Done()
 		if err := w.store.SaveGraphDelta(changedFile, w.graph); err != nil {
 			fmt.Fprintf(os.Stderr, "synapses/watcher: cache save: %v\n", err)
 		}
@@ -764,9 +788,16 @@ func (w *Watcher) ingestToBrain(path string) {
 	}
 
 	// Delayed write-back: fetch summaries after the brain has processed the ingest queue.
+	// Respects stopCh so shutdown isn't delayed by the 15-second wait.
 	if w.store != nil {
+		w.wg.Add(1)
 		go func(nodeList []*graph.Node) {
-			time.Sleep(15 * time.Second)
+			defer w.wg.Done()
+			select {
+			case <-time.After(15 * time.Second):
+			case <-w.stopCh:
+				return
+			}
 			for _, n := range nodeList {
 				if string(n.Type) == "package" || string(n.Type) == "file" {
 					continue
