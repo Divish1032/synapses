@@ -667,6 +667,13 @@ func Open(path string) (*Store, error) {
 		st.CollectQueryStats(os.Stderr)
 	}
 
+	// Raise connection pool size now that schema init and migrations are done.
+	// WAL mode supports one concurrent writer + one reader without blocking;
+	// MaxOpenConns(1) would serialize reads behind writes unnecessarily.
+	// Read-only federation stores use 4; primary stores use 2 (one writer path).
+	graphDB.SetMaxOpenConns(2)
+	knowledgeDB.SetMaxOpenConns(2)
+
 	return st, nil
 }
 
@@ -679,6 +686,10 @@ func openSQLiteDB(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db %s: %w", path, err)
 	}
+	// Start with 1 connection during schema initialization. modernc.org/sqlite
+	// deadlocks when two connections race to initialize the same schema. After
+	// migrations complete in store.Open(), this is raised to 2 to allow WAL
+	// concurrent reads alongside writes.
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
 		fmt.Fprintf(os.Stderr, "synapses: store: enable WAL on %s: %v\n", path, err)
