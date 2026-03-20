@@ -178,6 +178,37 @@ func TestHandleGetGaps_HasHint(t *testing.T) {
 	hasKey(t, m, "hint")
 }
 
+// TestHandleGetGaps_FileMetacharSafety verifies that LIKE metacharacters in the
+// file filter do not match unrelated gaps (Security F11 — GetGaps path).
+func TestHandleGetGaps_FileMetacharSafety(t *testing.T) {
+	srv, _, _ := newPopulatedServer(t)
+
+	// Upsert a gap attached to a real node (uses the server's graph).
+	_, err := srv.handleUpsertGap(ctx, callTool(map[string]any{
+		"node_id":     "AuthLogin",
+		"gap_id":      "test-gap",
+		"description": "test gap for LIKE escape test",
+		"severity":    "low",
+	}))
+	if err != nil {
+		t.Fatalf("upsert gap: %v", err)
+	}
+
+	// file="%" must not match gaps whose node_id does not contain a literal "%".
+	res, err := srv.handleGetGaps(ctx, callTool(map[string]any{
+		"file":   "%",
+		"status": "all",
+	}))
+	if err != nil {
+		t.Fatalf("handleGetGaps file=%%: %v", err)
+	}
+	m := mustResult(t, res, err)
+	gaps, _ := m["gaps"].([]interface{})
+	if len(gaps) != 0 {
+		t.Errorf("file=%% matched %d gap(s); want 0 — LIKE metachar not escaped in GetGaps", len(gaps))
+	}
+}
+
 // TestUpsertGap_BareNameResolvesToGraphID verifies that passing a bare function
 // name as node_id gets resolved to a canonical "{repoID}::{file}::{name}" ID
 // so the gap surfaces in get_context() queries rather than being silently lost.
