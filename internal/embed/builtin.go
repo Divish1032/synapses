@@ -149,6 +149,14 @@ func (b *BuiltinEmbedder) Model() string {
 	return builtinModel
 }
 
+// IsReady reports whether the model is downloaded and the inference pipeline
+// is initialized. Thread-safe.
+func (b *BuiltinEmbedder) IsReady() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.ready
+}
+
 // Close releases the hugot session resources.
 func (b *BuiltinEmbedder) Close() error {
 	b.mu.Lock()

@@ -11,6 +11,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/brain"
 	brainconfig "github.com/SynapsesOS/synapses/internal/brain/config"
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
@@ -306,6 +307,64 @@ func TestHandleSessionInit_BrainWarning_DegradedTier(t *testing.T) {
 	if !ok || warning == "" {
 		t.Errorf("expected brain_warning for degraded ingest tier, got %v", m["brain_warning"])
 	}
+}
+
+// ── embeddingStatus helper ────────────────────────────────────────────────────
+
+func TestEmbeddingStatus_Nil_ReturnsOff(t *testing.T) {
+	if got := embeddingStatus(nil); got != "off" {
+		t.Errorf("embeddingStatus(nil) = %q, want %q", got, "off")
+	}
+}
+
+func TestEmbeddingStatus_BuiltinNotReady_ReturnsNotDownloaded(t *testing.T) {
+	e := embed.NewBuiltinEmbedder(t.TempDir())
+	if e.IsReady() {
+		t.Skip("model already downloaded; skip not-ready path")
+	}
+	got := embeddingStatus(e)
+	if got != "builtin (model not yet downloaded)" {
+		t.Errorf("embeddingStatus(builtin, not ready) = %q, want %q", got, "builtin (model not yet downloaded)")
+	}
+}
+
+func TestEmbeddingStatus_Ollama_ReturnsOllama(t *testing.T) {
+	e := embed.NewOllamaEmbedder("http://localhost:11434/api/embeddings", "")
+	if e == nil {
+		t.Skip("NewOllamaEmbedder returned nil (empty endpoint?)")
+	}
+	got := embeddingStatus(e)
+	if got != "ollama" {
+		t.Errorf("embeddingStatus(ollama) = %q, want %q", got, "ollama")
+	}
+}
+
+func TestHandleSessionInit_EmbeddingsField_AlwaysPresent(t *testing.T) {
+	// nil embedder: field must be "off"
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "test"}))
+	m := mustResult(t, res, err)
+	hasKey(t, m, "embeddings")
+	if m["embeddings"] != "off" {
+		t.Errorf("expected embeddings=off when no embedder set, got %v", m["embeddings"])
+	}
+
+	// builtin embedder: field must reflect ready state
+	s2 := newTestServer(t)
+	s2.SetMemoryEmbedder(embed.NewBuiltinEmbedder(t.TempDir()))
+	res2, err2 := s2.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "test2"}))
+	m2 := mustResult(t, res2, err2)
+	hasKey(t, m2, "embeddings")
+	if v := m2["embeddings"]; v != "builtin (ready)" && v != "builtin (model not yet downloaded)" {
+		t.Errorf("unexpected embeddings value for builtin: %v", v)
+	}
+}
+
+func TestHandleSessionInit_EmbeddingsField_PresentInQuickMode(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "q", "scope": "quick"}))
+	m := mustResult(t, res, err)
+	hasKey(t, m, "embeddings")
 }
 
 // ── handleGetProjectIdentity ──────────────────────────────────────────────────

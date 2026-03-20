@@ -18,11 +18,32 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
+
+// embeddingStatus returns a human-readable status string for the active
+// memory embedder. Used in the session_init response to explain why recall()
+// may return only FTS results (e.g. in air-gapped or unconfigured environments).
+func embeddingStatus(e embed.Embedder) string {
+	if e == nil {
+		return "off"
+	}
+	switch v := e.(type) {
+	case *embed.BuiltinEmbedder:
+		if v.IsReady() {
+			return "builtin (ready)"
+		}
+		return "builtin (model not yet downloaded)"
+	case *embed.OllamaEmbedder:
+		return "ollama"
+	default:
+		return "builtin"
+	}
+}
 
 type changeEntry struct {
 	File         string `json:"file"`
@@ -1306,6 +1327,11 @@ func (s *Server) handleSessionInit(
 			resp["daemon_health"] = health
 		}
 	} // end !quickMode && !resumeMode (daemon_health)
+
+	// ── Embedding health ──────────────────────────────────────────────────
+	// Always included — agents need this to understand why recall() returns
+	// only FTS results in air-gapped or unconfigured environments.
+	resp["embeddings"] = embeddingStatus(s.memoryEmbedder)
 
 	// Cross-project status: show ACL-allowed projects only.
 	// Do not expose names of projects this project is not allowed to read from.
