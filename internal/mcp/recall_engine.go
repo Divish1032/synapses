@@ -212,7 +212,7 @@ func (s *Server) quadRecallSearch(
 		return nil, nil
 	}
 
-	rankedIDs, attribution := store.RRFMerge(channels, limit, 60)
+	rankedIDs, attribution := store.RRFMergeWeighted(channels, limit, 60, store.DefaultRRFWeights)
 	if len(rankedIDs) == 0 {
 		return nil, nil
 	}

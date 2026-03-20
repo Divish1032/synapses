@@ -183,12 +183,43 @@ func (s *Store) GetMemoriesByAnchorNodes(nodeIDs []string, limit int, includeSta
 // contribution between channels — a rank-1 result scores 1/61 ≈ 0.0164,
 // rank-10 scores 1/70 ≈ 0.0143. The flat curve ensures multi-channel
 // presence matters more than exact rank within any single channel.
+// RRFChannelWeights defines per-channel weight multipliers for RRF scoring.
+// A weight of 1.0 means the channel contributes at full RRF strength.
+// Lower weights reduce the channel's influence, preventing it from
+// displacing results from stronger channels.
+//
+// Default weights (used when nil is passed):
+//   - bm25: 1.0 (text relevance is the primary signal)
+//   - semantic: 1.0 (conceptual similarity is equally weighted)
+//   - graph: 1.0 (structural relationships are equally weighted)
+//   - temporal: 0.5 (recency is a supplementary signal, not primary)
+//
+// The temporal weight of 0.5 ensures that at 1000+ memories, a temporal-only
+// result (score ~0.008) never outranks a BM25 rank-2 result (score ~0.016).
+// Temporal results still surface when other channels leave gaps.
+var DefaultRRFWeights = map[string]float64{
+	"bm25":     1.0,
+	"semantic": 1.0,
+	"graph":    1.0,
+	"temporal": 0.5,
+}
+
 func RRFMerge(channels map[string][]string, limit int, k int) ([]string, map[string][]string) {
+	return RRFMergeWeighted(channels, limit, k, nil)
+}
+
+// RRFMergeWeighted applies Reciprocal Rank Fusion with per-channel weights.
+// weights maps channel name → weight multiplier (nil = DefaultRRFWeights).
+// Channels not in the weights map get weight 1.0.
+func RRFMergeWeighted(channels map[string][]string, limit int, k int, weights map[string]float64) ([]string, map[string][]string) {
 	if k <= 0 {
 		k = 60
 	}
 	if limit <= 0 {
 		limit = 20
+	}
+	if weights == nil {
+		weights = DefaultRRFWeights
 	}
 
 	type scored struct {
@@ -200,13 +231,17 @@ func RRFMerge(channels map[string][]string, limit int, k int) ([]string, map[str
 	scoreMap := make(map[string]*scored)
 
 	for channelName, rankedIDs := range channels {
+		w := 1.0
+		if cw, ok := weights[channelName]; ok {
+			w = cw
+		}
 		for rank, id := range rankedIDs {
 			s, ok := scoreMap[id]
 			if !ok {
 				s = &scored{id: id}
 				scoreMap[id] = s
 			}
-			s.score += 1.0 / float64(k+rank+1) // rank is 0-indexed, RRF uses 1-indexed
+			s.score += w * (1.0 / float64(k+rank+1)) // rank is 0-indexed, RRF uses 1-indexed
 			s.channels = append(s.channels, channelName)
 		}
 	}
