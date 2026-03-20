@@ -1990,14 +1990,17 @@ type SignatureChange struct {
 // (same semantics as Graph.FindByFile) so callers may pass either a relative or an
 // absolute path. Returns an empty slice — not an error — when nothing changed.
 func (s *Store) GetSignatureChanges(file string) ([]SignatureChange, error) {
-	// Use suffix matching: '%' || file handles both absolute and relative paths.
+	// Use suffix matching: '%' || escapedFile handles both absolute and relative paths.
+	// escapeLike prevents LIKE metacharacters in user-supplied file names (e.g. from
+	// verify_implementation files_written) from wildcarding unrelated nodes.
+	escapedFile := escapeLike(file)
 	rows, err := s.graphDB.Query(`
 		SELECT id, name, type, file, line, signature, prev_signature
 		FROM nodes
-		WHERE (file = ? OR file LIKE '%' || ?)
+		WHERE (file = ? OR file LIKE '%' || ? ESCAPE '\')
 		  AND prev_signature != ''
 		  AND type IN ('function', 'method', 'struct', 'interface')
-	`, file, file)
+	`, file, escapedFile)
 	if err != nil {
 		return nil, fmt.Errorf("store.GetSignatureChanges: %w", err)
 	}
@@ -2581,8 +2584,10 @@ func (s *Store) GetGaps(f GapFilter) ([]QualityGap, error) {
 	//   - "%::auth.go::%" matches "repo::auth.go::Func"     (root-level file)
 	// Using two patterns with OR avoids the substring false-positive of the old
 	// single "%auth.go%" pattern (which matched "unauth.go" as well).
+	// escapeLike guards against LIKE metacharacters in user-supplied file names.
+	escapedFile := escapeLike(f.File)
 	fileWhere := func(extra string) string {
-		return base + ` WHERE (node_id LIKE ? OR node_id LIKE ?)` + extra + ` ORDER BY` + severityOrder
+		return base + ` WHERE (node_id LIKE ? ESCAPE '\' OR node_id LIKE ? ESCAPE '\')` + extra + ` ORDER BY` + severityOrder
 	}
 
 	switch {
@@ -2593,18 +2598,18 @@ func (s *Store) GetGaps(f GapFilter) ([]QualityGap, error) {
 		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? AND severity = ? ORDER BY`+severityOrder, f.NodeID, f.Severity)
 	// Compound: File + Severity.
 	case f.File != "" && f.Severity != "" && status != "all":
-		rows, err = s.knowledgeDB.Query(fileWhere(` AND severity = ? AND status = ?`), "%/"+f.File+"::%", "%::"+f.File+"::%", f.Severity, status)
+		rows, err = s.knowledgeDB.Query(fileWhere(` AND severity = ? AND status = ?`), "%/"+escapedFile+"::%", "%::"+escapedFile+"::%", f.Severity, status)
 	case f.File != "" && f.Severity != "":
-		rows, err = s.knowledgeDB.Query(fileWhere(` AND severity = ?`), "%/"+f.File+"::%", "%::"+f.File+"::%", f.Severity)
+		rows, err = s.knowledgeDB.Query(fileWhere(` AND severity = ?`), "%/"+escapedFile+"::%", "%::"+escapedFile+"::%", f.Severity)
 	// Single-field cases.
 	case f.NodeID != "" && status != "all":
 		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? AND status = ? ORDER BY`+severityOrder, f.NodeID, status)
 	case f.NodeID != "":
 		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? ORDER BY`+severityOrder, f.NodeID)
 	case f.File != "" && status != "all":
-		rows, err = s.knowledgeDB.Query(fileWhere(` AND status = ?`), "%/"+f.File+"::%", "%::"+f.File+"::%", status)
+		rows, err = s.knowledgeDB.Query(fileWhere(` AND status = ?`), "%/"+escapedFile+"::%", "%::"+escapedFile+"::%", status)
 	case f.File != "":
-		rows, err = s.knowledgeDB.Query(fileWhere(``), "%/"+f.File+"::%", "%::"+f.File+"::%")
+		rows, err = s.knowledgeDB.Query(fileWhere(``), "%/"+escapedFile+"::%", "%::"+escapedFile+"::%")
 	case f.Severity != "" && status != "all":
 		rows, err = s.knowledgeDB.Query(base+` WHERE severity = ? AND status = ? ORDER BY`+severityOrder, f.Severity, status)
 	case status != "all":
