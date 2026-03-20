@@ -820,6 +820,38 @@ func TestPruneToolCallsOlderThan_Debounce(t *testing.T) {
 	}
 }
 
+func TestPruneStaleData_Debounce(t *testing.T) {
+	st := openTestStore(t)
+
+	// Ensure first call runs by resetting timestamp to zero.
+	st.lastPruneMu.Lock()
+	st.lastPruneStaleAt = time.Time{}
+	st.lastPruneMu.Unlock()
+
+	// First call: should run (no-op on empty DB, but should not be skipped).
+	before := time.Now()
+	st.PruneStaleData(30)
+
+	st.lastPruneMu.Lock()
+	firstAt := st.lastPruneStaleAt
+	st.lastPruneMu.Unlock()
+
+	if firstAt.Before(before) {
+		t.Error("first call should have updated lastPruneStaleAt")
+	}
+
+	// Second call within 23 hours: should be skipped (debounced).
+	st.PruneStaleData(30)
+
+	st.lastPruneMu.Lock()
+	secondAt := st.lastPruneStaleAt
+	st.lastPruneMu.Unlock()
+
+	if !secondAt.Equal(firstAt) {
+		t.Error("debounce failed: second call within 23h should not update lastPruneStaleAt")
+	}
+}
+
 // ── Full lifecycle ────────────────────────────────────────────────────────────
 
 func TestSessionLifecycle_CreateTouchEnd(t *testing.T) {
