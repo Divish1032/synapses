@@ -334,6 +334,14 @@ func (s *Server) handleRecall(
 		untilTime = &t
 	}
 
+	// Validate ordering: since must be strictly before until.
+	if sinceTime != nil && untilTime != nil && !sinceTime.Before(*untilTime) {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"since (%s) must be before until (%s)",
+			sinceTime.Format("2006-01-02"), untilTime.Format("2006-01-02"),
+		)), nil
+	}
+
 	includeStale, _ := req.GetArguments()["include_stale"].(bool)
 
 	// Browse mode: empty query = list chronologically (newest first).
@@ -384,6 +392,9 @@ func (s *Server) handleRecall(
 		hint := "Ordered by creation time (newest first). 'memories' includes auto-captured memories from end_session and annotate_node. Pass query=... for relevance-ranked search."
 		if stringArg(req, "as_of") != "" {
 			hint += " Note: as_of is only applied in search mode (with query=). Browse mode always shows current content."
+		}
+		if sinceTime != nil || untilTime != nil {
+			hint += " Note: since/until are only applied in search mode (with query=). In browse mode, use since_days= to limit the lookback window."
 		}
 		resp := map[string]interface{}{
 			"summary":  summary,
@@ -443,31 +454,81 @@ func (s *Server) handleRecall(
 		return mcp.NewToolResultError(fmt.Sprintf("recall episodes: %v", err)), nil
 	}
 
+	// Sprint 10.5: when time bounds are active, inflate the internal fetch limit
+	// so post-filtering has enough candidates. Without this, in-range memories
+	// ranked below the normal channel limit would be silently excluded.
+	// A 10× multiplier (min 50) covers typical Synapses scale (hundreds of memories).
+	quadLimit := searchLimit
+	if sinceTime != nil || untilTime != nil {
+		quadLimit = searchLimit * 10
+		if quadLimit < 50 {
+			quadLimit = 50
+		}
+	}
+
 	// Quad-channel recall: 4 parallel channels merged via RRF.
 	// Replaces the old sequential BM25 + vector search path.
-	memories, _, staleEmbIDs, traversalInfo := s.quadRecallSearch(ctx, query, searchLimit, includeStale, sinceDays, depth)
+	memories, _, staleEmbIDs, traversalInfo := s.quadRecallSearch(ctx, query, quadLimit, includeStale, sinceDays, untilTime, depth)
 
 	// Sprint 10.5: apply absolute time bounds (since / until) as post-filters.
 	// sinceTime and untilTime are only set when the caller provided since= / until=.
+	// We parse m.CreatedAt as time.Time for comparison — string comparison of
+	// RFC3339 is lexicographically safe for UTC but fragile if the format varies.
 	if sinceTime != nil || untilTime != nil {
 		filtered := memories[:0]
 		for _, m := range memories {
-			if sinceTime != nil && m.CreatedAt < sinceTime.UTC().Format(time.RFC3339) {
+			t, parseErr := time.Parse(time.RFC3339, m.CreatedAt)
+			if parseErr != nil {
+				// Unparseable created_at — keep the memory to avoid silently dropping data.
+				filtered = append(filtered, m)
 				continue
 			}
-			if untilTime != nil && m.CreatedAt > untilTime.UTC().Format(time.RFC3339) {
+			if sinceTime != nil && t.Before(*sinceTime) {
+				continue
+			}
+			if untilTime != nil && t.After(*untilTime) {
 				continue
 			}
 			filtered = append(filtered, m)
 		}
 		memories = filtered
-		// Also filter episodes by absolute time bounds (CreatedAt is Unix seconds).
+
+		// Reconcile staleEmbIDs and traversalInfo.Paths to the filtered set.
+		// They were computed from the pre-filter result; IDs no longer in memories
+		// must be removed to avoid confusing agents with references to absent memories.
+		if len(staleEmbIDs) > 0 || traversalInfo != nil {
+			survivingIDs := make(map[string]bool, len(memories))
+			for _, m := range memories {
+				survivingIDs[m.ID] = true
+			}
+			if len(staleEmbIDs) > 0 {
+				kept := staleEmbIDs[:0]
+				for _, id := range staleEmbIDs {
+					if survivingIDs[id] {
+						kept = append(kept, id)
+					}
+				}
+				staleEmbIDs = kept
+			}
+			if traversalInfo != nil && len(traversalInfo.Paths) > 0 {
+				keptPaths := traversalInfo.Paths[:0]
+				for _, p := range traversalInfo.Paths {
+					if survivingIDs[p.MemoryID] {
+						keptPaths = append(keptPaths, p)
+					}
+				}
+				traversalInfo.Paths = keptPaths
+			}
+		}
+
+		// Filter episodes by absolute time bounds (CreatedAt is Unix seconds).
 		filteredEp := episodes[:0]
 		for _, ep := range episodes {
-			if sinceTime != nil && ep.CreatedAt < sinceTime.Unix() {
+			t := time.Unix(ep.CreatedAt, 0).UTC()
+			if sinceTime != nil && t.Before(*sinceTime) {
 				continue
 			}
-			if untilTime != nil && ep.CreatedAt > untilTime.Unix() {
+			if untilTime != nil && t.After(*untilTime) {
 				continue
 			}
 			filteredEp = append(filteredEp, ep)
@@ -526,6 +587,13 @@ func (s *Server) handleRecall(
 			defer cancel()
 			fedEpisodes := s.federationResolver.SearchEpisodes(ctx, query, aliases, searchLimit)
 			for _, fe := range fedEpisodes {
+				// Sprint 10.5: apply time bounds to federation results.
+				if sinceTime != nil && time.Unix(fe.Episode.CreatedAt, 0).UTC().Before(*sinceTime) {
+					continue
+				}
+				if untilTime != nil && time.Unix(fe.Episode.CreatedAt, 0).UTC().After(*untilTime) {
+					continue
+				}
 				crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
 					"source":       fmt.Sprintf("[%s]", fe.Alias),
 					"id":           fe.Episode.ID,
@@ -566,6 +634,14 @@ func (s *Server) handleRecall(
 			eps, err := projStore.RecallEpisodes(query, "", "", "", "", searchLimit, sinceDays)
 			if err == nil {
 				for _, ep := range eps {
+					// Sprint 10.5: apply time bounds to registry episode results.
+					epTime := time.Unix(ep.CreatedAt, 0).UTC()
+					if sinceTime != nil && epTime.Before(*sinceTime) {
+						continue
+					}
+					if untilTime != nil && epTime.After(*untilTime) {
+						continue
+					}
 					crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
 						"source":       fmt.Sprintf("[%s]", projName),
 						"id":           ep.ID,
@@ -579,11 +655,23 @@ func (s *Server) handleRecall(
 					})
 				}
 			}
-			// Also search memories; apply decay filter for consistency with local recall.
+			// Also search memories; apply decay filter and time bounds for consistency.
 			mems, _ := projStore.SearchMemories(query, searchLimit)
 			for _, m := range mems {
 				if store.DecayedImportanceScore(m, 0) < store.DecayVisibilityThreshold {
 					continue // skip decayed memories in cross-project results
+				}
+				// Sprint 10.5: apply time bounds to cross-project memories.
+				if sinceTime != nil || untilTime != nil {
+					mt, parseErr := time.Parse(time.RFC3339, m.CreatedAt)
+					if parseErr == nil {
+						if sinceTime != nil && mt.Before(*sinceTime) {
+							continue
+						}
+						if untilTime != nil && mt.After(*untilTime) {
+							continue
+						}
+					}
 				}
 				crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
 					"source":     fmt.Sprintf("[%s]", projName),
@@ -634,6 +722,19 @@ func (s *Server) handleRecall(
 	if asOfTime != nil {
 		resp["as_of"] = asOfTime.Format(time.RFC3339)
 		resp["as_of_note"] = "Memory content shown as it existed at the specified time. Memories with version > 0 show historical content."
+	}
+	// Sprint 10.5: annotate response when absolute time bounds were applied.
+	// Tells the agent exactly what window was searched so it can reason about completeness.
+	if sinceTime != nil || untilTime != nil {
+		tf := map[string]interface{}{}
+		if sinceTime != nil {
+			tf["since"] = sinceTime.UTC().Format(time.RFC3339)
+		}
+		if untilTime != nil {
+			tf["until"] = untilTime.UTC().Format(time.RFC3339)
+		}
+		tf["note"] = "Results are bounded to the specified time window. All result sources (local memories, episodes, cross-project) were filtered by this range."
+		resp["time_filter"] = tf
 	}
 	// Sprint 10.8: surface graph traversal info when graph channel was active.
 	// graph_traversal.paths shows the structural connections that led to each
