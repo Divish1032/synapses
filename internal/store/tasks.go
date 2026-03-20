@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -394,7 +395,9 @@ func (s *Store) findNewlyUnblocked(completedID string) ([]string, error) {
 			return nil, err
 		}
 		var deps []string
-		_ = json.Unmarshal([]byte(depsJSON), &deps)
+		if err := json.Unmarshal([]byte(depsJSON), &deps); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal depends_on for task %q: %v\n", tid, err)
+		}
 		// Filter to only tasks that actually list completedID.
 		for _, d := range deps {
 			if d == completedID {
@@ -487,15 +490,21 @@ func (s *Store) GetTask(id string) (*Task, error) {
 	); err != nil {
 		return nil, fmt.Errorf("get task %q: %w", id, err)
 	}
-	_ = json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes)
+	if err := json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes); err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal linked_nodes for task %q: %v\n", t.ID, err)
+	}
 	if t.LinkedNodes == nil {
 		t.LinkedNodes = []string{}
 	}
-	_ = json.Unmarshal([]byte(depsJSON), &t.DependsOn)
+	if err := json.Unmarshal([]byte(depsJSON), &t.DependsOn); err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal depends_on for task %q: %v\n", t.ID, err)
+	}
 	if t.DependsOn == nil {
 		t.DependsOn = []string{}
 	}
-	_ = json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart)
+	if err := json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart); err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal commits_since_start for task %q: %v\n", t.ID, err)
+	}
 	return &t, nil
 }
 
@@ -583,15 +592,21 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 		); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes)
+		if err := json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal linked_nodes for task %q: %v\n", t.ID, err)
+		}
 		if t.LinkedNodes == nil {
 			t.LinkedNodes = []string{}
 		}
-		_ = json.Unmarshal([]byte(depsJSON), &t.DependsOn)
+		if err := json.Unmarshal([]byte(depsJSON), &t.DependsOn); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal depends_on for task %q: %v\n", t.ID, err)
+		}
 		if t.DependsOn == nil {
 			t.DependsOn = []string{}
 		}
-		_ = json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart)
+		if err := json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal commits_since_start for task %q: %v\n", t.ID, err)
+		}
 		tasks = append(tasks, t)
 	}
 	return tasks, rows.Err()
@@ -689,11 +704,21 @@ func (s *Store) GetSessionState(taskID string) (*SessionState, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = json.Unmarshal([]byte(filesJSON), &st.FilesModified)
-	_ = json.Unmarshal([]byte(completedJSON), &st.CompletedSteps)
-	_ = json.Unmarshal([]byte(remainingJSON), &st.RemainingSteps)
-	_ = json.Unmarshal([]byte(blockersJSON), &st.Blockers)
-	_ = json.Unmarshal([]byte(decisionsJSON), &st.Decisions)
+	if err := json.Unmarshal([]byte(filesJSON), &st.FilesModified); err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal files_modified for session state %q: %v\n", st.ID, err)
+	}
+	if err := json.Unmarshal([]byte(completedJSON), &st.CompletedSteps); err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal completed_steps for session state %q: %v\n", st.ID, err)
+	}
+	if err := json.Unmarshal([]byte(remainingJSON), &st.RemainingSteps); err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal remaining_steps for session state %q: %v\n", st.ID, err)
+	}
+	if err := json.Unmarshal([]byte(blockersJSON), &st.Blockers); err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal blockers for session state %q: %v\n", st.ID, err)
+	}
+	if err := json.Unmarshal([]byte(decisionsJSON), &st.Decisions); err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal decisions for session state %q: %v\n", st.ID, err)
+	}
 	return &st, nil
 }
 
@@ -733,11 +758,21 @@ func (s *Store) GetSessionStateForTasks(taskIDs []string) (map[string]*SessionSt
 		); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(filesJSON), &st.FilesModified)
-		_ = json.Unmarshal([]byte(completedJSON), &st.CompletedSteps)
-		_ = json.Unmarshal([]byte(remainingJSON), &st.RemainingSteps)
-		_ = json.Unmarshal([]byte(blockersJSON), &st.Blockers)
-		_ = json.Unmarshal([]byte(decisionsJSON), &st.Decisions)
+		if err := json.Unmarshal([]byte(filesJSON), &st.FilesModified); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal files_modified for session state %q: %v\n", st.ID, err)
+		}
+		if err := json.Unmarshal([]byte(completedJSON), &st.CompletedSteps); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal completed_steps for session state %q: %v\n", st.ID, err)
+		}
+		if err := json.Unmarshal([]byte(remainingJSON), &st.RemainingSteps); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal remaining_steps for session state %q: %v\n", st.ID, err)
+		}
+		if err := json.Unmarshal([]byte(blockersJSON), &st.Blockers); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal blockers for session state %q: %v\n", st.ID, err)
+		}
+		if err := json.Unmarshal([]byte(decisionsJSON), &st.Decisions); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: tasks: unmarshal decisions for session state %q: %v\n", st.ID, err)
+		}
 		result[st.TaskID] = &st
 	}
 	return result, rows.Err()

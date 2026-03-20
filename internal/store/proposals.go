@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -55,7 +56,9 @@ func (s *Store) CreateProposal(agentID, title, description string, affectedNodes
 		return "", fmt.Errorf("create proposal: %w", err)
 	}
 	if payload, err2 := json.Marshal(map[string]string{"proposal_id": id, "title": title}); err2 == nil {
-		_ = s.AppendEvent("proposal_created", agentID, string(payload))
+		if err2 = s.AppendEvent("proposal_created", agentID, string(payload)); err2 != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: proposals: append proposal_created event for %q: %v\n", id, err2)
+		}
 	}
 	return id, nil
 }
@@ -119,11 +122,15 @@ func (s *Store) VoteOnProposal(proposalID, agentID, vote, rationale string) (*Pr
 		}
 		p.Status = newStatus
 		if payload, err2 := json.Marshal(map[string]string{"proposal_id": proposalID, "resolution": newStatus}); err2 == nil {
-			_ = s.AppendEvent("proposal_resolved", agentID, string(payload))
+			if err2 = s.AppendEvent("proposal_resolved", agentID, string(payload)); err2 != nil {
+				fmt.Fprintf(os.Stderr, "DEBUG: synapses: proposals: append proposal_resolved event for %q: %v\n", proposalID, err2)
+			}
 		}
 	} else {
 		if payload, err2 := json.Marshal(map[string]string{"proposal_id": proposalID, "vote": vote}); err2 == nil {
-			_ = s.AppendEvent("proposal_voted", agentID, string(payload))
+			if err2 = s.AppendEvent("proposal_voted", agentID, string(payload)); err2 != nil {
+				fmt.Fprintf(os.Stderr, "DEBUG: synapses: proposals: append proposal_voted event for %q: %v\n", proposalID, err2)
+			}
 		}
 	}
 
@@ -180,7 +187,9 @@ func (s *Store) GetProposals(status string) ([]Proposal, error) {
 		); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(nodesJSON), &p.AffectedNodes)
+		if err := json.Unmarshal([]byte(nodesJSON), &p.AffectedNodes); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: proposals: unmarshal affected_nodes for proposal %q: %v\n", p.ID, err)
+		}
 		if p.AffectedNodes == nil {
 			p.AffectedNodes = []string{}
 		}
@@ -217,7 +226,9 @@ func (s *Store) getProposal(id string) (*Proposal, error) {
 	); err != nil {
 		return nil, fmt.Errorf("get proposal %q: %w", id, err)
 	}
-	_ = json.Unmarshal([]byte(nodesJSON), &p.AffectedNodes)
+	if err := json.Unmarshal([]byte(nodesJSON), &p.AffectedNodes); err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG: synapses: proposals: unmarshal affected_nodes for proposal %q: %v\n", p.ID, err)
+	}
 	if p.AffectedNodes == nil {
 		p.AffectedNodes = []string{}
 	}
