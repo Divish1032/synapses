@@ -422,10 +422,11 @@ type Store struct {
 	graphDB     *sql.DB // code-domain: nodes, edges, meta, file_hashes, call_sites, node_embeddings
 	knowledgeDB *sql.DB // universal: memories, episodes, sessions, events, tasks, agents, ...
 
-	// lastPruneMu guards both prune timestamps to prevent redundant concurrent prunes.
+	// lastPruneMu guards all prune timestamps to prevent redundant concurrent prunes.
 	lastPruneMu        sync.Mutex
 	lastPruneAt        time.Time // tool_calls prune (hourly debounce)
 	lastSessionPruneAt time.Time // sessions prune (daily debounce)
+	lastPruneStaleAt   time.Time // PruneStaleData (daily debounce)
 }
 
 // CacheDir returns the canonical directory where synapses stores all project
@@ -1203,9 +1204,18 @@ func (s *Store) CollectQueryStats(w io.Writer) QueryStats {
 
 // PruneStaleData removes old rows from tables that grow unbounded over time.
 // retentionDays controls the cutoff; rows older than that are deleted.
-// Safe to call concurrently (each DELETE is a separate implicit transaction).
-// Intended to be called once on startup in a background goroutine.
+// Safe to call concurrently — a built-in 23-hour debounce ensures at most one
+// prune runs per day regardless of how many goroutines invoke it.
+// Intended to be called at startup and then on a daily timer.
 func (s *Store) PruneStaleData(retentionDays int) {
+	s.lastPruneMu.Lock()
+	if time.Since(s.lastPruneStaleAt) < 23*time.Hour {
+		s.lastPruneMu.Unlock()
+		return // already pruned recently; skip
+	}
+	s.lastPruneStaleAt = time.Now()
+	s.lastPruneMu.Unlock()
+
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
 	cutoffUnix := time.Now().AddDate(0, 0, -retentionDays).Unix()
 

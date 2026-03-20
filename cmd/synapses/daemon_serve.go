@@ -803,7 +803,22 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		projCancel()
 		return nil, fmt.Errorf("open store: %w", err)
 	}
-	go st.PruneStaleData(30)
+	// Prune stale operational data at startup and then daily.
+	// Prevents unbounded growth of tool_calls, events, agent_messages, and
+	// episodes tables during long daemon uptime (weeks/months).
+	go func() {
+		st.PruneStaleData(30)
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				st.PruneStaleData(30)
+			case <-projCtx.Done():
+				return
+			}
+		}
+	}()
 
 	// ── Knowledge mode: skip graph, parsing, watcher, federation ──────────
 	if cfg.Mode == "knowledge" {
