@@ -64,10 +64,14 @@ func (s *Store) InsertMemory(m Memory) (string, error) {
 		return "", err
 	}
 	if deduped != "" {
-		_ = s.TouchMemory(deduped)
-		if err := s.AppendEvent("knowledge_updated", m.AgentID,
-			fmt.Sprintf(`{"memory_id":%q,"reason":"dedup"}`, deduped)); err != nil {
-			logutil.Warn("synapses: store: append knowledge_updated event: %v\n", err)
+		// Only emit knowledge_updated if the touch succeeds — a failed touch means
+		// the memory was deleted between the dedup check and now (concurrent prune).
+		// Emitting an event for a non-existent memory would corrupt learning-loop data.
+		if touchErr := s.TouchMemory(deduped); touchErr == nil {
+			if err := s.AppendEvent("knowledge_updated", m.AgentID,
+				fmt.Sprintf(`{"memory_id":%q,"reason":"dedup"}`, deduped)); err != nil {
+				logutil.Warn("synapses: store: append knowledge_updated event: %v\n", err)
+			}
 		}
 		return deduped, nil
 	}
