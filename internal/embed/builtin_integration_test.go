@@ -57,6 +57,22 @@ func TestBuiltinEmbedder_Integration(t *testing.T) {
 		assert.Equal(t, "ready", e.StatusDetail())
 	})
 
+	t.Run("Embed_Deterministic", func(t *testing.T) {
+		ctx := context.Background()
+		vec1, err := e.Embed(ctx, "determinism check")
+		require.NoError(t, err)
+
+		vec2, err := e.Embed(ctx, "determinism check")
+		require.NoError(t, err)
+
+		require.Len(t, vec1, 384)
+		require.Len(t, vec2, 384)
+		for i := range vec1 {
+			assert.InDelta(t, vec1[i], vec2[i], 1e-6,
+				"same input must produce same output at index %d", i)
+		}
+	})
+
 	t.Run("Embed_DifferentTexts_DifferentVectors", func(t *testing.T) {
 		ctx := context.Background()
 		vec1, err := e.Embed(ctx, "the quick brown fox")
@@ -80,8 +96,22 @@ func TestBuiltinEmbedder_Integration(t *testing.T) {
 		assert.Len(t, vec, 384, "empty string should still produce 384-dim embedding")
 	})
 
-	t.Run("Embed_ConcurrentCalls", func(t *testing.T) {
+	t.Run("Embed_LongText", func(t *testing.T) {
+		// MiniLM has a 256-token context window. Verify long text doesn't panic
+		// or return an error — the model truncates internally.
+		longText := ""
+		for i := 0; i < 1000; i++ {
+			longText += "the quick brown fox jumps over the lazy dog "
+		}
+		ctx := context.Background()
+		vec, err := e.Embed(ctx, longText)
+		require.NoError(t, err)
+		assert.Len(t, vec, 384)
+	})
+
+	t.Run("Embed_ConcurrentCalls_AllIdentical", func(t *testing.T) {
 		const n = 5
+		const text = "concurrent determinism test"
 		var wg sync.WaitGroup
 		results := make([][]float32, n)
 		errs := make([]error, n)
@@ -90,49 +120,85 @@ func TestBuiltinEmbedder_Integration(t *testing.T) {
 			wg.Add(1)
 			go func(idx int) {
 				defer wg.Done()
-				results[idx], errs[idx] = e.Embed(context.Background(), "concurrent test")
+				results[idx], errs[idx] = e.Embed(context.Background(), text)
 			}(i)
 		}
 		wg.Wait()
 
 		for i := 0; i < n; i++ {
 			require.NoError(t, errs[i], "goroutine %d failed", i)
-			assert.Len(t, results[i], 384, "goroutine %d returned wrong dimension", i)
+			require.Len(t, results[i], 384, "goroutine %d returned wrong dimension", i)
 		}
-	})
 
-	t.Run("Close_ThenReopen", func(t *testing.T) {
-		// Close the embedder, verify state reset.
-		require.NoError(t, e.Close())
-		assert.False(t, e.IsReady())
-
-		// Re-initialize by calling Embed again (model is cached on disk).
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		vec, err := e.Embed(ctx, "reopen test")
-		require.NoError(t, err)
-		assert.Len(t, vec, 384)
-		assert.True(t, e.IsReady())
+		// All goroutines embedded the same text — verify results are identical.
+		for i := 1; i < n; i++ {
+			for j := range results[0] {
+				assert.InDelta(t, results[0][j], results[i][j], 1e-6,
+					"goroutine %d differs from goroutine 0 at index %d", i, j)
+			}
+		}
 	})
 }
 
-func TestBuiltinEmbedder_ContextCancellation_MidEmbed(t *testing.T) {
+// TestBuiltinEmbedder_CloseThenReopen uses its own embedder instance to
+// avoid mutating state shared with other subtests.
+func TestBuiltinEmbedder_CloseThenReopen(t *testing.T) {
 	modelsDir := t.TempDir()
 	e := embed.NewBuiltinEmbedder(modelsDir)
 	t.Cleanup(func() { _ = e.Close() })
 
-	// First, ensure model is downloaded with a generous timeout.
+	// Initialize the embedder.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	vec, err := e.Embed(ctx, "warmup")
+	require.NoError(t, err)
+	require.Len(t, vec, 384)
+	assert.True(t, e.IsReady())
+
+	// Close and verify state reset.
+	require.NoError(t, e.Close())
+	assert.False(t, e.IsReady())
+	// After close, status should show init was attempted but not ready.
+	// Close sets ready=false but initAttempted stays true.
+	assert.Equal(t, "unavailable", e.StatusDetail())
+
+	// Re-initialize by calling Embed again (model is cached on disk).
+	vec2, err := e.Embed(ctx, "reopen test")
+	require.NoError(t, err)
+	assert.Len(t, vec2, 384)
+	assert.True(t, e.IsReady())
+	assert.Equal(t, "ready", e.StatusDetail())
+}
+
+func TestBuiltinEmbedder_ContextCancellation_PreAndPostLock(t *testing.T) {
+	modelsDir := t.TempDir()
+	e := embed.NewBuiltinEmbedder(modelsDir)
+	t.Cleanup(func() { _ = e.Close() })
+
+	// Ensure model is downloaded with a generous timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	_, err := e.Embed(ctx, "warmup")
 	require.NoError(t, err)
 
-	// Now test that a pre-cancelled context fails fast.
+	// Test 1: Pre-cancelled context (hits the pre-lock check at builtin.go:121).
 	cancelledCtx, cancelFn := context.WithCancel(context.Background())
 	cancelFn()
 
 	vec, err := e.Embed(cancelledCtx, "should fail")
 	assert.Nil(t, vec)
 	assert.ErrorIs(t, err, context.Canceled)
+
+	// Test 2: Deadline-exceeded context.
+	expiredCtx, expCancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer expCancel()
+
+	vec2, err2 := e.Embed(expiredCtx, "should also fail")
+	assert.Nil(t, vec2)
+	assert.ErrorIs(t, err2, context.DeadlineExceeded)
+
+	// Verify embedder is still healthy after cancelled calls.
+	goodVec, goodErr := e.Embed(context.Background(), "recovery")
+	require.NoError(t, goodErr)
+	assert.Len(t, goodVec, 384, "embedder should recover after cancelled calls")
 }
