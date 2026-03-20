@@ -1634,104 +1634,32 @@ func cmdList(args []string) error {
 func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Repository root to initialise (default: current directory)")
-	forceReindex := fs.Bool("reindex", false, "Force a full re-index even if cache is fresh")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-
-	fmt.Fprintf(os.Stderr, "[deprecated] 'synapses init' is superseded by the Synapses app, which\n"+
-		"starts the daemon and writes IDE configs automatically. For headless use,\n"+
-		"run: synapses index && synapses mcp-setup\n\n")
 
 	absPath, err := filepath.Abs(*repoPath)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
-	initStart := time.Now()
-	projectName := filepath.Base(absPath)
-	fmt.Printf("\n  Synapses — setting up %s\n", projectName)
-	fmt.Printf("  ─────────────────────────────────────\n\n")
+	fmt.Fprintf(os.Stderr, "[deprecated] 'synapses init' is replaced by 'synapses start'.\n\n")
 
-	// ── Step 1: Detect languages ───────────────────────────────────────────────
-	// GAP-9: Show what's in the project so the user knows parsing is relevant.
-	fmt.Printf("  Detecting languages...\n")
-	langs := detectProjectLanguages(absPath)
-	if len(langs) > 0 {
-		fmt.Printf("  ✓ Found: %s\n\n", strings.Join(langs, ", "))
-	} else {
-		fmt.Printf("  ✓ Generic parsing (no deep AST parsers matched)\n\n")
-	}
-
-	// ── Step 2: Generate synapses.json if missing ──────────────────────────────
+	// Generate synapses.json if missing — the only setup step still useful here.
 	cfgPath := filepath.Join(absPath, "synapses.json")
 	if _, statErr := os.Stat(cfgPath); os.IsNotExist(statErr) {
-		fmt.Printf("  Generating synapses.json...\n")
 		if err := writeOnboardSynapsesJSON(absPath); err != nil {
-			fmt.Printf("  ! could not write synapses.json: %v\n\n", err)
+			fmt.Fprintf(os.Stderr, "  warning: could not write synapses.json: %v\n", err)
 		} else {
-			fmt.Printf("  ✓ %s\n    brain+pulse+web-cache: all in-process (no sidecars needed)\n\n", cfgPath)
+			fmt.Printf("  Created %s\n", cfgPath)
 		}
-	} else {
-		fmt.Printf("  synapses.json already exists — skipping\n\n")
 	}
 
-	// ── Step 3: Index ──────────────────────────────────────────────────────────
-	fmt.Printf("  Indexing...\n")
-	start := time.Now()
-	g, err := loadOrBuildGraph(absPath, *forceReindex)
-	if err != nil {
-		return err
-	}
-	identity := g.ProjectIdentity()
-	elapsed := time.Since(start).Round(time.Millisecond)
-	fmt.Printf("  ✓ %d files   %d nodes   %d edges   (%s)\n\n",
-		identity.Summary.Files,
-		identity.Summary.Files+identity.Summary.Functions+
-			identity.Summary.Methods+identity.Summary.Structs+identity.Summary.Interfaces,
-		identity.Summary.Edges,
-		elapsed)
-
-	// ── Step 4: Write .mcp.json ────────────────────────────────────────────────
-	mcpFile := filepath.Join(absPath, ".mcp.json")
-	if err := writeMCPConfig(mcpFile, absPath); err != nil {
-		return fmt.Errorf("write .mcp.json: %w", err)
-	}
-	fmt.Printf("  Writing .mcp.json...\n")
-	fmt.Printf("  ✓ %s\n\n", mcpFile)
-
-	// ── Step 5: Write CLAUDE.md ────────────────────────────────────────────────
-	fmt.Printf("  Writing CLAUDE.md...\n")
-	if err := writeProjectCLAUDE(absPath); err != nil {
-		fmt.Printf("  ! could not update CLAUDE.md: %v\n\n", err)
-	} else {
-		fmt.Printf("  ✓ %s\n\n", filepath.Join(absPath, ".claude", "CLAUDE.md"))
-	}
-
-	// ── Step 6: Write .claude/settings.json ────────────────────────────────────
-	fmt.Printf("  Writing .claude/settings.json...\n")
-	if err := writeClaudeSettings(absPath); err != nil {
-		fmt.Printf("  ! could not update .claude/settings.json: %v\n\n", err)
-	} else {
-		fmt.Printf("  ✓ %s\n\n", filepath.Join(absPath, ".claude", "settings.json"))
-	}
-
-	// ── Step 7: Ensure sidecars running ────────────────────────────────────────
-	fmt.Printf("  Starting background services...\n")
-	if ensureDirs() == nil {
-		daemonStart(allSidecars, false) //nolint:errcheck
-	}
-
-	// ── Summary ────────────────────────────────────────────────────────────────
-	totalElapsed := time.Since(initStart).Round(time.Millisecond)
-	fmt.Printf("\n  ✓ Setup complete in %s\n\n", totalElapsed)
-
-	fmt.Printf("  Next step — reload MCP servers in your agent:\n")
-	fmt.Printf("    Claude Code:  type /mcp or reopen the chat panel\n")
-	fmt.Printf("    CLI:          claude mcp add --scope user synapses -- synapses start -path %s\n\n", absPath)
-
-	fmt.Printf("  Your agent can now call session_init() to start.\n")
-	fmt.Printf("  Run 'synapses onboard' for full interactive setup (install sidecars, configure brain).\n\n")
+	fmt.Printf("\n  Golden path (replaces init):\n\n")
+	fmt.Printf("    cd %s && synapses start --path .\n\n", absPath)
+	fmt.Printf("  This starts the daemon, indexes the project, and serves MCP — all in one step.\n")
+	fmt.Printf("  To wire into your agent:\n")
+	fmt.Printf("    claude mcp add synapses -- synapses start --path %s\n\n", absPath)
 	return nil
 }
 
@@ -2655,8 +2583,8 @@ USAGE:
   synapses <command> [flags]
 
 GETTING STARTED:
-  Open the Synapses app — it starts the daemon and writes IDE configs automatically.
-  For headless/CI environments: cd /your/project && synapses index && synapses mcp-setup
+  cd /your/project && synapses start --path .
+  Or: brew install synapses && cd myproject && synapses start
 
 DAEMON COMMANDS:
   start     -path <dir>   Ensure daemon is running and register project (proxy mode)
@@ -2673,9 +2601,10 @@ INDEX COMMANDS:
   reset     -all          Remove ALL cached indexes
 
 SETUP COMMANDS:
-  brain setup               Pull qwen3.5:2b + register all 5 AI tier identities
+  setup     -path <dir>     Create synapses.json and print getting-started instructions
   mcp-setup -agent <name>   Write MCP config for the specified agent
-  init      -path <dir>     [deprecated] Index + write MCP config (use Synapses app instead)
+  connect   --agent <name>  Write per-agent IDE configs (claude, cursor, windsurf, zed, vscode)
+  init      -path <dir>     [deprecated] Redirects to 'synapses start'
 
 OTHER:
   query   -path <dir> -entity <n>  Dump entity context as JSON
@@ -3327,7 +3256,8 @@ func cmdExport(args []string) error {
 func cmdSetup(args []string) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Project root (default: current directory)")
-	skipBrain := fs.Bool("core", false, "Skip brain setup (Tier 1 only)")
+	// --core kept for backwards compatibility but is now a no-op (brain is in-process).
+	_ = fs.Bool("core", false, "No-op (kept for backwards compatibility)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3341,82 +3271,29 @@ func cmdSetup(args []string) error {
 	fmt.Println("  Synapses setup")
 	fmt.Println("  ──────────────────────────────────────")
 
-	// ── Step 1: brain ────────────────────────────────────────────────────────
-	brainPath, brainFound := "", false
-	if !*skipBrain {
-		if p, err := exec.LookPath("brain"); err == nil {
-			brainPath = p
-			brainFound = true
-			fmt.Printf("  \033[32m✓\033[0m brain found  (%s)\n", brainPath)
-		} else {
-			fmt.Println("  \033[33m!\033[0m brain not found — skipping AI enrichment (Tier 1 only)")
-			fmt.Println()
-			fmt.Println("    To install the brain sidecar later:")
-			fmt.Println("      curl -fsSL https://raw.githubusercontent.com/synapses/synapses/main/install.sh | sh -s -- --full")
-			fmt.Println("    or:  go install github.com/SynapsesOS/synapses-intelligence/cmd/brain@latest")
-			fmt.Println("    Then re-run:  synapses setup --path", absPath)
-		}
-	}
-
-	// ── Step 2: brain setup ──────────────────────────────────────────────────
-	if brainFound {
-		fmt.Println()
-		fmt.Println("  \033[1mRunning brain setup...\033[0m")
-		fmt.Println()
-		cmd := exec.Command(brainPath, "setup")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Println()
-			fmt.Println("  \033[33m!\033[0m brain setup failed (see above).")
-			fmt.Println("    Fix the issue, then run:  brain setup")
-			fmt.Println("    Continuing with Tier 1 config...")
-			brainFound = false
-		}
-	}
-
-	// ── Step 3: write / update synapses.json ─────────────────────────────────
+	// ── Step 1: write / validate synapses.json ──────────────────────────────
 	cfgFile := filepath.Join(absPath, "synapses.json")
-	existingJSON := map[string]interface{}{}
-
-	if data, err := os.ReadFile(cfgFile); err == nil {
-		// Preserve existing keys; we only add/update the brain block.
-		if jsonErr := json.Unmarshal(data, &existingJSON); jsonErr != nil {
-			return fmt.Errorf("parse existing synapses.json: %w", jsonErr)
+	if _, statErr := os.Stat(cfgFile); os.IsNotExist(statErr) {
+		if err := writeOnboardSynapsesJSON(absPath); err != nil {
+			return fmt.Errorf("write synapses.json: %w", err)
 		}
+		fmt.Printf("  Created %s\n", cfgFile)
+		fmt.Println("    brain, pulse, web-cache: all in-process (no external sidecars needed)")
+	} else {
+		fmt.Printf("  synapses.json already exists (%s)\n", cfgFile)
 	}
 
-	if brainFound {
-		existingJSON["brain"] = map[string]interface{}{
-			"url":        "http://localhost:11435",
-			"enable_llm": true,
-		}
-	}
-
-	out, err := json.MarshalIndent(existingJSON, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal synapses.json: %w", err)
-	}
-	if err := os.WriteFile(cfgFile, append(out, '\n'), 0o644); err != nil {
-		return fmt.Errorf("write synapses.json: %w", err)
-	}
-	fmt.Printf("  \033[32m✓\033[0m synapses.json written  (%s)\n", cfgFile)
-
-	// ── Step 4: final instructions ───────────────────────────────────────────
+	// ── Step 2: golden path instructions ────────────────────────────────────
 	fmt.Println()
 	fmt.Println("  ──────────────────────────────────────")
-	fmt.Println("  \033[1mDone. Final steps:\033[0m")
+	fmt.Println("  Next step — start Synapses:")
 	fmt.Println()
-	if brainFound {
-		fmt.Println("  1. Start the brain (keep it running):")
-		fmt.Println("       brain serve")
-		fmt.Println()
-		fmt.Println("  2. Wire synapses into Claude Code:")
-		fmt.Printf("       claude mcp add synapses -- synapses start --path %s\n", absPath)
-	} else {
-		fmt.Println("  Wire synapses into Claude Code:")
-		fmt.Printf("    claude mcp add synapses -- synapses start --path %s\n", absPath)
-	}
+	fmt.Printf("    synapses start --path %s\n", absPath)
+	fmt.Println()
+	fmt.Println("  To wire into your agent:")
+	fmt.Printf("    claude mcp add synapses -- synapses start --path %s\n", absPath)
+	fmt.Println()
+	fmt.Println("  Brain, pulse, and web-cache all run in-process — no external sidecars needed.")
 	fmt.Println()
 	return nil
 }
