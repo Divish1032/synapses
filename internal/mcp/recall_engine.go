@@ -110,7 +110,7 @@ func (s *Server) quadRecallSearch(
 				return
 			}
 
-			// Hydrate full Memory structs for results.
+			// Hydrate full Memory structs for results, preserving cosine-similarity order.
 			ids := make([]string, len(vecResults))
 			for i, vr := range vecResults {
 				ids[i] = vr.MemoryID
@@ -123,7 +123,20 @@ func (s *Server) quadRecallSearch(
 					collectMemoryIDs("semantic", ids)
 					return
 				}
-				collectMemories("semantic", fullMems)
+				// GetMemoriesByIDs returns in arbitrary SQL order.
+				// Re-sort to match the original cosine-similarity ranking
+				// so RRF assigns correct rank positions.
+				memByID := make(map[string]store.Memory, len(fullMems))
+				for _, m := range fullMems {
+					memByID[m.ID] = m
+				}
+				ordered := make([]store.Memory, 0, len(ids))
+				for _, id := range ids {
+					if m, ok := memByID[id]; ok {
+						ordered = append(ordered, m)
+					}
+				}
+				collectMemories("semantic", ordered)
 			}
 		}()
 	}
@@ -164,6 +177,14 @@ func (s *Server) quadRecallSearch(
 	}
 
 	// ── Channel 4: Temporal ───────────────────────────────────────────────
+	// Temporal channel uses a lower limit than other channels. It returns
+	// unfiltered recent memories (no text match), so with channelLimit it
+	// would flood RRF with irrelevant noise. Capping at `limit` ensures
+	// temporal only fills gaps when other channels don't have enough results.
+	temporalLimit := limit
+	if temporalLimit < 5 {
+		temporalLimit = 5
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -171,7 +192,7 @@ func (s *Server) quadRecallSearch(
 		defer cancel()
 		_ = chCtx
 
-		mems, err := s.store.RecentMemories(channelLimit, sinceDays, includeStale)
+		mems, err := s.store.RecentMemories(temporalLimit, sinceDays, includeStale)
 		if err != nil {
 			logRecallChannelError("temporal", err)
 			return
@@ -206,7 +227,9 @@ func (s *Server) quadRecallSearch(
 	}
 	if len(missingIDs) > 0 {
 		fetched, err := s.store.GetMemoriesByIDs(missingIDs)
-		if err == nil {
+		if err != nil {
+			logRecallChannelError("hydration", err)
+		} else {
 			mu.Lock()
 			for _, m := range fetched {
 				memMap[m.ID] = m
