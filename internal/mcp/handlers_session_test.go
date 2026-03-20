@@ -145,6 +145,65 @@ func TestHandleSessionInit_CollisionWarning(t *testing.T) {
 
 // ── BRAIN-1: brain_health in session_init ─────────────────────────────────────
 
+// TestHandleSessionInit_LeanDefault verifies that empty arrays are omitted from
+// the default response on a fresh project, reducing first-session noise.
+func TestHandleSessionInit_LeanDefault_OmitsEmptyTasks(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "lean-agent"}))
+	m := mustResult(t, res, err)
+
+	// pending_tasks.tasks must be absent when no tasks exist (not "tasks": []).
+	pt, ok := m["pending_tasks"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected pending_tasks map, got %T", m["pending_tasks"])
+	}
+	if _, hasTasks := pt["tasks"]; hasTasks {
+		t.Error("pending_tasks.tasks must be omitted when empty, not present as []")
+	}
+	if pt["summary"] == nil {
+		t.Error("pending_tasks.summary must still be present")
+	}
+}
+
+// TestHandleSessionInit_LeanDefault_OmitsEmptyRecentEvents verifies that
+// recent_events is absent when the events list is genuinely empty.
+// No agent_id → no session_start event is emitted, so the list stays empty.
+func TestHandleSessionInit_LeanDefault_OmitsEmptyRecentEvents(t *testing.T) {
+	s := newTestServer(t)
+	// No agent_id: session_start event is NOT emitted, so recent_events is truly empty.
+	res, err := s.handleSessionInit(ctx, callTool(nil))
+	m := mustResult(t, res, err)
+	noKey(t, m, "recent_events")
+}
+
+// TestHandleSessionInit_LeanDefault_TasksPresentWhenNonEmpty verifies that
+// pending_tasks.tasks IS included when tasks exist.
+func TestHandleSessionInit_LeanDefault_TasksPresentWhenNonEmpty(t *testing.T) {
+	s := newTestServer(t)
+
+	// Create a plan with one task.
+	_, _ = s.handleCreatePlan(ctx, callTool(map[string]any{
+		"title": "lean-test plan",
+		"tasks": []any{map[string]any{"title": "do work", "priority": "p1"}},
+	}))
+
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "lean-agent2"}))
+	m := mustResult(t, res, err)
+
+	pt, ok := m["pending_tasks"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected pending_tasks map, got %T", m["pending_tasks"])
+	}
+	tasks, hasTasks := pt["tasks"]
+	if !hasTasks {
+		t.Error("pending_tasks.tasks must be present when tasks exist")
+	}
+	taskSlice, _ := tasks.([]any)
+	if len(taskSlice) == 0 {
+		t.Error("expected at least one task in pending_tasks.tasks")
+	}
+}
+
 func TestHandleSessionInit_BrainHealth_AbsentWhenNoBrain(t *testing.T) {
 	s := newTestServer(t)
 	// brainClient is nil by default in test server.
