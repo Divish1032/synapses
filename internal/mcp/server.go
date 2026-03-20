@@ -2377,6 +2377,14 @@ func (s *Server) registerTools() {
 					"For memories with version history (updated via dedup), returns the content that was active at that time. "+
 					"Search mode only."),
 			),
+			mcp.WithNumber("depth",
+				mcp.Description("Graph traversal depth for multi-hop knowledge discovery (default 2, max 4). " +
+					"depth=2: surfaces memories about entities 2 hops from query-matching anchors " +
+					"(e.g. querying auth finds TokenValidator memories because AuthService -[CALLS]- TokenValidator). " +
+					"depth=3: extends one more hop (AuthService -[CALLS]- TokenValidator -[CALLS]- EncryptionService). " +
+					"Response includes graph_traversal.paths showing each structural connection found. " +
+					"Increasing beyond 2 may surface more distant but less relevant context."),
+			),
 		),
 		s.handleRecall,
 	)

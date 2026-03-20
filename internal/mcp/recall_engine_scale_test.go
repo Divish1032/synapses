@@ -26,7 +26,7 @@ func TestQuadRecall_Scale_SmallProject_5Memories(t *testing.T) {
 	insertMemory(t, srv, "refactored database connection pooling settings")
 	insertMemory(t, srv, "added retry logic to HTTP client for flaky endpoints")
 
-	mems, attr, _ := srv.quadRecallSearch(context.Background(), "auth token validation", 5, false, 7)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth token validation", 5, false, 7, 0)
 
 	// With only 5 memories total, all should appear.
 	if len(mems) < 2 {
@@ -81,7 +81,7 @@ func TestQuadRecall_Scale_MediumProject_100Memories(t *testing.T) {
 		insertMemory(t, srv, content)
 	}
 
-	mems, attr, _ := srv.quadRecallSearch(context.Background(), "auth token JWT validation", 5, false, 7)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth token JWT validation", 5, false, 7, 0)
 
 	if len(mems) == 0 {
 		t.Fatal("medium project: got 0 results")
@@ -125,7 +125,7 @@ func TestQuadRecall_Scale_LargeProject_1000Memories(t *testing.T) {
 		insertMemory(t, srv, content)
 	}
 
-	mems, attr, _ := srv.quadRecallSearch(context.Background(), "auth JWT token", 5, false, 7)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth JWT token", 5, false, 7, 0)
 
 	if len(mems) == 0 {
 		t.Fatal("large project: got 0 results")
@@ -176,7 +176,7 @@ func TestQuadRecall_Scale_LargeProject_TemporalStillUseful(t *testing.T) {
 		insertMemory(t, srv, content)
 	}
 
-	mems, _, _ := srv.quadRecallSearch(context.Background(), "auth JWT signing", 5, false, 7)
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth JWT signing", 5, false, 7, 0)
 
 	if len(mems) == 0 {
 		t.Fatal("expected results")
@@ -195,7 +195,7 @@ func TestQuadRecall_Scale_LargeProject_TemporalStillUseful(t *testing.T) {
 
 func TestQuadRecall_Scale_EmptyProject(t *testing.T) {
 	srv := newTestServer(t)
-	mems, attr, _ := srv.quadRecallSearch(context.Background(), "auth", 5, false, 7)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth", 5, false, 7, 0)
 	if len(mems) != 0 {
 		t.Errorf("empty project: expected 0 results, got %d", len(mems))
 	}
@@ -213,7 +213,7 @@ func TestQuadRecall_Scale_AllMemoriesRelevant(t *testing.T) {
 		insertMemory(t, srv, content)
 	}
 
-	mems, _, _ := srv.quadRecallSearch(context.Background(), "auth handler", 5, false, 7)
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth handler", 5, false, 7, 0)
 
 	if len(mems) != 5 {
 		t.Errorf("all-relevant: expected 5 results, got %d", len(mems))
