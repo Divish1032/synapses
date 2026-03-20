@@ -249,20 +249,24 @@ func (s *Server) quadRecallSearch(
 		}
 	}
 
-	// Build final ordered result.
+	// Build final ordered result, applying decay visibility threshold.
+	// Memories with decayed importance below the threshold are demoted (excluded)
+	// unless they are pinned. Pinned memories always score 1.0 and are never removed.
 	result := make([]store.Memory, 0, len(rankedIDs))
 	for _, id := range rankedIDs {
 		if m, ok := memMap[id]; ok {
-			result = append(result, m)
+			if store.DecayedImportanceScore(m, 0) >= store.DecayVisibilityThreshold {
+				result = append(result, m)
+			}
 		}
 	}
 
-	// Sprint 10.7: collect stale embedding IDs that survived RRF merge.
-	// Only include IDs that are in the final result set.
+	// Sprint 10.7: collect stale embedding IDs that survived RRF merge AND decay filter.
+	// Only include IDs that are in the final result set (post-decay-threshold).
 	var staleEmbIDs []string
-	for _, id := range rankedIDs {
-		if staleEmbeddings[id] {
-			staleEmbIDs = append(staleEmbIDs, id)
+	for _, m := range result {
+		if staleEmbeddings[m.ID] {
+			staleEmbIDs = append(staleEmbIDs, m.ID)
 		}
 	}
 

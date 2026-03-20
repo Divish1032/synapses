@@ -340,7 +340,8 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at       TEXT NOT NULL,
     expires_at       TEXT NOT NULL,
     last_accessed_at TEXT NOT NULL,
-    source           TEXT NOT NULL DEFAULT 'manual'
+    source           TEXT NOT NULL DEFAULT 'manual',
+    importance       TEXT NOT NULL DEFAULT '1.0'
 );
 
 -- FTS5 for episodes.
@@ -689,6 +690,8 @@ func Open(path string) (*Store, error) {
 			superseded_at   TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memver_memory ON memory_versions(memory_id, version)`,
+		// Sprint 10.2: knowledge decay scoring — importance field on memories.
+		`ALTER TABLE memories ADD COLUMN importance TEXT NOT NULL DEFAULT '1.0'`,
 	} {
 		if _, err := knowledgeDB.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
