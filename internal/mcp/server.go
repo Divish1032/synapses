@@ -1391,16 +1391,17 @@ func (s *Server) registerTools() {
 					"Returns any violations before a single line of code is written. "+
 					"Call this before implementing a plan that touches multiple files. "+
 					"Pass check_safety=true to also run a failure-episode safety check inline. "+
-					`Example: validate_plan(changes='[{"file": "internal/auth/service.go", "adds_call_to": "ValidateToken"}]').`,
+					`Example: validate_plan(changes=[{"file": "internal/auth/service.go", "adds_call_to": "ValidateToken"}]).`,
 			),
 			mcp.WithString("changes",
 				mcp.Required(),
 				mcp.Description(
 					"JSON array of proposed changes. "+
-						`Minimum (file-level freshness check only): [{"file": "internal/auth/service.go"}]. `+
+						`Minimum: [{"file": "internal/auth/service.go"}]. `+
 						`Full form: [{"file": "path/to/file.go", "adds_call_to": "SomeFunction", "removes_call_to": "OtherFunction"}]. `+
-						"When only 'file' is provided, no rule checks run — the tool warns if the file was recently modified (possible stale read). "+
-						"Add 'adds_call_to' or 'removes_call_to' to enable rule violation checking for proposed edges.",
+						"With file only: freshness warning (if modified <10s ago), logic anomaly checks, and cross-project drift checks all run — "+
+						"but architectural graph-rule checks are skipped (they require adds_call_to to build the proposed edge). "+
+						"Note: removes_call_to is accepted but not yet enforced against rules; use it for documentation purposes.",
 				),
 			),
 			mcp.WithBoolean("check_safety",
