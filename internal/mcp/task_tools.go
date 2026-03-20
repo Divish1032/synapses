@@ -170,11 +170,12 @@ func (s *Server) handleCreatePlan(
 				if parseErr != nil || time.Since(updatedAt) > replanWindow {
 					continue // stale — not an active session replan
 				}
-				go pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
+				evt := pulse.OutcomeSignalEvent{
 					ProjectID:  s.projectID,
 					AgentID:    agentID,
 					SignalType: "replan",
-				})
+				}
+				s.goBackground(func() { pc.RecordOutcomeSignal(evt) })
 				break
 			}
 		}
@@ -514,7 +515,9 @@ func (s *Server) handleUpdateTask(
 				taskID := id
 				sg := s.graph
 				st := s.store
-				go func() {
+				aid := agentID
+				sig := signalType
+				s.goBackground(func() {
 					var emitted bool
 					if sg != nil {
 						if task, err := st.GetTask(taskID); err == nil {
@@ -522,9 +525,9 @@ func (s *Server) handleUpdateTask(
 								if n := sg.GetNode(graph.NodeID(nodeID)); n != nil && n.Name != "" {
 									pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
 										ProjectID:  projID,
-										AgentID:    agentID,
+										AgentID:    aid,
 										Entity:     entityWithPath(n.Name, n.File),
-										SignalType: signalType,
+										SignalType: sig,
 									})
 									emitted = true
 								}
@@ -534,11 +537,11 @@ func (s *Server) handleUpdateTask(
 					if !emitted {
 						pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
 							ProjectID:  projID,
-							AgentID:    agentID,
-							SignalType: signalType,
+							AgentID:    aid,
+							SignalType: sig,
 						})
 					}
-				}()
+				})
 			}
 		}
 	}
@@ -582,7 +585,10 @@ func (s *Server) handleUpdateTask(
 	// history in get_context. Runs in a goroutine so it never delays the
 	// response. Fail-silent: annotation errors are discarded.
 	if status == "done" {
-		go s.writeRetrospectiveAnnotations(id, agentID, notes)
+		taskID := id
+		aid := agentID
+		n := notes
+		s.goBackground(func() { s.writeRetrospectiveAnnotations(taskID, aid, n) })
 	}
 
 	result := map[string]interface{}{

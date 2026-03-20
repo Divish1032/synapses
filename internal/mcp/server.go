@@ -184,6 +184,15 @@ type Server struct {
 	startOnce sync.Once
 	wg        sync.WaitGroup
 
+	// Bounded background worker pool for fire-and-forget operations.
+	// All handler goroutines (telemetry, embedding, store writes) go through
+	// goBackground() which enqueues work items. Fixed workers drain the queue.
+	// Close() rejects new work, closes the queue, and waits for workers to
+	// drain remaining items — preventing goroutines from racing with Store.Close().
+	bgQueue    chan func()   // buffered work queue (cap bgQueueCap)
+	shutdownMu sync.RWMutex // guards bgClosed + bgQueue sends
+	bgClosed   bool         // true after Close() — rejects new work
+
 	// toolHandlers is the dispatch table for the REST API (POST /v1/tools/{name}).
 	// Populated in addOrDefer alongside mcp-go registration so REST and MCP share
 	// the exact same handler functions. In knowledge mode, graph-tool entries hold
@@ -213,6 +222,37 @@ type Server struct {
 	// Components that panic or timeout ≥3 times in a session are auto-disabled.
 	// Per-agent scoped — concurrent agents don't interfere.
 	componentHealth componentHealthTracker
+}
+
+const (
+	// bgWorkers is the number of fixed worker goroutines processing the
+	// background queue. 8 is sufficient — most work items are fast SQLite
+	// writes serialized by WAL anyway; brain/pulse HTTP calls are IO-bound
+	// and benefit from concurrency.
+	bgWorkers = 8
+
+	// bgQueueCap is the buffer size for the background work queue.
+	// Absorbs burst traffic (~50 concurrent tool calls × 5 background ops).
+	// When full, new work is dropped with a stderr warning (back-pressure).
+	bgQueueCap = 256
+)
+
+// goBackground enqueues fn for execution by the bounded worker pool.
+// Safe to call from any handler goroutine. Work is silently dropped after
+// Close() is called or when the queue is full (back-pressure).
+func (s *Server) goBackground(fn func()) {
+	s.shutdownMu.RLock()
+	if s.bgClosed {
+		s.shutdownMu.RUnlock()
+		return
+	}
+	select {
+	case s.bgQueue <- fn:
+		// queued successfully
+	default:
+		fmt.Fprintf(os.Stderr, "synapses: background queue full (%d), dropping work\n", bgQueueCap)
+	}
+	s.shutdownMu.RUnlock()
 }
 
 // getSessionHash returns the last stored entity_hash for this session+entityKey, or "".
@@ -342,6 +382,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		synapsesSessions: make(map[string]*synapseSessionEntry),
 		toolHandlers:     make(map[string]server.ToolHandlerFunc),
 		stopCh:           make(chan struct{}),
+		bgQueue:          make(chan func(), bgQueueCap),
 		logToolCalls:     true, // default on
 		logSessions:      true,
 		cacheWebSearches: true,
@@ -426,7 +467,13 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		if s.store != nil && synapseSessionID != "" {
 			s.store.TouchSession(synapseSessionID)
 			if s.logToolCalls {
-				go s.store.RecordToolCall(req.Params.Name, agentID, synapseSessionID, entity, elapsed.Milliseconds(), success)
+				toolName := req.Params.Name
+				aid := agentID
+				sessID := synapseSessionID
+				ent := entity
+				ms := elapsed.Milliseconds()
+				ok := success
+				s.goBackground(func() { s.store.RecordToolCall(toolName, aid, sessID, ent, ms, ok) })
 			}
 		}
 
@@ -438,7 +485,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 					responseBytes = len(tc.Text)
 				}
 			}
-			go pc.RecordToolCall(pulse.ToolCallEvent{
+			evt := pulse.ToolCallEvent{
 				ToolName:      req.Params.Name,
 				AgentID:       agentID,
 				ProjectID:     s.projectID,
@@ -446,7 +493,8 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 				DurationMs:    elapsed.Milliseconds(),
 				Success:       success,
 				ResponseBytes: responseBytes,
-			})
+			}
+			s.goBackground(func() { pc.RecordToolCall(evt) })
 		}
 		// RX1: track per-connection call depth and auto-trigger session log on threshold.
 		// Skip end_session calls themselves to avoid recursion.
@@ -748,41 +796,76 @@ func (s *Server) MCPServer() *server.MCPServer {
 	return s.mcp
 }
 
-// StartBackground launches background maintenance goroutines.
+// StartBackground launches background maintenance goroutines and the
+// bounded worker pool that processes fire-and-forget handler work.
 // Call Close() to stop them and wait for graceful completion.
 // Idempotent — safe to call multiple times.
 func (s *Server) StartBackground() {
-	if s.store == nil {
-		return
-	}
 	s.startOnce.Do(func() {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			s.memoryExpiryLoop()
-		}()
+		// Start bounded worker pool — processes all goBackground() work items.
+		// Workers drain the queue on shutdown via close(bgQueue) + range loop.
+		for i := 0; i < bgWorkers; i++ {
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				for fn := range s.bgQueue {
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								fmt.Fprintf(os.Stderr, "synapses: background worker panic: %v\n", r)
+							}
+						}()
+						fn()
+					}()
+				}
+			}()
+		}
+
+		// Memory expiry loop (requires store).
+		// Capture s.store now — tests may set s.store = nil after StartBackground.
+		if st := s.store; st != nil {
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				s.memoryExpiryLoop(st)
+			}()
+		}
 	})
 }
 
 // closeGracefulTimeout is how long Close() waits for background goroutines
-// before giving up. memoryExpiryLoop calls store.ExpireMemories() — a fast
-// SQLite DELETE in practice — but we cap the wait to prevent daemon shutdown
-// from hanging if the store is locked or unresponsive.
+// before giving up. Workers drain remaining bgQueue items; memoryExpiryLoop
+// calls store.ExpireMemories() — both fast in practice. The cap prevents
+// daemon shutdown from hanging if the store is locked or unresponsive.
 const closeGracefulTimeout = 5 * time.Second
 
 // Close signals all background goroutines to stop and waits up to 5 seconds
-// for graceful completion. If goroutines don't finish in time, Close returns
-// anyway — they will be abandoned when the process exits.
+// for graceful completion. Shutdown sequence:
+//  1. Reject new work (shutdownMu write lock ensures no concurrent goBackground sends)
+//  2. Signal long-running loops via stopCh
+//  3. Close bgQueue — workers drain remaining items then exit their range loop
+//  4. Wait with timeout for all tracked goroutines
+//
 // Safe to call multiple times — subsequent calls are no-ops.
 func (s *Server) Close() {
-	select {
-	case <-s.stopCh:
-		// already closed
-	default:
-		close(s.stopCh)
+	// 1. Reject new work — atomic with bgQueue access via shutdownMu.
+	// After this, goBackground() returns immediately without enqueuing.
+	s.shutdownMu.Lock()
+	alreadyClosed := s.bgClosed
+	s.bgClosed = true
+	s.shutdownMu.Unlock()
+
+	if alreadyClosed {
+		return
 	}
-	// Wait with timeout: prevents blocking forever if a background goroutine
-	// is stuck in a slow store operation (e.g., SQLite busy under heavy load).
+
+	// 2. Signal long-running loops (memoryExpiryLoop).
+	close(s.stopCh)
+
+	// 3. Close queue — workers drain remaining items then exit.
+	close(s.bgQueue)
+
+	// 4. Wait with timeout.
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
@@ -791,22 +874,27 @@ func (s *Server) Close() {
 	select {
 	case <-done:
 	case <-time.After(closeGracefulTimeout):
-		// goroutines didn't finish in time — proceed anyway
+		fmt.Fprintf(os.Stderr, "synapses: background workers did not drain within %v\n", closeGracefulTimeout)
 	}
 }
 
 // memoryExpiryLoop runs ExpireMemories every 6 hours until stopCh is closed.
-func (s *Server) memoryExpiryLoop() {
+// st is captured at call-site to avoid reading s.store which may be set to nil
+// by tests. Returns immediately when st is nil.
+func (s *Server) memoryExpiryLoop(st *store.Store) {
+	if st == nil {
+		return
+	}
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
 
 	// Run once at startup to clear any stale memories from previous sessions.
-	s.store.ExpireMemories()
+	st.ExpireMemories()
 
 	for {
 		select {
 		case <-ticker.C:
-			s.store.ExpireMemories()
+			st.ExpireMemories()
 		case <-s.stopCh:
 			return
 		}

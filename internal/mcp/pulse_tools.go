@@ -38,7 +38,8 @@ func (s *Server) emitContextDelivery(
 	// This is the honest cost of what the agent would have read via cat/grep.
 	baselineTokens := fileBaselineTokens(nodes)
 
-	go pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
+	// Synchronous — callers are expected to wrap in goBackground.
+	pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
 		ToolName:       toolName,
 		AgentID:        agentID,
 		ProjectID:      s.projectID,
@@ -85,7 +86,7 @@ func (s *Server) emitFileContextDelivery(
 		}
 	}
 
-	go pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
+	evt := pulse.ContextDeliveryEvent{
 		ToolName:       "get_file_context",
 		AgentID:        agentID,
 		ProjectID:      s.projectID,
@@ -95,7 +96,8 @@ func (s *Server) emitFileContextDelivery(
 		BaselineTokens: int(total / 4),
 		NodesDelivered: len(nodes),
 		DurationMs:     durationMs,
-	})
+	}
+	s.goBackground(func() { pc.RecordContextDelivery(evt) })
 }
 
 // fileBaselineTokens computes the baseline token count for a subgraph.

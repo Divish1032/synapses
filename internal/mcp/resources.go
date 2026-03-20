@@ -113,10 +113,14 @@ func (s *Server) warmBrainCache(changedFile string) {
 		entities = entities[:5]
 	}
 
-	go func() {
-		for _, entity := range entities {
+	ents := make([]*graph.Node, len(entities))
+	copy(ents, entities)
+	projID := s.projectID
+	enableLLM := s.config.Brain.ContextBuilder
+	s.goBackground(func() {
+		for _, entity := range ents {
 			_ = bc.BuildContextPacket(context.Background(), brain.ContextPacketRequest{
-				ProjectID: s.projectID,
+				ProjectID: projID,
 				Snapshot: brain.SnapshotInput{
 					RootNodeID: string(entity.ID),
 					RootName:   entity.Name,
@@ -126,10 +130,10 @@ func (s *Server) warmBrainCache(changedFile string) {
 					HasTests:   fileHasTests(entity.File),
 					FanIn:      s.graph.Fanin(entity.ID),
 				},
-				EnableLLM: s.config.Brain.ContextBuilder,
+				EnableLLM: enableLLM,
 			})
 		}
-	}()
+	})
 }
 
 // ---------------------------------------------------------------------------
