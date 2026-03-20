@@ -813,6 +813,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		for {
 			select {
 			case <-ticker.C:
+				fmt.Fprintf(os.Stderr, "synapses [%s]: daily prune running (30-day retention)\n", projectHash(absPath))
 				st.PruneStaleData(30)
 			case <-projCtx.Done():
 				return
