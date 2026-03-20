@@ -423,3 +423,57 @@ func buildViolationGraph(t *testing.T) *graph.Graph {
 
 	return g
 }
+
+func TestFederationACL_IsAllowed(t *testing.T) {
+	tests := []struct {
+		name    string
+		acl     *config.FederationACLConfig
+		project string
+		want    bool
+	}{
+		{"nil ACL denies all", nil, "any-project", false},
+		{"empty AllowReadFrom denies all", &config.FederationACLConfig{}, "any", false},
+		{"explicit empty slice denies all", &config.FederationACLConfig{AllowReadFrom: []string{}}, "any", false},
+		{"wildcard allows all", &config.FederationACLConfig{AllowReadFrom: []string{"*"}}, "anything", true},
+		{"exact match allows", &config.FederationACLConfig{AllowReadFrom: []string{"backend"}}, "backend", true},
+		{"non-matching denies", &config.FederationACLConfig{AllowReadFrom: []string{"backend"}}, "frontend", false},
+		{"multiple entries", &config.FederationACLConfig{AllowReadFrom: []string{"a", "b"}}, "b", true},
+		{"multiple entries deny unlisted", &config.FederationACLConfig{AllowReadFrom: []string{"a", "b"}}, "c", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.acl.IsAllowed(tt.project)
+			if got != tt.want {
+				t.Errorf("IsAllowed(%q) = %v, want %v", tt.project, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFederationACL_JSONRoundTrip(t *testing.T) {
+	cfg := config.Config{
+		Version: "1",
+		FederationACL: &config.FederationACLConfig{
+			AllowReadFrom: []string{"project-a", "project-b"},
+		},
+	}
+
+	dir := writeConfig(t, cfg)
+	loaded, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.FederationACL == nil {
+		t.Fatal("FederationACL should not be nil after load")
+	}
+	if len(loaded.FederationACL.AllowReadFrom) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(loaded.FederationACL.AllowReadFrom))
+	}
+	if !loaded.FederationACL.IsAllowed("project-a") {
+		t.Error("project-a should be allowed")
+	}
+	if loaded.FederationACL.IsAllowed("project-c") {
+		t.Error("project-c should NOT be allowed")
+	}
+}

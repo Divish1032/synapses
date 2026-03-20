@@ -1,6 +1,8 @@
 package watcher
 
 import (
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -229,5 +231,46 @@ func TestTrackGo_ConcurrentWithStop(t *testing.T) {
 	}
 	if afterStop.Load() > 0 {
 		t.Errorf("%d goroutine(s) ran AFTER Stop() returned — lifecycle violation", afterStop.Load())
+	}
+}
+
+// TestStop_PendingTimerNoDeadlock verifies that Stop() does not deadlock when
+// there are pending debounce timers that haven't fired yet. Each timer is
+// registered with wg.Add(1); if Stop cancels the timer, it must call wg.Done
+// to balance the counter — otherwise wg.Wait blocks forever.
+func TestStop_PendingTimerNoDeadlock(t *testing.T) {
+	dir := t.TempDir()
+	g := graph.New("test")
+	g.SetRoot(dir)
+
+	w, err := New(g, parser.NewWalker(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := w.Start(dir); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Create a file to trigger a debounce timer.
+	file := filepath.Join(dir, "pending.go")
+	if err := os.WriteFile(file, []byte("package testpkg\n\nfunc Pending() {}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Wait just enough for the event to be picked up but NOT for the debounce
+	// timer to fire (debounceDelay is 150ms).
+	time.Sleep(50 * time.Millisecond)
+
+	// Stop must not deadlock even though a pending timer with wg.Add(1) exists.
+	done := make(chan struct{})
+	go func() {
+		w.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// Success — Stop() returned without deadlock.
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() deadlocked — pending debounce timer wg.Add not balanced on cancel")
 	}
 }

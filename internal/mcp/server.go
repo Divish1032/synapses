@@ -586,6 +586,11 @@ func (s *Server) SetProjectRegistry(pr ProjectStoreProvider) {
 // and returns a map of projectName → *store.Store. Excludes the current project.
 // The second return value lists any requested project names that were not found
 // (empty for "*" queries). Callers can surface this to help agents fix typos.
+//
+// Federation ACL enforcement: if s.config.FederationACL is configured, only
+// projects listed in AllowReadFrom (or "*" for all) are returned. Projects
+// blocked by the ACL appear in the third return value so agents understand why.
+// Default (nil ACL or empty AllowReadFrom): deny-all — no cross-project reads.
 func (s *Server) resolveProjectStores(projectsParam string) (map[string]*store.Store, []string) {
 	if s.projectRegistry == nil || projectsParam == "" {
 		return nil, nil
@@ -611,9 +616,20 @@ func (s *Server) resolveProjectStores(projectsParam string) (map[string]*store.S
 		}
 	}
 
+	// ACL enforcement: check federation_acl.allow_read_from.
+	acl := s.config.FederationACL
+
 	result := make(map[string]*store.Store)
 	var notFound []string
 	for name := range wanted {
+		// ACL check — deny-all by default.
+		if !acl.IsAllowed(name) {
+			if projectsParam != "*" {
+				notFound = append(notFound, name+" (denied by federation_acl)")
+			}
+			continue
+		}
+
 		st := s.projectRegistry.GetStore(name)
 		if st == nil {
 			if projectsParam != "*" {

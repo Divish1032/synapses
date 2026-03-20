@@ -23,6 +23,9 @@
       "alias": "sibling"
     }
   ],
+  "federation_acl": {
+    "allow_read_from": ["sibling"]
+  },
   "brain": {
     "enabled": false,
     "ollama_url": "http://localhost:11434",

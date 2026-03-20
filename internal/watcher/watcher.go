@@ -189,7 +189,11 @@ func (w *Watcher) Start(root string) error {
 		return fmt.Errorf("walk %s: %w", root, err)
 	}
 
-	go w.loop(root)
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		w.loop(root)
+	}()
 	return nil
 }
 
@@ -207,9 +211,14 @@ func (w *Watcher) Stop() {
 	close(w.stopCh)
 	w.fw.Close()
 
-	// Cancel any pending debounce timers.
+	// Cancel any pending debounce timers. Each timer was registered with
+	// wg.Add(1) in debounce/debounceConfigReload. If Stop succeeds (timer
+	// hasn't fired yet), we must call wg.Done to balance the Add — otherwise
+	// wg.Wait blocks forever.
 	for _, t := range w.timers {
-		t.Stop()
+		if t.Stop() {
+			w.wg.Done()
+		}
 	}
 	w.mu.Unlock()
 
@@ -386,7 +395,9 @@ func (w *Watcher) debounce(path, root string) {
 		return
 	}
 
+	w.wg.Add(1) // track the timer callback so Stop() waits for in-flight reparses
 	w.timers[path] = time.AfterFunc(debounceDelay, func() {
+		defer w.wg.Done()
 		w.mu.Lock()
 		delete(w.timers, path)
 		w.mu.Unlock()
@@ -407,7 +418,9 @@ func (w *Watcher) debounceConfigReload(path string) {
 		return
 	}
 
+	w.wg.Add(1) // track the timer callback so Stop() waits for it
 	w.timers[path] = time.AfterFunc(debounceDelay, func() {
+		defer w.wg.Done()
 		w.mu.Lock()
 		delete(w.timers, path)
 		w.mu.Unlock()
