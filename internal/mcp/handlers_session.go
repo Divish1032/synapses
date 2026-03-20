@@ -1295,14 +1295,22 @@ func (s *Server) handleSessionInit(
 		}
 	} // end !quickMode && !resumeMode (daemon_health)
 
-	// Cross-project status: show registered daemon projects.
+	// Cross-project status: show ACL-allowed projects only.
+	// Do not expose names of projects this project is not allowed to read from.
 	if s.projectRegistry != nil {
 		allProjects := s.projectRegistry.ListProjects()
+		allowed := s.allowedProjectNames()
 		if len(allProjects) > 1 { // only include if there are siblings
-			resp["cross_project_status"] = map[string]interface{}{
+			status := map[string]interface{}{
 				"registered_projects": len(allProjects),
-				"projects":            allProjects,
 			}
+			if len(allowed) > 0 {
+				status["accessible_projects"] = allowed
+			}
+			if len(allowed) == 0 {
+				status["note"] = "No cross-project reads allowed. Configure federation_acl.allow_read_from in synapses.json to enable."
+			}
+			resp["cross_project_status"] = status
 		}
 	}
 

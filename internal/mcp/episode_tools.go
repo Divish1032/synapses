@@ -404,7 +404,7 @@ func (s *Server) handleRecall(
 		stores, notFound := s.resolveProjectStores(projectsParam)
 		if len(notFound) > 0 {
 			crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
-				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.projectRegistry.ListProjects(), ", ")),
+				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.allowedProjectNames(), ", ")),
 			})
 		}
 		for projName, projStore := range stores {

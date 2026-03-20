@@ -648,6 +648,23 @@ func (s *Server) resolveProjectStores(projectsParam string) (map[string]*store.S
 	return result, notFound
 }
 
+// allowedProjectNames returns the subset of registered project names that the
+// current project's ACL permits reading from. Used in error messages to avoid
+// leaking the names of projects the agent is not allowed to access.
+func (s *Server) allowedProjectNames() []string {
+	if s.projectRegistry == nil {
+		return nil
+	}
+	acl := s.config.FederationACL
+	var allowed []string
+	for _, name := range s.projectRegistry.ListProjects() {
+		if acl.IsAllowed(name) {
+			allowed = append(allowed, name)
+		}
+	}
+	return allowed
+}
+
 // SetBrainClient wires a *brain.Client into the server so that get_context
 // returns enriched Context Packets and violations include LLM explanations.
 // Using interface{} avoids an import cycle (brain imports only stdlib).

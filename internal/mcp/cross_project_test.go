@@ -241,6 +241,45 @@ func TestSessionInit_CrossProjectStatus(t *testing.T) {
 	if !ok || count < 2 {
 		t.Errorf("expected registered_projects >= 2, got %v", statusMap["registered_projects"])
 	}
+	// Without ACL, should show note about no reads allowed.
+	note, _ := statusMap["note"].(string)
+	if !strings.Contains(note, "federation_acl") {
+		t.Error("expected federation_acl guidance note when no ACL configured")
+	}
+	// Should NOT expose project names when no ACL configured.
+	if _, hasProjects := statusMap["projects"]; hasProjects {
+		t.Error("should not expose unfiltered project names without ACL")
+	}
+}
+
+func TestSessionInit_CrossProjectStatus_WithACL(t *testing.T) {
+	s := newTestServer(t)
+	s.config.FederationACL = allowACL("project-a")
+
+	s.SetProjectRegistry(&mockProjectRegistry{
+		stores: map[string]*store.Store{
+			"project-a": s.store,
+			"project-b": s.store,
+		},
+	})
+
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "test-agent",
+	}))
+	m := mustResult(t, res, err)
+
+	status, ok := m["cross_project_status"]
+	if !ok {
+		t.Fatal("expected cross_project_status")
+	}
+	statusMap, _ := status.(map[string]interface{})
+	accessible, ok := statusMap["accessible_projects"].([]interface{})
+	if !ok || len(accessible) != 1 {
+		t.Errorf("expected 1 accessible project, got %v", statusMap["accessible_projects"])
+	}
+	if accessible[0] != "project-a" {
+		t.Errorf("expected project-a, got %v", accessible[0])
+	}
 }
 
 func TestResolveProjectStores_ExcludesSelf(t *testing.T) {
@@ -651,5 +690,36 @@ func TestACL_PartialAllowBlocksUnlisted(t *testing.T) {
 		if proj, ok := epMap["_project"].(string); ok && proj == "project-b" {
 			t.Fatal("SECURITY: project-b episodes leaked despite not being in ACL allowlist")
 		}
+	}
+}
+
+// TestACL_ErrorMessageDoesNotLeakProjectNames verifies that when an agent
+// queries a project blocked by ACL, the error message does NOT reveal the
+// names of other registered projects it shouldn't know about.
+func TestACL_ErrorMessageDoesNotLeakProjectNames(t *testing.T) {
+	s := newTestServer(t)
+	s.config.FederationACL = allowACL("allowed-proj")
+
+	allowedStore := openTestStore(t)
+	secretStore := openTestStore(t)
+
+	s.SetProjectRegistry(&mockProjectRegistry{
+		stores: map[string]*store.Store{
+			"allowed-proj": allowedStore,
+			"secret-proj":  secretStore,
+			"self":         s.store,
+		},
+	})
+	s.projectPath = "/test/self"
+
+	// allowedProjectNames should only return the allowed project.
+	allowed := s.allowedProjectNames()
+	for _, name := range allowed {
+		if name == "secret-proj" {
+			t.Fatal("SECURITY: allowedProjectNames() leaked secret-proj")
+		}
+	}
+	if len(allowed) != 1 || allowed[0] != "allowed-proj" {
+		t.Errorf("expected [allowed-proj], got %v", allowed)
 	}
 }
