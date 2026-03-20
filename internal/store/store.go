@@ -427,6 +427,11 @@ type Store struct {
 	lastPruneAt        time.Time // tool_calls prune (hourly debounce)
 	lastSessionPruneAt time.Time // sessions prune (daily debounce)
 	lastPruneStaleAt   time.Time // PruneStaleData (daily debounce)
+
+	// vectorCapWarnOnce ensures the "cap triggered" warning is logged at most once
+	// per Store instance. Without this, projects with 10K+ memories would spam
+	// the warning on every recall() call.
+	vectorCapWarnOnce sync.Once
 }
 
 // CacheDir returns the canonical directory where synapses stores all project

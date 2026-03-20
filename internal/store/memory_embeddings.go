@@ -4,10 +4,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
 )
+
+// maxVectorScanCap is the maximum number of embedding rows loaded into memory
+// during a brute-force cosine similarity scan. Prevents unbounded heap
+// allocation (≈15 MB per 10K memories). Proper ANN fix ships in Sprint 10.
+const maxVectorScanCap = 10_000
 
 // MemorySearchResult represents a memory matched by vector similarity search.
 type MemorySearchResult struct {
@@ -204,7 +210,8 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 		JOIN memories m ON e.memory_id = m.id
 		WHERE e.stale = 0
 		  AND m.stale = 0
-		  AND m.expires_at > ?`, now)
+		  AND m.expires_at > ?
+		LIMIT 10000`, now)
 	if err != nil {
 		return nil, fmt.Errorf("memory vector search: %w", err)
 	}
@@ -216,7 +223,9 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 	}
 	var candidates []candidate
 
+	scanned := 0
 	for rows.Next() {
+		scanned++
 		var r MemorySearchResult
 		var blob []byte
 		if err := rows.Scan(&r.MemoryID, &r.Content, &r.Tier, &r.EntityID, &blob); err != nil {
@@ -234,6 +243,11 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if scanned == maxVectorScanCap {
+		s.vectorCapWarnOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "WARN: synapses: vector search cap triggered (%d embeddings scanned); results may be incomplete. Upgrade to sqlite-vec ANN (Sprint 10) for full recall.\n", maxVectorScanCap)
+		})
 	}
 	if len(candidates) == 0 {
 		return nil, nil
@@ -274,7 +288,8 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 		JOIN memories m ON e.memory_id = m.id
 		WHERE e.stale = 0
 		  AND m.stale = 0
-		  AND m.expires_at > ?`, now)
+		  AND m.expires_at > ?
+		LIMIT 10000`, now)
 	if err != nil {
 		return nil, fmt.Errorf("memory vector search with threshold: %w", err)
 	}
@@ -287,7 +302,9 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 	var candidates []candidate
 
 	threshold := float32(minScore)
+	scanned := 0
 	for rows.Next() {
+		scanned++
 		var r MemorySearchResult
 		var blob []byte
 		if err := rows.Scan(&r.MemoryID, &r.Content, &r.Tier, &r.EntityID, &blob); err != nil {
@@ -305,6 +322,11 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if scanned == maxVectorScanCap {
+		s.vectorCapWarnOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "WARN: synapses: vector search cap triggered (%d embeddings scanned); results may be incomplete. Upgrade to sqlite-vec ANN (Sprint 10) for full recall.\n", maxVectorScanCap)
+		})
 	}
 	if len(candidates) == 0 {
 		return nil, nil
