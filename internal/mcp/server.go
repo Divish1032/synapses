@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -218,10 +219,20 @@ type Server struct {
 	// Resets on every file-change event.
 	lg *loopGuard
 
+	// Security F10: per-session token-bucket rate limiter for write operations,
+	// expensive reads (recall), and cross-project queries. Configured via
+	// synapses.json "rate_limits". Cleared on session close.
+	rl *rateLimiter
+
 	// Phase 6: component health tracker for prepare_context pipeline.
 	// Components that panic or timeout ≥3 times in a session are auto-disabled.
 	// Per-agent scoped — concurrent agents don't interfere.
 	componentHealth componentHealthTracker
+
+	// OF-E3: cross-project write approval gates.
+	// Stores pending approval tokens for broadcast send_message and
+	// cross-project remember operations. Tokens expire after 5 minutes.
+	approvals *approvalStore
 }
 
 const (
@@ -343,6 +354,8 @@ func (s *Server) ClearSynapseSession(mcpSessionID string) {
 	s.synapseSessionsMu.Unlock()
 	// OF-S5: release loop-guard memory for the closed session.
 	s.lg.clearSession(key)
+	// Security F10: release rate-limiter state for the closed session.
+	s.rl.clearSession(key)
 }
 
 // ctxCallEntry tracks how many times an agent requested context for an entity.
@@ -388,6 +401,14 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		cacheWebSearches: true,
 		startTime:        time.Now(),
 		lg:               newLoopGuard(),
+		approvals:        newApprovalStore(),
+	}
+
+	// Security F10: build rate limiter from config (or defaults if cfg is nil).
+	if cfg != nil {
+		s.rl = newRateLimiter(cfg.RateLimits)
+	} else {
+		s.rl = newRateLimiter(config.RateLimitConfig{})
 	}
 
 	// Load app-level settings from ~/.synapses/app_settings.json.
@@ -800,6 +821,13 @@ func (s *Server) MCPServer() *server.MCPServer {
 // bounded worker pool that processes fire-and-forget handler work.
 // Call Close() to stop them and wait for graceful completion.
 // Idempotent — safe to call multiple times.
+//
+// IMPORTANT: must be called before any handler executes. All production paths
+// (stdio, daemon full-mode, daemon knowledge-mode) call this immediately after
+// New(). goBackground() enqueues work into the buffered channel even before
+// StartBackground runs, so a brief gap is tolerable — items accumulate in the
+// buffer and are consumed once workers start. However, if StartBackground is
+// never called, queued items are silently lost on Close().
 func (s *Server) StartBackground() {
 	s.startOnce.Do(func() {
 		// Start bounded worker pool — processes all goBackground() work items.
@@ -812,7 +840,7 @@ func (s *Server) StartBackground() {
 					func() {
 						defer func() {
 							if r := recover(); r != nil {
-								fmt.Fprintf(os.Stderr, "synapses: background worker panic: %v\n", r)
+								fmt.Fprintf(os.Stderr, "synapses: background worker panic: %v\nstack:\n%s\n", r, debug.Stack())
 							}
 						}()
 						fn()
@@ -1007,9 +1035,13 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 		s.toolHandlersMu.Unlock()
 		return
 	}
+	// Security F10: apply per-session rate limiting before loop-guard so that
+	// rate-limited calls never consume a loop-guard slot. Rate limiting is
+	// evaluated first (cheapest check first), then loop detection.
+	rateLimited := s.rl.wrap(t.Name, h)
 	// OF-S5: wrap every handler with the loop guard so that agent loops are
 	// detected and rejected uniformly — no per-handler wiring needed.
-	guarded := s.lg.wrap(h)
+	guarded := s.lg.wrap(rateLimited)
 	s.mcp.AddTool(t, guarded)
 	s.toolHandlersMu.Lock()
 	s.toolHandlers[t.Name] = guarded
@@ -2069,6 +2101,11 @@ func (s *Server) registerTools() {
 			mcp.WithString("project_id",
 				mcp.Description("Optional repo context identifier (e.g. 'my-backend'). Used for cross-project coordination."),
 			),
+			mcp.WithString("approval_token",
+				mcp.Description("Required for broadcast messages (to_agent omitted). "+
+					"Call without this param first to receive an approval token, "+
+					"then re-call with the token after user confirmation. Expires in 5 minutes."),
+			),
 		),
 		s.handleSendMessage,
 	)
@@ -2157,6 +2194,11 @@ func (s *Server) registerTools() {
 					"architecture decisions, component status, API signatures. "+
 					"Example: '[\"repo::pkg/auth.go::AuthService\"]'. "+
 					"Omit for durable facts (user preferences, feedback) that have no codebase anchor."),
+			),
+			mcp.WithString("approval_token",
+				mcp.Description("Required when project_id targets a different project. "+
+					"Call without this param first to receive an approval token, "+
+					"then re-call with the token after user confirmation. Expires in 5 minutes."),
 			),
 		),
 		s.handleRemember,

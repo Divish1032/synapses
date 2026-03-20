@@ -145,6 +145,12 @@ type Config struct {
 
 	// Session configures agent session memory behavior.
 	Session SessionConfig `json:"session,omitempty"`
+
+	// RateLimits configures per-session token-bucket rate limiting for write
+	// operations and expensive read operations on the MCP stdio transport.
+	// All limits are per-session (per MCP connection) and measured per minute.
+	// Set any limit to -1 to disable that category. Defaults apply when omitted.
+	RateLimits RateLimitConfig `json:"rate_limits,omitempty"`
 }
 
 // ConstitutionConfig holds project-wide principles that are injected into agent
@@ -264,6 +270,36 @@ type SessionConfig struct {
 	// Example: hibernate_window_secs: 7200   # 2-hour window
 	// Example: hibernate_window_secs: -1      # disable
 	HibernateWindowSecs int `json:"hibernate_window_secs,omitempty"`
+}
+
+// RateLimitConfig configures per-session token-bucket rate limiting for
+// write operations, expensive reads, and cross-project queries on the MCP
+// stdio transport. Limits are applied independently per category.
+//
+// All values are calls-per-minute. Omitting a field uses the built-in default.
+// Set to -1 to disable a category entirely.
+//
+// Example:
+//
+//	"rate_limits": {
+//	  "write_ops_per_minute": 20,
+//	  "expensive_reads_per_minute": 10,
+//	  "cross_project_per_minute": 60
+//	}
+type RateLimitConfig struct {
+	// WriteOpsPerMinute is the maximum number of write-category tool calls
+	// (remember, send_message, annotate_node, upsert_rule, create_plan) per
+	// session per minute. Default: 30. Set to -1 to disable.
+	WriteOpsPerMinute int `json:"write_ops_per_minute,omitempty"`
+
+	// ExpensiveReadsPerMinute is the maximum number of recall calls per session
+	// per minute. Default: 20. Set to -1 to disable.
+	ExpensiveReadsPerMinute int `json:"expensive_reads_per_minute,omitempty"`
+
+	// CrossProjectPerMinute is the maximum number of cross-project queries
+	// (any tool called with projects="*" or a specific project name) per
+	// session per minute. Default: 60. Set to -1 to disable.
+	CrossProjectPerMinute int `json:"cross_project_per_minute,omitempty"`
 }
 
 // FederationEntry describes a local sibling project to query across.
