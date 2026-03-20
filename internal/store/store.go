@@ -1372,8 +1372,8 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	// tool_calls: one row per MCP tool invocation — can reach millions.
 	pruneExec(`DELETE FROM tool_calls WHERE created_at < ?`, cutoff)
 
-	// agent_messages: no built-in TTL.
-	pruneExec(`DELETE FROM agent_messages WHERE created_at < ?`, cutoff)
+	// agent_messages: created_at is stored as Unix INTEGER (see SendMessage).
+	pruneExec(`DELETE FROM agent_messages WHERE created_at < ?`, cutoffUnix)
 
 	// events: coordination/observability stream — pruned to retention window.
 	pruneExec(`DELETE FROM events WHERE created_at < ?`, cutoff)
