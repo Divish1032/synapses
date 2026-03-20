@@ -6,8 +6,10 @@ package watcher
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +100,14 @@ type Watcher struct {
 
 	changeMu  sync.RWMutex
 	changeLog []ChangeEvent // bounded log of recent file events (max changeLogCap)
+
+	// fileHashMu guards fileHashes for concurrent reparseFile goroutines.
+	// fileHashes stores the SHA-256 content hash of each file after its most
+	// recent successful re-parse. Used by Sprint 10.7 embedding invalidation to
+	// skip staling when file content did not actually change (no-op saves,
+	// IDE auto-saves without edits). Keyed by absolute file path.
+	fileHashMu sync.Mutex
+	fileHashes map[string]string
 }
 
 // New creates a Watcher. store may be nil; if provided the cache is updated
@@ -108,12 +118,13 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 		return nil, fmt.Errorf("create fsnotify watcher: %w", err)
 	}
 	return &Watcher{
-		fw:     fw,
-		graph:  g,
-		walker: w,
-		store:  st,
-		timers: make(map[string]*time.Timer),
-		stopCh: make(chan struct{}),
+		fw:         fw,
+		graph:      g,
+		walker:     w,
+		store:      st,
+		timers:     make(map[string]*time.Timer),
+		stopCh:     make(chan struct{}),
+		fileHashes: make(map[string]string),
 	}, nil
 }
 
@@ -454,6 +465,23 @@ func (w *Watcher) reloadConfig(configPath string) {
 	}
 }
 
+// fileContentHash returns the hex-encoded SHA-256 hash of a file's content.
+// Returns ("", false) if the file cannot be read (e.g., deleted between
+// fsnotify event and hash computation). Caller treats ("", false) as
+// "hash unknown" and proceeds conservatively (as if content changed).
+func fileContentHash(path string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", false
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), true
+}
+
 // reparseFile removes stale nodes for path and re-parses it into the graph.
 //
 // reparseMu serialises concurrent calls: debounce timers for different files
@@ -473,11 +501,21 @@ func (w *Watcher) reparseFile(path, _ string) {
 	w.graph.SnapshotFileStableIDs(path)
 
 	// AM-2: capture node IDs before removal to detect disappeared nodes after re-parse.
+	// Sprint 10.7: also capture the file's current content hash BEFORE re-parsing,
+	// so we can compare it against the hash stored from the previous parse. This
+	// lets us skip embedding invalidation for no-op saves (same content, different mtime).
 	var beforeNodeIDs []string
+	var prevFileHash, newFileHash string
+	var fileHashKnown bool
 	if w.store != nil {
 		for _, n := range w.graph.NodesForFile(path) {
 			beforeNodeIDs = append(beforeNodeIDs, string(n.ID))
 		}
+		// Snapshot the OLD hash before we parse. We'll store the NEW hash after.
+		w.fileHashMu.Lock()
+		prevFileHash = w.fileHashes[path]
+		w.fileHashMu.Unlock()
+		newFileHash, fileHashKnown = fileContentHash(path)
 	}
 
 	// Remove stale graph data and call sites for this file before re-parsing.
@@ -496,6 +534,15 @@ func (w *Watcher) reparseFile(path, _ string) {
 		w.graph.MigrateStableID(n)
 	}
 	w.graph.ClearFileSnapshot(path)
+
+	// Sprint 10.7: persist the new hash after a successful parse so subsequent
+	// parses can compare against it. Done here (outside the beforeNodeIDs guard)
+	// so the hash is seeded even on first parse (when beforeNodeIDs is empty).
+	if w.store != nil && fileHashKnown {
+		w.fileHashMu.Lock()
+		w.fileHashes[path] = newFileHash
+		w.fileHashMu.Unlock()
+	}
 
 	// AM-2: cascade stale flag to memories anchored to nodes that disappeared
 	// during re-parse (functions renamed or deleted within the file).
@@ -522,12 +569,14 @@ func (w *Watcher) reparseFile(path, _ string) {
 				logutil.Warn("synapses/watcher: cascade entity memory stale: %v\n", err)
 			}
 		}
-		// Sprint 10.7: mark EMBEDDINGS stale for surviving (changed) nodes.
-		// The memory records remain valid — the entity still exists — but
-		// its implementation changed, so embeddings computed from the old
-		// content are no longer accurate. They will be re-embedded lazily
-		// on the next recall() semantic channel pass.
-		if len(changedIDs) > 0 {
+		// Sprint 10.7: mark EMBEDDINGS stale for surviving (changed) nodes,
+		// but only when the file content actually changed. IDE auto-saves and
+		// no-op writes with identical content produce the same hash, so we skip
+		// embedding invalidation for those (avoiding pointless re-embedding of
+		// identical content on next recall).
+		// contentChanged is true when: hash unreadable (conservative) OR hash differs.
+		contentChanged := !fileHashKnown || newFileHash != prevFileHash
+		if len(changedIDs) > 0 && contentChanged {
 			memIDs, err := w.store.GetMemoryIDsByAnchorNodes(changedIDs, 500)
 			if err != nil {
 				logutil.Warn("synapses/watcher: get anchor memory ids for embedding invalidation: %v\n", err)

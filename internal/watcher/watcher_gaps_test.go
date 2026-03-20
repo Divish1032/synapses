@@ -10,6 +10,7 @@ package watcher
 // - RecentChanges with negative windowMinutes
 // - SetProjectID stores value
 // - recordChange with equal nodesBefore/nodesAfter
+// - Sprint 10.7: embedding invalidation for changed (surviving) nodes
 
 import (
 	"os"
@@ -388,5 +389,156 @@ func TestReparseFile_SetsBlameMetadata(t *testing.T) {
 	// staleness_score must be present (may be "0.0" for a brand-new commit, but must exist).
 	if serveNode.Metadata["staleness_score"] == "" {
 		t.Error("Serve node missing staleness_score after reparseFile")
+	}
+}
+
+// ── Sprint 10.7: embedding invalidation ───────────────────────────────────────
+
+// TestReparseFile_ContentChanged_InvalidatesEmbeddings verifies that when a
+// file's content changes, embeddings of memories anchored to surviving nodes
+// are marked stale so they will be re-embedded on the next recall() call.
+func TestReparseFile_ContentChanged_InvalidatesEmbeddings(t *testing.T) {
+	root := t.TempDir()
+	goFile := filepath.Join(root, "svc.go")
+	v1 := []byte("package p\nfunc Serve() {}\n")
+	v2 := []byte("package p\nfunc Serve() { panic(\"updated\") }\n") // same entity, changed body
+	if err := os.WriteFile(goFile, v1, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g := graph.New(root)
+	g.SetRoot(root)
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	w, wErr := New(g, parser.NewWalker(), st)
+	if wErr != nil {
+		t.Fatalf("New: %v", wErr)
+	}
+	defer w.Stop()
+
+	// First parse: build initial graph.
+	w.reparseFile(goFile, root)
+
+	// Find the node ID for Serve after first parse.
+	nodes := g.NodesForFile(goFile)
+	if len(nodes) == 0 {
+		t.Fatal("expected at least one node after first parse")
+	}
+	var serveNodeID string
+	for _, n := range nodes {
+		if n.Name == "Serve" {
+			serveNodeID = string(n.ID)
+			break
+		}
+	}
+	if serveNodeID == "" {
+		t.Fatal("Serve node not found after first parse")
+	}
+
+	// Insert a memory anchored to Serve and give it an embedding.
+	memID, err := st.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: "Serve handles HTTP requests on port 8080",
+		AgentID: "test",
+	})
+	if err != nil {
+		t.Fatalf("InsertMemory: %v", err)
+	}
+	if err := st.InsertMemoryAnchors(memID, []string{serveNodeID}); err != nil {
+		t.Fatalf("InsertMemoryAnchors: %v", err)
+	}
+	if err := st.UpsertMemoryEmbedding(memID, "test", []float32{1, 0}); err != nil {
+		t.Fatalf("UpsertMemoryEmbedding: %v", err)
+	}
+
+	// Verify embedding starts fresh (stale=0).
+	var staleFlag int
+	st.KnowledgeDB().QueryRow(`SELECT stale FROM memory_embeddings WHERE memory_id = ?`, memID).Scan(&staleFlag)
+	if staleFlag != 0 {
+		t.Fatalf("embedding should start fresh, got stale=%d", staleFlag)
+	}
+
+	// Update the file with different content and re-parse.
+	if err := os.WriteFile(goFile, v2, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.reparseFile(goFile, root)
+
+	// Embedding should now be stale because the file content changed.
+	st.KnowledgeDB().QueryRow(`SELECT stale FROM memory_embeddings WHERE memory_id = ?`, memID).Scan(&staleFlag)
+	if staleFlag != 1 {
+		t.Errorf("embedding should be stale=1 after content change, got stale=%d", staleFlag)
+	}
+}
+
+// TestReparseFile_ContentUnchanged_EmbeddingsNotStaled verifies that when a
+// file is re-parsed without content changes (no-op save / IDE resave), embeddings
+// of anchored memories are NOT marked stale — avoiding unnecessary re-embedding.
+func TestReparseFile_ContentUnchanged_EmbeddingsNotStaled(t *testing.T) {
+	root := t.TempDir()
+	goFile := filepath.Join(root, "svc.go")
+	content := []byte("package p\nfunc Serve() {}\n")
+	if err := os.WriteFile(goFile, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g := graph.New(root)
+	g.SetRoot(root)
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	w, wErr := New(g, parser.NewWalker(), st)
+	if wErr != nil {
+		t.Fatalf("New: %v", wErr)
+	}
+	defer w.Stop()
+
+	// First parse.
+	w.reparseFile(goFile, root)
+
+	nodes := g.NodesForFile(goFile)
+	if len(nodes) == 0 {
+		t.Fatal("expected at least one node after first parse")
+	}
+	var serveNodeID string
+	for _, n := range nodes {
+		if n.Name == "Serve" {
+			serveNodeID = string(n.ID)
+			break
+		}
+	}
+	if serveNodeID == "" {
+		t.Fatal("Serve node not found after first parse")
+	}
+
+	// Anchor a memory and embed it.
+	memID, err := st.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: "Serve handles HTTP requests",
+		AgentID: "test",
+	})
+	if err != nil {
+		t.Fatalf("InsertMemory: %v", err)
+	}
+	_ = st.InsertMemoryAnchors(memID, []string{serveNodeID})
+	_ = st.UpsertMemoryEmbedding(memID, "test", []float32{1, 0})
+
+	// Re-parse the SAME content (no-op save).
+	w.reparseFile(goFile, root)
+
+	// Embedding should remain fresh — content hash unchanged.
+	var staleFlag int
+	st.KnowledgeDB().QueryRow(`SELECT stale FROM memory_embeddings WHERE memory_id = ?`, memID).Scan(&staleFlag)
+	if staleFlag != 0 {
+		t.Errorf("embedding should remain fresh=0 after no-op save, got stale=%d", staleFlag)
 	}
 }
