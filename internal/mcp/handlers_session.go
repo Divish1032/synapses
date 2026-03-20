@@ -473,13 +473,15 @@ func (s *Server) handleSessionInit(
 			}
 			pendingSection = map[string]interface{}{
 				"summary":  summary,
-				"tasks":    result,
 				"reminder": "Call update_task(id, 'in_progress') before starting a task and update_task(id, 'done', notes) immediately when finished. Never batch completions.",
+			}
+			if len(result) > 0 {
+				pendingSection["tasks"] = result
 			}
 		}
 	}
 	if pendingSection == nil {
-		pendingSection = map[string]interface{}{"summary": "no pending tasks", "tasks": []interface{}{}}
+		pendingSection = map[string]interface{}{"summary": "no pending tasks"}
 	}
 
 	// ── 3. Working state ──────────────────────────────────────────────────
@@ -721,7 +723,11 @@ func (s *Server) handleSessionInit(
 	}
 	if !quickMode && !resumeMode {
 		resp["project_identity"] = projectSection
-		resp["recent_events"] = recentEvents
+		// Omit recent_events entirely when empty — reduces first-session noise on fresh projects.
+		// Full list still available via scope="full" when events exist, or get_events() directly.
+		if len(recentEvents) > 0 {
+			resp["recent_events"] = recentEvents
+		}
 		resp["latest_event_seq"] = latestEventSeq
 		resp["session_hint"] = "Pass latest_event_seq to get_events on the next call to receive only new events. Use scale_guidance to decide when to use Synapses tools vs Read/Grep."
 	} else {
