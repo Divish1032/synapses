@@ -55,7 +55,8 @@ func TestDiscoverTools_StatusField(t *testing.T) {
 		// Status must be one of the valid values — never "promoted".
 		valid := status == "core — always available" ||
 			status == "standard — always available" ||
-			status == "available — ready to call"
+			status == "available — ready to call" ||
+			status == "hidden — not in tools/list, still callable"
 		if !valid {
 			t.Errorf("invalid status %q for %v", status, match["name"])
 		}
@@ -101,6 +102,97 @@ func TestDiscoverTools_NoPromotedStatus(t *testing.T) {
 		if strings.Contains(match["status"].(string), "promoted") {
 			t.Errorf("found 'promoted' status for %v — dead code path", match["name"])
 		}
+	}
+}
+
+// ── Hidden tools tests (Sprint 8 #1) ─────────────────────────────────────────
+
+func TestHiddenTools_SetContainsExpectedTools(t *testing.T) {
+	expected := []string{
+		"get_working_state", "get_project_identity", "report_usage",
+		"check_plan_safety", "get_edge_types", "plan_context",
+	}
+	for _, name := range expected {
+		if !hiddenTools[name] {
+			t.Errorf("expected %q in hiddenTools set", name)
+		}
+	}
+}
+
+func TestHiddenTools_CoreToolsNotHidden(t *testing.T) {
+	// Core tools must never be hidden.
+	coreNames := []string{
+		"session_init", "prepare_context", "search", "find_entity",
+		"validate_plan", "verify_implementation", "remember", "recall",
+		"create_plan", "update_task", "end_session", "discover_tools",
+	}
+	for _, name := range coreNames {
+		if hiddenTools[name] {
+			t.Errorf("core tool %q must not be in hiddenTools", name)
+		}
+	}
+}
+
+func TestDiscoverTools_HiddenToolStatus(t *testing.T) {
+	s := newTestServer(t)
+	// check_plan_safety is in the tool catalog and hidden — search for it.
+	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{
+		"query": "safety check failed before similar risk interjection",
+	}))
+	m := mustResult(t, res, err)
+	matches, ok := m["matches"].([]any)
+	if !ok || len(matches) == 0 {
+		t.Fatal("expected matches for safety query")
+	}
+	found := false
+	for _, raw := range matches {
+		match := raw.(map[string]any)
+		if match["name"] == "check_plan_safety" {
+			found = true
+			status := match["status"].(string)
+			if status != "hidden — not in tools/list, still callable" {
+				t.Errorf("check_plan_safety status = %q, want hidden", status)
+			}
+		}
+	}
+	if !found {
+		t.Error("check_plan_safety not found in discover_tools results — should be discoverable even when hidden")
+	}
+}
+
+func TestDiscoverTools_EmptyQuery_HiddenToolsMarked(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{}))
+	m := mustResult(t, res, err)
+	categories, ok := m["categories"].(map[string]any)
+	if !ok {
+		t.Fatal("expected categories")
+	}
+	// Walk all categories and check that hidden tools have status field.
+	for _, tools := range categories {
+		for _, raw := range tools.([]any) {
+			entry := raw.(map[string]any)
+			name := entry["name"].(string)
+			if hiddenTools[name] {
+				st, _ := entry["status"].(string)
+				if st == "" {
+					t.Errorf("hidden tool %q missing status in category overview", name)
+				}
+			}
+		}
+	}
+}
+
+func TestHiddenTools_StillCallable(t *testing.T) {
+	// Hidden tools must still be callable — they're registered, just unlisted.
+	s := newTestServer(t)
+	// Call get_project_identity (hidden) — should return a valid response, not an error.
+	res, err := s.handleGetProjectIdentity(ctx, callTool(map[string]any{}))
+	if err != nil {
+		t.Fatalf("hidden tool get_project_identity returned error: %v", err)
+	}
+	if res == nil || res.IsError {
+		t.Error("hidden tool get_project_identity should still work when called directly")
 	}
 }
 

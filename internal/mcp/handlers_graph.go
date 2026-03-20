@@ -420,10 +420,14 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 			if s.knowledgeMode && !knowledgeTools[t.Name] {
 				continue
 			}
-			categories[t.Category] = append(categories[t.Category], map[string]string{
+			entry := map[string]string{
 				"name":        t.Name,
 				"description": t.Description,
-			})
+			}
+			if hiddenTools[t.Name] {
+				entry["status"] = "hidden — not in tools/list, still callable"
+			}
+			categories[t.Category] = append(categories[t.Category], entry)
 		}
 		resp := map[string]interface{}{
 			"hint":       "Pass a query to get targeted results, e.g. discover_tools(query=\"check what calls this function\")",
@@ -561,7 +565,9 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 	matches := make([]toolMatch, len(results))
 	for i, r := range results {
 		status := "available — ready to call"
-		if coreTierTools[r.entry.Name] {
+		if hiddenTools[r.entry.Name] {
+			status = "hidden — not in tools/list, still callable"
+		} else if coreTierTools[r.entry.Name] {
 			status = "core — always available"
 		} else if standardTierTools[r.entry.Name] {
 			status = "standard — always available"
