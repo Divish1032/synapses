@@ -276,16 +276,99 @@ func TestResolveEntityNode_DottedName(t *testing.T) {
 	}
 }
 
+func TestGetEntityHistory_WithAnchoredMemory(t *testing.T) {
+	srv, loginID, _ := newPopulatedServer(t)
+
+	// Insert a memory anchored via memory_anchors (not entity_id).
+	// This is the path used by remember(anchor_nodes=[...]).
+	memID, _ := srv.store.InsertMemory(store.Memory{
+		Tier:    "project",
+		Content: "Auth redesign: switched to OAuth2 flow",
+		AgentID: "test-agent",
+		Source:  "manual",
+		// EntityID intentionally empty — not linked via entity_id column.
+	})
+	_ = srv.store.InsertMemoryAnchors(memID, []string{string(loginID)})
+
+	res, err := srv.handleGetEntityHistory(context.Background(), callTool(map[string]any{
+		"entity": "AuthLogin",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := extractText(t, res)
+	if !strings.Contains(text, "OAuth2") {
+		t.Errorf("expected anchored memory content, got: %s", text)
+	}
+}
+
+func TestGetEntityHistory_DeduplicatesMemories(t *testing.T) {
+	srv, loginID, _ := newPopulatedServer(t)
+
+	// Insert a memory that is BOTH entity_id-linked AND anchor-linked.
+	// Should appear only once in the timeline.
+	memID, _ := srv.store.InsertMemory(store.Memory{
+		Tier:     "entity",
+		Content:  "Dual-linked memory for dedup test",
+		EntityID: string(loginID),
+		AgentID:  "test-agent",
+		Source:   "manual",
+	})
+	_ = srv.store.InsertMemoryAnchors(memID, []string{string(loginID)})
+
+	res, err := srv.handleGetEntityHistory(context.Background(), callTool(map[string]any{
+		"entity": "AuthLogin",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := extractText(t, res)
+	// Count occurrences of the memory content — should be exactly 1.
+	if count := strings.Count(text, "Dual-linked memory"); count != 1 {
+		t.Errorf("expected 1 occurrence (deduped), got %d in: %s", count, text)
+	}
+}
+
 // ── truncate ────────────────────────────────────────────────────────────────
 
 func TestTruncate(t *testing.T) {
 	if got := truncate("short", 100); got != "short" {
 		t.Errorf("expected no truncation, got %q", got)
 	}
-	if got := truncate("this is a long string", 10); len(got) <= 10 {
-		// Should be 10 chars + "…"
-	} else if !strings.HasSuffix(got, "…") {
+	if got := truncate("this is a long string", 10); !strings.HasSuffix(got, "…") {
 		t.Errorf("expected truncation with ellipsis, got %q", got)
+	}
+	// Edge: maxLen 0 returns empty
+	if got := truncate("anything", 0); got != "" {
+		t.Errorf("expected empty for maxLen=0, got %q", got)
+	}
+	// Edge: negative maxLen returns empty
+	if got := truncate("anything", -5); got != "" {
+		t.Errorf("expected empty for negative maxLen, got %q", got)
+	}
+	// Unicode: CJK characters truncated correctly
+	if got := truncate("日本語テスト", 3); got != "日本語…" {
+		t.Errorf("expected CJK truncation, got %q", got)
+	}
+}
+
+// ── compactDetail ───────────────────────────────────────────────────────────
+
+func TestCompactDetail(t *testing.T) {
+	// All present
+	got := compactDetail("tier", "entity", "source", "manual", "agent", "claude")
+	if got != "tier=entity source=manual agent=claude" {
+		t.Errorf("all present: %q", got)
+	}
+	// Some empty
+	got = compactDetail("tier", "entity", "source", "", "agent", "claude")
+	if got != "tier=entity agent=claude" {
+		t.Errorf("some empty: %q", got)
+	}
+	// All empty
+	got = compactDetail("tier", "", "source", "", "agent", "")
+	if got != "" {
+		t.Errorf("all empty: %q", got)
 	}
 }
 
