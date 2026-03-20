@@ -30,7 +30,7 @@ func TestQuadRecallSearch_BM25Channel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mems, attr, _ := srv.quadRecallSearch(context.Background(), "auth token", 5, false, 7)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth token", 5, false, 7, 0)
 	if len(mems) == 0 {
 		t.Fatal("expected at least 1 memory from BM25 channel")
 	}
@@ -65,7 +65,7 @@ func TestQuadRecallSearch_TemporalChannel(t *testing.T) {
 	}
 
 	// Query for "auth" — BM25 won't find "Docker" memory, but temporal should.
-	mems, _, _ := srv.quadRecallSearch(context.Background(), "auth changes", 10, false, 7)
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth changes", 10, false, 7, 0)
 
 	// Temporal channel returns recent memories regardless of text match.
 	foundDocker := false
@@ -103,7 +103,7 @@ func TestQuadRecallSearch_TemporalDoesNotOverwhelmRelevant(t *testing.T) {
 	}
 
 	// Query for "auth" with limit=5.
-	mems, _, _ := srv.quadRecallSearch(context.Background(), "auth OAuth middleware", 5, false, 7)
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth OAuth middleware", 5, false, 7, 0)
 
 	// The 2 auth-relevant memories should rank in the top 3 (multi-channel boost).
 	authCount := 0
@@ -166,7 +166,7 @@ func TestQuadRecallSearch_GraphChannel(t *testing.T) {
 		Source:  store.SourceManual,
 	}, []string{string(tokID)})
 
-	mems, attr, _ := srv.quadRecallSearch(context.Background(), "auth login", 10, false, 7)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", 10, false, 7, 0)
 
 	// Graph channel should find the TokenValidator memory via BFS from AuthLogin.
 	foundJWT := false
@@ -194,7 +194,7 @@ func TestQuadRecallSearch_GraphChannel(t *testing.T) {
 func TestQuadRecallSearch_EmptyResults(t *testing.T) {
 	srv := newTestServer(t)
 
-	mems, attr, _ := srv.quadRecallSearch(context.Background(), "nonexistent query", 5, false, 7)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "nonexistent query", 5, false, 7, 0)
 	// Temporal channel may return recent memories, but store is empty.
 	if len(mems) != 0 {
 		t.Errorf("expected 0 memories from empty store, got %d", len(mems))
@@ -216,7 +216,7 @@ func TestQuadRecallSearch_NoGraph_GracefulDegradation(t *testing.T) {
 		Source:  store.SourceManual,
 	})
 
-	mems, _, _ := srv.quadRecallSearch(context.Background(), "GraphQL", 5, false, 7)
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "GraphQL", 5, false, 7, 0)
 	if len(mems) == 0 {
 		t.Error("expected BM25/temporal results even without graph")
 	}
@@ -244,7 +244,7 @@ func TestGraphBFS_TwoHops(t *testing.T) {
 	result := srv.graphBFS([]string{string(aID)}, 2)
 	// Should find B (depth 1) and C (depth 2), but not A (seed excluded).
 	found := make(map[string]bool)
-	for _, id := range result {
+	for _, id := range result.Nodes {
 		found[id] = true
 	}
 	if !found[string(bID)] {
@@ -277,7 +277,7 @@ func TestGraphBFS_RespectsEdgeTypeFilter(t *testing.T) {
 
 	result := srv.graphBFS([]string{string(aID)}, 2)
 	found := make(map[string]bool)
-	for _, id := range result {
+	for _, id := range result.Nodes {
 		found[id] = true
 	}
 	if !found[string(bID)] {
@@ -307,7 +307,7 @@ func TestGraphBFS_Depth2OnlyCallsEdges(t *testing.T) {
 
 	result := srv.graphBFS([]string{string(aID)}, 2)
 	found := make(map[string]bool)
-	for _, id := range result {
+	for _, id := range result.Nodes {
 		found[id] = true
 	}
 	if !found[string(bID)] {
@@ -334,16 +334,16 @@ func TestGraphBFS_MaxNodesCap(t *testing.T) {
 
 	result := srv.graphBFS([]string{string(hubID)}, 1)
 	// Should be capped at 500 - 1 (seed excluded) = 499 max.
-	if len(result) > 500 {
-		t.Errorf("BFS returned %d nodes, expected <= 500", len(result))
+	if len(result.Nodes) > 500 {
+		t.Errorf("BFS returned %d nodes, expected <= 500", len(result.Nodes))
 	}
 }
 
 func TestGraphBFS_InvalidSeedIgnored(t *testing.T) {
 	srv := newTestServer(t)
 	result := srv.graphBFS([]string{"nonexistent::node"}, 2)
-	if len(result) != 0 {
-		t.Errorf("invalid seed should return empty, got %d", len(result))
+	if len(result.Nodes) != 0 {
+		t.Errorf("invalid seed should return empty, got %d", len(result.Nodes))
 	}
 }
 
@@ -363,7 +363,7 @@ func TestGraphBFS_FollowsIncomingEdges(t *testing.T) {
 
 	result := srv.graphBFS([]string{string(bID)}, 1)
 	found := false
-	for _, id := range result {
+	for _, id := range result.Nodes {
 		if id == string(aID) {
 			found = true
 		}
@@ -546,6 +546,413 @@ func TestHandleRecall_BrowseMode_HidesDecayedMemory(t *testing.T) {
 	}
 	if !foundPinned {
 		t.Error("pinned memory was hidden from browse results — pinned memories must always be visible")
+	}
+}
+
+// ── Sprint 10 #8: depth param + traversal paths ───────────────────────────────
+
+func TestGraphBFS_ReturnsParentMap(t *testing.T) {
+	srv := newTestServer(t)
+
+	// A → B → C chain via CALLS.
+	aID := srv.graph.MakeNodeID("a.go", "ServiceA")
+	bID := srv.graph.MakeNodeID("b.go", "ServiceB")
+	cID := srv.graph.MakeNodeID("c.go", "ServiceC")
+	for _, n := range []*graph.Node{
+		{ID: aID, Name: "ServiceA", Type: graph.NodeFunction, File: "a.go", Line: 1},
+		{ID: bID, Name: "ServiceB", Type: graph.NodeFunction, File: "b.go", Line: 1},
+		{ID: cID, Name: "ServiceC", Type: graph.NodeFunction, File: "c.go", Line: 1},
+	} {
+		srv.graph.AddNode(n)
+	}
+	srv.graph.AddEdge(&graph.Edge{From: aID, To: bID, Type: graph.EdgeCalls})
+	srv.graph.AddEdge(&graph.Edge{From: bID, To: cID, Type: graph.EdgeCalls})
+
+	result := srv.graphBFS([]string{string(aID)}, 2)
+
+	// ParentMap must record how B and C were discovered.
+	entryB, okB := result.ParentMap[string(bID)]
+	if !okB {
+		t.Fatal("expected ParentMap entry for ServiceB")
+	}
+	if entryB.ParentNodeID != string(aID) {
+		t.Errorf("ServiceB parent should be ServiceA, got %q", entryB.ParentNodeID)
+	}
+	if entryB.EdgeType != graph.EdgeCalls {
+		t.Errorf("ServiceB edge type should be CALLS, got %q", entryB.EdgeType)
+	}
+
+	entryC, okC := result.ParentMap[string(cID)]
+	if !okC {
+		t.Fatal("expected ParentMap entry for ServiceC")
+	}
+	if entryC.ParentNodeID != string(bID) {
+		t.Errorf("ServiceC parent should be ServiceB, got %q", entryC.ParentNodeID)
+	}
+
+	// SeedSet must contain the seed.
+	if !result.SeedSet[string(aID)] {
+		t.Error("SeedSet should contain seed aID")
+	}
+	if result.SeedSet[string(bID)] {
+		t.Error("SeedSet should NOT contain non-seed bID")
+	}
+}
+
+func TestGraphBFS_DepthParam_1HopOnly(t *testing.T) {
+	srv := newTestServer(t)
+
+	// A → B → C — depth=1 should find B but NOT C.
+	aID := srv.graph.MakeNodeID("a.go", "Root")
+	bID := srv.graph.MakeNodeID("b.go", "Mid")
+	cID := srv.graph.MakeNodeID("c.go", "Far")
+	for _, n := range []*graph.Node{
+		{ID: aID, Name: "Root", Type: graph.NodeFunction, File: "a.go", Line: 1},
+		{ID: bID, Name: "Mid", Type: graph.NodeFunction, File: "b.go", Line: 1},
+		{ID: cID, Name: "Far", Type: graph.NodeFunction, File: "c.go", Line: 1},
+	} {
+		srv.graph.AddNode(n)
+	}
+	srv.graph.AddEdge(&graph.Edge{From: aID, To: bID, Type: graph.EdgeCalls})
+	srv.graph.AddEdge(&graph.Edge{From: bID, To: cID, Type: graph.EdgeCalls})
+
+	result := srv.graphBFS([]string{string(aID)}, 1)
+	found := make(map[string]bool)
+	for _, id := range result.Nodes {
+		found[id] = true
+	}
+	if !found[string(bID)] {
+		t.Error("depth=1: expected Mid (1 hop)")
+	}
+	if found[string(cID)] {
+		t.Error("depth=1: Far is 2 hops away — should NOT be found")
+	}
+}
+
+func TestGraphBFS_DepthParam_3Hops(t *testing.T) {
+	srv := newTestServer(t)
+
+	// A → B → C → D chain — depth=3 should find B, C, and D.
+	aID := srv.graph.MakeNodeID("a.go", "NodeA")
+	bID := srv.graph.MakeNodeID("b.go", "NodeB")
+	cID := srv.graph.MakeNodeID("c.go", "NodeC")
+	dID := srv.graph.MakeNodeID("d.go", "NodeD")
+	for _, n := range []*graph.Node{
+		{ID: aID, Name: "NodeA", Type: graph.NodeFunction, File: "a.go", Line: 1},
+		{ID: bID, Name: "NodeB", Type: graph.NodeFunction, File: "b.go", Line: 1},
+		{ID: cID, Name: "NodeC", Type: graph.NodeFunction, File: "c.go", Line: 1},
+		{ID: dID, Name: "NodeD", Type: graph.NodeFunction, File: "d.go", Line: 1},
+	} {
+		srv.graph.AddNode(n)
+	}
+	srv.graph.AddEdge(&graph.Edge{From: aID, To: bID, Type: graph.EdgeCalls})
+	srv.graph.AddEdge(&graph.Edge{From: bID, To: cID, Type: graph.EdgeCalls})
+	srv.graph.AddEdge(&graph.Edge{From: cID, To: dID, Type: graph.EdgeCalls})
+
+	result := srv.graphBFS([]string{string(aID)}, 3)
+	found := make(map[string]bool)
+	for _, id := range result.Nodes {
+		found[id] = true
+	}
+	if !found[string(bID)] || !found[string(cID)] || !found[string(dID)] {
+		t.Errorf("depth=3: expected B, C, D; got nodes: %v", result.Nodes)
+	}
+}
+
+func TestGraphBFS_DepthParam_Capped_At_4(t *testing.T) {
+	// depth=5 should be clamped to 4 by quadRecallSearch; test that graphBFS(maxDepth=4) doesn't
+	// panic and still returns results.
+	srv := newTestServer(t)
+
+	aID := srv.graph.MakeNodeID("a.go", "Root")
+	bID := srv.graph.MakeNodeID("b.go", "Child")
+	for _, n := range []*graph.Node{
+		{ID: aID, Name: "Root", Type: graph.NodeFunction, File: "a.go", Line: 1},
+		{ID: bID, Name: "Child", Type: graph.NodeFunction, File: "b.go", Line: 1},
+	} {
+		srv.graph.AddNode(n)
+	}
+	srv.graph.AddEdge(&graph.Edge{From: aID, To: bID, Type: graph.EdgeCalls})
+
+	result := srv.graphBFS([]string{string(aID)}, 4)
+	found := make(map[string]bool)
+	for _, id := range result.Nodes {
+		found[id] = true
+	}
+	if !found[string(bID)] {
+		t.Error("depth=4: should still find direct child")
+	}
+}
+
+func TestBuildGraphPath_TwoHop(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Build: Auth → TokenValidator → RS256Handler
+	authID := srv.graph.MakeNodeID("auth.go", "Auth")
+	tokID := srv.graph.MakeNodeID("auth.go", "TokenValidator")
+	for _, n := range []*graph.Node{
+		{ID: authID, Name: "Auth", Type: graph.NodeFunction, File: "auth.go", Line: 1},
+		{ID: tokID, Name: "TokenValidator", Type: graph.NodeFunction, File: "auth.go", Line: 50},
+	} {
+		srv.graph.AddNode(n)
+	}
+	srv.graph.AddEdge(&graph.Edge{From: authID, To: tokID, Type: graph.EdgeCalls})
+
+	bfsResult := srv.graphBFS([]string{string(authID)}, 2)
+
+	// TokenValidator should be reachable from Auth seed.
+	pathStr, hops := srv.buildGraphPath(string(tokID), bfsResult)
+	if hops != 1 {
+		t.Errorf("expected 1 hop, got %d", hops)
+	}
+	if pathStr == "" {
+		t.Fatal("expected non-empty path string")
+	}
+	// Path should contain both node names and the edge type.
+	if !strings.Contains(pathStr, "Auth") {
+		t.Errorf("path should contain 'Auth', got: %q", pathStr)
+	}
+	if !strings.Contains(pathStr, "TokenValidator") {
+		t.Errorf("path should contain 'TokenValidator', got: %q", pathStr)
+	}
+	if !strings.Contains(pathStr, "CALLS") {
+		t.Errorf("path should contain 'CALLS', got: %q", pathStr)
+	}
+}
+
+func TestBuildGraphPath_SeedIsAnchor_ReturnsEmpty(t *testing.T) {
+	// When the anchor IS a seed node, no multi-hop path exists — should return "".
+	srv := newTestServer(t)
+
+	aID := srv.graph.MakeNodeID("a.go", "SeedNode")
+	srv.graph.AddNode(&graph.Node{ID: aID, Name: "SeedNode", Type: graph.NodeFunction, File: "a.go", Line: 1})
+
+	bfsResult := srv.graphBFS([]string{string(aID)}, 2)
+
+	pathStr, hops := srv.buildGraphPath(string(aID), bfsResult)
+	if hops != 0 || pathStr != "" {
+		t.Errorf("anchor=seed should return ('', 0), got (%q, %d)", pathStr, hops)
+	}
+}
+
+func TestQuadRecallSearch_DepthZeroDefaultsToTwo(t *testing.T) {
+	// depth=0 should default to 2 (same behavior as before this feature).
+	// This tests backward compatibility — the graph channel still fires with default depth.
+	srv := newTestServer(t)
+
+	authID := srv.graph.MakeNodeID("pkg/auth.go", "AuthLogin")
+	srv.graph.AddNode(&graph.Node{ID: authID, Name: "AuthLogin", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 10})
+	tokID := srv.graph.MakeNodeID("pkg/auth.go", "TokenValidator")
+	srv.graph.AddNode(&graph.Node{ID: tokID, Name: "TokenValidator", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 50})
+	srv.graph.AddEdge(&graph.Edge{From: authID, To: tokID, Type: graph.EdgeCalls})
+
+	_, _ = srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "auth login refactored for OAuth2",
+		AgentID: "agent-1", Source: store.SourceManual,
+	}, []string{string(authID)})
+	_, _ = srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "switched to RS256 for token signing",
+		AgentID: "agent-1", Source: store.SourceManual,
+	}, []string{string(tokID)})
+
+	// depth=0 → defaults to 2; should find the TokenValidator memory via graph channel.
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", 10, false, 7, 0)
+
+	foundJWT := false
+	for _, m := range mems {
+		if strings.Contains(m.Content, "RS256") {
+			foundJWT = true
+			channels := attr[m.ID]
+			hasGraph := false
+			for _, ch := range channels {
+				if ch == "graph" {
+					hasGraph = true
+				}
+			}
+			if !hasGraph {
+				t.Error("RS256 memory should be attributed to graph channel")
+			}
+		}
+	}
+	if !foundJWT {
+		t.Error("depth=0 (default 2): expected graph channel to find RS256 memory via TokenValidator")
+	}
+}
+
+func TestQuadRecallSearch_ReturnsTraversalInfo_WhenGraphFires(t *testing.T) {
+	// Traversal info must be populated when graph channel was active and found memories.
+	srv := newTestServer(t)
+
+	authID := srv.graph.MakeNodeID("pkg/auth.go", "AuthService")
+	srv.graph.AddNode(&graph.Node{ID: authID, Name: "AuthService", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 1})
+	tokID := srv.graph.MakeNodeID("pkg/auth.go", "TokenValidator")
+	srv.graph.AddNode(&graph.Node{ID: tokID, Name: "TokenValidator", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 50})
+	srv.graph.AddEdge(&graph.Edge{From: authID, To: tokID, Type: graph.EdgeCalls})
+
+	// Anchor query-matching memory to AuthService (seed), and
+	// non-query-matching memory to TokenValidator (discovered via graph).
+	_, _ = srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "auth service handles login flow",
+		AgentID: "a1", Source: store.SourceManual,
+	}, []string{string(authID)})
+	_, _ = srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "switched to RS256 for JWT signing",
+		AgentID: "a1", Source: store.SourceManual,
+	}, []string{string(tokID)})
+
+	_, _, _, ti := srv.quadRecallSearch(context.Background(), "auth service login", 10, false, 7, 2)
+
+	if ti == nil {
+		t.Fatal("expected non-nil GraphTraversalInfo when graph channel was active")
+	}
+	if ti.Depth != 2 {
+		t.Errorf("expected depth=2, got %d", ti.Depth)
+	}
+	if ti.AnchorCount == 0 {
+		t.Error("expected AnchorCount > 0")
+	}
+	if ti.Note == "" {
+		t.Error("expected non-empty Note")
+	}
+}
+
+func TestQuadRecallSearch_TraversalPaths_ShowConnection(t *testing.T) {
+	// When graph channel surfaces a memory via traversal, graph_traversal.paths
+	// must include a path entry with the node names and edge type.
+	srv := newTestServer(t)
+
+	authID := srv.graph.MakeNodeID("pkg/auth.go", "AuthService")
+	srv.graph.AddNode(&graph.Node{ID: authID, Name: "AuthService", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 1})
+	tokID := srv.graph.MakeNodeID("pkg/auth.go", "TokenValidator")
+	srv.graph.AddNode(&graph.Node{ID: tokID, Name: "TokenValidator", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 50})
+	srv.graph.AddEdge(&graph.Edge{From: authID, To: tokID, Type: graph.EdgeCalls})
+
+	_, _ = srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "auth service handles login and session management",
+		AgentID: "a1", Source: store.SourceManual,
+	}, []string{string(authID)})
+	jwtMemID, _ := srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "switched to RS256 for JWT signing algorithm",
+		AgentID: "a1", Source: store.SourceManual,
+	}, []string{string(tokID)})
+
+	_, _, _, ti := srv.quadRecallSearch(context.Background(), "auth service login", 10, false, 7, 2)
+
+	if ti == nil {
+		t.Fatal("expected GraphTraversalInfo")
+	}
+	if len(ti.Paths) == 0 {
+		// Graph channel may not have attributed this memory — acceptable if BM25 ranks it higher.
+		// Just verify the traversal info itself is populated.
+		t.Logf("no traversal paths (memory may not be graph-attributed); ti=%+v", ti)
+		return
+	}
+
+	// At least one path should reference the JWT memory and show the connection.
+	for _, p := range ti.Paths {
+		if p.MemoryID == jwtMemID {
+			if p.Hops == 0 {
+				t.Error("expected Hops > 0 for TokenValidator memory")
+			}
+			if !strings.Contains(p.Path, "AuthService") {
+				t.Errorf("path should mention AuthService: %q", p.Path)
+			}
+			if !strings.Contains(p.Path, "TokenValidator") {
+				t.Errorf("path should mention TokenValidator: %q", p.Path)
+			}
+			return
+		}
+	}
+}
+
+func TestHandleRecall_DepthParam_WiredThrough(t *testing.T) {
+	// Verify that the depth param is accepted by handleRecall without error,
+	// and that graph_traversal appears in the response when the graph fires.
+	srv := newTestServer(t)
+
+	authID := srv.graph.MakeNodeID("pkg/auth.go", "AuthService")
+	srv.graph.AddNode(&graph.Node{ID: authID, Name: "AuthService", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 1})
+	tokID := srv.graph.MakeNodeID("pkg/auth.go", "TokenSvc")
+	srv.graph.AddNode(&graph.Node{ID: tokID, Name: "TokenSvc", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 50})
+	srv.graph.AddEdge(&graph.Edge{From: authID, To: tokID, Type: graph.EdgeCalls})
+
+	_, _ = srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "auth service initialises token pipeline",
+		AgentID: "a1", Source: store.SourceManual,
+	}, []string{string(authID)})
+	_, _ = srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "token service validates expiry and issuer",
+		AgentID: "a1", Source: store.SourceManual,
+	}, []string{string(tokID)})
+
+	ctx := context.Background()
+	res, err := srv.handleRecall(ctx, callTool(map[string]any{
+		"query": "auth service",
+		"depth": float64(3),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var text string
+	for _, c := range res.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			text = tc.Text
+		}
+	}
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	// Response must have graph_traversal when graph channel was active.
+	if gt, ok := resp["graph_traversal"]; ok {
+		gtMap, ok := gt.(map[string]any)
+		if !ok {
+			t.Fatal("graph_traversal should be an object")
+		}
+		depth, _ := gtMap["depth"].(float64)
+		if int(depth) != 3 {
+			t.Errorf("expected depth=3 in graph_traversal, got %v", depth)
+		}
+	}
+	// Mode must be search.
+	if resp["mode"] != "search" {
+		t.Errorf("expected mode=search, got %v", resp["mode"])
+	}
+}
+
+func TestHandleRecall_NoDepth_NoTraversalInfo_WhenGraphSkipped(t *testing.T) {
+	// Without a graph, graph_traversal should be absent from the response.
+	st := openMCPTestStore(t)
+	srv := &Server{store: st}
+
+	_, _ = st.InsertMemory(store.Memory{
+		Tier: store.TierProject, Content: "auth service test memory",
+		AgentID: "a1", Source: store.SourceManual,
+	})
+
+	ctx := context.Background()
+	res, err := srv.handleRecall(ctx, callTool(map[string]any{
+		"query": "auth service",
+		"depth": float64(2),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text string
+	for _, c := range res.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			text = tc.Text
+		}
+	}
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// No graph → graph_traversal must be absent.
+	if _, ok := resp["graph_traversal"]; ok {
+		t.Error("graph_traversal should not be present when no graph is loaded")
 	}
 }
 

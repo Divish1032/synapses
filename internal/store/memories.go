@@ -993,6 +993,64 @@ func (s *Store) GetMemoryAnchors(memoryID string) ([]string, error) {
 	return out, rows.Err()
 }
 
+// GetMemoryAnchorNodeIDs returns the first anchor node ID for each memory in the input list.
+// Returns map[memoryID → nodeID]. Memories with no anchors are absent from the map.
+// Batches via IN-clause (groups of 500 for SQLite variable limits).
+// "First" is defined by created_at ASC — the primary anchor node per memory.
+// Used by the graph channel to reconstruct traversal paths from memory to anchor node.
+func (s *Store) GetMemoryAnchorNodeIDs(memIDs []string) (map[string]string, error) {
+	if len(memIDs) == 0 {
+		return nil, nil
+	}
+
+	result := make(map[string]string, len(memIDs))
+
+	const batchSize = 500
+	for i := 0; i < len(memIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(memIDs) {
+			end = len(memIDs)
+		}
+		batch := memIDs[i:end]
+
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for j, id := range batch {
+			placeholders[j] = "?"
+			args[j] = id
+		}
+
+		rows, err := s.knowledgeDB.Query(
+			`SELECT memory_id, node_id FROM memory_anchors
+			 WHERE memory_id IN (`+strings.Join(placeholders, ",")+`)
+			 ORDER BY memory_id, created_at`,
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("get memory anchor node IDs: %w", err)
+		}
+
+		for rows.Next() {
+			var memID, nodeID string
+			if err := rows.Scan(&memID, &nodeID); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan memory anchor node ID: %w", err)
+			}
+			// Keep only the first anchor per memory (ORDER BY created_at).
+			if _, exists := result[memID]; !exists {
+				result[memID] = nodeID
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("memory anchor node IDs rows: %w", err)
+		}
+		rows.Close()
+	}
+
+	return result, nil
+}
+
 // GetMemoriesByAnchorNode returns memories anchored to the given node ID via the
 // memory_anchors junction table. This finds memories linked through anchor_nodes=
 // in remember(), which are NOT discoverable via QueryMemories(entityID=...) alone.

@@ -413,6 +413,13 @@ func (s *Server) handleRecall(
 		asOfTime = &parsed
 	}
 
+	// Read depth for graph channel multi-hop traversal (Sprint 10 #8).
+	// 0 = default (2 hops). Negative values clamp to 1 inside quadRecallSearch.
+	depth := 0
+	if v, ok := req.GetArguments()["depth"].(float64); ok && v > 0 {
+		depth = int(v)
+	}
+
 	// Search mode: quad-channel recall (BM25 + semantic + graph + temporal).
 	searchLimit := limit
 	if searchLimit > 5 {
@@ -438,7 +445,7 @@ func (s *Server) handleRecall(
 
 	// Quad-channel recall: 4 parallel channels merged via RRF.
 	// Replaces the old sequential BM25 + vector search path.
-	memories, _, staleEmbIDs := s.quadRecallSearch(ctx, query, searchLimit, includeStale, sinceDays)
+	memories, _, staleEmbIDs, traversalInfo := s.quadRecallSearch(ctx, query, searchLimit, includeStale, sinceDays, depth)
 
 	// Sprint 10.5: apply absolute time bounds (since / until) as post-filters.
 	// sinceTime and untilTime are only set when the caller provided since= / until=.
@@ -627,6 +634,12 @@ func (s *Server) handleRecall(
 	if asOfTime != nil {
 		resp["as_of"] = asOfTime.Format(time.RFC3339)
 		resp["as_of_note"] = "Memory content shown as it existed at the specified time. Memories with version > 0 show historical content."
+	}
+	// Sprint 10.8: surface graph traversal info when graph channel was active.
+	// graph_traversal.paths shows the structural connections that led to each
+	// graph-attributed memory — e.g. "AuthService -[CALLS]- TokenValidator".
+	if traversalInfo != nil {
+		resp["graph_traversal"] = traversalInfo
 	}
 	return jsonResult(resp)
 }

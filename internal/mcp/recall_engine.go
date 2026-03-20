@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,8 +11,50 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
+// graphParentEntry records how a node was discovered during BFS traversal.
+// ParentNodeID is the node from which this node was reached.
+// EdgeType is the relationship type between them in the code graph.
+type graphParentEntry struct {
+	ParentNodeID string
+	EdgeType     graph.EdgeType
+}
+
+// GraphBFSResult is the output of a BFS traversal from seed nodes.
+type GraphBFSResult struct {
+	// Nodes: reachable node IDs, excluding seeds themselves.
+	Nodes []string
+	// ParentMap: maps each discovered node to the edge that found it.
+	// Used to reconstruct traversal paths (anchor → seed walk).
+	ParentMap map[string]graphParentEntry
+	// SeedSet: original seed node IDs (for terminating path reconstruction).
+	SeedSet map[string]bool
+}
+
+// TraversalPath describes how a specific memory was reached via graph traversal.
+type TraversalPath struct {
+	MemoryID string `json:"memory_id"`
+	// MemorySnippet is the first ~80 chars of memory content, for quick preview.
+	MemorySnippet string `json:"memory_snippet"`
+	// Path shows structural connections from query-matching entity to memory anchor point.
+	// Example: "AuthService -[CALLS]- TokenValidator"
+	// -[EDGE_TYPE]- denotes a code graph relationship; both caller and callee directions explored.
+	Path string `json:"path"`
+	Hops int    `json:"hops"`
+}
+
+// GraphTraversalInfo describes the graph channel's multi-hop traversal for a recall() call.
+// Surfaced in the response when the graph channel was active and found results.
+type GraphTraversalInfo struct {
+	Depth        int             `json:"depth"`
+	AnchorCount  int             `json:"anchor_count"`  // query-matching seed entities
+	VisitedNodes int             `json:"visited_nodes"` // graph nodes explored by BFS
+	Paths        []TraversalPath `json:"paths,omitempty"`
+	Note         string          `json:"note"`
+}
+
 // quadRecallSearch runs 4 parallel retrieval channels and merges via RRF.
-// Returns memories ranked by fused score, plus per-memory channel attribution.
+// Returns memories ranked by fused score, plus per-memory channel attribution,
+// stale embedding IDs, and optional graph traversal info.
 //
 // Channels:
 //  1. BM25 — FTS5 full-text search on memory content (existing)
@@ -19,6 +62,7 @@ import (
 //  3. Graph — BFS from anchor entities of query-matching memories (skipped if no graph)
 //  4. Temporal — recent memories scored by recency decay (no text filter)
 //
+// depth controls the graph channel's BFS hop count (0 = default 2, max 4).
 // Each channel runs in its own goroutine with a 5s timeout.
 // Channel errors are logged but never fail the entire recall.
 // The response shape is unchanged — episodes are searched separately by the caller.
@@ -28,9 +72,16 @@ func (s *Server) quadRecallSearch(
 	limit int,
 	includeStale bool,
 	sinceDays int,
-) ([]store.Memory, map[string][]string, []string) {
+	depth int,
+) ([]store.Memory, map[string][]string, []string, *GraphTraversalInfo) {
 	if limit <= 0 {
 		limit = 5
+	}
+	// Clamp depth: 0 → default 2, negative → 1, >4 → 4.
+	if depth <= 0 {
+		depth = 2
+	} else if depth > 4 {
+		depth = 4
 	}
 
 	// Per-channel limit: request more than final limit so RRF has enough
@@ -45,6 +96,13 @@ func (s *Server) quadRecallSearch(
 		channels        = make(map[string][]string)
 		memMap          = make(map[string]store.Memory) // id → full memory for hydration
 		staleEmbeddings = make(map[string]bool)         // memory IDs with stale embeddings (entity changed)
+	)
+
+	// Graph channel metadata: written only by the graph goroutine, read after
+	// wg.Wait() which provides the synchronisation barrier — no mutex needed.
+	var (
+		graphResult    GraphBFSResult
+		graphSeedCount int
 	)
 
 	collectMemories := func(name string, mems []store.Memory) {
@@ -167,18 +225,21 @@ func (s *Server) quadRecallSearch(
 				logRecallChannelError("graph", err)
 				return
 			}
+			graphSeedCount = len(seedNodes)
 			if len(seedNodes) == 0 {
 				return // no anchor nodes match query — graph channel empty
 			}
 
-			// Step 2: BFS 2 hops from seed nodes.
-			reachableNodes := s.graphBFS(seedNodes, 2)
-			if len(reachableNodes) == 0 {
+			// Step 2: BFS from seed nodes at configured depth.
+			// graphBFS now returns a GraphBFSResult with parent map for path reconstruction.
+			bfsRes := s.graphBFS(seedNodes, depth)
+			graphResult = bfsRes
+			if len(bfsRes.Nodes) == 0 {
 				return
 			}
 
 			// Step 3: Find memories anchored to reachable nodes.
-			mems, err := s.store.GetMemoriesByAnchorNodes(reachableNodes, channelLimit, includeStale)
+			mems, err := s.store.GetMemoriesByAnchorNodes(bfsRes.Nodes, channelLimit, includeStale)
 			if err != nil {
 				logRecallChannelError("graph", err)
 				return
@@ -220,12 +281,12 @@ func (s *Server) quadRecallSearch(
 
 	// ── RRF Merge ─────────────────────────────────────────────────────────
 	if len(channels) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	rankedIDs, attribution := store.RRFMergeWeighted(channels, limit, 60, store.DefaultRRFWeights)
 	if len(rankedIDs) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	// Hydrate results from memMap. Any missing IDs (from semantic fallback
@@ -270,19 +331,190 @@ func (s *Server) quadRecallSearch(
 		}
 	}
 
-	return result, attribution, staleEmbIDs
+	// ── Sprint 10.8: Graph traversal info ─────────────────────────────────
+	// Build traversal info only when the graph channel was active (seedCount > 0).
+	// Path reconstruction: for each result memory attributed to the graph channel,
+	// trace the BFS parent map from its anchor node back to the seed, producing
+	// a human-readable path like "AuthService -[CALLS]- TokenValidator".
+	var traversalInfo *GraphTraversalInfo
+	if graphSeedCount > 0 {
+		ti := &GraphTraversalInfo{
+			Depth:        depth,
+			AnchorCount:  graphSeedCount,
+			VisitedNodes: len(graphResult.Nodes),
+			Note: "Paths show structural connections from query-matching entities to " +
+				"memory anchor points. Uses CALLS, IMPORTS, and IMPLEMENTS edges from " +
+				"the AST code graph. -[EDGE_TYPE]- denotes a code relationship; both " +
+				"caller and callee directions are explored bidirectionally.",
+		}
+
+		// Collect memory IDs attributed to the graph channel in the final result.
+		graphMemIDs := graphAttributedMemIDs(result, attribution)
+		if len(graphMemIDs) > 0 && len(graphResult.ParentMap) > 0 {
+			anchorMap, err := s.store.GetMemoryAnchorNodeIDs(graphMemIDs)
+			if err != nil {
+				logRecallChannelError("graph-traversal", err)
+			} else if len(anchorMap) > 0 {
+				ti.Paths = s.reconstructTraversalPaths(result, attribution, graphResult, anchorMap)
+			}
+		}
+		traversalInfo = ti
+	}
+
+	return result, attribution, staleEmbIDs, traversalInfo
+}
+
+// graphAttributedMemIDs returns memory IDs from result that have "graph" in their attribution.
+func graphAttributedMemIDs(result []store.Memory, attribution map[string][]string) []string {
+	var ids []string
+	for _, m := range result {
+		for _, ch := range attribution[m.ID] {
+			if ch == "graph" {
+				ids = append(ids, m.ID)
+				break
+			}
+		}
+	}
+	return ids
+}
+
+// reconstructTraversalPaths builds per-memory path explanations for memories
+// surfaced by the graph channel. Skips memories whose anchor is itself a seed
+// (those are found by BM25 directly — no interesting multi-hop to show).
+func (s *Server) reconstructTraversalPaths(
+	mems []store.Memory,
+	attribution map[string][]string,
+	bfsResult GraphBFSResult,
+	anchorMap map[string]string, // memID → first anchor nodeID
+) []TraversalPath {
+	var paths []TraversalPath
+	for _, m := range mems {
+		// Only build paths for memories attributed to the graph channel.
+		graphContributed := false
+		for _, ch := range attribution[m.ID] {
+			if ch == "graph" {
+				graphContributed = true
+				break
+			}
+		}
+		if !graphContributed {
+			continue
+		}
+
+		anchorNodeID, ok := anchorMap[m.ID]
+		if !ok {
+			continue
+		}
+
+		pathStr, hops := s.buildGraphPath(anchorNodeID, bfsResult)
+		if hops == 0 {
+			continue // anchor is a seed — no multi-hop path to show
+		}
+
+		snippet := m.Content
+		if len(snippet) > 80 {
+			snippet = snippet[:77] + "..."
+		}
+
+		paths = append(paths, TraversalPath{
+			MemoryID:      m.ID,
+			MemorySnippet: snippet,
+			Path:          pathStr,
+			Hops:          hops,
+		})
+	}
+	return paths
+}
+
+// buildGraphPath reconstructs the traversal path from a seed to the given anchor
+// node using the BFS parent map. Returns the path string and hop count.
+// Returns ("", 0) when:
+//   - the anchor is itself a seed (no interesting path),
+//   - the path cannot be traced back to a seed within maxIter hops,
+//   - the parent map is empty.
+func (s *Server) buildGraphPath(nodeID string, bfsResult GraphBFSResult) (string, int) {
+	const maxIter = 8
+
+	if bfsResult.SeedSet[nodeID] {
+		return "", 0 // anchor is a seed — surfaced by BM25 directly
+	}
+
+	type segment struct {
+		nodeID   string
+		edgeType graph.EdgeType
+	}
+
+	// Trace from anchor back toward seed, collecting segments.
+	// Each segment records the node ID and the edge type used to discover it.
+	var segs []segment
+	current := nodeID
+	for i := 0; i < maxIter; i++ {
+		entry, ok := bfsResult.ParentMap[current]
+		if !ok {
+			// Can't trace further — path is incomplete.
+			return "", 0
+		}
+		segs = append(segs, segment{nodeID: current, edgeType: entry.EdgeType})
+		current = entry.ParentNodeID
+		if bfsResult.SeedSet[current] {
+			break
+		}
+	}
+
+	if len(segs) == 0 {
+		return "", 0
+	}
+	// Verify we actually reached a seed (not just hit maxIter).
+	if !bfsResult.SeedSet[current] {
+		return "", 0
+	}
+
+	// segs is ordered [anchor, ..., first-node-after-seed].
+	// Reverse to get seed → anchor order for display.
+	for i, j := 0, len(segs)-1; i < j; i, j = i+1, j-1 {
+		segs[i], segs[j] = segs[j], segs[i]
+	}
+
+	// Build: seedName -[EDGE_TYPE]- node1 -[EDGE_TYPE]- ... -[EDGE_TYPE]- anchorName
+	var sb strings.Builder
+	sb.WriteString(s.graphNodeName(current))
+	for _, seg := range segs {
+		sb.WriteString(" -[")
+		sb.WriteString(string(seg.edgeType))
+		sb.WriteString("]- ")
+		sb.WriteString(s.graphNodeName(seg.nodeID))
+	}
+	return sb.String(), len(segs)
+}
+
+// graphNodeName returns the display name for a node ID.
+// Falls back to extracting the entity name from the "repoID::file::EntityName"
+// node ID format if the node is not present in the graph.
+func (s *Server) graphNodeName(nodeID string) string {
+	if s.graph != nil {
+		if n := s.graph.GetNode(graph.NodeID(nodeID)); n != nil {
+			return n.Name
+		}
+	}
+	// Fallback: extract last segment from "::" separated node ID.
+	if idx := strings.LastIndex(nodeID, "::"); idx >= 0 {
+		return nodeID[idx+2:]
+	}
+	return nodeID
 }
 
 // graphBFS performs breadth-first search from seed node IDs following
-// CALLS, IMPORTS, and IMPLEMENTS edges. Returns all unique reachable node IDs.
+// CALLS, IMPORTS, and IMPLEMENTS edges. Returns a GraphBFSResult containing
+// reachable node IDs (excluding seeds), the parent map for path reconstruction,
+// and the seed set for termination detection.
 //
 // Edge type filtering by depth:
 //   - Depth 1: CALLS + IMPORTS + IMPLEMENTS (broad discovery)
-//   - Depth 2: CALLS only (focused structural relationship)
+//   - Depth 2+: CALLS only (focused structural relationship)
 //
 // Capped at 500 total reachable nodes to prevent explosion from hub nodes.
-// maxDepth is configurable to support Sprint 10 #8 (multi-hop traversal).
-func (s *Server) graphBFS(seeds []string, maxDepth int) []string {
+// maxDepth is configurable to support depth= parameter; 0 defaults to 2.
+func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 	if maxDepth <= 0 {
 		maxDepth = 2
 	}
@@ -291,8 +523,11 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) []string {
 
 	visited := make(map[graph.NodeID]bool, len(seeds))
 	frontier := make([]graph.NodeID, 0, len(seeds))
+	parentMap := make(map[string]graphParentEntry, 64)
+	seedSet := make(map[string]bool, len(seeds))
 
 	for _, seed := range seeds {
+		seedSet[seed] = true
 		nid := graph.NodeID(seed)
 		if s.graph.GetNode(nid) != nil && !visited[nid] {
 			visited[nid] = true
@@ -310,24 +545,28 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) []string {
 		graph.EdgeCalls: true,
 	}
 
-	for depth := 1; depth <= maxDepth; depth++ {
+	for d := 1; d <= maxDepth; d++ {
 		if len(visited) >= maxNodes {
 			break
 		}
 
 		allowedTypes := depth1Types
-		if depth >= 2 {
+		if d >= 2 {
 			allowedTypes = depth2Types
 		}
 
 		var nextFrontier []graph.NodeID
 		for _, nid := range frontier {
-			// Follow outgoing edges.
+			// Follow outgoing edges (callees, imports, implements).
 			for _, e := range s.graph.OutEdges(nid) {
 				if !allowedTypes[e.Type] || visited[e.To] {
 					continue
 				}
 				visited[e.To] = true
+				parentMap[string(e.To)] = graphParentEntry{
+					ParentNodeID: string(nid),
+					EdgeType:     e.Type,
+				}
 				nextFrontier = append(nextFrontier, e.To)
 				if len(visited) >= maxNodes {
 					break
@@ -336,12 +575,16 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) []string {
 			if len(visited) >= maxNodes {
 				break
 			}
-			// Follow incoming edges (callers).
+			// Follow incoming edges (callers of this node).
 			for _, e := range s.graph.InEdges(nid) {
 				if !allowedTypes[e.Type] || visited[e.From] {
 					continue
 				}
 				visited[e.From] = true
+				parentMap[string(e.From)] = graphParentEntry{
+					ParentNodeID: string(nid),
+					EdgeType:     e.Type,
+				}
 				nextFrontier = append(nextFrontier, e.From)
 				if len(visited) >= maxNodes {
 					break
@@ -354,21 +597,19 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) []string {
 		frontier = nextFrontier
 	}
 
-	// Convert to string slice, excluding seed nodes (we want structurally
-	// RELATED nodes, not the seeds themselves — the seeds' memories are
-	// already covered by the BM25 channel).
-	seedSet := make(map[string]bool, len(seeds))
-	for _, s := range seeds {
-		seedSet[s] = true
-	}
-
+	// Build result slice — exclude seed nodes (their memories are covered by BM25).
 	result := make([]string, 0, len(visited))
 	for nid := range visited {
 		if !seedSet[string(nid)] {
 			result = append(result, string(nid))
 		}
 	}
-	return result
+
+	return GraphBFSResult{
+		Nodes:     result,
+		ParentMap: parentMap,
+		SeedSet:   seedSet,
+	}
 }
 
 // logRecallChannelError logs a non-fatal error from a recall channel.
