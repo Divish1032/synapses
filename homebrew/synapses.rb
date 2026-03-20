@@ -8,7 +8,7 @@
 #   brew install SynapsesOS/tap/synapses
 
 class Synapses < Formula
-  desc "Graph-based code intelligence MCP server with 24 tools, 18-language support"
+  desc "Graph-based code intelligence MCP server with 42 tools, 49+ language support"
   homepage "https://github.com/SynapsesOS/synapses"
   license "MIT"
 

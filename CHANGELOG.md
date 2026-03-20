@@ -118,7 +118,7 @@ All notable changes to Synapses are documented here. This project adheres to [Se
 
 ### Added
 - **MCP Protocol** — Implemented mark3labs/mcp-go server over stdio.
-- **18-Language Parser** — Tree-sitter-based parser suite (Go, TypeScript, Rust, Java, and 14 others).
+- **49+ Language Parsers** — Tree-sitter-based parser suite (Go, TypeScript, Rust, Java, and 50+ others).
 - **Core MCP Tools** — `get_context`, `find_entity`, `search`, `get_call_chain`, `get_impact`, `annotate_node`.
 - **SQLite Persistence** — modernc.org/sqlite (pure Go, no CGo).
 - **Graph Index** — Columnar adjacency representation for fast BFS.

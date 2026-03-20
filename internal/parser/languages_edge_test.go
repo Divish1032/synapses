@@ -1,6 +1,6 @@
 package parser_test
 
-// Edge-case and feature-completeness tests for all 18 language parsers.
+// Edge-case and feature-completeness tests for all 49+ language parsers.
 // Covers: class-qualified methods, new entity types (enums, traits, consts,
 // annotations, protocols, namespaces), function-level call-site resolution,
 // visibility, nested classes, and degenerate inputs.
