@@ -79,9 +79,31 @@ func (s *Store) InsertMemory(m Memory) (string, error) {
 	}
 	if dedup.dedupedID != "" {
 		// Sprint 10.1: snapshot old content before overwriting via touch.
-		if dedup.dedupedContent != "" {
-			if _, verr := s.CreateMemoryVersion(dedup.dedupedID, dedup.dedupedContent); verr != nil {
+		// activeFrom = the matched memory's created_at (or its last version's superseded_at
+		// if versions exist, but for simplicity we use the memory's own last_accessed_at
+		// which is updated on each dedup — approximating "when this content became active").
+		// For v1 (no prior versions), activeFrom = memory.created_at is exact.
+		if dedup.dedupedContent != "" && dedup.dedupedContent != m.Content {
+			activeFrom := dedup.dedupedCreatedAt
+			// If versions already exist, the activeFrom should be the latest
+			// version's superseded_at (when that version was replaced with
+			// the content we're now snapshotting). Fall back to created_at.
+			var latestSupersededAt sql.NullString
+			_ = s.knowledgeDB.QueryRow(
+				`SELECT superseded_at FROM memory_versions WHERE memory_id = ? ORDER BY version DESC LIMIT 1`,
+				dedup.dedupedID,
+			).Scan(&latestSupersededAt)
+			if latestSupersededAt.Valid && latestSupersededAt.String != "" {
+				activeFrom = latestSupersededAt.String
+			}
+			if _, verr := s.CreateMemoryVersion(dedup.dedupedID, dedup.dedupedContent, activeFrom); verr != nil {
 				logutil.Warn("synapses: store: create memory version on dedup: %v\n", verr)
+			}
+		}
+		// Update memory content to the new (dedup-winning) content.
+		if m.Content != dedup.dedupedContent {
+			if uerr := s.UpdateMemoryContent(dedup.dedupedID, m.Content); uerr != nil {
+				logutil.Warn("synapses: store: update memory content on dedup: %v\n", uerr)
 			}
 		}
 		// Only emit knowledge_updated if the touch succeeds — a failed touch means
@@ -696,9 +718,24 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 	}
 	if dedup.dedupedID != "" {
 		// Sprint 10.1: snapshot old content before overwriting via touch.
-		if dedup.dedupedContent != "" {
-			if _, verr := s.CreateMemoryVersion(dedup.dedupedID, dedup.dedupedContent); verr != nil {
+		if dedup.dedupedContent != "" && dedup.dedupedContent != m.Content {
+			activeFrom := dedup.dedupedCreatedAt
+			var latestSupersededAt sql.NullString
+			_ = s.knowledgeDB.QueryRow(
+				`SELECT superseded_at FROM memory_versions WHERE memory_id = ? ORDER BY version DESC LIMIT 1`,
+				dedup.dedupedID,
+			).Scan(&latestSupersededAt)
+			if latestSupersededAt.Valid && latestSupersededAt.String != "" {
+				activeFrom = latestSupersededAt.String
+			}
+			if _, verr := s.CreateMemoryVersion(dedup.dedupedID, dedup.dedupedContent, activeFrom); verr != nil {
 				logutil.Warn("synapses: store: create memory version on dedup (anchored): %v\n", verr)
+			}
+		}
+		// Update memory content to the new (dedup-winning) content.
+		if m.Content != dedup.dedupedContent {
+			if uerr := s.UpdateMemoryContent(dedup.dedupedID, m.Content); uerr != nil {
+				logutil.Warn("synapses: store: update memory content on dedup (anchored): %v\n", uerr)
 			}
 		}
 		// Memory deduped — wrap touch + anchor inserts in one tx so crash
@@ -813,8 +850,9 @@ func (s *Store) queryFreshMemoriesForDedup(tier, entityID, agentID string) ([]Me
 
 // prepareMemoryResult holds the result of prepareMemory dedup check.
 type prepareMemoryResult struct {
-	dedupedID      string // non-empty if dedup matched an existing memory
-	dedupedContent string // the old content of the matched memory (for versioning)
+	dedupedID        string // non-empty if dedup matched an existing memory
+	dedupedContent   string // the old content of the matched memory (for versioning)
+	dedupedCreatedAt string // the matched memory's created_at (for version activeFrom)
 }
 
 // prepareMemory applies defaults, validates, and checks dedup for a Memory.
@@ -871,10 +909,14 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 	}
 	for _, ex := range dupCandidates {
 		if stringSimilarity(ex.Content, m.Content) > 0.85 {
-			// Return dedup result with old content for versioning.
+			// Return dedup result with old content + created_at for versioning.
 			// prepareMemory must be pure (no writes) so callers can decide
 			// whether to touch inside or outside a transaction.
-			return m, prepareMemoryResult{dedupedID: ex.ID, dedupedContent: ex.Content}, nil
+			return m, prepareMemoryResult{
+				dedupedID:        ex.ID,
+				dedupedContent:   ex.Content,
+				dedupedCreatedAt: ex.CreatedAt,
+			}, nil
 		}
 	}
 
@@ -993,25 +1035,37 @@ func (s *Store) GetMemoriesByIDs(ids []string) ([]Memory, error) {
 
 // ── Sprint 10.1: Memory Versioning ──────────────────────────────────────────
 
+// maxVersionsPerMemory caps how many historical versions a single memory can have.
+// When exceeded, the oldest version is deleted. Prevents unbounded row growth from
+// high-frequency dedup cycles.
+const maxVersionsPerMemory = 50
+
 // CreateMemoryVersion snapshots the current content of a memory as a historical
-// version before the memory is updated (dedup touch). Returns the version number.
-// Caller provides the current content to snapshot — this avoids a SELECT inside tx.
+// version before the memory is updated (dedup overwrite). Returns the version number.
 //
-// Concurrency safety: uses INSERT ... SELECT to atomically compute the next version
-// number in a single SQL statement, preventing duplicate version numbers under
-// concurrent dedup.
-func (s *Store) CreateMemoryVersion(memoryID, content string) (int, error) {
-	now := time.Now().UTC().Format(time.RFC3339)
+// Temporal semantics:
+//   - created_at: when this version's content was originally written (the memory's
+//     created_at for v1, or the previous version's superseded_at for v2+).
+//   - superseded_at: NOW — when this version was replaced by the new content.
+//
+// The live memory row in `memories` always holds the *current* content.
+// Versions hold *previous* content that was active from created_at to superseded_at.
+//
+// Caller must provide oldContent (the content being replaced) and memCreatedAt
+// (the memory's created_at or last version's superseded_at as the start time).
+//
+// Concurrency safety: uses INSERT ... SELECT for atomic version numbering.
+// Enforces maxVersionsPerMemory cap — oldest version is pruned when exceeded.
+func (s *Store) CreateMemoryVersion(memoryID, oldContent, activeFrom string) (int, error) {
+	supersededAt := time.Now().UTC().Format(time.RFC3339)
 	versionID := newID()
 
 	// Atomic: compute next version and insert in one statement.
-	// COALESCE(MAX(version), 0) + 1 is evaluated atomically by SQLite's
-	// single-writer serialization (WAL mode + IMMEDIATE tx).
 	_, err := s.knowledgeDB.Exec(`
 		INSERT INTO memory_versions (id, memory_id, version, content, superseded_by, created_at, superseded_at)
 		SELECT ?, ?, COALESCE(MAX(version), 0) + 1, ?, ?, ?, ?
 		FROM memory_versions WHERE memory_id = ?`,
-		versionID, memoryID, content, memoryID, now, now, memoryID,
+		versionID, memoryID, oldContent, memoryID, activeFrom, supersededAt, memoryID,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert memory version: %w", err)
@@ -1025,7 +1079,29 @@ func (s *Store) CreateMemoryVersion(memoryID, content string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("read back version: %w", err)
 	}
+
+	// Prune oldest versions if cap exceeded.
+	if ver > maxVersionsPerMemory {
+		_, _ = s.knowledgeDB.Exec(`
+			DELETE FROM memory_versions WHERE id IN (
+				SELECT id FROM memory_versions WHERE memory_id = ?
+				ORDER BY version ASC LIMIT ?
+			)`, memoryID, ver-maxVersionsPerMemory)
+	}
+
 	return ver, nil
+}
+
+// UpdateMemoryContent updates the content of an existing memory in-place.
+// Called after versioning to store the new (dedup-winning) content.
+func (s *Store) UpdateMemoryContent(memoryID, newContent string) error {
+	_, err := s.knowledgeDB.Exec(
+		`UPDATE memories SET content = ? WHERE id = ?`, newContent, memoryID,
+	)
+	if err != nil {
+		return fmt.Errorf("update memory content: %w", err)
+	}
+	return nil
 }
 
 // GetMemoryVersions returns all historical versions for a memory, ordered by
@@ -1063,17 +1139,16 @@ func (s *Store) GetMemoryVersionCount(memoryID string) (int, error) {
 	return count, err
 }
 
-// GetMemoryAsOf returns memories that were active at the given point in time.
-// For each memory in the input set, it checks whether a historical version was
-// the active version at `asOf`. If so, it returns that version's content in place
-// of the current content. Memories created after `asOf` are excluded entirely.
+// GetMemoryAsOf returns memories with content as it existed at the given point in time.
+// For each memory in the input set:
+//   - If memory.created_at > asOf → memory didn't exist yet → excluded
+//   - If a version existed that was active at asOf (created_at <= asOf < superseded_at)
+//     → return that version's content instead of current content
+//   - If no version covers asOf but the memory existed → current content is returned
+//     (the memory was never overwritten, or asOf is after the latest supersession)
 //
-// The logic:
-//   - If memory.created_at > asOf → memory didn't exist yet → exclude
-//   - If no versions exist for the memory → current content was always the content
-//   - If versions exist: find the version whose superseded_at > asOf AND version is
-//     the highest where created_at <= asOf → that was the active content at asOf
-//   - Otherwise the current content is the active one
+// All timestamps are UTC RFC3339 (guaranteed by prepareMemory), so string comparison
+// is safe for temporal ordering.
 func (s *Store) GetMemoryAsOf(memoryIDs []string, asOf time.Time) ([]Memory, error) {
 	if len(memoryIDs) == 0 {
 		return nil, nil
@@ -1087,9 +1162,7 @@ func (s *Store) GetMemoryAsOf(memoryIDs []string, asOf time.Time) ([]Memory, err
 		return nil, err
 	}
 
-	// Step 2: For each memory, check if it existed at asOf and find the right content version.
-	// Note: created_at is always stored in UTC RFC3339 by prepareMemory, so string
-	// comparison is safe for temporal ordering.
+	// Step 2: For each memory, check if it existed at asOf and find the active content.
 	var result []Memory
 	for _, m := range mems {
 		// Memory didn't exist at asOf.
@@ -1097,25 +1170,27 @@ func (s *Store) GetMemoryAsOf(memoryIDs []string, asOf time.Time) ([]Memory, err
 			continue
 		}
 
-		// Check for a historical version that was active at asOf.
-		// The active version at time T is the one with the highest version number
-		// where the version's superseded_at > T (it hadn't been replaced yet).
-		// If no versions exist, the current content is the only content.
+		// Find the version that was active at asOf.
+		// Active at time T means: created_at <= T AND superseded_at > T.
+		// We want the highest version number matching this range (most recent
+		// version that was still active at asOf).
 		var vContent sql.NullString
 		var vVersion sql.NullInt64
 		err := s.knowledgeDB.QueryRow(`
 			SELECT content, version FROM memory_versions
-			WHERE memory_id = ? AND superseded_at > ?
+			WHERE memory_id = ? AND created_at <= ? AND superseded_at > ?
 			ORDER BY version DESC LIMIT 1`,
-			m.ID, asOfStr,
+			m.ID, asOfStr, asOfStr,
 		).Scan(&vContent, &vVersion)
 
 		if err == nil && vContent.Valid {
-			// A historical version was active at asOf.
+			// A historical version was active at asOf — use its content.
 			m.Content = vContent.String
 			m.Version = int(vVersion.Int64)
 		}
-		// else: no version was active → current content is correct (or no versions exist).
+		// else: no historical version was active at asOf. Either no versions exist
+		// (memory was never overwritten) or asOf is after the latest supersession
+		// (current content is the right answer). Both cases: keep m.Content as-is.
 
 		result = append(result, m)
 	}
