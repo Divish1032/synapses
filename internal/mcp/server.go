@@ -1114,7 +1114,10 @@ func (s *Server) registerTools() {
 					"(e.g. project_identity is omitted if the graph hasn't changed). "+
 					"Also surfaces invalidated_memories — beliefs anchored to graph nodes that "+
 					"were removed or changed since the last session. Per-agent: each agent sees "+
-					"invalidations independently.",
+					"invalidations independently. "+
+					"Lean defaults: pending_tasks.tasks is omitted when empty (no tasks exist) — "+
+					"check pending_tasks.summary instead. recent_events is omitted when empty — "+
+					"latest_event_seq is always present for event-stream subscription.",
 			),
 			mcp.WithString("agent_id",
 				mcp.Description("Self-declared agent identifier. Enables incremental delivery: "+
@@ -1133,7 +1136,7 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("scope",
 				mcp.Description("Optional. Controls response verbosity. "+
-					"\"full\" (default): all sections, backward compatible. "+
+					"\"full\" (default): all sections; empty arrays omitted (pending_tasks.tasks, recent_events absent when empty — check pending_tasks.summary and latest_event_seq). "+
 					"\"quick\": tasks + working_state + scale_guidance (~500 tokens for single-repo; "+
 					"safety-critical alerts like cross_project_alerts and agent_awareness are always included). "+
 					"\"resume\": tasks with session states + working_state + relevant_memories (for task context continuity)."),
