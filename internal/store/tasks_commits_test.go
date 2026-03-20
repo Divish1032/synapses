@@ -9,6 +9,7 @@ import (
 // TestSetTaskStartCommit_HappyPath verifies that start_commit is persisted and
 // returned by GetTask and GetPendingTasks.
 func TestSetTaskStartCommit_HappyPath(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, ids, err := st.CreatePlan("p", "", "", []store.TaskInput{
@@ -49,6 +50,7 @@ func TestSetTaskStartCommit_HappyPath(t *testing.T) {
 // TestSetTaskStartCommit_EmptySHAIsNoop verifies that passing an empty SHA is
 // silently ignored (graceful degradation when git is unavailable).
 func TestSetTaskStartCommit_EmptySHAIsNoop(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, ids, _ := st.CreatePlan("p", "", "", []store.TaskInput{{Title: "t", Priority: "p2"}})
@@ -71,6 +73,7 @@ func TestSetTaskStartCommit_EmptySHAIsNoop(t *testing.T) {
 
 // TestSetTaskCommits_HappyPath verifies commits are persisted and returned.
 func TestSetTaskCommits_HappyPath(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, ids, _ := st.CreatePlan("p", "", "", []store.TaskInput{{Title: "t", Priority: "p1"}})
@@ -95,6 +98,7 @@ func TestSetTaskCommits_HappyPath(t *testing.T) {
 
 // TestSetTaskCommits_NilCommits verifies nil is stored as an empty list, not an error.
 func TestSetTaskCommits_NilCommits(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, ids, _ := st.CreatePlan("p", "", "", []store.TaskInput{{Title: "t", Priority: "p2"}})
@@ -113,6 +117,7 @@ func TestSetTaskCommits_NilCommits(t *testing.T) {
 
 // TestSetTaskCommits_EmptySlice verifies an empty slice is stored cleanly.
 func TestSetTaskCommits_EmptySlice(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, ids, _ := st.CreatePlan("p", "", "", []store.TaskInput{{Title: "t", Priority: "p2"}})
@@ -130,6 +135,7 @@ func TestSetTaskCommits_EmptySlice(t *testing.T) {
 // TestCommitTracking_FullLifecycle exercises the complete in_progress→done flow
 // at the store layer: start_commit set, then commits stored on completion.
 func TestCommitTracking_FullLifecycle(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, ids, _ := st.CreatePlan("plan", "", "", []store.TaskInput{{Title: "work", Priority: "p0"}})
@@ -189,6 +195,7 @@ func TestCommitTracking_FullLifecycle(t *testing.T) {
 // TestGetPendingTasks_CommitFieldsDefaultEmpty verifies that tasks created before
 // R21 (start_commit='', commits='[]') surface empty fields gracefully.
 func TestGetPendingTasks_CommitFieldsDefaultEmpty(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _, _ = st.CreatePlan("p", "", "", []store.TaskInput{{Title: "old-task", Priority: "p2"}})

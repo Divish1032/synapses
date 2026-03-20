@@ -17,6 +17,7 @@ func openMemTestStore(t *testing.T) *Store {
 }
 
 func TestInsertMemory_BasicRoundTrip(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -49,6 +50,7 @@ func TestInsertMemory_BasicRoundTrip(t *testing.T) {
 }
 
 func TestInsertMemory_RejectsShortContent(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	_, err := st.InsertMemory(Memory{
@@ -61,6 +63,7 @@ func TestInsertMemory_RejectsShortContent(t *testing.T) {
 }
 
 func TestInsertMemory_TruncatesLongContent(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	long := make([]byte, 3000)
@@ -90,6 +93,7 @@ func TestInsertMemory_TruncatesLongContent(t *testing.T) {
 }
 
 func TestInsertMemory_Dedup(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id1, err := st.InsertMemory(Memory{
@@ -125,6 +129,7 @@ func TestInsertMemory_Dedup(t *testing.T) {
 }
 
 func TestQueryMemories_FiltersByTier(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	st.InsertMemory(Memory{Tier: TierEntity, Content: "entity memory content here", EntityID: "node1"})
@@ -148,6 +153,7 @@ func TestQueryMemories_FiltersByTier(t *testing.T) {
 }
 
 func TestTouchMemory_ExtendsExpiry(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, _ := st.InsertMemory(Memory{
@@ -179,6 +185,7 @@ func TestTouchMemory_ExtendsExpiry(t *testing.T) {
 }
 
 func TestExpireMemories_DeletesExpired(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Insert a memory with already-expired timestamp.
@@ -206,6 +213,7 @@ func TestExpireMemories_DeletesExpired(t *testing.T) {
 }
 
 func TestQueryMemoriesForEntities_MultipleEntities(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	st.InsertMemory(Memory{Tier: TierEntity, Content: "memory about Store.Close function", EntityID: "node-close"})
@@ -225,6 +233,7 @@ func TestQueryMemoriesForEntities_MultipleEntities(t *testing.T) {
 }
 
 func TestMarkEntityMemoriesStale(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	st.InsertMemory(Memory{Tier: TierEntity, Content: "memory for a node that will be deleted", EntityID: "dead-node"})
@@ -256,6 +265,7 @@ func TestMarkEntityMemoriesStale(t *testing.T) {
 // entity-tier memories written with entity_id (no anchors) are staled by the
 // batch function — the Gap 4 fix.
 func TestMarkEntityMemoriesStaleForNodes_BatchCoversEntityIDMemories(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Three entity memories: two in the removed batch, one surviving.
@@ -284,6 +294,7 @@ func TestMarkEntityMemoriesStaleForNodes_BatchCoversEntityIDMemories(t *testing.
 // TestMarkEntityMemoriesStaleForNodes_EmptyIsNoop ensures an empty slice does
 // not error or affect any rows.
 func TestMarkEntityMemoriesStaleForNodes_EmptyIsNoop(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	if err := st.MarkEntityMemoriesStaleForNodes(nil, "test"); err != nil {
 		t.Fatalf("expected nil error for empty slice, got %v", err)
@@ -294,6 +305,7 @@ func TestMarkEntityMemoriesStaleForNodes_EmptyIsNoop(t *testing.T) {
 // project-tier and session-tier memories with a matching entity_id are NOT
 // staled — the function is scoped to tier='entity' only.
 func TestMarkEntityMemoriesStaleForNodes_NonEntityTierUntouched(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Project-tier memory with entity_id set (unusual but possible).
@@ -311,6 +323,7 @@ func TestMarkEntityMemoriesStaleForNodes_NonEntityTierUntouched(t *testing.T) {
 }
 
 func TestStringSimilarity(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		a, b     string
@@ -342,6 +355,7 @@ func TestStringSimilarity(t *testing.T) {
 // Unicode code-point boundaries, not raw bytes. Emoji are 4 bytes each —
 // truncating at byte 2000 would split them and produce invalid UTF-8.
 func TestInsertMemory_UTF8Truncation(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	// Build content with 2100 emoji (2100 runes > 2000 rune cap; 8400 bytes).
 	// If we truncated at bytes, slicing at byte 2000 would split a 4-byte emoji.
@@ -375,6 +389,7 @@ func TestInsertMemory_UTF8Truncation(t *testing.T) {
 }
 
 func TestCountMemories(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	st.InsertMemory(Memory{Tier: TierEntity, Content: "entity memory for counting test", EntityID: "n1"})
@@ -401,6 +416,7 @@ func TestCountMemories(t *testing.T) {
 // 9-word sentence keeps similarity above 0.85 (9/10 = 0.90, 9/11 = 0.82).
 // Content is chosen so the second insert is within the dedup window.
 func TestInsertMemory_ProjectTierDedup(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	// 9 unique words. Adding " Verified." → 10 words, similarity = 9/10 = 0.90 > 0.85.
 	content := "The auth module uses JWT tokens for session management."
@@ -434,6 +450,7 @@ func TestInsertMemory_ProjectTierDedup(t *testing.T) {
 // is NOT deduped (new memories are allowed when content diverges).
 // 11-word base + 4 new words → similarity = 11/15 = 0.73 < 0.85 → NOT deduped.
 func TestInsertMemory_BelowDedupThreshold(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	content := "The auth module uses JWT tokens for session management across services."
 
@@ -461,6 +478,7 @@ func TestInsertMemory_BelowDedupThreshold(t *testing.T) {
 // TestInsertMemory_IdenticalProjectMemory_Deduped verifies exact-same content
 // from the same agent isn't written twice (end_session retry scenario).
 func TestInsertMemory_IdenticalProjectMemory_Deduped(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	content := "Refactored store module to add connection pooling for high throughput."
 
@@ -481,6 +499,7 @@ func TestInsertMemory_IdenticalProjectMemory_Deduped(t *testing.T) {
 
 // TestInsertMemory_SizeCap verifies that content over 2000 chars is truncated.
 func TestInsertMemory_SizeCap(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	longContent := strings.Repeat("word ", 600) // ~3000 chars
 
@@ -507,6 +526,7 @@ func TestInsertMemory_SizeCap(t *testing.T) {
 // TestTouchMemory_NonExistentID verifies TouchMemory returns an error rather
 // than silently succeeding when the ID doesn't exist.
 func TestTouchMemory_NonExistentID(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	err := st.TouchMemory("nonexistent-id-xyz")
 	if err == nil {
@@ -518,6 +538,7 @@ func TestTouchMemory_NonExistentID(t *testing.T) {
 // empty entityID returns all entity memories rather than filtering to none.
 // This is documented behavior — callers must pass explicit entityID to filter.
 func TestQueryMemories_EmptyEntityID_NoEntityFilter(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	st.InsertMemory(Memory{Tier: TierEntity, Content: "Memory about node alpha here.", EntityID: "node-alpha", Source: SourceAuto, Tags: `[]`})
@@ -539,6 +560,7 @@ func TestQueryMemories_EmptyEntityID_NoEntityFilter(t *testing.T) {
 // TestSearchMemories_FindsByContent verifies FTS5 search finds a memory by
 // keyword in its content.
 func TestSearchMemories_FindsByContent(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	_, err := st.InsertMemory(Memory{
@@ -567,6 +589,7 @@ func TestSearchMemories_FindsByContent(t *testing.T) {
 // TestSearchMemories_EmptyQuery_ReturnsNil verifies empty query returns
 // nil (not an error) — callers use browse mode for listing without a query.
 func TestSearchMemories_EmptyQuery_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	st.InsertMemory(Memory{
@@ -585,6 +608,7 @@ func TestSearchMemories_EmptyQuery_ReturnsNil(t *testing.T) {
 // TestSearchMemories_CrossTier verifies FTS5 search returns memories from
 // multiple tiers in a single query.
 func TestSearchMemories_CrossTier(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	st.InsertMemory(Memory{
@@ -620,6 +644,7 @@ func TestSearchMemories_CrossTier(t *testing.T) {
 // ── AM-1: Memory Anchors ────────────────────────────────────────────────────
 
 func TestInsertMemoryAnchors_BasicRoundTrip(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	id, err := st.InsertMemory(Memory{
 		Tier: TierProject, Content: "AuthService handles all auth flows", AgentID: "a", Source: SourceManual,
@@ -643,6 +668,7 @@ func TestInsertMemoryAnchors_BasicRoundTrip(t *testing.T) {
 }
 
 func TestInsertMemoryAnchors_EmptySlice_NoOp(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	id, _ := st.InsertMemory(Memory{
 		Tier: TierProject, Content: "some project fact with no anchors", AgentID: "a", Source: SourceManual,
@@ -657,6 +683,7 @@ func TestInsertMemoryAnchors_EmptySlice_NoOp(t *testing.T) {
 }
 
 func TestInsertMemoryAnchors_DuplicateIgnored(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	id, _ := st.InsertMemory(Memory{
 		Tier: TierProject, Content: "fact anchored to same node twice", AgentID: "a", Source: SourceManual,
@@ -671,6 +698,7 @@ func TestInsertMemoryAnchors_DuplicateIgnored(t *testing.T) {
 }
 
 func TestInsertMemoryAnchors_EmptyNodeIDSkipped(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	id, _ := st.InsertMemory(Memory{
 		Tier: TierProject, Content: "fact with empty anchor nodes mixed in", AgentID: "a", Source: SourceManual,
@@ -685,6 +713,7 @@ func TestInsertMemoryAnchors_EmptyNodeIDSkipped(t *testing.T) {
 }
 
 func TestExpireMemories_CleansOrphanedAnchors(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	// Insert a memory with a very short TTL (already expired).
 	id, err := st.InsertMemory(Memory{
@@ -721,6 +750,7 @@ func TestExpireMemories_CleansOrphanedAnchors(t *testing.T) {
 }
 
 func TestInsertMemoryAnchors_DedupedMemory_AddsAnchors(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	// Insert original memory with anchors.
 	id1, err := st.InsertMemory(Memory{
@@ -754,6 +784,7 @@ func TestInsertMemoryAnchors_DedupedMemory_AddsAnchors(t *testing.T) {
 }
 
 func TestInsertMemoryWithAnchors_DedupPath_AtomicTouchAndAnchors(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Insert original memory.
@@ -794,6 +825,7 @@ func TestInsertMemoryWithAnchors_DedupPath_AtomicTouchAndAnchors(t *testing.T) {
 }
 
 func TestInsertMemoryWithAnchors_RollsBackOnAnchorFailure(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	// Drop the memory_anchors table so anchor INSERT fails inside the tx.
 	if _, err := st.knowledgeDB.Exec(`DROP TABLE memory_anchors`); err != nil {
@@ -818,6 +850,7 @@ func TestInsertMemoryWithAnchors_RollsBackOnAnchorFailure(t *testing.T) {
 
 // TestMarkAnchoredMemoriesStale_EmptyNodeIDs is a no-op — no SQL should run.
 func TestMarkAnchoredMemoriesStale_EmptyNodeIDs(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	if err := st.MarkAnchoredMemoriesStale(nil, "reason"); err != nil {
 		t.Fatalf("unexpected error on empty nodeIDs: %v", err)
@@ -827,6 +860,7 @@ func TestMarkAnchoredMemoriesStale_EmptyNodeIDs(t *testing.T) {
 // TestMarkAnchoredMemoriesStale_NoAnchors verifies that a node with no anchored
 // memories produces no error and marks nothing.
 func TestMarkAnchoredMemoriesStale_NoAnchors(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	id, _ := st.InsertMemory(Memory{
 		Tier: TierProject, Content: "fact with no anchor", AgentID: "a", Source: SourceManual,
@@ -852,6 +886,7 @@ func TestMarkAnchoredMemoriesStale_NoAnchors(t *testing.T) {
 // TestMarkAnchoredMemoriesStale_MarksAnchored verifies that a memory anchored
 // to the given node ID is flagged stale with the correct reason.
 func TestMarkAnchoredMemoriesStale_MarksAnchored(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	id, _ := st.InsertMemory(Memory{
 		Tier: TierProject, Content: "Store.Close has 96 callers", AgentID: "a", Source: SourceManual,
@@ -885,6 +920,7 @@ func TestMarkAnchoredMemoriesStale_MarksAnchored(t *testing.T) {
 
 // TestMarkAnchoredMemoriesStale_BatchNodes verifies multiple node IDs in one call.
 func TestMarkAnchoredMemoriesStale_BatchNodes(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	id1, _ := st.InsertMemory(Memory{Tier: TierProject, Content: "fact about Foo", AgentID: "a", Source: SourceManual})
 	id2, _ := st.InsertMemory(Memory{Tier: TierProject, Content: "fact about Bar", AgentID: "a", Source: SourceManual})
@@ -910,6 +946,7 @@ func TestMarkAnchoredMemoriesStale_BatchNodes(t *testing.T) {
 
 // TestMarkAnchoredMemoriesStale_Idempotent verifies calling twice does not error.
 func TestMarkAnchoredMemoriesStale_Idempotent(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	id, _ := st.InsertMemory(Memory{Tier: TierProject, Content: "fact about Foo", AgentID: "a", Source: SourceManual})
 	_ = st.InsertMemoryAnchors(id, []string{"repo::a.go::Foo"})
@@ -931,6 +968,7 @@ func TestMarkAnchoredMemoriesStale_Idempotent(t *testing.T) {
 // TestSearchMemories_NoResults verifies a query with no matches returns empty
 // slice (not an error).
 func TestSearchMemories_NoResults(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	st.InsertMemory(Memory{
@@ -951,6 +989,7 @@ func TestSearchMemories_NoResults(t *testing.T) {
 // Without the fix, a new write similar to a stale memory would call TouchMemory
 // on the stale ID, extending its TTL and resurrecting invalidated data.
 func TestInsertMemory_Dedup_SkipsStaleMemories(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Insert a memory, then mark it stale via a fake anchor cascade.
@@ -994,6 +1033,7 @@ func TestInsertMemory_Dedup_SkipsStaleMemories(t *testing.T) {
 // TestMarkAnchoredMemoriesStale_LargeBatch verifies that batching works correctly
 // for nodeID slices exceeding SQLite's 999-variable limit — Gap 5 fix.
 func TestMarkAnchoredMemoriesStale_LargeBatch(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Insert one memory and anchor it to node "node-0".
@@ -1033,6 +1073,7 @@ func TestMarkAnchoredMemoriesStale_LargeBatch(t *testing.T) {
 // ── AM-3: QueryInvalidatedMemories + MarkMemoriesSurfaced ──────────────
 
 func TestQueryInvalidatedMemories_ReturnsStaleUnsurfaced(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Insert a memory, then mark it stale.
@@ -1070,6 +1111,7 @@ func TestQueryInvalidatedMemories_ReturnsStaleUnsurfaced(t *testing.T) {
 }
 
 func TestQueryInvalidatedMemories_EmptyWhenNoneStale(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Insert a non-stale memory.
@@ -1092,6 +1134,7 @@ func TestQueryInvalidatedMemories_EmptyWhenNoneStale(t *testing.T) {
 }
 
 func TestMarkMemoriesSurfaced_PreventsRequery(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -1133,6 +1176,7 @@ func TestMarkMemoriesSurfaced_PreventsRequery(t *testing.T) {
 }
 
 func TestMarkMemoriesSurfaced_EmptyIDsNoop(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	if err := st.MarkMemoriesSurfaced("agent-1", nil); err != nil {
 		t.Fatal(err)
@@ -1142,6 +1186,7 @@ func TestMarkMemoriesSurfaced_EmptyIDsNoop(t *testing.T) {
 // TestQueryInvalidatedMemories_PerAgentIsolation verifies that surfacing
 // for agent-A does NOT prevent agent-B from seeing the same invalidated memory.
 func TestQueryInvalidatedMemories_PerAgentIsolation(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	_, err := st.InsertMemory(Memory{
@@ -1195,6 +1240,7 @@ func TestQueryInvalidatedMemories_PerAgentIsolation(t *testing.T) {
 // TestQueryInvalidatedMemories_StaledAtOrdering verifies that memories are
 // ordered by staled_at (when invalidated), not created_at (when written).
 func TestQueryInvalidatedMemories_StaledAtOrdering(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Insert two memories at different times. Both get staled, but in reverse order.
@@ -1247,6 +1293,7 @@ func TestQueryInvalidatedMemories_StaledAtOrdering(t *testing.T) {
 // sessions (empty agentID) use the legacy surfaced_at path correctly, AND that
 // a named agent surfacing does NOT poison the anonymous path.
 func TestQueryInvalidatedMemories_AnonymousFallback(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	_, err := st.InsertMemory(Memory{
@@ -1301,6 +1348,7 @@ func TestQueryInvalidatedMemories_AnonymousFallback(t *testing.T) {
 // TestExpireMemories_CleansOrphanedSurfacedRows verifies that ExpireMemories
 // removes orphaned memory_surfaced rows when their parent memory is deleted.
 func TestExpireMemories_CleansOrphanedSurfacedRows(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -1350,6 +1398,7 @@ func TestExpireMemories_CleansOrphanedSurfacedRows(t *testing.T) {
 // QueryMemoriesForEntities, and SearchMemories all filter out stale=1 memories.
 // This is the Gap 1 fix: stale memories must NOT appear as active truth.
 func TestQueryMemories_ExcludesStaleMemories(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	entityID := "repo::store.go::Store.Close"
@@ -1418,6 +1467,7 @@ func TestQueryMemories_ExcludesStaleMemories(t *testing.T) {
 // TestQueryMemoriesIncludingStale_ReturnsStaledMemory verifies that
 // QueryMemoriesIncludingStale surfaces stale memories that QueryMemories hides.
 func TestQueryMemoriesIncludingStale_ReturnsStaledMemory(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	entityID := "repo::audit.go::AuditFunc"
@@ -1456,6 +1506,7 @@ func TestQueryMemoriesIncludingStale_ReturnsStaledMemory(t *testing.T) {
 
 // TestQueryMemoriesIncludingStale_EmptyDB_ReturnsNil verifies no panic on empty store.
 func TestQueryMemoriesIncludingStale_EmptyDB_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	mems, err := st.QueryMemoriesIncludingStale("", "", "", 10)
@@ -1470,6 +1521,7 @@ func TestQueryMemoriesIncludingStale_EmptyDB_ReturnsNil(t *testing.T) {
 // TestSearchMemoriesIncludingStale_ReturnsStaledMemory verifies FTS also surfaces stale
 // when using the audit variant.
 func TestSearchMemoriesIncludingStale_ReturnsStaledMemory(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	_, err := st.InsertMemory(Memory{
@@ -1510,6 +1562,7 @@ func TestSearchMemoriesIncludingStale_ReturnsStaledMemory(t *testing.T) {
 // TestQueryRecentSessionMemoriesIncludingStale_ReturnsStaledSession verifies the
 // session-log audit variant surfaces stale session memories.
 func TestQueryRecentSessionMemoriesIncludingStale_ReturnsStaledSession(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	_, err := st.InsertMemory(Memory{
@@ -1549,6 +1602,7 @@ func TestQueryRecentSessionMemoriesIncludingStale_ReturnsStaledSession(t *testin
 // two anchors is NOT staled when only one anchor is removed (the surviving anchor
 // means the belief is still partially valid).
 func TestMarkAnchoredMemoriesStale_PartialAnchorSurvival(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	memID, err := st.InsertMemoryWithAnchors(Memory{
@@ -1584,6 +1638,7 @@ func TestMarkAnchoredMemoriesStale_PartialAnchorSurvival(t *testing.T) {
 // TestMarkAnchoredMemoriesStale_AllAnchorsRemoved verifies that a memory IS staled
 // when ALL its anchor nodes are in the removal batch.
 func TestMarkAnchoredMemoriesStale_AllAnchorsRemoved(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	memID, err := st.InsertMemoryWithAnchors(Memory{
@@ -1630,6 +1685,7 @@ func TestMarkAnchoredMemoriesStale_AllAnchorsRemoved(t *testing.T) {
 // TestMarkAnchoredMemoriesStale_SingleAnchorStales verifies that a memory with
 // exactly one anchor IS staled when that anchor is removed (single anchor = all anchors).
 func TestMarkAnchoredMemoriesStale_SingleAnchorStales(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	memID, err := st.InsertMemoryWithAnchors(Memory{
@@ -1657,6 +1713,7 @@ func TestMarkAnchoredMemoriesStale_SingleAnchorStales(t *testing.T) {
 }
 
 func TestQueryInvalidatedMemories_CapsAt10(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Insert 12 memories and mark all stale.
@@ -1689,6 +1746,7 @@ func TestQueryInvalidatedMemories_CapsAt10(t *testing.T) {
 // SearchMemoriesIncludingStale. Before the fix, raw queries like "NOT *" were
 // passed directly to FTS5 MATCH, which caused a parse error in SQLite.
 func TestSearchMemories_FTS5Injection(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Seed one memory so the FTS index is non-empty and queries execute fully.
@@ -1736,6 +1794,7 @@ func TestSearchMemories_FTS5Injection(t *testing.T) {
 // attack vector from the council finding (query: "NOT *") is closed.
 // Without the fix, this would cause: "fts5: syntax error near "*"".
 func TestSearchMemories_FTS5InjectionAttackVector(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	_, err := st.InsertMemory(Memory{
@@ -1775,6 +1834,7 @@ func TestSearchMemories_FTS5InjectionAttackVector(t *testing.T) {
 // ── GetMemoriesByAnchorNode ─────────────────────────────────────────────────
 
 func TestGetMemoriesByAnchorNode_BasicRoundTrip(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	nodeID := "repo::auth.go::AuthService"
 
@@ -1796,6 +1856,7 @@ func TestGetMemoriesByAnchorNode_BasicRoundTrip(t *testing.T) {
 }
 
 func TestGetMemoriesByAnchorNode_EmptyNodeID(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	mems, err := st.GetMemoriesByAnchorNode("", 10)
 	if err != nil {
@@ -1807,6 +1868,7 @@ func TestGetMemoriesByAnchorNode_EmptyNodeID(t *testing.T) {
 }
 
 func TestGetMemoriesByAnchorNode_ExcludesStale(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	nodeID := "repo::auth.go::AuthService"
 
@@ -1828,6 +1890,7 @@ func TestGetMemoriesByAnchorNode_ExcludesStale(t *testing.T) {
 }
 
 func TestGetMemoriesByAnchorNode_NoMatch(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	memID, _ := st.InsertMemory(Memory{
 		Tier: TierProject, Content: "Unrelated memory", AgentID: "a", Source: SourceManual,

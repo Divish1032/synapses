@@ -9,6 +9,7 @@ import (
 // ── DecayedImportanceScore ────────────────────────────────────────────────────
 
 func TestDecayedImportanceScore_Pinned(t *testing.T) {
+	t.Parallel()
 	// Pinned memory from 10 years ago — must still score 1.0.
 	m := Memory{
 		Importance:     ImportancePinned,
@@ -22,6 +23,7 @@ func TestDecayedImportanceScore_Pinned(t *testing.T) {
 }
 
 func TestDecayedImportanceScore_DefaultImportance_JustAccessed(t *testing.T) {
+	t.Parallel()
 	// importance "1.0", accessed right now — score should be ~1.0.
 	m := Memory{
 		Importance:     "1.0",
@@ -35,6 +37,7 @@ func TestDecayedImportanceScore_DefaultImportance_JustAccessed(t *testing.T) {
 }
 
 func TestDecayedImportanceScore_DefaultImportance_OneHalfLife(t *testing.T) {
+	t.Parallel()
 	// importance "1.0", last accessed 1 week ago — should be ~0.5.
 	m := Memory{
 		Importance:     "1.0",
@@ -48,6 +51,7 @@ func TestDecayedImportanceScore_DefaultImportance_OneHalfLife(t *testing.T) {
 }
 
 func TestDecayedImportanceScore_HighImportanceWeight(t *testing.T) {
+	t.Parallel()
 	// importance "2.0", 1 week old — score = 2.0 * 0.5 = 1.0.
 	m := Memory{
 		Importance:     "2.0",
@@ -61,6 +65,7 @@ func TestDecayedImportanceScore_HighImportanceWeight(t *testing.T) {
 }
 
 func TestDecayedImportanceScore_LowImportanceWeight(t *testing.T) {
+	t.Parallel()
 	// importance "0.5", just accessed — score = 0.5 * ~1.0 = ~0.5.
 	m := Memory{
 		Importance:     "0.5",
@@ -74,6 +79,7 @@ func TestDecayedImportanceScore_LowImportanceWeight(t *testing.T) {
 }
 
 func TestDecayedImportanceScore_EmptyImportance_TreatedAsOne(t *testing.T) {
+	t.Parallel()
 	// Empty importance defaults to weight 1.0.
 	m := Memory{
 		Importance:     "",
@@ -87,6 +93,7 @@ func TestDecayedImportanceScore_EmptyImportance_TreatedAsOne(t *testing.T) {
 }
 
 func TestDecayedImportanceScore_InvalidImportance_TreatedAsOne(t *testing.T) {
+	t.Parallel()
 	// Invalid importance string — should treat as weight 1.0, not panic.
 	m := Memory{
 		Importance:     "not-a-number",
@@ -100,6 +107,7 @@ func TestDecayedImportanceScore_InvalidImportance_TreatedAsOne(t *testing.T) {
 }
 
 func TestDecayedImportanceScore_BelowVisibilityThreshold(t *testing.T) {
+	t.Parallel()
 	// importance "1.0", last accessed very long ago — should fall below threshold.
 	// At halfLife=168h, threshold=0.05: age = halfLife * (1/0.05 - 1) = 168*19 = 3192h ≈ 133 days.
 	m := Memory{
@@ -114,6 +122,7 @@ func TestDecayedImportanceScore_BelowVisibilityThreshold(t *testing.T) {
 }
 
 func TestDecayedImportanceScore_PinnedNeverBelowThreshold(t *testing.T) {
+	t.Parallel()
 	// Pinned memory, even very old, must score above threshold.
 	m := Memory{
 		Importance:     ImportancePinned,
@@ -127,6 +136,7 @@ func TestDecayedImportanceScore_PinnedNeverBelowThreshold(t *testing.T) {
 }
 
 func TestDecayedImportanceScore_UsesLastAccessedAt_NotCreatedAt(t *testing.T) {
+	t.Parallel()
 	// Memory created long ago but accessed recently — should have high score.
 	// This verifies we use last_accessed_at for the decay signal, not created_at.
 	m := Memory{
@@ -141,6 +151,7 @@ func TestDecayedImportanceScore_UsesLastAccessedAt_NotCreatedAt(t *testing.T) {
 }
 
 func TestDecayedImportanceScore_InvalidTimestamp_FallsBackToCreatedAt(t *testing.T) {
+	t.Parallel()
 	// Invalid last_accessed_at — should fall back to created_at.
 	m := Memory{
 		Importance:     "1.0",
@@ -156,6 +167,7 @@ func TestDecayedImportanceScore_InvalidTimestamp_FallsBackToCreatedAt(t *testing
 // ── Importance field persistence ──────────────────────────────────────────────
 
 func TestInsertMemory_ImportanceRoundTrip(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -190,6 +202,7 @@ func TestInsertMemory_ImportanceRoundTrip(t *testing.T) {
 }
 
 func TestInsertMemory_ImportanceDefaultsToOnePointZero(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -224,6 +237,7 @@ func TestInsertMemory_ImportanceDefaultsToOnePointZero(t *testing.T) {
 }
 
 func TestInsertMemory_ImportanceFloatWeight(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -260,6 +274,7 @@ func TestInsertMemory_ImportanceFloatWeight(t *testing.T) {
 // ── Importance clamping (Fix 3: footgun prevention) ───────────────────────────
 
 func TestInsertMemory_ImportanceZeroClampedToThreshold(t *testing.T) {
+	t.Parallel()
 	// importance "0.0" would make any memory permanently invisible (score=0 < threshold).
 	// prepareMemory must clamp it up to DecayVisibilityThreshold so fresh memories remain visible.
 	st := openMemTestStore(t)
@@ -303,6 +318,7 @@ func TestInsertMemory_ImportanceZeroClampedToThreshold(t *testing.T) {
 }
 
 func TestInsertMemory_ImportanceBelowThresholdClamped(t *testing.T) {
+	t.Parallel()
 	// importance "0.01" (below threshold of 0.05) — should be clamped.
 	st := openMemTestStore(t)
 
@@ -345,6 +361,7 @@ func TestInsertMemory_ImportanceBelowThresholdClamped(t *testing.T) {
 }
 
 func TestInsertMemory_ImportanceInvalidStringDefaultsToOne(t *testing.T) {
+	t.Parallel()
 	// Invalid numeric string falls back to "1.0" (normal decay).
 	st := openMemTestStore(t)
 

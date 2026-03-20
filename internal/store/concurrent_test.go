@@ -16,6 +16,7 @@ import (
 // the FTS index. All 10 episodes must be persisted after completion, and
 // recall must return consistent results (no partial reads, no panics).
 func TestConcurrentRememberRecall(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	const writers = 10
@@ -116,6 +117,7 @@ func TestConcurrentRememberRecall(t *testing.T) {
 // writers and readers target overlapping FTS terms, stressing SQLite's WAL
 // journal under concurrent read/write pressure.
 func TestConcurrentRememberRecall_HighContention(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	const goroutines = 20
@@ -166,6 +168,7 @@ func TestConcurrentRememberRecall_HighContention(t *testing.T) {
 // data or corrupt the FTS index. Each memory has unique content to avoid
 // dedup collisions.
 func TestConcurrentInsertMemory_SearchMemories(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	const writers = 10
@@ -258,6 +261,7 @@ func TestConcurrentInsertMemory_SearchMemories(t *testing.T) {
 // insert — this is acceptable (slightly more data, no corruption).
 // What is NOT acceptable: panic, lost data, or corrupted FTS index.
 func TestConcurrentInsertMemory_DedupRace(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	const goroutines = 10
@@ -333,6 +337,7 @@ func TestConcurrentInsertMemory_DedupRace(t *testing.T) {
 // task, so there should be no contention on the same row — but they share the
 // same knowledgeDB connection and the plan-completion check runs for each.
 func TestConcurrentUpdateTask(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	const taskCount = 10
@@ -448,6 +453,7 @@ func TestConcurrentUpdateTask(t *testing.T) {
 // severity and can track if a future fix (e.g., using UPDATE ... SET notes =
 // notes || ?) resolves it.
 func TestConcurrentUpdateTask_SameTask(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _, err := st.CreatePlan("single task plan", "", "", []store.TaskInput{
@@ -536,6 +542,7 @@ func TestConcurrentUpdateTask_SameTask(t *testing.T) {
 // readers (GetPendingTasks) and writers (UpdateTask) don't deadlock or
 // produce inconsistent results. Exercises WAL concurrent read/write.
 func TestConcurrentUpdateTask_ReadWriteContention(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	const taskCount = 5

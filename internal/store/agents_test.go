@@ -25,6 +25,7 @@ func openTestStore(t *testing.T) *Store {
 
 // TestClassifyPresence checks the three presence tiers.
 func TestClassifyPresence(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	cases := []struct {
 		lastSeen time.Time
@@ -47,6 +48,7 @@ func TestClassifyPresence(t *testing.T) {
 // TestSendMessage_PrunesReadMessages verifies that read messages older than
 // 24 h are removed on the next SendMessage call.
 func TestSendMessage_PrunesReadMessages(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Insert a message manually with a timestamp in the past (> 24 h ago)
@@ -84,6 +86,7 @@ func TestSendMessage_PrunesReadMessages(t *testing.T) {
 // TestSendMessage_KeepsUnreadMessages verifies that unread messages within the
 // 7-day window are NOT pruned.
 func TestSendMessage_KeepsUnreadMessages(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Insert an unread message from 2 days ago (well within 7-day window).
@@ -112,6 +115,7 @@ func TestSendMessage_KeepsUnreadMessages(t *testing.T) {
 // TestSendMessage_PrunesVeryOldUnread verifies that unread messages older than
 // 7 days are also pruned.
 func TestSendMessage_PrunesVeryOldUnread(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	veryOld := time.Now().Add(-8 * 24 * time.Hour).Unix()

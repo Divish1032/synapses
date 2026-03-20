@@ -254,6 +254,7 @@ func countRows(db *sql.DB, table string) (int, error) {
 // TestDualDBMigration_AllTablesPopulated verifies that all 23 knowledgeTables
 // are correctly migrated from a legacy single-DB to the new knowledge.db.
 func TestDualDBMigration_AllTablesPopulated(t *testing.T) {
+	t.Parallel()
 	dbPath := createLegacySingleDB(t)
 	expected := seedLegacyData(t, dbPath)
 
@@ -292,6 +293,7 @@ func TestDualDBMigration_AllTablesPopulated(t *testing.T) {
 // TestDualDBMigration_FTSRebuilt verifies that FTS indexes on episodes and
 // memories are functional after migration.
 func TestDualDBMigration_FTSRebuilt(t *testing.T) {
+	t.Parallel()
 	dbPath := createLegacySingleDB(t)
 	seedLegacyData(t, dbPath)
 
@@ -362,6 +364,7 @@ func TestDualDBMigration_FTSRebuilt(t *testing.T) {
 // TestDualDBMigration_Idempotent verifies that closing and re-opening the
 // store after migration does not duplicate rows (INSERT OR IGNORE).
 func TestDualDBMigration_Idempotent(t *testing.T) {
+	t.Parallel()
 	dbPath := createLegacySingleDB(t)
 	expected := seedLegacyData(t, dbPath)
 
@@ -405,6 +408,7 @@ func TestDualDBMigration_Idempotent(t *testing.T) {
 // TestDualDBMigration_EmptyTables verifies migration completes cleanly when
 // the legacy DB has tables but no data rows.
 func TestDualDBMigration_EmptyTables(t *testing.T) {
+	t.Parallel()
 	dbPath := createLegacySingleDB(t)
 	// Don't seed any data — tables exist but are empty.
 
@@ -441,6 +445,7 @@ func TestDualDBMigration_EmptyTables(t *testing.T) {
 // TestDualDBMigration_UnicodeContent verifies that CJK characters, emoji,
 // and multi-byte UTF-8 survive the migration round-trip.
 func TestDualDBMigration_UnicodeContent(t *testing.T) {
+	t.Parallel()
 	dbPath := createLegacySingleDB(t)
 
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
@@ -515,6 +520,7 @@ func TestDualDBMigration_UnicodeContent(t *testing.T) {
 // TestDualDBMigration_NullColumns verifies that SQL NULL values in nullable
 // columns are preserved through migration (not converted to empty strings).
 func TestDualDBMigration_NullColumns(t *testing.T) {
+	t.Parallel()
 	dbPath := createLegacySingleDB(t)
 
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
@@ -571,6 +577,7 @@ func TestDualDBMigration_NullColumns(t *testing.T) {
 // knowledge tables at all (fresh install, not upgrade), migration is skipped
 // gracefully.
 func TestDualDBMigration_NoLegacyData(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "fresh.db")
 
@@ -590,6 +597,7 @@ func TestDualDBMigration_NoLegacyData(t *testing.T) {
 // TestDualDBMigration_SpecificDataIntegrity does spot-checks on individual
 // field values to verify data fidelity beyond just row counts.
 func TestDualDBMigration_SpecificDataIntegrity(t *testing.T) {
+	t.Parallel()
 	dbPath := createLegacySingleDB(t)
 	seedLegacyData(t, dbPath)
 
@@ -673,6 +681,7 @@ func TestDualDBMigration_SpecificDataIntegrity(t *testing.T) {
 // older version). The commonCols intersection logic in migrateSingleTable
 // must only copy columns that exist in both source and destination.
 func TestDualDBMigration_SchemaMismatch(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "oldschema.db")
 
@@ -808,6 +817,7 @@ func TestDualDBMigration_SchemaMismatch(t *testing.T) {
 // memories table specifically. The guard checks knowledgeDB.memories count,
 // not legacyDB.memories count.
 func TestDualDBMigration_LegacyNoMemoryRows(t *testing.T) {
+	t.Parallel()
 	dbPath := createLegacySingleDB(t)
 
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
@@ -868,6 +878,7 @@ func TestDualDBMigration_LegacyNoMemoryRows(t *testing.T) {
 // TestDualDBMigration_MultiRowStress seeds multiple rows per table to verify
 // that row iteration doesn't break mid-batch (e.g., early close, scan errors).
 func TestDualDBMigration_MultiRowStress(t *testing.T) {
+	t.Parallel()
 	dbPath := createLegacySingleDB(t)
 
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
@@ -991,6 +1002,7 @@ func TestDualDBMigration_MultiRowStress(t *testing.T) {
 // migration from running a second time. This is critical for session_tasks
 // which has no PRIMARY KEY — without the guard, duplicates would appear.
 func TestDualDBMigration_IdempotentGuardPreventsDoubleRun(t *testing.T) {
+	t.Parallel()
 	dbPath := createLegacySingleDB(t)
 
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")

@@ -20,6 +20,7 @@ func eventsOfType(t *testing.T, s *Store, typ string) []Event {
 // TestKnowledgeEvent_Created verifies that InsertMemory emits a
 // knowledge_created event for each new (non-deduped) memory.
 func TestKnowledgeEvent_Created(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -67,6 +68,7 @@ func TestKnowledgeEvent_Created(t *testing.T) {
 // TestKnowledgeEvent_Updated_Dedup verifies that inserting a near-duplicate
 // memory emits a knowledge_updated event (dedup path, not knowledge_created).
 func TestKnowledgeEvent_Updated_Dedup(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	content := "refactored store.Close to accept projectID — unique-sentinel-abc123"
@@ -122,6 +124,7 @@ func TestKnowledgeEvent_Updated_Dedup(t *testing.T) {
 // TestKnowledgeEvent_WithAnchors verifies that InsertMemoryWithAnchors emits
 // knowledge_created with anchor count in the payload.
 func TestKnowledgeEvent_WithAnchors(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemoryWithAnchors(Memory{
@@ -160,6 +163,7 @@ func TestKnowledgeEvent_WithAnchors(t *testing.T) {
 // TestKnowledgeEvent_Expired verifies that PruneStaleData emits a
 // knowledge_expired event reporting how many memories were cleaned up.
 func TestKnowledgeEvent_Expired(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Seed a memory directly with an expired expires_at.
@@ -204,6 +208,7 @@ func TestKnowledgeEvent_Expired(t *testing.T) {
 // TestKnowledgeEvent_NoSpuriousCreated verifies that a failed InsertMemory
 // (e.g. store closed) does NOT emit a spurious knowledge_created event.
 func TestKnowledgeEvent_NoSpuriousOnError(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Close the store to force an error path.
@@ -235,6 +240,7 @@ func TestKnowledgeEvent_NoSpuriousOnError(t *testing.T) {
 // returns an error per TestTouchMemory_NonExistentID) and verifying that the
 // AppendEvent path is skipped — proved by checking the event table stays clean.
 func TestKnowledgeEvent_Updated_TouchGuard(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// TouchMemory on nonexistent ID must return an error (proven by existing test).

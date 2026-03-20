@@ -27,6 +27,7 @@ func seedEmbedNodes(t *testing.T, st interface{ SaveGraph(*graph.Graph) error })
 }
 
 func TestUpsertEmbedding_StoresCount(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	idA, _ := seedEmbedNodes(t, st)
 
@@ -39,6 +40,7 @@ func TestUpsertEmbedding_StoresCount(t *testing.T) {
 }
 
 func TestUpsertEmbedding_Idempotent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	idA, _ := seedEmbedNodes(t, st)
 
@@ -51,6 +53,7 @@ func TestUpsertEmbedding_Idempotent(t *testing.T) {
 }
 
 func TestVectorSearch_ReturnsMostSimilar(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	idA, idB := seedEmbedNodes(t, st)
 
@@ -75,6 +78,7 @@ func TestVectorSearch_ReturnsMostSimilar(t *testing.T) {
 }
 
 func TestVectorSearch_EmptyStore_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	results, err := st.VectorSearch([]float32{1, 0, 0}, 5)
 	if err != nil {
@@ -86,6 +90,7 @@ func TestVectorSearch_EmptyStore_ReturnsNil(t *testing.T) {
 }
 
 func TestGetNodesWithoutEmbeddings_ReturnsOnlyUnembedded(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	idA, idB := seedEmbedNodes(t, st)
 
@@ -102,6 +107,7 @@ func TestGetNodesWithoutEmbeddings_ReturnsOnlyUnembedded(t *testing.T) {
 }
 
 func TestGetNodeTextForEmbedding_ReturnsNameAndDoc(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("texttest")
 	nid := g.MakeNodeID("a.go", "ParseRequest")

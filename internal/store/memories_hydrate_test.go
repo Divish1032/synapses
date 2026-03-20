@@ -9,6 +9,7 @@ import (
 )
 
 func TestGetMemoriesByIDs_EmptySlice(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	mems, err := st.GetMemoriesByIDs(nil)
 	require.NoError(t, err)
@@ -16,6 +17,7 @@ func TestGetMemoriesByIDs_EmptySlice(t *testing.T) {
 }
 
 func TestGetMemoriesByIDs_ReturnsFullStructs(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id1, err := st.InsertMemory(store.Memory{
@@ -62,6 +64,7 @@ func TestGetMemoriesByIDs_ReturnsFullStructs(t *testing.T) {
 }
 
 func TestGetMemoriesByIDs_MissingIDsSkipped(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id1, err := st.InsertMemory(store.Memory{

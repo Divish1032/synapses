@@ -64,6 +64,7 @@ func buildDeltaGraph(t *testing.T) *graph.Graph {
 // Each subtest resets state via st.SaveGraph at the start, so subtests are
 // fully independent despite sharing the connection.
 func TestSaveGraphDelta(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// ── Basic delta: file update replaces nodes correctly ──────────────────────
@@ -467,6 +468,7 @@ func TestSaveGraphDelta(t *testing.T) {
 // TestSaveGraphDelta_WithoutPriorFullSave uses its own isolated store because
 // it needs a completely clean state with no prior SaveGraph call.
 func TestSaveGraphDelta_WithoutPriorFullSave(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("cold-repo")
 	g.SetRoot("/tmp/cold")

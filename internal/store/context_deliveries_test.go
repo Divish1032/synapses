@@ -7,6 +7,7 @@ import (
 )
 
 func TestInsertContextDelivery_HappyPath(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	st.InsertContextDelivery(store.ContextDelivery{
@@ -46,6 +47,7 @@ func TestInsertContextDelivery_HappyPath(t *testing.T) {
 }
 
 func TestInsertContextDelivery_RefetchedFlag(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// First call — not a refetch.
@@ -79,6 +81,7 @@ func TestInsertContextDelivery_RefetchedFlag(t *testing.T) {
 }
 
 func TestCorrelateSessionOutcome_UpdatesRows(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Insert two deliveries for the same session.
@@ -126,6 +129,7 @@ func TestCorrelateSessionOutcome_UpdatesRows(t *testing.T) {
 }
 
 func TestCorrelateSessionOutcome_IdempotentOnAlreadySet(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	st.InsertContextDelivery(store.ContextDelivery{
@@ -162,6 +166,7 @@ func TestCorrelateSessionOutcome_IdempotentOnAlreadySet(t *testing.T) {
 // some rows already correlated (e.g., from a prior interrupted end_session) and
 // new rows without an outcome. Only uncorrelated rows must be updated.
 func TestCorrelateSessionOutcome_PartialUpdate(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Row 1: already correlated from a prior call.
@@ -213,6 +218,7 @@ func TestCorrelateSessionOutcome_PartialUpdate(t *testing.T) {
 }
 
 func TestInsertContextDelivery_EmptySessionID(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Deliveries with no session ID are valid — stdio paths have no session ID.
@@ -234,6 +240,7 @@ func TestInsertContextDelivery_EmptySessionID(t *testing.T) {
 }
 
 func TestInsertContextDelivery_EmptyToolName_Skipped(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Empty ToolName must be silently skipped — no row inserted.
@@ -253,6 +260,7 @@ func TestInsertContextDelivery_EmptyToolName_Skipped(t *testing.T) {
 }
 
 func TestInsertContextDelivery_NilStore(t *testing.T) {
+	t.Parallel()
 	// Must not panic when store is nil.
 	var st *store.Store
 	st.InsertContextDelivery(store.ContextDelivery{ToolName: "get_context", Entity: "X"})
@@ -275,6 +283,7 @@ func TestInsertContextDelivery_NilStore(t *testing.T) {
 }
 
 func TestGetContextDeliveriesForSession_OrderByInsertionOrder(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Insert three deliveries with the same session.

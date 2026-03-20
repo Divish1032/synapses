@@ -5,6 +5,7 @@ import (
 )
 
 func TestCreateProposal(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id, err := st.CreateProposal("agent-1", "Merge handlers", "Combine into one package", nil, 2)
@@ -35,6 +36,7 @@ func TestCreateProposal(t *testing.T) {
 }
 
 func TestVoteOnProposal_ApproveThreshold(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id, err := st.CreateProposal("proposer", "Change X", "", nil, 2)
@@ -65,6 +67,7 @@ func TestVoteOnProposal_ApproveThreshold(t *testing.T) {
 }
 
 func TestVoteOnProposal_RejectThreshold(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id, err := st.CreateProposal("proposer", "Bad idea", "", nil, 2)
@@ -83,6 +86,7 @@ func TestVoteOnProposal_RejectThreshold(t *testing.T) {
 }
 
 func TestVoteOnProposal_ChangeVote(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id, _ := st.CreateProposal("proposer", "Test", "", nil, 2)
@@ -102,6 +106,7 @@ func TestVoteOnProposal_ChangeVote(t *testing.T) {
 }
 
 func TestVoteOnProposal_ClosedProposalError(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id, _ := st.CreateProposal("proposer", "Test", "", nil, 1)
@@ -117,6 +122,7 @@ func TestVoteOnProposal_ClosedProposalError(t *testing.T) {
 }
 
 func TestWithdrawProposal(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id, _ := st.CreateProposal("proposer", "Test", "", nil, 2)
@@ -131,6 +137,7 @@ func TestWithdrawProposal(t *testing.T) {
 }
 
 func TestWithdrawProposal_WrongAgent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id, _ := st.CreateProposal("proposer", "Test", "", nil, 2)
@@ -142,6 +149,7 @@ func TestWithdrawProposal_WrongAgent(t *testing.T) {
 }
 
 func TestGetProposals_StatusFilter(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	id1, _ := st.CreateProposal("a", "Open one", "", nil, 2)

@@ -6,6 +6,7 @@ import (
 )
 
 func TestAgentContext_CRUD(t *testing.T) {
+	t.Parallel()
 	f, err := os.CreateTemp("", "test-agentctx-*.db")
 	if err != nil {
 		t.Fatal(err)

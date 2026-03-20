@@ -70,11 +70,13 @@ func buildTestGraph(t *testing.T) *graph.Graph {
 }
 
 func TestOpen_CreatesSchema(t *testing.T) {
+	t.Parallel()
 	// Simply opening must not error.
 	_ = openTestStore(t)
 }
 
 func TestSaveAndLoad_Roundtrip(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	original := buildTestGraph(t)
 
@@ -99,6 +101,7 @@ func TestSaveAndLoad_Roundtrip(t *testing.T) {
 }
 
 func TestLoad_EmptyStore_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g, err := st.LoadGraph()
 	if err != nil {
@@ -110,6 +113,7 @@ func TestLoad_EmptyStore_ReturnsNil(t *testing.T) {
 }
 
 func TestSaveAndLoad_NodeFields(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	original := buildTestGraph(t)
 
@@ -143,6 +147,7 @@ func TestSaveAndLoad_NodeFields(t *testing.T) {
 }
 
 func TestSaveAndLoad_EdgeTypes(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	original := buildTestGraph(t)
 
@@ -170,6 +175,7 @@ func TestSaveAndLoad_EdgeTypes(t *testing.T) {
 }
 
 func TestSaveGraph_Replaces(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// First save: 3 nodes.
@@ -193,6 +199,7 @@ func TestSaveGraph_Replaces(t *testing.T) {
 }
 
 func TestSavedAt_AfterSave(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	before := time.Now().Add(-time.Second)
@@ -214,6 +221,7 @@ func TestSavedAt_AfterSave(t *testing.T) {
 }
 
 func TestSavedAt_EmptyStore(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	ts, err := st.SavedAt()
 	if err != nil {
@@ -225,6 +233,7 @@ func TestSavedAt_EmptyStore(t *testing.T) {
 }
 
 func TestDefaultPath_Deterministic(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	p1, err := store.DefaultPath(dir)
 	if err != nil {
@@ -239,6 +248,7 @@ func TestDefaultPath_Deterministic(t *testing.T) {
 // ─── Stat ─────────────────────────────────────────────────────────────────────
 
 func TestStat_EmptyStore_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	stat, err := st.Stat(dbPath)
@@ -251,6 +261,7 @@ func TestStat_EmptyStore_ReturnsNil(t *testing.T) {
 }
 
 func TestStat_AfterSave_ReturnsMetadata(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	st, err := store.Open(dbPath)
 	if err != nil {
@@ -300,6 +311,7 @@ func TestStat_AfterSave_ReturnsMetadata(t *testing.T) {
 // ─── SemanticSearch ───────────────────────────────────────────────────────────
 
 func TestSemanticSearch_FindsByName(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := buildTestGraph(t)
 	// Add a function with rich metadata for search testing.
@@ -339,6 +351,7 @@ func TestSemanticSearch_FindsByName(t *testing.T) {
 }
 
 func TestSemanticSearch_CamelCaseSplit(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := buildTestGraph(t)
 	g.AddNode(&graph.Node{
@@ -370,6 +383,7 @@ func TestSemanticSearch_CamelCaseSplit(t *testing.T) {
 }
 
 func TestSemanticSearch_EmptyQuery(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	results, err := st.SemanticSearch("", 10)
 	if err != nil {
@@ -381,6 +395,7 @@ func TestSemanticSearch_EmptyQuery(t *testing.T) {
 }
 
 func TestSemanticSearch_MultiWord(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("testrepo")
 
@@ -423,6 +438,7 @@ func TestSemanticSearch_MultiWord(t *testing.T) {
 }
 
 func TestSemanticSearch_SpecialChars(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("testrepo")
 	g.AddNode(&graph.Node{
@@ -445,6 +461,7 @@ func TestSemanticSearch_SpecialChars(t *testing.T) {
 // TestScanAll_DoesNotCrash verifies that ScanAll on the live cache dir returns
 // without error regardless of what is (or isn't) cached on this machine.
 func TestScanAll_DoesNotCrash(t *testing.T) {
+	t.Parallel()
 	stats, err := store.ScanAll()
 	if err != nil {
 		t.Fatalf("ScanAll() returned error: %v", err)
@@ -457,6 +474,7 @@ func TestScanAll_DoesNotCrash(t *testing.T) {
 // directory is gracefully skipped and does not cause ScanAll to error.
 // We test this via Open + Stat since ScanAll reads from the OS cache dir.
 func TestStat_CorruptDB_ReturnsError(t *testing.T) {
+	t.Parallel()
 	// Write garbage bytes as a "corrupt" DB file.
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "corrupt.db")

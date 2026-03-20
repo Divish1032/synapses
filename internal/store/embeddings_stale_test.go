@@ -9,6 +9,7 @@ import (
 )
 
 func TestGetNodesWithoutEmbeddings_DetectsStaleHash(t *testing.T) {
+	t.Parallel()
 	st, err := Open(t.TempDir() + "/stale_test.db")
 	if err != nil {
 		t.Fatalf("Open: %v", err)

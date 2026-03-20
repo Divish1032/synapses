@@ -23,6 +23,7 @@ func makeGraph(t *testing.T, nodes []*graph.Node) *graph.Graph {
 // TestGetSignatureChanges_ChangedSignature verifies the common case: an
 // exported function whose signature changes between two SaveGraph calls.
 func TestGetSignatureChanges_ChangedSignature(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	g1 := graph.New("test-repo")
@@ -69,6 +70,7 @@ func TestGetSignatureChanges_ChangedSignature(t *testing.T) {
 // TestGetSignatureChanges_UnchangedSignature verifies that an exported function
 // whose signature did NOT change produces no entries.
 func TestGetSignatureChanges_UnchangedSignature(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	g1 := graph.New("test-repo")
@@ -105,6 +107,7 @@ func TestGetSignatureChanges_UnchangedSignature(t *testing.T) {
 // TestGetSignatureChanges_NewNode verifies that a brand-new exported node
 // (not present in the prior SaveGraph) does NOT appear as a change.
 func TestGetSignatureChanges_NewNode(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// First save: empty graph.
@@ -138,6 +141,7 @@ func TestGetSignatureChanges_NewNode(t *testing.T) {
 // package call unexported functions directly and break compilation when their
 // signature changes. FIX-R20A: removed the exported=1 filter.
 func TestGetSignatureChanges_UnexportedChanged(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	g1 := graph.New("test-repo")
@@ -177,6 +181,7 @@ func TestGetSignatureChanges_UnexportedChanged(t *testing.T) {
 
 // TestGetSignatureChanges_StructChanged verifies struct type changes are tracked.
 func TestGetSignatureChanges_StructChanged(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	g1 := graph.New("test-repo")
@@ -215,6 +220,7 @@ func TestGetSignatureChanges_StructChanged(t *testing.T) {
 // TestGetSignatureChanges_WrongFileReturnsEmpty verifies that querying a
 // different file returns nothing even if another file has changes.
 func TestGetSignatureChanges_WrongFileReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	g1 := graph.New("test-repo")
@@ -250,6 +256,7 @@ func TestGetSignatureChanges_WrongFileReturnsEmpty(t *testing.T) {
 
 // TestGetSignatureChanges_EmptyStore verifies graceful return on empty DB.
 func TestGetSignatureChanges_EmptyStore(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	changes, err := st.GetSignatureChanges("any/file.go")
 	if err != nil {
@@ -263,6 +270,7 @@ func TestGetSignatureChanges_EmptyStore(t *testing.T) {
 // TestGetSignatureChanges_MultipleChangesInFile verifies multiple changed
 // entities in a single file are all returned.
 func TestGetSignatureChanges_MultipleChangesInFile(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	g1 := graph.New("test-repo")
@@ -293,6 +301,7 @@ func TestGetSignatureChanges_MultipleChangesInFile(t *testing.T) {
 // TestGetSignatureChanges_UsesStoreNotExposedToPublic is a compile-time check
 // that SignatureChange fields are accessible.
 func TestGetSignatureChanges_FieldsAccessible(t *testing.T) {
+	t.Parallel()
 	var sc store.SignatureChange
 	_ = sc.NodeID
 	_ = sc.Name

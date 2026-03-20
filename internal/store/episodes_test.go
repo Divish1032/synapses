@@ -7,6 +7,7 @@ import (
 )
 
 func TestRememberEpisode_FTSTriggerIndexes(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	ep := store.Episode{
@@ -41,6 +42,7 @@ func TestRememberEpisode_FTSTriggerIndexes(t *testing.T) {
 }
 
 func TestCheckPlanSafety_ReturnsTopFailureMatch(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Record two failure episodes.
@@ -71,6 +73,7 @@ func TestCheckPlanSafety_ReturnsTopFailureMatch(t *testing.T) {
 }
 
 func TestCheckPlanSafety_ColdStart_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	// Empty store — no failures recorded yet.
 	match, err := st.CheckPlanSafety("modify the auth handler", "")
@@ -83,6 +86,7 @@ func TestCheckPlanSafety_ColdStart_ReturnsNil(t *testing.T) {
 }
 
 func TestGetEpisodes_FilterByType(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _ = st.RememberEpisode(store.Episode{AgentID: "a", EpisodeType: "failure", Outcome: "failure", Decision: "bad thing"})
@@ -101,6 +105,7 @@ func TestGetEpisodes_FilterByType(t *testing.T) {
 }
 
 func TestRecallEpisodes_SinceDays(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Insert an episode (created_at defaults to time.Now() inside RememberEpisode).
@@ -146,6 +151,7 @@ func TestRecallEpisodes_SinceDays(t *testing.T) {
 }
 
 func TestFTSTrigger_DeleteKeepsIndexClean(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Insert then verify FTS finds it.
@@ -172,6 +178,7 @@ func TestFTSTrigger_DeleteKeepsIndexClean(t *testing.T) {
 // Before the fix, tag="%" would construct `tags LIKE "%%%"` which matches every row.
 // After the fix, "%" is escaped to "\%" so only episodes literally tagged "%" match.
 func TestGetEpisodes_TagLIKEEscaping(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Episode tagged with a real tag.
@@ -254,6 +261,7 @@ func TestGetEpisodes_TagLIKEEscaping(t *testing.T) {
 // An empty tag is not a filter — skipping it means all episodes are returned
 // (same as passing no tags), not zero episodes.
 func TestGetEpisodes_EmptyTagSkipped(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	_, _ = st.RememberEpisode(store.Episode{AgentID: "a", EpisodeType: "decision", Outcome: "success", Decision: "ep1", Tags: `["x"]`})
@@ -274,6 +282,7 @@ func TestGetEpisodes_EmptyTagSkipped(t *testing.T) {
 }
 
 func TestFindEpisodesByNodeID_NoSubstringFalsePositive(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 
 	// Insert two episodes: one with "Auth", one with "AuthService".

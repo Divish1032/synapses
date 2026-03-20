@@ -11,6 +11,7 @@ import (
 // ── Sprint 10.1: Memory Versioning Tests ────────────────────────────────────
 
 func TestCreateMemoryVersion_BasicRoundTrip(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -40,6 +41,7 @@ func TestCreateMemoryVersion_BasicRoundTrip(t *testing.T) {
 }
 
 func TestCreateMemoryVersion_MultipleVersions(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -73,6 +75,7 @@ func TestCreateMemoryVersion_MultipleVersions(t *testing.T) {
 }
 
 func TestGetMemoryVersionCount(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -97,6 +100,7 @@ func TestGetMemoryVersionCount(t *testing.T) {
 }
 
 func TestInsertMemory_DedupCreatesVersionAndUpdatesContent(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Insert original memory.
@@ -134,6 +138,7 @@ func TestInsertMemory_DedupCreatesVersionAndUpdatesContent(t *testing.T) {
 }
 
 func TestInsertMemoryWithAnchors_DedupCreatesVersionAndUpdatesContent(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id1, err := st.InsertMemoryWithAnchors(Memory{
@@ -167,6 +172,7 @@ func TestInsertMemoryWithAnchors_DedupCreatesVersionAndUpdatesContent(t *testing
 }
 
 func TestInsertMemory_IdenticalContentNoVersion(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Insert a memory.
@@ -195,6 +201,7 @@ func TestInsertMemory_IdenticalContentNoVersion(t *testing.T) {
 }
 
 func TestGetMemoryAsOf_NoVersions(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -212,6 +219,7 @@ func TestGetMemoryAsOf_NoVersions(t *testing.T) {
 }
 
 func TestGetMemoryAsOf_BeforeCreation(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	pastTime := time.Now().Add(-24 * time.Hour)
@@ -230,6 +238,7 @@ func TestGetMemoryAsOf_BeforeCreation(t *testing.T) {
 }
 
 func TestGetMemoryAsOf_ReturnsHistoricalVersion(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Memory created at T0 = -20s with content "v1 content".
@@ -257,6 +266,7 @@ func TestGetMemoryAsOf_ReturnsHistoricalVersion(t *testing.T) {
 }
 
 func TestGetMemoryAsOf_MultiVersionCorrectSelection(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Memory created at T0 with content "A".
@@ -311,6 +321,7 @@ func TestGetMemoryAsOf_MultiVersionCorrectSelection(t *testing.T) {
 }
 
 func TestGetMemoryAsOf_EmptyIDs(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 	mems, err := st.GetMemoryAsOf(nil, time.Now())
 	require.NoError(t, err)
@@ -318,6 +329,7 @@ func TestGetMemoryAsOf_EmptyIDs(t *testing.T) {
 }
 
 func TestExpireMemories_CascadesVersions(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -347,6 +359,7 @@ func TestExpireMemories_CascadesVersions(t *testing.T) {
 }
 
 func TestUpdateMemoryContent(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -367,6 +380,7 @@ func TestUpdateMemoryContent(t *testing.T) {
 }
 
 func TestVersionCap_PrunesOldest(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	id, err := st.InsertMemory(Memory{
@@ -391,6 +405,7 @@ func TestVersionCap_PrunesOldest(t *testing.T) {
 }
 
 func TestDedupChain_ThreeWrites(t *testing.T) {
+	t.Parallel()
 	st := openMemTestStore(t)
 
 	// Write 1: original.
