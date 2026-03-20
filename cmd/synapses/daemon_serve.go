@@ -877,7 +877,18 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		}, nil
 	}
 
-	g, err := loadOrBuildGraphWithStore(absPath, st, false, cfg.Plugins)
+	// Plugin security: per-machine opt-in for external parser commands.
+	var pluginCheck *parser.PluginChecker
+	if len(cfg.Plugins) > 0 {
+		sHome, homeErr := synapsesHome()
+		if homeErr != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: cannot determine synapses home: %v (plugins disabled)\n", homeErr)
+		} else {
+			pluginCheck = parser.NewPluginChecker(sHome)
+		}
+	}
+
+	g, err := loadOrBuildGraphWithStore(absPath, st, false, cfg.Plugins, pluginCheck)
 	if err != nil {
 		st.Close()
 		projCancel()
@@ -1066,7 +1077,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	var fw *watcher.Watcher
 	w := parser.NewWalker()
 	for _, p := range cfg.Plugins {
-		w.RegisterPlugin(p.Extensions, p.Command)
+		w.RegisterPlugin(p.Extensions, p.Command, pluginCheck)
 	}
 	fw2, err := watcher.New(g, w, st)
 	if err == nil {

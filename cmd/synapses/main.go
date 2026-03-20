@@ -115,6 +115,8 @@ func run(args []string) error {
 		return cmdConnect(args[1:])
 	case "memory":
 		return cmdMemory(args[1:])
+	case "allow-plugin":
+		return cmdAllowPlugin(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -170,7 +172,18 @@ func cmdStartDirect(args []string) error {
 	// Prune stale operational data in the background (30-day retention).
 	go st.PruneStaleData(30)
 
-	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins)
+	// Plugin security: per-machine opt-in for external parser commands.
+	var pluginCheck *parser.PluginChecker
+	if len(cfg.Plugins) > 0 {
+		sHome, homeErr := synapsesHome()
+		if homeErr != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: cannot determine synapses home: %v (plugins disabled)\n", homeErr)
+		} else {
+			pluginCheck = parser.NewPluginChecker(sHome)
+		}
+	}
+
+	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins, pluginCheck)
 	if err != nil {
 		return err
 	}
@@ -382,7 +395,7 @@ func cmdStartDirect(args []string) error {
 	if !*noWatch {
 		w := parser.NewWalker()
 		for _, p := range cfg.Plugins {
-			w.RegisterPlugin(p.Extensions, p.Command)
+			w.RegisterPlugin(p.Extensions, p.Command, pluginCheck)
 		}
 		fw, err := watcher.New(g, w, st)
 		if err != nil {
@@ -475,7 +488,18 @@ func cmdIndex(args []string) error {
 	}
 	defer st.Close()
 
-	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins)
+	// Plugin security: per-machine opt-in for external parser commands.
+	var pluginCheck2 *parser.PluginChecker
+	if len(cfg.Plugins) > 0 {
+		sHome, homeErr := synapsesHome()
+		if homeErr != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: cannot determine synapses home: %v (plugins disabled)\n", homeErr)
+		} else {
+			pluginCheck2 = parser.NewPluginChecker(sHome)
+		}
+	}
+
+	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins, pluginCheck2)
 	if err != nil {
 		return err
 	}
@@ -880,12 +904,12 @@ func formatDuration(d time.Duration) string {
 // is attempted first — only changed files are re-parsed, saving significant time
 // on large codebases. Falls back to a full parse if the smart reindex fails.
 // plugins is forwarded to the Walker so external parser plugins handle their extensions.
-func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bool, plugins []config.PluginConfig) (*graph.Graph, error) {
+func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bool, plugins []config.PluginConfig, pluginCheck *parser.PluginChecker) (*graph.Graph, error) {
 	// Always attempt smart reindex first: a fast filesystem mtime walk that
 	// re-parses only changed files. This keeps line numbers accurate after
 	// offline edits made between sessions (when the watcher was not running).
 	// On repos with no changes the walk is cheap and returns immediately.
-	g, err := smartReindex(repoRoot, st, plugins)
+	g, err := smartReindex(repoRoot, st, plugins, pluginCheck)
 	if err == nil {
 		if saveErr := st.SaveGraph(g); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "synapses: cache save failed: %v\n", saveErr)
@@ -928,7 +952,7 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 	defer UnregisterIndexing(repoRoot)
 
 	start := time.Now()
-	g, err = buildGraph(repoRoot, st, plugins, quiet, progress)
+	g, err = buildGraph(repoRoot, st, plugins, quiet, progress, pluginCheck)
 	if err != nil {
 		return nil, err
 	}
@@ -978,7 +1002,7 @@ func loadOrBuildGraph(repoRoot string, forceReindex bool) (*graph.Graph, error) 
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 	defer st.Close()
-	return loadOrBuildGraphWithStore(repoRoot, st, forceReindex, nil)
+	return loadOrBuildGraphWithStore(repoRoot, st, forceReindex, nil, nil)
 }
 
 // analyzeDataFlowIfEnabled tags source/sink nodes and creates DATA_FLOWS summary
@@ -1115,13 +1139,13 @@ func extDisplayName(ext string) string {
 // buildGraph performs a full parse from scratch.
 // quiet suppresses stderr progress output (SYNAPSES_QUIET=1).
 // progress, if non-nil, receives live done/total updates for the health endpoint.
-func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, quiet bool, progress *IndexingState) (*graph.Graph, error) {
+func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, quiet bool, progress *IndexingState, pluginCheck *parser.PluginChecker) (*graph.Graph, error) {
 	repoID := filepath.Base(root)
 	g := graph.New(repoID)
 	g.SetRoot(root)
 	w := parser.NewWalker()
 	for _, p := range plugins {
-		w.RegisterPlugin(p.Extensions, p.Command)
+		w.RegisterPlugin(p.Extensions, p.Command, pluginCheck)
 	}
 
 	// BeginFunc fires after Phase 1 (filesystem scan) with the real total.
@@ -1204,7 +1228,7 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 // and returns the updated graph. Used when --reindex is requested and a valid
 // cache exists, avoiding a full re-parse of unchanged files.
 // plugins registers any external parser plugins before the incremental walk.
-func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfig) (*graph.Graph, error) {
+func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfig, pluginCheck *parser.PluginChecker) (*graph.Graph, error) {
 	g, err := st.LoadGraph()
 	if err != nil || g == nil {
 		return nil, fmt.Errorf("load cached graph: %w", err)
@@ -1220,7 +1244,7 @@ func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfi
 
 	w := parser.NewWalker()
 	for _, p := range plugins {
-		w.RegisterPlugin(p.Extensions, p.Command)
+		w.RegisterPlugin(p.Extensions, p.Command, pluginCheck)
 	}
 	fresh, changed, removed, err := w.IncrementalReindex(g, repoRoot, known)
 	if err != nil {
@@ -1361,6 +1385,64 @@ var agentMemoryTables = []string{
 }
 
 // cmdMemory dispatches "synapses memory <subcommand>".
+// cmdAllowPlugin manages the per-machine plugin allowlist.
+// Usage: synapses allow-plugin <command>
+//
+//	synapses allow-plugin --list
+//	synapses allow-plugin --revoke <command>
+func cmdAllowPlugin(args []string) error {
+	sHome, err := synapsesHome()
+	if err != nil {
+		return fmt.Errorf("cannot determine synapses home: %w", err)
+	}
+	checker := parser.NewPluginChecker(sHome)
+
+	if len(args) == 0 {
+		fmt.Println("Usage: synapses allow-plugin <command>")
+		fmt.Println("       synapses allow-plugin --list")
+		fmt.Println("       synapses allow-plugin --revoke <command>")
+		fmt.Println()
+		fmt.Println("Approves an external parser plugin command for execution on this machine.")
+		fmt.Println("Plugin commands are specified in synapses.json and execute arbitrary binaries.")
+		fmt.Println("This allowlist prevents malicious repositories from running code on clone.")
+		return nil
+	}
+
+	switch args[0] {
+	case "--list":
+		approved := checker.ListApproved()
+		if len(approved) == 0 {
+			fmt.Println("No plugins approved.")
+			return nil
+		}
+		fmt.Printf("%d approved plugin(s):\n", len(approved))
+		for _, cmd := range approved {
+			fmt.Printf("  %s\n", cmd)
+		}
+		return nil
+
+	case "--revoke":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: synapses allow-plugin --revoke <command>")
+		}
+		command := strings.Join(args[1:], " ")
+		if err := checker.RevokeCommand(command); err != nil {
+			return fmt.Errorf("revoke plugin: %w", err)
+		}
+		fmt.Printf("Revoked plugin: %s\n", command)
+		return nil
+
+	default:
+		command := strings.Join(args, " ")
+		if err := checker.ApproveCommand(command); err != nil {
+			return fmt.Errorf("approve plugin: %w", err)
+		}
+		fmt.Printf("Approved plugin: %s\n", command)
+		fmt.Printf("This plugin will now execute when loading projects that reference it.\n")
+		return nil
+	}
+}
+
 func cmdMemory(args []string) error {
 	if len(args) == 0 || args[0] == "help" {
 		fmt.Println("Usage: synapses memory clear -all [--logs]")
