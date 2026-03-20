@@ -247,10 +247,11 @@ func (s *Store) FindEpisodesByNodeID(nodeID string, limit int) ([]Episode, error
 	if nodeID == "" || limit <= 0 {
 		return nil, nil
 	}
-	// Use LIKE with the node ID substring. The affected_nodes column stores
-	// a JSON array like '["repo::file.go::Name"]'. We search for the node ID
-	// within it. escapeLike handles % and _ in node IDs.
-	pattern := "%" + escapeLike(nodeID) + "%"
+	// The affected_nodes column stores a JSON array like '["repo::file.go::Name"]'.
+	// Wrap the search term in double quotes so the LIKE pattern matches the exact
+	// JSON string entry — "Auth" will NOT false-match "AuthService" because the
+	// closing quote acts as a boundary. escapeLike handles % and _ in node IDs.
+	pattern := `%"` + escapeLike(nodeID) + `"%`
 	rows, err := s.knowledgeDB.Query(`
 		SELECT id, agent_id, project_id, created_at, episode_type, outcome,
 		       trigger, decision, rationale, affected_files, affected_nodes,
