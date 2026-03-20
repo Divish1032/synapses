@@ -324,9 +324,40 @@ func TestEmbeddingStatus_BuiltinNotReady_ReturnsNotDownloaded(t *testing.T) {
 	}
 	got := embeddingStatus(e)
 	if got != "builtin (model not yet downloaded)" {
-		t.Errorf("embeddingStatus(builtin, not ready) = %q, want %q", got, "builtin (model not yet downloaded)")
+		t.Errorf("embeddingStatus(builtin, never tried) = %q, want %q", got, "builtin (model not yet downloaded)")
 	}
 }
+
+// TestEmbeddingStatus_BuiltinUnavailable verifies the "unavailable" state after a
+// failed init attempt (distinguishes from "never tried").
+func TestEmbeddingStatus_BuiltinUnavailable_AfterFailedInit(t *testing.T) {
+	// Point embedder at a non-creatable path so ensureModel() always fails.
+	e := embed.NewBuiltinEmbedder("/nonexistent/path/that/cannot/be/created")
+	if e.IsReady() {
+		t.Skip("unexpectedly ready")
+	}
+	// Trigger an init attempt — fails because the directory can't be created.
+	_, _ = e.Embed(context.Background(), "probe")
+
+	got := embeddingStatus(e)
+	if got != "builtin (unavailable)" {
+		t.Errorf("embeddingStatus(builtin, init failed) = %q, want %q", got, "builtin (unavailable)")
+	}
+}
+
+// TestEmbeddingStatus_UnknownEmbedder covers the default branch.
+func TestEmbeddingStatus_UnknownEmbedder_ReturnsUnknown(t *testing.T) {
+	got := embeddingStatus(&stubEmbedder{})
+	if got != "unknown" {
+		t.Errorf("embeddingStatus(unknown type) = %q, want %q", got, "unknown")
+	}
+}
+
+// stubEmbedder satisfies embed.Embedder but is not BuiltinEmbedder or OllamaEmbedder.
+type stubEmbedder struct{}
+
+func (s *stubEmbedder) Embed(_ context.Context, _ string) ([]float32, error) { return nil, nil }
+func (s *stubEmbedder) Model() string                                          { return "stub" }
 
 func TestEmbeddingStatus_Ollama_ReturnsOllama(t *testing.T) {
 	e := embed.NewOllamaEmbedder("http://localhost:11434/api/embeddings", "")

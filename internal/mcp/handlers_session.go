@@ -28,20 +28,25 @@ import (
 // embeddingStatus returns a human-readable status string for the active
 // memory embedder. Used in the session_init response to explain why recall()
 // may return only FTS results (e.g. in air-gapped or unconfigured environments).
+//
+// Possible values:
+//   - "off"                                  — no embedder configured
+//   - "builtin (ready)"                      — model loaded, embeddings working
+//   - "builtin (model not yet downloaded)"   — never attempted; will download on first recall()
+//   - "builtin (unavailable)"                — init attempted but failed (e.g. air-gapped)
+//   - "ollama"                               — delegating to local Ollama instance
+//   - "unknown"                              — unrecognized embedder implementation
 func embeddingStatus(e embed.Embedder) string {
 	if e == nil {
 		return "off"
 	}
 	switch v := e.(type) {
 	case *embed.BuiltinEmbedder:
-		if v.IsReady() {
-			return "builtin (ready)"
-		}
-		return "builtin (model not yet downloaded)"
+		return "builtin (" + v.StatusDetail() + ")"
 	case *embed.OllamaEmbedder:
 		return "ollama"
 	default:
-		return "builtin"
+		return "unknown"
 	}
 }
 
