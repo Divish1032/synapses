@@ -1343,6 +1343,42 @@ func TestHandleRecall_InvalidSinceFormat_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestHandleRecall_LimitRespectedAfterTimeFilter verifies that limit= is honored even when
+// the inflated quadLimit would return more candidates inside the time window.
+// Regression: without the re-cap, limit=2 with 5 in-range memories returned 5.
+func TestHandleRecall_LimitRespectedAfterTimeFilter(t *testing.T) {
+	srv := newTestServer(t)
+
+	for i := 0; i < 5; i++ {
+		_, _ = srv.store.InsertMemory(store.Memory{
+			Tier:    store.TierProject,
+			Content: fmt.Sprintf("auth decision number %d", i),
+			AgentID: "agent-1",
+			Source:  store.SourceManual,
+		})
+	}
+
+	since := time.Now().UTC().Add(-1 * time.Hour).Format("2006-01-02T15:04:05Z")
+	until := time.Now().UTC().Add(1 * time.Hour).Format("2006-01-02T15:04:05Z")
+	res, err := srv.handleRecall(context.Background(), callTool(map[string]any{
+		"query": "auth decision",
+		"since": since,
+		"until": until,
+		"limit": float64(2),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", extractErrorText(t, res))
+	}
+	raw := extractJSON(t, res)
+	mems, _ := raw["memories"].([]interface{})
+	if len(mems) > 2 {
+		t.Errorf("limit=2 must be respected after time filter: got %d memories", len(mems))
+	}
+}
+
 // TestHandleRecall_DateOnlyFormat verifies "2026-03-01" is accepted without RFC3339 suffix.
 func TestHandleRecall_DateOnlyFormat(t *testing.T) {
 	srv := newTestServer(t)
