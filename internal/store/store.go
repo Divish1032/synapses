@@ -1362,30 +1362,36 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
 	cutoffUnix := time.Now().AddDate(0, 0, -retentionDays).Unix()
 
+	pruneExec := func(query string, args ...interface{}) {
+		if _, err := s.knowledgeDB.Exec(query, args...); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: store: prune exec failed (%q): %v\n", query[:min(len(query), 60)], err)
+		}
+	}
+
 	// tool_calls: one row per MCP tool invocation — can reach millions.
-	s.knowledgeDB.Exec(`DELETE FROM tool_calls WHERE created_at < ?`, cutoff)
+	pruneExec(`DELETE FROM tool_calls WHERE created_at < ?`, cutoff)
 
 	// agent_messages: no built-in TTL.
-	s.knowledgeDB.Exec(`DELETE FROM agent_messages WHERE created_at < ?`, cutoff)
+	pruneExec(`DELETE FROM agent_messages WHERE created_at < ?`, cutoff)
 
 	// events: coordination/observability stream — pruned to retention window.
-	s.knowledgeDB.Exec(`DELETE FROM events WHERE created_at < ?`, cutoff)
+	pruneExec(`DELETE FROM events WHERE created_at < ?`, cutoff)
 
 	// episodes: stored as Unix seconds (INTEGER).
-	s.knowledgeDB.Exec(`DELETE FROM episodes WHERE created_at < ?`, cutoffUnix)
+	pruneExec(`DELETE FROM episodes WHERE created_at < ?`, cutoffUnix)
 
 	// memories: honour their own expires_at field; also remove session_log entries
 	// older than the retention window regardless of their expires_at.
-	s.knowledgeDB.Exec(`DELETE FROM memories WHERE expires_at != '' AND expires_at < ?`, time.Now().UTC().Format(time.RFC3339))
-	s.knowledgeDB.Exec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at < ?`, cutoff)
+	pruneExec(`DELETE FROM memories WHERE expires_at != '' AND expires_at < ?`, time.Now().UTC().Format(time.RFC3339))
+	pruneExec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at < ?`, cutoff)
 
 	// context_deliveries: instrumentation data for Sprint 11 feedback loop.
 	// Rows older than retention window have been analyzed and have no further value.
-	s.knowledgeDB.Exec(`DELETE FROM context_deliveries WHERE created_at < ?`, cutoffUnix)
+	pruneExec(`DELETE FROM context_deliveries WHERE created_at < ?`, cutoffUnix)
 
 	// proposals: resolved proposals have no further value after retention period.
-	s.knowledgeDB.Exec(`DELETE FROM proposals WHERE status IN ('accepted','rejected','withdrawn') AND updated_at < ?`, cutoff)
-	s.knowledgeDB.Exec(`DELETE FROM proposal_votes WHERE proposal_id NOT IN (SELECT id FROM proposals)`)
+	pruneExec(`DELETE FROM proposals WHERE status IN ('accepted','rejected','withdrawn') AND updated_at < ?`, cutoff)
+	pruneExec(`DELETE FROM proposal_votes WHERE proposal_id NOT IN (SELECT id FROM proposals)`)
 
 	// Cross-DB reconciliation for hard node_id references: annotations and quality_gaps
 	// in knowledgeDB reference node IDs from graphDB, but there is no cross-database
@@ -1422,7 +1428,7 @@ func (s *Store) PruneStaleData(retentionDays int) {
 				}
 				annRows.Close()
 				for _, id := range toDelete {
-					s.knowledgeDB.Exec(`DELETE FROM annotations WHERE id = ?`, id)
+					pruneExec(`DELETE FROM annotations WHERE id = ?`, id)
 				}
 			}
 
@@ -1445,16 +1451,18 @@ func (s *Store) PruneStaleData(retentionDays int) {
 				}
 				gapRows.Close()
 				for _, id := range toDelete {
-					s.knowledgeDB.Exec(`DELETE FROM quality_gaps WHERE id = ?`, id)
+					pruneExec(`DELETE FROM quality_gaps WHERE id = ?`, id)
 				}
 			}
 		}
 	}
 
 	// SQLite housekeeping for both databases.
-	s.knowledgeDB.Exec(`PRAGMA optimize`)
+	pruneExec(`PRAGMA optimize`)
 	if s.graphDB != nil {
-		s.graphDB.Exec(`PRAGMA optimize`)
+		if _, err := s.graphDB.Exec(`PRAGMA optimize`); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: store: prune graphDB PRAGMA optimize: %v\n", err)
+		}
 	}
 }
 
@@ -2099,7 +2107,9 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		var meta map[string]string
-		_ = json.Unmarshal([]byte(metaJSON), &meta)
+		if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: synapses: store: unmarshal metadata for node %q (%s): %v\n", id, name, err)
+		}
 		if meta == nil {
 			meta = make(map[string]string)
 		}
