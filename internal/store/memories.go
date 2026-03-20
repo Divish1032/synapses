@@ -1051,6 +1051,87 @@ func (s *Store) GetMemoryAnchorNodeIDs(memIDs []string) (map[string]string, erro
 	return result, nil
 }
 
+// GetMemoryAnchorNodeIDsInSet returns for each memory the first anchor node ID
+// that is present in nodeSet (the BFS-discovered nodes). Returns map[memoryID → nodeID].
+// Memories with no anchors in nodeSet are absent from the map.
+//
+// This is the correct method for path reconstruction: a memory may have multiple
+// anchors, and only the one that was actually discovered by BFS is useful for tracing
+// the path back to the query seed. Using GetMemoryAnchorNodeIDs (first by created_at)
+// would silently drop paths when the first anchor is not the BFS-discovered one.
+//
+// Batches memIDs in groups of 200 (leaves room for nodeSet placeholders within
+// SQLite's 999-variable limit even when nodeSet has up to 500 entries).
+func (s *Store) GetMemoryAnchorNodeIDsInSet(memIDs []string, nodeSet map[string]bool) (map[string]string, error) {
+	if len(memIDs) == 0 || len(nodeSet) == 0 {
+		return nil, nil
+	}
+
+	// Build sorted node ID slice for stable, deterministic IN clause.
+	nodeIDs := make([]string, 0, len(nodeSet))
+	for nid := range nodeSet {
+		nodeIDs = append(nodeIDs, nid)
+	}
+
+	nodePlaceholders := make([]string, len(nodeIDs))
+	nodeArgs := make([]interface{}, len(nodeIDs))
+	for i, nid := range nodeIDs {
+		nodePlaceholders[i] = "?"
+		nodeArgs[i] = nid
+	}
+	nodeInClause := strings.Join(nodePlaceholders, ",")
+
+	result := make(map[string]string, len(memIDs))
+
+	const batchSize = 200
+	for i := 0; i < len(memIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(memIDs) {
+			end = len(memIDs)
+		}
+		batch := memIDs[i:end]
+
+		memPlaceholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for j, id := range batch {
+			memPlaceholders[j] = "?"
+			args[j] = id
+		}
+		// Combine args: mem IDs first, then node IDs.
+		allArgs := append(args, nodeArgs...)
+
+		rows, err := s.knowledgeDB.Query(
+			`SELECT memory_id, node_id FROM memory_anchors
+			 WHERE memory_id IN (`+strings.Join(memPlaceholders, ",")+`)
+			   AND node_id IN (`+nodeInClause+`)
+			 ORDER BY memory_id, created_at`,
+			allArgs...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("get memory anchor node IDs in set: %w", err)
+		}
+
+		for rows.Next() {
+			var memID, nodeID string
+			if err := rows.Scan(&memID, &nodeID); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan memory anchor node ID in set: %w", err)
+			}
+			// Keep only the first anchor per memory (ORDER BY created_at).
+			if _, exists := result[memID]; !exists {
+				result[memID] = nodeID
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("memory anchor node IDs in set rows: %w", err)
+		}
+		rows.Close()
+	}
+
+	return result, nil
+}
+
 // GetMemoriesByAnchorNode returns memories anchored to the given node ID via the
 // memory_anchors junction table. This finds memories linked through anchor_nodes=
 // in remember(), which are NOT discoverable via QueryMemories(entityID=...) alone.
