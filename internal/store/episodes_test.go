@@ -272,3 +272,35 @@ func TestGetEpisodes_EmptyTagSkipped(t *testing.T) {
 		t.Errorf("empty tag slice returned %d rows, nil tag slice returned %d rows; want equal (empty tag must be skipped)", len(withEmpty), len(withNil))
 	}
 }
+
+func TestFindEpisodesByNodeID_NoSubstringFalsePositive(t *testing.T) {
+	st := openTestStore(t)
+
+	// Insert two episodes: one with "Auth", one with "AuthService".
+	// Searching for "Auth" must NOT match "AuthService".
+	_, _ = st.RememberEpisode(store.Episode{
+		AgentID:       "a",
+		EpisodeType:   "decision",
+		Outcome:       "success",
+		Decision:      "short name episode",
+		AffectedNodes: `["repo::auth.go::Auth"]`,
+	})
+	_, _ = st.RememberEpisode(store.Episode{
+		AgentID:       "a",
+		EpisodeType:   "decision",
+		Outcome:       "success",
+		Decision:      "long name episode",
+		AffectedNodes: `["repo::auth.go::AuthService"]`,
+	})
+
+	eps, err := st.FindEpisodesByNodeID("repo::auth.go::Auth", 10)
+	if err != nil {
+		t.Fatalf("FindEpisodesByNodeID: %v", err)
+	}
+	if len(eps) != 1 {
+		t.Fatalf("expected 1 episode (exact match only), got %d", len(eps))
+	}
+	if eps[0].Decision != "short name episode" {
+		t.Errorf("expected 'short name episode', got %q", eps[0].Decision)
+	}
+}

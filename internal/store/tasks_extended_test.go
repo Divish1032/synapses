@@ -342,3 +342,24 @@ func TestFindTasksByNodeID_LIKEMetacharacterEscaped(t *testing.T) {
 	}
 }
 
+func TestFindTasksByNodeID_NoSubstringFalsePositive(t *testing.T) {
+	st := openTestStore(t)
+
+	// "Auth" must NOT false-match "AuthService" — the JSON quote boundary prevents it.
+	_, _, _ = st.CreatePlan("substring plan", "", "", []store.TaskInput{
+		{Title: "short name", Priority: "p1", LinkedNodes: []string{"repo::auth.go::Auth"}},
+		{Title: "long name", Priority: "p2", LinkedNodes: []string{"repo::auth.go::AuthService"}},
+	})
+
+	tasks, err := st.FindTasksByNodeID("repo::auth.go::Auth", 10)
+	if err != nil {
+		t.Fatalf("FindTasksByNodeID: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task (exact match only, no substring false positive), got %d", len(tasks))
+	}
+	if tasks[0].Title != "short name" {
+		t.Errorf("expected 'short name', got %q", tasks[0].Title)
+	}
+}
+

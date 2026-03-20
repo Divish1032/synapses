@@ -245,12 +245,13 @@ func (s *Store) GetPendingTasks(planID, agentID string) ([]Task, error) {
 
 // FindTasksByNodeID searches tasks where linked_nodes contains the given node ID.
 // Returns up to limit results ordered by most recently updated first.
-// Uses LIKE with escapeLike for safe substring matching in the JSON array column.
+// Wraps the search term in JSON double quotes so "Auth" does NOT false-match
+// "AuthService" — the closing quote acts as an exact-entry boundary.
 func (s *Store) FindTasksByNodeID(nodeID string, limit int) ([]Task, error) {
 	if nodeID == "" || limit <= 0 {
 		return nil, nil
 	}
-	pattern := "%" + escapeLike(nodeID) + "%"
+	pattern := `%"` + escapeLike(nodeID) + `"%`
 	rows, err := s.knowledgeDB.Query(`
 		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
 		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits
