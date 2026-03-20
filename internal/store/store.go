@@ -487,7 +487,9 @@ func Open(path string) (*Store, error) {
 	if checkErr := runQuickCheck(graphDB); checkErr != nil {
 		fmt.Fprintf(os.Stderr, "synapses: store: graph.db corrupt (%v) — deleting and re-indexing from source\n", checkErr)
 		graphDB.Close()
-		deleteDBFiles(path)
+		if recoverErr := recoverGraphDB(path); recoverErr != nil {
+			return nil, recoverErr
+		}
 		graphDB, err = openSQLiteDB(path)
 		if err != nil {
 			return nil, fmt.Errorf("open fresh graph db after corruption recovery: %w", err)
@@ -511,11 +513,10 @@ func Open(path string) (*Store, error) {
 	if checkErr := runQuickCheck(knowledgeDB); checkErr != nil {
 		fmt.Fprintf(os.Stderr, "synapses: store: knowledge.db corrupt (%v) — backing up to knowledge.db.corrupt and starting fresh\n", checkErr)
 		knowledgeDB.Close()
-		_ = os.Rename(kPath, kPath+".corrupt")
-		knowledgeDB, err = openSQLiteDB(kPath)
+		knowledgeDB, err = recoverKnowledgeDB(kPath)
 		if err != nil {
 			graphDB.Close()
-			return nil, fmt.Errorf("open fresh knowledge db after corruption recovery: %w", err)
+			return nil, fmt.Errorf("recover corrupt knowledge db: %w", err)
 		}
 	}
 	if _, err := knowledgeDB.Exec(knowledgeSchema); err != nil {
@@ -760,12 +761,41 @@ func runQuickCheck(db *sql.DB) error {
 	return rows.Err()
 }
 
-// deleteDBFiles removes a SQLite database file along with its WAL and SHM
-// sidecar files so a fresh empty DB can be created in its place.
-func deleteDBFiles(path string) {
+// recoverGraphDB handles a corrupt graph.db: deletes the file and its WAL/SHM
+// sidecars, then verifies the deletion succeeded before the caller reopens.
+// Graph data is fully regenerable from source — a fresh empty DB is safe.
+// Returns an error if the file could not be removed (requires manual intervention).
+func recoverGraphDB(path string) error {
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		_ = os.Remove(path + suffix)
 	}
+	// Verify the main file was actually removed. If it still exists, the
+	// caller would reopen the same corrupt file and get confusing schema errors.
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("could not remove corrupt graph.db at %s — delete the file manually and restart", path)
+	}
+	return nil
+}
+
+// recoverKnowledgeDB handles a corrupt knowledge.db:
+//  1. Renames to knowledge.db.corrupt to preserve data for manual recovery
+//  2. Falls back to deletion if rename fails (permissions, etc.)
+//  3. Always cleans up WAL/SHM sidecars — a leftover -wal file would be
+//     replayed by SQLite against the fresh empty DB, corrupting it on first open
+//  4. Opens and returns a fresh empty DB at kPath
+func recoverKnowledgeDB(kPath string) (*sql.DB, error) {
+	// Rename the corrupt file so it can be inspected later.
+	if err := os.Rename(kPath, kPath+".corrupt"); err != nil {
+		// Rename failed — fall back to deletion so we can create a fresh file.
+		// Log the rename error so the user knows the backup was not preserved.
+		fmt.Fprintf(os.Stderr, "synapses: store: could not back up corrupt knowledge.db (%v) — deleting it\n", err)
+		_ = os.Remove(kPath)
+	}
+	// Always remove WAL and SHM sidecars. A leftover -wal file from the corrupt
+	// DB would be replayed by SQLite's WAL recovery against the new empty file.
+	_ = os.Remove(kPath + "-wal")
+	_ = os.Remove(kPath + "-shm")
+	return openSQLiteDB(kPath)
 }
 
 // OpenReadOnly opens an existing SQLite store at path in query-only mode.

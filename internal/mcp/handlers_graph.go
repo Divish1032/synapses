@@ -350,7 +350,7 @@ var workflowRecipes = []workflowRecipe{
 		Intent:   "Resume a previous session's work where you left off",
 		Keywords: []string{"resume", "continue", "pick", "left", "session", "previous", "start", "pending"},
 		Steps: []workflowStep{
-			{Tool: "session_init", ArgsHint: `agent_id="..."`, Expects: "pending_tasks, project_identity, working_state, sidecars, scale_guidance.", UsesOutput: ""},
+			{Tool: "session_init", ArgsHint: `agent_id="..."`, Expects: "pending_tasks (tasks key absent when empty — check summary), project_identity, working_state, scale_guidance.", UsesOutput: ""},
 			{Tool: "get_pending_tasks", ArgsHint: `suggest_next=true`, Expects: "Tasks list + suggested_next (first unblocked task).", UsesOutput: "Use suggested_next to decide what to work on"},
 			{Tool: "get_session_state", ArgsHint: `task_id="{suggested_task_id}"`, Expects: "Saved progress: completed_steps, current_step, context_snapshot.", UsesOutput: "Use task ID from suggested_next"},
 			{Tool: "prepare_context", ArgsHint: `intent="understand", target="{from_session_state}", task_id="{task_id}"`, Expects: "Fresh context with task-boosted relevance.", UsesOutput: "Use entity from session state's context_snapshot"},
