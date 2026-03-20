@@ -100,17 +100,27 @@ func (g *loopGuard) clearSession(sessionKey string) {
 	g.mu.Unlock()
 }
 
+// loopGuardExempt lists tools that must never be circuit-broken. These are
+// session-lifecycle tools whose availability is unconditional:
+//   - session_init: agents may call this on reconnection or startup — blocking
+//     it strands the agent permanently.
+//   - end_session: cleanup must always succeed — blocking it means the agent
+//     can never terminate its session, and the circuit-breaker error message
+//     itself suggests calling end_session, which would be contradictory.
+var loopGuardExempt = map[string]bool{
+	"session_init": true,
+	"end_session":  true,
+}
+
 // fingerprintCall builds a compact call identifier from a tool name and its
 // arguments. Checks a fixed priority list of argument keys; uses the first
-// non-empty string value found. Truncates the primary arg to 200 bytes.
+// non-empty string value found. Truncates the primary arg to 200 bytes at a
+// valid UTF-8 rune boundary.
 func fingerprintCall(toolName string, args map[string]interface{}) string {
 	for _, key := range []string{"target", "query", "entity", "symbol", "file", "name", "title", "id"} {
 		if v, ok := args[key]; ok {
 			if s, ok := v.(string); ok && s != "" {
-				if len(s) > 200 {
-					s = s[:200]
-				}
-				return toolName + ":" + s
+				return toolName + ":" + truncateUTF8(s, 200)
 			}
 		}
 	}
@@ -119,13 +129,19 @@ func fingerprintCall(toolName string, args map[string]interface{}) string {
 
 // wrap returns a handler that applies loop-guard logic before and after h.
 //
+//   - Exempt tools (session_init, end_session): always pass through unchanged.
 //   - Below loopGuardWarnAt: h runs unmodified.
 //   - At loopGuardWarnAt..loopGuardCircuitBreak-1: h runs; warning is appended
-//     to the first text content block in the result.
+//     to the result so the agent knows to change approach.
 //   - At loopGuardCircuitBreak and above: h is NOT called; an error result is
 //     returned immediately describing the loop and suggesting alternatives.
 func (g *loopGuard) wrap(h server.ToolHandlerFunc) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Lifecycle tools are unconditionally exempt — see loopGuardExempt.
+		if loopGuardExempt[req.Params.Name] {
+			return h(ctx, req)
+		}
+
 		sessionKey := synapseSessionKey(SessionIDFromContext(ctx))
 		args, _ := req.Params.Arguments.(map[string]interface{})
 		fp := fingerprintCall(req.Params.Name, args)
@@ -138,7 +154,7 @@ func (g *loopGuard) wrap(h server.ToolHandlerFunc) server.ToolHandlerFunc {
 					"Suggestions:\n"+
 					"  1. Re-read the result you already received — it may contain what you need.\n"+
 					"  2. Try a different tool or a different argument.\n"+
-					"  3. Call end_session() and reconsider your approach.\n\n"+
+					"  3. Stop and reconsider your approach before continuing.\n\n"+
 					"The loop counter resets automatically when a file change is detected.",
 				req.Params.Name, count, fp,
 			)), nil
@@ -164,15 +180,24 @@ func (g *loopGuard) wrap(h server.ToolHandlerFunc) server.ToolHandlerFunc {
 }
 
 // appendWarningToResult appends warning text to the first TextContent block in
-// result.Content. If no TextContent block exists, the result is left unchanged.
+// result.Content. All fields of the TextContent value (including Annotations)
+// are preserved — only the Text field is extended. If no TextContent block
+// exists (e.g. the tool returned only ImageContent), a new TextContent block
+// is appended so the warning is never silently dropped.
 func appendWarningToResult(result *mcp.CallToolResult, warning string) {
 	for i, block := range result.Content {
 		if tc, ok := block.(mcp.TextContent); ok {
-			result.Content[i] = mcp.TextContent{
-				Type: tc.Type,
-				Text: tc.Text + warning,
-			}
+			// Copy the full value to preserve all fields (e.g. Annotations),
+			// then extend Text in place.
+			tc.Text += warning
+			result.Content[i] = tc
 			return
 		}
 	}
+	// Fallback: no TextContent block found — append a dedicated warning block
+	// so the warning is never silently lost.
+	result.Content = append(result.Content, mcp.TextContent{
+		Type: "text",
+		Text: warning,
+	})
 }

@@ -59,6 +59,23 @@ func TestFingerprintCall_longArgTruncated(t *testing.T) {
 	}
 }
 
+func TestFingerprintCall_utf8SafeTruncation(t *testing.T) {
+	// 3-byte UTF-8 rune: '€' = 0xE2 0x82 0xAC. Build a string that is exactly
+	// 201 bytes long ending mid-rune so a naive byte slice would split it.
+	// truncateUTF8 must walk back to the last complete rune.
+	rune3 := "€" // 3 bytes
+	s := strings.Repeat("a", 199) + rune3 // 202 bytes; rune starts at byte 199
+	fp := fingerprintCall("tool", map[string]interface{}{"query": s})
+	suffix := strings.TrimPrefix(fp, "tool:")
+	if !strings.HasSuffix(suffix, "a") {
+		// The 3-byte rune should have been dropped; last char must be 'a'
+		t.Errorf("UTF-8 truncation unsafe: suffix ends with %q", suffix[len(suffix)-4:])
+	}
+	if len(suffix) > 200 {
+		t.Errorf("truncated suffix still exceeds 200 bytes: len=%d", len(suffix))
+	}
+}
+
 // ── loopGuardSession window behaviour ─────────────────────────────────────────
 
 func TestLoopGuardSession_push(t *testing.T) {
@@ -375,5 +392,177 @@ func TestLoopGuard_integratedResetOnFileChange(t *testing.T) {
 	}
 	if result.IsError {
 		t.Error("after file change reset, tool should not be circuit-broken")
+	}
+}
+
+// ── Bug-fix regression tests ──────────────────────────────────────────────────
+
+// Bug 1: session_init and end_session must be unconditionally exempt.
+// A circuit-broken end_session means agents can never clean up. A circuit-broken
+// session_init means agents can never reconnect after an error-recovery loop.
+func TestLoopGuard_exemptToolsNeverBlocked(t *testing.T) {
+	g := newLoopGuard()
+
+	for _, exemptTool := range []string{"session_init", "end_session"} {
+		callCount := 0
+		handler := func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			callCount++
+			return mcp.NewToolResultText("ok"), nil
+		}
+		wrapped := g.wrap(handler)
+
+		req := mcp.CallToolRequest{}
+		req.Params.Name = exemptTool
+		req.Params.Arguments = map[string]interface{}{}
+
+		// Call well past the circuit breaker threshold.
+		calls := loopGuardCircuitBreak + 5
+		for i := 0; i < calls; i++ {
+			result, err := wrapped(context.Background(), req)
+			if err != nil {
+				t.Fatalf("%s call %d: error: %v", exemptTool, i+1, err)
+			}
+			if result.IsError {
+				t.Errorf("%s call %d: exempt tool was circuit-broken (must NEVER happen)", exemptTool, i+1)
+			}
+		}
+		if callCount != calls {
+			t.Errorf("%s: handler called %d times, want %d (circuit breaker fired on exempt tool)", exemptTool, callCount, calls)
+		}
+	}
+}
+
+// Bug 1 (integration): session_init is exempt on the real server dispatch table.
+func TestLoopGuard_exemptToolsIntegrated(t *testing.T) {
+	s := newTestServer(t)
+
+	// Call session_init more than the circuit breaker threshold.
+	for i := 0; i < loopGuardCircuitBreak+2; i++ {
+		result, err := s.DispatchTool(context.Background(), "session_init", map[string]interface{}{
+			"agent_id": "test-agent",
+		})
+		if err != nil {
+			t.Fatalf("session_init call %d: error: %v", i+1, err)
+		}
+		if result != nil && result.IsError {
+			tc, _ := result.Content[0].(mcp.TextContent)
+			if strings.Contains(tc.Text, "CIRCUIT BREAKER") {
+				t.Fatalf("session_init call %d: circuit breaker fired on exempt tool — this is a critical production bug", i+1)
+			}
+		}
+	}
+}
+
+// Bug 2: appendWarningToResult must preserve the embedded Annotated field
+// (and therefore Annotations) on TextContent — not just Type and Text.
+func TestAppendWarningToResult_preservesAnnotations(t *testing.T) {
+	// Build a TextContent with non-nil Annotations via the embedded Annotated field.
+	ann := &mcp.Annotations{Audience: []mcp.Role{mcp.RoleUser}}
+	annotated := mcp.TextContent{
+		Annotated: mcp.Annotated{Annotations: ann},
+		Type:      "text",
+		Text:      "original",
+	}
+	result := &mcp.CallToolResult{
+		Content: []mcp.Content{annotated},
+	}
+	appendWarningToResult(result, " [warn]")
+
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatal("Content[0] is not TextContent after append")
+	}
+	if !strings.HasSuffix(tc.Text, " [warn]") {
+		t.Errorf("warning not appended: got %q", tc.Text)
+	}
+	if tc.Annotations == nil {
+		t.Error("Annotations were dropped by appendWarningToResult — must be preserved")
+	}
+	if len(tc.Annotations.Audience) != 1 || tc.Annotations.Audience[0] != mcp.RoleUser {
+		t.Errorf("Annotations.Audience corrupted: %v", tc.Annotations.Audience)
+	}
+}
+
+// Bug 3: warning must not be silently dropped when result has no TextContent.
+// Some tools may return only ImageContent or EmbeddedResource blocks.
+func TestAppendWarningToResult_fallbackWhenNoTextContent(t *testing.T) {
+	// Result with no TextContent — only an embedded resource block.
+	result := &mcp.CallToolResult{
+		Content: []mcp.Content{
+			mcp.EmbeddedResource{
+				Type: "resource",
+				Resource: mcp.TextResourceContents{
+					URI:      "synapses://active-context",
+					MIMEType: "text/plain",
+					Text:     "some resource",
+				},
+			},
+		},
+	}
+	appendWarningToResult(result, " [warn]")
+
+	if len(result.Content) < 2 {
+		t.Fatal("fallback TextContent block was not appended when no TextContent existed")
+	}
+	// The second block should be the warning TextContent.
+	tc, ok := result.Content[1].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("fallback block is not TextContent, got %T", result.Content[1])
+	}
+	if !strings.Contains(tc.Text, "[warn]") {
+		t.Errorf("fallback block missing warning text: %q", tc.Text)
+	}
+	// Original EmbeddedResource must be untouched.
+	if _, ok := result.Content[0].(mcp.EmbeddedResource); !ok {
+		t.Error("original EmbeddedResource was replaced rather than left untouched")
+	}
+}
+
+// Bug 3: empty Content slice also gets a fallback warning block.
+func TestAppendWarningToResult_emptyContent(t *testing.T) {
+	result := &mcp.CallToolResult{Content: nil}
+	appendWarningToResult(result, " [warn]")
+	if len(result.Content) != 1 {
+		t.Fatalf("expected 1 content block after fallback, got %d", len(result.Content))
+	}
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("fallback is not TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(tc.Text, "[warn]") {
+		t.Errorf("fallback missing warning: %q", tc.Text)
+	}
+}
+
+// Bug 4 (UTF-8 safety): already covered by TestFingerprintCall_utf8SafeTruncation above.
+// This test verifies the circuit-breaker error message no longer references
+// end_session (which would be contradictory since end_session is now exempt).
+func TestLoopGuard_circuitBreakerMessageConsistency(t *testing.T) {
+	g := newLoopGuard()
+	wrapped := g.wrap(makeMockHandler("ok"))
+
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "recall"
+	req.Params.Arguments = map[string]interface{}{"query": "stuck query"}
+
+	var result *mcp.CallToolResult
+	for i := 0; i < loopGuardCircuitBreak; i++ {
+		var err error
+		result, err = wrapped(context.Background(), req)
+		if err != nil {
+			t.Fatalf("call %d: %v", i+1, err)
+		}
+	}
+	if !result.IsError {
+		t.Fatal("expected circuit breaker error")
+	}
+	tc := result.Content[0].(mcp.TextContent)
+	// The message must NOT suggest calling end_session because that tool
+	// itself was previously guarded (the bug). It now says "reconsider".
+	if strings.Contains(tc.Text, "Call end_session()") {
+		t.Error("circuit breaker message should not reference end_session() as a recovery action — end_session was previously guarded itself")
+	}
+	if !strings.Contains(tc.Text, "CIRCUIT BREAKER") {
+		t.Errorf("missing CIRCUIT BREAKER header: %s", tc.Text)
 	}
 }

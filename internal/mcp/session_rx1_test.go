@@ -15,6 +15,9 @@ import (
 // ── helpers ────────────────────────────────────────────────────────────────
 
 // newServerWithThreshold creates a test server with AutoEndThresholdCalls set.
+// StartBackground is called so that goBackground() work items are actually
+// processed — trackSessionCall enqueues via goBackground, which requires live
+// workers. t.Cleanup closes the server to drain the pool and stop goroutines.
 func newServerWithThreshold(t *testing.T, threshold int) *Server {
 	t.Helper()
 	st := openMCPTestStore(t)
@@ -25,6 +28,8 @@ func newServerWithThreshold(t *testing.T, threshold int) *Server {
 		},
 	}
 	s := New(g, cfg, st)
+	s.StartBackground()
+	t.Cleanup(func() { s.Close() })
 	return s
 }
 
