@@ -538,6 +538,22 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		}
 	})
 
+	// Sprint 8 #1: hide deprecated/subsumed tools from tools/list.
+	// Tools remain registered (callable) but are filtered from the listing.
+	// Power users can still find them via discover_tools.
+	hooks.AddAfterListTools(func(_ context.Context, _ any, _ *mcp.ListToolsRequest, result *mcp.ListToolsResult) {
+		if result == nil {
+			return
+		}
+		filtered := result.Tools[:0]
+		for _, t := range result.Tools {
+			if !hiddenTools[t.Name] {
+				filtered = append(filtered, t)
+			}
+		}
+		result.Tools = filtered
+	})
+
 	s.mcp = server.NewMCPServer(serverName, Version,
 		server.WithToolCapabilities(true),
 		server.WithResourceCapabilities(true, true), // subscribe + listChanged
@@ -1015,6 +1031,18 @@ var knowledgeTools = map[string]bool{
 	"report_usage":       true,
 }
 
+// hiddenTools are deprecated or subsumed tools that remain callable but are
+// filtered from tools/list to reduce the default tool surface (Sprint 8 #1).
+// Power users can still discover and call them via discover_tools.
+var hiddenTools = map[string]bool{
+	"get_working_state":    true, // subsumed by session_init
+	"get_project_identity": true, // subsumed by session_init
+	"report_usage":         true, // absorbed by end_session
+	"check_plan_safety":    true, // absorbed by plan_context and validate_plan(check_safety=true)
+	"get_edge_types":       true, // implementation detail
+	"plan_context":         true, // power-user compound tool; Sprint 8 #2
+}
+
 // toolInTier reports whether name should be registered at startup given
 // s.repoScale. Phase 6 (Proactive Context Engine): all tools are always
 // registered at all scales. The design doc mandates "the agent NEVER sees
@@ -1150,7 +1178,9 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"report_usage",
 			mcp.WithDescription(
-				"Report your LLM token usage for this response. Call after completing a major task "+
+				"Prefer end_session(model=..., input_tokens=..., output_tokens=...) instead — "+
+					"it absorbs report_usage and also persists session knowledge. "+
+					"Report your LLM token usage for this response. Call after completing a major task "+
 					"to give Synapses accurate data on model cost and token consumption. "+
 					"All fields are optional but model is strongly recommended. "+
 					"This is the complement to session_init(model=...) — session_init records the model once, "+
@@ -1240,9 +1270,10 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"get_project_identity",
 			mcp.WithDescription(
-				"Returns a compact architectural summary of the indexed project: "+
-					"node counts, entry points, highest-connectivity entities, and active rules. "+
-					"Call this at the start of every session to orient yourself before querying deeper.",
+				"Prefer session_init instead — it includes project_identity along with "+
+					"pending tasks, working state, and scale guidance in one call. "+
+					"Returns a compact architectural summary of the indexed project: "+
+					"node counts, entry points, highest-connectivity entities, and active rules.",
 			),
 		),
 		s.handleGetProjectIdentity,
@@ -1938,10 +1969,11 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"get_working_state",
 			mcp.WithDescription(
-				"Returns recent file changes detected by the file watcher, answering "+
+				"Prefer session_init instead — it includes working_state along with "+
+					"pending tasks, project identity, and scale guidance in one call. "+
+					"Returns recent file changes detected by the file watcher, answering "+
 					"'what was the developer just working on?' "+
-					"Also includes a git diff stat for the current working tree. "+
-					"Call this at session start to orient yourself to recent activity.",
+					"Also includes a git diff stat for the current working tree.",
 			),
 			mcp.WithNumber("window_minutes",
 				mcp.Description("Look-back window in minutes. Defaults to 15."),
