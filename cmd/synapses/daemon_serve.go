@@ -752,7 +752,8 @@ func cmdDaemonServe(args []string) error {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		logutil.Info("\nsynapses daemon: received %s, shutting down\n", sig)
+		fmt.Fprintln(os.Stderr) // visual separator
+		logutil.Info("synapses daemon: received %s, shutting down\n", sig)
 		appCancel()
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutCancel()
