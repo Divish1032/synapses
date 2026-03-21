@@ -394,7 +394,7 @@ func cmdStartDirect(args []string) error {
 
 	// Memory embeddings: generate embeddings for memories on remember() writes
 	// and provide vector search in recall(). Three modes:
-	//   "builtin" (default) — pure-Go all-MiniLM-L6-v2, auto-downloads model
+	//   "builtin" (default) — pure-Go nomic-embed-text-v1.5, auto-downloads model
 	//   "ollama"            — delegates to local Ollama instance
 	//   "off"               — disabled, FTS5-only recall
 	{
@@ -3193,7 +3193,7 @@ func createMemoryEmbedder(cfg *config.Config) embed.Embedder {
 			return nil
 		}
 		modelsDir := filepath.Join(homeDir, ".synapses", "models")
-		logutil.Info("synapses: memory embeddings via builtin all-MiniLM-L6-v2\n")
+		logutil.Info("synapses: memory embeddings via builtin nomic-embed-text-v1.5\n")
 		return embed.NewBuiltinEmbedder(modelsDir)
 	default:
 		logutil.Warn("synapses: unknown embeddings mode %q, disabling\n", mode)

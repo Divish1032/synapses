@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,29 +19,45 @@ import (
 
 const (
 	// builtinModelName is the HuggingFace model ID for the default embedding model.
-	builtinModelName = "KnightsAnalytics/all-MiniLM-L6-v2"
+	// Upgraded from KnightsAnalytics/all-MiniLM-L6-v2 (384-dim, 256-token, 2021)
+	// to nomic-embed-text-v1.5 (768-dim Matryoshka → 384, 8192-token, 2024).
+	// 32× longer context captures full decision rationales without truncation.
+	builtinModelName = "nomic-ai/nomic-embed-text-v1.5"
 	// builtinModelDirName is the local directory name for the cached model.
-	builtinModelDirName = "KnightsAnalytics_all-MiniLM-L6-v2"
+	builtinModelDirName = "nomic-ai_nomic-embed-text-v1.5"
 	// builtinModelFile is the ONNX model filename within the model directory.
-	builtinModelFile = "model.onnx"
+	// hugot strips the onnx/ directory prefix: onnx/model_quantized.onnx → model_quantized.onnx.
+	// Quantized variant (~137 MB) used for CPU deployments; GPU users can override via config.
+	builtinModelFile = "model_quantized.onnx"
+	// builtinOnnxFilePath is the path within the HuggingFace repo for download.
+	// hugot uses this to select which ONNX variant to download.
+	builtinOnnxFilePath = "onnx/model_quantized.onnx"
 	// builtinModel is the model identifier used in UpsertMemoryEmbedding.
-	builtinModel = "all-MiniLM-L6-v2"
+	// Changing this triggers automatic re-embedding of all memories on next startup.
+	builtinModel = "nomic-embed-text-v1.5"
+
+	// matryoshkaDims is the output dimensionality after Matryoshka truncation.
+	// nomic-embed-text-v1.5 produces 768 dims; truncating to 384 preserves
+	// ranking quality (validated in Sprint 12 #1 spike: <15% drift on well-separated pairs)
+	// while maintaining storage compatibility with the existing 384-dim schema.
+	matryoshkaDims = 384
 
 	// defaultPoolSize is the number of pipeline instances to create.
-	// 3 balances memory (~69 MB total) against concurrency for 50+ sessions.
+	// 3 balances memory (~411 MB total for nomic quantized) against concurrency for 50+ sessions.
 	defaultPoolSize = 3
 
 	// builtinModelRevision pins the HuggingFace download to a specific commit
 	// hash, ensuring every user gets the exact same ONNX model bytes. Without
 	// this, a repo owner pushing an update could silently change model behavior.
 	// Update this hash when intentionally adopting a newer model version.
-	builtinModelRevision = "24b4c6b40fc5571f11ed3bf6061596fa4e8290d4"
+	builtinModelRevision = "e5cf08aadaa33385f5990def41f7a23405aec398"
 
 	// builtinModelSHA256 is the expected SHA-256 hash of the downloaded ONNX
 	// model file. After download, the file is verified against this hash to
 	// detect tampering (compromised CDN, MITM with rogue CA, partial download).
 	// Update this value whenever builtinModelRevision changes.
-	builtinModelSHA256 = "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452"
+	// Captured from nomic-embed-text-v1.5 quantized ONNX at revision e5cf08aa.
+	builtinModelSHA256 = "b4342336debaea79de872370664b0aaeb67dea4605513d00ee236ea871a81f27"
 )
 
 // pipelineSlot is one independently-usable ONNX pipeline instance.
@@ -50,10 +67,10 @@ type pipelineSlot struct {
 	pipeline *pipelines.FeatureExtractionPipeline
 }
 
-// BuiltinEmbedder uses the pure-Go hugot library to run all-MiniLM-L6-v2
-// inference locally without any external dependencies. The ONNX model
-// (~23MB) is auto-downloaded from HuggingFace on first use and cached
-// in the models directory.
+// BuiltinEmbedder uses the pure-Go hugot library to run nomic-embed-text-v1.5
+// inference locally without any external dependencies. The quantized ONNX model
+// (~137MB) is auto-downloaded from HuggingFace on first use and cached
+// in the models directory. Output is Matryoshka-truncated to 384 dims.
 //
 // Concurrent: a pool of pipeline instances allows bounded parallel
 // inference. The pool size defaults to 3 — up to 3 Embed calls run
@@ -76,9 +93,9 @@ type BuiltinEmbedder struct {
 }
 
 // NewBuiltinEmbedder creates a BuiltinEmbedder that stores its model in
-// modelsDir (typically ~/.synapses/models). The model is lazily downloaded
-// on the first Embed() call. Uses a pool of 3 pipeline instances for
-// concurrent inference.
+// modelsDir (typically ~/.synapses/models). The nomic-embed-text-v1.5 model
+// is lazily downloaded on the first Embed() call. Uses a pool of 3 pipeline
+// instances for concurrent inference. Output is 384-dim (Matryoshka truncated).
 func NewBuiltinEmbedder(modelsDir string) *BuiltinEmbedder {
 	return &BuiltinEmbedder{
 		modelsDir: modelsDir,
@@ -124,6 +141,7 @@ func (b *BuiltinEmbedder) ensureModel() error {
 		}
 		opts := hugot.NewDownloadOptions()
 		opts.Branch = builtinModelRevision
+		opts.OnnxFilePath = builtinOnnxFilePath // download only the quantized variant
 		opts.Verbose = false
 		opts.MaxRetries = 3
 		opts.RetryInterval = 2
@@ -159,9 +177,10 @@ func (b *BuiltinEmbedder) ensureModel() error {
 			ModelPath:    modelPath,
 			Name:         fmt.Sprintf("memory-embedder-%d", i),
 			OnnxFilename: builtinModelFile,
-			Options: []hugot.FeatureExtractionOption{
-				pipelines.WithNormalization(),
-			},
+			// No WithNormalization() — we truncate to matryoshkaDims first,
+			// then the store's UpsertMemoryEmbedding normalizes the truncated vector.
+			// Normalizing the full 768 dims before truncation wastes FLOPs and
+			// produces a non-unit vector after truncation anyway.
 		}
 		pipeline, err := hugot.NewPipeline(session, config)
 		if err != nil {
@@ -191,6 +210,7 @@ func (b *BuiltinEmbedder) ensureModel() error {
 // compares it against the expected hash. If the hash doesn't match (tampered
 // download, partial write, CDN compromise), the file is removed and an error
 // is returned so the next Embed() call triggers a fresh download.
+// When builtinModelSHA256 is empty, the hash is logged for capture but not enforced.
 func verifyModelIntegrity(onnxPath string) error {
 	f, err := os.Open(onnxPath)
 	if err != nil {
@@ -204,6 +224,11 @@ func verifyModelIntegrity(onnxPath string) error {
 	}
 
 	got := hex.EncodeToString(h.Sum(nil))
+	if builtinModelSHA256 == "" {
+		// First download — log the hash so it can be captured and hardcoded.
+		logutil.Info("synapses: embedding model SHA-256: %s (capture this for builtinModelSHA256)\n", got)
+		return nil
+	}
 	if got != builtinModelSHA256 {
 		// Remove the tampered/corrupt file so the next attempt re-downloads.
 		os.Remove(onnxPath)
@@ -213,7 +238,8 @@ func verifyModelIntegrity(onnxPath string) error {
 }
 
 // Embed generates a 384-dimensional embedding for text using the builtin
-// all-MiniLM-L6-v2 model. Concurrent: up to poolSize calls run in parallel;
+// nomic-embed-text-v1.5 model (768 dims → Matryoshka truncation to 384).
+// Concurrent: up to poolSize calls run in parallel;
 // additional callers block until a pipeline slot is available (respecting
 // context cancellation and shutdown).
 //
@@ -274,7 +300,19 @@ func (b *BuiltinEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 	if len(result.Embeddings) == 0 {
 		return nil, fmt.Errorf("builtin embed: empty result")
 	}
-	return result.Embeddings[0], nil
+	vec := result.Embeddings[0]
+	// Matryoshka truncation: nomic-embed-text-v1.5 produces 768 dims;
+	// truncate to 384 to match storage schema and reduce memory footprint.
+	// Matryoshka training ensures the leading dimensions carry the most signal.
+	// No task prefix — Sprint 12 #1 spike proved it hurts discrimination by 0.04.
+	if len(vec) > matryoshkaDims {
+		vec = vec[:matryoshkaDims]
+	}
+	// L2-normalize after truncation so callers always receive a unit vector.
+	// This is necessary because truncation breaks the pre-normalization invariant.
+	// The store's UpsertMemoryEmbedding also normalizes, making that a no-op.
+	vec = l2Normalize(vec)
+	return vec, nil
 }
 
 // Model returns the builtin model identifier.
@@ -361,5 +399,29 @@ func (b *BuiltinEmbedder) Close() error {
 	b.pool = nil
 	b.ready = false
 	return firstErr
+}
+
+// l2Normalize returns a unit-length copy of vec (L2 norm = 1.0).
+// Returns the original vec unchanged if it's already unit-length, zero-length,
+// or zero-magnitude. This is a local utility — the store package has its own
+// normalizeVec using SIMD; this one is for the embed package only.
+func l2Normalize(vec []float32) []float32 {
+	if len(vec) == 0 {
+		return vec
+	}
+	var sumSq float64
+	for _, v := range vec {
+		sumSq += float64(v) * float64(v)
+	}
+	norm := math.Sqrt(sumSq)
+	if norm == 0 || (norm > 0.999 && norm < 1.001) {
+		return vec // already normalized or zero
+	}
+	out := make([]float32, len(vec))
+	scale := float32(1.0 / norm)
+	for i, v := range vec {
+		out[i] = v * scale
+	}
+	return out
 }
 

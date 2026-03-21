@@ -44,8 +44,8 @@ type Config struct {
 	EmbeddingEndpoint string `json:"embedding_endpoint,omitempty"`
 
 	// Embeddings controls memory embedding generation mode.
-	// "builtin" (default): pure-Go sentence-transformer inference using a
-	// bundled all-MiniLM-L6-v2 ONNX model (~23MB). Zero external dependencies.
+	// "builtin" (default): pure-Go sentence-transformer inference using
+	// nomic-embed-text-v1.5 ONNX model (~137MB). Zero external dependencies.
 	// "ollama": delegates to a local Ollama instance (requires Ollama running).
 	// Uses EmbeddingEndpoint or defaults to http://localhost:11434/api/embeddings.
 	// "off": disabled, FTS5-only recall.

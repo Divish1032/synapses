@@ -43,10 +43,26 @@ func (s *Server) embedMemory(embedder embed.Embedder, st *store.Store, memoryID,
 // EmbedAllMemories generates embeddings for all un-embedded memories in the
 // background. Rate-limited to ~2 embeddings/second for builtin mode to avoid
 // CPU contention. Called at startup to lazy-migrate legacy memories.
+//
+// Model-change migration: before scanning for un-embedded memories, all
+// embeddings from a previous model are marked stale. This handles the
+// MiniLM → nomic upgrade path: old embeddings are in a different vector
+// space and must be regenerated. The rate limiter ensures this doesn't
+// saturate CPU (nomic is ~12s/embed on CPU; 1000 memories ≈ 1h8m at pool/3).
+//
 // pc may be nil (pulse disabled) — fire-and-forget EmbeddingEvent on completion. (P2-6)
 func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.Store, pc *pulse.Client) {
 	if embedder == nil || st == nil {
 		return
+	}
+
+	// Model-change migration: invalidate embeddings from a different model.
+	// This is the critical path for embedding model upgrades — old embeddings
+	// in a different vector space produce meaningless similarity scores.
+	if invalidated, err := st.InvalidateEmbeddingsByModel(embedder.Model()); err != nil {
+		logutil.Error("synapses: invalidate old model embeddings: %v\n", err)
+	} else if invalidated > 0 {
+		logutil.Info("synapses: model upgrade detected — marked %d embeddings for re-embedding (new model: %s)\n", invalidated, embedder.Model())
 	}
 
 	ids, err := st.GetMemoriesWithoutEmbeddings(0) // 0 = no limit
