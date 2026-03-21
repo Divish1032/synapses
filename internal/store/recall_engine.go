@@ -42,6 +42,30 @@ func RecencyDecayScore(createdAt time.Time, halfLifeHours float64, accessCount i
 	return 1.0 / (1.0 + ageHours/effectiveHalfLife)
 }
 
+// TierHalfLife returns the tier-specific decay half-life in hours.
+// Different memory tiers decay at different rates:
+//   - session_log: 72h (3 days) — ephemeral session summaries fade quickly
+//   - project: 336h (2 weeks) — conventions and decisions persist longer
+//   - entity + auto: 168h (1 week) — auto-captured code facts
+//   - entity + manual: 504h (3 weeks) — manually annotated code facts persist longest
+//
+// Based on A-MAC (arXiv:2603.04549) differential decay rates.
+func TierHalfLife(tier, source string) float64 {
+	switch tier {
+	case TierSessionLog:
+		return 72
+	case TierProject:
+		return 336
+	case TierEntity:
+		if source == SourceManual {
+			return 504
+		}
+		return 168
+	default:
+		return 168
+	}
+}
+
 // DecayedImportanceScore combines memory importance weight with recency decay.
 //
 // Rules:
@@ -52,7 +76,8 @@ func RecencyDecayScore(createdAt time.Time, halfLifeHours float64, accessCount i
 //     multiplied by RecencyDecayScore(lastAccessedAt, halfLifeHours).
 //   - Invalid or empty string: treated as weight 1.0 (pure recency decay).
 //
-// halfLifeHours controls how fast scores decay. 0 = default 168h (1 week).
+// halfLifeHours controls how fast scores decay. 0 = use tier-specific defaults
+// (session_log 72h, project 336h, entity+auto 168h, entity+manual 504h).
 // Result is in (0, 1] for pinned=false, exactly 1.0 for pinned.
 func DecayedImportanceScore(m Memory, halfLifeHours float64) float64 {
 	if m.Importance == ImportancePinned {
@@ -78,6 +103,9 @@ func DecayedImportanceScore(m Memory, halfLifeHours float64) float64 {
 		}
 	}
 
+	if halfLifeHours <= 0 {
+		halfLifeHours = TierHalfLife(m.Tier, m.Source)
+	}
 	return weight * RecencyDecayScore(accessedAt, halfLifeHours, m.AccessCount)
 }
 
