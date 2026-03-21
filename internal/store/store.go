@@ -733,6 +733,7 @@ func Open(path string) (*Store, error) {
 	knowledgeRW, err := newRWDB(KnowledgePath(path), knowledgeDB, 8)
 	if err != nil {
 		graphRW.Close()
+		knowledgeDB.Close() // newRWDB doesn't take ownership on failure
 		return nil, fmt.Errorf("create knowledge reader pool: %w", err)
 	}
 

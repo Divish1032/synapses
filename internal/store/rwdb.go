@@ -101,7 +101,10 @@ func newRWDB(path string, writerDB *sql.DB, maxReaders int) (*rwDB, error) {
 		return nil, fmt.Errorf("create parent dir for reader %s: %w", path, err)
 	}
 	// Open same file with WAL + busy_timeout for the reader pool.
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	// query_only(true) prevents accidental writes through the reader pool —
+	// if a routing bug ever sends a write here, it fails fast instead of
+	// silently succeeding.
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=query_only(true)"
 	readerDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open reader db %s: %w", path, err)
