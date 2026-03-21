@@ -82,6 +82,7 @@ func (c *subgraphCache) get(rootID NodeID, cfg CarveConfig, fingerprint string) 
 	}
 	if time.Now().After(e.expiresAt) {
 		delete(c.entries, key)
+		c.removeFromOrder(key)
 		return nil, false
 	}
 	c.promoteKey(key)
@@ -158,14 +159,20 @@ func entryReferencesFile(e *cacheEntry, file string) bool {
 	return false
 }
 
-// promoteKey moves key to the tail of c.order (most-recently-used position).
+// removeFromOrder removes the first occurrence of key from c.order.
 // Caller must hold c.mu.
-func (c *subgraphCache) promoteKey(key string) {
+func (c *subgraphCache) removeFromOrder(key string) {
 	for i, k := range c.order {
 		if k == key {
 			c.order = append(c.order[:i], c.order[i+1:]...)
-			c.order = append(c.order, key)
 			return
 		}
 	}
+}
+
+// promoteKey moves key to the tail of c.order (most-recently-used position).
+// Caller must hold c.mu.
+func (c *subgraphCache) promoteKey(key string) {
+	c.removeFromOrder(key)
+	c.order = append(c.order, key)
 }
