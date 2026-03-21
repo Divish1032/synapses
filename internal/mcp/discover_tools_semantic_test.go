@@ -286,16 +286,18 @@ func TestDiscoverTools_SemanticPath_RankingByCosineSimilarity(t *testing.T) {
 	}
 
 	s := newTestServer(t)
-	// Embed each tool via a controlled sequence.
+	// The query embedder returns queryVec.
+	s.memoryEmbedder = &constEmbedder{vec: queryVec}
+
+	// Embed each tool via controlled sequence; model must match memoryEmbedder.Model()
+	// so the model-consistency check in handleDiscoverTools passes.
 	s.toolEmbedsMu.Lock()
 	s.toolEmbeds = make([][]float32, len(toolCatalog))
 	for i, v := range vecs {
 		s.toolEmbeds[i] = normalizeVec(v)
 	}
+	s.toolEmbedModel = s.memoryEmbedder.Model()
 	s.toolEmbedsMu.Unlock()
-
-	// The query embedder returns queryVec.
-	s.memoryEmbedder = &constEmbedder{vec: queryVec}
 
 	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{"query": "find function"}))
 	if err != nil {
@@ -404,6 +406,62 @@ func TestDiscoverTools_SemanticPath_KnowledgeModeFilters(t *testing.T) {
 		if !knowledgeTools[name] {
 			t.Errorf("matches[%d] name=%q is not a knowledge tool", i, name)
 		}
+	}
+}
+
+func TestDiscoverTools_SemanticPath_NegativeSimilarityFallsBackToKeyword(t *testing.T) {
+	// When all tool-query cosine similarities are ≤ 0 (orthogonal or opposite),
+	// the semantic path should fall through to keyword rather than returning
+	// irrelevant results labeled "semantic".
+	//
+	// Setup: query vector = [1,0,0,0]; all tool embeddings = [-1,0,0,0].
+	// dot([1,0,0,0], [-1,0,0,0]) = -1.0  → all scores negative.
+	s := newTestServer(t)
+	s.memoryEmbedder = &constEmbedder{vec: []float32{1, 0, 0, 0}} // query vec
+
+	s.toolEmbedsMu.Lock()
+	s.toolEmbeds = make([][]float32, len(toolCatalog))
+	for i := range s.toolEmbeds {
+		s.toolEmbeds[i] = normalizeVec([]float32{-1, 0, 0, 0})
+	}
+	s.toolEmbedModel = s.memoryEmbedder.Model() // model matches: "test-const"
+	s.toolEmbedsMu.Unlock()
+
+	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{"query": "blast radius callers"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, res, nil)
+	mode, _ := m["search_mode"].(string)
+	if mode != "keyword" {
+		t.Errorf("expected keyword fallback when all similarities ≤ 0, got %q", mode)
+	}
+}
+
+func TestDiscoverTools_KeywordFallback_ModelMismatch(t *testing.T) {
+	// Tool embeddings were built with model "old-model" but the current embedder
+	// reports "new-model". The model-consistency check must force keyword fallback
+	// so we never compare vectors from different embedding spaces.
+	s := newTestServer(t)
+	s.memoryEmbedder = &constEmbedder{vec: []float32{1, 0, 0, 0}} // Model() = "test-const"
+
+	// Manually inject embeddings built by a different model.
+	s.toolEmbedsMu.Lock()
+	s.toolEmbeds = make([][]float32, len(toolCatalog))
+	for i := range s.toolEmbeds {
+		s.toolEmbeds[i] = normalizeVec([]float32{1, 0, 0, 0})
+	}
+	s.toolEmbedModel = "old-model" // does NOT match memoryEmbedder.Model() = "test-const"
+	s.toolEmbedsMu.Unlock()
+
+	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{"query": "blast radius callers"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, res, nil)
+	mode, _ := m["search_mode"].(string)
+	if mode != "keyword" {
+		t.Errorf("expected keyword fallback on model mismatch, got %q", mode)
 	}
 }
 
