@@ -84,6 +84,15 @@ func (s *Store) GetMemoryEmbedding(memoryID string) []float32 {
 	return blobToVec(blob)
 }
 
+// CountEmbeddableMemories returns the total number of non-expired, non-stale memories (P8-10).
+// This is the denominator for embedding coverage percentage.
+func (s *Store) CountEmbeddableMemories() int {
+	now := time.Now().UTC().Format(time.RFC3339)
+	var n int
+	s.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at > ? AND stale = 0`, now).Scan(&n)
+	return n
+}
+
 // GetMemoriesWithoutEmbeddings returns up to limit memory IDs that either have no
 // embedding yet or whose stored content_hash no longer matches the current memory
 // content. Only non-expired, non-stale memories are returned.

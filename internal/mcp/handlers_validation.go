@@ -760,6 +760,20 @@ func (s *Server) handleGetViolations(
 		summary = fmt.Sprintf("%d violations (%d errors)", len(violations), errorCount)
 	}
 
+	// P7-15: emit validation event for standalone get_violations.
+	if pc := s.getPulseClient(); pc != nil {
+		st := "ok"
+		if len(violations) > 0 {
+			st = "violations_found"
+		}
+		pc.RecordValidationEvent(pulse.ValidationEvent{
+			ToolName:       "get_violations",
+			Status:         st,
+			ViolationCount: len(violations),
+			ProjectID:      s.projectID,
+		})
+	}
+
 	result := map[string]interface{}{
 		"summary":    summary,
 		"violations": violations,
@@ -896,6 +910,13 @@ func (s *Server) handleUpsertRule(
 					log.Printf("mcp: log violations (upsert_rule): %v", err)
 				}
 			}
+		})
+	}
+
+	// P7-14: emit rule eval event for rule creation/update.
+	if pc := s.getPulseClient(); pc != nil {
+		pc.RecordRuleEvalEvent(pulse.RuleEvalEvent{
+			RulesEvaluated: 1, ProjectID: s.projectID,
 		})
 	}
 

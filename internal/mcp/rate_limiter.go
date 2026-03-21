@@ -139,8 +139,9 @@ type rateLimiter struct {
 	expensiveReadLimitPerMin int
 	crossProjectLimitPerMin  int
 
-	pc        interface{} // *pulse.Client — set via SetPulseClient; nil if pulse not configured
-	projectID string
+	pc             interface{} // *pulse.Client — set via SetPulseClient; nil if pulse not configured
+	projectID      string
+	resolveSession func(string) string // P8-2: MCP session key → Synapses session UUID
 }
 
 // SetPulseClient wires a pulse client so rate-limiter can emit guard events.
@@ -298,12 +299,17 @@ func (rl *rateLimiter) wrap(toolName string, h server.ToolHandlerFunc) server.To
 		res := rl.check(sessionKey, toolName, args)
 		if !res.allowed {
 			if pc := rl.getPulseClient(); pc != nil {
+				sessID := ""
+				if rl.resolveSession != nil {
+					sessID = rl.resolveSession(SessionIDFromContext(ctx))
+				}
 				pc.RecordGuardEvent(pulse.GuardEvent{
 					GuardType: "rate_limit",
 					ToolName:  toolName,
 					Category:  res.category,
 					AgentID:   SessionIDFromContext(ctx),
 					ProjectID: rl.projectID,
+					SessionID: sessID,
 				})
 			}
 			secs := int(res.retryAfter.Seconds()) + 1

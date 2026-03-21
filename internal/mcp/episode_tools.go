@@ -89,6 +89,13 @@ func (s *Server) handleRemember(
 		decision = scanResult.sanitized
 		if scanResult.warning != "" {
 			injectionWarning = scanResult.warning
+			// P7-1: emit guard event for injection scan trigger.
+			if pc := s.getPulseClient(); pc != nil {
+				pc.RecordGuardEvent(pulse.GuardEvent{
+					GuardType: "injection_scan", ToolName: "remember",
+					Category: "warn", AgentID: agentID, ProjectID: s.projectID,
+				})
+			}
 		}
 	}
 	if rationale != "" {
@@ -98,6 +105,13 @@ func (s *Server) handleRemember(
 			rationale = scanResult.sanitized
 			if scanResult.warning != "" && injectionWarning == "" {
 				injectionWarning = scanResult.warning
+				// P7-1: emit guard event for injection scan trigger.
+				if pc := s.getPulseClient(); pc != nil {
+					pc.RecordGuardEvent(pulse.GuardEvent{
+						GuardType: "injection_scan", ToolName: "remember",
+						Category: "warn", AgentID: agentID, ProjectID: s.projectID,
+					})
+				}
 			}
 		}
 	}
@@ -118,11 +132,25 @@ func (s *Server) handleRemember(
 			// OF-E3: check for an out-of-band user-approved approval file.
 			// The agent never sees the token — only the user can approve via `synapses approve`.
 			if !s.approvals.checkAndConsumeApproval("cross_project_remember", agentID) {
+				// P7-2: emit guard event for approval gate request.
+				if pc := s.getPulseClient(); pc != nil {
+					pc.RecordGuardEvent(pulse.GuardEvent{
+						GuardType: "approval_gate", ToolName: "remember",
+						Category: "requested", AgentID: agentID, ProjectID: s.projectID,
+					})
+				}
 				return s.approvals.requestApproval(
 					"cross_project_remember",
 					fmt.Sprintf("Agent %q writing memory to project %q (current project: %q)", agentID, reqProjectID, currentProject),
 					agentID,
 				), nil
+			}
+			// P7-2: emit guard event for approval gate consumption.
+			if pc := s.getPulseClient(); pc != nil {
+				pc.RecordGuardEvent(pulse.GuardEvent{
+					GuardType: "approval_gate", ToolName: "remember",
+					Category: "consumed", AgentID: agentID, ProjectID: s.projectID,
+				})
 			}
 		}
 	}
@@ -944,6 +972,14 @@ func (s *Server) handleCheckPlanSafety(
 					AgentID:   agentCopy,
 					ProjectID: projCopy,
 				})
+				// P8-7: track check_plan_safety outcome for hit-rate analysis.
+				pc.RecordValidationEvent(pulse.ValidationEvent{
+					ToolName:     "check_plan_safety",
+					Status:       "ok",
+					SafetyStatus: "clear",
+					AgentID:      agentCopy,
+					ProjectID:    projCopy,
+				})
 			})
 		}
 		return jsonResult(map[string]interface{}{
@@ -963,6 +999,14 @@ func (s *Server) handleCheckPlanSafety(
 				Source:    "auto",
 				AgentID:   agentCopy,
 				ProjectID: projCopy,
+			})
+			// P8-7: track check_plan_safety outcome for hit-rate analysis.
+			pc.RecordValidationEvent(pulse.ValidationEvent{
+				ToolName:     "check_plan_safety",
+				Status:       "warning",
+				SafetyStatus: "warning",
+				AgentID:      agentCopy,
+				ProjectID:    projCopy,
 			})
 		})
 	}

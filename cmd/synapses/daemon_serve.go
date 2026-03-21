@@ -643,6 +643,8 @@ func cmdDaemonServe(args []string) error {
 	})
 
 	// Admin: pulse analytics summary
+	// P12-3: supports ?sections=summary,tools,timeline to avoid computing all 50+ fields.
+	// When sections is omitted, returns the full summary (backward compatible).
 	mux.HandleFunc("/api/admin/pulse/summary", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -657,9 +659,21 @@ func cmdDaemonServe(args []string) error {
 		w.Header().Set("Content-Type", "application/json")
 		if projectFilter := r.URL.Query().Get("project"); projectFilter != "" {
 			json.NewEncoder(w).Encode(sharedPulse.GetSummaryForProject(days, projectFilter))
-		} else {
-			json.NewEncoder(w).Encode(sharedPulse.GetSummary(days))
+			return
 		}
+		// P12-3: sectioned response.
+		if sectionsParam := r.URL.Query().Get("sections"); sectionsParam != "" {
+			sectionSet := make(map[string]bool)
+			for _, s := range strings.Split(sectionsParam, ",") {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					sectionSet[s] = true
+				}
+			}
+			json.NewEncoder(w).Encode(sharedPulse.GetSummarySectioned(days, sectionSet))
+			return
+		}
+		json.NewEncoder(w).Encode(sharedPulse.GetSummary(days))
 	})
 
 	// Admin: pulse — per-tool stats (P4-1 / Task P4-1)
@@ -840,6 +854,154 @@ func cmdDaemonServe(args []string) error {
 		report := sharedPulse.GetMonthlyROIReport(year, month)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(report)
+	})
+
+	// P12-7: SSE real-time event stream.
+	// GET /api/admin/pulse/stream
+	mux.HandleFunc("/api/admin/pulse/stream", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		ch := sharedPulse.SubscribeSSE()
+		defer sharedPulse.UnsubscribeSSE(ch)
+
+		// Send initial keepalive so the client knows the connection is established.
+		fmt.Fprintf(w, ": connected\n\n")
+		flusher.Flush()
+
+		for {
+			select {
+			case ev, ok := <-ch:
+				if !ok {
+					return
+				}
+				data, _ := json.Marshal(ev)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
+	})
+
+	// P12-1: per-agent drill-down endpoint.
+	// GET /api/admin/pulse/agents/{id}?days=N
+	mux.HandleFunc("/api/admin/pulse/agents/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		agentID := strings.TrimPrefix(r.URL.Path, "/api/admin/pulse/agents/")
+		if agentID == "" {
+			http.Error(w, "missing agent id", http.StatusBadRequest)
+			return
+		}
+		days := 7
+		if d := r.URL.Query().Get("days"); d != "" {
+			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		detail := sharedPulse.GetAgentDrillDown(agentID, days)
+		if detail == nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(detail)
+	})
+
+	// P12-2: week-over-week comparison endpoint.
+	// GET /api/admin/pulse/wow
+	mux.HandleFunc("/api/admin/pulse/wow", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		wow := sharedPulse.GetWeekOverWeek()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(wow)
+	})
+
+	// P12-8: selective data cleanup.
+	// DELETE /api/admin/pulse/data?agent_id=X or ?project_id=X
+	mux.HandleFunc("/api/admin/pulse/data", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		agentID := r.URL.Query().Get("agent_id")
+		projectID := r.URL.Query().Get("project_id")
+		if agentID == "" && projectID == "" {
+			http.Error(w, "missing agent_id or project_id query parameter", http.StatusBadRequest)
+			return
+		}
+		var deleted int64
+		if agentID != "" {
+			deleted = sharedPulse.DeleteByAgent(agentID)
+		} else {
+			deleted = sharedPulse.DeleteByProject(projectID)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":       "ok",
+			"rows_deleted": deleted,
+		})
+	})
+
+	// P12-9: validate-to-verify funnel rate.
+	// GET /api/admin/pulse/funnel/validate-verify?days=N
+	mux.HandleFunc("/api/admin/pulse/funnel/validate-verify", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		days := 7
+		if d := r.URL.Query().Get("days"); d != "" {
+			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		rate := sharedPulse.GetValidateToVerifyRate(days)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"days":             days,
+			"verify_rate":      rate,
+		})
+	})
+
+	// P12-10: declining tools.
+	// GET /api/admin/pulse/tools/declining?days=N&min_calls=M
+	mux.HandleFunc("/api/admin/pulse/tools/declining", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		days := 30
+		if d := r.URL.Query().Get("days"); d != "" {
+			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 365 {
+				days = n
+			}
+		}
+		minCalls := 10
+		if m := r.URL.Query().Get("min_calls"); m != "" {
+			if n, err := strconv.Atoi(m); err == nil && n > 0 {
+				minCalls = n
+			}
+		}
+		tools := sharedPulse.GetDecliningTools(days, minCalls)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(tools)
 	})
 
 	// MCP: route to per-project StreamableHTTPServer

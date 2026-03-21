@@ -527,6 +527,8 @@ func (s *Server) handleUpdateTask(
 				st := s.store
 				aid := agentID
 				sig := signalType
+				// P6-3: capture pulse session ID so outcome signals can be linked to sessions.
+				pulseSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
 				s.goBackground(func() {
 					// P3B-5a: compute task duration from CreatedAt for task_done signals.
 					var durationMs int
@@ -537,25 +539,36 @@ func (s *Server) handleUpdateTask(
 						}
 					}
 
+					// P8-8: extract task priority for outcome signal correlation.
+					var taskPriority string
+					if taskErr == nil {
+						taskPriority = task.Priority
+					}
+
 					var emitted bool
 					if sg != nil && taskErr == nil {
 						for _, nodeID := range task.LinkedNodes {
 							if n := sg.GetNode(graph.NodeID(nodeID)); n != nil && n.Name != "" {
 								entity := entityWithPath(n.Name, n.File)
+								// P6-11: compute tool calls between last delivery and this outcome.
+								toolsBetween := pc.CountToolCallsSinceDelivery(pulseSessID, entity)
 								pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
-									ProjectID:       projID,
-									AgentID:         aid,
-									Entity:          entity,
-									SignalType:      sig,
-									Count:           1,
-									TimeToOutcomeMs: int64(durationMs),
+									ProjectID:        projID,
+									AgentID:          aid,
+									Entity:           entity,
+									SignalType:       sig,
+									Count:            1,
+									SessionID:        pulseSessID,
+									TimeToOutcomeMs:  int64(durationMs),
+									ToolCallsBetween: toolsBetween,
+									Priority:         taskPriority,
 								})
 								// P5 — Item 10: recompute entity quality score after outcome.
 								pc.UpdateEntityQualityScore(entity, projID)
 								// P5 — Item 11: link most recent delivery to this outcome.
 								if sig == "task_done" {
 									if did := pc.GetMostRecentDeliveryID(entity); did > 0 {
-										pc.InsertDeliveryOutcome(did, "", entity, sig, 0, true)
+										pc.InsertDeliveryOutcome(did, pulseSessID, entity, sig, toolsBetween, true)
 									}
 								}
 								emitted = true
@@ -568,7 +581,9 @@ func (s *Server) handleUpdateTask(
 							AgentID:         aid,
 							SignalType:      sig,
 							Count:           1,
+							SessionID:       pulseSessID,
 							TimeToOutcomeMs: int64(durationMs),
+							Priority:        taskPriority,
 						})
 					}
 				})
@@ -581,11 +596,13 @@ func (s *Server) handleUpdateTask(
 		if pc := s.getPulseClient(); pc != nil {
 			projCopy := s.projectID
 			aidCopy := agentID
+			replanSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
 			s.goBackground(func() {
 				pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
 					ProjectID:  projCopy,
 					AgentID:    aidCopy,
 					SignalType: "replan",
+					SessionID:  replanSessID,
 				})
 			})
 		}

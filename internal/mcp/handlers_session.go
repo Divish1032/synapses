@@ -286,6 +286,7 @@ func (s *Server) handleSessionInit(
 	model, _ := req.GetArguments()["model"].(string)
 	provider, _ := req.GetArguments()["provider"].(string)
 	intent, _ := req.GetArguments()["intent"].(string)
+	agentVersion, _ := req.GetArguments()["agent_version"].(string)
 	// scope controls response verbosity:
 	//   "full"   (default) — all sections, backward compatible
 	//   "quick"  — tasks + working_state + scale_guidance only (~500 tokens)
@@ -369,9 +370,25 @@ func (s *Server) handleSessionInit(
 			s.registerSynapseSession(mcpSessionID, synapseSessionID, effectiveAgentID, model)
 			// Prune tool_calls older than 7 days on session start — debounced inside,
 			// so concurrent session_init calls are safe and only one prune runs/hour.
-			s.goBackground(func() { s.store.PruneToolCallsOlderThan(7 * 24 * time.Hour) }) //nolint:errcheck
+			s.goBackground(func() {
+				pruned, _ := s.store.PruneToolCallsOlderThan(7 * 24 * time.Hour)
+				// P7-7: emit lifecycle event for tool call pruning.
+				if pruned > 0 {
+					if pc := s.getPulseClient(); pc != nil {
+						pc.RecordLifecycleEvent("prune_tool_calls", float64(pruned), s.projectID)
+					}
+				}
+			})
 			// Prune closed/hibernated sessions older than 90 days — debounced to once/day.
-			s.goBackground(func() { s.store.PruneOldSessions(90 * 24 * time.Hour) }) //nolint:errcheck
+			s.goBackground(func() {
+				pruned, _ := s.store.PruneOldSessions(90 * 24 * time.Hour)
+				// P7-7: emit lifecycle event for session pruning.
+				if pruned > 0 {
+					if pc := s.getPulseClient(); pc != nil {
+						pc.RecordLifecycleEvent("prune_sessions", float64(pruned), s.projectID)
+					}
+				}
+			})
 		}
 	}
 
@@ -383,10 +400,17 @@ func (s *Server) handleSessionInit(
 		mdl := model
 		prov := provider
 		sessID := synapseSessionID // use main store's UUID
+		ver := agentVersion
+		intentCopy := intent
 		s.goBackground(func() {
-			pc.RecordSessionEventWithID(sessID, aid, projID, "start")
+			// P6-8: use RecordSessionEventFull to populate agent_version column.
+			pc.RecordSessionEventFull(sessID, aid, projID, "start", ver)
 			if mdl != "" {
 				pc.RecordSessionModelWithID(sessID, aid, projID, mdl, prov)
+			}
+			// P8-1: propagate session intent to Pulse sessions table.
+			if intentCopy != "" {
+				pc.SetSessionIntent(sessID, intentCopy)
 			}
 		})
 	}
@@ -662,6 +686,17 @@ func (s *Server) handleSessionInit(
 				}
 			}
 			staleSessions = stale
+			// P7-8: emit session event for stale detection.
+			if pc := s.getPulseClient(); pc != nil {
+				orphanCount := 0
+				for _, ss := range stale {
+					orphanCount += len(ss.OrphanedTasks)
+				}
+				pc.RecordLifecycleEvent("stale_detected", float64(len(stale)), s.projectID)
+				if orphanCount > 0 {
+					pc.RecordLifecycleEvent("orphaned_tasks_found", float64(orphanCount), s.projectID)
+				}
+			}
 		}
 	}
 
@@ -870,8 +905,37 @@ func (s *Server) handleSessionInit(
 		}
 
 		// Drift detection: compare stored deps against sibling state.
+		driftStart := time.Now()
 		driftAlerts := s.federationResolver.CheckDrift(fedCtx, s.store)
 		fedCancel()
+		// P10-1: emit federation drift detection events to Pulse.
+		// Always emit an aggregate "drift_check" event so we can measure check
+		// frequency and duration even when no drift is found. Then emit per-project
+		// "drift_detected" events (without duration — we only have the aggregate).
+		if pc := s.getPulseClient(); pc != nil {
+			driftMs := float64(time.Since(driftStart).Milliseconds())
+			pc.RecordFederationEvent(pulse.FederationDetectEvent{
+				AgentID:   agentID,
+				ProjectID: s.projectID,
+				DepsFound: len(driftAlerts),
+				DurationMs: driftMs,
+				EventType: "drift_check",
+			})
+			// Per-project breakdown when drift is found.
+			perProject := make(map[string]int, len(driftAlerts))
+			for _, da := range driftAlerts {
+				perProject[da.Project]++
+			}
+			for proj, count := range perProject {
+				pc.RecordFederationEvent(pulse.FederationDetectEvent{
+					AgentID:        agentID,
+					ProjectID:      s.projectID,
+					SiblingProject: proj,
+					DepsFound:      count,
+					EventType:      "drift_detected",
+				})
+			}
+		}
 		if len(driftAlerts) > 0 {
 			// Surface as top-level warnings array so agents can't miss them.
 			warnings := make([]string, 0, len(driftAlerts))
@@ -1694,6 +1758,13 @@ func (s *Server) handleAnnotateNode(
 		note = scanResult.sanitized
 		if scanResult.warning != "" {
 			injectionWarning = scanResult.warning
+			// P7-1: emit guard event for injection scan trigger.
+			if pc := s.getPulseClient(); pc != nil {
+				pc.RecordGuardEvent(pulse.GuardEvent{
+					GuardType: "injection_scan", ToolName: "annotate_node",
+					Category: "warn", AgentID: agentID, ProjectID: s.projectID,
+				})
+			}
 		}
 	}
 
@@ -1705,6 +1776,14 @@ func (s *Server) handleAnnotateNode(
 	id, err := s.store.AddAnnotation(nodeID, agentID, note)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("add annotation: %v", err)), nil
+	}
+
+	// P7-11: emit memory op for annotation write.
+	if pc := s.getPulseClient(); pc != nil {
+		pc.RecordMemoryOp(pulse.MemoryOperationEvent{
+			Operation: "annotation_write", Tier: "entity",
+			ResultCount: 1, AgentID: agentID, ProjectID: s.projectID,
+		})
 	}
 
 	// Dual-write to unified memories table (entity tier).

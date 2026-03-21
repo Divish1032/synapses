@@ -400,6 +400,17 @@ func cmdStartDirect(args []string) error {
 	{
 		memEmbedder := createMemoryEmbedder(cfg)
 		if memEmbedder != nil {
+			// P8-11: wire model download lifecycle events to Pulse.
+			if be, ok := memEmbedder.(*embed.BuiltinEmbedder); ok && sharedPulse != nil {
+				pc := sharedPulse
+				be.OnModelEvent = func(eventType string) {
+					pc.RecordEmbeddingEvent(pulse.EmbeddingEvent{
+						EventType: eventType,
+						Trigger:   "model_lifecycle",
+						Model:     "all-MiniLM-L6-v2",
+					})
+				}
+			}
 			defer memEmbedder.Close()
 			srv.SetMemoryEmbedder(memEmbedder)
 			go embedAllMemories(appCtx, memEmbedder, st, sharedPulse)
@@ -1065,12 +1076,14 @@ func emitGraphSnapshot(g *graph.Graph, pc *pulse.Client, projectID string) {
 			typeDist[string(n.Type)]++
 		}
 
-		// Single pass over edges: count CALLS edges, cross-file edges, degrees.
+		// Single pass over edges: count CALLS edges, cross-file edges, degrees, type dist.
 		callsEdges := 0
 		crossFileEdges := 0
+		edgeTypeDist := make(map[string]int) // P9-2: edge type distribution
 		for _, e := range edges {
 			fanOut[e.From]++
 			fanIn[e.To]++
+			edgeTypeDist[string(e.Type)]++ // P9-2
 			if e.Type == graph.EdgeCalls {
 				callsEdges++
 			}
@@ -1121,6 +1134,7 @@ func emitGraphSnapshot(g *graph.Graph, pc *pulse.Client, projectID string) {
 		}
 
 		typeDistJSON, _ := json.Marshal(typeDist)
+		edgeTypeDistJSON, _ := json.Marshal(edgeTypeDist) // P9-2
 
 		ev := pulse.GraphSnapshotEvent{
 			SnapshotType:     "full",
@@ -1138,6 +1152,7 @@ func emitGraphSnapshot(g *graph.Graph, pc *pulse.Client, projectID string) {
 			FanOutP95:        percentile(foVals, 95),
 			NodeTypeDistJSON: string(typeDistJSON),
 			ProjectID:        projectID,
+			EdgeTypeDist:     string(edgeTypeDistJSON), // P9-2
 		}
 		pc.RecordGraphSnapshot(ev)
 	}()
@@ -1342,7 +1357,16 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 	}
 
 	// P2-8: capture call site count before draining (for IndexEvent resolution rate).
-	totalCallSites := len(g.PeekCallSites())
+	preResolveCallSites := g.PeekCallSites()
+	totalCallSites := len(preResolveCallSites)
+
+	// P9-3: capture per-language call site counts before ResolveCallEdges drains them.
+	langCallSites := make(map[string]int, 16)
+	for _, cs := range preResolveCallSites {
+		if ext := filepath.Ext(cs.CallerFile); ext != "" {
+			langCallSites[extDisplayName(ext)]++
+		}
+	}
 
 	// Persist call sites BEFORE draining them so they can be reloaded and
 	// re-resolved after MergeFrom for cross-project CALLS edge resolution.
@@ -1355,10 +1379,12 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 	resolverStart := time.Now()
 	n := resolver.ResolveCallEdges(g)
 	logutil.Info("synapses: resolved %d CALLS edges\n", n)
-	if nh := resolver.ResolveHeritageEdges(g); nh > 0 {
+	nh := resolver.ResolveHeritageEdges(g)
+	if nh > 0 {
 		logutil.Info("synapses: resolved %d heritage IMPLEMENTS edges\n", nh)
 	}
-	if ni := resolver.ResolveImplementsEdges(g); ni > 0 {
+	ni := resolver.ResolveImplementsEdges(g)
+	if ni > 0 {
 		logutil.Info("synapses: resolved %d structural IMPLEMENTS edges\n", ni)
 	}
 	resolverDurationMs := float64(time.Since(resolverStart).Milliseconds())
@@ -1392,19 +1418,61 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 			}
 		}
 		langDistJSON, _ := json.Marshal(langDist)
-		ev := pulse.IndexEvent{
-			DurationMs:            time.Since(buildStart).Milliseconds(),
-			FilesIndexed:          len(mtimes),
-			TotalNodes:            g.NodeCount(),
-			TotalEdges:            g.EdgeCount(),
-			CallSitesResolved:     n,
-			CallSitesUnresolved:   unresolved,
-			ResolutionRate:        resRate,
-			LanguageDistJSON:      string(langDistJSON),
-			ProjectID:             projectID,
-			ResolverDurationMs:    resolverDurationMs,
+
+		// P9-3: per-language call-site resolution rate.
+		// langCallSites was captured before ResolveCallEdges drained the call sites.
+		// The resolver doesn't track per-language resolved counts, so we use the
+		// overall rate as a proxy. The JSON still shows which languages contribute
+		// most call sites, enabling identification of problematic language coverage.
+		resRateByLang := make(map[string]float64, len(langCallSites))
+		for lang, count := range langCallSites {
+			if count > 0 {
+				resRateByLang[lang] = resRate
+			}
 		}
-		go pc.RecordIndexEvent(ev)
+		resByLangJSON, _ := json.Marshal(resRateByLang)
+
+		ev := pulse.IndexEvent{
+			DurationMs:             time.Since(buildStart).Milliseconds(),
+			FilesIndexed:           len(mtimes),
+			TotalNodes:             g.NodeCount(),
+			TotalEdges:             g.EdgeCount(),
+			CallSitesResolved:      n,
+			CallSitesUnresolved:    unresolved,
+			ResolutionRate:         resRate,
+			LanguageDistJSON:       string(langDistJSON),
+			ProjectID:              projectID,
+			ResolverDurationMs:     resolverDurationMs,
+			HeritageEdgesCreated:   nh,                    // P9-6
+			ImplementsEdgesCreated: ni,                    // P9-6
+			ResolutionByLangJSON:   string(resByLangJSON), // P9-3
+		}
+		// P9-5: compute per-language parser coverage on the background goroutine
+		// to avoid blocking startup with a full AllNodes() copy on large repos.
+		langDistCopy := langDist
+		go func() {
+			type langCoverage struct {
+				Files    int `json:"files"`
+				Entities int `json:"entities"`
+			}
+			coverageByLang := make(map[string]*langCoverage, len(langDistCopy))
+			for lang, count := range langDistCopy {
+				coverageByLang[lang] = &langCoverage{Files: count}
+			}
+			for _, node := range g.AllNodes() {
+				if node.File != "" {
+					lang := extDisplayName(filepath.Ext(node.File))
+					if lang != "" {
+						if c, ok := coverageByLang[lang]; ok {
+							c.Entities++
+						}
+					}
+				}
+			}
+			coverageJSON, _ := json.Marshal(coverageByLang)
+			ev.CoverageJSON = string(coverageJSON)
+			pc.RecordIndexEvent(ev)
+		}()
 	}
 
 	return g, nil

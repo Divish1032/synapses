@@ -193,6 +193,8 @@ func (s *Server) handleGetContext(
 			pulseNode := pickBestNode(pulseNodes, s.graph)
 			pulseEntity = entityWithPath(pulseNode.Name, pulseNode.File)
 		}
+		// P6-3: resolve pulse session ID early for outcome signals.
+		earlyPulseSessID := s.getSynapseSessionID(sessionID)
 		if repeatCount == 2 {
 			// R29: correction signal — second fetch of same entity in session.
 			if pc := s.getPulseClient(); pc != nil {
@@ -202,6 +204,7 @@ func (s *Server) handleGetContext(
 					Entity:     pulseEntity,
 					SignalType: "correction",
 					Count:      repeatCount,
+					SessionID:  earlyPulseSessID,
 				}
 				s.goBackground(func() { pc.RecordOutcomeSignal(evt) })
 			}
@@ -215,6 +218,7 @@ func (s *Server) handleGetContext(
 					Entity:     pulseEntity,
 					SignalType: "escalation",
 					Count:      repeatCount,
+					SessionID:  earlyPulseSessID,
 				}
 				s.goBackground(func() { pc.RecordOutcomeSignal(evt) })
 			}
@@ -410,7 +414,9 @@ func (s *Server) handleGetContext(
 		})
 	}
 
+	traversalStart := time.Now()
 	subgraph, err := s.graph.CarveEgoGraph(best.ID, cfg)
+	traversalDurationMs := float64(time.Since(traversalStart).Microseconds()) / 1000.0
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -448,7 +454,7 @@ func (s *Server) handleGetContext(
 				s.goBackground(func() {
 					s.emitContextDelivery("get_context", cacheAgentID, entityName, best.File,
 						cacheResp, sg.Nodes, sg.Edges, sg.TruncatedCount, sg.Truncated,
-						false, true, durationMs, pulseSessID)
+						false, true, durationMs, pulseSessID, nil)
 				})
 				return jsonResult(cacheResp)
 			}
@@ -467,7 +473,7 @@ func (s *Server) handleGetContext(
 				s.goBackground(func() {
 					s.emitContextDelivery("get_context", cacheAgentID, entityName, best.File,
 						cacheResp, sg.Nodes, sg.Edges, sg.TruncatedCount, sg.Truncated,
-						false, true, durationMs, pulseSessID)
+						false, true, durationMs, pulseSessID, nil)
 				})
 				// Respect the requested format — agent expected compact text, not JSON.
 				// Explicit known_hash paths stay JSON (agent manages their own cache protocol).
@@ -771,6 +777,44 @@ func (s *Server) handleGetContext(
 	}
 	durationMs := time.Since(handlerStart).Milliseconds()
 	hasBrain := dc.ContextPacket != nil
+
+	// P6-1: compute extra delivery metrics for full (non-cache-hit) responses.
+	depthAchieved := 0
+	for _, cn := range sg.Nodes {
+		if cn.Hop > depthAchieved {
+			depthAchieved = cn.Hop
+		}
+	}
+	edgeDist := make(map[string]int, 4)
+	for _, e := range sg.Edges {
+		edgeDist[string(e.Type)]++
+	}
+	edgeDistJSON, _ := json.Marshal(edgeDist)
+	var rulesMatched, violationsFound int
+	if dc.Enrichment != nil {
+		rulesMatched = len(dc.Enrichment.ApplicableRules)
+		violationsFound = len(dc.Enrichment.RuleAlerts)
+	}
+
+	deliveryExtras := &contextDeliveryExtras{
+		Intent:               mode,
+		DepthRequested:       cfg.MaxDepth,
+		DepthAchieved:        depthAchieved,
+		NodesVisited:         len(sg.Nodes) + sg.TruncatedCount,
+		AnnotationsIncluded:  dc.Annotations != nil,
+		OutputFormat:         format,
+		EdgeTypesDist:        string(edgeDistJSON),
+		TraversalDurationMs:  traversalDurationMs,
+		GraphSizeAtTraversal: s.graph.NodeCount(),
+		DetailLevel:          detailLevel,
+		RulesMatched:         rulesMatched,
+		ViolationsFound:      violationsFound,
+		MinRelevanceHits:     sg.TruncatedCount,
+		TokenBudgetHit:       sg.Truncated,
+		Refetched:            contextRefetched,
+		CacheSize:            s.graph.CacheLen(), // P9-8
+	}
+
 	s.goBackground(func() {
 		s.emitContextDelivery(
 			"get_context", agentID, entityName, best.File,
@@ -781,6 +825,7 @@ func (s *Server) handleGetContext(
 			false,
 			durationMs,
 			pulseSessID,
+			deliveryExtras,
 		)
 	})
 
@@ -826,8 +871,26 @@ func (s *Server) handleGetContext(
 		}
 		fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
 		for _, alias := range aliases {
-			if fc := s.federationResolver.GetEntityContext(fedCtx, entityName, alias, cfg.MaxDepth); fc != nil {
+			fedStart := time.Now()
+			fc := s.federationResolver.GetEntityContext(fedCtx, entityName, alias, cfg.MaxDepth)
+			fedDuration := float64(time.Since(fedStart).Milliseconds())
+			if fc != nil {
 				dc.FederatedContexts = append(dc.FederatedContexts, fc)
+			}
+			// P10-2: emit federation resolver timing to Pulse.
+			if pc := s.getPulseClient(); pc != nil {
+				nodeCount := 0
+				if fc != nil {
+					nodeCount = fc.NodeCount
+				}
+				pc.RecordFederationEvent(pulse.FederationDetectEvent{
+					AgentID:        agentIDForFeedback,
+					ProjectID:      s.projectID,
+					SiblingProject: alias,
+					DepsFound:      nodeCount,
+					DurationMs:     fedDuration,
+					EventType:      "resolver_context",
+				})
 			}
 		}
 		fedCancel()
@@ -1232,6 +1295,13 @@ func (s *Server) handleGetImpact(
 		merged.TestCoverage = s.trimRepoRoot(merged.TestCoverage)
 		sort.Strings(merged.TestCoverage)
 		applyImpactTokenBudget(merged, tokenBudget)
+		// P7-10: emit search event for impact analysis.
+		if pc := s.getPulseClient(); pc != nil {
+			pc.RecordSearchEvent(pulse.SearchEvent{
+				Mode: "impact", Query: symbol,
+				ResultCount: merged.TotalAffected, ProjectID: s.projectID,
+			})
+		}
 		return jsonResult(merged)
 	}
 
@@ -1248,6 +1318,14 @@ func (s *Server) handleGetImpact(
 	// with all other file references in get_context/get_impact responses.
 	result.TestCoverage = s.trimRepoRoot(s.graph.FindTestsFor(root.ID))
 	applyImpactTokenBudget(result, tokenBudget)
+
+	// P7-10: emit search event for impact analysis.
+	if pc := s.getPulseClient(); pc != nil {
+		pc.RecordSearchEvent(pulse.SearchEvent{
+			Mode: "impact", Query: symbol,
+			ResultCount: result.TotalAffected, ProjectID: s.projectID,
+		})
+	}
 
 	// Cross-project impact: when projects= is specified, include cross-project
 	// dependency status so the agent sees the full blast radius including siblings.

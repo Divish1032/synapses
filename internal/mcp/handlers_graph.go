@@ -659,6 +659,22 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 		}
 	}
 
+	// P8-3: emit discover_tools funnel event.
+	if pc := s.getPulseClient(); pc != nil {
+		wfCount := 0
+		if bestWorkflow != nil && bestWfScore > 0 {
+			wfCount = 1
+		}
+		pc.RecordSearchEvent(pulse.SearchEvent{
+			Mode:             "discover",
+			Query:            query,
+			ResultCount:      len(matches),
+			MatchedTools:     len(matches),
+			MatchedWorkflows: wfCount,
+			ProjectID:        s.projectID,
+		})
+	}
+
 	return jsonResult(resp)
 }
 
@@ -768,7 +784,7 @@ func (s *Server) handleGetFileContext(
 			payload["total_entities"] = totalEntities
 		}
 		pulseSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
-		s.emitFileContextDelivery(agentIDFC, filePath, matches, payload, time.Since(handlerStart).Milliseconds(), pulseSessID)
+		s.emitFileContextDelivery(agentIDFC, filePath, matches, payload, time.Since(handlerStart).Milliseconds(), pulseSessID, truncated, totalEntities-len(out))
 		return jsonResult(payload)
 	}
 
@@ -790,7 +806,7 @@ func (s *Server) handleGetFileContext(
 		"hint":             fmt.Sprintf("%d files named %q found. Use file= param with a longer path suffix to pin to one file.", len(fileSet), filePath),
 	}
 	pulseSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
-	s.emitFileContextDelivery(agentIDFC, filePath, matches, multiPayload, time.Since(handlerStart).Milliseconds(), pulseSessID)
+	s.emitFileContextDelivery(agentIDFC, filePath, matches, multiPayload, time.Since(handlerStart).Milliseconds(), pulseSessID, false, 0)
 	return jsonResult(multiPayload)
 }
 
@@ -1079,6 +1095,13 @@ func (s *Server) handleGetCallChain(
 	}
 
 	if !found {
+		// P7-9: emit search event for call chain BFS (not found).
+		if pc := s.getPulseClient(); pc != nil {
+			pc.RecordSearchEvent(pulse.SearchEvent{
+				Mode: "call_chain", Query: fromName + " -> " + toName,
+				ResultCount: 0, ProjectID: s.projectID,
+			})
+		}
 		// Build a helpful explanation for why no path was found.
 		fromPkg := topLevelPackage(fromNode.File)
 		toPkg := topLevelPackage(toNode.File)
@@ -1165,6 +1188,14 @@ func (s *Server) handleGetCallChain(
 			usedHandles = true
 		}
 		chain = append(chain, step)
+	}
+
+	// P7-9: emit search event for call chain BFS (found).
+	if pc := s.getPulseClient(); pc != nil {
+		pc.RecordSearchEvent(pulse.SearchEvent{
+			Mode: "call_chain", Query: fromName + " -> " + toName,
+			ResultCount: len(chain) - 1, ProjectID: s.projectID,
+		})
 	}
 
 	return jsonResult(map[string]interface{}{

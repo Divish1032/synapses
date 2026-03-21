@@ -122,6 +122,16 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 		if sd, ok := embedder.(statusDetailer); ok {
 			modelStatus = sd.StatusDetail()
 		}
+		// P8-10: compute embedding coverage percentage.
+		var coveragePct float64
+		totalMemories := st.CountEmbeddableMemories()
+		if totalMemories > 0 {
+			remainingStale := staleCount - done
+			if remainingStale < 0 {
+				remainingStale = 0
+			}
+			coveragePct = float64(totalMemories-remainingStale) / float64(totalMemories)
+		}
 		pc.RecordEmbeddingEvent(pulse.EmbeddingEvent{
 			Trigger:     "startup",
 			Model:       embedder.Model(),
@@ -132,6 +142,7 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 			DurationMs:  time.Since(start).Milliseconds(),
 			Success:     errors == 0,
 			EventType:   "batch",
+			CoveragePct: coveragePct,
 		})
 	}
 }
