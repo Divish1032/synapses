@@ -524,6 +524,8 @@ func (p *TypeScriptParser) extractClassMethods(
 						classNode.Metadata["decorators"] = strings.Join(decs, ",")
 					}
 				}
+				// Heritage clause extraction: implements/extends.
+				extractTSHeritage(g, n, src, filePath, className)
 			}
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				walk(n.Child(i), className)
@@ -774,6 +776,56 @@ func tsDecoratorName(decorator sitter.Node, src []byte) string {
 		return string(src[ident.StartByte():ident.EndByte()])
 	}
 	return ""
+}
+
+// extractTSHeritage walks the children of a TypeScript class_declaration or
+// abstract_class_declaration node, finds class_heritage, and extracts
+// implements/extends type names into the class node's metadata.
+func extractTSHeritage(g *graph.Graph, classNode sitter.Node, src []byte, filePath, className string) {
+	nodeID := g.MakeNodeID(filePath, className)
+	node := g.GetNode(nodeID)
+	if node == nil {
+		return
+	}
+
+	var implementsNames, extendsNames []string
+
+	for i := uint32(0); i < classNode.ChildCount(); i++ {
+		child := classNode.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		switch child.Type() {
+		case "class_heritage":
+			// class_heritage contains extends_clause and/or implements_clause.
+			for j := uint32(0); j < child.ChildCount(); j++ {
+				hChild := child.Child(j)
+				if hChild.IsNull() {
+					continue
+				}
+				switch hChild.Type() {
+				case "extends_clause":
+					extendsNames = append(extendsNames, extractTypeIdentifiers(hChild, src)...)
+				case "implements_clause":
+					implementsNames = append(implementsNames, extractTypeIdentifiers(hChild, src)...)
+				}
+			}
+		}
+	}
+
+	if len(implementsNames) == 0 && len(extendsNames) == 0 {
+		return
+	}
+
+	if node.Metadata == nil {
+		node.Metadata = make(map[string]string)
+	}
+	if len(implementsNames) > 0 {
+		node.Metadata["heritage_implements"] = strings.Join(implementsNames, ",")
+	}
+	if len(extendsNames) > 0 {
+		node.Metadata["heritage_extends"] = strings.Join(extendsNames, ",")
+	}
 }
 
 // isTSBuiltin returns true for TypeScript/JavaScript built-in methods and

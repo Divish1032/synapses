@@ -240,6 +240,8 @@ func (p *JavaParser) extractAllDeclarations(
 					}
 				}
 			}
+			// Heritage clause extraction: implements/extends.
+			meta = extractJavaHeritage(n, src, meta)
 			g.AddNode(&graph.Node{
 				ID:       nodeID,
 				Type:     graph.NodeStruct,
@@ -319,6 +321,7 @@ func (p *JavaParser) extractAllDeclarations(
 				meta = make(map[string]string, 1)
 			}
 			meta["kind"] = "enum"
+			meta = extractJavaHeritage(n, src, meta)
 			g.AddNode(&graph.Node{
 				ID:       nodeID,
 				Type:     graph.NodeStruct,
@@ -348,6 +351,7 @@ func (p *JavaParser) extractAllDeclarations(
 				meta = make(map[string]string, 1)
 			}
 			meta["kind"] = "record"
+			meta = extractJavaHeritage(n, src, meta)
 			g.AddNode(&graph.Node{
 				ID:       nodeID,
 				Type:     graph.NodeStruct,
@@ -581,6 +585,35 @@ func collectJavaVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePath 
 		}
 	}
 	walk(root)
+}
+
+// extractJavaHeritage extracts implements/extends clauses from a Java class,
+// enum, or record declaration and stores them in metadata.
+func extractJavaHeritage(n sitter.Node, src []byte, meta map[string]string) map[string]string {
+	// Java class_declaration has "interfaces" field (type_list) and "superclass" field.
+	var implementsNames, extendsNames []string
+
+	if ifaces := n.ChildByFieldName("interfaces"); !ifaces.IsNull() {
+		implementsNames = extractTypeIdentifiers(ifaces, src)
+	}
+	if super := n.ChildByFieldName("superclass"); !super.IsNull() {
+		extendsNames = extractTypeIdentifiers(super, src)
+	}
+
+	if len(implementsNames) == 0 && len(extendsNames) == 0 {
+		return meta
+	}
+
+	if meta == nil {
+		meta = make(map[string]string)
+	}
+	if len(implementsNames) > 0 {
+		meta["heritage_implements"] = strings.Join(implementsNames, ",")
+	}
+	if len(extendsNames) > 0 {
+		meta["heritage_extends"] = strings.Join(extendsNames, ",")
+	}
+	return meta
 }
 
 // isJavaBuiltin returns true for common Java stdlib types/methods that should
