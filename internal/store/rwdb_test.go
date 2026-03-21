@@ -1,6 +1,8 @@
 package store
 
 import (
+	"database/sql"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -211,5 +213,63 @@ func TestRWDB_ReaderRejectsWrites(t *testing.T) {
 		 VALUES ('test', 'entity', 'should fail', '2026-01-01', '', '2026-01-01')`)
 	if err == nil {
 		t.Error("expected error writing to query_only reader pool, got nil")
+	}
+}
+
+// TestRWDB_PerformancePragmas verifies that the performance pragmas (synchronous,
+// cache_size, mmap_size, temp_store) are applied to both writer and reader pools.
+func TestRWDB_PerformancePragmas(t *testing.T) {
+	t.Parallel()
+	f, err := os.CreateTemp("", "rwdb-pragma-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	t.Cleanup(func() { os.Remove(f.Name()) })
+
+	st, err := Open(f.Name())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	// Expected pragma values for the performance tuning.
+	// synchronous: 1 = NORMAL (vs 2 = FULL default).
+	// cache_size: -65536 (64 MB, negative = KiB).
+	// mmap_size: 268435456 (256 MB).
+	// temp_store: 2 = MEMORY (vs 0 = DEFAULT).
+	expectations := []struct {
+		pragma string
+		want   string
+	}{
+		{"synchronous", "1"},
+		{"cache_size", "-65536"},
+		{"mmap_size", "268435456"},
+		{"temp_store", "2"},
+	}
+
+	type namedDB struct {
+		name string
+		db   *sql.DB
+	}
+	pools := []namedDB{
+		{"graph-writer", st.graphDB.writer},
+		{"graph-reader", st.graphDB.reader},
+		{"knowledge-writer", st.knowledgeDB.writer},
+		{"knowledge-reader", st.knowledgeDB.reader},
+	}
+
+	for _, pool := range pools {
+		for _, exp := range expectations {
+			var val string
+			err := pool.db.QueryRow(fmt.Sprintf("PRAGMA %s", exp.pragma)).Scan(&val)
+			if err != nil {
+				t.Errorf("%s: PRAGMA %s: %v", pool.name, exp.pragma, err)
+				continue
+			}
+			if val != exp.want {
+				t.Errorf("%s: PRAGMA %s = %s, want %s", pool.name, exp.pragma, val, exp.want)
+			}
+		}
 	}
 }
