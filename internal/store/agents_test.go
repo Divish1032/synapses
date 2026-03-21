@@ -1,26 +1,15 @@
 package store
 
 import (
-	"os"
 	"testing"
 	"time"
 )
 
 // openTestStore is a helper that creates a temp SQLite store and registers cleanup.
+// Uses the pre-initialized template DB from TestMain for fast setup.
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	f, err := os.CreateTemp("", "test-agents-*.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-	t.Cleanup(func() { os.Remove(f.Name()) })
-	st, err := Open(f.Name())
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { st.Close() })
-	return st
+	return openFromTemplate(t)
 }
 
 // TestClassifyPresence checks the three presence tiers.

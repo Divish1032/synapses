@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -450,6 +451,11 @@ func (s *Store) memoryVectorSearchBruteForce(normQuery []float32, limit int) ([]
 // Uses HNSW fast path when available, with threshold applied post-search.
 // Falls back to brute-force scan when HNSW index is not ready.
 func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, minScore float64) ([]MemorySearchResult, error) {
+	return s.MemoryVectorSearchWithThresholdCtx(context.Background(), queryVec, limit, minScore)
+}
+
+// MemoryVectorSearchWithThresholdCtx is the context-aware variant of MemoryVectorSearchWithThreshold.
+func (s *Store) MemoryVectorSearchWithThresholdCtx(ctx context.Context, queryVec []float32, limit int, minScore float64) ([]MemorySearchResult, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -478,19 +484,24 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 			}
 			winners := h.drain()
 			if len(winners) > 0 {
-				return s.fetchMemorySearchResults(winners)
+				return s.fetchMemorySearchResultsCtx(ctx, winners)
 			}
 		}
 	}
 
 	// Fallback: brute-force scan with threshold.
-	return s.memoryVectorSearchBruteForceWithThreshold(normQuery, limit, threshold)
+	return s.memoryVectorSearchBruteForceWithThresholdCtx(ctx, normQuery, limit, threshold)
 }
 
 // memoryVectorSearchBruteForceWithThreshold is the O(N) fallback with threshold.
 func (s *Store) memoryVectorSearchBruteForceWithThreshold(normQuery []float32, limit int, threshold float32) ([]MemorySearchResult, error) {
+	return s.memoryVectorSearchBruteForceWithThresholdCtx(context.Background(), normQuery, limit, threshold)
+}
+
+// memoryVectorSearchBruteForceWithThresholdCtx is the context-aware variant of memoryVectorSearchBruteForceWithThreshold.
+func (s *Store) memoryVectorSearchBruteForceWithThresholdCtx(ctx context.Context, normQuery []float32, limit int, threshold float32) ([]MemorySearchResult, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.knowledgeDB.Query(`
+	rows, err := s.knowledgeDB.QueryContext(ctx, `
 		SELECT e.memory_id, e.embedding, e.stale
 		FROM memory_embeddings e
 		JOIN memories m ON e.memory_id = m.id
@@ -530,7 +541,7 @@ func (s *Store) memoryVectorSearchBruteForceWithThreshold(normQuery []float32, l
 		return nil, nil
 	}
 
-	return s.fetchMemorySearchResults(winners)
+	return s.fetchMemorySearchResultsCtx(ctx, winners)
 }
 
 // fetchMemorySearchResults performs the second pass of the two-pass vector
@@ -543,6 +554,11 @@ func (s *Store) memoryVectorSearchBruteForceWithThreshold(normQuery []float32, l
 // a memory valid during Pass 1 could expire before Pass 2 executes.
 // Memory-level stale (m.stale=1) is also re-checked — dead memories excluded.
 func (s *Store) fetchMemorySearchResults(winners []scoredID) ([]MemorySearchResult, error) {
+	return s.fetchMemorySearchResultsCtx(context.Background(), winners)
+}
+
+// fetchMemorySearchResultsCtx is the context-aware variant of fetchMemorySearchResults.
+func (s *Store) fetchMemorySearchResultsCtx(ctx context.Context, winners []scoredID) ([]MemorySearchResult, error) {
 	// Build id → score+position+stale map for reassembly.
 	type posScore struct {
 		pos   int
@@ -562,7 +578,7 @@ func (s *Store) fetchMemorySearchResults(winners []scoredID) ([]MemorySearchResu
 
 	// Pass 2: join memories with their embedding stale flag. The HNSW path
 	// doesn't carry stale status, so we always resolve it from SQL here.
-	rows, err := s.knowledgeDB.Query(
+	rows, err := s.knowledgeDB.QueryContext(ctx,
 		`SELECT m.id, m.content, m.tier, m.entity_id, COALESCE(e.stale, 0)
 		 FROM memories m
 		 LEFT JOIN memory_embeddings e ON m.id = e.memory_id

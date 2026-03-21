@@ -88,6 +88,7 @@ func (s *Store) RebuildMemoryHNSW() {
 		var memID string
 		var blob []byte
 		if err := rows.Scan(&memID, &blob); err != nil {
+			logutil.Warn("synapses: rebuild HNSW: skip corrupt row: %v\n", err)
 			continue
 		}
 		vec := blobToVec(blob)
@@ -254,6 +255,7 @@ func (s *Store) RebuildNodeHNSW() {
 		var nodeID string
 		var blob []byte
 		if err := rows.Scan(&nodeID, &blob); err != nil {
+			logutil.Warn("synapses: rebuild node HNSW: skip corrupt row: %v\n", err)
 			continue
 		}
 		vec := blobToVec(blob)

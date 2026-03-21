@@ -314,30 +314,33 @@ func TestComputeAdmissionImportance_Clamps(t *testing.T) {
 		hasCandidates bool
 		maxJaccard    float64
 		maxCosine     float32
+		hasCosine     bool
 		wantMin       float64
 		wantMax       float64
 		wantExact     float64 // 0 means skip exact check
 	}{
 		// No existing memories → fully novel → importance = prior × 1.0 = 1.4.
-		{"failure+fully-novel", `["episode","failure"]`, SourceManual, false, 0.0, 0, 1.39, 1.41, 1.4},
+		{"failure+fully-novel", `["episode","failure"]`, SourceManual, false, 0.0, 0, false, 1.39, 1.41, 1.4},
 		// hasCandidates but no cosine/Jaccard → Jaccard fallback, maxJaccard=0 → novelty=1.0.
-		{"decision+no-similarity", `["episode","decision"]`, SourceManual, true, 0.0, 0, 0.99, 1.01, 1.0},
+		{"decision+no-similarity", `["episode","decision"]`, SourceManual, true, 0.0, 0, false, 0.99, 1.01, 1.0},
 		// Jaccard fallback with near-duplicate: noveltyFactor=0.01 → clamped to noveltyFloor=0.2
 		// → importance=0.8×0.2=0.16. Above minImportance(0.10) so no second clamp.
-		{"auto+near-duplicate-jaccard", `[]`, SourceAuto, true, 0.99, 0, 0.15, 0.17, 0.16},
+		{"auto+near-duplicate-jaccard", `[]`, SourceAuto, true, 0.99, 0, false, 0.15, 0.17, 0.16},
 		// Cosine novelty path: prior=1.0, cosine=0.5 → novelty=0.5 → importance=0.5.
-		{"decision+cosine-novelty", `[]`, SourceManual, true, 0.0, 0.5, 0.49, 0.51, 0.5},
+		{"decision+cosine-novelty", `[]`, SourceManual, true, 0.0, 0.5, true, 0.49, 0.51, 0.5},
 		// Cosine near-duplicate: prior=1.4, cosine=0.95 → novelty=0.05, below floor(0.2) → 1.4×0.2=0.28.
-		{"failure+cosine-near-dup", `["episode","failure"]`, SourceManual, true, 0.0, 0.95, 0.27, 0.29, 0.28},
+		{"failure+cosine-near-dup", `["episode","failure"]`, SourceManual, true, 0.0, 0.95, true, 0.27, 0.29, 0.28},
 		// High prior + full novelty = 1.4 — still within [0.10, 2.0].
-		{"failure+novel", `["episode","failure"]`, SourceManual, true, 0.0, 0, 1.39, 1.41, 1.4},
+		{"failure+novel", `["episode","failure"]`, SourceManual, true, 0.0, 0, false, 1.39, 1.41, 1.4},
+		// Cosine exactly 0.0 (orthogonal) — hasCosine=true, should use cosine path (novelty=1.0).
+		{"decision+cosine-zero", `[]`, SourceManual, true, 0.5, 0.0, true, 0.99, 1.01, 1.0},
 	}
 
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.description, func(t *testing.T) {
 			t.Parallel()
-			got := computeAdmissionImportance(tc.tags, tc.source, tc.hasCandidates, tc.maxJaccard, tc.maxCosine)
+			got := computeAdmissionImportance(tc.tags, tc.source, tc.hasCandidates, tc.maxJaccard, tc.maxCosine, tc.hasCosine)
 			f, err := strconv.ParseFloat(got, 64)
 			if err != nil {
 				t.Fatalf("parse %q: %v", got, err)

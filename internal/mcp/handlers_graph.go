@@ -590,10 +590,13 @@ func (s *Server) handleDiscoverTools(ctx context.Context, req mcp.CallToolReques
 	s.toolEmbedsMu.RUnlock()
 
 	// Model consistency check: query embeddings must come from the same model as
-	// tool embeddings. A mismatch (possible during embedder hot-swap) means vectors
-	// live in different spaces — cosine similarity would be meaningless garbage.
+	// tool embeddings. A mismatch (possible during embedder hot-swap or model
+	// upgrade) means vectors live in different spaces — cosine similarity would
+	// be meaningless. Trigger background re-embedding so the next call works.
 	if embeddingsReady && s.memoryEmbedder != nil && toolEmbedModel != s.memoryEmbedder.Model() {
 		embeddingsReady = false
+		// Re-embed tool catalog with the new model in background.
+		go s.EmbedToolCatalog(context.Background(), s.memoryEmbedder)
 	}
 
 	if embeddingsReady && s.memoryEmbedder != nil {

@@ -420,6 +420,107 @@ func runFTSRanking(g *graph.Graph, st *store.Store) ([]QueryResult, error) {
 	return results, nil
 }
 
+// ── Scenario 6: Memory Recall ────────────────────────────────────────────────
+//
+// For memories inserted with known content, FTS recall should surface them
+// when searching for their content keywords. Tests the memory write → search
+// round-trip quality.
+//
+// Ground truth: memories we just inserted with known IDs.
+// Pass threshold: 0.7 (FTS may rank some below top-k).
+
+func scenarioMemoryRecall() Scenario {
+	return Scenario{
+		Name:          "memory-recall",
+		Description:   "FTS recall surfaces memories matching their content keywords",
+		PassThreshold: 0.7,
+		Run:           runMemoryRecall,
+	}
+}
+
+func runMemoryRecall(g *graph.Graph, st *store.Store) ([]QueryResult, error) {
+	if st == nil {
+		return nil, fmt.Errorf("store required for memory-recall scenario")
+	}
+
+	// Insert test memories with distinctive content.
+	type testMemory struct {
+		content string
+		query   string // search query that should find this memory
+	}
+	memories := []testMemory{
+		{
+			content: "Authentication tokens must be rotated every 24 hours to comply with security policy",
+			query:   "authentication token rotation",
+		},
+		{
+			content: "Database connection pool size should be set to 2x CPU cores for optimal throughput",
+			query:   "database connection pool",
+		},
+		{
+			content: "Rate limiting middleware uses a sliding window algorithm with 100 requests per minute",
+			query:   "rate limiting sliding window",
+		},
+		{
+			content: "Cache invalidation follows write-through pattern to prevent stale reads in distributed nodes",
+			query:   "cache invalidation write-through",
+		},
+		{
+			content: "Error handling in the API layer must return structured JSON error responses with error codes",
+			query:   "error handling API structured",
+		},
+	}
+
+	// Use a short TTL so benchmark memories expire quickly after the run.
+	shortExpiry := time.Now().UTC().Add(2 * time.Minute).Format(time.RFC3339)
+
+	// Insert memories.
+	insertedIDs := make([]string, len(memories))
+	for i, tm := range memories {
+		id := fmt.Sprintf("bench-recall-%d-%d", i, time.Now().UnixNano())
+		m := store.Memory{
+			ID:        id,
+			Tier:      store.TierProject,
+			Content:   tm.content,
+			Source:    "benchmark",
+			Tags:     `["benchmark"]`,
+			ExpiresAt: shortExpiry,
+		}
+		insertedID, err := st.InsertMemory(m)
+		if err != nil {
+			return nil, fmt.Errorf("insert test memory %d: %w", i, err)
+		}
+		insertedIDs[i] = insertedID
+	}
+
+	// Search for each memory by its query.
+	var results []QueryResult
+	for i, tm := range memories {
+		expected := map[string]bool{insertedIDs[i]: true}
+
+		start := time.Now()
+		found, err := st.SearchMemories(tm.query, 10)
+		elapsed := time.Since(start)
+
+		if err != nil {
+			continue
+		}
+
+		returned := make(map[string]bool)
+		for _, m := range found {
+			returned[m.ID] = true
+		}
+
+		label := fmt.Sprintf("MemoryRecall(%q)", tm.query)
+		results = append(results, makeQueryResult(label, expected, returned, elapsed))
+	}
+
+	if len(results) == 0 {
+		return nil, fmt.Errorf("no memory recall queries returned results")
+	}
+	return results, nil
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1

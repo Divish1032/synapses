@@ -8,7 +8,9 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 
 	hugot "github.com/knights-analytics/hugot"
@@ -25,13 +27,17 @@ const (
 	builtinModelName = "nomic-ai/nomic-embed-text-v1.5"
 	// builtinModelDirName is the local directory name for the cached model.
 	builtinModelDirName = "nomic-ai_nomic-embed-text-v1.5"
-	// builtinModelFile is the ONNX model filename within the model directory.
+	// builtinModelFileQuantized is the ONNX model filename for CPU deployments.
 	// hugot strips the onnx/ directory prefix: onnx/model_quantized.onnx → model_quantized.onnx.
-	// Quantized variant (~137 MB) used for CPU deployments; GPU users can override via config.
-	builtinModelFile = "model_quantized.onnx"
-	// builtinOnnxFilePath is the path within the HuggingFace repo for download.
-	// hugot uses this to select which ONNX variant to download.
-	builtinOnnxFilePath = "onnx/model_quantized.onnx"
+	// Quantized variant (~137 MB) is faster and smaller on CPU.
+	builtinModelFileQuantized = "model_quantized.onnx"
+	// builtinOnnxFilePathQuantized is the HuggingFace repo path for the quantized variant.
+	builtinOnnxFilePathQuantized = "onnx/model_quantized.onnx"
+	// builtinModelFileFP32 is the ONNX model filename for GPU deployments.
+	// Full-precision fp32 variant (~548 MB) offers higher quality on GPU hardware.
+	builtinModelFileFP32 = "model.onnx"
+	// builtinOnnxFilePathFP32 is the HuggingFace repo path for the fp32 variant.
+	builtinOnnxFilePathFP32 = "onnx/model.onnx"
 	// builtinModel is the model identifier used in UpsertMemoryEmbedding.
 	// Changing this triggers automatic re-embedding of all memories on next startup.
 	builtinModel = "nomic-embed-text-v1.5"
@@ -90,6 +96,13 @@ type BuiltinEmbedder struct {
 	closed        bool
 	done          chan struct{}   // closed by Close() to unblock pool waiters
 	inflight      sync.WaitGroup // tracks in-flight Embed calls for graceful shutdown
+
+	// onnxFile is the selected ONNX model filename, set during ensureModel().
+	// GPU → "model.onnx" (fp32); CPU → "model_quantized.onnx".
+	onnxFile string
+	// onnxPath is the HuggingFace repo path for the selected variant.
+	// GPU → "onnx/model.onnx"; CPU → "onnx/model_quantized.onnx".
+	onnxPath string
 }
 
 // NewBuiltinEmbedder creates a BuiltinEmbedder that stores its model in
@@ -129,35 +142,40 @@ func (b *BuiltinEmbedder) ensureModel() error {
 	}
 	b.initAttempted = true
 
+	// Select ONNX variant based on hardware: fp32 for GPU, quantized for CPU.
+	modelFile, repoPath := selectOnnxVariant()
+	b.onnxFile = modelFile
+	b.onnxPath = repoPath
+
 	modelPath := filepath.Join(b.modelsDir, builtinModelDirName)
-	onnxPath := filepath.Join(modelPath, builtinModelFile)
+	onnxDisk := filepath.Join(modelPath, modelFile)
 
 	// Check if model already exists.
-	if _, err := os.Stat(onnxPath); os.IsNotExist(err) {
+	if _, err := os.Stat(onnxDisk); os.IsNotExist(err) {
 		// Download from HuggingFace.
-		logutil.Info("synapses: downloading embedding model %s to %s …\n", builtinModelName, b.modelsDir)
+		logutil.Info("synapses: downloading embedding model %s (%s) to %s …\n", builtinModelName, modelFile, b.modelsDir)
 		if err := os.MkdirAll(b.modelsDir, 0o755); err != nil {
 			return fmt.Errorf("create models dir: %w", err)
 		}
 		opts := hugot.NewDownloadOptions()
 		opts.Branch = builtinModelRevision
-		opts.OnnxFilePath = builtinOnnxFilePath // download only the quantized variant
+		opts.OnnxFilePath = repoPath // download the selected variant (fp32 or quantized)
 		opts.Verbose = false
 		opts.MaxRetries = 3
 		opts.RetryInterval = 2
 		if _, err := hugot.DownloadModel(builtinModelName, b.modelsDir, opts); err != nil {
 			return fmt.Errorf("download embedding model: %w", err)
 		}
-		logutil.Info("synapses: embedding model downloaded\n")
+		logutil.Info("synapses: embedding model downloaded (%s)\n", modelFile)
 	}
 
 	// Verify model file exists after potential download.
-	if _, err := os.Stat(onnxPath); err != nil {
-		return fmt.Errorf("embedding model not found at %s: %w", onnxPath, err)
+	if _, err := os.Stat(onnxDisk); err != nil {
+		return fmt.Errorf("embedding model not found at %s: %w", onnxDisk, err)
 	}
 
 	// Verify integrity of the ONNX model file.
-	if err := verifyModelIntegrity(onnxPath); err != nil {
+	if err := verifyModelIntegrity(onnxDisk, modelFile); err != nil {
 		return err
 	}
 
@@ -176,7 +194,7 @@ func (b *BuiltinEmbedder) ensureModel() error {
 		config := hugot.FeatureExtractionConfig{
 			ModelPath:    modelPath,
 			Name:         fmt.Sprintf("memory-embedder-%d", i),
-			OnnxFilename: builtinModelFile,
+			OnnxFilename: modelFile,
 			// No WithNormalization() — we truncate to matryoshkaDims first,
 			// then the store's UpsertMemoryEmbedding normalizes the truncated vector.
 			// Normalizing the full 768 dims before truncation wastes FLOPs and
@@ -202,7 +220,7 @@ func (b *BuiltinEmbedder) ensureModel() error {
 
 	b.pool = pool
 	b.ready = true
-	logutil.Info("synapses: embedding pool ready (%d pipeline instances)\n", b.poolSize)
+	logutil.Info("synapses: embedding pool ready (%d pipeline instances, variant=%s)\n", b.poolSize, modelFile)
 	return nil
 }
 
@@ -210,8 +228,14 @@ func (b *BuiltinEmbedder) ensureModel() error {
 // compares it against the expected hash. If the hash doesn't match (tampered
 // download, partial write, CDN compromise), the file is removed and an error
 // is returned so the next Embed() call triggers a fresh download.
+//
+// modelFile identifies which variant is being verified:
+//   - builtinModelFileQuantized → hash verified against builtinModelSHA256
+//   - builtinModelFileFP32 → hash logged for capture but not enforced
+//
 // When builtinModelSHA256 is empty, the hash is logged for capture but not enforced.
-func verifyModelIntegrity(onnxPath string) error {
+// TODO: capture the fp32 model SHA-256 hash and add it as builtinModelSHA256FP32.
+func verifyModelIntegrity(onnxPath string, modelFile string) error {
 	f, err := os.Open(onnxPath)
 	if err != nil {
 		return fmt.Errorf("open model for integrity check: %w", err)
@@ -224,6 +248,14 @@ func verifyModelIntegrity(onnxPath string) error {
 	}
 
 	got := hex.EncodeToString(h.Sum(nil))
+
+	// fp32 model: we don't have a verified hash yet — log it for capture.
+	if modelFile == builtinModelFileFP32 {
+		logutil.Info("synapses: embedding model (%s) SHA-256: %s (fp32 hash not yet enforced — capture this for builtinModelSHA256FP32)\n", modelFile, got)
+		return nil
+	}
+
+	// Quantized model: verify against hardcoded hash.
 	if builtinModelSHA256 == "" {
 		// First download — log the hash so it can be captured and hardcoded.
 		logutil.Info("synapses: embedding model SHA-256: %s (capture this for builtinModelSHA256)\n", got)
@@ -355,9 +387,12 @@ func (b *BuiltinEmbedder) StatusDetail() string {
 	// just hasn't been initialized yet (lazy init — happens on first Embed call).
 	// This is the common case after a daemon restart when the model was previously
 	// downloaded. Reporting "not yet downloaded" in this state misleads agents.
-	onnxPath := filepath.Join(b.modelsDir, builtinModelDirName, builtinModelFile)
-	if _, err := os.Stat(onnxPath); err == nil {
-		return "model cached"
+	// Check both variants — either one being present means the model is cached.
+	for _, mf := range []string{builtinModelFileQuantized, builtinModelFileFP32} {
+		onnxOnDisk := filepath.Join(b.modelsDir, builtinModelDirName, mf)
+		if _, err := os.Stat(onnxOnDisk); err == nil {
+			return "model cached"
+		}
 	}
 	return "model not yet downloaded"
 }
@@ -399,6 +434,49 @@ func (b *BuiltinEmbedder) Close() error {
 	b.pool = nil
 	b.ready = false
 	return firstErr
+}
+
+// detectAccelerator probes the host for GPU hardware and returns a string
+// indicating the best available accelerator: "cuda", "rocm", "metal", or "cpu".
+// This is a lightweight check (exec.LookPath + stat, no GPU driver calls) so
+// it is safe to call on every ensureModel() invocation.
+func detectAccelerator() string {
+	// Apple Silicon Metal: arm64 macOS always has Metal support.
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		return "metal"
+	}
+
+	// NVIDIA CUDA: check for nvidia-smi binary.
+	if _, err := exec.LookPath("nvidia-smi"); err == nil {
+		return "cuda"
+	}
+	// Fallback: check /proc/driver/nvidia (present even if nvidia-smi is not in PATH).
+	if _, err := os.Stat("/proc/driver/nvidia"); err == nil {
+		return "cuda"
+	}
+
+	// AMD ROCm: check for rocm-smi binary.
+	if _, err := exec.LookPath("rocm-smi"); err == nil {
+		return "rocm"
+	}
+
+	return "cpu"
+}
+
+// selectOnnxVariant returns the (modelFile, onnxRepoPath) tuple for the ONNX
+// variant best suited to the detected hardware. GPU (cuda/rocm/metal) gets the
+// full-precision fp32 model for higher quality; CPU gets the quantized model
+// for lower memory and faster inference.
+func selectOnnxVariant() (modelFile, onnxRepoPath string) {
+	accel := detectAccelerator()
+	switch accel {
+	case "cuda", "rocm", "metal":
+		logutil.Info("synapses: GPU detected (%s) — selecting fp32 ONNX model\n", accel)
+		return builtinModelFileFP32, builtinOnnxFilePathFP32
+	default:
+		logutil.Info("synapses: no GPU detected — selecting quantized ONNX model\n")
+		return builtinModelFileQuantized, builtinOnnxFilePathQuantized
+	}
 }
 
 // l2Normalize returns a unit-length copy of vec (L2 norm = 1.0).

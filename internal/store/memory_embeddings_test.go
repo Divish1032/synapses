@@ -2,27 +2,16 @@ package store
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
 // openMemEmbedTestStore creates a temporary Store with a seeded memory for embedding tests.
+// Uses the pre-initialized template DB from TestMain for fast setup.
 func openMemEmbedTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
-	f, err := os.CreateTemp("", "test-memembed-*.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-	t.Cleanup(func() { os.Remove(f.Name()); os.Remove(KnowledgePath(f.Name())) })
-
-	st, err := Open(f.Name())
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := openFromTemplate(t)
 
 	// Insert a test memory.
 	memID, err := st.InsertMemory(Memory{
