@@ -975,8 +975,10 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 	embedFn := s.semanticDedupFunc // snapshot — safe even if swapped concurrently
 
 	// maxJaccard tracks the highest Jaccard similarity seen across all candidates.
-	// Used as a fallback for novelty scoring when embeddings are unavailable.
+	// maxCosine tracks the highest cosine similarity (when embeddings are available).
+	// Both are passed to computeAdmissionImportance — no re-fetching of embeddings needed.
 	var maxJaccard float64
+	var maxCosine float32
 
 	for _, ex := range dupCandidates {
 		sim := stringSimilarity(ex.Content, m.Content)
@@ -1005,22 +1007,28 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 					newVec = normalizeVec(raw)
 				}
 			}
-			if len(newVec) > 0 && dotSimilarity(newVec, candidateVec) > 0.9 {
-				return m, prepareMemoryResult{
-					dedupedID:        ex.ID,
-					dedupedContent:   ex.Content,
-					dedupedCreatedAt: ex.CreatedAt,
-				}, nil
+			if len(newVec) > 0 {
+				cos := dotSimilarity(newVec, candidateVec)
+				if cos > maxCosine {
+					maxCosine = cos // track for A-MAC — no re-fetch needed
+				}
+				if cos > 0.9 {
+					return m, prepareMemoryResult{
+						dedupedID:        ex.ID,
+						dedupedContent:   ex.Content,
+						dedupedCreatedAt: ex.CreatedAt,
+					}, nil
+				}
 			}
 		}
 	}
 
 	// A-MAC: auto-compute importance when caller didn't set it explicitly.
 	// Score = content_type_prior × novelty_factor (A-MAC, arXiv:2603.04549).
-	// This runs after dedup so dupCandidates and newVec are already available —
-	// zero extra embedding or DB cost in the common case.
+	// maxJaccard and maxCosine were captured during the dedup loop above — no
+	// extra embedding or DB calls are needed here.
 	if m.Importance == "" {
-		m.Importance = s.computeAdmissionImportance(m.Tags, m.Source, dupCandidates, maxJaccard, newVec)
+		m.Importance = computeAdmissionImportance(m.Tags, m.Source, len(dupCandidates) > 0, maxJaccard, maxCosine)
 	}
 
 	return m, prepareMemoryResult{}, nil
@@ -1052,44 +1060,35 @@ func parseContentTypePrior(tags, source string) float64 {
 //   - content_type_prior: derived from episode type in tags and source field
 //   - novelty_factor: 1 − max_similarity(new, recent_same_tier_memories)
 //
-// Similarity is cosine when newVec is available (computed during dedup check at
-// zero extra embedding cost), Jaccard otherwise. Clamped to [0.10, 2.0].
-func (s *Store) computeAdmissionImportance(tags, source string, candidates []Memory, maxJaccard float64, newVec []float32) string {
+// maxJaccard and maxCosine are pre-computed in the dedup loop — this function
+// performs no DB calls and is a pure computation. Clamped to [0.10, 2.0].
+//
+// hasCandidates must be true when any same-tier memories exist (even if their
+// embeddings are absent). It distinguishes "no prior memories" (novelty=1.0)
+// from "similar memories but no embeddings" (Jaccard fallback).
+func computeAdmissionImportance(tags, source string, hasCandidates bool, maxJaccard float64, maxCosine float32) string {
 	const (
 		minImportance = DecayVisibilityThreshold * 2 // 0.10 — floor matching clamp elsewhere
 		maxImportance = 2.0                          // cap: matches edge weight scale in BFS
-		noveltyFloor  = 0.2                          // even near-duplicates have baseline value
+		noveltyFloor  = 0.2                          // even near-duplicates retain baseline value
 	)
 
 	prior := parseContentTypePrior(tags, source)
 
 	var noveltyFactor float64
 	switch {
-	case len(candidates) == 0:
+	case !hasCandidates:
 		noveltyFactor = 1.0 // no existing memories → fully novel by definition
-	case len(newVec) > 0:
-		// Cosine-based novelty: more accurate than Jaccard for semantic similarity.
-		// newVec was computed during the dedup check — no extra embedding call needed.
-		var maxCosine float32
-		for _, c := range candidates {
-			cv := s.GetMemoryEmbedding(c.ID)
-			if len(cv) == 0 {
-				continue
-			}
-			if cos := dotSimilarity(newVec, cv); cos > maxCosine {
-				maxCosine = cos
-			}
-		}
-		if maxCosine > 0 {
-			noveltyFactor = 1.0 - float64(maxCosine)
-		} else {
-			noveltyFactor = 1.0 - maxJaccard // no candidate had stored embeddings
-		}
+	case maxCosine > 0:
+		// Cosine was computed during dedup — more accurate than Jaccard for
+		// semantic similarity. Uses embeddings already fetched, no extra DB calls.
+		noveltyFactor = 1.0 - float64(maxCosine)
 	default:
-		noveltyFactor = 1.0 - maxJaccard // Jaccard fallback: embedder unavailable
+		// Jaccard fallback: embedder unavailable or no candidate had stored embeddings.
+		noveltyFactor = 1.0 - maxJaccard
 	}
 
-	// Clamp novelty: floor ensures even redundant memories remain visible.
+	// Clamp novelty: floor ensures even redundant memories retain baseline importance.
 	if noveltyFactor < noveltyFloor {
 		noveltyFactor = noveltyFloor
 	} else if noveltyFactor > 1.0 {
@@ -1283,6 +1282,73 @@ func (s *Store) GetMemoryAnchorNodeIDsInSet(memIDs []string, nodeSet map[string]
 		rows.Close()
 	}
 
+	return result, nil
+}
+
+// GetAllMemoryAnchorNodeIDsInSet returns ALL anchor node IDs in nodeSet for
+// each memory, not just the first. Used by the spreading activation sort step
+// to compute maximum activation across all of a memory's anchors.
+//
+// Returns map[memoryID → []nodeID]. Memories with no anchors in nodeSet are
+// absent. Batches like GetMemoryAnchorNodeIDsInSet (200 mem IDs per batch).
+func (s *Store) GetAllMemoryAnchorNodeIDsInSet(memIDs []string, nodeSet map[string]bool) (map[string][]string, error) {
+	if len(memIDs) == 0 || len(nodeSet) == 0 {
+		return nil, nil
+	}
+
+	nodeIDs := make([]string, 0, len(nodeSet))
+	for nid := range nodeSet {
+		nodeIDs = append(nodeIDs, nid)
+	}
+	nodePlaceholders := make([]string, len(nodeIDs))
+	nodeArgs := make([]interface{}, len(nodeIDs))
+	for i, nid := range nodeIDs {
+		nodePlaceholders[i] = "?"
+		nodeArgs[i] = nid
+	}
+	nodeInClause := strings.Join(nodePlaceholders, ",")
+
+	result := make(map[string][]string, len(memIDs))
+
+	const batchSize = 200
+	for i := 0; i < len(memIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(memIDs) {
+			end = len(memIDs)
+		}
+		batch := memIDs[i:end]
+
+		memPlaceholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for j, id := range batch {
+			memPlaceholders[j] = "?"
+			args[j] = id
+		}
+		allArgs := append(args, nodeArgs...)
+
+		rows, err := s.knowledgeDB.Query(
+			`SELECT memory_id, node_id FROM memory_anchors
+			 WHERE memory_id IN (`+strings.Join(memPlaceholders, ",")+`)
+			   AND node_id IN (`+nodeInClause+`)`,
+			allArgs...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("get all memory anchor node IDs in set: %w", err)
+		}
+		for rows.Next() {
+			var memID, nodeID string
+			if err := rows.Scan(&memID, &nodeID); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan all memory anchor node IDs in set: %w", err)
+			}
+			result[memID] = append(result[memID], nodeID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("all memory anchor node IDs in set rows: %w", err)
+		}
+		rows.Close()
+	}
 	return result, nil
 }
 

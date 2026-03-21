@@ -303,47 +303,54 @@ func TestAdmissionControl_AutoCaptureGetsLowerPrior(t *testing.T) {
 }
 
 // TestComputeAdmissionImportance_Clamps verifies that the output is always
-// within [minImportance, maxImportance] regardless of inputs.
+// within [minImportance, maxImportance] regardless of inputs, and that the
+// Jaccard and cosine novelty paths produce correct values.
 func TestComputeAdmissionImportance_Clamps(t *testing.T) {
 	t.Parallel()
-	st := openMemTestStore(t)
-
-	// Insert a dummy existing memory so we can test low-novelty clamping.
-	existing := Memory{
-		Tier:       TierProject,
-		AgentID:    "agent-clamp",
-		Source:     SourceManual,
-		Tags:       `[]`,
-		Importance: "1.0",
-	}
-	// Use computeAdmissionImportance directly with extreme inputs.
 	cases := []struct {
-		tags        string
-		source      string
-		maxJaccard  float64
-		wantMin     float64
-		wantMax     float64
-		description string
+		description   string
+		tags          string
+		source        string
+		hasCandidates bool
+		maxJaccard    float64
+		maxCosine     float32
+		wantMin       float64
+		wantMax       float64
+		wantExact     float64 // 0 means skip exact check
 	}{
-		// Very high prior × full novelty = 1.4 — within bounds.
-		{`["episode","failure"]`, SourceManual, 0.0, 0.10, 2.0, "failure+novel"},
-		// Very low novelty — but floor at noveltyFloor=0.2 → min output = 0.8×0.2=0.16 → clamped to 0.10.
-		{`[]`, SourceAuto, 0.99, 0.10, 2.0, "auto+near-duplicate"},
-		// No candidates at all — novelty=1.0, prior=1.0 → 1.0.
-		{`[]`, SourceManual, 0.0, 0.10, 2.0, "no-candidates"},
+		// No existing memories → fully novel → importance = prior × 1.0 = 1.4.
+		{"failure+fully-novel", `["episode","failure"]`, SourceManual, false, 0.0, 0, 1.39, 1.41, 1.4},
+		// hasCandidates but no cosine/Jaccard → Jaccard fallback, maxJaccard=0 → novelty=1.0.
+		{"decision+no-similarity", `["episode","decision"]`, SourceManual, true, 0.0, 0, 0.99, 1.01, 1.0},
+		// Jaccard fallback with near-duplicate: noveltyFactor=0.01 → clamped to noveltyFloor=0.2
+		// → importance=0.8×0.2=0.16. Above minImportance(0.10) so no second clamp.
+		{"auto+near-duplicate-jaccard", `[]`, SourceAuto, true, 0.99, 0, 0.15, 0.17, 0.16},
+		// Cosine novelty path: prior=1.0, cosine=0.5 → novelty=0.5 → importance=0.5.
+		{"decision+cosine-novelty", `[]`, SourceManual, true, 0.0, 0.5, 0.49, 0.51, 0.5},
+		// Cosine near-duplicate: prior=1.4, cosine=0.95 → novelty=0.05, below floor(0.2) → 1.4×0.2=0.28.
+		{"failure+cosine-near-dup", `["episode","failure"]`, SourceManual, true, 0.0, 0.95, 0.27, 0.29, 0.28},
+		// High prior + full novelty = 1.4 — still within [0.10, 2.0].
+		{"failure+novel", `["episode","failure"]`, SourceManual, true, 0.0, 0, 1.39, 1.41, 1.4},
 	}
-
-	_ = existing // avoid unused warning
 
 	for _, tc := range cases {
-		got := st.computeAdmissionImportance(tc.tags, tc.source, nil, tc.maxJaccard, nil)
-		f, err := strconv.ParseFloat(got, 64)
-		if err != nil {
-			t.Errorf("[%s] parse %q: %v", tc.description, got, err)
-			continue
-		}
-		if f < tc.wantMin || f > tc.wantMax {
-			t.Errorf("[%s] importance %v out of [%v, %v]", tc.description, f, tc.wantMin, tc.wantMax)
-		}
+		tc := tc
+		t.Run(tc.description, func(t *testing.T) {
+			t.Parallel()
+			got := computeAdmissionImportance(tc.tags, tc.source, tc.hasCandidates, tc.maxJaccard, tc.maxCosine)
+			f, err := strconv.ParseFloat(got, 64)
+			if err != nil {
+				t.Fatalf("parse %q: %v", got, err)
+			}
+			if f < tc.wantMin || f > tc.wantMax {
+				t.Errorf("importance %v out of [%v, %v]", f, tc.wantMin, tc.wantMax)
+			}
+			if tc.wantExact != 0 {
+				const eps = 0.001
+				if f < tc.wantExact-eps || f > tc.wantExact+eps {
+					t.Errorf("importance %v, want ~%v", f, tc.wantExact)
+				}
+			}
+		})
 	}
 }
