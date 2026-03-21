@@ -15,10 +15,14 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
-// TestMain redirects the synapses cache for all mcp package tests.
-// handlers_federation_test.go calls federation.SiblingDBPath which resolves
-// to store.DefaultPath, writing DB files into ~/.synapses/cache/. Without
-// this, running the test suite pollutes the user's real project list.
+// templateGraphDB and templateKnowledgeDB hold paths to pre-initialized
+// SQLite databases created once in TestMain. openMCPTestStore copies these
+// files instead of re-running 50+ DDL migrations per test.
+var templateGraphDB string
+var templateKnowledgeDB string
+
+// TestMain redirects the synapses cache for all mcp package tests and
+// creates a template store for fast per-test setup.
 func TestMain(m *testing.M) {
 	tmp, err := os.MkdirTemp("", "synapses-mcp-test-cache-*")
 	if err != nil {
@@ -27,6 +31,26 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(tmp)
 	os.Setenv("SYNAPSES_CACHE_DIR", tmp)
+
+	// Create template store once — runs all DDL, migrations, PRAGMA setup.
+	templateDir, err := os.MkdirTemp("", "synapses-mcp-test-template-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create template dir: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(templateDir)
+
+	templatePath := filepath.Join(templateDir, "template.db")
+	st, err := store.Open(templatePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "store.Open template: %v\n", err)
+		os.Exit(1)
+	}
+	st.Close()
+
+	templateGraphDB = templatePath
+	templateKnowledgeDB = store.KnowledgePath(templatePath)
+
 	os.Exit(m.Run())
 }
 

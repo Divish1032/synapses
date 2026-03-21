@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strconv"
@@ -681,6 +682,11 @@ func (s *Store) MarkMemoriesSurfaced(agentID string, ids []string) error {
 // Returns non-expired memories ordered by relevance (best match first).
 // The query uses FTS5 query syntax — each space-separated word is an implicit AND term.
 func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
+	return s.SearchMemoriesCtx(context.Background(), query, limit)
+}
+
+// SearchMemoriesCtx is the context-aware variant of SearchMemories.
+func (s *Store) SearchMemoriesCtx(ctx context.Context, query string, limit int) ([]Memory, error) {
 	if query == "" {
 		return nil, nil
 	}
@@ -692,7 +698,7 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 		limit = 10
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.knowledgeDB.Query(`
+	rows, err := s.knowledgeDB.QueryContext(ctx, `
 		SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
 		       m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count
 		FROM memories m
@@ -719,6 +725,11 @@ type ScoredMemory struct {
 // their raw BM25 scores. Used by ConvexMerge to do score-magnitude-aware
 // fusion instead of rank-only RRF.
 func (s *Store) SearchMemoriesWithScores(query string, limit int, includeStale bool) ([]ScoredMemory, error) {
+	return s.SearchMemoriesWithScoresCtx(context.Background(), query, limit, includeStale)
+}
+
+// SearchMemoriesWithScoresCtx is the context-aware variant of SearchMemoriesWithScores.
+func (s *Store) SearchMemoriesWithScoresCtx(ctx context.Context, query string, limit int, includeStale bool) ([]ScoredMemory, error) {
 	if query == "" {
 		return nil, nil
 	}
@@ -744,7 +755,7 @@ func (s *Store) SearchMemoriesWithScores(query string, limit int, includeStale b
 	}
 	q += ` ORDER BY rank LIMIT ?`
 
-	rows, err := s.knowledgeDB.Query(q, safeQuery, now, limit)
+	rows, err := s.knowledgeDB.QueryContext(ctx, q, safeQuery, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search memories with scores: %w", err)
 	}
@@ -770,6 +781,11 @@ func (s *Store) SearchMemoriesWithScores(query string, limit int, includeStale b
 // SearchMemoriesIncludingStale is like SearchMemories but also returns stale memories.
 // Use for audit scenarios where the agent explicitly passes include_stale=true to recall().
 func (s *Store) SearchMemoriesIncludingStale(query string, limit int) ([]Memory, error) {
+	return s.SearchMemoriesIncludingStaleCtx(context.Background(), query, limit)
+}
+
+// SearchMemoriesIncludingStaleCtx is the context-aware variant of SearchMemoriesIncludingStale.
+func (s *Store) SearchMemoriesIncludingStaleCtx(ctx context.Context, query string, limit int) ([]Memory, error) {
 	if query == "" {
 		return nil, nil
 	}
@@ -781,7 +797,7 @@ func (s *Store) SearchMemoriesIncludingStale(query string, limit int) ([]Memory,
 		limit = 10
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.knowledgeDB.Query(`
+	rows, err := s.knowledgeDB.QueryContext(ctx, `
 		SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
 		       m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count
 		FROM memories m
@@ -1037,6 +1053,7 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 	// Both are passed to computeAdmissionImportance — no re-fetching of embeddings needed.
 	var maxJaccard float64
 	var maxCosine float32
+	var hasCosine bool // true once at least one cosine similarity was computed
 
 	for _, ex := range dupCandidates {
 		sim := stringSimilarity(ex.Content, m.Content)
@@ -1067,6 +1084,7 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 			}
 			if len(newVec) > 0 {
 				cos := dotSimilarity(newVec, candidateVec)
+				hasCosine = true
 				if cos > maxCosine {
 					maxCosine = cos // track for A-MAC — no re-fetch needed
 				}
@@ -1086,7 +1104,7 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 	// maxJaccard and maxCosine were captured during the dedup loop above — no
 	// extra embedding or DB calls are needed here.
 	if m.Importance == "" {
-		m.Importance = computeAdmissionImportance(m.Tags, m.Source, len(dupCandidates) > 0, maxJaccard, maxCosine)
+		m.Importance = computeAdmissionImportance(m.Tags, m.Source, len(dupCandidates) > 0, maxJaccard, maxCosine, hasCosine)
 	}
 
 	return m, prepareMemoryResult{}, nil
@@ -1124,7 +1142,12 @@ func parseContentTypePrior(tags, source string) float64 {
 // hasCandidates must be true when any same-tier memories exist (even if their
 // embeddings are absent). It distinguishes "no prior memories" (novelty=1.0)
 // from "similar memories but no embeddings" (Jaccard fallback).
-func computeAdmissionImportance(tags, source string, hasCandidates bool, maxJaccard float64, maxCosine float32) string {
+//
+// hasCosine must be true when at least one cosine similarity was computed
+// during dedup. This is distinct from maxCosine > 0: perfectly orthogonal
+// embeddings produce cosine=0.0, which is a valid "no similarity" result
+// that should use the cosine path, not fall through to Jaccard.
+func computeAdmissionImportance(tags, source string, hasCandidates bool, maxJaccard float64, maxCosine float32, hasCosine bool) string {
 	const (
 		minImportance = DecayVisibilityThreshold * 2 // 0.10 — floor matching clamp elsewhere
 		maxImportance = 2.0                          // cap: matches edge weight scale in BFS
@@ -1137,9 +1160,11 @@ func computeAdmissionImportance(tags, source string, hasCandidates bool, maxJacc
 	switch {
 	case !hasCandidates:
 		noveltyFactor = 1.0 // no existing memories → fully novel by definition
-	case maxCosine > 0:
+	case hasCosine:
 		// Cosine was computed during dedup — more accurate than Jaccard for
 		// semantic similarity. Uses embeddings already fetched, no extra DB calls.
+		// Uses hasCosine flag (not maxCosine > 0) because cosine=0.0 (perfectly
+		// orthogonal) is a valid result that means "no similarity".
 		noveltyFactor = 1.0 - float64(maxCosine)
 	default:
 		// Jaccard fallback: embedder unavailable or no candidate had stored embeddings.
@@ -1461,6 +1486,11 @@ func (s *Store) CountMemories() (map[string]int, error) {
 // Missing IDs are silently skipped. Used by recall() to hydrate vector
 // search results that only contain partial fields.
 func (s *Store) GetMemoriesByIDs(ids []string) ([]Memory, error) {
+	return s.GetMemoriesByIDsCtx(context.Background(), ids)
+}
+
+// GetMemoriesByIDsCtx is the context-aware variant of GetMemoriesByIDs.
+func (s *Store) GetMemoriesByIDsCtx(ctx context.Context, ids []string) ([]Memory, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -1473,7 +1503,7 @@ func (s *Store) GetMemoriesByIDs(ids []string) ([]Memory, error) {
 	query := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
 	                 created_at, expires_at, last_accessed_at, source, importance, access_count
 	          FROM memories WHERE id IN (` + strings.Join(placeholders, ",") + `)`
-	rows, err := s.knowledgeDB.Query(query, args...)
+	rows, err := s.knowledgeDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get memories by IDs: %w", err)
 	}

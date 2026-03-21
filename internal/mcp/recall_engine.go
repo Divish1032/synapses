@@ -169,11 +169,18 @@ func (s *Server) quadRecallSearch(
 		defer wg.Done()
 		chCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		_ = chCtx // context for future cancellation awareness
+
+		// Check context before doing work — fail fast if parent was cancelled.
+		select {
+		case <-chCtx.Done():
+			logRecallChannelError("bm25", chCtx.Err())
+			return
+		default:
+		}
 
 		if useConvex {
 			// ConvexMerge needs raw BM25 scores for magnitude-aware fusion.
-			scored, err := s.store.SearchMemoriesWithScores(query, channelLimit, includeStale)
+			scored, err := s.store.SearchMemoriesWithScoresCtx(chCtx, query, channelLimit, includeStale)
 			if err != nil {
 				logRecallChannelError("bm25", err)
 				return
@@ -183,9 +190,9 @@ func (s *Server) quadRecallSearch(
 			var mems []store.Memory
 			var err error
 			if includeStale {
-				mems, err = s.store.SearchMemoriesIncludingStale(query, channelLimit)
+				mems, err = s.store.SearchMemoriesIncludingStaleCtx(chCtx, query, channelLimit)
 			} else {
-				mems, err = s.store.SearchMemories(query, channelLimit)
+				mems, err = s.store.SearchMemoriesCtx(chCtx, query, channelLimit)
 			}
 			if err != nil {
 				logRecallChannelError("bm25", err)
@@ -215,7 +222,7 @@ func (s *Server) quadRecallSearch(
 			// scoring — their vector is still valid (memory text unchanged).
 			// MemoryVectorSearchWithThreshold no longer filters e.stale=0;
 			// stale results carry StaleEmbedding=true for agent annotation.
-			vecResults, vecErr := s.store.MemoryVectorSearchWithThreshold(queryVec, channelLimit, 0.3)
+			vecResults, vecErr := s.store.MemoryVectorSearchWithThresholdCtx(chCtx, queryVec, channelLimit, 0.3)
 			if vecErr != nil {
 				logRecallChannelError("semantic", vecErr)
 				return
@@ -235,7 +242,7 @@ func (s *Server) quadRecallSearch(
 				}
 			}
 			if len(ids) > 0 {
-				fullMems, hydErr := s.store.GetMemoriesByIDs(ids)
+				fullMems, hydErr := s.store.GetMemoriesByIDsCtx(chCtx, ids)
 				if hydErr != nil {
 					logRecallChannelError("semantic", hydErr)
 					// Fall back to IDs only — RRF can still rank them.
@@ -292,10 +299,16 @@ func (s *Server) quadRecallSearch(
 			defer wg.Done()
 			chCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			_ = chCtx
+
+			select {
+			case <-chCtx.Done():
+				logRecallChannelError("graph", chCtx.Err())
+				return
+			default:
+			}
 
 			// Step 1: Find anchor nodes of memories matching the query.
-			seedNodes, err := s.store.GetAnchorNodesByFTSQuery(query, 50)
+			seedNodes, err := s.store.GetAnchorNodesByFTSQueryCtx(chCtx, query, 50)
 			if err != nil {
 				logRecallChannelError("graph", err)
 				return
@@ -314,7 +327,7 @@ func (s *Server) quadRecallSearch(
 			}
 
 			// Step 3: Find memories anchored to reachable nodes.
-			mems, err := s.store.GetMemoriesByAnchorNodes(bfsRes.Nodes, channelLimit, includeStale)
+			mems, err := s.store.GetMemoriesByAnchorNodesCtx(chCtx, bfsRes.Nodes, channelLimit, includeStale)
 			if err != nil {
 				logRecallChannelError("graph", err)
 				return
@@ -410,9 +423,15 @@ func (s *Server) quadRecallSearch(
 		defer wg.Done()
 		chCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		_ = chCtx
 
-		mems, err := s.store.RecentMemories(temporalLimit, sinceDays, untilTime, includeStale)
+		select {
+		case <-chCtx.Done():
+			logRecallChannelError("temporal", chCtx.Err())
+			return
+		default:
+		}
+
+		mems, err := s.store.RecentMemoriesCtx(chCtx, temporalLimit, sinceDays, untilTime, includeStale)
 		if err != nil {
 			logRecallChannelError("temporal", err)
 			return
@@ -480,7 +499,7 @@ func (s *Server) quadRecallSearch(
 		}
 	}
 	if len(missingIDs) > 0 {
-		fetched, err := s.store.GetMemoriesByIDs(missingIDs)
+		fetched, err := s.store.GetMemoriesByIDsCtx(ctx, missingIDs)
 		if err != nil {
 			logRecallChannelError("hydration", err)
 		} else {

@@ -202,8 +202,8 @@ func TestRunAll_FixtureGraph(t *testing.T) {
 	}
 
 	// At least some scenarios should run (some may skip if graph too small).
-	if result.Summary.ScenariosRun != 5 {
-		t.Errorf("ScenariosRun = %d, want 5", result.Summary.ScenariosRun)
+	if result.Summary.ScenariosRun != 6 {
+		t.Errorf("ScenariosRun = %d, want 6", result.Summary.ScenariosRun)
 	}
 
 	// Verify structural properties of result.
@@ -328,7 +328,7 @@ func TestFindScenario_NotFound(t *testing.T) {
 
 func TestBuiltinScenarioNames(t *testing.T) {
 	names := BuiltinScenarioNames()
-	if len(names) != 5 {
-		t.Errorf("expected 5 built-in scenarios, got %d: %v", len(names), names)
+	if len(names) != 6 {
+		t.Errorf("expected 6 built-in scenarios, got %d: %v", len(names), names)
 	}
 }

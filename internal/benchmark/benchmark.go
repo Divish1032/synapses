@@ -252,6 +252,7 @@ func BuiltinScenarios() []Scenario {
 		scenarioImpactCoverage(),
 		scenarioCallChainConnectivity(),
 		scenarioFTSRanking(),
+		scenarioMemoryRecall(),
 	}
 }
 

@@ -1,12 +1,15 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // RecencyDecayScore computes a decay score using ACT-R frequency-weighted
@@ -130,6 +133,11 @@ const DecayVisibilityThreshold = 0.05
 // until optionally caps the upper bound on created_at (nil = no upper bound).
 // When includeStale is true, stale memories are also returned.
 func (s *Store) RecentMemories(limit, sinceDays int, until *time.Time, includeStale bool) ([]Memory, error) {
+	return s.RecentMemoriesCtx(context.Background(), limit, sinceDays, until, includeStale)
+}
+
+// RecentMemoriesCtx is the context-aware variant of RecentMemories.
+func (s *Store) RecentMemoriesCtx(ctx context.Context, limit, sinceDays int, until *time.Time, includeStale bool) ([]Memory, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -161,7 +169,7 @@ func (s *Store) RecentMemories(limit, sinceDays int, until *time.Time, includeSt
 	q += ` ORDER BY created_at DESC LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.knowledgeDB.Query(q, args...)
+	rows, err := s.knowledgeDB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("recent memories: %w", err)
 	}
@@ -178,6 +186,11 @@ func (s *Store) RecentMemories(limit, sinceDays int, until *time.Time, includeSt
 // Independent of the BM25 channel (different query path, different purpose).
 // Returns at most limit node IDs. Returns (nil, nil) on empty/invalid query.
 func (s *Store) GetAnchorNodesByFTSQuery(query string, limit int) ([]string, error) {
+	return s.GetAnchorNodesByFTSQueryCtx(context.Background(), query, limit)
+}
+
+// GetAnchorNodesByFTSQueryCtx is the context-aware variant of GetAnchorNodesByFTSQuery.
+func (s *Store) GetAnchorNodesByFTSQueryCtx(ctx context.Context, query string, limit int) ([]string, error) {
 	if query == "" {
 		return nil, nil
 	}
@@ -190,7 +203,7 @@ func (s *Store) GetAnchorNodesByFTSQuery(query string, limit int) ([]string, err
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.knowledgeDB.Query(`
+	rows, err := s.knowledgeDB.QueryContext(ctx, `
 		SELECT DISTINCT ma.node_id
 		FROM memory_anchors ma
 		JOIN memories m ON ma.memory_id = m.id
@@ -221,6 +234,11 @@ func (s *Store) GetAnchorNodesByFTSQuery(query string, limit int) ([]string, err
 // Deduplicates by memory ID across batches.
 // When includeStale is true, stale memories are also returned.
 func (s *Store) GetMemoriesByAnchorNodes(nodeIDs []string, limit int, includeStale bool) ([]Memory, error) {
+	return s.GetMemoriesByAnchorNodesCtx(context.Background(), nodeIDs, limit, includeStale)
+}
+
+// GetMemoriesByAnchorNodesCtx is the context-aware variant of GetMemoriesByAnchorNodes.
+func (s *Store) GetMemoriesByAnchorNodesCtx(ctx context.Context, nodeIDs []string, limit int, includeStale bool) ([]Memory, error) {
 	if len(nodeIDs) == 0 || limit <= 0 {
 		return nil, nil
 	}
@@ -257,7 +275,7 @@ func (s *Store) GetMemoriesByAnchorNodes(nodeIDs []string, limit int, includeSta
 		}
 		q += ` ORDER BY m.created_at DESC`
 
-		rows, err := s.knowledgeDB.Query(q, args...)
+		rows, err := s.knowledgeDB.QueryContext(ctx, q, args...)
 		if err != nil {
 			return nil, fmt.Errorf("get memories by anchor nodes: %w", err)
 		}
@@ -520,6 +538,7 @@ func channelWeight(name string, w ConvexWeights) float64 {
 	case "temporal":
 		return w.TemporalBonus
 	default:
+		logutil.Warn("synapses: ConvexMerge: unknown channel %q — using default weight 0.5\n", name)
 		return 0.5 // unknown channels get moderate weight
 	}
 }
