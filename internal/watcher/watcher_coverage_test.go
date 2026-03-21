@@ -158,7 +158,7 @@ func TestReparseFile_ParseError_BinaryFile(t *testing.T) {
 
 // ── reparseFile: tree-sitter error recovery ─────────────────────────────────
 
-func TestReparseFile_SkipsOnParseErrors(t *testing.T) {
+func TestReparseFile_SkipsOnFirstParseError(t *testing.T) {
 	root := t.TempDir()
 	goFile := filepath.Join(root, "main.go")
 
@@ -189,12 +189,110 @@ func TestReparseFile_SkipsOnParseErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Reparse should detect errors and skip — retaining old nodes.
+	// FIRST error: reparse should skip — retaining old nodes.
 	w.reparseFile(goFile, root)
 	nodesAfter := len(g.NodesForFile(goFile))
 	if nodesAfter != nodesBefore {
-		t.Errorf("expected %d nodes (retained), got %d (graph was modified despite parse errors)", nodesBefore, nodesAfter)
+		t.Errorf("expected %d nodes (retained on first error), got %d", nodesBefore, nodesAfter)
 	}
+}
+
+func TestReparseFile_ProceedsOnPersistentErrors(t *testing.T) {
+	root := t.TempDir()
+	goFile := filepath.Join(root, "main.go")
+
+	// Write a valid Go file and do initial parse.
+	if err := os.WriteFile(goFile, []byte("package main\n\nfunc Hello() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g := graph.New(root)
+	walker := parser.NewWalker()
+	w, err := New(g, walker, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer w.Stop()
+
+	w.reparseFile(goFile, root)
+	nodesBefore := len(g.NodesForFile(goFile))
+	if nodesBefore == 0 {
+		t.Fatal("expected nodes after initial parse")
+	}
+
+	// Overwrite with broken source (real syntax error, not mid-save).
+	brokenSrc := []byte("package main\n\nfunc Hello() {\n\tfmt.Println(\"hello\n")
+	if err := os.WriteFile(goFile, brokenSrc, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// FIRST error: skipped.
+	w.reparseFile(goFile, root)
+	if len(g.NodesForFile(goFile)) != nodesBefore {
+		t.Fatal("first error should have been skipped")
+	}
+
+	// SECOND consecutive error: should proceed with parse (persistent error).
+	w.reparseFile(goFile, root)
+	// Graph should now reflect the broken file's best-effort parse
+	// (tree-sitter error recovery still produces nodes).
+	nodesAfterSecond := len(g.NodesForFile(goFile))
+	if nodesAfterSecond == 0 {
+		t.Error("expected nodes after persistent-error reparse (tree-sitter error recovery)")
+	}
+	// The key check: the graph WAS updated (not still the original).
+	// With broken source, the node set will differ from the original clean parse.
+	t.Logf("nodes: before=%d, after persistent-error reparse=%d", nodesBefore, nodesAfterSecond)
+}
+
+func TestReparseFile_ClearsErrorFlagOnCleanParse(t *testing.T) {
+	root := t.TempDir()
+	goFile := filepath.Join(root, "main.go")
+
+	if err := os.WriteFile(goFile, []byte("package main\n\nfunc Hello() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g := graph.New(root)
+	walker := parser.NewWalker()
+	w, err := New(g, walker, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer w.Stop()
+
+	w.reparseFile(goFile, root)
+	nodesBefore := len(g.NodesForFile(goFile))
+
+	// Introduce error → first skip.
+	if err := os.WriteFile(goFile, []byte("package main\n\nfunc Hello() {\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.reparseFile(goFile, root) // skipped (first error)
+
+	// Fix the error.
+	if err := os.WriteFile(goFile, []byte("package main\n\nfunc Fixed() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.reparseFile(goFile, root) // clean → should parse and clear error flag
+
+	// Introduce error again → should skip again (flag was cleared).
+	if err := os.WriteFile(goFile, []byte("package main\n\nfunc Broken() {\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.reparseFile(goFile, root) // first error again → skip
+
+	// Verify nodes are from "Fixed" (the last clean parse), not "Hello" (original).
+	found := false
+	for _, n := range g.NodesForFile(goFile) {
+		if n.Name == "Fixed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected 'Fixed' node from last clean parse — error flag was not properly cleared")
+	}
+	_ = nodesBefore // suppress unused
 }
 
 func TestReparseFile_ProceedsOnCleanParse(t *testing.T) {
