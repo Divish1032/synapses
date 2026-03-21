@@ -208,12 +208,11 @@ func (s *Server) handleRemember(
 	// Collect written memory IDs for embedding.
 	var memoryIDs []string
 
-	// memory_importance: forwarded from caller, default "1.0".
+	// memory_importance: forwarded from caller when explicitly set.
 	// "pinned" exempts from decay; float strings set the weight multiplier.
+	// When empty, prepareMemory auto-computes via A-MAC admission control
+	// (content_type_prior × novelty_factor) at write time.
 	memImportance := stringArg(req, "memory_importance")
-	if memImportance == "" {
-		memImportance = "1.0"
-	}
 
 	// Entity-tier: one memory per affected node (failures & patterns only).
 	if episodeType == "failure" || episodeType == "pattern" {

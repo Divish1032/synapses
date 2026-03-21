@@ -23,6 +23,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/coder/hnsw"
 )
 
 // ProjectStat holds the lightweight per-project metadata that can be read
@@ -458,6 +459,18 @@ type Store struct {
 	// to abort long-running DB operations promptly instead of blocking shutdown.
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
+
+	// hnswMemIndex is the in-memory HNSW approximate nearest-neighbor index for
+	// memory embeddings. Replaces O(N) brute-force scan with O(log N) graph
+	// traversal. Keyed by memory_id, values are pre-normalized embedding vectors.
+	// Rebuilt from SQLite at startup via RebuildMemoryHNSW(). Protected by hnswMemMu.
+	hnswMemIndex *hnsw.Graph[string]
+	hnswMemMu    sync.RWMutex
+
+	// hnswNodeIndex is the in-memory HNSW index for graph node embeddings.
+	// Used by semantic search in the search tool. Same pattern as memory HNSW.
+	hnswNodeIndex *hnsw.Graph[string]
+	hnswNodeMu    sync.RWMutex
 }
 
 // SetSemanticDedupFunc sets the embedding function used for semantic dedup
@@ -767,6 +780,12 @@ func Open(path string) (*Store, error) {
 	// similarity reduces to a single dot product (Sprint 11.3). Idempotent —
 	// normalizing an already-normalized vector is a no-op within float32 precision.
 	st.normalizeStoredEmbeddings()
+
+	// Build HNSW ANN indexes from stored embeddings. These are in-memory
+	// acceleration structures — SQLite remains the authoritative store.
+	// O(N log N) rebuild: ~200-500ms for 10K embeddings, ~2-5s for 50K.
+	st.RebuildMemoryHNSW()
+	st.RebuildNodeHNSW()
 
 	if os.Getenv("SYNAPSES_QUERY_STATS") == "1" {
 		st.CollectQueryStats(os.Stderr)

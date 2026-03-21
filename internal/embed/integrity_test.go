@@ -7,15 +7,18 @@ import (
 )
 
 func TestVerifyModelIntegrity_CorruptFile_ReturnsError(t *testing.T) {
-	dir := t.TempDir()
-	onnxPath := filepath.Join(dir, "model.onnx")
+	if builtinModelSHA256 == "" {
+		t.Skip("builtinModelSHA256 is empty — integrity enforcement disabled")
+	}
 
-	// Write garbage data — hash won't match.
+	dir := t.TempDir()
+	onnxPath := filepath.Join(dir, builtinModelFileQuantized)
+
 	if err := os.WriteFile(onnxPath, []byte("not a real onnx model"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	err := verifyModelIntegrity(onnxPath)
+	err := verifyModelIntegrity(onnxPath, builtinModelFileQuantized)
 	if err == nil {
 		t.Fatal("expected error for corrupt model, got nil")
 	}
@@ -27,28 +30,44 @@ func TestVerifyModelIntegrity_CorruptFile_ReturnsError(t *testing.T) {
 }
 
 func TestVerifyModelIntegrity_MissingFile_ReturnsError(t *testing.T) {
-	err := verifyModelIntegrity("/nonexistent/path/model.onnx")
+	err := verifyModelIntegrity("/nonexistent/path/"+builtinModelFileQuantized, builtinModelFileQuantized)
 	if err == nil {
 		t.Fatal("expected error for missing file, got nil")
 	}
 }
 
 func TestVerifyModelIntegrity_EmptyFile_ReturnsError(t *testing.T) {
-	dir := t.TempDir()
-	onnxPath := filepath.Join(dir, "model.onnx")
+	if builtinModelSHA256 == "" {
+		t.Skip("builtinModelSHA256 is empty — integrity enforcement disabled")
+	}
 
-	// Empty file — hash won't match.
+	dir := t.TempDir()
+	onnxPath := filepath.Join(dir, builtinModelFileQuantized)
+
 	if err := os.WriteFile(onnxPath, []byte{}, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	err := verifyModelIntegrity(onnxPath)
+	err := verifyModelIntegrity(onnxPath, builtinModelFileQuantized)
 	if err == nil {
 		t.Fatal("expected error for empty model, got nil")
 	}
 
-	// The empty file should have been removed.
 	if _, statErr := os.Stat(onnxPath); !os.IsNotExist(statErr) {
 		t.Errorf("corrupt model file should have been removed, but still exists")
+	}
+}
+
+func TestVerifyModelIntegrity_FP32_LogsButPasses(t *testing.T) {
+	// FP32 variant: hash is logged for capture but not enforced.
+	dir := t.TempDir()
+	onnxPath := filepath.Join(dir, builtinModelFileFP32)
+	if err := os.WriteFile(onnxPath, []byte("any content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := verifyModelIntegrity(onnxPath, builtinModelFileFP32)
+	if err != nil {
+		t.Fatalf("expected nil error for fp32 variant (hash not enforced), got: %v", err)
 	}
 }

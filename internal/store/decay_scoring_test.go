@@ -211,7 +211,8 @@ func TestInsertMemory_ImportanceDefaultsToOnePointZero(t *testing.T) {
 		AgentID: "agent-2",
 		Source:  SourceManual,
 		Tags:    `[]`,
-		// Importance not set — should default to "1.0".
+		// Importance not set — A-MAC auto-computes: prior=1.0 (no episode type) × novelty=1.0
+		// (no existing memories) = 1.0. String format is an implementation detail; compare numerically.
 	})
 	if err != nil {
 		t.Fatalf("insert memory: %v", err)
@@ -231,8 +232,12 @@ func TestInsertMemory_ImportanceDefaultsToOnePointZero(t *testing.T) {
 	if found == nil {
 		t.Fatal("inserted memory not found")
 	}
-	if found.Importance != "1.0" {
-		t.Errorf("default importance = %q, want %q", found.Importance, "1.0")
+	got, parseErr := strconv.ParseFloat(found.Importance, 64)
+	if parseErr != nil {
+		t.Fatalf("parse importance %q: %v", found.Importance, parseErr)
+	}
+	if got != 1.0 {
+		t.Errorf("default importance = %v, want 1.0", got)
 	}
 }
 

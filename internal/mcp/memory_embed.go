@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/embed"
@@ -41,10 +43,30 @@ func (s *Server) embedMemory(embedder embed.Embedder, st *store.Store, memoryID,
 // EmbedAllMemories generates embeddings for all un-embedded memories in the
 // background. Rate-limited to ~2 embeddings/second for builtin mode to avoid
 // CPU contention. Called at startup to lazy-migrate legacy memories.
+//
+// Model-change migration: before scanning for un-embedded memories, all
+// embeddings from a previous model are marked stale. This handles the
+// MiniLM → nomic upgrade path: old embeddings are in a different vector
+// space and must be regenerated. The rate limiter ensures this doesn't
+// saturate CPU (nomic is ~12s/embed on CPU; 1000 memories ≈ 1h8m at pool/3).
+//
 // pc may be nil (pulse disabled) — fire-and-forget EmbeddingEvent on completion. (P2-6)
 func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.Store, pc *pulse.Client) {
 	if embedder == nil || st == nil {
 		return
+	}
+
+	// Model-change migration: invalidate embeddings from a different model.
+	// This is the critical path for embedding model upgrades — old embeddings
+	// in a different vector space produce meaningless similarity scores.
+	if invalidated, err := st.InvalidateEmbeddingsByModel(embedder.Model()); err != nil {
+		logutil.Error("synapses: invalidate old model embeddings: %v\n", err)
+	} else if invalidated > 0 {
+		logutil.Info("synapses: model upgrade detected — marked %d embeddings for re-embedding (new model: %s)\n", invalidated, embedder.Model())
+		// Rebuild HNSW index to purge stale old-model embeddings that were
+		// loaded at startup before invalidation. The rebuilt index contains
+		// only current-model embeddings (RebuildMemoryHNSW filters stale=0).
+		st.RebuildMemoryHNSW()
 	}
 
 	ids, err := st.GetMemoriesWithoutEmbeddings(0) // 0 = no limit
@@ -145,4 +167,68 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 			CoveragePct: coveragePct,
 		})
 	}
+}
+
+// normalizeVec returns a unit-length copy of v.
+// Used to convert raw embedding vectors into pre-normalized form so that
+// dot-product == cosine-similarity (avoids magnitude division per query).
+// Always returns a fresh slice — never the input buffer — so callers that
+// store the result are safe even if the embedder reuses its output array.
+// Returns a zero-filled copy when magnitude is zero (degenerate vector).
+func normalizeVec(v []float32) []float32 {
+	var sum float64
+	for _, x := range v {
+		sum += float64(x) * float64(x)
+	}
+	if sum == 0 {
+		out := make([]float32, len(v))
+		copy(out, v)
+		return out
+	}
+	scale := float32(1.0 / math.Sqrt(sum))
+	out := make([]float32, len(v))
+	for i, x := range v {
+		out[i] = x * scale
+	}
+	return out
+}
+
+// EmbedToolCatalog pre-computes normalized vector embeddings for all entries in
+// toolCatalog. Each tool is embedded as "Description keywords…" so that
+// cosine similarity captures both the functional description and intent tags.
+//
+// Called as a background goroutine from SetMemoryEmbedder. Safe to call
+// concurrently — results are committed atomically under toolEmbedsMu.
+// Aborts on any embedding error to avoid a partial index, which would silently
+// degrade ranking (partial embeddings produce misleading similarity scores).
+func (s *Server) EmbedToolCatalog(ctx context.Context, embedder embed.Embedder) {
+	if embedder == nil {
+		return
+	}
+	embeddings := make([][]float32, len(toolCatalog))
+	for i, tool := range toolCatalog {
+		text := tool.Description
+		if len(tool.Keywords) > 0 {
+			text += " " + strings.Join(tool.Keywords, " ")
+		}
+		embedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		vec, err := embedder.Embed(embedCtx, text)
+		cancel()
+		if err != nil {
+			logutil.Warn("synapses: embed tool catalog %s: %v — semantic tool discovery unavailable\n", tool.Name, err)
+			return // abort; partial index is worse than no index
+		}
+		if len(vec) == 0 {
+			logutil.Warn("synapses: embed tool catalog %s: empty vector — semantic tool discovery unavailable\n", tool.Name)
+			return
+		}
+		embeddings[i] = normalizeVec(vec)
+	}
+
+	model := embedder.Model()
+	s.toolEmbedsMu.Lock()
+	s.toolEmbeds = embeddings
+	s.toolEmbedModel = model
+	s.toolEmbedsMu.Unlock()
+	logutil.Info("synapses: tool catalog embedded (%d tools, model=%s)\n", len(embeddings), model)
 }

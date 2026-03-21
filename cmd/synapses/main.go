@@ -28,6 +28,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/SynapsesOS/synapses/internal/benchmark"
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/config"
@@ -120,6 +121,8 @@ func run(args []string) error {
 		return cmdAllowPlugin(args[1:])
 	case "approve":
 		return cmdApprove(args[1:])
+	case "benchmark":
+		return cmdBenchmark(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -394,7 +397,7 @@ func cmdStartDirect(args []string) error {
 
 	// Memory embeddings: generate embeddings for memories on remember() writes
 	// and provide vector search in recall(). Three modes:
-	//   "builtin" (default) — pure-Go all-MiniLM-L6-v2, auto-downloads model
+	//   "builtin" (default) — pure-Go nomic-embed-text-v1.5, auto-downloads model
 	//   "ollama"            — delegates to local Ollama instance
 	//   "off"               — disabled, FTS5-only recall
 	{
@@ -3265,7 +3268,7 @@ func createMemoryEmbedder(cfg *config.Config) embed.Embedder {
 			return nil
 		}
 		modelsDir := filepath.Join(homeDir, ".synapses", "models")
-		logutil.Info("synapses: memory embeddings via builtin all-MiniLM-L6-v2\n")
+		logutil.Info("synapses: memory embeddings via builtin nomic-embed-text-v1.5\n")
 		return embed.NewBuiltinEmbedder(modelsDir)
 	default:
 		logutil.Warn("synapses: unknown embeddings mode %q, disabling\n", mode)
@@ -3536,5 +3539,60 @@ func cmdSetup(args []string) error {
 	fmt.Println()
 	fmt.Println("  Brain, pulse, and web-cache all run in-process — no external sidecars needed.")
 	fmt.Println()
+	return nil
+}
+
+// cmdBenchmark runs self-validating benchmark scenarios against an indexed repo.
+// Each scenario derives ground truth from the graph's own topology — no hardcoded
+// node IDs, portable across any indexed codebase.
+func cmdBenchmark(args []string) error {
+	fs := flag.NewFlagSet("benchmark", flag.ContinueOnError)
+	repoPath := fs.String("path", ".", "Repository root")
+	scenario := fs.String("scenario", "all", "Scenario to run: all, context-completeness, search-accuracy, impact-coverage, graph-reachability, fts-ranking")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	absPath, err := filepath.Abs(*repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	dbPath, err := store.DefaultPath(absPath)
+	if err != nil {
+		return err
+	}
+	st, err := store.OpenReadOnly(dbPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	g, err := st.LoadGraph()
+	if err != nil {
+		return fmt.Errorf("load graph: %w", err)
+	}
+	if g == nil {
+		return fmt.Errorf("no index found — run 'synapses index --path %s' first", absPath)
+	}
+
+	fmt.Fprintf(os.Stderr, "synapses benchmark: %d nodes, %d edges\n", g.NodeCount(), g.EdgeCount())
+
+	var result *benchmark.Result
+	if *scenario == "" || *scenario == "all" {
+		result = benchmark.RunAll(g, st)
+	} else {
+		sc, err := benchmark.FindScenario(*scenario)
+		if err != nil {
+			return err
+		}
+		result = benchmark.RunScenarios(g, st, []benchmark.Scenario{sc})
+	}
+
+	b, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal result: %w", err)
+	}
+	fmt.Println(string(b))
 	return nil
 }

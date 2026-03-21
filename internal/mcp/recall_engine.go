@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,12 @@ type GraphBFSResult struct {
 	ParentMap map[string]graphParentEntry
 	// SeedSet: original seed node IDs (for terminating path reconstruction).
 	SeedSet map[string]bool
+	// ActivationMap: spreading activation score for each reachable node (0.0–1.0).
+	// Seeds are also present with activation 1.0.
+	// Non-seed nodes receive activation proportional to edge type weight and
+	// parent fan-out. Nodes reachable via multiple paths hold the maximum score.
+	// Used to rank memories anchored to high-activation nodes higher in RRF.
+	ActivationMap map[string]float64
 }
 
 // TraversalPath describes how a specific memory was reached via graph traversal.
@@ -99,11 +106,17 @@ func (s *Server) quadRecallSearch(
 		channelLimit = 10
 	}
 
+	// Snapshot config once to prevent nil-pointer races if config is
+	// hot-reloaded between the check and the merge branch below.
+	cfg := s.config
+	useConvex := cfg != nil && cfg.Recall.FusionMode == "convex"
+
 	var (
 		mu              sync.Mutex
 		channels        = make(map[string][]string)
-		memMap          = make(map[string]store.Memory) // id → full memory for hydration
-		staleEmbeddings = make(map[string]bool)         // memory IDs with stale embeddings (entity changed)
+		channelScores   = make(map[string]*store.ChannelScores) // raw scores for ConvexMerge
+		memMap          = make(map[string]store.Memory)          // id → full memory for hydration
+		staleEmbeddings = make(map[string]bool)                  // memory IDs with stale embeddings (entity changed)
 	)
 
 	// Graph channel metadata: written only by the graph goroutine, read after
@@ -111,6 +124,10 @@ func (s *Server) quadRecallSearch(
 	var (
 		graphResult    GraphBFSResult
 		graphSeedCount int
+		// graphAnchorMap: memID → anchor nodeID for memories returned by the
+		// graph channel. Populated during activation sort, reused by traversal
+		// info to avoid a second DB round-trip.
+		graphAnchorMap map[string]string
 	)
 
 	collectMemories := func(name string, mems []store.Memory) {
@@ -122,6 +139,20 @@ func (s *Server) quadRecallSearch(
 			memMap[m.ID] = m
 		}
 		channels[name] = ids
+	}
+
+	collectScoredMemories := func(name string, scored []store.ScoredMemory) {
+		mu.Lock()
+		defer mu.Unlock()
+		ids := make([]string, len(scored))
+		scores := make([]float64, len(scored))
+		for i, sm := range scored {
+			ids[i] = sm.Memory.ID
+			scores[i] = sm.Score
+			memMap[sm.Memory.ID] = sm.Memory
+		}
+		channels[name] = ids
+		channelScores[name] = &store.ChannelScores{IDs: ids, Scores: scores}
 	}
 
 	collectMemoryIDs := func(name string, ids []string) {
@@ -139,20 +170,37 @@ func (s *Server) quadRecallSearch(
 		defer wg.Done()
 		chCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		_ = chCtx // context for future cancellation awareness
 
-		var mems []store.Memory
-		var err error
-		if includeStale {
-			mems, err = s.store.SearchMemoriesIncludingStale(query, channelLimit)
-		} else {
-			mems, err = s.store.SearchMemories(query, channelLimit)
-		}
-		if err != nil {
-			logRecallChannelError("bm25", err)
+		// Check context before doing work — fail fast if parent was cancelled.
+		select {
+		case <-chCtx.Done():
+			logRecallChannelError("bm25", chCtx.Err())
 			return
+		default:
 		}
-		collectMemories("bm25", mems)
+
+		if useConvex {
+			// ConvexMerge needs raw BM25 scores for magnitude-aware fusion.
+			scored, err := s.store.SearchMemoriesWithScoresCtx(chCtx, query, channelLimit, includeStale)
+			if err != nil {
+				logRecallChannelError("bm25", err)
+				return
+			}
+			collectScoredMemories("bm25", scored)
+		} else {
+			var mems []store.Memory
+			var err error
+			if includeStale {
+				mems, err = s.store.SearchMemoriesIncludingStaleCtx(chCtx, query, channelLimit)
+			} else {
+				mems, err = s.store.SearchMemoriesCtx(chCtx, query, channelLimit)
+			}
+			if err != nil {
+				logRecallChannelError("bm25", err)
+				return
+			}
+			collectMemories("bm25", mems)
+		}
 	}()
 
 	// ── Channel 2: Semantic ───────────────────────────────────────────────
@@ -176,7 +224,7 @@ func (s *Server) quadRecallSearch(
 			// scoring — their vector is still valid (memory text unchanged).
 			// MemoryVectorSearchWithThreshold no longer filters e.stale=0;
 			// stale results carry StaleEmbedding=true for agent annotation.
-			vecResults, vecErr := s.store.MemoryVectorSearchWithThreshold(queryVec, channelLimit, 0.3)
+			vecResults, vecErr := s.store.MemoryVectorSearchWithThresholdCtx(chCtx, queryVec, channelLimit, 0.3)
 			// P5 — Item 39: record vector search latency.
 			vecSearchMs := float64(time.Since(vecSearchStart).Milliseconds())
 			mu.Lock()
@@ -190,8 +238,10 @@ func (s *Server) quadRecallSearch(
 			// Hydrate full Memory structs for results, preserving cosine-similarity order.
 			// Track stale embedding IDs for the recall response annotation.
 			ids := make([]string, len(vecResults))
+			cosineScores := make([]float64, len(vecResults))
 			for i, vr := range vecResults {
 				ids[i] = vr.MemoryID
+				cosineScores[i] = vr.Score
 				if vr.StaleEmbedding {
 					mu.Lock()
 					staleEmbeddings[vr.MemoryID] = true
@@ -199,11 +249,22 @@ func (s *Server) quadRecallSearch(
 				}
 			}
 			if len(ids) > 0 {
-				fullMems, hydErr := s.store.GetMemoriesByIDs(ids)
+				fullMems, hydErr := s.store.GetMemoriesByIDsCtx(chCtx, ids)
 				if hydErr != nil {
 					logRecallChannelError("semantic", hydErr)
 					// Fall back to IDs only — RRF can still rank them.
 					collectMemoryIDs("semantic", ids)
+					// In convex mode, still populate channel scores from the
+					// cosine similarities we already have. The scores are valid
+					// even though we couldn't hydrate full Memory structs.
+					if useConvex {
+						mu.Lock()
+						channelScores["semantic"] = &store.ChannelScores{
+							IDs:    ids,
+							Scores: cosineScores,
+						}
+						mu.Unlock()
+					}
 					return
 				}
 				// GetMemoriesByIDs returns in arbitrary SQL order.
@@ -214,12 +275,26 @@ func (s *Server) quadRecallSearch(
 					memByID[m.ID] = m
 				}
 				ordered := make([]store.Memory, 0, len(ids))
-				for _, id := range ids {
+				orderedScores := make([]float64, 0, len(ids))
+				for idx, id := range ids {
 					if m, ok := memByID[id]; ok {
 						ordered = append(ordered, m)
+						orderedScores = append(orderedScores, cosineScores[idx])
 					}
 				}
 				collectMemories("semantic", ordered)
+				if useConvex {
+					mu.Lock()
+					cs := &store.ChannelScores{
+						IDs:    make([]string, len(ordered)),
+						Scores: orderedScores,
+					}
+					for i, m := range ordered {
+						cs.IDs[i] = m.ID
+					}
+					channelScores["semantic"] = cs
+					mu.Unlock()
+				}
 			}
 		}()
 	}
@@ -231,10 +306,16 @@ func (s *Server) quadRecallSearch(
 			defer wg.Done()
 			chCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			_ = chCtx
+
+			select {
+			case <-chCtx.Done():
+				logRecallChannelError("graph", chCtx.Err())
+				return
+			default:
+			}
 
 			// Step 1: Find anchor nodes of memories matching the query.
-			seedNodes, err := s.store.GetAnchorNodesByFTSQuery(query, 50)
+			seedNodes, err := s.store.GetAnchorNodesByFTSQueryCtx(chCtx, query, 50)
 			if err != nil {
 				logRecallChannelError("graph", err)
 				return
@@ -253,12 +334,85 @@ func (s *Server) quadRecallSearch(
 			}
 
 			// Step 3: Find memories anchored to reachable nodes.
-			mems, err := s.store.GetMemoriesByAnchorNodes(bfsRes.Nodes, channelLimit, includeStale)
+			mems, err := s.store.GetMemoriesByAnchorNodesCtx(chCtx, bfsRes.Nodes, channelLimit, includeStale)
 			if err != nil {
 				logRecallChannelError("graph", err)
 				return
 			}
+
+			// Step 4: Sort memories by anchor node activation so that memories
+			// attached to high-activation nodes get better RRF rank positions.
+			// Uses MAX activation across all of a memory's anchors — a memory
+			// anchored to both a high- and a low-activation node should rank high.
+			// Also caches the first-anchor map for traversal info (avoids a second DB call).
+			//
+			// maxAct is scoped outside the nested if so ConvexMerge can use it.
+			maxAct := make(map[string]float64, len(mems))
+			if len(mems) > 0 && len(bfsRes.ActivationMap) > 0 {
+				memIDs := make([]string, len(mems))
+				for i, m := range mems {
+					memIDs[i] = m.ID
+				}
+				bfsNodeSet := make(map[string]bool, len(bfsRes.Nodes))
+				for _, nid := range bfsRes.Nodes {
+					bfsNodeSet[nid] = true
+				}
+				// Fetch all anchors per memory for accurate max-activation scoring.
+				allAnchors, allErr := s.store.GetAllMemoryAnchorNodeIDsInSet(memIDs, bfsNodeSet)
+				if allErr != nil {
+					logRecallChannelError("graph-activation", allErr)
+					// Sorting fails gracefully — fall through with unsorted memories.
+				} else if len(allAnchors) > 0 {
+					// Pre-compute max activation score per memory.
+					for memID, nodeIDs := range allAnchors {
+						best := 0.0
+						for _, nid := range nodeIDs {
+							if a := bfsRes.ActivationMap[nid]; a > best {
+								best = a
+							}
+						}
+						maxAct[memID] = best
+					}
+					sort.Slice(mems, func(i, j int) bool {
+						return maxAct[mems[i].ID] > maxAct[mems[j].ID]
+					})
+					// Cache first-anchor map for traversal info (avoids a second DB call).
+					// Traversal path reconstruction uses one anchor per memory — any
+					// anchor in the BFS set is valid for path tracing.
+					firstAnchor := make(map[string]string, len(allAnchors))
+					for memID, nodeIDs := range allAnchors {
+						if len(nodeIDs) > 0 {
+							firstAnchor[memID] = nodeIDs[0]
+						}
+					}
+					graphAnchorMap = firstAnchor
+				}
+			}
+
 			collectMemories("graph", mems)
+			if useConvex && len(mems) > 0 && len(maxAct) > 0 {
+				// Use activation scores as raw graph channel scores.
+				// Only emit when maxAct is populated — otherwise all scores
+				// are 0.0 which normalizes to all-1.0, giving every graph
+				// result misleading maximum weight.
+				hasNonZero := false
+				mu.Lock()
+				cs := &store.ChannelScores{
+					IDs:    make([]string, len(mems)),
+					Scores: make([]float64, len(mems)),
+				}
+				for i, m := range mems {
+					cs.IDs[i] = m.ID
+					cs.Scores[i] = maxAct[m.ID]
+					if cs.Scores[i] > 0 {
+						hasNonZero = true
+					}
+				}
+				if hasNonZero {
+					channelScores["graph"] = cs
+				}
+				mu.Unlock()
+			}
 		}()
 	}
 
@@ -276,9 +430,15 @@ func (s *Server) quadRecallSearch(
 		defer wg.Done()
 		chCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		_ = chCtx
 
-		mems, err := s.store.RecentMemories(temporalLimit, sinceDays, untilTime, includeStale)
+		select {
+		case <-chCtx.Done():
+			logRecallChannelError("temporal", chCtx.Err())
+			return
+		default:
+		}
+
+		mems, err := s.store.RecentMemoriesCtx(chCtx, temporalLimit, sinceDays, untilTime, includeStale)
 		if err != nil {
 			logRecallChannelError("temporal", err)
 			return
@@ -289,16 +449,50 @@ func (s *Server) quadRecallSearch(
 		// The order from RecentMemories is already created_at DESC, which is
 		// equivalent to recency-first ranking. No re-sort needed.
 		collectMemories("temporal", mems)
+		if useConvex && len(mems) > 0 {
+			// Use recency decay as raw temporal channel scores.
+			mu.Lock()
+			cs := &store.ChannelScores{
+				IDs:    make([]string, len(mems)),
+				Scores: make([]float64, len(mems)),
+			}
+			for i, m := range mems {
+				cs.IDs[i] = m.ID
+				cs.Scores[i] = store.DecayedImportanceScore(m, 0)
+			}
+			channelScores["temporal"] = cs
+			mu.Unlock()
+		}
 	}()
 
 	wg.Wait()
 
-	// ── RRF Merge ─────────────────────────────────────────────────────────
+	// ── Merge ────────────────────────────────────────────────────────────
 	if len(channels) == 0 {
 		return nil, nil, nil, nil
 	}
 
-	rankedIDs, attribution := store.RRFMergeWeighted(channels, limit, 60, store.DefaultRRFWeights)
+	var rankedIDs []string
+	var attribution map[string][]string
+
+	if useConvex && len(channelScores) > 0 {
+		// Score-aware convex fusion: uses score magnitudes, not just ranks.
+		cw := store.DefaultConvexWeights
+		if cfg.Recall.ConvexAlpha != nil {
+			cw.Alpha = clampUnit(*cfg.Recall.ConvexAlpha)
+		}
+		if cfg.Recall.ConvexGraphBonus != nil {
+			cw.GraphBonus = clampUnit(*cfg.Recall.ConvexGraphBonus)
+		}
+		if cfg.Recall.ConvexTemporalBonus != nil {
+			cw.TemporalBonus = clampUnit(*cfg.Recall.ConvexTemporalBonus)
+		}
+		rankedIDs, attribution = store.ConvexMerge(channelScores, limit, cw)
+	} else {
+		// Default: Reciprocal Rank Fusion (rank-only).
+		rankedIDs, attribution = store.RRFMergeWeighted(channels, limit, 60, store.DefaultRRFWeights)
+	}
+
 	if len(rankedIDs) == 0 {
 		return nil, nil, nil, nil
 	}
@@ -312,7 +506,7 @@ func (s *Server) quadRecallSearch(
 		}
 	}
 	if len(missingIDs) > 0 {
-		fetched, err := s.store.GetMemoriesByIDs(missingIDs)
+		fetched, err := s.store.GetMemoriesByIDsCtx(ctx, missingIDs)
 		if err != nil {
 			logRecallChannelError("hydration", err)
 		} else {
@@ -365,18 +559,26 @@ func (s *Server) quadRecallSearch(
 		// Collect memory IDs attributed to the graph channel in the final result.
 		graphMemIDs := graphAttributedMemIDs(result, attribution)
 		if len(graphMemIDs) > 0 && len(graphResult.ParentMap) > 0 {
-			// Build the set of nodes reachable in this BFS result (parent map keys).
-			// GetMemoryAnchorNodeIDsInSet filters to only anchors that ARE in this set,
-			// fixing the multi-anchor bug where the first-by-date anchor might not be
-			// the BFS-discovered one.
-			bfsNodeSet := make(map[string]bool, len(graphResult.ParentMap))
-			for nid := range graphResult.ParentMap {
-				bfsNodeSet[nid] = true
+			// Reuse the anchorMap populated during activation sort in the graph
+			// channel goroutine. graphAnchorMap covers all graph channel memories
+			// (a superset of graphMemIDs), so all lookups succeed.
+			// Fall back to a fresh DB query only when the activation sort was
+			// skipped (e.g., anchorErr in the goroutine or empty mems).
+			anchorMap := graphAnchorMap
+			if len(anchorMap) == 0 {
+				// Fallback: build nodeSet and re-query with the narrower graphMemIDs.
+				bfsNodeSet := make(map[string]bool, len(graphResult.ParentMap))
+				for nid := range graphResult.ParentMap {
+					bfsNodeSet[nid] = true
+				}
+				var dbErr error
+				anchorMap, dbErr = s.store.GetMemoryAnchorNodeIDsInSet(graphMemIDs, bfsNodeSet)
+				if dbErr != nil {
+					logRecallChannelError("graph-traversal", dbErr)
+					anchorMap = nil
+				}
 			}
-			anchorMap, err := s.store.GetMemoryAnchorNodeIDsInSet(graphMemIDs, bfsNodeSet)
-			if err != nil {
-				logRecallChannelError("graph-traversal", err)
-			} else if len(anchorMap) > 0 {
+			if len(anchorMap) > 0 {
 				ti.Paths = s.reconstructTraversalPaths(result, attribution, graphResult, anchorMap)
 			}
 		}
@@ -551,10 +753,38 @@ func (s *Server) graphNodeName(nodeID string) string {
 	return nodeID
 }
 
+// edgeActivationWeight returns the spreading activation multiplier for the given
+// edge type. CALLS (direct invocation) propagates full activation. IMPLEMENTS
+// (structural contract) propagates 70%. IMPORTS (package-level dependency)
+// propagates 50%. Unknown types are given 40% — conservative, as their
+// semantic coupling is weaker.
+//
+// Based on Anderson (1983) spreading activation theory: tighter coupling
+// between nodes means more shared cognitive context, so more activation flows.
+func edgeActivationWeight(t graph.EdgeType) float64 {
+	switch t {
+	case graph.EdgeCalls:
+		return 1.0
+	case graph.EdgeImplements:
+		return 0.7
+	case graph.EdgeImports:
+		return 0.5
+	default:
+		return 0.4
+	}
+}
+
 // graphBFS performs breadth-first search from seed node IDs following
 // CALLS, IMPORTS, and IMPLEMENTS edges. Returns a GraphBFSResult containing
 // reachable node IDs (excluding seeds), the parent map for path reconstruction,
-// and the seed set for termination detection.
+// the seed set for termination detection, and an activation map.
+//
+// Spreading activation (Anderson 1983): seeds start at 1.0. Each hop:
+//
+//	child_act = parent_act × edgeActivationWeight(type) / max(1, fan_out)
+//
+// fan_out is the count of allowed-type edges on the parent (both directions).
+// Nodes reachable via multiple paths keep the maximum activation.
 //
 // Edge type filtering by depth:
 //   - Depth 1: CALLS + IMPORTS + IMPLEMENTS (broad discovery)
@@ -574,11 +804,15 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 	parentMap := make(map[string]graphParentEntry, 64)
 	seedSet := make(map[string]bool, len(seeds))
 
+	// activationMap: seeds = 1.0; non-seeds = max activation across all paths.
+	activationMap := make(map[string]float64, len(seeds)+64)
+
 	for _, seed := range seeds {
 		seedSet[seed] = true
 		nid := graph.NodeID(seed)
 		if s.graph.GetNode(nid) != nil && !visited[nid] {
 			visited[nid] = true
+			activationMap[seed] = 1.0
 			frontier = append(frontier, nid)
 		}
 	}
@@ -605,10 +839,42 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 
 		var nextFrontier []graph.NodeID
 		for _, nid := range frontier {
+			parentActivation := activationMap[string(nid)]
+
+			// Fetch edges once for both fan-out counting and traversal.
+			outEdges := s.graph.OutEdges(nid)
+			inEdges := s.graph.InEdges(nid)
+
+			// fan-out: count of allowed-type edges in both directions.
+			// Divides parent activation so hub nodes don't flood neighbors.
+			fanOut := 0
+			for _, e := range outEdges {
+				if allowedTypes[e.Type] {
+					fanOut++
+				}
+			}
+			for _, e := range inEdges {
+				if allowedTypes[e.Type] {
+					fanOut++
+				}
+			}
+			if fanOut < 1 {
+				fanOut = 1
+			}
+
 			// Follow outgoing edges (callees, imports, implements).
 			// IsIncoming=false: nid (parent) CALLS/IMPORTS/IMPLEMENTS e.To.
-			for _, e := range s.graph.OutEdges(nid) {
-				if !allowedTypes[e.Type] || visited[e.To] {
+			for _, e := range outEdges {
+				if !allowedTypes[e.Type] {
+					continue
+				}
+				act := parentActivation * edgeActivationWeight(e.Type) / float64(fanOut)
+				// Update activation unconditionally — nodes reachable via
+				// multiple paths keep the maximum.
+				if act > activationMap[string(e.To)] {
+					activationMap[string(e.To)] = act
+				}
+				if visited[e.To] {
 					continue
 				}
 				visited[e.To] = true
@@ -627,8 +893,15 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 			}
 			// Follow incoming edges (callers of this node).
 			// IsIncoming=true: e.From CALLS nid — e.From is the caller, nid the callee.
-			for _, e := range s.graph.InEdges(nid) {
-				if !allowedTypes[e.Type] || visited[e.From] {
+			for _, e := range inEdges {
+				if !allowedTypes[e.Type] {
+					continue
+				}
+				act := parentActivation * edgeActivationWeight(e.Type) / float64(fanOut)
+				if act > activationMap[string(e.From)] {
+					activationMap[string(e.From)] = act
+				}
+				if visited[e.From] {
 					continue
 				}
 				visited[e.From] = true
@@ -658,10 +931,23 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 	}
 
 	return GraphBFSResult{
-		Nodes:     result,
-		ParentMap: parentMap,
-		SeedSet:   seedSet,
+		Nodes:         result,
+		ParentMap:     parentMap,
+		SeedSet:       seedSet,
+		ActivationMap: activationMap,
 	}
+}
+
+// clampUnit clamps a float64 to the [0, 1] range.
+// Used for config validation of ConvexWeights fields.
+func clampUnit(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
 
 // logRecallChannelError logs a non-fatal error from a recall channel.
