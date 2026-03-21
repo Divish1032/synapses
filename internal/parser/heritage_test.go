@@ -1,6 +1,7 @@
 package parser_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -201,6 +202,67 @@ class Greeter : Greetable {
 	}
 }
 
+func TestKotlinParser_HeritageConstructorInvocation(t *testing.T) {
+	// Common Kotlin pattern: class extends via constructor invocation (parens).
+	src := `
+open class Base
+
+class Child : Base() {
+}
+`
+	g := graph.New("test")
+	if err := parser.NewKotlinParser().Parse(g, "Child.kt", []byte(src)); err != nil {
+		t.Fatal(err)
+	}
+	nodes := g.FindByName("Child")
+	if len(nodes) == 0 {
+		t.Fatal("class 'Child' not found")
+	}
+	hi := nodes[0].Metadata["heritage_implements"]
+	if hi != "Base" {
+		t.Errorf("heritage_implements = %q, want %q", hi, "Base")
+	}
+}
+
+func TestKotlinParser_HeritageMultiple(t *testing.T) {
+	// Class extends base + implements interface.
+	src := `
+open class Base
+interface Loggable
+
+class Service : Base(), Loggable {
+}
+`
+	g := graph.New("test")
+	if err := parser.NewKotlinParser().Parse(g, "Service.kt", []byte(src)); err != nil {
+		t.Fatal(err)
+	}
+	nodes := g.FindByName("Service")
+	if len(nodes) == 0 {
+		t.Fatal("class 'Service' not found")
+	}
+	hi := nodes[0].Metadata["heritage_implements"]
+	if hi == "" {
+		t.Fatal("heritage_implements is empty")
+	}
+	// Should contain both Base and Loggable.
+	if !containsStr(hi, "Base") {
+		t.Errorf("heritage_implements = %q, missing Base", hi)
+	}
+	if !containsStr(hi, "Loggable") {
+		t.Errorf("heritage_implements = %q, missing Loggable", hi)
+	}
+}
+
+func containsStr(csv, target string) bool {
+	for _, s := range strings.Split(csv, ",") {
+		if strings.TrimSpace(s) == target {
+			return true
+		}
+	}
+	return false
+}
+
 func TestKotlinParser_HeritageNoInheritance(t *testing.T) {
 	src := `class Plain {}`
 	g := graph.New("test")
@@ -213,6 +275,50 @@ func TestKotlinParser_HeritageNoInheritance(t *testing.T) {
 	}
 	if nodes[0].Metadata["heritage_implements"] != "" {
 		t.Errorf("unexpected heritage_implements = %q", nodes[0].Metadata["heritage_implements"])
+	}
+}
+
+func TestKotlinParser_HeritageGeneric(t *testing.T) {
+	src := `
+interface Comparable<T>
+
+class User : Comparable<User> {
+}
+`
+	g := graph.New("test")
+	if err := parser.NewKotlinParser().Parse(g, "User.kt", []byte(src)); err != nil {
+		t.Fatal(err)
+	}
+	nodes := g.FindByName("User")
+	if len(nodes) == 0 {
+		t.Fatal("class 'User' not found")
+	}
+	hi := nodes[0].Metadata["heritage_implements"]
+	// Should be "Comparable", NOT "Comparable,User" (type arg shouldn't leak).
+	if hi != "Comparable" {
+		t.Errorf("heritage_implements = %q, want %q (generic type arg should not leak)", hi, "Comparable")
+	}
+}
+
+func TestJavaParser_HeritageGenericExtends(t *testing.T) {
+	src := `
+public class Base<T> {}
+
+public class Child extends Base<String> {
+}
+`
+	g := graph.New("test")
+	if err := parser.NewJavaParser().Parse(g, "Child.java", []byte(src)); err != nil {
+		t.Fatal(err)
+	}
+	nodes := g.FindByName("Child")
+	if len(nodes) == 0 {
+		t.Fatal("class 'Child' not found")
+	}
+	he := nodes[0].Metadata["heritage_extends"]
+	// Should be "Base", NOT "Base,String".
+	if he != "Base" {
+		t.Errorf("heritage_extends = %q, want %q (generic type arg should not leak)", he, "Base")
 	}
 }
 

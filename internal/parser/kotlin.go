@@ -549,44 +549,28 @@ func collectKotlinCallSites(g *graph.Graph, lang *sitter.Language, root sitter.N
 // extractKotlinHeritage extracts supertypes from a Kotlin class_declaration.
 // Kotlin uses delegation_specifier children (or a delegation_specifier_list)
 // for both extends and implements, e.g. `class Foo : Bar(), IBaz`.
+// Uses extractTypeIdentifiers to correctly handle constructor invocations
+// (Bar() → "Bar", not "Bar()") and generic types (Comparable<T> → "Comparable").
 func extractKotlinHeritage(n sitter.Node, src []byte, meta map[string]string) map[string]string {
 	var names []string
 	seen := make(map[string]bool)
-
-	var walk func(child sitter.Node)
-	walk = func(child sitter.Node) {
-		if child.IsNull() {
-			return
-		}
-		switch child.Type() {
-		case "delegation_specifier":
-			// delegation_specifier contains a user_type or constructor_invocation.
-			name := extractSimpleTypeName(child, src)
-			if name != "" && !seen[name] {
-				seen[name] = true
-				names = append(names, name)
-			}
-			return
-		case "type_identifier":
-			name := string(src[child.StartByte():child.EndByte()])
-			if name != "" && !seen[name] {
-				seen[name] = true
-				names = append(names, name)
-			}
-			return
-		}
-		for i := uint32(0); i < child.ChildCount(); i++ {
-			walk(child.Child(i))
-		}
-	}
 
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "delegation_specifier" || child.Type() == "delegation_specifier_list" {
-			walk(child)
+		if child.Type() != "delegation_specifier" && child.Type() != "delegation_specifier_list" {
+			continue
+		}
+		// extractTypeIdentifiers recursively walks the AST subtree for
+		// type_identifier and generic_type nodes, correctly handling
+		// constructor_invocation → user_type → type_identifier paths.
+		for _, name := range extractTypeIdentifiers(child, src) {
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
 		}
 	}
 
