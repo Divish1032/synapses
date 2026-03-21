@@ -30,7 +30,14 @@ package store
 //
 //	Use github.com/coder/hnsw with sync.RWMutex wrapper + 3× oversampling.
 //	Distance function: hnsw.CosineDistance (= 1 − cosine_similarity).
-//	Lower distance = more similar — Search returns closest first.
+//	Lower distance = more similar.
+//	NOTE: Graph.Search returns results in internal heap order, NOT distance-sorted.
+//	Root cause: heap.Slice() returns h.inner.data (raw min-heap array). Min() is
+//	at index 0, but indices 1…k-1 are in partial heap order, not ascending order.
+//	Sprint 12 #4 must NOT assume Search result ordering. The SQL Pass 2 layer
+//	handles final ordering; HNSW provides the candidate pool only.
+//	If explicit sort is needed outside SQL: recompute hnsw.CosineDistance(query,
+//	node.Value) for each candidate and sort.Slice. See TestSpike_SearchResultOrdering.
 //
 //	OVERSAMPLING REQUIRED: coder/hnsw at M=16, EfSearch=20 returns ~60-70%
 //	recall@k on structured data when requesting exactly k results — HNSW
@@ -119,39 +126,40 @@ func TestSpike_CoderHNSW_BasicRecall(t *testing.T) {
 // fetch act as a re-ranking/filtering layer (it re-applies stale/expired filters
 // and returns the full memory record for each candidate).
 //
-// With oversampleFactor=3 and seeded graph construction: ≥95% recall@10 at
-// N=200, dims=384. Sprint 12 #4 will implement:
+// Test runs across three graph construction seeds (1, 2, 3). Each seed produces
+// a structurally different HNSW graph due to random level assignments. All three
+// must achieve ≥95% recall@10, proving the oversampling design is seed-robust and
+// not dependent on a lucky graph structure. The production Rng is seeded from
+// time.Now().UnixNano() — any reasonable seed must work. Sprint 12 #4:
 //
 //	MemoryVectorSearch → hnswMu.RLock → g.Search(query, limit*3)
 //	→ hnswMu.RUnlock → fetchMemorySearchResults(candidates)
 //
-// Test uses Graph.Rng seeded to 1 for reproducibility — HNSW graph structure
-// is random (level assignments), so an unseeded graph may give different results
-// each run. Sprint 12 #4 implementation will also seed the production Rng once at
-// startup (rand.New(rand.NewSource(time.Now().UnixNano()))) for graph quality.
+// Note: Search returns candidates in heap order (NOT distance-sorted). The SQL
+// Pass 2 layer handles final top-k selection — order of HNSW candidates is irrelevant.
 func TestSpike_CoderHNSW_RecallAccuracyWithOversampling(t *testing.T) {
 	t.Parallel()
 	const (
-		nClusters   = 20
-		membersEach = 10
-		N           = nClusters * membersEach // 200 — fast enough for test suite
-		dims        = 384                     // production embedding dimension
-		k           = 10
-		oversample  = 3    // request k*oversample from HNSW, pick true top-k via SQL
-		noiseStd    = float32(0.01) // per-component; L2 ≈ 0.01×sqrt(384) ≈ 0.196
+		nClusters  = 20
+		N          = nClusters * 10  // 200 — fast enough for test suite
+		dims       = 384             // production embedding dimension
+		k          = 10
+		oversample = 3              // request k*oversample from HNSW, pick true top-k via SQL
+		noiseStd   = float32(0.01)  // per-component; L2 ≈ 0.01×sqrt(384) ≈ 0.196
 	)
 	rng := rand.New(rand.NewSource(42))
 
-	// Generate cluster centres (random unit vectors, mutually far in 384-dim:
-	// mean pairwise cosine similarity ≈ 0, std ≈ 1/sqrt(384) ≈ 0.051).
+	// Generate data once — same across all seed iterations.
+	// Cluster centres: random unit vectors in 384-dim (mean pairwise cosine
+	// similarity ≈ 0, std ≈ 1/sqrt(384) ≈ 0.051 — every cross-cluster pair far).
 	centres := make([][]float32, nClusters)
 	for i := range centres {
 		centres[i] = randomUnitVec(rng, dims)
 	}
 
-	// Generate members: centre + small per-component noise, then re-normalise.
-	// cos_sim(centre, member) ≈ 1/(√(1+noiseStd²×dims)) ≈ 0.981 — far closer
-	// than any cross-cluster pair (≈0). So brute-force top-10 = the 10 members.
+	// Members: centre + small per-component Gaussian noise, then re-normalise.
+	// cos_sim(centre, member) ≈ 0.981 >> any cross-cluster similarity (≈0).
+	// Brute-force top-k for each centre query = exactly that cluster's members.
 	vecs := make([][]float32, N)
 	keys := make([]string, N)
 	for i := 0; i < N; i++ {
@@ -170,54 +178,56 @@ func TestSpike_CoderHNSW_RecallAccuracyWithOversampling(t *testing.T) {
 		keys[i] = fmt.Sprintf("mem-%d", i)
 	}
 
-	// Build HNSW index with seeded Rng for reproducibility.
-	g := hnsw.NewGraph[string]()
-	g.Distance = hnsw.CosineDistance
-	g.M = 16
-	g.EfSearch = 20
-	g.Rng = rand.New(rand.NewSource(1)) // seeded for deterministic level assignment
-	for i, v := range vecs {
-		g.Add(hnsw.MakeNode(keys[i], v))
+	// Brute-force ground truth sets — constant across seeds.
+	type scored struct {
+		key  string
+		dist float32
 	}
-	if g.Len() != N {
-		t.Fatalf("expected index size %d, got %d", N, g.Len())
-	}
-
-	// Measure recall@k using oversampling (the Sprint 12 #4 production design).
-	var totalHits float64
+	bfSets := make([]map[string]bool, nClusters)
 	for q := 0; q < nClusters; q++ {
 		qv := centres[q]
-
-		// Brute-force ground truth.
-		type scored struct {
-			key  string
-			dist float32
-		}
 		bf := make([]scored, N)
 		for i, v := range vecs {
 			bf[i] = scored{keys[i], hnsw.CosineDistance(qv, v)}
 		}
 		sort.Slice(bf, func(a, b int) bool { return bf[a].dist < bf[b].dist })
-		bfSet := make(map[string]bool, k)
+		bfSets[q] = make(map[string]bool, k)
 		for _, s := range bf[:k] {
-			bfSet[s.key] = true
-		}
-
-		// HNSW with oversampling: request k×3, count hits in true top-k.
-		// In Sprint 12 #4, the SQL Pass 2 naturally picks the top-k from
-		// the candidate set — here we manually count them.
-		for _, r := range g.Search(qv, k*oversample) {
-			if bfSet[r.Key] {
-				totalHits++
-			}
+			bfSets[q][s.key] = true
 		}
 	}
 
-	recall := totalHits / float64(nClusters*k)
-	t.Logf("recall@%d with %d× oversampling at N=%d dims=%d: %.1f%% (target: ≥95%%)",
-		k, oversample, N, dims, recall*100)
-	if recall < 0.95 {
-		t.Errorf("recall@%d with oversampling = %.1f%% < 95%% — try higher oversampling", k, recall*100)
+	// Verify recall across three different graph construction seeds.
+	// All must pass ≥95% — proves robustness, not a single-seed lucky result.
+	for _, rngSeed := range []int64{1, 2, 3} {
+		g := hnsw.NewGraph[string]()
+		g.Distance = hnsw.CosineDistance
+		g.M = 16
+		g.EfSearch = 20
+		g.Rng = rand.New(rand.NewSource(rngSeed))
+		for i, v := range vecs {
+			g.Add(hnsw.MakeNode(keys[i], v))
+		}
+		if g.Len() != N {
+			t.Fatalf("seed=%d: index size mismatch: want %d got %d", rngSeed, N, g.Len())
+		}
+
+		// Count SET membership (not order — Search returns heap order, see header).
+		var hits float64
+		for q := 0; q < nClusters; q++ {
+			for _, r := range g.Search(centres[q], k*oversample) {
+				if bfSets[q][r.Key] {
+					hits++
+				}
+			}
+		}
+		recall := hits / float64(nClusters*k)
+		t.Logf("seed=%d recall@%d with %d× oversample N=%d dims=%d: %.1f%% (target ≥95%%)",
+			rngSeed, k, oversample, N, dims, recall*100)
+		if recall < 0.95 {
+			t.Errorf("seed=%d recall@%d = %.1f%% < 95%% — oversampling insufficient for this construction",
+				rngSeed, k, recall*100)
+		}
 	}
 }
 
@@ -407,6 +417,152 @@ func TestSpike_CoderHNSW_IndexSizeGrowth(t *testing.T) {
 	}
 	t.Logf("CONFIRMED Add/Delete/Len consistency: index size tracks correctly")
 	t.Logf("NOTED: Sprint 12 #4 must use fresh UUIDs on re-insert, not re-add deleted keys")
+}
+
+// TestSpike_CoderHNSW_EmptyGraphSearch confirms that Search on an empty graph
+// returns nil without panicking. This is the cold-start safety guarantee for
+// Sprint 12 #4: Open() calls rebuildHNSWIndex() which may produce an empty
+// index when the SQLite embeddings table has no rows. The first inbound
+// MemoryVectorSearch call must not panic — it must return zero results.
+func TestSpike_CoderHNSW_EmptyGraphSearch(t *testing.T) {
+	t.Parallel()
+	g := hnsw.NewGraph[string]()
+	g.Distance = hnsw.CosineDistance
+	g.M = 16
+	g.EfSearch = 20
+
+	// Cold-start: graph is empty. Search must return nil, not panic.
+	result := g.Search([]float32{1, 0, 0, 0}, 5)
+	if result != nil {
+		t.Errorf("expected nil from empty-graph Search, got %v (len=%d)", result, len(result))
+	}
+	// Also verify Len() is 0 and Lookup returns not-found.
+	if g.Len() != 0 {
+		t.Errorf("expected Len=0 on empty graph, got %d", g.Len())
+	}
+	if _, ok := g.Lookup("nonexistent"); ok {
+		t.Error("Lookup on empty graph should return (nil, false)")
+	}
+	t.Logf("CONFIRMED empty-graph Search returns nil (cold-start safe)")
+}
+
+// TestSpike_CoderHNSW_SearchResultOrdering documents the HEAP-ORDER contract:
+// Graph.Search returns candidates in internal min-heap order, NOT sorted by
+// ascending cosine distance. This is a critical constraint for Sprint 12 #4.
+//
+// Root cause (verified in heap/heap.go): heap.Slice() returns h.inner.data —
+// the raw backing array of a min-heap. The minimum element is guaranteed at
+// index 0 (heap invariant), but elements at indices 1…k-1 are only heap-valid
+// (each parent ≤ its children), not globally sorted.
+//
+// Consequence for Sprint 12 #4: HNSW candidates are a pool, not a ranked list.
+// The SQL Pass 2 layer picks the final top-k by fetching full records and
+// applying stale/expired filters — ordering emerges from SQL, not HNSW.
+// If a caller needs sorted candidates outside of SQL (e.g. a unit test or
+// fallback path), it must recompute hnsw.CosineDistance(query, node.Value)
+// for each result and sort explicitly. This test demonstrates that pattern.
+func TestSpike_CoderHNSW_SearchResultOrdering(t *testing.T) {
+	t.Parallel()
+
+	// normalise returns a unit vector (modifies v in-place and returns it).
+	normalise := func(v []float32) []float32 {
+		var nrm float32
+		for _, x := range v {
+			nrm += x * x
+		}
+		nrm = float32(math.Sqrt(float64(nrm)))
+		if nrm == 0 {
+			return v
+		}
+		for i := range v {
+			v[i] /= nrm
+		}
+		return v
+	}
+
+	// Build a graph with 5 vectors at known, distinct cosine distances from
+	// query [1,0,0,0]. All are pre-normalised for exact distance measurement.
+	// We insert them in REVERSE distance order (farthest first) so the heap
+	// structure is more likely to expose non-sorted ordering.
+	query := []float32{1, 0, 0, 0}
+	type entry struct {
+		key      string
+		vec      []float32
+		wantRank int // 1=closest … 5=farthest
+	}
+	nodes := []entry{
+		{"rank5-ortho", normalise([]float32{0, 0, 1, 0}), 5},  // dist = 1.0
+		{"rank4-far", normalise([]float32{0.5, 0.87, 0, 0}), 4}, // dist ≈ 0.50
+		{"rank3-mid", normalise([]float32{0.7, 0.71, 0, 0}), 3}, // dist ≈ 0.30
+		{"rank2-near", normalise([]float32{0.95, 0.31, 0, 0}), 2}, // dist ≈ 0.05
+		{"rank1-exact", normalise([]float32{1, 0, 0, 0}), 1},   // dist = 0.0
+	}
+
+	g := hnsw.NewGraph[string]()
+	g.Distance = hnsw.CosineDistance
+	g.M = 16
+	g.EfSearch = 20
+	g.Rng = rand.New(rand.NewSource(1))
+	for _, n := range nodes {
+		g.Add(hnsw.MakeNode(n.key, n.vec))
+	}
+
+	results := g.Search(query, 5)
+	if len(results) != 5 {
+		t.Fatalf("expected 5 results, got %d", len(results))
+	}
+
+	// All 5 nodes must be in the result set (correct candidate pool).
+	inResults := make(map[string]bool, 5)
+	for _, r := range results {
+		inResults[r.Key] = true
+	}
+	for _, n := range nodes {
+		if !inResults[n.key] {
+			t.Errorf("expected %q in Search results but it was missing", n.key)
+		}
+	}
+
+	// Log the raw heap-ordered results with their actual distances.
+	t.Logf("Raw Search result order (heap order — NOT guaranteed distance-sorted):")
+	isSorted := true
+	var prevDist float32 = -1
+	for i, r := range results {
+		d := hnsw.CosineDistance(query, r.Value)
+		t.Logf("  results[%d]: key=%q dist=%.6f", i, r.Key, d)
+		if d < prevDist {
+			isSorted = false
+		}
+		prevDist = d
+	}
+	if !isSorted {
+		t.Logf("CONFIRMED: Search results are NOT in ascending distance order (heap order only).")
+	} else {
+		t.Logf("NOTE: results happen to be distance-sorted for this construction — not guaranteed.")
+	}
+
+	// Sprint 12 #4 pattern: recompute distances + sort to get correct ordering.
+	// SQL Pass 2 naturally handles this; this shows the explicit pattern if needed.
+	type sc struct {
+		key  string
+		dist float32
+	}
+	computed := make([]sc, len(results))
+	for i, r := range results {
+		computed[i] = sc{r.Key, hnsw.CosineDistance(query, r.Value)}
+	}
+	sort.Slice(computed, func(i, j int) bool { return computed[i].dist < computed[j].dist })
+
+	// After recompute+sort, rank order must be correct.
+	wantOrder := []string{"rank1-exact", "rank2-near", "rank3-mid", "rank4-far", "rank5-ortho"}
+	for i, want := range wantOrder {
+		if computed[i].key != want {
+			t.Errorf("recompute+sort result[%d] = %q, want %q (dist=%.6f)",
+				i, computed[i].key, want, computed[i].dist)
+		}
+	}
+	t.Logf("CONFIRMED: recompute-and-sort gives correct distance ordering.")
+	t.Logf("Sprint 12 #4: HNSW candidates are a pool; SQL Pass 2 owns final ordering.")
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
