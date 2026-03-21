@@ -392,3 +392,95 @@ func TestQuadRecallSearch_GraphChannel_SortsByActivation(t *testing.T) {
 		t.Errorf("highMem (rank %d) should rank above lowMem (rank %d) due to higher activation", highIdx, lowIdx)
 	}
 }
+
+// TestQuadRecallSearch_MultiAnchorUsesMaxActivation verifies that a memory with
+// multiple anchor nodes is sorted by its MAXIMUM activation across all anchors,
+// not the activation of its oldest anchor. This covers the correctness fix for
+// GetAllMemoryAnchorNodeIDsInSet replacing the single-anchor sort path.
+//
+// Graph: seedNode → highNode (CALLS)  → activation 0.5
+//        seedNode → lowNode  (IMPORTS) → activation 0.25
+//
+// dualAnchorMem is anchored to BOTH lowNode AND highNode.
+// singleHighMem is anchored to highNode only.
+// singleLowMem is anchored to lowNode only.
+//
+// Expected order: singleHighMem == dualAnchorMem (both 0.5) > singleLowMem (0.25).
+// The key correctness assertion: dualAnchorMem must NOT rank below singleLowMem.
+func TestQuadRecallSearch_MultiAnchorUsesMaxActivation(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+
+	seedNode := srv.graph.MakeNodeID("seed2.go", "Seed2")
+	highNode := srv.graph.MakeNodeID("high2.go", "High2")
+	lowNode := srv.graph.MakeNodeID("low2.go", "Low2")
+	for _, n := range []*graph.Node{
+		{ID: seedNode, Name: "Seed2", Type: graph.NodeFunction, File: "seed2.go", Line: 1},
+		{ID: highNode, Name: "High2", Type: graph.NodeFunction, File: "high2.go", Line: 1},
+		{ID: lowNode, Name: "Low2", Type: graph.NodeFunction, File: "low2.go", Line: 1},
+	} {
+		srv.graph.AddNode(n)
+	}
+	srv.graph.AddEdge(&graph.Edge{From: seedNode, To: highNode, Type: graph.EdgeCalls})
+	srv.graph.AddEdge(&graph.Edge{From: seedNode, To: lowNode, Type: graph.EdgeImports})
+
+	// queryMem: triggers BFS from seedNode.
+	_, err := srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier:    store.TierEntity,
+		Content: "multianchor activation query uniquetok99",
+		AgentID: "agent-1",
+		Source:  store.SourceManual,
+	}, []string{string(seedNode)})
+	if err != nil {
+		t.Fatalf("insert queryMem: %v", err)
+	}
+
+	// dualAnchorMem: anchored to BOTH lowNode (inserted first) and highNode.
+	// Without max-activation fix, it would be sorted by lowNode's activation (0.25).
+	dualMemID, err := srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier:    store.TierEntity,
+		Content: "dual anchor memory with low and high anchors",
+		AgentID: "agent-1",
+		Source:  store.SourceManual,
+	}, []string{string(lowNode), string(highNode)}) // lowNode first (older anchor)
+	if err != nil {
+		t.Fatalf("insert dualAnchorMem: %v", err)
+	}
+
+	// singleLowMem: anchored only to lowNode (activation 0.25).
+	lowMemID, err := srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier:    store.TierEntity,
+		Content: "single anchor memory with low activation only",
+		AgentID: "agent-1",
+		Source:  store.SourceManual,
+	}, []string{string(lowNode)})
+	if err != nil {
+		t.Fatalf("insert singleLowMem: %v", err)
+	}
+
+	mems, _, _, _ := srv.quadRecallSearch(
+		context.Background(), "uniquetok99", 10, false, 7, nil, 1,
+	)
+
+	dualIdx, lowIdx := -1, -1
+	for i, m := range mems {
+		switch m.ID {
+		case dualMemID:
+			dualIdx = i
+		case lowMemID:
+			lowIdx = i
+		}
+	}
+	if dualIdx < 0 {
+		t.Fatalf("dualAnchorMem not found in results")
+	}
+	if lowIdx < 0 {
+		t.Fatalf("singleLowMem not found in results")
+	}
+	// dualAnchorMem has max activation = 0.5 (via highNode).
+	// singleLowMem has max activation = 0.25 (via lowNode only).
+	// dualAnchorMem must rank at least as high as singleLowMem.
+	if dualIdx > lowIdx {
+		t.Errorf("dualAnchorMem (rank %d) should rank >= singleLowMem (rank %d): multi-anchor must use max activation", dualIdx, lowIdx)
+	}
+}

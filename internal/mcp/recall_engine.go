@@ -265,7 +265,9 @@ func (s *Server) quadRecallSearch(
 
 			// Step 4: Sort memories by anchor node activation so that memories
 			// attached to high-activation nodes get better RRF rank positions.
-			// Also caches the anchor map for traversal info (avoids a second DB call).
+			// Uses MAX activation across all of a memory's anchors — a memory
+			// anchored to both a high- and a low-activation node should rank high.
+			// Also caches the first-anchor map for traversal info (avoids a second DB call).
 			if len(mems) > 0 && len(bfsRes.ActivationMap) > 0 {
 				memIDs := make([]string, len(mems))
 				for i, m := range mems {
@@ -275,20 +277,36 @@ func (s *Server) quadRecallSearch(
 				for _, nid := range bfsRes.Nodes {
 					bfsNodeSet[nid] = true
 				}
-				anchorMap, anchorErr := s.store.GetMemoryAnchorNodeIDsInSet(memIDs, bfsNodeSet)
-				if anchorErr != nil {
-					logRecallChannelError("graph-activation", anchorErr)
+				// Fetch all anchors per memory for accurate max-activation scoring.
+				allAnchors, allErr := s.store.GetAllMemoryAnchorNodeIDsInSet(memIDs, bfsNodeSet)
+				if allErr != nil {
+					logRecallChannelError("graph-activation", allErr)
 					// Sorting fails gracefully — fall through with unsorted memories.
-				} else {
-					// Store for traversal info reuse (no mutex — graph goroutine only).
-					graphAnchorMap = anchorMap
-					if len(anchorMap) > 0 {
-						sort.Slice(mems, func(i, j int) bool {
-							ai := bfsRes.ActivationMap[anchorMap[mems[i].ID]]
-							aj := bfsRes.ActivationMap[anchorMap[mems[j].ID]]
-							return ai > aj // descending: high-activation memories first
-						})
+				} else if len(allAnchors) > 0 {
+					// Pre-compute max activation score per memory.
+					maxAct := make(map[string]float64, len(mems))
+					for memID, nodeIDs := range allAnchors {
+						best := 0.0
+						for _, nid := range nodeIDs {
+							if a := bfsRes.ActivationMap[nid]; a > best {
+								best = a
+							}
+						}
+						maxAct[memID] = best
 					}
+					sort.Slice(mems, func(i, j int) bool {
+						return maxAct[mems[i].ID] > maxAct[mems[j].ID]
+					})
+					// Cache first-anchor map for traversal info (avoids a second DB call).
+					// Traversal path reconstruction uses one anchor per memory — any
+					// anchor in the BFS set is valid for path tracing.
+					firstAnchor := make(map[string]string, len(allAnchors))
+					for memID, nodeIDs := range allAnchors {
+						if len(nodeIDs) > 0 {
+							firstAnchor[memID] = nodeIDs[0]
+						}
+					}
+					graphAnchorMap = firstAnchor
 				}
 			}
 
