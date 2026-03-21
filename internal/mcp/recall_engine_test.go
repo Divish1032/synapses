@@ -467,7 +467,7 @@ func TestHandleRecall_BrowseMode_HidesDecayedMemory(t *testing.T) {
 
 	// Insert a memory with minimum-importance weight and a very old last_accessed_at,
 	// engineered so DecayedImportanceScore < DecayVisibilityThreshold.
-	// weight=0.05 (threshold floor) × recencyDecay(3200h, 168h) = 0.05 × 0.05 ≈ 0.0025 < 0.05.
+	// TierProject half-life = 336h. weight=0.05 × recencyDecay(3200h, 336h) = 0.05 × 0.095 ≈ 0.00475 < 0.05.
 	oldTime := time.Now().Add(-3200 * time.Hour).UTC().Format(time.RFC3339)
 	_, err := srv.store.InsertMemory(store.Memory{
 		Tier:           store.TierProject,
