@@ -282,19 +282,6 @@ func (b *BuiltinEmbedder) Model() string {
 	return builtinModel
 }
 
-// IsReady reports whether the model is downloaded and the inference pipeline
-// pool is initialized. Thread-safe.
-func (b *BuiltinEmbedder) IsReady() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.ready
-}
-
-// PoolSize returns the configured pool size for this embedder.
-func (b *BuiltinEmbedder) PoolSize() int {
-	return b.poolSize
-}
-
 // StatusDetail returns a human-readable string describing the current
 // initialization state. Thread-safe. Four possible values:
 //   - "ready"                              — pipeline pool initialized, embeddings working

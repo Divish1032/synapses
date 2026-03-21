@@ -152,7 +152,7 @@ func TestMemoryVectorSearch_TwoPass_ContentFetched(t *testing.T) {
 	_ = st.UpsertMemoryEmbedding(ids[0], "test", []float32{1, 0, 0, 0})
 	_ = st.UpsertMemoryEmbedding(ids[1], "test", []float32{0, 1, 0, 0})
 
-	results, err := st.MemoryVectorSearch([]float32{1, 0, 0, 0}, 5)
+	results, err := st.MemoryVectorSearchWithThreshold([]float32{1, 0, 0, 0}, 5, 0.0)
 	if err != nil {
 		t.Fatalf("MemoryVectorSearch: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestMemoryVectorSearch_TwoPass_DeletedBetweenPasses(t *testing.T) {
 	// Delete memory directly (simulating race between passes).
 	_, _ = st.knowledgeDB.Exec(`DELETE FROM memories WHERE id = ?`, ids[0])
 
-	results, err := st.MemoryVectorSearch([]float32{1, 0}, 5)
+	results, err := st.MemoryVectorSearchWithThreshold([]float32{1, 0}, 5, 0.0)
 	if err != nil {
 		t.Fatalf("MemoryVectorSearch: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestMemoryVectorSearch_ScoreOrdering(t *testing.T) {
 			VALUES (?, 'test', ?, 'hash', 0, ?)`, id, vecToBlob(vec), now.Unix())
 	}
 
-	results, err := st.MemoryVectorSearch([]float32{1, 0}, 10)
+	results, err := st.MemoryVectorSearchWithThreshold([]float32{1, 0}, 10, 0.0)
 	if err != nil {
 		t.Fatalf("MemoryVectorSearch: %v", err)
 	}

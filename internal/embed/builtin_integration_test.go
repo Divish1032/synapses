@@ -49,10 +49,6 @@ func TestBuiltinEmbedder_Integration(t *testing.T) {
 		assert.InDelta(t, 1.0, norm, 0.01, "normalized embedding should have L2 norm ≈ 1.0")
 	})
 
-	t.Run("IsReady_AfterEmbed", func(t *testing.T) {
-		assert.True(t, e.IsReady(), "embedder should be ready after successful Embed")
-	})
-
 	t.Run("StatusDetail_AfterEmbed", func(t *testing.T) {
 		assert.Equal(t, "ready", e.StatusDetail())
 	})
@@ -153,11 +149,10 @@ func TestBuiltinEmbedder_CloseThenReopen(t *testing.T) {
 	vec, err := e.Embed(ctx, "warmup")
 	require.NoError(t, err)
 	require.Len(t, vec, 384)
-	assert.True(t, e.IsReady())
+	assert.Equal(t, "ready", e.StatusDetail())
 
 	// Close and verify state reset.
 	require.NoError(t, e.Close())
-	assert.False(t, e.IsReady())
 	// After close, status should show init was attempted but not ready.
 	// Close sets ready=false but initAttempted stays true.
 	assert.Equal(t, "unavailable", e.StatusDetail())
@@ -166,7 +161,6 @@ func TestBuiltinEmbedder_CloseThenReopen(t *testing.T) {
 	vec2, err := e.Embed(ctx, "reopen test")
 	require.NoError(t, err)
 	assert.Len(t, vec2, 384)
-	assert.True(t, e.IsReady())
 	assert.Equal(t, "ready", e.StatusDetail())
 }
 

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -207,6 +208,12 @@ func (s *Store) GetEpisodes(projectID, agentID, episodeType string, tags []strin
 // plan descriptions use different words than stored episodes — "change auth
 // handler" should match "modified auth token validation" via shared key terms.
 func (s *Store) CheckPlanSafety(planDesc, projectID string) (*Episode, error) {
+	return s.CheckPlanSafetyCtx(context.Background(), planDesc, projectID)
+}
+
+// CheckPlanSafetyCtx is the context-aware variant of CheckPlanSafety.
+// The context is threaded into the SQL query — if it expires, the query cancels.
+func (s *Store) CheckPlanSafetyCtx(ctx context.Context, planDesc, projectID string) (*Episode, error) {
 	safeQuery := buildORQuery(planDesc)
 	if safeQuery == "" {
 		return nil, nil
@@ -228,7 +235,7 @@ func (s *Store) CheckPlanSafety(planDesc, projectID string) (*Episode, error) {
 	}
 	query += ` ORDER BY rank LIMIT 1`
 
-	row := s.knowledgeDB.QueryRow(query, args...)
+	row := s.knowledgeDB.QueryRowContext(ctx, query, args...)
 	episodes, err := scanEpisodeRow(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -300,19 +307,6 @@ func (s *Store) GetRuleCandidates(minOccurrences int) ([]RuleCandidate, error) {
 		candidates = append(candidates, c)
 	}
 	return candidates, rows.Err()
-}
-
-// MarkEpisodePromoted sets promoted_rule on an episode after it has been
-// converted to a dynamic_rule via upsert_rule().
-func (s *Store) MarkEpisodePromoted(episodeID, ruleID string) error {
-	_, err := s.knowledgeDB.Exec(
-		`UPDATE episodes SET promoted_rule = ? WHERE id = ?`,
-		ruleID, episodeID,
-	)
-	if err != nil {
-		return fmt.Errorf("mark episode promoted: %w", err)
-	}
-	return nil
 }
 
 // scanEpisodes reads all rows into an Episode slice.

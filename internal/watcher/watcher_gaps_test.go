@@ -456,11 +456,9 @@ func TestReparseFile_ContentChanged_InvalidatesEmbeddings(t *testing.T) {
 		t.Fatalf("UpsertMemoryEmbedding: %v", err)
 	}
 
-	// Verify embedding starts fresh (stale=0).
-	var staleFlag int
-	st.KnowledgeDB().QueryRow(`SELECT stale FROM memory_embeddings WHERE memory_id = ?`, memID).Scan(&staleFlag)
-	if staleFlag != 0 {
-		t.Fatalf("embedding should start fresh, got stale=%d", staleFlag)
+	// Verify embedding starts fresh (stale=0) — GetMemoryEmbedding returns nil for stale embeddings.
+	if vec := st.GetMemoryEmbedding(memID); vec == nil {
+		t.Fatal("embedding should start fresh (non-nil from GetMemoryEmbedding)")
 	}
 
 	// Update the file with different content and re-parse.
@@ -470,9 +468,9 @@ func TestReparseFile_ContentChanged_InvalidatesEmbeddings(t *testing.T) {
 	w.reparseFile(goFile, root)
 
 	// Embedding should now be stale because the file content changed.
-	st.KnowledgeDB().QueryRow(`SELECT stale FROM memory_embeddings WHERE memory_id = ?`, memID).Scan(&staleFlag)
-	if staleFlag != 1 {
-		t.Errorf("embedding should be stale=1 after content change, got stale=%d", staleFlag)
+	// GetMemoryEmbedding filters WHERE stale=0, so a stale embedding returns nil.
+	if vec := st.GetMemoryEmbedding(memID); vec != nil {
+		t.Errorf("embedding should be stale after content change, but GetMemoryEmbedding returned non-nil")
 	}
 }
 
@@ -536,9 +534,8 @@ func TestReparseFile_ContentUnchanged_EmbeddingsNotStaled(t *testing.T) {
 	w.reparseFile(goFile, root)
 
 	// Embedding should remain fresh — content hash unchanged.
-	var staleFlag int
-	st.KnowledgeDB().QueryRow(`SELECT stale FROM memory_embeddings WHERE memory_id = ?`, memID).Scan(&staleFlag)
-	if staleFlag != 0 {
-		t.Errorf("embedding should remain fresh=0 after no-op save, got stale=%d", staleFlag)
+	// GetMemoryEmbedding filters WHERE stale=0, so a fresh embedding returns non-nil.
+	if vec := st.GetMemoryEmbedding(memID); vec == nil {
+		t.Errorf("embedding should remain fresh after no-op save, but GetMemoryEmbedding returned nil")
 	}
 }

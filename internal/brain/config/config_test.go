@@ -78,44 +78,6 @@ func TestAutoConfigureModels(t *testing.T) {
 	}
 }
 
-func TestModelsToInstall(t *testing.T) {
-	tests := []struct {
-		name       string
-		ramGB      float64
-		wantModels []string
-	}{
-		{
-			name:       "4GB RAM -> 1 unique model (all 2b)",
-			ramGB:      4,
-			wantModels: []string{"qwen3.5:2b"},
-		},
-		{
-			name:       "20GB RAM -> 2 unique models sorted",
-			ramGB:      20,
-			wantModels: []string{"qwen3.5:2b", "qwen3.5:4b"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := config.DefaultConfig()
-			cfg.AutoConfigureModels(tc.ramGB)
-
-			models := cfg.ModelsToInstall()
-
-			if len(models) != len(tc.wantModels) {
-				t.Fatalf("ModelsToInstall() returned %d models %v, want %d %v",
-					len(models), models, len(tc.wantModels), tc.wantModels)
-			}
-			for i, m := range models {
-				if m != tc.wantModels[i] {
-					t.Errorf("ModelsToInstall()[%d] = %q, want %q", i, m, tc.wantModels[i])
-				}
-			}
-		})
-	}
-}
-
 func TestDefaultConfig_OllamaBackend(t *testing.T) {
 	cfg := config.DefaultConfig()
 

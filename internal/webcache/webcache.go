@@ -175,12 +175,6 @@ func (c *Cache) InvalidatePackage(importPath, oldVersion string) {
 	_ = c.store.DeleteWebCachePrefix(prefix)
 }
 
-// PruneExpired removes URL cache entries past their TTL.
-// Version-pinned package docs (TTL=0) are never removed by this.
-func (c *Cache) PruneExpired() error {
-	return c.store.PruneExpiredWebCache()
-}
-
 // ParseGoMod parses the go.mod file at projectPath and returns a map of
 // module import path → version for all direct and indirect dependencies.
 func ParseGoMod(projectPath string) (map[string]string, error) {

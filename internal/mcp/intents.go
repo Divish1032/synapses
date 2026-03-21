@@ -1028,38 +1028,27 @@ func (s *Server) handlePlanContext(
 		if desc == "" {
 			desc = target
 		}
-		type safetyRes struct {
-			ep  *store.Episode
-			err error
-		}
-		ch := make(chan safetyRes, 1)
-		go func() {
-			ep, err := s.store.CheckPlanSafety(desc, "")
-			ch <- safetyRes{ep, err}
-		}()
 		safetyCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		defer cancel()
-		select {
-		case r := <-ch:
-			if r.err == nil && r.ep != nil {
-				safetyStatus = "warnings"
-				result["safety_check"] = map[string]interface{}{
-					"status": "warning",
-					"match": map[string]interface{}{
-						"episode_id": r.ep.ID,
-						"decision":   r.ep.Decision,
-						"outcome":    r.ep.Outcome,
-						"rationale":  r.ep.Rationale,
-					},
-					"message": fmt.Sprintf("⚠ Past failure match: %q (outcome: %s). Review rationale before proceeding.", r.ep.Decision, r.ep.Outcome),
-				}
-			} else {
-				safetyStatus = "clear"
-				result["safety_check"] = map[string]interface{}{"status": "clear"}
+		ep, safetyErr := s.store.CheckPlanSafetyCtx(safetyCtx, desc, "")
+		cancel()
+		if safetyErr == nil && ep != nil {
+			safetyStatus = "warnings"
+			result["safety_check"] = map[string]interface{}{
+				"status": "warning",
+				"match": map[string]interface{}{
+					"episode_id": ep.ID,
+					"decision":   ep.Decision,
+					"outcome":    ep.Outcome,
+					"rationale":  ep.Rationale,
+				},
+				"message": fmt.Sprintf("⚠ Past failure match: %q (outcome: %s). Review rationale before proceeding.", ep.Decision, ep.Outcome),
 			}
-		case <-safetyCtx.Done():
+		} else if safetyCtx.Err() != nil {
 			safetyStatus = "clear"
 			result["safety_check"] = map[string]interface{}{"status": "clear", "note": "timed out (>500ms)"}
+		} else {
+			safetyStatus = "clear"
+			result["safety_check"] = map[string]interface{}{"status": "clear"}
 		}
 	}
 

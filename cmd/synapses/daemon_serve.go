@@ -662,6 +662,152 @@ func cmdDaemonServe(args []string) error {
 		}
 	})
 
+	// Admin: pulse — per-tool stats (P4-1 / Task P4-1)
+	mux.HandleFunc("/api/admin/pulse/tools", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		days := 7
+		if d := r.URL.Query().Get("days"); d != "" {
+			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sharedPulse.GetToolStatsRaw(days))
+	})
+
+	// Admin: pulse — daily timeline (P4-1 / Task P4-1)
+	mux.HandleFunc("/api/admin/pulse/timeline", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		days := 14
+		if d := r.URL.Query().Get("days"); d != "" {
+			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sharedPulse.GetTimelineRaw(days))
+	})
+
+	// Admin: pulse — brain LLM cost stats (P4-1 / Task P4-1)
+	mux.HandleFunc("/api/admin/pulse/brain", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		days := 7
+		if d := r.URL.Query().Get("days"); d != "" {
+			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sharedPulse.GetBrainCostStats(days))
+	})
+
+	// Admin: pulse — graph snapshot (P4-7)
+	mux.HandleFunc("/api/admin/pulse/graph", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sharedPulse.GetLatestGraphSnapshot())
+	})
+
+	// Admin: pulse — search analytics (P4-8)
+	mux.HandleFunc("/api/admin/pulse/search", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		days := 7
+		if d := r.URL.Query().Get("days"); d != "" {
+			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sharedPulse.GetSearchStats(days))
+	})
+
+	// Admin: pulse — per-tool timeline (Bug 54)
+	// GET /api/admin/pulse/tools/{name}/timeline?days=N
+	mux.HandleFunc("/api/admin/pulse/tools/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// Path: /api/admin/pulse/tools/{name}/timeline
+		path := strings.TrimPrefix(r.URL.Path, "/api/admin/pulse/tools/")
+		parts := strings.SplitN(path, "/", 2)
+		if len(parts) != 2 || parts[1] != "timeline" {
+			http.NotFound(w, r)
+			return
+		}
+		toolName := parts[0]
+		if toolName == "" {
+			http.Error(w, "missing tool name", http.StatusBadRequest)
+			return
+		}
+		days := 14
+		if d := r.URL.Query().Get("days"); d != "" {
+			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sharedPulse.GetToolTimeline(toolName, days))
+	})
+
+	// Admin: pulse — session detail (Bug 55)
+	// GET /api/admin/pulse/sessions/{id}
+	mux.HandleFunc("/api/admin/pulse/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		sessionID := strings.TrimPrefix(r.URL.Path, "/api/admin/pulse/sessions/")
+		if sessionID == "" {
+			http.Error(w, "missing session id", http.StatusBadRequest)
+			return
+		}
+		detail := sharedPulse.GetSessionDetail(sessionID)
+		if detail == nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(detail)
+	})
+
+	// Admin: pulse — raw data export (Bug 56)
+	// GET /api/admin/pulse/export?days=N
+	mux.HandleFunc("/api/admin/pulse/export", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		days := 7
+		if d := r.URL.Query().Get("days"); d != "" {
+			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		data := sharedPulse.ExportRawData(days)
+		if data == nil {
+			http.Error(w, "export failed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(data)
+	})
+
 	// MCP: route to per-project StreamableHTTPServer
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
 		projectPath := r.URL.Query().Get("project")
@@ -1134,6 +1280,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	// Memory embeddings (recall vector search).
 	memEmbedder := createMemoryEmbedder(cfg)
 	if memEmbedder != nil {
+		defer memEmbedder.Close()
 		srv.SetMemoryEmbedder(memEmbedder)
 		go embedAllMemories(projCtx, memEmbedder, st, sharedPulse)
 	}

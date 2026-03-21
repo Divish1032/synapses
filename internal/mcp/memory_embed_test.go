@@ -27,6 +27,7 @@ func (e *testEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
 }
 
 func (e *testEmbedder) Model() string { return e.model }
+func (e *testEmbedder) Close() error  { return nil }
 
 // compile-time check
 var _ embed.Embedder = (*testEmbedder)(nil)
@@ -70,7 +71,7 @@ func TestEmbedMemory_StoresEmbedding(t *testing.T) {
 	s.embedMemory(e, st, mid, "auth service uses JWT")
 
 	assert.Equal(t, int32(1), e.callCount.Load())
-	assert.Equal(t, 1, st.MemoryEmbeddingCount())
+	assert.NotNil(t, st.GetMemoryEmbedding(mid), "embedding should be stored")
 }
 
 func TestEmbedMemory_EmbedError_NoStoreWrite(t *testing.T) {
@@ -87,7 +88,7 @@ func TestEmbedMemory_EmbedError_NoStoreWrite(t *testing.T) {
 	s.embedMemory(e, st, "mem1", "content")
 
 	assert.Equal(t, int32(1), e.callCount.Load())
-	assert.Equal(t, 0, st.MemoryEmbeddingCount())
+	assert.Nil(t, st.GetMemoryEmbedding("mem1"), "no embedding should be stored on error")
 }
 
 func TestEmbedAllMemories_EmbedsUnembeddedMemories(t *testing.T) {
@@ -118,7 +119,9 @@ func TestEmbedAllMemories_EmbedsUnembeddedMemories(t *testing.T) {
 	EmbedAllMemories(ctx, e, st, nil)
 
 	assert.Equal(t, int32(3), e.callCount.Load())
-	assert.Equal(t, 3, st.MemoryEmbeddingCount())
+	missing, err := st.GetMemoriesWithoutEmbeddings(100)
+	require.NoError(t, err)
+	assert.Empty(t, missing, "all 3 memories should have embeddings")
 }
 
 func TestEmbedAllMemories_NilEmbedder(t *testing.T) {
@@ -200,5 +203,7 @@ func TestEmbedAllMemories_SkipsAlreadyEmbedded(t *testing.T) {
 
 	// Only the un-embedded memory should be processed.
 	assert.Equal(t, int32(1), e.callCount.Load())
-	assert.Equal(t, 2, st.MemoryEmbeddingCount())
+	missing, err := st.GetMemoriesWithoutEmbeddings(100)
+	require.NoError(t, err)
+	assert.Empty(t, missing, "all memories should have embeddings after EmbedAllMemories")
 }

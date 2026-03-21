@@ -200,16 +200,6 @@ func seedLegacyData(t *testing.T, dbPath string) map[string]int {
 		VALUES ('gap-1', 'node-1', 'missing-nil-check', 'No nil check on input', 'high', 'open', 'agent-1', '2026-03-01', '2026-03-01')`)
 	expected["quality_gaps"] = 1
 
-	// proposals
-	mustExec(t, db, `INSERT INTO proposals (id, agent_id, title, description, affected_nodes, status, vote_threshold, created_at, updated_at)
-		VALUES ('prop-1', 'agent-1', 'Refactor auth', 'Split auth into modules', '["node-1"]', 'open', 2, '2026-03-01', '2026-03-01')`)
-	expected["proposals"] = 1
-
-	// proposal_votes
-	mustExec(t, db, `INSERT INTO proposal_votes (proposal_id, agent_id, vote, rationale, created_at)
-		VALUES ('prop-1', 'agent-2', 'approve', 'looks good', '2026-03-02')`)
-	expected["proposal_votes"] = 1
-
 	// tool_calls
 	mustExec(t, db, `INSERT INTO tool_calls (tool_name, agent_id, session_id, entity, duration_ms, success, created_at)
 		VALUES ('get_context', 'agent-1', 'sess-1', 'AuthService', 42, 1, '2026-03-01')`)

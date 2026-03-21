@@ -28,6 +28,7 @@ type OutcomeSignalEvent = types.OutcomeSignalEvent
 type EntityEffectiveness = types.EntityEffectiveness
 type BrainUsageEvent = types.BrainUsageEvent
 type AgentLLMUsageEvent = types.AgentLLMUsageEvent
+
 // Phase 2 pipeline event types.
 type ParseEvent = types.ParseEvent
 type ReparseEvent = types.ReparseEvent
@@ -40,12 +41,20 @@ type GuardEvent = types.GuardEvent
 type MemoryOperationEvent = types.MemoryOperationEvent
 type ValidationEvent = types.ValidationEvent
 
+// Phase 4 event types.
+type SearchEvent = types.SearchEvent
+type ConfigReloadEvent = types.ConfigReloadEvent
+type PersistenceEvent = types.PersistenceEvent
+type EnrichmentEvent = types.EnrichmentEvent
+type RuleEvalEvent = types.RuleEvalEvent
+
 // Client is the in-process analytics collector. It replaces the HTTP sidecar.
 // Create with New; call Close when the daemon shuts down.
 type Client struct {
-	store *pulsestore.Store
-	coll  *collector.Collector
-	agg   *aggregator.Aggregator
+	store  *pulsestore.Store
+	coll   *collector.Collector
+	agg    *aggregator.Aggregator
+	dbPath string // retained for lifecycle event recording (Bug 64 — PIPE-E6)
 	// P2-5: background worker counters — incremented by server.goBackground.
 	bgEnqueued atomic.Int64
 	bgDropped  atomic.Int64
@@ -74,10 +83,11 @@ func New(dbPath string) (*Client, error) {
 	coll := collector.New(st, 1000, 500)
 	coll.Start()
 
-	agg := aggregator.New(st, 3600)
+	// Bug 27 — ROI-E7 / Bug 28 — ROI-E8: pass dbPath and drop-rate fn to aggregator.
+	agg := aggregator.NewWithOptions(st, 3600, dbPath, coll.DropRate)
 	agg.Start()
 
-	return &Client{store: st, coll: coll, agg: agg}, nil
+	return &Client{store: st, coll: coll, agg: agg, dbPath: dbPath}, nil
 }
 
 // NewClient is a backwards-compatible constructor for code that still calls
@@ -95,12 +105,17 @@ func NewClient(_ string, _ int) *Client {
 }
 
 // Close stops the collector (flushing remaining events) and closes the store.
+// Bug 64 — PIPE-E6: measures drain time and records a lifecycle event.
 func (c *Client) Close() {
 	if c == nil {
 		return
 	}
+	start := time.Now()
 	c.agg.Stop()
 	c.coll.Stop()
+	drainMs := float64(time.Since(start).Milliseconds())
+	// Record drain latency as a lifecycle event before closing the store.
+	_ = c.store.RecordLifecycleEvent("collector_drain", drainMs, "")
 	_ = c.store.Close()
 }
 
@@ -140,6 +155,15 @@ func (c *Client) RecordSessionEventWithID(sessionID, agentID, projectID, eventTy
 		return
 	}
 	c.coll.RecordSessionEvent(sessionID, agentID, projectID, eventType)
+}
+
+// RecordSessionEventFull enqueues a session lifecycle event with agent version
+// (Bug 16 — DQ-C.6). If sessionID is empty, the event is silently dropped.
+func (c *Client) RecordSessionEventFull(sessionID, agentID, projectID, eventType, agentVersion string) {
+	if c == nil || sessionID == "" {
+		return
+	}
+	c.coll.RecordSessionEventFull(sessionID, agentID, projectID, eventType, agentVersion)
 }
 
 // RecordOutcomeSignal enqueues an intent alignment outcome signal. Fire-and-forget.
@@ -251,6 +275,46 @@ func (c *Client) RecordValidationEvent(ev ValidationEvent) {
 	c.coll.RecordValidationEvent(ev)
 }
 
+// RecordSearchEvent enqueues a search or find_entity analytics event. Fire-and-forget (P4-8).
+func (c *Client) RecordSearchEvent(ev SearchEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordSearchEvent(ev)
+}
+
+// RecordConfigReload enqueues a configuration hot-reload event. Fire-and-forget (Bug 68 — COV-9).
+func (c *Client) RecordConfigReload(ev ConfigReloadEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordConfigReload(ev)
+}
+
+// RecordPersistenceEvent enqueues a store write duration/size event. Fire-and-forget (Bug 69 — COV-12).
+func (c *Client) RecordPersistenceEvent(ev PersistenceEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordPersistenceEvent(ev)
+}
+
+// RecordEnrichmentEvent enqueues a code enrichment pass outcome event. Fire-and-forget (Bug 70 — COV-Subsys).
+func (c *Client) RecordEnrichmentEvent(ev EnrichmentEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordEnrichmentEvent(ev)
+}
+
+// RecordRuleEvalEvent enqueues an architecture rule evaluation event. Fire-and-forget (Bug 71 — COV-Subsys).
+func (c *Client) RecordRuleEvalEvent(ev RuleEvalEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordRuleEvalEvent(ev)
+}
+
 // GetSummaryForProject returns aggregated analytics for the last N days filtered to projectID.
 // Returns a PulseSummary with only Summary populated (no per-tool/agent breakdowns).
 func (c *Client) GetSummaryForProject(days int, projectID string) *PulseSummary {
@@ -304,23 +368,6 @@ func (c *Client) RecordBackgroundWorkerPanic() {
 	c.bgPanics.Add(1)
 }
 
-// GetBackgroundWorkerStats returns enqueued, dropped, and panic counts (P2-5).
-func (c *Client) GetBackgroundWorkerStats() (enqueued, dropped, panics int64) {
-	if c == nil {
-		return 0, 0, 0
-	}
-	return c.bgEnqueued.Load(), c.bgDropped.Load(), c.bgPanics.Load()
-}
-
-// GetCollectorStats returns the collector's event-drop count and high-water mark (P2-17/P2-19).
-// Returns zeros if pulse is unavailable.
-func (c *Client) GetCollectorStats() (dropped, hwm int64) {
-	if c == nil {
-		return 0, 0
-	}
-	return c.coll.Dropped(), c.coll.HighWaterMark()
-}
-
 // FetchEffectiveness returns per-entity effectiveness scores from the local store.
 // Returns nil if no data is available or the store returns an error.
 func (c *Client) FetchEffectiveness(projectID string, minSignals int) []EntityEffectiveness {
@@ -344,6 +391,43 @@ type PulseSummary struct {
 	TopEntities []pulsestore.EntityCount     `json:"top_entities"`
 	Insights    []EntityEffectiveness        `json:"insights"`
 	LLMStats    []pulsestore.AgentLLMStats   `json:"llm_stats"`
+	RuleHits    []pulsestore.RuleHitStat     `json:"rule_hits"`
+	// Phase 4 analytics extensions.
+	TopEntitiesBySavings    []pulsestore.EntitySavings        `json:"top_entities_by_savings,omitempty"`
+	CostSavingsByModel      []pulsestore.ModelCostStat        `json:"cost_savings_by_model,omitempty"`
+	AgentTokenEfficiency    []pulsestore.AgentEfficiencyStat  `json:"agent_token_efficiency,omitempty"`
+	ContextReuseRate        float64                           `json:"context_reuse_rate,omitempty"`
+	EngagementScore         float64                           `json:"engagement_score,omitempty"`
+	OnboardingLatencyMs     float64                           `json:"onboarding_latency_ms,omitempty"`
+	MultiSessionCampaigns   int                               `json:"multi_session_campaigns,omitempty"`
+	AgentToolPreferences    []pulsestore.AgentToolPref        `json:"agent_tool_preferences,omitempty"`
+	AgentEfficiencyScores   []pulsestore.AgentEfficiency      `json:"agent_efficiency_scores,omitempty"`
+	ModelComparison         []pulsestore.ModelComparisonStat  `json:"model_comparison,omitempty"`
+	ErrorRecoveryPatterns   []pulsestore.ErrorRecovery        `json:"error_recovery_patterns,omitempty"`
+	ToolPairCorrelation     []pulsestore.ToolPairStat         `json:"tool_pair_correlation,omitempty"`
+	DiscoveryToolEffective  float64                           `json:"discovery_tool_effectiveness,omitempty"`
+	SkillExecutionStats     []pulsestore.SkillStat            `json:"skill_execution_stats,omitempty"`
+	MemoryTypeDistribution  map[string]int                    `json:"memory_type_distribution,omitempty"`
+	CancellationReasons     []pulsestore.CancellationStat     `json:"cancellation_reasons,omitempty"`
+	PlanComplexityVsOutcome []pulsestore.PlanComplexityStat   `json:"plan_complexity_vs_outcome,omitempty"`
+	BlockedTaskCount        int                               `json:"blocked_task_count,omitempty"`
+	MessageVolumeStats      *pulsestore.MessageVolumeStat     `json:"message_volume_stats,omitempty"`
+	CrossProjectQueryVolume int                               `json:"cross_project_query_volume,omitempty"`
+	ApprovalGateUsage       int                               `json:"approval_gate_usage,omitempty"`
+	ModelEfficiencyComparison []pulsestore.ModelEfficiency    `json:"model_efficiency_comparison,omitempty"`
+	ProjectEfficiencyComparison []pulsestore.ProjectEfficiency `json:"project_efficiency_comparison,omitempty"`
+	HypotheticalCostUSD     float64                           `json:"hypothetical_cost_usd,omitempty"`
+	WithSynapsesCostUSD     float64                           `json:"with_synapses_cost_usd,omitempty"`
+	LatencyP50Ms            float64                           `json:"latency_p50_ms,omitempty"`
+	LatencyP95Ms            float64                           `json:"latency_p95_ms,omitempty"`
+	LatencyP99Ms            float64                           `json:"latency_p99_ms,omitempty"`
+	ContextPrecision        float64                           `json:"context_precision,omitempty"`
+	ContextRecall           float64                           `json:"context_recall,omitempty"`
+	ContextF1               float64                           `json:"context_f1,omitempty"`
+	BrainCostStats          []pulsestore.BrainCostStat        `json:"brain_cost_stats,omitempty"`
+	SearchStats             *pulsestore.SearchStats           `json:"search_stats,omitempty"`
+	GraphSnapshot           *pulsestore.GraphSnapshotRow      `json:"graph_snapshot,omitempty"`
+	AvgTaskDurationMs       float64                           `json:"avg_task_duration_ms,omitempty"`
 }
 
 // GetSummary returns aggregated analytics for the last N days including per-tool,
@@ -368,12 +452,8 @@ func (c *Client) GetSummary(days int) *PulseSummary {
 	if err != nil {
 		agents = nil
 	}
-	// Always use 14 days for the timeline chart regardless of the summary period.
-	timelineDays := 14
-	if days > 14 {
-		timelineDays = days
-	}
-	timeline, err := c.store.GetTimeline(timelineDays)
+	// Bug 3 — STO-D.1.3: use the requested window directly instead of a forced minimum.
+	timeline, err := c.store.GetTimeline(days)
 	if err != nil {
 		timeline = nil
 	}
@@ -386,6 +466,32 @@ func (c *Client) GetSummary(days int) *PulseSummary {
 	if err != nil {
 		llmStats = nil
 	}
+	ruleHits, err := c.store.GetRuleHitDistribution(days, 20)
+	if err != nil {
+		ruleHits = nil
+	}
+
+	// Phase 4 analytics.
+	topEntitiesBySavings, _ := c.store.TopEntitiesBySavings(days, 10)
+	costByModel, _ := c.store.GetCostSavingsByModel(days)
+	agentTokenEff, _ := c.store.GetAgentTokenEfficiency(days)
+	agentToolPrefs, _ := c.store.GetAgentToolPreferences(days)
+	agentEffScores, _ := c.store.GetAgentEfficiencyScores(days)
+	modelCmp, _ := c.store.GetModelComparison(days)
+	errRecovery, _ := c.store.GetErrorRecoveryPatterns(days)
+	toolPairs, _ := c.store.GetToolPairCorrelation(days)
+	skillStats, _ := c.store.GetSkillExecutionStats(days)
+	memTypeDist, _ := c.store.GetMemoryTypeDistribution(days)
+	cancReasons, _ := c.store.GetCancellationReasons(days)
+	planCmplx, _ := c.store.GetPlanComplexityVsOutcome(days)
+	msgVol, _ := c.store.GetMessageVolumeStats(days)
+	modelEff, _ := c.store.GetModelEfficiencyComparison(days)
+	projectEff, _ := c.store.GetProjectEfficiencyComparison(days)
+	p50, p95, p99 := c.store.GetLatencyPercentiles(days)
+	brainCosts, _ := c.store.GetBrainCostStats(days)
+	searchStats, _ := c.store.GetSearchStats(days)
+	graphSnap, _ := c.store.GetLatestGraphSnapshot()
+
 	return &PulseSummary{
 		Days:        days,
 		Summary:     sum,
@@ -395,7 +501,50 @@ func (c *Client) GetSummary(days int) *PulseSummary {
 		TopEntities: topEntities,
 		Insights:    insights,
 		LLMStats:    llmStats,
+		RuleHits:    ruleHits,
+		// Phase 4.
+		TopEntitiesBySavings:        toEntitySavings(topEntitiesBySavings),
+		CostSavingsByModel:          costByModel,
+		AgentTokenEfficiency:        agentTokenEff,
+		ContextReuseRate:            c.store.GetContextReuseRate(days),
+		EngagementScore:             c.store.GetEngagementScore(days),
+		OnboardingLatencyMs:         c.store.GetOnboardingLatencyMs(days),
+		MultiSessionCampaigns:       c.store.GetMultiSessionCampaigns(days),
+		AgentToolPreferences:        agentToolPrefs,
+		AgentEfficiencyScores:       agentEffScores,
+		ModelComparison:             modelCmp,
+		ErrorRecoveryPatterns:       errRecovery,
+		ToolPairCorrelation:         toolPairs,
+		DiscoveryToolEffective:      c.store.GetDiscoveryToolEffectiveness(days),
+		SkillExecutionStats:         skillStats,
+		MemoryTypeDistribution:      memTypeDist,
+		CancellationReasons:         cancReasons,
+		PlanComplexityVsOutcome:     planCmplx,
+		BlockedTaskCount:            c.store.GetBlockedTaskCount(days),
+		MessageVolumeStats:          msgVol,
+		CrossProjectQueryVolume:     c.store.GetCrossProjectQueryVolume(days),
+		ApprovalGateUsage:           c.store.GetApprovalGateUsage(days),
+		ModelEfficiencyComparison:   modelEff,
+		ProjectEfficiencyComparison: projectEff,
+		HypotheticalCostUSD:         c.store.GetHypotheticalCostUSD(days),
+		WithSynapsesCostUSD:         c.store.GetWithSynapsesCostUSD(days),
+		LatencyP50Ms:                p50,
+		LatencyP95Ms:                p95,
+		LatencyP99Ms:                p99,
+		ContextPrecision:            c.store.GetContextPrecision(days),
+		ContextRecall:               c.store.GetContextRecall(days),
+		ContextF1:                   c.store.GetContextF1(days),
+		BrainCostStats:              brainCosts,
+		SearchStats:                 searchStats,
+		GraphSnapshot:               graphSnap,
+		AvgTaskDurationMs:           c.store.GetAvgTaskDuration(days),
 	}
+}
+
+// toEntitySavings is a nil-safe pass-through (the types are identical; this
+// ensures the nil slice becomes nil rather than an empty slice).
+func toEntitySavings(in []pulsestore.EntitySavings) []pulsestore.EntitySavings {
+	return in
 }
 
 // GetLifetimeSummary returns aggregated analytics across all time.
@@ -428,4 +577,127 @@ func (c *Client) GetFirstContextRightRate(days int) float64 {
 		return 1.0
 	}
 	return rate
+}
+
+// GetToolTimeline returns per-tool call counts across daily data points (Bug 54).
+func (c *Client) GetToolTimeline(toolName string, days int) []pulsestore.ToolTimelinePoint {
+	if c == nil {
+		return nil
+	}
+	if days <= 0 {
+		days = 7
+	}
+	pts, err := c.store.GetToolTimeline(toolName, days)
+	if err != nil {
+		return nil
+	}
+	return pts
+}
+
+// GetSessionDetail returns full analytics detail for a specific session (Bug 55).
+func (c *Client) GetSessionDetail(sessionID string) *pulsestore.SessionDetail {
+	if c == nil || sessionID == "" {
+		return nil
+	}
+	detail, err := c.store.GetSessionDetail(sessionID)
+	if err != nil {
+		return nil
+	}
+	return detail
+}
+
+// ExportRawData returns a raw data export for the last N days (Bug 56).
+func (c *Client) ExportRawData(days int) *pulsestore.ExportData {
+	if c == nil {
+		return nil
+	}
+	if days <= 0 {
+		days = 7
+	}
+	data, err := c.store.ExportRawData(days)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+// GetLatestGraphSnapshot returns the most recent graph topology snapshot (P4-7).
+func (c *Client) GetLatestGraphSnapshot() *pulsestore.GraphSnapshotRow {
+	if c == nil {
+		return nil
+	}
+	snap, err := c.store.GetLatestGraphSnapshot()
+	if err != nil {
+		return nil
+	}
+	return snap
+}
+
+// GetSearchStats returns aggregated search analytics for the last N days (P4-8).
+func (c *Client) GetSearchStats(days int) *pulsestore.SearchStats {
+	if c == nil {
+		return nil
+	}
+	if days <= 0 {
+		days = 7
+	}
+	stats, err := c.store.GetSearchStats(days)
+	if err != nil {
+		return nil
+	}
+	return stats
+}
+
+// GetBrainCostStats returns per-model brain LLM cost breakdown (P4-1).
+func (c *Client) GetBrainCostStats(days int) []pulsestore.BrainCostStat {
+	if c == nil {
+		return nil
+	}
+	if days <= 0 {
+		days = 7
+	}
+	stats, err := c.store.GetBrainCostStats(days)
+	if err != nil {
+		return nil
+	}
+	return stats
+}
+
+// GetToolStatsRaw returns raw per-tool stats for the last N days (P4-1).
+func (c *Client) GetToolStatsRaw(days int) []pulsestore.ToolStats {
+	if c == nil {
+		return nil
+	}
+	if days <= 0 {
+		days = 7
+	}
+	stats, err := c.store.GetToolStats(days)
+	if err != nil {
+		return nil
+	}
+	return stats
+}
+
+// GetTimelineRaw returns the daily timeline for the last N days (P4-1).
+func (c *Client) GetTimelineRaw(days int) []pulsestore.TimelinePoint {
+	if c == nil {
+		return nil
+	}
+	if days <= 0 {
+		days = 7
+	}
+	pts, err := c.store.GetTimeline(days)
+	if err != nil {
+		return nil
+	}
+	return pts
+}
+
+// RecordLifecycleEvent records a daemon lifecycle event (startup, shutdown, drain).
+// Fire-and-forget; errors are silently discarded.
+func (c *Client) RecordLifecycleEvent(eventType string, valueMs float64, projectID string) {
+	if c == nil {
+		return
+	}
+	_ = c.store.RecordLifecycleEvent(eventType, valueMs, projectID)
 }

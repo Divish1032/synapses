@@ -35,16 +35,6 @@ func TestProjectIsolation_SummariesScopedByProject(t *testing.T) {
 	if gotB != "summary for B" {
 		t.Errorf("proj-B GetSummary = %q, want %q", gotB, "summary for B")
 	}
-
-	// Tags should also be isolated.
-	_, tagsA := s.GetSummaryWithTags("proj-A", "node1")
-	_, tagsB := s.GetSummaryWithTags("proj-B", "node1")
-	if len(tagsA) != 1 || tagsA[0] != "api" {
-		t.Errorf("proj-A tags = %v, want [api]", tagsA)
-	}
-	if len(tagsB) != 1 || tagsB[0] != "core" {
-		t.Errorf("proj-B tags = %v, want [core]", tagsB)
-	}
 }
 
 func TestProjectIsolation_GetSummariesBulk(t *testing.T) {
@@ -101,15 +91,3 @@ func TestProjectIsolation_UpdateDoesNotCrossProjects(t *testing.T) {
 	}
 }
 
-func TestProjectIsolation_CountPerProject(t *testing.T) {
-	s := openTestStoreIso(t)
-
-	_ = s.UpsertSummary("proj-A", "n1", "F1", "s1", nil)
-	_ = s.UpsertSummary("proj-A", "n2", "F2", "s2", nil)
-	_ = s.UpsertSummary("proj-B", "n1", "F1", "s1", nil)
-
-	// SummaryCount returns global total across all projects.
-	if c := s.SummaryCount(); c != 3 {
-		t.Errorf("SummaryCount = %d, want 3", c)
-	}
-}

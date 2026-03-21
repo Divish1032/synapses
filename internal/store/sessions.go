@@ -5,26 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-)
 
-// AgentSession tracks the lifecycle of a single agent session.
-// Created on session_init(); heartbeat updated on every tool call;
-// closed cleanly on end_session() or marked stale after 30 min of inactivity.
-type AgentSession struct {
-	ID               string
-	AgentID          string
-	ProjectID        string
-	Intent           string
-	State            string     // "active" | "hibernated" | "closed"
-	ParentSessionID  string     // ID of prior session on cross-connection resume; "" = first
-	StartedAt        time.Time
-	LastSeenAt       time.Time
-	EndedAt          *time.Time // nil = still active
-	EndReason        string     // "clean" | "timeout" | "reconciled" | "superseded" | ""
-	Outcome          string     // "success" | "failure" | "partial" | "unknown"
-	Summary          string
-	ToolCalls        int
-}
+	"github.com/SynapsesOS/synapses/internal/logutil"
+)
 
 // HibernateResumeContext carries prior session information surfaced when a
 // cross-connection resume occurs (agent restarts editor and calls session_init).
@@ -196,11 +179,13 @@ func (s *Store) GetOrResumeSession(agentID, projectID, mcpSessionID, intent stri
 
 	if queryErr == nil && existing != "" {
 		// Resume: refresh heartbeat and ensure state is active.
-		_, _ = tx.Exec(
+		if _, err := tx.Exec(
 			`UPDATE sessions SET last_seen_at = ?, state = 'active' WHERE id = ?`,
-			now, existing)
-		err = tx.Commit()
-		if err != nil {
+			now, existing); err != nil {
+			_ = tx.Rollback()
+			return "", false, nil, fmt.Errorf("resume heartbeat update: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
 			return "", false, nil, fmt.Errorf("commit resume: %w", err)
 		}
 		return existing, true, nil, nil
@@ -225,14 +210,17 @@ func (s *Store) GetOrResumeSession(agentID, projectID, mcpSessionID, intent stri
 		// Phase 2 time predicates and be stolen — even though the editor is
 		// still open. Marking it 'hibernated' here (atomically, under the write
 		// lock) ensures Phase 2 can safely filter on state = 'hibernated'.
-		_, _ = tx.Exec(`
+		if _, err := tx.Exec(`
 			UPDATE sessions SET state = 'hibernated'
 			WHERE agent_id   = ?
 			  AND project_id = ?
 			  AND state      = 'active'
 			  AND ended_at   IS NULL
 			  AND last_seen_at < ?`,
-			agentID, projectID, cutoff)
+			agentID, projectID, cutoff); err != nil {
+			_ = tx.Rollback()
+			return "", false, nil, fmt.Errorf("promote idle sessions to hibernated: %w", err)
+		}
 
 		var priorID, priorIntent, priorSummary string
 		var priorToolCalls int
@@ -292,21 +280,27 @@ func (s *Store) GetOrResumeSession(agentID, projectID, mcpSessionID, intent stri
 	// Scope to mcp_session_id so we only close sessions from THIS physical
 	// connection's prior runs. Sessions from other concurrent connections
 	// (different mcp_session_id) are live and must not be touched.
-	_, _ = tx.Exec(`
+	if _, err := tx.Exec(`
 		UPDATE sessions
 		SET ended_at = ?, end_reason = 'superseded', outcome = 'unknown', state = 'closed'
 		WHERE agent_id = ? AND project_id = ? AND mcp_session_id = ? AND ended_at IS NULL`,
-		now, agentID, projectID, mcpSessionID)
+		now, agentID, projectID, mcpSessionID); err != nil {
+		_ = tx.Rollback()
+		return "", false, nil, fmt.Errorf("supersede prior sessions: %w", err)
+	}
 
 	// ── Phase 4: Create fresh session ──────────────────────────────────────
 	// Find the most recent closed session for this (agent_id, project_id) to
 	// set as parent, giving a traceable ancestry chain across restarts.
 	var parentID string
-	_ = tx.QueryRow(`
+	// Best-effort parent lookup — sql.ErrNoRows is expected for brand-new agents.
+	if err := tx.QueryRow(`
 		SELECT id FROM sessions
 		WHERE agent_id = ? AND project_id = ? AND ended_at IS NOT NULL
 		ORDER BY ended_at DESC
-		LIMIT 1`, agentID, projectID).Scan(&parentID)
+		LIMIT 1`, agentID, projectID).Scan(&parentID); err != nil && err != sql.ErrNoRows {
+		logutil.Warn("synapses: store: parent session lookup: %v\n", err)
+	}
 
 	sessionID = newID()
 	_, err = tx.Exec(

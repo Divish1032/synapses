@@ -97,8 +97,3 @@ func (p *SecurityPolicy) Check(skillID string, origin TrustOrigin, required []st
 	return nil
 }
 
-// Granted returns true if the given origin has the given permission under this policy.
-// Useful for inspection/testing without constructing a full required list.
-func (p *SecurityPolicy) Granted(origin TrustOrigin, perm Permission) bool {
-	return p.grants[origin][perm]
-}

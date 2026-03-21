@@ -202,16 +202,6 @@ func TestInvalidatePackage(t *testing.T) {
 	}
 }
 
-func TestPruneExpired(t *testing.T) {
-	s := testStore(t)
-	c := New(s)
-
-	err := c.PruneExpired()
-	if err != nil {
-		t.Fatalf("PruneExpired: %v", err)
-	}
-}
-
 func TestParseGoMod(t *testing.T) {
 	dir := t.TempDir()
 	gomod := `module example.com/myproject

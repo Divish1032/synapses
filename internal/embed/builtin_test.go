@@ -19,12 +19,6 @@ func TestBuiltinEmbedder_NewAndModel(t *testing.T) {
 	assert.Equal(t, "all-MiniLM-L6-v2", e.Model())
 }
 
-func TestBuiltinEmbedder_IsReady_InitiallyFalse(t *testing.T) {
-	e := embed.NewBuiltinEmbedder(t.TempDir())
-	t.Cleanup(func() { _ = e.Close() })
-	assert.False(t, e.IsReady(), "embedder should not be ready before first Embed call")
-}
-
 func TestBuiltinEmbedder_StatusDetail_BeforeInit(t *testing.T) {
 	e := embed.NewBuiltinEmbedder(t.TempDir())
 	t.Cleanup(func() { _ = e.Close() })
@@ -35,7 +29,6 @@ func TestBuiltinEmbedder_CloseBeforeInit(t *testing.T) {
 	e := embed.NewBuiltinEmbedder(t.TempDir())
 	err := e.Close()
 	assert.NoError(t, err, "Close() on un-initialized embedder should succeed")
-	assert.False(t, e.IsReady())
 }
 
 func TestBuiltinEmbedder_CloseIdempotent(t *testing.T) {

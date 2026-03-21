@@ -3,11 +3,12 @@
 package aggregator
 
 import (
-	"log"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	pulsestore "github.com/SynapsesOS/synapses/internal/pulse/pstore"
 )
 
@@ -19,6 +20,10 @@ type Aggregator struct {
 	wg           sync.WaitGroup
 	// P2-20: track last vacuum time so it runs at most once per day.
 	lastVacuumDay atomic.Value // stores string "YYYY-MM-DD"
+	// Bug 27 — ROI-E7: DB file path for size metric.
+	dbPath string
+	// Bug 28 — ROI-E8: optional function to read the collector drop rate.
+	collDropRate func() float64
 }
 
 // New creates an Aggregator that rolls up at the given interval.
@@ -31,6 +36,16 @@ func New(st *pulsestore.Store, intervalSec int) *Aggregator {
 		interval: time.Duration(intervalSec) * time.Second,
 		stopCh:   make(chan struct{}),
 	}
+}
+
+// NewWithOptions creates an Aggregator with extended options.
+// dbPath is used to measure DB file size (Bug 27 — ROI-E7).
+// collDropRate is an optional function returning the collector drop rate (Bug 28 — ROI-E8).
+func NewWithOptions(st *pulsestore.Store, intervalSec int, dbPath string, collDropRate func() float64) *Aggregator {
+	a := New(st, intervalSec)
+	a.dbPath = dbPath
+	a.collDropRate = collDropRate
+	return a
 }
 
 // Start begins the rollup loop. It runs an immediate rollup, then repeats
@@ -76,11 +91,42 @@ func (a *Aggregator) loop() {
 // backfill days (the value is point-in-time and cannot be reconstructed).
 // p3Metrics holds pre-computed P3 agent behavior counts for a single day.
 type p3Metrics struct {
-	guardCircuitBreaks  int
-	rateLimitRejections int
-	recallHits          int
-	recallMisses        int
+	// Phase 3 (existing)
+	guardCircuitBreaks   int
+	rateLimitRejections  int
+	recallHits           int
+	recallMisses         int
 	validationViolations int
+	// Phase 3B additions
+	errorCount            int
+	brainCostUSD          float64
+	agentLLMCostUSD       float64
+	truncatedDeliveries   int
+	bfsCacheHits          int
+	validatePlanCount     int
+	memoryWrites          int
+	safetyCheckHits       int
+	safetyCheckMisses     int
+	memoriesStaled        int
+	avgSessionDurationMs  float64
+	resumedSessions       int
+	workflowAdherenceRate float64
+	tasksPerHour          float64
+	avgTaskCompletionMs   float64
+	replanCount           int
+	// Bug 8 — DQ-G.5: session abandonment rate.
+	abandonmentRate float64
+	// Bug 23 — ROI-C5: token savings from Anthropic cache reads.
+	cacheTokenSavings int
+	// Bug 24 — ROI-C7: context freshness score (0.0–1.0).
+	contextFreshnessScore float64
+	// Bug 25 — ROI-D5: fraction of entities with memory coverage.
+	entityMemoryCoverage float64
+	// Bug 68 — COV-9: config reload count for the day.
+	configReloads int
+	// Bug 69 — COV-12: store persistence operation count and avg latency.
+	persistOps   int
+	avgPersistMs float64
 }
 
 func buildDayMetrics(sum *pulsestore.Summary, reparseCount int, reparseDurationMs float64, staleEmbeddings int, p3 p3Metrics) map[string]float64 {
@@ -116,6 +162,41 @@ func buildDayMetrics(sum *pulsestore.Summary, reparseCount int, reparseDurationM
 		"recall_hits":           float64(p3.recallHits),
 		"recall_misses":         float64(p3.recallMisses),
 		"validation_violations": float64(p3.validationViolations),
+		// Phase 3B: cost rollups
+		"error_count":        float64(p3.errorCount),
+		"brain_cost_usd":     p3.brainCostUSD,
+		"agent_llm_cost_usd": p3.agentLLMCostUSD,
+		// Phase 3B: context delivery quality
+		"truncated_deliveries": float64(p3.truncatedDeliveries),
+		"bfs_cache_hits":       float64(p3.bfsCacheHits),
+		// Phase 3B: validation workflow
+		"validate_plan_count": float64(p3.validatePlanCount),
+		// Phase 3B: memory health
+		"memory_writes":               float64(p3.memoryWrites),
+		"safety_check_hits":           float64(p3.safetyCheckHits),
+		"safety_check_misses":         float64(p3.safetyCheckMisses),
+		"memory_anchor_invalidations": float64(p3.memoriesStaled),
+		// Phase 3B: session analytics
+		"avg_session_duration_ms": p3.avgSessionDurationMs,
+		"resumed_sessions":        float64(p3.resumedSessions),
+		"workflow_adherence_rate": p3.workflowAdherenceRate,
+		// Phase 3B: task productivity
+		"tasks_per_hour":         p3.tasksPerHour,
+		"avg_task_completion_ms": p3.avgTaskCompletionMs,
+		"replan_count":           float64(p3.replanCount),
+		// Bug 8 — DQ-G.5: session abandonment rate.
+		"abandonment_rate": p3.abandonmentRate,
+		// Bug 23 — ROI-C5: Anthropic cache token savings.
+		"cache_token_savings": float64(p3.cacheTokenSavings),
+		// Bug 24 — ROI-C7: context freshness score.
+		"context_freshness_score": p3.contextFreshnessScore,
+		// Bug 25 — ROI-D5: entity memory coverage fraction.
+		"entity_memory_coverage": p3.entityMemoryCoverage,
+		// Bug 68 — COV-9: config reloads.
+		"config_reloads": float64(p3.configReloads),
+		// Bug 69 — COV-12: persistence metrics.
+		"persist_ops":    float64(p3.persistOps),
+		"avg_persist_ms": p3.avgPersistMs,
 	}
 }
 
@@ -130,7 +211,7 @@ func (a *Aggregator) rollup() {
 
 	sum, err := a.store.GetSummaryForDay(today)
 	if err != nil {
-		log.Printf("pulse aggregator: summary error: %v", err)
+		logutil.Warn("pulse aggregator: summary error: %v\n", err)
 		return
 	}
 
@@ -142,31 +223,80 @@ func (a *Aggregator) rollup() {
 	staleEmbeddings := a.store.CountStaleEmbeddings()
 
 	// P3: agent behavior counts for today.
+	truncatedDeliveries, _ := a.store.CountTruncatedDeliveries(today)
 	p3 := p3Metrics{
-		guardCircuitBreaks:   a.store.CountGuardEvents(today, "loop_circuit_break"),
-		rateLimitRejections:  a.store.CountGuardEvents(today, "rate_limit"),
-		recallHits:           a.store.CountMemoryOps(today, "recall_hit"),
-		recallMisses:         a.store.CountMemoryOps(today, "recall_miss"),
-		validationViolations: a.store.CountValidationViolations(today),
+		guardCircuitBreaks:    a.store.CountGuardEvents(today, "loop_circuit_break"),
+		rateLimitRejections:   a.store.CountGuardEvents(today, "rate_limit"),
+		recallHits:            a.store.CountMemoryOps(today, "recall_hit"),
+		recallMisses:          a.store.CountMemoryOps(today, "recall_miss"),
+		validationViolations:  a.store.CountValidationViolations(today),
+		errorCount:            a.store.CountToolErrors(today),
+		brainCostUSD:          a.store.SumBrainCostForDay(today),
+		agentLLMCostUSD:       a.store.SumAgentLLMCostForDay(today),
+		truncatedDeliveries:   truncatedDeliveries,
+		bfsCacheHits:          a.store.CountBFSCacheHitsForDay(today),
+		validatePlanCount:     a.store.CountValidationCalls(today, "validate_plan"),
+		memoryWrites:          a.store.CountMemoryOps(today, "write"),
+		safetyCheckHits:       a.store.CountMemoryOps(today, "safety_hit"),
+		safetyCheckMisses:     a.store.CountMemoryOps(today, "safety_miss"),
+		memoriesStaled:        a.store.SumMemoriesStaled(today),
+		avgSessionDurationMs:  a.store.AvgSessionDurationMs(today),
+		resumedSessions:       a.store.CountResumedSessions(today),
+		workflowAdherenceRate: a.store.GetWorkflowAdherenceRate(today),
+		tasksPerHour:          a.store.GetTasksPerHour(today),
+		avgTaskCompletionMs:   a.store.GetAvgTaskCompletionMs(today),
+		replanCount:           a.store.CountOutcomeSignals(today, "replan"),
+		// Bug 8 — DQ-G.5: session abandonment rate.
+		abandonmentRate: a.store.GetAbandonmentRate(today),
+		// Bug 23 — ROI-C5: Anthropic cache read token savings.
+		cacheTokenSavings: a.store.SumCacheTokenSavings(today),
+		// Bug 24 — ROI-C7: context freshness score.
+		contextFreshnessScore: a.store.GetContextFreshnessScore(today),
+		// Bug 25 — ROI-D5: entity memory coverage.
+		entityMemoryCoverage: a.store.GetEntityMemoryCoverage(today),
+		// Bug 68 — COV-9: config reloads.
+		configReloads: a.store.CountConfigReloads(today),
+		// Bug 69 — COV-12: persistence metrics.
+		persistOps:   a.store.CountPersistOps(today),
+		avgPersistMs: a.store.AvgPersistMs(today),
 	}
 
 	metrics := buildDayMetrics(sum, reparseCount, reparseDurationMs, staleEmbeddings, p3)
 
+	// Bug 26 — ROI-E6: embedding coverage (point-in-time, not in p3Metrics).
+	metrics["embedding_coverage_pct"] = a.store.GetEmbeddingCoveragePct()
+
+	// Bug 27 — ROI-E7: DB file size in bytes.
+	if a.dbPath != "" {
+		metrics["db_size_bytes"] = float64(a.store.DBSizeBytes(a.dbPath))
+	}
+
+	// Bug 28 — ROI-E8: collector drop rate (provided by caller).
+	if a.collDropRate != nil {
+		metrics["collector_drop_rate"] = a.collDropRate()
+	}
+
 	rollupOK := true
 	for metric, value := range metrics {
 		if err := a.store.UpsertDailyRollup(today, metric, value); err != nil {
-			log.Printf("pulse aggregator: upsert %s: %v", metric, err)
+			logutil.Warn("pulse aggregator: upsert %s: %v\n", metric, err)
 			rollupOK = false
 		}
 	}
+
+	// Bug 21 — DQ-G.2: per-project rollups for today.
+	a.rollupPerProject(today)
+
+	// Bug 22 — DQ-G.3: per-tool rollups for today.
+	a.rollupPerTool(today)
 
 	// Automatic pruning: remove events older than 90 days.
 	// Only prune if the rollup succeeded — otherwise raw data is still needed.
 	if rollupOK {
 		if deleted, err := a.store.PruneOldEvents(90); err != nil {
-			log.Printf("pulse aggregator: prune error: %v", err)
+			logutil.Warn("pulse aggregator: prune error: %v\n", err)
 		} else if deleted > 0 {
-			log.Printf("pulse aggregator: pruned %d old events", deleted)
+			logutil.Info("pulse aggregator: pruned %d old events\n", deleted)
 		}
 
 		// P2-20: run VACUUM at most once per day to reclaim space freed by DELETE.
@@ -174,10 +304,49 @@ func (a *Aggregator) rollup() {
 		lastVac, _ := a.lastVacuumDay.Load().(string)
 		if lastVac != today {
 			if err := a.store.Vacuum(); err != nil {
-				log.Printf("pulse aggregator: vacuum error: %v", err)
+				logutil.Warn("pulse aggregator: vacuum error: %v\n", err)
 			} else {
 				a.lastVacuumDay.Store(today)
 			}
+		}
+	}
+}
+
+// rollupPerProject writes per-project rollups for a given day (Bug 21 — DQ-G.2).
+// Each project gets its own daily_rollups rows keyed as "project:<id>:<metric>".
+func (a *Aggregator) rollupPerProject(day string) {
+	projects := a.store.GetProjectsForDay(day)
+	for _, projectID := range projects {
+		sum, err := a.store.GetSummaryForDayProject(day, projectID)
+		if err != nil || sum == nil {
+			continue
+		}
+		key := func(metric string) string {
+			return fmt.Sprintf("project:%s:%s", projectID, metric)
+		}
+		entries := map[string]float64{
+			key("tool_calls"):         float64(sum.TotalToolCalls),
+			key("context_deliveries"): float64(sum.ContextDeliveries),
+			key("tokens_saved"):       float64(sum.TokensSaved),
+			key("cost_saved_usd"):     sum.CostSavedUSD,
+			key("sessions"):           float64(sum.Sessions),
+		}
+		for metric, value := range entries {
+			if err := a.store.UpsertDailyRollup(day, metric, value); err != nil {
+				logutil.Warn("pulse aggregator: per-project upsert %s: %v\n", metric, err)
+			}
+		}
+	}
+}
+
+// rollupPerTool writes per-tool rollups for a given day (Bug 22 — DQ-G.3).
+// Each tool gets a daily_rollups row keyed as "tool:<name>:calls".
+func (a *Aggregator) rollupPerTool(day string) {
+	toolCounts := a.store.GetTopToolsForDay(day)
+	for toolName, count := range toolCounts {
+		metric := fmt.Sprintf("tool:%s:calls", toolName)
+		if err := a.store.UpsertDailyRollup(day, metric, float64(count)); err != nil {
+			logutil.Warn("pulse aggregator: per-tool upsert %s: %v\n", metric, err)
 		}
 	}
 }
@@ -199,30 +368,61 @@ func (a *Aggregator) backfillMissedDays(today string) {
 	for _, day := range gaps {
 		sum, err := a.store.GetSummaryForDay(day)
 		if err != nil {
-			log.Printf("pulse aggregator: backfill summary for %s: %v", day, err)
+			logutil.Warn("pulse aggregator: backfill summary for %s: %v\n", day, err)
 			continue
 		}
 		reparseCount, reparseDurationMs, _ := a.store.CountReparses(day)
 		// stale_embeddings and P3 counts are point-in-time; use 0 for historical
 		// backfill days since live counts cannot be reconstructed after the fact.
+		// Rate/average metrics use 0.0 for historical backfill — they can't be reconstructed.
+		backfillTruncated, _ := a.store.CountTruncatedDeliveries(day)
 		backfillP3 := p3Metrics{
-			guardCircuitBreaks:   a.store.CountGuardEvents(day, "loop_circuit_break"),
-			rateLimitRejections:  a.store.CountGuardEvents(day, "rate_limit"),
-			recallHits:           a.store.CountMemoryOps(day, "recall_hit"),
-			recallMisses:         a.store.CountMemoryOps(day, "recall_miss"),
-			validationViolations: a.store.CountValidationViolations(day),
+			guardCircuitBreaks:    a.store.CountGuardEvents(day, "loop_circuit_break"),
+			rateLimitRejections:   a.store.CountGuardEvents(day, "rate_limit"),
+			recallHits:            a.store.CountMemoryOps(day, "recall_hit"),
+			recallMisses:          a.store.CountMemoryOps(day, "recall_miss"),
+			validationViolations:  a.store.CountValidationViolations(day),
+			errorCount:            a.store.CountToolErrors(day),
+			brainCostUSD:          a.store.SumBrainCostForDay(day),
+			agentLLMCostUSD:       a.store.SumAgentLLMCostForDay(day),
+			truncatedDeliveries:   backfillTruncated,
+			bfsCacheHits:          a.store.CountBFSCacheHitsForDay(day),
+			validatePlanCount:     a.store.CountValidationCalls(day, "validate_plan"),
+			memoryWrites:          a.store.CountMemoryOps(day, "write"),
+			safetyCheckHits:       a.store.CountMemoryOps(day, "safety_hit"),
+			safetyCheckMisses:     a.store.CountMemoryOps(day, "safety_miss"),
+			memoriesStaled:        a.store.SumMemoriesStaled(day),
+			resumedSessions:       a.store.CountResumedSessions(day),
+			replanCount:           a.store.CountOutcomeSignals(day, "replan"),
+			// Bug 8 — DQ-G.5: abandonment rate from raw data.
+			abandonmentRate: a.store.GetAbandonmentRate(day),
+			// Bug 23 — ROI-C5: cache token savings from raw data.
+			cacheTokenSavings: a.store.SumCacheTokenSavings(day),
+			// Bug 68 — COV-9: config reloads from raw data.
+			configReloads: a.store.CountConfigReloads(day),
+			// Bug 69 — COV-12: persistence metrics from raw data.
+			persistOps:   a.store.CountPersistOps(day),
+			avgPersistMs: a.store.AvgPersistMs(day),
+			// Rate/average metrics: 0.0 for historical backfill (cannot be reconstructed).
+			avgSessionDurationMs:  0.0,
+			workflowAdherenceRate: 0.0,
+			tasksPerHour:          0.0,
+			avgTaskCompletionMs:   0.0,
+			// Bug 24 — ROI-C7: context freshness; 0.0 for backfill.
+			contextFreshnessScore: 0.0,
+			// Bug 25 — ROI-D5: entity memory coverage; 0.0 for backfill.
+			entityMemoryCoverage: 0.0,
 		}
 		metrics := buildDayMetrics(sum, reparseCount, reparseDurationMs, 0, backfillP3)
 		for metric, value := range metrics {
 			if err := a.store.UpsertDailyRollup(day, metric, value); err != nil {
-				log.Printf("pulse aggregator: backfill upsert %s for %s: %v", metric, day, err)
+				logutil.Warn("pulse aggregator: backfill upsert %s for %s: %v\n", metric, day, err)
 			}
 		}
-		log.Printf("pulse aggregator: backfilled rollup for %s", day)
+		// Bug 21/22: also backfill per-project and per-tool for missed days.
+		a.rollupPerProject(day)
+		a.rollupPerTool(day)
+		logutil.Info("pulse aggregator: backfilled rollup for %s\n", day)
 	}
 }
 
-// RollupNow triggers an immediate rollup (useful for CLI).
-func (a *Aggregator) RollupNow() {
-	a.rollup()
-}

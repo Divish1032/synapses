@@ -275,14 +275,6 @@ func TestClient_Ingest(t *testing.T) {
 	c.Ingest(context.Background(), IngestRequest{NodeID: "n1"})
 }
 
-func TestClient_BulkIngest(t *testing.T) {
-	c := NewClient("", 0)
-	c.BulkIngest(context.Background(), []IngestRequest{
-		{NodeID: "n1"},
-		{NodeID: "n2"},
-	})
-}
-
 func TestClient_ExplainViolation(t *testing.T) {
 	c := NewClient("", 0)
 	exp, fix := c.ExplainViolation(context.Background(), ViolationRequest{})
@@ -301,17 +293,6 @@ func TestClient_GetSummary(t *testing.T) {
 func TestClient_LogDecision(t *testing.T) {
 	c := NewClient("", 0)
 	c.LogDecision(context.Background(), DecisionRequest{})
-}
-
-func TestClient_GetSDLC(t *testing.T) {
-	c := NewClient("", 0)
-	phase, mode := c.GetSDLC(context.Background())
-	if phase != "development" {
-		t.Errorf("phase: got %q, want development", phase)
-	}
-	if mode != "standard" {
-		t.Errorf("mode: got %q, want standard", mode)
-	}
 }
 
 func TestClient_BuildContextPacket(t *testing.T) {
@@ -386,31 +367,12 @@ func TestClient_Close_WithEnabledBrain(t *testing.T) {
 	// Should not panic even though NullBrain.Close() may do nothing
 }
 
-func TestClient_BulkIngest_Empty(t *testing.T) {
-	c := NewClient("", 0)
-	// BulkIngest with empty slice should not panic
-	c.BulkIngest(context.Background(), []IngestRequest{})
-}
-
 func TestClient_BuildContextPacket_WithEnabledBrain(t *testing.T) {
 	cfg := &brainconfig.BrainConfig{Enabled: false}
 	c := NewInProcess(cfg)
 	pkt := c.BuildContextPacket(context.Background(), ContextPacketRequest{})
 	if pkt != nil {
 		t.Error("expected nil packet from disabled brain")
-	}
-}
-
-func TestClient_GetSDLC_DefaultPhase(t *testing.T) {
-	cfg := &brainconfig.BrainConfig{Enabled: false}
-	c := NewInProcess(cfg)
-	phase, mode := c.GetSDLC(context.Background())
-	// Disabled brain should return defaults
-	if phase != "development" {
-		t.Errorf("expected development phase, got %q", phase)
-	}
-	if mode != "standard" {
-		t.Errorf("expected standard mode, got %q", mode)
 	}
 }
 

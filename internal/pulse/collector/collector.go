@@ -5,11 +5,11 @@
 package collector
 
 import (
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	pulsestore "github.com/SynapsesOS/synapses/internal/pulse/pstore"
 	pulsetypes "github.com/SynapsesOS/synapses/internal/pulse/types"
 )
@@ -18,16 +18,18 @@ import (
 type event struct {
 	kind string // "tool_call", "context_delivery", "brain_usage", "session", "session_model", "agent_llm_usage",
 	// "parse_event", "reparse_event", "graph_snapshot", "embedding_event", "index_event",
-	// "guard_event", "memory_op", "validation_event"
+	// "guard_event", "memory_op", "validation_event", "search_event",
+	// "config_reload", "persistence_event", "enrichment_event", "rule_eval_event"
 	data interface{}
 }
 
 // sessionPayload wraps a session event with its ID.
 type sessionPayload struct {
-	ID        string
-	AgentID   string
-	ProjectID string
-	Event     string
+	ID           string
+	AgentID      string
+	ProjectID    string
+	Event        string
+	AgentVersion string // Bug 16 — DQ-C.6
 }
 
 // sessionModelPayload carries the model/provider for Option A (session_init reports model).
@@ -105,6 +107,13 @@ func (c *Collector) RecordSessionEvent(id, agentID, projectID, eventType string)
 	}})
 }
 
+// RecordSessionEventFull enqueues a session lifecycle event with agent version (Bug 16 — DQ-C.6).
+func (c *Collector) RecordSessionEventFull(id, agentID, projectID, eventType, agentVersion string) {
+	c.enqueue(event{kind: "session", data: sessionPayload{
+		ID: id, AgentID: agentID, ProjectID: projectID, Event: eventType, AgentVersion: agentVersion,
+	}})
+}
+
 // RecordOutcomeSignal enqueues an intent alignment outcome signal (R29).
 func (c *Collector) RecordOutcomeSignal(ev pulsetypes.OutcomeSignalEvent) {
 	c.enqueue(event{kind: "outcome_signal", data: ev})
@@ -164,6 +173,31 @@ func (c *Collector) RecordValidationEvent(ev pulsetypes.ValidationEvent) {
 	c.enqueue(event{kind: "validation_event", data: ev})
 }
 
+// RecordSearchEvent enqueues a search or find_entity analytics event (P4-8).
+func (c *Collector) RecordSearchEvent(ev pulsetypes.SearchEvent) {
+	c.enqueue(event{kind: "search_event", data: ev})
+}
+
+// RecordConfigReload enqueues a configuration hot-reload event (Bug 68 — COV-9).
+func (c *Collector) RecordConfigReload(ev pulsetypes.ConfigReloadEvent) {
+	c.enqueue(event{kind: "config_reload", data: ev})
+}
+
+// RecordPersistenceEvent enqueues a store write duration/size event (Bug 69 — COV-12).
+func (c *Collector) RecordPersistenceEvent(ev pulsetypes.PersistenceEvent) {
+	c.enqueue(event{kind: "persistence_event", data: ev})
+}
+
+// RecordEnrichmentEvent enqueues a code enrichment pass outcome event (Bug 70 — COV-Subsys).
+func (c *Collector) RecordEnrichmentEvent(ev pulsetypes.EnrichmentEvent) {
+	c.enqueue(event{kind: "enrichment_event", data: ev})
+}
+
+// RecordRuleEvalEvent enqueues an architecture rule evaluation event (Bug 71 — COV-Subsys).
+func (c *Collector) RecordRuleEvalEvent(ev pulsetypes.RuleEvalEvent) {
+	c.enqueue(event{kind: "rule_eval_event", data: ev})
+}
+
 // Dropped returns the number of events dropped due to buffer overflow (P2-19).
 func (c *Collector) Dropped() int64 {
 	return c.dropped.Load()
@@ -172,6 +206,22 @@ func (c *Collector) Dropped() int64 {
 // HighWaterMark returns the peak buffer depth since the collector started (P2-17).
 func (c *Collector) HighWaterMark() int64 {
 	return c.highWaterMark.Load()
+}
+
+// DropRate returns the fraction of enqueued events that were dropped (Bug 28 — ROI-E8).
+// Returns 0.0 if no events have been dropped or the high-water mark is zero.
+func (c *Collector) DropRate() float64 {
+	hwm := c.highWaterMark.Load()
+	if hwm <= 0 {
+		return 0.0
+	}
+	dropped := c.dropped.Load()
+	if dropped <= 0 {
+		return 0.0
+	}
+	// Approximate: dropped / (dropped + hwm) gives a conservative rate.
+	total := dropped + hwm
+	return float64(dropped) / float64(total)
 }
 
 func (c *Collector) enqueue(ev event) {
@@ -195,7 +245,11 @@ func (c *Collector) enqueue(ev event) {
 	if len(c.buf) >= c.cap*80/100 {
 		batch := c.drainLocked()
 		c.mu.Unlock()
-		go c.writeBatch(batch)
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.writeBatch(batch)
+		}()
 		return
 	}
 	c.mu.Unlock()
@@ -240,7 +294,7 @@ func (c *Collector) writeBatch(batch []event) {
 	// Wrap the entire batch in a single transaction (1 fsync instead of N).
 	commit, txErr := c.store.BeginBatch()
 	if txErr != nil {
-		log.Printf("pulse collector: begin batch tx: %v", txErr)
+		logutil.Warn("pulse collector: begin batch tx: %v\n", txErr)
 		// Fall back to non-transactional writes.
 		c.writeBatchNoTx(batch)
 		return
@@ -251,11 +305,11 @@ func (c *Collector) writeBatch(batch []event) {
 	ok := true
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("pulse collector: panic in writeBatch: %v", r)
+			logutil.Warn("pulse collector: panic in writeBatch: %v\n", r)
 			ok = false
 		}
 		if err := commit(ok); err != nil {
-			log.Printf("pulse collector: commit/rollback error: %v", err)
+			logutil.Warn("pulse collector: commit/rollback error: %v\n", err)
 			if ok {
 				// Commit failed — fall back to individual writes.
 				c.writeBatchNoTx(batch)
@@ -265,7 +319,7 @@ func (c *Collector) writeBatch(batch []event) {
 
 	for _, ev := range batch {
 		if err := c.dispatchTx(ev); err != nil {
-			log.Printf("pulse collector: write error (%s): %v", ev.kind, err)
+			logutil.Warn("pulse collector: write error (%s): %v\n", ev.kind, err)
 			ok = false
 			// Break immediately — the deferred commit(ok=false) rolls back the
 			// entire transaction, so continuing would just burn CPU for nothing.
@@ -292,7 +346,7 @@ func (c *Collector) dispatchTx(ev event) error {
 			sessionID = agentID + ":" + tc.ProjectID + ":" + time.Now().UTC().Format("2006-01-02")
 		}
 		if serr := c.store.UpdateSessionStatsTx(sessionID, agentID, tc.ProjectID, 0, 0); serr != nil {
-			log.Printf("pulse collector: update session stats: %v", serr)
+			logutil.Warn("pulse collector: update session stats: %v\n", serr)
 		}
 	case "context_delivery":
 		cd, _ := ev.data.(pulsetypes.ContextDeliveryEvent)
@@ -307,20 +361,26 @@ func (c *Collector) dispatchTx(ev event) error {
 		if tokensSaved < 0 {
 			tokensSaved = 0
 		}
-		costSaved := c.computeCostSaved(tokensSaved)
+		// Bug 1 — DQ-H.3: look up the session model for accurate cost pricing.
 		sessionID := cd.SessionID
 		if sessionID == "" {
 			sessionID = agentID + ":" + cd.ProjectID + ":" + time.Now().UTC().Format("2006-01-02")
 		}
+		model := c.store.GetSessionModel(sessionID)
+		if model == "" {
+			model = "claude-sonnet-4-6"
+		}
+		costSaved := c.computeCostSaved(tokensSaved, model)
 		if serr := c.store.AddSessionTokensSavedTx(sessionID, agentID, cd.ProjectID, tokensSaved, costSaved); serr != nil {
-			log.Printf("pulse collector: add session tokens saved: %v", serr)
+			logutil.Warn("pulse collector: add session tokens saved: %v\n", serr)
 		}
 	case "brain_usage":
 		bu, _ := ev.data.(pulsetypes.BrainUsageEvent)
 		return c.store.InsertBrainUsageTx(bu)
 	case "session":
 		sp, _ := ev.data.(sessionPayload)
-		return c.store.UpsertSessionTx(sp.ID, sp.AgentID, sp.ProjectID, sp.Event)
+		// Bug 16 — DQ-C.6: pass agent version through to the store.
+		return c.store.UpsertSessionWithVersionTx(sp.ID, sp.AgentID, sp.ProjectID, sp.Event, sp.AgentVersion)
 	case "outcome_signal":
 		os, _ := ev.data.(pulsetypes.OutcomeSignalEvent)
 		return c.store.InsertOutcomeSignalTx(os)
@@ -354,6 +414,21 @@ func (c *Collector) dispatchTx(ev event) error {
 	case "validation_event":
 		ve, _ := ev.data.(pulsetypes.ValidationEvent)
 		return c.store.InsertValidationEventTx(ve)
+	case "search_event":
+		se, _ := ev.data.(pulsetypes.SearchEvent)
+		return c.store.InsertSearchEventTx(se)
+	case "config_reload":
+		cr, _ := ev.data.(pulsetypes.ConfigReloadEvent)
+		return c.store.InsertConfigReloadEventTx(cr)
+	case "persistence_event":
+		pe, _ := ev.data.(pulsetypes.PersistenceEvent)
+		return c.store.InsertPersistenceEventTx(pe)
+	case "enrichment_event":
+		ee, _ := ev.data.(pulsetypes.EnrichmentEvent)
+		return c.store.InsertEnrichmentEventTx(ee)
+	case "rule_eval_event":
+		re, _ := ev.data.(pulsetypes.RuleEvalEvent)
+		return c.store.InsertRuleEvalEventTx(re)
 	}
 	return nil
 }
@@ -365,7 +440,7 @@ func (c *Collector) dispatchTx(ev event) error {
 func (c *Collector) writeBatchNoTx(batch []event) {
 	for _, ev := range batch {
 		if err := c.dispatchNoTx(ev); err != nil {
-			log.Printf("pulse collector: write error (%s): %v", ev.kind, err)
+			logutil.Warn("pulse collector: write error (%s): %v\n", ev.kind, err)
 		}
 	}
 }
@@ -388,7 +463,7 @@ func (c *Collector) dispatchNoTx(ev event) error {
 			sessionID = agentID + ":" + tc.ProjectID + ":" + time.Now().UTC().Format("2006-01-02")
 		}
 		if serr := c.store.UpdateSessionStats(sessionID, agentID, tc.ProjectID, 0, 0); serr != nil {
-			log.Printf("pulse collector: update session stats: %v", serr)
+			logutil.Warn("pulse collector: update session stats: %v\n", serr)
 		}
 	case "context_delivery":
 		cd, _ := ev.data.(pulsetypes.ContextDeliveryEvent)
@@ -403,20 +478,26 @@ func (c *Collector) dispatchNoTx(ev event) error {
 		if tokensSaved < 0 {
 			tokensSaved = 0
 		}
-		costSaved := c.computeCostSaved(tokensSaved)
+		// Bug 1 — DQ-H.3: look up the session model for accurate cost pricing.
 		sessionID := cd.SessionID
 		if sessionID == "" {
 			sessionID = agentID + ":" + cd.ProjectID + ":" + time.Now().UTC().Format("2006-01-02")
 		}
+		model := c.store.GetSessionModel(sessionID)
+		if model == "" {
+			model = "claude-sonnet-4-6"
+		}
+		costSaved := c.computeCostSaved(tokensSaved, model)
 		if serr := c.store.AddSessionTokensSaved(sessionID, agentID, cd.ProjectID, tokensSaved, costSaved); serr != nil {
-			log.Printf("pulse collector: add session tokens saved: %v", serr)
+			logutil.Warn("pulse collector: add session tokens saved: %v\n", serr)
 		}
 	case "brain_usage":
 		bu, _ := ev.data.(pulsetypes.BrainUsageEvent)
 		return c.store.InsertBrainUsage(bu)
 	case "session":
 		sp, _ := ev.data.(sessionPayload)
-		return c.store.UpsertSession(sp.ID, sp.AgentID, sp.ProjectID, sp.Event)
+		// Bug 16 — DQ-C.6: pass agent version through to the store.
+		return c.store.UpsertSessionWithVersion(sp.ID, sp.AgentID, sp.ProjectID, sp.Event, sp.AgentVersion)
 	case "outcome_signal":
 		os, _ := ev.data.(pulsetypes.OutcomeSignalEvent)
 		return c.store.InsertOutcomeSignal(os)
@@ -450,21 +531,39 @@ func (c *Collector) dispatchNoTx(ev event) error {
 	case "validation_event":
 		ve, _ := ev.data.(pulsetypes.ValidationEvent)
 		return c.store.InsertValidationEvent(ve)
+	case "search_event":
+		se, _ := ev.data.(pulsetypes.SearchEvent)
+		return c.store.InsertSearchEvent(se)
+	case "config_reload":
+		cr, _ := ev.data.(pulsetypes.ConfigReloadEvent)
+		return c.store.InsertConfigReloadEvent(cr)
+	case "persistence_event":
+		pe, _ := ev.data.(pulsetypes.PersistenceEvent)
+		return c.store.InsertPersistenceEvent(pe)
+	case "enrichment_event":
+		ee, _ := ev.data.(pulsetypes.EnrichmentEvent)
+		return c.store.InsertEnrichmentEvent(ee)
+	case "rule_eval_event":
+		re, _ := ev.data.(pulsetypes.RuleEvalEvent)
+		return c.store.InsertRuleEvalEvent(re)
 	}
 	return nil
 }
 
-// computeCostSaved estimates the USD value of tokensSaved by pricing the saved
-// tokens at gpt-4o input rates (the canonical high-value agent baseline).
-// Falls back to 0 if the pricing table has no entry for the baseline model.
-func (c *Collector) computeCostSaved(tokensSaved int) float64 {
+// computeCostSaved estimates the USD value of tokensSaved using the provided
+// model's pricing (Bug 1 — DQ-H.3). Falls back to gpt-4o rates if the model
+// is not found in the pricing table.
+func (c *Collector) computeCostSaved(tokensSaved int, model string) float64 {
 	if tokensSaved <= 0 {
 		return 0
 	}
-	const baselineModel = "gpt-4o"
-	inputPer1M, _, found := c.store.GetPricing(baselineModel)
+	inputPer1M, _, found := c.store.GetPricing(model)
 	if !found || inputPer1M <= 0 {
-		return 0
+		// Fall back to gpt-4o as canonical high-value agent baseline.
+		inputPer1M, _, found = c.store.GetPricing("gpt-4o")
+		if !found || inputPer1M <= 0 {
+			return 0
+		}
 	}
 	return float64(tokensSaved) / 1_000_000.0 * inputPer1M
 }

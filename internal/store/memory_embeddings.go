@@ -84,13 +84,6 @@ func (s *Store) GetMemoryEmbedding(memoryID string) []float32 {
 	return blobToVec(blob)
 }
 
-// MemoryEmbeddingCount returns the total number of stored memory embeddings.
-func (s *Store) MemoryEmbeddingCount() int {
-	var count int
-	_ = s.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM memory_embeddings`).Scan(&count)
-	return count
-}
-
 // GetMemoriesWithoutEmbeddings returns up to limit memory IDs that either have no
 // embedding yet or whose stored content_hash no longer matches the current memory
 // content. Only non-expired, non-stale memories are returned.
@@ -236,154 +229,6 @@ func (s *Store) GetMemoryIDsByAnchorNodes(nodeIDs []string, limit int) ([]string
 	return result, nil
 }
 
-// GetStaleEmbeddingMemoryIDs returns memory IDs whose embeddings are stale
-// (stale=1 in memory_embeddings) but whose memory records are still valid
-// (non-stale, non-expired). Up to limit IDs are returned.
-// Used by the semantic recall channel to drive lazy re-embedding: stale
-// embeddings are refreshed just before the vector search runs so they
-// participate in scoring instead of being silently excluded.
-func (s *Store) GetStaleEmbeddingMemoryIDs(limit int) ([]string, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.knowledgeDB.Query(`
-		SELECT me.memory_id
-		FROM memory_embeddings me
-		JOIN memories m ON me.memory_id = m.id
-		WHERE me.stale = 1
-		  AND m.stale = 0
-		  AND m.expires_at > ?
-		ORDER BY me.embedded_at DESC
-		LIMIT ?`, now, limit)
-	if err != nil {
-		return nil, fmt.Errorf("get stale embedding memory ids: %w", err)
-	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan stale embedding id: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
-// DeleteMemoryEmbeddings removes embeddings for the given memory IDs.
-// Called during memory expiry cleanup. A no-op when memoryIDs is empty.
-// Processes in batches of 500 to respect SQLite variable limits.
-func (s *Store) DeleteMemoryEmbeddings(memoryIDs []string) error {
-	if len(memoryIDs) == 0 {
-		return nil
-	}
-	const batchSize = 500
-	for i := 0; i < len(memoryIDs); i += batchSize {
-		end := i + batchSize
-		if end > len(memoryIDs) {
-			end = len(memoryIDs)
-		}
-		batch := memoryIDs[i:end]
-		placeholders := strings.Repeat("?,", len(batch))
-		placeholders = placeholders[:len(placeholders)-1]
-		args := make([]any, len(batch))
-		for j, id := range batch {
-			args[j] = id
-		}
-		if _, err := s.knowledgeDB.Exec(
-			`DELETE FROM memory_embeddings WHERE memory_id IN (`+placeholders+`)`,
-			args...,
-		); err != nil {
-			return fmt.Errorf("delete memory embeddings: %w", err)
-		}
-	}
-	return nil
-}
-
-// MemoryVectorSearch performs cosine similarity search over memory embeddings.
-// Returns up to limit results ordered by descending similarity.
-// Only non-expired, non-stale memories are included. Stale embeddings (stale=1)
-// are excluded from results — they need re-embedding first.
-// Falls back gracefully with (nil, nil) when no embeddings are stored yet.
-//
-// Uses a two-pass approach for memory efficiency:
-//
-//	Pass 1: Scan only (memory_id, embedding) with a min-heap of size K to
-//	         select the top-K candidates. Content is NOT loaded during the scan,
-//	         keeping peak memory at O(K) instead of O(N).
-//	Pass 2: Fetch full memory data (content, tier, entity_id) only for the
-//	         K winning candidates.
-func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearchResult, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	if len(queryVec) == 0 {
-		return nil, nil
-	}
-
-	// Pre-normalize query vector so dot product = cosine similarity.
-	normQuery := normalizeVec(queryVec)
-	if normQuery == nil {
-		return nil, nil
-	}
-
-	// Pass 1: Lightweight scan — IDs, embeddings, and stale flag.
-	// Stale embeddings (e.stale=1) are INCLUDED in scoring — their vector
-	// is still valid (memory text unchanged). StaleEmbedding flag is
-	// propagated to results so agents know the anchored entity changed.
-	// Dead memories (m.stale=1) are still excluded — different concept.
-	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.knowledgeDB.Query(`
-		SELECT e.memory_id, e.embedding, e.stale
-		FROM memory_embeddings e
-		JOIN memories m ON e.memory_id = m.id
-		WHERE m.stale = 0
-		  AND m.expires_at > ?
-		ORDER BY e.rowid DESC
-		LIMIT 10000`, now)
-	if err != nil {
-		return nil, fmt.Errorf("memory vector search: %w", err)
-	}
-	defer rows.Close()
-
-	h := &topKHeap{k: limit}
-	var scanned int
-	for rows.Next() {
-		scanned++
-		var memID string
-		var blob []byte
-		var embStale int
-		if err := rows.Scan(&memID, &blob, &embStale); err != nil {
-			return nil, fmt.Errorf("scan memory embedding row: %w", err)
-		}
-		vec := blobToVec(blob)
-		if len(vec) == 0 {
-			continue
-		}
-		score := dotSimilarity(normQuery, vec)
-		if score <= 0 {
-			continue
-		}
-		h.tryPush(memID, score, embStale == 1)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if scanned >= 10000 {
-		logutil.Warn("synapses: vector search scanned 10,000-embedding safety cap — memories beyond the cap were excluded from ranking. Recall quality may be degraded at this corpus size.\n")
-	}
-
-	winners := h.drain()
-	if len(winners) == 0 {
-		return nil, nil
-	}
-
-	// Pass 2: Fetch content for winners only.
-	return s.fetchMemorySearchResults(winners)
-}
-
 // MemoryVectorSearchWithThreshold performs cosine similarity search with a
 // minimum similarity threshold. Results below the threshold are excluded.
 // Useful for recall() where low-confidence matches should not pollute results.
@@ -439,7 +284,7 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 			continue
 		}
 		score := dotSimilarity(normQuery, vec)
-		if score < threshold {
+		if score <= 0 || score < threshold {
 			continue
 		}
 		h.tryPush(memID, score, embStale == 1)

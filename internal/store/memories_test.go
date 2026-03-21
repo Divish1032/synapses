@@ -16,6 +16,22 @@ func openMemTestStore(t *testing.T) *Store {
 	return st
 }
 
+// testGetMemoryAnchors queries the memory_anchors table directly for testing.
+func testGetMemoryAnchors(st *Store, memoryID string) []string {
+	rows, err := st.knowledgeDB.Query(`SELECT node_id FROM memory_anchors WHERE memory_id = ? ORDER BY node_id`, memoryID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var anchors []string
+	for rows.Next() {
+		var nid string
+		rows.Scan(&nid)
+		anchors = append(anchors, nid)
+	}
+	return anchors
+}
+
 func TestInsertMemory_BasicRoundTrip(t *testing.T) {
 	t.Parallel()
 	st := openMemTestStore(t)
@@ -288,7 +304,7 @@ func TestMarkEntityMemoriesStale(t *testing.T) {
 
 	st.InsertMemory(Memory{Tier: TierEntity, Content: "memory for a node that will be deleted", EntityID: "dead-node"})
 
-	err := st.MarkEntityMemoriesStale("dead-node", "entity node removed")
+	err := st.MarkEntityMemoriesStaleForNodes([]string{"dead-node"}, "entity node removed")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +454,7 @@ func TestInsertMemory_UTF8Truncation(t *testing.T) {
 	}
 }
 
-func TestCountMemories(t *testing.T) {
+func TestCountMemories_ViaSQL(t *testing.T) {
 	t.Parallel()
 	st := openMemTestStore(t)
 
@@ -446,15 +462,14 @@ func TestCountMemories(t *testing.T) {
 	st.InsertMemory(Memory{Tier: TierEntity, Content: "another entity memory for count", EntityID: "n2"})
 	st.InsertMemory(Memory{Tier: TierProject, Content: "project memory for counting test"})
 
-	counts, err := st.CountMemories()
-	if err != nil {
-		t.Fatal(err)
+	var entityCount, projectCount int
+	st.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM memories WHERE tier = ?`, TierEntity).Scan(&entityCount)
+	st.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM memories WHERE tier = ?`, TierProject).Scan(&projectCount)
+	if entityCount != 2 {
+		t.Errorf("expected 2 entity memories, got %d", entityCount)
 	}
-	if counts[TierEntity] != 2 {
-		t.Errorf("expected 2 entity memories, got %d", counts[TierEntity])
-	}
-	if counts[TierProject] != 1 {
-		t.Errorf("expected 1 project memory, got %d", counts[TierProject])
+	if projectCount != 1 {
+		t.Errorf("expected 1 project memory, got %d", projectCount)
 	}
 }
 
@@ -940,9 +955,16 @@ func TestInsertMemoryAnchors_BasicRoundTrip(t *testing.T) {
 	if err := st.InsertMemoryAnchors(id, []string{"repo::auth.go::AuthService", "repo::auth.go::Login"}); err != nil {
 		t.Fatal(err)
 	}
-	anchors, err := st.GetMemoryAnchors(id)
+	rows, err := st.knowledgeDB.Query(`SELECT node_id FROM memory_anchors WHERE memory_id = ? ORDER BY node_id`, id)
 	if err != nil {
 		t.Fatal(err)
+	}
+	defer rows.Close()
+	var anchors []string
+	for rows.Next() {
+		var nid string
+		rows.Scan(&nid)
+		anchors = append(anchors, nid)
 	}
 	if len(anchors) != 2 {
 		t.Fatalf("expected 2 anchors, got %d", len(anchors))
@@ -961,7 +983,7 @@ func TestInsertMemoryAnchors_EmptySlice_NoOp(t *testing.T) {
 	if err := st.InsertMemoryAnchors(id, nil); err != nil {
 		t.Fatal(err)
 	}
-	anchors, _ := st.GetMemoryAnchors(id)
+	anchors := testGetMemoryAnchors(st, id)
 	if len(anchors) != 0 {
 		t.Errorf("expected 0 anchors, got %d", len(anchors))
 	}
@@ -976,7 +998,7 @@ func TestInsertMemoryAnchors_DuplicateIgnored(t *testing.T) {
 	if err := st.InsertMemoryAnchors(id, []string{"repo::a.go::Foo", "repo::a.go::Foo"}); err != nil {
 		t.Fatal(err)
 	}
-	anchors, _ := st.GetMemoryAnchors(id)
+	anchors := testGetMemoryAnchors(st, id)
 	if len(anchors) != 1 {
 		t.Errorf("expected 1 anchor (deduped), got %d", len(anchors))
 	}
@@ -991,7 +1013,7 @@ func TestInsertMemoryAnchors_EmptyNodeIDSkipped(t *testing.T) {
 	if err := st.InsertMemoryAnchors(id, []string{"repo::a.go::Foo", "", "repo::b.go::Bar"}); err != nil {
 		t.Fatal(err)
 	}
-	anchors, _ := st.GetMemoryAnchors(id)
+	anchors := testGetMemoryAnchors(st, id)
 	if len(anchors) != 2 {
 		t.Errorf("expected 2 anchors (empty skipped), got %d", len(anchors))
 	}
@@ -1015,7 +1037,7 @@ func TestExpireMemories_CleansOrphanedAnchors(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Verify anchor exists before expiry.
-	anchors, _ := st.GetMemoryAnchors(id)
+	anchors := testGetMemoryAnchors(st, id)
 	if len(anchors) != 1 {
 		t.Fatalf("expected 1 anchor before expiry, got %d", len(anchors))
 	}
@@ -1028,7 +1050,7 @@ func TestExpireMemories_CleansOrphanedAnchors(t *testing.T) {
 		t.Errorf("expected 1 expired memory, got %d", n)
 	}
 	// Verify anchor was cleaned up.
-	anchors, _ = st.GetMemoryAnchors(id)
+	anchors = testGetMemoryAnchors(st, id)
 	if len(anchors) != 0 {
 		t.Errorf("expected 0 anchors after expiry cleanup, got %d", len(anchors))
 	}
@@ -1062,7 +1084,7 @@ func TestInsertMemoryAnchors_DedupedMemory_AddsAnchors(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Both anchors should exist.
-	anchors, _ := st.GetMemoryAnchors(id1)
+	anchors := testGetMemoryAnchors(st, id1)
 	if len(anchors) != 2 {
 		t.Errorf("expected 2 anchors (original + dedup additive), got %d: %v", len(anchors), anchors)
 	}
@@ -1094,7 +1116,7 @@ func TestInsertMemoryWithAnchors_DedupPath_AtomicTouchAndAnchors(t *testing.T) {
 	// Atomicity proof: if anchors exist, the tx committed — which means the
 	// touch (UPDATE last_accessed_at) in the same tx also committed.
 	// If the tx had rolled back, neither touch nor anchors would be present.
-	anchors, _ := st.GetMemoryAnchors(id1)
+	anchors := testGetMemoryAnchors(st, id1)
 	if len(anchors) != 2 {
 		t.Fatalf("expected 2 anchors on deduped memory (proves tx committed), got %d: %v", len(anchors), anchors)
 	}
@@ -1372,7 +1394,7 @@ func TestQueryInvalidatedMemories_ReturnsStaleUnsurfaced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkEntityMemoriesStale("repo::intel/main.go::main", "anchor node removed"); err != nil {
+	if err := st.MarkEntityMemoriesStaleForNodes([]string{"repo::intel/main.go::main"}, "anchor node removed"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1432,7 +1454,7 @@ func TestMarkMemoriesSurfaced_PreventsRequery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkEntityMemoriesStale("repo::store.go::Store.Close", "node changed"); err != nil {
+	if err := st.MarkEntityMemoriesStaleForNodes([]string{"repo::store.go::Store.Close"}, "node changed"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1483,7 +1505,7 @@ func TestQueryInvalidatedMemories_PerAgentIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkEntityMemoriesStale("repo::auth/middleware.go::AuthMiddleware", "node removed"); err != nil {
+	if err := st.MarkEntityMemoriesStaleForNodes([]string{"repo::auth/middleware.go::AuthMiddleware"}, "node removed"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1549,12 +1571,12 @@ func TestQueryInvalidatedMemories_StaledAtOrdering(t *testing.T) {
 	}
 
 	// Stale id2 first, then id1 — so id1 has a LATER staled_at.
-	if err := st.MarkEntityMemoriesStale("repo::second.go::Second", "removed first"); err != nil {
+	if err := st.MarkEntityMemoriesStaleForNodes([]string{"repo::second.go::Second"}, "removed first"); err != nil {
 		t.Fatal(err)
 	}
 	// Small delay to ensure staled_at differs.
 	time.Sleep(10 * time.Millisecond)
-	if err := st.MarkEntityMemoriesStale("repo::first.go::First", "removed second"); err != nil {
+	if err := st.MarkEntityMemoriesStaleForNodes([]string{"repo::first.go::First"}, "removed second"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1590,7 +1612,7 @@ func TestQueryInvalidatedMemories_AnonymousFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkEntityMemoriesStale("repo::config/service.go::ConfigService", "node removed"); err != nil {
+	if err := st.MarkEntityMemoriesStaleForNodes([]string{"repo::config/service.go::ConfigService"}, "node removed"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1646,7 +1668,7 @@ func TestExpireMemories_CleansOrphanedSurfacedRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Mark stale (shortens TTL to 30d).
-	if err := st.MarkEntityMemoriesStale("repo::store.go::Store.Close", "removed"); err != nil {
+	if err := st.MarkEntityMemoriesStaleForNodes([]string{"repo::store.go::Store.Close"}, "removed"); err != nil {
 		t.Fatal(err)
 	}
 	// Surface for an agent — creates a memory_surfaced row.
@@ -1716,7 +1738,7 @@ func TestQueryMemories_ExcludesStaleMemories(t *testing.T) {
 	}
 
 	// Mark stale.
-	if err := st.MarkEntityMemoriesStale(entityID, "node removed"); err != nil {
+	if err := st.MarkEntityMemoriesStaleForNodes([]string{entityID}, "node removed"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1768,7 +1790,7 @@ func TestQueryMemoriesIncludingStale_ReturnsStaledMemory(t *testing.T) {
 	}
 
 	// Mark stale: normal query returns 0, audit query returns 1.
-	if err := st.MarkEntityMemoriesStale(entityID, "node removed"); err != nil {
+	if err := st.MarkEntityMemoriesStaleForNodes([]string{entityID}, "node removed"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1874,12 +1896,11 @@ func TestQueryRecentSessionMemoriesIncludingStale_ReturnsStaledSession(t *testin
 		t.Fatalf("QueryRecentSessionMemories: expected 0 stale, got %d", len(normal))
 	}
 
-	audit, err := st.QueryRecentSessionMemoriesIncludingStale("agent-audit", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(audit) != 1 {
-		t.Fatalf("QueryRecentSessionMemoriesIncludingStale: expected 1, got %d", len(audit))
+	// Query including stale via direct SQL (QueryRecentSessionMemoriesIncludingStale was removed).
+	var auditCount int
+	st.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM memories WHERE tier = 'session_log' AND agent_id = ?`, "agent-audit").Scan(&auditCount)
+	if auditCount != 1 {
+		t.Fatalf("expected 1 session-log memory (including stale), got %d", auditCount)
 	}
 }
 
@@ -2012,7 +2033,7 @@ func TestQueryInvalidatedMemories_CapsAt10(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := st.MarkEntityMemoriesStale("repo::entity"+string(rune('A'+i)), "removed"); err != nil {
+		if err := st.MarkEntityMemoriesStaleForNodes([]string{"repo::entity"+string(rune('A'+i))}, "removed"); err != nil {
 			t.Fatal(err)
 		}
 	}

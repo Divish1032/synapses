@@ -15,4 +15,8 @@ type Embedder interface {
 	// Model returns the model name used for embedding generation.
 	// Used as the model key in UpsertMemoryEmbedding for cache invalidation.
 	Model() string
+
+	// Close releases any resources held by the embedder (e.g. ONNX sessions).
+	// Implementations where Close is a no-op should return nil.
+	Close() error
 }

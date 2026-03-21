@@ -23,7 +23,6 @@ var knowledgeTables = []string{
 	"events", "agent_messages", "agents", "agent_context",
 	"annotations", "dynamic_rules", "violation_log",
 	"quality_gaps",
-	"proposals", "proposal_votes",
 	"tool_calls", "web_cache", "cross_project_deps",
 	"work_claims", "agent_watched_symbols",
 }
@@ -44,15 +43,20 @@ func migrateKnowledgeFromLegacy(knowledgeDB *sql.DB, graphDBPath string) error {
 		return fmt.Errorf("set busy_timeout: %w", err)
 	}
 
+	var migrationErrors []string
 	for _, table := range knowledgeTables {
 		n, err := migrateSingleTable(legacyDB, knowledgeDB, table)
 		if err != nil {
 			logutil.Error("synapses: dual_db: migrate %s: %v\n", table, err)
+			migrationErrors = append(migrationErrors, fmt.Sprintf("%s: %v", table, err))
 			continue
 		}
 		if n > 0 {
 			logutil.Info("synapses: dual_db: migrated %d rows from legacy.%s\n", n, table)
 		}
+	}
+	if len(migrationErrors) > 0 {
+		return fmt.Errorf("partial migration failures: %s", strings.Join(migrationErrors, "; "))
 	}
 	return nil
 }

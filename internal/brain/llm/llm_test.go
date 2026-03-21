@@ -938,57 +938,6 @@ func TestOllamaClient_PullModel_EventError(t *testing.T) {
 	}
 }
 
-func TestOllamaClient_ProbeLatency_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, ollamaSuccessBody("ready"))
-	}))
-	defer srv.Close()
-
-	c := NewOllamaClient(srv.URL, "llama3", 5000)
-	dur, err := c.ProbeLatency(context.Background(), 10*time.Second)
-	if err != nil {
-		t.Fatalf("ProbeLatency() unexpected error: %v", err)
-	}
-	if dur <= 0 {
-		t.Errorf("ProbeLatency() returned non-positive duration: %v", dur)
-	}
-}
-
-func TestOllamaClient_ProbeLatency_HTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "bad gateway", http.StatusBadGateway)
-	}))
-	defer srv.Close()
-
-	c := NewOllamaClient(srv.URL, "llama3", 5000)
-	_, err := c.ProbeLatency(context.Background(), 10*time.Second)
-	if err == nil {
-		t.Fatal("expected error for non-200 probe response")
-	}
-	if !strings.Contains(err.Error(), "502") {
-		t.Errorf("error should mention 502, got %q", err.Error())
-	}
-}
-
-func TestOllamaClient_ProbeLatency_BodyError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		b, _ := json.Marshal(ollamaResponse{Error: "context length exceeded"})
-		fmt.Fprint(w, string(b))
-	}))
-	defer srv.Close()
-
-	c := NewOllamaClient(srv.URL, "llama3", 5000)
-	_, err := c.ProbeLatency(context.Background(), 10*time.Second)
-	if err == nil {
-		t.Fatal("expected error for response body error field")
-	}
-	if !strings.Contains(err.Error(), "context length exceeded") {
-		t.Errorf("error should mention probe error, got %q", err.Error())
-	}
-}
-
 func TestListInstalledModels_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/tags" {

@@ -14,6 +14,10 @@ type ToolCallEvent struct {
 	ResponseBytes int    `json:"response_bytes"`
 	SessionID     string `json:"session_id,omitempty"`
 	ErrorMessage  string `json:"error_message,omitempty"`
+	// Bug 10 — DQ-A.5: size of tool input payload in bytes.
+	InputBytes int `json:"input_bytes,omitempty"`
+	// Bug 11 — DQ-A.6: categorizes response shape for downstream analytics.
+	ResponseType string `json:"response_type,omitempty"` // "graph_slice", "validation", "memory_list", "error", "text"
 }
 
 // ContextDeliveryEvent is sent for context-delivery tools (get_context,
@@ -39,25 +43,39 @@ type ContextDeliveryEvent struct {
 	DepthRequested  int    `json:"depth_requested,omitempty"`
 	DepthAchieved   int    `json:"depth_achieved,omitempty"`
 	NodesVisited    int    `json:"nodes_visited,omitempty"`
+	// Bug 12 — DQ-B.6: whether annotation data was included in delivery.
+	AnnotationsIncluded bool `json:"annotations_included,omitempty"`
+	// Bug 13 — DQ-B.7: serialization format used for this delivery.
+	OutputFormat string `json:"output_format,omitempty"` // "compact", "json", "default"
+	// Bug 65 — PIPE-F3: distribution of edge types in the delivered slice.
+	EdgeTypesDist string `json:"edge_types_dist,omitempty"` // JSON map of edge type -> count
+	// Bug 66 — PIPE-F4: time spent on graph traversal for this delivery.
+	TraversalDurationMs float64 `json:"traversal_duration_ms,omitempty"`
+	// Bug 67 — PIPE-F6: number of nodes in the graph when traversal was performed.
+	GraphSizeAtTraversal int `json:"graph_size_at_traversal,omitempty"`
 }
 
 // SessionEvent is sent when an agent session starts or ends.
 type SessionEvent struct {
-	AgentID   string `json:"agent_id"`
-	ProjectID string `json:"project_id,omitempty"`
-	Event     string `json:"event"` // "start" | "end" | "task_done"
-	SessionID string `json:"session_id,omitempty"`
+	AgentID      string `json:"agent_id"`
+	ProjectID    string `json:"project_id,omitempty"`
+	Event        string `json:"event"` // "start" | "end" | "task_done"
+	SessionID    string `json:"session_id,omitempty"`
+	// Bug 16 — DQ-C.6: record which version of the agent started the session.
+	AgentVersion string `json:"agent_version,omitempty"`
 }
 
 // OutcomeSignalEvent is sent for passive outcome signals (R29).
 // SignalType: "correction", "escalation", "replan", "task_done", "task_cancelled".
 type OutcomeSignalEvent struct {
-	ProjectID  string `json:"project_id,omitempty"`
-	AgentID    string `json:"agent_id,omitempty"`
-	Entity     string `json:"entity,omitempty"`
-	SignalType string `json:"signal_type"`
-	Count      int    `json:"count,omitempty"`
-	SessionID  string `json:"session_id,omitempty"`
+	ProjectID       string `json:"project_id,omitempty"`
+	AgentID         string `json:"agent_id,omitempty"`
+	Entity          string `json:"entity,omitempty"`
+	SignalType      string `json:"signal_type"`
+	Count           int    `json:"count,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+	// Bug 17 — DQ-D.3: how many tool calls occurred between context delivery and this signal.
+	ToolCallsBetween int `json:"tool_calls_between,omitempty"`
 }
 
 // EntityEffectiveness is returned by GetEffectiveness for a single entity.
@@ -83,6 +101,10 @@ type BrainUsageEvent struct {
 	ProjectID        string  `json:"project_id,omitempty"`
 	TargetEntity     string  `json:"target_entity,omitempty"`
 	Success          bool    `json:"success"`
+	// Bug 19 — DQ-F.3: subjective quality score for this inference (0.0–1.0).
+	QualityScore float64 `json:"quality_score,omitempty"`
+	// Bug 20 — DQ-F.4: whether a fallback model/path was used.
+	FallbackUsed bool `json:"fallback_used,omitempty"`
 }
 
 // TotalTokens returns prompt + completion tokens.
@@ -102,6 +124,13 @@ type AgentLLMUsageEvent struct {
 	InputTokens  int     `json:"input_tokens"`
 	OutputTokens int     `json:"output_tokens"`
 	CostUSD      float64 `json:"cost_usd,omitempty"`
+	// Bug 7 — DQ-E.3: disambiguate explicit zero cost from unreported cost.
+	CostReported bool `json:"cost_reported,omitempty"` // true when cost_usd was explicitly provided
+	// Bug 9 — DQ-E.2: Anthropic cache token fields.
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	// Bug 18 — DQ-E.1: correlate with the tool call that triggered this usage.
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 // Phase 2: Pipeline instrumentation event types.
@@ -128,6 +157,10 @@ type ReparseEvent struct {
 	EdgesDelta     int    `json:"edges_delta"`
 	MemoriesStaled int    `json:"memories_staled"`
 	ProjectID      string `json:"project_id"`
+	// Bug 60 — PIPE-C5: number of times the debouncer suppressed a redundant reparse.
+	DebounceHits int `json:"debounce_hits,omitempty"`
+	// Bug 61 — PIPE-C8: time to detect whether this file belongs to a cross-project ref.
+	CrossProjectDetectionMs float64 `json:"cross_project_detection_ms,omitempty"`
 }
 
 // GraphSnapshotEvent captures a point-in-time snapshot of graph topology metrics.
@@ -147,6 +180,10 @@ type GraphSnapshotEvent struct {
 	FanOutP95          int     `json:"fan_out_p95"`
 	NodeTypeDistJSON   string  `json:"node_type_distribution"` // JSON map
 	ProjectID          string  `json:"project_id"`
+	// Bug 58 — PIPE-B6: ratio of tombstoned (deleted) nodes to total nodes.
+	TombstoneRatio float64 `json:"tombstone_ratio,omitempty"`
+	// Bug 59 — PIPE-B8: JSON map of node provenance (parser, inferred, manual).
+	ProvenanceDist string `json:"provenance_dist,omitempty"` // JSON map
 }
 
 // EmbeddingEvent records the outcome of an EmbedAllMemories batch operation.
@@ -160,6 +197,8 @@ type EmbeddingEvent struct {
 	Success     bool   `json:"success"`
 	StaleCount  int    `json:"stale_count"`
 	ProjectID   string `json:"project_id"`
+	// Bug 62 — PIPE-D8: times a goroutine had to wait for the embedding pool.
+	EmbedPoolContention int `json:"embed_pool_contention,omitempty"`
 }
 
 // GuardEvent is emitted when loop-guard or rate-limiter blocks a tool call.
@@ -187,6 +226,7 @@ type ValidationEvent struct {
 	Status         string `json:"status"`                 // "ok" | "violations_found" | "pass"
 	ViolationCount int    `json:"violation_count"`
 	SafetyStatus   string `json:"safety_status,omitempty"` // "clear" | "warning"
+	RuleIDs        string `json:"rule_ids,omitempty"`      // JSON array of config.Violation.RuleID strings
 	AgentID        string `json:"agent_id,omitempty"`
 	ProjectID      string `json:"project_id,omitempty"`
 }
@@ -202,4 +242,47 @@ type IndexEvent struct {
 	ResolutionRate      float64 `json:"resolution_rate"`
 	LanguageDistJSON    string  `json:"language_distribution"` // JSON map
 	ProjectID           string  `json:"project_id"`
+	// Bug 63 — PIPE-E5: JSON map of work item types processed during this index run.
+	WorkItemTypeDist string `json:"work_item_type_dist,omitempty"` // JSON map
+}
+
+// SearchEvent records a search or find_entity tool call for analytics (Bug 57 / Task P4-8).
+type SearchEvent struct {
+	AgentID     string `json:"agent_id,omitempty"`
+	ProjectID   string `json:"project_id,omitempty"`
+	Query       string `json:"query,omitempty"`
+	Mode        string `json:"mode,omitempty"`   // "semantic", "exact", "hybrid"
+	ResultCount int    `json:"result_count"`
+	DurationMs  int64  `json:"duration_ms"`
+	CacheHit    bool   `json:"cache_hit"`
+	SessionID   string `json:"session_id,omitempty"`
+}
+
+// ConfigReloadEvent tracks configuration hot-reload outcomes (Bug 68 — COV-9).
+type ConfigReloadEvent struct {
+	Success       bool     `json:"success"`
+	ChangedFields []string `json:"changed_fields,omitempty"`
+	ProjectID     string   `json:"project_id,omitempty"`
+}
+
+// PersistenceEvent tracks store write durations and sizes (Bug 69 — COV-12).
+type PersistenceEvent struct {
+	DurationMs   float64 `json:"duration_ms"`
+	BytesWritten int64   `json:"bytes_written"`
+	ProjectID    string  `json:"project_id,omitempty"`
+}
+
+// EnrichmentEvent records the outcome of a code enrichment pass (Bug 70 — COV-Subsys).
+type EnrichmentEvent struct {
+	EnrichmentType string `json:"enrichment_type"` // "metrics", "brain", "types"
+	DurationMs     int64  `json:"duration_ms"`
+	Success        bool   `json:"success"`
+	ProjectID      string `json:"project_id,omitempty"`
+}
+
+// RuleEvalEvent records architecture rule evaluation outcomes (Bug 71 — COV-Subsys).
+type RuleEvalEvent struct {
+	RulesEvaluated  int    `json:"rules_evaluated"`
+	ViolationsFound int    `json:"violations_found"`
+	ProjectID       string `json:"project_id,omitempty"`
 }

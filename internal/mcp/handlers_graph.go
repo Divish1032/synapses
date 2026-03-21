@@ -12,6 +12,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -59,6 +60,8 @@ func (s *Server) handleFindEntity(
 	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
+	start := time.Now()
+
 	query, ok := req.GetArguments()["query"].(string)
 	if !ok || query == "" {
 		return mcp.NewToolResultError("query is required (e.g., 'AuthService', 'handleLogin')"), nil
@@ -164,6 +167,27 @@ func (s *Server) handleFindEntity(
 		fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
 		fedResults = s.federationResolver.FindEntities(fedCtx, query, aliases, 20)
 		fedCancel()
+	}
+
+	if pc := s.getPulseClient(); pc != nil {
+		agentID, _ := req.GetArguments()["agent_id"].(string)
+		if agentID == "" {
+			agentID = s.getLastAgent()
+		}
+		pulseSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+		count := len(results)
+		durationMs := time.Since(start).Milliseconds()
+		s.goBackground(func() {
+			pc.RecordSearchEvent(pulse.SearchEvent{
+				AgentID:     agentID,
+				ProjectID:   s.projectID,
+				Query:       query,
+				Mode:        "exact",
+				ResultCount: count,
+				DurationMs:  durationMs,
+				SessionID:   pulseSessID,
+			})
+		})
 	}
 
 	if format == "compact" {
@@ -791,6 +815,8 @@ func (s *Server) handleSearch(
 		return s.handleSemanticSearch(ctx, req)
 	}
 
+	start := time.Now()
+
 	root := s.graph.Root()
 	prefix := root
 	if prefix != "" && !strings.HasSuffix(prefix, "/") {
@@ -901,6 +927,27 @@ func (s *Server) handleSearch(
 			Doc:       h.node.Metadata["doc"],
 			Signature: h.node.Metadata["signature"],
 		}
+	}
+
+	if pc := s.getPulseClient(); pc != nil {
+		agentID, _ := req.GetArguments()["agent_id"].(string)
+		if agentID == "" {
+			agentID = s.getLastAgent()
+		}
+		pulseSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+		count := len(results)
+		durationMs := time.Since(start).Milliseconds()
+		s.goBackground(func() {
+			pc.RecordSearchEvent(pulse.SearchEvent{
+				AgentID:     agentID,
+				ProjectID:   s.projectID,
+				Query:       query,
+				Mode:        "exact",
+				ResultCount: count,
+				DurationMs:  durationMs,
+				SessionID:   pulseSessID,
+			})
+		})
 	}
 
 	return jsonResult(map[string]interface{}{

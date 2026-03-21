@@ -670,7 +670,7 @@ func (s *Server) handleGetContext(
 		if bc == nil || dc.Root == nil || dc.Root.File == "" {
 			return
 		}
-		if adrs, err := bc.GetADRs(context.Background(), dc.Root.File); err == nil && len(adrs) > 0 {
+		if adrs, err := bc.GetADRs(ctx, dc.Root.File); err == nil && len(adrs) > 0 {
 			if len(adrs) > 2 {
 				adrs = adrs[:2]
 			}

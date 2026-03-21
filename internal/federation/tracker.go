@@ -819,16 +819,6 @@ func (d *DeterministicDetector) DetectAndStore(ctx context.Context, filePath str
 	}
 }
 
-// ModuleCount returns the number of modules in the index. Used in tests.
-func (d *DeterministicDetector) ModuleCount() int {
-	return len(d.modules)
-}
-
-// Modules returns the module entries for inspection. Used in tests.
-func (d *DeterministicDetector) Modules() []moduleEntry {
-	return d.modules
-}
-
 // StoreDeps persists detected dependencies via the local store.
 // Errors are logged and skipped (fail-open). Existing deps for the same
 // file are cleaned up before inserting new ones.

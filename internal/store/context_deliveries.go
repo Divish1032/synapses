@@ -60,32 +60,3 @@ func (s *Store) CorrelateSessionOutcome(sessionID, outcome string) (int64, error
 	return n, nil
 }
 
-// GetContextDeliveriesForSession returns all recorded deliveries for a session,
-// ordered by insertion order (id ASC). Used by tests and Sprint 11 analysis queries.
-// Returns (nil, nil) when the store is not available.
-func (s *Store) GetContextDeliveriesForSession(sessionID string) ([]ContextDelivery, error) {
-	if s == nil || s.knowledgeDB == nil {
-		return nil, nil
-	}
-	rows, err := s.knowledgeDB.Query(
-		`SELECT session_id, agent_id, tool_name, entity, refetched, task_outcome
-		 FROM context_deliveries WHERE session_id = ? ORDER BY id ASC`,
-		sessionID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []ContextDelivery
-	for rows.Next() {
-		var cd ContextDelivery
-		var refetchedInt int
-		if err := rows.Scan(&cd.SessionID, &cd.AgentID, &cd.ToolName, &cd.Entity, &refetchedInt, &cd.TaskOutcome); err != nil {
-			return nil, err
-		}
-		cd.Refetched = refetchedInt == 1
-		out = append(out, cd)
-	}
-	return out, rows.Err()
-}

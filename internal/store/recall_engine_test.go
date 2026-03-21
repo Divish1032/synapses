@@ -379,7 +379,7 @@ func TestRecentMemories_ExcludesStaleByDefault(t *testing.T) {
 		AgentID:  "agent-1",
 		Source:   SourceAuto,
 	})
-	_ = st.MarkEntityMemoriesStale("repo::test.go::Foo", "node removed")
+	_ = st.MarkEntityMemoriesStaleForNodes([]string{"repo::test.go::Foo"}, "node removed")
 	_ = id
 
 	mems, err := st.RecentMemories(10, 7, nil, false)
@@ -404,7 +404,7 @@ func TestRecentMemories_IncludesStaleWhenRequested(t *testing.T) {
 		AgentID:  "agent-1",
 		Source:   SourceAuto,
 	})
-	_ = st.MarkEntityMemoriesStale("repo::test.go::Bar", "changed")
+	_ = st.MarkEntityMemoriesStaleForNodes([]string{"repo::test.go::Bar"}, "changed")
 
 	mems, err := st.RecentMemories(10, 7, nil, true)
 	if err != nil {

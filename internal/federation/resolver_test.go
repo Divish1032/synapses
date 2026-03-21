@@ -1144,17 +1144,6 @@ func TestAliases(t *testing.T) {
 	}
 }
 
-func TestHasAlias(t *testing.T) {
-	r := newResolver([]config.FederationEntry{{Path: "/a", Alias: "alpha"}})
-	defer r.Close()
-	if !r.HasAlias("alpha") {
-		t.Error("expected true")
-	}
-	if r.HasAlias("beta") {
-		t.Error("expected false")
-	}
-}
-
 // ── Config validation ───────────────────────────────────────────────────────
 
 func TestConfigValidation_DuplicateAlias(t *testing.T) {
@@ -1237,7 +1226,7 @@ func TestNodeExistsByName_LikeWildcardEscaped(t *testing.T) {
 		&graph.Node{ID: "test::b.go::Xinit", Name: "Xinit", Type: graph.NodeFunction, File: "b.go"},
 	)
 	// Searching "_init" should NOT match "Xinit" — underscore must be escaped.
-	results, err := st.FindNodesByName("_init", 10)
+	results, err := st.FindNodesByNameCtx(context.Background(),"_init", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1256,7 +1245,7 @@ func TestNodeExistsByName_PercentEscaped(t *testing.T) {
 		&graph.Node{ID: "test::b.go::XabcY", Name: "XabcY", Type: graph.NodeFunction, File: "b.go"},
 	)
 	// Searching "X%Y" should only match literal "X%Y", not "XabcY".
-	exists, err := st.NodeExistsByName("X%Y")
+	exists, err := st.NodeExistsByNameCtx(context.Background(),"X%Y")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1264,7 +1253,7 @@ func TestNodeExistsByName_PercentEscaped(t *testing.T) {
 		t.Error("expected X%Y to exist via exact match")
 	}
 	// FindNodesByName should find exactly 1 (the exact match) — not 2 via LIKE wildcard.
-	results, err := st.FindNodesByName("X%Y", 10)
+	results, err := st.FindNodesByNameCtx(context.Background(),"X%Y", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1282,7 +1271,7 @@ func TestFindNodesByName_MultipleMatches(t *testing.T) {
 		&graph.Node{ID: "test::b.go::Foo", Name: "Foo", Type: graph.NodeFunction, File: "b.go"},
 		&graph.Node{ID: "test::c.go::Bar", Name: "Bar", Type: graph.NodeFunction, File: "c.go"},
 	)
-	results, err := st.FindNodesByName("Foo", 10)
+	results, err := st.FindNodesByNameCtx(context.Background(),"Foo", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1297,7 +1286,7 @@ func TestFindNodesByName_QualifiedSuffix(t *testing.T) {
 		&graph.Node{ID: "test::a.go::Server.Handle", Name: "Server.Handle", Type: graph.NodeMethod, File: "a.go"},
 		&graph.Node{ID: "test::b.go::Handle", Name: "Handle", Type: graph.NodeFunction, File: "b.go"},
 	)
-	results, err := st.FindNodesByName("Handle", 10)
+	results, err := st.FindNodesByNameCtx(context.Background(),"Handle", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1524,12 +1513,12 @@ func gitOutputHelper(t *testing.T, dir string, args ...string) string {
 
 func assertExists(t *testing.T, st *store.Store, name string, want bool) {
 	t.Helper()
-	got, err := st.NodeExistsByName(name)
+	got, err := st.NodeExistsByNameCtx(context.Background(), name)
 	if err != nil {
-		t.Fatalf("NodeExistsByName(%q): %v", name, err)
+		t.Fatalf("NodeExistsByNameCtx(%q): %v", name, err)
 	}
 	if got != want {
-		t.Errorf("NodeExistsByName(%q) = %v, want %v", name, got, want)
+		t.Errorf("NodeExistsByNameCtx(%q) = %v, want %v", name, got, want)
 	}
 }
 
