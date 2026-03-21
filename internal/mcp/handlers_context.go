@@ -429,6 +429,8 @@ func (s *Server) handleGetContext(
 	// early "unchanged" response so agents can skip re-processing stale context.
 	// Skipped for mode=impact — that path produces a different response shape.
 	entityHash := computeEntityHash(best.ID, sg.Nodes, sg.Edges)
+	// Resolve pulse session ID early so cache-hit paths can use it too.
+	pulseSessID := s.getSynapseSessionID(sessionID)
 	if mode == "" {
 		explicitKnownHash, _ := req.GetArguments()["known_hash"].(string)
 		if explicitKnownHash != "" {
@@ -446,7 +448,7 @@ func (s *Server) handleGetContext(
 				s.goBackground(func() {
 					s.emitContextDelivery("get_context", cacheAgentID, entityName, best.File,
 						cacheResp, sg.Nodes, sg.Edges, sg.TruncatedCount, sg.Truncated,
-						false, true, durationMs)
+						false, true, durationMs, pulseSessID)
 				})
 				return jsonResult(cacheResp)
 			}
@@ -465,7 +467,7 @@ func (s *Server) handleGetContext(
 				s.goBackground(func() {
 					s.emitContextDelivery("get_context", cacheAgentID, entityName, best.File,
 						cacheResp, sg.Nodes, sg.Edges, sg.TruncatedCount, sg.Truncated,
-						false, true, durationMs)
+						false, true, durationMs, pulseSessID)
 				})
 				// Respect the requested format — agent expected compact text, not JSON.
 				// Explicit known_hash paths stay JSON (agent manages their own cache protocol).
@@ -778,6 +780,7 @@ func (s *Server) handleGetContext(
 			hasBrain,
 			false,
 			durationMs,
+			pulseSessID,
 		)
 	})
 
@@ -939,6 +942,7 @@ func (s *Server) asyncEnrichContext(
 	enrichCtx, enrichCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer enrichCancel()
 
+	brainStart := time.Now()
 	pkt := bc.BuildContextPacket(enrichCtx, brain.ContextPacketRequest{
 		ProjectID: s.projectID,
 		Snapshot: brain.SnapshotInput{
@@ -957,6 +961,23 @@ func (s *Server) asyncEnrichContext(
 		},
 		EnableLLM: s.config.Brain.ContextBuilder,
 	})
+	brainDuration := time.Since(brainStart).Milliseconds()
+
+	// Record brain usage to pulse for cost/usage tracking (non-blocking).
+	if pc := s.getPulseClient(); pc != nil {
+		brainSuccess := pkt != nil
+		s.goBackground(func() {
+			pc.RecordBrainUsage(pulse.BrainUsageEvent{
+				Tier:         "enrich",
+				Endpoint:     "BuildContextPacket",
+				DurationMs:   brainDuration,
+				ProjectID:    s.projectID,
+				TargetEntity: best.Name,
+				Success:      brainSuccess,
+			})
+		})
+	}
+
 	// Sanitize: don't cache "enrichment in progress" placeholder packets —
 	// they would poison the cache and suppress future real enrichments.
 	if pkt != nil && !strings.Contains(strings.ToLower(pkt.RootSummary), "in progress") {

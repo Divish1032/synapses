@@ -187,6 +187,11 @@ func (s *Server) handleEndSession(
 		s.ClearSynapseSession(mcpSessionID)
 	}
 
+	// Pulse: record session end event using the Synapses session UUID.
+	if pc := s.getPulseClient(); pc != nil {
+		pc.RecordSessionEventWithID(synapseSessionID, agentID, s.projectID, "end")
+	}
+
 	// ── Phase 6: absorb report_usage ─────────────────────────────────────
 	// If the agent provided model/token data, report it to pulse in one call.
 	// This saves agents from needing a separate report_usage call at session end.
@@ -197,7 +202,10 @@ func (s *Server) handleEndSession(
 		outputTokens, _ := req.GetArguments()["output_tokens"].(float64)
 		costUSD, _ := req.GetArguments()["cost_usd"].(float64)
 		if usageModel != "" {
-			sessID := agentID + ":" + s.projectID + ":" + time.Now().UTC().Format("2006-01-02")
+			sessID := synapseSessionID // Use main store UUID instead of synthetic ID.
+			if sessID == "" {
+				sessID = agentID + ":" + s.projectID + ":" + time.Now().UTC().Format("2006-01-02")
+			}
 			evt := pulse.AgentLLMUsageEvent{
 				SessionID:    sessID,
 				AgentID:      agentID,

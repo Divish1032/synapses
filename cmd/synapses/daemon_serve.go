@@ -949,7 +949,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		}
 	}
 
-	g, err := loadOrBuildGraphWithStore(absPath, st, false, cfg.Plugins, pluginCheck)
+	g, err := loadOrBuildGraphWithStore(absPath, st, false, cfg.Plugins, pluginCheck, sharedPulse, pathProjectID(absPath))
 	if err != nil {
 		st.Close()
 		projCancel()
@@ -1131,7 +1131,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	memEmbedder := createMemoryEmbedder(cfg)
 	if memEmbedder != nil {
 		srv.SetMemoryEmbedder(memEmbedder)
-		go embedAllMemories(projCtx, memEmbedder, st)
+		go embedAllMemories(projCtx, memEmbedder, st, sharedPulse)
 	}
 
 	// File watcher.
@@ -1146,6 +1146,9 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			fw = fw2
 			fw.SetConfig(cfg)
 			fw.SetProjectID(pathProjectID(absPath))
+			if sharedPulse != nil {
+				fw.SetPulseClient(sharedPulse) // P2-3: wire pulse for reparse events
+			}
 			srv.SetChangeSource(fw)
 			fw.SetPacketInvalidator(srv)
 			fw.SetBrainClient(brainCli)

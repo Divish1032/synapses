@@ -115,7 +115,7 @@ func TestEmbedAllMemories_EmbedsUnembeddedMemories(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	EmbedAllMemories(ctx, e, st)
+	EmbedAllMemories(ctx, e, st, nil)
 
 	assert.Equal(t, int32(3), e.callCount.Load())
 	assert.Equal(t, 3, st.MemoryEmbeddingCount())
@@ -127,13 +127,13 @@ func TestEmbedAllMemories_NilEmbedder(t *testing.T) {
 	defer st.Close()
 
 	// Should not panic.
-	EmbedAllMemories(context.Background(), nil, st)
+	EmbedAllMemories(context.Background(), nil, st, nil)
 }
 
 func TestEmbedAllMemories_NilStore(t *testing.T) {
 	e := &testEmbedder{vec: []float32{0.1}, model: "test"}
 	// Should not panic.
-	EmbedAllMemories(context.Background(), e, nil)
+	EmbedAllMemories(context.Background(), e, nil, nil)
 }
 
 func TestEmbedAllMemories_ContextCancellation(t *testing.T) {
@@ -159,7 +159,7 @@ func TestEmbedAllMemories_ContextCancellation(t *testing.T) {
 	vec := make([]float32, 384)
 	e := &testEmbedder{vec: vec, model: "test"}
 
-	EmbedAllMemories(ctx, e, st)
+	EmbedAllMemories(ctx, e, st, nil)
 
 	// Should have embedded 0 or very few memories due to cancellation.
 	assert.LessOrEqual(t, e.callCount.Load(), int32(5))
@@ -196,7 +196,7 @@ func TestEmbedAllMemories_SkipsAlreadyEmbedded(t *testing.T) {
 
 	e := &testEmbedder{vec: vec, model: "test-model"}
 
-	EmbedAllMemories(context.Background(), e, st)
+	EmbedAllMemories(context.Background(), e, st, nil)
 
 	// Only the un-embedded memory should be processed.
 	assert.Equal(t, int32(1), e.callCount.Load())

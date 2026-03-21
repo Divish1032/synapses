@@ -25,6 +25,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/metrics"
 	"github.com/SynapsesOS/synapses/internal/parser"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
@@ -122,6 +123,12 @@ type Watcher struct {
 	// loopAlive tracks whether the event processing loop is running.
 	// Set to 0 (dead) when the loop exhausts all restart attempts.
 	loopAlive atomic.Int32
+
+	// pulseClient, when non-nil, receives pipeline instrumentation events.
+	// Set via SetPulseClient; may be nil (pulse disabled). (P2-3/P2-4)
+	pulseClient *pulse.Client
+	// loopPanics counts how many times the watcher event loop panicked. (P2-4)
+	loopPanics atomic.Int64
 }
 
 // New creates a Watcher. store may be nil; if provided the cache is updated
@@ -183,6 +190,18 @@ func (w *Watcher) SetCrossProjectTracker(tracker CrossProjectTracker) {
 // Must be called before Start. tracker may be nil to disable.
 func (w *Watcher) SetBrainCrossProjectTracker(tracker BrainCrossProjectTracker) {
 	w.cpBrainTracker = tracker
+}
+
+// SetPulseClient wires a pulse.Client into the watcher for pipeline instrumentation.
+// When set, reparseFile emits ReparseEvents and the event loop emits health events.
+// Must be called before Start. pc may be nil to disable. (P2-3/P2-4)
+func (w *Watcher) SetPulseClient(pc *pulse.Client) {
+	w.pulseClient = pc
+}
+
+// LoopPanics returns the number of times the watcher event loop panicked. (P2-4)
+func (w *Watcher) LoopPanics() int64 {
+	return w.loopPanics.Load()
 }
 
 // SetConfigChangeHandler registers a callback that is invoked whenever
@@ -320,6 +339,7 @@ func (w *Watcher) loop(root string) {
 				if r := recover(); r != nil {
 					logutil.Error("synapses/watcher: panic in loop (attempt %d/%d): %v\n", attempt+1, maxRestarts+1, r)
 					panicked = true
+					w.loopPanics.Add(1) // P2-4: track panic count
 				}
 			}()
 			for {
@@ -522,6 +542,7 @@ func fileContentHash(path string) (string, bool) {
 func (w *Watcher) reparseFile(path, _ string) {
 	w.reparseMu.Lock()
 	defer w.reparseMu.Unlock()
+	reparseStart := time.Now() // P2-3: timing
 
 	// Sprint 11.9: Check for tree-sitter parse errors before updating graph.
 	// Half-saved files during active editing produce corrupted ASTs with phantom
@@ -599,6 +620,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 
 	// AM-2: cascade stale flag to memories anchored to nodes that disappeared
 	// during re-parse (functions renamed or deleted within the file).
+	var memoriesStaled int // P2-14: count for ReparseEvent
 	if w.store != nil && len(beforeNodeIDs) > 0 {
 		afterIDs := make(map[string]struct{}, len(beforeNodeIDs))
 		for _, n := range w.graph.NodesForFile(path) {
@@ -614,6 +636,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 			}
 		}
 		if len(removedIDs) > 0 {
+			memoriesStaled = len(removedIDs) // P2-14: capture for ReparseEvent
 			if err := w.store.MarkAnchoredMemoriesStale(removedIDs, "anchor node removed"); err != nil {
 				logutil.Warn("synapses/watcher: cascade memory stale: %v\n", err)
 			}
@@ -743,6 +766,21 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// Intra-project change alerts: notify agents whose claimed scope covers the
 	// changed file, and agents whose in-progress task has nodes in the changed file.
 	w.notifyIntraProjectImpact(path)
+
+	// P2-3: emit ReparseEvent. Enqueue is mutex+append (O(1)) — direct call.
+	if w.pulseClient != nil {
+		lang := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+		w.pulseClient.RecordReparseEvent(pulse.ReparseEvent{
+			File:           path,
+			Language:       lang,
+			DurationMs:     time.Since(reparseStart).Milliseconds(),
+			NodesBefore:    nodesBefore,
+			NodesAfter:     nodesAfter,
+			EdgesDelta:     edgesAfter - edgesBefore,
+			MemoriesStaled: memoriesStaled, // P2-14: memories_staled proxy
+			ProjectID:      w.projectID,
+		})
+	}
 
 	logutil.Info("synapses/watcher: updated %s\n", path)
 	w.persistAsync(path)

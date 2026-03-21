@@ -282,8 +282,14 @@ func (s *Server) goBackground(fn func()) {
 	select {
 	case s.bgQueue <- fn:
 		// queued successfully
+		if pc := s.getPulseClient(); pc != nil {
+			pc.RecordBackgroundWorkerEnqueue() // P2-5
+		}
 	default:
 		logutil.Warn("synapses: background queue full (%d), dropping work\n", bgQueueCap)
+		if pc := s.getPulseClient(); pc != nil {
+			pc.RecordBackgroundWorkerDrop() // P2-5
+		}
 	}
 	s.shutdownMu.RUnlock()
 }
@@ -581,11 +587,22 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		// Fire-and-forget telemetry to synapses-pulse (if configured).
 		if pc := s.getPulseClient(); pc != nil && s.logToolCalls {
 			var responseBytes int
+			var errorMsg string
 			if result != nil && !result.IsError && len(result.Content) > 0 {
 				if tc, ok := result.Content[0].(mcp.TextContent); ok {
 					responseBytes = len(tc.Text)
 				}
 			}
+			if result != nil && result.IsError && len(result.Content) > 0 {
+				if tc, ok := result.Content[0].(mcp.TextContent); ok {
+					errorMsg = tc.Text
+					if len(errorMsg) > 200 {
+						// Truncate at a valid UTF-8 boundary.
+						errorMsg = truncateUTF8(errorMsg, 200)
+					}
+				}
+			}
+			pulseSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
 			evt := pulse.ToolCallEvent{
 				ToolName:      req.Params.Name,
 				AgentID:       agentID,
@@ -594,6 +611,8 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 				DurationMs:    elapsed.Milliseconds(),
 				Success:       success,
 				ResponseBytes: responseBytes,
+				SessionID:     pulseSessID,
+				ErrorMessage:  errorMsg,
 			}
 			s.goBackground(func() { pc.RecordToolCall(evt) })
 		}
@@ -972,6 +991,9 @@ func (s *Server) StartBackground() {
 						defer func() {
 							if r := recover(); r != nil {
 								logutil.Error("synapses: background worker panic: %v\nstack:\n%s\n", r, debug.Stack())
+								if pc := s.getPulseClient(); pc != nil {
+									pc.RecordBackgroundWorkerPanic() // P2-5
+								}
 							}
 						}()
 						fn()

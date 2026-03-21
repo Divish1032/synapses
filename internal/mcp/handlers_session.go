@@ -328,19 +328,9 @@ func (s *Server) handleSessionInit(
 		s.ctxCallMu.Unlock()
 	}
 
-	// Notify pulse of session start and record the model if provided (Option A).
-	if pc := s.getPulseClient(); pc != nil && agentID != "" && s.logSessions {
-		aid := agentID
-		projID := s.projectID
-		mdl := model
-		prov := provider
-		s.goBackground(func() {
-			pc.RecordSessionEvent(aid, projID, "start")
-			if mdl != "" {
-				pc.RecordSessionModel(aid, projID, mdl, prov)
-			}
-		})
-	}
+	// Pulse session event is deferred until after synapseSessionID is obtained
+	// (see below) so we can pass the main store's UUID to eliminate session ID
+	// collision.
 
 	// Emit session-start event so peers polling get_events see a new agent arrive.
 	if s.store != nil && agentID != "" {
@@ -383,6 +373,22 @@ func (s *Server) handleSessionInit(
 			// Prune closed/hibernated sessions older than 90 days — debounced to once/day.
 			s.goBackground(func() { s.store.PruneOldSessions(90 * 24 * time.Hour) }) //nolint:errcheck
 		}
+	}
+
+	// Notify pulse of session start using the Synapses session UUID (eliminates
+	// session ID collision from the old synthetic agentID:projectID:date format).
+	if pc := s.getPulseClient(); pc != nil && agentID != "" && s.logSessions {
+		aid := agentID
+		projID := s.projectID
+		mdl := model
+		prov := provider
+		sessID := synapseSessionID // use main store's UUID
+		s.goBackground(func() {
+			pc.RecordSessionEventWithID(sessID, aid, projID, "start")
+			if mdl != "" {
+				pc.RecordSessionModelWithID(sessID, aid, projID, mdl, prov)
+			}
+		})
 	}
 
 	// ── Look up agent context profile for incremental delivery ───────────
@@ -1516,7 +1522,7 @@ func (s *Server) inferOrphanEvidence(ot store.OrphanedTask, recentChanges []chan
 // The agent calls this after completing a response to give Synapses accurate
 // model cost data that cannot be inferred from the MCP layer alone.
 func (s *Server) handleReportUsage(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
@@ -1546,7 +1552,11 @@ func (s *Server) handleReportUsage(
 
 	pc := s.getPulseClient()
 	if pc != nil {
-		sessID := agentID + ":" + s.projectID + ":" + time.Now().UTC().Format("2006-01-02")
+		mcpSessID := SessionIDFromContext(ctx)
+		sessID := s.getSynapseSessionID(mcpSessID)
+		if sessID == "" {
+			sessID = agentID + ":" + s.projectID + ":" + time.Now().UTC().Format("2006-01-02")
+		}
 		evt := pulse.AgentLLMUsageEvent{
 			SessionID:    sessID,
 			AgentID:      agentID,

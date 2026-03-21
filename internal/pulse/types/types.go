@@ -12,6 +12,8 @@ type ToolCallEvent struct {
 	DurationMs    int64  `json:"duration_ms"`
 	Success       bool   `json:"success"`
 	ResponseBytes int    `json:"response_bytes"`
+	SessionID     string `json:"session_id,omitempty"`
+	ErrorMessage  string `json:"error_message,omitempty"`
 }
 
 // ContextDeliveryEvent is sent for context-delivery tools (get_context,
@@ -32,6 +34,8 @@ type ContextDeliveryEvent struct {
 	DurationMs     int64  `json:"duration_ms"`
 	CacheHit       bool   `json:"cache_hit"`
 	BrainEnriched  bool   `json:"brain_enriched"`
+	SessionID      string `json:"session_id,omitempty"`
+	Intent         string `json:"intent,omitempty"`
 }
 
 // SessionEvent is sent when an agent session starts or ends.
@@ -39,6 +43,7 @@ type SessionEvent struct {
 	AgentID   string `json:"agent_id"`
 	ProjectID string `json:"project_id,omitempty"`
 	Event     string `json:"event"` // "start" | "end" | "task_done"
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // OutcomeSignalEvent is sent for passive outcome signals (R29).
@@ -49,6 +54,7 @@ type OutcomeSignalEvent struct {
 	Entity     string `json:"entity,omitempty"`
 	SignalType string `json:"signal_type"`
 	Count      int    `json:"count,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
 }
 
 // EntityEffectiveness is returned by GetEffectiveness for a single entity.
@@ -72,6 +78,8 @@ type BrainUsageEvent struct {
 	CostUSD          float64 `json:"cost_usd,omitempty"`
 	AgentID          string  `json:"agent_id,omitempty"`
 	ProjectID        string  `json:"project_id,omitempty"`
+	TargetEntity     string  `json:"target_entity,omitempty"`
+	Success          bool    `json:"success"`
 }
 
 // TotalTokens returns prompt + completion tokens.
@@ -91,4 +99,75 @@ type AgentLLMUsageEvent struct {
 	InputTokens  int     `json:"input_tokens"`
 	OutputTokens int     `json:"output_tokens"`
 	CostUSD      float64 `json:"cost_usd,omitempty"`
+}
+
+// Phase 2: Pipeline instrumentation event types.
+
+// ParseEvent records the outcome of parsing a single source file during WalkDir.
+type ParseEvent struct {
+	File              string `json:"file"`
+	Language          string `json:"language"`
+	DurationMs        int64  `json:"duration_ms"`
+	NodesProduced     int    `json:"nodes_produced"`
+	EdgesProduced     int    `json:"edges_produced"`
+	CallSitesProduced int    `json:"call_sites_produced"`
+	ErrorType         string `json:"error_type,omitempty"`
+	ProjectID         string `json:"project_id"`
+}
+
+// ReparseEvent records the outcome of incrementally re-parsing a changed file.
+type ReparseEvent struct {
+	File           string `json:"file"`
+	Language       string `json:"language"`
+	DurationMs     int64  `json:"duration_ms"`
+	NodesBefore    int    `json:"nodes_before"`
+	NodesAfter     int    `json:"nodes_after"`
+	EdgesDelta     int    `json:"edges_delta"`
+	MemoriesStaled int    `json:"memories_staled"`
+	ProjectID      string `json:"project_id"`
+}
+
+// GraphSnapshotEvent captures a point-in-time snapshot of graph topology metrics.
+type GraphSnapshotEvent struct {
+	SnapshotType       string  `json:"snapshot_type"` // "full" | "delta"
+	NodesTotal         int     `json:"nodes_total"`
+	EdgesTotal         int     `json:"edges_total"`
+	EdgesCalls         int     `json:"edges_calls"`
+	Density            float64 `json:"density"`
+	OrphanNodes        int     `json:"orphan_nodes"`
+	CrossFileEdgePct   float64 `json:"cross_file_edge_pct"`
+	MaxFanin           int     `json:"max_fanin"`
+	MaxFanout          int     `json:"max_fanout"`
+	FanInP50           int     `json:"fan_in_p50"`
+	FanInP95           int     `json:"fan_in_p95"`
+	FanOutP50          int     `json:"fan_out_p50"`
+	FanOutP95          int     `json:"fan_out_p95"`
+	NodeTypeDistJSON   string  `json:"node_type_distribution"` // JSON map
+	ProjectID          string  `json:"project_id"`
+}
+
+// EmbeddingEvent records the outcome of an EmbedAllMemories batch operation.
+type EmbeddingEvent struct {
+	Trigger     string `json:"trigger"`      // "startup" | "reparse" | "manual"
+	Count       int    `json:"count"`
+	Errors      int    `json:"errors"`
+	DurationMs  int64  `json:"duration_ms"`
+	Model       string `json:"model"`
+	ModelStatus string `json:"model_status"` // "loaded" | "downloading" | "failed" | "none"
+	Success     bool   `json:"success"`
+	StaleCount  int    `json:"stale_count"`
+	ProjectID   string `json:"project_id"`
+}
+
+// IndexEvent records the outcome of a full or incremental index operation.
+type IndexEvent struct {
+	DurationMs          int64   `json:"duration_ms"`
+	FilesIndexed        int     `json:"files_indexed"`
+	TotalNodes          int     `json:"total_nodes"`
+	TotalEdges          int     `json:"total_edges"`
+	CallSitesResolved   int     `json:"call_sites_resolved"`
+	CallSitesUnresolved int     `json:"call_sites_unresolved"`
+	ResolutionRate      float64 `json:"resolution_rate"`
+	LanguageDistJSON    string  `json:"language_distribution"` // JSON map
+	ProjectID           string  `json:"project_id"`
 }

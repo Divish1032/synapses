@@ -1027,7 +1027,7 @@ func TestDetachedSysProcAttr(t *testing.T) {
 
 func TestBuildGraph_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
-	g, err := buildGraph(dir, nil, nil, false, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1039,7 +1039,7 @@ func TestBuildGraph_EmptyDir(t *testing.T) {
 func TestBuildGraph_WithGoFile(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644)
-	g, err := buildGraph(dir, nil, nil, false, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1064,7 +1064,7 @@ func TestLoadOrBuildGraphWithStore_FreshStore(t *testing.T) {
 	}
 	defer st.Close()
 
-	g, err := loadOrBuildGraphWithStore(dir, st, false, nil, nil)
+	g, err := loadOrBuildGraphWithStore(dir, st, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1697,7 +1697,7 @@ func buildTestIndexedDir(t *testing.T) (string, *store.Store, *graph.Graph) {
 		t.Fatalf("store open: %v", err)
 	}
 
-	g, err := buildGraph(dir, st, nil, false, nil, nil)
+	g, err := buildGraph(dir, st, nil, false, nil, nil, nil, "")
 	if err != nil {
 		st.Close()
 		t.Fatalf("build graph: %v", err)
@@ -1887,7 +1887,7 @@ func TestSmartReindex_WithData(t *testing.T) {
 func TestLoadOrBuildGraphWithStore_ForceReindex(t *testing.T) {
 	dir, st, _ := buildTestIndexedDir(t)
 	defer st.Close()
-	g, err := loadOrBuildGraphWithStore(dir, st, true, nil, nil)
+	g, err := loadOrBuildGraphWithStore(dir, st, true, nil, nil, nil, "")
 	if err != nil {
 		t.Fatalf("force reindex: %v", err)
 	}
@@ -1906,7 +1906,7 @@ func TestLoadOrBuildGraphWithStore_CachedLoad(t *testing.T) {
 	g0 := graph.New("cached-test")
 	_ = st.SaveGraph(g0)
 
-	g, err := loadOrBuildGraphWithStore(dir, st, false, nil, nil)
+	g, err := loadOrBuildGraphWithStore(dir, st, false, nil, nil, nil, "")
 	if err != nil {
 		t.Logf("cached load: %v (may fall through to full reindex)", err)
 	}
