@@ -756,6 +756,11 @@ func Open(path string) (*Store, error) {
 		_, _ = knowledgeDB.Exec(`INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')`)
 	}
 
+	// One-time migration: normalize stored embeddings to unit length so cosine
+	// similarity reduces to a single dot product (Sprint 11.3). Idempotent —
+	// normalizing an already-normalized vector is a no-op within float32 precision.
+	st.normalizeStoredEmbeddings()
+
 	if os.Getenv("SYNAPSES_QUERY_STATS") == "1" {
 		st.CollectQueryStats(os.Stderr)
 	}
