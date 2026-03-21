@@ -1047,3 +1047,151 @@ func TestGetStaleEmbeddingMemoryIDs_LimitRespected(t *testing.T) {
 		t.Errorf("expected exactly 5 results with limit=5, got %d", len(ids))
 	}
 }
+
+// ── InvalidateEmbeddingsByModel (model upgrade migration) ──────────────────
+
+func TestInvalidateEmbeddingsByModel_MarksOldModelStale(t *testing.T) {
+	t.Parallel()
+	st, memID := openMemEmbedTestStore(t)
+
+	// Embed with old model.
+	_ = st.UpsertMemoryEmbedding(memID, "all-MiniLM-L6-v2", []float32{1, 0, 0})
+
+	// Add a second memory with old model.
+	ids := seedMultipleMemories(t, st)
+	_ = st.UpsertMemoryEmbedding(ids[0], "all-MiniLM-L6-v2", []float32{0, 1, 0})
+
+	// Invalidate: switch to nomic.
+	n, err := st.InvalidateEmbeddingsByModel("nomic-embed-text-v1.5")
+	if err != nil {
+		t.Fatalf("InvalidateEmbeddingsByModel: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 invalidated, got %d", n)
+	}
+
+	// Both should now appear in GetMemoriesWithoutEmbeddings (stale=1 picked up).
+	missing, err := st.GetMemoriesWithoutEmbeddings(0)
+	if err != nil {
+		t.Fatalf("GetMemoriesWithoutEmbeddings: %v", err)
+	}
+	foundOrig, foundSeed := false, false
+	for _, m := range missing {
+		if m == memID {
+			foundOrig = true
+		}
+		if m == ids[0] {
+			foundSeed = true
+		}
+	}
+	if !foundOrig {
+		t.Error("original memory should appear in missing list after model invalidation")
+	}
+	if !foundSeed {
+		t.Error("seeded memory should appear in missing list after model invalidation")
+	}
+}
+
+func TestInvalidateEmbeddingsByModel_SkipsCurrentModel(t *testing.T) {
+	t.Parallel()
+	st, memID := openMemEmbedTestStore(t)
+
+	// Embed with current model.
+	_ = st.UpsertMemoryEmbedding(memID, "nomic-embed-text-v1.5", []float32{1, 0, 0})
+
+	// Invalidate with same model — should be a no-op.
+	n, err := st.InvalidateEmbeddingsByModel("nomic-embed-text-v1.5")
+	if err != nil {
+		t.Fatalf("InvalidateEmbeddingsByModel: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 invalidated (same model), got %d", n)
+	}
+}
+
+func TestInvalidateEmbeddingsByModel_SkipsAlreadyStale(t *testing.T) {
+	t.Parallel()
+	st, memID := openMemEmbedTestStore(t)
+
+	// Embed with old model and mark stale manually.
+	_ = st.UpsertMemoryEmbedding(memID, "all-MiniLM-L6-v2", []float32{1, 0, 0})
+	_ = st.MarkMemoryEmbeddingsStale([]string{memID})
+
+	// Invalidate — already stale, should not count again.
+	n, err := st.InvalidateEmbeddingsByModel("nomic-embed-text-v1.5")
+	if err != nil {
+		t.Fatalf("InvalidateEmbeddingsByModel: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 (already stale), got %d", n)
+	}
+}
+
+func TestInvalidateEmbeddingsByModel_EmptyModelNoOp(t *testing.T) {
+	t.Parallel()
+	st, memID := openMemEmbedTestStore(t)
+	_ = st.UpsertMemoryEmbedding(memID, "test", []float32{1, 0, 0})
+
+	n, err := st.InvalidateEmbeddingsByModel("")
+	if err != nil {
+		t.Fatalf("InvalidateEmbeddingsByModel: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 for empty model, got %d", n)
+	}
+}
+
+func TestInvalidateEmbeddingsByModel_MixedModels(t *testing.T) {
+	t.Parallel()
+	st, _ := openMemEmbedTestStore(t)
+	ids := seedMultipleMemories(t, st)
+
+	// Two with old model, two with new model.
+	_ = st.UpsertMemoryEmbedding(ids[0], "all-MiniLM-L6-v2", []float32{1, 0})
+	_ = st.UpsertMemoryEmbedding(ids[1], "all-MiniLM-L6-v2", []float32{0, 1})
+	_ = st.UpsertMemoryEmbedding(ids[2], "nomic-embed-text-v1.5", []float32{1, 1})
+	_ = st.UpsertMemoryEmbedding(ids[3], "nomic-embed-text-v1.5", []float32{0, 0})
+
+	n, err := st.InvalidateEmbeddingsByModel("nomic-embed-text-v1.5")
+	if err != nil {
+		t.Fatalf("InvalidateEmbeddingsByModel: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 (old model only), got %d", n)
+	}
+}
+
+func TestGetMemoriesWithoutEmbeddings_IncludesStaleEmbeddings(t *testing.T) {
+	t.Parallel()
+	st, memID := openMemEmbedTestStore(t)
+
+	// Embed normally.
+	_ = st.UpsertMemoryEmbedding(memID, "test", []float32{1, 0, 0})
+
+	// Verify NOT in missing list.
+	missing, _ := st.GetMemoriesWithoutEmbeddings(0)
+	for _, m := range missing {
+		if m == memID {
+			t.Fatal("freshly embedded memory should not be in missing list")
+		}
+	}
+
+	// Mark stale (simulates model upgrade invalidation).
+	_ = st.MarkMemoryEmbeddingsStale([]string{memID})
+
+	// Should now appear as needing re-embedding.
+	missing, err := st.GetMemoriesWithoutEmbeddings(0)
+	if err != nil {
+		t.Fatalf("GetMemoriesWithoutEmbeddings: %v", err)
+	}
+	found := false
+	for _, m := range missing {
+		if m == memID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("memory with stale embedding should appear in missing list")
+	}
+}

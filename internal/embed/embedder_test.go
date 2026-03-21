@@ -57,5 +57,5 @@ func TestOllamaEmbedder_CustomModel(t *testing.T) {
 
 func TestBuiltinEmbedder_Model(t *testing.T) {
 	e := embed.NewBuiltinEmbedder("/tmp/test-models")
-	assert.Equal(t, "all-MiniLM-L6-v2", e.Model())
+	assert.Equal(t, "nomic-embed-text-v1.5", e.Model())
 }
