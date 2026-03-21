@@ -517,3 +517,113 @@ func TestGetBrainClient_NoBrain(t *testing.T) {
 		t.Error("expected nil brain client for unconfigured server")
 	}
 }
+
+// TestSerializeCompact_SandwichOrdering verifies the "Lost in the Middle" ordering:
+// safety-critical content (violations, quality gaps, warnings) at the BEGINNING,
+// supplementary content (blame, ADRs, annotations) in the MIDDLE,
+// actionable items (calls, called-by, callee blocks) at the END.
+func TestSerializeCompact_SandwichOrdering(t *testing.T) {
+	root := &graph.Node{
+		ID: "root", Name: "AuthLogin", Type: graph.NodeFunction,
+		File: "pkg/auth/auth.go", Line: 10,
+		Metadata: map[string]string{
+			"blame_author": "alice",
+			"blame_date":   "2026-03-01",
+			"blame_subject": "refactor auth",
+		},
+	}
+	dc := &directionalContext{
+		Root: root,
+		Enrichment: &contextEnrichment{
+			RuleAlerts: []ruleAlert{
+				{RuleID: "no-cross", Severity: "HIGH", FromNode: "a::b::X", ToNode: "c::d::Y", EdgeType: "CALLS"},
+			},
+		},
+		QualityGaps: []store.QualityGap{
+			{GapID: "GAP-1", Severity: "MEDIUM", Description: "missing tests"},
+		},
+		ContextPacket: &brain.ContextPacket{
+			GraphWarnings: []string{"high fan-out"},
+			Concerns:      []string{"no error handling"},
+		},
+		Callees: []graph.CarvedNode{
+			{Node: &graph.Node{ID: "c1", Name: "ValidateToken", Type: graph.NodeFunction, File: "token.go", Line: 5}},
+		},
+		Callers: []graph.CarvedNode{
+			{Node: &graph.Node{ID: "c2", Name: "HandleRequest", Type: graph.NodeFunction, File: "handler.go", Line: 20}},
+		},
+		ADRs:       []brain.ADR{{ID: "adr-1", Title: "Use JWT", Status: "accepted"}},
+		Principles: []string{"keep it simple"},
+		Annotations: map[string][]store.Annotation{
+			"root": {{Note: "needs refactor"}},
+		},
+	}
+
+	out := serializeCompact(dc, "full")
+
+	// Find positions of key sections.
+	posViolation := strings.Index(out, "rule violation")
+	posGap := strings.Index(out, "quality gap")
+	posWarning := strings.Index(out, "high fan-out")
+	posBlame := strings.Index(out, "@alice")
+	posAnnotation := strings.Index(out, "needs refactor")
+	posADR := strings.Index(out, "[ADR]")
+	posLaws := strings.Index(out, "Laws:")
+	posCalls := strings.Index(out, "Calls:")
+	posCalledBy := strings.Index(out, "Called by:")
+
+	// All sections must be present.
+	for _, check := range []struct {
+		name string
+		pos  int
+	}{
+		{"violation", posViolation},
+		{"gap", posGap},
+		{"warning", posWarning},
+		{"blame", posBlame},
+		{"annotation", posAnnotation},
+		{"ADR", posADR},
+		{"laws", posLaws},
+		{"calls", posCalls},
+		{"called by", posCalledBy},
+	} {
+		if check.pos < 0 {
+			t.Fatalf("section %q not found in output:\n%s", check.name, out)
+		}
+	}
+
+	// BEGINNING: violations and quality gaps before blame and ADRs.
+	if posViolation > posBlame {
+		t.Error("sandwich: violations must appear before blame (beginning > middle)")
+	}
+	if posGap > posBlame {
+		t.Error("sandwich: quality gaps must appear before blame (beginning > middle)")
+	}
+
+	// MIDDLE: blame, annotations, ADRs before calls/called-by.
+	if posBlame > posCalls {
+		t.Error("sandwich: blame must appear before calls (middle > end)")
+	}
+	if posAnnotation > posCalls {
+		t.Error("sandwich: annotations must appear before calls (middle > end)")
+	}
+	if posADR > posCalls {
+		t.Error("sandwich: ADRs must appear before calls (middle > end)")
+	}
+	if posLaws > posCalls {
+		t.Error("sandwich: laws must appear before calls (middle > end)")
+	}
+
+	// END: warnings before calls/called-by (safety at beginning of post-summary).
+	if posWarning > posADR {
+		t.Error("sandwich: warnings must appear before ADRs")
+	}
+
+	// END: calls/called-by at the end.
+	if posCalls < posADR {
+		t.Error("sandwich: calls must appear after ADRs (end > middle)")
+	}
+	if posCalledBy < posADR {
+		t.Error("sandwich: called-by must appear after ADRs (end > middle)")
+	}
+}
