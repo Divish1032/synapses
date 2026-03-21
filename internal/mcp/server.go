@@ -177,6 +177,10 @@ type Server struct {
 	sessionCallsMu sync.Mutex
 	sessionCalls   map[string]*sessionCallEntry
 
+	// P5 — SA-C1: per-session tool position counter for sequence capture.
+	// Key: MCP sessionID. Protected by sessionCallsMu (reuse existing lock).
+	toolPositions map[string]int
+
 	// Session Intelligence (Layer 1): maps MCP connection session ID → Synapses session UUID.
 	// Created on session_init(); used to attribute every subsequent tool call to a session.
 	// Key: MCP sessionID (from SessionIDFromContext) or "stdio" for single-connection mode.
@@ -465,6 +469,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		store:            st,
 		packetCache:      make(map[string]*packetCacheEntry, 20),
 		sessionCalls:     make(map[string]*sessionCallEntry),
+		toolPositions:    make(map[string]int),
 		synapsesSessions: make(map[string]*synapseSessionEntry),
 		toolHandlers:     make(map[string]server.ToolHandlerFunc),
 		stopCh:           make(chan struct{}),
@@ -603,6 +608,16 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 				}
 			}
 			pulseSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+			// P5 — Item 26: serialize request params (truncated for storage).
+			var reqParams string
+			if args := req.GetArguments(); len(args) > 0 {
+				if b, jErr := json.Marshal(args); jErr == nil {
+					reqParams = string(b)
+					if len(reqParams) > 512 {
+						reqParams = reqParams[:512]
+					}
+				}
+			}
 			evt := pulse.ToolCallEvent{
 				ToolName:      req.Params.Name,
 				AgentID:       agentID,
@@ -613,8 +628,19 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 				ResponseBytes: responseBytes,
 				SessionID:     pulseSessID,
 				ErrorMessage:  errorMsg,
+				RequestParams: reqParams,
 			}
 			s.goBackground(func() { pc.RecordToolCall(evt) })
+		}
+		// P5 — SA-C1: record tool sequence entry for workflow analysis.
+		if pc := s.getPulseClient(); pc != nil {
+			sessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+			if sessID != "" {
+				pos := s.nextToolPosition(SessionIDFromContext(ctx))
+				toolName := req.Params.Name
+				ok := success
+				s.goBackground(func() { pc.RecordToolSequenceEntry(sessID, toolName, pos, ok) })
+			}
 		}
 		// RX1: track per-connection call depth and auto-trigger session log on threshold.
 		// Skip end_session calls themselves to avoid recursion.

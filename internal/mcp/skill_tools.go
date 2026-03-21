@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/skills"
 )
 
@@ -112,7 +114,41 @@ func (s *Server) handleExecuteSkill(ctx context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultError("execute_skill: skill engine not initialized; call SetSkillRecipes before serving requests"), nil
 	}
 
+	skillStart := time.Now()
 	result, err := s.skillExecutor.Execute(ctx, *found, params)
+	skillDurMs := float64(time.Since(skillStart).Milliseconds())
+
+	// P5 — COV-15: emit skill execution event to pulse.
+	if pc := s.getPulseClient(); pc != nil {
+		stepsTotal := len(found.Steps)
+		stepsOK := 0
+		var errStep string
+		if result != nil {
+			for _, sr := range result.Steps {
+				if sr.Error == "" && !sr.Skipped {
+					stepsOK++
+				} else if errStep == "" && sr.Error != "" {
+					errStep = sr.Tool
+				}
+			}
+		}
+		agentID, _ := req.GetArguments()["agent_id"].(string)
+		if agentID == "" {
+			agentID = s.getLastAgent()
+		}
+		evt := pulse.SkillExecutionEvent{
+			AgentID:        agentID,
+			ProjectID:      s.projectID,
+			SkillName:      skillID,
+			DurationMs:     skillDurMs,
+			StepsTotal:     stepsTotal,
+			StepsSucceeded: stepsOK,
+			Success:        err == nil,
+			ErrorStep:      errStep,
+		}
+		s.goBackground(func() { pc.RecordSkillExecution(evt) })
+	}
+
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("execute_skill: %v", err)), nil
 	}

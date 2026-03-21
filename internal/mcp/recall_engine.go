@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -162,6 +163,7 @@ func (s *Server) quadRecallSearch(
 			chCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 
+			vecSearchStart := time.Now()
 			queryVec, embedErr := s.memoryEmbedder.Embed(chCtx, query)
 			if embedErr != nil || len(queryVec) == 0 {
 				if embedErr != nil {
@@ -175,6 +177,11 @@ func (s *Server) quadRecallSearch(
 			// MemoryVectorSearchWithThreshold no longer filters e.stale=0;
 			// stale results carry StaleEmbedding=true for agent annotation.
 			vecResults, vecErr := s.store.MemoryVectorSearchWithThreshold(queryVec, channelLimit, 0.3)
+			// P5 — Item 39: record vector search latency.
+			vecSearchMs := float64(time.Since(vecSearchStart).Milliseconds())
+			mu.Lock()
+			channels["_vector_search_ms"] = []string{fmt.Sprintf("%.0f", vecSearchMs)}
+			mu.Unlock()
 			if vecErr != nil {
 				logRecallChannelError("semantic", vecErr)
 				return

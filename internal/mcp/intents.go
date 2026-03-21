@@ -368,6 +368,7 @@ func (s *Server) handlePrepareContext(
 				DurationMs:     0, // not tracked at this level
 				SessionID:      sessID,
 				Intent:         intentCopy,
+				EntityFound:    true,
 			})
 		})
 	}
@@ -1139,11 +1140,12 @@ func (s *Server) handlePlanContext(
 		entityCopy := target
 		s.goBackground(func() {
 			pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
-				ToolName:  "plan_context",
-				ProjectID: projID,
-				Entity:    entityCopy,
-				SessionID: sessID,
-				Intent:    "plan",
+				ToolName:    "plan_context",
+				ProjectID:   projID,
+				Entity:      entityCopy,
+				SessionID:   sessID,
+				Intent:      "plan",
+				EntityFound: true,
 			})
 		})
 	}

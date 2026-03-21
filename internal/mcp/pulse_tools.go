@@ -62,6 +62,8 @@ func (s *Server) emitContextDelivery(
 		CacheHit:       cacheHit,
 		DurationMs:     durationMs,
 		SessionID:      sessionID,
+		// P5 — Item 30: entity was found (caller only invokes emitContextDelivery on success).
+		EntityFound: true,
 	})
 }
 

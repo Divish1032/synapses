@@ -808,6 +808,40 @@ func cmdDaemonServe(args []string) error {
 		json.NewEncoder(w).Encode(data)
 	})
 
+	// GET /v1/health — P5 Item 23: lightweight health endpoint.
+	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		snap := sharedPulse.GetHealthSnapshot()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(snap)
+	})
+
+	// GET /api/admin/pulse/monthly?year=YYYY&month=MM — P5 Item 20: monthly ROI report.
+	mux.HandleFunc("/api/admin/pulse/monthly", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		now := time.Now().UTC()
+		year, month := now.Year(), int(now.Month())
+		if y := r.URL.Query().Get("year"); y != "" {
+			if n, err := strconv.Atoi(y); err == nil {
+				year = n
+			}
+		}
+		if m := r.URL.Query().Get("month"); m != "" {
+			if n, err := strconv.Atoi(m); err == nil && n >= 1 && n <= 12 {
+				month = n
+			}
+		}
+		report := sharedPulse.GetMonthlyROIReport(year, month)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(report)
+	})
+
 	// MCP: route to per-project StreamableHTTPServer
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
 		projectPath := r.URL.Query().Get("project")

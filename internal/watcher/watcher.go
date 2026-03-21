@@ -727,9 +727,26 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// Rebuild the columnar GraphIndex asynchronously so BFS reads pick up the
 	// latest graph state without blocking the watcher loop.
 	// Snapshot is saved by main.go via the store; watcher discards the bytes.
-	w.trackGo(func() { w.graph.RebuildIndex() })
+	w.trackGo(func() {
+		rebuildStart := time.Now()
+		w.graph.RebuildIndex()
+		// P5 — COV-7: emit graph rebuild duration to pulse.
+		if w.pulseClient != nil {
+			w.pulseClient.RecordGraphSnapshot(pulse.GraphSnapshotEvent{
+				RebuildDurationMs: float64(time.Since(rebuildStart).Milliseconds()),
+				RebuildTrigger:    "file_change",
+			})
+		}
+	})
 	if w.pktInval != nil {
 		w.pktInval.InvalidatePacketCacheForFile(path)
+		// P5 — COV-10: emit memory invalidation cascade event.
+		if w.pulseClient != nil {
+			w.pulseClient.RecordMemoryOp(pulse.MemoryOperationEvent{
+				Operation: "invalidation_cascade",
+				Count:     1,
+			})
+		}
 	}
 
 	// Record change event with delta counts.
@@ -749,18 +766,38 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// 2-second timeout ensures federation work never blocks the watcher loop
 	// (sibling stores use SQLite with 5s busy_timeout; 2s caps our exposure).
 	if w.cpTracker != nil && w.store != nil {
+		fedStart := time.Now()
 		cpCtx, cpCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		w.cpTracker.DetectAndStore(cpCtx, path, w.store)
 		cpCancel()
+		// P5 — COV-8: emit federation detection event to pulse.
+		if w.pulseClient != nil {
+			w.pulseClient.RecordFederationEvent(pulse.FederationDetectEvent{
+				ProjectID:  w.graph.RepoID(),
+				Tier:       1,
+				DurationMs: float64(time.Since(fedStart).Milliseconds()),
+				EventType:  "detect_and_store",
+			})
+		}
 
 		// Tier 2: brain-enhanced detection runs async for languages Tier 1
 		// handles poorly (Python, dynamic imports, transitive deps).
 		if w.cpBrainTracker != nil {
 			filePath := path
 			w.trackGo(func() {
+				brainStart := time.Now()
 				brainCtx, brainCancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer brainCancel()
 				w.cpBrainTracker.DetectAndStoreBrain(brainCtx, filePath, w.store)
+				// P5 — COV-8: emit Tier 2 federation detection event.
+				if w.pulseClient != nil {
+					w.pulseClient.RecordFederationEvent(pulse.FederationDetectEvent{
+						ProjectID:  w.graph.RepoID(),
+						Tier:       2,
+						DurationMs: float64(time.Since(brainStart).Milliseconds()),
+						EventType:  "detect_brain",
+					})
+				}
 			})
 		}
 	}
@@ -777,6 +814,11 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// P2-3: emit ReparseEvent. Enqueue is mutex+append (O(1)) — direct call.
 	if w.pulseClient != nil {
 		lang := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+		// P5 — Item 37: compute delta rows (node count change).
+		deltaRows := nodesAfter - nodesBefore
+		if deltaRows < 0 {
+			deltaRows = -deltaRows
+		}
 		w.pulseClient.RecordReparseEvent(pulse.ReparseEvent{
 			File:           path,
 			Language:       lang,
@@ -786,6 +828,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 			EdgesDelta:     edgesAfter - edgesBefore,
 			MemoriesStaled: memoriesStaled, // P2-14: memories_staled proxy
 			ProjectID:      w.projectID,
+			DeltaRows:      deltaRows,
 		})
 	}
 
@@ -827,6 +870,19 @@ func (w *Watcher) checkViolations(path string) {
 	// Persist to violation_log (upsert — safe to call repeatedly).
 	if err := w.store.LogViolations(violations); err != nil {
 		logutil.Error("synapses/watcher: log violations: %v\n", err)
+	}
+
+	// P5 — COV-13: emit watcher violation count to pulse.
+	if w.pulseClient != nil {
+		status := "ok"
+		if len(violations) > 0 {
+			status = "violations_found"
+		}
+		w.pulseClient.RecordValidationEvent(pulse.ValidationEvent{
+			ToolName:       "watcher_violation_check",
+			Status:         status,
+			ViolationCount: len(violations),
+		})
 	}
 
 	// Emit an event only for violations that weren't already in the log.
@@ -1073,6 +1129,16 @@ func (w *Watcher) notifyCrossProjectImpact(changedFile string) {
 
 	if len(byProject) == 0 {
 		return
+	}
+
+	// P5 — COV-14: emit cross-project impact alert to pulse (one per affected project).
+	if w.pulseClient != nil {
+		for range byProject {
+			w.pulseClient.RecordGuardEvent(pulse.GuardEvent{
+				GuardType: "cross_project_impact",
+				ProjectID: primaryRepoID,
+			})
+		}
 	}
 
 	for linkedRepoID, imp := range byProject {
