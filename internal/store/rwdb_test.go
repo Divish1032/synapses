@@ -187,3 +187,29 @@ func TestRWDB_ReadOnlyWrapsSingleDB(t *testing.T) {
 		t.Error("read-only graphDB should use single DB (reader should be nil)")
 	}
 }
+
+// TestRWDB_ReaderRejectsWrites verifies the reader pool has query_only(true),
+// preventing accidental writes through the reader connection.
+func TestRWDB_ReaderRejectsWrites(t *testing.T) {
+	t.Parallel()
+	f, err := os.CreateTemp("", "rwdb-qo-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	t.Cleanup(func() { os.Remove(f.Name()) })
+
+	st, err := Open(f.Name())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	// Attempt a write directly on the reader pool — should fail due to query_only.
+	_, err = st.knowledgeDB.reader.Exec(
+		`INSERT INTO memories (id, tier, content, created_at, expires_at, last_accessed_at)
+		 VALUES ('test', 'entity', 'should fail', '2026-01-01', '', '2026-01-01')`)
+	if err == nil {
+		t.Error("expected error writing to query_only reader pool, got nil")
+	}
+}
