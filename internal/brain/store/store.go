@@ -114,7 +114,10 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+
+		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"+
+		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)"+
+		"&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}

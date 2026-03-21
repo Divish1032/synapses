@@ -28,6 +28,27 @@ func TestOpen_Success(t *testing.T) {
 	}
 }
 
+func TestOpen_PerformancePragmas(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	for _, tc := range []struct {
+		pragma, want string
+	}{
+		{"journal_mode", "wal"},
+		{"synchronous", "1"},       // NORMAL
+		{"cache_size", "-65536"},    // 64 MB
+		{"mmap_size", "268435456"}, // 256 MB
+		{"temp_store", "2"},        // MEMORY
+	} {
+		var val string
+		if err := s.db.QueryRow("PRAGMA " + tc.pragma).Scan(&val); err != nil {
+			t.Errorf("PRAGMA %s: %v", tc.pragma, err)
+		} else if val != tc.want {
+			t.Errorf("PRAGMA %s = %s, want %s", tc.pragma, val, tc.want)
+		}
+	}
+}
+
 func TestOpen_CreatesParentDirs(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "a", "b", "c", "brain.sqlite")
