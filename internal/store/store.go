@@ -775,9 +775,15 @@ func openSQLiteDB(path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create parent dir for %s: %w", path, err)
 	}
-	// _pragma=journal_mode(WAL) — enable WAL on every connection open.
-	// _pragma=busy_timeout(5000) — wait up to 5 s on write contention.
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	// _pragma=journal_mode(WAL)       — enable WAL on every connection open.
+	// _pragma=busy_timeout(5000)      — wait up to 5 s on write contention.
+	// _pragma=synchronous(NORMAL)     — safe with WAL; 2x write throughput vs FULL.
+	// _pragma=cache_size(-65536)      — 64 MB page cache per connection (vs 2 MB default).
+	// _pragma=mmap_size(268435456)    — 256 MB memory-mapped I/O; OS shares pages across connections.
+	// _pragma=temp_store(MEMORY)      — temp tables/indices in memory, not disk.
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)" +
+		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)" +
+		"&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db %s: %w", path, err)
@@ -866,7 +872,10 @@ func openReadOnlySQLiteDB(path string) (*sql.DB, error) {
 	// _pragma=busy_timeout(5000): wait up to 5 s on write contention instead of
 	// failing immediately with SQLITE_BUSY — critical for federation stores that
 	// share a WAL file with the primary MCP server.
-	dsn := path + "?_pragma=query_only(true)&_pragma=busy_timeout(5000)"
+	// Performance pragmas: 64 MB page cache, 256 MB mmap, temp tables in memory.
+	dsn := path + "?_pragma=query_only(true)&_pragma=busy_timeout(5000)" +
+		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)" +
+		"&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
