@@ -331,6 +331,7 @@ func (s *Server) ClearSessionHashes(sessionID string) {
 type synapseSessionEntry struct {
 	id      string // UUID in the sessions table
 	agentID string
+	model   string // agent model from session_init (e.g. "claude-opus-4-6")
 }
 
 // synapseSessionKey returns the map key for a given MCP session ID.
@@ -357,13 +358,57 @@ func (s *Server) getSynapseSessionID(mcpSessionID string) string {
 
 // registerSynapseSession associates a newly created Synapses session with an
 // MCP connection. Called from handleSessionInit after CreateSession succeeds.
-func (s *Server) registerSynapseSession(mcpSessionID, synapseSessionID, agentID string) {
+func (s *Server) registerSynapseSession(mcpSessionID, synapseSessionID, agentID, model string) {
 	s.synapseSessionsMu.Lock()
 	s.synapsesSessions[synapseSessionKey(mcpSessionID)] = &synapseSessionEntry{
 		id:      synapseSessionID,
 		agentID: agentID,
+		model:   model,
 	}
 	s.synapseSessionsMu.Unlock()
+}
+
+// modelBudgetMultiplier returns a token budget multiplier based on the agent's
+// declared model. Large-context models get richer context automatically.
+// Unknown models default to 1.0 (no change).
+func modelBudgetMultiplier(model string) float64 {
+	// Normalize: strip suffixes like date stamps (e.g. "claude-sonnet-4-6-20250514")
+	// by matching known prefixes.
+	m := strings.ToLower(model)
+	switch {
+	case strings.HasPrefix(m, "claude-opus"):
+		return 2.0
+	case strings.HasPrefix(m, "claude-sonnet"):
+		return 1.5
+	case strings.HasPrefix(m, "gpt-4o-mini"):
+		return 0.5
+	case strings.HasPrefix(m, "gpt-4o"):
+		return 1.0
+	case strings.HasPrefix(m, "gpt-4.1-mini"), strings.HasPrefix(m, "gpt-4.1-nano"):
+		return 0.5
+	case strings.HasPrefix(m, "gpt-4.1"):
+		return 1.5
+	case strings.HasPrefix(m, "claude-haiku"):
+		return 0.75
+	case strings.HasPrefix(m, "gemini-2.5-pro"), strings.HasPrefix(m, "gemini-2.5-flash"):
+		return 1.5
+	default:
+		return 1.0
+	}
+}
+
+// getSessionBudgetMultiplier returns the token budget multiplier for the
+// current MCP session based on the model declared in session_init.
+// Returns 1.0 when no session or model is known.
+func (s *Server) getSessionBudgetMultiplier(ctx context.Context) float64 {
+	mcpSessionID := SessionIDFromContext(ctx)
+	s.synapseSessionsMu.RLock()
+	entry, ok := s.synapsesSessions[synapseSessionKey(mcpSessionID)]
+	s.synapseSessionsMu.RUnlock()
+	if !ok || entry.model == "" {
+		return 1.0
+	}
+	return modelBudgetMultiplier(entry.model)
 }
 
 // ClearSynapseSession removes the session mapping for an MCP connection.

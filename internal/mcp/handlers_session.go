@@ -376,7 +376,7 @@ func (s *Server) handleSessionInit(
 			synapseSessionID = id
 			sessionResumed = resumed
 			hibernateCtx = hibCtx
-			s.registerSynapseSession(mcpSessionID, synapseSessionID, effectiveAgentID)
+			s.registerSynapseSession(mcpSessionID, synapseSessionID, effectiveAgentID, model)
 			// Prune tool_calls older than 7 days on session start — debounced inside,
 			// so concurrent session_init calls are safe and only one prune runs/hour.
 			s.goBackground(func() { s.store.PruneToolCallsOlderThan(7 * 24 * time.Hour) }) //nolint:errcheck
@@ -788,6 +788,10 @@ func (s *Server) handleSessionInit(
 	}
 	if collisionWarning != "" {
 		resp["warning"] = collisionWarning
+	}
+	// Sprint 11: inform agent of the budget multiplier applied to default token budgets.
+	if mult := modelBudgetMultiplier(model); mult != 1.0 {
+		resp["budget_multiplier"] = mult
 	}
 	if recentFailure != nil {
 		resp["recent_failure"] = recentFailure
