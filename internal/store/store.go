@@ -847,6 +847,29 @@ func recoverKnowledgeDB(kPath string) (*sql.DB, error) {
 	return openSQLiteDB(kPath)
 }
 
+// openReadOnlySQLiteDB opens a single SQLite DB in query-only mode using
+// DSN-level pragmas so every connection opened by the pool inherits them —
+// not just the first. This mirrors the approach used by openSQLiteDB for the
+// primary databases (see its comment about MaxOpenConns and DSN pragmas).
+func openReadOnlySQLiteDB(path string) (*sql.DB, error) {
+	// _pragma=query_only(true): prevents accidental writes on any pool connection.
+	// _pragma=busy_timeout(5000): wait up to 5 s on write contention instead of
+	// failing immediately with SQLITE_BUSY — critical for federation stores that
+	// share a WAL file with the primary MCP server.
+	dsn := path + "?_pragma=query_only(true)&_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(4)
+	// Ping to force the first connection open and confirm the DSN pragmas are accepted.
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
 // OpenReadOnly opens an existing SQLite store at path in query-only mode.
 // It does NOT run schema migrations or FTS rebuilds, making it safe to call
 // concurrently with a running MCP server.
@@ -854,29 +877,18 @@ func OpenReadOnly(path string) (*Store, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil, fmt.Errorf("no index at %s — run 'synapses index' first", path)
 	}
-	graphDB, err := sql.Open("sqlite", path)
+	graphDB, err := openReadOnlySQLiteDB(path)
 	if err != nil {
 		return nil, fmt.Errorf("open graph db (ro) %s: %w", path, err)
-	}
-	graphDB.SetMaxOpenConns(4)
-	if _, err := graphDB.Exec("PRAGMA query_only=true; PRAGMA busy_timeout=5000;"); err != nil {
-		graphDB.Close()
-		return nil, fmt.Errorf("configure graph read-only: %w", err)
 	}
 
 	kPath := KnowledgePath(path)
 	var knowledgeDB *sql.DB
 	if _, err := os.Stat(kPath); err == nil {
-		knowledgeDB, err = sql.Open("sqlite", kPath)
+		knowledgeDB, err = openReadOnlySQLiteDB(kPath)
 		if err != nil {
 			graphDB.Close()
 			return nil, fmt.Errorf("open knowledge db (ro) %s: %w", kPath, err)
-		}
-		knowledgeDB.SetMaxOpenConns(4)
-		if _, err := knowledgeDB.Exec("PRAGMA query_only=true; PRAGMA busy_timeout=5000;"); err != nil {
-			graphDB.Close()
-			knowledgeDB.Close()
-			return nil, fmt.Errorf("configure knowledge read-only: %w", err)
 		}
 	} else {
 		// Knowledge DB doesn't exist yet (sibling not fully initialized).

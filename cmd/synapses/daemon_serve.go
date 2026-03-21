@@ -146,6 +146,18 @@ func singletonLogPath() (string, error) {
 	return filepath.Join(base, "daemon.log"), nil
 }
 
+// rotateLogIfNeeded performs simple size-based log rotation at daemon startup.
+// If the log file exceeds 50 MB, it is renamed to <logPath>.1 and a fresh
+// file is created on the next open. At most one backup is kept (~100 MB max).
+func rotateLogIfNeeded(logPath string) {
+	const maxLogBytes = 50 * 1024 * 1024 // 50 MiB
+	info, err := os.Stat(logPath)
+	if err != nil || info.Size() < maxLogBytes {
+		return
+	}
+	_ = os.Rename(logPath, logPath+".1")
+}
+
 // IsSingletonDaemonRunning checks if the singleton daemon is up by hitting
 // the health endpoint. Returns true if the daemon responds within 2 seconds.
 func IsSingletonDaemonRunning() bool {
@@ -571,7 +583,7 @@ func cmdDaemonServe(args []string) error {
 			var req struct {
 				Path string `json:"path"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 				http.Error(w, "invalid JSON", http.StatusBadRequest)
 				return
 			}
@@ -608,11 +620,19 @@ func cmdDaemonServe(args []string) error {
 			var req struct {
 				Path string `json:"path"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 				http.Error(w, "invalid JSON", http.StatusBadRequest)
 				return
 			}
-			absPath, _ := canonicalPath(req.Path)
+			absPath, err := canonicalPath(req.Path)
+			if err != nil {
+				http.Error(w, "invalid path: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := isValidProjectPath(absPath); err != nil {
+				http.Error(w, "invalid project path: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 			reg.Delete(absPath)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
@@ -741,6 +761,14 @@ func cmdDaemonServe(args []string) error {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		// Per-request write deadline for non-SSE endpoints. The server-level
+		// WriteTimeout is 0 (required for SSE/MCP streams), so we set a 60s
+		// deadline on regular REST/admin endpoints to prevent slow-client
+		// resource exhaustion.
+		if !strings.HasPrefix(r.URL.Path, "/mcp") {
+			rc := http.NewResponseController(w)
+			_ = rc.SetWriteDeadline(time.Now().Add(60 * time.Second))
+		}
 		authProtected.ServeHTTP(w, r)
 	})
 	httpSrv := &http.Server{
@@ -815,17 +843,22 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 	// Prune stale operational data at startup and then daily.
-	// Prevents unbounded growth of tool_calls, events, agent_messages, and
-	// episodes tables during long daemon uptime (weeks/months).
+	// Prevents unbounded growth of tool_calls, events, agent_messages, episodes,
+	// and sessions tables during long daemon uptime (weeks/months).
+	// PruneOldSessions is also triggered on each session_init (hourly debounce),
+	// but including it here ensures sessions are cleaned up even when no agents
+	// connect for days (e.g. a paused project still running in the background).
 	go func() {
 		st.PruneStaleData(30)
+		st.PruneOldSessions(90 * 24 * time.Hour) //nolint:errcheck
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				logutil.InfoP(projectHash(absPath), "synapses: daily prune running (30-day retention)\n")
+				logutil.InfoP(projectHash(absPath), "synapses: daily prune running (30-day retention, 90-day sessions)\n")
 				st.PruneStaleData(30)
+				st.PruneOldSessions(90 * 24 * time.Hour) //nolint:errcheck
 			case <-projCtx.Done():
 				return
 			}

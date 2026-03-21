@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -108,6 +109,10 @@ type Watcher struct {
 	// IDE auto-saves without edits). Keyed by absolute file path.
 	fileHashMu sync.Mutex
 	fileHashes map[string]string
+
+	// loopAlive tracks whether the event processing loop is running.
+	// Set to 0 (dead) when the loop exhausts all restart attempts.
+	loopAlive atomic.Int32
 }
 
 // New creates a Watcher. store may be nil; if provided the cache is updated
@@ -209,6 +214,13 @@ func (w *Watcher) Start(root string) error {
 	return nil
 }
 
+// IsAlive reports whether the file-watching event loop is still running.
+// Returns false if the loop has exhausted all restart attempts after panics
+// or if Start() was never called.
+func (w *Watcher) IsAlive() bool {
+	return w.loopAlive.Load() == 1
+}
+
 // Stop shuts down the watcher and releases resources. It blocks until all
 // fire-and-forget goroutines (persistAsync, ingestToBrain, brain summary
 // write-back, cross-project brain detection, index rebuild) have returned,
@@ -289,6 +301,7 @@ func (w *Watcher) RecentChanges(windowMinutes int) []ChangeEvent {
 func (w *Watcher) loop(root string) {
 	const maxRestarts = 3
 	backoff := 100 * time.Millisecond
+	w.loopAlive.Store(1)
 
 	for attempt := 0; attempt <= maxRestarts; attempt++ {
 		panicked := false
@@ -335,6 +348,7 @@ func (w *Watcher) loop(root string) {
 			backoff *= 2
 		}
 	}
+	w.loopAlive.Store(0)
 	logutil.Error("synapses/watcher: loop exhausted all %d restart attempts, file watching disabled\n", maxRestarts)
 }
 
@@ -364,6 +378,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 		w.graph.RemoveFile(path)
 		w.graph.RemoveCallSitesForFile(path)
 		w.graph.InvalidateCache()
+		w.fileHashMu.Lock()
+		delete(w.fileHashes, path)
+		w.fileHashMu.Unlock()
 		// Remove this file's call sites from the persisted table so they are
 		// not reloaded by future reparseFile calls for other files.
 		if w.store != nil {

@@ -33,7 +33,8 @@ import (
 // Possible values:
 //   - "off"                                  — no embedder configured
 //   - "builtin (ready)"                      — model loaded, embeddings working
-//   - "builtin (model not yet downloaded)"   — never attempted; will download on first recall()
+//   - "builtin (model cached)"               — model on disk, pool initializes on first recall()
+//   - "builtin (model not yet downloaded)"   — no model on disk; will download on first recall()
 //   - "builtin (unavailable)"                — init attempted but failed (e.g. air-gapped)
 //   - "ollama"                               — delegating to local Ollama instance
 //   - "unknown"                              — unrecognized embedder implementation
@@ -293,6 +294,12 @@ func (s *Server) handleSessionInit(
 	if scope == "" {
 		scope = "full"
 	}
+	validScopes := map[string]bool{"full": true, "quick": true, "resume": true}
+	scopeWarning := ""
+	if !validScopes[scope] {
+		scopeWarning = fmt.Sprintf("unknown scope %q — defaulting to 'full'. Valid values: full, quick, resume.", scope)
+		scope = "full"
+	}
 	quickMode := scope == "quick"
 	resumeMode := scope == "resume"
 	s.upsertAgentIfNeeded(agentID)
@@ -337,8 +344,8 @@ func (s *Server) handleSessionInit(
 
 	// Emit session-start event so peers polling get_events see a new agent arrive.
 	if s.store != nil && agentID != "" {
-		_ = s.store.AppendEvent("agent_session_start", agentID,
-			fmt.Sprintf(`{"agent_id":%q}`, agentID))
+		sessionPayload, _ := json.Marshal(map[string]string{"agent_id": agentID})
+		_ = s.store.AppendEvent("agent_session_start", agentID, string(sessionPayload))
 	}
 
 	// ── Session Intelligence: get or resume session record ───────────────
@@ -747,6 +754,9 @@ func (s *Server) handleSessionInit(
 		"pending_tasks":  pendingSection,
 		"working_state":  workingSection,
 		"scale_guidance": identity.ToolGuidance,
+	}
+	if scopeWarning != "" {
+		resp["scope_warning"] = scopeWarning
 	}
 	if !quickMode && !resumeMode {
 		resp["project_identity"] = projectSection
@@ -1432,6 +1442,13 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// Surface watcher health: if the file-watching loop has died, warn agents
+	// so they know context may be stale.
+	if whc, ok := s.changeSource.(WatcherHealthChecker); ok && !whc.IsAlive() {
+		existing, _ := resp["warnings"].([]string)
+		resp["warnings"] = append(existing, "file_watcher_stopped: file watching is no longer active — context may be stale. Restart the daemon to restore live updates.")
+	}
+
 	return jsonResult(resp)
 }
 
@@ -1611,8 +1628,8 @@ func (s *Server) handleAnnotateNode(
 	})
 
 	// Emit event.
-	if err := s.store.AppendEvent("annotation_added", agentID,
-		fmt.Sprintf(`{"annotation_id":%q,"node_id":%q}`, id, nodeID)); err != nil {
+	annotPayload, _ := json.Marshal(map[string]string{"annotation_id": id, "node_id": nodeID})
+	if err := s.store.AppendEvent("annotation_added", agentID, string(annotPayload)); err != nil {
 		logutil.Warn("synapses: append annotation_added event: %v\n", err)
 	}
 

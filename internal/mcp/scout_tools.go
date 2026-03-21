@@ -172,6 +172,9 @@ func (s *Server) lookupPackageDocs(ctx context.Context, importPath string) (*mcp
 }
 
 func (s *Server) lookupURL(ctx context.Context, url string) (*mcpgo.CallToolResult, error) {
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		return mcpgo.NewToolResultError("url must use http:// or https:// scheme"), nil
+	}
 	var content string
 	var fromCache bool
 	if s.cacheWebSearches {

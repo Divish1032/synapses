@@ -330,28 +330,21 @@ func (s *Store) UpdateTask(id, status, appendNotes, agentID string) (unblocked [
 	}
 
 	if appendNotes != "" {
-		var existing string
-		row := s.knowledgeDB.QueryRow(`SELECT notes FROM tasks WHERE id = ?`, id)
-		if scanErr := row.Scan(&existing); scanErr != nil && scanErr != sql.ErrNoRows {
-			return nil, false, fmt.Errorf("read task notes: %w", scanErr)
-		}
 		newNote := fmt.Sprintf("[%s] %s", now, appendNotes)
-		if existing != "" {
-			existing = existing + "\n" + newNote
-		} else {
-			existing = newNote
-		}
+		// Atomic SQL append — avoids the read-modify-write TOCTOU race that
+		// previously lost notes under concurrent access.
+		notesExpr := `CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || char(10) || ? END`
 		if assignedTo != "" {
 			if _, execErr := s.knowledgeDB.Exec(
-				`UPDATE tasks SET status = ?, notes = ?, assigned_to = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
-				status, existing, assignedTo, agentID, now, id,
+				`UPDATE tasks SET status = ?, notes = `+notesExpr+`, assigned_to = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
+				status, newNote, newNote, assignedTo, agentID, now, id,
 			); execErr != nil {
 				return nil, false, execErr
 			}
 		} else {
 			if _, execErr := s.knowledgeDB.Exec(
-				`UPDATE tasks SET status = ?, notes = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
-				status, existing, agentID, now, id,
+				`UPDATE tasks SET status = ?, notes = `+notesExpr+`, last_updated_by = ?, updated_at = ? WHERE id = ?`,
+				status, newNote, newNote, agentID, now, id,
 			); execErr != nil {
 				return nil, false, execErr
 			}

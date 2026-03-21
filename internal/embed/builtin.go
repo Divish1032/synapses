@@ -2,7 +2,10 @@ package embed
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -26,6 +29,18 @@ const (
 	// defaultPoolSize is the number of pipeline instances to create.
 	// 3 balances memory (~69 MB total) against concurrency for 50+ sessions.
 	defaultPoolSize = 3
+
+	// builtinModelRevision pins the HuggingFace download to a specific commit
+	// hash, ensuring every user gets the exact same ONNX model bytes. Without
+	// this, a repo owner pushing an update could silently change model behavior.
+	// Update this hash when intentionally adopting a newer model version.
+	builtinModelRevision = "24b4c6b40fc5571f11ed3bf6061596fa4e8290d4"
+
+	// builtinModelSHA256 is the expected SHA-256 hash of the downloaded ONNX
+	// model file. After download, the file is verified against this hash to
+	// detect tampering (compromised CDN, MITM with rogue CA, partial download).
+	// Update this value whenever builtinModelRevision changes.
+	builtinModelSHA256 = "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452"
 )
 
 // pipelineSlot is one independently-usable ONNX pipeline instance.
@@ -108,6 +123,7 @@ func (b *BuiltinEmbedder) ensureModel() error {
 			return fmt.Errorf("create models dir: %w", err)
 		}
 		opts := hugot.NewDownloadOptions()
+		opts.Branch = builtinModelRevision
 		opts.Verbose = false
 		opts.MaxRetries = 3
 		opts.RetryInterval = 2
@@ -120,6 +136,11 @@ func (b *BuiltinEmbedder) ensureModel() error {
 	// Verify model file exists after potential download.
 	if _, err := os.Stat(onnxPath); err != nil {
 		return fmt.Errorf("embedding model not found at %s: %w", onnxPath, err)
+	}
+
+	// Verify integrity of the ONNX model file.
+	if err := verifyModelIntegrity(onnxPath); err != nil {
+		return err
 	}
 
 	// Create poolSize pipeline instances, each with its own session.
@@ -163,6 +184,31 @@ func (b *BuiltinEmbedder) ensureModel() error {
 	b.pool = pool
 	b.ready = true
 	logutil.Info("synapses: embedding pool ready (%d pipeline instances)\n", b.poolSize)
+	return nil
+}
+
+// verifyModelIntegrity computes the SHA-256 hash of the ONNX model file and
+// compares it against the expected hash. If the hash doesn't match (tampered
+// download, partial write, CDN compromise), the file is removed and an error
+// is returned so the next Embed() call triggers a fresh download.
+func verifyModelIntegrity(onnxPath string) error {
+	f, err := os.Open(onnxPath)
+	if err != nil {
+		return fmt.Errorf("open model for integrity check: %w", err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("hash model file: %w", err)
+	}
+
+	got := hex.EncodeToString(h.Sum(nil))
+	if got != builtinModelSHA256 {
+		// Remove the tampered/corrupt file so the next attempt re-downloads.
+		os.Remove(onnxPath)
+		return fmt.Errorf("embedding model integrity check failed: expected sha256:%s, got sha256:%s — removed corrupt file", builtinModelSHA256, got)
+	}
 	return nil
 }
 
@@ -250,10 +296,13 @@ func (b *BuiltinEmbedder) PoolSize() int {
 }
 
 // StatusDetail returns a human-readable string describing the current
-// initialization state. Thread-safe. Three possible values:
-//   - "ready"                    — pipeline pool initialized, embeddings working
-//   - "model not yet downloaded" — Embed() has never been called; no init attempted
-//   - "unavailable"              — init was attempted but failed (download error,
+// initialization state. Thread-safe. Four possible values:
+//   - "ready"                              — pipeline pool initialized, embeddings working
+//   - "model cached"                       — model on disk but pool not yet started;
+//     will initialize automatically on the first recall() call (e.g. after daemon restart)
+//   - "model not yet downloaded"           — Embed() has never been called and no model
+//     found on disk; model will be downloaded on first recall()
+//   - "unavailable"                        — init was attempted but failed (download error,
 //     pipeline error, or air-gapped environment); Embed() will retry automatically
 func (b *BuiltinEmbedder) StatusDetail() string {
 	b.mu.Lock()
@@ -263,6 +312,14 @@ func (b *BuiltinEmbedder) StatusDetail() string {
 	}
 	if b.initAttempted {
 		return "unavailable"
+	}
+	// Check the filesystem: if the ONNX model file is already on disk the pool
+	// just hasn't been initialized yet (lazy init — happens on first Embed call).
+	// This is the common case after a daemon restart when the model was previously
+	// downloaded. Reporting "not yet downloaded" in this state misleads agents.
+	onnxPath := filepath.Join(b.modelsDir, builtinModelDirName, builtinModelFile)
+	if _, err := os.Stat(onnxPath); err == nil {
+		return "model cached"
 	}
 	return "model not yet downloaded"
 }
@@ -305,3 +362,4 @@ func (b *BuiltinEmbedder) Close() error {
 	b.ready = false
 	return firstErr
 }
+

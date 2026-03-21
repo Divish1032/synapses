@@ -114,17 +114,13 @@ func (s *Server) handleRemember(
 			currentProject = filepath.Base(s.projectPath)
 		}
 		if reqProjectID != currentProject {
-			approvalToken := stringArg(req, "approval_token")
-			if approvalToken == "" {
+			// OF-E3: check for an out-of-band user-approved approval file.
+			// The agent never sees the token — only the user can approve via `synapses approve`.
+			if !s.approvals.checkAndConsumeApproval("cross_project_remember", agentID) {
 				return s.approvals.requestApproval(
 					"cross_project_remember",
 					fmt.Sprintf("Agent %q writing memory to project %q (current project: %q)", agentID, reqProjectID, currentProject),
 					agentID,
-				), nil
-			}
-			if !s.approvals.validateAndConsume(approvalToken) {
-				return mcp.NewToolResultError(
-					"approval_token is invalid or expired. Re-request approval by calling remember without approval_token.",
 				), nil
 			}
 		}
@@ -224,9 +220,10 @@ func (s *Server) handleRemember(
 	}
 
 	if episodeType == "failure" {
-		if err := s.store.AppendEvent("failure_recorded", agentID,
-			fmt.Sprintf(`{"episode_id":%q,"outcome":%q,"trigger":%q}`,
-				id, outcome, e.Trigger)); err != nil {
+		payload, _ := json.Marshal(map[string]string{
+			"episode_id": id, "outcome": outcome, "trigger": e.Trigger,
+		})
+		if err := s.store.AppendEvent("failure_recorded", agentID, string(payload)); err != nil {
 			logutil.Warn("synapses: append failure_recorded event: %v\n", err)
 		}
 	}

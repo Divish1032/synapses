@@ -71,15 +71,30 @@ func LoadRecipeDir(dir, origin string) ([]Recipe, error) {
 	return out, nil
 }
 
-// DeduplicateRecipes removes duplicate IDs, keeping the last occurrence.
-// Since recipes are loaded builtin < user < project, this gives project-scoped
-// recipes precedence over user-scoped, and user over builtin.
+// DeduplicateRecipes removes duplicate IDs. User/project recipes can override
+// each other, but builtin IDs are protected — non-builtin recipes that collide
+// with a builtin ID are silently dropped to prevent untrusted project recipes
+// from shadowing trusted builtins.
 func DeduplicateRecipes(recipes []Recipe) []Recipe {
+	// First pass: collect builtin IDs.
+	builtinIDs := make(map[string]bool)
+	for _, r := range recipes {
+		if r.ID != "" && r.Origin == string(TrustBuiltin) {
+			builtinIDs[r.ID] = true
+		}
+	}
+
+	// Second pass: keep last occurrence per ID, but skip non-builtin recipes
+	// that collide with a builtin ID.
 	last := make(map[string]int, len(recipes))
 	for i, r := range recipes {
-		if r.ID != "" {
-			last[r.ID] = i
+		if r.ID == "" {
+			continue
 		}
+		if builtinIDs[r.ID] && r.Origin != string(TrustBuiltin) {
+			continue // non-builtin cannot shadow builtin
+		}
+		last[r.ID] = i
 	}
 	out := make([]Recipe, 0, len(recipes))
 	for i, r := range recipes {

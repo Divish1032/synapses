@@ -118,6 +118,8 @@ func run(args []string) error {
 		return cmdMemory(args[1:])
 	case "allow-plugin":
 		return cmdAllowPlugin(args[1:])
+	case "approve":
+		return cmdApprove(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -3264,12 +3266,11 @@ func cmdExport(args []string) error {
 	return nil
 }
 
-// cmdSetup configures a project for use with synapses (and optionally the
-// brain sidecar). It:
-//  1. Checks whether `brain` is installed; if not, prints install instructions.
-//  2. Runs `brain setup` to configure Ollama + pull the model.
-//  3. Writes (or updates) synapses.json in the project root with the brain URL.
-//  4. Prints the `claude mcp add` command to wire everything into Claude Code.
+// cmdSetup configures a project for use with synapses. It:
+//  1. Writes synapses.json in the project root if it does not already exist.
+//  2. Prints the golden-path `synapses start` and `claude mcp add` commands.
+//
+// Brain, pulse, and web-cache all run in-process — no external sidecars needed.
 func cmdSetup(args []string) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Project root (default: current directory)")

@@ -206,10 +206,15 @@ func topLevelPackage(filePath string) string {
 }
 
 // jsonResult marshals v to JSON and wraps it in a text tool result.
+// Responses exceeding 2 MiB are rejected to prevent memory exhaustion.
 func jsonResult(v interface{}) (*mcp.CallToolResult, error) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("marshal result: %v", err)), nil
+	}
+	const maxResponseBytes = 2 * 1024 * 1024 // 2 MiB
+	if len(b) > maxResponseBytes {
+		return mcp.NewToolResultError(fmt.Sprintf("response too large (%d bytes, max %d). Narrow your query.", len(b), maxResponseBytes)), nil
 	}
 	return mcp.NewToolResultText(string(b)), nil
 }
