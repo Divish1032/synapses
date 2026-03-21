@@ -26,6 +26,8 @@ func (p *CSharpParser) Extensions() []string {
 	return []string{".cs"}
 }
 
+func (p *CSharpParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // extractCSharpDeclInfo performs a pre-pass over the AST to collect metadata.
 func extractCSharpDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)

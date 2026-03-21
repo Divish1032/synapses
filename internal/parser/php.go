@@ -26,6 +26,8 @@ func (p *PHPParser) Extensions() []string {
 	return []string{".php"}
 }
 
+func (p *PHPParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // extractPHPDeclInfo collects metadata for PHP declarations.
 func extractPHPDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)

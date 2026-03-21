@@ -33,6 +33,9 @@ func (p *JsonnetParser) Extensions() []string {
 	return []string{".jsonnet", ".libsonnet"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for the given file.
+func (p *JsonnetParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single Jsonnet file.
 //
 // The Jsonnet grammar structures files as a chain of local_bind nodes:

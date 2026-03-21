@@ -41,6 +41,9 @@ func (p *VueParser) Extensions() []string {
 	return []string{".vue"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for the given file.
+func (p *VueParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single Vue SFC file and merges them
 // into the provided graph.
 func (p *VueParser) Parse(g *graph.Graph, filePath string, src []byte) error {

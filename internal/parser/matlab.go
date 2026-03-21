@@ -23,7 +23,11 @@ type MATLABParser struct{}
 func NewMATLABParser() *MATLABParser { return &MATLABParser{} }
 
 func (p *MATLABParser) Language() string       { return "matlab" }
-func (p *MATLABParser) Extensions() []string   { return []string{".m"} }
+func (p *MATLABParser) Extensions() []string { return []string{".m"} }
+
+func (p *MATLABParser) TSLanguageForFile(_ string) *sitter.Language {
+	return sitter.NewLanguage(matlabg.GetLanguage())
+}
 
 func (p *MATLABParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()

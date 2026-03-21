@@ -26,6 +26,8 @@ func (p *LuaParser) Extensions() []string {
 	return []string{".lua"}
 }
 
+func (p *LuaParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // extractLuaCATS does a line-by-line pre-pass scanning for LuaCATS annotations
 // (from lua-language-server) and emits graph nodes for classes and their fields.
 //

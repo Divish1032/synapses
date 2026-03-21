@@ -31,6 +31,9 @@ func (p *XMLParser) Extensions() []string {
 	return []string{".xml"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for the given file.
+func (p *XMLParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single XML file.
 func (p *XMLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()

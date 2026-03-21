@@ -26,6 +26,8 @@ func (p *OCamlParser) Extensions() []string {
 	return []string{".ml", ".mli"}
 }
 
+func (p *OCamlParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // extractOCamlDocComment scans backwards from startLine (1-indexed) looking for
 // OCaml doc comments: (** ... *). Returns the extracted doc text or "".
 func extractOCamlDocComment(lines []string, startLine int) string {

@@ -26,6 +26,8 @@ func (p *JavaScriptParser) Extensions() []string {
 	return []string{".js", ".jsx", ".mjs", ".cjs"}
 }
 
+func (p *JavaScriptParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // extractJSDeclInfo walks the JavaScript AST and builds a name→declMeta map
 // for all function, class, and method declarations.
 func extractJSDeclInfo(root sitter.Node, src []byte) map[string]declMeta {

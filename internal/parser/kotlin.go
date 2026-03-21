@@ -26,6 +26,8 @@ func (p *KotlinParser) Extensions() []string {
 	return []string{".kt", ".kts"}
 }
 
+func (p *KotlinParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // extractKotlinDeclInfo performs a pre-pass to collect metadata.
 func extractKotlinDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)

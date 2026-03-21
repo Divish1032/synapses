@@ -97,6 +97,8 @@ func (p *StarlarkParser) Extensions() []string {
 	return []string{".bzl", ".star"}
 }
 
+func (p *StarlarkParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Filenames returns the exact base filenames handled by this parser.
 func (p *StarlarkParser) Filenames() []string {
 	return []string{"BUILD", "BUILD.bazel", "WORKSPACE", "WORKSPACE.bazel"}

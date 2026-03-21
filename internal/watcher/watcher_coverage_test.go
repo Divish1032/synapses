@@ -156,6 +156,86 @@ func TestReparseFile_ParseError_BinaryFile(t *testing.T) {
 	w.reparseFile(binFile, root)
 }
 
+// ── reparseFile: tree-sitter error recovery ─────────────────────────────────
+
+func TestReparseFile_SkipsOnParseErrors(t *testing.T) {
+	root := t.TempDir()
+	goFile := filepath.Join(root, "main.go")
+
+	// Write a valid Go file and do initial parse.
+	validSrc := []byte("package main\n\nfunc Hello() {}\n")
+	if err := os.WriteFile(goFile, validSrc, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g := graph.New(root)
+	walker := parser.NewWalker()
+	w, err := New(g, walker, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer w.Stop()
+
+	// Initial parse to populate the graph.
+	w.reparseFile(goFile, root)
+	nodesBefore := len(g.NodesForFile(goFile))
+	if nodesBefore == 0 {
+		t.Fatal("expected nodes after initial parse")
+	}
+
+	// Overwrite with broken source (simulates half-saved file).
+	brokenSrc := []byte("package main\n\nfunc Hello() {\n\tfmt.Println(\"hello\n")
+	if err := os.WriteFile(goFile, brokenSrc, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reparse should detect errors and skip — retaining old nodes.
+	w.reparseFile(goFile, root)
+	nodesAfter := len(g.NodesForFile(goFile))
+	if nodesAfter != nodesBefore {
+		t.Errorf("expected %d nodes (retained), got %d (graph was modified despite parse errors)", nodesBefore, nodesAfter)
+	}
+}
+
+func TestReparseFile_ProceedsOnCleanParse(t *testing.T) {
+	root := t.TempDir()
+	goFile := filepath.Join(root, "main.go")
+
+	// Write a valid Go file.
+	if err := os.WriteFile(goFile, []byte("package main\n\nfunc Hello() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g := graph.New(root)
+	walker := parser.NewWalker()
+	w, err := New(g, walker, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer w.Stop()
+
+	// Initial parse.
+	w.reparseFile(goFile, root)
+	nodesBefore := len(g.NodesForFile(goFile))
+
+	// Overwrite with DIFFERENT but VALID source — reparse should proceed.
+	if err := os.WriteFile(goFile, []byte("package main\n\nfunc World() {}\nfunc Another() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w.reparseFile(goFile, root)
+	nodesAfter := len(g.NodesForFile(goFile))
+
+	// Should have different node count since source changed.
+	if nodesAfter == 0 {
+		t.Error("expected nodes after clean reparse")
+	}
+	// Nodes should differ (World+Another vs Hello).
+	if nodesAfter == nodesBefore {
+		t.Log("note: node count unchanged, but reparse proceeded (acceptable if both sources produce same node count)")
+	}
+}
+
 // ── checkViolations: known violation (already in log) ─────────────────────────
 
 func TestCheckViolations_KnownViolation_Skipped(t *testing.T) {

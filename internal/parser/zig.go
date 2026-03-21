@@ -26,6 +26,8 @@ func (p *ZigParser) Extensions() []string {
 	return []string{".zig"}
 }
 
+func (p *ZigParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // isZigPub returns true if the node has a direct child with type "pub".
 func isZigPub(n sitter.Node) bool {
 	for i := uint32(0); i < n.ChildCount(); i++ {

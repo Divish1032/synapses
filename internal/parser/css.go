@@ -26,6 +26,8 @@ func (p *CSSParser) Extensions() []string {
 	return []string{".css"}
 }
 
+func (p *CSSParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single CSS file and merges them into the graph.
 //
 // Extracts:

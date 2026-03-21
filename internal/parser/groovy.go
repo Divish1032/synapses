@@ -26,6 +26,8 @@ func (p *GroovyParser) Extensions() []string {
 	return []string{".groovy", ".gradle"}
 }
 
+func (p *GroovyParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // extractGroovyDeclInfo performs a pre-pass for metadata.
 func extractGroovyDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)

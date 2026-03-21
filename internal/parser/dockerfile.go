@@ -34,6 +34,8 @@ func (p *DockerfileParser) Extensions() []string {
 	return []string{".dockerfile", ".containerfile"}
 }
 
+func (p *DockerfileParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Filenames returns the exact base filenames handled by this parser.
 // These are files that have no extension (e.g. "Dockerfile") or use
 // a dot-separated variant (e.g. "Dockerfile.dev"). The Walker checks

@@ -26,6 +26,8 @@ func (p *ElmParser) Extensions() []string {
 	return []string{".elm"}
 }
 
+func (p *ElmParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // extractElmDeclInfo does a pre-pass to collect metadata (doc comments,
 // type annotations, line counts) for Elm declarations.
 func extractElmDeclInfo(root sitter.Node, src []byte) map[string]declMeta {

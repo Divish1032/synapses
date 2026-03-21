@@ -31,6 +31,8 @@ func (p *NixParser) Extensions() []string {
 	return []string{".nix"}
 }
 
+func (p *NixParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single Nix file.
 func (p *NixParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()

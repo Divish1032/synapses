@@ -37,6 +37,9 @@ func (p *ObjCParser) Extensions() []string {
 	return []string{".m", ".h"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for the given file.
+func (p *ObjCParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single Objective-C file and merges them into the graph.
 func (p *ObjCParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()

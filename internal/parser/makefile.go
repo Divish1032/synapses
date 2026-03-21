@@ -28,6 +28,8 @@ func (p *MakefileParser) Extensions() []string {
 	return []string{".mk"}
 }
 
+func (p *MakefileParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Filenames returns the exact base filenames handled by this parser.
 // These are files that have no extension (e.g. "Makefile") or use
 // standard naming conventions for GNU Make.

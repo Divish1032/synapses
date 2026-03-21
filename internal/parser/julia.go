@@ -26,6 +26,9 @@ func (p *JuliaParser) Extensions() []string {
 	return []string{".jl"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for the given file.
+func (p *JuliaParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // juliaIsUppercase returns true if name starts with an uppercase letter.
 // In Julia, convention is that uppercase-named symbols are exported/public.
 func juliaIsUppercase(name string) bool {

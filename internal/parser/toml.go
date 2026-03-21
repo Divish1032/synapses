@@ -29,6 +29,9 @@ func (p *TOMLParser) Extensions() []string {
 	return []string{".toml"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for the given file.
+func (p *TOMLParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single TOML file and merges them
 // into the graph.
 //

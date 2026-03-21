@@ -28,6 +28,9 @@ func (p *GraphQLParser) Extensions() []string {
 	return []string{".graphql", ".gql"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for the given file.
+func (p *GraphQLParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single GraphQL file and merges them into the graph.
 func (p *GraphQLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
