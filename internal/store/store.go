@@ -468,6 +468,19 @@ type Store struct {
 	lastSessionPruneAt time.Time // sessions prune (daily debounce)
 	lastPruneStaleAt   time.Time // PruneStaleData (daily debounce)
 
+	// semanticDedupFunc embeds text on-the-fly for semantic dedup in prepareMemory.
+	// When set: Jaccard in [0.5, 0.85) triggers a cosine similarity check against
+	// the candidate's stored embedding. When nil: inconclusive range falls through
+	// (no semantic dedup — same as pre-Sprint-11 behavior).
+	semanticDedupFunc func(text string) ([]float32, error)
+}
+
+// SetSemanticDedupFunc sets the embedding function used for semantic dedup
+// in prepareMemory. When Jaccard similarity is inconclusive (0.5–0.85), the
+// function embeds the new content and compares against the candidate's stored
+// embedding. Pass nil to disable semantic dedup (default).
+func (s *Store) SetSemanticDedupFunc(fn func(text string) ([]float32, error)) {
+	s.semanticDedupFunc = fn
 }
 
 // CacheDir returns the canonical directory where synapses stores all project
