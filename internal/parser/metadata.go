@@ -363,11 +363,26 @@ func extractTypeIdentifiers(n sitter.Node, src []byte) []string {
 			return
 		case "generic_type":
 			// generic_type has a name child (type_identifier) + type_arguments.
+			// Extract only the name, not the type arguments.
 			if ti := firstChildOfType(child, "type_identifier"); !ti.IsNull() {
 				name := string(src[ti.StartByte():ti.EndByte()])
 				if name != "" && !seen[name] {
 					seen[name] = true
 					names = append(names, name)
+				}
+			}
+			return
+		case "user_type":
+			// Kotlin user_type: simple_identifier + optional type_arguments.
+			// Extract only the identifier, not the type arguments.
+			for _, idType := range []string{"simple_identifier", "type_identifier"} {
+				if id := firstChildOfType(child, idType); !id.IsNull() {
+					name := string(src[id.StartByte():id.EndByte()])
+					if name != "" && !seen[name] {
+						seen[name] = true
+						names = append(names, name)
+					}
+					return
 				}
 			}
 			return
