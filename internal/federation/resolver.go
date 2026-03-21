@@ -287,11 +287,6 @@ func (r *Resolver) Close() {
 	r.stores = make(map[string]*store.Store)
 }
 
-// Entries returns the federation entries.
-func (r *Resolver) Entries() []config.FederationEntry {
-	return r.entries
-}
-
 // Aliases returns all configured federation aliases.
 func (r *Resolver) Aliases() []string {
 	aliases := make([]string, len(r.entries))
@@ -299,16 +294,6 @@ func (r *Resolver) Aliases() []string {
 		aliases[i] = e.Alias
 	}
 	return aliases
-}
-
-// HasAlias reports whether the resolver has an entry for the given alias.
-func (r *Resolver) HasAlias(alias string) bool {
-	for _, e := range r.entries {
-		if e.Alias == alias {
-			return true
-		}
-	}
-	return false
 }
 
 // SiblingProjectID derives the brain-compatible projectID for a sibling.

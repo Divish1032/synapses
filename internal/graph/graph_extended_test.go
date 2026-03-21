@@ -336,31 +336,6 @@ func TestStringPool_EmptyString(t *testing.T) {
 	}
 }
 
-func TestStringPool_GhostIntern(t *testing.T) {
-	pool := graph.NewStringPool()
-
-	ghostID := pool.GhostIntern("transient-string")
-	if pool.Value(ghostID) != "transient-string" {
-		t.Errorf("expected 'transient-string', got %q", pool.Value(ghostID))
-	}
-}
-
-func TestStringPool_Stats(t *testing.T) {
-	pool := graph.NewStringPool()
-
-	pool.Intern("a")
-	pool.Intern("b")
-	pool.Intern("c")
-
-	interned, nextGhost := pool.Stats()
-	if interned != 3 {
-		t.Errorf("expected 3 interned, got %d", interned)
-	}
-	if nextGhost < 1 {
-		t.Errorf("expected nextGhost >= 1, got %d", nextGhost)
-	}
-}
-
 // ── FlatGraph (flatgraph.go) ──────────────────────────────────────────────────
 
 func TestFlatGraph_AddNodeAndExtID(t *testing.T) {
@@ -390,69 +365,3 @@ func TestFlatGraph_AddEdge(t *testing.T) {
 	fg.AddEdge(aID, bID, 1.0)
 }
 
-func TestFlatGraph_InvalidateNode(t *testing.T) {
-	fg := graph.NewFlatGraph("test-repo")
-
-	idx := fg.AddNode(graph.Pool.Intern("TombTarget_unique"), graph.NodeFunction, graph.Pool.Intern("tomb.go"), 0)
-	extID := fg.ExtID(idx)
-
-	fg.InvalidateNode(extID)
-
-	if !fg.Tombstones[idx] {
-		t.Error("expected node to be tombstoned after InvalidateNode")
-	}
-}
-
-func TestFlatGraph_NeedsDefrag_False(t *testing.T) {
-	fg := graph.NewFlatGraph("test-repo")
-	// Empty graph — no defrag needed.
-	if fg.NeedsDefrag() {
-		t.Error("empty graph should not need defrag")
-	}
-}
-
-func TestFlatGraph_NeedsDefrag_True(t *testing.T) {
-	fg := graph.NewFlatGraph("defrag-repo")
-
-	// Add 10 nodes with distinct names via global Pool, tombstone 9 (>15%).
-	names := []string{"Nd0", "Nd1", "Nd2", "Nd3", "Nd4", "Nd5", "Nd6", "Nd7", "Nd8", "Nd9"}
-	fileID := graph.Pool.Intern("defrag_test.go")
-
-	var extIDs []graph.NodeID
-	for _, name := range names {
-		idx := fg.AddNode(graph.Pool.Intern(name), graph.NodeFunction, fileID, 0)
-		extIDs = append(extIDs, fg.ExtID(idx))
-	}
-
-	for i := 0; i < 9; i++ {
-		fg.InvalidateNode(extIDs[i])
-	}
-
-	if !fg.NeedsDefrag() {
-		t.Error("expected NeedsDefrag=true when >15% tombstoned")
-	}
-}
-
-func TestFlatGraph_Resolve_Found(t *testing.T) {
-	fg := graph.NewFlatGraph("test-repo")
-
-	idx := fg.AddNode(graph.Pool.Intern("FooResolve_unique"), graph.NodeFunction, graph.Pool.Intern("foo_resolve.go"), 0)
-	extID := fg.ExtID(idx)
-
-	resolved, ok := fg.Resolve(extID)
-	if !ok {
-		t.Errorf("expected Resolve to find node with extID %q", extID)
-	}
-	if resolved != idx {
-		t.Errorf("expected resolved idx=%d, got %d", idx, resolved)
-	}
-}
-
-func TestFlatGraph_Resolve_NotFound(t *testing.T) {
-	fg := graph.NewFlatGraph("test-repo")
-
-	_, ok := fg.Resolve(graph.NodeID("unknown::file::symbol"))
-	if ok {
-		t.Error("expected Resolve to return false for unknown node")
-	}
-}

@@ -80,28 +80,28 @@ func TestInsertBrainUsage(t *testing.T) {
 	}
 }
 
-func TestUpsertSession_StartEnd(t *testing.T) {
+func TestUpsertSessionWithVersion_StartEnd(t *testing.T) {
 	s := testStore(t)
 
-	err := s.UpsertSession("sess-1", "agent-1", "proj-1", "start")
+	err := s.UpsertSessionWithVersion("sess-1", "agent-1", "proj-1", "start", "")
 	if err != nil {
-		t.Fatalf("UpsertSession start: %v", err)
+		t.Fatalf("UpsertSessionWithVersion start: %v", err)
 	}
 
-	err = s.UpsertSession("sess-1", "agent-1", "proj-1", "end")
+	err = s.UpsertSessionWithVersion("sess-1", "agent-1", "proj-1", "end", "")
 	if err != nil {
-		t.Fatalf("UpsertSession end: %v", err)
+		t.Fatalf("UpsertSessionWithVersion end: %v", err)
 	}
 
-	err = s.UpsertSession("sess-1", "agent-1", "proj-1", "task_done")
+	err = s.UpsertSessionWithVersion("sess-1", "agent-1", "proj-1", "task_done", "")
 	if err != nil {
-		t.Fatalf("UpsertSession task_done: %v", err)
+		t.Fatalf("UpsertSessionWithVersion task_done: %v", err)
 	}
 
 	// Unknown event type — should be no-op
-	err = s.UpsertSession("sess-1", "agent-1", "proj-1", "unknown")
+	err = s.UpsertSessionWithVersion("sess-1", "agent-1", "proj-1", "unknown", "")
 	if err != nil {
-		t.Fatalf("UpsertSession unknown: %v", err)
+		t.Fatalf("UpsertSessionWithVersion unknown: %v", err)
 	}
 }
 
@@ -124,22 +124,6 @@ func TestAddSessionTokensSaved(t *testing.T) {
 	err := s.AddSessionTokensSaved("sess-1", "agent-1", "proj-1", 500, 0.25)
 	if err != nil {
 		t.Fatalf("AddSessionTokensSaved: %v", err)
-	}
-}
-
-func TestUpsertPricing(t *testing.T) {
-	s := testStore(t)
-	err := s.UpsertPricing("test-model", 5.0, 15.0, "test")
-	if err != nil {
-		t.Fatalf("UpsertPricing: %v", err)
-	}
-
-	in, out, found := s.GetPricing("test-model")
-	if !found {
-		t.Fatal("pricing not found")
-	}
-	if in != 5.0 || out != 15.0 {
-		t.Errorf("pricing: got in=%.2f out=%.2f, want 5.0/15.0", in, out)
 	}
 }
 
@@ -185,7 +169,7 @@ func TestGetSummary(t *testing.T) {
 	_ = s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
 		ToolName: "get_context", ResponseTokens: 100, BaselineTokens: 400,
 	})
-	_ = s.UpsertSession("sess-1", "agent-1", "proj-1", "start")
+	_ = s.UpsertSessionWithVersion("sess-1", "agent-1", "proj-1", "start", "")
 
 	sum, err := s.GetSummary(7)
 	if err != nil {
@@ -246,7 +230,7 @@ func TestGetToolStats(t *testing.T) {
 
 func TestGetAgentStats(t *testing.T) {
 	s := testStore(t)
-	_ = s.UpsertSession("sess-1", "agent-1", "proj-1", "start")
+	_ = s.UpsertSessionWithVersion("sess-1", "agent-1", "proj-1", "start", "")
 	_ = s.UpdateSessionStats("sess-1", "agent-1", "proj-1", 100, 0.05)
 
 	stats, err := s.GetAgentStats(7)
@@ -258,38 +242,17 @@ func TestGetAgentStats(t *testing.T) {
 	}
 }
 
-func TestGetBrainCosts(t *testing.T) {
-	s := testStore(t)
-	_ = s.InsertBrainUsage(pulsetypes.BrainUsageEvent{
-		Model: "test-model", Tier: "ingest", PromptTokens: 100, CompletionTokens: 50,
-	})
-
-	costs, err := s.GetBrainCosts(7)
-	if err != nil {
-		t.Fatalf("GetBrainCosts: %v", err)
-	}
-	if costs.TotalTokens != 150 {
-		t.Errorf("TotalTokens: got %d, want 150", costs.TotalTokens)
-	}
-}
-
 func TestEventCount(t *testing.T) {
 	s := testStore(t)
-	count, err := s.EventCount()
-	if err != nil {
-		t.Fatalf("EventCount: %v", err)
-	}
-	if count != 0 {
-		t.Errorf("expected 0 events, got %d", count)
+	tc, cd, bu := s.EventCount()
+	if tc+cd+bu != 0 {
+		t.Errorf("expected 0 events, got %d", tc+cd+bu)
 	}
 
 	_ = s.InsertToolCall(pulsetypes.ToolCallEvent{ToolName: "test", Success: true})
-	count, err = s.EventCount()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if count != 1 {
-		t.Errorf("expected 1 event, got %d", count)
+	tc, cd, bu = s.EventCount()
+	if tc+cd+bu != 1 {
+		t.Errorf("expected 1 event, got %d", tc+cd+bu)
 	}
 }
 

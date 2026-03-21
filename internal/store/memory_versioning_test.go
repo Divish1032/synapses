@@ -8,6 +8,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testGetMemoryVersions queries memory_versions directly for testing (replaces removed method).
+func testGetMemoryVersions(st *Store, memoryID string) ([]MemoryVersion, error) {
+	rows, err := st.knowledgeDB.Query(
+		`SELECT id, memory_id, version, content, superseded_by, created_at, superseded_at
+		 FROM memory_versions WHERE memory_id = ? ORDER BY version ASC`, memoryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var versions []MemoryVersion
+	for rows.Next() {
+		var v MemoryVersion
+		if err := rows.Scan(&v.ID, &v.MemoryID, &v.Version, &v.Content, &v.SupersededBy, &v.CreatedAt, &v.SupersededAt); err != nil {
+			return nil, err
+		}
+		versions = append(versions, v)
+	}
+	return versions, nil
+}
+
+// testGetMemoryVersionCount counts versions for a memory via direct SQL (replaces removed method).
+func testGetMemoryVersionCount(st *Store, memoryID string) (int, error) {
+	var count int
+	err := st.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM memory_versions WHERE memory_id = ?`, memoryID).Scan(&count)
+	return count, err
+}
+
 // ── Sprint 10.1: Memory Versioning Tests ────────────────────────────────────
 
 func TestCreateMemoryVersion_BasicRoundTrip(t *testing.T) {
@@ -29,7 +56,7 @@ func TestCreateMemoryVersion_BasicRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, ver)
 
-	versions, err := st.GetMemoryVersions(id)
+	versions, err := testGetMemoryVersions(st,id)
 	require.NoError(t, err)
 	require.Len(t, versions, 1)
 	assert.Equal(t, id, versions[0].MemoryID)
@@ -63,7 +90,7 @@ func TestCreateMemoryVersion_MultipleVersions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, v2)
 
-	versions, err := st.GetMemoryVersions(id)
+	versions, err := testGetMemoryVersions(st,id)
 	require.NoError(t, err)
 	require.Len(t, versions, 2)
 	assert.Equal(t, 1, versions[0].Version)
@@ -86,7 +113,7 @@ func TestGetMemoryVersionCount(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	count, err := st.GetMemoryVersionCount(id)
+	count, err := testGetMemoryVersionCount(st,id)
 	require.NoError(t, err)
 	assert.Equal(t, 0, count)
 
@@ -94,7 +121,7 @@ func TestGetMemoryVersionCount(t *testing.T) {
 	_, err = st.CreateMemoryVersion(id, "old content", now)
 	require.NoError(t, err)
 
-	count, err = st.GetMemoryVersionCount(id)
+	count, err = testGetMemoryVersionCount(st,id)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count)
 }
@@ -123,7 +150,7 @@ func TestInsertMemory_DedupCreatesVersionAndUpdatesContent(t *testing.T) {
 	assert.Equal(t, id1, id2, "should dedup to same memory")
 
 	// Verify a version was created with the OLD content.
-	versions, err := st.GetMemoryVersions(id1)
+	versions, err := testGetMemoryVersions(st,id1)
 	require.NoError(t, err)
 	require.Len(t, versions, 1, "dedup should have created one version snapshot")
 	assert.Equal(t, "the authentication service handles user login via JWT", versions[0].Content,
@@ -159,7 +186,7 @@ func TestInsertMemoryWithAnchors_DedupCreatesVersionAndUpdatesContent(t *testing
 	assert.Equal(t, id1, id2)
 
 	// Version has the OLD content.
-	versions, err := st.GetMemoryVersions(id1)
+	versions, err := testGetMemoryVersions(st,id1)
 	require.NoError(t, err)
 	require.Len(t, versions, 1)
 	assert.Equal(t, "TokenValidator uses RS256 algorithm for JWT signature verification", versions[0].Content)
@@ -195,7 +222,7 @@ func TestInsertMemory_IdenticalContentNoVersion(t *testing.T) {
 	assert.Equal(t, id1, id2)
 
 	// No version should exist — content didn't change.
-	versions, err := st.GetMemoryVersions(id1)
+	versions, err := testGetMemoryVersions(st,id1)
 	require.NoError(t, err)
 	assert.Empty(t, versions, "identical content should not create a version")
 }
@@ -345,7 +372,7 @@ func TestExpireMemories_CascadesVersions(t *testing.T) {
 	_, err = st.CreateMemoryVersion(id, "old content for version snapshot testing", now)
 	require.NoError(t, err)
 
-	versions, err := st.GetMemoryVersions(id)
+	versions, err := testGetMemoryVersions(st,id)
 	require.NoError(t, err)
 	require.Len(t, versions, 1)
 
@@ -353,7 +380,7 @@ func TestExpireMemories_CascadesVersions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Greater(t, count, int64(0))
 
-	versions, err = st.GetMemoryVersions(id)
+	versions, err = testGetMemoryVersions(st,id)
 	require.NoError(t, err)
 	assert.Empty(t, versions, "versions should be cascade-deleted on expire")
 }
@@ -399,7 +426,7 @@ func TestVersionCap_PrunesOldest(t *testing.T) {
 	}
 
 	// Should be capped at maxVersionsPerMemory.
-	count, err := st.GetMemoryVersionCount(id)
+	count, err := testGetMemoryVersionCount(st,id)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, count, maxVersionsPerMemory, "versions should be capped")
 }
@@ -438,7 +465,7 @@ func TestDedupChain_ThreeWrites(t *testing.T) {
 	assert.Equal(t, id, id3)
 
 	// Should have 2 versions (write 1 content + write 2 content).
-	versions, err := st.GetMemoryVersions(id)
+	versions, err := testGetMemoryVersions(st,id)
 	require.NoError(t, err)
 	require.Len(t, versions, 2, "three writes with two content changes = two versions")
 

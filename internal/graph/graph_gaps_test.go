@@ -1,7 +1,6 @@
 package graph
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -237,78 +236,6 @@ func TestSubgraphCache_ExpiredEntryCleanedFromOrder(t *testing.T) {
 	}
 }
 
-// ── communities.go tests ─────────────────────────────────────────────────────
-
-func TestDetectCommunities_DefaultParams(t *testing.T) {
-	g := New("test")
-	// Pass 0 values; should use defaults (maxIter=10, minSize=2)
-	res, err := g.DetectCommunities(0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Algorithm != "label_propagation" {
-		t.Fatalf("unexpected algorithm: %s", res.Algorithm)
-	}
-}
-
-func TestDetectCommunities_TwoClusters(t *testing.T) {
-	g := New("test")
-	// Cluster 1: A <-> B
-	g.AddNode(&Node{ID: "a", Name: "A", Type: NodeFunction, Package: "pkg1"})
-	g.AddNode(&Node{ID: "b", Name: "B", Type: NodeFunction, Package: "pkg1"})
-	g.AddEdge(&Edge{From: "a", To: "b", Type: EdgeCalls})
-
-	// Cluster 2: C <-> D
-	g.AddNode(&Node{ID: "c", Name: "C", Type: NodeFunction, Package: "pkg2"})
-	g.AddNode(&Node{ID: "d", Name: "D", Type: NodeFunction, Package: "pkg2"})
-	g.AddEdge(&Edge{From: "c", To: "d", Type: EdgeCalls})
-
-	res, err := g.DetectCommunities(10, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.CommunityCount < 2 {
-		t.Fatalf("expected at least 2 communities, got %d", res.CommunityCount)
-	}
-}
-
-func TestDetectCommunities_MixedPackage(t *testing.T) {
-	g := New("test")
-	g.AddNode(&Node{ID: "a", Name: "A", Type: NodeFunction, Package: "pkg1"})
-	g.AddNode(&Node{ID: "b", Name: "B", Type: NodeFunction, Package: "pkg2"})
-	g.AddEdge(&Edge{From: "a", To: "b", Type: EdgeCalls})
-
-	res, err := g.DetectCommunities(10, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range res.Communities {
-		if c.Size >= 2 && len(c.PackageMix) > 1 {
-			if !c.IsMixed {
-				t.Fatal("community spanning two packages should be IsMixed=true")
-			}
-		}
-	}
-}
-
-func TestComputeModularity_NoEdges(t *testing.T) {
-	nodes := []*Node{{ID: "a"}}
-	var edges []*Edge
-	idx := map[NodeID]int{"a": 0}
-	labels := []int{0}
-	q := computeModularity(nodes, edges, idx, labels)
-	if q != 0 {
-		t.Fatalf("expected 0 modularity with no edges, got %f", q)
-	}
-}
-
-func TestComputeModularity_NoNodes(t *testing.T) {
-	q := computeModularity(nil, nil, nil, nil)
-	if q != 0 {
-		t.Fatalf("expected 0, got %f", q)
-	}
-}
-
 // ── export.go tests ──────────────────────────────────────────────────────────
 
 func TestExportDOT_SkipsEdgesOutsideNodeSet(t *testing.T) {
@@ -428,78 +355,6 @@ func TestDotHelpers(t *testing.T) {
 	}
 }
 
-// ── serialize.go tests ───────────────────────────────────────────────────────
-
-func TestFlatGraph_SerializeDeserialize_RoundTrip(t *testing.T) {
-	fg := NewFlatGraph("test-repo")
-	n1 := fg.AddNode(Pool.Intern("Foo"), NodeFunction, Pool.Intern("foo.go"), 0)
-	n2 := fg.AddNode(Pool.Intern("Bar"), NodeFunction, Pool.Intern("bar.go"), 0)
-	fg.AddEdge(n1, n2, 1.0)
-
-	var buf bytes.Buffer
-	if err := fg.Serialize(&buf); err != nil {
-		t.Fatal(err)
-	}
-
-	fg2, err := Deserialize(&buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fg2.RepoID != "test-repo" {
-		t.Fatalf("expected repo test-repo, got %s", fg2.RepoID)
-	}
-}
-
-func TestDeserializeMapped_Works(t *testing.T) {
-	fg := NewFlatGraph("mapped")
-	fg.AddNode(Pool.Intern("X"), NodeFunction, Pool.Intern("x.go"), 0)
-
-	var buf bytes.Buffer
-	if err := fg.Serialize(&buf); err != nil {
-		t.Fatal(err)
-	}
-
-	fg2, err := DeserializeMapped(buf.Bytes())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fg2.RepoID != "mapped" {
-		t.Fatalf("unexpected repoID: %s", fg2.RepoID)
-	}
-}
-
-func TestSerialize_EmptyFlatGraph(t *testing.T) {
-	fg := NewFlatGraph("empty")
-	var buf bytes.Buffer
-	if err := fg.Serialize(&buf); err != nil {
-		t.Fatal(err)
-	}
-	fg2, err := Deserialize(&buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fg2.RepoID != "empty" {
-		t.Fatal("empty graph round-trip failed")
-	}
-}
-
-func TestWriteReadString(t *testing.T) {
-	tests := []string{"", "hello", "longer string with spaces"}
-	for _, s := range tests {
-		var buf bytes.Buffer
-		if err := writeString(&buf, s); err != nil {
-			t.Fatal(err)
-		}
-		got, err := readString(&buf)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != s {
-			t.Errorf("writeString/readString round-trip: got %q, want %q", got, s)
-		}
-	}
-}
-
 // ── intern.go tests ──────────────────────────────────────────────────────────
 
 func TestStringPool_ValueOutOfBounds(t *testing.T) {
@@ -508,18 +363,6 @@ func TestStringPool_ValueOutOfBounds(t *testing.T) {
 	got := p.Value(StringID(999999))
 	if got != "" {
 		t.Fatalf("expected empty string for out-of-bounds ID, got %q", got)
-	}
-}
-
-func TestStringPool_GhostWraparound(t *testing.T) {
-	p := NewStringPool()
-	// Intern enough ghosts to wrap around
-	for i := 0; i < ReservedGhostRange+10; i++ {
-		p.GhostIntern("ghost")
-	}
-	// Should not panic; ghostNext should wrap
-	if p.ghostNext >= ReservedGhostRange {
-		t.Fatalf("ghostNext should have wrapped, got %d", p.ghostNext)
 	}
 }
 

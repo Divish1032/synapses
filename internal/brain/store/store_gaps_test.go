@@ -40,23 +40,6 @@ func TestGetSummary_FallbackToLegacy(t *testing.T) {
 	}
 }
 
-func TestGetSummaryWithTags_FallbackToLegacy(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-
-	if err := s.UpsertSummary("", "node-leg", "Fn", "sum", []string{"tag1"}); err != nil {
-		t.Fatal(err)
-	}
-
-	summary, tags := s.GetSummaryWithTags("other-project", "node-leg")
-	if summary != "sum" {
-		t.Errorf("summary = %q, want 'sum'", summary)
-	}
-	if len(tags) != 1 || tags[0] != "tag1" {
-		t.Errorf("tags = %v, want [tag1]", tags)
-	}
-}
-
 // --- GetSummaries with empty input ---
 
 func TestGetSummaries_EmptyIDs(t *testing.T) {
@@ -65,20 +48,6 @@ func TestGetSummaries_EmptyIDs(t *testing.T) {
 	result := s.GetSummaries("proj", []string{})
 	if len(result) != 0 {
 		t.Errorf("expected empty map, got %v", result)
-	}
-}
-
-// --- AllSummaries on empty DB ---
-
-func TestAllSummaries_Empty(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-	all, err := s.AllSummaries()
-	if err != nil {
-		t.Fatalf("AllSummaries: %v", err)
-	}
-	if len(all) != 0 {
-		t.Errorf("expected 0 summaries, got %d", len(all))
 	}
 }
 
@@ -156,25 +125,6 @@ func TestAllPatterns_Empty(t *testing.T) {
 	}
 	if len(all) != 0 {
 		t.Errorf("expected 0 patterns, got %d", len(all))
-	}
-}
-
-// --- GetRecentDecisions with limit ---
-
-func TestGetRecentDecisions_LimitRespected(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-
-	for i := 0; i < 5; i++ {
-		_ = s.LogDecision("a", "p", "E", "act", nil, "out", "")
-	}
-
-	decisions, err := s.GetRecentDecisions("E", 2)
-	if err != nil {
-		t.Fatalf("GetRecentDecisions: %v", err)
-	}
-	if len(decisions) != 2 {
-		t.Errorf("expected 2 decisions (limit), got %d", len(decisions))
 	}
 }
 

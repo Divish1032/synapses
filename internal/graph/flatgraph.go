@@ -2,7 +2,6 @@ package graph
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 )
 
@@ -172,47 +171,3 @@ func (fg *FlatGraph) AddEdge(from, to NodeIndex, weight float32) {
 	}
 }
 
-// InvalidateNode (Tombstoning). Marks a node as deleted without shifting slices.
-func (fg *FlatGraph) InvalidateNode(extID NodeID) {
-	fg.mu.Lock()
-	defer fg.mu.Unlock()
-
-	idx, exists := fg.stringIDToIndex[extID]
-	if !exists {
-		return
-	}
-
-	if !fg.Tombstones[idx] {
-		fg.Tombstones[idx] = true
-		fg.TombstoneCount++
-		delete(fg.stringIDToIndex, extID)
-	}
-}
-
-// NeedsDefrag returns true if >15% of the graph consists of tombstoned nodes.
-func (fg *FlatGraph) NeedsDefrag() bool {
-	fg.mu.RLock()
-	defer fg.mu.RUnlock()
-
-	total := len(fg.Names)
-	if total == 0 {
-		return false
-	}
-	ratio := float64(fg.TombstoneCount) / float64(total)
-	return ratio > 0.15
-}
-
-// Resolve takes an external string NodeID and returns the internal SoA NodeIndex.
-func (fg *FlatGraph) Resolve(extID NodeID) (NodeIndex, bool) {
-	fg.mu.RLock()
-	defer fg.mu.RUnlock()
-
-	// Quick namespace normalization if needed
-	if strings.Contains(string(extID), "::") {
-		idx, ok := fg.stringIDToIndex[extID]
-		if ok && !fg.Tombstones[idx] {
-			return idx, true
-		}
-	}
-	return 0, false
-}

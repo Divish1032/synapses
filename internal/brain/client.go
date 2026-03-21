@@ -62,13 +62,6 @@ func (c *Client) Ingest(ctx context.Context, req IngestRequest) {
 	_, _ = c.brain.Ingest(ctx, req)
 }
 
-// BulkIngest calls Ingest for each node. Fire-and-forget.
-func (c *Client) BulkIngest(ctx context.Context, nodes []IngestRequest) {
-	for _, n := range nodes {
-		_, _ = c.brain.Ingest(ctx, n)
-	}
-}
-
 // ExplainViolation returns (explanation, fix) for an architecture violation.
 // Returns ("", "") if the brain is unavailable.
 func (c *Client) ExplainViolation(ctx context.Context, req ViolationRequest) (string, string) {
@@ -106,21 +99,6 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 // LogDecision records a reasoning decision. Fire-and-forget.
 func (c *Client) LogDecision(ctx context.Context, req DecisionRequest) {
 	_ = c.brain.LogDecision(ctx, req)
-}
-
-// GetSDLC returns (phase, qualityMode) from the brain's SDLC config.
-// Returns ("development", "standard") if the brain is unavailable.
-func (c *Client) GetSDLC(_ context.Context) (string, string) {
-	cfg := c.brain.GetSDLCConfig()
-	phase := string(cfg.Phase)
-	mode := string(cfg.QualityMode)
-	if phase == "" {
-		phase = "development"
-	}
-	if mode == "" {
-		mode = "standard"
-	}
-	return phase, mode
 }
 
 // SetPhase updates the active SDLC phase. Returns the updated SDLCConfig.

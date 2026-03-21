@@ -47,12 +47,6 @@ func TestIngest_NilSafe(t *testing.T) {
 	c.Ingest(context.Background(), brain.IngestRequest{NodeID: "x", Code: "func Foo() {}"})
 }
 
-// TestBulkIngest_NilSafe verifies BulkIngest doesn't panic on NullBrain.
-func TestBulkIngest_NilSafe(t *testing.T) {
-	c := brain.NewInProcess(nil)
-	c.BulkIngest(context.Background(), []brain.IngestRequest{{NodeID: "a"}, {NodeID: "b"}})
-}
-
 // TestExplainViolation_NullBrain verifies ExplainViolation returns empty strings.
 func TestExplainViolation_NullBrain(t *testing.T) {
 	c := brain.NewInProcess(nil)
@@ -68,18 +62,6 @@ func TestGetSummary_NullBrain(t *testing.T) {
 	s := c.GetSummary(context.Background(), "some-node-id")
 	if s != "" {
 		t.Errorf("expected empty summary, got %q", s)
-	}
-}
-
-// TestGetSDLC_NullBrain verifies defaults are returned.
-func TestGetSDLC_NullBrain(t *testing.T) {
-	c := brain.NewInProcess(nil)
-	phase, mode := c.GetSDLC(context.Background())
-	if phase != "development" {
-		t.Errorf("expected 'development', got %q", phase)
-	}
-	if mode != "standard" {
-		t.Errorf("expected 'standard', got %q", mode)
 	}
 }
 

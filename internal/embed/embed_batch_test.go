@@ -191,24 +191,3 @@ func TestModel_NonNil(t *testing.T) {
 	}
 }
 
-func TestEndpoint_NilClient(t *testing.T) {
-	var c *embed.Client
-	if e := c.Endpoint(); e != "" {
-		t.Errorf("expected empty endpoint for nil client, got %q", e)
-	}
-}
-
-func TestEndpoint_NonNil(t *testing.T) {
-	url := "http://localhost:11434/api/embeddings"
-	c := embed.NewClient(url, "model")
-	if e := c.Endpoint(); e != url {
-		t.Errorf("expected %q, got %q", url, e)
-	}
-}
-
-func TestEndpoint_BrainClient(t *testing.T) {
-	c := embed.NewBrainClient("http://localhost:11435")
-	if e := c.Endpoint(); e == "" {
-		t.Error("expected non-empty endpoint for brain client")
-	}
-}

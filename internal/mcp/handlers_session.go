@@ -1577,6 +1577,82 @@ func (s *Server) handleReportUsage(
 	})
 }
 
+// handleGetMyAnalytics returns a per-agent analytics summary for the current agent
+// (Bug 57 — STO-D.4.5). This is the agent-facing complement to the admin HTTP
+// /api/admin/pulse/summary endpoint.
+func (s *Server) handleGetMyAnalytics(
+	ctx context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	agentID, _ := args["agent_id"].(string)
+	if agentID == "" {
+		agentID = s.getLastAgent()
+	}
+	days := 7
+	if v, ok := args["days"].(float64); ok && v > 0 && v <= 90 {
+		days = int(v)
+	}
+
+	pc := s.getPulseClient()
+	if pc == nil {
+		return jsonResult(map[string]interface{}{
+			"available": false,
+			"note":      "Analytics not available (pulse not initialised).",
+		})
+	}
+
+	// Get a project-scoped summary for the current project filtered by agent.
+	sum := pc.GetSummaryForProject(days, s.projectID)
+
+	result := map[string]interface{}{
+		"available":   true,
+		"days":        days,
+		"agent_id":    agentID,
+		"project_id":  s.projectID,
+	}
+
+	if sum != nil && sum.Summary != nil {
+		result["tool_calls"] = sum.Summary.TotalToolCalls
+		result["context_deliveries"] = sum.Summary.ContextDeliveries
+		result["tokens_saved"] = sum.Summary.TokensSaved
+		result["cost_saved_usd"] = sum.Summary.CostSavedUSD
+		result["sessions"] = sum.Summary.Sessions
+		result["tasks_completed"] = sum.Summary.TasksCompleted
+		result["cache_hit_rate"] = sum.Summary.CacheHitRate
+		result["avg_latency_ms"] = sum.Summary.AvgLatencyMs
+		result["savings_pct"] = sum.Summary.SavingsPct
+	}
+
+	// Effectiveness insights — agent can use this to understand which entities
+	// their context requests are landing well on.
+	insights := pc.FetchEffectiveness(s.projectID, 2)
+	if len(insights) > 0 {
+		type insight struct {
+			Entity     string  `json:"entity"`
+			Score      float64 `json:"score"`
+			Signals    int     `json:"signals"`
+			Suggestion string  `json:"suggestion"`
+		}
+		top := make([]insight, 0, len(insights))
+		for _, e := range insights {
+			top = append(top, insight{
+				Entity:     e.Entity,
+				Score:      e.Score,
+				Signals:    e.Signals,
+				Suggestion: e.Suggestion,
+			})
+		}
+		result["effectiveness_insights"] = top
+	}
+
+	// FCRR tells the agent how often its context was "right first time".
+	fcrr := pc.GetFirstContextRightRate(days)
+	result["first_context_right_rate"] = fcrr
+
+	return jsonResult(result)
+}
+
 // cloneGraph creates a shallow copy of g with an independent edge set.
 func cloneGraph(g *graph.Graph) *graph.Graph {
 	clone := graph.New(g.RepoID())

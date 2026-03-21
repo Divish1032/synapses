@@ -1161,6 +1161,7 @@ var knowledgeTools = map[string]bool{
 	"link_task_nodes":    true,
 	"check_plan_safety":  true,
 	"report_usage":       true,
+	"get_my_analytics":   true,
 }
 
 // hiddenTools are deprecated or subsumed tools that remain callable but are
@@ -1345,6 +1346,27 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleReportUsage,
+	)
+
+	// get_my_analytics: agent-facing analytics summary (Bug 57 — STO-D.4.5).
+	s.addOrDefer(
+		mcp.NewTool(
+			"get_my_analytics",
+			mcp.WithDescription(
+				"Returns a personal analytics summary for this agent and project: "+
+					"tool call counts, context deliveries, tokens saved, cost savings, "+
+					"cache hit rate, and effectiveness insights for top entities. "+
+					"Use this to understand how well Synapses is working for you and "+
+					"which entities are being served accurately vs. needing correction.",
+			),
+			mcp.WithNumber("days",
+				mcp.Description("Window in days (1–90). Defaults to 7."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Agent identifier. Defaults to the agent_id from the most recent session_init."),
+			),
+		),
+		s.handleGetMyAnalytics,
 	)
 
 	// explain_codebase: first-5-minutes orientation narrative (R11)

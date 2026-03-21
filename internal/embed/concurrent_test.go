@@ -45,9 +45,6 @@ func TestConcurrentEmbed_MutexSerialization(t *testing.T) {
 	}
 
 	// Verify embedder is in a consistent state after concurrent failures.
-	if e.IsReady() {
-		t.Error("embedder should not be ready after failed init")
-	}
 	if e.StatusDetail() != "unavailable" {
 		t.Errorf("expected status 'unavailable', got %q", e.StatusDetail())
 	}
@@ -115,39 +112,6 @@ func TestConcurrentClose(t *testing.T) {
 
 	wg.Wait()
 	// If we get here without a panic or race detector failure, the test passes.
-}
-
-// TestPoolSize_Default verifies the default pool size is 3.
-func TestPoolSize_Default(t *testing.T) {
-	e := embed.NewBuiltinEmbedder(t.TempDir())
-	defer e.Close()
-	if got := e.PoolSize(); got != 3 {
-		t.Errorf("default pool size = %d, want 3", got)
-	}
-}
-
-// TestPoolSize_Custom verifies custom pool sizes and clamping.
-func TestPoolSize_Custom(t *testing.T) {
-	tests := []struct {
-		input int
-		want  int
-	}{
-		{1, 1},
-		{2, 2},
-		{5, 5},
-		{8, 8},
-		{0, 1},  // clamped to 1
-		{-1, 1}, // clamped to 1
-		{9, 8},  // clamped to 8
-		{100, 8},
-	}
-	for _, tc := range tests {
-		e := embed.NewBuiltinEmbedderWithPoolSize(t.TempDir(), tc.input)
-		defer e.Close()
-		if got := e.PoolSize(); got != tc.want {
-			t.Errorf("NewBuiltinEmbedderWithPoolSize(_, %d).PoolSize() = %d, want %d", tc.input, got, tc.want)
-		}
-	}
 }
 
 // TestCloseIdempotent verifies that calling Close() multiple times is safe.

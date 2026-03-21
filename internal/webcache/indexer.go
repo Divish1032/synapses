@@ -112,17 +112,3 @@ func IndexProjectImports(ctx context.Context, projectPath string, g *graph.Graph
 	}
 }
 
-// HandleGoModChanged is called by the watcher when go.mod changes in a project.
-// It re-parses the new versions and invalidates stale cached docs.
-func HandleGoModChanged(projectPath string, cache *Cache) {
-	newVersions, err := ParseGoMod(projectPath)
-	if err != nil || newVersions == nil {
-		return
-	}
-	// Invalidate all package entries — re-fetch at new versions on next access.
-	// Simple approach: delete all pkg: prefixed entries for this project's deps.
-	for importPath := range newVersions {
-		cache.InvalidatePackage(importPath, "")
-	}
-	log.Printf("webcache: go.mod changed at %s — invalidated cached package docs", projectPath)
-}

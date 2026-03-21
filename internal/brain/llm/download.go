@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // HFBaseURL is the HuggingFace resolve endpoint for file downloads.
@@ -86,7 +87,10 @@ func DownloadGGUF(ctx context.Context, cfg DownloadConfig) (string, error) {
 		return "", fmt.Errorf("download: build request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	// Use a dedicated client with a timeout to prevent indefinite hangs
+	// on stalled network connections during multi-GB model downloads.
+	dlClient := &http.Client{Timeout: 30 * time.Minute}
+	resp, err := dlClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("download: GET %s: %w", url, err)
 	}

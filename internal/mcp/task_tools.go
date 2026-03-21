@@ -453,6 +453,14 @@ func (s *Server) handleUpdateTask(
 		}
 	}
 
+	// P3B-5b: replan detection — check if task is reverting from in_progress back to pending.
+	var oldStatus string
+	if status == "pending" {
+		if t, err := s.store.GetTask(id); err == nil {
+			oldStatus = t.Status
+		}
+	}
+
 	unblocked, planCompleted, err := s.store.UpdateTask(id, status, notes, agentID)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("update task: %v", err)), nil
@@ -520,19 +528,27 @@ func (s *Server) handleUpdateTask(
 				aid := agentID
 				sig := signalType
 				s.goBackground(func() {
+					// P3B-5a: compute task duration from CreatedAt for task_done signals.
+					var durationMs int
+					task, taskErr := st.GetTask(taskID)
+					if taskErr == nil && sig == "task_done" {
+						if created, parseErr := time.Parse(time.RFC3339, task.CreatedAt); parseErr == nil {
+							durationMs = int(time.Since(created).Milliseconds())
+						}
+					}
+
 					var emitted bool
-					if sg != nil {
-						if task, err := st.GetTask(taskID); err == nil {
-							for _, nodeID := range task.LinkedNodes {
-								if n := sg.GetNode(graph.NodeID(nodeID)); n != nil && n.Name != "" {
-									pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
-										ProjectID:  projID,
-										AgentID:    aid,
-										Entity:     entityWithPath(n.Name, n.File),
-										SignalType: sig,
-									})
-									emitted = true
-								}
+					if sg != nil && taskErr == nil {
+						for _, nodeID := range task.LinkedNodes {
+							if n := sg.GetNode(graph.NodeID(nodeID)); n != nil && n.Name != "" {
+								pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
+									ProjectID:  projID,
+									AgentID:    aid,
+									Entity:     entityWithPath(n.Name, n.File),
+									SignalType: sig,
+									Count:      durationMs,
+								})
+								emitted = true
 							}
 						}
 					}
@@ -541,10 +557,26 @@ func (s *Server) handleUpdateTask(
 							ProjectID:  projID,
 							AgentID:    aid,
 							SignalType: sig,
+							Count:      durationMs,
 						})
 					}
 				})
 			}
+		}
+	}
+
+	// P3B-5b: emit replan signal when task reverts from in_progress back to pending.
+	if status == "pending" && oldStatus == "in_progress" {
+		if pc := s.getPulseClient(); pc != nil {
+			projCopy := s.projectID
+			aidCopy := agentID
+			s.goBackground(func() {
+				pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
+					ProjectID:  projCopy,
+					AgentID:    aidCopy,
+					SignalType: "replan",
+				})
+			})
 		}
 	}
 

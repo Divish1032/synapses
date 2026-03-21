@@ -199,11 +199,6 @@ func (w *Watcher) SetPulseClient(pc *pulse.Client) {
 	w.pulseClient = pc
 }
 
-// LoopPanics returns the number of times the watcher event loop panicked. (P2-4)
-func (w *Watcher) LoopPanics() int64 {
-	return w.loopPanics.Load()
-}
-
 // SetConfigChangeHandler registers a callback that is invoked whenever
 // synapses.json changes on disk. The callback receives the newly parsed config.
 // This enables hot-reload of brain/scout client settings without restarting.
@@ -499,6 +494,12 @@ func (w *Watcher) reloadConfig(configPath string) {
 	newCfg, err := config.Load(dir)
 	if err != nil {
 		logutil.Error("synapses/watcher: reload %s: %v\n", configPath, err)
+		if w.pulseClient != nil {
+			w.pulseClient.RecordConfigReload(pulse.ConfigReloadEvent{
+				Success:   false,
+				ProjectID: w.projectID,
+			})
+		}
 		return
 	}
 	// Update the watcher's own violation-checking config so future file changes
@@ -513,6 +514,12 @@ func (w *Watcher) reloadConfig(configPath string) {
 	logutil.Info("synapses/watcher: config reloaded from %s\n", configPath)
 	if handler != nil {
 		handler(newCfg)
+	}
+	if w.pulseClient != nil {
+		w.pulseClient.RecordConfigReload(pulse.ConfigReloadEvent{
+			Success:   true,
+			ProjectID: w.projectID,
+		})
 	}
 }
 
@@ -924,6 +931,7 @@ func (w *Watcher) persistAsync(changedFile string) {
 	}
 	mtime := time.Now().UnixNano()
 	w.trackGo(func() {
+		persistStart := time.Now()
 		if err := w.store.SaveGraphDelta(changedFile, w.graph); err != nil {
 			logutil.Error("synapses/watcher: cache save: %v\n", err)
 		}
@@ -931,6 +939,12 @@ func (w *Watcher) persistAsync(changedFile string) {
 			if err := w.store.UpsertFileMtime(changedFile, mtime); err != nil {
 				logutil.Error("synapses/watcher: update mtime %s: %v\n", changedFile, err)
 			}
+		}
+		if w.pulseClient != nil {
+			w.pulseClient.RecordPersistenceEvent(pulse.PersistenceEvent{
+				DurationMs: float64(time.Since(persistStart).Milliseconds()),
+				ProjectID:  w.projectID,
+			})
 		}
 	})
 }

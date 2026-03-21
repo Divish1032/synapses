@@ -202,11 +202,6 @@ func TestWriteBatch_TokenSavingsComputation(t *testing.T) {
 	c.Start()
 	defer c.Stop()
 
-	// Insert pricing data for gpt-4o
-	if err := s.UpsertPricing("gpt-4o", 2.50, 10.00, "test"); err != nil {
-		t.Fatalf("UpsertPricing: %v", err)
-	}
-
 	// Record context delivery with significant token savings
 	// BaselineTokens 400 - ResponseTokens 100 = 300 tokens saved
 	c.RecordContextDelivery(pulsetypes.ContextDeliveryEvent{
@@ -235,7 +230,7 @@ func TestComputeCostSaved_ZeroTokens(t *testing.T) {
 	s := testStore(t)
 	c := New(s, 100, 500)
 
-	cost := c.computeCostSaved(0)
+	cost := c.computeCostSaved(0, "gpt-4o")
 	if cost != 0.0 {
 		t.Errorf("zero tokens: got %.6f, want 0", cost)
 	}
@@ -245,7 +240,7 @@ func TestComputeCostSaved_NegativeTokens(t *testing.T) {
 	s := testStore(t)
 	c := New(s, 100, 500)
 
-	cost := c.computeCostSaved(-100)
+	cost := c.computeCostSaved(-100, "gpt-4o")
 	if cost != 0.0 {
 		t.Errorf("negative tokens: got %.6f, want 0", cost)
 	}
@@ -255,13 +250,8 @@ func TestComputeCostSaved_WithPricing(t *testing.T) {
 	s := testStore(t)
 	c := New(s, 100, 500)
 
-	// Insert pricing data for gpt-4o (2.50 per 1M input tokens)
-	if err := s.UpsertPricing("gpt-4o", 2.50, 10.00, "test"); err != nil {
-		t.Fatalf("UpsertPricing: %v", err)
-	}
-
-	// 1000000 tokens saved should cost ~$2.50
-	cost := c.computeCostSaved(1000000)
+	// 1000000 tokens saved should cost ~$2.50 (gpt-4o pricing seeded by schema)
+	cost := c.computeCostSaved(1000000, "gpt-4o")
 	if cost < 2.4 || cost > 2.6 {
 		t.Errorf("1M tokens: got $%.6f, want ~$2.50", cost)
 	}
@@ -271,13 +261,8 @@ func TestComputeCostSaved_SmallAmount(t *testing.T) {
 	s := testStore(t)
 	c := New(s, 100, 500)
 
-	// Insert pricing data
-	if err := s.UpsertPricing("gpt-4o", 2.50, 10.00, "test"); err != nil {
-		t.Fatalf("UpsertPricing: %v", err)
-	}
-
-	// 1000 tokens at $2.50/1M = $0.0000025
-	cost := c.computeCostSaved(1000)
+	// 1000 tokens at $2.50/1M = $0.0000025 (gpt-4o pricing seeded by schema)
+	cost := c.computeCostSaved(1000, "gpt-4o")
 	expected := 1000.0 / 1_000_000.0 * 2.50
 	if cost < expected*0.9 || cost > expected*1.1 {
 		t.Errorf("1K tokens: got $%.9f, want ~$%.9f", cost, expected)
@@ -288,12 +273,7 @@ func TestComputeCostSaved_MultipleTokenAmounts(t *testing.T) {
 	s := testStore(t)
 	c := New(s, 100, 500)
 
-	// Insert pricing data
-	if err := s.UpsertPricing("gpt-4o", 2.50, 10.00, "test"); err != nil {
-		t.Fatalf("UpsertPricing: %v", err)
-	}
-
-	// Test with different token amounts
+	// Test with different token amounts (gpt-4o pricing seeded by schema)
 	testCases := []struct {
 		tokens int
 		name   string
@@ -304,7 +284,7 @@ func TestComputeCostSaved_MultipleTokenAmounts(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		cost := c.computeCostSaved(tc.tokens)
+		cost := c.computeCostSaved(tc.tokens, "gpt-4o")
 		expected := float64(tc.tokens) / 1_000_000.0 * 2.50
 		// Allow 5% tolerance for floating point math
 		if cost < expected*0.95 || cost > expected*1.05 {
@@ -343,12 +323,9 @@ func TestFlush_OnStop(t *testing.T) {
 
 	c.Stop() // Should trigger final flush
 
-	count, err := s.EventCount()
-	if err != nil {
-		t.Fatalf("EventCount: %v", err)
-	}
-	if count < 2 {
-		t.Errorf("expected at least 2 events after stop, got %d", count)
+	tc, cd, bu := s.EventCount()
+	if tc+cd+bu < 2 {
+		t.Errorf("expected at least 2 events after stop, got %d", tc+cd+bu)
 	}
 }
 
@@ -392,19 +369,19 @@ func TestComputeCostSaved(t *testing.T) {
 	c := New(s, 100, 500)
 
 	// gpt-4o default pricing is $2.50/1M input
-	cost := c.computeCostSaved(1_000_000)
+	cost := c.computeCostSaved(1_000_000, "gpt-4o")
 	if cost != 2.50 {
 		t.Errorf("cost: got %.2f, want 2.50", cost)
 	}
 
 	// Zero tokens
-	cost = c.computeCostSaved(0)
+	cost = c.computeCostSaved(0, "gpt-4o")
 	if cost != 0 {
 		t.Errorf("cost for 0 tokens: got %.2f, want 0", cost)
 	}
 
 	// Negative tokens
-	cost = c.computeCostSaved(-100)
+	cost = c.computeCostSaved(-100, "gpt-4o")
 	if cost != 0 {
 		t.Errorf("cost for negative tokens: got %.2f, want 0", cost)
 	}
@@ -482,18 +459,15 @@ func TestWriteBatch_WithAgentLLMUsage(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 }
 
-func TestComputeCostSaved_ZeroPricing(t *testing.T) {
+func TestComputeCostSaved_UnknownModel(t *testing.T) {
 	s := testStore(t)
 	c := New(s, 100, 500)
 
-	// Insert pricing with 0 inputPer1M — should return 0 even for positive tokens
-	if err := s.UpsertPricing("gpt-4o", 0.0, 10.00, "test"); err != nil {
-		t.Fatalf("UpsertPricing: %v", err)
-	}
-
-	cost := c.computeCostSaved(1_000_000)
-	if cost != 0.0 {
-		t.Errorf("zero pricing: got %.6f, want 0", cost)
+	// Unknown model falls back to gpt-4o pricing (canonical agent baseline).
+	// gpt-4o input pricing is $2.50/1M tokens, so 1M tokens → $2.50.
+	cost := c.computeCostSaved(1_000_000, "nonexistent-model")
+	if cost < 0.01 {
+		t.Errorf("unknown model with gpt-4o fallback: got %.6f, want > 0 (gpt-4o fallback)", cost)
 	}
 }
 
@@ -549,7 +523,7 @@ func TestComputeCostSaved_WithPricingLookup(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		cost := c.computeCostSaved(tt.tokens)
+		cost := c.computeCostSaved(tt.tokens, "gpt-4o")
 		if cost != tt.want {
 			t.Errorf("computeCostSaved(%d) = %.2f, want %.2f", tt.tokens, cost, tt.want)
 		}

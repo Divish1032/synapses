@@ -233,27 +233,6 @@ CREATE TABLE IF NOT EXISTS work_claims (
     PRIMARY KEY (agent_id, scope)
 );
 
-CREATE TABLE IF NOT EXISTS proposals (
-    id             TEXT PRIMARY KEY,
-    agent_id       TEXT NOT NULL,
-    title          TEXT NOT NULL,
-    description    TEXT NOT NULL DEFAULT '',
-    affected_nodes TEXT NOT NULL DEFAULT '[]',
-    status         TEXT NOT NULL DEFAULT 'open',
-    vote_threshold INTEGER NOT NULL DEFAULT 2,
-    created_at     TEXT NOT NULL,
-    updated_at     TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS proposal_votes (
-    proposal_id TEXT NOT NULL,
-    agent_id    TEXT NOT NULL,
-    vote        TEXT NOT NULL,
-    rationale   TEXT NOT NULL DEFAULT '',
-    created_at  TEXT NOT NULL,
-    PRIMARY KEY (proposal_id, agent_id)
-);
-
 CREATE TABLE IF NOT EXISTS tool_calls (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     tool_name   TEXT    NOT NULL,
@@ -388,9 +367,6 @@ CREATE INDEX IF NOT EXISTS idx_web_cache_fetched   ON web_cache(fetched_at);
 CREATE INDEX IF NOT EXISTS idx_annotations_node    ON annotations(node_id);
 CREATE INDEX IF NOT EXISTS idx_work_claims_scope   ON work_claims(scope);
 CREATE INDEX IF NOT EXISTS idx_work_claims_expires ON work_claims(expires_at);
-CREATE INDEX IF NOT EXISTS idx_proposals_status    ON proposals(status);
-CREATE INDEX IF NOT EXISTS idx_proposals_agent     ON proposals(agent_id);
-CREATE INDEX IF NOT EXISTS idx_pvotes_proposal     ON proposal_votes(proposal_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool     ON tool_calls(tool_name);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_ts       ON tool_calls(created_at);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session  ON tool_calls(session_id) WHERE session_id != '';
@@ -439,7 +415,6 @@ CREATE INDEX IF NOT EXISTS idx_cross_deps_file     ON cross_project_deps(to_proj
 // Soft references (node IDs stored as JSON in TEXT columns — informational only, not cleaned up):
 //
 //   - episodes.affected_nodes  — historical record; stale IDs do not affect episode retrieval
-//   - proposals.affected_nodes — captures nodes at proposal-creation time; may reference absent nodes
 //
 // These hard references may briefly point to non-existent node IDs during a reindex:
 // the file watcher deletes stale graph nodes and re-inserts them as parsing
@@ -473,6 +448,16 @@ type Store struct {
 	// the candidate's stored embedding. When nil: inconclusive range falls through
 	// (no semantic dedup — same as pre-Sprint-11 behavior).
 	semanticDedupFunc func(text string) ([]float32, error)
+
+	// bgWg tracks background goroutines spawned by SaveGraph/SaveGraphDelta
+	// for post-commit stale annotation detection. Close() waits on this to
+	// prevent "database is closed" panics during shutdown.
+	bgWg sync.WaitGroup
+
+	// bgCtx is cancelled when Close() is called, signalling background goroutines
+	// to abort long-running DB operations promptly instead of blocking shutdown.
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
 }
 
 // SetSemanticDedupFunc sets the embedding function used for semantic dedup
@@ -752,15 +737,22 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("create knowledge reader pool: %w", err)
 	}
 
-	st := &Store{graphDB: graphRW, knowledgeDB: knowledgeRW}
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	st := &Store{graphDB: graphRW, knowledgeDB: knowledgeRW, bgCtx: bgCtx, bgCancel: bgCancel}
 
 	// Rebuild FTS index for existing databases where nodes_fts is empty but
 	// the nodes table already has data.
 	var ftsCount, nodeCount int
-	_ = graphDB.QueryRow(`SELECT count(*) FROM nodes_fts`).Scan(&ftsCount)
-	_ = graphDB.QueryRow(`SELECT count(*) FROM nodes`).Scan(&nodeCount)
+	if err := graphDB.QueryRow(`SELECT count(*) FROM nodes_fts`).Scan(&ftsCount); err != nil {
+		logutil.Warn("synapses: store: count nodes_fts: %v\n", err)
+	}
+	if err := graphDB.QueryRow(`SELECT count(*) FROM nodes`).Scan(&nodeCount); err != nil {
+		logutil.Warn("synapses: store: count nodes: %v\n", err)
+	}
 	if ftsCount == 0 && nodeCount > 0 {
-		_ = st.rebuildFTS()
+		if err := st.rebuildFTS(); err != nil {
+			logutil.Error("synapses: store: FTS rebuild failed — search may be degraded: %v\n", err)
+		}
 	}
 
 	// Backfill memories_fts for upgraded databases.
@@ -852,7 +844,9 @@ func runQuickCheck(db *sql.DB) error {
 // Returns an error if the file could not be removed (requires manual intervention).
 func recoverGraphDB(path string) error {
 	for _, suffix := range []string{"", "-wal", "-shm"} {
-		_ = os.Remove(path + suffix)
+		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
+			logutil.Warn("synapses: store: recoverGraphDB: failed to remove %s: %v\n", path+suffix, err)
+		}
 	}
 	// Verify the main file was actually removed. If it still exists, the
 	// caller would reopen the same corrupt file and get confusing schema errors.
@@ -943,7 +937,8 @@ func OpenReadOnly(path string) (*Store, error) {
 		knowledgeDB.SetMaxOpenConns(1)
 		_, _ = knowledgeDB.Exec(knowledgeSchema)
 	}
-	return &Store{graphDB: wrapSingleDB(graphDB), knowledgeDB: wrapSingleDB(knowledgeDB)}, nil
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	return &Store{graphDB: wrapSingleDB(graphDB), knowledgeDB: wrapSingleDB(knowledgeDB), bgCtx: bgCtx, bgCancel: bgCancel}, nil
 }
 
 // rebuildFTS repopulates the nodes_fts table from the current nodes table.
@@ -1011,14 +1006,6 @@ func escapeLike(s string) string {
 	return r.Replace(s)
 }
 
-// NodeExistsByName reports whether a node with the given name exists in the store.
-// The match is case-insensitive and also matches qualified names: searching
-// "Close" will match a node named "Store.Close" (suffix after the last dot).
-// This mirrors graph.Graph.FindByName behaviour.
-func (s *Store) NodeExistsByName(name string) (bool, error) {
-	return s.NodeExistsByNameCtx(context.Background(), name)
-}
-
 // NodeExistsByNameCtx is the context-aware variant of NodeExistsByName.
 // The context is threaded into the SQL query — if the context expires,
 // the query is cancelled.
@@ -1035,13 +1022,6 @@ func (s *Store) NodeExistsByNameCtx(ctx context.Context, name string) (bool, err
 		return false, fmt.Errorf("node exists check: %w", err)
 	}
 	return count > 0, nil
-}
-
-// FindNodesByName returns lightweight node references matching the given name
-// (case-insensitive). Also matches qualified names: searching "Close" finds
-// both "Close" and "Store.Close". This mirrors graph.Graph.FindByName behaviour.
-func (s *Store) FindNodesByName(name string, limit int) ([]SearchResult, error) {
-	return s.FindNodesByNameCtx(context.Background(), name, limit)
 }
 
 // FindNodesByNameCtx is the context-aware variant of FindNodesByName.
@@ -1308,6 +1288,26 @@ func sanitizeFTSQuery(q string) string {
 
 // Close releases all database connections (both reader and writer pools).
 func (s *Store) Close() error {
+	// Signal background goroutines to cancel their in-flight DB operations.
+	if s.bgCancel != nil {
+		s.bgCancel()
+	}
+
+	// Wait for background goroutines (SaveGraph/SaveGraphDelta stale-detection)
+	// to finish before closing databases to prevent "database is closed" panics.
+	// Use a bounded wait to avoid deadlock if a goroutine is stuck on a DB lock.
+	done := make(chan struct{})
+	go func() {
+		s.bgWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// All background goroutines finished cleanly.
+	case <-time.After(10 * time.Second):
+		logutil.Warn("synapses: store: Close() timed out waiting for background goroutines after 10s; proceeding with DB close\n")
+	}
+
 	var firstErr error
 	if s.graphDB != nil {
 		if err := s.graphDB.Close(); err != nil {
@@ -1321,13 +1321,6 @@ func (s *Store) Close() error {
 	}
 	return firstErr
 }
-
-// GraphDB returns the underlying graph writer database connection. Used by
-// callers that need direct *sql.DB access (e.g., tests, federation probes).
-func (s *Store) GraphDB() *sql.DB { return s.graphDB.Writer() }
-
-// KnowledgeDB returns the underlying knowledge writer database connection.
-func (s *Store) KnowledgeDB() *sql.DB { return s.knowledgeDB.Writer() }
 
 // QueryStats reports index coverage for a set of representative hot-path queries.
 // It runs EXPLAIN QUERY PLAN on each query and classifies each step as either an
@@ -1456,10 +1449,6 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	// context_deliveries: instrumentation data for Sprint 11 feedback loop.
 	// Rows older than retention window have been analyzed and have no further value.
 	pruneExec(`DELETE FROM context_deliveries WHERE created_at < ?`, cutoffUnix)
-
-	// proposals: resolved proposals have no further value after retention period.
-	pruneExec(`DELETE FROM proposals WHERE status IN ('accepted','rejected','withdrawn') AND updated_at < ?`, cutoff)
-	pruneExec(`DELETE FROM proposal_votes WHERE proposal_id NOT IN (SELECT id FROM proposals)`)
 
 	// Cross-DB reconciliation for hard node_id references: annotations and quality_gaps
 	// in knowledgeDB reference node IDs from graphDB, but there is no cross-database
@@ -1772,9 +1761,14 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 
 	// GAP-3: After the new graph is committed, compute new fan-in and mark
 	// annotations stale where the call structure changed by >20% or node removed.
+	s.bgWg.Add(1)
 	go func() {
+		defer s.bgWg.Done()
+		if s.bgCtx.Err() != nil {
+			return
+		}
 		newFanIn := make(map[string]int)
-		if fanRows, err := s.graphDB.Query(`SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id`); err == nil {
+		if fanRows, err := s.graphDB.QueryContext(s.bgCtx, `SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id`); err == nil {
 			defer fanRows.Close()
 			for fanRows.Next() {
 				var nid string
@@ -1784,6 +1778,9 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 				}
 			}
 		}
+		if s.bgCtx.Err() != nil {
+			return
+		}
 		var staleIDs []string
 		const threshold = 0.20
 		for nid, oldCnt := range oldFanIn {
@@ -1792,11 +1789,10 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 			}
 			newCnt, exists := newFanIn[nid]
 			if !exists {
-				// Node removed entirely — its annotations are definitely stale.
 				staleIDs = append(staleIDs, nid)
 				continue
 			}
-			delta := float64(newCnt-oldCnt)
+			delta := float64(newCnt - oldCnt)
 			if delta < 0 {
 				delta = -delta
 			}
@@ -1806,10 +1802,6 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		}
 		if len(staleIDs) > 0 {
 			_ = s.MarkAnnotationsStale(staleIDs)
-			// AM-2: cascade stale flag to any memories anchored to these structurally-changed nodes.
-			// Gap-4 fix: also stale entity-tier memories written with entity_id but no anchor_nodes.
-			// Both calls are fire-and-forget — failures are non-fatal; stale memories will be
-			// re-detected on next session via AM-3.
 			_ = s.MarkAnchoredMemoriesStale(staleIDs, "anchor node structural change (fanin delta >20%)")
 			_ = s.MarkEntityMemoriesStaleForNodes(staleIDs, "entity node structural change (fanin delta >20%)")
 		}
@@ -2073,9 +2065,14 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 
 	// GAP-3: Post-commit stale annotation detection for changedFile nodes.
 	// Same logic as SaveGraph but scoped to changedFile via subquery.
+	s.bgWg.Add(1)
 	go func() {
+		defer s.bgWg.Done()
+		if s.bgCtx.Err() != nil {
+			return
+		}
 		newFanIn := make(map[string]int)
-		if fanRows, err := s.graphDB.Query(`
+		if fanRows, err := s.graphDB.QueryContext(s.bgCtx, `
 			SELECT e.to_id, COUNT(*)
 			FROM edges e
 			WHERE e.type = 'CALLS'
@@ -2090,6 +2087,9 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 					newFanIn[nid] = cnt
 				}
 			}
+		}
+		if s.bgCtx.Err() != nil {
+			return
 		}
 		var staleIDs []string
 		const threshold = 0.20
@@ -2895,26 +2895,6 @@ func (s *Store) GetGaps(f GapFilter) ([]QualityGap, error) {
 		out = append(out, g)
 	}
 	return out, rows.Err()
-}
-
-// CountOpenGaps returns the number of open quality gaps matching the given
-// node IDs. Used by session_init to surface gap counts for recently-worked files.
-func (s *Store) CountOpenGaps(nodeIDs []string) (int, error) {
-	if len(nodeIDs) == 0 {
-		return 0, nil
-	}
-	placeholders := make([]string, len(nodeIDs))
-	args := make([]interface{}, len(nodeIDs))
-	for i, id := range nodeIDs {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	row := s.knowledgeDB.QueryRow(
-		`SELECT COUNT(*) FROM quality_gaps WHERE status = 'open' AND node_id IN (`+
-			strings.Join(placeholders, ",")+`)`,
-		args...)
-	var n int
-	return n, row.Scan(&n)
 }
 
 // Agent is a registered agent that has interacted with Synapses.

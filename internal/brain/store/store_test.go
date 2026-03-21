@@ -96,58 +96,6 @@ func TestUpsertSummary_Update_Idempotent(t *testing.T) {
 	if got != "updated summary" {
 		t.Errorf("after update: GetSummary = %q, want %q", got, "updated summary")
 	}
-
-	// Count must still be 1.
-	if c := s.SummaryCount(); c != 1 {
-		t.Errorf("SummaryCount = %d, want 1", c)
-	}
-}
-
-func TestUpsertSummary_NilTags(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-
-	if err := s.UpsertSummary("test-project", "node-nil", "SomeFunc", "summary text", nil); err != nil {
-		t.Fatalf("UpsertSummary with nil tags: %v", err)
-	}
-
-	_, tags := s.GetSummaryWithTags("test-project", "node-nil")
-	if tags == nil {
-		t.Error("GetSummaryWithTags: expected non-nil slice for nil tags, got nil")
-	}
-	if len(tags) != 0 {
-		t.Errorf("expected empty tags slice, got %v", tags)
-	}
-}
-
-// --- GetSummaryWithTags ---
-
-func TestGetSummaryWithTags_Found(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-
-	_ = s.UpsertSummary("test-project", "node2", "OtherFunc", "another summary", []string{"x", "y"})
-
-	summary, tags := s.GetSummaryWithTags("test-project", "node2")
-	if summary != "another summary" {
-		t.Errorf("summary = %q, want %q", summary, "another summary")
-	}
-	if len(tags) != 2 || tags[0] != "x" || tags[1] != "y" {
-		t.Errorf("tags = %v, want [x y]", tags)
-	}
-}
-
-func TestGetSummaryWithTags_NotFound(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-
-	summary, tags := s.GetSummaryWithTags("test-project", "missing")
-	if summary != "" {
-		t.Errorf("summary = %q, want \"\"", summary)
-	}
-	if tags != nil {
-		t.Errorf("tags = %v, want nil", tags)
-	}
 }
 
 // --- GetSummaries ---
@@ -213,40 +161,6 @@ func TestGetSummariesByName_EmptySlice(t *testing.T) {
 	}
 	if len(result) != 0 {
 		t.Errorf("expected empty map, got %v", result)
-	}
-}
-
-// --- SummaryCount ---
-
-func TestSummaryCount(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-
-	if c := s.SummaryCount(); c != 0 {
-		t.Errorf("initial count = %d, want 0", c)
-	}
-	_ = s.UpsertSummary("test-project", "n1", "F1", "s1", nil)
-	_ = s.UpsertSummary("test-project", "n2", "F2", "s2", nil)
-	if c := s.SummaryCount(); c != 2 {
-		t.Errorf("after 2 inserts count = %d, want 2", c)
-	}
-}
-
-// --- AllSummaries ---
-
-func TestAllSummaries(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-
-	_ = s.UpsertSummary("test-project", "n1", "F1", "s1", nil)
-	_ = s.UpsertSummary("test-project", "n2", "F2", "s2", nil)
-
-	all, err := s.AllSummaries()
-	if err != nil {
-		t.Fatalf("AllSummaries: %v", err)
-	}
-	if len(all) != 2 {
-		t.Errorf("AllSummaries len = %d, want 2", len(all))
 	}
 }
 
@@ -470,50 +384,7 @@ func TestAllPatterns(t *testing.T) {
 	}
 }
 
-// --- LogDecision / GetRecentDecisions ---
-
-func TestLogAndGetRecentDecisions_FilterByEntity(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-
-	_ = s.LogDecision("agent1", "dev", "FuncA", "refactor", []string{"FuncB"}, "success", "")
-	_ = s.LogDecision("agent1", "dev", "FuncC", "review", nil, "pending", "notes here")
-
-	decisions, err := s.GetRecentDecisions("FuncA", 10)
-	if err != nil {
-		t.Fatalf("GetRecentDecisions: %v", err)
-	}
-	if len(decisions) != 1 {
-		t.Fatalf("expected 1 decision for FuncA, got %d", len(decisions))
-	}
-	if decisions[0].EntityName != "FuncA" {
-		t.Errorf("EntityName = %q, want FuncA", decisions[0].EntityName)
-	}
-	if decisions[0].Action != "refactor" {
-		t.Errorf("Action = %q, want refactor", decisions[0].Action)
-	}
-	if len(decisions[0].RelatedEntities) != 1 || decisions[0].RelatedEntities[0] != "FuncB" {
-		t.Errorf("RelatedEntities = %v", decisions[0].RelatedEntities)
-	}
-}
-
-func TestGetRecentDecisions_AllEntities(t *testing.T) {
-	t.Parallel()
-	s := openTestStore(t)
-
-	_ = s.LogDecision("a1", "dev", "FuncA", "act1", nil, "ok", "")
-	_ = s.LogDecision("a2", "dev", "FuncB", "act2", nil, "ok", "")
-	_ = s.LogDecision("a3", "dev", "FuncC", "act3", nil, "ok", "")
-
-	// Empty entityName = all entities.
-	decisions, err := s.GetRecentDecisions("", 10)
-	if err != nil {
-		t.Fatalf("GetRecentDecisions all: %v", err)
-	}
-	if len(decisions) != 3 {
-		t.Errorf("expected 3 decisions, got %d", len(decisions))
-	}
-}
+// --- LogDecision ---
 
 func TestLogDecision_NilRelatedEntities(t *testing.T) {
 	t.Parallel()
@@ -521,14 +392,6 @@ func TestLogDecision_NilRelatedEntities(t *testing.T) {
 
 	if err := s.LogDecision("a", "p", "Entity", "do", nil, "out", "note"); err != nil {
 		t.Fatalf("LogDecision with nil related: %v", err)
-	}
-
-	decisions, _ := s.GetRecentDecisions("Entity", 1)
-	if len(decisions) != 1 {
-		t.Fatalf("expected 1 decision, got %d", len(decisions))
-	}
-	if decisions[0].RelatedEntities == nil {
-		t.Error("RelatedEntities should be non-nil empty slice, got nil")
 	}
 }
 
@@ -714,8 +577,9 @@ func TestReset_ClearsAllTables(t *testing.T) {
 		t.Fatalf("Reset: %v", err)
 	}
 
-	if c := s.SummaryCount(); c != 0 {
-		t.Errorf("after Reset: SummaryCount = %d, want 0", c)
+	// Verify summaries cleared.
+	if got := s.GetSummary("test-project", "n1"); got != "" {
+		t.Errorf("after Reset: GetSummary = %q, want empty", got)
 	}
 	_, _, ok := s.GetViolationExplanation("r1", "f.go")
 	if ok {
@@ -724,10 +588,6 @@ func TestReset_ClearsAllTables(t *testing.T) {
 	_, ok = s.GetInsightCache("n1", "dev")
 	if ok {
 		t.Error("after Reset: insight cache should be empty")
-	}
-	decisions, _ := s.GetRecentDecisions("", 100)
-	if len(decisions) != 0 {
-		t.Errorf("after Reset: decision_log len = %d, want 0", len(decisions))
 	}
 	adrs, _ := s.AllADRs()
 	if len(adrs) != 0 {

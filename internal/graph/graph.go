@@ -62,7 +62,9 @@ type Graph struct {
 // generateStableID returns a random UUID v4 using crypto/rand (no external deps).
 func generateStableID() string {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand.Read failed: " + err.Error())
+	}
 	b[6] = (b[6] & 0x0f) | 0x40 // version 4
 	b[8] = (b[8] & 0x3f) | 0x80 // variant bits
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
@@ -602,22 +604,6 @@ func (g *Graph) EdgeCount() int {
 		total += len(edges)
 	}
 	return total
-}
-
-// NodeCountsByRepo returns the number of nodes per repository prefix.
-// It iterates the internal node map directly without allocating a snapshot
-// slice, making it O(N) in nodes with zero slice allocation overhead.
-// Node IDs are expected to be of the form "repoID::...".
-func (g *Graph) NodeCountsByRepo() map[string]int {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	counts := make(map[string]int)
-	for id := range g.nodes {
-		if idx := strings.Index(string(id), "::"); idx >= 0 {
-			counts[string(id)[:idx]]++
-		}
-	}
-	return counts
 }
 
 // CrossRepoCalls returns statistics about cross-repository CALLS edges.

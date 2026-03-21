@@ -31,8 +31,5 @@ func (o *OllamaEmbedder) Model() string {
 	return o.client.Model()
 }
 
-// Client returns the underlying embed.Client for direct access
-// (e.g. batch embedding, node embedding).
-func (o *OllamaEmbedder) Client() *Client {
-	return o.client
-}
+// Close is a no-op for the Ollama embedder (HTTP client has no resources to release).
+func (o *OllamaEmbedder) Close() error { return nil }

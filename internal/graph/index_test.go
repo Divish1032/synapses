@@ -1,7 +1,6 @@
 package graph_test
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -235,29 +234,3 @@ func TestErrNodeNotFound_Error(t *testing.T) {
 	}
 }
 
-// ── FlatGraph Serialize/Deserialize ───────────────────────────────────────────
-
-func TestFlatGraph_SerializeDeserialize(t *testing.T) {
-	fg := graph.NewFlatGraph("ser-repo")
-	nameID := graph.Pool.Intern("SerFunc")
-	fileID := graph.Pool.Intern("ser.go")
-	fg.AddNode(nameID, graph.NodeFunction, fileID, 0)
-
-	// Serialize.
-	var buf bytes.Buffer
-	if err := fg.Serialize(&buf); err != nil {
-		t.Fatalf("Serialize: %v", err)
-	}
-	if buf.Len() == 0 {
-		t.Fatal("expected non-empty serialized blob")
-	}
-
-	// Deserialize.
-	fg2, err := graph.Deserialize(&buf)
-	if err != nil {
-		t.Fatalf("Deserialize: %v", err)
-	}
-	if fg2.RepoID != "ser-repo" {
-		t.Errorf("expected RepoID='ser-repo', got %q", fg2.RepoID)
-	}
-}

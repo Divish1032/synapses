@@ -319,7 +319,7 @@ func TestEmbeddingStatus_Nil_ReturnsOff(t *testing.T) {
 
 func TestEmbeddingStatus_BuiltinNotReady_ReturnsNotDownloaded(t *testing.T) {
 	e := embed.NewBuiltinEmbedder(t.TempDir())
-	if e.IsReady() {
+	if e.StatusDetail() == "ready" {
 		t.Skip("model already downloaded; skip not-ready path")
 	}
 	got := embeddingStatus(e)
@@ -333,7 +333,7 @@ func TestEmbeddingStatus_BuiltinNotReady_ReturnsNotDownloaded(t *testing.T) {
 func TestEmbeddingStatus_BuiltinUnavailable_AfterFailedInit(t *testing.T) {
 	// Point embedder at a non-creatable path so ensureModel() always fails.
 	e := embed.NewBuiltinEmbedder("/nonexistent/path/that/cannot/be/created")
-	if e.IsReady() {
+	if e.StatusDetail() == "ready" {
 		t.Skip("unexpectedly ready")
 	}
 	// Trigger an init attempt — fails because the directory can't be created.
@@ -358,6 +358,7 @@ type stubEmbedder struct{}
 
 func (s *stubEmbedder) Embed(_ context.Context, _ string) ([]float32, error) { return nil, nil }
 func (s *stubEmbedder) Model() string                                          { return "stub" }
+func (s *stubEmbedder) Close() error                                           { return nil }
 
 func TestEmbeddingStatus_Ollama_ReturnsOllama(t *testing.T) {
 	e := embed.NewOllamaEmbedder("http://localhost:11434/api/embeddings", "")

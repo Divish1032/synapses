@@ -12,7 +12,7 @@ import (
 func TestDefaultPolicy_BuiltinGrantsAll(t *testing.T) {
 	p := DefaultPolicy()
 	for _, perm := range []Permission{PermGraphRead, PermGraphWrite, PermIntelligence, PermNetwork} {
-		if !p.Granted(TrustBuiltin, perm) {
+		if !p.grants[TrustBuiltin][perm] {
 			t.Errorf("builtin should have %q", perm)
 		}
 	}
@@ -21,7 +21,7 @@ func TestDefaultPolicy_BuiltinGrantsAll(t *testing.T) {
 func TestDefaultPolicy_BuiltinNoShell(t *testing.T) {
 	// Shell is reserved for Phase 2 — must never be granted in Phase 1.
 	p := DefaultPolicy()
-	if p.Granted(TrustBuiltin, PermShell) {
+	if p.grants[TrustBuiltin][PermShell] {
 		t.Error("builtin must NOT have shell permission in Phase 1")
 	}
 }
@@ -31,12 +31,12 @@ func TestDefaultPolicy_UserGrants(t *testing.T) {
 	granted := []Permission{PermGraphRead, PermGraphWrite, PermIntelligence}
 	denied := []Permission{PermShell, PermNetwork}
 	for _, perm := range granted {
-		if !p.Granted(TrustUser, perm) {
+		if !p.grants[TrustUser][perm] {
 			t.Errorf("user should have %q", perm)
 		}
 	}
 	for _, perm := range denied {
-		if p.Granted(TrustUser, perm) {
+		if p.grants[TrustUser][perm] {
 			t.Errorf("user must NOT have %q", perm)
 		}
 	}
@@ -44,11 +44,11 @@ func TestDefaultPolicy_UserGrants(t *testing.T) {
 
 func TestDefaultPolicy_ProjectReadOnly(t *testing.T) {
 	p := DefaultPolicy()
-	if !p.Granted(TrustProject, PermGraphRead) {
+	if !p.grants[TrustProject][PermGraphRead] {
 		t.Error("project should have graph_read")
 	}
 	for _, perm := range []Permission{PermGraphWrite, PermIntelligence, PermShell, PermNetwork} {
-		if p.Granted(TrustProject, perm) {
+		if p.grants[TrustProject][perm] {
 			t.Errorf("project must NOT have %q", perm)
 		}
 	}
@@ -56,11 +56,11 @@ func TestDefaultPolicy_ProjectReadOnly(t *testing.T) {
 
 func TestDefaultPolicy_RemoteReadOnly(t *testing.T) {
 	p := DefaultPolicy()
-	if !p.Granted(TrustRemote, PermGraphRead) {
+	if !p.grants[TrustRemote][PermGraphRead] {
 		t.Error("remote should have graph_read")
 	}
 	for _, perm := range []Permission{PermGraphWrite, PermIntelligence, PermShell, PermNetwork} {
-		if p.Granted(TrustRemote, perm) {
+		if p.grants[TrustRemote][perm] {
 			t.Errorf("remote must NOT have %q", perm)
 		}
 	}

@@ -107,37 +107,3 @@ func (p *StringPool) Value(id StringID) string {
 	return "" // Out of bounds safety fallback
 }
 
-// GhostIntern registers a string in the temporary Ghost ring-buffer.
-// This is used for queries involving nodes that aren't officially in the graph yet.
-func (p *StringPool) GhostIntern(s string) StringID {
-	if s == "" {
-		return 0
-	}
-
-	p.ghostMu.Lock()
-	defer p.ghostMu.Unlock()
-
-	id := p.ghostNext
-	p.ghostCache[id] = s
-
-	p.ghostNext++
-	if p.ghostNext >= ReservedGhostRange {
-		p.ghostNext = 1 // wrap around, overriding oldest ghosts
-	}
-
-	return StringID(id)
-}
-
-// Stats returns the number of permanently interned strings and the current
-// next ghost index.
-func (p *StringPool) Stats() (interned int, nextGhost uint32) {
-	p.mu.RLock()
-	interned = len(p.reverse)
-	p.mu.RUnlock()
-
-	p.ghostMu.Lock()
-	nextGhost = p.ghostNext
-	p.ghostMu.Unlock()
-
-	return interned, nextGhost
-}

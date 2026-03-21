@@ -149,6 +149,25 @@ func (s *Server) handleRemember(
 		return mcp.NewToolResultError(fmt.Sprintf("remember episode: %v", err)), nil
 	}
 
+	// P3B-3: emit memory write operation event for pulse analytics.
+	if pc := s.getPulseClient(); pc != nil {
+		episodeTypeCopy := episodeType
+		agentCopy := agentID
+		projCopy := reqProjectID
+		if projCopy == "" {
+			projCopy = s.projectID
+		}
+		s.goBackground(func() {
+			pc.RecordMemoryOp(pulse.MemoryOperationEvent{
+				Operation: "write",
+				Tier:      episodeTypeCopy,
+				Source:    "manual",
+				AgentID:   agentCopy,
+				ProjectID: projCopy,
+			})
+		})
+	}
+
 	// ── Dual-write to unified memories table ──
 	// Failures with affected nodes → entity-tier memories.
 	// All episodes → project-tier memory (decisions, patterns, failures).
@@ -866,22 +885,8 @@ func (s *Server) handleCheckPlanSafety(
 	safetyCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
-	type result struct {
-		ep  *store.Episode
-		err error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		ep, err := s.store.CheckPlanSafety(planDesc, projectID)
-		ch <- result{ep, err}
-	}()
-
-	var match *store.Episode
-	var err error
-	select {
-	case r := <-ch:
-		match, err = r.ep, r.err
-	case <-safetyCtx.Done():
+	match, err := s.store.CheckPlanSafetyCtx(safetyCtx, planDesc, projectID)
+	if safetyCtx.Err() != nil {
 		return jsonResult(map[string]interface{}{
 			"status": "clear",
 			"hint":   "Safety check timed out (>500ms). Proceed with validate_plan().",
@@ -898,9 +903,38 @@ func (s *Server) handleCheckPlanSafety(
 	}
 
 	if match == nil {
+		// P3B-4: emit safety_miss — no matching failure episode found.
+		if pc := s.getPulseClient(); pc != nil {
+			agentCopy := agentID
+			projCopy := projectID
+			s.goBackground(func() {
+				pc.RecordMemoryOp(pulse.MemoryOperationEvent{
+					Operation: "safety_miss",
+					Tier:      "episodic",
+					Source:    "auto",
+					AgentID:   agentCopy,
+					ProjectID: projCopy,
+				})
+			})
+		}
 		return jsonResult(map[string]interface{}{
 			"status": "clear",
 			"hint":   "No failure episodes recorded yet. Record failures with remember(episode_type='failure') to build the Hall of Shame.",
+		})
+	}
+
+	// P3B-4: emit safety_hit — a matching failure episode was found.
+	if pc := s.getPulseClient(); pc != nil {
+		agentCopy := agentID
+		projCopy := projectID
+		s.goBackground(func() {
+			pc.RecordMemoryOp(pulse.MemoryOperationEvent{
+				Operation: "safety_hit",
+				Tier:      "episodic",
+				Source:    "auto",
+				AgentID:   agentCopy,
+				ProjectID: projCopy,
+			})
 		})
 	}
 

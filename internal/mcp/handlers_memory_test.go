@@ -550,24 +550,22 @@ func TestE2E_RememberWithAnchors_FullPath(t *testing.T) {
 		t.Fatal("expected project-tier memory from remember() with anchors")
 	}
 
-	// Step 3: Verify anchors exist in memory_anchors table.
+	// Step 3: Verify anchors exist by querying each anchor node.
 	memID := projMems[0].ID
-	anchors, err := srv.store.GetMemoryAnchors(memID)
-	if err != nil {
-		t.Fatalf("GetMemoryAnchors: %v", err)
-	}
-	if len(anchors) != 2 {
-		t.Fatalf("expected 2 anchors on project memory, got %d: %v", len(anchors), anchors)
-	}
-
-	// Verify anchor values match what was sent.
-	anchorSet := make(map[string]bool)
-	for _, a := range anchors {
-		anchorSet[a] = true
-	}
-	for _, expected := range anchorNodeIDs {
-		if !anchorSet[expected] {
-			t.Errorf("expected anchor %q not found in %v", expected, anchors)
+	for _, nodeID := range anchorNodeIDs {
+		mems, err := srv.store.GetMemoriesByAnchorNode(nodeID, 10)
+		if err != nil {
+			t.Fatalf("GetMemoriesByAnchorNode(%s): %v", nodeID, err)
+		}
+		found := false
+		for _, m := range mems {
+			if m.ID == memID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected memory %s to be anchored to %s", memID, nodeID)
 		}
 	}
 }
@@ -603,7 +601,7 @@ func TestSessionInit_SurfacesInvalidatedMemories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.store.MarkEntityMemoriesStale("repo::intel/main.go::main", "anchor node removed"); err != nil {
+	if err := srv.store.MarkEntityMemoriesStaleForNodes([]string{"repo::intel/main.go::main"}, "anchor node removed"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -660,7 +658,7 @@ func TestSessionInit_InvalidatedMemories_PerAgentIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.store.MarkEntityMemoriesStale("repo::auth/middleware.go::AuthMiddleware", "node removed"); err != nil {
+	if err := srv.store.MarkEntityMemoriesStaleForNodes([]string{"repo::auth/middleware.go::AuthMiddleware"}, "node removed"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -707,8 +705,8 @@ func TestRecall_IncludeStale_False_ExcludesStaled(t *testing.T) {
 	}
 
 	// Stale the memory via entity ID.
-	if err := srv.store.MarkEntityMemoriesStale(entityID, "node removed"); err != nil {
-		t.Fatalf("MarkEntityMemoriesStale: %v", err)
+	if err := srv.store.MarkEntityMemoriesStaleForNodes([]string{entityID}, "node removed"); err != nil {
+		t.Fatalf("MarkEntityMemoriesStaleForNodes: %v", err)
 	}
 
 	// recall without include_stale — should return nothing.
@@ -739,8 +737,8 @@ func TestRecall_IncludeStale_True_ReturnsStaledMemory(t *testing.T) {
 	}
 
 	// Stale the memory.
-	if err := srv.store.MarkEntityMemoriesStale(entityID, "node removed"); err != nil {
-		t.Fatalf("MarkEntityMemoriesStale: %v", err)
+	if err := srv.store.MarkEntityMemoriesStaleForNodes([]string{entityID}, "node removed"); err != nil {
+		t.Fatalf("MarkEntityMemoriesStaleForNodes: %v", err)
 	}
 
 	// recall with include_stale=true — should return the stale memory.
@@ -773,8 +771,8 @@ func TestRecall_Browse_IncludeStale_True_ReturnsStaledMemory(t *testing.T) {
 	}
 
 	// Stale the memory.
-	if err := srv.store.MarkEntityMemoriesStale(entityID, "node removed"); err != nil {
-		t.Fatalf("MarkEntityMemoriesStale: %v", err)
+	if err := srv.store.MarkEntityMemoriesStaleForNodes([]string{entityID}, "node removed"); err != nil {
+		t.Fatalf("MarkEntityMemoriesStaleForNodes: %v", err)
 	}
 
 	// Browse without include_stale — stale memory absent.

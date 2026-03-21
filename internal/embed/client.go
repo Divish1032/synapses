@@ -270,10 +270,3 @@ func (c *Client) Model() string {
 	return c.model
 }
 
-// Endpoint returns the configured embedding endpoint URL.
-func (c *Client) Endpoint() string {
-	if c == nil {
-		return ""
-	}
-	return c.endpoint
-}

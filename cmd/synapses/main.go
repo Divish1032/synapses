@@ -400,6 +400,7 @@ func cmdStartDirect(args []string) error {
 	{
 		memEmbedder := createMemoryEmbedder(cfg)
 		if memEmbedder != nil {
+			defer memEmbedder.Close()
 			srv.SetMemoryEmbedder(memEmbedder)
 			go embedAllMemories(appCtx, memEmbedder, st, sharedPulse)
 		}

@@ -15,85 +15,127 @@ import (
 // ── Manifest reading tests ──────────────────────────────────────────────────
 
 func TestBuildModuleIndex_GoMod(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "go.mod"), "module github.com/user/sibling\n\ngo 1.21\n")
+	sibDir := t.TempDir()
+	writeFile(t, filepath.Join(sibDir, "go.mod"), "module github.com/user/sibling\n\ngo 1.21\n")
 
-	d := federation.NewDeterministicDetector(
-		[]config.FederationEntry{{Path: dir, Alias: "sib"}},
-		newResolver(nil),
-	)
-	if d.ModuleCount() != 1 {
-		t.Fatalf("expected 1 module, got %d", d.ModuleCount())
+	// Create a sibling store with entity "X" so entity resolution succeeds.
+	createSiblingWithDefaultPath(t, sibDir, "sib",
+		sampleNodeWithSig("sib", "X", "pkg/x.go", "func X() int"))
+
+	localDir := t.TempDir()
+	goFile := filepath.Join(localDir, "main.go")
+	writeFile(t, goFile, "package main\n\nimport \"github.com/user/sibling/pkg\"\n\nfunc main() { _ = pkg.X }\n")
+
+	entries := []config.FederationEntry{{Path: sibDir, Alias: "sib"}}
+	r := newResolver(entries)
+	defer r.Close()
+	d := federation.NewDeterministicDetector(entries, r)
+	deps := d.DetectDeps(context.Background(), goFile, nil)
+	if len(deps) == 0 {
+		t.Fatal("expected at least 1 dep from Go module index")
 	}
-	if d.Modules()[0].Prefix != "github.com/user/sibling" {
-		t.Errorf("expected module prefix github.com/user/sibling, got %q", d.Modules()[0].Prefix)
+	if deps[0].ToProject != "sib" {
+		t.Errorf("expected project 'sib', got %q", deps[0].ToProject)
 	}
 }
 
 func TestBuildModuleIndex_PackageJSON(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "package.json"), `{"name": "@synapses/core", "version": "1.0.0"}`)
+	sibDir := t.TempDir()
+	writeFile(t, filepath.Join(sibDir, "package.json"), `{"name": "@synapses/core", "version": "1.0.0"}`)
 
-	d := federation.NewDeterministicDetector(
-		[]config.FederationEntry{{Path: dir, Alias: "core"}},
-		newResolver(nil),
-	)
-	found := false
-	for _, m := range d.Modules() {
-		if m.Prefix == "@synapses/core" && m.Lang == "typescript" {
-			found = true
-			break
-		}
+	// Create a sibling store with entity "x" so entity resolution succeeds.
+	createSiblingWithDefaultPath(t, sibDir, "core",
+		sampleNodeWithSig("core", "x", "src/x.ts", "export function x(): void"))
+
+	localDir := t.TempDir()
+	tsFile := filepath.Join(localDir, "index.ts")
+	writeFile(t, tsFile, "import { x } from '@synapses/core';\n")
+
+	entries := []config.FederationEntry{{Path: sibDir, Alias: "core"}}
+	r := newResolver(entries)
+	defer r.Close()
+	d := federation.NewDeterministicDetector(entries, r)
+	deps := d.DetectDeps(context.Background(), tsFile, nil)
+	if len(deps) == 0 {
+		t.Fatal("expected at least 1 dep from TS module index")
 	}
-	if !found {
-		t.Errorf("expected @synapses/core typescript module, got %+v", d.Modules())
+	if deps[0].ToProject != "core" {
+		t.Errorf("expected project 'core', got %q", deps[0].ToProject)
 	}
 }
 
 func TestBuildModuleIndex_CargoToml(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname = \"synapses-core\"\nversion = \"0.1.0\"\n")
+	sibDir := t.TempDir()
+	writeFile(t, filepath.Join(sibDir, "Cargo.toml"), "[package]\nname = \"synapses-core\"\nversion = \"0.1.0\"\n")
 
-	d := federation.NewDeterministicDetector(
-		[]config.FederationEntry{{Path: dir, Alias: "core"}},
-		newResolver(nil),
-	)
-	found := false
-	for _, m := range d.Modules() {
-		if m.Prefix == "synapses-core" && m.Lang == "rust" {
-			found = true
-			break
-		}
+	// Create a sibling store with entity "something" so entity resolution succeeds.
+	createSiblingWithDefaultPath(t, sibDir, "core",
+		sampleNodeWithSig("core", "something", "src/lib.rs", "pub fn something() -> bool"))
+
+	localDir := t.TempDir()
+	rsFile := filepath.Join(localDir, "lib.rs")
+	writeFile(t, rsFile, "use synapses_core::something;\n")
+
+	entries := []config.FederationEntry{{Path: sibDir, Alias: "core"}}
+	r := newResolver(entries)
+	defer r.Close()
+	d := federation.NewDeterministicDetector(entries, r)
+	deps := d.DetectDeps(context.Background(), rsFile, nil)
+	if len(deps) == 0 {
+		t.Fatal("expected at least 1 dep from Rust module index")
 	}
-	if !found {
-		t.Errorf("expected synapses-core rust module, got %+v", d.Modules())
+	if deps[0].ToProject != "core" {
+		t.Errorf("expected project 'core', got %q", deps[0].ToProject)
 	}
 }
 
 func TestBuildModuleIndex_MultipleManifests(t *testing.T) {
-	dir := t.TempDir()
+	sibDir := t.TempDir()
 	// Project has both go.mod and package.json (monorepo with Go + TS).
-	writeFile(t, filepath.Join(dir, "go.mod"), "module github.com/user/sibling\n\ngo 1.21\n")
-	writeFile(t, filepath.Join(dir, "package.json"), `{"name": "@sibling/core"}`)
+	writeFile(t, filepath.Join(sibDir, "go.mod"), "module github.com/user/sibling\n\ngo 1.21\n")
+	writeFile(t, filepath.Join(sibDir, "package.json"), `{"name": "@sibling/core"}`)
 
-	d := federation.NewDeterministicDetector(
-		[]config.FederationEntry{{Path: dir, Alias: "sib"}},
-		newResolver(nil),
-	)
-	if d.ModuleCount() != 2 {
-		t.Fatalf("expected 2 modules (Go + TS), got %d", d.ModuleCount())
+	// Create a sibling store with both entities so entity resolution succeeds.
+	createSiblingWithDefaultPath(t, sibDir, "sib", []*graph.Node{
+		{ID: "sib::pkg/x.go::X", Name: "X", Type: graph.NodeFunction,
+			File: "pkg/x.go", Line: 1, Exported: true,
+			Metadata: map[string]string{"signature": "func X() int"}},
+		{ID: "sib::src/x.ts::x", Name: "x", Type: graph.NodeFunction,
+			File: "src/x.ts", Line: 1, Exported: true,
+			Metadata: map[string]string{"signature": "export function x(): void"}},
+	})
+
+	localDir := t.TempDir()
+	goFile := filepath.Join(localDir, "main.go")
+	writeFile(t, goFile, "package main\n\nimport \"github.com/user/sibling/pkg\"\n\nfunc main() { _ = pkg.X }\n")
+	tsFile := filepath.Join(localDir, "index.ts")
+	writeFile(t, tsFile, "import { x } from '@sibling/core';\n")
+
+	entries := []config.FederationEntry{{Path: sibDir, Alias: "sib"}}
+	r := newResolver(entries)
+	defer r.Close()
+	d := federation.NewDeterministicDetector(entries, r)
+	goDeps := d.DetectDeps(context.Background(), goFile, nil)
+	tsDeps := d.DetectDeps(context.Background(), tsFile, nil)
+	if len(goDeps) == 0 || len(tsDeps) == 0 {
+		t.Fatalf("expected deps from both Go (%d) and TS (%d)", len(goDeps), len(tsDeps))
 	}
 }
 
 func TestBuildModuleIndex_MissingManifest(t *testing.T) {
 	dir := t.TempDir() // empty — no manifests
 
+	localDir := t.TempDir()
+	goFile := filepath.Join(localDir, "main.go")
+	writeFile(t, goFile, "package main\n\nimport \"github.com/user/sibling/pkg\"\n\nfunc main() { _ = pkg.X }\n")
+
 	d := federation.NewDeterministicDetector(
 		[]config.FederationEntry{{Path: dir, Alias: "empty"}},
 		newResolver(nil),
 	)
-	if d.ModuleCount() != 0 {
-		t.Errorf("expected 0 modules for empty dir, got %d", d.ModuleCount())
+	deps := d.DetectDeps(context.Background(), goFile, nil)
+	if len(deps) != 0 {
+		t.Errorf("expected 0 deps for empty dir, got %d", len(deps))
 	}
 }
 
@@ -101,13 +143,18 @@ func TestBuildModuleIndex_MalformedGoMod(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "go.mod"), "this is not a valid go.mod\n")
 
+	localDir := t.TempDir()
+	goFile := filepath.Join(localDir, "main.go")
+	writeFile(t, goFile, "package main\n\nimport \"github.com/user/sibling/pkg\"\n\nfunc main() { _ = pkg.X }\n")
+
 	d := federation.NewDeterministicDetector(
 		[]config.FederationEntry{{Path: dir, Alias: "bad"}},
 		newResolver(nil),
 	)
 	// Should not crash, just skip.
-	if d.ModuleCount() != 0 {
-		t.Errorf("expected 0 modules for malformed go.mod, got %d", d.ModuleCount())
+	deps := d.DetectDeps(context.Background(), goFile, nil)
+	if len(deps) != 0 {
+		t.Errorf("expected 0 deps for malformed go.mod, got %d", len(deps))
 	}
 }
 

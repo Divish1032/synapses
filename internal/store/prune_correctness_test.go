@@ -143,41 +143,6 @@ func seedOldContextDeliveries(t *testing.T, s *Store, n int, age time.Duration) 
 	}
 }
 
-// seedOldProposals inserts resolved proposals with a backdated updated_at.
-func seedOldProposals(t *testing.T, s *Store, prefix, status string, age time.Duration) []string {
-	t.Helper()
-	ts := time.Now().UTC().Add(-age).Format(time.RFC3339)
-	now := time.Now().UTC().Format(time.RFC3339)
-	var ids []string
-	id := fmt.Sprintf("prop-%s-%s", prefix, status)
-	_, err := s.knowledgeDB.Exec(
-		`INSERT INTO proposals(id, agent_id, title, description, affected_nodes, status, vote_threshold, created_at, updated_at)
-		 VALUES(?, 'test-agent', ?, '', '[]', ?, 2, ?, ?)`,
-		id, fmt.Sprintf("proposal %s", prefix), status, now, ts,
-	)
-	if err != nil {
-		t.Fatalf("seedOldProposals: %v", err)
-	}
-	ids = append(ids, id)
-	return ids
-}
-
-// seedProposalVotes inserts votes for a given proposal.
-func seedProposalVotes(t *testing.T, s *Store, proposalID string, n int) {
-	t.Helper()
-	now := time.Now().UTC().Format(time.RFC3339)
-	for i := 0; i < n; i++ {
-		_, err := s.knowledgeDB.Exec(
-			`INSERT INTO proposal_votes(proposal_id, agent_id, vote, rationale, created_at)
-			 VALUES(?, ?, 'approve', 'lgtm', ?)`,
-			proposalID, fmt.Sprintf("voter-%s-%d", proposalID, i), now,
-		)
-		if err != nil {
-			t.Fatalf("seedProposalVotes: %v", err)
-		}
-	}
-}
-
 // seedOldMemories inserts memories with a backdated timestamp and specified tier/expiry.
 func seedOldMemories(t *testing.T, s *Store, prefix, tier string, age time.Duration, expiresAt string) {
 	t.Helper()
@@ -366,53 +331,6 @@ func TestPruneStaleData_Memories_ExpiredAndSessionLog(t *testing.T) {
 	// Survivors: 1 entity with future expiry + 1 recent session_log = 2
 	if after != 2 {
 		t.Errorf("expected 2 memories after prune, got %d", after)
-	}
-}
-
-// TestPruneStaleData_Proposals_DeletesResolvedPreservesOpen verifies that
-// resolved proposals (accepted/rejected/withdrawn) older than retention are
-// deleted, while open proposals survive. Also verifies orphaned proposal_votes
-// are cleaned up.
-func TestPruneStaleData_Proposals_DeletesResolvedPreservesOpen(t *testing.T) {
-	t.Parallel()
-	st := openTestStore(t)
-	resetDebounce(st)
-
-	// Old resolved proposals — should be deleted.
-	ids1 := seedOldProposals(t, st, "a1", "accepted", 60*24*time.Hour)
-	seedOldProposals(t, st, "a2", "accepted", 60*24*time.Hour)
-	seedOldProposals(t, st, "r1", "rejected", 60*24*time.Hour)
-	// Old open proposal — should survive (not resolved).
-	ids4 := seedOldProposals(t, st, "o1", "open", 60*24*time.Hour)
-	// Recent resolved proposal — should survive (within retention).
-	seedOldProposals(t, st, "a3", "accepted", 1*time.Hour)
-
-	// Add votes to a proposal that will be deleted and one that will survive.
-	seedProposalVotes(t, st, ids1[0], 2)
-	seedProposalVotes(t, st, ids4[0], 1)
-
-	beforeProposals := pruneCountRows(t, st, "proposals")
-	beforeVotes := pruneCountRows(t, st, "proposal_votes")
-	if beforeProposals != 5 {
-		t.Fatalf("expected 5 proposals before prune, got %d", beforeProposals)
-	}
-	if beforeVotes != 3 {
-		t.Fatalf("expected 3 votes before prune, got %d", beforeVotes)
-	}
-
-	st.PruneStaleData(30)
-
-	afterProposals := pruneCountRows(t, st, "proposals")
-	// Survivors: 1 open + 1 recent accepted = 2
-	if afterProposals != 2 {
-		t.Errorf("expected 2 proposals after prune, got %d", afterProposals)
-	}
-
-	afterVotes := pruneCountRows(t, st, "proposal_votes")
-	// prop-a1-accepted was deleted → its 2 votes are orphaned → deleted
-	// prop-o1-open survives → its 1 vote survives
-	if afterVotes != 1 {
-		t.Errorf("expected 1 proposal_vote after prune (orphans cleaned), got %d", afterVotes)
 	}
 }
 
@@ -622,8 +540,6 @@ func TestPruneStaleData_AllTables_IntegrationRoundTrip(t *testing.T) {
 	seedOldEpisodes(t, st, 3, 90*24*time.Hour)
 	seedOldMessages(t, st, 3, 90*24*time.Hour)
 	seedOldContextDeliveries(t, st, 3, 90*24*time.Hour)
-	seedOldProposals(t, st, "int-a1", "accepted", 90*24*time.Hour)
-	seedOldProposals(t, st, "int-a2", "accepted", 90*24*time.Hour)
 
 	// --- Seed recent data ---
 	st.RecordToolCall("get_context", "agent-new", "", "", 10, true)
@@ -654,7 +570,6 @@ func TestPruneStaleData_AllTables_IntegrationRoundTrip(t *testing.T) {
 		{"episodes", 1},
 		{"agent_messages", 1},
 		{"context_deliveries", 1},
-		{"proposals", 0}, // both were old + resolved
 	}
 	for _, c := range checks {
 		got := pruneCountRows(t, st, c.table)

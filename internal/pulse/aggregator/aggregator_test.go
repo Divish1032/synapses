@@ -44,14 +44,14 @@ func TestNew_DefaultInterval(t *testing.T) {
 	}
 }
 
-func TestRollupNow_EmptyDB(t *testing.T) {
+func TestRollup_EmptyDB(t *testing.T) {
 	s := testStore(t)
 	a := New(s, 3600)
 	// Should not panic on empty DB
-	a.RollupNow()
+	a.rollup()
 }
 
-func TestRollupNow_WithData(t *testing.T) {
+func TestRollup_WithData(t *testing.T) {
 	s := testStore(t)
 	a := New(s, 3600)
 
@@ -63,7 +63,7 @@ func TestRollupNow_WithData(t *testing.T) {
 		ToolName: "get_context", ResponseTokens: 100, BaselineTokens: 400,
 	})
 
-	a.RollupNow()
+	a.rollup()
 	// Verify rollup was written by checking GetSummary
 	sum, err := s.GetSummary(1)
 	if err != nil {

@@ -209,27 +209,6 @@ func (s *Store) GetSummary(projectID, nodeID string) string {
 	return summary
 }
 
-// GetSummaryWithTags returns summary and tags for a node.
-func (s *Store) GetSummaryWithTags(projectID, nodeID string) (summary string, tags []string) {
-	var tagsJSON string
-	err := s.db.QueryRow(
-		`SELECT summary, tags FROM semantic_summaries WHERE project_id = ? AND node_id = ?`,
-		projectID, nodeID,
-	).Scan(&summary, &tagsJSON)
-	if err != nil {
-		// Fallback: legacy unscoped entry
-		s.db.QueryRow(
-			`SELECT summary, tags FROM semantic_summaries WHERE project_id = '' AND node_id = ?`, nodeID,
-		).Scan(&summary, &tagsJSON)
-	}
-	if tagsJSON != "" {
-		if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
-			logutil.Warn("brain store: decode tags for node: %v\n", err)
-		}
-	}
-	return summary, tags
-}
-
 // GetSummaries returns summaries for all given node IDs keyed by node ID.
 // Missing nodes are omitted from the result map.
 func (s *Store) GetSummaries(projectID string, nodeIDs []string) map[string]string {
@@ -271,41 +250,6 @@ func (s *Store) GetSummariesByName(names []string) map[string]string {
 		}
 	}
 	return result
-}
-
-// SummaryCount returns the total number of stored summaries.
-func (s *Store) SummaryCount() int {
-	var n int
-	s.db.QueryRow(`SELECT COUNT(*) FROM semantic_summaries`).Scan(&n)
-	return n
-}
-
-// AllSummaries returns all stored summaries as a slice for the CLI display.
-func (s *Store) AllSummaries() ([]Summary, error) {
-	rows, err := s.db.Query(
-		`SELECT node_id, node_name, summary, updated_at FROM semantic_summaries ORDER BY updated_at DESC`,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Summary
-	for rows.Next() {
-		var sm Summary
-		if err := rows.Scan(&sm.NodeID, &sm.NodeName, &sm.Summary, &sm.UpdatedAt); err != nil {
-			continue
-		}
-		out = append(out, sm)
-	}
-	return out, rows.Err()
-}
-
-// Summary is a row from semantic_summaries.
-type Summary struct {
-	NodeID    string
-	NodeName  string
-	Summary   string
-	UpdatedAt string
 }
 
 // --- Violation Cache ---
@@ -548,43 +492,6 @@ func (s *Store) LogDecision(agentID, phase, entityName, action string, relatedEn
 		now.UTC().Format(time.RFC3339),
 	)
 	return err
-}
-
-// GetRecentDecisions returns the most recent decision log entries for an entity.
-func (s *Store) GetRecentDecisions(entityName string, limit int) ([]DecisionLogEntry, error) {
-	var rows *sql.Rows
-	var err error
-	if entityName != "" {
-		rows, err = s.db.Query(
-			`SELECT id, agent_id, phase, entity_name, action, related_entities, outcome, notes, created_at
-			 FROM decision_log WHERE entity_name = ? ORDER BY created_at DESC LIMIT ?`,
-			entityName, limit,
-		)
-	} else {
-		rows, err = s.db.Query(
-			`SELECT id, agent_id, phase, entity_name, action, related_entities, outcome, notes, created_at
-			 FROM decision_log ORDER BY created_at DESC LIMIT ?`,
-			limit,
-		)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []DecisionLogEntry
-	for rows.Next() {
-		var e DecisionLogEntry
-		var relJSON string
-		if err := rows.Scan(&e.ID, &e.AgentID, &e.Phase, &e.EntityName,
-			&e.Action, &relJSON, &e.Outcome, &e.Notes, &e.CreatedAt); err != nil {
-			continue
-		}
-		if err := json.Unmarshal([]byte(relJSON), &e.RelatedEntities); err != nil {
-			logutil.Warn("brain store: decode related_entities for decision %s: %v\n", e.ID, err)
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
 }
 
 // --- Reset ---

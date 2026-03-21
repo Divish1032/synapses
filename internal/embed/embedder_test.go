@@ -26,6 +26,8 @@ func (m *mockEmbedder) Model() string {
 	return m.model
 }
 
+func (m *mockEmbedder) Close() error { return nil }
+
 func TestEmbedderInterface_MockSatisfies(t *testing.T) {
 	var e embed.Embedder = &mockEmbedder{
 		vec:   []float32{0.1, 0.2, 0.3},
@@ -46,7 +48,6 @@ func TestOllamaEmbedder_CreatesWithEndpoint(t *testing.T) {
 	e := embed.NewOllamaEmbedder("http://localhost:11434/api/embeddings", "")
 	require.NotNil(t, e)
 	assert.Equal(t, "nomic-embed-text", e.Model())
-	assert.NotNil(t, e.Client())
 }
 
 func TestOllamaEmbedder_CustomModel(t *testing.T) {

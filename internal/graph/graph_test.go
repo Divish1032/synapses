@@ -56,35 +56,6 @@ func TestEdgeCount(t *testing.T) {
 	}
 }
 
-func TestNodeCountsByRepo_SingleRepo(t *testing.T) {
-	g := buildFixture(t)
-	// buildFixture creates graph.New("testrepo") and uses MakeNodeID which
-	// generates "testrepo::file::name" IDs. All 5 nodes should be under "testrepo".
-	counts := g.NodeCountsByRepo()
-	if counts["testrepo"] != 5 {
-		t.Errorf("NodeCountsByRepo()[testrepo] = %d, want 5; full map: %v", counts["testrepo"], counts)
-	}
-	if len(counts) != 1 {
-		t.Errorf("NodeCountsByRepo() has %d repos, want 1; full map: %v", len(counts), counts)
-	}
-}
-
-func TestNodeCountsByRepo_FederatedNodes(t *testing.T) {
-	g := graph.New("primary")
-	// Add nodes with federated IDs: "repoA::file.go::Func"
-	g.AddNode(&graph.Node{ID: "repoA::auth.go::Login", Type: graph.NodeFunction, Name: "Login", File: "auth.go"})
-	g.AddNode(&graph.Node{ID: "repoA::auth.go::Service", Type: graph.NodeStruct, Name: "Service", File: "auth.go"})
-	g.AddNode(&graph.Node{ID: "repoB::db.go::Repo", Type: graph.NodeStruct, Name: "Repo", File: "db.go"})
-	g.AddNode(&graph.Node{ID: "plain", Type: graph.NodeFunction, Name: "plain", File: "x.go"}) // no "::"
-	counts := g.NodeCountsByRepo()
-	if counts["repoA"] != 2 {
-		t.Errorf("counts[repoA] = %d, want 2", counts["repoA"])
-	}
-	if counts["repoB"] != 1 {
-		t.Errorf("counts[repoB] = %d, want 1", counts["repoB"])
-	}
-}
-
 func TestCrossRepoCalls_NoFederation(t *testing.T) {
 	g := buildFixture(t)
 	count, repos := g.CrossRepoCalls("testrepo")

@@ -87,35 +87,24 @@ func (s *Server) handleValidatePlan(
 			}
 		}
 		if planDesc != "" {
-			type safetyRes struct {
-				ep  *store.Episode
-				err error
-			}
-			ch := make(chan safetyRes, 1)
-			go func() {
-				ep, err := s.store.CheckPlanSafety(planDesc, "")
-				ch <- safetyRes{ep, err}
-			}()
 			safetyCtx, safetyCancel := context.WithTimeout(ctx, 500*time.Millisecond)
-			defer safetyCancel()
-			select {
-			case r := <-ch:
-				if r.err == nil && r.ep != nil {
-					safetyCheck = map[string]interface{}{
-						"status": "warning",
-						"match": map[string]interface{}{
-							"episode_id": r.ep.ID,
-							"decision":   r.ep.Decision,
-							"outcome":    r.ep.Outcome,
-							"rationale":  r.ep.Rationale,
-						},
-						"message": fmt.Sprintf("⚠ Past failure match: %q (outcome: %s). Review before proceeding.", r.ep.Decision, r.ep.Outcome),
-					}
-				} else {
-					safetyCheck = map[string]interface{}{"status": "clear"}
+			ep, safetyErr := s.store.CheckPlanSafetyCtx(safetyCtx, planDesc, "")
+			safetyCancel()
+			if safetyErr == nil && ep != nil {
+				safetyCheck = map[string]interface{}{
+					"status": "warning",
+					"match": map[string]interface{}{
+						"episode_id": ep.ID,
+						"decision":   ep.Decision,
+						"outcome":    ep.Outcome,
+						"rationale":  ep.Rationale,
+					},
+					"message": fmt.Sprintf("⚠ Past failure match: %q (outcome: %s). Review before proceeding.", ep.Decision, ep.Outcome),
 				}
-			case <-safetyCtx.Done():
+			} else if safetyCtx.Err() != nil {
 				safetyCheck = map[string]interface{}{"status": "clear", "note": "safety check timed out (>500ms)"}
+			} else {
+				safetyCheck = map[string]interface{}{"status": "clear"}
 			}
 		}
 	}
@@ -195,11 +184,27 @@ func (s *Server) handleValidatePlan(
 		}
 		agentIDForPulse := stringArg(req, "agent_id")
 		projID := s.projectID
+
+		// P3B-6: collect unique rule IDs from violations and encode as JSON.
+		ruleIDSet := make(map[string]struct{})
+		for _, v := range violations {
+			if v.RuleID != "" {
+				ruleIDSet[v.RuleID] = struct{}{}
+			}
+		}
+		ruleIDs := make([]string, 0, len(ruleIDSet))
+		for rid := range ruleIDSet {
+			ruleIDs = append(ruleIDs, rid)
+		}
+		sort.Strings(ruleIDs)
+		ruleIDsJSON, _ := json.Marshal(ruleIDs)
+
 		pc.RecordValidationEvent(pulse.ValidationEvent{
 			ToolName:       "validate_plan",
 			Status:         status,
 			ViolationCount: len(violations),
 			SafetyStatus:   safetyStatus,
+			RuleIDs:        string(ruleIDsJSON),
 			AgentID:        agentIDForPulse,
 			ProjectID:      projID,
 		})

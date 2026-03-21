@@ -227,31 +227,6 @@ func (s *Store) QueryMemoriesIncludingStale(tier, entityID, agentID string, limi
 	return scanMemories(rows)
 }
 
-// QueryRecentSessionMemoriesIncludingStale is like QueryRecentSessionMemories but
-// returns both active and stale session-log memories for explicit audit queries.
-func (s *Store) QueryRecentSessionMemoriesIncludingStale(agentID string, limit int) ([]Memory, error) {
-	if limit <= 0 {
-		limit = 10
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
-	             created_at, expires_at, last_accessed_at, source, importance, access_count
-	      FROM memories
-	      WHERE tier = 'session_log'
-	        AND agent_id = ?
-	        AND expires_at > ?
-	      ORDER BY created_at DESC LIMIT ?`
-
-	rows, err := s.knowledgeDB.Query(q, agentID, now, limit)
-	if err != nil {
-		return nil, fmt.Errorf("query session memories including stale: %w", err)
-	}
-	defer rows.Close()
-
-	return scanMemories(rows)
-}
-
 // QueryMemoriesForEntities retrieves entity-tier memories for multiple entity IDs.
 // Returns a map of entityID → []Memory. Non-expired only.
 func (s *Store) QueryMemoriesForEntities(entityIDs []string, limit int) (map[string][]Memory, error) {
@@ -405,13 +380,6 @@ func (s *Store) TouchMemory(id string) error {
 	return err
 }
 
-// TouchMemories batch-updates last_accessed_at for multiple memory IDs.
-func (s *Store) TouchMemories(ids []string) {
-	for _, id := range ids {
-		_ = s.TouchMemory(id) // best-effort
-	}
-}
-
 // ExpireMemories deletes memories past their expires_at. Call periodically.
 // Also cleans up orphaned memory_anchors and memory_surfaced rows for deleted memories.
 func (s *Store) ExpireMemories() (int64, error) {
@@ -474,21 +442,6 @@ func (s *Store) ExpireMemories() (int64, error) {
 	}
 
 	return result.RowsAffected()
-}
-
-// MarkEntityMemoriesStale marks all entity-tier memories for the given entity
-// as stale (stale=1) and shortens their TTL to 30 days.
-// Called when a single node is tombstoned (deleted from graph).
-// For bulk node removal use MarkEntityMemoriesStaleForNodes.
-func (s *Store) MarkEntityMemoriesStale(entityID, reason string) error {
-	now := time.Now().UTC()
-	staleExpiry := now.Add(30 * 24 * time.Hour).Format(time.RFC3339)
-	staledAt := now.Format(time.RFC3339)
-	_, err := s.knowledgeDB.Exec(`
-		UPDATE memories SET stale = 1, stale_reason = ?, expires_at = ?, staled_at = ?
-		WHERE tier = 'entity' AND entity_id = ?`,
-		reason, staleExpiry, staledAt, entityID)
-	return err
 }
 
 // MarkEntityMemoriesStaleForNodes marks entity-tier memories stale (stale=1) for
@@ -1033,82 +986,6 @@ func (s *Store) InsertMemoryAnchors(memoryID string, nodeIDs []string) error {
 	return nil
 }
 
-// GetMemoryAnchors returns the node IDs anchored to a memory.
-func (s *Store) GetMemoryAnchors(memoryID string) ([]string, error) {
-	rows, err := s.knowledgeDB.Query(`SELECT node_id FROM memory_anchors WHERE memory_id = ? ORDER BY node_id`, memoryID)
-	if err != nil {
-		return nil, fmt.Errorf("get memory anchors: %w", err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var nid string
-		if err := rows.Scan(&nid); err != nil {
-			return nil, fmt.Errorf("scan memory anchor: %w", err)
-		}
-		out = append(out, nid)
-	}
-	return out, rows.Err()
-}
-
-// GetMemoryAnchorNodeIDs returns the first anchor node ID for each memory in the input list.
-// Returns map[memoryID → nodeID]. Memories with no anchors are absent from the map.
-// Batches via IN-clause (groups of 500 for SQLite variable limits).
-// "First" is defined by created_at ASC — the primary anchor node per memory.
-// Used by the graph channel to reconstruct traversal paths from memory to anchor node.
-func (s *Store) GetMemoryAnchorNodeIDs(memIDs []string) (map[string]string, error) {
-	if len(memIDs) == 0 {
-		return nil, nil
-	}
-
-	result := make(map[string]string, len(memIDs))
-
-	const batchSize = 500
-	for i := 0; i < len(memIDs); i += batchSize {
-		end := i + batchSize
-		if end > len(memIDs) {
-			end = len(memIDs)
-		}
-		batch := memIDs[i:end]
-
-		placeholders := make([]string, len(batch))
-		args := make([]interface{}, len(batch))
-		for j, id := range batch {
-			placeholders[j] = "?"
-			args[j] = id
-		}
-
-		rows, err := s.knowledgeDB.Query(
-			`SELECT memory_id, node_id FROM memory_anchors
-			 WHERE memory_id IN (`+strings.Join(placeholders, ",")+`)
-			 ORDER BY memory_id, created_at`,
-			args...,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("get memory anchor node IDs: %w", err)
-		}
-
-		for rows.Next() {
-			var memID, nodeID string
-			if err := rows.Scan(&memID, &nodeID); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("scan memory anchor node ID: %w", err)
-			}
-			// Keep only the first anchor per memory (ORDER BY created_at).
-			if _, exists := result[memID]; !exists {
-				result[memID] = nodeID
-			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("memory anchor node IDs rows: %w", err)
-		}
-		rows.Close()
-	}
-
-	return result, nil
-}
-
 // GetMemoryAnchorNodeIDsInSet returns for each memory the first anchor node ID
 // that is present in nodeSet (the BFS-discovered nodes). Returns map[memoryID → nodeID].
 // Memories with no anchors in nodeSet are absent from the map.
@@ -1168,23 +1045,25 @@ func (s *Store) GetMemoryAnchorNodeIDsInSet(memIDs []string, nodeSet map[string]
 		if err != nil {
 			return nil, fmt.Errorf("get memory anchor node IDs in set: %w", err)
 		}
-
-		for rows.Next() {
-			var memID, nodeID string
-			if err := rows.Scan(&memID, &nodeID); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("scan memory anchor node ID in set: %w", err)
+		func() {
+			defer rows.Close()
+			for rows.Next() {
+				var memID, nodeID string
+				if scanErr := rows.Scan(&memID, &nodeID); scanErr != nil {
+					err = fmt.Errorf("scan memory anchor node ID in set: %w", scanErr)
+					return
+				}
+				if _, exists := result[memID]; !exists {
+					result[memID] = nodeID
+				}
 			}
-			// Keep only the first anchor per memory (ORDER BY created_at).
-			if _, exists := result[memID]; !exists {
-				result[memID] = nodeID
+			if rowsErr := rows.Err(); rowsErr != nil {
+				err = fmt.Errorf("memory anchor node IDs in set rows: %w", rowsErr)
 			}
+		}()
+		if err != nil {
+			return nil, err
 		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("memory anchor node IDs in set rows: %w", err)
-		}
-		rows.Close()
 	}
 
 	return result, nil
@@ -1215,26 +1094,6 @@ func (s *Store) GetMemoriesByAnchorNode(nodeID string, limit int) ([]Memory, err
 	}
 	defer rows.Close()
 	return scanMemories(rows)
-}
-
-// CountMemories returns total memory count by tier.
-func (s *Store) CountMemories() (map[string]int, error) {
-	rows, err := s.knowledgeDB.Query(`SELECT tier, COUNT(*) FROM memories GROUP BY tier`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	counts := make(map[string]int)
-	for rows.Next() {
-		var tier string
-		var count int
-		if err := rows.Scan(&tier, &count); err != nil {
-			return nil, err
-		}
-		counts[tier] = count
-	}
-	return counts, rows.Err()
 }
 
 // GetMemoriesByIDs returns full Memory structs for the given IDs.
@@ -1330,41 +1189,6 @@ func (s *Store) UpdateMemoryContent(memoryID, newContent string) error {
 		return fmt.Errorf("update memory content: %w", err)
 	}
 	return nil
-}
-
-// GetMemoryVersions returns all historical versions for a memory, ordered by
-// version number ascending (oldest first). The current live memory is NOT included —
-// it lives in the memories table.
-func (s *Store) GetMemoryVersions(memoryID string) ([]MemoryVersion, error) {
-	rows, err := s.knowledgeDB.Query(`
-		SELECT id, memory_id, version, content, superseded_by, created_at, superseded_at
-		FROM memory_versions
-		WHERE memory_id = ?
-		ORDER BY version ASC`, memoryID)
-	if err != nil {
-		return nil, fmt.Errorf("get memory versions: %w", err)
-	}
-	defer rows.Close()
-
-	var out []MemoryVersion
-	for rows.Next() {
-		var v MemoryVersion
-		if err := rows.Scan(&v.ID, &v.MemoryID, &v.Version, &v.Content,
-			&v.SupersededBy, &v.CreatedAt, &v.SupersededAt); err != nil {
-			return nil, fmt.Errorf("scan memory version: %w", err)
-		}
-		out = append(out, v)
-	}
-	return out, rows.Err()
-}
-
-// GetMemoryVersionCount returns the number of historical versions for a memory.
-func (s *Store) GetMemoryVersionCount(memoryID string) (int, error) {
-	var count int
-	err := s.knowledgeDB.QueryRow(
-		`SELECT COUNT(*) FROM memory_versions WHERE memory_id = ?`, memoryID,
-	).Scan(&count)
-	return count, err
 }
 
 // GetMemoryAsOf returns memories with content as it existed at the given point in time.

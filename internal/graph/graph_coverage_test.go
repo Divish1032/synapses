@@ -1,11 +1,10 @@
 package graph_test
 
 // Additional tests targeting uncovered graph functions:
-// DetectCommunities, Serialize/Deserialize/DeserializeMapped, LoadSnapshot,
+// Serialize/Deserialize, LoadSnapshot,
 // SuggestRules, MakeNodeID, MergeFrom, ProjectIdentity.
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -47,132 +46,6 @@ func buildTestGraph(t *testing.T) *graph.Graph {
 	g.AddEdge(&graph.Edge{From: ids["Login"], To: ids["ValidateToken"], Type: graph.EdgeCalls})
 	g.AddEdge(&graph.Edge{From: ids["Logout"], To: ids["ValidateToken"], Type: graph.EdgeCalls})
 	return g
-}
-
-// ── DetectCommunities ─────────────────────────────────────────────────────────
-
-func TestDetectCommunities_EmptyGraph(t *testing.T) {
-	g := graph.New("test")
-	result, err := g.DetectCommunities(10, 2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-}
-
-func TestDetectCommunities_WithNodes(t *testing.T) {
-	g := buildTestGraph(t)
-	result, err := g.DetectCommunities(10, 1)
-	if err != nil {
-		t.Fatalf("DetectCommunities: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-	_ = result.Communities
-	_ = result.Modularity
-}
-
-func TestDetectCommunities_MinSizeFilter(t *testing.T) {
-	g := buildTestGraph(t)
-	result, err := g.DetectCommunities(5, 100)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	_ = result
-}
-
-func TestDetectCommunities_SingleIteration(t *testing.T) {
-	g := buildTestGraph(t)
-	result, err := g.DetectCommunities(1, 1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	_ = result
-}
-
-// ── Serialize / Deserialize ───────────────────────────────────────────────────
-
-func buildFlatGraphForTest(t *testing.T) *graph.FlatGraph {
-	t.Helper()
-	pool := graph.NewStringPool()
-	fg := graph.NewFlatGraph("test-repo")
-
-	fileID := pool.Intern("pkg/auth.go")
-	nameA := pool.Intern("Login")
-	nameB := pool.Intern("Logout")
-
-	idxA := fg.AddNode(nameA, graph.NodeFunction, fileID, 0)
-	idxB := fg.AddNode(nameB, graph.NodeFunction, fileID, 0)
-	fg.AddEdge(idxA, idxB, 1.0)
-	return fg
-}
-
-func TestFlatGraphSerializeDeserialize_RoundTrip(t *testing.T) {
-	fg := buildFlatGraphForTest(t)
-
-	var buf bytes.Buffer
-	if err := fg.Serialize(&buf); err != nil {
-		t.Fatalf("Serialize: %v", err)
-	}
-	if buf.Len() == 0 {
-		t.Fatal("expected non-empty serialized output")
-	}
-
-	restored, err := graph.Deserialize(&buf)
-	if err != nil {
-		t.Fatalf("Deserialize: %v", err)
-	}
-	if restored == nil {
-		t.Fatal("expected non-nil restored FlatGraph")
-	}
-}
-
-func TestFlatGraphSerialize_EmptyGraph(t *testing.T) {
-	fg := graph.NewFlatGraph("empty")
-	var buf bytes.Buffer
-	if err := fg.Serialize(&buf); err != nil {
-		t.Fatalf("Serialize empty: %v", err)
-	}
-	restored, err := graph.Deserialize(&buf)
-	if err != nil {
-		t.Fatalf("Deserialize empty: %v", err)
-	}
-	_ = restored
-}
-
-func TestDeserialize_CorruptData(t *testing.T) {
-	r := bytes.NewReader([]byte("not valid data"))
-	_, err := graph.Deserialize(r)
-	if err == nil {
-		t.Error("expected error for corrupt data")
-	}
-}
-
-func TestDeserializeMapped_RoundTrip(t *testing.T) {
-	fg := buildFlatGraphForTest(t)
-
-	var buf bytes.Buffer
-	if err := fg.Serialize(&buf); err != nil {
-		t.Fatalf("Serialize: %v", err)
-	}
-
-	restored, err := graph.DeserializeMapped(buf.Bytes())
-	if err != nil {
-		t.Fatalf("DeserializeMapped: %v", err)
-	}
-	if restored == nil {
-		t.Fatal("expected non-nil restored FlatGraph")
-	}
-}
-
-func TestDeserializeMapped_CorruptData(t *testing.T) {
-	_, err := graph.DeserializeMapped([]byte("garbage"))
-	if err == nil {
-		t.Error("expected error for corrupt data")
-	}
 }
 
 // ── LoadSnapshot via RebuildIndex ─────────────────────────────────────────────

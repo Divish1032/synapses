@@ -40,7 +40,22 @@ func extractText(t *testing.T, result *mcplib.CallToolResult) string {
 
 // newFederatedServer creates a Server with federation configured.
 // The sibling store contains a single entity with the given name and signature.
+// newFederatedServerResult holds the return values from newFederatedServer.
+type newFederatedServerResult struct {
+	srv    *Server
+	st     *store.Store
+	sibDir string // filesystem path to the sibling project directory
+}
+
 func newFederatedServer(t *testing.T, sibAlias, sibEntityName, sibEntitySig string) (*Server, *store.Store) {
+	t.Helper()
+	r := newFederatedServerFull(t, sibAlias, sibEntityName, sibEntitySig)
+	return r.srv, r.st
+}
+
+// newFederatedServerFull is like newFederatedServer but also returns the
+// sibling directory path so tests can access the sibling store directly.
+func newFederatedServerFull(t *testing.T, sibAlias, sibEntityName, sibEntitySig string) newFederatedServerResult {
 	t.Helper()
 	st := openMCPTestStore(t)
 	g := graph.New("test-repo")
@@ -93,7 +108,7 @@ func newFederatedServer(t *testing.T, sibAlias, sibEntityName, sibEntitySig stri
 	srv.SetFederationResolver(resolver)
 	t.Cleanup(func() { resolver.Close() })
 
-	return srv, st
+	return newFederatedServerResult{srv: srv, st: st, sibDir: sibDir}
 }
 
 // ── Test 1: session_init with federation (healthy, no drift) ────────────────
@@ -356,10 +371,11 @@ func TestGetImpact_ProjectsParameter(t *testing.T) {
 // ── Test 9: recall with projects= (cross-project found) ─────────────────────
 
 func TestRecall_CrossProject_Found(t *testing.T) {
-	srv, _ := newFederatedServer(t, "core", "AuthService", "func AuthService() error")
+	r := newFederatedServerFull(t, "core", "AuthService", "func AuthService() error")
+	srv := r.srv
 
 	// Add episodes to the sibling store.
-	sibDir := srv.federationResolver.Entries()[0].Path
+	sibDir := r.sibDir
 	dbPath, _ := federation.SiblingDBPath(sibDir)
 	sibSt, _ := store.Open(dbPath)
 	sibSt.RememberEpisode(store.Episode{
@@ -389,9 +405,10 @@ func TestRecall_CrossProject_Found(t *testing.T) {
 // ── Test 10: recall cross-project results are labeled with source ────────────
 
 func TestRecall_CrossProject_LabeledWithSource(t *testing.T) {
-	srv, _ := newFederatedServer(t, "core", "AuthService", "func AuthService() error")
+	r := newFederatedServerFull(t, "core", "AuthService", "func AuthService() error")
+	srv := r.srv
 
-	sibDir := srv.federationResolver.Entries()[0].Path
+	sibDir := r.sibDir
 	dbPath, _ := federation.SiblingDBPath(sibDir)
 	sibSt, _ := store.Open(dbPath)
 	sibSt.RememberEpisode(store.Episode{
@@ -419,10 +436,11 @@ func TestRecall_CrossProject_LabeledWithSource(t *testing.T) {
 // ── Test 11: recall without projects= → local only (no regression) ──────────
 
 func TestRecall_CrossProject_NoParam(t *testing.T) {
-	srv, _ := newFederatedServer(t, "core", "AuthService", "func AuthService() error")
+	r := newFederatedServerFull(t, "core", "AuthService", "func AuthService() error")
+	srv := r.srv
 
 	// Add episodes to sibling.
-	sibDir := srv.federationResolver.Entries()[0].Path
+	sibDir := r.sibDir
 	dbPath, _ := federation.SiblingDBPath(sibDir)
 	sibSt, _ := store.Open(dbPath)
 	sibSt.RememberEpisode(store.Episode{

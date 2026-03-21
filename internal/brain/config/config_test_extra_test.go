@@ -292,35 +292,6 @@ func TestAutoConfigureModels_30GB(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ModelsToInstall — deduplication and sorting
-// ---------------------------------------------------------------------------
-
-func TestModelsToInstall_Dedup(t *testing.T) {
-	cfg := config.DefaultConfig()
-	// All tiers at same model — result must have exactly 1 entry.
-	cfg.AutoConfigureModels(4)
-	models := cfg.ModelsToInstall()
-	// With 4GB, all tiers use qwen3.5:2b, so only 1 unique model (archivist defaults to orchestrate).
-	if len(models) != 1 {
-		t.Errorf("ModelsToInstall() returned %d models (%v), want 1", len(models), models)
-	}
-	if models[0] != "qwen3.5:2b" {
-		t.Errorf("ModelsToInstall()[0] = %q, want qwen3.5:2b", models[0])
-	}
-}
-
-func TestModelsToInstall_Sorted(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.AutoConfigureModels(20) // enrich/orch → 4b, rest → 2b
-	models := cfg.ModelsToInstall()
-	for i := 1; i < len(models); i++ {
-		if models[i] < models[i-1] {
-			t.Errorf("ModelsToInstall() not sorted: %v", models)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
 // applyDefaults — "auto" model trigger path
 // ---------------------------------------------------------------------------
 

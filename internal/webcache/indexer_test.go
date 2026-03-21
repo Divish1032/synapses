@@ -2,50 +2,10 @@ package webcache
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
-
-func TestHandleGoModChanged(t *testing.T) {
-	s := testStore(t)
-	c := New(s)
-
-	// Create a project dir with a go.mod
-	dir := t.TempDir()
-	gomod := `module test
-
-require (
-	github.com/foo/bar v1.0.0
-)
-`
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Pre-populate cache
-	key := PackageCacheKey("github.com/foo/bar", "v1.0.0")
-	if err := s.UpsertWebCache(key, "old docs", 0); err != nil {
-		t.Fatal(err)
-	}
-
-	HandleGoModChanged(dir, c)
-
-	// Cache should be invalidated
-	if _, ok := s.GetWebCache(key); ok {
-		t.Error("expected cache entry to be invalidated after go.mod change")
-	}
-}
-
-func TestHandleGoModChanged_NoGoMod(t *testing.T) {
-	s := testStore(t)
-	c := New(s)
-
-	// Should not panic with a directory without go.mod
-	HandleGoModChanged(t.TempDir(), c)
-}
 
 func TestIndexProjectImports_EmptyGraph(t *testing.T) {
 	s := testStore(t)

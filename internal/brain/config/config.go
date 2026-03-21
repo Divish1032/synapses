@@ -2,14 +2,10 @@
 package config
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-
-	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // IntelligenceMode controls which models are loaded and how they are cached,
@@ -419,54 +415,6 @@ func (c *BrainConfig) AutoConfigureModels(totalRAMGB float64) {
 	}
 }
 
-// ProbeAndDowngradeModels verifies that each tier's configured model is present
-// in Ollama's local library. Tiers whose model is missing are downgraded to the
-// ingest-tier model (the lowest common denominator that must always be present).
-// Logs a warning for each downgraded tier. Returns nil if Ollama is unreachable
-// — startup should continue with the originally configured models in that case.
-//
-// ollamaURL must be the base URL passed to Ollama (e.g. "http://localhost:11434").
-// listFn is an injection point for testing; pass nil to use the real Ollama API.
-func (c *BrainConfig) ProbeAndDowngradeModels(ctx context.Context, ollamaURL string, listFn func(context.Context, string) ([]string, error)) error {
-	if listFn == nil {
-		return nil // real implementation supplied by brain package to avoid circular import
-	}
-	available, err := listFn(ctx, ollamaURL)
-	if err != nil {
-		// Ollama unreachable at probe time — not fatal, keep configured models.
-		return nil
-	}
-	// normalize strips :latest for comparison — Ollama's /api/tags returns
-	// "synapses/navigator:latest" but brain.json typically omits the tag.
-	normalize := func(s string) string {
-		return strings.TrimSuffix(strings.TrimSpace(s), ":latest")
-	}
-	present := make(map[string]bool, len(available))
-	for _, m := range available {
-		present[normalize(m)] = true
-	}
-	base := c.ModelIngest
-	type tierField struct {
-		name  string
-		value *string
-	}
-	tiers := []tierField{
-		{"guardian", &c.ModelGuardian},
-		{"enrich", &c.ModelEnrich},
-		{"orchestrate", &c.ModelOrchestrate},
-		{"archivist", &c.ModelArchivist},
-	}
-	for _, t := range tiers {
-		if *t.value != "" && !present[normalize(*t.value)] {
-			// keep base in canonical form; if it's also missing, nothing we can do
-			logutil.Warn("brain: tier %q model %q not found in Ollama — downgrading to %q\n",
-				t.name, *t.value, base)
-			*t.value = base
-		}
-	}
-	return nil
-}
-
 // KeepAliveValues returns the keep_alive seconds for guardian, enrich,
 // orchestrate, and archivist tiers based on the configured IntelligenceMode.
 //
@@ -487,19 +435,3 @@ func (c *BrainConfig) KeepAliveValues() (kaGuardian, kaEnrich, kaOrchestrate, ka
 	return -1, -1, -1, -1
 }
 
-// ModelsToInstall returns a deduplicated, sorted list of model tags needed
-// for the current tier configuration.
-func (c *BrainConfig) ModelsToInstall() []string {
-	seen := make(map[string]struct{})
-	for _, m := range []string{c.ModelIngest, c.ModelGuardian, c.ModelEnrich, c.ModelOrchestrate, c.ModelArchivist} {
-		if m != "" {
-			seen[m] = struct{}{}
-		}
-	}
-	models := make([]string, 0, len(seen))
-	for m := range seen {
-		models = append(models, m)
-	}
-	sort.Strings(models)
-	return models
-}
