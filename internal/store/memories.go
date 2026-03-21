@@ -749,8 +749,9 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 	}
 
 	// ── Phase 1: Validate and check dedup OUTSIDE the tx ──────────────────
-	// SetMaxOpenConns(1) means a tx holds the only conn. Any s.knowledgeDB.Query inside
-	// a tx would deadlock. So we run all reads (dedup, defaults) first.
+	// Writer pool has MaxOpenConns=1: a tx holds the only writer conn.
+	// Reads go through the separate reader pool and won't deadlock, but we
+	// still run dedup/defaults first to avoid reading uncommitted writes.
 	m, dedup, err := s.prepareMemory(m)
 	if err != nil {
 		return "", err

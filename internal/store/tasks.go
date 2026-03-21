@@ -391,7 +391,7 @@ func (s *Store) UpdateTask(id, status, appendNotes, agentID string) (unblocked [
 // reached a terminal status (done or cancelled). It is idempotent: a plan
 // that is already completed (completed_at != 0) is never double-stamped.
 // Returns true when the plan was just transitioned to completed.
-func checkAndCompletePlan(db *sql.DB, planID string) (bool, error) {
+func checkAndCompletePlan(db *rwDB, planID string) (bool, error) {
 	if planID == "" {
 		return false, nil
 	}

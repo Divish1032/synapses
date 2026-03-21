@@ -459,8 +459,8 @@ CREATE INDEX IF NOT EXISTS idx_cross_deps_file     ON cross_project_deps(to_proj
 // hard-reference node_ids against graphDB and flags orphans immediately,
 // rather than waiting for the next daily prune cycle.
 type Store struct {
-	graphDB     *sql.DB // code-domain: nodes, edges, meta, file_hashes, call_sites, node_embeddings
-	knowledgeDB *sql.DB // universal: memories, episodes, sessions, events, tasks, agents, ...
+	graphDB     *rwDB // code-domain: nodes, edges, meta, file_hashes, call_sites, node_embeddings
+	knowledgeDB *rwDB // universal: memories, episodes, sessions, events, tasks, agents, ...
 
 	// lastPruneMu guards all prune timestamps to prevent redundant concurrent prunes.
 	lastPruneMu        sync.Mutex
@@ -720,7 +720,23 @@ func Open(path string) (*Store, error) {
 		}
 	}
 
-	st := &Store{graphDB: graphDB, knowledgeDB: knowledgeDB}
+	// Schema init complete. Create reader/writer pool split.
+	// Writer: MaxOpenConns=1 (serializes writes — SQLite allows one writer).
+	// Reader: MaxOpenConns=8 (concurrent reads — WAL mode allows unlimited readers).
+	// This replaces the old MaxOpenConns(2) which only allowed 1 reader + 1 writer.
+	graphRW, err := newRWDB(path, graphDB, 8)
+	if err != nil {
+		graphDB.Close()
+		knowledgeDB.Close()
+		return nil, fmt.Errorf("create graph reader pool: %w", err)
+	}
+	knowledgeRW, err := newRWDB(KnowledgePath(path), knowledgeDB, 8)
+	if err != nil {
+		graphRW.Close()
+		return nil, fmt.Errorf("create knowledge reader pool: %w", err)
+	}
+
+	st := &Store{graphDB: graphRW, knowledgeDB: knowledgeRW}
 
 	// Rebuild FTS index for existing databases where nodes_fts is empty but
 	// the nodes table already has data.
@@ -743,24 +759,17 @@ func Open(path string) (*Store, error) {
 		st.CollectQueryStats(os.Stderr)
 	}
 
-	// Raise connection pool size now that schema init and migrations are done.
-	// WAL mode supports one concurrent writer + one reader without blocking;
-	// MaxOpenConns(1) would serialize reads behind writes unnecessarily.
-	// Read-only federation stores use 4; primary stores use 2 (one writer path).
-	graphDB.SetMaxOpenConns(2)
-	knowledgeDB.SetMaxOpenConns(2)
-
 	return st, nil
 }
 
 // openSQLiteDB opens a single SQLite DB with WAL mode and busy timeout.
 //
 // Pragmas are embedded in the DSN via `_pragma=` rather than run as explicit
-// EXEC calls. This is critical for correctness with MaxOpenConns(2): every
+// EXEC calls. This is critical for correctness with pooled connections: every
 // connection opened by the database/sql pool inherits the settings, not just
-// the first. Without DSN-level pragmas, lazily-opened second connections get
-// default settings (no busy_timeout) and fail immediately with SQLITE_BUSY
-// on write contention instead of waiting the configured 5 s.
+// the first. Without DSN-level pragmas, lazily-opened connections get default
+// settings (no busy_timeout) and fail immediately with SQLITE_BUSY on write
+// contention instead of waiting the configured 5 s.
 func openSQLiteDB(path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create parent dir for %s: %w", path, err)
@@ -775,8 +784,8 @@ func openSQLiteDB(path string) (*sql.DB, error) {
 	// Start with 1 connection during schema initialization. modernc.org/sqlite
 	// can deadlock when two connections race to initialize the same schema
 	// (both calling _sqlite3InitOne while one holds a schema write-lock).
-	// After store.Open() completes all migrations, this is raised to 2 to
-	// enable WAL's concurrent-reader + single-writer benefit.
+	// After store.Open() completes all migrations, this becomes the writer pool
+	// (MaxOpenConns=1) and a separate reader pool (MaxOpenConns=8) is opened.
 	db.SetMaxOpenConns(1)
 	return db, nil
 }
@@ -904,7 +913,7 @@ func OpenReadOnly(path string) (*Store, error) {
 		knowledgeDB.SetMaxOpenConns(1)
 		_, _ = knowledgeDB.Exec(knowledgeSchema)
 	}
-	return &Store{graphDB: graphDB, knowledgeDB: knowledgeDB}, nil
+	return &Store{graphDB: wrapSingleDB(graphDB), knowledgeDB: wrapSingleDB(knowledgeDB)}, nil
 }
 
 // rebuildFTS repopulates the nodes_fts table from the current nodes table.
@@ -1267,7 +1276,7 @@ func sanitizeFTSQuery(q string) string {
 	return strings.Join(terms, " OR ")
 }
 
-// Close releases both database connections.
+// Close releases all database connections (both reader and writer pools).
 func (s *Store) Close() error {
 	var firstErr error
 	if s.graphDB != nil {
@@ -1283,12 +1292,12 @@ func (s *Store) Close() error {
 	return firstErr
 }
 
-// GraphDB returns the underlying graph database connection. Used by callers
-// that need direct graph DB access (e.g., tests, federation read-only probes).
-func (s *Store) GraphDB() *sql.DB { return s.graphDB }
+// GraphDB returns the underlying graph writer database connection. Used by
+// callers that need direct *sql.DB access (e.g., tests, federation probes).
+func (s *Store) GraphDB() *sql.DB { return s.graphDB.Writer() }
 
-// KnowledgeDB returns the underlying knowledge database connection.
-func (s *Store) KnowledgeDB() *sql.DB { return s.knowledgeDB }
+// KnowledgeDB returns the underlying knowledge writer database connection.
+func (s *Store) KnowledgeDB() *sql.DB { return s.knowledgeDB.Writer() }
 
 // QueryStats reports index coverage for a set of representative hot-path queries.
 // It runs EXPLAIN QUERY PLAN on each query and classifies each step as either an
