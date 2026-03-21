@@ -114,8 +114,12 @@ func DecayedImportanceScore(m Memory, halfLifeHours float64) float64 {
 // demoted (excluded from results) but never deleted — they remain in the DB for
 // audit queries (include_stale=true) and as_of temporal lookups.
 //
-// At 0.05, a default-importance memory (weight=1.0, halfLife=168h) decays below
-// threshold after approximately 19 weeks (~4.5 months) without being accessed.
+// At 0.05 with default importance (weight=1.0), visibility windows by tier:
+//   - session_log (72h):     ~8 weeks without access
+//   - entity+auto (168h):    ~19 weeks without access
+//   - project (336h):        ~38 weeks (but TTL expires at 60 days first)
+//   - entity+manual (504h):  ~57 weeks without access
+//
 // Pinned memories always score 1.0 and are never demoted.
 const DecayVisibilityThreshold = 0.05
 
