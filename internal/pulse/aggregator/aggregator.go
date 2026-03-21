@@ -74,7 +74,16 @@ func (a *Aggregator) loop() {
 //
 // staleEmbeddings should be the current live count for today, or 0 for historical
 // backfill days (the value is point-in-time and cannot be reconstructed).
-func buildDayMetrics(sum *pulsestore.Summary, reparseCount int, reparseDurationMs float64, staleEmbeddings int) map[string]float64 {
+// p3Metrics holds pre-computed P3 agent behavior counts for a single day.
+type p3Metrics struct {
+	guardCircuitBreaks  int
+	rateLimitRejections int
+	recallHits          int
+	recallMisses        int
+	validationViolations int
+}
+
+func buildDayMetrics(sum *pulsestore.Summary, reparseCount int, reparseDurationMs float64, staleEmbeddings int, p3 p3Metrics) map[string]float64 {
 	return map[string]float64{
 		"tokens_saved":       float64(sum.TokensSaved),
 		"tokens_delivered":   float64(sum.TokensDelivered),
@@ -101,6 +110,12 @@ func buildDayMetrics(sum *pulsestore.Summary, reparseCount int, reparseDurationM
 		"file_changes_count": float64(reparseCount),
 		// P2-16: stale embeddings (point-in-time; 0 for historical backfill).
 		"stale_embeddings": float64(staleEmbeddings),
+		// P3: agent behavior metrics.
+		"guard_circuit_breaks":  float64(p3.guardCircuitBreaks),
+		"rate_limit_rejections": float64(p3.rateLimitRejections),
+		"recall_hits":           float64(p3.recallHits),
+		"recall_misses":         float64(p3.recallMisses),
+		"validation_violations": float64(p3.validationViolations),
 	}
 }
 
@@ -126,7 +141,16 @@ func (a *Aggregator) rollup() {
 	// P2-16: stale embedding count.
 	staleEmbeddings := a.store.CountStaleEmbeddings()
 
-	metrics := buildDayMetrics(sum, reparseCount, reparseDurationMs, staleEmbeddings)
+	// P3: agent behavior counts for today.
+	p3 := p3Metrics{
+		guardCircuitBreaks:   a.store.CountGuardEvents(today, "loop_circuit_break"),
+		rateLimitRejections:  a.store.CountGuardEvents(today, "rate_limit"),
+		recallHits:           a.store.CountMemoryOps(today, "recall_hit"),
+		recallMisses:         a.store.CountMemoryOps(today, "recall_miss"),
+		validationViolations: a.store.CountValidationViolations(today),
+	}
+
+	metrics := buildDayMetrics(sum, reparseCount, reparseDurationMs, staleEmbeddings, p3)
 
 	rollupOK := true
 	for metric, value := range metrics {
@@ -179,9 +203,16 @@ func (a *Aggregator) backfillMissedDays(today string) {
 			continue
 		}
 		reparseCount, reparseDurationMs, _ := a.store.CountReparses(day)
-		// stale_embeddings is point-in-time; use 0 for historical days since the
-		// live count cannot be reconstructed after the fact.
-		metrics := buildDayMetrics(sum, reparseCount, reparseDurationMs, 0)
+		// stale_embeddings and P3 counts are point-in-time; use 0 for historical
+		// backfill days since live counts cannot be reconstructed after the fact.
+		backfillP3 := p3Metrics{
+			guardCircuitBreaks:   a.store.CountGuardEvents(day, "loop_circuit_break"),
+			rateLimitRejections:  a.store.CountGuardEvents(day, "rate_limit"),
+			recallHits:           a.store.CountMemoryOps(day, "recall_hit"),
+			recallMisses:         a.store.CountMemoryOps(day, "recall_miss"),
+			validationViolations: a.store.CountValidationViolations(day),
+		}
+		metrics := buildDayMetrics(sum, reparseCount, reparseDurationMs, 0, backfillP3)
 		for metric, value := range metrics {
 			if err := a.store.UpsertDailyRollup(day, metric, value); err != nil {
 				log.Printf("pulse aggregator: backfill upsert %s for %s: %v", metric, day, err)

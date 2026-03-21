@@ -111,13 +111,14 @@ func (s *Store) InsertContextDeliveryTx(ev pulsetypes.ContextDeliveryEvent) erro
 		`INSERT INTO context_deliveries
 		 (tool_name, agent_id, project_id, entity, file, response_bytes, response_tokens, baseline_tokens,
 		  nodes_delivered, nodes_pruned, edges_delivered, truncated, duration_ms, cache_hit, brain_enriched,
-		  created_date, session_id, intent)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  created_date, session_id, intent, depth_requested, depth_achieved, nodes_visited)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.ToolName, ev.AgentID, ev.ProjectID, ev.Entity, ev.File,
 		ev.ResponseBytes, ev.ResponseTokens, ev.BaselineTokens,
 		ev.NodesDelivered, ev.NodesPruned, ev.EdgesDelivered,
 		truncInt, ev.DurationMs, cacheInt, brainInt,
 		today, ev.SessionID, ev.Intent,
+		ev.DepthRequested, ev.DepthAchieved, ev.NodesVisited,
 	)
 	return err
 }
@@ -331,6 +332,87 @@ func (s *Store) InsertIndexEvent(ev pulsetypes.IndexEvent) error {
 	return s.InsertIndexEventTx(ev)
 }
 
+// InsertGuardEventTx records a guard (loop/rate-limit) event without acquiring the mutex.
+func (s *Store) InsertGuardEventTx(ev pulsetypes.GuardEvent) error {
+	_, err := s.db.Exec(
+		`INSERT INTO guard_events (guard_type, tool_name, category, agent_id, project_id)
+		 VALUES (?, ?, ?, ?, ?)`,
+		ev.GuardType, ev.ToolName, ev.Category, ev.AgentID, ev.ProjectID,
+	)
+	return err
+}
+
+// InsertGuardEvent records a guard event, acquiring the mutex.
+func (s *Store) InsertGuardEvent(ev pulsetypes.GuardEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.InsertGuardEventTx(ev)
+}
+
+// InsertMemoryOpTx records a memory operation event without acquiring the mutex.
+func (s *Store) InsertMemoryOpTx(ev pulsetypes.MemoryOperationEvent) error {
+	_, err := s.db.Exec(
+		`INSERT INTO memory_ops (operation, tier, source, result_count, agent_id, project_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		ev.Operation, ev.Tier, ev.Source, ev.ResultCount, ev.AgentID, ev.ProjectID,
+	)
+	return err
+}
+
+// InsertMemoryOp records a memory operation event, acquiring the mutex.
+func (s *Store) InsertMemoryOp(ev pulsetypes.MemoryOperationEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.InsertMemoryOpTx(ev)
+}
+
+// InsertValidationEventTx records a validation event without acquiring the mutex.
+func (s *Store) InsertValidationEventTx(ev pulsetypes.ValidationEvent) error {
+	_, err := s.db.Exec(
+		`INSERT INTO validation_events (tool_name, status, violation_count, safety_status, agent_id, project_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		ev.ToolName, ev.Status, ev.ViolationCount, ev.SafetyStatus, ev.AgentID, ev.ProjectID,
+	)
+	return err
+}
+
+// InsertValidationEvent records a validation event, acquiring the mutex.
+func (s *Store) InsertValidationEvent(ev pulsetypes.ValidationEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.InsertValidationEventTx(ev)
+}
+
+// CountGuardEvents returns the count of guard events of the given type for a calendar day.
+func (s *Store) CountGuardEvents(day, guardType string) int {
+	var n int
+	row := s.db.QueryRow(
+		`SELECT COUNT(*) FROM guard_events WHERE guard_type = ? AND date(created_at) = ?`,
+		guardType, day)
+	_ = row.Scan(&n)
+	return n
+}
+
+// CountMemoryOps returns the count of memory operations of the given type for a calendar day.
+func (s *Store) CountMemoryOps(day, operation string) int {
+	var n int
+	row := s.db.QueryRow(
+		`SELECT COUNT(*) FROM memory_ops WHERE operation = ? AND date(created_at) = ?`,
+		operation, day)
+	_ = row.Scan(&n)
+	return n
+}
+
+// CountValidationViolations returns the count of validation events with violations for a calendar day.
+func (s *Store) CountValidationViolations(day string) int {
+	var n int
+	row := s.db.QueryRow(
+		`SELECT COALESCE(SUM(violation_count), 0) FROM validation_events WHERE date(created_at) = ?`,
+		day)
+	_ = row.Scan(&n)
+	return n
+}
+
 // CountStaleEmbeddings returns a best-effort estimate of how many memories
 // currently lack up-to-date embeddings. It reads from the pulse store's
 // embedding_events table (not the main store's memory_embeddings table, which
@@ -372,6 +454,10 @@ func (s *Store) migrateColumns() error {
 		`ALTER TABLE context_deliveries ADD COLUMN intent TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE brain_usage ADD COLUMN target_entity TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE brain_usage ADD COLUMN success INTEGER NOT NULL DEFAULT 1`,
+		// Pulse Phase 3: context delivery depth/traversal fields.
+		`ALTER TABLE context_deliveries ADD COLUMN depth_requested INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE context_deliveries ADD COLUMN depth_achieved INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE context_deliveries ADD COLUMN nodes_visited INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range alterStmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -445,10 +531,13 @@ CREATE TABLE IF NOT EXISTS context_deliveries (
     duration_ms      INTEGER NOT NULL DEFAULT 0,
     cache_hit        INTEGER NOT NULL DEFAULT 0,
     brain_enriched   INTEGER NOT NULL DEFAULT 0,
-    created_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    created_date     TEXT    NOT NULL DEFAULT '',
-    session_id       TEXT    NOT NULL DEFAULT '',
-    intent           TEXT    NOT NULL DEFAULT ''
+    created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_date      TEXT    NOT NULL DEFAULT '',
+    session_id        TEXT    NOT NULL DEFAULT '',
+    intent            TEXT    NOT NULL DEFAULT '',
+    depth_requested   INTEGER NOT NULL DEFAULT 0,
+    depth_achieved    INTEGER NOT NULL DEFAULT 0,
+    nodes_visited     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_cd_tool    ON context_deliveries(tool_name);
 CREATE INDEX IF NOT EXISTS idx_cd_agent   ON context_deliveries(agent_id);
@@ -671,6 +760,43 @@ CREATE TABLE IF NOT EXISTS index_events (
 );
 CREATE INDEX IF NOT EXISTS idx_ie_created ON index_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_ie_project ON index_events(project_id);
+
+-- Phase 3: Agent behavior & value metric tables.
+
+CREATE TABLE IF NOT EXISTS guard_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    guard_type  TEXT    NOT NULL,
+    tool_name   TEXT    NOT NULL,
+    category    TEXT    NOT NULL DEFAULT '',
+    agent_id    TEXT    NOT NULL DEFAULT '',
+    project_id  TEXT    NOT NULL DEFAULT '',
+    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ge_created ON guard_events(created_at);
+
+CREATE TABLE IF NOT EXISTS memory_ops (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation    TEXT    NOT NULL,
+    tier         TEXT    NOT NULL DEFAULT '',
+    source       TEXT    NOT NULL DEFAULT '',
+    result_count INTEGER NOT NULL DEFAULT 0,
+    agent_id     TEXT    NOT NULL DEFAULT '',
+    project_id   TEXT    NOT NULL DEFAULT '',
+    created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_mo_created ON memory_ops(created_at);
+
+CREATE TABLE IF NOT EXISTS validation_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    tool_name       TEXT    NOT NULL,
+    status          TEXT    NOT NULL,
+    violation_count INTEGER NOT NULL DEFAULT 0,
+    safety_status   TEXT    NOT NULL DEFAULT '',
+    agent_id        TEXT    NOT NULL DEFAULT '',
+    project_id      TEXT    NOT NULL DEFAULT '',
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ve_created ON validation_events(created_at);
 `
 
 // ---------------------------------------------------------------------------
@@ -719,13 +845,14 @@ func (s *Store) InsertContextDelivery(ev pulsetypes.ContextDeliveryEvent) error 
 		`INSERT INTO context_deliveries
 		 (tool_name, agent_id, project_id, entity, file, response_bytes, response_tokens, baseline_tokens,
 		  nodes_delivered, nodes_pruned, edges_delivered, truncated, duration_ms, cache_hit, brain_enriched,
-		  created_date, session_id, intent)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  created_date, session_id, intent, depth_requested, depth_achieved, nodes_visited)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.ToolName, ev.AgentID, ev.ProjectID, ev.Entity, ev.File,
 		ev.ResponseBytes, ev.ResponseTokens, ev.BaselineTokens,
 		ev.NodesDelivered, ev.NodesPruned, ev.EdgesDelivered,
 		truncInt, ev.DurationMs, cacheInt, brainInt,
 		today, ev.SessionID, ev.Intent,
+		ev.DepthRequested, ev.DepthAchieved, ev.NodesVisited,
 	)
 	return err
 }
@@ -951,6 +1078,152 @@ func (s *Store) GetSummary(days int) (*Summary, error) {
 	computeValueMultiplier(sum)
 
 	return sum, nil
+}
+
+// GetSummaryForProject returns aggregated analytics for the last N days filtered to a specific project.
+// Uses a raw-table scan since daily_rollups are not project-scoped.
+func (s *Store) GetSummaryForProject(days int, projectID string) (*Summary, error) {
+	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
+	sum := &Summary{}
+
+	row := s.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(SUM(duration_ms), 0)
+		 FROM tool_calls WHERE created_at >= ? AND project_id = ?`, since, projectID)
+	if err := row.Scan(&sum.TotalToolCalls, &sum.TotalLatencyMs); err != nil {
+		return nil, err
+	}
+	if sum.TotalToolCalls > 0 {
+		sum.AvgLatencyMs = sum.TotalLatencyMs / float64(sum.TotalToolCalls)
+	}
+
+	row = s.db.QueryRow(
+		`SELECT COUNT(*),
+		        COALESCE(SUM(response_tokens), 0),
+		        COALESCE(SUM(baseline_tokens), 0),
+		        COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END), 0),
+		        COALESCE(SUM(CASE WHEN brain_enriched = 1 THEN 1 ELSE 0 END), 0)
+		 FROM context_deliveries WHERE created_at >= ? AND project_id = ?`, since, projectID)
+	if err := row.Scan(&sum.ContextDeliveries, &sum.TokensDelivered, &sum.BaselineTokens,
+		&sum.CacheHits, &sum.BrainEnrichedCount); err != nil {
+		return nil, err
+	}
+
+	if sum.ContextDeliveries > 0 {
+		sum.CacheHitRate = float64(sum.CacheHits) / float64(sum.ContextDeliveries)
+		sum.BrainEnrichRate = float64(sum.BrainEnrichedCount) / float64(sum.ContextDeliveries)
+	}
+
+	sum.TokensSaved = sum.BaselineTokens - sum.TokensDelivered
+	if sum.TokensSaved < 0 {
+		sum.TokensSaved = 0
+	}
+	if sum.TokensDelivered > 0 {
+		sum.CompressionRatio = float64(sum.BaselineTokens) / float64(sum.TokensDelivered)
+	} else {
+		sum.CompressionRatio = 1.0
+	}
+
+	row = s.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0)
+		 FROM sessions WHERE started_at >= ? AND project_id = ?`, since, projectID)
+	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD); err != nil {
+		return nil, err
+	}
+
+	if sum.BaselineTokens > 0 && sum.TokensSaved > 0 {
+		sum.SavingsPct = float64(sum.TokensSaved) / float64(sum.BaselineTokens) * 100.0
+	}
+	computeValueMultiplier(sum)
+
+	return sum, nil
+}
+
+// WoWComparison holds week-over-week metric deltas computed from daily_rollups.
+type WoWComparison struct {
+	ThisWeek map[string]float64 `json:"this_week"`
+	LastWeek map[string]float64 `json:"last_week"`
+	Delta    map[string]float64 `json:"delta"`     // absolute change
+	DeltaPct map[string]float64 `json:"delta_pct"` // percentage change (0 if last_week was 0)
+}
+
+// wowSummableMetrics is the set of metrics that can be meaningfully summed over a week.
+// Rate/average metrics are excluded because summing them produces nonsensical values.
+var wowSummableMetrics = map[string]bool{
+	"tokens_saved": true, "tokens_delivered": true, "baseline_tokens": true,
+	"tool_calls": true, "context_deliveries": true, "cost_saved_usd": true,
+	"sessions": true, "tasks_completed": true, "cache_hits": true,
+	"brain_enriched_count": true, "total_latency_ms": true,
+	"total_reparses": true, "total_reparse_duration_ms": true,
+	"file_changes_count": true,
+	"guard_circuit_breaks": true, "rate_limit_rejections": true,
+	"recall_hits": true, "recall_misses": true, "validation_violations": true,
+}
+
+// GetWeekOverWeek computes this-week vs last-week for key summable metrics from daily_rollups.
+// Returns nil on error (best-effort; caller should handle nil).
+func (s *Store) GetWeekOverWeek() (*WoWComparison, error) {
+	today := time.Now().UTC().Format("2006-01-02")
+	weekAgo := time.Now().UTC().AddDate(0, 0, -7).Format("2006-01-02")
+	twoWeeksAgo := time.Now().UTC().AddDate(0, 0, -14).Format("2006-01-02")
+
+	sumPeriod := func(from, before string) (map[string]float64, error) {
+		rows, err := s.db.Query(
+			`SELECT metric, SUM(value) FROM daily_rollups WHERE day >= ? AND day < ? GROUP BY metric`,
+			from, before)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		result := make(map[string]float64)
+		for rows.Next() {
+			var metric string
+			var value float64
+			if err := rows.Scan(&metric, &value); err != nil {
+				return nil, err
+			}
+			if wowSummableMetrics[metric] {
+				result[metric] = value
+			}
+		}
+		return result, rows.Err()
+	}
+
+	thisWeek, err := sumPeriod(weekAgo, today)
+	if err != nil {
+		return nil, err
+	}
+	lastWeek, err := sumPeriod(twoWeeksAgo, weekAgo)
+	if err != nil {
+		return nil, err
+	}
+
+	delta := make(map[string]float64)
+	deltaPct := make(map[string]float64)
+	// Union of both weeks' metrics.
+	keys := make(map[string]bool)
+	for k := range thisWeek {
+		keys[k] = true
+	}
+	for k := range lastWeek {
+		keys[k] = true
+	}
+	for k := range keys {
+		tw := thisWeek[k]
+		lw := lastWeek[k]
+		delta[k] = tw - lw
+		if lw != 0 {
+			deltaPct[k] = (tw - lw) / lw * 100.0
+		} else {
+			deltaPct[k] = 0
+		}
+	}
+
+	return &WoWComparison{
+		ThisWeek: thisWeek,
+		LastWeek: lastWeek,
+		Delta:    delta,
+		DeltaPct: deltaPct,
+	}, nil
 }
 
 // sumRollups aggregates daily_rollups rows in [since, before) into a Summary.
@@ -1362,6 +1635,7 @@ func (s *Store) PruneOldEvents(retentionDays int) (int64, error) {
 	for _, table := range []string{
 		"tool_calls", "context_deliveries", "brain_usage", "outcome_signals", "agent_llm_usage",
 		"parse_events", "reparse_events", "graph_snapshots", "embedding_events", "index_events",
+		"guard_events", "memory_ops", "validation_events",
 	} {
 		result, err := s.db.Exec(
 			fmt.Sprintf("DELETE FROM %s WHERE created_at < ?", table), since)

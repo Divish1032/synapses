@@ -655,7 +655,11 @@ func cmdDaemonServe(args []string) error {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(sharedPulse.GetSummary(days))
+		if projectFilter := r.URL.Query().Get("project"); projectFilter != "" {
+			json.NewEncoder(w).Encode(sharedPulse.GetSummaryForProject(days, projectFilter))
+		} else {
+			json.NewEncoder(w).Encode(sharedPulse.GetSummary(days))
+		}
 	})
 
 	// MCP: route to per-project StreamableHTTPServer

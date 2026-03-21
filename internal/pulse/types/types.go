@@ -19,23 +19,26 @@ type ToolCallEvent struct {
 // ContextDeliveryEvent is sent for context-delivery tools (get_context,
 // get_file_context, prepare_context) and carries token savings data.
 type ContextDeliveryEvent struct {
-	ToolName       string `json:"tool_name"`
-	AgentID        string `json:"agent_id,omitempty"`
-	ProjectID      string `json:"project_id,omitempty"`
-	Entity         string `json:"entity,omitempty"`
-	File           string `json:"file,omitempty"`
-	ResponseBytes  int    `json:"response_bytes"`
-	ResponseTokens int    `json:"response_tokens"`
-	BaselineTokens int    `json:"baseline_tokens"`
-	NodesDelivered int    `json:"nodes_delivered"`
-	NodesPruned    int    `json:"nodes_pruned"`
-	EdgesDelivered int    `json:"edges_delivered"`
-	Truncated      bool   `json:"truncated"`
-	DurationMs     int64  `json:"duration_ms"`
-	CacheHit       bool   `json:"cache_hit"`
-	BrainEnriched  bool   `json:"brain_enriched"`
-	SessionID      string `json:"session_id,omitempty"`
-	Intent         string `json:"intent,omitempty"`
+	ToolName        string `json:"tool_name"`
+	AgentID         string `json:"agent_id,omitempty"`
+	ProjectID       string `json:"project_id,omitempty"`
+	Entity          string `json:"entity,omitempty"`
+	File            string `json:"file,omitempty"`
+	ResponseBytes   int    `json:"response_bytes"`
+	ResponseTokens  int    `json:"response_tokens"`
+	BaselineTokens  int    `json:"baseline_tokens"`
+	NodesDelivered  int    `json:"nodes_delivered"`
+	NodesPruned     int    `json:"nodes_pruned"`
+	EdgesDelivered  int    `json:"edges_delivered"`
+	Truncated       bool   `json:"truncated"`
+	DurationMs      int64  `json:"duration_ms"`
+	CacheHit        bool   `json:"cache_hit"`
+	BrainEnriched   bool   `json:"brain_enriched"`
+	SessionID       string `json:"session_id,omitempty"`
+	Intent          string `json:"intent,omitempty"`
+	DepthRequested  int    `json:"depth_requested,omitempty"`
+	DepthAchieved   int    `json:"depth_achieved,omitempty"`
+	NodesVisited    int    `json:"nodes_visited,omitempty"`
 }
 
 // SessionEvent is sent when an agent session starts or ends.
@@ -157,6 +160,35 @@ type EmbeddingEvent struct {
 	Success     bool   `json:"success"`
 	StaleCount  int    `json:"stale_count"`
 	ProjectID   string `json:"project_id"`
+}
+
+// GuardEvent is emitted when loop-guard or rate-limiter blocks a tool call.
+type GuardEvent struct {
+	GuardType string `json:"guard_type"` // "loop_warning" | "loop_circuit_break" | "rate_limit"
+	ToolName  string `json:"tool_name"`
+	Category  string `json:"category,omitempty"` // for rate_limit: "write_ops"|"expensive_reads"|"cross_project"
+	AgentID   string `json:"agent_id,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+}
+
+// MemoryOperationEvent tracks recall hits/misses and memory writes.
+type MemoryOperationEvent struct {
+	Operation   string `json:"operation"`    // "recall_hit" | "recall_miss" | "write" | "anchor_invalidated"
+	Tier        string `json:"tier"`         // "episodic" | "entity" | "project"
+	Source      string `json:"source"`       // "manual" | "auto"
+	ResultCount int    `json:"result_count"`
+	AgentID     string `json:"agent_id,omitempty"`
+	ProjectID   string `json:"project_id,omitempty"`
+}
+
+// ValidationEvent tracks outcomes of validate_plan and verify_implementation.
+type ValidationEvent struct {
+	ToolName       string `json:"tool_name"`              // "validate_plan" | "verify_implementation"
+	Status         string `json:"status"`                 // "ok" | "violations_found" | "pass"
+	ViolationCount int    `json:"violation_count"`
+	SafetyStatus   string `json:"safety_status,omitempty"` // "clear" | "warning"
+	AgentID        string `json:"agent_id,omitempty"`
+	ProjectID      string `json:"project_id,omitempty"`
 }
 
 // IndexEvent records the outcome of a full or incremental index operation.
