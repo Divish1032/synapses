@@ -2590,4 +2590,28 @@ func (s *Server) registerTools() {
 		s.handlePlanContext,
 	)
 
+	// ── Benchmark ───────────────────────────────────────────────────────────
+
+	s.addOrDefer(
+		mcp.NewTool(
+			"benchmark",
+			mcp.WithDescription(
+				"Run self-validating benchmarks against the current graph and store. "+
+					"Each scenario derives ground truth from the graph's own topology — "+
+					"no hardcoded IDs, portable across any indexed codebase. "+
+					"Measures precision, recall, F1, and latency for key operations: "+
+					"context completeness, search accuracy, impact coverage, graph reachability, "+
+					"and FTS ranking quality. "+
+					"Use scenario=\"all\" (default) to run all 5 built-in scenarios, or "+
+					"pass a specific name: context-completeness, search-accuracy, impact-coverage, "+
+					"graph-reachability, fts-ranking.",
+			),
+			mcp.WithString("scenario",
+				mcp.Description("Scenario to run: 'all' (default), 'context-completeness', 'search-accuracy', "+
+					"'impact-coverage', 'graph-reachability', 'fts-ranking'."),
+			),
+		),
+		s.handleBenchmark,
+	)
+
 }

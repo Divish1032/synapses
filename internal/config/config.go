@@ -156,6 +156,33 @@ type Config struct {
 	// externally-sourced content before storage. Covers remember(), send_message(),
 	// annotate_node(), and web_annotate() inputs.
 	ContentSafety ContentSafetyConfig `json:"content_safety,omitempty"`
+
+	// Recall configures the quad-channel retrieval pipeline.
+	Recall RecallConfig `json:"recall,omitempty"`
+}
+
+// RecallConfig controls the quad-channel recall pipeline behavior.
+type RecallConfig struct {
+	// FusionMode selects the multi-channel merging strategy.
+	// "rrf" (default): Reciprocal Rank Fusion — uses rank positions only.
+	// "convex": Score-aware convex combination — uses score magnitudes.
+	//   Research shows 3.86% NDCG@10 improvement when channels have
+	//   heterogeneous score distributions (Benham & Culpepper, 2017).
+	FusionMode string `json:"fusion_mode,omitempty"`
+
+	// ConvexAlpha controls the BM25 vs semantic balance in convex fusion.
+	// score = α × norm_bm25 + (1-α) × norm_cosine + graph_bonus + temporal_bonus.
+	// Range [0.0, 1.0]. Default 0.5 (equal weight). Higher = more BM25 influence.
+	// Only used when FusionMode is "convex".
+	ConvexAlpha *float64 `json:"convex_alpha,omitempty"`
+
+	// ConvexGraphBonus is the additive weight for graph channel in convex fusion.
+	// Range [0.0, 1.0]. Default 0.3.
+	ConvexGraphBonus *float64 `json:"convex_graph_bonus,omitempty"`
+
+	// ConvexTemporalBonus is the additive weight for temporal channel in convex fusion.
+	// Range [0.0, 1.0]. Default 0.2.
+	ConvexTemporalBonus *float64 `json:"convex_temporal_bonus,omitempty"`
 }
 
 // ContentSafetyConfig controls the prompt injection scanner.
