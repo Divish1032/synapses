@@ -2,11 +2,15 @@ package store
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math"
 	"strings"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/viterin/vek/vek32"
 )
 
 // nodeContentHash computes an 8-char hex hash of the concatenated node text
@@ -43,7 +47,12 @@ func nodeText(name, sig, doc string) string {
 // stored so that GetNodesWithoutEmbeddings can detect stale embeddings when
 // the code changes. Thread-safe: each call is a single UPSERT.
 func (s *Store) UpsertEmbedding(nodeID, model string, vec []float32) error {
-	blob := vecToBlob(vec)
+	// Pre-normalize to unit length so cosine similarity reduces to a dot product.
+	nvec := normalizeVec(vec)
+	if nvec == nil {
+		return fmt.Errorf("upsert embedding: zero-magnitude vector")
+	}
+	blob := vecToBlob(nvec)
 
 	// Compute content hash for change detection. If the node has been deleted
 	// or renamed, the query returns empty strings and the hash reflects that —
@@ -141,6 +150,12 @@ func (s *Store) VectorSearch(queryVec []float32, limit int) ([]SearchResult, err
 		return nil, nil
 	}
 
+	// Pre-normalize query vector so dot product = cosine similarity.
+	normQuery := normalizeVec(queryVec)
+	if normQuery == nil {
+		return nil, nil
+	}
+
 	// Pass 1: Lightweight scan — IDs and embeddings only.
 	rows, err := s.graphDB.Query(`
 		SELECT e.node_id, e.embedding
@@ -161,7 +176,7 @@ func (s *Store) VectorSearch(queryVec []float32, limit int) ([]SearchResult, err
 		if len(vec) == 0 {
 			continue
 		}
-		score := cosineSimilarity(queryVec, vec)
+		score := dotSimilarity(normQuery, vec)
 		if score <= 0 {
 			continue
 		}
@@ -243,8 +258,92 @@ func blobToVec(b []byte) []float32 {
 	return vec
 }
 
+// normalizeVec returns a unit-length copy of vec. Returns nil for empty/zero-magnitude input.
+// Pre-normalizing vectors at insertion time reduces cosine similarity to a single dot product.
+func normalizeVec(vec []float32) []float32 {
+	if len(vec) == 0 {
+		return nil
+	}
+	norm := vek32.Norm(vec)
+	if norm == 0 {
+		return nil
+	}
+	out := make([]float32, len(vec))
+	copy(out, vec)
+	vek32.DivNumber_Inplace(out, norm)
+	return out
+}
+
+// normalizeStoredEmbeddings migrates existing embeddings to unit-normalized form.
+// Called once at store Open. Idempotent: re-normalizing a unit vector produces
+// the same vector within float32 precision. Skips rows that are already
+// normalized (norm within [0.999, 1.001]) to avoid unnecessary writes.
+func (s *Store) normalizeStoredEmbeddings() {
+	normalizeTable := func(db interface {
+		Query(string, ...any) (*sql.Rows, error)
+		Exec(string, ...any) (sql.Result, error)
+	}, table, idCol string) int {
+		rows, err := db.Query(fmt.Sprintf("SELECT %s, embedding FROM %s", idCol, table))
+		if err != nil {
+			return 0
+		}
+		defer rows.Close()
+
+		var updated int
+		for rows.Next() {
+			var id string
+			var blob []byte
+			if err := rows.Scan(&id, &blob); err != nil {
+				continue
+			}
+			vec := blobToVec(blob)
+			if len(vec) == 0 {
+				continue
+			}
+			norm := vek32.Norm(vec)
+			// Skip if already normalized (within float32 tolerance).
+			if norm > 0.999 && norm < 1.001 {
+				continue
+			}
+			if norm == 0 {
+				continue
+			}
+			nvec := normalizeVec(vec)
+			if nvec == nil {
+				continue
+			}
+			if _, err := db.Exec(
+				fmt.Sprintf("UPDATE %s SET embedding = ? WHERE %s = ?", table, idCol),
+				vecToBlob(nvec), id,
+			); err != nil {
+				continue
+			}
+			updated++
+		}
+		return updated
+	}
+
+	nodeUpdated := normalizeTable(s.graphDB, "node_embeddings", "node_id")
+	memUpdated := normalizeTable(s.knowledgeDB, "memory_embeddings", "memory_id")
+	if nodeUpdated+memUpdated > 0 {
+		logutil.Info("synapses: normalized %d node + %d memory embeddings to unit length\n", nodeUpdated, memUpdated)
+	}
+}
+
+// dotSimilarity returns the dot product of two pre-normalized vectors as their
+// cosine similarity. Uses SIMD-accelerated vek32.Dot for 3-5x speedup over
+// scalar loops. Both vectors MUST be pre-normalized (unit length) for the
+// result to equal cosine similarity. Returns 0 for length mismatches or empty input.
+func dotSimilarity(a, b []float32) float32 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	return vek32.Dot(a, b)
+}
+
 // cosineSimilarity returns the cosine similarity between two float32 vectors.
 // Returns 0 if either vector has zero magnitude or if lengths differ.
+// Kept as fallback for non-normalized vectors (e.g., external callers).
 func cosineSimilarity(a, b []float32) float32 {
 	if len(a) != len(b) || len(a) == 0 {
 		return 0

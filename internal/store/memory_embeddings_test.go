@@ -751,7 +751,8 @@ func TestMemoryVectorSearch_LargeDataset_NoCap(t *testing.T) {
 			t.Fatalf("insert memory %d: %v", i, err)
 		}
 		// All point roughly in {1, 0} direction, but the last one is closest.
-		vec := []float32{1.0, float32(totalRows-i) * 0.001}
+		// Vectors are pre-normalized (unit length) as required by dotSimilarity.
+		vec := normalizeVec([]float32{1.0, float32(totalRows-i) * 0.001})
 		if _, err := embStmt.Exec(id, vecToBlob(vec), now.Unix()); err != nil {
 			t.Fatalf("insert embedding %d: %v", i, err)
 		}

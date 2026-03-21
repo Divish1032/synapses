@@ -40,7 +40,12 @@ func (s *Store) UpsertMemoryEmbedding(memoryID, model string, vec []float32) err
 	if len(vec) == 0 {
 		return fmt.Errorf("upsert memory embedding: empty vector")
 	}
-	blob := vecToBlob(vec)
+	// Pre-normalize to unit length so cosine similarity reduces to a dot product.
+	nvec := normalizeVec(vec)
+	if nvec == nil {
+		return fmt.Errorf("upsert memory embedding: zero-magnitude vector")
+	}
+	blob := vecToBlob(nvec)
 
 	// Compute content hash for change detection.
 	var content string
@@ -304,6 +309,12 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 		return nil, nil
 	}
 
+	// Pre-normalize query vector so dot product = cosine similarity.
+	normQuery := normalizeVec(queryVec)
+	if normQuery == nil {
+		return nil, nil
+	}
+
 	// Pass 1: Lightweight scan — IDs, embeddings, and stale flag.
 	// Stale embeddings (e.stale=1) are INCLUDED in scoring — their vector
 	// is still valid (memory text unchanged). StaleEmbedding flag is
@@ -337,7 +348,7 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 		if len(vec) == 0 {
 			continue
 		}
-		score := cosineSimilarity(queryVec, vec)
+		score := dotSimilarity(normQuery, vec)
 		if score <= 0 {
 			continue
 		}
@@ -374,6 +385,12 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 		return nil, nil
 	}
 
+	// Pre-normalize query vector so dot product = cosine similarity.
+	normQuery := normalizeVec(queryVec)
+	if normQuery == nil {
+		return nil, nil
+	}
+
 	// Pass 1: Lightweight scan with threshold filter.
 	// Stale embeddings included — see MemoryVectorSearch comment.
 	// LIMIT 10000: safety cap so heap allocation stays bounded on large corpora.
@@ -407,7 +424,7 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 		if len(vec) == 0 {
 			continue
 		}
-		score := cosineSimilarity(queryVec, vec)
+		score := dotSimilarity(normQuery, vec)
 		if score < threshold {
 			continue
 		}

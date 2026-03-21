@@ -135,3 +135,27 @@ func TestGetNodeTextForEmbedding_ReturnsNameAndDoc(t *testing.T) {
 		t.Errorf("expected text to contain 'ParseRequest', got: %q", text)
 	}
 }
+
+func TestUpsertEmbedding_PreNormalizesVector(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+	idA, _ := seedEmbedNodes(t, st)
+
+	// Insert a non-unit vector. UpsertEmbedding should normalize it.
+	if err := st.UpsertEmbedding(idA, "test", []float32{3, 4}); err != nil {
+		t.Fatalf("UpsertEmbedding: %v", err)
+	}
+
+	// Search with query in the same direction — should get high score (≈1.0).
+	results, err := st.VectorSearch([]float32{3, 4}, 5)
+	if err != nil {
+		t.Fatalf("VectorSearch: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results")
+	}
+	// Dot product of two normalized identical-direction vectors ≈ 1.0.
+	if results[0].Score < 0.99 {
+		t.Errorf("expected score ≈ 1.0, got %f", results[0].Score)
+	}
+}
