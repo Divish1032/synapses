@@ -2,16 +2,26 @@ package store
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// RecencyDecayScore computes a decay score based on age since creation.
-// Returns a value in (0, 1] where 1.0 = just created, 0.5 = halfLifeHours old.
-// Exported as a reusable utility for Sprint 10 #2 (knowledge decay scoring).
-func RecencyDecayScore(createdAt time.Time, halfLifeHours float64) float64 {
+// RecencyDecayScore computes a decay score using ACT-R frequency-weighted
+// power-law decay. Returns a value in (0, 1] where 1.0 = just created,
+// 0.5 = one effective half-life old. The effective half-life grows
+// logarithmically with access_count: a memory accessed 20 times decays
+// ~4.4x slower than one accessed once.
+//
+// Formula: score = 1 / (1 + ageHours / effectiveHalfLife)
+// where effectiveHalfLife = halfLifeHours × log2(max(accessCount, 1) + 1).
+//
+// Based on ACT-R base-level activation (Anderson & Lebiere, 1998).
+// The log-frequency scaling is the core ACT-R insight: each additional
+// access has diminishing returns on memory strength.
+func RecencyDecayScore(createdAt time.Time, halfLifeHours float64, accessCount int) float64 {
 	if halfLifeHours <= 0 {
 		halfLifeHours = 168 // 1 week default
 	}
@@ -19,7 +29,17 @@ func RecencyDecayScore(createdAt time.Time, halfLifeHours float64) float64 {
 	if ageHours < 0 {
 		ageHours = 0 // future timestamps treated as "just created"
 	}
-	return 1.0 / (1.0 + ageHours/halfLifeHours)
+
+	// ACT-R frequency boost: effective half-life scales with log2(n+1).
+	// n=0 or n=1 → multiplier = 1.0 (backward compatible with old formula).
+	// n=20 → multiplier ≈ 4.39 (memory decays 4.39x slower).
+	n := float64(accessCount)
+	if n < 1 {
+		n = 1
+	}
+	effectiveHalfLife := halfLifeHours * math.Log2(n+1)
+
+	return 1.0 / (1.0 + ageHours/effectiveHalfLife)
 }
 
 // DecayedImportanceScore combines memory importance weight with recency decay.
@@ -58,7 +78,7 @@ func DecayedImportanceScore(m Memory, halfLifeHours float64) float64 {
 		}
 	}
 
-	return weight * RecencyDecayScore(accessedAt, halfLifeHours)
+	return weight * RecencyDecayScore(accessedAt, halfLifeHours, m.AccessCount)
 }
 
 // DecayVisibilityThreshold is the minimum DecayedImportanceScore for a memory
@@ -90,7 +110,7 @@ func (s *Store) RecentMemories(limit, sinceDays int, until *time.Time, includeSt
 	nowStr := now.Format(time.RFC3339)
 
 	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
-	             created_at, expires_at, last_accessed_at, source, importance
+	             created_at, expires_at, last_accessed_at, source, importance, access_count
 	      FROM memories
 	      WHERE created_at >= ?
 	        AND expires_at > ?`
@@ -194,7 +214,7 @@ func (s *Store) GetMemoriesByAnchorNodes(nodeIDs []string, limit int, includeSta
 		args = append(args, now) // for expires_at filter
 
 		q := `SELECT DISTINCT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
-		             m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance
+		             m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count
 		      FROM memories m
 		      JOIN memory_anchors ma ON m.id = ma.memory_id
 		      WHERE ma.node_id IN (` + strings.Join(placeholders, ",") + `)

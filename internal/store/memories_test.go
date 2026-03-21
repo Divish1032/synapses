@@ -184,6 +184,56 @@ func TestTouchMemory_ExtendsExpiry(t *testing.T) {
 	}
 }
 
+func TestTouchMemory_IncrementsAccessCount(t *testing.T) {
+	t.Parallel()
+	st := openMemTestStore(t)
+
+	id, _ := st.InsertMemory(Memory{
+		Tier:    TierProject,
+		Content: "memory to verify access count increments on touch",
+	})
+
+	// Initial access_count should be 0.
+	var count int
+	st.knowledgeDB.QueryRow(`SELECT access_count FROM memories WHERE id = ?`, id).Scan(&count)
+	if count != 0 {
+		t.Fatalf("initial access_count = %d, want 0", count)
+	}
+
+	// Touch 3 times.
+	for i := 0; i < 3; i++ {
+		if err := st.TouchMemory(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	st.knowledgeDB.QueryRow(`SELECT access_count FROM memories WHERE id = ?`, id).Scan(&count)
+	if count != 3 {
+		t.Errorf("access_count after 3 touches = %d, want 3", count)
+	}
+}
+
+func TestTouchMemory_EntityMemory_IncrementsAccessCount(t *testing.T) {
+	t.Parallel()
+	st := openMemTestStore(t)
+
+	id, _ := st.InsertMemory(Memory{
+		Tier:     TierEntity,
+		Content:  "entity memory to verify access count via entity touch path",
+		EntityID: "repo::test.go::Foo",
+	})
+
+	if err := st.TouchMemory(id); err != nil {
+		t.Fatal(err)
+	}
+
+	var count int
+	st.knowledgeDB.QueryRow(`SELECT access_count FROM memories WHERE id = ?`, id).Scan(&count)
+	if count != 1 {
+		t.Errorf("entity memory access_count after touch = %d, want 1", count)
+	}
+}
+
 func TestExpireMemories_DeletesExpired(t *testing.T) {
 	t.Parallel()
 	st := openMemTestStore(t)
