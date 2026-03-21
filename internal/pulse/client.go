@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/pulse/aggregator"
@@ -27,6 +28,12 @@ type OutcomeSignalEvent = types.OutcomeSignalEvent
 type EntityEffectiveness = types.EntityEffectiveness
 type BrainUsageEvent = types.BrainUsageEvent
 type AgentLLMUsageEvent = types.AgentLLMUsageEvent
+// Phase 2 pipeline event types.
+type ParseEvent = types.ParseEvent
+type ReparseEvent = types.ReparseEvent
+type GraphSnapshotEvent = types.GraphSnapshotEvent
+type EmbeddingEvent = types.EmbeddingEvent
+type IndexEvent = types.IndexEvent
 
 // Client is the in-process analytics collector. It replaces the HTTP sidecar.
 // Create with New; call Close when the daemon shuts down.
@@ -34,6 +41,10 @@ type Client struct {
 	store *pulsestore.Store
 	coll  *collector.Collector
 	agg   *aggregator.Aggregator
+	// P2-5: background worker counters — incremented by server.goBackground.
+	bgEnqueued atomic.Int64
+	bgDropped  atomic.Int64
+	bgPanics   atomic.Int64
 }
 
 // DefaultDBPath returns the canonical path for the pulse SQLite database.
@@ -105,13 +116,24 @@ func (c *Client) RecordContextDelivery(ev ContextDeliveryEvent) {
 }
 
 // RecordSessionEvent enqueues a session lifecycle event. Fire-and-forget.
-// Session ID includes projectID so sessions from different projects are never
-// merged even when the same agent_id is used across projects.
+// If sessionID is provided, it is used directly (preferred — avoids session ID
+// collision). If empty, falls back to the legacy synthetic ID format for
+// backward compatibility.
 func (c *Client) RecordSessionEvent(agentID, projectID, eventType string) {
 	if c == nil {
 		return
 	}
 	sessionID := agentID + ":" + projectID + ":" + time.Now().UTC().Format("2006-01-02")
+	c.coll.RecordSessionEvent(sessionID, agentID, projectID, eventType)
+}
+
+// RecordSessionEventWithID enqueues a session lifecycle event with an explicit
+// session UUID from the main store. If sessionID is empty, the event is
+// silently dropped — callers must resolve the session ID before calling.
+func (c *Client) RecordSessionEventWithID(sessionID, agentID, projectID, eventType string) {
+	if c == nil || sessionID == "" {
+		return
+	}
 	c.coll.RecordSessionEvent(sessionID, agentID, projectID, eventType)
 }
 
@@ -133,6 +155,15 @@ func (c *Client) RecordSessionModel(agentID, projectID, model, provider string) 
 	c.coll.RecordSessionModel(sessionID, agentID, projectID, model, provider)
 }
 
+// RecordSessionModelWithID records the model with an explicit session UUID.
+// If sessionID is empty, the event is silently dropped.
+func (c *Client) RecordSessionModelWithID(sessionID, agentID, projectID, model, provider string) {
+	if c == nil || model == "" || sessionID == "" {
+		return
+	}
+	c.coll.RecordSessionModel(sessionID, agentID, projectID, model, provider)
+}
+
 // RecordBrainUsage enqueues a brain LLM inference event. Fire-and-forget.
 // Used to track deterministic vs. Ollama call ratios in the brain enricher.
 func (c *Client) RecordBrainUsage(ev BrainUsageEvent) {
@@ -149,6 +180,87 @@ func (c *Client) RecordAgentLLMUsage(ev AgentLLMUsageEvent) {
 		return
 	}
 	c.coll.RecordAgentLLMUsage(ev)
+}
+
+// RecordParseEvent enqueues a per-file parse event. Fire-and-forget (P2-2).
+func (c *Client) RecordParseEvent(ev ParseEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordParseEvent(ev)
+}
+
+// RecordReparseEvent enqueues an incremental reparse event. Fire-and-forget (P2-3).
+func (c *Client) RecordReparseEvent(ev ReparseEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordReparseEvent(ev)
+}
+
+// RecordGraphSnapshot enqueues a graph topology snapshot. Fire-and-forget (P2-7).
+func (c *Client) RecordGraphSnapshot(ev GraphSnapshotEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordGraphSnapshot(ev)
+}
+
+// RecordEmbeddingEvent enqueues an embedding batch event. Fire-and-forget (P2-6).
+func (c *Client) RecordEmbeddingEvent(ev EmbeddingEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordEmbeddingEvent(ev)
+}
+
+// RecordIndexEvent enqueues a full-index completion event. Fire-and-forget (P2-8).
+func (c *Client) RecordIndexEvent(ev IndexEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordIndexEvent(ev)
+}
+
+// RecordBackgroundWorkerEnqueue increments the bgEnqueued counter (P2-5).
+func (c *Client) RecordBackgroundWorkerEnqueue() {
+	if c == nil {
+		return
+	}
+	c.bgEnqueued.Add(1)
+}
+
+// RecordBackgroundWorkerDrop increments the bgDropped counter (P2-5).
+func (c *Client) RecordBackgroundWorkerDrop() {
+	if c == nil {
+		return
+	}
+	c.bgDropped.Add(1)
+}
+
+// RecordBackgroundWorkerPanic increments the bgPanics counter (P2-5).
+func (c *Client) RecordBackgroundWorkerPanic() {
+	if c == nil {
+		return
+	}
+	c.bgPanics.Add(1)
+}
+
+// GetBackgroundWorkerStats returns enqueued, dropped, and panic counts (P2-5).
+func (c *Client) GetBackgroundWorkerStats() (enqueued, dropped, panics int64) {
+	if c == nil {
+		return 0, 0, 0
+	}
+	return c.bgEnqueued.Load(), c.bgDropped.Load(), c.bgPanics.Load()
+}
+
+// GetCollectorStats returns the collector's event-drop count and high-water mark (P2-17/P2-19).
+// Returns zeros if pulse is unavailable.
+func (c *Client) GetCollectorStats() (dropped, hwm int64) {
+	if c == nil {
+		return 0, 0
+	}
+	return c.coll.Dropped(), c.coll.HighWaterMark()
 }
 
 // FetchEffectiveness returns per-entity effectiveness scores from the local store.
@@ -226,4 +338,36 @@ func (c *Client) GetSummary(days int) *PulseSummary {
 		Insights:    insights,
 		LLMStats:    llmStats,
 	}
+}
+
+// GetLifetimeSummary returns aggregated analytics across all time.
+// Returns nil if pulse is unavailable.
+func (c *Client) GetLifetimeSummary() *PulseSummary {
+	if c == nil {
+		return &PulseSummary{Days: 0}
+	}
+	sum, err := c.store.GetLifetimeSummary()
+	if err != nil {
+		sum = &pulsestore.Summary{}
+	}
+	return &PulseSummary{
+		Days:    0, // 0 means "all time"
+		Summary: sum,
+	}
+}
+
+// GetFirstContextRightRate returns the fraction of context deliveries that
+// did not require correction. Returns 1.0 if no data is available.
+func (c *Client) GetFirstContextRightRate(days int) float64 {
+	if c == nil {
+		return 1.0
+	}
+	if days <= 0 {
+		days = 7
+	}
+	rate, err := c.store.GetFirstContextRightRate(days)
+	if err != nil {
+		return 1.0
+	}
+	return rate
 }

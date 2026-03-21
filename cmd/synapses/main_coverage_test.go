@@ -51,7 +51,7 @@ func indexedRepoDir2(t *testing.T) string {
 
 func TestBuildGraph_BasicGoRepoCov(t *testing.T) {
 	dir := goRepoDir2(t)
-	g, err := buildGraph(dir, nil, nil, false, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatalf("buildGraph returned error: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestBuildGraph_WithStoreCov(t *testing.T) {
 	}
 	defer st.Close()
 
-	g, err := buildGraph(dir, st, nil, false, nil, nil)
+	g, err := buildGraph(dir, st, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatalf("buildGraph with store returned error: %v", err)
 	}
@@ -276,7 +276,7 @@ func main() {}
 
 func TestAnalyzeDataFlowIfEnabled_EmptyConfigCov(t *testing.T) {
 	dir := goRepoDir2(t)
-	g, err := buildGraph(dir, nil, nil, false, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestAnalyzeDataFlowIfEnabled_EmptyConfigCov(t *testing.T) {
 
 func TestEnrichMetricsIfEnabled_DefaultDays(t *testing.T) {
 	dir := goRepoDir2(t)
-	g, err := buildGraph(dir, nil, nil, false, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestEnrichMetricsIfEnabled_DefaultDays(t *testing.T) {
 
 func TestEnrichMetricsIfEnabled_WithCoverageProfile(t *testing.T) {
 	dir := goRepoDir2(t)
-	g, err := buildGraph(dir, nil, nil, false, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestEnrichMetricsIfEnabled_WithCoverageProfile(t *testing.T) {
 
 func TestEnrichMetricsIfEnabled_WithPprofProfile(t *testing.T) {
 	dir := goRepoDir2(t)
-	g, err := buildGraph(dir, nil, nil, false, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestEnrichMetricsIfEnabled_WithPprofProfile(t *testing.T) {
 
 func TestEnrichMetricsIfEnabled_CustomDays(t *testing.T) {
 	dir := goRepoDir2(t)
-	g, err := buildGraph(dir, nil, nil, false, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestEnrichMetricsIfEnabled_CustomDays(t *testing.T) {
 
 func TestApplyGoTypesIfEnabled_DisabledCov(t *testing.T) {
 	dir := goRepoDir2(t)
-	g, err := buildGraph(dir, nil, nil, false, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestApplyGoTypesIfEnabled_DisabledCov(t *testing.T) {
 
 func TestApplyGoTypesIfEnabled_EnabledCov(t *testing.T) {
 	dir := goRepoDir2(t)
-	g, err := buildGraph(dir, nil, nil, false, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +358,7 @@ func TestApplyGoTypesIfEnabled_EnabledCov(t *testing.T) {
 
 func TestApplyTSTypesIfEnabled_DisabledCov(t *testing.T) {
 	dir := goRepoDir2(t)
-	g, err := buildGraph(dir, nil, nil, false, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func TestApplyTSTypesIfEnabled_DisabledCov(t *testing.T) {
 func TestApplyTSTypesIfEnabled_EnabledCov(t *testing.T) {
 	dir := t.TempDir()
 	// Use a dir with no TS files — resolver should fail silently.
-	g, err := buildGraph(dir, nil, nil, false, nil, nil)
+	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,7 +558,7 @@ func TestSmartReindex_WithCachedGraphCov(t *testing.T) {
 	defer st.Close()
 
 	// Build graph and save it (mtimes saved by buildGraph).
-	g, err := buildGraph(dir, st, nil, false, nil, nil)
+	g, err := buildGraph(dir, st, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +580,7 @@ func TestSmartReindex_WithCachedGraphCov(t *testing.T) {
 // ── mergeLinkedProject ────────────────────────────────────────────────────────
 
 func TestMergeLinkedProject_NotIndexedCov(t *testing.T) {
-	g, err := buildGraph(t.TempDir(), nil, nil, false, nil, nil)
+	g, err := buildGraph(t.TempDir(), nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +601,7 @@ func TestMergeLinkedProject_IndexedCov(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g, err := buildGraph(primary, nil, nil, false, nil, nil)
+	g, err := buildGraph(primary, nil, nil, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +626,7 @@ func TestLoadOrBuildGraphWithStore_ForceReindexWithCacheCov(t *testing.T) {
 	defer st.Close()
 
 	// First build to create cache.
-	g, err := loadOrBuildGraphWithStore(dir, st, false, nil, nil)
+	g, err := loadOrBuildGraphWithStore(dir, st, false, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,7 +635,7 @@ func TestLoadOrBuildGraphWithStore_ForceReindexWithCacheCov(t *testing.T) {
 	}
 
 	// Force reindex with existing cache.
-	g2, err := loadOrBuildGraphWithStore(dir, st, true, nil, nil)
+	g2, err := loadOrBuildGraphWithStore(dir, st, true, nil, nil, nil, "")
 	if err != nil {
 		t.Errorf("force reindex returned error: %v", err)
 	}

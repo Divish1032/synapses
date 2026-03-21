@@ -202,7 +202,7 @@ func cmdStartDirect(args []string) error {
 		}
 	}
 
-	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins, pluginCheck)
+	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins, pluginCheck, nil, "")
 	if err != nil {
 		return err
 	}
@@ -368,9 +368,10 @@ func cmdStartDirect(args []string) error {
 	// Optional: connect to synapses-pulse analytics sidecar.
 	// Pulse is fire-and-forget: if unreachable at startup or during operation,
 	// all errors are silently discarded and the MCP server continues normally.
+	var sharedPulse *pulse.Client // P2-6: shared with embedAllMemories
 	if cfg.Pulse.URL != "" {
-		pulseCli := pulse.NewClient(cfg.Pulse.URL, cfg.Pulse.TimeoutSec)
-		srv.SetPulseClient(pulseCli)
+		sharedPulse = pulse.NewClient(cfg.Pulse.URL, cfg.Pulse.TimeoutSec)
+		srv.SetPulseClient(sharedPulse)
 		logutil.Info("synapses: pulse analytics enabled at %s\n", cfg.Pulse.URL)
 	}
 
@@ -400,7 +401,7 @@ func cmdStartDirect(args []string) error {
 		memEmbedder := createMemoryEmbedder(cfg)
 		if memEmbedder != nil {
 			srv.SetMemoryEmbedder(memEmbedder)
-			go embedAllMemories(appCtx, memEmbedder, st)
+			go embedAllMemories(appCtx, memEmbedder, st, sharedPulse)
 		}
 	}
 
@@ -530,7 +531,7 @@ func cmdIndex(args []string) error {
 		}
 	}
 
-	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins, pluginCheck2)
+	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins, pluginCheck2, nil, "")
 	if err != nil {
 		return err
 	}
@@ -935,7 +936,7 @@ func formatDuration(d time.Duration) string {
 // is attempted first — only changed files are re-parsed, saving significant time
 // on large codebases. Falls back to a full parse if the smart reindex fails.
 // plugins is forwarded to the Walker so external parser plugins handle their extensions.
-func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bool, plugins []config.PluginConfig, pluginCheck *parser.PluginChecker) (*graph.Graph, error) {
+func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bool, plugins []config.PluginConfig, pluginCheck *parser.PluginChecker, pc *pulse.Client, projectID string) (*graph.Graph, error) {
 	// Always attempt smart reindex first: a fast filesystem mtime walk that
 	// re-parses only changed files. This keeps line numbers accurate after
 	// offline edits made between sessions (when the watcher was not running).
@@ -945,6 +946,7 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 		if saveErr := st.SaveGraph(g); saveErr != nil {
 			logutil.Error("synapses: cache save failed: %v\n", saveErr)
 		}
+		emitGraphSnapshot(g, pc, projectID) // P2-7: graph topology snapshot
 		// Warm-boot: try to restore the columnar index from the snapshot blob.
 		// This is best-effort — failure is silent (the index will be rebuilt async).
 		tryLoadSnapshot(g, st)
@@ -983,7 +985,7 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 	defer UnregisterIndexing(repoRoot)
 
 	start := time.Now()
-	g, err = buildGraph(repoRoot, st, plugins, quiet, progress, pluginCheck)
+	g, err = buildGraph(repoRoot, st, plugins, quiet, progress, pluginCheck, pc, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -999,6 +1001,7 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 	if err := st.SaveGraph(g); err != nil {
 		logutil.Error("synapses: cache save failed: %v\n", err)
 	}
+	emitGraphSnapshot(g, pc, projectID) // P2-7: graph topology snapshot
 
 	return g, nil
 }
@@ -1033,7 +1036,110 @@ func loadOrBuildGraph(repoRoot string, forceReindex bool) (*graph.Graph, error) 
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 	defer st.Close()
-	return loadOrBuildGraphWithStore(repoRoot, st, forceReindex, nil, nil)
+	return loadOrBuildGraphWithStore(repoRoot, st, forceReindex, nil, nil, nil, "")
+}
+
+// emitGraphSnapshot computes graph topology metrics and emits a GraphSnapshotEvent
+// as a fire-and-forget goroutine. Nil-safe: no-op if pc is nil. (P2-7/P2-11)
+func emitGraphSnapshot(g *graph.Graph, pc *pulse.Client, projectID string) {
+	if pc == nil || g == nil {
+		return
+	}
+	go func() {
+		nodes := g.AllNodes()
+		edges := g.AllEdges()
+		nodesTotal := len(nodes)
+		edgesTotal := len(edges)
+
+		// Single pass over nodes: build nodeFile map, degree arrays, type dist, orphans.
+		nodeFile := make(map[graph.NodeID]string, nodesTotal)
+		fiVals := make([]int, 0, nodesTotal)
+		foVals := make([]int, 0, nodesTotal)
+		typeDist := make(map[string]int)
+		// Fan-in/out computed after edge pass; populate placeholders now.
+		fanIn := make(map[graph.NodeID]int, nodesTotal)
+		fanOut := make(map[graph.NodeID]int, nodesTotal)
+		for _, n := range nodes {
+			nodeFile[n.ID] = n.File
+			typeDist[string(n.Type)]++
+		}
+
+		// Single pass over edges: count CALLS edges, cross-file edges, degrees.
+		callsEdges := 0
+		crossFileEdges := 0
+		for _, e := range edges {
+			fanOut[e.From]++
+			fanIn[e.To]++
+			if e.Type == graph.EdgeCalls {
+				callsEdges++
+			}
+			if nodeFile[e.From] != nodeFile[e.To] {
+				crossFileEdges++
+			}
+		}
+
+		// Second (and final) pass over nodes: orphans + percentile arrays.
+		// Merged from the original three separate node loops.
+		orphans := 0
+		maxFanIn, maxFanOut := 0, 0
+		for _, n := range nodes {
+			fi := fanIn[n.ID]
+			fo := fanOut[n.ID]
+			fiVals = append(fiVals, fi)
+			foVals = append(foVals, fo)
+			if fi > maxFanIn {
+				maxFanIn = fi
+			}
+			if fo > maxFanOut {
+				maxFanOut = fo
+			}
+			if fi == 0 && fo == 0 {
+				orphans++
+			}
+		}
+
+		// Compute density: edges / (N*(N-1)). Use float64 casts to avoid
+		// implicit integer overflow on very large graphs.
+		var density float64
+		if nodesTotal > 1 {
+			density = float64(edgesTotal) / (float64(nodesTotal) * float64(nodesTotal-1))
+		}
+
+		var crossPct float64
+		if edgesTotal > 0 {
+			crossPct = float64(crossFileEdges) / float64(edgesTotal) * 100
+		}
+
+		sort.Ints(fiVals)
+		sort.Ints(foVals)
+		percentile := func(vals []int, pct int) int {
+			if len(vals) == 0 {
+				return 0
+			}
+			return vals[(len(vals)-1)*pct/100]
+		}
+
+		typeDistJSON, _ := json.Marshal(typeDist)
+
+		ev := pulse.GraphSnapshotEvent{
+			SnapshotType:     "full",
+			NodesTotal:       nodesTotal,
+			EdgesTotal:       edgesTotal,
+			EdgesCalls:       callsEdges,
+			OrphanNodes:      orphans,
+			Density:          density,
+			CrossFileEdgePct: crossPct,
+			MaxFanin:         maxFanIn,
+			MaxFanout:        maxFanOut,
+			FanInP50:         percentile(fiVals, 50),
+			FanInP95:         percentile(fiVals, 95),
+			FanOutP50:        percentile(foVals, 50),
+			FanOutP95:        percentile(foVals, 95),
+			NodeTypeDistJSON: string(typeDistJSON),
+			ProjectID:        projectID,
+		}
+		pc.RecordGraphSnapshot(ev)
+	}()
 }
 
 // analyzeDataFlowIfEnabled tags source/sink nodes and creates DATA_FLOWS summary
@@ -1170,11 +1276,15 @@ func extDisplayName(ext string) string {
 // buildGraph performs a full parse from scratch.
 // quiet suppresses stderr progress output (SYNAPSES_QUIET=1).
 // progress, if non-nil, receives live done/total updates for the health endpoint.
-func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, quiet bool, progress *IndexingState, pluginCheck *parser.PluginChecker) (*graph.Graph, error) {
+// pc, if non-nil, receives parse and index telemetry events (P2-8/P2-9).
+func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, quiet bool, progress *IndexingState, pluginCheck *parser.PluginChecker, pc *pulse.Client, projectID string) (*graph.Graph, error) {
 	repoID := filepath.Base(root)
 	g := graph.New(repoID)
 	g.SetRoot(root)
 	w := parser.NewWalker()
+	// P2-9: wire pulse client so WalkDir emits per-file ParseEvents.
+	w.PulseClient = pc
+	w.ProjectID = projectID
 	for _, p := range plugins {
 		w.RegisterPlugin(p.Extensions, p.Command, pluginCheck)
 	}
@@ -1218,6 +1328,7 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 		}
 	}
 
+	buildStart := time.Now() // P2-8: index timing
 	mtimes, err := w.WalkDir(g, root)
 	if err != nil {
 		return nil, fmt.Errorf("parse repo: %w", err)
@@ -1228,6 +1339,9 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 	if progress != nil {
 		progress.SetLabel("Resolving edges…")
 	}
+
+	// P2-8: capture call site count before draining (for IndexEvent resolution rate).
+	totalCallSites := len(g.PeekCallSites())
 
 	// Persist call sites BEFORE draining them so they can be reloaded and
 	// re-resolved after MergeFrom for cross-project CALLS edge resolution.
@@ -1255,6 +1369,40 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 			logutil.Error("synapses: save file mtimes: %v\n", saveErr)
 		}
 	}
+
+	// P2-8: emit IndexEvent (fire-and-forget).
+	if pc != nil {
+		unresolved := totalCallSites - n
+		if unresolved < 0 {
+			unresolved = 0
+		}
+		var resRate float64
+		if totalCallSites > 0 {
+			resRate = float64(n) / float64(totalCallSites)
+		}
+		// Build language distribution JSON from mtimes keys (already unique per file).
+		// Avoids allocating a full AllNodes() slice just for file-extension counting.
+		langDist := make(map[string]int, 16)
+		for f := range mtimes {
+			if ext := filepath.Ext(f); ext != "" {
+				langDist[extDisplayName(ext)]++
+			}
+		}
+		langDistJSON, _ := json.Marshal(langDist)
+		ev := pulse.IndexEvent{
+			DurationMs:            time.Since(buildStart).Milliseconds(),
+			FilesIndexed:          len(mtimes),
+			TotalNodes:            g.NodeCount(),
+			TotalEdges:            g.EdgeCount(),
+			CallSitesResolved:     n,
+			CallSitesUnresolved:   unresolved,
+			ResolutionRate:        resRate,
+			LanguageDistJSON:      string(langDistJSON),
+			ProjectID:             projectID,
+		}
+		go pc.RecordIndexEvent(ev)
+	}
+
 	return g, nil
 }
 
@@ -3054,9 +3202,9 @@ func createMemoryEmbedder(cfg *config.Config) embed.Embedder {
 }
 
 // embedAllMemories generates embeddings for all un-embedded memories.
-// Wraps the mcp package helper for use from main.
-func embedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.Store) {
-	mcpsrv.EmbedAllMemories(ctx, embedder, st)
+// Wraps the mcp package helper for use from main. pc may be nil (pulse disabled).
+func embedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.Store, pc *pulse.Client) {
+	mcpsrv.EmbedAllMemories(ctx, embedder, st, pc)
 }
 
 // pathProjectID returns a stable 8-hex-char project identifier derived from the project root path.

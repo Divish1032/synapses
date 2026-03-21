@@ -598,31 +598,33 @@ func TestOpen_CreatesDatabase(t *testing.T) {
 }
 
 func TestMergeSummaries_WeightedAverages(t *testing.T) {
-	// Test weighted average calculations for rate fields
+	// Test that mergeSummaries recomputes rates from summable components.
 	hist := &Summary{
-		ContextDeliveries: 10,
-		CacheHitRate:      0.8,  // 80%
-		TotalToolCalls:    20,
-		AvgLatencyMs:      100.0,
+		ContextDeliveries:  10,
+		CacheHits:          8,    // 80% hit rate
+		BrainEnrichedCount: 0,
+		TotalToolCalls:     20,
+		TotalLatencyMs:     2000, // avg = 100ms
 	}
 	today := &Summary{
-		ContextDeliveries: 5,
-		CacheHitRate:      0.6,  // 60%
-		TotalToolCalls:    10,
-		AvgLatencyMs:      50.0,
+		ContextDeliveries:  5,
+		CacheHits:          3,    // 60% hit rate
+		BrainEnrichedCount: 0,
+		TotalToolCalls:     10,
+		TotalLatencyMs:     500, // avg = 50ms
 	}
 
 	result := mergeSummaries(hist, today)
 
-	// Expected weighted cache hit rate: (0.8*10 + 0.6*5) / 15 = 10/15 ≈ 0.667
-	expectedCacheHit := (0.8*10 + 0.6*5) / 15.0
+	// Expected cache hit rate: (8+3) / (10+5) = 11/15 ≈ 0.733
+	expectedCacheHit := 11.0 / 15.0
 	if abs(result.CacheHitRate-expectedCacheHit) > 0.001 {
 		t.Errorf("CacheHitRate: got %.3f, want %.3f", result.CacheHitRate, expectedCacheHit)
 	}
 
-	// Expected weighted avg latency: (100*20 + 50*10) / 30 = 3000/30 = 100
-	expectedLatency := (100.0*20 + 50.0*10) / 30.0
-	if abs(result.AvgLatencyMs-expectedLatency) > 0.001 {
+	// Expected avg latency: (2000+500) / (20+10) = 2500/30 ≈ 83.3
+	expectedLatency := 2500.0 / 30.0
+	if abs(result.AvgLatencyMs-expectedLatency) > 0.1 {
 		t.Errorf("AvgLatencyMs: got %.1f, want %.1f", result.AvgLatencyMs, expectedLatency)
 	}
 }

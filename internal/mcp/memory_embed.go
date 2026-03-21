@@ -6,8 +6,14 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
+
+// statusDetailer is satisfied by embed.BuiltinEmbedder to expose model init state.
+type statusDetailer interface {
+	StatusDetail() string
+}
 
 // embedMemory generates a vector embedding for a single memory and stores it.
 // Fail-silent: errors are logged to stderr but never propagated to callers.
@@ -35,7 +41,8 @@ func (s *Server) embedMemory(embedder embed.Embedder, st *store.Store, memoryID,
 // EmbedAllMemories generates embeddings for all un-embedded memories in the
 // background. Rate-limited to ~2 embeddings/second for builtin mode to avoid
 // CPU contention. Called at startup to lazy-migrate legacy memories.
-func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.Store) {
+// pc may be nil (pulse disabled) — fire-and-forget EmbeddingEvent on completion. (P2-6)
+func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.Store, pc *pulse.Client) {
 	if embedder == nil || st == nil {
 		return
 	}
@@ -45,9 +52,11 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 		return
 	}
 
+	staleCount := len(ids) // P2-15: capture before processing
 	logutil.Info("synapses: embedding %d memories (model: %s) …\n", len(ids), embedder.Model())
 	done := 0
 	errors := 0
+	start := time.Now() // P2-6: timing
 
 	// Rate limit: pause between embeddings to avoid saturating CPU.
 	// Builtin mode is CPU-bound; Ollama mode has its own throughput limits.
@@ -103,5 +112,25 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 
 	if done > 0 || errors > 0 {
 		logutil.Info("synapses: memory embedding complete (%d/%d indexed, %d errors)\n", done, len(ids), errors)
+	}
+
+	// P2-6: emit EmbeddingEvent on completion. Enqueue is mutex+append (O(1)) —
+	// direct call, no goroutine needed. EmbedAllMemories itself is already called
+	// from a goroutine by callers.
+	if pc != nil {
+		modelStatus := ""
+		if sd, ok := embedder.(statusDetailer); ok {
+			modelStatus = sd.StatusDetail()
+		}
+		pc.RecordEmbeddingEvent(pulse.EmbeddingEvent{
+			Trigger:     "startup",
+			Model:       embedder.Model(),
+			ModelStatus: modelStatus,
+			Count:       done,
+			Errors:      errors,
+			StaleCount:  staleCount,
+			DurationMs:  time.Since(start).Milliseconds(),
+			Success:     errors == 0,
+		})
 	}
 }

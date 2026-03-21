@@ -25,6 +25,7 @@ func (s *Server) emitContextDelivery(
 	brainEnriched bool,
 	cacheHit bool,
 	durationMs int64,
+	extras ...string, // optional: extras[0] = sessionID
 ) {
 	pc := s.getPulseClient()
 	if pc == nil {
@@ -37,6 +38,11 @@ func (s *Server) emitContextDelivery(
 	// Baseline = sum of unique source file sizes / 4.
 	// This is the honest cost of what the agent would have read via cat/grep.
 	baselineTokens := fileBaselineTokens(nodes)
+
+	var sessionID string
+	if len(extras) > 0 {
+		sessionID = extras[0]
+	}
 
 	// Synchronous — callers are expected to wrap in goBackground.
 	pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
@@ -55,6 +61,7 @@ func (s *Server) emitContextDelivery(
 		BrainEnriched:  brainEnriched,
 		CacheHit:       cacheHit,
 		DurationMs:     durationMs,
+		SessionID:      sessionID,
 	})
 }
 
@@ -65,6 +72,7 @@ func (s *Server) emitFileContextDelivery(
 	nodes []*graph.Node,
 	responsePayload interface{},
 	durationMs int64,
+	sessionID string,
 ) {
 	pc := s.getPulseClient()
 	if pc == nil {
@@ -96,6 +104,7 @@ func (s *Server) emitFileContextDelivery(
 		BaselineTokens: int(total / 4),
 		NodesDelivered: len(nodes),
 		DurationMs:     durationMs,
+		SessionID:      sessionID,
 	}
 	s.goBackground(func() { pc.RecordContextDelivery(evt) })
 }

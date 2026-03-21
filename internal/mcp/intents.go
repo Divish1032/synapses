@@ -16,6 +16,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -337,9 +338,9 @@ func (s *Server) handlePrepareContext(
 	// Sprint 6.7: passive context delivery instrumentation for Sprint 11 feedback loop.
 	// Fire-and-forget — no latency added to hot path. agent_id not part of prepare_context
 	// API so it is left empty; session_id provides the session correlation anchor.
+	mcpSessID := SessionIDFromContext(ctx)
+	synapseSessionID := s.getSynapseSessionID(mcpSessID)
 	if s.store != nil {
-		mcpSessID := SessionIDFromContext(ctx)
-		synapseSessionID := s.getSynapseSessionID(mcpSessID)
 		cd := store.ContextDelivery{
 			SessionID: synapseSessionID,
 			ToolName:  "prepare_context",
@@ -348,7 +349,30 @@ func (s *Server) handlePrepareContext(
 		s.goBackground(func() { s.store.InsertContextDelivery(cd) })
 	}
 
-	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+	// Pulse: emit context delivery event for prepare_context so it is
+	// visible in analytics (previously only get_context was instrumented).
+	responseText := strings.TrimSpace(b.String())
+	if pc := s.getPulseClient(); pc != nil {
+		responseBytes := len(responseText)
+		projID := s.projectID
+		sessID := synapseSessionID
+		intentCopy := intent
+		entityCopy := target
+		s.goBackground(func() {
+			pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
+				ToolName:       "prepare_context",
+				ProjectID:      projID,
+				Entity:         entityCopy,
+				ResponseBytes:  responseBytes,
+				ResponseTokens: responseBytes / 4,
+				DurationMs:     0, // not tracked at this level
+				SessionID:      sessID,
+				Intent:         intentCopy,
+			})
+		})
+	}
+
+	return mcp.NewToolResultText(responseText), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,6 +1140,23 @@ func (s *Server) handlePlanContext(
 	default:
 		result["verdict"] = "clear"
 		result["verdict_message"] = "✓ No past failures, no architectural violations. Safe to proceed."
+	}
+
+	// Pulse: emit context delivery event for plan_context.
+	if pc := s.getPulseClient(); pc != nil {
+		mcpSessID := SessionIDFromContext(ctx)
+		sessID := s.getSynapseSessionID(mcpSessID)
+		projID := s.projectID
+		entityCopy := target
+		s.goBackground(func() {
+			pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
+				ToolName:  "plan_context",
+				ProjectID: projID,
+				Entity:    entityCopy,
+				SessionID: sessID,
+				Intent:    "plan",
+			})
+		})
 	}
 
 	return jsonResult(result)

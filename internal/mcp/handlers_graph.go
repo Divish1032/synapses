@@ -743,7 +743,8 @@ func (s *Server) handleGetFileContext(
 			payload["truncated"] = true
 			payload["total_entities"] = totalEntities
 		}
-		s.emitFileContextDelivery(agentIDFC, filePath, matches, payload, time.Since(handlerStart).Milliseconds())
+		pulseSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+		s.emitFileContextDelivery(agentIDFC, filePath, matches, payload, time.Since(handlerStart).Milliseconds(), pulseSessID)
 		return jsonResult(payload)
 	}
 
@@ -764,7 +765,8 @@ func (s *Server) handleGetFileContext(
 		"entities_by_file": byFile,
 		"hint":             fmt.Sprintf("%d files named %q found. Use file= param with a longer path suffix to pin to one file.", len(fileSet), filePath),
 	}
-	s.emitFileContextDelivery(agentIDFC, filePath, matches, multiPayload, time.Since(handlerStart).Milliseconds())
+	pulseSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+	s.emitFileContextDelivery(agentIDFC, filePath, matches, multiPayload, time.Since(handlerStart).Milliseconds(), pulseSessID)
 	return jsonResult(multiPayload)
 }
 

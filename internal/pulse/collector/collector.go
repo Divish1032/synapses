@@ -7,6 +7,7 @@ package collector
 import (
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pulsestore "github.com/SynapsesOS/synapses/internal/pulse/pstore"
@@ -15,7 +16,8 @@ import (
 
 // event wraps a typed event for the ring buffer.
 type event struct {
-	kind string // "tool_call", "context_delivery", "brain_usage", "session", "session_model", "agent_llm_usage"
+	kind string // "tool_call", "context_delivery", "brain_usage", "session", "session_model", "agent_llm_usage",
+	// "parse_event", "reparse_event", "graph_snapshot", "embedding_event", "index_event"
 	data interface{}
 }
 
@@ -45,6 +47,10 @@ type Collector struct {
 	interval time.Duration
 	stopCh   chan struct{}
 	wg       sync.WaitGroup
+	// P2-17: high-water mark — peak buffer depth since last flush.
+	highWaterMark atomic.Int64
+	// P2-19: events dropped due to full buffer (ring buffer overflow).
+	dropped atomic.Int64
 }
 
 // New creates a Collector with the given buffer capacity and flush interval.
@@ -117,17 +123,66 @@ func (c *Collector) RecordAgentLLMUsage(ev pulsetypes.AgentLLMUsageEvent) {
 	c.enqueue(event{kind: "agent_llm_usage", data: ev})
 }
 
+// RecordParseEvent enqueues a per-file parse event (P2-2).
+func (c *Collector) RecordParseEvent(ev pulsetypes.ParseEvent) {
+	c.enqueue(event{kind: "parse_event", data: ev})
+}
+
+// RecordReparseEvent enqueues an incremental reparse event (P2-3).
+func (c *Collector) RecordReparseEvent(ev pulsetypes.ReparseEvent) {
+	c.enqueue(event{kind: "reparse_event", data: ev})
+}
+
+// RecordGraphSnapshot enqueues a graph topology snapshot (P2-7).
+func (c *Collector) RecordGraphSnapshot(ev pulsetypes.GraphSnapshotEvent) {
+	c.enqueue(event{kind: "graph_snapshot", data: ev})
+}
+
+// RecordEmbeddingEvent enqueues an embedding batch event (P2-6).
+func (c *Collector) RecordEmbeddingEvent(ev pulsetypes.EmbeddingEvent) {
+	c.enqueue(event{kind: "embedding_event", data: ev})
+}
+
+// RecordIndexEvent enqueues a full-index completion event (P2-8).
+func (c *Collector) RecordIndexEvent(ev pulsetypes.IndexEvent) {
+	c.enqueue(event{kind: "index_event", data: ev})
+}
+
+// Dropped returns the number of events dropped due to buffer overflow (P2-19).
+func (c *Collector) Dropped() int64 {
+	return c.dropped.Load()
+}
+
+// HighWaterMark returns the peak buffer depth since the collector started (P2-17).
+func (c *Collector) HighWaterMark() int64 {
+	return c.highWaterMark.Load()
+}
+
 func (c *Collector) enqueue(ev event) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+
+	// P2-19: true bounded ring buffer — drop the oldest event when full.
+	if len(c.buf) >= c.cap {
+		// Remove oldest event to make room (ring buffer semantics).
+		c.buf = c.buf[1:]
+		c.dropped.Add(1)
+	}
 
 	c.buf = append(c.buf, ev)
+
+	// P2-17: update high-water mark.
+	if depth := int64(len(c.buf)); depth > c.highWaterMark.Load() {
+		c.highWaterMark.Store(depth)
+	}
 
 	// If buffer is at 80% capacity, trigger an early flush in the background.
 	if len(c.buf) >= c.cap*80/100 {
 		batch := c.drainLocked()
+		c.mu.Unlock()
 		go c.writeBatch(batch)
+		return
 	}
+	c.mu.Unlock()
 }
 
 // drainLocked swaps the buffer and returns the old batch. Caller must hold mu.
@@ -166,61 +221,203 @@ func (c *Collector) flush() {
 }
 
 func (c *Collector) writeBatch(batch []event) {
-	for _, ev := range batch {
-		var err error
-		switch ev.kind {
-		case "tool_call":
-			tc := ev.data.(pulsetypes.ToolCallEvent)
-			err = c.store.InsertToolCall(tc)
-			// Increment the session tool_call counter for every real tool invocation.
-			if err == nil {
-				agentID := tc.AgentID
-				if agentID == "" {
-					agentID = "default"
-				}
-				sessionID := agentID + ":" + tc.ProjectID + ":" + time.Now().UTC().Format("2006-01-02")
-				if serr := c.store.UpdateSessionStats(sessionID, agentID, tc.ProjectID, 0, 0); serr != nil {
-					log.Printf("pulse collector: update session stats: %v", serr)
-				}
-			}
-		case "context_delivery":
-			cd := ev.data.(pulsetypes.ContextDeliveryEvent)
-			err = c.store.InsertContextDelivery(cd)
-			// Accumulate token savings separately — does NOT increment tool_calls
-			// (that is handled above in the tool_call branch so the counter
-			// reflects actual tool invocations, not just context deliveries).
-			if err == nil {
-				agentID := cd.AgentID
-				if agentID == "" {
-					agentID = "default"
-				}
-				tokensSaved := cd.BaselineTokens - cd.ResponseTokens
-				if tokensSaved < 0 {
-					tokensSaved = 0
-				}
-				costSaved := c.computeCostSaved(tokensSaved)
-				sessionID := agentID + ":" + cd.ProjectID + ":" + time.Now().UTC().Format("2006-01-02")
-				if serr := c.store.AddSessionTokensSaved(sessionID, agentID, cd.ProjectID, tokensSaved, costSaved); serr != nil {
-					log.Printf("pulse collector: add session tokens saved: %v", serr)
-				}
-			}
-		case "brain_usage":
-			err = c.store.InsertBrainUsage(ev.data.(pulsetypes.BrainUsageEvent))
-		case "session":
-			sp := ev.data.(sessionPayload)
-			err = c.store.UpsertSession(sp.ID, sp.AgentID, sp.ProjectID, sp.Event)
-		case "outcome_signal":
-			err = c.store.InsertOutcomeSignal(ev.data.(pulsetypes.OutcomeSignalEvent))
-		case "session_model":
-			sp := ev.data.(sessionModelPayload)
-			err = c.store.UpdateSessionModel(sp.SessionID, sp.AgentID, sp.ProjectID, sp.Model, sp.Provider)
-		case "agent_llm_usage":
-			err = c.store.InsertAgentLLMUsage(ev.data.(pulsetypes.AgentLLMUsageEvent))
+	// Wrap the entire batch in a single transaction (1 fsync instead of N).
+	commit, txErr := c.store.BeginBatch()
+	if txErr != nil {
+		log.Printf("pulse collector: begin batch tx: %v", txErr)
+		// Fall back to non-transactional writes.
+		c.writeBatchNoTx(batch)
+		return
+	}
+
+	// Panic recovery: if a type assertion or other bug panics, we must
+	// rollback and release the mutex to avoid a permanent deadlock.
+	ok := true
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("pulse collector: panic in writeBatch: %v", r)
+			ok = false
 		}
-		if err != nil {
+		if err := commit(ok); err != nil {
+			log.Printf("pulse collector: commit/rollback error: %v", err)
+			if ok {
+				// Commit failed — fall back to individual writes.
+				c.writeBatchNoTx(batch)
+			}
+		}
+	}()
+
+	for _, ev := range batch {
+		if err := c.dispatchTx(ev); err != nil {
+			log.Printf("pulse collector: write error (%s): %v", ev.kind, err)
+			ok = false
+			// Break immediately — the deferred commit(ok=false) rolls back the
+			// entire transaction, so continuing would just burn CPU for nothing.
+			break
+		}
+	}
+}
+
+// dispatchTx writes a single event using the in-transaction Tx methods.
+// Caller must hold the open transaction (via BeginBatch).
+func (c *Collector) dispatchTx(ev event) error {
+	switch ev.kind {
+	case "tool_call":
+		tc, _ := ev.data.(pulsetypes.ToolCallEvent)
+		if err := c.store.InsertToolCallTx(tc); err != nil {
+			return err
+		}
+		agentID := tc.AgentID
+		if agentID == "" {
+			agentID = "default"
+		}
+		sessionID := tc.SessionID
+		if sessionID == "" {
+			sessionID = agentID + ":" + tc.ProjectID + ":" + time.Now().UTC().Format("2006-01-02")
+		}
+		if serr := c.store.UpdateSessionStatsTx(sessionID, agentID, tc.ProjectID, 0, 0); serr != nil {
+			log.Printf("pulse collector: update session stats: %v", serr)
+		}
+	case "context_delivery":
+		cd, _ := ev.data.(pulsetypes.ContextDeliveryEvent)
+		if err := c.store.InsertContextDeliveryTx(cd); err != nil {
+			return err
+		}
+		agentID := cd.AgentID
+		if agentID == "" {
+			agentID = "default"
+		}
+		tokensSaved := cd.BaselineTokens - cd.ResponseTokens
+		if tokensSaved < 0 {
+			tokensSaved = 0
+		}
+		costSaved := c.computeCostSaved(tokensSaved)
+		sessionID := cd.SessionID
+		if sessionID == "" {
+			sessionID = agentID + ":" + cd.ProjectID + ":" + time.Now().UTC().Format("2006-01-02")
+		}
+		if serr := c.store.AddSessionTokensSavedTx(sessionID, agentID, cd.ProjectID, tokensSaved, costSaved); serr != nil {
+			log.Printf("pulse collector: add session tokens saved: %v", serr)
+		}
+	case "brain_usage":
+		bu, _ := ev.data.(pulsetypes.BrainUsageEvent)
+		return c.store.InsertBrainUsageTx(bu)
+	case "session":
+		sp, _ := ev.data.(sessionPayload)
+		return c.store.UpsertSessionTx(sp.ID, sp.AgentID, sp.ProjectID, sp.Event)
+	case "outcome_signal":
+		os, _ := ev.data.(pulsetypes.OutcomeSignalEvent)
+		return c.store.InsertOutcomeSignalTx(os)
+	case "session_model":
+		sp, _ := ev.data.(sessionModelPayload)
+		return c.store.UpdateSessionModelTx(sp.SessionID, sp.AgentID, sp.ProjectID, sp.Model, sp.Provider)
+	case "agent_llm_usage":
+		au, _ := ev.data.(pulsetypes.AgentLLMUsageEvent)
+		return c.store.InsertAgentLLMUsageTx(au)
+	case "parse_event":
+		pe, _ := ev.data.(pulsetypes.ParseEvent)
+		return c.store.InsertParseEventTx(pe)
+	case "reparse_event":
+		re, _ := ev.data.(pulsetypes.ReparseEvent)
+		return c.store.InsertReparseEventTx(re)
+	case "graph_snapshot":
+		gs, _ := ev.data.(pulsetypes.GraphSnapshotEvent)
+		return c.store.InsertGraphSnapshotTx(gs)
+	case "embedding_event":
+		ee, _ := ev.data.(pulsetypes.EmbeddingEvent)
+		return c.store.InsertEmbeddingEventTx(ee)
+	case "index_event":
+		ie, _ := ev.data.(pulsetypes.IndexEvent)
+		return c.store.InsertIndexEventTx(ie)
+	}
+	return nil
+}
+
+// writeBatchNoTx is the fallback for when transaction creation fails.
+// Each event is written individually; errors are logged but never halt the loop
+// (unlike dispatchTx, partial progress is acceptable here since there's no
+// transaction to roll back).
+func (c *Collector) writeBatchNoTx(batch []event) {
+	for _, ev := range batch {
+		if err := c.dispatchNoTx(ev); err != nil {
 			log.Printf("pulse collector: write error (%s): %v", ev.kind, err)
 		}
 	}
+}
+
+// dispatchNoTx writes a single event using the non-transactional store methods.
+// Used as the BeginBatch fallback path; each call acquires its own store mutex.
+func (c *Collector) dispatchNoTx(ev event) error {
+	switch ev.kind {
+	case "tool_call":
+		tc, _ := ev.data.(pulsetypes.ToolCallEvent)
+		if err := c.store.InsertToolCall(tc); err != nil {
+			return err
+		}
+		agentID := tc.AgentID
+		if agentID == "" {
+			agentID = "default"
+		}
+		sessionID := tc.SessionID
+		if sessionID == "" {
+			sessionID = agentID + ":" + tc.ProjectID + ":" + time.Now().UTC().Format("2006-01-02")
+		}
+		if serr := c.store.UpdateSessionStats(sessionID, agentID, tc.ProjectID, 0, 0); serr != nil {
+			log.Printf("pulse collector: update session stats: %v", serr)
+		}
+	case "context_delivery":
+		cd, _ := ev.data.(pulsetypes.ContextDeliveryEvent)
+		if err := c.store.InsertContextDelivery(cd); err != nil {
+			return err
+		}
+		agentID := cd.AgentID
+		if agentID == "" {
+			agentID = "default"
+		}
+		tokensSaved := cd.BaselineTokens - cd.ResponseTokens
+		if tokensSaved < 0 {
+			tokensSaved = 0
+		}
+		costSaved := c.computeCostSaved(tokensSaved)
+		sessionID := cd.SessionID
+		if sessionID == "" {
+			sessionID = agentID + ":" + cd.ProjectID + ":" + time.Now().UTC().Format("2006-01-02")
+		}
+		if serr := c.store.AddSessionTokensSaved(sessionID, agentID, cd.ProjectID, tokensSaved, costSaved); serr != nil {
+			log.Printf("pulse collector: add session tokens saved: %v", serr)
+		}
+	case "brain_usage":
+		bu, _ := ev.data.(pulsetypes.BrainUsageEvent)
+		return c.store.InsertBrainUsage(bu)
+	case "session":
+		sp, _ := ev.data.(sessionPayload)
+		return c.store.UpsertSession(sp.ID, sp.AgentID, sp.ProjectID, sp.Event)
+	case "outcome_signal":
+		os, _ := ev.data.(pulsetypes.OutcomeSignalEvent)
+		return c.store.InsertOutcomeSignal(os)
+	case "session_model":
+		sp, _ := ev.data.(sessionModelPayload)
+		return c.store.UpdateSessionModel(sp.SessionID, sp.AgentID, sp.ProjectID, sp.Model, sp.Provider)
+	case "agent_llm_usage":
+		au, _ := ev.data.(pulsetypes.AgentLLMUsageEvent)
+		return c.store.InsertAgentLLMUsage(au)
+	case "parse_event":
+		pe, _ := ev.data.(pulsetypes.ParseEvent)
+		return c.store.InsertParseEvent(pe)
+	case "reparse_event":
+		re, _ := ev.data.(pulsetypes.ReparseEvent)
+		return c.store.InsertReparseEvent(re)
+	case "graph_snapshot":
+		gs, _ := ev.data.(pulsetypes.GraphSnapshotEvent)
+		return c.store.InsertGraphSnapshot(gs)
+	case "embedding_event":
+		ee, _ := ev.data.(pulsetypes.EmbeddingEvent)
+		return c.store.InsertEmbeddingEvent(ee)
+	case "index_event":
+		ie, _ := ev.data.(pulsetypes.IndexEvent)
+		return c.store.InsertIndexEvent(ie)
+	}
+	return nil
 }
 
 // computeCostSaved estimates the USD value of tokensSaved by pricing the saved

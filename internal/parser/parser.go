@@ -17,6 +17,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 )
 
 // LanguageParser is implemented by each language-specific parser.
@@ -78,6 +79,12 @@ type Walker struct {
 	// The callback is called from multiple goroutines; implementations must be
 	// goroutine-safe. Set to nil to disable progress reporting.
 	ProgressFunc func(done, total int, byExt map[string]int)
+
+	// PulseClient, when non-nil, receives a ParseEvent after each file is
+	// parsed during WalkDir. Fire-and-forget — never blocks parsing. (P2-2)
+	PulseClient  *pulse.Client
+	// ProjectID is included in ParseEvent so Pulse can scope data per project.
+	ProjectID    string
 }
 
 // NewWalker creates a Walker pre-loaded with all built-in language parsers.
@@ -343,6 +350,9 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 		w.ProgressFunc(done, total, snapshot)
 	}
 
+	pc := w.PulseClient   // capture to avoid data race on walker field
+	projID := w.ProjectID
+
 	for _, job := range jobs {
 		job := job // capture loop variable
 		wg.Add(1)
@@ -351,11 +361,16 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			parseStart := time.Now()
 			src, err := os.ReadFile(job.path)
+			errType := ""
+			var nodesProduced int
 			if err != nil {
 				logutil.Error("synapses: read %s: %v\n", job.path, err)
+				errType = "read_error"
 			} else if parseErr := job.parser.Parse(g, job.path, src); parseErr != nil {
 				logutil.Error("synapses: parse %s: %v\n", job.path, parseErr)
+				errType = "parse_error"
 			} else {
 				// R28: stamp provenance on all nodes produced by this file.
 				ApplyProvenance(g, job.path, src)
@@ -363,6 +378,22 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 				heuristicMu.Lock()
 				heuristicFiles = append(heuristicFiles, parsedFile{job.path, src})
 				heuristicMu.Unlock()
+				nodesProduced = len(g.NodesForFile(job.path))
+			}
+			parseElapsed := time.Since(parseStart).Milliseconds()
+
+			// P2-2: emit ParseEvent. Enqueue is mutex+append (O(1)) — direct call,
+			// no goroutine needed. The outer goroutine is already off the parse path.
+			if pc != nil {
+				lang := strings.TrimPrefix(strings.ToLower(filepath.Ext(job.path)), ".")
+				pc.RecordParseEvent(pulse.ParseEvent{
+					File:          job.path,
+					Language:      lang,
+					DurationMs:    parseElapsed,
+					NodesProduced: nodesProduced,
+					ErrorType:     errType,
+					ProjectID:     projID,
+				})
 			}
 
 			if job.mtime != 0 {
