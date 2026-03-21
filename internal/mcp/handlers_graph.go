@@ -585,8 +585,16 @@ func (s *Server) handleDiscoverTools(ctx context.Context, req mcp.CallToolReques
 	// on any error (embed failure, nil embedder, embeddings not yet computed).
 	s.toolEmbedsMu.RLock()
 	toolEmbeds := s.toolEmbeds
+	toolEmbedModel := s.toolEmbedModel
 	embeddingsReady := len(toolEmbeds) == len(toolCatalog)
 	s.toolEmbedsMu.RUnlock()
+
+	// Model consistency check: query embeddings must come from the same model as
+	// tool embeddings. A mismatch (possible during embedder hot-swap) means vectors
+	// live in different spaces — cosine similarity would be meaningless garbage.
+	if embeddingsReady && s.memoryEmbedder != nil && toolEmbedModel != s.memoryEmbedder.Model() {
+		embeddingsReady = false
+	}
 
 	if embeddingsReady && s.memoryEmbedder != nil {
 		embedCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -607,6 +615,23 @@ func (s *Server) handleDiscoverTools(ctx context.Context, req mcp.CallToolReques
 				semResults = append(semResults, semScored{idx: i, score: sim})
 			}
 			sort.Slice(semResults, func(i, j int) bool { return semResults[i].score > semResults[j].score })
+
+			// Drop tools with non-positive similarity — they are semantically
+			// unrelated to the query (cosine ≤ 0 means orthogonal or opposite).
+			// If nothing passes the threshold, fall through to the keyword path
+			// rather than returning irrelevant results tagged as "semantic".
+			filtered := semResults[:0]
+			for _, r := range semResults {
+				if r.score > 0 {
+					filtered = append(filtered, r)
+				}
+			}
+			if len(filtered) == 0 {
+				// No positive-similarity tools — keyword path will do better.
+				goto keywordPath
+			}
+			semResults = filtered
+
 			limit := 3
 			if debug || len(semResults) < limit {
 				limit = len(semResults)
@@ -681,9 +706,10 @@ func (s *Server) handleDiscoverTools(ctx context.Context, req mcp.CallToolReques
 			}
 			return jsonResult(resp)
 		}
-		// Embed failed — fall through to keyword path.
+		// Embed failed or no positive-similarity results — fall through to keyword path.
 	}
 
+keywordPath:
 	// ── Keyword path (fallback) ────────────────────────────────────────────────
 
 	matches := make([]toolMatch, len(results))

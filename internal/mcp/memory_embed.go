@@ -140,14 +140,18 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 // normalizeVec returns a unit-length copy of v.
 // Used to convert raw embedding vectors into pre-normalized form so that
 // dot-product == cosine-similarity (avoids magnitude division per query).
-// Returns the original slice unchanged when magnitude is zero.
+// Always returns a fresh slice — never the input buffer — so callers that
+// store the result are safe even if the embedder reuses its output array.
+// Returns a zero-filled copy when magnitude is zero (degenerate vector).
 func normalizeVec(v []float32) []float32 {
 	var sum float64
 	for _, x := range v {
 		sum += float64(x) * float64(x)
 	}
 	if sum == 0 {
-		return v
+		out := make([]float32, len(v))
+		copy(out, v)
+		return out
 	}
 	scale := float32(1.0 / math.Sqrt(sum))
 	out := make([]float32, len(v))
@@ -189,8 +193,10 @@ func (s *Server) EmbedToolCatalog(ctx context.Context, embedder embed.Embedder) 
 		embeddings[i] = normalizeVec(vec)
 	}
 
+	model := embedder.Model()
 	s.toolEmbedsMu.Lock()
 	s.toolEmbeds = embeddings
+	s.toolEmbedModel = model
 	s.toolEmbedsMu.Unlock()
-	logutil.Info("synapses: tool catalog embedded (%d tools, model=%s)\n", len(embeddings), embedder.Model())
+	logutil.Info("synapses: tool catalog embedded (%d tools, model=%s)\n", len(embeddings), model)
 }
