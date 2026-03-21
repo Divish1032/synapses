@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -71,9 +72,20 @@ type Client struct {
 	agg    *aggregator.Aggregator
 	dbPath string // retained for lifecycle event recording (Bug 64 — PIPE-E6)
 	// P2-5: background worker counters — incremented by server.goBackground.
-	bgEnqueued atomic.Int64
-	bgDropped  atomic.Int64
-	bgPanics   atomic.Int64
+	bgEnqueued       atomic.Int64
+	bgDropped        atomic.Int64
+	bgPanics         atomic.Int64
+	bgPeakQueueDepth atomic.Int64 // P9-4: high-water mark of queue depth
+	// P12-7: SSE subscriber list for real-time event streaming.
+	sseMu   sync.Mutex
+	sseSubs map[chan SSEEvent]struct{}
+}
+
+// SSEEvent is a lightweight notification sent to SSE subscribers after collector flush.
+type SSEEvent struct {
+	EventType string `json:"event_type"` // "flush", "tool_call", "context_delivery", etc.
+	Count     int    `json:"count"`      // number of events in this flush batch
+	Timestamp string `json:"timestamp"`
 }
 
 // DefaultDBPath returns the canonical path for the pulse SQLite database.
@@ -96,13 +108,20 @@ func New(dbPath string) (*Client, error) {
 		return nil, fmt.Errorf("pulse: open store: %w", err)
 	}
 	coll := collector.New(st, 1000, 500)
-	coll.Start()
 
 	// Bug 27 — ROI-E7 / Bug 28 — ROI-E8: pass dbPath and drop-rate fn to aggregator.
 	agg := aggregator.NewWithOptions(st, 3600, dbPath, coll.DropRate)
 	agg.Start()
 
-	return &Client{store: st, coll: coll, agg: agg, dbPath: dbPath}, nil
+	c := &Client{store: st, coll: coll, agg: agg, dbPath: dbPath}
+
+	// P12-7: wire collector flush callback to SSE broadcast.
+	coll.OnFlush = func(count int) {
+		c.NotifySSE("flush", count)
+	}
+	coll.Start()
+
+	return c, nil
 }
 
 // NewClient is a backwards-compatible constructor for code that still calls
@@ -132,6 +151,65 @@ func (c *Client) Close() {
 	// Record drain latency as a lifecycle event before closing the store.
 	_ = c.store.RecordLifecycleEvent("collector_drain", drainMs, "")
 	_ = c.store.Close()
+}
+
+// SubscribeSSE returns a channel that receives SSE events after each collector
+// flush. The caller must call UnsubscribeSSE when done to prevent leaks.
+// Channel has a small buffer to avoid blocking the flush path (P12-7).
+func (c *Client) SubscribeSSE() chan SSEEvent {
+	if c == nil {
+		ch := make(chan SSEEvent)
+		close(ch)
+		return ch
+	}
+	ch := make(chan SSEEvent, 8)
+	c.sseMu.Lock()
+	if c.sseSubs == nil {
+		c.sseSubs = make(map[chan SSEEvent]struct{})
+	}
+	c.sseSubs[ch] = struct{}{}
+	c.sseMu.Unlock()
+	return ch
+}
+
+// UnsubscribeSSE removes a subscriber channel and closes it.
+// Safe to call multiple times — only the first call closes the channel.
+func (c *Client) UnsubscribeSSE(ch chan SSEEvent) {
+	if c == nil {
+		return
+	}
+	c.sseMu.Lock()
+	_, exists := c.sseSubs[ch]
+	delete(c.sseSubs, ch)
+	c.sseMu.Unlock()
+	if exists {
+		close(ch)
+	}
+}
+
+// NotifySSE broadcasts an SSE event to all subscribers. Non-blocking: if a
+// subscriber's buffer is full, the notification is dropped for that subscriber.
+// Called from the collector after each flush.
+func (c *Client) NotifySSE(eventType string, count int) {
+	if c == nil {
+		return
+	}
+	c.sseMu.Lock()
+	defer c.sseMu.Unlock()
+	if len(c.sseSubs) == 0 {
+		return
+	}
+	ev := SSEEvent{
+		EventType: eventType,
+		Count:     count,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	for ch := range c.sseSubs {
+		select {
+		case ch <- ev:
+		default: // drop if subscriber is slow
+		}
+	}
 }
 
 // RecordToolCall enqueues a tool call event. Fire-and-forget.
@@ -572,6 +650,15 @@ func (c *Client) GetMostRecentDeliveryID(entity string) int {
 	return c.store.GetMostRecentDeliveryIDByEntity(entity)
 }
 
+// CountToolCallsSinceDelivery returns the number of tool calls in a session
+// since the most recent context delivery for the given entity (P6-11).
+func (c *Client) CountToolCallsSinceDelivery(sessionID, entity string) int {
+	if c == nil || sessionID == "" {
+		return 0
+	}
+	return c.store.CountToolCallsSinceDelivery(sessionID, entity)
+}
+
 // WriteErrors returns the total collector write errors (P5 — DQ-Integrity.1 / Item 35).
 func (c *Client) WriteErrors() int64 {
 	if c == nil {
@@ -600,6 +687,7 @@ func (c *Client) GetHealthSnapshot() map[string]interface{} {
 		"bg_enqueued":          c.bgEnqueued.Load(),
 		"bg_dropped":           c.bgDropped.Load(),
 		"bg_panics":            c.bgPanics.Load(),
+		"bg_peak_queue_depth":  c.bgPeakQueueDepth.Load(), // P9-4
 	}
 }
 
@@ -654,6 +742,24 @@ func (c *Client) RecordBackgroundWorkerPanic() {
 		return
 	}
 	c.bgPanics.Add(1)
+}
+
+// RecordBackgroundQueueDepth updates the peak queue depth (P9-4).
+// Called from goBackground on each enqueue with the current queue length.
+func (c *Client) RecordBackgroundQueueDepth(depth int) {
+	if c == nil {
+		return
+	}
+	d := int64(depth)
+	for {
+		cur := c.bgPeakQueueDepth.Load()
+		if d <= cur {
+			break
+		}
+		if c.bgPeakQueueDepth.CompareAndSwap(cur, d) {
+			break
+		}
+	}
 }
 
 // FetchEffectiveness returns per-entity effectiveness scores from the local store.
@@ -731,6 +837,106 @@ type PulseSummary struct {
 	CollectorWriteErrors    int64                             `json:"collector_write_errors,omitempty"`
 	CrossSessionReuseRate   float64                           `json:"cross_session_reuse_rate,omitempty"`
 	ConcurrentAgentsMax     int                               `json:"concurrent_agents_max,omitempty"`
+}
+
+// GetSummarySectioned returns a PulseSummary with only the requested sections populated.
+// Valid sections: summary, tools, agents, timeline, entities, insights, phase4, phase5, llm.
+// Core "summary" is always included. Sections not requested are left at zero/nil.
+// This avoids ~30 queries per request when the caller only needs a subset (P12-3).
+func (c *Client) GetSummarySectioned(days int, sections map[string]bool) *PulseSummary {
+	if c == nil {
+		return &PulseSummary{Days: days}
+	}
+	if days <= 0 {
+		days = 7
+	}
+	ps := &PulseSummary{Days: days}
+
+	// Core summary is always included.
+	sum, err := c.store.GetSummary(days)
+	if err != nil {
+		sum = &pulsestore.Summary{}
+	}
+	ps.Summary = sum
+
+	if sections["tools"] {
+		ps.Tools, _ = c.store.GetToolStats(days)
+	}
+	if sections["agents"] {
+		ps.Agents, _ = c.store.GetAgentStats(days)
+	}
+	if sections["timeline"] {
+		ps.Timeline, _ = c.store.GetTimeline(days)
+	}
+	if sections["entities"] {
+		ps.TopEntities, _ = c.store.TopEntities(days, 12)
+	}
+	if sections["insights"] {
+		ps.Insights = c.FetchEffectiveness("", 2)
+	}
+	if sections["llm"] {
+		ps.LLMStats, _ = c.store.GetAgentLLMStats(days)
+		ps.RuleHits, _ = c.store.GetRuleHitDistribution(days, 20)
+		ps.BrainCostStats, _ = c.store.GetBrainCostStats(days)
+		ps.SearchStats, _ = c.store.GetSearchStats(days)
+		ps.GraphSnapshot, _ = c.store.GetLatestGraphSnapshot()
+	}
+	if sections["phase4"] {
+		ps.TopEntitiesBySavings, _ = c.store.TopEntitiesBySavings(days, 10)
+		ps.CostSavingsByModel, _ = c.store.GetCostSavingsByModel(days)
+		ps.AgentTokenEfficiency, _ = c.store.GetAgentTokenEfficiency(days)
+		ps.AgentToolPreferences, _ = c.store.GetAgentToolPreferences(days)
+		ps.AgentEfficiencyScores, _ = c.store.GetAgentEfficiencyScores(days)
+		ps.ModelComparison, _ = c.store.GetModelComparison(days)
+		ps.ErrorRecoveryPatterns, _ = c.store.GetErrorRecoveryPatterns(days)
+		ps.ToolPairCorrelation, _ = c.store.GetToolPairCorrelation(days)
+		ps.SkillExecutionStats, _ = c.store.GetSkillExecutionStats(days)
+		ps.MemoryTypeDistribution, _ = c.store.GetMemoryTypeDistribution(days)
+		ps.CancellationReasons, _ = c.store.GetCancellationReasons(days)
+		ps.PlanComplexityVsOutcome, _ = c.store.GetPlanComplexityVsOutcome(days)
+		ps.MessageVolumeStats, _ = c.store.GetMessageVolumeStats(days)
+		ps.ModelEfficiencyComparison, _ = c.store.GetModelEfficiencyComparison(days)
+		ps.ProjectEfficiencyComparison, _ = c.store.GetProjectEfficiencyComparison(days)
+		ps.ContextReuseRate = c.store.GetContextReuseRate(days)
+		ps.EngagementScore = c.store.GetEngagementScore(days)
+		ps.OnboardingLatencyMs = c.store.GetOnboardingLatencyMs(days)
+		ps.MultiSessionCampaigns = c.store.GetMultiSessionCampaigns(days)
+		ps.DiscoveryToolEffective = c.store.GetDiscoveryToolEffectiveness(days)
+		ps.BlockedTaskCount = c.store.GetBlockedTaskCount(days)
+		ps.CrossProjectQueryVolume = c.store.GetCrossProjectQueryVolume(days)
+		ps.ApprovalGateUsage = c.store.GetApprovalGateUsage(days)
+		ps.HypotheticalCostUSD = c.store.GetHypotheticalCostUSD(days)
+		ps.WithSynapsesCostUSD = c.store.GetWithSynapsesCostUSD(days)
+		p50, p95, p99 := c.store.GetLatencyPercentiles(days)
+		ps.LatencyP50Ms = p50
+		ps.LatencyP95Ms = p95
+		ps.LatencyP99Ms = p99
+		ps.ContextPrecision = c.store.GetContextPrecision(days)
+		ps.ContextRecall = c.store.GetContextRecall(days)
+		ps.ContextF1 = c.store.GetContextF1(days)
+		ps.AvgTaskDurationMs = c.store.GetAvgTaskDuration(days)
+	}
+	if sections["phase5"] {
+		today := time.Now().UTC().Format("2006-01-02")
+		ps.EntityQualityScores = c.store.GetEntityQualityScores("", 20)
+		ps.RecallChannelWeights = c.store.GetRecallChannelWeights("")
+		ps.EffectivenessTrend = c.store.GetRecentEffectivenessTrend(14, "")
+		ps.ImplementationQualityGap = c.store.GetImplementationQualityGap(days)
+		ps.BrainEnrichmentUplift = c.store.GetBrainEnrichmentUplift(days)
+		ps.MemoryFailurePrevRate = c.store.GetMemoryFailurePreventionRate(days)
+		ps.DecayEffectiveness = c.store.GetDecayEffectiveness(90)
+		ps.GraphFreshnessScoreP5 = c.store.GetGraphFreshnessScoreP5(today)
+		ps.TokenSavingsByIntent = c.store.GetTokenSavingsByIntent(days)
+		ps.SkillStatsP5 = c.store.GetSkillExecutionStatsP5(days)
+		ps.CollectorWriteErrors = c.coll.WriteErrors()
+		ps.CrossSessionReuseRate = c.store.GetCrossSessionReuseRate(days)
+		ps.ConcurrentAgentsMax = c.store.GetConcurrentAgentsMax(today)
+		var sessPct types.SessionPercentiles
+		sessPct.ToolsP50, sessPct.ToolsP95, sessPct.ToolsP99 = c.store.GetToolsPerSessionPercentiles(days)
+		sessPct.CallsP50, sessPct.CallsP95, sessPct.CallsP99 = c.store.GetCallsPerSessionPercentiles(days)
+		ps.SessionPercentiles = sessPct
+	}
+	return ps
 }
 
 // GetSummary returns aggregated analytics for the last N days including per-tool,
@@ -1022,6 +1228,41 @@ func (c *Client) GetTimelineRaw(days int) []pulsestore.TimelinePoint {
 	return pts
 }
 
+// Phase 8 types.
+type SessionPerformance = types.SessionPerformance
+
+// GetAgentFirstSessionsPerformance returns per-session efficiency for the first N sessions (P8-6).
+func (c *Client) GetAgentFirstSessionsPerformance(agentID string, nSessions int) []SessionPerformance {
+	if c == nil || agentID == "" {
+		return nil
+	}
+	if nSessions <= 0 {
+		nSessions = 5
+	}
+	return c.store.GetAgentFirstSessionsPerformance(agentID, nSessions)
+}
+
+// GetToolLatencyPercentiles returns p50, p95, p99 latency for a specific tool (P8-5).
+func (c *Client) GetToolLatencyPercentiles(toolName string, days int) *DurationBuckets {
+	if c == nil || toolName == "" {
+		return nil
+	}
+	if days <= 0 {
+		days = 7
+	}
+	p50, p95, p99 := c.store.GetToolLatencyPercentiles(toolName, days)
+	return &DurationBuckets{P50: p50, P95: p95, P99: p99}
+}
+
+// SetSessionIntent sets the intent field on a Pulse session row (P8-1).
+// Fire-and-forget; errors are silently discarded.
+func (c *Client) SetSessionIntent(sessionID, intent string) {
+	if c == nil || sessionID == "" || intent == "" {
+		return
+	}
+	_ = c.store.SetSessionIntent(sessionID, intent)
+}
+
 // RecordLifecycleEvent records a daemon lifecycle event (startup, shutdown, drain).
 // Fire-and-forget; errors are silently discarded.
 func (c *Client) RecordLifecycleEvent(eventType string, valueMs float64, projectID string) {
@@ -1029,4 +1270,103 @@ func (c *Client) RecordLifecycleEvent(eventType string, valueMs float64, project
 		return
 	}
 	_ = c.store.RecordLifecycleEvent(eventType, valueMs, projectID)
+}
+
+// GetAgentEntityOverlap returns entities accessed by multiple agents within a
+// time window. Useful for detecting concurrent agent conflicts (P10-4).
+func (c *Client) GetAgentEntityOverlap(days, windowMinutes int) []pulsestore.AgentEntityOverlap {
+	if c == nil {
+		return nil
+	}
+	result, _ := c.store.GetAgentEntityOverlap(days, windowMinutes)
+	return result
+}
+
+// ---------------------------------------------------------------------------
+// P12-1: Per-agent drill-down
+// ---------------------------------------------------------------------------
+
+// AgentDrillDown is a composite view of a single agent's analytics.
+type AgentDrillDown struct {
+	AgentID        string                         `json:"agent_id"`
+	Days           int                            `json:"days"`
+	Summary        *pulsestore.Summary            `json:"summary"`
+	LearningCurve []WeeklyEfficiency              `json:"learning_curve"`
+	FirstSessions  []SessionPerformance           `json:"first_sessions"`
+	ToolPrefs      []pulsestore.AgentToolPref     `json:"tool_preferences"`
+	Efficiency     []pulsestore.AgentEfficiency    `json:"efficiency_scores"`
+}
+
+// GetAgentDrillDown returns a composite view of a single agent's analytics (P12-1).
+func (c *Client) GetAgentDrillDown(agentID string, days int) *AgentDrillDown {
+	if c == nil || agentID == "" {
+		return nil
+	}
+	if days <= 0 {
+		days = 7
+	}
+	sum, err := c.store.GetSummaryForAgent(agentID, days)
+	if err != nil {
+		sum = &pulsestore.Summary{}
+	}
+	curve := c.store.GetAgentLearningCurve(agentID, 8)
+	firstSess := c.store.GetAgentFirstSessionsPerformance(agentID, 5)
+	toolPrefs, _ := c.store.GetAgentToolPreferencesForAgent(agentID, days)
+	efficiency, _ := c.store.GetAgentEfficiencyForAgent(agentID, days)
+	return &AgentDrillDown{
+		AgentID:       agentID,
+		Days:          days,
+		Summary:       sum,
+		LearningCurve: curve,
+		FirstSessions: firstSess,
+		ToolPrefs:     toolPrefs,
+		Efficiency:    efficiency,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P12-8: Selective data cleanup
+// ---------------------------------------------------------------------------
+
+// DeleteByAgent removes all data for a specific agent across all tables.
+func (c *Client) DeleteByAgent(agentID string) int64 {
+	if c == nil || agentID == "" {
+		return 0
+	}
+	n, _ := c.store.DeleteByAgent(agentID)
+	return n
+}
+
+// DeleteByProject removes all data for a specific project across all tables.
+func (c *Client) DeleteByProject(projectID string) int64 {
+	if c == nil || projectID == "" {
+		return 0
+	}
+	n, _ := c.store.DeleteByProject(projectID)
+	return n
+}
+
+// ---------------------------------------------------------------------------
+// P12-9: Validate-to-verify funnel rate
+// ---------------------------------------------------------------------------
+
+// GetValidateToVerifyRate returns the fraction of sessions that called
+// validate_plan and also called verify_implementation.
+func (c *Client) GetValidateToVerifyRate(days int) float64 {
+	if c == nil {
+		return 0
+	}
+	return c.store.GetValidateToVerifyRate(days)
+}
+
+// ---------------------------------------------------------------------------
+// P12-10: Tool deprecation signals
+// ---------------------------------------------------------------------------
+
+// GetDecliningTools returns tools whose usage is trending downward.
+func (c *Client) GetDecliningTools(days, minCallThreshold int) []pulsestore.DecliningTool {
+	if c == nil {
+		return nil
+	}
+	return c.store.GetDecliningTools(days, minCallThreshold)
 }

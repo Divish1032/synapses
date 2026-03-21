@@ -68,6 +68,10 @@ type ContextDeliveryEvent struct {
 	MinRelevanceHits int `json:"min_relevance_hits,omitempty"`
 	// P5 — PIPE-F7: whether token budget was the binding constraint.
 	TokenBudgetHit bool `json:"token_budget_hit,omitempty"`
+	// P7-17: whether this delivery is a refetch of a previously delivered entity.
+	Refetched bool `json:"refetched,omitempty"`
+	// P9-8: BFS subgraph cache size at delivery time.
+	CacheSize int `json:"cache_size,omitempty"`
 }
 
 // SessionEvent is sent when an agent session starts or ends.
@@ -93,6 +97,8 @@ type OutcomeSignalEvent struct {
 	ToolCallsBetween int `json:"tool_calls_between,omitempty"`
 	// P5 — DQ-D.2: time from most recent context delivery to this signal.
 	TimeToOutcomeMs int64 `json:"time_to_outcome_ms,omitempty"`
+	// P8-8: task priority for priority-completion correlation.
+	Priority string `json:"priority,omitempty"`
 }
 
 // EntityEffectiveness is returned by GetEffectiveness for a single entity.
@@ -122,6 +128,8 @@ type BrainUsageEvent struct {
 	QualityScore float64 `json:"quality_score,omitempty"`
 	// Bug 20 — DQ-F.4: whether a fallback model/path was used.
 	FallbackUsed bool `json:"fallback_used,omitempty"`
+	// P11-5: session ID for correlating brain inference to agent sessions.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // TotalTokens returns prompt + completion tokens.
@@ -184,6 +192,8 @@ type ReparseEvent struct {
 	DeltaRows int `json:"delta_rows,omitempty"`
 	// P5 — PIPE-C3: bytes written by delta save.
 	DeltaBytes int64 `json:"delta_bytes,omitempty"`
+	// P9-7: error action taken by watcher ("clean", "skip", "proceed").
+	ErrorAction string `json:"error_action,omitempty"`
 }
 
 // GraphSnapshotEvent captures a point-in-time snapshot of graph topology metrics.
@@ -211,6 +221,8 @@ type GraphSnapshotEvent struct {
 	RebuildDurationMs float64 `json:"rebuild_duration_ms,omitempty"`
 	// P5 — COV-7: what triggered the rebuild ("startup", "file_change", "manual").
 	RebuildTrigger string `json:"rebuild_trigger,omitempty"`
+	// P9-2: edge type distribution JSON map {"CALLS": 1200, "CONTAINS": 800, ...}.
+	EdgeTypeDist string `json:"edge_type_dist,omitempty"`
 }
 
 // EmbeddingEvent records the outcome of an EmbedAllMemories batch operation.
@@ -228,6 +240,8 @@ type EmbeddingEvent struct {
 	EmbedPoolContention int `json:"embed_pool_contention,omitempty"`
 	// P5 — PIPE-D6: event type ("batch", "download_start", "download_complete", "load", "error").
 	EventType string `json:"event_type,omitempty"`
+	// P8-10: percentage of memories with up-to-date embeddings (0.0–1.0).
+	CoveragePct float64 `json:"coverage_pct,omitempty"`
 }
 
 // GuardEvent is emitted when loop-guard or rate-limiter blocks a tool call.
@@ -237,6 +251,8 @@ type GuardEvent struct {
 	Category  string `json:"category,omitempty"` // for rate_limit: "write_ops"|"expensive_reads"|"cross_project"
 	AgentID   string `json:"agent_id,omitempty"`
 	ProjectID string `json:"project_id,omitempty"`
+	// P8-2: session ID for guard-event-to-session-outcome joins.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // MemoryOperationEvent tracks recall hits/misses and memory writes.
@@ -285,6 +301,16 @@ type IndexEvent struct {
 	WorkItemTypeDist string `json:"work_item_type_dist,omitempty"` // JSON map
 	// P5 — COV-Subsys (resolver/): call-site resolution duration.
 	ResolverDurationMs float64 `json:"resolver_duration_ms,omitempty"`
+	// P9-1: files skipped by mtime check during incremental reindex.
+	FilesSkipped int `json:"files_skipped,omitempty"`
+	// P9-3: per-language call-site resolution rate JSON map {"Go": 0.95, "TypeScript": 0.82}.
+	ResolutionByLangJSON string `json:"resolution_by_lang_json,omitempty"`
+	// P9-5: per-language parser coverage JSON map {"Go": {"files": 10, "entities": 42}, ...}.
+	CoverageJSON string `json:"coverage_json,omitempty"`
+	// P9-6: heritage (INHERITS) edges created during this index run.
+	HeritageEdgesCreated int `json:"heritage_edges_created,omitempty"`
+	// P9-6: implements edges created during this index run.
+	ImplementsEdgesCreated int `json:"implements_edges_created,omitempty"`
 }
 
 // SearchEvent records a search or find_entity tool call for analytics (Bug 57 / Task P4-8).
@@ -292,11 +318,14 @@ type SearchEvent struct {
 	AgentID     string `json:"agent_id,omitempty"`
 	ProjectID   string `json:"project_id,omitempty"`
 	Query       string `json:"query,omitempty"`
-	Mode        string `json:"mode,omitempty"`   // "semantic", "exact", "hybrid"
+	Mode        string `json:"mode,omitempty"`   // "semantic", "exact", "hybrid", "discover", "call_chain", "impact", "doc_lookup"
 	ResultCount int    `json:"result_count"`
 	DurationMs  int64  `json:"duration_ms"`
 	CacheHit    bool   `json:"cache_hit"`
 	SessionID   string `json:"session_id,omitempty"`
+	// P8-3: discover_tools funnel tracking — tools and workflows matched.
+	MatchedTools     int `json:"matched_tools,omitempty"`
+	MatchedWorkflows int `json:"matched_workflows,omitempty"`
 }
 
 // ConfigReloadEvent tracks configuration hot-reload outcomes (Bug 68 — COV-9).
@@ -409,6 +438,15 @@ type WeeklyEfficiency struct {
 	WeekStart       string  `json:"week_start"`
 	TasksPerSession float64 `json:"tasks_per_session"`
 	ToolCallsPerTask float64 `json:"tool_calls_per_task"`
+}
+
+// SessionPerformance holds per-session efficiency metrics for learning velocity (P8-6).
+type SessionPerformance struct {
+	SessionNum       int     `json:"session_num"`
+	ToolCalls        int     `json:"tool_calls"`
+	TasksCompleted   int     `json:"tasks_completed"`
+	ToolCallsPerTask float64 `json:"tool_calls_per_task"`
+	TokensSaved      int     `json:"tokens_saved"`
 }
 
 // MonthlyROI holds monthly ROI report data (ROI-F5).

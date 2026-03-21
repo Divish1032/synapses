@@ -318,10 +318,29 @@ func (a *Aggregator) rollup() {
 		metrics["collector_drop_rate"] = a.collDropRate()
 	}
 
+	// P12-6: batch all metric upserts into a single transaction to reduce
+	// fsync overhead from ~80 individual commits to 1.
+	// Falls back to individual upserts if BeginBatch fails (e.g. DB locked).
 	rollupOK := true
-	for metric, value := range metrics {
-		if err := a.store.UpsertDailyRollup(today, metric, value); err != nil {
-			logutil.Warn("pulse aggregator: upsert %s: %v\n", metric, err)
+	commit, batchErr := a.store.BeginBatch()
+	if batchErr != nil {
+		logutil.Warn("pulse aggregator: begin batch (fallback to individual): %v\n", batchErr)
+		// Fallback: write each metric individually (pre-P12-6 behavior).
+		for metric, value := range metrics {
+			if err := a.store.UpsertDailyRollup(today, metric, value); err != nil {
+				logutil.Warn("pulse aggregator: upsert %s: %v\n", metric, err)
+				rollupOK = false
+			}
+		}
+	} else {
+		for metric, value := range metrics {
+			if err := a.store.UpsertDailyRollupTx(today, metric, value); err != nil {
+				logutil.Warn("pulse aggregator: upsert %s: %v\n", metric, err)
+				rollupOK = false
+			}
+		}
+		if err := commit(rollupOK); err != nil {
+			logutil.Warn("pulse aggregator: commit batch: %v\n", err)
 			rollupOK = false
 		}
 	}
@@ -338,6 +357,26 @@ func (a *Aggregator) rollup() {
 
 	// Bug 22 — DQ-G.3: per-tool rollups for today.
 	a.rollupPerTool(today)
+
+	// P8-4: per-agent rollups for today.
+	a.rollupPerAgent(today)
+
+	// P9-9: peak file change rate for today.
+	peakRate := a.store.GetPeakReparseRate(today)
+	if peakRate > 0 {
+		if err := a.store.UpsertDailyRollup(today, "peak_reparse_rate_per_min", float64(peakRate)); err != nil {
+			logutil.Warn("pulse aggregator: peak reparse rate upsert: %v\n", err)
+		}
+	}
+
+	// P9-10: per-language parse stats rollup.
+	a.rollupPerLanguage(today)
+
+	// P12-4: search effectiveness metrics.
+	a.rollupSearchMetrics(today)
+
+	// P12-5: per-tool error rates.
+	a.rollupPerToolErrors(today)
 
 	// Automatic pruning: remove events older than 90 days.
 	// Only prune if the rollup succeeded — otherwise raw data is still needed.
@@ -383,6 +422,53 @@ func (a *Aggregator) rollupPerProject(day string) {
 		for metric, value := range entries {
 			if err := a.store.UpsertDailyRollup(day, metric, value); err != nil {
 				logutil.Warn("pulse aggregator: per-project upsert %s: %v\n", metric, err)
+			}
+		}
+	}
+}
+
+// rollupPerAgent writes per-agent rollups for a given day (P8-4).
+// Each agent gets daily_rollups rows keyed as "agent:<id>:<metric>".
+func (a *Aggregator) rollupPerAgent(day string) {
+	agents := a.store.GetAgentsForDay(day)
+	for _, agentID := range agents {
+		sum, err := a.store.GetSummaryForDayAgent(day, agentID)
+		if err != nil || sum == nil {
+			continue
+		}
+		key := func(metric string) string {
+			return fmt.Sprintf("agent:%s:%s", agentID, metric)
+		}
+		entries := map[string]float64{
+			key("tool_calls"):         float64(sum.TotalToolCalls),
+			key("context_deliveries"): float64(sum.ContextDeliveries),
+			key("tokens_saved"):       float64(sum.TokensSaved),
+			key("sessions"):           float64(sum.Sessions),
+		}
+		for metric, value := range entries {
+			if err := a.store.UpsertDailyRollup(day, metric, value); err != nil {
+				logutil.Warn("pulse aggregator: per-agent upsert %s: %v\n", metric, err)
+			}
+		}
+	}
+}
+
+// rollupPerLanguage writes per-language parse stats for a given day (P9-10).
+// Each language gets daily_rollups rows keyed as "lang:<name>:<metric>".
+func (a *Aggregator) rollupPerLanguage(day string) {
+	stats := a.store.GetLanguageStatsForDay(day)
+	for _, ls := range stats {
+		key := func(metric string) string {
+			return fmt.Sprintf("lang:%s:%s", ls.Language, metric)
+		}
+		entries := map[string]float64{
+			key("parse_count"):    float64(ls.ParseCount),
+			key("avg_duration_ms"): ls.AvgDurationMs,
+			key("error_count"):    float64(ls.ErrorCount),
+		}
+		for metric, value := range entries {
+			if err := a.store.UpsertDailyRollup(day, metric, value); err != nil {
+				logutil.Warn("pulse aggregator: per-language upsert %s: %v\n", metric, err)
 			}
 		}
 	}
@@ -452,11 +538,11 @@ func (a *Aggregator) backfillMissedDays(today string) {
 			// Bug 69 — COV-12: persistence metrics from raw data.
 			persistOps:   a.store.CountPersistOps(day),
 			avgPersistMs: a.store.AvgPersistMs(day),
-			// Rate/average metrics: 0.0 for historical backfill (cannot be reconstructed).
-			avgSessionDurationMs:  0.0,
-			workflowAdherenceRate: 0.0,
-			tasksPerHour:          0.0,
-			avgTaskCompletionMs:   0.0,
+			// P6-9: reconstruct session metrics from raw data instead of hardcoding 0.0.
+			avgSessionDurationMs:  a.store.AvgSessionDurationMs(day),
+			workflowAdherenceRate: a.store.GetWorkflowAdherenceRate(day),
+			tasksPerHour:          a.store.GetTasksPerHour(day),
+			avgTaskCompletionMs:   a.store.GetAvgTaskCompletionMs(day),
 			// Bug 24 — ROI-C7: context freshness; 0.0 for backfill.
 			contextFreshnessScore: 0.0,
 			// Bug 25 — ROI-D5: entity memory coverage; 0.0 for backfill.
@@ -486,7 +572,41 @@ func (a *Aggregator) backfillMissedDays(today string) {
 		// Bug 21/22: also backfill per-project and per-tool for missed days.
 		a.rollupPerProject(day)
 		a.rollupPerTool(day)
+		// P8-4: backfill per-agent for missed days.
+		a.rollupPerAgent(day)
+		// P9-9/P9-10: backfill per-language and peak rate for missed days.
+		peakRate := a.store.GetPeakReparseRate(day)
+		if peakRate > 0 {
+			_ = a.store.UpsertDailyRollup(day, "peak_reparse_rate_per_min", float64(peakRate))
+		}
+		a.rollupPerLanguage(day)
+		// P12-4/P12-5: backfill search metrics and per-tool errors.
+		a.rollupSearchMetrics(day)
+		a.rollupPerToolErrors(day)
 		logutil.Info("pulse aggregator: backfilled rollup for %s\n", day)
+	}
+}
+
+// rollupSearchMetrics writes search effectiveness rollup metrics for a day (P12-4).
+func (a *Aggregator) rollupSearchMetrics(day string) {
+	zeroRate := a.store.GetSearchZeroResultRate(day)
+	avgLatency := a.store.GetSearchAvgLatencyMs(day)
+	// Only write if there were any searches (avoid polluting rollups with zeros).
+	if zeroRate > 0 || avgLatency > 0 {
+		_ = a.store.UpsertDailyRollup(day, "search_zero_result_rate", zeroRate)
+		_ = a.store.UpsertDailyRollup(day, "search_avg_latency_ms", avgLatency)
+	}
+}
+
+// rollupPerToolErrors writes per-tool error rates for a day (P12-5).
+// Each tool with errors gets a daily_rollups row keyed as "tool:<name>:error_rate".
+func (a *Aggregator) rollupPerToolErrors(day string) {
+	rates := a.store.GetToolErrorRates(day)
+	for _, r := range rates {
+		metric := fmt.Sprintf("tool:%s:error_rate", r.ToolName)
+		if err := a.store.UpsertDailyRollup(day, metric, r.ErrorRate); err != nil {
+			logutil.Warn("pulse aggregator: per-tool error rate upsert %s: %v\n", metric, err)
+		}
 	}
 }
 

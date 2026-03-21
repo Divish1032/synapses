@@ -8,6 +8,28 @@ import (
 	"github.com/SynapsesOS/synapses/internal/pulse"
 )
 
+// contextDeliveryExtras carries optional metrics that are only available in the
+// full (non-cache-hit) response path. Nil is safe — emitContextDelivery treats
+// nil as "no extras".
+type contextDeliveryExtras struct {
+	Intent               string
+	DepthRequested       int
+	DepthAchieved        int
+	NodesVisited         int
+	AnnotationsIncluded  bool
+	OutputFormat         string
+	EdgeTypesDist        string  // JSON map of edge type -> count
+	TraversalDurationMs  float64
+	GraphSizeAtTraversal int
+	DetailLevel          string
+	RulesMatched         int
+	ViolationsFound      int
+	MinRelevanceHits     int
+	TokenBudgetHit       bool
+	Refetched            bool
+	CacheSize            int // P9-8: BFS cache size at delivery time
+}
+
 // emitContextDelivery fires a ContextDeliveryEvent to the pulse sidecar for
 // a get_context / get_file_context / prepare_context call. It is called
 // asynchronously (via goroutine) so it never blocks the MCP response path.
@@ -25,7 +47,8 @@ func (s *Server) emitContextDelivery(
 	brainEnriched bool,
 	cacheHit bool,
 	durationMs int64,
-	extras ...string, // optional: extras[0] = sessionID
+	sessionID string,
+	opts *contextDeliveryExtras,
 ) {
 	pc := s.getPulseClient()
 	if pc == nil {
@@ -39,17 +62,15 @@ func (s *Server) emitContextDelivery(
 	// This is the honest cost of what the agent would have read via cat/grep.
 	baselineTokens := fileBaselineTokens(nodes)
 
-	var sessionID string
-	if len(extras) > 0 {
-		sessionID = extras[0]
-	}
+	// P6-4: normalize entity name to "Name@dir/file" format to match
+	// outcome_signals and enable JOINs between context_deliveries and outcome_signals.
+	normalizedEntity := entityWithPath(entity, file)
 
-	// Synchronous — callers are expected to wrap in goBackground.
-	pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
+	evt := pulse.ContextDeliveryEvent{
 		ToolName:       toolName,
 		AgentID:        agentID,
 		ProjectID:      s.projectID,
-		Entity:         entity,
+		Entity:         normalizedEntity,
 		File:           file,
 		ResponseBytes:  responseBytes,
 		ResponseTokens: responseTokens,
@@ -64,7 +85,30 @@ func (s *Server) emitContextDelivery(
 		SessionID:      sessionID,
 		// P5 — Item 30: entity was found (caller only invokes emitContextDelivery on success).
 		EntityFound: true,
-	})
+	}
+
+	// P6-1: populate the 14 fields that were previously always zero/empty.
+	if opts != nil {
+		evt.Intent = opts.Intent
+		evt.DepthRequested = opts.DepthRequested
+		evt.DepthAchieved = opts.DepthAchieved
+		evt.NodesVisited = opts.NodesVisited
+		evt.AnnotationsIncluded = opts.AnnotationsIncluded
+		evt.OutputFormat = opts.OutputFormat
+		evt.EdgeTypesDist = opts.EdgeTypesDist
+		evt.TraversalDurationMs = opts.TraversalDurationMs
+		evt.GraphSizeAtTraversal = opts.GraphSizeAtTraversal
+		evt.DetailLevel = opts.DetailLevel
+		evt.RulesMatched = opts.RulesMatched
+		evt.ViolationsFound = opts.ViolationsFound
+		evt.MinRelevanceHits = opts.MinRelevanceHits
+		evt.TokenBudgetHit = opts.TokenBudgetHit
+		evt.Refetched = opts.Refetched
+		evt.CacheSize = opts.CacheSize
+	}
+
+	// Synchronous — callers are expected to wrap in goBackground.
+	pc.RecordContextDelivery(evt)
 }
 
 // emitFileContextDelivery fires a ContextDeliveryEvent for get_file_context.
@@ -75,6 +119,8 @@ func (s *Server) emitFileContextDelivery(
 	responsePayload interface{},
 	durationMs int64,
 	sessionID string,
+	truncated bool,
+	nodesPruned int,
 ) {
 	pc := s.getPulseClient()
 	if pc == nil {
@@ -107,6 +153,10 @@ func (s *Server) emitFileContextDelivery(
 		NodesDelivered: len(nodes),
 		DurationMs:     durationMs,
 		SessionID:      sessionID,
+		// P6-2: populate fields that were previously always zero/empty.
+		EntityFound: len(nodes) > 0,
+		Truncated:   truncated,
+		NodesPruned: nodesPruned,
 	}
 	s.goBackground(func() { pc.RecordContextDelivery(evt) })
 }

@@ -342,6 +342,11 @@ func (g *Graph) InvalidateCache() {
 	g.cache.invalidate()
 }
 
+// CacheLen returns the number of entries in the subgraph cache (P9-8).
+func (g *Graph) CacheLen() int {
+	return g.cache.Len()
+}
+
 // InvalidateCacheForFile evicts only cached subgraphs that reference the given
 // file. Entries for unrelated entities survive, dramatically improving cache
 // hit rates when a single file changes. Prefer this over InvalidateCache when

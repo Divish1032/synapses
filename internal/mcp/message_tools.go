@@ -10,6 +10,7 @@ import (
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 )
 
 // handleSendMessage sends a message from one agent to another (or broadcasts
@@ -60,6 +61,13 @@ func (s *Server) handleSendMessage(
 		return mcp.NewToolResultError(scanErr.Error()), nil
 	} else if scanResult.warning != "" {
 		injectionWarning = scanResult.warning
+		// P7-1: emit guard event for injection scan trigger.
+		if pc := s.getPulseClient(); pc != nil {
+			pc.RecordGuardEvent(pulse.GuardEvent{
+				GuardType: "injection_scan", ToolName: "send_message",
+				Category: "warn", AgentID: fromAgent, ProjectID: s.projectID,
+			})
+		}
 		// In truncate mode, stripping regex matches from JSON can produce
 		// invalid JSON. Fall back to original content (warn behavior) if the
 		// sanitized payload is no longer valid JSON.
@@ -76,11 +84,25 @@ func (s *Server) handleSendMessage(
 		// OF-E3: check for an out-of-band user-approved approval file.
 		// The agent never sees the token — only the user can approve via `synapses approve`.
 		if !s.approvals.checkAndConsumeApproval("broadcast_message", fromAgent) {
+			// P7-2: emit guard event for approval gate request.
+			if pc := s.getPulseClient(); pc != nil {
+				pc.RecordGuardEvent(pulse.GuardEvent{
+					GuardType: "approval_gate", ToolName: "send_message",
+					Category: "requested", AgentID: fromAgent, ProjectID: s.projectID,
+				})
+			}
 			return s.approvals.requestApproval(
 				"broadcast_message",
 				fmt.Sprintf("Broadcast message from agent %q with topic %q to all agents across all projects", fromAgent, topic),
 				fromAgent,
 			), nil
+		}
+		// P7-2: emit guard event for approval gate consumption.
+		if pc := s.getPulseClient(); pc != nil {
+			pc.RecordGuardEvent(pulse.GuardEvent{
+				GuardType: "approval_gate", ToolName: "send_message",
+				Category: "consumed", AgentID: fromAgent, ProjectID: s.projectID,
+			})
 		}
 	}
 

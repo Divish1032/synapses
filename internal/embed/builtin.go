@@ -73,6 +73,10 @@ type BuiltinEmbedder struct {
 	closed        bool
 	done          chan struct{}   // closed by Close() to unblock pool waiters
 	inflight      sync.WaitGroup // tracks in-flight Embed calls for graceful shutdown
+
+	// P8-11: optional callback for model download lifecycle events.
+	// eventType is "download_start" or "download_complete".
+	OnModelEvent func(eventType string)
 }
 
 // NewBuiltinEmbedder creates a BuiltinEmbedder that stores its model in
@@ -117,6 +121,9 @@ func (b *BuiltinEmbedder) ensureModel() error {
 
 	// Check if model already exists.
 	if _, err := os.Stat(onnxPath); os.IsNotExist(err) {
+		// P8-11: emit download_start event. Called under b.mu — recover so a
+		// panicking callback can't leave the mutex permanently locked.
+		b.safeModelEvent("download_start")
 		// Download from HuggingFace.
 		logutil.Info("synapses: downloading embedding model %s to %s …\n", builtinModelName, b.modelsDir)
 		if err := os.MkdirAll(b.modelsDir, 0o755); err != nil {
@@ -131,6 +138,8 @@ func (b *BuiltinEmbedder) ensureModel() error {
 			return fmt.Errorf("download embedding model: %w", err)
 		}
 		logutil.Info("synapses: embedding model downloaded\n")
+		// P8-11: emit download_complete event.
+		b.safeModelEvent("download_complete")
 	}
 
 	// Verify model file exists after potential download.
@@ -210,6 +219,21 @@ func verifyModelIntegrity(onnxPath string) error {
 		return fmt.Errorf("embedding model integrity check failed: expected sha256:%s, got sha256:%s — removed corrupt file", builtinModelSHA256, got)
 	}
 	return nil
+}
+
+// safeModelEvent invokes OnModelEvent inside a recover guard. ensureModel()
+// runs under b.mu, so a panicking callback would leave the mutex permanently
+// locked, deadlocking the entire embedder. This ensures that never happens.
+func (b *BuiltinEmbedder) safeModelEvent(eventType string) {
+	if b.OnModelEvent == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			logutil.Error("synapses: OnModelEvent(%s) panicked: %v\n", eventType, r)
+		}
+	}()
+	b.OnModelEvent(eventType)
 }
 
 // Embed generates a 384-dimensional embedding for text using the builtin

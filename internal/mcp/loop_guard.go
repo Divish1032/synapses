@@ -25,10 +25,11 @@ import (
 // The window resets on every file-change event (via Server.InvalidatePacketCacheForFile).
 // This is domain-agnostic — it applies to all registered tools uniformly.
 type loopGuard struct {
-	mu        sync.Mutex
-	sessions  map[string]*loopGuardSession
-	pc        interface{} // *pulse.Client — set via SetPulseClient; nil if pulse not configured
-	projectID string
+	mu             sync.Mutex
+	sessions       map[string]*loopGuardSession
+	pc             interface{} // *pulse.Client — set via SetPulseClient; nil if pulse not configured
+	projectID      string
+	resolveSession func(string) string // P8-2: MCP session key → Synapses session UUID
 }
 
 func newLoopGuard() *loopGuard {
@@ -164,11 +165,16 @@ func (g *loopGuard) wrap(h server.ToolHandlerFunc) server.ToolHandlerFunc {
 
 		if count >= loopGuardCircuitBreak {
 			if pc := g.getPulseClient(); pc != nil {
+				sessID := ""
+				if g.resolveSession != nil {
+					sessID = g.resolveSession(SessionIDFromContext(ctx))
+				}
 				pc.RecordGuardEvent(pulse.GuardEvent{
 					GuardType: "loop_circuit_break",
 					ToolName:  req.Params.Name,
 					AgentID:   SessionIDFromContext(ctx),
 					ProjectID: g.projectID,
+					SessionID: sessID,
 				})
 			}
 			return mcp.NewToolResultError(fmt.Sprintf(
@@ -190,11 +196,16 @@ func (g *loopGuard) wrap(h server.ToolHandlerFunc) server.ToolHandlerFunc {
 
 		if count >= loopGuardWarnAt && !result.IsError {
 			if pc := g.getPulseClient(); pc != nil {
+				sessID := ""
+				if g.resolveSession != nil {
+					sessID = g.resolveSession(SessionIDFromContext(ctx))
+				}
 				pc.RecordGuardEvent(pulse.GuardEvent{
 					GuardType: "loop_warning",
 					ToolName:  req.Params.Name,
 					AgentID:   SessionIDFromContext(ctx),
 					ProjectID: g.projectID,
+					SessionID: sessID,
 				})
 			}
 			warning := fmt.Sprintf(

@@ -335,6 +335,10 @@ func (w *Watcher) loop(root string) {
 					logutil.Error("synapses/watcher: panic in loop (attempt %d/%d): %v\n", attempt+1, maxRestarts+1, r)
 					panicked = true
 					w.loopPanics.Add(1) // P2-4: track panic count
+					// P7-4: emit watcher panic count to Pulse.
+					if w.pulseClient != nil {
+						w.pulseClient.RecordLifecycleEvent("watcher_panic", float64(w.loopPanics.Load()), w.projectID)
+					}
 				}
 			}()
 			for {
@@ -374,6 +378,10 @@ func (w *Watcher) loop(root string) {
 		}
 	}
 	w.loopAlive.Store(0)
+	// P7-5: emit watcher death event when all restarts exhausted.
+	if w.pulseClient != nil {
+		w.pulseClient.RecordLifecycleEvent("watcher_dead", float64(w.loopPanics.Load()), w.projectID)
+	}
 	logutil.Error("synapses/watcher: loop exhausted all %d restart attempts, file watching disabled\n", maxRestarts)
 }
 
@@ -556,17 +564,29 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// nodes. Strategy: skip on FIRST error (likely transient mid-save), but
 	// proceed on SECOND consecutive error (persistent syntax error or grammar
 	// gap — stale data is worse than imperfect data from error-recovering parse).
+	errorAction := "clean" // P9-7: track parse error action
 	if src, err := os.ReadFile(path); err == nil {
 		if w.walker.HasParseErrors(path, src) {
 			if !w.fileHadParseErrors[path] {
 				// First error: skip reparse, retain previous clean data.
 				w.fileHadParseErrors[path] = true
 				logutil.Warn("synapses/watcher: skipping reparse of %s: AST has errors (file may be mid-save)\n", path)
+				// P9-7: emit skip event so parse error frequency is visible.
+				if w.pulseClient != nil {
+					lang := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+					w.pulseClient.RecordReparseEvent(pulse.ReparseEvent{
+						File:        path,
+						Language:    lang,
+						ProjectID:   w.projectID,
+						ErrorAction: "skip",
+					})
+				}
 				return
 			}
 			// Persistent error: proceed with parse — tree-sitter's error
 			// recovery produces a best-effort AST that's better than stale data.
 			logutil.Warn("synapses/watcher: reparsing %s despite errors (persistent, not mid-save)\n", path)
+			errorAction = "proceed" // P9-7
 		} else {
 			// Clean parse: clear the error flag.
 			delete(w.fileHadParseErrors, path)
@@ -789,13 +809,25 @@ func (w *Watcher) reparseFile(path, _ string) {
 				brainCtx, brainCancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer brainCancel()
 				w.cpBrainTracker.DetectAndStoreBrain(brainCtx, filePath, w.store)
+				brainDurationMs := float64(time.Since(brainStart).Milliseconds())
 				// P5 — COV-8: emit Tier 2 federation detection event.
 				if w.pulseClient != nil {
 					w.pulseClient.RecordFederationEvent(pulse.FederationDetectEvent{
 						ProjectID:  w.graph.RepoID(),
 						Tier:       2,
-						DurationMs: float64(time.Since(brainStart).Milliseconds()),
+						DurationMs: brainDurationMs,
 						EventType:  "detect_brain",
+					})
+					// P10-3: record brain LLM cost for federation analysis.
+					// Model is synthetic — actual model is encapsulated inside
+					// BrainDetector.Generate. Tier and endpoint identify the call path.
+					w.pulseClient.RecordBrainUsage(pulse.BrainUsageEvent{
+						Model:      "brain:federation",
+						Tier:       "federation",
+						Endpoint:   "cross_project_detect",
+						DurationMs: int64(brainDurationMs),
+						ProjectID:  w.graph.RepoID(),
+						Success:    true,
 					})
 				}
 			})
@@ -829,6 +861,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 			MemoriesStaled: memoriesStaled, // P2-14: memories_staled proxy
 			ProjectID:      w.projectID,
 			DeltaRows:      deltaRows,
+			ErrorAction:    errorAction, // P9-7
 		})
 	}
 
@@ -1015,6 +1048,8 @@ func (w *Watcher) ingestToBrain(path string) {
 		return
 	}
 	nodes := w.graph.NodesForFile(path)
+	ingestStart := time.Now()
+	var ingestCount int
 	for _, n := range nodes {
 		if string(n.Type) == "package" || string(n.Type) == "file" {
 			continue
@@ -1034,6 +1069,15 @@ func (w *Watcher) ingestToBrain(path string) {
 			Package:   n.Package,
 			Code:      code,
 		})
+		ingestCount++
+	}
+	// P7-3: emit brain usage for ingest pipeline.
+	if w.pulseClient != nil && ingestCount > 0 {
+		w.pulseClient.RecordBrainUsage(pulse.BrainUsageEvent{
+			Tier: "ingest", Endpoint: "Ingest",
+			DurationMs: time.Since(ingestStart).Milliseconds(),
+			ProjectID:  w.projectID, Success: true,
+		})
 	}
 
 	// Delayed write-back: fetch summaries after the brain has processed the ingest queue.
@@ -1046,14 +1090,26 @@ func (w *Watcher) ingestToBrain(path string) {
 			case <-w.stopCh:
 				return
 			}
+			wbStart := time.Now()
+			wbSuccess := true
 			for _, n := range nodeList {
 				if string(n.Type) == "package" || string(n.Type) == "file" {
 					continue
 				}
 				summary := bc.GetSummary(context.Background(), string(n.ID))
 				if summary != "" {
-					_, _, _ = w.store.AddAnnotationIfNew(string(n.ID), "brain", summary, 60*time.Second)
+					if _, _, err := w.store.AddAnnotationIfNew(string(n.ID), "brain", summary, 60*time.Second); err != nil {
+						wbSuccess = false
+					}
 				}
+			}
+			// P7-3: emit enrichment event for brain write-back.
+			if w.pulseClient != nil {
+				w.pulseClient.RecordEnrichmentEvent(pulse.EnrichmentEvent{
+					EnrichmentType: "brain_writeback",
+					DurationMs:     time.Since(wbStart).Milliseconds(),
+					Success:        wbSuccess, ProjectID: w.projectID,
+				})
 			}
 		})
 	}

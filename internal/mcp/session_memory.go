@@ -324,6 +324,15 @@ func (s *Server) handleEndSession(
 
 	// ── Step 5: Run memory expiry ──
 	expired, _ := s.store.ExpireMemories()
+	// P7-6: emit memory op for expired memories.
+	if expired > 0 {
+		if pc := s.getPulseClient(); pc != nil {
+			pc.RecordMemoryOp(pulse.MemoryOperationEvent{
+				Operation: "expire", Tier: "episodic",
+				Count: int(expired), ProjectID: s.projectID, AgentID: agentID,
+			})
+		}
+	}
 	result.MemoriesExpired = expired
 	result.MemoriesSaved = memoriesSaved
 	result.Retrospective = retro

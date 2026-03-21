@@ -10,6 +10,7 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/webcache"
 )
 
@@ -77,12 +78,26 @@ func (s *Server) handleWebAnnotate(
 		note = scanResult.sanitized
 		if scanResult.warning != "" {
 			injectionWarning = scanResult.warning
+			// P7-1: emit guard event for injection scan trigger.
+			if pc := s.getPulseClient(); pc != nil {
+				pc.RecordGuardEvent(pulse.GuardEvent{
+					GuardType: "injection_scan", ToolName: "web_annotate",
+					Category: "warn", AgentID: agentID, ProjectID: s.projectID,
+				})
+			}
 		}
 	}
 
 	id, err := s.store.AddAnnotation(nodeID, agentID, note)
 	if err != nil {
 		return mcpgo.NewToolResultError(fmt.Sprintf("store annotation failed: %v", err)), nil
+	}
+	// P7-12: emit memory op for web annotation write.
+	if pc := s.getPulseClient(); pc != nil {
+		pc.RecordMemoryOp(pulse.MemoryOperationEvent{
+			Operation: "web_annotation_write", Tier: "entity",
+			ResultCount: 1, AgentID: agentID, ProjectID: s.projectID,
+		})
 	}
 	_ = ctx
 	resp := map[string]interface{}{
@@ -155,6 +170,18 @@ func (s *Server) lookupPackageDocs(ctx context.Context, importPath string) (*mcp
 		}
 	}
 
+	// P7-13: emit search event for doc lookup.
+	if pc := s.getPulseClient(); pc != nil {
+		rc := 0
+		if content != "" {
+			rc = 1
+		}
+		pc.RecordSearchEvent(pulse.SearchEvent{
+			Mode: "doc_lookup", Query: importPath,
+			ResultCount: rc, CacheHit: fromCache, ProjectID: s.projectID,
+		})
+	}
+
 	result := map[string]interface{}{
 		"import_path": importPath,
 		"content":     content,
@@ -190,6 +217,18 @@ func (s *Server) lookupURL(ctx context.Context, url string) (*mcpgo.CallToolResu
 			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
 		}
 	}
+	// P7-13: emit search event for URL lookup.
+	if pc := s.getPulseClient(); pc != nil {
+		rc := 0
+		if content != "" {
+			rc = 1
+		}
+		pc.RecordSearchEvent(pulse.SearchEvent{
+			Mode: "doc_lookup", Query: url,
+			ResultCount: rc, CacheHit: fromCache, ProjectID: s.projectID,
+		})
+	}
+
 	result := map[string]interface{}{
 		"url":        url,
 		"content":    content,

@@ -159,6 +159,13 @@ func entryReferencesFile(e *cacheEntry, file string) bool {
 	return false
 }
 
+// Len returns the number of entries currently in the cache (P9-8).
+func (c *subgraphCache) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries)
+}
+
 // removeFromOrder removes the first occurrence of key from c.order.
 // Caller must hold c.mu.
 func (c *subgraphCache) removeFromOrder(key string) {

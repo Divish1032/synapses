@@ -288,6 +288,7 @@ func (s *Server) goBackground(fn func()) {
 		// queued successfully
 		if pc := s.getPulseClient(); pc != nil {
 			pc.RecordBackgroundWorkerEnqueue() // P2-5
+			pc.RecordBackgroundQueueDepth(len(s.bgQueue)) // P9-4
 		}
 	default:
 		logutil.Warn("synapses: background queue full (%d), dropping work\n", bgQueueCap)
@@ -570,6 +571,10 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		entity, _ := req.GetArguments()["entity"].(string)
 		if entity == "" {
 			entity, _ = req.GetArguments()["query"].(string)
+		}
+		// P8-9: capture topic for send_message so message distribution is tracked.
+		if entity == "" {
+			entity, _ = req.GetArguments()["topic"].(string)
 		}
 
 		// Session Intelligence: touch heartbeat and record audit row.
@@ -944,6 +949,12 @@ func (s *Server) SetPulseClient(pc *pulse.Client) {
 	s.rl.SetPulseClient(pc)
 	s.lg.projectID = s.projectID
 	s.rl.projectID = s.projectID
+	// P8-2: wire session resolver so guard events include Synapses session UUID.
+	resolver := func(mcpSessID string) string {
+		return s.getSynapseSessionID(mcpSessID)
+	}
+	s.lg.resolveSession = resolver
+	s.rl.resolveSession = resolver
 }
 
 // getPulseClient type-asserts the stored pulseClient to *pulse.Client.

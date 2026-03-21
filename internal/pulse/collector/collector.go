@@ -5,6 +5,7 @@
 package collector
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,6 +58,8 @@ type Collector struct {
 	dropped atomic.Int64
 	// P5 — DQ-Integrity.1: write errors during batch persistence.
 	writeErrors atomic.Int64
+	// P12-7: optional callback invoked after each flush with the batch size.
+	OnFlush func(count int)
 }
 
 // New creates a Collector with the given buffer capacity and flush interval.
@@ -318,6 +321,11 @@ func (c *Collector) flush() {
 	c.mu.Unlock()
 
 	c.writeBatch(batch)
+
+	// P12-7: notify SSE subscribers after flush.
+	if c.OnFlush != nil {
+		c.OnFlush(len(batch))
+	}
 }
 
 func (c *Collector) writeBatch(batch []event) {
@@ -351,10 +359,18 @@ func (c *Collector) writeBatch(batch []event) {
 		if err := c.dispatchTx(ev); err != nil {
 			logutil.Warn("pulse collector: write error (%s): %v\n", ev.kind, err)
 			c.writeErrors.Add(1)
-			ok = false
-			// Break immediately — the deferred commit(ok=false) rolls back the
-			// entire transaction, so continuing would just burn CPU for nothing.
-			break
+			// P6-7: skip the bad event and continue processing the rest of the
+			// batch. Only unrecoverable errors (disk full, DB locked) should
+			// abort the entire transaction — single-row constraint or type
+			// errors should not kill the whole flush.
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "disk") || strings.Contains(errMsg, "readonly") ||
+				strings.Contains(errMsg, "SQLITE_FULL") || strings.Contains(errMsg, "database is locked") {
+				ok = false
+				break
+			}
+			// Non-fatal: log and skip.
+			continue
 		}
 	}
 }
