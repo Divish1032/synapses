@@ -110,6 +110,15 @@ type Watcher struct {
 	fileHashMu sync.Mutex
 	fileHashes map[string]string
 
+	// fileHadParseErrors tracks files whose most recent watcher reparse was
+	// skipped due to tree-sitter parse errors. On the FIRST error occurrence,
+	// the reparse is skipped (likely a transient mid-save artifact). On the
+	// SECOND consecutive error, the reparse proceeds (the errors are persistent
+	// — real syntax errors or grammar gaps — and stale data is worse than
+	// imperfect data). Cleared when a file parses cleanly or is deleted.
+	// Protected by reparseMu (only accessed inside reparseFile).
+	fileHadParseErrors map[string]bool
+
 	// loopAlive tracks whether the event processing loop is running.
 	// Set to 0 (dead) when the loop exhausts all restart attempts.
 	loopAlive atomic.Int32
@@ -123,13 +132,14 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 		return nil, fmt.Errorf("create fsnotify watcher: %w", err)
 	}
 	return &Watcher{
-		fw:         fw,
-		graph:      g,
-		walker:     w,
-		store:      st,
-		timers:     make(map[string]*time.Timer),
-		stopCh:     make(chan struct{}),
-		fileHashes: make(map[string]string),
+		fw:                 fw,
+		graph:              g,
+		walker:             w,
+		store:              st,
+		timers:             make(map[string]*time.Timer),
+		stopCh:             make(chan struct{}),
+		fileHashes:         make(map[string]string),
+		fileHadParseErrors: make(map[string]bool),
 	}, nil
 }
 
@@ -381,6 +391,10 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 		w.fileHashMu.Lock()
 		delete(w.fileHashes, path)
 		w.fileHashMu.Unlock()
+		// Clean up parse-error tracking for deleted files.
+		w.reparseMu.Lock()
+		delete(w.fileHadParseErrors, path)
+		w.reparseMu.Unlock()
 		// Remove this file's call sites from the persisted table so they are
 		// not reloaded by future reparseFile calls for other files.
 		if w.store != nil {
@@ -511,11 +525,23 @@ func (w *Watcher) reparseFile(path, _ string) {
 
 	// Sprint 11.9: Check for tree-sitter parse errors before updating graph.
 	// Half-saved files during active editing produce corrupted ASTs with phantom
-	// nodes. When errors are detected, retain the previous (clean) parse.
+	// nodes. Strategy: skip on FIRST error (likely transient mid-save), but
+	// proceed on SECOND consecutive error (persistent syntax error or grammar
+	// gap — stale data is worse than imperfect data from error-recovering parse).
 	if src, err := os.ReadFile(path); err == nil {
 		if w.walker.HasParseErrors(path, src) {
-			logutil.Warn("synapses/watcher: skipping reparse of %s: AST has errors (file may be mid-save)\n", path)
-			return
+			if !w.fileHadParseErrors[path] {
+				// First error: skip reparse, retain previous clean data.
+				w.fileHadParseErrors[path] = true
+				logutil.Warn("synapses/watcher: skipping reparse of %s: AST has errors (file may be mid-save)\n", path)
+				return
+			}
+			// Persistent error: proceed with parse — tree-sitter's error
+			// recovery produces a best-effort AST that's better than stale data.
+			logutil.Warn("synapses/watcher: reparsing %s despite errors (persistent, not mid-save)\n", path)
+		} else {
+			// Clean parse: clear the error flag.
+			delete(w.fileHadParseErrors, path)
 		}
 	}
 
