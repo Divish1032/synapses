@@ -55,7 +55,8 @@ type Memory struct {
 	// Sprint 10.2: importance weight for decay scoring.
 	// "pinned" = never decays. Numeric string (e.g. "0.8") = weight multiplier
 	// applied to RecencyDecayScore. Default "1.0" = full recency decay.
-	Importance string `json:"importance,omitempty"`
+	Importance  string `json:"importance,omitempty"`
+	AccessCount int    `json:"access_count,omitempty"` // Sprint 11.5: ACT-R frequency counter
 }
 
 // MemoryVersion is a historical snapshot preserved when remember() deduplicates.
@@ -132,10 +133,10 @@ func (s *Store) InsertMemory(m Memory) (string, error) {
 
 	_, err = s.knowledgeDB.Exec(`
 		INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
-		                      created_at, expires_at, last_accessed_at, source, importance)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                      created_at, expires_at, last_accessed_at, source, importance, access_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.Tier, m.Content, m.EntityID, m.AgentID, m.TaskID, m.Tags,
-		m.CreatedAt, m.ExpiresAt, m.LastAccessedAt, m.Source, m.Importance,
+		m.CreatedAt, m.ExpiresAt, m.LastAccessedAt, m.Source, m.Importance, m.AccessCount,
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert memory: %w", err)
@@ -158,7 +159,7 @@ func (s *Store) QueryMemories(tier, entityID, agentID string, limit int) ([]Memo
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
-	             created_at, expires_at, last_accessed_at, source, importance
+	             created_at, expires_at, last_accessed_at, source, importance, access_count
 	      FROM memories WHERE expires_at > ? AND stale = 0`
 	args := []interface{}{now}
 
@@ -197,7 +198,7 @@ func (s *Store) QueryMemoriesIncludingStale(tier, entityID, agentID string, limi
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
-	             created_at, expires_at, last_accessed_at, source, importance
+	             created_at, expires_at, last_accessed_at, source, importance, access_count
 	      FROM memories WHERE expires_at > ?`
 	args := []interface{}{now}
 
@@ -235,7 +236,7 @@ func (s *Store) QueryRecentSessionMemoriesIncludingStale(agentID string, limit i
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
-	             created_at, expires_at, last_accessed_at, source, importance
+	             created_at, expires_at, last_accessed_at, source, importance, access_count
 	      FROM memories
 	      WHERE tier = 'session_log'
 	        AND agent_id = ?
@@ -269,7 +270,7 @@ func (s *Store) QueryMemoriesForEntities(entityIDs []string, limit int) (map[str
 
 	q := fmt.Sprintf(`
 		SELECT id, tier, content, entity_id, agent_id, task_id, tags,
-		       created_at, expires_at, last_accessed_at, source, importance
+		       created_at, expires_at, last_accessed_at, source, importance, access_count
 		FROM memories
 		WHERE tier = 'entity'
 		  AND entity_id IN (%s)
@@ -306,7 +307,7 @@ func (s *Store) QueryRecentSessionMemories(agentID string, limit int) ([]Memory,
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
-	             created_at, expires_at, last_accessed_at, source, importance
+	             created_at, expires_at, last_accessed_at, source, importance, access_count
 	      FROM memories
 	      WHERE tier = 'session_log'
 	        AND agent_id = ?
@@ -334,7 +335,7 @@ func (s *Store) GetLatestWorkSummary(agentID string) (*Memory, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	row := s.knowledgeDB.QueryRow(`
 		SELECT id, tier, content, entity_id, agent_id, task_id, tags,
-		       created_at, expires_at, last_accessed_at, source, importance
+		       created_at, expires_at, last_accessed_at, source, importance, access_count
 		FROM memories
 		WHERE tier = 'session_log'
 		  AND agent_id = ?
@@ -348,6 +349,7 @@ func (s *Store) GetLatestWorkSummary(agentID string) (*Memory, error) {
 	err := row.Scan(
 		&m.ID, &m.Tier, &m.Content, &m.EntityID, &m.AgentID, &m.TaskID,
 		&m.Tags, &m.CreatedAt, &m.ExpiresAt, &m.LastAccessedAt, &m.Source, &m.Importance,
+		&m.AccessCount,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -383,8 +385,8 @@ func (s *Store) TouchMemory(id string) error {
 		extension = ttlProject / 2
 		maxExpiry = now.Add(2 * ttlProject)
 	default:
-		// Entity memories: no meaningful extension needed, just update access time.
-		_, err := s.knowledgeDB.Exec(`UPDATE memories SET last_accessed_at = ? WHERE id = ?`, nowStr, id)
+		// Entity memories: no meaningful extension needed, just update access time and count.
+		_, err := s.knowledgeDB.Exec(`UPDATE memories SET last_accessed_at = ?, access_count = access_count + 1 WHERE id = ?`, nowStr, id)
 		return err
 	}
 
@@ -398,7 +400,7 @@ func (s *Store) TouchMemory(id string) error {
 		newExpiry = maxExpiry
 	}
 
-	_, err = s.knowledgeDB.Exec(`UPDATE memories SET last_accessed_at = ?, expires_at = ? WHERE id = ?`,
+	_, err = s.knowledgeDB.Exec(`UPDATE memories SET last_accessed_at = ?, expires_at = ?, access_count = access_count + 1 WHERE id = ?`,
 		nowStr, newExpiry.Format(time.RFC3339), id)
 	return err
 }
@@ -692,7 +694,7 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.knowledgeDB.Query(`
 		SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
-		       m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance
+		       m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count
 		FROM memories m
 		JOIN memories_fts f ON m.rowid = f.rowid
 		WHERE memories_fts MATCH ?
@@ -723,7 +725,7 @@ func (s *Store) SearchMemoriesIncludingStale(query string, limit int) ([]Memory,
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.knowledgeDB.Query(`
 		SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
-		       m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance
+		       m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count
 		FROM memories m
 		JOIN memories_fts f ON m.rowid = f.rowid
 		WHERE memories_fts MATCH ?
@@ -827,10 +829,10 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 
 	_, err = tx.Exec(`
 		INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
-		                      created_at, expires_at, last_accessed_at, source, importance)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                      created_at, expires_at, last_accessed_at, source, importance, access_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.Tier, m.Content, m.EntityID, m.AgentID, m.TaskID, m.Tags,
-		m.CreatedAt, m.ExpiresAt, m.LastAccessedAt, m.Source, m.Importance,
+		m.CreatedAt, m.ExpiresAt, m.LastAccessedAt, m.Source, m.Importance, m.AccessCount,
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert memory in tx: %w", err)
@@ -864,7 +866,7 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 func (s *Store) queryFreshMemoriesForDedup(tier, entityID, agentID string) ([]Memory, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
-	             created_at, expires_at, last_accessed_at, source, importance
+	             created_at, expires_at, last_accessed_at, source, importance, access_count
 	      FROM memories WHERE expires_at > ? AND stale = 0`
 	args := []interface{}{now}
 	if tier != "" {
@@ -1172,7 +1174,7 @@ func (s *Store) GetMemoriesByAnchorNode(nodeID string, limit int) ([]Memory, err
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.knowledgeDB.Query(`
 		SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
-		       m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance
+		       m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count
 		FROM memories m
 		JOIN memory_anchors ma ON m.id = ma.memory_id
 		WHERE ma.node_id = ?
@@ -1221,7 +1223,7 @@ func (s *Store) GetMemoriesByIDs(ids []string) ([]Memory, error) {
 		args[i] = id
 	}
 	query := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
-	                 created_at, expires_at, last_accessed_at, source, importance
+	                 created_at, expires_at, last_accessed_at, source, importance, access_count
 	          FROM memories WHERE id IN (` + strings.Join(placeholders, ",") + `)`
 	rows, err := s.knowledgeDB.Query(query, args...)
 	if err != nil {
@@ -1398,7 +1400,7 @@ func (s *Store) GetMemoryAsOf(memoryIDs []string, asOf time.Time) ([]Memory, err
 
 // scanMemories reads rows into a Memory slice.
 // Expects columns: id, tier, content, entity_id, agent_id, task_id, tags,
-// created_at, expires_at, last_accessed_at, source, importance.
+// created_at, expires_at, last_accessed_at, source, importance, access_count, access_count.
 func scanMemories(rows *sql.Rows) ([]Memory, error) {
 	var out []Memory
 	for rows.Next() {
@@ -1406,6 +1408,7 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 		if err := rows.Scan(
 			&m.ID, &m.Tier, &m.Content, &m.EntityID, &m.AgentID, &m.TaskID, &m.Tags,
 			&m.CreatedAt, &m.ExpiresAt, &m.LastAccessedAt, &m.Source, &m.Importance,
+			&m.AccessCount,
 		); err != nil {
 			return nil, fmt.Errorf("scan memory: %w", err)
 		}
