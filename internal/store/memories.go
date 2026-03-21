@@ -929,10 +929,9 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 			m.ExpiresAt = now.Add(ttlProject).Format(time.RFC3339)
 		}
 	}
-	if m.Importance == "" {
-		m.Importance = "1.0"
-	} else if m.Importance != ImportancePinned {
-		// Validate numeric importance and clamp to a safe minimum.
+	// Validate caller-provided importance (non-empty, non-pinned).
+	// When empty, A-MAC admission control computes it after the dedup check.
+	if m.Importance != "" && m.Importance != ImportancePinned {
 		// Values below the visibility threshold (e.g. "0.0", "0.01") would make the
 		// memory permanently invisible on recall immediately after creation — almost
 		// certainly not what the caller intended. We clamp rather than reject to stay
@@ -975,8 +974,15 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 	var newVecComputed bool
 	embedFn := s.semanticDedupFunc // snapshot — safe even if swapped concurrently
 
+	// maxJaccard tracks the highest Jaccard similarity seen across all candidates.
+	// Used as a fallback for novelty scoring when embeddings are unavailable.
+	var maxJaccard float64
+
 	for _, ex := range dupCandidates {
 		sim := stringSimilarity(ex.Content, m.Content)
+		if sim > maxJaccard {
+			maxJaccard = sim
+		}
 		if sim > 0.85 {
 			// High Jaccard — definite dedup match.
 			return m, prepareMemoryResult{
@@ -1009,7 +1015,97 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 		}
 	}
 
+	// A-MAC: auto-compute importance when caller didn't set it explicitly.
+	// Score = content_type_prior × novelty_factor (A-MAC, arXiv:2603.04549).
+	// This runs after dedup so dupCandidates and newVec are already available —
+	// zero extra embedding or DB cost in the common case.
+	if m.Importance == "" {
+		m.Importance = s.computeAdmissionImportance(m.Tags, m.Source, dupCandidates, maxJaccard, newVec)
+	}
+
 	return m, prepareMemoryResult{}, nil
+}
+
+// parseContentTypePrior returns the A-MAC content-type prior for importance scoring.
+// Explicit episodic decisions (failure, pattern, rule_proposal) score higher than
+// generic decisions or auto-captured session logs, reflecting their higher future utility.
+func parseContentTypePrior(tags, source string) float64 {
+	if source == SourceAuto {
+		return 0.8 // auto-captured session logs have lower signal-to-noise ratio
+	}
+	// Tags format: ["episode","failure"] — check for episode type substring.
+	switch {
+	case strings.Contains(tags, `"failure"`):
+		return 1.4 // failures must surface to prevent repeat mistakes
+	case strings.Contains(tags, `"pattern"`):
+		return 1.2 // reusable patterns have high future utility
+	case strings.Contains(tags, `"rule_proposal"`):
+		return 1.2 // architectural rules are structural knowledge
+	default:
+		return 1.0 // general decisions and non-episodic content
+	}
+}
+
+// computeAdmissionImportance implements A-MAC write-time importance scoring.
+//
+// Score = content_type_prior × novelty_factor (A-MAC, arXiv:2603.04549).
+//   - content_type_prior: derived from episode type in tags and source field
+//   - novelty_factor: 1 − max_similarity(new, recent_same_tier_memories)
+//
+// Similarity is cosine when newVec is available (computed during dedup check at
+// zero extra embedding cost), Jaccard otherwise. Clamped to [0.10, 2.0].
+func (s *Store) computeAdmissionImportance(tags, source string, candidates []Memory, maxJaccard float64, newVec []float32) string {
+	const (
+		minImportance = DecayVisibilityThreshold * 2 // 0.10 — floor matching clamp elsewhere
+		maxImportance = 2.0                          // cap: matches edge weight scale in BFS
+		noveltyFloor  = 0.2                          // even near-duplicates have baseline value
+	)
+
+	prior := parseContentTypePrior(tags, source)
+
+	var noveltyFactor float64
+	switch {
+	case len(candidates) == 0:
+		noveltyFactor = 1.0 // no existing memories → fully novel by definition
+	case len(newVec) > 0:
+		// Cosine-based novelty: more accurate than Jaccard for semantic similarity.
+		// newVec was computed during the dedup check — no extra embedding call needed.
+		var maxCosine float32
+		for _, c := range candidates {
+			cv := s.GetMemoryEmbedding(c.ID)
+			if len(cv) == 0 {
+				continue
+			}
+			if cos := dotSimilarity(newVec, cv); cos > maxCosine {
+				maxCosine = cos
+			}
+		}
+		if maxCosine > 0 {
+			noveltyFactor = 1.0 - float64(maxCosine)
+		} else {
+			noveltyFactor = 1.0 - maxJaccard // no candidate had stored embeddings
+		}
+	default:
+		noveltyFactor = 1.0 - maxJaccard // Jaccard fallback: embedder unavailable
+	}
+
+	// Clamp novelty: floor ensures even redundant memories remain visible.
+	if noveltyFactor < noveltyFloor {
+		noveltyFactor = noveltyFloor
+	} else if noveltyFactor > 1.0 {
+		noveltyFactor = 1.0
+	}
+
+	importance := prior * noveltyFactor
+
+	// Clamp to system-safe range.
+	if importance < minImportance {
+		importance = minImportance
+	} else if importance > maxImportance {
+		importance = maxImportance
+	}
+
+	return strconv.FormatFloat(importance, 'f', -1, 64)
 }
 
 // InsertMemoryAnchors links a memory to one or more graph node IDs.
