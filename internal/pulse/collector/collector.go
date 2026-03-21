@@ -17,7 +17,8 @@ import (
 // event wraps a typed event for the ring buffer.
 type event struct {
 	kind string // "tool_call", "context_delivery", "brain_usage", "session", "session_model", "agent_llm_usage",
-	// "parse_event", "reparse_event", "graph_snapshot", "embedding_event", "index_event"
+	// "parse_event", "reparse_event", "graph_snapshot", "embedding_event", "index_event",
+	// "guard_event", "memory_op", "validation_event"
 	data interface{}
 }
 
@@ -146,6 +147,21 @@ func (c *Collector) RecordEmbeddingEvent(ev pulsetypes.EmbeddingEvent) {
 // RecordIndexEvent enqueues a full-index completion event (P2-8).
 func (c *Collector) RecordIndexEvent(ev pulsetypes.IndexEvent) {
 	c.enqueue(event{kind: "index_event", data: ev})
+}
+
+// RecordGuardEvent enqueues a loop-guard or rate-limiter block event (P3-2/P3-3).
+func (c *Collector) RecordGuardEvent(ev pulsetypes.GuardEvent) {
+	c.enqueue(event{kind: "guard_event", data: ev})
+}
+
+// RecordMemoryOp enqueues a recall hit/miss or memory write event (P3-4).
+func (c *Collector) RecordMemoryOp(ev pulsetypes.MemoryOperationEvent) {
+	c.enqueue(event{kind: "memory_op", data: ev})
+}
+
+// RecordValidationEvent enqueues a validate_plan or verify_implementation outcome event (P3-5).
+func (c *Collector) RecordValidationEvent(ev pulsetypes.ValidationEvent) {
+	c.enqueue(event{kind: "validation_event", data: ev})
 }
 
 // Dropped returns the number of events dropped due to buffer overflow (P2-19).
@@ -329,6 +345,15 @@ func (c *Collector) dispatchTx(ev event) error {
 	case "index_event":
 		ie, _ := ev.data.(pulsetypes.IndexEvent)
 		return c.store.InsertIndexEventTx(ie)
+	case "guard_event":
+		ge, _ := ev.data.(pulsetypes.GuardEvent)
+		return c.store.InsertGuardEventTx(ge)
+	case "memory_op":
+		mo, _ := ev.data.(pulsetypes.MemoryOperationEvent)
+		return c.store.InsertMemoryOpTx(mo)
+	case "validation_event":
+		ve, _ := ev.data.(pulsetypes.ValidationEvent)
+		return c.store.InsertValidationEventTx(ve)
 	}
 	return nil
 }
@@ -416,6 +441,15 @@ func (c *Collector) dispatchNoTx(ev event) error {
 	case "index_event":
 		ie, _ := ev.data.(pulsetypes.IndexEvent)
 		return c.store.InsertIndexEvent(ie)
+	case "guard_event":
+		ge, _ := ev.data.(pulsetypes.GuardEvent)
+		return c.store.InsertGuardEvent(ge)
+	case "memory_op":
+		mo, _ := ev.data.(pulsetypes.MemoryOperationEvent)
+		return c.store.InsertMemoryOp(mo)
+	case "validation_event":
+		ve, _ := ev.data.(pulsetypes.ValidationEvent)
+		return c.store.InsertValidationEvent(ve)
 	}
 	return nil
 }

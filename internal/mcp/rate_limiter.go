@@ -10,6 +10,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 )
 
 // Default per-session rate limits (calls per minute). All defaults are
@@ -137,6 +138,20 @@ type rateLimiter struct {
 	writeLimitPerMin         int
 	expensiveReadLimitPerMin int
 	crossProjectLimitPerMin  int
+
+	pc        interface{} // *pulse.Client — set via SetPulseClient; nil if pulse not configured
+	projectID string
+}
+
+// SetPulseClient wires a pulse client so rate-limiter can emit guard events.
+func (rl *rateLimiter) SetPulseClient(pc interface{}) { rl.pc = pc }
+
+func (rl *rateLimiter) getPulseClient() *pulse.Client {
+	if rl.pc == nil {
+		return nil
+	}
+	pc, _ := rl.pc.(*pulse.Client)
+	return pc
 }
 
 // newRateLimiter constructs a rateLimiter from config. Zero fields fall back to
@@ -282,6 +297,15 @@ func (rl *rateLimiter) wrap(toolName string, h server.ToolHandlerFunc) server.To
 		sessionKey := synapseSessionKey(SessionIDFromContext(ctx))
 		res := rl.check(sessionKey, toolName, args)
 		if !res.allowed {
+			if pc := rl.getPulseClient(); pc != nil {
+				pc.RecordGuardEvent(pulse.GuardEvent{
+					GuardType: "rate_limit",
+					ToolName:  toolName,
+					Category:  res.category,
+					AgentID:   SessionIDFromContext(ctx),
+					ProjectID: rl.projectID,
+				})
+			}
 			secs := int(res.retryAfter.Seconds()) + 1
 			return mcp.NewToolResultError(fmt.Sprintf(
 				"rate_limit_exceeded: tool %q has exceeded the %s rate limit for this session. "+

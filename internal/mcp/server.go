@@ -889,8 +889,11 @@ func (s *Server) SetBrainClient(bc interface{}) {
 }
 
 // SetProjectID sets the stable project identifier used when building context packets.
+// Also propagates the ID to loop_guard and rate_limiter for guard event attribution.
 func (s *Server) SetProjectID(id string) {
 	s.projectID = id
+	s.lg.projectID = id
+	s.rl.projectID = id
 }
 
 // SetWebCache wires a *webcache.Cache into the server so that lookup_docs
@@ -907,8 +910,14 @@ func (s *Server) SetProjectPath(path string) {
 
 // SetPulseClient wires a *pulse.Client into the server so that every tool
 // call emits telemetry to the synapses-pulse analytics sidecar.
+// Also propagates the pulse client to loop_guard and rate_limiter so they
+// can emit guard events (P3-2, P3-3).
 func (s *Server) SetPulseClient(pc *pulse.Client) {
 	s.pulseClient = pc
+	s.lg.SetPulseClient(pc)
+	s.rl.SetPulseClient(pc)
+	s.lg.projectID = s.projectID
+	s.rl.projectID = s.projectID
 }
 
 // getPulseClient type-asserts the stored pulseClient to *pulse.Client.

@@ -11,6 +11,7 @@ import (
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -592,6 +593,25 @@ func (s *Server) handleRecall(
 				fmt.Sprintf(`{"query":%q,"memories":%d,"episodes":%d}`, query, mCount, eCount)); err != nil {
 				logutil.Warn("synapses: recall: append knowledge_accessed event: %v\n", err)
 			}
+		})
+	}
+
+	// P3-4: emit recall hit/miss event.
+	if pc := s.getPulseClient(); pc != nil {
+		totalResults := len(episodes) + len(memories)
+		op := "recall_miss"
+		if totalResults > 0 {
+			op = "recall_hit"
+		}
+		recallAgentID := stringArg(req, "agent_id")
+		projID := s.projectID
+		pc.RecordMemoryOp(pulse.MemoryOperationEvent{
+			Operation:   op,
+			Tier:        "episodic",
+			Source:      "manual",
+			ResultCount: totalResults,
+			AgentID:     recallAgentID,
+			ProjectID:   projID,
 		})
 	}
 

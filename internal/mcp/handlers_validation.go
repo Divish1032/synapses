@@ -18,6 +18,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/parser"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -184,6 +185,24 @@ func (s *Server) handleValidatePlan(
 	status := "ok"
 	if len(violations) > 0 {
 		status = "violations_found"
+	}
+
+	// P3-5: emit validation outcome event.
+	if pc := s.getPulseClient(); pc != nil {
+		safetyStatus := ""
+		if safetyCheck != nil {
+			safetyStatus, _ = safetyCheck["status"].(string)
+		}
+		agentIDForPulse := stringArg(req, "agent_id")
+		projID := s.projectID
+		pc.RecordValidationEvent(pulse.ValidationEvent{
+			ToolName:       "validate_plan",
+			Status:         status,
+			ViolationCount: len(violations),
+			SafetyStatus:   safetyStatus,
+			AgentID:        agentIDForPulse,
+			ProjectID:      projID,
+		})
 	}
 
 	// GAP-8: Auto pattern extraction — when violations are found, record an
@@ -587,6 +606,20 @@ func (s *Server) handleVerifyImplementation(
 	if totalViolations > 0 {
 		status = "violations_found"
 	}
+
+	// P3-5: emit validation outcome event.
+	if pc := s.getPulseClient(); pc != nil {
+		agentIDForPulse := stringArg(req, "agent_id")
+		projID := s.projectID
+		pc.RecordValidationEvent(pulse.ValidationEvent{
+			ToolName:       "verify_implementation",
+			Status:         status,
+			ViolationCount: totalViolations,
+			AgentID:        agentIDForPulse,
+			ProjectID:      projID,
+		})
+	}
+
 	// Check if any files are not yet in the graph.
 	notIndexed := 0
 	for _, r := range reports {

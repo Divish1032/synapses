@@ -35,6 +35,11 @@ type GraphSnapshotEvent = types.GraphSnapshotEvent
 type EmbeddingEvent = types.EmbeddingEvent
 type IndexEvent = types.IndexEvent
 
+// Phase 3 agent behavior event types.
+type GuardEvent = types.GuardEvent
+type MemoryOperationEvent = types.MemoryOperationEvent
+type ValidationEvent = types.ValidationEvent
+
 // Client is the in-process analytics collector. It replaces the HTTP sidecar.
 // Create with New; call Close when the daemon shuts down.
 type Client struct {
@@ -220,6 +225,59 @@ func (c *Client) RecordIndexEvent(ev IndexEvent) {
 		return
 	}
 	c.coll.RecordIndexEvent(ev)
+}
+
+// RecordGuardEvent enqueues a loop-guard or rate-limiter block event. Fire-and-forget (P3-2/P3-3).
+func (c *Client) RecordGuardEvent(ev GuardEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordGuardEvent(ev)
+}
+
+// RecordMemoryOp enqueues a recall hit/miss or memory write event. Fire-and-forget (P3-4).
+func (c *Client) RecordMemoryOp(ev MemoryOperationEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordMemoryOp(ev)
+}
+
+// RecordValidationEvent enqueues a validate_plan or verify_implementation outcome event. Fire-and-forget (P3-5).
+func (c *Client) RecordValidationEvent(ev ValidationEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordValidationEvent(ev)
+}
+
+// GetSummaryForProject returns aggregated analytics for the last N days filtered to projectID.
+// Returns a PulseSummary with only Summary populated (no per-tool/agent breakdowns).
+func (c *Client) GetSummaryForProject(days int, projectID string) *PulseSummary {
+	if c == nil {
+		return &PulseSummary{Days: days}
+	}
+	if days <= 0 {
+		days = 7
+	}
+	sum, err := c.store.GetSummaryForProject(days, projectID)
+	if err != nil {
+		sum = &pulsestore.Summary{}
+	}
+	return &PulseSummary{Days: days, Summary: sum}
+}
+
+// GetWeekOverWeek returns week-over-week metric comparisons from daily_rollups.
+// Returns nil on error (best-effort).
+func (c *Client) GetWeekOverWeek() *pulsestore.WoWComparison {
+	if c == nil {
+		return nil
+	}
+	wow, err := c.store.GetWeekOverWeek()
+	if err != nil {
+		return nil
+	}
+	return wow
 }
 
 // RecordBackgroundWorkerEnqueue increments the bgEnqueued counter (P2-5).

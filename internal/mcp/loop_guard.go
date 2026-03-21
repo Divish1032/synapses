@@ -7,6 +7,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+
+	"github.com/SynapsesOS/synapses/internal/pulse"
 )
 
 // loopGuard detects agent loops by tracking per-session call fingerprints.
@@ -23,14 +25,27 @@ import (
 // The window resets on every file-change event (via Server.InvalidatePacketCacheForFile).
 // This is domain-agnostic — it applies to all registered tools uniformly.
 type loopGuard struct {
-	mu       sync.Mutex
-	sessions map[string]*loopGuardSession
+	mu        sync.Mutex
+	sessions  map[string]*loopGuardSession
+	pc        interface{} // *pulse.Client — set via SetPulseClient; nil if pulse not configured
+	projectID string
 }
 
 func newLoopGuard() *loopGuard {
 	return &loopGuard{
 		sessions: make(map[string]*loopGuardSession),
 	}
+}
+
+// SetPulseClient wires a pulse client so loop-guard can emit guard events.
+func (g *loopGuard) SetPulseClient(pc interface{}) { g.pc = pc }
+
+func (g *loopGuard) getPulseClient() *pulse.Client {
+	if g.pc == nil {
+		return nil
+	}
+	pc, _ := g.pc.(*pulse.Client)
+	return pc
 }
 
 // loopGuardSession holds the sliding window for one MCP connection.
@@ -148,6 +163,14 @@ func (g *loopGuard) wrap(h server.ToolHandlerFunc) server.ToolHandlerFunc {
 		count := g.record(sessionKey, fp)
 
 		if count >= loopGuardCircuitBreak {
+			if pc := g.getPulseClient(); pc != nil {
+				pc.RecordGuardEvent(pulse.GuardEvent{
+					GuardType: "loop_circuit_break",
+					ToolName:  req.Params.Name,
+					AgentID:   SessionIDFromContext(ctx),
+					ProjectID: g.projectID,
+				})
+			}
 			return mcp.NewToolResultError(fmt.Sprintf(
 				"[CIRCUIT BREAKER] Tool %q called %d times with identical arguments "+
 					"in this session (fingerprint: %q). This pattern indicates an agent loop.\n\n"+
@@ -166,6 +189,14 @@ func (g *loopGuard) wrap(h server.ToolHandlerFunc) server.ToolHandlerFunc {
 		}
 
 		if count >= loopGuardWarnAt && !result.IsError {
+			if pc := g.getPulseClient(); pc != nil {
+				pc.RecordGuardEvent(pulse.GuardEvent{
+					GuardType: "loop_warning",
+					ToolName:  req.Params.Name,
+					AgentID:   SessionIDFromContext(ctx),
+					ProjectID: g.projectID,
+				})
+			}
 			warning := fmt.Sprintf(
 				"\n\n---\n[LOOP WARNING] Tool %q has been called %d times with the same "+
 					"arguments in this session. If you are not making progress, consider "+
