@@ -159,6 +159,40 @@ func TestSubgraphCache_ExpiredEntryNotReturned(t *testing.T) {
 	}
 }
 
+func TestSubgraphCache_LRU_EvictsLeastRecentlyUsed(t *testing.T) {
+	c := newSubgraphCache()
+	// Insert 3 entries with capacity constrained to test LRU behaviour.
+	// We use the real cacheMaxSize (512), so fill to capacity then verify
+	// the *accessed* entry survives while the untouched one is evicted.
+
+	// Fill cache to capacity.
+	for i := 0; i < cacheMaxSize; i++ {
+		cfg := CarveConfig{MaxDepth: i}
+		c.put(NodeID("n"), cfg, "fp", &SubGraph{Root: "n"})
+	}
+
+	// Access entry 0 (moves it to most-recently-used).
+	cfg0 := CarveConfig{MaxDepth: 0}
+	if _, ok := c.get("n", cfg0, "fp"); !ok {
+		t.Fatal("entry 0 should be present")
+	}
+
+	// Insert one more entry — this should evict entry 1 (LRU), NOT entry 0.
+	cfgNew := CarveConfig{MaxDepth: cacheMaxSize}
+	c.put(NodeID("n"), cfgNew, "fp", &SubGraph{Root: "n"})
+
+	// Entry 0 was promoted by get() so it should survive.
+	if _, ok := c.get("n", cfg0, "fp"); !ok {
+		t.Fatal("entry 0 was accessed (LRU promoted) but was evicted — LRU broken")
+	}
+
+	// Entry 1 was the true LRU and should have been evicted.
+	cfg1 := CarveConfig{MaxDepth: 1}
+	if _, ok := c.get("n", cfg1, "fp"); ok {
+		t.Fatal("entry 1 should have been evicted as LRU")
+	}
+}
+
 // ── communities.go tests ─────────────────────────────────────────────────────
 
 func TestDetectCommunities_DefaultParams(t *testing.T) {
