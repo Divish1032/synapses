@@ -108,6 +108,107 @@ func TestRecencyDecayScore_ZeroAccessCount_BackwardCompat(t *testing.T) {
 	}
 }
 
+// ── TierHalfLife ─────────────────────────────────────────────────────────────
+
+func TestTierHalfLife_SessionLog(t *testing.T) {
+	t.Parallel()
+	if h := TierHalfLife(TierSessionLog, SourceAuto); h != 72 {
+		t.Errorf("session_log half-life = %f, want 72", h)
+	}
+	if h := TierHalfLife(TierSessionLog, SourceManual); h != 72 {
+		t.Errorf("session_log+manual half-life = %f, want 72 (source irrelevant for session_log)", h)
+	}
+}
+
+func TestTierHalfLife_Project(t *testing.T) {
+	t.Parallel()
+	if h := TierHalfLife(TierProject, SourceManual); h != 336 {
+		t.Errorf("project half-life = %f, want 336", h)
+	}
+}
+
+func TestTierHalfLife_EntityAuto(t *testing.T) {
+	t.Parallel()
+	if h := TierHalfLife(TierEntity, SourceAuto); h != 168 {
+		t.Errorf("entity+auto half-life = %f, want 168", h)
+	}
+	if h := TierHalfLife(TierEntity, SourceExtracted); h != 168 {
+		t.Errorf("entity+extracted half-life = %f, want 168", h)
+	}
+}
+
+func TestTierHalfLife_EntityManual(t *testing.T) {
+	t.Parallel()
+	if h := TierHalfLife(TierEntity, SourceManual); h != 504 {
+		t.Errorf("entity+manual half-life = %f, want 504", h)
+	}
+}
+
+func TestTierHalfLife_UnknownTier(t *testing.T) {
+	t.Parallel()
+	if h := TierHalfLife("unknown", ""); h != 168 {
+		t.Errorf("unknown tier half-life = %f, want 168 (default)", h)
+	}
+}
+
+// ── DecayedImportanceScore: differential tier decay ──────────────────────────
+
+func TestDecayedImportanceScore_SessionLogDecaysFaster(t *testing.T) {
+	t.Parallel()
+	// At the same age, session_log (72h half-life) should score lower than
+	// entity+auto (168h half-life) because it decays faster.
+	age := time.Now().UTC().Add(-168 * time.Hour).Format(time.RFC3339) // 1 week old
+	sessionMem := Memory{Tier: TierSessionLog, Source: SourceAuto, LastAccessedAt: age, AccessCount: 1}
+	entityMem := Memory{Tier: TierEntity, Source: SourceAuto, LastAccessedAt: age, AccessCount: 1}
+
+	sessionScore := DecayedImportanceScore(sessionMem, 0)
+	entityScore := DecayedImportanceScore(entityMem, 0)
+
+	if sessionScore >= entityScore {
+		t.Errorf("session_log score (%f) should be lower than entity+auto score (%f) at same age", sessionScore, entityScore)
+	}
+}
+
+func TestDecayedImportanceScore_ProjectDecaysSlower(t *testing.T) {
+	t.Parallel()
+	age := time.Now().UTC().Add(-168 * time.Hour).Format(time.RFC3339)
+	entityMem := Memory{Tier: TierEntity, Source: SourceAuto, LastAccessedAt: age, AccessCount: 1}
+	projectMem := Memory{Tier: TierProject, Source: SourceManual, LastAccessedAt: age, AccessCount: 1}
+
+	entityScore := DecayedImportanceScore(entityMem, 0)
+	projectScore := DecayedImportanceScore(projectMem, 0)
+
+	if projectScore <= entityScore {
+		t.Errorf("project score (%f) should be higher than entity+auto score (%f) at same age", projectScore, entityScore)
+	}
+}
+
+func TestDecayedImportanceScore_ManualEntityDecaysSlowest(t *testing.T) {
+	t.Parallel()
+	age := time.Now().UTC().Add(-336 * time.Hour).Format(time.RFC3339) // 2 weeks old
+	autoMem := Memory{Tier: TierEntity, Source: SourceAuto, LastAccessedAt: age, AccessCount: 1}
+	manualMem := Memory{Tier: TierEntity, Source: SourceManual, LastAccessedAt: age, AccessCount: 1}
+
+	autoScore := DecayedImportanceScore(autoMem, 0)
+	manualScore := DecayedImportanceScore(manualMem, 0)
+
+	if manualScore <= autoScore {
+		t.Errorf("entity+manual score (%f) should be higher than entity+auto score (%f) at same age", manualScore, autoScore)
+	}
+}
+
+func TestDecayedImportanceScore_ExplicitHalfLifeOverridesTier(t *testing.T) {
+	t.Parallel()
+	age := time.Now().UTC().Add(-168 * time.Hour).Format(time.RFC3339)
+	m := Memory{Tier: TierSessionLog, Source: SourceAuto, LastAccessedAt: age, AccessCount: 1}
+
+	// With explicit 168h, session_log should score ~0.5 (not use its 72h tier default).
+	score := DecayedImportanceScore(m, 168)
+	if score < 0.49 || score > 0.51 {
+		t.Errorf("explicit halfLife=168 score = %f, want ~0.5", score)
+	}
+}
+
 // ── RRFMerge ──────────────────────────────────────────────────────────────────
 
 func TestRRFMerge_SingleChannel(t *testing.T) {
