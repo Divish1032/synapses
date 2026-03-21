@@ -193,6 +193,50 @@ func TestSubgraphCache_LRU_EvictsLeastRecentlyUsed(t *testing.T) {
 	}
 }
 
+func TestSubgraphCache_ExpiredEntryCleanedFromOrder(t *testing.T) {
+	c := newSubgraphCache()
+	cfg := CarveConfig{MaxDepth: 1}
+	fp := "fpghost"
+	c.put("ghost", cfg, fp, &SubGraph{Root: "ghost"})
+
+	// Force expiry.
+	c.mu.Lock()
+	key := cacheKeyFor("ghost", cfg, fp)
+	c.entries[key].expiresAt = time.Now().Add(-1 * time.Second)
+	orderLenBefore := len(c.order)
+	c.mu.Unlock()
+
+	// get() should detect expiry and clean from both entries AND order.
+	_, ok := c.get("ghost", cfg, fp)
+	if ok {
+		t.Fatal("expired entry should not be returned")
+	}
+
+	c.mu.Lock()
+	orderLenAfter := len(c.order)
+	c.mu.Unlock()
+
+	if orderLenAfter != orderLenBefore-1 {
+		t.Fatalf("expired key should be removed from order: before=%d after=%d", orderLenBefore, orderLenAfter)
+	}
+
+	// Re-insert same key — should NOT create duplicate in order.
+	c.put("ghost", cfg, fp, &SubGraph{Root: "ghost"})
+
+	c.mu.Lock()
+	dupeCount := 0
+	for _, k := range c.order {
+		if k == key {
+			dupeCount++
+		}
+	}
+	c.mu.Unlock()
+
+	if dupeCount != 1 {
+		t.Fatalf("key should appear exactly once in order after re-insert, got %d", dupeCount)
+	}
+}
+
 // ── communities.go tests ─────────────────────────────────────────────────────
 
 func TestDetectCommunities_DefaultParams(t *testing.T) {
