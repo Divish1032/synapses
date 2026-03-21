@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	cacheMaxSize = 128
-	cacheTTL     = 30 * time.Second
+	cacheMaxSize = 512
+	cacheTTL     = 90 * time.Second
 )
 
 type cacheEntry struct {
@@ -25,7 +25,7 @@ type cacheEntry struct {
 type subgraphCache struct {
 	mu      sync.Mutex
 	entries map[string]*cacheEntry
-	order   []string // insertion-order keys for FIFO eviction
+	order   []string // access-order keys for LRU eviction (most recent at tail)
 }
 
 func newSubgraphCache() *subgraphCache {
@@ -84,23 +84,27 @@ func (c *subgraphCache) get(rootID NodeID, cfg CarveConfig, fingerprint string) 
 		delete(c.entries, key)
 		return nil, false
 	}
+	c.promoteKey(key)
 	return e.sub, true
 }
 
-// put stores a SubGraph in the cache. If the cache is at capacity the oldest
-// entry (by insertion order) is evicted first.
+// put stores a SubGraph in the cache. If the cache is at capacity the least
+// recently used entry is evicted first.
 // fingerprint is the structural fingerprint of the root node (see get).
 func (c *subgraphCache) put(rootID NodeID, cfg CarveConfig, fingerprint string, sub *SubGraph) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	key := cacheKeyFor(rootID, cfg, fingerprint)
-	if _, exists := c.entries[key]; !exists {
-		// New entry: evict the oldest if we are at capacity.
+	if _, exists := c.entries[key]; exists {
+		// Existing entry: promote to most-recently-used.
+		c.promoteKey(key)
+	} else {
+		// New entry: evict the LRU if we are at capacity.
 		for len(c.entries) >= cacheMaxSize && len(c.order) > 0 {
-			oldest := c.order[0]
+			lru := c.order[0]
 			c.order = c.order[1:]
-			delete(c.entries, oldest)
+			delete(c.entries, lru)
 		}
 		c.order = append(c.order, key)
 	}
@@ -152,4 +156,16 @@ func entryReferencesFile(e *cacheEntry, file string) bool {
 		}
 	}
 	return false
+}
+
+// promoteKey moves key to the tail of c.order (most-recently-used position).
+// Caller must hold c.mu.
+func (c *subgraphCache) promoteKey(key string) {
+	for i, k := range c.order {
+		if k == key {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			c.order = append(c.order, key)
+			return
+		}
+	}
 }
