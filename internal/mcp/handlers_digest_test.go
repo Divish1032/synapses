@@ -518,21 +518,19 @@ func TestGetBrainClient_NoBrain(t *testing.T) {
 	}
 }
 
-// TestSerializeCompact_SandwichOrdering verifies the "Lost in the Middle" ordering:
-// safety-critical content (violations, quality gaps, warnings) at the BEGINNING,
-// supplementary content (blame, ADRs, annotations) in the MIDDLE,
-// actionable items (calls, called-by, callee blocks) at the END.
-func TestSerializeCompact_SandwichOrdering(t *testing.T) {
+// newSandwichDC builds a directionalContext with all sections populated
+// so ordering assertions can check every position.
+func newSandwichDC() *directionalContext {
 	root := &graph.Node{
 		ID: "root", Name: "AuthLogin", Type: graph.NodeFunction,
 		File: "pkg/auth/auth.go", Line: 10,
 		Metadata: map[string]string{
-			"blame_author": "alice",
-			"blame_date":   "2026-03-01",
+			"blame_author":  "alice",
+			"blame_date":    "2026-03-01",
 			"blame_subject": "refactor auth",
 		},
 	}
-	dc := &directionalContext{
+	return &directionalContext{
 		Root: root,
 		Enrichment: &contextEnrichment{
 			RuleAlerts: []ruleAlert{
@@ -552,78 +550,179 @@ func TestSerializeCompact_SandwichOrdering(t *testing.T) {
 		Callers: []graph.CarvedNode{
 			{Node: &graph.Node{ID: "c2", Name: "HandleRequest", Type: graph.NodeFunction, File: "handler.go", Line: 20}},
 		},
+		Related: []graph.CarvedNode{
+			{Node: &graph.Node{ID: "r1", Name: "AuthInterface", Type: graph.NodeInterface, File: "auth.go", Line: 1}},
+		},
 		ADRs:       []brain.ADR{{ID: "adr-1", Title: "Use JWT", Status: "accepted"}},
 		Principles: []string{"keep it simple"},
 		Annotations: map[string][]store.Annotation{
 			"root": {{Note: "needs refactor"}},
 		},
 	}
+}
+
+// assertBefore is a test helper that fails if posA >= posB.
+func assertBefore(t *testing.T, nameA string, posA int, nameB string, posB int) {
+	t.Helper()
+	if posA >= posB {
+		t.Errorf("sandwich: %s (pos %d) must appear before %s (pos %d)", nameA, posA, nameB, posB)
+	}
+}
+
+// TestSerializeCompact_SandwichOrdering_Full verifies the "Lost in the Middle"
+// ordering at "full" detail level: safety → supplementary → actionable.
+func TestSerializeCompact_SandwichOrdering_Full(t *testing.T) {
+	dc := newSandwichDC()
+	// Give Related a brain summary so it appears in output.
+	dc.ContextPacket.DependencySummaries = map[string]string{
+		"AuthInterface": "core auth contract",
+	}
+	dc.ContextPacket.Insight = "performance-critical path"
 
 	out := serializeCompact(dc, "full")
 
-	// Find positions of key sections.
-	posViolation := strings.Index(out, "rule violation")
-	posGap := strings.Index(out, "quality gap")
-	posWarning := strings.Index(out, "high fan-out")
-	posBlame := strings.Index(out, "@alice")
-	posAnnotation := strings.Index(out, "needs refactor")
-	posADR := strings.Index(out, "[ADR]")
-	posLaws := strings.Index(out, "Laws:")
-	posCalls := strings.Index(out, "Calls:")
-	posCalledBy := strings.Index(out, "Called by:")
+	pos := func(marker string) int { return strings.Index(out, marker) }
+
+	posViolation := pos("rule violation")
+	posGap := pos("quality gap")
+	posWarning := pos("high fan-out")
+	posBlame := pos("@alice")
+	posAnnotation := pos("needs refactor")
+	posADR := pos("[ADR]")
+	posLaws := pos("Laws:")
+	posCalls := pos("Calls:")
+	posCalledBy := pos("Called by:")
+	posInsight := pos("Insight:")
+	posRelated := pos("AuthInterface")
+	// Callee detail block: second occurrence of ValidateToken (first is in "Calls:" line).
+	posCalleeBlock := strings.LastIndex(out, "[ValidateToken]")
 
 	// All sections must be present.
 	for _, check := range []struct {
 		name string
-		pos  int
+		p    int
 	}{
-		{"violation", posViolation},
-		{"gap", posGap},
-		{"warning", posWarning},
-		{"blame", posBlame},
-		{"annotation", posAnnotation},
-		{"ADR", posADR},
-		{"laws", posLaws},
-		{"calls", posCalls},
-		{"called by", posCalledBy},
+		{"violation", posViolation}, {"gap", posGap}, {"warning", posWarning},
+		{"blame", posBlame}, {"annotation", posAnnotation}, {"ADR", posADR},
+		{"laws", posLaws}, {"calls", posCalls}, {"called by", posCalledBy},
+		{"insight", posInsight}, {"related", posRelated}, {"callee block", posCalleeBlock},
 	} {
-		if check.pos < 0 {
+		if check.p < 0 {
 			t.Fatalf("section %q not found in output:\n%s", check.name, out)
 		}
 	}
 
-	// BEGINNING: violations and quality gaps before blame and ADRs.
-	if posViolation > posBlame {
-		t.Error("sandwich: violations must appear before blame (beginning > middle)")
-	}
-	if posGap > posBlame {
-		t.Error("sandwich: quality gaps must appear before blame (beginning > middle)")
+	// === BEGINNING: safety-critical before supplementary ===
+	assertBefore(t, "violations", posViolation, "blame", posBlame)
+	assertBefore(t, "quality gaps", posGap, "blame", posBlame)
+	assertBefore(t, "warnings", posWarning, "ADRs", posADR)
+
+	// === MIDDLE: supplementary before actionable ===
+	assertBefore(t, "blame", posBlame, "calls", posCalls)
+	assertBefore(t, "annotations", posAnnotation, "calls", posCalls)
+	assertBefore(t, "ADRs", posADR, "calls", posCalls)
+	assertBefore(t, "laws", posLaws, "calls", posCalls)
+
+	// === END: actionable items at the end ===
+	assertBefore(t, "ADRs", posADR, "calls", posCalls)
+	assertBefore(t, "ADRs", posADR, "called by", posCalledBy)
+
+	// Full-level: related nodes (supplementary) before callee detail blocks (actionable).
+	assertBefore(t, "related", posRelated, "callee block", posCalleeBlock)
+
+	// Callee detail blocks are the last content section (before entity_hash).
+	assertBefore(t, "insight", posInsight, "callee block", posCalleeBlock)
+}
+
+// TestSerializeCompact_SandwichOrdering_Neighbors verifies the sandwich pattern
+// at "neighbors" detail level: warnings/safety first, supplementary middle,
+// calls/called-by at end.
+func TestSerializeCompact_SandwichOrdering_Neighbors(t *testing.T) {
+	dc := newSandwichDC()
+	out := serializeCompact(dc, "neighbors")
+
+	pos := func(marker string) int { return strings.Index(out, marker) }
+
+	posViolation := pos("rule violation")
+	posGap := pos("quality gap")
+	posWarning := pos("high fan-out")
+	posBlame := pos("@alice")
+	posADR := pos("[ADR]")
+	posCalls := pos("Calls:")
+	posCalledBy := pos("Called by:")
+
+	for _, check := range []struct {
+		name string
+		p    int
+	}{
+		{"violation", posViolation}, {"gap", posGap}, {"warning", posWarning},
+		{"blame", posBlame}, {"ADR", posADR}, {"calls", posCalls}, {"called by", posCalledBy},
+	} {
+		if check.p < 0 {
+			t.Fatalf("section %q not found in neighbors output:\n%s", check.name, out)
+		}
 	}
 
-	// MIDDLE: blame, annotations, ADRs before calls/called-by.
-	if posBlame > posCalls {
-		t.Error("sandwich: blame must appear before calls (middle > end)")
+	// Safety before supplementary.
+	assertBefore(t, "violations", posViolation, "blame", posBlame)
+	assertBefore(t, "quality gaps", posGap, "blame", posBlame)
+	assertBefore(t, "warnings", posWarning, "ADRs", posADR)
+
+	// Supplementary before actionable.
+	assertBefore(t, "ADRs", posADR, "calls", posCalls)
+	assertBefore(t, "ADRs", posADR, "called by", posCalledBy)
+
+	// Callee detail blocks must NOT appear in neighbors level.
+	if strings.Contains(out, "[ValidateToken]") {
+		t.Error("neighbors level must not include callee detail blocks")
 	}
-	if posAnnotation > posCalls {
-		t.Error("sandwich: annotations must appear before calls (middle > end)")
-	}
-	if posADR > posCalls {
-		t.Error("sandwich: ADRs must appear before calls (middle > end)")
-	}
-	if posLaws > posCalls {
-		t.Error("sandwich: laws must appear before calls (middle > end)")
+}
+
+// TestSerializeCompact_SandwichOrdering_Summary verifies violations/gaps
+// appear before blame even in the summary level.
+func TestSerializeCompact_SandwichOrdering_Summary(t *testing.T) {
+	dc := newSandwichDC()
+	out := serializeCompact(dc, "summary")
+
+	posViolation := strings.Index(out, "rule violation")
+	posGap := strings.Index(out, "quality gap")
+	posBlame := strings.Index(out, "@alice")
+
+	if posViolation < 0 || posGap < 0 || posBlame < 0 {
+		t.Fatalf("expected violations, gaps, and blame in summary output:\n%s", out)
 	}
 
-	// END: warnings before calls/called-by (safety at beginning of post-summary).
-	if posWarning > posADR {
-		t.Error("sandwich: warnings must appear before ADRs")
-	}
+	assertBefore(t, "violations", posViolation, "blame", posBlame)
+	assertBefore(t, "quality gaps", posGap, "blame", posBlame)
 
-	// END: calls/called-by at the end.
-	if posCalls < posADR {
-		t.Error("sandwich: calls must appear after ADRs (end > middle)")
+	// Summary must NOT contain calls or callee blocks.
+	if strings.Contains(out, "Calls:") {
+		t.Error("summary must not contain Calls:")
 	}
-	if posCalledBy < posADR {
-		t.Error("sandwich: called-by must appear after ADRs (end > middle)")
+}
+
+// TestSerializeCompact_NilMetadata verifies no panic when Root.Metadata is nil.
+func TestSerializeCompact_NilMetadata(t *testing.T) {
+	dc := &directionalContext{
+		Root: &graph.Node{
+			ID: "x", Name: "Foo", Type: graph.NodeFunction,
+			File: "foo.go", Line: 1,
+			// Metadata intentionally nil.
+		},
+		Enrichment: &contextEnrichment{
+			RuleAlerts: []ruleAlert{
+				{RuleID: "r1", Severity: "LOW", FromNode: "a", ToNode: "b", EdgeType: "CALLS"},
+			},
+		},
+	}
+	// Must not panic for any detail level.
+	for _, level := range []string{"summary", "neighbors", "full"} {
+		out := serializeCompact(dc, level)
+		if !strings.Contains(out, "[Foo]") {
+			t.Errorf("level %q: expected root entity name in output", level)
+		}
+		if !strings.Contains(out, "rule violation") {
+			t.Errorf("level %q: expected rule violation in output", level)
+		}
 	}
 }
