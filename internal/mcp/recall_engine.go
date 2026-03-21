@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,12 @@ type GraphBFSResult struct {
 	ParentMap map[string]graphParentEntry
 	// SeedSet: original seed node IDs (for terminating path reconstruction).
 	SeedSet map[string]bool
+	// ActivationMap: spreading activation score for each reachable node (0.0–1.0).
+	// Seeds are also present with activation 1.0.
+	// Non-seed nodes receive activation proportional to edge type weight and
+	// parent fan-out. Nodes reachable via multiple paths hold the maximum score.
+	// Used to rank memories anchored to high-activation nodes higher in RRF.
+	ActivationMap map[string]float64
 }
 
 // TraversalPath describes how a specific memory was reached via graph traversal.
@@ -110,6 +117,10 @@ func (s *Server) quadRecallSearch(
 	var (
 		graphResult    GraphBFSResult
 		graphSeedCount int
+		// graphAnchorMap: memID → anchor nodeID for memories returned by the
+		// graph channel. Populated during activation sort, reused by traversal
+		// info to avoid a second DB round-trip.
+		graphAnchorMap map[string]string
 	)
 
 	collectMemories := func(name string, mems []store.Memory) {
@@ -251,6 +262,36 @@ func (s *Server) quadRecallSearch(
 				logRecallChannelError("graph", err)
 				return
 			}
+
+			// Step 4: Sort memories by anchor node activation so that memories
+			// attached to high-activation nodes get better RRF rank positions.
+			// Also caches the anchor map for traversal info (avoids a second DB call).
+			if len(mems) > 0 && len(bfsRes.ActivationMap) > 0 {
+				memIDs := make([]string, len(mems))
+				for i, m := range mems {
+					memIDs[i] = m.ID
+				}
+				bfsNodeSet := make(map[string]bool, len(bfsRes.Nodes))
+				for _, nid := range bfsRes.Nodes {
+					bfsNodeSet[nid] = true
+				}
+				anchorMap, anchorErr := s.store.GetMemoryAnchorNodeIDsInSet(memIDs, bfsNodeSet)
+				if anchorErr != nil {
+					logRecallChannelError("graph-activation", anchorErr)
+					// Sorting fails gracefully — fall through with unsorted memories.
+				} else {
+					// Store for traversal info reuse (no mutex — graph goroutine only).
+					graphAnchorMap = anchorMap
+					if len(anchorMap) > 0 {
+						sort.Slice(mems, func(i, j int) bool {
+							ai := bfsRes.ActivationMap[anchorMap[mems[i].ID]]
+							aj := bfsRes.ActivationMap[anchorMap[mems[j].ID]]
+							return ai > aj // descending: high-activation memories first
+						})
+					}
+				}
+			}
+
 			collectMemories("graph", mems)
 		}()
 	}
@@ -358,18 +399,26 @@ func (s *Server) quadRecallSearch(
 		// Collect memory IDs attributed to the graph channel in the final result.
 		graphMemIDs := graphAttributedMemIDs(result, attribution)
 		if len(graphMemIDs) > 0 && len(graphResult.ParentMap) > 0 {
-			// Build the set of nodes reachable in this BFS result (parent map keys).
-			// GetMemoryAnchorNodeIDsInSet filters to only anchors that ARE in this set,
-			// fixing the multi-anchor bug where the first-by-date anchor might not be
-			// the BFS-discovered one.
-			bfsNodeSet := make(map[string]bool, len(graphResult.ParentMap))
-			for nid := range graphResult.ParentMap {
-				bfsNodeSet[nid] = true
+			// Reuse the anchorMap populated during activation sort in the graph
+			// channel goroutine. graphAnchorMap covers all graph channel memories
+			// (a superset of graphMemIDs), so all lookups succeed.
+			// Fall back to a fresh DB query only when the activation sort was
+			// skipped (e.g., anchorErr in the goroutine or empty mems).
+			anchorMap := graphAnchorMap
+			if len(anchorMap) == 0 {
+				// Fallback: build nodeSet and re-query with the narrower graphMemIDs.
+				bfsNodeSet := make(map[string]bool, len(graphResult.ParentMap))
+				for nid := range graphResult.ParentMap {
+					bfsNodeSet[nid] = true
+				}
+				var dbErr error
+				anchorMap, dbErr = s.store.GetMemoryAnchorNodeIDsInSet(graphMemIDs, bfsNodeSet)
+				if dbErr != nil {
+					logRecallChannelError("graph-traversal", dbErr)
+					anchorMap = nil
+				}
 			}
-			anchorMap, err := s.store.GetMemoryAnchorNodeIDsInSet(graphMemIDs, bfsNodeSet)
-			if err != nil {
-				logRecallChannelError("graph-traversal", err)
-			} else if len(anchorMap) > 0 {
+			if len(anchorMap) > 0 {
 				ti.Paths = s.reconstructTraversalPaths(result, attribution, graphResult, anchorMap)
 			}
 		}
@@ -544,10 +593,38 @@ func (s *Server) graphNodeName(nodeID string) string {
 	return nodeID
 }
 
+// edgeActivationWeight returns the spreading activation multiplier for the given
+// edge type. CALLS (direct invocation) propagates full activation. IMPLEMENTS
+// (structural contract) propagates 70%. IMPORTS (package-level dependency)
+// propagates 50%. Unknown types are given 40% — conservative, as their
+// semantic coupling is weaker.
+//
+// Based on Anderson (1983) spreading activation theory: tighter coupling
+// between nodes means more shared cognitive context, so more activation flows.
+func edgeActivationWeight(t graph.EdgeType) float64 {
+	switch t {
+	case graph.EdgeCalls:
+		return 1.0
+	case graph.EdgeImplements:
+		return 0.7
+	case graph.EdgeImports:
+		return 0.5
+	default:
+		return 0.4
+	}
+}
+
 // graphBFS performs breadth-first search from seed node IDs following
 // CALLS, IMPORTS, and IMPLEMENTS edges. Returns a GraphBFSResult containing
 // reachable node IDs (excluding seeds), the parent map for path reconstruction,
-// and the seed set for termination detection.
+// the seed set for termination detection, and an activation map.
+//
+// Spreading activation (Anderson 1983): seeds start at 1.0. Each hop:
+//
+//	child_act = parent_act × edgeActivationWeight(type) / max(1, fan_out)
+//
+// fan_out is the count of allowed-type edges on the parent (both directions).
+// Nodes reachable via multiple paths keep the maximum activation.
 //
 // Edge type filtering by depth:
 //   - Depth 1: CALLS + IMPORTS + IMPLEMENTS (broad discovery)
@@ -567,11 +644,15 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 	parentMap := make(map[string]graphParentEntry, 64)
 	seedSet := make(map[string]bool, len(seeds))
 
+	// activationMap: seeds = 1.0; non-seeds = max activation across all paths.
+	activationMap := make(map[string]float64, len(seeds)+64)
+
 	for _, seed := range seeds {
 		seedSet[seed] = true
 		nid := graph.NodeID(seed)
 		if s.graph.GetNode(nid) != nil && !visited[nid] {
 			visited[nid] = true
+			activationMap[seed] = 1.0
 			frontier = append(frontier, nid)
 		}
 	}
@@ -598,10 +679,42 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 
 		var nextFrontier []graph.NodeID
 		for _, nid := range frontier {
+			parentActivation := activationMap[string(nid)]
+
+			// Fetch edges once for both fan-out counting and traversal.
+			outEdges := s.graph.OutEdges(nid)
+			inEdges := s.graph.InEdges(nid)
+
+			// fan-out: count of allowed-type edges in both directions.
+			// Divides parent activation so hub nodes don't flood neighbors.
+			fanOut := 0
+			for _, e := range outEdges {
+				if allowedTypes[e.Type] {
+					fanOut++
+				}
+			}
+			for _, e := range inEdges {
+				if allowedTypes[e.Type] {
+					fanOut++
+				}
+			}
+			if fanOut < 1 {
+				fanOut = 1
+			}
+
 			// Follow outgoing edges (callees, imports, implements).
 			// IsIncoming=false: nid (parent) CALLS/IMPORTS/IMPLEMENTS e.To.
-			for _, e := range s.graph.OutEdges(nid) {
-				if !allowedTypes[e.Type] || visited[e.To] {
+			for _, e := range outEdges {
+				if !allowedTypes[e.Type] {
+					continue
+				}
+				act := parentActivation * edgeActivationWeight(e.Type) / float64(fanOut)
+				// Update activation unconditionally — nodes reachable via
+				// multiple paths keep the maximum.
+				if act > activationMap[string(e.To)] {
+					activationMap[string(e.To)] = act
+				}
+				if visited[e.To] {
 					continue
 				}
 				visited[e.To] = true
@@ -620,8 +733,15 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 			}
 			// Follow incoming edges (callers of this node).
 			// IsIncoming=true: e.From CALLS nid — e.From is the caller, nid the callee.
-			for _, e := range s.graph.InEdges(nid) {
-				if !allowedTypes[e.Type] || visited[e.From] {
+			for _, e := range inEdges {
+				if !allowedTypes[e.Type] {
+					continue
+				}
+				act := parentActivation * edgeActivationWeight(e.Type) / float64(fanOut)
+				if act > activationMap[string(e.From)] {
+					activationMap[string(e.From)] = act
+				}
+				if visited[e.From] {
 					continue
 				}
 				visited[e.From] = true
@@ -651,9 +771,10 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 	}
 
 	return GraphBFSResult{
-		Nodes:     result,
-		ParentMap: parentMap,
-		SeedSet:   seedSet,
+		Nodes:         result,
+		ParentMap:     parentMap,
+		SeedSet:       seedSet,
+		ActivationMap: activationMap,
 	}
 }
 
