@@ -258,31 +258,62 @@ func blobToVec(b []byte) []float32 {
 	return vec
 }
 
-// normalizeVec returns a unit-length copy of vec. Returns nil for empty/zero-magnitude input.
+// normalizeVec returns a unit-length copy of vec. Returns nil for empty/zero-magnitude input,
+// or if normalization produces NaN/Inf (extreme float32 edge case).
 // Pre-normalizing vectors at insertion time reduces cosine similarity to a single dot product.
 func normalizeVec(vec []float32) []float32 {
 	if len(vec) == 0 {
 		return nil
 	}
 	norm := vek32.Norm(vec)
-	if norm == 0 {
+	if norm == 0 || math.IsNaN(float64(norm)) || math.IsInf(float64(norm), 0) {
 		return nil
 	}
 	out := make([]float32, len(vec))
 	copy(out, vec)
 	vek32.DivNumber_Inplace(out, norm)
+	// Guard: reject if division produced NaN/Inf (near-zero norm edge case).
+	if math.IsNaN(float64(out[0])) || math.IsInf(float64(out[0]), 0) {
+		return nil
+	}
 	return out
 }
 
 // normalizeStoredEmbeddings migrates existing embeddings to unit-normalized form.
-// Called once at store Open. Idempotent: re-normalizing a unit vector produces
-// the same vector within float32 precision. Skips rows that are already
-// normalized (norm within [0.999, 1.001]) to avoid unnecessary writes.
+// Called at store Open. Uses a sample-first check: reads ONE embedding per table
+// to decide whether a full scan is needed. After the first migration pass, all
+// vectors are normalized and subsequent opens skip in O(1).
+// Idempotent: re-normalizing a unit vector produces the same value within float32 precision.
 func (s *Store) normalizeStoredEmbeddings() {
-	normalizeTable := func(db interface {
+	type dbIface interface {
 		Query(string, ...any) (*sql.Rows, error)
+		QueryRow(string, ...any) *sql.Row
 		Exec(string, ...any) (sql.Result, error)
-	}, table, idCol string) int {
+	}
+
+	// sampleIsNormalized reads one embedding and checks if it's unit-length.
+	// Returns true if no embeddings exist or the sample is already normalized.
+	sampleIsNormalized := func(db dbIface, table string) bool {
+		var blob []byte
+		err := db.QueryRow(fmt.Sprintf("SELECT embedding FROM %s LIMIT 1", table)).Scan(&blob)
+		if err != nil {
+			return true // no rows = nothing to migrate
+		}
+		vec := blobToVec(blob)
+		if len(vec) == 0 {
+			return true
+		}
+		norm := vek32.Norm(vec)
+		return norm > 0.999 && norm < 1.001
+	}
+
+	// Quick check: if samples from both tables are already normalized, skip the full scan.
+	if sampleIsNormalized(s.graphDB, "node_embeddings") &&
+		sampleIsNormalized(s.knowledgeDB, "memory_embeddings") {
+		return
+	}
+
+	normalizeTable := func(db dbIface, table, idCol string) int {
 		rows, err := db.Query(fmt.Sprintf("SELECT %s, embedding FROM %s", idCol, table))
 		if err != nil {
 			return 0

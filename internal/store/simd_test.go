@@ -43,6 +43,20 @@ func TestNormalizeVec_DoesNotMutateInput(t *testing.T) {
 	}
 }
 
+func TestNormalizeVec_NaNInfGuard(t *testing.T) {
+	t.Parallel()
+	// NaN input: norm is NaN → should return nil.
+	nan := float32(math.NaN())
+	if got := normalizeVec([]float32{nan, 1}); got != nil {
+		t.Errorf("expected nil for NaN input, got %v", got)
+	}
+	// Inf input: norm is Inf → should return nil.
+	inf := float32(math.Inf(1))
+	if got := normalizeVec([]float32{inf, 1}); got != nil {
+		t.Errorf("expected nil for Inf input, got %v", got)
+	}
+}
+
 func TestDotSimilarity_NormalizedVectors(t *testing.T) {
 	t.Parallel()
 	a := normalizeVec([]float32{1, 0})
