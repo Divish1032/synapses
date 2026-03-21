@@ -51,6 +51,34 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		}
 	}
 
+	// === BEGINNING: Safety-critical content (high LLM attention) ===
+	// "Lost in the Middle" (Liu et al., NeurIPS 2023): LLMs attend 30%+ better
+	// to the beginning and end of context. Place violations and quality gaps
+	// here so agents never miss them.
+
+	// R19: Proactive rule alerts — actual violations found in the carved subgraph.
+	if dc.Enrichment != nil && len(dc.Enrichment.RuleAlerts) > 0 {
+		fmt.Fprintf(&b, "⚠ %d rule violation(s) in context:\n", len(dc.Enrichment.RuleAlerts))
+		for _, ra := range dc.Enrichment.RuleAlerts {
+			fromShort := shortName(ra.FromNode)
+			toShort := shortName(ra.ToNode)
+			fmt.Fprintf(&b, "  [%s] %s: %s → %s (%s)\n", ra.Severity, ra.RuleID, fromShort, toShort, ra.EdgeType)
+			if ra.SuggestedFix != "" {
+				fmt.Fprintf(&b, "    fix: %s\n", ra.SuggestedFix)
+			}
+		}
+	}
+
+	// R32: Open quality gaps.
+	if len(dc.QualityGaps) > 0 {
+		fmt.Fprintf(&b, "⚠ %d open quality gap(s):\n", len(dc.QualityGaps))
+		for _, g := range dc.QualityGaps {
+			fmt.Fprintf(&b, "  [%s] %s — %s\n", g.Severity, g.GapID, g.Description)
+		}
+	}
+
+	// === MIDDLE: Supplementary content (lower LLM attention zone) ===
+
 	// R3: Git blame line — who last touched this function and how stale it is.
 	if dc.Root.Metadata != nil {
 		if author := dc.Root.Metadata["blame_author"]; author != "" {
@@ -84,27 +112,6 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 			// Surface body of the most recent commit when it adds context beyond the subject.
 			if commits[0].Body != "" {
 				fmt.Fprintf(&b, "  └ %q\n", commits[0].Body)
-			}
-		}
-	}
-
-	// R32: Open quality gaps — surface before annotations so agents see known issues first.
-	if len(dc.QualityGaps) > 0 {
-		fmt.Fprintf(&b, "⚠ %d open quality gap(s):\n", len(dc.QualityGaps))
-		for _, g := range dc.QualityGaps {
-			fmt.Fprintf(&b, "  [%s] %s — %s\n", g.Severity, g.GapID, g.Description)
-		}
-	}
-
-	// R19: Proactive rule alerts — actual violations found in the carved subgraph.
-	if dc.Enrichment != nil && len(dc.Enrichment.RuleAlerts) > 0 {
-		fmt.Fprintf(&b, "⚠ %d rule violation(s) in context:\n", len(dc.Enrichment.RuleAlerts))
-		for _, ra := range dc.Enrichment.RuleAlerts {
-			fromShort := shortName(ra.FromNode)
-			toShort := shortName(ra.ToNode)
-			fmt.Fprintf(&b, "  [%s] %s: %s → %s (%s)\n", ra.Severity, ra.RuleID, fromShort, toShort, ra.EdgeType)
-			if ra.SuggestedFix != "" {
-				fmt.Fprintf(&b, "    fix: %s\n", ra.SuggestedFix)
 			}
 		}
 	}
@@ -158,28 +165,26 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		return strings.TrimSpace(b.String())
 	}
 
-	// "neighbors" and "full": add Calls / Called-by name lists.
+	// "neighbors" and "full": sandwich ordering continues.
 
-	// Calls: list callee names.
-	if len(dc.Callees) > 0 {
-		names := make([]string, 0, len(dc.Callees))
-		for _, c := range dc.Callees {
-			names = append(names, c.Node.Name)
-		}
-		fmt.Fprintf(&b, "Calls: %s\n", strings.Join(names, " · "))
+	// === BEGINNING (cont.): Warnings and confidence alerts ===
+
+	// Warnings: combine brain concerns + graph warnings.
+	var warnings []string
+	if dc.ContextPacket != nil {
+		warnings = append(warnings, dc.ContextPacket.GraphWarnings...)
+		warnings = append(warnings, dc.ContextPacket.Concerns...)
+	}
+	if len(warnings) > 0 {
+		fmt.Fprintf(&b, "⚠ %s\n", strings.Join(warnings, " · "))
 	}
 
-	// Called by: list caller names.
-	if len(dc.Callers) > 0 {
-		names := make([]string, 0, len(dc.Callers))
-		for _, c := range dc.Callers {
-			names = append(names, c.Node.Name)
-		}
-		fmt.Fprintf(&b, "Called by: %s\n", strings.Join(names, " · "))
-	} else if len(dc.Callees) == 0 {
-		// Neither callers nor callees — standalone entity.
-		b.WriteString("Called by: (none)\n")
+	// DIAG-3: caller-count confidence warning.
+	if dc.CallerCountWarning != "" {
+		fmt.Fprintf(&b, "%s\n", dc.CallerCountWarning)
 	}
+
+	// === MIDDLE: Supplementary content (lowest LLM attention zone) ===
 
 	// IMP-IMPL-2: For struct nodes, list field names and types from metadata.
 	// Fields are stored as "Name type,Name type,..." by the Go parser.
@@ -201,21 +206,6 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 			}
 			b.WriteString("\n")
 		}
-	}
-
-	// DIAG-3: caller-count confidence warning.
-	if dc.CallerCountWarning != "" {
-		fmt.Fprintf(&b, "%s\n", dc.CallerCountWarning)
-	}
-
-	// Warnings: combine brain concerns + graph warnings.
-	var warnings []string
-	if dc.ContextPacket != nil {
-		warnings = append(warnings, dc.ContextPacket.GraphWarnings...)
-		warnings = append(warnings, dc.ContextPacket.Concerns...)
-	}
-	if len(warnings) > 0 {
-		fmt.Fprintf(&b, "⚠ %s\n", strings.Join(warnings, " · "))
 	}
 
 	// Hot Constitution: append project principles as a Laws line.
@@ -246,7 +236,30 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		fmt.Fprintf(&b, "📚 [%s] %s\n", ap.ID, hint)
 	}
 
-	// "neighbors" level: stop after caller/callee names. No callee blocks.
+	// === END: Actionable items (second-highest LLM attention) ===
+
+	// Calls: list callee names.
+	if len(dc.Callees) > 0 {
+		names := make([]string, 0, len(dc.Callees))
+		for _, c := range dc.Callees {
+			names = append(names, c.Node.Name)
+		}
+		fmt.Fprintf(&b, "Calls: %s\n", strings.Join(names, " · "))
+	}
+
+	// Called by: list caller names.
+	if len(dc.Callers) > 0 {
+		names := make([]string, 0, len(dc.Callers))
+		for _, c := range dc.Callers {
+			names = append(names, c.Node.Name)
+		}
+		fmt.Fprintf(&b, "Called by: %s\n", strings.Join(names, " · "))
+	} else if len(dc.Callees) == 0 {
+		// Neither callers nor callees — standalone entity.
+		b.WriteString("Called by: (none)\n")
+	}
+
+	// "neighbors" level: stop after actionable call lists.
 	if detailLevel == "neighbors" {
 		if dc.EntityHash != "" {
 			fmt.Fprintf(&b, "\nentity_hash:%s\n", dc.EntityHash)
@@ -254,22 +267,11 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		return strings.TrimSpace(b.String())
 	}
 
-	// "full" level (default): add insight + callee detail blocks.
+	// "full" level (default): add remaining middle + actionable callee detail blocks.
 
 	// Architectural insight from brain (LLM-generated, only when brain available).
 	if dc.ContextPacket != nil && dc.ContextPacket.Insight != "" {
 		fmt.Fprintf(&b, "Insight: %s\n", dc.ContextPacket.Insight)
-	}
-
-	// Callee detail blocks: always show all callees in "full" mode so the output
-	// is visibly richer than "neighbors" even when the brain cache is cold.
-	// Without summaries, only the entity header line is written (no Summary line).
-	if len(dc.Callees) > 0 {
-		for _, c := range dc.Callees {
-			depSummary := getDepSummary(c.Node.Name, dc.ContextPacket)
-			b.WriteString("\n")
-			writeNodeHeader(&b, c.Node, depSummary)
-		}
 	}
 
 	// Show related nodes with brain summaries (often interface implementations, types).
@@ -280,6 +282,18 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		}
 		b.WriteString("\n")
 		writeNodeHeader(&b, r.Node, depSummary)
+	}
+
+	// Callee detail blocks: always show all callees in "full" mode so the output
+	// is visibly richer than "neighbors" even when the brain cache is cold.
+	// Without summaries, only the entity header line is written (no Summary line).
+	// Placed at end — actionable details agents act on immediately.
+	if len(dc.Callees) > 0 {
+		for _, c := range dc.Callees {
+			depSummary := getDepSummary(c.Node.Name, dc.ContextPacket)
+			b.WriteString("\n")
+			writeNodeHeader(&b, c.Node, depSummary)
+		}
 	}
 
 	if dc.Truncated {
