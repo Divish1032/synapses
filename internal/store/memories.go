@@ -709,6 +709,64 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 	return scanMemories(rows)
 }
 
+// ScoredMemory pairs a Memory with a raw channel score for ConvexMerge fusion.
+type ScoredMemory struct {
+	Memory Memory
+	Score  float64 // raw BM25 score (higher = better match)
+}
+
+// SearchMemoriesWithScores returns memories matching an FTS query along with
+// their raw BM25 scores. Used by ConvexMerge to do score-magnitude-aware
+// fusion instead of rank-only RRF.
+func (s *Store) SearchMemoriesWithScores(query string, limit int, includeStale bool) ([]ScoredMemory, error) {
+	if query == "" {
+		return nil, nil
+	}
+	safeQuery := sanitizeFTSQuery(query)
+	if safeQuery == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	q := `SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
+	             m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count,
+	             -rank AS score
+	      FROM memories m
+	      JOIN memories_fts f ON m.rowid = f.rowid
+	      WHERE memories_fts MATCH ?
+	        AND m.expires_at > ?`
+
+	if !includeStale {
+		q += ` AND m.stale = 0`
+	}
+	q += ` ORDER BY rank LIMIT ?`
+
+	rows, err := s.knowledgeDB.Query(q, safeQuery, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search memories with scores: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ScoredMemory
+	for rows.Next() {
+		var sm ScoredMemory
+		if err := rows.Scan(
+			&sm.Memory.ID, &sm.Memory.Tier, &sm.Memory.Content, &sm.Memory.EntityID,
+			&sm.Memory.AgentID, &sm.Memory.TaskID, &sm.Memory.Tags,
+			&sm.Memory.CreatedAt, &sm.Memory.ExpiresAt, &sm.Memory.LastAccessedAt,
+			&sm.Memory.Source, &sm.Memory.Importance, &sm.Memory.AccessCount,
+			&sm.Score,
+		); err != nil {
+			return nil, fmt.Errorf("scan scored memory: %w", err)
+		}
+		out = append(out, sm)
+	}
+	return out, rows.Err()
+}
+
 // SearchMemoriesIncludingStale is like SearchMemories but also returns stale memories.
 // Use for audit scenarios where the agent explicitly passes include_stale=true to recall().
 func (s *Store) SearchMemoriesIncludingStale(query string, limit int) ([]Memory, error) {

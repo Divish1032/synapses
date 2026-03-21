@@ -75,6 +75,10 @@ func (s *Store) UpsertEmbedding(nodeID, model string, vec []float32) error {
 	if err != nil {
 		return fmt.Errorf("upsert embedding: %w", err)
 	}
+
+	// Update the in-memory HNSW index for node embeddings.
+	s.nodeHNSWAdd(nodeID, nvec)
+
 	return nil
 }
 
@@ -136,12 +140,11 @@ func (s *Store) GetNodeTextForEmbedding(nodeID string) (text string, ok bool) {
 // Returns up to limit results ordered by descending similarity.
 // Falls back gracefully with (nil, nil) when no embeddings are stored yet.
 //
-// Uses a two-pass approach for memory efficiency:
+// Uses HNSW approximate nearest-neighbor index when available (Sprint 12 #4):
+//   - O(log N) query time vs O(N) brute-force
+//   - 3× oversampling for ≥95% recall, then Pass 2 fetches node metadata
 //
-//	Pass 1: Scan only (node_id, embedding) with a min-heap of size K.
-//	         Node metadata (name, signature, doc) is NOT loaded during scan,
-//	         keeping peak memory at O(K) instead of O(N).
-//	Pass 2: Fetch full node data only for the K winning candidates.
+// Falls back to brute-force scan when HNSW index is empty.
 func (s *Store) VectorSearch(queryVec []float32, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 20
@@ -156,12 +159,32 @@ func (s *Store) VectorSearch(queryVec []float32, limit int) ([]SearchResult, err
 		return nil, nil
 	}
 
-	// Pass 1: Lightweight scan — IDs and embeddings only.
+	// Fast path: HNSW ANN index.
+	if s.nodeHNSWReady() {
+		candidates := s.NodeHNSWSearch(normQuery, limit)
+		if len(candidates) > 0 {
+			h := &topKHeap{k: limit}
+			for _, c := range candidates {
+				h.tryPush(c.id, c.score, false)
+			}
+			winners := h.drain()
+			if len(winners) > 0 {
+				return s.fetchNodeSearchResults(winners)
+			}
+		}
+	}
+
+	// Fallback: brute-force scan.
+	return s.vectorSearchBruteForce(normQuery, limit)
+}
+
+// vectorSearchBruteForce is the O(N) fallback path for node vector search.
+func (s *Store) vectorSearchBruteForce(normQuery []float32, limit int) ([]SearchResult, error) {
 	rows, err := s.graphDB.Query(`
 		SELECT e.node_id, e.embedding
 		FROM node_embeddings e`)
 	if err != nil {
-		return nil, fmt.Errorf("vector search: %w", err)
+		return nil, fmt.Errorf("vector search (brute-force): %w", err)
 	}
 	defer rows.Close()
 
@@ -191,7 +214,12 @@ func (s *Store) VectorSearch(queryVec []float32, limit int) ([]SearchResult, err
 		return nil, nil
 	}
 
-	// Pass 2: Fetch node metadata for winners only.
+	return s.fetchNodeSearchResults(winners)
+}
+
+// fetchNodeSearchResults performs Pass 2 of the two-pass node vector search:
+// given top-K (id, score) tuples, fetches full node metadata from graphDB.
+func (s *Store) fetchNodeSearchResults(winners []scoredID) ([]SearchResult, error) {
 	lookup := make(map[string]struct{ pos int; score float64 }, len(winners))
 	placeholders := make([]string, len(winners))
 	args := make([]any, len(winners))

@@ -105,11 +105,17 @@ func (s *Server) quadRecallSearch(
 		channelLimit = 10
 	}
 
+	// Snapshot config once to prevent nil-pointer races if config is
+	// hot-reloaded between the check and the merge branch below.
+	cfg := s.config
+	useConvex := cfg != nil && cfg.Recall.FusionMode == "convex"
+
 	var (
 		mu              sync.Mutex
 		channels        = make(map[string][]string)
-		memMap          = make(map[string]store.Memory) // id → full memory for hydration
-		staleEmbeddings = make(map[string]bool)         // memory IDs with stale embeddings (entity changed)
+		channelScores   = make(map[string]*store.ChannelScores) // raw scores for ConvexMerge
+		memMap          = make(map[string]store.Memory)          // id → full memory for hydration
+		staleEmbeddings = make(map[string]bool)                  // memory IDs with stale embeddings (entity changed)
 	)
 
 	// Graph channel metadata: written only by the graph goroutine, read after
@@ -134,6 +140,20 @@ func (s *Server) quadRecallSearch(
 		channels[name] = ids
 	}
 
+	collectScoredMemories := func(name string, scored []store.ScoredMemory) {
+		mu.Lock()
+		defer mu.Unlock()
+		ids := make([]string, len(scored))
+		scores := make([]float64, len(scored))
+		for i, sm := range scored {
+			ids[i] = sm.Memory.ID
+			scores[i] = sm.Score
+			memMap[sm.Memory.ID] = sm.Memory
+		}
+		channels[name] = ids
+		channelScores[name] = &store.ChannelScores{IDs: ids, Scores: scores}
+	}
+
 	collectMemoryIDs := func(name string, ids []string) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -151,18 +171,28 @@ func (s *Server) quadRecallSearch(
 		defer cancel()
 		_ = chCtx // context for future cancellation awareness
 
-		var mems []store.Memory
-		var err error
-		if includeStale {
-			mems, err = s.store.SearchMemoriesIncludingStale(query, channelLimit)
+		if useConvex {
+			// ConvexMerge needs raw BM25 scores for magnitude-aware fusion.
+			scored, err := s.store.SearchMemoriesWithScores(query, channelLimit, includeStale)
+			if err != nil {
+				logRecallChannelError("bm25", err)
+				return
+			}
+			collectScoredMemories("bm25", scored)
 		} else {
-			mems, err = s.store.SearchMemories(query, channelLimit)
+			var mems []store.Memory
+			var err error
+			if includeStale {
+				mems, err = s.store.SearchMemoriesIncludingStale(query, channelLimit)
+			} else {
+				mems, err = s.store.SearchMemories(query, channelLimit)
+			}
+			if err != nil {
+				logRecallChannelError("bm25", err)
+				return
+			}
+			collectMemories("bm25", mems)
 		}
-		if err != nil {
-			logRecallChannelError("bm25", err)
-			return
-		}
-		collectMemories("bm25", mems)
 	}()
 
 	// ── Channel 2: Semantic ───────────────────────────────────────────────
@@ -194,8 +224,10 @@ func (s *Server) quadRecallSearch(
 			// Hydrate full Memory structs for results, preserving cosine-similarity order.
 			// Track stale embedding IDs for the recall response annotation.
 			ids := make([]string, len(vecResults))
+			cosineScores := make([]float64, len(vecResults))
 			for i, vr := range vecResults {
 				ids[i] = vr.MemoryID
+				cosineScores[i] = vr.Score
 				if vr.StaleEmbedding {
 					mu.Lock()
 					staleEmbeddings[vr.MemoryID] = true
@@ -208,6 +240,17 @@ func (s *Server) quadRecallSearch(
 					logRecallChannelError("semantic", hydErr)
 					// Fall back to IDs only — RRF can still rank them.
 					collectMemoryIDs("semantic", ids)
+					// In convex mode, still populate channel scores from the
+					// cosine similarities we already have. The scores are valid
+					// even though we couldn't hydrate full Memory structs.
+					if useConvex {
+						mu.Lock()
+						channelScores["semantic"] = &store.ChannelScores{
+							IDs:    ids,
+							Scores: cosineScores,
+						}
+						mu.Unlock()
+					}
 					return
 				}
 				// GetMemoriesByIDs returns in arbitrary SQL order.
@@ -218,12 +261,26 @@ func (s *Server) quadRecallSearch(
 					memByID[m.ID] = m
 				}
 				ordered := make([]store.Memory, 0, len(ids))
-				for _, id := range ids {
+				orderedScores := make([]float64, 0, len(ids))
+				for idx, id := range ids {
 					if m, ok := memByID[id]; ok {
 						ordered = append(ordered, m)
+						orderedScores = append(orderedScores, cosineScores[idx])
 					}
 				}
 				collectMemories("semantic", ordered)
+				if useConvex {
+					mu.Lock()
+					cs := &store.ChannelScores{
+						IDs:    make([]string, len(ordered)),
+						Scores: orderedScores,
+					}
+					for i, m := range ordered {
+						cs.IDs[i] = m.ID
+					}
+					channelScores["semantic"] = cs
+					mu.Unlock()
+				}
 			}
 		}()
 	}
@@ -268,6 +325,9 @@ func (s *Server) quadRecallSearch(
 			// Uses MAX activation across all of a memory's anchors — a memory
 			// anchored to both a high- and a low-activation node should rank high.
 			// Also caches the first-anchor map for traversal info (avoids a second DB call).
+			//
+			// maxAct is scoped outside the nested if so ConvexMerge can use it.
+			maxAct := make(map[string]float64, len(mems))
 			if len(mems) > 0 && len(bfsRes.ActivationMap) > 0 {
 				memIDs := make([]string, len(mems))
 				for i, m := range mems {
@@ -284,7 +344,6 @@ func (s *Server) quadRecallSearch(
 					// Sorting fails gracefully — fall through with unsorted memories.
 				} else if len(allAnchors) > 0 {
 					// Pre-compute max activation score per memory.
-					maxAct := make(map[string]float64, len(mems))
 					for memID, nodeIDs := range allAnchors {
 						best := 0.0
 						for _, nid := range nodeIDs {
@@ -311,6 +370,29 @@ func (s *Server) quadRecallSearch(
 			}
 
 			collectMemories("graph", mems)
+			if useConvex && len(mems) > 0 && len(maxAct) > 0 {
+				// Use activation scores as raw graph channel scores.
+				// Only emit when maxAct is populated — otherwise all scores
+				// are 0.0 which normalizes to all-1.0, giving every graph
+				// result misleading maximum weight.
+				hasNonZero := false
+				mu.Lock()
+				cs := &store.ChannelScores{
+					IDs:    make([]string, len(mems)),
+					Scores: make([]float64, len(mems)),
+				}
+				for i, m := range mems {
+					cs.IDs[i] = m.ID
+					cs.Scores[i] = maxAct[m.ID]
+					if cs.Scores[i] > 0 {
+						hasNonZero = true
+					}
+				}
+				if hasNonZero {
+					channelScores["graph"] = cs
+				}
+				mu.Unlock()
+			}
 		}()
 	}
 
@@ -341,16 +423,50 @@ func (s *Server) quadRecallSearch(
 		// The order from RecentMemories is already created_at DESC, which is
 		// equivalent to recency-first ranking. No re-sort needed.
 		collectMemories("temporal", mems)
+		if useConvex && len(mems) > 0 {
+			// Use recency decay as raw temporal channel scores.
+			mu.Lock()
+			cs := &store.ChannelScores{
+				IDs:    make([]string, len(mems)),
+				Scores: make([]float64, len(mems)),
+			}
+			for i, m := range mems {
+				cs.IDs[i] = m.ID
+				cs.Scores[i] = store.DecayedImportanceScore(m, 0)
+			}
+			channelScores["temporal"] = cs
+			mu.Unlock()
+		}
 	}()
 
 	wg.Wait()
 
-	// ── RRF Merge ─────────────────────────────────────────────────────────
+	// ── Merge ────────────────────────────────────────────────────────────
 	if len(channels) == 0 {
 		return nil, nil, nil, nil
 	}
 
-	rankedIDs, attribution := store.RRFMergeWeighted(channels, limit, 60, store.DefaultRRFWeights)
+	var rankedIDs []string
+	var attribution map[string][]string
+
+	if useConvex && len(channelScores) > 0 {
+		// Score-aware convex fusion: uses score magnitudes, not just ranks.
+		cw := store.DefaultConvexWeights
+		if cfg.Recall.ConvexAlpha != nil {
+			cw.Alpha = clampUnit(*cfg.Recall.ConvexAlpha)
+		}
+		if cfg.Recall.ConvexGraphBonus != nil {
+			cw.GraphBonus = clampUnit(*cfg.Recall.ConvexGraphBonus)
+		}
+		if cfg.Recall.ConvexTemporalBonus != nil {
+			cw.TemporalBonus = clampUnit(*cfg.Recall.ConvexTemporalBonus)
+		}
+		rankedIDs, attribution = store.ConvexMerge(channelScores, limit, cw)
+	} else {
+		// Default: Reciprocal Rank Fusion (rank-only).
+		rankedIDs, attribution = store.RRFMergeWeighted(channels, limit, 60, store.DefaultRRFWeights)
+	}
+
 	if len(rankedIDs) == 0 {
 		return nil, nil, nil, nil
 	}
@@ -794,6 +910,18 @@ func (s *Server) graphBFS(seeds []string, maxDepth int) GraphBFSResult {
 		SeedSet:       seedSet,
 		ActivationMap: activationMap,
 	}
+}
+
+// clampUnit clamps a float64 to the [0, 1] range.
+// Used for config validation of ConvexWeights fields.
+func clampUnit(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
 
 // logRecallChannelError logs a non-fatal error from a recall channel.

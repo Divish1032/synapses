@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"math"
 	"testing"
 	"time"
 )
@@ -634,6 +635,355 @@ func TestGetMemoriesByAnchorNodes_EmptyInput(t *testing.T) {
 	}
 }
 
+// ── ConvexMerge ────────────────────────────────────────────────────────────────
+
+func TestConvexMerge_SingleChannel_BM25(t *testing.T) {
+	t.Parallel()
+	channels := map[string]*ChannelScores{
+		"bm25": {IDs: []string{"a", "b", "c"}, Scores: []float64{10.0, 5.0, 1.0}},
+	}
+	ids, attr := ConvexMerge(channels, 3, DefaultConvexWeights)
+	if len(ids) != 3 {
+		t.Fatalf("got %d results, want 3", len(ids))
+	}
+	// "a" has highest BM25 score → should rank first.
+	if ids[0] != "a" {
+		t.Errorf("first = %q, want a (highest BM25)", ids[0])
+	}
+	if ids[2] != "c" {
+		t.Errorf("last = %q, want c (lowest BM25)", ids[2])
+	}
+	if len(attr["a"]) != 1 || attr["a"][0] != "bm25" {
+		t.Errorf("attribution for a = %v, want [bm25]", attr["a"])
+	}
+}
+
+func TestConvexMerge_TwoChannels_ScoreMagnitudeMatters(t *testing.T) {
+	t.Parallel()
+	// "a" has low BM25 but very high semantic. "b" has high BM25 but low semantic.
+	// With α=0.5 (equal weight), the one with higher total normalized score wins.
+	channels := map[string]*ChannelScores{
+		"bm25":     {IDs: []string{"a", "b"}, Scores: []float64{1.0, 10.0}},
+		"semantic": {IDs: []string{"a", "b"}, Scores: []float64{0.95, 0.30}},
+	}
+	// α=0.5: bm25 weight=0.5, semantic weight=0.5
+	// a: 0.5*(0/9) + 0.5*(1.0) = 0.0 + 0.5 = 0.5
+	// b: 0.5*(9/9) + 0.5*(0.0) = 0.5 + 0.0 = 0.5
+	// Tie → broken alphabetically: a < b → a first.
+	ids, _ := ConvexMerge(channels, 2, DefaultConvexWeights)
+	if len(ids) != 2 {
+		t.Fatalf("got %d results, want 2", len(ids))
+	}
+	// Exact tie with equal weights → alphabetical order.
+	if ids[0] != "a" {
+		t.Errorf("first = %q, want a (alphabetical tie-break)", ids[0])
+	}
+}
+
+func TestConvexMerge_AlphaShiftsFavorToBM25(t *testing.T) {
+	t.Parallel()
+	channels := map[string]*ChannelScores{
+		"bm25":     {IDs: []string{"a", "b"}, Scores: []float64{1.0, 10.0}},
+		"semantic": {IDs: []string{"a", "b"}, Scores: []float64{0.99, 0.30}},
+	}
+	// α=0.9: strongly favor BM25.
+	// b has much higher BM25 → should win.
+	weights := ConvexWeights{Alpha: 0.9, GraphBonus: 0.3, TemporalBonus: 0.2}
+	ids, _ := ConvexMerge(channels, 2, weights)
+	if ids[0] != "b" {
+		t.Errorf("first = %q, want b (high-alpha favors BM25)", ids[0])
+	}
+}
+
+func TestConvexMerge_AlphaShiftsFavorToSemantic(t *testing.T) {
+	t.Parallel()
+	channels := map[string]*ChannelScores{
+		"bm25":     {IDs: []string{"a", "b"}, Scores: []float64{1.0, 10.0}},
+		"semantic": {IDs: []string{"a", "b"}, Scores: []float64{0.99, 0.30}},
+	}
+	// α=0.1: strongly favor semantic.
+	// a has much higher semantic → should win.
+	weights := ConvexWeights{Alpha: 0.1, GraphBonus: 0.3, TemporalBonus: 0.2}
+	ids, _ := ConvexMerge(channels, 2, weights)
+	if ids[0] != "a" {
+		t.Errorf("first = %q, want a (low-alpha favors semantic)", ids[0])
+	}
+}
+
+func TestConvexMerge_GraphBonusLiftsGraphResults(t *testing.T) {
+	t.Parallel()
+	// "a" only in BM25, "b" in BM25 + graph. Same BM25 score.
+	// Graph bonus should lift "b" above "a".
+	channels := map[string]*ChannelScores{
+		"bm25":  {IDs: []string{"a", "b"}, Scores: []float64{5.0, 5.0}},
+		"graph": {IDs: []string{"b"}, Scores: []float64{0.8}},
+	}
+	ids, _ := ConvexMerge(channels, 2, DefaultConvexWeights)
+	if ids[0] != "b" {
+		t.Errorf("first = %q, want b (graph bonus lifts it)", ids[0])
+	}
+}
+
+func TestConvexMerge_TemporalBonusLiftsRecentResults(t *testing.T) {
+	t.Parallel()
+	// "a" only in BM25, "b" in BM25 + temporal. Same BM25 score.
+	channels := map[string]*ChannelScores{
+		"bm25":     {IDs: []string{"a", "b"}, Scores: []float64{5.0, 5.0}},
+		"temporal": {IDs: []string{"b"}, Scores: []float64{0.9}},
+	}
+	ids, _ := ConvexMerge(channels, 2, DefaultConvexWeights)
+	if ids[0] != "b" {
+		t.Errorf("first = %q, want b (temporal bonus lifts it)", ids[0])
+	}
+}
+
+func TestConvexMerge_FourChannels_HighScoresWin(t *testing.T) {
+	t.Parallel()
+	// "m1" appears in all 4 channels with the HIGHEST score in each.
+	// Unlike RRF, ConvexMerge rewards score magnitude — being top-scored
+	// in multiple channels should dominate.
+	channels := map[string]*ChannelScores{
+		"bm25":     {IDs: []string{"m1", "m2"}, Scores: []float64{10.0, 3.0}},
+		"semantic": {IDs: []string{"m1", "m3"}, Scores: []float64{0.95, 0.3}},
+		"graph":    {IDs: []string{"m1", "m4"}, Scores: []float64{0.9, 0.4}},
+		"temporal": {IDs: []string{"m1", "m5"}, Scores: []float64{0.95, 0.2}},
+	}
+	ids, attr := ConvexMerge(channels, 5, DefaultConvexWeights)
+	if ids[0] != "m1" {
+		t.Errorf("first = %q, want m1 (highest score in all 4 channels)", ids[0])
+	}
+	if len(attr["m1"]) != 4 {
+		t.Errorf("m1 channels = %d, want 4", len(attr["m1"]))
+	}
+}
+
+func TestConvexMerge_LimitRespected(t *testing.T) {
+	t.Parallel()
+	channels := map[string]*ChannelScores{
+		"bm25": {IDs: []string{"a", "b", "c", "d", "e"}, Scores: []float64{5, 4, 3, 2, 1}},
+	}
+	ids, _ := ConvexMerge(channels, 2, DefaultConvexWeights)
+	if len(ids) != 2 {
+		t.Errorf("got %d results, want 2", len(ids))
+	}
+}
+
+func TestConvexMerge_EmptyChannels(t *testing.T) {
+	t.Parallel()
+	channels := map[string]*ChannelScores{}
+	ids, attr := ConvexMerge(channels, 10, DefaultConvexWeights)
+	if len(ids) != 0 {
+		t.Errorf("got %d results from empty channels, want 0", len(ids))
+	}
+	if len(attr) != 0 {
+		t.Errorf("got %d attributions from empty channels, want 0", len(attr))
+	}
+}
+
+func TestConvexMerge_NilChannelScores(t *testing.T) {
+	t.Parallel()
+	channels := map[string]*ChannelScores{
+		"bm25":     nil,
+		"semantic": {IDs: []string{"a"}, Scores: []float64{0.9}},
+	}
+	ids, _ := ConvexMerge(channels, 5, DefaultConvexWeights)
+	if len(ids) != 1 || ids[0] != "a" {
+		t.Errorf("got %v, want [a]", ids)
+	}
+}
+
+func TestConvexMerge_AllEqualScores_NormalizesToOne(t *testing.T) {
+	t.Parallel()
+	// All same score → all normalize to 1.0 → rank alphabetically.
+	channels := map[string]*ChannelScores{
+		"bm25": {IDs: []string{"c", "a", "b"}, Scores: []float64{5.0, 5.0, 5.0}},
+	}
+	ids, _ := ConvexMerge(channels, 3, DefaultConvexWeights)
+	if ids[0] != "a" || ids[1] != "b" || ids[2] != "c" {
+		t.Errorf("equal scores should sort alphabetically, got %v", ids)
+	}
+}
+
+func TestConvexMerge_DeterministicTieBreaking(t *testing.T) {
+	t.Parallel()
+	// Same setup as RRF test: "a" and "b" with equal scores.
+	channels := map[string]*ChannelScores{
+		"ch1": {IDs: []string{"b"}, Scores: []float64{1.0}},
+		"ch2": {IDs: []string{"a"}, Scores: []float64{1.0}},
+	}
+	ids, _ := ConvexMerge(channels, 2, ConvexWeights{Alpha: 0.5, GraphBonus: 0.5, TemporalBonus: 0.5})
+	if len(ids) != 2 || ids[0] != "a" || ids[1] != "b" {
+		t.Errorf("tie-breaking: got %v, want [a b]", ids)
+	}
+}
+
+// ── minMaxNormalize ────────────────────────────────────────────────────────────
+
+func TestMinMaxNormalize_BasicRange(t *testing.T) {
+	t.Parallel()
+	norm := minMaxNormalize([]float64{1.0, 5.0, 10.0})
+	// min=1, max=10, spread=9
+	// (1-1)/9 = 0.0, (5-1)/9 ≈ 0.444, (10-1)/9 = 1.0
+	if norm[0] != 0.0 {
+		t.Errorf("norm[0] = %f, want 0.0", norm[0])
+	}
+	if norm[2] != 1.0 {
+		t.Errorf("norm[2] = %f, want 1.0", norm[2])
+	}
+	if norm[1] < 0.44 || norm[1] > 0.45 {
+		t.Errorf("norm[1] = %f, want ~0.444", norm[1])
+	}
+}
+
+func TestMinMaxNormalize_SingleElement(t *testing.T) {
+	t.Parallel()
+	norm := minMaxNormalize([]float64{42.0})
+	if norm[0] != 1.0 {
+		t.Errorf("single element should normalize to 1.0, got %f", norm[0])
+	}
+}
+
+func TestMinMaxNormalize_AllEqual(t *testing.T) {
+	t.Parallel()
+	norm := minMaxNormalize([]float64{3.0, 3.0, 3.0})
+	for i, v := range norm {
+		if v != 1.0 {
+			t.Errorf("norm[%d] = %f, want 1.0 (all equal)", i, v)
+		}
+	}
+}
+
+func TestMinMaxNormalize_Empty(t *testing.T) {
+	t.Parallel()
+	norm := minMaxNormalize(nil)
+	if norm != nil {
+		t.Errorf("empty input should return nil, got %v", norm)
+	}
+}
+
+func TestMinMaxNormalize_NegativeScores(t *testing.T) {
+	t.Parallel()
+	// BM25 can return negative scores in raw form.
+	norm := minMaxNormalize([]float64{-10.0, -5.0, 0.0})
+	if norm[0] != 0.0 {
+		t.Errorf("norm[0] = %f, want 0.0 (most negative)", norm[0])
+	}
+	if norm[2] != 1.0 {
+		t.Errorf("norm[2] = %f, want 1.0 (highest)", norm[2])
+	}
+	if norm[1] != 0.5 {
+		t.Errorf("norm[1] = %f, want 0.5", norm[1])
+	}
+}
+
+// ── SearchMemoriesWithScores ──────────────────────────────────────────────────
+
+func TestSearchMemoriesWithScores_ReturnsBM25Scores(t *testing.T) {
+	t.Parallel()
+	st := openRecallTestStore(t)
+
+	_, err := st.InsertMemory(Memory{
+		Tier:    TierEntity,
+		Content: "authentication token validation middleware",
+		AgentID: "agent-1",
+		Source:  SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scored, err := st.SearchMemoriesWithScores("authentication", 10, false)
+	if err != nil {
+		t.Fatalf("SearchMemoriesWithScores: %v", err)
+	}
+	if len(scored) == 0 {
+		t.Fatal("expected at least 1 scored result")
+	}
+	if scored[0].Score <= 0 {
+		t.Errorf("BM25 score should be positive, got %f", scored[0].Score)
+	}
+	if scored[0].Memory.Content == "" {
+		t.Error("memory content should be populated")
+	}
+}
+
+func TestSearchMemoriesWithScores_OrderedByScore(t *testing.T) {
+	t.Parallel()
+	st := openRecallTestStore(t)
+
+	// Insert two memories: one highly relevant, one marginally.
+	_, _ = st.InsertMemory(Memory{
+		Tier:    TierEntity,
+		Content: "authentication authentication authentication token",
+		AgentID: "agent-1",
+		Source:  SourceManual,
+	})
+	_, _ = st.InsertMemory(Memory{
+		Tier:    TierEntity,
+		Content: "database connection pooling with authentication check",
+		AgentID: "agent-1",
+		Source:  SourceManual,
+	})
+
+	scored, err := st.SearchMemoriesWithScores("authentication", 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scored) < 2 {
+		t.Fatalf("expected 2 results, got %d", len(scored))
+	}
+	// First result should have higher or equal score.
+	if scored[0].Score < scored[1].Score {
+		t.Errorf("results not ordered by score: %f < %f", scored[0].Score, scored[1].Score)
+	}
+}
+
+func TestSearchMemoriesWithScores_EmptyQuery(t *testing.T) {
+	t.Parallel()
+	st := openRecallTestStore(t)
+	scored, err := st.SearchMemoriesWithScores("", 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scored) != 0 {
+		t.Errorf("empty query should return nil, got %d", len(scored))
+	}
+}
+
+func TestSearchMemoriesWithScores_IncludeStale(t *testing.T) {
+	t.Parallel()
+	st := openRecallTestStore(t)
+
+	_, _ = st.InsertMemory(Memory{
+		Tier:     TierEntity,
+		Content:  "stale authentication middleware",
+		EntityID: "repo::auth.go::Auth",
+		AgentID:  "agent-1",
+		Source:   SourceManual,
+	})
+	_ = st.MarkEntityMemoriesStale("repo::auth.go::Auth", "changed")
+
+	// Without stale: should not find it.
+	scored, _ := st.SearchMemoriesWithScores("authentication", 10, false)
+	for _, s := range scored {
+		if s.Memory.Content == "stale authentication middleware" {
+			t.Error("stale memory should be excluded when includeStale=false")
+		}
+	}
+
+	// With stale: should find it.
+	scored, _ = st.SearchMemoriesWithScores("authentication", 10, true)
+	found := false
+	for _, s := range scored {
+		if s.Memory.Content == "stale authentication middleware" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("stale memory should be included when includeStale=true")
+	}
+}
+
 func TestGetMemoriesByAnchorNodes_LimitRespected(t *testing.T) {
 	t.Parallel()
 	st := openRecallTestStore(t)
@@ -660,6 +1010,111 @@ func TestGetMemoriesByAnchorNodes_LimitRespected(t *testing.T) {
 	}
 	if len(mems) != 2 {
 		t.Errorf("got %d memories, want 2 (limit)", len(mems))
+	}
+}
+
+// ── Production edge cases: NaN/Inf, mismatched lengths, zero weights ────────
+
+func TestMinMaxNormalize_NaN_SanitizedToZero(t *testing.T) {
+	t.Parallel()
+	nan := math.NaN()
+	norm := minMaxNormalize([]float64{nan, 5.0, 10.0})
+	// NaN → 0.0; min=0, max=10; (0-0)/10=0, (5-0)/10=0.5, (10-0)/10=1.0
+	if norm[0] != 0.0 {
+		t.Errorf("NaN should sanitize to 0.0, got %f", norm[0])
+	}
+	if norm[2] != 1.0 {
+		t.Errorf("norm[2] = %f, want 1.0", norm[2])
+	}
+}
+
+func TestMinMaxNormalize_Inf_SanitizedToZero(t *testing.T) {
+	t.Parallel()
+	inf := math.Inf(1)
+	norm := minMaxNormalize([]float64{inf, 5.0, 10.0})
+	// +Inf → 0.0; min=0, max=10.
+	if norm[0] != 0.0 {
+		t.Errorf("+Inf should sanitize to 0.0, got %f", norm[0])
+	}
+}
+
+func TestMinMaxNormalize_AllNaN_NormalizesToOne(t *testing.T) {
+	t.Parallel()
+	nan := math.NaN()
+	norm := minMaxNormalize([]float64{nan, nan, nan})
+	// All NaN → all 0.0 → all equal → all 1.0.
+	for i, v := range norm {
+		if v != 1.0 {
+			t.Errorf("norm[%d] = %f, want 1.0 (all-NaN → all-equal → 1.0)", i, v)
+		}
+	}
+}
+
+func TestConvexMerge_MismatchedIDsScores_SkipsChannel(t *testing.T) {
+	t.Parallel()
+	// IDs has 3 elements but Scores has 2 → channel should be skipped.
+	channels := map[string]*ChannelScores{
+		"bm25":     {IDs: []string{"a", "b", "c"}, Scores: []float64{10.0, 5.0}},
+		"semantic": {IDs: []string{"d"}, Scores: []float64{0.9}},
+	}
+	ids, _ := ConvexMerge(channels, 5, DefaultConvexWeights)
+	// bm25 skipped (mismatched), semantic survives.
+	if len(ids) != 1 || ids[0] != "d" {
+		t.Errorf("got %v, want [d] (bm25 skipped due to length mismatch)", ids)
+	}
+}
+
+func TestConvexMerge_ZeroAlpha_AllSemantic(t *testing.T) {
+	t.Parallel()
+	// α=0 → BM25 weight=0, semantic weight=1.
+	channels := map[string]*ChannelScores{
+		"bm25":     {IDs: []string{"a", "b"}, Scores: []float64{100.0, 1.0}},
+		"semantic": {IDs: []string{"a", "b"}, Scores: []float64{0.1, 0.9}},
+	}
+	weights := ConvexWeights{Alpha: 0.0, GraphBonus: 0, TemporalBonus: 0}
+	ids, _ := ConvexMerge(channels, 2, weights)
+	// BM25 contributes 0. Semantic: a=0.0, b=1.0 → b first.
+	if ids[0] != "b" {
+		t.Errorf("first = %q, want b (alpha=0, all semantic)", ids[0])
+	}
+}
+
+func TestConvexMerge_OneAlpha_AllBM25(t *testing.T) {
+	t.Parallel()
+	// α=1 → BM25 weight=1, semantic weight=0.
+	channels := map[string]*ChannelScores{
+		"bm25":     {IDs: []string{"a", "b"}, Scores: []float64{100.0, 1.0}},
+		"semantic": {IDs: []string{"a", "b"}, Scores: []float64{0.1, 0.9}},
+	}
+	weights := ConvexWeights{Alpha: 1.0, GraphBonus: 0, TemporalBonus: 0}
+	ids, _ := ConvexMerge(channels, 2, weights)
+	// Semantic contributes 0. BM25: a=1.0, b=0.0 → a first.
+	if ids[0] != "a" {
+		t.Errorf("first = %q, want a (alpha=1, all BM25)", ids[0])
+	}
+}
+
+func TestConvexMerge_NaNScores_DoNotCrash(t *testing.T) {
+	t.Parallel()
+	nan := math.NaN()
+	channels := map[string]*ChannelScores{
+		"bm25": {IDs: []string{"a", "b"}, Scores: []float64{nan, 5.0}},
+	}
+	// Must not panic.
+	ids, _ := ConvexMerge(channels, 2, DefaultConvexWeights)
+	if len(ids) != 2 {
+		t.Errorf("got %d results, want 2", len(ids))
+	}
+}
+
+func TestConvexMerge_EmptyScoresSlice(t *testing.T) {
+	t.Parallel()
+	channels := map[string]*ChannelScores{
+		"bm25": {IDs: []string{}, Scores: []float64{}},
+	}
+	ids, _ := ConvexMerge(channels, 5, DefaultConvexWeights)
+	if len(ids) != 0 {
+		t.Errorf("got %d results from empty scores, want 0", len(ids))
 	}
 }
 

@@ -63,6 +63,10 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 		logutil.Error("synapses: invalidate old model embeddings: %v\n", err)
 	} else if invalidated > 0 {
 		logutil.Info("synapses: model upgrade detected — marked %d embeddings for re-embedding (new model: %s)\n", invalidated, embedder.Model())
+		// Rebuild HNSW index to purge stale old-model embeddings that were
+		// loaded at startup before invalidation. The rebuilt index contains
+		// only current-model embeddings (RebuildMemoryHNSW filters stale=0).
+		st.RebuildMemoryHNSW()
 	}
 
 	ids, err := st.GetMemoriesWithoutEmbeddings(0) // 0 = no limit
