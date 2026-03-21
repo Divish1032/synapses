@@ -692,6 +692,8 @@ func Open(path string) (*Store, error) {
 		`CREATE INDEX IF NOT EXISTS idx_memver_memory ON memory_versions(memory_id, version)`,
 		// Sprint 10.2: knowledge decay scoring — importance field on memories.
 		`ALTER TABLE memories ADD COLUMN importance TEXT NOT NULL DEFAULT '1.0'`,
+		// Sprint 11.5: ACT-R frequency-weighted decay — access counter on memories.
+		`ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := knowledgeDB.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
