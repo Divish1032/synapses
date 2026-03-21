@@ -267,6 +267,10 @@ func (s *Server) handlePrepareContext(
 	}
 
 	tokenBudget := intentDefaultBudget(intent)
+	// Sprint 11: apply model-based budget multiplier to the default budget.
+	if mult := s.getSessionBudgetMultiplier(ctx); mult != 1.0 {
+		tokenBudget = int(float64(tokenBudget) * mult)
+	}
 	if b, ok := req.GetArguments()["token_budget"].(float64); ok && b > 0 {
 		tokenBudget = int(b)
 	}
@@ -1085,6 +1089,10 @@ func (s *Server) handlePlanContext(
 	resolved := s.resolveTarget(target, fileHint)
 	if !resolved.isConcept {
 		tokenBudget := 2000
+		// Sprint 11: apply model-based budget multiplier.
+		if mult := s.getSessionBudgetMultiplier(ctx); mult != 1.0 {
+			tokenBudget = int(float64(tokenBudget) * mult)
+		}
 		var scopeBuilder strings.Builder
 		s.assemblePlanContext(ctx, &scopeBuilder, resolved, taskID, tokenBudget)
 		if scopeBuilder.Len() > 0 {

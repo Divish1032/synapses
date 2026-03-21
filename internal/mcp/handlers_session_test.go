@@ -1171,3 +1171,105 @@ func TestHandleGetEvents_SinceCursorFilters(t *testing.T) {
 		t.Error("expected new events after cursor position")
 	}
 }
+
+// ── Sprint 11: Dynamic token budget by agent model ──────────────────────────
+
+func TestModelBudgetMultiplier(t *testing.T) {
+	tests := []struct {
+		model string
+		want  float64
+	}{
+		{"claude-opus-4-6", 2.0},
+		{"claude-opus-4-6-20250514", 2.0},
+		{"Claude-Opus-4-6", 2.0}, // case-insensitive
+		{"claude-sonnet-4-6", 1.5},
+		{"claude-sonnet-4-6-20250514", 1.5},
+		{"claude-haiku-4-5-20251001", 0.75},
+		{"gpt-4o", 1.0},
+		{"gpt-4o-2024-08-06", 1.0},
+		{"gpt-4o-mini", 0.5},
+		{"gpt-4o-mini-2024-07-18", 0.5},
+		{"gpt-4.1", 1.5},
+		{"gpt-4.1-mini", 0.5},
+		{"gpt-4.1-nano", 0.5},
+		{"gemini-2.5-pro", 1.5},
+		{"gemini-2.5-flash", 1.5},
+		{"unknown-model", 1.0},
+		{"", 1.0},
+	}
+	for _, tt := range tests {
+		got := modelBudgetMultiplier(tt.model)
+		if got != tt.want {
+			t.Errorf("modelBudgetMultiplier(%q) = %v, want %v", tt.model, got, tt.want)
+		}
+	}
+}
+
+func TestGetSessionBudgetMultiplier_NoSession(t *testing.T) {
+	s := newTestServer(t)
+	// No session_init called → multiplier should be 1.0
+	mult := s.getSessionBudgetMultiplier(ctx)
+	if mult != 1.0 {
+		t.Errorf("expected 1.0 without session, got %v", mult)
+	}
+}
+
+func TestGetSessionBudgetMultiplier_WithModel(t *testing.T) {
+	s := newTestServer(t)
+	// Call session_init with a model to register the session
+	_, _ = s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "test-agent",
+		"model":    "claude-opus-4-6",
+	}))
+	mult := s.getSessionBudgetMultiplier(ctx)
+	if mult != 2.0 {
+		t.Errorf("expected 2.0 for claude-opus-4-6, got %v", mult)
+	}
+}
+
+func TestGetSessionBudgetMultiplier_WithoutModel(t *testing.T) {
+	s := newTestServer(t)
+	// Call session_init without model → should default to 1.0
+	_, _ = s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "test-agent",
+	}))
+	mult := s.getSessionBudgetMultiplier(ctx)
+	if mult != 1.0 {
+		t.Errorf("expected 1.0 without model, got %v", mult)
+	}
+}
+
+func TestSessionInit_BudgetMultiplier_InResponse(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "test-agent",
+		"model":    "claude-opus-4-6",
+	}))
+	m := mustResult(t, res, err)
+	mult, ok := m["budget_multiplier"].(float64)
+	if !ok {
+		t.Fatal("expected budget_multiplier in response")
+	}
+	if mult != 2.0 {
+		t.Errorf("budget_multiplier = %v, want 2.0", mult)
+	}
+}
+
+func TestSessionInit_BudgetMultiplier_OmittedWhenDefault(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "test-agent",
+		"model":    "gpt-4o",
+	}))
+	m := mustResult(t, res, err)
+	noKey(t, m, "budget_multiplier")
+}
+
+func TestSessionInit_BudgetMultiplier_OmittedWithoutModel(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "test-agent",
+	}))
+	m := mustResult(t, res, err)
+	noKey(t, m, "budget_multiplier")
+}

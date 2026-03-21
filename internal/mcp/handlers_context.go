@@ -262,6 +262,12 @@ func (s *Server) handleGetContext(
 		adaptiveForceFullDetail = s.adaptiveCarveConfig(&cfg, entityName, agentIDForFeedback)
 	}
 
+	// Sprint 11: apply model-based budget multiplier to the default budget.
+	// Only applies when the agent did NOT explicitly pass token_budget.
+	if mult := s.getSessionBudgetMultiplier(ctx); mult != 1.0 {
+		cfg.TokenBudget = int(float64(cfg.TokenBudget) * mult)
+	}
+
 	// Allow per-call overrides of depth and token budget (always win over adaptive).
 	if d, ok := req.GetArguments()["depth"].(float64); ok && d > 0 {
 		cfg.MaxDepth = int(d)
@@ -1113,6 +1119,10 @@ func (s *Server) handleGetImpact(
 	}
 
 	tokenBudget := 2000
+	// Sprint 11: apply model-based budget multiplier to the default budget.
+	if mult := s.getSessionBudgetMultiplier(ctx); mult != 1.0 {
+		tokenBudget = int(float64(tokenBudget) * mult)
+	}
 	if tb, ok := req.GetArguments()["token_budget"].(float64); ok && tb > 0 {
 		tokenBudget = int(tb)
 	}

@@ -639,7 +639,7 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 }
 
 func (s *Server) handleGetFileContext(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	handlerStart := time.Now()
@@ -695,6 +695,10 @@ func (s *Server) handleGetFileContext(
 	}
 
 	fileTokenBudget := 4000
+	// Sprint 11: apply model-based budget multiplier to the default budget.
+	if mult := s.getSessionBudgetMultiplier(ctx); mult != 1.0 {
+		fileTokenBudget = int(float64(fileTokenBudget) * mult)
+	}
 	if tb, ok := req.GetArguments()["token_budget"].(float64); ok && tb > 0 {
 		fileTokenBudget = int(tb)
 	}
