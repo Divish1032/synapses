@@ -243,3 +243,140 @@ func TestTypeScriptParser_EmptyFile(t *testing.T) {
 		t.Error("empty file produced no nodes")
 	}
 }
+
+func TestTypeScriptParser_HeritageImplements(t *testing.T) {
+	// The existing tsSource has: class AuthClient implements AuthService
+	g := parseTS(t, "auth/service.ts", tsSource)
+	nodes := g.FindByName("AuthClient")
+	if len(nodes) == 0 {
+		t.Fatal("class 'AuthClient' not found")
+	}
+	hi := nodes[0].Metadata["heritage_implements"]
+	if hi != "AuthService" {
+		t.Errorf("heritage_implements = %q, want %q", hi, "AuthService")
+	}
+}
+
+func TestTypeScriptParser_HeritageExtends(t *testing.T) {
+	src := `
+class Base {
+  greet(): string { return "hi"; }
+}
+
+class Child extends Base {
+  wave(): void {}
+}
+`
+	g := parseTS(t, "app.ts", src)
+	nodes := g.FindByName("Child")
+	if len(nodes) == 0 {
+		t.Fatal("class 'Child' not found")
+	}
+	he := nodes[0].Metadata["heritage_extends"]
+	if he != "Base" {
+		t.Errorf("heritage_extends = %q, want %q", he, "Base")
+	}
+}
+
+func TestTypeScriptParser_HeritageExtendsAndImplements(t *testing.T) {
+	src := `
+interface Loggable {
+  log(): void;
+}
+
+class Base {}
+
+class Service extends Base implements Loggable {
+  log(): void {}
+}
+`
+	g := parseTS(t, "app.ts", src)
+	nodes := g.FindByName("Service")
+	if len(nodes) == 0 {
+		t.Fatal("class 'Service' not found")
+	}
+	hi := nodes[0].Metadata["heritage_implements"]
+	he := nodes[0].Metadata["heritage_extends"]
+	if hi != "Loggable" {
+		t.Errorf("heritage_implements = %q, want %q", hi, "Loggable")
+	}
+	if he != "Base" {
+		t.Errorf("heritage_extends = %q, want %q", he, "Base")
+	}
+}
+
+func TestTypeScriptParser_HeritageMultipleImplements(t *testing.T) {
+	src := `
+interface Readable { read(): void; }
+interface Writable { write(): void; }
+
+class Stream implements Readable, Writable {
+  read(): void {}
+  write(): void {}
+}
+`
+	g := parseTS(t, "stream.ts", src)
+	nodes := g.FindByName("Stream")
+	if len(nodes) == 0 {
+		t.Fatal("class 'Stream' not found")
+	}
+	hi := nodes[0].Metadata["heritage_implements"]
+	if hi != "Readable,Writable" {
+		t.Errorf("heritage_implements = %q, want %q", hi, "Readable,Writable")
+	}
+}
+
+func TestTypeScriptParser_HeritageAbstractClass(t *testing.T) {
+	src := `
+abstract class Base {
+  abstract greet(): string;
+}
+
+class Impl extends Base {
+  greet(): string { return "hi"; }
+}
+`
+	g := parseTS(t, "app.ts", src)
+	nodes := g.FindByName("Impl")
+	if len(nodes) == 0 {
+		t.Fatal("class 'Impl' not found")
+	}
+	he := nodes[0].Metadata["heritage_extends"]
+	if he != "Base" {
+		t.Errorf("heritage_extends = %q, want %q", he, "Base")
+	}
+}
+
+func TestTypeScriptParser_NoHeritage(t *testing.T) {
+	src := `class Standalone { foo(): void {} }`
+	g := parseTS(t, "app.ts", src)
+	nodes := g.FindByName("Standalone")
+	if len(nodes) == 0 {
+		t.Fatal("class 'Standalone' not found")
+	}
+	if nodes[0].Metadata["heritage_implements"] != "" {
+		t.Errorf("unexpected heritage_implements = %q", nodes[0].Metadata["heritage_implements"])
+	}
+	if nodes[0].Metadata["heritage_extends"] != "" {
+		t.Errorf("unexpected heritage_extends = %q", nodes[0].Metadata["heritage_extends"])
+	}
+}
+
+func TestTypeScriptParser_HeritageGenericType(t *testing.T) {
+	src := `
+interface Comparable<T> { compareTo(other: T): number; }
+
+class User implements Comparable<User> {
+  compareTo(other: User): number { return 0; }
+}
+`
+	g := parseTS(t, "app.ts", src)
+	nodes := g.FindByName("User")
+	if len(nodes) == 0 {
+		t.Fatal("class 'User' not found")
+	}
+	hi := nodes[0].Metadata["heritage_implements"]
+	if hi != "Comparable" {
+		t.Errorf("heritage_implements = %q, want %q (generic stripped)", hi, "Comparable")
+	}
+}

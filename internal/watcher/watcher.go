@@ -626,6 +626,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 	}
 
 	resolver.ResolveCallEdges(w.graph)
+	resolver.ResolveHeritageEdges(w.graph)
 	resolver.ResolveImplementsEdges(w.graph)
 	// R31: re-resolve doc edges. For markdown files only the newly parsed
 	// sections need linking (code entities are unchanged), so use the

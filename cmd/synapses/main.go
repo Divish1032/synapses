@@ -1239,8 +1239,11 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 
 	n := resolver.ResolveCallEdges(g)
 	logutil.Info("synapses: resolved %d CALLS edges\n", n)
+	if nh := resolver.ResolveHeritageEdges(g); nh > 0 {
+		logutil.Info("synapses: resolved %d heritage IMPLEMENTS edges\n", nh)
+	}
 	if ni := resolver.ResolveImplementsEdges(g); ni > 0 {
-		logutil.Info("synapses: resolved %d IMPLEMENTS edges\n", ni)
+		logutil.Info("synapses: resolved %d structural IMPLEMENTS edges\n", ni)
 	}
 	// R31: resolve documentation → code entity links (EXPLAINS/DOCUMENTED_BY).
 	if nd := resolver.ResolveDocEdges(g); nd > 0 {

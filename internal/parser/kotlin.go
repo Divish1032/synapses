@@ -289,6 +289,8 @@ func (p *KotlinParser) extractAllDeclarations(
 				meta["kind"] = "sealed"
 			}
 
+			// Heritage clause extraction: Kotlin uses delegation_specifier children.
+			meta = extractKotlinHeritage(n, src, meta)
 			nodeID := g.MakeNodeID(filePath, name)
 			g.AddNode(&graph.Node{
 				ID: nodeID, Type: nodeType, Name: name, File: filePath,
@@ -542,6 +544,60 @@ func collectKotlinCallSites(g *graph.Graph, lang *sitter.Language, root sitter.N
 		}
 		g.AddCallSite(graph.CallSite{CallerID: fileNodeID, CallerFile: filePath, FuncName: callee})
 	})
+}
+
+// extractKotlinHeritage extracts supertypes from a Kotlin class_declaration.
+// Kotlin uses delegation_specifier children (or a delegation_specifier_list)
+// for both extends and implements, e.g. `class Foo : Bar(), IBaz`.
+func extractKotlinHeritage(n sitter.Node, src []byte, meta map[string]string) map[string]string {
+	var names []string
+	seen := make(map[string]bool)
+
+	var walk func(child sitter.Node)
+	walk = func(child sitter.Node) {
+		if child.IsNull() {
+			return
+		}
+		switch child.Type() {
+		case "delegation_specifier":
+			// delegation_specifier contains a user_type or constructor_invocation.
+			name := extractSimpleTypeName(child, src)
+			if name != "" && !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+			return
+		case "type_identifier":
+			name := string(src[child.StartByte():child.EndByte()])
+			if name != "" && !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+			return
+		}
+		for i := uint32(0); i < child.ChildCount(); i++ {
+			walk(child.Child(i))
+		}
+	}
+
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		if child.Type() == "delegation_specifier" || child.Type() == "delegation_specifier_list" {
+			walk(child)
+		}
+	}
+
+	if len(names) == 0 {
+		return meta
+	}
+	if meta == nil {
+		meta = make(map[string]string)
+	}
+	meta["heritage_implements"] = strings.Join(names, ",")
+	return meta
 }
 
 func isKotlinBuiltin(name string) bool {

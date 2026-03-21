@@ -129,6 +129,30 @@ func isCSharpPublic(n sitter.Node, src []byte) bool {
 	return true // Default (no modifier) is internal, treat as exported
 }
 
+// extractCSharpHeritage extracts heritage (base_list) from C# class/struct
+// declarations. C# uses a single base_list for both extends and implements.
+// Since C# classes can extend one class and implement multiple interfaces,
+// and we can't easily distinguish them at parse time without type analysis,
+// we store all base types in heritage_implements metadata.
+func extractCSharpHeritage(n sitter.Node, src []byte, meta map[string]string) map[string]string {
+	baseList := n.ChildByFieldName("bases")
+	if baseList.IsNull() {
+		baseList = firstChildOfType(n, "base_list")
+	}
+	if baseList.IsNull() {
+		return meta
+	}
+	names := extractTypeIdentifiers(baseList, src)
+	if len(names) == 0 {
+		return meta
+	}
+	if meta == nil {
+		meta = make(map[string]string)
+	}
+	meta["heritage_implements"] = strings.Join(names, ",")
+	return meta
+}
+
 // isCSharpExtensionMethod returns true when the method_declaration's first
 // parameter has a "this" modifier — the C# extension method marker.
 // AST: method_declaration → parameter_list → parameter → modifier("this")
@@ -261,6 +285,8 @@ func (p *CSharpParser) extractAllDeclarations(
 					}
 				}
 			}
+			// Heritage clause extraction: C# uses base_list for both extends and implements.
+			meta = extractCSharpHeritage(n, src, meta)
 			g.AddNode(&graph.Node{
 				ID: nodeID, Type: graph.NodeStruct, Name: name, File: filePath,
 				Line: int(n.StartPoint().Row) + 1, Exported: isCSharpPublic(n, src), Metadata: meta,
@@ -285,6 +311,7 @@ func (p *CSharpParser) extractAllDeclarations(
 				meta = make(map[string]string, 1)
 			}
 			meta["kind"] = "struct"
+			meta = extractCSharpHeritage(n, src, meta)
 			g.AddNode(&graph.Node{
 				ID: nodeID, Type: graph.NodeStruct, Name: name, File: filePath,
 				Line: int(n.StartPoint().Row) + 1, Exported: isCSharpPublic(n, src), Metadata: meta,

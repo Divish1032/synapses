@@ -6,10 +6,107 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
+// ResolveHeritageEdges creates IMPLEMENTS edges from explicit heritage clauses
+// (implements/extends) extracted during parsing of nominally-typed languages
+// (TypeScript, Java, C#, Kotlin). These edges are based on explicit source
+// declarations and are always correct — no structural heuristic needed.
+//
+// Returns the number of new IMPLEMENTS edges added.
+func ResolveHeritageEdges(g *graph.Graph) int {
+	nodes := g.AllNodes()
+
+	// Build name → []NodeID index for all interface and struct nodes.
+	// Multiple nodes may share the same name (different packages/files).
+	type nodeRef struct {
+		id  graph.NodeID
+		pkg string
+	}
+	nameIndex := make(map[string][]nodeRef)
+	for _, n := range nodes {
+		if n.Type == graph.NodeInterface || n.Type == graph.NodeStruct {
+			nameIndex[n.Name] = append(nameIndex[n.Name], nodeRef{id: n.ID, pkg: n.Package})
+		}
+	}
+
+	// Collect existing IMPLEMENTS edges to avoid duplicates.
+	seen := make(map[string]bool)
+	for _, e := range g.AllEdges() {
+		if e.Type == graph.EdgeImplements {
+			seen[string(e.From)+"->"+string(e.To)] = true
+		}
+	}
+
+	count := 0
+	for _, n := range nodes {
+		if n.Type != graph.NodeStruct {
+			continue
+		}
+
+		// Combine heritage_implements and heritage_extends — both create IMPLEMENTS edges.
+		var heritageNames []string
+		if hi := n.Metadata["heritage_implements"]; hi != "" {
+			heritageNames = append(heritageNames, strings.Split(hi, ",")...)
+		}
+		if he := n.Metadata["heritage_extends"]; he != "" {
+			heritageNames = append(heritageNames, strings.Split(he, ",")...)
+		}
+		if len(heritageNames) == 0 {
+			continue
+		}
+
+		for _, targetName := range heritageNames {
+			targetName = strings.TrimSpace(targetName)
+			if targetName == "" {
+				continue
+			}
+
+			candidates := nameIndex[targetName]
+			if len(candidates) == 0 {
+				continue
+			}
+
+			// Prefer same-package match. If no same-package match, use first.
+			var targetID graph.NodeID
+			for _, c := range candidates {
+				if c.pkg == n.Package {
+					targetID = c.id
+					break
+				}
+			}
+			if targetID == "" {
+				targetID = candidates[0].id
+			}
+
+			// Don't self-implement.
+			if targetID == n.ID {
+				continue
+			}
+
+			edgeKey := string(n.ID) + "->" + string(targetID)
+			if seen[edgeKey] {
+				continue
+			}
+			seen[edgeKey] = true
+			g.AddEdge(&graph.Edge{
+				From: n.ID,
+				To:   targetID,
+				Type: graph.EdgeImplements,
+			})
+			count++
+		}
+	}
+	return count
+}
+
 // ResolveImplementsEdges detects which structs satisfy which interfaces using
 // a same-package structural heuristic: if a struct defines all methods listed
 // in an interface's "methods" metadata, an IMPLEMENTS edge is added from the
 // struct node to the interface node.
+//
+// Structs with "heritage_implements" or "heritage_extends" metadata are SKIPPED
+// — they use nominal typing (TypeScript, Java, C#, Kotlin) and their IMPLEMENTS
+// edges are resolved by ResolveHeritageEdges instead. Structural matching
+// produces false positives for nominal type systems.
 //
 // This is an approximation. It only matches same-package pairs — cross-package
 // interface satisfaction requires full type inference (go/types) which is not
@@ -52,8 +149,15 @@ func ResolveImplementsEdges(g *graph.Graph) int {
 	// 2. Collect concrete method names per (pkg, receiverType) pair.
 	//    Method node names have the form "ReceiverType.MethodName".
 	//    Key: "pkg::ReceiverType" → set of method names
+	//    Skip methods belonging to heritage-tagged structs (nominal typing).
+	heritageStructs := make(map[string]bool)
 	structMethods := make(map[string]map[string]bool)
 	for _, n := range nodes {
+		if n.Type == graph.NodeStruct {
+			if n.Metadata["heritage_implements"] != "" || n.Metadata["heritage_extends"] != "" {
+				heritageStructs[n.Package+"::"+n.Name] = true
+			}
+		}
 		if n.Type != graph.NodeMethod {
 			continue
 		}
@@ -85,6 +189,7 @@ func ResolveImplementsEdges(g *graph.Graph) int {
 	}
 
 	// 5. Match structs against interfaces in the same package.
+	//    Skip structs with heritage metadata — they use nominal typing.
 	count := 0
 	for ifaceKey, iface := range ifaces {
 		sepIdx := strings.Index(ifaceKey, "::")
@@ -95,6 +200,10 @@ func ResolveImplementsEdges(g *graph.Graph) int {
 		prefix := pkg + "::"
 		for structKey, methods := range structMethods {
 			if !strings.HasPrefix(structKey, prefix) {
+				continue
+			}
+			// Skip heritage-tagged structs — nominal typing, not structural.
+			if heritageStructs[structKey] {
 				continue
 			}
 			// All required interface methods must be present on the struct.

@@ -339,6 +339,56 @@ func collectCallSitesWalk(
 	walk(root, "", "")
 }
 
+// extractTypeIdentifiers extracts type names from a heritage clause AST node.
+// It walks direct children looking for type_identifier nodes (simple names)
+// and generic_type nodes (extracts the name child). Returns deduplicated names.
+func extractTypeIdentifiers(n sitter.Node, src []byte) []string {
+	if n.IsNull() {
+		return nil
+	}
+	var names []string
+	seen := make(map[string]bool)
+	var walk func(child sitter.Node)
+	walk = func(child sitter.Node) {
+		if child.IsNull() {
+			return
+		}
+		switch child.Type() {
+		case "type_identifier":
+			name := string(src[child.StartByte():child.EndByte()])
+			if name != "" && !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+			return
+		case "generic_type":
+			// generic_type has a name child (type_identifier) + type_arguments.
+			if ti := firstChildOfType(child, "type_identifier"); !ti.IsNull() {
+				name := string(src[ti.StartByte():ti.EndByte()])
+				if name != "" && !seen[name] {
+					seen[name] = true
+					names = append(names, name)
+				}
+			}
+			return
+		case "identifier", "simple_identifier":
+			name := string(src[child.StartByte():child.EndByte()])
+			if name != "" && !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+			return
+		}
+		for i := uint32(0); i < child.ChildCount(); i++ {
+			walk(child.Child(i))
+		}
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		walk(n.Child(i))
+	}
+	return names
+}
+
 // firstChildOfType returns the first direct child of n whose type matches typ,
 // or nil if none is found. Used by language parsers that lack named fields.
 func firstChildOfType(n sitter.Node, typ string) sitter.Node {
