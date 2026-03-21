@@ -1470,3 +1470,34 @@ func extractErrorText(t *testing.T, res *mcp.CallToolResult) string {
 	}
 	return ""
 }
+
+// ── clampUnit tests ──────────────────────────────────────────────────────────
+
+func TestClampUnit_InRange(t *testing.T) {
+	t.Parallel()
+	for _, v := range []float64{0.0, 0.5, 1.0, 0.001, 0.999} {
+		if got := clampUnit(v); got != v {
+			t.Errorf("clampUnit(%f) = %f, want %f", v, got, v)
+		}
+	}
+}
+
+func TestClampUnit_Below(t *testing.T) {
+	t.Parallel()
+	if got := clampUnit(-0.5); got != 0 {
+		t.Errorf("clampUnit(-0.5) = %f, want 0", got)
+	}
+	if got := clampUnit(-100); got != 0 {
+		t.Errorf("clampUnit(-100) = %f, want 0", got)
+	}
+}
+
+func TestClampUnit_Above(t *testing.T) {
+	t.Parallel()
+	if got := clampUnit(1.5); got != 1 {
+		t.Errorf("clampUnit(1.5) = %f, want 1", got)
+	}
+	if got := clampUnit(999); got != 1 {
+		t.Errorf("clampUnit(999) = %f, want 1", got)
+	}
+}

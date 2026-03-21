@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strconv"
@@ -634,6 +635,11 @@ func (s *Store) MarkMemoriesSurfaced(agentID string, ids []string) error {
 // Returns non-expired memories ordered by relevance (best match first).
 // The query uses FTS5 query syntax — each space-separated word is an implicit AND term.
 func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
+	return s.SearchMemoriesCtx(context.Background(), query, limit)
+}
+
+// SearchMemoriesCtx is the context-aware variant of SearchMemories.
+func (s *Store) SearchMemoriesCtx(ctx context.Context, query string, limit int) ([]Memory, error) {
 	if query == "" {
 		return nil, nil
 	}
@@ -645,7 +651,7 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 		limit = 10
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.knowledgeDB.Query(`
+	rows, err := s.knowledgeDB.QueryContext(ctx, `
 		SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
 		       m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count
 		FROM memories m
@@ -662,9 +668,21 @@ func (s *Store) SearchMemories(query string, limit int) ([]Memory, error) {
 	return scanMemories(rows)
 }
 
-// SearchMemoriesIncludingStale is like SearchMemories but also returns stale memories.
-// Use for audit scenarios where the agent explicitly passes include_stale=true to recall().
-func (s *Store) SearchMemoriesIncludingStale(query string, limit int) ([]Memory, error) {
+// ScoredMemory pairs a Memory with a raw channel score for ConvexMerge fusion.
+type ScoredMemory struct {
+	Memory Memory
+	Score  float64 // raw BM25 score (higher = better match)
+}
+
+// SearchMemoriesWithScores returns memories matching an FTS query along with
+// their raw BM25 scores. Used by ConvexMerge to do score-magnitude-aware
+// fusion instead of rank-only RRF.
+func (s *Store) SearchMemoriesWithScores(query string, limit int, includeStale bool) ([]ScoredMemory, error) {
+	return s.SearchMemoriesWithScoresCtx(context.Background(), query, limit, includeStale)
+}
+
+// SearchMemoriesWithScoresCtx is the context-aware variant of SearchMemoriesWithScores.
+func (s *Store) SearchMemoriesWithScoresCtx(ctx context.Context, query string, limit int, includeStale bool) ([]ScoredMemory, error) {
 	if query == "" {
 		return nil, nil
 	}
@@ -676,7 +694,63 @@ func (s *Store) SearchMemoriesIncludingStale(query string, limit int) ([]Memory,
 		limit = 10
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.knowledgeDB.Query(`
+
+	q := `SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
+	             m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count,
+	             -rank AS score
+	      FROM memories m
+	      JOIN memories_fts f ON m.rowid = f.rowid
+	      WHERE memories_fts MATCH ?
+	        AND m.expires_at > ?`
+
+	if !includeStale {
+		q += ` AND m.stale = 0`
+	}
+	q += ` ORDER BY rank LIMIT ?`
+
+	rows, err := s.knowledgeDB.QueryContext(ctx, q, safeQuery, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search memories with scores: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ScoredMemory
+	for rows.Next() {
+		var sm ScoredMemory
+		if err := rows.Scan(
+			&sm.Memory.ID, &sm.Memory.Tier, &sm.Memory.Content, &sm.Memory.EntityID,
+			&sm.Memory.AgentID, &sm.Memory.TaskID, &sm.Memory.Tags,
+			&sm.Memory.CreatedAt, &sm.Memory.ExpiresAt, &sm.Memory.LastAccessedAt,
+			&sm.Memory.Source, &sm.Memory.Importance, &sm.Memory.AccessCount,
+			&sm.Score,
+		); err != nil {
+			return nil, fmt.Errorf("scan scored memory: %w", err)
+		}
+		out = append(out, sm)
+	}
+	return out, rows.Err()
+}
+
+// SearchMemoriesIncludingStale is like SearchMemories but also returns stale memories.
+// Use for audit scenarios where the agent explicitly passes include_stale=true to recall().
+func (s *Store) SearchMemoriesIncludingStale(query string, limit int) ([]Memory, error) {
+	return s.SearchMemoriesIncludingStaleCtx(context.Background(), query, limit)
+}
+
+// SearchMemoriesIncludingStaleCtx is the context-aware variant of SearchMemoriesIncludingStale.
+func (s *Store) SearchMemoriesIncludingStaleCtx(ctx context.Context, query string, limit int) ([]Memory, error) {
+	if query == "" {
+		return nil, nil
+	}
+	safeQuery := sanitizeFTSQuery(query)
+	if safeQuery == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	rows, err := s.knowledgeDB.QueryContext(ctx, `
 		SELECT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
 		       m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count
 		FROM memories m
@@ -882,10 +956,9 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 			m.ExpiresAt = now.Add(ttlProject).Format(time.RFC3339)
 		}
 	}
-	if m.Importance == "" {
-		m.Importance = "1.0"
-	} else if m.Importance != ImportancePinned {
-		// Validate numeric importance and clamp to a safe minimum.
+	// Validate caller-provided importance (non-empty, non-pinned).
+	// When empty, A-MAC admission control computes it after the dedup check.
+	if m.Importance != "" && m.Importance != ImportancePinned {
 		// Values below the visibility threshold (e.g. "0.0", "0.01") would make the
 		// memory permanently invisible on recall immediately after creation — almost
 		// certainly not what the caller intended. We clamp rather than reject to stay
@@ -928,8 +1001,18 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 	var newVecComputed bool
 	embedFn := s.semanticDedupFunc // snapshot — safe even if swapped concurrently
 
+	// maxJaccard tracks the highest Jaccard similarity seen across all candidates.
+	// maxCosine tracks the highest cosine similarity (when embeddings are available).
+	// Both are passed to computeAdmissionImportance — no re-fetching of embeddings needed.
+	var maxJaccard float64
+	var maxCosine float32
+	var hasCosine bool // true once at least one cosine similarity was computed
+
 	for _, ex := range dupCandidates {
 		sim := stringSimilarity(ex.Content, m.Content)
+		if sim > maxJaccard {
+			maxJaccard = sim
+		}
 		if sim > 0.85 {
 			// High Jaccard — definite dedup match.
 			return m, prepareMemoryResult{
@@ -952,17 +1035,112 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 					newVec = normalizeVec(raw)
 				}
 			}
-			if len(newVec) > 0 && dotSimilarity(newVec, candidateVec) > 0.9 {
-				return m, prepareMemoryResult{
-					dedupedID:        ex.ID,
-					dedupedContent:   ex.Content,
-					dedupedCreatedAt: ex.CreatedAt,
-				}, nil
+			if len(newVec) > 0 {
+				cos := dotSimilarity(newVec, candidateVec)
+				hasCosine = true
+				if cos > maxCosine {
+					maxCosine = cos // track for A-MAC — no re-fetch needed
+				}
+				if cos > 0.9 {
+					return m, prepareMemoryResult{
+						dedupedID:        ex.ID,
+						dedupedContent:   ex.Content,
+						dedupedCreatedAt: ex.CreatedAt,
+					}, nil
+				}
 			}
 		}
 	}
 
+	// A-MAC: auto-compute importance when caller didn't set it explicitly.
+	// Score = content_type_prior × novelty_factor (A-MAC, arXiv:2603.04549).
+	// maxJaccard and maxCosine were captured during the dedup loop above — no
+	// extra embedding or DB calls are needed here.
+	if m.Importance == "" {
+		m.Importance = computeAdmissionImportance(m.Tags, m.Source, len(dupCandidates) > 0, maxJaccard, maxCosine, hasCosine)
+	}
+
 	return m, prepareMemoryResult{}, nil
+}
+
+// parseContentTypePrior returns the A-MAC content-type prior for importance scoring.
+// Explicit episodic decisions (failure, pattern, rule_proposal) score higher than
+// generic decisions or auto-captured session logs, reflecting their higher future utility.
+func parseContentTypePrior(tags, source string) float64 {
+	if source == SourceAuto {
+		return 0.8 // auto-captured session logs have lower signal-to-noise ratio
+	}
+	// Tags format: ["episode","failure"] — check for episode type substring.
+	switch {
+	case strings.Contains(tags, `"failure"`):
+		return 1.4 // failures must surface to prevent repeat mistakes
+	case strings.Contains(tags, `"pattern"`):
+		return 1.2 // reusable patterns have high future utility
+	case strings.Contains(tags, `"rule_proposal"`):
+		return 1.2 // architectural rules are structural knowledge
+	default:
+		return 1.0 // general decisions and non-episodic content
+	}
+}
+
+// computeAdmissionImportance implements A-MAC write-time importance scoring.
+//
+// Score = content_type_prior × novelty_factor (A-MAC, arXiv:2603.04549).
+//   - content_type_prior: derived from episode type in tags and source field
+//   - novelty_factor: 1 − max_similarity(new, recent_same_tier_memories)
+//
+// maxJaccard and maxCosine are pre-computed in the dedup loop — this function
+// performs no DB calls and is a pure computation. Clamped to [0.10, 2.0].
+//
+// hasCandidates must be true when any same-tier memories exist (even if their
+// embeddings are absent). It distinguishes "no prior memories" (novelty=1.0)
+// from "similar memories but no embeddings" (Jaccard fallback).
+//
+// hasCosine must be true when at least one cosine similarity was computed
+// during dedup. This is distinct from maxCosine > 0: perfectly orthogonal
+// embeddings produce cosine=0.0, which is a valid "no similarity" result
+// that should use the cosine path, not fall through to Jaccard.
+func computeAdmissionImportance(tags, source string, hasCandidates bool, maxJaccard float64, maxCosine float32, hasCosine bool) string {
+	const (
+		minImportance = DecayVisibilityThreshold * 2 // 0.10 — floor matching clamp elsewhere
+		maxImportance = 2.0                          // cap: matches edge weight scale in BFS
+		noveltyFloor  = 0.2                          // even near-duplicates retain baseline value
+	)
+
+	prior := parseContentTypePrior(tags, source)
+
+	var noveltyFactor float64
+	switch {
+	case !hasCandidates:
+		noveltyFactor = 1.0 // no existing memories → fully novel by definition
+	case hasCosine:
+		// Cosine was computed during dedup — more accurate than Jaccard for
+		// semantic similarity. Uses embeddings already fetched, no extra DB calls.
+		// Uses hasCosine flag (not maxCosine > 0) because cosine=0.0 (perfectly
+		// orthogonal) is a valid result that means "no similarity".
+		noveltyFactor = 1.0 - float64(maxCosine)
+	default:
+		// Jaccard fallback: embedder unavailable or no candidate had stored embeddings.
+		noveltyFactor = 1.0 - maxJaccard
+	}
+
+	// Clamp novelty: floor ensures even redundant memories retain baseline importance.
+	if noveltyFactor < noveltyFloor {
+		noveltyFactor = noveltyFloor
+	} else if noveltyFactor > 1.0 {
+		noveltyFactor = 1.0
+	}
+
+	importance := prior * noveltyFactor
+
+	// Clamp to system-safe range.
+	if importance < minImportance {
+		importance = minImportance
+	} else if importance > maxImportance {
+		importance = maxImportance
+	}
+
+	return strconv.FormatFloat(importance, 'f', -1, 64)
 }
 
 // InsertMemoryAnchors links a memory to one or more graph node IDs.
@@ -1069,6 +1247,73 @@ func (s *Store) GetMemoryAnchorNodeIDsInSet(memIDs []string, nodeSet map[string]
 	return result, nil
 }
 
+// GetAllMemoryAnchorNodeIDsInSet returns ALL anchor node IDs in nodeSet for
+// each memory, not just the first. Used by the spreading activation sort step
+// to compute maximum activation across all of a memory's anchors.
+//
+// Returns map[memoryID → []nodeID]. Memories with no anchors in nodeSet are
+// absent. Batches like GetMemoryAnchorNodeIDsInSet (200 mem IDs per batch).
+func (s *Store) GetAllMemoryAnchorNodeIDsInSet(memIDs []string, nodeSet map[string]bool) (map[string][]string, error) {
+	if len(memIDs) == 0 || len(nodeSet) == 0 {
+		return nil, nil
+	}
+
+	nodeIDs := make([]string, 0, len(nodeSet))
+	for nid := range nodeSet {
+		nodeIDs = append(nodeIDs, nid)
+	}
+	nodePlaceholders := make([]string, len(nodeIDs))
+	nodeArgs := make([]interface{}, len(nodeIDs))
+	for i, nid := range nodeIDs {
+		nodePlaceholders[i] = "?"
+		nodeArgs[i] = nid
+	}
+	nodeInClause := strings.Join(nodePlaceholders, ",")
+
+	result := make(map[string][]string, len(memIDs))
+
+	const batchSize = 200
+	for i := 0; i < len(memIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(memIDs) {
+			end = len(memIDs)
+		}
+		batch := memIDs[i:end]
+
+		memPlaceholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for j, id := range batch {
+			memPlaceholders[j] = "?"
+			args[j] = id
+		}
+		allArgs := append(args, nodeArgs...)
+
+		rows, err := s.knowledgeDB.Query(
+			`SELECT memory_id, node_id FROM memory_anchors
+			 WHERE memory_id IN (`+strings.Join(memPlaceholders, ",")+`)
+			   AND node_id IN (`+nodeInClause+`)`,
+			allArgs...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("get all memory anchor node IDs in set: %w", err)
+		}
+		for rows.Next() {
+			var memID, nodeID string
+			if err := rows.Scan(&memID, &nodeID); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan all memory anchor node IDs in set: %w", err)
+			}
+			result[memID] = append(result[memID], nodeID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("all memory anchor node IDs in set rows: %w", err)
+		}
+		rows.Close()
+	}
+	return result, nil
+}
+
 // GetMemoriesByAnchorNode returns memories anchored to the given node ID via the
 // memory_anchors junction table. This finds memories linked through anchor_nodes=
 // in remember(), which are NOT discoverable via QueryMemories(entityID=...) alone.
@@ -1100,6 +1345,11 @@ func (s *Store) GetMemoriesByAnchorNode(nodeID string, limit int) ([]Memory, err
 // Missing IDs are silently skipped. Used by recall() to hydrate vector
 // search results that only contain partial fields.
 func (s *Store) GetMemoriesByIDs(ids []string) ([]Memory, error) {
+	return s.GetMemoriesByIDsCtx(context.Background(), ids)
+}
+
+// GetMemoriesByIDsCtx is the context-aware variant of GetMemoriesByIDs.
+func (s *Store) GetMemoriesByIDsCtx(ctx context.Context, ids []string) ([]Memory, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -1112,7 +1362,7 @@ func (s *Store) GetMemoriesByIDs(ids []string) ([]Memory, error) {
 	query := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
 	                 created_at, expires_at, last_accessed_at, source, importance, access_count
 	          FROM memories WHERE id IN (` + strings.Join(placeholders, ",") + `)`
-	rows, err := s.knowledgeDB.Query(query, args...)
+	rows, err := s.knowledgeDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get memories by IDs: %w", err)
 	}

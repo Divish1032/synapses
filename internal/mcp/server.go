@@ -123,6 +123,9 @@ type Server struct {
 	projectID    string         // stable project identifier (FNV hash of project root path)
 	projectPath  string         // absolute path to the project root (for go.mod parsing)
 	rulesMu      sync.RWMutex  // protects s.config.Rules for concurrent dynamic upserts
+	toolEmbeds      [][]float32  // per-tool normalized vectors; len==len(toolCatalog) when ready
+	toolEmbedModel  string       // embedding model used to build toolEmbeds; must match query model
+	toolEmbedsMu    sync.RWMutex // protects toolEmbeds and toolEmbedModel
 
 	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
 	// Loaded once at startup. When false, the corresponding data collection is skipped.
@@ -997,6 +1000,11 @@ func (s *Server) SetMemoryEmbedder(e embed.Embedder) {
 		})
 	} else if s.store != nil {
 		s.store.SetSemanticDedupFunc(nil)
+	}
+	// Pre-embed tool catalog in background so discover_tools can rank by
+	// cosine similarity instead of keyword overlap (Sprint 12 #5).
+	if e != nil {
+		go s.EmbedToolCatalog(context.Background(), e)
 	}
 }
 
@@ -2639,6 +2647,30 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handlePlanContext,
+	)
+
+	// ── Benchmark ───────────────────────────────────────────────────────────
+
+	s.addOrDefer(
+		mcp.NewTool(
+			"benchmark",
+			mcp.WithDescription(
+				"Run self-validating benchmarks against the current graph and store. "+
+					"Each scenario derives ground truth from the graph's own topology — "+
+					"no hardcoded IDs, portable across any indexed codebase. "+
+					"Measures precision, recall, F1, and latency for key operations: "+
+					"context completeness, search accuracy, impact coverage, graph reachability, "+
+					"and FTS ranking quality. "+
+					"Use scenario=\"all\" (default) to run all 5 built-in scenarios, or "+
+					"pass a specific name: context-completeness, search-accuracy, impact-coverage, "+
+					"graph-reachability, fts-ranking.",
+			),
+			mcp.WithString("scenario",
+				mcp.Description("Scenario to run: 'all' (default), 'context-completeness', 'search-accuracy', "+
+					"'impact-coverage', 'graph-reachability', 'fts-ranking'."),
+			),
+		),
+		s.handleBenchmark,
 	)
 
 }

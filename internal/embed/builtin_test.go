@@ -16,7 +16,7 @@ func TestBuiltinEmbedder_NewAndModel(t *testing.T) {
 	e := embed.NewBuiltinEmbedder(t.TempDir())
 	t.Cleanup(func() { _ = e.Close() })
 	require.NotNil(t, e)
-	assert.Equal(t, "all-MiniLM-L6-v2", e.Model())
+	assert.Equal(t, "nomic-embed-text-v1.5", e.Model())
 }
 
 func TestBuiltinEmbedder_StatusDetail_BeforeInit(t *testing.T) {

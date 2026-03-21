@@ -8,12 +8,7 @@ import (
 
 func openMemTestStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := Open(t.TempDir() + "/test.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-	return st
+	return openFromTemplate(t)
 }
 
 // testGetMemoryAnchors queries the memory_anchors table directly for testing.

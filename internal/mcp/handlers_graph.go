@@ -430,9 +430,24 @@ func init() {
 	}
 }
 
-// handleDiscoverTools is a lightweight keyword matcher that helps agents find
-// the right tool without scanning all tool definitions.
-func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+// dotProduct returns the dot product of two pre-normalized float32 vectors.
+// For unit-length vectors this equals cosine similarity.
+// Returns 0 for empty or mismatched-length inputs.
+func dotProduct(a, b []float32) float32 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	var sum float32
+	for i := range a {
+		sum += a[i] * b[i]
+	}
+	return sum
+}
+
+// handleDiscoverTools ranks tools for a query. When the memory embedder is
+// configured and tool embeddings are ready, ranking uses cosine similarity
+// (semantic path). Otherwise it falls back to keyword overlap scoring.
+func (s *Server) handleDiscoverTools(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	query := strings.ToLower(stringArg(req, "query"))
 	debug, _ := req.GetArguments()["debug"].(bool)
 
@@ -578,14 +593,152 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 
 	// Format output with status indicator (Phase 6: tool discoverability).
 	type toolMatch struct {
-		Name        string     `json:"name"`
-		Category    string     `json:"category"`
-		Description string     `json:"description"`
-		Example     string     `json:"example"`
-		Score       int        `json:"score"`
-		Status      string     `json:"status"`
-		Breakdown   *breakdown `json:"breakdown,omitempty"`
+		Name             string     `json:"name"`
+		Category         string     `json:"category"`
+		Description      string     `json:"description"`
+		Example          string     `json:"example"`
+		Score            int        `json:"score,omitempty"`
+		SimilarityScore  float32    `json:"similarity_score,omitempty"`
+		Status           string     `json:"status"`
+		Breakdown        *breakdown `json:"breakdown,omitempty"`
 	}
+
+	// ── Semantic path ──────────────────────────────────────────────────────────
+	// When tool embeddings are ready and the embedder is available, rank by
+	// cosine similarity instead of keyword overlap. Falls back to keyword path
+	// on any error (embed failure, nil embedder, embeddings not yet computed).
+	s.toolEmbedsMu.RLock()
+	toolEmbeds := s.toolEmbeds
+	toolEmbedModel := s.toolEmbedModel
+	embeddingsReady := len(toolEmbeds) == len(toolCatalog)
+	s.toolEmbedsMu.RUnlock()
+
+	// Model consistency check: query embeddings must come from the same model as
+	// tool embeddings. A mismatch (possible during embedder hot-swap or model
+	// upgrade) means vectors live in different spaces — cosine similarity would
+	// be meaningless. Trigger background re-embedding so the next call works.
+	if embeddingsReady && s.memoryEmbedder != nil && toolEmbedModel != s.memoryEmbedder.Model() {
+		embeddingsReady = false
+		// Re-embed tool catalog with the new model in background.
+		go s.EmbedToolCatalog(context.Background(), s.memoryEmbedder)
+	}
+
+	if embeddingsReady && s.memoryEmbedder != nil {
+		embedCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		queryVec, embedErr := s.memoryEmbedder.Embed(embedCtx, query)
+		cancel()
+		if embedErr == nil && len(queryVec) > 0 {
+			queryVec = normalizeVec(queryVec)
+			type semScored struct {
+				idx   int
+				score float32
+			}
+			semResults := make([]semScored, 0, len(toolCatalog))
+			for i, tool := range toolCatalog {
+				if s.knowledgeMode && !knowledgeTools[tool.Name] {
+					continue
+				}
+				sim := dotProduct(queryVec, toolEmbeds[i])
+				semResults = append(semResults, semScored{idx: i, score: sim})
+			}
+			sort.Slice(semResults, func(i, j int) bool { return semResults[i].score > semResults[j].score })
+
+			// Drop tools with non-positive similarity — they are semantically
+			// unrelated to the query (cosine ≤ 0 means orthogonal or opposite).
+			// If nothing passes the threshold, fall through to the keyword path
+			// rather than returning irrelevant results tagged as "semantic".
+			filtered := semResults[:0]
+			for _, r := range semResults {
+				if r.score > 0 {
+					filtered = append(filtered, r)
+				}
+			}
+			if len(filtered) == 0 {
+				// No positive-similarity tools — keyword path will do better.
+				goto keywordPath
+			}
+			semResults = filtered
+
+			limit := 3
+			if debug || len(semResults) < limit {
+				limit = len(semResults)
+			}
+			semResults = semResults[:limit]
+
+			matches := make([]toolMatch, len(semResults))
+			for i, r := range semResults {
+				tool := toolCatalog[r.idx]
+				status := "available — ready to call"
+				if hiddenTools[tool.Name] {
+					status = "hidden — not in tools/list, still callable"
+				} else if coreTierTools[tool.Name] {
+					status = "core — always available"
+				} else if standardTierTools[tool.Name] {
+					status = "standard — always available"
+				}
+				matches[i] = toolMatch{
+					Name:            tool.Name,
+					Category:        tool.Category,
+					Description:     tool.Description,
+					Example:         tool.Example,
+					SimilarityScore: r.score,
+					Status:          status,
+				}
+			}
+
+			resp := map[string]interface{}{
+				"query":       query,
+				"matches":     matches,
+				"search_mode": "semantic",
+			}
+			if len(matches) == 0 {
+				resp["hint"] = "No matches. Try broader terms like 'explore', 'task', 'web', 'architecture'."
+			}
+			// Workflow recipe matching stays keyword-based — it uses rich intent
+			// descriptions that benefit from literal keyword alignment.
+			var bestWorkflow *workflowRecipe
+			bestWfScore := 0
+			for i := range workflowRecipes {
+				wf := &workflowRecipes[i]
+				score := 0
+				for _, qw := range queryWords {
+					for _, kw := range wf.Keywords {
+						if kwMatch(kw, qw) {
+							score++
+						}
+					}
+					for _, dw := range wf.intentWords {
+						if kwMatch(dw, qw) {
+							score++
+							break
+						}
+					}
+				}
+				if score > bestWfScore {
+					bestWfScore = score
+					bestWorkflow = wf
+				}
+			}
+			if bestWorkflow != nil && bestWfScore > 0 {
+				resp["recommended_workflow"] = bestWorkflow
+			}
+			if s.projectRegistry != nil {
+				allowed := s.allowedProjectNames()
+				if len(allowed) > 0 {
+					resp["cross_project_hint"] = fmt.Sprintf(
+						"Cross-project queries available for: %s. Add projects=\"*\" to recall, get_events, get_messages, or get_agents to query across them.",
+						strings.Join(allowed, ", "),
+					)
+				}
+			}
+			return jsonResult(resp)
+		}
+		// Embed failed or no positive-similarity results — fall through to keyword path.
+	}
+
+keywordPath:
+	// ── Keyword path (fallback) ────────────────────────────────────────────────
+
 	matches := make([]toolMatch, len(results))
 	for i, r := range results {
 		status := "available — ready to call"
@@ -611,8 +764,9 @@ func (s *Server) handleDiscoverTools(_ context.Context, req mcp.CallToolRequest)
 	}
 
 	resp := map[string]interface{}{
-		"query":   query,
-		"matches": matches,
+		"query":       query,
+		"matches":     matches,
+		"search_mode": "keyword",
 	}
 	if len(matches) == 0 {
 		resp["hint"] = "No matches. Try broader terms like 'explore', 'task', 'web', 'architecture'."

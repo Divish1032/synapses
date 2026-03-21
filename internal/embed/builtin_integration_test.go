@@ -14,11 +14,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ── Integration tests (require model download, ~23 MB) ──────────────────────
+// ── Integration tests (require model download, ~137 MB) ─────────────────────
 //
-// Run with: go test ./internal/embed -tags integration -race -count=1 -timeout 120s
+// Run with: go test ./internal/embed -tags integration -race -count=1 -timeout 300s
 //
-// These tests download the all-MiniLM-L6-v2 ONNX model on first run.
+// These tests download the nomic-embed-text-v1.5 quantized ONNX model on first run.
+// Output is Matryoshka-truncated to 384 dims and L2-normalized.
 // The model is cached in the test temp directory across subtests.
 
 func TestBuiltinEmbedder_Integration(t *testing.T) {
@@ -44,7 +45,7 @@ func TestBuiltinEmbedder_Integration(t *testing.T) {
 		}
 		assert.Greater(t, sumSq, 0.0, "embedding should have non-zero magnitude")
 
-		// Verify normalization: L2 norm should be ~1.0 (MiniLM with normalization).
+		// Verify normalization: L2 norm should be ~1.0 (nomic with Matryoshka truncation + L2 normalize).
 		norm := math.Sqrt(sumSq)
 		assert.InDelta(t, 1.0, norm, 0.01, "normalized embedding should have L2 norm ≈ 1.0")
 	})
@@ -93,13 +94,15 @@ func TestBuiltinEmbedder_Integration(t *testing.T) {
 	})
 
 	t.Run("Embed_LongText", func(t *testing.T) {
-		// MiniLM has a 256-token context window. Verify long text doesn't panic
-		// or return an error — the model truncates internally.
+		// nomic has an 8192-token context window (~6000 words).
+		// Use a moderate-length text (~500 words, ~700 tokens) to verify
+		// long-context handling without excessive CPU time in CI.
 		longText := ""
-		for i := 0; i < 1000; i++ {
-			longText += "the quick brown fox jumps over the lazy dog "
+		for i := 0; i < 50; i++ {
+			longText += "the quick brown fox jumps over the lazy dog in the park "
 		}
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
 		vec, err := e.Embed(ctx, longText)
 		require.NoError(t, err)
 		assert.Len(t, vec, 384)

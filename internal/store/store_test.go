@@ -12,13 +12,7 @@ import (
 
 func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "test.db")
-	st, err := store.Open(path)
-	if err != nil {
-		t.Fatalf("Open() error: %v", err)
-	}
-	t.Cleanup(func() { st.Close() })
-	return st
+	return store.OpenFromTemplate(t)
 }
 
 // openTestStoreAtPath opens (or creates) a store at a specific path.

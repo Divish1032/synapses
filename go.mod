@@ -63,6 +63,7 @@ require (
 
 require (
 	github.com/chewxy/math32 v1.11.1 // indirect
+	github.com/coder/hnsw v0.6.1 // indirect
 	github.com/daulet/tokenizers v1.26.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -75,6 +76,7 @@ require (
 	github.com/gomlx/go-xla v0.2.0 // indirect
 	github.com/gomlx/gomlx v0.27.1 // indirect
 	github.com/gomlx/onnx-gomlx v0.4.1 // indirect
+	github.com/google/renameio v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/knights-analytics/ortgenai v0.1.0 // indirect

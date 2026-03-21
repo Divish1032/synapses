@@ -1,12 +1,15 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // RecencyDecayScore computes a decay score using ACT-R frequency-weighted
@@ -130,6 +133,11 @@ const DecayVisibilityThreshold = 0.05
 // until optionally caps the upper bound on created_at (nil = no upper bound).
 // When includeStale is true, stale memories are also returned.
 func (s *Store) RecentMemories(limit, sinceDays int, until *time.Time, includeStale bool) ([]Memory, error) {
+	return s.RecentMemoriesCtx(context.Background(), limit, sinceDays, until, includeStale)
+}
+
+// RecentMemoriesCtx is the context-aware variant of RecentMemories.
+func (s *Store) RecentMemoriesCtx(ctx context.Context, limit, sinceDays int, until *time.Time, includeStale bool) ([]Memory, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -161,7 +169,7 @@ func (s *Store) RecentMemories(limit, sinceDays int, until *time.Time, includeSt
 	q += ` ORDER BY created_at DESC LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.knowledgeDB.Query(q, args...)
+	rows, err := s.knowledgeDB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("recent memories: %w", err)
 	}
@@ -178,6 +186,11 @@ func (s *Store) RecentMemories(limit, sinceDays int, until *time.Time, includeSt
 // Independent of the BM25 channel (different query path, different purpose).
 // Returns at most limit node IDs. Returns (nil, nil) on empty/invalid query.
 func (s *Store) GetAnchorNodesByFTSQuery(query string, limit int) ([]string, error) {
+	return s.GetAnchorNodesByFTSQueryCtx(context.Background(), query, limit)
+}
+
+// GetAnchorNodesByFTSQueryCtx is the context-aware variant of GetAnchorNodesByFTSQuery.
+func (s *Store) GetAnchorNodesByFTSQueryCtx(ctx context.Context, query string, limit int) ([]string, error) {
 	if query == "" {
 		return nil, nil
 	}
@@ -190,7 +203,7 @@ func (s *Store) GetAnchorNodesByFTSQuery(query string, limit int) ([]string, err
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.knowledgeDB.Query(`
+	rows, err := s.knowledgeDB.QueryContext(ctx, `
 		SELECT DISTINCT ma.node_id
 		FROM memory_anchors ma
 		JOIN memories m ON ma.memory_id = m.id
@@ -221,6 +234,11 @@ func (s *Store) GetAnchorNodesByFTSQuery(query string, limit int) ([]string, err
 // Deduplicates by memory ID across batches.
 // When includeStale is true, stale memories are also returned.
 func (s *Store) GetMemoriesByAnchorNodes(nodeIDs []string, limit int, includeStale bool) ([]Memory, error) {
+	return s.GetMemoriesByAnchorNodesCtx(context.Background(), nodeIDs, limit, includeStale)
+}
+
+// GetMemoriesByAnchorNodesCtx is the context-aware variant of GetMemoriesByAnchorNodes.
+func (s *Store) GetMemoriesByAnchorNodesCtx(ctx context.Context, nodeIDs []string, limit int, includeStale bool) ([]Memory, error) {
 	if len(nodeIDs) == 0 || limit <= 0 {
 		return nil, nil
 	}
@@ -257,7 +275,7 @@ func (s *Store) GetMemoriesByAnchorNodes(nodeIDs []string, limit int, includeSta
 		}
 		q += ` ORDER BY m.created_at DESC`
 
-		rows, err := s.knowledgeDB.Query(q, args...)
+		rows, err := s.knowledgeDB.QueryContext(ctx, q, args...)
 		if err != nil {
 			return nil, fmt.Errorf("get memories by anchor nodes: %w", err)
 		}
@@ -381,5 +399,194 @@ func RRFMergeWeighted(channels map[string][]string, limit int, k int, weights ma
 	}
 
 	return resultIDs, attribution
+}
+
+// ── Score-Aware Fusion (ConvexMerge) ─────────────────────────────────────────
+//
+// ConvexMerge is an alternative to RRF that uses actual score magnitudes
+// instead of rank positions. Research shows 3.86% NDCG@10 improvement over
+// pure RRF when score distributions are heterogeneous (Benham & Culpepper, 2017).
+//
+// Formula: score = α × norm_bm25 + (1-α) × norm_cosine + graph_bonus + temporal_bonus
+//
+// Each channel's scores are min-max normalized to [0, 1] before combining.
+// This lets score magnitude (how confident each channel is) influence the
+// final ranking, unlike RRF which treats rank-1 and rank-2 identically
+// regardless of the gap between their raw scores.
+
+// ChannelScores carries per-ID raw scores from a single retrieval channel.
+// IDs and Scores are parallel slices: Scores[i] is the raw score for IDs[i].
+// Higher scores = more relevant.
+type ChannelScores struct {
+	IDs    []string
+	Scores []float64
+}
+
+// ConvexWeights configures the linear combination coefficients for ConvexMerge.
+// Alpha controls the BM25 vs semantic balance (α * bm25 + (1-α) * semantic).
+// GraphBonus and TemporalBonus are additive weights for those channels.
+// All values should be in [0, 1]. The sum need not equal 1 — scores are
+// normalized per-channel before weighting.
+type ConvexWeights struct {
+	Alpha         float64 // BM25 vs semantic balance: 0.0 = all semantic, 1.0 = all BM25
+	GraphBonus    float64 // additive weight for graph channel
+	TemporalBonus float64 // additive weight for temporal channel
+}
+
+// DefaultConvexWeights provides balanced defaults for score-aware fusion.
+// Alpha=0.5 weights BM25 and semantic equally. Graph and temporal each
+// contribute 30% and 20% bonus respectively when present.
+var DefaultConvexWeights = ConvexWeights{
+	Alpha:         0.5,
+	GraphBonus:    0.3,
+	TemporalBonus: 0.2,
+}
+
+// ConvexMerge fuses multiple retrieval channels using score-magnitude-aware
+// linear combination. Unlike RRF (which uses only rank positions), ConvexMerge
+// preserves the information in how confident each channel is about a result.
+//
+// Per-channel min-max normalization maps raw scores to [0, 1]:
+//
+//	norm(s) = (s - min) / (max - min)       if max > min
+//	norm(s) = 1.0                           if max == min (single result or all tied)
+//
+// Final score for each document:
+//
+//	score = α × norm_bm25 + (1-α) × norm_cosine + graph_bonus × norm_graph + temporal_bonus × norm_temporal
+//
+// Returns top-N memory IDs sorted by fused score, plus per-memory channel
+// attribution (same shape as RRFMergeWeighted for drop-in compatibility).
+func ConvexMerge(
+	channels map[string]*ChannelScores,
+	limit int,
+	weights ConvexWeights,
+) ([]string, map[string][]string) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	type scored struct {
+		id       string
+		score    float64
+		channels []string
+	}
+	scoreMap := make(map[string]*scored)
+
+	// Normalize and accumulate scores from each channel.
+	for channelName, cs := range channels {
+		if cs == nil || len(cs.IDs) == 0 {
+			continue
+		}
+		// Guard: IDs and Scores must be parallel slices. If mismatched,
+		// skip the channel rather than panic on index-out-of-bounds.
+		if len(cs.IDs) != len(cs.Scores) {
+			continue
+		}
+
+		norm := minMaxNormalize(cs.Scores)
+		w := channelWeight(channelName, weights)
+
+		for i, id := range cs.IDs {
+			s, ok := scoreMap[id]
+			if !ok {
+				s = &scored{id: id}
+				scoreMap[id] = s
+			}
+			s.score += w * norm[i]
+			s.channels = append(s.channels, channelName)
+		}
+	}
+
+	// Collect and sort by score descending.
+	items := make([]scored, 0, len(scoreMap))
+	for _, s := range scoreMap {
+		items = append(items, *s)
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].score != items[j].score {
+			return items[i].score > items[j].score
+		}
+		return items[i].id < items[j].id
+	})
+
+	if len(items) > limit {
+		items = items[:limit]
+	}
+
+	resultIDs := make([]string, len(items))
+	attribution := make(map[string][]string, len(items))
+	for i, item := range items {
+		resultIDs[i] = item.id
+		attribution[item.id] = item.channels
+	}
+
+	return resultIDs, attribution
+}
+
+// channelWeight maps a channel name to its ConvexMerge coefficient.
+// The formula is: α × bm25 + (1-α) × semantic + graph_bonus × graph + temporal_bonus × temporal.
+func channelWeight(name string, w ConvexWeights) float64 {
+	switch name {
+	case "bm25":
+		return w.Alpha
+	case "semantic":
+		return 1.0 - w.Alpha
+	case "graph":
+		return w.GraphBonus
+	case "temporal":
+		return w.TemporalBonus
+	default:
+		logutil.Warn("synapses: ConvexMerge: unknown channel %q — using default weight 0.5\n", name)
+		return 0.5 // unknown channels get moderate weight
+	}
+}
+
+// minMaxNormalize maps a slice of raw scores to [0, 1] using min-max scaling.
+// Returns a parallel slice of normalized scores.
+// If all scores are equal (max == min), returns all 1.0.
+// If the input is empty, returns nil.
+// NaN and ±Inf values are sanitized to 0.0 before normalization to prevent
+// poison-pill propagation through the fusion pipeline.
+func minMaxNormalize(scores []float64) []float64 {
+	if len(scores) == 0 {
+		return nil
+	}
+
+	// Sanitize: replace NaN/Inf with 0.0 so they don't poison min/max.
+	clean := make([]float64, len(scores))
+	for i, s := range scores {
+		if math.IsNaN(s) || math.IsInf(s, 0) {
+			clean[i] = 0.0
+		} else {
+			clean[i] = s
+		}
+	}
+
+	minS, maxS := clean[0], clean[0]
+	for _, s := range clean[1:] {
+		if s < minS {
+			minS = s
+		}
+		if s > maxS {
+			maxS = s
+		}
+	}
+
+	norm := make([]float64, len(clean))
+	spread := maxS - minS
+	if spread <= 0 {
+		// All scores identical — normalize to 1.0 (they're equally relevant).
+		for i := range norm {
+			norm[i] = 1.0
+		}
+		return norm
+	}
+
+	for i, s := range clean {
+		norm[i] = (s - minS) / spread
+	}
+	return norm
 }
 
