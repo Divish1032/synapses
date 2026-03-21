@@ -968,16 +968,44 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 	} else if m.AgentID != "" {
 		dupCandidates, _ = s.queryFreshMemoriesForDedup(m.Tier, "", m.AgentID)
 	}
+	// newVec caches the new memory's embedding for the semantic dedup check.
+	// Computed lazily (at most once) only when Jaccard is inconclusive AND
+	// semanticDedupFunc is set AND the candidate has a stored embedding.
+	var newVec []float32
+	var newVecComputed bool
+	embedFn := s.semanticDedupFunc // snapshot — safe even if swapped concurrently
+
 	for _, ex := range dupCandidates {
-		if stringSimilarity(ex.Content, m.Content) > 0.85 {
-			// Return dedup result with old content + created_at for versioning.
-			// prepareMemory must be pure (no writes) so callers can decide
-			// whether to touch inside or outside a transaction.
+		sim := stringSimilarity(ex.Content, m.Content)
+		if sim > 0.85 {
+			// High Jaccard — definite dedup match.
 			return m, prepareMemoryResult{
 				dedupedID:        ex.ID,
 				dedupedContent:   ex.Content,
 				dedupedCreatedAt: ex.CreatedAt,
 			}, nil
+		}
+		// Inconclusive Jaccard [0.5, 0.85): check cosine similarity of
+		// embeddings to catch paraphrased duplicates. Degrades gracefully:
+		// no embedder or no stored embedding → skip (same as before).
+		if sim >= 0.5 && embedFn != nil {
+			candidateVec := s.GetMemoryEmbedding(ex.ID)
+			if len(candidateVec) == 0 {
+				continue
+			}
+			if !newVecComputed {
+				newVecComputed = true
+				if raw, embedErr := s.safeEmbed(embedFn, m.Content); embedErr == nil {
+					newVec = normalizeVec(raw)
+				}
+			}
+			if len(newVec) > 0 && dotSimilarity(newVec, candidateVec) > 0.9 {
+				return m, prepareMemoryResult{
+					dedupedID:        ex.ID,
+					dedupedContent:   ex.Content,
+					dedupedCreatedAt: ex.CreatedAt,
+				}, nil
+			}
 		}
 	}
 
@@ -1455,4 +1483,17 @@ func tokenSet(s string) map[string]bool {
 		}
 	}
 	return set
+}
+
+// safeEmbed calls the embedding function with panic recovery. If the embedder
+// panics (e.g., ONNX runtime crash), the error is captured instead of crashing
+// the server. This makes semantic dedup a best-effort enhancement that never
+// degrades the core memory write path.
+func (*Store) safeEmbed(fn func(string) ([]float32, error), text string) (vec []float32, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("semantic dedup embed panic: %v", r)
+		}
+	}()
+	return fn(text)
 }

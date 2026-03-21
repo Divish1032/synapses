@@ -70,6 +70,20 @@ func (s *Store) UpsertMemoryEmbedding(memoryID, model string, vec []float32) err
 	return nil
 }
 
+// GetMemoryEmbedding returns the stored embedding vector for a memory, or nil
+// if the memory has no embedding or the embedding is stale.
+func (s *Store) GetMemoryEmbedding(memoryID string) []float32 {
+	var blob []byte
+	err := s.knowledgeDB.QueryRow(
+		`SELECT embedding FROM memory_embeddings WHERE memory_id = ? AND stale = 0`,
+		memoryID,
+	).Scan(&blob)
+	if err != nil {
+		return nil
+	}
+	return blobToVec(blob)
+}
+
 // MemoryEmbeddingCount returns the total number of stored memory embeddings.
 func (s *Store) MemoryEmbeddingCount() int {
 	var count int

@@ -919,8 +919,20 @@ func (s *Server) SetEmbedClient(ec *embed.Client) {
 // SetMemoryEmbedder wires an embedder for generating memory embeddings
 // on remember() writes and for vector search in recall(). Pass nil to
 // disable memory embeddings (FTS5-only recall).
+// Also wires the embedder into the store's semantic dedup: when Jaccard
+// similarity is inconclusive, the store uses the embedder to compare
+// new content against existing memory embeddings.
 func (s *Server) SetMemoryEmbedder(e embed.Embedder) {
 	s.memoryEmbedder = e
+	if s.store != nil && e != nil {
+		s.store.SetSemanticDedupFunc(func(text string) ([]float32, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return e.Embed(ctx, text)
+		})
+	} else if s.store != nil {
+		s.store.SetSemanticDedupFunc(nil)
+	}
 }
 
 // ServeStdio starts the MCP server on stdin/stdout. This call blocks until

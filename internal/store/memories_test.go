@@ -525,6 +525,241 @@ func TestInsertMemory_BelowDedupThreshold(t *testing.T) {
 	}
 }
 
+// TestInsertMemory_SemanticDedup_InconclusiveJaccard verifies that when Jaccard
+// similarity is in [0.5, 0.85) and the semantic dedup function reports high
+// cosine similarity (>0.9), the memory is deduplicated. This catches paraphrased
+// duplicates like "auth middleware uses JWT RS256" vs "JWT RS256 signing in auth
+// middleware" that have different word order but identical meaning.
+func TestInsertMemory_SemanticDedup_InconclusiveJaccard(t *testing.T) {
+	t.Parallel()
+	st := openMemTestStore(t)
+
+	// Wire a mock embedder that returns distinct but very similar vectors.
+	// Candidate vector and new vector will have dot product > 0.9.
+	candidateVec := make([]float32, 4)
+	candidateVec[0], candidateVec[1], candidateVec[2], candidateVec[3] = 1, 0, 0, 0
+	newVec := make([]float32, 4)
+	newVec[0], newVec[1], newVec[2], newVec[3] = 0.96, 0.28, 0, 0 // dot=0.96 with candidateVec after normalization
+
+	st.SetSemanticDedupFunc(func(text string) ([]float32, error) {
+		return []float32{0.96, 0.28, 0, 0}, nil
+	})
+
+	// Content pair chosen so Jaccard is ~0.6 (inconclusive range).
+	// "auth middleware uses JWT RS256 tokens" (6 words)
+	// "JWT RS256 signing in auth middleware system" (7 words)
+	// Overlap: {auth, middleware, JWT, RS256} = 4, Union = 9 → 4/9 ≈ 0.44
+	// Let's use something that hits [0.5, 0.85) more reliably:
+	contentA := "the authentication middleware uses JWT RS256 tokens for secure session management"
+	contentB := "JWT RS256 tokens used by the authentication middleware for secure session handling"
+	// Overlap: {the, authentication, middleware, uses/used→different, JWT, RS256, tokens, for, secure, session} ≈ high overlap
+	// Jaccard should be in the inconclusive range.
+
+	id1, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: contentA, AgentID: "sem-agent", Source: SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	// Store an embedding for the first memory (simulates async embed pipeline).
+	if err := st.UpsertMemoryEmbedding(id1, "test-model", candidateVec); err != nil {
+		t.Fatalf("upsert embedding: %v", err)
+	}
+
+	id2, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: contentB, AgentID: "sem-agent", Source: SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+
+	if id1 != id2 {
+		t.Errorf("expected semantic dedup (same ID), got id1=%s id2=%s", id1, id2)
+	}
+	mems, _ := st.QueryMemories(TierProject, "", "sem-agent", 10)
+	if len(mems) != 1 {
+		t.Errorf("expected 1 memory after semantic dedup, got %d", len(mems))
+	}
+}
+
+// TestInsertMemory_SemanticDedup_LowCosine verifies that when Jaccard is
+// inconclusive but cosine similarity is below 0.9, the memory is NOT deduped.
+func TestInsertMemory_SemanticDedup_LowCosine(t *testing.T) {
+	t.Parallel()
+	st := openMemTestStore(t)
+
+	// Return a vector that will have low cosine with the candidate.
+	st.SetSemanticDedupFunc(func(text string) ([]float32, error) {
+		return []float32{0, 0, 1, 0}, nil // orthogonal to candidate → cosine ≈ 0
+	})
+
+	contentA := "the authentication middleware uses JWT RS256 tokens for secure session management"
+	contentB := "JWT RS256 tokens used by the authentication middleware for secure session handling"
+
+	id1, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: contentA, AgentID: "sem-lo", Source: SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	candidateVec := []float32{1, 0, 0, 0}
+	if err := st.UpsertMemoryEmbedding(id1, "test-model", candidateVec); err != nil {
+		t.Fatalf("upsert embedding: %v", err)
+	}
+
+	id2, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: contentB, AgentID: "sem-lo", Source: SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+
+	if id1 == id2 {
+		t.Errorf("expected NO dedup (low cosine), but got same ID %s", id1)
+	}
+	mems, _ := st.QueryMemories(TierProject, "", "sem-lo", 10)
+	if len(mems) != 2 {
+		t.Errorf("expected 2 memories (no semantic dedup), got %d", len(mems))
+	}
+}
+
+// TestInsertMemory_SemanticDedup_NoEmbedder verifies graceful degradation:
+// when no semantic dedup function is set, inconclusive Jaccard memories are NOT
+// deduped (same behavior as pre-Sprint-11).
+func TestInsertMemory_SemanticDedup_NoEmbedder(t *testing.T) {
+	t.Parallel()
+	st := openMemTestStore(t)
+	// No SetSemanticDedupFunc — nil by default.
+
+	contentA := "the authentication middleware uses JWT RS256 tokens for secure session management"
+	contentB := "JWT RS256 tokens used by the authentication middleware for secure session handling"
+
+	id1, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: contentA, AgentID: "sem-none", Source: SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+
+	id2, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: contentB, AgentID: "sem-none", Source: SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+
+	if id1 == id2 {
+		t.Errorf("expected NO dedup (no embedder), but got same ID %s", id1)
+	}
+}
+
+// TestInsertMemory_SemanticDedup_NoCandidateEmbedding verifies that semantic
+// dedup is skipped when the candidate memory has no stored embedding.
+func TestInsertMemory_SemanticDedup_NoCandidateEmbedding(t *testing.T) {
+	t.Parallel()
+	st := openMemTestStore(t)
+
+	st.SetSemanticDedupFunc(func(text string) ([]float32, error) {
+		return []float32{1, 0, 0, 0}, nil
+	})
+
+	contentA := "the authentication middleware uses JWT RS256 tokens for secure session management"
+	contentB := "JWT RS256 tokens used by the authentication middleware for secure session handling"
+
+	id1, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: contentA, AgentID: "sem-no-emb", Source: SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	// Do NOT insert embedding for id1 — no candidate embedding available.
+
+	id2, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: contentB, AgentID: "sem-no-emb", Source: SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+
+	if id1 == id2 {
+		t.Errorf("expected NO dedup (no candidate embedding), but got same ID %s", id1)
+	}
+}
+
+// TestInsertMemory_SemanticDedup_DimensionMismatch verifies that dimension
+// mismatch between candidate and new embedding (e.g., model upgrade) doesn't
+// cause a false positive — dotSimilarity returns 0 for length mismatches.
+func TestInsertMemory_SemanticDedup_DimensionMismatch(t *testing.T) {
+	t.Parallel()
+	st := openMemTestStore(t)
+
+	// New embedder returns 8-dim vectors, but candidate was embedded with 4-dim.
+	st.SetSemanticDedupFunc(func(text string) ([]float32, error) {
+		return []float32{1, 0, 0, 0, 0, 0, 0, 0}, nil
+	})
+
+	contentA := "the authentication middleware uses JWT RS256 tokens for secure session management"
+	contentB := "JWT RS256 tokens used by the authentication middleware for secure session handling"
+
+	id1, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: contentA, AgentID: "sem-dim", Source: SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	if err := st.UpsertMemoryEmbedding(id1, "old-model", []float32{1, 0, 0, 0}); err != nil {
+		t.Fatalf("upsert embedding: %v", err)
+	}
+
+	id2, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: contentB, AgentID: "sem-dim", Source: SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+
+	if id1 == id2 {
+		t.Errorf("expected NO dedup (dimension mismatch), but got same ID %s", id1)
+	}
+}
+
+// TestInsertMemory_SemanticDedup_EmbedderPanic verifies that a panicking
+// embedder does not crash the server — the memory is inserted without dedup.
+func TestInsertMemory_SemanticDedup_EmbedderPanic(t *testing.T) {
+	t.Parallel()
+	st := openMemTestStore(t)
+
+	st.SetSemanticDedupFunc(func(text string) ([]float32, error) {
+		panic("onnx runtime crash")
+	})
+
+	contentA := "the authentication middleware uses JWT RS256 tokens for secure session management"
+	contentB := "JWT RS256 tokens used by the authentication middleware for secure session handling"
+
+	id1, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: contentA, AgentID: "sem-panic", Source: SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	candidateVec := []float32{1, 0, 0, 0}
+	if err := st.UpsertMemoryEmbedding(id1, "test-model", candidateVec); err != nil {
+		t.Fatalf("upsert embedding: %v", err)
+	}
+
+	// This should NOT panic — the panic is recovered and dedup is skipped.
+	id2, err := st.InsertMemory(Memory{
+		Tier: TierProject, Content: contentB, AgentID: "sem-panic", Source: SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+
+	if id1 == id2 {
+		t.Errorf("expected NO dedup after embedder panic, but got same ID %s", id1)
+	}
+}
+
 // TestInsertMemory_IdenticalProjectMemory_Deduped verifies exact-same content
 // from the same agent isn't written twice (end_session retry scenario).
 func TestInsertMemory_IdenticalProjectMemory_Deduped(t *testing.T) {
