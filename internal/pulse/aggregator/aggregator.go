@@ -127,6 +127,20 @@ type p3Metrics struct {
 	// Bug 69 — COV-12: store persistence operation count and avg latency.
 	persistOps   int
 	avgPersistMs float64
+	// Phase 5: coverage completeness & self-refining metrics.
+	crossSessionRecallHits int
+	uptimePct              float64
+	avgRebuildMs           float64
+	federationDetections   int
+	memoryInvalidations    int
+	watcherViolations      int
+	crossProjectAlerts     int
+	deliverySuccessRate    float64
+	concurrentAgentsMax    int
+	graphFreshnessScore    float64
+	cleanSessionRate       float64
+	tokenBudgetHitRate     float64
+	bfsCacheHitRateP5      float64
 }
 
 func buildDayMetrics(sum *pulsestore.Summary, reparseCount int, reparseDurationMs float64, staleEmbeddings int, p3 p3Metrics) map[string]float64 {
@@ -197,6 +211,20 @@ func buildDayMetrics(sum *pulsestore.Summary, reparseCount int, reparseDurationM
 		// Bug 69 — COV-12: persistence metrics.
 		"persist_ops":    float64(p3.persistOps),
 		"avg_persist_ms": p3.avgPersistMs,
+		// Phase 5: coverage completeness & self-refining.
+		"cross_session_recall_hits": float64(p3.crossSessionRecallHits),
+		"uptime_pct":               p3.uptimePct,
+		"avg_rebuild_ms":           p3.avgRebuildMs,
+		"federation_detections":    float64(p3.federationDetections),
+		"memory_invalidations":     float64(p3.memoryInvalidations),
+		"watcher_violations":       float64(p3.watcherViolations),
+		"cross_project_alerts":     float64(p3.crossProjectAlerts),
+		"delivery_success_rate":    p3.deliverySuccessRate,
+		"concurrent_agents_max":    float64(p3.concurrentAgentsMax),
+		"graph_freshness_score_p5": p3.graphFreshnessScore,
+		"clean_session_rate":       p3.cleanSessionRate,
+		"token_budget_hit_rate":    p3.tokenBudgetHitRate,
+		"bfs_cache_hit_rate_p5":    p3.bfsCacheHitRateP5,
 	}
 }
 
@@ -259,6 +287,20 @@ func (a *Aggregator) rollup() {
 		// Bug 69 — COV-12: persistence metrics.
 		persistOps:   a.store.CountPersistOps(today),
 		avgPersistMs: a.store.AvgPersistMs(today),
+		// Phase 5: coverage completeness & self-refining.
+		crossSessionRecallHits: a.store.CountCrossSessionRecallHits(today),
+		uptimePct:              a.store.GetUptimePctForDay(today),
+		avgRebuildMs:           a.store.AvgRebuildMs(today),
+		federationDetections:   a.store.CountFederationDetections(today, 0),
+		memoryInvalidations:    a.store.SumMemoryInvalidations(today),
+		watcherViolations:      a.store.CountWatcherViolations(today),
+		crossProjectAlerts:     a.store.CountCrossProjectImpactAlerts(today),
+		deliverySuccessRate:    a.store.GetDeliverySuccessRateForDay(today),
+		concurrentAgentsMax:    a.store.GetConcurrentAgentsMax(today),
+		graphFreshnessScore:    a.store.GetGraphFreshnessScoreP5(today),
+		cleanSessionRate:       a.store.GetCleanSessionRate(today),
+		tokenBudgetHitRate:     a.store.GetTokenBudgetHitRate(today),
+		bfsCacheHitRateP5:      a.store.GetBFSCacheHitRate(1),
 	}
 
 	metrics := buildDayMetrics(sum, reparseCount, reparseDurationMs, staleEmbeddings, p3)
@@ -281,6 +323,13 @@ func (a *Aggregator) rollup() {
 		if err := a.store.UpsertDailyRollup(today, metric, value); err != nil {
 			logutil.Warn("pulse aggregator: upsert %s: %v\n", metric, err)
 			rollupOK = false
+		}
+	}
+
+	// P5 — ROI-E1: heartbeat tick on every successful rollup cycle.
+	if rollupOK {
+		if hbErr := a.store.InsertHeartbeat(); hbErr != nil {
+			logutil.Warn("pulse aggregator: heartbeat insert: %v\n", hbErr)
 		}
 	}
 
@@ -412,6 +461,21 @@ func (a *Aggregator) backfillMissedDays(today string) {
 			contextFreshnessScore: 0.0,
 			// Bug 25 — ROI-D5: entity memory coverage; 0.0 for backfill.
 			entityMemoryCoverage: 0.0,
+			// Phase 5: reconstructable counts from raw data.
+			crossSessionRecallHits: a.store.CountCrossSessionRecallHits(day),
+			uptimePct:              a.store.GetUptimePctForDay(day),
+			avgRebuildMs:           a.store.AvgRebuildMs(day),
+			federationDetections:   a.store.CountFederationDetections(day, 0),
+			memoryInvalidations:    a.store.SumMemoryInvalidations(day),
+			watcherViolations:      a.store.CountWatcherViolations(day),
+			crossProjectAlerts:     a.store.CountCrossProjectImpactAlerts(day),
+			deliverySuccessRate:    a.store.GetDeliverySuccessRateForDay(day),
+			concurrentAgentsMax:    a.store.GetConcurrentAgentsMax(day),
+			// Point-in-time metrics: 0.0 for historical backfill.
+			graphFreshnessScore: 0.0,
+			cleanSessionRate:    a.store.GetCleanSessionRate(day),
+			tokenBudgetHitRate:  a.store.GetTokenBudgetHitRate(day),
+			bfsCacheHitRateP5:   0.0,
 		}
 		metrics := buildDayMetrics(sum, reparseCount, reparseDurationMs, 0, backfillP3)
 		for metric, value := range metrics {

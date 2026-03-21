@@ -19,7 +19,8 @@ type event struct {
 	kind string // "tool_call", "context_delivery", "brain_usage", "session", "session_model", "agent_llm_usage",
 	// "parse_event", "reparse_event", "graph_snapshot", "embedding_event", "index_event",
 	// "guard_event", "memory_op", "validation_event", "search_event",
-	// "config_reload", "persistence_event", "enrichment_event", "rule_eval_event"
+	// "config_reload", "persistence_event", "enrichment_event", "rule_eval_event",
+	// "federation_event", "skill_execution", "tool_sequence", "heartbeat"
 	data interface{}
 }
 
@@ -54,6 +55,8 @@ type Collector struct {
 	highWaterMark atomic.Int64
 	// P2-19: events dropped due to full buffer (ring buffer overflow).
 	dropped atomic.Int64
+	// P5 — DQ-Integrity.1: write errors during batch persistence.
+	writeErrors atomic.Int64
 }
 
 // New creates a Collector with the given buffer capacity and flush interval.
@@ -198,6 +201,28 @@ func (c *Collector) RecordRuleEvalEvent(ev pulsetypes.RuleEvalEvent) {
 	c.enqueue(event{kind: "rule_eval_event", data: ev})
 }
 
+// RecordFederationEvent enqueues a federation detection event (P5 — COV-8).
+func (c *Collector) RecordFederationEvent(ev pulsetypes.FederationDetectEvent) {
+	c.enqueue(event{kind: "federation_event", data: ev})
+}
+
+// RecordSkillExecution enqueues a skill execution event (P5 — COV-15).
+func (c *Collector) RecordSkillExecution(ev pulsetypes.SkillExecutionEvent) {
+	c.enqueue(event{kind: "skill_execution", data: ev})
+}
+
+// RecordToolSequenceEntry enqueues a tool call sequence entry (P5 — SA-C1).
+func (c *Collector) RecordToolSequenceEntry(sessionID, toolName string, position int, success bool) {
+	c.enqueue(event{kind: "tool_sequence", data: pulsetypes.ToolSequenceEntry{
+		SessionID: sessionID, ToolName: toolName, Position: position, Success: success,
+	}})
+}
+
+// RecordHeartbeat enqueues a system uptime heartbeat tick (P5 — ROI-E1).
+func (c *Collector) RecordHeartbeat() {
+	c.enqueue(event{kind: "heartbeat", data: nil})
+}
+
 // Dropped returns the number of events dropped due to buffer overflow (P2-19).
 func (c *Collector) Dropped() int64 {
 	return c.dropped.Load()
@@ -222,6 +247,11 @@ func (c *Collector) DropRate() float64 {
 	// Approximate: dropped / (dropped + hwm) gives a conservative rate.
 	total := dropped + hwm
 	return float64(dropped) / float64(total)
+}
+
+// WriteErrors returns the total number of batch-write errors since collector start (P5 — DQ-Integrity.1).
+func (c *Collector) WriteErrors() int64 {
+	return c.writeErrors.Load()
 }
 
 func (c *Collector) enqueue(ev event) {
@@ -320,6 +350,7 @@ func (c *Collector) writeBatch(batch []event) {
 	for _, ev := range batch {
 		if err := c.dispatchTx(ev); err != nil {
 			logutil.Warn("pulse collector: write error (%s): %v\n", ev.kind, err)
+			c.writeErrors.Add(1)
 			ok = false
 			// Break immediately — the deferred commit(ok=false) rolls back the
 			// entire transaction, so continuing would just burn CPU for nothing.
@@ -429,6 +460,17 @@ func (c *Collector) dispatchTx(ev event) error {
 	case "rule_eval_event":
 		re, _ := ev.data.(pulsetypes.RuleEvalEvent)
 		return c.store.InsertRuleEvalEventTx(re)
+	case "federation_event":
+		fe, _ := ev.data.(pulsetypes.FederationDetectEvent)
+		return c.store.InsertFederationEventTx(fe)
+	case "skill_execution":
+		se, _ := ev.data.(pulsetypes.SkillExecutionEvent)
+		return c.store.InsertSkillExecutionTx(se)
+	case "tool_sequence":
+		ts, _ := ev.data.(pulsetypes.ToolSequenceEntry)
+		return c.store.InsertToolSequenceEntryTx(ts.SessionID, ts.ToolName, ts.Position, ts.Success)
+	case "heartbeat":
+		return c.store.InsertHeartbeatTx()
 	}
 	return nil
 }
@@ -441,6 +483,7 @@ func (c *Collector) writeBatchNoTx(batch []event) {
 	for _, ev := range batch {
 		if err := c.dispatchNoTx(ev); err != nil {
 			logutil.Warn("pulse collector: write error (%s): %v\n", ev.kind, err)
+			c.writeErrors.Add(1)
 		}
 	}
 }
@@ -546,6 +589,17 @@ func (c *Collector) dispatchNoTx(ev event) error {
 	case "rule_eval_event":
 		re, _ := ev.data.(pulsetypes.RuleEvalEvent)
 		return c.store.InsertRuleEvalEvent(re)
+	case "federation_event":
+		fe, _ := ev.data.(pulsetypes.FederationDetectEvent)
+		return c.store.InsertFederationEvent(fe)
+	case "skill_execution":
+		se, _ := ev.data.(pulsetypes.SkillExecutionEvent)
+		return c.store.InsertSkillExecution(se)
+	case "tool_sequence":
+		ts, _ := ev.data.(pulsetypes.ToolSequenceEntry)
+		return c.store.InsertToolSequenceEntry(ts.SessionID, ts.ToolName, ts.Position, ts.Success)
+	case "heartbeat":
+		return c.store.InsertHeartbeat()
 	}
 	return nil
 }

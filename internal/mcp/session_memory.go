@@ -332,8 +332,39 @@ func (s *Server) handleEndSession(
 	// sessionStartedAt is captured atomically via clearAndGetStartTime — it records
 	// when session_init first fired for this (sessionID, agentID) pair.
 	// Using a.LastSeen was wrong: LastSeen is the last heartbeat, not session start.
+	var durationMs int64
 	if !sessionStartedAt.IsZero() {
+		durationMs = time.Since(sessionStartedAt).Milliseconds()
 		result.SessionDuration = time.Since(sessionStartedAt).Round(time.Second).String()
+	}
+
+	// P5 — Item 32: record session termination reason and duration.
+	if pc := s.getPulseClient(); pc != nil && synapseSessionID != "" {
+		reason := "clean"
+		if summary == "" {
+			reason = "no_summary"
+		}
+		s.goBackground(func() { pc.SetSessionTermination(synapseSessionID, reason) })
+	}
+
+	// P5 — Item 13: compute and record session effectiveness report.
+	if pc := s.getPulseClient(); pc != nil && synapseSessionID != "" {
+		var toolCalls int
+		var taskCompRate float64
+		if retro != nil {
+			toolCalls = retro.TotalCalls
+			// Use (1 - error_rate) as a proxy for task completion rate.
+			taskCompRate = 1.0 - retro.ErrorRate
+		}
+		eff := pulse.SessionEffectiveness{
+			SessionID:          synapseSessionID,
+			AgentID:            agentID,
+			ProjectID:          s.projectID,
+			TaskCompletionRate: taskCompRate,
+			ToolCalls:          toolCalls,
+			DurationMs:         durationMs,
+		}
+		s.goBackground(func() { pc.InsertSessionEffectiveness(eff) })
 	}
 
 	return jsonResult(result)
@@ -451,6 +482,16 @@ func buildSessionLogContent(agentID, taskID, summary string, sess *sessionSummar
 // trackSessionCall increments the call counter for (sessionID, agentID) and
 // fires triggerAutoSessionLog asynchronously when the configured threshold is
 // exceeded. Safe to call from the AddAfterCallTool hook concurrently.
+// nextToolPosition returns and increments the per-session tool sequence position (P5 — SA-C1).
+// Uses the existing sessionCallsMu to avoid adding a new lock.
+func (s *Server) nextToolPosition(mcpSessionID string) int {
+	s.sessionCallsMu.Lock()
+	pos := s.toolPositions[mcpSessionID]
+	s.toolPositions[mcpSessionID] = pos + 1
+	s.sessionCallsMu.Unlock()
+	return pos
+}
+
 func (s *Server) trackSessionCall(sessionID, agentID string) {
 	threshold := 0
 	if s.config != nil {
@@ -508,6 +549,19 @@ func (s *Server) triggerAutoSessionLog(agentID string) {
 		Source:  store.SourceAuto,
 		Tags:    `["auto_session_log","auto"]`,
 	})
+
+	// P5 — Item 32: record auto-end termination reason for any active Synapses session.
+	if pc := s.getPulseClient(); pc != nil {
+		// We don't have the MCP sessionID here, so iterate synapsesSessions looking
+		// for one belonging to this agentID. Best-effort — fire-and-forget.
+		s.synapseSessionsMu.RLock()
+		for _, entry := range s.synapsesSessions {
+			if entry != nil && entry.agentID == agentID && entry.id != "" {
+				pc.SetSessionTermination(entry.id, "auto_threshold")
+			}
+		}
+		s.synapseSessionsMu.RUnlock()
+	}
 }
 
 // clearAndGetStartTime removes the call counter for (sessionID, agentID) and

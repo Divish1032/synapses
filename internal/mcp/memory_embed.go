@@ -131,6 +131,7 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 			StaleCount:  staleCount,
 			DurationMs:  time.Since(start).Milliseconds(),
 			Success:     errors == 0,
+			EventType:   "batch",
 		})
 	}
 }

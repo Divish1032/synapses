@@ -1352,6 +1352,7 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 		}
 	}
 
+	resolverStart := time.Now()
 	n := resolver.ResolveCallEdges(g)
 	logutil.Info("synapses: resolved %d CALLS edges\n", n)
 	if nh := resolver.ResolveHeritageEdges(g); nh > 0 {
@@ -1360,6 +1361,7 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 	if ni := resolver.ResolveImplementsEdges(g); ni > 0 {
 		logutil.Info("synapses: resolved %d structural IMPLEMENTS edges\n", ni)
 	}
+	resolverDurationMs := float64(time.Since(resolverStart).Milliseconds())
 	// R31: resolve documentation → code entity links (EXPLAINS/DOCUMENTED_BY).
 	if nd := resolver.ResolveDocEdges(g); nd > 0 {
 		logutil.Info("synapses: resolved %d EXPLAINS edges\n", nd)
@@ -1400,6 +1402,7 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 			ResolutionRate:        resRate,
 			LanguageDistJSON:      string(langDistJSON),
 			ProjectID:             projectID,
+			ResolverDurationMs:    resolverDurationMs,
 		}
 		go pc.RecordIndexEvent(ev)
 	}

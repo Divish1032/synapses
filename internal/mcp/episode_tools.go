@@ -497,7 +497,7 @@ func (s *Server) handleRecall(
 
 	// Quad-channel recall: 4 parallel channels merged via RRF.
 	// Replaces the old sequential BM25 + vector search path.
-	memories, _, staleEmbIDs, traversalInfo := s.quadRecallSearch(ctx, query, quadLimit, includeStale, sinceDays, untilTime, depth)
+	memories, recallChannels, staleEmbIDs, traversalInfo := s.quadRecallSearch(ctx, query, quadLimit, includeStale, sinceDays, untilTime, depth)
 
 	// Sprint 10.5: apply absolute time bounds (since / until) as post-filters.
 	// sinceTime and untilTime are only set when the caller provided since= / until=.
@@ -624,14 +624,43 @@ func (s *Server) handleRecall(
 		}
 		recallAgentID := stringArg(req, "agent_id")
 		projID := s.projectID
+		// P5 — SA-D6: attach session ID for cross-session reuse tracking.
+		mcpSessID := SessionIDFromContext(ctx)
+		sessID := s.getSynapseSessionID(mcpSessID)
+		// P5 — Item 39: extract vector search latency from channel metadata.
+		var vecSearchMs float64
+		if vs, ok := recallChannels["_vector_search_ms"]; ok && len(vs) > 0 {
+			fmt.Sscanf(vs[0], "%f", &vecSearchMs)
+		}
+		// P5 — Item 12: find top contributing channel.
+		var topChan string
+		var topChanScore float64
+		for ch, ids := range recallChannels {
+			if strings.HasPrefix(ch, "_") {
+				continue // skip metadata keys
+			}
+			score := float64(len(ids))
+			if score > topChanScore {
+				topChanScore = score
+				topChan = ch
+			}
+		}
 		pc.RecordMemoryOp(pulse.MemoryOperationEvent{
-			Operation:   op,
-			Tier:        "episodic",
-			Source:      "manual",
-			ResultCount: totalResults,
-			AgentID:     recallAgentID,
-			ProjectID:   projID,
+			Operation:       op,
+			Tier:            "episodic",
+			Source:          "manual",
+			ResultCount:     totalResults,
+			AgentID:         recallAgentID,
+			ProjectID:       projID,
+			SessionID:       sessID,
+			VectorSearchMs:  vecSearchMs,
+			TopChannel:      topChan,
+			TopChannelScore: topChanScore,
 		})
+		// P5 — Item 12: trigger recall channel attribution refresh after hits.
+		if op == "recall_hit" {
+			s.goBackground(func() { pc.UpdateRecallChannelStats(projID) })
+		}
 	}
 
 	// Cross-project episode search when projects= is provided.

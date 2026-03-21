@@ -541,23 +541,34 @@ func (s *Server) handleUpdateTask(
 					if sg != nil && taskErr == nil {
 						for _, nodeID := range task.LinkedNodes {
 							if n := sg.GetNode(graph.NodeID(nodeID)); n != nil && n.Name != "" {
+								entity := entityWithPath(n.Name, n.File)
 								pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
-									ProjectID:  projID,
-									AgentID:    aid,
-									Entity:     entityWithPath(n.Name, n.File),
-									SignalType: sig,
-									Count:      durationMs,
+									ProjectID:       projID,
+									AgentID:         aid,
+									Entity:          entity,
+									SignalType:      sig,
+									Count:           1,
+									TimeToOutcomeMs: int64(durationMs),
 								})
+								// P5 — Item 10: recompute entity quality score after outcome.
+								pc.UpdateEntityQualityScore(entity, projID)
+								// P5 — Item 11: link most recent delivery to this outcome.
+								if sig == "task_done" {
+									if did := pc.GetMostRecentDeliveryID(entity); did > 0 {
+										pc.InsertDeliveryOutcome(did, "", entity, sig, 0, true)
+									}
+								}
 								emitted = true
 							}
 						}
 					}
 					if !emitted {
 						pc.RecordOutcomeSignal(pulse.OutcomeSignalEvent{
-							ProjectID:  projID,
-							AgentID:    aid,
-							SignalType: sig,
-							Count:      durationMs,
+							ProjectID:       projID,
+							AgentID:         aid,
+							SignalType:      sig,
+							Count:           1,
+							TimeToOutcomeMs: int64(durationMs),
 						})
 					}
 				})

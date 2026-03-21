@@ -48,6 +48,21 @@ type PersistenceEvent = types.PersistenceEvent
 type EnrichmentEvent = types.EnrichmentEvent
 type RuleEvalEvent = types.RuleEvalEvent
 
+// Phase 5 event types.
+type FederationDetectEvent = types.FederationDetectEvent
+type SkillExecutionEvent = types.SkillExecutionEvent
+type ToolSequenceEntry = types.ToolSequenceEntry
+type EntityQuality = types.EntityQuality
+type DeliveryOutcome = types.DeliveryOutcome
+type SessionEffectiveness = types.SessionEffectiveness
+type DailyEffectiveness = types.DailyEffectiveness
+type WeeklyEfficiency = types.WeeklyEfficiency
+type MonthlyROI = types.MonthlyROI
+type DecayStats = types.DecayStats
+type SessionPercentiles = types.SessionPercentiles
+type SkillStat = types.SkillStat
+type DurationBuckets = types.DurationBuckets
+
 // Client is the in-process analytics collector. It replaces the HTTP sidecar.
 // Create with New; call Close when the daemon shuts down.
 type Client struct {
@@ -315,6 +330,279 @@ func (c *Client) RecordRuleEvalEvent(ev RuleEvalEvent) {
 	c.coll.RecordRuleEvalEvent(ev)
 }
 
+// RecordFederationEvent enqueues a federation detection event. Fire-and-forget (P5 — COV-8).
+func (c *Client) RecordFederationEvent(ev FederationDetectEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordFederationEvent(ev)
+}
+
+// RecordSkillExecution enqueues a skill execution event. Fire-and-forget (P5 — COV-15).
+func (c *Client) RecordSkillExecution(ev SkillExecutionEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordSkillExecution(ev)
+}
+
+// RecordToolSequenceEntry enqueues a tool call sequence entry. Fire-and-forget (P5 — SA-C1).
+func (c *Client) RecordToolSequenceEntry(sessionID, toolName string, position int, success bool) {
+	if c == nil || sessionID == "" {
+		return
+	}
+	c.coll.RecordToolSequenceEntry(sessionID, toolName, position, success)
+}
+
+// RecordHeartbeat enqueues a system uptime heartbeat tick. Fire-and-forget (P5 — ROI-E1).
+func (c *Client) RecordHeartbeat() {
+	if c == nil {
+		return
+	}
+	c.coll.RecordHeartbeat()
+}
+
+// InsertSessionEffectiveness records a computed session effectiveness row. Fire-and-forget (P5 — Item 13).
+func (c *Client) InsertSessionEffectiveness(ev SessionEffectiveness) {
+	if c == nil {
+		return
+	}
+	_ = c.store.InsertSessionEffectiveness(ev)
+}
+
+// InsertDeliveryOutcome records a delivery-to-outcome linkage. Fire-and-forget (P5 — Item 11).
+func (c *Client) InsertDeliveryOutcome(deliveryID int, sessionID, entity, signalType string, toolsBetween int, success bool) {
+	if c == nil {
+		return
+	}
+	_ = c.store.InsertDeliveryOutcome(deliveryID, sessionID, entity, signalType, toolsBetween, success)
+}
+
+// SetSessionTermination records termination reason and duration. Fire-and-forget (P5 — Item 32).
+func (c *Client) SetSessionTermination(sessionID, reason string) {
+	if c == nil || sessionID == "" {
+		return
+	}
+	_ = c.store.SetSessionTermination(sessionID, reason)
+}
+
+// UpdateEntityQualityScore recomputes the running quality score for an entity. Fire-and-forget (P5 — Item 10).
+func (c *Client) UpdateEntityQualityScore(entity, projectID string) {
+	if c == nil {
+		return
+	}
+	c.store.UpdateEntityQualityScore(entity, projectID)
+}
+
+// UpdateRecallChannelStats recomputes recall channel attribution weights. Fire-and-forget (P5 — Item 12).
+func (c *Client) UpdateRecallChannelStats(projectID string) {
+	if c == nil {
+		return
+	}
+	c.store.UpdateRecallChannelStats(projectID)
+}
+
+// GetToolSequences returns tool call sequences for a session (P5 — SA-C1).
+func (c *Client) GetToolSequences(sessionID string) []ToolSequenceEntry {
+	if c == nil || sessionID == "" {
+		return nil
+	}
+	return c.store.GetToolSequences(sessionID)
+}
+
+// GetEntityQualityScores returns entity context quality scores (P5 — Item 10).
+func (c *Client) GetEntityQualityScores(projectID string, limit int) []EntityQuality {
+	if c == nil {
+		return nil
+	}
+	return c.store.GetEntityQualityScores(projectID, limit)
+}
+
+// GetDeliveryOutcomes returns delivery-to-outcome linkages (P5 — Item 11).
+func (c *Client) GetDeliveryOutcomes(days int) []DeliveryOutcome {
+	if c == nil {
+		return nil
+	}
+	if days <= 0 {
+		days = 7
+	}
+	return c.store.GetDeliveryOutcomes(days)
+}
+
+// GetRecallChannelWeights returns recall channel attribution weights (P5 — Item 12).
+func (c *Client) GetRecallChannelWeights(projectID string) map[string]float64 {
+	if c == nil {
+		return nil
+	}
+	return c.store.GetRecallChannelWeights(projectID)
+}
+
+// GetSessionEffectiveness returns a specific session's effectiveness record (P5 — Item 13).
+func (c *Client) GetSessionEffectiveness(sessionID string) *SessionEffectiveness {
+	if c == nil || sessionID == "" {
+		return nil
+	}
+	return c.store.GetSessionEffectivenessP5(sessionID)
+}
+
+// GetRecentEffectivenessTrend returns daily effectiveness averages (P5 — Item 13).
+func (c *Client) GetRecentEffectivenessTrend(days int, agentID string) []DailyEffectiveness {
+	if c == nil {
+		return nil
+	}
+	if days <= 0 {
+		days = 14
+	}
+	return c.store.GetRecentEffectivenessTrend(days, agentID)
+}
+
+// GetAgentLearningCurve returns weekly efficiency trend for an agent (P5 — Item 14).
+func (c *Client) GetAgentLearningCurve(agentID string, weeks int) []WeeklyEfficiency {
+	if c == nil || agentID == "" {
+		return nil
+	}
+	if weeks <= 0 {
+		weeks = 12
+	}
+	return c.store.GetAgentLearningCurve(agentID, weeks)
+}
+
+// GetImplementationQualityGap returns pre/post implementation quality gap (P5 — Item 15).
+func (c *Client) GetImplementationQualityGap(days int) float64 {
+	if c == nil {
+		return 0
+	}
+	if days <= 0 {
+		days = 30
+	}
+	return c.store.GetImplementationQualityGap(days)
+}
+
+// GetBrainEnrichmentUplift returns the enrichment quality uplift ratio (P5 — Item 16).
+func (c *Client) GetBrainEnrichmentUplift(days int) float64 {
+	if c == nil {
+		return 0
+	}
+	if days <= 0 {
+		days = 30
+	}
+	return c.store.GetBrainEnrichmentUplift(days)
+}
+
+// GetMemoryFailurePreventionRate returns the memory failure prevention rate (P5 — Item 17).
+func (c *Client) GetMemoryFailurePreventionRate(days int) float64 {
+	if c == nil {
+		return 0
+	}
+	if days <= 0 {
+		days = 30
+	}
+	return c.store.GetMemoryFailurePreventionRate(days)
+}
+
+// GetDecayEffectiveness returns knowledge decay hit rate buckets (P5 — Item 18).
+func (c *Client) GetDecayEffectiveness(days int) DecayStats {
+	if c == nil {
+		return DecayStats{}
+	}
+	if days <= 0 {
+		days = 90
+	}
+	return c.store.GetDecayEffectiveness(days)
+}
+
+// GetMonthlyROIReport returns the monthly ROI report (P5 — Item 20).
+func (c *Client) GetMonthlyROIReport(year, month int) *MonthlyROI {
+	if c == nil {
+		return nil
+	}
+	return c.store.GetMonthlyROIReport(year, month)
+}
+
+// GetGraphFreshnessScore returns the graph freshness score for today (P5 — Item 21).
+func (c *Client) GetGraphFreshnessScore() float64 {
+	if c == nil {
+		return 0
+	}
+	today := time.Now().UTC().Format("2006-01-02")
+	return c.store.GetGraphFreshnessScoreP5(today)
+}
+
+// GetTokenSavingsByIntent returns per-intent token savings (P5 — Item 22).
+func (c *Client) GetTokenSavingsByIntent(days int) map[string]int64 {
+	if c == nil {
+		return nil
+	}
+	if days <= 0 {
+		days = 7
+	}
+	return c.store.GetTokenSavingsByIntent(days)
+}
+
+// GetToolsPerSessionPercentiles returns tools-per-session percentile distribution (P5 — Item 45).
+func (c *Client) GetToolsPerSessionPercentiles(days int) SessionPercentiles {
+	if c == nil {
+		return SessionPercentiles{}
+	}
+	if days <= 0 {
+		days = 30
+	}
+	sp := SessionPercentiles{}
+	sp.ToolsP50, sp.ToolsP95, sp.ToolsP99 = c.store.GetToolsPerSessionPercentiles(days)
+	sp.CallsP50, sp.CallsP95, sp.CallsP99 = c.store.GetCallsPerSessionPercentiles(days)
+	return sp
+}
+
+// GetSkillExecutionStatsP5 returns skill execution stats for the last N days (P5 — COV-15).
+func (c *Client) GetSkillExecutionStatsP5(days int) []SkillStat {
+	if c == nil {
+		return nil
+	}
+	if days <= 0 {
+		days = 30
+	}
+	return c.store.GetSkillExecutionStatsP5(days)
+}
+
+// GetMostRecentDeliveryID returns the most recent context delivery ID for an entity (P5 — Item 11).
+func (c *Client) GetMostRecentDeliveryID(entity string) int {
+	if c == nil || entity == "" {
+		return 0
+	}
+	return c.store.GetMostRecentDeliveryIDByEntity(entity)
+}
+
+// WriteErrors returns the total collector write errors (P5 — DQ-Integrity.1 / Item 35).
+func (c *Client) WriteErrors() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.coll.WriteErrors()
+}
+
+// GetHealthSnapshot returns a lightweight health check payload (P5 — Item 23).
+func (c *Client) GetHealthSnapshot() map[string]interface{} {
+	if c == nil {
+		return map[string]interface{}{"status": "unavailable"}
+	}
+	today := time.Now().UTC().Format("2006-01-02")
+	return map[string]interface{}{
+		"status":               "ok",
+		"events_today":         c.store.CountEventsToday(),
+		"last_rollup":          c.store.GetLastRollupTime(),
+		"collector_errors":     c.coll.WriteErrors(),
+		"collector_drop_rate":  c.coll.DropRate(),
+		"collector_hwm":        c.coll.HighWaterMark(),
+		"collector_buf_len":    c.coll.Len(),
+		"db_size_bytes":        c.store.DBSizeBytesP5(c.dbPath),
+		"errors_today":         c.store.GetErrorsToday(),
+		"graph_freshness":      c.store.GetGraphFreshnessScoreP5(today),
+		"bg_enqueued":          c.bgEnqueued.Load(),
+		"bg_dropped":           c.bgDropped.Load(),
+		"bg_panics":            c.bgPanics.Load(),
+	}
+}
+
 // GetSummaryForProject returns aggregated analytics for the last N days filtered to projectID.
 // Returns a PulseSummary with only Summary populated (no per-tool/agent breakdowns).
 func (c *Client) GetSummaryForProject(days int, projectID string) *PulseSummary {
@@ -428,6 +716,21 @@ type PulseSummary struct {
 	SearchStats             *pulsestore.SearchStats           `json:"search_stats,omitempty"`
 	GraphSnapshot           *pulsestore.GraphSnapshotRow      `json:"graph_snapshot,omitempty"`
 	AvgTaskDurationMs       float64                           `json:"avg_task_duration_ms,omitempty"`
+	// Phase 5: self-refining loop, coverage & observability.
+	EntityQualityScores     []types.EntityQuality             `json:"entity_quality_scores,omitempty"`
+	RecallChannelWeights    map[string]float64                `json:"recall_channel_weights,omitempty"`
+	EffectivenessTrend      []types.DailyEffectiveness        `json:"effectiveness_trend,omitempty"`
+	ImplementationQualityGap float64                          `json:"implementation_quality_gap,omitempty"`
+	BrainEnrichmentUplift   float64                           `json:"brain_enrichment_uplift,omitempty"`
+	MemoryFailurePrevRate   float64                           `json:"memory_failure_prevention_rate,omitempty"`
+	DecayEffectiveness      types.DecayStats                  `json:"decay_effectiveness,omitempty"`
+	GraphFreshnessScoreP5   float64                           `json:"graph_freshness_score_p5,omitempty"`
+	TokenSavingsByIntent    map[string]int64                  `json:"token_savings_by_intent,omitempty"`
+	SessionPercentiles      types.SessionPercentiles          `json:"session_percentiles,omitempty"`
+	SkillStatsP5            []types.SkillStat                 `json:"skill_stats_p5,omitempty"`
+	CollectorWriteErrors    int64                             `json:"collector_write_errors,omitempty"`
+	CrossSessionReuseRate   float64                           `json:"cross_session_reuse_rate,omitempty"`
+	ConcurrentAgentsMax     int                               `json:"concurrent_agents_max,omitempty"`
 }
 
 // GetSummary returns aggregated analytics for the last N days including per-tool,
@@ -492,6 +795,17 @@ func (c *Client) GetSummary(days int) *PulseSummary {
 	searchStats, _ := c.store.GetSearchStats(days)
 	graphSnap, _ := c.store.GetLatestGraphSnapshot()
 
+	// Phase 5: self-refining & observability queries.
+	today := time.Now().UTC().Format("2006-01-02")
+	entityQuality := c.store.GetEntityQualityScores("", 20)
+	recallWeights := c.store.GetRecallChannelWeights("")
+	effTrend := c.store.GetRecentEffectivenessTrend(14, "")
+	skillStatsP5 := c.store.GetSkillExecutionStatsP5(days)
+	tokensByIntent := c.store.GetTokenSavingsByIntent(days)
+	var sessPct types.SessionPercentiles
+	sessPct.ToolsP50, sessPct.ToolsP95, sessPct.ToolsP99 = c.store.GetToolsPerSessionPercentiles(days)
+	sessPct.CallsP50, sessPct.CallsP95, sessPct.CallsP99 = c.store.GetCallsPerSessionPercentiles(days)
+
 	return &PulseSummary{
 		Days:        days,
 		Summary:     sum,
@@ -538,6 +852,21 @@ func (c *Client) GetSummary(days int) *PulseSummary {
 		SearchStats:                 searchStats,
 		GraphSnapshot:               graphSnap,
 		AvgTaskDurationMs:           c.store.GetAvgTaskDuration(days),
+		// Phase 5.
+		EntityQualityScores:      entityQuality,
+		RecallChannelWeights:     recallWeights,
+		EffectivenessTrend:       effTrend,
+		ImplementationQualityGap: c.store.GetImplementationQualityGap(days),
+		BrainEnrichmentUplift:    c.store.GetBrainEnrichmentUplift(days),
+		MemoryFailurePrevRate:    c.store.GetMemoryFailurePreventionRate(days),
+		DecayEffectiveness:       c.store.GetDecayEffectiveness(90),
+		GraphFreshnessScoreP5:    c.store.GetGraphFreshnessScoreP5(today),
+		TokenSavingsByIntent:     tokensByIntent,
+		SessionPercentiles:       sessPct,
+		SkillStatsP5:             skillStatsP5,
+		CollectorWriteErrors:     c.coll.WriteErrors(),
+		CrossSessionReuseRate:    c.store.GetCrossSessionReuseRate(days),
+		ConcurrentAgentsMax:      c.store.GetConcurrentAgentsMax(today),
 	}
 }
 
