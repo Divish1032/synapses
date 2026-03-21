@@ -520,14 +520,12 @@ func TestConcurrentUpdateTask_SameTask(t *testing.T) {
 
 	t.Logf("note append: %d/%d notes survived concurrent same-row updates", noteLines, noteWriters)
 
-	// At minimum, at least 1 note must survive (the last writer always wins).
-	if noteLines == 0 {
-		t.Error("zero notes survived — this indicates data corruption, not just a race")
+	// All notes must survive — the atomic SQL append eliminates the TOCTOU race.
+	if noteLines != noteWriters {
+		t.Errorf("expected all %d notes to survive, got %d — atomic append may be broken", noteWriters, noteLines)
 	}
 
-	// Under SQLite WAL with MaxOpenConns(2), we expect some loss due to
-	// the non-atomic read-modify-write. But the store must remain consistent:
-	// no partial lines, no corruption.
+	// Verify no corruption: every line must have a timestamp prefix.
 	for _, line := range strings.Split(updatedTasks[0].Notes, "\n") {
 		if line == "" {
 			continue

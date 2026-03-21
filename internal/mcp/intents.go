@@ -895,7 +895,9 @@ func (s *Server) buildBrainPacket(
 
 	cacheKey := fmt.Sprintf("%s:%d", node.Name, 2)
 	if cached := s.getPacketFromCache(cacheKey); cached != nil {
-		return cached.(*brain.ContextPacket)
+		if pkt, ok := cached.(*brain.ContextPacket); ok {
+			return pkt
+		}
 	}
 
 	// Async enrichment: fire background goroutine, return nil for this call.

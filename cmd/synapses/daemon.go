@@ -26,6 +26,9 @@ import (
 	"time"
 )
 
+// daemonLabel is the launchd/systemd service identifier for the main daemon process.
+const daemonLabel = "com.synapses.daemon"
+
 // Sidecar describes one managed background service.
 type Sidecar struct {
 	Name   string
@@ -388,6 +391,36 @@ func launchdPlist(s Sidecar) string {
 `, label, binPath, logPath, logPath)
 }
 
+// daemonSelfPlist returns the launchd plist XML for the daemon process itself.
+// It uses KeepAlive so launchd auto-restarts the daemon on crash.
+func daemonSelfPlist(binPath, logPath, homeDir string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>%s</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>%s</string>
+    <string>daemon</string>
+    <string>serve</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>WorkingDirectory</key>
+  <string>%s</string>
+  <key>StandardOutPath</key>
+  <string>%s</string>
+  <key>StandardErrorPath</key>
+  <string>%s</string>
+</dict>
+</plist>
+`, daemonLabel, binPath, homeDir, logPath, logPath)
+}
+
 func installLaunchd() error {
 	agentsDir, err := launchdAgentsDir()
 	if err != nil {
@@ -421,8 +454,32 @@ func installLaunchd() error {
 			fmt.Printf("  \033[32m✓\033[0m %-8s installed and will start at login\n", s.Name)
 		}
 	}
+
+	// Install the daemon itself so launchd auto-restarts it on crash.
+	binPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve binary path: %w", err)
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home dir: %w", err)
+	}
+	logPath := logFilePath("daemon")
+	plistPath := filepath.Join(agentsDir, daemonLabel+".plist")
+	plistContent := daemonSelfPlist(binPath, logPath, homeDir)
+
+	if err := os.WriteFile(plistPath, []byte(plistContent), 0o644); err != nil {
+		return fmt.Errorf("write daemon plist: %w", err)
+	}
+	exec.Command("launchctl", "unload", plistPath).Run() //nolint:errcheck
+	if out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {
+		fmt.Printf("  \033[31m✗\033[0m %-8s launchctl load failed: %s\n", "daemon", strings.TrimSpace(string(out)))
+	} else {
+		fmt.Printf("  \033[32m✓\033[0m %-8s installed — daemon will auto-start at login and restart on crash\n", "daemon")
+	}
+
 	fmt.Println()
-	fmt.Println("  Run 'synapses daemon start' to start them now.")
+	fmt.Println("  Run 'synapses start' to start the daemon now.")
 	fmt.Println()
 	return nil
 }
@@ -440,6 +497,13 @@ func uninstallLaunchd() error {
 		os.Remove(plistPath)
 		fmt.Printf("  \033[32m✓\033[0m %-8s uninstalled\n", s.Name)
 	}
+
+	// Uninstall the daemon plist.
+	daemonPlistPath := filepath.Join(agentsDir, daemonLabel+".plist")
+	exec.Command("launchctl", "unload", daemonPlistPath).Run() //nolint:errcheck
+	os.Remove(daemonPlistPath)
+	fmt.Printf("  \033[32m✓\033[0m %-8s uninstalled\n", "daemon")
+
 	fmt.Println()
 	return nil
 }
@@ -474,6 +538,25 @@ WantedBy=default.target
 `, s.Name, binPath, logPath, logPath)
 }
 
+// daemonSelfSystemdUnit returns the systemd unit file for the daemon process itself.
+func daemonSelfSystemdUnit(binPath, logPath string) string {
+	return fmt.Sprintf(`[Unit]
+Description=Synapses MCP daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%s daemon serve
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%s
+StandardError=append:%s
+
+[Install]
+WantedBy=default.target
+`, binPath, logPath, logPath)
+}
+
 func installSystemd() error {
 	svcDir, err := systemdUserDir()
 	if err != nil {
@@ -505,6 +588,26 @@ func installSystemd() error {
 			fmt.Printf("  \033[32m✓\033[0m %-8s installed and started\n", s.Name)
 		}
 	}
+
+	// Install the daemon itself.
+	binPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve binary path: %w", err)
+	}
+	logPath := logFilePath("daemon")
+	unitName := "synapses-daemon.service"
+	unitPath := filepath.Join(svcDir, unitName)
+
+	if err := os.WriteFile(unitPath, []byte(daemonSelfSystemdUnit(binPath, logPath)), 0o644); err != nil {
+		return fmt.Errorf("write daemon unit: %w", err)
+	}
+	exec.Command("systemctl", "--user", "daemon-reload").Run() //nolint:errcheck
+	if out, err := exec.Command("systemctl", "--user", "enable", "--now", unitName).CombinedOutput(); err != nil {
+		fmt.Printf("  \033[31m✗\033[0m %-8s systemctl failed: %s\n", "daemon", strings.TrimSpace(string(out)))
+	} else {
+		fmt.Printf("  \033[32m✓\033[0m %-8s installed — daemon will auto-start and restart on failure\n", "daemon")
+	}
+
 	fmt.Println()
 	return nil
 }
@@ -521,6 +624,13 @@ func uninstallSystemd() error {
 		os.Remove(filepath.Join(svcDir, unitName))
 		fmt.Printf("  \033[32m✓\033[0m %-8s uninstalled\n", s.Name)
 	}
+
+	// Uninstall the daemon unit.
+	daemonUnitName := "synapses-daemon.service"
+	exec.Command("systemctl", "--user", "disable", "--now", daemonUnitName).Run() //nolint:errcheck
+	os.Remove(filepath.Join(svcDir, daemonUnitName))
+	fmt.Printf("  \033[32m✓\033[0m %-8s uninstalled\n", "daemon")
+
 	exec.Command("systemctl", "--user", "daemon-reload").Run() //nolint:errcheck
 	fmt.Println()
 	return nil

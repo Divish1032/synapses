@@ -75,6 +75,12 @@ type ChangeSource interface {
 	RecentChanges(windowMinutes int) []watcher.ChangeEvent
 }
 
+// WatcherHealthChecker is an optional interface that ChangeSource implementations
+// may satisfy to report whether the file-watching event loop is still alive.
+type WatcherHealthChecker interface {
+	IsAlive() bool
+}
+
 // ProjectStoreProvider gives access to a sibling project's store for cross-project queries.
 // Implemented by the daemon's project registry; nil in single-project (stdio) mode.
 type ProjectStoreProvider interface {
@@ -240,10 +246,13 @@ type Server struct {
 	approvals *approvalStore
 
 	// OF-S4: tool description integrity.
-	// toolDescs captures name → description at addOrDefer time.
-	// toolDescBaseline is the SHA256 hex of the sorted descriptions, computed
-	// once at the end of registerTools(). handleSessionInit re-derives the hash
-	// from toolDescs and compares it to detect runtime tampering.
+	// toolDescs captures name → (description + "\x00" + JSON(inputSchema)) at
+	// addOrDefer time, so both the tool description and parameter schemas are
+	// included in the integrity baseline.
+	// toolDescBaseline is the SHA256 hex of all sorted entries, computed once at
+	// the end of registerTools(). handleSessionInit re-derives the hash from
+	// toolDescs and compares it to detect runtime tampering of descriptions or
+	// parameter definitions.
 	toolDescs        map[string]string
 	toolDescBaseline string
 }
@@ -592,9 +601,12 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 }
 
 // hashToolDescs computes a deterministic SHA256 hex digest of all tool
-// name→description pairs. Names are sorted alphabetically before hashing so
-// the result is independent of registration order. Called once at startup to
-// establish the baseline, and re-called in handleSessionInit to detect drift.
+// name→(description+schema) pairs. Names are sorted alphabetically before
+// hashing so the result is independent of registration order. The value
+// includes both the tool description and the serialised input schema so that
+// parameter-level tampering (renamed params, altered descriptions) is caught
+// alongside top-level description changes. Called once at startup to establish
+// the baseline, and re-called in handleSessionInit to detect drift.
 func hashToolDescs(descs map[string]string) string {
 	names := make([]string, 0, len(descs))
 	for name := range descs {
@@ -1058,7 +1070,6 @@ var knowledgeTools = map[string]bool{
 	"get_events":         true,
 	"discover_tools":     true,
 	"get_plans":          true,
-	"get_my_tasks":       true,
 	"link_task_nodes":    true,
 	"check_plan_safety":  true,
 	"report_usage":       true,
@@ -1093,8 +1104,12 @@ func (s *Server) toolInTier(_ string) bool {
 // Always populates the REST dispatch table (toolHandlers) with the effective handler
 // so POST /v1/tools/{name} calls the same function as the MCP path.
 func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
-	// OF-S4: capture description for integrity baseline.
-	s.toolDescs[t.Name] = t.Description
+	// OF-S4: capture description + input schema for integrity baseline.
+	// Encoding the full schema (parameter names, types, descriptions) alongside
+	// the tool description means parameter-level tampering is also detected —
+	// not just changes to the top-level tool description.
+	schemaBytes, _ := json.Marshal(t.InputSchema)
+	s.toolDescs[t.Name] = t.Description + "\x00" + string(schemaBytes)
 	if s.knowledgeMode && !knowledgeTools[t.Name] {
 		// In knowledge mode, register a stub that returns a clear error.
 		stub := func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1337,13 +1352,12 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"get_context",
 			mcp.WithDescription(
-				"For most use cases, use prepare_context instead — "+
-					"it provides intent-based context assembly in one structured call "+
-					"(e.g. prepare_context(intent='modify', target='AuthService')). "+
+				"Direct graph traversal with full parameter control (depth, format, known_hash, detail_level). "+
+					"Use prepare_context for intent-based context assembly; use get_context when you need "+
+					"specific BFS parameters, conditional fetching via known_hash, or fine-grained output control. "+
 					"Returns a relevance-ranked subgraph centred on the named entity. "+
 					"Uses BFS with edge-type-weighted decay so the closest, most semantically "+
-					"significant relationships appear first. This replaces grep: ask for what you "+
-					"need structurally, not textually.",
+					"significant relationships appear first.",
 			),
 			mcp.WithString("entity",
 				mcp.Required(),
@@ -1599,7 +1613,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Search term (case-insensitive)."),
 			),
 			mcp.WithString("mode",
-				mcp.Description("Search mode: 'keyword' (default, exact/prefix/substring) or 'semantic' (FTS BM25 by concept)."),
+				mcp.Description("Search mode: 'keyword' (default, exact/prefix/substring) or 'fulltext' (FTS5 BM25 full-text search). 'semantic' accepted as legacy alias for 'fulltext'."),
 			),
 			mcp.WithNumber("limit",
 				mcp.Description("Maximum results to return (default 20, max 50). Only used for mode=semantic."),
@@ -2218,11 +2232,6 @@ func (s *Server) registerTools() {
 			mcp.WithString("project_id",
 				mcp.Description("Optional repo context identifier (e.g. 'my-backend'). Used for cross-project coordination."),
 			),
-			mcp.WithString("approval_token",
-				mcp.Description("Required for broadcast messages (to_agent omitted). "+
-					"Call without this param first to receive an approval token, "+
-					"then re-call with the token after user confirmation. Expires in 5 minutes."),
-			),
 		),
 		s.handleSendMessage,
 	)
@@ -2246,8 +2255,8 @@ func (s *Server) registerTools() {
 			mcp.WithString("topic_filter",
 				mcp.Description("Optional. Only return messages with this exact topic (e.g. 'api_changed')."),
 			),
-			mcp.WithString("unread_only",
-				mcp.Description("If 'true' (default), only return unread messages. Pass 'false' to retrieve all messages including already-read ones."),
+			mcp.WithBoolean("unread_only",
+				mcp.Description("If true (default), only return unread messages. Pass false to retrieve all messages including already-read ones."),
 			),
 			mcp.WithNumber("limit",
 				mcp.Description("Maximum messages to return. Defaults to 50."),
@@ -2312,11 +2321,6 @@ func (s *Server) registerTools() {
 					"Use for codebase-derived facts: architecture decisions, component status, API signatures. "+
 					"Example: '[\"repo::pkg/auth.go::AuthService\"]'. "+
 					"Omit for durable facts (user preferences, feedback) that have no codebase anchor."),
-			),
-			mcp.WithString("approval_token",
-				mcp.Description("Required when project_id targets a different project. "+
-					"Call without this param first to receive an approval token, "+
-					"then re-call with the token after user confirmation. Expires in 5 minutes."),
 			),
 			mcp.WithString("memory_importance",
 				mcp.Description("Importance level for the knowledge memory written alongside this episode. "+

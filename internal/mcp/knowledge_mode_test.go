@@ -105,28 +105,36 @@ func TestKnowledgeMode_CreatePlan(t *testing.T) {
 func TestKnowledgeMode_SendMessage(t *testing.T) {
 	srv := newKnowledgeServer(t)
 
-	// Broadcast requires approval (OF-E3). Step 1: get token.
+	// Broadcast requires approval (OF-E3). Step 1: request approval.
 	res, err := srv.handleSendMessage(context.Background(), callTool(map[string]any{
 		"from_agent": "marketing-agent",
 		"topic":      "review_needed",
 		"payload":    `{"item":"Q1 copy"}`,
 	}))
 	m := mustResult(t, res, err)
-	token, ok := m["approval_token"].(string)
-	if !ok || token == "" {
-		t.Fatal("expected approval_token for broadcast send_message")
+	if m["requires_approval"] != true {
+		t.Fatal("expected requires_approval=true for broadcast send_message")
+	}
+	// Token must not appear in response.
+	if _, hasToken := m["approval_token"]; hasToken {
+		t.Fatal("approval_token must not appear in MCP response")
 	}
 
-	// Step 2: re-call with approval token.
+	// Step 2: simulate user approval via `synapses approve`.
+	p := findPendingFor(t, "broadcast_message", "marketing-agent")
+	if err := ApproveRequest(p.Token); err != nil {
+		t.Fatalf("ApproveRequest: %v", err)
+	}
+
+	// Step 3: agent retries without approval_token.
 	res, err = srv.handleSendMessage(context.Background(), callTool(map[string]any{
-		"from_agent":     "marketing-agent",
-		"topic":          "review_needed",
-		"payload":        `{"item":"Q1 copy"}`,
-		"approval_token": token,
+		"from_agent": "marketing-agent",
+		"topic":      "review_needed",
+		"payload":    `{"item":"Q1 copy"}`,
 	}))
 	m = mustResult(t, res, err)
 	if _, ok := m["message_id"]; !ok {
-		t.Error("expected message_id in send_message response")
+		t.Error("expected message_id in send_message response after approval")
 	}
 }
 

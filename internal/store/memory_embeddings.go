@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // MemorySearchResult represents a memory matched by vector similarity search.
@@ -322,7 +324,9 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 	defer rows.Close()
 
 	h := &topKHeap{k: limit}
+	var scanned int
 	for rows.Next() {
+		scanned++
 		var memID string
 		var blob []byte
 		var embStale int
@@ -341,6 +345,9 @@ func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearc
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if scanned >= 10000 {
+		logutil.Warn("synapses: vector search scanned 10,000-embedding safety cap — memories beyond the cap were excluded from ranking. Recall quality may be degraded at this corpus size.\n")
 	}
 
 	winners := h.drain()
@@ -387,7 +394,9 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 
 	threshold := float32(minScore)
 	h := &topKHeap{k: limit}
+	var scanned int
 	for rows.Next() {
+		scanned++
 		var memID string
 		var blob []byte
 		var embStale int
@@ -406,6 +415,9 @@ func (s *Store) MemoryVectorSearchWithThreshold(queryVec []float32, limit int, m
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if scanned >= 10000 {
+		logutil.Warn("synapses: vector search (threshold) scanned 10,000-embedding safety cap — memories beyond the cap were excluded from ranking. Recall quality may be degraded at this corpus size.\n")
 	}
 
 	winners := h.drain()

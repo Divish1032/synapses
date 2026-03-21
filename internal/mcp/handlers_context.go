@@ -510,7 +510,9 @@ func (s *Server) handleGetContext(
 		// callees must not be served for an unfiltered request (different content).
 		cacheKey := fmt.Sprintf("%s:%d:%v", entityName, cfg.MaxDepth, includeInferred)
 		if cached := s.getPacketFromCache(cacheKey); cached != nil {
-			dc.ContextPacket = cached.(*brain.ContextPacket)
+			if pkt, ok := cached.(*brain.ContextPacket); ok {
+				dc.ContextPacket = pkt
+			}
 		} else {
 			// Async enrichment: return raw graph now, enrich in background.
 			dc.BrainHint = "enrichment in progress — call get_context again in a few seconds for brain-enriched results"

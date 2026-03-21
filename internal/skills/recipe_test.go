@@ -130,7 +130,7 @@ func TestLoadRecipeDir_MalformedJSON(t *testing.T) {
 
 // --- DeduplicateRecipes ---
 
-func TestDeduplicateRecipes_LastWins(t *testing.T) {
+func TestDeduplicateRecipes_BuiltinProtected(t *testing.T) {
 	recipes := []Recipe{
 		{ID: "onboard-to-module", Description: "builtin", Origin: "builtin"},
 		{ID: "other", Description: "stays", Origin: "builtin"},
@@ -142,9 +142,24 @@ func TestDeduplicateRecipes_LastWins(t *testing.T) {
 		t.Fatalf("expected 2, got %d", len(got))
 	}
 	for _, r := range got {
-		if r.ID == "onboard-to-module" && r.Origin != "project" {
-			t.Errorf("onboard-to-module should be project version, got origin=%q", r.Origin)
+		if r.ID == "onboard-to-module" && r.Origin != "builtin" {
+			t.Errorf("onboard-to-module should remain builtin (protected), got origin=%q", r.Origin)
 		}
+	}
+}
+
+func TestDeduplicateRecipes_UserOverridesUser(t *testing.T) {
+	// Non-builtin IDs can still be overridden by later entries.
+	recipes := []Recipe{
+		{ID: "custom", Description: "user v1", Origin: "user"},
+		{ID: "custom", Description: "project v2", Origin: "project"},
+	}
+	got := DeduplicateRecipes(recipes)
+	if len(got) != 1 {
+		t.Fatalf("expected 1, got %d", len(got))
+	}
+	if got[0].Origin != "project" {
+		t.Errorf("non-builtin custom should be project version, got origin=%q", got[0].Origin)
 	}
 }
 

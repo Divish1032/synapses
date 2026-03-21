@@ -73,17 +73,13 @@ func (s *Server) handleSendMessage(
 	// Broadcasts are visible to all agents on all projects via get_messages(projects="*").
 	// Require explicit user approval before sending.
 	if toAgent == "" {
-		approvalToken := stringArg(req, "approval_token")
-		if approvalToken == "" {
+		// OF-E3: check for an out-of-band user-approved approval file.
+		// The agent never sees the token — only the user can approve via `synapses approve`.
+		if !s.approvals.checkAndConsumeApproval("broadcast_message", fromAgent) {
 			return s.approvals.requestApproval(
 				"broadcast_message",
 				fmt.Sprintf("Broadcast message from agent %q with topic %q to all agents across all projects", fromAgent, topic),
 				fromAgent,
-			), nil
-		}
-		if !s.approvals.validateAndConsume(approvalToken) {
-			return mcp.NewToolResultError(
-				"approval_token is invalid or expired. Re-request approval by calling send_message without approval_token.",
 			), nil
 		}
 	}
@@ -97,9 +93,10 @@ func (s *Server) handleSendMessage(
 
 	// Emit event so agents polling get_events see the message immediately
 	// without needing to poll get_messages as well.
-	if err := s.store.AppendEvent("agent_message", fromAgent,
-		fmt.Sprintf(`{"message_id":%q,"topic":%q,"to_agent":%q,"project_id":%q}`,
-			msgID, topic, toAgent, projectID)); err != nil {
+	msgPayload, _ := json.Marshal(map[string]string{
+		"message_id": msgID, "topic": topic, "to_agent": toAgent, "project_id": projectID,
+	})
+	if err := s.store.AppendEvent("agent_message", fromAgent, string(msgPayload)); err != nil {
 		logutil.Warn("synapses: append agent_message event: %v\n", err)
 	}
 

@@ -41,24 +41,28 @@ func TestHandleSendMessage_MissingTopic_ReturnsError(t *testing.T) {
 func TestHandleSendMessage_BroadcastNoToAgent(t *testing.T) {
 	s := newTestServer(t)
 	// Broadcasting: to_agent is empty → requires approval (OF-E3).
-	// Step 1: get approval token.
+	// Step 1: request approval — token must NOT appear in response.
 	res, err := s.handleSendMessage(ctx, callTool(map[string]any{
-		"from_agent": "broadcaster",
+		"from_agent": "msg-test-broadcaster",
 		"to_agent":   "",
 		"topic":      "announcement",
 		"payload":    `{"msg":"all hands"}`,
 	}))
 	m := mustResult(t, res, err)
-	hasKey(t, m, "approval_token")
-	token := m["approval_token"].(string)
+	if _, hasToken := m["approval_token"]; hasToken {
+		t.Fatal("approval_token must not appear in MCP response (out-of-band delivery)")
+	}
+	hasKey(t, m, "requires_approval")
 
-	// Step 2: re-call with approval token.
+	// Step 2: simulate user approval via CLI, then retry.
+	p := findPendingFor(t, "broadcast_message", "msg-test-broadcaster")
+	_ = ApproveRequest(p.Token)
+
 	res, err = s.handleSendMessage(ctx, callTool(map[string]any{
-		"from_agent":     "broadcaster",
-		"to_agent":       "",
-		"topic":          "announcement",
-		"payload":        `{"msg":"all hands"}`,
-		"approval_token": token,
+		"from_agent": "msg-test-broadcaster",
+		"to_agent":   "",
+		"topic":      "announcement",
+		"payload":    `{"msg":"all hands"}`,
 	}))
 	m = mustResult(t, res, err)
 	hasKey(t, m, "message_id")
