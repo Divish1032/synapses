@@ -28,6 +28,8 @@ func (p *CMakeParser) Extensions() []string {
 	return []string{".cmake"}
 }
 
+func (p *CMakeParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Filenames returns the exact base filenames handled by this parser.
 func (p *CMakeParser) Filenames() []string {
 	return []string{"CMakeLists.txt"}

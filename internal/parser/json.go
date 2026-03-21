@@ -29,6 +29,9 @@ func (p *JSONParser) Extensions() []string {
 	return []string{".json"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for the given file.
+func (p *JSONParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single JSON file and merges them
 // into the graph.
 //

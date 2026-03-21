@@ -28,6 +28,8 @@ func (p *RubyParser) Extensions() []string {
 	return []string{".rb", ".rbi"}
 }
 
+func (p *RubyParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // extractRubyDeclInfo performs a pre-pass for metadata.
 func extractRubyDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)

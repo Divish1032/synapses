@@ -26,6 +26,8 @@ func (p *ElixirParser) Extensions() []string {
 	return []string{".ex", ".exs"}
 }
 
+func (p *ElixirParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // extractElixirDeclInfo performs a pre-pass for metadata.
 func extractElixirDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)

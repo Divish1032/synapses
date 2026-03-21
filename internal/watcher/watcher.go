@@ -509,6 +509,16 @@ func (w *Watcher) reparseFile(path, _ string) {
 	w.reparseMu.Lock()
 	defer w.reparseMu.Unlock()
 
+	// Sprint 11.9: Check for tree-sitter parse errors before updating graph.
+	// Half-saved files during active editing produce corrupted ASTs with phantom
+	// nodes. When errors are detected, retain the previous (clean) parse.
+	if src, err := os.ReadFile(path); err == nil {
+		if w.walker.HasParseErrors(path, src) {
+			logutil.Warn("synapses/watcher: skipping reparse of %s: AST has errors (file may be mid-save)\n", path)
+			return
+		}
+	}
+
 	// Snapshot counts before mutation for ChangeEvent delta.
 	nodesBefore := w.countNodesForFile(path)
 	edgesBefore := w.graph.EdgeCount()

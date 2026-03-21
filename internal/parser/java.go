@@ -95,6 +95,8 @@ func (p *JavaParser) Extensions() []string {
 	return []string{".java"}
 }
 
+func (p *JavaParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // isJavaPublicNode checks if a declaration node has the "public" modifier
 // by inspecting its modifier children. Falls back to true for top-level
 // declarations (Java default package-private is still accessible within package).

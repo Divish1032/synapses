@@ -26,6 +26,8 @@ func (p *ScalaParser) Extensions() []string {
 	return []string{".scala"}
 }
 
+func (p *ScalaParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // extractScalaDeclInfo performs a pre-pass for metadata.
 func extractScalaDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	result := make(map[string]declMeta)

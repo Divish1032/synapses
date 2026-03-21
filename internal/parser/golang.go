@@ -417,6 +417,8 @@ func (p *GoParser) Extensions() []string {
 	return []string{".go"}
 }
 
+func (p *GoParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single Go source file and merges them
 // into the provided graph. The following constructs are captured:
 //

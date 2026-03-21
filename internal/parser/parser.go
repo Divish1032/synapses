@@ -3,6 +3,7 @@
 package parser
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/logutil"
@@ -38,6 +41,14 @@ type FilenameParser interface {
 // "Dockerfile.staging", "Dockerfile.ci", etc.).
 type FilenamePatternParser interface {
 	FilenamePrefixes() []string
+}
+
+// TreeSitterLanguageProvider is an optional interface for parsers that use
+// tree-sitter internally. Returning the language enables the watcher to
+// pre-check files for parse errors before updating the graph, preventing
+// corrupted ASTs from half-saved files during active editing.
+type TreeSitterLanguageProvider interface {
+	TSLanguageForFile(filePath string) *sitter.Language
 }
 
 // filenamePrefixEntry associates a filename prefix with the parser that handles it.
@@ -507,6 +518,53 @@ func (w *Walker) ParseFile(g *graph.Graph, path string) error {
 	// R1: inject HANDLES edges for this file.
 	ApplyHeuristics(g, path, src)
 	return nil
+}
+
+// parserForPath returns the language parser for the given file path, or nil
+// if no parser is registered for the file's extension or name.
+func (w *Walker) parserForPath(path string) LanguageParser {
+	ext := strings.ToLower(filepath.Ext(path))
+	if p, ok := w.parsers[ext]; ok {
+		return p
+	}
+	base := filepath.Base(path)
+	if p, ok := w.filenameParsers[base]; ok {
+		return p
+	}
+	for _, entry := range w.filenamePrefixParsers {
+		if strings.HasPrefix(base, entry.prefix) {
+			return entry.parser
+		}
+	}
+	return nil
+}
+
+// HasParseErrors performs a lightweight tree-sitter parse of src and returns
+// true if the resulting AST contains syntax errors. Used by the watcher to
+// skip reparsing files that are mid-save (half-written), preventing corrupted
+// AST data from replacing valid graph nodes.
+//
+// Returns false for parsers that don't use tree-sitter or for unknown extensions.
+func (w *Walker) HasParseErrors(path string, src []byte) bool {
+	p := w.parserForPath(path)
+	if p == nil {
+		return false
+	}
+	tsp, ok := p.(TreeSitterLanguageProvider)
+	if !ok {
+		return false
+	}
+	lang := tsp.TSLanguageForFile(path)
+	if lang == nil {
+		return false
+	}
+	parser := sitter.NewParser()
+	parser.SetLanguage(lang)
+	tree, err := parser.ParseString(context.Background(), nil, src)
+	if err != nil || tree == nil {
+		return true
+	}
+	return tree.RootNode().HasError()
 }
 
 // shouldSkipDir returns true for directories that never contain useful source:

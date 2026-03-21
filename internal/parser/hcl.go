@@ -33,6 +33,8 @@ func (p *HCLParser) Extensions() []string {
 	return []string{".tf", ".tfvars", ".hcl"}
 }
 
+func (p *HCLParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single HCL/Terraform file.
 func (p *HCLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()

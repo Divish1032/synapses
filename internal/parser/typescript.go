@@ -114,6 +114,10 @@ func (p *TypeScriptParser) Extensions() []string {
 	return []string{".ts", ".tsx"}
 }
 
+func (p *TypeScriptParser) TSLanguageForFile(filePath string) *sitter.Language {
+	return p.langForFile(filePath)
+}
+
 // Parse extracts code entities from a single TypeScript/TSX file and merges
 // them into the provided graph.
 func (p *TypeScriptParser) Parse(g *graph.Graph, filePath string, src []byte) error {

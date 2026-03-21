@@ -51,6 +51,9 @@ func (p *ThriftParser) Extensions() []string {
 	return []string{".thrift"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for the given file.
+func (p *ThriftParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single Thrift IDL file and merges them into the graph.
 func (p *ThriftParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()

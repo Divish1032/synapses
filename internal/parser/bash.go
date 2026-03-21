@@ -26,6 +26,8 @@ func (p *BashParser) Extensions() []string {
 	return []string{".sh", ".bash", ".zsh"}
 }
 
+func (p *BashParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // extractBashDeclInfo performs a pre-pass collecting metadata for function
 // definitions. It extracts doc comments (# lines above functions) and line counts.
 func extractBashDeclInfo(root sitter.Node, src []byte) map[string]declMeta {

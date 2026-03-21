@@ -186,6 +186,8 @@ func (p *CParser) Extensions() []string {
 	return []string{".c", ".h", ".ino"}
 }
 
+func (p *CParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single C file and merges them into the graph.
 func (p *CParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()

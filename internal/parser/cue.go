@@ -29,6 +29,9 @@ func (p *CUEParser) Extensions() []string {
 	return []string{".cue"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for the given file.
+func (p *CUEParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single CUE file.
 func (p *CUEParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()

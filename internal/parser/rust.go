@@ -125,6 +125,8 @@ func (p *RustParser) Extensions() []string {
 	return []string{".rs"}
 }
 
+func (p *RustParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single Rust file and merges them into the graph.
 func (p *RustParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()

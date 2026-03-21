@@ -35,6 +35,9 @@ func (p *BicepParser) Extensions() []string {
 	return []string{".bicep"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for the given file.
+func (p *BicepParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single Bicep file.
 //
 // The Bicep grammar root node is "infrastructure". Its direct children are:

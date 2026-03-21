@@ -25,6 +25,10 @@ func NewPerlParser() *PerlParser { return &PerlParser{} }
 func (p *PerlParser) Language() string { return "perl" }
 func (p *PerlParser) Extensions() []string { return []string{".pl", ".pm", ".t"} }
 
+func (p *PerlParser) TSLanguageForFile(_ string) *sitter.Language {
+	return sitter.NewLanguage(perlg.GetLanguage())
+}
+
 func (p *PerlParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(sitter.NewLanguage(perlg.GetLanguage()))

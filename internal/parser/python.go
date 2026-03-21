@@ -100,6 +100,8 @@ func (p *PythonParser) Extensions() []string {
 	return []string{".py", ".pyi"}
 }
 
+func (p *PythonParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single Python file and merges them
 // into the provided graph.
 func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error {

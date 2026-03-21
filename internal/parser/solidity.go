@@ -208,6 +208,9 @@ func (p *SolidityParser) Extensions() []string {
 	return []string{".sol"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for the given file.
+func (p *SolidityParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
+
 // Parse extracts code entities from a single Solidity file and merges them into the graph.
 func (p *SolidityParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
