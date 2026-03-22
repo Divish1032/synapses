@@ -264,6 +264,11 @@ type Server struct {
 	// parameter definitions.
 	toolDescs        map[string]string
 	toolDescBaseline string
+
+	// updateChecker is an optional function that returns the pending update
+	// version string, or "" if up to date. Set via SetUpdateChecker.
+	// Used by session_init to include an update_available hint.
+	updateChecker func() string
 }
 
 const (
@@ -1024,6 +1029,11 @@ func (s *Server) SetMemoryEmbedder(e embed.Embedder) {
 	if e != nil {
 		go s.EmbedToolCatalog(context.Background(), e)
 	}
+}
+
+// SetUpdateChecker sets the function that returns the pending update version.
+func (s *Server) SetUpdateChecker(fn func() string) {
+	s.updateChecker = fn
 }
 
 // ServeStdio starts the MCP server on stdin/stdout. This call blocks until

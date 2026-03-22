@@ -59,6 +59,11 @@ func main() {
 	// that runs before main(). Keeps `synapses version` zero-cost.
 	if len(os.Args) >= 2 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Printf("synapses %s\n", version)
+		// Show update hint if a cached check found a newer version.
+		if state := getUpdateState(); state != nil && state.UpdateAvailable {
+			fmt.Printf("Update available: %s → %s (run 'synapses update')\n",
+				state.CurrentVersion, state.LatestVersion)
+		}
 		return
 	}
 
@@ -133,6 +138,8 @@ func run(args []string) error {
 		return cmdApprove(args[1:])
 	case "benchmark":
 		return cmdBenchmark(args[1:])
+	case "update":
+		return cmdUpdate(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -2779,6 +2786,10 @@ INDEX:
 
 AGENTS:
   connect   --agent <name> --path <dir>   Write per-agent MCP config
+
+UPDATE:
+  update               Check for updates and install
+  update    --check    Check only, don't download
 
 OTHER:
   query, brief, export, benchmark, memory, version, help
