@@ -77,15 +77,10 @@ func AnnotateGraph(g *graph.Graph, cfg *config.Config) int {
 		sinkSet[s.ID] = true
 	}
 
-	// Phase 2: Pre-populate seen set from existing DATA_FLOWS edges (safe on re-index).
+	// Phase 2: BFS from each source; create DATA_FLOWS edges to reachable sinks.
+	// The seen set deduplicates across sources within this call; AddEdge
+	// handles dedup against pre-existing edges in the graph.
 	seen := make(map[edgeKey]bool)
-	for _, e := range g.AllEdges() {
-		if e.Type == graph.EdgeDataFlows {
-			seen[edgeKey{e.From, e.To}] = true
-		}
-	}
-
-	// Phase 3: BFS from each source; create DATA_FLOWS edges to reachable sinks.
 	created := 0
 	for _, src := range sources {
 		reachable := bfsReachableSinks(g, src.ID, sinkSet, maxHops)
