@@ -83,6 +83,50 @@ const DaemonHTTPPort = "11435"
 // Each POST /v1/tools/{name} request gets an isolated "rest-N" session context.
 var restSessionCounter atomic.Int64
 
+// restRateLimiter is a global token-bucket rate limiter for the REST tool API.
+// Prevents abuse since each REST request gets a fresh session (bypassing
+// per-session MCP rate limits). 50 requests/sec burst, refills at 10/sec.
+var restRateLimiter = newTokenBucket(10, 50)
+
+// tokenBucket is a simple token-bucket rate limiter.
+type tokenBucket struct {
+	mu         sync.Mutex
+	tokens     float64
+	maxTokens  float64
+	refillRate float64   // tokens per second
+	lastRefill time.Time
+}
+
+func newTokenBucket(refillRate, maxTokens float64) *tokenBucket {
+	return &tokenBucket{
+		tokens:     maxTokens,
+		maxTokens:  maxTokens,
+		refillRate: refillRate,
+		lastRefill: time.Now(),
+	}
+}
+
+func (tb *tokenBucket) Allow() bool {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	now := time.Now()
+	elapsed := now.Sub(tb.lastRefill).Seconds()
+	if elapsed > 0 {
+		// Only refill forward — clamp negative elapsed (NTP clock skew) to zero
+		// to prevent draining tokens when the system clock jumps backward.
+		tb.tokens += elapsed * tb.refillRate
+		if tb.tokens > tb.maxTokens {
+			tb.tokens = tb.maxTokens
+		}
+	}
+	tb.lastRefill = now
+	if tb.tokens < 1 {
+		return false
+	}
+	tb.tokens--
+	return true
+}
+
 // DaemonHTTPAddr is the loopback address the singleton daemon binds to.
 const DaemonHTTPAddr = "127.0.0.1:" + DaemonHTTPPort
 
@@ -301,6 +345,15 @@ func isCORSAllowedOrigin(origin string) bool {
 // Extracted from cmdDaemonServe to enable HTTP-level testing.
 func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectInstance, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Global rate limit — independent of per-session MCP limits.
+		if !restRateLimiter.Allow() {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]string{"error": "rate limit exceeded, try again later"}) //nolint:errcheck
+			return
+		}
+
 		if r.Method != http.MethodPost {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -1476,7 +1529,6 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	// Memory embeddings (recall vector search).
 	memEmbedder := createMemoryEmbedder(cfg)
 	if memEmbedder != nil {
-		defer memEmbedder.Close()
 		srv.SetMemoryEmbedder(memEmbedder)
 		go embedAllMemories(projCtx, memEmbedder, st, sharedPulse)
 	}
@@ -1545,14 +1597,15 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		identity.Summary.Edges)
 
 	return &ProjectInstance{
-		AbsPath:     absPath,
-		Graph:       g,
-		Store:       st,
-		MCPServer:   srv,
-		HTTPHandler: httpHandler,
-		BrainClient: brainCli,
-		Watcher:     fw,
-		cancel:      projCancel,
+		AbsPath:        absPath,
+		Graph:          g,
+		Store:          st,
+		MCPServer:      srv,
+		HTTPHandler:    httpHandler,
+		BrainClient:    brainCli,
+		Watcher:        fw,
+		MemoryEmbedder: memEmbedder,
+		cancel:         projCancel,
 	}, nil
 }
 

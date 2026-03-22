@@ -1362,13 +1362,13 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"report_usage",
 			mcp.WithDescription(
-				"Prefer end_session(model=..., input_tokens=..., output_tokens=...) instead — "+
-					"it absorbs report_usage and also persists session knowledge. "+
-					"Report your LLM token usage for this response. Call after completing a major task "+
+				"Report your LLM token usage for this response. Call after completing a major task "+
 					"to give Synapses accurate data on model cost and token consumption. "+
 					"All fields are optional but model is strongly recommended. "+
 					"This is the complement to session_init(model=...) — session_init records the model once, "+
-					"report_usage records per-response token counts.",
+					"report_usage records per-response token counts. "+
+					"Prefer end_session(model=..., input_tokens=..., output_tokens=...) instead — "+
+					"it absorbs report_usage and also persists session knowledge.",
 			),
 			mcp.WithString("model",
 				mcp.Required(),
@@ -1475,10 +1475,10 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"get_project_identity",
 			mcp.WithDescription(
-				"Prefer session_init instead — it includes project_identity along with "+
-					"pending tasks, working state, and scale guidance in one call. "+
-					"Returns a compact architectural summary of the indexed project: "+
-					"node counts, entry points, highest-connectivity entities, and active rules.",
+				"Returns a compact architectural summary of the indexed project: "+
+					"node counts, entry points, highest-connectivity entities, and active rules. "+
+					"Prefer session_init instead — it includes project_identity along with "+
+					"pending tasks, working state, and scale guidance in one call.",
 			),
 		),
 		s.handleGetProjectIdentity,
@@ -2204,11 +2204,11 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"get_working_state",
 			mcp.WithDescription(
-				"Prefer session_init instead — it includes working_state along with "+
-					"pending tasks, project identity, and scale guidance in one call. "+
-					"Returns recent file changes detected by the file watcher, answering "+
+				"Returns recent file changes detected by the file watcher, answering "+
 					"'what was the developer just working on?' "+
-					"Also includes a git diff stat for the current working tree.",
+					"Also includes a git diff stat for the current working tree. "+
+					"Prefer session_init instead — it includes working_state along with "+
+					"pending tasks, project identity, and scale guidance in one call.",
 			),
 			mcp.WithNumber("window_minutes",
 				mcp.Description("Look-back window in minutes. Defaults to 15."),
@@ -2565,10 +2565,10 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"check_plan_safety",
 			mcp.WithDescription(
-				"Prefer validate_plan(check_safety=true) instead — it runs this check inline. "+
-					"Searches failure episodes for the closest match to the proposed plan (Reactive Interjection). "+
+				"Searches failure episodes for the closest match to the proposed plan (Reactive Interjection). "+
 					"Returns a Recovery Packet if a similar past failure is found — the agent decides relevance. "+
-					"Non-blocking: returns 'clear' if no failures recorded yet or on timeout.",
+					"Non-blocking: returns 'clear' if no failures recorded yet or on timeout. "+
+					"Prefer validate_plan(check_safety=true) instead — it runs this check inline.",
 			),
 			mcp.WithString("plan_description",
 				mcp.Required(),

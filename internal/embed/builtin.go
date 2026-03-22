@@ -64,6 +64,12 @@ const (
 	// Update this value whenever builtinModelRevision changes.
 	// Captured from nomic-embed-text-v1.5 quantized ONNX at revision e5cf08aa.
 	builtinModelSHA256 = "b4342336debaea79de872370664b0aaeb67dea4605513d00ee236ea871a81f27"
+
+	// builtinModelSHA256FP32 is the expected SHA-256 hash of the fp32 ONNX
+	// model file. Set to empty string until captured from a GPU machine.
+	// Once captured, the fp32 model will be integrity-checked like the quantized variant.
+	// TODO: run on a GPU machine, capture the logged hash, and paste it here.
+	builtinModelSHA256FP32 = ""
 )
 
 // pipelineSlot is one independently-usable ONNX pipeline instance.
@@ -184,8 +190,34 @@ func (b *BuiltinEmbedder) ensureModel() error {
 	}
 
 	// Verify integrity of the ONNX model file.
+	// If fp32 fails integrity (hash not yet captured), fall back to the
+	// verified quantized variant rather than serving unverified embeddings.
 	if err := verifyModelIntegrity(onnxDisk, modelFile); err != nil {
-		return err
+		if modelFile != builtinModelFileQuantized {
+			logutil.Warn("synapses: %s integrity check failed (%v) — falling back to verified quantized model\n", modelFile, err)
+			modelFile = builtinModelFileQuantized
+			repoPath = builtinOnnxFilePathQuantized
+			b.onnxFile = modelFile
+			b.onnxPath = repoPath
+			onnxDisk = filepath.Join(modelPath, modelFile)
+			// Download quantized if not present.
+			if _, statErr := os.Stat(onnxDisk); os.IsNotExist(statErr) {
+				opts := hugot.NewDownloadOptions()
+				opts.Branch = builtinModelRevision
+				opts.OnnxFilePath = repoPath
+				opts.Verbose = false
+				opts.MaxRetries = 3
+				opts.RetryInterval = 2
+				if _, dlErr := hugot.DownloadModel(builtinModelName, b.modelsDir, opts); dlErr != nil {
+					return fmt.Errorf("download fallback quantized model: %w", dlErr)
+				}
+			}
+			if fallbackErr := verifyModelIntegrity(onnxDisk, modelFile); fallbackErr != nil {
+				return fallbackErr
+			}
+		} else {
+			return err
+		}
 	}
 
 	// Create poolSize pipeline instances, each with its own session.
@@ -258,22 +290,25 @@ func verifyModelIntegrity(onnxPath string, modelFile string) error {
 
 	got := hex.EncodeToString(h.Sum(nil))
 
-	// fp32 model: we don't have a verified hash yet — log it for capture.
-	if modelFile == builtinModelFileFP32 {
-		logutil.Info("synapses: embedding model (%s) SHA-256: %s (fp32 hash not yet enforced — capture this for builtinModelSHA256FP32)\n", modelFile, got)
-		return nil
+	// Select the expected hash based on the model variant.
+	var expected string
+	switch modelFile {
+	case builtinModelFileFP32:
+		expected = builtinModelSHA256FP32
+	default:
+		expected = builtinModelSHA256
 	}
 
-	// Quantized model: verify against hardcoded hash.
-	if builtinModelSHA256 == "" {
-		// First download — log the hash so it can be captured and hardcoded.
-		logutil.Info("synapses: embedding model SHA-256: %s (capture this for builtinModelSHA256)\n", got)
-		return nil
+	if expected == "" {
+		// Hash not yet captured — log it so an operator can hardcode it,
+		// but refuse to use the model until then (fail-closed).
+		logutil.Error("synapses: embedding model (%s) SHA-256: %s — hash not yet hardcoded, refusing to use unverified model. Capture this hash and set builtinModelSHA256FP32.\n", modelFile, got)
+		return fmt.Errorf("integrity check skipped: no expected hash for %s (sha256:%s) — will fall back to verified variant", modelFile, got)
 	}
-	if got != builtinModelSHA256 {
+	if got != expected {
 		// Remove the tampered/corrupt file so the next attempt re-downloads.
 		os.Remove(onnxPath)
-		return fmt.Errorf("embedding model integrity check failed: expected sha256:%s, got sha256:%s — removed corrupt file", builtinModelSHA256, got)
+		return fmt.Errorf("embedding model integrity check failed: expected sha256:%s, got sha256:%s — removed corrupt file", expected, got)
 	}
 	return nil
 }

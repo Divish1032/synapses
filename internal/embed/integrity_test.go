@@ -3,6 +3,7 @@ package embed
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -58,8 +59,9 @@ func TestVerifyModelIntegrity_EmptyFile_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestVerifyModelIntegrity_FP32_LogsButPasses(t *testing.T) {
-	// FP32 variant: hash is logged for capture but not enforced.
+func TestVerifyModelIntegrity_FP32_FailsClosed(t *testing.T) {
+	// FP32 variant: hash not yet captured → fail-closed (refuse to use).
+	// This forces fallback to the verified quantized variant in ensureModel().
 	dir := t.TempDir()
 	onnxPath := filepath.Join(dir, builtinModelFileFP32)
 	if err := os.WriteFile(onnxPath, []byte("any content"), 0o644); err != nil {
@@ -67,7 +69,10 @@ func TestVerifyModelIntegrity_FP32_LogsButPasses(t *testing.T) {
 	}
 
 	err := verifyModelIntegrity(onnxPath, builtinModelFileFP32)
-	if err != nil {
-		t.Fatalf("expected nil error for fp32 variant (hash not enforced), got: %v", err)
+	if err == nil {
+		t.Fatal("expected error for fp32 variant with no hardcoded hash (fail-closed), got nil")
+	}
+	if !strings.Contains(err.Error(), "no expected hash") {
+		t.Fatalf("unexpected error message: %v", err)
 	}
 }

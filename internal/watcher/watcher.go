@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -89,6 +90,7 @@ type Watcher struct {
 	cfgHandler  ConfigChangeHandler    // called when synapses.json changes; may be nil
 	configPath  string                 // absolute path to synapses.json (set by Start)
 	projectID   string                 // stable project identifier (FNV hash of project root path)
+	rootPath    string                 // absolute resolved project root (set by Start)
 	cpTracker      CrossProjectTracker      // set via SetCrossProjectTracker; may be nil
 	cpBrainTracker BrainCrossProjectTracker // set via SetBrainCrossProjectTracker; may be nil
 
@@ -212,6 +214,12 @@ func (w *Watcher) SetConfigChangeHandler(fn ConfigChangeHandler) {
 // loop runs in a background goroutine. Call Stop to shut it down.
 func (w *Watcher) Start(root string) error {
 	// Record the config file path so handleEvent can detect changes to it.
+	// Store the resolved root so reparseFile can check symlinks against it.
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		w.rootPath = resolved
+	} else {
+		w.rootPath = root
+	}
 	w.configPath = filepath.Join(root, "synapses.json")
 
 	// Add every subdirectory under root to the fsnotify watch list.
@@ -557,6 +565,38 @@ func fileContentHash(path string) (string, bool) {
 func (w *Watcher) reparseFile(path, _ string) {
 	w.reparseMu.Lock()
 	defer w.reparseMu.Unlock()
+
+	// BUG-009: Symlink traversal defense with TOCTOU protection.
+	//
+	// Step 1: Lstat to detect symlinks and capture inode.
+	// Step 2: If symlink, verify target is within project root.
+	// Step 3: After reading, verify inode hasn't changed (prevents swap attacks).
+	//
+	// On macOS, /var → /private/var is a filesystem mount, not a symlink at the
+	// file level — Lstat correctly sees it as a regular file, not ModeSymlink.
+	var lstatIno uint64
+	if fi, lstatErr := os.Lstat(path); lstatErr == nil {
+		if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
+			lstatIno = stat.Ino
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			resolved, evalErr := filepath.EvalSymlinks(path)
+			if evalErr != nil {
+				logutil.Warn("synapses/watcher: skipping broken symlink %s: %v\n", path, evalErr)
+				return
+			}
+			root := w.rootPath
+			if root == "" {
+				logutil.Warn("synapses/watcher: skipping symlink %s → %s (no root path to verify against)\n", path, resolved)
+				return
+			}
+			if !strings.HasPrefix(resolved, root+string(filepath.Separator)) && resolved != root {
+				logutil.Warn("synapses/watcher: skipping symlink %s → %s (outside project root %s)\n", path, resolved, root)
+				return
+			}
+		}
+	}
+
 	reparseStart := time.Now() // P2-3: timing
 
 	// Sprint 11.9: Check for tree-sitter parse errors before updating graph.
@@ -566,6 +606,17 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// gap — stale data is worse than imperfect data from error-recovering parse).
 	errorAction := "clean" // P9-7: track parse error action
 	if src, err := os.ReadFile(path); err == nil {
+		// BUG-009 TOCTOU check: verify inode hasn't changed between Lstat and ReadFile.
+		// If an attacker replaced the regular file with a symlink between our check
+		// and the read, the inode will differ. Reject to prevent exfiltration.
+		if lstatIno != 0 {
+			if postFi, postErr := os.Lstat(path); postErr == nil {
+				if postStat, ok := postFi.Sys().(*syscall.Stat_t); ok && postStat.Ino != lstatIno {
+					logutil.Warn("synapses/watcher: inode changed for %s between check and read (possible symlink swap) — discarding\n", path)
+					return
+				}
+			}
+		}
 		if w.walker.HasParseErrors(path, src) {
 			if !w.fileHadParseErrors[path] {
 				// First error: skip reparse, retain previous clean data.

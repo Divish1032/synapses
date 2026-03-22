@@ -40,6 +40,19 @@ type RuleCandidate struct {
 
 // RememberEpisode inserts a new episode and keeps the FTS5 index in sync.
 func (s *Store) RememberEpisode(e Episode) (string, error) {
+	// BUG-014: enforce per-project episode row cap.
+	// rowCapMu serializes cap-check + insert to prevent race conditions.
+	s.rowCapMu.Lock()
+	defer s.rowCapMu.Unlock()
+	maxRows := s.MaxEpisodeRows
+	if maxRows <= 0 {
+		maxRows = DefaultMaxEpisodeRows
+	}
+	var count int
+	if err := s.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM episodes`).Scan(&count); err == nil && count >= maxRows {
+		return "", fmt.Errorf("episode row cap reached (%d/%d) — prune old episodes or increase the cap", count, maxRows)
+	}
+
 	if e.ID == "" {
 		e.ID = newID()
 	}

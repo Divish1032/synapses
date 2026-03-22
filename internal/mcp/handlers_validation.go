@@ -28,20 +28,25 @@ import (
 // When root is empty the project boundary is unknown; filesystem access is
 // blocked (returns false) rather than allowing arbitrary paths — fail-closed.
 //
-// Note: this check uses filepath.Clean, which resolves ".." components but
-// does NOT follow symlinks. A symlink inside root pointing outside would pass
-// this check; EvalSymlinks-based resolution is not done here because
-// (a) proposed files may not exist yet and EvalSymlinks requires existence,
-// (b) creating a malicious symlink requires prior filesystem write access —
-// a higher attack bar than the MCP input traversal this guard targets.
+// For paths that exist on disk, symlinks are resolved via filepath.EvalSymlinks
+// so that a symlink inside root pointing outside (e.g. to /etc/passwd) is
+// correctly rejected. For non-existent paths (proposed files), only
+// filepath.Clean is used since EvalSymlinks requires existence.
 func pathWithinRoot(root, path string) bool {
 	if root == "" {
-		// No project root configured — we have no boundary to enforce.
-		// Block all filesystem access rather than allowing arbitrary paths.
 		return false
 	}
 	cleanRoot := filepath.Clean(root)
 	cleanPath := filepath.Clean(path)
+
+	// Resolve symlinks for paths that exist on disk.
+	if resolved, err := filepath.EvalSymlinks(cleanPath); err == nil {
+		cleanPath = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(cleanRoot); err == nil {
+		cleanRoot = resolved
+	}
+
 	return cleanPath == cleanRoot ||
 		strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator))
 }

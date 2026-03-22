@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +14,59 @@ import (
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/webcache"
 )
+
+// allowedDocsDomains is the set of domains permitted for lookup_docs.
+// Prevents data exfiltration via URL query parameters to arbitrary hosts.
+// Add domains as needed for documentation sources agents legitimately fetch.
+var allowedDocsDomains = map[string]bool{
+	// Language/framework docs
+	"pkg.go.dev": true, "go.dev": true, "golang.org": true,
+	"docs.python.org": true, "pypi.org": true,
+	"developer.mozilla.org": true, "nodejs.org": true,
+	"docs.rs": true, "crates.io": true,
+	"docs.oracle.com": true, "kotlinlang.org": true,
+	"learn.microsoft.com": true, "docs.microsoft.com": true,
+	"developer.apple.com": true, "swift.org": true,
+	"dart.dev": true, "api.dart.dev": true, "pub.dev": true, "api.flutter.dev": true,
+	"typescriptlang.org": true, "www.typescriptlang.org": true,
+	"react.dev": true, "vuejs.org": true, "angular.io": true, "svelte.dev": true,
+	// Infrastructure/cloud
+	"docs.docker.com": true, "kubernetes.io": true,
+	"docs.aws.amazon.com": true, "cloud.google.com": true,
+	"registry.terraform.io": true,
+	// General reference
+	"en.wikipedia.org": true, "stackoverflow.com": true,
+	"github.com": true, "raw.githubusercontent.com": true,
+	// Localhost (dev servers)
+	"localhost": true, "127.0.0.1": true, "0.0.0.0": true,
+}
+
+// isAllowedDocsURL checks whether the URL's host is in the documentation allowlist.
+// Matches exact domains and subdomains of allowed domains (e.g. "docs.python.org"
+// matches because "python.org" is allowed). Does NOT match domains that merely
+// contain an allowed domain as a suffix (e.g. "evil-github.com" does not match).
+func isAllowedDocsURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if allowedDocsDomains[host] {
+		return true
+	}
+	// Check if host is a subdomain of any allowed domain.
+	// "docs.python.org" → check ".python.org" suffix against allowlist.
+	// This correctly rejects "attacker.google.com" only if "attacker.google.com"
+	// is checked as a subdomain — it matches "google.com" which IS in the list.
+	// But "evil-github.com" does NOT match "github.com" because the suffix
+	// check requires a dot boundary.
+	for domain := range allowedDocsDomains {
+		if strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
+}
 
 // handleWebAnnotate persists web findings as a graph node annotation so they
 // survive across sessions and appear in get_context for that node.
@@ -201,6 +255,9 @@ func (s *Server) lookupPackageDocs(ctx context.Context, importPath string) (*mcp
 func (s *Server) lookupURL(ctx context.Context, url string) (*mcpgo.CallToolResult, error) {
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return mcpgo.NewToolResultError("url must use http:// or https:// scheme"), nil
+	}
+	if !isAllowedDocsURL(url) {
+		return mcpgo.NewToolResultError("url domain not in allowlist — lookup_docs is restricted to known documentation sites to prevent data exfiltration. Use web_search for general queries."), nil
 	}
 	var content string
 	var fromCache bool

@@ -21,7 +21,7 @@ Instead of line-by-line searching, Synapses maintains an in-memory graph of your
 - **Nodes**: functions, methods, structs, classes, interfaces, variables, files, packages
 - **Edges**: calls, implements, defines, embeds, imports, depends on, data flows
 
-AI agents query the graph via **40 MCP tools** to answer questions like:
+AI agents query the graph via **48 MCP tools** to answer questions like:
 - "Find all callers of auth.Login()"
 - "What breaks if I change this function signature?"
 - "Architect a context packet for debugging checkout flow"
@@ -33,7 +33,7 @@ Synapses maintains **episodic memory** (past decisions, failures), an **agent me
 
 ## Features
 
-**40 MCP Tools** — session management, code graph queries, task memory, agent coordination, episodic memory, architecture enforcement, skill automation
+**48 MCP Tools** — session management, code graph queries, task memory, agent coordination, episodic memory, architecture enforcement, skill automation
 **49+ Language Parsers** — Go, TypeScript, Python, Java, Rust, C/C++, C#, Swift, Ruby, PHP, Kotlin, Scala, Dart, Zig, Haskell, Terraform, Nix, and 30+ more with generic fallback
 **Episodic Memory** — persist past decisions and failures; future sessions query them to avoid repeating mistakes
 **Agent Message Bus** — broadcast work status across agents; unread messages surface on session start

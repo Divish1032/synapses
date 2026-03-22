@@ -1105,7 +1105,7 @@ func (s *Server) handleSessionInit(
 			// With 2 signals a single correction event would score 0.0 and trigger
 			// a false "frequently insufficient" warning — 5 provides minimal
 			// statistical validity before an entity is flagged.
-			go func() { hintCh <- hintResult{hints: pc.FetchEffectiveness(projID, 5)} }()
+			s.goBackground(func() { hintCh <- hintResult{hints: pc.FetchEffectiveness(projID, 5)} })
 			select {
 			case res := <-hintCh:
 				if len(res.hints) > 0 {
