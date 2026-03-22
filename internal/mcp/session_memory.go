@@ -133,6 +133,9 @@ type sessionCallEntry struct {
 	agentID   string
 	callCount int
 	startedAt time.Time
+	// startSeq is the event sequence number at session start, used to scope
+	// extractSessionSummary to only this session's events.
+	startSeq int64
 	// autoLogged is set after the first auto-log fires, preventing re-trigger until
 	// the count resets (manual end_session or reconnect).
 	autoLogged bool
@@ -165,7 +168,7 @@ func (s *Server) handleEndSession(
 	// clearAndGetStartTime captures startedAt and deletes the entry atomically,
 	// avoiding two separate lock acquisitions.
 	mcpSessionID := SessionIDFromContext(ctx)
-	sessionStartedAt := s.clearAndGetStartTime(mcpSessionID, agentID)
+	sessionStartedAt, sessionStartSeq := s.clearAndGetStartTime(mcpSessionID, agentID)
 
 	// Session Intelligence: close the Synapses session record.
 	// Outcome is "unknown" by default; the agent may provide context via summary.
@@ -228,7 +231,7 @@ func (s *Server) handleEndSession(
 	var memoriesSaved int
 
 	// ── Step 1: Structured extraction from events ──
-	sessSummary := s.extractSessionSummary(agentID, sessionStartedAt)
+	sessSummary := s.extractSessionSummary(agentID, sessionStartedAt, sessionStartSeq)
 	result.SessionSummary = sessSummary
 
 	// ── Step 1b: Package-grouped work summary (RX4) ──
@@ -384,17 +387,16 @@ func (s *Server) handleEndSession(
 // sessionStart is the time the session began; it widens the watcher look-back
 // window to the full session duration. Pass zero time to use the 30-minute
 // default (used by triggerAutoSessionLog which doesn't have a start time).
-func (s *Server) extractSessionSummary(agentID string, sessionStart time.Time) *sessionSummary {
+func (s *Server) extractSessionSummary(agentID string, sessionStart time.Time, sinceSeq int64) *sessionSummary {
 	summary := &sessionSummary{}
 
 	if s.store == nil {
 		return summary
 	}
 
-	// Get recent events filtered by agent ID at the store level.
-	// This avoids fetching all events from the beginning of time and
-	// filtering in Go code.
-	events, _, err := s.store.GetEvents(0, nil, agentID, 200)
+	// Get events filtered by agent ID and starting from the session's
+	// start sequence, avoiding fetching all-time history.
+	events, _, err := s.store.GetEvents(sinceSeq, nil, agentID, 200)
 	if err != nil {
 		return summary
 	}
@@ -513,9 +515,18 @@ func (s *Server) trackSessionCall(sessionID, agentID string) {
 	s.sessionCallsMu.Lock()
 	entry, ok := s.sessionCalls[key]
 	if !ok {
+		// Capture the current latest event seq so extractSessionSummary
+		// only processes events from this session, not all-time history.
+		var startSeq int64
+		if s.store != nil {
+			if _, seq, err := s.store.GetEvents(0, nil, "", 0); err == nil {
+				startSeq = seq
+			}
+		}
 		entry = &sessionCallEntry{
 			agentID:   agentID,
 			startedAt: time.Now(),
+			startSeq:  startSeq,
 		}
 		s.sessionCalls[key] = entry
 	}
@@ -542,7 +553,7 @@ func (s *Server) triggerAutoSessionLog(agentID string) {
 		return
 	}
 
-	sessSummary := s.extractSessionSummary(agentID, time.Time{}) // zero = 30-min fallback
+	sessSummary := s.extractSessionSummary(agentID, time.Time{}, 0) // zero = 30-min fallback, 0 = no seq filter
 	content := buildSessionLogContent(agentID, "", "", sessSummary)
 	if content == "" {
 		return
@@ -574,19 +585,21 @@ func (s *Server) triggerAutoSessionLog(agentID string) {
 // clearAndGetStartTime removes the call counter for (sessionID, agentID) and
 // returns the session's startedAt time in a single atomic lock acquisition.
 // Returns zero time if no entry exists.
-func (s *Server) clearAndGetStartTime(sessionID, agentID string) time.Time {
+func (s *Server) clearAndGetStartTime(sessionID, agentID string) (time.Time, int64) {
 	if sessionID == "" && agentID == "" {
-		return time.Time{}
+		return time.Time{}, 0
 	}
 	key := sessionID + "::" + agentID
 	s.sessionCallsMu.Lock()
 	defer s.sessionCallsMu.Unlock()
 	var t time.Time
+	var seq int64
 	if entry, ok := s.sessionCalls[key]; ok {
 		t = entry.startedAt
+		seq = entry.startSeq
 		delete(s.sessionCalls, key)
 	}
-	return t
+	return t, seq
 }
 
 // ── end RX1 ────────────────────────────────────────────────────────────────

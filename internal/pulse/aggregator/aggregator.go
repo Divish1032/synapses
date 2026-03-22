@@ -242,12 +242,18 @@ func (a *Aggregator) rollup() {
 	// directly to the per-dimension rollups that are individually idempotent.
 	// The sentinel metric "rollup_completed" marks a successful full pass.
 	if val, readErr := a.store.ReadDailyRollup(today, "rollup_completed"); readErr == nil && val > 0 {
-		// Rollup already ran. Still re-run per-dimension rollups since they
-		// are cheap and idempotent, and handle any late-arriving events.
+		// Batch metrics already computed. Re-run per-dimension rollups
+		// (cheap, idempotent) and prune to handle late-arriving events.
 		a.rollupPerProject(today)
 		a.rollupPerTool(today)
 		a.rollupPerAgent(today)
 		a.rollupPerLanguage(today)
+		a.rollupSearchMetrics(today)
+		a.rollupPerToolErrors(today)
+		// Prune is also idempotent (date-based, doesn't double-delete).
+		if deleted, err := a.store.PruneOldEvents(90); err == nil && deleted > 0 {
+			logutil.Info("pulse aggregator: pruned %d old events\n", deleted)
+		}
 		return
 	}
 
@@ -366,6 +372,13 @@ func (a *Aggregator) rollup() {
 		}
 	}
 
+	// G3 idempotency: mark batch_metrics as completed BEFORE per-dimension
+	// rollups. On restart, we skip only the expensive batch_metrics phase;
+	// per-dimension rollups are cheap and idempotent — always re-run them.
+	if rollupOK {
+		_ = a.store.UpsertDailyRollup(today, "rollup_completed", 1)
+	}
+
 	// Per-dimension rollups for today. Each method calls UpsertDailyRollup
 	// individually. TODO: refactor these methods to accept a Tx parameter so
 	// they can be wrapped in a single BeginBatch/CommitBatch transaction.
@@ -389,12 +402,6 @@ func (a *Aggregator) rollup() {
 
 	// P12-5: per-tool error rates.
 	a.rollupPerToolErrors(today)
-
-	// Mark the full rollup as completed for today so a restart doesn't
-	// re-run the expensive batch metrics phase (G3 idempotency).
-	if rollupOK {
-		_ = a.store.UpsertDailyRollup(today, "rollup_completed", 1)
-	}
 
 	// Automatic pruning: remove events older than 90 days.
 	// Only prune if the rollup succeeded — otherwise raw data is still needed.
