@@ -502,6 +502,12 @@ func (w *Watcher) debounce(path, root string) {
 	defer w.mu.Unlock()
 
 	if t, ok := w.timers[path]; ok {
+		if !t.Stop() {
+			select {
+			case <-t.C:
+			default:
+			}
+		}
 		t.Reset(debounceDelay)
 		return
 	}
@@ -573,6 +579,12 @@ func (w *Watcher) debounceConfigReload(path string) {
 	defer w.mu.Unlock()
 
 	if t, ok := w.timers[path]; ok {
+		if !t.Stop() {
+			select {
+			case <-t.C:
+			default:
+			}
+		}
 		t.Reset(debounceDelay)
 		return
 	}
