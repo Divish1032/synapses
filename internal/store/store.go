@@ -2138,7 +2138,6 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 	oldNodeIDs := make([]string, 0)
 	oldSigs := make(map[string]string)
 	if rows, err := s.graphDB.Query(`SELECT id, signature FROM nodes WHERE file = ?`, changedFile); err == nil {
-		defer rows.Close()
 		for rows.Next() {
 			var nid, sig string
 			if rows.Scan(&nid, &sig) == nil {
@@ -2148,6 +2147,7 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 				}
 			}
 		}
+		rows.Close()
 	}
 
 	// Snapshot CALLS fan-in for changedFile nodes (for stale annotation detection).
@@ -2159,7 +2159,6 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 		  AND e.to_id IN (SELECT id FROM nodes WHERE file = ?)
 		GROUP BY e.to_id
 	`, changedFile); err == nil {
-		defer fanRows.Close()
 		for fanRows.Next() {
 			var nid string
 			var cnt int
@@ -2167,6 +2166,7 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 				oldFanIn[nid] = cnt
 			}
 		}
+		fanRows.Close()
 	}
 
 	// Collect outgoing edges for new changedFile nodes from the in-memory graph.
