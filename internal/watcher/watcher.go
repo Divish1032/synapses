@@ -538,14 +538,22 @@ func (w *Watcher) debounce(path, root string) {
 		w.mu.Unlock()
 
 		// Use bounded work channel to limit concurrent reparses.
+		// Guard with stopCh so timer callbacks that fire after Stop()
+		// closes stopCh do not block or write to a closed store.
 		if w.workCh != nil {
 			select {
 			case w.workCh <- reparseWork{path, root}:
-				// Worker will process; worker lifecycle tracked by wg separately.
+				return
+			case <-w.stopCh:
 				return
 			default:
-				// Channel full — process inline
+				// Channel full — process inline if not stopped
 			}
+		}
+		select {
+		case <-w.stopCh:
+			return
+		default:
 		}
 		w.reparseFile(path, root)
 	})
