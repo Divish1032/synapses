@@ -74,7 +74,14 @@ func isSymlinkContained(info os.FileInfo, path, root string) bool {
 	if symErr != nil {
 		return false
 	}
-	absRoot, absErr := filepath.Abs(root)
+	// EvalSymlinks on root resolves its canonical path too, handling
+	// macOS case-insensitive (HFS+) and Unicode normalization (NFD)
+	// so both sides compare identically.
+	canonRoot, rootErr := filepath.EvalSymlinks(root)
+	if rootErr != nil {
+		return false
+	}
+	absRoot, absErr := filepath.Abs(canonRoot)
 	if absErr != nil {
 		return false
 	}

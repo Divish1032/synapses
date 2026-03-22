@@ -252,7 +252,14 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 			if symErr != nil {
 				return nil // Skip dangling or invalid symlinks
 			}
-			absRoot, absErr := filepath.Abs(root)
+			// EvalSymlinks on root resolves its canonical path too, handling
+			// macOS case-insensitive (HFS+) and Unicode normalization (NFD)
+			// so both sides compare identically.
+			canonRoot, rootErr := filepath.EvalSymlinks(root)
+			if rootErr != nil {
+				return nil
+			}
+			absRoot, absErr := filepath.Abs(canonRoot)
 			if absErr != nil {
 				return nil
 			}
