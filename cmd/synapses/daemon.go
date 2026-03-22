@@ -91,26 +91,62 @@ func readPID(name string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return strconv.Atoi(strings.TrimSpace(string(data)))
+	// PID file format: "<pid>\n<start_unix_nanos>" (second line optional for compat).
+	line := strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])
+	return strconv.Atoi(line)
+}
+
+// readPIDWithStart reads both PID and start timestamp from the PID file.
+func readPIDWithStart(name string) (int, int64, error) {
+	data, err := os.ReadFile(pidFilePath(name))
+	if err != nil {
+		return 0, 0, err
+	}
+	parts := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
+	pid, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, err
+	}
+	var startNanos int64
+	if len(parts) > 1 {
+		startNanos, _ = strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+	}
+	return pid, startNanos, nil
 }
 
 func writePID(name string, pid int) error {
-	return os.WriteFile(pidFilePath(name), []byte(strconv.Itoa(pid)), 0o600)
+	// Write PID and current timestamp so we can detect PID recycling on read.
+	content := fmt.Sprintf("%d\n%d", pid, time.Now().UnixNano())
+	return os.WriteFile(pidFilePath(name), []byte(content), 0o600)
 }
 
 func removePID(name string) { os.Remove(pidFilePath(name)) }
 
 // serviceRunning returns the PID and whether it is alive.
+// Guards against PID recycling by comparing the process start time
+// against the timestamp recorded in the PID file.
 func serviceRunning(name string) (int, bool) {
-	pid, err := readPID(name)
+	pid, startNanos, err := readPIDWithStart(name)
 	if err != nil {
 		return 0, false
 	}
-	if processAlive(pid) {
-		return pid, true
+	if !processAlive(pid) {
+		removePID(name) // stale
+		return 0, false
 	}
-	removePID(name) // stale
-	return 0, false
+	// If we have a recorded start time, verify the process hasn't been recycled.
+	if startNanos > 0 {
+		if procStart := processStartTime(pid); procStart > 0 {
+			// Allow 2-second tolerance for clock granularity differences.
+			recorded := time.Unix(0, startNanos)
+			actual := time.Unix(0, procStart)
+			if actual.Sub(recorded).Abs() > 2*time.Second {
+				removePID(name) // PID was recycled
+				return 0, false
+			}
+		}
+	}
+	return pid, true
 }
 
 // ── start / stop ──────────────────────────────────────────────────────────────

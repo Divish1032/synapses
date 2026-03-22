@@ -1573,6 +1573,19 @@ func (s *Store) UpsertDailyRollup(day, metric string, value float64) error {
 	return err
 }
 
+// ReadDailyRollup reads a single metric value for the given day.
+// Returns 0 and an error if the metric does not exist.
+func (s *Store) ReadDailyRollup(day, metric string) (float64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var val float64
+	err := s.execer().QueryRow(
+		`SELECT value FROM daily_rollups WHERE day = ? AND metric = ?`,
+		day, metric,
+	).Scan(&val)
+	return val, err
+}
+
 // ---------------------------------------------------------------------------
 // Read methods
 // ---------------------------------------------------------------------------

@@ -395,7 +395,7 @@ func TestFlush_WithEmptyBuffer(t *testing.T) {
 
 	// Immediately flush with no events — should be a no-op
 	c.mu.Lock()
-	initialLen := len(c.buf)
+	initialLen := c.count
 	c.mu.Unlock()
 
 	if initialLen != 0 {

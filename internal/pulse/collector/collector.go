@@ -45,8 +45,12 @@ type sessionModelPayload struct {
 
 // Collector buffers analytics events and batch-writes them to the store.
 type Collector struct {
-	store    *pulsestore.Store
-	buf      []event
+	store *pulsestore.Store
+	// Ring buffer: fixed-size array with head/tail indices.
+	ring  []event
+	head  int // index of oldest event
+	tail  int // index of next write slot
+	count int // number of events in the buffer
 	mu       sync.Mutex
 	cap      int
 	interval time.Duration
@@ -75,7 +79,7 @@ func New(st *pulsestore.Store, capacity int, flushIntervalMs int) *Collector {
 	}
 	return &Collector{
 		store:    st,
-		buf:      make([]event, 0, capacity),
+		ring:     make([]event, capacity),
 		cap:      capacity,
 		interval: time.Duration(flushIntervalMs) * time.Millisecond,
 		stopCh:   make(chan struct{}),
@@ -263,26 +267,24 @@ func (c *Collector) WriteErrors() int64 {
 func (c *Collector) enqueue(ev event) {
 	c.mu.Lock()
 
-	// P2-19: true bounded ring buffer — drop the oldest event when full.
-	if len(c.buf) >= c.cap {
-		// Remove oldest event to make room (ring buffer semantics).
-		// Use copy instead of c.buf[1:] to prevent slice header leak
-		// (underlying array never shrinks with simple reslice).
-		copy(c.buf, c.buf[1:])
-		c.buf = c.buf[:len(c.buf)-1]
+	// O(1) ring buffer enqueue — drop the oldest event when full.
+	if c.count == c.cap {
+		c.head = (c.head + 1) % c.cap
 		c.dropped.Add(1)
+	} else {
+		c.count++
 	}
-
-	c.buf = append(c.buf, ev)
+	c.ring[c.tail] = ev
+	c.tail = (c.tail + 1) % c.cap
 
 	// P2-17: update high-water mark.
-	if depth := int64(len(c.buf)); depth > c.highWaterMark.Load() {
+	if depth := int64(c.count); depth > c.highWaterMark.Load() {
 		c.highWaterMark.Store(depth)
 	}
 
 	// If buffer is at 80% capacity, trigger an early flush in the background.
 	// Only allow one concurrent early-flush goroutine to prevent unbounded goroutine spawning.
-	if len(c.buf) >= c.cap*80/100 && c.earlyFlushRunning.CompareAndSwap(0, 1) {
+	if c.count >= c.cap*80/100 && c.earlyFlushRunning.CompareAndSwap(0, 1) {
 		batch := c.drainLocked()
 		c.mu.Unlock()
 		c.wg.Add(1)
@@ -296,10 +298,21 @@ func (c *Collector) enqueue(ev event) {
 	c.mu.Unlock()
 }
 
-// drainLocked swaps the buffer and returns the old batch. Caller must hold mu.
+// drainLocked reads all events from the ring buffer and resets it. Caller must hold mu.
 func (c *Collector) drainLocked() []event {
-	batch := c.buf
-	c.buf = make([]event, 0, c.cap)
+	if c.count == 0 {
+		return nil
+	}
+	batch := make([]event, c.count)
+	if c.head < c.tail {
+		copy(batch, c.ring[c.head:c.tail])
+	} else {
+		n := copy(batch, c.ring[c.head:])
+		copy(batch[n:], c.ring[:c.tail])
+	}
+	c.head = 0
+	c.tail = 0
+	c.count = 0
 	return batch
 }
 
@@ -321,7 +334,7 @@ func (c *Collector) flushLoop() {
 
 func (c *Collector) flush() {
 	c.mu.Lock()
-	if len(c.buf) == 0 {
+	if c.count == 0 {
 		c.mu.Unlock()
 		return
 	}
@@ -834,5 +847,5 @@ func (c *Collector) computeCostSaved(tokensSaved int, model string) float64 {
 func (c *Collector) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.buf)
+	return c.count
 }

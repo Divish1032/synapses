@@ -286,8 +286,16 @@ func cmdUpdate(args []string) error {
 		return fmt.Errorf("extracted binary is suspiciously small (%d bytes) — aborting", info.Size())
 	}
 
+	// Compute the SHA-256 of the extracted binary before applying.
+	// applySelfUpdateFromPath re-verifies this hash to close the TOCTOU
+	// window between checksum verification and binary replacement.
+	binaryHash, err := hashFile(binaryPath)
+	if err != nil {
+		return fmt.Errorf("hash extracted binary: %w", err)
+	}
+
 	fmt.Println("Replacing binary...")
-	if err := applySelfUpdateFromPath(binaryPath); err != nil {
+	if err := applySelfUpdateFromPath(binaryPath, binaryHash); err != nil {
 		// Detect permission errors and give a helpful hint.
 		if os.IsPermission(err) {
 			exe, _ := os.Executable()
@@ -551,9 +559,10 @@ func extractFromZip(archivePath, destDir, binaryName string) (string, error) {
 // ── Binary replacement ──────────────────────────────────────────────────────
 
 // applySelfUpdateFromPath atomically replaces the running executable with newBinary.
-// It writes to a .new temp file, then renames over the original.
+// expectedHash is the SHA-256 hex digest computed before this call; the binary
+// is re-hashed here to close the TOCTOU window between verification and apply.
 // On failure it cleans up and leaves the original intact.
-func applySelfUpdateFromPath(newBinary string) error {
+func applySelfUpdateFromPath(newBinary string, expectedHash string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("could not determine executable path: %w", err)
@@ -567,6 +576,14 @@ func applySelfUpdateFromPath(newBinary string) error {
 	data, err := os.ReadFile(newBinary)
 	if err != nil {
 		return fmt.Errorf("read new binary: %w", err)
+	}
+
+	// Re-verify hash to close TOCTOU between the caller's hash check and this read.
+	if expectedHash != "" {
+		actualHash := sha256.Sum256(data)
+		if hex.EncodeToString(actualHash[:]) != expectedHash {
+			return fmt.Errorf("binary integrity check failed: hash changed between verification and apply")
+		}
 	}
 
 	// Write to a temp file in the same directory (ensures same filesystem for rename).
@@ -589,6 +606,20 @@ func applySelfUpdateFromPath(newBinary string) error {
 	}
 
 	return nil
+}
+
+// hashFile returns the hex-encoded SHA-256 hash of the file at path.
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // ── Semver comparison ───────────────────────────────────────────────────────
