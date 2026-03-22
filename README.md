@@ -95,55 +95,59 @@ Download the latest release from [GitHub Releases](https://github.com/SynapsesOS
 
 Extract and place the `synapses` binary on your `PATH` (e.g. `/usr/local/bin/synapses`).
 
+**From source (requires Go 1.22+):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh
+```
+
 **VS Code Extension:**
 ```
 ext install SynapsesOS.synapses
 ```
 Or search "Synapses" in the VS Code Extensions panel.
 
-### 2. Set Up Your Project
+### 2. Initialize Your Project
 
 ```bash
 cd /path/to/your/repo
-synapses setup
+synapses init
 ```
 
-This creates `synapses.json` with sensible defaults and prints the next steps. Brain, pulse, and web-cache all run in-process — no external sidecars needed.
+That's it. The `init` wizard handles everything in four steps:
 
-### 3. Start the Server
+| Step | What it does |
+|------|-------------|
+| **[1/4] Project Setup** | Detects git, creates `synapses.json` with sensible defaults |
+| **[2/4] Indexing** | Parses your codebase and builds the code graph (49+ languages) |
+| **[3/4] Starting Engine** | Starts the singleton daemon and registers your project |
+| **[4/4] Connect Agents** | Auto-detects installed AI agents and writes their MCP configs |
 
+The wizard auto-detects Claude Code, Cursor, VS Code, Windsurf, Zed, and Antigravity. Select which ones to connect and Synapses writes the config files for you.
+
+**Non-interactive mode:**
 ```bash
-synapses start --path /path/to/your/repo
+synapses init --yes --agents claude,cursor
 ```
 
-This registers the project with the Synapses daemon, indexes your codebase (49+ language support), and begins serving MCP over stdio. The daemon persists across editor restarts.
-
-### 4. Connect Your Agent
-
+**Connect additional agents later:**
 ```bash
-synapses connect --agent claude    # Claude Code
-synapses connect --agent cursor    # Cursor
-synapses connect --agent windsurf  # Windsurf
-synapses connect --agent zed       # Zed
-synapses connect --agent vscode    # VS Code
-```
-
-Or for Claude Code specifically:
-```bash
-claude mcp add synapses -- synapses start --path /path/to/your/repo
+synapses connect --agent windsurf
 ```
 
 ---
 
 ## IDE Integrations
 
-**Synapses works with any editor that supports MCP (Model Context Protocol):**
+**Synapses works with any editor that supports MCP (Model Context Protocol).**
+
+The easiest way to connect is `synapses init` — it auto-detects installed agents and writes their configs. To connect additional agents later:
 
 - **Claude Code** — `synapses connect --agent claude`
 - **Cursor** — `synapses connect --agent cursor`
 - **Zed** — `synapses connect --agent zed`
 - **Windsurf** — `synapses connect --agent windsurf`
 - **VS Code** — `synapses connect --agent vscode`
+- **Antigravity** — `synapses connect --agent antigravity`
 - **Manual config** — each agent's config points to: `{"command": "synapses", "args": ["start", "--path", "/path/to/repo"]}`
 
 ---
@@ -258,9 +262,9 @@ All commands use the syntax `synapses <command> [flags]`.
 ### Setup Commands
 | Command | Flags | Description |
 |---------|-------|-------------|
-| `setup` | `-path` | Create `synapses.json` with defaults and print getting-started instructions. |
-| `connect` | `--agent` (claude/cursor/windsurf/zed/vscode), `-path` | Write per-agent IDE configs (MCP config + agent rules file). |
-| `mcp-setup` | `-agent` (cursor/gemini/zed/windsurf/claude/all), `-path` | Write agent-specific MCP config (legacy; prefer `connect`). |
+| `init` | `-path`, `--yes`/`-y`, `--agents`, `--no-agents` | Interactive 4-step wizard: project setup, indexing, daemon start, agent connection. The single golden-path command for new users. |
+| `connect` | `--agent` (claude/cursor/windsurf/zed/vscode/antigravity), `-path` | Write per-agent IDE configs (MCP config + agent rules file). Use to connect additional agents after `init`. |
+| `uninstall` | `-path`, `--yes`/`-y`, `--global`, `--keep-data`, `--keep-binary` | Complete removal wizard — the inverse of `init`. Stops daemon, removes indexes, cleans agent configs. Use `--global` for full system cleanup including `~/.synapses` and the binary. |
 
 ### Security Commands
 | Command | Flags | Description |
