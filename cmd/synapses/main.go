@@ -24,6 +24,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -631,9 +632,25 @@ func cmdStop(args []string) error {
 		}
 		return fmt.Errorf("read PID file: %w", err)
 	}
-	pid, err := parseInt(strings.TrimSpace(string(data)))
+	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
+	pid, err := parseInt(strings.TrimSpace(lines[0]))
 	if err != nil {
 		return fmt.Errorf("invalid PID in %s: %w", pidPath, err)
+	}
+	// PID recycling check: if we recorded a start timestamp, verify the
+	// process with this PID actually started at that time.
+	if len(lines) >= 2 {
+		if startNanos, parseErr := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64); parseErr == nil && startNanos > 0 {
+			if procStart := processStartTime(pid); procStart > 0 {
+				recorded := time.Unix(0, startNanos)
+				actual := time.Unix(0, procStart)
+				if diff := recorded.Sub(actual); diff < -2*time.Second || diff > 2*time.Second {
+					fmt.Printf("Process %d was recycled — removing stale PID file.\n", pid)
+					os.Remove(pidPath)
+					return nil
+				}
+			}
+		}
 	}
 	if !processAlive(pid) {
 		fmt.Printf("Process %d not found — removing stale PID file.\n", pid)
