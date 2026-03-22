@@ -403,8 +403,8 @@ func TestEmbed_EmptyVector(t *testing.T) {
 	if err == nil {
 		t.Error("expected error on empty embedding")
 	}
-	if !strings.Contains(err.Error(), "empty") {
-		t.Errorf("error should mention empty, got: %v", err)
+	if !strings.Contains(err.Error(), "invalid embedding dimensionality") {
+		t.Errorf("error should mention invalid dimensionality, got: %v", err)
 	}
 }
 

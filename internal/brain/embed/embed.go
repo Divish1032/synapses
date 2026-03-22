@@ -252,8 +252,8 @@ func (s *Server) Embed(ctx context.Context, text string) ([]float32, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode embedding response: %w", err)
 	}
-	if len(result.Embedding) == 0 {
-		return nil, fmt.Errorf("empty embedding in response")
+	if len(result.Embedding) < 2 {
+		return nil, fmt.Errorf("invalid embedding dimensionality: got %d, want ≥2", len(result.Embedding))
 	}
 	normed := normalizeL2Vec(result.Embedding)
 	if normed == nil {
@@ -307,6 +307,19 @@ func (s *Server) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	}
 	if len(results) != len(texts) {
 		return nil, fmt.Errorf("batch response length mismatch: got %d, want %d", len(results), len(texts))
+	}
+
+	// Validate dimensionality: all embeddings must have ≥2 dimensions and
+	// the same length. A malformed server response with inconsistent
+	// dimensions would silently create bad embeddings without this check.
+	expectedDims := len(results[0].Embedding)
+	if expectedDims < 2 {
+		return nil, fmt.Errorf("invalid embedding dimensionality: got %d, want ≥2", expectedDims)
+	}
+	for i, r := range results[1:] {
+		if len(r.Embedding) != expectedDims {
+			return nil, fmt.Errorf("embedding[%d] dimension mismatch: got %d, want %d", i+1, len(r.Embedding), expectedDims)
+		}
 	}
 
 	vecs := make([][]float32, len(results))
