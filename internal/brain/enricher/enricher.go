@@ -282,7 +282,9 @@ func (e *Enricher) buildPrompt(req Request) string {
 
 	taskSection := ""
 	if req.TaskContext != "" {
-		taskSection = "\nTask context: " + req.TaskContext
+		// Wrap user-controlled task context in XML delimiters to reduce
+		// prompt injection surface from adversarial content.
+		taskSection = "\nTask context: <task_context>" + sanitizePromptInput(req.TaskContext) + "</task_context>"
 	}
 
 	domainSection := ""
@@ -290,11 +292,23 @@ func (e *Enricher) buildPrompt(req Request) string {
 		domainSection = "\n" + focus
 	}
 
+	// Wrap entity name in XML delimiters to isolate it from instruction text.
+	safeName := "<entity_name>" + sanitizePromptInput(req.RootName) + "</entity_name>"
+
 	return fmt.Sprintf(promptTemplate,
-		req.RootName, nodeType,
+		safeName, nodeType,
 		callees, callers,
 		taskSection+domainSection,
 	)
+}
+
+// sanitizePromptInput strips XML-like tags from user-controlled input to
+// prevent injection of fake delimiter boundaries. This ensures that
+// adversarial entity names or task contexts cannot break out of their
+// XML-delimited sections in the prompt.
+func sanitizePromptInput(s string) string {
+	r := strings.NewReplacer("<", "&lt;", ">", "&gt;")
+	return r.Replace(s)
 }
 
 // detectDomain returns a domain-specific focus line for the given file path,

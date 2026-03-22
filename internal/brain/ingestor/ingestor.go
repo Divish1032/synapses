@@ -158,7 +158,7 @@ func (ing *Ingestor) Summarize(ctx context.Context, req Request) (Response, erro
 
 // buildPrompt constructs the LLM prompt for a code entity.
 func (ing *Ingestor) buildPrompt(req Request) string {
-	code := truncateCode(req.Code)
+	code := scrubSecrets(truncateCode(req.Code))
 	nodeType := req.NodeType
 	if nodeType == "" {
 		nodeType = "entity"
@@ -168,6 +168,49 @@ func (ing *Ingestor) buildPrompt(req Request) string {
 		pkg = "unknown"
 	}
 	return fmt.Sprintf(promptTemplate, req.NodeName, nodeType, pkg, code)
+}
+
+// secretPatterns are case-insensitive substrings indicating a line contains
+// or assigns a secret value. Mirrors the patterns in federation/tracker_brain.go.
+var secretPatterns = []string{
+	"API_KEY=", "APIKEY=", "API_KEY:", "APIKEY:",
+	"SECRET=", "SECRET:", "SECRET_KEY=", "SECRET_KEY:",
+	"PASSWORD=", "PASSWORD:", "PASSWD=", "PASSWD:",
+	"TOKEN=", "TOKEN:", "AUTH_TOKEN=", "AUTH_TOKEN:",
+	"PRIVATE_KEY", "-----BEGIN ",
+}
+
+// scrubSecrets removes lines that look like they contain secrets from code
+// before sending to the LLM. Matches the logic in federation/tracker_brain.go.
+func scrubSecrets(code string) string {
+	lines := strings.Split(code, "\n")
+	filtered := make([]string, 0, len(lines))
+	inPEM := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "-----BEGIN ") {
+			inPEM = true
+			continue
+		}
+		if inPEM {
+			if strings.HasPrefix(trimmed, "-----END ") {
+				inPEM = false
+			}
+			continue
+		}
+		upper := strings.ToUpper(trimmed)
+		skip := false
+		for _, pat := range secretPatterns {
+			if strings.Contains(upper, pat) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			filtered = append(filtered, line)
+		}
+	}
+	return strings.Join(filtered, "\n")
 }
 
 // parseSummary extracts the summary and tags from the LLM JSON response.
