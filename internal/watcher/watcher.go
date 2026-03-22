@@ -519,6 +519,12 @@ func (w *Watcher) debounce(path, root string) {
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
+			// Abort if watcher is already stopping to avoid writing to a closed store.
+			select {
+			case <-w.stopCh:
+				return
+			default:
+			}
 			logutil.Info("synapses/watcher: backlog > %d files, triggering full re-walk of %s\n", reparseBacklogThreshold, root)
 			if _, err := w.walker.WalkDir(w.graph, root); err != nil {
 				logutil.Warn("synapses/watcher: full re-walk failed: %v\n", err)
