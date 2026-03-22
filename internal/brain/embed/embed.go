@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -30,6 +31,32 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/logutil"
 )
+
+// normalizeL2Vec returns a unit-length copy of v. Returns nil if any element
+// is NaN or Inf, ensuring degenerate vectors never reach the vector store.
+func normalizeL2Vec(v []float32) []float32 {
+	if len(v) == 0 {
+		return v
+	}
+	for _, x := range v {
+		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
+			return nil
+		}
+	}
+	var sum float64
+	for _, x := range v {
+		sum += float64(x) * float64(x)
+	}
+	norm := math.Sqrt(sum)
+	if norm == 0 || (norm > 0.999 && norm < 1.001) {
+		return v
+	}
+	out := make([]float32, len(v))
+	for i, x := range v {
+		out[i] = float32(float64(x) / norm)
+	}
+	return out
+}
 
 // Server manages a llama-server subprocess running in embedding-only mode.
 type Server struct {
@@ -228,7 +255,11 @@ func (s *Server) Embed(ctx context.Context, text string) ([]float32, error) {
 	if len(result.Embedding) == 0 {
 		return nil, fmt.Errorf("empty embedding in response")
 	}
-	return result.Embedding, nil
+	normed := normalizeL2Vec(result.Embedding)
+	if normed == nil {
+		return nil, fmt.Errorf("embedding contains NaN/Inf values")
+	}
+	return normed, nil
 }
 
 // EmbedBatch returns embedding vectors for a batch of texts in one round-trip.
@@ -280,7 +311,11 @@ func (s *Server) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 
 	vecs := make([][]float32, len(results))
 	for i, r := range results {
-		vecs[i] = r.Embedding
+		normed := normalizeL2Vec(r.Embedding)
+		if normed == nil {
+			return nil, fmt.Errorf("embedding[%d] contains NaN/Inf values", i)
+		}
+		vecs[i] = normed
 	}
 	return vecs, nil
 }
