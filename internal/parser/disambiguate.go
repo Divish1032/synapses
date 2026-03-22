@@ -74,9 +74,11 @@ func isSymlinkContained(info os.FileInfo, path, root string) bool {
 	if symErr != nil {
 		return false
 	}
-	// EvalSymlinks on root resolves its canonical path too, handling
-	// macOS case-insensitive (HFS+) and Unicode normalization (NFD)
-	// so both sides compare identically.
+	// EvalSymlinks on root resolves platform symlinks (e.g. /tmp →
+	// /private/tmp) so both sides get the same base path. Note: on
+	// macOS HFS+ this does NOT normalize case or Unicode — a symlink
+	// using different case than the root would be rejected (safe
+	// false-positive, not a bypass).
 	canonRoot, rootErr := filepath.EvalSymlinks(root)
 	if rootErr != nil {
 		return false
