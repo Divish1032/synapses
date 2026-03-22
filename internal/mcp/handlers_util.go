@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -11,6 +12,13 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
+
+// pathStripRe matches absolute Unix paths in error messages.
+// Captures paths like /home/user/.synapses/data/file.db or /tmp/foo.
+var pathStripRe = regexp.MustCompile(`/(?:home|Users|tmp|var|etc|root|opt)[/][^\s:,"'\)]+`)
+
+// winPathStripRe matches absolute Windows paths (e.g. C:\Users\foo\...).
+var winPathStripRe = regexp.MustCompile(`[A-Z]:\\[^\s:,"'\)]+`)
 
 // MCP input size limits. These prevent unbounded memory growth, SQLite bloat,
 // and OOM from embedding oversized strings. The default cap applies to all
@@ -223,7 +231,7 @@ func jsonResult(v interface{}) (*mcp.CallToolResult, error) {
 // Common SQLite and store errors are detected and annotated so agents get
 // actionable guidance instead of raw constraint violation strings (BUG-022).
 func toolError(operation string, err error) (*mcp.CallToolResult, error) {
-	msg := err.Error()
+	msg := stripInternalPaths(err.Error())
 	hint := ""
 
 	switch {
@@ -242,5 +250,17 @@ func toolError(operation string, err error) (*mcp.CallToolResult, error) {
 	if hint != "" {
 		return mcp.NewToolResultError(fmt.Sprintf("%s failed: %s\n\nHint: %s", operation, msg, hint)), nil
 	}
-	return mcp.NewToolResultError(fmt.Sprintf("%s: %v", operation, err)), nil
+	return mcp.NewToolResultError(fmt.Sprintf("%s: %v", operation, msg)), nil
+}
+
+// stripInternalPaths removes absolute filesystem paths from error messages to
+// prevent leaking internal server paths to AI agents via MCP tool results.
+// Replaces patterns like "/Users/foo/.synapses/data/graph.db" with "<internal>".
+func stripInternalPaths(msg string) string {
+	// Strip Unix absolute paths (e.g., /home/user/.synapses/..., /Users/...)
+	// but preserve relative paths and URL paths.
+	result := pathStripRe.ReplaceAllString(msg, "<internal>")
+	// Also strip Windows-style paths (e.g., C:\Users\...)
+	result = winPathStripRe.ReplaceAllString(result, "<internal>")
+	return result
 }
