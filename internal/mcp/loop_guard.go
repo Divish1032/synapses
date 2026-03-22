@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -88,6 +89,11 @@ func (s *loopGuardSession) reset() {
 // record records a fingerprint for the given session and returns its current
 // count within the sliding window. Thread-safe.
 func (g *loopGuard) record(sessionKey, fp string) int {
+	// REST calls create unique "rest-N" session IDs that are never cleaned up.
+	// Don't track them to prevent unbounded memory growth.
+	if strings.HasPrefix(sessionKey, "rest-") {
+		return 0
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	sess, ok := g.sessions[sessionKey]

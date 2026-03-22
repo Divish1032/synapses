@@ -1092,6 +1092,16 @@ func (s *Server) StartBackground() {
 				defer s.wg.Done()
 				s.memoryExpiryLoop(st)
 			}()
+			// Periodic sweep for dropped memory embeddings (#23).
+			// Catches embeddings lost due to background queue pressure.
+			if s.memoryEmbedder != nil {
+				embedder := s.memoryEmbedder
+				s.wg.Add(1)
+				go func() {
+					defer s.wg.Done()
+					s.embedSweepLoop(embedder, st)
+				}()
+			}
 		}
 	})
 }
@@ -1158,6 +1168,35 @@ func (s *Server) memoryExpiryLoop(st *store.Store) {
 		select {
 		case <-ticker.C:
 			st.ExpireMemories()
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+// embedSweepLoop periodically checks for memories missing embeddings (dropped
+// by background queue pressure) and re-embeds them. Runs every 5 minutes.
+func (s *Server) embedSweepLoop(embedder embed.Embedder, st *store.Store) {
+	if st == nil || embedder == nil {
+		return
+	}
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			ids, err := st.GetMemoriesWithoutEmbeddings(50)
+			if err != nil || len(ids) == 0 {
+				continue
+			}
+			logutil.Info("synapses: embed sweep: %d memories missing embeddings\n", len(ids))
+			for _, memID := range ids {
+				content, ok := st.GetMemoryContent(memID)
+				if !ok || content == "" {
+					continue
+				}
+				s.embedMemory(embedder, st, memID, content)
+			}
 		case <-s.stopCh:
 			return
 		}

@@ -178,16 +178,28 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 // store the result are safe even if the embedder reuses its output array.
 // Returns a zero-filled copy when magnitude is zero (degenerate vector).
 func normalizeVec(v []float32) []float32 {
+	if len(v) == 0 {
+		return v
+	}
+	// Guard: reject input containing NaN or Inf values.
+	for _, x := range v {
+		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
+			return make([]float32, len(v)) // return zero vector
+		}
+	}
 	var sum float64
 	for _, x := range v {
 		sum += float64(x) * float64(x)
 	}
-	if sum == 0 {
+	if sum == 0 || math.IsNaN(sum) || math.IsInf(sum, 0) {
 		out := make([]float32, len(v))
-		copy(out, v)
 		return out
 	}
 	scale := float32(1.0 / math.Sqrt(sum))
+	// Guard: reject if scale is NaN/Inf (near-zero sum edge case).
+	if math.IsNaN(float64(scale)) || math.IsInf(float64(scale), 0) {
+		return make([]float32, len(v))
+	}
 	out := make([]float32, len(v))
 	for i, x := range v {
 		out[i] = x * scale
