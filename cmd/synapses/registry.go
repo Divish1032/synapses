@@ -11,8 +11,10 @@ import (
 	"sync"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -27,9 +29,10 @@ type ProjectInstance struct {
 	Store       *store.Store
 	MCPServer   *mcpsrv.Server
 	HTTPHandler *mcpserver.StreamableHTTPServer // HTTP MCP endpoint for this project
-	BrainClient *brain.Client
-	Watcher     *watcher.Watcher
-	cancel      context.CancelFunc // cancels the project context (stops watcher, socket listener)
+	BrainClient    *brain.Client
+	Watcher        *watcher.Watcher
+	MemoryEmbedder embed.Embedder    // closed on project shutdown, NOT via defer in init
+	cancel         context.CancelFunc // cancels the project context (stops watcher, socket listener)
 }
 
 // Close shuts down all resources owned by this instance.
@@ -53,6 +56,9 @@ func (pi *ProjectInstance) Close() {
 	if pi.BrainClient != nil {
 		pi.BrainClient.Close()
 	}
+	if pi.MemoryEmbedder != nil {
+		pi.MemoryEmbedder.Close()
+	}
 }
 
 // projectRegistry is a thread-safe map of canonicalAbsPath → ProjectInstance.
@@ -60,6 +66,7 @@ func (pi *ProjectInstance) Close() {
 type projectRegistry struct {
 	mu       sync.RWMutex
 	projects map[string]*ProjectInstance
+	sf       singleflight.Group
 }
 
 func newProjectRegistry() *projectRegistry {
@@ -84,10 +91,8 @@ func (r *projectRegistry) Set(pi *ProjectInstance) {
 }
 
 // GetOrSet returns the existing instance, or calls init() and stores the result.
-// The init function is called WITHOUT the registry lock held, so concurrent
-// callers for the same path may call init concurrently. The winner's instance
-// is stored; the loser discards its instance. This is safe because init()
-// produces equivalent instances and the store/graph are idempotent.
+// Uses singleflight to ensure exactly one init() per path, preventing duplicate
+// resource allocation when concurrent requests arrive for the same project.
 func (r *projectRegistry) GetOrSet(absPath string, init func() (*ProjectInstance, error)) (*ProjectInstance, error) {
 	r.mu.RLock()
 	if pi, ok := r.projects[absPath]; ok {
@@ -96,21 +101,31 @@ func (r *projectRegistry) GetOrSet(absPath string, init func() (*ProjectInstance
 	}
 	r.mu.RUnlock()
 
-	pi, err := init()
+	// singleflight ensures only one init() runs per absPath.
+	v, err, _ := r.sf.Do(absPath, func() (interface{}, error) {
+		// Double-check under lock — another caller may have stored it
+		// between our RUnlock above and singleflight selecting us.
+		r.mu.RLock()
+		if pi, ok := r.projects[absPath]; ok {
+			r.mu.RUnlock()
+			return pi, nil
+		}
+		r.mu.RUnlock()
+
+		pi, err := init()
+		if err != nil {
+			return nil, err
+		}
+
+		r.mu.Lock()
+		r.projects[absPath] = pi
+		r.mu.Unlock()
+		return pi, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	r.mu.Lock()
-	if existing, ok := r.projects[absPath]; ok {
-		// Another goroutine won the race — discard ours.
-		r.mu.Unlock()
-		pi.Close()
-		return existing, nil
-	}
-	r.projects[absPath] = pi
-	r.mu.Unlock()
-	return pi, nil
+	return v.(*ProjectInstance), nil
 }
 
 // Delete closes and removes a project instance.

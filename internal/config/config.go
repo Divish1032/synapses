@@ -205,14 +205,17 @@ func (c ContentSafetyConfig) ContentSafetyEnabled() bool {
 	return *c.Enabled
 }
 
-// ContentSafetyMode returns the configured scanner mode, defaulting to "warn".
-// Only "warn", "truncate", and "reject" are valid. Invalid values fall back to "warn".
+// ContentSafetyMode returns the configured scanner mode, defaulting to "reject".
+// Only "warn", "truncate", and "reject" are valid. Invalid values fall back to "reject".
+// Default changed from "warn" to "reject" (BUG-008): warn-mode detects injection
+// but stores content unchanged, allowing poisoned memories to persist and infect
+// future readers via recall().
 func (c ContentSafetyConfig) ContentSafetyMode() string {
 	switch c.Mode {
 	case "warn", "truncate", "reject":
 		return c.Mode
 	default:
-		return "warn"
+		return "reject"
 	}
 }
 

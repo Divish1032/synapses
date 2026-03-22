@@ -234,6 +234,11 @@ func (s *Server) handleGetMessages(
 		}
 	}
 
+	// BUG-011: Output-path injection scanning for messages.
+	for i := range msgs {
+		msgs[i].Payload = s.scanOutputContent(msgs[i].Payload)
+	}
+
 	summary := fmt.Sprintf("no messages for agent %q", agentID)
 	if len(msgs) > 0 {
 		summary = fmt.Sprintf("%d message(s) for agent %q", len(msgs), agentID)

@@ -569,8 +569,8 @@ func TestContentSafetyConfig_Defaults(t *testing.T) {
 	if !c.ContentSafetyEnabled() {
 		t.Error("default should be enabled")
 	}
-	if c.ContentSafetyMode() != "warn" {
-		t.Errorf("default mode should be warn, got %s", c.ContentSafetyMode())
+	if c.ContentSafetyMode() != "reject" {
+		t.Errorf("default mode should be reject, got %s", c.ContentSafetyMode())
 	}
 }
 
@@ -594,8 +594,8 @@ func TestNewServer_ScannerEnabledByDefault(t *testing.T) {
 	if srv.injectionScanner == nil {
 		t.Error("scanner should be enabled by default")
 	}
-	if srv.injectionScanner.Mode() != ScanModeWarn {
-		t.Errorf("default mode should be warn, got %s", srv.injectionScanner.Mode())
+	if srv.injectionScanner.Mode() != ScanModeReject {
+		t.Errorf("default mode should be reject, got %s", srv.injectionScanner.Mode())
 	}
 }
 
@@ -753,14 +753,14 @@ func TestScanContent_TruncateMode_MixedContent_StripsInjection(t *testing.T) {
 }
 
 // Bug 4: Invalid ScanMode in config should fall back to "warn".
-func TestContentSafetyConfig_InvalidMode_FallsBackToWarn(t *testing.T) {
+func TestContentSafetyConfig_InvalidMode_FallsBackToReject(t *testing.T) {
 	c := config.ContentSafetyConfig{Mode: "block"} // typo — invalid mode
-	if c.ContentSafetyMode() != "warn" {
-		t.Errorf("invalid mode should fall back to warn, got %s", c.ContentSafetyMode())
+	if c.ContentSafetyMode() != "reject" {
+		t.Errorf("invalid mode should fall back to reject, got %s", c.ContentSafetyMode())
 	}
 	c2 := config.ContentSafetyConfig{Mode: "REJECT"} // wrong case
-	if c2.ContentSafetyMode() != "warn" {
-		t.Errorf("wrong-case mode should fall back to warn, got %s", c2.ContentSafetyMode())
+	if c2.ContentSafetyMode() != "reject" {
+		t.Errorf("wrong-case mode should fall back to reject, got %s", c2.ContentSafetyMode())
 	}
 }
 

@@ -429,6 +429,15 @@ func (s *Server) handleRecall(
 			}
 		}
 
+		// BUG-011: Output-path injection scanning for browse mode.
+		for i := range episodes {
+			episodes[i].Decision = s.scanOutputContent(episodes[i].Decision)
+			episodes[i].Rationale = s.scanOutputContent(episodes[i].Rationale)
+		}
+		for i := range recentMems {
+			recentMems[i].Content = s.scanOutputContent(recentMems[i].Content)
+		}
+
 		summary := "no episodes found"
 		if len(episodes) > 0 || len(recentMems) > 0 {
 			summary = fmt.Sprintf("%d episode(s), %d memory/memories", len(episodes), len(recentMems))
@@ -615,6 +624,17 @@ func (s *Server) handleRecall(
 		if verr == nil && len(versioned) > 0 {
 			memories = versioned
 		}
+	}
+
+	// BUG-011: Output-path injection scanning — scan recalled content before
+	// delivering to agents. Content stored before the scanner existed (or while
+	// in warn mode) may contain injection patterns that must be annotated.
+	for i := range memories {
+		memories[i].Content = s.scanOutputContent(memories[i].Content)
+	}
+	for i := range episodes {
+		episodes[i].Decision = s.scanOutputContent(episodes[i].Decision)
+		episodes[i].Rationale = s.scanOutputContent(episodes[i].Rationale)
 	}
 
 	// Touch surfaced memories in background to renew TTL.

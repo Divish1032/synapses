@@ -19,6 +19,13 @@ const (
 	TierProject    = "project"     // Conventions, decisions, gotchas — project-wide.
 )
 
+// DefaultMaxMemoryRows is the per-project memory cap. Prevents unbounded disk
+// growth from agents calling remember() in a loop. Configurable via Store.MaxMemoryRows.
+const DefaultMaxMemoryRows = 10000
+
+// DefaultMaxEpisodeRows is the per-project episode cap.
+const DefaultMaxEpisodeRows = 10000
+
 // MemorySource indicates how the memory was created.
 const (
 	SourceManual    = "manual"    // Agent explicitly called remember() or annotate_node().
@@ -87,6 +94,21 @@ type InvalidatedMemory struct {
 // Returns the memory ID. Deduplicates against existing memories with similar content.
 // Sprint 10.1: on dedup, snapshots the old content as a version before touching.
 func (s *Store) InsertMemory(m Memory) (string, error) {
+	// BUG-014: enforce per-project memory row cap.
+	// rowCapMu serializes cap-check + insert to prevent concurrent writers
+	// from both passing the check. Held for the duration of InsertMemory.
+	// Cost: ~54µs per call (4µs COUNT + 50µs INSERT) — negligible.
+	s.rowCapMu.Lock()
+	defer s.rowCapMu.Unlock()
+	maxRows := s.MaxMemoryRows
+	if maxRows <= 0 {
+		maxRows = DefaultMaxMemoryRows
+	}
+	var count int
+	if err := s.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&count); err == nil && count >= maxRows {
+		return "", fmt.Errorf("memory row cap reached (%d/%d) — prune old memories or increase the cap", count, maxRows)
+	}
+
 	m, dedup, err := s.prepareMemory(m)
 	if err != nil {
 		return "", err

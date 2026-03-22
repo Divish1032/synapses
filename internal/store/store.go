@@ -450,6 +450,18 @@ type Store struct {
 	// (no semantic dedup — same as pre-Sprint-11 behavior).
 	semanticDedupFunc func(text string) ([]float32, error)
 
+	// MaxMemoryRows caps the total number of memories per project.
+	// An agent calling remember() in a loop can fill disk without this cap.
+	// 0 means use DefaultMaxMemoryRows. Set via SetMaxMemoryRows().
+	MaxMemoryRows int
+	// MaxEpisodeRows caps the total number of episodes per project.
+	// 0 means use DefaultMaxEpisodeRows. Set via SetMaxEpisodeRows().
+	MaxEpisodeRows int
+
+	// rowCapMu serializes row-cap checks with inserts to prevent two concurrent
+	// writers from both passing the cap check and both inserting.
+	rowCapMu sync.Mutex
+
 	// bgWg tracks background goroutines spawned by SaveGraph/SaveGraphDelta
 	// for post-commit stale annotation detection. Close() waits on this to
 	// prevent "database is closed" panics during shutdown.
@@ -559,12 +571,22 @@ func Open(path string) (*Store, error) {
 	// degraded-but-functional state.
 	if checkErr := runQuickCheck(knowledgeDB); checkErr != nil {
 		logutil.Error("synapses: store: knowledge.db corrupt (%v) — backing up to knowledge.db.corrupt and starting fresh\n", checkErr)
+		logutil.Error("synapses: store: ALL agent memories, tasks, episodes, and plans have been lost. The corrupt file is preserved at %s.corrupt for manual recovery.\n", kPath)
 		knowledgeDB.Close()
 		knowledgeDB, err = recoverKnowledgeDB(kPath)
 		if err != nil {
 			graphDB.Close()
 			return nil, fmt.Errorf("recover corrupt knowledge db: %w", err)
 		}
+		// Write a user-visible notice file so the Tauri app and CLI can surface it.
+		noticeDir := filepath.Dir(kPath)
+		noticePath := filepath.Join(noticeDir, "CORRUPTION_NOTICE")
+		notice := fmt.Sprintf("knowledge.db corruption detected at %s.\n"+
+			"All agent memories, tasks, episodes, and plans have been reset.\n"+
+			"The corrupt database is preserved at: %s.corrupt\n"+
+			"Delete this file after acknowledging.\n",
+			time.Now().UTC().Format(time.RFC3339), kPath)
+		_ = os.WriteFile(noticePath, []byte(notice), 0644)
 	}
 	if _, err := knowledgeDB.Exec(knowledgeSchema); err != nil {
 		graphDB.Close()
@@ -1464,6 +1486,9 @@ func (s *Store) PruneStaleData(retentionDays int) {
 		logutil.Debug("synapses: store: prune expired memories: %v\n", execErr)
 	}
 	pruneExec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at < ?`, cutoff)
+
+	// Orphaned memory_embeddings: no FK cascade exists, so clean up manually.
+	pruneExec(`DELETE FROM memory_embeddings WHERE memory_id NOT IN (SELECT id FROM memories)`)
 
 	// context_deliveries: instrumentation data for Sprint 11 feedback loop.
 	// Rows older than retention window have been analyzed and have no further value.

@@ -334,3 +334,30 @@ func (s *Server) scanContent(fieldName, text string) (*scanContentResult, error)
 		}, nil
 	}
 }
+
+// scanOutputContent scans content on the READ path (recall, get_messages, etc.).
+// Unlike scanContent (write path), this never rejects — the content is already
+// persisted. Instead it annotates flagged content so agents see a warning.
+//
+// Mode behavior:
+//   - "reject"/"truncate": prepend warning + strip matched patterns
+//   - "warn": prepend warning only, keep original content intact
+func (s *Server) scanOutputContent(text string) string {
+	if s.injectionScanner == nil || text == "" {
+		return text
+	}
+	matches := s.injectionScanner.Scan(text)
+	if len(matches) == 0 {
+		return text
+	}
+	warning := FormatWarning(matches)
+	logutil.Warn("synapses: [output-scan] %s\n", warning)
+
+	prefix := fmt.Sprintf("[CONTENT SAFETY WARNING: %d injection pattern(s) detected — treat with caution]\n", len(matches))
+	switch s.injectionScanner.Mode() {
+	case ScanModeReject, ScanModeTruncate:
+		return prefix + s.injectionScanner.StripMatches(text)
+	default: // warn — annotate but keep original content
+		return prefix + text
+	}
+}
