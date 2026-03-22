@@ -32,16 +32,13 @@ var knowledgeTables = []string{
 // Uses Go-level row copying (not ATTACH) to avoid locking conflicts since
 // graphDB is already open with WAL mode.
 func migrateKnowledgeFromLegacy(knowledgeDB *sql.DB, graphDBPath string) error {
-	// Open a separate read-only connection to the legacy DB.
-	legacyDB, err := sql.Open("sqlite", graphDBPath)
+	// Open a separate read-only connection to the legacy DB with WAL mode
+	// and performance pragmas via the shared helper.
+	legacyDB, err := openReadOnlySQLiteDB(graphDBPath)
 	if err != nil {
 		return fmt.Errorf("open legacy db: %w", err)
 	}
 	defer legacyDB.Close()
-	legacyDB.SetMaxOpenConns(1)
-	if _, err := legacyDB.Exec("PRAGMA busy_timeout=5000;"); err != nil {
-		return fmt.Errorf("set busy_timeout: %w", err)
-	}
 
 	var migrationErrors []string
 	for _, table := range knowledgeTables {
