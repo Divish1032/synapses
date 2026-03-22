@@ -635,9 +635,7 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("migrate graph schema: %w", err)
 		}
 	}
-	if graphTx != nil {
-		graphTx.Commit()
-	}
+	graphTx.Commit()
 
 	// ── Knowledge migrations ─────────────────────────────────────────────
 	knowledgeTx, err := knowledgeDB.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -767,9 +765,7 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("migrate knowledge schema: %w", err)
 		}
 	}
-	if knowledgeTx != nil {
-		knowledgeTx.Commit()
-	}
+	knowledgeTx.Commit()
 
 	// Fix historical rows: sessions with ended_at already set must be 'closed'.
 	_, _ = knowledgeDB.Exec(`UPDATE sessions SET state = 'closed' WHERE ended_at IS NOT NULL AND state = 'active'`)
