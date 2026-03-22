@@ -83,7 +83,11 @@ func (b *tokenBucket) refill(now time.Time) {
 	}
 	elapsed := now.Sub(b.lastRefill).Seconds()
 	if elapsed < 0 {
-		elapsed = 0 // guard against clock skew / time going backwards
+		// Clock went backwards (NTP correction, VM migration, etc.).
+		// Skip this refill entirely — don't update lastRefill either,
+		// so the next call with a correct timestamp computes elapsed
+		// from the original lastRefill, not from the skewed time.
+		return
 	}
 	b.tokens += elapsed * b.ratePerSec
 	if b.tokens > b.capacity {
