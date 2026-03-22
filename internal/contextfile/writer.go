@@ -53,7 +53,7 @@ func Write(repoRoot string, identity *graph.ProjectIdentity, tasks []store.Task)
 	content := render(identity, tasks)
 	// Atomic write: temp file + rename avoids a partial read by the hook.
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("write context file: %w", err)
 	}
 	return os.Rename(tmp, path)

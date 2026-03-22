@@ -167,7 +167,7 @@ func startSidecar(s Sidecar, quiet bool) error {
 		return nil
 	}
 
-	lf, err := os.OpenFile(logFilePath(s.Name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	lf, err := os.OpenFile(logFilePath(s.Name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open log for %s: %w", s.Name, err)
 	}
