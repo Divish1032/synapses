@@ -39,6 +39,12 @@ const (
 	ttlProject    = 60 * 24 * time.Hour // 60 days
 )
 
+// timeFmtMicro is a fixed-width RFC 3339 variant with microsecond precision.
+// Used for created_at so that rapid sequential inserts always get distinct,
+// lexicographically-sortable timestamps — eliminating reliance on rowid as a
+// tiebreaker (which is unreliable with TEXT PRIMARY KEY in some SQLite drivers).
+const timeFmtMicro = "2006-01-02T15:04:05.000000Z07:00"
+
 // ImportancePinned is a special importance value that exempts a memory from
 // decay scoring. Pinned memories always score 1.0 regardless of age, making
 // them permanently visible in recall results. Use for security configs,
@@ -344,7 +350,7 @@ func (s *Store) GetLatestWorkSummary(agentID string) (*Memory, error) {
 		  AND tags LIKE '%"work_summary"%'
 		  AND stale = 0
 		  AND expires_at > ?
-		ORDER BY created_at DESC, rowid DESC
+		ORDER BY created_at DESC
 		LIMIT 1`, agentID, now)
 
 	var m Memory
@@ -967,7 +973,7 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 	}
 	now := time.Now().UTC()
 	if m.CreatedAt == "" {
-		m.CreatedAt = now.Format(time.RFC3339)
+		m.CreatedAt = now.Format(timeFmtMicro)
 	}
 	if m.LastAccessedAt == "" {
 		m.LastAccessedAt = m.CreatedAt
