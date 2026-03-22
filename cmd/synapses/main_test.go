@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -137,50 +136,19 @@ func TestRun_Export_BadFormat(t *testing.T) {
 	}
 }
 
-func TestRun_Setup_Core(t *testing.T) {
-	dir := t.TempDir()
-	// --core skips brain check; should write synapses.json.
-	err := run([]string{"setup", "--path", dir, "--core"})
+func TestRun_Setup_PrintsRedirect(t *testing.T) {
+	// setup now prints a redirect to "synapses init" and exits cleanly.
+	err := run([]string{"setup"})
 	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	// Verify synapses.json was written.
-	if _, err := os.Stat(filepath.Join(dir, "synapses.json")); os.IsNotExist(err) {
-		t.Error("synapses.json not written by setup --core")
+		t.Errorf("setup should not error: %v", err)
 	}
 }
 
-func TestRun_MCPSetup_Cursor(t *testing.T) {
-	dir := t.TempDir()
-	err := run([]string{"mcp-setup", "--agent", "cursor", "--path", dir})
+func TestRun_MCPSetup_PrintsRedirect(t *testing.T) {
+	// mcp-setup now prints a redirect to "synapses init" and exits cleanly.
+	err := run([]string{"mcp-setup"})
 	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	cfgPath := filepath.Join(dir, ".cursor", "mcp.json")
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		t.Errorf("cursor mcp.json not written")
-	}
-}
-
-func TestRun_MCPSetup_Gemini(t *testing.T) {
-	dir := t.TempDir()
-	_ = run([]string{"mcp-setup", "--agent", "gemini", "--path", dir})
-}
-
-func TestRun_MCPSetup_Zed(t *testing.T) {
-	dir := t.TempDir()
-	_ = run([]string{"mcp-setup", "--agent", "zed", "--path", dir})
-	cfgPath := filepath.Join(dir, ".zed", "settings.json")
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		t.Errorf("zed settings.json not written")
-	}
-}
-
-func TestRun_MCPSetup_UnknownAgent(t *testing.T) {
-	dir := t.TempDir()
-	err := run([]string{"mcp-setup", "--agent", "notanagent", "--path", dir})
-	if err == nil {
-		t.Fatal("expected error for unknown agent")
+		t.Errorf("mcp-setup should not error: %v", err)
 	}
 }
 
@@ -259,54 +227,11 @@ func TestBinaryExists(t *testing.T) {
 	}
 }
 
-// ── printInstalled ────────────────────────────────────────────────────────────
+// ── writeSynapsesJSON (from init.go, replaces writeOnboardSynapsesJSON) ──────
 
-func TestPrintInstalled(t *testing.T) {
-	// Just verify it doesn't panic.
-	printInstalled("test-component", true)
-	printInstalled("test-component", false)
-}
-
-// ── activeSidecars ────────────────────────────────────────────────────────────
-
-func TestActiveSidecars(t *testing.T) {
-	// All sidecars are now in-process; allSidecars is empty.
-	if got := activeSidecars(); len(got) != 0 {
-		t.Errorf("activeSidecars() = %d, want 0 (no external sidecars)", len(got))
-	}
-}
-
-// ── prompt ────────────────────────────────────────────────────────────────────
-
-func TestPrompt(t *testing.T) {
-	cases := []struct {
-		input    string
-		question string
-		want     bool
-	}{
-		{"y\n", "Proceed? [Y/n]: ", true},
-		{"yes\n", "Proceed? [Y/n]: ", true},
-		{"\n", "Proceed? [Y/n]: ", true},  // empty = yes (default Y)
-		{"n\n", "Proceed? [Y/n]: ", false},
-		{"no\n", "Proceed? [Y/n]: ", false},
-		{"y\n", "Do it? [y/N]: ", true},   // explicit yes
-		{"n\n", "Do it? [y/N]: ", false},
-		{"\n", "Do it? [y/N]: ", false},   // empty = no (default N)
-	}
-	for _, c := range cases {
-		r := bufio.NewReader(strings.NewReader(c.input))
-		got := prompt(r, c.question)
-		if got != c.want {
-			t.Errorf("prompt(input=%q, q=%q) = %v, want %v", c.input, c.question, got, c.want)
-		}
-	}
-}
-
-// ── writeOnboardSynapsesJSON ──────────────────────────────────────────────────
-
-func TestWriteOnboardSynapsesJSON_Basic(t *testing.T) {
+func TestWriteSynapsesJSON_Basic(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeOnboardSynapsesJSON(dir); err != nil {
+	if err := writeSynapsesJSON(dir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "synapses.json"))
@@ -317,24 +242,18 @@ func TestWriteOnboardSynapsesJSON_Basic(t *testing.T) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	// brain always present (in-process, disabled by default)
 	if _, ok := m["brain"]; !ok {
 		t.Error("expected brain key in synapses.json")
 	}
-	// scout should never be written — web intelligence is built-in
-	if _, ok := m["scout"]; ok {
-		t.Error("scout key must not be written — web intelligence is built-in via webcache")
-	}
 }
 
-func TestWriteOnboardSynapsesJSON_MergesExisting(t *testing.T) {
+func TestWriteSynapsesJSON_MergesExisting(t *testing.T) {
 	dir := t.TempDir()
-	// Write initial file with a custom key.
 	initial := map[string]interface{}{"mykey": "myvalue"}
 	data, _ := json.Marshal(initial)
 	os.WriteFile(filepath.Join(dir, "synapses.json"), data, 0o644)
 
-	if err := writeOnboardSynapsesJSON(dir); err != nil {
+	if err := writeSynapsesJSON(dir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	result, _ := os.ReadFile(filepath.Join(dir, "synapses.json"))
@@ -536,52 +455,21 @@ func TestUpsertHookEntry_MultipleMatchers(t *testing.T) {
 	}
 }
 
-// ── detectProjectLanguages ────────────────────────────────────────────────────
+// ── detectInstalledAgents (from init.go) ─────────────────────────────────────
 
-func TestDetectProjectLanguages_Empty(t *testing.T) {
-	dir := t.TempDir()
-	langs := detectProjectLanguages(dir)
-	if len(langs) != 0 {
-		t.Errorf("expected no languages in empty dir, got %v", langs)
+func TestDetectInstalledAgents(t *testing.T) {
+	agents := detectInstalledAgents()
+	if len(agents) != 6 {
+		t.Errorf("expected 6 agents, got %d", len(agents))
 	}
-}
-
-func TestDetectProjectLanguages_Go(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644)
-	langs := detectProjectLanguages(dir)
-	found := false
-	for _, l := range langs {
-		if l == "Go" {
-			found = true
-		}
+	// Check that all expected keys are present.
+	keys := map[string]bool{}
+	for _, a := range agents {
+		keys[a.Key] = true
 	}
-	if !found {
-		t.Errorf("expected Go to be detected, got %v", langs)
-	}
-}
-
-func TestDetectProjectLanguages_Multiple(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644)
-	os.WriteFile(filepath.Join(dir, "app.py"), []byte("print('hi')"), 0o644)
-	os.WriteFile(filepath.Join(dir, "index.ts"), []byte("const x = 1"), 0o644)
-	langs := detectProjectLanguages(dir)
-	if len(langs) < 3 {
-		t.Errorf("expected at least 3 languages, got %v", langs)
-	}
-}
-
-func TestDetectProjectLanguages_SkipsVendor(t *testing.T) {
-	dir := t.TempDir()
-	vendor := filepath.Join(dir, "vendor")
-	os.MkdirAll(vendor, 0o755)
-	os.WriteFile(filepath.Join(vendor, "lib.py"), []byte("x=1"), 0o644)
-	// No non-vendor .py file.
-	langs := detectProjectLanguages(dir)
-	for _, l := range langs {
-		if l == "Python" {
-			t.Error("Python should be skipped (it's only in vendor/)")
+	for _, want := range []string{"claude", "cursor", "vscode", "windsurf", "zed", "antigravity"} {
+		if !keys[want] {
+			t.Errorf("missing agent key %q", want)
 		}
 	}
 }
@@ -1132,16 +1020,17 @@ func TestCmdBrief_NoIndex(t *testing.T) {
 	}
 }
 
-// ── cmdInit ───────────────────────────────────────────────────────────────────
+// ── cmdInit (unified wizard — see init.go) ───────────────────────────────────
 
 func TestCmdInit_TempDir(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o644)
-	err := run([]string{"init", "--path", dir})
+	// --yes skips interactive prompts, --no-agents skips agent connection.
+	// Daemon connection may fail in test env — that's fine (non-fatal warning).
+	err := run([]string{"init", "--yes", "--no-agents", "--path", dir})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	// init now creates synapses.json (if missing) and prints golden path.
 	if _, statErr := os.Stat(filepath.Join(dir, "synapses.json")); os.IsNotExist(statErr) {
 		t.Error("synapses.json not written by init")
 	}
@@ -1149,17 +1038,37 @@ func TestCmdInit_TempDir(t *testing.T) {
 
 func TestCmdInit_ExistingConfig(t *testing.T) {
 	dir := t.TempDir()
-	// Pre-existing synapses.json should be preserved (not overwritten).
 	os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(`{"existing":true}`+"\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, "app.go"), []byte("package app\n"), 0o644)
-	err := run([]string{"init", "--path", dir})
+	err := run([]string{"init", "--yes", "--no-agents", "--path", dir})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-
 	data, _ := os.ReadFile(filepath.Join(dir, "synapses.json"))
 	if !strings.Contains(string(data), "existing") {
 		t.Error("existing synapses.json should be preserved")
+	}
+}
+
+func TestCmdInit_ShortY(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o644)
+	// -y should be accepted as shorthand for --yes.
+	err := run([]string{"init", "-y", "--no-agents", "--path", dir})
+	if err != nil {
+		t.Errorf("-y flag not accepted: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "synapses.json")); os.IsNotExist(statErr) {
+		t.Error("synapses.json not written with -y")
+	}
+}
+
+func TestCmdInit_EmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	// Empty directory — indexing will produce 0 nodes but should not fail init.
+	err := run([]string{"init", "--yes", "--no-agents", "--path", dir})
+	if err != nil {
+		t.Errorf("init should succeed even with empty dir: %v", err)
 	}
 }
 
@@ -1349,13 +1258,7 @@ func TestSmartReindex_NoStoredMtimes(t *testing.T) {
 	}
 }
 
-// ── runCmd ────────────────────────────────────────────────────────────────────
-
-func TestRunCmd_Echo(t *testing.T) {
-	if err := runCmd("echo", "synapses-test"); err != nil {
-		t.Errorf("runCmd echo: %v", err)
-	}
-}
+// runCmd test removed — function was in deleted onboard.go.
 
 // ── embedAllNodes nil guard ───────────────────────────────────────────────────
 
@@ -1419,37 +1322,7 @@ func TestMain_Run(t *testing.T) {
 	main()
 }
 
-// ── cmdOnboard ────────────────────────────────────────────────────────────────
-
-func TestCmdOnboard_AllNo(t *testing.T) {
-	dir := t.TempDir()
-
-	// Control PATH so brain/ollama/scout/pulse are NOT found.
-	// Without this, the test would actually run 'brain setup' and hang.
-	emptyBin := t.TempDir()
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", emptyBin)
-	defer os.Setenv("PATH", oldPath)
-
-	// Supply enough "n\n" to answer every prompt with No.
-	input := strings.Repeat("n\n", 20)
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	oldStdin := os.Stdin
-	os.Stdin = r
-	defer func() {
-		os.Stdin = oldStdin
-		r.Close()
-	}()
-	go func() {
-		fmt.Fprint(w, input)
-		w.Close()
-	}()
-	// cmdOnboard may fail at some steps (e.g., daemonInstall). Ignore result.
-	_ = cmdOnboard([]string{dir})
-}
+// cmdOnboard tests removed — replaced by cmdInit (init.go).
 
 // ── serveMCPConn via net.Pipe() ───────────────────────────────────────────────
 
@@ -1841,32 +1714,7 @@ func TestCmdList_WithProjects(t *testing.T) {
 	}
 }
 
-// ── cmdSetup ─────────────────────────────────────────────────────────────────
-
-func TestCmdSetup_CreatesSynapsesJSON(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := cmdSetup([]string{"--path", dir}); err != nil {
-		t.Errorf("cmdSetup: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "synapses.json")); os.IsNotExist(err) {
-		t.Error("synapses.json not written by cmdSetup")
-	}
-}
-
-func TestCmdSetup_PreservesExistingConfig(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(`{"custom":true}`+"\n"), 0o644)
-
-	if err := cmdSetup([]string{"--path", dir}); err != nil {
-		t.Errorf("cmdSetup: %v", err)
-	}
-	// Existing config should not be overwritten.
-	data, _ := os.ReadFile(filepath.Join(dir, "synapses.json"))
-	if !strings.Contains(string(data), "custom") {
-		t.Error("existing synapses.json should be preserved")
-	}
-}
+// cmdSetup tests removed — replaced by cmdInit (init.go).
 
 // ── smartReindex with real data ───────────────────────────────────────────────
 
@@ -2139,63 +1987,7 @@ func TestCmdBrief_WithMessages(t *testing.T) {
 	}
 }
 
-// ── cmdSetup backwards compatibility ─────────────────────────────────────────
-
-func TestCmdSetup_CoreFlagBackwardsCompat(t *testing.T) {
-	dir := t.TempDir()
-	// --core flag should be accepted (backwards compat) even though it's a no-op.
-	err := cmdSetup([]string{"--core", "--path", dir})
-	if err != nil {
-		t.Errorf("cmdSetup --core: %v", err)
-	}
-	if _, statErr := os.Stat(filepath.Join(dir, "synapses.json")); os.IsNotExist(statErr) {
-		t.Error("synapses.json not written by cmdSetup --core")
-	}
-}
-
-// ── cmdOnboard with fake brain+ollama ────────────────────────────────────────
-
-func TestCmdOnboard_WithFakeBrainAndOllama(t *testing.T) {
-	binDir := t.TempDir()
-	// Create fake brain and ollama scripts that exit 0 immediately.
-	for _, name := range []string{"brain", "ollama"} {
-		script := filepath.Join(binDir, name)
-		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir)
-	defer os.Setenv("PATH", oldPath)
-
-	dir := t.TempDir()
-	// With brain=true and ollama=true:
-	// - scout not found → prompt "Install scout? [Y/n]:" → n
-	// - pulse not found → prompt "Install pulse? [Y/n]:" → n
-	// - brain setup runs immediately (fake script exits 0)
-	// - prompt "Start all sidecars? [Y/n]:" → n
-	// - prompt "Auto-start at login? [Y/n]:" → n
-	// - prompt "Wire into Claude Code? [Y/n]:" → n
-	// - prompt "Wire into Cursor? [y/N]:" → \n (default=no)
-	// - prompt "Wire into Windsurf? [y/N]:" → \n
-	// - prompt "Wire into Zed? [y/N]:" → \n
-	// - prompt "Wire into Gemini CLI? [y/N]:" → \n
-	input := "n\nn\nn\nn\nn\n\n\n\n\n"
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldStdin := os.Stdin
-	os.Stdin = r
-	defer func() { os.Stdin = oldStdin }()
-
-	go func() {
-		w.WriteString(input)
-		w.Close()
-	}()
-
-	_ = cmdOnboard([]string{dir})
-}
+// cmdSetup/cmdOnboard backwards compat tests removed — replaced by cmdInit.
 
 // ── cmdReset --all path ───────────────────────────────────────────────────────
 
