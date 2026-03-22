@@ -531,6 +531,14 @@ func selectOnnxVariant() (modelFile, onnxRepoPath string) {
 	accel := detectAccelerator()
 	switch accel {
 	case "cuda", "rocm", "metal":
+		// Skip fp32 variant when its integrity hash hasn't been captured yet.
+		// Without a hash, the integrity check will fail-closed and trigger a
+		// redundant fallback download of the quantized model (~700 MB wasted).
+		// Once builtinModelSHA256FP32 is pinned, remove this guard.
+		if builtinModelSHA256FP32 == "" {
+			logutil.Info("synapses: GPU detected (%s) but fp32 hash not yet pinned — selecting quantized ONNX model\n", accel)
+			return builtinModelFileQuantized, builtinOnnxFilePathQuantized
+		}
 		logutil.Info("synapses: GPU detected (%s) — selecting fp32 ONNX model\n", accel)
 		return builtinModelFileFP32, builtinOnnxFilePathFP32
 	default:
