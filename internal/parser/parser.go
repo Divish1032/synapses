@@ -257,7 +257,7 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 				return nil
 			}
 			absResolved, resErr := filepath.Abs(resolved)
-			if resErr != nil || !strings.HasPrefix(absResolved, absRoot) {
+			if resErr != nil || (!strings.HasPrefix(absResolved, absRoot+"/") && absResolved != absRoot) {
 				logutil.Warn("synapses/security: skipped symlink resolving outside repo root: %s -> %s\n", path, resolved)
 				return nil
 			}
