@@ -988,7 +988,7 @@ func (s *Store) queryFreshMemoriesForDedup(tier, entityID, agentID string) ([]Me
 		q += ` AND agent_id = ?`
 		args = append(args, agentID)
 	}
-	q += ` ORDER BY last_accessed_at DESC LIMIT 5`
+	q += ` ORDER BY last_accessed_at DESC LIMIT 25`
 	rows, err := s.knowledgeDB.Query(q, args...)
 	if err != nil {
 		return nil, err
