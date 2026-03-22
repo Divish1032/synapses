@@ -58,6 +58,9 @@ type Collector struct {
 	dropped atomic.Int64
 	// P5 — DQ-Integrity.1: write errors during batch persistence.
 	writeErrors atomic.Int64
+	// earlyFlushRunning prevents concurrent early-flush goroutines. Only one
+	// early-flush goroutine is allowed at a time; additional triggers are skipped.
+	earlyFlushRunning atomic.Int32
 	// P12-7: optional callback invoked after each flush with the batch size.
 	OnFlush func(count int)
 }
@@ -275,12 +278,14 @@ func (c *Collector) enqueue(ev event) {
 	}
 
 	// If buffer is at 80% capacity, trigger an early flush in the background.
-	if len(c.buf) >= c.cap*80/100 {
+	// Only allow one concurrent early-flush goroutine to prevent unbounded goroutine spawning.
+	if len(c.buf) >= c.cap*80/100 && c.earlyFlushRunning.CompareAndSwap(0, 1) {
 		batch := c.drainLocked()
 		c.mu.Unlock()
 		c.wg.Add(1)
 		go func() {
 			defer c.wg.Done()
+			defer c.earlyFlushRunning.Store(0)
 			c.writeBatch(batch)
 		}()
 		return

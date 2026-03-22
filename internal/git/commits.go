@@ -1,9 +1,13 @@
 package git
 
 import (
+	"context"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+const gitCmdTimeout = 5 * time.Second
 
 // HeadSHA returns the current HEAD commit SHA in the given repo.
 // Returns "" if git is unavailable, repoRoot is not a git repo, or the repo
@@ -13,7 +17,9 @@ func HeadSHA(repoRoot string) string {
 	if repoRoot == "" {
 		return ""
 	}
-	out, err := exec.Command("git", "-C", repoRoot, "rev-parse", "HEAD").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse", "HEAD").Output()
 	if err != nil {
 		return ""
 	}
@@ -39,12 +45,16 @@ func LogSince(repoRoot, startCommit string) []string {
 	}
 	// Verify startCommit is still reachable before attempting the range log.
 	// If not (rebase / force-push), return nil so the task update still succeeds.
-	catOut, err := exec.Command("git", "-C", repoRoot, "cat-file", "-t", startCommit).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
+	defer cancel()
+	catOut, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "cat-file", "-t", startCommit).Output()
 	if err != nil || strings.TrimSpace(string(catOut)) != "commit" {
 		return nil
 	}
 	// git log <startCommit>..HEAD --oneline returns commits after startCommit.
-	out, err := exec.Command(
+	ctx2, cancel2 := context.WithTimeout(context.Background(), gitCmdTimeout)
+	defer cancel2()
+	out, err := exec.CommandContext(ctx2,
 		"git", "-C", repoRoot,
 		"log", "--oneline",
 		startCommit+"..HEAD",
