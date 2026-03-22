@@ -446,6 +446,9 @@ func (p *GoParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	if tree != nil {
 		defer tree.Close()
 	}
+	if tree == nil {
+		return nil
+	}
 	root := tree.RootNode()
 
 	// First pass: extract package name.
