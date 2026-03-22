@@ -247,9 +247,9 @@ func (c *Cache) fetchAndStrip(ctx context.Context, url string) (string, error) {
 		return "", fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
 	}
 
-	// Cap read size: 64KB of HTML is more than enough to produce maxDocBytes
-	// (8KB) of stripped text. Avoids ~448KB of wasted allocation per fetch.
-	limited := io.LimitReader(resp.Body, 64*1024)
+	// Cap read size to limit allocation. 128KB of HTML comfortably produces
+	// maxDocBytes (8KB) of stripped text even for script/style-heavy pages.
+	limited := io.LimitReader(resp.Body, 128*1024)
 	raw, err := io.ReadAll(limited)
 	if err != nil {
 		return "", err

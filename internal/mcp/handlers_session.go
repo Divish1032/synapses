@@ -93,18 +93,28 @@ func (s *Server) handleGetWorkingState(
 	root := s.graph.Root()
 	if root != "" {
 		cutoff := time.Now().Add(-time.Duration(windowMinutes) * time.Minute)
-		knownConfigs := []string{
-			"synapses.json", "Makefile", "Dockerfile",
-			"package.json", "go.mod", "Cargo.toml", "pyproject.toml",
-			"tsconfig.json", "docker-compose.yml", "docker-compose.yaml",
-			".env", "config.yaml", "config.yml", "config.toml", "config.json",
-		}
-		for _, name := range knownConfigs {
-			if info, err := os.Stat(filepath.Join(root, name)); err == nil && !info.IsDir() && info.ModTime().After(cutoff) {
-				events = append(events, changeEntry{
-					File: filepath.Join(root, name),
-					At:   info.ModTime().Format("15:04:05"),
-				})
+		configNames := map[string]bool{"synapses.json": true, "Makefile": true, "Dockerfile": true}
+		configExts := map[string]bool{".json": true, ".yaml": true, ".yml": true, ".toml": true}
+		if entries, err := os.ReadDir(root); err == nil {
+			// Cap scan to prevent excessive work in huge monorepo roots.
+			const maxEntries = 200
+			for i, de := range entries {
+				if i >= maxEntries || de.IsDir() {
+					if i >= maxEntries {
+						break
+					}
+					continue
+				}
+				name := de.Name()
+				if !configNames[name] && !configExts[filepath.Ext(name)] {
+					continue
+				}
+				if info, err := de.Info(); err == nil && info.ModTime().After(cutoff) {
+					events = append(events, changeEntry{
+						File: filepath.Join(root, name),
+						At:   info.ModTime().Format("15:04:05"),
+					})
+				}
 			}
 		}
 	}

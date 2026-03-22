@@ -564,9 +564,18 @@ func (s *Store) PruneOldSessions(age time.Duration) (int64, error) {
 	s.lastPruneMu.Unlock()
 
 	cutoff := time.Now().UTC().Add(-age).Unix()
+	// Use IMMEDIATE transaction to atomically prune sessions and their tasks.
+	// Without this, a concurrent insert into session_tasks between the two
+	// DELETEs could orphan freshly-inserted task rows.
+	tx, err := s.knowledgeDB.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return 0, fmt.Errorf("begin prune tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Only prune rows that are fully closed or hibernated past the age window.
 	// Active sessions are never touched regardless of age.
-	res, err := s.knowledgeDB.Exec(`
+	res, err := tx.Exec(`
 		DELETE FROM sessions
 		WHERE state IN ('closed', 'hibernated')
 		  AND last_seen_at < ?`, cutoff)
@@ -574,6 +583,11 @@ func (s *Store) PruneOldSessions(age time.Duration) (int64, error) {
 		return 0, err
 	}
 	// Clean up orphaned session_tasks — no FOREIGN KEY CASCADE exists on this table.
-	_, _ = s.knowledgeDB.Exec(`DELETE FROM session_tasks WHERE session_id NOT IN (SELECT id FROM sessions)`)
+	if _, err := tx.Exec(`DELETE FROM session_tasks WHERE session_id NOT IN (SELECT id FROM sessions)`); err != nil {
+		return 0, fmt.Errorf("prune session_tasks: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit prune tx: %w", err)
+	}
 	return res.RowsAffected()
 }

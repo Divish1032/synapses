@@ -351,7 +351,7 @@ func (s *Store) GetLatestWorkSummary(agentID string) (*Memory, error) {
 		  AND stale = 0
 		  AND expires_at > ?
 		ORDER BY created_at DESC
-		LIMIT 1`, agentID, "%"+escapeLike("work_summary")+"%", now)
+		LIMIT 1`, agentID, "%\""+escapeLike("work_summary")+"\"%", now)
 
 	var m Memory
 	err := row.Scan(

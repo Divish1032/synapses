@@ -640,7 +640,12 @@ func Open(path string) (*Store, error) {
 	}
 
 	// ── Knowledge migrations ─────────────────────────────────────────────
-	knowledgeTx, _ := knowledgeDB.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	knowledgeTx, err := knowledgeDB.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		graphDB.Close()
+		knowledgeDB.Close()
+		return nil, fmt.Errorf("begin knowledge migration tx: %w", err)
+	}
 	for _, m := range []string{
 		`ALTER TABLE plans ADD COLUMN created_by TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE plans ADD COLUMN completed_at INTEGER NOT NULL DEFAULT 0`,
