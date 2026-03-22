@@ -148,6 +148,9 @@ func (fg *FlatGraph) AddEdge(from, to NodeIndex, weight float32) {
 	if int(from) >= len(fg.Names) || int(to) >= len(fg.Names) {
 		return // Out of bounds safety
 	}
+	if int(from)+1 >= len(fg.OutOffsets) || int(to)+1 >= len(fg.InOffsets) {
+		return // CSR offset sentinel missing — BulkAddEdges not called yet
+	}
 
 	// 1. Insert Outgoing Edge for 'from'
 	outInsertIdx := fg.OutOffsets[from+1]
