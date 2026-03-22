@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,22 +19,42 @@ import (
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/logutil"
+	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 )
 
-// validateOllamaURL checks that the Ollama URL points to localhost only,
-// preventing SSRF via user-controlled brain.json configuration.
+// validateOllamaURL checks that the Ollama URL uses http(s) and points to
+// localhost only, preventing SSRF via user-controlled brain.json configuration.
+// Covers the full 127.0.0.0/8 loopback range, IPv6 ::1, IPv6-mapped IPv4,
+// and rejects non-HTTP schemes (gopher://, file://, etc.).
 func validateOllamaURL(rawURL string) error {
+	if rawURL == "" {
+		return fmt.Errorf("empty ollama URL")
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid ollama URL: %w", err)
+		return fmt.Errorf("invalid ollama URL")
+	}
+	// Restrict to http/https only.
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("unsupported URL scheme")
 	}
 	host := u.Hostname()
-	switch host {
-	case "localhost", "127.0.0.1", "::1":
-		return nil
-	default:
-		return fmt.Errorf("ollama URL must point to localhost, got %q", host)
+	if host == "" {
+		return fmt.Errorf("missing hostname in ollama URL")
 	}
+	// If it parses as an IP, accept only loopback addresses.
+	// net.ParseIP handles 127.0.0.0/8, ::1, and ::ffff:127.0.0.1.
+	if ip := net.ParseIP(host); ip != nil {
+		if !ip.IsLoopback() {
+			return fmt.Errorf("ollama URL must point to localhost")
+		}
+		return nil
+	}
+	// For hostnames, accept only the exact string "localhost".
+	if host != "localhost" {
+		return fmt.Errorf("ollama URL must point to localhost")
+	}
+	return nil
 }
 
 // registerAdminEndpoints adds the Phase 0 management API to mux.
@@ -138,7 +159,7 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 		}
 		absPath, err := canonicalPath(req.ProjectPath)
 		if err != nil {
-			http.Error(w, "invalid path: "+err.Error(), http.StatusBadRequest)
+			http.Error(w, "invalid path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
 			return
 		}
 		results := connectAgents(absPath, []string{req.Agent})
@@ -199,7 +220,7 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 			}
 			home, err := synapsesHome()
 			if err != nil {
-				http.Error(w, "cannot find data dir: "+err.Error(), http.StatusInternalServerError)
+				http.Error(w, "cannot find data dir: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusInternalServerError)
 				return
 			}
 			// Write brain.json
@@ -210,14 +231,14 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 					return
 				}
 				if err := os.WriteFile(filepath.Join(home, "brain.json"), raw, 0o600); err != nil {
-					http.Error(w, "write brain.json: "+err.Error(), http.StatusInternalServerError)
+					http.Error(w, "write brain.json: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusInternalServerError)
 					return
 				}
 			}
 			// Write app_settings.json
 			if raw, ok := body["app_settings"]; ok {
 				if err := os.WriteFile(filepath.Join(home, "app_settings.json"), raw, 0o600); err != nil {
-					http.Error(w, "write app_settings.json: "+err.Error(), http.StatusInternalServerError)
+					http.Error(w, "write app_settings.json: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusInternalServerError)
 					return
 				}
 			}
@@ -239,7 +260,7 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 		}
 		logPath, err := singletonLogPath()
 		if err != nil {
-			http.Error(w, "log path: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "log path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusInternalServerError)
 			return
 		}
 		lines := tailFile(logPath, n)
@@ -373,7 +394,7 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 		}
 		absPath, err := canonicalPath(req.Path)
 		if err != nil {
-			http.Error(w, "invalid path: "+err.Error(), http.StatusBadRequest)
+			http.Error(w, "invalid path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
 			return
 		}
 
