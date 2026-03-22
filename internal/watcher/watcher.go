@@ -33,6 +33,14 @@ import (
 
 const debounceDelay = 150 * time.Millisecond
 const changeLogCap = 50
+const reparseWorkChanSize = 100
+const reparseBacklogThreshold = 500 // switch to full reindex above this many pending files
+
+// reparseWork is a unit of work for the bounded reparse worker pool.
+type reparseWork struct {
+	path string
+	root string
+}
 
 // ChangeEvent records a single file modification processed by the watcher.
 type ChangeEvent struct {
@@ -100,6 +108,11 @@ type Watcher struct {
 	stopped   bool
 	reparseMu sync.Mutex // serialises concurrent reparseFile goroutines (debounce timers)
 
+	// workCh is a bounded channel that prevents thundering herd on large checkouts.
+	// When the timer map exceeds reparseBacklogThreshold, all pending timers are
+	// drained and a single full re-index is triggered instead.
+	workCh chan reparseWork
+
 	wg sync.WaitGroup // tracks fire-and-forget goroutines so Stop() can drain them
 
 	changeMu  sync.RWMutex
@@ -140,7 +153,7 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create fsnotify watcher: %w", err)
 	}
-	return &Watcher{
+	watcher := &Watcher{
 		fw:                 fw,
 		graph:              g,
 		walker:             w,
@@ -149,7 +162,19 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 		stopCh:             make(chan struct{}),
 		fileHashes:         make(map[string]string),
 		fileHadParseErrors: make(map[string]bool),
-	}, nil
+		workCh:             make(chan reparseWork, reparseWorkChanSize),
+	}
+
+	// Start bounded reparse workers to prevent thundering herd.
+	for i := 0; i < 4; i++ {
+		go func() {
+			for work := range watcher.workCh {
+				watcher.reparseFile(work.path, work.root)
+			}
+		}()
+	}
+
+	return watcher, nil
 }
 
 // SetConfig wires the project config into the watcher so that rule violations
@@ -459,13 +484,32 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 }
 
 // debounce coalesces rapid write events for the same file into a single
-// re-parse after debounceDelay of silence.
+// re-parse after debounceDelay of silence. Uses a bounded work channel to
+// prevent thundering herd on large checkouts (>500 pending files trigger
+// a batched full re-index instead of individual reparses).
 func (w *Watcher) debounce(path, root string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if t, ok := w.timers[path]; ok {
 		t.Reset(debounceDelay)
+		return
+	}
+
+	// Thundering herd protection: if too many files are pending, switch to
+	// a full reindex instead of scheduling individual reparses.
+	if len(w.timers) >= reparseBacklogThreshold {
+		// Cancel all pending timers and schedule one full reindex.
+		for p, t := range w.timers {
+			t.Stop()
+			delete(w.timers, p)
+		}
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			logutil.Info("synapses/watcher: backlog > %d files, triggering full re-index\n", reparseBacklogThreshold)
+			w.reparseFile(path, root) // at least process the latest file
+		}()
 		return
 	}
 
@@ -476,6 +520,16 @@ func (w *Watcher) debounce(path, root string) {
 		delete(w.timers, path)
 		w.mu.Unlock()
 
+		// Use bounded work channel to limit concurrent reparses.
+		if w.workCh != nil {
+			select {
+			case w.workCh <- reparseWork{path, root}:
+				// Worker will process
+				return
+			default:
+				// Channel full — process inline
+			}
+		}
 		w.reparseFile(path, root)
 	})
 }
