@@ -847,8 +847,12 @@ func (g *Graph) RemoveFile(file string) {
 	// Clean up per-file variable type annotations so the resolver doesn't
 	// create incorrect CALLS edges for variable names that no longer exist.
 	delete(g.varTypes, file)
-	// Clean up stale stable ID snapshots for renamed/removed files.
-	delete(g.fileStableIDs, file)
+	// Note: fileStableIDs is NOT deleted here because RemoveFile is called
+	// between SnapshotFileStableIDs and MigrateStableID during re-parse.
+	// Deleting it here would break stable ID migration. ClearFileSnapshot
+	// handles cleanup after migration completes. For renames (old path
+	// removed, new path added), the old entry becomes stale but is small
+	// (a few bytes per renamed file) and bounded by total file count.
 
 	if len(toRemove) > 0 {
 		g.piCache = nil // invalidate ProjectIdentity cache
