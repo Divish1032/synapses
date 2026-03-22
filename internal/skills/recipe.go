@@ -115,23 +115,38 @@ func resolveArg(v interface{}, params map[string]interface{}, prevResult string,
 	if !ok {
 		return v
 	}
-	if !strings.HasPrefix(s, "$") {
+	if !strings.Contains(s, "$") {
 		return v
 	}
-	key := s[1:] // strip leading $
-	if key == "prev_result" {
-		return prevResult
-	}
-	if strings.HasPrefix(key, "step_") {
-		stepKey := key[5:] // strip "step_"
-		if val, ok := stepOutputs[stepKey]; ok {
+	// Exact-match fast path: entire string is a single "$varName".
+	if strings.HasPrefix(s, "$") && !strings.ContainsAny(s[1:], " $") {
+		key := s[1:] // strip leading $
+		if key == "prev_result" {
+			return prevResult
+		}
+		if strings.HasPrefix(key, "step_") {
+			stepKey := key[5:] // strip "step_"
+			if val, ok := stepOutputs[stepKey]; ok {
+				return val
+			}
+		}
+		if val, ok := params[key]; ok {
 			return val
 		}
+		return v // unresolved — return original
 	}
-	if val, ok := params[key]; ok {
-		return val
+	// Embedded $param substitution: "prefix $param suffix" → replace all occurrences.
+	result := s
+	result = strings.ReplaceAll(result, "$prev_result", prevResult)
+	for k, val := range stepOutputs {
+		result = strings.ReplaceAll(result, "$step_"+k, val)
 	}
-	return v // unresolved — return original
+	for k, val := range params {
+		if sv, ok := val.(string); ok {
+			result = strings.ReplaceAll(result, "$"+k, sv)
+		}
+	}
+	return result
 }
 
 // ResolveArgs applies resolveArg to all values in an args map.

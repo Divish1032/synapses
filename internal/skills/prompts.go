@@ -187,8 +187,8 @@ func matchGlob(pattern, path string) bool {
 // every MatchPrompts call. When the cache exceeds maxRegexCacheSize entries,
 // it is cleared entirely (simple LRU-eviction alternative).
 var (
-	regexCacheMu   sync.Mutex
-	regexCacheMap  = make(map[string]*regexp.Regexp)
+	regexCacheMu      sync.RWMutex
+	regexCacheMap     = make(map[string]*regexp.Regexp)
 	maxRegexCacheSize = 1000
 )
 
@@ -196,23 +196,32 @@ var (
 // Compiled regexes are cached globally with a bounded map. Invalid patterns
 // are silently treated as non-matching.
 func matchRegex(pattern, name string) bool {
-	regexCacheMu.Lock()
+	// Fast path: read lock for cache hit.
+	regexCacheMu.RLock()
 	re, ok := regexCacheMap[pattern]
-	if !ok {
-		compiled, err := regexp.Compile(pattern)
-		if err != nil {
-			regexCacheMu.Unlock()
-			return false
-		}
-		// Evict all entries when cache is full.
-		if len(regexCacheMap) >= maxRegexCacheSize {
-			regexCacheMap = make(map[string]*regexp.Regexp)
-		}
-		regexCacheMap[pattern] = compiled
-		re = compiled
+	regexCacheMu.RUnlock()
+	if ok {
+		return re.MatchString(name)
 	}
+
+	// Slow path: compile and store under write lock.
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		return false
+	}
+	regexCacheMu.Lock()
+	// Double-check after acquiring write lock.
+	if existing, exists := regexCacheMap[pattern]; exists {
+		regexCacheMu.Unlock()
+		return existing.MatchString(name)
+	}
+	// Evict all entries when cache is full.
+	if len(regexCacheMap) >= maxRegexCacheSize {
+		regexCacheMap = make(map[string]*regexp.Regexp)
+	}
+	regexCacheMap[pattern] = compiled
 	regexCacheMu.Unlock()
-	return re.MatchString(name)
+	return compiled.MatchString(name)
 }
 
 // parsePromptFile parses a Markdown file with optional YAML frontmatter.
