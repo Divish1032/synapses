@@ -3,7 +3,6 @@
 package parser
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -591,10 +590,13 @@ func (w *Walker) HasParseErrors(path string, src []byte) bool {
 	}
 	parser := sitter.NewParser()
 	parser.SetLanguage(lang)
-	tree, err := parser.ParseString(context.Background(), nil, src)
+	parseCtx, parseCancel := parseContext()
+	defer parseCancel()
+	tree, err := parser.ParseString(parseCtx, nil, src)
 	if err != nil || tree == nil {
 		return true
 	}
+	defer tree.Close()
 	return tree.RootNode().HasError()
 }
 

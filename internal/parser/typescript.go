@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"context"
 	"path/filepath"
 	"strings"
 
@@ -126,7 +125,12 @@ func (p *TypeScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 	tsParser := sitter.NewParser()
 	tsParser.SetLanguage(lang)
 
-	tree, _ := tsParser.ParseString(context.Background(), nil, src)
+	parseCtx, parseCancel := parseContext()
+	defer parseCancel()
+	tree, _ := tsParser.ParseString(parseCtx, nil, src)
+	if tree != nil {
+		defer tree.Close()
+	}
 	root := tree.RootNode()
 
 	// Module name = basename without extension.

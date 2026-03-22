@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"context"
 	"path/filepath"
 	"strings"
 
@@ -32,10 +31,13 @@ func (p *MATLABParser) TSLanguageForFile(_ string) *sitter.Language {
 func (p *MATLABParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(sitter.NewLanguage(matlabg.GetLanguage()))
-	tree, err := parser.ParseString(context.Background(), nil, src)
+	parseCtx, parseCancel := parseContext()
+	defer parseCancel()
+	tree, err := parser.ParseString(parseCtx, nil, src)
 	if err != nil || tree == nil {
 		return err
 	}
+	defer tree.Close()
 	root := tree.RootNode()
 	if root.IsNull() {
 		return nil
