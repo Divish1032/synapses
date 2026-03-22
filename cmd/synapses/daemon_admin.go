@@ -363,6 +363,44 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 			}
 		}()
 	})
+
+	// ── GET/POST /api/admin/update-check — update status ────────────────────
+	mux.HandleFunc("/api/admin/update-check", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			// Return cached update state.
+			state := getUpdateState()
+			if state == nil {
+				state = &UpdateState{
+					CurrentVersion:  version,
+					UpdateAvailable: false,
+					CheckedAt:       "",
+				}
+			}
+			// Override with live pending version (may be fresher than file).
+			if v := getPendingUpdateVersion(); v != "" {
+				state.UpdateAvailable = true
+				state.LatestVersion = v
+			}
+			json.NewEncoder(w).Encode(state) //nolint:errcheck
+
+		case http.MethodPost:
+			// Force a fresh check.
+			state := checkForUpdate()
+			if state == nil {
+				state = &UpdateState{
+					CurrentVersion:  version,
+					UpdateAvailable: false,
+					Error:           "check skipped (dev build)",
+				}
+			}
+			json.NewEncoder(w).Encode(state) //nolint:errcheck
+
+		default:
+			http.Error(w, "use GET or POST", http.StatusMethodNotAllowed)
+		}
+	})
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

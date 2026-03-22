@@ -65,6 +65,10 @@ export function Dashboard({ onNav }: { onNav: (r: string) => void }) {
   const [agents, setAgents] = useState<AgentStat[]>([]);
   const [offline, setOffline] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [updateInfo, setUpdateInfo] = useState<{ latest_version: string; changelog_url: string } | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(() => {
+    try { return localStorage.getItem("synapses_update_dismissed") ?? ""; } catch { return ""; }
+  });
 
   const healthy = services.filter((s) => s.status === "healthy").length;
   const total = services.length;
@@ -74,9 +78,10 @@ export function Dashboard({ onNav }: { onNav: (r: string) => void }) {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [projRes, pulseRes] = await Promise.allSettled([
+      const [projRes, pulseRes, updateRes] = await Promise.allSettled([
         get<Project[]>("/api/admin/projects"),
         get<any>("/api/admin/pulse/summary?days=7"),
+        get<{ update_available: boolean; latest_version: string; changelog_url: string }>("/api/admin/update-check"),
       ]);
       if (projRes.status === "fulfilled") setProjects(projRes.value);
       if (pulseRes.status === "fulfilled") {
@@ -85,6 +90,9 @@ export function Dashboard({ onNav }: { onNav: (r: string) => void }) {
         setOffline(false);
       } else {
         setOffline(true);
+      }
+      if (updateRes.status === "fulfilled" && updateRes.value.update_available) {
+        setUpdateInfo({ latest_version: updateRes.value.latest_version, changelog_url: updateRes.value.changelog_url });
       }
     } finally {
       setLoading(false);
@@ -136,6 +144,33 @@ export function Dashboard({ onNav }: { onNav: (r: string) => void }) {
       {startupError && (
         <div className="offline-banner">
           <span>{startupError}</span>
+        </div>
+      )}
+
+      {updateInfo && updateDismissed !== updateInfo.latest_version && (
+        <div className="update-banner" style={{
+          background: "var(--warning-bg, #3d3000)", border: "1px solid var(--warning, #f0a030)",
+          borderRadius: 8, padding: "10px 16px", marginBottom: 16, display: "flex",
+          alignItems: "center", justifyContent: "space-between", gap: 12
+        }}>
+          <span style={{ color: "var(--warning, #f0a030)" }}>
+            Update available: <strong>{updateInfo.latest_version}</strong>
+            {" \u2014 "}
+            <code style={{ fontSize: 12 }}>synapses update</code>
+            {updateInfo.changelog_url && (
+              <>{" \u2014 "}<a href={updateInfo.changelog_url} target="_blank" rel="noopener"
+                style={{ color: "var(--warning, #f0a030)", textDecoration: "underline" }}>changelog</a></>
+            )}
+          </span>
+          <button
+            className="btn-ghost"
+            style={{ padding: "2px 8px", fontSize: 12 }}
+            onClick={() => {
+              setUpdateDismissed(updateInfo.latest_version);
+              try { localStorage.setItem("synapses_update_dismissed", updateInfo.latest_version); } catch {}
+            }}
+            title="Dismiss"
+          >{"\u2715"}</button>
         </div>
       )}
 
