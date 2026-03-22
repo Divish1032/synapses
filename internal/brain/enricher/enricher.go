@@ -445,6 +445,9 @@ func languageFromFile(filePath string) string {
 
 // stripToRelative strips absolute paths to relative project paths to prevent
 // leaking filesystem paths to the LLM.
+// Handles Go-conventional paths (/internal/, /cmd/, /pkg/, /src/).
+// For non-Go projects, falls back to filepath.Base which is safe (filename only).
+// This means the LLM sees less context for non-Go files, but no path leakage occurs.
 func stripToRelative(filePath string) string {
 	for _, marker := range []string{"/internal/", "/cmd/", "/pkg/", "/src/"} {
 		if idx := strings.Index(filePath, marker); idx >= 0 {
