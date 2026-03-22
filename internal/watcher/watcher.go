@@ -1059,15 +1059,9 @@ func (w *Watcher) checkViolations(path string) {
 }
 
 // countNodesForFile counts nodes in the graph whose File matches path.
-// TODO: O(N) over all nodes — add a file→nodes index to Graph for O(1) lookup.
+// Uses the indexed NodesForFile lookup instead of scanning all nodes.
 func (w *Watcher) countNodesForFile(path string) int {
-	count := 0
-	for _, n := range w.graph.AllNodes() {
-		if n.File == path {
-			count++
-		}
-	}
-	return count
+	return len(w.graph.NodesForFile(path))
 }
 
 // recordChange appends a ChangeEvent to the circular log, evicting the oldest

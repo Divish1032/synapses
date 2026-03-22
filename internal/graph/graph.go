@@ -844,8 +844,15 @@ func (g *Graph) RemoveFile(file string) {
 		delete(g.inEdges, id)
 		delete(g.nodes, id)
 	}
+	// Clean up per-file variable type annotations so the resolver doesn't
+	// create incorrect CALLS edges for variable names that no longer exist.
+	delete(g.varTypes, file)
+
 	if len(toRemove) > 0 {
 		g.piCache = nil // invalidate ProjectIdentity cache
+
+		// Invalidate subgraph cache entries that may reference removed nodes.
+		g.cache.invalidateForFile(file)
 
 		// Tombstone removed nodes in the columnar index so BFS skips them
 		// immediately without waiting for the next full rebuild.
