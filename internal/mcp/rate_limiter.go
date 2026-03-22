@@ -143,6 +143,12 @@ type rateLimiter struct {
 	mu       sync.Mutex
 	sessions map[string]*sessionBuckets
 
+	// restBuckets is a per-instance shared bucket for all REST "rest-N" sessions,
+	// initialized lazily via restOnce. This avoids the cross-project singleton bug
+	// where the first project's rate limits were used for all projects.
+	restBuckets *sessionBuckets
+	restOnce    sync.Once
+
 	writeLimitPerMin         int
 	expensiveReadLimitPerMin int
 	crossProjectLimitPerMin  int
@@ -185,23 +191,18 @@ func newRateLimiter(cfg config.RateLimitConfig) *rateLimiter {
 	return rl
 }
 
-// sharedRESTBuckets is a shared static bucket for all REST "rest-N" sessions,
-// preventing unbounded memory growth from unique REST session IDs.
-var sharedRESTBuckets *sessionBuckets
-var sharedRESTOnce sync.Once
-
 // getOrCreate returns the bucket set for sessionKey, creating it if absent.
-// REST sessions ("rest-N") share a single static bucket to avoid memory leaks.
+// REST sessions ("rest-N") share a per-instance bucket to avoid memory leaks.
 func (rl *rateLimiter) getOrCreate(sessionKey string) *sessionBuckets {
 	if strings.HasPrefix(sessionKey, "rest-") {
-		sharedRESTOnce.Do(func() {
-			sharedRESTBuckets = &sessionBuckets{
+		rl.restOnce.Do(func() {
+			rl.restBuckets = &sessionBuckets{
 				write:         newTokenBucket(rl.writeLimitPerMin),
 				expensiveRead: newTokenBucket(rl.expensiveReadLimitPerMin),
 				crossProject:  newTokenBucket(rl.crossProjectLimitPerMin),
 			}
 		})
-		return sharedRESTBuckets
+		return rl.restBuckets
 	}
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
