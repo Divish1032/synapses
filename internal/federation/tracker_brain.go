@@ -218,7 +218,20 @@ func (a *BrainTrackerAdapter) DetectAndStoreBrain(ctx context.Context, filePath 
 func filterSecretLines(content string) string {
 	lines := strings.Split(content, "\n")
 	filtered := make([]string, 0, len(lines))
+	inPEMBlock := false
 	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Track PEM blocks: skip everything between BEGIN and END markers.
+		if strings.HasPrefix(trimmed, "-----BEGIN ") {
+			inPEMBlock = true
+			continue
+		}
+		if inPEMBlock {
+			if strings.HasPrefix(trimmed, "-----END ") {
+				inPEMBlock = false
+			}
+			continue
+		}
 		if looksLikeSecret(line) {
 			continue
 		}
