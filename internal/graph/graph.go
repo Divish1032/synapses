@@ -532,6 +532,16 @@ func (g *Graph) NodesForFile(file string) []*Node {
 // while the MCP server is live: git I/O should happen before calling this
 // method; the write lock is held only for the in-memory metadata writes
 // (typically microseconds).
+// UpdateNodeMetadata applies update to the node with the given ID under
+// the graph write lock. Safe for concurrent use.
+func (g *Graph) UpdateNodeMetadata(id NodeID, update func(n *Node)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if n, ok := g.nodes[id]; ok {
+		update(n)
+	}
+}
+
 func (g *Graph) UpdateFileNodeMetadata(absFile string, update func(n *Node)) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
