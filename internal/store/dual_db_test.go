@@ -1049,3 +1049,92 @@ func TestDualDBMigration_IdempotentGuardPreventsDoubleRun(t *testing.T) {
 		t.Errorf("session_tasks: expected 2 (single migration), got %d (migration ran multiple times?)", count)
 	}
 }
+
+// TEST-003: migrateSingleTable partial failure — if one table fails
+// mid-migration, the others should still succeed (graceful degradation).
+func TestMigrateSingleTable_PartialFailure(t *testing.T) {
+	// Create a source DB with a valid table and a corrupt table.
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "src.db")
+	srcDB, err := sql.Open("sqlite", srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srcDB.Close()
+	srcDB.SetMaxOpenConns(1)
+
+	// Create a valid memories table with data.
+	_, err = srcDB.Exec(`CREATE TABLE memories (id TEXT PRIMARY KEY, content TEXT)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = srcDB.Exec(`INSERT INTO memories (id, content) VALUES ('m1', 'test memory')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create the destination DB with the memories table.
+	dstPath := filepath.Join(dir, "dst.db")
+	dstDB, err := sql.Open("sqlite", dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dstDB.Close()
+	dstDB.SetMaxOpenConns(1)
+
+	_, err = dstDB.Exec(`CREATE TABLE memories (id TEXT PRIMARY KEY, content TEXT)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Migrate the valid table — should succeed.
+	n, err := migrateSingleTable(srcDB, dstDB, "memories")
+	if err != nil {
+		t.Fatalf("migrateSingleTable(memories) unexpected error: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 row migrated, got %d", n)
+	}
+
+	// Migrate a non-existent table — should return 0, no error.
+	n2, err2 := migrateSingleTable(srcDB, dstDB, "nonexistent_table")
+	if err2 != nil {
+		t.Fatalf("migrateSingleTable(nonexistent) unexpected error: %v", err2)
+	}
+	if n2 != 0 {
+		t.Errorf("expected 0 rows for nonexistent table, got %d", n2)
+	}
+}
+
+// TEST-003b: quoteIdentifier and isValidIdentifier helpers.
+func TestQuoteIdentifier(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"memories", `"memories"`},
+		{`bad"name`, `"bad""name"`},
+		{"", `""`},
+	}
+	for _, tc := range tests {
+		got := quoteIdentifier(tc.input)
+		if got != tc.want {
+			t.Errorf("quoteIdentifier(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestIsValidIdentifier(t *testing.T) {
+	valid := []string{"memories", "node_embeddings", "col1", "A"}
+	for _, s := range valid {
+		if !isValidIdentifier(s) {
+			t.Errorf("isValidIdentifier(%q) = false, want true", s)
+		}
+	}
+	invalid := []string{"", "bad;name", "col name", "drop--table", "x)", "1;DROP TABLE"}
+	for _, s := range invalid {
+		if isValidIdentifier(s) {
+			t.Errorf("isValidIdentifier(%q) = true, want false", s)
+		}
+	}
+}

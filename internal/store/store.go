@@ -798,6 +798,11 @@ func Open(path string) (*Store, error) {
 		_, _ = knowledgeDB.Exec(`INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')`)
 	}
 
+	// BUG-026: startup reconciliation — remove orphaned hard-reference records
+	// in knowledgeDB that point to node IDs absent from graphDB. This covers the
+	// window between a crash mid-reindex and the next daily PruneStaleData.
+	st.reconcileOrphanedReferences()
+
 	// One-time migration: normalize stored embeddings to unit length so cosine
 	// similarity reduces to a single dot product (Sprint 11.3). Idempotent —
 	// normalizing an already-normalized vector is a no-op within float32 precision.
@@ -1464,14 +1469,36 @@ func (s *Store) PruneStaleData(retentionDays int) {
 		}
 	}
 
+	// BUG-036: chunkedPrune deletes in batches of 1000 rows using a rowid
+	// subquery to avoid holding the SQLite writer lock for unbounded durations.
+	// SQLite doesn't support DELETE ... LIMIT without SQLITE_ENABLE_UPDATE_DELETE_LIMIT.
+	chunkedPrune := func(table, whereClause string, args ...interface{}) {
+		subq := fmt.Sprintf(
+			"DELETE FROM %s WHERE rowid IN (SELECT rowid FROM %s WHERE %s LIMIT 1000)",
+			table, table, whereClause,
+		)
+		for {
+			res, err := s.knowledgeDB.Exec(subq, args...)
+			if err != nil {
+				logutil.Debug("synapses: store: chunked prune %s failed: %v\n", table, err)
+				return
+			}
+			n, _ := res.RowsAffected()
+			if n < 1000 {
+				return // done
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
 	// tool_calls: one row per MCP tool invocation — can reach millions.
-	pruneExec(`DELETE FROM tool_calls WHERE created_at < ?`, cutoff)
+	chunkedPrune("tool_calls", "created_at < ?", cutoff)
 
 	// agent_messages: created_at is stored as Unix INTEGER (see SendMessage).
-	pruneExec(`DELETE FROM agent_messages WHERE created_at < ?`, cutoffUnix)
+	chunkedPrune("agent_messages", "created_at < ?", cutoffUnix)
 
 	// events: coordination/observability stream — pruned to retention window.
-	pruneExec(`DELETE FROM events WHERE created_at < ?`, cutoff)
+	chunkedPrune("events", "created_at < ?", cutoff)
 
 	// episodes: stored as Unix seconds (INTEGER).
 	pruneExec(`DELETE FROM episodes WHERE created_at < ?`, cutoffUnix)
@@ -1564,6 +1591,87 @@ func (s *Store) PruneStaleData(retentionDays int) {
 		if _, err := s.graphDB.Exec(`PRAGMA optimize`); err != nil {
 			logutil.Debug("synapses: store: prune graphDB PRAGMA optimize: %v\n", err)
 		}
+	}
+}
+
+// reconcileOrphanedReferences runs a fast startup pass that removes
+// knowledgeDB records whose node_id references no longer exist in graphDB.
+// This covers the window between a crash mid-reindex and the next daily
+// PruneStaleData (BUG-026).
+func (s *Store) reconcileOrphanedReferences() {
+	if s.graphDB == nil {
+		return // knowledge-mode: no graph → nothing to reconcile
+	}
+
+	nodeIDs := make(map[string]struct{})
+	rows, err := s.graphDB.Query(`SELECT id FROM nodes`)
+	if err != nil {
+		logutil.Debug("synapses: store: startup reconcile: read nodes: %v\n", err)
+		return
+	}
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			nodeIDs[id] = struct{}{}
+		}
+	}
+	rows.Close()
+
+	if len(nodeIDs) == 0 {
+		return // empty graph — skip to avoid deleting everything
+	}
+
+	// cleanupByNodeID removes rows from a knowledgeDB table where the node_id
+	// column references a node absent from the current graphDB.
+	cleanupByNodeID := func(table, deleteSQL string) int {
+		r, err := s.knowledgeDB.Query(fmt.Sprintf("SELECT node_id FROM %s", table))
+		if err != nil {
+			return 0
+		}
+		var staleNodeIDs []string
+		seen := make(map[string]bool)
+		for r.Next() {
+			var nodeID string
+			if r.Scan(&nodeID) == nil {
+				if _, exists := nodeIDs[nodeID]; !exists && !seen[nodeID] {
+					staleNodeIDs = append(staleNodeIDs, nodeID)
+					seen[nodeID] = true
+				}
+			}
+		}
+		r.Close()
+		for _, nid := range staleNodeIDs {
+			s.knowledgeDB.Exec(deleteSQL, nid)
+		}
+		return len(staleNodeIDs)
+	}
+
+	removed := 0
+	removed += cleanupByNodeID("annotations", "DELETE FROM annotations WHERE node_id = ?")
+	// memory_anchors has composite PK (memory_id, node_id). Delete only the
+	// specific anchor row, not all anchors for the memory.
+	removed += cleanupByNodeID("memory_anchors", "DELETE FROM memory_anchors WHERE node_id = ?")
+
+	// quality_gaps: only clean up open gaps referencing absent nodes.
+	if qr, err := s.knowledgeDB.Query(`SELECT id, node_id FROM quality_gaps WHERE status = 'open'`); err == nil {
+		var toDelete []string
+		for qr.Next() {
+			var id, nodeID string
+			if qr.Scan(&id, &nodeID) == nil {
+				if _, exists := nodeIDs[nodeID]; !exists {
+					toDelete = append(toDelete, id)
+				}
+			}
+		}
+		qr.Close()
+		for _, id := range toDelete {
+			s.knowledgeDB.Exec(`DELETE FROM quality_gaps WHERE id = ?`, id)
+		}
+		removed += len(toDelete)
+	}
+
+	if removed > 0 {
+		logutil.Info("synapses: store: startup reconcile: removed %d orphaned knowledge references\n", removed)
 	}
 }
 

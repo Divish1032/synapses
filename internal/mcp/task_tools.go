@@ -183,7 +183,7 @@ func (s *Server) handleCreatePlan(
 
 	planID, taskIDs, err := s.store.CreatePlan(title, description, agentID, taskInputs)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("create plan: %v", err)), nil
+		return toolError("create plan", err)
 	}
 
 	// Session Intelligence: link each created task to the current session.

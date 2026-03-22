@@ -218,3 +218,29 @@ func jsonResult(v interface{}) (*mcp.CallToolResult, error) {
 	}
 	return mcp.NewToolResultText(string(b)), nil
 }
+
+// toolError wraps a raw Go error with a user-facing message and recovery hint.
+// Common SQLite and store errors are detected and annotated so agents get
+// actionable guidance instead of raw constraint violation strings (BUG-022).
+func toolError(operation string, err error) (*mcp.CallToolResult, error) {
+	msg := err.Error()
+	hint := ""
+
+	switch {
+	case strings.Contains(msg, "UNIQUE constraint failed"):
+		hint = "A record with this ID already exists. Use a different ID or update the existing record."
+	case strings.Contains(msg, "database is locked"):
+		hint = "The database is temporarily busy. Retry after a brief pause."
+	case strings.Contains(msg, "no such table"):
+		hint = "The store schema may be outdated. Try re-running 'synapses index' to rebuild."
+	case strings.Contains(msg, "disk I/O error") || strings.Contains(msg, "readonly database"):
+		hint = "Database write failed — check disk space and file permissions."
+	case strings.Contains(msg, "FOREIGN KEY constraint failed"):
+		hint = "A referenced record does not exist. Verify parent record IDs before creating child records."
+	}
+
+	if hint != "" {
+		return mcp.NewToolResultError(fmt.Sprintf("%s failed: %s\n\nHint: %s", operation, msg, hint)), nil
+	}
+	return mcp.NewToolResultError(fmt.Sprintf("%s: %v", operation, err)), nil
+}

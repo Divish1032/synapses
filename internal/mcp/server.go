@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -209,6 +210,7 @@ type Server struct {
 	// Close() rejects new work, closes the queue, and waits for workers to
 	// drain remaining items — preventing goroutines from racing with Store.Close().
 	bgQueue    chan func()   // buffered work queue (cap bgQueueCap)
+	bgDrops    atomic.Int64 // BUG-020: total work items dropped due to full queue
 	shutdownMu sync.RWMutex // guards bgClosed + bgQueue sends
 	bgClosed   bool         // true after Close() — rejects new work
 
@@ -294,12 +296,28 @@ func (s *Server) goBackground(fn func()) {
 			pc.RecordBackgroundQueueDepth(len(s.bgQueue)) // P9-4
 		}
 	default:
+		s.bgDrops.Add(1) // BUG-020: track drops for health endpoint
 		logutil.Warn("synapses: background queue full (%d), dropping work\n", bgQueueCap)
 		if pc := s.getPulseClient(); pc != nil {
 			pc.RecordBackgroundWorkerDrop() // P2-5
 		}
 	}
 	s.shutdownMu.RUnlock()
+}
+
+// getConfig returns a snapshot of the server config, safe for concurrent use.
+// BUG-037: rulesMu protects config pointer from concurrent hot-reload replacement.
+func (s *Server) getConfig() *config.Config {
+	s.rulesMu.RLock()
+	cfg := s.config
+	s.rulesMu.RUnlock()
+	return cfg
+}
+
+// BackgroundQueueStats returns the current queue depth and total drop count
+// for health endpoint reporting (BUG-020).
+func (s *Server) BackgroundQueueStats() (depth int, drops int64) {
+	return len(s.bgQueue), s.bgDrops.Load()
 }
 
 // getSessionHash returns the last stored entity_hash for this session+entityKey, or "".
@@ -1507,9 +1525,10 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"get_context",
 			mcp.WithDescription(
-				"Direct graph traversal with full parameter control (depth, format, known_hash, detail_level). "+
-					"Use prepare_context for intent-based context assembly; use get_context when you need "+
-					"specific BFS parameters, conditional fetching via known_hash, or fine-grained output control. "+
+				"Advanced/low-level graph traversal with full parameter control (depth, format, known_hash, detail_level). "+
+					"Most agents should START with prepare_context (intent-based, one round-trip). "+
+					"Use get_context only when you need specific BFS parameters, conditional fetching via known_hash, "+
+					"or fine-grained output control that prepare_context doesn't expose. "+
 					"Returns a relevance-ranked subgraph centred on the named entity. "+
 					"Uses BFS with edge-type-weighted decay so the closest, most semantically "+
 					"significant relationships appear first.",
@@ -1760,7 +1779,7 @@ func (s *Server) registerTools() {
 				"Keyword search across entity names and doc comments. "+
 					"Results are ranked: exact name match > name prefix > name substring > doc comment match. "+
 					"Returns up to 25 results. Use this to find auth-related code, error handlers, etc. "+
-					"Set mode='fulltext' for FTS5 BM25 search by concept ('rate limiting', 'JWT validation'). 'semantic' is accepted as alias. "+
+					"Set mode='fulltext' for FTS5 BM25 full-text search by concept ('rate limiting', 'JWT validation'). "+
 					"CamelCase names are auto-split: searching 'carve' finds 'CarveEgoGraph'.",
 			),
 			mcp.WithString("query",
@@ -1768,7 +1787,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Search term (case-insensitive)."),
 			),
 			mcp.WithString("mode",
-				mcp.Description("Search mode: 'keyword' (default, exact/prefix/substring) or 'fulltext' (FTS5 BM25 full-text search). 'semantic' accepted as legacy alias for 'fulltext'."),
+				mcp.Description("Search mode: 'keyword' (default, exact/prefix/substring) or 'fulltext' (FTS5 BM25 ranked full-text search — NOT vector/embedding search). 'semantic' is a deprecated alias for 'fulltext' (will be removed in a future version)."),
 			),
 			mcp.WithNumber("limit",
 				mcp.Description("Maximum results to return (default 20, max 50). Only used for mode=semantic."),
@@ -2620,14 +2639,12 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"plan_context",
 			mcp.WithDescription(
-				"Power-user compound tool — for most agents, use validate_plan(check_safety=true) + "+
-					"prepare_context(intent='plan') individually instead. "+
-					"Single-call pre-implementation gate. Runs three checks in one round-trip: "+
+				"Advanced compound tool — single-call pre-implementation gate. Runs three checks in one round-trip: "+
 					"(1) safety check — searches failure episodes for past matches (500ms cap); "+
 					"(2) validate_plan — checks proposed changes against architectural rules; "+
 					"(3) prepare_context(intent=plan) — scope assessment: files, interfaces, risk level. "+
 					"Returns a verdict: 'clear' | 'warnings' | 'violations' | 'blocked'. "+
-					"Find this tool via discover_tools(query='plan implementation gate').",
+					"Most agents should use validate_plan(check_safety=true) + prepare_context(intent='plan') individually instead.",
 			),
 			mcp.WithString("target",
 				mcp.Required(),

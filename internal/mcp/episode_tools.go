@@ -55,10 +55,11 @@ func (s *Server) handleRemember(
 		return mcp.NewToolResultError("outcome must be one of: success, failure, partial, unknown"), nil
 	}
 
+	// Episode importance defaults to 0.5 (normal). The registered parameter
+	// is memory_importance (string), used for the companion memory — not this
+	// episode-level field. Previously an unregistered "importance" float was
+	// read here but agents never sent it (BUG-018).
 	importance := 0.5
-	if v, ok := req.GetArguments()["importance"].(float64); ok && v >= 0 && v <= 1 {
-		importance = v
-	}
 
 	// AM-1: Parse optional anchor_nodes for binding memories to graph nodes.
 	var anchorNodes []string
@@ -174,7 +175,7 @@ func (s *Server) handleRemember(
 
 	id, err := s.store.RememberEpisode(e)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("remember episode: %v", err)), nil
+		return toolError("remember episode", err)
 	}
 
 	// P3B-3: emit memory write operation event for pulse analytics.

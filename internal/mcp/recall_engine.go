@@ -108,7 +108,8 @@ func (s *Server) quadRecallSearch(
 
 	// Snapshot config once to prevent nil-pointer races if config is
 	// hot-reloaded between the check and the merge branch below.
-	cfg := s.config
+	// BUG-037: use getConfig() which provides thread-safe access.
+	cfg := s.getConfig()
 	useConvex := cfg != nil && cfg.Recall.FusionMode == "convex"
 
 	var (

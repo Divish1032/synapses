@@ -130,35 +130,96 @@ func (s *Store) InvalidateEmbeddingsByModel(currentModel string) (int, error) {
 func (s *Store) GetMemoriesWithoutEmbeddings(limit int) ([]string, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	rows, err := s.knowledgeDB.Query(`
-		SELECT m.id, m.content, COALESCE(e.content_hash, '') AS stored_hash,
-		       COALESCE(e.stale, 0) AS emb_stale
+	// BUG-024: Split into two queries to avoid loading all content into Go.
+	// Phase 1: find memories with NO embedding at all (pure SQL, no content scan).
+	var ids []string
+	missingRows, err := s.knowledgeDB.Query(`
+		SELECT m.id
 		FROM memories m
 		LEFT JOIN memory_embeddings e ON m.id = e.memory_id
 		WHERE m.expires_at > ?
-		  AND m.stale = 0`, now)
+		  AND m.stale = 0
+		  AND e.memory_id IS NULL`, now)
 	if err != nil {
 		return nil, fmt.Errorf("get memories without embeddings: %w", err)
 	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id, content, storedHash string
-		var embStale int
-		if err := rows.Scan(&id, &content, &storedHash, &embStale); err != nil {
+	for missingRows.Next() {
+		var id string
+		if err := missingRows.Scan(&id); err != nil {
+			missingRows.Close()
 			return nil, err
 		}
-		// Include memories that need embedding: no embedding, content changed,
-		// or embedding stale (model upgrade / anchor invalidation).
-		if memoryContentHash(content) != storedHash || embStale == 1 {
+		ids = append(ids, id)
+		if limit > 0 && len(ids) >= limit {
+			break
+		}
+	}
+	missingRows.Close()
+	if err := missingRows.Err(); err != nil {
+		return nil, err
+	}
+
+	if limit > 0 && len(ids) >= limit {
+		return ids, nil
+	}
+
+	// Phase 2a: find memories with explicitly stale embeddings (pure SQL, no content load).
+	remaining := limit - len(ids)
+	if limit == 0 {
+		remaining = 0 // 0 means no cap
+	}
+	staleRows, err := s.knowledgeDB.Query(`
+		SELECT e.memory_id
+		FROM memory_embeddings e
+		JOIN memories m ON m.id = e.memory_id
+		WHERE m.expires_at > ?
+		  AND m.stale = 0
+		  AND e.stale = 1`, now)
+	if err == nil {
+		for staleRows.Next() {
+			var id string
+			if staleRows.Scan(&id) == nil {
+				ids = append(ids, id)
+				if remaining > 0 && len(ids) >= limit {
+					break
+				}
+			}
+		}
+		staleRows.Close()
+	}
+
+	if limit > 0 && len(ids) >= limit {
+		return ids, nil
+	}
+
+	// Phase 2b: find memories with changed content (requires Go-side hash comparison).
+	// Only loads content for memories that HAVE an embedding and are NOT already stale.
+	// This is the expensive path but only runs for the content-changed subset.
+	changedRows, err := s.knowledgeDB.Query(`
+		SELECT m.id, m.content, e.content_hash
+		FROM memories m
+		JOIN memory_embeddings e ON m.id = e.memory_id
+		WHERE m.expires_at > ?
+		  AND m.stale = 0
+		  AND e.stale = 0`, now)
+	if err != nil {
+		return ids, nil // fail-open: return what we have
+	}
+	defer changedRows.Close()
+
+	for changedRows.Next() {
+		var id, content, storedHash string
+		if err := changedRows.Scan(&id, &content, &storedHash); err != nil {
+			continue
+		}
+		if memoryContentHash(content) != storedHash {
 			ids = append(ids, id)
 			if limit > 0 && len(ids) >= limit {
 				break
 			}
 		}
 	}
-	return ids, rows.Err()
+	return ids, changedRows.Err()
 }
 
 // GetMemoryTextForEmbedding returns the text content that should be embedded

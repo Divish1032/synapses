@@ -3,6 +3,9 @@ package federation
 import (
 	"context"
 	"log"
+	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -42,6 +45,7 @@ func (s *CrossProjectSearch) EntityExists(ctx context.Context, alias string, ent
 // FindEntities searches sibling stores for entities matching query.
 // If aliases is nil or empty, all siblings are searched.
 // Errors on individual siblings are silently skipped.
+// BUG-023: queries run in parallel via errgroup for O(1) latency.
 func (s *CrossProjectSearch) FindEntities(ctx context.Context, query string, aliases []string, limit int) []FederatedSearchResult {
 	if limit <= 0 {
 		limit = 20
@@ -49,30 +53,37 @@ func (s *CrossProjectSearch) FindEntities(ctx context.Context, query string, ali
 
 	targets := s.resolver.filterEntries(aliases)
 
+	var mu sync.Mutex
 	var results []FederatedSearchResult
+
+	g, gctx := errgroup.WithContext(ctx)
 	for _, e := range targets {
-		if ctx.Err() != nil {
-			break
-		}
-		st := s.resolver.getStore(e.Alias)
-		if st == nil {
-			continue
-		}
+		e := e // capture loop variable
+		g.Go(func() error {
+			st := s.resolver.getStore(e.Alias)
+			if st == nil {
+				return nil
+			}
 
-		nodes, err := st.FindNodesByNameCtx(ctx, query, limit)
-		if err != nil {
-			log.Printf("federation: find_entity in %q: %v", e.Alias, err)
-			continue
-		}
-		if len(nodes) == 0 {
-			continue
-		}
+			nodes, err := st.FindNodesByNameCtx(gctx, query, limit)
+			if err != nil {
+				log.Printf("federation: find_entity in %q: %v", e.Alias, err)
+				return nil // fail-open
+			}
+			if len(nodes) == 0 {
+				return nil
+			}
 
-		results = append(results, FederatedSearchResult{
-			Alias:   e.Alias,
-			Results: nodes,
+			mu.Lock()
+			results = append(results, FederatedSearchResult{
+				Alias:   e.Alias,
+				Results: nodes,
+			})
+			mu.Unlock()
+			return nil
 		})
 	}
+	_ = g.Wait() // errors are nil (fail-open)
 	return results
 }
 
@@ -182,42 +193,51 @@ func (s *CrossProjectSearch) GetEntityContext(ctx context.Context, entity string
 // SearchEpisodes queries sibling stores' episodes tables using FTS5 search.
 // Results are labeled with their source alias. If aliases is nil or empty,
 // all siblings are searched. Errors on individual siblings are silently skipped.
+// BUG-023: queries run in parallel via errgroup for O(1) latency.
 func (s *CrossProjectSearch) SearchEpisodes(ctx context.Context, query string, aliases []string, limit int) []FederatedEpisode {
 	if limit <= 0 {
 		limit = 5
 	}
 
 	targets := s.resolver.filterEntries(aliases)
+
+	var mu sync.Mutex
 	var results []FederatedEpisode
 
+	eg, egctx := errgroup.WithContext(ctx)
 	for _, e := range targets {
-		if ctx.Err() != nil {
-			break
-		}
-		st := s.resolver.getStore(e.Alias)
-		if st == nil {
-			continue
-		}
+		e := e
+		eg.Go(func() error {
+			st := s.resolver.getStore(e.Alias)
+			if st == nil {
+				return nil
+			}
 
-		// Check if the sibling store has the episodes_fts table.
-		// Older stores might not have episodic memory tables.
-		if !s.hasEpisodesTable(st) {
-			continue
-		}
+			// Check if the sibling store has the episodes_fts table.
+			// Older stores might not have episodic memory tables.
+			if !s.hasEpisodesTable(st) {
+				return nil
+			}
 
-		episodes, err := st.RecallEpisodes(query, "", "", "", "", limit, 0)
-		if err != nil {
-			log.Printf("federation: search episodes in %q: %v", e.Alias, err)
-			continue
-		}
+			episodes, err := st.RecallEpisodes(query, "", "", "", "", limit, 0)
+			if err != nil {
+				log.Printf("federation: search episodes in %q: %v", e.Alias, err)
+				return nil
+			}
 
-		for _, ep := range episodes {
-			results = append(results, FederatedEpisode{
-				Alias:   e.Alias,
-				Episode: ep,
-			})
-		}
+			mu.Lock()
+			for _, ep := range episodes {
+				results = append(results, FederatedEpisode{
+					Alias:   e.Alias,
+					Episode: ep,
+				})
+			}
+			mu.Unlock()
+			_ = egctx // use the group context for cancellation
+			return nil
+		})
 	}
+	_ = eg.Wait()
 	return results
 }
 
@@ -226,50 +246,58 @@ func (s *CrossProjectSearch) SearchEpisodes(ctx context.Context, query string, a
 // affected_nodes) as the primary path — more precise than text matching.
 // Falls back to FTS text search if no node ID is found.
 // Returns 1-line hints for prepare_context. At most 3 hints per sibling.
+// BUG-023: queries run in parallel via errgroup for O(1) latency.
 func (s *CrossProjectSearch) SearchMemoriesForEntity(ctx context.Context, entityName string, aliases []string) []FederatedMemoryHint {
 	targets := s.resolver.filterEntries(aliases)
+
+	var mu sync.Mutex
 	var hints []FederatedMemoryHint
 
+	eg, egctx := errgroup.WithContext(ctx)
 	for _, e := range targets {
-		if ctx.Err() != nil {
-			break
-		}
-		st := s.resolver.getStore(e.Alias)
-		if st == nil {
-			continue
-		}
-		if !s.hasEpisodesTable(st) {
-			continue
-		}
-
-		// Primary: graph-anchored search via node ID in affected_nodes.
-		// This is precise — finds only memories explicitly linked to the entity,
-		// not just any memory that mentions the name in text.
-		var episodes []store.Episode
-		nodes, err := st.FindNodesByNameCtx(ctx, entityName, 1)
-		if err == nil && len(nodes) > 0 {
-			episodes, _ = st.FindEpisodesByNodeID(nodes[0].ID, 3)
-		}
-
-		// Fallback: FTS text search on entity name.
-		// Used when the entity has no node in the sibling store (e.g., removed
-		// entity with memories still referencing it by name).
-		if len(episodes) == 0 {
-			episodes, _ = st.RecallEpisodes(entityName, "", "", "", "", 3, 0)
-		}
-
-		for _, ep := range episodes {
-			summary := ep.Decision
-			if len(summary) > 120 {
-				summary = summary[:117] + "..."
+		e := e
+		eg.Go(func() error {
+			st := s.resolver.getStore(e.Alias)
+			if st == nil {
+				return nil
 			}
-			hints = append(hints, FederatedMemoryHint{
-				Alias:   e.Alias,
-				Summary: summary,
-				Query:   entityName,
-			})
-		}
+			if !s.hasEpisodesTable(st) {
+				return nil
+			}
+
+			// Primary: graph-anchored search via node ID in affected_nodes.
+			// This is precise — finds only memories explicitly linked to the entity,
+			// not just any memory that mentions the name in text.
+			var episodes []store.Episode
+			nodes, err := st.FindNodesByNameCtx(egctx, entityName, 1)
+			if err == nil && len(nodes) > 0 {
+				episodes, _ = st.FindEpisodesByNodeID(nodes[0].ID, 3)
+			}
+
+			// Fallback: FTS text search on entity name.
+			// Used when the entity has no node in the sibling store (e.g., removed
+			// entity with memories still referencing it by name).
+			if len(episodes) == 0 {
+				episodes, _ = st.RecallEpisodes(entityName, "", "", "", "", 3, 0)
+			}
+
+			mu.Lock()
+			for _, ep := range episodes {
+				summary := ep.Decision
+				if len(summary) > 120 {
+					summary = summary[:117] + "..."
+				}
+				hints = append(hints, FederatedMemoryHint{
+					Alias:   e.Alias,
+					Summary: summary,
+					Query:   entityName,
+				})
+			}
+			mu.Unlock()
+			return nil
+		})
 	}
+	_ = eg.Wait()
 	return hints
 }
 

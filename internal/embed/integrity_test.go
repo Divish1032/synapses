@@ -59,6 +59,33 @@ func TestVerifyModelIntegrity_EmptyFile_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestSelectOnnxVariant_ReturnsTwoStrings(t *testing.T) {
+	// selectOnnxVariant should always return non-empty file and path.
+	modelFile, repoPath := selectOnnxVariant()
+	if modelFile == "" {
+		t.Error("selectOnnxVariant returned empty modelFile")
+	}
+	if repoPath == "" {
+		t.Error("selectOnnxVariant returned empty repoPath")
+	}
+	// One of the two known variants must be returned.
+	if modelFile != builtinModelFileQuantized && modelFile != builtinModelFileFP32 {
+		t.Errorf("unexpected modelFile %q", modelFile)
+	}
+}
+
+func TestSafeModelEvent_PanicRecovery(t *testing.T) {
+	e := &BuiltinEmbedder{
+		modelsDir: t.TempDir(),
+		done:      make(chan struct{}),
+	}
+	e.OnModelEvent = func(eventType string) {
+		panic("test panic in model event callback")
+	}
+	// Should not panic — safeModelEvent recovers.
+	e.safeModelEvent("test_event")
+}
+
 func TestVerifyModelIntegrity_FP32_FailsClosed(t *testing.T) {
 	// FP32 variant: hash not yet captured → fail-closed (refuse to use).
 	// This forces fallback to the verified quantized variant in ensureModel().

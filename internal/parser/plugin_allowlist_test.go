@@ -193,6 +193,7 @@ func TestPluginChecker_EnvOverrideBypassesAllowlist(t *testing.T) {
 	pc := NewPluginChecker(dir)
 
 	t.Setenv(allowlistEnvOverride, "1")
+	t.Setenv("SYNAPSES_TEST", "1") // BUG-032: env override now also requires SYNAPSES_TEST=1
 
 	// Even without approval, the env override should allow it.
 	if err := pc.IsAllowed("any-unapproved-command"); err != nil {
