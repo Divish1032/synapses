@@ -96,13 +96,15 @@ func (s *Server) handleGetWorkingState(
 		configNames := map[string]bool{"synapses.json": true, "Makefile": true, "Dockerfile": true}
 		configExts := map[string]bool{".json": true, ".yaml": true, ".yml": true, ".toml": true}
 		if entries, err := os.ReadDir(root); err == nil {
-			// Cap scan to prevent excessive work in huge monorepo roots.
+			// Cap iteration to prevent excessive work in huge monorepo roots.
+			// 200 entries covers all realistic root directories — monorepos with
+			// thousands of top-level entries won't stall this handler.
 			const maxEntries = 200
 			for i, de := range entries {
-				if i >= maxEntries || de.IsDir() {
-					if i >= maxEntries {
-						break
-					}
+				if i >= maxEntries {
+					break
+				}
+				if de.IsDir() {
 					continue
 				}
 				name := de.Name()

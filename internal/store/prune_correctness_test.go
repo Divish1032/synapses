@@ -578,3 +578,65 @@ func TestPruneStaleData_AllTables_IntegrationRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestPruneOldSessions_CleansOrphanedSessionTasks verifies that
+// PruneOldSessions removes session_tasks rows whose session_id no longer
+// exists in sessions. This is the regression test for B2 — the table has
+// no FOREIGN KEY CASCADE.
+func TestPruneOldSessions_CleansOrphanedSessionTasks(t *testing.T) {
+	t.Parallel()
+	st := openFromTemplate(t)
+
+	// Reset the session prune debounce so PruneOldSessions runs.
+	st.lastPruneMu.Lock()
+	st.lastSessionPruneAt = time.Time{}
+	st.lastPruneMu.Unlock()
+
+	old := time.Now().UTC().Add(-48 * time.Hour).Unix()
+	recent := time.Now().UTC().Unix()
+
+	// Insert a prunable (closed + old) session and a non-prunable (active) session.
+	mustExecKnowledge(t, st, `INSERT INTO sessions (id, agent_id, project_id, started_at, last_seen_at, state)
+		VALUES ('old-sess', 'a1', 'p1', ?, ?, 'closed')`, old, old)
+	mustExecKnowledge(t, st, `INSERT INTO sessions (id, agent_id, project_id, started_at, last_seen_at, state)
+		VALUES ('active-sess', 'a1', 'p1', ?, ?, 'active')`, recent, recent)
+
+	// Insert session_tasks referencing both sessions AND one orphaned row
+	// (referencing a session_id that never existed).
+	mustExecKnowledge(t, st, `INSERT INTO session_tasks (session_id, task_id, action, at) VALUES ('old-sess', 't1', 'started', ?)`, old)
+	mustExecKnowledge(t, st, `INSERT INTO session_tasks (session_id, task_id, action, at) VALUES ('active-sess', 't2', 'started', ?)`, recent)
+	mustExecKnowledge(t, st, `INSERT INTO session_tasks (session_id, task_id, action, at) VALUES ('ghost-sess', 't3', 'started', ?)`, old)
+
+	// Prune with a 24h window — old-sess qualifies.
+	n, err := st.PruneOldSessions(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("PruneOldSessions: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 session pruned, got %d", n)
+	}
+
+	// session_tasks for 'old-sess' and 'ghost-sess' should be gone.
+	// Only 'active-sess' task should survive.
+	got := pruneCountRows(t, st, "session_tasks")
+	if got != 1 {
+		t.Errorf("expected 1 surviving session_task, got %d", got)
+	}
+
+	// Verify the surviving row is the active session's task.
+	var survivingSession string
+	if err := st.knowledgeDB.QueryRow(`SELECT session_id FROM session_tasks`).Scan(&survivingSession); err != nil {
+		t.Fatalf("scan surviving session_task: %v", err)
+	}
+	if survivingSession != "active-sess" {
+		t.Errorf("surviving session_task belongs to %q, want 'active-sess'", survivingSession)
+	}
+}
+
+// mustExecKnowledge executes a SQL statement on the knowledge DB.
+func mustExecKnowledge(t *testing.T, s *Store, query string, args ...interface{}) {
+	t.Helper()
+	if _, err := s.knowledgeDB.Exec(query, args...); err != nil {
+		t.Fatalf("mustExecKnowledge: %v\nquery: %s", err, query)
+	}
+}
