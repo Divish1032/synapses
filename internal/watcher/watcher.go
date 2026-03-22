@@ -635,7 +635,15 @@ func fileContentHash(path string) (string, bool) {
 // race, the second DrainCallSites returns empty and those edges are lost.
 func (w *Watcher) reparseFile(path, _ string) {
 	w.reparseMu.Lock()
-	defer w.reparseMu.Unlock()
+	// reparseMu is explicitly unlocked before federation detection to avoid
+	// holding it across network timeouts. Early returns are covered by the
+	// deferred conditional unlock below.
+	reparseMuHeld := true
+	defer func() {
+		if reparseMuHeld {
+			w.reparseMu.Unlock()
+		}
+	}()
 
 	// BUG-009: Symlink traversal defense with TOCTOU protection.
 	//
@@ -902,11 +910,15 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// by polling get_events, without manually calling get_violations.
 	w.checkViolations(path)
 
+	// Release reparseMu before federation detection. DrainCallSites,
+	// graph mutations, and violation checks are done. Federation only
+	// queries sibling stores (network I/O) — no need to serialise it.
+	w.reparseMu.Unlock()
+	reparseMuHeld = false
+
 	// RX2 Phase 3: detect cross-project dependencies in the changed file.
 	// Runs after parsing so sibling entity resolution has fresh graph data.
 	// Fail-open: errors logged inside tracker, never blocks the watcher.
-	// 2-second timeout ensures federation work never blocks the watcher loop
-	// (sibling stores use SQLite with 5s busy_timeout; 2s caps our exposure).
 	if w.cpTracker != nil && w.store != nil {
 		fedStart := time.Now()
 		cpCtx, cpCancel := context.WithTimeout(context.Background(), 2*time.Second)

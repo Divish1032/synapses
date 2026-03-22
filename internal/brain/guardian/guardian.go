@@ -20,10 +20,10 @@ import (
 const promptTemplate = `Explain this architectural rule violation to a developer. Be direct and actionable.
 Output ONLY valid JSON with no other text: {"explanation": "...", "fix": "..."}
 
-Rule violated: %s
+Rule violated: <rule_description>%s</rule_description>
 Severity: %s
-File: %s
-This file is importing or calling: %s`
+File: <file_path>%s</file_path>
+This file is importing or calling: <target_name>%s</target_name>`
 
 // Request carries a single architectural rule violation.
 type Request struct {
@@ -104,7 +104,7 @@ func (g *Guardian) buildPrompt(req Request) string {
 	if targetName == "" {
 		targetName = "(unknown target)"
 	}
-	return fmt.Sprintf(promptTemplate, description, severity, stripToRelative(req.SourceFile), targetName)
+	return fmt.Sprintf(promptTemplate, sanitizePromptInput(description), severity, stripToRelative(req.SourceFile), sanitizePromptInput(targetName))
 }
 
 func stripToRelative(filePath string) string {
@@ -118,6 +118,12 @@ func stripToRelative(filePath string) string {
 		return parts[len(parts)-1]
 	}
 	return filePath
+}
+
+// sanitizePromptInput escapes XML-like delimiters to prevent prompt injection.
+func sanitizePromptInput(s string) string {
+	r := strings.NewReplacer("<", "&lt;", ">", "&gt;")
+	return r.Replace(s)
 }
 
 func parseViolation(raw string) (Response, error) {

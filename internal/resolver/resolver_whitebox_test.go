@@ -32,15 +32,16 @@ func TestFindByTypedMethod_Found(t *testing.T) {
 
 	idx["pkg"] = []*graph.Node{node1, node2}
 	idx["other"] = []*graph.Node{node3}
+	methodIdx := buildMethodIndex(idx)
 
 	// Should find Service.Handle
-	id := findByTypedMethod(idx, "Service", "Handle")
+	id := findByTypedMethod(methodIdx, "Service", "Handle")
 	if id != "id1" {
 		t.Errorf("expected to find 'Service.Handle', got %q", id)
 	}
 
 	// Should find OtherType.Method
-	id = findByTypedMethod(idx, "OtherType", "Method")
+	id = findByTypedMethod(methodIdx, "OtherType", "Method")
 	if id != "id3" {
 		t.Errorf("expected to find 'OtherType.Method', got %q", id)
 	}
@@ -57,15 +58,16 @@ func TestFindByTypedMethod_NotFound(t *testing.T) {
 		Package: "pkg",
 	}
 	idx["pkg"] = []*graph.Node{node1}
+	methodIdx := buildMethodIndex(idx)
 
 	// Should not find NonExistent.Method
-	id := findByTypedMethod(idx, "NonExistent", "Method")
+	id := findByTypedMethod(methodIdx, "NonExistent", "Method")
 	if id != "" {
 		t.Errorf("expected empty string for non-existent method, got %q", id)
 	}
 
 	// Should not find Service.NonExistent
-	id = findByTypedMethod(idx, "Service", "NonExistent")
+	id = findByTypedMethod(methodIdx, "Service", "NonExistent")
 	if id != "" {
 		t.Errorf("expected empty string for non-existent method, got %q", id)
 	}
@@ -75,8 +77,9 @@ func TestFindByTypedMethod_NotFound(t *testing.T) {
 // an empty index gracefully.
 func TestFindByTypedMethod_EmptyIndex(t *testing.T) {
 	idx := make(map[string][]*graph.Node)
+	methodIdx := buildMethodIndex(idx)
 
-	id := findByTypedMethod(idx, "Any", "Method")
+	id := findByTypedMethod(methodIdx, "Any", "Method")
 	if id != "" {
 		t.Errorf("expected empty string for empty index, got %q", id)
 	}
@@ -94,14 +97,15 @@ func TestFindByTypedMethod_MultipleNodesInPackage(t *testing.T) {
 		{ID: "id4", Name: "First.Other", Package: "pkg"},
 	}
 	idx["pkg"] = nodes
+	methodIdx := buildMethodIndex(idx)
 
 	// Should find the correct method among many
-	id := findByTypedMethod(idx, "Second", "Method")
+	id := findByTypedMethod(methodIdx, "Second", "Method")
 	if id != "id2" {
 		t.Errorf("expected id2 for 'Second.Method', got %q", id)
 	}
 
-	id = findByTypedMethod(idx, "Third", "Helper")
+	id = findByTypedMethod(methodIdx, "Third", "Helper")
 	if id != "id3" {
 		t.Errorf("expected id3 for 'Third.Helper', got %q", id)
 	}
@@ -118,14 +122,15 @@ func TestFindByTypedMethod_PartialNameMatch(t *testing.T) {
 		Package: "pkg",
 	}
 	idx["pkg"] = []*graph.Node{node}
+	methodIdx := buildMethodIndex(idx)
 
 	// Should not match partial names
-	id := findByTypedMethod(idx, "Serv", "Handle")
+	id := findByTypedMethod(methodIdx, "Serv", "Handle")
 	if id != "" {
 		t.Errorf("expected empty string for partial type name, got %q", id)
 	}
 
-	id = findByTypedMethod(idx, "Service", "Hand")
+	id = findByTypedMethod(methodIdx, "Service", "Hand")
 	if id != "" {
 		t.Errorf("expected empty string for partial method name, got %q", id)
 	}

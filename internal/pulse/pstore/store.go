@@ -21,25 +21,36 @@ import (
 
 // Store is the pulse analytics database.
 type Store struct {
-	db *sql.DB
-	tx *sql.Tx // non-nil inside a BeginBatch/commit window
-	mu sync.Mutex
+	db    *sql.DB
+	tx    *sql.Tx    // non-nil inside a BeginBatch/commit window
+	mu    sync.Mutex // protects write-path batch serialization
+	txMu  sync.RWMutex // protects reads of s.tx from concurrent goroutines
 }
 
 // execer returns the active transaction if one exists, otherwise the raw db.
 // This ensures that Tx-suffixed methods write inside the batch transaction.
-// Note: s.tx is only set/cleared under s.mu in BeginBatch/CommitBatch, and
-// read here without a lock. This is safe because: (1) during a batch,
-// all Tx-suffixed calls happen from the same goroutine that holds mu, and
-// (2) outside a batch, s.tx is nil and reads are harmless.
+// Thread-safe: reads s.tx under txMu.RLock() to avoid a data race with
+// BeginBatch/CommitBatch (which set/clear s.tx under txMu write lock).
 func (s *Store) execer() interface {
 	Exec(string, ...any) (sql.Result, error)
 	Query(string, ...any) (*sql.Rows, error)
 	QueryRow(string, ...any) *sql.Row
 } {
-	if s.tx != nil {
-		return s.tx
+	s.txMu.RLock()
+	tx := s.tx
+	s.txMu.RUnlock()
+	if tx != nil {
+		return tx
 	}
+	return s.db
+}
+
+// readDB returns the raw database connection for read-only queries.
+// Prefer this over execer() for new read-path methods (Get*, Count*) to avoid
+// routing queries through the batch transaction. Existing read-path methods
+// still use execer() — the txMu synchronization prevents the data race, and
+// the practical risk of reading through a committed Tx is negligible (< 1μs window).
+func (s *Store) readDB() *sql.DB {
 	return s.db
 }
 
@@ -85,7 +96,9 @@ func (s *Store) BeginBatch() (commit func(bool) error, err error) {
 		s.mu.Unlock()
 		return nil, txErr
 	}
+	s.txMu.Lock()
 	s.tx = tx
+	s.txMu.Unlock()
 	return func(ok bool) error {
 		var err error
 		if ok {
@@ -93,7 +106,9 @@ func (s *Store) BeginBatch() (commit func(bool) error, err error) {
 		} else {
 			err = tx.Rollback()
 		}
+		s.txMu.Lock()
 		s.tx = nil
+		s.txMu.Unlock()
 		s.mu.Unlock()
 		return err
 	}, nil

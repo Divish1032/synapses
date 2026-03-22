@@ -15,6 +15,7 @@ import (
 
 	hugot "github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/SynapsesOS/synapses/internal/logutil"
 )
@@ -102,6 +103,7 @@ type BuiltinEmbedder struct {
 	closed        bool
 	done          chan struct{}   // closed by Close() to unblock pool waiters
 	inflight      sync.WaitGroup // tracks in-flight Embed calls for graceful shutdown
+	initGroup     singleflight.Group // coalesces concurrent model downloads
 
 	// P8-11: optional callback for model download lifecycle events.
 	// eventType is "download_start" or "download_complete".
@@ -143,26 +145,43 @@ func NewBuiltinEmbedderWithPoolSize(modelsDir string, poolSize int) *BuiltinEmbe
 	}
 }
 
-// ensureModel downloads the model if not already cached, and initializes
-// the pipeline pool. Must be called under b.mu lock.
+// ensureModelWithSingleflight downloads the model if not already cached, and
+// initializes the pipeline pool. Uses singleflight so that only one goroutine
+// downloads while others wait, without holding the main mutex during download.
 // Returns nil on success. On failure, the caller should retry next time.
-//
-// TODO(perf): this holds b.mu during the entire model download, which can
-// take minutes and blocks all concurrent Embed() calls. Refactor to use a
-// dedicated downloadMu or a singleflight/sync.Once-with-retry pattern so
-// that Embed() callers can wait on download completion without holding the
-// main mutex. sync.Once alone doesn't support retry-on-failure, so a
-// custom once-or-retry wrapper is needed.
-func (b *BuiltinEmbedder) ensureModel() error {
+func (b *BuiltinEmbedder) ensureModelWithSingleflight() error {
+	// Fast path under lock: already initialized.
+	b.mu.Lock()
 	if b.ready {
+		b.mu.Unlock()
 		return nil
 	}
-	b.initAttempted = true
+	b.mu.Unlock()
 
+	// Use singleflight so concurrent Embed() callers coalesce into one download.
+	// This releases b.mu during the potentially slow download, unblocking new
+	// Embed() callers to wait on the singleflight result instead.
+	_, err, _ := b.initGroup.Do("init", func() (interface{}, error) {
+		// Re-check under lock in case another goroutine finished first.
+		b.mu.Lock()
+		if b.ready {
+			b.mu.Unlock()
+			return nil, nil
+		}
+		b.initAttempted = true
+		b.mu.Unlock()
+
+		// All work below runs WITHOUT holding b.mu.
+		return nil, b.doInit()
+	})
+	return err
+}
+
+// doInit performs the actual model download, integrity verification, and pipeline
+// pool creation. Called from singleflight — only one goroutine runs this at a time.
+func (b *BuiltinEmbedder) doInit() error {
 	// Select ONNX variant based on hardware: fp32 for GPU, quantized for CPU.
 	modelFile, repoPath := selectOnnxVariant()
-	b.onnxFile = modelFile
-	b.onnxPath = repoPath
 
 	modelPath := filepath.Join(b.modelsDir, builtinModelDirName)
 
@@ -183,8 +202,7 @@ func (b *BuiltinEmbedder) ensureModel() error {
 
 	// Check if model already exists.
 	if _, err := os.Stat(onnxDisk); os.IsNotExist(err) {
-		// P8-11: emit download_start event. Called under b.mu — recover so a
-		// panicking callback can't leave the mutex permanently locked.
+		// P8-11: emit download_start event.
 		b.safeModelEvent("download_start")
 		// Download from HuggingFace.
 		logutil.Info("synapses: downloading embedding model %s (%s) to %s …\n", builtinModelName, modelFile, b.modelsDir)
@@ -222,8 +240,6 @@ func (b *BuiltinEmbedder) ensureModel() error {
 			logutil.Warn("synapses: %s integrity check failed (%v) — falling back to verified quantized model\n", modelFile, err)
 			modelFile = builtinModelFileQuantized
 			repoPath = builtinOnnxFilePathQuantized
-			b.onnxFile = modelFile
-			b.onnxPath = repoPath
 			onnxDisk = filepath.Join(modelPath, modelFile)
 			// Download quantized if not present.
 			if _, statErr := os.Stat(onnxDisk); os.IsNotExist(statErr) {
@@ -284,8 +300,14 @@ func (b *BuiltinEmbedder) ensureModel() error {
 		pool <- s
 	}
 
+	// Commit results under lock.
+	b.mu.Lock()
 	b.pool = pool
+	b.onnxFile = modelFile
+	b.onnxPath = repoPath
 	b.ready = true
+	b.mu.Unlock()
+
 	logutil.Info("synapses: embedding pool ready (%d pipeline instances, variant=%s)\n", b.poolSize, modelFile)
 	return nil
 }
@@ -369,7 +391,7 @@ func (b *BuiltinEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 	default:
 	}
 
-	// Hold mu to check closed flag and register in-flight.
+	// Hold mu briefly to check closed flag and register in-flight.
 	// inflight.Add MUST happen under mu before Close sets closed=true,
 	// so Close().Wait() never returns while an Add is pending.
 	b.mu.Lock()
@@ -378,15 +400,19 @@ func (b *BuiltinEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 		return nil, fmt.Errorf("builtin embedder: closed")
 	}
 	b.inflight.Add(1)
-	err := b.ensureModel()
-	pool := b.pool
 	b.mu.Unlock()
 
 	defer b.inflight.Done()
 
-	if err != nil {
+	// Initialize model outside the main mutex. Uses singleflight so only one
+	// goroutine downloads while others wait — no 2-5 minute mutex hold.
+	if err := b.ensureModelWithSingleflight(); err != nil {
 		return nil, err
 	}
+
+	b.mu.Lock()
+	pool := b.pool
+	b.mu.Unlock()
 
 	// Acquire a pipeline slot from the pool (bounded concurrency).
 	// Respects context cancellation and embedder shutdown.

@@ -18,7 +18,7 @@ import (
 const promptTemplate = `Two AI agents want to work on overlapping code. Suggest how to divide the work clearly.
 Output ONLY valid JSON with no other text: {"suggestion": "...", "alternative_scope": "..."}
 
-New agent wants to work on: %s
+New agent wants to work on: <agent_scope>%s</agent_scope>
 Existing conflicts:
 %s`
 
@@ -85,13 +85,22 @@ func (o *Orchestrator) Coordinate(ctx context.Context, req Request) (Response, e
 func (o *Orchestrator) buildPrompt(req Request) string {
 	var sb strings.Builder
 	for _, c := range req.ConflictingClaims {
-		fmt.Fprintf(&sb, "  - Agent %q owns %q (%s)\n", c.AgentID, c.Scope, c.ScopeType)
+		fmt.Fprintf(&sb, "  - Agent %q owns %q (%s)\n",
+			sanitizePromptInput(c.AgentID),
+			sanitizePromptInput(c.Scope),
+			sanitizePromptInput(c.ScopeType))
 	}
 	conflicts := sb.String()
 	if conflicts == "" {
 		conflicts = "  (none)\n"
 	}
-	return fmt.Sprintf(promptTemplate, req.NewScope, conflicts)
+	return fmt.Sprintf(promptTemplate, sanitizePromptInput(req.NewScope), conflicts)
+}
+
+// sanitizePromptInput escapes XML-like delimiters to prevent prompt injection.
+func sanitizePromptInput(s string) string {
+	r := strings.NewReplacer("<", "&lt;", ">", "&gt;")
+	return r.Replace(s)
 }
 
 func (o *Orchestrator) fallbackResponse(req Request) Response {
