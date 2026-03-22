@@ -1540,12 +1540,12 @@ func TestCircuitBreaker_DifferentTiers(t *testing.T) {
 
 func TestImpl_WarmUpModels_Empty(t *testing.T) {
 	// Should not panic with empty client list
-	warmUpModels()
+	warmUpModels(context.Background())
 }
 
 func TestImpl_WarmUpModels_WithNilClients(t *testing.T) {
 	// Should not panic with nil clients mixed in
-	warmUpModels(nil, nil)
+	warmUpModels(context.Background(), nil, nil)
 }
 
 func TestImpl_ValidateResponse_EdgeCases(t *testing.T) {
