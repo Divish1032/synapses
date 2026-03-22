@@ -99,9 +99,15 @@ func run(args []string) error {
 	case "brain":
 		return cmdBrain(args[1:])
 	case "setup":
-		return cmdSetup(args[1:])
+		// Replaced by "synapses init". Print redirect.
+		fmt.Println("'synapses setup' has been replaced by 'synapses init'.")
+		fmt.Println("Run: synapses init --path <dir>")
+		return nil
 	case "mcp-setup":
-		return cmdMCPSetup(args[1:])
+		// Replaced by "synapses init". Print redirect.
+		fmt.Println("'synapses mcp-setup' has been replaced by 'synapses init'.")
+		fmt.Println("Run: synapses init --path <dir>")
+		return nil
 	case "query":
 		return cmdQuery(args[1:])
 	case "export":
@@ -113,7 +119,10 @@ func run(args []string) error {
 	case "brief":
 		return cmdBrief(args[1:])
 	case "onboard":
-		return cmdOnboard(args[1:])
+		// Replaced by "synapses init". Print redirect.
+		fmt.Println("'synapses onboard' has been replaced by 'synapses init'.")
+		fmt.Println("Run: synapses init --path <dir>")
+		return nil
 	case "connect":
 		return cmdConnect(args[1:])
 	case "memory":
@@ -1875,89 +1884,7 @@ func cmdList(args []string) error {
 	return nil
 }
 
-// cmdInit is the zero-friction onboarding command. It:
-//  1. Indexes the project (uses cache if already fresh)
-//  2. Writes / updates .mcp.json in the project root so Claude Code picks it
-//     up automatically — without touching any existing MCP server entries
-//  3. Prints the exact next step the user needs to take
-func cmdInit(args []string) error {
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	repoPath := fs.String("path", ".", "Repository root to initialise (default: current directory)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	absPath, err := filepath.Abs(*repoPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
-
-	logutil.Warn("[deprecated] 'synapses init' is replaced by 'synapses start'.\n\n")
-
-	// Generate synapses.json if missing — the only setup step still useful here.
-	cfgPath := filepath.Join(absPath, "synapses.json")
-	if _, statErr := os.Stat(cfgPath); os.IsNotExist(statErr) {
-		if err := writeOnboardSynapsesJSON(absPath); err != nil {
-			logutil.Warn("could not write synapses.json: %v\n", err)
-		} else {
-			fmt.Printf("  Created %s\n", cfgPath)
-		}
-	}
-
-	fmt.Printf("\n  Golden path (replaces init):\n\n")
-	fmt.Printf("    cd %s && synapses start --path .\n\n", absPath)
-	fmt.Printf("  This starts the daemon, indexes the project, and serves MCP — all in one step.\n")
-	fmt.Printf("  To wire into your agent:\n")
-	fmt.Printf("    claude mcp add synapses -- synapses start --path %s\n\n", absPath)
-	return nil
-}
-
-// detectProjectLanguages scans the project root for known source file extensions
-// and returns a sorted list of detected language names. Stops after 5000 files
-// to keep init fast on large repos.
-func detectProjectLanguages(root string) []string {
-	extToLang := map[string]string{
-		".go": "Go", ".py": "Python", ".pyi": "Python",
-		".ts": "TypeScript", ".tsx": "TypeScript",
-		".js": "JavaScript", ".jsx": "JavaScript", ".mjs": "JavaScript",
-		".java": "Java", ".kt": "Kotlin", ".kts": "Kotlin",
-		".rs": "Rust", ".c": "C", ".h": "C", ".cpp": "C++", ".cc": "C++",
-		".cs": "C#", ".swift": "Swift", ".rb": "Ruby", ".php": "PHP",
-		".lua": "Lua", ".ex": "Elixir", ".exs": "Elixir",
-		".scala": "Scala", ".groovy": "Groovy", ".proto": "Protobuf",
-	}
-
-	seen := make(map[string]bool)
-	count := 0
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error { //nolint:errcheck
-		if err != nil {
-			return nil
-		}
-		if info.IsDir() {
-			base := filepath.Base(path)
-			if strings.HasPrefix(base, ".") || base == "node_modules" || base == "vendor" || base == "__pycache__" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		count++
-		if count > 5000 {
-			return filepath.SkipAll
-		}
-		ext := filepath.Ext(path)
-		if lang, ok := extToLang[ext]; ok {
-			seen[lang] = true
-		}
-		return nil
-	})
-
-	langs := make([]string, 0, len(seen))
-	for lang := range seen {
-		langs = append(langs, lang)
-	}
-	sort.Strings(langs)
-	return langs
-}
+// cmdInit is defined in init.go — the unified 4-step interactive wizard.
 
 // synapsesSectionStart / synapsesSectionEnd are the HTML comment sentinels
 // that fence the Synapses-managed guidance block in every agent rules file.
@@ -2832,238 +2759,33 @@ USAGE:
   synapses <command> [flags]
 
 GETTING STARTED:
-  cd /your/project && synapses start --path .
-  Or: brew install synapses && cd myproject && synapses start
+  synapses init                     Set up everything: index, daemon, agents
+  synapses init --path /project     Target a specific directory
+  synapses init --yes               Non-interactive (CI/scripting)
 
-DAEMON COMMANDS:
-  start     -path <dir>   Ensure daemon is running and register project (proxy mode)
-  stop                    Stop the singleton daemon
-  projects                List projects registered with the running daemon
-  logs      [-n N]        Tail the daemon log (~/.synapses/daemon.log)
-  status    -path <dir>   Show index statistics and daemon health
-  doctor    -path <dir>   Full health check (index, brain, scout)
+DAEMON:
+  start     -path <dir>   Start daemon and register project (MCP proxy)
+  stop                    Stop the daemon
+  projects                List registered projects
+  logs      [-n N]        Tail daemon log
+  status    -path <dir>   Index stats and daemon health
+  doctor    -path <dir>   Full health check
 
-INDEX COMMANDS:
-  index     -path <dir>   Index repo and save to cache
+INDEX:
+  index     -path <dir>   Index/reindex a project
   list                    List all indexed projects
-  reset     -path <dir>   Remove the cached index for a project
+  reset     -path <dir>   Remove cached index
   reset     -all          Remove ALL cached indexes
 
-SETUP COMMANDS:
-  setup     -path <dir>     Create synapses.json and print getting-started instructions
-  mcp-setup -agent <name>   Write MCP config for the specified agent
-  connect   --agent <name>  Write per-agent IDE configs (claude, cursor, windsurf, zed, vscode)
-  init      -path <dir>     [deprecated] Redirects to 'synapses start'
+AGENTS:
+  connect   --agent <name> --path <dir>   Write per-agent MCP config
 
 OTHER:
-  query   -path <dir> -entity <n>  Dump entity context as JSON
-  brief   -path <dir>              Concise session brief
-  export  -path <dir>              Export graph as DOT/JSON/GraphML
-  version                          Print version
-  help                             Print this message
-
-Supported agents for mcp-setup: cursor, gemini, zed, windsurf, claude, all
+  query, brief, export, benchmark, memory, version, help
 `, version)
 }
 
-// cmdMCPSetup writes per-agent MCP configuration files so that AI coding
-// agents other than Claude Code can discover and use the Synapses MCP server.
-//
-// Usage:
-//
-//	synapses mcp-setup --agent cursor|gemini|zed|windsurf|claude|all [--path .]
-//
-// All per-project config files are written relative to --path (default ".").
-// Windsurf writes to the global user config (~/.codeium/windsurf/mcp_config.json).
-func cmdMCPSetup(args []string) error {
-	fs := flag.NewFlagSet("mcp-setup", flag.ContinueOnError)
-	agent := fs.String("agent", "all", "Agent to configure: cursor|gemini|zed|windsurf|claude|all")
-	repoPath := fs.String("path", ".", "Project root to write per-project configs into")
-	transport := fs.String("transport", "stdio", "MCP transport: stdio|http")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	absPath, err := filepath.Abs(*repoPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
-
-	useHTTP := strings.ToLower(*transport) == "http"
-
-	// mergeHTTPConfig writes an HTTP MCP entry (for IDEs that support HTTP transport).
-	// URL format: http://127.0.0.1:11435/mcp?project=<absPath>
-	mergeHTTPConfig := func(filePath string) error {
-		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-			return err
-		}
-		existing := make(map[string]interface{})
-		if data, err := os.ReadFile(filePath); err == nil {
-			_ = json.Unmarshal(data, &existing)
-		}
-		servers, _ := existing["mcpServers"].(map[string]interface{})
-		if servers == nil {
-			servers = make(map[string]interface{})
-		}
-		servers["synapses"] = map[string]interface{}{
-			"type": "http",
-			"url":  "http://" + DaemonHTTPAddr + "/mcp?project=" + absPath,
-		}
-		existing["mcpServers"] = servers
-		out, err := json.MarshalIndent(existing, "", "  ")
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(filePath, append(out, '\n'), 0o644)
-	}
-
-	// The MCP server entry common to all stdio-based agents.
-	type stdioServer struct {
-		Command string   `json:"command"`
-		Args    []string `json:"args"`
-		Type    string   `json:"type"`
-	}
-
-	serverEntry := stdioServer{
-		Command: "synapses",
-		Args:    []string{"start", "--path", "."},
-		Type:    "stdio",
-	}
-
-	// mergeStdioConfig reads an existing JSON file (if any), sets/updates the
-	// "synapses" key inside the top-level "mcpServers" object, and writes back.
-	mergeStdioConfig := func(filePath string) error {
-		if useHTTP {
-			return mergeHTTPConfig(filePath)
-		}
-		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-			return err
-		}
-		existing := make(map[string]interface{})
-		if data, err := os.ReadFile(filePath); err == nil {
-			_ = json.Unmarshal(data, &existing)
-		}
-		servers, _ := existing["mcpServers"].(map[string]interface{})
-		if servers == nil {
-			servers = make(map[string]interface{})
-		}
-		servers["synapses"] = serverEntry
-		existing["mcpServers"] = servers
-		out, err := json.MarshalIndent(existing, "", "  ")
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(filePath, append(out, '\n'), 0o644)
-	}
-
-	// mergeZedConfig handles Zed's different "context_servers" key shape.
-	mergeZedConfig := func(filePath string) error {
-		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-			return err
-		}
-		existing := make(map[string]interface{})
-		if data, err := os.ReadFile(filePath); err == nil {
-			_ = json.Unmarshal(data, &existing)
-		}
-		ctxServers, _ := existing["context_servers"].(map[string]interface{})
-		if ctxServers == nil {
-			ctxServers = make(map[string]interface{})
-		}
-		ctxServers["synapses"] = map[string]interface{}{
-			"command": map[string]interface{}{
-				"path": "synapses",
-				"args": []string{"start", "--path", "."},
-			},
-		}
-		existing["context_servers"] = ctxServers
-		out, err := json.MarshalIndent(existing, "", "  ")
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(filePath, append(out, '\n'), 0o644)
-	}
-
-	type agentSetup struct {
-		name    string
-		setup   func() error
-		cfgPath string // for display only
-	}
-
-	homeDir, _ := os.UserHomeDir()
-
-	agents := []agentSetup{
-		{
-			name:    "cursor",
-			cfgPath: filepath.Join(absPath, ".cursor", "mcp.json"),
-			setup: func() error {
-				return mergeStdioConfig(filepath.Join(absPath, ".cursor", "mcp.json"))
-			},
-		},
-		{
-			name:    "gemini",
-			cfgPath: filepath.Join(absPath, ".gemini", "settings.json"),
-			setup: func() error {
-				return mergeStdioConfig(filepath.Join(absPath, ".gemini", "settings.json"))
-			},
-		},
-		{
-			name:    "zed",
-			cfgPath: filepath.Join(absPath, ".zed", "settings.json"),
-			setup: func() error {
-				return mergeZedConfig(filepath.Join(absPath, ".zed", "settings.json"))
-			},
-		},
-		{
-			name:    "windsurf",
-			cfgPath: filepath.Join(homeDir, ".codeium", "windsurf", "mcp_config.json"),
-			setup: func() error {
-				return mergeStdioConfig(filepath.Join(homeDir, ".codeium", "windsurf", "mcp_config.json"))
-			},
-		},
-		{
-			name:    "claude",
-			cfgPath: "via `claude mcp add` (Claude Code CLI)",
-			setup: func() error {
-				if useHTTP {
-					// HTTP transport: write to ~/.claude/mcp.json directly.
-					homeDir2, _ := os.UserHomeDir()
-					return mergeHTTPConfig(filepath.Join(homeDir2, ".claude", "mcp.json"))
-				}
-				cmd := exec.Command("claude", "mcp", "add", "synapses", "--", "synapses", "start", "--path", ".")
-				cmd.Dir = absPath
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				if err := cmd.Run(); err != nil {
-					// Not fatal — Claude Code may not be installed.
-					logutil.Warn("claude CLI not available (%v). Manual setup: claude mcp add synapses -- synapses start --path .\n", err)
-				}
-				return nil
-			},
-		},
-	}
-
-	target := strings.ToLower(*agent)
-	wrote := 0
-	for _, a := range agents {
-		if target != "all" && target != a.name {
-			continue
-		}
-		if err := a.setup(); err != nil {
-			logutil.Error("✗ %-12s %v\n", a.name, err)
-		} else {
-			fmt.Printf("  \033[32m✓\033[0m %-12s %s\n", a.name, a.cfgPath)
-			wrote++
-		}
-	}
-
-	if wrote == 0 && target != "all" {
-		return fmt.Errorf("unknown agent %q — choose one of: cursor, gemini, zed, windsurf, claude, all", *agent)
-	}
-
-	fmt.Printf("\n  Done. Restart your AI agent to pick up the new MCP server.\n")
-	fmt.Printf("  Note: make sure 'synapses' is on PATH before starting your agent.\n")
-	return nil
-}
+// cmdMCPSetup is replaced by "synapses init" — see init.go.
 
 // buildIngestCode constructs the ingest code string for a node (signature + doc comment).
 func buildIngestCode(n *graph.Node) string {
@@ -3496,55 +3218,7 @@ func cmdExport(args []string) error {
 	return nil
 }
 
-// cmdSetup configures a project for use with synapses. It:
-//  1. Writes synapses.json in the project root if it does not already exist.
-//  2. Prints the golden-path `synapses start` and `claude mcp add` commands.
-//
-// Brain, pulse, and web-cache all run in-process — no external sidecars needed.
-func cmdSetup(args []string) error {
-	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
-	repoPath := fs.String("path", ".", "Project root (default: current directory)")
-	// --core kept for backwards compatibility but is now a no-op (brain is in-process).
-	_ = fs.Bool("core", false, "No-op (kept for backwards compatibility)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	absPath, err := filepath.Abs(*repoPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
-
-	fmt.Println()
-	fmt.Println("  Synapses setup")
-	fmt.Println("  ──────────────────────────────────────")
-
-	// ── Step 1: write / validate synapses.json ──────────────────────────────
-	cfgFile := filepath.Join(absPath, "synapses.json")
-	if _, statErr := os.Stat(cfgFile); os.IsNotExist(statErr) {
-		if err := writeOnboardSynapsesJSON(absPath); err != nil {
-			return fmt.Errorf("write synapses.json: %w", err)
-		}
-		fmt.Printf("  Created %s\n", cfgFile)
-		fmt.Println("    brain, pulse, web-cache: all in-process (no external sidecars needed)")
-	} else {
-		fmt.Printf("  synapses.json already exists (%s)\n", cfgFile)
-	}
-
-	// ── Step 2: golden path instructions ────────────────────────────────────
-	fmt.Println()
-	fmt.Println("  ──────────────────────────────────────")
-	fmt.Println("  Next step — start Synapses:")
-	fmt.Println()
-	fmt.Printf("    synapses start --path %s\n", absPath)
-	fmt.Println()
-	fmt.Println("  To wire into your agent:")
-	fmt.Printf("    claude mcp add synapses -- synapses start --path %s\n", absPath)
-	fmt.Println()
-	fmt.Println("  Brain, pulse, and web-cache all run in-process — no external sidecars needed.")
-	fmt.Println()
-	return nil
-}
+// cmdSetup is replaced by "synapses init" — see init.go.
 
 // cmdBenchmark runs self-validating benchmark scenarios against an indexed repo.
 // Each scenario derives ground truth from the graph's own topology — no hardcoded
