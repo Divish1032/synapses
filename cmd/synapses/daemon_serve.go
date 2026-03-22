@@ -39,6 +39,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -265,9 +266,11 @@ func loadOrCreateAuthToken() (string, error) {
 	if data, err := os.ReadFile(path); err == nil {
 		token := strings.TrimSpace(string(data))
 		if len(token) == 64 {
-			return token, nil
+			if _, hexErr := hex.DecodeString(token); hexErr == nil {
+				return token, nil
+			}
 		}
-		// File exists but is invalid (truncated, corrupted) — regenerate.
+		// File exists but is invalid (truncated, corrupted, non-hex) — regenerate.
 	}
 	// Generate a new 32-byte random token.
 	var b [32]byte
@@ -842,12 +845,24 @@ func cmdDaemonServe(args []string) error {
 		}
 	})
 
+	// pulseGuard returns true (and writes 503) if sharedPulse is nil.
+	pulseGuard := func(w http.ResponseWriter) bool {
+		if sharedPulse == nil {
+			http.Error(w, `{"error":"pulse analytics unavailable"}`, http.StatusServiceUnavailable)
+			return true
+		}
+		return false
+	}
+
 	// Admin: pulse analytics summary
 	// P12-3: supports ?sections=summary,tools,timeline to avoid computing all 50+ fields.
 	// When sections is omitted, returns the full summary (backward compatible).
 	mux.HandleFunc("/api/admin/pulse/summary", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pulseGuard(w) {
 			return
 		}
 		days := 7
@@ -882,6 +897,9 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if pulseGuard(w) {
+			return
+		}
 		days := 7
 		if d := r.URL.Query().Get("days"); d != "" {
 			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
@@ -896,6 +914,9 @@ func cmdDaemonServe(args []string) error {
 	mux.HandleFunc("/api/admin/pulse/timeline", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pulseGuard(w) {
 			return
 		}
 		days := 14
@@ -914,6 +935,9 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if pulseGuard(w) {
+			return
+		}
 		days := 7
 		if d := r.URL.Query().Get("days"); d != "" {
 			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
@@ -930,6 +954,9 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if pulseGuard(w) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(sharedPulse.GetLatestGraphSnapshot())
 	})
@@ -938,6 +965,9 @@ func cmdDaemonServe(args []string) error {
 	mux.HandleFunc("/api/admin/pulse/search", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pulseGuard(w) {
 			return
 		}
 		days := 7
@@ -955,6 +985,9 @@ func cmdDaemonServe(args []string) error {
 	mux.HandleFunc("/api/admin/pulse/tools/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pulseGuard(w) {
 			return
 		}
 		// Path: /api/admin/pulse/tools/{name}/timeline
@@ -986,6 +1019,9 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if pulseGuard(w) {
+			return
+		}
 		sessionID := strings.TrimPrefix(r.URL.Path, "/api/admin/pulse/sessions/")
 		if sessionID == "" {
 			http.Error(w, "missing session id", http.StatusBadRequest)
@@ -1005,6 +1041,9 @@ func cmdDaemonServe(args []string) error {
 	mux.HandleFunc("/api/admin/pulse/export", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pulseGuard(w) {
 			return
 		}
 		days := 7
@@ -1028,6 +1067,9 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if pulseGuard(w) {
+			return
+		}
 		snap := sharedPulse.GetHealthSnapshot()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(snap)
@@ -1037,6 +1079,9 @@ func cmdDaemonServe(args []string) error {
 	mux.HandleFunc("/api/admin/pulse/monthly", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pulseGuard(w) {
 			return
 		}
 		now := time.Now().UTC()
@@ -1063,6 +1108,9 @@ func cmdDaemonServe(args []string) error {
 	mux.HandleFunc("/api/admin/pulse/stream", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pulseGuard(w) {
 			return
 		}
 		flusher, ok := w.(http.Flusher)
@@ -1121,6 +1169,9 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if pulseGuard(w) {
+			return
+		}
 		agentID := strings.TrimPrefix(r.URL.Path, "/api/admin/pulse/agents/")
 		if agentID == "" {
 			http.Error(w, "missing agent id", http.StatusBadRequest)
@@ -1148,6 +1199,9 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if pulseGuard(w) {
+			return
+		}
 		wow := sharedPulse.GetWeekOverWeek()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(wow)
@@ -1158,6 +1212,9 @@ func cmdDaemonServe(args []string) error {
 	mux.HandleFunc("/api/admin/pulse/data", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pulseGuard(w) {
 			return
 		}
 		agentID := r.URL.Query().Get("agent_id")
@@ -1186,6 +1243,9 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if pulseGuard(w) {
+			return
+		}
 		days := 7
 		if d := r.URL.Query().Get("days"); d != "" {
 			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
@@ -1205,6 +1265,9 @@ func cmdDaemonServe(args []string) error {
 	mux.HandleFunc("/api/admin/pulse/tools/declining", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pulseGuard(w) {
 			return
 		}
 		days := 30

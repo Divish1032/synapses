@@ -348,10 +348,17 @@ func (s *Store) EndSession(sessionID, reason, outcome, summary string) error {
 func (s *Store) GetStaleSessions(projectID, currentSessionID string, staleThreshold time.Duration) ([]StaleSession, error) {
 	cutoff := time.Now().UTC().Add(-staleThreshold).Unix()
 
+	ctx := context.Background()
+	tx, err := s.knowledgeDB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return nil, fmt.Errorf("begin stale sessions tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Lazily mark dormant sessions as 'hibernated' so the Tauri app and any
 	// observer can see accurate state without a separate reconciliation pass.
 	// Scoped to this project; error silently ignored (non-critical side effect).
-	_, _ = s.knowledgeDB.Exec(`
+	_, _ = tx.Exec(`
 		UPDATE sessions
 		SET state = 'hibernated'
 		WHERE project_id = ?
@@ -359,7 +366,7 @@ func (s *Store) GetStaleSessions(projectID, currentSessionID string, staleThresh
 		  AND state = 'active'
 		  AND last_seen_at < ?`, projectID, cutoff)
 
-	rows, err := s.knowledgeDB.Query(`
+	rows, err := tx.Query(`
 		SELECT id, agent_id, started_at, last_seen_at, intent, tool_calls
 		FROM sessions
 		WHERE project_id = ?
@@ -387,7 +394,13 @@ func (s *Store) GetStaleSessions(projectID, currentSessionID string, staleThresh
 		ss.LastSeenAt = time.Unix(lastSeenEpoch, 0).UTC().Format(time.RFC3339)
 		result = append(result, ss)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit stale sessions tx: %w", err)
+	}
+	return result, nil
 }
 
 // GetOrphanedTasks returns tasks that were started or created by the given

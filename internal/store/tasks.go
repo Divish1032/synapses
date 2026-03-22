@@ -395,9 +395,21 @@ func checkAndCompletePlan(db *rwDB, planID string) (bool, error) {
 	if planID == "" {
 		return false, nil
 	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("check plan completion: begin tx: %w", err)
+	}
+	defer tx.Rollback() // no-op after successful Commit
+
+	// BEGIN IMMEDIATE to prevent concurrent modifications between read and write.
+	if _, err := tx.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		return false, fmt.Errorf("check plan completion: set busy timeout: %w", err)
+	}
+
 	// A plan completes when it has at least one task and all tasks are terminal.
 	var totalTasks, openTasks int
-	row := db.QueryRow(`
+	row := tx.QueryRow(`
 		SELECT COUNT(*),
 		       COALESCE(SUM(CASE WHEN status NOT IN ('done','cancelled') THEN 1 ELSE 0 END), 0)
 		FROM tasks WHERE plan_id = ?`, planID)
@@ -408,7 +420,7 @@ func checkAndCompletePlan(db *rwDB, planID string) (bool, error) {
 		return false, nil
 	}
 	// Stamp completed_at atomically — only rows that are still active (0) are updated.
-	res, err := db.Exec(
+	res, err := tx.Exec(
 		`UPDATE plans SET completed_at = ? WHERE id = ? AND completed_at = 0`,
 		time.Now().Unix(), planID,
 	)
@@ -416,6 +428,9 @@ func checkAndCompletePlan(db *rwDB, planID string) (bool, error) {
 		return false, fmt.Errorf("mark plan complete: %w", err)
 	}
 	n, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("mark plan complete: commit: %w", err)
+	}
 	return n > 0, nil
 }
 

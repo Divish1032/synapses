@@ -436,7 +436,7 @@ func (s *Store) normalizeStoredEmbeddings() {
 				fmt.Sprintf("UPDATE %s SET embedding = ? WHERE %s = ?", table, idCol),
 				u.blob, u.id,
 			); err != nil {
-				continue
+				return 0
 			}
 			updated++
 		}

@@ -38,6 +38,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync/atomic"
 
 	"github.com/klauspost/compress/zstd"
@@ -279,6 +280,39 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 		idx.Lines[i] = line
 		idx.Exported[i] = exp
 		idx.IDToSeq[nid] = i
+	}
+
+	// --- Rebuild secondary indexes (nameIndex, fileIndex, receiverIndex) ---
+	// These are not serialised; rebuild from the node property arrays just
+	// loaded, matching the logic in buildIndex().
+	for i := uint32(1); i <= nodeCount; i++ {
+		name := pool.Value(idx.Names[i])
+		file := pool.Value(idx.FileIDs[i])
+		ntype := NodeType(pool.Value(idx.Types[i]))
+
+		// nameIndex: lowercase full name + unqualified suffix
+		nameLower := strings.ToLower(name)
+		idx.nameIndex[nameLower] = append(idx.nameIndex[nameLower], i)
+		if dotPos := strings.LastIndex(name, "."); dotPos >= 0 {
+			suffixLower := strings.ToLower(name[dotPos+1:])
+			if suffixLower != nameLower {
+				idx.nameIndex[suffixLower] = append(idx.nameIndex[suffixLower], i)
+			}
+			// receiverIndex: map receiver name → method seq IDs
+			if ntype == NodeMethod {
+				receiverLower := strings.ToLower(name[:dotPos])
+				idx.receiverIndex[receiverLower] = append(idx.receiverIndex[receiverLower], i)
+			}
+		}
+
+		// fileIndex: full path + basename only
+		idx.fileIndex[file] = append(idx.fileIndex[file], i)
+		if slashPos := strings.LastIndex(file, "/"); slashPos >= 0 {
+			base := file[slashPos+1:]
+			if base != file {
+				idx.fileIndex[base] = append(idx.fileIndex[base], i)
+			}
+		}
 	}
 
 	// StringPool

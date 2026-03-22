@@ -381,7 +381,7 @@ func RRFMergeWeighted(channels map[string][]string, limit int, k int, weights ma
 
 	// Sort by score DESC, then by ID for deterministic ordering on ties.
 	sort.Slice(items, func(i, j int) bool {
-		if items[i].score != items[j].score {
+		if math.Abs(items[i].score-items[j].score) > 1e-12 {
 			return items[i].score > items[j].score
 		}
 		return items[i].id < items[j].id
@@ -505,7 +505,7 @@ func ConvexMerge(
 	}
 
 	sort.Slice(items, func(i, j int) bool {
-		if items[i].score != items[j].score {
+		if math.Abs(items[i].score-items[j].score) > 1e-12 {
 			return items[i].score > items[j].score
 		}
 		return items[i].id < items[j].id

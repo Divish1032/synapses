@@ -372,13 +372,6 @@ func (a *Aggregator) rollup() {
 		}
 	}
 
-	// G3 idempotency: mark batch_metrics as completed BEFORE per-dimension
-	// rollups. On restart, we skip only the expensive batch_metrics phase;
-	// per-dimension rollups are cheap and idempotent — always re-run them.
-	if rollupOK {
-		_ = a.store.UpsertDailyRollup(today, "rollup_completed", 1)
-	}
-
 	// Per-dimension rollups for today. Each method calls UpsertDailyRollup
 	// individually. TODO: refactor these methods to accept a Tx parameter so
 	// they can be wrapped in a single BeginBatch/CommitBatch transaction.
@@ -402,6 +395,13 @@ func (a *Aggregator) rollup() {
 
 	// P12-5: per-tool error rates.
 	a.rollupPerToolErrors(today)
+
+	// G3 idempotency: mark rollup_completed AFTER all per-dimension rollups
+	// are done. This ensures that on restart, incomplete per-dimension rollups
+	// are re-run (they are cheap and idempotent).
+	if rollupOK {
+		_ = a.store.UpsertDailyRollup(today, "rollup_completed", 1)
+	}
 
 	// Automatic pruning: remove events older than 90 days.
 	// Only prune if the rollup succeeded — otherwise raw data is still needed.

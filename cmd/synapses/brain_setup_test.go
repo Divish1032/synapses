@@ -161,7 +161,7 @@ func TestBrainPingOllama_Success(t *testing.T) {
 	server := mockOllamaServer(t, nil)
 	defer server.Close()
 
-	version, err := brainPingOllama(server.URL)
+	version, err := brainPingOllama(server.URL, http.DefaultClient)
 	if err != nil {
 		t.Fatalf("brainPingOllama failed: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestBrainPingOllama_Success(t *testing.T) {
 }
 
 func TestBrainPingOllama_Unreachable(t *testing.T) {
-	_, err := brainPingOllama("http://invalid-unreachable-host:9999")
+	_, err := brainPingOllama("http://invalid-unreachable-host:9999", http.DefaultClient)
 	if err == nil {
 		t.Error("expected error when server unreachable")
 	}
@@ -184,7 +184,7 @@ func TestBrainPingOllama_Timeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := brainPingOllama(server.URL)
+	_, err := brainPingOllama(server.URL, http.DefaultClient)
 	if err == nil {
 		t.Error("expected error on timeout")
 	}
@@ -203,7 +203,7 @@ func TestBrainIsModelInstalled_Found(t *testing.T) {
 	}))
 	defer server.Close()
 
-	installed, err := brainIsModelInstalled(server.URL, "qwen3.5:2b")
+	installed, err := brainIsModelInstalled(server.URL, "qwen3.5:2b", http.DefaultClient)
 	if err != nil {
 		t.Fatalf("brainIsModelInstalled failed: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestBrainIsModelInstalled_NotFound(t *testing.T) {
 	}))
 	defer server.Close()
 
-	installed, err := brainIsModelInstalled(server.URL, "qwen3.5:2b")
+	installed, err := brainIsModelInstalled(server.URL, "qwen3.5:2b", http.DefaultClient)
 	if err != nil {
 		t.Fatalf("brainIsModelInstalled failed: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestBrainIsModelInstalled_InvalidJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := brainIsModelInstalled(server.URL, "qwen3.5:2b")
+	_, err := brainIsModelInstalled(server.URL, "qwen3.5:2b", http.DefaultClient)
 	if err == nil {
 		t.Error("expected error on invalid JSON")
 	}
@@ -255,7 +255,7 @@ func TestBrainPullModel_Success(t *testing.T) {
 	server := mockOllamaServer(t, nil)
 	defer server.Close()
 
-	err := brainPullModel(server.URL, "qwen3.5:2b")
+	err := brainPullModel(server.URL, "qwen3.5:2b", http.DefaultClient)
 	if err != nil {
 		t.Fatalf("brainPullModel failed: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestBrainSmokeTest_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ok, elapsed := brainSmokeTest(server.URL, "test-tier")
+	ok, elapsed := brainSmokeTest(server.URL, "test-tier", http.DefaultClient)
 	if !ok {
 		t.Error("expected smoke test to pass")
 	}
@@ -296,7 +296,7 @@ func TestBrainSmokeTest_InvalidResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ok, _ := brainSmokeTest(server.URL, "test-tier")
+	ok, _ := brainSmokeTest(server.URL, "test-tier", http.DefaultClient)
 	if ok {
 		t.Error("expected smoke test to fail with invalid response")
 	}

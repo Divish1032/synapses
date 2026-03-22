@@ -54,15 +54,18 @@ func isAllowedDocsURL(rawURL string) bool {
 	if allowedDocsDomains[host] {
 		return true
 	}
-	// Check if host is a subdomain of any allowed domain.
-	// "docs.python.org" → check ".python.org" suffix against allowlist.
-	// This correctly rejects "attacker.google.com" only if "attacker.google.com"
-	// is checked as a subdomain — it matches "google.com" which IS in the list.
-	// But "evil-github.com" does NOT match "github.com" because the suffix
-	// check requires a dot boundary.
+	// Check if host is a one-level-deep subdomain of any allowed domain.
+	// Only "sub.domain.com" matches "domain.com", NOT "deep.sub.domain.com".
+	// This prevents multi-level subdomain abuse (e.g. "evil.attacker.github.com").
 	for domain := range allowedDocsDomains {
-		if strings.HasSuffix(host, "."+domain) {
-			return true
+		suffix := "." + domain
+		if strings.HasSuffix(host, suffix) {
+			// Ensure only one level of subdomain: the part before ".domain"
+			// must contain no dots.
+			subdomain := strings.TrimSuffix(host, suffix)
+			if subdomain != "" && !strings.Contains(subdomain, ".") {
+				return true
+			}
 		}
 	}
 	return false

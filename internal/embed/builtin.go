@@ -591,7 +591,7 @@ func l2Normalize(vec []float32) []float32 {
 		return nil
 	}
 	if norm == 0 {
-		return vec // zero-magnitude vector — return as-is
+		return nil // zero-magnitude vector — cannot normalize
 	}
 	if norm > 0.999 && norm < 1.001 {
 		return vec // already normalized

@@ -231,6 +231,12 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 			http.Error(w, "editor and project_path query params required", http.StatusBadRequest)
 			return
 		}
+		absPath, err := canonicalPath(projectPath)
+		if err != nil {
+			http.Error(w, "invalid path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
+			return
+		}
+		projectPath = absPath
 		configured := checkMCPConfigured(editor, projectPath)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"configured": configured}) //nolint:errcheck

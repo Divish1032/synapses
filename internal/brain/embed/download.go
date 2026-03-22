@@ -170,16 +170,31 @@ func EnsureEmbedModel(ctx context.Context, opts DownloadOptions, hfRepo, filenam
 		return "", fmt.Errorf("download embedding model: %w", err)
 	}
 
-	// Verify SHA-256 integrity — always read back and check.
-	tmpData, readErr := os.ReadFile(tmpPath)
+	// Verify SHA-256 integrity — stream the file through the hash to avoid
+	// loading the entire model (~274 MB) into memory.
+	hashFile, readErr := os.Open(tmpPath)
 	if readErr != nil {
 		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("read downloaded model for verification: %w", readErr)
+		return "", fmt.Errorf("open downloaded model for verification: %w", readErr)
 	}
-	if err := verifyOrLogSHA256(tmpData, embedModelSHA256[filename], "embed model", opts.Progress); err != nil {
+	h := sha256.New()
+	if _, readErr = io.Copy(h, hashFile); readErr != nil {
+		hashFile.Close()
 		_ = os.Remove(tmpPath)
-		return "", err
+		return "", fmt.Errorf("hash downloaded model: %w", readErr)
 	}
+	hashFile.Close()
+	actualHex := hex.EncodeToString(h.Sum(nil))
+	expected := embedModelSHA256[filename]
+	if expected == "" {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("embed model integrity check failed: no expected sha256 hash configured (actual: %s) — pin this hash before shipping", actualHex)
+	}
+	if subtle.ConstantTimeCompare([]byte(actualHex), []byte(expected)) != 1 {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("embed model integrity check failed: expected sha256 %s, got %s", expected, actualHex)
+	}
+	logProgress(opts.Progress, "SHA-256 verified: %s", actualHex[:16])
 
 	if err := os.Rename(tmpPath, modelPath); err != nil {
 		return "", err

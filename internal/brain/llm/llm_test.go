@@ -607,8 +607,8 @@ func ollamaSuccessBody(response string) string {
 func TestNewOllamaClient(t *testing.T) {
 	t.Run("default timeout applied when zero", func(t *testing.T) {
 		c := NewOllamaClient("http://localhost:11434", "llama3", 0)
-		if c.httpClient.Timeout != 3000*time.Millisecond {
-			t.Errorf("expected 3000ms timeout, got %v", c.httpClient.Timeout)
+		if c.httpClient.Timeout != 30000*time.Millisecond {
+			t.Errorf("expected 30000ms timeout, got %v", c.httpClient.Timeout)
 		}
 	})
 

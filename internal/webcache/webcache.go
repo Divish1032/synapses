@@ -13,6 +13,7 @@ package webcache
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -85,6 +86,18 @@ func New(s *store.Store) *Cache {
 		httpClient: &http.Client{
 			Transport: transport,
 			Timeout:   httpTimeout,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return errors.New("too many redirects")
+				}
+				// Validate redirect target is not internal
+				host := req.URL.Hostname()
+				ip := net.ParseIP(host)
+				if ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
+					return fmt.Errorf("redirect to private IP blocked: %s", host)
+				}
+				return nil
+			},
 		},
 	}
 }

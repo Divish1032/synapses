@@ -305,11 +305,21 @@ func cmdUpdate(args []string) error {
 	}
 
 	// Also update ~/.synapses/bin/ copy if it exists.
+	// Read from the already-installed executable (not binaryPath, which is
+	// in a temp dir that may be cleaned up by the deferred os.RemoveAll).
 	if home, err := synapsesHome(); err == nil {
 		binCopy := filepath.Join(home, "bin", "synapses")
 		if _, statErr := os.Stat(binCopy); statErr == nil {
-			if data, readErr := os.ReadFile(binaryPath); readErr == nil {
-				_ = os.WriteFile(binCopy, data, 0o755)
+			installedExe, exeErr := os.Executable()
+			if exeErr == nil {
+				installedExe, exeErr = filepath.EvalSymlinks(installedExe)
+			}
+			if exeErr == nil {
+				if data, readErr := os.ReadFile(installedExe); readErr == nil {
+					if writeErr := os.WriteFile(binCopy, data, 0o755); writeErr != nil {
+						fmt.Fprintf(os.Stderr, "warning: failed to update %s: %v\n", binCopy, writeErr)
+					}
+				}
 			}
 		}
 	}

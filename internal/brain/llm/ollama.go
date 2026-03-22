@@ -51,7 +51,7 @@ type OllamaClient struct {
 // level — does not cancel the Ollama server-side inference, only the wait).
 func NewOllamaClient(baseURL, model string, timeoutMS int) *OllamaClient {
 	if timeoutMS <= 0 {
-		timeoutMS = 3000
+		timeoutMS = 30000
 	}
 	return &OllamaClient{
 		baseURL: strings.TrimRight(baseURL, "/"),

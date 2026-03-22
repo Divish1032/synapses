@@ -635,7 +635,9 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("migrate graph schema: %w", err)
 		}
 	}
-	graphTx.Commit()
+	if err := graphTx.Commit(); err != nil {
+		return nil, fmt.Errorf("graph migration commit: %w", err)
+	}
 
 	// ── Knowledge migrations ─────────────────────────────────────────────
 	knowledgeTx, err := knowledgeDB.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -765,7 +767,9 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("migrate knowledge schema: %w", err)
 		}
 	}
-	knowledgeTx.Commit()
+	if err := knowledgeTx.Commit(); err != nil {
+		return nil, fmt.Errorf("knowledge migration commit: %w", err)
+	}
 
 	// Fix historical rows: sessions with ended_at already set must be 'closed'.
 	_, _ = knowledgeDB.Exec(`UPDATE sessions SET state = 'closed' WHERE ended_at IS NOT NULL AND state = 'active'`)
@@ -1156,7 +1160,7 @@ func scanCrossDep(scanner interface{ Scan(...interface{}) error }) (CrossProject
 // GetCrossProjectDeps returns all cross-project dependencies for a local entity.
 func (s *Store) GetCrossProjectDeps(fromEntity string) ([]CrossProjectDep, error) {
 	rows, err := s.knowledgeDB.Query(
-		`SELECT `+crossDepCols+` FROM cross_project_deps WHERE from_entity = ?`,
+		`SELECT `+crossDepCols+` FROM cross_project_deps WHERE from_entity = ? LIMIT 1000`,
 		fromEntity,
 	)
 	if err != nil {
@@ -1178,7 +1182,7 @@ func (s *Store) GetCrossProjectDeps(fromEntity string) ([]CrossProjectDep, error
 // GetCrossProjectDepsByProject returns all deps targeting a specific sibling project.
 func (s *Store) GetCrossProjectDepsByProject(project string) ([]CrossProjectDep, error) {
 	rows, err := s.knowledgeDB.Query(
-		`SELECT `+crossDepCols+` FROM cross_project_deps WHERE to_project = ?`,
+		`SELECT `+crossDepCols+` FROM cross_project_deps WHERE to_project = ? LIMIT 1000`,
 		project,
 	)
 	if err != nil {

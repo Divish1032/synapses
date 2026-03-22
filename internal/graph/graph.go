@@ -105,6 +105,8 @@ func (g *Graph) Root() string {
 
 // SetRoot stores the absolute path of the repository root.
 func (g *Graph) SetRoot(root string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.root = root
 }
 
