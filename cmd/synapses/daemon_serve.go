@@ -393,10 +393,15 @@ func mutationGuard(csrfToken string, next http.Handler) http.Handler {
 			http.Error(w, "Forbidden: untrusted origin", http.StatusForbidden)
 			return
 		}
-		// CSRF token check: require X-CSRF-Token on all mutations.
-		// Exempt: /mcp (MCP protocol uses its own session management),
-		//         /v1/tools/ (REST tool API used by non-browser clients).
-		if !strings.HasPrefix(r.URL.Path, "/mcp") && !strings.HasPrefix(r.URL.Path, "/v1/tools/") {
+		// CSRF token check: require X-CSRF-Token on mutations.
+		// Exempt: /mcp (MCP protocol uses its own session management).
+		// /v1/tools/ requires CSRF only when Origin header is present (browser context);
+		// non-browser REST clients (CLI, MCP proxies) don't send Origin.
+		needCSRF := !strings.HasPrefix(r.URL.Path, "/mcp")
+		if strings.HasPrefix(r.URL.Path, "/v1/tools/") && origin == "" {
+			needCSRF = false // non-browser REST client — Bearer auth suffices
+		}
+		if needCSRF {
 			provided := r.Header.Get("X-CSRF-Token")
 			if csrfToken == "" || provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(csrfToken)) != 1 {
 				w.Header().Set("Content-Type", "application/json")
@@ -1255,7 +1260,7 @@ func cmdDaemonServe(args []string) error {
 	// ── Phase 0: Admin management endpoints (web console) ────────────────────
 	registerAdminEndpoints(mux, reg, func(absPath string) (*ProjectInstance, error) {
 		return initProjectInstance(appCtx, absPath, sharedPulse, reg)
-	})
+	}, appCancel)
 
 	// ── Serve web console at root ────────────────────────────────────────────
 	// Lookup order (Gitea/MinIO pattern):
@@ -1300,7 +1305,17 @@ func cmdDaemonServe(args []string) error {
 	}
 
 	// CSRF token endpoint — fetched once by the web console on load.
+	// Restricted to GET; requires trusted Origin (or no Origin for same-origin).
 	mux.HandleFunc("/api/admin/csrf-token", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "use GET", http.StatusMethodNotAllowed)
+			return
+		}
+		origin := r.Header.Get("Origin")
+		if origin != "" && !trustedOrigins[origin] {
+			http.Error(w, "Forbidden: untrusted origin", http.StatusForbidden)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"token": csrfToken}) //nolint:errcheck
 	})
@@ -1591,11 +1606,14 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		}
 	}()
 
-	// Background index rebuild.
+	// Background index rebuild — respects project context cancellation.
 	go func() {
 		blob, err := g.RebuildIndex()
 		if err == nil && len(blob) > 0 {
-			_ = st.SaveIndexSnapshot(blob)
+			// Check context before writing to store — project may have been torn down.
+			if projCtx.Err() == nil {
+				_ = st.SaveIndexSnapshot(blob)
+			}
 		}
 	}()
 	// Background idle-defrag.
