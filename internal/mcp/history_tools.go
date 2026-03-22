@@ -78,9 +78,10 @@ func (s *Server) handleGetEntityHistory(
 	// tasks, git changes. Each writes to its own local slice — no shared state
 	// until appendEvents grabs the mutex.
 	var (
-		mu     sync.Mutex
-		events []timelineEvent
-		wg     sync.WaitGroup
+		mu       sync.Mutex
+		events   []timelineEvent
+		warnings []string
+		wg       sync.WaitGroup
 	)
 
 	appendEvents := func(evts []timelineEvent) {
@@ -89,6 +90,12 @@ func (s *Server) handleGetEntityHistory(
 		}
 		mu.Lock()
 		events = append(events, evts...)
+		mu.Unlock()
+	}
+
+	appendWarning := func(msg string) {
+		mu.Lock()
+		warnings = append(warnings, msg)
 		mu.Unlock()
 	}
 
@@ -124,6 +131,7 @@ func (s *Server) handleGetEntityHistory(
 		}
 		mems, err := s.store.QueryMemories("entity", nodeID, "", limit)
 		if err != nil {
+			appendWarning(fmt.Sprintf("entity memories query failed: %v", err))
 			return
 		}
 		var evts []timelineEvent
@@ -144,6 +152,7 @@ func (s *Server) handleGetEntityHistory(
 		}
 		mems, err := s.store.GetMemoriesByAnchorNode(nodeID, limit)
 		if err != nil {
+			appendWarning(fmt.Sprintf("anchored memories query failed: %v", err))
 			return
 		}
 		var evts []timelineEvent
@@ -164,6 +173,7 @@ func (s *Server) handleGetEntityHistory(
 		}
 		eps, err := s.store.FindEpisodesByNodeID(nodeID, limit)
 		if err != nil {
+			appendWarning(fmt.Sprintf("episodes query failed: %v", err))
 			return
 		}
 		var evts []timelineEvent
@@ -188,6 +198,7 @@ func (s *Server) handleGetEntityHistory(
 		}
 		annMap, err := s.store.GetAnnotationsForNodes([]string{nodeID})
 		if err != nil {
+			appendWarning(fmt.Sprintf("annotations query failed: %v", err))
 			return
 		}
 		var evts []timelineEvent
@@ -219,6 +230,7 @@ func (s *Server) handleGetEntityHistory(
 		}
 		tasks, err := s.store.FindTasksByNodeID(nodeID, limit)
 		if err != nil {
+			appendWarning(fmt.Sprintf("tasks query failed: %v", err))
 			return
 		}
 		var evts []timelineEvent
@@ -261,6 +273,14 @@ func (s *Server) handleGetEntityHistory(
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "## Entity History: %s\n", node.Name)
 	fmt.Fprintf(&sb, "**File:** %s:%d  **Type:** %s\n\n", node.File, node.Line, node.Type)
+
+	if len(warnings) > 0 {
+		sb.WriteString("**Warnings** (some data may be incomplete):\n")
+		for _, w := range warnings {
+			fmt.Fprintf(&sb, "- %s\n", w)
+		}
+		sb.WriteString("\n")
+	}
 
 	if len(events) == 0 {
 		sb.WriteString("No history found for this entity. It has no memories, episodes, annotations, task references, or git changes.\n")

@@ -391,8 +391,10 @@ func (s *Server) extractSessionSummary(agentID string, sessionStart time.Time) *
 		return summary
 	}
 
-	// Get recent events (all types, last 200).
-	events, _, err := s.store.GetEvents(0, nil, "", 200)
+	// Get recent events filtered by agent ID at the store level.
+	// This avoids fetching all events from the beginning of time and
+	// filtering in Go code.
+	events, _, err := s.store.GetEvents(0, nil, agentID, 200)
 	if err != nil {
 		return summary
 	}
@@ -401,10 +403,6 @@ func (s *Server) extractSessionSummary(agentID string, sessionStart time.Time) *
 	tasksSet := make(map[string]bool)
 
 	for _, ev := range events {
-		// Only process events attributed to this agent.
-		if ev.AgentID != agentID {
-			continue
-		}
 		switch ev.Type {
 		case "agent_examining":
 			var payload struct {
