@@ -620,7 +620,12 @@ func (s *Server) handleDiscoverTools(ctx context.Context, req mcp.CallToolReques
 	if embeddingsReady && s.memoryEmbedder != nil && toolEmbedModel != s.memoryEmbedder.Model() {
 		embeddingsReady = false
 		// Re-embed tool catalog with the new model in background.
-		go s.EmbedToolCatalog(context.Background(), s.memoryEmbedder)
+		s.wg.Add(1)
+		embedder := s.memoryEmbedder
+		go func() {
+			defer s.wg.Done()
+			s.EmbedToolCatalog(ctx, embedder)
+		}()
 	}
 
 	if embeddingsReady && s.memoryEmbedder != nil {

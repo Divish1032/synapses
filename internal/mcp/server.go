@@ -1044,7 +1044,16 @@ func (s *Server) SetMemoryEmbedder(e embed.Embedder) {
 	// Pre-embed tool catalog in background so discover_tools can rank by
 	// cosine similarity instead of keyword overlap (Sprint 12 #5).
 	if e != nil {
-		go s.EmbedToolCatalog(context.Background(), e)
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			ctx, cancel := context.WithCancel(context.Background())
+			go func() {
+				<-s.stopCh
+				cancel()
+			}()
+			s.EmbedToolCatalog(ctx, e)
+		}()
 	}
 }
 
