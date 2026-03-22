@@ -295,9 +295,13 @@ func normalizeL2(v []float32) []float32 {
 		sum += float64(x) * float64(x)
 	}
 	norm := math.Sqrt(sum)
-	// Guard: skip normalisation for zero-magnitude, already-unit, or degenerate
-	// (NaN/Inf) vectors — dividing by a bad norm would corrupt the output.
-	if norm == 0 || math.IsNaN(norm) || math.IsInf(norm, 0) || (norm > 0.999 && norm < 1.001) {
+	// Guard: return nil for zero-magnitude or degenerate vectors so callers
+	// can detect and skip them rather than storing invalid embeddings.
+	if norm == 0 || math.IsNaN(norm) || math.IsInf(norm, 0) {
+		return nil
+	}
+	// Already unit-length — return as-is.
+	if norm > 0.999 && norm < 1.001 {
 		return v
 	}
 	out := make([]float32, len(v))

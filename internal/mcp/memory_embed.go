@@ -176,15 +176,16 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 // dot-product == cosine-similarity (avoids magnitude division per query).
 // Always returns a fresh slice — never the input buffer — so callers that
 // store the result are safe even if the embedder reuses its output array.
-// Returns a zero-filled copy when magnitude is zero (degenerate vector).
+// Returns nil when magnitude is zero (degenerate vector) so callers can
+// detect and skip rather than storing a zero-vector as valid.
 func normalizeVec(v []float32) []float32 {
 	if len(v) == 0 {
-		return v
+		return nil
 	}
 	// Guard: reject input containing NaN or Inf values.
 	for _, x := range v {
 		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
-			return make([]float32, len(v)) // return zero vector
+			return nil
 		}
 	}
 	var sum float64
@@ -192,13 +193,12 @@ func normalizeVec(v []float32) []float32 {
 		sum += float64(x) * float64(x)
 	}
 	if sum == 0 || math.IsNaN(sum) || math.IsInf(sum, 0) {
-		out := make([]float32, len(v))
-		return out
+		return nil
 	}
 	scale := float32(1.0 / math.Sqrt(sum))
 	// Guard: reject if scale is NaN/Inf (near-zero sum edge case).
 	if math.IsNaN(float64(scale)) || math.IsInf(float64(scale), 0) {
-		return make([]float32, len(v))
+		return nil
 	}
 	out := make([]float32, len(v))
 	for i, x := range v {
@@ -236,7 +236,12 @@ func (s *Server) EmbedToolCatalog(ctx context.Context, embedder embed.Embedder) 
 			logutil.Warn("synapses: embed tool catalog %s: empty vector — semantic tool discovery unavailable\n", tool.Name)
 			return
 		}
-		embeddings[i] = normalizeVec(vec)
+		normed := normalizeVec(vec)
+		if normed == nil {
+			logutil.Warn("synapses: embed tool catalog %s: zero-magnitude vector — skipping\n", tool.Name)
+			return
+		}
+		embeddings[i] = normed
 	}
 
 	model := embedder.Model()
