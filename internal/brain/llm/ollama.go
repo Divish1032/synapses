@@ -457,8 +457,9 @@ func (c *OllamaClient) PullModel(ctx context.Context, w io.Writer) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Pull can take minutes; use a long timeout client.
-	pullCli := &http.Client{Timeout: 30 * time.Minute}
+	// Pull can take minutes; use a long timeout client that inherits the
+	// existing transport (connection pool, proxy, TLS config).
+	pullCli := &http.Client{Transport: c.httpClient.Transport, Timeout: 30 * time.Minute}
 	resp, err := pullCli.Do(req)
 	if err != nil {
 		return fmt.Errorf("pull request: %w", err)
