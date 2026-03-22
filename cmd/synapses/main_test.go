@@ -459,8 +459,8 @@ func TestUpsertHookEntry_MultipleMatchers(t *testing.T) {
 
 func TestDetectInstalledAgents(t *testing.T) {
 	agents := detectInstalledAgents()
-	if len(agents) != 6 {
-		t.Errorf("expected 6 agents, got %d", len(agents))
+	if len(agents) != 5 {
+		t.Errorf("expected 5 agents, got %d", len(agents))
 	}
 	// Check that all expected keys are present.
 	keys := map[string]bool{}
