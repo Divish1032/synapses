@@ -20,6 +20,32 @@ install: build
 	@mkdir -p $(INSTALL_DIR)
 	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
 	@echo "Installed $(INSTALL_DIR)/$(BINARY)"
+	@if ! echo "$$PATH" | tr ':' '\n' | grep -qx "$(INSTALL_DIR)"; then \
+		SHELL_RC=""; \
+		if [ -f "$$HOME/.zshrc" ]; then \
+			SHELL_RC="$$HOME/.zshrc"; \
+		elif [ -f "$$HOME/.bash_profile" ]; then \
+			SHELL_RC="$$HOME/.bash_profile"; \
+		elif [ -f "$$HOME/.bashrc" ]; then \
+			SHELL_RC="$$HOME/.bashrc"; \
+		elif [ -f "$$HOME/.profile" ]; then \
+			SHELL_RC="$$HOME/.profile"; \
+		fi; \
+		if [ -n "$$SHELL_RC" ] && ! grep -q '.synapses/bin' "$$SHELL_RC" 2>/dev/null; then \
+			echo 'export PATH="$$HOME/.synapses/bin:$$PATH"' >> "$$SHELL_RC"; \
+			echo "Added $(INSTALL_DIR) to PATH in $$SHELL_RC"; \
+			echo "Run: source $$SHELL_RC"; \
+		fi; \
+		FISH_RC="$$HOME/.config/fish/config.fish"; \
+		if [ -f "$$FISH_RC" ] && ! grep -q '.synapses/bin' "$$FISH_RC" 2>/dev/null; then \
+			echo 'fish_add_path $$HOME/.synapses/bin' >> "$$FISH_RC"; \
+			echo "Added $(INSTALL_DIR) to PATH in $$FISH_RC"; \
+			echo "Run: source $$FISH_RC"; \
+		fi; \
+		if [ -z "$$SHELL_RC" ] && [ ! -f "$$FISH_RC" ]; then \
+			echo "Add to your shell config: export PATH=\"$(INSTALL_DIR):\$$PATH\""; \
+		fi; \
+	fi
 
 ## test: Run all tests
 test:
