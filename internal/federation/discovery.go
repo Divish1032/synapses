@@ -49,13 +49,13 @@ func DiscoverSiblings(projectRoot string) []DiscoveredSibling {
 		dirPath := filepath.Join(parent, e.Name())
 		hint := ""
 
-		// Check for synapses.json.
-		if _, err := os.Stat(filepath.Join(dirPath, "synapses.json")); err == nil {
+		// Check for synapses.json (Lstat to avoid following symlinks).
+		if _, err := os.Lstat(filepath.Join(dirPath, "synapses.json")); err == nil {
 			hint = "has synapses.json"
 		}
 		// Check for .synapses/ cache directory.
 		if hint == "" {
-			if info, err := os.Stat(filepath.Join(dirPath, ".synapses")); err == nil && info.IsDir() {
+			if info, err := os.Lstat(filepath.Join(dirPath, ".synapses")); err == nil && info.IsDir() {
 				hint = "has .synapses/ cache"
 			}
 		}
