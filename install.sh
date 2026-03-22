@@ -85,7 +85,8 @@ echo ""
 
 info "Installing synapses core..."
 go install "$SYNAPSES_PKG"
-ok "synapses installed  ($(command -v synapses 2>/dev/null || echo '~/.go/bin/synapses'))"
+GOBIN_DIR=$(go env GOBIN); GOPATH_DIR=$(go env GOPATH); EFFECTIVE_BIN="${GOBIN_DIR:-${GOPATH_DIR}/bin}"
+ok "synapses installed  ($(command -v synapses 2>/dev/null || echo "$EFFECTIVE_BIN/synapses"))"
 
 # ── install brain ─────────────────────────────────────────────────────────────
 
@@ -133,30 +134,53 @@ if [ "$WITH_PULSE" = true ]; then
   ok "pulse installed  ($(command -v pulse 2>/dev/null || echo '~/.go/bin/pulse'))"
 fi
 
-# ── path hint ────────────────────────────────────────────────────────────────
+# ── path verification ────────────────────────────────────────────────────────
 
-GOBIN=$(go env GOBIN)
-GOPATH=$(go env GOPATH)
-EFFECTIVE_BIN="${GOBIN:-${GOPATH}/bin}"
+if command -v synapses >/dev/null 2>&1; then
+  ok "synapses is in PATH — ready to use"
+else
+  GOBIN_DIR=$(go env GOBIN)
+  GOPATH_DIR=$(go env GOPATH)
+  EFFECTIVE_BIN="${GOBIN_DIR:-${GOPATH_DIR}/bin}"
 
-if ! echo "$PATH" | grep -q "$EFFECTIVE_BIN"; then
   echo ""
   warn "$EFFECTIVE_BIN is not in your PATH."
-  warn "Add this to ~/.zshrc or ~/.profile:"
   echo ""
-  echo "       export PATH=\"\$PATH:$EFFECTIVE_BIN\""
+  echo "       Activate now:"
+  echo "         export PATH=\"$EFFECTIVE_BIN:\$PATH\""
+  echo ""
+  echo "       Persist for future sessions:"
+
+  SHELL_NAME=$(basename "$SHELL" 2>/dev/null)
+  case "$SHELL_NAME" in
+    zsh)  echo "         echo 'export PATH=\"$EFFECTIVE_BIN:\$PATH\"' >> ~/.zshrc" ;;
+    bash)
+      if [ -f "$HOME/.bash_profile" ]; then
+        echo "         echo 'export PATH=\"$EFFECTIVE_BIN:\$PATH\"' >> ~/.bash_profile"
+      else
+        echo "         echo 'export PATH=\"$EFFECTIVE_BIN:\$PATH\"' >> ~/.bashrc"
+      fi ;;
+    fish) echo "         fish_add_path $EFFECTIVE_BIN" ;;
+    *)    echo "         echo 'export PATH=\"$EFFECTIVE_BIN:\$PATH\"' >> ~/.profile" ;;
+  esac
   echo ""
 fi
 
-# ── start sidecars ────────────────────────────────────────────────────────────
+# ── start daemon ─────────────────────────────────────────────────────────────
 
 echo ""
 echo "  ──────────────────────────────────────"
-info "Starting background services..."
-echo ""
 
-# synapses daemon start is idempotent and skips binaries not in PATH
-synapses daemon start
+# Resolve binary: prefer PATH, fall back to GOBIN location from earlier.
+SYNAPSES_BIN=$(command -v synapses 2>/dev/null || echo "${EFFECTIVE_BIN}/synapses")
+
+if [ -x "$SYNAPSES_BIN" ]; then
+  info "Starting daemon..."
+  "$SYNAPSES_BIN" daemon start || warn "Daemon start failed — run 'synapses daemon start' later."
+else
+  warn "Skipping daemon start — synapses not in PATH yet."
+  warn "After updating PATH (see above), run: synapses daemon start"
+fi
 
 # ── next steps ────────────────────────────────────────────────────────────────
 

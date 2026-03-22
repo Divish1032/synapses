@@ -13,38 +13,44 @@ build:
 	@mkdir -p $(BUILD_DIR)
 	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY) $(CMD_PATH)
 
-INSTALL_DIR := $(HOME)/.synapses/bin
-
-## install: Build and install binary to ~/.synapses/bin
+## install: Build and install synapses binary
+##
+## Strategy: use `go install` so the binary lands in GOBIN/GOPATH (already in
+## PATH for any Go developer). Also copy to ~/.synapses/bin/ for the Tauri
+## desktop app's find_binary() fallback.
+##
+## Works immediately — no terminal restart needed on macOS, Linux, or Windows.
 install: build
-	@mkdir -p $(INSTALL_DIR)
-	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
-	@echo "Installed $(INSTALL_DIR)/$(BINARY)"
-	@if ! echo "$$PATH" | tr ':' '\n' | grep -qx "$(INSTALL_DIR)"; then \
-		SHELL_RC=""; \
-		if [ -f "$$HOME/.zshrc" ]; then \
-			SHELL_RC="$$HOME/.zshrc"; \
-		elif [ -f "$$HOME/.bash_profile" ]; then \
-			SHELL_RC="$$HOME/.bash_profile"; \
-		elif [ -f "$$HOME/.bashrc" ]; then \
-			SHELL_RC="$$HOME/.bashrc"; \
-		elif [ -f "$$HOME/.profile" ]; then \
-			SHELL_RC="$$HOME/.profile"; \
-		fi; \
-		if [ -n "$$SHELL_RC" ] && ! grep -q '.synapses/bin' "$$SHELL_RC" 2>/dev/null; then \
-			echo 'export PATH="$$HOME/.synapses/bin:$$PATH"' >> "$$SHELL_RC"; \
-			echo "Added $(INSTALL_DIR) to PATH in $$SHELL_RC"; \
-			echo "Run: source $$SHELL_RC"; \
-		fi; \
-		FISH_RC="$$HOME/.config/fish/config.fish"; \
-		if [ -f "$$FISH_RC" ] && ! grep -q '.synapses/bin' "$$FISH_RC" 2>/dev/null; then \
-			echo 'fish_add_path $$HOME/.synapses/bin' >> "$$FISH_RC"; \
-			echo "Added $(INSTALL_DIR) to PATH in $$FISH_RC"; \
-			echo "Run: source $$FISH_RC"; \
-		fi; \
-		if [ -z "$$SHELL_RC" ] && [ ! -f "$$FISH_RC" ]; then \
-			echo "Add to your shell config: export PATH=\"$(INSTALL_DIR):\$$PATH\""; \
-		fi; \
+	@go install $(LDFLAGS) $(CMD_PATH)
+	@GOBIN_DIR=$$(go env GOBIN); \
+	GOPATH_DIR=$$(go env GOPATH); \
+	EFFECTIVE_BIN=$${GOBIN_DIR:-$${GOPATH_DIR}/bin}; \
+	echo "  Installed $$EFFECTIVE_BIN/$(BINARY)"; \
+	mkdir -p "$$HOME/.synapses/bin"; \
+	cp "$(BUILD_DIR)/$(BINARY)" "$$HOME/.synapses/bin/$(BINARY)" 2>/dev/null || true; \
+	if command -v $(BINARY) >/dev/null 2>&1; then \
+		printf "  \033[32m✓\033[0m Ready! Run: synapses version\n"; \
+	else \
+		echo ""; \
+		printf "  \033[33m!\033[0m $$EFFECTIVE_BIN is not in your PATH.\n"; \
+		echo ""; \
+		echo "  Activate now (pick one):"; \
+		echo "    export PATH=\"$$EFFECTIVE_BIN:\$$PATH\""; \
+		echo ""; \
+		echo "  Persist for future sessions — add to your shell config:"; \
+		SHELL_NAME=$$(basename "$$SHELL" 2>/dev/null); \
+		case "$$SHELL_NAME" in \
+			zsh)  echo "    echo 'export PATH=\"$$EFFECTIVE_BIN:\$$PATH\"' >> ~/.zshrc" ;; \
+			bash) \
+				if [ -f "$$HOME/.bash_profile" ]; then \
+					echo "    echo 'export PATH=\"$$EFFECTIVE_BIN:\$$PATH\"' >> ~/.bash_profile"; \
+				else \
+					echo "    echo 'export PATH=\"$$EFFECTIVE_BIN:\$$PATH\"' >> ~/.bashrc"; \
+				fi ;; \
+			fish) echo "    fish_add_path $$EFFECTIVE_BIN" ;; \
+			*)    echo "    echo 'export PATH=\"$$EFFECTIVE_BIN:\$$PATH\"' >> ~/.profile" ;; \
+		esac; \
+		echo ""; \
 	fi
 
 ## test: Run all tests
