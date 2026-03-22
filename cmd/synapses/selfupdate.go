@@ -423,8 +423,27 @@ func downloadFile(dst, url string) error {
 		return fmt.Errorf("download incomplete: got %d bytes, expected %d", written, total)
 	}
 
+	computedHash := hex.EncodeToString(hasher.Sum(nil))
 	logutil.Info("synapses: downloaded %s (%d bytes, sha256:%s)\n",
-		filepath.Base(dst), written, hex.EncodeToString(hasher.Sum(nil))[:16])
+		filepath.Base(dst), written, computedHash[:16])
+
+	// Fetch the published .sha256 checksum file and verify integrity.
+	checksumURL := url + ".sha256"
+	if checksumResp, checksumErr := client.Get(checksumURL); checksumErr == nil {
+		defer checksumResp.Body.Close()
+		if checksumResp.StatusCode == http.StatusOK {
+			if checksumBody, readErr := io.ReadAll(io.LimitReader(checksumResp.Body, 256)); readErr == nil {
+				expectedHash := strings.Fields(strings.TrimSpace(string(checksumBody)))
+				if len(expectedHash) > 0 && len(expectedHash[0]) == 64 {
+					if !strings.EqualFold(computedHash, expectedHash[0]) {
+						os.Remove(dst)
+						return fmt.Errorf("integrity check failed: expected sha256 %s, got %s", expectedHash[0], computedHash)
+					}
+					logutil.Info("synapses: sha256 checksum verified against %s\n", filepath.Base(checksumURL))
+				}
+			}
+		}
+	}
 	return nil
 }
 

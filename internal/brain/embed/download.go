@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +15,37 @@ import (
 	"strings"
 	"time"
 )
+
+// llamaServerSHA256 maps (version, GOOS/GOARCH) to the expected SHA-256 hash
+// of the downloaded zip artifact. Update these when bumping DefaultLlamaCPPVersion.
+var llamaServerSHA256 = map[string]string{
+	"b5618:darwin/arm64":  "", // TODO: pin hash after first verified download
+	"b5618:darwin/amd64":  "",
+	"b5618:linux/amd64":   "",
+	"b5618:linux/arm64":   "",
+	"b5618:windows/amd64": "",
+}
+
+// embedModelSHA256 maps model filenames to expected SHA-256 hashes.
+var embedModelSHA256 = map[string]string{
+	"nomic-embed-text-v1.5.Q4_K_M.gguf": "", // TODO: pin hash after first verified download
+}
+
+// verifyOrLogSHA256 checks download data against an expected hash. If expected is
+// empty, logs the hash for pinning. Returns error on mismatch.
+func verifyOrLogSHA256(data []byte, expected string, label string, progress io.Writer) error {
+	actual := sha256.Sum256(data)
+	actualHex := hex.EncodeToString(actual[:])
+	if expected != "" {
+		if actualHex != expected {
+			return fmt.Errorf("%s integrity check failed: expected sha256 %s, got %s", label, expected, actualHex)
+		}
+		logProgress(progress, "SHA-256 verified: %s", actualHex[:16])
+	} else {
+		logProgress(progress, "%s sha256 (pin this): %s", label, actualHex)
+	}
+	return nil
+}
 
 const (
 	// DefaultLlamaCPPVersion is the pinned llama.cpp release used for binary downloads.
@@ -88,6 +121,12 @@ func EnsureLlamaServer(ctx context.Context, opts DownloadOptions) (string, error
 		return "", fmt.Errorf("download llama.cpp release: %w", err)
 	}
 
+	// Verify SHA-256 integrity when a pinned hash is available.
+	hashKey := opts.LlamaCPPVersion + ":" + runtime.GOOS + "/" + runtime.GOARCH
+	if err := verifyOrLogSHA256(data, llamaServerSHA256[hashKey], "llama-server", opts.Progress); err != nil {
+		return "", err
+	}
+
 	logProgress(opts.Progress, "Extracting llama-server from zip (%d MB)…", len(data)/1024/1024)
 	if err := extractLlamaServerFromZip(data, opts.BinDir, binPath); err != nil {
 		return "", fmt.Errorf("extract llama-server: %w", err)
@@ -130,6 +169,15 @@ func EnsureEmbedModel(ctx context.Context, opts DownloadOptions, hfRepo, filenam
 		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("download embedding model: %w", err)
 	}
+
+	// Verify SHA-256 integrity when a pinned hash is available.
+	if tmpData, readErr := os.ReadFile(tmpPath); readErr == nil {
+		if err := verifyOrLogSHA256(tmpData, embedModelSHA256[filename], "embed model", opts.Progress); err != nil {
+			_ = os.Remove(tmpPath)
+			return "", err
+		}
+	}
+
 	if err := os.Rename(tmpPath, modelPath); err != nil {
 		return "", err
 	}
