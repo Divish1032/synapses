@@ -1,5 +1,6 @@
 .PHONY: build test lint clean install fmt vet \
-        run/index run/start run/status run/reset run/reset-all
+        run/index run/start run/status run/reset run/reset-all \
+        web/build
 
 BINARY     := synapses
 BUILD_DIR  := bin
@@ -8,8 +9,12 @@ CMD_PATH   := ./cmd/synapses
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS    := -ldflags "-X main.version=$(VERSION) -s -w"
 
-## build: Compile the binary
-build:
+## web/build: Build the embedded web console (Preact + Vite)
+web/build:
+	@cd web/console && npm ci --silent && npm run build
+
+## build: Build web console + compile Go binary (embeds console assets)
+build: web/build
 	@mkdir -p $(BUILD_DIR)
 	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY) $(CMD_PATH)
 
