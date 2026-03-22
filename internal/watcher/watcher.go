@@ -1202,12 +1202,28 @@ func (w *Watcher) ingestToBrain(path string) {
 	if !ok || bc == nil {
 		return
 	}
+	// Derive context from stopCh so in-flight ingests are cancelled on shutdown.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-w.stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	defer cancel()
 	nodes := w.graph.NodesForFile(path)
 	ingestStart := time.Now()
 	var ingestCount int
 	for _, n := range nodes {
 		if string(n.Type) == "package" || string(n.Type) == "file" {
 			continue
+		}
+		// Check for shutdown between ingest calls.
+		select {
+		case <-w.stopCh:
+			return
+		default:
 		}
 		code := ""
 		if sig, ok := n.Metadata["signature"]; ok && sig != "" {
@@ -1216,7 +1232,7 @@ func (w *Watcher) ingestToBrain(path string) {
 		if doc, ok := n.Metadata["doc"]; ok && doc != "" && code != "" {
 			code = "// " + doc + "\n" + code
 		}
-		bc.Ingest(context.Background(), brain.IngestRequest{
+		bc.Ingest(ctx, brain.IngestRequest{
 			ProjectID: w.projectID,
 			NodeID:    string(n.ID),
 			NodeName:  n.Name,
