@@ -467,7 +467,7 @@ func TestDetectInstalledAgents(t *testing.T) {
 	for _, a := range agents {
 		keys[a.Key] = true
 	}
-	for _, want := range []string{"claude", "cursor", "vscode", "windsurf", "zed", "antigravity"} {
+	for _, want := range []string{"claude", "cursor", "windsurf", "zed", "antigravity"} {
 		if !keys[want] {
 			t.Errorf("missing agent key %q", want)
 		}

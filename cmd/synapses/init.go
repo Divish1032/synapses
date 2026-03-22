@@ -55,7 +55,7 @@ func cmdInit(args []string) error {
 	var yes bool
 	fs.BoolVar(&yes, "yes", false, "Non-interactive mode — accept all defaults")
 	fs.BoolVar(&yes, "y", false, "Non-interactive mode (shorthand)")
-	agentList := fs.String("agents", "", "Comma-separated agents to connect (claude,cursor,windsurf,zed,vscode,antigravity)")
+	agentList := fs.String("agents", "", "Comma-separated agents to connect (claude,cursor,windsurf,zed,antigravity)")
 	noAgents := fs.Bool("no-agents", false, "Skip agent connection step")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -385,7 +385,6 @@ func detectInstalledAgents() []AgentInfo {
 	agents := []AgentInfo{
 		{Key: "claude", Display: "Claude Code", Detected: detectClaude(home)},
 		{Key: "cursor", Display: "Cursor", Detected: detectCursor(home)},
-		{Key: "vscode", Display: "VS Code", Detected: detectVSCode(home)},
 		{Key: "windsurf", Display: "Windsurf", Detected: detectWindsurf(home)},
 		{Key: "zed", Display: "Zed", Detected: detectZed(home)},
 		{Key: "antigravity", Display: "Antigravity", Detected: detectAntigravity(home)},
@@ -412,19 +411,6 @@ func detectCursor(home string) bool {
 	}
 }
 
-func detectVSCode(home string) bool {
-	switch runtime.GOOS {
-	case "darwin":
-		return pathExists("/Applications/Visual Studio Code.app") ||
-			pathExists(filepath.Join(home, ".vscode"))
-	case "windows":
-		return pathExistsInLocalAppData("Programs", "Microsoft VS Code") ||
-			pathExists(filepath.Join(home, ".vscode"))
-	default:
-		return pathExists(filepath.Join(home, ".vscode")) ||
-			pathExists(filepath.Join(home, ".config", "Code"))
-	}
-}
 
 func detectWindsurf(home string) bool {
 	switch runtime.GOOS {
@@ -530,11 +516,6 @@ func connectSingleAgent(absPath, agent string) connectResult {
 	case "zed":
 		ops = []writeOp{
 			{func() error { return writeZedMCPConfig(absPath) }, ".zed/settings.json"},
-		}
-
-	case "vscode":
-		ops = []writeOp{
-			{func() error { return writeVSCodeMCPConfig(absPath) }, ".vscode/mcp.json"},
 		}
 
 	case "antigravity":

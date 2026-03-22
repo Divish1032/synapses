@@ -14,7 +14,6 @@ const AGENTS = [
   { id: "cursor", label: "Cursor", configFile: ".cursor/mcp.json" },
   { id: "windsurf", label: "Windsurf", configFile: ".windsurf/mcp_config.json" },
   { id: "zed", label: "Zed", configFile: ".zed/settings.json" },
-  { id: "vscode", label: "VS Code", configFile: ".vscode/mcp.json" },
   { id: "antigravity", label: "Antigravity", configFile: ".agent/mcp.json" },
 ];
 

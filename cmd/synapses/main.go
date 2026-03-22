@@ -2308,38 +2308,6 @@ func writeZedMCPConfig(repoRoot string) error {
 	return os.WriteFile(file, append(out, '\n'), 0o644)
 }
 
-// writeVSCodeMCPConfig merges a synapses entry into .vscode/mcp.json for
-// VS Code 1.99+ native MCP support (GitHub Copilot agent mode).
-func writeVSCodeMCPConfig(repoRoot string) error {
-	file := filepath.Join(repoRoot, ".vscode", "mcp.json")
-	raw := map[string]interface{}{"servers": map[string]interface{}{}}
-	if data, err := os.ReadFile(file); err == nil {
-		parsed := map[string]interface{}{}
-		if json.Unmarshal(data, &parsed) == nil {
-			raw = parsed
-		}
-	}
-	if _, ok := raw["servers"]; !ok {
-		raw["servers"] = map[string]interface{}{}
-	}
-	servers, _ := raw["servers"].(map[string]interface{})
-	if servers == nil {
-		servers = map[string]interface{}{}
-		raw["servers"] = servers
-	}
-	servers["synapses"] = map[string]interface{}{
-		"type": "http",
-		"url":  mcpURL(repoRoot),
-	}
-	if err := os.MkdirAll(filepath.Join(repoRoot, ".vscode"), 0o755); err != nil {
-		return err
-	}
-	out, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(file, append(out, '\n'), 0o644)
-}
 
 // writeGuidanceFile writes (or updates) the Synapses guidance section in a
 // plain-markdown rules file (e.g. .windsurfrules). frontmatter is prepended
@@ -2382,13 +2350,13 @@ func writeGuidanceFile(repoRoot, file, frontmatter string) error {
 // .claude/settings.json (hooks + permissions).
 func cmdConnect(args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
-	agent := fs.String("agent", "", "Agent to connect: claude, cursor, windsurf, zed, vscode")
+	agent := fs.String("agent", "", "Agent to connect: claude, cursor, windsurf, zed, antigravity")
 	repoPath := fs.String("path", ".", "Path to the project root")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *agent == "" {
-		return fmt.Errorf("--agent is required (claude, cursor, windsurf, zed, vscode)")
+		return fmt.Errorf("--agent is required (claude, cursor, windsurf, zed, antigravity)")
 	}
 	absPath, err := filepath.Abs(*repoPath)
 	if err != nil {
@@ -2430,10 +2398,6 @@ func cmdConnect(args []string) error {
 		settingsFile := filepath.Join(absPath, ".zed", "settings.json")
 		add(settingsFile, writeZedMCPConfig(absPath))
 
-	case "vscode":
-		mcpFile := filepath.Join(absPath, ".vscode", "mcp.json")
-		add(mcpFile, writeVSCodeMCPConfig(absPath))
-
 	case "antigravity":
 		// Antigravity (https://antigravity.google) stores workspace MCP config
 		// at .agent/mcp.json and agent rules at .agent/rules/
@@ -2443,7 +2407,7 @@ func cmdConnect(args []string) error {
 		add(rulesFile, writeGuidanceFile(absPath, rulesFile, ""))
 
 	default:
-		return fmt.Errorf("unknown agent %q — supported: claude, cursor, windsurf, zed, vscode, antigravity", *agent)
+		return fmt.Errorf("unknown agent %q — supported: claude, cursor, windsurf, zed, antigravity", *agent)
 	}
 
 	for _, r := range results {
@@ -2528,7 +2492,6 @@ func printSummaryTable(
 
 // cmdQuery loads the cached graph for a project and outputs a single entity's
 // context as JSON — name, type, file, line, callers, callees, and metadata.
-// This is the backend used by the VS Code extension hover provider.
 func cmdQuery(args []string) error {
 	fs := flag.NewFlagSet("query", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Repository root")
@@ -2568,8 +2531,8 @@ func cmdQuery(args []string) error {
 	// Resolution order:
 	//   1. Exact name match (e.g. "Store", "cmdQuery")
 	//   2. Suffix match — bare word matches "Type.Method" suffix (e.g. "AddEdge" → "Graph.AddEdge")
-	//      This lets the VS Code hover provider (word-under-cursor) find methods without
-	//      the caller needing the fully-qualified "TypeName.Method" form.
+	//      This lets callers (word-under-cursor) find methods without
+	//      the fully-qualified "TypeName.Method" form.
 	// Within each tier: fn/method beats struct/other.
 	suffix := "." + *entityName
 	pickBetter := func(cur, candidate *graph.Node) *graph.Node {
