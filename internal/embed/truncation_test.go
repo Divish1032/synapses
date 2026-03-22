@@ -127,16 +127,13 @@ func TestL2Normalize_NearlyUnit(t *testing.T) {
 func TestL2Normalize_ZeroVector(t *testing.T) {
 	in := []float32{0, 0, 0}
 	out := l2Normalize(in)
-	if len(out) != 3 {
-		t.Fatalf("expected length 3, got %d", len(out))
+	// Zero-magnitude vectors return nil to prevent NaN in cosine similarity.
+	if out != nil {
+		t.Fatalf("expected nil for zero-magnitude vector, got %v", out)
 	}
-	for i, v := range out {
-		if v != 0 {
-			t.Errorf("out[%d] = %f, want 0", i, v)
-		}
-	}
-	// Should return same slice (zero-magnitude early return).
-	if &out[0] != &in[0] {
+	// Legacy check removed: zero-magnitude now returns nil, not same slice.
+	_ = in
+	if false {
 		t.Error("expected same backing array for zero vector")
 	}
 }

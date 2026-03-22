@@ -228,6 +228,13 @@ func cmdBrainSetup(args []string) error {
 		return fmt.Errorf("invalid mode %q — must be one of: optimal, standard, full", *mode)
 	}
 
+	// SSRF protection: validate URL points to localhost only and create a
+	// hardened HTTP client that enforces loopback at dial time.
+	if err := validateOllamaURL(*ollamaURL); err != nil {
+		return fmt.Errorf("brain setup: %w", err)
+	}
+	safeClient := newOllamaHTTPClient(30 * time.Second)
+
 	// color helpers — inline so callers stay readable
 	green  := func(s string) string { if *noColor { return s }; return "\033[32m" + s + "\033[0m" }
 	yellow := func(s string) string { if *noColor { return s }; return "\033[33m" + s + "\033[0m" }
@@ -245,7 +252,7 @@ func cmdBrainSetup(args []string) error {
 
 	// ── Step 1: Ollama reachability ──────────────────────────────────────────
 	fmt.Print("  [1/4] Checking Ollama... ")
-	version, err := brainPingOllama(*ollamaURL)
+	version, err := brainPingOllama(*ollamaURL, safeClient)
 	if err != nil {
 		fmt.Println()
 		fmt.Println()
@@ -272,7 +279,7 @@ func cmdBrainSetup(args []string) error {
 	if *skipPull {
 		fmt.Println("        --skip-pull set, assuming already downloaded.")
 	} else {
-		installed, err := brainIsModelInstalled(*ollamaURL, baseModel)
+		installed, err := brainIsModelInstalled(*ollamaURL, baseModel, safeClient)
 		if err != nil {
 			return fmt.Errorf("brain setup: check model: %w", err)
 		}
@@ -280,7 +287,7 @@ func cmdBrainSetup(args []string) error {
 			fmt.Printf("        %s %s is already downloaded\n", green("✓"), baseModel)
 		} else {
 			fmt.Printf("        %s Downloading %s (~2.7 GB) — this may take a few minutes...\n\n", yellow("↓"), baseModel)
-			if err := brainPullModel(*ollamaURL, baseModel); err != nil {
+			if err := brainPullModel(*ollamaURL, baseModel, safeClient); err != nil {
 				return fmt.Errorf("brain setup: pull %s: %w", baseModel, err)
 			}
 			fmt.Printf("\n        %s %s downloaded\n", green("✓"), baseModel)
@@ -312,7 +319,7 @@ func cmdBrainSetup(args []string) error {
 		fmt.Println()
 		failed := 0
 		for _, tier := range brainTiers {
-			ok, elapsed := brainSmokeTest(*ollamaURL, tier.name)
+			ok, elapsed := brainSmokeTest(*ollamaURL, tier.name, safeClient)
 			if ok {
 				fmt.Printf("        %s  %-24s  responded in %s\n", green("✓"), tier.name, elapsed)
 			} else {
@@ -370,14 +377,14 @@ func cmdBrainRegister(args []string) error {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 // brainPingOllama returns the Ollama version string or an error if unreachable.
-func brainPingOllama(baseURL string) (string, error) {
+func brainPingOllama(baseURL string, client *http.Client) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/version", nil)
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -393,14 +400,14 @@ func brainPingOllama(baseURL string) (string, error) {
 }
 
 // brainIsModelInstalled returns true if modelName is present in Ollama's tag list.
-func brainIsModelInstalled(baseURL, modelName string) (bool, error) {
+func brainIsModelInstalled(baseURL, modelName string, client *http.Client) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/tags", nil)
 	if err != nil {
 		return false, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -423,7 +430,7 @@ func brainIsModelInstalled(baseURL, modelName string) (bool, error) {
 }
 
 // brainPullModel streams a pull from Ollama, printing live progress.
-func brainPullModel(baseURL, modelName string) error {
+func brainPullModel(baseURL, modelName string, client *http.Client) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	reqBody, _ := json.Marshal(map[string]interface{}{
@@ -435,7 +442,7 @@ func brainPullModel(baseURL, modelName string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -524,7 +531,7 @@ func brainRegisterIdentity(tier brainTierDef) error {
 
 // brainSmokeTest sends a minimal chat request and checks for valid JSON output.
 // Returns (ok, elapsed) — the elapsed is formatted as "1.2s".
-func brainSmokeTest(baseURL, modelName string) (bool, string) {
+func brainSmokeTest(baseURL, modelName string, client *http.Client) (bool, string) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
@@ -544,7 +551,7 @@ func brainSmokeTest(baseURL, modelName string) (bool, string) {
 		return false, ""
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, ""
 	}
@@ -608,5 +615,5 @@ func brainWriteConfig(ollamaURL, mode string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return cfgPath, os.WriteFile(cfgPath, append(out, '\n'), 0o644)
+	return cfgPath, os.WriteFile(cfgPath, append(out, '\n'), 0o600)
 }

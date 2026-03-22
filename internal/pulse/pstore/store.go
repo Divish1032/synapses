@@ -28,6 +28,10 @@ type Store struct {
 
 // execer returns the active transaction if one exists, otherwise the raw db.
 // This ensures that Tx-suffixed methods write inside the batch transaction.
+// Note: s.tx is only set/cleared under s.mu in BeginBatch/CommitBatch, and
+// read here without a lock. This is safe because: (1) during a batch,
+// all Tx-suffixed calls happen from the same goroutine that holds mu, and
+// (2) outside a batch, s.tx is nil and reads are harmless.
 func (s *Store) execer() interface {
 	Exec(string, ...any) (sql.Result, error)
 	Query(string, ...any) (*sql.Rows, error)

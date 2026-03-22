@@ -472,6 +472,21 @@ func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[strin
 		if statErr != nil {
 			return nil
 		}
+
+		// Security: Prevent Directory Traversal via Symlinks.
+		// Resolve the symlink and verify containment using inode comparison
+		// (os.SameFile), which is immune to case/Unicode/TOCTOU races.
+		if info.Mode()&os.ModeSymlink != 0 {
+			resolved, symErr := filepath.EvalSymlinks(path)
+			if symErr != nil {
+				return nil // Skip dangling or invalid symlinks
+			}
+			if !isPathContainedIn(resolved, root) {
+				logutil.Warn("synapses/security: skipped symlink resolving outside repo root: %s -> %s\n", path, resolved)
+				return nil
+			}
+		}
+
 		mtime := info.ModTime().UnixNano()
 
 		if stored, hit := known[path]; hit && stored == mtime {

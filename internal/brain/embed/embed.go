@@ -48,12 +48,18 @@ func normalizeL2Vec(v []float32) []float32 {
 		sum += float64(x) * float64(x)
 	}
 	norm := math.Sqrt(sum)
+	if math.IsNaN(norm) || math.IsInf(norm, 0) {
+		return nil
+	}
 	if norm == 0 || (norm > 0.999 && norm < 1.001) {
 		return v
 	}
 	out := make([]float32, len(v))
 	for i, x := range v {
 		out[i] = float32(float64(x) / norm)
+	}
+	if math.IsNaN(float64(out[0])) || math.IsInf(float64(out[0]), 0) {
+		return nil
 	}
 	return out
 }
