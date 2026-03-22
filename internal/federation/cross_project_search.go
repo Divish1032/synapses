@@ -57,6 +57,7 @@ func (s *CrossProjectSearch) FindEntities(ctx context.Context, query string, ali
 	var results []FederatedSearchResult
 
 	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(8) // bound parallelism to avoid overwhelming sibling stores
 	for _, e := range targets {
 		e := e // capture loop variable
 		g.Go(func() error {
@@ -205,6 +206,7 @@ func (s *CrossProjectSearch) SearchEpisodes(ctx context.Context, query string, a
 	var results []FederatedEpisode
 
 	eg, egctx := errgroup.WithContext(ctx)
+	eg.SetLimit(8) // bound parallelism to avoid overwhelming sibling stores
 	for _, e := range targets {
 		e := e
 		eg.Go(func() error {
@@ -254,6 +256,7 @@ func (s *CrossProjectSearch) SearchMemoriesForEntity(ctx context.Context, entity
 	var hints []FederatedMemoryHint
 
 	eg, egctx := errgroup.WithContext(ctx)
+	eg.SetLimit(8) // bound parallelism to avoid overwhelming sibling stores
 	for _, e := range targets {
 		e := e
 		eg.Go(func() error {
