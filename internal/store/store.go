@@ -1562,34 +1562,38 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	// Cross-DB reconciliation for hard node_id references: annotations and quality_gaps
 	// in knowledgeDB reference node IDs from graphDB, but there is no cross-database
 	// transaction guaranteeing consistency (see the Store type comment for the full
-	// eventual-consistency model). This daily pass collects current node IDs from
-	// graphDB and removes knowledgeDB records that reference absent nodes.
-	// The read and delete are not atomic — a node added between the two steps could
-	// be briefly affected — but since the prune runs daily, any node absent at prune
-	// time has been gone for 23+ hours and is permanently deleted, not a reindex transient.
-	// NOTE: O(N) over all nodes — acceptable at current scale (tens of thousands).
-	// If the node table grows significantly, consider a chunked or indexed approach.
+	// eventual-consistency model). This daily pass collects referenced node IDs from
+	// the knowledgeDB tables (small set) and checks them against graphDB, avoiding
+	// loading the entire graph node table into memory.
 	if s.graphDB != nil {
-		nodeIDs := make(map[string]struct{})
-		if rows, err := s.graphDB.Query(`SELECT id FROM nodes`); err == nil {
-			for rows.Next() {
-				var id string
-				if rows.Scan(&id) == nil {
-					nodeIDs[id] = struct{}{}
-				}
+		// nodeExistsInGraph checks a single node_id against graphDB.
+		// Cached per-prune-cycle so repeated references are O(1) after first check.
+		existsCache := make(map[string]bool)
+		nodeExistsInGraph := func(nodeID string) bool {
+			if cached, ok := existsCache[nodeID]; ok {
+				return cached
 			}
-			rows.Close()
+			var dummy int
+			err := s.graphDB.QueryRow(`SELECT 1 FROM nodes WHERE id = ? LIMIT 1`, nodeID).Scan(&dummy)
+			exists := err == nil
+			existsCache[nodeID] = exists
+			return exists
 		}
-		if len(nodeIDs) > 0 {
+
+		// hasAnyNodes is a quick check to avoid deleting everything from an empty graph.
+		var hasNodes bool
+		if err := s.graphDB.QueryRow(`SELECT 1 FROM nodes LIMIT 1`).Scan(new(int)); err == nil {
+			hasNodes = true
+		}
+
+		if hasNodes {
 			// Delete stale annotations whose node no longer exists in the graph.
-			// Only annotations already flagged stale=1 are candidates — un-flagged
-			// annotations are preserved even during transient reindex windows.
 			if annRows, err := s.knowledgeDB.Query(`SELECT id, node_id FROM annotations WHERE stale=1`); err == nil {
 				var toDelete []string
 				for annRows.Next() {
 					var annID, nodeID string
 					if annRows.Scan(&annID, &nodeID) == nil {
-						if _, exists := nodeIDs[nodeID]; !exists {
+						if !nodeExistsInGraph(nodeID) {
 							toDelete = append(toDelete, annID)
 						}
 					}
@@ -1601,18 +1605,12 @@ func (s *Store) PruneStaleData(retentionDays int) {
 			}
 
 			// Delete quality gaps whose node no longer exists in the graph.
-			// A quality gap for a deleted or renamed node is misleading — the code
-			// it described no longer exists at that identity. Unlike annotations,
-			// quality_gaps has no stale flag: any gap referencing an absent node is
-			// by definition stale. The prune runs daily, so transient reindex windows
-			// (seconds) are not a concern — if the node is still absent after 23+ hours,
-			// it is permanently gone.
 			if gapRows, err := s.knowledgeDB.Query(`SELECT id, node_id FROM quality_gaps WHERE status = 'open'`); err == nil {
 				var toDelete []string
 				for gapRows.Next() {
 					var gapID, nodeID string
 					if gapRows.Scan(&gapID, &nodeID) == nil {
-						if _, exists := nodeIDs[nodeID]; !exists {
+						if !nodeExistsInGraph(nodeID) {
 							toDelete = append(toDelete, gapID)
 						}
 					}
@@ -1643,22 +1641,27 @@ func (s *Store) reconcileOrphanedReferences() {
 		return // knowledge-mode: no graph → nothing to reconcile
 	}
 
-	nodeIDs := make(map[string]struct{})
-	rows, err := s.graphDB.Query(`SELECT id FROM nodes`)
-	if err != nil {
-		logutil.Debug("synapses: store: startup reconcile: read nodes: %v\n", err)
+	// Quick check: if graph is empty, skip to avoid deleting everything.
+	var hasNodes bool
+	if err := s.graphDB.QueryRow(`SELECT 1 FROM nodes LIMIT 1`).Scan(new(int)); err == nil {
+		hasNodes = true
+	}
+	if !hasNodes {
 		return
 	}
-	for rows.Next() {
-		var id string
-		if rows.Scan(&id) == nil {
-			nodeIDs[id] = struct{}{}
-		}
-	}
-	rows.Close()
 
-	if len(nodeIDs) == 0 {
-		return // empty graph — skip to avoid deleting everything
+	// Cache node existence checks to avoid repeated graphDB round-trips for
+	// the same node_id referenced by multiple knowledge tables.
+	existsCache := make(map[string]bool)
+	nodeExistsInGraph := func(nodeID string) bool {
+		if cached, ok := existsCache[nodeID]; ok {
+			return cached
+		}
+		var dummy int
+		err := s.graphDB.QueryRow(`SELECT 1 FROM nodes WHERE id = ? LIMIT 1`, nodeID).Scan(&dummy)
+		exists := err == nil
+		existsCache[nodeID] = exists
+		return exists
 	}
 
 	// cleanupByNodeID removes rows from a knowledgeDB table where the node_id
@@ -1668,18 +1671,16 @@ func (s *Store) reconcileOrphanedReferences() {
 		if !allowedTables[table] {
 			return 0
 		}
-		r, err := s.knowledgeDB.Query(fmt.Sprintf("SELECT node_id FROM %s", quoteIdentifier(table)))
+		r, err := s.knowledgeDB.Query(fmt.Sprintf("SELECT DISTINCT node_id FROM %s", quoteIdentifier(table)))
 		if err != nil {
 			return 0
 		}
 		var staleNodeIDs []string
-		seen := make(map[string]bool)
 		for r.Next() {
 			var nodeID string
 			if r.Scan(&nodeID) == nil {
-				if _, exists := nodeIDs[nodeID]; !exists && !seen[nodeID] {
+				if !nodeExistsInGraph(nodeID) {
 					staleNodeIDs = append(staleNodeIDs, nodeID)
-					seen[nodeID] = true
 				}
 			}
 		}
@@ -1702,7 +1703,7 @@ func (s *Store) reconcileOrphanedReferences() {
 		for qr.Next() {
 			var id, nodeID string
 			if qr.Scan(&id, &nodeID) == nil {
-				if _, exists := nodeIDs[nodeID]; !exists {
+				if !nodeExistsInGraph(nodeID) {
 					toDelete = append(toDelete, id)
 				}
 			}
