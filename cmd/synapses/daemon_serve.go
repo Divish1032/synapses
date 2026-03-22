@@ -1099,6 +1099,9 @@ func cmdDaemonServe(args []string) error {
 				data, _ := json.Marshal(ev)
 				// Set write deadline to detect stale connections, then clear
 				// it after successful write to avoid expiring idle streams.
+				// SetWriteDeadline error is intentionally ignored — not all
+				// ResponseWriter implementations support deadlines, and the
+				// subsequent Fprintf will catch stale connections regardless.
 				_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
 					return // stale client

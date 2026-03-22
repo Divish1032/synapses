@@ -618,6 +618,7 @@ func Open(path string) (*Store, error) {
 		knowledgeDB.Close()
 		return nil, fmt.Errorf("begin graph migration tx: %w", err)
 	}
+	defer func() { _ = graphTx.Rollback() }() // no-op after Commit
 	for _, m := range []string{
 		`ALTER TABLE nodes ADD COLUMN doc TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN signature TEXT NOT NULL DEFAULT ''`,
@@ -629,7 +630,6 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE node_embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := graphTx.Exec(m); err != nil && !isDupColumnErr(err) {
-			graphTx.Rollback()
 			graphDB.Close()
 			knowledgeDB.Close()
 			return nil, fmt.Errorf("migrate graph schema: %w", err)
@@ -644,6 +644,7 @@ func Open(path string) (*Store, error) {
 		knowledgeDB.Close()
 		return nil, fmt.Errorf("begin knowledge migration tx: %w", err)
 	}
+	defer func() { _ = knowledgeTx.Rollback() }() // no-op after Commit
 	for _, m := range []string{
 		`ALTER TABLE plans ADD COLUMN created_by TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE plans ADD COLUMN completed_at INTEGER NOT NULL DEFAULT 0`,
@@ -759,7 +760,6 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
-			knowledgeTx.Rollback()
 			graphDB.Close()
 			knowledgeDB.Close()
 			return nil, fmt.Errorf("migrate knowledge schema: %w", err)
