@@ -21,6 +21,13 @@ type stableIDRecord struct {
 	id   string // the stable UUID to reuse
 }
 
+// edgeKey is the deduplication key for edges: (From, To, Type).
+type edgeKey struct {
+	From NodeID
+	To   NodeID
+	Type EdgeType
+}
+
 // Graph is the core in-memory code graph. It is safe for concurrent reads
 // and writes — a RWMutex serialises mutations while allowing parallel queries.
 type Graph struct {
@@ -30,6 +37,7 @@ type Graph struct {
 	nodes     map[NodeID]*Node
 	outEdges  map[NodeID][]*Edge // edges leaving a node
 	inEdges   map[NodeID][]*Edge // edges arriving at a node
+	edgeSet   map[edgeKey]struct{} // O(1) edge deduplication
 	callSites []CallSite         // temporary: accumulated during parse, drained by resolver
 	cache     *subgraphCache     // in-memory cache for carved subgraphs (30s TTL, max 20 entries)
 
@@ -78,6 +86,7 @@ func New(repoID string) *Graph {
 		nodes:         make(map[NodeID]*Node),
 		outEdges:      make(map[NodeID][]*Edge),
 		inEdges:       make(map[NodeID][]*Edge),
+		edgeSet:       make(map[edgeKey]struct{}),
 		cache:         newSubgraphCache(),
 		fileStableIDs: make(map[string][]stableIDRecord),
 	}
@@ -146,12 +155,12 @@ func (g *Graph) AddEdge(e *Edge) {
 	if _, ok := g.nodes[e.To]; !ok {
 		return
 	}
-	// Deduplicate: skip if this exact (From, To, Type) triple already exists.
-	for _, existing := range g.outEdges[e.From] {
-		if existing.To == e.To && existing.Type == e.Type {
-			return
-		}
+	// O(1) dedup: skip if this exact (From, To, Type) triple already exists.
+	ek := edgeKey{From: e.From, To: e.To, Type: e.Type}
+	if _, exists := g.edgeSet[ek]; exists {
+		return
 	}
+	g.edgeSet[ek] = struct{}{}
 	g.outEdges[e.From] = append(g.outEdges[e.From], e)
 	g.inEdges[e.To] = append(g.inEdges[e.To], e)
 	g.piCache = nil // invalidate ProjectIdentity cache
@@ -690,6 +699,11 @@ func (g *Graph) MergeFrom(other *Graph) {
 		if _, ok := g.nodes[e.To]; !ok {
 			continue
 		}
+		ek := edgeKey{From: e.From, To: e.To, Type: e.Type}
+		if _, exists := g.edgeSet[ek]; exists {
+			continue
+		}
+		g.edgeSet[ek] = struct{}{}
 		g.outEdges[e.From] = append(g.outEdges[e.From], e)
 		g.inEdges[e.To] = append(g.inEdges[e.To], e)
 	}
@@ -803,9 +817,11 @@ func (g *Graph) RemoveFile(file string) {
 	// Remove edges then nodes.
 	for _, id := range toRemove {
 		for _, e := range g.outEdges[id] {
+			delete(g.edgeSet, edgeKey{From: e.From, To: e.To, Type: e.Type})
 			g.removeInEdge(e.To, id)
 		}
 		for _, e := range g.inEdges[id] {
+			delete(g.edgeSet, edgeKey{From: e.From, To: e.To, Type: e.Type})
 			g.removeOutEdge(e.From, id)
 		}
 		delete(g.outEdges, id)

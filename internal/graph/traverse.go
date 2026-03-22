@@ -191,7 +191,11 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 			if prev, seen := visited[neighbor]; !seen || relevance > prev {
 				visited[neighbor] = relevance
 				if curr.hop+1 < cfg.MaxDepth {
-					queue = append(queue, qItem{neighbor, curr.hop + 1})
+					// Only re-enqueue if not previously visited at a lower hop count.
+					// This prevents exponential queue growth on dense graphs.
+					if !seen {
+						queue = append(queue, qItem{neighbor, curr.hop + 1})
+					}
 				}
 			}
 
@@ -222,7 +226,7 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		}
 		// Drop test-file nodes when requested (still traversed for edge discovery).
 		if cfg.ExcludeTestFiles {
-			if n, ok := g.nodes[id]; ok && strings.HasSuffix(n.File, "_test.go") {
+			if n, ok := g.nodes[id]; ok && isTestFile(n.File) {
 				continue
 			}
 		}
