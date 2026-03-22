@@ -150,6 +150,7 @@ type rateLimiter struct {
 	pc             interface{} // *pulse.Client — set via SetPulseClient; nil if pulse not configured
 	projectID      string
 	resolveSession func(string) string // P8-2: MCP session key → Synapses session UUID
+	resolveAgent   func(string) string // MCP session key → agent_id (for agent-scoped rate limiting)
 }
 
 // SetPulseClient wires a pulse client so rate-limiter can emit guard events.
@@ -253,7 +254,16 @@ func (rl *rateLimiter) check(sessionKey, toolName string, args map[string]interf
 		return checkResult{allowed: true}
 	}
 
-	sb := rl.getOrCreate(sessionKey)
+	// Use agent identity as bucket key when available. This makes rate limits
+	// persist across reconnections for the same agent+project combination.
+	bucketKey := sessionKey
+	if rl.resolveAgent != nil {
+		if agentID := rl.resolveAgent(sessionKey); agentID != "" {
+			bucketKey = agentID + ":" + rl.projectID
+		}
+	}
+
+	sb := rl.getOrCreate(bucketKey)
 
 	// Single lock for the entire peek+consume sequence.
 	sb.mu.Lock()

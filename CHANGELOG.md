@@ -2,6 +2,30 @@
 
 All notable changes to Synapses are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-03-23
+
+### Added
+- **Socket Activation** — Daemon now supports launchd (macOS) and systemd (Linux) socket activation. The OS holds port 11435 during daemon restarts, so AI agents see a brief delay instead of "connection refused". New files: `socket_activation_darwin.go`, `socket_activation_linux.go`, `socket_activation_other.go`.
+- **Default Service Install** — `synapses init` automatically registers the daemon as a system service (launchd/systemd) if not already installed. No more forgotten `synapses daemon install` step. Auto-restarts on crash with zero user action.
+- **Project Persistence** — Registered projects saved to `~/.synapses/projects.json`. On daemon restart, all known projects are eagerly warmed in the background so the first MCP request is instant instead of blocking for 10-60s on graph indexing.
+- **Structured Daemon Lifecycle Events** — JSON events (`daemon_starting`, `daemon_ready`, `daemon_stopping`, `daemon_panic`) written to daemon.log. Diagnostic ladder: empty log = binary never ran, `starting` without `ready` = crash during init.
+- **Panic Recovery in MCP Handler** — `defer recover()` wraps the `/mcp` HTTP handler. Panics in tool handlers or project init log full stack traces and return HTTP 500 instead of crashing the daemon. Combined with mcp-go's `WithRecovery()` middleware for tool-level protection.
+- **Per-Project Circuit Breaker** — If a project panics 3 times in 5 minutes, it's temporarily disabled to protect other projects. Auto-re-enables after 10 minutes.
+- **Suffix Cycle Detection in Loop Guard** — Detects not just repeated identical calls (A,A,A) but alternating patterns (A,B,A,B) and short cycles (A,B,C,A,B,C) of any length up to 10. Window increased from 20 to 30 calls. Prevents agents from gaming the guard by alternating between tools.
+- **Agent-Scoped Rate Limiting** — Rate limit buckets keyed by `agent_id:project_id` instead of MCP session ID. Reconnecting no longer resets rate limits.
+- **Systemd Socket Unit** — New `synapses.socket` unit for zero-downtime restarts on Linux. The daemon service unit now includes `Requires=synapses.socket`.
+
+### Changed
+- **Verified Init Flow** — `synapses init` now fails loudly if the daemon can't start, instead of silently writing `.mcp.json` pointing to a dead server. Prints diagnostics (log tail, port status, binary path) on failure.
+- **Loop Guard No Longer Resets on File Save** — File saves are not evidence of agent progress (agents save files as part of their loop). The guard now auto-resets only when the agent calls a different tool (fingerprint change) or after 60s of inactivity.
+- **Daemon Health Verification** — Init wizard verifies the MCP endpoint is reachable before writing agent configs and printing "Synapses is ready!".
+
+### Dependencies
+- Added `github.com/tprasadtp/go-launchd` — Pure Go launchd socket activation (no cgo)
+- Added `github.com/coreos/go-systemd/v22` — systemd socket activation and file descriptor passing
+
+---
+
 ## [0.7.2] - 2026-03-22
 
 ### Added

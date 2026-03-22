@@ -50,6 +50,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -524,6 +526,7 @@ func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectIn
 			json.NewEncoder(w).Encode(map[string]string{"error": "init project: " + mcpsrv.StripInternalPaths(initErr.Error())}) //nolint:errcheck
 			return
 		}
+		go saveKnownProject(absPath)
 
 		// Parse request body as tool arguments. Empty or absent body → empty args.
 		// Cap at 1 MiB to prevent unbounded memory allocation from malformed requests.
@@ -675,6 +678,31 @@ func (s *connSession) GetLogLevel() mcp.LoggingLevel {
 // ── cmdDaemonServe: the singleton daemon entry point ─────────────────────────
 
 func cmdDaemonServe(args []string) error {
+	// Structured lifecycle event — MUST be the very first output so that
+	// an empty daemon.log means the binary never executed (OS-level issue).
+	daemonStartedAt := time.Now()
+	emitLifecycleEvent("daemon_starting", map[string]any{
+		"version": version,
+		"pid":     os.Getpid(),
+		"go":      runtime.Version(),
+		"os":      runtime.GOOS,
+		"arch":    runtime.GOARCH,
+		"addr":    DaemonHTTPAddr,
+	})
+
+	// Catch panics so they appear in daemon.log as structured JSON instead
+	// of causing a silent exit with an empty log.
+	defer func() {
+		if r := recover(); r != nil {
+			emitLifecycleEvent("daemon_panic", map[string]any{
+				"error": fmt.Sprint(r),
+				"stack": string(debug.Stack()),
+			})
+			// Re-panic so the process exits with a non-zero status.
+			panic(r)
+		}
+	}()
+
 	// No flags — the singleton daemon serves all projects.
 	// Projects are registered on-demand via the admin API.
 
@@ -710,6 +738,37 @@ func cmdDaemonServe(args []string) error {
 			logutil.Info("synapses: pulse analytics enabled (in-process, db: %s)\n", pulseDBPath)
 		}
 	}
+
+	// ── Eager project warming ────────────────────────────────────────────────
+	// Pre-initialize projects that were registered before the last shutdown.
+	// Runs in background so it doesn't block HTTP server startup.
+	go func() {
+		projects := loadKnownProjects()
+		if len(projects) == 0 {
+			return
+		}
+		logutil.Info("synapses daemon: warming %d known project(s)\n", len(projects))
+		for _, path := range projects {
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				logutil.Info("synapses daemon: removing stale project %s\n", path)
+				removeKnownProject(path)
+				continue
+			}
+			if err := isValidProjectPath(path); err != nil {
+				logutil.Info("synapses daemon: skipping invalid project %s: %v\n", path, err)
+				removeKnownProject(path)
+				continue
+			}
+			_, err := reg.GetOrSet(path, func() (*ProjectInstance, error) {
+				return initProjectInstance(appCtx, path, sharedPulse, reg)
+			})
+			if err != nil {
+				logutil.Warn("synapses daemon: warm %s failed: %v\n", path, err)
+			} else {
+				logutil.Info("synapses daemon: warmed %s\n", path)
+			}
+		}
+	}()
 
 	// ── HTTP MCP router ───────────────────────────────────────────────────────
 	// /mcp?project=<absPath>  → per-project StreamableHTTPServer
@@ -812,6 +871,9 @@ func cmdDaemonServe(args []string) error {
 				http.Error(w, "init project: "+mcpsrv.StripInternalPaths(initErr.Error()), http.StatusInternalServerError)
 				return
 			}
+			// Persist for eager warming on next daemon restart.
+			go saveKnownProject(absPath)
+
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"status": "ok",
@@ -837,6 +899,7 @@ func cmdDaemonServe(args []string) error {
 				return
 			}
 			reg.Delete(absPath)
+			go removeKnownProject(absPath)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
@@ -1317,6 +1380,24 @@ func cmdDaemonServe(args []string) error {
 
 	// MCP: route to per-project StreamableHTTPServer
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		// Panic recovery: a panic in any tool handler or project init must NOT
+		// crash the entire daemon. Log it, return 500, and keep serving.
+		defer func() {
+			if rv := recover(); rv != nil {
+				stack := debug.Stack()
+				logutil.Error("panic in /mcp handler: %v\n%s", rv, stack)
+				// Best-effort error response. If headers were already sent
+				// (e.g. SSE stream in progress), this will be a no-op since
+				// WriteHeader only takes effect on the first call.
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+					"jsonrpc": "2.0",
+					"error":   fmt.Sprintf("internal error (recovered): %v", rv),
+				})
+			}
+		}()
+
 		projectPath := r.URL.Query().Get("project")
 		if projectPath == "" {
 			http.Error(w, "missing ?project=<abs-path> query parameter", http.StatusBadRequest)
@@ -1345,6 +1426,7 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "init project: "+mcpsrv.StripInternalPaths(initErr.Error()), http.StatusInternalServerError)
 			return
 		}
+		go saveKnownProject(absPath)
 
 		// Strip the ?project= param before forwarding so the MCP server
 		// doesn't see unknown query parameters.
@@ -1495,6 +1577,11 @@ func cmdDaemonServe(args []string) error {
 		sig := <-sigCh
 		fmt.Fprintln(os.Stderr) // visual separator
 		logutil.Info("synapses daemon: received %s, shutting down\n", sig)
+		emitLifecycleEvent("daemon_stopping", map[string]any{
+			"signal":      sig.String(),
+			"uptime_secs": int(time.Since(daemonStartedAt).Seconds()),
+			"projects":    len(reg.All()),
+		})
 		appCancel()
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutCancel()
@@ -1502,20 +1589,61 @@ func cmdDaemonServe(args []string) error {
 	}()
 
 	// ── Start HTTP server ─────────────────────────────────────────────────────
+	// Try socket activation first (launchd on macOS, systemd on Linux).
+	// If the OS supervisor provides a pre-opened listener, use it.
+	// This keeps port 11435 available even during daemon restarts.
+	listenSource := "tcp"
+	ln, err := trySocketActivation()
+	if err != nil {
+		logutil.Warn("socket activation: %v (falling back to TCP)\n", err)
+	}
+	if ln == nil {
+		// Fallback: direct TCP bind.
+		ln, err = net.Listen("tcp", DaemonHTTPAddr)
+		if err != nil {
+			return fmt.Errorf("http listen: %w", err)
+		}
+	} else {
+		listenSource = "socket_activation"
+		logutil.Info("synapses daemon: using socket activation listener\n")
+	}
+
 	// BUG-028: cap concurrent connections to prevent FD exhaustion from
 	// misbehaving clients (e.g. many SSE streams from a single process).
-	ln, err := net.Listen("tcp", DaemonHTTPAddr)
-	if err != nil {
-		return fmt.Errorf("http listen: %w", err)
-	}
 	const maxConns = 512
 	ln = netutil.LimitListener(ln, maxConns)
+	emitLifecycleEvent("daemon_ready", map[string]any{
+		"addr":   DaemonHTTPAddr,
+		"source": listenSource,
+	})
 	httpSrv.Addr = "" // already bound via listener
 	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("http server: %w", err)
 	}
 	logutil.Info("synapses daemon: stopped\n")
 	return nil
+}
+
+// emitLifecycleEvent writes a structured JSON event to stdout (which is
+// daemon.log when running as a detached process). These events form a
+// diagnostic ladder: empty log = binary never ran, "daemon_starting" without
+// "daemon_ready" = crash during init, etc.
+func emitLifecycleEvent(event string, fields map[string]any) {
+	rec := map[string]any{
+		"time":  time.Now().UTC().Format(time.RFC3339),
+		"event": event,
+	}
+	for k, v := range fields {
+		rec[k] = v
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		// Fallback: at least write something.
+		fmt.Fprintf(os.Stdout, `{"time":"%s","event":"%s","error":"marshal failed"}`+"\n",
+			time.Now().UTC().Format(time.RFC3339), event)
+		return
+	}
+	fmt.Fprintln(os.Stdout, string(data))
 }
 
 // ── initProjectInstance: bootstrap one project in the singleton daemon ────────

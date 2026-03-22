@@ -412,11 +412,10 @@ func (s *Server) InvalidatePacketCacheForFile(changedFile string) {
 	s.orientRepoFull = nil
 	s.orientMu.Unlock()
 
-	// OF-S5: reset all loop-guard windows on file change. A file change is a
-	// strong signal that the agent's context has changed and a repeated call
-	// may now return different results — false-positive loop detection is worse
-	// than missing a real loop, so we err on the side of clearing.
-	s.lg.resetAll()
+	// Loop guard no longer resets on file change. File saves are NOT evidence
+	// of agent progress — agents save files as part of their loop. The loop
+	// guard now auto-resets when the agent's NEXT call has a DIFFERENT
+	// fingerprint (proving they moved on), or after 60s of inactivity.
 
 	s.notifyResourceChanged("synapses://active-context")
 	s.notifyResourceChanged("synapses://violations")

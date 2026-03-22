@@ -479,9 +479,23 @@ func daemonSelfPlist(binPath, logPath, homeDir string) string {
   <string>%s</string>
   <key>StandardErrorPath</key>
   <string>%s</string>
+  <key>Sockets</key>
+  <dict>
+    <key>SynapsesHTTP</key>
+    <dict>
+      <key>SockServiceName</key>
+      <string>%s</string>
+      <key>SockType</key>
+      <string>stream</string>
+      <key>SockFamily</key>
+      <string>IPv4</string>
+      <key>SockNodeName</key>
+      <string>127.0.0.1</string>
+    </dict>
+  </dict>
 </dict>
 </plist>
-`, html.EscapeString(daemonLabel), html.EscapeString(binPath), html.EscapeString(homeDir), html.EscapeString(logPath), html.EscapeString(logPath))
+`, html.EscapeString(daemonLabel), html.EscapeString(binPath), html.EscapeString(homeDir), html.EscapeString(logPath), html.EscapeString(logPath), DaemonHTTPPort)
 }
 
 func installLaunchd() error {
@@ -618,6 +632,7 @@ func daemonSelfSystemdUnit(binPath, logPath string) string {
 	return fmt.Sprintf(`[Unit]
 Description=Synapses MCP daemon
 After=network.target
+Requires=synapses.socket
 
 [Service]
 Type=simple
@@ -630,6 +645,19 @@ StandardError=append:%s
 [Install]
 WantedBy=default.target
 `, sanitizeUnitValue(binPath), sanitizeUnitValue(logPath), sanitizeUnitValue(logPath))
+}
+
+// daemonSocketUnit returns the systemd socket unit for socket activation.
+func daemonSocketUnit() string {
+	return fmt.Sprintf(`[Unit]
+Description=Synapses MCP daemon socket
+
+[Socket]
+ListenStream=127.0.0.1:%s
+
+[Install]
+WantedBy=sockets.target
+`, DaemonHTTPPort)
 }
 
 func installSystemd() error {
@@ -668,23 +696,37 @@ func installSystemd() error {
 		}
 	}
 
-	// Install the daemon itself.
+	// Install the daemon socket unit (socket activation) and service unit.
 	binPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve binary path: %w", err)
 	}
 	logPath := logFilePath("daemon")
+
+	// Write socket unit first — holds the port during daemon restarts.
+	socketUnitName := "synapses.socket"
+	socketUnitPath := filepath.Join(svcDir, socketUnitName)
+	if err := os.WriteFile(socketUnitPath, []byte(daemonSocketUnit()), 0o644); err != nil {
+		return fmt.Errorf("write socket unit: %w", err)
+	}
+
+	// Write service unit.
 	unitName := "synapses-daemon.service"
 	unitPath := filepath.Join(svcDir, unitName)
-
 	if err := os.WriteFile(unitPath, []byte(daemonSelfSystemdUnit(binPath, logPath)), 0o644); err != nil {
 		return fmt.Errorf("write daemon unit: %w", err)
 	}
+
 	exec.Command("systemctl", "--user", "daemon-reload").Run() //nolint:errcheck
+
+	// Enable and start the socket (which will start the service on first connection).
+	if out, err := exec.Command("systemctl", "--user", "enable", "--now", socketUnitName).CombinedOutput(); err != nil {
+		fmt.Printf("  \033[31m✗\033[0m %-8s systemctl socket failed: %s\n", "daemon", strings.TrimSpace(string(out)))
+	}
 	if out, err := exec.Command("systemctl", "--user", "enable", "--now", unitName).CombinedOutput(); err != nil {
 		fmt.Printf("  \033[31m✗\033[0m %-8s systemctl failed: %s\n", "daemon", strings.TrimSpace(string(out)))
 	} else {
-		fmt.Printf("  \033[32m✓\033[0m %-8s installed — daemon will auto-start and restart on failure\n", "daemon")
+		fmt.Printf("  \033[32m✓\033[0m %-8s installed with socket activation — auto-restarts on crash, port stays open\n", "daemon")
 	}
 
 	fmt.Println()
