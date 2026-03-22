@@ -38,7 +38,7 @@ func DiscoverSiblings(projectRoot string) []DiscoveredSibling {
 		if time.Now().After(deadline) {
 			break
 		}
-		if !e.IsDir() || e.Name() == currentName {
+		if !e.Type().IsDir() || e.Name() == currentName {
 			continue
 		}
 		// Skip hidden directories.

@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"container/list"
 	"fmt"
 	"strings"
 	"sync"
@@ -22,15 +23,20 @@ type cacheEntry struct {
 // It is safe for concurrent use. Supports both full invalidation and
 // file-scoped invalidation so that a single file change doesn't flush the
 // entire cache.
+//
+// Uses container/list for O(1) LRU promote/remove instead of O(N) slice scan.
 type subgraphCache struct {
-	mu      sync.Mutex
-	entries map[string]*cacheEntry
-	order   []string // access-order keys for LRU eviction (most recent at tail)
+	mu       sync.Mutex
+	entries  map[string]*cacheEntry
+	order    *list.List               // doubly-linked list for LRU; Back = most-recently-used
+	elements map[string]*list.Element // key → list element for O(1) lookup
 }
 
 func newSubgraphCache() *subgraphCache {
 	return &subgraphCache{
-		entries: make(map[string]*cacheEntry, cacheMaxSize),
+		entries:  make(map[string]*cacheEntry, cacheMaxSize),
+		order:    list.New(),
+		elements: make(map[string]*list.Element, cacheMaxSize),
 	}
 }
 
@@ -102,12 +108,15 @@ func (c *subgraphCache) put(rootID NodeID, cfg CarveConfig, fingerprint string, 
 		c.promoteKey(key)
 	} else {
 		// New entry: evict the LRU if we are at capacity.
-		for len(c.entries) >= cacheMaxSize && len(c.order) > 0 {
-			lru := c.order[0]
-			c.order = c.order[1:]
+		for len(c.entries) >= cacheMaxSize && c.order.Len() > 0 {
+			front := c.order.Front()
+			lru := front.Value.(string)
+			c.order.Remove(front)
+			delete(c.elements, lru)
 			delete(c.entries, lru)
 		}
-		c.order = append(c.order, key)
+		elem := c.order.PushBack(key)
+		c.elements[key] = elem
 	}
 	c.entries[key] = &cacheEntry{
 		sub:       sub,
@@ -122,7 +131,8 @@ func (c *subgraphCache) invalidate() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries = make(map[string]*cacheEntry, cacheMaxSize)
-	c.order = c.order[:0]
+	c.order.Init()
+	c.elements = make(map[string]*list.Element, cacheMaxSize)
 }
 
 // invalidateForFile evicts only cached entries whose subgraph references the
@@ -133,19 +143,19 @@ func (c *subgraphCache) invalidateForFile(file string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var surviving []string
-	for _, key := range c.order {
-		e, ok := c.entries[key]
-		if !ok {
-			continue
-		}
+	var toRemove []string
+	for key, e := range c.entries {
 		if entryReferencesFile(e, file) {
-			delete(c.entries, key)
-		} else {
-			surviving = append(surviving, key)
+			toRemove = append(toRemove, key)
 		}
 	}
-	c.order = surviving
+	for _, key := range toRemove {
+		delete(c.entries, key)
+		if elem, ok := c.elements[key]; ok {
+			c.order.Remove(elem)
+			delete(c.elements, key)
+		}
+	}
 }
 
 // entryReferencesFile checks if any node file in the cache entry matches the
@@ -166,20 +176,19 @@ func (c *subgraphCache) Len() int {
 	return len(c.entries)
 }
 
-// removeFromOrder removes the first occurrence of key from c.order.
+// removeFromOrder removes key from the LRU list. O(1).
 // Caller must hold c.mu.
 func (c *subgraphCache) removeFromOrder(key string) {
-	for i, k := range c.order {
-		if k == key {
-			c.order = append(c.order[:i], c.order[i+1:]...)
-			return
-		}
+	if elem, ok := c.elements[key]; ok {
+		c.order.Remove(elem)
+		delete(c.elements, key)
 	}
 }
 
-// promoteKey moves key to the tail of c.order (most-recently-used position).
+// promoteKey moves key to the back of the list (most-recently-used position). O(1).
 // Caller must hold c.mu.
 func (c *subgraphCache) promoteKey(key string) {
-	c.removeFromOrder(key)
-	c.order = append(c.order, key)
+	if elem, ok := c.elements[key]; ok {
+		c.order.MoveToBack(elem)
+	}
 }

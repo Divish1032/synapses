@@ -202,7 +202,7 @@ func TestSubgraphCache_ExpiredEntryCleanedFromOrder(t *testing.T) {
 	c.mu.Lock()
 	key := cacheKeyFor("ghost", cfg, fp)
 	c.entries[key].expiresAt = time.Now().Add(-1 * time.Second)
-	orderLenBefore := len(c.order)
+	orderLenBefore := c.order.Len()
 	c.mu.Unlock()
 
 	// get() should detect expiry and clean from both entries AND order.
@@ -212,7 +212,7 @@ func TestSubgraphCache_ExpiredEntryCleanedFromOrder(t *testing.T) {
 	}
 
 	c.mu.Lock()
-	orderLenAfter := len(c.order)
+	orderLenAfter := c.order.Len()
 	c.mu.Unlock()
 
 	if orderLenAfter != orderLenBefore-1 {
@@ -224,8 +224,8 @@ func TestSubgraphCache_ExpiredEntryCleanedFromOrder(t *testing.T) {
 
 	c.mu.Lock()
 	dupeCount := 0
-	for _, k := range c.order {
-		if k == key {
+	for e := c.order.Front(); e != nil; e = e.Next() {
+		if e.Value.(string) == key {
 			dupeCount++
 		}
 	}

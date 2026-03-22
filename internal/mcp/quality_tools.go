@@ -85,7 +85,7 @@ func (s *Server) handleUpsertGap(
 
 	saved, err := s.store.UpsertGap(gap)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("upsert gap failed: %v", err)), nil
+		return toolError("upsert gap", err)
 	}
 
 	statusVerb := "recorded"
@@ -127,7 +127,7 @@ func (s *Server) handleGetGaps(
 
 	gaps, err := s.store.GetGaps(f)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get gaps failed: %v", err)), nil
+		return toolError("get gaps", err)
 	}
 
 	displayStatus := f.Status

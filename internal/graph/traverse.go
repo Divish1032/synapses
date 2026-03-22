@@ -193,6 +193,10 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 				if curr.hop+1 < cfg.MaxDepth {
 					// Only re-enqueue if not previously visited at a lower hop count.
 					// This prevents exponential queue growth on dense graphs.
+					// Known accuracy tradeoff: when a node is re-discovered at a
+					// higher score, its subtree is NOT re-explored. Intentional —
+					// re-enqueueing would degrade to Dijkstra-like complexity on
+					// dense graphs. The score update still improves pruning.
 					if !seen {
 						queue = append(queue, qItem{neighbor, curr.hop + 1})
 					}

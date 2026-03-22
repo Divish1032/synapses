@@ -1135,6 +1135,10 @@ func (s *Server) Close() {
 	// 2. Signal long-running loops (memoryExpiryLoop).
 	close(s.stopCh)
 
+	if s.lg != nil {
+		s.lg.close()
+	}
+
 	// 3. Close queue — workers drain remaining items then exit.
 	close(s.bgQueue)
 

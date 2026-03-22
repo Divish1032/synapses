@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -314,14 +315,15 @@ func ensureProjectMarker(absPath string) error {
 	return os.WriteFile(cfgPath, []byte("{}\n"), 0o644)
 }
 
-// parseInt is a convenience wrapper for strconv.Atoi.
+// parseInt parses a non-negative integer string. It rejects negative values
+// and empty strings to guard against corrupted PID files or port numbers.
 func parseInt(s string) (int, error) {
-	n := 0
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("not an integer: %s", s)
-		}
-		n = n*10 + int(c-'0')
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("not a non-negative integer: %s", s)
 	}
 	return n, nil
 }

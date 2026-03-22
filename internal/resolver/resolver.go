@@ -29,17 +29,9 @@ func ResolveCallEdges(g *graph.Graph) int {
 	importMap := buildImportMap(g)   // absFilePath → {alias → importPath}
 	pkgIndex := buildPackageIndex(g) // shortPkgName → []*Node
 
+	// Track edges added in this batch. Existing edges checked via g.HasEdge.
 	type edgeKey struct{ from, to graph.NodeID }
 	seen := make(map[edgeKey]bool)
-
-	// Pre-populate seen from existing CALLS edges so that a second call to
-	// ResolveCallEdges (e.g. after MergeFrom for cross-project resolution)
-	// never creates duplicate edges in the in-memory graph.
-	for _, e := range g.AllEdges() {
-		if e.Type == graph.EdgeCalls {
-			seen[edgeKey{e.From, e.To}] = true
-		}
-	}
 	resolved := 0
 
 	for _, site := range sites {
@@ -118,7 +110,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 		}
 
 		key := edgeKey{site.CallerID, targetID}
-		if seen[key] {
+		if seen[key] || g.HasEdge(site.CallerID, targetID, graph.EdgeCalls) {
 			continue // deduplicate: same function may call the same target multiple times
 		}
 		seen[key] = true

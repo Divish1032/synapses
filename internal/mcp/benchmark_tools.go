@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/SynapsesOS/synapses/internal/benchmark"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -34,7 +33,7 @@ func (s *Server) handleBenchmark(
 
 	sc, err := benchmark.FindScenario(scenario)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("%v", err)), nil
+		return toolError("find scenario", err)
 	}
 
 	result := benchmark.RunScenarios(s.graph, s.store, []benchmark.Scenario{sc})

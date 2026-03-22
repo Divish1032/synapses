@@ -115,8 +115,7 @@ func (a *Archivist) Memorize(ctx context.Context, req MemorizeRequest) (Memorize
 
 	resp, parseErr := parseMemorizeResponse(raw)
 	if parseErr != nil {
-		// Return empty on parse failure — non-fatal, agent continues without new memories.
-		return MemorizeResponse{}, nil
+		return MemorizeResponse{}, fmt.Errorf("parse memorize response: %w", parseErr)
 	}
 	return resp, nil
 }

@@ -707,16 +707,22 @@ func TestDaemonLogs_NotFound(t *testing.T) {
 // ── launchdPlist / systemdUnit ────────────────────────────────────────────────
 
 func TestLaunchdPlist(t *testing.T) {
-	s := Sidecar{Name: "brain", Binary: "brain", Args: []string{"serve"}, Port: "11435"}
-	plist := launchdPlist(s)
+	s := Sidecar{Name: "brain", Binary: "go", Args: []string{"serve"}, Port: "11435"}
+	plist, err := launchdPlist(s)
+	if err != nil {
+		t.Skipf("binary not in PATH: %v", err)
+	}
 	if !strings.Contains(plist, "com.synapses.brain") {
 		t.Errorf("plist should contain label, got %q", plist[:100])
 	}
 }
 
 func TestSystemdUnit(t *testing.T) {
-	s := Sidecar{Name: "scout", Binary: "scout", Args: []string{"serve"}, Port: "11436"}
-	unit := systemdUnit(s)
+	s := Sidecar{Name: "scout", Binary: "go", Args: []string{"serve"}, Port: "11436"}
+	unit, err := systemdUnit(s)
+	if err != nil {
+		t.Skipf("binary not in PATH: %v", err)
+	}
 	if !strings.Contains(unit, "Synapses scout") {
 		t.Errorf("unit should contain service name, got %q", unit[:100])
 	}

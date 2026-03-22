@@ -130,13 +130,13 @@ func (s *Server) handleCreatePlan(
 			return mcp.NewToolResultError("tasks is required (JSON array of task objects)"), nil
 		}
 		if err := json.Unmarshal([]byte(tv), &taskInputs); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid tasks JSON: %v", err)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("invalid tasks JSON: %v", stripInternalPaths(err.Error()))), nil
 		}
 	case []interface{}:
 		// LLM sent tasks as a native JSON array (normal MCP path).
 		b, _ := json.Marshal(tv)
 		if err := json.Unmarshal(b, &taskInputs); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid tasks array: %v", err)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("invalid tasks array: %v", stripInternalPaths(err.Error()))), nil
 		}
 	default:
 		return mcp.NewToolResultError("tasks is required (JSON array of task objects)"), nil
@@ -224,7 +224,7 @@ func (s *Server) handleGetPendingTasks(
 
 	tasks, err := s.store.GetPendingTasks(planID, agentID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get pending tasks: %v", err)), nil
+		return toolError("get pending tasks", err)
 	}
 
 	// Collect IDs of in_progress tasks to fetch their session state.
@@ -331,7 +331,7 @@ func (s *Server) handleSaveSessionState(
 	state.Decisions = parseStrArr("decisions")
 
 	if err := s.store.UpsertSessionState(state); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("save session state: %v", err)), nil
+		return toolError("save session state", err)
 	}
 
 	return jsonResult(map[string]interface{}{
@@ -360,7 +360,7 @@ func (s *Server) handleGetSessionState(
 
 	state, err := s.store.GetSessionState(taskID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get session state: %v", err)), nil
+		return toolError("get session state", err)
 	}
 
 	// F12: Fetch recent failure episodes for the task's assigned agent so the
@@ -463,7 +463,7 @@ func (s *Server) handleUpdateTask(
 
 	unblocked, planCompleted, err := s.store.UpdateTask(id, status, notes, agentID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("update task: %v", err)), nil
+		return toolError("update task", err)
 	}
 
 	// R21: Capture HEAD SHA on in_progress; capture git log range on done/cancelled.

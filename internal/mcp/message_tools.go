@@ -45,7 +45,7 @@ func (s *Server) handleSendMessage(
 	// payload must be valid JSON; default to empty object if omitted.
 	payload, payloadErr := stringArgLimited(req, "payload", maxArgLengthPayload)
 	if payloadErr != nil {
-		return mcp.NewToolResultError(payloadErr.Error()), nil
+		return mcp.NewToolResultError(stripInternalPaths(payloadErr.Error())), nil
 	}
 	if payload == "" {
 		payload = "{}"
@@ -58,7 +58,7 @@ func (s *Server) handleSendMessage(
 	// OF-S2: scan payload for prompt injection patterns.
 	var injectionWarning string
 	if scanResult, scanErr := s.scanContent("payload", payload); scanErr != nil {
-		return mcp.NewToolResultError(scanErr.Error()), nil
+		return mcp.NewToolResultError(stripInternalPaths(scanErr.Error())), nil
 	} else if scanResult.warning != "" {
 		injectionWarning = scanResult.warning
 		// P7-1: emit guard event for injection scan trigger.
@@ -178,7 +178,7 @@ func (s *Server) handleGetMessages(
 
 	msgs, latestSeq, err := s.store.GetMessages(agentID, sinceSeq, topicFilter, unreadOnly, limit)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get messages: %v", err)), nil
+		return toolError("get messages", err)
 	}
 
 	// mark_read_ids: batch-acknowledge messages in the same call, eliminating

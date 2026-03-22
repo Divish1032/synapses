@@ -502,13 +502,13 @@ func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectIn
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invalid project path: " + err.Error()}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid project path: " + mcpsrv.StripInternalPaths(err.Error())}) //nolint:errcheck
 			return
 		}
 		if err := isValidProjectPath(absPath); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invalid project path: " + err.Error()}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid project path: " + mcpsrv.StripInternalPaths(err.Error())}) //nolint:errcheck
 			return
 		}
 
@@ -518,7 +518,7 @@ func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectIn
 		if initErr != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "init project: " + initErr.Error()}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]string{"error": "init project: " + mcpsrv.StripInternalPaths(initErr.Error())}) //nolint:errcheck
 			return
 		}
 
@@ -531,7 +531,7 @@ func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectIn
 		if decodeErr := json.NewDecoder(limited).Decode(&args); decodeErr != nil && decodeErr != io.EOF {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON body: " + decodeErr.Error()}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON body: " + mcpsrv.StripInternalPaths(decodeErr.Error())}) //nolint:errcheck
 			return
 		}
 
@@ -546,10 +546,10 @@ func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectIn
 			w.Header().Set("Content-Type", "application/json")
 			if _, ok := dispatchErr.(*mcpsrv.ErrUnknownTool); ok {
 				w.WriteHeader(http.StatusNotFound)
-				json.NewEncoder(w).Encode(map[string]string{"error": dispatchErr.Error()}) //nolint:errcheck
+				json.NewEncoder(w).Encode(map[string]string{"error": mcpsrv.StripInternalPaths(dispatchErr.Error())}) //nolint:errcheck
 			} else {
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": dispatchErr.Error()}) //nolint:errcheck
+				json.NewEncoder(w).Encode(map[string]string{"error": mcpsrv.StripInternalPaths(dispatchErr.Error())}) //nolint:errcheck
 			}
 			return
 		}

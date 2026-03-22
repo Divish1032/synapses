@@ -218,6 +218,14 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 	if err != nil {
 		return nil, err
 	}
+	const maxNodeCount uint32 = 10_000_000
+	if nodeCount > maxNodeCount {
+		return nil, fmt.Errorf("nodeCount %d exceeds maximum %d", nodeCount, maxNodeCount)
+	}
+	const maxEdgeCount uint32 = 50_000_000
+	if edgeCount > maxEdgeCount {
+		return nil, fmt.Errorf("edgeCount %d exceeds maximum %d", edgeCount, maxEdgeCount)
+	}
 
 	idx := newGraphIndex(pool)
 

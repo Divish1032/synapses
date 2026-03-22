@@ -192,14 +192,14 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 					http.Error(w, "brain: invalid JSON", http.StatusBadRequest)
 					return
 				}
-				if err := os.WriteFile(filepath.Join(home, "brain.json"), raw, 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(home, "brain.json"), raw, 0o600); err != nil {
 					http.Error(w, "write brain.json: "+err.Error(), http.StatusInternalServerError)
 					return
 				}
 			}
 			// Write app_settings.json
 			if raw, ok := body["app_settings"]; ok {
-				if err := os.WriteFile(filepath.Join(home, "app_settings.json"), raw, 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(home, "app_settings.json"), raw, 0o600); err != nil {
 					http.Error(w, "write app_settings.json: "+err.Error(), http.StatusInternalServerError)
 					return
 				}
@@ -434,7 +434,18 @@ func checkMCPConfigured(editor, projectPath string) bool {
 	if err != nil {
 		return false
 	}
-	// Check if "synapses" appears in the config
+	// Parse JSON and check for "synapses" key in mcpServers object.
+	var config map[string]interface{}
+	if json.Unmarshal(data, &config) != nil {
+		return false
+	}
+	// Check nested mcpServers.synapses (common format for Claude, Cursor, etc.)
+	if servers, ok := config["mcpServers"].(map[string]interface{}); ok {
+		if _, found := servers["synapses"]; found {
+			return true
+		}
+	}
+	// Zed uses a different structure — fall back to string check for "synapses".
 	return strings.Contains(string(data), "synapses")
 }
 

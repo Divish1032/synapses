@@ -1,17 +1,16 @@
 package store
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/logutil"
 )
-
-var idCounter uint64
 
 // Plan is a named collection of related tasks created during an LLM session.
 // It persists in SQLite so future sessions can resume the agreed work.
@@ -176,7 +175,8 @@ func (s *Store) GetPendingTasks(planID, agentID string) ([]Task, error) {
 	}
 	query += ` ORDER BY
 		CASE priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,
-		created_at ASC`
+		created_at ASC
+		LIMIT 500`
 
 	rows, err := s.knowledgeDB.Query(query, args...)
 	if err != nil {
@@ -424,8 +424,8 @@ func checkAndCompletePlan(db *rwDB, planID string) (bool, error) {
 func (s *Store) findNewlyUnblocked(completedID string) ([]string, error) {
 	// Find all pending/in_progress tasks that depend on completedID.
 	rows, err := s.knowledgeDB.Query(
-		`SELECT id, depends_on FROM tasks WHERE status IN ('pending','in_progress') AND depends_on LIKE ?`,
-		"%"+completedID+"%",
+		`SELECT id, depends_on FROM tasks WHERE status IN ('pending','in_progress') AND depends_on LIKE ? ESCAPE '\'`,
+		"%"+escapeLike(completedID)+"%",
 	)
 	if err != nil {
 		return nil, err
@@ -660,15 +660,16 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 	return tasks, rows.Err()
 }
 
-// newID generates a short random ID for plans and tasks.
-// Uses time + random suffix — collision probability is negligible for local use.
+// newID generates a cryptographically random ID for plans and tasks.
+// Uses 16 bytes of crypto/rand, hex-encoded (32 chars). Existing stored IDs
+// (which used time+counter format) remain valid — the format is opaque.
 func newID() string {
-	// Combine timestamp with counter to ensure uniqueness even on systems with
-	// coarse timer resolution (like Windows). The counter ensures that multiple
-	// IDs generated within the same nanosecond are still unique.
-	ts := time.Now().UnixNano()
-	counter := atomic.AddUint64(&idCounter, 1)
-	return fmt.Sprintf("%x-%x", ts, counter)
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// Fallback: should never happen on modern OS.
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf[:])
 }
 
 // --- Session State (exact-moment task resumption) ---

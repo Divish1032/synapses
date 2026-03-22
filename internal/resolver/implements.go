@@ -28,13 +28,8 @@ func ResolveHeritageEdges(g *graph.Graph) int {
 		}
 	}
 
-	// Collect existing IMPLEMENTS edges to avoid duplicates.
+	// Track edges added in this batch. Existing edges checked via g.HasEdge.
 	seen := make(map[string]bool)
-	for _, e := range g.AllEdges() {
-		if e.Type == graph.EdgeImplements {
-			seen[string(e.From)+"->"+string(e.To)] = true
-		}
-	}
 
 	count := 0
 	for _, n := range nodes {
@@ -83,7 +78,7 @@ func ResolveHeritageEdges(g *graph.Graph) int {
 			}
 
 			edgeKey := string(n.ID) + "->" + string(targetID)
-			if seen[edgeKey] {
+			if seen[edgeKey] || g.HasEdge(n.ID, targetID, graph.EdgeImplements) {
 				continue
 			}
 			seen[edgeKey] = true
@@ -180,13 +175,8 @@ func ResolveImplementsEdges(g *graph.Graph) int {
 		}
 	}
 
-	// 4. Avoid duplicating IMPLEMENTS edges that already exist.
+	// 4. Track edges added in this batch. Existing edges checked via g.HasEdge.
 	seen := make(map[string]bool)
-	for _, e := range g.AllEdges() {
-		if e.Type == graph.EdgeImplements {
-			seen[string(e.From)+"->"+string(e.To)] = true
-		}
-	}
 
 	// 5. Match structs against interfaces in the same package.
 	//    Skip structs with heritage metadata — they use nominal typing.
@@ -222,7 +212,7 @@ func ResolveImplementsEdges(g *graph.Graph) int {
 				continue
 			}
 			edgeKey := string(sid) + "->" + string(iface.nodeID)
-			if seen[edgeKey] {
+			if seen[edgeKey] || g.HasEdge(sid, iface.nodeID, graph.EdgeImplements) {
 				continue
 			}
 			seen[edgeKey] = true

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -155,7 +156,7 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 		if len(out.Data) == 0 || len(out.Data[0].Embedding) == 0 {
 			return nil, fmt.Errorf("empty embedding from endpoint")
 		}
-		return out.Data[0].Embedding, nil
+		return normalizeL2(out.Data[0].Embedding), nil
 	}
 
 	// Brain format and Ollama format both use {"embedding": [float, ...]}
@@ -168,7 +169,7 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	if len(out.Embedding) == 0 {
 		return nil, fmt.Errorf("empty embedding from endpoint")
 	}
-	return out.Embedding, nil
+	return normalizeL2(out.Embedding), nil
 }
 
 // EmbedBatch returns vector embeddings for a batch of texts in one HTTP round-trip.
@@ -260,6 +261,26 @@ func (c *Client) embedSerial(ctx context.Context, texts []string) ([][]float32, 
 		vecs[i] = v
 	}
 	return vecs, nil
+}
+
+// normalizeL2 returns a unit-length copy of v. Returns v unchanged if already
+// normalized (within tolerance) or if the vector has zero magnitude.
+func normalizeL2(v []float32) []float32 {
+	var sum float64
+	for _, x := range v {
+		sum += float64(x) * float64(x)
+	}
+	norm := math.Sqrt(sum)
+	// Guard: skip normalisation for zero-magnitude, already-unit, or degenerate
+	// (NaN/Inf) vectors — dividing by a bad norm would corrupt the output.
+	if norm == 0 || math.IsNaN(norm) || math.IsInf(norm, 0) || (norm > 0.999 && norm < 1.001) {
+		return v
+	}
+	out := make([]float32, len(v))
+	for i, x := range v {
+		out[i] = float32(float64(x) / norm)
+	}
+	return out
 }
 
 // Model returns the configured embedding model name.

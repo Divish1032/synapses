@@ -22,7 +22,21 @@ import (
 // Store is the pulse analytics database.
 type Store struct {
 	db *sql.DB
+	tx *sql.Tx // non-nil inside a BeginBatch/commit window
 	mu sync.Mutex
+}
+
+// execer returns the active transaction if one exists, otherwise the raw db.
+// This ensures that Tx-suffixed methods write inside the batch transaction.
+func (s *Store) execer() interface {
+	Exec(string, ...any) (sql.Result, error)
+	Query(string, ...any) (*sql.Rows, error)
+	QueryRow(string, ...any) *sql.Row
+} {
+	if s.tx != nil {
+		return s.tx
+	}
+	return s.db
 }
 
 // Open creates or opens a pulse SQLite database at the given path.
@@ -62,17 +76,20 @@ func (s *Store) Close() error {
 // This reduces fsync overhead from N fsyncs to 1 for N events.
 func (s *Store) BeginBatch() (commit func(bool) error, err error) {
 	s.mu.Lock()
-	if _, err := s.db.Exec("BEGIN DEFERRED"); err != nil {
+	tx, txErr := s.db.Begin()
+	if txErr != nil {
 		s.mu.Unlock()
-		return nil, err
+		return nil, txErr
 	}
+	s.tx = tx
 	return func(ok bool) error {
 		var err error
 		if ok {
-			_, err = s.db.Exec("COMMIT")
+			err = tx.Commit()
 		} else {
-			_, err = s.db.Exec("ROLLBACK")
+			err = tx.Rollback()
 		}
+		s.tx = nil
 		s.mu.Unlock()
 		return err
 	}, nil
@@ -96,7 +113,7 @@ func (s *Store) InsertToolCallTx(ev pulsetypes.ToolCallEvent) error {
 		}
 	}
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO tool_calls (tool_name, agent_id, project_id, entity, duration_ms, success, response_bytes, created_date, session_id, error_message, input_bytes, response_type, request_params, retry_count)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.ToolName, ev.AgentID, ev.ProjectID, ev.Entity, ev.DurationMs, successInt, ev.ResponseBytes,
@@ -136,7 +153,7 @@ func (s *Store) InsertContextDeliveryTx(ev pulsetypes.ContextDeliveryEvent) erro
 	if ev.Refetched {
 		refetchedInt = 1
 	}
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO context_deliveries
 		 (tool_name, agent_id, project_id, entity, file, response_bytes, response_tokens, baseline_tokens,
 		  nodes_delivered, nodes_pruned, edges_delivered, truncated, duration_ms, cache_hit, brain_enriched,
@@ -168,7 +185,7 @@ func (s *Store) InsertBrainUsageTx(ev pulsetypes.BrainUsageEvent) error {
 		fallbackInt = 1
 	}
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO brain_usage
 		 (model, tier, endpoint, prompt_tokens, completion_tokens, duration_ms, cost_usd, agent_id, project_id, target_entity, success, quality_score, fallback_used, created_date, session_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -182,7 +199,7 @@ func (s *Store) InsertBrainUsageTx(ev pulsetypes.BrainUsageEvent) error {
 // InsertOutcomeSignalTx records an outcome signal without acquiring the mutex.
 func (s *Store) InsertOutcomeSignalTx(ev pulsetypes.OutcomeSignalEvent) error {
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO outcome_signals (project_id, agent_id, entity, signal_type, count, session_id, tool_calls_between, time_to_outcome_ms, created_date, priority)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.ProjectID, ev.AgentID, ev.Entity, ev.SignalType, ev.Count, ev.SessionID, ev.ToolCallsBetween, ev.TimeToOutcomeMs, today, ev.Priority,
@@ -197,7 +214,7 @@ func (s *Store) InsertAgentLLMUsageTx(ev pulsetypes.AgentLLMUsageEvent) error {
 		costReportedInt = 1
 	}
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO agent_llm_usage
 		 (session_id, agent_id, project_id, model, provider, input_tokens, output_tokens, cost_usd,
 		  cost_reported, cache_creation_input_tokens, cache_read_input_tokens, tool_call_id, created_date)
@@ -216,20 +233,20 @@ func (s *Store) UpsertSessionWithVersionTx(id, agentID, projectID, event, agentV
 	today := time.Now().UTC().Format("2006-01-02")
 	switch event {
 	case "start":
-		_, err := s.db.Exec(
+		_, err := s.execer().Exec(
 			`INSERT INTO sessions (id, agent_id, project_id, started_at, agent_version, started_date) VALUES (?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET started_at = excluded.started_at, started_date = excluded.started_date, agent_version = CASE WHEN excluded.agent_version != '' THEN excluded.agent_version ELSE agent_version END`,
 			id, agentID, projectID, now, agentVersion, today,
 		)
 		return err
 	case "end":
-		_, err := s.db.Exec(
+		_, err := s.execer().Exec(
 			`UPDATE sessions SET ended_at = ? WHERE id = ?`,
 			now, id,
 		)
 		return err
 	case "task_done":
-		_, err := s.db.Exec(
+		_, err := s.execer().Exec(
 			`UPDATE sessions SET tasks_completed = tasks_completed + 1 WHERE id = ?`,
 			id,
 		)
@@ -244,14 +261,14 @@ func (s *Store) SetSessionIntent(sessionID, intent string) error {
 	if sessionID == "" || intent == "" {
 		return nil
 	}
-	_, err := s.db.Exec(`UPDATE sessions SET intent = ? WHERE id = ?`, intent, sessionID)
+	_, err := s.execer().Exec(`UPDATE sessions SET intent = ? WHERE id = ?`, intent, sessionID)
 	return err
 }
 
 // UpdateSessionStatsTx upserts session stats without acquiring the mutex.
 func (s *Store) UpdateSessionStatsTx(sessionID, agentID, projectID string, tokensSaved int, costSaved float64) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO sessions (id, agent_id, project_id, started_at, tool_calls, tokens_saved, cost_saved_usd)
 		 VALUES (?, ?, ?, ?, 1, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
@@ -266,7 +283,7 @@ func (s *Store) UpdateSessionStatsTx(sessionID, agentID, projectID string, token
 // AddSessionTokensSavedTx increments token savings without acquiring the mutex.
 func (s *Store) AddSessionTokensSavedTx(sessionID, agentID, projectID string, tokensSaved int, costSaved float64) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO sessions (id, agent_id, project_id, started_at, tokens_saved, cost_saved_usd)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
@@ -280,7 +297,7 @@ func (s *Store) AddSessionTokensSavedTx(sessionID, agentID, projectID string, to
 // UpdateSessionModelTx records model/provider without acquiring the mutex.
 func (s *Store) UpdateSessionModelTx(sessionID, agentID, projectID, model, provider string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO sessions (id, agent_id, project_id, started_at, model, provider)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET model = excluded.model, provider = excluded.provider`,
@@ -292,7 +309,7 @@ func (s *Store) UpdateSessionModelTx(sessionID, agentID, projectID, model, provi
 // InsertParseEventTx records a parse event without acquiring the mutex.
 func (s *Store) InsertParseEventTx(ev pulsetypes.ParseEvent) error {
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO parse_events (file, language, duration_ms, nodes_produced, edges_produced, call_sites_produced, error_type, project_id, created_date, ts_error_nodes)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.File, ev.Language, ev.DurationMs, ev.NodesProduced, ev.EdgesProduced,
@@ -315,7 +332,7 @@ func (s *Store) InsertReparseEventTx(ev pulsetypes.ReparseEvent) error {
 	if errorAction == "" {
 		errorAction = "clean"
 	}
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO reparse_events (file, language, duration_ms, nodes_before, nodes_after, edges_delta, memories_staled, project_id, created_date, debounce_hits, cross_project_detection_ms, delta_rows, delta_bytes, error_action)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.File, ev.Language, ev.DurationMs, ev.NodesBefore, ev.NodesAfter,
@@ -343,7 +360,7 @@ func (s *Store) InsertGraphSnapshotTx(ev pulsetypes.GraphSnapshotEvent) error {
 		edgeTypeDist = "{}"
 	}
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO graph_snapshots
 		 (snapshot_type, nodes_total, edges_total, edges_calls, density, orphan_nodes,
 		  cross_file_edge_pct, max_fanin, max_fanout, fan_in_p50, fan_in_p95, fan_out_p50, fan_out_p95,
@@ -375,7 +392,7 @@ func (s *Store) InsertEmbeddingEventTx(ev pulsetypes.EmbeddingEvent) error {
 	if evType == "" {
 		evType = "batch"
 	}
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO embedding_events (trigger, count, errors, duration_ms, model, model_status, success, stale_count, project_id, embed_pool_contention, event_type, coverage_pct)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.Trigger, ev.Count, ev.Errors, ev.DurationMs, ev.Model, ev.ModelStatus,
@@ -405,7 +422,7 @@ func (s *Store) InsertIndexEventTx(ev pulsetypes.IndexEvent) error {
 	if coverageJSON == "" {
 		coverageJSON = "{}"
 	}
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO index_events (duration_ms, files_indexed, total_nodes, total_edges, call_sites_resolved, call_sites_unresolved, resolution_rate, language_dist, project_id, work_item_type_dist, resolver_duration_ms, files_skipped, resolution_by_lang_json, coverage_json, heritage_edges_created, implements_edges_created)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.DurationMs, ev.FilesIndexed, ev.TotalNodes, ev.TotalEdges,
@@ -426,7 +443,7 @@ func (s *Store) InsertIndexEvent(ev pulsetypes.IndexEvent) error {
 // InsertGuardEventTx records a guard (loop/rate-limit) event without acquiring the mutex.
 func (s *Store) InsertGuardEventTx(ev pulsetypes.GuardEvent) error {
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO guard_events (guard_type, tool_name, category, agent_id, project_id, created_date, session_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		ev.GuardType, ev.ToolName, ev.Category, ev.AgentID, ev.ProjectID, today, ev.SessionID,
@@ -444,7 +461,7 @@ func (s *Store) InsertGuardEvent(ev pulsetypes.GuardEvent) error {
 // InsertMemoryOpTx records a memory operation event without acquiring the mutex.
 func (s *Store) InsertMemoryOpTx(ev pulsetypes.MemoryOperationEvent) error {
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO memory_ops (operation, tier, source, result_count, agent_id, project_id, count, session_id, top_channel, top_channel_score, vector_search_ms, created_date)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.Operation, ev.Tier, ev.Source, ev.ResultCount, ev.AgentID, ev.ProjectID,
@@ -463,7 +480,7 @@ func (s *Store) InsertMemoryOp(ev pulsetypes.MemoryOperationEvent) error {
 // InsertValidationEventTx records a validation event without acquiring the mutex.
 func (s *Store) InsertValidationEventTx(ev pulsetypes.ValidationEvent) error {
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO validation_events (tool_name, status, violation_count, safety_status, agent_id, project_id, rule_ids, created_at, created_date)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?)`,
 		ev.ToolName, ev.Status, ev.ViolationCount, ev.SafetyStatus, ev.AgentID, ev.ProjectID, ev.RuleIDs, today,
@@ -481,7 +498,7 @@ func (s *Store) InsertValidationEvent(ev pulsetypes.ValidationEvent) error {
 // CountGuardEvents returns the count of guard events of the given type for a calendar day.
 func (s *Store) CountGuardEvents(day, guardType string) int {
 	var n int
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*) FROM guard_events WHERE guard_type = ? AND created_date = ?`,
 		guardType, day)
 	_ = row.Scan(&n)
@@ -491,7 +508,7 @@ func (s *Store) CountGuardEvents(day, guardType string) int {
 // CountMemoryOps returns the count of memory operations of the given type for a calendar day.
 func (s *Store) CountMemoryOps(day, operation string) int {
 	var n int
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*) FROM memory_ops WHERE operation = ? AND created_date = ?`,
 		operation, day)
 	_ = row.Scan(&n)
@@ -501,7 +518,7 @@ func (s *Store) CountMemoryOps(day, operation string) int {
 // CountValidationViolations returns the count of validation events with violations for a calendar day.
 func (s *Store) CountValidationViolations(day string) int {
 	var n int
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COALESCE(SUM(violation_count), 0) FROM validation_events WHERE created_date = ?`,
 		day)
 	_ = row.Scan(&n)
@@ -511,7 +528,7 @@ func (s *Store) CountValidationViolations(day string) int {
 // CountToolErrors returns the number of failed tool calls on the given day.
 func (s *Store) CountToolErrors(day string) int {
 	var n int
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*) FROM tool_calls WHERE success = 0 AND created_date = ?`, day)
 	_ = row.Scan(&n)
 	return n
@@ -520,7 +537,7 @@ func (s *Store) CountToolErrors(day string) int {
 // SumBrainCostForDay returns total brain LLM cost (USD) for the given day.
 func (s *Store) SumBrainCostForDay(day string) float64 {
 	var v float64
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COALESCE(SUM(cost_usd), 0.0) FROM brain_usage WHERE created_date = ?`, day)
 	_ = row.Scan(&v)
 	return v
@@ -529,7 +546,7 @@ func (s *Store) SumBrainCostForDay(day string) float64 {
 // SumAgentLLMCostForDay returns total agent-reported LLM cost (USD) for the given day.
 func (s *Store) SumAgentLLMCostForDay(day string) float64 {
 	var v float64
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COALESCE(SUM(cost_usd), 0.0) FROM agent_llm_usage WHERE created_date = ?`, day)
 	_ = row.Scan(&v)
 	return v
@@ -537,7 +554,7 @@ func (s *Store) SumAgentLLMCostForDay(day string) float64 {
 
 // CountTruncatedDeliveries returns (truncated count, total count) for context_deliveries on the given day.
 func (s *Store) CountTruncatedDeliveries(day string) (truncated, total int) {
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COALESCE(SUM(CASE WHEN truncated=1 THEN 1 ELSE 0 END),0), COUNT(*)
 		 FROM context_deliveries WHERE created_date = ?`, day)
 	_ = row.Scan(&truncated, &total)
@@ -547,7 +564,7 @@ func (s *Store) CountTruncatedDeliveries(day string) (truncated, total int) {
 // CountBFSCacheHitsForDay returns context deliveries with cache_hit=1 for the given day.
 func (s *Store) CountBFSCacheHitsForDay(day string) int {
 	var n int
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*) FROM context_deliveries WHERE cache_hit = 1 AND created_date = ?`, day)
 	_ = row.Scan(&n)
 	return n
@@ -556,7 +573,7 @@ func (s *Store) CountBFSCacheHitsForDay(day string) int {
 // CountValidationCalls returns the number of validation_events with the given tool_name for the given day.
 func (s *Store) CountValidationCalls(day, toolName string) int {
 	var n int
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*) FROM validation_events WHERE tool_name = ? AND created_date = ?`,
 		toolName, day)
 	_ = row.Scan(&n)
@@ -566,7 +583,7 @@ func (s *Store) CountValidationCalls(day, toolName string) int {
 // SumMemoriesStaled returns SUM(memories_staled) from reparse_events for the given day.
 func (s *Store) SumMemoriesStaled(day string) int {
 	var n int
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COALESCE(SUM(memories_staled), 0) FROM reparse_events WHERE created_date = ?`, day)
 	_ = row.Scan(&n)
 	return n
@@ -576,7 +593,7 @@ func (s *Store) SumMemoriesStaled(day string) int {
 // started on the given day and have a non-null ended_at.
 func (s *Store) AvgSessionDurationMs(day string) float64 {
 	var v float64
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COALESCE(AVG((julianday(ended_at)-julianday(started_at))*86400000.0), 0.0)
 		 FROM sessions WHERE started_date = ? AND ended_at IS NOT NULL`, day)
 	_ = row.Scan(&v)
@@ -587,7 +604,7 @@ func (s *Store) AvgSessionDurationMs(day string) float64 {
 // had a previous session that ended within the 24 hours before this session started.
 func (s *Store) CountResumedSessions(day string) int {
 	var n int
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*) FROM sessions s1
 		 WHERE date(s1.started_at) = ?
 		 AND EXISTS (
@@ -606,7 +623,7 @@ func (s *Store) CountResumedSessions(day string) int {
 // Returns 0.0 if no sessions match.
 func (s *Store) GetWorkflowAdherenceRate(day string) float64 {
 	var v float64
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COALESCE(
 		   CAST(SUM(CASE WHEN has_init=1 AND has_context=1 AND has_validate=1 AND has_verify=1 THEN 1 ELSE 0 END) AS REAL)
 		   / NULLIF(COUNT(*), 0), 0.0)
@@ -628,7 +645,7 @@ func (s *Store) GetWorkflowAdherenceRate(day string) float64 {
 // on the given day. Returns 0 if no sessions.
 func (s *Store) GetTasksPerHour(day string) float64 {
 	var v float64
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COALESCE(
 		   SUM(tasks_completed) / NULLIF(SUM((julianday(COALESCE(ended_at,datetime('now')))-julianday(started_at))*24), 0),
 		   0.0)
@@ -642,7 +659,7 @@ func (s *Store) GetTasksPerHour(day string) float64 {
 // are averaged (count stores duration_ms; pre-P3B signals have count=0).
 func (s *Store) GetAvgTaskCompletionMs(day string) float64 {
 	var v float64
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COALESCE(AVG(CAST(count AS REAL)), 0.0)
 		 FROM outcome_signals
 		 WHERE signal_type = 'task_done' AND count > 0 AND created_date = ?`, day)
@@ -654,7 +671,7 @@ func (s *Store) GetAvgTaskCompletionMs(day string) float64 {
 // for the given day.
 func (s *Store) CountOutcomeSignals(day, signalType string) int {
 	var n int
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*) FROM outcome_signals WHERE signal_type = ? AND created_date = ?`,
 		signalType, day)
 	_ = row.Scan(&n)
@@ -672,7 +689,7 @@ type RuleHitStat struct {
 // No mutex needed — read-only query, consistent with other read methods in this store.
 func (s *Store) GetRuleHitDistribution(days, limit int) ([]RuleHitStat, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT rule_ids FROM validation_events WHERE violation_count > 0 AND created_at >= ?`,
 		cutoff)
 	if err != nil {
@@ -727,7 +744,7 @@ func (s *Store) GetRuleHitDistribution(days, limit int) ([]RuleHitStat, error) {
 // live count. Returns 0 on error (pulse is best-effort).
 func (s *Store) CountStaleEmbeddings() int {
 	var n int
-	row := s.db.QueryRow(`SELECT COALESCE(MAX(stale_count), 0) FROM embedding_events WHERE created_at >= ?`,
+	row := s.execer().QueryRow(`SELECT COALESCE(MAX(stale_count), 0) FROM embedding_events WHERE created_at >= ?`,
 		time.Now().UTC().AddDate(0, 0, -7).Format(time.RFC3339))
 	_ = row.Scan(&n)
 	return n
@@ -736,7 +753,7 @@ func (s *Store) CountStaleEmbeddings() int {
 // migrate creates all tables and indexes if they don't exist, then runs
 // column-level migrations for databases created before new columns were added.
 func (s *Store) migrate() error {
-	if _, err := s.db.Exec(schema); err != nil {
+	if _, err := s.execer().Exec(schema); err != nil {
 		return err
 	}
 	return s.migrateColumns()
@@ -892,7 +909,7 @@ func (s *Store) migrateColumns() error {
 		`ALTER TABLE brain_usage ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range alterStmts {
-		if _, err := s.db.Exec(stmt); err != nil {
+		if _, err := s.execer().Exec(stmt); err != nil {
 			if !strings.Contains(err.Error(), "duplicate column") {
 				return fmt.Errorf("migrate columns: %w", err)
 			}
@@ -906,7 +923,7 @@ func (s *Store) migrateColumns() error {
 		"agent_llm_usage", "outcome_signals", "heartbeat_events",
 		"graph_snapshots", "delivery_outcomes",
 	} {
-		if _, err := s.db.Exec(fmt.Sprintf(
+		if _, err := s.execer().Exec(fmt.Sprintf(
 			`UPDATE %s SET created_date = date(created_at) WHERE created_date = ''`, tbl)); err != nil {
 			// Table may not have created_at — skip silently (e.g. delivery_outcomes).
 			if !strings.Contains(err.Error(), "no such column") {
@@ -915,7 +932,7 @@ func (s *Store) migrateColumns() error {
 		}
 	}
 	// P6-5: sessions uses started_at, not created_at.
-	if _, err := s.db.Exec(`UPDATE sessions SET started_date = date(started_at) WHERE started_date = ''`); err != nil {
+	if _, err := s.execer().Exec(`UPDATE sessions SET started_date = date(started_at) WHERE started_date = ''`); err != nil {
 		if !strings.Contains(err.Error(), "no such column") {
 			return fmt.Errorf("backfill started_date on sessions: %w", err)
 		}
@@ -953,7 +970,7 @@ func (s *Store) migrateColumns() error {
 		`CREATE INDEX IF NOT EXISTS idx_sess_sdate ON sessions(started_date)`,
 	}
 	for _, stmt := range indexStmts {
-		if _, err := s.db.Exec(stmt); err != nil {
+		if _, err := s.execer().Exec(stmt); err != nil {
 			// IF NOT EXISTS should prevent duplicates, but tolerate edge cases.
 			if !strings.Contains(err.Error(), "already exists") {
 				return fmt.Errorf("migrate indexes: %w", err)
@@ -993,7 +1010,7 @@ func (s *Store) migrateColumns() error {
 	// P11-2: populate cached_input_per_1m for Anthropic models.
 	// Anthropic charges 10% of input price for prompt cache reads.
 	// Only update rows where cached_input_per_1m is still 0 (not previously set).
-	s.db.Exec(`UPDATE pricing SET cached_input_per_1m = input_per_1m * 0.1
+	s.execer().Exec(`UPDATE pricing SET cached_input_per_1m = input_per_1m * 0.1
 		WHERE cached_input_per_1m = 0.0 AND model LIKE 'claude-%'`)
 
 	return nil
@@ -1511,7 +1528,7 @@ func (s *Store) UpdateSessionStats(sessionID, agentID, projectID string, tokensS
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO sessions (id, agent_id, project_id, started_at, tool_calls, tokens_saved, cost_saved_usd)
 		 VALUES (?, ?, ?, ?, 1, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
@@ -1532,7 +1549,7 @@ func (s *Store) AddSessionTokensSaved(sessionID, agentID, projectID string, toke
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO sessions (id, agent_id, project_id, started_at, tokens_saved, cost_saved_usd)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
@@ -1548,7 +1565,7 @@ func (s *Store) UpsertDailyRollup(day, metric string, value float64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO daily_rollups (day, metric, value) VALUES (?, ?, ?)
 		 ON CONFLICT(day, metric) DO UPDATE SET value = excluded.value`,
 		day, metric, value,
@@ -1607,7 +1624,7 @@ func (s *Store) GetSummary(days int) (*Summary, error) {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	sum := &Summary{}
 
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(duration_ms), 0)
 		 FROM tool_calls WHERE created_at >= ?`, since)
 	if err := row.Scan(&sum.TotalToolCalls, &sum.TotalLatencyMs); err != nil {
@@ -1617,7 +1634,7 @@ func (s *Store) GetSummary(days int) (*Summary, error) {
 		sum.AvgLatencyMs = sum.TotalLatencyMs / float64(sum.TotalToolCalls)
 	}
 
-	row = s.db.QueryRow(
+	row = s.execer().QueryRow(
 		`SELECT COUNT(*),
 		        COALESCE(SUM(response_tokens), 0),
 		        COALESCE(SUM(baseline_tokens), 0),
@@ -1646,7 +1663,7 @@ func (s *Store) GetSummary(days int) (*Summary, error) {
 		sum.CompressionRatio = 1.0
 	}
 
-	row = s.db.QueryRow(
+	row = s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0)
 		 FROM sessions WHERE started_at >= ?`, since)
 	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD); err != nil {
@@ -1667,7 +1684,7 @@ func (s *Store) GetSummaryForProject(days int, projectID string) (*Summary, erro
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	sum := &Summary{}
 
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(duration_ms), 0)
 		 FROM tool_calls WHERE created_at >= ? AND project_id = ?`, since, projectID)
 	if err := row.Scan(&sum.TotalToolCalls, &sum.TotalLatencyMs); err != nil {
@@ -1677,7 +1694,7 @@ func (s *Store) GetSummaryForProject(days int, projectID string) (*Summary, erro
 		sum.AvgLatencyMs = sum.TotalLatencyMs / float64(sum.TotalToolCalls)
 	}
 
-	row = s.db.QueryRow(
+	row = s.execer().QueryRow(
 		`SELECT COUNT(*),
 		        COALESCE(SUM(response_tokens), 0),
 		        COALESCE(SUM(baseline_tokens), 0),
@@ -1704,7 +1721,7 @@ func (s *Store) GetSummaryForProject(days int, projectID string) (*Summary, erro
 		sum.CompressionRatio = 1.0
 	}
 
-	row = s.db.QueryRow(
+	row = s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0)
 		 FROM sessions WHERE started_at >= ? AND project_id = ?`, since, projectID)
 	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD); err != nil {
@@ -1753,7 +1770,7 @@ func (s *Store) GetWeekOverWeek() (*WoWComparison, error) {
 	twoWeeksAgo := time.Now().UTC().AddDate(0, 0, -14).Format("2006-01-02")
 
 	sumPeriod := func(from, before string) (map[string]float64, error) {
-		rows, err := s.db.Query(
+		rows, err := s.execer().Query(
 			`SELECT metric, SUM(value) FROM daily_rollups WHERE day >= ? AND day < ? GROUP BY metric`,
 			from, before)
 		if err != nil {
@@ -1818,7 +1835,7 @@ func (s *Store) GetWeekOverWeek() (*WoWComparison, error) {
 // from summable components (cache_hits, brain_enriched_count, total_latency_ms)
 // instead of naively summing daily averages (which produces nonsensical values).
 func (s *Store) sumRollups(since, before string) (*Summary, error) {
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT metric, COALESCE(SUM(value), 0)
 		 FROM daily_rollups WHERE day >= ? AND day < ?
 		 GROUP BY metric`, since, before)
@@ -1941,7 +1958,7 @@ func computeValueMultiplier(s *Summary) {
 func (s *Store) GetSummaryForDay(day string) (*Summary, error) {
 	sum := &Summary{}
 
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(duration_ms), 0)
 		 FROM tool_calls WHERE created_date = ?`, day)
 	var totalLatency int64
@@ -1950,7 +1967,7 @@ func (s *Store) GetSummaryForDay(day string) (*Summary, error) {
 	}
 	sum.TotalLatencyMs = float64(totalLatency)
 
-	row = s.db.QueryRow(
+	row = s.execer().QueryRow(
 		`SELECT COUNT(*),
 		        COALESCE(SUM(response_tokens), 0),
 		        COALESCE(SUM(baseline_tokens), 0),
@@ -1983,7 +2000,7 @@ func (s *Store) GetSummaryForDay(day string) (*Summary, error) {
 		sum.CompressionRatio = 1.0
 	}
 
-	row = s.db.QueryRow(
+	row = s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0)
 		 FROM sessions WHERE started_date = ?`, day)
 	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD); err != nil {
@@ -2014,7 +2031,7 @@ type TimelinePoint struct {
 func (s *Store) GetTimeline(days int) ([]TimelinePoint, error) {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT day,
 		        COALESCE(SUM(tokens_saved), 0),
 		        COALESCE(SUM(tool_calls), 0),
@@ -2090,7 +2107,7 @@ type ToolStats struct {
 func (s *Store) GetToolStats(days int) ([]ToolStats, error) {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT tool_name,
 		        COUNT(*),
 		        COALESCE(AVG(duration_ms), 0),
@@ -2138,7 +2155,7 @@ func (s *Store) GetAgentStats(days int) ([]AgentStats, error) {
 	// agent_id. This avoids the LEFT JOIN on context_deliveries which produces
 	// zeros whenever the delivery lacks an agent_id (common for bare get_context
 	// calls that omit the optional agent_id param).
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT a.agent_id,
 		        COUNT(DISTINCT a.id)    AS sessions,
 		        SUM(a.tool_calls)       AS tool_calls,
@@ -2170,7 +2187,7 @@ func (s *Store) GetAgentStats(days int) ([]AgentStats, error) {
 // EventCount returns the total number of events across all main tables.
 // Bug 4 — STO-A.3.3: use a single query to avoid 3 round-trips.
 func (s *Store) EventCount() (int, int, int) {
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT
 			(SELECT COUNT(*) FROM tool_calls),
 			(SELECT COUNT(*) FROM context_deliveries),
@@ -2190,7 +2207,7 @@ func (s *Store) InsertToolSequenceEntryTx(sessionID, toolName string, position i
 	if !success {
 		sInt = 0
 	}
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO tool_sequences (session_id, position, tool_name, success) VALUES (?, ?, ?, ?)`,
 		sessionID, position, toolName, sInt)
 	return err
@@ -2206,7 +2223,7 @@ func (s *Store) InsertToolSequenceEntry(sessionID, toolName string, position int
 // InsertHeartbeatTx records a daemon heartbeat.
 func (s *Store) InsertHeartbeatTx() error {
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(`INSERT INTO heartbeat_events (created_date) VALUES (?)`, today)
+	_, err := s.execer().Exec(`INSERT INTO heartbeat_events (created_date) VALUES (?)`, today)
 	return err
 }
 
@@ -2224,7 +2241,7 @@ func (s *Store) InsertFederationEventTx(ev pulsetypes.FederationDetectEvent) err
 	if evType == "" {
 		evType = "detection"
 	}
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO federation_events (agent_id, project_id, sibling_project, tier, deps_found, duration_ms, event_type, created_date)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.AgentID, ev.ProjectID, ev.SiblingProject, ev.Tier, ev.DepsFound, ev.DurationMs, evType, today)
@@ -2245,7 +2262,7 @@ func (s *Store) InsertSkillExecutionTx(ev pulsetypes.SkillExecutionEvent) error 
 		successInt = 1
 	}
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO skill_executions (agent_id, project_id, skill_name, duration_ms, steps_total, steps_succeeded, success, error_step, created_date)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.AgentID, ev.ProjectID, ev.SkillName, ev.DurationMs,
@@ -2264,7 +2281,7 @@ func (s *Store) InsertSkillExecution(ev pulsetypes.SkillExecutionEvent) error {
 func (s *Store) InsertSessionEffectiveness(e pulsetypes.SessionEffectiveness) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT OR REPLACE INTO session_effectiveness (session_id, agent_id, project_id, context_hit_rate, task_completion_rate, tokens_saved, tool_calls, duration_ms)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SessionID, e.AgentID, e.ProjectID, e.ContextHitRate, e.TaskCompletionRate, e.TokensSaved, e.ToolCalls, e.DurationMs)
@@ -2281,7 +2298,7 @@ func (s *Store) InsertDeliveryOutcome(deliveryID int, sessionID, entity, signalT
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO delivery_outcomes (delivery_id, session_id, entity, outcome_signal_type, outcome_at, tools_between, success, created_date)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		deliveryID, sessionID, entity, signalType, now, toolsBetween, sInt, today)
@@ -2294,12 +2311,12 @@ func (s *Store) SetSessionTermination(sessionID, reason string) error {
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
 	var startedAt string
-	s.db.QueryRow(`SELECT started_at FROM sessions WHERE id = ?`, sessionID).Scan(&startedAt)
+	s.execer().QueryRow(`SELECT started_at FROM sessions WHERE id = ?`, sessionID).Scan(&startedAt)
 	var durationMs int64
 	if t, err := time.Parse(time.RFC3339, startedAt); err == nil {
 		durationMs = now.Sub(t).Milliseconds()
 	}
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`UPDATE sessions SET ended_at = ?, duration_ms = ?, termination_reason = ? WHERE id = ?`,
 		now.Format(time.RFC3339), durationMs, reason, sessionID)
 	return err
@@ -2311,7 +2328,7 @@ func (s *Store) SetSessionTermination(sessionID, reason string) error {
 
 // GetToolSequences returns the ordered tool sequence for a session (SA-C1).
 func (s *Store) GetToolSequences(sessionID string) []pulsetypes.ToolSequenceEntry {
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT session_id, position, tool_name, success FROM tool_sequences WHERE session_id = ? ORDER BY position`,
 		sessionID)
 	if err != nil {
@@ -2336,11 +2353,11 @@ func (s *Store) GetToolSequences(sessionID string) []pulsetypes.ToolSequenceEntr
 func (s *Store) GetWorkflowViolationRate(days int) float64 {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var total, violations int
-	s.db.QueryRow(`SELECT COUNT(DISTINCT session_id) FROM tool_sequences WHERE created_at >= ?`, since).Scan(&total)
+	s.execer().QueryRow(`SELECT COUNT(DISTINCT session_id) FROM tool_sequences WHERE created_at >= ?`, since).Scan(&total)
 	if total == 0 {
 		return 0.0
 	}
-	s.db.QueryRow(`SELECT COUNT(*) FROM (
+	s.execer().QueryRow(`SELECT COUNT(*) FROM (
 		SELECT session_id FROM tool_sequences WHERE tool_name = 'verify_implementation' AND created_at >= ?
 		EXCEPT
 		SELECT ts1.session_id FROM tool_sequences ts1
@@ -2354,7 +2371,7 @@ func (s *Store) GetWorkflowViolationRate(days int) float64 {
 // CountCrossSessionRecallHits counts cross_session_hit ops for a day (SA-D6).
 func (s *Store) CountCrossSessionRecallHits(day string) int {
 	var n int
-	s.db.QueryRow(`SELECT COUNT(*) FROM memory_ops WHERE operation = 'cross_session_hit' AND created_date = ?`, day).Scan(&n)
+	s.execer().QueryRow(`SELECT COUNT(*) FROM memory_ops WHERE operation = 'cross_session_hit' AND created_date = ?`, day).Scan(&n)
 	return n
 }
 
@@ -2362,8 +2379,8 @@ func (s *Store) CountCrossSessionRecallHits(day string) int {
 func (s *Store) GetCrossSessionReuseRate(days int) float64 {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var crossHits, totalRecalls int
-	s.db.QueryRow(`SELECT COUNT(*) FROM memory_ops WHERE operation = 'cross_session_hit' AND created_at >= ?`, since).Scan(&crossHits)
-	s.db.QueryRow(`SELECT COUNT(*) FROM memory_ops WHERE operation IN ('recall_hit', 'recall_miss', 'cross_session_hit') AND created_at >= ?`, since).Scan(&totalRecalls)
+	s.execer().QueryRow(`SELECT COUNT(*) FROM memory_ops WHERE operation = 'cross_session_hit' AND created_at >= ?`, since).Scan(&crossHits)
+	s.execer().QueryRow(`SELECT COUNT(*) FROM memory_ops WHERE operation IN ('recall_hit', 'recall_miss', 'cross_session_hit') AND created_at >= ?`, since).Scan(&totalRecalls)
 	if totalRecalls == 0 {
 		return 0.0
 	}
@@ -2373,7 +2390,7 @@ func (s *Store) GetCrossSessionReuseRate(days int) float64 {
 // GetUptimeSince returns (upMinutes, expectedMinutes) from heartbeat_events (ROI-E1).
 func (s *Store) GetUptimeSince(cutoff time.Time) (upMinutes, expectedMinutes float64) {
 	var heartbeats int
-	s.db.QueryRow(`SELECT COUNT(*) FROM heartbeat_events WHERE created_at >= ?`, cutoff.Format(time.RFC3339)).Scan(&heartbeats)
+	s.execer().QueryRow(`SELECT COUNT(*) FROM heartbeat_events WHERE created_at >= ?`, cutoff.Format(time.RFC3339)).Scan(&heartbeats)
 	expectedMinutes = time.Since(cutoff).Minutes()
 	upMinutes = float64(heartbeats) * 60.0
 	if upMinutes > expectedMinutes {
@@ -2385,7 +2402,7 @@ func (s *Store) GetUptimeSince(cutoff time.Time) (upMinutes, expectedMinutes flo
 // GetUptimePctForDay returns uptime percentage for the day (heartbeats / 24).
 func (s *Store) GetUptimePctForDay(day string) float64 {
 	var heartbeats int
-	s.db.QueryRow(`SELECT COUNT(*) FROM heartbeat_events WHERE created_date = ?`, day).Scan(&heartbeats)
+	s.execer().QueryRow(`SELECT COUNT(*) FROM heartbeat_events WHERE created_date = ?`, day).Scan(&heartbeats)
 	if heartbeats >= 24 {
 		return 100.0
 	}
@@ -2395,42 +2412,42 @@ func (s *Store) GetUptimePctForDay(day string) float64 {
 // AvgRebuildMs returns average graph rebuild duration for a day (COV-7).
 func (s *Store) AvgRebuildMs(day string) float64 {
 	var v float64
-	s.db.QueryRow(`SELECT COALESCE(AVG(rebuild_duration_ms), 0.0) FROM graph_snapshots WHERE rebuild_duration_ms > 0 AND created_date = ?`, day).Scan(&v)
+	s.execer().QueryRow(`SELECT COALESCE(AVG(rebuild_duration_ms), 0.0) FROM graph_snapshots WHERE rebuild_duration_ms > 0 AND created_date = ?`, day).Scan(&v)
 	return v
 }
 
 // CountFederationDetections returns federation detection count by tier for a day (COV-8).
 func (s *Store) CountFederationDetections(day string, tier int) int {
 	var n int
-	s.db.QueryRow(`SELECT COUNT(*) FROM federation_events WHERE tier = ? AND event_type = 'detection' AND created_date = ?`, tier, day).Scan(&n)
+	s.execer().QueryRow(`SELECT COUNT(*) FROM federation_events WHERE tier = ? AND event_type = 'detection' AND created_date = ?`, tier, day).Scan(&n)
 	return n
 }
 
 // SumMemoryInvalidations returns total memory cascade invalidations for a day (COV-10).
 func (s *Store) SumMemoryInvalidations(day string) int {
 	var n int
-	s.db.QueryRow(`SELECT COALESCE(SUM(count), 0) FROM memory_ops WHERE operation = 'invalidated_cascade' AND created_date = ?`, day).Scan(&n)
+	s.execer().QueryRow(`SELECT COALESCE(SUM(count), 0) FROM memory_ops WHERE operation = 'invalidated_cascade' AND created_date = ?`, day).Scan(&n)
 	return n
 }
 
 // CountWatcherViolations returns watcher_check violations for a day (COV-13).
 func (s *Store) CountWatcherViolations(day string) int {
 	var n int
-	s.db.QueryRow(`SELECT COALESCE(SUM(violation_count), 0) FROM validation_events WHERE tool_name = 'watcher_check' AND created_date = ?`, day).Scan(&n)
+	s.execer().QueryRow(`SELECT COALESCE(SUM(violation_count), 0) FROM validation_events WHERE tool_name = 'watcher_check' AND created_date = ?`, day).Scan(&n)
 	return n
 }
 
 // CountCrossProjectImpactAlerts returns impact_notification count for a day (COV-14).
 func (s *Store) CountCrossProjectImpactAlerts(day string) int {
 	var n int
-	s.db.QueryRow(`SELECT COUNT(*) FROM federation_events WHERE event_type = 'impact_notification' AND created_date = ?`, day).Scan(&n)
+	s.execer().QueryRow(`SELECT COUNT(*) FROM federation_events WHERE event_type = 'impact_notification' AND created_date = ?`, day).Scan(&n)
 	return n
 }
 
 // GetSkillExecutionStatsP5 returns skill stats from skill_executions table (COV-15).
 func (s *Store) GetSkillExecutionStatsP5(days int) []pulsetypes.SkillStat {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT skill_name, COUNT(*), COALESCE(AVG(CASE WHEN success=1 THEN 1.0 ELSE 0.0 END),0), COALESCE(AVG(duration_ms),0)
 		 FROM skill_executions WHERE created_at >= ? GROUP BY skill_name ORDER BY COUNT(*) DESC`, since)
 	if err != nil {
@@ -2448,7 +2465,7 @@ func (s *Store) GetSkillExecutionStatsP5(days int) []pulsetypes.SkillStat {
 
 // UpdateEntityQualityScore recomputes the quality score for an entity (Item 10).
 func (s *Store) UpdateEntityQualityScore(entity, projectID string) {
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COALESCE(SUM(CASE
 			WHEN signal_type = 'task_done' THEN 2.0
 			WHEN signal_type IN ('recall_hit','cross_session_hit') THEN 0.5
@@ -2464,14 +2481,14 @@ func (s *Store) UpdateEntityQualityScore(entity, projectID string) {
 	var pos, neg int
 	row.Scan(&score, &pos, &neg)
 	now := time.Now().UTC().Format(time.RFC3339)
-	s.db.Exec(`INSERT INTO entity_quality (entity, project_id, quality_score, positive_signals, negative_signals, last_updated)
+	s.execer().Exec(`INSERT INTO entity_quality (entity, project_id, quality_score, positive_signals, negative_signals, last_updated)
 		VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(entity, project_id) DO UPDATE SET quality_score = excluded.quality_score, positive_signals = excluded.positive_signals, negative_signals = excluded.negative_signals, last_updated = excluded.last_updated`,
 		entity, projectID, score, pos, neg, now)
 }
 
 // GetEntityQualityScores returns entities with at least minSignals signals (Item 10).
 func (s *Store) GetEntityQualityScores(projectID string, minSignals int) []pulsetypes.EntityQuality {
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT entity, project_id, quality_score, positive_signals, negative_signals, last_updated
 		 FROM entity_quality WHERE (project_id = ? OR ? = '') AND (positive_signals + negative_signals) >= ?
 		 ORDER BY quality_score DESC LIMIT 100`,
@@ -2492,7 +2509,7 @@ func (s *Store) GetEntityQualityScores(projectID string, minSignals int) []pulse
 // GetDeliveryOutcomes returns delivery-to-outcome linkages (Item 11).
 func (s *Store) GetDeliveryOutcomes(days int) []pulsetypes.DeliveryOutcome {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT delivery_id, session_id, entity, outcome_signal_type, outcome_at, tools_between, success
 		 FROM delivery_outcomes WHERE created_at >= ? ORDER BY created_at DESC LIMIT 500`, since)
 	if err != nil {
@@ -2511,7 +2528,7 @@ func (s *Store) GetDeliveryOutcomes(days int) []pulsetypes.DeliveryOutcome {
 // GetEntityDeliverySuccessRate returns fraction of deliveries with positive outcomes.
 func (s *Store) GetEntityDeliverySuccessRate(entity string) float64 {
 	var succ, total int
-	s.db.QueryRow(`SELECT COALESCE(SUM(success),0), COUNT(*) FROM delivery_outcomes WHERE entity = ?`, entity).Scan(&succ, &total)
+	s.execer().QueryRow(`SELECT COALESCE(SUM(success),0), COUNT(*) FROM delivery_outcomes WHERE entity = ?`, entity).Scan(&succ, &total)
 	if total == 0 {
 		return 0.0
 	}
@@ -2521,7 +2538,7 @@ func (s *Store) GetEntityDeliverySuccessRate(entity string) float64 {
 // GetDeliverySuccessRateForDay returns daily delivery success rate (Item 11).
 func (s *Store) GetDeliverySuccessRateForDay(day string) float64 {
 	var succ, total int
-	s.db.QueryRow(`SELECT COALESCE(SUM(success),0), COUNT(*) FROM delivery_outcomes WHERE created_date = ?`, day).Scan(&succ, &total)
+	s.execer().QueryRow(`SELECT COALESCE(SUM(success),0), COUNT(*) FROM delivery_outcomes WHERE created_date = ?`, day).Scan(&succ, &total)
 	if total == 0 {
 		return 0.0
 	}
@@ -2530,7 +2547,7 @@ func (s *Store) GetDeliverySuccessRateForDay(day string) float64 {
 
 // UpdateRecallChannelStats recomputes recall channel win rates (Item 12).
 func (s *Store) UpdateRecallChannelStats(projectID string) {
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT top_channel, COUNT(*) FROM memory_ops
 		 WHERE operation IN ('recall_hit','cross_session_hit') AND top_channel != '' AND (project_id = ? OR ? = '')
 		 GROUP BY top_channel`, projectID, projectID)
@@ -2556,7 +2573,7 @@ func (s *Store) UpdateRecallChannelStats(projectID string) {
 		if total > 0 {
 			winRate = float64(cs.hits) / float64(total)
 		}
-		s.db.Exec(`INSERT INTO recall_channel_weights (project_id, channel, hits, win_rate, last_updated)
+		s.execer().Exec(`INSERT INTO recall_channel_weights (project_id, channel, hits, win_rate, last_updated)
 			VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id, channel) DO UPDATE SET hits = excluded.hits, win_rate = excluded.win_rate, last_updated = excluded.last_updated`,
 			projectID, cs.ch, cs.hits, winRate, now)
 	}
@@ -2564,7 +2581,7 @@ func (s *Store) UpdateRecallChannelStats(projectID string) {
 
 // GetRecallChannelWeights returns per-channel win rates (Item 12).
 func (s *Store) GetRecallChannelWeights(projectID string) map[string]float64 {
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT channel, win_rate FROM recall_channel_weights WHERE project_id = ? OR ? = ''`,
 		projectID, projectID)
 	if err != nil {
@@ -2583,7 +2600,7 @@ func (s *Store) GetRecallChannelWeights(projectID string) map[string]float64 {
 
 // GetSessionEffectivenessP5 returns effectiveness data for a session (Item 13).
 func (s *Store) GetSessionEffectivenessP5(sessionID string) *pulsetypes.SessionEffectiveness {
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT session_id, agent_id, project_id, context_hit_rate, task_completion_rate, tokens_saved, tool_calls, duration_ms, created_at
 		 FROM session_effectiveness WHERE session_id = ?`, sessionID)
 	var e pulsetypes.SessionEffectiveness
@@ -2604,7 +2621,7 @@ func (s *Store) GetRecentEffectivenessTrend(days int, agentID string) []pulsetyp
 		args = append(args, agentID)
 	}
 	q += ` GROUP BY date(created_at) ORDER BY date(created_at)`
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.execer().Query(q, args...)
 	if err != nil {
 		return nil
 	}
@@ -2621,7 +2638,7 @@ func (s *Store) GetRecentEffectivenessTrend(days int, agentID string) []pulsetyp
 // GetAgentLearningCurve returns weekly efficiency for an agent (SA-B2).
 func (s *Store) GetAgentLearningCurve(agentID string, weeks int) []pulsetypes.WeeklyEfficiency {
 	since := time.Now().UTC().AddDate(0, 0, -weeks*7).Format(time.RFC3339)
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT strftime('%%Y-W%%W', started_at) AS wk,
 		       CAST(SUM(tasks_completed) AS REAL) / MAX(COUNT(*), 1),
 		       CAST(SUM(tool_calls) AS REAL) / MAX(SUM(tasks_completed), 1)
@@ -2646,7 +2663,7 @@ func (s *Store) GetAgentFirstSessionsPerformance(agentID string, nSessions int) 
 	if nSessions <= 0 {
 		nSessions = 5
 	}
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT tool_calls, tasks_completed, tokens_saved
 		FROM (
 			SELECT tool_calls, tasks_completed, tokens_saved,
@@ -2679,7 +2696,7 @@ func (s *Store) GetImplementationQualityGap(days int) float64 {
 	// Simplified: compare violation counts in sessions with verify_implementation
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var avg float64
-	s.db.QueryRow(`SELECT COALESCE(AVG(violation_count), 0) FROM validation_events
+	s.execer().QueryRow(`SELECT COALESCE(AVG(violation_count), 0) FROM validation_events
 		WHERE tool_name = 'verify_implementation' AND created_at >= ?`, since).Scan(&avg)
 	return avg
 }
@@ -2688,8 +2705,8 @@ func (s *Store) GetImplementationQualityGap(days int) float64 {
 func (s *Store) GetBrainEnrichmentUplift(days int) float64 {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var enriched, plain float64
-	s.db.QueryRow(`SELECT COALESCE(AVG(baseline_tokens - response_tokens), 0) FROM context_deliveries WHERE brain_enriched = 1 AND created_at >= ?`, since).Scan(&enriched)
-	s.db.QueryRow(`SELECT COALESCE(AVG(baseline_tokens - response_tokens), 0) FROM context_deliveries WHERE brain_enriched = 0 AND created_at >= ?`, since).Scan(&plain)
+	s.execer().QueryRow(`SELECT COALESCE(AVG(baseline_tokens - response_tokens), 0) FROM context_deliveries WHERE brain_enriched = 1 AND created_at >= ?`, since).Scan(&enriched)
+	s.execer().QueryRow(`SELECT COALESCE(AVG(baseline_tokens - response_tokens), 0) FROM context_deliveries WHERE brain_enriched = 0 AND created_at >= ?`, since).Scan(&plain)
 	if plain <= 0 {
 		return 0.0
 	}
@@ -2700,11 +2717,11 @@ func (s *Store) GetBrainEnrichmentUplift(days int) float64 {
 func (s *Store) GetMemoryFailurePreventionRate(days int) float64 {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var withRecall, withRecallNoErr int
-	s.db.QueryRow(`SELECT COUNT(DISTINCT session_id) FROM memory_ops WHERE operation IN ('recall_hit','cross_session_hit') AND created_at >= ? AND session_id != ''`, since).Scan(&withRecall)
+	s.execer().QueryRow(`SELECT COUNT(DISTINCT session_id) FROM memory_ops WHERE operation IN ('recall_hit','cross_session_hit') AND created_at >= ? AND session_id != ''`, since).Scan(&withRecall)
 	if withRecall == 0 {
 		return 0.0
 	}
-	s.db.QueryRow(`
+	s.execer().QueryRow(`
 		SELECT COUNT(*) FROM (
 			SELECT DISTINCT m.session_id FROM memory_ops m
 			WHERE m.operation IN ('recall_hit','cross_session_hit') AND m.created_at >= ? AND m.session_id != ''
@@ -2717,11 +2734,11 @@ func (s *Store) GetMemoryFailurePreventionRate(days int) float64 {
 func (s *Store) GetDecayEffectiveness(days int) pulsetypes.DecayStats {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var ds pulsetypes.DecayStats
-	s.db.QueryRow(`SELECT COALESCE(AVG(CASE WHEN result_count > 0 THEN 1.0 ELSE 0.0 END), 0)
+	s.execer().QueryRow(`SELECT COALESCE(AVG(CASE WHEN result_count > 0 THEN 1.0 ELSE 0.0 END), 0)
 		FROM memory_ops WHERE operation = 'recall_hit' AND created_at >= ? AND julianday('now') - julianday(created_at) < 7`, since).Scan(&ds.HitRateUnder7d)
-	s.db.QueryRow(`SELECT COALESCE(AVG(CASE WHEN result_count > 0 THEN 1.0 ELSE 0.0 END), 0)
+	s.execer().QueryRow(`SELECT COALESCE(AVG(CASE WHEN result_count > 0 THEN 1.0 ELSE 0.0 END), 0)
 		FROM memory_ops WHERE operation = 'recall_hit' AND created_at >= ? AND julianday('now') - julianday(created_at) BETWEEN 7 AND 30`, since).Scan(&ds.HitRate7to30d)
-	s.db.QueryRow(`SELECT COALESCE(AVG(CASE WHEN result_count > 0 THEN 1.0 ELSE 0.0 END), 0)
+	s.execer().QueryRow(`SELECT COALESCE(AVG(CASE WHEN result_count > 0 THEN 1.0 ELSE 0.0 END), 0)
 		FROM memory_ops WHERE operation = 'recall_hit' AND created_at >= ? AND julianday('now') - julianday(created_at) > 30`, since).Scan(&ds.HitRateOver30d)
 	return ds
 }
@@ -2729,7 +2746,7 @@ func (s *Store) GetDecayEffectiveness(days int) pulsetypes.DecayStats {
 // GetConcurrentAgentsMax returns max concurrent agents on a day (SA-F2).
 func (s *Store) GetConcurrentAgentsMax(day string) int {
 	var n int
-	s.db.QueryRow(`SELECT COUNT(DISTINCT agent_id) FROM tool_calls WHERE created_date = ? AND agent_id != ''`, day).Scan(&n)
+	s.execer().QueryRow(`SELECT COUNT(DISTINCT agent_id) FROM tool_calls WHERE created_date = ? AND agent_id != ''`, day).Scan(&n)
 	return n
 }
 
@@ -2737,7 +2754,7 @@ func (s *Store) GetConcurrentAgentsMax(day string) int {
 func (s *Store) GetMonthlyROIReport(year, month int) *pulsetypes.MonthlyROI {
 	prefix := fmt.Sprintf("%04d-%02d-%%", year, month)
 	r := &pulsetypes.MonthlyROI{}
-	s.db.QueryRow(`SELECT COALESCE(SUM(CASE WHEN metric='tokens_saved' THEN value ELSE 0 END), 0),
+	s.execer().QueryRow(`SELECT COALESCE(SUM(CASE WHEN metric='tokens_saved' THEN value ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN metric='cost_saved_usd' THEN value ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN metric='sessions' THEN value ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN metric='tasks_completed' THEN value ELSE 0 END), 0)
@@ -2748,12 +2765,12 @@ func (s *Store) GetMonthlyROIReport(year, month int) *pulsetypes.MonthlyROI {
 // GetGraphFreshnessScoreP5 returns fraction of queried entities recently reparsed (ROI-E5).
 func (s *Store) GetGraphFreshnessScoreP5(day string) float64 {
 	var total int
-	s.db.QueryRow(`SELECT COUNT(DISTINCT entity) FROM context_deliveries WHERE created_date = ? AND entity != ''`, day).Scan(&total)
+	s.execer().QueryRow(`SELECT COUNT(DISTINCT entity) FROM context_deliveries WHERE created_date = ? AND entity != ''`, day).Scan(&total)
 	if total == 0 {
 		return 0.0
 	}
 	var fresh int
-	s.db.QueryRow(`SELECT COUNT(*) FROM (
+	s.execer().QueryRow(`SELECT COUNT(*) FROM (
 		SELECT DISTINCT cd.entity FROM context_deliveries cd
 		JOIN reparse_events re ON cd.entity LIKE '%%' || re.file || '%%'
 		WHERE cd.created_date = ? AND re.created_date = ?
@@ -2767,7 +2784,7 @@ func (s *Store) GetGraphFreshnessScoreP5(day string) float64 {
 // GetTokenSavingsByIntent returns token savings grouped by intent (ROI-A4).
 func (s *Store) GetTokenSavingsByIntent(days int) map[string]int64 {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT intent, SUM(baseline_tokens - response_tokens) FROM context_deliveries
 		 WHERE created_at >= ? AND intent != '' GROUP BY intent`, since)
 	if err != nil {
@@ -2788,7 +2805,7 @@ func (s *Store) GetTokenSavingsByIntent(days int) map[string]int64 {
 func (s *Store) GetBFSCacheHitRate(days int) float64 {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	var hits, total float64
-	s.db.QueryRow(`SELECT COALESCE(SUM(CASE WHEN metric='bfs_cache_hits' THEN value ELSE 0 END), 0),
+	s.execer().QueryRow(`SELECT COALESCE(SUM(CASE WHEN metric='bfs_cache_hits' THEN value ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN metric='context_deliveries' THEN value ELSE 0 END), 0)
 		FROM daily_rollups WHERE day >= ?`, since).Scan(&hits, &total)
 	if total == 0 {
@@ -2802,20 +2819,20 @@ func (s *Store) GetSessionDurationDistribution(days int) pulsetypes.DurationBuck
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var db pulsetypes.DurationBuckets
 	var total int
-	s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE duration_ms > 0 AND started_at >= ?`, since).Scan(&total)
+	s.execer().QueryRow(`SELECT COUNT(*) FROM sessions WHERE duration_ms > 0 AND started_at >= ?`, since).Scan(&total)
 	if total == 0 {
 		return db
 	}
-	s.db.QueryRow(`SELECT duration_ms FROM sessions WHERE duration_ms > 0 AND started_at >= ? ORDER BY duration_ms LIMIT 1 OFFSET ?`, since, total/2).Scan(&db.P50)
-	s.db.QueryRow(`SELECT duration_ms FROM sessions WHERE duration_ms > 0 AND started_at >= ? ORDER BY duration_ms LIMIT 1 OFFSET ?`, since, total*95/100).Scan(&db.P95)
-	s.db.QueryRow(`SELECT duration_ms FROM sessions WHERE duration_ms > 0 AND started_at >= ? ORDER BY duration_ms LIMIT 1 OFFSET ?`, since, total*99/100).Scan(&db.P99)
+	s.execer().QueryRow(`SELECT duration_ms FROM sessions WHERE duration_ms > 0 AND started_at >= ? ORDER BY duration_ms LIMIT 1 OFFSET ?`, since, total/2).Scan(&db.P50)
+	s.execer().QueryRow(`SELECT duration_ms FROM sessions WHERE duration_ms > 0 AND started_at >= ? ORDER BY duration_ms LIMIT 1 OFFSET ?`, since, total*95/100).Scan(&db.P95)
+	s.execer().QueryRow(`SELECT duration_ms FROM sessions WHERE duration_ms > 0 AND started_at >= ? ORDER BY duration_ms LIMIT 1 OFFSET ?`, since, total*99/100).Scan(&db.P99)
 	return db
 }
 
 // GetCleanSessionRate returns fraction of cleanly-terminated sessions (DQ-C.5).
 func (s *Store) GetCleanSessionRate(day string) float64 {
 	var clean, total int
-	s.db.QueryRow(`SELECT COALESCE(SUM(CASE WHEN termination_reason='clean' THEN 1 ELSE 0 END),0), COUNT(*) FROM sessions WHERE started_date = ? AND ended_at IS NOT NULL`, day).Scan(&clean, &total)
+	s.execer().QueryRow(`SELECT COALESCE(SUM(CASE WHEN termination_reason='clean' THEN 1 ELSE 0 END),0), COUNT(*) FROM sessions WHERE started_date = ? AND ended_at IS NOT NULL`, day).Scan(&clean, &total)
 	if total == 0 {
 		return 0.0
 	}
@@ -2826,7 +2843,7 @@ func (s *Store) GetCleanSessionRate(day string) float64 {
 func (s *Store) GetAvgTimeToOutcome(days int, signalType string) float64 {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var v float64
-	s.db.QueryRow(`SELECT COALESCE(AVG(time_to_outcome_ms), 0) FROM outcome_signals WHERE time_to_outcome_ms > 0 AND signal_type = ? AND created_at >= ?`,
+	s.execer().QueryRow(`SELECT COALESCE(AVG(time_to_outcome_ms), 0) FROM outcome_signals WHERE time_to_outcome_ms > 0 AND signal_type = ? AND created_at >= ?`,
 		signalType, since).Scan(&v)
 	return v
 }
@@ -2835,13 +2852,13 @@ func (s *Store) GetAvgTimeToOutcome(days int, signalType string) float64 {
 func (s *Store) GetToolsPerSessionPercentiles(days int) (p50, p95, p99 float64) {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var total int
-	s.db.QueryRow(`SELECT COUNT(DISTINCT session_id) FROM tool_calls WHERE created_at >= ? AND session_id != ''`, since).Scan(&total)
+	s.execer().QueryRow(`SELECT COUNT(DISTINCT session_id) FROM tool_calls WHERE created_at >= ? AND session_id != ''`, since).Scan(&total)
 	if total == 0 {
 		return
 	}
-	s.db.QueryRow(`SELECT cnt FROM (SELECT COUNT(DISTINCT tool_name) AS cnt FROM tool_calls WHERE created_at >= ? AND session_id != '' GROUP BY session_id ORDER BY cnt) LIMIT 1 OFFSET ?`, since, total/2).Scan(&p50)
-	s.db.QueryRow(`SELECT cnt FROM (SELECT COUNT(DISTINCT tool_name) AS cnt FROM tool_calls WHERE created_at >= ? AND session_id != '' GROUP BY session_id ORDER BY cnt) LIMIT 1 OFFSET ?`, since, total*95/100).Scan(&p95)
-	s.db.QueryRow(`SELECT cnt FROM (SELECT COUNT(DISTINCT tool_name) AS cnt FROM tool_calls WHERE created_at >= ? AND session_id != '' GROUP BY session_id ORDER BY cnt) LIMIT 1 OFFSET ?`, since, total*99/100).Scan(&p99)
+	s.execer().QueryRow(`SELECT cnt FROM (SELECT COUNT(DISTINCT tool_name) AS cnt FROM tool_calls WHERE created_at >= ? AND session_id != '' GROUP BY session_id ORDER BY cnt) LIMIT 1 OFFSET ?`, since, total/2).Scan(&p50)
+	s.execer().QueryRow(`SELECT cnt FROM (SELECT COUNT(DISTINCT tool_name) AS cnt FROM tool_calls WHERE created_at >= ? AND session_id != '' GROUP BY session_id ORDER BY cnt) LIMIT 1 OFFSET ?`, since, total*95/100).Scan(&p95)
+	s.execer().QueryRow(`SELECT cnt FROM (SELECT COUNT(DISTINCT tool_name) AS cnt FROM tool_calls WHERE created_at >= ? AND session_id != '' GROUP BY session_id ORDER BY cnt) LIMIT 1 OFFSET ?`, since, total*99/100).Scan(&p99)
 	return
 }
 
@@ -2849,20 +2866,20 @@ func (s *Store) GetToolsPerSessionPercentiles(days int) (p50, p95, p99 float64) 
 func (s *Store) GetCallsPerSessionPercentiles(days int) (p50, p95, p99 float64) {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var total int
-	s.db.QueryRow(`SELECT COUNT(DISTINCT session_id) FROM tool_calls WHERE created_at >= ? AND session_id != ''`, since).Scan(&total)
+	s.execer().QueryRow(`SELECT COUNT(DISTINCT session_id) FROM tool_calls WHERE created_at >= ? AND session_id != ''`, since).Scan(&total)
 	if total == 0 {
 		return
 	}
-	s.db.QueryRow(`SELECT cnt FROM (SELECT COUNT(*) AS cnt FROM tool_calls WHERE created_at >= ? AND session_id != '' GROUP BY session_id ORDER BY cnt) LIMIT 1 OFFSET ?`, since, total/2).Scan(&p50)
-	s.db.QueryRow(`SELECT cnt FROM (SELECT COUNT(*) AS cnt FROM tool_calls WHERE created_at >= ? AND session_id != '' GROUP BY session_id ORDER BY cnt) LIMIT 1 OFFSET ?`, since, total*95/100).Scan(&p95)
-	s.db.QueryRow(`SELECT cnt FROM (SELECT COUNT(*) AS cnt FROM tool_calls WHERE created_at >= ? AND session_id != '' GROUP BY session_id ORDER BY cnt) LIMIT 1 OFFSET ?`, since, total*99/100).Scan(&p99)
+	s.execer().QueryRow(`SELECT cnt FROM (SELECT COUNT(*) AS cnt FROM tool_calls WHERE created_at >= ? AND session_id != '' GROUP BY session_id ORDER BY cnt) LIMIT 1 OFFSET ?`, since, total/2).Scan(&p50)
+	s.execer().QueryRow(`SELECT cnt FROM (SELECT COUNT(*) AS cnt FROM tool_calls WHERE created_at >= ? AND session_id != '' GROUP BY session_id ORDER BY cnt) LIMIT 1 OFFSET ?`, since, total*95/100).Scan(&p95)
+	s.execer().QueryRow(`SELECT cnt FROM (SELECT COUNT(*) AS cnt FROM tool_calls WHERE created_at >= ? AND session_id != '' GROUP BY session_id ORDER BY cnt) LIMIT 1 OFFSET ?`, since, total*99/100).Scan(&p99)
 	return
 }
 
 // GetTokenBudgetHitRate returns fraction of deliveries where token budget was binding (PIPE-F7).
 func (s *Store) GetTokenBudgetHitRate(day string) float64 {
 	var hits, total int
-	s.db.QueryRow(`SELECT COALESCE(SUM(token_budget_hit),0), COUNT(*) FROM context_deliveries WHERE created_date = ?`, day).Scan(&hits, &total)
+	s.execer().QueryRow(`SELECT COALESCE(SUM(token_budget_hit),0), COUNT(*) FROM context_deliveries WHERE created_date = ?`, day).Scan(&hits, &total)
 	if total == 0 {
 		return 0.0
 	}
@@ -2872,7 +2889,7 @@ func (s *Store) GetTokenBudgetHitRate(day string) float64 {
 // GetMostRecentDeliveryID returns the ID of the most recent context delivery for entity+session.
 func (s *Store) GetMostRecentDeliveryID(entity, sessionID string) int {
 	var id int
-	s.db.QueryRow(`SELECT id FROM context_deliveries WHERE entity = ? AND session_id = ? ORDER BY created_at DESC LIMIT 1`,
+	s.execer().QueryRow(`SELECT id FROM context_deliveries WHERE entity = ? AND session_id = ? ORDER BY created_at DESC LIMIT 1`,
 		entity, sessionID).Scan(&id)
 	return id
 }
@@ -2881,7 +2898,7 @@ func (s *Store) GetMostRecentDeliveryID(entity, sessionID string) int {
 // for an entity, regardless of session. Returns 0 if none found.
 func (s *Store) GetMostRecentDeliveryIDByEntity(entity string) int {
 	var id int
-	s.db.QueryRow(`SELECT id FROM context_deliveries WHERE entity = ? ORDER BY created_at DESC LIMIT 1`,
+	s.execer().QueryRow(`SELECT id FROM context_deliveries WHERE entity = ? ORDER BY created_at DESC LIMIT 1`,
 		entity).Scan(&id)
 	return id
 }
@@ -2893,7 +2910,7 @@ func (s *Store) CountToolCallsSinceDelivery(sessionID, entity string) int {
 		return 0
 	}
 	var n int
-	s.db.QueryRow(`
+	s.execer().QueryRow(`
 		SELECT COUNT(*) FROM tool_calls
 		WHERE session_id = ? AND created_at > COALESCE(
 			(SELECT created_at FROM context_deliveries WHERE session_id = ? AND entity = ? ORDER BY created_at DESC LIMIT 1),
@@ -2906,14 +2923,14 @@ func (s *Store) CountToolCallsSinceDelivery(sessionID, entity string) int {
 func (s *Store) CountEventsToday() int {
 	today := time.Now().UTC().Format("2006-01-02")
 	var n int
-	s.db.QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE created_date = ?`, today).Scan(&n)
+	s.execer().QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE created_date = ?`, today).Scan(&n)
 	return n
 }
 
 // GetLastRollupTime returns the most recent rollup day string.
 func (s *Store) GetLastRollupTime() string {
 	var day string
-	s.db.QueryRow(`SELECT MAX(day) FROM daily_rollups`).Scan(&day)
+	s.execer().QueryRow(`SELECT MAX(day) FROM daily_rollups`).Scan(&day)
 	return day
 }
 
@@ -2955,8 +2972,8 @@ func (s *Store) PruneOldEvents(retentionDays int) (int64, error) {
 	} {
 		// Bug 74: count rows before deleting so we can log them.
 		var count int
-		s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE created_at < ?", table), since).Scan(&count)
-		result, err := s.db.Exec(
+		s.execer().QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE created_at < ?", table), since).Scan(&count)
+		result, err := s.execer().Exec(
 			fmt.Sprintf("DELETE FROM %s WHERE created_at < ?", table), since)
 		if err != nil {
 			return totalDeleted, err
@@ -2964,7 +2981,7 @@ func (s *Store) PruneOldEvents(retentionDays int) (int64, error) {
 		if n, err := result.RowsAffected(); err == nil {
 			totalDeleted += n
 			if n > 0 {
-				s.db.Exec(`INSERT INTO pruning_log (day, table_name, rows_deleted) VALUES (?, ?, ?)`,
+				s.execer().Exec(`INSERT INTO pruning_log (day, table_name, rows_deleted) VALUES (?, ?, ?)`,
 					today, table, n)
 			}
 		}
@@ -2972,24 +2989,24 @@ func (s *Store) PruneOldEvents(retentionDays int) (int64, error) {
 
 	// Prune sessions older than retention
 	var sessCount int
-	s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE started_at < ?`, since).Scan(&sessCount)
-	result, err := s.db.Exec(`DELETE FROM sessions WHERE started_at < ?`, since)
+	s.execer().QueryRow(`SELECT COUNT(*) FROM sessions WHERE started_at < ?`, since).Scan(&sessCount)
+	result, err := s.execer().Exec(`DELETE FROM sessions WHERE started_at < ?`, since)
 	if err != nil {
 		return totalDeleted, err
 	}
 	if n, err := result.RowsAffected(); err == nil {
 		totalDeleted += n
 		if n > 0 {
-			s.db.Exec(`INSERT INTO pruning_log (day, table_name, rows_deleted) VALUES (?, 'sessions', ?)`,
+			s.execer().Exec(`INSERT INTO pruning_log (day, table_name, rows_deleted) VALUES (?, 'sessions', ?)`,
 				today, n)
 		}
 	}
 
 	// Phase 5: prune session_effectiveness older than retention.
-	if result, err := s.db.Exec(`DELETE FROM session_effectiveness WHERE created_at < ?`, since); err == nil {
+	if result, err := s.execer().Exec(`DELETE FROM session_effectiveness WHERE created_at < ?`, since); err == nil {
 		if n, _ := result.RowsAffected(); n > 0 {
 			totalDeleted += n
-			s.db.Exec(`INSERT INTO pruning_log (day, table_name, rows_deleted) VALUES (?, 'session_effectiveness', ?)`, today, n)
+			s.execer().Exec(`INSERT INTO pruning_log (day, table_name, rows_deleted) VALUES (?, 'session_effectiveness', ?)`, today, n)
 		}
 	}
 
@@ -2997,27 +3014,27 @@ func (s *Store) PruneOldEvents(retentionDays int) (int64, error) {
 	// These are running aggregates (INSERT OR REPLACE) that don't use created_at.
 	// Prune entries whose last_updated is older than retention to prevent stale
 	// entities from accumulating after they're removed from the graph.
-	if result, err := s.db.Exec(`DELETE FROM entity_quality WHERE last_updated != '' AND last_updated < ?`, since); err == nil {
+	if result, err := s.execer().Exec(`DELETE FROM entity_quality WHERE last_updated != '' AND last_updated < ?`, since); err == nil {
 		if n, _ := result.RowsAffected(); n > 0 {
 			totalDeleted += n
-			s.db.Exec(`INSERT INTO pruning_log (day, table_name, rows_deleted) VALUES (?, 'entity_quality', ?)`, today, n)
+			s.execer().Exec(`INSERT INTO pruning_log (day, table_name, rows_deleted) VALUES (?, 'entity_quality', ?)`, today, n)
 		}
 	}
-	if result, err := s.db.Exec(`DELETE FROM recall_channel_weights WHERE last_updated != '' AND last_updated < ?`, since); err == nil {
+	if result, err := s.execer().Exec(`DELETE FROM recall_channel_weights WHERE last_updated != '' AND last_updated < ?`, since); err == nil {
 		if n, _ := result.RowsAffected(); n > 0 {
 			totalDeleted += n
-			s.db.Exec(`INSERT INTO pruning_log (day, table_name, rows_deleted) VALUES (?, 'recall_channel_weights', ?)`, today, n)
+			s.execer().Exec(`INSERT INTO pruning_log (day, table_name, rows_deleted) VALUES (?, 'recall_channel_weights', ?)`, today, n)
 		}
 	}
 
 	// Bug 72 — STO-A.1.2: soft FK cleanup — orphaned agent_llm_usage rows.
-	s.db.Exec(`DELETE FROM agent_llm_usage WHERE session_id != '' AND session_id NOT IN (SELECT id FROM sessions) AND created_at < ?`,
+	s.execer().Exec(`DELETE FROM agent_llm_usage WHERE session_id != '' AND session_id NOT IN (SELECT id FROM sessions) AND created_at < ?`,
 		time.Now().UTC().AddDate(0, 0, -retentionDays).Format(time.RFC3339))
 
 	// P11-4: rollups are compact (~80 rows/day, ~3MB/year) — keep 365 days
 	// for long-term trend analysis, independent of raw data retention.
 	rollupSince := time.Now().UTC().AddDate(0, 0, -365).Format("2006-01-02")
-	result, err = s.db.Exec(`DELETE FROM daily_rollups WHERE day < ?`, rollupSince)
+	result, err = s.execer().Exec(`DELETE FROM daily_rollups WHERE day < ?`, rollupSince)
 	if err != nil {
 		return totalDeleted, err
 	}
@@ -3034,7 +3051,7 @@ func (s *Store) PruneOldEvents(retentionDays int) (int64, error) {
 func (s *Store) Vacuum() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec("VACUUM")
+	_, err := s.execer().Exec("VACUUM")
 	return err
 }
 
@@ -3043,7 +3060,7 @@ func (s *Store) Vacuum() error {
 // Used by the aggregator to backfill missed days.
 func (s *Store) GetRollupGapDays(lastRollupDay, today string) ([]string, error) {
 	// Collect days that already have rollup entries.
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT DISTINCT day FROM daily_rollups WHERE day > ? AND day < ? ORDER BY day`,
 		lastRollupDay, today)
 	if err != nil {
@@ -3085,7 +3102,7 @@ func (s *Store) GetRollupGapDays(lastRollupDay, today string) ([]string, error) 
 // or an empty string if no rollup data exists.
 func (s *Store) GetLastRollupDay() (string, error) {
 	var day string
-	row := s.db.QueryRow(`SELECT COALESCE(MAX(day), '') FROM daily_rollups`)
+	row := s.execer().QueryRow(`SELECT COALESCE(MAX(day), '') FROM daily_rollups`)
 	if err := row.Scan(&day); err != nil {
 		return "", err
 	}
@@ -3095,7 +3112,7 @@ func (s *Store) GetLastRollupDay() (string, error) {
 // CountReparses returns the total count and sum of duration_ms for reparse_events
 // on the given calendar day (YYYY-MM-DD).
 func (s *Store) CountReparses(day string) (count int, totalDurationMs float64, err error) {
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(duration_ms), 0) FROM reparse_events WHERE created_date = ?`, day)
 	err = row.Scan(&count, &totalDurationMs)
 	return
@@ -3112,7 +3129,7 @@ type LanguageStats struct {
 // GetLanguageStatsForDay returns per-language parse statistics for the given day (P9-10).
 // avg_duration excludes skip events (DurationMs=0) to avoid deflating the average.
 func (s *Store) GetLanguageStatsForDay(day string) []LanguageStats {
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT language,
 		       COUNT(*) AS parse_count,
 		       COALESCE(AVG(CASE WHEN error_action != 'skip' THEN duration_ms END), 0) AS avg_duration,
@@ -3139,7 +3156,7 @@ func (s *Store) GetLanguageStatsForDay(day string) []LanguageStats {
 // auto-save storms or branch checkout floods.
 func (s *Store) GetPeakReparseRate(day string) int {
 	var peak int
-	s.db.QueryRow(`
+	s.execer().QueryRow(`
 		SELECT COALESCE(MAX(cnt), 0) FROM (
 			SELECT COUNT(*) AS cnt
 			FROM reparse_events
@@ -3153,14 +3170,14 @@ func (s *Store) GetPeakReparseRate(day string) int {
 // P11-1: fuzzy matching — if exact match fails, strips date suffixes commonly
 // appended by providers (e.g. "-20241022", "-2024-08-06") and retries.
 func (s *Store) GetPricing(model string) (inputPer1M, outputPer1M float64, found bool) {
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT input_per_1m, output_per_1m FROM pricing WHERE model = ?`, model)
 	if err := row.Scan(&inputPer1M, &outputPer1M); err == nil {
 		return inputPer1M, outputPer1M, true
 	}
 	// Fuzzy fallback: strip trailing date suffix and retry.
 	if base := stripModelDateSuffix(model); base != model {
-		row = s.db.QueryRow(
+		row = s.execer().QueryRow(
 			`SELECT input_per_1m, output_per_1m FROM pricing WHERE model = ?`, base)
 		if err := row.Scan(&inputPer1M, &outputPer1M); err == nil {
 			return inputPer1M, outputPer1M, true
@@ -3208,13 +3225,13 @@ func isDateHyphenated(s string) bool {
 // Returns 0 if no cached rate is set or model is not found. Uses the same
 // fuzzy matching as GetPricing.
 func (s *Store) GetCachedPricing(model string) (cachedInputPer1M float64) {
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT cached_input_per_1m FROM pricing WHERE model = ?`, model)
 	if err := row.Scan(&cachedInputPer1M); err == nil {
 		return cachedInputPer1M
 	}
 	if base := stripModelDateSuffix(model); base != model {
-		row = s.db.QueryRow(
+		row = s.execer().QueryRow(
 			`SELECT cached_input_per_1m FROM pricing WHERE model = ?`, base)
 		_ = row.Scan(&cachedInputPer1M)
 	}
@@ -3231,7 +3248,7 @@ type EntityCount struct {
 // each with a query count so the UI can display relative frequency.
 func (s *Store) TopEntities(days, limit int) ([]EntityCount, error) {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT entity, COUNT(*) AS cnt
 		 FROM context_deliveries
 		 WHERE created_at >= ? AND entity != ''
@@ -3272,7 +3289,7 @@ func (s *Store) GetEffectiveness(projectID string, minSignals int) ([]pulsetypes
 	if minSignals <= 0 {
 		minSignals = 2
 	}
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT entity, signal_type, created_at
 		FROM outcome_signals
 		WHERE (? = '' OR project_id = ?)
@@ -3384,7 +3401,7 @@ func (s *Store) UpdateSessionModel(sessionID, agentID, projectID, model, provide
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO sessions (id, agent_id, project_id, started_at, model, provider)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET model = excluded.model, provider = excluded.provider`,
@@ -3413,7 +3430,7 @@ type AgentLLMStats struct {
 // GetAgentLLMStats returns per-model aggregated LLM usage for the last N days.
 func (s *Store) GetAgentLLMStats(days int) ([]AgentLLMStats, error) {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT model, provider,
 		        COUNT(*),
 		        COALESCE(SUM(input_tokens), 0),
@@ -3449,7 +3466,7 @@ func (s *Store) GetAgentLLMStats(days int) ([]AgentLLMStats, error) {
 func (s *Store) GetLifetimeSummary() (*Summary, error) {
 	sum := &Summary{}
 
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(duration_ms), 0)
 		 FROM tool_calls`)
 	if err := row.Scan(&sum.TotalToolCalls, &sum.TotalLatencyMs); err != nil {
@@ -3459,7 +3476,7 @@ func (s *Store) GetLifetimeSummary() (*Summary, error) {
 		sum.AvgLatencyMs = sum.TotalLatencyMs / float64(sum.TotalToolCalls)
 	}
 
-	row = s.db.QueryRow(
+	row = s.execer().QueryRow(
 		`SELECT COUNT(*),
 		        COALESCE(SUM(response_tokens), 0),
 		        COALESCE(SUM(baseline_tokens), 0),
@@ -3487,7 +3504,7 @@ func (s *Store) GetLifetimeSummary() (*Summary, error) {
 		sum.CompressionRatio = 1.0
 	}
 
-	row = s.db.QueryRow(
+	row = s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0)
 		 FROM sessions`)
 	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD); err != nil {
@@ -3512,7 +3529,7 @@ func (s *Store) GetFirstContextRightRate(days int) (float64, error) {
 
 	// Count distinct (entity, session_id) pairs delivered.
 	var totalPairs int
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*) FROM (
 		   SELECT DISTINCT entity, session_id FROM context_deliveries
 		   WHERE created_at >= ? AND entity != '' AND session_id != ''
@@ -3526,7 +3543,7 @@ func (s *Store) GetFirstContextRightRate(days int) (float64, error) {
 
 	// Count (entity, session_id) pairs that received a correction in the same session.
 	var correctedPairs int
-	row = s.db.QueryRow(
+	row = s.execer().QueryRow(
 		`SELECT COUNT(*) FROM (
 		   SELECT DISTINCT cd.entity, cd.session_id
 		   FROM context_deliveries cd
@@ -3553,7 +3570,7 @@ func (s *Store) GetFirstContextRightRate(days int) (float64, error) {
 // GetSessionModel returns the model recorded for the given session, or "" if not found.
 func (s *Store) GetSessionModel(sessionID string) string {
 	var model string
-	row := s.db.QueryRow(`SELECT COALESCE(model, '') FROM sessions WHERE id = ?`, sessionID)
+	row := s.execer().QueryRow(`SELECT COALESCE(model, '') FROM sessions WHERE id = ?`, sessionID)
 	_ = row.Scan(&model)
 	return model
 }
@@ -3571,7 +3588,7 @@ func (s *Store) GetSessionModel(sessionID string) string {
 // denominator would deflate the rate incorrectly (especially during morning rollups).
 func (s *Store) GetAbandonmentRate(day string) float64 {
 	var v float64
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COALESCE(
 			CAST(SUM(CASE WHEN ended_at IS NULL THEN 1 ELSE 0 END) AS REAL)
 			/ NULLIF(COUNT(*), 0), 0.0)
@@ -3588,7 +3605,7 @@ func (s *Store) GetAbandonmentRate(day string) float64 {
 
 // GetProjectsForDay returns all distinct project_ids that had activity on the given day.
 func (s *Store) GetProjectsForDay(day string) []string {
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT DISTINCT project_id FROM tool_calls WHERE created_date = ? AND project_id != ''`, day)
 	if err != nil {
 		return nil
@@ -3606,7 +3623,7 @@ func (s *Store) GetProjectsForDay(day string) []string {
 
 // GetAgentsForDay returns all distinct agent_ids that had activity on the given day (P8-4).
 func (s *Store) GetAgentsForDay(day string) []string {
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT DISTINCT agent_id FROM tool_calls WHERE created_date = ? AND agent_id != ''`, day)
 	if err != nil {
 		return nil
@@ -3625,7 +3642,7 @@ func (s *Store) GetAgentsForDay(day string) []string {
 // GetSummaryForDayAgent returns aggregated metrics for a specific calendar day and agent (P8-4).
 func (s *Store) GetSummaryForDayAgent(day, agentID string) (*Summary, error) {
 	sum := &Summary{}
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(duration_ms), 0)
 		 FROM tool_calls WHERE created_date = ? AND agent_id = ?`, day, agentID)
 	var totalLatency int64
@@ -3633,11 +3650,11 @@ func (s *Store) GetSummaryForDayAgent(day, agentID string) (*Summary, error) {
 		return nil, err
 	}
 	sum.TotalLatencyMs = float64(totalLatency)
-	s.db.QueryRow(
+	s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(response_tokens), 0), COALESCE(SUM(baseline_tokens - response_tokens), 0)
 		 FROM context_deliveries WHERE created_date = ? AND agent_id = ?`, day, agentID).
 		Scan(&sum.ContextDeliveries, &sum.TokensDelivered, &sum.TokensSaved)
-	s.db.QueryRow(
+	s.execer().QueryRow(
 		`SELECT COUNT(DISTINCT id) FROM sessions WHERE started_date = ? AND agent_id = ?`, day, agentID).
 		Scan(&sum.Sessions)
 	return sum, nil
@@ -3647,7 +3664,7 @@ func (s *Store) GetSummaryForDayAgent(day, agentID string) (*Summary, error) {
 func (s *Store) GetSummaryForDayProject(day, projectID string) (*Summary, error) {
 	sum := &Summary{}
 
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(duration_ms), 0)
 		 FROM tool_calls WHERE created_date = ? AND project_id = ?`, day, projectID)
 	var totalLatency int64
@@ -3656,7 +3673,7 @@ func (s *Store) GetSummaryForDayProject(day, projectID string) (*Summary, error)
 	}
 	sum.TotalLatencyMs = float64(totalLatency)
 
-	row = s.db.QueryRow(
+	row = s.execer().QueryRow(
 		`SELECT COUNT(*),
 		        COALESCE(SUM(response_tokens), 0),
 		        COALESCE(SUM(baseline_tokens), 0),
@@ -3685,7 +3702,7 @@ func (s *Store) GetSummaryForDayProject(day, projectID string) (*Summary, error)
 		sum.CompressionRatio = 1.0
 	}
 
-	row = s.db.QueryRow(
+	row = s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0)
 		 FROM sessions WHERE started_date = ? AND project_id = ?`, day, projectID)
 	if err := row.Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD); err != nil {
@@ -3703,7 +3720,7 @@ func (s *Store) GetSummaryForDayProject(day, projectID string) (*Summary, error)
 
 // GetTopToolsForDay returns top-5 tool call counts for the given day.
 func (s *Store) GetTopToolsForDay(day string) map[string]int {
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT tool_name, COUNT(*) FROM tool_calls WHERE created_date = ? GROUP BY tool_name ORDER BY COUNT(*) DESC LIMIT 5`, day)
 	if err != nil {
 		return nil
@@ -3727,7 +3744,7 @@ func (s *Store) GetTopToolsForDay(day string) map[string]int {
 // SumCacheTokenSavings returns tokens saved specifically from cache hits.
 func (s *Store) SumCacheTokenSavings(day string) int {
 	var n int
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COALESCE(SUM(baseline_tokens - response_tokens), 0)
 		 FROM context_deliveries WHERE cache_hit = 1 AND created_date = ?`, day)
 	_ = row.Scan(&n)
@@ -3742,7 +3759,7 @@ func (s *Store) SumCacheTokenSavings(day string) int {
 // was reparsed within 24h prior to delivery.
 func (s *Store) GetContextFreshnessScore(day string) float64 {
 	var v float64
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COALESCE(
 			CAST(SUM(CASE WHEN EXISTS(
 				SELECT 1 FROM reparse_events r
@@ -3763,7 +3780,7 @@ func (s *Store) GetContextFreshnessScore(day string) float64 {
 // at least one positive outcome signal (proxy for memory coverage).
 func (s *Store) GetEntityMemoryCoverage(day string) float64 {
 	var v float64
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COALESCE(
 			CAST(COUNT(DISTINCT os.entity) AS REAL) / NULLIF(COUNT(DISTINCT cd.entity), 0), 0.0)
 		FROM context_deliveries cd
@@ -3781,7 +3798,7 @@ func (s *Store) GetEntityMemoryCoverage(day string) float64 {
 // memory_ops write events (since the main store is a separate DB).
 func (s *Store) CountTotalMemories() int {
 	var n int
-	row := s.db.QueryRow(`SELECT COUNT(*) FROM memory_ops WHERE operation = 'write'`)
+	row := s.execer().QueryRow(`SELECT COUNT(*) FROM memory_ops WHERE operation = 'write'`)
 	_ = row.Scan(&n)
 	return n
 }
@@ -3827,7 +3844,7 @@ type EntitySavings struct {
 // TopEntitiesBySavings returns entities ranked by token savings over the last N days.
 func (s *Store) TopEntitiesBySavings(days, limit int) ([]EntitySavings, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT entity, COALESCE(SUM(baseline_tokens - response_tokens), 0) as savings
 		FROM context_deliveries WHERE created_date >= ? AND entity != ''
 		GROUP BY entity ORDER BY savings DESC LIMIT ?`, cutoff, limit)
@@ -3859,7 +3876,7 @@ type ModelCostStat struct {
 // GetCostSavingsByModel returns cost savings grouped by model over the last N days.
 func (s *Store) GetCostSavingsByModel(days int) ([]ModelCostStat, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT model, COALESCE(SUM(cost_saved_usd), 0), COUNT(*)
 		FROM sessions WHERE started_at >= ? AND model != ''
 		GROUP BY model ORDER BY SUM(cost_saved_usd) DESC`, cutoff)
@@ -3885,7 +3902,7 @@ func (s *Store) GetCostSavingsByModel(days int) ([]ModelCostStat, error) {
 func (s *Store) GetAvgTaskDuration(days int) float64 {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var v float64
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COALESCE(AVG(CAST(count AS REAL)), 0.0)
 		FROM outcome_signals WHERE signal_type = 'task_done' AND count > 0 AND created_at >= ?`, cutoff)
 	_ = row.Scan(&v)
@@ -3905,7 +3922,7 @@ type AgentEfficiencyStat struct {
 // GetAgentTokenEfficiency returns tokens saved per context delivery call per agent.
 func (s *Store) GetAgentTokenEfficiency(days int) ([]AgentEfficiencyStat, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT agent_id,
 		       COALESCE(CAST(SUM(baseline_tokens - response_tokens) AS REAL) / NULLIF(COUNT(*), 0), 0.0)
 		FROM context_deliveries WHERE created_date >= ? AND agent_id != ''
@@ -3932,7 +3949,7 @@ func (s *Store) GetAgentTokenEfficiency(days int) ([]AgentEfficiencyStat, error)
 func (s *Store) GetContextReuseRate(days int) float64 {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	var v float64
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COALESCE(
 			CAST(COUNT(*) AS REAL) / NULLIF((SELECT COUNT(*) FROM context_deliveries WHERE created_date >= ?), 0), 0.0)
 		FROM (
@@ -3956,7 +3973,7 @@ func (s *Store) GetContextReuseRate(days int) float64 {
 func (s *Store) GetEngagementScore(days int) float64 {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	var tasksCompleted, cacheHits, positiveSignals, sessions int
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT
 			(SELECT COALESCE(SUM(tasks_completed), 0) FROM sessions         WHERE started_date  >= ?),
 			(SELECT COUNT(*)                           FROM context_deliveries WHERE cache_hit = 1 AND created_date >= ?),
@@ -3976,7 +3993,7 @@ func (s *Store) GetEngagementScore(days int) float64 {
 // GetOnboardingLatencyMs returns average ms from session_init to first context tool call.
 func (s *Store) GetOnboardingLatencyMs(days int) float64 {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT session_id,
 		       MIN(CASE WHEN tool_name='session_init' THEN created_at END) as init_at,
 		       MIN(CASE WHEN tool_name IN ('get_context','prepare_context','plan_context') THEN created_at END) as ctx_at
@@ -4019,7 +4036,7 @@ func (s *Store) GetOnboardingLatencyMs(days int) float64 {
 func (s *Store) GetMultiSessionCampaigns(days int) int {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var n int
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COUNT(*) FROM (
 			SELECT agent_id FROM sessions WHERE started_at >= ? AND agent_id != ''
 			GROUP BY agent_id HAVING COUNT(*) > 1
@@ -4042,7 +4059,7 @@ type AgentToolPref struct {
 // GetAgentToolPreferences returns per-agent, per-tool call counts.
 func (s *Store) GetAgentToolPreferences(days int) ([]AgentToolPref, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT agent_id, tool_name, COUNT(*) as cnt
 		FROM tool_calls WHERE created_date >= ? AND agent_id != ''
 		GROUP BY agent_id, tool_name ORDER BY agent_id, cnt DESC`, cutoff)
@@ -4069,7 +4086,7 @@ func (s *Store) GetSummaryForAgent(agentID string, days int) (*Summary, error) {
 	cutoffDate := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	sum := &Summary{}
 	var totalLatency int64
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(duration_ms), 0)
 		 FROM tool_calls WHERE created_date >= ? AND agent_id = ?`, cutoffDate, agentID)
 	if err := row.Scan(&sum.TotalToolCalls, &totalLatency); err != nil {
@@ -4079,7 +4096,7 @@ func (s *Store) GetSummaryForAgent(agentID string, days int) (*Summary, error) {
 	if sum.TotalToolCalls > 0 {
 		sum.AvgLatencyMs = sum.TotalLatencyMs / float64(sum.TotalToolCalls)
 	}
-	s.db.QueryRow(
+	s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(response_tokens), 0),
 		        COALESCE(SUM(baseline_tokens), 0),
 		        COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END), 0),
@@ -4100,7 +4117,7 @@ func (s *Store) GetSummaryForAgent(agentID string, days int) (*Summary, error) {
 	} else {
 		sum.CompressionRatio = 1.0
 	}
-	s.db.QueryRow(
+	s.execer().QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(tasks_completed), 0), COALESCE(SUM(cost_saved_usd), 0)
 		 FROM sessions WHERE started_date >= ? AND agent_id = ?`, cutoffDate, agentID).
 		Scan(&sum.Sessions, &sum.TasksCompleted, &sum.CostSavedUSD)
@@ -4113,7 +4130,7 @@ func (s *Store) GetSummaryForAgent(agentID string, days int) (*Summary, error) {
 // GetAgentToolPreferencesForAgent returns tool preferences for a single agent.
 func (s *Store) GetAgentToolPreferencesForAgent(agentID string, days int) ([]AgentToolPref, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT agent_id, tool_name, COUNT(*) as cnt
 		FROM tool_calls WHERE created_date >= ? AND agent_id = ?
 		GROUP BY tool_name ORDER BY cnt DESC LIMIT 20`, cutoff, agentID)
@@ -4134,7 +4151,7 @@ func (s *Store) GetAgentToolPreferencesForAgent(agentID string, days int) ([]Age
 // GetAgentEfficiencyForAgent returns efficiency scores for a single agent.
 func (s *Store) GetAgentEfficiencyForAgent(agentID string, days int) ([]AgentEfficiency, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT agent_id,
 		       COALESCE(CAST(SUM(tasks_completed) AS REAL)/NULLIF(COUNT(*),0), 0.0) as tps,
 		       COALESCE(CAST(SUM(tokens_saved) AS REAL)/NULLIF(NULLIF(SUM(tasks_completed),0),0), 0.0) as tspt
@@ -4168,7 +4185,7 @@ type AgentEfficiency struct {
 // GetAgentEfficiencyScores returns per-agent efficiency scores.
 func (s *Store) GetAgentEfficiencyScores(days int) ([]AgentEfficiency, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT agent_id,
 		       COALESCE(CAST(SUM(tasks_completed) AS REAL)/NULLIF(COUNT(*),0), 0.0) as tps,
 		       COALESCE(CAST(SUM(tokens_saved) AS REAL)/NULLIF(NULLIF(SUM(tasks_completed),0),0), 0.0) as tspt
@@ -4204,7 +4221,7 @@ type ModelComparisonStat struct {
 // GetModelComparison returns per-model session statistics.
 func (s *Store) GetModelComparison(days int) ([]ModelComparisonStat, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT model, COUNT(*), AVG(tool_calls), AVG(tokens_saved), AVG(cost_saved_usd)
 		FROM sessions WHERE started_at >= ? AND model != ''
 		GROUP BY model ORDER BY COUNT(*) DESC`, cutoff)
@@ -4239,7 +4256,7 @@ type ErrorRecovery struct {
 // avoiding the t2.id = t1.id+1 trap (global IDs are not contiguous per session).
 func (s *Store) GetErrorRecoveryPatterns(days int) ([]ErrorRecovery, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		WITH ranked AS (
 			SELECT id, session_id, tool_name, success,
 			       ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS rn
@@ -4282,7 +4299,7 @@ type ToolPairStat struct {
 // Uses ROW_NUMBER() window function for correct per-session ordering.
 func (s *Store) GetToolPairCorrelation(days int) ([]ToolPairStat, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		WITH ranked AS (
 			SELECT session_id, tool_name,
 			       ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS rn
@@ -4315,7 +4332,7 @@ func (s *Store) GetToolPairCorrelation(days int) ([]ToolPairStat, error) {
 func (s *Store) GetDiscoveryToolEffectiveness(days int) float64 {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	var v float64
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COALESCE(
 			CAST(COUNT(DISTINCT t1.id) AS REAL) / NULLIF(
 				(SELECT COUNT(*) FROM tool_calls WHERE tool_name IN ('search','find_entity') AND created_date >= ?), 0
@@ -4344,7 +4361,7 @@ type SkillStat struct {
 // GetSkillExecutionStats returns aggregated stats for execute_skill calls.
 func (s *Store) GetSkillExecutionStats(days int) ([]SkillStat, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT entity, COUNT(*),
 		       COALESCE(CAST(SUM(success) AS REAL)/NULLIF(COUNT(*),0), 0.0),
 		       COALESCE(AVG(duration_ms), 0.0)
@@ -4372,7 +4389,7 @@ func (s *Store) GetSkillExecutionStats(days int) ([]SkillStat, error) {
 // GetMemoryTypeDistribution returns memory operation counts grouped by operation type.
 func (s *Store) GetMemoryTypeDistribution(days int) (map[string]int, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(`SELECT operation, COUNT(*) FROM memory_ops WHERE created_at >= ? GROUP BY operation`, cutoff)
+	rows, err := s.execer().Query(`SELECT operation, COUNT(*) FROM memory_ops WHERE created_at >= ? GROUP BY operation`, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -4401,7 +4418,7 @@ type CancellationStat struct {
 // GetCancellationReasons returns entities most associated with task cancellations.
 func (s *Store) GetCancellationReasons(days int) ([]CancellationStat, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT entity, COUNT(*) FROM outcome_signals
 		WHERE signal_type = 'task_cancelled' AND created_at >= ? AND entity != ''
 		GROUP BY entity ORDER BY COUNT(*) DESC LIMIT 20`, cutoff)
@@ -4433,7 +4450,7 @@ type PlanComplexityStat struct {
 // GetPlanComplexityVsOutcome groups sessions by replan count and computes avg tasks completed.
 func (s *Store) GetPlanComplexityVsOutcome(days int) ([]PlanComplexityStat, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT replans, COALESCE(AVG(tasks_completed), 0.0), COUNT(*) FROM (
 			SELECT s.id, s.tasks_completed,
 				(SELECT COUNT(*) FROM outcome_signals os WHERE os.session_id = s.id AND os.signal_type = 'replan') as replans
@@ -4461,7 +4478,7 @@ func (s *Store) GetPlanComplexityVsOutcome(days int) ([]PlanComplexityStat, erro
 func (s *Store) GetBlockedTaskCount(days int) int {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var n int
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COUNT(*) FROM (
 			SELECT session_id FROM outcome_signals
 			WHERE signal_type = 'replan' AND created_at >= ?
@@ -4486,8 +4503,8 @@ type MessageVolumeStat struct {
 func (s *Store) GetMessageVolumeStats(days int) (*MessageVolumeStat, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	var stat MessageVolumeStat
-	s.db.QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE created_date >= ?`, cutoff).Scan(&stat.TotalToolCalls)
-	s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE started_date >= ?`, cutoff).Scan(&stat.TotalSessions)
+	s.execer().QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE created_date >= ?`, cutoff).Scan(&stat.TotalToolCalls)
+	s.execer().QueryRow(`SELECT COUNT(*) FROM sessions WHERE started_date >= ?`, cutoff).Scan(&stat.TotalSessions)
 	if stat.TotalSessions > 0 {
 		stat.AvgCallsPerSession = float64(stat.TotalToolCalls) / float64(stat.TotalSessions)
 	}
@@ -4502,7 +4519,7 @@ func (s *Store) GetMessageVolumeStats(days int) (*MessageVolumeStat, error) {
 func (s *Store) GetCrossProjectQueryVolume(days int) int {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	var n int
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COUNT(*) FROM outcome_signals
 		WHERE signal_type IN ('federation', 'cross_project') AND created_at >= ?`, cutoff)
 	_ = row.Scan(&n)
@@ -4517,7 +4534,7 @@ func (s *Store) GetCrossProjectQueryVolume(days int) int {
 func (s *Store) GetApprovalGateUsage(days int) int {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	var n int
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COUNT(*) FROM tool_calls WHERE tool_name = 'check_plan_safety' AND created_date >= ?`, cutoff)
 	_ = row.Scan(&n)
 	return n
@@ -4537,7 +4554,7 @@ type ModelEfficiency struct {
 // GetModelEfficiencyComparison returns tokens saved per dollar spent per model.
 func (s *Store) GetModelEfficiencyComparison(days int) ([]ModelEfficiency, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT s.model,
 		       COALESCE(CAST(SUM(s.tokens_saved) AS REAL) / NULLIF(SUM(alu.cost_usd), 0), 0.0),
 		       COALESCE(SUM(alu.cost_usd), 0.0)
@@ -4575,7 +4592,7 @@ type ProjectEfficiency struct {
 // GetProjectEfficiencyComparison returns efficiency metrics grouped by project.
 func (s *Store) GetProjectEfficiencyComparison(days int) ([]ProjectEfficiency, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT project_id, COALESCE(SUM(tokens_saved),0), COALESCE(SUM(cost_saved_usd),0.0),
 		       COALESCE(SUM(tasks_completed),0), COUNT(*)
 		FROM sessions WHERE started_at >= ? AND project_id != ''
@@ -4608,7 +4625,7 @@ type ToolTimelinePoint struct {
 // GetToolTimeline returns daily call counts and error rates for a specific tool.
 func (s *Store) GetToolTimeline(toolName string, days int) ([]ToolTimelinePoint, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT created_date, COUNT(*),
 		       COALESCE(CAST(SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS REAL)/NULLIF(COUNT(*),0), 0.0)
 		FROM tool_calls WHERE tool_name = ? AND created_date >= ?
@@ -4647,7 +4664,7 @@ type SessionDetail struct {
 func (s *Store) GetSessionDetail(sessionID string) (*SessionDetail, error) {
 	var detail SessionDetail
 	detail.SessionID = sessionID
-	row := s.db.QueryRow(`SELECT agent_id, started_at, COALESCE(ended_at,''), model FROM sessions WHERE id = ?`, sessionID)
+	row := s.execer().QueryRow(`SELECT agent_id, started_at, COALESCE(ended_at,''), model FROM sessions WHERE id = ?`, sessionID)
 	if err := row.Scan(&detail.AgentID, &detail.StartedAt, &detail.EndedAt, &detail.Model); err != nil {
 		if err == sql.ErrNoRows {
 			return &SessionDetail{SessionID: sessionID}, nil
@@ -4656,7 +4673,7 @@ func (s *Store) GetSessionDetail(sessionID string) (*SessionDetail, error) {
 	}
 	// Each query block closes its rows before opening the next one to avoid
 	// exhausting the connection pool (MaxOpenConns=2) with 3 concurrent iterators.
-	rows, err := s.db.Query(`SELECT tool_name, agent_id, project_id, entity, duration_ms, success, response_bytes, session_id, error_message FROM tool_calls WHERE session_id = ? ORDER BY id`, sessionID)
+	rows, err := s.execer().Query(`SELECT tool_name, agent_id, project_id, entity, duration_ms, success, response_bytes, session_id, error_message FROM tool_calls WHERE session_id = ? ORDER BY id`, sessionID)
 	if err == nil {
 		for rows.Next() {
 			var tc pulsetypes.ToolCallEvent
@@ -4668,7 +4685,7 @@ func (s *Store) GetSessionDetail(sessionID string) (*SessionDetail, error) {
 		}
 		rows.Close()
 	}
-	rows2, err := s.db.Query(`SELECT tool_name, agent_id, project_id, entity, response_tokens, baseline_tokens, duration_ms, cache_hit, session_id FROM context_deliveries WHERE session_id = ? ORDER BY id`, sessionID)
+	rows2, err := s.execer().Query(`SELECT tool_name, agent_id, project_id, entity, response_tokens, baseline_tokens, duration_ms, cache_hit, session_id FROM context_deliveries WHERE session_id = ? ORDER BY id`, sessionID)
 	if err == nil {
 		for rows2.Next() {
 			var cd pulsetypes.ContextDeliveryEvent
@@ -4680,7 +4697,7 @@ func (s *Store) GetSessionDetail(sessionID string) (*SessionDetail, error) {
 		}
 		rows2.Close()
 	}
-	rows3, err := s.db.Query(`SELECT project_id, agent_id, entity, signal_type, count, session_id FROM outcome_signals WHERE session_id = ?`, sessionID)
+	rows3, err := s.execer().Query(`SELECT project_id, agent_id, entity, signal_type, count, session_id FROM outcome_signals WHERE session_id = ?`, sessionID)
 	if err == nil {
 		for rows3.Next() {
 			var sig pulsetypes.OutcomeSignalEvent
@@ -4713,7 +4730,7 @@ func (s *Store) ExportRawData(days int) (*ExportData, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	export := &ExportData{DayRange: days}
 
-	if rows, err := s.db.Query(`SELECT tool_name, agent_id, project_id, entity, duration_ms, success, created_date, session_id FROM tool_calls WHERE created_date >= ?`, cutoff); err == nil {
+	if rows, err := s.execer().Query(`SELECT tool_name, agent_id, project_id, entity, duration_ms, success, created_date, session_id FROM tool_calls WHERE created_date >= ?`, cutoff); err == nil {
 		for rows.Next() {
 			var name, agent, proj, entity, date, sess string
 			var dur int64
@@ -4729,7 +4746,7 @@ func (s *Store) ExportRawData(days int) (*ExportData, error) {
 		rows.Close()
 	}
 
-	if rows, err := s.db.Query(`SELECT tool_name, agent_id, entity, response_tokens, baseline_tokens, created_date, session_id FROM context_deliveries WHERE created_date >= ?`, cutoff); err == nil {
+	if rows, err := s.execer().Query(`SELECT tool_name, agent_id, entity, response_tokens, baseline_tokens, created_date, session_id FROM context_deliveries WHERE created_date >= ?`, cutoff); err == nil {
 		for rows.Next() {
 			var name, agent, entity, date, sess string
 			var rt, bt int
@@ -4743,7 +4760,7 @@ func (s *Store) ExportRawData(days int) (*ExportData, error) {
 		rows.Close()
 	}
 
-	if rows, err := s.db.Query(`SELECT id, agent_id, project_id, started_at, COALESCE(ended_at,''), model FROM sessions WHERE started_date >= ?`, cutoff); err == nil {
+	if rows, err := s.execer().Query(`SELECT id, agent_id, project_id, started_at, COALESCE(ended_at,''), model FROM sessions WHERE started_date >= ?`, cutoff); err == nil {
 		for rows.Next() {
 			var id, agent, proj, startAt, endAt, model string
 			if rows.Scan(&id, &agent, &proj, &startAt, &endAt, &model) == nil {
@@ -4756,7 +4773,7 @@ func (s *Store) ExportRawData(days int) (*ExportData, error) {
 		rows.Close()
 	}
 
-	if rows, err := s.db.Query(`SELECT project_id, agent_id, entity, signal_type, session_id FROM outcome_signals WHERE created_date >= ?`, cutoff); err == nil {
+	if rows, err := s.execer().Query(`SELECT project_id, agent_id, entity, signal_type, session_id FROM outcome_signals WHERE created_date >= ?`, cutoff); err == nil {
 		for rows.Next() {
 			var proj, agent, entity, sig, sess string
 			if rows.Scan(&proj, &agent, &entity, &sig, &sess) == nil {
@@ -4779,7 +4796,7 @@ func (s *Store) ExportRawData(days int) (*ExportData, error) {
 func (s *Store) GetHypotheticalCostUSD(days int) float64 {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	var totalBaseline int64
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COALESCE(SUM(baseline_tokens), 0) FROM context_deliveries WHERE created_date >= ?`, cutoff)
 	_ = row.Scan(&totalBaseline)
 	inputPer1M, _, found := s.GetPricing("claude-sonnet-4-6")
@@ -4793,7 +4810,7 @@ func (s *Store) GetHypotheticalCostUSD(days int) float64 {
 func (s *Store) GetWithSynapsesCostUSD(days int) float64 {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	var totalResponse int64
-	row := s.db.QueryRow(
+	row := s.execer().QueryRow(
 		`SELECT COALESCE(SUM(response_tokens), 0) FROM context_deliveries WHERE created_date >= ?`, cutoff)
 	_ = row.Scan(&totalResponse)
 	inputPer1M, _, found := s.GetPricing("claude-sonnet-4-6")
@@ -4810,7 +4827,7 @@ func (s *Store) GetWithSynapsesCostUSD(days int) float64 {
 // GetLatencyPercentiles returns p50, p95, p99 latency in ms for context deliveries.
 func (s *Store) GetLatencyPercentiles(days int) (p50, p95, p99 float64) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT duration_ms FROM context_deliveries WHERE created_date >= ? ORDER BY duration_ms`, cutoff)
 	if err != nil {
 		return 0, 0, 0
@@ -4856,7 +4873,7 @@ func percentile(sorted []float64, pct float64) float64 {
 // GetToolLatencyPercentiles returns p50, p95, p99 latency in ms for a specific tool (P8-5).
 func (s *Store) GetToolLatencyPercentiles(toolName string, days int) (p50, p95, p99 float64) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.db.Query(
+	rows, err := s.execer().Query(
 		`SELECT duration_ms FROM tool_calls WHERE tool_name = ? AND created_date >= ? ORDER BY duration_ms`, toolName, cutoff)
 	if err != nil {
 		return 0, 0, 0
@@ -4893,7 +4910,7 @@ func (s *Store) GetToolLatencyPercentiles(toolName string, days int) (p50, p95, 
 func (s *Store) GetContextPrecision(days int) float64 {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	var v float64
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COALESCE(
 			CAST(SUM(CASE WHEN EXISTS(
 				SELECT 1 FROM outcome_signals os
@@ -4911,7 +4928,7 @@ func (s *Store) GetContextPrecision(days int) float64 {
 func (s *Store) GetContextRecall(days int) float64 {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	var v float64
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COALESCE(
 			CAST(COUNT(DISTINCT os.session_id) AS REAL) / NULLIF((SELECT COUNT(DISTINCT session_id) FROM outcome_signals WHERE signal_type='task_done' AND created_date >= ?), 0), 0.0)
 		FROM outcome_signals os
@@ -4951,7 +4968,7 @@ type GraphSnapshotRow struct {
 
 // GetLatestGraphSnapshot returns the most recent graph_snapshots row.
 func (s *Store) GetLatestGraphSnapshot() (*GraphSnapshotRow, error) {
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT snapshot_type, nodes_total, edges_total, density, orphan_nodes, node_type_dist, project_id, created_at
 		FROM graph_snapshots ORDER BY created_at DESC LIMIT 1`)
 	var gs GraphSnapshotRow
@@ -4976,7 +4993,7 @@ func (s *Store) InsertSearchEventTx(ev pulsetypes.SearchEvent) error {
 		cacheInt = 1
 	}
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO search_events (agent_id, project_id, query, mode, result_count, duration_ms, cache_hit, session_id, created_date, matched_tools, matched_workflows)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.AgentID, ev.ProjectID, ev.Query, ev.Mode, ev.ResultCount, ev.DurationMs, cacheInt, ev.SessionID, today,
@@ -5003,7 +5020,7 @@ type SearchStats struct {
 // GetSearchStats returns aggregated search statistics for the last N days.
 func (s *Store) GetSearchStats(days int) (*SearchStats, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	row := s.db.QueryRow(`
+	row := s.execer().QueryRow(`
 		SELECT COUNT(*), COALESCE(AVG(result_count),0), COALESCE(AVG(duration_ms),0),
 		       COALESCE(CAST(SUM(cache_hit) AS REAL)/NULLIF(COUNT(*),0), 0.0)
 		FROM search_events WHERE created_date >= ?`, cutoff)
@@ -5011,7 +5028,7 @@ func (s *Store) GetSearchStats(days int) (*SearchStats, error) {
 	if err := row.Scan(&stats.TotalSearches, &stats.AvgResultCount, &stats.AvgDurationMs, &stats.CacheHitRate); err != nil {
 		return &SearchStats{}, nil
 	}
-	modeRows, err := s.db.Query(
+	modeRows, err := s.execer().Query(
 		`SELECT mode, COUNT(*) FROM search_events WHERE created_date >= ? GROUP BY mode ORDER BY COUNT(*) DESC LIMIT 5`, cutoff)
 	if err == nil {
 		defer modeRows.Close()
@@ -5035,7 +5052,7 @@ func (s *Store) GetSearchStats(days int) (*SearchStats, error) {
 func (s *Store) RecordLifecycleEvent(eventType string, valueMs float64, projectID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`INSERT INTO lifecycle_events (event_type, value_ms, project_id) VALUES (?, ?, ?)`,
+	_, err := s.execer().Exec(`INSERT INTO lifecycle_events (event_type, value_ms, project_id) VALUES (?, ?, ?)`,
 		eventType, valueMs, projectID)
 	return err
 }
@@ -5057,7 +5074,7 @@ func (s *Store) InsertConfigReloadEventTx(ev pulsetypes.ConfigReloadEvent) error
 		}
 	}
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO config_reload_events (success, changed_fields, project_id, created_date) VALUES (?, ?, ?, ?)`,
 		successInt, fieldsJSON, ev.ProjectID, today)
 	return err
@@ -5073,7 +5090,7 @@ func (s *Store) InsertConfigReloadEvent(ev pulsetypes.ConfigReloadEvent) error {
 // CountConfigReloads returns the number of config reload events for the given day.
 func (s *Store) CountConfigReloads(day string) int {
 	var n int
-	row := s.db.QueryRow(`SELECT COUNT(*) FROM config_reload_events WHERE created_date = ?`, day)
+	row := s.execer().QueryRow(`SELECT COUNT(*) FROM config_reload_events WHERE created_date = ?`, day)
 	_ = row.Scan(&n)
 	return n
 }
@@ -5085,7 +5102,7 @@ func (s *Store) CountConfigReloads(day string) int {
 // InsertPersistenceEventTx records a persistence event without acquiring the mutex.
 func (s *Store) InsertPersistenceEventTx(ev pulsetypes.PersistenceEvent) error {
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO persistence_events (duration_ms, bytes_written, project_id, created_date) VALUES (?, ?, ?, ?)`,
 		ev.DurationMs, ev.BytesWritten, ev.ProjectID, today)
 	return err
@@ -5101,7 +5118,7 @@ func (s *Store) InsertPersistenceEvent(ev pulsetypes.PersistenceEvent) error {
 // AvgPersistMs returns the average persistence duration for the given day.
 func (s *Store) AvgPersistMs(day string) float64 {
 	var v float64
-	row := s.db.QueryRow(`SELECT COALESCE(AVG(duration_ms), 0.0) FROM persistence_events WHERE created_date = ?`, day)
+	row := s.execer().QueryRow(`SELECT COALESCE(AVG(duration_ms), 0.0) FROM persistence_events WHERE created_date = ?`, day)
 	_ = row.Scan(&v)
 	return v
 }
@@ -5109,7 +5126,7 @@ func (s *Store) AvgPersistMs(day string) float64 {
 // CountPersistOps returns the number of persistence events for the given day.
 func (s *Store) CountPersistOps(day string) int {
 	var n int
-	row := s.db.QueryRow(`SELECT COUNT(*) FROM persistence_events WHERE created_date = ?`, day)
+	row := s.execer().QueryRow(`SELECT COUNT(*) FROM persistence_events WHERE created_date = ?`, day)
 	_ = row.Scan(&n)
 	return n
 }
@@ -5125,7 +5142,7 @@ func (s *Store) InsertEnrichmentEventTx(ev pulsetypes.EnrichmentEvent) error {
 		successInt = 0
 	}
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO enrichment_events (enrichment_type, duration_ms, success, project_id, created_date) VALUES (?, ?, ?, ?, ?)`,
 		ev.EnrichmentType, ev.DurationMs, successInt, ev.ProjectID, today)
 	return err
@@ -5145,7 +5162,7 @@ func (s *Store) InsertEnrichmentEvent(ev pulsetypes.EnrichmentEvent) error {
 // InsertRuleEvalEventTx records a rule evaluation event without acquiring the mutex.
 func (s *Store) InsertRuleEvalEventTx(ev pulsetypes.RuleEvalEvent) error {
 	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO rule_eval_events (rules_evaluated, violations_found, project_id, created_date) VALUES (?, ?, ?, ?)`,
 		ev.RulesEvaluated, ev.ViolationsFound, ev.ProjectID, today)
 	return err
@@ -5165,16 +5182,16 @@ func (s *Store) InsertRuleEvalEvent(ev pulsetypes.RuleEvalEvent) error {
 // upsertPricingWithHistory inserts/replaces a pricing entry and records history if the price changed.
 func (s *Store) upsertPricingWithHistory(model string, inputPer1M, outputPer1M float64) error {
 	var oldInput float64
-	row := s.db.QueryRow(`SELECT input_per_1m FROM pricing WHERE model = ?`, model)
+	row := s.execer().QueryRow(`SELECT input_per_1m FROM pricing WHERE model = ?`, model)
 	_ = row.Scan(&oldInput)
 
-	if _, err := s.db.Exec(`INSERT OR REPLACE INTO pricing (model, input_per_1m, output_per_1m, source, updated_at) VALUES (?, ?, ?, 'default', strftime('%Y-%m-%dT%H:%M:%SZ','now'))`,
+	if _, err := s.execer().Exec(`INSERT OR REPLACE INTO pricing (model, input_per_1m, output_per_1m, source, updated_at) VALUES (?, ?, ?, 'default', strftime('%Y-%m-%dT%H:%M:%SZ','now'))`,
 		model, inputPer1M, outputPer1M); err != nil {
 		return err
 	}
 
 	if oldInput > 0 && oldInput != inputPer1M {
-		s.db.Exec(`INSERT INTO pricing_history (model, old_price, new_price) VALUES (?, ?, ?)`,
+		s.execer().Exec(`INSERT INTO pricing_history (model, old_price, new_price) VALUES (?, ?, ?)`,
 			model, oldInput, inputPer1M)
 	}
 	return nil
@@ -5196,7 +5213,7 @@ type BrainCostStat struct {
 // GetBrainCostStats returns brain LLM costs grouped by model and tier.
 func (s *Store) GetBrainCostStats(days int) ([]BrainCostStat, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT model, tier, SUM(cost_usd), COUNT(*)
 		FROM brain_usage WHERE created_at >= ?
 		GROUP BY model, tier ORDER BY SUM(cost_usd) DESC`, cutoff)
@@ -5249,7 +5266,7 @@ func (s *Store) GetAgentEntityOverlap(days, windowMinutes int) ([]AgentEntityOve
 	//         Overlap formula: A.last + window >= B.first AND B.last + window >= A.first
 	//         a.agent_id < b.agent_id avoids duplicate pairs (A,B) vs (B,A).
 	// Step 3: Collect all agents involved in overlapping pairs per entity.
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		WITH entity_agents AS (
 			SELECT entity, agent_id,
 			       MIN(created_at) AS first_at,
@@ -5305,7 +5322,7 @@ func (s *Store) GetAgentEntityOverlap(days, windowMinutes int) ([]AgentEntityOve
 // GetSearchZeroResultRate returns the fraction of searches with zero results for a day.
 func (s *Store) GetSearchZeroResultRate(day string) float64 {
 	var total, zeros int
-	s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN result_count = 0 THEN 1 ELSE 0 END), 0)
+	s.execer().QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN result_count = 0 THEN 1 ELSE 0 END), 0)
 		FROM search_events WHERE created_date = ?`, day).Scan(&total, &zeros)
 	if total == 0 {
 		return 0
@@ -5316,7 +5333,7 @@ func (s *Store) GetSearchZeroResultRate(day string) float64 {
 // GetSearchAvgLatencyMs returns the average search latency in ms for a day.
 func (s *Store) GetSearchAvgLatencyMs(day string) float64 {
 	var avg float64
-	s.db.QueryRow(`SELECT COALESCE(AVG(duration_ms), 0) FROM search_events WHERE created_date = ?`, day).Scan(&avg)
+	s.execer().QueryRow(`SELECT COALESCE(AVG(duration_ms), 0) FROM search_events WHERE created_date = ?`, day).Scan(&avg)
 	return avg
 }
 
@@ -5334,7 +5351,7 @@ type ToolErrorRate struct {
 
 // GetToolErrorRates returns per-tool error rates for a day.
 func (s *Store) GetToolErrorRates(day string) []ToolErrorRate {
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT tool_name,
 		       COUNT(*)                                          AS calls,
 		       COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) AS errors
@@ -5369,7 +5386,7 @@ func (s *Store) GetToolErrorRates(day string) []ToolErrorRate {
 // UpsertDailyRollupTx upserts a daily rollup without acquiring the mutex.
 // Caller must hold the mutex (via BeginBatch).
 func (s *Store) UpsertDailyRollupTx(day, metric string, value float64) error {
-	_, err := s.db.Exec(
+	_, err := s.execer().Exec(
 		`INSERT INTO daily_rollups (day, metric, value) VALUES (?, ?, ?)
 		 ON CONFLICT(day, metric) DO UPDATE SET value = excluded.value`,
 		day, metric, value,
@@ -5388,7 +5405,7 @@ func (s *Store) DeleteByAgent(agentID string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.db.Exec("BEGIN DEFERRED")
+	s.execer().Exec("BEGIN DEFERRED")
 	var total int64
 	tables := []string{
 		"tool_calls", "context_deliveries", "search_events",
@@ -5397,7 +5414,7 @@ func (s *Store) DeleteByAgent(agentID string) (int64, error) {
 		"heartbeat_events", "sessions",
 	}
 	for _, tbl := range tables {
-		result, err := s.db.Exec(
+		result, err := s.execer().Exec(
 			fmt.Sprintf(`DELETE FROM %s WHERE agent_id = ?`, tbl), agentID)
 		if err != nil {
 			continue // table may not have agent_id column
@@ -5406,7 +5423,7 @@ func (s *Store) DeleteByAgent(agentID string) (int64, error) {
 			total += n
 		}
 	}
-	s.db.Exec("COMMIT")
+	s.execer().Exec("COMMIT")
 	return total, nil
 }
 
@@ -5417,7 +5434,7 @@ func (s *Store) DeleteByProject(projectID string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.db.Exec("BEGIN DEFERRED")
+	s.execer().Exec("BEGIN DEFERRED")
 	var total int64
 	tables := []string{
 		"tool_calls", "context_deliveries", "search_events",
@@ -5427,7 +5444,7 @@ func (s *Store) DeleteByProject(projectID string) (int64, error) {
 		"entity_quality", "recall_channel_weights",
 	}
 	for _, tbl := range tables {
-		result, err := s.db.Exec(
+		result, err := s.execer().Exec(
 			fmt.Sprintf(`DELETE FROM %s WHERE project_id = ?`, tbl), projectID)
 		if err != nil {
 			continue
@@ -5436,7 +5453,7 @@ func (s *Store) DeleteByProject(projectID string) (int64, error) {
 			total += n
 		}
 	}
-	s.db.Exec("COMMIT")
+	s.execer().Exec("COMMIT")
 	return total, nil
 }
 
@@ -5452,7 +5469,7 @@ func (s *Store) GetValidateToVerifyRate(days int) float64 {
 	}
 	cutoffDate := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	var validated, verified int
-	s.db.QueryRow(`
+	s.execer().QueryRow(`
 		SELECT
 			COUNT(DISTINCT session_id),
 			COALESCE(SUM(CASE WHEN session_id IN (
@@ -5496,7 +5513,7 @@ func (s *Store) GetDecliningTools(days, minCallThreshold int) []DecliningTool {
 	recentStart := now.AddDate(0, 0, -halfDays).Format("2006-01-02")
 	priorStart := now.AddDate(0, 0, -days).Format("2006-01-02")
 
-	rows, err := s.db.Query(`
+	rows, err := s.execer().Query(`
 		SELECT tool_name,
 		       COALESCE(SUM(CASE WHEN created_date >= ? THEN 1 ELSE 0 END), 0) AS recent,
 		       COALESCE(SUM(CASE WHEN created_date < ? THEN 1 ELSE 0 END), 0) AS prior

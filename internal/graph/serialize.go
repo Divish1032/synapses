@@ -45,6 +45,10 @@ func Deserialize(r io.Reader) (*FlatGraph, error) {
 	if err := binary.Read(dec, binary.LittleEndian, &nodeCount); err != nil {
 		return nil, err
 	}
+	const maxNodeCount = 10_000_000
+	if nodeCount > maxNodeCount {
+		return nil, fmt.Errorf("nodeCount %d exceeds maximum %d", nodeCount, maxNodeCount)
+	}
 
 	if nodeCount > 0 {
 		fg.Names = make([]StringID, nodeCount)
@@ -96,6 +100,10 @@ func Deserialize(r io.Reader) (*FlatGraph, error) {
 	if err := binary.Read(dec, binary.LittleEndian, &outEdgeCount); err != nil {
 		return nil, err
 	}
+	const maxEdgeCount = 50_000_000
+	if outEdgeCount > maxEdgeCount {
+		return nil, fmt.Errorf("outEdgeCount %d exceeds maximum %d", outEdgeCount, maxEdgeCount)
+	}
 	if outEdgeCount > 0 {
 		fg.OutEdges = make([]NodeIndex, outEdgeCount)
 		if err := binary.Read(dec, binary.LittleEndian, &fg.OutEdges); err != nil {
@@ -115,6 +123,9 @@ func Deserialize(r io.Reader) (*FlatGraph, error) {
 	var inEdgeCount uint32
 	if err := binary.Read(dec, binary.LittleEndian, &inEdgeCount); err != nil {
 		return nil, err
+	}
+	if inEdgeCount > maxEdgeCount {
+		return nil, fmt.Errorf("inEdgeCount %d exceeds maximum %d", inEdgeCount, maxEdgeCount)
 	}
 	if inEdgeCount > 0 {
 		fg.InEdges = make([]NodeIndex, inEdgeCount)

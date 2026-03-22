@@ -150,12 +150,12 @@ func (s *Server) handleExecuteSkill(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("execute_skill: %v", err)), nil
+		return toolError("execute_skill", err)
 	}
 
 	out, err := json.Marshal(result)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("execute_skill: marshal: %v", err)), nil
+		return toolError("execute_skill marshal", err)
 	}
 	return mcp.NewToolResultText(string(out)), nil
 }

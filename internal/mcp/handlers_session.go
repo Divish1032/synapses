@@ -649,6 +649,8 @@ func (s *Server) handleSessionInit(
 						// Surface which files differ between branches so the agent
 						// knows what context may have changed. Capped at 50 files.
 						gitCtxDiff, gitCancelDiff := context.WithTimeout(ctx, 2*time.Second)
+						// Reject branch names starting with "-" to prevent git flag injection.
+						if !strings.HasPrefix(prevBranch, "-") && !strings.HasPrefix(currentBranch, "-") {
 						if diffOut, diffErr := exec.CommandContext(gitCtxDiff, "git", "-C", root, "diff", "--name-only", prevBranch+"..."+currentBranch).Output(); diffErr == nil {
 							diffFiles := strings.Split(strings.TrimSpace(string(diffOut)), "\n")
 							// Filter empty strings from split.
@@ -666,6 +668,7 @@ func (s *Server) handleSessionInit(
 								workingSection["branch_diff_files"] = files
 								workingSection["branch_diff_note"] = fmt.Sprintf("Switched from %s to %s. %d file(s) differ between branches. The file watcher handles re-indexing automatically.", prevBranch, currentBranch, len(files))
 							}
+						}
 						}
 						gitCancelDiff()
 					}
@@ -1754,7 +1757,7 @@ func (s *Server) handleAnnotateNode(
 	}
 	note, noteErr := stringArgLimited(req, "note", maxArgLengthNote)
 	if noteErr != nil {
-		return mcp.NewToolResultError(noteErr.Error()), nil
+		return mcp.NewToolResultError(stripInternalPaths(noteErr.Error())), nil
 	}
 	if note == "" {
 		return mcp.NewToolResultError("note is required (a brief annotation, e.g., 'this function has O(n²) complexity')"), nil
@@ -1764,7 +1767,7 @@ func (s *Server) handleAnnotateNode(
 	// OF-S2: scan note content for prompt injection patterns.
 	var injectionWarning string
 	if scanResult, scanErr := s.scanContent("note", note); scanErr != nil {
-		return mcp.NewToolResultError(scanErr.Error()), nil
+		return mcp.NewToolResultError(stripInternalPaths(scanErr.Error())), nil
 	} else {
 		note = scanResult.sanitized
 		if scanResult.warning != "" {
@@ -1786,7 +1789,7 @@ func (s *Server) handleAnnotateNode(
 
 	id, err := s.store.AddAnnotation(nodeID, agentID, note)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("add annotation: %v", err)), nil
+		return toolError("add annotation", err)
 	}
 
 	// P7-11: emit memory op for annotation write.

@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -215,15 +216,15 @@ func TestExecutor_ExtraCallerParams(t *testing.T) {
 		},
 	}
 
-	// Provide both required and extra params
-	result, err := exec.Execute(context.Background(), recipe, map[string]interface{}{
+	// Provide both required and extra params — extra should be rejected.
+	_, err := exec.Execute(context.Background(), recipe, map[string]interface{}{
 		"target":      "Graph",
 		"extra_param": "bonus_value",
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for undeclared param, got nil")
 	}
-	if len(result.Steps) != 1 {
-		t.Errorf("expected 1 step, got %d", len(result.Steps))
+	if !strings.Contains(err.Error(), "undeclared param") {
+		t.Errorf("expected undeclared param error, got: %v", err)
 	}
 }

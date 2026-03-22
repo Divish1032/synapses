@@ -73,10 +73,15 @@ func (e *Executor) Execute(ctx context.Context, r Recipe, params map[string]inte
 			resolved[p.Name] = v
 		}
 	}
-	// Also pass through any extra caller-supplied params (useful for dynamic recipes).
-	for k, v := range params {
-		if _, already := resolved[k]; !already {
-			resolved[k] = v
+	// Reject undeclared params — accepting arbitrary extra params is a security risk
+	// because it allows callers to inject values into step args without declaration.
+	declared := make(map[string]bool, len(r.Params))
+	for _, p := range r.Params {
+		declared[p.Name] = true
+	}
+	for k := range params {
+		if !declared[k] {
+			return nil, fmt.Errorf("skills.Executor: recipe %q received undeclared param %q", r.ID, k)
 		}
 	}
 

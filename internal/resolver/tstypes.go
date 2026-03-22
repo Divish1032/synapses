@@ -84,15 +84,9 @@ func ResolveTSTypesCallEdges(g *graph.Graph, root string) (int, error) {
 		}
 	}
 
-	// Pre-populate dedup set from existing CALLS edges so we never create
-	// duplicates of what the tree-sitter resolver already emitted.
+	// Track edges added in this batch. Existing edges checked via g.HasEdge.
 	type edgeKey struct{ from, to graph.NodeID }
-	seen := make(map[edgeKey]bool, g.EdgeCount())
-	for _, e := range g.AllEdges() {
-		if e.Type == graph.EdgeCalls {
-			seen[edgeKey{e.From, e.To}] = true
-		}
-	}
+	seen := make(map[edgeKey]bool)
 
 	added := 0
 	scanner := bufio.NewScanner(stdout)
@@ -119,7 +113,7 @@ func ResolveTSTypesCallEdges(g *graph.Graph, root string) (int, error) {
 		}
 
 		k := edgeKey{callerID, calleeID}
-		if !seen[k] {
+		if !seen[k] && !g.HasEdge(callerID, calleeID, graph.EdgeCalls) {
 			seen[k] = true
 			g.AddEdge(&graph.Edge{
 				From: callerID,

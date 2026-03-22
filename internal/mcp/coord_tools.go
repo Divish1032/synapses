@@ -21,7 +21,7 @@ func (s *Server) handleGetPlans(
 	}
 	plans, err := s.store.GetPlans()
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get plans: %v", err)), nil
+		return toolError("get plans", err)
 	}
 	summary := "no plans found"
 	if len(plans) > 0 {
@@ -52,7 +52,7 @@ func (s *Server) handleGetMyTasks(
 
 	tasks, err := s.store.GetPendingTasks(planID, agentID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get tasks: %v", err)), nil
+		return toolError("get tasks", err)
 	}
 
 	// Pick the top unblocked task as the suggested next task.
@@ -112,7 +112,7 @@ func (s *Server) handleLinkTaskNodes(
 	}
 
 	if err := s.store.UpdateLinkedNodes(taskID, nodeIDs); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("link task nodes: %v", err)), nil
+		return toolError("link task nodes", err)
 	}
 	return jsonResult(map[string]interface{}{
 		"task_id":  taskID,
@@ -134,7 +134,7 @@ func (s *Server) handleGetAgents(
 	}
 	agents, err := s.store.GetAgents()
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get agents: %v", err)), nil
+		return toolError("get agents", err)
 	}
 
 	// Cross-project agents via daemon registry.
@@ -232,7 +232,7 @@ func (s *Server) handleGetEvents(
 
 	events, latestSeq, err := s.store.GetEvents(sinceSeq, types, agentIDFilter, limit)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get events: %v", err)), nil
+		return toolError("get events", err)
 	}
 
 	// Cross-project events via daemon registry.

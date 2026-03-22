@@ -25,14 +25,13 @@ func StripHTML(s string) string {
 
 		// Detect opening <script> and <style> blocks to skip their content.
 		if !inTag && c == '<' {
-			rest := strings.ToLower(s[i:])
-			if strings.HasPrefix(rest, "<script") {
+			if hasPrefixFold(s[i:], "<script") {
 				inScript = true
-			} else if strings.HasPrefix(rest, "<style") {
+			} else if hasPrefixFold(s[i:], "<style") {
 				inStyle = true
-			} else if strings.HasPrefix(rest, "</script") {
+			} else if hasPrefixFold(s[i:], "</script") {
 				inScript = false
-			} else if strings.HasPrefix(rest, "</style") {
+			} else if hasPrefixFold(s[i:], "</style") {
 				inStyle = false
 			}
 			inTag = true
@@ -44,9 +43,9 @@ func StripHTML(s string) string {
 			if c == '>' {
 				inTag = false
 				// Treat block-level closing tags as newlines for readability.
-				rest := strings.ToLower(s[max(0, i-20):i])
+				rest := s[max(0, i-20) : i]
 				for _, tag := range []string{"/p", "/div", "/li", "/h1", "/h2", "/h3", "/h4", "/pre", "/section", "br"} {
-					if strings.Contains(rest, tag) {
+					if containsFold(rest, tag) {
 						b.WriteByte('\n')
 						break
 					}
@@ -142,4 +141,23 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func hasPrefixFold(s, prefix string) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+	return strings.EqualFold(s[:len(prefix)], prefix)
+}
+
+func containsFold(s, substr string) bool {
+	if len(substr) > len(s) {
+		return false
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if strings.EqualFold(s[i:i+len(substr)], substr) {
+			return true
+		}
+	}
+	return false
 }
