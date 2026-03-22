@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,6 +19,22 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/logutil"
 )
+
+// validateOllamaURL checks that the Ollama URL points to localhost only,
+// preventing SSRF via user-controlled brain.json configuration.
+func validateOllamaURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid ollama URL: %w", err)
+	}
+	host := u.Hostname()
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return nil
+	default:
+		return fmt.Errorf("ollama URL must point to localhost, got %q", host)
+	}
+}
 
 // registerAdminEndpoints adds the Phase 0 management API to mux.
 // reg is the project registry (for reindex).
@@ -245,6 +262,10 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 				}
 			}
 		}
+		if err := validateOllamaURL(ollamaURL); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		client := &http.Client{Timeout: 3 * time.Second}
 		result := map[string]interface{}{"running": false}
 
@@ -298,6 +319,10 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 					}
 				}
 			}
+		}
+		if err := validateOllamaURL(ollamaURL); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 
 		// Stream pull progress as SSE
