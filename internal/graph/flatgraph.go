@@ -2,6 +2,7 @@ package graph
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -169,5 +170,80 @@ func (fg *FlatGraph) AddEdge(from, to NodeIndex, weight float32) {
 	for i := int(to) + 1; i < len(fg.InOffsets); i++ {
 		fg.InOffsets[i]++
 	}
+}
+
+// BulkEdge is a single edge for bulk insertion.
+type BulkEdge struct {
+	From, To NodeIndex
+	Weight   float32
+}
+
+// BulkAddEdges rebuilds CSR arrays from scratch given a sorted list of edges.
+// This is O(E + N) instead of O(E * N) for AddEdge called E times.
+func (fg *FlatGraph) BulkAddEdges(edges []BulkEdge) {
+	fg.mu.Lock()
+	defer fg.mu.Unlock()
+
+	N := len(fg.Names)
+	if N == 0 {
+		return
+	}
+
+	// Sort by From for outgoing CSR, count per node.
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].From != edges[j].From {
+			return edges[i].From < edges[j].From
+		}
+		return edges[i].To < edges[j].To
+	})
+
+	// Build outgoing CSR.
+	outEdges := make([]NodeIndex, 0, len(edges))
+	outWeights := make([]float32, 0, len(edges))
+	outOffsets := make([]uint64, N+1)
+
+	for _, e := range edges {
+		if int(e.From) >= N || int(e.To) >= N {
+			continue
+		}
+		outEdges = append(outEdges, e.To)
+		outWeights = append(outWeights, e.Weight)
+		outOffsets[e.From+1]++
+	}
+	// Prefix sum to get offsets.
+	for i := 1; i <= N; i++ {
+		outOffsets[i] += outOffsets[i-1]
+	}
+
+	// Sort by To for incoming CSR.
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].To != edges[j].To {
+			return edges[i].To < edges[j].To
+		}
+		return edges[i].From < edges[j].From
+	})
+
+	inEdges := make([]NodeIndex, 0, len(edges))
+	inWeights := make([]float32, 0, len(edges))
+	inOffsets := make([]uint64, N+1)
+
+	for _, e := range edges {
+		if int(e.From) >= N || int(e.To) >= N {
+			continue
+		}
+		inEdges = append(inEdges, e.From)
+		inWeights = append(inWeights, e.Weight)
+		inOffsets[e.To+1]++
+	}
+	for i := 1; i <= N; i++ {
+		inOffsets[i] += inOffsets[i-1]
+	}
+
+	fg.OutEdges = outEdges
+	fg.OutWeights = outWeights
+	fg.OutOffsets = outOffsets
+	fg.InEdges = inEdges
+	fg.InWeights = inWeights
+	fg.InOffsets = inOffsets
 }
 
