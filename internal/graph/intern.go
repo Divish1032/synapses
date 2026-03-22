@@ -121,7 +121,9 @@ func (p *StringPool) Value(id StringID) string {
 func (p *StringPool) internGhost(s string) StringID {
 	id := p.ghostNext
 	if id >= ReservedGhostRange {
-		id = 1 // wrap around (0 is reserved for empty string)
+		// Pool is saturated and ghost range is full — return ID 0 (empty string)
+		// rather than silently wrapping and corrupting existing ghost lookups.
+		return 0
 	}
 	p.ghostCache[id] = s
 	p.ghostNext = id + 1
