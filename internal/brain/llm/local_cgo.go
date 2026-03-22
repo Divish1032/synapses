@@ -108,7 +108,12 @@ func (c *LocalClient) loadModel() error {
 
 // generate runs a single inference call and returns the decoded text.
 // Called under c.mu, so single-threaded access to the context is guaranteed.
-func (c *LocalClient) generate(_ context.Context, prompt string) (string, error) {
+//
+// The CGo inference call blocks for 5-30s and cannot be interrupted from Go.
+// We run it in a goroutine and select on ctx.Done() so the caller is unblocked
+// immediately on context cancellation (timeout, shutdown). The goroutine will
+// finish naturally when inference completes — bounded by MaxTokens(512).
+func (c *LocalClient) generate(ctx context.Context, prompt string) (string, error) {
 	llamaCtx, ok := c.llamaCtx.(*llama.Context)
 	if !ok || llamaCtx == nil {
 		return "", fmt.Errorf("local LLM: inference context is nil")
@@ -120,17 +125,32 @@ func (c *LocalClient) generate(_ context.Context, prompt string) (string, error)
 	// gollama's Generate API is raw-completion only — we format the template here.
 	fullPrompt := applyQwen3ChatTemplate(silSystemPrompt, prompt)
 
-	// --- Level 3: generate ---
-	result, err := llamaCtx.Generate(fullPrompt,
-		llama.WithMaxTokens(512),   // match grpo_train max_completion_length
-		llama.WithTemperature(0.1), // low temp for deterministic code graph analysis
-		llama.WithTopP(0.9),
-		llama.WithRepeatPenalty(1.1),
-	)
-	if err != nil {
-		return "", fmt.Errorf("local LLM generate: %w", err)
+	// --- Level 3: generate (in goroutine for context cancellation) ---
+	type result struct {
+		text string
+		err  error
 	}
+	ch := make(chan result, 1)
+	go func() {
+		text, err := llamaCtx.Generate(fullPrompt,
+			llama.WithMaxTokens(512),   // match grpo_train max_completion_length
+			llama.WithTemperature(0.1), // low temp for deterministic code graph analysis
+			llama.WithTopP(0.9),
+			llama.WithRepeatPenalty(1.1),
+		)
+		ch <- result{text, err}
+	}()
 
-	return strings.TrimSpace(result), nil
+	select {
+	case <-ctx.Done():
+		// Caller cancelled — unblock immediately. The goroutine will finish
+		// naturally (bounded by MaxTokens=512) and its result is discarded.
+		return "", fmt.Errorf("local LLM generate: %w", ctx.Err())
+	case r := <-ch:
+		if r.err != nil {
+			return "", fmt.Errorf("local LLM generate: %w", r.err)
+		}
+		return strings.TrimSpace(r.text), nil
+	}
 }
 
