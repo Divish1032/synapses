@@ -36,7 +36,7 @@ type StringPool struct {
 
 	// ghostPool handles transient strings within the reserved range.
 	// We use a simple slice that wraps around to prevent infinite growth.
-	ghostMu    sync.Mutex
+	// Protected by p.mu (read lock for Value, write lock for internGhost).
 	ghostCache []string
 	ghostNext  uint32
 }
@@ -99,8 +99,8 @@ func (p *StringPool) Value(id StringID) string {
 
 	// Check if this ID falls into the Ghost range
 	if id < ReservedGhostRange {
-		p.ghostMu.Lock()
-		defer p.ghostMu.Unlock()
+		p.mu.RLock()
+		defer p.mu.RUnlock()
 		return p.ghostCache[id]
 	}
 
@@ -119,8 +119,6 @@ func (p *StringPool) Value(id StringID) string {
 
 // internGhost allocates a transient ghost ID for s. Caller must hold p.mu write lock.
 func (p *StringPool) internGhost(s string) StringID {
-	p.ghostMu.Lock()
-	defer p.ghostMu.Unlock()
 	id := p.ghostNext
 	if id >= ReservedGhostRange {
 		id = 1 // wrap around (0 is reserved for empty string)
