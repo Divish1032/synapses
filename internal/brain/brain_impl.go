@@ -256,6 +256,8 @@ type impl struct {
 	// produces garbage — those models have no conflict-resolution capability.
 	// orchestrator.DeterministicCoordinate() provides a guaranteed non-empty
 	// rule-based response when the orchestrate circuit is open.
+
+	cancelWarmup context.CancelFunc // cancels background model warm-up goroutines
 }
 
 // New creates a fully-configured Brain from cfg.
@@ -410,7 +412,9 @@ func New(cfg config.BrainConfig) Brain {
 
 	// Pre-load all configured models in background so the first real request
 	// hits a warm model instead of waiting 3-8s for Ollama to load from disk.
-	go warmUpModels(ingestClient, guardianClient, enrichClient, orchestrateClient, archivistClient)
+	warmCtx, cancelWarmup := context.WithCancel(context.Background())
+	b.cancelWarmup = cancelWarmup
+	go warmUpModels(warmCtx, ingestClient, guardianClient, enrichClient, orchestrateClient, archivistClient)
 
 	return b
 }
@@ -418,7 +422,8 @@ func New(cfg config.BrainConfig) Brain {
 // warmUpModels pre-loads all unique Ollama models into memory concurrently.
 // Runs in a background goroutine — non-blocking, logs results to stderr.
 // Models that don't implement ModelWarmer (e.g. LocalClient) are skipped silently.
-func warmUpModels(clients ...llm.LLMClient) {
+// The parent context allows cancellation when the Brain is closed.
+func warmUpModels(parent context.Context, clients ...llm.LLMClient) {
 	seen := make(map[string]bool)
 	var wg sync.WaitGroup
 	for _, c := range clients {
@@ -437,7 +442,7 @@ func warmUpModels(clients ...llm.LLMClient) {
 		wg.Add(1)
 		go func(w llm.ModelWarmer, name string) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 			defer cancel()
 			if err := w.WarmUp(ctx); err != nil {
 				logutil.Error("brain: warmup %s: %v\n", name, err)
@@ -719,6 +724,9 @@ func (b *impl) Summary(projectID, nodeID string) string {
 }
 
 func (b *impl) Close() error {
+	if b.cancelWarmup != nil {
+		b.cancelWarmup()
+	}
 	if b.store != nil {
 		return b.store.Close()
 	}
