@@ -88,32 +88,81 @@ func (g *loopGuard) getPulseClient() *pulse.Client {
 
 // loopGuardSession holds the sliding window for one MCP connection.
 type loopGuardSession struct {
-	window [loopGuardWindowSize]string
-	head   int // next write index (wraps modulo loopGuardWindowSize)
-	size   int // valid entries in window (0..loopGuardWindowSize)
+	window   [loopGuardWindowSize]string
+	head     int // next write index (wraps modulo loopGuardWindowSize)
+	size     int // valid entries in window (0..loopGuardWindowSize)
+	lastFP   string    // last fingerprint seen — used for auto-reset on change
+	lastCall time.Time // last call time — used for time-based decay
 }
 
 const (
-	loopGuardWindowSize   = 20 // sliding window length
-	loopGuardWarnAt       = 3  // identical calls before warning
-	loopGuardCircuitBreak = 5  // identical calls before hard rejection
+	loopGuardWindowSize   = 30 // sliding window length (enough for cycles up to length 10 repeated 3x)
+	loopGuardWarnAt       = 3  // cycle repetitions before warning
+	loopGuardCircuitBreak = 5  // cycle repetitions before hard rejection
 )
 
-// push records fp in the circular window and returns the count of occurrences
-// of fp currently in the window (including the entry just added).
+// push records fp in the circular window and returns the maximum number of
+// consecutive suffix cycle repetitions detected. This catches:
+//   - Same call repeated (A,A,A,A,A) → cycle len 1, reps 5
+//   - Alternating calls (A,B,A,B,A,B) → cycle len 2, reps 3
+//   - Short cycles (A,B,C,A,B,C,A,B,C) → cycle len 3, reps 3
 func (s *loopGuardSession) push(fp string) int {
 	s.window[s.head] = fp
 	s.head = (s.head + 1) % loopGuardWindowSize
 	if s.size < loopGuardWindowSize {
 		s.size++
 	}
-	count := 0
+	return s.detectCycleRepetitions()
+}
+
+// detectCycleRepetitions checks for repeating suffix patterns of length 1..maxCycleLen.
+// Returns the highest repetition count found across all cycle lengths.
+func (s *loopGuardSession) detectCycleRepetitions() int {
+	if s.size == 0 {
+		return 0
+	}
+
+	// Linearize the circular buffer into a flat slice for easier indexing.
+	flat := make([]string, s.size)
 	for i := 0; i < s.size; i++ {
-		if s.window[i] == fp {
-			count++
+		idx := (s.head - s.size + i + loopGuardWindowSize) % loopGuardWindowSize
+		flat[i] = s.window[idx]
+	}
+
+	maxReps := 1
+	// Check cycles up to length W/2 (need at least 2 reps to detect).
+	// The warn/circuit-break thresholds handle whether it's actionable.
+	maxCycleLen := s.size / 2
+	if maxCycleLen > 10 {
+		maxCycleLen = 10 // cap to keep O(W*maxCycleLen) bounded
+	}
+
+	for cycleLen := 1; cycleLen <= maxCycleLen; cycleLen++ {
+		// Extract the candidate pattern = last cycleLen elements.
+		patternStart := len(flat) - cycleLen
+		reps := 1
+
+		// Count how many times this pattern repeats backwards.
+		for pos := patternStart - cycleLen; pos >= 0; pos -= cycleLen {
+			match := true
+			for j := 0; j < cycleLen; j++ {
+				if flat[pos+j] != flat[patternStart+j] {
+					match = false
+					break
+				}
+			}
+			if !match {
+				break
+			}
+			reps++
+		}
+
+		if reps > maxReps {
+			maxReps = reps
 		}
 	}
-	return count
+
+	return maxReps
 }
 
 // reset clears the sliding window (called on file-change events).
@@ -124,6 +173,10 @@ func (s *loopGuardSession) reset() {
 
 // record records a fingerprint for the given session and returns its current
 // count within the sliding window. Thread-safe.
+//
+// Auto-resets the window when:
+//   - The fingerprint differs from the last one (agent made progress)
+//   - More than 60 seconds have elapsed since the last call (agent paused)
 func (g *loopGuard) record(sessionKey, fp string) int {
 	// REST calls create unique "rest-N" session IDs that are never cleaned up.
 	// Don't track them to prevent unbounded memory growth.
@@ -137,7 +190,23 @@ func (g *loopGuard) record(sessionKey, fp string) int {
 		sess = &loopGuardSession{}
 		g.sessions[sessionKey] = sess
 	}
-	g.lastActivity[sessionKey] = time.Now()
+
+	now := time.Now()
+
+	// Time-based decay: if the agent hasn't called in > 60s, clear the window.
+	if !sess.lastCall.IsZero() && now.Sub(sess.lastCall) > 60*time.Second {
+		sess.reset()
+	}
+
+	// Auto-reset on fingerprint change: the agent tried something different,
+	// which is evidence of progress. Clear the loop counter.
+	if sess.lastFP != "" && sess.lastFP != fp {
+		sess.reset()
+	}
+
+	sess.lastFP = fp
+	sess.lastCall = now
+	g.lastActivity[sessionKey] = now
 	return sess.push(fp)
 }
 

@@ -393,6 +393,18 @@ func (s *Server) getSynapseSessionID(mcpSessionID string) string {
 	return entry.id
 }
 
+// getSynapseAgentID returns the agent_id associated with an MCP session,
+// or "" if the session hasn't called session_init yet.
+func (s *Server) getSynapseAgentID(mcpSessionID string) string {
+	s.synapseSessionsMu.RLock()
+	entry, ok := s.synapsesSessions[synapseSessionKey(mcpSessionID)]
+	s.synapseSessionsMu.RUnlock()
+	if !ok {
+		return ""
+	}
+	return entry.agentID
+}
+
 // registerSynapseSession associates a newly created Synapses session with an
 // MCP connection. Called from handleSessionInit after CreateSession succeeds.
 func (s *Server) registerSynapseSession(mcpSessionID, synapseSessionID, agentID, model string) {
@@ -702,6 +714,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		server.WithResourceCapabilities(true, true), // subscribe + listChanged
 		server.WithPromptCapabilities(false),         // static prompts; no listChanged notifications
 		server.WithHooks(hooks),
+		server.WithRecovery(), // recover panics in tool handlers — prevents daemon crash
 	)
 
 	// Knowledge mode detection: explicit config setting.
@@ -981,6 +994,10 @@ func (s *Server) SetPulseClient(pc *pulse.Client) {
 	}
 	s.lg.resolveSession = resolver
 	s.rl.resolveSession = resolver
+	// Agent-scoped rate limiting: same agent_id across reconnections shares one bucket.
+	s.rl.resolveAgent = func(mcpSessID string) string {
+		return s.getSynapseAgentID(mcpSessID)
+	}
 }
 
 // getPulseClient type-asserts the stored pulseClient to *pulse.Client.

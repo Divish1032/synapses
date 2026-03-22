@@ -137,7 +137,7 @@ That's it. The `init` wizard handles everything in four steps:
 |------|-------------|
 | **[1/4] Project Setup** | Detects git, creates `synapses.json` with sensible defaults |
 | **[2/4] Indexing** | Parses your codebase and builds the code graph (49+ languages) |
-| **[3/4] Starting Engine** | Starts the singleton daemon and registers your project |
+| **[3/4] Starting Engine** | Installs system service (auto-restart on crash), starts daemon, registers project, verifies MCP endpoint |
 | **[4/4] Connect Agents** | Auto-detects installed AI agents and writes their MCP configs |
 
 The wizard auto-detects Claude Code, Cursor, VS Code, Windsurf, Zed, and Antigravity. Select which ones to connect and Synapses writes the config files for you.
@@ -265,6 +265,8 @@ All commands use the syntax `synapses <command> [flags]`.
 |---------|-------|-------------|
 | `start` | `-path` | Ensure daemon is running and register project (proxy mode). Indexes the codebase and serves MCP. |
 | `stop` | — | Stop the singleton daemon. |
+| `daemon install` | — | Register daemon as system service (launchd/systemd) with socket activation. Auto-restarts on crash, port stays open during restart. **Run automatically by `init`.** |
+| `daemon uninstall` | — | Remove system service registration. |
 | `projects` | — | List projects registered with the running daemon. |
 | `logs` | `-n` | Tail the daemon log (`~/.synapses/daemon.log`). |
 | `status` | `-path` | Show index statistics and daemon health. |
@@ -443,13 +445,31 @@ The brain is **fully configurable** — you can point it at any Ollama model, Op
 
 **Pre-built Binaries** — No toolchain needed. Download from GitHub Releases or install via Homebrew.
 
-**Fail-Silent** — Brain LLM crashes? Graph queries still work. Web cache down? `lookup_docs` returns a clear error.
+**Never Go Down** — Socket activation (launchd/systemd) holds port 11435 during daemon restarts. Process auto-restarts on crash. Panic recovery in MCP handlers. Per-project circuit breakers isolate failures.
 
-**Single Binary** — One MCP server. Works with any IDE via stdio.
+**Fail-Silent** — Brain LLM crashes? Graph queries still work. Web cache down? `lookup_docs` returns a clear error. Tool panics? Daemon recovers and keeps serving.
+
+**Single Binary** — One MCP server per machine, serving all projects. Works with any IDE via HTTP or stdio.
 
 **Local Cache** — All state at `~/.synapses/`. No cloud. Graph snapshots in SQLite.
 
 **Incremental** — File watcher re-parses only changed files. Session state accumulates across connections.
+
+### Daemon Model
+
+Synapses runs ONE singleton daemon per machine (`127.0.0.1:11435`), serving multiple projects concurrently. Each project gets its own graph, store, file watcher, and MCP server instance.
+
+```
+AI Agent → HTTP POST /mcp?project=<path> → Daemon → ProjectInstance → Tool Handler
+```
+
+**Reliability layers:**
+- **Socket activation** — OS holds port 11435; connections queue during restart (up to 128)
+- **Process supervision** — launchd (macOS) / systemd (Linux) auto-restarts on crash
+- **Panic recovery** — 4 layers: `WithRecovery()` for tools, `defer recover()` in HTTP handler, Go stdlib per-connection recovery, process restart
+- **Project warming** — Known projects pre-initialized on daemon startup from `~/.synapses/projects.json`
+- **Agent-scoped rate limits** — Keyed by agent identity, persist across reconnections
+- **Cycle detection** — Loop guard catches repeated calls AND alternating patterns (A-B-A-B)
 
 ### Data Model
 
@@ -464,8 +484,9 @@ Serialized to SQLite: full graph snapshot for recovery, FTS5 for semantic search
 - **Language**: Go 1.22+
 - **Graph DB**: SQLite (modernc.org/sqlite, pure Go)
 - **Parser**: Tree-sitter (49+ languages)
-- **MCP**: mark3labs/mcp-go (stdio transport)
+- **MCP**: mark3labs/mcp-go (Streamable HTTP + stdio transports)
 - **Embeddings**: Built-in all-MiniLM-L6-v2 ONNX model (pure Go, ~23MB)
+- **Socket Activation**: tprasadtp/go-launchd (macOS, pure Go), coreos/go-systemd (Linux)
 
 ---
 

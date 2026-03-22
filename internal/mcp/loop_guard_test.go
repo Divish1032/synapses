@@ -81,16 +81,78 @@ func TestFingerprintCall_utf8SafeTruncation(t *testing.T) {
 func TestLoopGuardSession_push(t *testing.T) {
 	var s loopGuardSession
 
-	// First call: count 1.
+	// First call: cycle of len 1 repeated 1 time.
 	if n := s.push("a"); n != 1 {
 		t.Fatalf("call 1: want 1, got %d", n)
 	}
-	// Second distinct call: count for "b" is 1.
-	s.push("b")
-	// Third call to "a": count 2.
+	// Same call again: cycle [a] repeated 2 times.
 	if n := s.push("a"); n != 2 {
-		t.Fatalf("call 3 (2nd 'a'): want 2, got %d", n)
+		t.Fatalf("call 2: want 2, got %d", n)
 	}
+	// Different call breaks the cycle: [a,a,b] → no cycle > 1 rep.
+	if n := s.push("b"); n != 1 {
+		t.Fatalf("call 3: want 1, got %d", n)
+	}
+	// Alternating pattern: [a,a,b,a] → no clear cycle yet.
+	s.push("a")
+	// Now add b: [a,a,b,a,b] → cycle [a,b] repeated 2 times.
+	if n := s.push("b"); n != 2 {
+		t.Fatalf("call 5 (a,b cycle): want 2, got %d", n)
+	}
+	// Continue the alternation: [a,a,b,a,b,a] → cycle [b,a] repeated 2 or [a,b,a] check...
+	// Let's just verify the core: 5 identical calls = 5 repetitions.
+	s.reset()
+	for i := 0; i < 5; i++ {
+		s.push("x")
+	}
+	if n := s.push("x"); n != 6 {
+		t.Fatalf("6th identical: want 6, got %d", n)
+	}
+}
+
+func TestLoopGuardSession_cycleDetection(t *testing.T) {
+	// Test that alternating patterns are detected as cycles.
+	t.Run("alternating_AB", func(t *testing.T) {
+		var s loopGuardSession
+		// Build A-B-A-B-A-B pattern
+		for i := 0; i < 3; i++ {
+			s.push("a")
+			s.push("b")
+		}
+		// Window: [a,b,a,b,a,b] → cycle [a,b] repeated 3 times
+		// Last push("b") should detect this.
+		// Re-check by pushing one more:
+		n := s.push("a")
+		// Window: [a,b,a,b,a,b,a] → cycle [b,a] repeated 3 times
+		if n < 3 {
+			t.Errorf("alternating A-B: want >=3 reps, got %d", n)
+		}
+	})
+
+	t.Run("triple_cycle_ABC", func(t *testing.T) {
+		var s loopGuardSession
+		// Build A-B-C-A-B-C-A-B-C pattern
+		for i := 0; i < 3; i++ {
+			s.push("a")
+			s.push("b")
+			s.push("c")
+		}
+		// Window: [a,b,c,a,b,c,a,b,c] → cycle [a,b,c] repeated 3 times
+		if n := s.detectCycleRepetitions(); n < 3 {
+			t.Errorf("triple cycle A-B-C: want >=3 reps, got %d", n)
+		}
+	})
+
+	t.Run("no_cycle", func(t *testing.T) {
+		var s loopGuardSession
+		// Diverse calls: no cycle
+		for _, fp := range []string{"a", "b", "c", "d", "e", "f"} {
+			s.push(fp)
+		}
+		if n := s.detectCycleRepetitions(); n > 1 {
+			t.Errorf("diverse calls should not detect cycle: got %d reps", n)
+		}
+	})
 }
 
 func TestLoopGuardSession_windowEviction(t *testing.T) {
@@ -374,7 +436,7 @@ func TestLoopGuard_integratedWithServer(t *testing.T) {
 	}
 }
 
-func TestLoopGuard_integratedResetOnFileChange(t *testing.T) {
+func TestLoopGuard_resetOnFingerprintChange(t *testing.T) {
 	s := newTestServer(t)
 
 	// Drive discover_tools close to the circuit breaker.
@@ -382,16 +444,17 @@ func TestLoopGuard_integratedResetOnFileChange(t *testing.T) {
 		s.DispatchTool(context.Background(), "discover_tools", map[string]interface{}{}) //nolint:errcheck
 	}
 
-	// Simulate file change via InvalidatePacketCacheForFile.
-	s.InvalidatePacketCacheForFile("")
+	// Call a DIFFERENT tool — this changes the fingerprint, which auto-resets
+	// the loop guard window (proving the agent made progress).
+	s.DispatchTool(context.Background(), "get_repo_map", map[string]interface{}{}) //nolint:errcheck
 
-	// After reset, the same call should succeed.
+	// After fingerprint change, the original call should succeed.
 	result, err := s.DispatchTool(context.Background(), "discover_tools", map[string]interface{}{})
 	if err != nil {
-		t.Fatalf("after file change reset: error: %v", err)
+		t.Fatalf("after fingerprint change: error: %v", err)
 	}
 	if result.IsError {
-		t.Error("after file change reset, tool should not be circuit-broken")
+		t.Error("after fingerprint change, tool should not be circuit-broken")
 	}
 }
 

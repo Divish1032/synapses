@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,20 +106,58 @@ func cmdInit(args []string) error {
 	if err := ensureProjectMarker(absPath); err != nil {
 		logutil.Warn("  project marker: %v\n", err)
 	}
+
+	// Install as system service (launchd/systemd) if available and not
+	// already installed. This makes crash recovery automatic.
+	serviceInstalled := tryAutoInstallService()
+
+	daemonOK := true
 	if err := ensureSingletonDaemon(absPath); err != nil {
-		logutil.Warn("  daemon: %v\n", err)
-	} else {
-		fmt.Printf("  \033[32m✓\033[0m Daemon running on %s\n", DaemonHTTPAddr)
+		daemonOK = false
+		if *noAgents {
+			// No agent configs will be written — daemon failure is non-fatal.
+			logutil.Warn("  daemon: %v\n", err)
+		} else {
+			// Agents need the daemon. Hard fail to avoid writing broken configs.
+			fmt.Printf("  \033[31m✗\033[0m Daemon failed to start: %v\n", err)
+			diagnoseDaemonFailure()
+			fmt.Println()
+			fmt.Println("  \033[33mSkipping agent connection — daemon is not running.\033[0m")
+			fmt.Println("  Fix the issue above, then run: synapses init")
+			fmt.Println()
+			return fmt.Errorf("daemon failed to start: %w", err)
+		}
 	}
 
-	// Hint: install as system service for auto-restart on crash.
-	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+	if daemonOK {
+		fmt.Printf("  \033[32m✓\033[0m Daemon running on %s\n", DaemonHTTPAddr)
+
+		if _, err := registerProjectWithDaemon(absPath); err != nil {
+			if !*noAgents {
+				fmt.Printf("  \033[31m✗\033[0m Project registration failed: %v\n", err)
+				fmt.Println()
+				fmt.Println("  \033[33mSkipping agent connection — project not registered.\033[0m")
+				fmt.Println("  Fix the issue above, then run: synapses init")
+				fmt.Println()
+				return fmt.Errorf("project registration failed: %w", err)
+			}
+			logutil.Warn("  register project: %v\n", err)
+		} else {
+			fmt.Printf("  \033[32m✓\033[0m Project registered with daemon\n")
+		}
+
+		// Verify the MCP endpoint is actually reachable before writing configs.
+		if err := verifyDaemonHealth(); err != nil {
+			fmt.Printf("  \033[33m!\033[0m Health check warning: %v\n", err)
+		}
+	}
+
+	if serviceInstalled {
+		fmt.Printf("  \033[32m✓\033[0m Daemon registered as system service (auto-restarts on crash)\n")
+	} else if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
 		fmt.Println()
 		fmt.Printf("  \033[33mTip:\033[0m Run '\033[1msynapses daemon install\033[0m' to auto-restart the daemon on crash.\n")
 		fmt.Println("       (Registers a launchd/systemd service for this machine.)")
-	}
-	if _, err := registerProjectWithDaemon(absPath); err != nil {
-		logutil.Warn("  register project: %v\n", err)
 	}
 	fmt.Println()
 
@@ -566,4 +605,120 @@ func isInteractive() bool {
 func binaryExists(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+// ── Init verification helpers ───────────────────────────────────────────────
+
+// tryAutoInstallService silently installs the daemon as a system service
+// (launchd on macOS, systemd on Linux) if not already installed.
+// Returns true if a service was installed (or was already installed).
+func tryAutoInstallService() bool {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return false
+	}
+
+	// Check if already installed by looking for the plist/unit file.
+	if isServiceInstalled() {
+		return true
+	}
+
+	// Redirect stdout to suppress daemonInstall's verbose output.
+	// We only want clean init wizard output; service install details are noise.
+	origStdout := os.Stdout
+	devNull, err := os.Open(os.DevNull)
+	if err == nil {
+		os.Stdout = devNull
+	}
+	installErr := daemonInstall()
+	os.Stdout = origStdout
+	if devNull != nil {
+		devNull.Close()
+	}
+
+	if installErr != nil {
+		logutil.Info("  auto-install service: %v (non-fatal)\n", installErr)
+		return false
+	}
+	return true
+}
+
+// isServiceInstalled checks if the daemon service file exists.
+func isServiceInstalled() bool {
+	switch runtime.GOOS {
+	case "darwin":
+		agentsDir, err := launchdAgentsDir()
+		if err != nil {
+			return false
+		}
+		_, err = os.Stat(filepath.Join(agentsDir, daemonLabel+".plist"))
+		return err == nil
+	case "linux":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		_, err = os.Stat(filepath.Join(home, ".config", "systemd", "user", "synapses-daemon.service"))
+		return err == nil
+	default:
+		return false
+	}
+}
+
+// verifyDaemonHealth makes a quick HTTP call to the daemon health endpoint
+// to confirm the full MCP stack is reachable.
+func verifyDaemonHealth() error {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://" + DaemonHTTPAddr + "/api/admin/health")
+	if err != nil {
+		return fmt.Errorf("cannot reach daemon: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("daemon returned HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// diagnoseDaemonFailure prints actionable diagnostic information when
+// the daemon fails to start.
+func diagnoseDaemonFailure() {
+	fmt.Println()
+	fmt.Println("  \033[1mDiagnostics:\033[0m")
+
+	// 1. Show daemon log tail.
+	logPath, err := singletonLogPath()
+	if err == nil {
+		data, readErr := os.ReadFile(logPath)
+		if readErr == nil && len(data) > 0 {
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			tail := lines
+			if len(tail) > 10 {
+				tail = tail[len(tail)-10:]
+			}
+			fmt.Printf("  Log (%s):\n", logPath)
+			for _, line := range tail {
+				fmt.Printf("    %s\n", line)
+			}
+		} else {
+			fmt.Printf("  Log: empty or unreadable (%s)\n", logPath)
+			fmt.Println("    → Binary may not have executed. Check permissions and PATH.")
+		}
+	}
+
+	// 2. Check if port is already in use.
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		out, err := exec.Command("lsof", "-i", ":"+DaemonHTTPPort, "-sTCP:LISTEN", "-P", "-n").CombinedOutput()
+		if err == nil && len(out) > 0 {
+			fmt.Printf("  Port %s in use by:\n", DaemonHTTPPort)
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				fmt.Printf("    %s\n", line)
+			}
+		}
+	}
+
+	// 3. Show binary path.
+	self, err := os.Executable()
+	if err == nil {
+		fmt.Printf("  Binary: %s (version %s)\n", self, version)
+	}
 }
