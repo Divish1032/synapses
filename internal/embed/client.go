@@ -156,7 +156,11 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 		if len(out.Data) == 0 || len(out.Data[0].Embedding) == 0 {
 			return nil, fmt.Errorf("empty embedding from endpoint")
 		}
-		return normalizeL2(out.Data[0].Embedding), nil
+		normed := normalizeL2(out.Data[0].Embedding)
+		if normed == nil {
+			return nil, fmt.Errorf("embedding contains NaN/Inf values")
+		}
+		return normed, nil
 	}
 
 	// Brain format and Ollama format both use {"embedding": [float, ...]}
@@ -169,7 +173,11 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	if len(out.Embedding) == 0 {
 		return nil, fmt.Errorf("empty embedding from endpoint")
 	}
-	return normalizeL2(out.Embedding), nil
+	normed := normalizeL2(out.Embedding)
+	if normed == nil {
+		return nil, fmt.Errorf("embedding contains NaN/Inf values")
+	}
+	return normed, nil
 }
 
 // EmbedBatch returns vector embeddings for a batch of texts in one HTTP round-trip.
@@ -231,7 +239,11 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		}
 		vecs := make([][]float32, len(out.Data))
 		for i, d := range out.Data {
-			vecs[i] = normalizeL2(d.Embedding)
+			normed := normalizeL2(d.Embedding)
+			if normed == nil {
+				return nil, fmt.Errorf("batch embedding[%d] contains NaN/Inf values", i)
+			}
+			vecs[i] = normed
 		}
 		return vecs, nil
 	}
@@ -247,7 +259,11 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		return nil, fmt.Errorf("batch response length mismatch: got %d, want %d", len(out.Embeddings), len(texts))
 	}
 	for i, v := range out.Embeddings {
-		out.Embeddings[i] = normalizeL2(v)
+		normed := normalizeL2(v)
+		if normed == nil {
+			return nil, fmt.Errorf("batch embedding[%d] contains NaN/Inf values", i)
+		}
+		out.Embeddings[i] = normed
 	}
 	return out.Embeddings, nil
 }
