@@ -12,15 +12,19 @@ import (
 	"time"
 )
 
-// gitTimeout is the per-command timeout for all git operations.
-// Git commands on local repos are fast (<10ms); 500ms is generous.
-const gitTimeout = 500 * time.Millisecond
+// gitTimeoutFast is the per-command timeout for fast git metadata operations
+// (rev-parse, cat-file -s). Git commands on local repos are fast (<10ms).
+const gitTimeoutFast = 500 * time.Millisecond
+
+// gitTimeoutSlow is the per-command timeout for git operations that may read
+// file contents or compute diffs (diff, show). These can be slower on large repos.
+const gitTimeoutSlow = 5 * time.Second
 
 // gitRevParseHead returns the current HEAD commit hash of a git repo.
 // Returns ("", nil) if the path is not a git repo.
 // Returns ("", err) on unexpected git failures.
 func gitRevParseHead(ctx context.Context, repoPath string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	ctx, cancel := context.WithTimeout(ctx, gitTimeoutFast)
 	defer cancel()
 
 	out, err := gitCmd(ctx, repoPath, "rev-parse", "HEAD")
@@ -38,7 +42,7 @@ func gitRevParseHead(ctx context.Context, repoPath string) (string, error) {
 // Returns (nil, nil) if oldCommit is unreachable (force push, squash merge,
 // rebase) — the caller should fall back to signature comparison.
 func gitDiffNameOnly(ctx context.Context, repoPath, oldCommit, newCommit string) ([]string, error) {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	ctx, cancel := context.WithTimeout(ctx, gitTimeoutSlow)
 	defer cancel()
 
 	out, err := gitCmd(ctx, repoPath, "diff", "--name-only", oldCommit+".."+newCommit)
@@ -59,7 +63,7 @@ func gitDiffNameOnly(ctx context.Context, repoPath, oldCommit, newCommit string)
 // gitDiffFile returns the unified diff for a specific file between two commits.
 // Returns ("", nil) if the file was not changed or commits are unreachable.
 func gitDiffFile(ctx context.Context, repoPath, oldCommit, newCommit, filePath string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	ctx, cancel := context.WithTimeout(ctx, gitTimeoutSlow)
 	defer cancel()
 
 	out, err := gitCmd(ctx, repoPath, "diff", oldCommit+".."+newCommit, "--", filePath)
@@ -134,7 +138,7 @@ func gitCmd(ctx context.Context, repoPath string, args ...string) (string, error
 // gitCommitTime returns the author date of a specific commit as a time.Time.
 // Used to compare against store SavedAt for freshness checks.
 func gitCommitTime(ctx context.Context, repoPath, commitHash string) (time.Time, error) {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	ctx, cancel := context.WithTimeout(ctx, gitTimeoutFast)
 	defer cancel()
 
 	// %aI = author date, strict ISO 8601 format
@@ -349,12 +353,12 @@ const entityExistsFileSizeLimit = 1 * 1024 * 1024 // 1 MB
 func entityExistsInFile(ctx context.Context, repoPath, filePath, entityName string) bool {
 	// Each git call gets its own independent timeout derived from the parent ctx.
 	// A shared timeout would let the size-check call consume budget from the
-	// content-read call — two separate gitTimeout windows ensures each has the
+	// content-read call — two separate timeout windows ensures each has the
 	// full budget regardless of how fast the other completes.
 
 	// Check file size before reading to avoid huge allocations.
 	// git cat-file -s <object> prints the byte size of the object.
-	sizeCtx, sizeCancel := context.WithTimeout(ctx, gitTimeout)
+	sizeCtx, sizeCancel := context.WithTimeout(ctx, gitTimeoutFast)
 	sizeOut, sizeErr := gitCmd(sizeCtx, repoPath, "cat-file", "-s", "HEAD:"+filePath)
 	sizeCancel()
 	if sizeErr == nil {
@@ -365,7 +369,7 @@ func entityExistsInFile(ctx context.Context, repoPath, filePath, entityName stri
 		}
 	}
 
-	showCtx, showCancel := context.WithTimeout(ctx, gitTimeout)
+	showCtx, showCancel := context.WithTimeout(ctx, gitTimeoutSlow)
 	defer showCancel()
 	out, err := gitCmd(showCtx, repoPath, "show", "HEAD:"+filePath)
 	if err != nil {
