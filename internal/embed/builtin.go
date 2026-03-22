@@ -537,18 +537,34 @@ func l2Normalize(vec []float32) []float32 {
 	if len(vec) == 0 {
 		return vec
 	}
+	// Guard: reject input containing NaN or Inf values.
+	for _, v := range vec {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return nil
+		}
+	}
 	var sumSq float64
 	for _, v := range vec {
 		sumSq += float64(v) * float64(v)
 	}
 	norm := math.Sqrt(sumSq)
-	if norm == 0 || (norm > 0.999 && norm < 1.001) {
-		return vec // already normalized or zero
+	if math.IsNaN(norm) || math.IsInf(norm, 0) {
+		return nil
+	}
+	if norm == 0 {
+		return vec // zero-magnitude vector — return as-is
+	}
+	if norm > 0.999 && norm < 1.001 {
+		return vec // already normalized
 	}
 	out := make([]float32, len(vec))
 	scale := float32(1.0 / norm)
 	for i, v := range vec {
 		out[i] = v * scale
+	}
+	// Guard: reject output if normalization produced NaN/Inf.
+	if math.IsNaN(float64(out[0])) || math.IsInf(float64(out[0]), 0) {
+		return nil
 	}
 	return out
 }
