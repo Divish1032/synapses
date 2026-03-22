@@ -1546,13 +1546,14 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	pruneExec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at < ?`, cutoff)
 
 	// Orphaned memory_embeddings: no FK cascade exists, so clean up manually.
-	pruneExec(`DELETE FROM memory_embeddings WHERE memory_id NOT IN (SELECT id FROM memories)`)
+	// Use NOT EXISTS instead of NOT IN for better performance with large tables.
+	pruneExec(`DELETE FROM memory_embeddings WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_embeddings.memory_id)`)
 	// Orphaned memory_anchors: anchor rows whose memory was deleted.
-	pruneExec(`DELETE FROM memory_anchors WHERE memory_id NOT IN (SELECT id FROM memories)`)
+	pruneExec(`DELETE FROM memory_anchors WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_anchors.memory_id)`)
 	// Orphaned memory_surfaced: surfacing records for deleted memories.
-	pruneExec(`DELETE FROM memory_surfaced WHERE memory_id NOT IN (SELECT id FROM memories)`)
+	pruneExec(`DELETE FROM memory_surfaced WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_surfaced.memory_id)`)
 	// Orphaned memory_versions: version snapshots for deleted memories.
-	pruneExec(`DELETE FROM memory_versions WHERE memory_id NOT IN (SELECT id FROM memories)`)
+	pruneExec(`DELETE FROM memory_versions WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_versions.memory_id)`)
 
 	// context_deliveries: instrumentation data for Sprint 11 feedback loop.
 	// Rows older than retention window have been analyzed and have no further value.
@@ -1667,7 +1668,7 @@ func (s *Store) reconcileOrphanedReferences() {
 		if !allowedTables[table] {
 			return 0
 		}
-		r, err := s.knowledgeDB.Query(fmt.Sprintf("SELECT node_id FROM %q", table))
+		r, err := s.knowledgeDB.Query(fmt.Sprintf("SELECT node_id FROM %s", quoteIdentifier(table)))
 		if err != nil {
 			return 0
 		}

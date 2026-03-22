@@ -863,11 +863,43 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 		}
 		defer tx.Rollback()
 
-		// Inline touch: just update last_accessed_at (skip TTL extension logic
-		// for simplicity — the full TouchMemory reads tier+expires_at which
-		// would need s.knowledgeDB.QueryRow inside tx, risking the same conn deadlock).
-		tx.Exec(`UPDATE memories SET last_accessed_at = ? WHERE id = ?`,
-			time.Now().UTC().Format(time.RFC3339), dedup.dedupedID) //nolint:errcheck — best-effort
+		// Inline touch with TTL extension: update last_accessed_at and extend
+		// expires_at within the same transaction for consistency.
+		nowUTC := time.Now().UTC()
+		nowStr := nowUTC.Format(time.RFC3339)
+
+		var tier, expiresAtStr string
+		if scanErr := tx.QueryRow(`SELECT tier, expires_at FROM memories WHERE id = ?`,
+			dedup.dedupedID).Scan(&tier, &expiresAtStr); scanErr == nil {
+			var extension time.Duration
+			var maxExpiry time.Time
+			switch tier {
+			case TierSessionLog:
+				extension = ttlSessionLog / 2
+				maxExpiry = nowUTC.Add(2 * ttlSessionLog)
+			case TierProject:
+				extension = ttlProject / 2
+				maxExpiry = nowUTC.Add(2 * ttlProject)
+			}
+			if extension > 0 {
+				current, _ := time.Parse(time.RFC3339, expiresAtStr)
+				if current.IsZero() {
+					current = nowUTC
+				}
+				newExpiry := current.Add(extension)
+				if newExpiry.After(maxExpiry) {
+					newExpiry = maxExpiry
+				}
+				tx.Exec(`UPDATE memories SET last_accessed_at = ?, access_count = access_count + 1, expires_at = ? WHERE id = ?`,
+					nowStr, newExpiry.Format(time.RFC3339), dedup.dedupedID) //nolint:errcheck
+			} else {
+				tx.Exec(`UPDATE memories SET last_accessed_at = ?, access_count = access_count + 1 WHERE id = ?`,
+					nowStr, dedup.dedupedID) //nolint:errcheck
+			}
+		} else {
+			tx.Exec(`UPDATE memories SET last_accessed_at = ? WHERE id = ?`,
+				nowStr, dedup.dedupedID) //nolint:errcheck — best-effort
+		}
 
 		now := time.Now().UTC().Format(time.RFC3339)
 		for _, nid := range anchorNodes {

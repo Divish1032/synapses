@@ -408,13 +408,16 @@ func (s *Store) normalizeStoredEmbeddings() {
 		if sqlDB, ok := db.(beginner); ok {
 			tx, err := sqlDB.Begin()
 			if err == nil {
+				defer tx.Rollback() // no-op after successful Commit
 				var updated int
 				for _, u := range updates {
-					if _, err := tx.Exec(
+					if _, execErr := tx.Exec(
 						fmt.Sprintf("UPDATE %s SET embedding = ? WHERE %s = ?", table, idCol),
 						u.blob, u.id,
-					); err != nil {
-						continue
+					); execErr != nil {
+						// Abort the entire tx on first error rather than
+						// continuing with partial updates.
+						return 0
 					}
 					updated++
 				}
