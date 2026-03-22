@@ -51,11 +51,15 @@ func AnnotateGraph(g *graph.Graph, cfg *config.Config) int {
 		if role == "" {
 			continue
 		}
-		if n.Metadata == nil {
-			n.Metadata = make(map[string]string)
-		}
-		n.Metadata["data_role"] = role
-		n.Metadata["data_label"] = label
+		// Mutate metadata under the graph write lock to avoid data races
+		// with concurrent readers (e.g. CarveEgoGraph).
+		g.UpdateNodeMetadata(n.ID, func(nn *graph.Node) {
+			if nn.Metadata == nil {
+				nn.Metadata = make(map[string]string)
+			}
+			nn.Metadata["data_role"] = role
+			nn.Metadata["data_label"] = label
+		})
 		if role == "source" {
 			sources = append(sources, n)
 		} else {
