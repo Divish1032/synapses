@@ -27,17 +27,10 @@ func newRawDB(path string) (rawDB, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return rawDB{}, fmt.Errorf("db file not found: %s", path)
 	}
-	db, err := sql.Open("sqlite", path)
+	dsn := path + "?_pragma=query_only(true)&_pragma=busy_timeout(2000)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return rawDB{}, fmt.Errorf("open raw db: %w", err)
-	}
-	if _, err := db.Exec("PRAGMA query_only=true;"); err != nil {
-		db.Close()
-		return rawDB{}, fmt.Errorf("set read-only: %w", err)
-	}
-	if _, err := db.Exec("PRAGMA busy_timeout=2000;"); err != nil {
-		db.Close()
-		return rawDB{}, fmt.Errorf("set busy_timeout: %w", err)
 	}
 	return rawDB{db: db}, nil
 }

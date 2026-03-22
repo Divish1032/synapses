@@ -183,23 +183,35 @@ func matchGlob(pattern, path string) bool {
 	return ok
 }
 
-// regexCache caches compiled regexes to avoid recompiling on every MatchPrompts call.
-var regexCache sync.Map // map[string]*regexp.Regexp
+// regexCache is a bounded cache of compiled regexes to avoid recompiling on
+// every MatchPrompts call. When the cache exceeds maxRegexCacheSize entries,
+// it is cleared entirely (simple LRU-eviction alternative).
+var (
+	regexCacheMu   sync.Mutex
+	regexCacheMap  = make(map[string]*regexp.Regexp)
+	maxRegexCacheSize = 1000
+)
 
 // matchRegex matches a regex pattern against a name.
-// Compiled regexes are cached globally. Invalid patterns are silently treated as non-matching.
+// Compiled regexes are cached globally with a bounded map. Invalid patterns
+// are silently treated as non-matching.
 func matchRegex(pattern, name string) bool {
-	var re *regexp.Regexp
-	if v, ok := regexCache.Load(pattern); ok {
-		re = v.(*regexp.Regexp)
-	} else {
+	regexCacheMu.Lock()
+	re, ok := regexCacheMap[pattern]
+	if !ok {
 		compiled, err := regexp.Compile(pattern)
 		if err != nil {
+			regexCacheMu.Unlock()
 			return false
 		}
-		regexCache.Store(pattern, compiled)
+		// Evict all entries when cache is full.
+		if len(regexCacheMap) >= maxRegexCacheSize {
+			regexCacheMap = make(map[string]*regexp.Regexp)
+		}
+		regexCacheMap[pattern] = compiled
 		re = compiled
 	}
+	regexCacheMu.Unlock()
 	return re.MatchString(name)
 }
 
