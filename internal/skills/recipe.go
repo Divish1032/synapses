@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -136,13 +137,28 @@ func resolveArg(v interface{}, params map[string]interface{}, prevResult string,
 		return v // unresolved — return original
 	}
 	// Embedded $param substitution: "prefix $param suffix" → replace all occurrences.
+	// Replace longest keys first to prevent "$name" from corrupting "$name_prefix".
 	result := s
 	result = strings.ReplaceAll(result, "$prev_result", prevResult)
-	for k, val := range stepOutputs {
-		result = strings.ReplaceAll(result, "$step_"+k, val)
+
+	// Sort step output keys longest-first.
+	stepKeys := make([]string, 0, len(stepOutputs))
+	for k := range stepOutputs {
+		stepKeys = append(stepKeys, k)
 	}
-	for k, val := range params {
-		if sv, ok := val.(string); ok {
+	sort.Slice(stepKeys, func(i, j int) bool { return len(stepKeys[i]) > len(stepKeys[j]) })
+	for _, k := range stepKeys {
+		result = strings.ReplaceAll(result, "$step_"+k, stepOutputs[k])
+	}
+
+	// Sort param keys longest-first.
+	paramKeys := make([]string, 0, len(params))
+	for k := range params {
+		paramKeys = append(paramKeys, k)
+	}
+	sort.Slice(paramKeys, func(i, j int) bool { return len(paramKeys[i]) > len(paramKeys[j]) })
+	for _, k := range paramKeys {
+		if sv, ok := params[k].(string); ok {
 			result = strings.ReplaceAll(result, "$"+k, sv)
 		}
 	}

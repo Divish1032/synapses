@@ -177,7 +177,7 @@ var secretPatterns = []string{
 	"SECRET=", "SECRET:", "SECRET_KEY=", "SECRET_KEY:",
 	"PASSWORD=", "PASSWORD:", "PASSWD=", "PASSWD:",
 	"TOKEN=", "TOKEN:", "AUTH_TOKEN=", "AUTH_TOKEN:",
-	"PRIVATE_KEY", "-----BEGIN ",
+	"PRIVATE_KEY",
 }
 
 // scrubSecrets removes lines that look like they contain secrets from code
