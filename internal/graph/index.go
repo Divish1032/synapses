@@ -71,6 +71,11 @@ type GraphIndex struct {
 	// 100–500, far fewer than the ~N_nodes that the old linear scan touched).
 	fileIndex map[string][]uint32
 
+	// receiverIndex maps lowercase receiver/struct name → method seq IDs.
+	// Used by CarveEgoGraph to seed BFS with struct methods in O(methods)
+	// instead of O(all_nodes).
+	receiverIndex map[string][]uint32
+
 	// CSR adjacency lists for outgoing edges.
 	// Node with seq i has outgoing edges in OutTargets[OutStart[i]:OutEnd[i]].
 	OutStart   []uint32   // len = node count + 2 (1-indexed, sentinel at 0)
@@ -93,9 +98,10 @@ type GraphIndex struct {
 func newGraphIndex(pool *StringPool) *GraphIndex {
 	idx := &GraphIndex{
 		Pool:      pool,
-		IDToSeq:   make(map[NodeID]uint32),
-		nameIndex: make(map[string][]uint32),
-		fileIndex: make(map[string][]uint32),
+		IDToSeq:       make(map[NodeID]uint32),
+		nameIndex:     make(map[string][]uint32),
+		fileIndex:     make(map[string][]uint32),
+		receiverIndex: make(map[string][]uint32),
 	}
 	// Append sentinel at position 0 for all slices.
 	idx.SeqIDs = append(idx.SeqIDs, "")
@@ -199,6 +205,50 @@ func (idx *GraphIndex) TombstoneRatio() float64 {
 		return 0
 	}
 	return float64(atomic.LoadInt32(&idx.TombstoneCount)) / float64(total)
+}
+
+// ReceiverMethodSeqs returns seq IDs of methods whose receiver matches the
+// given name (case-insensitive). Used by CarveEgoGraph to seed BFS with
+// struct/interface methods without scanning all nodes.
+// The caller MUST already hold g.mu.RLock — this method does no locking.
+func (idx *GraphIndex) ReceiverMethodSeqs(receiverName string) []uint32 {
+	return idx.receiverIndex[strings.ToLower(receiverName)]
+}
+
+// UnsafeSeq returns the sequential ID for nid without acquiring the RLock.
+// The caller MUST guarantee that the index is immutable (ready == 1) and hold
+// g.mu.RLock to prevent concurrent MarkTombstone writes.
+func (idx *GraphIndex) UnsafeSeq(nid NodeID) uint32 {
+	return idx.IDToSeq[nid]
+}
+
+// UnsafeOutNeighbours returns outgoing neighbours without acquiring the RLock.
+// Same safety requirements as UnsafeSeq.
+func (idx *GraphIndex) UnsafeOutNeighbours(seq uint32) (targets []uint32, types []StringID) {
+	if int(seq) >= len(idx.OutStart) {
+		return nil, nil
+	}
+	start, end := idx.OutStart[seq], idx.OutEnd[seq]
+	return idx.OutTargets[start:end], idx.OutTypes[start:end]
+}
+
+// UnsafeInNeighbours returns incoming neighbours without acquiring the RLock.
+// Same safety requirements as UnsafeSeq.
+func (idx *GraphIndex) UnsafeInNeighbours(seq uint32) (sources []uint32, types []StringID) {
+	if int(seq) >= len(idx.InStart) {
+		return nil, nil
+	}
+	start, end := idx.InStart[seq], idx.InEnd[seq]
+	return idx.InTargets[start:end], idx.InTypes[start:end]
+}
+
+// UnsafeIsTombstoned checks the tombstone flag without acquiring the RLock.
+// Same safety requirements as UnsafeSeq.
+func (idx *GraphIndex) UnsafeIsTombstoned(seq uint32) bool {
+	if int(seq) >= len(idx.Tombstone) {
+		return true
+	}
+	return idx.Tombstone[seq]
 }
 
 // nameSeqs returns seq IDs matching name (case-insensitive, including qualified
@@ -313,6 +363,11 @@ func buildIndex(g *Graph, pool *StringPool) *GraphIndex {
 			// (can't happen — dotPos >= 0 means there is a prefix — but guard anyway).
 			if suffixLower != nameLower {
 				idx.nameIndex[suffixLower] = append(idx.nameIndex[suffixLower], seq)
+			}
+			// receiverIndex: map receiver name → method seq IDs for O(1) BFS seeding.
+			if ns.ntype == NodeMethod {
+				receiverLower := strings.ToLower(ns.name[:dotPos])
+				idx.receiverIndex[receiverLower] = append(idx.receiverIndex[receiverLower], seq)
 			}
 		}
 

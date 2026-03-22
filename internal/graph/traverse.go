@@ -32,19 +32,18 @@ func provenanceWeight(p ProvenanceType) float64 {
 // The returned slice is always a fresh allocation — callers must not modify it.
 func (g *Graph) outInEdges(id NodeID, idx *GraphIndex) []*Edge {
 	if idx != nil && idx.Ready() {
-		// Use idx.Seq() rather than reading idx.IDToSeq directly: Seq() acquires
-		// idx.mu.RLock() which synchronises with the idx.mu.Lock() held by
-		// MarkTombstone.  A direct map read without the lock is flagged as a data
-		// race by the race detector even though IDToSeq is immutable after ready=1.
-		seq := idx.Seq(id)
+		// Use Unsafe* methods: the caller (CarveEgoGraph) already holds g.mu.RLock
+		// and the index is immutable after ready=1. This avoids acquiring idx.mu.RLock
+		// three times per BFS step (Seq + OutNeighbours + InNeighbours).
+		seq := idx.UnsafeSeq(id)
 		if seq == 0 {
 			return nil
 		}
-		outSeqs, outTypes := idx.OutNeighbours(seq)
-		inSeqs, inTypes := idx.InNeighbours(seq)
+		outSeqs, outTypes := idx.UnsafeOutNeighbours(seq)
+		inSeqs, inTypes := idx.UnsafeInNeighbours(seq)
 		edges := make([]*Edge, 0, len(outSeqs)+len(inSeqs))
 		for i, tSeq := range outSeqs {
-			if idx.IsTombstoned(tSeq) {
+			if idx.UnsafeIsTombstoned(tSeq) {
 				continue
 			}
 			edges = append(edges, &Edge{
@@ -54,7 +53,7 @@ func (g *Graph) outInEdges(id NodeID, idx *GraphIndex) []*Edge {
 			})
 		}
 		for i, fSeq := range inSeqs {
-			if idx.IsTombstoned(fSeq) {
+			if idx.UnsafeIsTombstoned(fSeq) {
 				continue
 			}
 			edges = append(edges, &Edge{
@@ -128,11 +127,24 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	// Seed BFS with the struct's methods so the carve includes method-level context.
 	if rootNode := g.nodes[rootID]; rootNode != nil &&
 		(rootNode.Type == NodeStruct || rootNode.Type == NodeInterface) {
-		prefix := rootNode.Name + "."
-		for _, n := range g.nodes {
-			if n.Type == NodeMethod && strings.HasPrefix(n.Name, prefix) {
-				visited[n.ID] = 0.9 // slightly below root
-				queue = append(queue, qItem{n.ID, 0})
+		if idx != nil && idx.Ready() {
+			// Use the receiverIndex for O(methods) instead of O(all_nodes).
+			for _, mSeq := range idx.ReceiverMethodSeqs(rootNode.Name) {
+				if idx.UnsafeIsTombstoned(mSeq) {
+					continue
+				}
+				mID := idx.SeqIDs[mSeq]
+				visited[mID] = 0.9 // slightly below root
+				queue = append(queue, qItem{mID, 0})
+			}
+		} else {
+			// Fallback: linear scan when index is not ready.
+			prefix := rootNode.Name + "."
+			for _, n := range g.nodes {
+				if n.Type == NodeMethod && strings.HasPrefix(n.Name, prefix) {
+					visited[n.ID] = 0.9
+					queue = append(queue, qItem{n.ID, 0})
+				}
 			}
 		}
 	}
