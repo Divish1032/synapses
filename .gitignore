@@ -44,6 +44,10 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 
+# Security/CI tool output
+gosec-results.json
+vuln_report.txt
+
 # Config files with secrets (use synapses.example.json as template)
 synapses.json
 
@@ -57,3 +61,10 @@ synapses.json
 .env.*.local
 
 json
+
+# Generated folders (Claude skills output, docs)
+council-reports/
+design-system/
+docs/
+e2e-results/
+pulse-audit-reports/
