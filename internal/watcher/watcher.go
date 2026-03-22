@@ -635,9 +635,9 @@ func fileContentHash(path string) (string, bool) {
 // race, the second DrainCallSites returns empty and those edges are lost.
 func (w *Watcher) reparseFile(path, _ string) {
 	w.reparseMu.Lock()
-	// reparseMu is explicitly unlocked before federation detection to avoid
-	// holding it across network timeouts. Early returns are covered by the
-	// deferred conditional unlock below.
+	// reparseMu is explicitly unlocked after notify*Impact and before federation
+	// detection to avoid holding it across network timeouts. Early returns are
+	// covered by the deferred conditional unlock below.
 	reparseMuHeld := true
 	defer func() {
 		if reparseMuHeld {
@@ -910,9 +910,18 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// by polling get_events, without manually calling get_violations.
 	w.checkViolations(path)
 
-	// Release reparseMu before federation detection. DrainCallSites,
-	// graph mutations, and violation checks are done. Federation only
-	// queries sibling stores (network I/O) — no need to serialise it.
+	// Cross-project reactive propagation: if any linked-project node depends on
+	// a node we just changed, broadcast a cross_project_impact message so agents
+	// working in this session are warned before they continue.
+	w.notifyCrossProjectImpact(path)
+
+	// Intra-project change alerts: notify agents whose claimed scope covers the
+	// changed file, and agents whose in-progress task has nodes in the changed file.
+	w.notifyIntraProjectImpact(path)
+
+	// Release reparseMu before federation detection — cpTracker.DetectAndStore
+	// reads sibling stores and writes to local store (both have their own locks).
+	// This lets the 4-worker pool achieve real concurrency during federation waits.
 	w.reparseMu.Unlock()
 	reparseMuHeld = false
 
@@ -967,15 +976,6 @@ func (w *Watcher) reparseFile(path, _ string) {
 			})
 		}
 	}
-
-	// Cross-project reactive propagation: if any linked-project node depends on
-	// a node we just changed, broadcast a cross_project_impact message so agents
-	// working in this session are warned before they continue.
-	w.notifyCrossProjectImpact(path)
-
-	// Intra-project change alerts: notify agents whose claimed scope covers the
-	// changed file, and agents whose in-progress task has nodes in the changed file.
-	w.notifyIntraProjectImpact(path)
 
 	// P2-3: emit ReparseEvent. Enqueue is mutex+append (O(1)) — direct call.
 	if w.pulseClient != nil {

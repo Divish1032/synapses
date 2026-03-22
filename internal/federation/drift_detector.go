@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -16,14 +17,16 @@ import (
 type DriftDetector struct {
 	resolver *Resolver
 
-	mu    sync.RWMutex
-	cache map[string][]DriftAlert // alias → cached drift results (session-level)
+	mu        sync.RWMutex
+	cache     map[string][]DriftAlert // alias → cached drift results (session-level)
+	cacheTime map[string]time.Time    // alias → when the cache entry was created
 }
 
 func newDriftDetector(r *Resolver) *DriftDetector {
 	return &DriftDetector{
-		resolver: r,
-		cache:    make(map[string][]DriftAlert),
+		resolver:  r,
+		cache:     make(map[string][]DriftAlert),
+		cacheTime: make(map[string]time.Time),
 	}
 }
 
@@ -40,10 +43,18 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 			break
 		}
 
-		// Check session-level cache first.
+		// Check session-level cache first (with TTL).
 		d.mu.RLock()
 		cached, hasCached := d.cache[e.Alias]
+		fresh := hasCached && time.Since(d.cacheTime[e.Alias]) < 5*time.Minute
 		d.mu.RUnlock()
+		if hasCached && !fresh {
+			d.mu.Lock()
+			delete(d.cache, e.Alias)
+			delete(d.cacheTime, e.Alias)
+			d.mu.Unlock()
+			hasCached = false
+		}
 		if hasCached {
 			allAlerts = append(allAlerts, cached...)
 			continue
@@ -53,6 +64,19 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 
 		d.mu.Lock()
 		d.cache[e.Alias] = alerts
+		d.cacheTime[e.Alias] = time.Now()
+		if len(d.cache) > 20 {
+			var oldest string
+			var oldestTime time.Time
+			for k, t := range d.cacheTime {
+				if oldest == "" || t.Before(oldestTime) {
+					oldest = k
+					oldestTime = t
+				}
+			}
+			delete(d.cache, oldest)
+			delete(d.cacheTime, oldest)
+		}
 		d.mu.Unlock()
 
 		allAlerts = append(allAlerts, alerts...)
@@ -64,6 +88,7 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 func (d *DriftDetector) InvalidateCache() {
 	d.mu.Lock()
 	d.cache = make(map[string][]DriftAlert)
+	d.cacheTime = make(map[string]time.Time)
 	d.mu.Unlock()
 }
 

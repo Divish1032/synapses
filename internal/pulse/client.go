@@ -1098,6 +1098,15 @@ func (c *Client) GetLifetimeSummary() *PulseSummary {
 	}
 }
 
+// GetSessionContextHitRate returns the cache hit rate for context deliveries
+// in a specific session. Returns 0 if no data.
+func (c *Client) GetSessionContextHitRate(sessionID string) float64 {
+	if c == nil || sessionID == "" {
+		return 0
+	}
+	return c.store.GetSessionContextHitRate(sessionID)
+}
+
 // GetFirstContextRightRate returns the fraction of context deliveries that
 // did not require correction. Returns 1.0 if no data is available.
 func (c *Client) GetFirstContextRightRate(days int) float64 {
