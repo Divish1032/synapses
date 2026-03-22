@@ -79,7 +79,7 @@ func isSymlinkContained(info os.FileInfo, path, root string) bool {
 		return false
 	}
 	absResolved, resErr := filepath.Abs(resolved)
-	if resErr != nil || !strings.HasPrefix(absResolved, absRoot) {
+	if resErr != nil || (!strings.HasPrefix(absResolved, absRoot+"/") && absResolved != absRoot) {
 		logutil.Warn("synapses/security: skipped symlink resolving outside repo root: %s -> %s\n", path, resolved)
 		return false
 	}
