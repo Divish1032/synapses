@@ -62,9 +62,11 @@ func DebugP(project string, format string, args ...interface{}) {
 func writeLog(level, project, format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	ts := time.Now().Format("2006-01-02T15:04:05-07:00")
+	var line string
 	if project != "" {
-		fmt.Fprintf(os.Stderr, "%s %s: [%s] %s", ts, level, project, msg)
+		line = fmt.Sprintf("%s %s: [%s] %s", ts, level, project, msg)
 	} else {
-		fmt.Fprintf(os.Stderr, "%s %s: %s", ts, level, msg)
+		line = fmt.Sprintf("%s %s: %s", ts, level, msg)
 	}
+	os.Stderr.WriteString(line)
 }
