@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -122,9 +123,13 @@ func TestWriteAndReadPID(t *testing.T) {
 		t.Fatalf("readFile failed: %v", err)
 	}
 
-	content := string(data)
-	if content != "12345" {
-		t.Errorf("expected PID 12345, got %s", content)
+	// PID file format: "<pid>\n<start_unix_nanos>"
+	lines := strings.SplitN(string(data), "\n", 2)
+	if strings.TrimSpace(lines[0]) != "12345" {
+		t.Errorf("expected PID 12345, got %s", lines[0])
+	}
+	if len(lines) < 2 || strings.TrimSpace(lines[1]) == "" {
+		t.Error("expected start timestamp on second line")
 	}
 }
 
