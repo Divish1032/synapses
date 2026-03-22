@@ -716,7 +716,8 @@ func cmdDaemonServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("pid path: %w", err)
 	}
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+	pidContent := fmt.Sprintf("%d\n%d", os.Getpid(), time.Now().UnixNano())
+	if err := os.WriteFile(pidPath, []byte(pidContent), 0o600); err != nil {
 		return fmt.Errorf("write pid: %w", err)
 	}
 	defer os.Remove(pidPath)
