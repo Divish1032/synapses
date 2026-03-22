@@ -2,12 +2,26 @@ package git
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 )
 
 const gitCmdTimeout = 5 * time.Second
+
+// safeGitCmd creates a git command with a minimal environment to prevent
+// secrets (GITHUB_TOKEN, OPENAI_API_KEY, etc.) from leaking to git hooks
+// in indexed repositories.
+func safeGitCmd(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = []string{
+		"HOME=" + os.Getenv("HOME"),
+		"PATH=" + os.Getenv("PATH"),
+		"GIT_CONFIG_NOSYSTEM=1",
+	}
+	return cmd
+}
 
 // HeadSHA returns the current HEAD commit SHA in the given repo.
 // Returns "" if git is unavailable, repoRoot is not a git repo, or the repo
@@ -19,7 +33,7 @@ func HeadSHA(repoRoot string) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse", "HEAD").Output()
+	out, err := safeGitCmd(ctx, "-C", repoRoot, "rev-parse", "HEAD").Output()
 	if err != nil {
 		return ""
 	}
@@ -47,15 +61,15 @@ func LogSince(repoRoot, startCommit string) []string {
 	// If not (rebase / force-push), return nil so the task update still succeeds.
 	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
 	defer cancel()
-	catOut, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "cat-file", "-t", startCommit).Output()
+	catOut, err := safeGitCmd(ctx, "-C", repoRoot, "cat-file", "-t", startCommit).Output()
 	if err != nil || strings.TrimSpace(string(catOut)) != "commit" {
 		return nil
 	}
 	// git log <startCommit>..HEAD --oneline returns commits after startCommit.
 	ctx2, cancel2 := context.WithTimeout(context.Background(), gitCmdTimeout)
 	defer cancel2()
-	out, err := exec.CommandContext(ctx2,
-		"git", "-C", repoRoot,
+	out, err := safeGitCmd(ctx2,
+		"-C", repoRoot,
 		"log", "--oneline",
 		startCommit+"..HEAD",
 	).Output()
