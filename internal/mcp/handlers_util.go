@@ -14,8 +14,10 @@ import (
 )
 
 // pathStripRe matches absolute Unix paths in error messages.
-// Captures paths like /home/user/.synapses/data/file.db or /tmp/foo.
-var pathStripRe = regexp.MustCompile(`/(?:home|Users|tmp|var|etc|root|opt)[/][^\s:,"'\)]+`)
+// Matches any path starting with / followed by a path segment, covering all
+// prefixes including /home, /Users, /tmp, /var, container paths (/app, /build),
+// CI paths (/runner, /workspace), and others.
+var pathStripRe = regexp.MustCompile(`/[a-zA-Z_][a-zA-Z0-9_.-]*/[^\s:,"'\)]+`)
 
 // winPathStripRe matches absolute Windows paths (e.g. C:\Users\foo\...).
 var winPathStripRe = regexp.MustCompile(`[A-Z]:\\[^\s:,"'\)]+`)
