@@ -939,6 +939,11 @@ func (g *Graph) ProjectIdentity() *ProjectIdentity {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	// Re-check cache under write lock (double-checked locking pattern).
+	if g.piCache != nil && time.Now().Unix()-g.piCacheAt < 30 {
+		return g.piCache
+	}
+
 	summary := GraphSummary{}
 
 	for _, n := range g.nodes {
