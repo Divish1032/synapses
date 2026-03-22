@@ -187,6 +187,9 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 		if l == 0 {
 			return "", nil
 		}
+		if l > 10*1024*1024 { // 10 MB max string length
+			return "", fmt.Errorf("readStr: length %d exceeds maximum", l)
+		}
 		bs := make([]byte, l)
 		if _, err := io.ReadFull(r, bs); err != nil {
 			return "", err
@@ -234,12 +237,30 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 		if err != nil {
 			return nil, fmt.Errorf("graph snapshot: node %d id: %w", i, err)
 		}
-		typeID, _ := readSID()
-		nameID, _ := readSID()
-		fileID, _ := readSID()
-		pkgID, _ := readSID()
-		line, _ := readI32()
-		exp, _ := readBool()
+		typeID, err := readSID()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d typeID: %w", i, err)
+		}
+		nameID, err := readSID()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d nameID: %w", i, err)
+		}
+		fileID, err := readSID()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d fileID: %w", i, err)
+		}
+		pkgID, err := readSID()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d pkgID: %w", i, err)
+		}
+		line, err := readI32()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d line: %w", i, err)
+		}
+		exp, err := readBool()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d exported: %w", i, err)
+		}
 
 		nid := NodeID(nidStr)
 		idx.SeqIDs[i] = nid
@@ -269,32 +290,48 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 	idx.OutStart = make([]uint32, nodeCount+2)
 	idx.OutEnd = make([]uint32, nodeCount+2)
 	for i := uint32(1); i <= nodeCount; i++ {
-		idx.OutStart[i], _ = readU32()
-		idx.OutEnd[i], _ = readU32()
+		if idx.OutStart[i], err = readU32(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: out-edge start %d: %w", i, err)
+		}
+		if idx.OutEnd[i], err = readU32(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: out-edge end %d: %w", i, err)
+		}
 	}
 	idx.OutTargets = make([]uint32, edgeCount)
 	for i := range idx.OutTargets {
-		idx.OutTargets[i], _ = readU32()
+		if idx.OutTargets[i], err = readU32(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: out-target %d: %w", i, err)
+		}
 	}
 	idx.OutTypes = make([]StringID, edgeCount)
 	for i := range idx.OutTypes {
-		idx.OutTypes[i], _ = readSID()
+		if idx.OutTypes[i], err = readSID(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: out-type %d: %w", i, err)
+		}
 	}
 
 	// CSR in-edges
 	idx.InStart = make([]uint32, nodeCount+2)
 	idx.InEnd = make([]uint32, nodeCount+2)
 	for i := uint32(1); i <= nodeCount; i++ {
-		idx.InStart[i], _ = readU32()
-		idx.InEnd[i], _ = readU32()
+		if idx.InStart[i], err = readU32(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: in-edge start %d: %w", i, err)
+		}
+		if idx.InEnd[i], err = readU32(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: in-edge end %d: %w", i, err)
+		}
 	}
 	idx.InTargets = make([]uint32, edgeCount)
 	for i := range idx.InTargets {
-		idx.InTargets[i], _ = readU32()
+		if idx.InTargets[i], err = readU32(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: in-target %d: %w", i, err)
+		}
 	}
 	idx.InTypes = make([]StringID, edgeCount)
 	for i := range idx.InTypes {
-		idx.InTypes[i], _ = readSID()
+		if idx.InTypes[i], err = readSID(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: in-type %d: %w", i, err)
+		}
 	}
 
 	atomic.StoreInt32(&idx.ready, 1)
