@@ -237,6 +237,20 @@ func (a *Aggregator) rollup() {
 	// P2-18: backfill rollups for any days missed due to daemon downtime.
 	a.backfillMissedDays(today)
 
+	// G3 idempotency: if the full rollup already completed for today (e.g.,
+	// daemon restarted mid-day), skip the batch metrics phase and jump
+	// directly to the per-dimension rollups that are individually idempotent.
+	// The sentinel metric "rollup_completed" marks a successful full pass.
+	if val, readErr := a.store.ReadDailyRollup(today, "rollup_completed"); readErr == nil && val > 0 {
+		// Rollup already ran. Still re-run per-dimension rollups since they
+		// are cheap and idempotent, and handle any late-arriving events.
+		a.rollupPerProject(today)
+		a.rollupPerTool(today)
+		a.rollupPerAgent(today)
+		a.rollupPerLanguage(today)
+		return
+	}
+
 	sum, err := a.store.GetSummaryForDay(today)
 	if err != nil {
 		logutil.Warn("pulse aggregator: summary error: %v\n", err)
@@ -375,6 +389,12 @@ func (a *Aggregator) rollup() {
 
 	// P12-5: per-tool error rates.
 	a.rollupPerToolErrors(today)
+
+	// Mark the full rollup as completed for today so a restart doesn't
+	// re-run the expensive batch metrics phase (G3 idempotency).
+	if rollupOK {
+		_ = a.store.UpsertDailyRollup(today, "rollup_completed", 1)
+	}
 
 	// Automatic pruning: remove events older than 90 days.
 	// Only prune if the rollup succeeded — otherwise raw data is still needed.

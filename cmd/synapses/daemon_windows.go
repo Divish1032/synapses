@@ -41,3 +41,9 @@ func forceKillProcess(pid int) error {
 	}
 	return proc.Kill()
 }
+
+// processStartTime returns 0 on Windows — PID recycling detection
+// relies solely on the PID file timestamp heuristic.
+func processStartTime(_ int) int64 {
+	return 0
+}
