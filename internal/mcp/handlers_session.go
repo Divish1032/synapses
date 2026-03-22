@@ -208,6 +208,17 @@ func (s *Server) handleGetWorkingState(
 	// Context-aware suggestions based on what was recently changed.
 	result["suggested_tools"] = suggestToolsForChanges(events)
 
+	// Update notification — non-empty when a newer daemon version is available.
+	if s.updateChecker != nil {
+		if v := s.updateChecker(); v != "" {
+			result["update_available"] = map[string]string{
+				"latest_version":  v,
+				"current_version": Version,
+				"hint":            "A newer version of synapses is available. Run 'synapses update' to upgrade.",
+			}
+		}
+	}
+
 	return jsonResult(result)
 }
 

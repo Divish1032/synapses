@@ -71,6 +71,24 @@ Synapses maintains **episodic memory** (past decisions, failures), an **agent me
 
 ---
 
+## Web Console
+
+When the Synapses daemon is running, a **built-in web console** is available at:
+
+```
+http://localhost:11435
+```
+
+The console gives you a visual dashboard for all your indexed projects — live index stats, task queues, episodic memory, agent activity, and one-click reindex. No separate install needed; it's embedded in the binary.
+
+**Open it:** after running `synapses init`, just visit `http://localhost:11435` in your browser.
+
+**Desktop app:** if you prefer a native window, the [Synapses desktop app](https://github.com/SynapsesOS/synapses-app) wraps this same UI in a Tauri shell (macOS, Linux, Windows).
+
+**Custom UI (advanced):** drop your own `index.html` into `~/.synapses/console/` and the daemon will serve that instead of the built-in UI. Useful for hotfixes or custom dashboards without rebuilding the binary.
+
+---
+
 ## Quick Start
 
 ### 1. Install
@@ -271,13 +289,21 @@ All commands use the syntax `synapses <command> [flags]`.
 |---------|-------|-------------|
 | `approve` | `--all` / `-a` | Review and approve pending cross-project write requests. Agents that attempt a broadcast `send_message` or cross-project `remember` are gated until a human runs this command. `--all` approves all non-interactively. |
 
+### Update Commands
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `update` | `--check` | Check for a new release and print a diff. Without `--check`, downloads and installs the latest binary. |
+
 ### Other Commands
 | Command | Flags | Description |
 |---------|-------|-------------|
 | `query` | `-path`, `-entity` | JSON lookup of entity (read-only). |
 | `brief` | `-path` | Concise session brief. |
 | `export` | `-path`, `-entity`, `-format` (dot/mermaid/graphml), `-depth` | Export graph to stdout. |
-| `version` | — | Print version. |
+| `memory` | — | Session memory subcommands (`list`, `get`, `delete`). |
+| `allow-plugin` | — | Add a plugin to the allowlist. |
+| `benchmark` | — | Run performance benchmarks (graph BFS, FTS, embeddings). |
+| `version` | — | Print version. Shows update hint if a newer release is cached. |
 | `help` | — | Print usage. |
 
 ---
@@ -377,7 +403,21 @@ The brain is an optional in-process LLM layer that enriches context packets:
 - Build compact context packets (~800 tokens vs 4000 raw)
 - Enable Architectural Decision Records (`upsert_adr`/`get_adrs`)
 
-Enable by setting `brain.enabled: true` in `synapses.json` and pointing `brain.ollama_url` at a running Ollama instance. The default model is `qwen3.5:2b`.
+No external sidecar binary is needed — the brain runs in the same process as the MCP server.
+
+### Choosing a Backend
+
+Synapses supports three LLM backends. Choose one based on your setup:
+
+| Backend | When to use | Setup |
+|---------|------------|-------|
+| **llama-server** | No Ollama, want GPU/CPU auto-detect | `brain setup --llama-server` |
+| **ollama** | Ollama already installed | `brain setup` |
+| **local** | In-process GGUF, CGo build | `brain setup --local` |
+
+**llama-server is the recommended default** — it requires no Ollama installation, auto-detects Metal/CUDA/CPU, and manages the subprocess automatically.
+
+### Quick Enable
 
 ```json
 "brain": {
@@ -389,7 +429,11 @@ Enable by setting `brain.enabled: true` in `synapses.json` and pointing `brain.o
 }
 ```
 
-No external sidecar binary is needed — the brain runs in the same process as the MCP server.
+Run `brain setup` (or `brain setup --llama-server`) to auto-detect your hardware and write a tuned `~/.synapses/brain.json`. The setup command probes installed models for latency and picks the right tier for your machine.
+
+### Default Models
+
+The brain is **fully configurable** — you can point it at any Ollama model, OpenAI-compatible endpoint, or local GGUF file. The default configuration uses [Qwen2.5-Coder](https://huggingface.co/Qwen) models (by the Qwen team at Alibaba Cloud, Apache 2.0) on CPU, and [Qwen3.5](https://huggingface.co/Qwen) on GPU. These are sensible defaults chosen for their balance of speed and quality at small sizes; you are not required to use them.
 
 ---
 
@@ -417,7 +461,7 @@ Serialized to SQLite: full graph snapshot for recovery, FTS5 for semantic search
 
 ### Stack
 
-- **Language**: Go 1.26
+- **Language**: Go 1.22+
 - **Graph DB**: SQLite (modernc.org/sqlite, pure Go)
 - **Parser**: Tree-sitter (49+ languages)
 - **MCP**: mark3labs/mcp-go (stdio transport)
@@ -442,10 +486,22 @@ MIT License — See [LICENSE](LICENSE) for details.
 
 ---
 
+## Acknowledgments
+
+Synapses builds on several excellent open-source projects:
+
+- [mark3labs/mcp-go](https://github.com/mark3labs/mcp-go) — MCP protocol implementation
+- [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) — Pure-Go SQLite driver
+- [go-tree-sitter](https://github.com/smacker/go-tree-sitter) — Language parsing
+- [Qwen team (Alibaba Cloud)](https://huggingface.co/Qwen) — Default brain models (Qwen2.5-Coder, Qwen3.5), Apache 2.0
+
+---
+
 ## Links
 
 - **GitHub**: https://github.com/SynapsesOS/synapses
 - **Organization**: https://github.com/SynapsesOS
+- **Desktop App**: https://github.com/SynapsesOS/synapses-app
 
 ## Support
 

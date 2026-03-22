@@ -2,6 +2,23 @@
 
 All notable changes to Synapses are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.2] - 2026-03-22
+
+### Added
+- **Web Console** — Built-in management UI served at `http://localhost:11435`. Dashboard shows live index stats, task queues, episodic memory, agent activity, and one-click reindex. Embedded in the binary via `//go:embed`; no separate install.
+- **`synapses update` command** — Check for new releases and install the latest binary with a single command. Background check runs on daemon start and surfaces an update hint in `synapses version` and `session_init` if a newer release is available.
+- **Disk override for web console** — Drop a custom `index.html` into `~/.synapses/console/` and the daemon serves it instead of the embedded UI. Enables hotfixes and custom dashboards without rebuilding the binary.
+- **CSRF protection** — All mutation endpoints on the admin API require a session token. Fail-closed: if token generation fails, mutations are rejected.
+- **Update notification in `session_init`** — If a newer Synapses release is cached, AI agents receive an `update_available` hint in the `session_init` response.
+- **Admin API endpoints** — `GET /api/admin/update-check`, `POST /api/admin/projects/{path}/reindex`, `GET /api/admin/services`, and supporting routes for the web console.
+
+### Fixed
+- **Reindex correctness** — `POST /api/admin/projects/{path}/reindex` now fully tears down and rebuilds the project instance (was previously only rebuilding the FTS index from stale in-memory data).
+- **Ollama pull write timeout** — `/api/admin/ollama/pull` excluded from HTTP write deadline so large model downloads do not time out.
+- **Dev embed** — `web.ConsoleFS` in dev mode is now `os.DirFS("web")` so `fs.Sub(ConsoleFS, "console/dist")` resolves correctly without a production build.
+
+---
+
 ## [0.7.1] - 2026-03-09
 
 ### Added
@@ -125,6 +142,8 @@ All notable changes to Synapses are documented here. This project adheres to [Se
 
 ---
 
+[0.7.2]: https://github.com/SynapsesOS/synapses/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/SynapsesOS/synapses/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/SynapsesOS/synapses/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/SynapsesOS/synapses/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/SynapsesOS/synapses/compare/v0.5.2...v0.6.0

@@ -61,7 +61,7 @@ func DebugP(project string, format string, args ...interface{}) {
 
 func writeLog(level, project, format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	ts := time.Now().Format(time.RFC3339)
+	ts := time.Now().Format("2006-01-02T15:04:05-07:00")
 	if project != "" {
 		fmt.Fprintf(os.Stderr, "%s %s: [%s] %s", ts, level, project, msg)
 	} else {
