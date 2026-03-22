@@ -289,7 +289,7 @@ func writeSynapsesJSON(root string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cfgPath, append(data, '\n'), 0o644)
+	return os.WriteFile(cfgPath, append(data, '\n'), 0o600)
 }
 
 // ── Step 2 helper ───────────────────────────────────────────────────────────
