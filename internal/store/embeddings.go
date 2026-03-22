@@ -94,12 +94,21 @@ func (s *Store) EmbeddingCount() int {
 // node text (name+signature+doc). File and package nodes are excluded.
 // Pass limit=0 to return all matching nodes (no cap).
 func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
-	// Fetch all non-file/package nodes with their stored hash (NULL when no embedding exists).
-	rows, err := s.graphDB.Query(`
+	// Fetch non-file/package nodes with their stored hash (NULL when no embedding exists).
+	// When limit > 0, apply SQL LIMIT to avoid loading the entire table client-side.
+	baseQuery := `
 		SELECT n.id, n.name, n.signature, n.doc, COALESCE(e.content_hash, '') AS stored_hash
 		FROM nodes n
 		LEFT JOIN node_embeddings e ON n.id = e.node_id
-		WHERE n.type NOT IN ('file', 'package')`)
+		WHERE n.type NOT IN ('file', 'package')`
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		// Over-fetch by 2x since some rows may have matching hashes and be skipped.
+		rows, err = s.graphDB.Query(baseQuery+" LIMIT ?", limit*2)
+	} else {
+		rows, err = s.graphDB.Query(baseQuery)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("get unembed nodes: %w", err)
 	}
@@ -342,13 +351,17 @@ func (s *Store) normalizeStoredEmbeddings() {
 	}
 
 	normalizeTable := func(db dbIface, table, idCol string) int {
+		// Collect rows to update first.
 		rows, err := db.Query(fmt.Sprintf("SELECT %s, embedding FROM %s", idCol, table))
 		if err != nil {
 			return 0
 		}
-		defer rows.Close()
 
-		var updated int
+		type updateItem struct {
+			id   string
+			blob []byte
+		}
+		var updates []updateItem
 		for rows.Next() {
 			var id string
 			var blob []byte
@@ -371,9 +384,46 @@ func (s *Store) normalizeStoredEmbeddings() {
 			if nvec == nil {
 				continue
 			}
+			updates = append(updates, updateItem{id: id, blob: vecToBlob(nvec)})
+		}
+		rows.Close()
+
+		if len(updates) == 0 {
+			return 0
+		}
+
+		// Wrap all UPDATEs in a single transaction for atomicity and performance.
+		// Use type assertion to access Begin(); fall back to individual writes if unavailable.
+		type beginner interface {
+			Begin() (*sql.Tx, error)
+		}
+		if sqlDB, ok := db.(beginner); ok {
+			tx, err := sqlDB.Begin()
+			if err == nil {
+				var updated int
+				for _, u := range updates {
+					if _, err := tx.Exec(
+						fmt.Sprintf("UPDATE %s SET embedding = ? WHERE %s = ?", table, idCol),
+						u.blob, u.id,
+					); err != nil {
+						continue
+					}
+					updated++
+				}
+				if err := tx.Commit(); err != nil {
+					return 0
+				}
+				return updated
+			}
+			// Fall through to non-transactional path on Begin() error.
+		}
+
+		// Fallback: individual UPDATEs without a transaction.
+		var updated int
+		for _, u := range updates {
 			if _, err := db.Exec(
 				fmt.Sprintf("UPDATE %s SET embedding = ? WHERE %s = ?", table, idCol),
-				vecToBlob(nvec), id,
+				u.blob, u.id,
 			); err != nil {
 				continue
 			}

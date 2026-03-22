@@ -445,10 +445,9 @@ type Store struct {
 	lastPruneStaleAt   time.Time // PruneStaleData (daily debounce)
 
 	// semanticDedupFunc embeds text on-the-fly for semantic dedup in prepareMemory.
-	// When set: Jaccard in [0.5, 0.85) triggers a cosine similarity check against
-	// the candidate's stored embedding. When nil: inconclusive range falls through
-	// (no semantic dedup — same as pre-Sprint-11 behavior).
+	// Protected by semanticDedupMu for concurrent read/write safety.
 	semanticDedupFunc func(text string) ([]float32, error)
+	semanticDedupMu   sync.RWMutex
 
 	// MaxMemoryRows caps the total number of memories per project.
 	// An agent calling remember() in a loop can fill disk without this cap.
@@ -490,7 +489,17 @@ type Store struct {
 // function embeds the new content and compares against the candidate's stored
 // embedding. Pass nil to disable semantic dedup (default).
 func (s *Store) SetSemanticDedupFunc(fn func(text string) ([]float32, error)) {
+	s.semanticDedupMu.Lock()
 	s.semanticDedupFunc = fn
+	s.semanticDedupMu.Unlock()
+}
+
+// getSemanticDedupFunc returns the current semantic dedup function (thread-safe read).
+func (s *Store) getSemanticDedupFunc() func(text string) ([]float32, error) {
+	s.semanticDedupMu.RLock()
+	fn := s.semanticDedupFunc
+	s.semanticDedupMu.RUnlock()
+	return fn
 }
 
 // CacheDir returns the canonical directory where synapses stores all project
@@ -596,6 +605,8 @@ func Open(path string) (*Store, error) {
 	// ── Graph migrations ─────────────────────────────────────────────────
 	// "duplicate column name" errors are safe to ignore — they mean the column
 	// was already created by CREATE TABLE (fresh DB) or a previous migration run.
+	// Wrapped in a transaction to prevent partially-migrated state on crash.
+	graphTx, _ := graphDB.Begin()
 	for _, m := range []string{
 		`ALTER TABLE nodes ADD COLUMN doc TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN signature TEXT NOT NULL DEFAULT ''`,
@@ -606,14 +617,19 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE nodes ADD COLUMN prev_signature TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE node_embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
 	} {
-		if _, err := graphDB.Exec(m); err != nil && !isDupColumnErr(err) {
+		if _, err := graphTx.Exec(m); err != nil && !isDupColumnErr(err) {
+			graphTx.Rollback()
 			graphDB.Close()
 			knowledgeDB.Close()
 			return nil, fmt.Errorf("migrate graph schema: %w", err)
 		}
 	}
+	if graphTx != nil {
+		graphTx.Commit()
+	}
 
 	// ── Knowledge migrations ─────────────────────────────────────────────
+	knowledgeTx, _ := knowledgeDB.Begin()
 	for _, m := range []string{
 		`ALTER TABLE plans ADD COLUMN created_by TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE plans ADD COLUMN completed_at INTEGER NOT NULL DEFAULT 0`,
@@ -728,11 +744,15 @@ func Open(path string) (*Store, error) {
 		// Sprint 11.5: ACT-R frequency-weighted decay — access counter on memories.
 		`ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0`,
 	} {
-		if _, err := knowledgeDB.Exec(m); err != nil && !isDupColumnErr(err) {
+		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
+			knowledgeTx.Rollback()
 			graphDB.Close()
 			knowledgeDB.Close()
 			return nil, fmt.Errorf("migrate knowledge schema: %w", err)
 		}
+	}
+	if knowledgeTx != nil {
+		knowledgeTx.Commit()
 	}
 
 	// Fix historical rows: sessions with ended_at already set must be 'closed'.
@@ -1623,7 +1643,11 @@ func (s *Store) reconcileOrphanedReferences() {
 
 	// cleanupByNodeID removes rows from a knowledgeDB table where the node_id
 	// column references a node absent from the current graphDB.
+	allowedTables := map[string]bool{"annotations": true, "memory_anchors": true, "agent_watched_symbols": true}
 	cleanupByNodeID := func(table, deleteSQL string) int {
+		if !allowedTables[table] {
+			return 0
+		}
 		r, err := s.knowledgeDB.Query(fmt.Sprintf("SELECT node_id FROM %s", table))
 		if err != nil {
 			return 0
@@ -1716,7 +1740,7 @@ func (s *Store) GetWebCache(url string) (*WebCacheEntry, bool) {
 // DeleteWebCachePrefix removes all cache entries whose URL starts with prefix.
 // Used to invalidate version-pinned entries when go.mod bumps a package version.
 func (s *Store) DeleteWebCachePrefix(prefix string) error {
-	_, err := s.knowledgeDB.Exec(`DELETE FROM web_cache WHERE url LIKE ?`, prefix+"%")
+	_, err := s.knowledgeDB.Exec(`DELETE FROM web_cache WHERE url LIKE ? ESCAPE '\'`, escapeLike(prefix)+"%")
 	return err
 }
 
@@ -1737,7 +1761,6 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	// whose call structure changed significantly and mark their annotations stale.
 	oldFanIn := make(map[string]int)
 	if fanRows, err := s.graphDB.Query(`SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id`); err == nil {
-		defer fanRows.Close()
 		for fanRows.Next() {
 			var nid string
 			var cnt int
@@ -1745,6 +1768,7 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 				oldFanIn[nid] = cnt
 			}
 		}
+		fanRows.Close() // close before write tx to avoid holding reader pool connection
 	}
 
 	// R20/FIX-R20A: Snapshot current signatures before the wipe so we can detect
@@ -1754,13 +1778,13 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	// are captured — new nodes (not in this map) are treated as additions, not changes.
 	oldSigs := make(map[string]string)
 	if sigRows, err := s.graphDB.Query(`SELECT id, signature FROM nodes WHERE signature != ''`); err == nil {
-		defer sigRows.Close()
 		for sigRows.Next() {
 			var nid, sig string
 			if sigRows.Scan(&nid, &sig) == nil {
 				oldSigs[nid] = sig
 			}
 		}
+		sigRows.Close() // close before write tx to avoid holding reader pool connection
 	}
 
 	tx, err := s.graphDB.Begin()
@@ -2850,9 +2874,10 @@ func (s *Store) LogViolations(vs []config.Violation) error {
 // substring. Used by the watcher to distinguish newly-detected violations
 // (which should trigger an event) from pre-existing ones (which should not).
 func (s *Store) ViolationIDsForFile(file string) (map[string]struct{}, error) {
-	pattern := "%" + file + "%"
+	escaped := escapeLike(file)
+	pattern := "%" + escaped + "%"
 	rows, err := s.knowledgeDB.Query(
-		`SELECT id FROM violation_log WHERE from_node LIKE ? OR to_node LIKE ?`,
+		`SELECT id FROM violation_log WHERE from_node LIKE ? ESCAPE '\' OR to_node LIKE ? ESCAPE '\'`,
 		pattern, pattern,
 	)
 	if err != nil {

@@ -266,6 +266,8 @@ func (s *Store) QueryMemoriesForEntities(entityIDs []string, limit int) (map[str
 	}
 	args = append(args, now)
 
+	// Cap total rows: limit per entity × number of entities.
+	totalLimit := limit * len(entityIDs)
 	q := fmt.Sprintf(`
 		SELECT id, tier, content, entity_id, agent_id, task_id, tags,
 		       created_at, expires_at, last_accessed_at, source, importance, access_count
@@ -274,7 +276,9 @@ func (s *Store) QueryMemoriesForEntities(entityIDs []string, limit int) (map[str
 		  AND entity_id IN (%s)
 		  AND expires_at > ?
 		  AND stale = 0
-		ORDER BY last_accessed_at DESC`, strings.Join(placeholders, ","))
+		ORDER BY last_accessed_at DESC
+		LIMIT ?`, strings.Join(placeholders, ","))
+	args = append(args, totalLimit)
 
 	rows, err := s.knowledgeDB.Query(q, args...)
 	if err != nil {
@@ -356,6 +360,16 @@ func (s *Store) GetLatestWorkSummary(agentID string) (*Memory, error) {
 		return nil, fmt.Errorf("get latest work summary: %w", err)
 	}
 	return &m, nil
+}
+
+// GetMemoryContent returns the content of a memory by ID. Returns ("", false) if not found.
+func (s *Store) GetMemoryContent(id string) (string, bool) {
+	var content string
+	err := s.knowledgeDB.QueryRow(`SELECT content FROM memories WHERE id = ?`, id).Scan(&content)
+	if err != nil {
+		return "", false
+	}
+	return content, true
 }
 
 // TouchMemory updates last_accessed_at and extends expires_at by 50% of the
@@ -1021,7 +1035,7 @@ func (s *Store) prepareMemory(m Memory) (Memory, prepareMemoryResult, error) {
 	// semanticDedupFunc is set AND the candidate has a stored embedding.
 	var newVec []float32
 	var newVecComputed bool
-	embedFn := s.semanticDedupFunc // snapshot — safe even if swapped concurrently
+	embedFn := s.getSemanticDedupFunc() // thread-safe snapshot
 
 	// maxJaccard tracks the highest Jaccard similarity seen across all candidates.
 	// maxCosine tracks the highest cosine similarity (when embeddings are available).
