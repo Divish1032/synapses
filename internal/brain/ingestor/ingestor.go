@@ -159,7 +159,7 @@ func (ing *Ingestor) Summarize(ctx context.Context, req Request) (Response, erro
 
 // buildPrompt constructs the LLM prompt for a code entity.
 func (ing *Ingestor) buildPrompt(req Request) string {
-	code := secrets.FilterLines(truncateCode(req.Code))
+	code := truncateCode(secrets.FilterLines(req.Code))
 	nodeType := req.NodeType
 	if nodeType == "" {
 		nodeType = "entity"
