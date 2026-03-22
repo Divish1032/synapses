@@ -125,6 +125,15 @@ func (c *LocalClient) generate(ctx context.Context, prompt string) (string, erro
 	// gollama's Generate API is raw-completion only — we format the template here.
 	fullPrompt := applyQwen3ChatTemplate(silSystemPrompt, prompt)
 
+	// Acquire the inference semaphore to prevent a second caller from using the
+	// non-thread-safe gollama context while an abandoned goroutine (from a prior
+	// cancelled call) is still running.
+	select {
+	case c.inferSem <- struct{}{}:
+	case <-ctx.Done():
+		return "", fmt.Errorf("local LLM generate: %w", ctx.Err())
+	}
+
 	// --- Level 3: generate (in goroutine for context cancellation) ---
 	type result struct {
 		text string
@@ -132,6 +141,7 @@ func (c *LocalClient) generate(ctx context.Context, prompt string) (string, erro
 	}
 	ch := make(chan result, 1)
 	go func() {
+		defer func() { <-c.inferSem }() // release semaphore when inference completes
 		text, err := llamaCtx.Generate(fullPrompt,
 			llama.WithMaxTokens(512),   // match grpo_train max_completion_length
 			llama.WithTemperature(0.1), // low temp for deterministic code graph analysis
@@ -144,7 +154,7 @@ func (c *LocalClient) generate(ctx context.Context, prompt string) (string, erro
 	select {
 	case <-ctx.Done():
 		// Caller cancelled — unblock immediately. The goroutine will finish
-		// naturally (bounded by MaxTokens=512) and its result is discarded.
+		// naturally (bounded by MaxTokens=512) and release the semaphore.
 		return "", fmt.Errorf("local LLM generate: %w", ctx.Err())
 	case r := <-ch:
 		if r.err != nil {
