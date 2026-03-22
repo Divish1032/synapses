@@ -279,6 +279,9 @@ func downloadBytes(ctx context.Context, client *http.Client, url string) ([]byte
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
 	}
+	// maxDownloadBytes caps peak memory at ~1 GB (zip in memory + extraction).
+	// Streaming extraction would reduce this but actual artifacts are <200 MB.
+	// Acceptable given the cap prevents unbounded growth.
 	const maxDownloadBytes = 512 << 20
 	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadBytes))
 }
