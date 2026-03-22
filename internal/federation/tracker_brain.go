@@ -219,18 +219,60 @@ func filterSecretLines(content string) string {
 	lines := strings.Split(content, "\n")
 	filtered := make([]string, 0, len(lines))
 	for _, line := range lines {
-		upper := strings.ToUpper(line)
-		if strings.Contains(upper, "API_KEY=") ||
-			strings.Contains(upper, "SECRET=") ||
-			strings.Contains(upper, "PASSWORD=") ||
-			strings.Contains(upper, "TOKEN=") ||
-			strings.Contains(upper, "PRIVATE_KEY") ||
-			strings.Contains(upper, "SECRET_KEY") {
+		if looksLikeSecret(line) {
 			continue
 		}
 		filtered = append(filtered, line)
 	}
 	return strings.Join(filtered, "\n")
+}
+
+// secretPatterns are case-insensitive substrings that indicate a line contains
+// or assigns a secret value. Covers environment variables, config files, code
+// constants, and common provider-specific key names.
+var secretPatterns = []string{
+	// Generic assignment patterns
+	"API_KEY=", "APIKEY=", "API_KEY:", "APIKEY:",
+	"SECRET=", "SECRET:", "SECRET_KEY", "SECRETKEY",
+	"PASSWORD=", "PASSWORD:", "PASSWD=", "PASSWD:",
+	"TOKEN=", "TOKEN:", "_TOKEN=", "_TOKEN:",
+	"PRIVATE_KEY", "PRIVATEKEY",
+	"CREDENTIALS=", "CREDENTIALS:",
+
+	// AWS
+	"AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN",
+
+	// Database
+	"DATABASE_URL=", "DATABASE_URL:", "DB_PASSWORD", "DB_PASS",
+	"MONGO_URI=", "REDIS_URL=", "REDIS_PASSWORD",
+
+	// OAuth / social
+	"CLIENT_SECRET", "GITHUB_TOKEN", "SLACK_TOKEN", "SLACK_WEBHOOK",
+	"DISCORD_TOKEN", "OPENAI_API_KEY",
+
+	// PEM blocks
+	"-----BEGIN RSA", "-----BEGIN EC", "-----BEGIN PRIVATE",
+	"-----BEGIN OPENSSH", "-----BEGIN PGP",
+
+	// Generic bearer/auth
+	"BEARER ", "AUTHORIZATION:",
+
+	// Common prefixes for API keys
+	"SK_LIVE_", "SK_TEST_", "PK_LIVE_", "PK_TEST_",
+	"GHPAT_", "GHP_", "GHO_", "GHU_", "GHS_", "GHR_",
+	"XOXB-", "XOXP-", "XOXA-",
+	"SG.", // SendGrid
+}
+
+// looksLikeSecret returns true if the line likely contains a secret value.
+func looksLikeSecret(line string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(line))
+	for _, pat := range secretPatterns {
+		if strings.Contains(upper, pat) {
+			return true
+		}
+	}
+	return false
 }
 
 func (bd *BrainDetector) validateBrainDeps(ctx context.Context, raw []BrainDetectedDep) []RawCrossDep {
