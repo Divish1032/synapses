@@ -344,7 +344,7 @@ func (s *Store) GetLatestWorkSummary(agentID string) (*Memory, error) {
 		  AND tags LIKE '%"work_summary"%'
 		  AND stale = 0
 		  AND expires_at > ?
-		ORDER BY created_at DESC, id DESC
+		ORDER BY created_at DESC, rowid DESC
 		LIMIT 1`, agentID, now)
 
 	var m Memory
