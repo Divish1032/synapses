@@ -29,9 +29,12 @@ vendor/
 .vscode/
 .cursor/
 .gemini/
+.windsurf/
+.agent/
 .zed/
 *.swp
 *.swo
+.windsurfrules
 
 # OS
 .DS_Store
