@@ -49,6 +49,15 @@ func cmdStartProxy(args []string) error {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
+	// ── Auto-create synapses.json if no project marker exists ───────────────
+	// The user explicitly ran "synapses start" in this directory — that is
+	// clear intent to use it as a project root.  Create a minimal config so
+	// the daemon's security check (isValidProjectPath) passes without
+	// requiring a .git directory.
+	if err := ensureProjectMarker(absPath); err != nil {
+		return fmt.Errorf("ensure project marker: %w", err)
+	}
+
 	// ── Ensure singleton daemon is running ───────────────────────────────────
 	if err := ensureSingletonDaemon(absPath); err != nil {
 		return fmt.Errorf("ensure daemon: %w", err)
@@ -282,6 +291,27 @@ func restartSingletonDaemon(absPath string) error {
 	}
 	cleanStaleSingletonPID()
 	return ensureSingletonDaemon(absPath)
+}
+
+// ensureProjectMarker creates a minimal synapses.json in absPath if the
+// directory has no existing project marker (.git or synapses.json).
+// This lets users run "synapses start" in any directory without manually
+// creating config files, while preserving the daemon's security validation.
+func ensureProjectMarker(absPath string) error {
+	// Already a git repo (directory or worktree file)?
+	if info, err := os.Stat(filepath.Join(absPath, ".git")); err == nil {
+		if info.IsDir() || info.Mode().IsRegular() {
+			return nil
+		}
+	}
+	// Already has synapses.json?
+	cfgPath := filepath.Join(absPath, "synapses.json")
+	if info, err := os.Stat(cfgPath); err == nil && info.Mode().IsRegular() {
+		return nil
+	}
+	// Create minimal config.
+	logutil.Info("synapses proxy: creating %s\n", cfgPath)
+	return os.WriteFile(cfgPath, []byte("{}\n"), 0o644)
 }
 
 // parseInt is a convenience wrapper for strconv.Atoi.

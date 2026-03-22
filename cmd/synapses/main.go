@@ -10,6 +10,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -515,6 +516,9 @@ func cmdIndex(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
 	}
+
+	// ── Check for git and offer to initialize ────────────────────────────
+	offerGitInit(absPath)
 
 	cfg, err := config.Load(absPath)
 	if err != nil {
@@ -3595,4 +3599,51 @@ func cmdBenchmark(args []string) error {
 	}
 	fmt.Println(string(b))
 	return nil
+}
+
+// offerGitInit checks whether absPath has a git repository. If not, it
+// prompts the user to initialize one.  This is called during "synapses index"
+// which is always run by a human at a terminal.
+//
+// Git gives synapses 6 features: churn analysis, blame/ownership tracking,
+// commit context, working state diffs, task commit linking, and federation
+// drift detection.  Without git, synapses still works but with reduced
+// intelligence.
+func offerGitInit(absPath string) {
+	// Already has git?
+	dotGit := filepath.Join(absPath, ".git")
+	if info, err := os.Stat(dotGit); err == nil && (info.IsDir() || info.Mode().IsRegular()) {
+		return
+	}
+
+	fmt.Println()
+	fmt.Println("  No git repository detected.")
+	fmt.Println()
+	fmt.Println("  Git enables richer intelligence for synapses:")
+	fmt.Println("    - Churn analysis    (which files change most)")
+	fmt.Println("    - Blame tracking    (who owns what code)")
+	fmt.Println("    - Commit context    (why code was changed)")
+	fmt.Println("    - Working state     (what changed since last commit)")
+	fmt.Println("    - Task tracking     (link tasks to commits)")
+	fmt.Println("    - Drift detection   (detect cross-project breakage)")
+	fmt.Println()
+	fmt.Printf("  Initialize git repository? [Y/n] ")
+
+	reader := bufio.NewReader(os.Stdin)
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(strings.ToLower(answer))
+
+	if answer != "" && answer != "y" && answer != "yes" {
+		fmt.Println("  Skipped. You can run 'git init' later to enable these features.")
+		fmt.Println()
+		return
+	}
+
+	cmd := exec.Command("git", "init", absPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Printf("  git init failed: %v\n  %s\n", err, strings.TrimSpace(string(out)))
+		return
+	}
+	fmt.Printf("  Initialized git repository at %s\n", absPath)
+	fmt.Println()
 }
