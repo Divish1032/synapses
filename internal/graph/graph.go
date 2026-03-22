@@ -847,6 +847,8 @@ func (g *Graph) RemoveFile(file string) {
 	// Clean up per-file variable type annotations so the resolver doesn't
 	// create incorrect CALLS edges for variable names that no longer exist.
 	delete(g.varTypes, file)
+	// Clean up stale stable ID snapshots for renamed/removed files.
+	delete(g.fileStableIDs, file)
 
 	if len(toRemove) > 0 {
 		g.piCache = nil // invalidate ProjectIdentity cache

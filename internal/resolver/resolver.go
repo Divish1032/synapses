@@ -8,6 +8,7 @@ package resolver
 
 import (
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -70,7 +71,12 @@ func ResolveCallEdges(g *graph.Graph) int {
 				}
 				if targetID == "" {
 					if aliases, ok := importMap[site.CallerFile]; ok {
-						for _, importPath := range aliases {
+						sortedPaths := make([]string, 0, len(aliases))
+						for _, p := range aliases {
+							sortedPaths = append(sortedPaths, p)
+						}
+						sort.Strings(sortedPaths)
+						for _, importPath := range sortedPaths {
 							shortPkg := path.Base(importPath)
 							if id := findInPackage(pkgIndex, shortPkg, site.FuncName); id != "" {
 								targetID = id
@@ -94,7 +100,12 @@ func ResolveCallEdges(g *graph.Graph) int {
 			//    the symbol is imported directly (no qualifier) from another module.
 			if targetID == "" {
 				if aliases, ok := importMap[site.CallerFile]; ok {
-					for _, importPath := range aliases {
+					sortedPaths := make([]string, 0, len(aliases))
+					for _, p := range aliases {
+						sortedPaths = append(sortedPaths, p)
+					}
+					sort.Strings(sortedPaths)
+					for _, importPath := range sortedPaths {
 						shortPkg := path.Base(importPath)
 						if id := findInPackage(pkgIndex, shortPkg, site.FuncName); id != "" {
 							targetID = id
