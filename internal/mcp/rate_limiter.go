@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -176,8 +177,24 @@ func newRateLimiter(cfg config.RateLimitConfig) *rateLimiter {
 	return rl
 }
 
+// sharedRESTBuckets is a shared static bucket for all REST "rest-N" sessions,
+// preventing unbounded memory growth from unique REST session IDs.
+var sharedRESTBuckets *sessionBuckets
+var sharedRESTOnce sync.Once
+
 // getOrCreate returns the bucket set for sessionKey, creating it if absent.
+// REST sessions ("rest-N") share a single static bucket to avoid memory leaks.
 func (rl *rateLimiter) getOrCreate(sessionKey string) *sessionBuckets {
+	if strings.HasPrefix(sessionKey, "rest-") {
+		sharedRESTOnce.Do(func() {
+			sharedRESTBuckets = &sessionBuckets{
+				write:         newTokenBucket(rl.writeLimitPerMin),
+				expensiveRead: newTokenBucket(rl.expensiveReadLimitPerMin),
+				crossProject:  newTokenBucket(rl.crossProjectLimitPerMin),
+			}
+		})
+		return sharedRESTBuckets
+	}
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	sb, ok := rl.sessions[sessionKey]
