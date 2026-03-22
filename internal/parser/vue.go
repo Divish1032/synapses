@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"context"
 	"path/filepath"
 	"strings"
 
@@ -50,7 +49,12 @@ func (p *VueParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	// Parse the Vue file with tree-sitter to get the SFC structure.
 	vueParser := sitter.NewParser()
 	vueParser.SetLanguage(p.language)
-	tree, _ := vueParser.ParseString(context.Background(), nil, src)
+	parseCtx, parseCancel := parseContext()
+	defer parseCancel()
+	tree, _ := vueParser.ParseString(parseCtx, nil, src)
+	if tree != nil {
+		defer tree.Close()
+	}
 	root := tree.RootNode()
 
 	// Derive component name from filename (e.g. MyComponent.vue → MyComponent).

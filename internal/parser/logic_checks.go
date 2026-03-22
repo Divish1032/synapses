@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -76,10 +75,13 @@ func runGoLogicChecks(filePath string, src []byte) []LogicWarning {
 	parser := sitter.NewParser()
 	parser.SetLanguage(sitter.NewLanguage(gositter.GetLanguage()))
 
-	tree, err := parser.ParseString(context.Background(), nil, src)
+	parseCtx, parseCancel := parseContext()
+	defer parseCancel()
+	tree, err := parser.ParseString(parseCtx, nil, src)
 	if err != nil || tree == nil {
 		return nil
 	}
+	defer tree.Close()
 	root := tree.RootNode()
 	if root.IsNull() {
 		return nil

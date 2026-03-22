@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"context"
 	"path/filepath"
 	"strings"
 
@@ -81,7 +80,12 @@ func (p *PHPParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
 
-	tree, _ := parser.ParseString(context.Background(), nil, src)
+	parseCtx, parseCancel := parseContext()
+	defer parseCancel()
+	tree, _ := parser.ParseString(parseCtx, nil, src)
+	if tree != nil {
+		defer tree.Close()
+	}
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
