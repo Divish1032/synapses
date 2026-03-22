@@ -721,6 +721,7 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE sessions ADD COLUMN state TEXT NOT NULL DEFAULT 'active'`,
 		`ALTER TABLE sessions ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state, agent_id, project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_branch ON sessions(agent_id, ended_at DESC) WHERE ended_at IS NOT NULL AND last_branch != ''`,
 		// Sprint 6.7: context outcome instrumentation for Sprint 11 feedback loop.
 		`CREATE TABLE IF NOT EXISTS context_deliveries (
 			id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1510,7 +1511,23 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	// BUG-036: chunkedPrune deletes in batches of 1000 rows using a rowid
 	// subquery to avoid holding the SQLite writer lock for unbounded durations.
 	// SQLite doesn't support DELETE ... LIMIT without SQLITE_ENABLE_UPDATE_DELETE_LIMIT.
+	allowedTables := map[string]bool{
+		"tool_calls":     true,
+		"agent_messages": true,
+		"events":         true,
+	}
+	allowedWhere := map[string]bool{
+		"created_at < ?": true,
+	}
 	chunkedPrune := func(table, whereClause string, args ...interface{}) {
+		if !allowedTables[table] {
+			logutil.Debug("synapses: store: chunkedPrune: rejected table %q\n", table)
+			return
+		}
+		if !allowedWhere[whereClause] {
+			logutil.Debug("synapses: store: chunkedPrune: rejected where clause %q\n", whereClause)
+			return
+		}
 		subq := fmt.Sprintf(
 			"DELETE FROM %s WHERE rowid IN (SELECT rowid FROM %s WHERE %s LIMIT 1000)",
 			table, table, whereClause,
