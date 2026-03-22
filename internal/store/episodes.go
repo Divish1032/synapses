@@ -303,7 +303,8 @@ func (s *Store) GetRuleCandidates(minOccurrences int) ([]RuleCandidate, error) {
 		  AND (promoted_rule = '' OR promoted_rule IS NULL)
 		GROUP BY decision
 		HAVING COUNT(*) >= ?
-		ORDER BY occurrences DESC`,
+		ORDER BY occurrences DESC
+		LIMIT 100`,
 		minOccurrences,
 	)
 	if err != nil {
