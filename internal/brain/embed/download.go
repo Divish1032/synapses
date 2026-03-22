@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -37,12 +38,12 @@ func verifyOrLogSHA256(data []byte, expected string, label string, progress io.W
 	actual := sha256.Sum256(data)
 	actualHex := hex.EncodeToString(actual[:])
 	if expected != "" {
-		if actualHex != expected {
+		if subtle.ConstantTimeCompare([]byte(actualHex), []byte(expected)) != 1 {
 			return fmt.Errorf("%s integrity check failed: expected sha256 %s, got %s", label, expected, actualHex)
 		}
 		logProgress(progress, "SHA-256 verified: %s", actualHex[:16])
 	} else {
-		logProgress(progress, "%s sha256 (pin this): %s", label, actualHex)
+		logProgress(progress, "WARNING: %s sha256 not pinned (pin this): %s", label, actualHex)
 	}
 	return nil
 }
@@ -170,12 +171,15 @@ func EnsureEmbedModel(ctx context.Context, opts DownloadOptions, hfRepo, filenam
 		return "", fmt.Errorf("download embedding model: %w", err)
 	}
 
-	// Verify SHA-256 integrity when a pinned hash is available.
-	if tmpData, readErr := os.ReadFile(tmpPath); readErr == nil {
-		if err := verifyOrLogSHA256(tmpData, embedModelSHA256[filename], "embed model", opts.Progress); err != nil {
-			_ = os.Remove(tmpPath)
-			return "", err
-		}
+	// Verify SHA-256 integrity — always read back and check.
+	tmpData, readErr := os.ReadFile(tmpPath)
+	if readErr != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("read downloaded model for verification: %w", readErr)
+	}
+	if err := verifyOrLogSHA256(tmpData, embedModelSHA256[filename], "embed model", opts.Progress); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
 	}
 
 	if err := os.Rename(tmpPath, modelPath); err != nil {

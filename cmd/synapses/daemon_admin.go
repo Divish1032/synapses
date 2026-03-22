@@ -23,7 +23,7 @@ import (
 // reg is the project registry (for reindex).
 func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProject func(string) (*ProjectInstance, error), shutdownFn ...func()) {
 	// shutdownFn is an optional graceful shutdown callback that replaces os.Exit(0).
-	doShutdown := func() { os.Exit(0) } // fallback
+	doShutdown := func() { logutil.Warn("synapses: shutdown requested but no graceful handler registered\n") } // safe fallback — never hard-exit
 	if len(shutdownFn) > 0 && shutdownFn[0] != nil {
 		doShutdown = shutdownFn[0]
 	}
@@ -57,7 +57,6 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 				"name":   "daemon",
 				"port":   11435,
 				"status": "healthy",
-				"pid":    os.Getpid(),
 			},
 		}
 		json.NewEncoder(w).Encode(services) //nolint:errcheck
