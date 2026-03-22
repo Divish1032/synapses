@@ -165,6 +165,20 @@ func (b *BuiltinEmbedder) ensureModel() error {
 	b.onnxPath = repoPath
 
 	modelPath := filepath.Join(b.modelsDir, builtinModelDirName)
+
+	// Check for stale model files from previous variant selections.
+	if modelFile == builtinModelFileQuantized {
+		staleFile := filepath.Join(modelPath, builtinModelFileFP32)
+		if _, statErr := os.Stat(staleFile); statErr == nil {
+			logutil.Info("synapses: stale fp32 model found at %s — safe to delete (not in use)\n", staleFile)
+		}
+	} else if modelFile == builtinModelFileFP32 {
+		staleFile := filepath.Join(modelPath, builtinModelFileQuantized)
+		if _, statErr := os.Stat(staleFile); statErr == nil {
+			logutil.Info("synapses: stale quantized model found at %s — safe to delete (not in use)\n", staleFile)
+		}
+	}
+
 	onnxDisk := filepath.Join(modelPath, modelFile)
 
 	// Check if model already exists.
@@ -528,6 +542,13 @@ func detectAccelerator() string {
 // full-precision fp32 model for higher quality; CPU gets the quantized model
 // for lower memory and faster inference.
 func selectOnnxVariant() (modelFile, onnxRepoPath string) {
+	// Allow GPU users to force fp32 selection even without a pinned hash.
+	// This is an opt-in escape hatch for users who want fp32 at their own risk.
+	if os.Getenv("SYNAPSES_EMBED_FP32") == "1" {
+		logutil.Warn("synapses: SYNAPSES_EMBED_FP32=1 — selecting fp32 model without integrity hash (use at own risk)\n")
+		return builtinModelFileFP32, builtinOnnxFilePathFP32
+	}
+
 	accel := detectAccelerator()
 	switch accel {
 	case "cuda", "rocm", "metal":
