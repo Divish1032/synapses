@@ -300,7 +300,9 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 	mux.HandleFunc("/api/admin/logs", func(w http.ResponseWriter, r *http.Request) {
 		n := 100
 		if v := r.URL.Query().Get("n"); v != "" {
-			fmt.Sscanf(v, "%d", &n) //nolint:errcheck
+			if parsed, err := strconv.Atoi(v); err == nil {
+				n = parsed
+			}
 		}
 		if n <= 0 || n > 10000 {
 			n = 100
