@@ -2124,6 +2124,7 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcps
 	}
 	defer mcpSrv.UnregisterSession(ctx, sessionID)
 	defer synSrv.ClearSessionHashes(sessionID)
+	defer synSrv.ClearSynapseSession(sessionID)
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
