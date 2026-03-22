@@ -121,6 +121,9 @@ func (p *JavaScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 	if tree != nil {
 		defer tree.Close()
 	}
+	if tree == nil {
+		return nil
+	}
 	root := tree.RootNode()
 
 	moduleName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))

@@ -131,6 +131,9 @@ func (p *TypeScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 	if tree != nil {
 		defer tree.Close()
 	}
+	if tree == nil {
+		return nil
+	}
 	root := tree.RootNode()
 
 	// Module name = basename without extension.

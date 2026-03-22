@@ -38,7 +38,12 @@ func (p *GraphQLParser) Parse(g *graph.Graph, filePath string, src []byte) error
 	parseCtx, parseCancel := parseContext()
 	defer parseCancel()
 	tree, _ := parser.ParseString(parseCtx, nil, src)
-	defer tree.Close()
+	if tree != nil {
+		defer tree.Close()
+	}
+	if tree == nil {
+		return nil
+	}
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
