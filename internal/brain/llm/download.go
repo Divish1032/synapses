@@ -11,6 +11,8 @@ package llm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,6 +35,8 @@ type DownloadConfig struct {
 	DestDir string
 	// Progress is an optional writer for progress messages. May be nil.
 	Progress io.Writer
+	// SHA256 is the expected SHA-256 hex digest. If empty, verification is skipped.
+	SHA256 string
 }
 
 // DestPath returns the full local path where the GGUF will be saved.
@@ -126,6 +130,21 @@ func DownloadGGUF(ctx context.Context, cfg DownloadConfig) (string, error) {
 		return "", fmt.Errorf("download: write %q: %w", tmpPath, err)
 	}
 	f.Close()
+
+	// Verify SHA-256 integrity before atomic rename.
+	if hashData, readErr := os.ReadFile(tmpPath); readErr == nil {
+		actual := sha256.Sum256(hashData)
+		actualHex := hex.EncodeToString(actual[:])
+		if cfg.SHA256 != "" {
+			if actualHex != cfg.SHA256 {
+				os.Remove(tmpPath)
+				return "", fmt.Errorf("download: integrity check failed for %s: expected sha256 %s, got %s", cfg.Filename, cfg.SHA256, actualHex)
+			}
+			logf(cfg.Progress, "SHA-256 verified: %s\n", actualHex[:16])
+		} else {
+			logf(cfg.Progress, "GGUF sha256 (pin this): %s\n", actualHex)
+		}
+	}
 
 	// Atomic rename.
 	if err := os.Rename(tmpPath, dest); err != nil {
