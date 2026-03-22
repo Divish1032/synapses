@@ -789,16 +789,16 @@ func cmdDaemonServe(args []string) error {
 			}
 			absPath, err := canonicalPath(req.Path)
 			if err != nil {
-				http.Error(w, "invalid path: "+err.Error(), http.StatusBadRequest)
+				http.Error(w, "invalid path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
 				return
 			}
 			if err := isValidProjectPath(absPath); err != nil {
-				http.Error(w, "invalid project path: "+err.Error(), http.StatusBadRequest)
+				http.Error(w, "invalid project path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
 				return
 			}
 			sockPath, err := daemonSocketPath(absPath)
 			if err != nil {
-				http.Error(w, "socket path error: "+err.Error(), http.StatusInternalServerError)
+				http.Error(w, "socket path error: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusInternalServerError)
 				return
 			}
 			// GetOrSet: lazy-initialize the project if not already registered.
@@ -806,7 +806,7 @@ func cmdDaemonServe(args []string) error {
 				return initProjectInstance(appCtx, absPath, sharedPulse, reg)
 			})
 			if initErr != nil {
-				http.Error(w, "init project: "+initErr.Error(), http.StatusInternalServerError)
+				http.Error(w, "init project: "+mcpsrv.StripInternalPaths(initErr.Error()), http.StatusInternalServerError)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -826,11 +826,11 @@ func cmdDaemonServe(args []string) error {
 			}
 			absPath, err := canonicalPath(req.Path)
 			if err != nil {
-				http.Error(w, "invalid path: "+err.Error(), http.StatusBadRequest)
+				http.Error(w, "invalid path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
 				return
 			}
 			if err := isValidProjectPath(absPath); err != nil {
-				http.Error(w, "invalid project path: "+err.Error(), http.StatusBadRequest)
+				http.Error(w, "invalid project path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
 				return
 			}
 			reg.Delete(absPath)
@@ -1219,11 +1219,11 @@ func cmdDaemonServe(args []string) error {
 
 		absPath, err := canonicalPath(projectPath)
 		if err != nil {
-			http.Error(w, "invalid project path: "+err.Error(), http.StatusBadRequest)
+			http.Error(w, "invalid project path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
 			return
 		}
 		if err := isValidProjectPath(absPath); err != nil {
-			http.Error(w, "invalid project path: "+err.Error(), http.StatusBadRequest)
+			http.Error(w, "invalid project path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
 			return
 		}
 
@@ -1231,7 +1231,7 @@ func cmdDaemonServe(args []string) error {
 			return initProjectInstance(appCtx, absPath, sharedPulse, reg)
 		})
 		if initErr != nil {
-			http.Error(w, "init project: "+initErr.Error(), http.StatusInternalServerError)
+			http.Error(w, "init project: "+mcpsrv.StripInternalPaths(initErr.Error()), http.StatusInternalServerError)
 			return
 		}
 
