@@ -42,6 +42,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -73,6 +74,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 	"github.com/SynapsesOS/synapses/internal/webcache"
+	"github.com/SynapsesOS/synapses/web"
 )
 
 // DaemonHTTPPort is the fixed port for the singleton daemon HTTP server.
@@ -282,7 +284,7 @@ func isValidProjectPath(absPath string) error {
 // Non-browser clients (curl, MCP stdio proxy) send no Origin header and are
 // unaffected by CORS headers entirely.
 func isCORSAllowedOrigin(origin string) bool {
-	if origin == "tauri://localhost" {
+	if origin == "tauri://localhost" || origin == "https://tauri.localhost" {
 		return true
 	}
 	for _, prefix := range []string{
@@ -294,6 +296,114 @@ func isCORSAllowedOrigin(origin string) bool {
 		}
 	}
 	return false
+}
+
+// ── Security middleware (Phase -1) ───────────────────────────────────────────
+
+// hostGuard blocks DNS rebinding attacks by validating the Host header.
+// Only requests to 127.0.0.1, localhost, or ::1 are allowed.
+// This is the same mitigation used by Jupyter Notebook, webpack-dev-server,
+// and Chrome DevTools after their DNS rebinding CVEs.
+func hostGuard(next http.Handler) http.Handler {
+	allowed := map[string]bool{
+		"127.0.0.1": true, "localhost": true, "::1": true,
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		if !allowed[host] {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// trustedOrigins is the set of origins allowed to perform mutations.
+// Non-browser clients (curl, Go HTTP) send no Origin header and are always allowed.
+// Browsers ALWAYS send Origin on cross-origin POST/PUT/DELETE.
+var trustedOrigins = map[string]bool{
+	"http://127.0.0.1:11435":  true,
+	"http://localhost:11435":   true,
+	"tauri://localhost":        true,
+	"https://tauri.localhost":  true,
+}
+
+// mutationGuard blocks CSRF by validating Origin and CSRF token on mutations.
+// GET/HEAD/OPTIONS are always allowed (read-only).
+// For POST/PUT/DELETE: Origin must be trusted (or absent), AND a valid
+// X-CSRF-Token header must be present.
+func mutationGuard(csrfToken string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" || r.Method == "HEAD" || r.Method == "OPTIONS" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Check Origin header (present on cross-origin requests from browsers).
+		origin := r.Header.Get("Origin")
+		if origin != "" && !trustedOrigins[origin] {
+			http.Error(w, "Forbidden: untrusted origin", http.StatusForbidden)
+			return
+		}
+		// CSRF token check: require X-CSRF-Token on all mutations.
+		// Exempt: /mcp (MCP protocol uses its own session management),
+		//         /v1/tools/ (REST tool API used by non-browser clients).
+		if !strings.HasPrefix(r.URL.Path, "/mcp") && !strings.HasPrefix(r.URL.Path, "/v1/tools/") {
+			provided := r.Header.Get("X-CSRF-Token")
+			if csrfToken == "" || provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(csrfToken)) != 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]string{"error": "missing or invalid CSRF token"}) //nolint:errcheck
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// generateCSRFToken creates a random 32-byte hex-encoded CSRF token.
+func generateCSRFToken() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", b), nil
+}
+
+// setSecurityHeaders adds CSP and other security headers to responses.
+func setSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy", strings.Join([]string{
+		"default-src 'self'",
+		"script-src 'self'",
+		"style-src 'self' 'unsafe-inline'",
+		"connect-src 'self'",
+		"img-src 'self' data:",
+		"frame-ancestors 'none'",
+	}, "; "))
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+}
+
+// spaHandler serves static files from root and falls back to index.html for
+// client-side routing (SPA pattern). If the requested path matches a file in
+// the embedded FS, it's served directly. Otherwise index.html is served.
+func spaHandler(root http.FileSystem) http.Handler {
+	fileServer := http.FileServer(root)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		// Try to open the file. If it exists, serve it.
+		f, err := root.Open(path)
+		if err == nil {
+			f.Close()
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		// File not found — serve index.html for SPA routing.
+		r.URL.Path = "/"
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 // restToolsHandler returns the HTTP handler for POST /v1/tools/{name}?project=<path>.
@@ -1057,6 +1167,32 @@ func cmdDaemonServe(args []string) error {
 		return initProjectInstance(appCtx, absPath, sharedPulse, reg)
 	}))
 
+	// ── Phase 0: Admin management endpoints (web console) ────────────────────
+	registerAdminEndpoints(mux, reg, func(absPath string) (*ProjectInstance, error) {
+		return initProjectInstance(appCtx, absPath, sharedPulse, reg)
+	})
+
+	// ── Serve web console at root ────────────────────────────────────────────
+	// Lookup order (Gitea/MinIO pattern):
+	//   1. ~/.synapses/console/  — disk override for hotfixes & dev
+	//   2. //go:embed             — production default baked into binary
+	//
+	// SPA fallback: if the path doesn't match an existing file in dist/,
+	// serve index.html so client-side routing works.
+	var consoleFS http.FileSystem
+	if home, err := synapsesHome(); err == nil {
+		overridePath := filepath.Join(home, "console")
+		if info, statErr := os.Stat(filepath.Join(overridePath, "index.html")); statErr == nil && !info.IsDir() {
+			consoleFS = http.Dir(overridePath)
+			logutil.Info("synapses: serving web console from disk override: %s\n", overridePath)
+		}
+	}
+	if consoleFS == nil {
+		consoleDist, _ := fs.Sub(web.ConsoleFS, "console/dist")
+		consoleFS = http.FS(consoleDist)
+	}
+	mux.Handle("/", spaHandler(consoleFS))
+
 	// ── Auth token ────────────────────────────────────────────────────────────
 	// Generated on first start, persisted at ~/.synapses/auth_token.
 	// Required only for non-localhost connections; localhost is always trusted.
@@ -1071,32 +1207,42 @@ func cmdDaemonServe(args []string) error {
 		logutil.Info("synapses: auth token stored at %s\n", tokenPath)
 	}
 
+	// ── CSRF token (per-daemon-session, in-memory only) ──────────────────────
+	csrfToken, csrfErr := generateCSRFToken()
+	if csrfErr != nil {
+		logutil.Warn("synapses: could not generate CSRF token: %v\n", csrfErr)
+		csrfToken = "" // mutationGuard will reject all mutations if token is empty (fail-closed)
+	}
+
+	// CSRF token endpoint — fetched once by the web console on load.
+	mux.HandleFunc("/api/admin/csrf-token", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"token": csrfToken}) //nolint:errcheck
+	})
+
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	// Layer order (outermost → innermost):
 	//
-	//   finalHandler (CORS headers + OPTIONS)
-	//     └─ authProtected (authMiddleware → mux)
+	//   hostGuard → finalHandler (CORS + CSP + OPTIONS + write deadline)
+	//     └─ mutationGuard (Origin + CSRF on POST/PUT/DELETE)
+	//       └─ authMiddleware → mux
 	//
-	// CORS headers are set BEFORE the auth check runs.  This guarantees that
-	// 401 rejections carry the Access-Control-Allow-* headers a browser needs
-	// to surface the auth error; without this ordering, auth failures look like
-	// opaque CORS errors to the caller.
+	// CORS headers are set BEFORE auth/mutation checks run. This guarantees
+	// that rejection responses carry the Access-Control-Allow-* headers a
+	// browser needs to surface the real error rather than an opaque CORS error.
 	authProtected := authMiddleware(authToken, mux)
+	mutProtected := mutationGuard(csrfToken, authProtected)
 	finalHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Security headers on all responses (CSP, X-Frame-Options, nosniff).
+		setSecurityHeaders(w)
+
 		// CORS: reflect origin only for known-safe origins (explicit allowlist).
 		// Wildcard (*) is intentionally not used — see isCORSAllowedOrigin.
-		//
-		// Layer order: CORS headers set here (outermost) so that 401 rejections
-		// from authMiddleware carry the correct ACAO header, letting browsers
-		// surface the auth error rather than an opaque CORS error.
-		//
-		// Non-browser clients (curl, MCP stdio proxy) send no Origin header;
-		// they bypass this block entirely and are unaffected.
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if isCORSAllowedOrigin(origin) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token")
 				w.Header().Set("Vary", "Origin")
 			}
 			// Disallowed origin: no CORS headers set → browser blocks the request.
@@ -1111,15 +1257,16 @@ func cmdDaemonServe(args []string) error {
 		// WriteTimeout is 0 (required for SSE/MCP streams), so we set a 60s
 		// deadline on regular REST/admin endpoints to prevent slow-client
 		// resource exhaustion.
-		if !strings.HasPrefix(r.URL.Path, "/mcp") {
+		if !strings.HasPrefix(r.URL.Path, "/mcp") && !strings.HasPrefix(r.URL.Path, "/api/admin/pulse/stream") && !strings.HasPrefix(r.URL.Path, "/api/admin/ollama/pull") {
 			rc := http.NewResponseController(w)
 			_ = rc.SetWriteDeadline(time.Now().Add(60 * time.Second))
 		}
-		authProtected.ServeHTTP(w, r)
+		mutProtected.ServeHTTP(w, r)
 	})
+	secureHandler := hostGuard(finalHandler)
 	httpSrv := &http.Server{
 		Addr:         DaemonHTTPAddr,
-		Handler:      finalHandler,
+		Handler:      secureHandler,
 		ReadTimeout:  60 * time.Second,
 		WriteTimeout: 0, // SSE streams can be indefinite
 		IdleTimeout:  120 * time.Second,
