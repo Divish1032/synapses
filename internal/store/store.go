@@ -612,7 +612,7 @@ func Open(path string) (*Store, error) {
 	// "duplicate column name" errors are safe to ignore — they mean the column
 	// was already created by CREATE TABLE (fresh DB) or a previous migration run.
 	// Wrapped in a transaction to prevent partially-migrated state on crash.
-	graphTx, err := graphDB.Begin()
+	graphTx, err := graphDB.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		graphDB.Close()
 		knowledgeDB.Close()
@@ -640,7 +640,7 @@ func Open(path string) (*Store, error) {
 	}
 
 	// ── Knowledge migrations ─────────────────────────────────────────────
-	knowledgeTx, _ := knowledgeDB.Begin()
+	knowledgeTx, _ := knowledgeDB.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
 	for _, m := range []string{
 		`ALTER TABLE plans ADD COLUMN created_by TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE plans ADD COLUMN completed_at INTEGER NOT NULL DEFAULT 0`,
@@ -1310,6 +1310,8 @@ func (s *Store) likeSearch(query string, limit int) ([]SearchResult, error) {
 		args = append(args, pat, pat)
 	}
 	args = append(args, limit)
+	// Safety: conds are built from hardcoded templates with parameterized values.
+	// No user input enters the SQL structure — only the LIKE pattern args use ?.
 	rows, err := s.graphDB.Query(fmt.Sprintf(`
         SELECT id, name, signature, doc
         FROM nodes

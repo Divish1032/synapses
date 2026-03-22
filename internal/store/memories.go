@@ -347,11 +347,11 @@ func (s *Store) GetLatestWorkSummary(agentID string) (*Memory, error) {
 		FROM memories
 		WHERE tier = 'session_log'
 		  AND agent_id = ?
-		  AND tags LIKE '%"work_summary"%'
+		  AND tags LIKE ? ESCAPE '\'
 		  AND stale = 0
 		  AND expires_at > ?
 		ORDER BY created_at DESC
-		LIMIT 1`, agentID, now)
+		LIMIT 1`, agentID, "%"+escapeLike("work_summary")+"%", now)
 
 	var m Memory
 	err := row.Scan(
@@ -475,6 +475,10 @@ func (s *Store) ExpireMemories() (int64, error) {
 
 	// Emit lifecycle events for all deleted memories (Sprint 10.3).
 	// Non-fatal: event failure does not roll back the deletion.
+	// Trade-off: events are emitted after tx.Commit() because AppendEvent
+	// acquires its own transaction on knowledgeDB. Moving events inside the
+	// expire transaction would require AppendEvent to accept an external tx.
+	// Consequence: on crash between commit and emission, events may be lost.
 	for _, e := range expiring {
 		if evErr := s.AppendEvent("knowledge_expired", e.agentID,
 			fmt.Sprintf(`{"memory_id":%q}`, e.id)); evErr != nil {

@@ -573,5 +573,7 @@ func (s *Store) PruneOldSessions(age time.Duration) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Clean up orphaned session_tasks — no FOREIGN KEY CASCADE exists on this table.
+	_, _ = s.knowledgeDB.Exec(`DELETE FROM session_tasks WHERE session_id NOT IN (SELECT id FROM sessions)`)
 	return res.RowsAffected()
 }
