@@ -107,7 +107,12 @@ func (bd *BrainDetector) DetectDeps(ctx context.Context, fileContent string, max
 	}
 	code := secrets.FilterLines(fileContent)
 	if len(code) > maxCodeLen {
-		code = code[:maxCodeLen]
+		// Truncate at rune boundary to avoid producing invalid UTF-8.
+		runes := []rune(code)
+		if len(runes) > maxCodeLen {
+			runes = runes[:maxCodeLen]
+		}
+		code = string(runes)
 	}
 
 	// Escape any closing delimiter in the code to prevent breakout.
