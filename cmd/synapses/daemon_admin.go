@@ -287,7 +287,12 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		client := &http.Client{Timeout: 3 * time.Second}
+		client := &http.Client{
+			Timeout: 3 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse // prevent SSRF via redirect
+			},
+		}
 		result := map[string]interface{}{"running": false}
 
 		// Check version
@@ -357,7 +362,12 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 		}
 
 		bodyJSON, _ := json.Marshal(map[string]interface{}{"model": req.Model, "stream": true})
-		ollamaClient := &http.Client{Timeout: 30 * time.Minute}
+		ollamaClient := &http.Client{
+			Timeout: 30 * time.Minute,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse // prevent SSRF via redirect
+			},
+		}
 		resp, err := ollamaClient.Post(ollamaURL+"/api/pull", "application/json", strings.NewReader(string(bodyJSON)))
 		if err != nil {
 			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]interface{}{"error": err.Error()}))
