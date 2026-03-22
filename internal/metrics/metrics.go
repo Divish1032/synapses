@@ -440,7 +440,9 @@ func EnrichPprof(g *graph.Graph, repoRoot, profilePath string) {
 // parsePprofTop runs "go tool pprof -top -nodecount=100000 <profile>" and
 // returns a map of raw pprof function name → flat CPU percentage.
 func parsePprofTop(profilePath string) (map[string]float64, error) {
-	out, err := exec.Command(
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx,
 		"go", "tool", "pprof", "-top", "-nodecount=100000", profilePath,
 	).Output()
 	if err != nil {
