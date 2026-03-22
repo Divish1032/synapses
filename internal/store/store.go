@@ -1573,17 +1573,36 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	// the knowledgeDB tables (small set) and checks them against graphDB, avoiding
 	// loading the entire graph node table into memory.
 	if s.graphDB != nil {
-		// nodeExistsInGraph checks a single node_id against graphDB.
-		// Cached per-prune-cycle so repeated references are O(1) after first check.
-		existsCache := make(map[string]bool)
-		nodeExistsInGraph := func(nodeID string) bool {
-			if cached, ok := existsCache[nodeID]; ok {
-				return cached
+		// batchNodeExistsForPrune checks node IDs in batches of 500 using
+		// WHERE id IN (...), avoiding O(N) individual round-trips.
+		batchNodeExistsForPrune := func(nodeIDs []string) map[string]bool {
+			exists := make(map[string]bool, len(nodeIDs))
+			const batchSize = 500
+			for i := 0; i < len(nodeIDs); i += batchSize {
+				end := i + batchSize
+				if end > len(nodeIDs) {
+					end = len(nodeIDs)
+				}
+				chunk := nodeIDs[i:end]
+				placeholders := make([]string, len(chunk))
+				args := make([]any, len(chunk))
+				for j, id := range chunk {
+					placeholders[j] = "?"
+					args[j] = id
+				}
+				query := fmt.Sprintf("SELECT id FROM nodes WHERE id IN (%s)", strings.Join(placeholders, ","))
+				rows, err := s.graphDB.Query(query, args...)
+				if err != nil {
+					continue
+				}
+				for rows.Next() {
+					var id string
+					if rows.Scan(&id) == nil {
+						exists[id] = true
+					}
+				}
+				rows.Close()
 			}
-			var dummy int
-			err := s.graphDB.QueryRow(`SELECT 1 FROM nodes WHERE id = ? LIMIT 1`, nodeID).Scan(&dummy)
-			exists := err == nil
-			existsCache[nodeID] = exists
 			return exists
 		}
 
@@ -1596,35 +1615,47 @@ func (s *Store) PruneStaleData(retentionDays int) {
 		if hasNodes {
 			// Delete stale annotations whose node no longer exists in the graph.
 			if annRows, err := s.knowledgeDB.Query(`SELECT id, node_id FROM annotations WHERE stale=1`); err == nil {
-				var toDelete []string
+				type annEntry struct{ id, nodeID string }
+				var anns []annEntry
+				var annNodeIDs []string
 				for annRows.Next() {
-					var annID, nodeID string
-					if annRows.Scan(&annID, &nodeID) == nil {
-						if !nodeExistsInGraph(nodeID) {
-							toDelete = append(toDelete, annID)
-						}
+					var a annEntry
+					if annRows.Scan(&a.id, &a.nodeID) == nil {
+						anns = append(anns, a)
+						annNodeIDs = append(annNodeIDs, a.nodeID)
 					}
 				}
 				annRows.Close()
-				for _, id := range toDelete {
-					pruneExec(`DELETE FROM annotations WHERE id = ?`, id)
+				if len(annNodeIDs) > 0 {
+					existingAnnNodes := batchNodeExistsForPrune(annNodeIDs)
+					for _, a := range anns {
+						if !existingAnnNodes[a.nodeID] {
+							pruneExec(`DELETE FROM annotations WHERE id = ?`, a.id)
+						}
+					}
 				}
 			}
 
 			// Delete quality gaps whose node no longer exists in the graph.
 			if gapRows, err := s.knowledgeDB.Query(`SELECT id, node_id FROM quality_gaps WHERE status = 'open'`); err == nil {
-				var toDelete []string
+				type gapEntry struct{ id, nodeID string }
+				var gaps []gapEntry
+				var gapNodeIDs []string
 				for gapRows.Next() {
-					var gapID, nodeID string
-					if gapRows.Scan(&gapID, &nodeID) == nil {
-						if !nodeExistsInGraph(nodeID) {
-							toDelete = append(toDelete, gapID)
-						}
+					var g gapEntry
+					if gapRows.Scan(&g.id, &g.nodeID) == nil {
+						gaps = append(gaps, g)
+						gapNodeIDs = append(gapNodeIDs, g.nodeID)
 					}
 				}
 				gapRows.Close()
-				for _, id := range toDelete {
-					pruneExec(`DELETE FROM quality_gaps WHERE id = ?`, id)
+				if len(gapNodeIDs) > 0 {
+					existingGapNodes := batchNodeExistsForPrune(gapNodeIDs)
+					for _, g := range gaps {
+						if !existingGapNodes[g.nodeID] {
+							pruneExec(`DELETE FROM quality_gaps WHERE id = ?`, g.id)
+						}
+					}
 				}
 			}
 		}
@@ -1657,17 +1688,37 @@ func (s *Store) reconcileOrphanedReferences() {
 		return
 	}
 
-	// Cache node existence checks to avoid repeated graphDB round-trips for
-	// the same node_id referenced by multiple knowledge tables.
-	existsCache := make(map[string]bool)
-	nodeExistsInGraph := func(nodeID string) bool {
-		if cached, ok := existsCache[nodeID]; ok {
-			return cached
+	// batchNodeExists checks a batch of node IDs against graphDB in chunks
+	// of 500 using WHERE id IN (...), returning the set of IDs that DO exist.
+	// This avoids O(N) individual round-trips at startup.
+	batchNodeExists := func(nodeIDs []string) map[string]bool {
+		exists := make(map[string]bool, len(nodeIDs))
+		const batchSize = 500
+		for i := 0; i < len(nodeIDs); i += batchSize {
+			end := i + batchSize
+			if end > len(nodeIDs) {
+				end = len(nodeIDs)
+			}
+			chunk := nodeIDs[i:end]
+			placeholders := make([]string, len(chunk))
+			args := make([]any, len(chunk))
+			for j, id := range chunk {
+				placeholders[j] = "?"
+				args[j] = id
+			}
+			query := fmt.Sprintf("SELECT id FROM nodes WHERE id IN (%s)", strings.Join(placeholders, ","))
+			rows, err := s.graphDB.Query(query, args...)
+			if err != nil {
+				continue
+			}
+			for rows.Next() {
+				var id string
+				if rows.Scan(&id) == nil {
+					exists[id] = true
+				}
+			}
+			rows.Close()
 		}
-		var dummy int
-		err := s.graphDB.QueryRow(`SELECT 1 FROM nodes WHERE id = ? LIMIT 1`, nodeID).Scan(&dummy)
-		exists := err == nil
-		existsCache[nodeID] = exists
 		return exists
 	}
 
@@ -1682,18 +1733,28 @@ func (s *Store) reconcileOrphanedReferences() {
 		if err != nil {
 			return 0
 		}
-		var staleNodeIDs []string
+		var allNodeIDs []string
 		for r.Next() {
 			var nodeID string
 			if r.Scan(&nodeID) == nil {
-				if !nodeExistsInGraph(nodeID) {
-					staleNodeIDs = append(staleNodeIDs, nodeID)
-				}
+				allNodeIDs = append(allNodeIDs, nodeID)
 			}
 		}
 		r.Close()
+
+		if len(allNodeIDs) == 0 {
+			return 0
+		}
+
+		existingNodes := batchNodeExists(allNodeIDs)
+		var staleNodeIDs []string
+		for _, nid := range allNodeIDs {
+			if !existingNodes[nid] {
+				staleNodeIDs = append(staleNodeIDs, nid)
+			}
+		}
 		for _, nid := range staleNodeIDs {
-			s.knowledgeDB.Exec(deleteSQL, nid)
+			s.knowledgeDB.Exec(deleteSQL, nid) //nolint:errcheck
 		}
 		return len(staleNodeIDs)
 	}
@@ -1706,20 +1767,26 @@ func (s *Store) reconcileOrphanedReferences() {
 
 	// quality_gaps: only clean up open gaps referencing absent nodes.
 	if qr, err := s.knowledgeDB.Query(`SELECT id, node_id FROM quality_gaps WHERE status = 'open'`); err == nil {
-		var toDelete []string
+		type gapEntry struct{ id, nodeID string }
+		var gaps []gapEntry
+		var gapNodeIDs []string
 		for qr.Next() {
-			var id, nodeID string
-			if qr.Scan(&id, &nodeID) == nil {
-				if !nodeExistsInGraph(nodeID) {
-					toDelete = append(toDelete, id)
-				}
+			var g gapEntry
+			if qr.Scan(&g.id, &g.nodeID) == nil {
+				gaps = append(gaps, g)
+				gapNodeIDs = append(gapNodeIDs, g.nodeID)
 			}
 		}
 		qr.Close()
-		for _, id := range toDelete {
-			s.knowledgeDB.Exec(`DELETE FROM quality_gaps WHERE id = ?`, id)
+		if len(gapNodeIDs) > 0 {
+			existingGapNodes := batchNodeExists(gapNodeIDs)
+			for _, g := range gaps {
+				if !existingGapNodes[g.nodeID] {
+					s.knowledgeDB.Exec(`DELETE FROM quality_gaps WHERE id = ?`, g.id) //nolint:errcheck
+					removed++
+				}
+			}
 		}
-		removed += len(toDelete)
 	}
 
 	if removed > 0 {

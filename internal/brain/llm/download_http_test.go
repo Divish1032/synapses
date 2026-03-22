@@ -2,6 +2,8 @@ package llm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -107,12 +109,17 @@ func TestDownloadGGUF_HTTPSuccess_DownloadsFile(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// Compute the SHA-256 of the test content for verification.
+	h := sha256.Sum256(fileContent)
+	expectedHash := hex.EncodeToString(h[:])
+
 	dir := t.TempDir()
 	filename := "model.gguf"
 	cfg := DownloadConfig{
 		Repo:     "owner/repo",
 		Filename: filename,
 		DestDir:  dir,
+		SHA256:   expectedHash,
 	}
 
 	withHijackedHTTP(t, srv, func() {
@@ -143,6 +150,10 @@ func TestDownloadGGUF_CreatesDestDir(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// Compute the SHA-256 of the test content for verification.
+	h := sha256.Sum256(fileContent)
+	expectedHash := hex.EncodeToString(h[:])
+
 	// Use a deeply nested directory that doesn't exist yet.
 	base := t.TempDir()
 	dir := filepath.Join(base, "a", "b", "c", "models")
@@ -150,6 +161,7 @@ func TestDownloadGGUF_CreatesDestDir(t *testing.T) {
 		Repo:     "owner/repo",
 		Filename: "model.gguf",
 		DestDir:  dir,
+		SHA256:   expectedHash,
 	}
 
 	withHijackedHTTP(t, srv, func() {

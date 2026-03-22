@@ -149,8 +149,6 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		}
 	}
 
-	var edgesInSubgraph []*Edge
-
 	for len(queue) > 0 {
 		curr := queue[0]
 		queue = queue[1:]
@@ -215,9 +213,8 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 				}
 			}
 
-			// Collect the edge if both endpoints are in our visited set
-			// (we will filter again after budget pruning).
-			edgesInSubgraph = append(edgesInSubgraph, e)
+			// Edge collection deferred to after budget pruning to prevent
+			// unbounded memory on hub nodes with 50K+ edges.
 		}
 	}
 
@@ -317,21 +314,25 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		})
 	}
 
-	// Include only edges where both endpoints survived the budget cut.
+	// Collect edges where both endpoints survived the budget cut.
+	// Deferred to after pruning to avoid unbounded memory on hub nodes
+	// with 50K+ edges — only edges between kept nodes are allocated.
 	seen := make(map[[2]NodeID]struct{})
 	var outEdges []*Edge
-	for _, e := range edgesInSubgraph {
-		_, fromOK := keep[e.From]
-		_, toOK := keep[e.To]
-		if !fromOK || !toOK {
-			continue
+	for id := range keep {
+		for _, e := range g.outInEdges(id, idx) {
+			_, fromOK := keep[e.From]
+			_, toOK := keep[e.To]
+			if !fromOK || !toOK {
+				continue
+			}
+			key := [2]NodeID{e.From, e.To}
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			outEdges = append(outEdges, e)
 		}
-		key := [2]NodeID{e.From, e.To}
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		outEdges = append(outEdges, e)
 	}
 
 	result := &SubGraph{

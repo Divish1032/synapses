@@ -36,7 +36,7 @@ type DownloadConfig struct {
 	DestDir string
 	// Progress is an optional writer for progress messages. May be nil.
 	Progress io.Writer
-	// SHA256 is the expected SHA-256 hex digest. If empty, verification is skipped.
+	// SHA256 is the expected SHA-256 hex digest. Required: download fails if empty.
 	SHA256 string
 }
 
@@ -154,7 +154,10 @@ func DownloadGGUF(ctx context.Context, cfg DownloadConfig) (string, error) {
 		}
 		logf(cfg.Progress, "SHA-256 verified: %s\n", actualHex[:16])
 	} else {
-		logf(cfg.Progress, "WARNING: GGUF sha256 not pinned (pin this): %s\n", actualHex)
+		// Fail closed: refuse to use an unverified download. Log the actual hash
+		// so an operator can pin it in the config, then remove the temp file.
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download: integrity check failed for %s: no expected sha256 hash configured (actual: %s) — pin this hash before shipping", cfg.Filename, actualHex)
 	}
 
 	// Atomic rename.

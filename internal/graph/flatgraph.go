@@ -2,8 +2,10 @@ package graph
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // Pool is the global instance of the StringPool accessed by FlatGraph.
@@ -126,13 +128,22 @@ func (fg *FlatGraph) AddNode(name StringID, nodeType NodeType, fileID StringID, 
 	return idx
 }
 
+// addEdgeSeqCount tracks sequential AddEdge calls for misuse detection.
+// Reset by BulkAddEdges. Warning logged once after 10 sequential calls.
+var addEdgeSeqCount atomic.Int32
+var addEdgeWarned atomic.Int32
+
 // AddEdge inserts a directed edge.
-// WARNING: O(E) due to offset shifting — do NOT call in a hot loop.
+//
+// Deprecated: O(E) due to offset shifting — do NOT call in a hot loop.
 // Use BulkAddEdges for batch insertion; it rebuilds CSR arrays from scratch in O(N+E).
-// For Synapses FlatGraph, incremental edge addition appends to the slice and shifts offsets.
 func (fg *FlatGraph) AddEdge(from, to NodeIndex, weight float32) {
 	fg.mu.Lock()
 	defer fg.mu.Unlock()
+
+	if n := addEdgeSeqCount.Add(1); n > 10 && addEdgeWarned.CompareAndSwap(0, 1) {
+		log.Printf("flatgraph: AddEdge called %d+ times sequentially — use BulkAddEdges for O(N+E) batch insertion", n)
+	}
 
 	if int(from) >= len(fg.Names) || int(to) >= len(fg.Names) {
 		return // Out of bounds safety
@@ -182,6 +193,10 @@ type BulkEdge struct {
 func (fg *FlatGraph) BulkAddEdges(edges []BulkEdge) {
 	fg.mu.Lock()
 	defer fg.mu.Unlock()
+
+	// Reset sequential AddEdge counter — bulk path is the correct usage.
+	addEdgeSeqCount.Store(0)
+	addEdgeWarned.Store(0)
 
 	N := len(fg.Names)
 	if N == 0 {

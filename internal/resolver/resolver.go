@@ -27,8 +27,9 @@ func ResolveCallEdges(g *graph.Graph) int {
 	}
 
 	// Build lookup tables once.
-	importMap := buildImportMap(g)   // absFilePath → {alias → importPath}
-	pkgIndex := buildPackageIndex(g) // shortPkgName → []*Node
+	importMap := buildImportMap(g)       // absFilePath → {alias → importPath}
+	pkgIndex := buildPackageIndex(g)     // shortPkgName → []*Node
+	methodIndex := buildMethodIndex(pkgIndex) // "TypeName.MethodName" → NodeID
 
 	// Track edges added in this batch. Existing edges checked via g.HasEdge.
 	type edgeKey struct{ from, to graph.NodeID }
@@ -57,7 +58,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 			if targetID == "" {
 				varTypes := g.GetVarTypes(site.CallerFile)
 				if typeName, hasType := varTypes[site.PkgAlias]; hasType {
-					targetID = findByTypedMethod(pkgIndex, typeName, site.FuncName)
+					targetID = findByTypedMethod(methodIndex, typeName, site.FuncName)
 				}
 			}
 
@@ -190,17 +191,23 @@ func findInPackage(idx map[string][]*graph.Node, pkg, name string) graph.NodeID 
 	return ""
 }
 
-// findByTypedMethod searches all packages for a method matching "TypeName.MethodName".
-// Used for Python/Java var type resolution: when obj is known to be type T,
-// resolve obj.method() as T.method across the full package index.
-func findByTypedMethod(idx map[string][]*graph.Node, typeName, methodName string) graph.NodeID {
-	qualified := typeName + "." + methodName
-	for _, nodes := range idx {
+// buildMethodIndex builds a flat "TypeName.MethodName" → NodeID map from the
+// package index, enabling O(1) typed method resolution instead of O(N) full scan.
+func buildMethodIndex(pkgIndex map[string][]*graph.Node) map[string]graph.NodeID {
+	result := make(map[string]graph.NodeID)
+	for _, nodes := range pkgIndex {
 		for _, n := range nodes {
-			if n.Name == qualified {
-				return n.ID
+			// Only index names that look like qualified methods (contain a dot).
+			if strings.Contains(n.Name, ".") {
+				result[n.Name] = n.ID
 			}
 		}
 	}
-	return ""
+	return result
+}
+
+// findByTypedMethod looks up a "TypeName.MethodName" in the pre-built method index.
+// O(1) per call instead of O(N) full scan.
+func findByTypedMethod(methodIndex map[string]graph.NodeID, typeName, methodName string) graph.NodeID {
+	return methodIndex[typeName+"."+methodName]
 }

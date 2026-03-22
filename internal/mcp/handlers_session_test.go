@@ -387,7 +387,7 @@ func TestHandleSessionInit_EmbeddingsField_AlwaysPresent(t *testing.T) {
 	res2, err2 := s2.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "test2"}))
 	m2 := mustResult(t, res2, err2)
 	hasKey(t, m2, "embeddings")
-	if v := m2["embeddings"]; v != "builtin (ready)" && v != "builtin (model not yet downloaded)" {
+	if v := m2["embeddings"]; v != "builtin (ready)" && v != "builtin (model not yet downloaded)" && v != "builtin (unavailable)" {
 		t.Errorf("unexpected embeddings value for builtin: %v", v)
 	}
 }
