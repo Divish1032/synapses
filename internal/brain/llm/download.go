@@ -12,6 +12,7 @@ package llm
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -131,19 +132,22 @@ func DownloadGGUF(ctx context.Context, cfg DownloadConfig) (string, error) {
 	}
 	f.Close()
 
-	// Verify SHA-256 integrity before atomic rename.
-	if hashData, readErr := os.ReadFile(tmpPath); readErr == nil {
-		actual := sha256.Sum256(hashData)
-		actualHex := hex.EncodeToString(actual[:])
-		if cfg.SHA256 != "" {
-			if actualHex != cfg.SHA256 {
-				os.Remove(tmpPath)
-				return "", fmt.Errorf("download: integrity check failed for %s: expected sha256 %s, got %s", cfg.Filename, cfg.SHA256, actualHex)
-			}
-			logf(cfg.Progress, "SHA-256 verified: %s\n", actualHex[:16])
-		} else {
-			logf(cfg.Progress, "GGUF sha256 (pin this): %s\n", actualHex)
+	// Verify SHA-256 integrity before atomic rename — always read back the file.
+	hashData, readErr := os.ReadFile(tmpPath)
+	if readErr != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download: read downloaded file for verification: %w", readErr)
+	}
+	actual := sha256.Sum256(hashData)
+	actualHex := hex.EncodeToString(actual[:])
+	if cfg.SHA256 != "" {
+		if subtle.ConstantTimeCompare([]byte(actualHex), []byte(cfg.SHA256)) != 1 {
+			os.Remove(tmpPath)
+			return "", fmt.Errorf("download: integrity check failed for %s: expected sha256 %s, got %s", cfg.Filename, cfg.SHA256, actualHex)
 		}
+		logf(cfg.Progress, "SHA-256 verified: %s\n", actualHex[:16])
+	} else {
+		logf(cfg.Progress, "WARNING: GGUF sha256 not pinned (pin this): %s\n", actualHex)
 	}
 
 	// Atomic rename.

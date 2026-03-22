@@ -350,7 +350,14 @@ func (s *Store) normalizeStoredEmbeddings() {
 		return
 	}
 
+	// allowedTables prevents SQL injection via table/column name interpolation.
+	allowedTables := map[string]bool{"node_embeddings": true, "memory_embeddings": true}
+	allowedCols := map[string]bool{"node_id": true, "memory_id": true}
+
 	normalizeTable := func(db dbIface, table, idCol string) int {
+		if !allowedTables[table] || !allowedCols[idCol] {
+			return 0 // reject unknown table/column names
+		}
 		// Collect rows to update first.
 		rows, err := db.Query(fmt.Sprintf("SELECT %s, embedding FROM %s", idCol, table))
 		if err != nil {

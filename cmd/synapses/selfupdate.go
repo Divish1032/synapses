@@ -17,6 +17,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -428,22 +429,33 @@ func downloadFile(dst, url string) error {
 		filepath.Base(dst), written, computedHash[:16])
 
 	// Fetch the published .sha256 checksum file and verify integrity.
+	// Fail closed: if checksum file is unavailable or malformed, refuse the download.
 	checksumURL := url + ".sha256"
-	if checksumResp, checksumErr := client.Get(checksumURL); checksumErr == nil {
-		defer checksumResp.Body.Close()
-		if checksumResp.StatusCode == http.StatusOK {
-			if checksumBody, readErr := io.ReadAll(io.LimitReader(checksumResp.Body, 256)); readErr == nil {
-				expectedHash := strings.Fields(strings.TrimSpace(string(checksumBody)))
-				if len(expectedHash) > 0 && len(expectedHash[0]) == 64 {
-					if !strings.EqualFold(computedHash, expectedHash[0]) {
-						os.Remove(dst)
-						return fmt.Errorf("integrity check failed: expected sha256 %s, got %s", expectedHash[0], computedHash)
-					}
-					logutil.Info("synapses: sha256 checksum verified against %s\n", filepath.Base(checksumURL))
-				}
-			}
-		}
+	checksumResp, checksumErr := client.Get(checksumURL)
+	if checksumErr != nil {
+		os.Remove(dst)
+		return fmt.Errorf("integrity check: failed to fetch checksum file %s: %w", filepath.Base(checksumURL), checksumErr)
 	}
+	defer checksumResp.Body.Close()
+	if checksumResp.StatusCode != http.StatusOK {
+		os.Remove(dst)
+		return fmt.Errorf("integrity check: checksum file %s returned HTTP %d — refusing unverified download", filepath.Base(checksumURL), checksumResp.StatusCode)
+	}
+	checksumBody, readErr := io.ReadAll(io.LimitReader(checksumResp.Body, 256))
+	if readErr != nil {
+		os.Remove(dst)
+		return fmt.Errorf("integrity check: failed to read checksum file: %w", readErr)
+	}
+	expectedHash := strings.Fields(strings.TrimSpace(string(checksumBody)))
+	if len(expectedHash) == 0 || len(expectedHash[0]) != 64 {
+		os.Remove(dst)
+		return fmt.Errorf("integrity check: malformed checksum file (expected 64-char hex hash)")
+	}
+	if subtle.ConstantTimeCompare([]byte(strings.ToLower(computedHash)), []byte(strings.ToLower(expectedHash[0]))) != 1 {
+		os.Remove(dst)
+		return fmt.Errorf("integrity check failed: expected sha256 %s, got %s", expectedHash[0], computedHash)
+	}
+	logutil.Info("synapses: sha256 checksum verified against %s\n", filepath.Base(checksumURL))
 	return nil
 }
 

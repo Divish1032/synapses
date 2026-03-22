@@ -499,7 +499,7 @@ func (w *Watcher) debounce(path, root string) {
 	// Thundering herd protection: if too many files are pending, switch to
 	// a full reindex instead of scheduling individual reparses.
 	if len(w.timers) >= reparseBacklogThreshold {
-		// Cancel all pending timers and schedule one full reindex.
+		// Cancel all pending timers and schedule one full re-walk.
 		for p, t := range w.timers {
 			t.Stop()
 			delete(w.timers, p)
@@ -507,8 +507,10 @@ func (w *Watcher) debounce(path, root string) {
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
-			logutil.Info("synapses/watcher: backlog > %d files, triggering full re-index\n", reparseBacklogThreshold)
-			w.reparseFile(path, root) // at least process the latest file
+			logutil.Info("synapses/watcher: backlog > %d files, triggering full re-walk of %s\n", reparseBacklogThreshold, root)
+			if _, err := w.walker.WalkDir(w.graph, root); err != nil {
+				logutil.Warn("synapses/watcher: full re-walk failed: %v\n", err)
+			}
 		}()
 		return
 	}
