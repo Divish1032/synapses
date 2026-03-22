@@ -15,6 +15,7 @@ package federation
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -690,13 +691,34 @@ func splitRustNames(nameList string) []string {
 
 // ── Manifest readers ────────────────────────────────────────────────────────
 
+// safeReadManifest resolves symlinks and validates that the target file still
+// resides under projectPath before reading. This prevents symlink-based path
+// traversal when reading untrusted project manifests.
+func safeReadManifest(projectPath, filename string) ([]byte, error) {
+	target := filepath.Join(projectPath, filename)
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return nil, err
+	}
+	absProject, err := filepath.Abs(projectPath)
+	if err != nil {
+		return nil, err
+	}
+	absProject = filepath.Clean(absProject) + string(filepath.Separator)
+	resolved = filepath.Clean(resolved)
+	if !strings.HasPrefix(resolved, absProject) && resolved != filepath.Clean(absProject[:len(absProject)-1]) {
+		return nil, fmt.Errorf("manifest %s resolves outside project: %s", filename, resolved)
+	}
+	return os.ReadFile(resolved)
+}
+
 // goModRe matches the `module` directive in go.mod.
 var goModRe = regexp.MustCompile(`^module\s+(\S+)`)
 
 // readGoMod extracts the module path from go.mod.
 // Returns "" if go.mod doesn't exist or can't be parsed.
 func readGoMod(projectPath string) string {
-	data, err := os.ReadFile(filepath.Join(projectPath, "go.mod"))
+	data, err := safeReadManifest(projectPath, "go.mod")
 	if err != nil {
 		return ""
 	}
@@ -715,7 +737,7 @@ var pkgNameRe = regexp.MustCompile(`"name"\s*:\s*"([^"]+)"`)
 // readPackageJSON extracts the package name from package.json.
 // Returns "" if package.json doesn't exist or has no name field.
 func readPackageJSON(projectPath string) string {
-	data, err := os.ReadFile(filepath.Join(projectPath, "package.json"))
+	data, err := safeReadManifest(projectPath, "package.json")
 	if err != nil {
 		return ""
 	}
@@ -732,7 +754,7 @@ var cargoNameRe = regexp.MustCompile(`^name\s*=\s*"([^"]+)"`)
 // readCargoToml extracts the crate name from Cargo.toml.
 // Returns "" if Cargo.toml doesn't exist or has no name field.
 func readCargoToml(projectPath string) string {
-	data, err := os.ReadFile(filepath.Join(projectPath, "Cargo.toml"))
+	data, err := safeReadManifest(projectPath, "Cargo.toml")
 	if err != nil {
 		return ""
 	}
