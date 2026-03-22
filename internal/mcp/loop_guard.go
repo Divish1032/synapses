@@ -31,6 +31,7 @@ type loopGuard struct {
 	sessions       map[string]*loopGuardSession
 	lastActivity   map[string]time.Time
 	stopCh         chan struct{}
+	wg             sync.WaitGroup
 	pc             interface{} // *pulse.Client — set via SetPulseClient; nil if pulse not configured
 	projectID      string
 	resolveSession func(string) string // P8-2: MCP session key → Synapses session UUID
@@ -42,7 +43,9 @@ func newLoopGuard() *loopGuard {
 		lastActivity: make(map[string]time.Time),
 		stopCh:       make(chan struct{}),
 	}
+	g.wg.Add(1)
 	go func() {
+		defer g.wg.Done()
 		ticker := time.NewTicker(30 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -57,9 +60,10 @@ func newLoopGuard() *loopGuard {
 	return g
 }
 
-// close stops the background GC goroutine.
+// close stops the background GC goroutine and waits for it to exit.
 func (g *loopGuard) close() {
 	close(g.stopCh)
+	g.wg.Wait()
 }
 
 // gcIdleSessions removes sessions that have been idle longer than maxIdle.
