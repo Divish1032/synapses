@@ -32,6 +32,9 @@ func newRawDB(path string) (rawDB, error) {
 	if err != nil {
 		return rawDB{}, fmt.Errorf("open raw db: %w", err)
 	}
+	// SQLite doesn't benefit from multiple connections for read-only access.
+	// Limit to 1 to prevent unnecessary file descriptor allocation.
+	db.SetMaxOpenConns(1)
 	return rawDB{db: db}, nil
 }
 
