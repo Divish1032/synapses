@@ -17,14 +17,11 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
-// autoLinkNodes scans text for node names that exist in the graph and returns
-// their IDs. Only semantic node types (function, method, struct, interface) are
-// considered — files and packages produce too many false positives. Names
-// shorter than 3 characters are skipped. Results are capped at 10.
-//
-// Uses a name→nodeID index for O(words_in_text) lookups instead of O(nodes × text).
-func (s *Server) autoLinkNodes(text string) []string {
-	if s.graph == nil || text == "" {
+// buildNameIndex creates a name→nodeID index for all semantic nodes in the graph.
+// Used by autoLinkNodes and linkNodesWithIndex. Callers that link multiple texts
+// should call this once and reuse the index.
+func (s *Server) buildNameIndex() map[string]string {
+	if s.graph == nil {
 		return nil
 	}
 	skip := map[graph.NodeType]bool{
@@ -32,7 +29,6 @@ func (s *Server) autoLinkNodes(text string) []string {
 		graph.NodePackage: true,
 	}
 
-	// Build name→nodeID index (includes both full name and bare method name).
 	nameIndex := make(map[string]string) // name → first nodeID
 	for _, n := range s.graph.AllNodes() {
 		if skip[n.Type] || len(n.Name) < 3 {
@@ -52,11 +48,18 @@ func (s *Server) autoLinkNodes(text string) []string {
 			}
 		}
 	}
+	return nameIndex
+}
 
-	// Extract words from text and look up in the index.
+// linkNodesWithIndex scans text for node names using a pre-built name index
+// and returns their IDs. Results are capped at 10.
+func linkNodesWithIndex(text string, nameIndex map[string]string) []string {
+	if text == "" || len(nameIndex) == 0 {
+		return nil
+	}
+
 	seen := make(map[string]struct{})
 	var result []string
-	// Split on common delimiters to get candidate tokens.
 	for _, word := range strings.FieldsFunc(text, func(r rune) bool {
 		return (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' && r != '.'
 	}) {
@@ -74,6 +77,17 @@ func (s *Server) autoLinkNodes(text string) []string {
 		}
 	}
 	return result
+}
+
+// autoLinkNodes scans text for node names that exist in the graph and returns
+// their IDs. Only semantic node types (function, method, struct, interface) are
+// considered — files and packages produce too many false positives. Names
+// shorter than 3 characters are skipped. Results are capped at 10.
+//
+// For linking multiple texts, use buildNameIndex() + linkNodesWithIndex() to
+// avoid rebuilding the index on each call.
+func (s *Server) autoLinkNodes(text string) []string {
+	return linkNodesWithIndex(text, s.buildNameIndex())
 }
 
 // mergeNodeIDs merges two slices of node ID strings, deduplicating the result.
@@ -150,8 +164,10 @@ func (s *Server) handleCreatePlan(
 	// Auto-detect code nodes mentioned in each task's text and merge with any
 	// explicitly provided linked_nodes — bridges "work to be done" with "code
 	// to be changed" without requiring the caller to know node IDs upfront.
+	// Build the name index once and reuse across all tasks to avoid O(N×tasks).
+	nameIdx := s.buildNameIndex()
 	for i := range taskInputs {
-		detected := s.autoLinkNodes(taskInputs[i].Title + " " + taskInputs[i].Description)
+		detected := linkNodesWithIndex(taskInputs[i].Title+" "+taskInputs[i].Description, nameIdx)
 		taskInputs[i].LinkedNodes = mergeNodeIDs(taskInputs[i].LinkedNodes, detected)
 	}
 
