@@ -282,6 +282,20 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 		idx.IDToSeq[nid] = i
 	}
 
+	// StringPool must be deserialized BEFORE rebuilding secondary indexes,
+	// because the index rebuild calls pool.Value() to resolve StringIDs.
+	poolSize, err := readU32()
+	if err != nil {
+		return nil, err
+	}
+	for i := uint32(0); i < poolSize; i++ {
+		s, err := readStr()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: pool entry %d: %w", i, err)
+		}
+		pool.Intern(s) // re-intern to restore IDs (IDs are positional in the pool)
+	}
+
 	// --- Rebuild secondary indexes (nameIndex, fileIndex, receiverIndex) ---
 	// These are not serialised; rebuild from the node property arrays just
 	// loaded, matching the logic in buildIndex().
@@ -313,19 +327,6 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 				idx.fileIndex[base] = append(idx.fileIndex[base], i)
 			}
 		}
-	}
-
-	// StringPool
-	poolSize, err := readU32()
-	if err != nil {
-		return nil, err
-	}
-	for i := uint32(0); i < poolSize; i++ {
-		s, err := readStr()
-		if err != nil {
-			return nil, fmt.Errorf("graph snapshot: pool entry %d: %w", i, err)
-		}
-		pool.Intern(s) // re-intern to restore IDs (IDs are positional in the pool)
 	}
 
 	// CSR out-edges
