@@ -317,7 +317,11 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	// Collect edges where both endpoints survived the budget cut.
 	// Deferred to after pruning to avoid unbounded memory on hub nodes
 	// with 50K+ edges — only edges between kept nodes are allocated.
-	seen := make(map[[2]NodeID]struct{})
+	type edgeDedupKey struct {
+		from, to NodeID
+		typ      EdgeType
+	}
+	seen := make(map[edgeDedupKey]struct{})
 	var outEdges []*Edge
 	for id := range keep {
 		for _, e := range g.outInEdges(id, idx) {
@@ -326,7 +330,7 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 			if !fromOK || !toOK {
 				continue
 			}
-			key := [2]NodeID{e.From, e.To}
+			key := edgeDedupKey{e.From, e.To, e.Type}
 			if _, dup := seen[key]; dup {
 				continue
 			}
