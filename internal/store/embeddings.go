@@ -359,42 +359,48 @@ func (s *Store) normalizeStoredEmbeddings() {
 		if !allowedTables[table] || !allowedCols[idCol] {
 			return 0 // reject unknown table/column names
 		}
-		// Collect rows to update first.
-		rows, err := db.Query(fmt.Sprintf("SELECT %s, embedding FROM %s", idCol, table))
-		if err != nil {
-			return 0
-		}
-
+		// Collect rows to update in chunks to avoid loading entire table into memory.
+		const chunkSize = 2000
 		type updateItem struct {
 			id   string
 			blob []byte
 		}
 		var updates []updateItem
-		for rows.Next() {
-			var id string
-			var blob []byte
-			if err := rows.Scan(&id, &blob); err != nil {
-				continue
+		for offset := 0; ; offset += chunkSize {
+			rows, err := db.Query(fmt.Sprintf("SELECT %s, embedding FROM %s LIMIT %d OFFSET %d", idCol, table, chunkSize, offset))
+			if err != nil {
+				break
 			}
-			vec := blobToVec(blob)
-			if len(vec) == 0 {
-				continue
+			rowCount := 0
+			for rows.Next() {
+				rowCount++
+				var id string
+				var blob []byte
+				if err := rows.Scan(&id, &blob); err != nil {
+					continue
+				}
+				vec := blobToVec(blob)
+				if len(vec) == 0 {
+					continue
+				}
+				norm := vek32.Norm(vec)
+				if norm > 0.999 && norm < 1.001 {
+					continue
+				}
+				if norm == 0 {
+					continue
+				}
+				nvec := normalizeVec(vec)
+				if nvec == nil {
+					continue
+				}
+				updates = append(updates, updateItem{id: id, blob: vecToBlob(nvec)})
 			}
-			norm := vek32.Norm(vec)
-			// Skip if already normalized (within float32 tolerance).
-			if norm > 0.999 && norm < 1.001 {
-				continue
+			rows.Close()
+			if rowCount < chunkSize {
+				break
 			}
-			if norm == 0 {
-				continue
-			}
-			nvec := normalizeVec(vec)
-			if nvec == nil {
-				continue
-			}
-			updates = append(updates, updateItem{id: id, blob: vecToBlob(nvec)})
 		}
-		rows.Close()
 
 		if len(updates) == 0 {
 			return 0
