@@ -1058,11 +1058,20 @@ func cmdDaemonServe(args []string) error {
 
 	// P12-7: SSE real-time event stream.
 	// GET /api/admin/pulse/stream
+	const maxSSEClients = 16
+	var sseClientCount atomic.Int32
 	mux.HandleFunc("/api/admin/pulse/stream", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if sseClientCount.Add(1) > int32(maxSSEClients) {
+			sseClientCount.Add(-1)
+			http.Error(w, "too many SSE clients", http.StatusServiceUnavailable)
+			return
+		}
+		defer sseClientCount.Add(-1)
+
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -1086,6 +1095,9 @@ func cmdDaemonServe(args []string) error {
 					return
 				}
 				data, _ := json.Marshal(ev)
+				if rc := http.NewResponseController(w); rc != nil {
+					_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				}
 				fmt.Fprintf(w, "data: %s\n\n", data)
 				flusher.Flush()
 			case <-r.Context().Done():

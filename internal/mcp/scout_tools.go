@@ -304,9 +304,9 @@ func (s *Server) lookupEntityDocs(ctx context.Context, entityName string) (*mcpg
 		return mcpgo.NewToolResultError("graph not available"), nil
 	}
 
-	// Find the entity node by exact name or suffix match.
+	// Find the entity node by indexed lookup, then apply suffix filter.
 	var entityNode *graph.Node
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.graph.FindByName(entityName) {
 		if n.Name == entityName || strings.HasSuffix(n.Name, "/"+entityName) {
 			entityNode = n
 			break
