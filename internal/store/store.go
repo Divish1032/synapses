@@ -3156,7 +3156,7 @@ func (s *Store) GetGaps(f GapFilter) ([]QualityGap, error) {
 	case status != "all":
 		rows, err = s.knowledgeDB.Query(base+` WHERE status = ? ORDER BY`+severityOrder, status)
 	default:
-		rows, err = s.knowledgeDB.Query(base + ` ORDER BY` + severityOrder)
+		rows, err = s.knowledgeDB.Query(base + ` ORDER BY` + severityOrder + ` LIMIT 1000`)
 	}
 	if err != nil {
 		return nil, err
