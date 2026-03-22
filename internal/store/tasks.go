@@ -402,11 +402,6 @@ func checkAndCompletePlan(db *rwDB, planID string) (bool, error) {
 	}
 	defer tx.Rollback() // no-op after successful Commit
 
-	// BEGIN IMMEDIATE to prevent concurrent modifications between read and write.
-	if _, err := tx.Exec("PRAGMA busy_timeout = 5000"); err != nil {
-		return false, fmt.Errorf("check plan completion: set busy timeout: %w", err)
-	}
-
 	// A plan completes when it has at least one task and all tasks are terminal.
 	var totalTasks, openTasks int
 	row := tx.QueryRow(`
