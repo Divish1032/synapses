@@ -63,6 +63,50 @@ func (w *Walker) resolveParser(path, ext string) (LanguageParser, bool) {
 	return nil, false
 }
 
+// isPathContainedIn checks whether resolved is located inside (or equal to)
+// root by walking up the directory tree and comparing inodes via os.SameFile.
+//
+// Why inodes instead of string comparison?
+//   - Immune to case-sensitivity differences (e.g. macOS HFS+/APFS).
+//   - Immune to Unicode normalization variants (NFC vs NFD).
+//   - Compares device+inode, so bind-mounts and case-variant paths are
+//     handled correctly.
+//   - Eliminates the string-based TOCTOU window on the path comparison
+//     itself (though the symlink target can still change between
+//     EvalSymlinks and this walk — an inherent limitation).
+//
+// A depth limit of 256 prevents infinite loops on circular mounts.
+func isPathContainedIn(resolved, root string) bool {
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		return false
+	}
+
+	cur := resolved
+	// If resolved is a file, start from its parent directory.
+	if info, err := os.Stat(cur); err != nil || !info.IsDir() {
+		cur = filepath.Dir(cur)
+	}
+
+	const maxDepth = 256
+	for i := 0; i < maxDepth; i++ {
+		curInfo, err := os.Stat(cur)
+		if err != nil {
+			return false
+		}
+		if os.SameFile(curInfo, rootInfo) {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached filesystem root without matching.
+			return false
+		}
+		cur = parent
+	}
+	return false
+}
+
 // isSymlinkContained checks if a file is a symlink and, if so, verifies that
 // it resolves to a target within the repository root. Returns true if the file
 // is safe to process (not a symlink, or symlink within root).
@@ -74,21 +118,7 @@ func isSymlinkContained(info os.FileInfo, path, root string) bool {
 	if symErr != nil {
 		return false
 	}
-	// EvalSymlinks on root resolves platform symlinks (e.g. /tmp →
-	// /private/tmp) so both sides get the same base path. Note: on
-	// macOS HFS+ this does NOT normalize case or Unicode — a symlink
-	// using different case than the root would be rejected (safe
-	// false-positive, not a bypass).
-	canonRoot, rootErr := filepath.EvalSymlinks(root)
-	if rootErr != nil {
-		return false
-	}
-	absRoot, absErr := filepath.Abs(canonRoot)
-	if absErr != nil {
-		return false
-	}
-	absResolved, resErr := filepath.Abs(resolved)
-	if resErr != nil || (!strings.HasPrefix(absResolved, absRoot+"/") && absResolved != absRoot) {
+	if !isPathContainedIn(resolved, root) {
 		logutil.Warn("synapses/security: skipped symlink resolving outside repo root: %s -> %s\n", path, resolved)
 		return false
 	}
