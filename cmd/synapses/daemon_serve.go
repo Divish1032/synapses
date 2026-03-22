@@ -1065,6 +1065,11 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
 		if sseClientCount.Add(1) > int32(maxSSEClients) {
 			sseClientCount.Add(-1)
 			http.Error(w, "too many SSE clients", http.StatusServiceUnavailable)
@@ -1072,17 +1077,14 @@ func cmdDaemonServe(args []string) error {
 		}
 		defer sseClientCount.Add(-1)
 
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-			return
-		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
 		ch := sharedPulse.SubscribeSSE()
 		defer sharedPulse.UnsubscribeSSE(ch)
+
+		rc := http.NewResponseController(w)
 
 		// Send initial keepalive so the client knows the connection is established.
 		fmt.Fprintf(w, ": connected\n\n")
@@ -1095,10 +1097,13 @@ func cmdDaemonServe(args []string) error {
 					return
 				}
 				data, _ := json.Marshal(ev)
-				if rc := http.NewResponseController(w); rc != nil {
-					_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				// Set write deadline to detect stale connections, then clear
+				// it after successful write to avoid expiring idle streams.
+				_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+					return // stale client
 				}
-				fmt.Fprintf(w, "data: %s\n\n", data)
+				_ = rc.SetWriteDeadline(time.Time{}) // clear deadline
 				flusher.Flush()
 			case <-r.Context().Done():
 				return
