@@ -20,10 +20,44 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/SynapsesOS/synapses/internal/store"
 )
+
+// secretRegexps are precompiled regular expressions for detecting secret
+// patterns across all common assignment styles: env vars, code assignments,
+// YAML/TOML, JSON, connection strings, provider-specific tokens, and
+// high-entropy values assigned to secret-looking variable names.
+var secretRegexps = []*regexp.Regexp{
+	// Generic assignment: secret-like variable name followed by assignment operator and value
+	regexp.MustCompile(`(?i)(api[_-]?key|secret|password|passwd|token|credential|auth[_-]?token|access[_-]?key|private[_-]?key)[^a-zA-Z0-9].*[=:]`),
+
+	// Connection strings with embedded credentials
+	regexp.MustCompile(`(?i)(postgres|mysql|mongodb|redis|amqp|smtp)://[^:]+:[^@]+@`),
+
+	// AWS access key pattern
+	regexp.MustCompile(`(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}`),
+
+	// GitHub tokens
+	regexp.MustCompile(`(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}`),
+
+	// Slack tokens
+	regexp.MustCompile(`xox[bpas]-[0-9]+-[0-9]+-[a-zA-Z0-9]+`),
+
+	// Stripe keys
+	regexp.MustCompile(`(?:sk|pk)_(?:live|test)_[a-zA-Z0-9]{20,}`),
+
+	// Generic high-entropy: variable with secret-like name assigned a 20+ char alphanumeric value
+	regexp.MustCompile(`(?i)(secret|key|token|password|credential).*["'][A-Za-z0-9+/=_-]{20,}["']`),
+
+	// Bearer tokens
+	regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9._\-]+`),
+
+	// Authorization headers
+	regexp.MustCompile(`(?i)authorization['"]*\s*[:=]\s*['"]`),
+}
 
 // BrainDetectedDep is a single dependency detected by the brain LLM.
 type BrainDetectedDep struct {
@@ -278,10 +312,21 @@ var secretPatterns = []string{
 }
 
 // looksLikeSecret returns true if the line likely contains a secret value.
+// It uses a two-phase approach: first a cheap substring scan (fast-path),
+// then precompiled regex patterns for more nuanced detection across all
+// assignment styles (code, YAML, JSON, connection strings, etc.).
 func looksLikeSecret(line string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(line))
+	// Fast-path: cheap substring check catches obvious cases.
 	for _, pat := range secretPatterns {
 		if strings.Contains(upper, pat) {
+			return true
+		}
+	}
+	// Slow-path: regex-based detection for assignment styles the
+	// substring patterns miss (e.g. `apiKey = "sk-abc"`).
+	for _, re := range secretRegexps {
+		if re.MatchString(line) {
 			return true
 		}
 	}
