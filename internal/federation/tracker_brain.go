@@ -20,44 +20,11 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"regexp"
 	"strings"
 
+	"github.com/SynapsesOS/synapses/internal/secrets"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
-
-// secretRegexps are precompiled regular expressions for detecting secret
-// patterns across all common assignment styles: env vars, code assignments,
-// YAML/TOML, JSON, connection strings, provider-specific tokens, and
-// high-entropy values assigned to secret-looking variable names.
-var secretRegexps = []*regexp.Regexp{
-	// Generic assignment: secret-like variable name followed by assignment operator and value
-	regexp.MustCompile(`(?i)(api[_-]?key|secret|password|passwd|token|credential|auth[_-]?token|access[_-]?key|private[_-]?key)[^a-zA-Z0-9].*[=:]`),
-
-	// Connection strings with embedded credentials
-	regexp.MustCompile(`(?i)(postgres|mysql|mongodb|redis|amqp|smtp)://[^:]+:[^@]+@`),
-
-	// AWS access key pattern
-	regexp.MustCompile(`(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}`),
-
-	// GitHub tokens
-	regexp.MustCompile(`(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}`),
-
-	// Slack tokens
-	regexp.MustCompile(`xox[bpas]-[0-9]+-[0-9]+-[a-zA-Z0-9]+`),
-
-	// Stripe keys
-	regexp.MustCompile(`(?:sk|pk)_(?:live|test)_[a-zA-Z0-9]{20,}`),
-
-	// Generic high-entropy: variable with secret-like name assigned a 20+ char alphanumeric value
-	regexp.MustCompile(`(?i)(secret|key|token|password|credential).*["'][A-Za-z0-9+/=_-]{20,}["']`),
-
-	// Bearer tokens
-	regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9._\-]+`),
-
-	// Authorization headers
-	regexp.MustCompile(`(?i)authorization['"]*\s*[:=]\s*['"]`),
-}
 
 // BrainDetectedDep is a single dependency detected by the brain LLM.
 type BrainDetectedDep struct {
@@ -137,7 +104,7 @@ func (bd *BrainDetector) DetectDeps(ctx context.Context, fileContent string, max
 	if maxCodeLen <= 0 {
 		maxCodeLen = 2000
 	}
-	code := filterSecretLines(fileContent)
+	code := secrets.FilterLines(fileContent)
 	if len(code) > maxCodeLen {
 		code = code[:maxCodeLen]
 	}
@@ -247,92 +214,6 @@ func (a *BrainTrackerAdapter) DetectAndStoreBrain(ctx context.Context, filePath 
 // Only deps where the entity actually exists are returned.
 // This is the anti-hallucination gate — the brain may claim a dep exists,
 // but we only trust it if the sibling's graph confirms it.
-// filterSecretLines removes lines that match common secret patterns before
-// sending file content to the LLM.
-func filterSecretLines(content string) string {
-	lines := strings.Split(content, "\n")
-	filtered := make([]string, 0, len(lines))
-	inPEMBlock := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		// Track PEM blocks: skip everything between BEGIN and END markers.
-		if strings.HasPrefix(trimmed, "-----BEGIN ") {
-			inPEMBlock = true
-			continue
-		}
-		if inPEMBlock {
-			if strings.HasPrefix(trimmed, "-----END ") {
-				inPEMBlock = false
-			}
-			continue
-		}
-		if looksLikeSecret(line) {
-			continue
-		}
-		filtered = append(filtered, line)
-	}
-	return strings.Join(filtered, "\n")
-}
-
-// secretPatterns are case-insensitive substrings that indicate a line contains
-// or assigns a secret value. Covers environment variables, config files, code
-// constants, and common provider-specific key names.
-var secretPatterns = []string{
-	// Generic assignment patterns
-	"API_KEY=", "APIKEY=", "API_KEY:", "APIKEY:",
-	"SECRET=", "SECRET:", "SECRET_KEY", "SECRETKEY",
-	"PASSWORD=", "PASSWORD:", "PASSWD=", "PASSWD:",
-	"TOKEN=", "TOKEN:", "_TOKEN=", "_TOKEN:",
-	"PRIVATE_KEY", "PRIVATEKEY",
-	"CREDENTIALS=", "CREDENTIALS:",
-
-	// AWS
-	"AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN",
-
-	// Database
-	"DATABASE_URL=", "DATABASE_URL:", "DB_PASSWORD", "DB_PASS",
-	"MONGO_URI=", "REDIS_URL=", "REDIS_PASSWORD",
-
-	// OAuth / social
-	"CLIENT_SECRET", "GITHUB_TOKEN", "SLACK_TOKEN", "SLACK_WEBHOOK",
-	"DISCORD_TOKEN", "OPENAI_API_KEY",
-
-	// PEM blocks
-	"-----BEGIN RSA", "-----BEGIN EC", "-----BEGIN PRIVATE",
-	"-----BEGIN OPENSSH", "-----BEGIN PGP",
-
-	// Generic bearer/auth
-	"BEARER ", "AUTHORIZATION:",
-
-	// Common prefixes for API keys
-	"SK_LIVE_", "SK_TEST_", "PK_LIVE_", "PK_TEST_",
-	"GHPAT_", "GHP_", "GHO_", "GHU_", "GHS_", "GHR_",
-	"XOXB-", "XOXP-", "XOXA-",
-	"SG.", // SendGrid
-}
-
-// looksLikeSecret returns true if the line likely contains a secret value.
-// It uses a two-phase approach: first a cheap substring scan (fast-path),
-// then precompiled regex patterns for more nuanced detection across all
-// assignment styles (code, YAML, JSON, connection strings, etc.).
-func looksLikeSecret(line string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(line))
-	// Fast-path: cheap substring check catches obvious cases.
-	for _, pat := range secretPatterns {
-		if strings.Contains(upper, pat) {
-			return true
-		}
-	}
-	// Slow-path: regex-based detection for assignment styles the
-	// substring patterns miss (e.g. `apiKey = "sk-abc"`).
-	for _, re := range secretRegexps {
-		if re.MatchString(line) {
-			return true
-		}
-	}
-	return false
-}
-
 func (bd *BrainDetector) validateBrainDeps(ctx context.Context, raw []BrainDetectedDep) []RawCrossDep {
 	var valid []RawCrossDep
 	for _, dep := range raw {
