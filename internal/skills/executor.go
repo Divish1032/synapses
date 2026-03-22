@@ -54,7 +54,8 @@ func NewExecutor(caller ToolCaller, policy *SecurityPolicy) *Executor {
 // Optional steps that fail are recorded with Skipped=true; non-optional step failures abort.
 func (e *Executor) Execute(ctx context.Context, r Recipe, params map[string]interface{}) (*ExecutionResult, error) {
 	// Security gate: check origin permissions before any steps execute.
-	if err := e.policy.Check(r.ID, TrustOrigin(r.Origin), r.RequiredPermissions); err != nil {
+	// Uses CheckWithSteps to also validate inferred permissions from step tools.
+	if err := e.policy.CheckWithSteps(r.ID, TrustOrigin(r.Origin), r.RequiredPermissions, r.Steps); err != nil {
 		return nil, err
 	}
 	// Validate and apply defaults for params.

@@ -71,7 +71,8 @@ func New(s *store.Store) *Cache {
 				return nil, err
 			}
 			for _, ip := range ips {
-				if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+				if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+					ip.IsUnspecified() || ip.IsMulticast() {
 					return nil, fmt.Errorf("SSRF prevention blocked access to %s (%s)", host, ip.String())
 				}
 			}
@@ -225,6 +226,10 @@ func ParseGoMod(projectPath string) (map[string]string, error) {
 // fetchAndStrip performs an HTTP GET and returns HTML-stripped plain text,
 // capped at maxDocBytes.
 func (c *Cache) fetchAndStrip(ctx context.Context, url string) (string, error) {
+	// Validate URL scheme — only allow http and https.
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		return "", fmt.Errorf("unsupported URL scheme (only http/https allowed): %s", url)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
