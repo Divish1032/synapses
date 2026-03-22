@@ -125,8 +125,8 @@ func (tb *tokenBucket) Allow() bool {
 		if tb.tokens > tb.maxTokens {
 			tb.tokens = tb.maxTokens
 		}
+		tb.lastRefill = now
 	}
-	tb.lastRefill = now
 	if tb.tokens < 1 {
 		return false
 	}
