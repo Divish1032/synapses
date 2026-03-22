@@ -177,6 +177,10 @@ func (b *BuiltinEmbedder) ensureModel() error {
 		opts.MaxRetries = 3
 		opts.RetryInterval = 2
 		if _, err := hugot.DownloadModel(builtinModelName, b.modelsDir, opts); err != nil {
+			// BUG-027: surface a clear message for air-gapped environments.
+			logutil.Error("synapses: embedding model download failed — semantic search will be unavailable. "+
+				"If this machine has no internet access, pre-download the model on a connected machine "+
+				"and place it at %s\n", filepath.Join(modelPath, modelFile))
 			return fmt.Errorf("download embedding model: %w", err)
 		}
 		logutil.Info("synapses: embedding model downloaded (%s)\n", modelFile)

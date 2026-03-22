@@ -73,6 +73,8 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 	"github.com/SynapsesOS/synapses/internal/webcache"
+
+	"golang.org/x/net/netutil"
 )
 
 // DaemonHTTPPort is the fixed port for the singleton daemon HTTP server.
@@ -601,11 +603,41 @@ func cmdDaemonServe(args []string) error {
 		// Health endpoint is exempt from auth for liveness checks.
 		// Only return project_count (not paths) to avoid information disclosure.
 		// Full project details available at /api/admin/projects (auth-protected).
+		projects := reg.All()
+		overallStatus := "ok"
+
+		// BUG-019: include per-project watcher liveness so Tauri app and
+		// monitoring can detect watcher deaths (previously only surfaced
+		// in session_init warnings).
+		watcherDead := 0
+		for _, pi := range projects {
+			if pi.Watcher != nil && !pi.Watcher.IsAlive() {
+				watcherDead++
+			}
+		}
+		if watcherDead > 0 {
+			overallStatus = "degraded"
+		}
+
+		// BUG-020: aggregate background queue stats across projects.
+		var totalBgDepth int
+		var totalBgDrops int64
+		for _, pi := range projects {
+			if pi.MCPServer != nil {
+				depth, drops := pi.MCPServer.BackgroundQueueStats()
+				totalBgDepth += depth
+				totalBgDrops += drops
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":            "ok",
+			"status":            overallStatus,
 			"version":           version,
-			"project_count":     len(reg.All()),
+			"project_count":     len(projects),
+			"watchers_dead":     watcherDead,
+			"bg_queue_depth":    totalBgDepth,
+			"bg_queue_drops":    totalBgDrops,
 			"indexing_progress": ActiveSnapshot(),
 		})
 	})
@@ -1197,7 +1229,16 @@ func cmdDaemonServe(args []string) error {
 	}()
 
 	// ── Start HTTP server ─────────────────────────────────────────────────────
-	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	// BUG-028: cap concurrent connections to prevent FD exhaustion from
+	// misbehaving clients (e.g. many SSE streams from a single process).
+	ln, err := net.Listen("tcp", DaemonHTTPAddr)
+	if err != nil {
+		return fmt.Errorf("http listen: %w", err)
+	}
+	const maxConns = 512
+	ln = netutil.LimitListener(ln, maxConns)
+	httpSrv.Addr = "" // already bound via listener
+	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("http server: %w", err)
 	}
 	logutil.Info("synapses daemon: stopped\n")

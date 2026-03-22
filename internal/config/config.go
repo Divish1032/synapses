@@ -11,6 +11,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/brain/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 const configFileName = "synapses.json"
@@ -570,6 +571,10 @@ func Load(dir string) (*Config, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
+	// BUG-035: detect unknown top-level keys so typos like "contex_carve"
+	// are flagged instead of silently ignored.
+	warnUnknownKeys(data)
+
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -606,6 +611,34 @@ func Load(dir string) (*Config, error) {
 		}
 	}
 	return &cfg, nil
+}
+
+// knownTopLevelKeys lists all valid top-level JSON keys in synapses.json.
+// Used by warnUnknownKeys to detect typos (BUG-035).
+var knownTopLevelKeys = map[string]bool{
+	"version": true, "mode": true, "rules": true, "edge_weights": true,
+	"context_carve": true, "linked": true, "embedding_endpoint": true,
+	"embeddings": true, "api_entries": true, "use_go_types": true,
+	"use_ts_types": true, "metrics_days": true, "coverage_profile": true,
+	"pprof_profile": true, "data_flow_sources": true, "data_flow_sinks": true,
+	"data_flow_max_hops": true, "federation": true, "federation_acl": true,
+	"constitution": true, "brain": true, "pulse": true, "session": true,
+	"rate_limits": true, "content_safety": true, "recall": true,
+}
+
+// warnUnknownKeys parses raw JSON to detect top-level keys not recognized
+// by the Config struct. Emits a warning for each, helping users catch typos
+// like "contex_carve" that would otherwise be silently ignored (BUG-035).
+func warnUnknownKeys(data []byte) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return // can't parse — validation will catch it
+	}
+	for key := range raw {
+		if !knownTopLevelKeys[key] {
+			logutil.Warn("synapses: config: unknown key %q in synapses.json (typo?)\n", key)
+		}
+	}
 }
 
 // CarveConfig converts the project-level carving settings into a

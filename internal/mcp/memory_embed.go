@@ -82,7 +82,9 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 
 	// Rate limit: pause between embeddings to avoid saturating CPU.
 	// Builtin mode is CPU-bound; Ollama mode has its own throughput limits.
-	ticker := time.NewTicker(500 * time.Millisecond)
+	// BUG-025: reduced from 500ms to 100ms — at 500ms, 100 memories took
+	// 50 seconds of zero embedding coverage after startup.
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for i, memID := range ids {

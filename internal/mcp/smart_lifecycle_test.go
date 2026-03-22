@@ -195,11 +195,11 @@ func TestAutoFixTask_HighImportance_AutoCreatesFixTask(t *testing.T) {
 	s := newTestServer(t)
 
 	m := remember(t, s, map[string]any{
-		"agent_id":     "agent-fix",
-		"episode_type": "failure",
-		"outcome":      "failure",
-		"decision":     "DB connection pool exhausted under load",
-		"importance":   float64(0.9), // >= 0.7 → auto
+		"agent_id":       "agent-fix",
+		"episode_type":   "failure",
+		"outcome":        "failure",
+		"decision":       "DB connection pool exhausted under load",
+		"create_fix_task": true, // BUG-018: importance param removed; use explicit flag
 	})
 
 	if m["fix_task_id"] == nil {
@@ -215,8 +215,7 @@ func TestAutoFixTask_LowImportanceNoFlag_NoFixTask(t *testing.T) {
 		"episode_type": "failure",
 		"outcome":      "failure",
 		"decision":     "Minor style issue",
-		"importance":   float64(0.3), // below threshold
-		// create_fix_task not set
+		// create_fix_task not set — default importance (0.5) won't auto-create
 	})
 
 	if m["fix_task_id"] != nil {

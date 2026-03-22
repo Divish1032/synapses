@@ -49,11 +49,14 @@ func NewPluginChecker(synapsesDir string) *PluginChecker {
 // IsAllowed checks whether a plugin command is approved for execution.
 // Returns nil if allowed, a descriptive error if not.
 func (pc *PluginChecker) IsAllowed(command string) error {
-	// Environment override for CI/testing.
-	if os.Getenv(allowlistEnvOverride) == "1" {
+	// Environment override for CI/testing — only honoured when running
+	// automated tests (SYNAPSES_TEST=1). A .env file sourced by a
+	// malicious agent cannot enable this bypass without also controlling
+	// the test flag (BUG-032).
+	if os.Getenv(allowlistEnvOverride) == "1" && os.Getenv("SYNAPSES_TEST") == "1" {
 		pc.mu.Lock()
 		if !pc.envWarnLogged {
-			logutil.Warn("%s=1 — all plugin parsers are allowed (bypass mode)\n", allowlistEnvOverride)
+			logutil.Warn("%s=1 — all plugin parsers are allowed (test bypass mode)\n", allowlistEnvOverride)
 			pc.envWarnLogged = true
 		}
 		pc.mu.Unlock()

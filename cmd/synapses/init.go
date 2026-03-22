@@ -110,6 +110,13 @@ func cmdInit(args []string) error {
 	} else {
 		fmt.Printf("  \033[32m✓\033[0m Daemon running on %s\n", DaemonHTTPAddr)
 	}
+
+	// Hint: install as system service for auto-restart on crash.
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		fmt.Println()
+		fmt.Printf("  \033[33mTip:\033[0m Run '\033[1msynapses daemon install\033[0m' to auto-restart the daemon on crash.\n")
+		fmt.Println("       (Registers a launchd/systemd service for this machine.)")
+	}
 	if _, err := registerProjectWithDaemon(absPath); err != nil {
 		logutil.Warn("  register project: %v\n", err)
 	}
@@ -210,9 +217,33 @@ func writeSynapsesJSON(root string) error {
 		_ = json.Unmarshal(data, &existing)
 	}
 
-	if _, hasBrain := existing["brain"]; !hasBrain {
-		existing["brain"] = map[string]interface{}{
+	// Populate sensible defaults for sections that are missing.
+	// This gives users a working config with discoverable options
+	// instead of an opaque `{"brain":{"enabled":false}}`.
+	defaults := map[string]interface{}{
+		"version": "1",
+		"mode":    "full",
+		"brain": map[string]interface{}{
 			"enabled": false,
+		},
+		"context_carve": map[string]interface{}{
+			"default_depth":      2,
+			"token_budget":       4000,
+			"exclude_test_files": true,
+		},
+		"embeddings": "builtin",
+		"content_safety": map[string]interface{}{
+			"enabled": true,
+			"mode":    "reject",
+		},
+		"session": map[string]interface{}{
+			"auto_end_threshold_calls": 80,
+			"reconnect_window_secs":    300,
+		},
+	}
+	for key, val := range defaults {
+		if _, exists := existing[key]; !exists {
+			existing[key] = val
 		}
 	}
 	data, err := json.MarshalIndent(existing, "", "  ")

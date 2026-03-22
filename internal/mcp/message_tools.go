@@ -110,7 +110,7 @@ func (s *Server) handleSendMessage(
 
 	msgID, err := s.store.SendMessage(fromAgent, toAgent, topic, payload, projectID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("send message: %v", err)), nil
+		return toolError("send message", err)
 	}
 
 	// Emit event so agents polling get_events see the message immediately
@@ -280,7 +280,7 @@ func (s *Server) handleMarkRead(
 	s.upsertAgentIfNeeded(agentID)
 
 	if err := s.store.MarkRead(messageID, agentID); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("mark read: %v", err)), nil
+		return toolError("mark read", err)
 	}
 	return jsonResult(map[string]interface{}{
 		"message_id": messageID,

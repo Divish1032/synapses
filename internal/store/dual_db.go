@@ -72,8 +72,11 @@ func migrateSingleTable(srcDB, dstDB *sql.DB, table string) (int64, error) {
 		return 0, nil
 	}
 
+	// BUG-030: sanitize table name to prevent SQL injection via crafted federation DBs.
+	quotedTable := quoteIdentifier(table)
+
 	// Get column names from source table.
-	rows, err := srcDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	rows, err := srcDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", quotedTable))
 	if err != nil {
 		return 0, fmt.Errorf("pragma table_info: %w", err)
 	}
@@ -88,6 +91,11 @@ func migrateSingleTable(srcDB, dstDB *sql.DB, table string) (int64, error) {
 			rows.Close()
 			return 0, fmt.Errorf("scan column info: %w", err)
 		}
+		// BUG-030: validate column name characters to prevent injection.
+		if !isValidIdentifier(name) {
+			rows.Close()
+			return 0, fmt.Errorf("invalid column name %q in table %s", name, table)
+		}
 		cols = append(cols, name)
 	}
 	rows.Close()
@@ -96,7 +104,7 @@ func migrateSingleTable(srcDB, dstDB *sql.DB, table string) (int64, error) {
 	}
 
 	// Check destination has the same columns (may be a subset if source is newer).
-	dstRows, err := dstDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	dstRows, err := dstDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", quotedTable))
 	if err != nil {
 		return 0, fmt.Errorf("dst pragma table_info: %w", err)
 	}
@@ -126,12 +134,17 @@ func migrateSingleTable(srcDB, dstDB *sql.DB, table string) (int64, error) {
 		return 0, nil
 	}
 
-	colList := strings.Join(commonCols, ", ")
+	// BUG-030: quote column names in SQL to prevent injection.
+	quotedCols := make([]string, len(commonCols))
+	for i, c := range commonCols {
+		quotedCols[i] = quoteIdentifier(c)
+	}
+	colList := strings.Join(quotedCols, ", ")
 	placeholders := strings.Repeat("?, ", len(commonCols))
 	placeholders = placeholders[:len(placeholders)-2] // trim trailing ", "
 
 	// Read all rows from source.
-	srcRows, err := srcDB.Query(fmt.Sprintf("SELECT %s FROM %s", colList, table))
+	srcRows, err := srcDB.Query(fmt.Sprintf("SELECT %s FROM %s", colList, quotedTable))
 	if err != nil {
 		return 0, fmt.Errorf("select from source: %w", err)
 	}
@@ -144,7 +157,7 @@ func migrateSingleTable(srcDB, dstDB *sql.DB, table string) (int64, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	insertSQL := fmt.Sprintf("INSERT OR IGNORE INTO %s (%s) VALUES (%s)", table, colList, placeholders)
+	insertSQL := fmt.Sprintf("INSERT OR IGNORE INTO %s (%s) VALUES (%s)", quotedTable, colList, placeholders)
 	stmt, err := tx.Prepare(insertSQL)
 	if err != nil {
 		return 0, fmt.Errorf("prepare insert: %w", err)
@@ -176,4 +189,25 @@ func migrateSingleTable(srcDB, dstDB *sql.DB, table string) (int64, error) {
 		return 0, fmt.Errorf("commit: %w", err)
 	}
 	return count, nil
+}
+
+// quoteIdentifier wraps a SQL identifier in double quotes and escapes any
+// embedded double quotes. This prevents SQL injection via crafted column or
+// table names from untrusted SQLite databases (BUG-030).
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// isValidIdentifier checks that a SQL identifier contains only safe characters.
+// Rejects names with semicolons, parentheses, or other SQL metacharacters.
+func isValidIdentifier(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
 }

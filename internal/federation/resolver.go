@@ -510,7 +510,24 @@ func SiblingDBPath(projectPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("abs path: %w", err)
 	}
-	return store.DefaultPath(abs)
+
+	// BUG-031: validate that the resolved project path exists as a real
+	// directory and is not a symlink pointing outside the expected tree.
+	// Prevents a compromised .synapses/synapses.json from pointing federation
+	// at crafted SQLite files in arbitrary locations.
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("eval symlinks for federation path %q: %w", abs, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("federation path %q: %w", resolved, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("federation path %q is not a directory", resolved)
+	}
+
+	return store.DefaultPath(resolved)
 }
 
 // ---------------------------------------------------------------------------
