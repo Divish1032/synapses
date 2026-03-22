@@ -47,7 +47,6 @@ function agentShortName(id: string): string {
   if (l.includes("cursor")) return "Cursor";
   if (l.includes("windsurf")) return "Windsurf";
   if (l.includes("zed")) return "Zed";
-  if (l.includes("vscode") || l.includes("vs code")) return "VS Code";
   return id.length > 24 ? id.slice(0, 22) + "..." : id;
 }
 

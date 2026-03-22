@@ -37,7 +37,6 @@ function agentLabel(id: string): string {
   if (l.includes("claude")) return "Claude Code";
   if (l.includes("cursor")) return "Cursor";
   if (l.includes("windsurf")) return "Windsurf";
-  if (l.includes("vscode") || l.includes("vs code")) return "VS Code";
   if (l.includes("zed")) return "Zed";
   return id.length > 28 ? id.slice(0, 26) + "..." : id;
 }

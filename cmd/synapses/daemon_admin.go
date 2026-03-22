@@ -415,8 +415,6 @@ func checkMCPConfigured(editor, projectPath string) bool {
 		configPath = filepath.Join(projectPath, ".cursor", "mcp.json")
 	case "windsurf":
 		configPath = filepath.Join(projectPath, ".windsurf", "mcp_config.json")
-	case "vscode":
-		configPath = filepath.Join(projectPath, ".vscode", "mcp.json")
 	case "antigravity":
 		configPath = filepath.Join(projectPath, ".agent", "mcp.json")
 	case "zed":
