@@ -246,27 +246,14 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 		}
 
 		// Security: Prevent Directory Traversal via Symlinks.
-		// Resolve the symlink and ensure the target is within the repository root.
+		// Resolve the symlink and verify containment using inode comparison
+		// (os.SameFile), which is immune to case/Unicode/TOCTOU races.
 		if info.Mode()&os.ModeSymlink != 0 {
 			resolved, symErr := filepath.EvalSymlinks(path)
 			if symErr != nil {
 				return nil // Skip dangling or invalid symlinks
 			}
-			// EvalSymlinks on root resolves platform symlinks (e.g. /tmp →
-			// /private/tmp) so both sides get the same base path. Note: on
-			// macOS HFS+ this does NOT normalize case or Unicode — a symlink
-			// using different case than the root would be rejected (safe
-			// false-positive, not a bypass).
-			canonRoot, rootErr := filepath.EvalSymlinks(root)
-			if rootErr != nil {
-				return nil
-			}
-			absRoot, absErr := filepath.Abs(canonRoot)
-			if absErr != nil {
-				return nil
-			}
-			absResolved, resErr := filepath.Abs(resolved)
-			if resErr != nil || (!strings.HasPrefix(absResolved, absRoot+"/") && absResolved != absRoot) {
+			if !isPathContainedIn(resolved, root) {
 				logutil.Warn("synapses/security: skipped symlink resolving outside repo root: %s -> %s\n", path, resolved)
 				return nil
 			}
