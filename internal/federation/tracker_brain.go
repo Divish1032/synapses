@@ -103,11 +103,10 @@ func (bd *BrainDetector) DetectDeps(ctx context.Context, fileContent string, max
 	if maxCodeLen <= 0 {
 		maxCodeLen = 2000
 	}
-	code := fileContent
+	code := filterSecretLines(fileContent)
 	if len(code) > maxCodeLen {
 		code = code[:maxCodeLen]
 	}
-	code = filterSecretLines(code)
 
 	prompt := fmt.Sprintf(crossProjectPromptSuffix, strings.Join(bd.aliases, ", ")) + code
 
