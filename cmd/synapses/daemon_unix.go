@@ -16,6 +16,7 @@ func processAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
+	defer proc.Release()
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 

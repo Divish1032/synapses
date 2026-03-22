@@ -167,9 +167,19 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 
 	// Start bounded reparse workers to prevent thundering herd.
 	for i := 0; i < 4; i++ {
+		watcher.wg.Add(1)
 		go func() {
-			for work := range watcher.workCh {
-				watcher.reparseFile(work.path, work.root)
+			defer watcher.wg.Done()
+			for {
+				select {
+				case work, ok := <-watcher.workCh:
+					if !ok {
+						return
+					}
+					watcher.reparseFile(work.path, work.root)
+				case <-watcher.stopCh:
+					return
+				}
 			}
 		}()
 	}
@@ -501,7 +511,9 @@ func (w *Watcher) debounce(path, root string) {
 	if len(w.timers) >= reparseBacklogThreshold {
 		// Cancel all pending timers and schedule one full re-walk.
 		for p, t := range w.timers {
-			t.Stop()
+			if t.Stop() {
+				w.wg.Done() // balance the wg.Add(1) from when the timer was created
+			}
 			delete(w.timers, p)
 		}
 		w.wg.Add(1)
@@ -515,7 +527,10 @@ func (w *Watcher) debounce(path, root string) {
 		return
 	}
 
-	w.wg.Add(1) // track the timer callback so Stop() waits for in-flight reparses
+	w.wg.Add(1) // track the timer callback; when work is sent to workCh, the
+	// callback's wg.Done fires before the worker processes the item, but this
+	// is safe: worker goroutines are separately tracked by wg (see New()),
+	// and Stop() closes workCh causing workers to drain before wg.Wait returns.
 	w.timers[path] = time.AfterFunc(debounceDelay, func() {
 		defer w.wg.Done()
 		w.mu.Lock()
@@ -526,7 +541,7 @@ func (w *Watcher) debounce(path, root string) {
 		if w.workCh != nil {
 			select {
 			case w.workCh <- reparseWork{path, root}:
-				// Worker will process
+				// Worker will process; worker lifecycle tracked by wg separately.
 				return
 			default:
 				// Channel full — process inline
@@ -1044,6 +1059,7 @@ func (w *Watcher) checkViolations(path string) {
 }
 
 // countNodesForFile counts nodes in the graph whose File matches path.
+// TODO: O(N) over all nodes — add a file→nodes index to Graph for O(1) lookup.
 func (w *Watcher) countNodesForFile(path string) int {
 	count := 0
 	for _, n := range w.graph.AllNodes() {

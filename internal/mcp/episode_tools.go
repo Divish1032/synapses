@@ -31,7 +31,7 @@ func (s *Server) handleRemember(
 	}
 	decision, err := stringArgLimited(req, "decision", maxArgLengthDecision)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return mcp.NewToolResultError(stripInternalPaths(err.Error())), nil
 	}
 	if decision == "" {
 		return mcp.NewToolResultError("decision is required (e.g., 'switched auth to OAuth 2.0')"), nil
@@ -65,7 +65,7 @@ func (s *Server) handleRemember(
 	var anchorNodes []string
 	if raw := stringArg(req, "anchor_nodes"); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &anchorNodes); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("anchor_nodes must be a JSON array of strings: %v", err)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("anchor_nodes must be a JSON array of strings: %v", stripInternalPaths(err.Error()))), nil
 		}
 		// Validate node ID format: must contain "::" separator (e.g. "repo::file.go::FuncName").
 		for _, nid := range anchorNodes {
@@ -78,14 +78,14 @@ func (s *Server) handleRemember(
 	// rationale is concatenated with decision before embedding — needs same tight limit.
 	rationale, rationaleErr := stringArgLimited(req, "rationale", maxArgLengthRationale)
 	if rationaleErr != nil {
-		return mcp.NewToolResultError(rationaleErr.Error()), nil
+		return mcp.NewToolResultError(stripInternalPaths(rationaleErr.Error())), nil
 	}
 
 	// OF-S2: scan externally-sourced content for prompt injection patterns.
 	// Covers decision and rationale — the two fields persisted to SQLite and embedded.
 	var injectionWarning string
 	if scanResult, scanErr := s.scanContent("decision", decision); scanErr != nil {
-		return mcp.NewToolResultError(scanErr.Error()), nil
+		return mcp.NewToolResultError(stripInternalPaths(scanErr.Error())), nil
 	} else {
 		decision = scanResult.sanitized
 		if scanResult.warning != "" {
@@ -101,7 +101,7 @@ func (s *Server) handleRemember(
 	}
 	if rationale != "" {
 		if scanResult, scanErr := s.scanContent("rationale", rationale); scanErr != nil {
-			return mcp.NewToolResultError(scanErr.Error()), nil
+			return mcp.NewToolResultError(stripInternalPaths(scanErr.Error())), nil
 		} else {
 			rationale = scanResult.sanitized
 			if scanResult.warning != "" && injectionWarning == "" {
@@ -359,7 +359,7 @@ func (s *Server) handleRecall(
 	if sinceStr := stringArg(req, "since"); sinceStr != "" {
 		t, err := parseFlexibleTime(sinceStr, false)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("since: %v", err)), nil
+			return toolError("since", err)
 		}
 		sinceTime = &t
 		// Auto-derive sinceDays if the caller didn't set since_days explicitly.
@@ -374,7 +374,7 @@ func (s *Server) handleRecall(
 	if untilStr := stringArg(req, "until"); untilStr != "" {
 		t, err := parseFlexibleTime(untilStr, true) // true = end-of-day for date-only
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("until: %v", err)), nil
+			return toolError("until", err)
 		}
 		untilTime = &t
 	}
@@ -409,7 +409,7 @@ func (s *Server) handleRecall(
 			sinceDays,
 		)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("get episodes: %v", err)), nil
+			return toolError("get episodes", err)
 		}
 
 		// Also surface recent memories from the unified table.
@@ -470,7 +470,7 @@ func (s *Server) handleRecall(
 			// Try date-only format as fallback (e.g. "2026-03-15").
 			parsed, parseErr = time.Parse("2006-01-02", asOfStr)
 			if parseErr != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("as_of must be RFC3339 (e.g. '2026-03-15T12:00:00Z') or date (e.g. '2026-03-15'): %v", parseErr)), nil
+				return mcp.NewToolResultError(fmt.Sprintf("as_of must be RFC3339 (e.g. '2026-03-15T12:00:00Z') or date (e.g. '2026-03-15'): %v", stripInternalPaths(parseErr.Error()))), nil
 			}
 			// Set to end of day in UTC for date-only format.
 			parsed = parsed.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
@@ -517,7 +517,7 @@ func (s *Server) handleRecall(
 		sinceDays,
 	)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("recall episodes: %v", err)), nil
+		return toolError("recall episodes", err)
 	}
 
 	// Sprint 10.5: when time bounds are active, inflate the internal fetch limit
@@ -924,7 +924,7 @@ func (s *Server) handleGetEpisodes(
 		sinceDays,
 	)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get episodes: %v", err)), nil
+		return toolError("get episodes", err)
 	}
 
 	summary := "no episodes found"
@@ -1086,7 +1086,7 @@ func (s *Server) handleGetRuleCandidates(
 
 	candidates, err := s.store.GetRuleCandidates(minOccurrences)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get rule candidates: %v", err)), nil
+		return toolError("get rule candidates", err)
 	}
 
 	summary := fmt.Sprintf("no failure patterns with ≥%d occurrences yet", minOccurrences)

@@ -47,7 +47,8 @@ type OllamaClient struct {
 }
 
 // NewOllamaClient creates a client targeting the given Ollama base URL and model.
-// timeoutMS is the per-request timeout in milliseconds.
+// timeoutMS is the per-request timeout in milliseconds (applied at HTTP client
+// level — does not cancel the Ollama server-side inference, only the wait).
 func NewOllamaClient(baseURL, model string, timeoutMS int) *OllamaClient {
 	if timeoutMS <= 0 {
 		timeoutMS = 3000

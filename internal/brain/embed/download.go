@@ -37,14 +37,13 @@ var embedModelSHA256 = map[string]string{
 func verifyOrLogSHA256(data []byte, expected string, label string, progress io.Writer) error {
 	actual := sha256.Sum256(data)
 	actualHex := hex.EncodeToString(actual[:])
-	if expected != "" {
-		if subtle.ConstantTimeCompare([]byte(actualHex), []byte(expected)) != 1 {
-			return fmt.Errorf("%s integrity check failed: expected sha256 %s, got %s", label, expected, actualHex)
-		}
-		logProgress(progress, "SHA-256 verified: %s", actualHex[:16])
-	} else {
-		logProgress(progress, "WARNING: %s sha256 not pinned (pin this): %s", label, actualHex)
+	if expected == "" {
+		return fmt.Errorf("%s integrity check failed: no expected sha256 hash configured (actual: %s) — pin this hash before shipping", label, actualHex)
 	}
+	if subtle.ConstantTimeCompare([]byte(actualHex), []byte(expected)) != 1 {
+		return fmt.Errorf("%s integrity check failed: expected sha256 %s, got %s", label, expected, actualHex)
+	}
+	logProgress(progress, "SHA-256 verified: %s", actualHex[:16])
 	return nil
 }
 
@@ -280,7 +279,8 @@ func downloadBytes(ctx context.Context, client *http.Client, url string) ([]byte
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
 	}
-	return io.ReadAll(resp.Body)
+	const maxDownloadBytes = 512 << 20
+	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadBytes))
 }
 
 // downloadFile streams a URL to a local file, writing progress to w.

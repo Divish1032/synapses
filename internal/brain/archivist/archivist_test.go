@@ -122,17 +122,11 @@ func TestMemorize_NonJSON_ReturnsEmptyNoError(t *testing.T) {
 	client := llm.NewMockClient("Sorry, I cannot help with that request.")
 	a := New(client, 5*time.Second)
 
-	resp, err := a.Memorize(context.Background(), MemorizeRequest{
+	_, err := a.Memorize(context.Background(), MemorizeRequest{
 		SessionEvents: []SessionEvent{{Tool: "get_context", Entity: "Foo"}},
 	})
-	if err != nil {
-		t.Fatalf("expected no error for non-JSON response, got: %v", err)
-	}
-	if len(resp.NewMemories) != 0 {
-		t.Errorf("NewMemories = %v, want empty", resp.NewMemories)
-	}
-	if len(resp.Annotations) != 0 {
-		t.Errorf("Annotations = %v, want empty", resp.Annotations)
+	if err == nil {
+		t.Fatalf("expected parse error for non-JSON response, got nil")
 	}
 }
 
@@ -273,13 +267,9 @@ func TestMemorize_UnavailableMock_StillCallsGenerate(t *testing.T) {
 	client := llm.NewUnavailableMockClient()
 	a := New(client, 5*time.Second)
 
-	resp, err := a.Memorize(context.Background(), MemorizeRequest{})
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-	// Empty string is not valid JSON → falls through to empty response.
-	if len(resp.NewMemories) != 0 || len(resp.Annotations) != 0 {
-		t.Errorf("expected empty response from unavailable mock, got: %+v", resp)
+	_, err := a.Memorize(context.Background(), MemorizeRequest{})
+	if err == nil {
+		t.Fatalf("expected parse error from unavailable mock, got nil")
 	}
 }
 

@@ -218,7 +218,7 @@ func topLevelPackage(filePath string) string {
 func jsonResult(v interface{}) (*mcp.CallToolResult, error) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("marshal result: %v", err)), nil
+		return toolError("marshal result", err)
 	}
 	const maxResponseBytes = 2 * 1024 * 1024 // 2 MiB
 	if len(b) > maxResponseBytes {
@@ -253,10 +253,10 @@ func toolError(operation string, err error) (*mcp.CallToolResult, error) {
 	return mcp.NewToolResultError(fmt.Sprintf("%s: %v", operation, msg)), nil
 }
 
-// stripInternalPaths removes absolute filesystem paths from error messages to
+// StripInternalPaths removes absolute filesystem paths from error messages to
 // prevent leaking internal server paths to AI agents via MCP tool results.
 // Replaces patterns like "/Users/foo/.synapses/data/graph.db" with "<internal>".
-func stripInternalPaths(msg string) string {
+func StripInternalPaths(msg string) string {
 	// Strip Unix absolute paths (e.g., /home/user/.synapses/..., /Users/...)
 	// but preserve relative paths and URL paths.
 	result := pathStripRe.ReplaceAllString(msg, "<internal>")
@@ -264,3 +264,6 @@ func stripInternalPaths(msg string) string {
 	result = winPathStripRe.ReplaceAllString(result, "<internal>")
 	return result
 }
+
+// stripInternalPaths is an unexported alias for internal callers.
+var stripInternalPaths = StripInternalPaths

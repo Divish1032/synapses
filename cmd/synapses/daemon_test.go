@@ -218,7 +218,7 @@ func TestDaemonLogs_WithContent(t *testing.T) {
 	defer cleanup()
 
 	// Create a log file with content
-	logPath := logFilePath("brain")
+	logPath := logFilePath("daemon")
 
 	// Ensure parent directory exists (should already be created by tempSynapsesHome)
 	os.MkdirAll(filepath.Dir(logPath), 0o755)
@@ -229,7 +229,7 @@ func TestDaemonLogs_WithContent(t *testing.T) {
 	}
 
 	// Read the logs
-	err := daemonLogs("brain")
+	err := daemonLogs("daemon")
 	if err != nil {
 		t.Fatalf("daemonLogs failed: %v", err)
 	}

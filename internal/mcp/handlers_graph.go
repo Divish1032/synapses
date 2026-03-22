@@ -1001,6 +1001,9 @@ func (s *Server) handleSearch(
 	}
 	var hits []hit
 
+	// TODO: O(N) scan over all nodes — consider routing default mode through
+	// FTS5 (like mode=fulltext) for large graphs. Current approach provides
+	// name-prefix and file-path scoring that FTS5 BM25 does not replicate.
 	for _, n := range s.graph.AllNodes() {
 		if n.Type == graph.NodeFile || n.Type == graph.NodePackage {
 			continue
@@ -1403,7 +1406,7 @@ func (s *Server) handleSemanticSearch(
 	// --- FTS5 path (always runs as fallback / supplement) ---
 	ftsResults, err := s.store.SemanticSearch(query, limit)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("semantic search: %v", err)), nil
+		return toolError("semantic search", err)
 	}
 
 	// --- Merge: vector results first, then FTS results not already returned ---

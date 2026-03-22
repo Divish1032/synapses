@@ -60,6 +60,8 @@ type LocalClient struct {
 
 	// contextSize is the maximum token context window.
 	contextSize int
+	// inferSem prevents queued zombie inferences on context cancellation.
+	inferSem chan struct{}
 }
 
 // NewLocalClient loads a GGUF model file and returns a ready LocalClient.
@@ -81,6 +83,7 @@ func NewLocalClient(ggufPath string, hw HardwareConfig) (*LocalClient, error) {
 		modelName:   ggufModelName(ggufPath),
 		hw:          hw,
 		contextSize: 2048,
+		inferSem:    make(chan struct{}, 1),
 	}
 
 	if err := c.loadModel(); err != nil {

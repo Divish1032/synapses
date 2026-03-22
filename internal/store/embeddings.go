@@ -191,7 +191,8 @@ func (s *Store) VectorSearch(queryVec []float32, limit int) ([]SearchResult, err
 func (s *Store) vectorSearchBruteForce(normQuery []float32, limit int) ([]SearchResult, error) {
 	rows, err := s.graphDB.Query(`
 		SELECT e.node_id, e.embedding
-		FROM node_embeddings e`)
+		FROM node_embeddings e
+		LIMIT 50000`)
 	if err != nil {
 		return nil, fmt.Errorf("vector search (brute-force): %w", err)
 	}

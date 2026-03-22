@@ -2,7 +2,7 @@ package mcp
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -121,7 +121,7 @@ func computeEntityHash(rootID graph.NodeID, nodes []graph.CarvedNode, edges []*g
 		parts = append(parts, string(e.From)+">"+string(e.To)+":"+string(e.Type))
 	}
 	sort.Strings(parts)
-	h := sha1.New()
+	h := sha256.New()
 	for _, s := range parts {
 		_, _ = h.Write([]byte(s))
 	}
@@ -418,7 +418,7 @@ func (s *Server) handleGetContext(
 	subgraph, err := s.graph.CarveEgoGraph(best.ID, cfg)
 	traversalDurationMs := float64(time.Since(traversalStart).Microseconds()) / 1000.0
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolError("carve ego graph", err)
 	}
 
 	// normalizeSubgraph deep-copies nodes, so boosting relevance on the result
@@ -502,7 +502,7 @@ func (s *Server) handleGetContext(
 		maxDepth := cfg.MaxDepth
 		result, err := s.graph.ImpactAnalysis(best.ID, maxDepth)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("impact analysis: %v", err)), nil
+			return toolError("impact analysis", err)
 		}
 		return jsonResult(result)
 	}
@@ -1307,7 +1307,7 @@ func (s *Server) handleGetImpact(
 
 	result, err := s.graph.ImpactAnalysis(root.ID, maxDepth)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("impact analysis: %v", err)), nil
+		return toolError("impact analysis", err)
 	}
 	if result.Tiers == nil {
 		result.Tiers = []graph.ImpactTier{}

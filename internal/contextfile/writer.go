@@ -16,15 +16,15 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
-// fnvHash mirrors the FNV-1a computation from store.hashPath so that the
+// fnvHash mirrors the FNV-1a 64-bit computation from store.hashPath so that the
 // context file can be located by its project path without importing store.
 func fnvHash(path string) string {
-	h := uint32(2166136261)
+	h := uint64(14695981039346656037)
 	for _, c := range []byte(path) {
-		h ^= uint32(c)
-		h *= 16777619
+		h ^= uint64(c)
+		h *= 1099511628211
 	}
-	return fmt.Sprintf("%08x", h)
+	return fmt.Sprintf("%016x", h)
 }
 
 // ContextFilePath returns the absolute path of the context file for repoRoot.

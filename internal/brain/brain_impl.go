@@ -718,6 +718,13 @@ func (b *impl) Summary(projectID, nodeID string) string {
 	return b.store.GetSummary(projectID, nodeID)
 }
 
+func (b *impl) Close() error {
+	if b.store != nil {
+		return b.store.Close()
+	}
+	return nil
+}
+
 func (b *impl) Available() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

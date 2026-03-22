@@ -13,6 +13,11 @@ type StringID uint32
 // when an agent requests a file that hasn't been saved to the SQLite BLOB yet.
 const ReservedGhostRange = 1000
 
+// MaxPoolSize is the upper bound on the number of interned strings.
+// Intern returns a ghost ID once this limit is reached, preventing unbounded
+// memory growth in extremely large repositories.
+const MaxPoolSize = 5_000_000
+
 // StringPool implements a bi-directional mapping between strings and uint32 IDs.
 // It leverages the Go 1.23 `unique` package to ensure that identical strings
 // share the same underlying memory allocation across the entire application,
@@ -72,6 +77,11 @@ func (p *StringPool) Intern(s string) StringID {
 		return id
 	}
 
+	// Cap check: if the pool is full, return a ghost ID instead of growing forever.
+	if len(p.reverse) >= MaxPoolSize {
+		return p.internGhost(s)
+	}
+
 	// Assign the next available ID sequence (offset by the ghost range)
 	id = StringID(len(p.reverse) + ReservedGhostRange)
 	p.forward[h] = id
@@ -105,5 +115,18 @@ func (p *StringPool) Value(id StringID) string {
 	}
 
 	return "" // Out of bounds safety fallback
+}
+
+// internGhost allocates a transient ghost ID for s. Caller must hold p.mu write lock.
+func (p *StringPool) internGhost(s string) StringID {
+	p.ghostMu.Lock()
+	defer p.ghostMu.Unlock()
+	id := p.ghostNext
+	if id >= ReservedGhostRange {
+		id = 1 // wrap around (0 is reserved for empty string)
+	}
+	p.ghostCache[id] = s
+	p.ghostNext = id + 1
+	return StringID(id)
 }
 

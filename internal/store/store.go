@@ -5,7 +5,7 @@ package store
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -537,7 +537,13 @@ func DefaultPath(repoRoot string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("abs path: %w", err)
 	}
-	safe := filepath.Base(abs) + "_" + hashPath(abs)
+	base := filepath.Base(abs)
+	for _, c := range base {
+		if c < 0x20 || c == 0x7f {
+			return "", fmt.Errorf("repo path contains control characters")
+		}
+	}
+	safe := base + "_" + hashPath(abs)
 	return filepath.Join(dir, safe+".db"), nil
 }
 
@@ -606,7 +612,12 @@ func Open(path string) (*Store, error) {
 	// "duplicate column name" errors are safe to ignore — they mean the column
 	// was already created by CREATE TABLE (fresh DB) or a previous migration run.
 	// Wrapped in a transaction to prevent partially-migrated state on crash.
-	graphTx, _ := graphDB.Begin()
+	graphTx, err := graphDB.Begin()
+	if err != nil {
+		graphDB.Close()
+		knowledgeDB.Close()
+		return nil, fmt.Errorf("begin graph migration tx: %w", err)
+	}
 	for _, m := range []string{
 		`ALTER TABLE nodes ADD COLUMN doc TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN signature TEXT NOT NULL DEFAULT ''`,
@@ -1536,6 +1547,12 @@ func (s *Store) PruneStaleData(retentionDays int) {
 
 	// Orphaned memory_embeddings: no FK cascade exists, so clean up manually.
 	pruneExec(`DELETE FROM memory_embeddings WHERE memory_id NOT IN (SELECT id FROM memories)`)
+	// Orphaned memory_anchors: anchor rows whose memory was deleted.
+	pruneExec(`DELETE FROM memory_anchors WHERE memory_id NOT IN (SELECT id FROM memories)`)
+	// Orphaned memory_surfaced: surfacing records for deleted memories.
+	pruneExec(`DELETE FROM memory_surfaced WHERE memory_id NOT IN (SELECT id FROM memories)`)
+	// Orphaned memory_versions: version snapshots for deleted memories.
+	pruneExec(`DELETE FROM memory_versions WHERE memory_id NOT IN (SELECT id FROM memories)`)
 
 	// context_deliveries: instrumentation data for Sprint 11 feedback loop.
 	// Rows older than retention window have been analyzed and have no further value.
@@ -1549,6 +1566,8 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	// The read and delete are not atomic — a node added between the two steps could
 	// be briefly affected — but since the prune runs daily, any node absent at prune
 	// time has been gone for 23+ hours and is permanently deleted, not a reindex transient.
+	// NOTE: O(N) over all nodes — acceptable at current scale (tens of thousands).
+	// If the node table grows significantly, consider a chunked or indexed approach.
 	if s.graphDB != nil {
 		nodeIDs := make(map[string]struct{})
 		if rows, err := s.graphDB.Query(`SELECT id FROM nodes`); err == nil {
@@ -1648,7 +1667,7 @@ func (s *Store) reconcileOrphanedReferences() {
 		if !allowedTables[table] {
 			return 0
 		}
-		r, err := s.knowledgeDB.Query(fmt.Sprintf("SELECT node_id FROM %s", table))
+		r, err := s.knowledgeDB.Query(fmt.Sprintf("SELECT node_id FROM %q", table))
 		if err != nil {
 			return 0
 		}
@@ -2800,12 +2819,12 @@ func (s *Store) LoadDynamicRules() ([]config.Rule, error) {
 // hashPath produces a short, filesystem-safe hash of a path string.
 // This is not cryptographic — it exists solely to avoid filename collisions.
 func hashPath(path string) string {
-	h := uint32(2166136261) // FNV-1a
+	h := uint64(14695981039346656037) // FNV-1a 64-bit
 	for _, c := range []byte(path) {
-		h ^= uint32(c)
-		h *= 16777619
+		h ^= uint64(c)
+		h *= 1099511628211
 	}
-	return fmt.Sprintf("%08x", h)
+	return fmt.Sprintf("%016x", h)
 }
 
 // ViolationLogEntry is a single entry in the violation audit log.
@@ -2821,12 +2840,12 @@ type ViolationLogEntry struct {
 	Occurrences int    `json:"occurrences"`
 }
 
-// ViolationID returns a stable SHA-1-derived ID for a violation so that
+// ViolationID returns a stable SHA-256-derived ID for a violation so that
 // re-detecting the same violation updates the existing row rather than
 // inserting a duplicate. Exported so callers (e.g. the watcher) can compute
 // IDs to compare against ViolationIDsForFile results.
 func ViolationID(ruleID, fromNode, toNode, edgeType string) string {
-	h := sha1.Sum([]byte(ruleID + "\x00" + fromNode + "\x00" + toNode + "\x00" + edgeType))
+	h := sha256.Sum256([]byte(ruleID + "\x00" + fromNode + "\x00" + toNode + "\x00" + edgeType))
 	return fmt.Sprintf("%x", h[:8]) // 16 hex chars — compact and collision-resistant
 }
 

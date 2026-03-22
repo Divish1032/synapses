@@ -81,9 +81,11 @@ type Walker struct {
 
 	// PulseClient, when non-nil, receives a ParseEvent after each file is
 	// parsed during WalkDir. Fire-and-forget — never blocks parsing. (P2-2)
-	PulseClient  *pulse.Client
+	PulseClient *pulse.Client
 	// ProjectID is included in ParseEvent so Pulse can scope data per project.
-	ProjectID    string
+	ProjectID     string
+	mMATLABParser LanguageParser
+	mObjCParser   LanguageParser
 }
 
 // NewWalker creates a Walker pre-loaded with all built-in language parsers.

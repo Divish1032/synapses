@@ -146,6 +146,13 @@ func NewBuiltinEmbedderWithPoolSize(modelsDir string, poolSize int) *BuiltinEmbe
 // ensureModel downloads the model if not already cached, and initializes
 // the pipeline pool. Must be called under b.mu lock.
 // Returns nil on success. On failure, the caller should retry next time.
+//
+// TODO(perf): this holds b.mu during the entire model download, which can
+// take minutes and blocks all concurrent Embed() calls. Refactor to use a
+// dedicated downloadMu or a singleflight/sync.Once-with-retry pattern so
+// that Embed() callers can wait on download completion without holding the
+// main mutex. sync.Once alone doesn't support retry-on-failure, so a
+// custom once-or-retry wrapper is needed.
 func (b *BuiltinEmbedder) ensureModel() error {
 	if b.ready {
 		return nil
@@ -407,6 +414,9 @@ func (b *BuiltinEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 	// This is necessary because truncation breaks the pre-normalization invariant.
 	// The store's UpsertMemoryEmbedding also normalizes, making that a no-op.
 	vec = l2Normalize(vec)
+	if vec == nil {
+		return nil, fmt.Errorf("builtin embed: l2 normalization failed (NaN/Inf in embedding)")
+	}
 	return vec, nil
 }
 

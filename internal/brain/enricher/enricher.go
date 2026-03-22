@@ -375,7 +375,7 @@ func (e *Enricher) buildSILPrompt(req Request) string {
 		Name:    req.RootName,
 		Type:    nodeTypeOrDefault(req.RootType),
 		Package: packageFromFile(req.RootFile),
-		File:    req.RootFile,
+		File:    stripToRelative(req.RootFile),
 		Line:    0,
 	}}
 	edges := []silGraphEdge{}
@@ -427,6 +427,17 @@ func languageFromFile(filePath string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// stripToRelative strips absolute paths to relative project paths to prevent
+// leaking filesystem paths to the LLM.
+func stripToRelative(filePath string) string {
+	for _, marker := range []string{"/internal/", "/cmd/", "/pkg/", "/src/"} {
+		if idx := strings.Index(filePath, marker); idx >= 0 {
+			return filePath[idx+1:]
+		}
+	}
+	return filepath.Base(filePath)
 }
 
 // packageFromFile extracts the immediate parent directory name from a file path.

@@ -166,6 +166,14 @@ func (g *Graph) AddEdge(e *Edge) {
 	g.piCache = nil // invalidate ProjectIdentity cache
 }
 
+// HasEdge reports whether an edge (from, to, edgeType) exists in the graph. O(1).
+func (g *Graph) HasEdge(from, to NodeID, edgeType EdgeType) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	_, exists := g.edgeSet[edgeKey{From: from, To: to, Type: edgeType}]
+	return exists
+}
+
 // GetNode returns the node for a given ID, or nil if absent.
 func (g *Graph) GetNode(id NodeID) *Node {
 	g.mu.RLock()
@@ -464,7 +472,15 @@ func (g *Graph) AddVarType(file, varName, typeName string) {
 func (g *Graph) GetVarTypes(file string) map[string]string {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return g.varTypes[file]
+	orig := g.varTypes[file]
+	if orig == nil {
+		return nil
+	}
+	cp := make(map[string]string, len(orig))
+	for k, v := range orig {
+		cp[k] = v
+	}
+	return cp
 }
 
 // AllNodes returns a snapshot of every node in the graph.
@@ -895,8 +911,8 @@ func (g *Graph) ProjectIdentity() *ProjectIdentity {
 	}
 	g.mu.RUnlock()
 
-	g.mu.RLock()
-	defer g.mu.RUnlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
 
 	summary := GraphSummary{}
 
@@ -939,6 +955,10 @@ func (g *Graph) ProjectIdentity() *ProjectIdentity {
 			})
 		}
 	}
+
+	sort.Slice(entryPoints, func(i, j int) bool {
+		return string(entryPoints[i].ID) < string(entryPoints[j].ID)
+	})
 
 	// Key entities: top-10 nodes by combined fanin + fanout (connectivity).
 	type scored struct {
@@ -1010,8 +1030,8 @@ func (g *Graph) ProjectIdentity() *ProjectIdentity {
 		Scale:          scale,
 		ToolGuidance:   toolGuidance,
 	}
-	// Best-effort cache — safe because piCache is only read under RLock
-	// and invalidated under Lock in AddNode/AddEdge/RemoveFile.
+	// Best-effort cache — safe because we hold a write lock here
+	// and the cache is invalidated under Lock in AddNode/AddEdge/RemoveFile.
 	g.piCache = result
 	g.piCacheAt = time.Now().Unix()
 	return result
@@ -1022,8 +1042,8 @@ func (g *Graph) ProjectIdentity() *ProjectIdentity {
 // directory pairs where ≥85% of nodes in the from-dir call into the to-dir
 // (minimum 3 samples) as suggested architectural rules.
 //
-// Must be called under g.mu.RLock() — used by ProjectIdentity() which already
-// holds the read lock. Do NOT call g.mu.RLock() inside this method.
+// Must be called under g.mu.Lock() — used by ProjectIdentity() which already
+// holds the write lock. Do NOT call g.mu.Lock() inside this method.
 //
 // Returns up to 5 suggestions ordered by confidence descending.
 func (g *Graph) SuggestRules() []SuggestedRule {

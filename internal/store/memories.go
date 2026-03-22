@@ -422,12 +422,17 @@ func (s *Store) TouchMemory(id string) error {
 func (s *Store) ExpireMemories() (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	// Collect expiring memories before deletion so we can emit lifecycle events.
-	// Query outside the tx — connection is free, avoids holding a read lock
-	// across the write transaction.
+	// Delete expired memories and clean up their anchors in one transaction.
+	tx, err := s.knowledgeDB.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin expire tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Collect expiring memories inside the transaction to avoid TOCTOU races.
 	type expiredEntry struct{ id, agentID string }
 	var expiring []expiredEntry
-	if erows, qErr := s.knowledgeDB.Query(
+	if erows, qErr := tx.Query(
 		`SELECT id, agent_id FROM memories WHERE expires_at <= ?`, now,
 	); qErr == nil {
 		for erows.Next() {
@@ -437,13 +442,6 @@ func (s *Store) ExpireMemories() (int64, error) {
 		}
 		_ = erows.Close()
 	}
-
-	// Delete expired memories and clean up their anchors in one transaction.
-	tx, err := s.knowledgeDB.Begin()
-	if err != nil {
-		return 0, fmt.Errorf("begin expire tx: %w", err)
-	}
-	defer tx.Rollback()
 
 	// Delete anchors, surfacing records, embeddings, and versions for memories about to expire.
 	// Correlated EXISTS is O(n·log n) with the PK index on memories,

@@ -30,8 +30,8 @@ func TestFnvHash_DifferentPaths(t *testing.T) {
 
 func TestFnvHash_Format(t *testing.T) {
 	h := fnvHash("/any/path")
-	if len(h) != 8 {
-		t.Errorf("expected 8-char hex hash, got %q (len %d)", h, len(h))
+	if len(h) != 16 {
+		t.Errorf("expected 16-char hex hash, got %q (len %d)", h, len(h))
 	}
 	for _, c := range h {
 		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
@@ -482,8 +482,8 @@ func TestRender_OnlyPendingTasks(t *testing.T) {
 
 func TestFnvHash_EmptyString(t *testing.T) {
 	h := fnvHash("")
-	if len(h) != 8 {
-		t.Errorf("fnvHash(\"\") length = %d, want 8", len(h))
+	if len(h) != 16 {
+		t.Errorf("fnvHash(\"\") length = %d, want 16", len(h))
 	}
 	// Hash of empty string should be consistent
 	h2 := fnvHash("")
@@ -498,7 +498,7 @@ func TestFnvHash_SingleCharacter(t *testing.T) {
 	if h1 == h2 {
 		t.Errorf("single char hashes collision: %q == %q", h1, h2)
 	}
-	if len(h1) != 8 || len(h2) != 8 {
+	if len(h1) != 16 || len(h2) != 16 {
 		t.Errorf("hash format incorrect: %q, %q", h1, h2)
 	}
 }
@@ -647,8 +647,8 @@ func TestRender_MixedTaskStatuses(t *testing.T) {
 func TestFnvHash_LongPath(t *testing.T) {
 	longPath := "/very/long/path/to/some/project/with/many/segments/that/goes/on/and/on/and/on/and/on"
 	h := fnvHash(longPath)
-	if len(h) != 8 {
-		t.Errorf("expected 8-char hash for long path, got %d: %s", len(h), h)
+	if len(h) != 16 {
+		t.Errorf("expected 16-char hash for long path, got %d: %s", len(h), h)
 	}
 	// Should be deterministic
 	h2 := fnvHash(longPath)

@@ -17,6 +17,7 @@ package main
 
 import (
 	"fmt"
+	"html"
 	"log"
 	"os"
 	"os/exec"
@@ -323,6 +324,20 @@ func daemonLogs(name string) error {
 	if name == "" {
 		return fmt.Errorf("specify a service: synapses daemon logs --service brain")
 	}
+	// Validate name against known services to prevent path traversal.
+	allowed := false
+	for _, s := range allSidecars {
+		if s.Name == name {
+			allowed = true
+			break
+		}
+	}
+	if name == "daemon" {
+		allowed = true
+	}
+	if !allowed {
+		return fmt.Errorf("unknown service %q", name)
+	}
 	data, err := os.ReadFile(logFilePath(name))
 	if err != nil {
 		return fmt.Errorf("no log file for %s at %s", name, logFilePath(name))
@@ -372,8 +387,11 @@ func launchdAgentsDir() (string, error) {
 	return filepath.Join(home, "Library", "LaunchAgents"), nil
 }
 
-func launchdPlist(s Sidecar) string {
-	binPath, _ := exec.LookPath(s.Binary)
+func launchdPlist(s Sidecar) (string, error) {
+	binPath, err := exec.LookPath(s.Binary)
+	if err != nil {
+		return "", fmt.Errorf("look up %s binary: %w", s.Binary, err)
+	}
 	logPath := logFilePath(s.Name)
 	label := "com.synapses." + s.Name
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
@@ -397,7 +415,7 @@ func launchdPlist(s Sidecar) string {
   <string>%s</string>
 </dict>
 </plist>
-`, label, binPath, logPath, logPath)
+`, html.EscapeString(label), html.EscapeString(binPath), html.EscapeString(logPath), html.EscapeString(logPath)), nil
 }
 
 // daemonSelfPlist returns the launchd plist XML for the daemon process itself.
@@ -427,7 +445,7 @@ func daemonSelfPlist(binPath, logPath, homeDir string) string {
   <string>%s</string>
 </dict>
 </plist>
-`, daemonLabel, binPath, homeDir, logPath, logPath)
+`, html.EscapeString(daemonLabel), html.EscapeString(binPath), html.EscapeString(homeDir), html.EscapeString(logPath), html.EscapeString(logPath))
 }
 
 func installLaunchd() error {
@@ -451,7 +469,11 @@ func installLaunchd() error {
 		label := "com.synapses." + s.Name
 		plistPath := filepath.Join(agentsDir, label+".plist")
 
-		if err := os.WriteFile(plistPath, []byte(launchdPlist(s)), 0o644); err != nil {
+		plistContent, err := launchdPlist(s)
+		if err != nil {
+			return fmt.Errorf("generate plist for %s: %w", s.Name, err)
+		}
+		if err := os.WriteFile(plistPath, []byte(plistContent), 0o644); err != nil {
 			return fmt.Errorf("write plist for %s: %w", s.Name, err)
 		}
 		// Unload first in case it's already registered with old config.
@@ -517,6 +539,11 @@ func uninstallLaunchd() error {
 	return nil
 }
 
+// sanitizeUnitValue strips newlines to prevent directive injection in systemd unit files.
+func sanitizeUnitValue(s string) string {
+	return strings.NewReplacer("\n", "", "\r", "").Replace(s)
+}
+
 // ── systemd (Linux) ───────────────────────────────────────────────────────────
 
 func systemdUserDir() (string, error) {
@@ -527,8 +554,11 @@ func systemdUserDir() (string, error) {
 	return filepath.Join(home, ".config", "systemd", "user"), nil
 }
 
-func systemdUnit(s Sidecar) string {
-	binPath, _ := exec.LookPath(s.Binary)
+func systemdUnit(s Sidecar) (string, error) {
+	binPath, err := exec.LookPath(s.Binary)
+	if err != nil {
+		return "", fmt.Errorf("look up %s binary: %w", s.Binary, err)
+	}
 	logPath := logFilePath(s.Name)
 	return fmt.Sprintf(`[Unit]
 Description=Synapses %s sidecar
@@ -544,7 +574,7 @@ StandardError=append:%s
 
 [Install]
 WantedBy=default.target
-`, s.Name, binPath, logPath, logPath)
+`, sanitizeUnitValue(s.Name), sanitizeUnitValue(binPath), sanitizeUnitValue(logPath), sanitizeUnitValue(logPath)), nil
 }
 
 // daemonSelfSystemdUnit returns the systemd unit file for the daemon process itself.
@@ -563,7 +593,7 @@ StandardError=append:%s
 
 [Install]
 WantedBy=default.target
-`, binPath, logPath, logPath)
+`, sanitizeUnitValue(binPath), sanitizeUnitValue(logPath), sanitizeUnitValue(logPath))
 }
 
 func installSystemd() error {
@@ -587,7 +617,11 @@ func installSystemd() error {
 		unitName := "synapses-" + s.Name + ".service"
 		unitPath := filepath.Join(svcDir, unitName)
 
-		if err := os.WriteFile(unitPath, []byte(systemdUnit(s)), 0o644); err != nil {
+		unitContent, err := systemdUnit(s)
+		if err != nil {
+			return fmt.Errorf("generate unit for %s: %w", s.Name, err)
+		}
+		if err := os.WriteFile(unitPath, []byte(unitContent), 0o644); err != nil {
 			return fmt.Errorf("write unit for %s: %w", s.Name, err)
 		}
 		exec.Command("systemctl", "--user", "daemon-reload").Run() //nolint:errcheck

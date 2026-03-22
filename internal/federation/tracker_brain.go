@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 
@@ -134,7 +135,7 @@ func parseBrainDeps(response string) []BrainDetectedDep {
 		}
 
 		// Confidence threshold filter.
-		if dep.Confidence < 0.7 {
+		if math.IsNaN(dep.Confidence) || dep.Confidence < 0.7 {
 			continue
 		}
 
@@ -212,6 +213,26 @@ func (a *BrainTrackerAdapter) DetectAndStoreBrain(ctx context.Context, filePath 
 // Only deps where the entity actually exists are returned.
 // This is the anti-hallucination gate — the brain may claim a dep exists,
 // but we only trust it if the sibling's graph confirms it.
+// filterSecretLines removes lines that match common secret patterns before
+// sending file content to the LLM.
+func filterSecretLines(content string) string {
+	lines := strings.Split(content, "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		upper := strings.ToUpper(line)
+		if strings.Contains(upper, "API_KEY=") ||
+			strings.Contains(upper, "SECRET=") ||
+			strings.Contains(upper, "PASSWORD=") ||
+			strings.Contains(upper, "TOKEN=") ||
+			strings.Contains(upper, "PRIVATE_KEY") ||
+			strings.Contains(upper, "SECRET_KEY") {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	return strings.Join(filtered, "\n")
+}
+
 func (bd *BrainDetector) validateBrainDeps(ctx context.Context, raw []BrainDetectedDep) []RawCrossDep {
 	var valid []RawCrossDep
 	for _, dep := range raw {

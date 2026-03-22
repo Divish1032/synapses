@@ -266,7 +266,10 @@ func (c *Collector) enqueue(ev event) {
 	// P2-19: true bounded ring buffer — drop the oldest event when full.
 	if len(c.buf) >= c.cap {
 		// Remove oldest event to make room (ring buffer semantics).
-		c.buf = c.buf[1:]
+		// Use copy instead of c.buf[1:] to prevent slice header leak
+		// (underlying array never shrinks with simple reslice).
+		copy(c.buf, c.buf[1:])
+		c.buf = c.buf[:len(c.buf)-1]
 		c.dropped.Add(1)
 	}
 
@@ -385,7 +388,11 @@ func (c *Collector) writeBatch(batch []event) {
 func (c *Collector) dispatchTx(ev event) error {
 	switch ev.kind {
 	case "tool_call":
-		tc, _ := ev.data.(pulsetypes.ToolCallEvent)
+		tc, ok := ev.data.(pulsetypes.ToolCallEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		if err := c.store.InsertToolCallTx(tc); err != nil {
 			return err
 		}
@@ -401,7 +408,11 @@ func (c *Collector) dispatchTx(ev event) error {
 			logutil.Warn("pulse collector: update session stats: %v\n", serr)
 		}
 	case "context_delivery":
-		cd, _ := ev.data.(pulsetypes.ContextDeliveryEvent)
+		cd, ok := ev.data.(pulsetypes.ContextDeliveryEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		if err := c.store.InsertContextDeliveryTx(cd); err != nil {
 			return err
 		}
@@ -427,68 +438,152 @@ func (c *Collector) dispatchTx(ev event) error {
 			logutil.Warn("pulse collector: add session tokens saved: %v\n", serr)
 		}
 	case "brain_usage":
-		bu, _ := ev.data.(pulsetypes.BrainUsageEvent)
+		bu, ok := ev.data.(pulsetypes.BrainUsageEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertBrainUsageTx(bu)
 	case "session":
-		sp, _ := ev.data.(sessionPayload)
+		sp, ok := ev.data.(sessionPayload)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		// Bug 16 — DQ-C.6: pass agent version through to the store.
 		return c.store.UpsertSessionWithVersionTx(sp.ID, sp.AgentID, sp.ProjectID, sp.Event, sp.AgentVersion)
 	case "outcome_signal":
-		os, _ := ev.data.(pulsetypes.OutcomeSignalEvent)
+		os, ok := ev.data.(pulsetypes.OutcomeSignalEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertOutcomeSignalTx(os)
 	case "session_model":
-		sp, _ := ev.data.(sessionModelPayload)
+		sp, ok := ev.data.(sessionModelPayload)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.UpdateSessionModelTx(sp.SessionID, sp.AgentID, sp.ProjectID, sp.Model, sp.Provider)
 	case "agent_llm_usage":
-		au, _ := ev.data.(pulsetypes.AgentLLMUsageEvent)
+		au, ok := ev.data.(pulsetypes.AgentLLMUsageEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertAgentLLMUsageTx(au)
 	case "parse_event":
-		pe, _ := ev.data.(pulsetypes.ParseEvent)
+		pe, ok := ev.data.(pulsetypes.ParseEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertParseEventTx(pe)
 	case "reparse_event":
-		re, _ := ev.data.(pulsetypes.ReparseEvent)
+		re, ok := ev.data.(pulsetypes.ReparseEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertReparseEventTx(re)
 	case "graph_snapshot":
-		gs, _ := ev.data.(pulsetypes.GraphSnapshotEvent)
+		gs, ok := ev.data.(pulsetypes.GraphSnapshotEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertGraphSnapshotTx(gs)
 	case "embedding_event":
-		ee, _ := ev.data.(pulsetypes.EmbeddingEvent)
+		ee, ok := ev.data.(pulsetypes.EmbeddingEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertEmbeddingEventTx(ee)
 	case "index_event":
-		ie, _ := ev.data.(pulsetypes.IndexEvent)
+		ie, ok := ev.data.(pulsetypes.IndexEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertIndexEventTx(ie)
 	case "guard_event":
-		ge, _ := ev.data.(pulsetypes.GuardEvent)
+		ge, ok := ev.data.(pulsetypes.GuardEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertGuardEventTx(ge)
 	case "memory_op":
-		mo, _ := ev.data.(pulsetypes.MemoryOperationEvent)
+		mo, ok := ev.data.(pulsetypes.MemoryOperationEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertMemoryOpTx(mo)
 	case "validation_event":
-		ve, _ := ev.data.(pulsetypes.ValidationEvent)
+		ve, ok := ev.data.(pulsetypes.ValidationEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertValidationEventTx(ve)
 	case "search_event":
-		se, _ := ev.data.(pulsetypes.SearchEvent)
+		se, ok := ev.data.(pulsetypes.SearchEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertSearchEventTx(se)
 	case "config_reload":
-		cr, _ := ev.data.(pulsetypes.ConfigReloadEvent)
+		cr, ok := ev.data.(pulsetypes.ConfigReloadEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertConfigReloadEventTx(cr)
 	case "persistence_event":
-		pe, _ := ev.data.(pulsetypes.PersistenceEvent)
+		pe, ok := ev.data.(pulsetypes.PersistenceEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertPersistenceEventTx(pe)
 	case "enrichment_event":
-		ee, _ := ev.data.(pulsetypes.EnrichmentEvent)
+		ee, ok := ev.data.(pulsetypes.EnrichmentEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertEnrichmentEventTx(ee)
 	case "rule_eval_event":
-		re, _ := ev.data.(pulsetypes.RuleEvalEvent)
+		re, ok := ev.data.(pulsetypes.RuleEvalEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertRuleEvalEventTx(re)
 	case "federation_event":
-		fe, _ := ev.data.(pulsetypes.FederationDetectEvent)
+		fe, ok := ev.data.(pulsetypes.FederationDetectEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertFederationEventTx(fe)
 	case "skill_execution":
-		se, _ := ev.data.(pulsetypes.SkillExecutionEvent)
+		se, ok := ev.data.(pulsetypes.SkillExecutionEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertSkillExecutionTx(se)
 	case "tool_sequence":
-		ts, _ := ev.data.(pulsetypes.ToolSequenceEntry)
+		ts, ok := ev.data.(pulsetypes.ToolSequenceEntry)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertToolSequenceEntryTx(ts.SessionID, ts.ToolName, ts.Position, ts.Success)
 	case "heartbeat":
 		return c.store.InsertHeartbeatTx()
@@ -514,7 +609,11 @@ func (c *Collector) writeBatchNoTx(batch []event) {
 func (c *Collector) dispatchNoTx(ev event) error {
 	switch ev.kind {
 	case "tool_call":
-		tc, _ := ev.data.(pulsetypes.ToolCallEvent)
+		tc, ok := ev.data.(pulsetypes.ToolCallEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		if err := c.store.InsertToolCall(tc); err != nil {
 			return err
 		}
@@ -530,7 +629,11 @@ func (c *Collector) dispatchNoTx(ev event) error {
 			logutil.Warn("pulse collector: update session stats: %v\n", serr)
 		}
 	case "context_delivery":
-		cd, _ := ev.data.(pulsetypes.ContextDeliveryEvent)
+		cd, ok := ev.data.(pulsetypes.ContextDeliveryEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		if err := c.store.InsertContextDelivery(cd); err != nil {
 			return err
 		}
@@ -556,68 +659,152 @@ func (c *Collector) dispatchNoTx(ev event) error {
 			logutil.Warn("pulse collector: add session tokens saved: %v\n", serr)
 		}
 	case "brain_usage":
-		bu, _ := ev.data.(pulsetypes.BrainUsageEvent)
+		bu, ok := ev.data.(pulsetypes.BrainUsageEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertBrainUsage(bu)
 	case "session":
-		sp, _ := ev.data.(sessionPayload)
+		sp, ok := ev.data.(sessionPayload)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		// Bug 16 — DQ-C.6: pass agent version through to the store.
 		return c.store.UpsertSessionWithVersion(sp.ID, sp.AgentID, sp.ProjectID, sp.Event, sp.AgentVersion)
 	case "outcome_signal":
-		os, _ := ev.data.(pulsetypes.OutcomeSignalEvent)
+		os, ok := ev.data.(pulsetypes.OutcomeSignalEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertOutcomeSignal(os)
 	case "session_model":
-		sp, _ := ev.data.(sessionModelPayload)
+		sp, ok := ev.data.(sessionModelPayload)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.UpdateSessionModel(sp.SessionID, sp.AgentID, sp.ProjectID, sp.Model, sp.Provider)
 	case "agent_llm_usage":
-		au, _ := ev.data.(pulsetypes.AgentLLMUsageEvent)
+		au, ok := ev.data.(pulsetypes.AgentLLMUsageEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertAgentLLMUsage(au)
 	case "parse_event":
-		pe, _ := ev.data.(pulsetypes.ParseEvent)
+		pe, ok := ev.data.(pulsetypes.ParseEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertParseEvent(pe)
 	case "reparse_event":
-		re, _ := ev.data.(pulsetypes.ReparseEvent)
+		re, ok := ev.data.(pulsetypes.ReparseEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertReparseEvent(re)
 	case "graph_snapshot":
-		gs, _ := ev.data.(pulsetypes.GraphSnapshotEvent)
+		gs, ok := ev.data.(pulsetypes.GraphSnapshotEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertGraphSnapshot(gs)
 	case "embedding_event":
-		ee, _ := ev.data.(pulsetypes.EmbeddingEvent)
+		ee, ok := ev.data.(pulsetypes.EmbeddingEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertEmbeddingEvent(ee)
 	case "index_event":
-		ie, _ := ev.data.(pulsetypes.IndexEvent)
+		ie, ok := ev.data.(pulsetypes.IndexEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertIndexEvent(ie)
 	case "guard_event":
-		ge, _ := ev.data.(pulsetypes.GuardEvent)
+		ge, ok := ev.data.(pulsetypes.GuardEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertGuardEvent(ge)
 	case "memory_op":
-		mo, _ := ev.data.(pulsetypes.MemoryOperationEvent)
+		mo, ok := ev.data.(pulsetypes.MemoryOperationEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertMemoryOp(mo)
 	case "validation_event":
-		ve, _ := ev.data.(pulsetypes.ValidationEvent)
+		ve, ok := ev.data.(pulsetypes.ValidationEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertValidationEvent(ve)
 	case "search_event":
-		se, _ := ev.data.(pulsetypes.SearchEvent)
+		se, ok := ev.data.(pulsetypes.SearchEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertSearchEvent(se)
 	case "config_reload":
-		cr, _ := ev.data.(pulsetypes.ConfigReloadEvent)
+		cr, ok := ev.data.(pulsetypes.ConfigReloadEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertConfigReloadEvent(cr)
 	case "persistence_event":
-		pe, _ := ev.data.(pulsetypes.PersistenceEvent)
+		pe, ok := ev.data.(pulsetypes.PersistenceEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertPersistenceEvent(pe)
 	case "enrichment_event":
-		ee, _ := ev.data.(pulsetypes.EnrichmentEvent)
+		ee, ok := ev.data.(pulsetypes.EnrichmentEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertEnrichmentEvent(ee)
 	case "rule_eval_event":
-		re, _ := ev.data.(pulsetypes.RuleEvalEvent)
+		re, ok := ev.data.(pulsetypes.RuleEvalEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertRuleEvalEvent(re)
 	case "federation_event":
-		fe, _ := ev.data.(pulsetypes.FederationDetectEvent)
+		fe, ok := ev.data.(pulsetypes.FederationDetectEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertFederationEvent(fe)
 	case "skill_execution":
-		se, _ := ev.data.(pulsetypes.SkillExecutionEvent)
+		se, ok := ev.data.(pulsetypes.SkillExecutionEvent)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertSkillExecution(se)
 	case "tool_sequence":
-		ts, _ := ev.data.(pulsetypes.ToolSequenceEntry)
+		ts, ok := ev.data.(pulsetypes.ToolSequenceEntry)
+		if !ok {
+			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
+			return nil
+		}
 		return c.store.InsertToolSequenceEntry(ts.SessionID, ts.ToolName, ts.Position, ts.Success)
 	case "heartbeat":
 		return c.store.InsertHeartbeat()

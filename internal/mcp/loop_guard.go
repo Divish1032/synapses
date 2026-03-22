@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -28,14 +29,49 @@ import (
 type loopGuard struct {
 	mu             sync.Mutex
 	sessions       map[string]*loopGuardSession
+	lastActivity   map[string]time.Time
+	stopCh         chan struct{}
 	pc             interface{} // *pulse.Client — set via SetPulseClient; nil if pulse not configured
 	projectID      string
 	resolveSession func(string) string // P8-2: MCP session key → Synapses session UUID
 }
 
 func newLoopGuard() *loopGuard {
-	return &loopGuard{
-		sessions: make(map[string]*loopGuardSession),
+	g := &loopGuard{
+		sessions:     make(map[string]*loopGuardSession),
+		lastActivity: make(map[string]time.Time),
+		stopCh:       make(chan struct{}),
+	}
+	go func() {
+		ticker := time.NewTicker(30 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				g.gcIdleSessions(1 * time.Hour)
+			case <-g.stopCh:
+				return
+			}
+		}
+	}()
+	return g
+}
+
+// close stops the background GC goroutine.
+func (g *loopGuard) close() {
+	close(g.stopCh)
+}
+
+// gcIdleSessions removes sessions that have been idle longer than maxIdle.
+func (g *loopGuard) gcIdleSessions(maxIdle time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cutoff := time.Now().Add(-maxIdle)
+	for key, last := range g.lastActivity {
+		if last.Before(cutoff) {
+			delete(g.sessions, key)
+			delete(g.lastActivity, key)
+		}
 	}
 }
 
@@ -101,6 +137,7 @@ func (g *loopGuard) record(sessionKey, fp string) int {
 		sess = &loopGuardSession{}
 		g.sessions[sessionKey] = sess
 	}
+	g.lastActivity[sessionKey] = time.Now()
 	return sess.push(fp)
 }
 
@@ -119,6 +156,7 @@ func (g *loopGuard) resetAll() {
 func (g *loopGuard) clearSession(sessionKey string) {
 	g.mu.Lock()
 	delete(g.sessions, sessionKey)
+	delete(g.lastActivity, sessionKey)
 	g.mu.Unlock()
 }
 

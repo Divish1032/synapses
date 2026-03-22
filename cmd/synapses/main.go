@@ -503,6 +503,7 @@ func cmdStartDirect(args []string) error {
 		appCancel()
 		time.AfterFunc(5*time.Second, func() {
 			logutil.Error("synapses: graceful shutdown timed out, forcing exit\n")
+			st.Close() // explicitly close store since defers won't run on os.Exit
 			os.Exit(1)
 		})
 	}()

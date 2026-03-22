@@ -118,12 +118,51 @@ func availableRAMGB() float64 {
 		}
 
 	case "darwin":
-		out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+		// Parse vm_stat output to compute available memory as
+		// (free + inactive + purgeable) * pageSize.  Using only
+		// "free" drastically underreports because macOS aggressively
+		// uses RAM for file-backed caches (inactive/purgeable pages
+		// are reclaimable on demand).
+		out, err := exec.Command("vm_stat").Output()
 		if err != nil {
 			return 0
 		}
-		bytes, _ := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-		return bytes / (1024 * 1024 * 1024)
+		var freePages, inactivePages, purgeablePages float64
+		var pageSize float64 = 4096 // default; overridden if vm_stat header says otherwise
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, "Mach Virtual Memory Statistics") {
+				// Header line contains page size, e.g. "(page size of 16384 bytes)"
+				if idx := strings.Index(line, "page size of "); idx >= 0 {
+					s := line[idx+len("page size of "):]
+					if end := strings.Index(s, " "); end > 0 {
+						if ps, pErr := strconv.ParseFloat(s[:end], 64); pErr == nil && ps > 0 {
+							pageSize = ps
+						}
+					}
+				}
+				continue
+			}
+			// Lines look like: "Pages free:    123456."
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			val, pErr := strconv.ParseFloat(strings.TrimRight(strings.TrimSpace(parts[1]), "."), 64)
+			if pErr != nil {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			switch key {
+			case "Pages free":
+				freePages = val
+			case "Pages inactive":
+				inactivePages = val
+			case "Pages purgeable":
+				purgeablePages = val
+			}
+		}
+		availableBytes := (freePages + inactivePages + purgeablePages) * pageSize
+		return availableBytes / (1024 * 1024 * 1024)
 	}
 	return 0
 }

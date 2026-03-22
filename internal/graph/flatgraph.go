@@ -127,10 +127,9 @@ func (fg *FlatGraph) AddNode(name StringID, nodeType NodeType, fileID StringID, 
 }
 
 // AddEdge inserts a directed edge.
-// Note: In a true immutable CSR graph, edges are added by rebuilding the slice.
+// WARNING: O(E) due to offset shifting — do NOT call in a hot loop.
+// Use BulkAddEdges for batch insertion; it rebuilds CSR arrays from scratch in O(N+E).
 // For Synapses FlatGraph, incremental edge addition appends to the slice and shifts offsets.
-// Since shifting O(E) elements is expensive, bulk-loading is preferred, or
-// edges are accumulated in a buffer and flushed together.
 func (fg *FlatGraph) AddEdge(from, to NodeIndex, weight float32) {
 	fg.mu.Lock()
 	defer fg.mu.Unlock()

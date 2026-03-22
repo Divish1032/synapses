@@ -87,7 +87,7 @@ func (s *Server) handleWebAnnotate(
 	agentID, _ := req.GetArguments()["agent_id"].(string)
 	note, noteErr := stringArgLimited(req, "note", maxArgLengthNote)
 	if noteErr != nil {
-		return mcpgo.NewToolResultError(noteErr.Error()), nil
+		return mcpgo.NewToolResultError(stripInternalPaths(noteErr.Error())), nil
 	}
 
 	// Optional: structured hits JSON to format as a readable annotation.
@@ -127,7 +127,7 @@ func (s *Server) handleWebAnnotate(
 	// web_annotate is highest risk — content originates from web pages.
 	var injectionWarning string
 	if scanResult, scanErr := s.scanContent("note", note); scanErr != nil {
-		return mcpgo.NewToolResultError(scanErr.Error()), nil
+		return mcpgo.NewToolResultError(stripInternalPaths(scanErr.Error())), nil
 	} else {
 		note = scanResult.sanitized
 		if scanResult.warning != "" {
@@ -144,7 +144,7 @@ func (s *Server) handleWebAnnotate(
 
 	id, err := s.store.AddAnnotation(nodeID, agentID, note)
 	if err != nil {
-		return mcpgo.NewToolResultError(fmt.Sprintf("store annotation failed: %v", err)), nil
+		return mcpgo.NewToolResultError(fmt.Sprintf("store annotation failed: %v", stripInternalPaths(err.Error()))), nil
 	}
 	// P7-12: emit memory op for web annotation write.
 	if pc := s.getPulseClient(); pc != nil {
@@ -213,14 +213,14 @@ func (s *Server) lookupPackageDocs(ctx context.Context, importPath string) (*mcp
 		var err error
 		content, fromCache, err = s.webCache.FetchPackageDocs(ctx, importPath, version)
 		if err != nil {
-			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
+			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", stripInternalPaths(err.Error()))), nil
 		}
 	} else {
 		// Cache disabled — fetch fresh, skip read/write
 		var err error
 		content, err = s.webCache.FetchPackageDocsFresh(ctx, importPath, version)
 		if err != nil {
-			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
+			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", stripInternalPaths(err.Error()))), nil
 		}
 	}
 
@@ -265,13 +265,13 @@ func (s *Server) lookupURL(ctx context.Context, url string) (*mcpgo.CallToolResu
 		var err error
 		content, fromCache, err = s.webCache.Fetch(ctx, url, webcache.URLCacheTTL)
 		if err != nil {
-			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
+			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", stripInternalPaths(err.Error()))), nil
 		}
 	} else {
 		var err error
 		content, err = s.webCache.FetchFresh(ctx, url)
 		if err != nil {
-			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", err)), nil
+			return mcpgo.NewToolResultError(fmt.Sprintf("lookup_docs: %v", stripInternalPaths(err.Error()))), nil
 		}
 	}
 	// P7-13: emit search event for URL lookup.

@@ -73,7 +73,7 @@ func (s *Server) handleValidatePlan(
 
 	var changes []ProposedChange
 	if err := json.Unmarshal([]byte(changesRaw), &changes); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid changes JSON: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("invalid changes JSON: %v", stripInternalPaths(err.Error()))), nil
 	}
 
 	// Optional inline safety check — runs check_plan_safety before structural validation.
@@ -367,7 +367,7 @@ func (s *Server) handleVerifyImplementation(
 
 	var files []string
 	if err := json.Unmarshal([]byte(filesRaw), &files); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid files_written JSON: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("invalid files_written JSON: %v", stripInternalPaths(err.Error()))), nil
 	}
 	if len(files) == 0 {
 		return mcp.NewToolResultError("files_written must contain at least one file path"), nil
@@ -882,7 +882,7 @@ func (s *Server) handleUpsertRule(
 	// Persist first — if the DB write fails, don't mutate in-memory state.
 	if s.store != nil {
 		if err := s.store.UpsertDynamicRule(rule); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("persist rule: %v", err)), nil
+			return toolError("persist rule", err)
 		}
 	}
 

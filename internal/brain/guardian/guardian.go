@@ -104,7 +104,20 @@ func (g *Guardian) buildPrompt(req Request) string {
 	if targetName == "" {
 		targetName = "(unknown target)"
 	}
-	return fmt.Sprintf(promptTemplate, description, severity, req.SourceFile, targetName)
+	return fmt.Sprintf(promptTemplate, description, severity, stripToRelative(req.SourceFile), targetName)
+}
+
+func stripToRelative(filePath string) string {
+	for _, marker := range []string{"/internal/", "/cmd/", "/pkg/", "/src/"} {
+		if idx := strings.Index(filePath, marker); idx >= 0 {
+			return filePath[idx+1:]
+		}
+	}
+	parts := strings.Split(filePath, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return filePath
 }
 
 func parseViolation(raw string) (Response, error) {

@@ -35,7 +35,7 @@ type timelineEvent struct {
 // Results are deduplicated by memory ID to prevent doubles when a memory is linked
 // through both entity_id and anchor_nodes.
 func (s *Server) handleGetEntityHistory(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	entityName, _ := req.GetArguments()["entity"].(string)
@@ -243,7 +243,7 @@ func (s *Server) handleGetEntityHistory(
 		if repoRoot == "" || node.File == "" {
 			return
 		}
-		evts := s.gitFileHistory(repoRoot, node.File, 20)
+		evts := s.gitFileHistory(ctx, repoRoot, node.File, 20)
 		appendEvents(evts)
 	}()
 
@@ -348,8 +348,8 @@ func (s *Server) resolveEntityNode(entityName, fileHint string) (*graph.Node, st
 
 // gitFileHistory returns git log entries for a specific file as timeline events.
 // Limited to maxEntries commits. Uses a 5-second timeout.
-func (s *Server) gitFileHistory(repoRoot, relFile string, maxEntries int) []timelineEvent {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (s *Server) gitFileHistory(parentCtx context.Context, repoRoot, relFile string, maxEntries int) []timelineEvent {
+	ctx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
 	defer cancel()
 
 	out, err := exec.CommandContext(ctx,

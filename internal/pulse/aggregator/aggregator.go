@@ -352,16 +352,15 @@ func (a *Aggregator) rollup() {
 		}
 	}
 
-	// Bug 21 — DQ-G.2: per-project rollups for today.
+	// Per-dimension rollups for today. Each method calls UpsertDailyRollup
+	// individually. TODO: refactor these methods to accept a Tx parameter so
+	// they can be wrapped in a single BeginBatch/CommitBatch transaction.
+	// Currently not transactional because the methods internally acquire the
+	// store mutex, which would deadlock with BeginBatch's held mutex.
 	a.rollupPerProject(today)
-
-	// Bug 22 — DQ-G.3: per-tool rollups for today.
 	a.rollupPerTool(today)
-
-	// P8-4: per-agent rollups for today.
 	a.rollupPerAgent(today)
 
-	// P9-9: peak file change rate for today.
 	peakRate := a.store.GetPeakReparseRate(today)
 	if peakRate > 0 {
 		if err := a.store.UpsertDailyRollup(today, "peak_reparse_rate_per_min", float64(peakRate)); err != nil {
@@ -369,7 +368,6 @@ func (a *Aggregator) rollup() {
 		}
 	}
 
-	// P9-10: per-language parse stats rollup.
 	a.rollupPerLanguage(today)
 
 	// P12-4: search effectiveness metrics.
