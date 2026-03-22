@@ -132,14 +132,21 @@ func DownloadGGUF(ctx context.Context, cfg DownloadConfig) (string, error) {
 	}
 	f.Close()
 
-	// Verify SHA-256 integrity before atomic rename — always read back the file.
-	hashData, readErr := os.ReadFile(tmpPath)
+	// Verify SHA-256 integrity before atomic rename — stream the file through
+	// the hash to avoid loading multi-GB GGUF files entirely into memory.
+	hashFile, readErr := os.Open(tmpPath)
 	if readErr != nil {
 		os.Remove(tmpPath)
-		return "", fmt.Errorf("download: read downloaded file for verification: %w", readErr)
+		return "", fmt.Errorf("download: open downloaded file for verification: %w", readErr)
 	}
-	actual := sha256.Sum256(hashData)
-	actualHex := hex.EncodeToString(actual[:])
+	h := sha256.New()
+	if _, readErr = io.Copy(h, hashFile); readErr != nil {
+		hashFile.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download: hash downloaded file: %w", readErr)
+	}
+	hashFile.Close()
+	actualHex := hex.EncodeToString(h.Sum(nil))
 	if cfg.SHA256 != "" {
 		if subtle.ConstantTimeCompare([]byte(actualHex), []byte(cfg.SHA256)) != 1 {
 			os.Remove(tmpPath)
