@@ -231,7 +231,7 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		}
 		vecs := make([][]float32, len(out.Data))
 		for i, d := range out.Data {
-			vecs[i] = d.Embedding
+			vecs[i] = normalizeL2(d.Embedding)
 		}
 		return vecs, nil
 	}
@@ -245,6 +245,9 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	}
 	if len(out.Embeddings) != len(texts) {
 		return nil, fmt.Errorf("batch response length mismatch: got %d, want %d", len(out.Embeddings), len(texts))
+	}
+	for i, v := range out.Embeddings {
+		out.Embeddings[i] = normalizeL2(v)
 	}
 	return out.Embeddings, nil
 }
@@ -266,6 +269,11 @@ func (c *Client) embedSerial(ctx context.Context, texts []string) ([][]float32, 
 // normalizeL2 returns a unit-length copy of v. Returns v unchanged if already
 // normalized (within tolerance) or if the vector has zero magnitude.
 func normalizeL2(v []float32) []float32 {
+	for _, x := range v {
+		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
+			return nil
+		}
+	}
 	var sum float64
 	for _, x := range v {
 		sum += float64(x) * float64(x)
