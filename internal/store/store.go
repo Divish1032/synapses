@@ -1541,26 +1541,31 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	// episodes: stored as Unix seconds (INTEGER).
 	pruneExec(`DELETE FROM episodes WHERE created_at < ?`, cutoffUnix)
 
-	// memories: honour their own expires_at field; capture count for lifecycle event.
-	memNow := time.Now().UTC().Format(time.RFC3339)
-	if res, execErr := s.knowledgeDB.Exec(`DELETE FROM memories WHERE expires_at != '' AND expires_at < ?`, memNow); execErr == nil {
-		if n, _ := res.RowsAffected(); n > 0 {
-			_ = s.AppendEvent("knowledge_expired", "system", fmt.Sprintf(`{"count":%d}`, n))
+	// memories + cascades: wrap in a single transaction to prevent orphaned
+	// embeddings/anchors/surfaced/versions on crash between DELETEs.
+	if tx, txErr := s.knowledgeDB.Begin(); txErr == nil {
+		memNow := time.Now().UTC().Format(time.RFC3339)
+		var expiredCount int64
+		if res, execErr := tx.Exec(`DELETE FROM memories WHERE expires_at != '' AND expires_at < ?`, memNow); execErr == nil {
+			expiredCount, _ = res.RowsAffected()
+		}
+		if _, err := tx.Exec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at < ?`, cutoff); err != nil {
+			logutil.Debug("synapses: store: prune session_log memories: %v\n", err)
+		}
+		// Orphaned cascade tables: no FK cascade exists, so clean up manually.
+		tx.Exec(`DELETE FROM memory_embeddings WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_embeddings.memory_id)`)
+		tx.Exec(`DELETE FROM memory_anchors WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_anchors.memory_id)`)
+		tx.Exec(`DELETE FROM memory_surfaced WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_surfaced.memory_id)`)
+		tx.Exec(`DELETE FROM memory_versions WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_versions.memory_id)`)
+
+		if err := tx.Commit(); err != nil {
+			logutil.Debug("synapses: store: prune memories tx commit: %v\n", err)
+		} else if expiredCount > 0 {
+			_ = s.AppendEvent("knowledge_expired", "system", fmt.Sprintf(`{"count":%d}`, expiredCount))
 		}
 	} else {
-		logutil.Debug("synapses: store: prune expired memories: %v\n", execErr)
+		logutil.Debug("synapses: store: prune memories tx begin: %v\n", txErr)
 	}
-	pruneExec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at < ?`, cutoff)
-
-	// Orphaned memory_embeddings: no FK cascade exists, so clean up manually.
-	// Use NOT EXISTS instead of NOT IN for better performance with large tables.
-	pruneExec(`DELETE FROM memory_embeddings WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_embeddings.memory_id)`)
-	// Orphaned memory_anchors: anchor rows whose memory was deleted.
-	pruneExec(`DELETE FROM memory_anchors WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_anchors.memory_id)`)
-	// Orphaned memory_surfaced: surfacing records for deleted memories.
-	pruneExec(`DELETE FROM memory_surfaced WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_surfaced.memory_id)`)
-	// Orphaned memory_versions: version snapshots for deleted memories.
-	pruneExec(`DELETE FROM memory_versions WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_versions.memory_id)`)
 
 	// context_deliveries: instrumentation data for Sprint 11 feedback loop.
 	// Rows older than retention window have been analyzed and have no further value.
