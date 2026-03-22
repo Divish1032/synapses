@@ -20,16 +20,15 @@ import (
 // llamaServerSHA256 maps (version, GOOS/GOARCH) to the expected SHA-256 hash
 // of the downloaded zip artifact. Update these when bumping DefaultLlamaCPPVersion.
 var llamaServerSHA256 = map[string]string{
-	"b5618:darwin/arm64":  "", // TODO: pin hash after first verified download
-	"b5618:darwin/amd64":  "",
-	"b5618:linux/amd64":   "",
-	"b5618:linux/arm64":   "",
-	"b5618:windows/amd64": "",
+	"b5618:darwin/arm64":  "b9c5548e43e712b7528c1c553e0f5ab670e36eba50e81a98d0ccb449501da7c4",
+	"b5618:darwin/amd64":  "3025e9469e9c743881abc5f11875356c84ffa97c5c5a4cff1d60b9ca508553df",
+	"b5618:linux/amd64":   "cb14b8a80d045cb20a8c6c7f0efd234f255b504e368de59401a290bbea9967df",
+	"b5618:windows/amd64": "ae87ccf08c0f548597abf9c304c121c71fc09bbe757bfae7b2ea78e3d47d2c9a",
 }
 
 // embedModelSHA256 maps model filenames to expected SHA-256 hashes.
 var embedModelSHA256 = map[string]string{
-	"nomic-embed-text-v1.5.Q4_K_M.gguf": "", // TODO: pin hash after first verified download
+	"nomic-embed-text-v1.5.Q4_K_M.gguf": "d4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac",
 }
 
 // verifyOrLogSHA256 checks download data against an expected hash. If expected is
@@ -213,10 +212,8 @@ func llamaCPPReleaseURL(version string) (string, error) {
 		artifact = fmt.Sprintf("llama-%s-bin-macos-x64.zip", version)
 	case runtime.GOOS == "linux" && runtime.GOARCH == "amd64":
 		artifact = fmt.Sprintf("llama-%s-bin-ubuntu-x64.zip", version)
-	case runtime.GOOS == "linux" && runtime.GOARCH == "arm64":
-		artifact = fmt.Sprintf("llama-%s-bin-ubuntu-arm64.zip", version)
 	case runtime.GOOS == "windows" && runtime.GOARCH == "amd64":
-		artifact = fmt.Sprintf("llama-%s-bin-win-avx2-x64.zip", version)
+		artifact = fmt.Sprintf("llama-%s-bin-win-cpu-x64.zip", version)
 	default:
 		return "", fmt.Errorf("unsupported platform: %s/%s", runtime.GOOS, runtime.GOARCH)
 	}

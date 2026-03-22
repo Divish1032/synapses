@@ -2630,6 +2630,19 @@ func (s *Store) GetRecallChannelWeights(projectID string) map[string]float64 {
 	return out
 }
 
+// GetSessionContextHitRate returns the cache hit rate for context deliveries
+// in a specific session: cache_hits / total_deliveries. Returns 0 if no data.
+func (s *Store) GetSessionContextHitRate(sessionID string) float64 {
+	var hits, total int
+	s.execer().QueryRow(
+		`SELECT COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END), 0), COUNT(*)
+		 FROM context_deliveries WHERE session_id = ?`, sessionID).Scan(&hits, &total)
+	if total == 0 {
+		return 0
+	}
+	return float64(hits) / float64(total)
+}
+
 // GetSessionEffectivenessP5 returns effectiveness data for a session (Item 13).
 func (s *Store) GetSessionEffectivenessP5(sessionID string) *pulsetypes.SessionEffectiveness {
 	row := s.execer().QueryRow(

@@ -368,10 +368,12 @@ func (s *Server) handleEndSession(
 			// Use (1 - error_rate) as a proxy for task completion rate.
 			taskCompRate = 1.0 - retro.ErrorRate
 		}
+		contextHitRate := pc.GetSessionContextHitRate(synapseSessionID)
 		eff := pulse.SessionEffectiveness{
 			SessionID:          synapseSessionID,
 			AgentID:            agentID,
 			ProjectID:          s.projectID,
+			ContextHitRate:     contextHitRate,
 			TaskCompletionRate: taskCompRate,
 			ToolCalls:          toolCalls,
 			DurationMs:         durationMs,

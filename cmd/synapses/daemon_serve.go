@@ -1287,6 +1287,34 @@ func cmdDaemonServe(args []string) error {
 		json.NewEncoder(w).Encode(tools)
 	})
 
+	// GET /api/admin/pulse/effectiveness?days=N&project=P
+	mux.HandleFunc("/api/admin/pulse/effectiveness", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if pulseGuard(w) {
+			return
+		}
+		days := 7
+		if d := r.URL.Query().Get("days"); d != "" {
+			if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		projectID := r.URL.Query().Get("project")
+		fcr := sharedPulse.GetFirstContextRightRate(days)
+		entities := sharedPulse.FetchEffectiveness(projectID, 2)
+		trend := sharedPulse.GetRecentEffectivenessTrend(days, "")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"days":                     days,
+			"first_context_right_rate": fcr,
+			"entity_effectiveness":     entities,
+			"trend":                    trend,
+		})
+	})
+
 	// MCP: route to per-project StreamableHTTPServer
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
 		projectPath := r.URL.Query().Get("project")

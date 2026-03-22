@@ -112,6 +112,7 @@ func (bd *BrainDetector) DetectDeps(ctx context.Context, fileContent string, max
 
 	// Escape any closing delimiter in the code to prevent breakout.
 	code = strings.ReplaceAll(code, "</source_code>", "&lt;/source_code&gt;")
+	code = sanitizePromptInput(code)
 	prompt := fmt.Sprintf(crossProjectPromptSuffix, strings.Join(bd.aliases, ", ")) + code + "\n</source_code>"
 
 	response, err := bd.Generate(ctx, prompt)
@@ -237,4 +238,10 @@ func (bd *BrainDetector) validateBrainDeps(ctx context.Context, raw []BrainDetec
 		})
 	}
 	return valid
+}
+
+// sanitizePromptInput escapes angle brackets to prevent prompt injection.
+func sanitizePromptInput(s string) string {
+	r := strings.NewReplacer("<", "&lt;", ">", "&gt;")
+	return r.Replace(s)
 }

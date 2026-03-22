@@ -388,6 +388,14 @@ func (a *Aggregator) rollup() {
 		}
 	}
 
+	// First-context-right rate: fraction of (entity, session) pairs where the
+	// initial context delivery was sufficient (no correction signal followed).
+	if fcr, fcrErr := a.store.GetFirstContextRightRate(1); fcrErr == nil {
+		if err := a.store.UpsertDailyRollup(today, "first_context_right_rate", fcr); err != nil {
+			logutil.Warn("pulse aggregator: first_context_right_rate upsert: %v\n", err)
+		}
+	}
+
 	a.rollupPerLanguage(today)
 
 	// P12-4: search effectiveness metrics.

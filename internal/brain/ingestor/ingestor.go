@@ -168,7 +168,7 @@ func (ing *Ingestor) buildPrompt(req Request) string {
 	if pkg == "" {
 		pkg = "unknown"
 	}
-	return fmt.Sprintf(promptTemplate, req.NodeName, nodeType, pkg, code)
+	return fmt.Sprintf(promptTemplate, sanitizePromptInput(req.NodeName), sanitizePromptInput(nodeType), sanitizePromptInput(pkg), code)
 }
 
 
@@ -245,6 +245,12 @@ func looksLikeCode(s string) bool {
 		return true
 	}
 	return false
+}
+
+// sanitizePromptInput escapes angle brackets to prevent prompt injection.
+func sanitizePromptInput(s string) string {
+	r := strings.NewReplacer("<", "&lt;", ">", "&gt;")
+	return r.Replace(s)
 }
 
 // truncateCode caps the code snippet at maxCodeChars runes.

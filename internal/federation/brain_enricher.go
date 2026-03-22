@@ -124,7 +124,7 @@ func (b *BrainEnricher) BrainDriftSummary(ctx context.Context, oldSig, newSig, e
 	brainCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	prompt := fmt.Sprintf(driftSummaryPrompt, oldSig, newSig, structural)
+	prompt := fmt.Sprintf(driftSummaryPrompt, sanitizePromptInput(oldSig), sanitizePromptInput(newSig), sanitizePromptInput(structural))
 	response, err := bg(brainCtx, prompt)
 	if err != nil || response == "" {
 		return structural // fail-open: brain error → structural diff
