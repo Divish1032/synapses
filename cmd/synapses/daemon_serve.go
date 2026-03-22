@@ -1365,6 +1365,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		srv.SetProjectID(pathProjectID(absPath))
 		srv.SetProjectPath(absPath)
 		srv.SetProjectRegistry(&registryAdapter{reg: reg})
+		srv.SetUpdateChecker(getPendingUpdateVersion)
 		srv.StartBackground()
 
 		if sharedPulse != nil {
@@ -1529,6 +1530,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	srv := mcpsrv.New(g, cfg, st)
 	srv.SetProjectID(pathProjectID(absPath))
 	srv.SetProjectRegistry(&registryAdapter{reg: reg})
+	srv.SetUpdateChecker(getPendingUpdateVersion)
 	srv.StartBackground()
 
 	// Skills / prompts.
