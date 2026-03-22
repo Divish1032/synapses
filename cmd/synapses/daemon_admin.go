@@ -15,7 +15,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/logutil"
@@ -55,6 +57,51 @@ func validateOllamaURL(rawURL string) error {
 		return fmt.Errorf("ollama URL must point to localhost")
 	}
 	return nil
+}
+
+// newOllamaHTTPClient returns an HTTP client hardened against SSRF:
+//   - Dial-time IP validation ensures the resolved address is loopback,
+//     eliminating DNS-rebinding / TOCTOU attacks.
+//   - Port validation restricts connections to user ports (1024-65535) or
+//     the Ollama default (11434), preventing access to privileged services.
+//   - Redirect following is disabled.
+func newOllamaHTTPClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{
+		Timeout: 5 * time.Second,
+		Control: func(network, address string, c syscall.RawConn) error {
+			host, portStr, err := net.SplitHostPort(address)
+			if err != nil {
+				return fmt.Errorf("ssrf: invalid address %q", address)
+			}
+
+			// Validate the resolved IP is loopback (runs AFTER DNS resolution).
+			ip := net.ParseIP(host)
+			if ip == nil {
+				return fmt.Errorf("ssrf: could not parse IP %q", host)
+			}
+			if !ip.IsLoopback() {
+				return fmt.Errorf("ssrf: dial to non-loopback address %s blocked", ip)
+			}
+
+			// Validate port: allow Ollama default (11434) and user ports (1024-65535).
+			port, err := strconv.Atoi(portStr)
+			if err != nil || port <= 0 || port > 65535 {
+				return fmt.Errorf("ssrf: invalid port %q", portStr)
+			}
+			if port < 1024 && port != 11434 {
+				return fmt.Errorf("ssrf: privileged port %d blocked", port)
+			}
+
+			return nil
+		},
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: &http.Transport{DialContext: dialer.DialContext},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse // prevent SSRF via redirect
+		},
+	}
 }
 
 // registerAdminEndpoints adds the Phase 0 management API to mux.
@@ -166,7 +213,7 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 		w.Header().Set("Content-Type", "application/json")
 		if len(results) > 0 && results[0].Err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": results[0].Err.Error()}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]string{"error": mcpsrv.StripInternalPaths(results[0].Err.Error())}) //nolint:errcheck
 			return
 		}
 		resp := map[string]interface{}{"status": "ok"}
@@ -287,12 +334,7 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		client := &http.Client{
-			Timeout: 3 * time.Second,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse // prevent SSRF via redirect
-			},
-		}
+		client := newOllamaHTTPClient(3 * time.Second)
 		result := map[string]interface{}{"running": false}
 
 		// Check version
@@ -362,15 +404,10 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 		}
 
 		bodyJSON, _ := json.Marshal(map[string]interface{}{"model": req.Model, "stream": true})
-		ollamaClient := &http.Client{
-			Timeout: 30 * time.Minute,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse // prevent SSRF via redirect
-			},
-		}
+		ollamaClient := newOllamaHTTPClient(30 * time.Minute)
 		resp, err := ollamaClient.Post(ollamaURL+"/api/pull", "application/json", strings.NewReader(string(bodyJSON)))
 		if err != nil {
-			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]interface{}{"error": err.Error()}))
+			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]interface{}{"error": mcpsrv.StripInternalPaths(err.Error())}))
 			flusher.Flush()
 			return
 		}
