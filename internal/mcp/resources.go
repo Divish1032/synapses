@@ -256,6 +256,12 @@ func (s *Server) handleFileResource(
 	if filePath == "" {
 		return nil, fmt.Errorf("file path required in URI, e.g. synapses://file/internal/graph/traverse.go")
 	}
+	// Reject path traversal attempts — ".." components could escape the repo root.
+	for _, seg := range strings.Split(filepath.ToSlash(filePath), "/") {
+		if seg == ".." {
+			return nil, fmt.Errorf("path traversal not allowed in file URI")
+		}
+	}
 
 	nodes := s.graph.FindByFile(filePath)
 	if len(nodes) == 0 {
