@@ -90,11 +90,25 @@ func New(s *store.Store) *Cache {
 				if len(via) >= 10 {
 					return errors.New("too many redirects")
 				}
-				// Validate redirect target is not internal
+				// Validate redirect target is not internal.
+				// Check both raw IP literals and hostname-based private addresses
+				// (defense-in-depth — DialContext also validates resolved IPs).
 				host := req.URL.Hostname()
 				ip := net.ParseIP(host)
 				if ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
 					return fmt.Errorf("redirect to private IP blocked: %s", host)
+				}
+				if ip == nil {
+					// Hostname redirect — resolve DNS and check for private IPs.
+					ips, err := net.LookupIP(host)
+					if err == nil {
+						for _, resolved := range ips {
+							if resolved.IsLoopback() || resolved.IsPrivate() ||
+								resolved.IsLinkLocalUnicast() || resolved.IsUnspecified() {
+								return fmt.Errorf("redirect to private address blocked: %s resolves to %s", host, resolved)
+							}
+						}
+					}
 				}
 				return nil
 			},
