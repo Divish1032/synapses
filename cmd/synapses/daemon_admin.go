@@ -21,17 +21,25 @@ import (
 
 // registerAdminEndpoints adds the Phase 0 management API to mux.
 // reg is the project registry (for reindex).
-func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProject func(string) (*ProjectInstance, error)) {
+func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProject func(string) (*ProjectInstance, error), shutdownFn ...func()) {
+	// shutdownFn is an optional graceful shutdown callback that replaces os.Exit(0).
+	doShutdown := func() { os.Exit(0) } // fallback
+	if len(shutdownFn) > 0 && shutdownFn[0] != nil {
+		doShutdown = shutdownFn[0]
+	}
 
 	// ── GET /api/admin/version — binary version info ─────────────────────────
 	mux.HandleFunc("/api/admin/version", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "use GET", http.StatusMethodNotAllowed)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"version":  version,
 			"go":       runtime.Version(),
 			"os":       runtime.GOOS,
 			"arch":     runtime.GOARCH,
-			"pid":      os.Getpid(),
 			"projects": len(reg.All()),
 		}) //nolint:errcheck
 	})
@@ -73,14 +81,14 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 			go func() {
 				time.Sleep(500 * time.Millisecond)
 				logutil.Info("synapses: daemon restart requested via API\n")
-				os.Exit(0) // systemd/launchd will restart
+				doShutdown()
 			}()
 		case "stop":
 			json.NewEncoder(w).Encode(map[string]string{"status": "stopping"}) //nolint:errcheck
 			go func() {
 				time.Sleep(500 * time.Millisecond)
 				logutil.Info("synapses: daemon stop requested via API\n")
-				os.Exit(0)
+				doShutdown()
 			}()
 		default:
 			http.Error(w, "unknown action: "+action, http.StatusBadRequest)
@@ -303,8 +311,9 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 			return
 		}
 
-		body := fmt.Sprintf(`{"model":%q,"stream":true}`, req.Model)
-		resp, err := http.Post(ollamaURL+"/api/pull", "application/json", strings.NewReader(body))
+		bodyJSON, _ := json.Marshal(map[string]interface{}{"model": req.Model, "stream": true})
+		ollamaClient := &http.Client{Timeout: 30 * time.Minute}
+		resp, err := ollamaClient.Post(ollamaURL+"/api/pull", "application/json", strings.NewReader(string(bodyJSON)))
 		if err != nil {
 			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]interface{}{"error": err.Error()}))
 			flusher.Flush()
@@ -430,7 +439,8 @@ func checkMCPConfigured(editor, projectPath string) bool {
 	return strings.Contains(string(data), "synapses")
 }
 
-// tailFile reads the last n lines from a file.
+// tailFile reads the last n lines from a file using seek-from-end to avoid
+// loading the entire file into memory for large log files.
 func tailFile(path string, n int) []string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -438,10 +448,49 @@ func tailFile(path string, n int) []string {
 	}
 	defer f.Close()
 
-	// Read all lines (for simplicity; daemon.log is small)
+	// For small files (< 1 MB), just read everything.
+	info, err := f.Stat()
+	if err != nil {
+		return []string{}
+	}
+	const seekThreshold = 1 * 1024 * 1024 // 1 MB
+
+	if info.Size() > seekThreshold {
+		// Seek from end: read the last chunk and extract lines.
+		// Start with 64KB * n/100 estimate, grow if needed.
+		chunkSize := int64(n) * 1024
+		if chunkSize < 64*1024 {
+			chunkSize = 64 * 1024
+		}
+		if chunkSize > info.Size() {
+			chunkSize = info.Size()
+		}
+		offset := info.Size() - chunkSize
+		if offset < 0 {
+			offset = 0
+		}
+		if _, err := f.Seek(offset, io.SeekStart); err == nil {
+			var lines []string
+			scanner := bufio.NewScanner(f)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+			for scanner.Scan() {
+				lines = append(lines, scanner.Text())
+			}
+			// If we started mid-file, the first line may be partial — skip it.
+			if offset > 0 && len(lines) > 0 {
+				lines = lines[1:]
+			}
+			if len(lines) > n {
+				lines = lines[len(lines)-n:]
+			}
+			return lines
+		}
+	}
+
+	// Fallback for small files: read all lines.
 	var lines []string
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
 	}

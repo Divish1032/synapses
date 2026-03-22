@@ -17,6 +17,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,12 +66,20 @@ func ensureDirs() error {
 }
 
 func pidFilePath(name string) string {
-	base, _ := synapsesHome()
+	base, err := synapsesHome()
+	if err != nil {
+		log.Printf("warning: could not determine synapses home: %v; falling back to /tmp", err)
+		base = "/tmp/.synapses"
+	}
 	return filepath.Join(base, "pids", name+".pid")
 }
 
 func logFilePath(name string) string {
-	base, _ := synapsesHome()
+	base, err := synapsesHome()
+	if err != nil {
+		log.Printf("warning: could not determine synapses home: %v; falling back to /tmp", err)
+		base = "/tmp/.synapses"
+	}
 	return filepath.Join(base, "logs", name+".log")
 }
 
@@ -85,7 +94,7 @@ func readPID(name string) (int, error) {
 }
 
 func writePID(name string, pid int) error {
-	return os.WriteFile(pidFilePath(name), []byte(strconv.Itoa(pid)), 0o644)
+	return os.WriteFile(pidFilePath(name), []byte(strconv.Itoa(pid)), 0o600)
 }
 
 func removePID(name string) { os.Remove(pidFilePath(name)) }
