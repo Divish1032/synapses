@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -94,8 +95,13 @@ func (s *Server) handleValidatePlan(
 		if planDesc != "" {
 			safetyCtx, safetyCancel := context.WithTimeout(ctx, 500*time.Millisecond)
 			ep, safetyErr := s.store.CheckPlanSafetyCtx(safetyCtx, planDesc, "")
+			// Capture deadline state BEFORE calling safetyCancel — calling cancel
+			// sets Err() to context.Canceled (non-nil) even when the deadline never
+			// fired, which previously caused every call to report "timed out".
+			timedOut := errors.Is(safetyCtx.Err(), context.DeadlineExceeded)
 			safetyCancel()
-			if safetyErr == nil && ep != nil {
+			switch {
+			case safetyErr == nil && ep != nil:
 				safetyCheck = map[string]interface{}{
 					"status": "warning",
 					"match": map[string]interface{}{
@@ -106,9 +112,11 @@ func (s *Server) handleValidatePlan(
 					},
 					"message": fmt.Sprintf("⚠ Past failure match: %q (outcome: %s). Review before proceeding.", ep.Decision, ep.Outcome),
 				}
-			} else if safetyCtx.Err() != nil {
-				safetyCheck = map[string]interface{}{"status": "clear", "note": "safety check timed out (>500ms)"}
-			} else {
+			case timedOut || errors.Is(safetyErr, context.DeadlineExceeded):
+				safetyCheck = map[string]interface{}{"status": "timeout", "note": "safety check timed out (>500ms) — past failures not checked"}
+			case ep == nil && safetyErr == nil && s.store.HasNoFailureEpisodes():
+				safetyCheck = map[string]interface{}{"status": "clear_no_data", "note": "no failure episodes recorded yet"}
+			default:
 				safetyCheck = map[string]interface{}{"status": "clear"}
 			}
 		}
