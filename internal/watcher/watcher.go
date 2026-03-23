@@ -580,24 +580,17 @@ func (w *Watcher) debounce(path, root string) {
 		// Use bounded work channel to limit concurrent reparses.
 		// Guard with stopCh so timer callbacks that fire after Stop()
 		// closes stopCh do not block or write to a closed store.
-		if w.workCh != nil {
-			select {
-			case w.workCh <- reparseWork{path, root}:
-				return
-			case <-w.stopCh:
-				return
-			default:
-				// Channel full — drop rather than bypass the worker pool bound.
-				logutil.Debug("synapses: watcher: work channel full, dropping reparse for %s\n", path)
-				return
-			}
-		}
 		select {
+		case w.workCh <- reparseWork{path, root}:
+			return
 		case <-w.stopCh:
 			return
 		default:
+			// Channel full — drop rather than bypass the worker pool bound.
+			// The file will be re-parsed on the next change event.
+			logutil.Debug("synapses: watcher: work channel full, dropping reparse for %s\n", path)
+			return
 		}
-		w.reparseFile(path, root)
 	})
 }
 
