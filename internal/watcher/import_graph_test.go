@@ -154,6 +154,58 @@ func TestComputeInvalidationSet_UnknownFileReturnsSelf(t *testing.T) {
 	}
 }
 
+// TestComputeInvalidationSet_JavaStyleFilenameBase verifies that the filename-base
+// fallback correctly finds importers for OOP languages (Java, C#, Kotlin) where
+// the import path includes the class name and path.Base(importPath) = filename base,
+// while filePkg stores the fully-qualified package name.
+//
+// Example: Foo.java in package "com.example.models".
+// Importer Bar.java records pkgImporters["Foo"] (from path.Base("com.example.models.Foo")).
+// filePkg["Foo.java"] = "com.example.models" — these differ, so a plain pkg lookup misses it.
+// The filename-base fallback ("Foo") must cover this case.
+func TestComputeInvalidationSet_JavaStyleFilenameBase(t *testing.T) {
+	g := graph.New("repo")
+
+	// Foo.java: package "com.example.models"
+	fooFileID := g.MakeNodeID("Foo.java", "Foo.java")
+	g.AddNode(&graph.Node{ID: fooFileID, Type: graph.NodeFile, Name: "Foo.java", File: "Foo.java", Package: "com.example.models"})
+	g.AddNode(&graph.Node{ID: g.MakeNodeID("Foo.java", "Foo"), Type: graph.NodeFunction, Name: "Foo", File: "Foo.java", Package: "com.example.models"})
+
+	// Bar.java imports "com.example.models.Foo" — parser stores pkgNode.Name = "com.example.models.Foo".
+	// path.Base of that = "Foo", so pkgImporters["Foo"]["Bar.java"] is set.
+	barFileID := g.MakeNodeID("Bar.java", "Bar.java")
+	g.AddNode(&graph.Node{ID: barFileID, Type: graph.NodeFile, Name: "Bar.java", File: "Bar.java", Package: "com.example.other"})
+	fooImportID := g.MakeNodeID("com.example.models.Foo", "com.example.models.Foo")
+	g.AddNode(&graph.Node{ID: fooImportID, Type: graph.NodePackage, Name: "com.example.models.Foo", File: "Bar.java", Package: "com.example.models.Foo"})
+	g.AddEdge(&graph.Edge{From: barFileID, To: fooImportID, Type: graph.EdgeImports})
+
+	w := newTestWatcher(t, g)
+
+	// path.Base("com.example.models.Foo") returns the full string (no slash separator),
+	// so pkgImporters is keyed by the FULL dotted path, not just "Foo".
+	if !w.pkgImporters["com.example.models.Foo"]["Bar.java"] {
+		t.Fatalf("pre-condition: pkgImporters[com.example.models.Foo] should contain Bar.java, got %v", w.pkgImporters)
+	}
+	// filePkg["Foo.java"] = "com.example.models" (the full Java package name)
+	if w.filePkg["Foo.java"] != "com.example.models" {
+		t.Fatalf("pre-condition: filePkg[Foo.java] should be 'com.example.models', got %q", w.filePkg["Foo.java"])
+	}
+
+	// When Foo.java changes, Bar.java MUST be in the invalidation set.
+	// Without the filename-base fallback, pkgImporters["com.example.models"] is
+	// empty and Bar.java would be missed, silently losing the Bar→Foo CALLS edge.
+	invalid := w.computeInvalidationSet("Foo.java")
+	found := false
+	for _, f := range invalid {
+		if f == "Bar.java" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Java-style importer Bar.java must be in invalidation set for Foo.java, got %v", invalid)
+	}
+}
+
 func TestUpdateImportGraphForFile_UpdatesPkgImporters(t *testing.T) {
 	g := buildImportTestGraph(t)
 	w := newTestWatcher(t, g)
