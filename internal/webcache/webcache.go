@@ -274,6 +274,8 @@ func (c *Cache) fetchAndStrip(ctx context.Context, url string) (string, error) {
 	// 8KB target, saving ~384KB vs the original 512KB limit per fetch.
 	limited := io.LimitReader(resp.Body, 128*1024)
 	raw, err := io.ReadAll(limited)
+	// Drain remaining body so the HTTP transport can reuse the connection.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	if err != nil {
 		return "", err
 	}
