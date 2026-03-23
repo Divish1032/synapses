@@ -435,6 +435,9 @@ func New(cfg config.BrainConfig) Brain {
 func warmUpModels(parent context.Context, clients ...llm.LLMClient) {
 	seen := make(map[string]bool)
 	var wg sync.WaitGroup
+	// Semaphore limits concurrent warmups to 2 to avoid GPU memory pressure
+	// when multiple models compete for a single GPU.
+	sem := make(chan struct{}, 2)
 	for _, c := range clients {
 		if c == nil {
 			continue
@@ -451,6 +454,8 @@ func warmUpModels(parent context.Context, clients ...llm.LLMClient) {
 		wg.Add(1)
 		go func(w llm.ModelWarmer, name string) {
 			defer wg.Done()
+			sem <- struct{}{} // acquire
+			defer func() { <-sem }() // release
 			ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 			defer cancel()
 			if err := w.WarmUp(ctx); err != nil {
