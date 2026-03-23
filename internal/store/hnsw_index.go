@@ -127,12 +127,13 @@ func (s *Store) hnswAdd(memoryID string, vec []float32) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			logutil.Error("synapses: HNSW add recovered from panic (memory_id=%s): %v — invalidating index\n", memoryID, r)
+			logutil.Error("synapses: HNSW add recovered from panic (memory_id=%s): %v — rebuilding index\n", memoryID, r)
 			// A panic during Add leaves the graph in an inconsistent state
-			// (partially inserted node across layers). All subsequent operations
-			// would cascade-panic. Nil out the index so searches fall back to
-			// brute-force SQLite until the next periodic RebuildMemoryHNSW.
+			// (partially inserted node across layers). Nil out immediately so
+			// concurrent searches fall back to brute-force SQLite, then rebuild
+			// from the authoritative SQLite source in the background.
 			s.hnswMemIndex = nil
+			go s.RebuildMemoryHNSW()
 		}
 	}()
 	// Pre-delete to work around coder/hnsw v0.6.1 bug: Graph.Add() internally
@@ -331,8 +332,9 @@ func (s *Store) nodeHNSWAdd(nodeID string, vec []float32) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			logutil.Error("synapses: node HNSW add recovered from panic (node_id=%s): %v — invalidating index\n", nodeID, r)
+			logutil.Error("synapses: node HNSW add recovered from panic (node_id=%s): %v — rebuilding index\n", nodeID, r)
 			s.hnswNodeIndex = nil
+			go s.RebuildNodeHNSW()
 		}
 	}()
 	// Pre-delete: same workaround as hnswAdd (see comment there).
