@@ -313,6 +313,12 @@ func looksLikeDeclaration(line, entityName string) bool {
 // compileSignaturePatterns returns compiled regexes that match function/method/
 // class/type signature lines for the given entity name across common languages.
 func compileSignaturePatterns(entityName string) []*regexp.Regexp {
+	// Guard against unreasonably long entity names that would produce
+	// multi-MB regex objects (each of 11 patterns). Entity names from
+	// sibling projects are untrusted input.
+	if len(entityName) > 256 {
+		return nil
+	}
 	escaped := regexp.QuoteMeta(entityName)
 
 	// If qualified (e.g. "Server.Validate"), also match the unqualified
