@@ -327,18 +327,22 @@ func (w *Watcher) updateImportGraphForFile(filePath string) {
 // computeInvalidationSet returns the set of files whose stored call sites need
 // to be reloaded when filePath changes.
 //
-// Strategy: inspect the live CALLS/IMPLEMENTS edges that point INTO filePath
-// BEFORE RemoveFile deletes them. Any file with such an edge is a direct
-// caller — its stored call sites reference nodes that are about to be removed
-// and re-created, so they must be re-resolved.
+// Three complementary layers ensure complete coverage:
 //
-// Same-package files are always included because they can call each other
-// without a package qualifier; unresolved same-package call sites may not
-// yet have CALLS edges but will succeed once the re-parsed nodes are present.
+//  1. Resolved CALLS/IMPLEMENTS edges — inspect live graph edges pointing INTO
+//     filePath (must be called BEFORE RemoveFile). Any file with such an edge
+//     is a confirmed caller; its stored call sites reference nodes about to be
+//     removed and re-created. Language-agnostic; exact.
 //
-// This approach is language-agnostic: it relies on the resolved graph state,
-// not on import-path name-matching heuristics, so it works correctly for Go,
-// Java, TypeScript, Python, and every other language the parsers support.
+//  2. Same-package files — always included because they share the package
+//     namespace and can call each other without a qualifier; unresolved
+//     same-package call sites may not yet have CALLS edges.
+//
+//  3. Unresolved cross-package callers (DB query) — when filePath exports a
+//     new function, other files that import its package have call sites stored
+//     in call_sites with pkg_alias matching this package but no CALLS edge yet.
+//     LoadCallerFilesForPkgAliases finds them by pkg_alias so they get
+//     re-resolved on the next pass. This closes the "new public function" gap.
 //
 // Must be called BEFORE RemoveFile so the incoming edges are still present.
 // Must be called under reparseMu (reparseFile is already serialised).
@@ -357,12 +361,40 @@ func (w *Watcher) computeInvalidationSet(filePath string) []string {
 
 	// Same-package files: may have unresolved call sites that will succeed
 	// once the re-parsed functions are in the graph.
-	if pkg := w.filePkg[filePath]; pkg != "" {
+	pkg := w.filePkg[filePath]
+	if pkg != "" {
 		for f, fpkg := range w.filePkg {
 			if fpkg == pkg {
 				invalid[f] = true
 			}
 		}
+	}
+
+	// Unresolved cross-package callers (the "new public function" gap).
+	//
+	// When filePath adds a new exported function, other packages may already
+	// have call sites in the DB with pkg_alias matching this file's package name
+	// or filename stem — but no CALLS edge exists yet because the function was
+	// not there during their last parse. Query call_sites by pkg_alias to find
+	// these latent callers so they get re-resolved on the next analysis pass.
+	//
+	// Two aliases are tried: the package declaration name (e.g. "models") and
+	// the filename stem (e.g. "user" from "user.go"), because some languages
+	// use the filename as the import alias.
+	if w.store != nil && pkg != "" {
+		base := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
+		aliases := []string{pkg}
+		if base != pkg {
+			aliases = append(aliases, base)
+		}
+		if callers, err := w.store.LoadCallerFilesForPkgAliases(aliases); err == nil {
+			for _, f := range callers {
+				invalid[f] = true
+			}
+		}
+		// Errors are silently ignored: the invalidation set is best-effort.
+		// A missed latent caller is corrected on its next manual save; it
+		// never causes data corruption, only a delayed re-resolution.
 	}
 
 	result := make([]string, 0, len(invalid))

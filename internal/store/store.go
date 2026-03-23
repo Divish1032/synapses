@@ -112,8 +112,9 @@ CREATE INDEX IF NOT EXISTS idx_nodes_file      ON nodes(file);
 CREATE INDEX IF NOT EXISTS idx_nodes_name      ON nodes(name);
 CREATE INDEX IF NOT EXISTS idx_edges_from      ON edges(from_id);
 CREATE INDEX IF NOT EXISTS idx_edges_to        ON edges(to_id);
-CREATE INDEX IF NOT EXISTS idx_call_sites_caller ON call_sites(caller_id);
-CREATE INDEX IF NOT EXISTS idx_call_sites_file   ON call_sites(caller_file);
+CREATE INDEX IF NOT EXISTS idx_call_sites_caller    ON call_sites(caller_id);
+CREATE INDEX IF NOT EXISTS idx_call_sites_file      ON call_sites(caller_file);
+CREATE INDEX IF NOT EXISTS idx_call_sites_pkg_alias ON call_sites(pkg_alias);
 CREATE INDEX IF NOT EXISTS idx_embeddings_node ON node_embeddings(node_id);
 CREATE INDEX IF NOT EXISTS idx_nodes_type_pkg  ON nodes(type, package);
 CREATE INDEX IF NOT EXISTS idx_edges_to_type   ON edges(to_id, type);
@@ -640,7 +641,8 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE nodes ADD COLUMN domain TEXT NOT NULL DEFAULT 'code'`,
 		`ALTER TABLE nodes ADD COLUMN prev_signature TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE node_embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
-		`CREATE INDEX IF NOT EXISTS idx_call_sites_file   ON call_sites(caller_file)`,
+		`CREATE INDEX IF NOT EXISTS idx_call_sites_file      ON call_sites(caller_file)`,
+		`CREATE INDEX IF NOT EXISTS idx_call_sites_pkg_alias ON call_sites(pkg_alias)`,
 	} {
 		if _, err := graphTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
@@ -2997,6 +2999,62 @@ func (s *Store) LoadCallSitesForFiles(files []string) ([]graph.CallSite, error) 
 		sites = append(sites, cs)
 	}
 	return sites, rows.Err()
+}
+
+// LoadCallerFilesForPkgAliases returns distinct caller_file values for stored
+// call sites whose pkg_alias matches any of the provided aliases.
+//
+// This covers the "new public function" gap: when a file adds a new exported
+// function, other files that import its package may have unresolved call sites
+// (no CALLS edge yet) stored in call_sites with pkg_alias equal to the package
+// name or the filename stem. Querying by pkg_alias finds these latent callers
+// so they are included in the invalidation set and re-resolved on the next
+// analysis pass.
+//
+// Callers should pass both the package declaration name and the filename stem
+// (e.g., ["models", "user"]) to maximize coverage across languages where the
+// import alias may differ from the package name.
+func (s *Store) LoadCallerFilesForPkgAliases(aliases []string) ([]string, error) {
+	// Deduplicate and remove empty aliases.
+	seen := make(map[string]bool, len(aliases))
+	clean := make([]string, 0, len(aliases))
+	for _, a := range aliases {
+		if a != "" && !seen[a] {
+			seen[a] = true
+			clean = append(clean, a)
+		}
+	}
+	if len(clean) == 0 {
+		return nil, nil
+	}
+	if len(clean) > 900 {
+		clean = clean[:900]
+	}
+	placeholders := make([]byte, 0, len(clean)*2)
+	args := make([]interface{}, len(clean))
+	for i, a := range clean {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+		args[i] = a
+	}
+	//nolint:gosec // placeholders is a sequence of "?" chars, not user input
+	q := "SELECT DISTINCT caller_file FROM call_sites WHERE pkg_alias IN (" + string(placeholders) + ")"
+	rows, err := s.graphDB.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query caller files for pkg aliases: %w", err)
+	}
+	defer rows.Close()
+	var files []string
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			return nil, fmt.Errorf("scan caller_file: %w", err)
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
 }
 
 // UpsertDynamicRule persists a dynamic architectural rule to the store.

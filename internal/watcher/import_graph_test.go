@@ -5,12 +5,14 @@ package watcher
 // (CALLS-edge based, language-agnostic), and updateImportGraphForFile (filePkg update).
 
 import (
+	"path/filepath"
 	"slices"
 	"sort"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/parser"
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 // newTestWatcher creates a minimal Watcher for unit testing the import-graph
@@ -171,6 +173,70 @@ func TestComputeInvalidationSet_AllLanguagesViaCalls(t *testing.T) {
 	invalid := w.computeInvalidationSet("Foo.java")
 	if !slices.Contains(invalid, "Bar.java") {
 		t.Errorf("Bar.java (calls Foo.java) must be in invalidation set for Foo.java, got %v", invalid)
+	}
+}
+
+// TestComputeInvalidationSet_UnresolvedCrossPackageCallers verifies the third
+// invalidation layer: when a file adds a new exported function, other files
+// that import its package (but have no CALLS edge yet) are found via a DB
+// query on call_sites.pkg_alias. This is the "new public function" gap.
+func TestComputeInvalidationSet_UnresolvedCrossPackageCallers(t *testing.T) {
+	// Use a temporary on-disk store so DB queries are real.
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	// Seed: handler.go imports package "models" but has no CALLS edge yet
+	// (it references NewUser which doesn't exist yet).
+	sites := []graph.CallSite{
+		{
+			CallerID:   graph.NodeID("repo::handler.go::Handle"),
+			CallerFile: "handler.go",
+			PkgAlias:   "models",
+			FuncName:   "NewUser",
+		},
+	}
+	if err := st.SaveCallSites(sites); err != nil {
+		t.Fatalf("SaveCallSites: %v", err)
+	}
+
+	// Graph: models/user.go defines existing functions — no CALLS edge to handler.go.
+	g := graph.New("repo")
+	g.AddNode(&graph.Node{
+		ID: g.MakeNodeID("models/user.go", "models/user.go"),
+		Type: graph.NodeFile, Name: "models/user.go",
+		File: "models/user.go", Package: "models",
+	})
+	g.AddNode(&graph.Node{
+		ID: g.MakeNodeID("models/user.go", "OldFunc"),
+		Type: graph.NodeFunction, Name: "OldFunc",
+		File: "models/user.go", Package: "models",
+	})
+	g.AddNode(&graph.Node{
+		ID: g.MakeNodeID("handler.go", "handler.go"),
+		Type: graph.NodeFile, Name: "handler.go",
+		File: "handler.go", Package: "main",
+	})
+
+	w, werr := New(g, parser.NewWalker(), st)
+	if werr != nil {
+		t.Fatalf("New: %v", werr)
+	}
+	t.Cleanup(func() { w.Stop() })
+
+	// When models/user.go is modified (e.g. NewUser is added),
+	// handler.go MUST appear in the invalidation set via the DB query —
+	// even though no CALLS edge from handler.go → models/user.go exists yet.
+	invalid := w.computeInvalidationSet("models/user.go")
+
+	if !slices.Contains(invalid, "handler.go") {
+		t.Errorf("handler.go (unresolved caller via pkg_alias='models') must be in invalidation set, got %v", invalid)
+	}
+	if !slices.Contains(invalid, "models/user.go") {
+		t.Errorf("models/user.go itself must be in invalidation set, got %v", invalid)
 	}
 }
 
