@@ -62,6 +62,12 @@ type LocalClient struct {
 	contextSize int
 	// inferSem prevents queued zombie inferences on context cancellation.
 	inferSem chan struct{}
+
+	// abandonedDone is set when a generate() call is abandoned due to context
+	// cancellation. The channel is closed when the abandoned goroutine finishes,
+	// freeing the semaphore. The next caller drains it to reclaim the semaphore
+	// immediately instead of blocking for the full inference duration.
+	abandonedDone chan struct{}
 }
 
 // NewLocalClient loads a GGUF model file and returns a ready LocalClient.
