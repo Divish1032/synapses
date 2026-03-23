@@ -335,16 +335,11 @@ func isValidProjectPath(absPath string) error {
 // Non-browser clients (curl, MCP stdio proxy) send no Origin header and are
 // unaffected by CORS headers entirely.
 func isCORSAllowedOrigin(origin string) bool {
-	if origin == "tauri://localhost" || origin == "https://tauri.localhost" {
+	switch origin {
+	case "tauri://localhost", "https://tauri.localhost",
+		"http://localhost:11435", "https://localhost:11435",
+		"http://127.0.0.1:11435", "https://127.0.0.1:11435":
 		return true
-	}
-	for _, prefix := range []string{
-		"http://localhost", "https://localhost",
-		"http://127.0.0.1", "https://127.0.0.1",
-	} {
-		if origin == prefix || strings.HasPrefix(origin, prefix+":") {
-			return true
-		}
 	}
 	return false
 }
