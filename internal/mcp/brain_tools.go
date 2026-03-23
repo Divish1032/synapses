@@ -53,9 +53,13 @@ func (s *Server) handleUpsertADR(
 
 	var linkedFiles []string
 	if lf, ok := req.GetArguments()["linked_files"].([]interface{}); ok {
+		root := s.graph.Root()
 		for _, f := range lf {
-			if s, ok := f.(string); ok && s != "" {
-				linkedFiles = append(linkedFiles, s)
+			if p, ok := f.(string); ok && p != "" {
+				if root != "" && !pathWithinRoot(root, p) {
+					continue
+				}
+				linkedFiles = append(linkedFiles, p)
 			}
 		}
 	}
