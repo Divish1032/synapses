@@ -87,6 +87,11 @@ func (s *Store) RebuildMemoryHNSW() {
 		}
 	}()
 
+	s.hnswMemMu.Lock()
+	s.hnswRebuilding = true
+	s.hnswMemIndex = nil
+	s.hnswMemMu.Unlock()
+
 	// Include stale embeddings — the search API returns them with a StaleEmbedding
 	// flag so callers can surface "possibly outdated" results. Only exclude
 	// stale/expired memories (the memory itself, not the embedding).
