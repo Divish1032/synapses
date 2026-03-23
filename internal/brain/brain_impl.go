@@ -736,6 +736,10 @@ func (b *impl) Close() error {
 	if b.cancelWarmup != nil {
 		b.cancelWarmup()
 	}
+	// Release GPU/CPU memory held by the LLM client (e.g. llama.cpp context).
+	if closer, ok := b.llm.(io.Closer); ok {
+		closer.Close()
+	}
 	if b.store != nil {
 		return b.store.Close()
 	}
