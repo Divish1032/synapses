@@ -1780,8 +1780,15 @@ func (s *Store) reconcileOrphanedReferences() {
 				staleNodeIDs = append(staleNodeIDs, nid)
 			}
 		}
-		for _, nid := range staleNodeIDs {
-			s.knowledgeDB.Exec(deleteSQL, nid) //nolint:errcheck
+		if tx, txErr := s.knowledgeDB.Begin(); txErr == nil {
+			for _, nid := range staleNodeIDs {
+				tx.Exec(deleteSQL, nid) //nolint:errcheck
+			}
+			tx.Commit() //nolint:errcheck
+		} else {
+			for _, nid := range staleNodeIDs {
+				s.knowledgeDB.Exec(deleteSQL, nid) //nolint:errcheck
+			}
 		}
 		return len(staleNodeIDs)
 	}
@@ -2452,7 +2459,7 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 
 	// Load nodes.
 	rows, err := s.graphDB.Query(`
-        SELECT id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance, domain FROM nodes
+        SELECT id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance, domain FROM nodes LIMIT 2000000
     `)
 	if err != nil {
 		return nil, fmt.Errorf("query nodes: %w", err)
@@ -2509,7 +2516,7 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 	}
 
 	// Load edges.
-	erows, err := s.graphDB.Query(`SELECT from_id, to_id, type FROM edges`)
+	erows, err := s.graphDB.Query(`SELECT from_id, to_id, type FROM edges LIMIT 10000000`)
 	if err != nil {
 		return nil, fmt.Errorf("query edges: %w", err)
 	}
