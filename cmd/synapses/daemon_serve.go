@@ -231,7 +231,7 @@ func cleanStaleSingletonPID() {
 	if err != nil {
 		return
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	pid, err := strconv.Atoi(strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0]))
 	if err != nil || !processAlive(pid) {
 		os.Remove(pidPath)
 	}
