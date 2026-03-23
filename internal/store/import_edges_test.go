@@ -9,70 +9,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
-func TestImportEdges_RoundTrip(t *testing.T) {
-	t.Parallel()
-	st := openTestStore(t)
-
-	if err := st.UpdateImportEdgesForFile("a.go", []string{"store", "graph", "config"}); err != nil {
-		t.Fatalf("UpdateImportEdgesForFile: %v", err)
-	}
-	if err := st.UpdateImportEdgesForFile("b.go", []string{"store"}); err != nil {
-		t.Fatalf("UpdateImportEdgesForFile: %v", err)
-	}
-
-	loaded, err := st.LoadAllImportEdges()
-	if err != nil {
-		t.Fatalf("LoadAllImportEdges: %v", err)
-	}
-	if len(loaded) != 2 {
-		t.Fatalf("want 2 files, got %d", len(loaded))
-	}
-	aPkgs := loaded["a.go"]
-	sort.Strings(aPkgs)
-	want := []string{"config", "graph", "store"}
-	if !slices.Equal(aPkgs, want) {
-		t.Errorf("a.go pkgs: want %v, got %v", want, aPkgs)
-	}
-	if !slices.Equal(loaded["b.go"], []string{"store"}) {
-		t.Errorf("b.go pkgs: want [store], got %v", loaded["b.go"])
-	}
-}
-
-func TestImportEdges_UpdateReplacesPreviousEntries(t *testing.T) {
-	t.Parallel()
-	st := openTestStore(t)
-
-	_ = st.UpdateImportEdgesForFile("a.go", []string{"store", "graph"})
-	// Update to a different set.
-	if err := st.UpdateImportEdgesForFile("a.go", []string{"config"}); err != nil {
-		t.Fatalf("second UpdateImportEdgesForFile: %v", err)
-	}
-
-	loaded, err := st.LoadAllImportEdges()
-	if err != nil {
-		t.Fatalf("LoadAllImportEdges: %v", err)
-	}
-	pkgs := loaded["a.go"]
-	if len(pkgs) != 1 || pkgs[0] != "config" {
-		t.Errorf("want [config] after update, got %v", pkgs)
-	}
-}
-
-func TestImportEdges_EmptyPkgSkipped(t *testing.T) {
-	t.Parallel()
-	st := openTestStore(t)
-
-	_ = st.UpdateImportEdgesForFile("a.go", []string{"", "store", ""})
-
-	loaded, err := st.LoadAllImportEdges()
-	if err != nil {
-		t.Fatalf("LoadAllImportEdges: %v", err)
-	}
-	if !slices.Equal(loaded["a.go"], []string{"store"}) {
-		t.Errorf("want [store] (empty strings skipped), got %v", loaded["a.go"])
-	}
-}
-
 func TestLoadCallSitesForFiles_ScopedLoad(t *testing.T) {
 	t.Parallel()
 	st := openTestStore(t)
@@ -140,6 +76,36 @@ func TestLoadCallSitesForFiles_FallbackWhenTooManyFiles(t *testing.T) {
 	// At least the seeded site should be returned (fallback to full load).
 	if len(loaded) == 0 {
 		t.Error("expected at least one call site from full-load fallback")
+	}
+}
+
+func TestLoadCallSitesForFiles_RoundTrip(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+
+	sites := []graph.CallSite{
+		{CallerID: "repo::a.go::Foo", CallerFile: "a.go", PkgAlias: "store", FuncName: "Open"},
+		{CallerID: "repo::a.go::Bar", CallerFile: "a.go", PkgAlias: "graph", FuncName: "New"},
+		{CallerID: "repo::b.go::Baz", CallerFile: "b.go", PkgAlias: "store", FuncName: "Save"},
+	}
+	if err := st.SaveCallSites(sites); err != nil {
+		t.Fatalf("SaveCallSites: %v", err)
+	}
+
+	loaded, err := st.LoadCallSitesForFiles([]string{"a.go"})
+	if err != nil {
+		t.Fatalf("LoadCallSitesForFiles: %v", err)
+	}
+	if len(loaded) != 2 {
+		t.Fatalf("want 2 call sites for a.go, got %d: %v", len(loaded), loaded)
+	}
+	var funcs []string
+	for _, cs := range loaded {
+		funcs = append(funcs, cs.FuncName)
+	}
+	sort.Strings(funcs)
+	if !slices.Equal(funcs, []string{"New", "Open"}) {
+		t.Errorf("want [New Open], got %v", funcs)
 	}
 }
 
