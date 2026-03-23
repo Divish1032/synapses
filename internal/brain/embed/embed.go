@@ -209,9 +209,10 @@ func (s *Server) supervise(ctx context.Context, args []string) {
 		newProc := exec.CommandContext(ctx, s.llamaBin, args...)
 		newProc.Stderr = os.Stderr
 		if err := newProc.Start(); err != nil {
+			s.restarting = false
 			s.mu.Unlock()
 			logutil.Error("synapses-intelligence/embed: restart failed: %v\n", err)
-			continue
+			return // cannot restart — stop supervisor to avoid busy-loop on proc.Wait
 		}
 		s.proc = newProc
 		s.mu.Unlock()
