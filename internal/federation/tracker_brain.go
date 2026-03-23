@@ -335,18 +335,23 @@ var importSegmentSplitter = strings.NewReplacer(
 // containsSegment checks whether needle appears as a whole segment within
 // haystack after splitting both on path delimiters (/, ., _, -). This prevents
 // short aliases like "db" from matching "database" or "indexeddb".
+//
+// Empty segments from consecutive delimiters (e.g. "foo//bar") are filtered
+// out so they don't cause false negatives. An empty needle never matches.
 func containsSegment(haystack, needle string) bool {
+	// Empty needle should never match.
+	if needle == "" {
+		return false
+	}
 	// Fast path: if needle is longer than haystack it can't match.
 	if len(needle) > len(haystack) {
 		return false
 	}
-	// If needle itself contains delimiters, check if it appears as a
-	// contiguous sub-sequence of segments.
-	haystackNorm := importSegmentSplitter.Replace(haystack)
-	needleNorm := importSegmentSplitter.Replace(needle)
-	hSegments := strings.Split(haystackNorm, "\x00")
-	nSegments := strings.Split(needleNorm, "\x00")
-	if len(nSegments) > len(hSegments) {
+	// Split on path delimiters and filter empty segments from consecutive
+	// delimiters (e.g. "foo//bar" → ["foo", "bar"], not ["foo", "", "bar"]).
+	hSegments := splitSegments(haystack)
+	nSegments := splitSegments(needle)
+	if len(nSegments) == 0 || len(nSegments) > len(hSegments) {
 		return false
 	}
 	// Slide needle segments over haystack segments.
@@ -363,6 +368,22 @@ func containsSegment(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// splitSegments splits s on path delimiters (/, ., _, -) and returns only
+// non-empty segments. This handles consecutive delimiters and delimiter-only
+// strings correctly.
+func splitSegments(s string) []string {
+	norm := importSegmentSplitter.Replace(s)
+	parts := strings.Split(norm, "\x00")
+	// Filter empty segments in-place without allocation when there are none.
+	out := parts[:0]
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // sanitizePromptInput escapes angle brackets to prevent prompt injection.
