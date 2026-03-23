@@ -821,13 +821,64 @@ func EnrichBlameForFile(g *graph.Graph, repoRoot, absFile string) {
 // EnrichBlame) for performance. Nodes in vendored/generated paths are skipped.
 // Git errors are silently ignored — the graph remains usable without commit data.
 func EnrichCommitContext(g *graph.Graph, repoRoot string) {
-	// Per-file cache: absFile → marshaled JSON (empty string = no data for file).
-	cache := make(map[string]string)
+	// Phase 1: collect unique files and resolve git roots (sequential — shared cache).
+	type fileJob struct {
+		absFile string
+		gitRoot string
+	}
 	seen := make(map[string]bool)
-	// dirToGitRoot caches git root lookups to avoid one subprocess per file.
-	// Supports umbrella workspaces where repoRoot has no .git but sub-dirs do.
 	dirToGitRoot := make(map[string]string)
+	var jobs []fileJob
 
+	for _, n := range g.AllNodes() {
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
+			continue
+		}
+		absFile := n.File
+		if seen[absFile] {
+			continue
+		}
+		seen[absFile] = true
+		dir := filepath.Dir(absFile)
+		gr, grSeen := dirToGitRoot[dir]
+		if !grSeen {
+			gr = gitRootForDir(dir)
+			if gr == "" {
+				gr = repoRoot
+			}
+			dirToGitRoot[dir] = gr
+		}
+		jobs = append(jobs, fileJob{absFile: absFile, gitRoot: gr})
+	}
+
+	// Phase 2: run RecentCommitsForFile in parallel with bounded worker pool.
+	cache := make(map[string]string, len(jobs))
+	var cacheMu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4) // concurrency limit
+
+	for _, j := range jobs {
+		wg.Add(1)
+		go func(f fileJob) {
+			defer wg.Done()
+			sem <- struct{}{}        // acquire
+			commits := RecentCommitsForFile(f.gitRoot, f.absFile, 3)
+			<-sem                    // release
+			if len(commits) > 0 {
+				if raw, err := json.Marshal(commits); err == nil {
+					cacheMu.Lock()
+					cache[f.absFile] = string(raw)
+					cacheMu.Unlock()
+				}
+			}
+		}(j)
+	}
+	wg.Wait()
+
+	// Phase 3: apply commit context metadata (sequential).
 	type ccUpdate struct {
 		id  graph.NodeID
 		raw string
@@ -840,27 +891,7 @@ func EnrichCommitContext(g *graph.Graph, repoRoot string) {
 		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
 			continue
 		}
-
-		absFile := n.File
-		if !seen[absFile] {
-			seen[absFile] = true
-			dir := filepath.Dir(absFile)
-			gr, grSeen := dirToGitRoot[dir]
-			if !grSeen {
-				gr = gitRootForDir(dir)
-				if gr == "" {
-					gr = repoRoot // fall back; RecentCommitsForFile handles git errors silently
-				}
-				dirToGitRoot[dir] = gr
-			}
-			commits := RecentCommitsForFile(gr, absFile, 3)
-			if len(commits) > 0 {
-				if raw, err := json.Marshal(commits); err == nil {
-					cache[absFile] = string(raw)
-				}
-			}
-		}
-		raw := cache[absFile]
+		raw := cache[n.File]
 		if raw == "" {
 			continue
 		}

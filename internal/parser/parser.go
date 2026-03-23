@@ -170,6 +170,12 @@ func NewWalker() *Walker {
 	w.Register(NewObjCParser()) // deep: .m (Objective-C)
 	// Scientific
 	w.Register(NewJuliaParser()) // deep: .jl
+
+	// Populate disambiguation fields for .m extension (MATLAB vs Objective-C).
+	// MATLAB was registered first; ObjC registered last wins in w.parsers[".m"].
+	// resolveParser uses these fields to disambiguate at parse time.
+	w.mObjCParser = w.parsers[".m"]   // ObjC (last registered, current winner)
+	w.mMATLABParser = NewMATLABParser() // MATLAB (re-instantiate since overwritten)
 	return w
 }
 
@@ -260,21 +266,7 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 		}
 
 		ext := strings.ToLower(filepath.Ext(path))
-		p, ok := w.parsers[ext]
-		if !ok {
-			// Try filename-based match for files like "Dockerfile" (no extension).
-			base := filepath.Base(path)
-			p, ok = w.filenameParsers[base]
-			if !ok {
-				// Try prefix-based match (e.g. Dockerfile.staging → DockerfileParser).
-				for _, entry := range w.filenamePrefixParsers {
-					if strings.HasPrefix(base, entry.prefix) {
-						p, ok = entry.parser, true
-						break
-					}
-				}
-			}
-		}
+		p, ok := w.resolveParser(path, ext)
 		if !ok {
 			return nil
 		}
@@ -449,21 +441,7 @@ func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[strin
 		}
 
 		ext := strings.ToLower(filepath.Ext(path))
-		p, ok := w.parsers[ext]
-		if !ok {
-			// Try filename-based match for files like "Dockerfile" (no extension).
-			base := filepath.Base(path)
-			p, ok = w.filenameParsers[base]
-			if !ok {
-				// Try prefix-based match (e.g. Dockerfile.staging → DockerfileParser).
-				for _, entry := range w.filenamePrefixParsers {
-					if strings.HasPrefix(base, entry.prefix) {
-						p, ok = entry.parser, true
-						break
-					}
-				}
-			}
-		}
+		p, ok := w.resolveParser(path, ext)
 		if !ok {
 			return nil // unsupported extension or filename
 		}
@@ -531,21 +509,7 @@ func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[strin
 // supported it returns nil without error.
 func (w *Walker) ParseFile(g *graph.Graph, path string) error {
 	ext := strings.ToLower(filepath.Ext(path))
-	p, ok := w.parsers[ext]
-	if !ok {
-		// Try filename-based match for files like "Dockerfile" (no extension).
-		base := filepath.Base(path)
-		p, ok = w.filenameParsers[base]
-		if !ok {
-			// Try prefix-based match (e.g. Dockerfile.staging → DockerfileParser).
-			for _, entry := range w.filenamePrefixParsers {
-				if strings.HasPrefix(base, entry.prefix) {
-					p, ok = entry.parser, true
-					break
-				}
-			}
-		}
-	}
+	p, ok := w.resolveParser(path, ext)
 	if !ok {
 		return nil
 	}
