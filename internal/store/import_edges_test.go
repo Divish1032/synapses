@@ -109,9 +109,112 @@ func TestLoadCallSitesForFiles_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestLoadCallerFilesForPkgAliases_Basic(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+
+	// a.go calls something from package "models" (unresolved — no CALLS edge yet)
+	// b.go calls something from package "store"
+	sites := []graph.CallSite{
+		{CallerID: "repo::a.go::Handler", CallerFile: "a.go", PkgAlias: "models", FuncName: "NewUser"},
+		{CallerID: "repo::b.go::Fetcher", CallerFile: "b.go", PkgAlias: "store", FuncName: "Open"},
+		{CallerID: "repo::c.go::Init", CallerFile: "c.go", PkgAlias: "models", FuncName: "FindAll"},
+	}
+	if err := st.SaveCallSites(sites); err != nil {
+		t.Fatalf("SaveCallSites: %v", err)
+	}
+
+	// When "models" package adds a new function, a.go and c.go must be found.
+	files, err := st.LoadCallerFilesForPkgAliases([]string{"models"})
+	if err != nil {
+		t.Fatalf("LoadCallerFilesForPkgAliases: %v", err)
+	}
+	sort.Strings(files)
+	if !slices.Equal(files, []string{"a.go", "c.go"}) {
+		t.Errorf("want [a.go c.go], got %v", files)
+	}
+
+	// b.go must NOT appear when querying for "models".
+	for _, f := range files {
+		if f == "b.go" {
+			t.Errorf("b.go (alias 'store') must not appear for alias 'models'")
+		}
+	}
+}
+
+func TestLoadCallerFilesForPkgAliases_MultipleAliases(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+
+	sites := []graph.CallSite{
+		{CallerID: "repo::x.go::A", CallerFile: "x.go", PkgAlias: "models", FuncName: "Foo"},
+		{CallerID: "repo::y.go::B", CallerFile: "y.go", PkgAlias: "user", FuncName: "Bar"},
+		{CallerID: "repo::z.go::C", CallerFile: "z.go", PkgAlias: "other", FuncName: "Baz"},
+	}
+	if err := st.SaveCallSites(sites); err != nil {
+		t.Fatalf("SaveCallSites: %v", err)
+	}
+
+	// Query with both aliases: package name "models" and filename stem "user".
+	files, err := st.LoadCallerFilesForPkgAliases([]string{"models", "user"})
+	if err != nil {
+		t.Fatalf("LoadCallerFilesForPkgAliases: %v", err)
+	}
+	sort.Strings(files)
+	if !slices.Equal(files, []string{"x.go", "y.go"}) {
+		t.Errorf("want [x.go y.go], got %v", files)
+	}
+}
+
+func TestLoadCallerFilesForPkgAliases_EmptyAliasesReturnsNil(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+
+	files, err := st.LoadCallerFilesForPkgAliases([]string{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if files != nil {
+		t.Errorf("want nil for empty aliases, got %v", files)
+	}
+
+	files, err = st.LoadCallerFilesForPkgAliases([]string{""})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if files != nil {
+		t.Errorf("want nil for blank alias, got %v", files)
+	}
+}
+
+func TestLoadCallerFilesForPkgAliases_DeduplicatesResults(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+
+	// a.go has two call sites both with alias "models" — should appear once.
+	sites := []graph.CallSite{
+		{CallerID: "repo::a.go::F1", CallerFile: "a.go", PkgAlias: "models", FuncName: "Alpha"},
+		{CallerID: "repo::a.go::F2", CallerFile: "a.go", PkgAlias: "models", FuncName: "Beta"},
+	}
+	if err := st.SaveCallSites(sites); err != nil {
+		t.Fatalf("SaveCallSites: %v", err)
+	}
+
+	files, err := st.LoadCallerFilesForPkgAliases([]string{"models"})
+	if err != nil {
+		t.Fatalf("LoadCallerFilesForPkgAliases: %v", err)
+	}
+	if len(files) != 1 || files[0] != "a.go" {
+		t.Errorf("want exactly [a.go] (deduplicated), got %v", files)
+	}
+}
+
 // ── test helper to expose SaveCallSites via the exported store API ────────────
 
 func init() {
-	// Ensure store.Store has the SaveCallSites method used above.
+	// Ensure store.Store has the required methods.
 	var _ interface{ SaveCallSites([]graph.CallSite) error } = (*store.Store)(nil)
+	var _ interface {
+		LoadCallerFilesForPkgAliases([]string) ([]string, error)
+	} = (*store.Store)(nil)
 }
