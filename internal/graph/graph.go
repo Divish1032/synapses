@@ -632,12 +632,48 @@ func (g *Graph) RebuildIndex() ([]byte, error) {
 
 	newIdx := buildIndex(g, pool)
 
+	// Compact maps after a full reindex to release memory from deleted buckets.
+	g.Compact()
+
 	g.mu.Lock()
 	g.index = newIdx
 	g.mu.Unlock()
 
 	blob, err := newIdx.SaveSnapshot()
 	return blob, err
+}
+
+// Compact recreates the internal maps from scratch, allowing the Go runtime
+// to release memory from deleted map buckets. Go maps do not shrink after
+// deletions, so after thousands of incremental re-parses memory trends upward.
+// Call this periodically (e.g. after a full reindex) to reclaim that memory.
+func (g *Graph) Compact() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	newNodes := make(map[NodeID]*Node, len(g.nodes))
+	for k, v := range g.nodes {
+		newNodes[k] = v
+	}
+	g.nodes = newNodes
+
+	newOut := make(map[NodeID][]*Edge, len(g.outEdges))
+	for k, v := range g.outEdges {
+		newOut[k] = v
+	}
+	g.outEdges = newOut
+
+	newIn := make(map[NodeID][]*Edge, len(g.inEdges))
+	for k, v := range g.inEdges {
+		newIn[k] = v
+	}
+	g.inEdges = newIn
+
+	newEdgeSet := make(map[edgeKey]struct{}, len(g.edgeSet))
+	for k, v := range g.edgeSet {
+		newEdgeSet[k] = v
+	}
+	g.edgeSet = newEdgeSet
 }
 
 // EdgeCount returns the total number of edges.
