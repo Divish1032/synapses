@@ -150,6 +150,23 @@ func (c *LocalClient) PullModel(_ context.Context, _ io.Writer) error {
 	return nil
 }
 
+// Close releases GPU/CPU memory held by the llama.cpp model and context.
+// Safe to call multiple times; second and subsequent calls are no-ops.
+func (c *LocalClient) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Release context first (depends on model), then model.
+	if closer, ok := c.llamaCtx.(io.Closer); ok {
+		closer.Close()
+	}
+	c.llamaCtx = nil
+	if closer, ok := c.model.(io.Closer); ok {
+		closer.Close()
+	}
+	c.model = nil
+	c.available = false
+}
+
 // ---------------------------------------------------------------------------
 // CGo bridge — conditionally compiled
 // ---------------------------------------------------------------------------
