@@ -73,6 +73,20 @@ func newMemoryHNSW() *hnsw.Graph[string] {
 // Thread-safe: acquires exclusive lock on hnswMemMu for the entire rebuild.
 // Callers should not hold hnswMemMu when calling this method.
 func (s *Store) RebuildMemoryHNSW() {
+	// Guarantee hnswRebuilding is cleared even if this function panics.
+	// Without this, a panic before the Lock at the bottom leaves
+	// hnswRebuilding=true forever, causing all future hnswAdd calls to
+	// queue entries that are never replayed.
+	defer func() {
+		if r := recover(); r != nil {
+			logutil.Error("synapses: RebuildMemoryHNSW panicked: %v — clearing rebuild flag\n", r)
+			s.hnswMemMu.Lock()
+			s.hnswRebuilding = false
+			s.hnswPendingAdds = nil
+			s.hnswMemMu.Unlock()
+		}
+	}()
+
 	// Include stale embeddings — the search API returns them with a StaleEmbedding
 	// flag so callers can surface "possibly outdated" results. Only exclude
 	// stale/expired memories (the memory itself, not the embedding).
@@ -84,6 +98,10 @@ func (s *Store) RebuildMemoryHNSW() {
 		  AND m.expires_at > datetime('now')`)
 	if err != nil {
 		logutil.Error("synapses: rebuild HNSW index: %v\n", err)
+		s.hnswMemMu.Lock()
+		s.hnswRebuilding = false
+		s.hnswPendingAdds = nil
+		s.hnswMemMu.Unlock()
 		return
 	}
 	defer rows.Close()
@@ -119,8 +137,14 @@ func (s *Store) RebuildMemoryHNSW() {
 	s.hnswMemMu.Lock()
 	// Replay any additions that were queued during the rebuild.
 	// Use the same pre-delete + panic-recovery pattern as hnswAdd.
+	// Cap replay to 10K entries to bound memory; remaining entries are
+	// already in SQLite and will be picked up on the next rebuild.
 	pending := s.hnswPendingAdds
 	s.hnswPendingAdds = nil
+	if len(pending) > 10000 {
+		logutil.Warn("synapses: HNSW rebuild: %d pending entries, capping replay to 10000\n", len(pending))
+		pending = pending[len(pending)-10000:] // keep most recent
+	}
 	for _, p := range pending {
 		func() {
 			defer func() {
@@ -157,8 +181,13 @@ func (s *Store) hnswAdd(memoryID string, vec []float32) {
 	// If a rebuild is in progress, queue the addition for replay after
 	// rebuild completes. Without this, vectors added during the 200ms-5s
 	// rebuild window would be silently lost from the index.
+	// Capped at 10K to prevent unbounded growth during long rebuilds;
+	// vectors beyond the cap are still in SQLite and will be indexed on
+	// the next rebuild.
 	if s.hnswRebuilding {
-		s.hnswPendingAdds = append(s.hnswPendingAdds, hnswPendingEntry{memoryID: memoryID, vec: vec})
+		if len(s.hnswPendingAdds) < 10000 {
+			s.hnswPendingAdds = append(s.hnswPendingAdds, hnswPendingEntry{memoryID: memoryID, vec: vec})
+		}
 		return
 	}
 
