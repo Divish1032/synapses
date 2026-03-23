@@ -2458,15 +2458,18 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 	}
 
 	// Load nodes.
-	rows, err := s.graphDB.Query(`
-        SELECT id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance, domain FROM nodes LIMIT 2000000
-    `)
+	const maxNodes = 2_000_000
+	rows, err := s.graphDB.Query(fmt.Sprintf(`
+        SELECT id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance, domain FROM nodes LIMIT %d
+    `, maxNodes))
 	if err != nil {
 		return nil, fmt.Errorf("query nodes: %w", err)
 	}
 	defer rows.Close()
 
+	var nodeCount int
 	for rows.Next() {
+		nodeCount++
 		var (
 			id, typ, name, pkg, file string
 			line, exported           int
@@ -2511,18 +2514,24 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 			Domain:     graph.DomainType(domain),
 		})
 	}
+	if nodeCount >= maxNodes {
+		logutil.Warn("synapses: store: LoadGraph truncated at %d nodes — graph may be incomplete\n", maxNodes)
+	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate nodes: %w", err)
 	}
 
 	// Load edges.
-	erows, err := s.graphDB.Query(`SELECT from_id, to_id, type FROM edges LIMIT 10000000`)
+	const maxEdges = 10_000_000
+	erows, err := s.graphDB.Query(fmt.Sprintf(`SELECT from_id, to_id, type FROM edges LIMIT %d`, maxEdges))
 	if err != nil {
 		return nil, fmt.Errorf("query edges: %w", err)
 	}
 	defer erows.Close()
 
+	var edgeCount int
 	for erows.Next() {
+		edgeCount++
 		var fromID, toID, typ string
 		if err := erows.Scan(&fromID, &toID, &typ); err != nil {
 			return nil, fmt.Errorf("scan edge: %w", err)
@@ -2532,6 +2541,9 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 			To:   graph.NodeID(toID),
 			Type: graph.EdgeType(typ),
 		})
+	}
+	if edgeCount >= maxEdges {
+		logutil.Warn("synapses: store: LoadGraph truncated at %d edges — graph may be incomplete\n", maxEdges)
 	}
 	if err := erows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate edges: %w", err)
