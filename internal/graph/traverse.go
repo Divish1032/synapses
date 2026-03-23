@@ -449,11 +449,15 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 		depth int
 	}
 
+	const maxVisited = 10_000
 	visited := map[NodeID]int{rootID: 0} // node → first-seen depth
 	queue := []entry{{rootID, 0}}
 	fileSet := map[string]struct{}{}
 
 	for len(queue) > 0 {
+		if len(visited) >= maxVisited {
+			break
+		}
 		cur := queue[0]
 		queue = queue[1:]
 
@@ -609,11 +613,15 @@ func (g *Graph) FindTestsFor(nodeID NodeID) []string {
 		id    NodeID
 		depth int
 	}
+	const maxVisited = 5_000
 	visited := map[NodeID]bool{nodeID: true}
 	queue := []entry{{nodeID, 0}}
 	testFiles := map[string]struct{}{}
 
 	for len(queue) > 0 {
+		if len(visited) >= maxVisited {
+			break
+		}
 		cur := queue[0]
 		queue = queue[1:]
 		if cur.depth >= 5 { // cap at 5 hops to avoid runaway traversal

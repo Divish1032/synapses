@@ -1613,15 +1613,13 @@ func (s *Store) PruneStaleData(retentionDays int) {
 				end = len(deletedIDs)
 			}
 			batch := deletedIDs[i:end]
-			placeholders := ""
+			pTokens := make([]string, len(batch))
 			args := make([]interface{}, len(batch))
 			for j, id := range batch {
-				if j > 0 {
-					placeholders += ","
-				}
-				placeholders += "?"
+				pTokens[j] = "?"
 				args[j] = id
 			}
+			placeholders := strings.Join(pTokens, ",")
 			for _, table := range []string{"memory_embeddings", "memory_anchors", "memory_surfaced", "memory_versions"} {
 				tx.Exec("DELETE FROM "+table+" WHERE memory_id IN ("+placeholders+")", args...)
 			}
