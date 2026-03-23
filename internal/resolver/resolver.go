@@ -26,10 +26,10 @@ func ResolveCallEdges(g *graph.Graph) int {
 		return 0
 	}
 
-	// Build lookup tables once.
-	importMap := buildImportMap(g)       // absFilePath → {alias → importPath}
-	pkgIndex := buildPackageIndex(g)     // shortPkgName → []*Node
-	methodIndex := buildMethodIndex(pkgIndex) // "TypeName.MethodName" → NodeID
+	// Build all lookup tables in a single AllNodes() pass to avoid redundant
+	// full-graph scans. Previously 3 separate passes; now 1 pass + edge lookups.
+	importMap, pkgIndex := buildLookupTables(g)
+	methodIndex := buildMethodIndex(pkgIndex) // derived from pkgIndex, no graph scan
 
 	// Track edges added in this batch. Existing edges checked via g.HasEdge.
 	type edgeKey struct{ from, to graph.NodeID }
@@ -138,44 +138,37 @@ func ResolveCallEdges(g *graph.Graph) int {
 	return resolved
 }
 
-// buildImportMap builds a map of absFilePath → {packageAlias → importPath}
-// by following IMPORTS edges from every NodeFile node.
-// The alias defaults to the last path segment of the import path.
-func buildImportMap(g *graph.Graph) map[string]map[string]string {
-	result := make(map[string]map[string]string)
-	for _, n := range g.AllNodes() {
-		if n.Type != graph.NodeFile {
-			continue
-		}
-		aliases := make(map[string]string)
-		for _, e := range g.OutEdges(n.ID) {
-			if e.Type != graph.EdgeImports {
-				continue
-			}
-			pkgNode := g.GetNode(e.To)
-			if pkgNode == nil || pkgNode.Type != graph.NodePackage {
-				continue
-			}
-			// Use last path segment as the alias (matches Go's default convention).
-			alias := path.Base(pkgNode.Name)
-			aliases[alias] = pkgNode.Name
-		}
-		result[n.File] = aliases
-	}
-	return result
-}
+// buildLookupTables builds the import map and package index in a single
+// AllNodes() pass, avoiding redundant full-graph scans. Previously these were
+// two separate functions (buildImportMap + buildPackageIndex) with two passes.
+//
+// importMap: absFilePath → {packageAlias → importPath}
+// pkgIndex:  shortPkgName → []*Node (functions and methods)
+func buildLookupTables(g *graph.Graph) (map[string]map[string]string, map[string][]*graph.Node) {
+	importMap := make(map[string]map[string]string)
+	pkgIndex := make(map[string][]*graph.Node)
 
-// buildPackageIndex groups NodeFunction and NodeMethod nodes by their short
-// package name (node.Package), enabling fast lookup by (pkg, name).
-func buildPackageIndex(g *graph.Graph) map[string][]*graph.Node {
-	result := make(map[string][]*graph.Node)
 	for _, n := range g.AllNodes() {
 		switch n.Type {
+		case graph.NodeFile:
+			aliases := make(map[string]string)
+			for _, e := range g.OutEdges(n.ID) {
+				if e.Type != graph.EdgeImports {
+					continue
+				}
+				pkgNode := g.GetNode(e.To)
+				if pkgNode == nil || pkgNode.Type != graph.NodePackage {
+					continue
+				}
+				alias := path.Base(pkgNode.Name)
+				aliases[alias] = pkgNode.Name
+			}
+			importMap[n.File] = aliases
 		case graph.NodeFunction, graph.NodeMethod:
-			result[n.Package] = append(result[n.Package], n)
+			pkgIndex[n.Package] = append(pkgIndex[n.Package], n)
 		}
 	}
-	return result
+	return importMap, pkgIndex
 }
 
 // findInPackage returns the NodeID of a function or method named `name` in
