@@ -279,7 +279,14 @@ func (c *Cache) fetchAndStrip(ctx context.Context, url string) (string, error) {
 
 	text := StripHTML(string(raw))
 	if len(text) > maxDocBytes {
-		text = text[:maxDocBytes]
+		// Truncate at rune boundary to avoid splitting multi-byte UTF-8 chars.
+		runes := []rune(text)
+		if len(string(runes)) > maxDocBytes {
+			for len(runes) > 0 && len(string(runes)) > maxDocBytes {
+				runes = runes[:len(runes)-1]
+			}
+		}
+		text = string(runes)
 	}
 	return strings.TrimSpace(text), nil
 }
