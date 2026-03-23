@@ -117,19 +117,17 @@ func (r *projectRegistry) GetOrSet(absPath string, init func() (*ProjectInstance
 		}
 		r.mu.RUnlock()
 
-		r.mu.RLock()
-		count := len(r.projects)
-		r.mu.RUnlock()
-		if count >= maxActiveProjects {
-			return nil, fmt.Errorf("max active projects (%d) reached", maxActiveProjects)
-		}
-
 		pi, err := init()
 		if err != nil {
 			return nil, err
 		}
 
 		r.mu.Lock()
+		if len(r.projects) >= maxActiveProjects {
+			r.mu.Unlock()
+			pi.Close()
+			return nil, fmt.Errorf("max active projects (%d) reached", maxActiveProjects)
+		}
 		r.projects[absPath] = pi
 		r.mu.Unlock()
 		return pi, nil
