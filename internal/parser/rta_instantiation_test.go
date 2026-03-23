@@ -420,6 +420,51 @@ class DatabaseConnection {
 	}
 }
 
+// TestTSInstantiatedTypes_InjectableNonExported verifies that non-exported
+// decorated classes (decorator as child of class_declaration) are also recorded.
+// This covers the AST case where decorator is a child of class_declaration,
+// not a sibling inside export_statement.
+func TestTSInstantiatedTypes_InjectableNonExported(t *testing.T) {
+	src := `
+@Injectable()
+class TokenService {
+  verify() {}
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewTypeScriptParser()
+	if err := p.Parse(g, "token.service.ts", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if !types["TokenService"] {
+		t.Errorf("expected TokenService in instantiated types (non-exported @Injectable), got %v", types)
+	}
+}
+
+// TestTSInstantiatedTypes_MultipleClassesNoContamination verifies that decorators
+// from one class are NOT applied to an adjacent undecorated class.
+func TestTSInstantiatedTypes_MultipleClassesNoContamination(t *testing.T) {
+	src := `
+@Injectable()
+export class ServiceA {}
+
+export class ServiceB {}
+`
+	g := graph.New("testrepo")
+	p := parser.NewTypeScriptParser()
+	if err := p.Parse(g, "multi.ts", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if !types["ServiceA"] {
+		t.Errorf("expected ServiceA in instantiated types")
+	}
+	if types["ServiceB"] {
+		t.Errorf("unexpected ServiceB in instantiated types — decorator from ServiceA should not bleed")
+	}
+}
+
 func TestTSInstantiatedTypes_StaticFactory_DifferentReturn(t *testing.T) {
 	src := `
 class Builder {

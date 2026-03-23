@@ -749,24 +749,48 @@ func collectTSDecoratorInstantiations(g *graph.Graph, root sitter.Node, src []by
 			}
 			className := string(src[nameNode.StartByte():nameNode.EndByte()])
 
-			// Decorators are siblings BEFORE the class node in the parent's children.
-			parent := n.Parent()
-			if !parent.IsNull() {
-				classIdx := -1
-				for i := uint32(0); i < parent.ChildCount(); i++ {
-					if parent.Child(i).Equal(n) {
-						classIdx = int(i)
+			// Two decorator placements in tree-sitter TypeScript:
+			//
+			// 1. Non-exported class: decorator is a direct CHILD of class_declaration.
+			//    @Injectable() class Foo {} →  class_declaration → [decorator, class, name, body]
+			//
+			// 2. Exported class: decorator is a sibling inside the parent export_statement.
+			//    @Injectable() export class Foo {} → export_statement → [decorator, export, class_declaration]
+			//
+			// We handle both by: (a) scanning class_declaration's own children, and
+			// (b) scanning parent's children that precede this class node.
+
+			// (a) decorator as direct child of this class_declaration node
+			if !isTSBuiltin(className) {
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					child := n.Child(i)
+					if child.IsNull() || child.Type() != "decorator" {
+						continue
+					}
+					decName := extractTSDecoratorName(child, src)
+					if tsDIDecorators[decName] {
+						g.AddInstantiatedType(filePath, className)
 						break
 					}
 				}
-				for i := 0; i < classIdx; i++ {
-					sib := parent.Child(uint32(i))
-					if sib.IsNull() || sib.Type() != "decorator" {
+			}
+
+			// (b) decorator as sibling in parent node (export_statement case)
+			parent := n.Parent()
+			if !parent.IsNull() && !isTSBuiltin(className) {
+				for i := uint32(0); i < parent.ChildCount(); i++ {
+					sib := parent.Child(i)
+					if sib.IsNull() {
 						continue
 					}
-					// decorator → @ identifier OR @ call_expression → identifier
+					if sib.Equal(n) {
+						break // stop scanning once we reach the class itself
+					}
+					if sib.Type() != "decorator" {
+						continue
+					}
 					decName := extractTSDecoratorName(sib, src)
-					if tsDIDecorators[decName] && !isTSBuiltin(className) {
+					if tsDIDecorators[decName] {
 						g.AddInstantiatedType(filePath, className)
 						break
 					}
