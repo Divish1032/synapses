@@ -1317,3 +1317,99 @@ func TestCarveEgoGraph_InterfaceImplementorExpansion(t *testing.T) {
 		})
 	}
 }
+
+// TestCarveEgoGraph_InterfaceImplementorExpansion_SameReceiverName verifies that
+// when the interface and a concrete struct share the same name (e.g. "Store"
+// interface and "Store" struct in different packages), the method seeding does
+// not downgrade interface-method scores (0.9) to implementor-method scores (0.85).
+//
+// This covers the max-score guard in the BFS implementor seeding path.
+func TestCarveEgoGraph_InterfaceImplementorExpansion_SameReceiverName(t *testing.T) {
+	g := graph.New("testrepo")
+
+	// Interface "Store" with method "Store.Get" (in iface.go)
+	ifaceID := g.MakeNodeID("iface.go", "Store")
+	ifaceMethID := g.MakeNodeID("iface.go", "Store.Get")
+	g.AddNode(&graph.Node{ID: ifaceID, Type: graph.NodeInterface, Name: "Store", File: "iface.go"})
+	g.AddNode(&graph.Node{ID: ifaceMethID, Type: graph.NodeMethod, Name: "Store.Get", File: "iface.go"})
+	g.AddEdge(&graph.Edge{From: ifaceID, To: ifaceMethID, Type: graph.EdgeDefines})
+
+	// Concrete struct also named "Store" (in impl.go) — same receiver name, different file/ID
+	implID := g.MakeNodeID("impl.go", "Store")
+	implMethID := g.MakeNodeID("impl.go", "Store.Get")
+	g.AddNode(&graph.Node{ID: implID, Type: graph.NodeStruct, Name: "Store", File: "impl.go"})
+	g.AddNode(&graph.Node{ID: implMethID, Type: graph.NodeMethod, Name: "Store.Get", File: "impl.go"})
+	g.AddEdge(&graph.Edge{From: implID, To: implMethID, Type: graph.EdgeDefines})
+	g.AddEdge(&graph.Edge{From: implID, To: ifaceID, Type: graph.EdgeImplements})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = false
+	cfg.MinRelevance = 0.01
+
+	sub, err := g.CarveEgoGraph(ifaceID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+
+	nodeMap := make(map[graph.NodeID]float64)
+	for _, cn := range sub.Nodes {
+		nodeMap[cn.Node.ID] = cn.Relevance
+	}
+
+	// The interface method seeded at 0.9 must not be downgraded to 0.85.
+	// iface.go::Store.Get is the interface method (seeded at 0.9 by receiver-method seeding).
+	// impl.go::Store.Get is the implementor method (would be seeded at 0.85 by implementor seeding).
+	// Since both have receiver name "Store", the implementor seeding runs second;
+	// the max-score guard must preserve the higher 0.9 for iface.go::Store.Get.
+	ifaceMethRel, ok := nodeMap[ifaceMethID]
+	if !ok {
+		t.Fatal("interface method Store.Get (iface.go) missing from subgraph")
+	}
+	if ifaceMethRel < 0.89 {
+		t.Errorf("interface method Store.Get (iface.go) relevance = %.3f, want >= 0.89 (must not be downgraded from 0.9 to 0.85)", ifaceMethRel)
+	}
+
+	// Implementor method must still appear at 0.85.
+	implMethRel, ok := nodeMap[implMethID]
+	if !ok {
+		t.Fatal("implementor method Store.Get (impl.go) missing from subgraph")
+	}
+	if implMethRel < 0.80 {
+		t.Errorf("implementor method Store.Get (impl.go) relevance = %.3f, want >= 0.80", implMethRel)
+	}
+
+	// Implementor struct must appear.
+	if _, ok := nodeMap[implID]; !ok {
+		t.Error("implementor struct Store (impl.go) missing from subgraph")
+	}
+}
+
+// TestCarveEgoGraph_InterfaceImplementorExpansion_SelfLoop verifies that a
+// self-loop IMPLEMENTS edge (e.From == e.To == rootID, a parser-bug scenario)
+// does not corrupt the root node's relevance score.
+func TestCarveEgoGraph_InterfaceImplementorExpansion_SelfLoop(t *testing.T) {
+	g := graph.New("testrepo")
+
+	ifaceID := g.MakeNodeID("iface.go", "Iface")
+	g.AddNode(&graph.Node{ID: ifaceID, Type: graph.NodeInterface, Name: "Iface", File: "iface.go"})
+	// Simulate a parser-bug self-loop: interface IMPLEMENTS itself.
+	g.AddEdge(&graph.Edge{From: ifaceID, To: ifaceID, Type: graph.EdgeImplements})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = false
+
+	sub, err := g.CarveEgoGraph(ifaceID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == ifaceID {
+			if cn.Relevance != 1.0 {
+				t.Errorf("root Iface relevance = %.3f after self-loop, want exactly 1.0", cn.Relevance)
+			}
+			return
+		}
+	}
+	t.Error("root Iface node missing from subgraph")
+}

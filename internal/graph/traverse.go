@@ -440,6 +440,11 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 						continue
 					}
 					implID := e.From
+					// Guard: a self-loop IMPLEMENTS edge (parser bug) must never
+					// downgrade the root from its pinned score of 1.0.
+					if implID == rootID {
+						continue
+					}
 					visited[implID] = 0.85
 					queue = append(queue, qItem{implID, 0})
 					implNode := g.nodes[implID]
@@ -452,15 +457,29 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 								continue
 							}
 							mID := idx.SeqIDs[mSeq]
-							visited[mID] = 0.85
-							queue = append(queue, qItem{mID, 0})
+							// Max-score semantics: preserve a higher score already set
+							// by the interface's own method seeding (e.g. 0.9 when the
+							// interface and implementor share the same receiver name).
+							// Only enqueue if this is the first visit to avoid duplicate
+							// BFS expansions from the same node.
+							if prev, seen := visited[mID]; !seen {
+								visited[mID] = 0.85
+								queue = append(queue, qItem{mID, 0})
+							} else if 0.85 > prev {
+								visited[mID] = 0.85
+								// Already queued — score updated; BFS will use the new value.
+							}
 						}
 					} else {
 						prefix := implNode.Name + "."
 						for _, n := range g.nodes {
 							if n.Type == NodeMethod && strings.HasPrefix(n.Name, prefix) {
-								visited[n.ID] = 0.85
-								queue = append(queue, qItem{n.ID, 0})
+								if prev, seen := visited[n.ID]; !seen {
+									visited[n.ID] = 0.85
+									queue = append(queue, qItem{n.ID, 0})
+								} else if 0.85 > prev {
+									visited[n.ID] = 0.85
+								}
 							}
 						}
 					}
