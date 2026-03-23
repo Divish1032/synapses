@@ -285,6 +285,9 @@ func (c *Client) embedSerial(ctx context.Context, texts []string) ([][]float32, 
 // normalizeL2 returns a unit-length copy of v. Returns v unchanged if already
 // normalized (within tolerance) or if the vector has zero magnitude.
 func normalizeL2(v []float32) []float32 {
+	if len(v) == 0 {
+		return v
+	}
 	for _, x := range v {
 		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
 			return nil
@@ -295,12 +298,12 @@ func normalizeL2(v []float32) []float32 {
 		sum += float64(x) * float64(x)
 	}
 	norm := math.Sqrt(sum)
-	// Guard: return nil for zero-magnitude or degenerate vectors so callers
-	// can detect and skip them rather than storing invalid embeddings.
-	if norm == 0 || math.IsNaN(norm) || math.IsInf(norm, 0) {
+	if math.IsNaN(norm) || math.IsInf(norm, 0) {
 		return nil
 	}
-	// Already unit-length — return as-is.
+	if norm == 0 {
+		return v
+	}
 	if norm > 0.999 && norm < 1.001 {
 		return v
 	}
