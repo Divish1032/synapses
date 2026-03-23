@@ -56,7 +56,7 @@ func (s *Store) readDB() *sql.DB {
 
 // Open creates or opens a pulse SQLite database at the given path.
 func Open(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("pulse store: mkdir: %w", err)
 	}
 
