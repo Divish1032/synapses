@@ -207,6 +207,10 @@ func matchRegex(pattern, name string) bool {
 		return re.MatchString(name)
 	}
 
+	// Reject overly complex patterns to limit CPU usage from project-controlled content.
+	if len(pattern) > 1024 {
+		return false
+	}
 	// Slow path: compile and store under write lock.
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
