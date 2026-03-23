@@ -2578,6 +2578,7 @@ func (s *Store) GetSignatureChanges(file string) ([]SignatureChange, error) {
 		WHERE (file = ? OR file LIKE '%' || ? ESCAPE '\')
 		  AND prev_signature != ''
 		  AND type IN ('function', 'method', 'struct', 'interface')
+		LIMIT 10000
 	`, file, escapedFile)
 	if err != nil {
 		return nil, fmt.Errorf("store.GetSignatureChanges: %w", err)
