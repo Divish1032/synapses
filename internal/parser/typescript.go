@@ -685,9 +685,49 @@ func (p *TypeScriptParser) extractClassMethods(
 	walk(root, "")
 }
 
+// collectTSInstantiatedTypes walks the AST for new_expression nodes
+// (new Foo(...)) and records the constructed type names via AddInstantiatedType.
+// TypeScript's new_expression has a "constructor" field holding the class name.
+// This enables RTA-style call graph refinement in the resolver.
+func collectTSInstantiatedTypes(g *graph.Graph, root sitter.Node, src []byte, filePath string) {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
+			return
+		}
+		if n.Type() == "new_expression" {
+			constructor := n.ChildByFieldName("constructor")
+			if !constructor.IsNull() {
+				// Extract the simple identifier — skip member_expression (e.g. ns.Foo)
+				// to avoid recording qualified names that won't match method receiver types.
+				var typeName string
+				switch constructor.Type() {
+				case "identifier":
+					typeName = string(src[constructor.StartByte():constructor.EndByte()])
+				case "member_expression":
+					// Use only the property (rightmost) part: new ns.Foo() → "Foo"
+					prop := constructor.ChildByFieldName("property")
+					if !prop.IsNull() {
+						typeName = string(src[prop.StartByte():prop.EndByte()])
+					}
+				}
+				if typeName != "" && !isTSBuiltin(typeName) {
+					g.AddInstantiatedType(filePath, typeName)
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+}
+
 // collectTSCallSites performs a depth-first AST walk to collect call sites with
 // function-level caller resolution.
 func collectTSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	// Collect instantiated types for RTA-style call graph refinement.
+	collectTSInstantiatedTypes(g, root, src, filePath)
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{
 			"class_declaration":          true,
@@ -854,6 +894,12 @@ func isTSBuiltin(name string) bool {
 		"Promise", "resolve", "reject", "then", "catch", "finally",
 		"JSON", "Math", "Date", "Object", "Array", "String", "Number", "Boolean",
 		"Symbol", "RegExp", "Error", "TypeError", "RangeError",
+		// ES6 built-in constructors used with new.
+		"Map", "Set", "WeakMap", "WeakSet", "WeakRef",
+		"ArrayBuffer", "DataView", "Int8Array", "Uint8Array", "Int16Array",
+		"Uint16Array", "Int32Array", "Uint32Array", "Float32Array", "Float64Array",
+		"URL", "URLSearchParams", "TextEncoder", "TextDecoder",
+		"Worker", "MessageChannel", "BroadcastChannel",
 		"parseInt", "parseFloat", "isNaN", "isFinite",
 		"now", "from", "of", "call", "apply", "bind",
 		"require", "define":

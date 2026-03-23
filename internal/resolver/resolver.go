@@ -31,6 +31,10 @@ func ResolveCallEdges(g *graph.Graph) int {
 	importMap, pkgIndex := buildLookupTables(g)
 	methodIndex := buildMethodIndex(pkgIndex) // derived from pkgIndex, no graph scan
 
+	// RTA: collect which types are explicitly instantiated across the project.
+	// nil means no instantiation data (e.g. pure Go project) — tie-breaking skipped.
+	instantiated := g.GetInstantiatedTypes()
+
 	// Track edges added in this batch. Existing edges checked via g.HasEdge.
 	type edgeKey struct{ from, to graph.NodeID }
 	seen := make(map[edgeKey]bool)
@@ -48,7 +52,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 			if ok {
 				if importPath, found := aliases[site.PkgAlias]; found {
 					shortPkg := path.Base(importPath)
-					targetID = findInPackage(pkgIndex, shortPkg, site.FuncName)
+					targetID = findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated)
 				}
 			}
 
@@ -68,7 +72,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 			if targetID == "" {
 				callerNode := g.GetNode(site.CallerID)
 				if callerNode != nil {
-					targetID = findInPackage(pkgIndex, callerNode.Package, site.FuncName)
+					targetID = findInPackage(pkgIndex, callerNode.Package, site.FuncName, instantiated)
 				}
 				if targetID == "" {
 					if aliases, ok := importMap[site.CallerFile]; ok {
@@ -79,7 +83,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 						sort.Strings(sortedPaths)
 						for _, importPath := range sortedPaths {
 							shortPkg := path.Base(importPath)
-							if id := findInPackage(pkgIndex, shortPkg, site.FuncName); id != "" {
+							if id := findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated); id != "" {
 								targetID = id
 								break
 							}
@@ -94,7 +98,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 			if callerNode == nil {
 				continue
 			}
-			targetID = findInPackage(pkgIndex, callerNode.Package, site.FuncName)
+			targetID = findInPackage(pkgIndex, callerNode.Package, site.FuncName, instantiated)
 
 			// 2. Fallback: search all packages imported by the caller's file.
 			//    This handles Python/TypeScript `from X import Y` style calls where
@@ -108,7 +112,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 					sort.Strings(sortedPaths)
 					for _, importPath := range sortedPaths {
 						shortPkg := path.Base(importPath)
-						if id := findInPackage(pkgIndex, shortPkg, site.FuncName); id != "" {
+						if id := findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated); id != "" {
 							targetID = id
 							break
 						}
@@ -174,14 +178,43 @@ func buildLookupTables(g *graph.Graph) (map[string]map[string]string, map[string
 // findInPackage returns the NodeID of a function or method named `name` in
 // package `pkg`, or "" if not found.
 // Methods are stored as "ReceiverType.MethodName", so we match on the suffix.
-func findInPackage(idx map[string][]*graph.Node, pkg, name string) graph.NodeID {
+//
+// RTA tie-breaking: when multiple candidates match and instantiated is non-nil,
+// prefer candidates whose receiver type appears in the instantiated set. This
+// reduces false-positive CALLS edges in codebases with deep class hierarchies
+// (Java/TypeScript) where many classes share the same method name. Falls back
+// to the first candidate if no instantiated match exists (no regressions).
+func findInPackage(idx map[string][]*graph.Node, pkg, name string, instantiated map[string]bool) graph.NodeID {
 	suffix := "." + name
-	for _, n := range idx[pkg] {
-		if n.Name == name || strings.HasSuffix(n.Name, suffix) {
-			return n.ID
+	candidates := idx[pkg]
+
+	if len(instantiated) == 0 {
+		// Fast path: no RTA data, original CHA behavior.
+		for _, n := range candidates {
+			if n.Name == name || strings.HasSuffix(n.Name, suffix) {
+				return n.ID
+			}
+		}
+		return ""
+	}
+
+	// RTA path: prefer candidates whose receiver type is in the instantiated set.
+	var first graph.NodeID // first match (fallback if no instantiated candidate)
+	for _, n := range candidates {
+		if n.Name != name && !strings.HasSuffix(n.Name, suffix) {
+			continue
+		}
+		if first == "" {
+			first = n.ID
+		}
+		// For method nodes ("ReceiverType.MethodName"), check if the receiver type
+		// is in the instantiated set.
+		dot := strings.IndexByte(n.Name, '.')
+		if dot > 0 && instantiated[n.Name[:dot]] {
+			return n.ID // prefer instantiated receiver
 		}
 	}
-	return ""
+	return first // fallback: first match (CHA behavior when no RTA preference found)
 }
 
 // buildMethodIndex builds a flat "TypeName.MethodName" → NodeID map from the
