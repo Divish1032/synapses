@@ -14,7 +14,14 @@ import (
 
 // processStartTimeCache caches PID→start-time lookups to avoid shelling
 // out to `ps` on every check (10-50ms per call).
-var processStartTimeCache sync.Map // int → int64
+var processStartTimeCache struct {
+	mu sync.Mutex
+	m  map[int]int64
+}
+
+func init() {
+	processStartTimeCache.m = make(map[int]int64)
+}
 
 func detachedSysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setpgid: true}
@@ -56,13 +63,19 @@ func forceKillProcess(pid int) error {
 // This is locale-independent (no month/day names), working reliably on
 // macOS, Linux, and BSD regardless of LC_TIME settings.
 func processStartTime(pid int) int64 {
-	if v, ok := processStartTimeCache.Load(pid); ok {
-		return v.(int64)
+	processStartTimeCache.mu.Lock()
+	if v, ok := processStartTimeCache.m[pid]; ok {
+		processStartTimeCache.mu.Unlock()
+		return v
 	}
+	processStartTimeCache.mu.Unlock()
+
 	out, err := exec.Command("ps", "-o", "etime=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		// Process doesn't exist (ps failed) — evict any stale entry.
-		processStartTimeCache.Delete(pid)
+		processStartTimeCache.mu.Lock()
+		delete(processStartTimeCache.m, pid)
+		processStartTimeCache.mu.Unlock()
 		return 0
 	}
 	s := strings.TrimSpace(string(out))
@@ -75,19 +88,13 @@ func processStartTime(pid int) int64 {
 	}
 	result := time.Now().Add(-elapsed).UnixNano()
 	// Cap cache size to prevent unbounded growth from accumulated dead PIDs.
-	// sync.Map has no Len(); count via Range. Reset when over 256 entries.
-	count := 0
-	processStartTimeCache.Range(func(_, _ interface{}) bool {
-		count++
-		return count < 257
-	})
-	if count >= 256 {
-		processStartTimeCache.Range(func(k, _ interface{}) bool {
-			processStartTimeCache.Delete(k)
-			return true
-		})
+	// Count and clear happen under a single lock hold to prevent TOCTOU.
+	processStartTimeCache.mu.Lock()
+	if len(processStartTimeCache.m) >= 256 {
+		processStartTimeCache.m = make(map[int]int64)
 	}
-	processStartTimeCache.Store(pid, result)
+	processStartTimeCache.m[pid] = result
+	processStartTimeCache.mu.Unlock()
 	return result
 }
 

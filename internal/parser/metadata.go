@@ -175,6 +175,9 @@ func extractPythonDocstring(lines []string, startLine int) string {
 					parts = append(parts, firstLine)
 				}
 				for j := i + 1; j < len(lines); j++ {
+					if j-i > 200 {
+						break
+					}
 					line := lines[j]
 					trimmedLine := strings.TrimSpace(line)
 					if endIdx := strings.Index(trimmedLine, q); endIdx >= 0 {

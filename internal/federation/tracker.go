@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/config"
@@ -49,10 +50,11 @@ type moduleEntry struct {
 // DeterministicDetector detects cross-project dependencies by matching
 // import statements against a module index built from sibling manifests.
 //
-// Thread-safe for concurrent use — the module index is built once and
-// read-only after construction. Entity resolution goes through the Resolver
-// which has its own synchronization.
+// Thread-safe: mu protects modules so Rebuild() and DetectDeps() can run
+// concurrently. Entity resolution goes through the Resolver which has its
+// own synchronization.
 type DeterministicDetector struct {
+	mu       sync.RWMutex
 	modules  []moduleEntry // all known module prefixes
 	resolver *Resolver     // for querying sibling stores (entity resolution)
 }
@@ -105,7 +107,21 @@ func (d *DeterministicDetector) buildModuleIndex(entries []config.FederationEntr
 // Entity resolution uses the sibling store's graph — not regex, not git.
 // This means every dep gets a VerifiedSignature from the parsed graph,
 // enabling graph-first drift detection immediately.
+// Rebuild replaces the module index with a fresh one built from entries.
+// Safe to call concurrently with DetectDeps — protected by mu.
+func (d *DeterministicDetector) Rebuild(entries []config.FederationEntry) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.modules = nil
+	d.buildModuleIndex(entries)
+}
+
 func (d *DeterministicDetector) DetectDeps(ctx context.Context, filePath string, localStore *store.Store) []store.CrossProjectDep {
+	// Hold RLock for the entire detection so Rebuild() cannot replace d.modules
+	// mid-scan. Rebuild() only happens on config reload (infrequent); the
+	// short lock hold here does not cause meaningful contention.
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	if len(d.modules) == 0 || ctx.Err() != nil {
 		return nil
 	}

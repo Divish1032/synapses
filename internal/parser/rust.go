@@ -13,9 +13,8 @@ import (
 // extractRustDeclInfo walks the Rust AST collecting metadata for function,
 // struct, enum, trait, type alias, and macro declarations.
 // Methods inside impl blocks are qualified as Type.method_name.
-func extractRustDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
+func extractRustDeclInfo(root sitter.Node, src []byte, lines []string) map[string]declMeta {
 	result := make(map[string]declMeta)
-	lines := strings.Split(string(src), "\n")
 
 	var walk func(n sitter.Node, implType string, depth int)
 	walk = func(n sitter.Node, implType string, depth int) {
@@ -152,7 +151,8 @@ func (p *RustParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	})
 
 	lang := p.language
-	declInfo := extractRustDeclInfo(root, src)
+	lines := strings.Split(string(src), "\n")
+	declInfo := extractRustDeclInfo(root, src, lines)
 
 	// --- use declarations (scoped_identifier) ---
 	useQuery := `(use_declaration argument: (scoped_identifier) @use_path)`

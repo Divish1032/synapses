@@ -4,6 +4,7 @@ package metrics
 // parsePprofTop. Using package metrics (not metrics_test) gives direct access.
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -177,7 +178,7 @@ func TestFileChurn_WithGitRepo(t *testing.T) {
 func TestRecentCommitsForFile_WithGitRepo(t *testing.T) {
 	dir := initGitRepo(t)
 
-	commits := RecentCommitsForFile(dir, "pkg/svc.go", 3)
+	commits := RecentCommitsForFile(context.Background(), dir, "pkg/svc.go", 3)
 	if len(commits) == 0 {
 		t.Error("expected at least 1 commit for pkg/svc.go")
 	}

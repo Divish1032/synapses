@@ -186,7 +186,15 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) supervise(ctx context.Context, args []string) {
 	backoff := time.Second
 	for {
-		_ = s.proc.Wait() // blocks until the process exits
+		// Capture proc under lock so we don't race with Stop() calling Wait()
+		// on the same process handle.
+		s.mu.Lock()
+		proc := s.proc
+		s.mu.Unlock()
+		if proc == nil {
+			return
+		}
+		_ = proc.Wait() // blocks until the process exits
 
 		// Check whether the exit was intentional (Stop() sets started=false).
 		// Set restarting=true under lock so Embed() callers see a clear state

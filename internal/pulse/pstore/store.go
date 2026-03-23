@@ -25,12 +25,19 @@ type Store struct {
 	tx    *sql.Tx    // non-nil inside a BeginBatch/commit window
 	mu    sync.Mutex // protects write-path batch serialization
 	txMu  sync.RWMutex // protects reads of s.tx from concurrent goroutines
+	// readTx is a non-nil *sql.Tx while a BeginReadSnapshot/EndReadSnapshot
+	// window is active. All readDB() calls route through it, giving the
+	// rollup read phase a consistent WAL snapshot.
+	readTx   *sql.Tx
+	readTxMu sync.RWMutex
 }
 
 // execer returns the active transaction if one exists, otherwise the raw db.
 // This ensures that Tx-suffixed methods write inside the batch transaction.
-// Thread-safe: reads s.tx under txMu.RLock() to avoid a data race with
-// BeginBatch/CommitBatch (which set/clear s.tx under txMu write lock).
+// When a read snapshot is active (BeginReadSnapshot), read-only callers are
+// routed through it for a consistent WAL snapshot.
+// Priority: write-tx (s.tx) > read-snapshot (s.readTx) > raw db.
+// Thread-safe: reads both tx fields under their respective RLocks.
 func (s *Store) execer() interface {
 	Exec(string, ...any) (sql.Result, error)
 	Query(string, ...any) (*sql.Rows, error)
@@ -42,7 +49,41 @@ func (s *Store) execer() interface {
 	if tx != nil {
 		return tx
 	}
+	s.readTxMu.RLock()
+	rtx := s.readTx
+	s.readTxMu.RUnlock()
+	if rtx != nil {
+		return rtx
+	}
 	return s.db
+}
+
+// BeginReadSnapshot starts a DEFERRED (read) transaction so that all
+// subsequent readDB()-based queries see a consistent WAL snapshot.
+// Call EndReadSnapshot when the read phase is complete. The transaction
+// is always rolled back (never committed) — no writes occur in it.
+// Safe to call even while a BeginBatch write transaction is active.
+func (s *Store) BeginReadSnapshot() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	s.readTxMu.Lock()
+	s.readTx = tx
+	s.readTxMu.Unlock()
+	return nil
+}
+
+// EndReadSnapshot rolls back and clears the read snapshot transaction.
+// Safe to call even if BeginReadSnapshot returned an error (no-op when readTx is nil).
+func (s *Store) EndReadSnapshot() {
+	s.readTxMu.Lock()
+	tx := s.readTx
+	s.readTx = nil
+	s.readTxMu.Unlock()
+	if tx != nil {
+		_ = tx.Rollback()
+	}
 }
 
 // readDB returns the raw database connection for read-only queries.

@@ -19,6 +19,8 @@ func safeGitCmd(ctx context.Context, args ...string) *exec.Cmd {
 		"HOME=" + os.Getenv("HOME"),
 		"PATH=" + os.Getenv("PATH"),
 		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=/bin/false",
 	}
 	return cmd
 }

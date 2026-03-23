@@ -2,6 +2,7 @@ package store
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -2204,5 +2205,116 @@ func TestGetMemoriesByAnchorNode_NoMatch(t *testing.T) {
 	}
 	if len(mems) != 0 {
 		t.Errorf("expected 0 memories for unmatched node, got %d", len(mems))
+	}
+}
+
+// TestInsertMemoryDedupAtomicity verifies that 10 concurrent goroutines
+// inserting the same memory content trigger the dedup path atomically:
+// exactly 1 memory row must survive, with no partial writes (e.g. a
+// memory_versions row whose paired content update did not commit).
+func TestInsertMemoryDedupAtomicity(t *testing.T) {
+	// Not parallel: shared-DB template usage makes parallelism unsafe here.
+	st := openMemTestStore(t)
+
+	const (
+		entity  = "repo::dedup_test.go::DedupFunc"
+		agent   = "agent-dedup"
+		content = "DedupFunc was refactored to accept a context parameter"
+	)
+
+	// Baseline insert — establishes the memory row that dedup goroutines will hit.
+	baseID, err := st.InsertMemory(Memory{
+		Tier:     TierEntity,
+		Content:  content,
+		EntityID: entity,
+		AgentID:  agent,
+		Source:   SourceAuto,
+	})
+	if err != nil {
+		t.Fatalf("baseline InsertMemory: %v", err)
+	}
+	if baseID == "" {
+		t.Fatal("baseline InsertMemory returned empty ID")
+	}
+
+	// Launch 10 goroutines that all insert a nearly-identical content simultaneously.
+	// Adding one extra word keeps all base tokens and pushes Jaccard to 8/9≈0.888
+	// (above the 0.85 threshold), triggering the dedup branch while also exercising
+	// the content-update + version-snapshot steps inside the transaction.
+	const goroutines = 10
+	const contentVariant = "DedupFunc was refactored to accept a context parameter updated"
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, errs[idx] = st.InsertMemory(Memory{
+				Tier:     TierEntity,
+				Content:  contentVariant, // Jaccard > 0.85 vs baseline → dedup path
+				EntityID: entity,
+				AgentID:  agent,
+				Source:   SourceAuto,
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	// Non-fatal: log any goroutine errors (busy-timeout or lock errors are
+	// acceptable under contention, but the DB must stay consistent).
+	for i, e := range errs {
+		if e != nil {
+			t.Logf("goroutine %d returned error (acceptable): %v", i, e)
+		}
+	}
+
+	// --- Invariant 1: exactly 1 memory row for the entity ---
+	var memCount int
+	if err := st.knowledgeDB.QueryRow(
+		`SELECT COUNT(*) FROM memories WHERE entity_id = ? AND tier = ?`,
+		entity, TierEntity,
+	).Scan(&memCount); err != nil {
+		t.Fatalf("counting memories: %v", err)
+	}
+	if memCount != 1 {
+		t.Errorf("expected exactly 1 memory row, got %d", memCount)
+	}
+
+	// --- Invariant 2: version count must be reasonable (≥ 0 and ≤ 10) ---
+	var versionCount int
+	if err := st.knowledgeDB.QueryRow(
+		`SELECT COUNT(*) FROM memory_versions WHERE memory_id = ?`, baseID,
+	).Scan(&versionCount); err != nil {
+		t.Fatalf("counting memory_versions: %v", err)
+	}
+	if versionCount < 0 || versionCount > goroutines {
+		t.Errorf("version count out of range: got %d (want 0..%d)", versionCount, goroutines)
+	}
+
+	// --- Invariant 3: no partial state ---
+	// For every memory_versions row, the parent memory row must still exist
+	// and have non-empty content (content update and version insert are atomic).
+	rows, err := st.knowledgeDB.Query(
+		`SELECT mv.id, m.content
+		 FROM memory_versions mv
+		 JOIN memories m ON m.id = mv.memory_id
+		 WHERE mv.memory_id = ?`, baseID,
+	)
+	if err != nil {
+		t.Fatalf("querying version/memory join: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var vID, memContent string
+		if err := rows.Scan(&vID, &memContent); err != nil {
+			t.Fatalf("scanning version row: %v", err)
+		}
+		if memContent == "" {
+			t.Errorf("version %s has parent memory with empty content — partial write detected", vID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows error: %v", err)
 	}
 }
