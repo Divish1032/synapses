@@ -777,20 +777,12 @@ func cmdLogs(args []string) error {
 		return fmt.Errorf("find home dir: %w", err)
 	}
 	logPath := filepath.Join(home, ".synapses", "daemon.log")
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Println("No daemon log found. Has the daemon started yet?")
-			return nil
-		}
-		return fmt.Errorf("read log: %w", err)
+	if _, statErr := os.Stat(logPath); os.IsNotExist(statErr) {
+		fmt.Println("No daemon log found. Has the daemon started yet?")
+		return nil
 	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	start := 0
-	if len(lines) > *n {
-		start = len(lines) - *n
-	}
-	for _, line := range lines[start:] {
+	lines := tailFile(logPath, *n)
+	for _, line := range lines {
 		fmt.Println(line)
 	}
 	return nil
@@ -3368,7 +3360,9 @@ func offerGitInit(absPath string) {
 		return
 	}
 
-	cmd := exec.Command("git", "init", absPath)
+	ctx30, cancel30 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel30()
+	cmd := exec.CommandContext(ctx30, "git", "init", absPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Printf("  git init failed: %v\n  %s\n", err, strings.TrimSpace(string(out)))
 		return

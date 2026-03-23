@@ -626,13 +626,17 @@ func (a *Aggregator) backfillMissedDays(today string) {
 			bfsCacheHitRateP5:   0.0,
 		}
 		metrics := buildDayMetrics(sum, reparseCount, reparseDurationMs, 0, backfillP3)
+		commit, batchErr := a.store.BeginBatch()
+		bfUp := a.store.UpsertDailyRollup
+		if batchErr == nil {
+			bfUp = a.store.UpsertDailyRollupTx
+		}
 		for metric, value := range metrics {
-			if err := a.store.UpsertDailyRollup(day, metric, value); err != nil {
+			if err := bfUp(day, metric, value); err != nil {
 				logutil.Warn("pulse aggregator: backfill upsert %s for %s: %v\n", metric, day, err)
 			}
 		}
 		// Bug 21/22: also backfill per-project and per-tool for missed days.
-		bfUp := a.store.UpsertDailyRollup
 		a.rollupPerProject(day, bfUp)
 		a.rollupPerTool(day, bfUp)
 		// P8-4: backfill per-agent for missed days.
@@ -640,12 +644,17 @@ func (a *Aggregator) backfillMissedDays(today string) {
 		// P9-9/P9-10: backfill per-language and peak rate for missed days.
 		peakRate := a.store.GetPeakReparseRate(day)
 		if peakRate > 0 {
-			_ = a.store.UpsertDailyRollup(day, "peak_reparse_rate_per_min", float64(peakRate))
+			_ = bfUp(day, "peak_reparse_rate_per_min", float64(peakRate))
 		}
 		a.rollupPerLanguage(day, bfUp)
 		// P12-4/P12-5: backfill search metrics and per-tool errors.
 		a.rollupSearchMetrics(day, bfUp)
 		a.rollupPerToolErrors(day, bfUp)
+		if batchErr == nil {
+			if err := commit(true); err != nil {
+				logutil.Warn("pulse aggregator: backfill commit for %s: %v\n", day, err)
+			}
+		}
 		logutil.Info("pulse aggregator: backfilled rollup for %s\n", day)
 	}
 }

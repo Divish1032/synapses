@@ -340,7 +340,7 @@ func downloadFile(ctx context.Context, client *http.Client, url, destPath string
 	}
 	defer out.Close()
 
-	pr := &progressReader{r: resp.Body, total: resp.ContentLength, w: w}
+	pr := &progressReader{r: io.LimitReader(resp.Body, 1<<30), total: resp.ContentLength, w: w}
 	_, err = io.Copy(out, pr)
 	return err
 }

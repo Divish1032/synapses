@@ -68,7 +68,7 @@ func setupRESTTest(t *testing.T) (ts *httptest.Server, projectPath string) {
 	// Build handler.
 	handler := restToolsHandler(reg, func(path string) (*ProjectInstance, error) {
 		return nil, fmt.Errorf("unexpected lazy init for %s", path)
-	})
+	}, nil)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/tools/", handler)
@@ -468,7 +468,7 @@ func TestREST_URLEncodedProjectPath(t *testing.T) {
 
 	handler := restToolsHandler(reg, func(path string) (*ProjectInstance, error) {
 		return nil, fmt.Errorf("unexpected init")
-	})
+	}, nil)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/tools/", handler)
