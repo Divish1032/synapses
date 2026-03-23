@@ -126,7 +126,7 @@ func (s *Server) handleGetEntityHistory(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if s.store == nil {
+		if s.store == nil || ctx.Err() != nil {
 			return
 		}
 		mems, err := s.store.QueryMemories("entity", nodeID, "", limit)
@@ -147,7 +147,7 @@ func (s *Server) handleGetEntityHistory(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if s.store == nil {
+		if s.store == nil || ctx.Err() != nil {
 			return
 		}
 		mems, err := s.store.GetMemoriesByAnchorNode(nodeID, limit)
@@ -168,7 +168,7 @@ func (s *Server) handleGetEntityHistory(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if s.store == nil {
+		if s.store == nil || ctx.Err() != nil {
 			return
 		}
 		eps, err := s.store.FindEpisodesByNodeID(nodeID, limit)
@@ -193,7 +193,7 @@ func (s *Server) handleGetEntityHistory(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if s.store == nil {
+		if s.store == nil || ctx.Err() != nil {
 			return
 		}
 		annMap, err := s.store.GetAnnotationsForNodes([]string{nodeID})
@@ -225,7 +225,7 @@ func (s *Server) handleGetEntityHistory(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if s.store == nil {
+		if s.store == nil || ctx.Err() != nil {
 			return
 		}
 		tasks, err := s.store.FindTasksByNodeID(nodeID, limit)
@@ -311,7 +311,7 @@ func (s *Server) handleGetEntityHistory(
 func (s *Server) resolveEntityNode(entityName, fileHint string) (*graph.Node, string) {
 	nodes := s.graph.FindByName(entityName)
 	if len(nodes) == 0 {
-		nodes = s.graph.FindByPattern(entityName)
+		nodes = s.graph.FindByPatternLimit(entityName, 50)
 	}
 	// Dotted-name resolution: "Graph.New" → find "New" filtered by prefix.
 	if len(nodes) == 0 && strings.Contains(entityName, ".") {

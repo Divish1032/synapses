@@ -438,11 +438,14 @@ type Store struct {
 	graphDB     *rwDB // code-domain: nodes, edges, meta, file_hashes, call_sites, node_embeddings
 	knowledgeDB *rwDB // universal: memories, episodes, sessions, events, tasks, agents, ...
 
-	// lastPruneMu guards all prune timestamps to prevent redundant concurrent prunes.
-	lastPruneMu        sync.Mutex
-	lastPruneAt        time.Time // tool_calls prune (hourly debounce)
-	lastSessionPruneAt time.Time // sessions prune (daily debounce)
-	lastPruneStaleAt   time.Time // PruneStaleData (daily debounce)
+	// Per-function prune mutexes — split to avoid contention between independent
+	// prune operations (tool_calls hourly, sessions daily, stale data daily).
+	lastPruneMu        sync.Mutex // guards lastPruneAt (tool_calls)
+	lastPruneAt        time.Time  // tool_calls prune (hourly debounce)
+	lastSessionPruneMu sync.Mutex // guards lastSessionPruneAt
+	lastSessionPruneAt time.Time  // sessions prune (daily debounce)
+	lastPruneStaleMu   sync.Mutex // guards lastPruneStaleAt
+	lastPruneStaleAt   time.Time  // PruneStaleData (daily debounce)
 
 	// semanticDedupFunc embeds text on-the-fly for semantic dedup in prepareMemory.
 	// Protected by semanticDedupMu for concurrent read/write safety.
@@ -482,8 +485,10 @@ type Store struct {
 
 	// hnswNodeIndex is the in-memory HNSW index for graph node embeddings.
 	// Used by semantic search in the search tool. Same pattern as memory HNSW.
-	hnswNodeIndex *hnsw.Graph[string]
-	hnswNodeMu    sync.RWMutex
+	hnswNodeIndex       *hnsw.Graph[string]
+	hnswNodeMu          sync.RWMutex
+	hnswNodeRebuilding  bool               // true while async node rebuild is in progress
+	hnswNodePendingAdds []hnswPendingEntry // vectors queued during node rebuild
 }
 
 // SetSemanticDedupFunc sets the embedding function used for semantic dedup
@@ -1497,13 +1502,13 @@ func (s *Store) CollectQueryStats(w io.Writer) QueryStats {
 // prune runs per day regardless of how many goroutines invoke it.
 // Intended to be called at startup and then on a daily timer.
 func (s *Store) PruneStaleData(retentionDays int) {
-	s.lastPruneMu.Lock()
+	s.lastPruneStaleMu.Lock()
 	if time.Since(s.lastPruneStaleAt) < 23*time.Hour {
-		s.lastPruneMu.Unlock()
+		s.lastPruneStaleMu.Unlock()
 		return // already pruned recently; skip
 	}
 	s.lastPruneStaleAt = time.Now()
-	s.lastPruneMu.Unlock()
+	s.lastPruneStaleMu.Unlock()
 
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
 	cutoffUnix := time.Now().AddDate(0, 0, -retentionDays).Unix()
@@ -1521,6 +1526,7 @@ func (s *Store) PruneStaleData(retentionDays int) {
 		"tool_calls":     true,
 		"agent_messages": true,
 		"events":         true,
+		"episodes":       true,
 	}
 	allowedWhere := map[string]bool{
 		"created_at < ?": true,
@@ -1562,7 +1568,7 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	chunkedPrune("events", "created_at < ?", cutoff)
 
 	// episodes: stored as Unix seconds (INTEGER).
-	pruneExec(`DELETE FROM episodes WHERE created_at < ?`, cutoffUnix)
+	chunkedPrune("episodes", "created_at < ?", cutoffUnix)
 
 	// memories + cascades: wrap in a single transaction to prevent orphaned
 	// embeddings/anchors/surfaced/versions on crash between DELETEs.
@@ -1578,13 +1584,13 @@ func (s *Store) PruneStaleData(retentionDays int) {
 			if err != nil {
 				return 0
 			}
-			defer rows.Close()
 			for rows.Next() {
 				var id string
 				if rows.Scan(&id) == nil {
 					deletedIDs = append(deletedIDs, id)
 				}
 			}
+			rows.Close() // close before DELETE to avoid open-cursor conflicts
 			res, execErr := tx.Exec("DELETE FROM memories WHERE "+query, args...)
 			if execErr != nil {
 				logutil.Debug("synapses: store: prune memories: %v\n", execErr)
@@ -1607,15 +1613,13 @@ func (s *Store) PruneStaleData(retentionDays int) {
 				end = len(deletedIDs)
 			}
 			batch := deletedIDs[i:end]
-			placeholders := ""
+			pTokens := make([]string, len(batch))
 			args := make([]interface{}, len(batch))
 			for j, id := range batch {
-				if j > 0 {
-					placeholders += ","
-				}
-				placeholders += "?"
+				pTokens[j] = "?"
 				args[j] = id
 			}
+			placeholders := strings.Join(pTokens, ",")
 			for _, table := range []string{"memory_embeddings", "memory_anchors", "memory_surfaced", "memory_versions"} {
 				tx.Exec("DELETE FROM "+table+" WHERE memory_id IN ("+placeholders+")", args...)
 			}
@@ -1797,7 +1801,7 @@ func (s *Store) reconcileOrphanedReferences() {
 		if !allowedTables[table] {
 			return 0
 		}
-		r, err := s.knowledgeDB.Query(fmt.Sprintf("SELECT DISTINCT node_id FROM %s", quoteIdentifier(table)))
+		r, err := s.knowledgeDB.Query(fmt.Sprintf("SELECT DISTINCT node_id FROM %s LIMIT 100000", quoteIdentifier(table)))
 		if err != nil {
 			return 0
 		}
@@ -1950,7 +1954,7 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	// GAP-3: Snapshot CALLS fan-in counts before the wipe so we can detect nodes
 	// whose call structure changed significantly and mark their annotations stale.
 	oldFanIn := make(map[string]int)
-	if fanRows, err := s.graphDB.Query(`SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id`); err == nil {
+	if fanRows, err := s.graphDB.Query(`SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id LIMIT 2000000`); err == nil {
 		for fanRows.Next() {
 			var nid string
 			var cnt int
@@ -1967,7 +1971,7 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	// break compilation when their signature changes. Only non-empty signatures
 	// are captured — new nodes (not in this map) are treated as additions, not changes.
 	oldSigs := make(map[string]string)
-	if sigRows, err := s.graphDB.Query(`SELECT id, signature FROM nodes WHERE signature != ''`); err == nil {
+	if sigRows, err := s.graphDB.Query(`SELECT id, signature FROM nodes WHERE signature != '' LIMIT 2000000`); err == nil {
 		for sigRows.Next() {
 			var nid, sig string
 			if sigRows.Scan(&nid, &sig) == nil {
@@ -3448,6 +3452,15 @@ func (s *Store) CountIndexedFiles() (int, error) {
 	var n int
 	err := s.graphDB.QueryRow(`SELECT COUNT(*) FROM file_hashes`).Scan(&n)
 	return n, err
+}
+
+// NodeCount returns the number of nodes currently stored in the graph database.
+func (s *Store) NodeCount() int {
+	var n int
+	if err := s.graphDB.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&n); err != nil {
+		return 0
+	}
+	return n
 }
 
 

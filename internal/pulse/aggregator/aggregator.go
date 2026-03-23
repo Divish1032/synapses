@@ -274,12 +274,15 @@ func (a *Aggregator) rollup() {
 	staleEmbeddings := a.store.CountStaleEmbeddings()
 
 	// P3: agent behavior counts for today.
+	// Batch guard_events and memory_ops queries to reduce sequential SQL round-trips.
+	guardCounts := a.store.CountGuardEventsBatch(today, []string{"loop_circuit_break", "rate_limit"})
+	memOpCounts := a.store.CountMemoryOpsBatch(today, []string{"recall_hit", "recall_miss", "write", "safety_hit", "safety_miss"})
 	truncatedDeliveries, _ := a.store.CountTruncatedDeliveries(today)
 	p3 := p3Metrics{
-		guardCircuitBreaks:    a.store.CountGuardEvents(today, "loop_circuit_break"),
-		rateLimitRejections:   a.store.CountGuardEvents(today, "rate_limit"),
-		recallHits:            a.store.CountMemoryOps(today, "recall_hit"),
-		recallMisses:          a.store.CountMemoryOps(today, "recall_miss"),
+		guardCircuitBreaks:    guardCounts["loop_circuit_break"],
+		rateLimitRejections:   guardCounts["rate_limit"],
+		recallHits:            memOpCounts["recall_hit"],
+		recallMisses:          memOpCounts["recall_miss"],
 		validationViolations:  a.store.CountValidationViolations(today),
 		errorCount:            a.store.CountToolErrors(today),
 		brainCostUSD:          a.store.SumBrainCostForDay(today),
@@ -287,9 +290,9 @@ func (a *Aggregator) rollup() {
 		truncatedDeliveries:   truncatedDeliveries,
 		bfsCacheHits:          a.store.CountBFSCacheHitsForDay(today),
 		validatePlanCount:     a.store.CountValidationCalls(today, "validate_plan"),
-		memoryWrites:          a.store.CountMemoryOps(today, "write"),
-		safetyCheckHits:       a.store.CountMemoryOps(today, "safety_hit"),
-		safetyCheckMisses:     a.store.CountMemoryOps(today, "safety_miss"),
+		memoryWrites:          memOpCounts["write"],
+		safetyCheckHits:       memOpCounts["safety_hit"],
+		safetyCheckMisses:     memOpCounts["safety_miss"],
 		memoriesStaled:        a.store.SumMemoriesStaled(today),
 		avgSessionDurationMs:  a.store.AvgSessionDurationMs(today),
 		resumedSessions:       a.store.CountResumedSessions(today),
@@ -375,6 +378,11 @@ func (a *Aggregator) rollup() {
 		}
 	}
 
+	// Pre-read metrics that will be written in the per-dimension batch.
+	// Doing reads before BeginBatch avoids holding the write lock during I/O.
+	peakRate := a.store.GetPeakReparseRate(today)
+	fcr, fcrErr := a.store.GetFirstContextRightRate(1)
+
 	// Per-dimension rollups + sentinel in a single transaction for crash-safety.
 	// BeginBatch holds the store mutex; UpsertDailyRollupTx executes within the
 	// held transaction. If we crash mid-rollup, the uncommitted transaction is
@@ -402,13 +410,12 @@ func (a *Aggregator) rollup() {
 		a.rollupSearchMetrics(today, upTx)
 		a.rollupPerToolErrors(today, upTx)
 
-		peakRate := a.store.GetPeakReparseRate(today)
 		if peakRate > 0 {
 			if err := a.store.UpsertDailyRollupTx(today, "peak_reparse_rate_per_min", float64(peakRate)); err != nil {
 				logutil.Warn("pulse aggregator: peak reparse rate upsert: %v\n", err)
 			}
 		}
-		if fcr, fcrErr := a.store.GetFirstContextRightRate(1); fcrErr == nil {
+		if fcrErr == nil {
 			if err := a.store.UpsertDailyRollupTx(today, "first_context_right_rate", fcr); err != nil {
 				logutil.Warn("pulse aggregator: first_context_right_rate upsert: %v\n", err)
 			}
@@ -619,13 +626,17 @@ func (a *Aggregator) backfillMissedDays(today string) {
 			bfsCacheHitRateP5:   0.0,
 		}
 		metrics := buildDayMetrics(sum, reparseCount, reparseDurationMs, 0, backfillP3)
+		commit, batchErr := a.store.BeginBatch()
+		bfUp := a.store.UpsertDailyRollup
+		if batchErr == nil {
+			bfUp = a.store.UpsertDailyRollupTx
+		}
 		for metric, value := range metrics {
-			if err := a.store.UpsertDailyRollup(day, metric, value); err != nil {
+			if err := bfUp(day, metric, value); err != nil {
 				logutil.Warn("pulse aggregator: backfill upsert %s for %s: %v\n", metric, day, err)
 			}
 		}
 		// Bug 21/22: also backfill per-project and per-tool for missed days.
-		bfUp := a.store.UpsertDailyRollup
 		a.rollupPerProject(day, bfUp)
 		a.rollupPerTool(day, bfUp)
 		// P8-4: backfill per-agent for missed days.
@@ -633,12 +644,17 @@ func (a *Aggregator) backfillMissedDays(today string) {
 		// P9-9/P9-10: backfill per-language and peak rate for missed days.
 		peakRate := a.store.GetPeakReparseRate(day)
 		if peakRate > 0 {
-			_ = a.store.UpsertDailyRollup(day, "peak_reparse_rate_per_min", float64(peakRate))
+			_ = bfUp(day, "peak_reparse_rate_per_min", float64(peakRate))
 		}
 		a.rollupPerLanguage(day, bfUp)
 		// P12-4/P12-5: backfill search metrics and per-tool errors.
 		a.rollupSearchMetrics(day, bfUp)
 		a.rollupPerToolErrors(day, bfUp)
+		if batchErr == nil {
+			if err := commit(true); err != nil {
+				logutil.Warn("pulse aggregator: backfill commit for %s: %v\n", day, err)
+			}
+		}
 		logutil.Info("pulse aggregator: backfilled rollup for %s\n", day)
 	}
 }

@@ -331,7 +331,7 @@ func cmdStartDirect(args []string) error {
 		if pts, err := skills.LoadPromptDir(projectDir, "project"); err == nil {
 			allPrompts = append(allPrompts, pts...)
 		}
-		allPrompts = skills.DeduplicatePrompts(allPrompts) // project overrides user, user overrides builtin
+		allPrompts = skills.DeduplicatePrompts(allPrompts) // user overrides builtin; project cannot shadow user/builtin
 		if len(allPrompts) > 0 {
 			srv.SetPromptTemplates(allPrompts)
 			logutil.Info("synapses: loaded %d activation-context prompts\n", len(allPrompts))
@@ -453,7 +453,22 @@ func cmdStartDirect(args []string) error {
 
 	// Autosubscribe: detect tech stack from manifest files.
 	go func() {
-		entries := scout.DetectTechStack(absPath)
+		// Wrap with timeout since DetectTechStack doesn't accept a context.
+		type tsResult struct{ entries []scout.TechStackEntry }
+		ch := make(chan tsResult, 1)
+		go func() {
+			ch <- tsResult{entries: scout.DetectTechStack(absPath)}
+		}()
+		tsCtx, tsCancel := context.WithTimeout(appCtx, 30*time.Second)
+		defer tsCancel()
+		var entries []scout.TechStackEntry
+		select {
+		case <-tsCtx.Done():
+			logutil.Warn("synapses: tech stack detection timed out\n")
+			return
+		case res := <-ch:
+			entries = res.entries
+		}
 		if len(entries) == 0 {
 			return
 		}
@@ -762,20 +777,12 @@ func cmdLogs(args []string) error {
 		return fmt.Errorf("find home dir: %w", err)
 	}
 	logPath := filepath.Join(home, ".synapses", "daemon.log")
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Println("No daemon log found. Has the daemon started yet?")
-			return nil
-		}
-		return fmt.Errorf("read log: %w", err)
+	if _, statErr := os.Stat(logPath); os.IsNotExist(statErr) {
+		fmt.Println("No daemon log found. Has the daemon started yet?")
+		return nil
 	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	start := 0
-	if len(lines) > *n {
-		start = len(lines) - *n
-	}
-	for _, line := range lines[start:] {
+	lines := tailFile(logPath, *n)
+	for _, line := range lines {
 		fmt.Println(line)
 	}
 	return nil
@@ -3353,7 +3360,9 @@ func offerGitInit(absPath string) {
 		return
 	}
 
-	cmd := exec.Command("git", "init", absPath)
+	ctx30, cancel30 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel30()
+	cmd := exec.CommandContext(ctx30, "git", "init", absPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Printf("  git init failed: %v\n  %s\n", err, strings.TrimSpace(string(out)))
 		return

@@ -355,7 +355,7 @@ func (s *Server) handleGetContext(
 	// Resolve the entity name to a node ID.
 	nodes := s.graph.FindByName(entityName)
 	if len(nodes) == 0 {
-		nodes = s.graph.FindByPattern(entityName)
+		nodes = s.graph.FindByPatternLimit(entityName, 50)
 	}
 	// Dotted-name resolution: "Graph.New" where "New" is a standalone function
 	// (not a method). FindByName only does suffix matching on stored names, so
@@ -1251,7 +1251,7 @@ func (s *Server) handleGetImpact(
 	// Resolve symbol name → node. Fall back to pattern match (same as get_context).
 	candidates := s.graph.FindByName(symbol)
 	if len(candidates) == 0 {
-		candidates = s.graph.FindByPattern(symbol)
+		candidates = s.graph.FindByPatternLimit(symbol, 50)
 	}
 	if len(candidates) == 0 {
 		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q", symbol)), nil
@@ -1261,7 +1261,7 @@ func (s *Server) handleGetImpact(
 	// For struct/interface nodes, aggregate impact across all their methods.
 	// A struct itself has no incoming CALLS edges — its methods do.
 	if root.Type == graph.NodeStruct || root.Type == graph.NodeInterface {
-		methods := s.graph.FindByPattern(root.Name)
+		methods := s.graph.FindByPatternLimit(root.Name, 100)
 		merged := &graph.ImpactResult{Tiers: []graph.ImpactTier{}}
 		seen := make(map[graph.NodeID]bool)
 		for _, m := range methods {

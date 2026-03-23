@@ -150,8 +150,9 @@ func (s *Store) CountUnreadMessages(agentID string) (int, error) {
 	return count, err
 }
 
-// MarkRead stamps a message as read by the given agent.
-// Only messages visible to agentID (direct or broadcast) can be marked read.
+// MarkRead stamps a direct message as read by the given agent.
+// Only direct messages (to_agent matches) can be marked read — broadcasts
+// (to_agent IS NULL) remain visible to all agents and cannot be marked read.
 // Calling MarkRead on an already-read message is a no-op (idempotent).
 func (s *Store) MarkRead(messageID, agentID string) error {
 	now := time.Now().Unix()
@@ -160,7 +161,7 @@ func (s *Store) MarkRead(messageID, agentID string) error {
 		 SET read_at = ?
 		 WHERE id = ?
 		   AND read_at IS NULL
-		   AND (to_agent = ? OR to_agent IS NULL)`,
+		   AND to_agent = ?`,
 		now, messageID, agentID,
 	)
 	if err != nil {

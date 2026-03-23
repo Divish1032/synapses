@@ -377,6 +377,7 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	// pipeline below (MinRelevance, centrality boost, token budget, edges).
 	// Populated by PPR power iteration or BFS max-score traversal.
 	var visited map[NodeID]float64
+	bfsTruncated := false
 
 	if cfg.UsePPR {
 		// PPR path: power iteration scores all reachable nodes.
@@ -487,9 +488,16 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 			}
 		}
 
+		const maxVisited = 10_000
+
 		for len(queue) > 0 {
 			curr := queue[0]
 			queue = queue[1:]
+
+			if len(visited) >= maxVisited {
+				bfsTruncated = true
+				break
+			}
 
 			if curr.hop >= cfg.MaxDepth {
 				continue
@@ -739,7 +747,8 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	seen := make(map[edgeDedupKey]struct{})
 	var outEdges []*Edge
 	for id := range keep {
-		for _, e := range g.outInEdges(id, idx) {
+		edges := g.outInEdges(id, idx)
+		for _, e := range edges {
 			_, fromOK := keep[e.From]
 			_, toOK := keep[e.To]
 			if !fromOK || !toOK {
@@ -758,7 +767,7 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		Root:           rootID,
 		Nodes:          outNodes,
 		Edges:          outEdges,
-		Truncated:      truncated,
+		Truncated:      truncated || bfsTruncated,
 		TruncatedCount: truncatedCount,
 	}
 	g.cache.put(rootID, cfg, fp, result)
@@ -842,11 +851,15 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 		depth int
 	}
 
+	const maxVisited = 10_000
 	visited := map[NodeID]int{rootID: 0} // node → first-seen depth
 	queue := []entry{{rootID, 0}}
 	fileSet := map[string]struct{}{}
 
 	for len(queue) > 0 {
+		if len(visited) >= maxVisited {
+			break
+		}
 		cur := queue[0]
 		queue = queue[1:]
 
@@ -1002,11 +1015,15 @@ func (g *Graph) FindTestsFor(nodeID NodeID) []string {
 		id    NodeID
 		depth int
 	}
+	const maxVisited = 5_000
 	visited := map[NodeID]bool{nodeID: true}
 	queue := []entry{{nodeID, 0}}
 	testFiles := map[string]struct{}{}
 
 	for len(queue) > 0 {
+		if len(visited) >= maxVisited {
+			break
+		}
 		cur := queue[0]
 		queue = queue[1:]
 		if cur.depth >= 5 { // cap at 5 hops to avoid runaway traversal

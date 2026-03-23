@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -634,12 +635,65 @@ func StalenessLabel(score float64) string {
 // Must be called after EnrichChurn — staleness_score reads metadata["churn"].
 // Git errors are silently ignored; the graph remains usable without blame data.
 func EnrichBlame(g *graph.Graph, repoRoot string) {
-	// Per-file blame cache: absFile → *blameResult (nil = no git data for file).
-	cache := make(map[string]*blameResult)
 	// dirToGitRoot caches git root lookups to avoid one subprocess per file.
 	// Supports umbrella workspaces where repoRoot has no .git but sub-dirs do.
 	dirToGitRoot := make(map[string]string)
 
+	// Phase 1: collect unique files that need blame data and resolve git roots.
+	// This is sequential because dirToGitRoot is a shared cache.
+	type fileJob struct {
+		absFile string
+		gitRoot string
+	}
+	seenFiles := make(map[string]bool)
+	var jobs []fileJob
+	for _, n := range g.AllNodes() {
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
+			continue
+		}
+		if n.File == "" || seenFiles[n.File] {
+			continue
+		}
+		seenFiles[n.File] = true
+
+		dir := filepath.Dir(n.File)
+		gr, grSeen := dirToGitRoot[dir]
+		if !grSeen {
+			gr = gitRootForDir(dir)
+			dirToGitRoot[dir] = gr
+		}
+		if gr == "" {
+			gr = repoRoot
+		}
+		jobs = append(jobs, fileJob{absFile: n.File, gitRoot: gr})
+	}
+
+	// Phase 2: run fileBlame in parallel with bounded worker pool (4 concurrent
+	// git subprocesses). This is the expensive I/O-bound phase — parallelism
+	// gives ~4x speedup on repos with hundreds of unique files.
+	cache := make(map[string]*blameResult, len(jobs))
+	var cacheMu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4) // concurrency limit
+
+	for _, j := range jobs {
+		wg.Add(1)
+		go func(f fileJob) {
+			defer wg.Done()
+			sem <- struct{}{}        // acquire
+			bi := fileBlame(f.gitRoot, f.absFile)
+			<-sem                    // release
+			cacheMu.Lock()
+			cache[f.absFile] = bi
+			cacheMu.Unlock()
+		}(j)
+	}
+	wg.Wait()
+
+	// Phase 3: assemble blame updates from cache (sequential, no git calls).
 	type blameUpdate struct {
 		id             graph.NodeID
 		author, date   string
@@ -654,22 +708,7 @@ func EnrichBlame(g *graph.Graph, repoRoot string) {
 		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
 			continue
 		}
-
-		absFile := n.File
-		bi, seen := cache[absFile]
-		if !seen {
-			dir := filepath.Dir(absFile)
-			gr, grSeen := dirToGitRoot[dir]
-			if !grSeen {
-				gr = gitRootForDir(dir)
-				dirToGitRoot[dir] = gr
-			}
-			if gr == "" {
-				gr = repoRoot
-			}
-			bi = fileBlame(gr, absFile)
-			cache[absFile] = bi
-		}
+		bi := cache[n.File]
 		if bi == nil {
 			continue
 		}
@@ -782,13 +821,64 @@ func EnrichBlameForFile(g *graph.Graph, repoRoot, absFile string) {
 // EnrichBlame) for performance. Nodes in vendored/generated paths are skipped.
 // Git errors are silently ignored — the graph remains usable without commit data.
 func EnrichCommitContext(g *graph.Graph, repoRoot string) {
-	// Per-file cache: absFile → marshaled JSON (empty string = no data for file).
-	cache := make(map[string]string)
+	// Phase 1: collect unique files and resolve git roots (sequential — shared cache).
+	type fileJob struct {
+		absFile string
+		gitRoot string
+	}
 	seen := make(map[string]bool)
-	// dirToGitRoot caches git root lookups to avoid one subprocess per file.
-	// Supports umbrella workspaces where repoRoot has no .git but sub-dirs do.
 	dirToGitRoot := make(map[string]string)
+	var jobs []fileJob
 
+	for _, n := range g.AllNodes() {
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
+			continue
+		}
+		absFile := n.File
+		if seen[absFile] {
+			continue
+		}
+		seen[absFile] = true
+		dir := filepath.Dir(absFile)
+		gr, grSeen := dirToGitRoot[dir]
+		if !grSeen {
+			gr = gitRootForDir(dir)
+			if gr == "" {
+				gr = repoRoot
+			}
+			dirToGitRoot[dir] = gr
+		}
+		jobs = append(jobs, fileJob{absFile: absFile, gitRoot: gr})
+	}
+
+	// Phase 2: run RecentCommitsForFile in parallel with bounded worker pool.
+	cache := make(map[string]string, len(jobs))
+	var cacheMu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4) // concurrency limit
+
+	for _, j := range jobs {
+		wg.Add(1)
+		go func(f fileJob) {
+			defer wg.Done()
+			sem <- struct{}{}        // acquire
+			commits := RecentCommitsForFile(f.gitRoot, f.absFile, 3)
+			<-sem                    // release
+			if len(commits) > 0 {
+				if raw, err := json.Marshal(commits); err == nil {
+					cacheMu.Lock()
+					cache[f.absFile] = string(raw)
+					cacheMu.Unlock()
+				}
+			}
+		}(j)
+	}
+	wg.Wait()
+
+	// Phase 3: apply commit context metadata (sequential).
 	type ccUpdate struct {
 		id  graph.NodeID
 		raw string
@@ -801,27 +891,7 @@ func EnrichCommitContext(g *graph.Graph, repoRoot string) {
 		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
 			continue
 		}
-
-		absFile := n.File
-		if !seen[absFile] {
-			seen[absFile] = true
-			dir := filepath.Dir(absFile)
-			gr, grSeen := dirToGitRoot[dir]
-			if !grSeen {
-				gr = gitRootForDir(dir)
-				if gr == "" {
-					gr = repoRoot // fall back; RecentCommitsForFile handles git errors silently
-				}
-				dirToGitRoot[dir] = gr
-			}
-			commits := RecentCommitsForFile(gr, absFile, 3)
-			if len(commits) > 0 {
-				if raw, err := json.Marshal(commits); err == nil {
-					cache[absFile] = string(raw)
-				}
-			}
-		}
-		raw := cache[absFile]
+		raw := cache[n.File]
 		if raw == "" {
 			continue
 		}

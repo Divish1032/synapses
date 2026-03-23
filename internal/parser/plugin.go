@@ -107,9 +107,18 @@ func (p *PluginParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		return nil // plugin produced no output — valid for empty/unsupported files
 	}
 
+	const maxPluginNodes = 100_000
+	const maxPluginEdges = 500_000
+
 	var result pluginOutput
 	if err := json.Unmarshal(out, &result); err != nil {
 		return fmt.Errorf("plugin %q: parse output: %w", p.command, err)
+	}
+	if len(result.Nodes) > maxPluginNodes {
+		return fmt.Errorf("plugin %q: output exceeds node limit (%d > %d)", p.command, len(result.Nodes), maxPluginNodes)
+	}
+	if len(result.Edges) > maxPluginEdges {
+		return fmt.Errorf("plugin %q: output exceeds edge limit (%d > %d)", p.command, len(result.Edges), maxPluginEdges)
 	}
 
 	// Always add a file node so the graph has an anchor for DEFINES edges.
@@ -161,10 +170,16 @@ func (p *PluginParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		if g.GetNode(fromID) == nil || g.GetNode(toID) == nil {
 			continue
 		}
+		edgeType := graph.EdgeType(strings.ToUpper(e.Type))
+		// Validate against known edge types to prevent arbitrary values
+		// from untrusted plugin subprocess output.
+		if _, known := graph.DefaultEdgeWeights[edgeType]; !known {
+			continue
+		}
 		g.AddEdge(&graph.Edge{
 			From: fromID,
 			To:   toID,
-			Type: graph.EdgeType(strings.ToUpper(e.Type)),
+			Type: edgeType,
 		})
 	}
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,7 +94,7 @@ func (a *approvalStore) requestApproval(operation, details, agentID string) *mcp
 	dir, err := approvalDir()
 	if err != nil {
 		return mcpgo.NewToolResultError(
-			fmt.Sprintf("cross-project write blocked: cannot create approvals directory: %v", err),
+			fmt.Sprintf("cross-project write blocked: cannot create approvals directory: %v", stripInternalPaths(err.Error())),
 		)
 	}
 
@@ -126,7 +127,7 @@ func (a *approvalStore) requestApproval(operation, details, agentID string) *mcp
 	filePath := filepath.Join(dir, token+".json")
 	if err := os.WriteFile(filePath, data, 0o600); err != nil {
 		return mcpgo.NewToolResultError(
-			fmt.Sprintf("cross-project write blocked: cannot write approval file: %v", err),
+			fmt.Sprintf("cross-project write blocked: cannot write approval file: %v", stripInternalPaths(err.Error())),
 		)
 	}
 
@@ -299,6 +300,9 @@ func ListPendingApprovals() ([]PendingApproval, error) {
 // ApproveRequest marks the approval with the given token as approved on disk.
 // The token is read from disk by `synapses approve` — it is never passed through agents.
 func ApproveRequest(token string) error {
+	if filepath.Base(token) != token || strings.ContainsAny(token, `/\`) || strings.Contains(token, "..") || strings.IndexByte(token, 0) >= 0 {
+		return fmt.Errorf("invalid token")
+	}
 	dir, err := approvalDir()
 	if err != nil {
 		return err
