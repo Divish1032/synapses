@@ -1,7 +1,9 @@
 package store_test
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/SynapsesOS/synapses/internal/store"
 )
@@ -82,6 +84,62 @@ func TestCheckPlanSafety_ColdStart_ReturnsNil(t *testing.T) {
 	}
 	if match != nil {
 		t.Errorf("expected nil on cold start, got: %+v", match)
+	}
+}
+
+func TestHasNoFailureEpisodes_TrueOnColdStart(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+	if !st.HasNoFailureEpisodes() {
+		t.Error("expected HasNoFailureEpisodes=true on empty store")
+	}
+}
+
+func TestHasNoFailureEpisodes_FalseAfterFailureRecorded(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+	_, _ = st.RememberEpisode(store.Episode{
+		AgentID:     "agent-1",
+		EpisodeType: "failure",
+		Outcome:     "failure",
+		Decision:    "broke the auth service",
+	})
+	if st.HasNoFailureEpisodes() {
+		t.Error("expected HasNoFailureEpisodes=false after failure recorded")
+	}
+}
+
+func TestHasNoFailureEpisodes_IgnoresNonFailureEpisodes(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+	// Only a decision episode — not a failure.
+	_, _ = st.RememberEpisode(store.Episode{
+		AgentID:     "agent-1",
+		EpisodeType: "decision",
+		Outcome:     "success",
+		Decision:    "added caching",
+	})
+	if !st.HasNoFailureEpisodes() {
+		t.Error("expected HasNoFailureEpisodes=true when only non-failure episodes exist")
+	}
+}
+
+func TestCheckPlanSafetyCtx_CompletesBeforeDeadline(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+	// Even with no episodes, the query must complete well within 500ms.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	match, err := st.CheckPlanSafetyCtx(ctx, "modify the auth handler", "")
+	if err != nil {
+		t.Fatalf("CheckPlanSafetyCtx: %v", err)
+	}
+	if match != nil {
+		t.Errorf("expected nil on cold start, got: %+v", match)
+	}
+	// Verify context was NOT exhausted — the query completed before the deadline.
+	if ctx.Err() != nil {
+		t.Errorf("context expired during query — query took too long: %v", ctx.Err())
 	}
 }
 
