@@ -164,10 +164,6 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		}
 	}
 
-	// Cache edge lists discovered during BFS so the edge-collection phase
-	// (after budget pruning) can reuse them instead of calling outInEdges again.
-	edgeCache := make(map[NodeID][]*Edge)
-
 	const maxVisited = 10_000
 	bfsTruncated := false
 
@@ -351,13 +347,7 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	seen := make(map[edgeDedupKey]struct{})
 	var outEdges []*Edge
 	for id := range keep {
-		// Use cached edge lists from BFS when available; fall back to
-		// outInEdges for nodes that entered keep without BFS traversal
-		// (e.g. the root node added before the loop).
-		edges, cached := edgeCache[id]
-		if !cached {
-			edges = g.outInEdges(id, idx)
-		}
+		edges := g.outInEdges(id, idx)
 		for _, e := range edges {
 			_, fromOK := keep[e.From]
 			_, toOK := keep[e.To]
