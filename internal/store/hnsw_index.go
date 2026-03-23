@@ -323,9 +323,30 @@ func (s *Store) memoryHNSWReady() bool {
 
 // RebuildNodeHNSW loads all node embeddings from graphDB into an HNSW index.
 func (s *Store) RebuildNodeHNSW() {
+	// Guarantee hnswNodeRebuilding is cleared even if this function panics.
+	defer func() {
+		if r := recover(); r != nil {
+			logutil.Error("synapses: RebuildNodeHNSW panicked: %v — clearing rebuild flag\n", r)
+			s.hnswNodeMu.Lock()
+			s.hnswNodeRebuilding = false
+			s.hnswNodePendingAdds = nil
+			s.hnswNodeMu.Unlock()
+		}
+	}()
+
+	// Signal that a rebuild is in progress so nodeHNSWAdd queues entries.
+	s.hnswNodeMu.Lock()
+	s.hnswNodeRebuilding = true
+	s.hnswNodeIndex = nil
+	s.hnswNodeMu.Unlock()
+
 	rows, err := s.graphDB.Query(`SELECT node_id, embedding FROM node_embeddings LIMIT 2000000`)
 	if err != nil {
 		logutil.Error("synapses: rebuild node HNSW index: %v\n", err)
+		s.hnswNodeMu.Lock()
+		s.hnswNodeRebuilding = false
+		s.hnswNodePendingAdds = nil
+		s.hnswNodeMu.Unlock()
 		return
 	}
 	defer rows.Close()
@@ -343,19 +364,47 @@ func (s *Store) RebuildNodeHNSW() {
 		if len(vec) == 0 {
 			continue
 		}
-		g.Add(hnsw.MakeNode(nodeID, vec))
-		count++
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logutil.Warn("synapses: rebuild node HNSW: skip panicking entry %s: %v\n", nodeID, r)
+				}
+			}()
+			g.Delete(nodeID)
+			g.Add(hnsw.MakeNode(nodeID, vec))
+			count++
+		}()
 	}
 	if err := rows.Err(); err != nil {
 		logutil.Error("synapses: rebuild node HNSW index scan: %v\n", err)
 	}
 
 	s.hnswNodeMu.Lock()
+	// Replay any additions that were queued during the rebuild.
+	pending := s.hnswNodePendingAdds
+	s.hnswNodePendingAdds = nil
+	if len(pending) > 10000 {
+		logutil.Warn("synapses: node HNSW rebuild: %d pending entries, capping replay to 10000\n", len(pending))
+		pending = pending[len(pending)-10000:]
+	}
+	for _, p := range pending {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logutil.Warn("synapses: node HNSW replay skipped node_id=%s: %v\n", p.memoryID, r)
+				}
+			}()
+			g.Delete(p.memoryID)
+			g.Add(hnsw.MakeNode(p.memoryID, p.vec))
+			count++
+		}()
+	}
 	s.hnswNodeIndex = g
+	s.hnswNodeRebuilding = false
 	s.hnswNodeMu.Unlock()
 
 	if count > 0 {
-		logutil.Info("synapses: node HNSW index built (%d node embeddings)\n", count)
+		logutil.Info("synapses: node HNSW index built (%d node embeddings, %d replayed)\n", count, len(pending))
 	}
 }
 
@@ -397,6 +446,15 @@ func (s *Store) NodeHNSWSearch(queryVec []float32, limit int) (results []scoredI
 func (s *Store) nodeHNSWAdd(nodeID string, vec []float32) {
 	s.hnswNodeMu.Lock()
 	defer s.hnswNodeMu.Unlock()
+
+	// If a rebuild is in progress, queue the addition for replay.
+	if s.hnswNodeRebuilding {
+		if len(s.hnswNodePendingAdds) < 10000 {
+			s.hnswNodePendingAdds = append(s.hnswNodePendingAdds, hnswPendingEntry{memoryID: nodeID, vec: vec})
+		}
+		return
+	}
+
 	if s.hnswNodeIndex == nil {
 		return
 	}
