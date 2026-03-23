@@ -43,7 +43,7 @@ func applyIntentCarveConfig(cfg *graph.CarveConfig, intent string) {
 // intents show meaningful blast radius for struct types.
 func (s *Server) aggregatedImpact(node *graph.Node, depth int) *graph.ImpactResult {
 	if node.Type == graph.NodeStruct || node.Type == graph.NodeInterface {
-		methods := s.graph.FindByPattern(node.Name)
+		methods := s.graph.FindByPatternLimit(node.Name, 100)
 		merged := &graph.ImpactResult{Tiers: []graph.ImpactTier{}}
 		seen := make(map[graph.NodeID]bool)
 		for _, m := range methods {
@@ -166,7 +166,7 @@ func (s *Server) resolveTarget(target, fileHint string) *resolvedTarget {
 	}
 
 	// 4. Pattern / substring match.
-	nodes = s.graph.FindByPattern(target)
+	nodes = s.graph.FindByPatternLimit(target, 50)
 	if len(nodes) > 0 {
 		best := pickBestNode(nodes, s.graph)
 		return &resolvedTarget{bestNode: best, candidates: nodes}

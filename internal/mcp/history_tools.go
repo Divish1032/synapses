@@ -311,7 +311,7 @@ func (s *Server) handleGetEntityHistory(
 func (s *Server) resolveEntityNode(entityName, fileHint string) (*graph.Node, string) {
 	nodes := s.graph.FindByName(entityName)
 	if len(nodes) == 0 {
-		nodes = s.graph.FindByPattern(entityName)
+		nodes = s.graph.FindByPatternLimit(entityName, 50)
 	}
 	// Dotted-name resolution: "Graph.New" → find "New" filtered by prefix.
 	if len(nodes) == 0 && strings.Contains(entityName, ".") {
