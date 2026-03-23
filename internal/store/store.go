@@ -438,11 +438,14 @@ type Store struct {
 	graphDB     *rwDB // code-domain: nodes, edges, meta, file_hashes, call_sites, node_embeddings
 	knowledgeDB *rwDB // universal: memories, episodes, sessions, events, tasks, agents, ...
 
-	// lastPruneMu guards all prune timestamps to prevent redundant concurrent prunes.
-	lastPruneMu        sync.Mutex
-	lastPruneAt        time.Time // tool_calls prune (hourly debounce)
-	lastSessionPruneAt time.Time // sessions prune (daily debounce)
-	lastPruneStaleAt   time.Time // PruneStaleData (daily debounce)
+	// Per-function prune mutexes — split to avoid contention between independent
+	// prune operations (tool_calls hourly, sessions daily, stale data daily).
+	lastPruneMu        sync.Mutex // guards lastPruneAt (tool_calls)
+	lastPruneAt        time.Time  // tool_calls prune (hourly debounce)
+	lastSessionPruneMu sync.Mutex // guards lastSessionPruneAt
+	lastSessionPruneAt time.Time  // sessions prune (daily debounce)
+	lastPruneStaleMu   sync.Mutex // guards lastPruneStaleAt
+	lastPruneStaleAt   time.Time  // PruneStaleData (daily debounce)
 
 	// semanticDedupFunc embeds text on-the-fly for semantic dedup in prepareMemory.
 	// Protected by semanticDedupMu for concurrent read/write safety.
@@ -1497,13 +1500,13 @@ func (s *Store) CollectQueryStats(w io.Writer) QueryStats {
 // prune runs per day regardless of how many goroutines invoke it.
 // Intended to be called at startup and then on a daily timer.
 func (s *Store) PruneStaleData(retentionDays int) {
-	s.lastPruneMu.Lock()
+	s.lastPruneStaleMu.Lock()
 	if time.Since(s.lastPruneStaleAt) < 23*time.Hour {
-		s.lastPruneMu.Unlock()
+		s.lastPruneStaleMu.Unlock()
 		return // already pruned recently; skip
 	}
 	s.lastPruneStaleAt = time.Now()
-	s.lastPruneMu.Unlock()
+	s.lastPruneStaleMu.Unlock()
 
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
 	cutoffUnix := time.Now().AddDate(0, 0, -retentionDays).Unix()
