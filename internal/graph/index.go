@@ -554,17 +554,22 @@ func (idx *GraphIndex) computeEigenvectorCentrality() {
 			xNew[i] *= invMax
 		}
 
-		// Check L1 convergence.
-		conv := 0.0
+		// Check L∞ convergence: max individual change across all nodes.
+		// L1 (sum of changes) is graph-size-dependent and would require
+		// a larger epsilon for large graphs; L∞ has consistent semantics
+		// regardless of node count.
+		maxDelta := 0.0
 		for i := 1; i < n; i++ {
 			d := xNew[i] - x[i]
 			if d < 0 {
 				d = -d
 			}
-			conv += d
+			if d > maxDelta {
+				maxDelta = d
+			}
 		}
 		x, xNew = xNew, x
-		if conv < eps {
+		if maxDelta < eps {
 			break
 		}
 	}
