@@ -11,6 +11,9 @@ import (
 	"time"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/scout"
 )
 
 // ── callStartTimes ─────────────────────────────────────────────────────────
@@ -107,8 +110,9 @@ func TestServer_Setters(t *testing.T) {
 	s.SetChangeSource(nil)
 
 	// SetBrainClient.
-	s.SetBrainClient("fake-brain")
-	if s.brainClient != "fake-brain" {
+	fakeBrain := &brain.Client{}
+	s.SetBrainClient(fakeBrain)
+	if s.brainClient != fakeBrain {
 		t.Error("SetBrainClient did not store value")
 	}
 
@@ -119,7 +123,7 @@ func TestServer_Setters(t *testing.T) {
 	}
 
 	// SetTechStack.
-	s.SetTechStack([]string{"go", "sqlite"})
+	s.SetTechStack([]scout.TechStackEntry{{Name: "go"}, {Name: "sqlite"}})
 	if s.techStack == nil {
 		t.Error("SetTechStack did not store value")
 	}

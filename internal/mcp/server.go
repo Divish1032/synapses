@@ -21,12 +21,14 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/pulse"
+	"github.com/SynapsesOS/synapses/internal/scout"
 	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
@@ -113,12 +115,12 @@ type Server struct {
 	changeSource ChangeSource  // nil if started without a file watcher
 	federationResolver  *federation.Resolver   // nil if no federation configured — set via SetFederationResolver
 	projectRegistry     ProjectStoreProvider   // nil in single-project mode — set via SetProjectRegistry
-	brainClient  interface{}   // *brain.Client — set via SetBrainClient; nil if brain not configured
+	brainClient  *brain.Client   // set via SetBrainClient; nil if brain not configured
 	webCache     *webcache.Cache // nil if webcache not configured
-	pulseClient  interface{}    // *pulse.Client — set via SetPulseClient; nil if pulse not configured
+	pulseClient  *pulse.Client   // set via SetPulseClient; nil if pulse not configured
 	embedClient    *embed.Client  // nil if embedding_endpoint not configured
 	memoryEmbedder embed.Embedder // nil if embeddings mode is "off" — set via SetMemoryEmbedder
-	techStack    interface{}    // []TechStackEntry — set via SetTechStack after autosubscribe
+	techStack    []scout.TechStackEntry // set via SetTechStack after autosubscribe; nil if not detected
 	injectionScanner *InjectionScanner // prompt injection scanner for externally-sourced content (nil = disabled)
 	knowledgeMode bool          // when true, only knowledge tools are registered (no code graph)
 	projectID    string         // stable project identifier (FNV hash of project root path)
@@ -954,8 +956,7 @@ func (s *Server) allowedProjectNames() []string {
 
 // SetBrainClient wires a *brain.Client into the server so that get_context
 // returns enriched Context Packets and violations include LLM explanations.
-// Using interface{} avoids an import cycle (brain imports only stdlib).
-func (s *Server) SetBrainClient(bc interface{}) {
+func (s *Server) SetBrainClient(bc *brain.Client) {
 	s.brainClient = bc
 }
 
@@ -1001,20 +1002,15 @@ func (s *Server) SetPulseClient(pc *pulse.Client) {
 	}
 }
 
-// getPulseClient type-asserts the stored pulseClient to *pulse.Client.
-// Returns nil if no pulse client is configured.
+// getPulseClient returns the stored pulse client, or nil if not configured.
 func (s *Server) getPulseClient() *pulse.Client {
-	if s.pulseClient == nil {
-		return nil
-	}
-	pc, _ := s.pulseClient.(*pulse.Client)
-	return pc
+	return s.pulseClient
 }
 
 // SetTechStack stores the detected tech stack entries so that
 // get_project_identity can surface them as tech_stack.
 // Called from cmdStart after autosubscribe detection completes.
-func (s *Server) SetTechStack(ts interface{}) {
+func (s *Server) SetTechStack(ts []scout.TechStackEntry) {
 	s.techStack = ts
 }
 
