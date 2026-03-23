@@ -45,6 +45,11 @@ func DiscoverSiblings(projectRoot string) []DiscoveredSibling {
 		if e.Name()[0] == '.' {
 			continue
 		}
+		// Skip symlink directories to prevent traversing into unrelated
+		// paths (e.g. /etc, /home/otheruser).
+		if e.Type()&os.ModeSymlink != 0 {
+			continue
+		}
 
 		dirPath := filepath.Join(parent, e.Name())
 		hint := ""
