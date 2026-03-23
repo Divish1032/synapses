@@ -58,11 +58,13 @@ func RepairJSON(s string) string {
 	return s // couldn't fix
 }
 
-// Truncate shortens s to at most n bytes for use in error messages.
-// Appends "..." when truncation occurs.
+// Truncate shortens s to at most n runes for use in error messages.
+// Appends "..." when truncation occurs. Uses rune-aware slicing to
+// avoid cutting multi-byte UTF-8 characters mid-sequence.
 func Truncate(s string, n int) string {
-	if len(s) <= n {
+	runes := []rune(s)
+	if len(runes) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	return string(runes[:n]) + "..."
 }
