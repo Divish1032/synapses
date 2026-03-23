@@ -223,6 +223,27 @@ func llamaCPPReleaseURL(version string) (string, error) {
 	), nil
 }
 
+// allowedLibPrefixes lists the shared library name prefixes that may be
+// extracted from the llama.cpp release zip. Any library not matching one of
+// these prefixes is silently skipped to reduce supply-chain risk.
+var allowedLibPrefixes = []string{
+	"libllama", "libggml", "libcommon", "llama", "ggml",
+}
+
+// isAllowedLib returns true if base matches the allowlist of shared libraries.
+func isAllowedLib(base string) bool {
+	if !strings.HasSuffix(base, ".dylib") && !strings.HasSuffix(base, ".so") && !strings.Contains(base, ".so.") {
+		return false
+	}
+	lower := strings.ToLower(base)
+	for _, pfx := range allowedLibPrefixes {
+		if strings.HasPrefix(lower, pfx) {
+			return true
+		}
+	}
+	return false
+}
+
 // extractLlamaServerFromZip finds and extracts the llama-server binary and any
 // accompanying shared libraries (.dylib/.so) from the zip bytes into destDir.
 // destPath is the final path for the llama-server binary itself.
@@ -244,7 +265,7 @@ func extractLlamaServerFromZip(data []byte, destDir, destPath string) error {
 		}
 		base := filepath.Base(f.Name)
 		isBinary := strings.EqualFold(base, target)
-		isLib := strings.HasSuffix(base, ".dylib") || strings.HasSuffix(base, ".so")
+		isLib := isAllowedLib(base)
 		if !isBinary && !isLib {
 			continue
 		}
