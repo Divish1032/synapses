@@ -35,6 +35,7 @@ const debounceDelay = 150 * time.Millisecond
 const changeLogCap = 50
 const reparseWorkChanSize = 100
 const reparseBacklogThreshold = 500 // switch to full reindex above this many pending files
+const brainWorkChanSize = 32        // bounded channel for brain ingestion work
 
 // reparseWork is a unit of work for the bounded reparse worker pool.
 type reparseWork struct {
@@ -113,6 +114,12 @@ type Watcher struct {
 	// drained and a single full re-index is triggered instead.
 	workCh chan reparseWork
 
+	// brainWorkCh is a bounded channel for brain ingestion work. Prevents
+	// unbounded goroutine spawning during burst file changes (e.g. git checkout).
+	// If the channel is full, new work is dropped — the file will be re-parsed
+	// and re-ingested on the next change.
+	brainWorkCh chan string
+
 	wg sync.WaitGroup // tracks fire-and-forget goroutines so Stop() can drain them
 
 	changeMu  sync.RWMutex
@@ -163,6 +170,7 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 		fileHashes:         make(map[string]string),
 		fileHadParseErrors: make(map[string]bool),
 		workCh:             make(chan reparseWork, reparseWorkChanSize),
+		brainWorkCh:        make(chan string, brainWorkChanSize),
 	}
 
 	// Start bounded reparse workers to prevent thundering herd.
@@ -177,6 +185,26 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 						return
 					}
 					watcher.reparseFile(work.path, work.root)
+				case <-watcher.stopCh:
+					return
+				}
+			}
+		}()
+	}
+
+	// Start bounded brain ingestion workers (2 goroutines).
+	// Prevents unbounded goroutine spawning during burst file changes.
+	for i := 0; i < 2; i++ {
+		watcher.wg.Add(1)
+		go func() {
+			defer watcher.wg.Done()
+			for {
+				select {
+				case path, ok := <-watcher.brainWorkCh:
+					if !ok {
+						return
+					}
+					watcher.ingestToBrain(path)
 				case <-watcher.stopCh:
 					return
 				}
@@ -1031,8 +1059,14 @@ func (w *Watcher) reparseFile(path, _ string) {
 	w.persistAsync(path)
 
 	// Ingest changed nodes to brain for semantic summarization.
+	// Non-blocking send: if the channel is full during burst file changes,
+	// the ingestion is dropped — the file will be re-ingested on the next change.
 	if w.brainClient != nil {
-		w.trackGo(func() { w.ingestToBrain(path) })
+		select {
+		case w.brainWorkCh <- path:
+		default:
+			// Channel full — drop this ingestion to avoid backpressure.
+		}
 	}
 }
 
