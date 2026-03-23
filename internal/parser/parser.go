@@ -248,7 +248,7 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 		// Security: Prevent Directory Traversal via Symlinks.
 		// Resolve the symlink and verify containment using inode comparison
 		// (os.SameFile), which is immune to case/Unicode/TOCTOU races.
-		if info.Mode()&os.ModeSymlink != 0 {
+		if d.Type()&os.ModeSymlink != 0 {
 			resolved, symErr := filepath.EvalSymlinks(path)
 			if symErr != nil {
 				return nil // Skip dangling or invalid symlinks
@@ -476,7 +476,7 @@ func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[strin
 		// Security: Prevent Directory Traversal via Symlinks.
 		// Resolve the symlink and verify containment using inode comparison
 		// (os.SameFile), which is immune to case/Unicode/TOCTOU races.
-		if info.Mode()&os.ModeSymlink != 0 {
+		if d.Type()&os.ModeSymlink != 0 {
 			resolved, symErr := filepath.EvalSymlinks(path)
 			if symErr != nil {
 				return nil // Skip dangling or invalid symlinks
