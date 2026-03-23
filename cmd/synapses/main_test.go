@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1196,7 +1197,7 @@ func TestPrintSummaryTable_WithViolations(t *testing.T) {
 
 func TestDaemonInstall(t *testing.T) {
 	// May succeed or fail depending on OS/environment; just must not panic.
-	_ = daemonInstall()
+	_ = daemonInstall(io.Discard)
 }
 
 func TestDaemonUninstall(t *testing.T) {

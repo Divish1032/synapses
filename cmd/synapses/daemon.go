@@ -18,6 +18,7 @@ package main
 import (
 	"fmt"
 	"html"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -284,7 +285,7 @@ func cmdDaemon(args []string) error {
 	case "logs":
 		return daemonLogs(target)
 	case "install":
-		return daemonInstall()
+		return daemonInstall(os.Stdout)
 	case "uninstall":
 		return daemonUninstall()
 	default:
@@ -384,15 +385,15 @@ func daemonLogs(name string) error {
 
 // ── OS init system integration ────────────────────────────────────────────────
 
-func daemonInstall() error {
+func daemonInstall(w io.Writer) error {
 	switch runtime.GOOS {
 	case "darwin":
-		return installLaunchd()
+		return installLaunchd(w)
 	case "linux":
-		return installSystemd()
+		return installSystemd(w)
 	default:
-		fmt.Printf("  Auto-start not supported on %s.\n", runtime.GOOS)
-		fmt.Println("  Start manually: synapses daemon start")
+		fmt.Fprintf(w, "  Auto-start not supported on %s.\n", runtime.GOOS)
+		fmt.Fprintln(w, "  Start manually: synapses daemon start")
 		return nil
 	}
 }
@@ -493,7 +494,7 @@ func daemonSelfPlist(binPath, logPath, homeDir string) string {
 `, html.EscapeString(daemonLabel), html.EscapeString(binPath), html.EscapeString(homeDir), html.EscapeString(logPath), html.EscapeString(logPath), DaemonHTTPPort)
 }
 
-func installLaunchd() error {
+func installLaunchd(w io.Writer) error {
 	agentsDir, err := launchdAgentsDir()
 	if err != nil {
 		return err
@@ -502,13 +503,13 @@ func installLaunchd() error {
 		return err
 	}
 
-	fmt.Println()
-	fmt.Println("  Installing Synapses launch agents (macOS launchd)...")
-	fmt.Println("  ────────────────────────────────────────────────────")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  Installing Synapses launch agents (macOS launchd)...")
+	fmt.Fprintln(w, "  ────────────────────────────────────────────────────")
 
 	for _, s := range allSidecars {
 		if _, err := exec.LookPath(s.Binary); err != nil {
-			fmt.Printf("  \033[33m!\033[0m %-8s binary not found — skipping\n", s.Name)
+			fmt.Fprintf(w, "  \033[33m!\033[0m %-8s binary not found — skipping\n", s.Name)
 			continue
 		}
 		label := "com.synapses." + s.Name
@@ -525,9 +526,9 @@ func installLaunchd() error {
 		exec.Command("launchctl", "unload", plistPath).Run() //nolint:errcheck
 
 		if out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {
-			fmt.Printf("  \033[31m✗\033[0m %-8s launchctl load failed: %s\n", s.Name, strings.TrimSpace(string(out)))
+			fmt.Fprintf(w, "  \033[31m✗\033[0m %-8s launchctl load failed: %s\n", s.Name, strings.TrimSpace(string(out)))
 		} else {
-			fmt.Printf("  \033[32m✓\033[0m %-8s installed and will start at login\n", s.Name)
+			fmt.Fprintf(w, "  \033[32m✓\033[0m %-8s installed and will start at login\n", s.Name)
 		}
 	}
 
@@ -549,14 +550,14 @@ func installLaunchd() error {
 	}
 	exec.Command("launchctl", "unload", plistPath).Run() //nolint:errcheck
 	if out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {
-		fmt.Printf("  \033[31m✗\033[0m %-8s launchctl load failed: %s\n", "daemon", strings.TrimSpace(string(out)))
+		fmt.Fprintf(w, "  \033[31m✗\033[0m %-8s launchctl load failed: %s\n", "daemon", strings.TrimSpace(string(out)))
 	} else {
-		fmt.Printf("  \033[32m✓\033[0m %-8s installed — daemon will auto-start at login and restart on crash\n", "daemon")
+		fmt.Fprintf(w, "  \033[32m✓\033[0m %-8s installed — daemon will auto-start at login and restart on crash\n", "daemon")
 	}
 
-	fmt.Println()
-	fmt.Println("  Run 'synapses start' to start the daemon now.")
-	fmt.Println()
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  Run 'synapses start' to start the daemon now.")
+	fmt.Fprintln(w)
 	return nil
 }
 
@@ -655,7 +656,7 @@ WantedBy=sockets.target
 `, DaemonHTTPPort)
 }
 
-func installSystemd() error {
+func installSystemd(w io.Writer) error {
 	svcDir, err := systemdUserDir()
 	if err != nil {
 		return err
@@ -664,13 +665,13 @@ func installSystemd() error {
 		return err
 	}
 
-	fmt.Println()
-	fmt.Println("  Installing Synapses systemd user services (Linux)...")
-	fmt.Println("  ────────────────────────────────────────────────────")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  Installing Synapses systemd user services (Linux)...")
+	fmt.Fprintln(w, "  ────────────────────────────────────────────────────")
 
 	for _, s := range allSidecars {
 		if _, err := exec.LookPath(s.Binary); err != nil {
-			fmt.Printf("  \033[33m!\033[0m %-8s binary not found — skipping\n", s.Name)
+			fmt.Fprintf(w, "  \033[33m!\033[0m %-8s binary not found — skipping\n", s.Name)
 			continue
 		}
 		unitName := "synapses-" + s.Name + ".service"
@@ -685,9 +686,9 @@ func installSystemd() error {
 		}
 		exec.Command("systemctl", "--user", "daemon-reload").Run() //nolint:errcheck
 		if out, err := exec.Command("systemctl", "--user", "enable", "--now", unitName).CombinedOutput(); err != nil {
-			fmt.Printf("  \033[31m✗\033[0m %-8s systemctl failed: %s\n", s.Name, strings.TrimSpace(string(out)))
+			fmt.Fprintf(w, "  \033[31m✗\033[0m %-8s systemctl failed: %s\n", s.Name, strings.TrimSpace(string(out)))
 		} else {
-			fmt.Printf("  \033[32m✓\033[0m %-8s installed and started\n", s.Name)
+			fmt.Fprintf(w, "  \033[32m✓\033[0m %-8s installed and started\n", s.Name)
 		}
 	}
 
@@ -716,15 +717,15 @@ func installSystemd() error {
 
 	// Enable and start the socket (which will start the service on first connection).
 	if out, err := exec.Command("systemctl", "--user", "enable", "--now", socketUnitName).CombinedOutput(); err != nil {
-		fmt.Printf("  \033[31m✗\033[0m %-8s systemctl socket failed: %s\n", "daemon", strings.TrimSpace(string(out)))
+		fmt.Fprintf(w, "  \033[31m✗\033[0m %-8s systemctl socket failed: %s\n", "daemon", strings.TrimSpace(string(out)))
 	}
 	if out, err := exec.Command("systemctl", "--user", "enable", "--now", unitName).CombinedOutput(); err != nil {
-		fmt.Printf("  \033[31m✗\033[0m %-8s systemctl failed: %s\n", "daemon", strings.TrimSpace(string(out)))
+		fmt.Fprintf(w, "  \033[31m✗\033[0m %-8s systemctl failed: %s\n", "daemon", strings.TrimSpace(string(out)))
 	} else {
-		fmt.Printf("  \033[32m✓\033[0m %-8s installed with socket activation — auto-restarts on crash, port stays open\n", "daemon")
+		fmt.Fprintf(w, "  \033[32m✓\033[0m %-8s installed with socket activation — auto-restarts on crash, port stays open\n", "daemon")
 	}
 
-	fmt.Println()
+	fmt.Fprintln(w)
 	return nil
 }
 
