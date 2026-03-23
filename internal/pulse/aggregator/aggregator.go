@@ -461,11 +461,17 @@ func (a *Aggregator) rollupPerProject(day string, upsert upsertFunc) {
 			return fmt.Sprintf("project:%s:%s", projectID, metric)
 		}
 		entries := map[string]float64{
-			key("tool_calls"):         float64(sum.TotalToolCalls),
-			key("context_deliveries"): float64(sum.ContextDeliveries),
-			key("tokens_saved"):       float64(sum.TokensSaved),
-			key("cost_saved_usd"):     sum.CostSavedUSD,
-			key("sessions"):           float64(sum.Sessions),
+			key("tool_calls"):           float64(sum.TotalToolCalls),
+			key("context_deliveries"):   float64(sum.ContextDeliveries),
+			key("tokens_saved"):         float64(sum.TokensSaved),
+			key("tokens_delivered"):     float64(sum.TokensDelivered),
+			key("baseline_tokens"):      float64(sum.BaselineTokens),
+			key("cost_saved_usd"):       sum.CostSavedUSD,
+			key("sessions"):             float64(sum.Sessions),
+			key("tasks_completed"):      float64(sum.TasksCompleted),
+			key("cache_hits"):           float64(sum.CacheHits),
+			key("brain_enriched_count"): float64(sum.BrainEnrichedCount),
+			key("total_latency_ms"):     sum.TotalLatencyMs,
 		}
 		for metric, value := range entries {
 			if err := upsert(day, metric, value); err != nil {
