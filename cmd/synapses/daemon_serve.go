@@ -478,7 +478,7 @@ func spaHandler(root http.FileSystem) http.Handler {
 // restToolsHandler returns the HTTP handler for POST /v1/tools/{name}?project=<path>.
 // projectInit is called to lazily initialize a project that is not yet registered.
 // Extracted from cmdDaemonServe to enable HTTP-level testing.
-func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectInstance, error)) http.HandlerFunc {
+func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectInstance, error), wg *sync.WaitGroup) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Global rate limit — independent of per-session MCP limits.
 		if !restRateLimiter.Allow() {
@@ -539,7 +539,15 @@ func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectIn
 			json.NewEncoder(w).Encode(map[string]string{"error": "init project: " + mcpsrv.StripInternalPaths(initErr.Error())}) //nolint:errcheck
 			return
 		}
-		go saveKnownProject(absPath)
+		if wg != nil {
+			wg.Add(1)
+			go func(p string) {
+				defer wg.Done()
+				saveKnownProject(p)
+			}(absPath)
+		} else {
+			go saveKnownProject(absPath)
+		}
 
 		// Parse request body as tool arguments. Empty or absent body → empty args.
 		// Cap at 1 MiB to prevent unbounded memory allocation from malformed requests.
@@ -744,6 +752,10 @@ func cmdDaemonServe(args []string) error {
 	}
 	defer os.Remove(pidPath)
 
+	// ── saveKnownProject WaitGroup ────────────────────────────────────────────
+	var saveKnownProjectWg sync.WaitGroup
+	defer saveKnownProjectWg.Wait()
+
 	// ── App context for graceful shutdown ────────────────────────────────────
 	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
@@ -895,7 +907,11 @@ func cmdDaemonServe(args []string) error {
 				return
 			}
 			// Persist for eager warming on next daemon restart.
-			go saveKnownProject(absPath)
+			saveKnownProjectWg.Add(1)
+		go func(p string) {
+			defer saveKnownProjectWg.Done()
+			saveKnownProject(p)
+		}(absPath)
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1451,7 +1467,11 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "init project: "+mcpsrv.StripInternalPaths(initErr.Error()), http.StatusInternalServerError)
 			return
 		}
-		go saveKnownProject(absPath)
+		saveKnownProjectWg.Add(1)
+		go func(p string) {
+			defer saveKnownProjectWg.Done()
+			saveKnownProject(p)
+		}(absPath)
 
 		// Strip the ?project= param before forwarding so the MCP server
 		// doesn't see unknown query parameters.
@@ -1473,7 +1493,7 @@ func cmdDaemonServe(args []string) error {
 	// binding (127.0.0.1) limits exposure to local processes only.
 	mux.HandleFunc("/v1/tools/", restToolsHandler(reg, func(absPath string) (*ProjectInstance, error) {
 		return initProjectInstance(appCtx, absPath, sharedPulse, reg)
-	}))
+	}, &saveKnownProjectWg))
 
 	// ── Phase 0: Admin management endpoints (web console) ────────────────────
 	registerAdminEndpoints(mux, reg, func(absPath string) (*ProjectInstance, error) {
