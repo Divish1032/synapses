@@ -1801,6 +1801,26 @@ func (s *Store) reconcileOrphanedReferences() {
 	// specific anchor row, not all anchors for the memory.
 	removed += cleanupByNodeID("memory_anchors", "DELETE FROM memory_anchors WHERE node_id = ?")
 
+	// agent_watched_symbols uses entity_id (not node_id) referencing graph nodes.
+	// Clean up symbols pointing at nodes that no longer exist in the graph.
+	if r, err := s.knowledgeDB.Query("SELECT DISTINCT entity_id FROM agent_watched_symbols"); err == nil {
+		var entityIDs []string
+		for r.Next() {
+			var eid string
+			if r.Scan(&eid) == nil {
+				entityIDs = append(entityIDs, eid)
+			}
+		}
+		r.Close()
+		existingNodes := batchNodeExists(entityIDs)
+		for _, eid := range entityIDs {
+			if !existingNodes[eid] {
+				s.knowledgeDB.Exec("DELETE FROM agent_watched_symbols WHERE entity_id = ?", eid) //nolint:errcheck
+				removed++
+			}
+		}
+	}
+
 	// quality_gaps: only clean up open gaps referencing absent nodes.
 	if qr, err := s.knowledgeDB.Query(`SELECT id, node_id FROM quality_gaps WHERE status = 'open'`); err == nil {
 		type gapEntry struct{ id, nodeID string }
@@ -3175,32 +3195,33 @@ func (s *Store) GetGaps(f GapFilter) ([]QualityGap, error) {
 		return base + ` WHERE (node_id LIKE ? ESCAPE '\' OR node_id LIKE ? ESCAPE '\')` + extra + ` ORDER BY` + severityOrder
 	}
 
+	const qualityGapsLimit = ` LIMIT 1000`
 	switch {
 	// Compound: NodeID + Severity (most specific — must come before single-field cases).
 	case f.NodeID != "" && f.Severity != "" && status != "all":
-		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? AND severity = ? AND status = ? ORDER BY`+severityOrder, f.NodeID, f.Severity, status)
+		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? AND severity = ? AND status = ? ORDER BY`+severityOrder+qualityGapsLimit, f.NodeID, f.Severity, status)
 	case f.NodeID != "" && f.Severity != "":
-		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? AND severity = ? ORDER BY`+severityOrder, f.NodeID, f.Severity)
+		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? AND severity = ? ORDER BY`+severityOrder+qualityGapsLimit, f.NodeID, f.Severity)
 	// Compound: File + Severity.
 	case f.File != "" && f.Severity != "" && status != "all":
-		rows, err = s.knowledgeDB.Query(fileWhere(` AND severity = ? AND status = ?`), "%/"+escapedFile+"::%", "%::"+escapedFile+"::%", f.Severity, status)
+		rows, err = s.knowledgeDB.Query(fileWhere(` AND severity = ? AND status = ?`)+qualityGapsLimit, "%/"+escapedFile+"::%", "%::"+escapedFile+"::%", f.Severity, status)
 	case f.File != "" && f.Severity != "":
-		rows, err = s.knowledgeDB.Query(fileWhere(` AND severity = ?`), "%/"+escapedFile+"::%", "%::"+escapedFile+"::%", f.Severity)
+		rows, err = s.knowledgeDB.Query(fileWhere(` AND severity = ?`)+qualityGapsLimit, "%/"+escapedFile+"::%", "%::"+escapedFile+"::%", f.Severity)
 	// Single-field cases.
 	case f.NodeID != "" && status != "all":
-		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? AND status = ? ORDER BY`+severityOrder, f.NodeID, status)
+		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? AND status = ? ORDER BY`+severityOrder+qualityGapsLimit, f.NodeID, status)
 	case f.NodeID != "":
-		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? ORDER BY`+severityOrder, f.NodeID)
+		rows, err = s.knowledgeDB.Query(base+` WHERE node_id = ? ORDER BY`+severityOrder+qualityGapsLimit, f.NodeID)
 	case f.File != "" && status != "all":
-		rows, err = s.knowledgeDB.Query(fileWhere(` AND status = ?`), "%/"+escapedFile+"::%", "%::"+escapedFile+"::%", status)
+		rows, err = s.knowledgeDB.Query(fileWhere(` AND status = ?`)+qualityGapsLimit, "%/"+escapedFile+"::%", "%::"+escapedFile+"::%", status)
 	case f.File != "":
-		rows, err = s.knowledgeDB.Query(fileWhere(``), "%/"+escapedFile+"::%", "%::"+escapedFile+"::%")
+		rows, err = s.knowledgeDB.Query(fileWhere(``)+qualityGapsLimit, "%/"+escapedFile+"::%", "%::"+escapedFile+"::%")
 	case f.Severity != "" && status != "all":
-		rows, err = s.knowledgeDB.Query(base+` WHERE severity = ? AND status = ? ORDER BY`+severityOrder, f.Severity, status)
+		rows, err = s.knowledgeDB.Query(base+` WHERE severity = ? AND status = ? ORDER BY`+severityOrder+qualityGapsLimit, f.Severity, status)
 	case status != "all":
-		rows, err = s.knowledgeDB.Query(base+` WHERE status = ? ORDER BY`+severityOrder, status)
+		rows, err = s.knowledgeDB.Query(base+` WHERE status = ? ORDER BY`+severityOrder+qualityGapsLimit, status)
 	default:
-		rows, err = s.knowledgeDB.Query(base + ` ORDER BY` + severityOrder + ` LIMIT 1000`)
+		rows, err = s.knowledgeDB.Query(base + ` ORDER BY` + severityOrder + qualityGapsLimit)
 	}
 	if err != nil {
 		return nil, err
