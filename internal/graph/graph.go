@@ -66,6 +66,14 @@ type Graph struct {
 	// Used by the resolver to resolve obj.method() call sites cross-file.
 	varTypes map[string]map[string]string
 
+	// instantiatedTypes stores per-file sets of type names that are explicitly
+	// constructed (Java: new Foo(), TypeScript: new Foo()). Used by the resolver
+	// for RTA-style call graph refinement — prefer method candidates whose
+	// receiver type appears in the instantiated set to reduce false-positive
+	// CALLS edges in codebases with deep class hierarchies.
+	// Maps file path → type name → true.
+	instantiatedTypes map[string]map[string]bool
+
 	// removeFileCount tracks RemoveFile calls to trigger periodic edgeSet
 	// compaction. Go maps never shrink their internal bucket array after
 	// deletions; recreating the map reclaims memory from deleted keys.
@@ -507,6 +515,48 @@ func (g *Graph) GetVarTypes(file string) map[string]string {
 	return cp
 }
 
+// AddInstantiatedType records that typeName is explicitly constructed in file.
+// Called by language parsers when they encounter constructor expressions
+// (Java: new Foo(), TypeScript: new Foo()). Used by the resolver for
+// RTA-style call graph refinement.
+func (g *Graph) AddInstantiatedType(file, typeName string) {
+	if file == "" || typeName == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.instantiatedTypes == nil {
+		g.instantiatedTypes = make(map[string]map[string]bool)
+	}
+	if g.instantiatedTypes[file] == nil {
+		g.instantiatedTypes[file] = make(map[string]bool)
+	}
+	g.instantiatedTypes[file][typeName] = true
+}
+
+// GetInstantiatedTypes returns the union of all instantiated type names across
+// all files. Returns nil if no instantiation data was recorded (e.g. pure Go
+// projects where constructor tracking is not implemented).
+func (g *Graph) GetInstantiatedTypes() map[string]bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if len(g.instantiatedTypes) == 0 {
+		return nil
+	}
+	// Count total entries for pre-allocation.
+	total := 0
+	for _, m := range g.instantiatedTypes {
+		total += len(m)
+	}
+	result := make(map[string]bool, total)
+	for _, m := range g.instantiatedTypes {
+		for k := range m {
+			result[k] = true
+		}
+	}
+	return result
+}
+
 // AllNodes returns a snapshot of every node in the graph.
 func (g *Graph) AllNodes() []*Node {
 	g.mu.RLock()
@@ -606,6 +656,56 @@ func (g *Graph) OutEdgesForFile(file string) []*Edge {
 	for id, n := range g.nodes {
 		if n.File == file {
 			out = append(out, g.outEdges[id]...)
+		}
+	}
+	return out
+}
+
+// InEdgesForFile returns all incoming edges to nodes whose File matches the
+// given path. Complexity is O(total_nodes + file_in_edges). Paired with
+// OutEdgesForFile to get all edges that touch a file without a full AllEdges()
+// scan — used by CheckViolationsForFile for O(file_edges) violation checks.
+func (g *Graph) InEdgesForFile(file string) []*Edge {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var out []*Edge
+	for id, n := range g.nodes {
+		if n.File == file {
+			out = append(out, g.inEdges[id]...)
+		}
+	}
+	return out
+}
+
+// EdgesForFile returns all edges where at least one endpoint belongs to the
+// given file: outgoing edges from file nodes and incoming edges to file nodes.
+// Self-edges within the same file appear exactly once. Complexity is
+// O(total_nodes + file_edges) — significantly cheaper than AllEdges() +
+// filter (O(E)) for per-file violation and analysis passes.
+func (g *Graph) EdgesForFile(file string) []*Edge {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	seen := make(map[edgeKey]bool)
+	var out []*Edge
+
+	for id, n := range g.nodes {
+		if n.File != file {
+			continue
+		}
+		for _, e := range g.outEdges[id] {
+			k := edgeKey{e.From, e.To, e.Type}
+			if !seen[k] {
+				seen[k] = true
+				out = append(out, e)
+			}
+		}
+		for _, e := range g.inEdges[id] {
+			k := edgeKey{e.From, e.To, e.Type}
+			if !seen[k] {
+				seen[k] = true
+				out = append(out, e)
+			}
 		}
 	}
 	return out
@@ -781,6 +881,12 @@ func (g *Graph) Compact() {
 		newVarTypes[k] = v
 	}
 	g.varTypes = newVarTypes
+
+	newInstTypes := make(map[string]map[string]bool, len(g.instantiatedTypes))
+	for k, v := range g.instantiatedTypes {
+		newInstTypes[k] = v
+	}
+	g.instantiatedTypes = newInstTypes
 }
 
 // EdgeCount returns the total number of edges.
@@ -1005,6 +1111,8 @@ func (g *Graph) RemoveFile(file string) {
 	// Clean up per-file variable type annotations so the resolver doesn't
 	// create incorrect CALLS edges for variable names that no longer exist.
 	delete(g.varTypes, file)
+	// Clean up per-file instantiated type sets to keep RTA data consistent.
+	delete(g.instantiatedTypes, file)
 	// Note: fileStableIDs is NOT deleted here because RemoveFile is called
 	// between SnapshotFileStableIDs and MigrateStableID during re-parse.
 	// Deleting it here would break stable ID migration. ClearFileSnapshot

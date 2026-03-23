@@ -11,8 +11,16 @@ import (
 // (TypeScript, Java, C#, Kotlin). These edges are based on explicit source
 // declarations and are always correct — no structural heuristic needed.
 //
+// RTA filtering: when instantiation data is available (Java/TypeScript projects
+// where new_expression / object_creation_expression was parsed), IMPLEMENTS edges
+// are only emitted for structs/classes that were explicitly constructed somewhere
+// in the project. This avoids polluting the graph with edges for abstract base
+// classes, test doubles, or dead code that is never instantiated.
+//
 // Returns the number of new IMPLEMENTS edges added.
 func ResolveHeritageEdges(g *graph.Graph) int {
+	// RTA: get instantiated type set. nil = no data (pure Go, or parsers haven't run).
+	instantiated := g.GetInstantiatedTypes()
 	nodes := g.AllNodes()
 
 	// Build name → []NodeID index for all interface and struct nodes.
@@ -34,6 +42,12 @@ func ResolveHeritageEdges(g *graph.Graph) int {
 	count := 0
 	for _, n := range nodes {
 		if n.Type != graph.NodeStruct {
+			continue
+		}
+
+		// RTA filter: if we have instantiation data, skip classes that are never
+		// constructed. len(instantiated)==0 means no data (Go projects) — skip filter.
+		if len(instantiated) > 0 && !instantiated[n.Name] {
 			continue
 		}
 
@@ -110,6 +124,9 @@ func ResolveHeritageEdges(g *graph.Graph) int {
 //
 // Returns the number of new IMPLEMENTS edges added.
 func ResolveImplementsEdges(g *graph.Graph) int {
+	// RTA: when instantiation data is available, skip structs never constructed.
+	// For pure Go projects, GetInstantiatedTypes returns nil and this is a no-op.
+	instantiated := g.GetInstantiatedTypes()
 	nodes := g.AllNodes()
 
 	// 1. Collect interfaces with required method sets (from "methods" metadata).
@@ -195,6 +212,13 @@ func ResolveImplementsEdges(g *graph.Graph) int {
 			// Skip heritage-tagged structs — nominal typing, not structural.
 			if heritageStructs[structKey] {
 				continue
+			}
+			// RTA filter: skip structs never instantiated (only when data is available).
+			if len(instantiated) > 0 {
+				structName := structKey[len(prefix):]
+				if !instantiated[structName] {
+					continue
+				}
 			}
 			// All required interface methods must be present on the struct.
 			allPresent := true
