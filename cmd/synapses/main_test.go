@@ -1792,7 +1792,7 @@ func TestInstallSystemd_NoBinaries(t *testing.T) {
 	os.Setenv("PATH", t.TempDir())
 	defer os.Setenv("PATH", oldPath)
 
-	_ = installSystemd()
+	_ = installSystemd(io.Discard)
 }
 
 func TestUninstallSystemd_Direct(t *testing.T) {
