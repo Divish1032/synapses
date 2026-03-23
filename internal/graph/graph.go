@@ -65,6 +65,11 @@ type Graph struct {
 	// Maps file path → variable name → type name (e.g. "repo" → "Repository").
 	// Used by the resolver to resolve obj.method() call sites cross-file.
 	varTypes map[string]map[string]string
+
+	// removeFileCount tracks RemoveFile calls to trigger periodic edgeSet
+	// compaction. Go maps never shrink their internal bucket array after
+	// deletions; recreating the map reclaims memory from deleted keys.
+	removeFileCount int
 }
 
 // generateStableID returns a random UUID v4 using crypto/rand (no external deps).
@@ -931,6 +936,18 @@ func (g *Graph) RemoveFile(file string) {
 					idx.MarkTombstone(seq)
 				}
 			}
+		}
+
+		// Periodic edgeSet compaction: Go maps never shrink after deletions.
+		// Recreate the map every 100 RemoveFile calls to reclaim memory.
+		g.removeFileCount++
+		if g.removeFileCount >= 100 {
+			newEdgeSet := make(map[edgeKey]struct{}, len(g.edgeSet))
+			for k, v := range g.edgeSet {
+				newEdgeSet[k] = v
+			}
+			g.edgeSet = newEdgeSet
+			g.removeFileCount = 0
 		}
 	}
 }
