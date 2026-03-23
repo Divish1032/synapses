@@ -411,40 +411,27 @@ func (s *Store) normalizeStoredEmbeddings() {
 		type beginner interface {
 			Begin() (*sql.Tx, error)
 		}
-		if sqlDB, ok := db.(beginner); ok {
-			tx, err := sqlDB.Begin()
-			if err == nil {
-				defer tx.Rollback() // no-op after successful Commit
-				var updated int
-				for _, u := range updates {
-					if _, execErr := tx.Exec(
-						fmt.Sprintf("UPDATE %s SET embedding = ? WHERE %s = ?", table, idCol),
-						u.blob, u.id,
-					); execErr != nil {
-						// Abort the entire tx on first error rather than
-						// continuing with partial updates.
-						return 0
-					}
-					updated++
-				}
-				if err := tx.Commit(); err != nil {
-					return 0
-				}
-				return updated
-			}
-			// Fall through to non-transactional path on Begin() error.
+		sqlDB, ok := db.(beginner)
+		if !ok {
+			return 0
 		}
-
-		// Fallback: individual UPDATEs without a transaction.
+		tx, err := sqlDB.Begin()
+		if err != nil {
+			return 0
+		}
+		defer tx.Rollback() // no-op after successful Commit
 		var updated int
 		for _, u := range updates {
-			if _, err := db.Exec(
+			if _, execErr := tx.Exec(
 				fmt.Sprintf("UPDATE %s SET embedding = ? WHERE %s = ?", table, idCol),
 				u.blob, u.id,
-			); err != nil {
+			); execErr != nil {
 				return 0
 			}
 			updated++
+		}
+		if err := tx.Commit(); err != nil {
+			return 0
 		}
 		return updated
 	}
