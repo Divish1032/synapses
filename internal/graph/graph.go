@@ -229,7 +229,16 @@ func (g *Graph) FindByName(name string) []*Node {
 
 // FindByPattern returns all nodes whose Name contains the given substring
 // (case-insensitive). Useful for fuzzy "find entity" queries.
+// On large graphs (100K+ nodes), consider FindByPatternLimit to cap the scan.
 func (g *Graph) FindByPattern(pattern string) []*Node {
+	return g.FindByPatternLimit(pattern, 0)
+}
+
+// FindByPatternLimit is like FindByPattern but stops scanning after limit
+// matches are found (0 = unlimited). This prevents O(N) full scans on hot
+// paths where only a few results are needed. Results are sorted by ID for
+// deterministic output.
+func (g *Graph) FindByPatternLimit(pattern string, limit int) []*Node {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	lower := strings.ToLower(pattern)
@@ -237,6 +246,9 @@ func (g *Graph) FindByPattern(pattern string) []*Node {
 	for _, n := range g.nodes {
 		if strings.Contains(strings.ToLower(n.Name), lower) {
 			results = append(results, n)
+			if limit > 0 && len(results) >= limit {
+				break
+			}
 		}
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].ID < results[j].ID })

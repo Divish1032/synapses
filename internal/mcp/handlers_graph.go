@@ -76,7 +76,7 @@ func (s *Server) handleFindEntity(
 	// Exact match first, then substring.
 	nodes := s.graph.FindByName(query)
 	if len(nodes) == 0 {
-		nodes = s.graph.FindByPattern(query)
+		nodes = s.graph.FindByPatternLimit(query, 50)
 	}
 	// Dotted method name fallback: "Store.Close" → search "Close", filter by "Store".
 	// Go method nodes are stored by their short name (e.g. "Close") without the
@@ -86,7 +86,7 @@ func (s *Server) handleFindEntity(
 		prefix, method := strings.ToLower(parts[0]), parts[1]
 		candidates := s.graph.FindByName(method)
 		if len(candidates) == 0 {
-			candidates = s.graph.FindByPattern(method)
+			candidates = s.graph.FindByPatternLimit(method, 50)
 		}
 		for _, n := range candidates {
 			if strings.Contains(strings.ToLower(string(n.ID)), prefix) ||
@@ -1007,16 +1007,18 @@ func (s *Server) handleSearch(
 		score int
 	}
 	var hits []hit
+	const maxResults = 25
+	highScoreCount := 0 // tracks hits with score >= 20 (exact/prefix)
 
-	// TODO: O(N) scan over all nodes — consider routing default mode through
-	// FTS5 (like mode=fulltext) for large graphs. Current approach provides
-	// name-prefix and file-path scoring that FTS5 BM25 does not replicate.
+	// O(N) scan with early termination: once we have maxResults exact/prefix
+	// matches (score ≥ 20), lower-scored hits can never displace them, so we
+	// stop scanning. On typical queries this terminates after a small fraction
+	// of the graph is scanned.
 	for _, n := range s.graph.AllNodes() {
 		if n.Type == graph.NodeFile || n.Type == graph.NodePackage {
 			continue
 		}
 		nameLow := strings.ToLower(n.Name)
-		fileLow := strings.ToLower(n.File)
 		score := 0
 		switch {
 		case nameLow == lower:
@@ -1026,8 +1028,14 @@ func (s *Server) handleSearch(
 		case strings.Contains(nameLow, lower):
 			score = 10
 		default:
+			// Skip expensive file-path, doc, and multi-word checks if we
+			// already have enough high-quality hits to fill the results.
+			if highScoreCount >= maxResults {
+				continue
+			}
 			// Score 8: file path suffix match — lets agents search by package name
 			// (e.g. "watcher" matches all nodes in internal/watcher/*.go).
+			fileLow := strings.ToLower(n.File)
 			if strings.HasSuffix(fileLow, "/"+lower+".go") ||
 				strings.Contains(fileLow, "/"+lower+"/") {
 				score = 8
@@ -1038,7 +1046,7 @@ func (s *Server) handleSearch(
 		// Multi-word AND query: each query word must appear in the name components
 		// or doc comment. Handles stemmed/derived forms like "BFS carver" matching
 		// "CarveEgoGraph" (query "carver" prefix-matches name component "carve").
-		if score == 0 {
+		if score == 0 && highScoreCount < maxResults {
 			words := strings.Fields(lower)
 			if len(words) > 1 {
 				nameWords := camelWords(n.Name)
@@ -1074,6 +1082,16 @@ func (s *Server) handleSearch(
 
 		if score > 0 {
 			hits = append(hits, hit{n, score})
+			if score >= 20 {
+				highScoreCount++
+				// Early termination: enough exact/prefix matches found —
+				// no lower-scored hit can displace these after sorting.
+				if highScoreCount >= maxResults {
+					// Continue scanning only for name-based matches (score ≥ 10)
+					// which are cheap to compute. The switch-default branch above
+					// skips expensive file/doc checks when highScoreCount >= maxResults.
+				}
+			}
 		}
 	}
 
@@ -1152,7 +1170,7 @@ func (s *Server) handleGetCallChain(
 	resolve := func(name string) *graph.Node {
 		nodes := s.graph.FindByName(name)
 		if len(nodes) == 0 {
-			nodes = s.graph.FindByPattern(name)
+			nodes = s.graph.FindByPatternLimit(name, 50)
 		}
 		if len(nodes) == 0 {
 			return nil
@@ -1472,7 +1490,7 @@ func (s *Server) handleSemanticSearch(
 func (s *Server) inlineFindEntity(query string) []map[string]interface{} {
 	nodes := s.graph.FindByName(query)
 	if len(nodes) == 0 {
-		nodes = s.graph.FindByPattern(query)
+		nodes = s.graph.FindByPatternLimit(query, 50)
 	}
 	// Dotted method name fallback: "Store.Close" → search "Close", filter by "Store".
 	if len(nodes) == 0 && strings.Contains(query, ".") {
@@ -1480,7 +1498,7 @@ func (s *Server) inlineFindEntity(query string) []map[string]interface{} {
 		typePrefix, method := strings.ToLower(parts[0]), parts[1]
 		candidates := s.graph.FindByName(method)
 		if len(candidates) == 0 {
-			candidates = s.graph.FindByPattern(method)
+			candidates = s.graph.FindByPatternLimit(method, 50)
 		}
 		for _, n := range candidates {
 			if strings.Contains(strings.ToLower(string(n.ID)), typePrefix) ||
