@@ -757,3 +757,48 @@ func TestGraphQLParser_BuiltinScalarsNoEdge(t *testing.T) {
 		}
 	}
 }
+
+func TestGraphQLParser_ForwardReferenceEdge(t *testing.T) {
+	// Post.author references User, but User is defined AFTER Post.
+	// Without deferred resolution, this edge would be silently dropped.
+	src := `
+type Post {
+  author: User
+}
+type User {
+  id: ID!
+}
+`
+	g := parseGraphQL(t, src)
+	postAuthor := g.FindByName("Post.author")
+	if len(postAuthor) == 0 {
+		t.Fatal("Post.author not found")
+	}
+	if !hasDependsOnEdge(g, postAuthor[0].ID, "User") {
+		t.Error("forward reference: Post.author should have DEPENDS_ON edge to User (defined after Post)")
+	}
+}
+
+func TestGraphQLParser_MutualForwardReference(t *testing.T) {
+	// A and B mutually reference each other — both edges must exist.
+	src := `
+type A {
+  b: B
+}
+type B {
+  a: A
+}
+`
+	g := parseGraphQL(t, src)
+	aNode := g.FindByName("A.b")
+	bNode := g.FindByName("B.a")
+	if len(aNode) == 0 || len(bNode) == 0 {
+		t.Fatal("A.b or B.a not found")
+	}
+	if !hasDependsOnEdge(g, aNode[0].ID, "B") {
+		t.Error("A.b should have DEPENDS_ON edge to B")
+	}
+	if !hasDependsOnEdge(g, bNode[0].ID, "A") {
+		t.Error("B.a should have DEPENDS_ON edge to A")
+	}
+}
