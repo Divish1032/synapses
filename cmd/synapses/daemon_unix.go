@@ -7,9 +7,14 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
+
+// processStartTimeCache caches PID→start-time lookups to avoid shelling
+// out to `ps` on every check (10-50ms per call).
+var processStartTimeCache sync.Map // int → int64
 
 func detachedSysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setpgid: true}
@@ -51,6 +56,9 @@ func forceKillProcess(pid int) error {
 // This is locale-independent (no month/day names), working reliably on
 // macOS, Linux, and BSD regardless of LC_TIME settings.
 func processStartTime(pid int) int64 {
+	if v, ok := processStartTimeCache.Load(pid); ok {
+		return v.(int64)
+	}
 	out, err := exec.Command("ps", "-o", "etime=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return 0
@@ -63,7 +71,9 @@ func processStartTime(pid int) int64 {
 	if elapsed <= 0 {
 		return 0
 	}
-	return time.Now().Add(-elapsed).UnixNano()
+	result := time.Now().Add(-elapsed).UnixNano()
+	processStartTimeCache.Store(pid, result)
+	return result
 }
 
 // parseEtime parses the `ps -o etime=` format: [[dd-]hh:]mm:ss
