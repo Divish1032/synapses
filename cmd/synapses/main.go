@@ -515,10 +515,26 @@ func cmdStartDirect(args []string) error {
 		appCancel()
 		time.AfterFunc(5*time.Second, func() {
 			logutil.Error("synapses: graceful shutdown timed out, forcing exit\n")
-			if sharedPulse != nil {
-				sharedPulse.Close() // flush ring buffer before exit
+			// Close resources in reverse-initialization order since defers
+			// won't run after os.Exit. Each Close is wrapped in a timer to
+			// prevent a hanging Close from blocking the force-exit.
+			forceClose := func(name string, fn func()) {
+				done := make(chan struct{})
+				go func() { fn(); close(done) }()
+				select {
+				case <-done:
+				case <-time.After(500 * time.Millisecond):
+					logutil.Error("synapses: force-exit: %s close timed out\n", name)
+				}
 			}
-			st.Close() // explicitly close store since defers won't run on os.Exit
+			if fedResolver != nil {
+				forceClose("federation", func() { fedResolver.Close() })
+			}
+			forceClose("mcp-server", func() { srv.Close() })
+			if sharedPulse != nil {
+				forceClose("pulse", func() { sharedPulse.Close() })
+			}
+			forceClose("store", func() { st.Close() })
 			os.Exit(1)
 		})
 	}()
