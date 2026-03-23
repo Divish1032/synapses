@@ -1789,10 +1789,13 @@ func (s *Store) GetSummaryForProject(days int, projectID string) (*Summary, erro
 // Returns (nil, nil) when no rollup rows exist for the period (triggers fallback).
 func (s *Store) sumRollupsForProject(since, before, projectID string) (*Summary, error) {
 	prefix := "project:" + projectID + ":"
+	// Escape SQL LIKE wildcards in the prefix to prevent pattern injection.
+	likeReplacer := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_")
+	likePattern := likeReplacer.Replace(prefix) + "%"
 	rows, err := s.execer().Query(
 		`SELECT metric, COALESCE(SUM(value), 0)
-		 FROM daily_rollups WHERE day >= ? AND day < ? AND metric LIKE ?
-		 GROUP BY metric`, since, before, prefix+"%")
+		 FROM daily_rollups WHERE day >= ? AND day < ? AND metric LIKE ? ESCAPE '\'
+		 GROUP BY metric`, since, before, likePattern)
 	if err != nil {
 		return nil, err
 	}
