@@ -231,6 +231,16 @@ func (s *Store) CheckPlanSafety(planDesc, projectID string) (*Episode, error) {
 	return s.CheckPlanSafetyCtx(context.Background(), planDesc, projectID)
 }
 
+// HasNoFailureEpisodes reports whether there are zero failure episodes in the
+// store. Uses a fast indexed EXISTS check — avoids the FTS5 scan entirely on
+// cold-start (no episodes recorded yet).
+func (s *Store) HasNoFailureEpisodes() bool {
+	var exists bool
+	err := s.knowledgeDB.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM episodes WHERE episode_type = 'failure')`).Scan(&exists)
+	return err != nil || !exists
+}
+
 // CheckPlanSafetyCtx is the context-aware variant of CheckPlanSafety.
 // The context is threaded into the SQL query — if it expires, the query cancels.
 func (s *Store) CheckPlanSafetyCtx(ctx context.Context, planDesc, projectID string) (*Episode, error) {

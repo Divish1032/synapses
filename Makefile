@@ -6,7 +6,7 @@ BINARY     := synapses
 BUILD_DIR  := bin
 CMD_PATH   := ./cmd/synapses
 
-VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION    ?= $(shell git describe --tags --always --dirty --match "v[0-9]*" 2>/dev/null || echo "dev")
 LDFLAGS    := -ldflags "-X main.version=$(VERSION) -s -w"
 
 ## web/build: Build the embedded web console (Preact + Vite)
