@@ -59,8 +59,9 @@ type Collector struct {
 	// P2-17: high-water mark — peak buffer depth since last flush.
 	highWaterMark atomic.Int64
 	// P2-19: events dropped due to full buffer (ring buffer overflow).
-	dropped  atomic.Int64
-	enqueued atomic.Int64
+	dropped        atomic.Int64
+	lastLoggedDrops int64 // last dropped count we logged — avoids repeated warnings
+	enqueued       atomic.Int64
 	// P5 — DQ-Integrity.1: write errors during batch persistence.
 	writeErrors atomic.Int64
 	// earlyFlushRunning prevents concurrent early-flush goroutines. Only one
@@ -340,6 +341,12 @@ func (c *Collector) flush() {
 	}
 	batch := c.drainLocked()
 	c.mu.Unlock()
+
+	// Log a warning if events were dropped since the last flush.
+	if dropped := c.dropped.Load(); dropped > 0 && dropped > c.lastLoggedDrops {
+		logutil.Warn("pulse collector: %d events dropped (ring buffer full, cap=%d)\n", dropped, c.cap)
+		c.lastLoggedDrops = dropped
+	}
 
 	c.writeBatch(batch)
 
