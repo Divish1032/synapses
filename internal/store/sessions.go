@@ -568,13 +568,13 @@ func (s *Store) PruneToolCallsOlderThan(age time.Duration) (int64, error) {
 // At ~5 sessions/day a 90-day window keeps fewer than 450 rows; the DELETE
 // itself is effectively instantaneous at that scale.
 func (s *Store) PruneOldSessions(age time.Duration) (int64, error) {
-	s.lastPruneMu.Lock()
+	s.lastSessionPruneMu.Lock()
 	if time.Since(s.lastSessionPruneAt) < 24*time.Hour {
-		s.lastPruneMu.Unlock()
+		s.lastSessionPruneMu.Unlock()
 		return 0, nil
 	}
 	s.lastSessionPruneAt = time.Now()
-	s.lastPruneMu.Unlock()
+	s.lastSessionPruneMu.Unlock()
 
 	cutoff := time.Now().UTC().Add(-age).Unix()
 	// Use IMMEDIATE transaction to atomically prune sessions and their tasks.
