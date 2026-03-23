@@ -74,6 +74,9 @@ func LoadPromptDir(dir, source string) ([]PromptTemplate, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
 		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			continue // skip symlinks to prevent directory traversal
+		}
 		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
 			continue // skip unreadable files silently

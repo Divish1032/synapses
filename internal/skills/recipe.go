@@ -55,6 +55,9 @@ func LoadRecipeDir(dir, origin string) ([]Recipe, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
+		if e.Type()&os.ModeSymlink != 0 {
+			continue // skip symlinks to prevent directory traversal
+		}
 		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
 		if err != nil {
 			continue // skip unreadable files silently
