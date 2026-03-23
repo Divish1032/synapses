@@ -104,7 +104,7 @@ func (g *Guardian) buildPrompt(req Request) string {
 	if targetName == "" {
 		targetName = "(unknown target)"
 	}
-	return fmt.Sprintf(promptTemplate, sanitizePromptInput(description), severity, stripToRelative(req.SourceFile), sanitizePromptInput(targetName))
+	return fmt.Sprintf(promptTemplate, sanitizePromptInput(description), sanitizePromptInput(severity), sanitizePromptInput(stripToRelative(req.SourceFile)), sanitizePromptInput(targetName))
 }
 
 func stripToRelative(filePath string) string {

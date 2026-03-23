@@ -400,26 +400,30 @@ func (s *Store) normalizeStoredEmbeddings() {
 		if !allowedTables[table] || !allowedCols[idCol] {
 			return 0 // reject unknown table/column names
 		}
-		// Collect rows to update in chunks to avoid loading entire table into memory.
+		// Collect rows to update using cursor-based pagination (WHERE rowid > ?)
+		// instead of LIMIT/OFFSET to avoid O(N^2/chunkSize) performance.
 		const chunkSize = 2000
 		type updateItem struct {
 			id   string
 			blob []byte
 		}
 		var updates []updateItem
-		for offset := 0; ; offset += chunkSize {
-			rows, err := db.Query(fmt.Sprintf("SELECT %s, embedding FROM %s LIMIT %d OFFSET %d", idCol, table, chunkSize, offset))
+		var lastRowid int64
+		for {
+			rows, err := db.Query(fmt.Sprintf("SELECT rowid, %s, embedding FROM %s WHERE rowid > ? LIMIT ?", idCol, table), lastRowid, chunkSize)
 			if err != nil {
 				break
 			}
 			rowCount := 0
 			for rows.Next() {
 				rowCount++
+				var rowid int64
 				var id string
 				var blob []byte
-				if err := rows.Scan(&id, &blob); err != nil {
+				if err := rows.Scan(&rowid, &id, &blob); err != nil {
 					continue
 				}
+				lastRowid = rowid
 				vec := blobToVec(blob)
 				if len(vec) == 0 {
 					continue

@@ -122,16 +122,29 @@ func AutoLoadPrompts(templates []PromptTemplate) []PromptTemplate {
 	return out
 }
 
-// DeduplicatePrompts removes duplicate IDs, keeping the last occurrence.
-// Since templates are loaded builtin < user < project, this gives project-scoped
-// prompts precedence over user-scoped, and user over builtin.
+// DeduplicatePrompts removes duplicate IDs, keeping the last occurrence per ID.
+// However, project-scoped prompts (Source == "project") cannot shadow user or
+// builtin prompts — an untrusted project repo must not override user-defined IDs.
 func DeduplicatePrompts(templates []PromptTemplate) []PromptTemplate {
-	// Record the last index at which each ID appears.
+	// First pass: collect IDs defined by user or builtin sources.
+	protectedIDs := make(map[string]bool)
+	for _, pt := range templates {
+		if pt.ID != "" && (pt.Source == "user" || pt.Source == "builtin") {
+			protectedIDs[pt.ID] = true
+		}
+	}
+
+	// Second pass: keep last occurrence per ID, but skip project prompts
+	// that collide with a protected (user/builtin) ID.
 	last := make(map[string]int, len(templates))
 	for i, pt := range templates {
-		if pt.ID != "" {
-			last[pt.ID] = i
+		if pt.ID == "" {
+			continue
 		}
+		if protectedIDs[pt.ID] && pt.Source == "project" {
+			continue // project cannot shadow user/builtin
+		}
+		last[pt.ID] = i
 	}
 	out := make([]PromptTemplate, 0, len(templates))
 	for i, pt := range templates {

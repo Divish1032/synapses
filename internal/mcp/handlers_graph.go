@@ -1199,6 +1199,7 @@ func (s *Server) handleGetCallChain(
 		id  graph.NodeID
 		hop int
 	}
+	const maxBFSHops = 30 // prevent full-graph traversal on dense graphs
 	queue := []bfsEntry{{fromNode.ID, 0}}
 	found := false
 	// closestReachable tracks the deepest node reached (by hop count from root).
@@ -1209,6 +1210,10 @@ func (s *Server) handleGetCallChain(
 	for len(queue) > 0 && !found {
 		curr := queue[0]
 		queue = queue[1:]
+
+		if curr.hop >= maxBFSHops {
+			continue
+		}
 
 		if curr.hop > maxHop {
 			maxHop = curr.hop
