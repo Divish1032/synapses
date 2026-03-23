@@ -102,6 +102,13 @@ func (s *Store) RememberEpisode(e Episode) (string, error) {
 // Returns up to limit results ordered by relevance (best match first).
 // v1 uses top-N strategy with no score threshold — caller decides relevance.
 func (s *Store) RecallEpisodes(query, projectID, agentID, episodeType, outcomeFilter string, limit, sinceDays int) ([]Episode, error) {
+	return s.RecallEpisodesCtx(context.Background(), query, projectID, agentID, episodeType, outcomeFilter, limit, sinceDays)
+}
+
+// RecallEpisodesCtx is like RecallEpisodes but accepts a context for cancellation.
+// Use this variant in federation cross-project search where a hung sibling store
+// should not block the caller for the full busy timeout.
+func (s *Store) RecallEpisodesCtx(ctx context.Context, query, projectID, agentID, episodeType, outcomeFilter string, limit, sinceDays int) ([]Episode, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -149,7 +156,7 @@ func (s *Store) RecallEpisodes(query, projectID, agentID, episodeType, outcomeFi
 	baseQuery += ` ORDER BY rank LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.knowledgeDB.Query(baseQuery, args...)
+	rows, err := s.knowledgeDB.QueryContext(ctx, baseQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("recall episodes: %w", err)
 	}

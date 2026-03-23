@@ -221,7 +221,7 @@ func (s *CrossProjectSearch) SearchEpisodes(ctx context.Context, query string, a
 				return nil
 			}
 
-			episodes, err := st.RecallEpisodes(query, "", "", "", "", limit, 0)
+			episodes, err := st.RecallEpisodesCtx(egctx, query, "", "", "", "", limit, 0)
 			if err != nil {
 				log.Printf("federation: search episodes in %q: %v", e.Alias, err)
 				return nil
@@ -235,7 +235,6 @@ func (s *CrossProjectSearch) SearchEpisodes(ctx context.Context, query string, a
 				})
 			}
 			mu.Unlock()
-			_ = egctx // use the group context for cancellation
 			return nil
 		})
 	}
@@ -281,7 +280,7 @@ func (s *CrossProjectSearch) SearchMemoriesForEntity(ctx context.Context, entity
 			// Used when the entity has no node in the sibling store (e.g., removed
 			// entity with memories still referencing it by name).
 			if len(episodes) == 0 {
-				episodes, _ = st.RecallEpisodes(entityName, "", "", "", "", 3, 0)
+				episodes, _ = st.RecallEpisodesCtx(egctx, entityName, "", "", "", "", 3, 0)
 			}
 
 			mu.Lock()
