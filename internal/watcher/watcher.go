@@ -273,6 +273,13 @@ func (w *Watcher) Start(root string) error {
 		return fmt.Errorf("walk %s: %w", root, err)
 	}
 
+	// Watch .git directory so we detect git commits via COMMIT_EDITMSG writes
+	// and can refresh stale blame data for recently-changed files.
+	gitDir := filepath.Join(root, ".git")
+	if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
+		_ = w.fw.Add(gitDir)
+	}
+
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
@@ -489,6 +496,15 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 			w.debounceConfigReload(path)
 			return
 		}
+
+		// Git commit detected: COMMIT_EDITMSG is written on every `git commit`.
+		// Re-enrich blame for recently-changed files so blame reflects the new
+		// commit hash rather than the pre-commit state captured at save time.
+		if filepath.Base(path) == "COMMIT_EDITMSG" {
+			w.refreshBlameAfterCommit(root)
+			return
+		}
+
 		w.debounce(path, root)
 	}
 }
@@ -752,8 +768,10 @@ func (w *Watcher) reparseFile(path, _ string) {
 	}
 
 	// Snapshot counts before mutation for ChangeEvent delta.
+	// Use OutEdgesForFile (not global EdgeCount) so edges_added reflects
+	// edges from this file only, not the entire resolver pass delta.
 	nodesBefore := w.countNodesForFile(path)
-	edgesBefore := w.graph.EdgeCount()
+	edgesBefore := len(w.graph.OutEdgesForFile(path))
 
 	// Snapshot stable UUIDs before removing nodes so they can be migrated to
 	// the re-parsed nodes (preserving cross-project references across renames).
@@ -929,7 +947,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 
 	// Record change event with delta counts.
 	nodesAfter := w.countNodesForFile(path)
-	edgesAfter := w.graph.EdgeCount()
+	edgesAfter := len(w.graph.OutEdgesForFile(path))
 	w.recordChange(path, nodesBefore, nodesAfter, edgesAfter-edgesBefore)
 
 	// Proactive violation detection: check rules scoped to the changed file and
@@ -1038,6 +1056,40 @@ func (w *Watcher) reparseFile(path, _ string) {
 
 // checkViolations runs the rule engine against edges touching path and emits
 // events for violations that were not already present in the log.
+// refreshBlameAfterCommit is called when .git/COMMIT_EDITMSG is written,
+// indicating a git commit just completed. It re-enriches blame for all files
+// that changed recently (within the last 5 minutes) so that blame_commit
+// reflects the new HEAD rather than the pre-commit state.
+func (w *Watcher) refreshBlameAfterCommit(root string) {
+	graphRoot := string(w.graph.Root())
+	if graphRoot == "" {
+		return
+	}
+
+	recent := w.RecentChanges(5) // last 5 minutes
+	if len(recent) == 0 {
+		return
+	}
+
+	seen := make(map[string]bool, len(recent))
+	for _, ev := range recent {
+		if seen[ev.File] {
+			continue
+		}
+		seen[ev.File] = true
+
+		absFile := ev.File
+		if !filepath.IsAbs(absFile) {
+			absFile = filepath.Join(graphRoot, absFile)
+		}
+
+		metrics.EnrichBlameForFile(w.graph, graphRoot, absFile)
+		metrics.EnrichCommitContextForFile(w.graph, graphRoot, absFile)
+	}
+
+	w.graph.InvalidateCache()
+}
+
 func (w *Watcher) checkViolations(path string) {
 	// Snapshot cfg under lock — reloadConfig may write w.cfg concurrently from
 	// a debounce timer goroutine while reparseFile (which calls checkViolations)
