@@ -142,6 +142,8 @@ type silGraphPacket struct {
 type Stats struct {
 	DeterministicHits uint64 // calls where deterministic pass ran (always ≥ OllamaCalls)
 	OllamaCalls       uint64 // calls where the LLM was invoked (subset of DeterministicHits)
+	OllamaFailures    uint64 // LLM invocations that returned an error
+	ParseFailures     uint64 // LLM responses that failed to parse
 }
 
 // Enricher adds semantic context to get_context responses.
@@ -154,6 +156,8 @@ type Enricher struct {
 	// Atomic counters for observability. Read via Stats().
 	deterministicHits uint64
 	ollamaCalls       uint64
+	ollamaFailures    uint64
+	parseFailures     uint64
 }
 
 // New creates an Enricher.
@@ -170,6 +174,8 @@ func (e *Enricher) Stats() Stats {
 	return Stats{
 		DeterministicHits: atomic.LoadUint64(&e.deterministicHits),
 		OllamaCalls:       atomic.LoadUint64(&e.ollamaCalls),
+		OllamaFailures:    atomic.LoadUint64(&e.ollamaFailures),
+		ParseFailures:     atomic.LoadUint64(&e.parseFailures),
 	}
 }
 
@@ -211,12 +217,14 @@ func (e *Enricher) Enrich(ctx context.Context, req Request) (Response, error) {
 
 	raw, err := e.llm.Generate(llmCtx, prompt)
 	if err != nil {
+		atomic.AddUint64(&e.ollamaFailures, 1)
 		// LLM unavailable — return deterministic fields, no error (fail-silent).
 		return resp, nil
 	}
 
 	result, parseErr := parseInsight(raw)
 	if parseErr != nil {
+		atomic.AddUint64(&e.parseFailures, 1)
 		// Unparseable response — deterministic fields still delivered.
 		return resp, nil
 	}
