@@ -365,3 +365,89 @@ func nodeIDSet(sub *graph.SubGraph) map[graph.NodeID]struct{} {
 	}
 	return m
 }
+
+// TestCentralityBoost_CacheInvalidatedOnRebuild verifies that after a second
+// RebuildIndex that promotes a new hub, a fresh CarveEgoGraph call reflects the
+// updated centrality — not a stale cache entry from before the rebuild.
+//
+// Setup: root calls leaf1 and leaf2.
+// Initial graph: leaf1 has no other edges (low centrality).
+// After rebuild: add 5 callers to leaf1 from a separate file → leaf1 becomes hub.
+// Carve root before rebuild → cache populated with old (equal) leaf1/leaf2 scores.
+// Carve root after rebuild → cache must be cleared, leaf1 must now outrank leaf2.
+func TestCentralityBoost_CacheInvalidatedOnRebuild(t *testing.T) {
+	g := graph.New("cachetest")
+
+	rootID := g.MakeNodeID("main.go", "Root")
+	leaf1ID := g.MakeNodeID("main.go", "Leaf1")
+	leaf2ID := g.MakeNodeID("main.go", "Leaf2")
+
+	g.AddNode(&graph.Node{ID: rootID, Type: graph.NodeFunction, Name: "Root", File: "main.go"})
+	g.AddNode(&graph.Node{ID: leaf1ID, Type: graph.NodeFunction, Name: "Leaf1", File: "main.go"})
+	g.AddNode(&graph.Node{ID: leaf2ID, Type: graph.NodeFunction, Name: "Leaf2", File: "main.go"})
+	g.AddEdge(&graph.Edge{From: rootID, To: leaf1ID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: rootID, To: leaf2ID, Type: graph.EdgeCalls})
+
+	if _, err := g.RebuildIndex(); err != nil {
+		t.Fatalf("first RebuildIndex: %v", err)
+	}
+
+	cfg := graph.DefaultCarveConfig()
+
+	// Warm the cache: both leaves are at equal 1-hop relevance, equal centrality.
+	sub1, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("first CarveEgoGraph: %v", err)
+	}
+
+	var leaf1RelBefore, leaf2RelBefore float64
+	for _, cn := range sub1.Nodes {
+		switch cn.Node.ID {
+		case leaf1ID:
+			leaf1RelBefore = cn.Relevance
+		case leaf2ID:
+			leaf2RelBefore = cn.Relevance
+		}
+	}
+	// Before rebuild both leaves are symmetric — same relevance.
+	if leaf1RelBefore != leaf2RelBefore {
+		t.Errorf("before rebuild: leaf1 (%f) != leaf2 (%f) — should be equal", leaf1RelBefore, leaf2RelBefore)
+	}
+
+	// Add 5 external callers to leaf1 only — makes leaf1 a hub.
+	for _, name := range []string{"Ca", "Cb", "Cc", "Cd", "Ce"} {
+		cid := g.MakeNodeID("callers.go", name)
+		g.AddNode(&graph.Node{ID: cid, Type: graph.NodeFunction, Name: name, File: "callers.go"})
+		g.AddEdge(&graph.Edge{From: cid, To: leaf1ID, Type: graph.EdgeCalls})
+	}
+
+	// Rebuild updates centrality AND must clear the cache.
+	if _, err := g.RebuildIndex(); err != nil {
+		t.Fatalf("second RebuildIndex: %v", err)
+	}
+
+	// After rebuild the cache must have been cleared.  A fresh call must
+	// reflect the new centrality — leaf1 is now the hub, leaf2 is still a leaf.
+	sub2, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("second CarveEgoGraph: %v", err)
+	}
+
+	var leaf1RelAfter, leaf2RelAfter float64
+	for _, cn := range sub2.Nodes {
+		switch cn.Node.ID {
+		case leaf1ID:
+			leaf1RelAfter = cn.Relevance
+		case leaf2ID:
+			leaf2RelAfter = cn.Relevance
+		}
+	}
+
+	if leaf1RelAfter == 0 || leaf2RelAfter == 0 {
+		t.Fatalf("expected both leaves in sub-graph after rebuild: leaf1=%f leaf2=%f", leaf1RelAfter, leaf2RelAfter)
+	}
+	if leaf1RelAfter <= leaf2RelAfter {
+		t.Errorf("after rebuild: leaf1 (%f) should outrank leaf2 (%f) due to centrality boost",
+			leaf1RelAfter, leaf2RelAfter)
+	}
+}

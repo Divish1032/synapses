@@ -636,6 +636,14 @@ func (g *Graph) RebuildIndex() ([]byte, error) {
 	g.index = newIdx
 	g.mu.Unlock()
 
+	// Invalidate the entire subgraph cache: eigenvector centrality is a global
+	// property — every node's boost factor can change when the graph topology
+	// changes.  Stale cache entries computed against old centrality scores must
+	// not be served.  The file-specific eviction that runs before RebuildIndex
+	// only evicts entries for the changed file; entries for other files can
+	// survive with baked-in centrality values that are now incorrect.
+	g.cache.invalidate()
+
 	blob, err := newIdx.SaveSnapshot()
 	return blob, err
 }
