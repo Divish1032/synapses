@@ -231,9 +231,22 @@ func cleanStaleSingletonPID() {
 	if err != nil {
 		return
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0]))
+	lines := strings.SplitN(string(data), "\n", 2)
+	pid, err := strconv.Atoi(strings.TrimSpace(lines[0]))
 	if err != nil || !processAlive(pid) {
 		os.Remove(pidPath)
+		return
+	}
+	if len(lines) >= 2 {
+		if startNanos, parseErr := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64); parseErr == nil && startNanos > 0 {
+			if procStart := processStartTime(pid); procStart > 0 {
+				recorded := time.Unix(0, startNanos)
+				actual := time.Unix(0, procStart)
+				if actual.Sub(recorded).Abs() > 2*time.Second {
+					os.Remove(pidPath)
+				}
+			}
+		}
 	}
 }
 
