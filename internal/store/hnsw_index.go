@@ -252,7 +252,7 @@ func (s *Store) memoryHNSWReady() bool {
 
 // RebuildNodeHNSW loads all node embeddings from graphDB into an HNSW index.
 func (s *Store) RebuildNodeHNSW() {
-	rows, err := s.graphDB.Query(`SELECT node_id, embedding FROM node_embeddings`)
+	rows, err := s.graphDB.Query(`SELECT node_id, embedding FROM node_embeddings LIMIT 2000000`)
 	if err != nil {
 		logutil.Error("synapses: rebuild node HNSW index: %v\n", err)
 		return
