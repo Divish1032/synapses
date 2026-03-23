@@ -1578,13 +1578,13 @@ func (s *Store) PruneStaleData(retentionDays int) {
 			if err != nil {
 				return 0
 			}
-			defer rows.Close()
 			for rows.Next() {
 				var id string
 				if rows.Scan(&id) == nil {
 					deletedIDs = append(deletedIDs, id)
 				}
 			}
+			rows.Close() // close before DELETE to avoid open-cursor conflicts
 			res, execErr := tx.Exec("DELETE FROM memories WHERE "+query, args...)
 			if execErr != nil {
 				logutil.Debug("synapses: store: prune memories: %v\n", execErr)

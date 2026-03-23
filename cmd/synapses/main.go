@@ -331,7 +331,7 @@ func cmdStartDirect(args []string) error {
 		if pts, err := skills.LoadPromptDir(projectDir, "project"); err == nil {
 			allPrompts = append(allPrompts, pts...)
 		}
-		allPrompts = skills.DeduplicatePrompts(allPrompts) // project overrides user, user overrides builtin
+		allPrompts = skills.DeduplicatePrompts(allPrompts) // user overrides builtin; project cannot shadow user/builtin
 		if len(allPrompts) > 0 {
 			srv.SetPromptTemplates(allPrompts)
 			logutil.Info("synapses: loaded %d activation-context prompts\n", len(allPrompts))
