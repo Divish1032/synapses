@@ -1210,3 +1210,110 @@ func TestCarveEgoGraph_HybridScoring_ClampStructuralAboveOne(t *testing.T) {
 		t.Errorf("hub score = %f > 1.0 — structural was not clamped before blend", hubScore)
 	}
 }
+
+// TestCarveEgoGraph_InterfaceImplementorExpansion verifies that when the root
+// is a NodeInterface, concrete implementors (via reverse IMPLEMENTS edges) and
+// their receiver methods are seeded at relevance 0.85 in both BFS and PPR paths.
+//
+// Graph layout:
+//
+//	Reader (interface)
+//	  ← IMPLEMENTS ─ FileReader  (struct + Read method)
+//	  ← IMPLEMENTS ─ NetReader   (struct + Read method)
+//	  (Unrelated struct MemStore — NOT an implementor, must not be seeded)
+func TestCarveEgoGraph_InterfaceImplementorExpansion(t *testing.T) {
+	g := graph.New("testrepo")
+
+	// Interface
+	ifaceID := g.MakeNodeID("io.go", "Reader")
+	g.AddNode(&graph.Node{ID: ifaceID, Type: graph.NodeInterface, Name: "Reader", File: "io.go"})
+
+	// FileReader struct + method
+	fileReaderID := g.MakeNodeID("file.go", "FileReader")
+	fileReaderReadID := g.MakeNodeID("file.go", "FileReader.Read")
+	g.AddNode(&graph.Node{ID: fileReaderID, Type: graph.NodeStruct, Name: "FileReader", File: "file.go"})
+	g.AddNode(&graph.Node{ID: fileReaderReadID, Type: graph.NodeMethod, Name: "FileReader.Read", File: "file.go"})
+	// Struct→method DEFINES edge (as Go parser emits)
+	g.AddEdge(&graph.Edge{From: fileReaderID, To: fileReaderReadID, Type: graph.EdgeDefines})
+	// Concrete→interface IMPLEMENTS edge
+	g.AddEdge(&graph.Edge{From: fileReaderID, To: ifaceID, Type: graph.EdgeImplements})
+
+	// NetReader struct + method
+	netReaderID := g.MakeNodeID("net.go", "NetReader")
+	netReaderReadID := g.MakeNodeID("net.go", "NetReader.Read")
+	g.AddNode(&graph.Node{ID: netReaderID, Type: graph.NodeStruct, Name: "NetReader", File: "net.go"})
+	g.AddNode(&graph.Node{ID: netReaderReadID, Type: graph.NodeMethod, Name: "NetReader.Read", File: "net.go"})
+	g.AddEdge(&graph.Edge{From: netReaderID, To: netReaderReadID, Type: graph.EdgeDefines})
+	g.AddEdge(&graph.Edge{From: netReaderID, To: ifaceID, Type: graph.EdgeImplements})
+
+	// Unrelated struct — NOT an implementor
+	unrelatedID := g.MakeNodeID("store.go", "MemStore")
+	g.AddNode(&graph.Node{ID: unrelatedID, Type: graph.NodeStruct, Name: "MemStore", File: "store.go"})
+
+	type testCase struct {
+		usePPR      bool
+		name        string
+		// BFS seeds implementors at the literal 0.85; PPR normalises the teleport
+		// vector across all seeds so each node's rank is lower than 0.85 but still
+		// well above MinRelevance.  The thresholds reflect this difference.
+		implMinRel  float64 // concrete implementor struct
+		methodMinRel float64 // implementor methods
+	}
+	cases := []testCase{
+		{usePPR: false, name: "BFS", implMinRel: 0.80, methodMinRel: 0.80},
+		// PPR normalises teleport to sum=1 so with 5 seeds (iface+2 impls+2 methods)
+		// at weights 1.0+0.85×4=4.4 the normalised weight per implementor ≈ 0.19.
+		// After power iteration convergence, implementors end up at ~0.25, methods
+		// at ~0.06 — well above MinRelevance=0.01 and significantly higher than if
+		// they were not seeded at all (where they'd only accumulate propagation mass).
+		{usePPR: true, name: "PPR", implMinRel: 0.10, methodMinRel: 0.03},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := graph.DefaultCarveConfig()
+			cfg.UsePPR = tc.usePPR
+			cfg.MinRelevance = 0.01
+
+			sub, err := g.CarveEgoGraph(ifaceID, cfg)
+			if err != nil {
+				t.Fatalf("CarveEgoGraph: %v", err)
+			}
+
+			nodeMap := make(map[graph.NodeID]float64)
+			for _, cn := range sub.Nodes {
+				nodeMap[cn.Node.ID] = cn.Relevance
+			}
+
+			// Concrete implementor structs must appear with meaningful relevance.
+			for _, id := range []graph.NodeID{fileReaderID, netReaderID} {
+				rel, ok := nodeMap[id]
+				if !ok {
+					t.Errorf("%s: concrete implementor %s missing from subgraph", tc.name, id)
+					continue
+				}
+				if rel < tc.implMinRel {
+					t.Errorf("%s: implementor %s relevance = %.3f, want >= %.3f", tc.name, id, rel, tc.implMinRel)
+				}
+			}
+
+			// Implementor methods must also appear.
+			for _, id := range []graph.NodeID{fileReaderReadID, netReaderReadID} {
+				rel, ok := nodeMap[id]
+				if !ok {
+					t.Errorf("%s: implementor method %s missing from subgraph", tc.name, id)
+					continue
+				}
+				if rel < tc.methodMinRel {
+					t.Errorf("%s: implementor method %s relevance = %.3f, want >= %.3f", tc.name, id, rel, tc.methodMinRel)
+				}
+			}
+
+			// Unrelated struct must not get high relevance (it is isolated).
+			if rel, ok := nodeMap[unrelatedID]; ok && rel > 0.5 {
+				t.Errorf("%s: unrelated MemStore has unexpectedly high relevance %.3f", tc.name, rel)
+			}
+		})
+	}
+}
