@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
 
@@ -61,6 +62,10 @@ func (pi *ProjectInstance) Close() {
 	}
 }
 
+// maxActiveProjects caps the number of simultaneously loaded projects to
+// prevent unbounded memory and file descriptor growth.
+const maxActiveProjects = 64
+
 // projectRegistry is a thread-safe map of canonicalAbsPath → ProjectInstance.
 // The daemon holds a single registry shared across all HTTP handlers.
 type projectRegistry struct {
@@ -111,6 +116,13 @@ func (r *projectRegistry) GetOrSet(absPath string, init func() (*ProjectInstance
 			return pi, nil
 		}
 		r.mu.RUnlock()
+
+		r.mu.RLock()
+		count := len(r.projects)
+		r.mu.RUnlock()
+		if count >= maxActiveProjects {
+			return nil, fmt.Errorf("max active projects (%d) reached", maxActiveProjects)
+		}
 
 		pi, err := init()
 		if err != nil {
