@@ -540,6 +540,15 @@ func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectIn
 			json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON body: " + mcpsrv.StripInternalPaths(decodeErr.Error())}) //nolint:errcheck
 			return
 		}
+		// Reject deeply nested JSON to prevent memory amplification attacks.
+		// A 1 MiB JSON body decoded into map[string]interface{} can amplify
+		// to 5-10 MiB heap per request with deep nesting.
+		if jsonDepth(args) > 10 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "JSON nesting too deep (max 10)"}) //nolint:errcheck
+			return
+		}
 
 		// Inject a per-request session ID so handlers that use SessionIDFromContext
 		// get an isolated context. Each REST call is stateless — no session is shared
@@ -2232,4 +2241,29 @@ func hasSourceFiles(dir string) bool {
 		}
 	}
 	return false
+}
+
+// jsonDepth returns the maximum nesting depth of a decoded JSON value.
+// Used to reject excessively nested request bodies that amplify memory usage.
+func jsonDepth(v interface{}) int {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		maxChild := 0
+		for _, child := range val {
+			if d := jsonDepth(child); d > maxChild {
+				maxChild = d
+			}
+		}
+		return 1 + maxChild
+	case []interface{}:
+		maxChild := 0
+		for _, child := range val {
+			if d := jsonDepth(child); d > maxChild {
+				maxChild = d
+			}
+		}
+		return 1 + maxChild
+	default:
+		return 0
+	}
 }
