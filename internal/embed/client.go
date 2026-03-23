@@ -302,7 +302,7 @@ func normalizeL2(v []float32) []float32 {
 		return nil
 	}
 	if norm == 0 {
-		return v
+		return nil
 	}
 	if norm > 0.999 && norm < 1.001 {
 		return v
