@@ -38,10 +38,18 @@ func gitRevParseHead(ctx context.Context, repoPath string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// safeGitRef validates that a commit reference is safe to pass to git commands.
+// Rejects strings that start with '-' (flag injection) or contain shell metacharacters.
+var safeGitRef = regexp.MustCompile(`^[0-9a-zA-Z_./:~^{}-]{1,128}$`)
+
 // gitDiffNameOnly returns files changed between two commits.
 // Returns (nil, nil) if oldCommit is unreachable (force push, squash merge,
 // rebase) — the caller should fall back to signature comparison.
 func gitDiffNameOnly(ctx context.Context, repoPath, oldCommit, newCommit string) ([]string, error) {
+	if !safeGitRef.MatchString(oldCommit) || strings.HasPrefix(oldCommit, "-") ||
+		!safeGitRef.MatchString(newCommit) || strings.HasPrefix(newCommit, "-") {
+		return nil, fmt.Errorf("invalid commit reference")
+	}
 	ctx, cancel := context.WithTimeout(ctx, gitTimeoutSlow)
 	defer cancel()
 
@@ -63,6 +71,10 @@ func gitDiffNameOnly(ctx context.Context, repoPath, oldCommit, newCommit string)
 // gitDiffFile returns the unified diff for a specific file between two commits.
 // Returns ("", nil) if the file was not changed or commits are unreachable.
 func gitDiffFile(ctx context.Context, repoPath, oldCommit, newCommit, filePath string) (string, error) {
+	if !safeGitRef.MatchString(oldCommit) || strings.HasPrefix(oldCommit, "-") ||
+		!safeGitRef.MatchString(newCommit) || strings.HasPrefix(newCommit, "-") {
+		return "", fmt.Errorf("invalid commit reference")
+	}
 	ctx, cancel := context.WithTimeout(ctx, gitTimeoutSlow)
 	defer cancel()
 
