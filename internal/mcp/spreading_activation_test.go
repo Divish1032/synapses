@@ -352,7 +352,7 @@ func TestQuadRecallSearch_GraphChannel_SortsByActivation(t *testing.T) {
 
 	// Run quad recall with a query matching the seed memory's content.
 	mems, attribution, _, _ := srv.quadRecallSearch(
-		context.Background(), "uniquetoken42", 10, false, 7, nil, 1,
+		context.Background(), "uniquetoken42", "", 10, false, 7, nil, 1,
 	)
 
 	// Verify both highMem and lowMem appear in the graph channel results.
@@ -459,7 +459,7 @@ func TestQuadRecallSearch_MultiAnchorUsesMaxActivation(t *testing.T) {
 	}
 
 	mems, _, _, _ := srv.quadRecallSearch(
-		context.Background(), "uniquetok99", 10, false, 7, nil, 1,
+		context.Background(), "uniquetok99", "", 10, false, 7, nil, 1,
 	)
 
 	dualIdx, lowIdx := -1, -1

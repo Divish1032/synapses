@@ -66,16 +66,55 @@ type GraphTraversalInfo struct {
 	Note         string          `json:"note"`
 }
 
+// buildEnrichedQuery appends session-context terms (intent, task title) to a
+// base query for BM25 and semantic channels. Terms already present in the base
+// query (case-insensitive) are skipped to avoid duplication. Returns the
+// original query unchanged when no useful context terms are present.
+//
+// This implements the ACT-R spreading activation principle (RC: Memory #9):
+// current working memory cues boost recall of relevant memories. The graph
+// channel deliberately uses the original structural query (not enriched).
+func buildEnrichedQuery(query, intent, taskTitle string) string {
+	if query == "" || (intent == "" && taskTitle == "") {
+		return query
+	}
+
+	// Build a set of words already in the query (case-insensitive dedup).
+	existing := make(map[string]bool)
+	for _, w := range strings.Fields(strings.ToLower(query)) {
+		existing[w] = true
+	}
+
+	var extras []string
+	// Collect unique words from intent and task title that are not already in query.
+	for _, src := range []string{intent, taskTitle} {
+		for _, w := range strings.Fields(src) {
+			lw := strings.ToLower(w)
+			if !existing[lw] && len(w) > 2 { // skip single/double-char tokens
+				existing[lw] = true
+				extras = append(extras, w)
+			}
+		}
+	}
+
+	if len(extras) == 0 {
+		return query
+	}
+	return query + " " + strings.Join(extras, " ")
+}
+
 // quadRecallSearch runs 4 parallel retrieval channels and merges via RRF.
 // Returns memories ranked by fused score, plus per-memory channel attribution,
 // stale embedding IDs, and optional graph traversal info.
 //
 // Channels:
-//  1. BM25 — FTS5 full-text search on memory content (existing)
-//  2. Semantic — cosine similarity on embeddings (existing, skipped if no embedder)
-//  3. Graph — BFS from anchor entities of query-matching memories (skipped if no graph)
+//  1. BM25 — FTS5 full-text search on memory content (uses enrichedQuery)
+//  2. Semantic — cosine similarity on embeddings (uses enrichedQuery)
+//  3. Graph — BFS from anchor entities of query-matching memories (uses query — structure, not text)
 //  4. Temporal — recent memories scored by recency decay (no text filter)
 //
+// enrichedQuery is used for BM25 and semantic channels; when empty it falls
+// back to query. The graph channel always uses query (structural lookup).
 // depth controls the graph channel's BFS hop count (0 = default 2, max 4).
 // Each channel runs in its own goroutine with a 5s timeout.
 // Channel errors are logged but never fail the entire recall.
@@ -83,12 +122,17 @@ type GraphTraversalInfo struct {
 func (s *Server) quadRecallSearch(
 	ctx context.Context,
 	query string,
+	enrichedQuery string,
 	limit int,
 	includeStale bool,
 	sinceDays int,
 	untilTime *time.Time, // Sprint 10.5: optional upper time bound for temporal channel
 	depth int,
 ) ([]store.Memory, map[string][]string, []string, *GraphTraversalInfo) {
+	// Fallback: empty enrichedQuery means no session context — use original query.
+	if enrichedQuery == "" {
+		enrichedQuery = query
+	}
 	if limit <= 0 {
 		limit = 5
 	}
@@ -182,7 +226,7 @@ func (s *Server) quadRecallSearch(
 
 		if useConvex {
 			// ConvexMerge needs raw BM25 scores for magnitude-aware fusion.
-			scored, err := s.store.SearchMemoriesWithScoresCtx(chCtx, query, channelLimit, includeStale)
+			scored, err := s.store.SearchMemoriesWithScoresCtx(chCtx, enrichedQuery, channelLimit, includeStale)
 			if err != nil {
 				logRecallChannelError("bm25", err)
 				return
@@ -192,9 +236,9 @@ func (s *Server) quadRecallSearch(
 			var mems []store.Memory
 			var err error
 			if includeStale {
-				mems, err = s.store.SearchMemoriesIncludingStaleCtx(chCtx, query, channelLimit)
+				mems, err = s.store.SearchMemoriesIncludingStaleCtx(chCtx, enrichedQuery, channelLimit)
 			} else {
-				mems, err = s.store.SearchMemoriesCtx(chCtx, query, channelLimit)
+				mems, err = s.store.SearchMemoriesCtx(chCtx, enrichedQuery, channelLimit)
 			}
 			if err != nil {
 				logRecallChannelError("bm25", err)
@@ -213,7 +257,7 @@ func (s *Server) quadRecallSearch(
 			defer cancel()
 
 			vecSearchStart := time.Now()
-			queryVec, embedErr := s.memoryEmbedder.Embed(chCtx, query)
+			queryVec, embedErr := s.memoryEmbedder.Embed(chCtx, enrichedQuery)
 			if embedErr != nil || len(queryVec) == 0 {
 				if embedErr != nil {
 					logRecallChannelError("semantic", embedErr)
