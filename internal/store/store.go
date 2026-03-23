@@ -1801,7 +1801,7 @@ func (s *Store) reconcileOrphanedReferences() {
 		if !allowedTables[table] {
 			return 0
 		}
-		r, err := s.knowledgeDB.Query(fmt.Sprintf("SELECT DISTINCT node_id FROM %s", quoteIdentifier(table)))
+		r, err := s.knowledgeDB.Query(fmt.Sprintf("SELECT DISTINCT node_id FROM %s LIMIT 100000", quoteIdentifier(table)))
 		if err != nil {
 			return 0
 		}
@@ -1954,7 +1954,7 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	// GAP-3: Snapshot CALLS fan-in counts before the wipe so we can detect nodes
 	// whose call structure changed significantly and mark their annotations stale.
 	oldFanIn := make(map[string]int)
-	if fanRows, err := s.graphDB.Query(`SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id`); err == nil {
+	if fanRows, err := s.graphDB.Query(`SELECT to_id, COUNT(*) FROM edges WHERE type='CALLS' GROUP BY to_id LIMIT 2000000`); err == nil {
 		for fanRows.Next() {
 			var nid string
 			var cnt int
@@ -1971,7 +1971,7 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	// break compilation when their signature changes. Only non-empty signatures
 	// are captured — new nodes (not in this map) are treated as additions, not changes.
 	oldSigs := make(map[string]string)
-	if sigRows, err := s.graphDB.Query(`SELECT id, signature FROM nodes WHERE signature != ''`); err == nil {
+	if sigRows, err := s.graphDB.Query(`SELECT id, signature FROM nodes WHERE signature != '' LIMIT 2000000`); err == nil {
 		for sigRows.Next() {
 			var nid, sig string
 			if sigRows.Scan(&nid, &sig) == nil {
@@ -3430,6 +3430,15 @@ func (s *Store) CountIndexedFiles() (int, error) {
 	var n int
 	err := s.graphDB.QueryRow(`SELECT COUNT(*) FROM file_hashes`).Scan(&n)
 	return n, err
+}
+
+// NodeCount returns the number of nodes currently stored in the graph database.
+func (s *Store) NodeCount() int {
+	var n int
+	if err := s.graphDB.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&n); err != nil {
+		return 0
+	}
+	return n
 }
 
 

@@ -154,6 +154,9 @@ func (s *CrossProjectSearch) GetEntityContext(ctx context.Context, entity string
 		return nil
 	}
 
+	if st.NodeCount() > 50_000 {
+		return nil
+	}
 	g, err := st.LoadGraph()
 	if err != nil || g == nil {
 		if err != nil {

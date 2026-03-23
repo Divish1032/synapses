@@ -107,9 +107,18 @@ func (p *PluginParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		return nil // plugin produced no output — valid for empty/unsupported files
 	}
 
+	const maxPluginNodes = 100_000
+	const maxPluginEdges = 500_000
+
 	var result pluginOutput
 	if err := json.Unmarshal(out, &result); err != nil {
 		return fmt.Errorf("plugin %q: parse output: %w", p.command, err)
+	}
+	if len(result.Nodes) > maxPluginNodes {
+		return fmt.Errorf("plugin %q: output exceeds node limit (%d > %d)", p.command, len(result.Nodes), maxPluginNodes)
+	}
+	if len(result.Edges) > maxPluginEdges {
+		return fmt.Errorf("plugin %q: output exceeds edge limit (%d > %d)", p.command, len(result.Edges), maxPluginEdges)
 	}
 
 	// Always add a file node so the graph has an anchor for DEFINES edges.

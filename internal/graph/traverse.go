@@ -189,7 +189,6 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		// When the columnar index is ready, reads from CSR arrays (cache-friendly,
 		// skips tombstoned nodes). Falls back to pointer-map when not ready.
 		allEdges := g.outInEdges(curr.id, idx)
-		edgeCache[curr.id] = allEdges
 
 		for _, e := range allEdges {
 			typeWeight := edgeWeight(e.Type, weights)
