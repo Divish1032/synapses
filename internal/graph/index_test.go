@@ -234,3 +234,170 @@ func TestErrNodeNotFound_Error(t *testing.T) {
 	}
 }
 
+// ── EigenvectorCentrality ──────────────────────────────────────────────────────
+
+// TestEigenvectorCentrality_HubHighest verifies that on a star graph the hub
+// node (connected to all spokes) receives the highest centrality score.
+//
+//	hub → A, hub → B, hub → C, hub → D
+func TestEigenvectorCentrality_HubHighest(t *testing.T) {
+	g := graph.New("star")
+	hubID := g.MakeNodeID("hub.go", "Hub")
+	g.AddNode(&graph.Node{ID: hubID, Type: graph.NodeFunction, Name: "Hub", File: "hub.go"})
+
+	var spokeIDs []graph.NodeID
+	for _, name := range []string{"A", "B", "C", "D"} {
+		sid := g.MakeNodeID("spokes.go", name)
+		g.AddNode(&graph.Node{ID: sid, Type: graph.NodeFunction, Name: name, File: "spokes.go"})
+		g.AddEdge(&graph.Edge{From: hubID, To: sid, Type: graph.EdgeCalls})
+		spokeIDs = append(spokeIDs, sid)
+	}
+
+	_, err := g.RebuildIndex()
+	if err != nil {
+		t.Fatalf("RebuildIndex: %v", err)
+	}
+	idx := g.Index()
+
+	hubSeq := idx.Seq(hubID)
+	hubCent := idx.EigenvectorCentrality[hubSeq]
+
+	// Hub must have centrality 1.0 (max-normalised).
+	if hubCent != 1.0 {
+		t.Errorf("hub centrality = %f, want 1.0", hubCent)
+	}
+
+	// Every spoke must have centrality strictly less than the hub.
+	for _, sid := range spokeIDs {
+		seq := idx.Seq(sid)
+		c := idx.EigenvectorCentrality[seq]
+		if c >= hubCent {
+			t.Errorf("spoke centrality %f >= hub centrality %f", c, hubCent)
+		}
+	}
+}
+
+// TestEigenvectorCentrality_ChainMiddleHigher verifies that middle nodes in a
+// chain (A→B→C→D) have higher centrality than the endpoints.
+func TestEigenvectorCentrality_ChainMiddleHigher(t *testing.T) {
+	g := graph.New("chain")
+	names := []string{"A", "B", "C", "D"}
+	ids := make([]graph.NodeID, len(names))
+	for i, name := range names {
+		id := g.MakeNodeID("chain.go", name)
+		ids[i] = id
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: name, File: "chain.go"})
+	}
+	for i := 0; i < len(ids)-1; i++ {
+		g.AddEdge(&graph.Edge{From: ids[i], To: ids[i+1], Type: graph.EdgeCalls})
+	}
+
+	_, err := g.RebuildIndex()
+	if err != nil {
+		t.Fatalf("RebuildIndex: %v", err)
+	}
+	idx := g.Index()
+
+	seqA := idx.Seq(ids[0])
+	seqB := idx.Seq(ids[1])
+	seqC := idx.Seq(ids[2])
+	seqD := idx.Seq(ids[3])
+
+	centA := idx.EigenvectorCentrality[seqA]
+	centB := idx.EigenvectorCentrality[seqB]
+	centC := idx.EigenvectorCentrality[seqC]
+	centD := idx.EigenvectorCentrality[seqD]
+
+	// Both endpoints (A, D) should have lower centrality than interior (B, C).
+	if centA >= centB {
+		t.Errorf("endpoint A centrality %f >= interior B centrality %f", centA, centB)
+	}
+	if centD >= centC {
+		t.Errorf("endpoint D centrality %f >= interior C centrality %f", centD, centC)
+	}
+}
+
+// TestEigenvectorCentrality_EmptyGraph verifies no panic and a valid (non-nil)
+// centrality slice for a graph with no edges.
+func TestEigenvectorCentrality_EmptyGraph(t *testing.T) {
+	g := graph.New("empty")
+	_, err := g.RebuildIndex()
+	if err != nil {
+		t.Fatalf("RebuildIndex: %v", err)
+	}
+	idx := g.Index()
+	if idx.EigenvectorCentrality == nil {
+		t.Error("expected non-nil EigenvectorCentrality for empty graph")
+	}
+}
+
+// TestEigenvectorCentrality_InRange verifies all centrality values are in [0, 1].
+func TestEigenvectorCentrality_InRange(t *testing.T) {
+	g := buildIndexedGraph(t) // uses buildFixture (5-node graph with edges)
+	idx := g.Index()
+
+	for i, c := range idx.EigenvectorCentrality {
+		if c < 0 || c > 1.0+1e-9 {
+			t.Errorf("centrality[%d] = %f out of [0,1]", i, c)
+		}
+	}
+}
+
+// TestEigenvectorCentrality_BoostsInCarve verifies that a node with high
+// centrality ranks higher than a same-hop node with low centrality after
+// CarveEgoGraph applies the centrality boost.
+//
+// Graph: root → central (also called by A,B,C) ; root → leaf (no other edges)
+// Both are 1 hop from root — leaf should be outranked by central after boost.
+func TestEigenvectorCentrality_BoostsInCarve(t *testing.T) {
+	g := graph.New("boost")
+
+	rootID := g.MakeNodeID("x.go", "Root")
+	centralID := g.MakeNodeID("x.go", "Central")
+	leafID := g.MakeNodeID("x.go", "Leaf")
+
+	g.AddNode(&graph.Node{ID: rootID, Type: graph.NodeFunction, Name: "Root", File: "x.go"})
+	g.AddNode(&graph.Node{ID: centralID, Type: graph.NodeFunction, Name: "Central", File: "x.go"})
+	g.AddNode(&graph.Node{ID: leafID, Type: graph.NodeFunction, Name: "Leaf", File: "x.go"})
+
+	// Both reachable from root at 1 hop.
+	g.AddEdge(&graph.Edge{From: rootID, To: centralID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: rootID, To: leafID, Type: graph.EdgeCalls})
+
+	// Extra callers that make Central architecturally important.
+	for _, name := range []string{"Caller1", "Caller2", "Caller3"} {
+		cid := g.MakeNodeID("callers.go", name)
+		g.AddNode(&graph.Node{ID: cid, Type: graph.NodeFunction, Name: name, File: "callers.go"})
+		g.AddEdge(&graph.Edge{From: cid, To: centralID, Type: graph.EdgeCalls})
+	}
+
+	_, err := g.RebuildIndex()
+	if err != nil {
+		t.Fatalf("RebuildIndex: %v", err)
+	}
+
+	cfg := graph.DefaultCarveConfig()
+	sub, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+
+	// Find relevance scores for central and leaf.
+	var centralRel, leafRel float64
+	for _, cn := range sub.Nodes {
+		switch cn.Node.ID {
+		case centralID:
+			centralRel = cn.Relevance
+		case leafID:
+			leafRel = cn.Relevance
+		}
+	}
+
+	if centralRel == 0 || leafRel == 0 {
+		t.Fatalf("expected both central (%f) and leaf (%f) in sub-graph", centralRel, leafRel)
+	}
+	if centralRel <= leafRel {
+		t.Errorf("expected central (%f) to outrank leaf (%f) after centrality boost", centralRel, leafRel)
+	}
+}
+

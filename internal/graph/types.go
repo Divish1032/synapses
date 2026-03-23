@@ -349,6 +349,29 @@ type CarveConfig struct {
 	// (e.g. "modify", "debug") so that intent-specific subgraphs are cached
 	// separately and do not collide with the default or other intents.
 	IntentID string
+	// UsePPR switches the traversal engine from BFS to Personalized PageRank.
+	// PPR captures multi-path importance: a node reached via N independent call
+	// chains scores N× higher than a structurally equivalent single-path node.
+	// BFS max-score heuristic cannot represent this. Default: false (BFS).
+	// Validated by Sprint 13 #1 spike (diamond 4.69×, wide-fan 5.68× PPR boost).
+	UsePPR bool
+	// Alpha is the PPR teleport probability — the chance the random walk jumps
+	// back to the root (personalized restart) at each step. Higher alpha means
+	// tighter focus on root with shorter effective reach. Default: 0.15
+	// (standard PageRank restart rate). Only used when UsePPR=true.
+	// Values outside (0,1) are clamped to 0.15.
+	Alpha float64
+	// EmbeddingLookup batch-fetches pre-normalized float32 embedding vectors for
+	// a set of node IDs. Called once after BFS/PPR with all scored node IDs.
+	// IDs with no stored embedding are omitted from the result map. Nil disables
+	// semantic hybrid scoring (pure structural — backward-compatible default).
+	EmbeddingLookup func(ids []NodeID) map[NodeID][]float32
+	// HybridLambda controls the semantic blend weight applied after BFS/PPR:
+	//   finalScore = (1-λ)×structural + λ×cosineSim(embed(root), embed(n))
+	// Range [0, 1]. 0 = pure structural (default). Ignored when EmbeddingLookup
+	// is nil or the root node has no stored embedding.
+	// Recommended production value: 0.3 (70% structural, 30% semantic).
+	HybridLambda float64
 }
 
 // intentModifyWeights boosts outgoing CALLS (callees) for the "modify" intent.
@@ -486,7 +509,7 @@ func DefaultCarveConfig() CarveConfig {
 		TokenBudget:      4000,
 		EdgeWeights:      DefaultEdgeWeights,
 		DecayFactor:      0.5,
-		MinRelevance:     0.25,
+		MinRelevance:     0.01,
 		ExcludeTestFiles: true,
 		ExcludeTypes: map[NodeType]bool{
 			NodePackage: true,

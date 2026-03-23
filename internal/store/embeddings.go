@@ -82,6 +82,58 @@ func (s *Store) UpsertEmbedding(nodeID, model string, vec []float32) error {
 	return nil
 }
 
+// BatchGetNodeEmbeddings fetches pre-normalized float32 embedding vectors for a
+// batch of node IDs. IDs with no stored embedding are silently omitted. The
+// returned vectors are already unit-normalized (guaranteed by UpsertEmbedding)
+// so callers can use dot product as cosine similarity.
+//
+// Queries are chunked at 500 IDs per IN(...) clause to stay under
+// SQLITE_MAX_VARIABLE_NUMBER (999). Returns nil when ids is empty or no rows match.
+func (s *Store) BatchGetNodeEmbeddings(ids []string) map[string][]float32 {
+	if len(ids) == 0 {
+		return nil
+	}
+	result := make(map[string][]float32, len(ids))
+	const batchSize = 500
+	for i := 0; i < len(ids); i += batchSize {
+		end := i + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[i:end]
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for j, id := range batch {
+			placeholders[j] = "?"
+			args[j] = id
+		}
+		rows, err := s.graphDB.Query(
+			`SELECT node_id, embedding FROM node_embeddings WHERE node_id IN (`+
+				strings.Join(placeholders, ",")+`)`,
+			args...,
+		)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var nodeID string
+			var blob []byte
+			if err := rows.Scan(&nodeID, &blob); err != nil {
+				continue
+			}
+			if vec := blobToVec(blob); len(vec) > 0 {
+				result[nodeID] = vec
+			}
+		}
+		_ = rows.Err() // drain; individual batch failures don't abort the whole fetch
+		rows.Close()
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // EmbeddingCount returns the total number of stored embeddings.
 func (s *Store) EmbeddingCount() int {
 	var count int

@@ -30,7 +30,7 @@ func TestQuadRecallSearch_BM25Channel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth token", 5, false, 7, nil, 0)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth token", "", 5, false, 7, nil, 0)
 	if len(mems) == 0 {
 		t.Fatal("expected at least 1 memory from BM25 channel")
 	}
@@ -65,7 +65,7 @@ func TestQuadRecallSearch_TemporalChannel(t *testing.T) {
 	}
 
 	// Query for "auth" — BM25 won't find "Docker" memory, but temporal should.
-	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth changes", 10, false, 7, nil, 0)
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth changes", "", 10, false, 7, nil, 0)
 
 	// Temporal channel returns recent memories regardless of text match.
 	foundDocker := false
@@ -103,7 +103,7 @@ func TestQuadRecallSearch_TemporalDoesNotOverwhelmRelevant(t *testing.T) {
 	}
 
 	// Query for "auth" with limit=5.
-	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth OAuth middleware", 5, false, 7, nil, 0)
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth OAuth middleware", "", 5, false, 7, nil, 0)
 
 	// The 2 auth-relevant memories should rank in the top 3 (multi-channel boost).
 	authCount := 0
@@ -166,7 +166,7 @@ func TestQuadRecallSearch_GraphChannel(t *testing.T) {
 		Source:  store.SourceManual,
 	}, []string{string(tokID)})
 
-	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", 10, false, 7, nil, 0)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", "", 10, false, 7, nil, 0)
 
 	// Graph channel should find the TokenValidator memory via BFS from AuthLogin.
 	foundJWT := false
@@ -194,7 +194,7 @@ func TestQuadRecallSearch_GraphChannel(t *testing.T) {
 func TestQuadRecallSearch_EmptyResults(t *testing.T) {
 	srv := newTestServer(t)
 
-	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "nonexistent query", 5, false, 7, nil, 0)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "nonexistent query", "", 5, false, 7, nil, 0)
 	// Temporal channel may return recent memories, but store is empty.
 	if len(mems) != 0 {
 		t.Errorf("expected 0 memories from empty store, got %d", len(mems))
@@ -216,7 +216,7 @@ func TestQuadRecallSearch_NoGraph_GracefulDegradation(t *testing.T) {
 		Source:  store.SourceManual,
 	})
 
-	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "GraphQL", 5, false, 7, nil, 0)
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "GraphQL", "", 5, false, 7, nil, 0)
 	if len(mems) == 0 {
 		t.Error("expected BM25/temporal results even without graph")
 	}
@@ -756,7 +756,7 @@ func TestQuadRecallSearch_DepthZeroDefaultsToTwo(t *testing.T) {
 	}, []string{string(tokID)})
 
 	// depth=0 → defaults to 2; should find the TokenValidator memory via graph channel.
-	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", 10, false, 7, nil, 0)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", "", 10, false, 7, nil, 0)
 
 	foundJWT := false
 	for _, m := range mems {
@@ -800,7 +800,7 @@ func TestQuadRecallSearch_ReturnsTraversalInfo_WhenGraphFires(t *testing.T) {
 		AgentID: "a1", Source: store.SourceManual,
 	}, []string{string(tokID)})
 
-	_, _, _, ti := srv.quadRecallSearch(context.Background(), "auth service login", 10, false, 7, nil, 2)
+	_, _, _, ti := srv.quadRecallSearch(context.Background(), "auth service login", "", 10, false, 7, nil, 2)
 
 	if ti == nil {
 		t.Fatal("expected non-nil GraphTraversalInfo when graph channel was active")
@@ -836,7 +836,7 @@ func TestQuadRecallSearch_TraversalPaths_ShowConnection(t *testing.T) {
 		AgentID: "a1", Source: store.SourceManual,
 	}, []string{string(tokID)})
 
-	_, _, _, ti := srv.quadRecallSearch(context.Background(), "auth service login", 10, false, 7, nil, 2)
+	_, _, _, ti := srv.quadRecallSearch(context.Background(), "auth service login", "", 10, false, 7, nil, 2)
 
 	if ti == nil {
 		t.Fatal("expected GraphTraversalInfo")
@@ -1428,7 +1428,7 @@ func TestQuadRecallSearch_UntilBound_TemporalChannel(t *testing.T) {
 	// until = 1 hour ago — the just-inserted memory was created "now", which is AFTER the cutoff.
 	// With until=past, the temporal channel should not return the memory.
 	past := time.Now().UTC().Add(-1 * time.Hour)
-	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "zzz_nomatching_query", 10, false, 30, &past, 0)
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "zzz_nomatching_query", "", 10, false, 30, &past, 0)
 
 	// The memory should not appear: BM25 won't find it (query doesn't match),
 	// and temporal channel is bounded to past — the memory was created after the cutoff.
@@ -1499,5 +1499,266 @@ func TestClampUnit_Above(t *testing.T) {
 	}
 	if got := clampUnit(999); got != 1 {
 		t.Errorf("clampUnit(999) = %f, want 1", got)
+	}
+}
+
+// ── Sprint 13 #6: buildEnrichedQuery unit tests ───────────────────────────────
+
+func TestBuildEnrichedQuery_EmptyQuery(t *testing.T) {
+	t.Parallel()
+	// Empty query → no enrichment regardless of intent/task.
+	if got := buildEnrichedQuery("", "implementing auth", "Fix login bug"); got != "" {
+		t.Errorf("empty query should be returned unchanged, got %q", got)
+	}
+}
+
+func TestBuildEnrichedQuery_EmptyContext(t *testing.T) {
+	t.Parallel()
+	// No intent, no task title → original query returned unchanged.
+	if got := buildEnrichedQuery("caching strategy", "", ""); got != "caching strategy" {
+		t.Errorf("empty context should return original query, got %q", got)
+	}
+}
+
+func TestBuildEnrichedQuery_AppendsMissingTerms(t *testing.T) {
+	t.Parallel()
+	// "caching strategy" + intent "implementing auth" → appends "implementing auth".
+	got := buildEnrichedQuery("caching strategy", "implementing auth", "")
+	if !strings.Contains(got, "caching strategy") {
+		t.Error("original query must be present")
+	}
+	if !strings.Contains(got, "implementing") || !strings.Contains(got, "auth") {
+		t.Errorf("intent terms should be appended; got %q", got)
+	}
+}
+
+func TestBuildEnrichedQuery_DeduplicatesExistingTerms(t *testing.T) {
+	t.Parallel()
+	// intent "auth caching" when query is "auth caching middleware" → no new terms.
+	got := buildEnrichedQuery("auth caching middleware", "auth caching", "")
+	if got != "auth caching middleware" {
+		t.Errorf("already-present terms should not be appended; got %q", got)
+	}
+}
+
+func TestBuildEnrichedQuery_CaseInsensitiveDedup(t *testing.T) {
+	t.Parallel()
+	// "Auth" in intent matches "auth" in query (case-insensitive).
+	got := buildEnrichedQuery("auth token", "Auth middleware", "")
+	if strings.Contains(got, "Auth") {
+		t.Errorf("case-insensitive dedup should suppress 'Auth' since 'auth' is in query; got %q", got)
+	}
+	if !strings.Contains(got, "middleware") {
+		t.Errorf("novel term 'middleware' should be appended; got %q", got)
+	}
+}
+
+func TestBuildEnrichedQuery_ShortTokensSkipped(t *testing.T) {
+	t.Parallel()
+	// Single- and double-char tokens (stop words) should be skipped.
+	got := buildEnrichedQuery("auth token", "a is in the auth", "")
+	if strings.Contains(got, " a ") || strings.Contains(got, " is ") || strings.Contains(got, " in ") {
+		t.Errorf("short tokens should be skipped; got %q", got)
+	}
+}
+
+func TestBuildEnrichedQuery_WithTaskTitle(t *testing.T) {
+	t.Parallel()
+	// Both intent and task title contribute novel terms.
+	got := buildEnrichedQuery("caching", "auth middleware", "Fix login redirect bug")
+	for _, want := range []string{"auth", "middleware", "Fix", "login", "redirect"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in enriched query %q", want, got)
+		}
+	}
+}
+
+// ── Sprint 13 #6: context-weighted recall integration tests ──────────────────
+
+func TestContextWeightedRecall_EnrichesQueryWithAgentIntent(t *testing.T) {
+	// When agent_id is provided and agent has intent/task set, recall()
+	// should surface memories that match intent terms even when the raw
+	// query alone wouldn't rank them first.
+	srv := newTestServer(t)
+
+	// Insert a memory that matches both query and intent.
+	_, err := srv.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: "auth middleware token validation caching optimisation",
+		AgentID: "agent-ctx",
+		Source:  store.SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Insert another memory that only matches the query term.
+	_, err = srv.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: "caching layer uses Redis for session storage",
+		AgentID: "agent-ctx",
+		Source:  store.SourceManual,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Register the agent with intent "auth middleware" so enrichment fires.
+	if upsertErr := srv.store.UpsertAgent("agent-ctx", &store.AgentActivity{
+		Intent:    "auth middleware implementation",
+		TaskTitle: "Implement token refresh",
+	}); upsertErr != nil {
+		t.Fatalf("UpsertAgent: %v", upsertErr)
+	}
+
+	// Call handleRecall with query="caching" and agent_id="agent-ctx".
+	// The enriched query becomes "caching auth middleware implementation Implement token refresh".
+	res, recallErr := srv.handleRecall(context.Background(), callTool(map[string]any{
+		"query":    "caching",
+		"agent_id": "agent-ctx",
+	}))
+	if recallErr != nil {
+		t.Fatal(recallErr)
+	}
+	if res.IsError {
+		t.Fatalf("handleRecall returned error: %v", extractErrorText(t, res))
+	}
+
+	raw := extractJSON(t, res)
+	if raw == nil {
+		t.Fatal("nil JSON response")
+	}
+	// Response must include context_enrichment annotation.
+	if _, ok := raw["context_enrichment"]; !ok {
+		t.Error("expected context_enrichment annotation in response when agent_id provided and intent set")
+	}
+}
+
+func TestContextWeightedRecall_NoEnrichmentWithoutAgentID(t *testing.T) {
+	// Without agent_id, recall() must behave identically to before (no enrichment).
+	srv := newTestServer(t)
+
+	_, _ = srv.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: "context weighted recall test memory",
+		AgentID: "nobody",
+		Source:  store.SourceManual,
+	})
+
+	res, err := srv.handleRecall(context.Background(), callTool(map[string]any{
+		"query": "context weighted recall",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw := extractJSON(t, res)
+	if raw == nil {
+		t.Fatal("nil JSON response")
+	}
+	// context_enrichment must NOT appear when agent_id is absent.
+	if _, ok := raw["context_enrichment"]; ok {
+		t.Error("context_enrichment should NOT appear when agent_id is not provided")
+	}
+}
+
+func TestContextWeightedRecall_GracefulFallbackWhenAgentNotFound(t *testing.T) {
+	// When agent_id is provided but agent has no record (first session),
+	// recall() should degrade gracefully to the original query.
+	srv := newTestServer(t)
+
+	_, _ = srv.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: "fallback test memory for unknown agent",
+		AgentID: "unknown-agent",
+		Source:  store.SourceManual,
+	})
+
+	// "ghost-agent" has no UpsertAgent record — GetAgent returns nil, nil.
+	res, err := srv.handleRecall(context.Background(), callTool(map[string]any{
+		"query":    "fallback test",
+		"agent_id": "ghost-agent",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should not be an error — graceful degradation.
+	if res.IsError {
+		t.Fatalf("unexpected error for unknown agent: %s", extractErrorText(t, res))
+	}
+	raw := extractJSON(t, res)
+	if raw == nil {
+		t.Fatal("nil JSON response")
+	}
+	// No enrichment fired because agent has no state.
+	if _, ok := raw["context_enrichment"]; ok {
+		t.Error("context_enrichment should NOT appear for unknown agent with no state")
+	}
+}
+
+func TestContextWeightedRecall_NoEnrichmentForEmptyIntent(t *testing.T) {
+	// Agent exists but has no intent/task — enrichedQuery == query → no annotation.
+	srv := newTestServer(t)
+
+	_, _ = srv.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: "empty intent test memory",
+		AgentID: "bare-agent",
+		Source:  store.SourceManual,
+	})
+	// Register agent with no intent or task title.
+	if err := srv.store.UpsertAgent("bare-agent", &store.AgentActivity{}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+
+	res, err := srv.handleRecall(context.Background(), callTool(map[string]any{
+		"query":    "empty intent test",
+		"agent_id": "bare-agent",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := extractJSON(t, res)
+	if raw == nil {
+		t.Fatal("nil JSON response")
+	}
+	// No enrichment because intent and task are both empty.
+	if _, ok := raw["context_enrichment"]; ok {
+		t.Error("context_enrichment should NOT appear when agent has no intent or task")
+	}
+}
+
+func TestGetAgent_NotFound(t *testing.T) {
+	// GetAgent returns nil, nil for an agent that was never inserted.
+	st := openMCPTestStore(t)
+	agent, err := st.GetAgent("nonexistent-agent-xyz")
+	if err != nil {
+		t.Fatalf("GetAgent returned error for unknown agent: %v", err)
+	}
+	if agent != nil {
+		t.Errorf("GetAgent should return nil for unknown agent, got %+v", agent)
+	}
+}
+
+func TestGetAgent_Found(t *testing.T) {
+	// GetAgent returns the correct Agent record after UpsertAgent.
+	st := openMCPTestStore(t)
+	if err := st.UpsertAgent("test-agent", &store.AgentActivity{
+		Intent:    "implementing caching",
+		TaskTitle: "Sprint 13 task 6",
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	agent, err := st.GetAgent("test-agent")
+	if err != nil {
+		t.Fatalf("GetAgent error: %v", err)
+	}
+	if agent == nil {
+		t.Fatal("GetAgent returned nil for known agent")
+	}
+	if agent.Intent != "implementing caching" {
+		t.Errorf("Intent: got %q want %q", agent.Intent, "implementing caching")
+	}
+	if agent.CurrentTaskTitle != "Sprint 13 task 6" {
+		t.Errorf("CurrentTaskTitle: got %q want %q", agent.CurrentTaskTitle, "Sprint 13 task 6")
 	}
 }
