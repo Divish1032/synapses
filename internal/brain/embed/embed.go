@@ -72,9 +72,10 @@ type Server struct {
 	baseURL   string // base URL for HTTP calls, set once at construction, never mutated
 	llamaBin  string
 
-	proc    *exec.Cmd
-	client  *http.Client
-	started bool
+	proc       *exec.Cmd
+	client     *http.Client
+	started    bool
+	restarting bool
 }
 
 // New creates an embedding Server.
@@ -183,11 +184,14 @@ func (s *Server) supervise(ctx context.Context, args []string) {
 		_ = s.proc.Wait() // blocks until the process exits
 
 		// Check whether the exit was intentional (Stop() sets started=false).
+		// Set restarting=true under lock so Embed() callers see a clear state
+		// instead of hitting connection refused during the restart window.
 		s.mu.Lock()
 		if !s.started {
 			s.mu.Unlock()
 			return
 		}
+		s.restarting = true
 		s.mu.Unlock()
 
 		select {
@@ -218,6 +222,9 @@ func (s *Server) supervise(ctx context.Context, args []string) {
 			logutil.Info("synapses-intelligence/embed: llama-server restarted successfully\n")
 			backoff = time.Second // reset backoff on successful restart
 		}
+		s.mu.Lock()
+		s.restarting = false
+		s.mu.Unlock()
 	}
 }
 
@@ -226,10 +233,14 @@ func (s *Server) supervise(ctx context.Context, args []string) {
 func (s *Server) Embed(ctx context.Context, text string) ([]float32, error) {
 	s.mu.Lock()
 	started := s.started
+	restarting := s.restarting
 	s.mu.Unlock()
 
 	if !started {
 		return nil, fmt.Errorf("embedding server not started")
+	}
+	if restarting {
+		return nil, fmt.Errorf("embedding server is restarting")
 	}
 
 	body, _ := json.Marshal(map[string]string{"content": text})
