@@ -461,7 +461,11 @@ func (s *Store) nodeHNSWAdd(nodeID string, vec []float32) {
 	defer func() {
 		if r := recover(); r != nil {
 			logutil.Error("synapses: node HNSW add recovered from panic (node_id=%s): %v — rebuilding index\n", nodeID, r)
+			// A panic during Add leaves the graph inconsistent. Nil out the
+			// index and set hnswNodeRebuilding so concurrent adds are queued
+			// (not silently dropped) until RebuildNodeHNSW completes.
 			s.hnswNodeIndex = nil
+			s.hnswNodeRebuilding = true
 			go s.RebuildNodeHNSW()
 		}
 	}()

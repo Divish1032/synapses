@@ -57,15 +57,12 @@ func forceKillProcess(pid int) error {
 // macOS, Linux, and BSD regardless of LC_TIME settings.
 func processStartTime(pid int) int64 {
 	if v, ok := processStartTimeCache.Load(pid); ok {
-		// If the process is dead, evict the cache entry instead of returning stale data.
-		if !processAlive(pid) {
-			processStartTimeCache.Delete(pid)
-			return 0
-		}
 		return v.(int64)
 	}
 	out, err := exec.Command("ps", "-o", "etime=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
+		// Process doesn't exist (ps failed) — evict any stale entry.
+		processStartTimeCache.Delete(pid)
 		return 0
 	}
 	s := strings.TrimSpace(string(out))
@@ -77,10 +74,20 @@ func processStartTime(pid int) int64 {
 		return 0
 	}
 	result := time.Now().Add(-elapsed).UnixNano()
-	// Only cache for alive processes to prevent unbounded growth from dead PIDs.
-	if processAlive(pid) {
-		processStartTimeCache.Store(pid, result)
+	// Cap cache size to prevent unbounded growth from accumulated dead PIDs.
+	// sync.Map has no Len(); count via Range. Reset when over 256 entries.
+	count := 0
+	processStartTimeCache.Range(func(_, _ interface{}) bool {
+		count++
+		return count < 257
+	})
+	if count >= 256 {
+		processStartTimeCache.Range(func(k, _ interface{}) bool {
+			processStartTimeCache.Delete(k)
+			return true
+		})
 	}
+	processStartTimeCache.Store(pid, result)
 	return result
 }
 

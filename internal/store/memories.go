@@ -515,7 +515,8 @@ func (s *Store) DeleteMemoryByID(id string) {
 		}
 	}
 	if _, err := tx.Exec("DELETE FROM memories WHERE id = ?", id); err != nil {
-		logutil.Warn("synapses: DeleteMemoryByID memories: %v\n", err)
+		logutil.Warn("synapses: DeleteMemoryByID memories: %v — rolling back\n", err)
+		return // don't commit — would orphan satellite deletes without removing the memory
 	}
 	if err := tx.Commit(); err != nil {
 		logutil.Warn("synapses: DeleteMemoryByID commit: %v\n", err)
