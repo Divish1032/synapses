@@ -573,7 +573,7 @@ func (g *Graph) UpdateFileNodeMetadata(absFile string, update func(n *Node)) {
 	}
 }
 
-// AllEdges returns a snapshot of every edge in the graph.
+// AllEdges returns a snapshot of every edge in the graph, sorted by From, To, Type.
 func (g *Graph) AllEdges() []*Edge {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -581,6 +581,15 @@ func (g *Graph) AllEdges() []*Edge {
 	for _, edges := range g.outEdges {
 		out = append(out, edges...)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].From != out[j].From {
+			return out[i].From < out[j].From
+		}
+		if out[i].To != out[j].To {
+			return out[i].To < out[j].To
+		}
+		return out[i].Type < out[j].Type
+	})
 	return out
 }
 
@@ -692,6 +701,12 @@ func (g *Graph) Compact() {
 		newEdgeSet[k] = v
 	}
 	g.edgeSet = newEdgeSet
+
+	newVarTypes := make(map[string]map[string]string, len(g.varTypes))
+	for k, v := range g.varTypes {
+		newVarTypes[k] = v
+	}
+	g.varTypes = newVarTypes
 }
 
 // EdgeCount returns the total number of edges.
