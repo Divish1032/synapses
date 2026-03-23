@@ -26,8 +26,9 @@ func (e *testEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
 	return e.vec, e.err
 }
 
-func (e *testEmbedder) Model() string { return e.model }
-func (e *testEmbedder) Close() error  { return nil }
+func (e *testEmbedder) WarmUp(_ context.Context) error { return nil }
+func (e *testEmbedder) Model() string                  { return e.model }
+func (e *testEmbedder) Close() error                   { return nil }
 
 // compile-time check
 var _ embed.Embedder = (*testEmbedder)(nil)

@@ -314,6 +314,9 @@ func normalizeL2(v []float32) []float32 {
 	return out
 }
 
+// WarmUp is a no-op for the HTTP client embedder (model is managed by the remote server).
+func (c *Client) WarmUp(_ context.Context) error { return nil }
+
 // Model returns the configured embedding model name.
 func (c *Client) Model() string {
 	if c == nil {

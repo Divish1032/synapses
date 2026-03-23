@@ -50,7 +50,8 @@ func (e *indexedEmbedder) Model() string {
 	return e.model
 }
 
-func (e *indexedEmbedder) Close() error { return nil }
+func (e *indexedEmbedder) WarmUp(_ context.Context) error { return nil }
+func (e *indexedEmbedder) Close() error                   { return nil }
 
 var _ embed.Embedder = (*indexedEmbedder)(nil)
 
@@ -65,8 +66,9 @@ type constEmbedder struct {
 func (e *constEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
 	return e.vec, e.err
 }
-func (e *constEmbedder) Model() string { return "test-const" }
-func (e *constEmbedder) Close() error  { return nil }
+func (e *constEmbedder) WarmUp(_ context.Context) error { return nil }
+func (e *constEmbedder) Model() string                  { return "test-const" }
+func (e *constEmbedder) Close() error                   { return nil }
 
 var _ embed.Embedder = (*constEmbedder)(nil)
 

@@ -26,7 +26,8 @@ func (m *mockEmbedder) Model() string {
 	return m.model
 }
 
-func (m *mockEmbedder) Close() error { return nil }
+func (m *mockEmbedder) WarmUp(_ context.Context) error { return nil }
+func (m *mockEmbedder) Close() error                   { return nil }
 
 func TestEmbedderInterface_MockSatisfies(t *testing.T) {
 	var e embed.Embedder = &mockEmbedder{

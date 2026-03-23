@@ -1978,6 +1978,11 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	memEmbedder := createMemoryEmbedder(cfg)
 	if memEmbedder != nil {
 		srv.SetMemoryEmbedder(memEmbedder)
+		go func() {
+			if err := memEmbedder.WarmUp(projCtx); err != nil {
+				logutil.Warn("synapses: embedder warmup: %v\n", err)
+			}
+		}()
 		go embedAllMemories(projCtx, memEmbedder, st, sharedPulse)
 	}
 
