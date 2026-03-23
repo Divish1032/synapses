@@ -197,7 +197,7 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 			ProjectPath string `json:"project_path"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+			http.Error(w, "bad request: invalid JSON", http.StatusBadRequest)
 			return
 		}
 		if req.Agent == "" || req.ProjectPath == "" {
@@ -207,6 +207,10 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 		absPath, err := canonicalPath(req.ProjectPath)
 		if err != nil {
 			http.Error(w, "invalid path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
+			return
+		}
+		if err := isValidProjectPath(absPath); err != nil {
+			http.Error(w, "invalid project path", http.StatusBadRequest)
 			return
 		}
 		results := connectAgents(absPath, []string{req.Agent})
@@ -234,6 +238,10 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 		absPath, err := canonicalPath(projectPath)
 		if err != nil {
 			http.Error(w, "invalid path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
+			return
+		}
+		if err := isValidProjectPath(absPath); err != nil {
+			http.Error(w, "invalid project path", http.StatusBadRequest)
 			return
 		}
 		projectPath = absPath
@@ -450,6 +458,10 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 		absPath, err := canonicalPath(req.Path)
 		if err != nil {
 			http.Error(w, "invalid path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
+			return
+		}
+		if err := isValidProjectPath(absPath); err != nil {
+			http.Error(w, "invalid project path", http.StatusBadRequest)
 			return
 		}
 
