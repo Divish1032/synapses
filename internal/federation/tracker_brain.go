@@ -386,8 +386,23 @@ func splitSegments(s string) []string {
 	return out
 }
 
-// sanitizePromptInput escapes angle brackets to prevent prompt injection.
+// sanitizePromptInput escapes angle brackets and strips control characters
+// to prevent prompt injection and log forging.
 func sanitizePromptInput(s string) string {
-	r := strings.NewReplacer("<", "&lt;", ">", "&gt;")
-	return r.Replace(s)
+	// Length cap to prevent excessive prompt content.
+	if len(s) > 512 {
+		s = s[:512]
+	}
+	r := strings.NewReplacer("<", "&lt;", ">", "&gt;", "`", "'")
+	s = r.Replace(s)
+	// Strip control characters (anything < 0x20, which includes \n, \r, \t, etc).
+	// Space (0x20) and above are kept.
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, c := range s {
+		if c >= 0x20 {
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
 }

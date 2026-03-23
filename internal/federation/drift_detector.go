@@ -9,6 +9,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/store"
+	"golang.org/x/sync/errgroup"
 )
 
 // DriftDetector handles cross-project dependency drift detection.
@@ -39,50 +40,70 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 		return nil
 	}
 
-	var allAlerts []DriftAlert
-	for _, e := range d.resolver.entries {
-		if ctx.Err() != nil {
-			break
-		}
-
-		// Check session-level cache first (with TTL).
-		d.mu.RLock()
-		cached, hasCached := d.cache[e.Alias]
-		fresh := hasCached && d.clock().Sub(d.cacheTime[e.Alias]) < 5*time.Minute
-		d.mu.RUnlock()
-		if hasCached && !fresh {
-			d.mu.Lock()
-			delete(d.cache, e.Alias)
-			delete(d.cacheTime, e.Alias)
-			d.mu.Unlock()
-			hasCached = false
-		}
-		if hasCached {
-			allAlerts = append(allAlerts, cached...)
-			continue
-		}
-
-		alerts := d.checkDriftForEntry(ctx, e, localStore)
-
-		d.mu.Lock()
-		d.cache[e.Alias] = alerts
-		d.cacheTime[e.Alias] = d.clock()
-		if len(d.cache) > 20 {
-			var oldest string
-			var oldestTime time.Time
-			for k, t := range d.cacheTime {
-				if oldest == "" || t.Before(oldestTime) {
-					oldest = k
-					oldestTime = t
-				}
-			}
-			delete(d.cache, oldest)
-			delete(d.cacheTime, oldest)
-		}
-		d.mu.Unlock()
-
-		allAlerts = append(allAlerts, alerts...)
+	type entryResult struct {
+		alerts []DriftAlert
 	}
+
+	var (
+		resultsMu  sync.Mutex
+		allAlerts  []DriftAlert
+	)
+
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.SetLimit(8)
+
+	for _, e := range d.resolver.entries {
+		e := e
+		eg.Go(func() error {
+			if egCtx.Err() != nil {
+				return nil
+			}
+
+			// Check session-level cache first (with TTL).
+			d.mu.RLock()
+			cached, hasCached := d.cache[e.Alias]
+			fresh := hasCached && d.clock().Sub(d.cacheTime[e.Alias]) < 5*time.Minute
+			d.mu.RUnlock()
+			if hasCached && !fresh {
+				d.mu.Lock()
+				delete(d.cache, e.Alias)
+				delete(d.cacheTime, e.Alias)
+				d.mu.Unlock()
+				hasCached = false
+			}
+			if hasCached {
+				resultsMu.Lock()
+				allAlerts = append(allAlerts, cached...)
+				resultsMu.Unlock()
+				return nil
+			}
+
+			alerts := d.checkDriftForEntry(egCtx, e, localStore)
+
+			d.mu.Lock()
+			d.cache[e.Alias] = alerts
+			d.cacheTime[e.Alias] = d.clock()
+			if len(d.cache) > 20 {
+				var oldest string
+				var oldestTime time.Time
+				for k, t := range d.cacheTime {
+					if oldest == "" || t.Before(oldestTime) {
+						oldest = k
+						oldestTime = t
+					}
+				}
+				delete(d.cache, oldest)
+				delete(d.cacheTime, oldest)
+			}
+			d.mu.Unlock()
+
+			resultsMu.Lock()
+			allAlerts = append(allAlerts, alerts...)
+			resultsMu.Unlock()
+			return nil
+		})
+	}
+	_ = eg.Wait()
 	return allAlerts
 }
 
