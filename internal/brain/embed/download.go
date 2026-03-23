@@ -285,11 +285,16 @@ func extractLlamaServerFromZip(data []byte, destDir, destPath string) error {
 			rc.Close()
 			return err
 		}
-		_, err = io.Copy(out, rc)
+		const maxExtractBytes = 200 << 20 // 200 MiB
+		lr := io.LimitReader(rc, maxExtractBytes)
+		n, err := io.Copy(out, lr)
 		rc.Close()
 		out.Close()
 		if err != nil {
 			return err
+		}
+		if n == maxExtractBytes {
+			return fmt.Errorf("extracted file %q exceeds 200 MiB size cap", base)
 		}
 	}
 	if !found {

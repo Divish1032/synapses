@@ -196,6 +196,9 @@ func (a *BrainTrackerAdapter) DetectAndStoreBrain(ctx context.Context, filePath 
 		return // unknown extension, skip
 	}
 
+	if fi, statErr := os.Stat(filePath); statErr == nil && fi.Size() > 1<<20 {
+		return // file too large — skip brain detection
+	}
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return // fail-open

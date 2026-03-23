@@ -103,14 +103,29 @@ func New(s *store.Store) *Cache {
 				if len(via) >= 10 {
 					return errors.New("too many redirects")
 				}
-				// Validate redirect target is not internal (IP literal only).
-				// Hostname-based DNS validation is handled by DialContext on the
-				// actual connection, eliminating the DNS rebinding TOCTOU window
-				// that a separate lookup here would create.
 				host := req.URL.Hostname()
-				ip := net.ParseIP(host)
-				if ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast()) {
-					return fmt.Errorf("redirect to private IP blocked: %s", host)
+				// Case 1: redirect target is an IP literal — check directly.
+				if ip := net.ParseIP(host); ip != nil {
+					if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast() {
+						return fmt.Errorf("redirect to private IP blocked: %s", host)
+					}
+					return nil
+				}
+				// Case 2: hostname-based redirect — resolve DNS with a short
+				// timeout and reject if any resolved IP is private/internal.
+				// Fail-open on DNS errors (DialContext provides the backstop).
+				dnsCtx, dnsCancel := context.WithTimeout(req.Context(), 500*time.Millisecond)
+				defer dnsCancel()
+				addrs, lookupErr := net.DefaultResolver.LookupIPAddr(dnsCtx, host)
+				if lookupErr != nil {
+					// DNS failed or timed out — allow and let DialContext decide.
+					return nil
+				}
+				for _, addr := range addrs {
+					ip := addr.IP
+					if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast() {
+						return fmt.Errorf("redirect to internal hostname blocked: %s resolves to %s", host, ip.String())
+					}
 				}
 				return nil
 			},
@@ -178,7 +193,7 @@ func (c *Cache) Fetch(ctx context.Context, rawURL string, ttlHours int) (string,
 
 	content, err := c.fetchAndStrip(ctx, rawURL)
 	if err != nil {
-		return "", false, fmt.Errorf("fetch %s: %w", rawURL, err)
+		return "", false, fmt.Errorf("fetch %s: %w", cacheKey, err)
 	}
 
 	if err := c.store.UpsertWebCache(cacheKey, content, ttlHours); err != nil {

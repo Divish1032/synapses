@@ -362,6 +362,6 @@ func TestFlatGraph_BulkAddEdges(t *testing.T) {
 	bID := fg.AddNode(graph.Pool.Intern("FlatB"), graph.NodeFunction, graph.Pool.Intern("flat_b.go"), 0)
 
 	// Should not panic.
-	fg.BulkAddEdges([]graph.BulkEdge{{From: aID, To: bID, Weight: 1.0}})
+	_ = fg.BulkAddEdges([]graph.BulkEdge{{From: aID, To: bID, Weight: 1.0}})
 }
 

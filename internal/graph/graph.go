@@ -253,6 +253,9 @@ func (g *Graph) FindByPatternLimit(pattern string, limit int) []*Node {
 		if strings.Contains(strings.ToLower(n.Name), lower) {
 			results = append(results, n)
 		}
+		if limit > 0 && len(results) >= limit*10 {
+			break
+		}
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].ID < results[j].ID })
 	if limit > 0 && len(results) > limit {

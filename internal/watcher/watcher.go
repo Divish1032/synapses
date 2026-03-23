@@ -106,6 +106,8 @@ type Watcher struct {
 	mu        sync.Mutex
 	timers    map[string]*time.Timer // debounce timers keyed by absolute file path
 	stopCh    chan struct{}
+	stopCtx   context.Context    // cancelled when Stop() is called
+	stopCtxFn context.CancelFunc // cancels stopCtx
 	stopped   bool
 	reparseMu sync.Mutex // serialises concurrent reparseFile goroutines (debounce timers)
 
@@ -160,6 +162,7 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create fsnotify watcher: %w", err)
 	}
+	stopCtx, stopCtxFn := context.WithCancel(context.Background())
 	watcher := &Watcher{
 		fw:                 fw,
 		graph:              g,
@@ -167,6 +170,8 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 		store:              st,
 		timers:             make(map[string]*time.Timer),
 		stopCh:             make(chan struct{}),
+		stopCtx:            stopCtx,
+		stopCtxFn:          stopCtxFn,
 		fileHashes:         make(map[string]string),
 		fileHadParseErrors: make(map[string]bool),
 		workCh:             make(chan reparseWork, reparseWorkChanSize),
@@ -346,6 +351,7 @@ func (w *Watcher) Stop() {
 		return
 	}
 	w.stopped = true
+	w.stopCtxFn()
 	close(w.stopCh)
 	w.fw.Close()
 
@@ -1009,7 +1015,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// Fail-open: errors logged inside tracker, never blocks the watcher.
 	if w.cpTracker != nil && w.store != nil {
 		fedStart := time.Now()
-		cpCtx, cpCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		cpCtx, cpCancel := context.WithTimeout(w.stopCtx, 2*time.Second)
 		w.cpTracker.DetectAndStore(cpCtx, path, w.store)
 		cpCancel()
 		// P5 — COV-8: emit federation detection event to pulse.
@@ -1028,7 +1034,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 			filePath := path
 			w.trackGo(func() {
 				brainStart := time.Now()
-				brainCtx, brainCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				brainCtx, brainCancel := context.WithTimeout(w.stopCtx, 10*time.Second)
 				defer brainCancel()
 				w.cpBrainTracker.DetectAndStoreBrain(brainCtx, filePath, w.store)
 				brainDurationMs := float64(time.Since(brainStart).Milliseconds())
@@ -1295,15 +1301,9 @@ func (w *Watcher) ingestToBrain(path string) {
 	if !ok || bc == nil {
 		return
 	}
-	// Derive context from stopCh so in-flight ingests are cancelled on shutdown.
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		select {
-		case <-w.stopCh:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
+	// Derive context from stopCtx so in-flight ingests are cancelled on shutdown.
+	// stopCtx is cancelled by Stop(), so no additional goroutine is needed.
+	ctx, cancel := context.WithCancel(w.stopCtx)
 	defer cancel()
 	nodes := w.graph.NodesForFile(path)
 	ingestStart := time.Now()

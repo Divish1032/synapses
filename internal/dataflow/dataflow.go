@@ -240,6 +240,7 @@ func bfsReachableSinks(g *graph.Graph, sourceID graph.NodeID, sinkSet map[graph.
 	queue := []qItem{{sourceID, 0}}
 	var found []graph.NodeID
 
+outerLoop:
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
@@ -256,7 +257,7 @@ func bfsReachableSinks(g *graph.Graph, sourceID graph.NodeID, sinkSet map[graph.
 				continue
 			}
 			if len(visited) >= maxVisited {
-				break
+				break outerLoop
 			}
 			visited[e.To] = true
 
@@ -267,7 +268,7 @@ func bfsReachableSinks(g *graph.Graph, sourceID graph.NodeID, sinkSet map[graph.
 			queue = append(queue, qItem{e.To, cur.hop + 1})
 		}
 		if len(visited) >= maxVisited {
-			break
+			break outerLoop
 		}
 	}
 

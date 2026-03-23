@@ -13,9 +13,8 @@ import (
 // extractJavaDeclInfo walks the Java AST collecting metadata for method,
 // constructor, class, interface, enum, and record declarations.
 // Method names are class-qualified (ClassName.methodName).
-func extractJavaDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
+func extractJavaDeclInfo(root sitter.Node, src []byte, lines []string) map[string]declMeta {
 	result := make(map[string]declMeta)
-	lines := strings.Split(string(src), "\n")
 
 	var walk func(n sitter.Node, enclosingClass string, depth int)
 	walk = func(n sitter.Node, enclosingClass string, depth int) {
@@ -157,7 +156,8 @@ func (p *JavaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	})
 
 	lang := p.language
-	declInfo := extractJavaDeclInfo(root, src)
+	lines := strings.Split(string(src), "\n")
+	declInfo := extractJavaDeclInfo(root, src, lines)
 
 	// --- package declaration ---
 	pkgQuery := `(package_declaration (scoped_identifier) @pkg_name)`

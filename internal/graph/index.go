@@ -412,9 +412,18 @@ func buildIndex(g *Graph, pool *StringPool) *GraphIndex {
 	}
 
 	// Compute prefix-sum start offsets.
+	// Guard: uint32 offsets overflow at 2^32 total edge endpoints.
 	totalEdges := 0
 	for _, d := range outDeg[1:] {
 		totalEdges += d
+	}
+	// Guard: CSR offsets are uint32; overflow silently wraps at 2^32.
+	// Return the partially-built index with ready=0 so the caller retains
+	// the previous valid index rather than installing a corrupt one.
+	const maxUint32 = 1<<32 - 1
+	if totalEdges >= maxUint32 {
+		// ready remains 0 (set by newGraphIndex); callers check idx.Ready().
+		return idx
 	}
 
 	// Extend CSR arrays (already have sentinel row at 0 from newGraphIndex).

@@ -121,41 +121,110 @@ func (s *Store) InsertMemory(m Memory) (string, error) {
 	}
 	if dedup.dedupedID != "" {
 		// Sprint 10.1: snapshot old content before overwriting via touch.
-		// activeFrom = the matched memory's created_at (or its last version's superseded_at
-		// if versions exist, but for simplicity we use the memory's own last_accessed_at
-		// which is updated on each dedup — approximating "when this content became active").
-		// For v1 (no prior versions), activeFrom = memory.created_at is exact.
-		if dedup.dedupedContent != "" && dedup.dedupedContent != m.Content {
-			activeFrom := dedup.dedupedCreatedAt
-			// If versions already exist, the activeFrom should be the latest
-			// version's superseded_at (when that version was replaced with
-			// the content we're now snapshotting). Fall back to created_at.
-			var latestSupersededAt sql.NullString
-			_ = s.knowledgeDB.QueryRow(
-				`SELECT superseded_at FROM memory_versions WHERE memory_id = ? ORDER BY version DESC LIMIT 1`,
-				dedup.dedupedID,
-			).Scan(&latestSupersededAt)
-			if latestSupersededAt.Valid && latestSupersededAt.String != "" {
-				activeFrom = latestSupersededAt.String
+		// Wrap all dedup writes in a single transaction so a crash between any
+		// two writes leaves the database in a consistent pre-dedup state.
+		dedupErr := func() error {
+			tx, txErr := s.knowledgeDB.Begin()
+			if txErr != nil {
+				return fmt.Errorf("dedup tx begin: %w", txErr)
 			}
-			if _, verr := s.CreateMemoryVersion(dedup.dedupedID, dedup.dedupedContent, activeFrom); verr != nil {
-				logutil.Warn("synapses: store: create memory version on dedup: %v\n", verr)
+			defer func() { _ = tx.Rollback() }()
+
+			now := time.Now().UTC()
+			nowStr := now.Format(time.RFC3339)
+
+			// --- Step 1: create a version snapshot of the old content (if changed) ---
+			if dedup.dedupedContent != "" && dedup.dedupedContent != m.Content {
+				activeFrom := dedup.dedupedCreatedAt
+				// Use the latest version's superseded_at as activeFrom when available.
+				var latestSupersededAt sql.NullString
+				_ = tx.QueryRow(
+					`SELECT superseded_at FROM memory_versions WHERE memory_id = ? ORDER BY version DESC LIMIT 1`,
+					dedup.dedupedID,
+				).Scan(&latestSupersededAt)
+				if latestSupersededAt.Valid && latestSupersededAt.String != "" {
+					activeFrom = latestSupersededAt.String
+				}
+				supersededAt := nowStr
+				versionID := newID()
+				if _, verr := tx.Exec(`
+					INSERT INTO memory_versions (id, memory_id, version, content, superseded_by, created_at, superseded_at)
+					SELECT ?, ?, COALESCE(MAX(version), 0) + 1, ?, ?, ?, ?
+					FROM memory_versions WHERE memory_id = ?`,
+					versionID, dedup.dedupedID, dedup.dedupedContent, dedup.dedupedID, activeFrom, supersededAt, dedup.dedupedID,
+				); verr != nil {
+					return fmt.Errorf("insert memory version: %w", verr)
+				}
+				// Prune oldest versions beyond cap.
+				var ver int
+				_ = tx.QueryRow(`SELECT version FROM memory_versions WHERE id = ?`, versionID).Scan(&ver)
+				if ver > maxVersionsPerMemory {
+					_, _ = tx.Exec(`
+						DELETE FROM memory_versions WHERE id IN (
+							SELECT id FROM memory_versions WHERE memory_id = ?
+							ORDER BY version ASC LIMIT ?
+						)`, dedup.dedupedID, ver-maxVersionsPerMemory)
+				}
 			}
-		}
-		// Update memory content to the new (dedup-winning) content.
-		if m.Content != dedup.dedupedContent {
-			if uerr := s.UpdateMemoryContent(dedup.dedupedID, m.Content); uerr != nil {
-				logutil.Warn("synapses: store: update memory content on dedup: %v\n", uerr)
+
+			// --- Step 2: update memory content to the new (dedup-winning) content ---
+			if m.Content != dedup.dedupedContent {
+				if _, uerr := tx.Exec(`UPDATE memories SET content = ? WHERE id = ?`, m.Content, dedup.dedupedID); uerr != nil {
+					return fmt.Errorf("update memory content: %w", uerr)
+				}
 			}
-		}
-		// Only emit knowledge_updated if the touch succeeds — a failed touch means
-		// the memory was deleted between the dedup check and now (concurrent prune).
-		// Emitting an event for a non-existent memory would corrupt learning-loop data.
-		if touchErr := s.TouchMemory(dedup.dedupedID); touchErr == nil {
-			if err := s.AppendEvent("knowledge_updated", m.AgentID,
-				fmt.Sprintf(`{"memory_id":%q,"reason":"dedup"}`, dedup.dedupedID)); err != nil {
-				logutil.Warn("synapses: store: append knowledge_updated event: %v\n", err)
+
+			// --- Step 3: touch — update last_accessed_at, expires_at, access_count ---
+			var tier, expiresAt string
+			if err := tx.QueryRow(`SELECT tier, expires_at FROM memories WHERE id = ?`, dedup.dedupedID).Scan(&tier, &expiresAt); err != nil {
+				return fmt.Errorf("touch memory (select): %w", err)
 			}
+			var touchExec string
+			var touchArgs []interface{}
+			switch tier {
+			case TierSessionLog, TierProject:
+				var extension time.Duration
+				var maxExpiry time.Time
+				if tier == TierSessionLog {
+					extension = ttlSessionLog / 2
+					maxExpiry = now.Add(2 * ttlSessionLog)
+				} else {
+					extension = ttlProject / 2
+					maxExpiry = now.Add(2 * ttlProject)
+				}
+				current, _ := time.Parse(time.RFC3339, expiresAt)
+				if current.IsZero() {
+					current = now
+				}
+				newExpiry := current.Add(extension)
+				if newExpiry.After(maxExpiry) {
+					newExpiry = maxExpiry
+				}
+				touchExec = `UPDATE memories SET last_accessed_at = ?, expires_at = ?, access_count = access_count + 1 WHERE id = ?`
+				touchArgs = []interface{}{nowStr, newExpiry.Format(time.RFC3339), dedup.dedupedID}
+			default:
+				touchExec = `UPDATE memories SET last_accessed_at = ?, access_count = access_count + 1 WHERE id = ?`
+				touchArgs = []interface{}{nowStr, dedup.dedupedID}
+			}
+			if _, terr := tx.Exec(touchExec, touchArgs...); terr != nil {
+				return fmt.Errorf("touch memory (update): %w", terr)
+			}
+
+			// --- Step 4: append knowledge_updated event ---
+			eventCutoff := now.Add(-24 * time.Hour).Format(time.RFC3339)
+			if _, eerr := tx.Exec(
+				`INSERT INTO events (type, agent_id, payload, created_at) VALUES (?, ?, ?, ?)`,
+				"knowledge_updated", m.AgentID,
+				fmt.Sprintf(`{"memory_id":%q,"reason":"dedup"}`, dedup.dedupedID), nowStr,
+			); eerr != nil {
+				return fmt.Errorf("append event: %w", eerr)
+			}
+			_, _ = tx.Exec(`DELETE FROM events WHERE created_at < ?`, eventCutoff)
+
+			return tx.Commit()
+		}()
+		if dedupErr != nil {
+			logutil.Warn("synapses: store: dedup transaction: %v\n", dedupErr)
 		}
 		return dedup.dedupedID, nil
 	}

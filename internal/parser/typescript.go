@@ -13,9 +13,8 @@ import (
 
 // extractTSDeclInfo walks the TypeScript/TSX AST and builds a name→declMeta map
 // for all function, class, interface, type alias, and enum declarations.
-func extractTSDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
+func extractTSDeclInfo(root sitter.Node, src []byte, lines []string) map[string]declMeta {
 	result := make(map[string]declMeta)
-	lines := strings.Split(string(src), "\n")
 
 	var walk func(n sitter.Node, enclosingClass string, depth int)
 	walk = func(n sitter.Node, enclosingClass string, depth int) {
@@ -170,7 +169,8 @@ func (p *TypeScriptParser) extractDeclarations(
 	fileNodeID graph.NodeID,
 	moduleName string,
 ) error {
-	declInfo := extractTSDeclInfo(root, src)
+	lines := strings.Split(string(src), "\n")
+	declInfo := extractTSDeclInfo(root, src, lines)
 
 	// --- Import declarations ---
 	importQuery := `(import_statement source: (string (string_fragment) @import_path))`
