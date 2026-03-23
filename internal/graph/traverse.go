@@ -88,18 +88,26 @@ func (g *Graph) outInEdges(id NodeID, idx *GraphIndex) []*Edge {
 	return all
 }
 
-// pprScores computes Personalized PageRank scores for all nodes reachable from
-// rootID using power iteration on the undirected weighted adjacency structure.
+// pprScores computes Personalized PageRank scores using power iteration on a
+// sparse candidate subgraph bounded by a BFS pre-pass.
 //
-// The teleport vector is personalised to rootID (teleport[root]=1.0). For
-// struct/interface roots, the receiver-method set is included as additional
-// teleport targets (at weight 0.9) so that methods without direct edges to their
-// struct are naturally surfaced — matching the BFS method-seeding behaviour.
-//
-// DirectionBoost is applied as a transition-probability bias on CALLS edges:
-// positive boost multiplies outgoing CALLS weights; negative multiplies incoming.
-// This causes the random walk to prefer callees (intent="modify") or callers
-// (intent="debug"), consistent with BFS directional behaviour.
+// Algorithm overview:
+//  1. Build a personalised teleport vector (root=1.0; struct/interface receiver
+//     methods at 0.9, matching BFS method-seeding behaviour).
+//  2. Collect a candidate set via BFS from the teleport targets up to
+//     pprBFSHorizon hops. Only nodes in this set participate in the random
+//     walk — nodes beyond the horizon have negligible PPR rank for any
+//     practical alpha (effective reach ≈ 1/alpha ≈ 7 hops for alpha=0.15).
+//     This keeps PPR O(K×E×I) where K is candidate size, not O(N×E×I),
+//     enabling production use on large graphs without O(N) work per call.
+//  3. Build undirected adjacency restricted to the candidate set.
+//     DirectionBoost is applied as a transition-probability bias on CALLS edges:
+//     positive boost multiplies outgoing CALLS weights; negative multiplies
+//     incoming. This causes the walk to prefer callees (intent="modify") or
+//     callers (intent="debug"), consistent with BFS directional behaviour.
+//  4. Power iteration until L∞ convergence (epsilon=1e-6, max 100 iters).
+//     Dangling nodes (zero out-weight within candidate set) redistribute mass
+//     to the teleport distribution to conserve total probability mass.
 //
 // Must be called with g.mu.RLock held (CarveEgoGraph already holds it).
 func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[NodeID]float64 {
@@ -113,9 +121,9 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 		weights = DefaultEdgeWeights
 	}
 
-	// Build personalised teleport vector.
-	// For struct/interface roots, add receiver methods at weight 0.9 so they
-	// surface even though they share no direct edge with the struct node itself.
+	// ── Teleport vector ────────────────────────────────────────────────────────
+	// For struct/interface roots, receiver methods are seeded at weight 0.9 so
+	// they surface even when they share no direct edge with the struct node.
 	teleport := make(map[NodeID]float64, 8)
 	teleport[rootID] = 1.0
 	if rootNode := g.nodes[rootID]; rootNode != nil &&
@@ -126,9 +134,20 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 					teleport[idx.SeqIDs[mSeq]] = 0.9
 				}
 			}
+		} else {
+			// Fallback: linear scan when the CSR index is not yet built.
+			// This path is taken at startup and in all unit tests (no index built).
+			prefix := rootNode.Name + "."
+			for _, n := range g.nodes {
+				if n.Type == NodeMethod && strings.HasPrefix(n.Name, prefix) {
+					if _, already := teleport[n.ID]; !already {
+						teleport[n.ID] = 0.9
+					}
+				}
+			}
 		}
 	}
-	// Normalise teleport to sum to 1.0 (required for a valid probability vector).
+	// Normalise to sum=1.0 (required for a valid probability vector).
 	teleportSum := 0.0
 	for _, v := range teleport {
 		teleportSum += v
@@ -137,22 +156,52 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 		teleport[k] /= teleportSum
 	}
 
-	// Build undirected adjacency list with DirectionBoost applied to CALLS edges.
-	// outInEdges uses the CSR index when idx is ready (cache-friendly, avoids
-	// pointer chasing and tombstone scans on every BFS step).
+	// ── Sparse candidate set ───────────────────────────────────────────────────
+	// BFS from all teleport targets up to pprBFSHorizon undirected hops.
+	// Seeding from teleport targets (not just root) ensures struct methods and
+	// their downstream subgraphs are included in the candidate set.
+	const pprBFSHorizon = 6
+	candidate := make(map[NodeID]struct{}, 128)
+	frontier := make([]NodeID, 0, len(teleport))
+	for id := range teleport {
+		candidate[id] = struct{}{}
+		frontier = append(frontier, id)
+	}
+	for hop := 0; hop < pprBFSHorizon && len(frontier) > 0; hop++ {
+		var next []NodeID
+		for _, id := range frontier {
+			for _, e := range g.outInEdges(id, idx) {
+				nb := e.To
+				if e.To == id {
+					nb = e.From
+				}
+				if _, seen := candidate[nb]; !seen {
+					candidate[nb] = struct{}{}
+					next = append(next, nb)
+				}
+			}
+		}
+		frontier = next
+	}
+
+	// ── Adjacency (restricted to candidate set) ────────────────────────────────
 	type nbEntry struct {
 		id     NodeID
 		weight float64
 	}
-	adj := make(map[NodeID][]nbEntry, len(g.nodes))
-	outWeightSum := make(map[NodeID]float64, len(g.nodes))
+	adj := make(map[NodeID][]nbEntry, len(candidate))
+	outWeightSum := make(map[NodeID]float64, len(candidate))
 
-	for id := range g.nodes {
+	for id := range candidate {
 		for _, e := range g.outInEdges(id, idx) {
 			nb := e.To
 			isOutgoing := e.From == id
 			if !isOutgoing {
 				nb = e.From
+			}
+			// Skip edges leaving the candidate set — those nodes have negligible rank.
+			if _, inCand := candidate[nb]; !inCand {
+				continue
 			}
 
 			w := edgeWeight(e.Type, weights)
@@ -180,15 +229,14 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 		}
 	}
 
-	// Power iteration:
+	// ── Power iteration ────────────────────────────────────────────────────────
 	//   rank[v] = α·teleport[v] + (1-α)·Σ_u rank[u]·w(u,v)/outDeg(u)
 	//
-	// Dangling nodes (outWeightSum==0) redistribute their full mass to the
-	// teleport distribution so the total probability mass is conserved.
-	rank := make(map[NodeID]float64, len(g.nodes))
+	// Dangling nodes (outWeightSum==0 within candidate set) redistribute their
+	// full mass to the teleport distribution to conserve total probability mass.
+	rank := make(map[NodeID]float64, len(candidate))
 	rank[rootID] = 1.0
-
-	newRank := make(map[NodeID]float64, len(g.nodes))
+	newRank := make(map[NodeID]float64, len(candidate))
 
 	const pprMaxIter = 100
 	const pprEpsilon = 1e-6 // L∞ convergence threshold
@@ -203,8 +251,8 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 			newRank[id] += alpha * tv
 		}
 
-		// Propagation: distribute each node's rank to its neighbours.
-		for id := range g.nodes {
+		// Propagation: distribute each candidate node's rank to its neighbours.
+		for id := range candidate {
 			r := rank[id]
 			if r == 0 {
 				continue
@@ -224,7 +272,7 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 
 		// L∞ convergence: stop when the maximum per-node change is below epsilon.
 		maxDelta := 0.0
-		for id := range g.nodes {
+		for id := range candidate {
 			if d := math.Abs(newRank[id] - rank[id]); d > maxDelta {
 				maxDelta = d
 			}

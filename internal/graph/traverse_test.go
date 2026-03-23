@@ -689,6 +689,70 @@ func TestCarveEgoGraph_PPR_PostProcessingPreserved(t *testing.T) {
 	}
 }
 
+// TestCarveEgoGraph_PPR_StructMethodSeeding verifies that PPR correctly seeds
+// struct receiver methods into the teleport vector via the idx==nil fallback
+// path (no CSR index built — the common path in unit tests and at startup).
+// Methods must appear in the output with non-trivial relevance, and nodes
+// reachable through those methods must also be included.
+func TestCarveEgoGraph_PPR_StructMethodSeeding(t *testing.T) {
+	g := graph.New("ppr-struct")
+
+	structID := g.MakeNodeID("svc.go", "Service")
+	m1ID := g.MakeNodeID("svc.go", "Service.Start")
+	m2ID := g.MakeNodeID("svc.go", "Service.Stop")
+	helperID := g.MakeNodeID("util.go", "doWork")
+	// unrelated is not reachable from any seeded node — should be absent.
+	unrelatedID := g.MakeNodeID("other.go", "Unrelated")
+
+	g.AddNode(&graph.Node{ID: structID, Type: graph.NodeStruct, Name: "Service", File: "svc.go"})
+	g.AddNode(&graph.Node{ID: m1ID, Type: graph.NodeMethod, Name: "Service.Start", File: "svc.go"})
+	g.AddNode(&graph.Node{ID: m2ID, Type: graph.NodeMethod, Name: "Service.Stop", File: "svc.go"})
+	g.AddNode(&graph.Node{ID: helperID, Type: graph.NodeFunction, Name: "doWork", File: "util.go"})
+	g.AddNode(&graph.Node{ID: unrelatedID, Type: graph.NodeFunction, Name: "Unrelated", File: "other.go"})
+
+	// Service.Start calls doWork; Service.Stop is a leaf.
+	g.AddEdge(&graph.Edge{From: m1ID, To: helperID, Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = true
+	cfg.MinRelevance = 0
+	cfg.TokenBudget = 0
+
+	sub, err := g.CarveEgoGraph(structID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph PPR struct: %v", err)
+	}
+
+	ids := nodeIDSet(sub)
+
+	// Both methods must be seeded into the teleport vector and therefore
+	// appear with non-trivial PPR rank.
+	if _, ok := ids[m1ID]; !ok {
+		t.Error("Service.Start missing from PPR subgraph — idx=nil method seeding fallback broken")
+	}
+	if _, ok := ids[m2ID]; !ok {
+		t.Error("Service.Stop missing from PPR subgraph — idx=nil method seeding fallback broken")
+	}
+	// doWork is reachable via Service.Start → must also appear.
+	if _, ok := ids[helperID]; !ok {
+		t.Error("doWork missing from PPR subgraph — not reachable through method teleport seeds")
+	}
+	// Root always pinned at 1.0.
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == structID && cn.Relevance != 1.0 {
+			t.Errorf("struct root relevance = %.6f, want 1.0 (root-pin)", cn.Relevance)
+		}
+	}
+	// Methods should outrank the leaf helper (teleport seeds have higher rank).
+	rel := make(map[graph.NodeID]float64)
+	for _, cn := range sub.Nodes {
+		rel[cn.Node.ID] = cn.Relevance
+	}
+	if rel[m1ID] <= rel[helperID] {
+		t.Errorf("Service.Start (%.5f) should outrank helper doWork (%.5f) — method teleport seeds must dominate", rel[m1ID], rel[helperID])
+	}
+}
+
 // nodeIDSet returns the set of NodeIDs present in a SubGraph for quick lookup.
 func nodeIDSet(sub *graph.SubGraph) map[graph.NodeID]struct{} {
 	m := make(map[graph.NodeID]struct{}, len(sub.Nodes))
