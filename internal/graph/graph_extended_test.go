@@ -355,13 +355,13 @@ func TestFlatGraph_AddNodeAndExtID(t *testing.T) {
 	}
 }
 
-func TestFlatGraph_AddEdge(t *testing.T) {
+func TestFlatGraph_BulkAddEdges(t *testing.T) {
 	fg := graph.NewFlatGraph("test-repo")
 
 	aID := fg.AddNode(graph.Pool.Intern("FlatA"), graph.NodeFunction, graph.Pool.Intern("flat_a.go"), 0)
 	bID := fg.AddNode(graph.Pool.Intern("FlatB"), graph.NodeFunction, graph.Pool.Intern("flat_b.go"), 0)
 
 	// Should not panic.
-	fg.AddEdge(aID, bID, 1.0)
+	fg.BulkAddEdges([]graph.BulkEdge{{From: aID, To: bID, Weight: 1.0}})
 }
 

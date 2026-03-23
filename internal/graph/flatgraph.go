@@ -2,10 +2,8 @@ package graph
 
 import (
 	"fmt"
-	"log"
 	"sort"
 	"sync"
-	"sync/atomic"
 )
 
 // Pool is the global instance of the StringPool accessed by FlatGraph.
@@ -38,10 +36,6 @@ func (fg *FlatGraph) ExtID(idx NodeIndex) NodeID {
 type FlatGraph struct {
 	mu     sync.RWMutex
 	RepoID string
-
-	// Per-instance counters for AddEdge misuse detection (moved from package-level).
-	addEdgeSeqCount atomic.Int32
-	addEdgeWarned   atomic.Int32
 
 	// --- SoA Property Slices ---
 
@@ -133,17 +127,11 @@ func (fg *FlatGraph) AddNode(name StringID, nodeType NodeType, fileID StringID, 
 }
 
 
-// AddEdge inserts a directed edge.
-//
-// Deprecated: O(E) due to offset shifting — do NOT call in a hot loop.
-// Use BulkAddEdges for batch insertion; it rebuilds CSR arrays from scratch in O(N+E).
-func (fg *FlatGraph) AddEdge(from, to NodeIndex, weight float32) {
+// addEdge inserts a directed edge. O(E) due to offset shifting — internal only.
+// Production code must use BulkAddEdges for batch insertion (O(N+E)).
+func (fg *FlatGraph) addEdge(from, to NodeIndex, weight float32) {
 	fg.mu.Lock()
 	defer fg.mu.Unlock()
-
-	if n := fg.addEdgeSeqCount.Add(1); n > 10 && fg.addEdgeWarned.CompareAndSwap(0, 1) {
-		log.Printf("flatgraph: AddEdge called %d+ times sequentially — use BulkAddEdges for O(N+E) batch insertion", n)
-	}
 
 	if int(from) >= len(fg.Names) || int(to) >= len(fg.Names) {
 		return // Out of bounds safety
@@ -196,10 +184,6 @@ type BulkEdge struct {
 func (fg *FlatGraph) BulkAddEdges(edges []BulkEdge) {
 	fg.mu.Lock()
 	defer fg.mu.Unlock()
-
-	// Reset sequential AddEdge counter — bulk path is the correct usage.
-	fg.addEdgeSeqCount.Store(0)
-	fg.addEdgeWarned.Store(0)
 
 	N := len(fg.Names)
 	if N == 0 {
