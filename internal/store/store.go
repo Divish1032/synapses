@@ -757,6 +757,10 @@ func Open(path string) (*Store, error) {
 			superseded_at   TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memver_memory ON memory_versions(memory_id, version)`,
+		// Indexes on memory_id for orphan-cleanup cascade DELETEs in PruneStaleData.
+		`CREATE INDEX IF NOT EXISTS idx_memembed_memory ON memory_embeddings(memory_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_memanchors_memory ON memory_anchors(memory_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_memsurfaced_memory ON memory_surfaced(memory_id)`,
 		// Sprint 10.2: knowledge decay scoring — importance field on memories.
 		`ALTER TABLE memories ADD COLUMN importance TEXT NOT NULL DEFAULT '1.0'`,
 		// Sprint 11.5: ACT-R frequency-weighted decay — access counter on memories.
