@@ -42,8 +42,27 @@ func forceKillProcess(pid int) error {
 	return proc.Kill()
 }
 
-// processStartTime returns 0 on Windows — PID recycling detection
-// relies solely on the PID file timestamp heuristic.
-func processStartTime(_ int) int64 {
-	return 0
+// processStartTime returns the creation time of the process with the given PID
+// as Unix nanoseconds. Returns 0 if the process cannot be queried (not running,
+// access denied, etc.). Used for PID recycling detection: if the PID file's
+// stored start time doesn't match the running process's creation time, the PID
+// was recycled by the OS and the stale PID file should be cleaned up.
+//
+// Uses GetProcessTimes via syscall — available on all Windows versions.
+// PROCESS_QUERY_LIMITED_INFORMATION (0x1000) is sufficient and works even for
+// processes owned by other users (unlike PROCESS_QUERY_INFORMATION).
+func processStartTime(pid int) int64 {
+	const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+	handle, err := syscall.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return 0
+	}
+	defer syscall.CloseHandle(handle)
+
+	var creation, exit, kernel, user syscall.Filetime
+	err = syscall.GetProcessTimes(handle, &creation, &exit, &kernel, &user)
+	if err != nil {
+		return 0
+	}
+	return creation.Nanoseconds()
 }
