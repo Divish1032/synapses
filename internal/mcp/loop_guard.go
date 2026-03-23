@@ -32,7 +32,7 @@ type loopGuard struct {
 	lastActivity   map[string]time.Time
 	stopCh         chan struct{}
 	wg             sync.WaitGroup
-	pc             interface{} // *pulse.Client — set via SetPulseClient; nil if pulse not configured
+	pc             *pulse.Client // set via SetPulseClient; nil if pulse not configured
 	projectID      string
 	resolveSession func(string) string // P8-2: MCP session key → Synapses session UUID
 }
@@ -80,14 +80,10 @@ func (g *loopGuard) gcIdleSessions(maxIdle time.Duration) {
 }
 
 // SetPulseClient wires a pulse client so loop-guard can emit guard events.
-func (g *loopGuard) SetPulseClient(pc interface{}) { g.pc = pc }
+func (g *loopGuard) SetPulseClient(pc *pulse.Client) { g.pc = pc }
 
 func (g *loopGuard) getPulseClient() *pulse.Client {
-	if g.pc == nil {
-		return nil
-	}
-	pc, _ := g.pc.(*pulse.Client)
-	return pc
+	return g.pc
 }
 
 // loopGuardSession holds the sliding window for one MCP connection.
