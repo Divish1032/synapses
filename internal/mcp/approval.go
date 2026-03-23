@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -299,6 +300,9 @@ func ListPendingApprovals() ([]PendingApproval, error) {
 // ApproveRequest marks the approval with the given token as approved on disk.
 // The token is read from disk by `synapses approve` — it is never passed through agents.
 func ApproveRequest(token string) error {
+	if filepath.Base(token) != token || strings.ContainsAny(token, `/\`) || strings.Contains(token, "..") {
+		return fmt.Errorf("invalid token")
+	}
 	dir, err := approvalDir()
 	if err != nil {
 		return err

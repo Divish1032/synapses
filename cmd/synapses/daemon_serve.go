@@ -1511,15 +1511,27 @@ func cmdDaemonServe(args []string) error {
 
 	// CSRF token endpoint — fetched once by the web console on load.
 	// Restricted to GET; requires trusted Origin (or no Origin for same-origin).
+	// Non-browser callers (no Origin/Sec-Fetch-Site header) must present a Bearer token.
 	mux.HandleFunc("/api/admin/csrf-token", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "use GET", http.StatusMethodNotAllowed)
 			return
 		}
 		origin := r.Header.Get("Origin")
-		if origin != "" && !trustedOrigins[origin] {
-			http.Error(w, "Forbidden: untrusted origin", http.StatusForbidden)
-			return
+		secFetch := r.Header.Get("Sec-Fetch-Site")
+		isBrowserRequest := origin != "" || secFetch == "same-origin"
+		if isBrowserRequest {
+			if origin != "" && !trustedOrigins[origin] {
+				http.Error(w, "Forbidden: untrusted origin", http.StatusForbidden)
+				return
+			}
+		} else {
+			authHeader := r.Header.Get("Authorization")
+			if !strings.HasPrefix(authHeader, "Bearer ") || strings.TrimPrefix(authHeader, "Bearer ") != authToken {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="synapses"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"token": csrfToken}) //nolint:errcheck
