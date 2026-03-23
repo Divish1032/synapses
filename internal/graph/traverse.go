@@ -88,9 +88,160 @@ func (g *Graph) outInEdges(id NodeID, idx *GraphIndex) []*Edge {
 	return all
 }
 
+// pprScores computes Personalized PageRank scores for all nodes reachable from
+// rootID using power iteration on the undirected weighted adjacency structure.
+//
+// The teleport vector is personalised to rootID (teleport[root]=1.0). For
+// struct/interface roots, the receiver-method set is included as additional
+// teleport targets (at weight 0.9) so that methods without direct edges to their
+// struct are naturally surfaced — matching the BFS method-seeding behaviour.
+//
+// DirectionBoost is applied as a transition-probability bias on CALLS edges:
+// positive boost multiplies outgoing CALLS weights; negative multiplies incoming.
+// This causes the random walk to prefer callees (intent="modify") or callers
+// (intent="debug"), consistent with BFS directional behaviour.
+//
+// Must be called with g.mu.RLock held (CarveEgoGraph already holds it).
+func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[NodeID]float64 {
+	alpha := cfg.Alpha
+	if alpha <= 0 || alpha >= 1 {
+		alpha = 0.15
+	}
+
+	weights := cfg.EdgeWeights
+	if weights == nil {
+		weights = DefaultEdgeWeights
+	}
+
+	// Build personalised teleport vector.
+	// For struct/interface roots, add receiver methods at weight 0.9 so they
+	// surface even though they share no direct edge with the struct node itself.
+	teleport := make(map[NodeID]float64, 8)
+	teleport[rootID] = 1.0
+	if rootNode := g.nodes[rootID]; rootNode != nil &&
+		(rootNode.Type == NodeStruct || rootNode.Type == NodeInterface) {
+		if idx != nil && idx.Ready() {
+			for _, mSeq := range idx.ReceiverMethodSeqs(rootNode.Name) {
+				if !idx.UnsafeIsTombstoned(mSeq) {
+					teleport[idx.SeqIDs[mSeq]] = 0.9
+				}
+			}
+		}
+	}
+	// Normalise teleport to sum to 1.0 (required for a valid probability vector).
+	teleportSum := 0.0
+	for _, v := range teleport {
+		teleportSum += v
+	}
+	for k := range teleport {
+		teleport[k] /= teleportSum
+	}
+
+	// Build undirected adjacency list with DirectionBoost applied to CALLS edges.
+	// outInEdges uses the CSR index when idx is ready (cache-friendly, avoids
+	// pointer chasing and tombstone scans on every BFS step).
+	type nbEntry struct {
+		id     NodeID
+		weight float64
+	}
+	adj := make(map[NodeID][]nbEntry, len(g.nodes))
+	outWeightSum := make(map[NodeID]float64, len(g.nodes))
+
+	for id := range g.nodes {
+		for _, e := range g.outInEdges(id, idx) {
+			nb := e.To
+			isOutgoing := e.From == id
+			if !isOutgoing {
+				nb = e.From
+			}
+
+			w := edgeWeight(e.Type, weights)
+
+			// Mirror the BFS confidence scaling for HANDLES edges.
+			if e.Type == EdgeHandles {
+				if routeNode := g.nodes[e.From]; routeNode != nil {
+					if conf, err := strconv.ParseFloat(routeNode.Metadata["confidence"], 64); err == nil && conf > 0 {
+						w *= conf
+					}
+				}
+			}
+
+			// Apply DirectionBoost to CALLS edges as a transition-probability bias.
+			if cfg.DirectionBoost != 0 && e.Type == EdgeCalls {
+				if cfg.DirectionBoost > 0 && isOutgoing {
+					w *= (1.0 + cfg.DirectionBoost)
+				} else if cfg.DirectionBoost < 0 && !isOutgoing {
+					w *= (1.0 - cfg.DirectionBoost) // double-neg → 1+|boost|
+				}
+			}
+
+			adj[id] = append(adj[id], nbEntry{nb, w})
+			outWeightSum[id] += w
+		}
+	}
+
+	// Power iteration:
+	//   rank[v] = α·teleport[v] + (1-α)·Σ_u rank[u]·w(u,v)/outDeg(u)
+	//
+	// Dangling nodes (outWeightSum==0) redistribute their full mass to the
+	// teleport distribution so the total probability mass is conserved.
+	rank := make(map[NodeID]float64, len(g.nodes))
+	rank[rootID] = 1.0
+
+	newRank := make(map[NodeID]float64, len(g.nodes))
+
+	const pprMaxIter = 100
+	const pprEpsilon = 1e-6 // L∞ convergence threshold
+
+	for iter := 0; iter < pprMaxIter; iter++ {
+		for k := range newRank {
+			delete(newRank, k)
+		}
+
+		// Teleport contribution (α fraction always returns to personalised roots).
+		for id, tv := range teleport {
+			newRank[id] += alpha * tv
+		}
+
+		// Propagation: distribute each node's rank to its neighbours.
+		for id := range g.nodes {
+			r := rank[id]
+			if r == 0 {
+				continue
+			}
+			total := outWeightSum[id]
+			if total <= 0 {
+				// Dangling node: redistribute to teleport distribution.
+				for tid, tv := range teleport {
+					newRank[tid] += (1 - alpha) * r * tv
+				}
+				continue
+			}
+			for _, nb := range adj[id] {
+				newRank[nb.id] += (1 - alpha) * r * nb.weight / total
+			}
+		}
+
+		// L∞ convergence: stop when the maximum per-node change is below epsilon.
+		maxDelta := 0.0
+		for id := range g.nodes {
+			if d := math.Abs(newRank[id] - rank[id]); d > maxDelta {
+				maxDelta = d
+			}
+		}
+		rank, newRank = newRank, rank
+
+		if maxDelta < pprEpsilon {
+			break
+		}
+	}
+
+	return rank
+}
+
 // CarveEgoGraph extracts a relevance-ranked subgraph centred on the given root node.
 //
-// Algorithm:
+// When cfg.UsePPR is false (default), the algorithm is:
 //  1. BFS outward from root, up to cfg.MaxDepth hops.
 //  2. Each node is assigned a relevance score:
 //     relevance = edgeTypeWeight(edge) × (cfg.DecayFactor ^ hopCount)
@@ -98,6 +249,10 @@ func (g *Graph) outInEdges(id NodeID, idx *GraphIndex) []*Edge {
 //  4. If the estimated token cost exceeds cfg.TokenBudget, the lowest-scored
 //     nodes are pruned (highest-hop, lowest-weight first).
 //  5. Only edges where both endpoints survived pruning are included.
+//
+// When cfg.UsePPR is true, step 1-3 are replaced by Personalized PageRank
+// (see pprScores). Steps 4-5 are identical. PPR captures multi-path importance
+// that BFS max-score heuristic cannot represent.
 func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error) {
 	// Acquire the read lock first so we can compute the structural fingerprint
 	// of the root node.  The fingerprint is included in the cache key, which
@@ -120,122 +275,144 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	// Grab index once under the read lock; nil if not yet built.
 	idx := g.index
 
-	weights := cfg.EdgeWeights
-	if weights == nil {
-		weights = DefaultEdgeWeights
-	}
+	// decay is used by hopDistance (display-only) in the post-processing section.
+	// For PPR, hop counts are approximate — PPR scores don't follow the BFS
+	// decay^hop formula, but the display heuristic is acceptable for both modes.
 	decay := cfg.DecayFactor
 	if decay <= 0 || decay > 1 {
 		decay = 0.5
 	}
 
-	// BFS state.
-	visited := make(map[NodeID]float64) // nodeID → best relevance seen
-	visited[rootID] = 1.0
+	// visited maps nodeID → relevance score, consumed by the post-processing
+	// pipeline below (MinRelevance, centrality boost, token budget, edges).
+	// Populated by PPR power iteration or BFS max-score traversal.
+	var visited map[NodeID]float64
 
-	qp := bfsQueuePool.Get().(*[]qItem)
-	queue := (*qp)[:0]
-	queue = append(queue, qItem{rootID, 0})
-	defer func() { *qp = queue[:0]; bfsQueuePool.Put(qp) }()
-
-	// Struct/interface nodes have no CALLS edges — only DEFINES from their file.
-	// Seed BFS with the struct's methods so the carve includes method-level context.
-	if rootNode := g.nodes[rootID]; rootNode != nil &&
-		(rootNode.Type == NodeStruct || rootNode.Type == NodeInterface) {
-		if idx != nil && idx.Ready() {
-			// Use the receiverIndex for O(methods) instead of O(all_nodes).
-			for _, mSeq := range idx.ReceiverMethodSeqs(rootNode.Name) {
-				if idx.UnsafeIsTombstoned(mSeq) {
-					continue
-				}
-				mID := idx.SeqIDs[mSeq]
-				visited[mID] = 0.9 // slightly below root
-				queue = append(queue, qItem{mID, 0})
-			}
-		} else {
-			// Fallback: linear scan when index is not ready.
-			prefix := rootNode.Name + "."
-			for _, n := range g.nodes {
-				if n.Type == NodeMethod && strings.HasPrefix(n.Name, prefix) {
-					visited[n.ID] = 0.9
-					queue = append(queue, qItem{n.ID, 0})
-				}
-			}
-		}
-	}
-
-	for len(queue) > 0 {
-		curr := queue[0]
-		queue = queue[1:]
-
-		if curr.hop >= cfg.MaxDepth {
-			continue
+	if cfg.UsePPR {
+		// PPR path: power iteration scores all reachable nodes.
+		// MinRelevance (applied in post-processing below) acts as the reach
+		// limiter in place of MaxDepth — PPR naturally assigns near-zero scores
+		// to distant nodes, which MinRelevance=0.01 (default) prunes cleanly.
+		visited = g.pprScores(rootID, cfg, idx)
+		// Root-pin: undirected PPR can rank high-degree neighbours above root
+		// (a degree-2 neighbour accumulates random-walk mass from both root and
+		// the rest of the graph). Always output root at relevance=1.0 regardless
+		// of the PPR mathematical rank.
+		visited[rootID] = 1.0
+	} else {
+		weights := cfg.EdgeWeights
+		if weights == nil {
+			weights = DefaultEdgeWeights
 		}
 
-		// Traverse both outgoing and incoming edges so the carve captures
-		// "what does this call" AND "what calls this".
-		// When the columnar index is ready, reads from CSR arrays (cache-friendly,
-		// skips tombstoned nodes). Falls back to pointer-map when not ready.
-		allEdges := g.outInEdges(curr.id, idx)
-		// Degree-normalized adaptive decay (GCN-style, Kipf & Welling ICLR 2017).
-		// High-degree hubs decay children faster to prevent hub explosion;
-		// low-degree nodes in narrow chains receive a relatively smaller penalty.
-		localDecay := decay / (1.0 + math.Log2(float64(len(allEdges)+1)))
+		// BFS state.
+		visited = make(map[NodeID]float64) // nodeID → best relevance seen
+		visited[rootID] = 1.0
 
-		for _, e := range allEdges {
-			typeWeight := edgeWeight(e.Type, weights)
+		qp := bfsQueuePool.Get().(*[]qItem)
+		queue := (*qp)[:0]
+		queue = append(queue, qItem{rootID, 0})
+		defer func() { *qp = queue[:0]; bfsQueuePool.Put(qp) }()
 
-			// R1: HANDLES edges are heuristically inferred (not AST-proven).
-			// Scale their weight by the route node's confidence score so that
-			// a 0.85-confidence inferred route ranks below a structural CALLS
-			// edge. The confidence is stored in the route node's metadata.
-			if e.Type == EdgeHandles {
-				if routeNode := g.nodes[e.From]; routeNode != nil {
-					if conf, err := strconv.ParseFloat(routeNode.Metadata["confidence"], 64); err == nil && conf > 0 {
-						typeWeight *= conf
+		// Struct/interface nodes have no CALLS edges — only DEFINES from their file.
+		// Seed BFS with the struct's methods so the carve includes method-level context.
+		if rootNode := g.nodes[rootID]; rootNode != nil &&
+			(rootNode.Type == NodeStruct || rootNode.Type == NodeInterface) {
+			if idx != nil && idx.Ready() {
+				// Use the receiverIndex for O(methods) instead of O(all_nodes).
+				for _, mSeq := range idx.ReceiverMethodSeqs(rootNode.Name) {
+					if idx.UnsafeIsTombstoned(mSeq) {
+						continue
+					}
+					mID := idx.SeqIDs[mSeq]
+					visited[mID] = 0.9 // slightly below root
+					queue = append(queue, qItem{mID, 0})
+				}
+			} else {
+				// Fallback: linear scan when index is not ready.
+				prefix := rootNode.Name + "."
+				for _, n := range g.nodes {
+					if n.Type == NodeMethod && strings.HasPrefix(n.Name, prefix) {
+						visited[n.ID] = 0.9
+						queue = append(queue, qItem{n.ID, 0})
 					}
 				}
 			}
+		}
 
-			relevance := typeWeight * localDecay * visited[curr.id]
+		for len(queue) > 0 {
+			curr := queue[0]
+			queue = queue[1:]
 
-			neighbor := e.To
-			if e.To == curr.id {
-				neighbor = e.From
+			if curr.hop >= cfg.MaxDepth {
+				continue
 			}
 
-			// Directional CALLS boost — intent-aware:
-			//   Positive DirectionBoost: forward edges (curr→neighbor) boosted
-			//     → pruner prefers callees (what this calls). Used by "modify".
-			//   Negative DirectionBoost: backward edges (neighbor→curr) boosted
-			//     → pruner prefers callers (what calls this). Used by "debug".
-			if cfg.DirectionBoost != 0 && e.Type == EdgeCalls {
-				if cfg.DirectionBoost > 0 && e.From == curr.id {
-					relevance *= (1.0 + cfg.DirectionBoost)
-				} else if cfg.DirectionBoost < 0 && e.To == curr.id {
-					relevance *= (1.0 - cfg.DirectionBoost) // double-neg: 1+|boost|
-				}
-			}
+			// Traverse both outgoing and incoming edges so the carve captures
+			// "what does this call" AND "what calls this".
+			// When the columnar index is ready, reads from CSR arrays (cache-friendly,
+			// skips tombstoned nodes). Falls back to pointer-map when not ready.
+			allEdges := g.outInEdges(curr.id, idx)
+			// Degree-normalized adaptive decay (GCN-style, Kipf & Welling ICLR 2017).
+			// High-degree hubs decay children faster to prevent hub explosion;
+			// low-degree nodes in narrow chains receive a relatively smaller penalty.
+			localDecay := decay / (1.0 + math.Log2(float64(len(allEdges)+1)))
 
-			if prev, seen := visited[neighbor]; !seen || relevance > prev {
-				visited[neighbor] = relevance
-				if curr.hop+1 < cfg.MaxDepth {
-					// Only re-enqueue if not previously visited at a lower hop count.
-					// This prevents exponential queue growth on dense graphs.
-					// Known accuracy tradeoff: when a node is re-discovered at a
-					// higher score, its subtree is NOT re-explored. Intentional —
-					// re-enqueueing would degrade to Dijkstra-like complexity on
-					// dense graphs. The score update still improves pruning.
-					if !seen {
-						queue = append(queue, qItem{neighbor, curr.hop + 1})
+			for _, e := range allEdges {
+				typeWeight := edgeWeight(e.Type, weights)
+
+				// R1: HANDLES edges are heuristically inferred (not AST-proven).
+				// Scale their weight by the route node's confidence score so that
+				// a 0.85-confidence inferred route ranks below a structural CALLS
+				// edge. The confidence is stored in the route node's metadata.
+				if e.Type == EdgeHandles {
+					if routeNode := g.nodes[e.From]; routeNode != nil {
+						if conf, err := strconv.ParseFloat(routeNode.Metadata["confidence"], 64); err == nil && conf > 0 {
+							typeWeight *= conf
+						}
 					}
 				}
-			}
 
-			// Edge collection deferred to after budget pruning to prevent
-			// unbounded memory on hub nodes with 50K+ edges.
+				relevance := typeWeight * localDecay * visited[curr.id]
+
+				neighbor := e.To
+				if e.To == curr.id {
+					neighbor = e.From
+				}
+
+				// Directional CALLS boost — intent-aware:
+				//   Positive DirectionBoost: forward edges (curr→neighbor) boosted
+				//     → pruner prefers callees (what this calls). Used by "modify".
+				//   Negative DirectionBoost: backward edges (neighbor→curr) boosted
+				//     → pruner prefers callers (what calls this). Used by "debug".
+				if cfg.DirectionBoost != 0 && e.Type == EdgeCalls {
+					if cfg.DirectionBoost > 0 && e.From == curr.id {
+						relevance *= (1.0 + cfg.DirectionBoost)
+					} else if cfg.DirectionBoost < 0 && e.To == curr.id {
+						relevance *= (1.0 - cfg.DirectionBoost) // double-neg: 1+|boost|
+					}
+				}
+
+				if prev, seen := visited[neighbor]; !seen || relevance > prev {
+					visited[neighbor] = relevance
+					if curr.hop+1 < cfg.MaxDepth {
+						// Only re-enqueue if not previously visited at a lower hop count.
+						// This prevents exponential queue growth on dense graphs.
+						// Known accuracy tradeoff: when a node is re-discovered at a
+						// higher score, its subtree is NOT re-explored. Intentional —
+						// re-enqueueing would degrade to Dijkstra-like complexity on
+						// dense graphs. The score update still improves pruning.
+						if !seen {
+							queue = append(queue, qItem{neighbor, curr.hop + 1})
+						}
+					}
+				}
+
+				// Edge collection deferred to after budget pruning to prevent
+				// unbounded memory on hub nodes with 50K+ edges.
+			}
 		}
-	}
+	} // end BFS / PPR scoring branch
 
 	// Build scored node list, applying MinRelevance and ExcludeTypes filters.
 	// Excluded-type nodes are still BFS-traversed above (so their edges are
@@ -292,6 +469,50 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 			seq := idx.UnsafeSeq(scored[i].id)
 			if seq > 0 && int(seq) < len(idx.EigenvectorCentrality) {
 				scored[i].relevance *= 1.0 + centralityBeta*idx.EigenvectorCentrality[seq]
+			}
+		}
+	}
+
+	// Sprint 13 #3: Semantic-structural hybrid scoring (CodexGraph / LEGO-GraphRAG).
+	// Blends BFS/PPR structural scores with embedding cosine similarity to root:
+	//   finalScore = (1-λ)×structural + λ×cosineSim(embed(root), embed(n))
+	//
+	// Since UpsertEmbedding pre-normalizes all vectors to unit length,
+	// cosine similarity reduces to a dot product — no sqrt needed.
+	//
+	// Applied only when EmbeddingLookup is set AND HybridLambda > 0. Falls back
+	// to pure structural scoring when the root has no stored embedding. Nodes
+	// with no embedding are left unchanged (structural score preserved).
+	// Root relevance is always pinned at 1.0 regardless of similarity.
+	if cfg.EmbeddingLookup != nil && cfg.HybridLambda > 0 {
+		// Batch-fetch embeddings for all scored nodes + root in one round-trip.
+		batchIDs := make([]NodeID, 0, len(scored)+1)
+		batchIDs = append(batchIDs, rootID)
+		for i := range scored {
+			if scored[i].id != rootID {
+				batchIDs = append(batchIDs, scored[i].id)
+			}
+		}
+		embeddings := cfg.EmbeddingLookup(batchIDs)
+		rootVec := embeddings[rootID]
+
+		// Only blend when we have a root embedding — without it cosine similarity
+		// is undefined and we must fall through to pure structural ranking.
+		if len(rootVec) > 0 {
+			λ := cfg.HybridLambda
+			for i := range scored {
+				if scored[i].id == rootID {
+					continue // root stays pinned at 1.0
+				}
+				nodeVec := embeddings[scored[i].id]
+				if len(nodeVec) == 0 {
+					continue // no embedding for this node — keep structural score
+				}
+				sim := dotProduct(rootVec, nodeVec)
+				if sim < 0 {
+					sim = 0 // negative cosine similarity (opposite meaning) → no boost
+				}
+				scored[i].relevance = (1-λ)*scored[i].relevance + λ*sim
 			}
 		}
 	}
@@ -385,6 +606,21 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	}
 	g.cache.put(rootID, cfg, fp, result)
 	return result, nil
+}
+
+// dotProduct computes the dot product of two float32 vectors.
+// Since all node embeddings are pre-normalized to unit length by UpsertEmbedding,
+// this equals cosine similarity without any additional sqrt computation.
+// Returns 0 for mismatched or empty lengths.
+func dotProduct(a, b []float32) float64 {
+	if len(a) == 0 || len(a) != len(b) {
+		return 0
+	}
+	var sum float64
+	for i := range a {
+		sum += float64(a[i]) * float64(b[i])
+	}
+	return sum
 }
 
 // edgeWeight returns the configured weight for an edge type, falling back to 0.5.

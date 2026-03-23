@@ -2,6 +2,7 @@ package graph_test
 
 import (
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -487,6 +488,207 @@ func TestFindTestsFor_PythonSuffixTestFile(t *testing.T) {
 	}
 }
 
+// ── Personalized PageRank ─────────────────────────────────────────────────────
+
+// TestCarveEgoGraph_PPR_DiamondBoost verifies the core PPR value proposition:
+// a convergent node reached by 2 independent call paths outranks structurally
+// equivalent single-path nodes. BFS max-score heuristic cannot distinguish these.
+//
+// Graph (same as spike Topology 1):
+//
+//	Root → A → C   (C reached via A)
+//	Root → B → C   (C reached via B — 2 independent paths)
+//	     A → D     (D unique to A's subtree)
+//	     B → E     (E unique to B's subtree)
+//
+// Expected with UsePPR=true: rank(C) > rank(D) == rank(E)
+func TestCarveEgoGraph_PPR_DiamondBoost(t *testing.T) {
+	g := graph.New("ppr-diamond")
+	mkID := func(name string) graph.NodeID { return g.MakeNodeID("main.go", name) }
+
+	ids := map[string]graph.NodeID{
+		"Root": mkID("Root"),
+		"A":    mkID("A"),
+		"B":    mkID("B"),
+		"C":    mkID("C"), // 2-path convergent — must rank highest
+		"D":    mkID("D"), // 1-path unique to A
+		"E":    mkID("E"), // 1-path unique to B
+	}
+	for name, id := range ids {
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: name, File: "main.go"})
+	}
+	g.AddEdge(&graph.Edge{From: ids["Root"], To: ids["A"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["Root"], To: ids["B"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["A"], To: ids["C"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["B"], To: ids["C"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["A"], To: ids["D"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["B"], To: ids["E"], Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.MaxDepth = 5
+	cfg.MinRelevance = 0
+	cfg.TokenBudget = 0
+	cfg.UsePPR = true
+
+	sub, err := g.CarveEgoGraph(ids["Root"], cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph PPR: %v", err)
+	}
+
+	rel := make(map[graph.NodeID]float64)
+	for _, cn := range sub.Nodes {
+		rel[cn.Node.ID] = cn.Relevance
+	}
+
+	if rel[ids["C"]] <= rel[ids["D"]] {
+		t.Errorf("PPR: C (%.5f) should outrank D (%.5f) — C has 2 incoming paths", rel[ids["C"]], rel[ids["D"]])
+	}
+	if rel[ids["C"]] <= rel[ids["E"]] {
+		t.Errorf("PPR: C (%.5f) should outrank E (%.5f) — C has 2 incoming paths", rel[ids["C"]], rel[ids["E"]])
+	}
+	t.Logf("PPR diamond: C=%.5f D=%.5f E=%.5f C/D=%.2fx", rel[ids["C"]], rel[ids["D"]], rel[ids["E"]], rel[ids["C"]]/rel[ids["D"]])
+}
+
+// TestCarveEgoGraph_PPR_BFSCannotDistinguishDiamond confirms that BFS (UsePPR=false)
+// assigns identical scores to C, D, and E on the diamond topology — the exact
+// weakness that PPR corrects.
+func TestCarveEgoGraph_PPR_BFSCannotDistinguishDiamond(t *testing.T) {
+	g := graph.New("bfs-diamond")
+	mkID := func(name string) graph.NodeID { return g.MakeNodeID("main.go", name) }
+
+	ids := map[string]graph.NodeID{
+		"Root": mkID("Root"), "A": mkID("A"), "B": mkID("B"),
+		"C": mkID("C"), "D": mkID("D"), "E": mkID("E"),
+	}
+	for name, id := range ids {
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: name, File: "main.go"})
+	}
+	g.AddEdge(&graph.Edge{From: ids["Root"], To: ids["A"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["Root"], To: ids["B"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["A"], To: ids["C"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["B"], To: ids["C"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["A"], To: ids["D"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["B"], To: ids["E"], Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.MaxDepth = 5
+	cfg.MinRelevance = 0
+	cfg.TokenBudget = 0
+	// UsePPR defaults to false
+
+	sub, err := g.CarveEgoGraph(ids["Root"], cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph BFS: %v", err)
+	}
+
+	rel := make(map[graph.NodeID]float64)
+	for _, cn := range sub.Nodes {
+		rel[cn.Node.ID] = cn.Relevance
+	}
+
+	// BFS max-score: C, D, E are hop-2 nodes with equal edge weights → same score.
+	const tol = 1e-9
+	if math.Abs(rel[ids["C"]]-rel[ids["D"]]) > tol {
+		t.Errorf("BFS: C (%.9f) != D (%.9f) — BFS should be blind to path count", rel[ids["C"]], rel[ids["D"]])
+	}
+	if math.Abs(rel[ids["C"]]-rel[ids["E"]]) > tol {
+		t.Errorf("BFS: C (%.9f) != E (%.9f) — BFS should be blind to path count", rel[ids["C"]], rel[ids["E"]])
+	}
+	t.Logf("BFS diamond confirmed: C=D=E=%.5f", rel[ids["C"]])
+}
+
+// TestCarveEgoGraph_PPR_RootAlwaysPinnedToOne verifies that the root node always
+// appears at relevance=1.0 regardless of what PPR computes for it. In undirected
+// PPR, high-degree neighbours can accumulate more random-walk mass than a degree-1
+// root. The root-pin ensures agents always see the queried entity at full relevance.
+func TestCarveEgoGraph_PPR_RootAlwaysPinnedToOne(t *testing.T) {
+	g := graph.New("ppr-rootpin")
+
+	// Chain: Root(deg=1) → A(deg=2) → B(deg=2) → C(deg=1)
+	// In undirected PPR, A and B can rank above Root.
+	rootID := g.MakeNodeID("chain.go", "Root")
+	aID := g.MakeNodeID("chain.go", "A")
+	bID := g.MakeNodeID("chain.go", "B")
+	cID := g.MakeNodeID("chain.go", "C")
+
+	for _, id := range []graph.NodeID{rootID, aID, bID, cID} {
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: string(id), File: "chain.go"})
+	}
+	g.AddEdge(&graph.Edge{From: rootID, To: aID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: aID, To: bID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: bID, To: cID, Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = true
+	cfg.MinRelevance = 0
+	cfg.TokenBudget = 0
+
+	sub, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph PPR: %v", err)
+	}
+
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == rootID {
+			if cn.Relevance != 1.0 {
+				t.Errorf("root PPR relevance = %.6f, want exactly 1.0 (root-pin)", cn.Relevance)
+			}
+			return
+		}
+	}
+	t.Error("root node missing from PPR subgraph")
+}
+
+// TestCarveEgoGraph_PPR_PostProcessingPreserved verifies PPR results flow through
+// the same post-processing pipeline as BFS: MinRelevance, token budget, edge
+// deduplication and truncation signal all apply correctly.
+func TestCarveEgoGraph_PPR_PostProcessingPreserved(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	// MinRelevance=0.99 prunes everything except root (pinned at 1.0).
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = true
+	cfg.MinRelevance = 0.99
+	cfg.MaxDepth = 5
+	cfg.TokenBudget = 0
+
+	sub, err := g.CarveEgoGraph(ids["service"], cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph PPR: %v", err)
+	}
+	if len(sub.Nodes) != 1 {
+		t.Errorf("expected 1 node after MinRelevance=0.99 pruning, got %d", len(sub.Nodes))
+	}
+	if len(sub.Nodes) > 0 && sub.Nodes[0].Node.ID != ids["service"] {
+		t.Errorf("surviving node should be root (service), got %s", sub.Nodes[0].Node.ID)
+	}
+
+	// TokenBudget=1 forces truncation.
+	cfg2 := graph.DefaultCarveConfig()
+	cfg2.UsePPR = true
+	cfg2.MinRelevance = 0
+	cfg2.TokenBudget = 1
+
+	sub2, err := g.CarveEgoGraph(ids["service"], cfg2)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph PPR tight budget: %v", err)
+	}
+	if !sub2.Truncated {
+		t.Error("expected Truncated=true with TokenBudget=1 and PPR")
+	}
+
+	// Edges only reference surviving nodes.
+	ns := nodeIDSet(sub2)
+	for _, e := range sub2.Edges {
+		if _, ok := ns[e.From]; !ok {
+			t.Errorf("PPR edge %s→%s: From not in surviving nodes", e.From, e.To)
+		}
+		if _, ok := ns[e.To]; !ok {
+			t.Errorf("PPR edge %s→%s: To not in surviving nodes", e.From, e.To)
+		}
+	}
+}
+
 // nodeIDSet returns the set of NodeIDs present in a SubGraph for quick lookup.
 func nodeIDSet(sub *graph.SubGraph) map[graph.NodeID]struct{} {
 	m := make(map[graph.NodeID]struct{}, len(sub.Nodes))
@@ -623,4 +825,249 @@ func TestCentralityBoost_CacheInvalidatedOnRebuild(t *testing.T) {
 		t.Errorf("after rebuild: leaf1 (%f) should outrank leaf2 (%f) due to centrality boost",
 			leaf1RelAfter, leaf2RelAfter)
 	}
+}
+
+// ── Hybrid Scoring (Sprint 13 #3) ────────────────────────────────────────────
+
+// makeUnitVec builds a unit-length float32 slice with only component [direction]
+// set to 1.0. Two vectors with the same direction have cosine similarity 1.0;
+// perpendicular vectors have cosine similarity 0.0.
+func makeUnitVec(dim, direction int) []float32 {
+	v := make([]float32, dim)
+	v[direction] = 1.0
+	return v
+}
+
+// TestCarveEgoGraph_HybridScoring_DisabledByDefault verifies that when neither
+// EmbeddingLookup nor HybridLambda is set, scoring is pure structural.
+func TestCarveEgoGraph_HybridScoring_DisabledByDefault(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	cfg := graph.DefaultCarveConfig()
+	// EmbeddingLookup and HybridLambda are zero-value — no blend expected.
+
+	sub, err := g.CarveEgoGraph(ids["handler"], cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == ids["handler"] && cn.Relevance != 1.0 {
+			t.Errorf("root relevance = %f, want 1.0", cn.Relevance)
+		}
+	}
+}
+
+// TestCarveEgoGraph_HybridScoring_LambdaZeroNoBlend verifies that lambda=0
+// with a lookup provided still produces pure structural scores and does NOT
+// invoke the lookup function.
+func TestCarveEgoGraph_HybridScoring_LambdaZeroNoBlend(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	lookupCalled := false
+	cfg := graph.DefaultCarveConfig()
+	cfg.EmbeddingLookup = func(nodeIDs []graph.NodeID) map[graph.NodeID][]float32 {
+		lookupCalled = true
+		return nil
+	}
+	cfg.HybridLambda = 0 // explicitly zero
+
+	_, err := g.CarveEgoGraph(ids["handler"], cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lookupCalled {
+		t.Error("EmbeddingLookup must not be called when HybridLambda=0")
+	}
+}
+
+// TestCarveEgoGraph_HybridScoring_NilLookupNoBlend verifies that a positive lambda
+// with nil EmbeddingLookup produces pure structural scores without panicking.
+func TestCarveEgoGraph_HybridScoring_NilLookupNoBlend(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.EmbeddingLookup = nil
+	cfg.HybridLambda = 0.5
+
+	sub, err := g.CarveEgoGraph(ids["service"], cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	found := false
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == ids["service"] {
+			found = true
+			if cn.Relevance != 1.0 {
+				t.Errorf("root relevance = %f, want 1.0", cn.Relevance)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("root node not found in result")
+	}
+}
+
+// TestCarveEgoGraph_HybridScoring_BlendApplied verifies the blend formula:
+//
+//	finalScore = (1-λ)×structural + λ×cosineSim(embed(root), embed(n))
+//
+// Uses unit vectors so cosine similarities are exact (0.0 or 1.0):
+//   - "service" gets the same-axis embedding as root → cosineSim=1.0 → boosted
+//   - "repo"    gets a perpendicular embedding        → cosineSim=0.0 → damped
+//
+// With λ=0.5, service must rank above repo after the blend.
+func TestCarveEgoGraph_HybridScoring_BlendApplied(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	const dim = 4
+	embeds := map[graph.NodeID][]float32{
+		ids["handler"]: makeUnitVec(dim, 0), // root axis
+		ids["service"]: makeUnitVec(dim, 0), // same axis as root → sim=1.0
+		ids["repo"]:    makeUnitVec(dim, 1), // perpendicular      → sim=0.0
+	}
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.EmbeddingLookup = func(nodeIDs []graph.NodeID) map[graph.NodeID][]float32 {
+		result := make(map[graph.NodeID][]float32, len(nodeIDs))
+		for _, id := range nodeIDs {
+			if v, ok := embeds[id]; ok {
+				result[id] = v
+			}
+		}
+		return result
+	}
+	cfg.HybridLambda = 0.5
+
+	sub, err := g.CarveEgoGraph(ids["handler"], cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var serviceRel, repoRel float64
+	for _, cn := range sub.Nodes {
+		switch cn.Node.ID {
+		case ids["handler"]:
+			if cn.Relevance != 1.0 {
+				t.Errorf("root relevance = %f, want 1.0", cn.Relevance)
+			}
+		case ids["service"]:
+			serviceRel = cn.Relevance
+		case ids["repo"]:
+			repoRel = cn.Relevance
+		}
+	}
+	if serviceRel == 0 {
+		t.Fatal("service node not found in result")
+	}
+	if repoRel == 0 {
+		t.Fatal("repo node not found in result")
+	}
+	// service (sim=1.0) must outrank repo (sim=0.0) after hybrid blend.
+	if serviceRel <= repoRel {
+		t.Errorf("service (%f) should outrank repo (%f) after semantic blend", serviceRel, repoRel)
+	}
+}
+
+// TestCarveEgoGraph_HybridScoring_NoRootEmbeddingFallback verifies that when
+// the root node has no stored embedding, scoring falls back to pure structural
+// (no blend applied to any node).
+func TestCarveEgoGraph_HybridScoring_NoRootEmbeddingFallback(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	// Embeddings for all nodes EXCEPT root.
+	const dim = 4
+	embeds := map[graph.NodeID][]float32{
+		ids["service"]: makeUnitVec(dim, 0),
+		ids["repo"]:    makeUnitVec(dim, 1),
+	}
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.EmbeddingLookup = func(nodeIDs []graph.NodeID) map[graph.NodeID][]float32 {
+		result := make(map[graph.NodeID][]float32)
+		for _, id := range nodeIDs {
+			if v, ok := embeds[id]; ok {
+				result[id] = v
+			}
+		}
+		return result
+	}
+	cfg.HybridLambda = 0.5
+
+	hybridSub, err := g.CarveEgoGraph(ids["handler"], cfg)
+	if err != nil {
+		t.Fatalf("hybrid sub error: %v", err)
+	}
+
+	// Pure structural baseline — use a different IntentID to avoid cache collision.
+	pureCfg := graph.DefaultCarveConfig()
+	pureCfg.IntentID = "pure"
+	pureSub, err := g.CarveEgoGraph(ids["handler"], pureCfg)
+	if err != nil {
+		t.Fatalf("pure sub error: %v", err)
+	}
+
+	hybridRel := map[graph.NodeID]float64{}
+	for _, cn := range hybridSub.Nodes {
+		hybridRel[cn.Node.ID] = cn.Relevance
+	}
+	pureRel := map[graph.NodeID]float64{}
+	for _, cn := range pureSub.Nodes {
+		pureRel[cn.Node.ID] = cn.Relevance
+	}
+
+	// Non-root scores must equal pure structural (no root embedding → no blend).
+	for id, pr := range pureRel {
+		if id == ids["handler"] {
+			continue
+		}
+		hr, ok := hybridRel[id]
+		if !ok {
+			t.Errorf("node %s missing from hybrid result", id)
+			continue
+		}
+		if hr != pr {
+			t.Errorf("node %s: hybrid=%f structural=%f — should be equal (no root embedding)", id, hr, pr)
+		}
+	}
+}
+
+// TestCarveEgoGraph_HybridScoring_MismatchedDimFallback verifies that a node
+// whose embedding dimension differs from root's is treated as "no embedding"
+// (dotProduct returns 0) and retains its structural score.
+func TestCarveEgoGraph_HybridScoring_MismatchedDimFallback(t *testing.T) {
+	g := graph.New("dimtest")
+	root := g.MakeNodeID("f.go", "Root")
+	child := g.MakeNodeID("f.go", "Child")
+	g.AddNode(&graph.Node{ID: root, Type: graph.NodeFunction, Name: "Root", File: "f.go"})
+	g.AddNode(&graph.Node{ID: child, Type: graph.NodeFunction, Name: "Child", File: "f.go"})
+	g.AddEdge(&graph.Edge{From: root, To: child, Type: graph.EdgeCalls})
+
+	// root: dim-2, child: dim-3 → dotProduct returns 0 → child score unchanged.
+	cfg := graph.DefaultCarveConfig()
+	cfg.HybridLambda = 0.5
+	cfg.EmbeddingLookup = func(ids []graph.NodeID) map[graph.NodeID][]float32 {
+		m := map[graph.NodeID][]float32{}
+		for _, id := range ids {
+			if id == root {
+				m[id] = []float32{1, 0}
+			} else {
+				m[id] = []float32{1, 0, 0} // mismatched length
+			}
+		}
+		return m
+	}
+
+	sub, err := g.CarveEgoGraph(root, cfg)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == child {
+			if cn.Relevance <= 0 {
+				t.Errorf("child relevance = %f, expected > 0 (structural fallback)", cn.Relevance)
+			}
+			return
+		}
+	}
+	t.Error("child node not found in result")
 }
