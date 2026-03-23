@@ -2,12 +2,19 @@ package mcp
 
 import (
 	"context"
-	"strings"
+	"encoding/json"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 )
+
+// errJSON returns a tool result with a properly JSON-encoded error message.
+func errJSON(err error) *mcp.CallToolResult {
+	msg := err.Error()
+	b, _ := json.Marshal(map[string]string{"error": msg})
+	return mcp.NewToolResultText(string(b))
+}
 
 // getBrainClient type-asserts the stored brainClient to *brain.Client.
 // Returns nil if no brain client is configured.
@@ -68,7 +75,7 @@ func (s *Server) handleUpsertADR(
 		LinkedFiles:  linkedFiles,
 	})
 	if err != nil {
-		return mcp.NewToolResultText(`{"error": "` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`), nil
+		return errJSON(err), nil
 	}
 	return jsonResult(adr)
 }
@@ -86,7 +93,7 @@ func (s *Server) handleGetADRs(
 	fileFilter, _ := req.GetArguments()["file"].(string)
 	adrs, err := bc.GetADRs(ctx, fileFilter)
 	if err != nil {
-		return mcp.NewToolResultText(`{"error": "` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`), nil
+		return errJSON(err), nil
 	}
 	if adrs == nil {
 		adrs = []brain.ADR{}
