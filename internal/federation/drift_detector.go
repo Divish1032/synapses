@@ -16,6 +16,7 @@ import (
 // using a graph-first strategy with git-diff fallback.
 type DriftDetector struct {
 	resolver *Resolver
+	clock    Clock // injected time source for deterministic testing
 
 	mu        sync.RWMutex
 	cache     map[string][]DriftAlert // alias → cached drift results (session-level)
@@ -25,6 +26,7 @@ type DriftDetector struct {
 func newDriftDetector(r *Resolver) *DriftDetector {
 	return &DriftDetector{
 		resolver:  r,
+		clock:     r.clock,
 		cache:     make(map[string][]DriftAlert),
 		cacheTime: make(map[string]time.Time),
 	}
@@ -46,7 +48,7 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 		// Check session-level cache first (with TTL).
 		d.mu.RLock()
 		cached, hasCached := d.cache[e.Alias]
-		fresh := hasCached && time.Since(d.cacheTime[e.Alias]) < 5*time.Minute
+		fresh := hasCached && d.clock().Sub(d.cacheTime[e.Alias]) < 5*time.Minute
 		d.mu.RUnlock()
 		if hasCached && !fresh {
 			d.mu.Lock()
@@ -64,7 +66,7 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 
 		d.mu.Lock()
 		d.cache[e.Alias] = alerts
-		d.cacheTime[e.Alias] = time.Now()
+		d.cacheTime[e.Alias] = d.clock()
 		if len(d.cache) > 20 {
 			var oldest string
 			var oldestTime time.Time
