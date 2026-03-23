@@ -426,6 +426,34 @@ func detectLayerLabel(pkg string) string {
 	case strings.Contains(lower, "test") || strings.Contains(lower, "mock") ||
 		strings.Contains(lower, "fake"):
 		return "[test support]"
+	case strings.Contains(lower, "doc") || strings.Contains(lower, "docs") ||
+		strings.Contains(lower, "documentation") || strings.Contains(lower, "council") ||
+		strings.Contains(lower, "report") || strings.Contains(lower, "spec"):
+		return "[documentation]"
+	case strings.Contains(lower, "script") || strings.Contains(lower, "tool") ||
+		strings.Contains(lower, "build") || strings.Contains(lower, "deploy") ||
+		strings.Contains(lower, "ci") || strings.Contains(lower, "infra") ||
+		strings.Contains(lower, "docker") || strings.Contains(lower, "k8s") ||
+		strings.Contains(lower, "makefile"):
+		return "[tooling/infra]"
+	case strings.Contains(lower, "proto") || strings.Contains(lower, "schema") ||
+		strings.Contains(lower, "model") || strings.Contains(lower, "types") ||
+		strings.Contains(lower, "dto") || strings.Contains(lower, "entity"):
+		return "[data model]"
+	case strings.Contains(lower, "util") || strings.Contains(lower, "utils") ||
+		strings.Contains(lower, "common") || strings.Contains(lower, "shared") ||
+		strings.Contains(lower, "helper") || strings.Contains(lower, "lib"):
+		return "[utilities]"
+	case strings.Contains(lower, "auth") || strings.Contains(lower, "authn") ||
+		strings.Contains(lower, "authz") || strings.Contains(lower, "security") ||
+		strings.Contains(lower, "permission") || strings.Contains(lower, "token"):
+		return "[security]"
+	case strings.Contains(lower, "cache") || strings.Contains(lower, "caching") ||
+		strings.Contains(lower, "redis") || strings.Contains(lower, "memcache"):
+		return "[caching]"
+	case strings.Contains(lower, "parser") || strings.Contains(lower, "lexer") ||
+		strings.Contains(lower, "ast") || strings.Contains(lower, "syntax"):
+		return "[parser]"
 	default:
 		return "[core logic]"
 	}
