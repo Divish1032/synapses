@@ -86,16 +86,6 @@ CREATE TABLE IF NOT EXISTS call_sites (
     func_name   TEXT NOT NULL
 );
 
--- Import edges: tracks which packages each source file imports.
--- Used by the watcher to compute the incremental reanalysis invalidation set
--- on file change: only call sites from direct importers of the changed file's
--- package need to be reloaded, not the entire call_sites table. This reduces
--- per-save resolver work by 10-50x on large codebases.
-CREATE TABLE IF NOT EXISTS import_edges (
-    importer_file TEXT NOT NULL,
-    imported_pkg  TEXT NOT NULL,
-    PRIMARY KEY (importer_file, imported_pkg)
-);
 
 -- Vector embeddings for graph nodes. Stored separately from the nodes table
 -- to keep the main table lean — embeddings are optional and can be regenerated.
@@ -123,7 +113,6 @@ CREATE INDEX IF NOT EXISTS idx_nodes_name      ON nodes(name);
 CREATE INDEX IF NOT EXISTS idx_edges_from      ON edges(from_id);
 CREATE INDEX IF NOT EXISTS idx_edges_to        ON edges(to_id);
 CREATE INDEX IF NOT EXISTS idx_call_sites_caller ON call_sites(caller_id);
-CREATE INDEX IF NOT EXISTS idx_import_edges_pkg  ON import_edges(imported_pkg);
 CREATE INDEX IF NOT EXISTS idx_call_sites_file   ON call_sites(caller_file);
 CREATE INDEX IF NOT EXISTS idx_embeddings_node ON node_embeddings(node_id);
 CREATE INDEX IF NOT EXISTS idx_nodes_type_pkg  ON nodes(type, package);
@@ -651,13 +640,6 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE nodes ADD COLUMN domain TEXT NOT NULL DEFAULT 'code'`,
 		`ALTER TABLE nodes ADD COLUMN prev_signature TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE node_embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
-		// Sprint 14.3: import_edges table for dependency-aware incremental reanalysis.
-		`CREATE TABLE IF NOT EXISTS import_edges (
-			importer_file TEXT NOT NULL,
-			imported_pkg  TEXT NOT NULL,
-			PRIMARY KEY (importer_file, imported_pkg)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_import_edges_pkg  ON import_edges(imported_pkg)`,
 		`CREATE INDEX IF NOT EXISTS idx_call_sites_file   ON call_sites(caller_file)`,
 	} {
 		if _, err := graphTx.Exec(m); err != nil && !isDupColumnErr(err) {
@@ -2971,57 +2953,6 @@ func (s *Store) UpdateCallSitesForFile(file string, newSites []graph.CallSite) e
 		}
 	}
 	return tx.Commit()
-}
-
-// UpdateImportEdgesForFile atomically replaces the persisted import edges for
-// importer_file with pkgs. Called by the watcher after each incremental
-// re-parse so the import_edges table stays consistent with the live graph.
-func (s *Store) UpdateImportEdgesForFile(file string, pkgs []string) error {
-	tx, err := s.graphDB.Begin()
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	if _, err := tx.Exec(`DELETE FROM import_edges WHERE importer_file = ?`, file); err != nil {
-		return fmt.Errorf("delete import_edges for %s: %w", file, err)
-	}
-	if len(pkgs) > 0 {
-		stmt, err := tx.Prepare(`INSERT OR IGNORE INTO import_edges (importer_file, imported_pkg) VALUES (?, ?)`)
-		if err != nil {
-			return fmt.Errorf("prepare import_edges stmt: %w", err)
-		}
-		defer stmt.Close()
-		for _, pkg := range pkgs {
-			if pkg == "" {
-				continue
-			}
-			if _, err := stmt.Exec(file, pkg); err != nil {
-				return fmt.Errorf("insert import_edge: %w", err)
-			}
-		}
-	}
-	return tx.Commit()
-}
-
-// LoadAllImportEdges returns all persisted import edges as a map from
-// importer_file to the list of short package names it imports. Returns an
-// empty map (not an error) if the table is empty.
-func (s *Store) LoadAllImportEdges() (map[string][]string, error) {
-	rows, err := s.graphDB.Query(`SELECT importer_file, imported_pkg FROM import_edges`)
-	if err != nil {
-		return nil, fmt.Errorf("query import_edges: %w", err)
-	}
-	defer rows.Close()
-	result := make(map[string][]string)
-	for rows.Next() {
-		var file, pkg string
-		if err := rows.Scan(&file, &pkg); err != nil {
-			return nil, fmt.Errorf("scan import_edge: %w", err)
-		}
-		result[file] = append(result[file], pkg)
-	}
-	return result, rows.Err()
 }
 
 // LoadCallSitesForFiles returns stored call sites whose caller_file is in the
