@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -322,6 +323,19 @@ func buildIndex(g *Graph, pool *StringPool) *GraphIndex {
 			exported: n.Exported,
 		})
 	}
+
+	// Sort nodeSnaps by NodeID for deterministic sequential ID assignment.
+	// Without this, map iteration order causes non-deterministic seq IDs
+	// across rebuilds.
+	slices.SortFunc(nodeSnaps, func(a, b nodeSnap) int {
+		if a.id < b.id {
+			return -1
+		}
+		if a.id > b.id {
+			return 1
+		}
+		return 0
+	})
 
 	edgeSnaps := make([]edgeSnap, 0)
 	for _, edges := range g.outEdges {
