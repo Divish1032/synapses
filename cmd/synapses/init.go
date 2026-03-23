@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -625,21 +626,7 @@ func tryAutoInstallService() bool {
 		return true
 	}
 
-	// Suppress daemonInstall's verbose fmt.Print output by temporarily
-	// redirecting os.Stdout to /dev/null. This is goroutine-unsafe but
-	// acceptable here because init runs single-threaded before any
-	// background goroutines are started.
-	origStdout := os.Stdout
-	if f, err := os.Open(os.DevNull); err == nil {
-		os.Stdout = f
-		defer func() {
-			os.Stdout = origStdout
-			f.Close()
-		}()
-	}
-	installErr := daemonInstall()
-	os.Stdout = origStdout
-
+	installErr := daemonInstall(io.Discard)
 	if installErr != nil {
 		logutil.Info("  auto-install service: %v (non-fatal)\n", installErr)
 		return false
