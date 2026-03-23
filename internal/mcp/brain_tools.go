@@ -17,14 +17,9 @@ func errJSON(err error) *mcp.CallToolResult {
 	return mcp.NewToolResultText(string(b))
 }
 
-// getBrainClient type-asserts the stored brainClient to *brain.Client.
-// Returns nil if no brain client is configured.
+// getBrainClient returns the stored brain client, or nil if not configured.
 func (s *Server) getBrainClient() *brain.Client {
-	if s.brainClient == nil {
-		return nil
-	}
-	bc, _ := s.brainClient.(*brain.Client)
-	return bc
+	return s.brainClient
 }
 
 // handleUpsertADR creates or updates an Architectural Decision Record in the brain.
