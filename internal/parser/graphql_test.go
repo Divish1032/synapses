@@ -648,3 +648,112 @@ type Mutation {
 	assertNode(t, g, "Query", graph.NodeStruct)
 	assertNode(t, g, "Mutation", graph.NodeStruct)
 }
+
+// ─── Domain tagging ──────────────────────────────────────────────────────────
+
+func TestGraphQLParser_DomainAPI(t *testing.T) {
+	g := parseGraphQL(t, graphqlSource)
+	// Every non-file node should carry DomainAPI.
+	for _, n := range []*graph.Node{
+		assertNode(t, g, "User", graph.NodeStruct),
+		assertNode(t, g, "Role", graph.NodeStruct),
+		assertNode(t, g, "DateTime", graph.NodeStruct),
+		assertNode(t, g, "Node", graph.NodeInterface),
+	} {
+		if n.Domain != graph.DomainAPI {
+			t.Errorf("node %q domain = %q, want DomainAPI", n.Name, n.Domain)
+		}
+	}
+}
+
+// ─── Query/Mutation operations as NodeRoute ───────────────────────────────────
+
+func TestGraphQLParser_QueryFieldsAreNodeRoute(t *testing.T) {
+	g := parseGraphQL(t, graphqlSource)
+	for _, name := range []string{"Query.user", "Query.users"} {
+		nodes := g.FindByName(name)
+		if len(nodes) == 0 {
+			t.Errorf("operation %q not found", name)
+			continue
+		}
+		if nodes[0].Type != graph.NodeRoute {
+			t.Errorf("operation %q type = %q, want NodeRoute", name, nodes[0].Type)
+		}
+		if nodes[0].Domain != graph.DomainAPI {
+			t.Errorf("operation %q domain = %q, want DomainAPI", name, nodes[0].Domain)
+		}
+	}
+}
+
+func TestGraphQLParser_MutationFieldsAreNodeRoute(t *testing.T) {
+	g := parseGraphQL(t, graphqlSource)
+	for _, name := range []string{"Mutation.createUser", "Mutation.updateUser"} {
+		nodes := g.FindByName(name)
+		if len(nodes) == 0 {
+			t.Errorf("mutation %q not found", name)
+			continue
+		}
+		if nodes[0].Type != graph.NodeRoute {
+			t.Errorf("mutation %q type = %q, want NodeRoute", name, nodes[0].Type)
+		}
+	}
+}
+
+func TestGraphQLParser_RegularFieldsRemainNodeFunction(t *testing.T) {
+	// Fields on non-operation types should still be NodeFunction.
+	g := parseGraphQL(t, graphqlSource)
+	for _, name := range []string{"User.name", "User.email", "Post.title"} {
+		nodes := g.FindByName(name)
+		if len(nodes) == 0 {
+			t.Errorf("field %q not found", name)
+			continue
+		}
+		if nodes[0].Type != graph.NodeFunction {
+			t.Errorf("field %q type = %q, want NodeFunction", name, nodes[0].Type)
+		}
+	}
+}
+
+// ─── Field → return type EdgeDependsOn ───────────────────────────────────────
+
+func TestGraphQLParser_FieldReturnTypeEdge(t *testing.T) {
+	// Post.author: User! should create DEPENDS_ON from Post.author to User.
+	g := parseGraphQL(t, graphqlSource)
+	postAuthor := g.FindByName("Post.author")
+	if len(postAuthor) == 0 {
+		t.Fatal("Post.author not found")
+	}
+	if !hasDependsOnEdge(g, postAuthor[0].ID, "User") {
+		t.Error("Post.author should have DEPENDS_ON edge to User")
+	}
+}
+
+func TestGraphQLParser_QueryOperationReturnTypeEdge(t *testing.T) {
+	// Query.user(id: ID!): User should have DEPENDS_ON → User.
+	g := parseGraphQL(t, graphqlSource)
+	queryUser := g.FindByName("Query.user")
+	if len(queryUser) == 0 {
+		t.Fatal("Query.user not found")
+	}
+	if !hasDependsOnEdge(g, queryUser[0].ID, "User") {
+		t.Error("Query.user should have DEPENDS_ON edge to User")
+	}
+}
+
+func TestGraphQLParser_BuiltinScalarsNoEdge(t *testing.T) {
+	// Fields returning String/Int/Boolean/Float/ID must NOT produce DEPENDS_ON edges
+	// (no node exists for built-in scalars).
+	g := parseGraphQL(t, graphqlSource)
+	userEmail := g.FindByName("User.email")
+	if len(userEmail) == 0 {
+		t.Fatal("User.email not found")
+	}
+	for _, e := range g.OutEdges(userEmail[0].ID) {
+		if e.Type == graph.EdgeDependsOn {
+			n := g.GetNode(e.To)
+			if n != nil && (n.Name == "String" || n.Name == "Int" || n.Name == "Boolean" || n.Name == "Float" || n.Name == "ID") {
+				t.Errorf("User.email must not have DEPENDS_ON to built-in scalar %q", n.Name)
+			}
+		}
+	}
+}

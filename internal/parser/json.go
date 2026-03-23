@@ -83,7 +83,12 @@ func (p *JSONParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	case base == "schema.json" || strings.HasSuffix(base, ".schema.json"):
 		p.parseSchemaJSON(g, rootObj, src, filePath, fileNodeID)
 	default:
-		p.parseGenericJSON(g, rootObj, src, filePath, fileNodeID)
+		// OpenAPI/Swagger JSON: detect by presence of ("openapi" or "swagger") + "paths" keys.
+		if p.isOpenAPIJSON(rootObj, src) {
+			p.parseOpenAPIJSON(g, rootObj, src, filePath, fileNodeID)
+		} else {
+			p.parseGenericJSON(g, rootObj, src, filePath, fileNodeID)
+		}
 	}
 
 	return nil
@@ -498,4 +503,233 @@ func jsonFindRootObject(root sitter.Node) sitter.Node {
 		return root
 	}
 	return sitter.Node{}
+}
+
+// isOpenAPIJSON returns true if the JSON root object contains ("openapi" or "swagger")
+// AND "paths" keys — the minimal signature of an OpenAPI/Swagger document.
+func (p *JSONParser) isOpenAPIJSON(obj sitter.Node, src []byte) bool {
+	if obj.IsNull() {
+		return false
+	}
+	var hasSpec, hasPaths bool
+	for _, kv := range jsonExtractObjectPairs(obj, src) {
+		switch kv.key {
+		case "openapi", "swagger":
+			hasSpec = true
+		case "paths":
+			hasPaths = true
+		}
+		if hasSpec && hasPaths {
+			return true
+		}
+	}
+	return false
+}
+
+// parseOpenAPIJSON extracts API entities from an OpenAPI/Swagger JSON document.
+// Endpoints (paths × methods) are emitted as NodeRoute with Domain DomainAPI.
+// Schema definitions (components.schemas / definitions) are emitted as NodeStruct.
+// EdgeDependsOn edges are created from each endpoint to any $ref schema types it uses.
+func (p *JSONParser) parseOpenAPIJSON(
+	g *graph.Graph,
+	obj sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+) {
+	pairs := jsonExtractObjectPairs(obj, src)
+	pairMap := make(map[string]jsonKVPair, len(pairs))
+	for _, kv := range pairs {
+		pairMap[kv.key] = kv
+	}
+
+	// Extract info.title / info.version as file node metadata.
+	if infoKV, ok := pairMap["info"]; ok && !infoKV.valueNode.IsNull() {
+		fileNode := g.GetNode(fileNodeID)
+		if fileNode != nil {
+			if fileNode.Metadata == nil {
+				fileNode.Metadata = make(map[string]string)
+			}
+			for _, sub := range jsonExtractObjectPairs(infoKV.valueNode, src) {
+				if (sub.key == "title" || sub.key == "version") && sub.valueStr != "" {
+					fileNode.Metadata[sub.key] = sub.valueStr
+				}
+			}
+		}
+	}
+
+	// Extract schema definitions: OpenAPI 3.x components.schemas, Swagger 2.x definitions.
+	p.extractJSONOpenAPISchemas(g, src, filePath, fileNodeID, pairMap)
+
+	// Extract paths → endpoint nodes.
+	if pathsKV, ok := pairMap["paths"]; ok && !pathsKV.valueNode.IsNull() {
+		p.extractJSONOpenAPIPaths(g, src, filePath, fileNodeID, pathsKV.valueNode)
+	}
+}
+
+// httpMethodSet is the set of HTTP methods recognised in OpenAPI path items.
+var httpMethodSet = map[string]bool{
+	"get": true, "post": true, "put": true, "delete": true,
+	"patch": true, "head": true, "options": true, "trace": true,
+}
+
+// extractJSONOpenAPIPaths extracts endpoint nodes from the "paths" object.
+func (p *JSONParser) extractJSONOpenAPIPaths(
+	g *graph.Graph,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+	pathsObj sitter.Node,
+) {
+	for _, pathKV := range jsonExtractObjectPairs(pathsObj, src) {
+		pathStr := pathKV.key // e.g. "/users/{id}"
+		if pathStr == "" || pathKV.valueNode.IsNull() {
+			continue
+		}
+		for _, methodKV := range jsonExtractObjectPairs(pathKV.valueNode, src) {
+			method := strings.ToLower(methodKV.key)
+			if !httpMethodSet[method] {
+				continue
+			}
+			upperMethod := strings.ToUpper(method)
+
+			// Try to find operationId inside the operation object.
+			nodeName := upperMethod + " " + pathStr
+			line := methodKV.startLine
+			if line == 0 {
+				line = 1
+			}
+			if !methodKV.valueNode.IsNull() {
+				for _, opKV := range jsonExtractObjectPairs(methodKV.valueNode, src) {
+					if opKV.key == "operationId" && opKV.valueStr != "" {
+						nodeName = opKV.valueStr
+						if opKV.startLine > 0 {
+							line = opKV.startLine
+						}
+						break
+					}
+				}
+			}
+
+			nodeID := g.MakeNodeID(filePath, "endpoint:"+upperMethod+":"+pathStr)
+			if g.GetNode(nodeID) == nil {
+				g.AddNode(&graph.Node{
+					ID:       nodeID,
+					Type:     graph.NodeRoute,
+					Name:     nodeName,
+					File:     filePath,
+					Line:     line,
+					Exported: true,
+					Domain:   graph.DomainAPI,
+					Metadata: map[string]string{
+						"kind":   "openapi_endpoint",
+						"method": upperMethod,
+						"path":   pathStr,
+					},
+				})
+			}
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+
+			// Create EdgeDependsOn from endpoint to referenced schema types.
+			if !methodKV.valueNode.IsNull() {
+				refs := jsonCollectOpenAPIRefs(methodKV.valueNode, src, nil)
+				seen := make(map[string]bool, len(refs))
+				for _, ref := range refs {
+					name := openAPIRefToSchemaName(ref)
+					if name == "" || seen[name] {
+						continue
+					}
+					seen[name] = true
+					schemaID := g.MakeNodeID(filePath, "schema:"+name)
+					if g.GetNode(schemaID) != nil {
+						g.AddEdge(&graph.Edge{From: nodeID, To: schemaID, Type: graph.EdgeDependsOn})
+					}
+				}
+			}
+		}
+	}
+}
+
+// extractJSONOpenAPISchemas extracts schema type nodes from components.schemas (v3)
+// or definitions (v2).
+func (p *JSONParser) extractJSONOpenAPISchemas(
+	g *graph.Graph,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+	pairMap map[string]jsonKVPair,
+) {
+	// OpenAPI 3.x: components.schemas
+	if compKV, ok := pairMap["components"]; ok && !compKV.valueNode.IsNull() {
+		for _, sub := range jsonExtractObjectPairs(compKV.valueNode, src) {
+			if sub.key == "schemas" && !sub.valueNode.IsNull() {
+				p.emitJSONSchemaNodes(g, src, filePath, fileNodeID, sub.valueNode)
+				break
+			}
+		}
+	}
+	// Swagger 2.x: definitions
+	if defsKV, ok := pairMap["definitions"]; ok && !defsKV.valueNode.IsNull() {
+		p.emitJSONSchemaNodes(g, src, filePath, fileNodeID, defsKV.valueNode)
+	}
+}
+
+// emitJSONSchemaNodes creates NodeStruct nodes for each key in a schemas/definitions object.
+func (p *JSONParser) emitJSONSchemaNodes(
+	g *graph.Graph,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+	schemasObj sitter.Node,
+) {
+	for _, kv := range jsonExtractObjectPairs(schemasObj, src) {
+		name := kv.key
+		if name == "" {
+			continue
+		}
+		line := kv.startLine
+		if line == 0 {
+			line = 1
+		}
+		nodeID := g.MakeNodeID(filePath, "schema:"+name)
+		if g.GetNode(nodeID) == nil {
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeStruct,
+				Name:     name,
+				File:     filePath,
+				Line:     line,
+				Exported: true,
+				Domain:   graph.DomainAPI,
+				Metadata: map[string]string{"kind": "openapi_schema"},
+			})
+		}
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}
+}
+
+// jsonCollectOpenAPIRefs recursively collects all "$ref" string values from a
+// JSON object subtree. Used to find schema references in operation bodies.
+func jsonCollectOpenAPIRefs(node sitter.Node, src []byte, out []string) []string {
+	if node.IsNull() {
+		return out
+	}
+	switch node.Type() {
+	case "object":
+		for _, kv := range jsonExtractObjectPairs(node, src) {
+			if kv.key == "$ref" && kv.valueStr != "" {
+				out = append(out, kv.valueStr)
+			} else if !kv.valueNode.IsNull() {
+				out = jsonCollectOpenAPIRefs(kv.valueNode, src, out)
+			}
+		}
+	case "array":
+		for i := uint32(0); i < node.ChildCount(); i++ {
+			child := node.Child(i)
+			if !child.IsNull() {
+				out = jsonCollectOpenAPIRefs(child, src, out)
+			}
+		}
+	}
+	return out
 }
