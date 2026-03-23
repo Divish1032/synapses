@@ -12,8 +12,8 @@ import (
 
 // TerraformParser parses HashiCorp Configuration Language (.tf) files.
 // It extracts Terraform resources, data sources, modules, variables, outputs,
-// and providers as graph nodes, and emits DEPENDS_ON edges for within-file
-// resource references discovered in expressions.
+// locals, and providers as graph nodes, and records TerraformRefs for
+// cross-file DEPENDS_ON resolution (resolved post-parse by ResolveTerraformRefs).
 type TerraformParser struct {
 	language *sitter.Language
 }
@@ -34,12 +34,6 @@ func (p *TerraformParser) TSLanguageForFile(_ string) *sitter.Language {
 	return p.language
 }
 
-// tfResourceInfo holds per-resource data needed for the DEPENDS_ON second pass.
-type tfResourceInfo struct {
-	nodeID   graph.NodeID
-	bodyNode sitter.Node
-}
-
 // Parse extracts Terraform entities from a single .tf file and merges them into g.
 //
 // Node mapping:
@@ -48,11 +42,12 @@ type tfResourceInfo struct {
 //   - module    → NodePackage  (name: "module.label")
 //   - variable  → NodeVariable (name: "var.label")
 //   - output    → NodeVariable (name: "output.label")
+//   - locals    → NodeVariable (name: "local.key") per key in the block
 //   - provider  → NodeStruct   (name: "provider.label")
 //
-// All nodes carry metadata: domain="terraform", kind=<block type>.
-// DEPENDS_ON edges are emitted for within-file resource references found in
-// attribute expressions (both explicit depends_on lists and inline references).
+// All nodes carry Domain=DomainInfra and metadata domain="terraform", kind=<type>.
+// Resource references found in attribute expressions are recorded as TerraformRefs
+// for cross-file DEPENDS_ON resolution by ResolveTerraformRefs (resolver package).
 func (p *TerraformParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(p.language)
@@ -60,10 +55,12 @@ func (p *TerraformParser) Parse(g *graph.Graph, filePath string, src []byte) err
 	parseCtx, parseCancel := parseContext()
 	defer parseCancel()
 
-	tree, _ := parser.ParseString(parseCtx, nil, src)
-	if tree == nil {
-		return nil
+	tree, err := parser.ParseString(parseCtx, nil, src)
+	if err != nil || tree == nil {
+		return nil // tree-sitter always returns a tree; nil is a safety guard
 	}
+	defer tree.Close()
+
 	root := tree.RootNode()
 
 	fileNodeID := g.MakeNodeID(filePath, filePath)
@@ -82,19 +79,19 @@ func (p *TerraformParser) Parse(g *graph.Graph, filePath string, src []byte) err
 		return nil
 	}
 
-	// knownResources maps "type.name" (for resources) and "data.type.name" (for data)
-	// to their graph node ID and body AST node. Used in the second pass for
-	// within-file DEPENDS_ON edge resolution.
-	knownResources := make(map[string]tfResourceInfo)
+	// resourceNodes tracks the nodeIDs of resource/data/module blocks in this
+	// file, keyed by their canonical ref name ("type.name", "data.type.name",
+	// "module.name"). Used when collecting refs: we emit a TerraformRef for
+	// every expression reference, and the global resolver resolves them.
+	resourceNodes := make(map[string]graph.NodeID)
 
-	// First pass: create all nodes.
+	// First pass: create all nodes and record resource nodeIDs.
 	for i := uint32(0); i < body.ChildCount(); i++ {
 		block := body.Child(i)
 		if block.IsNull() || block.Type() != "block" {
 			continue
 		}
 
-		// Child 0 of a block is always the block-type identifier.
 		blockTypeNode := block.Child(0)
 		if blockTypeNode.IsNull() || blockTypeNode.Type() != "identifier" {
 			continue
@@ -104,8 +101,6 @@ func (p *TerraformParser) Parse(g *graph.Graph, filePath string, src []byte) err
 
 		switch blockType {
 		case "resource":
-			// resource "TYPE" "NAME" { ... }
-			// Children: identifier(0) string_lit(1) string_lit(2) block_start(3) body(4) block_end(5)
 			rType := tfExtractLabelNode(src, block, 1)
 			rName := tfExtractLabelNode(src, block, 2)
 			if rType == "" || rName == "" {
@@ -130,12 +125,13 @@ func (p *TerraformParser) Parse(g *graph.Graph, filePath string, src []byte) err
 				},
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			resourceNodes[name] = nodeID
+			// Collect refs from body for cross-file resolution.
 			if bodyNode := tfFindChildNode(block, "body"); !bodyNode.IsNull() {
-				knownResources[name] = tfResourceInfo{nodeID: nodeID, bodyNode: bodyNode}
+				p.collectAndEmitRefs(g, filePath, nodeID, bodyNode, src)
 			}
 
 		case "data":
-			// data "TYPE" "NAME" { ... }
 			rType := tfExtractLabelNode(src, block, 1)
 			rName := tfExtractLabelNode(src, block, 2)
 			if rType == "" || rName == "" {
@@ -160,12 +156,12 @@ func (p *TerraformParser) Parse(g *graph.Graph, filePath string, src []byte) err
 				},
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			resourceNodes[name] = nodeID
 			if bodyNode := tfFindChildNode(block, "body"); !bodyNode.IsNull() {
-				knownResources[name] = tfResourceInfo{nodeID: nodeID, bodyNode: bodyNode}
+				p.collectAndEmitRefs(g, filePath, nodeID, bodyNode, src)
 			}
 
 		case "module":
-			// module "NAME" { ... }
 			label := tfExtractLabelNode(src, block, 1)
 			if label == "" {
 				continue
@@ -184,13 +180,12 @@ func (p *TerraformParser) Parse(g *graph.Graph, filePath string, src []byte) err
 				Metadata: map[string]string{"domain": "terraform", "kind": "module"},
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-			// Modules can reference resources; include in knownResources.
+			resourceNodes[name] = nodeID
 			if bodyNode := tfFindChildNode(block, "body"); !bodyNode.IsNull() {
-				knownResources[name] = tfResourceInfo{nodeID: nodeID, bodyNode: bodyNode}
+				p.collectAndEmitRefs(g, filePath, nodeID, bodyNode, src)
 			}
 
 		case "variable":
-			// variable "NAME" { ... }
 			label := tfExtractLabelNode(src, block, 1)
 			if label == "" {
 				continue
@@ -211,7 +206,6 @@ func (p *TerraformParser) Parse(g *graph.Graph, filePath string, src []byte) err
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 
 		case "output":
-			// output "NAME" { ... }
 			label := tfExtractLabelNode(src, block, 1)
 			if label == "" {
 				continue
@@ -231,8 +225,43 @@ func (p *TerraformParser) Parse(g *graph.Graph, filePath string, src []byte) err
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 
+		case "locals":
+			// locals { key = value ... } — each key becomes a "local.key" node.
+			// Unlike other blocks, locals has no label; its body attributes ARE the locals.
+			bodyNode := tfFindChildNode(block, "body")
+			if bodyNode.IsNull() {
+				continue
+			}
+			for j := uint32(0); j < bodyNode.ChildCount(); j++ {
+				attr := bodyNode.Child(j)
+				if attr.IsNull() || attr.Type() != "attribute" {
+					continue
+				}
+				keyNode := attr.Child(0)
+				if keyNode.IsNull() || keyNode.Type() != "identifier" {
+					continue
+				}
+				key := string(src[keyNode.StartByte():keyNode.EndByte()])
+				if key == "" {
+					continue
+				}
+				name := "local." + key
+				nodeID := g.MakeNodeID(filePath, name)
+				g.AddNode(&graph.Node{
+					ID:       nodeID,
+					Type:     graph.NodeVariable,
+					Name:     name,
+					Package:  "terraform",
+					File:     filePath,
+					Line:     int(keyNode.StartPoint().Row) + 1,
+					Exported: false, // locals are module-scoped, not exported
+					Domain:   graph.DomainInfra,
+					Metadata: map[string]string{"domain": "terraform", "kind": "local"},
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			}
+
 		case "provider":
-			// provider "NAME" { ... }
 			label := tfExtractLabelNode(src, block, 1)
 			if label == "" {
 				continue
@@ -254,25 +283,28 @@ func (p *TerraformParser) Parse(g *graph.Graph, filePath string, src []byte) err
 		}
 	}
 
-	// Second pass: emit DEPENDS_ON edges from within-file resource references.
-	// This covers both explicit `depends_on = [...]` and inline attribute references
-	// like `subnet_id = aws_subnet.main.id`.
-	for _, info := range knownResources {
-		refs := tfCollectRefs(info.bodyNode, src)
-		for ref := range refs {
-			target, ok := knownResources[ref]
-			if !ok || target.nodeID == info.nodeID {
-				continue
-			}
-			g.AddEdge(&graph.Edge{
-				From: info.nodeID,
-				To:   target.nodeID,
-				Type: graph.EdgeDependsOn,
-			})
-		}
-	}
-
+	_ = resourceNodes // tracked for potential future use
 	return nil
+}
+
+// collectAndEmitRefs walks bodyNode collecting all Terraform resource references
+// and emits them as TerraformRefs on the graph for cross-file resolution.
+// fromID is the node that contains these references (the depending resource).
+func (p *TerraformParser) collectAndEmitRefs(
+	g *graph.Graph,
+	filePath string,
+	fromID graph.NodeID,
+	bodyNode sitter.Node,
+	src []byte,
+) {
+	refs := tfCollectRefs(bodyNode, src)
+	for ref := range refs {
+		g.AddTerraformRef(graph.TerraformRef{
+			FromID:   fromID,
+			FromFile: filePath,
+			RefName:  ref,
+		})
+	}
 }
 
 // tfFindChildNode returns the first direct child of node whose type matches typ,
@@ -332,8 +364,6 @@ func tfWalkRefs(node sitter.Node, src []byte, refs map[string]bool) {
 	}
 
 	if node.Type() == "expression" {
-		// Scan direct children for the flat get_attr chain pattern.
-		// Structure: variable_expr, get_attr, get_attr, ...
 		var varExpr sitter.Node
 		var getAttrs []sitter.Node
 
@@ -355,18 +385,14 @@ func tfWalkRefs(node sitter.Node, src []byte, refs map[string]bool) {
 			firstAttr := tfGetAttrNameNode(src, getAttrs[0])
 
 			if baseText == "data" && len(getAttrs) >= 2 {
-				// data.TYPE.NAME — need two get_attr levels
 				secondAttr := tfGetAttrNameNode(src, getAttrs[1])
 				if firstAttr != "" && secondAttr != "" {
 					refs["data."+firstAttr+"."+secondAttr] = true
 				}
 			} else if !tfIsBuiltinNamespace(baseText) && firstAttr != "" {
-				// resource_type.resource_name or module.name
 				refs[baseText+"."+firstAttr] = true
 			}
 		}
-		// Always descend — sub-expressions (collection_value, tuple, etc.) may
-		// contain additional resource references that are their own expression nodes.
 	}
 
 	for i := uint32(0); i < node.ChildCount(); i++ {
@@ -375,8 +401,6 @@ func tfWalkRefs(node sitter.Node, src []byte, refs map[string]bool) {
 }
 
 // tfGetAttrNameNode extracts the identifier name from a get_attr node.
-// In HCL grammar, get_attr has children: "." and identifier.
-// Returns "" if no identifier child is found.
 func tfGetAttrNameNode(src []byte, getAttr sitter.Node) string {
 	for i := uint32(0); i < getAttr.ChildCount(); i++ {
 		child := getAttr.Child(i)
@@ -388,8 +412,7 @@ func tfGetAttrNameNode(src []byte, getAttr sitter.Node) string {
 }
 
 // tfIsBuiltinNamespace returns true for HCL namespaces that are not resource
-// references. These appear as the root identifier in attribute access chains
-// but do not correspond to graph nodes.
+// references.
 func tfIsBuiltinNamespace(name string) bool {
 	switch name {
 	case "var", "local", "locals", "path", "self", "terraform", "each", "count":

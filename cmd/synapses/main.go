@@ -658,6 +658,9 @@ func cmdIndex(args []string) error {
 				logutil.Info("synapses: resolved %d cross-project CALLS edges\n", n)
 			}
 		}
+		if nt := resolver.ResolveTerraformRefs(g); nt > 0 {
+			logutil.Info("synapses: resolved %d Terraform DEPENDS_ON edges\n", nt)
+		}
 	}
 
 	// Optional: type-checked CALLS resolution for Go (use_go_types: true).
@@ -1493,6 +1496,9 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 	if nd := resolver.ResolveDocEdges(g); nd > 0 {
 		logutil.Info("synapses: resolved %d EXPLAINS edges\n", nd)
 	}
+	if nt := resolver.ResolveTerraformRefs(g); nt > 0 {
+		logutil.Info("synapses: resolved %d Terraform DEPENDS_ON edges\n", nt)
+	}
 
 	if st != nil && len(mtimes) > 0 {
 		if saveErr := st.SaveFileMtimes(mtimes); saveErr != nil {
@@ -1629,6 +1635,9 @@ func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfi
 		// R31: re-resolve doc edges after incremental reparse.
 		if nd := resolver.ResolveDocEdges(g); nd > 0 {
 			logutil.Info("synapses: resolved %d EXPLAINS edges\n", nd)
+		}
+		if nt := resolver.ResolveTerraformRefs(g); nt > 0 {
+			logutil.Info("synapses: resolved %d Terraform DEPENDS_ON edges\n", nt)
 		}
 	}
 
