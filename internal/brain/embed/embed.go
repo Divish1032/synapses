@@ -51,8 +51,11 @@ func normalizeL2Vec(v []float32) []float32 {
 	if math.IsNaN(norm) || math.IsInf(norm, 0) {
 		return nil
 	}
-	if norm == 0 || (norm > 0.999 && norm < 1.001) {
-		return v
+	if norm == 0 {
+		return nil // zero-magnitude vector: model failure — must not enter index
+	}
+	if norm > 0.999 && norm < 1.001 {
+		return v // already normalized
 	}
 	out := make([]float32, len(v))
 	for i, x := range v {
