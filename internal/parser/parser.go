@@ -170,11 +170,13 @@ func NewWalker() *Walker {
 	w.Register(NewObjCParser()) // deep: .m (Objective-C)
 	// Scientific
 	w.Register(NewJuliaParser()) // deep: .jl
+	// Infrastructure
+	w.Register(NewTerraformParser()) // deep: .tf
 
 	// Populate disambiguation fields for .m extension (MATLAB vs Objective-C).
 	// MATLAB was registered first; ObjC registered last wins in w.parsers[".m"].
 	// resolveParser uses these fields to disambiguate at parse time.
-	w.mObjCParser = w.parsers[".m"]   // ObjC (last registered, current winner)
+	w.mObjCParser = w.parsers[".m"]    // ObjC (last registered, current winner)
 	w.mMATLABParser = NewMATLABParser() // MATLAB (re-instantiate since overwritten)
 	return w
 }
