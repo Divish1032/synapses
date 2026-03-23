@@ -490,6 +490,15 @@ func (s *Store) ExpireMemories() (int64, error) {
 	return result.RowsAffected()
 }
 
+// DeleteMemoryByID removes a single memory and its satellite rows by ID.
+// Used by benchmarks to clean up test data immediately instead of waiting for TTL.
+func (s *Store) DeleteMemoryByID(id string) {
+	for _, table := range []string{"memory_embeddings", "memory_anchors", "memory_surfaced", "memory_versions"} {
+		s.knowledgeDB.Exec("DELETE FROM "+table+" WHERE memory_id = ?", id)
+	}
+	s.knowledgeDB.Exec("DELETE FROM memories WHERE id = ?", id)
+}
+
 // MarkEntityMemoriesStaleForNodes marks entity-tier memories stale (stale=1) for
 // all entity IDs in nodeIDs in a single batch. Covers non-anchored entity memories
 // (written with entity_id but no anchor_nodes) that MarkAnchoredMemoriesStale
