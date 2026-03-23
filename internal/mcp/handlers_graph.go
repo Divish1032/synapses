@@ -624,14 +624,7 @@ func (s *Server) handleDiscoverTools(ctx context.Context, req mcp.CallToolReques
 		embedder := s.memoryEmbedder
 		go func() {
 			defer s.wg.Done()
-			bgCtx, cancel := context.WithCancel(context.Background())
-			go func() {
-				select {
-				case <-s.stopCh:
-					cancel()
-				case <-bgCtx.Done():
-				}
-			}()
+			bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			s.EmbedToolCatalog(bgCtx, embedder)
 		}()
