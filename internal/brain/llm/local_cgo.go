@@ -125,6 +125,19 @@ func (c *LocalClient) generate(ctx context.Context, prompt string) (string, erro
 	// gollama's Generate API is raw-completion only — we format the template here.
 	fullPrompt := applyQwen3ChatTemplate(silSystemPrompt, prompt)
 
+	// If a prior call was abandoned (ctx cancelled), try to drain its completion
+	// signal. If the abandoned goroutine has finished, the semaphore is already
+	// free and we can proceed immediately instead of blocking for the full
+	// inference duration (5-30s). Non-blocking: if still running, we'll wait
+	// on the semaphore as before.
+	if done := c.abandonedDone; done != nil {
+		select {
+		case <-done:
+			c.abandonedDone = nil
+		default:
+		}
+	}
+
 	// Acquire the inference semaphore to prevent a second caller from using the
 	// non-thread-safe gollama context while an abandoned goroutine (from a prior
 	// cancelled call) is still running.
@@ -140,8 +153,12 @@ func (c *LocalClient) generate(ctx context.Context, prompt string) (string, erro
 		err  error
 	}
 	ch := make(chan result, 1)
+	done := make(chan struct{})
 	go func() {
-		defer func() { <-c.inferSem }() // release semaphore when inference completes
+		defer func() {
+			<-c.inferSem // release semaphore when inference completes
+			close(done)  // signal to next caller that semaphore is free
+		}()
 		text, err := llamaCtx.Generate(fullPrompt,
 			llama.WithMaxTokens(512),   // match grpo_train max_completion_length
 			llama.WithTemperature(0.1), // low temp for deterministic code graph analysis
@@ -153,8 +170,9 @@ func (c *LocalClient) generate(ctx context.Context, prompt string) (string, erro
 
 	select {
 	case <-ctx.Done():
-		// Caller cancelled — unblock immediately. The goroutine will finish
-		// naturally (bounded by MaxTokens=512) and release the semaphore.
+		// Caller cancelled — stash the done channel so the next caller can
+		// drain it immediately instead of blocking on the semaphore.
+		c.abandonedDone = done
 		return "", fmt.Errorf("local LLM generate: %w", ctx.Err())
 	case r := <-ch:
 		if r.err != nil {
