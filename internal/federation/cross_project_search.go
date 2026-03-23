@@ -50,6 +50,9 @@ func (s *CrossProjectSearch) FindEntities(ctx context.Context, query string, ali
 	if limit <= 0 {
 		limit = 20
 	}
+	if limit > 100 {
+		limit = 100
+	}
 
 	targets := s.resolver.filterEntries(aliases)
 
