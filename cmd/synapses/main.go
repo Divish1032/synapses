@@ -420,8 +420,10 @@ func cmdStartDirect(args []string) error {
 	//   "builtin" (default) — pure-Go nomic-embed-text-v1.5, auto-downloads model
 	//   "ollama"            — delegates to local Ollama instance
 	//   "off"               — disabled, FTS5-only recall
+	// Declared at function scope so the force-close handler can reach it.
+	var memEmbedder embed.Embedder
 	{
-		memEmbedder := createMemoryEmbedder(cfg)
+		memEmbedder = createMemoryEmbedder(cfg)
 		if memEmbedder != nil {
 			// P8-11: wire model download lifecycle events to Pulse.
 			if be, ok := memEmbedder.(*embed.BuiltinEmbedder); ok && sharedPulse != nil {
@@ -466,12 +468,15 @@ func cmdStartDirect(args []string) error {
 	}()
 
 	// Start the file watcher so the graph stays current as files change.
+	// Declared at function scope so the force-close handler can reach it.
+	var fw *watcher.Watcher
 	if !*noWatch {
 		w := parser.NewWalker()
 		for _, p := range cfg.Plugins {
 			w.RegisterPlugin(p.Extensions, p.Command, pluginCheck)
 		}
-		fw, err := watcher.New(g, w, st)
+		var err error
+		fw, err = watcher.New(g, w, st)
 		if err != nil {
 			// Non-fatal: log and continue without watching.
 			logutil.Error("synapses: file watcher unavailable: %v\n", err)
@@ -530,7 +535,14 @@ func cmdStartDirect(args []string) error {
 			if fedResolver != nil {
 				forceClose("federation", func() { fedResolver.Close() })
 			}
+			if fw != nil {
+				forceClose("watcher", func() { fw.Stop() })
+			}
 			forceClose("mcp-server", func() { srv.Close() })
+			if memEmbedder != nil {
+				forceClose("embedder", func() { memEmbedder.Close() })
+			}
+			brainCli.Close()
 			if sharedPulse != nil {
 				forceClose("pulse", func() { sharedPulse.Close() })
 			}
