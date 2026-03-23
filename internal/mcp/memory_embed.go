@@ -225,9 +225,22 @@ func (s *Server) EmbedToolCatalog(ctx context.Context, embedder embed.Embedder) 
 		if len(tool.Keywords) > 0 {
 			text += " " + strings.Join(tool.Keywords, " ")
 		}
-		embedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		vec, err := embedder.Embed(embedCtx, text)
-		cancel()
+		var vec []float32
+		var err error
+		for attempt := 0; attempt < 3; attempt++ {
+			if ctx.Err() != nil {
+				return
+			}
+			embedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			vec, err = embedder.Embed(embedCtx, text)
+			cancel()
+			if err == nil && len(vec) > 0 {
+				break
+			}
+			if attempt < 2 {
+				time.Sleep(time.Duration(attempt+1) * time.Second)
+			}
+		}
 		if err != nil {
 			logutil.Warn("synapses: embed tool catalog %s: %v — semantic tool discovery unavailable\n", tool.Name, err)
 			return // abort; partial index is worse than no index
