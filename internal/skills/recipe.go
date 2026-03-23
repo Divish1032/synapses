@@ -56,9 +56,15 @@ func LoadRecipeDir(dir, origin string) ([]Recipe, error) {
 			continue
 		}
 		if e.Type()&os.ModeSymlink != 0 {
-			continue // skip symlinks to prevent directory traversal
+			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		fullPath := filepath.Join(dir, e.Name())
+		// Lstat right before read to close TOCTOU window where a regular
+		// file is replaced by a symlink between ReadDir and ReadFile.
+		if fi, err := os.Lstat(fullPath); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		data, err := os.ReadFile(fullPath)
 		if err != nil {
 			continue // skip unreadable files silently
 		}
