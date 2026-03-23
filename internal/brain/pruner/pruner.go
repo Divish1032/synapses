@@ -89,25 +89,33 @@ func (p *Pruner) Prune(ctx context.Context, content string) (string, error) {
 	return result, nil
 }
 
-// injectionPatterns are lowercased substrings that indicate the LLM output
-// was influenced by injected instructions rather than genuine extraction.
+// injectionPatterns are lowercased substrings that strongly indicate the
+// LLM output was influenced by injected instructions rather than genuine
+// extraction. Only unambiguous patterns are included — phrases like
+// "respond with" or "act as" occur naturally in technical documentation
+// and would cause false positives.
 var injectionPatterns = []string{
-	"ignore previous",
+	"ignore previous instructions",
 	"ignore all previous",
-	"disregard previous",
-	"new instructions",
+	"disregard previous instructions",
+	"disregard all previous",
 	"system prompt",
-	"you are now",
-	"act as",
+	"you are now a",
 	"pretend to be",
-	"output only",
-	"respond with",
+	"override your instructions",
+	"forget your instructions",
+	"new role:",
+	"jailbreak",
 }
 
 // looksLikeInjection returns true if the LLM output contains patterns
 // typical of prompt injection attacks, suggesting the model followed
-// injected instructions rather than extracting content.
+// injected instructions rather than extracting content. Only checks the
+// first 500 chars of output since injection directives typically appear
+// at the beginning of the hijacked response, reducing false positives
+// from injection patterns appearing in legitimately extracted content.
 func looksLikeInjection(output string) bool {
+	// Check full output for the strongest signals.
 	lower := strings.ToLower(output)
 	for _, pattern := range injectionPatterns {
 		if strings.Contains(lower, pattern) {
