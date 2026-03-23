@@ -787,8 +787,8 @@ func TestExtractLlamaServerFromZip_WithLibraries(t *testing.T) {
 
 	// Create a test zip with binary and libraries
 	zipData := createTestZip(t, map[string][]byte{
-		"llama-server": []byte("binary"),
-		"lib.dylib":    []byte("library content"),
+		"llama-server":    []byte("binary"),
+		"libllama.dylib":  []byte("library content"),
 	})
 
 	err := extractLlamaServerFromZip(zipData, tmpDir, destPath)
@@ -796,14 +796,14 @@ func TestExtractLlamaServerFromZip_WithLibraries(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify binary and library were extracted
+	// Verify binary and allowlisted library were extracted
 	if !fileExists(destPath) {
 		t.Error("expected llama-server to be extracted")
 	}
 
-	libPath := filepath.Join(tmpDir, "lib.dylib")
+	libPath := filepath.Join(tmpDir, "libllama.dylib")
 	if !fileExists(libPath) {
-		t.Error("expected lib.dylib to be extracted")
+		t.Error("expected libllama.dylib to be extracted")
 	}
 }
 
