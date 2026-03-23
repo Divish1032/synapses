@@ -197,3 +197,244 @@ class Handler {
 		}
 	}
 }
+
+// --- Java DI annotation tests ---
+
+func TestJavaInstantiatedTypes_SpringServiceAnnotation(t *testing.T) {
+	src := `
+@Service
+public class UserService {
+    public void doWork() {}
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewJavaParser()
+	if err := p.Parse(g, "UserService.java", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if !types["UserService"] {
+		t.Errorf("expected UserService in instantiated types (via @Service), got %v", types)
+	}
+}
+
+func TestJavaInstantiatedTypes_SpringComponentAnnotation(t *testing.T) {
+	src := `
+@Component
+public class EventListener {
+    public void onEvent() {}
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewJavaParser()
+	if err := p.Parse(g, "EventListener.java", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if !types["EventListener"] {
+		t.Errorf("expected EventListener in instantiated types (via @Component), got %v", types)
+	}
+}
+
+func TestJavaInstantiatedTypes_SpringBeanMethod(t *testing.T) {
+	src := `
+@Configuration
+public class AppConfig {
+    @Bean
+    public DataSource dataSource() {
+        return new HikariDataSource();
+    }
+    @Bean
+    public CacheManager cacheManager() {
+        return new RedisCacheManager();
+    }
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewJavaParser()
+	if err := p.Parse(g, "AppConfig.java", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	// AppConfig itself is @Configuration → instantiated
+	if !types["AppConfig"] {
+		t.Errorf("expected AppConfig in instantiated types (via @Configuration), got %v", types)
+	}
+	// @Bean return types should also be instantiated
+	for _, want := range []string{"DataSource", "CacheManager"} {
+		if !types[want] {
+			t.Errorf("expected %q in instantiated types (via @Bean return type), got %v", want, types)
+		}
+	}
+}
+
+func TestJavaInstantiatedTypes_StaticFactory_SameClass(t *testing.T) {
+	src := `
+public class ConnectionPool {
+    public static ConnectionPool getInstance() { return null; }
+    public static ConnectionPool create(String url) { return null; }
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewJavaParser()
+	if err := p.Parse(g, "ConnectionPool.java", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if !types["ConnectionPool"] {
+		t.Errorf("expected ConnectionPool in instantiated types (via static factory), got %v", types)
+	}
+}
+
+func TestJavaInstantiatedTypes_StaticFactory_DifferentReturn(t *testing.T) {
+	src := `
+public class Factory {
+    public static String create() { return ""; }
+    public static int count() { return 0; }
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewJavaParser()
+	if err := p.Parse(g, "Factory.java", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	// String is a builtin, Factory is not recorded (return type != enclosing class)
+	if types["Factory"] {
+		t.Errorf("unexpected Factory in instantiated types — static method returns String, not Factory")
+	}
+	if types["String"] {
+		t.Errorf("unexpected String (builtin) in instantiated types")
+	}
+}
+
+func TestJavaInstantiatedTypes_EnumConstants(t *testing.T) {
+	src := `
+public enum Status {
+    ACTIVE, INACTIVE, PENDING
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewJavaParser()
+	if err := p.Parse(g, "Status.java", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if !types["Status"] {
+		t.Errorf("expected Status in instantiated types (enum with constants), got %v", types)
+	}
+}
+
+func TestJavaInstantiatedTypes_EnumEmpty(t *testing.T) {
+	src := `
+public enum Empty {
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewJavaParser()
+	if err := p.Parse(g, "Empty.java", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if types["Empty"] {
+		t.Errorf("unexpected Empty in instantiated types — enum has no constants")
+	}
+}
+
+func TestJavaInstantiatedTypes_MultipleAnnotations(t *testing.T) {
+	src := `
+@Repository
+@Transactional
+public class UserRepo {
+    public void save() {}
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewJavaParser()
+	if err := p.Parse(g, "UserRepo.java", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if !types["UserRepo"] {
+		t.Errorf("expected UserRepo in instantiated types (via @Repository), got %v", types)
+	}
+}
+
+// --- TypeScript DI decorator tests ---
+
+func TestTSInstantiatedTypes_InjectableDecorator(t *testing.T) {
+	src := `
+@Injectable()
+export class AuthService {
+  login() {}
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewTypeScriptParser()
+	if err := p.Parse(g, "auth.service.ts", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if !types["AuthService"] {
+		t.Errorf("expected AuthService in instantiated types (via @Injectable), got %v", types)
+	}
+}
+
+func TestTSInstantiatedTypes_ComponentDecorator(t *testing.T) {
+	src := `
+@Component({
+  selector: 'app-root',
+  template: '<h1>Hello</h1>'
+})
+export class AppComponent {
+  title = 'app';
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewTypeScriptParser()
+	if err := p.Parse(g, "app.component.ts", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if !types["AppComponent"] {
+		t.Errorf("expected AppComponent in instantiated types (via @Component), got %v", types)
+	}
+}
+
+func TestTSInstantiatedTypes_StaticFactory_SameClass(t *testing.T) {
+	src := `
+class DatabaseConnection {
+  static getInstance(): DatabaseConnection {
+    return new DatabaseConnection();
+  }
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewTypeScriptParser()
+	if err := p.Parse(g, "db.ts", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if !types["DatabaseConnection"] {
+		t.Errorf("expected DatabaseConnection in instantiated types (via static factory), got %v", types)
+	}
+}
+
+func TestTSInstantiatedTypes_StaticFactory_DifferentReturn(t *testing.T) {
+	src := `
+class Builder {
+  static build(): string {
+    return '';
+  }
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewTypeScriptParser()
+	if err := p.Parse(g, "builder.ts", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if types["Builder"] {
+		t.Errorf("unexpected Builder in instantiated types — static method returns string, not Builder")
+	}
+}
