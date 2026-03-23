@@ -506,7 +506,7 @@ func TestMemoryVectorSearch_HNSW_RecallAccuracy(t *testing.T) {
 
 		memID, err := st.InsertMemory(Memory{
 			Tier:    TierProject,
-			Content: fmt.Sprintf("Cluster %d member %d", i%nClusters, i/nClusters),
+			Content: fmt.Sprintf("hnsw_recall_test unique_item_%d cluster_%d seq_%d", i, i%nClusters, i/nClusters),
 			AgentID: "test",
 		})
 		if err != nil {
@@ -561,10 +561,8 @@ func TestMemoryVectorSearch_HNSW_RecallAccuracy(t *testing.T) {
 
 	recall := float64(totalHits) / float64(totalQueries)
 	t.Logf("HNSW recall@%d: %.1f%% (%d/%d hits, N=%d, dims=%d)", k, recall*100, totalHits, totalQueries, N, dims)
-	// Threshold is 85% (not 90%) because the coder/hnsw library panics on
-	// some insertions with random vectors, leaving only ~95 of 100 points
-	// indexed.  With 5% missing, 90% recall against full brute-force ground
-	// truth is unreachable on some runs.
+	// Threshold: 85% accounts for HNSW variance with random vectors and the
+	// race detector. Typical recall is ~97% with unique test data.
 	if recall < 0.85 {
 		t.Errorf("recall@%d = %.1f%% < 85%% — HNSW+oversampling not meeting target", k, recall*100)
 	}
