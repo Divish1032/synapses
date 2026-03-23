@@ -93,43 +93,79 @@ func (s *Store) EmbeddingCount() int {
 // embedding yet or whose stored content_hash no longer matches the current
 // node text (name+signature+doc). File and package nodes are excluded.
 // Pass limit=0 to return all matching nodes (no cap).
+//
+// Uses cursor-based pagination (WHERE n.rowid > ? LIMIT ?) to guarantee
+// exactly limit results are returned when enough qualifying rows exist,
+// regardless of the hash-match ratio.
 func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
-	// Fetch non-file/package nodes with their stored hash (NULL when no embedding exists).
-	// When limit > 0, apply SQL LIMIT to avoid loading the entire table client-side.
+	const pageSize = 500
+
 	baseQuery := `
-		SELECT n.id, n.name, n.signature, n.doc, COALESCE(e.content_hash, '') AS stored_hash
+		SELECT n.rowid, n.id, n.name, n.signature, n.doc, COALESCE(e.content_hash, '') AS stored_hash
 		FROM nodes n
 		LEFT JOIN node_embeddings e ON n.id = e.node_id
 		WHERE n.type NOT IN ('file', 'package')`
-	var rows *sql.Rows
-	var err error
-	if limit > 0 {
-		// Over-fetch by 2x since some rows may have matching hashes and be skipped.
-		rows, err = s.graphDB.Query(baseQuery+" LIMIT ?", limit*2)
-	} else {
-		rows, err = s.graphDB.Query(baseQuery)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get unembed nodes: %w", err)
-	}
-	defer rows.Close()
 
-	var ids []string
-	for rows.Next() {
-		var id, name, sig, doc, storedHash string
-		if err := rows.Scan(&id, &name, &sig, &doc, &storedHash); err != nil {
-			return nil, err
+	// Unlimited mode: single full-table scan (no cursor needed).
+	if limit <= 0 {
+		rows, err := s.graphDB.Query(baseQuery)
+		if err != nil {
+			return nil, fmt.Errorf("get unembed nodes: %w", err)
 		}
-		// Include nodes with missing embeddings (storedHash=="") or stale ones
-		// (current content hash differs from what was stored at embedding time).
-		if nodeContentHash(name, sig, doc) != storedHash {
-			ids = append(ids, id)
-			if limit > 0 && len(ids) >= limit {
-				break
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var rowid int64
+			var id, name, sig, doc, storedHash string
+			if err := rows.Scan(&rowid, &id, &name, &sig, &doc, &storedHash); err != nil {
+				return nil, err
+			}
+			if nodeContentHash(name, sig, doc) != storedHash {
+				ids = append(ids, id)
 			}
 		}
+		return ids, rows.Err()
 	}
-	return ids, rows.Err()
+
+	// Cursor-based pagination: fetch pages until we have limit results or
+	// exhaust the table.
+	var ids []string
+	var cursor int64 // last seen rowid
+	pagedQuery := baseQuery + " AND n.rowid > ? LIMIT ?"
+
+	for len(ids) < limit {
+		rows, err := s.graphDB.Query(pagedQuery, cursor, pageSize)
+		if err != nil {
+			return nil, fmt.Errorf("get unembed nodes: %w", err)
+		}
+
+		rowCount := 0
+		for rows.Next() {
+			rowCount++
+			var rowid int64
+			var id, name, sig, doc, storedHash string
+			if err := rows.Scan(&rowid, &id, &name, &sig, &doc, &storedHash); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			cursor = rowid
+			if nodeContentHash(name, sig, doc) != storedHash {
+				ids = append(ids, id)
+				if len(ids) >= limit {
+					break
+				}
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		// No more rows in table — stop.
+		if rowCount < pageSize {
+			break
+		}
+	}
+	return ids, nil
 }
 
 // GetNodeTextForEmbedding returns the text that should be embedded for a node:
