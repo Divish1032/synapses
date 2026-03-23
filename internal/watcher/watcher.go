@@ -559,7 +559,9 @@ func (w *Watcher) debounce(path, root string) {
 			case <-w.stopCh:
 				return
 			default:
-				// Channel full — process inline if not stopped
+				// Channel full — drop rather than bypass the worker pool bound.
+				logutil.Debug("synapses: watcher: work channel full, dropping reparse for %s\n", path)
+				return
 			}
 		}
 		select {
