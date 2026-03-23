@@ -127,9 +127,9 @@ func (fg *FlatGraph) AddNode(name StringID, nodeType NodeType, fileID StringID, 
 }
 
 
-// addEdge inserts a directed edge. O(E) due to offset shifting — internal only.
+// addEdgeSlow inserts a directed edge. O(E) due to offset shifting — internal only.
 // Production code must use BulkAddEdges for batch insertion (O(N+E)).
-func (fg *FlatGraph) addEdge(from, to NodeIndex, weight float32) {
+func (fg *FlatGraph) addEdgeSlow(from, to NodeIndex, weight float32) {
 	fg.mu.Lock()
 	defer fg.mu.Unlock()
 

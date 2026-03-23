@@ -263,6 +263,7 @@ func (s *Store) GetMemoriesByAnchorNodesCtx(ctx context.Context, nodeIDs []strin
 		}
 		args = append(args, now) // for expires_at filter
 
+		remaining := limit - len(result)
 		q := `SELECT DISTINCT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
 		             m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count
 		      FROM memories m
@@ -273,7 +274,8 @@ func (s *Store) GetMemoriesByAnchorNodesCtx(ctx context.Context, nodeIDs []strin
 		if !includeStale {
 			q += ` AND m.stale = 0`
 		}
-		q += ` ORDER BY m.created_at DESC`
+		q += ` ORDER BY m.created_at DESC LIMIT ?`
+		args = append(args, remaining)
 
 		rows, err := s.knowledgeDB.QueryContext(ctx, q, args...)
 		if err != nil {
