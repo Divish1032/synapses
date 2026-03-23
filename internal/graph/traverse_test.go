@@ -1135,3 +1135,78 @@ func TestCarveEgoGraph_HybridScoring_MismatchedDimFallback(t *testing.T) {
 	}
 	t.Error("child node not found in result")
 }
+
+// TestCarveEgoGraph_HybridScoring_ClampStructuralAboveOne verifies that when a
+// struct method's structural score exceeds 1.0 after eigenvector centrality boost
+// (seeded at 0.9 × (1 + 0.2 × centrality)), the hybrid blend clamps it to 1.0
+// before applying the formula, so the final score stays ≤ 1.0.
+//
+// Graph: struct root "HubService" + hub method "HubService.Run" + 15 spoke
+// callers. After RebuildIndex the hub has centrality = 1.0 (highest connected
+// node). Structural = 0.9 × (1 + 0.2 × 1.0) = 1.08 > 1.0.
+// With λ=0.5 and sim=1.0: WITHOUT clamp score=1.04; WITH clamp score=1.0.
+func TestCarveEgoGraph_HybridScoring_ClampStructuralAboveOne(t *testing.T) {
+	g := graph.New("clamptest")
+	const pkg = "mypkg"
+
+	rootID := g.MakeNodeID("svc.go", "HubService")
+	g.AddNode(&graph.Node{ID: rootID, Name: "HubService", Type: graph.NodeStruct, File: "svc.go", Package: pkg})
+
+	hubID := g.MakeNodeID("svc.go", "HubService.Run")
+	g.AddNode(&graph.Node{ID: hubID, Name: "HubService.Run", Type: graph.NodeMethod, File: "svc.go", Package: pkg})
+
+	// 15 spokes all calling the hub → hub gets high eigenvector centrality.
+	for i := 0; i < 15; i++ {
+		name := fmt.Sprintf("Caller%d", i)
+		sid := g.MakeNodeID("callers.go", name)
+		g.AddNode(&graph.Node{ID: sid, Name: name, Type: graph.NodeFunction, File: "callers.go", Package: pkg})
+		g.AddEdge(&graph.Edge{From: sid, To: hubID, Type: graph.EdgeCalls})
+	}
+
+	// Build the CSR index so eigenvector centrality is computed.
+	if _, err := g.RebuildIndex(); err != nil {
+		t.Fatalf("RebuildIndex: %v", err)
+	}
+
+	// Hub method and root both get same-axis unit embedding → cosine sim = 1.0.
+	const dim = 4
+	rootVec := makeUnitVec(dim, 0)
+	hubVec := makeUnitVec(dim, 0)
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.MinRelevance = 0
+	cfg.EmbeddingLookup = func(ids []graph.NodeID) map[graph.NodeID][]float32 {
+		m := map[graph.NodeID][]float32{}
+		for _, id := range ids {
+			switch id {
+			case rootID:
+				m[id] = rootVec
+			case hubID:
+				m[id] = hubVec
+			}
+		}
+		return m
+	}
+	cfg.HybridLambda = 0.5
+
+	sub, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+
+	var hubScore float64
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == hubID {
+			hubScore = cn.Relevance
+			break
+		}
+	}
+	if hubScore == 0 {
+		t.Fatal("hub method not found in result")
+	}
+	// With clamp: score = (1-0.5)×1.0 + 0.5×1.0 = 1.0.
+	// Without clamp: score = (1-0.5)×1.08 + 0.5×1.0 = 1.04 > 1.0.
+	if hubScore > 1.0 {
+		t.Errorf("hub score = %f > 1.0 — structural was not clamped before blend", hubScore)
+	}
+}
