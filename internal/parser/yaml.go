@@ -189,12 +189,38 @@ func (p *YAMLParser) processMappingDocument(
 	}
 
 	// OpenAPI / Swagger: has "openapi" or "swagger" key AND "paths" key.
+	// IMPORTANT: schemas are extracted BEFORE paths so that $ref resolution in
+	// extractOpenAPIOperationRefs can find schema nodes that already exist.
 	if _, hasOpenAPI := kvMap["openapi"]; hasOpenAPI {
+		// 1. info metadata (no dependencies)
+		if infoNode, ok := kvMap["info"]; ok {
+			p.extractOpenAPIInfo(g, fileNodeID, infoNode)
+		}
+		// 2. schemas first — endpoint ref-resolution depends on these nodes existing
+		if compNode, ok := kvMap["components"]; ok && compNode != nil && compNode.Kind == yaml.MappingNode {
+			compKVs := p.extractMappingKV(compNode)
+			for _, kv := range compKVs {
+				if kv.key == "schemas" && kv.val != nil {
+					p.extractOpenAPISchemas(g, filePath, fileNodeID, kv.val)
+					break
+				}
+			}
+		}
+		// 3. paths last — can now resolve $ref → EdgeDependsOn
 		if pathsNode, ok := kvMap["paths"]; ok {
 			p.extractOpenAPIPaths(g, filePath, fileNodeID, pathsNode)
 		}
 	}
 	if _, hasSwagger := kvMap["swagger"]; hasSwagger {
+		// 1. info metadata
+		if infoNode, ok := kvMap["info"]; ok {
+			p.extractOpenAPIInfo(g, fileNodeID, infoNode)
+		}
+		// 2. definitions first
+		if defsNode, ok := kvMap["definitions"]; ok && defsNode != nil {
+			p.extractOpenAPISchemas(g, filePath, fileNodeID, defsNode)
+		}
+		// 3. paths last
 		if pathsNode, ok := kvMap["paths"]; ok {
 			p.extractOpenAPIPaths(g, filePath, fileNodeID, pathsNode)
 		}
@@ -532,11 +558,12 @@ func (p *YAMLParser) extractOpenAPIPaths(
 			if g.GetNode(nodeID) == nil {
 				g.AddNode(&graph.Node{
 					ID:       nodeID,
-					Type:     graph.NodeFunction,
+					Type:     graph.NodeRoute,
 					Name:     nodeName,
 					File:     filePath,
 					Line:     line,
 					Exported: true, // OpenAPI endpoints are public API surface
+					Domain:   graph.DomainAPI,
 					Metadata: map[string]string{
 						"kind":   "openapi_endpoint",
 						"method": strings.ToUpper(method),
@@ -545,6 +572,10 @@ func (p *YAMLParser) extractOpenAPIPaths(
 				})
 			}
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			// Create EdgeDependsOn edges from endpoint to referenced schema types.
+			if opNode != nil {
+				p.extractOpenAPIOperationRefs(g, filePath, nodeID, opNode)
+			}
 		}
 	}
 }
@@ -662,6 +693,138 @@ func (p *YAMLParser) extractMappingKV(node *yaml.Node) []kvPair {
 		})
 	}
 	return pairs
+}
+
+// extractOpenAPISchemas extracts schema definitions from a mapping node (the value of
+// "components.schemas" in OpenAPI 3.x or "definitions" in Swagger 2.x).
+// Each key becomes a NodeStruct with Domain DomainAPI.
+func (p *YAMLParser) extractOpenAPISchemas(
+	g *graph.Graph,
+	filePath string,
+	fileNodeID graph.NodeID,
+	schemasNode *yaml.Node,
+) {
+	if schemasNode == nil || schemasNode.Kind != yaml.MappingNode {
+		return
+	}
+	kvs := p.extractMappingKV(schemasNode)
+	for _, kv := range kvs {
+		name := kv.key
+		if name == "" {
+			continue
+		}
+		line := kv.line
+		nodeID := g.MakeNodeID(filePath, "schema:"+name)
+		if g.GetNode(nodeID) == nil {
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeStruct,
+				Name:     name,
+				File:     filePath,
+				Line:     line,
+				Exported: true,
+				Domain:   graph.DomainAPI,
+				Metadata: map[string]string{"kind": "openapi_schema"},
+			})
+		}
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}
+}
+
+// extractOpenAPIInfo extracts title and version from an OpenAPI/Swagger "info" mapping node
+// and stores them as metadata on the file node.
+func (p *YAMLParser) extractOpenAPIInfo(
+	g *graph.Graph,
+	fileNodeID graph.NodeID,
+	infoNode *yaml.Node,
+) {
+	if infoNode == nil || infoNode.Kind != yaml.MappingNode {
+		return
+	}
+	fileNode := g.GetNode(fileNodeID)
+	if fileNode == nil {
+		return
+	}
+	if fileNode.Metadata == nil {
+		fileNode.Metadata = make(map[string]string)
+	}
+	for _, kv := range p.extractMappingKV(infoNode) {
+		switch kv.key {
+		case "title", "version":
+			if kv.val != nil && kv.val.Kind == yaml.ScalarNode && kv.val.Value != "" {
+				fileNode.Metadata[kv.key] = kv.val.Value
+			}
+		}
+	}
+}
+
+// extractOpenAPIOperationRefs walks an OpenAPI operation object and creates
+// EdgeDependsOn edges from the endpoint node to any schema types referenced via
+// $ref values matching "#/components/schemas/<Name>" or "#/definitions/<Name>".
+func (p *YAMLParser) extractOpenAPIOperationRefs(
+	g *graph.Graph,
+	filePath string,
+	endpointNodeID graph.NodeID,
+	opNode *yaml.Node,
+) {
+	refs := p.collectOpenAPIRefs(opNode, nil)
+	seen := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		name := openAPIRefToSchemaName(ref)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		// Try both naming conventions (components/schemas and definitions).
+		schemaID := g.MakeNodeID(filePath, "schema:"+name)
+		if g.GetNode(schemaID) != nil {
+			g.AddEdge(&graph.Edge{From: endpointNodeID, To: schemaID, Type: graph.EdgeDependsOn})
+		}
+	}
+}
+
+// collectOpenAPIRefs recursively walks a yaml.Node collecting all scalar values
+// that are $ref strings (values of "$ref" keys anywhere in the subtree).
+func (p *YAMLParser) collectOpenAPIRefs(node *yaml.Node, out []string) []string {
+	if node == nil {
+		return out
+	}
+	if node.Kind == yaml.AliasNode {
+		return out
+	}
+	if node.Kind == yaml.MappingNode {
+		kvs := p.extractMappingKV(node)
+		for _, kv := range kvs {
+			if kv.key == "$ref" && kv.val != nil && kv.val.Kind == yaml.ScalarNode {
+				out = append(out, kv.val.Value)
+			} else if kv.val != nil {
+				out = p.collectOpenAPIRefs(kv.val, out)
+			}
+		}
+		return out
+	}
+	for _, child := range node.Content {
+		out = p.collectOpenAPIRefs(child, out)
+	}
+	return out
+}
+
+// openAPIRefToSchemaName extracts the schema name from a $ref string.
+// Handles "#/components/schemas/Foo" → "Foo" and "#/definitions/Foo" → "Foo".
+// Returns "" if the ref does not match either pattern.
+func openAPIRefToSchemaName(ref string) string {
+	const (
+		v3prefix  = "#/components/schemas/"
+		v2prefix  = "#/definitions/"
+	)
+	switch {
+	case strings.HasPrefix(ref, v3prefix):
+		return ref[len(v3prefix):]
+	case strings.HasPrefix(ref, v2prefix):
+		return ref[len(v2prefix):]
+	default:
+		return ""
+	}
 }
 
 // yamlIsFileRef returns true if the value looks like a YAML file path reference.
