@@ -357,6 +357,7 @@ func TestEmbeddingStatus_UnknownEmbedder_ReturnsUnknown(t *testing.T) {
 type stubEmbedder struct{}
 
 func (s *stubEmbedder) Embed(_ context.Context, _ string) ([]float32, error) { return nil, nil }
+func (s *stubEmbedder) WarmUp(_ context.Context) error                         { return nil }
 func (s *stubEmbedder) Model() string                                          { return "stub" }
 func (s *stubEmbedder) Close() error                                           { return nil }
 

@@ -145,6 +145,16 @@ func NewBuiltinEmbedderWithPoolSize(modelsDir string, poolSize int) *BuiltinEmbe
 	}
 }
 
+// WarmUp pre-initializes the embedder by downloading the model if not already
+// cached and setting up the inference pipeline pool. Call at daemon startup in
+// a background goroutine so the first Embed() call doesn't block on download.
+// Safe to call concurrently — uses singleflight internally.
+func (b *BuiltinEmbedder) WarmUp(ctx context.Context) error {
+	// WarmUp just delegates to ensureModelWithSingleflight. If the model is
+	// already downloaded and initialized, this is a fast no-op.
+	return b.ensureModelWithSingleflight()
+}
+
 // ensureModelWithSingleflight downloads the model if not already cached, and
 // initializes the pipeline pool. Uses singleflight so that only one goroutine
 // downloads while others wait, without holding the main mutex during download.

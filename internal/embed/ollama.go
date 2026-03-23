@@ -31,5 +31,8 @@ func (o *OllamaEmbedder) Model() string {
 	return o.client.Model()
 }
 
+// WarmUp is a no-op for the Ollama embedder (model is managed by the Ollama server).
+func (o *OllamaEmbedder) WarmUp(_ context.Context) error { return nil }
+
 // Close is a no-op for the Ollama embedder (HTTP client has no resources to release).
 func (o *OllamaEmbedder) Close() error { return nil }

@@ -436,6 +436,15 @@ func cmdStartDirect(args []string) error {
 			}
 			defer memEmbedder.Close()
 			srv.SetMemoryEmbedder(memEmbedder)
+			// Pre-initialize the embedder (e.g. download the model) in the
+			// background so the first Embed() call doesn't block. WarmUp
+			// uses singleflight internally — concurrent Embed() callers
+			// coalesce into the same download.
+			go func() {
+				if err := memEmbedder.WarmUp(appCtx); err != nil {
+					logutil.Warn("synapses: embedder warmup: %v\n", err)
+				}
+			}()
 			go embedAllMemories(appCtx, memEmbedder, st, sharedPulse)
 		}
 	}
