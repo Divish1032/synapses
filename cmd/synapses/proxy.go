@@ -191,16 +191,42 @@ func ensureSingletonDaemon(absPath string) error {
 	return fmt.Errorf("timed out waiting for daemon at %s (120s)", DaemonHTTPAddr)
 }
 
+// fetchDaemonCSRFToken fetches the per-session CSRF token from the daemon.
+// The /api/admin/csrf-token endpoint is GET-only and loopback-trusted.
+func fetchDaemonCSRFToken(client *http.Client) (string, error) {
+	resp, err := client.Get("http://" + DaemonHTTPAddr + "/api/admin/csrf-token")
+	if err != nil {
+		return "", fmt.Errorf("fetch csrf token: %w", err)
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode csrf token: %w", err)
+	}
+	return result.Token, nil
+}
+
 // registerProjectWithDaemon calls POST /api/admin/projects and returns the
 // per-project Unix socket path.
 func registerProjectWithDaemon(absPath string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"path": absPath})
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Post(
-		"http://"+DaemonHTTPAddr+"/api/admin/projects",
-		"application/json",
-		bytes.NewReader(body),
-	)
+
+	csrfToken, err := fetchDaemonCSRFToken(client)
+	if err != nil {
+		return "", fmt.Errorf("register project: %w", err)
+	}
+
+	body, _ := json.Marshal(map[string]string{"path": absPath})
+	req, err := http.NewRequest(http.MethodPost, "http://"+DaemonHTTPAddr+"/api/admin/projects", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("register project: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrfToken)
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("register project: %w", err)
 	}
