@@ -280,9 +280,13 @@ func (s *Server) scheduleToolCatalogRetry(ctx context.Context, embedder embed.Em
 		logutil.Warn("synapses: tool catalog embed retries exhausted — semantic tool discovery disabled for this session\n")
 		return
 	}
+	s.wg.Add(1)
 	go func() {
+		defer s.wg.Done()
 		select {
 		case <-ctx.Done():
+			return
+		case <-s.stopCh:
 			return
 		case <-time.After(30 * time.Second):
 		}
