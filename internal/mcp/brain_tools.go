@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
@@ -56,8 +57,14 @@ func (s *Server) handleUpsertADR(
 		root := s.graph.Root()
 		for _, f := range lf {
 			if p, ok := f.(string); ok && p != "" {
-				if root != "" && !pathWithinRoot(root, p) {
-					continue
+				// Resolve relative paths against root; reject paths that escape.
+				if root != "" {
+					if !filepath.IsAbs(p) {
+						p = filepath.Join(root, p)
+					}
+					if !pathWithinRoot(root, p) {
+						continue
+					}
 				}
 				linkedFiles = append(linkedFiles, p)
 			}
