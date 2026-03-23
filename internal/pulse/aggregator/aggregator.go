@@ -17,6 +17,7 @@ type Aggregator struct {
 	store        *pulsestore.Store
 	interval     time.Duration
 	stopCh       chan struct{}
+	stopOnce     sync.Once
 	wg           sync.WaitGroup
 	// P2-20: track last vacuum time so it runs at most once per day.
 	lastVacuumDay atomic.Value // stores string "YYYY-MM-DD"
@@ -56,8 +57,9 @@ func (a *Aggregator) Start() {
 }
 
 // Stop signals the loop to exit and waits for completion.
+// Safe to call multiple times.
 func (a *Aggregator) Stop() {
-	close(a.stopCh)
+	a.stopOnce.Do(func() { close(a.stopCh) })
 	a.wg.Wait()
 }
 
