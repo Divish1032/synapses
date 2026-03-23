@@ -613,11 +613,13 @@ func detectAccelerator() string {
 // full-precision fp32 model for higher quality; CPU gets the quantized model
 // for lower memory and faster inference.
 func selectOnnxVariant() (modelFile, onnxRepoPath string) {
-	// Allow GPU users to force fp32 selection even without a pinned hash.
-	// This is an opt-in escape hatch for users who want fp32 at their own risk.
+	// FP32 escape hatch removed: until builtinModelSHA256FP32 is populated
+	// with a verified hash, we refuse to serve an unverified fp32 model even
+	// when explicitly requested. This prevents trust-on-first-use (TOFU) attacks
+	// where a compromised download would be permanently trusted.
 	if os.Getenv("SYNAPSES_EMBED_FP32") == "1" {
-		logutil.Warn("synapses: SYNAPSES_EMBED_FP32=1 — selecting fp32 model without integrity hash (use at own risk)\n")
-		return builtinModelFileFP32, builtinOnnxFilePathFP32
+		logutil.Warn("synapses: SYNAPSES_EMBED_FP32=1 ignored — fp32 integrity hash not yet captured; using quantized model\n")
+		// Fall through to normal selection (which also guards on empty hash).
 	}
 
 	accel := detectAccelerator()
