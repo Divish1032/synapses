@@ -388,10 +388,13 @@ func (c *OllamaClient) ModelPulled(ctx context.Context) bool {
 		return false
 	}
 	resp, err := c.httpClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
 
 	var result struct {
 		Models []struct {

@@ -78,7 +78,15 @@ func New(s *store.Store) *Cache {
 					return nil, fmt.Errorf("SSRF prevention blocked access to %s (%s)", host, ip.String())
 				}
 			}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+			var lastErr error
+			for _, ip := range ips {
+				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+				if dialErr == nil {
+					return conn, nil
+				}
+				lastErr = dialErr
+			}
+			return nil, fmt.Errorf("all %d IPs for %s failed: %w", len(ips), host, lastErr)
 		},
 	}
 
