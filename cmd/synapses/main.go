@@ -453,7 +453,22 @@ func cmdStartDirect(args []string) error {
 
 	// Autosubscribe: detect tech stack from manifest files.
 	go func() {
-		entries := scout.DetectTechStack(absPath)
+		// Wrap with timeout since DetectTechStack doesn't accept a context.
+		type tsResult struct{ entries []scout.TechStackEntry }
+		ch := make(chan tsResult, 1)
+		go func() {
+			ch <- tsResult{entries: scout.DetectTechStack(absPath)}
+		}()
+		tsCtx, tsCancel := context.WithTimeout(appCtx, 30*time.Second)
+		defer tsCancel()
+		var entries []scout.TechStackEntry
+		select {
+		case <-tsCtx.Done():
+			logutil.Warn("synapses: tech stack detection timed out\n")
+			return
+		case res := <-ch:
+			entries = res.entries
+		}
 		if len(entries) == 0 {
 			return
 		}
