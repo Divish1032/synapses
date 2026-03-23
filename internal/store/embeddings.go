@@ -82,6 +82,48 @@ func (s *Store) UpsertEmbedding(nodeID, model string, vec []float32) error {
 	return nil
 }
 
+// BatchGetNodeEmbeddings fetches pre-normalized float32 embedding vectors for a
+// batch of node IDs in a single IN(...) SQL query. IDs with no stored embedding
+// are silently omitted. The returned vectors are already unit-normalized
+// (guaranteed by UpsertEmbedding) so callers can use dot product as cosine sim.
+// Returns nil when ids is empty or no rows match.
+func (s *Store) BatchGetNodeEmbeddings(ids []string) map[string][]float32 {
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	rows, err := s.graphDB.Query(
+		`SELECT node_id, embedding FROM node_embeddings WHERE node_id IN (`+
+			strings.Join(placeholders, ",")+`)`,
+		args...,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	result := make(map[string][]float32, len(ids))
+	for rows.Next() {
+		var nodeID string
+		var blob []byte
+		if err := rows.Scan(&nodeID, &blob); err != nil {
+			continue
+		}
+		if vec := blobToVec(blob); len(vec) > 0 {
+			result[nodeID] = vec
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // EmbeddingCount returns the total number of stored embeddings.
 func (s *Store) EmbeddingCount() int {
 	var count int

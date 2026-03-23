@@ -259,6 +259,34 @@ func (s *Server) handleGetContext(
 
 	cfg := s.config.CarveConfig()
 
+	// Sprint 13 #3: Semantic-structural hybrid scoring.
+	// Wire in the embedding lookup so CarveEgoGraph can blend structural BFS/PPR
+	// scores with cosine similarity to the root node's embedding. Lambda=0.3
+	// means 70% structural relevance + 30% semantic similarity — empirically
+	// calibrated to retain call-graph locality while surfacing semantically
+	// related nodes that fall outside the structural hop boundary.
+	// Falls back gracefully to pure structural when embeddings are not yet built
+	// (BatchGetNodeEmbeddings returns nil → EmbeddingLookup returns nil → no blend).
+	if s.store != nil {
+		st := s.store
+		cfg.EmbeddingLookup = func(ids []graph.NodeID) map[graph.NodeID][]float32 {
+			strIDs := make([]string, len(ids))
+			for i, id := range ids {
+				strIDs[i] = string(id)
+			}
+			raw := st.BatchGetNodeEmbeddings(strIDs)
+			if raw == nil {
+				return nil
+			}
+			out := make(map[graph.NodeID][]float32, len(raw))
+			for k, v := range raw {
+				out[graph.NodeID(k)] = v
+			}
+			return out
+		}
+		cfg.HybridLambda = 0.3
+	}
+
 	// F17: Adaptive Context Learning — auto-expand depth/detail based on
 	// stored feedback for this entity+agent before per-call explicit overrides
 	// are applied. Explicit caller values always win over adaptive adjustments.
