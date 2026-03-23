@@ -622,18 +622,20 @@ func tryAutoInstallService() bool {
 		return true
 	}
 
-	// Redirect stdout to suppress daemonInstall's verbose output.
-	// We only want clean init wizard output; service install details are noise.
+	// Suppress daemonInstall's verbose fmt.Print output by temporarily
+	// redirecting os.Stdout to /dev/null. This is goroutine-unsafe but
+	// acceptable here because init runs single-threaded before any
+	// background goroutines are started.
 	origStdout := os.Stdout
-	devNull, err := os.Open(os.DevNull)
-	if err == nil {
-		os.Stdout = devNull
+	if f, err := os.Open(os.DevNull); err == nil {
+		os.Stdout = f
+		defer func() {
+			os.Stdout = origStdout
+			f.Close()
+		}()
 	}
 	installErr := daemonInstall()
 	os.Stdout = origStdout
-	if devNull != nil {
-		devNull.Close()
-	}
 
 	if installErr != nil {
 		logutil.Info("  auto-install service: %v (non-fatal)\n", installErr)
