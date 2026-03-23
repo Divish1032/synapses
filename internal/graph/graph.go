@@ -239,6 +239,7 @@ func (g *Graph) FindByPattern(pattern string) []*Node {
 			results = append(results, n)
 		}
 	}
+	sort.Slice(results, func(i, j int) bool { return results[i].ID < results[j].ID })
 	return results
 }
 
@@ -493,6 +494,7 @@ func (g *Graph) AllNodes() []*Node {
 	for _, n := range g.nodes {
 		out = append(out, n)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
@@ -506,6 +508,7 @@ func (g *Graph) FindByType(t NodeType) []*Node {
 			out = append(out, n)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
@@ -876,7 +879,7 @@ func (g *Graph) RemoveFile(file string) {
 		// immediately without waiting for the next full rebuild.
 		if idx := g.index; idx != nil && idx.Ready() {
 			for _, id := range toRemove {
-				if seq := idx.Seq(id); seq != 0 {
+				if seq := idx.UnsafeSeq(id); seq != 0 {
 					idx.MarkTombstone(seq)
 				}
 			}
