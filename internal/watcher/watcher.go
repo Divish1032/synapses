@@ -439,14 +439,54 @@ func (w *Watcher) updateImportGraphForFile(filePath string) {
 //   - all files that directly import filePath's package (they may call into it)
 //   - all other files in the same package as filePath (same-package direct calls)
 //
+// Three lookup strategies are applied to pkgImporters to handle how different
+// language parsers record import paths:
+//
+//  1. Exact package-name match — works for Go where path.Base(importPath)
+//     equals the package declaration name by convention (e.g. "store").
+//
+//  2. Filename-without-extension match — works for languages where the
+//     import qualifier equals the filename base (TypeScript, JavaScript,
+//     Python simple modules).
+//
+//  3. Fully-qualified prefix scan — handles OOP languages (Java, C#, Kotlin,
+//     Scala) where import paths are dot-separated ("com.example.models.Foo")
+//     and path.Base returns the full string unchanged (no slash separator).
+//     When pkg = "com.example.models" we look for pkgImporters keys that
+//     start with "com.example.models." to find all class-level importers.
+//     This is O(|pkgImporters|) but pkgImporters is bounded by the number of
+//     distinct imported packages (typically hundreds, never millions).
+//
 // Must be called under reparseMu after updateImportGraphForFile.
 func (w *Watcher) computeInvalidationSet(filePath string) []string {
 	invalid := map[string]bool{filePath: true}
 	pkg := w.filePkg[filePath]
 	if pkg != "" {
-		// Direct importers of this file's package.
+		// Strategy 1: exact package-name match (Go, Python modules, Rust crates).
 		for importer := range w.pkgImporters[pkg] {
 			invalid[importer] = true
+		}
+		// Strategy 2: filename-without-extension match (TypeScript/JavaScript
+		// relative imports where path.Base("./utils") = "utils" = filename base).
+		base := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
+		if base != "" && base != pkg {
+			for importer := range w.pkgImporters[base] {
+				invalid[importer] = true
+			}
+		}
+		// Strategy 3: prefix scan for fully-qualified dot-separated package names
+		// (Java: "com.example.models" matches import key "com.example.models.Foo").
+		// path.Base does not truncate dot-separated paths, so parsers store the
+		// full qualified name as the pkgImporters key.
+		if strings.Contains(pkg, ".") {
+			prefix := pkg + "."
+			for key, importers := range w.pkgImporters {
+				if strings.HasPrefix(key, prefix) {
+					for importer := range importers {
+						invalid[importer] = true
+					}
+				}
+			}
 		}
 		// Same-package files (they can call without a package qualifier).
 		for f, fpkg := range w.filePkg {
