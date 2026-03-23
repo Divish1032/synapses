@@ -150,6 +150,9 @@ func gitCmd(ctx context.Context, repoPath string, args ...string) (string, error
 // gitCommitTime returns the author date of a specific commit as a time.Time.
 // Used to compare against store SavedAt for freshness checks.
 func gitCommitTime(ctx context.Context, repoPath, commitHash string) (time.Time, error) {
+	if !safeGitRef.MatchString(commitHash) || strings.HasPrefix(commitHash, "-") {
+		return time.Time{}, fmt.Errorf("invalid commit hash: %q", commitHash[:min(8, len(commitHash))])
+	}
 	ctx, cancel := context.WithTimeout(ctx, gitTimeoutFast)
 	defer cancel()
 
