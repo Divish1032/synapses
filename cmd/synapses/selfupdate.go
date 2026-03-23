@@ -597,7 +597,13 @@ func applySelfUpdateFromPath(newBinary string, expectedHash string) error {
 	}
 
 	// Write to a temp file in the same directory (ensures same filesystem for rename).
-	tmp := exe + ".new"
+	// Use os.CreateTemp to avoid a predictable name that could be exploited on shared systems.
+	tmpFile, err := os.CreateTemp(filepath.Dir(exe), ".synapses-update-*")
+	if err != nil {
+		return fmt.Errorf("create temp binary: %w", err)
+	}
+	tmp := tmpFile.Name()
+	tmpFile.Close()
 	if err := os.WriteFile(tmp, data, 0o755); err != nil {
 		// Wrap permission errors for better CLI messaging.
 		if os.IsPermission(err) {
