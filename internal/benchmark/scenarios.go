@@ -515,6 +515,12 @@ func runMemoryRecall(g *graph.Graph, st *store.Store) ([]QueryResult, error) {
 		results = append(results, makeQueryResult(label, expected, returned, elapsed))
 	}
 
+	// Clean up benchmark memories immediately instead of waiting for TTL expiry.
+	// This prevents test data from appearing in real recall() results.
+	for _, id := range insertedIDs {
+		st.DeleteMemoryByID(id)
+	}
+
 	if len(results) == 0 {
 		return nil, fmt.Errorf("no memory recall queries returned results")
 	}
