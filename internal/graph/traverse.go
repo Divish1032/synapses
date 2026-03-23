@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"log"
 	"math"
 	"path/filepath"
 	"sort"
@@ -511,6 +512,11 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 			// Degree-normalized adaptive decay (GCN-style, Kipf & Welling ICLR 2017).
 			// High-degree hubs decay children faster to prevent hub explosion;
 			// low-degree nodes in narrow chains receive a relatively smaller penalty.
+			//
+			// BFS-path-only safeguard: this formula applies only when UsePPR=false.
+			// PPR (Sprint 13 #2) assigns near-zero scores to distant nodes naturally
+			// via power iteration — no explicit decay is needed. This block is the
+			// BFS fallback that prevents hub explosion until PPR becomes the default.
 			localDecay := decay / (1.0 + math.Log2(float64(len(allEdges)+1)))
 
 			for _, e := range allEdges {
@@ -653,6 +659,10 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 
 		// Only blend when we have a root embedding — without it cosine similarity
 		// is undefined and we must fall through to pure structural ranking.
+		// Log at debug level so operators know the semantic channel is inactive.
+		if len(rootVec) == 0 {
+			log.Printf("graph: hybrid scoring fallback for root %q — no stored embedding; using pure structural scoring (lambda=%.2f inactive)", rootID, cfg.HybridLambda)
+		}
 		if len(rootVec) > 0 {
 			λ := cfg.HybridLambda
 			for i := range scored {

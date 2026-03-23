@@ -313,6 +313,7 @@ func TestCarveEgoGraph_PositiveBoostMagnitudeIsCorrect(t *testing.T) {
 	cfg.MaxDepth = 1
 	cfg.TokenBudget = 100000
 	cfg.MinRelevance = 0 // test scoring, not pruning
+	cfg.UsePPR = false   // test exact BFS score arithmetic
 	cfg.DirectionBoost = boost
 	cfg.DecayFactor = decay
 	cfg.IntentID = "test-magnitude"
@@ -356,6 +357,7 @@ func TestCarveEgoGraph_NegativeBoostMagnitudeIsCorrect(t *testing.T) {
 	cfg.MaxDepth = 1
 	cfg.TokenBudget = 100000
 	cfg.MinRelevance = 0 // test scoring, not pruning
+	cfg.UsePPR = false   // test exact BFS score arithmetic
 	cfg.DirectionBoost = boost
 	cfg.DecayFactor = decay
 	cfg.IntentID = "test-neg-magnitude"

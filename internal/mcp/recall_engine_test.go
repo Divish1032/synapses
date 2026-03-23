@@ -1627,9 +1627,20 @@ func TestContextWeightedRecall_EnrichesQueryWithAgentIntent(t *testing.T) {
 	if raw == nil {
 		t.Fatal("nil JSON response")
 	}
-	// Response must include context_enrichment annotation.
-	if _, ok := raw["context_enrichment"]; !ok {
-		t.Error("expected context_enrichment annotation in response when agent_id provided and intent set")
+	// Response must include query_enrichment annotation with applied=true.
+	ce, ok := raw["query_enrichment"]
+	if !ok {
+		t.Fatal("expected query_enrichment annotation in response when agent_id provided and intent set")
+	}
+	ceMap, ok := ce.(map[string]interface{})
+	if !ok {
+		t.Fatalf("query_enrichment has unexpected type %T", ce)
+	}
+	if ceMap["applied"] != true {
+		t.Errorf("query_enrichment.applied = %v, want true", ceMap["applied"])
+	}
+	if _, hasEnriched := ceMap["enriched_query"]; !hasEnriched {
+		t.Error("query_enrichment.enriched_query should be present when applied=true")
 	}
 }
 
@@ -1656,8 +1667,8 @@ func TestContextWeightedRecall_NoEnrichmentWithoutAgentID(t *testing.T) {
 		t.Fatal("nil JSON response")
 	}
 	// context_enrichment must NOT appear when agent_id is absent.
-	if _, ok := raw["context_enrichment"]; ok {
-		t.Error("context_enrichment should NOT appear when agent_id is not provided")
+	if _, ok := raw["query_enrichment"]; ok {
+		t.Error("query_enrichment should NOT appear when agent_id is not provided")
 	}
 }
 
@@ -1690,8 +1701,8 @@ func TestContextWeightedRecall_GracefulFallbackWhenAgentNotFound(t *testing.T) {
 		t.Fatal("nil JSON response")
 	}
 	// No enrichment fired because agent has no state.
-	if _, ok := raw["context_enrichment"]; ok {
-		t.Error("context_enrichment should NOT appear for unknown agent with no state")
+	if _, ok := raw["query_enrichment"]; ok {
+		t.Error("query_enrichment should NOT appear for unknown agent with no state")
 	}
 }
 
@@ -1721,9 +1732,21 @@ func TestContextWeightedRecall_NoEnrichmentForEmptyIntent(t *testing.T) {
 	if raw == nil {
 		t.Fatal("nil JSON response")
 	}
-	// No enrichment because intent and task are both empty.
-	if _, ok := raw["context_enrichment"]; ok {
-		t.Error("context_enrichment should NOT appear when agent has no intent or task")
+	// Agent found but no intent/task — context_enrichment present with applied=false.
+	ce, ok := raw["query_enrichment"]
+	if !ok {
+		t.Error("query_enrichment should appear when agent_id is provided and agent is found, even with empty intent/task")
+		return
+	}
+	ceMap, ok := ce.(map[string]interface{})
+	if !ok {
+		t.Fatalf("query_enrichment has unexpected type %T", ce)
+	}
+	if ceMap["applied"] != false {
+		t.Errorf("query_enrichment.applied = %v, want false (no new context terms)", ceMap["applied"])
+	}
+	if _, hasEnriched := ceMap["enriched_query"]; hasEnriched {
+		t.Error("query_enrichment.enriched_query should be absent when applied=false")
 	}
 }
 

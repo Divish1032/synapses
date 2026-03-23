@@ -1649,6 +1649,13 @@ func (s *Server) registerTools() {
 					"subsequently edits that file, a dependency_alert will surface in your next session_init. "+
 					"Omit in read-only or exploratory sessions where you don't want peer tracking."),
 			),
+			mcp.WithString("intent",
+				mcp.Description("Optional. Shapes the traversal direction and edge weights: "+
+					"'modify' (prefer callees — what this breaks), 'debug' (prefer callers — what triggers this), "+
+					"'review' (balanced — full contract surface), 'add', 'plan', 'understand'. "+
+					"When omitted, defaults to a balanced callee-slight preference. "+
+					"For intent-driven one-call workflows, prefer prepare_context which sets this automatically."),
+			),
 			mcp.WithString("projects",
 				mcp.Description("Optional. Comma-separated federation aliases to include sibling project results "+
 					"(e.g. 'core,app'). When provided, also returns matching entities from sibling stores."),

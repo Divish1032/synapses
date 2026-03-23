@@ -71,6 +71,7 @@ func TestCarveEgoGraph_DepthLimits(t *testing.T) {
 
 	cfg := graph.DefaultCarveConfig()
 	cfg.MaxDepth = 1
+	cfg.UsePPR = false // test BFS depth limits specifically
 
 	sub, err := g.CarveEgoGraph(ids["service"], cfg)
 	if err != nil {
@@ -574,7 +575,7 @@ func TestCarveEgoGraph_PPR_BFSCannotDistinguishDiamond(t *testing.T) {
 	cfg.MaxDepth = 5
 	cfg.MinRelevance = 0
 	cfg.TokenBudget = 0
-	// UsePPR defaults to false
+	cfg.UsePPR = false // this test proves BFS cannot distinguish diamond paths
 
 	sub, err := g.CarveEgoGraph(ids["Root"], cfg)
 	if err != nil {
