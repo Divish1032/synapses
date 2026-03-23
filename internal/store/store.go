@@ -485,8 +485,10 @@ type Store struct {
 
 	// hnswNodeIndex is the in-memory HNSW index for graph node embeddings.
 	// Used by semantic search in the search tool. Same pattern as memory HNSW.
-	hnswNodeIndex *hnsw.Graph[string]
-	hnswNodeMu    sync.RWMutex
+	hnswNodeIndex       *hnsw.Graph[string]
+	hnswNodeMu          sync.RWMutex
+	hnswNodeRebuilding  bool               // true while async node rebuild is in progress
+	hnswNodePendingAdds []hnswPendingEntry // vectors queued during node rebuild
 }
 
 // SetSemanticDedupFunc sets the embedding function used for semantic dedup
