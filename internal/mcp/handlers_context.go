@@ -262,9 +262,15 @@ func (s *Server) handleGetContext(
 	// Sprint 13 #3: Semantic-structural hybrid scoring.
 	// Wire in the embedding lookup so CarveEgoGraph can blend structural BFS/PPR
 	// scores with cosine similarity to the root node's embedding.
-	// Lambda defaults to 0.3 (70% structural, 30% semantic) when not set in
-	// synapses.json (context_carve.hybrid_lambda). Falls back gracefully to pure
-	// structural when embeddings are not yet built or store is unavailable.
+	//
+	// Lambda resolution (checked in order):
+	//   1. context_carve.hybrid_lambda in synapses.json (explicit value including 0)
+	//   2. Default 0.3 when not configured (70% structural, 30% semantic)
+	//   3. Disabled when store is nil (no embeddings available)
+	//
+	// Uses *float64 config type so hybrid_lambda: 0 (disable) is distinguishable
+	// from unset (apply default). Falls back to pure structural when embeddings
+	// are not yet indexed (BatchGetNodeEmbeddings returns nil → no blend applied).
 	if s.store != nil {
 		st := s.store
 		cfg.EmbeddingLookup = func(ids []graph.NodeID) map[graph.NodeID][]float32 {
@@ -282,7 +288,11 @@ func (s *Server) handleGetContext(
 			}
 			return out
 		}
-		if cfg.HybridLambda <= 0 {
+		// Apply lambda: explicit config value wins (including 0.0 to disable);
+		// nil (unset) falls back to default 0.3.
+		if s.config != nil && s.config.ContextCarve.HybridLambda != nil {
+			cfg.HybridLambda = *s.config.ContextCarve.HybridLambda
+		} else {
 			cfg.HybridLambda = 0.3 // default: 70% structural + 30% semantic
 		}
 	}

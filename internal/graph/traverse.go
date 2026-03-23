@@ -562,7 +562,17 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 				if sim < 0 {
 					sim = 0 // negative cosine similarity (opposite meaning) → no boost
 				}
-				scored[i].relevance = (1-λ)*scored[i].relevance + λ*sim
+				// Clamp structural score to [0, 1] before blending so the λ weights
+				// hold their meaning. Centrality boost and struct-method seeding (0.9)
+				// can push scores above 1.0 (e.g. 0.9 × 1.2 = 1.08), which would make
+				// the (1-λ) structural term dominate and distort the blend ratio.
+				// Root is always exactly 1.0 and is skipped above; no non-root node
+				// should claim higher structural relevance than the root itself.
+				structScore := scored[i].relevance
+				if structScore > 1.0 {
+					structScore = 1.0
+				}
+				scored[i].relevance = (1-λ)*structScore + λ*sim
 			}
 		}
 	}
