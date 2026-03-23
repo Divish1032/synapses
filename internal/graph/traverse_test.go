@@ -1,6 +1,8 @@
 package graph_test
 
 import (
+	"fmt"
+	"math"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -254,6 +256,135 @@ func TestCarveEgoGraph_TruncationSignal(t *testing.T) {
 	}
 }
 
+// ── Adaptive decay ────────────────────────────────────────────────────────────
+
+// TestCarveEgoGraph_AdaptiveDecay_HubChildLowerThanNarrowChild verifies that
+// children of a high-degree hub receive lower relevance than children of a
+// low-degree narrow-chain node at the same hop depth. This is the core
+// correctness property of degree-normalized adaptive decay.
+//
+// Graph:
+//
+//	root ─CALLS─► hub   ─CALLS─► h1, h2, h3, h4, h5  (5 children)
+//	root ─CALLS─► narrow ─CALLS─► n1                   (1 child)
+func TestCarveEgoGraph_AdaptiveDecay_HubChildLowerThanNarrowChild(t *testing.T) {
+	g := graph.New("testrepo")
+
+	rootID := g.MakeNodeID("root.go", "root")
+	hubID := g.MakeNodeID("hub.go", "hub")
+	narrowID := g.MakeNodeID("narrow.go", "narrow")
+	n1ID := g.MakeNodeID("narrow.go", "n1")
+	h1ID := g.MakeNodeID("hub.go", "h1")
+	h2ID := g.MakeNodeID("hub.go", "h2")
+	h3ID := g.MakeNodeID("hub.go", "h3")
+	h4ID := g.MakeNodeID("hub.go", "h4")
+	h5ID := g.MakeNodeID("hub.go", "h5")
+
+	for _, id := range []graph.NodeID{rootID, hubID, narrowID, n1ID, h1ID, h2ID, h3ID, h4ID, h5ID} {
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: string(id), File: "test.go"})
+	}
+
+	g.AddEdge(&graph.Edge{From: rootID, To: hubID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: rootID, To: narrowID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: narrowID, To: n1ID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: hubID, To: h1ID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: hubID, To: h2ID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: hubID, To: h3ID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: hubID, To: h4ID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: hubID, To: h5ID, Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.MaxDepth = 2
+	cfg.DecayFactor = 0.5
+	cfg.MinRelevance = 0 // test scoring, not pruning
+
+	sub, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+
+	rel := make(map[graph.NodeID]float64)
+	for _, cn := range sub.Nodes {
+		rel[cn.Node.ID] = cn.Relevance
+	}
+
+	// n1 is a child of a 2-edge node (narrow + root←narrow); hub children come
+	// from a 6-edge node (hub + 5 children + root←hub). Narrow chain's child
+	// must score strictly higher than any hub child.
+	if rel[n1ID] == 0 {
+		t.Fatal("narrow child n1 missing from subgraph")
+	}
+	if rel[h1ID] == 0 {
+		t.Fatal("hub child h1 missing from subgraph")
+	}
+	if rel[n1ID] <= rel[h1ID] {
+		t.Errorf("narrow child relevance (%v) should be > hub child relevance (%v): adaptive decay not working", rel[n1ID], rel[h1ID])
+	}
+}
+
+// TestCarveEgoGraph_AdaptiveDecay_ProductionPruning verifies that under the
+// default production config (MinRelevance=0.01, TokenBudget=4000):
+//
+//  1. n1 (narrow chain hop-2) is NOT falsely pruned by MinRelevance=0.01.
+//  2. n1 scores strictly above all hub hop-2 children.
+//
+// This guarantees the token budget will always select n1 over hub children
+// when capacity is limited — the core hub-explosion prevention property.
+func TestCarveEgoGraph_AdaptiveDecay_ProductionPruning(t *testing.T) {
+	g := graph.New("testrepo")
+
+	rootID := g.MakeNodeID("root.go", "root")
+	hubID := g.MakeNodeID("hub.go", "hub")
+	narrowID := g.MakeNodeID("narrow.go", "narrow")
+	n1ID := g.MakeNodeID("narrow.go", "n1")
+
+	// Hub has 19 children + 1 incoming (root→hub) = 20 total edges.
+	const numHubChildren = 19
+	var hubChildIDs []graph.NodeID
+	for i := 0; i < numHubChildren; i++ {
+		id := g.MakeNodeID("hub.go", fmt.Sprintf("hc%d", i))
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: fmt.Sprintf("hc%d", i), File: "hub.go"})
+		hubChildIDs = append(hubChildIDs, id)
+	}
+	for _, id := range []graph.NodeID{rootID, hubID, narrowID, n1ID} {
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: string(id), File: "test.go"})
+	}
+	g.AddEdge(&graph.Edge{From: rootID, To: hubID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: rootID, To: narrowID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: narrowID, To: n1ID, Type: graph.EdgeCalls})
+	for _, hcID := range hubChildIDs {
+		g.AddEdge(&graph.Edge{From: hubID, To: hcID, Type: graph.EdgeCalls})
+	}
+
+	// Default production config — MinRelevance=0.01, TokenBudget=4000.
+	cfg := graph.DefaultCarveConfig()
+	cfg.MaxDepth = 2
+
+	sub, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+	rel := make(map[graph.NodeID]float64)
+	for _, cn := range sub.Nodes {
+		rel[cn.Node.ID] = cn.Relevance
+	}
+
+	// Property 1: n1 is not falsely pruned by MinRelevance=0.01.
+	if rel[n1ID] == 0 {
+		t.Fatalf("narrow chain hop-2 node n1 pruned by default MinRelevance — adaptive decay too aggressive for degree-2 nodes")
+	}
+
+	// Property 2: n1 outranks every hub child that survived MinRelevance.
+	for i, hcID := range hubChildIDs {
+		if rel[hcID] == 0 {
+			continue // hub child pruned — acceptable
+		}
+		if rel[n1ID] <= rel[hcID] {
+			t.Errorf("hub child hc%d (rel=%v) ≥ n1 (rel=%v): adaptive decay must rank narrow chain higher than hub bulk", i, rel[hcID], rel[n1ID])
+		}
+	}
+}
+
 // ── FindTestsFor ──────────────────────────────────────────────────────────────
 
 func TestFindTestsFor_DirectTestCaller(t *testing.T) {
@@ -357,6 +488,271 @@ func TestFindTestsFor_PythonSuffixTestFile(t *testing.T) {
 	}
 }
 
+// ── Personalized PageRank ─────────────────────────────────────────────────────
+
+// TestCarveEgoGraph_PPR_DiamondBoost verifies the core PPR value proposition:
+// a convergent node reached by 2 independent call paths outranks structurally
+// equivalent single-path nodes. BFS max-score heuristic cannot distinguish these.
+//
+// Graph (same as spike Topology 1):
+//
+//	Root → A → C   (C reached via A)
+//	Root → B → C   (C reached via B — 2 independent paths)
+//	     A → D     (D unique to A's subtree)
+//	     B → E     (E unique to B's subtree)
+//
+// Expected with UsePPR=true: rank(C) > rank(D) == rank(E)
+func TestCarveEgoGraph_PPR_DiamondBoost(t *testing.T) {
+	g := graph.New("ppr-diamond")
+	mkID := func(name string) graph.NodeID { return g.MakeNodeID("main.go", name) }
+
+	ids := map[string]graph.NodeID{
+		"Root": mkID("Root"),
+		"A":    mkID("A"),
+		"B":    mkID("B"),
+		"C":    mkID("C"), // 2-path convergent — must rank highest
+		"D":    mkID("D"), // 1-path unique to A
+		"E":    mkID("E"), // 1-path unique to B
+	}
+	for name, id := range ids {
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: name, File: "main.go"})
+	}
+	g.AddEdge(&graph.Edge{From: ids["Root"], To: ids["A"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["Root"], To: ids["B"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["A"], To: ids["C"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["B"], To: ids["C"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["A"], To: ids["D"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["B"], To: ids["E"], Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.MaxDepth = 5
+	cfg.MinRelevance = 0
+	cfg.TokenBudget = 0
+	cfg.UsePPR = true
+
+	sub, err := g.CarveEgoGraph(ids["Root"], cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph PPR: %v", err)
+	}
+
+	rel := make(map[graph.NodeID]float64)
+	for _, cn := range sub.Nodes {
+		rel[cn.Node.ID] = cn.Relevance
+	}
+
+	if rel[ids["C"]] <= rel[ids["D"]] {
+		t.Errorf("PPR: C (%.5f) should outrank D (%.5f) — C has 2 incoming paths", rel[ids["C"]], rel[ids["D"]])
+	}
+	if rel[ids["C"]] <= rel[ids["E"]] {
+		t.Errorf("PPR: C (%.5f) should outrank E (%.5f) — C has 2 incoming paths", rel[ids["C"]], rel[ids["E"]])
+	}
+	t.Logf("PPR diamond: C=%.5f D=%.5f E=%.5f C/D=%.2fx", rel[ids["C"]], rel[ids["D"]], rel[ids["E"]], rel[ids["C"]]/rel[ids["D"]])
+}
+
+// TestCarveEgoGraph_PPR_BFSCannotDistinguishDiamond confirms that BFS (UsePPR=false)
+// assigns identical scores to C, D, and E on the diamond topology — the exact
+// weakness that PPR corrects.
+func TestCarveEgoGraph_PPR_BFSCannotDistinguishDiamond(t *testing.T) {
+	g := graph.New("bfs-diamond")
+	mkID := func(name string) graph.NodeID { return g.MakeNodeID("main.go", name) }
+
+	ids := map[string]graph.NodeID{
+		"Root": mkID("Root"), "A": mkID("A"), "B": mkID("B"),
+		"C": mkID("C"), "D": mkID("D"), "E": mkID("E"),
+	}
+	for name, id := range ids {
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: name, File: "main.go"})
+	}
+	g.AddEdge(&graph.Edge{From: ids["Root"], To: ids["A"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["Root"], To: ids["B"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["A"], To: ids["C"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["B"], To: ids["C"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["A"], To: ids["D"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["B"], To: ids["E"], Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.MaxDepth = 5
+	cfg.MinRelevance = 0
+	cfg.TokenBudget = 0
+	// UsePPR defaults to false
+
+	sub, err := g.CarveEgoGraph(ids["Root"], cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph BFS: %v", err)
+	}
+
+	rel := make(map[graph.NodeID]float64)
+	for _, cn := range sub.Nodes {
+		rel[cn.Node.ID] = cn.Relevance
+	}
+
+	// BFS max-score: C, D, E are hop-2 nodes with equal edge weights → same score.
+	const tol = 1e-9
+	if math.Abs(rel[ids["C"]]-rel[ids["D"]]) > tol {
+		t.Errorf("BFS: C (%.9f) != D (%.9f) — BFS should be blind to path count", rel[ids["C"]], rel[ids["D"]])
+	}
+	if math.Abs(rel[ids["C"]]-rel[ids["E"]]) > tol {
+		t.Errorf("BFS: C (%.9f) != E (%.9f) — BFS should be blind to path count", rel[ids["C"]], rel[ids["E"]])
+	}
+	t.Logf("BFS diamond confirmed: C=D=E=%.5f", rel[ids["C"]])
+}
+
+// TestCarveEgoGraph_PPR_RootAlwaysPinnedToOne verifies that the root node always
+// appears at relevance=1.0 regardless of what PPR computes for it. In undirected
+// PPR, high-degree neighbours can accumulate more random-walk mass than a degree-1
+// root. The root-pin ensures agents always see the queried entity at full relevance.
+func TestCarveEgoGraph_PPR_RootAlwaysPinnedToOne(t *testing.T) {
+	g := graph.New("ppr-rootpin")
+
+	// Chain: Root(deg=1) → A(deg=2) → B(deg=2) → C(deg=1)
+	// In undirected PPR, A and B can rank above Root.
+	rootID := g.MakeNodeID("chain.go", "Root")
+	aID := g.MakeNodeID("chain.go", "A")
+	bID := g.MakeNodeID("chain.go", "B")
+	cID := g.MakeNodeID("chain.go", "C")
+
+	for _, id := range []graph.NodeID{rootID, aID, bID, cID} {
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: string(id), File: "chain.go"})
+	}
+	g.AddEdge(&graph.Edge{From: rootID, To: aID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: aID, To: bID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: bID, To: cID, Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = true
+	cfg.MinRelevance = 0
+	cfg.TokenBudget = 0
+
+	sub, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph PPR: %v", err)
+	}
+
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == rootID {
+			if cn.Relevance != 1.0 {
+				t.Errorf("root PPR relevance = %.6f, want exactly 1.0 (root-pin)", cn.Relevance)
+			}
+			return
+		}
+	}
+	t.Error("root node missing from PPR subgraph")
+}
+
+// TestCarveEgoGraph_PPR_PostProcessingPreserved verifies PPR results flow through
+// the same post-processing pipeline as BFS: MinRelevance, token budget, edge
+// deduplication and truncation signal all apply correctly.
+func TestCarveEgoGraph_PPR_PostProcessingPreserved(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	// MinRelevance=0.99 prunes everything except root (pinned at 1.0).
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = true
+	cfg.MinRelevance = 0.99
+	cfg.MaxDepth = 5
+	cfg.TokenBudget = 0
+
+	sub, err := g.CarveEgoGraph(ids["service"], cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph PPR: %v", err)
+	}
+	if len(sub.Nodes) != 1 {
+		t.Errorf("expected 1 node after MinRelevance=0.99 pruning, got %d", len(sub.Nodes))
+	}
+	if len(sub.Nodes) > 0 && sub.Nodes[0].Node.ID != ids["service"] {
+		t.Errorf("surviving node should be root (service), got %s", sub.Nodes[0].Node.ID)
+	}
+
+	// TokenBudget=1 forces truncation.
+	cfg2 := graph.DefaultCarveConfig()
+	cfg2.UsePPR = true
+	cfg2.MinRelevance = 0
+	cfg2.TokenBudget = 1
+
+	sub2, err := g.CarveEgoGraph(ids["service"], cfg2)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph PPR tight budget: %v", err)
+	}
+	if !sub2.Truncated {
+		t.Error("expected Truncated=true with TokenBudget=1 and PPR")
+	}
+
+	// Edges only reference surviving nodes.
+	ns := nodeIDSet(sub2)
+	for _, e := range sub2.Edges {
+		if _, ok := ns[e.From]; !ok {
+			t.Errorf("PPR edge %s→%s: From not in surviving nodes", e.From, e.To)
+		}
+		if _, ok := ns[e.To]; !ok {
+			t.Errorf("PPR edge %s→%s: To not in surviving nodes", e.From, e.To)
+		}
+	}
+}
+
+// TestCarveEgoGraph_PPR_StructMethodSeeding verifies that PPR correctly seeds
+// struct receiver methods into the teleport vector via the idx==nil fallback
+// path (no CSR index built — the common path in unit tests and at startup).
+// Methods must appear in the output with non-trivial relevance, and nodes
+// reachable through those methods must also be included.
+func TestCarveEgoGraph_PPR_StructMethodSeeding(t *testing.T) {
+	g := graph.New("ppr-struct")
+
+	structID := g.MakeNodeID("svc.go", "Service")
+	m1ID := g.MakeNodeID("svc.go", "Service.Start")
+	m2ID := g.MakeNodeID("svc.go", "Service.Stop")
+	helperID := g.MakeNodeID("util.go", "doWork")
+	// unrelated is not reachable from any seeded node — should be absent.
+	unrelatedID := g.MakeNodeID("other.go", "Unrelated")
+
+	g.AddNode(&graph.Node{ID: structID, Type: graph.NodeStruct, Name: "Service", File: "svc.go"})
+	g.AddNode(&graph.Node{ID: m1ID, Type: graph.NodeMethod, Name: "Service.Start", File: "svc.go"})
+	g.AddNode(&graph.Node{ID: m2ID, Type: graph.NodeMethod, Name: "Service.Stop", File: "svc.go"})
+	g.AddNode(&graph.Node{ID: helperID, Type: graph.NodeFunction, Name: "doWork", File: "util.go"})
+	g.AddNode(&graph.Node{ID: unrelatedID, Type: graph.NodeFunction, Name: "Unrelated", File: "other.go"})
+
+	// Service.Start calls doWork; Service.Stop is a leaf.
+	g.AddEdge(&graph.Edge{From: m1ID, To: helperID, Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = true
+	cfg.MinRelevance = 0
+	cfg.TokenBudget = 0
+
+	sub, err := g.CarveEgoGraph(structID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph PPR struct: %v", err)
+	}
+
+	ids := nodeIDSet(sub)
+
+	// Both methods must be seeded into the teleport vector and therefore
+	// appear with non-trivial PPR rank.
+	if _, ok := ids[m1ID]; !ok {
+		t.Error("Service.Start missing from PPR subgraph — idx=nil method seeding fallback broken")
+	}
+	if _, ok := ids[m2ID]; !ok {
+		t.Error("Service.Stop missing from PPR subgraph — idx=nil method seeding fallback broken")
+	}
+	// doWork is reachable via Service.Start → must also appear.
+	if _, ok := ids[helperID]; !ok {
+		t.Error("doWork missing from PPR subgraph — not reachable through method teleport seeds")
+	}
+	// Root always pinned at 1.0.
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == structID && cn.Relevance != 1.0 {
+			t.Errorf("struct root relevance = %.6f, want 1.0 (root-pin)", cn.Relevance)
+		}
+	}
+	// Methods should outrank the leaf helper (teleport seeds have higher rank).
+	rel := make(map[graph.NodeID]float64)
+	for _, cn := range sub.Nodes {
+		rel[cn.Node.ID] = cn.Relevance
+	}
+	if rel[m1ID] <= rel[helperID] {
+		t.Errorf("Service.Start (%.5f) should outrank helper doWork (%.5f) — method teleport seeds must dominate", rel[m1ID], rel[helperID])
+	}
+}
+
 // nodeIDSet returns the set of NodeIDs present in a SubGraph for quick lookup.
 func nodeIDSet(sub *graph.SubGraph) map[graph.NodeID]struct{} {
 	m := make(map[graph.NodeID]struct{}, len(sub.Nodes))
@@ -364,4 +760,656 @@ func nodeIDSet(sub *graph.SubGraph) map[graph.NodeID]struct{} {
 		m[cn.Node.ID] = struct{}{}
 	}
 	return m
+}
+
+// TestCentralityDelta_MinorChange_CachePreserved verifies that a topology
+// change small enough to leave all centrality scores within the flush threshold
+// does NOT clear the subgraph cache.
+//
+// Setup: 3-node chain A→B→C. Prime the cache with a carve. Add one isolated
+// node (no edges to existing graph) — centrality delta for A/B/C is exactly 0.
+// RebuildIndex must preserve all existing cache entries.
+func TestCentralityDelta_MinorChange_CachePreserved(t *testing.T) {
+	g := graph.New("minor")
+	aID := g.MakeNodeID("f.go", "A")
+	bID := g.MakeNodeID("f.go", "B")
+	cID := g.MakeNodeID("f.go", "C")
+	for _, id := range []graph.NodeID{aID, bID, cID} {
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: string(id), File: "f.go"})
+	}
+	g.AddEdge(&graph.Edge{From: aID, To: bID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: bID, To: cID, Type: graph.EdgeCalls})
+
+	if _, err := g.RebuildIndex(); err != nil {
+		t.Fatalf("first RebuildIndex: %v", err)
+	}
+	cfg := graph.DefaultCarveConfig()
+	if _, err := g.CarveEgoGraph(aID, cfg); err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+	lenBefore := g.CacheLen()
+	if lenBefore == 0 {
+		t.Fatal("cache should be non-empty after priming")
+	}
+
+	// Add an isolated node — zero edges, centrality delta for A/B/C is exactly 0.
+	isolatedID := g.MakeNodeID("f.go", "Isolated")
+	g.AddNode(&graph.Node{ID: isolatedID, Type: graph.NodeFunction, Name: "Isolated", File: "f.go"})
+
+	if _, err := g.RebuildIndex(); err != nil {
+		t.Fatalf("second RebuildIndex: %v", err)
+	}
+	if g.CacheLen() < lenBefore {
+		t.Errorf("cache shrank from %d to %d after minor change — should be preserved",
+			lenBefore, g.CacheLen())
+	}
+}
+
+// TestCentralityBoost_CacheInvalidatedOnRebuild verifies that after a second
+// RebuildIndex that promotes a new hub, a fresh CarveEgoGraph call reflects the
+// updated centrality — not a stale cache entry from before the rebuild.
+//
+// Setup: root calls leaf1 and leaf2.
+// Initial graph: leaf1 has no other edges (low centrality).
+// After rebuild: add 5 callers to leaf1 from a separate file → leaf1 becomes hub.
+// Carve root before rebuild → cache populated with old (equal) leaf1/leaf2 scores.
+// Carve root after rebuild → cache must be cleared, leaf1 must now outrank leaf2.
+func TestCentralityBoost_CacheInvalidatedOnRebuild(t *testing.T) {
+	g := graph.New("cachetest")
+
+	rootID := g.MakeNodeID("main.go", "Root")
+	leaf1ID := g.MakeNodeID("main.go", "Leaf1")
+	leaf2ID := g.MakeNodeID("main.go", "Leaf2")
+
+	g.AddNode(&graph.Node{ID: rootID, Type: graph.NodeFunction, Name: "Root", File: "main.go"})
+	g.AddNode(&graph.Node{ID: leaf1ID, Type: graph.NodeFunction, Name: "Leaf1", File: "main.go"})
+	g.AddNode(&graph.Node{ID: leaf2ID, Type: graph.NodeFunction, Name: "Leaf2", File: "main.go"})
+	g.AddEdge(&graph.Edge{From: rootID, To: leaf1ID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: rootID, To: leaf2ID, Type: graph.EdgeCalls})
+
+	if _, err := g.RebuildIndex(); err != nil {
+		t.Fatalf("first RebuildIndex: %v", err)
+	}
+
+	cfg := graph.DefaultCarveConfig()
+
+	// Warm the cache: both leaves are at equal 1-hop relevance, equal centrality.
+	sub1, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("first CarveEgoGraph: %v", err)
+	}
+
+	var leaf1RelBefore, leaf2RelBefore float64
+	for _, cn := range sub1.Nodes {
+		switch cn.Node.ID {
+		case leaf1ID:
+			leaf1RelBefore = cn.Relevance
+		case leaf2ID:
+			leaf2RelBefore = cn.Relevance
+		}
+	}
+	// Before rebuild both leaves are symmetric — same relevance.
+	if leaf1RelBefore != leaf2RelBefore {
+		t.Errorf("before rebuild: leaf1 (%f) != leaf2 (%f) — should be equal", leaf1RelBefore, leaf2RelBefore)
+	}
+
+	// Add 5 external callers to leaf1 only — makes leaf1 a hub.
+	for _, name := range []string{"Ca", "Cb", "Cc", "Cd", "Ce"} {
+		cid := g.MakeNodeID("callers.go", name)
+		g.AddNode(&graph.Node{ID: cid, Type: graph.NodeFunction, Name: name, File: "callers.go"})
+		g.AddEdge(&graph.Edge{From: cid, To: leaf1ID, Type: graph.EdgeCalls})
+	}
+
+	// Rebuild updates centrality AND must clear the cache.
+	if _, err := g.RebuildIndex(); err != nil {
+		t.Fatalf("second RebuildIndex: %v", err)
+	}
+
+	// After rebuild the cache must have been cleared.  A fresh call must
+	// reflect the new centrality — leaf1 is now the hub, leaf2 is still a leaf.
+	sub2, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("second CarveEgoGraph: %v", err)
+	}
+
+	var leaf1RelAfter, leaf2RelAfter float64
+	for _, cn := range sub2.Nodes {
+		switch cn.Node.ID {
+		case leaf1ID:
+			leaf1RelAfter = cn.Relevance
+		case leaf2ID:
+			leaf2RelAfter = cn.Relevance
+		}
+	}
+
+	if leaf1RelAfter == 0 || leaf2RelAfter == 0 {
+		t.Fatalf("expected both leaves in sub-graph after rebuild: leaf1=%f leaf2=%f", leaf1RelAfter, leaf2RelAfter)
+	}
+	if leaf1RelAfter <= leaf2RelAfter {
+		t.Errorf("after rebuild: leaf1 (%f) should outrank leaf2 (%f) due to centrality boost",
+			leaf1RelAfter, leaf2RelAfter)
+	}
+}
+
+// ── Hybrid Scoring (Sprint 13 #3) ────────────────────────────────────────────
+
+// makeUnitVec builds a unit-length float32 slice with only component [direction]
+// set to 1.0. Two vectors with the same direction have cosine similarity 1.0;
+// perpendicular vectors have cosine similarity 0.0.
+func makeUnitVec(dim, direction int) []float32 {
+	v := make([]float32, dim)
+	v[direction] = 1.0
+	return v
+}
+
+// TestCarveEgoGraph_HybridScoring_DisabledByDefault verifies that when neither
+// EmbeddingLookup nor HybridLambda is set, scoring is pure structural.
+func TestCarveEgoGraph_HybridScoring_DisabledByDefault(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	cfg := graph.DefaultCarveConfig()
+	// EmbeddingLookup and HybridLambda are zero-value — no blend expected.
+
+	sub, err := g.CarveEgoGraph(ids["handler"], cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == ids["handler"] && cn.Relevance != 1.0 {
+			t.Errorf("root relevance = %f, want 1.0", cn.Relevance)
+		}
+	}
+}
+
+// TestCarveEgoGraph_HybridScoring_LambdaZeroNoBlend verifies that lambda=0
+// with a lookup provided still produces pure structural scores and does NOT
+// invoke the lookup function.
+func TestCarveEgoGraph_HybridScoring_LambdaZeroNoBlend(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	lookupCalled := false
+	cfg := graph.DefaultCarveConfig()
+	cfg.EmbeddingLookup = func(nodeIDs []graph.NodeID) map[graph.NodeID][]float32 {
+		lookupCalled = true
+		return nil
+	}
+	cfg.HybridLambda = 0 // explicitly zero
+
+	_, err := g.CarveEgoGraph(ids["handler"], cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lookupCalled {
+		t.Error("EmbeddingLookup must not be called when HybridLambda=0")
+	}
+}
+
+// TestCarveEgoGraph_HybridScoring_NilLookupNoBlend verifies that a positive lambda
+// with nil EmbeddingLookup produces pure structural scores without panicking.
+func TestCarveEgoGraph_HybridScoring_NilLookupNoBlend(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.EmbeddingLookup = nil
+	cfg.HybridLambda = 0.5
+
+	sub, err := g.CarveEgoGraph(ids["service"], cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	found := false
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == ids["service"] {
+			found = true
+			if cn.Relevance != 1.0 {
+				t.Errorf("root relevance = %f, want 1.0", cn.Relevance)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("root node not found in result")
+	}
+}
+
+// TestCarveEgoGraph_HybridScoring_BlendApplied verifies the blend formula:
+//
+//	finalScore = (1-λ)×structural + λ×cosineSim(embed(root), embed(n))
+//
+// Uses unit vectors so cosine similarities are exact (0.0 or 1.0):
+//   - "service" gets the same-axis embedding as root → cosineSim=1.0 → boosted
+//   - "repo"    gets a perpendicular embedding        → cosineSim=0.0 → damped
+//
+// With λ=0.5, service must rank above repo after the blend.
+func TestCarveEgoGraph_HybridScoring_BlendApplied(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	const dim = 4
+	embeds := map[graph.NodeID][]float32{
+		ids["handler"]: makeUnitVec(dim, 0), // root axis
+		ids["service"]: makeUnitVec(dim, 0), // same axis as root → sim=1.0
+		ids["repo"]:    makeUnitVec(dim, 1), // perpendicular      → sim=0.0
+	}
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.EmbeddingLookup = func(nodeIDs []graph.NodeID) map[graph.NodeID][]float32 {
+		result := make(map[graph.NodeID][]float32, len(nodeIDs))
+		for _, id := range nodeIDs {
+			if v, ok := embeds[id]; ok {
+				result[id] = v
+			}
+		}
+		return result
+	}
+	cfg.HybridLambda = 0.5
+
+	sub, err := g.CarveEgoGraph(ids["handler"], cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var serviceRel, repoRel float64
+	for _, cn := range sub.Nodes {
+		switch cn.Node.ID {
+		case ids["handler"]:
+			if cn.Relevance != 1.0 {
+				t.Errorf("root relevance = %f, want 1.0", cn.Relevance)
+			}
+		case ids["service"]:
+			serviceRel = cn.Relevance
+		case ids["repo"]:
+			repoRel = cn.Relevance
+		}
+	}
+	if serviceRel == 0 {
+		t.Fatal("service node not found in result")
+	}
+	if repoRel == 0 {
+		t.Fatal("repo node not found in result")
+	}
+	// service (sim=1.0) must outrank repo (sim=0.0) after hybrid blend.
+	if serviceRel <= repoRel {
+		t.Errorf("service (%f) should outrank repo (%f) after semantic blend", serviceRel, repoRel)
+	}
+}
+
+// TestCarveEgoGraph_HybridScoring_NoRootEmbeddingFallback verifies that when
+// the root node has no stored embedding, scoring falls back to pure structural
+// (no blend applied to any node).
+func TestCarveEgoGraph_HybridScoring_NoRootEmbeddingFallback(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	// Embeddings for all nodes EXCEPT root.
+	const dim = 4
+	embeds := map[graph.NodeID][]float32{
+		ids["service"]: makeUnitVec(dim, 0),
+		ids["repo"]:    makeUnitVec(dim, 1),
+	}
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.EmbeddingLookup = func(nodeIDs []graph.NodeID) map[graph.NodeID][]float32 {
+		result := make(map[graph.NodeID][]float32)
+		for _, id := range nodeIDs {
+			if v, ok := embeds[id]; ok {
+				result[id] = v
+			}
+		}
+		return result
+	}
+	cfg.HybridLambda = 0.5
+
+	hybridSub, err := g.CarveEgoGraph(ids["handler"], cfg)
+	if err != nil {
+		t.Fatalf("hybrid sub error: %v", err)
+	}
+
+	// Pure structural baseline — use a different IntentID to avoid cache collision.
+	pureCfg := graph.DefaultCarveConfig()
+	pureCfg.IntentID = "pure"
+	pureSub, err := g.CarveEgoGraph(ids["handler"], pureCfg)
+	if err != nil {
+		t.Fatalf("pure sub error: %v", err)
+	}
+
+	hybridRel := map[graph.NodeID]float64{}
+	for _, cn := range hybridSub.Nodes {
+		hybridRel[cn.Node.ID] = cn.Relevance
+	}
+	pureRel := map[graph.NodeID]float64{}
+	for _, cn := range pureSub.Nodes {
+		pureRel[cn.Node.ID] = cn.Relevance
+	}
+
+	// Non-root scores must equal pure structural (no root embedding → no blend).
+	for id, pr := range pureRel {
+		if id == ids["handler"] {
+			continue
+		}
+		hr, ok := hybridRel[id]
+		if !ok {
+			t.Errorf("node %s missing from hybrid result", id)
+			continue
+		}
+		if hr != pr {
+			t.Errorf("node %s: hybrid=%f structural=%f — should be equal (no root embedding)", id, hr, pr)
+		}
+	}
+}
+
+// TestCarveEgoGraph_HybridScoring_MismatchedDimFallback verifies that a node
+// whose embedding dimension differs from root's is treated as "no embedding"
+// (dotProduct returns 0) and retains its structural score.
+func TestCarveEgoGraph_HybridScoring_MismatchedDimFallback(t *testing.T) {
+	g := graph.New("dimtest")
+	root := g.MakeNodeID("f.go", "Root")
+	child := g.MakeNodeID("f.go", "Child")
+	g.AddNode(&graph.Node{ID: root, Type: graph.NodeFunction, Name: "Root", File: "f.go"})
+	g.AddNode(&graph.Node{ID: child, Type: graph.NodeFunction, Name: "Child", File: "f.go"})
+	g.AddEdge(&graph.Edge{From: root, To: child, Type: graph.EdgeCalls})
+
+	// root: dim-2, child: dim-3 → dotProduct returns 0 → child score unchanged.
+	cfg := graph.DefaultCarveConfig()
+	cfg.HybridLambda = 0.5
+	cfg.EmbeddingLookup = func(ids []graph.NodeID) map[graph.NodeID][]float32 {
+		m := map[graph.NodeID][]float32{}
+		for _, id := range ids {
+			if id == root {
+				m[id] = []float32{1, 0}
+			} else {
+				m[id] = []float32{1, 0, 0} // mismatched length
+			}
+		}
+		return m
+	}
+
+	sub, err := g.CarveEgoGraph(root, cfg)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == child {
+			if cn.Relevance <= 0 {
+				t.Errorf("child relevance = %f, expected > 0 (structural fallback)", cn.Relevance)
+			}
+			return
+		}
+	}
+	t.Error("child node not found in result")
+}
+
+// TestCarveEgoGraph_HybridScoring_ClampStructuralAboveOne verifies that when a
+// struct method's structural score exceeds 1.0 after eigenvector centrality boost
+// (seeded at 0.9 × (1 + 0.2 × centrality)), the hybrid blend clamps it to 1.0
+// before applying the formula, so the final score stays ≤ 1.0.
+//
+// Graph: struct root "HubService" + hub method "HubService.Run" + 15 spoke
+// callers. After RebuildIndex the hub has centrality = 1.0 (highest connected
+// node). Structural = 0.9 × (1 + 0.2 × 1.0) = 1.08 > 1.0.
+// With λ=0.5 and sim=1.0: WITHOUT clamp score=1.04; WITH clamp score=1.0.
+func TestCarveEgoGraph_HybridScoring_ClampStructuralAboveOne(t *testing.T) {
+	g := graph.New("clamptest")
+	const pkg = "mypkg"
+
+	rootID := g.MakeNodeID("svc.go", "HubService")
+	g.AddNode(&graph.Node{ID: rootID, Name: "HubService", Type: graph.NodeStruct, File: "svc.go", Package: pkg})
+
+	hubID := g.MakeNodeID("svc.go", "HubService.Run")
+	g.AddNode(&graph.Node{ID: hubID, Name: "HubService.Run", Type: graph.NodeMethod, File: "svc.go", Package: pkg})
+
+	// 15 spokes all calling the hub → hub gets high eigenvector centrality.
+	for i := 0; i < 15; i++ {
+		name := fmt.Sprintf("Caller%d", i)
+		sid := g.MakeNodeID("callers.go", name)
+		g.AddNode(&graph.Node{ID: sid, Name: name, Type: graph.NodeFunction, File: "callers.go", Package: pkg})
+		g.AddEdge(&graph.Edge{From: sid, To: hubID, Type: graph.EdgeCalls})
+	}
+
+	// Build the CSR index so eigenvector centrality is computed.
+	if _, err := g.RebuildIndex(); err != nil {
+		t.Fatalf("RebuildIndex: %v", err)
+	}
+
+	// Hub method and root both get same-axis unit embedding → cosine sim = 1.0.
+	const dim = 4
+	rootVec := makeUnitVec(dim, 0)
+	hubVec := makeUnitVec(dim, 0)
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.MinRelevance = 0
+	cfg.EmbeddingLookup = func(ids []graph.NodeID) map[graph.NodeID][]float32 {
+		m := map[graph.NodeID][]float32{}
+		for _, id := range ids {
+			switch id {
+			case rootID:
+				m[id] = rootVec
+			case hubID:
+				m[id] = hubVec
+			}
+		}
+		return m
+	}
+	cfg.HybridLambda = 0.5
+
+	sub, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+
+	var hubScore float64
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == hubID {
+			hubScore = cn.Relevance
+			break
+		}
+	}
+	if hubScore == 0 {
+		t.Fatal("hub method not found in result")
+	}
+	// With clamp: score = (1-0.5)×1.0 + 0.5×1.0 = 1.0.
+	// Without clamp: score = (1-0.5)×1.08 + 0.5×1.0 = 1.04 > 1.0.
+	if hubScore > 1.0 {
+		t.Errorf("hub score = %f > 1.0 — structural was not clamped before blend", hubScore)
+	}
+}
+
+// TestCarveEgoGraph_InterfaceImplementorExpansion verifies that when the root
+// is a NodeInterface, concrete implementors (via reverse IMPLEMENTS edges) and
+// their receiver methods are seeded at relevance 0.85 in both BFS and PPR paths.
+//
+// Graph layout:
+//
+//	Reader (interface)
+//	  ← IMPLEMENTS ─ FileReader  (struct + Read method)
+//	  ← IMPLEMENTS ─ NetReader   (struct + Read method)
+//	  (Unrelated struct MemStore — NOT an implementor, must not be seeded)
+func TestCarveEgoGraph_InterfaceImplementorExpansion(t *testing.T) {
+	g := graph.New("testrepo")
+
+	// Interface
+	ifaceID := g.MakeNodeID("io.go", "Reader")
+	g.AddNode(&graph.Node{ID: ifaceID, Type: graph.NodeInterface, Name: "Reader", File: "io.go"})
+
+	// FileReader struct + method
+	fileReaderID := g.MakeNodeID("file.go", "FileReader")
+	fileReaderReadID := g.MakeNodeID("file.go", "FileReader.Read")
+	g.AddNode(&graph.Node{ID: fileReaderID, Type: graph.NodeStruct, Name: "FileReader", File: "file.go"})
+	g.AddNode(&graph.Node{ID: fileReaderReadID, Type: graph.NodeMethod, Name: "FileReader.Read", File: "file.go"})
+	// Struct→method DEFINES edge (as Go parser emits)
+	g.AddEdge(&graph.Edge{From: fileReaderID, To: fileReaderReadID, Type: graph.EdgeDefines})
+	// Concrete→interface IMPLEMENTS edge
+	g.AddEdge(&graph.Edge{From: fileReaderID, To: ifaceID, Type: graph.EdgeImplements})
+
+	// NetReader struct + method
+	netReaderID := g.MakeNodeID("net.go", "NetReader")
+	netReaderReadID := g.MakeNodeID("net.go", "NetReader.Read")
+	g.AddNode(&graph.Node{ID: netReaderID, Type: graph.NodeStruct, Name: "NetReader", File: "net.go"})
+	g.AddNode(&graph.Node{ID: netReaderReadID, Type: graph.NodeMethod, Name: "NetReader.Read", File: "net.go"})
+	g.AddEdge(&graph.Edge{From: netReaderID, To: netReaderReadID, Type: graph.EdgeDefines})
+	g.AddEdge(&graph.Edge{From: netReaderID, To: ifaceID, Type: graph.EdgeImplements})
+
+	// Unrelated struct — NOT an implementor
+	unrelatedID := g.MakeNodeID("store.go", "MemStore")
+	g.AddNode(&graph.Node{ID: unrelatedID, Type: graph.NodeStruct, Name: "MemStore", File: "store.go"})
+
+	type testCase struct {
+		usePPR      bool
+		name        string
+		// BFS seeds implementors at the literal 0.85; PPR normalises the teleport
+		// vector across all seeds so each node's rank is lower than 0.85 but still
+		// well above MinRelevance.  The thresholds reflect this difference.
+		implMinRel  float64 // concrete implementor struct
+		methodMinRel float64 // implementor methods
+	}
+	cases := []testCase{
+		{usePPR: false, name: "BFS", implMinRel: 0.80, methodMinRel: 0.80},
+		// PPR normalises teleport to sum=1 so with 5 seeds (iface+2 impls+2 methods)
+		// at weights 1.0+0.85×4=4.4 the normalised weight per implementor ≈ 0.19.
+		// After power iteration convergence, implementors end up at ~0.25, methods
+		// at ~0.06 — well above MinRelevance=0.01 and significantly higher than if
+		// they were not seeded at all (where they'd only accumulate propagation mass).
+		{usePPR: true, name: "PPR", implMinRel: 0.10, methodMinRel: 0.03},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := graph.DefaultCarveConfig()
+			cfg.UsePPR = tc.usePPR
+			cfg.MinRelevance = 0.01
+
+			sub, err := g.CarveEgoGraph(ifaceID, cfg)
+			if err != nil {
+				t.Fatalf("CarveEgoGraph: %v", err)
+			}
+
+			nodeMap := make(map[graph.NodeID]float64)
+			for _, cn := range sub.Nodes {
+				nodeMap[cn.Node.ID] = cn.Relevance
+			}
+
+			// Concrete implementor structs must appear with meaningful relevance.
+			for _, id := range []graph.NodeID{fileReaderID, netReaderID} {
+				rel, ok := nodeMap[id]
+				if !ok {
+					t.Errorf("%s: concrete implementor %s missing from subgraph", tc.name, id)
+					continue
+				}
+				if rel < tc.implMinRel {
+					t.Errorf("%s: implementor %s relevance = %.3f, want >= %.3f", tc.name, id, rel, tc.implMinRel)
+				}
+			}
+
+			// Implementor methods must also appear.
+			for _, id := range []graph.NodeID{fileReaderReadID, netReaderReadID} {
+				rel, ok := nodeMap[id]
+				if !ok {
+					t.Errorf("%s: implementor method %s missing from subgraph", tc.name, id)
+					continue
+				}
+				if rel < tc.methodMinRel {
+					t.Errorf("%s: implementor method %s relevance = %.3f, want >= %.3f", tc.name, id, rel, tc.methodMinRel)
+				}
+			}
+
+			// Unrelated struct must not get high relevance (it is isolated).
+			if rel, ok := nodeMap[unrelatedID]; ok && rel > 0.5 {
+				t.Errorf("%s: unrelated MemStore has unexpectedly high relevance %.3f", tc.name, rel)
+			}
+		})
+	}
+}
+
+// TestCarveEgoGraph_InterfaceImplementorExpansion_SameReceiverName verifies that
+// when the interface and a concrete struct share the same name (e.g. "Store"
+// interface and "Store" struct in different packages), the method seeding does
+// not downgrade interface-method scores (0.9) to implementor-method scores (0.85).
+//
+// This covers the max-score guard in the BFS implementor seeding path.
+func TestCarveEgoGraph_InterfaceImplementorExpansion_SameReceiverName(t *testing.T) {
+	g := graph.New("testrepo")
+
+	// Interface "Store" with method "Store.Get" (in iface.go)
+	ifaceID := g.MakeNodeID("iface.go", "Store")
+	ifaceMethID := g.MakeNodeID("iface.go", "Store.Get")
+	g.AddNode(&graph.Node{ID: ifaceID, Type: graph.NodeInterface, Name: "Store", File: "iface.go"})
+	g.AddNode(&graph.Node{ID: ifaceMethID, Type: graph.NodeMethod, Name: "Store.Get", File: "iface.go"})
+	g.AddEdge(&graph.Edge{From: ifaceID, To: ifaceMethID, Type: graph.EdgeDefines})
+
+	// Concrete struct also named "Store" (in impl.go) — same receiver name, different file/ID
+	implID := g.MakeNodeID("impl.go", "Store")
+	implMethID := g.MakeNodeID("impl.go", "Store.Get")
+	g.AddNode(&graph.Node{ID: implID, Type: graph.NodeStruct, Name: "Store", File: "impl.go"})
+	g.AddNode(&graph.Node{ID: implMethID, Type: graph.NodeMethod, Name: "Store.Get", File: "impl.go"})
+	g.AddEdge(&graph.Edge{From: implID, To: implMethID, Type: graph.EdgeDefines})
+	g.AddEdge(&graph.Edge{From: implID, To: ifaceID, Type: graph.EdgeImplements})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = false
+	cfg.MinRelevance = 0.01
+
+	sub, err := g.CarveEgoGraph(ifaceID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+
+	nodeMap := make(map[graph.NodeID]float64)
+	for _, cn := range sub.Nodes {
+		nodeMap[cn.Node.ID] = cn.Relevance
+	}
+
+	// The interface method seeded at 0.9 must not be downgraded to 0.85.
+	// iface.go::Store.Get is the interface method (seeded at 0.9 by receiver-method seeding).
+	// impl.go::Store.Get is the implementor method (would be seeded at 0.85 by implementor seeding).
+	// Since both have receiver name "Store", the implementor seeding runs second;
+	// the max-score guard must preserve the higher 0.9 for iface.go::Store.Get.
+	ifaceMethRel, ok := nodeMap[ifaceMethID]
+	if !ok {
+		t.Fatal("interface method Store.Get (iface.go) missing from subgraph")
+	}
+	if ifaceMethRel < 0.89 {
+		t.Errorf("interface method Store.Get (iface.go) relevance = %.3f, want >= 0.89 (must not be downgraded from 0.9 to 0.85)", ifaceMethRel)
+	}
+
+	// Implementor method must still appear at 0.85.
+	implMethRel, ok := nodeMap[implMethID]
+	if !ok {
+		t.Fatal("implementor method Store.Get (impl.go) missing from subgraph")
+	}
+	if implMethRel < 0.80 {
+		t.Errorf("implementor method Store.Get (impl.go) relevance = %.3f, want >= 0.80", implMethRel)
+	}
+
+	// Implementor struct must appear.
+	if _, ok := nodeMap[implID]; !ok {
+		t.Error("implementor struct Store (impl.go) missing from subgraph")
+	}
+}
+
+// TestCarveEgoGraph_InterfaceImplementorExpansion_SelfLoop verifies that a
+// self-loop IMPLEMENTS edge (e.From == e.To == rootID, a parser-bug scenario)
+// does not corrupt the root node's relevance score.
+func TestCarveEgoGraph_InterfaceImplementorExpansion_SelfLoop(t *testing.T) {
+	g := graph.New("testrepo")
+
+	ifaceID := g.MakeNodeID("iface.go", "Iface")
+	g.AddNode(&graph.Node{ID: ifaceID, Type: graph.NodeInterface, Name: "Iface", File: "iface.go"})
+	// Simulate a parser-bug self-loop: interface IMPLEMENTS itself.
+	g.AddEdge(&graph.Edge{From: ifaceID, To: ifaceID, Type: graph.EdgeImplements})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = false
+
+	sub, err := g.CarveEgoGraph(ifaceID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == ifaceID {
+			if cn.Relevance != 1.0 {
+				t.Errorf("root Iface relevance = %.3f after self-loop, want exactly 1.0", cn.Relevance)
+			}
+			return
+		}
+	}
+	t.Error("root Iface node missing from subgraph")
 }

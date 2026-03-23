@@ -513,9 +513,38 @@ func (s *Server) handleRecall(
 		}
 	}
 
+	// Sprint 13 #6: Context-weighted recall — when agent_id is provided,
+	// enrich the BM25/semantic query with the agent's declared intent and
+	// active task title. Graph channel always uses the original structural query.
+	// Implements ACT-R spreading activation: current working memory cues
+	// surface contextually relevant memories (RC: Memory #9).
+	//
+	// Enrichment is computed once and used for BOTH episode and memory search
+	// (both are text-retrieval channels that benefit from session context).
+	enrichedQuery := ""
+	var contextEnrichment map[string]string
+	if agentIDStr := stringArg(req, "agent_id"); agentIDStr != "" && query != "" {
+		if agent, agentErr := s.store.GetAgent(agentIDStr); agentErr == nil && agent != nil {
+			enrichedQuery = buildEnrichedQuery(query, agent.Intent, agent.CurrentTaskTitle)
+			if enrichedQuery != query {
+				contextEnrichment = map[string]string{
+					"intent":     agent.Intent,
+					"task_title": agent.CurrentTaskTitle,
+					"enriched":   enrichedQuery,
+				}
+			}
+		}
+		// Lookup errors are silently swallowed — recall degrades to non-enriched.
+	}
+	// episodeQuery uses enrichedQuery when available (episode search is also FTS5/BM25).
+	episodeQuery := query
+	if enrichedQuery != "" {
+		episodeQuery = enrichedQuery
+	}
+
 	// Episodes: still searched via FTS5 BM25 separately (not part of RRF).
 	episodes, err := s.store.RecallEpisodes(
-		query,
+		episodeQuery,
 		stringArg(req, "project_id"),
 		stringArg(req, "agent_id"),
 		stringArg(req, "episode_type"),
@@ -541,7 +570,7 @@ func (s *Server) handleRecall(
 
 	// Quad-channel recall: 4 parallel channels merged via RRF.
 	// Replaces the old sequential BM25 + vector search path.
-	memories, recallChannels, staleEmbIDs, traversalInfo := s.quadRecallSearch(ctx, query, quadLimit, includeStale, sinceDays, untilTime, depth)
+	memories, recallChannels, staleEmbIDs, traversalInfo := s.quadRecallSearch(ctx, query, enrichedQuery, quadLimit, includeStale, sinceDays, untilTime, depth)
 
 	// Sprint 10.5: apply absolute time bounds (since / until) as post-filters.
 	// sinceTime and untilTime are only set when the caller provided since= / until=.
@@ -889,6 +918,11 @@ func (s *Server) handleRecall(
 	// graph-attributed memory — e.g. "AuthService -[CALLS]- TokenValidator".
 	if traversalInfo != nil {
 		resp["graph_traversal"] = traversalInfo
+	}
+	// Sprint 13 #6: surface context enrichment when it was applied.
+	// Tells the agent its session context (intent, task) boosted memory retrieval.
+	if contextEnrichment != nil {
+		resp["context_enrichment"] = contextEnrichment
 	}
 	return jsonResult(resp)
 }

@@ -3384,6 +3384,28 @@ func (s *Store) ClearAgentTask(agentID string) error {
 	return err
 }
 
+// GetAgent returns the agent record for the given ID, or nil if not found.
+// Used by context-weighted recall to fetch session state (intent, active task).
+func (s *Store) GetAgent(agentID string) (*Agent, error) {
+	var a Agent
+	err := s.knowledgeDB.QueryRow(`
+		SELECT id, last_seen, metadata,
+		       current_task_id, current_task_title, current_focus, project_id,
+		       focus_file, focus_since, intent
+		FROM agents WHERE id = ?`, agentID,
+	).Scan(&a.ID, &a.LastSeen, &a.Metadata,
+		&a.CurrentTaskID, &a.CurrentTaskTitle, &a.CurrentFocus, &a.ProjectID,
+		&a.CurrentFocusFile, &a.CurrentFocusSince, &a.Intent)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	a.Presence = classifyPresence(a.LastSeen, time.Now().UTC())
+	return &a, nil
+}
+
 // GetAgents returns all known agents ordered by last_seen descending.
 // Presence is computed from last_seen: active (≤5min), idle (5–15min), inactive (>15min).
 func (s *Store) GetAgents() ([]Agent, error) {

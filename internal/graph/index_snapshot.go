@@ -377,6 +377,10 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 		}
 	}
 
+	// Recompute eigenvector centrality from the restored CSR arrays.
+	// Not serialised — cheap to recompute (<10 ms) and avoids a version bump.
+	idx.computeEigenvectorCentrality()
+
 	atomic.StoreInt32(&idx.ready, 1)
 	return idx, nil
 }
