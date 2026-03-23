@@ -406,6 +406,7 @@ func (r *Resolver) isSiblingStoreFresh(ctx context.Context, siblingStore *store.
 // Returns nil on any error (fail-open). Once a store fails to open, the error
 // is cached to avoid retry storms — call InvalidateCache to reset.
 func (r *Resolver) getStore(alias string) *store.Store {
+	// Fast path: check if already cached under read lock.
 	r.mu.RLock()
 	st, ok := r.stores[alias]
 	if ok {
@@ -438,37 +439,34 @@ func (r *Resolver) getStore(alias string) *store.Store {
 		return nil
 	}
 
-	// Check cached compat result first, then check on disk.
-	r.mu.RLock()
-	compat, compatKnown := r.compatible[alias]
-	r.mu.RUnlock()
-
-	if !compatKnown {
-		if err := checkSchemaCompatibility(dbPath); err != nil {
-			r.mu.Lock()
-			r.storeErr[alias] = err
-			r.compatible[alias] = false
-			r.mu.Unlock()
-			log.Printf("federation: incompatible store %q: %v", alias, err)
-			return nil
-		}
-		r.mu.Lock()
-		r.compatible[alias] = true
-		r.mu.Unlock()
-		compat = true
-	}
-	if !compat {
-		return nil
-	}
-
+	// Acquire write lock for compat check + store open. This eliminates the
+	// TOCTOU race where concurrent goroutines would run duplicate compat checks
+	// and open duplicate store connections outside any lock.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Double-check after acquiring write lock.
+	// Double-check after acquiring write lock — another goroutine may have
+	// completed the open while we waited for the lock.
 	if st, ok := r.stores[alias]; ok {
 		return st
 	}
 	if _, errCached := r.storeErr[alias]; errCached {
+		return nil
+	}
+
+	// Check cached compat result, or run the check under the write lock.
+	compat, compatKnown := r.compatible[alias]
+	if !compatKnown {
+		if err := checkSchemaCompatibility(dbPath); err != nil {
+			r.storeErr[alias] = err
+			r.compatible[alias] = false
+			log.Printf("federation: incompatible store %q: %v", alias, err)
+			return nil
+		}
+		r.compatible[alias] = true
+		compat = true
+	}
+	if !compat {
 		return nil
 	}
 
