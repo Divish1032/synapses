@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SynapsesOS/synapses/internal/store"
 )
@@ -280,13 +281,15 @@ func (c *Cache) fetchAndStrip(ctx context.Context, url string) (string, error) {
 	text := StripHTML(string(raw))
 	if len(text) > maxDocBytes {
 		// Truncate at rune boundary to avoid splitting multi-byte UTF-8 chars.
-		runes := []rune(text)
-		if len(string(runes)) > maxDocBytes {
-			for len(runes) > 0 && len(string(runes)) > maxDocBytes {
-				runes = runes[:len(runes)-1]
+		// Walk backwards from the byte limit to find a valid rune start.
+		truncated := text[:maxDocBytes]
+		for i := len(truncated) - 1; i >= len(truncated)-utf8.UTFMax && i >= 0; i-- {
+			if utf8.RuneStart(truncated[i]) {
+				truncated = truncated[:i]
+				break
 			}
 		}
-		text = string(runes)
+		text = truncated
 	}
 	return strings.TrimSpace(text), nil
 }
