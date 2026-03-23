@@ -28,6 +28,12 @@ import (
 	"github.com/coder/hnsw"
 )
 
+// hnswPendingEntry is a vector queued during an HNSW rebuild.
+type hnswPendingEntry struct {
+	memoryID string
+	vec      []float32
+}
+
 const (
 	// hnswOversample is the multiplier applied to the requested limit when
 	// querying the HNSW index. HNSW graph traversal can terminate before
@@ -95,19 +101,44 @@ func (s *Store) RebuildMemoryHNSW() {
 		if len(vec) == 0 {
 			continue
 		}
-		g.Add(hnsw.MakeNode(memID, vec))
-		count++
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logutil.Warn("synapses: rebuild HNSW: skip panicking entry %s: %v\n", memID, r)
+				}
+			}()
+			g.Delete(memID)
+			g.Add(hnsw.MakeNode(memID, vec))
+			count++
+		}()
 	}
 	if err := rows.Err(); err != nil {
 		logutil.Error("synapses: rebuild HNSW index scan: %v\n", err)
 	}
 
 	s.hnswMemMu.Lock()
+	// Replay any additions that were queued during the rebuild.
+	// Use the same pre-delete + panic-recovery pattern as hnswAdd.
+	pending := s.hnswPendingAdds
+	s.hnswPendingAdds = nil
+	for _, p := range pending {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logutil.Warn("synapses: HNSW replay skipped memory_id=%s: %v\n", p.memoryID, r)
+				}
+			}()
+			g.Delete(p.memoryID)
+			g.Add(hnsw.MakeNode(p.memoryID, p.vec))
+			count++
+		}()
+	}
 	s.hnswMemIndex = g
+	s.hnswRebuilding = false
 	s.hnswMemMu.Unlock()
 
 	if count > 0 {
-		logutil.Info("synapses: HNSW index built (%d memory embeddings, M=%d, efSearch=%d)\n", count, hnswM, hnswEfSearch)
+		logutil.Info("synapses: HNSW index built (%d memory embeddings, %d replayed, M=%d, efSearch=%d)\n", count, len(pending), hnswM, hnswEfSearch)
 	}
 }
 
@@ -122,6 +153,15 @@ func (s *Store) RebuildMemoryHNSW() {
 func (s *Store) hnswAdd(memoryID string, vec []float32) {
 	s.hnswMemMu.Lock()
 	defer s.hnswMemMu.Unlock()
+
+	// If a rebuild is in progress, queue the addition for replay after
+	// rebuild completes. Without this, vectors added during the 200ms-5s
+	// rebuild window would be silently lost from the index.
+	if s.hnswRebuilding {
+		s.hnswPendingAdds = append(s.hnswPendingAdds, hnswPendingEntry{memoryID: memoryID, vec: vec})
+		return
+	}
+
 	if s.hnswMemIndex == nil {
 		return
 	}
@@ -133,6 +173,7 @@ func (s *Store) hnswAdd(memoryID string, vec []float32) {
 			// concurrent searches fall back to brute-force SQLite, then rebuild
 			// from the authoritative SQLite source in the background.
 			s.hnswMemIndex = nil
+			s.hnswRebuilding = true
 			go s.RebuildMemoryHNSW()
 		}
 	}()

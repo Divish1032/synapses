@@ -475,8 +475,10 @@ type Store struct {
 	// memory embeddings. Replaces O(N) brute-force scan with O(log N) graph
 	// traversal. Keyed by memory_id, values are pre-normalized embedding vectors.
 	// Rebuilt from SQLite at startup via RebuildMemoryHNSW(). Protected by hnswMemMu.
-	hnswMemIndex *hnsw.Graph[string]
-	hnswMemMu    sync.RWMutex
+	hnswMemIndex    *hnsw.Graph[string]
+	hnswMemMu       sync.RWMutex
+	hnswRebuilding  bool                // true while async rebuild is in progress
+	hnswPendingAdds []hnswPendingEntry  // vectors queued during rebuild
 
 	// hnswNodeIndex is the in-memory HNSW index for graph node embeddings.
 	// Used by semantic search in the search tool. Same pattern as memory HNSW.
