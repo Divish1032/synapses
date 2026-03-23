@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -255,6 +256,15 @@ func (s *Server) handleFileResource(
 	filePath := strings.TrimPrefix(uri, "synapses://file/")
 	if filePath == "" {
 		return nil, fmt.Errorf("file path required in URI, e.g. synapses://file/internal/graph/traverse.go")
+	}
+	// Decode percent-encoded characters before traversal check to prevent
+	// bypasses like %2e%2e/%2e%2e/etc/passwd.
+	if decoded, err := url.PathUnescape(filePath); err == nil {
+		filePath = decoded
+	}
+	// Reject absolute paths and null bytes.
+	if strings.HasPrefix(filePath, "/") || strings.Contains(filePath, "\x00") {
+		return nil, fmt.Errorf("invalid file URI path")
 	}
 	// Reject path traversal attempts — ".." components could escape the repo root.
 	for _, seg := range strings.Split(filepath.ToSlash(filePath), "/") {

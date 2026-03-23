@@ -95,18 +95,20 @@ func New(s *store.Store) *Cache {
 				// (defense-in-depth — DialContext also validates resolved IPs).
 				host := req.URL.Hostname()
 				ip := net.ParseIP(host)
-				if ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
+				if ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast()) {
 					return fmt.Errorf("redirect to private IP blocked: %s", host)
 				}
 				if ip == nil {
 					// Hostname redirect — resolve DNS and check for private IPs.
+					// Fail closed: if DNS fails, block the redirect.
 					ips, err := net.LookupIP(host)
-					if err == nil {
-						for _, resolved := range ips {
-							if resolved.IsLoopback() || resolved.IsPrivate() ||
-								resolved.IsLinkLocalUnicast() || resolved.IsUnspecified() {
-								return fmt.Errorf("redirect to private address blocked: %s resolves to %s", host, resolved)
-							}
+					if err != nil {
+						return fmt.Errorf("redirect DNS lookup failed for %s: %w", host, err)
+					}
+					for _, resolved := range ips {
+						if resolved.IsLoopback() || resolved.IsPrivate() ||
+							resolved.IsLinkLocalUnicast() || resolved.IsUnspecified() || resolved.IsMulticast() {
+							return fmt.Errorf("redirect to private address blocked: %s resolves to %s", host, resolved)
 						}
 					}
 				}

@@ -700,9 +700,12 @@ func safeReadManifest(projectPath, filename string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	absProject, err := filepath.Abs(projectPath)
+	absProject, err := filepath.EvalSymlinks(projectPath)
 	if err != nil {
-		return nil, err
+		absProject, err = filepath.Abs(projectPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 	absProject = filepath.Clean(absProject) + string(filepath.Separator)
 	resolved = filepath.Clean(resolved)

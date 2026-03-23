@@ -1561,6 +1561,7 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	// memories + cascades: wrap in a single transaction to prevent orphaned
 	// embeddings/anchors/surfaced/versions on crash between DELETEs.
 	if tx, txErr := s.knowledgeDB.Begin(); txErr == nil {
+		defer tx.Rollback() // no-op after Commit; prevents leaked tx on panic
 		memNow := time.Now().UTC().Format(time.RFC3339)
 		var expiredCount int64
 		if res, execErr := tx.Exec(`DELETE FROM memories WHERE expires_at != '' AND expires_at < ?`, memNow); execErr == nil {
