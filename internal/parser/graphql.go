@@ -30,6 +30,16 @@ func (p *GraphQLParser) Extensions() []string {
 // TSLanguageForFile returns the tree-sitter language for the given file.
 func (p *GraphQLParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
+// fieldTypeRef records a deferred field→returnType edge to resolve after all
+// type definitions in the file have been added to the graph.
+// GraphQL schemas can reference types in any order; we must not drop edges
+// simply because the target type was defined after the referencing field.
+type fieldTypeRef struct {
+	fieldNodeID graph.NodeID
+	baseType    string // stripped of []/! wrappers, e.g. "User" from "[User!]!"
+	filePath    string
+}
+
 // Parse extracts code entities from a single GraphQL file and merges them into the graph.
 func (p *GraphQLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
@@ -56,10 +66,21 @@ func (p *GraphQLParser) Parse(g *graph.Graph, filePath string, src []byte) error
 		Domain: graph.DomainAPI,
 	})
 
-	// The go-sitter-forest GraphQL grammar wraps definitions:
-	//   root → document → definition → type_system_definition → type_definition → actual_node
-	// We recursively unwrap to find the actual definition nodes.
-	p.walkDefinitions(g, root, src, filePath, fileNodeID)
+	// First pass: walk all definitions, collecting deferred field→type edges.
+	// Deferred resolution handles forward references: type B may appear after
+	// the field in type A that references it. Without deferral, forward-referenced
+	// types produce no edge — silently broken graph for real-world schemas.
+	var deferred []fieldTypeRef
+	p.walkDefinitions(g, root, src, filePath, fileNodeID, &deferred)
+
+	// Second pass: resolve all deferred field→type edges now that every type
+	// definition in this file has been added to the graph.
+	for _, d := range deferred {
+		typeNodeID := g.MakeNodeID(d.filePath, d.baseType)
+		if g.GetNode(typeNodeID) != nil {
+			g.AddEdge(&graph.Edge{From: d.fieldNodeID, To: typeNodeID, Type: graph.EdgeDependsOn})
+		}
+	}
 
 	return nil
 }
@@ -67,9 +88,12 @@ func (p *GraphQLParser) Parse(g *graph.Graph, filePath string, src []byte) error
 // walkDefinitions recursively unwraps the grammar's nested wrapper nodes
 // (document, definition, type_system_definition, executable_definition,
 // type_definition) to find the actual definition nodes and dispatch them.
+// deferred accumulates field→type edges that must be resolved after all type
+// nodes exist (handles forward references).
 func (p *GraphQLParser) walkDefinitions(
 	g *graph.Graph, n sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID,
+	deferred *[]fieldTypeRef,
 ) {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
@@ -78,11 +102,11 @@ func (p *GraphQLParser) walkDefinitions(
 		}
 		switch child.Type() {
 		case "object_type_definition":
-			p.extractObjectType(g, child, src, filePath, fileNodeID, "type")
+			p.extractObjectType(g, child, src, filePath, fileNodeID, "type", deferred)
 		case "input_object_type_definition":
-			p.extractObjectType(g, child, src, filePath, fileNodeID, "input")
+			p.extractObjectType(g, child, src, filePath, fileNodeID, "input", deferred)
 		case "interface_type_definition":
-			p.extractObjectType(g, child, src, filePath, fileNodeID, "interface")
+			p.extractObjectType(g, child, src, filePath, fileNodeID, "interface", deferred)
 		case "enum_type_definition":
 			p.extractEnumType(g, child, src, filePath, fileNodeID)
 		case "union_type_definition":
@@ -98,7 +122,7 @@ func (p *GraphQLParser) walkDefinitions(
 		case "document", "definition", "type_system_definition",
 			"executable_definition", "type_definition":
 			// Wrapper nodes — recurse to find actual definitions.
-			p.walkDefinitions(g, child, src, filePath, fileNodeID)
+			p.walkDefinitions(g, child, src, filePath, fileNodeID, deferred)
 		}
 	}
 }
@@ -109,6 +133,7 @@ func (p *GraphQLParser) walkDefinitions(
 func (p *GraphQLParser) extractObjectType(
 	g *graph.Graph, n sitter.Node, src []byte,
 	filePath string, fileNodeID graph.NodeID, kind string,
+	deferred *[]fieldTypeRef,
 ) {
 	name := graphqlNodeName(n, src)
 	if name == "" {
@@ -140,7 +165,7 @@ func (p *GraphQLParser) extractObjectType(
 	// Query, Mutation, and Subscription root types: fields are API operations (NodeRoute).
 	isOperation := name == "Query" || name == "Mutation" || name == "Subscription"
 	// Extract fields from fields_definition.
-	p.extractFields(g, n, src, filePath, fileNodeID, nodeID, name, isOperation)
+	p.extractFields(g, n, src, filePath, fileNodeID, nodeID, name, isOperation, deferred)
 }
 
 // extractEnumType handles enum_type_definition nodes.
@@ -457,6 +482,7 @@ func (p *GraphQLParser) extractFields(
 	filePath string, fileNodeID graph.NodeID,
 	parentNodeID graph.NodeID, parentName string,
 	isOperation bool,
+	deferred *[]fieldTypeRef,
 ) {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
@@ -509,15 +535,17 @@ func (p *GraphQLParser) extractFields(
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: fieldNodeID, Type: graph.EdgeDefines})
 			g.AddEdge(&graph.Edge{From: parentNodeID, To: fieldNodeID, Type: graph.EdgeDefines})
 
-			// Create EdgeDependsOn from field to its return type node (if resolved in graph).
-			// Skip built-in scalars which are not graph nodes.
+			// Defer field→returnType EdgeDependsOn resolution so that forward-referenced
+			// types (defined after this field in the same file) are also resolved.
+			// The second pass in Parse() creates the actual edges once all nodes exist.
 			if fieldType != "" {
 				baseType := graphqlBaseTypeName(fieldType)
 				if !graphqlIsBuiltinScalar(baseType) {
-					typeNodeID := g.MakeNodeID(filePath, baseType)
-					if g.GetNode(typeNodeID) != nil {
-						g.AddEdge(&graph.Edge{From: fieldNodeID, To: typeNodeID, Type: graph.EdgeDependsOn})
-					}
+					*deferred = append(*deferred, fieldTypeRef{
+						fieldNodeID: fieldNodeID,
+						baseType:    baseType,
+						filePath:    filePath,
+					})
 				}
 			}
 		}
