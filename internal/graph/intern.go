@@ -2,7 +2,10 @@ package graph
 
 import (
 	"sync"
+	"sync/atomic"
 	"unique"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // StringID is a compact index into the StringPool.
@@ -118,11 +121,15 @@ func (p *StringPool) Value(id StringID) string {
 }
 
 // internGhost allocates a transient ghost ID for s. Caller must hold p.mu write lock.
+// ghostWarnOnce ensures we log the saturation warning only once.
+var ghostWarnOnce atomic.Int32
+
 func (p *StringPool) internGhost(s string) StringID {
 	id := p.ghostNext
 	if id >= ReservedGhostRange {
-		// Pool is saturated and ghost range is full — return ID 0 (empty string)
-		// rather than silently wrapping and corrupting existing ghost lookups.
+		if ghostWarnOnce.CompareAndSwap(0, 1) {
+			logutil.Warn("synapses: StringPool ghost range saturated (%d entries); new strings will map to empty\n", ReservedGhostRange)
+		}
 		return 0
 	}
 	p.ghostCache[id] = s
