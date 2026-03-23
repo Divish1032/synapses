@@ -1569,18 +1569,57 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	if tx, txErr := s.knowledgeDB.Begin(); txErr == nil {
 		defer tx.Rollback() // no-op after Commit; prevents leaked tx on panic
 		memNow := time.Now().UTC().Format(time.RFC3339)
-		var expiredCount int64
-		if res, execErr := tx.Exec(`DELETE FROM memories WHERE expires_at != '' AND expires_at < ?`, memNow); execErr == nil {
-			expiredCount, _ = res.RowsAffected()
+
+		// Collect IDs that will be deleted so satellite tables can be cleaned
+		// with a targeted IN-list instead of expensive correlated anti-joins.
+		var deletedIDs []string
+		collectDeletedIDs := func(query string, args ...interface{}) int64 {
+			rows, err := tx.Query("SELECT id FROM memories WHERE "+query, args...)
+			if err != nil {
+				return 0
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var id string
+				if rows.Scan(&id) == nil {
+					deletedIDs = append(deletedIDs, id)
+				}
+			}
+			res, execErr := tx.Exec("DELETE FROM memories WHERE "+query, args...)
+			if execErr != nil {
+				logutil.Debug("synapses: store: prune memories: %v\n", execErr)
+				return 0
+			}
+			n, _ := res.RowsAffected()
+			return n
 		}
-		if _, err := tx.Exec(`DELETE FROM memories WHERE tier = 'session_log' AND created_at < ?`, cutoff); err != nil {
-			logutil.Debug("synapses: store: prune session_log memories: %v\n", err)
+
+		expiredCount := collectDeletedIDs("expires_at != '' AND expires_at < ?", memNow)
+		collectDeletedIDs("tier = 'session_log' AND created_at < ?", cutoff)
+
+		// Clean satellite tables using collected IDs (batched to avoid SQLite
+		// variable limit of 999). This replaces the O(N*M) NOT EXISTS anti-join
+		// with targeted deletes on known IDs.
+		const batchSize = 500
+		for i := 0; i < len(deletedIDs); i += batchSize {
+			end := i + batchSize
+			if end > len(deletedIDs) {
+				end = len(deletedIDs)
+			}
+			batch := deletedIDs[i:end]
+			placeholders := ""
+			args := make([]interface{}, len(batch))
+			for j, id := range batch {
+				if j > 0 {
+					placeholders += ","
+				}
+				placeholders += "?"
+				args[j] = id
+			}
+			for _, table := range []string{"memory_embeddings", "memory_anchors", "memory_surfaced", "memory_versions"} {
+				tx.Exec("DELETE FROM "+table+" WHERE memory_id IN ("+placeholders+")", args...)
+			}
 		}
-		// Orphaned cascade tables: no FK cascade exists, so clean up manually.
-		tx.Exec(`DELETE FROM memory_embeddings WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_embeddings.memory_id)`)
-		tx.Exec(`DELETE FROM memory_anchors WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_anchors.memory_id)`)
-		tx.Exec(`DELETE FROM memory_surfaced WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_surfaced.memory_id)`)
-		tx.Exec(`DELETE FROM memory_versions WHERE NOT EXISTS (SELECT 1 FROM memories WHERE memories.id = memory_versions.memory_id)`)
 
 		if err := tx.Commit(); err != nil {
 			logutil.Debug("synapses: store: prune memories tx commit: %v\n", err)
