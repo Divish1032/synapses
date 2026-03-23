@@ -246,12 +246,13 @@ func (a *Aggregator) rollup() {
 	if val, readErr := a.store.ReadDailyRollup(today, "rollup_completed"); readErr == nil && val > 0 {
 		// Batch metrics already computed. Re-run per-dimension rollups
 		// (cheap, idempotent) and prune to handle late-arriving events.
-		a.rollupPerProject(today)
-		a.rollupPerTool(today)
-		a.rollupPerAgent(today)
-		a.rollupPerLanguage(today)
-		a.rollupSearchMetrics(today)
-		a.rollupPerToolErrors(today)
+		up := a.store.UpsertDailyRollup
+		a.rollupPerProject(today, up)
+		a.rollupPerTool(today, up)
+		a.rollupPerAgent(today, up)
+		a.rollupPerLanguage(today, up)
+		a.rollupSearchMetrics(today, up)
+		a.rollupPerToolErrors(today, up)
 		// Prune is also idempotent (date-based, doesn't double-delete).
 		if deleted, err := a.store.PruneOldEvents(90); err == nil && deleted > 0 {
 			logutil.Info("pulse aggregator: pruned %d old events\n", deleted)
@@ -382,22 +383,24 @@ func (a *Aggregator) rollup() {
 	if dimBatchErr != nil {
 		// Fallback: run per-dimension rollups individually (pre-transaction behavior).
 		logutil.Warn("pulse aggregator: per-dimension begin batch (fallback to individual): %v\n", dimBatchErr)
-		a.rollupPerProject(today)
-		a.rollupPerTool(today)
-		a.rollupPerAgent(today)
-		a.rollupPerLanguage(today)
-		a.rollupSearchMetrics(today)
-		a.rollupPerToolErrors(today)
+		up := a.store.UpsertDailyRollup
+		a.rollupPerProject(today, up)
+		a.rollupPerTool(today, up)
+		a.rollupPerAgent(today, up)
+		a.rollupPerLanguage(today, up)
+		a.rollupSearchMetrics(today, up)
+		a.rollupPerToolErrors(today, up)
 		if rollupOK {
 			_ = a.store.UpsertDailyRollup(today, "rollup_completed", 1)
 		}
 	} else {
-		a.rollupPerProjectTx(today)
-		a.rollupPerToolTx(today)
-		a.rollupPerAgentTx(today)
-		a.rollupPerLanguageTx(today)
-		a.rollupSearchMetricsTx(today)
-		a.rollupPerToolErrorsTx(today)
+		upTx := a.store.UpsertDailyRollupTx
+		a.rollupPerProject(today, upTx)
+		a.rollupPerTool(today, upTx)
+		a.rollupPerAgent(today, upTx)
+		a.rollupPerLanguage(today, upTx)
+		a.rollupSearchMetrics(today, upTx)
+		a.rollupPerToolErrors(today, upTx)
 
 		peakRate := a.store.GetPeakReparseRate(today)
 		if peakRate > 0 {
@@ -440,9 +443,14 @@ func (a *Aggregator) rollup() {
 	}
 }
 
+// upsertFunc is the signature shared by UpsertDailyRollup and UpsertDailyRollupTx.
+// Accepting it as a parameter lets each per-dimension rollup method work both
+// inside and outside a store transaction, eliminating the duplicated Tx variants.
+type upsertFunc func(day, metric string, value float64) error
+
 // rollupPerProject writes per-project rollups for a given day (Bug 21 — DQ-G.2).
 // Each project gets its own daily_rollups rows keyed as "project:<id>:<metric>".
-func (a *Aggregator) rollupPerProject(day string) {
+func (a *Aggregator) rollupPerProject(day string, upsert upsertFunc) {
 	projects := a.store.GetProjectsForDay(day)
 	for _, projectID := range projects {
 		sum, err := a.store.GetSummaryForDayProject(day, projectID)
@@ -460,7 +468,7 @@ func (a *Aggregator) rollupPerProject(day string) {
 			key("sessions"):           float64(sum.Sessions),
 		}
 		for metric, value := range entries {
-			if err := a.store.UpsertDailyRollup(day, metric, value); err != nil {
+			if err := upsert(day, metric, value); err != nil {
 				logutil.Warn("pulse aggregator: per-project upsert %s: %v\n", metric, err)
 			}
 		}
@@ -469,7 +477,7 @@ func (a *Aggregator) rollupPerProject(day string) {
 
 // rollupPerAgent writes per-agent rollups for a given day (P8-4).
 // Each agent gets daily_rollups rows keyed as "agent:<id>:<metric>".
-func (a *Aggregator) rollupPerAgent(day string) {
+func (a *Aggregator) rollupPerAgent(day string, upsert upsertFunc) {
 	agents := a.store.GetAgentsForDay(day)
 	for _, agentID := range agents {
 		sum, err := a.store.GetSummaryForDayAgent(day, agentID)
@@ -486,7 +494,7 @@ func (a *Aggregator) rollupPerAgent(day string) {
 			key("sessions"):           float64(sum.Sessions),
 		}
 		for metric, value := range entries {
-			if err := a.store.UpsertDailyRollup(day, metric, value); err != nil {
+			if err := upsert(day, metric, value); err != nil {
 				logutil.Warn("pulse aggregator: per-agent upsert %s: %v\n", metric, err)
 			}
 		}
@@ -495,7 +503,7 @@ func (a *Aggregator) rollupPerAgent(day string) {
 
 // rollupPerLanguage writes per-language parse stats for a given day (P9-10).
 // Each language gets daily_rollups rows keyed as "lang:<name>:<metric>".
-func (a *Aggregator) rollupPerLanguage(day string) {
+func (a *Aggregator) rollupPerLanguage(day string, upsert upsertFunc) {
 	stats := a.store.GetLanguageStatsForDay(day)
 	for _, ls := range stats {
 		key := func(metric string) string {
@@ -507,7 +515,7 @@ func (a *Aggregator) rollupPerLanguage(day string) {
 			key("error_count"):    float64(ls.ErrorCount),
 		}
 		for metric, value := range entries {
-			if err := a.store.UpsertDailyRollup(day, metric, value); err != nil {
+			if err := upsert(day, metric, value); err != nil {
 				logutil.Warn("pulse aggregator: per-language upsert %s: %v\n", metric, err)
 			}
 		}
@@ -516,112 +524,16 @@ func (a *Aggregator) rollupPerLanguage(day string) {
 
 // rollupPerTool writes per-tool rollups for a given day (Bug 22 — DQ-G.3).
 // Each tool gets a daily_rollups row keyed as "tool:<name>:calls".
-func (a *Aggregator) rollupPerTool(day string) {
+func (a *Aggregator) rollupPerTool(day string, upsert upsertFunc) {
 	toolCounts := a.store.GetTopToolsForDay(day)
 	for toolName, count := range toolCounts {
 		metric := fmt.Sprintf("tool:%s:calls", toolName)
-		if err := a.store.UpsertDailyRollup(day, metric, float64(count)); err != nil {
+		if err := upsert(day, metric, float64(count)); err != nil {
 			logutil.Warn("pulse aggregator: per-tool upsert %s: %v\n", metric, err)
 		}
 	}
 }
 
-// --- Tx variants: identical to non-Tx methods but use UpsertDailyRollupTx ---
-// These run inside a BeginBatch transaction for atomic per-dimension rollups.
-
-func (a *Aggregator) rollupPerProjectTx(day string) {
-	projects := a.store.GetProjectsForDay(day)
-	for _, projectID := range projects {
-		sum, err := a.store.GetSummaryForDayProject(day, projectID)
-		if err != nil || sum == nil {
-			continue
-		}
-		key := func(metric string) string {
-			return fmt.Sprintf("project:%s:%s", projectID, metric)
-		}
-		for metric, value := range map[string]float64{
-			key("tool_calls"):         float64(sum.TotalToolCalls),
-			key("context_deliveries"): float64(sum.ContextDeliveries),
-			key("tokens_saved"):       float64(sum.TokensSaved),
-			key("cost_saved_usd"):     sum.CostSavedUSD,
-			key("sessions"):           float64(sum.Sessions),
-		} {
-			if err := a.store.UpsertDailyRollupTx(day, metric, value); err != nil {
-				logutil.Warn("pulse aggregator: per-project upsert %s: %v\n", metric, err)
-			}
-		}
-	}
-}
-
-func (a *Aggregator) rollupPerToolTx(day string) {
-	toolCounts := a.store.GetTopToolsForDay(day)
-	for toolName, count := range toolCounts {
-		metric := fmt.Sprintf("tool:%s:calls", toolName)
-		if err := a.store.UpsertDailyRollupTx(day, metric, float64(count)); err != nil {
-			logutil.Warn("pulse aggregator: per-tool upsert %s: %v\n", metric, err)
-		}
-	}
-}
-
-func (a *Aggregator) rollupPerAgentTx(day string) {
-	agents := a.store.GetAgentsForDay(day)
-	for _, agentID := range agents {
-		sum, err := a.store.GetSummaryForDayAgent(day, agentID)
-		if err != nil || sum == nil {
-			continue
-		}
-		key := func(metric string) string {
-			return fmt.Sprintf("agent:%s:%s", agentID, metric)
-		}
-		for metric, value := range map[string]float64{
-			key("tool_calls"):         float64(sum.TotalToolCalls),
-			key("context_deliveries"): float64(sum.ContextDeliveries),
-			key("tokens_saved"):       float64(sum.TokensSaved),
-			key("sessions"):           float64(sum.Sessions),
-		} {
-			if err := a.store.UpsertDailyRollupTx(day, metric, value); err != nil {
-				logutil.Warn("pulse aggregator: per-agent upsert %s: %v\n", metric, err)
-			}
-		}
-	}
-}
-
-func (a *Aggregator) rollupPerLanguageTx(day string) {
-	stats := a.store.GetLanguageStatsForDay(day)
-	for _, ls := range stats {
-		key := func(metric string) string {
-			return fmt.Sprintf("lang:%s:%s", ls.Language, metric)
-		}
-		for metric, value := range map[string]float64{
-			key("parse_count"):    float64(ls.ParseCount),
-			key("avg_duration_ms"): ls.AvgDurationMs,
-			key("error_count"):    float64(ls.ErrorCount),
-		} {
-			if err := a.store.UpsertDailyRollupTx(day, metric, value); err != nil {
-				logutil.Warn("pulse aggregator: per-language upsert %s: %v\n", metric, err)
-			}
-		}
-	}
-}
-
-func (a *Aggregator) rollupSearchMetricsTx(day string) {
-	zeroRate := a.store.GetSearchZeroResultRate(day)
-	avgLatency := a.store.GetSearchAvgLatencyMs(day)
-	if zeroRate > 0 || avgLatency > 0 {
-		_ = a.store.UpsertDailyRollupTx(day, "search_zero_result_rate", zeroRate)
-		_ = a.store.UpsertDailyRollupTx(day, "search_avg_latency_ms", avgLatency)
-	}
-}
-
-func (a *Aggregator) rollupPerToolErrorsTx(day string) {
-	rates := a.store.GetToolErrorRates(day)
-	for _, r := range rates {
-		metric := fmt.Sprintf("tool:%s:error_rate", r.ToolName)
-		if err := a.store.UpsertDailyRollupTx(day, metric, r.ErrorRate); err != nil {
-			logutil.Warn("pulse aggregator: per-tool error rate upsert %s: %v\n", metric, err)
-		}
-	}
-}
 
 // backfillMissedDays computes and inserts rollups for any days between the last
 // recorded rollup and today (exclusive) that are missing — handles daemon downtime
@@ -707,41 +619,42 @@ func (a *Aggregator) backfillMissedDays(today string) {
 			}
 		}
 		// Bug 21/22: also backfill per-project and per-tool for missed days.
-		a.rollupPerProject(day)
-		a.rollupPerTool(day)
+		bfUp := a.store.UpsertDailyRollup
+		a.rollupPerProject(day, bfUp)
+		a.rollupPerTool(day, bfUp)
 		// P8-4: backfill per-agent for missed days.
-		a.rollupPerAgent(day)
+		a.rollupPerAgent(day, bfUp)
 		// P9-9/P9-10: backfill per-language and peak rate for missed days.
 		peakRate := a.store.GetPeakReparseRate(day)
 		if peakRate > 0 {
 			_ = a.store.UpsertDailyRollup(day, "peak_reparse_rate_per_min", float64(peakRate))
 		}
-		a.rollupPerLanguage(day)
+		a.rollupPerLanguage(day, bfUp)
 		// P12-4/P12-5: backfill search metrics and per-tool errors.
-		a.rollupSearchMetrics(day)
-		a.rollupPerToolErrors(day)
+		a.rollupSearchMetrics(day, bfUp)
+		a.rollupPerToolErrors(day, bfUp)
 		logutil.Info("pulse aggregator: backfilled rollup for %s\n", day)
 	}
 }
 
 // rollupSearchMetrics writes search effectiveness rollup metrics for a day (P12-4).
-func (a *Aggregator) rollupSearchMetrics(day string) {
+func (a *Aggregator) rollupSearchMetrics(day string, upsert upsertFunc) {
 	zeroRate := a.store.GetSearchZeroResultRate(day)
 	avgLatency := a.store.GetSearchAvgLatencyMs(day)
 	// Only write if there were any searches (avoid polluting rollups with zeros).
 	if zeroRate > 0 || avgLatency > 0 {
-		_ = a.store.UpsertDailyRollup(day, "search_zero_result_rate", zeroRate)
-		_ = a.store.UpsertDailyRollup(day, "search_avg_latency_ms", avgLatency)
+		_ = upsert(day, "search_zero_result_rate", zeroRate)
+		_ = upsert(day, "search_avg_latency_ms", avgLatency)
 	}
 }
 
 // rollupPerToolErrors writes per-tool error rates for a day (P12-5).
 // Each tool with errors gets a daily_rollups row keyed as "tool:<name>:error_rate".
-func (a *Aggregator) rollupPerToolErrors(day string) {
+func (a *Aggregator) rollupPerToolErrors(day string, upsert upsertFunc) {
 	rates := a.store.GetToolErrorRates(day)
 	for _, r := range rates {
 		metric := fmt.Sprintf("tool:%s:error_rate", r.ToolName)
-		if err := a.store.UpsertDailyRollup(day, metric, r.ErrorRate); err != nil {
+		if err := upsert(day, metric, r.ErrorRate); err != nil {
 			logutil.Warn("pulse aggregator: per-tool error rate upsert %s: %v\n", metric, err)
 		}
 	}
