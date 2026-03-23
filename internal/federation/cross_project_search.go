@@ -202,6 +202,9 @@ func (s *CrossProjectSearch) SearchEpisodes(ctx context.Context, query string, a
 	if limit <= 0 {
 		limit = 5
 	}
+	if limit > 100 {
+		limit = 100
+	}
 
 	targets := s.resolver.filterEntries(aliases)
 

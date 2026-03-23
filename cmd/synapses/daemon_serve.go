@@ -1570,11 +1570,12 @@ func cmdDaemonServe(args []string) error {
 	})
 	secureHandler := hostGuard(finalHandler)
 	httpSrv := &http.Server{
-		Addr:         DaemonHTTPAddr,
-		Handler:      secureHandler,
-		ReadTimeout:  60 * time.Second,
-		WriteTimeout: 0, // SSE streams can be indefinite
-		IdleTimeout:  120 * time.Second,
+		Addr:           DaemonHTTPAddr,
+		Handler:        secureHandler,
+		ReadTimeout:    60 * time.Second,
+		WriteTimeout:   0, // SSE streams can be indefinite
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 64 * 1024,
 	}
 
 	logutil.Info("synapses %s singleton daemon starting on %s\n", version, DaemonHTTPAddr)
