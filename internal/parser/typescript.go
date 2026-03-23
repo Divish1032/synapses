@@ -723,11 +723,151 @@ func collectTSInstantiatedTypes(g *graph.Graph, root sitter.Node, src []byte, fi
 	walk(root)
 }
 
+// tsDIDecorators is the set of Angular/NestJS/general DI decorators that indicate
+// a class is instantiated by a framework container.
+var tsDIDecorators = map[string]bool{
+	"Component": true, "Injectable": true, "Directive": true, "Pipe": true,
+	"NgModule": true, "Controller": true, "Module": true, "Resolver": true,
+	"Guard": true, "Interceptor": true, "Middleware": true,
+	"singleton": true, "service": true, "provide": true,
+}
+
+// collectTSDecoratorInstantiations records class names as instantiated when the
+// class carries a DI decorator, or when a static method's return type matches
+// the enclosing class (static factory pattern).
+func collectTSDecoratorInstantiations(g *graph.Graph, root sitter.Node, src []byte, filePath string) {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "class_declaration", "abstract_class_declaration":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode.IsNull() {
+				break
+			}
+			className := string(src[nameNode.StartByte():nameNode.EndByte()])
+
+			// Decorators are siblings BEFORE the class node in the parent's children.
+			parent := n.Parent()
+			if !parent.IsNull() {
+				classIdx := -1
+				for i := uint32(0); i < parent.ChildCount(); i++ {
+					if parent.Child(i).Equal(n) {
+						classIdx = int(i)
+						break
+					}
+				}
+				for i := 0; i < classIdx; i++ {
+					sib := parent.Child(uint32(i))
+					if sib.IsNull() || sib.Type() != "decorator" {
+						continue
+					}
+					// decorator → @ identifier OR @ call_expression → identifier
+					decName := extractTSDecoratorName(sib, src)
+					if tsDIDecorators[decName] && !isTSBuiltin(className) {
+						g.AddInstantiatedType(filePath, className)
+						break
+					}
+				}
+			}
+
+			// Walk class body with class context for static factory detection.
+			body := n.ChildByFieldName("body")
+			if !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					walk(body.Child(i), className)
+				}
+			}
+			return
+
+		case "method_definition":
+			if enclosingClass == "" {
+				break
+			}
+			// Static factory: method has "static" modifier and return type == enclosingClass.
+			isStatic := false
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if !child.IsNull() && child.Type() == "static" {
+					isStatic = true
+					break
+				}
+			}
+			if !isStatic {
+				break
+			}
+			// Find type_annotation child for return type.
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if child.IsNull() || child.Type() != "type_annotation" {
+					continue
+				}
+				// type_annotation → ":" type — find type_identifier inside
+				retType := extractTSTypeIdentifier(child, src)
+				if retType == enclosingClass && !isTSBuiltin(retType) {
+					g.AddInstantiatedType(filePath, enclosingClass)
+				}
+				break
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i), enclosingClass)
+		}
+	}
+	walk(root, "")
+}
+
+// extractTSDecoratorName returns the decorator name from a decorator node.
+// Handles: @Injectable, @Injectable(), @Component({...})
+func extractTSDecoratorName(decorator sitter.Node, src []byte) string {
+	// decorator's first non-@ child is identifier or call_expression
+	for i := uint32(0); i < decorator.ChildCount(); i++ {
+		child := decorator.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		switch child.Type() {
+		case "identifier":
+			return string(src[child.StartByte():child.EndByte()])
+		case "call_expression":
+			fn := child.ChildByFieldName("function")
+			if !fn.IsNull() && fn.Type() == "identifier" {
+				return string(src[fn.StartByte():fn.EndByte()])
+			}
+		}
+	}
+	return ""
+}
+
+// extractTSTypeIdentifier finds the first type_identifier inside a type_annotation node.
+func extractTSTypeIdentifier(typeAnnotation sitter.Node, src []byte) string {
+	var find func(n sitter.Node) string
+	find = func(n sitter.Node) string {
+		if n.IsNull() {
+			return ""
+		}
+		if n.Type() == "type_identifier" {
+			return string(src[n.StartByte():n.EndByte()])
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if r := find(n.Child(i)); r != "" {
+				return r
+			}
+		}
+		return ""
+	}
+	return find(typeAnnotation)
+}
+
 // collectTSCallSites performs a depth-first AST walk to collect call sites with
 // function-level caller resolution.
 func collectTSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	// Collect instantiated types for RTA-style call graph refinement.
 	collectTSInstantiatedTypes(g, root, src, filePath)
+	// Collect decorator-annotated and static-factory instantiations.
+	collectTSDecoratorInstantiations(g, root, src, filePath)
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{
 			"class_declaration":          true,

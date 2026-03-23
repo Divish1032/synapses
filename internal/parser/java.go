@@ -501,6 +501,8 @@ func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, 
 	collectJavaVarTypes(g, root, src, filePath)
 	// Collect instantiated types for RTA-style call graph refinement.
 	collectJavaInstantiatedTypes(g, root, src, filePath)
+	// Collect framework-annotated and enum instantiations.
+	collectJavaAnnotatedInstantiations(g, root, src, filePath)
 
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{
@@ -666,6 +668,191 @@ func collectJavaInstantiatedTypes(g *graph.Graph, root sitter.Node, src []byte, 
 		}
 	}
 	walk(root)
+}
+
+// javadiAnnotations is the set of DI/framework annotations that indicate a class
+// is instantiated by a framework container rather than via explicit new.
+var javaDIAnnotations = map[string]bool{
+	"Component": true, "Service": true, "Repository": true,
+	"Controller": true, "RestController": true, "Configuration": true,
+	"Bean": true, "Singleton": true, "Managed": true,
+	"Entity": true, "MappedSuperclass": true, "Embeddable": true,
+	"Named": true, "ApplicationScoped": true, "RequestScoped": true,
+	"SessionScoped": true, "Stateless": true, "Stateful": true,
+	"MessageDriven": true,
+}
+
+// extractJavaModifierAnnotations returns annotation names from a modifiers node.
+func extractJavaModifierAnnotations(modifiers sitter.Node, src []byte) []string {
+	if modifiers.IsNull() {
+		return nil
+	}
+	var names []string
+	for i := uint32(0); i < modifiers.ChildCount(); i++ {
+		child := modifiers.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		// annotation or marker_annotation
+		if child.Type() == "annotation" || child.Type() == "marker_annotation" {
+			nameNode := child.ChildByFieldName("name")
+			if nameNode.IsNull() {
+				// fallback: first identifier child
+				nameNode = firstChildOfType(child, "identifier")
+			}
+			if !nameNode.IsNull() {
+				names = append(names, string(src[nameNode.StartByte():nameNode.EndByte()]))
+			}
+		}
+	}
+	return names
+}
+
+// javaHasModifier checks whether a node's modifiers include a given keyword.
+func javaHasModifier(n sitter.Node, src []byte, keyword string) bool {
+	modifiers := n.ChildByFieldName("modifiers")
+	if modifiers.IsNull() {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			child := n.Child(i)
+			if !child.IsNull() && child.Type() == "modifiers" {
+				modifiers = child
+				break
+			}
+		}
+	}
+	if modifiers.IsNull() {
+		return false
+	}
+	for i := uint32(0); i < modifiers.ChildCount(); i++ {
+		child := modifiers.Child(i)
+		if !child.IsNull() && string(src[child.StartByte():child.EndByte()]) == keyword {
+			return true
+		}
+	}
+	return false
+}
+
+// collectJavaAnnotatedInstantiations records class names as instantiated when:
+//  1. The class carries a DI annotation (@Service, @Component, etc.)
+//  2. A @Bean method in a @Configuration class returns a non-builtin type
+//  3. An enum_declaration has at least one enum_constant child
+//  4. A static method's return type matches the enclosing class (static factory)
+func collectJavaAnnotatedInstantiations(g *graph.Graph, root sitter.Node, src []byte, filePath string) {
+	var walk func(n sitter.Node, enclosingClass string, enclosingIsConfig bool)
+	walk = func(n sitter.Node, enclosingClass string, enclosingIsConfig bool) {
+		if n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "class_declaration":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode.IsNull() {
+				break
+			}
+			className := string(src[nameNode.StartByte():nameNode.EndByte()])
+
+			// Check modifiers for DI annotations.
+			modifiers := n.ChildByFieldName("modifiers")
+			if modifiers.IsNull() {
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					child := n.Child(i)
+					if !child.IsNull() && child.Type() == "modifiers" {
+						modifiers = child
+						break
+					}
+				}
+			}
+			annotations := extractJavaModifierAnnotations(modifiers, src)
+			isConfig := false
+			for _, ann := range annotations {
+				if javaDIAnnotations[ann] && !isJavaBuiltin(className) {
+					g.AddInstantiatedType(filePath, className)
+				}
+				if ann == "Configuration" {
+					isConfig = true
+				}
+			}
+
+			// Walk body with class context.
+			body := n.ChildByFieldName("body")
+			if !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					walk(body.Child(i), className, isConfig)
+				}
+			}
+			return
+
+		case "enum_declaration":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode.IsNull() {
+				break
+			}
+			enumName := string(src[nameNode.StartByte():nameNode.EndByte()])
+			// Record if there is at least one enum_constant.
+			body := n.ChildByFieldName("body")
+			if !body.IsNull() {
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					child := body.Child(i)
+					if !child.IsNull() && child.Type() == "enum_constant" {
+						if !isJavaBuiltin(enumName) {
+							g.AddInstantiatedType(filePath, enumName)
+						}
+						break
+					}
+				}
+				// Still walk body for nested classes.
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					walk(body.Child(i), enumName, false)
+				}
+			}
+			return
+
+		case "method_declaration":
+			if enclosingClass == "" {
+				break
+			}
+			// Static factory: static method whose return type equals enclosing class.
+			if javaHasModifier(n, src, "static") {
+				retNode := n.ChildByFieldName("type")
+				if !retNode.IsNull() {
+					retType := extractJavaSimpleTypeName(retNode, src)
+					if retType == enclosingClass && !isJavaBuiltin(retType) {
+						g.AddInstantiatedType(filePath, enclosingClass)
+					}
+				}
+			}
+			// @Bean method in @Configuration class: return type is instantiated by Spring.
+			if enclosingIsConfig {
+				modifiers := n.ChildByFieldName("modifiers")
+				if modifiers.IsNull() {
+					for i := uint32(0); i < n.ChildCount(); i++ {
+						child := n.Child(i)
+						if !child.IsNull() && child.Type() == "modifiers" {
+							modifiers = child
+							break
+						}
+					}
+				}
+				anns := extractJavaModifierAnnotations(modifiers, src)
+				for _, ann := range anns {
+					if ann == "Bean" {
+						retNode := n.ChildByFieldName("type")
+						if !retNode.IsNull() {
+							retType := extractJavaSimpleTypeName(retNode, src)
+							if retType != "" && !isJavaBuiltin(retType) {
+								g.AddInstantiatedType(filePath, retType)
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i), enclosingClass, enclosingIsConfig)
+		}
+	}
+	walk(root, "", false)
 }
 
 // extractJavaSimpleTypeName returns the bare type name from a Java type node.

@@ -1,6 +1,6 @@
 package resolver_test
 
-// Tests for RTA-style call graph refinement (Sprint 14 #2).
+// Tests for RTA-style call graph refinement (Sprint 14 #2 and Sprint 14 #8).
 //
 // Key behaviors verified:
 //   1. findInPackage emits edges to ALL instantiated receivers (true RTA multi-target).
@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 )
 
@@ -437,5 +438,57 @@ func TestRTA_InstantiatedTypes_EmptyInputIgnored(t *testing.T) {
 	types := g.GetInstantiatedTypes()
 	if len(types) != 0 {
 		t.Errorf("expected empty map for invalid inputs, got %v", types)
+	}
+}
+
+// TestRTA_SpringServiceGetsImplementsEdge is the primary regression test for
+// Sprint 14 #8 (DI annotation tracking). A @Repository-annotated class that is
+// NEVER instantiated via new should still appear in instantiatedTypes after
+// parsing, and ResolveHeritageEdges must emit the IMPLEMENTS edge (Java uses
+// nominal heritage resolution, not the structural heuristic).
+func TestRTA_SpringServiceGetsImplementsEdge(t *testing.T) {
+	const src = `
+public interface UserRepository {
+    void save(Object user);
+}
+
+@Repository
+public class JpaUserRepository implements UserRepository {
+    public void save(Object user) {}
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewJavaParser()
+	if err := p.Parse(g, "repo.java", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	// JpaUserRepository must be in instantiatedTypes via @Repository annotation.
+	types := g.GetInstantiatedTypes()
+	if !types["JpaUserRepository"] {
+		t.Fatalf("JpaUserRepository not in instantiatedTypes — @Repository annotation not tracked")
+	}
+
+	// Java uses nominal heritage resolution.
+	resolver.ResolveHeritageEdges(g)
+
+	// Find the JpaUserRepository and UserRepository nodes.
+	var implID, ifaceID graph.NodeID
+	for _, n := range g.AllNodes() {
+		switch n.Name {
+		case "JpaUserRepository":
+			implID = n.ID
+		case "UserRepository":
+			ifaceID = n.ID
+		}
+	}
+	if implID == "" {
+		t.Fatal("JpaUserRepository node not found in graph")
+	}
+	if ifaceID == "" {
+		t.Fatal("UserRepository node not found in graph")
+	}
+	if !g.HasEdge(implID, ifaceID, graph.EdgeImplements) {
+		t.Errorf("expected IMPLEMENTS edge from JpaUserRepository to UserRepository")
 	}
 }
