@@ -300,9 +300,9 @@ func extractImportLines(content string) []string {
 }
 
 // importMentions checks if any extracted import line references the target
-// project alias or the LLM-claimed import path. The check is case-insensitive
-// substring matching — sufficient because we only need to confirm that the file
-// has *some* import referencing the target, not exact path resolution.
+// project alias or the LLM-claimed import path. Uses whole-segment matching
+// (splitting on /, ., _, -) to avoid false positives from short aliases like
+// "db" matching "database", "indexeddb", "mongodb", etc.
 func importMentions(imports []string, targetProject, importPath string) bool {
 	if len(imports) == 0 {
 		return false
@@ -311,12 +311,54 @@ func importMentions(imports []string, targetProject, importPath string) bool {
 	importLower := strings.ToLower(importPath)
 	for _, imp := range imports {
 		impLower := strings.ToLower(imp)
-		// Check if the import mentions the target project alias.
-		if targetLower != "" && strings.Contains(impLower, targetLower) {
+		// Check if the import mentions the target project alias as a whole segment.
+		if targetLower != "" && containsSegment(impLower, targetLower) {
 			return true
 		}
-		// Check if the import matches the claimed import path.
-		if importLower != "" && (strings.Contains(impLower, importLower) || strings.Contains(importLower, impLower)) {
+		// Check if the import matches the claimed import path (whole segment).
+		if importLower != "" && (containsSegment(impLower, importLower) || containsSegment(importLower, impLower)) {
+			return true
+		}
+	}
+	return false
+}
+
+// importSegmentSplitter splits import paths on common delimiters (/, ., _, -)
+// so that "db" only matches the segment "db", not "database" or "mongodb".
+var importSegmentSplitter = strings.NewReplacer(
+	"/", "\x00",
+	".", "\x00",
+	"_", "\x00",
+	"-", "\x00",
+)
+
+// containsSegment checks whether needle appears as a whole segment within
+// haystack after splitting both on path delimiters (/, ., _, -). This prevents
+// short aliases like "db" from matching "database" or "indexeddb".
+func containsSegment(haystack, needle string) bool {
+	// Fast path: if needle is longer than haystack it can't match.
+	if len(needle) > len(haystack) {
+		return false
+	}
+	// If needle itself contains delimiters, check if it appears as a
+	// contiguous sub-sequence of segments.
+	haystackNorm := importSegmentSplitter.Replace(haystack)
+	needleNorm := importSegmentSplitter.Replace(needle)
+	hSegments := strings.Split(haystackNorm, "\x00")
+	nSegments := strings.Split(needleNorm, "\x00")
+	if len(nSegments) > len(hSegments) {
+		return false
+	}
+	// Slide needle segments over haystack segments.
+	for i := 0; i <= len(hSegments)-len(nSegments); i++ {
+		match := true
+		for j := 0; j < len(nSegments); j++ {
+			if hSegments[i+j] != nSegments[j] {
+				match = false
+				break
+			}
+		}
+		if match {
 			return true
 		}
 	}
