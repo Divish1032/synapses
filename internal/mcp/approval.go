@@ -94,7 +94,7 @@ func (a *approvalStore) requestApproval(operation, details, agentID string) *mcp
 	dir, err := approvalDir()
 	if err != nil {
 		return mcpgo.NewToolResultError(
-			fmt.Sprintf("cross-project write blocked: cannot create approvals directory: %v", err),
+			fmt.Sprintf("cross-project write blocked: cannot create approvals directory: %v", stripInternalPaths(err.Error())),
 		)
 	}
 
@@ -127,7 +127,7 @@ func (a *approvalStore) requestApproval(operation, details, agentID string) *mcp
 	filePath := filepath.Join(dir, token+".json")
 	if err := os.WriteFile(filePath, data, 0o600); err != nil {
 		return mcpgo.NewToolResultError(
-			fmt.Sprintf("cross-project write blocked: cannot write approval file: %v", err),
+			fmt.Sprintf("cross-project write blocked: cannot write approval file: %v", stripInternalPaths(err.Error())),
 		)
 	}
 

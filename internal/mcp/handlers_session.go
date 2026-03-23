@@ -1068,7 +1068,7 @@ func (s *Server) handleSessionInit(
 				defer func() {
 					if r := recover(); r != nil {
 						// Brain panic — degrade silently, don't crash session_init.
-						resp["brain_warning"] = fmt.Sprintf("brain health unavailable (internal error: %v)", r)
+						resp["brain_warning"] = fmt.Sprintf("brain health unavailable (internal error: %v)", stripInternalPaths(fmt.Sprint(r)))
 					}
 				}()
 				health := bc.BrainHealth()
