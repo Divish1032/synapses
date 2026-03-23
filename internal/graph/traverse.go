@@ -148,6 +148,46 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 				}
 			}
 		}
+
+		// For interface roots, also seed concrete implementors and their receiver
+		// methods. IMPLEMENTS edges have direction concrete→interface, so incoming
+		// edges on the interface node (e.To==rootID) identify the concrete types.
+		// Seeding at 0.85 ensures implementing types surface even when they are
+		// beyond the normal PPR BFS horizon via other edge paths.
+		if rootNode.Type == NodeInterface {
+			for _, e := range g.outInEdges(rootID, idx) {
+				if e.Type != EdgeImplements || e.To != rootID {
+					continue
+				}
+				implID := e.From
+				if _, already := teleport[implID]; !already {
+					teleport[implID] = 0.85
+				}
+				implNode := g.nodes[implID]
+				if implNode == nil {
+					continue
+				}
+				if idx != nil && idx.Ready() {
+					for _, mSeq := range idx.ReceiverMethodSeqs(implNode.Name) {
+						if !idx.UnsafeIsTombstoned(mSeq) {
+							mID := idx.SeqIDs[mSeq]
+							if _, alreadyM := teleport[mID]; !alreadyM {
+								teleport[mID] = 0.85
+							}
+						}
+					}
+				} else {
+					prefix := implNode.Name + "."
+					for _, n := range g.nodes {
+						if n.Type == NodeMethod && strings.HasPrefix(n.Name, prefix) {
+							if _, alreadyM := teleport[n.ID]; !alreadyM {
+								teleport[n.ID] = 0.85
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 	// Normalise to sum=1.0 (required for a valid probability vector).
 	teleportSum := 0.0
@@ -385,6 +425,44 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 					if n.Type == NodeMethod && strings.HasPrefix(n.Name, prefix) {
 						visited[n.ID] = 0.9
 						queue = append(queue, qItem{n.ID, 0})
+					}
+				}
+			}
+
+			// For interface roots, also seed concrete implementors and their
+			// receiver methods at 0.85. IMPLEMENTS edges point concrete→interface,
+			// so we look for incoming edges (e.To==rootID, e.Type==EdgeImplements).
+			// Without explicit seeding, implementors only surface at BFS-derived
+			// relevance ~0.45; their methods at ~0.034 — too low to survive pruning.
+			if rootNode.Type == NodeInterface {
+				for _, e := range g.outInEdges(rootID, idx) {
+					if e.Type != EdgeImplements || e.To != rootID {
+						continue
+					}
+					implID := e.From
+					visited[implID] = 0.85
+					queue = append(queue, qItem{implID, 0})
+					implNode := g.nodes[implID]
+					if implNode == nil {
+						continue
+					}
+					if idx != nil && idx.Ready() {
+						for _, mSeq := range idx.ReceiverMethodSeqs(implNode.Name) {
+							if idx.UnsafeIsTombstoned(mSeq) {
+								continue
+							}
+							mID := idx.SeqIDs[mSeq]
+							visited[mID] = 0.85
+							queue = append(queue, qItem{mID, 0})
+						}
+					} else {
+						prefix := implNode.Name + "."
+						for _, n := range g.nodes {
+							if n.Type == NodeMethod && strings.HasPrefix(n.Name, prefix) {
+								visited[n.ID] = 0.85
+								queue = append(queue, qItem{n.ID, 0})
+							}
+						}
 					}
 				}
 			}
