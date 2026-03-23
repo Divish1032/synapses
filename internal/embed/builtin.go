@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 
 	hugot "github.com/knights-analytics/hugot"
@@ -357,10 +358,27 @@ func verifyModelIntegrity(onnxPath string, modelFile string) error {
 	}
 
 	if expected == "" {
-		// Hash not yet captured — log it so an operator can hardcode it,
-		// but refuse to use the model until then (fail-closed).
-		logutil.Error("synapses: embedding model (%s) SHA-256: %s — hash not yet hardcoded, refusing to use unverified model. Capture this hash and set builtinModelSHA256FP32.\n", modelFile, got)
-		return fmt.Errorf("integrity check skipped: no expected hash for %s (sha256:%s) — will fall back to verified variant", modelFile, got)
+		// No hardcoded hash for this variant — use Trust-On-First-Use (TOFU).
+		// On first download: compute hash, store in sidecar file, trust it.
+		// On subsequent loads: verify against stored hash. Mismatch → tampered.
+		// Same trust model as SSH known_hosts: first contact is trusted,
+		// all subsequent loads are integrity-verified.
+		sidecar := onnxPath + ".sha256"
+		if stored, err := os.ReadFile(sidecar); err == nil {
+			storedHash := strings.TrimSpace(string(stored))
+			if storedHash != got {
+				os.Remove(onnxPath)
+				return fmt.Errorf("embedding model integrity check failed (TOFU): stored sha256:%s, got sha256:%s — removed corrupt file", storedHash, got)
+			}
+			return nil // TOFU verified
+		}
+		// First use — store the hash for future verification.
+		if err := os.WriteFile(sidecar, []byte(got+"\n"), 0o600); err != nil {
+			logutil.Warn("synapses: could not write TOFU hash sidecar %s: %v\n", sidecar, err)
+			// Non-fatal: proceed without stored hash. Next load will re-capture.
+		}
+		logutil.Info("synapses: embedding model (%s) SHA-256: %s — TOFU: hash stored for future integrity verification\n", modelFile, got)
+		return nil
 	}
 	if got != expected {
 		// Remove the tampered/corrupt file so the next attempt re-downloads.

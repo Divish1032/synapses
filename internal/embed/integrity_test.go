@@ -86,20 +86,75 @@ func TestSafeModelEvent_PanicRecovery(t *testing.T) {
 	e.safeModelEvent("test_event")
 }
 
-func TestVerifyModelIntegrity_FP32_FailsClosed(t *testing.T) {
-	// FP32 variant: hash not yet captured → fail-closed (refuse to use).
-	// This forces fallback to the verified quantized variant in ensureModel().
+func TestVerifyModelIntegrity_FP32_TOFU_FirstUse(t *testing.T) {
+	// FP32 variant with no hardcoded hash: first use should succeed (TOFU)
+	// and create a sidecar .sha256 file for future verification.
 	dir := t.TempDir()
 	onnxPath := filepath.Join(dir, builtinModelFileFP32)
-	if err := os.WriteFile(onnxPath, []byte("any content"), 0o644); err != nil {
+	if err := os.WriteFile(onnxPath, []byte("fp32 model content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	err := verifyModelIntegrity(onnxPath, builtinModelFileFP32)
-	if err == nil {
-		t.Fatal("expected error for fp32 variant with no hardcoded hash (fail-closed), got nil")
+	if err != nil {
+		t.Fatalf("expected TOFU first-use to succeed, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "no expected hash") {
-		t.Fatalf("unexpected error message: %v", err)
+
+	// Sidecar file should exist.
+	sidecar := onnxPath + ".sha256"
+	stored, err := os.ReadFile(sidecar)
+	if err != nil {
+		t.Fatalf("sidecar file not created: %v", err)
+	}
+	if strings.TrimSpace(string(stored)) == "" {
+		t.Fatal("sidecar file is empty")
+	}
+}
+
+func TestVerifyModelIntegrity_FP32_TOFU_SubsequentLoad(t *testing.T) {
+	// After TOFU stores the hash, subsequent loads verify against it.
+	dir := t.TempDir()
+	onnxPath := filepath.Join(dir, builtinModelFileFP32)
+	content := []byte("fp32 model content v2")
+	if err := os.WriteFile(onnxPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// First call: stores hash via TOFU.
+	if err := verifyModelIntegrity(onnxPath, builtinModelFileFP32); err != nil {
+		t.Fatalf("TOFU first-use failed: %v", err)
+	}
+
+	// Second call with same content: should pass.
+	if err := verifyModelIntegrity(onnxPath, builtinModelFileFP32); err != nil {
+		t.Fatalf("TOFU verification of unchanged file failed: %v", err)
+	}
+}
+
+func TestVerifyModelIntegrity_FP32_TOFU_TamperDetected(t *testing.T) {
+	// If the model file changes after TOFU, verification should fail.
+	dir := t.TempDir()
+	onnxPath := filepath.Join(dir, builtinModelFileFP32)
+	if err := os.WriteFile(onnxPath, []byte("original content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// First call: stores hash.
+	if err := verifyModelIntegrity(onnxPath, builtinModelFileFP32); err != nil {
+		t.Fatalf("TOFU first-use failed: %v", err)
+	}
+
+	// Tamper with the file.
+	if err := os.WriteFile(onnxPath, []byte("tampered content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second call: should detect tampering.
+	err := verifyModelIntegrity(onnxPath, builtinModelFileFP32)
+	if err == nil {
+		t.Fatal("expected TOFU to detect tampering, got nil")
+	}
+	if !strings.Contains(err.Error(), "TOFU") {
+		t.Fatalf("expected TOFU error, got: %v", err)
 	}
 }
