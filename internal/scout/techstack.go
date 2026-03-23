@@ -51,13 +51,27 @@ func DetectTechStack(projectRoot string) []TechStackEntry {
 	return entries
 }
 
-// safeReadManifest reads a file after checking it is not a symlink.
+// safeReadManifest reads a file after checking it is not a symlink and that
+// the resolved path stays within its parent directory (containment check).
 func safeReadManifest(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, os.ErrPermission
+	}
+	// Containment: resolve the real path and verify it's within the expected dir.
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, err
+	}
+	expectedDir := filepath.Dir(path)
+	realDir, err := filepath.EvalSymlinks(expectedDir)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(real, realDir+string(filepath.Separator)) && real != realDir {
 		return nil, os.ErrPermission
 	}
 	return os.ReadFile(path)
