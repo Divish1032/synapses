@@ -329,9 +329,14 @@ func (s *Store) normalizeStoredEmbeddings() {
 		Exec(string, ...any) (sql.Result, error)
 	}
 
+	allowedSampleTables := map[string]bool{"node_embeddings": true, "memory_embeddings": true}
+
 	// sampleIsNormalized reads one embedding and checks if it's unit-length.
 	// Returns true if no embeddings exist or the sample is already normalized.
 	sampleIsNormalized := func(db dbIface, table string) bool {
+		if !allowedSampleTables[table] {
+			return true
+		}
 		var blob []byte
 		err := db.QueryRow(fmt.Sprintf("SELECT embedding FROM %s LIMIT 1", table)).Scan(&blob)
 		if err != nil {
