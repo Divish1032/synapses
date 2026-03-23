@@ -39,6 +39,10 @@ type FlatGraph struct {
 	mu     sync.RWMutex
 	RepoID string
 
+	// Per-instance counters for AddEdge misuse detection (moved from package-level).
+	addEdgeSeqCount atomic.Int32
+	addEdgeWarned   atomic.Int32
+
 	// --- SoA Property Slices ---
 
 	// Names holds compact IDs into the String Interning Pool.
@@ -128,10 +132,6 @@ func (fg *FlatGraph) AddNode(name StringID, nodeType NodeType, fileID StringID, 
 	return idx
 }
 
-// addEdgeSeqCount tracks sequential AddEdge calls for misuse detection.
-// Reset by BulkAddEdges. Warning logged once after 10 sequential calls.
-var addEdgeSeqCount atomic.Int32
-var addEdgeWarned atomic.Int32
 
 // AddEdge inserts a directed edge.
 //
@@ -141,7 +141,7 @@ func (fg *FlatGraph) AddEdge(from, to NodeIndex, weight float32) {
 	fg.mu.Lock()
 	defer fg.mu.Unlock()
 
-	if n := addEdgeSeqCount.Add(1); n > 10 && addEdgeWarned.CompareAndSwap(0, 1) {
+	if n := fg.addEdgeSeqCount.Add(1); n > 10 && fg.addEdgeWarned.CompareAndSwap(0, 1) {
 		log.Printf("flatgraph: AddEdge called %d+ times sequentially — use BulkAddEdges for O(N+E) batch insertion", n)
 	}
 
@@ -198,8 +198,8 @@ func (fg *FlatGraph) BulkAddEdges(edges []BulkEdge) {
 	defer fg.mu.Unlock()
 
 	// Reset sequential AddEdge counter — bulk path is the correct usage.
-	addEdgeSeqCount.Store(0)
-	addEdgeWarned.Store(0)
+	fg.addEdgeSeqCount.Store(0)
+	fg.addEdgeWarned.Store(0)
 
 	N := len(fg.Names)
 	if N == 0 {
