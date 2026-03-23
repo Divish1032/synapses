@@ -55,10 +55,13 @@ func newSubgraphCache() *subgraphCache {
 // DirectionBoost is included because intent-specific configs vary it.
 // IntentID is included to prevent intent-specific weight overrides from
 // colliding with each other or with the default (non-intent) subgraph.
+// UsePPR and Alpha are included because PPR produces different score distributions.
+// HybridLambda is included because semantic blending changes node ranking.
 func cacheKeyFor(rootID NodeID, cfg CarveConfig, fingerprint string) string {
-	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s",
+	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f",
 		rootID, cfg.MaxDepth, cfg.TokenBudget, cfg.MinRelevance, cfg.DecayFactor,
-		cfg.DirectionBoost, cfg.IntentID, fingerprint)
+		cfg.DirectionBoost, cfg.IntentID, fingerprint, cfg.UsePPR, cfg.Alpha,
+		cfg.HybridLambda)
 }
 
 // extractFiles collects the set of source files referenced by nodes in the subgraph.
