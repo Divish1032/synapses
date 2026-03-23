@@ -36,11 +36,28 @@ const changeLogCap = 50
 const reparseWorkChanSize = 100
 const reparseBacklogThreshold = 500 // switch to full reindex above this many pending files
 const brainWorkChanSize = 32        // bounded channel for brain ingestion work
+const parseChanSize = 100           // buffered channel between parse workers and merge goroutine
+const batchCoalesceThreshold = 3    // min pending results to trigger 50ms coalesce wait
+const batchCoalesceDelay = 50 * time.Millisecond
 
 // reparseWork is a unit of work for the bounded reparse worker pool.
 type reparseWork struct {
 	path string
 	root string
+}
+
+// parseFileResult holds the output of the parallel (CPU-bound) parse phase.
+// It is produced by prepareParseResult and consumed by applyBatch.
+type parseFileResult struct {
+	path      string
+	src       []byte       // file bytes read once; reused for hash + parse
+	hasErrors bool         // tree-sitter detected syntax errors in src
+	hash      string       // SHA-256 content hash of src
+	hashKnown bool         // false when hash computation failed (conservative)
+	lstatIno  uint64       // inode at Lstat time; 0 if unavailable
+	tempGraph *graph.Graph // nodes/edges/callSites/terraformRefs from parse
+	err       error        // non-nil → skip this file in applyBatch
+	reparseStart time.Time // timing for pulse ReparseEvent
 }
 
 // ChangeEvent records a single file modification processed by the watcher.
@@ -116,6 +133,11 @@ type Watcher struct {
 	// drained and a single full re-index is triggered instead.
 	workCh chan reparseWork
 
+	// parseCh connects the parse worker pool to the single merge goroutine.
+	// Workers produce parseFileResult values (CPU-bound tree-sitter parse);
+	// the merge goroutine consumes them and applies graph mutations + resolvers.
+	parseCh chan parseFileResult
+
 	// brainWorkCh is a bounded channel for brain ingestion work. Prevents
 	// unbounded goroutine spawning during burst file changes (e.g. git checkout).
 	// If the channel is full, new work is dropped — the file will be re-parsed
@@ -187,8 +209,9 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 		fileHashes:         make(map[string]string),
 		fileHadParseErrors: make(map[string]bool),
 		workCh:             make(chan reparseWork, reparseWorkChanSize),
+		parseCh:            make(chan parseFileResult, parseChanSize),
 		brainWorkCh:        make(chan string, brainWorkChanSize),
-		filePkg: make(map[string]string),
+		filePkg:            make(map[string]string),
 	}
 
 	// Sprint 14.3: seed import graph from persisted import_edges table and
@@ -196,7 +219,10 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 	// the store fills in any edges not yet materialised in memory.
 	watcher.initImportGraph()
 
-	// Start bounded reparse workers to prevent thundering herd.
+	// Start bounded parse workers (CPU-bound tree-sitter phase).
+	// Each worker reads a file, checks for parse errors, computes a content
+	// hash, and parses into a temporary graph — all without holding reparseMu.
+	// Results are sent to parseCh for the single merge goroutine to apply.
 	for i := 0; i < 4; i++ {
 		watcher.wg.Add(1)
 		go func() {
@@ -207,17 +233,27 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 					if !ok {
 						return
 					}
-					watcher.reparseFile(work.path, work.root)
+					result := watcher.prepareParseResult(work.path)
+					select {
+					case watcher.parseCh <- result:
+					case <-watcher.stopCh:
+						return
+					}
 				case <-watcher.stopCh:
-					// Drain remaining work items before exiting to avoid
-					// silently dropping pending file reparses.
+					// Drain remaining work items: prepare results and
+					// forward them so the merge goroutine can flush.
 					for {
 						select {
 						case work, ok := <-watcher.workCh:
 							if !ok {
 								return
 							}
-							watcher.reparseFile(work.path, work.root)
+							result := watcher.prepareParseResult(work.path)
+							select {
+							case watcher.parseCh <- result:
+							default:
+								// parseCh full during shutdown — drop.
+							}
 						default:
 							return
 						}
@@ -226,6 +262,12 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 			}
 		}()
 	}
+
+	// Start single merge goroutine: consumes parsed results from parseCh,
+	// coalesces bursts (branch switches), then applies graph mutations and
+	// runs resolvers once per batch.
+	watcher.wg.Add(1)
+	go watcher.mergeLoop()
 
 	// Start bounded brain ingestion workers (2 goroutines).
 	// Prevents unbounded goroutine spawning during burst file changes.
@@ -841,6 +883,498 @@ func fileContentHash(path string) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)), true
+}
+
+// prepareParseResult performs the CPU-bound (parallelizable) part of file
+// re-parsing: symlink validation, file reading, parse-error check, content
+// hashing, and tree-sitter AST parsing into a temporary graph. It does NOT
+// acquire reparseMu and does NOT touch the main graph.
+//
+// The temporary graph is created with the same repoID and root as the main
+// graph so that all node IDs are identical to what the main graph would
+// produce — making MergeFrom / AddNode idempotent.
+func (w *Watcher) prepareParseResult(path string) (result parseFileResult) {
+	result.path = path
+	result.reparseStart = time.Now()
+
+	// BUG-009: Symlink traversal defense with TOCTOU protection.
+	var lstatIno uint64
+	if fi, lstatErr := os.Lstat(path); lstatErr == nil {
+		if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
+			lstatIno = stat.Ino
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			resolved, evalErr := filepath.EvalSymlinks(path)
+			if evalErr != nil {
+				logutil.Warn("synapses/watcher: skipping broken symlink %s: %v\n", path, evalErr)
+				result.err = evalErr
+				return
+			}
+			root := w.rootPath
+			if root == "" {
+				logutil.Warn("synapses/watcher: skipping symlink %s → %s (no root path to verify against)\n", path, resolved)
+				result.err = fmt.Errorf("no root path")
+				return
+			}
+			if !strings.HasPrefix(resolved, root+string(filepath.Separator)) && resolved != root {
+				logutil.Warn("synapses/watcher: skipping symlink %s → %s (outside project root %s)\n", path, resolved, root)
+				result.err = fmt.Errorf("symlink outside project root")
+				return
+			}
+		}
+	}
+	result.lstatIno = lstatIno
+
+	// Read the file once — reused for HasParseErrors, hash, and parse.
+	src, err := os.ReadFile(path)
+	if err != nil {
+		result.err = err
+		return
+	}
+
+	// BUG-009 TOCTOU check: verify inode hasn't changed between Lstat and ReadFile.
+	if lstatIno != 0 {
+		if postFi, postErr := os.Lstat(path); postErr == nil {
+			if postStat, ok := postFi.Sys().(*syscall.Stat_t); ok && postStat.Ino != lstatIno {
+				logutil.Warn("synapses/watcher: inode changed for %s between check and read (possible symlink swap) — discarding\n", path)
+				result.err = fmt.Errorf("inode changed (TOCTOU)")
+				return
+			}
+		}
+	}
+	result.src = src
+
+	// Sprint 11.9: Check for tree-sitter parse errors using pre-read bytes.
+	result.hasErrors = w.walker.HasParseErrors(path, src)
+
+	// Content hash from the already-read bytes (avoids a second ReadFile).
+	h := sha256.New()
+	h.Write(src)
+	result.hash = fmt.Sprintf("%x", h.Sum(nil))
+	result.hashKnown = true
+
+	// Parse into a temporary graph with the same repoID and root so node IDs
+	// match the main graph exactly. The temp graph is discarded after merge.
+	tempGraph := graph.New(w.graph.RepoID())
+	if root := w.graph.Root(); root != "" {
+		tempGraph.SetRoot(root)
+	}
+	if err := w.walker.ParseFileSrc(tempGraph, path, src); err != nil {
+		logutil.Error("synapses/watcher: pre-parse %s: %v\n", path, err)
+		result.err = err
+		return
+	}
+	result.tempGraph = tempGraph
+	return
+}
+
+// mergeLoop is the single serialised goroutine that applies pre-parsed results
+// to the main graph. It reads from parseCh and coalesces bursts (e.g. branch
+// switches) into batches so that the resolver runs once per batch rather than
+// once per file.
+func (w *Watcher) mergeLoop() {
+	defer w.wg.Done()
+	for {
+		var first parseFileResult
+		select {
+		case first = <-w.parseCh:
+		case <-w.stopCh:
+			// Drain any already-prepared results before exiting.
+			for {
+				select {
+				case r := <-w.parseCh:
+					w.applyBatch([]parseFileResult{r})
+				default:
+					return
+				}
+			}
+		}
+
+		batch := []parseFileResult{first}
+
+		// Batch coalescing: if ≥ batchCoalesceThreshold results are already
+		// in the channel (branch switch scenario), wait batchCoalesceDelay to
+		// let the parse workers fill up the channel further before applying.
+		if len(w.parseCh) >= batchCoalesceThreshold {
+			timer := time.NewTimer(batchCoalesceDelay)
+		coalesce:
+			for {
+				select {
+				case r := <-w.parseCh:
+					batch = append(batch, r)
+				case <-timer.C:
+					break coalesce
+				case <-w.stopCh:
+					timer.Stop()
+					w.applyBatch(batch)
+					return
+				}
+			}
+			timer.Stop()
+		}
+
+		// Drain any immediately-available results without additional waiting.
+	drain:
+		for {
+			select {
+			case r := <-w.parseCh:
+				batch = append(batch, r)
+			default:
+				break drain
+			}
+		}
+
+		w.applyBatch(batch)
+	}
+}
+
+// applyBatch applies a batch of pre-parsed file results to the main graph.
+// It acquires reparseMu for the graph mutation and resolver phase (serialised),
+// then releases it before federation detection and other I/O-heavy post-steps.
+//
+// Running resolvers once per batch (rather than once per file) is the primary
+// performance win for branch switches: 20 files → 1 resolver pass instead of 20.
+func (w *Watcher) applyBatch(results []parseFileResult) {
+	if len(results) == 0 {
+		return
+	}
+	w.reparseMu.Lock()
+	reparseMuHeld := true
+	defer func() {
+		if reparseMuHeld {
+			w.reparseMu.Unlock()
+		}
+	}()
+
+	// Phase 1: per-file validation and graph mutation.
+	// Filter out errored results, handle parse-error skip/proceed logic, then
+	// remove stale data and merge new nodes/edges into the main graph.
+	type fileState struct {
+		result         parseFileResult
+		errorAction    string // "clean", "proceed", "skip"
+		nodesBefore    int
+		edgesBefore    int
+		nodesAfter     int    // captured under reparseMu for accurate pulse reporting
+		edgesAfter     int    // captured under reparseMu for accurate pulse reporting
+		beforeNodeIDs  []string
+		prevFileHash   string
+		invalidSet     []string
+		newCallSites   []graph.CallSite
+		memoriesStaled int
+	}
+
+	valid := make([]fileState, 0, len(results))
+	for _, result := range results {
+		if result.err != nil {
+			// prepareParseResult failed (disk error, symlink rejection, etc.)
+			continue
+		}
+
+		state := fileState{result: result}
+
+		// Sprint 11.9: parse error skip/proceed logic.
+		// fileHadParseErrors is accessed only from this goroutine (reparseMu).
+		if result.hasErrors {
+			if !w.fileHadParseErrors[result.path] {
+				// First error: skip, retain previous clean data.
+				w.fileHadParseErrors[result.path] = true
+				logutil.Warn("synapses/watcher: skipping reparse of %s: AST has errors (file may be mid-save)\n", result.path)
+				if w.pulseClient != nil {
+					lang := strings.TrimPrefix(strings.ToLower(filepath.Ext(result.path)), ".")
+					w.pulseClient.RecordReparseEvent(pulse.ReparseEvent{
+						File:        result.path,
+						Language:    lang,
+						ProjectID:   w.projectID,
+						ErrorAction: "skip",
+					})
+				}
+				continue
+			}
+			// Persistent error: proceed with the error-recovered AST.
+			logutil.Warn("synapses/watcher: reparsing %s despite errors (persistent, not mid-save)\n", result.path)
+			state.errorAction = "proceed"
+		} else {
+			delete(w.fileHadParseErrors, result.path)
+			state.errorAction = "clean"
+		}
+
+		// Snapshot counts before mutation.
+		state.nodesBefore = w.countNodesForFile(result.path)
+		state.edgesBefore = len(w.graph.OutEdgesForFile(result.path))
+
+		// Snapshot stable UUIDs before removing nodes.
+		w.graph.SnapshotFileStableIDs(result.path)
+
+		// AM-2: capture node IDs before removal for memory staling cascade.
+		// Sprint 10.7: capture previous file hash for embedding invalidation.
+		if w.store != nil {
+			for _, n := range w.graph.NodesForFile(result.path) {
+				state.beforeNodeIDs = append(state.beforeNodeIDs, string(n.ID))
+			}
+			w.fileHashMu.Lock()
+			state.prevFileHash = w.fileHashes[result.path]
+			w.fileHashMu.Unlock()
+		}
+
+		// Sprint 14.3: capture callers BEFORE RemoveFile deletes the edges.
+		if w.store != nil {
+			state.invalidSet = w.computeInvalidationSet(result.path)
+		}
+
+		// Remove stale data from main graph.
+		w.graph.RemoveFile(result.path)
+		w.graph.RemoveCallSitesForFile(result.path)
+		w.graph.RemoveTerraformRefsForFile(result.path)
+
+		// Merge pre-parsed nodes and edges from tempGraph into main graph.
+		// tempGraph was built with the same repoID+root, so node IDs match.
+		w.graph.MergeFrom(result.tempGraph)
+
+		// Migrate stable UUIDs for re-parsed nodes (preserves cross-project refs).
+		for _, n := range w.graph.NodesForFile(result.path) {
+			w.graph.MigrateStableID(n)
+		}
+		w.graph.ClearFileSnapshot(result.path)
+
+		// Sprint 10.7: persist new content hash.
+		if w.store != nil && result.hashKnown {
+			w.fileHashMu.Lock()
+			w.fileHashes[result.path] = result.hash
+			w.fileHashMu.Unlock()
+		}
+
+		// AM-2: cascade stale flag to memories anchored to disappeared nodes.
+		if w.store != nil && len(state.beforeNodeIDs) > 0 {
+			afterIDs := make(map[string]struct{}, len(state.beforeNodeIDs))
+			for _, n := range w.graph.NodesForFile(result.path) {
+				afterIDs[string(n.ID)] = struct{}{}
+			}
+			var removedIDs, changedIDs []string
+			for _, id := range state.beforeNodeIDs {
+				if _, ok := afterIDs[id]; !ok {
+					removedIDs = append(removedIDs, id)
+				} else {
+					changedIDs = append(changedIDs, id)
+				}
+			}
+			if len(removedIDs) > 0 {
+				state.memoriesStaled = len(removedIDs)
+				if err := w.store.MarkAnchoredMemoriesStale(removedIDs, "anchor node removed"); err != nil {
+					logutil.Warn("synapses/watcher: cascade memory stale: %v\n", err)
+				}
+				if err := w.store.MarkEntityMemoriesStaleForNodes(removedIDs, "entity node removed"); err != nil {
+					logutil.Warn("synapses/watcher: cascade entity memory stale: %v\n", err)
+				}
+			}
+			contentChanged := !result.hashKnown || result.hash != state.prevFileHash
+			if len(changedIDs) > 0 && contentChanged {
+				memIDs, err := w.store.GetMemoryIDsByAnchorNodes(changedIDs, 500)
+				if err != nil {
+					logutil.Warn("synapses/watcher: get anchor memory ids for embedding invalidation: %v\n", err)
+				} else if len(memIDs) > 0 {
+					if err := w.store.MarkMemoryEmbeddingsStale(memIDs); err != nil {
+						logutil.Warn("synapses/watcher: invalidate anchor embeddings: %v\n", err)
+					}
+				}
+			}
+		}
+
+		// Sprint 14.3: update filePkg for the re-parsed file.
+		w.updateImportGraphForFile(result.path)
+
+		// Capture new call sites from the temp graph BEFORE loading stored
+		// call sites (so we know which sites belong to this file's fresh parse).
+		state.newCallSites = result.tempGraph.DrainCallSites()
+
+		// Load stored call sites for the invalidation set and merge into graph.
+		if w.store != nil {
+			var stored []graph.CallSite
+			var loadErr error
+			if stored, loadErr = w.store.LoadCallSitesForFiles(state.invalidSet); loadErr != nil {
+				logutil.Warn("synapses/watcher: scoped call-site load failed, falling back to full load: %v\n", loadErr)
+				stored, loadErr = w.store.LoadCallSites()
+			}
+			if loadErr == nil {
+				var filtered []graph.CallSite
+				for _, cs := range stored {
+					if cs.CallerFile != result.path {
+						filtered = append(filtered, cs)
+					}
+				}
+				w.graph.BulkAddCallSites(filtered)
+			}
+		}
+
+		// Add fresh call sites and terraform refs from this file's parse.
+		w.graph.BulkAddCallSites(state.newCallSites)
+		for _, ref := range result.tempGraph.DrainTerraformRefs() {
+			w.graph.AddTerraformRef(ref)
+		}
+
+		valid = append(valid, state)
+	}
+
+	if len(valid) == 0 {
+		return
+	}
+
+	// Phase 2: run resolvers ONCE for the entire batch.
+	// This is the primary win for branch switches: N files → 1 resolver pass.
+	resolver.ResolveCallEdges(w.graph)
+	resolver.ResolveHeritageEdges(w.graph)
+	resolver.ResolveImplementsEdges(w.graph)
+
+	// Doc edges: if any file in the batch is a code file, run the full scan
+	// (markdown sections may reference the new entities). Otherwise use the
+	// file-scoped variant (only markdown files changed — code entities unchanged).
+	hasNonMarkdown := false
+	for _, s := range valid {
+		ext := strings.ToLower(filepath.Ext(s.result.path))
+		if ext != ".md" && ext != ".markdown" && ext != ".mdx" {
+			hasNonMarkdown = true
+			break
+		}
+	}
+	if hasNonMarkdown {
+		resolver.ResolveDocEdges(w.graph)
+	} else {
+		for _, s := range valid {
+			resolver.ResolveDocEdgesForFile(w.graph, s.result.path)
+		}
+	}
+
+	// Phase 3: per-file post-resolve work (still under reparseMu).
+	for i := range valid {
+		s := &valid[i] // pointer so mutations are visible outside the loop
+
+		// Persist updated call sites for this file.
+		if w.store != nil {
+			if err := w.store.UpdateCallSitesForFile(s.result.path, s.newCallSites); err != nil {
+				logutil.Error("synapses/watcher: update call sites for %s: %v\n", s.result.path, err)
+			}
+		}
+
+		// R3/R34: re-enrich blame and commit context for changed file.
+		if root := w.graph.Root(); root != "" {
+			metrics.EnrichBlameForFile(w.graph, root, s.result.path)
+			metrics.EnrichCommitContextForFile(w.graph, root, s.result.path)
+		}
+
+		w.graph.InvalidateCacheForFile(s.result.path)
+
+		// Rebuild columnar GraphIndex asynchronously.
+		w.trackGo(func() {
+			rebuildStart := time.Now()
+			w.graph.RebuildIndex()
+			if w.pulseClient != nil {
+				w.pulseClient.RecordGraphSnapshot(pulse.GraphSnapshotEvent{
+					RebuildDurationMs: float64(time.Since(rebuildStart).Milliseconds()),
+					RebuildTrigger:    "file_change",
+				})
+			}
+		})
+
+		if w.pktInval != nil {
+			w.pktInval.InvalidatePacketCacheForFile(s.result.path)
+			if w.pulseClient != nil {
+				w.pulseClient.RecordMemoryOp(pulse.MemoryOperationEvent{
+					Operation: "invalidation_cascade",
+					Count:     1,
+				})
+			}
+		}
+
+		// Capture node/edge counts under reparseMu so pulse events are accurate.
+		// Using index-based loop + pointer ensures the stored values are visible
+		// in the post-lock section that reads valid[i].nodesAfter.
+		s.nodesAfter = w.countNodesForFile(s.result.path)
+		s.edgesAfter = len(w.graph.OutEdgesForFile(s.result.path))
+		w.recordChange(s.result.path, s.nodesBefore, s.nodesAfter, s.edgesAfter-s.edgesBefore)
+
+		w.checkViolations(s.result.path)
+		w.notifyCrossProjectImpact(s.result.path)
+		w.notifyIntraProjectImpact(s.result.path)
+	}
+
+	// Release reparseMu before I/O-heavy post-steps (federation, pulse, persist).
+	w.reparseMu.Unlock()
+	reparseMuHeld = false
+
+	for _, s := range valid {
+		// RX2 Phase 3: cross-project dependency detection.
+		if w.cpTracker != nil && w.store != nil {
+			fedStart := time.Now()
+			cpCtx, cpCancel := context.WithTimeout(w.stopCtx, 2*time.Second)
+			w.cpTracker.DetectAndStore(cpCtx, s.result.path, w.store)
+			cpCancel()
+			if w.pulseClient != nil {
+				w.pulseClient.RecordFederationEvent(pulse.FederationDetectEvent{
+					ProjectID:  w.graph.RepoID(),
+					Tier:       1,
+					DurationMs: float64(time.Since(fedStart).Milliseconds()),
+					EventType:  "detect_and_store",
+				})
+			}
+			if w.cpBrainTracker != nil {
+				filePath := s.result.path
+				w.trackGo(func() {
+					brainStart := time.Now()
+					brainCtx, brainCancel := context.WithTimeout(w.stopCtx, 10*time.Second)
+					defer brainCancel()
+					w.cpBrainTracker.DetectAndStoreBrain(brainCtx, filePath, w.store)
+					brainDurationMs := float64(time.Since(brainStart).Milliseconds())
+					if w.pulseClient != nil {
+						w.pulseClient.RecordFederationEvent(pulse.FederationDetectEvent{
+							ProjectID:  w.graph.RepoID(),
+							Tier:       2,
+							DurationMs: brainDurationMs,
+							EventType:  "detect_brain",
+						})
+						w.pulseClient.RecordBrainUsage(pulse.BrainUsageEvent{
+							Model:      "brain:federation",
+							Tier:       "federation",
+							Endpoint:   "cross_project_detect",
+							DurationMs: int64(brainDurationMs),
+							ProjectID:  w.graph.RepoID(),
+							Success:    true,
+						})
+					}
+				})
+			}
+		}
+
+		// P2-3: emit ReparseEvent. Use counts captured under reparseMu (Phase 3)
+		// so values are not affected by concurrent parses that ran after unlock.
+		if w.pulseClient != nil {
+			lang := strings.TrimPrefix(strings.ToLower(filepath.Ext(s.result.path)), ".")
+			deltaRows := s.nodesAfter - s.nodesBefore
+			if deltaRows < 0 {
+				deltaRows = -deltaRows
+			}
+			w.pulseClient.RecordReparseEvent(pulse.ReparseEvent{
+				File:           s.result.path,
+				Language:       lang,
+				DurationMs:     time.Since(s.result.reparseStart).Milliseconds(),
+				NodesBefore:    s.nodesBefore,
+				NodesAfter:     s.nodesAfter,
+				EdgesDelta:     s.edgesAfter - s.edgesBefore,
+				MemoriesStaled: s.memoriesStaled,
+				ProjectID:      w.projectID,
+				DeltaRows:      deltaRows,
+				ErrorAction:    s.errorAction,
+			})
+		}
+
+		logutil.Info("synapses/watcher: updated %s\n", s.result.path)
+		w.persistAsync(s.result.path)
+
+		if w.brainClient != nil {
+			select {
+			case w.brainWorkCh <- s.result.path:
+			default:
+			}
+		}
+	}
 }
 
 // reparseFile removes stale nodes for path and re-parses it into the graph.
