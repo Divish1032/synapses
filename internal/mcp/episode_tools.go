@@ -418,9 +418,16 @@ func (s *Server) handleRecall(
 		agentID := stringArg(req, "agent_id")
 		var recentMems []store.Memory
 		if includeStale {
-			recentMems, _ = s.store.QueryMemoriesIncludingStale("", "", agentID, limit)
+			var qErr error
+			recentMems, qErr = s.store.QueryMemoriesIncludingStale("", "", agentID, limit)
+			if qErr != nil {
+				logutil.Debug("synapses: episode browse memory query error: %v\n", qErr)
+			}
 		} else {
-			raw, _ := s.store.QueryMemories("", "", agentID, limit)
+			raw, qErr := s.store.QueryMemories("", "", agentID, limit)
+			if qErr != nil {
+				logutil.Debug("synapses: episode browse memory query error: %v\n", qErr)
+			}
 			// Apply decay visibility threshold — same filter as search mode.
 			// Pinned memories always pass; decayed memories are demoted but not deleted.
 			for _, m := range raw {
