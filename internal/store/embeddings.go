@@ -418,10 +418,12 @@ func (s *Store) normalizeStoredEmbeddings() {
 		}
 		sqlDB, ok := db.(beginner)
 		if !ok {
+			logutil.Warn("synapses: embedding normalization: db does not support transactions; %d vectors remain denormalized\n", len(updates))
 			return 0
 		}
 		tx, err := sqlDB.Begin()
 		if err != nil {
+			logutil.Warn("synapses: embedding normalization: begin tx: %v; %d vectors remain denormalized\n", err, len(updates))
 			return 0
 		}
 		defer tx.Rollback() // no-op after successful Commit
