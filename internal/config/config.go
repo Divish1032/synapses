@@ -504,12 +504,14 @@ type ContextCarveConfig struct {
 	// token-budget pruner prefer forward call dependencies over callers.
 	// Default: 0.2. Set to 0 to disable.
 	DirectionBoost float64 `json:"direction_boost,omitempty"`
-	// HybridLambda controls the semantic blend weight for Sprint 13 #3 scoring:
+	// HybridLambda controls the semantic blend weight for hybrid scoring:
 	//   finalScore = (1-λ)×structural + λ×cosineSim(embed(root), embed(n))
-	// Range [0, 1]. Default: 0.3 (70% structural, 30% semantic).
-	// Set to 0 to disable hybrid scoring (pure structural, fastest).
+	// Range [0, 1]. nil = not configured (server applies default of 0.3).
+	// Set to 0.0 to disable hybrid scoring entirely (pure structural, fastest).
+	// Set to any value in (0, 1] to use that blend ratio.
 	// Only applied when node embeddings are available; otherwise ignored.
-	HybridLambda float64 `json:"hybrid_lambda,omitempty"`
+	// Uses *float64 (pointer) so that explicit 0 is distinguishable from unset.
+	HybridLambda *float64 `json:"hybrid_lambda,omitempty"`
 }
 
 // Violation records a detected rule breach.
@@ -671,11 +673,14 @@ func (c *Config) CarveConfig() graph.CarveConfig {
 	} else {
 		cfg.DirectionBoost = 0.2 // default: 20% callee preference
 	}
-	// HybridLambda: 0 in config means "not configured" — handlers_context.go
-	// applies a default of 0.3. Explicit values (including 0.0 to disable) are
-	// passed through as-is. Use -1 sentinel is avoided; instead handlers_context.go
-	// checks lambda<=0 and applies the default only when the store is being wired.
-	cfg.HybridLambda = c.ContextCarve.HybridLambda
+	// HybridLambda: nil means "not configured" — handled in the MCP layer where
+	// the store is available and a default of 0.3 is applied. Explicit *float64
+	// values (including 0.0 to disable) are passed through via CarveConfig.HybridLambda.
+	// handlers_context.go reads s.config.ContextCarve.HybridLambda directly to
+	// preserve the nil / explicit-zero distinction.
+	if c.ContextCarve.HybridLambda != nil {
+		cfg.HybridLambda = *c.ContextCarve.HybridLambda
+	}
 	if len(c.EdgeWeights) > 0 {
 		cfg.EdgeWeights = make(map[graph.EdgeType]float64, len(c.EdgeWeights))
 		for k, v := range c.EdgeWeights {
