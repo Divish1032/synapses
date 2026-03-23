@@ -58,29 +58,7 @@ func (b *BrainEnricher) GetEntitySummary(ctx context.Context, alias, entityName 
 		return ""
 	}
 
-	// Try brain summary first (zero LLM calls — reads from brain.sqlite).
-	b.mu.RLock()
-	brain := b.brain
-	b.mu.RUnlock()
-	if brain != nil {
-		projectID := b.resolver.SiblingProjectID(alias)
-		if projectID != "" {
-			// Brain summaries are indexed by nodeID. We need to find the
-			// entity's nodeID in the sibling store first.
-			st := b.resolver.getStore(alias)
-			if st != nil {
-				results, err := st.FindNodesByNameCtx(ctx, entityName, 1)
-				if err == nil && len(results) > 0 {
-					summary := brain.Summary(projectID, results[0].ID)
-					if summary != "" {
-						return summary
-					}
-				}
-			}
-		}
-	}
-
-	// Fallback: raw entity signature from sibling store.
+	// Hoist store lookup and entity resolution — both branches need them.
 	st := b.resolver.getStore(alias)
 	if st == nil {
 		return ""
@@ -89,6 +67,22 @@ func (b *BrainEnricher) GetEntitySummary(ctx context.Context, alias, entityName 
 	if err != nil || len(results) == 0 {
 		return ""
 	}
+
+	// Try brain summary first (zero LLM calls — reads from brain.sqlite).
+	b.mu.RLock()
+	brain := b.brain
+	b.mu.RUnlock()
+	if brain != nil {
+		projectID := b.resolver.SiblingProjectID(alias)
+		if projectID != "" {
+			summary := brain.Summary(projectID, results[0].ID)
+			if summary != "" {
+				return summary
+			}
+		}
+	}
+
+	// Fallback: raw entity signature from sibling store.
 	if results[0].Signature != "" {
 		return results[0].Signature
 	}
