@@ -100,7 +100,7 @@ func DefaultDBPath() (string, error) {
 // New creates and starts an in-process pulse collector backed by a SQLite store
 // at dbPath. Returns an error if the database cannot be opened.
 func New(dbPath string) (*Client, error) {
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
 		return nil, fmt.Errorf("pulse: mkdir: %w", err)
 	}
 	st, err := pulsestore.Open(dbPath)

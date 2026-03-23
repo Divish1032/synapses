@@ -1526,6 +1526,7 @@ func (s *Store) PruneStaleData(retentionDays int) {
 		"tool_calls":     true,
 		"agent_messages": true,
 		"events":         true,
+		"episodes":       true,
 	}
 	allowedWhere := map[string]bool{
 		"created_at < ?": true,
@@ -1567,7 +1568,7 @@ func (s *Store) PruneStaleData(retentionDays int) {
 	chunkedPrune("events", "created_at < ?", cutoff)
 
 	// episodes: stored as Unix seconds (INTEGER).
-	pruneExec(`DELETE FROM episodes WHERE created_at < ?`, cutoffUnix)
+	chunkedPrune("episodes", "created_at < ?", cutoffUnix)
 
 	// memories + cascades: wrap in a single transaction to prevent orphaned
 	// embeddings/anchors/surfaced/versions on crash between DELETEs.
