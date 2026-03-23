@@ -40,13 +40,8 @@ func TestNormalizeL2Vec_Empty(t *testing.T) {
 func TestNormalizeL2Vec_ZeroMagnitude(t *testing.T) {
 	v := []float32{0, 0, 0}
 	got := normalizeL2Vec(v)
-	if got == nil {
-		t.Fatal("expected non-nil for zero-magnitude vector, got nil")
-	}
-	for i, x := range got {
-		if x != 0 {
-			t.Errorf("got[%d] = %v, want 0", i, x)
-		}
+	if got != nil {
+		t.Fatalf("expected nil for zero-magnitude vector (model failure), got %v", got)
 	}
 }
 
