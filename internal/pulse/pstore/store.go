@@ -1711,8 +1711,24 @@ func (s *Store) GetSummary(days int) (*Summary, error) {
 }
 
 // GetSummaryForProject returns aggregated analytics for the last N days filtered to a specific project.
-// Uses a raw-table scan since daily_rollups are not project-scoped.
+// Fast path: uses pre-computed per-project rollups (keyed as "project:<id>:<metric>") for past
+// days, then adds today's raw data via GetSummaryForDayProject. Falls back to a full raw-table
+// scan if per-project rollups are not yet available.
 func (s *Store) GetSummaryForProject(days int, projectID string) (*Summary, error) {
+	today := time.Now().UTC().Format("2006-01-02")
+	rollupSince := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
+
+	// Fast path: per-project rollups for past days + raw for today.
+	hist, rollupErr := s.sumRollupsForProject(rollupSince, today, projectID)
+	if rollupErr == nil && hist != nil {
+		raw, err := s.GetSummaryForDayProject(today, projectID)
+		if err != nil {
+			return nil, err
+		}
+		return mergeSummaries(hist, raw), nil
+	}
+
+	// Slow path: full raw-table scan (rollups absent or incomplete).
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
 	sum := &Summary{}
 
@@ -1764,6 +1780,73 @@ func (s *Store) GetSummaryForProject(days int, projectID string) (*Summary, erro
 		sum.SavingsPct = float64(sum.TokensSaved) / float64(sum.BaselineTokens) * 100.0
 	}
 	computeValueMultiplier(sum)
+
+	return sum, nil
+}
+
+// sumRollupsForProject aggregates per-project daily_rollups rows in [since, before) into a Summary.
+// Per-project rollup keys are stored as "project:<projectID>:<metric>".
+// Returns (nil, nil) when no rollup rows exist for the period (triggers fallback).
+func (s *Store) sumRollupsForProject(since, before, projectID string) (*Summary, error) {
+	prefix := "project:" + projectID + ":"
+	rows, err := s.execer().Query(
+		`SELECT metric, COALESCE(SUM(value), 0)
+		 FROM daily_rollups WHERE day >= ? AND day < ? AND metric LIKE ?
+		 GROUP BY metric`, since, before, prefix+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	m := make(map[string]float64)
+	for rows.Next() {
+		var metric string
+		var value float64
+		if err := rows.Scan(&metric, &value); err != nil {
+			return nil, err
+		}
+		// Strip the "project:<id>:" prefix to get the bare metric name.
+		if len(metric) > len(prefix) {
+			m[metric[len(prefix):]] = value
+		}
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	if len(m) == 0 {
+		return nil, nil // no rollup data — caller should use slow path
+	}
+
+	sum := &Summary{
+		TotalToolCalls:     int(m["tool_calls"]),
+		TokensDelivered:    int(m["tokens_delivered"]),
+		BaselineTokens:     int(m["baseline_tokens"]),
+		TokensSaved:        int(m["tokens_saved"]),
+		ContextDeliveries:  int(m["context_deliveries"]),
+		CostSavedUSD:       m["cost_saved_usd"],
+		Sessions:           int(m["sessions"]),
+		TasksCompleted:     int(m["tasks_completed"]),
+		CacheHits:          int(m["cache_hits"]),
+		BrainEnrichedCount: int(m["brain_enriched_count"]),
+		TotalLatencyMs:     m["total_latency_ms"],
+	}
+
+	// Recompute rate metrics from summable components.
+	if sum.ContextDeliveries > 0 {
+		sum.CacheHitRate = float64(sum.CacheHits) / float64(sum.ContextDeliveries)
+		sum.BrainEnrichRate = float64(sum.BrainEnrichedCount) / float64(sum.ContextDeliveries)
+	}
+	if sum.TotalToolCalls > 0 {
+		sum.AvgLatencyMs = sum.TotalLatencyMs / float64(sum.TotalToolCalls)
+	}
+	if sum.TokensDelivered > 0 {
+		sum.CompressionRatio = float64(sum.BaselineTokens) / float64(sum.TokensDelivered)
+	} else {
+		sum.CompressionRatio = 1.0
+	}
+	if sum.BaselineTokens > 0 && sum.TokensSaved > 0 {
+		sum.SavingsPct = float64(sum.TokensSaved) / float64(sum.BaselineTokens) * 100.0
+	}
 
 	return sum, nil
 }
