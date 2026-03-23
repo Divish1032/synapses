@@ -38,7 +38,8 @@ type Graph struct {
 	outEdges  map[NodeID][]*Edge // edges leaving a node
 	inEdges   map[NodeID][]*Edge // edges arriving at a node
 	edgeSet   map[edgeKey]struct{} // O(1) edge deduplication
-	callSites []CallSite         // temporary: accumulated during parse, drained by resolver
+	callSites     []CallSite     // temporary: accumulated during parse, drained by resolver
+	terraformRefs []TerraformRef // temporary: accumulated during .tf parse, drained by resolver
 	cache     *subgraphCache     // in-memory cache for carved subgraphs (30s TTL, max 20 entries)
 
 	// fileStableIDs stores stable UUID snapshots keyed by absolute file path.
@@ -479,6 +480,38 @@ func (g *Graph) DrainCallSites() []CallSite {
 	cs := g.callSites
 	g.callSites = nil
 	return cs
+}
+
+// AddTerraformRef records an unresolved Terraform resource reference for
+// post-parse cross-file DEPENDS_ON resolution.
+func (g *Graph) AddTerraformRef(ref TerraformRef) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.terraformRefs = append(g.terraformRefs, ref)
+}
+
+// DrainTerraformRefs returns all pending Terraform refs and clears the list.
+// Must be called after all .tf files have been parsed.
+func (g *Graph) DrainTerraformRefs() []TerraformRef {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	refs := g.terraformRefs
+	g.terraformRefs = nil
+	return refs
+}
+
+// RemoveTerraformRefsForFile removes pending Terraform refs whose FromFile
+// matches the given path. Called by the watcher before re-parsing a .tf file.
+func (g *Graph) RemoveTerraformRefsForFile(file string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	filtered := g.terraformRefs[:0]
+	for _, ref := range g.terraformRefs {
+		if ref.FromFile != file {
+			filtered = append(filtered, ref)
+		}
+	}
+	g.terraformRefs = filtered
 }
 
 // AddVarType records that variable varName in file has type typeName.

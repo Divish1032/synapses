@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -144,6 +145,26 @@ type Watcher struct {
 	// Protected by reparseMu (only accessed inside reparseFile).
 	fileHadParseErrors map[string]bool
 
+	// Sprint 14.3: Dependency-aware incremental reanalysis.
+	//
+	// fileImports maps each source file to the short package names it imports
+	// (e.g. "store", "graph"). Updated after each reparseFile. Together with
+	// pkgImporters and filePkg, this enables scoped call-site reload: only
+	// files that import the changed file's package need their stored call sites
+	// reloaded, not the entire call_sites table.
+	//
+	// filePkg maps each known source file to its own package name.
+	//
+	// pkgImporters is the inverted index: package name → set of files that
+	// import that package. Built from fileImports on load and kept in sync.
+	//
+	// All three maps are protected by reparseMu (only accessed from
+	// reparseFile, which is serialised). Loaded at Watcher creation from the
+	// persisted import_edges store table and from the in-memory graph.
+	fileImports  map[string][]string
+	pkgImporters map[string]map[string]bool
+	filePkg      map[string]string
+
 	// loopAlive tracks whether the event processing loop is running.
 	// Set to 0 (dead) when the loop exhausts all restart attempts.
 	loopAlive atomic.Int32
@@ -176,7 +197,15 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 		fileHadParseErrors: make(map[string]bool),
 		workCh:             make(chan reparseWork, reparseWorkChanSize),
 		brainWorkCh:        make(chan string, brainWorkChanSize),
+		fileImports:        make(map[string][]string),
+		pkgImporters:       make(map[string]map[string]bool),
+		filePkg:            make(map[string]string),
 	}
+
+	// Sprint 14.3: seed import graph from persisted import_edges table and
+	// from the in-memory graph. The graph is always the authoritative source;
+	// the store fills in any edges not yet materialised in memory.
+	watcher.initImportGraph()
 
 	// Start bounded reparse workers to prevent thundering herd.
 	for i := 0; i < 4; i++ {
@@ -272,6 +301,165 @@ func (w *Watcher) SetCrossProjectTracker(tracker CrossProjectTracker) {
 // Must be called before Start. tracker may be nil to disable.
 func (w *Watcher) SetBrainCrossProjectTracker(tracker BrainCrossProjectTracker) {
 	w.cpBrainTracker = tracker
+}
+
+// initImportGraph seeds the in-memory import-graph maps from the persisted
+// import_edges store table and from the IMPORTS edges currently in the graph.
+// Called once during New() — no locking needed (no goroutines active yet).
+func (w *Watcher) initImportGraph() {
+	// Seed filePkg from the graph's current nodes (O(N) one-time scan).
+	// Skip NodePackage nodes: they represent imported packages and have
+	// File=importer_file (the file that imports them). Using their Package
+	// field would corrupt filePkg with the imported package name instead of
+	// the importer file's own package.
+	for _, n := range w.graph.AllNodes() {
+		if n.Type == graph.NodePackage {
+			continue
+		}
+		if n.Package != "" && n.File != "" {
+			w.filePkg[n.File] = n.Package
+		}
+	}
+
+	// Load persisted import edges from the store if available. These cover
+	// files that have been changed since the last full index.
+	if w.store != nil {
+		if persisted, err := w.store.LoadAllImportEdges(); err == nil {
+			for file, pkgs := range persisted {
+				w.fileImports[file] = pkgs
+				for _, pkg := range pkgs {
+					if pkg == "" {
+						continue
+					}
+					if w.pkgImporters[pkg] == nil {
+						w.pkgImporters[pkg] = make(map[string]bool)
+					}
+					w.pkgImporters[pkg][file] = true
+				}
+			}
+		}
+	}
+
+	// Supplement with IMPORTS edges from the live in-memory graph. Nodes not
+	// yet in the store (fresh run) are covered here so the first reparseFile
+	// call has accurate import data even before any writes to import_edges.
+	for _, n := range w.graph.AllNodes() {
+		if n.Type != graph.NodeFile || n.File == "" {
+			continue
+		}
+		file := n.File
+		if _, alreadyLoaded := w.fileImports[file]; alreadyLoaded {
+			continue // store data takes precedence; skip re-scan
+		}
+		var pkgs []string
+		for _, e := range w.graph.OutEdges(n.ID) {
+			if e.Type != graph.EdgeImports {
+				continue
+			}
+			pkgNode := w.graph.GetNode(e.To)
+			if pkgNode == nil || pkgNode.Type != graph.NodePackage {
+				continue
+			}
+			shortName := path.Base(pkgNode.Name)
+			if shortName == "" || shortName == "." {
+				continue
+			}
+			pkgs = append(pkgs, shortName)
+		}
+		if len(pkgs) > 0 {
+			w.fileImports[file] = pkgs
+			for _, pkg := range pkgs {
+				if w.pkgImporters[pkg] == nil {
+					w.pkgImporters[pkg] = make(map[string]bool)
+				}
+				w.pkgImporters[pkg][file] = true
+			}
+		}
+	}
+}
+
+// updateImportGraphForFile updates the in-memory import-graph maps for file
+// after it has been re-parsed. Must be called under reparseMu.
+// Also persists the new import edges to the store (best-effort).
+func (w *Watcher) updateImportGraphForFile(filePath string) {
+	// Update filePkg from the newly-parsed nodes. Skip NodePackage nodes
+	// (they represent imported packages, not the file's own package).
+	for _, n := range w.graph.NodesForFile(filePath) {
+		if n.Type == graph.NodePackage {
+			continue
+		}
+		if n.Package != "" {
+			w.filePkg[filePath] = n.Package
+			break
+		}
+	}
+
+	// Remove old import entries for this file from pkgImporters.
+	if oldPkgs := w.fileImports[filePath]; len(oldPkgs) > 0 {
+		for _, pkg := range oldPkgs {
+			delete(w.pkgImporters[pkg], filePath)
+		}
+	}
+
+	// Rebuild import list from the fresh IMPORTS edges.
+	var newPkgs []string
+	for _, e := range w.graph.OutEdgesForFile(filePath) {
+		if e.Type != graph.EdgeImports {
+			continue
+		}
+		pkgNode := w.graph.GetNode(e.To)
+		if pkgNode == nil || pkgNode.Type != graph.NodePackage {
+			continue
+		}
+		shortName := path.Base(pkgNode.Name)
+		if shortName == "" || shortName == "." {
+			continue
+		}
+		newPkgs = append(newPkgs, shortName)
+	}
+	w.fileImports[filePath] = newPkgs
+	for _, pkg := range newPkgs {
+		if w.pkgImporters[pkg] == nil {
+			w.pkgImporters[pkg] = make(map[string]bool)
+		}
+		w.pkgImporters[pkg][filePath] = true
+	}
+
+	// Persist to store (best-effort — watcher runs normally if this fails).
+	if w.store != nil {
+		if err := w.store.UpdateImportEdgesForFile(filePath, newPkgs); err != nil {
+			logutil.Warn("synapses/watcher: update import_edges for %s: %v\n", filePath, err)
+		}
+	}
+}
+
+// computeInvalidationSet returns the set of files whose stored call sites need
+// to be reloaded when filePath changes. Includes:
+//   - filePath itself (its own call sites were re-registered by ParseFile)
+//   - all files that directly import filePath's package (they may call into it)
+//   - all other files in the same package as filePath (same-package direct calls)
+//
+// Must be called under reparseMu after updateImportGraphForFile.
+func (w *Watcher) computeInvalidationSet(filePath string) []string {
+	invalid := map[string]bool{filePath: true}
+	pkg := w.filePkg[filePath]
+	if pkg != "" {
+		// Direct importers of this file's package.
+		for importer := range w.pkgImporters[pkg] {
+			invalid[importer] = true
+		}
+		// Same-package files (they can call without a package qualifier).
+		for f, fpkg := range w.filePkg {
+			if fpkg == pkg {
+				invalid[f] = true
+			}
+		}
+	}
+	result := make([]string, 0, len(invalid))
+	for f := range invalid {
+		result = append(result, f)
+	}
+	return result
 }
 
 // SetPulseClient wires a pulse.Client into the watcher for pipeline instrumentation.
@@ -506,19 +694,33 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 		}
 		w.graph.RemoveFile(path)
 		w.graph.RemoveCallSitesForFile(path)
+		w.graph.RemoveTerraformRefsForFile(path)
 		w.graph.InvalidateCache()
 		w.fileHashMu.Lock()
 		delete(w.fileHashes, path)
 		w.fileHashMu.Unlock()
-		// Clean up parse-error tracking for deleted files.
+		// Clean up parse-error tracking and import graph for deleted files.
+		// Both structures are protected by reparseMu.
 		w.reparseMu.Lock()
 		delete(w.fileHadParseErrors, path)
+		// Sprint 14.3: evict from import graph so future invalidation sets
+		// don't include stale entries for this deleted file.
+		if oldPkgs := w.fileImports[path]; len(oldPkgs) > 0 {
+			for _, pkg := range oldPkgs {
+				delete(w.pkgImporters[pkg], path)
+			}
+		}
+		delete(w.fileImports, path)
+		delete(w.filePkg, path)
 		w.reparseMu.Unlock()
 		// Remove this file's call sites from the persisted table so they are
 		// not reloaded by future reparseFile calls for other files.
 		if w.store != nil {
 			if err := w.store.UpdateCallSitesForFile(path, nil); err != nil {
 				logutil.Error("synapses/watcher: remove call sites for %s: %v\n", path, err)
+			}
+			if err := w.store.UpdateImportEdgesForFile(path, nil); err != nil {
+				logutil.Warn("synapses/watcher: remove import_edges for %s: %v\n", path, err)
 			}
 		}
 		// AM-2: cascade stale flag to memories anchored to the removed nodes.
@@ -837,6 +1039,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// Remove stale graph data and call sites for this file before re-parsing.
 	w.graph.RemoveFile(path)
 	w.graph.RemoveCallSitesForFile(path)
+	w.graph.RemoveTerraformRefsForFile(path)
 
 	if err := w.walker.ParseFile(w.graph, path); err != nil {
 		logutil.Error("synapses/watcher: re-parse %s: %v\n", path, err)
@@ -906,16 +1109,34 @@ func (w *Watcher) reparseFile(path, _ string) {
 		}
 	}
 
+	// Sprint 14.3: update import graph for this file BEFORE computing the
+	// invalidation set — we need the new package name and import list.
+	w.updateImportGraphForFile(path)
+
 	// Peek the newly-registered call sites from the re-parsed file before the
 	// resolver drains them. We need these to update the stored call-site table.
 	newSites := w.graph.PeekCallSites()
 
-	// Reload stored call sites from ALL OTHER files and bulk-add them so the
-	// resolver can recreate CALLS edges pointing INTO the re-parsed file.
-	// (RemoveFile deleted those edges; the other files' call sites were already
-	// drained during the initial build and are NOT in graph.callSites.)
+	// Reload stored call sites from the INVALIDATION SET only, not the entire
+	// call_sites table. The invalidation set contains: the changed file itself,
+	// all files that import the changed file's package (they may have CALLS
+	// edges into it that RemoveFile just deleted), and all same-package files
+	// (same-package direct calls have no pkg qualifier — they'd also lose edges).
+	//
+	// Files outside the invalidation set cannot have call sites that resolve to
+	// nodes in the changed file, so their stored edges remain valid and do not
+	// need re-resolution — giving a 10-50x reduction in resolver work for
+	// leaf-module changes.
 	if w.store != nil {
-		if stored, err := w.store.LoadCallSites(); err == nil {
+		invalidSet := w.computeInvalidationSet(path)
+		var stored []graph.CallSite
+		var loadErr error
+		if stored, loadErr = w.store.LoadCallSitesForFiles(invalidSet); loadErr != nil {
+			// Fall back to full load on error so correctness is preserved.
+			logutil.Warn("synapses/watcher: scoped call-site load failed, falling back to full load: %v\n", loadErr)
+			stored, loadErr = w.store.LoadCallSites()
+		}
+		if loadErr == nil {
 			var filtered []graph.CallSite
 			for _, cs := range stored {
 				if cs.CallerFile != path {

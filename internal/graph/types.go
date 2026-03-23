@@ -315,6 +315,16 @@ type CallSite struct {
 	FuncName   string // name of the function/method being called
 }
 
+// TerraformRef records an unresolved Terraform resource reference encountered
+// during .tf file parsing. The resolver drains these after all files are parsed
+// and creates DEPENDS_ON edges between resource nodes. This enables cross-file
+// dependency resolution: a resource in vpc.tf can depend on one in compute.tf.
+type TerraformRef struct {
+	FromID   NodeID // node ID of the resource containing the reference
+	FromFile string // absolute path of the .tf file containing the reference
+	RefName  string // target resource name: "type.name" or "data.type.name" or "module.name"
+}
+
 // CarveConfig controls how an ego-subgraph is extracted for a query node.
 type CarveConfig struct {
 	// MaxDepth is the maximum number of hops from the root node.

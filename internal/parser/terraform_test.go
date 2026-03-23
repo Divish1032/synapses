@@ -135,7 +135,8 @@ func TestTerraformParser_DefinesEdges(t *testing.T) {
 }
 
 // TestTerraformParser_DependsOnEdges verifies that inline resource references
-// in attribute expressions produce DEPENDS_ON edges.
+// in attribute expressions produce TerraformRefs (cross-file DEPENDS_ON resolution
+// is handled by resolver.ResolveTerraformRefs — tested in resolver/terraform_resolver_test.go).
 func TestTerraformParser_DependsOnEdges(t *testing.T) {
 	const src = `
 resource "aws_instance" "web" {
@@ -163,44 +164,29 @@ resource "aws_vpc" "main" {
 		t.Fatalf("Parse error: %v", err)
 	}
 
-	edges := g.AllEdges()
-
-	// Build a map from resource name to its NodeID (by scanning nodes).
-	nodes := g.AllNodes()
-	nameToID := make(map[string]graph.NodeID)
-	for _, n := range nodes {
-		nameToID[n.Name] = n.ID
+	// Verify that TerraformRefs were recorded for cross-file resolution.
+	refs := g.DrainTerraformRefs()
+	refNames := make(map[string]bool)
+	for _, r := range refs {
+		refNames[r.RefName] = true
 	}
 
-	// Verify specific DEPENDS_ON edges.
-	type depEdge struct{ from, to string }
-	wantDeps := []depEdge{
-		{"aws_instance.web", "aws_subnet.main"},
-		{"aws_instance.web", "aws_security_group.allow_tls"},
-		{"aws_instance.web", "aws_vpc.main"},
-		{"aws_subnet.main", "aws_vpc.main"},
-		{"aws_security_group.allow_tls", "aws_vpc.main"},
+	wantRefs := []string{
+		"aws_subnet.main",
+		"aws_security_group.allow_tls",
+		"aws_vpc.main",
 	}
-
-	depSet := make(map[depEdge]bool)
-	for _, e := range edges {
-		if e.Type != graph.EdgeDependsOn {
-			continue
-		}
-		fromName := nodeIDToName(e.From, nodes)
-		toName := nodeIDToName(e.To, nodes)
-		depSet[depEdge{fromName, toName}] = true
-	}
-
-	for _, want := range wantDeps {
-		if !depSet[want] {
-			t.Errorf("missing DEPENDS_ON edge: %q → %q", want.from, want.to)
+	for _, want := range wantRefs {
+		if !refNames[want] {
+			t.Errorf("expected TerraformRef for %q to be recorded", want)
 		}
 	}
 }
 
-// TestTerraformParser_DataSourceRefs verifies DEPENDS_ON edges for data source
-// references like `data.aws_ami.ubuntu.id`.
+// TestTerraformParser_DataSourceRefs verifies that data source references like
+// `data.aws_ami.ubuntu.id` produce TerraformRefs for cross-file resolution.
+// DEPENDS_ON edges are created by resolver.ResolveTerraformRefs — tested in
+// resolver/terraform_resolver_test.go.
 func TestTerraformParser_DataSourceRefs(t *testing.T) {
 	const src = `
 data "aws_ami" "ubuntu" {
@@ -218,25 +204,17 @@ resource "aws_instance" "web" {
 		t.Fatalf("Parse error: %v", err)
 	}
 
-	edges := g.AllEdges()
-	nodes := g.AllNodes()
-	nameToID := make(map[string]graph.NodeID)
-	for _, n := range nodes {
-		nameToID[n.Name] = n.ID
-	}
-
+	// Verify TerraformRef for the data source reference was recorded.
+	refs := g.DrainTerraformRefs()
 	found := false
-	for _, e := range edges {
-		if e.Type == graph.EdgeDependsOn {
-			fromName := nodeIDToName(e.From, nodes)
-			toName := nodeIDToName(e.To, nodes)
-			if fromName == "aws_instance.web" && toName == "data.aws_ami.ubuntu" {
-				found = true
-			}
+	for _, r := range refs {
+		if r.RefName == "data.aws_ami.ubuntu" {
+			found = true
+			break
 		}
 	}
 	if !found {
-		t.Error("expected DEPENDS_ON from aws_instance.web to data.aws_ami.ubuntu")
+		t.Error("expected TerraformRef for data.aws_ami.ubuntu to be recorded")
 	}
 }
 
