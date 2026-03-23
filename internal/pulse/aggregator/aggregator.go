@@ -274,12 +274,15 @@ func (a *Aggregator) rollup() {
 	staleEmbeddings := a.store.CountStaleEmbeddings()
 
 	// P3: agent behavior counts for today.
+	// Batch guard_events and memory_ops queries to reduce sequential SQL round-trips.
+	guardCounts := a.store.CountGuardEventsBatch(today, []string{"loop_circuit_break", "rate_limit"})
+	memOpCounts := a.store.CountMemoryOpsBatch(today, []string{"recall_hit", "recall_miss", "write", "safety_hit", "safety_miss"})
 	truncatedDeliveries, _ := a.store.CountTruncatedDeliveries(today)
 	p3 := p3Metrics{
-		guardCircuitBreaks:    a.store.CountGuardEvents(today, "loop_circuit_break"),
-		rateLimitRejections:   a.store.CountGuardEvents(today, "rate_limit"),
-		recallHits:            a.store.CountMemoryOps(today, "recall_hit"),
-		recallMisses:          a.store.CountMemoryOps(today, "recall_miss"),
+		guardCircuitBreaks:    guardCounts["loop_circuit_break"],
+		rateLimitRejections:   guardCounts["rate_limit"],
+		recallHits:            memOpCounts["recall_hit"],
+		recallMisses:          memOpCounts["recall_miss"],
 		validationViolations:  a.store.CountValidationViolations(today),
 		errorCount:            a.store.CountToolErrors(today),
 		brainCostUSD:          a.store.SumBrainCostForDay(today),
@@ -287,9 +290,9 @@ func (a *Aggregator) rollup() {
 		truncatedDeliveries:   truncatedDeliveries,
 		bfsCacheHits:          a.store.CountBFSCacheHitsForDay(today),
 		validatePlanCount:     a.store.CountValidationCalls(today, "validate_plan"),
-		memoryWrites:          a.store.CountMemoryOps(today, "write"),
-		safetyCheckHits:       a.store.CountMemoryOps(today, "safety_hit"),
-		safetyCheckMisses:     a.store.CountMemoryOps(today, "safety_miss"),
+		memoryWrites:          memOpCounts["write"],
+		safetyCheckHits:       memOpCounts["safety_hit"],
+		safetyCheckMisses:     memOpCounts["safety_miss"],
 		memoriesStaled:        a.store.SumMemoriesStaled(today),
 		avgSessionDurationMs:  a.store.AvgSessionDurationMs(today),
 		resumedSessions:       a.store.CountResumedSessions(today),

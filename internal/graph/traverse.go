@@ -168,9 +168,17 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	// (after budget pruning) can reuse them instead of calling outInEdges again.
 	edgeCache := make(map[NodeID][]*Edge)
 
+	const maxVisited = 10_000
+	bfsTruncated := false
+
 	for len(queue) > 0 {
 		curr := queue[0]
 		queue = queue[1:]
+
+		if len(visited) >= maxVisited {
+			bfsTruncated = true
+			break
+		}
 
 		if curr.hop >= cfg.MaxDepth {
 			continue
@@ -370,7 +378,7 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		Root:           rootID,
 		Nodes:          outNodes,
 		Edges:          outEdges,
-		Truncated:      truncated,
+		Truncated:      truncated || bfsTruncated,
 		TruncatedCount: truncatedCount,
 	}
 	g.cache.put(rootID, cfg, fp, result)
