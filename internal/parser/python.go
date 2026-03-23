@@ -608,13 +608,24 @@ func collectPythonParamTypes(g *graph.Graph, params sitter.Node, src []byte, fil
 	}
 }
 
-// extractPythonTypeName extracts the simple type name from a Python type annotation node.
-// Handles bare identifiers (ClassName) and optional types (Optional[ClassName]).
+// extractPythonTypeName extracts the concrete class name from a Python type
+// annotation node (the "type" field of assignment/typed_parameter).
+//
+// Tree-sitter Python wraps the actual type expression inside a "type" node.
+// This function walks the children of that wrapper to find the real type:
+//
+//   - identifier:    Repository → "Repository"
+//   - generic_type:  Optional[X] / Union[X,None] / List[X] / ClassVar[X]
+//   - binary_operator: X | None (PEP 604)
+//
+// For Optional/Union/ClassVar/Final/Annotated, the inner type is unwrapped.
+// For container types (List, Dict, Set), the outer name is returned and the
+// caller may filter via isBuiltin.
 func extractPythonTypeName(typeNode sitter.Node, src []byte) string {
 	if typeNode.IsNull() {
 		return ""
 	}
-	// The type annotation node wraps the actual type expression.
+	// Walk immediate children — "type" is a thin wrapper around the expression.
 	for i := uint32(0); i < typeNode.ChildCount(); i++ {
 		child := typeNode.Child(i)
 		if child.IsNull() {
@@ -623,10 +634,141 @@ func extractPythonTypeName(typeNode sitter.Node, src []byte) string {
 		switch child.Type() {
 		case "identifier":
 			return string(src[child.StartByte():child.EndByte()])
-		case "subscript": // Optional[X], List[X], etc. — take the value part
-			val := child.ChildByFieldName("value")
-			if !val.IsNull() && val.Type() == "identifier" {
-				return string(src[val.StartByte():val.EndByte()])
+
+		case "generic_type":
+			// generic_type: Optional[X], Union[X,None], List[X], etc.
+			// Structure: generic_type → identifier("Optional") + type_parameter → type → identifier
+			outerName := extractGenericOuterName(child, src)
+			switch outerName {
+			case "Optional", "ClassVar", "Final":
+				// Single-arg generics: unwrap to the inner type.
+				if inner := extractGenericNthType(child, src, 0); inner != "" {
+					return inner
+				}
+				return outerName // fallback if inner can't be extracted
+			case "Union":
+				// Union[Service, None] → first non-None uppercase type
+				if inner := extractUnionInnerType(child, src); inner != "" {
+					return inner
+				}
+				return "" // Union with no extractable concrete type
+			case "Annotated":
+				// Annotated[X, metadata] → first type arg is the real type
+				if inner := extractGenericNthType(child, src, 0); inner != "" {
+					return inner
+				}
+			default:
+				// List[X], Dict[K,V], etc. — caller can filter via isBuiltin
+				return outerName
+			}
+
+		case "binary_operator":
+			// PEP 604: Service | None → "Service"
+			if name := extractPEP604Type(child, src); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// extractGenericOuterName returns the base type name from a generic_type node.
+// e.g. generic_type for Optional[Repository] → "Optional"
+func extractGenericOuterName(genericNode sitter.Node, src []byte) string {
+	for i := uint32(0); i < genericNode.ChildCount(); i++ {
+		child := genericNode.Child(i)
+		if !child.IsNull() && child.Type() == "identifier" {
+			return string(src[child.StartByte():child.EndByte()])
+		}
+	}
+	return ""
+}
+
+// extractGenericNthType extracts the Nth type argument from a generic_type node.
+// The structure is: generic_type → type_parameter → (type children, commas, brackets)
+// Optional[Repository] → idx=0 → "Repository"
+// Annotated[X, meta]  → idx=0 → "X"
+func extractGenericNthType(genericNode sitter.Node, src []byte, idx int) string {
+	for i := uint32(0); i < genericNode.ChildCount(); i++ {
+		tp := genericNode.Child(i)
+		if tp.IsNull() || tp.Type() != "type_parameter" {
+			continue
+		}
+		count := 0
+		for j := uint32(0); j < tp.ChildCount(); j++ {
+			typeChild := tp.Child(j)
+			if typeChild.IsNull() || typeChild.Type() != "type" {
+				continue
+			}
+			if count == idx {
+				// Extract identifier from this type node.
+				for k := uint32(0); k < typeChild.ChildCount(); k++ {
+					id := typeChild.Child(k)
+					if id.IsNull() || id.Type() != "identifier" {
+						continue
+					}
+					name := string(src[id.StartByte():id.EndByte()])
+					if name != "" && name[0] >= 'A' && name[0] <= 'Z' {
+						return name
+					}
+				}
+			}
+			count++
+		}
+	}
+	return ""
+}
+
+// extractUnionInnerType returns the first non-None uppercase type from
+// a Union[...] generic_type node.
+// Union[AuthService, None] → "AuthService"
+func extractUnionInnerType(genericNode sitter.Node, src []byte) string {
+	for i := uint32(0); i < genericNode.ChildCount(); i++ {
+		tp := genericNode.Child(i)
+		if tp.IsNull() || tp.Type() != "type_parameter" {
+			continue
+		}
+		for j := uint32(0); j < tp.ChildCount(); j++ {
+			typeChild := tp.Child(j)
+			if typeChild.IsNull() || typeChild.Type() != "type" {
+				continue
+			}
+			for k := uint32(0); k < typeChild.ChildCount(); k++ {
+				id := typeChild.Child(k)
+				if id.IsNull() || id.Type() != "identifier" {
+					continue
+				}
+				name := string(src[id.StartByte():id.EndByte()])
+				if name != "" && name != "None" && name[0] >= 'A' && name[0] <= 'Z' {
+					return name
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// extractPEP604Type extracts the concrete type from PEP 604 union syntax:
+// Repository | None → "Repository", None | Service → "Service".
+// Returns the first non-None uppercase identifier operand.
+func extractPEP604Type(binop sitter.Node, src []byte) string {
+	// Binary operator children: left operand, operator, right operand.
+	// We scan for identifier children, skip "None".
+	for k := uint32(0); k < binop.ChildCount(); k++ {
+		child := binop.Child(k)
+		if child.IsNull() {
+			continue
+		}
+		switch child.Type() {
+		case "identifier":
+			name := string(src[child.StartByte():child.EndByte()])
+			if name != "None" && name != "" && name[0] >= 'A' && name[0] <= 'Z' {
+				return name
+			}
+		case "binary_operator":
+			// Nested: A | B | None — recurse
+			if name := extractPEP604Type(child, src); name != "" {
+				return name
 			}
 		}
 	}

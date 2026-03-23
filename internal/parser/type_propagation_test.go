@@ -203,6 +203,70 @@ public class BatchProcessor {
 	_ = vt // nil is acceptable when all types are builtins
 }
 
+// TestPythonOptionalUnwrapping verifies that Optional[X], Union[X, None],
+// and PEP 604 X | None annotations are correctly unwrapped to the inner type.
+// This is critical: Optional[Repository] must resolve to Repository, not Optional.
+func TestPythonOptionalUnwrapping(t *testing.T) {
+	src := `class Handler:
+    def process(
+        self,
+        repo: Optional[Repository],
+        auth: Union[AuthService, None],
+        svc: Service | None,
+        plain: Repository,
+    ):
+        repo.save()
+        auth.verify()
+        svc.run()
+        plain.find()
+`
+	g := graph.New("testrepo")
+	p := parser.NewPythonParser()
+	if err := p.Parse(g, "handler.py", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	vt := g.GetVarTypes("handler.py")
+	if vt == nil {
+		t.Fatal("GetVarTypes returned nil")
+	}
+
+	tests := []struct {
+		varName  string
+		wantType string
+		desc     string
+	}{
+		{"repo", "Repository", "Optional[Repository] must unwrap to Repository"},
+		{"auth", "AuthService", "Union[AuthService, None] must unwrap to AuthService"},
+		{"svc", "Service", "PEP 604 Service | None must resolve to Service"},
+		{"plain", "Repository", "bare Repository annotation still works"},
+	}
+	for _, tc := range tests {
+		if got := vt[tc.varName]; got != tc.wantType {
+			t.Errorf("varTypes[%q] = %q, want %q — %s", tc.varName, got, tc.wantType, tc.desc)
+		}
+	}
+}
+
+// TestPythonAnnotatedType verifies Annotated[X, metadata] is unwrapped to X.
+func TestPythonAnnotatedType(t *testing.T) {
+	src := `def create(repo: Annotated[Repository, Field(default=None)]):
+    repo.save()
+`
+	g := graph.New("testrepo")
+	p := parser.NewPythonParser()
+	if err := p.Parse(g, "create.py", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	vt := g.GetVarTypes("create.py")
+	if vt == nil {
+		t.Fatal("GetVarTypes returned nil")
+	}
+	if got := vt["repo"]; got != "Repository" {
+		t.Errorf("varTypes[\"repo\"] = %q, want \"Repository\" (Annotated unwrap)", got)
+	}
+}
+
 // TestPythonExistingPatternUnchanged verifies the two pre-existing patterns
 // (annotated assignment and constructor assignment) still work after refactor.
 func TestPythonExistingPatternUnchanged(t *testing.T) {
