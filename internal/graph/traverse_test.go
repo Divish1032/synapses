@@ -1,6 +1,7 @@
 package graph_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -317,6 +318,69 @@ func TestCarveEgoGraph_AdaptiveDecay_HubChildLowerThanNarrowChild(t *testing.T) 
 	}
 	if rel[n1ID] <= rel[h1ID] {
 		t.Errorf("narrow child relevance (%v) should be > hub child relevance (%v): adaptive decay not working", rel[n1ID], rel[h1ID])
+	}
+}
+
+// TestCarveEgoGraph_AdaptiveDecay_ProductionPruning verifies that under the
+// default production config (MinRelevance=0.01, TokenBudget=4000):
+//
+//  1. n1 (narrow chain hop-2) is NOT falsely pruned by MinRelevance=0.01.
+//  2. n1 scores strictly above all hub hop-2 children.
+//
+// This guarantees the token budget will always select n1 over hub children
+// when capacity is limited — the core hub-explosion prevention property.
+func TestCarveEgoGraph_AdaptiveDecay_ProductionPruning(t *testing.T) {
+	g := graph.New("testrepo")
+
+	rootID := g.MakeNodeID("root.go", "root")
+	hubID := g.MakeNodeID("hub.go", "hub")
+	narrowID := g.MakeNodeID("narrow.go", "narrow")
+	n1ID := g.MakeNodeID("narrow.go", "n1")
+
+	// Hub has 19 children + 1 incoming (root→hub) = 20 total edges.
+	const numHubChildren = 19
+	var hubChildIDs []graph.NodeID
+	for i := 0; i < numHubChildren; i++ {
+		id := g.MakeNodeID("hub.go", fmt.Sprintf("hc%d", i))
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: fmt.Sprintf("hc%d", i), File: "hub.go"})
+		hubChildIDs = append(hubChildIDs, id)
+	}
+	for _, id := range []graph.NodeID{rootID, hubID, narrowID, n1ID} {
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: string(id), File: "test.go"})
+	}
+	g.AddEdge(&graph.Edge{From: rootID, To: hubID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: rootID, To: narrowID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: narrowID, To: n1ID, Type: graph.EdgeCalls})
+	for _, hcID := range hubChildIDs {
+		g.AddEdge(&graph.Edge{From: hubID, To: hcID, Type: graph.EdgeCalls})
+	}
+
+	// Default production config — MinRelevance=0.01, TokenBudget=4000.
+	cfg := graph.DefaultCarveConfig()
+	cfg.MaxDepth = 2
+
+	sub, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+	rel := make(map[graph.NodeID]float64)
+	for _, cn := range sub.Nodes {
+		rel[cn.Node.ID] = cn.Relevance
+	}
+
+	// Property 1: n1 is not falsely pruned by MinRelevance=0.01.
+	if rel[n1ID] == 0 {
+		t.Fatalf("narrow chain hop-2 node n1 pruned by default MinRelevance — adaptive decay too aggressive for degree-2 nodes")
+	}
+
+	// Property 2: n1 outranks every hub child that survived MinRelevance.
+	for i, hcID := range hubChildIDs {
+		if rel[hcID] == 0 {
+			continue // hub child pruned — acceptable
+		}
+		if rel[n1ID] <= rel[hcID] {
+			t.Errorf("hub child hc%d (rel=%v) ≥ n1 (rel=%v): adaptive decay must rank narrow chain higher than hub bulk", i, rel[hcID], rel[n1ID])
+		}
 	}
 }
 
