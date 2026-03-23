@@ -124,9 +124,10 @@ type Server struct {
 	projectID    string         // stable project identifier (FNV hash of project root path)
 	projectPath  string         // absolute path to the project root (for go.mod parsing)
 	rulesMu      sync.RWMutex  // protects s.config.Rules for concurrent dynamic upserts
-	toolEmbeds      [][]float32  // per-tool normalized vectors; len==len(toolCatalog) when ready
-	toolEmbedModel  string       // embedding model used to build toolEmbeds; must match query model
-	toolEmbedsMu    sync.RWMutex // protects toolEmbeds and toolEmbedModel
+	toolEmbeds         [][]float32  // per-tool normalized vectors; len==len(toolCatalog) when ready
+	toolEmbedModel     string       // embedding model used to build toolEmbeds; must match query model
+	toolEmbedsMu       sync.RWMutex // protects toolEmbeds and toolEmbedModel
+	toolCatalogRetries atomic.Int32 // counts delayed retries to cap at 2
 
 	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
 	// Loaded once at startup. When false, the corresponding data collection is skipped.
