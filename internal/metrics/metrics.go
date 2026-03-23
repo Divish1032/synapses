@@ -640,12 +640,17 @@ func EnrichBlame(g *graph.Graph, repoRoot string) {
 	// Supports umbrella workspaces where repoRoot has no .git but sub-dirs do.
 	dirToGitRoot := make(map[string]string)
 
+	type blameUpdate struct {
+		id             graph.NodeID
+		author, date   string
+		commit, subj   string
+		stalenessScore string
+	}
+	var blameUpdates []blameUpdate
 	for _, n := range g.AllNodes() {
-		// Only function/method nodes carry meaningful blame.
 		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
 			continue
 		}
-		// Skip vendored/generated code — blame is not actionable.
 		if n.Provenance == graph.ProvenanceVendored || n.Provenance == graph.ProvenanceGenerated {
 			continue
 		}
@@ -660,7 +665,7 @@ func EnrichBlame(g *graph.Graph, repoRoot string) {
 				dirToGitRoot[dir] = gr
 			}
 			if gr == "" {
-				gr = repoRoot // fall back; fileBlame handles git errors silently
+				gr = repoRoot
 			}
 			bi = fileBlame(gr, absFile)
 			cache[absFile] = bi
@@ -669,28 +674,35 @@ func EnrichBlame(g *graph.Graph, repoRoot string) {
 			continue
 		}
 
-		if n.Metadata == nil {
-			n.Metadata = make(map[string]string)
-		}
-		n.Metadata["blame_author"] = bi.Author
-		n.Metadata["blame_date"] = bi.Date
-		n.Metadata["blame_commit"] = bi.Commit
-		n.Metadata["blame_subject"] = bi.Subject
-
-		// staleness_score = days_since_change × log(1 + churn).
-		// churn is set by EnrichChurn (must run first).
 		daysAgo := 0.0
-		// Graceful: unparseable date → 0 days → staleness_score = 0 (treated as fresh).
 		if t, err := time.Parse("2006-01-02", bi.Date); err == nil {
 			daysAgo = time.Since(t).Hours() / 24
 		}
 		churn := 0.0
-		// Graceful: churn absent or non-numeric → 0 → log(1+0)=0, score = 0.
-		if c, err := strconv.ParseFloat(n.Metadata["churn"], 64); err == nil {
-			churn = c
+		if n.Metadata != nil {
+			if c, err := strconv.ParseFloat(n.Metadata["churn"], 64); err == nil {
+				churn = c
+			}
 		}
 		score := daysAgo * math.Log(1+churn)
-		n.Metadata["staleness_score"] = fmt.Sprintf("%.1f", score)
+
+		blameUpdates = append(blameUpdates, blameUpdate{
+			id: n.ID, author: bi.Author, date: bi.Date,
+			commit: bi.Commit, subj: bi.Subject,
+			stalenessScore: fmt.Sprintf("%.1f", score),
+		})
+	}
+	for _, u := range blameUpdates {
+		g.UpdateNodeMetadata(u.id, func(n *graph.Node) {
+			if n.Metadata == nil {
+				n.Metadata = make(map[string]string)
+			}
+			n.Metadata["blame_author"] = u.author
+			n.Metadata["blame_date"] = u.date
+			n.Metadata["blame_commit"] = u.commit
+			n.Metadata["blame_subject"] = u.subj
+			n.Metadata["staleness_score"] = u.stalenessScore
+		})
 	}
 }
 
