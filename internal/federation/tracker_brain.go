@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/SynapsesOS/synapses/internal/secrets"
@@ -219,18 +220,36 @@ func (a *BrainTrackerAdapter) DetectAndStoreBrain(ctx context.Context, filePath 
 	a.detector.StoreDeps(resolved, localStore)
 }
 
-// validateBrainDeps checks each brain-detected dep against the sibling store.
-// Only deps where the entity actually exists are returned.
-// This is the anti-hallucination gate — the brain may claim a dep exists,
-// but we only trust it if the sibling's graph confirms it.
-func (bd *BrainDetector) validateBrainDeps(ctx context.Context, raw []BrainDetectedDep, _ string) []RawCrossDep {
+// validateBrainDeps checks each brain-detected dep against two gates:
+//
+//  1. Import cross-validation: the source file must contain an import/require
+//     statement that references the claimed target project or import path.
+//     This prevents prompt-injection attacks where a real entity is injected
+//     as a false dependency by manipulating the LLM.
+//
+//  2. Entity existence: the target entity must exist in the sibling store.
+//     This prevents hallucinated entities from creating phantom deps.
+//
+// Both gates must pass for a dep to be accepted. A dep that fails either
+// gate is silently discarded (fail-safe: false-negative over false-positive).
+func (bd *BrainDetector) validateBrainDeps(ctx context.Context, raw []BrainDetectedDep, fileContent string) []RawCrossDep {
+	// Pre-extract import lines from the source file for cross-validation.
+	importLines := extractImportLines(fileContent)
+
 	var valid []RawCrossDep
 	for _, dep := range raw {
 		if ctx.Err() != nil {
 			break
 		}
 
-		// Check if the entity actually exists in the sibling store.
+		// Gate 1: import cross-validation.
+		// The file must actually contain an import/require that references
+		// the target project or the claimed import path.
+		if !importMentions(importLines, dep.TargetProject, dep.ImportPath) {
+			continue // no matching import → injected or hallucinated dep
+		}
+
+		// Gate 2: entity existence in sibling store.
 		if !bd.resolver.EntityExists(ctx, dep.TargetProject, dep.TargetEntity) {
 			continue // hallucination or stale reference → discard silently
 		}
@@ -243,6 +262,65 @@ func (bd *BrainDetector) validateBrainDeps(ctx context.Context, raw []BrainDetec
 		})
 	}
 	return valid
+}
+
+// importPatterns matches import/require statements across languages supported
+// by the brain detector (Python, Ruby, Java, PHP, Kotlin, Swift, C/C++).
+// Go/TS/Rust are handled by Tier 1 deterministically and never reach here.
+var importPatterns = []*regexp.Regexp{
+	// Python: import foo, from foo import bar, from foo.bar import baz
+	regexp.MustCompile(`(?m)^\s*(?:import|from)\s+([^\s;]+)`),
+	// Java/Kotlin: import com.foo.bar.Baz;
+	regexp.MustCompile(`(?m)^\s*import\s+(?:static\s+)?([^\s;]+)`),
+	// Ruby: require 'foo', require "foo", require_relative 'foo'
+	regexp.MustCompile(`(?m)^\s*require(?:_relative)?\s+['"]([^'"]+)['"]`),
+	// PHP: use Foo\Bar\Baz;
+	regexp.MustCompile(`(?m)^\s*use\s+([^\s;]+)`),
+	// C/C++: #include "foo.h", #include <foo.h>
+	regexp.MustCompile(`(?m)^\s*#include\s+[<"]([^>"]+)[>"]`),
+	// Swift: import Foundation, import PackageModule
+	regexp.MustCompile(`(?m)^\s*import\s+(\w[\w.]*)`),
+}
+
+// extractImportLines returns all import-like strings found in the source file.
+// Each entry is the captured module/package name from an import statement.
+func extractImportLines(content string) []string {
+	if content == "" {
+		return nil
+	}
+	var imports []string
+	for _, re := range importPatterns {
+		for _, m := range re.FindAllStringSubmatch(content, -1) {
+			if len(m) >= 2 && m[1] != "" {
+				imports = append(imports, m[1])
+			}
+		}
+	}
+	return imports
+}
+
+// importMentions checks if any extracted import line references the target
+// project alias or the LLM-claimed import path. The check is case-insensitive
+// substring matching — sufficient because we only need to confirm that the file
+// has *some* import referencing the target, not exact path resolution.
+func importMentions(imports []string, targetProject, importPath string) bool {
+	if len(imports) == 0 {
+		return false
+	}
+	targetLower := strings.ToLower(targetProject)
+	importLower := strings.ToLower(importPath)
+	for _, imp := range imports {
+		impLower := strings.ToLower(imp)
+		// Check if the import mentions the target project alias.
+		if targetLower != "" && strings.Contains(impLower, targetLower) {
+			return true
+		}
+		// Check if the import matches the claimed import path.
+		if importLower != "" && (strings.Contains(impLower, importLower) || strings.Contains(importLower, impLower)) {
+			return true
+		}
+	}
+	return false
 }
 
 // sanitizePromptInput escapes angle brackets to prevent prompt injection.

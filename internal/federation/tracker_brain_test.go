@@ -73,7 +73,9 @@ func TestBrainDetector_HallucinationFiltered(t *testing.T) {
 	}
 
 	bd := federation.NewBrainDetector(generate, r, []string{"core"})
-	deps := bd.DetectDeps(context.Background(), "some code", 2000)
+	// File content includes an import referencing "auth" so Gate 1 passes.
+	// Gate 2 (entity existence) then filters FakeEntity.
+	deps := bd.DetectDeps(context.Background(), "from auth import validate\nvalidate(token)", 2000)
 
 	// FakeEntity should be filtered out (anti-hallucination).
 	if len(deps) != 1 {
@@ -103,9 +105,9 @@ func TestBrainDetector_LowConfidenceFiltered(t *testing.T) {
 	}
 
 	bd := federation.NewBrainDetector(generate, r, []string{"core"})
-	deps := bd.DetectDeps(context.Background(), "some code", 2000)
+	deps := bd.DetectDeps(context.Background(), "from auth import validate", 2000)
 
-	// Low confidence → filtered.
+	// Low confidence → filtered before reaching Gate 1 or Gate 2.
 	if len(deps) != 0 {
 		t.Fatalf("expected 0 deps (low confidence filtered), got %d", len(deps))
 	}
@@ -181,7 +183,8 @@ func TestBrainDetector_MalformedJSON(t *testing.T) {
 	}
 
 	bd := federation.NewBrainDetector(generate, r, []string{"core"})
-	deps := bd.DetectDeps(context.Background(), "some code", 2000)
+	// File has an import referencing "auth" so Gate 1 passes for the valid line.
+	deps := bd.DetectDeps(context.Background(), "from auth import validate", 2000)
 
 	// Only the valid line should produce a dep.
 	if len(deps) != 1 {
@@ -206,6 +209,147 @@ func TestBrainDetector_CancelledContext(t *testing.T) {
 
 	if deps != nil {
 		t.Errorf("expected nil deps with cancelled context, got %d", len(deps))
+	}
+}
+
+// ── Import cross-validation tests (Gate 1 — prompt injection defense) ───────
+
+func TestBrainDetector_NoImport_Rejected(t *testing.T) {
+	dir := t.TempDir()
+	sibDir := filepath.Join(dir, "core")
+	os.MkdirAll(sibDir, 0o755)
+
+	// Entity exists in sibling — Gate 2 would pass.
+	createSiblingWithDefaultPath(t, sibDir, "core-repo", []*graph.Node{
+		{ID: "core-repo::auth.go::Validate", Name: "Validate", Type: graph.NodeFunction, File: "auth.go"},
+	})
+
+	r := federation.NewResolver([]config.FederationEntry{
+		{Alias: "core", Path: sibDir},
+	}, dir)
+	defer r.Close()
+
+	generate := func(ctx context.Context, prompt string) (string, error) {
+		return `{"target_project": "core", "target_entity": "Validate", "import_path": "core/auth", "confidence": 0.95}`, nil
+	}
+
+	bd := federation.NewBrainDetector(generate, r, []string{"core"})
+	// File has NO import statements — a prompt injection told the LLM to
+	// claim a dep that doesn't correspond to any actual import.
+	deps := bd.DetectDeps(context.Background(), "print('hello world')\n# no imports here", 2000)
+
+	if len(deps) != 0 {
+		t.Fatalf("expected 0 deps (no matching import in file), got %d", len(deps))
+	}
+}
+
+func TestBrainDetector_WrongImport_Rejected(t *testing.T) {
+	dir := t.TempDir()
+	sibDir := filepath.Join(dir, "core")
+	os.MkdirAll(sibDir, 0o755)
+
+	createSiblingWithDefaultPath(t, sibDir, "core-repo", []*graph.Node{
+		{ID: "core-repo::auth.go::Validate", Name: "Validate", Type: graph.NodeFunction, File: "auth.go"},
+	})
+
+	r := federation.NewResolver([]config.FederationEntry{
+		{Alias: "core", Path: sibDir},
+	}, dir)
+	defer r.Close()
+
+	generate := func(ctx context.Context, prompt string) (string, error) {
+		// LLM claims dep on "core" but the file only imports "utils".
+		return `{"target_project": "core", "target_entity": "Validate", "import_path": "core/auth", "confidence": 0.95}`, nil
+	}
+
+	bd := federation.NewBrainDetector(generate, r, []string{"core"})
+	// File imports "utils" not "core" — the injected dep should be rejected.
+	deps := bd.DetectDeps(context.Background(), "import utils\nutils.do_thing()", 2000)
+
+	if len(deps) != 0 {
+		t.Fatalf("expected 0 deps (import doesn't match target project), got %d", len(deps))
+	}
+}
+
+func TestBrainDetector_MatchingImport_Accepted(t *testing.T) {
+	dir := t.TempDir()
+	sibDir := filepath.Join(dir, "core")
+	os.MkdirAll(sibDir, 0o755)
+
+	createSiblingWithDefaultPath(t, sibDir, "core-repo", []*graph.Node{
+		{ID: "core-repo::auth.go::Validate", Name: "Validate", Type: graph.NodeFunction, File: "auth.go"},
+	})
+
+	r := federation.NewResolver([]config.FederationEntry{
+		{Alias: "core", Path: sibDir},
+	}, dir)
+	defer r.Close()
+
+	generate := func(ctx context.Context, prompt string) (string, error) {
+		return `{"target_project": "core", "target_entity": "Validate", "import_path": "core.auth", "confidence": 0.95}`, nil
+	}
+
+	bd := federation.NewBrainDetector(generate, r, []string{"core"})
+	// File has a Python import that references "core.auth" — both gates should pass.
+	deps := bd.DetectDeps(context.Background(), "from core.auth import validate\nvalidate(token)", 2000)
+
+	if len(deps) != 1 {
+		t.Fatalf("expected 1 dep (matching import + entity exists), got %d", len(deps))
+	}
+	if deps[0].ToEntity != "Validate" {
+		t.Errorf("expected 'Validate', got %q", deps[0].ToEntity)
+	}
+}
+
+func TestBrainDetector_JavaImport_Accepted(t *testing.T) {
+	dir := t.TempDir()
+	sibDir := filepath.Join(dir, "core")
+	os.MkdirAll(sibDir, 0o755)
+
+	createSiblingWithDefaultPath(t, sibDir, "core-repo", []*graph.Node{
+		{ID: "core-repo::Auth.java::AuthService", Name: "AuthService", Type: graph.NodeStruct, File: "Auth.java"},
+	})
+
+	r := federation.NewResolver([]config.FederationEntry{
+		{Alias: "core", Path: sibDir},
+	}, dir)
+	defer r.Close()
+
+	generate := func(ctx context.Context, prompt string) (string, error) {
+		return `{"target_project": "core", "target_entity": "AuthService", "import_path": "com.core.auth.AuthService", "confidence": 0.9}`, nil
+	}
+
+	bd := federation.NewBrainDetector(generate, r, []string{"core"})
+	deps := bd.DetectDeps(context.Background(), "import com.core.auth.AuthService;\n\npublic class Main {}", 2000)
+
+	if len(deps) != 1 {
+		t.Fatalf("expected 1 dep (Java import matches), got %d", len(deps))
+	}
+}
+
+func TestBrainDetector_RubyRequire_Accepted(t *testing.T) {
+	dir := t.TempDir()
+	sibDir := filepath.Join(dir, "core")
+	os.MkdirAll(sibDir, 0o755)
+
+	createSiblingWithDefaultPath(t, sibDir, "core-repo", []*graph.Node{
+		{ID: "core-repo::auth.rb::AuthService", Name: "AuthService", Type: graph.NodeStruct, File: "auth.rb"},
+	})
+
+	r := federation.NewResolver([]config.FederationEntry{
+		{Alias: "core", Path: sibDir},
+	}, dir)
+	defer r.Close()
+
+	generate := func(ctx context.Context, prompt string) (string, error) {
+		return `{"target_project": "core", "target_entity": "AuthService", "import_path": "core/auth", "confidence": 0.9}`, nil
+	}
+
+	bd := federation.NewBrainDetector(generate, r, []string{"core"})
+	deps := bd.DetectDeps(context.Background(), "require 'core/auth'\n\nAuthService.new", 2000)
+
+	if len(deps) != 1 {
+		t.Fatalf("expected 1 dep (Ruby require matches), got %d", len(deps))
 	}
 }
 
