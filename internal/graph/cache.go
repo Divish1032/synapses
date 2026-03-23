@@ -26,7 +26,7 @@ type cacheEntry struct {
 //
 // Uses container/list for O(1) LRU promote/remove instead of O(N) slice scan.
 type subgraphCache struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	entries  map[string]*cacheEntry
 	order    *list.List               // doubly-linked list for LRU; Back = most-recently-used
 	elements map[string]*list.Element // key → list element for O(1) lookup
@@ -78,20 +78,25 @@ func extractFiles(sub *SubGraph) map[string]struct{} {
 // structural change to the root node automatically produces a cache miss
 // without requiring explicit invalidation.
 func (c *subgraphCache) get(rootID NodeID, cfg CarveConfig, fingerprint string) (*SubGraph, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	c.mu.RLock()
 	key := cacheKeyFor(rootID, cfg, fingerprint)
 	e, ok := c.entries[key]
+	expired := ok && time.Now().After(e.expiresAt)
+	c.mu.RUnlock()
+
 	if !ok {
 		return nil, false
 	}
-	if time.Now().After(e.expiresAt) {
+	if expired {
+		c.mu.Lock()
 		delete(c.entries, key)
 		c.removeFromOrder(key)
+		c.mu.Unlock()
 		return nil, false
 	}
+	c.mu.Lock()
 	c.promoteKey(key)
+	c.mu.Unlock()
 	return e.sub, true
 }
 

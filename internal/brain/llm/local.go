@@ -63,11 +63,14 @@ type LocalClient struct {
 	// inferSem prevents queued zombie inferences on context cancellation.
 	inferSem chan struct{}
 
-	// abandonedDone is set when a generate() call is abandoned due to context
-	// cancellation. The channel is closed when the abandoned goroutine finishes,
-	// freeing the semaphore. The next caller drains it to reclaim the semaphore
+	// abandonedDones accumulates done channels from generate() calls abandoned
+	// due to context cancellation. Each channel is closed when the corresponding
+	// goroutine finishes and releases the semaphore. The next caller drains all
+	// pending channels before acquiring the semaphore, reclaiming slots
 	// immediately instead of blocking for the full inference duration.
-	abandonedDone chan struct{}
+	// A slice is used instead of a single chan so that consecutive cancellations
+	// do not overwrite each other and lose semaphore slots.
+	abandonedDones []chan struct{}
 }
 
 // NewLocalClient loads a GGUF model file and returns a ready LocalClient.
@@ -155,6 +158,15 @@ func (c *LocalClient) PullModel(_ context.Context, _ io.Writer) error {
 func (c *LocalClient) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Drain all pending abandoned-goroutine done channels before destroying the
+	// llama context. This ensures no abandoned inference goroutines are still
+	// referencing llamaCtx when we free it below.
+	for _, done := range c.abandonedDones {
+		if done != nil {
+			<-done
+		}
+	}
+	c.abandonedDones = nil
 	// Release context first (depends on model), then model.
 	if closer, ok := c.llamaCtx.(io.Closer); ok {
 		closer.Close()

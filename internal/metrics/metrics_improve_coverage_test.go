@@ -1,6 +1,7 @@
 package metrics_test
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,7 +139,7 @@ func TestRecentCommitsForFile_LargeLimit(t *testing.T) {
 	filePath := filepath.Join(tmpdir, "file.go")
 
 	// Request more commits than exist (100 vs 3 created)
-	commits := metrics.RecentCommitsForFile(tmpdir, filePath, 100)
+	commits := metrics.RecentCommitsForFile(context.Background(), tmpdir, filePath, 100)
 
 	// Should return at most 3 commits (what we created)
 	if commits != nil && len(commits) > 3 {

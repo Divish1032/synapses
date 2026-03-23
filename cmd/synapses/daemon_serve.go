@@ -95,6 +95,9 @@ var restSessionCounter atomic.Int64
 // per-session MCP rate limits). 50 requests/sec burst, refills at 10/sec.
 var restRateLimiter = newTokenBucket(10, 50)
 
+// adminProjectsRateLimiter rate-limits POST/DELETE /api/admin/projects (2/sec burst 10).
+var adminProjectsRateLimiter = newTokenBucket(2, 10)
+
 // tokenBucket is a simple token-bucket rate limiter.
 type tokenBucket struct {
 	mu         sync.Mutex
@@ -754,7 +757,6 @@ func cmdDaemonServe(args []string) error {
 
 	// ── saveKnownProject WaitGroup ────────────────────────────────────────────
 	var saveKnownProjectWg sync.WaitGroup
-	defer saveKnownProjectWg.Wait()
 
 	// ── App context for graceful shutdown ────────────────────────────────────
 	appCtx, appCancel := context.WithCancel(context.Background())
@@ -845,7 +847,6 @@ func cmdDaemonServe(args []string) error {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":            overallStatus,
-			"version":           version,
 			"project_count":     len(projects),
 			"watchers_dead":     watcherDead,
 			"bg_queue_depth":    totalBgDepth,
@@ -877,6 +878,11 @@ func cmdDaemonServe(args []string) error {
 			json.NewEncoder(w).Encode(map[string]interface{}{"projects": infos})
 
 		case http.MethodPost:
+			if !adminProjectsRateLimiter.Allow() {
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				return
+			}
 			var req struct {
 				Path string `json:"path"`
 			}
@@ -921,6 +927,11 @@ func cmdDaemonServe(args []string) error {
 			})
 
 		case http.MethodDelete:
+			if !adminProjectsRateLimiter.Allow() {
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				return
+			}
 			var req struct {
 				Path string `json:"path"`
 			}
@@ -1560,7 +1571,7 @@ func cmdDaemonServe(args []string) error {
 			}
 		} else {
 			authHeader := r.Header.Get("Authorization")
-			if !strings.HasPrefix(authHeader, "Bearer ") || strings.TrimPrefix(authHeader, "Bearer ") != authToken {
+			if !strings.HasPrefix(authHeader, "Bearer ") || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(authHeader, "Bearer ")), []byte(authToken)) != 1 {
 				w.Header().Set("WWW-Authenticate", `Bearer realm="synapses"`)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
@@ -1644,6 +1655,7 @@ func cmdDaemonServe(args []string) error {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutCancel()
 		httpSrv.Shutdown(shutCtx) //nolint:errcheck
+		saveKnownProjectWg.Wait()
 	}()
 
 	// ── Start HTTP server ─────────────────────────────────────────────────────
@@ -2061,22 +2073,26 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			srv.SetChangeSource(fw)
 			fw.SetPacketInvalidator(srv)
 			fw.SetBrainClient(brainCli)
+			// Wire federation dependency tracker into the watcher so
+			// cross-project imports are detected on every file re-parse.
+			var fedTracker *federation.DeterministicDetector
 			fw.SetConfigChangeHandler(func(newCfg *config.Config) {
 				newBrain := brain.NewInProcess(newCfg.Brain.ToBrainConfig())
 				srv.SetBrainClient(newBrain)
 				fw.SetBrainClient(newBrain)
+				if fedTracker != nil {
+					fedTracker.Rebuild(newCfg.Federation)
+				}
 			})
-			// Wire federation dependency tracker into the watcher so
-			// cross-project imports are detected on every file re-parse.
 			if fedResolver != nil {
-				tracker := federation.NewDeterministicDetector(cfg.Federation, fedResolver)
-				fw.SetCrossProjectTracker(tracker)
+				fedTracker = federation.NewDeterministicDetector(cfg.Federation, fedResolver)
+				fw.SetCrossProjectTracker(fedTracker)
 				// Tier 2: brain-enhanced cross-project detection for languages
 				// Tier 1 doesn't cover well (Python, Ruby, Java, etc.).
 				if cfg.Brain.Enabled {
 					aliases := fedResolver.Aliases()
 					brainDet := federation.NewBrainDetector(brainCli.Generate, fedResolver, aliases)
-					brainAdapter := federation.NewBrainTrackerAdapter(brainDet, tracker)
+					brainAdapter := federation.NewBrainTrackerAdapter(brainDet, fedTracker)
 					if brainAdapter != nil {
 						fw.SetBrainCrossProjectTracker(brainAdapter)
 					}

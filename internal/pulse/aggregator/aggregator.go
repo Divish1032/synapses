@@ -260,8 +260,17 @@ func (a *Aggregator) rollup() {
 		return
 	}
 
+	// Take a consistent read snapshot so all ~30 metric queries below see the
+	// same WAL state. SQLite DEFERRED transactions in WAL mode provide a
+	// point-in-time read snapshot for the duration of the transaction.
+	// EndReadSnapshot rolls back (no writes) — always called via defer.
+	if snapErr := a.store.BeginReadSnapshot(); snapErr != nil {
+		logutil.Warn("pulse aggregator: begin read snapshot (continuing without): %v\n", snapErr)
+	}
+
 	sum, err := a.store.GetSummaryForDay(today)
 	if err != nil {
+		a.store.EndReadSnapshot()
 		logutil.Warn("pulse aggregator: summary error: %v\n", err)
 		return
 	}
@@ -343,6 +352,10 @@ func (a *Aggregator) rollup() {
 	if a.collDropRate != nil {
 		metrics["collector_drop_rate"] = a.collDropRate()
 	}
+
+	// End the consistent read snapshot before starting the write transaction.
+	// Rollback is safe — no writes occurred inside the snapshot.
+	a.store.EndReadSnapshot()
 
 	// P12-6: batch all metric upserts into a single transaction to reduce
 	// fsync overhead from ~80 individual commits to 1.

@@ -13,9 +13,8 @@ import (
 // extractPythonDeclInfo walks the Python AST and builds a name→declMeta map
 // for function_definition and class_definition nodes at any nesting depth.
 // Method names are class-qualified (ClassName.method_name).
-func extractPythonDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
+func extractPythonDeclInfo(root sitter.Node, src []byte, lines []string) map[string]declMeta {
 	result := make(map[string]declMeta)
-	lines := strings.Split(string(src), "\n")
 
 	var walk func(n sitter.Node, enclosingClass string, depth int)
 	walk = func(n sitter.Node, enclosingClass string, depth int) {
@@ -131,7 +130,8 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 	})
 
 	lang := p.language
-	declInfo := extractPythonDeclInfo(root, src)
+	lines := strings.Split(string(src), "\n")
+	declInfo := extractPythonDeclInfo(root, src, lines)
 
 	// (class→method mapping is handled directly by extractFunctionsAndMethods AST walk)
 

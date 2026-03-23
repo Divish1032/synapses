@@ -392,9 +392,13 @@ func checkNilMethodCall(filePath string, body sitter.Node, src []byte) []LogicWa
 			if !cond.IsNull() {
 				condText := nodeText(cond, src)
 				if strings.Contains(condText, "!= nil") || strings.Contains(condText, "== nil") {
-					parts := strings.Fields(condText)
-					if len(parts) >= 1 {
-						delete(nilVars, parts[0])
+					// Delete all identifiers compared to nil in the condition to
+					// avoid false positives on compound nil-checks (e.g. a != nil && b != nil).
+					for _, word := range strings.Fields(condText) {
+						word = strings.Trim(word, "()!&|")
+						if word != "nil" && word != "==" && word != "!=" && word != "&&" && word != "||" {
+							delete(nilVars, word)
+						}
 					}
 				}
 			}

@@ -467,12 +467,14 @@ func (s *Store) normalizeStoredEmbeddings() {
 			return 0
 		}
 		defer tx.Rollback() // no-op after successful Commit
+		stmt, err := tx.Prepare(fmt.Sprintf("UPDATE %s SET embedding = ? WHERE %s = ?", table, idCol))
+		if err != nil {
+			return 0
+		}
+		defer stmt.Close()
 		var updated int
 		for _, u := range updates {
-			if _, execErr := tx.Exec(
-				fmt.Sprintf("UPDATE %s SET embedding = ? WHERE %s = ?", table, idCol),
-				u.blob, u.id,
-			); execErr != nil {
+			if _, execErr := stmt.Exec(u.blob, u.id); execErr != nil {
 				return 0
 			}
 			updated++

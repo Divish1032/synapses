@@ -130,7 +130,8 @@ func (fg *FlatGraph) AddNode(name StringID, nodeType NodeType, fileID StringID, 
 // addEdgeSlow inserts a directed edge. O(E) due to offset shifting — internal only.
 // Production code must use BulkAddEdges for batch insertion (O(N+E)).
 func (fg *FlatGraph) addEdgeSlow(from, to NodeIndex, weight float32) {
-	fg.mu.Lock()
+	panic("addEdgeSlow: use BulkAddEdges for batch insertion")
+	fg.mu.Lock() //nolint:unreachable
 	defer fg.mu.Unlock()
 
 	if int(from) >= len(fg.Names) || int(to) >= len(fg.Names) {
@@ -181,14 +182,15 @@ type BulkEdge struct {
 
 // BulkAddEdges rebuilds CSR arrays from scratch given a sorted list of edges.
 // This is O(E + N) instead of O(E * N) for AddEdge called E times.
-func (fg *FlatGraph) BulkAddEdges(edges []BulkEdge) {
+func (fg *FlatGraph) BulkAddEdges(edges []BulkEdge) int {
 	fg.mu.Lock()
 	defer fg.mu.Unlock()
 
 	N := len(fg.Names)
 	if N == 0 {
-		return
+		return 0
 	}
+	dropped := 0
 
 	// Sort by From for outgoing CSR, count per node.
 	sort.Slice(edges, func(i, j int) bool {
@@ -205,6 +207,7 @@ func (fg *FlatGraph) BulkAddEdges(edges []BulkEdge) {
 
 	for _, e := range edges {
 		if int(e.From) >= N || int(e.To) >= N {
+			dropped++
 			continue
 		}
 		outEdges = append(outEdges, e.To)
@@ -230,7 +233,7 @@ func (fg *FlatGraph) BulkAddEdges(edges []BulkEdge) {
 
 	for _, e := range edges {
 		if int(e.From) >= N || int(e.To) >= N {
-			continue
+			continue // already counted in first pass
 		}
 		inEdges = append(inEdges, e.From)
 		inWeights = append(inWeights, e.Weight)
@@ -246,5 +249,6 @@ func (fg *FlatGraph) BulkAddEdges(edges []BulkEdge) {
 	fg.InEdges = inEdges
 	fg.InWeights = inWeights
 	fg.InOffsets = inOffsets
+	return dropped
 }
 
