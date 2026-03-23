@@ -197,7 +197,7 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 				}
 			}
 
-			relevance := typeWeight * math.Pow(localDecay, float64(curr.hop+1))
+			relevance := typeWeight * localDecay * visited[curr.id]
 
 			neighbor := e.To
 			if e.To == curr.id {
