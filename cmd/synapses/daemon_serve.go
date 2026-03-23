@@ -1289,8 +1289,10 @@ func cmdDaemonServe(args []string) error {
 		}
 		var deleted int64
 		if agentID != "" {
+			logutil.Info("pulse: DELETE by agent_id=%q (remote=%s)\n", agentID, r.RemoteAddr)
 			deleted = sharedPulse.DeleteByAgent(agentID)
 		} else {
+			logutil.Info("pulse: DELETE by project_id=%q (remote=%s)\n", projectID, r.RemoteAddr)
 			deleted = sharedPulse.DeleteByProject(projectID)
 		}
 		w.Header().Set("Content-Type", "application/json")
