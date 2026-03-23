@@ -16,8 +16,11 @@ package logutil
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 )
+
+var logMu sync.Mutex
 
 // Error logs an ERROR-level message to stderr with timestamp.
 func Error(format string, args ...interface{}) {
@@ -68,5 +71,7 @@ func writeLog(level, project, format string, args ...interface{}) {
 	} else {
 		line = fmt.Sprintf("%s %s: %s", ts, level, msg)
 	}
+	logMu.Lock()
 	os.Stderr.WriteString(line)
+	logMu.Unlock()
 }
