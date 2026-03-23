@@ -390,8 +390,11 @@ func splitSegments(s string) []string {
 // to prevent prompt injection and log forging.
 func sanitizePromptInput(s string) string {
 	// Length cap to prevent excessive prompt content.
-	if len(s) > 512 {
-		s = s[:512]
+	// Use rune-based truncation to avoid splitting multi-byte UTF-8 characters.
+	runes := []rune(s)
+	if len(runes) > 512 {
+		runes = runes[:512]
+		s = string(runes)
 	}
 	r := strings.NewReplacer("<", "&lt;", ">", "&gt;", "`", "'")
 	s = r.Replace(s)

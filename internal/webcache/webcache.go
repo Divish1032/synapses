@@ -78,6 +78,9 @@ func New(s *store.Store) *Cache {
 					return nil, fmt.Errorf("SSRF prevention blocked access to %s (%s)", host, ip.String())
 				}
 			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("no IPs resolved for %s", host)
+			}
 			var lastErr error
 			for _, ip := range ips {
 				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
