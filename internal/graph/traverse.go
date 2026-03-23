@@ -274,6 +274,24 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		}
 	}
 
+	// R13: Apply eigenvector centrality boost — architecturally important nodes
+	// (connected to other important nodes) get a persistent relevance boost so
+	// they survive token-budget pruning over structurally similar but obscure nodes.
+	// Formula: relevance × (1 + centralityBeta × centrality[node])
+	// Root is never penalized or boosted here; its relevance is fixed at 1.0.
+	const centralityBeta = 0.2
+	if idx != nil && idx.Ready() && len(idx.EigenvectorCentrality) > 0 {
+		for i := range scored {
+			if scored[i].id == rootID {
+				continue
+			}
+			seq := idx.UnsafeSeq(scored[i].id)
+			if seq > 0 && int(seq) < len(idx.EigenvectorCentrality) {
+				scored[i].relevance *= 1.0 + centralityBeta*idx.EigenvectorCentrality[seq]
+			}
+		}
+	}
+
 	// Sort by relevance descending so we keep the most important nodes first
 	// when applying the token budget.
 	sort.Slice(scored, func(i, j int) bool {
