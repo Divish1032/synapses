@@ -867,17 +867,17 @@ func TestPruneStaleData_Debounce(t *testing.T) {
 	st := openTestStore(t)
 
 	// Ensure first call runs by resetting timestamp to zero.
-	st.lastPruneMu.Lock()
+	st.lastPruneStaleMu.Lock()
 	st.lastPruneStaleAt = time.Time{}
-	st.lastPruneMu.Unlock()
+	st.lastPruneStaleMu.Unlock()
 
 	// First call: should run (no-op on empty DB, but should not be skipped).
 	before := time.Now()
 	st.PruneStaleData(30)
 
-	st.lastPruneMu.Lock()
+	st.lastPruneStaleMu.Lock()
 	firstAt := st.lastPruneStaleAt
-	st.lastPruneMu.Unlock()
+	st.lastPruneStaleMu.Unlock()
 
 	if firstAt.Before(before) {
 		t.Error("first call should have updated lastPruneStaleAt")
@@ -886,9 +886,9 @@ func TestPruneStaleData_Debounce(t *testing.T) {
 	// Second call within 23 hours: should be skipped (debounced).
 	st.PruneStaleData(30)
 
-	st.lastPruneMu.Lock()
+	st.lastPruneStaleMu.Lock()
 	secondAt := st.lastPruneStaleAt
-	st.lastPruneMu.Unlock()
+	st.lastPruneStaleMu.Unlock()
 
 	if !secondAt.Equal(firstAt) {
 		t.Error("debounce failed: second call within 23h should not update lastPruneStaleAt")

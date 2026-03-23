@@ -186,7 +186,19 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 					}
 					watcher.reparseFile(work.path, work.root)
 				case <-watcher.stopCh:
-					return
+					// Drain remaining work items before exiting to avoid
+					// silently dropping pending file reparses.
+					for {
+						select {
+						case work, ok := <-watcher.workCh:
+							if !ok {
+								return
+							}
+							watcher.reparseFile(work.path, work.root)
+						default:
+							return
+						}
+					}
 				}
 			}
 		}()

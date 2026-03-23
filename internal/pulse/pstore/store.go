@@ -553,6 +553,68 @@ func (s *Store) CountToolErrors(day string) int {
 	return n
 }
 
+// CountGuardEventsBatch returns counts for multiple guard types in a single query.
+// Returns a map of guardType → count.
+func (s *Store) CountGuardEventsBatch(day string, guardTypes []string) map[string]int {
+	result := make(map[string]int, len(guardTypes))
+	if len(guardTypes) == 0 {
+		return result
+	}
+	placeholders := strings.Repeat("?,", len(guardTypes))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]interface{}, 0, len(guardTypes)+1)
+	args = append(args, day)
+	for _, gt := range guardTypes {
+		args = append(args, gt)
+	}
+	rows, err := s.execer().Query(
+		`SELECT guard_type, COUNT(*) FROM guard_events WHERE created_date = ? AND guard_type IN (`+placeholders+`) GROUP BY guard_type`,
+		args...)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var gt string
+		var n int
+		if rows.Scan(&gt, &n) == nil {
+			result[gt] = n
+		}
+	}
+	return result
+}
+
+// CountMemoryOpsBatch returns counts for multiple operation types in a single query.
+// Returns a map of operation → count.
+func (s *Store) CountMemoryOpsBatch(day string, operations []string) map[string]int {
+	result := make(map[string]int, len(operations))
+	if len(operations) == 0 {
+		return result
+	}
+	placeholders := strings.Repeat("?,", len(operations))
+	placeholders = placeholders[:len(operations)-1]
+	args := make([]interface{}, 0, len(operations)+1)
+	args = append(args, day)
+	for _, op := range operations {
+		args = append(args, op)
+	}
+	rows, err := s.execer().Query(
+		`SELECT operation, COUNT(*) FROM memory_ops WHERE created_date = ? AND operation IN (`+placeholders+`) GROUP BY operation`,
+		args...)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var op string
+		var n int
+		if rows.Scan(&op, &n) == nil {
+			result[op] = n
+		}
+	}
+	return result
+}
+
 // SumBrainCostForDay returns total brain LLM cost (USD) for the given day.
 func (s *Store) SumBrainCostForDay(day string) float64 {
 	var v float64
@@ -1789,10 +1851,13 @@ func (s *Store) GetSummaryForProject(days int, projectID string) (*Summary, erro
 // Returns (nil, nil) when no rollup rows exist for the period (triggers fallback).
 func (s *Store) sumRollupsForProject(since, before, projectID string) (*Summary, error) {
 	prefix := "project:" + projectID + ":"
+	// Escape SQL LIKE wildcards in the prefix to prevent pattern injection.
+	likeReplacer := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_")
+	likePattern := likeReplacer.Replace(prefix) + "%"
 	rows, err := s.execer().Query(
 		`SELECT metric, COALESCE(SUM(value), 0)
-		 FROM daily_rollups WHERE day >= ? AND day < ? AND metric LIKE ?
-		 GROUP BY metric`, since, before, prefix+"%")
+		 FROM daily_rollups WHERE day >= ? AND day < ? AND metric LIKE ? ESCAPE '\'
+		 GROUP BY metric`, since, before, likePattern)
 	if err != nil {
 		return nil, err
 	}

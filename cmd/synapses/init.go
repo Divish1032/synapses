@@ -13,9 +13,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -234,7 +236,9 @@ func initGitIfNeeded(absPath string, interactive bool) error {
 		return nil
 	}
 
-	cmd := exec.Command("git", "init", absPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "init", absPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git init failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -622,21 +626,7 @@ func tryAutoInstallService() bool {
 		return true
 	}
 
-	// Suppress daemonInstall's verbose fmt.Print output by temporarily
-	// redirecting os.Stdout to /dev/null. This is goroutine-unsafe but
-	// acceptable here because init runs single-threaded before any
-	// background goroutines are started.
-	origStdout := os.Stdout
-	if f, err := os.Open(os.DevNull); err == nil {
-		os.Stdout = f
-		defer func() {
-			os.Stdout = origStdout
-			f.Close()
-		}()
-	}
-	installErr := daemonInstall()
-	os.Stdout = origStdout
-
+	installErr := daemonInstall(io.Discard)
 	if installErr != nil {
 		logutil.Info("  auto-install service: %v (non-fatal)\n", installErr)
 		return false

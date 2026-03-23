@@ -27,9 +27,9 @@ func pruneCountRows(t *testing.T, s *Store, table string) int {
 
 // resetDebounce clears the prune debounce so PruneStaleData runs immediately.
 func resetDebounce(s *Store) {
-	s.lastPruneMu.Lock()
+	s.lastPruneStaleMu.Lock()
 	s.lastPruneStaleAt = time.Time{}
-	s.lastPruneMu.Unlock()
+	s.lastPruneStaleMu.Unlock()
 }
 
 // seedOldToolCalls inserts tool_calls with a backdated created_at timestamp.
@@ -588,9 +588,9 @@ func TestPruneOldSessions_CleansOrphanedSessionTasks(t *testing.T) {
 	st := openFromTemplate(t)
 
 	// Reset the session prune debounce so PruneOldSessions runs.
-	st.lastPruneMu.Lock()
+	st.lastSessionPruneMu.Lock()
 	st.lastSessionPruneAt = time.Time{}
-	st.lastPruneMu.Unlock()
+	st.lastSessionPruneMu.Unlock()
 
 	old := time.Now().UTC().Add(-48 * time.Hour).Unix()
 	recent := time.Now().UTC().Unix()

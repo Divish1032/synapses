@@ -474,6 +474,15 @@ func (s *Store) ExpireMemories() (int64, error) {
 		return 0, fmt.Errorf("commit expire tx: %w", err)
 	}
 
+	// Remove expired memory vectors from the in-memory HNSW index.
+	if len(expiring) > 0 {
+		ids := make([]string, len(expiring))
+		for i, e := range expiring {
+			ids[i] = e.id
+		}
+		s.hnswDeleteBatch(ids)
+	}
+
 	// Emit lifecycle events for all deleted memories (Sprint 10.3).
 	// Non-fatal: event failure does not roll back the deletion.
 	// Trade-off: events are emitted after tx.Commit() because AppendEvent
@@ -488,6 +497,32 @@ func (s *Store) ExpireMemories() (int64, error) {
 	}
 
 	return result.RowsAffected()
+}
+
+// DeleteMemoryByID removes a single memory and its satellite rows by ID.
+// Used by benchmarks to clean up test data immediately instead of waiting for TTL.
+func (s *Store) DeleteMemoryByID(id string) {
+	tx, err := s.knowledgeDB.Begin()
+	if err != nil {
+		logutil.Warn("synapses: DeleteMemoryByID begin tx: %v\n", err)
+		return
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	for _, table := range []string{"memory_embeddings", "memory_anchors", "memory_surfaced", "memory_versions"} {
+		if _, err := tx.Exec("DELETE FROM "+table+" WHERE memory_id = ?", id); err != nil {
+			logutil.Warn("synapses: DeleteMemoryByID %s: %v\n", table, err)
+		}
+	}
+	if _, err := tx.Exec("DELETE FROM memories WHERE id = ?", id); err != nil {
+		logutil.Warn("synapses: DeleteMemoryByID memories: %v — rolling back\n", err)
+		return // don't commit — would orphan satellite deletes without removing the memory
+	}
+	if err := tx.Commit(); err != nil {
+		logutil.Warn("synapses: DeleteMemoryByID commit: %v\n", err)
+		return
+	}
+	s.hnswDelete(id)
 }
 
 // MarkEntityMemoriesStaleForNodes marks entity-tier memories stale (stale=1) for

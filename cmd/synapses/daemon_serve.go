@@ -231,9 +231,22 @@ func cleanStaleSingletonPID() {
 	if err != nil {
 		return
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0]))
+	lines := strings.SplitN(string(data), "\n", 2)
+	pid, err := strconv.Atoi(strings.TrimSpace(lines[0]))
 	if err != nil || !processAlive(pid) {
 		os.Remove(pidPath)
+		return
+	}
+	if len(lines) >= 2 {
+		if startNanos, parseErr := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64); parseErr == nil && startNanos > 0 {
+			if procStart := processStartTime(pid); procStart > 0 {
+				recorded := time.Unix(0, startNanos)
+				actual := time.Unix(0, procStart)
+				if actual.Sub(recorded).Abs() > 2*time.Second {
+					os.Remove(pidPath)
+				}
+			}
+		}
 	}
 }
 
@@ -465,7 +478,7 @@ func spaHandler(root http.FileSystem) http.Handler {
 // restToolsHandler returns the HTTP handler for POST /v1/tools/{name}?project=<path>.
 // projectInit is called to lazily initialize a project that is not yet registered.
 // Extracted from cmdDaemonServe to enable HTTP-level testing.
-func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectInstance, error)) http.HandlerFunc {
+func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectInstance, error), wg *sync.WaitGroup) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Global rate limit — independent of per-session MCP limits.
 		if !restRateLimiter.Allow() {
@@ -526,7 +539,15 @@ func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectIn
 			json.NewEncoder(w).Encode(map[string]string{"error": "init project: " + mcpsrv.StripInternalPaths(initErr.Error())}) //nolint:errcheck
 			return
 		}
-		go saveKnownProject(absPath)
+		if wg != nil {
+			wg.Add(1)
+			go func(p string) {
+				defer wg.Done()
+				saveKnownProject(p)
+			}(absPath)
+		} else {
+			go saveKnownProject(absPath)
+		}
 
 		// Parse request body as tool arguments. Empty or absent body → empty args.
 		// Cap at 1 MiB to prevent unbounded memory allocation from malformed requests.
@@ -731,6 +752,10 @@ func cmdDaemonServe(args []string) error {
 	}
 	defer os.Remove(pidPath)
 
+	// ── saveKnownProject WaitGroup ────────────────────────────────────────────
+	var saveKnownProjectWg sync.WaitGroup
+	defer saveKnownProjectWg.Wait()
+
 	// ── App context for graceful shutdown ────────────────────────────────────
 	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
@@ -882,7 +907,11 @@ func cmdDaemonServe(args []string) error {
 				return
 			}
 			// Persist for eager warming on next daemon restart.
-			go saveKnownProject(absPath)
+			saveKnownProjectWg.Add(1)
+		go func(p string) {
+			defer saveKnownProjectWg.Done()
+			saveKnownProject(p)
+		}(absPath)
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1405,7 +1434,7 @@ func cmdDaemonServe(args []string) error {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
 					"jsonrpc": "2.0",
-					"error":   fmt.Sprintf("internal error (recovered): %v", rv),
+					"error":   "internal error (recovered)",
 				})
 			}
 		}()
@@ -1438,7 +1467,11 @@ func cmdDaemonServe(args []string) error {
 			http.Error(w, "init project: "+mcpsrv.StripInternalPaths(initErr.Error()), http.StatusInternalServerError)
 			return
 		}
-		go saveKnownProject(absPath)
+		saveKnownProjectWg.Add(1)
+		go func(p string) {
+			defer saveKnownProjectWg.Done()
+			saveKnownProject(p)
+		}(absPath)
 
 		// Strip the ?project= param before forwarding so the MCP server
 		// doesn't see unknown query parameters.
@@ -1460,7 +1493,7 @@ func cmdDaemonServe(args []string) error {
 	// binding (127.0.0.1) limits exposure to local processes only.
 	mux.HandleFunc("/v1/tools/", restToolsHandler(reg, func(absPath string) (*ProjectInstance, error) {
 		return initProjectInstance(appCtx, absPath, sharedPulse, reg)
-	}))
+	}, &saveKnownProjectWg))
 
 	// ── Phase 0: Admin management endpoints (web console) ────────────────────
 	registerAdminEndpoints(mux, reg, func(absPath string) (*ProjectInstance, error) {
@@ -1511,15 +1544,27 @@ func cmdDaemonServe(args []string) error {
 
 	// CSRF token endpoint — fetched once by the web console on load.
 	// Restricted to GET; requires trusted Origin (or no Origin for same-origin).
+	// Non-browser callers (no Origin/Sec-Fetch-Site header) must present a Bearer token.
 	mux.HandleFunc("/api/admin/csrf-token", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "use GET", http.StatusMethodNotAllowed)
 			return
 		}
 		origin := r.Header.Get("Origin")
-		if origin != "" && !trustedOrigins[origin] {
-			http.Error(w, "Forbidden: untrusted origin", http.StatusForbidden)
-			return
+		secFetch := r.Header.Get("Sec-Fetch-Site")
+		isBrowserRequest := origin != "" || secFetch == "same-origin"
+		if isBrowserRequest {
+			if origin != "" && !trustedOrigins[origin] {
+				http.Error(w, "Forbidden: untrusted origin", http.StatusForbidden)
+				return
+			}
+		} else {
+			authHeader := r.Header.Get("Authorization")
+			if !strings.HasPrefix(authHeader, "Bearer ") || strings.TrimPrefix(authHeader, "Bearer ") != authToken {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="synapses"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"token": csrfToken}) //nolint:errcheck
@@ -1570,11 +1615,12 @@ func cmdDaemonServe(args []string) error {
 	})
 	secureHandler := hostGuard(finalHandler)
 	httpSrv := &http.Server{
-		Addr:         DaemonHTTPAddr,
-		Handler:      secureHandler,
-		ReadTimeout:  60 * time.Second,
-		WriteTimeout: 0, // SSE streams can be indefinite
-		IdleTimeout:  120 * time.Second,
+		Addr:           DaemonHTTPAddr,
+		Handler:        secureHandler,
+		ReadTimeout:    60 * time.Second,
+		WriteTimeout:   0, // SSE streams can be indefinite
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 64 * 1024,
 	}
 
 	logutil.Info("synapses %s singleton daemon starting on %s\n", version, DaemonHTTPAddr)

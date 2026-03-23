@@ -65,6 +65,11 @@ type Graph struct {
 	// Maps file path → variable name → type name (e.g. "repo" → "Repository").
 	// Used by the resolver to resolve obj.method() call sites cross-file.
 	varTypes map[string]map[string]string
+
+	// removeFileCount tracks RemoveFile calls to trigger periodic edgeSet
+	// compaction. Go maps never shrink their internal bucket array after
+	// deletions; recreating the map reclaims memory from deleted keys.
+	removeFileCount int
 }
 
 // generateStableID returns a random UUID v4 using crypto/rand (no external deps).
@@ -229,10 +234,20 @@ func (g *Graph) FindByName(name string) []*Node {
 
 // FindByPattern returns all nodes whose Name contains the given substring
 // (case-insensitive). Useful for fuzzy "find entity" queries.
+// On large graphs (100K+ nodes), consider FindByPatternLimit to cap the scan.
 func (g *Graph) FindByPattern(pattern string) []*Node {
+	return g.FindByPatternLimit(pattern, 0)
+}
+
+// FindByPatternLimit is like FindByPattern but stops scanning after limit
+// matches are found (0 = unlimited). This prevents O(N) full scans on hot
+// paths where only a few results are needed. Results are sorted by ID for
+// deterministic output.
+func (g *Graph) FindByPatternLimit(pattern string, limit int) []*Node {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	lower := strings.ToLower(pattern)
+	// Collect ALL matches first, then sort for determinism, then apply limit.
 	var results []*Node
 	for _, n := range g.nodes {
 		if strings.Contains(strings.ToLower(n.Name), lower) {
@@ -240,6 +255,9 @@ func (g *Graph) FindByPattern(pattern string) []*Node {
 		}
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].ID < results[j].ID })
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
 	return results
 }
 
@@ -555,7 +573,7 @@ func (g *Graph) UpdateFileNodeMetadata(absFile string, update func(n *Node)) {
 	}
 }
 
-// AllEdges returns a snapshot of every edge in the graph.
+// AllEdges returns a snapshot of every edge in the graph, sorted by From, To, Type.
 func (g *Graph) AllEdges() []*Edge {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -563,6 +581,15 @@ func (g *Graph) AllEdges() []*Edge {
 	for _, edges := range g.outEdges {
 		out = append(out, edges...)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].From != out[j].From {
+			return out[i].From < out[j].From
+		}
+		if out[i].To != out[j].To {
+			return out[i].To < out[j].To
+		}
+		return out[i].Type < out[j].Type
+	})
 	return out
 }
 
@@ -631,6 +658,9 @@ func (g *Graph) RebuildIndex() ([]byte, error) {
 	g.mu.Unlock()
 
 	newIdx := buildIndex(g, pool)
+
+	// Compact maps after a full reindex to release memory from deleted buckets.
+	g.Compact()
 
 	g.mu.Lock()
 	oldIdx := g.index // capture before replacing — needed for centrality delta
@@ -709,6 +739,45 @@ func centralityDeltaExceeds(oldIdx, newIdx *GraphIndex, threshold float64) bool 
 		}
 	}
 	return false
+}
+
+// Compact recreates the internal maps from scratch, allowing the Go runtime
+// to release memory from deleted map buckets. Go maps do not shrink after
+// deletions, so after thousands of incremental re-parses memory trends upward.
+// Call this periodically (e.g. after a full reindex) to reclaim that memory.
+func (g *Graph) Compact() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	newNodes := make(map[NodeID]*Node, len(g.nodes))
+	for k, v := range g.nodes {
+		newNodes[k] = v
+	}
+	g.nodes = newNodes
+
+	newOut := make(map[NodeID][]*Edge, len(g.outEdges))
+	for k, v := range g.outEdges {
+		newOut[k] = v
+	}
+	g.outEdges = newOut
+
+	newIn := make(map[NodeID][]*Edge, len(g.inEdges))
+	for k, v := range g.inEdges {
+		newIn[k] = v
+	}
+	g.inEdges = newIn
+
+	newEdgeSet := make(map[edgeKey]struct{}, len(g.edgeSet))
+	for k, v := range g.edgeSet {
+		newEdgeSet[k] = v
+	}
+	g.edgeSet = newEdgeSet
+
+	newVarTypes := make(map[string]map[string]string, len(g.varTypes))
+	for k, v := range g.varTypes {
+		newVarTypes[k] = v
+	}
+	g.varTypes = newVarTypes
 }
 
 // EdgeCount returns the total number of edges.
@@ -954,6 +1023,18 @@ func (g *Graph) RemoveFile(file string) {
 					idx.MarkTombstone(seq)
 				}
 			}
+		}
+
+		// Periodic edgeSet compaction: Go maps never shrink after deletions.
+		// Recreate the map every 100 RemoveFile calls to reclaim memory.
+		g.removeFileCount++
+		if g.removeFileCount >= 100 {
+			newEdgeSet := make(map[edgeKey]struct{}, len(g.edgeSet))
+			for k, v := range g.edgeSet {
+				newEdgeSet[k] = v
+			}
+			g.edgeSet = newEdgeSet
+			g.removeFileCount = 0
 		}
 	}
 }

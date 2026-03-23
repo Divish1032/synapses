@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1196,7 +1197,7 @@ func TestPrintSummaryTable_WithViolations(t *testing.T) {
 
 func TestDaemonInstall(t *testing.T) {
 	// May succeed or fail depending on OS/environment; just must not panic.
-	_ = daemonInstall()
+	_ = daemonInstall(io.Discard)
 }
 
 func TestDaemonUninstall(t *testing.T) {
@@ -1791,7 +1792,7 @@ func TestInstallSystemd_NoBinaries(t *testing.T) {
 	os.Setenv("PATH", t.TempDir())
 	defer os.Setenv("PATH", oldPath)
 
-	_ = installSystemd()
+	_ = installSystemd(io.Discard)
 }
 
 func TestUninstallSystemd_Direct(t *testing.T) {

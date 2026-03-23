@@ -521,7 +521,9 @@ func brainRegisterIdentity(tier brainTierDef) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(ollamaBin, "create", tier.name, "-f", tmp.Name())
+	createCtx, createCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer createCancel()
+	cmd := exec.CommandContext(createCtx, ollamaBin, "create", tier.name, "-f", tmp.Name())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ollama create: %w\n%s", err, strings.TrimSpace(string(out)))

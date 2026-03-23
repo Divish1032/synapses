@@ -181,9 +181,9 @@ func TestKnowledgeEvent_Expired(t *testing.T) {
 	}
 
 	// Reset the lastPruneStaleAt guard so PruneStaleData runs.
-	st.lastPruneMu.Lock()
+	st.lastPruneStaleMu.Lock()
 	st.lastPruneStaleAt = time.Time{}
-	st.lastPruneMu.Unlock()
+	st.lastPruneStaleMu.Unlock()
 
 	st.PruneStaleData(30)
 

@@ -18,6 +18,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,7 +79,18 @@ func New(s *store.Store) *Cache {
 					return nil, fmt.Errorf("SSRF prevention blocked access to %s (%s)", host, ip.String())
 				}
 			}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("no IPs resolved for %s", host)
+			}
+			var lastErr error
+			for _, ip := range ips {
+				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+				if dialErr == nil {
+					return conn, nil
+				}
+				lastErr = dialErr
+			}
+			return nil, fmt.Errorf("all %d IPs for %s failed: %w", len(ips), host, lastErr)
 		},
 	}
 
@@ -154,17 +166,22 @@ func (c *Cache) FetchPackageDocs(ctx context.Context, importPath, version string
 // ttlHours controls expiry: 0 = never expire, >0 = expire after N hours.
 //
 // Returns (content, fromCache, error).
-func (c *Cache) Fetch(ctx context.Context, url string, ttlHours int) (string, bool, error) {
-	if entry, ok := c.store.GetWebCache(url); ok {
+func (c *Cache) Fetch(ctx context.Context, rawURL string, ttlHours int) (string, bool, error) {
+	cacheKey := rawURL
+	if u, err := url.Parse(rawURL); err == nil && u.User != nil {
+		u.User = nil
+		cacheKey = u.String()
+	}
+	if entry, ok := c.store.GetWebCache(cacheKey); ok {
 		return entry.Content, true, nil
 	}
 
-	content, err := c.fetchAndStrip(ctx, url)
+	content, err := c.fetchAndStrip(ctx, rawURL)
 	if err != nil {
-		return "", false, fmt.Errorf("fetch %s: %w", url, err)
+		return "", false, fmt.Errorf("fetch %s: %w", rawURL, err)
 	}
 
-	if err := c.store.UpsertWebCache(url, content, ttlHours); err != nil {
+	if err := c.store.UpsertWebCache(cacheKey, content, ttlHours); err != nil {
 		_ = err
 	}
 	return content, false, nil

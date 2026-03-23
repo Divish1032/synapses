@@ -61,8 +61,10 @@ func normalizeL2Vec(v []float32) []float32 {
 	for i, x := range v {
 		out[i] = float32(float64(x) / norm)
 	}
-	if math.IsNaN(float64(out[0])) || math.IsInf(float64(out[0]), 0) {
-		return nil
+	for _, v := range out {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return nil
+		}
 	}
 	return out
 }
@@ -199,6 +201,9 @@ func (s *Server) supervise(ctx context.Context, args []string) {
 
 		select {
 		case <-ctx.Done():
+			s.mu.Lock()
+			s.restarting = false
+			s.mu.Unlock()
 			return
 		case <-time.After(backoff):
 		}
@@ -357,11 +362,13 @@ func (s *Server) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 // Available returns true if the subprocess is running and responding.
 func (s *Server) Available() bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.started {
+	started := s.started
+	baseURL := s.baseURL
+	s.mu.Unlock()
+	if !started {
 		return false
 	}
-	resp, err := s.client.Get(s.baseURL + "/health")
+	resp, err := s.client.Get(baseURL + "/health")
 	if err != nil {
 		return false
 	}

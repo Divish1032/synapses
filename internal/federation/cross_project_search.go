@@ -154,6 +154,9 @@ func (s *CrossProjectSearch) GetEntityContext(ctx context.Context, entity string
 		return nil
 	}
 
+	if st.NodeCount() > 50_000 {
+		return nil
+	}
 	g, err := st.LoadGraph()
 	if err != nil || g == nil {
 		if err != nil {
@@ -201,6 +204,9 @@ func (s *CrossProjectSearch) GetEntityContext(ctx context.Context, entity string
 func (s *CrossProjectSearch) SearchEpisodes(ctx context.Context, query string, aliases []string, limit int) []FederatedEpisode {
 	if limit <= 0 {
 		limit = 5
+	}
+	if limit > 100 {
+		limit = 100
 	}
 
 	targets := s.resolver.filterEntries(aliases)

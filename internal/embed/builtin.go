@@ -277,8 +277,18 @@ func (b *BuiltinEmbedder) doInit(ctx context.Context) error {
 				opts.Verbose = false
 				opts.MaxRetries = 3
 				opts.RetryInterval = 2
-				if _, dlErr := hugot.DownloadModel(builtinModelName, b.modelsDir, opts); dlErr != nil {
-					return fmt.Errorf("download fallback quantized model: %w", dlErr)
+				dlCh := make(chan error, 1)
+				go func() {
+					_, dlErr := hugot.DownloadModel(builtinModelName, b.modelsDir, opts)
+					dlCh <- dlErr
+				}()
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("download fallback cancelled: %w", ctx.Err())
+				case dlErr := <-dlCh:
+					if dlErr != nil {
+						return fmt.Errorf("download fallback quantized model: %w", dlErr)
+					}
 				}
 			}
 			if fallbackErr := verifyModelIntegrity(onnxDisk, modelFile); fallbackErr != nil {
