@@ -6,7 +6,24 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// bfsQueuePool reuses BFS queue slices across CarveEgoGraph calls to reduce
+// allocation pressure on cache misses. The queue slice is reset to length 0
+// before reuse — O(1) compared to O(N) map clearing.
+var bfsQueuePool = sync.Pool{
+	New: func() interface{} {
+		s := make([]qItem, 0, 64)
+		return &s
+	},
+}
+
+// qItem is a BFS queue entry used by CarveEgoGraph.
+type qItem struct {
+	id  NodeID
+	hop int
+}
 
 // provenanceWeight returns a relevance multiplier based on node provenance.
 // user-authored nodes are not penalized; generated/vendored/external nodes
@@ -113,15 +130,13 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	}
 
 	// BFS state.
-	type qItem struct {
-		id  NodeID
-		hop int
-	}
-
 	visited := make(map[NodeID]float64) // nodeID → best relevance seen
 	visited[rootID] = 1.0
 
-	queue := []qItem{{rootID, 0}}
+	qp := bfsQueuePool.Get().(*[]qItem)
+	queue := (*qp)[:0]
+	queue = append(queue, qItem{rootID, 0})
+	defer func() { *qp = queue[:0]; bfsQueuePool.Put(qp) }()
 
 	// Struct/interface nodes have no CALLS edges — only DEFINES from their file.
 	// Seed BFS with the struct's methods so the carve includes method-level context.
