@@ -49,13 +49,14 @@ func TestCallStartTimes_SetLazyInit(t *testing.T) {
 
 func TestPacketCache_SetAndGet(t *testing.T) {
 	s := newTestServer(t)
-	s.setPacketCache("key-a", "payload-a")
+	pkt := &brain.ContextPacket{EntityName: "payload-a"}
+	s.setPacketCache("key-a", pkt)
 	got := s.getPacketFromCache("key-a")
 	if got == nil {
 		t.Fatal("expected cached value")
 	}
-	if got.(string) != "payload-a" {
-		t.Errorf("got %v, want %q", got, "payload-a")
+	if got.EntityName != "payload-a" {
+		t.Errorf("got %v, want %q", got.EntityName, "payload-a")
 	}
 }
 
@@ -71,7 +72,7 @@ func TestPacketCache_Eviction(t *testing.T) {
 	s := newTestServer(t)
 	// Fill cache to packetCacheMax+1 to trigger eviction.
 	for i := 0; i < packetCacheMax+1; i++ {
-		s.setPacketCache(string(rune('a'+i)), i)
+		s.setPacketCache(string(rune('a'+i)), &brain.ContextPacket{EntityName: string(rune('a' + i))})
 	}
 	// Cache should still be at most packetCacheMax entries.
 	s.packetCacheMu.Lock()
@@ -90,7 +91,7 @@ func TestPacketCache_Expired(t *testing.T) {
 	}
 	// Insert an already-expired entry.
 	s.packetCache["stale"] = &packetCacheEntry{
-		pkt:       "old",
+		pkt:       &brain.ContextPacket{EntityName: "old"},
 		expiresAt: time.Now().Add(-time.Minute),
 	}
 	s.packetCacheMu.Unlock()
@@ -144,7 +145,7 @@ func TestServer_MCPServer_NotNil(t *testing.T) {
 
 func TestInvalidatePacketCache(t *testing.T) {
 	s := newTestServer(t)
-	s.setPacketCache("k", "v")
+	s.setPacketCache("k", &brain.ContextPacket{EntityName: "v"})
 	s.InvalidatePacketCache()
 
 	// Cache should be cleared.
@@ -155,7 +156,7 @@ func TestInvalidatePacketCache(t *testing.T) {
 
 func TestInvalidatePacketCacheForFile_WithFile(t *testing.T) {
 	s := newTestServer(t)
-	s.setPacketCache("k", "v")
+	s.setPacketCache("k", &brain.ContextPacket{EntityName: "v"})
 	// Must not panic; brain is nil so warmBrainCache exits early.
 	s.InvalidatePacketCacheForFile("internal/auth/auth.go")
 	if got := s.getPacketFromCache("k"); got != nil {
@@ -165,7 +166,7 @@ func TestInvalidatePacketCacheForFile_WithFile(t *testing.T) {
 
 func TestInvalidatePacketCacheForFile_EmptyFile(t *testing.T) {
 	s := newTestServer(t)
-	s.setPacketCache("k", "v")
+	s.setPacketCache("k", &brain.ContextPacket{EntityName: "v"})
 	s.InvalidatePacketCacheForFile("")
 	if got := s.getPacketFromCache("k"); got != nil {
 		t.Error("expected nil after InvalidatePacketCacheForFile empty")

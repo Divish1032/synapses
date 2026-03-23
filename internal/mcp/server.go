@@ -102,7 +102,7 @@ var Version = "dev"
 
 // packetCacheEntry holds a cached context packet with an expiry time.
 type packetCacheEntry struct {
-	pkt       interface{} // *brain.ContextPacket (typed as interface{} to avoid import cycle)
+	pkt       *brain.ContextPacket
 	expiresAt time.Time
 }
 
@@ -813,7 +813,7 @@ const (
 // getPacketFromCache returns a cached context packet for the given key, or nil
 // if the entry is absent or expired. Uses a read lock so concurrent reads do
 // not serialise; expired entries are lazily evicted by setPacketCache.
-func (s *Server) getPacketFromCache(key string) interface{} {
+func (s *Server) getPacketFromCache(key string) *brain.ContextPacket {
 	s.packetCacheMu.RLock()
 	defer s.packetCacheMu.RUnlock()
 	e, ok := s.packetCache[key]
@@ -827,7 +827,7 @@ func (s *Server) getPacketFromCache(key string) interface{} {
 // When the cache exceeds packetCacheMax entries, the entry with the oldest
 // expiresAt timestamp is evicted (LRU-style). With ≤20 slots, the linear
 // scan is trivial.
-func (s *Server) setPacketCache(key string, pkt interface{}) {
+func (s *Server) setPacketCache(key string, pkt *brain.ContextPacket) {
 	s.packetCacheMu.Lock()
 	defer s.packetCacheMu.Unlock()
 	if len(s.packetCache) >= packetCacheMax {

@@ -153,21 +153,17 @@ type rateLimiter struct {
 	expensiveReadLimitPerMin int
 	crossProjectLimitPerMin  int
 
-	pc             interface{} // *pulse.Client — set via SetPulseClient; nil if pulse not configured
+	pc             *pulse.Client // set via SetPulseClient; nil if pulse not configured
 	projectID      string
 	resolveSession func(string) string // P8-2: MCP session key → Synapses session UUID
 	resolveAgent   func(string) string // MCP session key → agent_id (for agent-scoped rate limiting)
 }
 
 // SetPulseClient wires a pulse client so rate-limiter can emit guard events.
-func (rl *rateLimiter) SetPulseClient(pc interface{}) { rl.pc = pc }
+func (rl *rateLimiter) SetPulseClient(pc *pulse.Client) { rl.pc = pc }
 
 func (rl *rateLimiter) getPulseClient() *pulse.Client {
-	if rl.pc == nil {
-		return nil
-	}
-	pc, _ := rl.pc.(*pulse.Client)
-	return pc
+	return rl.pc
 }
 
 // newRateLimiter constructs a rateLimiter from config. Zero fields fall back to
