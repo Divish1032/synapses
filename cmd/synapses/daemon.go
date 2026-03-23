@@ -374,16 +374,11 @@ func daemonLogs(name string) error {
 	if !allowed {
 		return fmt.Errorf("unknown service %q", name)
 	}
-	data, err := os.ReadFile(logFilePath(name))
-	if err != nil {
+	lines := tailFile(logFilePath(name), 200)
+	if len(lines) == 0 {
 		return fmt.Errorf("no log file for %s at %s", name, logFilePath(name))
 	}
-	lines := strings.Split(string(data), "\n")
-	start := 0
-	if len(lines) > 200 {
-		start = len(lines) - 200
-	}
-	fmt.Print(strings.Join(lines[start:], "\n"))
+	fmt.Print(strings.Join(lines, "\n"))
 	return nil
 }
 

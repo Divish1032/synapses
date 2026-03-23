@@ -228,6 +228,8 @@ func matchesPattern(n *graph.Node, p config.DataFlowPattern) bool {
 // bfsReachableSinks does a forward BFS from sourceID following only CALLS edges,
 // up to maxHops deep. Returns the IDs of any sink nodes encountered.
 func bfsReachableSinks(g *graph.Graph, sourceID graph.NodeID, sinkSet map[graph.NodeID]bool, maxHops int) []graph.NodeID {
+	const maxVisited = 10_000 // cap total nodes to prevent runaway traversal on fan-out graphs
+
 	type qItem struct {
 		id  graph.NodeID
 		hop int
@@ -253,6 +255,9 @@ func bfsReachableSinks(g *graph.Graph, sourceID graph.NodeID, sinkSet map[graph.
 			if visited[e.To] {
 				continue
 			}
+			if len(visited) >= maxVisited {
+				break
+			}
 			visited[e.To] = true
 
 			if sinkSet[e.To] {
@@ -260,6 +265,9 @@ func bfsReachableSinks(g *graph.Graph, sourceID graph.NodeID, sinkSet map[graph.
 			}
 
 			queue = append(queue, qItem{e.To, cur.hop + 1})
+		}
+		if len(visited) >= maxVisited {
+			break
 		}
 	}
 

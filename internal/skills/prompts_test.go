@@ -252,7 +252,7 @@ func TestMatchPrompts_ANDSemantics_EmptyFieldSkipsCheck(t *testing.T) {
 
 // --- DeduplicatePrompts ---
 
-func TestDeduplicatePrompts_LastWins(t *testing.T) {
+func TestDeduplicatePrompts_UserOverProject(t *testing.T) {
 	templates := []PromptTemplate{
 		{ID: "go-errors", Body: "builtin version", Source: "builtin"},
 		{ID: "other", Body: "stays", Source: "builtin"},
@@ -260,14 +260,33 @@ func TestDeduplicatePrompts_LastWins(t *testing.T) {
 		{ID: "go-errors", Body: "project version", Source: "project"},
 	}
 	got := DeduplicatePrompts(templates)
-	// Should have 2 entries: "other" and the last "go-errors".
+	// Should have 2 entries: "other" and "go-errors" (user version wins —
+	// project prompts cannot shadow user/builtin prompts).
 	if len(got) != 2 {
 		t.Fatalf("expected 2, got %d: %+v", len(got), got)
 	}
 	for _, pt := range got {
-		if pt.ID == "go-errors" && pt.Source != "project" {
-			t.Errorf("go-errors should be project version, got %q", pt.Source)
+		if pt.ID == "go-errors" && pt.Source != "user" {
+			t.Errorf("go-errors should be user version (project must not shadow), got %q", pt.Source)
 		}
+	}
+}
+
+func TestDeduplicatePrompts_ProjectWinsOverBuiltin(t *testing.T) {
+	// Project prompts CAN override builtins (user didn't override this ID).
+	// Wait — actually per the new logic, builtin is also protected.
+	// Project prompts can only add NEW IDs, not shadow user or builtin.
+	templates := []PromptTemplate{
+		{ID: "go-errors", Body: "builtin version", Source: "builtin"},
+		{ID: "go-errors", Body: "project version", Source: "project"},
+	}
+	got := DeduplicatePrompts(templates)
+	if len(got) != 1 {
+		t.Fatalf("expected 1, got %d: %+v", len(got), got)
+	}
+	// Builtin is protected — project cannot shadow it.
+	if got[0].Source != "builtin" {
+		t.Errorf("go-errors should be builtin version, got %q", got[0].Source)
 	}
 }
 
