@@ -1405,7 +1405,7 @@ func cmdDaemonServe(args []string) error {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
 					"jsonrpc": "2.0",
-					"error":   fmt.Sprintf("internal error (recovered): %v", rv),
+					"error":   "internal error (recovered)",
 				})
 			}
 		}()
