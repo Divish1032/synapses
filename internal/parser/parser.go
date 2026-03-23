@@ -529,6 +529,25 @@ func (w *Walker) ParseFile(g *graph.Graph, path string) error {
 	return nil
 }
 
+// ParseFileSrc parses a single file from pre-read bytes and updates g.
+// It is identical to ParseFile but skips the os.ReadFile call, allowing
+// callers that already hold the file bytes (e.g. for error checking or
+// content hashing) to avoid a second disk read.
+// If the file extension is not supported it returns nil without error.
+func (w *Walker) ParseFileSrc(g *graph.Graph, path string, src []byte) error {
+	ext := strings.ToLower(filepath.Ext(path))
+	p, ok := w.resolveParser(path, ext)
+	if !ok {
+		return nil
+	}
+	if err := p.Parse(g, path, src); err != nil {
+		return err
+	}
+	ApplyProvenance(g, path, src)
+	ApplyHeuristics(g, path, src)
+	return nil
+}
+
 // parserForPath returns the language parser for the given file path, or nil
 // if no parser is registered for the file's extension or name.
 func (w *Walker) parserForPath(path string) LanguageParser {
