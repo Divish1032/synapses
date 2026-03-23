@@ -375,6 +375,11 @@ func (a *Aggregator) rollup() {
 		}
 	}
 
+	// Pre-read metrics that will be written in the per-dimension batch.
+	// Doing reads before BeginBatch avoids holding the write lock during I/O.
+	peakRate := a.store.GetPeakReparseRate(today)
+	fcr, fcrErr := a.store.GetFirstContextRightRate(1)
+
 	// Per-dimension rollups + sentinel in a single transaction for crash-safety.
 	// BeginBatch holds the store mutex; UpsertDailyRollupTx executes within the
 	// held transaction. If we crash mid-rollup, the uncommitted transaction is
@@ -402,13 +407,12 @@ func (a *Aggregator) rollup() {
 		a.rollupSearchMetrics(today, upTx)
 		a.rollupPerToolErrors(today, upTx)
 
-		peakRate := a.store.GetPeakReparseRate(today)
 		if peakRate > 0 {
 			if err := a.store.UpsertDailyRollupTx(today, "peak_reparse_rate_per_min", float64(peakRate)); err != nil {
 				logutil.Warn("pulse aggregator: peak reparse rate upsert: %v\n", err)
 			}
 		}
-		if fcr, fcrErr := a.store.GetFirstContextRightRate(1); fcrErr == nil {
+		if fcrErr == nil {
 			if err := a.store.UpsertDailyRollupTx(today, "first_context_right_rate", fcr); err != nil {
 				logutil.Warn("pulse aggregator: first_context_right_rate upsert: %v\n", err)
 			}

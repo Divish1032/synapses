@@ -855,16 +855,14 @@ func (s *Server) handleGetFileContext(
 		prefix += "/"
 	}
 
+	// Use indexed FindByFile for O(1) lookup instead of scanning all nodes.
+	candidates := s.graph.FindByFile(filePath)
 	var matches []*graph.Node
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range candidates {
 		if n.Type == graph.NodeFile || n.Type == graph.NodePackage {
 			continue
 		}
-		// Match against absolute path or repo-relative path.
-		rel := strings.TrimPrefix(n.File, prefix)
-		if strings.HasSuffix(n.File, filePath) || strings.HasSuffix(rel, filePath) {
-			matches = append(matches, n)
-		}
+		matches = append(matches, n)
 	}
 
 	if len(matches) == 0 {
