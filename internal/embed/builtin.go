@@ -151,16 +151,16 @@ func NewBuiltinEmbedderWithPoolSize(modelsDir string, poolSize int) *BuiltinEmbe
 // a background goroutine so the first Embed() call doesn't block on download.
 // Safe to call concurrently — uses singleflight internally.
 func (b *BuiltinEmbedder) WarmUp(ctx context.Context) error {
-	// WarmUp just delegates to ensureModelWithSingleflight. If the model is
-	// already downloaded and initialized, this is a fast no-op.
-	return b.ensureModelWithSingleflight()
+	// WarmUp delegates to ensureModelWithSingleflight, threading ctx so that
+	// cancellation (e.g. daemon shutdown) is respected during model download.
+	return b.ensureModelWithSingleflight(ctx)
 }
 
 // ensureModelWithSingleflight downloads the model if not already cached, and
 // initializes the pipeline pool. Uses singleflight so that only one goroutine
 // downloads while others wait, without holding the main mutex during download.
 // Returns nil on success. On failure, the caller should retry next time.
-func (b *BuiltinEmbedder) ensureModelWithSingleflight() error {
+func (b *BuiltinEmbedder) ensureModelWithSingleflight(ctx context.Context) error {
 	// Fast path under lock: already initialized.
 	b.mu.Lock()
 	if b.ready {
@@ -183,14 +183,14 @@ func (b *BuiltinEmbedder) ensureModelWithSingleflight() error {
 		b.mu.Unlock()
 
 		// All work below runs WITHOUT holding b.mu.
-		return nil, b.doInit()
+		return nil, b.doInit(ctx)
 	})
 	return err
 }
 
 // doInit performs the actual model download, integrity verification, and pipeline
 // pool creation. Called from singleflight — only one goroutine runs this at a time.
-func (b *BuiltinEmbedder) doInit() error {
+func (b *BuiltinEmbedder) doInit(ctx context.Context) error {
 	// Select ONNX variant based on hardware: fp32 for GPU, quantized for CPU.
 	modelFile, repoPath := selectOnnxVariant()
 
@@ -226,12 +226,29 @@ func (b *BuiltinEmbedder) doInit() error {
 		opts.Verbose = false
 		opts.MaxRetries = 3
 		opts.RetryInterval = 2
-		if _, err := hugot.DownloadModel(builtinModelName, b.modelsDir, opts); err != nil {
-			// BUG-027: surface a clear message for air-gapped environments.
-			logutil.Error("synapses: embedding model download failed — semantic search will be unavailable. "+
-				"If this machine has no internet access, pre-download the model on a connected machine "+
-				"and place it at %s\n", filepath.Join(modelPath, modelFile))
-			return fmt.Errorf("download embedding model: %w", err)
+		// Check context before starting the potentially slow download.
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("download cancelled before start: %w", err)
+		}
+		// hugot.DownloadModel does not accept a context, so we run it in a
+		// goroutine and race against ctx cancellation.
+		type dlResult struct{ err error }
+		dlCh := make(chan dlResult, 1)
+		go func() {
+			_, dlErr := hugot.DownloadModel(builtinModelName, b.modelsDir, opts)
+			dlCh <- dlResult{err: dlErr}
+		}()
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("download cancelled: %w", ctx.Err())
+		case res := <-dlCh:
+			if res.err != nil {
+				// BUG-027: surface a clear message for air-gapped environments.
+				logutil.Error("synapses: embedding model download failed — semantic search will be unavailable. "+
+					"If this machine has no internet access, pre-download the model on a connected machine "+
+					"and place it at %s\n", filepath.Join(modelPath, modelFile))
+				return fmt.Errorf("download embedding model: %w", res.err)
+			}
 		}
 		logutil.Info("synapses: embedding model downloaded (%s)\n", modelFile)
 		// P8-11: emit download_complete event.
@@ -434,7 +451,7 @@ func (b *BuiltinEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 
 	// Initialize model outside the main mutex. Uses singleflight so only one
 	// goroutine downloads while others wait — no 2-5 minute mutex hold.
-	if err := b.ensureModelWithSingleflight(); err != nil {
+	if err := b.ensureModelWithSingleflight(ctx); err != nil {
 		return nil, err
 	}
 
