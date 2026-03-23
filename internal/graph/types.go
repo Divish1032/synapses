@@ -486,7 +486,7 @@ func DefaultCarveConfig() CarveConfig {
 		TokenBudget:      4000,
 		EdgeWeights:      DefaultEdgeWeights,
 		DecayFactor:      0.5,
-		MinRelevance:     0.25,
+		MinRelevance:     0.05,
 		ExcludeTestFiles: true,
 		ExcludeTypes: map[NodeType]bool{
 			NodePackage: true,
