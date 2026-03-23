@@ -2720,7 +2720,7 @@ func ScanAll() ([]ProjectStat, error) {
 // LoadFileMtimes returns the stored path→mtime (UnixNano) map from the last
 // successful index. Returns an empty map (not nil) if no data is stored yet.
 func (s *Store) LoadFileMtimes() (map[string]int64, error) {
-	rows, err := s.graphDB.Query(`SELECT path, mod_time FROM file_hashes`)
+	rows, err := s.graphDB.Query(`SELECT path, mod_time FROM file_hashes LIMIT 2000000`)
 	if err != nil {
 		return nil, fmt.Errorf("query file_hashes: %w", err)
 	}
