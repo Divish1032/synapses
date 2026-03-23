@@ -127,10 +127,13 @@ var ghostWarnOnce atomic.Int32
 func (p *StringPool) internGhost(s string) StringID {
 	id := p.ghostNext
 	if id >= ReservedGhostRange {
+		// Wrap around: evict the oldest ghost entry. Ghost strings are transient
+		// so losing old mappings is acceptable — callers already treat them as
+		// best-effort. Start at 1 (0 is the empty-string sentinel).
 		if ghostWarnOnce.CompareAndSwap(0, 1) {
-			logutil.Warn("synapses: StringPool ghost range saturated (%d entries); new strings will map to empty\n", ReservedGhostRange)
+			logutil.Warn("synapses: StringPool ghost range wrapped (%d entries); oldest ghost strings evicted\n", ReservedGhostRange)
 		}
-		return 0
+		id = 1
 	}
 	p.ghostCache[id] = s
 	p.ghostNext = id + 1
