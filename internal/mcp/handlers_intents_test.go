@@ -4,12 +4,14 @@ package mcp
 // Uses package mcp (not mcp_test) for direct access to unexported symbols.
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
@@ -606,4 +608,176 @@ func TestApplyIntentCarveConfig_UnderstandUsesDefaultWeights(t *testing.T) {
 			t.Errorf("understand EdgeWeights[%s] = %v, want default %v", et, cfg.EdgeWeights[et], def)
 		}
 	}
+}
+
+// ── handleGetContext intent integration ───────────────────────────────────────
+
+// newServerWithDirectionalGraph builds a Server whose graph has the following
+// shape, designed to expose caller vs callee DirectionBoost differences:
+//
+//	CallerA ──CALLS──► Target ──CALLS──► CalleeB
+//
+// Target is the entity under test. CallerA calls Target; Target calls CalleeB.
+// With intent="debug" (DirectionBoost<0): CallerA should rank above CalleeB.
+// With intent="modify" (DirectionBoost>0): CalleeB should rank above CallerA.
+func newServerWithDirectionalGraph(t *testing.T) (*Server, map[string]graph.NodeID) {
+	t.Helper()
+	st := openMCPTestStore(t)
+	g := graph.New("intent-test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	addFn := func(file, name string) graph.NodeID {
+		id := g.MakeNodeID(file, name)
+		g.AddNode(&graph.Node{
+			ID: id, Type: graph.NodeFunction,
+			Name: name, File: file, Line: 1,
+		})
+		return id
+	}
+
+	ids := map[string]graph.NodeID{
+		"Target":  addFn("main.go", "Target"),
+		"CallerA": addFn("main.go", "CallerA"),
+		"CalleeB": addFn("main.go", "CalleeB"),
+	}
+	g.AddEdge(&graph.Edge{From: ids["CallerA"], To: ids["Target"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["Target"], To: ids["CalleeB"], Type: graph.EdgeCalls})
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+	return srv, ids
+}
+
+// relByName parses a get_context JSON response and returns a map of
+// node name → relevance score for all callers and callees.
+func relByName(t *testing.T, raw map[string]interface{}) map[string]float64 {
+	t.Helper()
+	scores := make(map[string]float64)
+	for _, section := range []string{"callers", "callees"} {
+		arr, _ := raw[section].([]interface{})
+		for _, item := range arr {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			node, _ := m["node"].(map[string]interface{})
+			if node == nil {
+				continue
+			}
+			name, _ := node["name"].(string)
+			rel, _ := m["relevance"].(float64)
+			scores[name] = rel
+		}
+	}
+	return scores
+}
+
+// TestHandleGetContext_IntentDebug_PrefersCallers verifies that passing
+// intent="debug" to get_context makes CallerA rank above CalleeB.
+func TestHandleGetContext_IntentDebug_PrefersCallers(t *testing.T) {
+	srv, _ := newServerWithDirectionalGraph(t)
+
+	res, err := srv.handleGetContext(context.Background(), callTool(map[string]any{
+		"entity": "Target",
+		"format": "json",
+		"intent": "debug",
+	}))
+	if err != nil {
+		t.Fatalf("handleGetContext: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", extractErrorText(t, res))
+	}
+
+	raw := extractJSON(t, res)
+	if raw == nil {
+		t.Fatal("nil JSON response")
+	}
+
+	scores := relByName(t, raw)
+	callerRel, hasCaller := scores["CallerA"]
+	calleeRel, hasCallee := scores["CalleeB"]
+	if !hasCaller {
+		t.Fatal("CallerA not found in response")
+	}
+	if !hasCallee {
+		t.Fatal("CalleeB not found in response")
+	}
+	if callerRel <= calleeRel {
+		t.Errorf("intent=debug: CallerA (%.4f) should outrank CalleeB (%.4f)", callerRel, calleeRel)
+	}
+	t.Logf("intent=debug: CallerA=%.4f CalleeB=%.4f", callerRel, calleeRel)
+}
+
+// TestHandleGetContext_IntentModify_PrefersCallees verifies that passing
+// intent="modify" to get_context makes CalleeB rank above CallerA.
+func TestHandleGetContext_IntentModify_PrefersCallees(t *testing.T) {
+	srv, _ := newServerWithDirectionalGraph(t)
+
+	res, err := srv.handleGetContext(context.Background(), callTool(map[string]any{
+		"entity": "Target",
+		"format": "json",
+		"intent": "modify",
+	}))
+	if err != nil {
+		t.Fatalf("handleGetContext: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", extractErrorText(t, res))
+	}
+
+	raw := extractJSON(t, res)
+	if raw == nil {
+		t.Fatal("nil JSON response")
+	}
+
+	scores := relByName(t, raw)
+	callerRel, hasCaller := scores["CallerA"]
+	calleeRel, hasCallee := scores["CalleeB"]
+	if !hasCaller {
+		t.Fatal("CallerA not found in response")
+	}
+	if !hasCallee {
+		t.Fatal("CalleeB not found in response")
+	}
+	if calleeRel <= callerRel {
+		t.Errorf("intent=modify: CalleeB (%.4f) should outrank CallerA (%.4f)", calleeRel, callerRel)
+	}
+	t.Logf("intent=modify: CallerA=%.4f CalleeB=%.4f", callerRel, calleeRel)
+}
+
+// TestHandleGetContext_NoIntent_UsesDefaultBias verifies that when no intent
+// is passed, the response still includes both callers and callees (default
+// slight callee preference does not erase callers entirely).
+func TestHandleGetContext_NoIntent_IncludesBothDirections(t *testing.T) {
+	srv, _ := newServerWithDirectionalGraph(t)
+
+	res, err := srv.handleGetContext(context.Background(), callTool(map[string]any{
+		"entity": "Target",
+		"format": "json",
+	}))
+	if err != nil {
+		t.Fatalf("handleGetContext: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", extractErrorText(t, res))
+	}
+
+	raw := extractJSON(t, res)
+	if raw == nil {
+		t.Fatal("nil JSON response")
+	}
+
+	scores := relByName(t, raw)
+	if scores["CallerA"] == 0 {
+		t.Error("CallerA should appear with no intent (balanced default)")
+	}
+	if scores["CalleeB"] == 0 {
+		t.Error("CalleeB should appear with no intent (balanced default)")
+	}
+	t.Logf("no intent: CallerA=%.4f CalleeB=%.4f", scores["CallerA"], scores["CalleeB"])
 }

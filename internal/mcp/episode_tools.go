@@ -522,16 +522,23 @@ func (s *Server) handleRecall(
 	// Enrichment is computed once and used for BOTH episode and memory search
 	// (both are text-retrieval channels that benefit from session context).
 	enrichedQuery := ""
-	var contextEnrichment map[string]string
+	// contextEnrichment is always populated when agent_id is provided so callers
+	// can distinguish "enrichment applied" (applied=true) from "enrichment
+	// attempted but no new context terms found" (applied=false) from
+	// "no agent provided at all" (field absent). This allows transparent
+	// reasoning about why a recall returned the results it did.
+	var contextEnrichment map[string]interface{}
 	if agentIDStr := stringArg(req, "agent_id"); agentIDStr != "" && query != "" {
 		if agent, agentErr := s.store.GetAgent(agentIDStr); agentErr == nil && agent != nil {
 			enrichedQuery = buildEnrichedQuery(query, agent.Intent, agent.CurrentTaskTitle)
-			if enrichedQuery != query {
-				contextEnrichment = map[string]string{
-					"intent":     agent.Intent,
-					"task_title": agent.CurrentTaskTitle,
-					"enriched":   enrichedQuery,
-				}
+			applied := enrichedQuery != query
+			contextEnrichment = map[string]interface{}{
+				"applied":    applied,
+				"intent":     agent.Intent,
+				"task_title": agent.CurrentTaskTitle,
+			}
+			if applied {
+				contextEnrichment["enriched_query"] = enrichedQuery
 			}
 		}
 		// Lookup errors are silently swallowed — recall degrades to non-enriched.
@@ -919,10 +926,12 @@ func (s *Server) handleRecall(
 	if traversalInfo != nil {
 		resp["graph_traversal"] = traversalInfo
 	}
-	// Sprint 13 #6: surface context enrichment when it was applied.
-	// Tells the agent its session context (intent, task) boosted memory retrieval.
+	// Sprint 13 #6: surface query enrichment when agent_id was provided.
+	// "query_enrichment" (distinct from get_context's "enrichment" field which
+	// carries rules/violations/task hints) shows how recall() modified the
+	// BM25/semantic query using the agent's session state.
 	if contextEnrichment != nil {
-		resp["context_enrichment"] = contextEnrichment
+		resp["query_enrichment"] = contextEnrichment
 	}
 	return jsonResult(resp)
 }

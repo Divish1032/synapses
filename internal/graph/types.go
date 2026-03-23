@@ -328,6 +328,7 @@ type CarveConfig struct {
 	// MinRelevance drops any node whose relevance score falls below this threshold
 	// before the token-budget cut is applied. Prevents low-signal siblings and
 	// package-import nodes from crowding out actual dependencies.
+	// See DefaultCarveConfig() for tuning guidance (BFS vs PPR interaction).
 	MinRelevance float64
 	// ExcludeTypes lists node types to omit from the response. These nodes are
 	// still traversed during BFS (so edges through them are discovered) but are
@@ -503,6 +504,23 @@ func IntentDirectionBoost(intent string) float64 {
 }
 
 // DefaultCarveConfig returns sensible defaults for context carving.
+//
+// MinRelevance / PPR interaction:
+//   - BFS path: MinRelevance=0.01 prunes nodes whose relevance has decayed below
+//     1% of root. With decay=0.5 and a 16K-edge graph this allows ~6 hops for
+//     narrow chains and ~3 hops for hub nodes (degree-normalized adaptive decay).
+//     Raising MinRelevance tightens the subgraph; lowering it risks hub explosion.
+//   - PPR path (UsePPR=true): power iteration assigns near-zero scores to distant
+//     nodes naturally — MinRelevance=0.01 trims the long tail without aggressive
+//     pruning. The spike benchmark (ppr_spike_test.go) validated this threshold
+//     against diamond and wide-fan graph topologies. Lowering below 0.001 has
+//     negligible recall gain with O(N) cost. Raising above 0.05 risks losing
+//     semantically adjacent nodes in sparse subgraphs.
+//
+// Recommended tuning guide:
+//   - Default (0.01) — correct for most codebases up to ~50K nodes.
+//   - Dense monorepos (>100K edges): raise to 0.03–0.05 to keep carves fast.
+//   - Sparse/small repos (<1K nodes): lower to 0.005 to improve recall depth.
 func DefaultCarveConfig() CarveConfig {
 	return CarveConfig{
 		MaxDepth:         2,
@@ -515,6 +533,10 @@ func DefaultCarveConfig() CarveConfig {
 			NodePackage: true,
 			NodeFile:    true,
 		},
+		// Sprint 13 end-state: PPR is the default traversal algorithm.
+		// Validated by spike tests (diamond 4.69×, wide-fan 5.68× over BFS).
+		// Set use_ppr=false in synapses.json to revert to BFS for debugging.
+		UsePPR: true,
 	}
 }
 

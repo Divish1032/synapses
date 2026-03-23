@@ -259,6 +259,16 @@ func (s *Server) handleGetContext(
 
 	cfg := s.config.CarveConfig()
 
+	// Sprint 13 gap: apply intent-based edge weights and directional bias when
+	// the caller passes intent=. This mirrors prepare_context behaviour — same
+	// applyIntentCarveConfig path — so get_context and prepare_context produce
+	// identically-shaped traversals for the same intent.
+	// When intent is absent, DirectionBoost stays at the default (0.2, slight
+	// callee preference) set by DefaultCarveConfig.
+	if intent, ok := req.GetArguments()["intent"].(string); ok && intent != "" {
+		applyIntentCarveConfig(&cfg, intent)
+	}
+
 	// Sprint 13 #3: Semantic-structural hybrid scoring.
 	// Wire in the embedding lookup so CarveEgoGraph can blend structural BFS/PPR
 	// scores with cosine similarity to the root node's embedding.
@@ -349,8 +359,11 @@ func (s *Server) handleGetContext(
 		includeInferred = v
 	}
 
-	entityCacheKey := fmt.Sprintf("%s|%s|%s|%s|%d|%d|inferred:%v",
-		entityName, fileHint, format, detailLevel, cfg.MaxDepth, cfg.TokenBudget, includeInferred)
+	// cfg.UsePPR is included so that toggling use_ppr in synapses.json produces
+	// a different cache key and agents never receive a stale {unchanged:true}
+	// response that was computed under a different traversal algorithm.
+	entityCacheKey := fmt.Sprintf("%s|%s|%s|%s|%d|%d|inferred:%v|ppr:%v",
+		entityName, fileHint, format, detailLevel, cfg.MaxDepth, cfg.TokenBudget, includeInferred, cfg.UsePPR)
 
 	// Resolve the entity name to a node ID.
 	nodes := s.graph.FindByName(entityName)

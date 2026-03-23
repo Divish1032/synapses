@@ -512,6 +512,23 @@ type ContextCarveConfig struct {
 	// Only applied when node embeddings are available; otherwise ignored.
 	// Uses *float64 (pointer) so that explicit 0 is distinguishable from unset.
 	HybridLambda *float64 `json:"hybrid_lambda,omitempty"`
+	// UsePPR enables Personalized PageRank traversal in get_context instead of
+	// the default BFS heuristic. PPR captures multi-path importance — a node
+	// reached by N independent call paths scores proportionally higher than a
+	// single-path node at the same structural distance. Validated by Sprint 13
+	// spike: 4.69× diamond boost, 5.68× wide-fan boost over BFS max-score.
+	//
+	// Default: true. Set to false to revert to BFS (e.g. for debugging or on
+	// very small repos where PPR overhead is unnecessary). Uses *bool so that
+	// explicit false is distinguishable from unset (which defaults to true).
+	UsePPR *bool `json:"use_ppr,omitempty"`
+	// PPRAlpha is the PPR teleport probability — the chance the random walk
+	// restarts from the root at each step. Range (0, 1).
+	//   Lower alpha → broader reach, more global importance captured.
+	//   Higher alpha → tighter focus on root, shorter effective reach.
+	// Default: 0.15 (standard PageRank restart rate, validated in spike tests).
+	// Values outside (0, 1) are clamped to 0.15. Only used when use_ppr=true.
+	PPRAlpha float64 `json:"ppr_alpha,omitempty"`
 }
 
 // Violation records a detected rule breach.
@@ -680,6 +697,12 @@ func (c *Config) CarveConfig() graph.CarveConfig {
 	// preserve the nil / explicit-zero distinction.
 	if c.ContextCarve.HybridLambda != nil {
 		cfg.HybridLambda = *c.ContextCarve.HybridLambda
+	}
+	if c.ContextCarve.UsePPR != nil {
+		cfg.UsePPR = *c.ContextCarve.UsePPR
+	}
+	if c.ContextCarve.PPRAlpha > 0 {
+		cfg.Alpha = c.ContextCarve.PPRAlpha
 	}
 	if len(c.EdgeWeights) > 0 {
 		cfg.EdgeWeights = make(map[graph.EdgeType]float64, len(c.EdgeWeights))
