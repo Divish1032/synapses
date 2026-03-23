@@ -117,10 +117,9 @@ func (d *DriftDetector) checkDriftForEntry(ctx context.Context, e config.Federat
 		return d.checkDriftFallback(ctx, e.Alias, deps)
 	}
 
-	// Cache the HEAD for other uses.
-	d.resolver.mu.Lock()
-	d.resolver.gitHeads[e.Alias] = currentHead
-	d.resolver.mu.Unlock()
+	// Cache the HEAD for other uses via exported setter to avoid
+	// reaching into Resolver internals and creating lock ordering risks.
+	d.resolver.SetGitHead(e.Alias, currentHead)
 
 	// Step 2: If ALL deps match current HEAD, no drift.
 	allSameHead := true

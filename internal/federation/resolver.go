@@ -372,6 +372,15 @@ func (r *Resolver) cachedHead(ctx context.Context, alias string) string {
 	return h
 }
 
+// SetGitHead stores a cached HEAD commit hash for a sibling alias.
+// Exposed so that DriftDetector can update the cache without reaching
+// into Resolver internals (avoids lock ordering risks).
+func (r *Resolver) SetGitHead(alias, head string) {
+	r.mu.Lock()
+	r.gitHeads[alias] = head
+	r.mu.Unlock()
+}
+
 // CachedHead is the exported counterpart of cachedHead. It returns the cached
 // git HEAD commit hash for a sibling project, fetching it fresh if not cached.
 // Returns "" if the alias is unknown, not a git repo, or git is unavailable.
