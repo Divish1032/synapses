@@ -75,9 +75,13 @@ func LoadPromptDir(dir, source string) ([]PromptTemplate, error) {
 			continue
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
-			continue // skip symlinks to prevent directory traversal
+			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		fullPath := filepath.Join(dir, entry.Name())
+		if fi, err := os.Lstat(fullPath); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		data, err := os.ReadFile(fullPath)
 		if err != nil {
 			continue // skip unreadable files silently
 		}
