@@ -247,10 +247,12 @@ func (s *Server) EmbedToolCatalog(ctx context.Context, embedder embed.Embedder) 
 		}
 		if err != nil {
 			logutil.Warn("synapses: embed tool catalog %s: %v — semantic tool discovery unavailable\n", tool.Name, err)
-			return // abort; partial index is worse than no index
+			s.scheduleToolCatalogRetry(ctx, embedder)
+			return // abort this attempt; partial index is worse than no index
 		}
 		if len(vec) == 0 {
 			logutil.Warn("synapses: embed tool catalog %s: empty vector — semantic tool discovery unavailable\n", tool.Name)
+			s.scheduleToolCatalogRetry(ctx, embedder)
 			return
 		}
 		normed := normalizeVec(vec)
@@ -265,6 +267,27 @@ func (s *Server) EmbedToolCatalog(ctx context.Context, embedder embed.Embedder) 
 	s.toolEmbedsMu.Lock()
 	s.toolEmbeds = embeddings
 	s.toolEmbedModel = model
+	s.toolCatalogRetries.Store(0) // reset retry counter on success
 	s.toolEmbedsMu.Unlock()
 	logutil.Info("synapses: tool catalog embedded (%d tools, model=%s)\n", len(embeddings), model)
+}
+
+// scheduleToolCatalogRetry schedules a single delayed retry of EmbedToolCatalog
+// after a transient failure. At most 2 retries are scheduled to prevent infinite
+// retry loops. The retry runs after 30 seconds in a background goroutine.
+func (s *Server) scheduleToolCatalogRetry(ctx context.Context, embedder embed.Embedder) {
+	if s.toolCatalogRetries.Add(1) > 2 {
+		logutil.Warn("synapses: tool catalog embed retries exhausted — semantic tool discovery disabled for this session\n")
+		return
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second):
+		}
+		retryCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		s.EmbedToolCatalog(retryCtx, embedder)
+	}()
 }
