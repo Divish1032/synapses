@@ -674,9 +674,11 @@ func l2Normalize(vec []float32) []float32 {
 	for i, v := range vec {
 		out[i] = v * scale
 	}
-	// Guard: reject output if normalization produced NaN/Inf.
-	if math.IsNaN(float64(out[0])) || math.IsInf(float64(out[0]), 0) {
-		return nil
+	// Guard: reject output if normalization produced NaN/Inf in any element.
+	for _, v := range out {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return nil
+		}
 	}
 	return out
 }
