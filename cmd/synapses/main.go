@@ -139,6 +139,8 @@ func run(args []string) error {
 		return cmdApprove(args[1:])
 	case "benchmark":
 		return cmdBenchmark(args[1:])
+	case "uninstall":
+		return cmdUninstall(args[1:])
 	case "update":
 		return cmdUpdate(args[1:])
 	case "help", "-h", "--help":
@@ -2774,6 +2776,12 @@ AGENTS:
 UPDATE:
   update               Check for updates and install
   update    --check    Check only, don't download
+
+CLEANUP:
+  uninstall -path <dir>       Remove Synapses from a project (agent configs, index)
+  uninstall --global          Full system removal (daemon, data, binary)
+  uninstall --keep-data       Keep indexes, remove everything else
+  uninstall --keep-binary     Keep the binary, remove everything else
 
 OTHER:
   query, brief, export, benchmark, memory, version, help
