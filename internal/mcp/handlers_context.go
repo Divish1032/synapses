@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -123,7 +124,7 @@ func computeEntityHash(rootID graph.NodeID, nodes []graph.CarvedNode, edges []*g
 	sort.Strings(parts)
 	h := sha256.New()
 	for _, s := range parts {
-		_, _ = h.Write([]byte(s))
+		io.WriteString(h, s) // hash.Hash.Write never returns an error per Go spec
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))[:12] // 12 hex chars = 48 bits — ample for cache hit detection
 }
