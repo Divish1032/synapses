@@ -437,6 +437,10 @@ func (p *JavaScriptParser) extractClassMethods(
 // collectJSCallSites performs a depth-first AST walk to collect call sites with
 // function-level caller resolution, matching the Go parser's accuracy.
 func collectJSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	// Collect instantiated types for RTA-style call graph refinement.
+	collectTSInstantiatedTypes(g, root, src, filePath)
+	// Collect decorator-annotated and static-factory instantiations.
+	collectTSDecoratorInstantiations(g, root, src, filePath)
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		ClassTypes: map[string]bool{"class_declaration": true},
 		FuncTypes: map[string]bool{

@@ -483,3 +483,49 @@ class Builder {
 		t.Errorf("unexpected Builder in instantiated types — static method returns string, not Builder")
 	}
 }
+
+// --- JavaScript tests ---
+
+// TestJSInstantiatedTypes_NewExpression verifies that JavaScript new expressions
+// are tracked (JS shares the same RTA infrastructure as TypeScript).
+func TestJSInstantiatedTypes_NewExpression(t *testing.T) {
+	src := `
+class App {
+  constructor() {
+    this.repo = new UserRepository();
+    this.auth = new AuthService();
+  }
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewJavaScriptParser()
+	if err := p.Parse(g, "app.js", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	for _, want := range []string{"UserRepository", "AuthService"} {
+		if !types[want] {
+			t.Errorf("expected %q in JS instantiated types, got %v", want, types)
+		}
+	}
+}
+
+// TestJSInstantiatedTypes_DecoratorClass verifies that JS decorator-annotated
+// classes are recorded (NestJS supports JS with decorators via Babel/SWC).
+func TestJSInstantiatedTypes_DecoratorClass(t *testing.T) {
+	src := `
+@Injectable()
+export class PaymentService {
+  charge() {}
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewJavaScriptParser()
+	if err := p.Parse(g, "payment.service.js", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	types := g.GetInstantiatedTypes()
+	if !types["PaymentService"] {
+		t.Errorf("expected PaymentService in JS instantiated types (via @Injectable), got %v", types)
+	}
+}
