@@ -88,6 +88,12 @@ func EnrichChurn(g *graph.Graph, repoRoot string, days int) {
 	// but n.File uses a symlinked path (e.g. macOS /var → /private/var).
 	resolvedFile := make(map[string]string)
 
+	// Collect churn updates outside the graph lock.
+	type churnUpdate struct {
+		id    graph.NodeID
+		count int
+	}
+	var updates []churnUpdate
 	for _, n := range nodes {
 		if n.File == "" {
 			continue
@@ -116,10 +122,17 @@ func EnrichChurn(g *graph.Graph, repoRoot string, days int) {
 		if !ok2 || count == 0 {
 			continue
 		}
-		if n.Metadata == nil {
-			n.Metadata = make(map[string]string)
-		}
-		n.Metadata["churn"] = strconv.Itoa(count)
+		updates = append(updates, churnUpdate{id: n.ID, count: count})
+	}
+	// Apply metadata writes under the graph write lock to prevent concurrent
+	// map read+write panics with get_context / CarveEgoGraph callers.
+	for _, u := range updates {
+		g.UpdateNodeMetadata(u.id, func(n *graph.Node) {
+			if n.Metadata == nil {
+				n.Metadata = make(map[string]string)
+			}
+			n.Metadata["churn"] = strconv.Itoa(u.count)
+		})
 	}
 }
 
@@ -247,6 +260,11 @@ func EnrichCoverage(g *graph.Graph, repoRoot, profilePath string) {
 	normRepoRoot := filepath.ToSlash(repoRoot)
 	prefix := normRepoRoot + "/"
 
+	type covUpdate struct {
+		id  graph.NodeID
+		pct string
+	}
+	var covUpdates []covUpdate
 	nodes := g.AllNodes()
 	for _, n := range nodes {
 		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
@@ -285,10 +303,15 @@ func EnrichCoverage(g *graph.Graph, repoRoot, profilePath string) {
 		}
 
 		pct := float64(coveredStmts) / float64(totalStmts)
-		if n.Metadata == nil {
-			n.Metadata = make(map[string]string)
-		}
-		n.Metadata["coverage"] = fmt.Sprintf("%.2f", pct)
+		covUpdates = append(covUpdates, covUpdate{id: n.ID, pct: fmt.Sprintf("%.2f", pct)})
+	}
+	for _, u := range covUpdates {
+		g.UpdateNodeMetadata(u.id, func(n *graph.Node) {
+			if n.Metadata == nil {
+				n.Metadata = make(map[string]string)
+			}
+			n.Metadata["coverage"] = u.pct
+		})
 	}
 }
 
@@ -421,6 +444,11 @@ func EnrichPprof(g *graph.Graph, repoRoot, profilePath string) {
 		}
 	}
 
+	type pprofUpdate struct {
+		id  graph.NodeID
+		val string
+	}
+	var pprofUpdates []pprofUpdate
 	for rawName, pct := range samples {
 		shortName := pprofShortName(rawName)
 		nodes, ok := nameToNodes[shortName]
@@ -429,11 +457,16 @@ func EnrichPprof(g *graph.Graph, repoRoot, profilePath string) {
 		}
 		val := fmt.Sprintf("%.2f", pct)
 		for _, n := range nodes {
+			pprofUpdates = append(pprofUpdates, pprofUpdate{id: n.ID, val: val})
+		}
+	}
+	for _, u := range pprofUpdates {
+		g.UpdateNodeMetadata(u.id, func(n *graph.Node) {
 			if n.Metadata == nil {
 				n.Metadata = make(map[string]string)
 			}
-			n.Metadata["cpu_pct"] = val
-		}
+			n.Metadata["cpu_pct"] = u.val
+		})
 	}
 }
 
@@ -744,6 +777,11 @@ func EnrichCommitContext(g *graph.Graph, repoRoot string) {
 	// Supports umbrella workspaces where repoRoot has no .git but sub-dirs do.
 	dirToGitRoot := make(map[string]string)
 
+	type ccUpdate struct {
+		id  graph.NodeID
+		raw string
+	}
+	var ccUpdates []ccUpdate
 	for _, n := range g.AllNodes() {
 		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
 			continue
@@ -775,10 +813,15 @@ func EnrichCommitContext(g *graph.Graph, repoRoot string) {
 		if raw == "" {
 			continue
 		}
-		if n.Metadata == nil {
-			n.Metadata = make(map[string]string)
-		}
-		n.Metadata["commit_context"] = raw
+		ccUpdates = append(ccUpdates, ccUpdate{id: n.ID, raw: raw})
+	}
+	for _, u := range ccUpdates {
+		g.UpdateNodeMetadata(u.id, func(n *graph.Node) {
+			if n.Metadata == nil {
+				n.Metadata = make(map[string]string)
+			}
+			n.Metadata["commit_context"] = u.raw
+		})
 	}
 }
 
