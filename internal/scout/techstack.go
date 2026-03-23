@@ -51,10 +51,22 @@ func DetectTechStack(projectRoot string) []TechStackEntry {
 	return entries
 }
 
+// safeReadManifest reads a file after checking it is not a symlink.
+func safeReadManifest(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, os.ErrPermission
+	}
+	return os.ReadFile(path)
+}
+
 // ── manifest parsers ──────────────────────────────────────────────────────────
 
 func parseGoMod(root string) []TechStackEntry {
-	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	data, err := safeReadManifest(filepath.Join(root, "go.mod"))
 	if err != nil {
 		return nil
 	}
@@ -112,7 +124,7 @@ func moduleShortName(modPath string) string {
 }
 
 func parsePackageJSON(root string) []TechStackEntry {
-	data, err := os.ReadFile(filepath.Join(root, "package.json"))
+	data, err := safeReadManifest(filepath.Join(root, "package.json"))
 	if err != nil {
 		return nil
 	}
@@ -147,7 +159,7 @@ func parsePackageJSON(root string) []TechStackEntry {
 }
 
 func parseRequirementsTxt(root string) []TechStackEntry {
-	data, err := os.ReadFile(filepath.Join(root, "requirements.txt"))
+	data, err := safeReadManifest(filepath.Join(root, "requirements.txt"))
 	if err != nil {
 		return nil
 	}
@@ -181,7 +193,7 @@ func parseRequirementsTxt(root string) []TechStackEntry {
 }
 
 func parseCargoToml(root string) []TechStackEntry {
-	data, err := os.ReadFile(filepath.Join(root, "Cargo.toml"))
+	data, err := safeReadManifest(filepath.Join(root, "Cargo.toml"))
 	if err != nil {
 		return nil
 	}
@@ -216,7 +228,7 @@ func parseCargoToml(root string) []TechStackEntry {
 }
 
 func parsePyprojectToml(root string) []TechStackEntry {
-	data, err := os.ReadFile(filepath.Join(root, "pyproject.toml"))
+	data, err := safeReadManifest(filepath.Join(root, "pyproject.toml"))
 	if err != nil {
 		return nil
 	}
