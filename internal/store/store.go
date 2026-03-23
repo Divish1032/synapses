@@ -545,6 +545,9 @@ func DefaultPath(repoRoot string) (string, error) {
 		return "", fmt.Errorf("abs path: %w", err)
 	}
 	base := filepath.Base(abs)
+	if strings.ContainsAny(base, "/\\") || base == "." || base == ".." {
+		return "", fmt.Errorf("unsafe repo path base %q", base)
+	}
 	for _, c := range base {
 		if c < 0x20 || c == 0x7f {
 			return "", fmt.Errorf("repo path contains control characters")
@@ -1047,11 +1050,30 @@ func (s *Store) rebuildFTS() error {
 	if _, err := tx.Exec(`DELETE FROM nodes_fts`); err != nil {
 		return err
 	}
-	rows, err := tx.Query(`SELECT id, name, signature, doc FROM nodes`)
-	if err != nil {
-		return err
+
+	// Buffer all rows before inserting to avoid interleaving tx.Query reads
+	// with tx.Exec inserts on the same transaction.
+	type ftsRow struct{ id, name, sig, doc string }
+	var buf []ftsRow
+	{
+		rows, err := tx.Query(`SELECT id, name, signature, doc FROM nodes`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var r ftsRow
+			if err := rows.Scan(&r.id, &r.name, &r.sig, &r.doc); err != nil {
+				rows.Close()
+				return err
+			}
+			buf = append(buf, r)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
 	}
-	defer rows.Close()
 
 	stmt, err := tx.Prepare(`INSERT INTO nodes_fts (node_id, name, split_name, signature, doc) VALUES (?, ?, ?, ?, ?)`)
 	if err != nil {
@@ -1059,17 +1081,10 @@ func (s *Store) rebuildFTS() error {
 	}
 	defer stmt.Close()
 
-	for rows.Next() {
-		var id, name, sig, doc string
-		if err := rows.Scan(&id, &name, &sig, &doc); err != nil {
+	for _, r := range buf {
+		if _, err := stmt.Exec(r.id, r.name, splitCamelCase(r.name), r.sig, r.doc); err != nil {
 			return err
 		}
-		if _, err := stmt.Exec(id, name, splitCamelCase(name), sig, doc); err != nil {
-			return err
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
 	}
 	return tx.Commit()
 }
@@ -1541,7 +1556,7 @@ func (s *Store) PruneStaleData(retentionDays int) {
 			return
 		}
 		subq := fmt.Sprintf(
-			"DELETE FROM %s WHERE rowid IN (SELECT rowid FROM %s WHERE %s LIMIT 1000)",
+			"DELETE FROM %s WHERE rowid IN (SELECT rowid FROM %s WHERE %s LIMIT 5000)",
 			table, table, whereClause,
 		)
 		for {
@@ -1551,10 +1566,10 @@ func (s *Store) PruneStaleData(retentionDays int) {
 				return
 			}
 			n, _ := res.RowsAffected()
-			if n < 1000 {
+			if n < 5000 {
 				return // done
 			}
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 
@@ -1826,6 +1841,7 @@ func (s *Store) reconcileOrphanedReferences() {
 			}
 		}
 		if tx, txErr := s.knowledgeDB.Begin(); txErr == nil {
+			defer func() { _ = tx.Rollback() }()
 			for _, nid := range staleNodeIDs {
 				tx.Exec(deleteSQL, nid) //nolint:errcheck
 			}

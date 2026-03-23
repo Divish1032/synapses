@@ -175,9 +175,8 @@ func extractInterfaceMethods(root sitter.Node, src []byte) map[string][]string {
 // method, and struct/interface declaration.  The returned map is keyed by the
 // unqualified name (for functions/types) or "ReceiverType.MethodName" (for
 // methods) — matching the name strings used when creating graph nodes.
-func extractGoDeclarationInfo(root sitter.Node, src []byte) map[string]goFuncInfo {
+func extractGoDeclarationInfo(root sitter.Node, src []byte, lines []string) map[string]goFuncInfo {
 	result := make(map[string]goFuncInfo)
-	lines := strings.Split(string(src), "\n")
 
 	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
@@ -498,10 +497,14 @@ func (p *GoParser) extractDeclarations(
 ) error {
 	lang := p.language
 
+	// Split source into lines once and pass to helpers to avoid repeated
+	// O(n) allocations inside each declaration extraction helper.
+	lines := strings.Split(string(src), "\n")
+
 	// Pre-build enriched metadata (signatures, doc comments, line counts) for
 	// all top-level declarations in one AST walk, so the query loops below
 	// can attach it without additional passes.
-	declInfo := extractGoDeclarationInfo(root, src)
+	declInfo := extractGoDeclarationInfo(root, src, lines)
 
 	// Pre-collect interface method names so they can be stored as metadata on
 	// interface nodes, enabling ResolveImplementsEdges to detect struct satisfaction.

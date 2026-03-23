@@ -355,24 +355,26 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 
 		// Check version
 		if resp, err := client.Get(ollamaURL + "/api/version"); err == nil {
-			defer resp.Body.Close()
 			var ver map[string]interface{}
 			if json.NewDecoder(resp.Body).Decode(&ver) == nil {
 				result["running"] = true
 				result["version"] = ver["version"]
 			}
+			io.Copy(io.Discard, resp.Body) //nolint:errcheck
+			resp.Body.Close()
 		}
 
 		// List models
 		if result["running"] == true {
 			if resp, err := client.Get(ollamaURL + "/api/tags"); err == nil {
-				defer resp.Body.Close()
 				var tags map[string]interface{}
 				if json.NewDecoder(resp.Body).Decode(&tags) == nil {
 					if models, ok := tags["models"]; ok {
 						result["models"] = models
 					}
 				}
+				io.Copy(io.Discard, resp.Body) //nolint:errcheck
+				resp.Body.Close()
 			}
 		}
 
@@ -588,11 +590,14 @@ func tailFile(path string, n int) []string {
 		if chunkSize > info.Size() {
 			chunkSize = info.Size()
 		}
-		offset := info.Size() - chunkSize
-		if offset < 0 {
-			offset = 0
-		}
-		if _, err := f.Seek(offset, io.SeekStart); err == nil {
+		for attempt := 0; attempt < 3; attempt++ {
+			offset := info.Size() - chunkSize
+			if offset < 0 {
+				offset = 0
+			}
+			if _, err := f.Seek(offset, io.SeekStart); err != nil {
+				break
+			}
 			var lines []string
 			scanner := bufio.NewScanner(f)
 			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -603,10 +608,17 @@ func tailFile(path string, n int) []string {
 			if offset > 0 && len(lines) > 0 {
 				lines = lines[1:]
 			}
-			if len(lines) > n {
-				lines = lines[len(lines)-n:]
+			if len(lines) >= n || offset == 0 {
+				if len(lines) > n {
+					lines = lines[len(lines)-n:]
+				}
+				return lines
 			}
-			return lines
+			// Too few lines; double chunk size and retry.
+			chunkSize *= 2
+			if chunkSize > info.Size() {
+				chunkSize = info.Size()
+			}
 		}
 	}
 

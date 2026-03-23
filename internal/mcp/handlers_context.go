@@ -699,7 +699,7 @@ func (s *Server) handleGetContext(
 		}
 		repoRoot := s.graph.Root()
 		if repoRoot != "" {
-			if commits := metrics.RecentCommitsForFile(repoRoot, dc.Root.File, 3); len(commits) > 0 {
+			if commits := metrics.RecentCommitsForFile(ctx, repoRoot, dc.Root.File, 3); len(commits) > 0 {
 				dc.RecentChanges = commits
 			}
 		}

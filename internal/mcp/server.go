@@ -1045,10 +1045,7 @@ func (s *Server) SetMemoryEmbedder(e embed.Embedder) {
 		go func() {
 			defer s.wg.Done()
 			ctx, cancel := context.WithCancel(context.Background())
-			go func() {
-				<-s.stopCh
-				cancel()
-			}()
+			defer cancel()
 			s.EmbedToolCatalog(ctx, e)
 		}()
 	}
@@ -1222,7 +1219,7 @@ func (s *Server) embedSweepLoop(embedder embed.Embedder, st *store.Store) {
 				if !ok || content == "" {
 					continue
 				}
-				s.embedMemory(embedder, st, memID, content)
+				s.goBackground(func() { s.embedMemory(embedder, st, memID, content) })
 			}
 		case <-s.stopCh:
 			return

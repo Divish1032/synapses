@@ -3,6 +3,7 @@ package metrics
 // Additional coverage tests for BlameAgeLabel branches and EnrichCommitContextForFile.
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -337,7 +338,7 @@ func TestRecentCommitsForFile_LongBody(t *testing.T) {
 		"is exercised properly by the test suite. Here are some extra words."
 	run("git", "commit", "-m", "subject\n\n"+longBody)
 
-	commits := RecentCommitsForFile(dir, absFile, 3)
+	commits := RecentCommitsForFile(context.Background(), dir, absFile, 3)
 	if len(commits) == 0 {
 		t.Skip("git not available or commit failed")
 	}

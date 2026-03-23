@@ -167,9 +167,13 @@ func resolveArg(v interface{}, params map[string]interface{}, prevResult string,
 	}
 	sort.Slice(paramKeys, func(i, j int) bool { return len(paramKeys[i]) > len(paramKeys[j]) })
 	for _, k := range paramKeys {
-		if sv, ok := params[k].(string); ok {
-			result = strings.ReplaceAll(result, "$"+k, sv)
+		var sv string
+		if s, ok := params[k].(string); ok {
+			sv = s
+		} else {
+			sv = fmt.Sprintf("%v", params[k])
 		}
+		result = strings.ReplaceAll(result, "$"+k, sv)
 	}
 	return result
 }

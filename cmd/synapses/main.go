@@ -506,15 +506,19 @@ func cmdStartDirect(args []string) error {
 				fw.SetPacketInvalidator(srv)          // clear brain packet cache on file change
 				fw.SetBrainClient(brainCli)           // wire incremental ingest
 				// Federation: wire cross-project dependency tracker into watcher.
+				var fedTracker *federation.DeterministicDetector
 				if fedResolver != nil {
-					tracker := federation.NewDeterministicDetector(cfg.Federation, fedResolver)
-					fw.SetCrossProjectTracker(tracker)
+					fedTracker = federation.NewDeterministicDetector(cfg.Federation, fedResolver)
+					fw.SetCrossProjectTracker(fedTracker)
 				}
-				// Hot-reload synapses.json: reconnect brain when config changes.
+				// Hot-reload synapses.json: reconnect brain and federation when config changes.
 				fw.SetConfigChangeHandler(func(newCfg *config.Config) {
 					newBrain := brain.NewInProcess(newCfg.Brain.ToBrainConfig())
 					srv.SetBrainClient(newBrain)
 					fw.SetBrainClient(newBrain)
+					if fedTracker != nil {
+						fedTracker.Rebuild(newCfg.Federation)
+					}
 					logutil.Info("synapses: brain reloaded (enabled=%v)\n", newCfg.Brain.Enabled)
 				})
 				logutil.Info("synapses: watching %s for changes\n", absPath)
@@ -559,7 +563,14 @@ func cmdStartDirect(args []string) error {
 			}
 			brainCli.Close()
 			if sharedPulse != nil {
-				forceClose("pulse", func() { sharedPulse.Close() })
+				// pulse.Collector.Stop() flushes in-flight events; give it 3s.
+				done := make(chan struct{})
+				go func() { sharedPulse.Close(); close(done) }()
+				select {
+				case <-done:
+				case <-time.After(3 * time.Second):
+					logutil.Error("synapses: force-exit: pulse close timed out\n")
+				}
 			}
 			forceClose("store", func() { st.Close() })
 			os.Exit(1)

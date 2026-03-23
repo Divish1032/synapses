@@ -1,6 +1,7 @@
 package metrics_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,7 +14,7 @@ import (
 func TestRecentCommitsForFile_NoGitRepo(t *testing.T) {
 	// Non-git directory → git log fails → returns nil without panicking.
 	dir := t.TempDir()
-	result := metrics.RecentCommitsForFile(dir, "nonexistent.go", 3)
+	result := metrics.RecentCommitsForFile(context.Background(), dir, "nonexistent.go", 3)
 	if result != nil {
 		t.Errorf("expected nil for non-git repo, got %v", result)
 	}
@@ -22,7 +23,7 @@ func TestRecentCommitsForFile_NoGitRepo(t *testing.T) {
 func TestRecentCommitsForFile_ZeroLimit(t *testing.T) {
 	// limit <= 0 defaults to 3, but non-git still returns nil.
 	dir := t.TempDir()
-	result := metrics.RecentCommitsForFile(dir, "file.go", 0)
+	result := metrics.RecentCommitsForFile(context.Background(), dir, "file.go", 0)
 	if result != nil {
 		t.Errorf("expected nil for non-git repo (limit=0), got %v", result)
 	}
@@ -30,7 +31,7 @@ func TestRecentCommitsForFile_ZeroLimit(t *testing.T) {
 
 func TestRecentCommitsForFile_NegativeLimit(t *testing.T) {
 	dir := t.TempDir()
-	result := metrics.RecentCommitsForFile(dir, "file.go", -1)
+	result := metrics.RecentCommitsForFile(context.Background(), dir, "file.go", -1)
 	if result != nil {
 		t.Errorf("expected nil for non-git repo (limit=-1), got %v", result)
 	}

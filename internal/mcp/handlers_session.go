@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -25,6 +26,9 @@ import (
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
+
+// safeBranchRe validates git branch names to prevent shell injection via undelimited arguments.
+var safeBranchRe = regexp.MustCompile(`^[a-zA-Z0-9._/\-]+$`)
 
 // embeddingStatus returns a human-readable status string for the active
 // memory embedder. Used in the session_init response to explain why recall()
@@ -647,16 +651,22 @@ func (s *Server) handleSessionInit(
 						// Surface which files differ between branches so the agent
 						// knows what context may have changed. Capped at 50 files.
 						gitCtxDiff, gitCancelDiff := context.WithTimeout(ctx, 2*time.Second)
-						// Reject branch names starting with "-" to prevent git flag injection.
-						if !strings.HasPrefix(prevBranch, "-") && !strings.HasPrefix(currentBranch, "-") {
+						// Validate branch names to prevent git argument injection.
+						if safeBranchRe.MatchString(prevBranch) && safeBranchRe.MatchString(currentBranch) &&
+							!strings.Contains(prevBranch, "\x00") && !strings.Contains(currentBranch, "\x00") &&
+							!strings.Contains(prevBranch, "...") && !strings.Contains(currentBranch, "...") {
 						if diffOut, diffErr := exec.CommandContext(gitCtxDiff, "git", "-C", root, "diff", "--name-only", prevBranch+"..."+currentBranch).Output(); diffErr == nil {
 							diffFiles := strings.Split(strings.TrimSpace(string(diffOut)), "\n")
-							// Filter empty strings from split.
+							// Filter empty strings and paths that escape root.
 							var files []string
 							for _, f := range diffFiles {
-								if f != "" {
-									files = append(files, f)
+								if f == "" {
+									continue
 								}
+								if !pathWithinRoot(root, filepath.Join(root, f)) {
+									continue
+								}
+								files = append(files, f)
 							}
 							if len(files) > 50 {
 								workingSection["branch_diff_truncated"] = true

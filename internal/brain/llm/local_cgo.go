@@ -125,17 +125,22 @@ func (c *LocalClient) generate(ctx context.Context, prompt string) (string, erro
 	// gollama's Generate API is raw-completion only — we format the template here.
 	fullPrompt := applyQwen3ChatTemplate(silSystemPrompt, prompt)
 
-	// If a prior call was abandoned (ctx cancelled), try to drain its completion
-	// signal. If the abandoned goroutine has finished, the semaphore is already
-	// free and we can proceed immediately instead of blocking for the full
-	// inference duration (5-30s). Non-blocking: if still running, we'll wait
-	// on the semaphore as before.
-	if done := c.abandonedDone; done != nil {
-		select {
-		case <-done:
-			c.abandonedDone = nil
-		default:
+	// Drain all prior abandoned-goroutine done channels (non-blocking).
+	// If the goroutine has finished, the semaphore is already free and we can
+	// proceed immediately instead of blocking for the full inference duration
+	// (5-30s). Channels that are not yet closed remain in the slice for the
+	// next caller to retry.
+	{
+		remaining := c.abandonedDones[:0]
+		for _, done := range c.abandonedDones {
+			select {
+			case <-done:
+				// goroutine finished; semaphore already released — discard
+			default:
+				remaining = append(remaining, done)
+			}
 		}
+		c.abandonedDones = remaining
 	}
 
 	// Acquire the inference semaphore to prevent a second caller from using the
@@ -170,9 +175,10 @@ func (c *LocalClient) generate(ctx context.Context, prompt string) (string, erro
 
 	select {
 	case <-ctx.Done():
-		// Caller cancelled — stash the done channel so the next caller can
-		// drain it immediately instead of blocking on the semaphore.
-		c.abandonedDone = done
+		// Caller cancelled — append the done channel so the next caller can
+		// drain it instead of blocking on the semaphore. Using append (not
+		// overwrite) prevents consecutive cancellations from losing slots.
+		c.abandonedDones = append(c.abandonedDones, done)
 		return "", fmt.Errorf("local LLM generate: %w", ctx.Err())
 	case r := <-ch:
 		if r.err != nil {

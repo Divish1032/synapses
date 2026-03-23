@@ -145,7 +145,7 @@ func fileChurn(repoRoot string, days int) (map[string]int, error) {
 	defer cancel()
 	out, err := exec.CommandContext(ctx,
 		"git", "-C", repoRoot,
-		"log", since, "--name-only", "--format=",
+		"log", since, "--name-only", "--format=", "--max-count=10000",
 	).Output()
 	if err != nil {
 		return nil, err
@@ -181,7 +181,7 @@ type CommitInfo struct {
 //
 // Each CommitInfo includes Hash (short), Author, Date, Message (subject), and
 // Body (first 200 chars of commit body, empty when none).
-func RecentCommitsForFile(repoRoot, filePath string, limit int) []CommitInfo {
+func RecentCommitsForFile(ctx context.Context, repoRoot, filePath string, limit int) []CommitInfo {
 	if limit <= 0 {
 		limit = 3
 	}
@@ -189,7 +189,7 @@ func RecentCommitsForFile(repoRoot, filePath string, limit int) []CommitInfo {
 	// terminate each commit record. This handles multi-line commit bodies cleanly:
 	// split by \x1e first, then by \x1f — body newlines don't interfere.
 	// %H=hash %an=author %ad=date(short) %s=subject %b=body
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx,
 		"git", "-C", repoRoot,
@@ -865,7 +865,7 @@ func EnrichCommitContext(g *graph.Graph, repoRoot string) {
 		go func(f fileJob) {
 			defer wg.Done()
 			sem <- struct{}{}        // acquire
-			commits := RecentCommitsForFile(f.gitRoot, f.absFile, 3)
+			commits := RecentCommitsForFile(context.Background(), f.gitRoot, f.absFile, 3)
 			<-sem                    // release
 			if len(commits) > 0 {
 				if raw, err := json.Marshal(commits); err == nil {
@@ -921,7 +921,7 @@ func EnrichCommitContextForFile(g *graph.Graph, repoRoot, absFile string) {
 	if gr == "" {
 		gr = repoRoot // fall back; RecentCommitsForFile handles git errors silently
 	}
-	commits := RecentCommitsForFile(gr, absFile, 3)
+	commits := RecentCommitsForFile(context.Background(), gr, absFile, 3)
 	if len(commits) == 0 {
 		// No commits yet or git unavailable — not an error, nodes carry no
 		// commit_context metadata.
