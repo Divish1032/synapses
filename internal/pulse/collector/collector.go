@@ -59,7 +59,8 @@ type Collector struct {
 	// P2-17: high-water mark — peak buffer depth since last flush.
 	highWaterMark atomic.Int64
 	// P2-19: events dropped due to full buffer (ring buffer overflow).
-	dropped atomic.Int64
+	dropped  atomic.Int64
+	enqueued atomic.Int64
 	// P5 — DQ-Integrity.1: write errors during batch persistence.
 	writeErrors atomic.Int64
 	// earlyFlushRunning prevents concurrent early-flush goroutines. Only one
@@ -246,17 +247,15 @@ func (c *Collector) HighWaterMark() int64 {
 // DropRate returns the fraction of enqueued events that were dropped (Bug 28 — ROI-E8).
 // Returns 0.0 if no events have been dropped or the high-water mark is zero.
 func (c *Collector) DropRate() float64 {
-	hwm := c.highWaterMark.Load()
-	if hwm <= 0 {
+	enqueued := c.enqueued.Load()
+	if enqueued <= 0 {
 		return 0.0
 	}
 	dropped := c.dropped.Load()
 	if dropped <= 0 {
 		return 0.0
 	}
-	// Approximate: dropped / (dropped + hwm) gives a conservative rate.
-	total := dropped + hwm
-	return float64(dropped) / float64(total)
+	return float64(dropped) / float64(enqueued)
 }
 
 // WriteErrors returns the total number of batch-write errors since collector start (P5 — DQ-Integrity.1).
@@ -265,6 +264,7 @@ func (c *Collector) WriteErrors() int64 {
 }
 
 func (c *Collector) enqueue(ev event) {
+	c.enqueued.Add(1)
 	c.mu.Lock()
 
 	// O(1) ring buffer enqueue — drop the oldest event when full.
