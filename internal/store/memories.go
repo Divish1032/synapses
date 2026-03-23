@@ -436,10 +436,11 @@ func (s *Store) ExpireMemories() (int64, error) {
 	defer tx.Rollback()
 
 	// Collect expiring memories inside the transaction to avoid TOCTOU races.
+	// Cap at 1000 to prevent unbounded memory allocation during mass expiry events.
 	type expiredEntry struct{ id, agentID string }
 	var expiring []expiredEntry
 	if erows, qErr := tx.Query(
-		`SELECT id, agent_id FROM memories WHERE expires_at <= ?`, now,
+		`SELECT id, agent_id FROM memories WHERE expires_at <= ? LIMIT 1000`, now,
 	); qErr == nil {
 		for erows.Next() {
 			var e expiredEntry
