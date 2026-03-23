@@ -12,6 +12,7 @@ package graph_test
 //     results consistent with their own config (no cross-intent cache collision)
 
 import (
+	"math"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -304,9 +305,14 @@ func TestCarveEgoGraph_PositiveBoostMagnitudeIsCorrect(t *testing.T) {
 	const edgeW = 1.0
 	const decay = 0.5
 
+	// target has 4 edges total (callerA, callerB in + calleeA, calleeB out).
+	// Adaptive decay: localDecay = decay / (1 + log2(numEdges+1))
+	localDecay := decay / (1.0 + math.Log2(float64(4+1)))
+
 	cfg := graph.DefaultCarveConfig()
 	cfg.MaxDepth = 1
 	cfg.TokenBudget = 100000
+	cfg.MinRelevance = 0 // test scoring, not pruning
 	cfg.DirectionBoost = boost
 	cfg.DecayFactor = decay
 	cfg.IntentID = "test-magnitude"
@@ -319,10 +325,10 @@ func TestCarveEgoGraph_PositiveBoostMagnitudeIsCorrect(t *testing.T) {
 
 	rel := relevanceMap(sub)
 
-	// Expected: callee = edgeW × decay^1 × (1 + boost)
-	wantCallee := edgeW * decay * (1.0 + boost)
-	// Expected: caller = edgeW × decay^1 (no boost)
-	wantCaller := edgeW * decay
+	// Expected: callee = edgeW × localDecay × (1 + boost)
+	wantCallee := edgeW * localDecay * (1.0 + boost)
+	// Expected: caller = edgeW × localDecay (no boost)
+	wantCaller := edgeW * localDecay
 
 	const eps = 0.001
 	if diff := rel[ids["calleeA"]] - wantCallee; diff > eps || diff < -eps {
@@ -342,9 +348,14 @@ func TestCarveEgoGraph_NegativeBoostMagnitudeIsCorrect(t *testing.T) {
 	const edgeW = 1.0
 	const decay = 0.5
 
+	// target has 4 edges total (callerA, callerB in + calleeA, calleeB out).
+	// Adaptive decay: localDecay = decay / (1 + log2(numEdges+1))
+	localDecay := decay / (1.0 + math.Log2(float64(4+1)))
+
 	cfg := graph.DefaultCarveConfig()
 	cfg.MaxDepth = 1
 	cfg.TokenBudget = 100000
+	cfg.MinRelevance = 0 // test scoring, not pruning
 	cfg.DirectionBoost = boost
 	cfg.DecayFactor = decay
 	cfg.IntentID = "test-neg-magnitude"
@@ -357,10 +368,10 @@ func TestCarveEgoGraph_NegativeBoostMagnitudeIsCorrect(t *testing.T) {
 
 	rel := relevanceMap(sub)
 
-	// Expected: caller = edgeW × decay^1 × (1 − boost) = edgeW × decay × 1.3
-	wantCaller := edgeW * decay * (1.0 - boost) // 1.0 - (-0.3) = 1.3
-	// Expected: callee = edgeW × decay^1 (no boost when boost < 0)
-	wantCallee := edgeW * decay
+	// Expected: caller = edgeW × localDecay × (1 − boost) — 1.0 - (-0.3) = 1.3
+	wantCaller := edgeW * localDecay * (1.0 - boost)
+	// Expected: callee = edgeW × localDecay (no boost when boost < 0)
+	wantCallee := edgeW * localDecay
 
 	const eps = 0.001
 	if diff := rel[ids["callerA"]] - wantCaller; diff > eps || diff < -eps {
@@ -385,6 +396,7 @@ func TestCarveEgoGraph_ReviewWeightsMakeIfaceNodeMoreRelevant(t *testing.T) {
 	defaultCfg := graph.DefaultCarveConfig()
 	defaultCfg.MaxDepth = 1
 	defaultCfg.TokenBudget = 100000
+	defaultCfg.MinRelevance = 0 // test scoring, not pruning
 	defaultCfg.DecayFactor = decay
 	defaultCfg.DirectionBoost = 0.0 // disable directional effect
 	defaultCfg.IntentID = "default-test"
@@ -404,6 +416,7 @@ func TestCarveEgoGraph_ReviewWeightsMakeIfaceNodeMoreRelevant(t *testing.T) {
 	reviewCfg := graph.DefaultCarveConfig()
 	reviewCfg.MaxDepth = 1
 	reviewCfg.TokenBudget = 100000
+	reviewCfg.MinRelevance = 0 // test scoring, not pruning
 	reviewCfg.DecayFactor = decay
 	reviewCfg.EdgeWeights = graph.IntentCarveWeights("review")
 	reviewCfg.DirectionBoost = graph.IntentDirectionBoost("review") // 0.0
@@ -436,6 +449,7 @@ func TestCarveEgoGraph_IntentCacheIsolation(t *testing.T) {
 	base := graph.DefaultCarveConfig()
 	base.MaxDepth = 1
 	base.TokenBudget = 100000
+	base.MinRelevance = 0 // test scoring, not pruning
 	base.DecayFactor = 0.5
 	base.EdgeWeights = map[graph.EdgeType]float64{graph.EdgeCalls: 1.0}
 

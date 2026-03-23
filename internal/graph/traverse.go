@@ -177,6 +177,10 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		// When the columnar index is ready, reads from CSR arrays (cache-friendly,
 		// skips tombstoned nodes). Falls back to pointer-map when not ready.
 		allEdges := g.outInEdges(curr.id, idx)
+		// Degree-normalized adaptive decay (GCN-style, Kipf & Welling ICLR 2017).
+		// High-degree hubs decay children faster to prevent hub explosion;
+		// low-degree nodes in narrow chains receive a relatively smaller penalty.
+		localDecay := decay / (1.0 + math.Log2(float64(len(allEdges)+1)))
 
 		for _, e := range allEdges {
 			typeWeight := edgeWeight(e.Type, weights)
@@ -193,7 +197,7 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 				}
 			}
 
-			relevance := typeWeight * math.Pow(decay, float64(curr.hop+1))
+			relevance := typeWeight * math.Pow(localDecay, float64(curr.hop+1))
 
 			neighbor := e.To
 			if e.To == curr.id {

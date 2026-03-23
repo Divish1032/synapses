@@ -633,19 +633,82 @@ func (g *Graph) RebuildIndex() ([]byte, error) {
 	newIdx := buildIndex(g, pool)
 
 	g.mu.Lock()
+	oldIdx := g.index // capture before replacing — needed for centrality delta
 	g.index = newIdx
 	g.mu.Unlock()
 
-	// Invalidate the entire subgraph cache: eigenvector centrality is a global
-	// property — every node's boost factor can change when the graph topology
-	// changes.  Stale cache entries computed against old centrality scores must
-	// not be served.  The file-specific eviction that runs before RebuildIndex
-	// only evicts entries for the changed file; entries for other files can
-	// survive with baked-in centrality values that are now incorrect.
-	g.cache.invalidate()
+	// Conditionally invalidate the subgraph cache based on how much eigenvector
+	// centrality shifted between the old and new index.
+	//
+	// Centrality is a global property: any topology change can alter scores for
+	// nodes outside the directly-changed file.  However, most file changes
+	// (renaming a local, editing a comment, adding a minor helper) produce
+	// negligible centrality shifts.  Flushing the entire cache on every rebuild
+	// destroys hit-rate during active editing sessions.
+	//
+	// Strategy: compute the L∞ delta (max single-node change) between the old
+	// and new centrality vectors.  Only flush when the delta exceeds the
+	// threshold below which the boost formula is indistinguishable:
+	//   boost = 1 + centralityBeta × centrality  (centralityBeta = 0.2)
+	//   delta=0.05 → relevance change ≤ 0.2 × 0.05 = 1%  (sub-pruning-granularity)
+	const centralityFlushThreshold = 0.05
+	if centralityDeltaExceeds(oldIdx, newIdx, centralityFlushThreshold) {
+		g.cache.invalidate()
+	}
 
 	blob, err := newIdx.SaveSnapshot()
 	return blob, err
+}
+
+// centralityDeltaExceeds reports whether any node's eigenvector centrality
+// changed by more than threshold between the two GraphIndex instances.
+//
+// Comparison is NodeID-keyed, not positional: seq IDs can shift when nodes are
+// added or removed (buildIndex assigns seqs in sorted NodeID order), so
+// comparing oldC[i] with newC[i] would compare different nodes after any
+// insertion.  Instead we look up each node from the old index in the new one
+// and compare their centrality values directly.
+//
+// Nodes added in newIdx are not compared — they are new and their neighbours'
+// fingerprints will have changed, producing cache misses for affected entries
+// without a full flush.  Nodes deleted from oldIdx are skipped similarly.
+//
+// Returns true (invalidate) when:
+//   - either index is nil (first build or post-reset)
+//   - any shared node's centrality changed by more than threshold
+//
+// Returns false (preserve cache) when no shared node's centrality shifted
+// enough to meaningfully affect the relevance boost formula.
+func centralityDeltaExceeds(oldIdx, newIdx *GraphIndex, threshold float64) bool {
+	if oldIdx == nil || newIdx == nil {
+		return true
+	}
+	oldC := oldIdx.EigenvectorCentrality
+	newC := newIdx.EigenvectorCentrality
+	if len(oldC) == 0 || len(newC) == 0 {
+		return true
+	}
+
+	// Walk every node in the old index and check its centrality in the new one.
+	// IDToSeq is the canonical map[NodeID]uint32 — correct even after seq shifts.
+	for nid, oldSeq := range oldIdx.IDToSeq {
+		if int(oldSeq) >= len(oldC) {
+			continue // guard: should not happen in a well-formed index
+		}
+		newSeq, exists := newIdx.IDToSeq[nid]
+		if !exists || int(newSeq) >= len(newC) {
+			// Node was removed — its cache entries will miss via fingerprint change.
+			continue
+		}
+		d := newC[newSeq] - oldC[oldSeq]
+		if d < 0 {
+			d = -d
+		}
+		if d > threshold {
+			return true
+		}
+	}
+	return false
 }
 
 // EdgeCount returns the total number of edges.

@@ -254,6 +254,72 @@ func TestCarveEgoGraph_TruncationSignal(t *testing.T) {
 	}
 }
 
+// ── Adaptive decay ────────────────────────────────────────────────────────────
+
+// TestCarveEgoGraph_AdaptiveDecay_HubChildLowerThanNarrowChild verifies that
+// children of a high-degree hub receive lower relevance than children of a
+// low-degree narrow-chain node at the same hop depth. This is the core
+// correctness property of degree-normalized adaptive decay.
+//
+// Graph:
+//
+//	root ─CALLS─► hub   ─CALLS─► h1, h2, h3, h4, h5  (5 children)
+//	root ─CALLS─► narrow ─CALLS─► n1                   (1 child)
+func TestCarveEgoGraph_AdaptiveDecay_HubChildLowerThanNarrowChild(t *testing.T) {
+	g := graph.New("testrepo")
+
+	rootID := g.MakeNodeID("root.go", "root")
+	hubID := g.MakeNodeID("hub.go", "hub")
+	narrowID := g.MakeNodeID("narrow.go", "narrow")
+	n1ID := g.MakeNodeID("narrow.go", "n1")
+	h1ID := g.MakeNodeID("hub.go", "h1")
+	h2ID := g.MakeNodeID("hub.go", "h2")
+	h3ID := g.MakeNodeID("hub.go", "h3")
+	h4ID := g.MakeNodeID("hub.go", "h4")
+	h5ID := g.MakeNodeID("hub.go", "h5")
+
+	for _, id := range []graph.NodeID{rootID, hubID, narrowID, n1ID, h1ID, h2ID, h3ID, h4ID, h5ID} {
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: string(id), File: "test.go"})
+	}
+
+	g.AddEdge(&graph.Edge{From: rootID, To: hubID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: rootID, To: narrowID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: narrowID, To: n1ID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: hubID, To: h1ID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: hubID, To: h2ID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: hubID, To: h3ID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: hubID, To: h4ID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: hubID, To: h5ID, Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.MaxDepth = 2
+	cfg.DecayFactor = 0.5
+	cfg.MinRelevance = 0 // test scoring, not pruning
+
+	sub, err := g.CarveEgoGraph(rootID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+
+	rel := make(map[graph.NodeID]float64)
+	for _, cn := range sub.Nodes {
+		rel[cn.Node.ID] = cn.Relevance
+	}
+
+	// n1 is a child of a 2-edge node (narrow + root←narrow); hub children come
+	// from a 6-edge node (hub + 5 children + root←hub). Narrow chain's child
+	// must score strictly higher than any hub child.
+	if rel[n1ID] == 0 {
+		t.Fatal("narrow child n1 missing from subgraph")
+	}
+	if rel[h1ID] == 0 {
+		t.Fatal("hub child h1 missing from subgraph")
+	}
+	if rel[n1ID] <= rel[h1ID] {
+		t.Errorf("narrow child relevance (%v) should be > hub child relevance (%v): adaptive decay not working", rel[n1ID], rel[h1ID])
+	}
+}
+
 // ── FindTestsFor ──────────────────────────────────────────────────────────────
 
 func TestFindTestsFor_DirectTestCaller(t *testing.T) {
@@ -364,6 +430,49 @@ func nodeIDSet(sub *graph.SubGraph) map[graph.NodeID]struct{} {
 		m[cn.Node.ID] = struct{}{}
 	}
 	return m
+}
+
+// TestCentralityDelta_MinorChange_CachePreserved verifies that a topology
+// change small enough to leave all centrality scores within the flush threshold
+// does NOT clear the subgraph cache.
+//
+// Setup: 3-node chain A→B→C. Prime the cache with a carve. Add one isolated
+// node (no edges to existing graph) — centrality delta for A/B/C is exactly 0.
+// RebuildIndex must preserve all existing cache entries.
+func TestCentralityDelta_MinorChange_CachePreserved(t *testing.T) {
+	g := graph.New("minor")
+	aID := g.MakeNodeID("f.go", "A")
+	bID := g.MakeNodeID("f.go", "B")
+	cID := g.MakeNodeID("f.go", "C")
+	for _, id := range []graph.NodeID{aID, bID, cID} {
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: string(id), File: "f.go"})
+	}
+	g.AddEdge(&graph.Edge{From: aID, To: bID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: bID, To: cID, Type: graph.EdgeCalls})
+
+	if _, err := g.RebuildIndex(); err != nil {
+		t.Fatalf("first RebuildIndex: %v", err)
+	}
+	cfg := graph.DefaultCarveConfig()
+	if _, err := g.CarveEgoGraph(aID, cfg); err != nil {
+		t.Fatalf("CarveEgoGraph: %v", err)
+	}
+	lenBefore := g.CacheLen()
+	if lenBefore == 0 {
+		t.Fatal("cache should be non-empty after priming")
+	}
+
+	// Add an isolated node — zero edges, centrality delta for A/B/C is exactly 0.
+	isolatedID := g.MakeNodeID("f.go", "Isolated")
+	g.AddNode(&graph.Node{ID: isolatedID, Type: graph.NodeFunction, Name: "Isolated", File: "f.go"})
+
+	if _, err := g.RebuildIndex(); err != nil {
+		t.Fatalf("second RebuildIndex: %v", err)
+	}
+	if g.CacheLen() < lenBefore {
+		t.Errorf("cache shrank from %d to %d after minor change — should be preserved",
+			lenBefore, g.CacheLen())
+	}
 }
 
 // TestCentralityBoost_CacheInvalidatedOnRebuild verifies that after a second
