@@ -478,21 +478,28 @@ func collectPythonCallSites(g *graph.Graph, lang *sitter.Language, root sitter.N
 }
 
 // collectPythonVarTypes walks the AST to extract variable → type mappings for
-// cross-file call resolution. Records two patterns:
-//   - Annotated assignments:  obj: ClassName = ...
-//   - Constructor assignments: obj = ClassName(...)
+// cross-file call resolution. Records four patterns:
+//   - Annotated assignments:        obj: ClassName = ...
+//   - Constructor assignments:      obj = ClassName(...)
+//   - Function parameter types:     def f(repo: Repository, ...) → repo → Repository
+//   - Self-attribute constructors:  self.attr = ClassName(...) → "self.attr" → ClassName
 func collectPythonVarTypes(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string) {
 	var walk func(n sitter.Node)
 	walk = func(n sitter.Node) {
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "assignment" {
+		switch n.Type() {
+		case "assignment":
 			left := n.ChildByFieldName("left")
 			right := n.ChildByFieldName("right")
 			typeAnnot := n.ChildByFieldName("type")
 
-			if !left.IsNull() && left.Type() == "identifier" {
+			if left.IsNull() {
+				goto recurse
+			}
+
+			if left.Type() == "identifier" {
 				varName := string(src[left.StartByte():left.EndByte()])
 				if varName == "self" || varName == "cls" {
 					goto recurse
@@ -518,14 +525,87 @@ func collectPythonVarTypes(g *graph.Graph, _ *sitter.Language, root sitter.Node,
 						}
 					}
 				}
+
+			} else if left.Type() == "attribute" {
+				// Pattern 3: self.attr = ClassName(...) — store "self.attr" → ClassName.
+				// The call-site extractor produces PkgAlias="self.attr" for self.attr.method(),
+				// so keying by the full attribute text enables cross-file resolution.
+				obj := left.ChildByFieldName("object")
+				if obj.IsNull() || obj.Type() != "identifier" {
+					goto recurse
+				}
+				if string(src[obj.StartByte():obj.EndByte()]) != "self" {
+					goto recurse
+				}
+				if right.IsNull() || right.Type() != "call" {
+					goto recurse
+				}
+				fn := right.ChildByFieldName("function")
+				if fn.IsNull() || fn.Type() != "identifier" {
+					goto recurse
+				}
+				typeName := string(src[fn.StartByte():fn.EndByte()])
+				if typeName != "" && typeName[0] >= 'A' && typeName[0] <= 'Z' {
+					attrKey := string(src[left.StartByte():left.EndByte()])
+					g.AddVarType(filePath, attrKey, typeName)
+				}
+			}
+
+		case "function_definition":
+			// Pattern 4: typed function parameters.
+			// def process(repo: Repository, size: int = 0) → repo → Repository
+			params := n.ChildByFieldName("parameters")
+			if !params.IsNull() {
+				collectPythonParamTypes(g, params, src, filePath)
 			}
 		}
+
 	recurse:
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
 	walk(root)
+}
+
+// collectPythonParamTypes extracts typed parameter annotations from a Python
+// parameters node and records them in the graph's varTypes store.
+// Handles typed_parameter and typed_default_parameter nodes:
+//   - typed_parameter:         (identifier) (type (identifier))
+//   - typed_default_parameter: (identifier) (type (identifier)) (default)
+func collectPythonParamTypes(g *graph.Graph, params sitter.Node, src []byte, filePath string) {
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		param := params.Child(i)
+		if param.IsNull() {
+			continue
+		}
+		if param.Type() != "typed_parameter" && param.Type() != "typed_default_parameter" {
+			continue
+		}
+		// The type annotation is in the "type" field.
+		typeAnnot := param.ChildByFieldName("type")
+		if typeAnnot.IsNull() {
+			continue
+		}
+		typeName := extractPythonTypeName(typeAnnot, src)
+		if typeName == "" {
+			continue
+		}
+		// The parameter name is the first identifier child.
+		for j := uint32(0); j < param.ChildCount(); j++ {
+			child := param.Child(j)
+			if child.IsNull() {
+				continue
+			}
+			if child.Type() == "identifier" {
+				varName := string(src[child.StartByte():child.EndByte()])
+				if varName != "self" && varName != "cls" && varName != "" {
+					g.AddVarType(filePath, varName, typeName)
+				}
+				break
+			}
+		}
+	}
 }
 
 // extractPythonTypeName extracts the simple type name from a Python type annotation node.

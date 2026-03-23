@@ -555,7 +555,10 @@ func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, 
 }
 
 // collectJavaVarTypes walks the AST to extract variable → type mappings for
-// cross-file call resolution. Records field declarations and local variable declarations.
+// cross-file call resolution. Records three patterns:
+//   - Field declarations:          Repository repo;
+//   - Local variable declarations: Repository repo = factory.get();
+//   - Method/constructor params:   void process(Repository repo) → repo → Repository
 func collectJavaVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePath string) {
 	var walk func(n sitter.Node)
 	walk = func(n sitter.Node) {
@@ -568,7 +571,7 @@ func collectJavaVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePath 
 			if typeNode.IsNull() {
 				break
 			}
-			typeName := string(src[typeNode.StartByte():typeNode.EndByte()])
+			typeName := extractJavaSimpleTypeName(typeNode, src)
 			// Skip primitive types and common stdlib generics.
 			if typeName == "" || isJavaBuiltin(typeName) {
 				break
@@ -588,12 +591,85 @@ func collectJavaVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePath 
 					g.AddVarType(filePath, varName, typeName)
 				}
 			}
+
+		case "method_declaration", "constructor_declaration":
+			// Extract typed formal parameters so method-body call resolution works.
+			// void process(Repository repo, AuthService auth) → repo→Repository, auth→AuthService
+			params := n.ChildByFieldName("parameters")
+			if params.IsNull() {
+				break
+			}
+			collectJavaFormalParamTypes(g, params, src, filePath)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
 	walk(root)
+}
+
+// collectJavaFormalParamTypes extracts type annotations from formal_parameter and
+// spread_parameter nodes within a method's parameter list.
+func collectJavaFormalParamTypes(g *graph.Graph, params sitter.Node, src []byte, filePath string) {
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		param := params.Child(i)
+		if param.IsNull() {
+			continue
+		}
+		if param.Type() != "formal_parameter" && param.Type() != "spread_parameter" {
+			continue
+		}
+		typeNode := param.ChildByFieldName("type")
+		if typeNode.IsNull() {
+			continue
+		}
+		typeName := extractJavaSimpleTypeName(typeNode, src)
+		if typeName == "" || isJavaBuiltin(typeName) {
+			continue
+		}
+		nameNode := param.ChildByFieldName("name")
+		if nameNode.IsNull() {
+			continue
+		}
+		varName := string(src[nameNode.StartByte():nameNode.EndByte()])
+		if varName != "" {
+			g.AddVarType(filePath, varName, typeName)
+		}
+	}
+}
+
+// extractJavaSimpleTypeName returns the bare type name from a Java type node.
+// Handles type_identifier, generic_type (List<Foo> → "List"), and array_type.
+// Returns "" for primitive or void types — no class exists to resolve.
+func extractJavaSimpleTypeName(typeNode sitter.Node, src []byte) string {
+	if typeNode.IsNull() {
+		return ""
+	}
+	switch typeNode.Type() {
+	case "type_identifier":
+		return string(src[typeNode.StartByte():typeNode.EndByte()])
+	case "generic_type":
+		// e.g. List<Repository> — take the base type identifier
+		for i := uint32(0); i < typeNode.ChildCount(); i++ {
+			child := typeNode.Child(i)
+			if !child.IsNull() && child.Type() == "type_identifier" {
+				return string(src[child.StartByte():child.EndByte()])
+			}
+		}
+	case "array_type":
+		// e.g. Repository[] — take the element type
+		elem := typeNode.ChildByFieldName("element")
+		if !elem.IsNull() {
+			return extractJavaSimpleTypeName(elem, src)
+		}
+	case "integral_type", "boolean_type", "void_type", "floating_point_type":
+		// Primitive/void — no class to look up. Return "" to skip.
+		return ""
+	default:
+		// Unknown type nodes: return the text; caller filters via isJavaBuiltin.
+		return string(src[typeNode.StartByte():typeNode.EndByte()])
+	}
+	return ""
 }
 
 // extractJavaHeritage extracts implements/extends clauses from a Java class,
