@@ -201,6 +201,9 @@ func (s *Server) supervise(ctx context.Context, args []string) {
 
 		select {
 		case <-ctx.Done():
+			s.mu.Lock()
+			s.restarting = false
+			s.mu.Unlock()
 			return
 		case <-time.After(backoff):
 		}
@@ -359,11 +362,13 @@ func (s *Server) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 // Available returns true if the subprocess is running and responding.
 func (s *Server) Available() bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.started {
+	started := s.started
+	baseURL := s.baseURL
+	s.mu.Unlock()
+	if !started {
 		return false
 	}
-	resp, err := s.client.Get(s.baseURL + "/health")
+	resp, err := s.client.Get(baseURL + "/health")
 	if err != nil {
 		return false
 	}
