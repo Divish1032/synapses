@@ -267,6 +267,9 @@ func cleanAgentConfigs(absPath string) {
 	// Claude Code
 	cleanMCPServerEntry(filepath.Join(absPath, ".mcp.json"), "claude")
 	cleanSynapsesSection(filepath.Join(absPath, ".claude", "CLAUDE.md"), "claude")
+	// Legacy: older versions wrote the synapses section into root CLAUDE.md
+	// before migrating to .claude/CLAUDE.md. Clean both locations.
+	cleanSynapsesSection(filepath.Join(absPath, "CLAUDE.md"), "claude")
 	cleanClaudeSettings(filepath.Join(absPath, ".claude", "settings.json"))
 
 	// Cursor
