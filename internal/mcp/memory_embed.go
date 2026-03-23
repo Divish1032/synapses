@@ -238,7 +238,11 @@ func (s *Server) EmbedToolCatalog(ctx context.Context, embedder embed.Embedder) 
 				break
 			}
 			if attempt < 2 {
-				time.Sleep(time.Duration(attempt+1) * time.Second)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Duration(attempt+1) * time.Second):
+				}
 			}
 		}
 		if err != nil {
