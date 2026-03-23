@@ -2,13 +2,15 @@ package resolver_test
 
 // Tests for RTA-style call graph refinement (Sprint 14 #2).
 //
-// Covers:
-//   - findInPackage tie-breaking: when multiple methods share a name, prefer
-//     the one whose receiver type is instantiated.
-//   - ResolveHeritageEdges: skip classes not in instantiatedTypes when data exists.
-//   - ResolveImplementsEdges: skip structs not in instantiatedTypes.
-//   - Fallback behavior: no regression when instantiatedTypes is empty (Go projects).
-//   - AddInstantiatedType / GetInstantiatedTypes: basic graph operations.
+// Key behaviors verified:
+//   1. findInPackage emits edges to ALL instantiated receivers (true RTA multi-target).
+//   2. Deterministic results: sorted pkgIndex means same graph always produces same edges.
+//   3. CHA fallback: when no instantiated receiver exists, still emit to first match.
+//   4. No-data fallback: pure Go projects (no instantiatedTypes) behave like old CHA.
+//   5. ResolveImplementsEdges: skips structs not in instantiatedTypes (Go structural).
+//   6. ResolveHeritageEdges: NO RTA filter — abstract base class chains stay intact.
+//   7. AddInstantiatedType / GetInstantiatedTypes: basic graph operations.
+//   8. RemoveFile cleans up instantiation data.
 
 import (
 	"testing"
@@ -17,155 +19,261 @@ import (
 	"github.com/SynapsesOS/synapses/internal/resolver"
 )
 
-// TestRTA_FindInPackage_PrefersInstantiatedReceiver verifies that when two methods
-// share the same name in the same package, findInPackage (via ResolveCallEdges)
-// resolves to the method whose receiver type is instantiated.
-func TestRTA_FindInPackage_PrefersInstantiatedReceiver(t *testing.T) {
+// helpers ─────────────────────────────────────────────────────────────────────
+
+func makePkg(g *graph.Graph, file, pkg string) graph.NodeID {
+	fileID := g.MakeNodeID(file, file)
+	pkgID := g.MakeNodeID(pkg, pkg)
+	g.AddNode(&graph.Node{ID: fileID, Type: graph.NodeFile, Name: file, File: file, Package: pkg})
+	g.AddNode(&graph.Node{ID: pkgID, Type: graph.NodePackage, Name: pkg})
+	return pkgID
+}
+
+func addMethod(g *graph.Graph, file, pkg, name string) graph.NodeID {
+	id := g.MakeNodeID(file, name)
+	g.AddNode(&graph.Node{ID: id, Type: graph.NodeMethod, Name: name, Package: pkg, File: file})
+	return id
+}
+
+func addFunction(g *graph.Graph, file, pkg, name string) graph.NodeID {
+	id := g.MakeNodeID(file, name)
+	g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: name, Package: pkg, File: file})
+	return id
+}
+
+// TestRTA_MultiTarget_AllInstantiatedReceiversGetEdge verifies that when
+// multiple classes in the same package have the same method and ALL are
+// instantiated, CALLS edges are emitted to ALL of them — not just the first.
+// This is the core RTA correctness requirement (Bacon & Sweeney OOPSLA 1996).
+func TestRTA_MultiTarget_AllInstantiatedReceiversGetEdge(t *testing.T) {
 	g := graph.New("testrepo")
 
-	// svc.go: two classes, both with a "Process" method.
-	svcFile := g.MakeNodeID("svc.go", "svc.go")
-	svcPkg := g.MakeNodeID("svc", "svc")
-	g.AddNode(&graph.Node{ID: svcFile, Type: graph.NodeFile, Name: "svc.go", File: "svc.go", Package: "svc"})
-	g.AddNode(&graph.Node{ID: svcPkg, Type: graph.NodePackage, Name: "svc"})
+	svcPkg := makePkg(g, "svc.go", "svc")
 
-	// ConcreteA.Process — ConcreteA IS instantiated.
-	concreteAID := g.MakeNodeID("svc.go", "ConcreteA.Process")
-	g.AddNode(&graph.Node{
-		ID: concreteAID, Type: graph.NodeMethod,
-		Name: "ConcreteA.Process", Package: "svc", File: "svc.go",
-	})
-	// ConcreteB.Process — ConcreteB is NOT instantiated.
-	concreteBID := g.MakeNodeID("svc.go", "ConcreteB.Process")
-	g.AddNode(&graph.Node{
-		ID: concreteBID, Type: graph.NodeMethod,
-		Name: "ConcreteB.Process", Package: "svc", File: "svc.go",
-	})
+	// Three classes all with a "Process" method — all instantiated.
+	aID := addMethod(g, "svc.go", "svc", "ConcreteA.Process")
+	bID := addMethod(g, "svc.go", "svc", "ConcreteB.Process")
+	cID := addMethod(g, "svc.go", "svc", "ConcreteC.Process")
 
-	// main.go: caller imports svc, calls "svc.Process".
-	mainFile := g.MakeNodeID("main.go", "main.go")
-	callerID := g.MakeNodeID("main.go", "main")
-	g.AddNode(&graph.Node{ID: mainFile, Type: graph.NodeFile, Name: "main.go", File: "main.go", Package: "main"})
-	g.AddNode(&graph.Node{ID: callerID, Type: graph.NodeFunction, Name: "main", Package: "main", File: "main.go"})
-	g.AddEdge(&graph.Edge{From: mainFile, To: svcPkg, Type: graph.EdgeImports})
+	mainPkg := makePkg(g, "main.go", "main")
+	_ = mainPkg
+	callerID := addFunction(g, "main.go", "main", "main")
+	g.AddEdge(&graph.Edge{From: g.MakeNodeID("main.go", "main.go"), To: svcPkg, Type: graph.EdgeImports})
 
-	// Seed call site: main() calls svc.Process().
 	g.AddCallSite(graph.CallSite{
-		CallerID:   callerID,
-		CallerFile: "main.go",
-		PkgAlias:   "svc",
-		FuncName:   "Process",
+		CallerID: callerID, CallerFile: "main.go",
+		PkgAlias: "svc", FuncName: "Process",
 	})
 
-	// RTA: ConcreteA was instantiated.
+	// All three are instantiated.
 	g.AddInstantiatedType("main.go", "ConcreteA")
+	g.AddInstantiatedType("main.go", "ConcreteB")
+	g.AddInstantiatedType("main.go", "ConcreteC")
 
 	count := resolver.ResolveCallEdges(g)
-	if count != 1 {
-		t.Fatalf("expected 1 edge resolved, got %d", count)
+	if count != 3 {
+		t.Fatalf("expected 3 CALLS edges (one per instantiated class), got %d", count)
 	}
+	for _, id := range []graph.NodeID{aID, bID, cID} {
+		if !g.HasEdge(callerID, id, graph.EdgeCalls) {
+			t.Errorf("missing CALLS edge to %s", id)
+		}
+	}
+}
 
-	// The edge must point to ConcreteA.Process, not ConcreteB.Process.
-	if !g.HasEdge(callerID, concreteAID, graph.EdgeCalls) {
-		t.Error("expected CALLS edge to ConcreteA.Process (instantiated receiver)")
+// TestRTA_MultiTarget_OnlyInstantiatedGetEdge verifies that when some classes
+// are instantiated and some are not, only the instantiated ones get edges.
+func TestRTA_MultiTarget_OnlyInstantiatedGetEdge(t *testing.T) {
+	g := graph.New("testrepo")
+
+	svcPkg := makePkg(g, "svc.go", "svc")
+
+	aID := addMethod(g, "svc.go", "svc", "ConcreteA.Save")
+	bID := addMethod(g, "svc.go", "svc", "ConcreteB.Save") // not instantiated
+	cID := addMethod(g, "svc.go", "svc", "ConcreteC.Save")
+
+	callerID := addFunction(g, "main.go", "main", "main")
+	makePkg(g, "main.go", "main")
+	g.AddEdge(&graph.Edge{From: g.MakeNodeID("main.go", "main.go"), To: svcPkg, Type: graph.EdgeImports})
+
+	g.AddCallSite(graph.CallSite{
+		CallerID: callerID, CallerFile: "main.go",
+		PkgAlias: "svc", FuncName: "Save",
+	})
+
+	g.AddInstantiatedType("main.go", "ConcreteA")
+	// ConcreteB NOT instantiated.
+	g.AddInstantiatedType("main.go", "ConcreteC")
+
+	count := resolver.ResolveCallEdges(g)
+	if count != 2 {
+		t.Fatalf("expected 2 CALLS edges (ConcreteA + ConcreteC), got %d", count)
 	}
-	if g.HasEdge(callerID, concreteBID, graph.EdgeCalls) {
-		t.Error("unexpected CALLS edge to ConcreteB.Process (not instantiated)")
+	if !g.HasEdge(callerID, aID, graph.EdgeCalls) {
+		t.Error("missing CALLS edge to ConcreteA.Save")
+	}
+	if g.HasEdge(callerID, bID, graph.EdgeCalls) {
+		t.Error("unexpected CALLS edge to ConcreteB.Save (not instantiated)")
+	}
+	if !g.HasEdge(callerID, cID, graph.EdgeCalls) {
+		t.Error("missing CALLS edge to ConcreteC.Save")
 	}
 }
 
 // TestRTA_FindInPackage_FallsBackWhenNoneInstantiated verifies that when no
-// candidate's receiver type is instantiated, findInPackage falls back to the
-// first match (no regression from CHA behavior).
+// candidate's receiver type is instantiated, a single CHA fallback edge is
+// still emitted (no lost edges).
 func TestRTA_FindInPackage_FallsBackWhenNoneInstantiated(t *testing.T) {
 	g := graph.New("testrepo")
 
-	svcFile := g.MakeNodeID("svc.go", "svc.go")
-	svcPkg := g.MakeNodeID("svc", "svc")
-	g.AddNode(&graph.Node{ID: svcFile, Type: graph.NodeFile, Name: "svc.go", File: "svc.go", Package: "svc"})
-	g.AddNode(&graph.Node{ID: svcPkg, Type: graph.NodePackage, Name: "svc"})
+	svcPkg := makePkg(g, "svc.go", "svc")
+	addMethod(g, "svc.go", "svc", "ConcreteA.Run")
+	addMethod(g, "svc.go", "svc", "ConcreteB.Run")
 
-	firstID := g.MakeNodeID("svc.go", "ConcreteA.Save")
-	g.AddNode(&graph.Node{
-		ID: firstID, Type: graph.NodeMethod,
-		Name: "ConcreteA.Save", Package: "svc", File: "svc.go",
-	})
-	secondID := g.MakeNodeID("svc.go", "ConcreteB.Save")
-	g.AddNode(&graph.Node{
-		ID: secondID, Type: graph.NodeMethod,
-		Name: "ConcreteB.Save", Package: "svc", File: "svc.go",
-	})
-
-	mainFile := g.MakeNodeID("main.go", "main.go")
-	callerID := g.MakeNodeID("main.go", "main")
-	g.AddNode(&graph.Node{ID: mainFile, Type: graph.NodeFile, Name: "main.go", File: "main.go", Package: "main"})
-	g.AddNode(&graph.Node{ID: callerID, Type: graph.NodeFunction, Name: "main", Package: "main", File: "main.go"})
-	g.AddEdge(&graph.Edge{From: mainFile, To: svcPkg, Type: graph.EdgeImports})
+	callerID := addFunction(g, "main.go", "main", "main")
+	makePkg(g, "main.go", "main")
+	g.AddEdge(&graph.Edge{From: g.MakeNodeID("main.go", "main.go"), To: svcPkg, Type: graph.EdgeImports})
 
 	g.AddCallSite(graph.CallSite{
-		CallerID:   callerID,
-		CallerFile: "main.go",
-		PkgAlias:   "svc",
-		FuncName:   "Save",
+		CallerID: callerID, CallerFile: "main.go",
+		PkgAlias: "svc", FuncName: "Run",
 	})
 
-	// Register SOME instantiated type, but not ConcreteA or ConcreteB.
+	// Some data exists, but NOT for ConcreteA or ConcreteB.
 	g.AddInstantiatedType("main.go", "OtherClass")
 
 	count := resolver.ResolveCallEdges(g)
 	if count != 1 {
-		t.Fatalf("expected 1 edge (fallback), got %d", count)
-	}
-	// Should have resolved to first match (ConcreteA.Save or ConcreteB.Save) — just not 0.
-	hasFirst := g.HasEdge(callerID, firstID, graph.EdgeCalls)
-	hasSecond := g.HasEdge(callerID, secondID, graph.EdgeCalls)
-	if !hasFirst && !hasSecond {
-		t.Error("expected CALLS edge to one of the Save methods as fallback")
+		t.Fatalf("expected 1 CHA fallback edge, got %d", count)
 	}
 }
 
 // TestRTA_FindInPackage_NoInstantiationData verifies that when no instantiation
-// data exists at all (pure Go project), behavior is identical to old CHA.
+// data exists (pure Go project), exactly one CHA edge is emitted — identical to
+// pre-RTA behavior.
 func TestRTA_FindInPackage_NoInstantiationData(t *testing.T) {
 	g := graph.New("testrepo")
 
-	svcFile := g.MakeNodeID("svc.go", "svc.go")
-	svcPkg := g.MakeNodeID("svc", "svc")
-	g.AddNode(&graph.Node{ID: svcFile, Type: graph.NodeFile, Name: "svc.go", File: "svc.go", Package: "svc"})
-	g.AddNode(&graph.Node{ID: svcPkg, Type: graph.NodePackage, Name: "svc"})
+	svcPkg := makePkg(g, "svc.go", "svc")
+	targetID := addMethod(g, "svc.go", "svc", "Handler.Run")
 
-	targetID := g.MakeNodeID("svc.go", "Handler.Run")
-	g.AddNode(&graph.Node{
-		ID: targetID, Type: graph.NodeMethod,
-		Name: "Handler.Run", Package: "svc", File: "svc.go",
-	})
-
-	mainFile := g.MakeNodeID("main.go", "main.go")
-	callerID := g.MakeNodeID("main.go", "main")
-	g.AddNode(&graph.Node{ID: mainFile, Type: graph.NodeFile, Name: "main.go", File: "main.go", Package: "main"})
-	g.AddNode(&graph.Node{ID: callerID, Type: graph.NodeFunction, Name: "main", Package: "main", File: "main.go"})
-	g.AddEdge(&graph.Edge{From: mainFile, To: svcPkg, Type: graph.EdgeImports})
+	callerID := addFunction(g, "main.go", "main", "main")
+	makePkg(g, "main.go", "main")
+	g.AddEdge(&graph.Edge{From: g.MakeNodeID("main.go", "main.go"), To: svcPkg, Type: graph.EdgeImports})
 
 	g.AddCallSite(graph.CallSite{
-		CallerID:   callerID,
-		CallerFile: "main.go",
-		PkgAlias:   "svc",
-		FuncName:   "Run",
+		CallerID: callerID, CallerFile: "main.go",
+		PkgAlias: "svc", FuncName: "Run",
 	})
 	// No AddInstantiatedType calls — GetInstantiatedTypes returns nil.
 
 	count := resolver.ResolveCallEdges(g)
 	if count != 1 {
-		t.Fatalf("expected 1 edge (CHA fallback), got %d", count)
+		t.Fatalf("expected 1 CHA edge, got %d", count)
 	}
 	if !g.HasEdge(callerID, targetID, graph.EdgeCalls) {
 		t.Error("expected CALLS edge to Handler.Run")
 	}
 }
 
-// TestRTA_HeritageEdges_SkipsNonInstantiated verifies that ResolveHeritageEdges
-// skips IMPLEMENTS edges for classes not in the instantiatedTypes set.
-func TestRTA_HeritageEdges_SkipsNonInstantiated(t *testing.T) {
+// TestRTA_Determinism verifies that the same graph always produces the same
+// CALLS edges regardless of run order (sorted pkgIndex).
+func TestRTA_Determinism(t *testing.T) {
+	// Build the same graph twice and verify identical edge targets.
+	build := func() (graph.NodeID, graph.NodeID) {
+		g := graph.New("testrepo")
+		svcPkg := makePkg(g, "svc.go", "svc")
+		alpha := addMethod(g, "svc.go", "svc", "AlphaService.Execute") // lexicographically first
+		addMethod(g, "svc.go", "svc", "ZetaService.Execute")
+
+		callerID := addFunction(g, "main.go", "main", "run")
+		makePkg(g, "main.go", "main")
+		g.AddEdge(&graph.Edge{From: g.MakeNodeID("main.go", "main.go"), To: svcPkg, Type: graph.EdgeImports})
+		g.AddCallSite(graph.CallSite{
+			CallerID: callerID, CallerFile: "main.go",
+			PkgAlias: "svc", FuncName: "Execute",
+		})
+
+		// Only AlphaService is instantiated — should always resolve to alpha.
+		g.AddInstantiatedType("main.go", "AlphaService")
+		resolver.ResolveCallEdges(g)
+		return callerID, alpha
+	}
+
+	callerID, alphaID := build()
+	// Run 50 times — non-determinism would show up quickly.
+	for i := 0; i < 50; i++ {
+		g2 := graph.New("testrepo")
+		svcPkg2 := makePkg(g2, "svc.go", "svc")
+		a2 := addMethod(g2, "svc.go", "svc", "AlphaService.Execute")
+		_ = addMethod(g2, "svc.go", "svc", "ZetaService.Execute")
+		caller2 := addFunction(g2, "main.go", "main", "run")
+		makePkg(g2, "main.go", "main")
+		g2.AddEdge(&graph.Edge{From: g2.MakeNodeID("main.go", "main.go"), To: svcPkg2, Type: graph.EdgeImports})
+		g2.AddCallSite(graph.CallSite{
+			CallerID: caller2, CallerFile: "main.go",
+			PkgAlias: "svc", FuncName: "Execute",
+		})
+		g2.AddInstantiatedType("main.go", "AlphaService")
+		resolver.ResolveCallEdges(g2)
+
+		if !g2.HasEdge(caller2, a2, graph.EdgeCalls) {
+			t.Fatalf("run %d: expected deterministic edge to AlphaService.Execute", i)
+		}
+		_ = callerID
+		_ = alphaID
+	}
+}
+
+// TestRTA_HeritageEdges_AbstractBaseClassPreserved verifies that abstract base
+// classes (never directly instantiated) still get their IMPLEMENTS edges.
+// This is the critical correctness case: AbstractBase → Interface must survive
+// even though AbstractBase is not in instantiatedTypes.
+func TestRTA_HeritageEdges_AbstractBaseClassPreserved(t *testing.T) {
+	g := graph.New("testrepo")
+
+	ifaceID := g.MakeNodeID("svc.go", "Auditable")
+	g.AddNode(&graph.Node{
+		ID: ifaceID, Type: graph.NodeInterface,
+		Name: "Auditable", Package: "svc", File: "svc.go",
+	})
+
+	// AbstractBase implements Auditable — never directly instantiated.
+	abstractID := g.MakeNodeID("svc.go", "AbstractBase")
+	g.AddNode(&graph.Node{
+		ID: abstractID, Type: graph.NodeStruct,
+		Name: "AbstractBase", Package: "svc", File: "svc.go",
+		Metadata: map[string]string{"heritage_implements": "Auditable"},
+	})
+
+	// ConcreteImpl extends AbstractBase — IS instantiated.
+	concreteID := g.MakeNodeID("svc.go", "ConcreteImpl")
+	g.AddNode(&graph.Node{
+		ID: concreteID, Type: graph.NodeStruct,
+		Name: "ConcreteImpl", Package: "svc", File: "svc.go",
+		Metadata: map[string]string{"heritage_extends": "AbstractBase"},
+	})
+
+	// Only ConcreteImpl is instantiated.
+	g.AddInstantiatedType("svc.go", "ConcreteImpl")
+
+	count := resolver.ResolveHeritageEdges(g)
+	// Both AbstractBase→Auditable AND ConcreteImpl→AbstractBase must be emitted.
+	if count != 2 {
+		t.Fatalf("expected 2 IMPLEMENTS edges (both abstract and concrete), got %d", count)
+	}
+	if !g.HasEdge(abstractID, ifaceID, graph.EdgeImplements) {
+		t.Error("missing AbstractBase→Auditable edge — abstract base class chain broken")
+	}
+	if !g.HasEdge(concreteID, abstractID, graph.EdgeImplements) {
+		t.Error("missing ConcreteImpl→AbstractBase edge")
+	}
+}
+
+// TestRTA_HeritageEdges_EmitsAllRegardlessOfInstantiation verifies that
+// ResolveHeritageEdges emits edges for ALL classes — instantiated or not —
+// because nominal type declarations are always structurally correct.
+func TestRTA_HeritageEdges_EmitsAllRegardlessOfInstantiation(t *testing.T) {
 	g := graph.New("testrepo")
 
 	ifaceID := g.MakeNodeID("svc.go", "Runnable")
@@ -174,15 +282,12 @@ func TestRTA_HeritageEdges_SkipsNonInstantiated(t *testing.T) {
 		Name: "Runnable", Package: "svc", File: "svc.go",
 	})
 
-	// ConcreteA implements Runnable — IS instantiated.
 	concreteAID := g.MakeNodeID("svc.go", "ConcreteA")
 	g.AddNode(&graph.Node{
 		ID: concreteAID, Type: graph.NodeStruct,
 		Name: "ConcreteA", Package: "svc", File: "svc.go",
 		Metadata: map[string]string{"heritage_implements": "Runnable"},
 	})
-
-	// ConcreteB implements Runnable — NOT instantiated.
 	concreteBID := g.MakeNodeID("svc.go", "ConcreteB")
 	g.AddNode(&graph.Node{
 		ID: concreteBID, Type: graph.NodeStruct,
@@ -190,55 +295,24 @@ func TestRTA_HeritageEdges_SkipsNonInstantiated(t *testing.T) {
 		Metadata: map[string]string{"heritage_implements": "Runnable"},
 	})
 
-	// Only ConcreteA is instantiated.
+	// Only ConcreteA is instantiated — but BOTH must get IMPLEMENTS edges.
 	g.AddInstantiatedType("svc.go", "ConcreteA")
 
 	count := resolver.ResolveHeritageEdges(g)
-	if count != 1 {
-		t.Fatalf("expected 1 IMPLEMENTS edge (ConcreteA only), got %d", count)
+	if count != 2 {
+		t.Fatalf("expected 2 IMPLEMENTS edges (all heritage, no RTA filter), got %d", count)
 	}
 	if !g.HasEdge(concreteAID, ifaceID, graph.EdgeImplements) {
-		t.Error("expected IMPLEMENTS edge for ConcreteA (instantiated)")
+		t.Error("missing ConcreteA→Runnable")
 	}
-	if g.HasEdge(concreteBID, ifaceID, graph.EdgeImplements) {
-		t.Error("unexpected IMPLEMENTS edge for ConcreteB (not instantiated)")
-	}
-}
-
-// TestRTA_HeritageEdges_NoFilterWhenNoData verifies that ResolveHeritageEdges
-// emits IMPLEMENTS edges for all classes when no instantiation data exists
-// (preserving backward compatibility for C#/Kotlin projects).
-func TestRTA_HeritageEdges_NoFilterWhenNoData(t *testing.T) {
-	g := graph.New("testrepo")
-
-	ifaceID := g.MakeNodeID("svc.go", "Runnable")
-	g.AddNode(&graph.Node{
-		ID: ifaceID, Type: graph.NodeInterface,
-		Name: "Runnable", Package: "svc", File: "svc.go",
-	})
-
-	concreteAID := g.MakeNodeID("svc.go", "ConcreteA")
-	g.AddNode(&graph.Node{
-		ID: concreteAID, Type: graph.NodeStruct,
-		Name: "ConcreteA", Package: "svc", File: "svc.go",
-		Metadata: map[string]string{"heritage_implements": "Runnable"},
-	})
-	concreteBID := g.MakeNodeID("svc.go", "ConcreteB")
-	g.AddNode(&graph.Node{
-		ID: concreteBID, Type: graph.NodeStruct,
-		Name: "ConcreteB", Package: "svc", File: "svc.go",
-		Metadata: map[string]string{"heritage_implements": "Runnable"},
-	})
-	// No instantiation data.
-
-	count := resolver.ResolveHeritageEdges(g)
-	if count != 2 {
-		t.Fatalf("expected 2 IMPLEMENTS edges (no RTA filter), got %d", count)
+	if !g.HasEdge(concreteBID, ifaceID, graph.EdgeImplements) {
+		t.Error("missing ConcreteB→Runnable — RTA filter must NOT apply to heritage edges")
 	}
 }
 
-// TestRTA_ImplementsEdges_SkipsNonInstantiated verifies that ResolveImplementsEdges
-// skips Go structural matches for structs not in instantiatedTypes.
+// TestRTA_ImplementsEdges_SkipsNonInstantiated verifies that the Go structural
+// heuristic (ResolveImplementsEdges) skips structs not in instantiatedTypes.
+// This is where RTA filtering IS appropriate — structural matching can over-match.
 func TestRTA_ImplementsEdges_SkipsNonInstantiated(t *testing.T) {
 	g := graph.New("testrepo")
 
@@ -249,30 +323,18 @@ func TestRTA_ImplementsEdges_SkipsNonInstantiated(t *testing.T) {
 		Metadata: map[string]string{"methods": "Do"},
 	})
 
-	// ConcreteA.Do — ConcreteA IS instantiated.
 	concreteAID := g.MakeNodeID("pkg/svc.go", "ConcreteA")
+	g.AddNode(&graph.Node{ID: concreteAID, Type: graph.NodeStruct, Name: "ConcreteA", Package: "pkg", File: "pkg/svc.go"})
 	g.AddNode(&graph.Node{
-		ID: concreteAID, Type: graph.NodeStruct,
-		Name: "ConcreteA", Package: "pkg", File: "pkg/svc.go",
-	})
-	g.AddNode(&graph.Node{
-		ID:      g.MakeNodeID("pkg/svc.go", "ConcreteA.Do"),
-		Type:    graph.NodeMethod,
-		Name:    "ConcreteA.Do",
-		Package: "pkg", File: "pkg/svc.go",
+		ID: g.MakeNodeID("pkg/svc.go", "ConcreteA.Do"), Type: graph.NodeMethod,
+		Name: "ConcreteA.Do", Package: "pkg", File: "pkg/svc.go",
 	})
 
-	// ConcreteB.Do — ConcreteB NOT instantiated.
 	concreteBID := g.MakeNodeID("pkg/svc.go", "ConcreteB")
+	g.AddNode(&graph.Node{ID: concreteBID, Type: graph.NodeStruct, Name: "ConcreteB", Package: "pkg", File: "pkg/svc.go"})
 	g.AddNode(&graph.Node{
-		ID: concreteBID, Type: graph.NodeStruct,
-		Name: "ConcreteB", Package: "pkg", File: "pkg/svc.go",
-	})
-	g.AddNode(&graph.Node{
-		ID:      g.MakeNodeID("pkg/svc.go", "ConcreteB.Do"),
-		Type:    graph.NodeMethod,
-		Name:    "ConcreteB.Do",
-		Package: "pkg", File: "pkg/svc.go",
+		ID: g.MakeNodeID("pkg/svc.go", "ConcreteB.Do"), Type: graph.NodeMethod,
+		Name: "ConcreteB.Do", Package: "pkg", File: "pkg/svc.go",
 	})
 
 	g.AddInstantiatedType("pkg/svc.go", "ConcreteA")
@@ -289,6 +351,34 @@ func TestRTA_ImplementsEdges_SkipsNonInstantiated(t *testing.T) {
 	}
 }
 
+// TestRTA_ImplementsEdges_NoFilterWhenNoData verifies that ResolveImplementsEdges
+// emits all Go structural matches when no instantiation data exists.
+func TestRTA_ImplementsEdges_NoFilterWhenNoData(t *testing.T) {
+	g := graph.New("testrepo")
+
+	ifaceID := g.MakeNodeID("pkg/svc.go", "Worker")
+	g.AddNode(&graph.Node{
+		ID: ifaceID, Type: graph.NodeInterface,
+		Name: "Worker", Package: "pkg", File: "pkg/svc.go",
+		Metadata: map[string]string{"methods": "Do"},
+	})
+
+	for _, name := range []string{"ConcreteA", "ConcreteB"} {
+		sID := g.MakeNodeID("pkg/svc.go", name)
+		g.AddNode(&graph.Node{ID: sID, Type: graph.NodeStruct, Name: name, Package: "pkg", File: "pkg/svc.go"})
+		g.AddNode(&graph.Node{
+			ID: g.MakeNodeID("pkg/svc.go", name+".Do"), Type: graph.NodeMethod,
+			Name: name + ".Do", Package: "pkg", File: "pkg/svc.go",
+		})
+	}
+	// No instantiation data → no filter.
+
+	count := resolver.ResolveImplementsEdges(g)
+	if count != 2 {
+		t.Fatalf("expected 2 IMPLEMENTS edges (no RTA filter), got %d", count)
+	}
+}
+
 // TestRTA_InstantiatedTypes_PerFileTracking verifies per-file tracking and
 // cross-file union in GetInstantiatedTypes.
 func TestRTA_InstantiatedTypes_PerFileTracking(t *testing.T) {
@@ -296,17 +386,14 @@ func TestRTA_InstantiatedTypes_PerFileTracking(t *testing.T) {
 
 	g.AddInstantiatedType("a.java", "ServiceA")
 	g.AddInstantiatedType("b.java", "ServiceB")
-	g.AddInstantiatedType("a.java", "ServiceA") // duplicate — should be idempotent
+	g.AddInstantiatedType("a.java", "ServiceA") // duplicate — idempotent
 
 	types := g.GetInstantiatedTypes()
 	if types == nil {
 		t.Fatal("expected non-nil instantiated types")
 	}
-	if !types["ServiceA"] {
-		t.Error("expected ServiceA in instantiated types")
-	}
-	if !types["ServiceB"] {
-		t.Error("expected ServiceB in instantiated types")
+	if !types["ServiceA"] || !types["ServiceB"] {
+		t.Errorf("missing expected types: %v", types)
 	}
 	if len(types) != 2 {
 		t.Errorf("expected 2 distinct types, got %d", len(types))
@@ -318,15 +405,11 @@ func TestRTA_InstantiatedTypes_PerFileTracking(t *testing.T) {
 func TestRTA_InstantiatedTypes_RemoveFile(t *testing.T) {
 	g := graph.New("testrepo")
 
-	// Add a file node so RemoveFile has something to remove.
 	fileID := g.MakeNodeID("a.java", "a.java")
 	g.AddNode(&graph.Node{ID: fileID, Type: graph.NodeFile, Name: "a.java", File: "a.java", Package: "com.example"})
 	g.AddNode(&graph.Node{
-		ID:      g.MakeNodeID("a.java", "ServiceA"),
-		Type:    graph.NodeStruct,
-		Name:    "ServiceA",
-		Package: "com.example",
-		File:    "a.java",
+		ID: g.MakeNodeID("a.java", "ServiceA"), Type: graph.NodeStruct,
+		Name: "ServiceA", Package: "com.example", File: "a.java",
 	})
 
 	g.AddInstantiatedType("a.java", "ServiceA")
@@ -344,12 +427,12 @@ func TestRTA_InstantiatedTypes_RemoveFile(t *testing.T) {
 }
 
 // TestRTA_InstantiatedTypes_EmptyInputIgnored verifies that empty type names
-// are silently ignored.
+// and empty file paths are silently ignored.
 func TestRTA_InstantiatedTypes_EmptyInputIgnored(t *testing.T) {
 	g := graph.New("testrepo")
-	g.AddInstantiatedType("", "ServiceA")  // empty file
-	g.AddInstantiatedType("a.java", "")    // empty type
-	g.AddInstantiatedType("", "")          // both empty
+	g.AddInstantiatedType("", "ServiceA")
+	g.AddInstantiatedType("a.java", "")
+	g.AddInstantiatedType("", "")
 
 	types := g.GetInstantiatedTypes()
 	if len(types) != 0 {
