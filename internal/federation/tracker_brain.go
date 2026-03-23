@@ -126,7 +126,7 @@ func (bd *BrainDetector) DetectDeps(ctx context.Context, fileContent string, max
 	}
 
 	raw := parseBrainDeps(response)
-	return bd.validateBrainDeps(ctx, raw)
+	return bd.validateBrainDeps(ctx, raw, fileContent)
 }
 
 // parseBrainDeps extracts BrainDetectedDep entries from the LLM response.
@@ -223,7 +223,7 @@ func (a *BrainTrackerAdapter) DetectAndStoreBrain(ctx context.Context, filePath 
 // Only deps where the entity actually exists are returned.
 // This is the anti-hallucination gate — the brain may claim a dep exists,
 // but we only trust it if the sibling's graph confirms it.
-func (bd *BrainDetector) validateBrainDeps(ctx context.Context, raw []BrainDetectedDep) []RawCrossDep {
+func (bd *BrainDetector) validateBrainDeps(ctx context.Context, raw []BrainDetectedDep, _ string) []RawCrossDep {
 	var valid []RawCrossDep
 	for _, dep := range raw {
 		if ctx.Err() != nil {
