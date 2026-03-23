@@ -11,16 +11,17 @@ import (
 // (TypeScript, Java, C#, Kotlin). These edges are based on explicit source
 // declarations and are always correct — no structural heuristic needed.
 //
-// RTA filtering: when instantiation data is available (Java/TypeScript projects
-// where new_expression / object_creation_expression was parsed), IMPLEMENTS edges
-// are only emitted for structs/classes that were explicitly constructed somewhere
-// in the project. This avoids polluting the graph with edges for abstract base
-// classes, test doubles, or dead code that is never instantiated.
+// RTA filtering is intentionally NOT applied here. Heritage clauses are nominal
+// type declarations: if a class says "implements Runnable", that relationship is
+// structurally true regardless of whether the class is instantiated. Filtering by
+// instantiation would break abstract base class chains (e.g. AbstractBase
+// implements Service, ConcreteImpl extends AbstractBase — filtering AbstractBase
+// drops the Service edge and breaks transitive hierarchy traversal). The Go
+// structural heuristic (ResolveImplementsEdges) is where RTA filtering is
+// valuable because it may over-match; nominal declarations cannot over-match.
 //
 // Returns the number of new IMPLEMENTS edges added.
 func ResolveHeritageEdges(g *graph.Graph) int {
-	// RTA: get instantiated type set. nil = no data (pure Go, or parsers haven't run).
-	instantiated := g.GetInstantiatedTypes()
 	nodes := g.AllNodes()
 
 	// Build name → []NodeID index for all interface and struct nodes.
@@ -42,12 +43,6 @@ func ResolveHeritageEdges(g *graph.Graph) int {
 	count := 0
 	for _, n := range nodes {
 		if n.Type != graph.NodeStruct {
-			continue
-		}
-
-		// RTA filter: if we have instantiation data, skip classes that are never
-		// constructed. len(instantiated)==0 means no data (Go projects) — skip filter.
-		if len(instantiated) > 0 && !instantiated[n.Name] {
 			continue
 		}
 

@@ -20,6 +20,11 @@ import (
 //
 // Must be called after all files have been parsed (i.e., after WalkDir or
 // ParseFile returns) so that all target nodes already exist in the graph.
+//
+// RTA multi-target: when instantiation data is available (Java/TypeScript),
+// an untyped method call may resolve to MULTIPLE targets — all instantiated
+// classes that define the method. An edge is emitted to each, matching true
+// RTA semantics (Bacon & Sweeney, OOPSLA 1996).
 func ResolveCallEdges(g *graph.Graph) int {
 	sites := g.DrainCallSites()
 	if len(sites) == 0 {
@@ -32,7 +37,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 	methodIndex := buildMethodIndex(pkgIndex) // derived from pkgIndex, no graph scan
 
 	// RTA: collect which types are explicitly instantiated across the project.
-	// nil means no instantiation data (e.g. pure Go project) — tie-breaking skipped.
+	// nil means no instantiation data (e.g. pure Go project) — CHA behavior used.
 	instantiated := g.GetInstantiatedTypes()
 
 	// Track edges added in this batch. Existing edges checked via g.HasEdge.
@@ -41,7 +46,9 @@ func ResolveCallEdges(g *graph.Graph) int {
 	resolved := 0
 
 	for _, site := range sites {
-		var targetID graph.NodeID
+		// targets holds all resolved NodeIDs for this call site. Multiple targets
+		// occur when RTA finds several instantiated classes with the same method.
+		var targets []graph.NodeID
 
 		if site.PkgAlias != "" {
 			// Qualified call: pkg.Func() or var.Method()
@@ -52,29 +59,32 @@ func ResolveCallEdges(g *graph.Graph) int {
 			if ok {
 				if importPath, found := aliases[site.PkgAlias]; found {
 					shortPkg := path.Base(importPath)
-					targetID = findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated)
+					targets = findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated)
 				}
 			}
 
 			// Second try: var type map — Python/Java obj.method() where obj has a
 			// known declared type (e.g. repo: Repository = ... or Repository repo = ...).
 			// Resolve the type name then look for TypeName.method across all packages.
-			if targetID == "" {
+			// This path is already precise (exact type known) — single target only.
+			if len(targets) == 0 {
 				varTypes := g.GetVarTypes(site.CallerFile)
 				if typeName, hasType := varTypes[site.PkgAlias]; hasType {
-					targetID = findByTypedMethod(methodIndex, typeName, site.FuncName)
+					if id := findByTypedMethod(methodIndex, typeName, site.FuncName); id != "" {
+						targets = []graph.NodeID{id}
+					}
 				}
 			}
 
 			// Fallback: alias was not an import or a typed var — treat as var.Method().
 			// Search the caller's own package and all imported packages
 			// for a method matching ".FuncName" (e.g. Graph.CarveEgoGraph).
-			if targetID == "" {
+			if len(targets) == 0 {
 				callerNode := g.GetNode(site.CallerID)
 				if callerNode != nil {
-					targetID = findInPackage(pkgIndex, callerNode.Package, site.FuncName, instantiated)
+					targets = findInPackage(pkgIndex, callerNode.Package, site.FuncName, instantiated)
 				}
-				if targetID == "" {
+				if len(targets) == 0 {
 					if aliases, ok := importMap[site.CallerFile]; ok {
 						sortedPaths := make([]string, 0, len(aliases))
 						for _, p := range aliases {
@@ -83,8 +93,8 @@ func ResolveCallEdges(g *graph.Graph) int {
 						sort.Strings(sortedPaths)
 						for _, importPath := range sortedPaths {
 							shortPkg := path.Base(importPath)
-							if id := findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated); id != "" {
-								targetID = id
+							if ids := findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated); len(ids) > 0 {
+								targets = ids
 								break
 							}
 						}
@@ -98,12 +108,12 @@ func ResolveCallEdges(g *graph.Graph) int {
 			if callerNode == nil {
 				continue
 			}
-			targetID = findInPackage(pkgIndex, callerNode.Package, site.FuncName, instantiated)
+			targets = findInPackage(pkgIndex, callerNode.Package, site.FuncName, instantiated)
 
 			// 2. Fallback: search all packages imported by the caller's file.
 			//    This handles Python/TypeScript `from X import Y` style calls where
 			//    the symbol is imported directly (no qualifier) from another module.
-			if targetID == "" {
+			if len(targets) == 0 {
 				if aliases, ok := importMap[site.CallerFile]; ok {
 					sortedPaths := make([]string, 0, len(aliases))
 					for _, p := range aliases {
@@ -112,8 +122,8 @@ func ResolveCallEdges(g *graph.Graph) int {
 					sort.Strings(sortedPaths)
 					for _, importPath := range sortedPaths {
 						shortPkg := path.Base(importPath)
-						if id := findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated); id != "" {
-							targetID = id
+						if ids := findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated); len(ids) > 0 {
+							targets = ids
 							break
 						}
 					}
@@ -121,22 +131,19 @@ func ResolveCallEdges(g *graph.Graph) int {
 			}
 		}
 
-		if targetID == "" {
-			continue
+		for _, targetID := range targets {
+			key := edgeKey{site.CallerID, targetID}
+			if seen[key] || g.HasEdge(site.CallerID, targetID, graph.EdgeCalls) {
+				continue // deduplicate: same function may call the same target multiple times
+			}
+			seen[key] = true
+			g.AddEdge(&graph.Edge{
+				From: site.CallerID,
+				To:   targetID,
+				Type: graph.EdgeCalls,
+			})
+			resolved++
 		}
-
-		key := edgeKey{site.CallerID, targetID}
-		if seen[key] || g.HasEdge(site.CallerID, targetID, graph.EdgeCalls) {
-			continue // deduplicate: same function may call the same target multiple times
-		}
-		seen[key] = true
-
-		g.AddEdge(&graph.Edge{
-			From: site.CallerID,
-			To:   targetID,
-			Type: graph.EdgeCalls,
-		})
-		resolved++
 	}
 
 	return resolved
@@ -147,7 +154,10 @@ func ResolveCallEdges(g *graph.Graph) int {
 // two separate functions (buildImportMap + buildPackageIndex) with two passes.
 //
 // importMap: absFilePath → {packageAlias → importPath}
-// pkgIndex:  shortPkgName → []*Node (functions and methods)
+// pkgIndex:  shortPkgName → []*Node (functions and methods), sorted by Name
+//
+// The pkgIndex is sorted by node name to guarantee deterministic resolution
+// order in findInPackage across runs (Go map iteration is non-deterministic).
 func buildLookupTables(g *graph.Graph) (map[string]map[string]string, map[string][]*graph.Node) {
 	importMap := make(map[string]map[string]string)
 	pkgIndex := make(map[string][]*graph.Node)
@@ -172,34 +182,42 @@ func buildLookupTables(g *graph.Graph) (map[string]map[string]string, map[string
 			pkgIndex[n.Package] = append(pkgIndex[n.Package], n)
 		}
 	}
+
+	// Sort each package's node list by name for deterministic resolution order.
+	// Without this, Go map iteration produces different orderings across runs,
+	// causing non-deterministic CALLS edge selection when multiple candidates match.
+	for pkg := range pkgIndex {
+		sort.Slice(pkgIndex[pkg], func(i, j int) bool {
+			return pkgIndex[pkg][i].Name < pkgIndex[pkg][j].Name
+		})
+	}
+
 	return importMap, pkgIndex
 }
 
-// findInPackage returns the NodeID of a function or method named `name` in
-// package `pkg`, or "" if not found.
+// findInPackage returns NodeIDs for functions/methods named `name` in package `pkg`.
 // Methods are stored as "ReceiverType.MethodName", so we match on the suffix.
 //
-// RTA tie-breaking: when multiple candidates match and instantiated is non-nil,
-// prefer candidates whose receiver type appears in the instantiated set. This
-// reduces false-positive CALLS edges in codebases with deep class hierarchies
-// (Java/TypeScript) where many classes share the same method name. Falls back
-// to the first candidate if no instantiated match exists (no regressions).
-func findInPackage(idx map[string][]*graph.Node, pkg, name string, instantiated map[string]bool) graph.NodeID {
+// RTA mode (len(instantiated) > 0):
+//   - For method calls: returns ALL candidates whose receiver type is in the
+//     instantiated set. If none are instantiated, falls back to [firstMatch]
+//     (CHA fallback — avoids losing edges entirely).
+//   - For plain function calls (no receiver dot): returns [firstMatch].
+//
+// CHA fast-path mode (instantiated nil/empty):
+//   - Returns [firstMatch] — original behavior, no change.
+//
+// Returns nil if no candidate exists in the package at all.
+//
+// The pkgIndex slice is pre-sorted by name (see buildLookupTables), guaranteeing
+// deterministic results across runs regardless of Go map iteration order.
+func findInPackage(idx map[string][]*graph.Node, pkg, name string, instantiated map[string]bool) []graph.NodeID {
 	suffix := "." + name
 	candidates := idx[pkg]
 
-	if len(instantiated) == 0 {
-		// Fast path: no RTA data, original CHA behavior.
-		for _, n := range candidates {
-			if n.Name == name || strings.HasSuffix(n.Name, suffix) {
-				return n.ID
-			}
-		}
-		return ""
-	}
+	var instantiatedMatches []graph.NodeID
+	var first graph.NodeID
 
-	// RTA path: prefer candidates whose receiver type is in the instantiated set.
-	var first graph.NodeID // first match (fallback if no instantiated candidate)
 	for _, n := range candidates {
 		if n.Name != name && !strings.HasSuffix(n.Name, suffix) {
 			continue
@@ -207,14 +225,41 @@ func findInPackage(idx map[string][]*graph.Node, pkg, name string, instantiated 
 		if first == "" {
 			first = n.ID
 		}
-		// For method nodes ("ReceiverType.MethodName"), check if the receiver type
-		// is in the instantiated set.
-		dot := strings.IndexByte(n.Name, '.')
-		if dot > 0 && instantiated[n.Name[:dot]] {
-			return n.ID // prefer instantiated receiver
+		if len(instantiated) > 0 {
+			dot := strings.IndexByte(n.Name, '.')
+			if dot > 0 {
+				// Method node "ReceiverType.MethodName": filter by instantiated receiver.
+				if instantiated[n.Name[:dot]] {
+					instantiatedMatches = append(instantiatedMatches, n.ID)
+				}
+			} else {
+				// Plain function (no receiver): not subject to RTA filtering.
+				// Use first match only — functions are uniquely named within a package.
+				if len(instantiatedMatches) == 0 {
+					instantiatedMatches = append(instantiatedMatches, n.ID)
+				}
+			}
 		}
 	}
-	return first // fallback: first match (CHA behavior when no RTA preference found)
+
+	if len(instantiated) > 0 {
+		if len(instantiatedMatches) > 0 {
+			return instantiatedMatches
+		}
+		// CHA fallback: no instantiated receiver found — return first match to
+		// avoid losing the edge entirely (better a false positive than a false
+		// negative for blast-radius analysis).
+		if first != "" {
+			return []graph.NodeID{first}
+		}
+		return nil
+	}
+
+	// CHA fast path: no instantiation data (pure Go project, etc.).
+	if first != "" {
+		return []graph.NodeID{first}
+	}
+	return nil
 }
 
 // buildMethodIndex builds a flat "TypeName.MethodName" → NodeID map from the
