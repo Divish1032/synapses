@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -298,6 +299,14 @@ func New(cfg config.BrainConfig) Brain {
 
 	// Ollama path (default): per-tier model assignment via Ollama HTTP API.
 	if cfg.Backend == "ollama" && ingestClient == nil {
+		// Warn once if OllamaURL points to a remote host — source code will be
+		// transmitted to that endpoint during ingest/enrich operations.
+		if u, err := url.Parse(cfg.OllamaURL); err == nil {
+			host := u.Hostname()
+			if host != "localhost" && host != "127.0.0.1" && host != "::1" && host != "" {
+				logutil.Warn("brain: OllamaURL points to remote host %q — source code snippets will be transmitted to this endpoint\n", host)
+			}
+		}
 		// Compute keep_alive values based on intelligence mode.
 		// Sentry (T0) is always pinned — it is called on every file-save event.
 		// Librarian (T2) is pinned in Standard/Full; JIT in Optimal to save RAM.
