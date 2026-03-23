@@ -156,6 +156,52 @@ func TestCarveConfig_OverridesApplied(t *testing.T) {
 	}
 }
 
+// TestCarveConfig_HybridLambda_PointerSemantics verifies the *float64 behaviour:
+//   - nil (unset in JSON)           → CarveConfig.HybridLambda == 0 (handler applies default)
+//   - explicit 0.0 in JSON          → CarveConfig.HybridLambda == 0 (disable hybrid)
+//   - explicit 0.5 in JSON          → CarveConfig.HybridLambda == 0.5
+//
+// The *float64 type is critical: without it, hybrid_lambda: 0 and omitted lambda
+// are indistinguishable, so users cannot disable hybrid scoring via synapses.json.
+func TestCarveConfig_HybridLambda_PointerSemantics(t *testing.T) {
+	zero := 0.0
+	half := 0.5
+
+	cases := []struct {
+		name   string
+		lambda *float64
+		want   float64
+	}{
+		{"nil (unset)", nil, 0},
+		{"explicit 0.0", &zero, 0},
+		{"explicit 0.5", &half, 0.5},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeConfig(t, config.Config{
+				ContextCarve: config.ContextCarveConfig{HybridLambda: tc.lambda},
+			})
+			cfg, err := config.Load(dir)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			cc := cfg.CarveConfig()
+			if cc.HybridLambda != tc.want {
+				t.Errorf("HybridLambda = %v, want %v", cc.HybridLambda, tc.want)
+			}
+			// Verify the pointer itself is correctly preserved for nil/non-nil check
+			// in handlers_context.go (the key distinction between unset and explicit-0).
+			if tc.lambda == nil && cfg.ContextCarve.HybridLambda != nil {
+				t.Error("expected ContextCarve.HybridLambda to be nil when unset")
+			}
+			if tc.lambda != nil && cfg.ContextCarve.HybridLambda == nil {
+				t.Errorf("expected ContextCarve.HybridLambda to be non-nil for value %v", *tc.lambda)
+			}
+		})
+	}
+}
+
 // FIX-RESOLVER-1: use_go_types should default to true when go.mod is present.
 func TestLoad_UseGoTypes_DefaultsTrueWhenGoModPresent(t *testing.T) {
 	dir := t.TempDir()
