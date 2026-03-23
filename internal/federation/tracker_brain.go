@@ -118,7 +118,7 @@ func (bd *BrainDetector) DetectDeps(ctx context.Context, fileContent string, max
 
 	// Escape any closing delimiter in the code to prevent breakout.
 	code = strings.ReplaceAll(code, "</source_code>", "&lt;/source_code&gt;")
-	code = sanitizePromptInput(code)
+	code = sanitizeCodeInput(code, maxCodeLen)
 	prompt := fmt.Sprintf(crossProjectPromptSuffix, strings.Join(bd.aliases, ", ")) + code + "\n</source_code>"
 
 	response, err := bd.Generate(ctx, prompt)
@@ -384,6 +384,26 @@ func splitSegments(s string) []string {
 		}
 	}
 	return out
+}
+
+// sanitizeCodeInput is like sanitizePromptInput but respects a caller-supplied
+// max rune length instead of the 512-rune cap.
+func sanitizeCodeInput(s string, maxLen int) string {
+	runes := []rune(s)
+	if maxLen > 0 && len(runes) > maxLen {
+		runes = runes[:maxLen]
+		s = string(runes)
+	}
+	r := strings.NewReplacer("<", "&lt;", ">", "&gt;", "`", "'")
+	s = r.Replace(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, c := range s {
+		if c >= 0x20 {
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
 }
 
 // sanitizePromptInput escapes angle brackets and strips control characters

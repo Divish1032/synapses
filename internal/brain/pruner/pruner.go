@@ -115,7 +115,11 @@ var injectionPatterns = []string{
 // at the beginning of the hijacked response, reducing false positives
 // from injection patterns appearing in legitimately extracted content.
 func looksLikeInjection(output string) bool {
-	// Check full output for the strongest signals.
+	// Truncate to first 500 chars as documented to reduce false positives
+	// from injection patterns appearing in legitimately extracted security content.
+	if len(output) > 500 {
+		output = output[:500]
+	}
 	lower := strings.ToLower(output)
 	for _, pattern := range injectionPatterns {
 		if strings.Contains(lower, pattern) {

@@ -650,10 +650,11 @@ func extractDiffSummary(diff, entityName string) string {
 	return "Signature modified: " + strings.Join(parts, ", ")
 }
 
-// truncate shortens a string to max characters with an ellipsis suffix.
+// truncate shortens a string to max runes with an ellipsis suffix.
 func truncate(s string, max int) string {
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max-3] + "..."
+	return string(runes[:max-3]) + "..."
 }

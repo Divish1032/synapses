@@ -26,6 +26,13 @@ func (s *Server) embedMemory(embedder embed.Embedder, st *store.Store, memoryID,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	go func() {
+		select {
+		case <-s.stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 
 	vec, err := embedder.Embed(ctx, content)
 	if err != nil {
