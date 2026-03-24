@@ -587,9 +587,10 @@ func (s *Server) handleUpdateTask(
 									Priority:         taskPriority,
 									SignalWeight:     sigWeight,
 								})
-								// P5 — Item 10: recompute entity quality score after outcome.
-								pc.UpdateEntityQualityScore(entity, projID)
 								// P5 — Item 11: link most recent delivery to this outcome.
+								// NOTE: quality score recomputation (Sprint 15 #2) is handled by
+								// the pulse collector after InsertOutcomeSignalTx — calling it here
+								// would run before the signal is flushed to the DB.
 								if sig == "task_done" {
 									if did := pc.GetMostRecentDeliveryID(entity); did > 0 {
 										pc.InsertDeliveryOutcome(did, pulseSessID, entity, sig, toolsBetween, true)

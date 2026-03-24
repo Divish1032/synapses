@@ -61,7 +61,9 @@ func (s *Server) emitAbandonedContextSignals(sessionID, agentID, projectID strin
 				SessionID:    sessionID,
 				SignalWeight: pulsetypes.SignalWeightTaskAbandoned,
 			})
-			pc.UpdateEntityQualityScore(e, projectID)
+			// NOTE: quality score recomputation (Sprint 15 #2) is handled by
+			// the pulse collector after InsertOutcomeSignalTx — calling it here
+			// would run before the signal is flushed to the DB.
 		})
 	}
 }

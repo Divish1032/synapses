@@ -478,7 +478,16 @@ func (c *Collector) dispatchTx(ev event) error {
 			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
 			return nil
 		}
-		return c.store.InsertOutcomeSignalTx(os)
+		if err := c.store.InsertOutcomeSignalTx(os); err != nil {
+			return err
+		}
+		// Sprint 15 #2: recompute quality score WITHIN the same transaction so
+		// the SELECT in UpdateEntityQualityScore sees the just-inserted signal.
+		// Calling this after the insert (not before) is what makes the score
+		// correct — the call-site fire-and-forget pattern in task_tools.go and
+		// context_signals.go ran before the flush and always missed the new signal.
+		c.store.UpdateEntityQualityScore(os.Entity, os.ProjectID)
+		return nil
 	case "session_model":
 		sp, ok := ev.data.(sessionModelPayload)
 		if !ok {
@@ -699,7 +708,13 @@ func (c *Collector) dispatchNoTx(ev event) error {
 			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
 			return nil
 		}
-		return c.store.InsertOutcomeSignal(os)
+		if err := c.store.InsertOutcomeSignal(os); err != nil {
+			return err
+		}
+		// Sprint 15 #2: recompute quality score immediately after the signal
+		// write so the SELECT aggregation sees the new row.
+		c.store.UpdateEntityQualityScore(os.Entity, os.ProjectID)
+		return nil
 	case "session_model":
 		sp, ok := ev.data.(sessionModelPayload)
 		if !ok {
