@@ -804,3 +804,78 @@ func TestUpdateEntityQualityScore_PositiveNegativeCounts(t *testing.T) {
 		t.Error("API entity not found in GetEntityQualityScores")
 	}
 }
+
+// TestUpdateRecallChannelStats_LearnedWeights verifies Sprint 15 #4's
+// weight-learning pipeline end-to-end at the store layer:
+// - InsertMemoryOp seeds recall_hit events with top_channel values
+// - UpdateRecallChannelStats aggregates win-rates into recall_channel_weights
+// - GetRecallChannelWeights returns per-project win-rates that sum to ~1.0
+// - A dominant channel's win-rate exceeds equal-share baseline (0.25)
+func TestUpdateRecallChannelStats_LearnedWeights(t *testing.T) {
+	s := testStore(t)
+	projID := "test-proj-sprint15"
+
+	// Seed 16 recall_hit ops: graph=8, bm25=4, semantic=2, temporal=2.
+	// Expected win-rates: graph=0.5, bm25=0.25, semantic=0.125, temporal=0.125.
+	seed := []struct {
+		ch    string
+		count int
+	}{
+		{"graph", 8},
+		{"bm25", 4},
+		{"semantic", 2},
+		{"temporal", 2},
+	}
+	for _, entry := range seed {
+		for i := 0; i < entry.count; i++ {
+			if err := s.InsertMemoryOp(pulsetypes.MemoryOperationEvent{
+				Operation: "recall_hit",
+				ProjectID: projID,
+				TopChannel: entry.ch,
+			}); err != nil {
+				t.Fatalf("InsertMemoryOp(%s): %v", entry.ch, err)
+			}
+		}
+	}
+
+	// Recompute channel win-rates from memory_ops.
+	s.UpdateRecallChannelStats(projID)
+
+	weights := s.GetRecallChannelWeights(projID)
+	if len(weights) < 2 {
+		t.Fatalf("expected ≥2 channel weights, got %d: %v", len(weights), weights)
+	}
+
+	// graph should have the highest win-rate (0.5).
+	graphWR, ok := weights["graph"]
+	if !ok {
+		t.Fatal("graph channel missing from learned weights")
+	}
+	if graphWR < 0.4 {
+		t.Errorf("graph win-rate %.3f, expected ≥0.4 for dominant channel", graphWR)
+	}
+
+	// Learned win-rates must sum to ~1.0 (they are probabilities).
+	total := 0.0
+	for _, wr := range weights {
+		total += wr
+	}
+	if total < 0.95 || total > 1.05 {
+		t.Errorf("win-rates sum to %.3f, expected ~1.0 (they are probabilities)", total)
+	}
+
+	// temporal (smallest slice) should have lowest win-rate.
+	tempWR, ok := weights["temporal"]
+	if !ok {
+		t.Fatal("temporal channel missing from learned weights")
+	}
+	if tempWR > graphWR {
+		t.Errorf("temporal win-rate %.3f > graph %.3f, expected temporal < graph for graph-dominant project", tempWR, graphWR)
+	}
+
+	// Verify that an unknown project returns empty (no cross-project bleed).
+	other := s.GetRecallChannelWeights("other-proj")
+	if len(other) != 0 {
+		t.Errorf("expected no weights for unknown project, got %v", other)
+	}
+}

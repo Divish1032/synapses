@@ -723,30 +723,31 @@ func (s *Server) handleRecall(
 		if vs, ok := recallChannels["_vector_search_ms"]; ok && len(vs) > 0 {
 			fmt.Sscanf(vs[0], "%f", &vecSearchMs)
 		}
-		// P5 — Item 12: find top contributing channel.
+		// Sprint 15 #4: find which channel contributed the top-ranked result.
+		// recallChannels is attribution[memID → []channelNames]. The rank-1
+		// result is memories[0] (post-filter). We take the first non-metadata
+		// channel in its attribution list as the winner so UpdateRecallChannelStats
+		// accumulates real channel names ("bm25", "semantic", "graph", "temporal")
+		// rather than memory IDs.
 		var topChan string
-		var topChanScore float64
-		for ch, ids := range recallChannels {
-			if strings.HasPrefix(ch, "_") {
-				continue // skip metadata keys
-			}
-			score := float64(len(ids))
-			if score > topChanScore {
-				topChanScore = score
-				topChan = ch
+		if len(memories) > 0 {
+			for _, ch := range recallChannels[memories[0].ID] {
+				if !strings.HasPrefix(ch, "_") {
+					topChan = ch
+					break
+				}
 			}
 		}
 		pc.RecordMemoryOp(pulse.MemoryOperationEvent{
-			Operation:       op,
-			Tier:            "episodic",
-			Source:          "manual",
-			ResultCount:     totalResults,
-			AgentID:         recallAgentID,
-			ProjectID:       projID,
-			SessionID:       sessID,
-			VectorSearchMs:  vecSearchMs,
-			TopChannel:      topChan,
-			TopChannelScore: topChanScore,
+			Operation:      op,
+			Tier:           "episodic",
+			Source:         "manual",
+			ResultCount:    totalResults,
+			AgentID:        recallAgentID,
+			ProjectID:      projID,
+			SessionID:      sessID,
+			VectorSearchMs: vecSearchMs,
+			TopChannel:     topChan,
 		})
 		// P5 — Item 12: trigger recall channel attribution refresh after hits.
 		if op == "recall_hit" {
