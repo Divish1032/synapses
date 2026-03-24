@@ -359,17 +359,22 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 			if err != nil {
 				logutil.Error("synapses: read %s: %v\n", job.path, err)
 				errType = "read_error"
-			} else if parseErr := job.parser.Parse(g, job.path, src); parseErr != nil {
-				logutil.Error("synapses: parse %s: %v\n", job.path, parseErr)
-				errType = "parse_error"
 			} else {
-				// R28: stamp provenance on all nodes produced by this file.
-				ApplyProvenance(g, job.path, src)
-				// R1: collect for heuristic pass.
-				heuristicMu.Lock()
-				heuristicFiles = append(heuristicFiles, parsedFile{job.path, src})
-				heuristicMu.Unlock()
-				nodesProduced = len(g.NodesForFile(job.path))
+				// Snapshot node count before parse to compute delta — avoids
+				// O(N) NodesForFile scan just for the telemetry counter.
+				before := g.NodeCount()
+				if parseErr := job.parser.Parse(g, job.path, src); parseErr != nil {
+					logutil.Error("synapses: parse %s: %v\n", job.path, parseErr)
+					errType = "parse_error"
+				} else {
+					nodesProduced = g.NodeCount() - before
+					// R28: stamp provenance on all nodes produced by this file.
+					ApplyProvenance(g, job.path, src)
+					// R1: collect for heuristic pass.
+					heuristicMu.Lock()
+					heuristicFiles = append(heuristicFiles, parsedFile{job.path, src})
+					heuristicMu.Unlock()
+				}
 			}
 			parseElapsed := time.Since(parseStart).Milliseconds()
 
