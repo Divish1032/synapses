@@ -287,26 +287,29 @@ func (g *Graph) FindByPattern(pattern string) []*Node {
 
 // EnableFlatGraph builds the FlatGraph from the current graph state and stores
 // it for use as the PPR BFS fast path. Safe to call at any time; rebuilds
-// atomically under write lock. Idempotent — calling multiple times is safe.
+// atomically. The heavy construction runs outside g.mu; only the final
+// pointer swap requires a write lock. Idempotent — calling multiple times is safe.
 func (g *Graph) EnableFlatGraph() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	// Hold read lock only while snapshotting graph data.
+	g.mu.RLock()
 	fg := NewFlatGraph(g.repoID)
 	indexMap := make(map[NodeID]NodeIndex, len(g.nodes))
-	// nodeIDs is a parallel slice: nodeIDs[idx] = original graph NodeID (relative-path format).
-	// This is used by flatGraphNeighbors to return the correct NodeID format after BFS expansion.
 	nodeIDs := make([]NodeID, 0, len(g.nodes))
 	for id, n := range g.nodes {
 		fileID := Pool.Intern(n.File)
 		nameID := Pool.Intern(n.Name)
-		idx := fg.AddNode(nameID, n.Type, fileID, 0)
+		// Directly append to fg fields — fg is not yet shared so fg.mu is not needed.
+		idx := NodeIndex(len(fg.Names))
+		fg.Names = append(fg.Names, nameID)
+		fg.Types = append(fg.Types, n.Type)
+		fg.FileIDs = append(fg.FileIDs, fileID)
+		fg.NamespaceIDs = append(fg.NamespaceIDs, 0)
+		fg.Tombstones = append(fg.Tombstones, false)
+		fg.OutOffsets = append(fg.OutOffsets, fg.OutOffsets[idx])
+		fg.InOffsets = append(fg.InOffsets, fg.InOffsets[idx])
 		indexMap[id] = idx
 		fg.stringIDToIndex[id] = idx
-		// Grow nodeIDs to cover idx — AddNode assigns indices sequentially.
-		for len(nodeIDs) <= int(idx) {
-			nodeIDs = append(nodeIDs, "")
-		}
-		nodeIDs[idx] = id
+		nodeIDs = append(nodeIDs, id)
 	}
 	fg.nodeIDs = nodeIDs
 	edges := make([]BulkEdge, 0, len(g.outEdges)*2)
@@ -320,8 +323,14 @@ func (g *Graph) EnableFlatGraph() {
 			edges = append(edges, BulkEdge{From: fromIdx, To: toIdx, Weight: 1.0})
 		}
 	}
+	g.mu.RUnlock()
+
 	fg.BulkAddEdges(edges)
+
+	// Acquire write lock only for the final pointer swap.
+	g.mu.Lock()
 	g.flatGraph = fg
+	g.mu.Unlock()
 }
 
 // flatGraphNeighbors returns undirected neighbor NodeIDs for id using the
