@@ -1775,6 +1775,10 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	// but including it here ensures sessions are cleaned up even when no agents
 	// connect for days (e.g. a paused project still running in the background).
 	go func() {
+		// Check ctx before the initial prune — don't run if already shutting down.
+		if projCtx.Err() != nil {
+			return
+		}
 		st.PruneStaleData(projCtx, 30)
 		st.PruneOldSessions(90 * 24 * time.Hour) //nolint:errcheck
 		ticker := time.NewTicker(24 * time.Hour)
