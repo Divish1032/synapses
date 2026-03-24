@@ -1266,6 +1266,7 @@ var standardTierTools = map[string]bool{
 	"discover_tools":        true,
 	"annotate_node":         true,
 	"link_entities":         true,
+	"unlink_entities":       true,
 	// Standard additions.
 	"get_context":       true,
 	"find_entity":       true,
@@ -1955,6 +1956,32 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleLinkEntities,
+	)
+
+	// unlink_entities
+	s.addOrDefer(
+		mcp.NewTool(
+			"unlink_entities",
+			mcp.WithDescription(
+				"Removes a previously created manual edge between two entities. "+
+					"Only removes edges that were created via link_entities — "+
+					"does not affect auto-discovered structural edges. "+
+					"The removal takes effect immediately in the live graph and persists across restarts.",
+			),
+			mcp.WithString("a",
+				mcp.Required(),
+				mcp.Description("Source entity: name or full node ID."),
+			),
+			mcp.WithString("b",
+				mcp.Required(),
+				mcp.Description("Target entity: name or full node ID."),
+			),
+			mcp.WithString("relation",
+				mcp.Required(),
+				mcp.Description("The relation label of the edge to remove (must match exactly what was used in link_entities)."),
+			),
+		),
+		s.handleUnlinkEntities,
 	)
 
 	// get_impact

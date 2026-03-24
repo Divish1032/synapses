@@ -182,6 +182,38 @@ func (g *Graph) AddEdge(e *Edge) {
 	g.piCache = nil // invalidate ProjectIdentity cache
 }
 
+// RemoveEdge removes a single directed edge. No-op if the edge does not exist.
+// O(outDegree + inDegree) due to slice filtering — acceptable for manual edge
+// removals which are rare and not on any hot path.
+func (g *Graph) RemoveEdge(from, to NodeID, edgeType EdgeType) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ek := edgeKey{From: from, To: to, Type: edgeType}
+	if _, exists := g.edgeSet[ek]; !exists {
+		return
+	}
+	delete(g.edgeSet, ek)
+	// Filter out the edge from outEdges[from].
+	out := g.outEdges[from]
+	filtered := out[:0]
+	for _, e := range out {
+		if !(e.From == from && e.To == to && e.Type == edgeType) {
+			filtered = append(filtered, e)
+		}
+	}
+	g.outEdges[from] = filtered
+	// Filter out the edge from inEdges[to].
+	in := g.inEdges[to]
+	filteredIn := in[:0]
+	for _, e := range in {
+		if !(e.From == from && e.To == to && e.Type == edgeType) {
+			filteredIn = append(filteredIn, e)
+		}
+	}
+	g.inEdges[to] = filteredIn
+	g.piCache = nil // invalidate ProjectIdentity cache
+}
+
 // HasEdge reports whether an edge (from, to, edgeType) exists in the graph. O(1).
 func (g *Graph) HasEdge(from, to NodeID, edgeType EdgeType) bool {
 	g.mu.RLock()
