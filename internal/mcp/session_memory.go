@@ -18,13 +18,44 @@ import (
 
 // endSessionResult is the response from end_session.
 type endSessionResult struct {
-	Status          string                  `json:"status"`
-	AgentID         string                  `json:"agent_id"`
-	SessionDuration string                  `json:"session_duration,omitempty"`
-	MemoriesSaved   int                     `json:"memories_saved"`
-	SessionSummary  *sessionSummary         `json:"session_summary,omitempty"`
-	MemoriesExpired int64                   `json:"memories_expired"`
-	Retrospective   *store.ToolCallSummary  `json:"retrospective,omitempty"`
+	Status              string                  `json:"status"`
+	AgentID             string                  `json:"agent_id"`
+	SessionDuration     string                  `json:"session_duration,omitempty"`
+	MemoriesSaved       int                     `json:"memories_saved"`
+	SessionSummary      *sessionSummary         `json:"session_summary,omitempty"`
+	MemoriesExpired     int64                   `json:"memories_expired"`
+	Retrospective       *store.ToolCallSummary  `json:"retrospective,omitempty"`
+	EffectivenessReport *EffectivenessReport    `json:"effectiveness_report,omitempty"`
+}
+
+// EffectivenessReport summarises session quality and compares to recent history (Sprint 15 #5).
+type EffectivenessReport struct {
+	// ContextHitRate is the fraction of context deliveries served from cache.
+	ContextHitRate float64 `json:"context_hit_rate"`
+	// TaskCompletionRate is 1 - tool_call_error_rate (proxy: successful calls / total calls).
+	TaskCompletionRate float64 `json:"task_completion_rate"`
+	// ToolCalls is the total number of MCP tool calls in this session.
+	ToolCalls int `json:"tool_calls"`
+	// TotalDeliveries is the total number of context deliveries in this session.
+	TotalDeliveries int `json:"total_deliveries"`
+	// FirstFetchRight is the number of deliveries that required no correction re-fetch.
+	FirstFetchRight int `json:"first_fetch_right"`
+	// TokensSaved is the estimated tokens saved vs full-file grep (baseline - response).
+	TokensSaved int `json:"tokens_saved"`
+	// DurationMs is the session wall-clock duration in milliseconds.
+	DurationMs int64 `json:"duration_ms"`
+	// Prev7d is the 7-day historical average across all previous sessions (omitted when no history).
+	Prev7d *prev7dSummary `json:"prev_7d,omitempty"`
+	// Message is the human-readable effectiveness summary.
+	Message string `json:"message"`
+}
+
+// prev7dSummary holds the 7-day rolling averages for cross-session comparison.
+type prev7dSummary struct {
+	Sessions          int     `json:"sessions"`
+	AvgContextHitRate float64 `json:"avg_context_hit_rate"`
+	AvgTaskCompletion float64 `json:"avg_task_completion"`
+	TotalTokensSaved  int     `json:"total_tokens_saved"`
 }
 
 // sessionSummary captures the structured extraction from a session.
@@ -375,7 +406,7 @@ func (s *Server) handleEndSession(
 		s.goBackground(func() { pc.SetSessionTermination(synapseSessionID, reason) })
 	}
 
-	// P5 — Item 13: compute and record session effectiveness report.
+	// Sprint 15 #5: compute and record session effectiveness report, then surface it in the response.
 	if pc := s.getPulseClient(); pc != nil && synapseSessionID != "" {
 		var toolCalls int
 		var taskCompRate float64
@@ -385,16 +416,48 @@ func (s *Server) handleEndSession(
 			taskCompRate = 1.0 - retro.ErrorRate
 		}
 		contextHitRate := pc.GetSessionContextHitRate(synapseSessionID)
+		totalDel, firstFetch, tokensSaved := pc.GetSessionDeliveryStats(synapseSessionID)
+
 		eff := pulse.SessionEffectiveness{
 			SessionID:          synapseSessionID,
 			AgentID:            agentID,
 			ProjectID:          s.projectID,
 			ContextHitRate:     contextHitRate,
 			TaskCompletionRate: taskCompRate,
+			TokensSaved:        tokensSaved,
 			ToolCalls:          toolCalls,
 			DurationMs:         durationMs,
 		}
 		s.goBackground(func() { pc.InsertSessionEffectiveness(eff) })
+
+		// Build the effectiveness report for the response.
+		// Read the 7-day trend from *previous* sessions (current session is still
+		// being inserted asynchronously above, so this reads historical data only).
+		report := &EffectivenessReport{
+			ContextHitRate:     contextHitRate,
+			TaskCompletionRate: taskCompRate,
+			ToolCalls:          toolCalls,
+			TotalDeliveries:    totalDel,
+			FirstFetchRight:    firstFetch,
+			TokensSaved:        tokensSaved,
+			DurationMs:         durationMs,
+		}
+		if trend := pc.GetRecentEffectivenessTrend(7, agentID); len(trend) > 0 {
+			p := &prev7dSummary{}
+			for _, d := range trend {
+				p.Sessions += d.Sessions
+				p.AvgContextHitRate += d.AvgContextHitRate * float64(d.Sessions)
+				p.AvgTaskCompletion += d.AvgTaskCompletion * float64(d.Sessions)
+				p.TotalTokensSaved += d.TotalTokensSaved
+			}
+			if p.Sessions > 0 {
+				p.AvgContextHitRate /= float64(p.Sessions)
+				p.AvgTaskCompletion /= float64(p.Sessions)
+				report.Prev7d = p
+			}
+		}
+		report.Message = buildEffectivenessMessage(report)
+		result.EffectivenessReport = report
 	}
 
 	return jsonResult(result)
@@ -666,6 +729,29 @@ func truncateSlice(s []string, n int) []string {
 	copy(result, s[:n])
 	result[n] = fmt.Sprintf("(+%d more)", len(s)-n)
 	return result
+}
+
+// buildEffectivenessMessage returns a human-readable one-liner summarising the session.
+// Examples:
+//
+//	"Your agent completed 14/16 tasks with first-fetch context (87%). Context hit rate: 85%. 47 tool calls in 4m0s."
+//	"No context deliveries this session. 12 tool calls in 30s."
+func buildEffectivenessMessage(r *EffectivenessReport) string {
+	dur := time.Duration(r.DurationMs) * time.Millisecond
+	durStr := dur.Round(time.Second).String()
+	if r.TotalDeliveries == 0 {
+		return fmt.Sprintf("No context deliveries this session. %d tool calls in %s.", r.ToolCalls, durStr)
+	}
+	pct := 100.0 * float64(r.FirstFetchRight) / float64(r.TotalDeliveries)
+	msg := fmt.Sprintf(
+		"Your agent completed %d/%d tasks with first-fetch context (%.0f%%). Context hit rate: %.0f%%. %d tool calls in %s.",
+		r.FirstFetchRight, r.TotalDeliveries, pct,
+		r.ContextHitRate*100, r.ToolCalls, durStr,
+	)
+	if r.TokensSaved > 0 {
+		msg += fmt.Sprintf(" ~%d tokens saved.", r.TokensSaved)
+	}
+	return msg
 }
 
 // parseExaminedEntities extracts entity names from a session log content string.

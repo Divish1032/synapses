@@ -2894,6 +2894,25 @@ func (s *Store) GetSessionContextHitRate(sessionID string) float64 {
 	return float64(hits) / float64(total)
 }
 
+// GetSessionDeliveryStats returns three counters for a session (Sprint 15 #5):
+//   - total:       all context deliveries in the session
+//   - firstFetch:  deliveries where refetched=0 (no correction re-fetch was needed)
+//   - tokensSaved: SUM(MAX(baseline_tokens - response_tokens, 0)) — conservative estimate
+//
+// All three are 0 when sessionID is empty or no deliveries exist.
+func (s *Store) GetSessionDeliveryStats(sessionID string) (total, firstFetch, tokensSaved int) {
+	if sessionID == "" {
+		return
+	}
+	s.execer().QueryRow(
+		`SELECT COUNT(*),
+		        COALESCE(SUM(CASE WHEN refetched = 0 THEN 1 ELSE 0 END), 0),
+		        COALESCE(SUM(MAX(baseline_tokens - response_tokens, 0)), 0)
+		 FROM context_deliveries WHERE session_id = ?`, sessionID,
+	).Scan(&total, &firstFetch, &tokensSaved)
+	return
+}
+
 // GetSessionEffectivenessP5 returns effectiveness data for a session (Item 13).
 func (s *Store) GetSessionEffectivenessP5(sessionID string) *pulsetypes.SessionEffectiveness {
 	row := s.execer().QueryRow(
