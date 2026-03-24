@@ -471,6 +471,18 @@ func (s *Server) handleQueryGraph(
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if raw == "" {
+		// Issue 7: detect the common mistake of passing from_pattern/to_pattern
+		// (which belong to upsert_rule, not query_graph) and give a targeted hint.
+		args := req.GetArguments()
+		_, hasFromPattern := args["from_pattern"]
+		_, hasToPattern := args["to_pattern"]
+		_, hasEdgeType := args["edge_type"]
+		if hasFromPattern || hasToPattern || hasEdgeType {
+			return mcp.NewToolResultError(
+				"query is required. Tip: query_graph uses a DSL (NODES WHERE ...), not a from/to pattern API. " +
+					"Use get_impact() or get_call_chain() for graph traversal queries, or upsert_rule() for from/to pattern matching. " +
+					"Example: NODES WHERE package=\"auth\" AND fanin > 5"), nil
+		}
 		return mcp.NewToolResultError(
 			"query is required. Example: NODES WHERE package=\"auth\" AND fanin > 5"), nil
 	}

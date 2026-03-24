@@ -102,9 +102,18 @@ func (s *Server) handleExecuteSkill(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 	// Also accept flat top-level keys as params (convenience).
+	// If the same key appears in both sources with different values, the call is
+	// ambiguous — return an error rather than silently ignoring one source.
 	for k, v := range req.GetArguments() {
 		if k != "skill_id" && k != "params" {
-			if _, already := params[k]; !already {
+			if existing, already := params[k]; already {
+				if fmt.Sprintf("%v", existing) != fmt.Sprintf("%v", v) {
+					return mcp.NewToolResultError(fmt.Sprintf(
+						"ambiguous parameter %q: provided in both the params object (%v) and as a top-level key (%v) with different values — use only one form",
+						k, existing, v,
+					)), nil
+				}
+			} else {
 				params[k] = v
 			}
 		}

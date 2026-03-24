@@ -829,7 +829,19 @@ func (s *Server) handleSessionInit(
 			resp["recent_events"] = recentEvents
 		}
 		resp["latest_event_seq"] = latestEventSeq
-		resp["session_hint"] = "Pass latest_event_seq to get_events on the next call to receive only new events. Use scale_guidance to decide when to use Synapses tools vs Read/Grep."
+		sessionHint := "Pass latest_event_seq to get_events on the next call to receive only new events. Use scale_guidance to decide when to use Synapses tools vs Read/Grep."
+		if identity != nil {
+			highConf := 0
+			for _, sr := range identity.SuggestedRules {
+				if sr.Confidence >= 0.9 {
+					highConf++
+				}
+			}
+			if highConf > 0 {
+				sessionHint += fmt.Sprintf(" %d high-confidence architectural pattern(s) detected in project_identity.suggested_rules. Run get_rule_candidates() to review, then upsert_rule() to enforce and upsert_adr() to document.", highConf)
+			}
+		}
+		resp["session_hint"] = sessionHint
 	} else {
 		resp["latest_event_seq"] = latestEventSeq
 	}
@@ -1077,12 +1089,28 @@ func (s *Server) handleSessionInit(
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						// Brain panic — degrade silently, don't crash session_init.
+						// Brain panic — degrade gracefully. Update sidecars.brain so agents
+						// see available=false rather than the stale available=true set above.
+						if sidecars, ok := resp["sidecars"].(map[string]interface{}); ok {
+							sidecars["brain"] = map[string]interface{}{
+								"available": false,
+								"note":      fmt.Sprintf("health check panicked: %v", stripInternalPaths(fmt.Sprint(r))),
+							}
+						}
 						resp["brain_warning"] = fmt.Sprintf("brain health unavailable (internal error: %v)", stripInternalPaths(fmt.Sprint(r)))
 					}
 				}()
 				health := bc.BrainHealth()
 				if health == nil {
+					// Brain is configured but health check returned nil — may be temporarily
+					// unreachable. Update sidecars.brain with a structured warning rather
+					// than leaving the field with the stale available=true set above.
+					if sidecars, ok := resp["sidecars"].(map[string]interface{}); ok {
+						sidecars["brain"] = map[string]interface{}{
+							"available": false,
+							"note":      "health check returned nil — brain may be temporarily unreachable",
+						}
+					}
 					return
 				}
 				resp["brain_health"] = health
