@@ -2851,6 +2851,42 @@ func (s *Store) LoadManualEdges() ([]ManualEdge, error) {
 	return out, rows.Err()
 }
 
+// CrossDomainEdgeStats returns aggregate counts of cross-domain edges
+// grouped into three buckets. Only non-suppressed edges are counted.
+//
+//   - Auto: created by the name-matcher (created_by == "namematcher") and
+//     not yet human-reviewed (confirmed == 0).
+//   - Confirmed: human-approved via confirm_edge (confirmed == 1).
+//   - Manual: all other non-suppressed edges — created via link_entities
+//     or any path other than the name-matcher.
+//
+// Uses a single aggregating SQL query to avoid loading all edge rows into Go.
+func (s *Store) CrossDomainEdgeStats() (auto, confirmed, manual int, err error) {
+	rows, err := s.graphDB.Query(
+		`SELECT created_by, confirmed, COUNT(*) FROM manual_edges WHERE suppressed=0 GROUP BY created_by, confirmed`,
+	)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("cross_domain_edge_stats: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var createdBy string
+		var isConfirmed, cnt int
+		if err := rows.Scan(&createdBy, &isConfirmed, &cnt); err != nil {
+			return 0, 0, 0, fmt.Errorf("cross_domain_edge_stats scan: %w", err)
+		}
+		switch {
+		case isConfirmed != 0:
+			confirmed += cnt
+		case createdBy == "namematcher":
+			auto += cnt
+		default:
+			manual += cnt
+		}
+	}
+	return auto, confirmed, manual, rows.Err()
+}
+
 // ReinjectManualEdges loads all persisted manual edges and adds them to g.
 // Safe to call after any graph rebuild — AddEdge is idempotent and silently
 // drops edges whose endpoints no longer exist.
