@@ -315,8 +315,11 @@ func GetEdgeTypes() []EdgeTypeDescriptor {
 
 // IsCrossDomainEdge returns true for edge types that connect entities across
 // knowledge domain boundaries (code ↔ infra ↔ api ↔ docs ↔ knowledge ↔ custom).
-// BFS/PPR applies CarveConfig.CrossDomainDecay to these edges so that
-// cross-domain neighbors score lower than same-domain neighbors by default.
+// Used by collectCrossDomainImpact for one-hop impact detection.
+//
+// Note: BFS/PPR cross-domain decay is applied based on node.Domain comparison
+// (currNode.Domain != neighNode.Domain), not on edge type. This function is not
+// called in the BFS/PPR hot path — it classifies edge types for impact analysis.
 func IsCrossDomainEdge(et EdgeType) bool {
 	switch et {
 	case EdgeDeploys, EdgeConsumes, EdgeConfiguredBy, EdgeDocuments, EdgeMentions, EdgeManual:
