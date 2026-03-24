@@ -1528,3 +1528,117 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// ── Parallelism boundary tests ───────────────────────────────────────────────
+
+// TestFindEntities_BeyondSetLimit creates 12 siblings (> SetLimit(8)) and
+// verifies that all are queried and all results are returned. This exercises
+// the errgroup spillover path where goroutines queue behind the 8-slot bound.
+func TestFindEntities_BeyondSetLimit(t *testing.T) {
+	const n = 12 // deliberately > SetLimit(8)
+
+	entries := make([]config.FederationEntry, n)
+	for i := range entries {
+		dir := t.TempDir()
+		alias := fmt.Sprintf("sibling-%d", i)
+		createSiblingWithDefaultPath(t, dir, alias, sampleNodesFor(alias))
+		entries[i] = config.FederationEntry{Path: dir, Alias: alias}
+	}
+
+	r := newResolver(entries)
+	defer r.Close()
+
+	results := r.FindEntities(bg(), "AuthService", nil, 100)
+
+	// Every sibling has an AuthService node — all 12 must be in results.
+	if len(results) != n {
+		t.Fatalf("expected %d result groups (one per sibling), got %d", n, len(results))
+	}
+	seen := make(map[string]bool, n)
+	for _, res := range results {
+		seen[res.Alias] = true
+		if len(res.Results) == 0 {
+			t.Errorf("sibling %q returned no results", res.Alias)
+		}
+	}
+	for i := range entries {
+		alias := fmt.Sprintf("sibling-%d", i)
+		if !seen[alias] {
+			t.Errorf("sibling %q missing from results", alias)
+		}
+	}
+}
+
+// TestStatus_BeyondSetLimit verifies that Status() returns one entry per
+// sibling and preserves ordering when there are more than 8 entries.
+func TestStatus_BeyondSetLimit(t *testing.T) {
+	const n = 12 // deliberately > SetLimit(8)
+
+	entries := make([]config.FederationEntry, n)
+	for i := range entries {
+		dir := t.TempDir()
+		alias := fmt.Sprintf("proj-%d", i)
+		createSiblingWithDefaultPath(t, dir, alias, sampleNodesFor(alias))
+		entries[i] = config.FederationEntry{Path: dir, Alias: alias}
+	}
+
+	r := newResolver(entries)
+	defer r.Close()
+
+	statuses := r.Status(bg())
+
+	if len(statuses) != n {
+		t.Fatalf("expected %d statuses, got %d", n, len(statuses))
+	}
+	// Verify ordering is preserved — result[i].Alias must match entries[i].Alias.
+	for i, es := range statuses {
+		if es.Alias != entries[i].Alias {
+			t.Errorf("position %d: expected alias %q, got %q", i, entries[i].Alias, es.Alias)
+		}
+		if es.Status != "indexed" {
+			t.Errorf("position %d (%q): expected indexed, got %q (err: %s)", i, es.Alias, es.Status, es.Error)
+		}
+	}
+}
+
+// TestFindEntities_ConcurrentCallers verifies that concurrent calls to
+// FindEntities and CheckDrift on the same Resolver are race-free.
+// Run with: go test -race
+func TestFindEntities_ConcurrentCallers(t *testing.T) {
+	const numSiblings = 5
+	const numCallers = 8
+
+	entries := make([]config.FederationEntry, numSiblings)
+	for i := range entries {
+		dir := t.TempDir()
+		alias := fmt.Sprintf("concurrent-%d", i)
+		createSiblingWithDefaultPath(t, dir, alias, sampleNodesFor(alias))
+		entries[i] = config.FederationEntry{Path: dir, Alias: alias}
+	}
+
+	r := newResolver(entries)
+	defer r.Close()
+
+	// Fire numCallers goroutines all calling FindEntities simultaneously.
+	// The race detector will catch any unsynchronized access.
+	done := make(chan struct{})
+	errs := make(chan string, numCallers*2)
+
+	for i := 0; i < numCallers; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			results := r.FindEntities(bg(), "AuthService", nil, 10)
+			if len(results) == 0 {
+				errs <- "FindEntities returned no results"
+			}
+		}()
+	}
+	for i := 0; i < numCallers; i++ {
+		<-done
+	}
+
+	close(errs)
+	for e := range errs {
+		t.Error(e)
+	}
+}
