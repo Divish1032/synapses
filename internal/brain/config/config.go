@@ -415,23 +415,39 @@ func (c *BrainConfig) AutoConfigureModels(totalRAMGB float64) {
 	}
 }
 
+// KeepAlive returns the keep_alive seconds for this intelligence mode.
+//
+// All 5 Ollama identities (synapses/sentry, synapses/librarian, etc.) share the
+// same base model weights, so Ollama treats them as a single loaded model.
+// A single keep_alive value applies to all tiers — the last request's value wins.
+//
+// Per-mode policy (Sprint 17 #3 — Model Manager):
+//
+//	optimal  (8 GB)  : 120s — model evicts after 2 min of idle; saves ~1.5 GB on
+//	                          tight 8 GB machines between bursts.
+//	standard (16 GB) : 300s — model evicts after 5 min of idle; good tradeoff for
+//	                          developer workstations where the model is used often.
+//	full     (32 GB+): -1   — model stays pinned; the machine can afford it.
+//	default (unset)  : -1   — backward-compatible behaviour; pinned.
+func (c *BrainConfig) KeepAlive() int {
+	switch c.IntelligenceMode {
+	case ModeOptimal:
+		return 120
+	case ModeStandard:
+		return 300
+	case ModeFull:
+		return -1
+	default:
+		return -1
+	}
+}
+
 // KeepAliveValues returns the keep_alive seconds for guardian, enrich,
-// orchestrate, and archivist tiers based on the configured IntelligenceMode.
-//
-// IMPORTANT: Since all 5 Ollama identities (synapses/sentry, synapses/librarian,
-// etc.) share the same base model weights (qwen3.5:2b), Ollama treats them as
-// a single loaded model in memory. Setting different keep_alive per identity
-// is effectively a no-op — evicting one evicts all.
-//
-// Because of this, we pin in all modes. The 2.7GB shared model stays resident.
-// The only difference between modes is whether Critic is enabled (Optimal: no).
-//
-// For 8GB machines (Optimal): 2.7GB model + OS leaves ~3GB for user apps — tight
-// but workable since macOS uses swap for inactive pages. If RAM pressure becomes
-// an issue, users can set keep_alive=300 (5-min TTL) in brain.json manually.
+// orchestrate, and archivist tiers. All four values are identical — they
+// delegate to KeepAlive() because all Ollama identities share the same model
+// weights. Retained for backward compatibility with existing callers.
 func (c *BrainConfig) KeepAliveValues() (kaGuardian, kaEnrich, kaOrchestrate, kaArchivist int) {
-	// All modes pin the shared model. Modes differ in which tiers are enabled,
-	// not in memory residency.
-	return -1, -1, -1, -1
+	ka := c.KeepAlive()
+	return ka, ka, ka, ka
 }
 

@@ -28,6 +28,7 @@
 package brain
 
 import (
+	"context"
 	"sort"
 	"sync"
 	"time"
@@ -199,9 +200,15 @@ func (q *deferredQueue) size() int {
 // P1 and P2 tasks go through Submit() and are executed serially by the internal
 // drain goroutine. Only one task runs at a time — no concurrent Ollama requests.
 //
-// Lifecycle: NewScheduler → Start → (Submit / ShouldDegrade calls) → Stop.
+// When a ModelManager is attached via WithModelManager, the drain goroutine calls
+// EnsureModel before executing each batch. If EnsureModel returns "" (insufficient
+// RAM to load any model), the batch is skipped and retried on the next tick.
+// Tasks remain in the deferred queue — they are not dropped.
+//
+// Lifecycle: NewScheduler → (optional WithModelManager) → Start → (Submit / ShouldDegrade calls) → Stop.
 type Scheduler struct {
-	pulse *SystemPulse
+	pulse    *SystemPulse
+	modelMgr *ModelManager // optional; nil = no RAM gate on drain loop
 
 	queue   *deferredQueue
 	drainCh chan struct{} // buffered(1): wakes drain goroutine immediately on Submit when Green
@@ -223,6 +230,19 @@ func NewScheduler(pulse *SystemPulse) *Scheduler {
 		drainCh: make(chan struct{}, 1),
 		done:    make(chan struct{}),
 	}
+}
+
+// WithModelManager attaches a ModelManager to the Scheduler. The drain goroutine
+// will call ModelManager.EnsureModel before executing each eligible task batch,
+// skipping the batch when no model can be loaded.
+//
+// Call before Start() to avoid a data race. Returns s for optional chaining:
+//
+//	sched := NewScheduler(pulse).WithModelManager(mgr)
+//	sched.Start()
+func (s *Scheduler) WithModelManager(mgr *ModelManager) *Scheduler {
+	s.modelMgr = mgr
+	return s
 }
 
 // Start launches the background drain goroutine. Safe to call multiple times
@@ -352,11 +372,30 @@ func (s *Scheduler) drainLoop() {
 // tasks were executing (concurrent Submit calls), the drain goroutine is
 // re-signaled to run immediately rather than waiting for the poll ticker.
 // Panics in task fns are recovered so the drain goroutine never dies.
+//
+// When a ModelManager is attached, runEligible calls EnsureModel before draining.
+// If EnsureModel returns "" (insufficient RAM), the drain cycle is skipped —
+// eligible tasks remain in the queue and will be retried on the next tick.
 func (s *Scheduler) runEligible() {
 	health := HealthGreen
 	if s.pulse != nil {
 		health = s.pulse.Current().Health
 	}
+
+	// RAM gate: before draining, verify a model can be loaded.
+	// Skipped when health is Red (drain() would return nothing anyway) or
+	// when no tasks are queued (avoid unnecessary HTTP warmup calls).
+	if s.modelMgr != nil && health != HealthRed && s.queue.size() > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), modelManagerWarmupTimeout)
+		defer cancel()
+		if s.modelMgr.EnsureModel(ctx) == "" {
+			// Insufficient RAM to load any model — skip this cycle.
+			// Tasks stay in the queue; they will be retried on the next tick
+			// or expire naturally at their TTL.
+			return
+		}
+	}
+
 	tasks := s.queue.drain(health)
 	for _, t := range tasks {
 		safeSchedulerRun(t.key, t.fn)

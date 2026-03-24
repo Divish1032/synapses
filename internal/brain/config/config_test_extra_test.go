@@ -521,22 +521,55 @@ func TestAutoConfigureModels_ModeFull(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// KeepAliveValues — all modes including guardian (regression for Bug 1)
+// KeepAlive / KeepAliveValues — per-mode keep_alive (Sprint 17 #3)
 // ---------------------------------------------------------------------------
 
-// All modes return keep_alive=-1 (pinned) because all identities share the
-// same qwen3.5:2b weights. Ollama treats them as one loaded model — evicting
-// one evicts all. Verified via /api/ps testing.
-func TestKeepAliveValues_AllModesPinned(t *testing.T) {
-	for _, mode := range []config.IntelligenceMode{config.ModeOptimal, config.ModeStandard, config.ModeFull, ""} {
+// All 5 Ollama identities share the same base model weights so a single
+// keep_alive value applies. Per-mode policy:
+//   - optimal  → 120s  (2-min eviction on 8 GB machines)
+//   - standard → 300s  (5-min eviction on 16 GB machines)
+//   - full     → -1    (pinned on 32 GB+ machines)
+//   - ""       → -1    (backward-compatible default)
+func TestKeepAlive_PerMode(t *testing.T) {
+	cases := []struct {
+		mode config.IntelligenceMode
+		want int
+	}{
+		{config.ModeOptimal, 120},
+		{config.ModeStandard, 300},
+		{config.ModeFull, -1},
+		{"", -1},
+	}
+	for _, tc := range cases {
 		cfg := config.DefaultConfig()
-		cfg.IntelligenceMode = mode
+		cfg.IntelligenceMode = tc.mode
+		if got := cfg.KeepAlive(); got != tc.want {
+			t.Errorf("mode=%q KeepAlive() = %d, want %d", tc.mode, got, tc.want)
+		}
+	}
+}
+
+// KeepAliveValues delegates to KeepAlive() — all four returned values must
+// equal the single per-mode keep_alive.
+func TestKeepAliveValues_DelegatesPerMode(t *testing.T) {
+	cases := []struct {
+		mode config.IntelligenceMode
+		want int
+	}{
+		{config.ModeOptimal, 120},
+		{config.ModeStandard, 300},
+		{config.ModeFull, -1},
+		{"", -1},
+	}
+	for _, tc := range cases {
+		cfg := config.DefaultConfig()
+		cfg.IntelligenceMode = tc.mode
 		kaG, kaE, kaO, kaA := cfg.KeepAliveValues()
 		for name, v := range map[string]int{
 			"guardian": kaG, "enrich": kaE, "orchestrate": kaO, "archivist": kaA,
 		} {
-			if v != -1 {
-				t.Errorf("mode=%q %s = %d, want -1 (shared weights → always pinned)", mode, name, v)
+			if v != tc.want {
+				t.Errorf("mode=%q %s = %d, want %d", tc.mode, name, v, tc.want)
 			}
 		}
 	}
