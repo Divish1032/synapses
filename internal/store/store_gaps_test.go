@@ -633,3 +633,137 @@ func TestOpen_Reopen_MigrationIdempotent(t *testing.T) {
 	}
 	st2.Close()
 }
+
+// ── PathPattern persistence round-trip ────────────────────────────────────────
+
+func TestUpsertDynamicRule_PathPatternRoundTrip(t *testing.T) {
+	// Verify that path_pattern is correctly persisted and restored.
+	// This is the critical persistence path for multi-hop architectural rules.
+	t.Parallel()
+	st := openTestStore(t)
+
+	rule := config.Rule{
+		ID:          "no-handler-db-path",
+		Description: "handler must not reach db via multi-hop",
+		Severity:    "error",
+		RuleType:    "structural",
+		ForbiddenEdge: config.ForbiddenEdge{
+			FromFilePattern: "*/handlers/*",
+			ToFilePattern:   "*/db/*",
+			PathPattern:     []graph.EdgeType{graph.EdgeCalls, graph.EdgeCalls},
+		},
+	}
+
+	if err := st.UpsertDynamicRule(rule); err != nil {
+		t.Fatalf("UpsertDynamicRule: %v", err)
+	}
+
+	rules, err := st.LoadDynamicRules()
+	if err != nil {
+		t.Fatalf("LoadDynamicRules: %v", err)
+	}
+
+	var found *config.Rule
+	for i := range rules {
+		if rules[i].ID == "no-handler-db-path" {
+			found = &rules[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("rule not found after load")
+	}
+	if len(found.ForbiddenEdge.PathPattern) != 2 {
+		t.Fatalf("PathPattern len = %d, want 2", len(found.ForbiddenEdge.PathPattern))
+	}
+	if found.ForbiddenEdge.PathPattern[0] != graph.EdgeCalls {
+		t.Errorf("PathPattern[0] = %q, want %q", found.ForbiddenEdge.PathPattern[0], graph.EdgeCalls)
+	}
+	if found.ForbiddenEdge.PathPattern[1] != graph.EdgeCalls {
+		t.Errorf("PathPattern[1] = %q, want %q", found.ForbiddenEdge.PathPattern[1], graph.EdgeCalls)
+	}
+	if found.ForbiddenEdge.FromFilePattern != "*/handlers/*" {
+		t.Errorf("FromFilePattern = %q", found.ForbiddenEdge.FromFilePattern)
+	}
+	if found.ForbiddenEdge.ToFilePattern != "*/db/*" {
+		t.Errorf("ToFilePattern = %q", found.ForbiddenEdge.ToFilePattern)
+	}
+	if found.RuleType != "structural" {
+		t.Errorf("RuleType = %q, want structural", found.RuleType)
+	}
+}
+
+func TestUpsertDynamicRule_PathPatternEmpty(t *testing.T) {
+	// A rule with no PathPattern must round-trip with nil PathPattern (not empty slice).
+	t.Parallel()
+	st := openTestStore(t)
+
+	rule := config.Rule{
+		ID:       "no-path-pattern",
+		Severity: "warning",
+		ForbiddenEdge: config.ForbiddenEdge{
+			EdgeType: graph.EdgeCalls,
+		},
+	}
+	_ = st.UpsertDynamicRule(rule)
+
+	rules, _ := st.LoadDynamicRules()
+	var found *config.Rule
+	for i := range rules {
+		if rules[i].ID == "no-path-pattern" {
+			found = &rules[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("rule not found")
+	}
+	if found.ForbiddenEdge.PathPattern != nil {
+		t.Errorf("expected nil PathPattern for rule without path_pattern, got %v", found.ForbiddenEdge.PathPattern)
+	}
+}
+
+func TestUpsertDynamicRule_PathPatternOverwrite(t *testing.T) {
+	// Updating a rule must replace the PathPattern (UPSERT correctness).
+	t.Parallel()
+	st := openTestStore(t)
+
+	r1 := config.Rule{
+		ID:       "overwrite-rule",
+		Severity: "warning",
+		ForbiddenEdge: config.ForbiddenEdge{
+			PathPattern: []graph.EdgeType{graph.EdgeCalls},
+		},
+	}
+	_ = st.UpsertDynamicRule(r1)
+
+	r2 := config.Rule{
+		ID:       "overwrite-rule",
+		Severity: "error",
+		ForbiddenEdge: config.ForbiddenEdge{
+			PathPattern: []graph.EdgeType{graph.EdgeCalls, graph.EdgeImports},
+		},
+	}
+	_ = st.UpsertDynamicRule(r2)
+
+	rules, _ := st.LoadDynamicRules()
+	var found *config.Rule
+	for i := range rules {
+		if rules[i].ID == "overwrite-rule" {
+			found = &rules[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("rule not found after overwrite")
+	}
+	if len(found.ForbiddenEdge.PathPattern) != 2 {
+		t.Fatalf("PathPattern len = %d after overwrite, want 2", len(found.ForbiddenEdge.PathPattern))
+	}
+	if found.ForbiddenEdge.PathPattern[1] != graph.EdgeImports {
+		t.Errorf("PathPattern[1] = %q after overwrite, want %q", found.ForbiddenEdge.PathPattern[1], graph.EdgeImports)
+	}
+	if found.Severity != "error" {
+		t.Errorf("Severity = %q after overwrite, want error", found.Severity)
+	}
+}
