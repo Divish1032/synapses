@@ -277,13 +277,24 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 	// Sprint 16 #4: Cross-domain neighbors — infra, API, config, knowledge nodes.
 	// Rendered before same-domain related nodes so agents immediately see cross-domain
 	// context (e.g. Terraform resources, OpenAPI endpoints) without scrolling past code.
-	if len(dc.CrossDomain) > 0 {
-		names := make([]string, 0, len(dc.CrossDomain))
-		for _, cd := range dc.CrossDomain {
-			domain := string(cd.Node.Domain)
-			names = append(names, fmt.Sprintf("%s(%s)", cd.Node.Name, domain))
+	if dc.CrossDomain != nil && !dc.CrossDomain.IsEmpty() {
+		renderCDBucket := func(label string, nodes []graph.CarvedNode) {
+			if len(nodes) == 0 {
+				return
+			}
+			names := make([]string, 0, len(nodes))
+			for _, n := range nodes {
+				names = append(names, n.Node.Name)
+			}
+			fmt.Fprintf(&b, "%s: %s\n", label, strings.Join(names, " · "))
 		}
-		fmt.Fprintf(&b, "Cross-domain: %s\n", strings.Join(names, " · "))
+		renderCDBucket("Deploys", dc.CrossDomain.Deploys)
+		renderCDBucket("Consumes", dc.CrossDomain.Consumes)
+		renderCDBucket("Configured by", dc.CrossDomain.ConfiguredBy)
+		renderCDBucket("Documented in", dc.CrossDomain.DocumentedIn)
+		renderCDBucket("Mentioned in", dc.CrossDomain.Mentions)
+		renderCDBucket("Manual links", dc.CrossDomain.Manual)
+		renderCDBucket("Cross-domain related", dc.CrossDomain.Related)
 	}
 
 	// Show related nodes with brain summaries (often interface implementations, types).

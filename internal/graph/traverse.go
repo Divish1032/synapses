@@ -1049,7 +1049,21 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 	// Edges have already been filtered at injection time (suppressed edges are never
 	// injected; namematcher enforces confidence >= 0.6), so all edges present in
 	// the in-memory graph already satisfy the confidence threshold.
-	crossDomainImpact := collectCrossDomainImpact(g, rootID)
+	cdResult := collectCrossDomainImpact(g, rootID)
+
+	// Add cross-domain entity files to AffectedFiles so callers (agents) see the
+	// full set of files to review — including Terraform, API specs, and doc files.
+	for _, ref := range cdResult.refs {
+		if ref.File != "" {
+			fileSet[ref.File] = struct{}{}
+		}
+	}
+	// Rebuild files slice now that cross-domain files have been added.
+	files = make([]string, 0, len(fileSet))
+	for f := range fileSet {
+		files = append(files, f)
+	}
+	sort.Strings(files)
 
 	return &ImpactResult{
 		Root: EntityRef{
@@ -1059,26 +1073,37 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 			File: root.File,
 			Line: root.Line,
 		},
-		Tiers:             tiers,
-		TotalAffected:     total,
-		AffectedFiles:     files,
-		Truncated:         anyTruncated,
-		CrossDomainImpact: crossDomainImpact,
+		Tiers:                tiers,
+		TotalAffected:        total,
+		AffectedFiles:        files,
+		Truncated:            anyTruncated,
+		CrossDomainImpact:    cdResult.refs,
+		CrossDomainAffected:  len(cdResult.refs),
+		CrossDomainTruncated: cdResult.truncated,
 	}, nil
 }
 
 // CrossDomainImpactForNode returns the cross-domain entities directly reachable
 // from nodeID via cross-domain edges. It is the public entry point used by
 // the struct/interface aggregation path in handleGetImpact.
-func (g *Graph) CrossDomainImpactForNode(nodeID NodeID) []CrossDomainRef {
+// Returns the refs and a truncated flag (true when capped at maxCrossDomainImpactNodes).
+func (g *Graph) CrossDomainImpactForNode(nodeID NodeID) ([]CrossDomainRef, bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return collectCrossDomainImpact(g, nodeID)
+	r := collectCrossDomainImpact(g, nodeID)
+	return r.refs, r.truncated
 }
 
 // maxCrossDomainImpactNodes caps the number of cross-domain refs returned by
 // collectCrossDomainImpact to keep response sizes bounded.
 const maxCrossDomainImpactNodes = 100
+
+// crossDomainResult packages the output of collectCrossDomainImpact so callers
+// can propagate the truncation signal without a separate call.
+type crossDomainResult struct {
+	refs      []CrossDomainRef
+	truncated bool
+}
 
 // collectCrossDomainImpact finds entities reachable from root in one hop via
 // cross-domain edges and returns them as CrossDomainRef slices.
@@ -1095,7 +1120,7 @@ const maxCrossDomainImpactNodes = 100
 //   - MENTIONS  → entities that mention this entity by name
 //
 // Caller must hold g.mu.RLock.
-func collectCrossDomainImpact(g *Graph, rootID NodeID) []CrossDomainRef {
+func collectCrossDomainImpact(g *Graph, rootID NodeID) crossDomainResult {
 	seen := make(map[NodeID]bool)
 	seen[rootID] = true
 	var refs []CrossDomainRef
@@ -1125,7 +1150,7 @@ func collectCrossDomainImpact(g *Graph, rootID NodeID) []CrossDomainRef {
 			Category: CrossDomainCategory(e.Type),
 		})
 		if len(refs) >= maxCrossDomainImpactNodes {
-			return sortCrossDomainRefs(refs)
+			return crossDomainResult{refs: sortCrossDomainRefs(refs), truncated: true}
 		}
 	}
 
@@ -1156,11 +1181,11 @@ func collectCrossDomainImpact(g *Graph, rootID NodeID) []CrossDomainRef {
 			Category: CrossDomainCategory(e.Type),
 		})
 		if len(refs) >= maxCrossDomainImpactNodes {
-			return sortCrossDomainRefs(refs)
+			return crossDomainResult{refs: sortCrossDomainRefs(refs), truncated: true}
 		}
 	}
 
-	return sortCrossDomainRefs(refs)
+	return crossDomainResult{refs: sortCrossDomainRefs(refs), truncated: false}
 }
 
 // sortCrossDomainRefs sorts cross-domain refs by category then name for stable output.

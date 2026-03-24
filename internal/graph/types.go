@@ -832,6 +832,32 @@ type CrossDomainRef struct {
 	Category string `json:"category"`
 }
 
+// CrossDomainContext groups cross-domain CarvedNodes from a BFS/PPR subgraph
+// by their relationship to the root entity. Used by directionalContext in
+// get_context responses. Each sub-slice preserves BFS Relevance scores for
+// ranking within the sub-bucket.
+//
+// Nodes connected via a direct edge from/to root are categorized by edge type.
+// Multi-hop cross-domain nodes with no direct root edge go into Related.
+type CrossDomainContext struct {
+	Deploys      []CarvedNode `json:"deploys,omitempty"`
+	Consumes     []CarvedNode `json:"consumes,omitempty"`
+	ConfiguredBy []CarvedNode `json:"configured_by,omitempty"`
+	DocumentedIn []CarvedNode `json:"documented_in,omitempty"`
+	Mentions     []CarvedNode `json:"mentions,omitempty"`
+	Manual       []CarvedNode `json:"manual,omitempty"`
+	Related      []CarvedNode `json:"related,omitempty"` // multi-hop or no direct edge from root
+}
+
+// IsEmpty returns true when all sub-buckets are empty.
+func (c *CrossDomainContext) IsEmpty() bool {
+	if c == nil {
+		return true
+	}
+	return len(c.Deploys) == 0 && len(c.Consumes) == 0 && len(c.ConfiguredBy) == 0 &&
+		len(c.DocumentedIn) == 0 && len(c.Mentions) == 0 && len(c.Manual) == 0 && len(c.Related) == 0
+}
+
 // CrossDomainCategory returns the human-readable category for a cross-domain edge type.
 func CrossDomainCategory(et EdgeType) string {
 	switch et {
@@ -867,4 +893,11 @@ type ImpactResult struct {
 	// edges present in the in-memory graph already satisfy the threshold.
 	// Sprint 16 #5: the killer feature — "what infra/API/docs does this touch?"
 	CrossDomainImpact []CrossDomainRef `json:"cross_domain_impact,omitempty"`
+	// CrossDomainAffected is the count of cross-domain entities in CrossDomainImpact.
+	// Kept separate from TotalAffected (which counts code-caller tier nodes) so
+	// callers can distinguish code blast-radius from cross-domain blast-radius.
+	CrossDomainAffected int `json:"cross_domain_affected,omitempty"`
+	// CrossDomainTruncated is true when CrossDomainImpact was capped at
+	// maxCrossDomainImpactNodes (100). The full count is not available.
+	CrossDomainTruncated bool `json:"cross_domain_truncated,omitempty"`
 }

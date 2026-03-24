@@ -1609,9 +1609,11 @@ func (s *Server) registerTools() {
 					"Use get_context only when you need specific BFS parameters, conditional fetching via known_hash, "+
 					"or fine-grained output control that prepare_context doesn't expose. "+
 					"Returns a relevance-ranked subgraph centred on the named entity. "+
-					"Uses BFS/PPR with edge-type-weighted decay. Response includes a cross_domain bucket "+
-					"(infra/API/config/knowledge nodes) separate from same-domain code neighbors, "+
-					"enabling traversal from a Go function to its Terraform deployment or API spec in one call.",
+					"Uses BFS/PPR with edge-type-weighted decay. Response includes a cross_domain object with sub-keys: "+
+					"deploys (infra resources this entity deploys to), consumes (APIs/services called), "+
+					"configured_by (config entities governing this), documented_in (doc nodes covering this), "+
+					"mentions (knowledge nodes referencing this), manual (user-defined links), "+
+					"related (multi-hop cross-domain). Enables traversal from a Go function to its Terraform deployment or API spec in one call.",
 			),
 			mcp.WithString("entity",
 				mcp.Required(),
@@ -1671,7 +1673,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Optional. Multiplier applied to relevance when BFS/PPR crosses a domain boundary "+
 					"(e.g. code→infra, code→api). Range (0, 1]. Default 0.5 — cross-domain neighbors score at "+
 					"half the relevance of same-domain neighbors at equal structural distance. Use 1.0 to disable "+
-					"the penalty. Cross-domain nodes appear in the cross_domain response bucket regardless of this value."),
+					"the penalty. Cross-domain nodes appear in the structured cross_domain response object (grouped by edge type) regardless of this value."),
 			),
 		),
 		s.handleGetContext,
