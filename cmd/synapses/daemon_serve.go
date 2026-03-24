@@ -2158,6 +2158,9 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 // serveProjectSocket accepts MCP sessions on the per-project Unix socket.
 // This provides backward compatibility for "synapses start" stdio proxies.
 func serveProjectSocket(ctx context.Context, srv *mcpsrv.Server, listener net.Listener) {
+	// Limit concurrent connections per socket to prevent FD exhaustion.
+	listener = netutil.LimitListener(listener, 64)
+
 	defer func() {
 		listener.Close()
 		// Remove the socket file on exit.
@@ -2257,7 +2260,7 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcps
 		}
 	}()
 
-	reader := bufio.NewReader(conn)
+	reader := bufio.NewReader(io.LimitReader(conn, 4*1024*1024))
 	for {
 		if sessionCtx.Err() != nil {
 			return sessionCtx.Err()
