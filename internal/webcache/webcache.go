@@ -122,12 +122,25 @@ func New(s *store.Store) *Cache {
 				if lookupErr != nil {
 					return fmt.Errorf("DNS lookup failed for redirect target %s: %w", host, lookupErr)
 				}
+				if len(addrs) == 0 {
+					return fmt.Errorf("no IPs resolved for redirect target %s", host)
+				}
 				for _, addr := range addrs {
 					ip := addr.IP
 					if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast() {
 						return fmt.Errorf("redirect to internal hostname blocked: %s resolves to %s", host, ip.String())
 					}
 				}
+				// Pin the subsequent dial to the verified IP to prevent DNS rebinding.
+				port := req.URL.Port()
+				if port == "" {
+					if req.URL.Scheme == "https" {
+						port = "443"
+					} else {
+						port = "80"
+					}
+				}
+				req.URL.Host = net.JoinHostPort(addrs[0].IP.String(), port)
 				return nil
 			},
 		},
