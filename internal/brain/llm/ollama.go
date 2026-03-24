@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -484,7 +485,10 @@ func (c *OllamaClient) PullModel(ctx context.Context, w io.Writer) error {
 			Error     string `json:"error"`
 		}
 		if err := dec.Decode(&evt); err != nil {
-			break // EOF = done
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return fmt.Errorf("decode pull response: %w", err)
 		}
 		if evt.Error != "" {
 			return fmt.Errorf("pull error: %s", evt.Error)
