@@ -689,6 +689,15 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 
 	// File removed or renamed: prune its nodes from the graph immediately.
 	if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+		// reparseMu must cover the entire graph-mutation block here — not just
+		// the map deletions below.  applyBatch Phase 0 reads graph edges (via
+		// graph.mu) without holding reparseMu, relying on the guarantee that all
+		// graph writers hold reparseMu.  If we mutated the graph outside this
+		// lock, Phase 0 would observe a partially-removed file and compute a
+		// stale invalidation set that misses callers of the deleted node.
+		// Holding reparseMu for the full remove also serialises with applyBatch
+		// Phase 1, preventing a concurrent "remove + reparse" interleaving.
+		w.reparseMu.Lock()
 		// AM-2: snapshot node IDs before removal so we can cascade memory invalidation.
 		var removedIDs []string
 		if w.store != nil {
@@ -700,15 +709,14 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 		w.graph.RemoveCallSitesForFile(path)
 		w.graph.RemoveTerraformRefsForFile(path)
 		w.graph.InvalidateCache()
-		w.fileHashMu.Lock()
-		delete(w.fileHashes, path)
-		w.fileHashMu.Unlock()
 		// Clean up parse-error tracking and filePkg for deleted files.
-		// Both structures are protected by reparseMu.
-		w.reparseMu.Lock()
 		delete(w.fileHadParseErrors, path)
 		delete(w.filePkg, path)
 		w.reparseMu.Unlock()
+		// fileHashMu is independent of reparseMu — update outside the lock.
+		w.fileHashMu.Lock()
+		delete(w.fileHashes, path)
+		w.fileHashMu.Unlock()
 		// Remove this file's call sites from the persisted table so they are
 		// not reloaded by future reparseFile calls for other files.
 		if w.store != nil {
@@ -1054,8 +1062,9 @@ func (w *Watcher) mergeLoop() {
 //
 //   Phase 0 (NO lock): pre-snapshot.
 //     Compute invalidation sets and pre-load stored call sites from SQLite.
-//     Safe without reparseMu because mergeLoop is the sole graph writer —
-//     no concurrent mutation can occur between here and the lock acquisition.
+//     Safe without reparseMu because all graph writers hold reparseMu (both
+//     applyBatch Phase 1 and handleEvent's remove path).  Reads are serialised
+//     at graph.mu.  Any staleness between Phase 0 and Phase 1 is benign.
 //     All store I/O happens here, eliminating the implicit reparseMu→store.mu
 //     lock-ordering dependency that would cause a deadlock if store ever needed
 //     to re-enter the watcher.
@@ -1077,8 +1086,12 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 
 	// ── Phase 0: pre-snapshot (NO lock held) ─────────────────────────────────
 	// Pre-compute invalidation sets and load stored call sites from SQLite.
-	// mergeLoop is the sole graph writer, so reading graph edges here is
-	// equivalent to reading them under reparseMu.
+	// All graph writers (applyBatch Phase 1 and handleEvent's remove path) hold
+	// reparseMu before mutating the graph.  Phase 0 reads are serialised at the
+	// graph.mu level, so they see a consistent snapshot of the last completed
+	// writer.  Any edge observed here may be removed by a concurrent handleEvent
+	// between Phase 0 and Phase 1, but that is benign: the invalidation set
+	// erring toward inclusion is safe (extra entries are no-ops).
 	type preFetch struct {
 		invalidSet     []string
 		preloadedSites []graph.CallSite
