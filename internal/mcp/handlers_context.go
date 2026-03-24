@@ -345,11 +345,14 @@ func (s *Server) handleGetContext(
 		}
 	}
 
-	// Sprint 15 #3: load per-edge learned weight multipliers from graphDB.
-	// Returns nil (no-op) when no entries exist yet or store is unavailable.
-	// Fire-and-forget single SQL SELECT — negligible latency on warm cache.
+	// Sprint 15 #3: load per-edge learned weight multipliers from the store's
+	// in-memory cache (populated from graphDB on first call after each write).
+	// Also capture the version counter: cacheKeyFor uses it to distinguish
+	// subgraphs built with different weight tables, preventing cache collisions
+	// that would occur if two weight maps happened to have the same entry count.
 	if s.store != nil {
 		cfg.LearnedEdgeWeights = s.store.GetLearnedEdgeWeights()
+		cfg.LearnedEdgeWeightsVersion = s.store.GetLearnedEdgeWeightsVersion()
 	}
 
 	// F17: Adaptive Context Learning — auto-expand depth/detail based on

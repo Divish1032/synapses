@@ -490,6 +490,12 @@ type CarveConfig struct {
 	// Cap: 2.0x boost, floor: 0.3x penalty. Nil disables learned-weight
 	// adjustments (backward-compatible default).
 	LearnedEdgeWeights map[EdgeWeightKey]float64
+	// LearnedEdgeWeightsVersion is the store's monotonic write counter at the
+	// time LearnedEdgeWeights was loaded. It is included in the subgraph cache
+	// key so that cached subgraphs are automatically invalidated after any write
+	// to the edge_learned_weights table — regardless of whether the map has the
+	// same number of entries (len-based discrimination is not sufficient).
+	LearnedEdgeWeightsVersion int64
 }
 
 // EdgeWeightKey uniquely identifies a specific directed edge in the graph.

@@ -17,6 +17,90 @@ func edgeKey(from, to, et string) graph.EdgeWeightKey {
 	}
 }
 
+// TestLearnedEdgeWeightsVersion_IncrementsOnWrite verifies that the version
+// counter starts at 0, increments on each UpsertLearnedEdgeWeights call, and
+// that GetLearnedEdgeWeights reflects post-write state (cache invalidation).
+func TestLearnedEdgeWeightsVersion_IncrementsOnWrite(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+
+	// Version must be 0 on a fresh store.
+	if v := st.GetLearnedEdgeWeightsVersion(); v != 0 {
+		t.Fatalf("expected version 0 on fresh store, got %d", v)
+	}
+
+	k1 := edgeKey("pkg::V1", "pkg::V2", "CALLS")
+	k2 := edgeKey("pkg::V2", "pkg::V3", "IMPORTS")
+
+	// First write: version 0→1.
+	st.UpsertLearnedEdgeWeights([]graph.EdgeWeightKey{k1}, 0.1)
+	v1 := st.GetLearnedEdgeWeightsVersion()
+	if v1 != 1 {
+		t.Errorf("expected version 1 after first upsert, got %d", v1)
+	}
+
+	// Cache must reflect the new weight — not a stale zero.
+	m := st.GetLearnedEdgeWeights()
+	if m == nil {
+		t.Fatal("cache returned nil after first upsert")
+	}
+	if got := m[k1]; got < 1.09 || got > 1.11 {
+		t.Errorf("expected ~1.1 in cache after first upsert, got %f", got)
+	}
+
+	// Second write (different key): version 1→2.
+	st.UpsertLearnedEdgeWeights([]graph.EdgeWeightKey{k2}, -0.05)
+	v2 := st.GetLearnedEdgeWeightsVersion()
+	if v2 != 2 {
+		t.Errorf("expected version 2 after second upsert, got %d", v2)
+	}
+
+	// Both keys must now be in the cache.
+	m2 := st.GetLearnedEdgeWeights()
+	if _, ok := m2[k1]; !ok {
+		t.Error("k1 missing from cache after second upsert")
+	}
+	if _, ok := m2[k2]; !ok {
+		t.Error("k2 missing from cache after second upsert")
+	}
+}
+
+// TestLearnedEdgeWeightsVersion_DifferentMapsCollideOnLen demonstrates the
+// scenario fixed by the version counter: two weight maps with the same entry
+// count but different keys would previously share the same cache key (lew:1).
+// With the version counter, each write produces a distinct version, preventing
+// any cache collision regardless of map cardinality.
+func TestLearnedEdgeWeightsVersion_DifferentMapsCollideOnLen(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+
+	// Write edge A→B.
+	kA := edgeKey("pkg::CollA", "pkg::CollB", "CALLS")
+	st.UpsertLearnedEdgeWeights([]graph.EdgeWeightKey{kA}, 0.5) // weight 1.5, version 1
+
+	vAfterA := st.GetLearnedEdgeWeightsVersion()
+
+	// Write edge C→D (same len=1 map, different key).
+	kC := edgeKey("pkg::CollC", "pkg::CollD", "IMPORTS")
+	st.UpsertLearnedEdgeWeights([]graph.EdgeWeightKey{kC}, -0.2) // version 2
+
+	vAfterB := st.GetLearnedEdgeWeightsVersion()
+
+	// Versions must differ — if a cache key used len(map) both would be "lew:1".
+	if vAfterA == vAfterB {
+		t.Errorf("version did not increment between distinct writes: both %d", vAfterA)
+	}
+
+	// The in-memory cache must carry both edges after the second write.
+	m := st.GetLearnedEdgeWeights()
+	if _, ok := m[kA]; !ok {
+		t.Error("kA missing — cache not reloaded after second write")
+	}
+	if _, ok := m[kC]; !ok {
+		t.Error("kC missing — cache not reloaded after second write")
+	}
+}
+
 // TestGetLearnedEdgeWeights_Empty returns nil before any entries are inserted.
 func TestGetLearnedEdgeWeights_Empty(t *testing.T) {
 	t.Parallel()
