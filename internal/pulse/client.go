@@ -448,6 +448,15 @@ func (c *Client) InsertSessionEffectiveness(ev SessionEffectiveness) {
 	_ = c.store.InsertSessionEffectiveness(ev)
 }
 
+// GetSessionDeliveryStats returns total deliveries, first-fetch count, and token savings
+// for a session. All zeroes when pulse is unavailable or sessionID is empty (Sprint 15 #5).
+func (c *Client) GetSessionDeliveryStats(sessionID string) (total, firstFetch, tokensSaved int) {
+	if c == nil || sessionID == "" {
+		return
+	}
+	return c.store.GetSessionDeliveryStats(sessionID)
+}
+
 // InsertDeliveryOutcome records a delivery-to-outcome linkage. Fire-and-forget (P5 — Item 11).
 func (c *Client) InsertDeliveryOutcome(deliveryID int, sessionID, entity, signalType string, toolsBetween int, success bool) {
 	if c == nil {

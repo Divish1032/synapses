@@ -879,3 +879,108 @@ func TestUpdateRecallChannelStats_LearnedWeights(t *testing.T) {
 		t.Errorf("expected no weights for unknown project, got %v", other)
 	}
 }
+
+
+// ---------------------------------------------------------------------------
+// Sprint 15 #5: GetSessionDeliveryStats
+// ---------------------------------------------------------------------------
+
+func TestGetSessionDeliveryStats_Empty(t *testing.T) {
+	s := testStore(t)
+	total, firstFetch, saved := s.GetSessionDeliveryStats("no-such-session")
+	if total != 0 || firstFetch != 0 || saved != 0 {
+		t.Errorf("expected all zeros for missing session, got total=%d firstFetch=%d saved=%d", total, firstFetch, saved)
+	}
+}
+
+func TestGetSessionDeliveryStats_EmptySessionID(t *testing.T) {
+	s := testStore(t)
+	total, firstFetch, saved := s.GetSessionDeliveryStats("")
+	if total != 0 || firstFetch != 0 || saved != 0 {
+		t.Errorf("expected all zeros for empty sessionID, got total=%d firstFetch=%d saved=%d", total, firstFetch, saved)
+	}
+}
+
+func TestGetSessionDeliveryStats_Counts(t *testing.T) {
+	s := testStore(t)
+	sess := "sess-eff-test"
+
+	// Delivery 1: first-fetch (refetched=false), baseline=400 response=100 → saves 300
+	if err := s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName:       "get_context",
+		SessionID:      sess,
+		Entity:         "AuthService",
+		BaselineTokens: 400,
+		ResponseTokens: 100,
+		Refetched:      false,
+	}); err != nil {
+		t.Fatalf("InsertContextDelivery: %v", err)
+	}
+
+	// Delivery 2: first-fetch, baseline=200 response=200 → saves 0 (no saving)
+	if err := s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName:       "get_context",
+		SessionID:      sess,
+		Entity:         "UserService",
+		BaselineTokens: 200,
+		ResponseTokens: 200,
+		Refetched:      false,
+	}); err != nil {
+		t.Fatalf("InsertContextDelivery: %v", err)
+	}
+
+	// Delivery 3: re-fetch (refetched=true), baseline=300 response=150 → saves 150 but NOT first-fetch
+	if err := s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName:       "get_context",
+		SessionID:      sess,
+		Entity:         "AuthService",
+		BaselineTokens: 300,
+		ResponseTokens: 150,
+		Refetched:      true,
+	}); err != nil {
+		t.Fatalf("InsertContextDelivery: %v", err)
+	}
+
+	// Different session — must not bleed into sess.
+	if err := s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName:       "get_context",
+		SessionID:      "other-sess",
+		Entity:         "OtherFunc",
+		BaselineTokens: 1000,
+		ResponseTokens: 100,
+	}); err != nil {
+		t.Fatalf("InsertContextDelivery other-sess: %v", err)
+	}
+
+	total, firstFetch, saved := s.GetSessionDeliveryStats(sess)
+
+	if total != 3 {
+		t.Errorf("total: got %d, want 3", total)
+	}
+	if firstFetch != 2 {
+		t.Errorf("firstFetch: got %d, want 2", firstFetch)
+	}
+	// Delivery 1: max(400-100,0)=300; Delivery 2: max(200-200,0)=0; Delivery 3: max(300-150,0)=150
+	// Total = 300+0+150 = 450
+	if saved != 450 {
+		t.Errorf("tokensSaved: got %d, want 450", saved)
+	}
+}
+
+func TestGetSessionDeliveryStats_NegativeSavingsClampedToZero(t *testing.T) {
+	// When response_tokens > baseline_tokens (unusual but possible for enriched responses),
+	// MAX(baseline-response, 0) should clamp to 0, not subtract.
+	s := testStore(t)
+	sess := "sess-negative"
+	_ = s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName:       "get_context",
+		SessionID:      sess,
+		Entity:         "BigFunc",
+		BaselineTokens: 50,
+		ResponseTokens: 200, // brain enrichment added more content than baseline
+	})
+	_, _, saved := s.GetSessionDeliveryStats(sess)
+	if saved != 0 {
+		t.Errorf("expected tokensSaved=0 for negative savings, got %d", saved)
+	}
+}
