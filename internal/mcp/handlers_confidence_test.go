@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -115,6 +116,49 @@ func TestComputeContextConfidence_Clamped(t *testing.T) {
 	conf = computeContextConfidence(-20.0, true, true, true)
 	if conf < 0.0 {
 		t.Errorf("confidence must not go below 0.0, got %.2f", conf)
+	}
+}
+
+func TestComputeContextConfidence_ExtremeNegativeClampedExact(t *testing.T) {
+	// qs=-20 (12+ abandoned sessions worth of signal) + both staleness flags:
+	// sigmoid(-10)≈0.0000454, scaled → 0.15+0.0000454*0.8 ≈ 0.1500.
+	// minus 0.10 (graphFreshWarning) → 0.0500.
+	// minus 0.05 (staleAnnotWarning) → 0.0000 → rounds to 0.00.
+	// This is the worst-case scenario; confidence must be exactly 0.00.
+	conf := computeContextConfidence(-20.0, true, true, true)
+	if conf != 0.0 {
+		t.Errorf("expected exactly 0.00 for extreme qs + both staleness flags, got %.6f", conf)
+	}
+	// The hint threshold (< 0.5) must fire for this value.
+	if conf >= 0.5 {
+		t.Errorf("confidence=0.00 must be below hint threshold 0.5, got %.2f", conf)
+	}
+}
+
+func TestSerializeCompact_ExtremeNegativeConfidenceE2E(t *testing.T) {
+	// End-to-end chain: extreme qs + both staleness → formula returns 0.0 →
+	// handler sets ConfidenceHint → compact format must surface both.
+	// This pins the production path that was previously silently broken.
+	conf := computeContextConfidence(-20.0, true, true, true) // must be 0.0
+	dc := newTestDC()
+	dc.Confidence = conf
+	if dc.Confidence < 0.5 {
+		dc.ConfidenceHint = fmt.Sprintf(
+			"Low confidence (%.2f): prior context deliveries for this entity were "+
+				"frequently followed by corrections or session abandonment. "+
+				"Context is not suppressed — agent decides. "+
+				"Consider depth=4 or a different entry point.",
+			dc.Confidence)
+	}
+	// Compact full
+	out := serializeCompact(dc, "full")
+	if !strings.Contains(out, "⚠ confidence:0.00") {
+		t.Errorf("extreme qs: compact/full must show ⚠ confidence:0.00, got:\n%s", out)
+	}
+	// Compact summary
+	out = serializeCompact(dc, "summary")
+	if !strings.Contains(out, "⚠ confidence:0.00") {
+		t.Errorf("extreme qs: compact/summary must show ⚠ confidence:0.00, got:\n%s", out)
 	}
 }
 
