@@ -196,7 +196,16 @@ func (a *BrainTrackerAdapter) DetectAndStoreBrain(ctx context.Context, filePath 
 		return // unknown extension, skip
 	}
 
-	if fi, statErr := os.Stat(filePath); statErr == nil && fi.Size() > 1<<20 {
+	// Symlink check: reject symlinks to prevent LLM exfiltration of files
+	// outside the project root via a crafted symlink.
+	lfi, lstatErr := os.Lstat(filePath)
+	if lstatErr != nil {
+		return // fail-open: can't stat, skip
+	}
+	if lfi.Mode()&os.ModeSymlink != 0 {
+		return // never read through symlinks — possible exfiltration vector
+	}
+	if lfi.Size() > 1<<20 {
 		return // file too large — skip brain detection
 	}
 	content, err := os.ReadFile(filePath)
