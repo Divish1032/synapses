@@ -365,11 +365,18 @@ func (w *Watcher) SetBrainCrossProjectTracker(tracker BrainCrossProjectTracker) 
 }
 
 // SetNameMatcher wires the cross-domain name-matching pass into the watcher.
-// Called after each applyBatch completes. nmRunner may be nil to disable.
+// When nm is non-nil, an initial unconditional pass is scheduled immediately
+// so that MENTIONS edges are created from the already-loaded graph on first run
+// and after daemon restarts (hasCrossDomain would otherwise stay false until a
+// cross-domain file changes, silently skipping all code-only file saves).
 func (w *Watcher) SetNameMatcher(nm NameMatcherRunner) {
 	w.mu.Lock()
 	w.nmRunner = nm
 	w.mu.Unlock()
+	if nm != nil {
+		// nil changedFiles = always run, regardless of hasCrossDomain state.
+		w.triggerNameMatcher(nil)
+	}
 }
 
 // triggerNameMatcher fires the name-matching pass in a tracked goroutine.
