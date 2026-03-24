@@ -733,8 +733,13 @@ func (b *impl) Memorize(ctx context.Context, req archivist.MemorizeRequest) (arc
 	}
 	// Retry once if the response is completely empty (model returned garbage
 	// that parsed to empty arrays). Non-trivial sessions should produce at
-	// least one memory or annotation.
+	// least one memory or annotation. Skip retry if context is already done.
 	if len(req.SessionEvents) > 1 && len(resp.NewMemories) == 0 && len(resp.Annotations) == 0 {
+		if ctx.Err() != nil {
+			b.cb.recordSuccess("archivist")
+			b.stats.record("archivist", true, 0)
+			return resp, nil
+		}
 		resp2, err2 := b.archivist.Memorize(ctx, req)
 		if err2 == nil && (len(resp2.NewMemories) > 0 || len(resp2.Annotations) > 0) {
 			resp = resp2
