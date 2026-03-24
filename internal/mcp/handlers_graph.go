@@ -1756,7 +1756,7 @@ func (s *Server) handleLinkEntities(
 	// prior confirm_edge rejection.
 	saved, err := s.store.SaveManualEdge(fromID, toID, relation, domain, agentID, 1.0, true)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("persist edge: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("persist edge: %v", stripInternalPaths(err.Error()))), nil
 	}
 
 	// Inject into the live in-memory graph. AddEdge is idempotent — safe to call
@@ -1908,7 +1908,7 @@ func (s *Server) handleUnlinkEntities(
 	// Uses primary-key lookup — O(log N), no full table scan.
 	found, err := s.store.ManualEdgeExists(fromID, toID, relation)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("check edge: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("check edge: %v", stripInternalPaths(err.Error()))), nil
 	}
 	if !found {
 		return mcp.NewToolResultError(fmt.Sprintf(
@@ -1919,7 +1919,7 @@ func (s *Server) handleUnlinkEntities(
 
 	// Remove from persistent store first — if this fails, leave the graph unchanged.
 	if err := s.store.DeleteManualEdge(fromID, toID, relation); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("delete edge: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("delete edge: %v", stripInternalPaths(err.Error()))), nil
 	}
 
 	// Remove from in-memory graph immediately. Effect is instant — no restart needed.
