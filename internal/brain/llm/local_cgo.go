@@ -107,15 +107,20 @@ func (c *LocalClient) loadModel() error {
 }
 
 // generate runs a single inference call and returns the decoded text.
-// Called under c.mu, so single-threaded access to the context is guaranteed.
+// Thread-safe: c.mu is held only for the brief snapshot of llamaCtx and the
+// abandonedDones drain; it is released before acquiring c.inferSem so a
+// context cancellation at the semaphore does not strand the next caller.
 //
 // The CGo inference call blocks for 5-30s and cannot be interrupted from Go.
 // We run it in a goroutine and select on ctx.Done() so the caller is unblocked
 // immediately on context cancellation (timeout, shutdown). The goroutine will
 // finish naturally when inference completes — bounded by MaxTokens(512).
 func (c *LocalClient) generate(ctx context.Context, prompt string) (string, error) {
+	// Hold mu briefly to snapshot the inference context and drain abandoned dones.
+	c.mu.Lock()
 	llamaCtx, ok := c.llamaCtx.(*llama.Context)
 	if !ok || llamaCtx == nil {
+		c.mu.Unlock()
 		return "", fmt.Errorf("local LLM: inference context is nil")
 	}
 
@@ -142,10 +147,10 @@ func (c *LocalClient) generate(ctx context.Context, prompt string) (string, erro
 		}
 		c.abandonedDones = remaining
 	}
+	c.mu.Unlock()
 
-	// Acquire the inference semaphore to prevent a second caller from using the
-	// non-thread-safe gollama context while an abandoned goroutine (from a prior
-	// cancelled call) is still running.
+	// Acquire the inference semaphore outside c.mu so context cancellation
+	// here does not prevent the next caller from acquiring c.mu promptly.
 	select {
 	case c.inferSem <- struct{}{}:
 	case <-ctx.Done():
@@ -178,7 +183,9 @@ func (c *LocalClient) generate(ctx context.Context, prompt string) (string, erro
 		// Caller cancelled — append the done channel so the next caller can
 		// drain it instead of blocking on the semaphore. Using append (not
 		// overwrite) prevents consecutive cancellations from losing slots.
+		c.mu.Lock()
 		c.abandonedDones = append(c.abandonedDones, done)
+		c.mu.Unlock()
 		return "", fmt.Errorf("local LLM generate: %w", ctx.Err())
 	case r := <-ch:
 		if r.err != nil {
