@@ -523,3 +523,261 @@ func TestFederationACL_JSONRoundTrip(t *testing.T) {
 		t.Error("project-c should NOT be allowed")
 	}
 }
+
+// ── Path-Pattern Architectural Rule Tests ────────────────────────────────────
+
+// buildLayeredGraph creates a 3-layer graph: handler → service → db.
+// Edges: handler -CALLS-> service -CALLS-> db.
+// Also includes a direct handler -CALLS-> db edge (the violation).
+// Absolute paths are used so that matchFilePath's progressive-suffix stripping
+// can match patterns like "*/handlers/*" against "/repo/handlers/order.go".
+func buildLayeredGraph(t *testing.T) *graph.Graph {
+	t.Helper()
+	g := graph.New("/repo")
+
+	handlerID := g.MakeNodeID("/repo/handlers/order.go", "HandleOrder")
+	serviceID := g.MakeNodeID("/repo/service/order.go", "OrderService")
+	dbID := g.MakeNodeID("/repo/db/store.go", "Insert")
+
+	g.AddNode(&graph.Node{ID: handlerID, Type: graph.NodeFunction, Name: "HandleOrder", File: "/repo/handlers/order.go"})
+	g.AddNode(&graph.Node{ID: serviceID, Type: graph.NodeFunction, Name: "OrderService", File: "/repo/service/order.go"})
+	g.AddNode(&graph.Node{ID: dbID, Type: graph.NodeFunction, Name: "Insert", File: "/repo/db/store.go"})
+
+	// Proper path: handler → service → db (two-hop, via service layer).
+	g.AddEdge(&graph.Edge{From: handlerID, To: serviceID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: serviceID, To: dbID, Type: graph.EdgeCalls})
+
+	// Direct violation: handler → db (one-hop, skips service layer).
+	g.AddEdge(&graph.Edge{From: handlerID, To: dbID, Type: graph.EdgeCalls})
+
+	return g
+}
+
+func TestCheckViolations_PathPattern_DirectCall(t *testing.T) {
+	// Rule: handler CALLS db directly is forbidden (1-hop path pattern).
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-handler-direct-db",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	// Should detect the direct handler→db CALLS edge.
+	found := false
+	for _, v := range violations {
+		if v.RuleID == "no-handler-direct-db" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected violation 'no-handler-direct-db', got %v", violations)
+	}
+}
+
+func TestCheckViolations_PathPattern_TwoHop(t *testing.T) {
+	// Rule: handler→X→db (two-hop) is forbidden — detects indirect-but-missing-service paths.
+	// This catches handler→service→db where service is NOT a proper service layer.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-two-hop-handler-db",
+			Severity: "warning",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls, graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	found := false
+	for _, v := range violations {
+		if v.RuleID == "no-two-hop-handler-db" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected violation 'no-two-hop-handler-db' for handler→service→db path, got %v", violations)
+	}
+}
+
+func TestCheckViolations_PathPattern_NoViolation(t *testing.T) {
+	// Rule requires 3-hop path handler→X→Y→db. Graph only has 1-hop and 2-hop.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-three-hop",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls, graph.EdgeCalls, graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	for _, v := range violations {
+		if v.RuleID == "no-three-hop" {
+			t.Errorf("unexpected violation 'no-three-hop': graph has no 3-hop path")
+		}
+	}
+}
+
+func TestCheckViolations_PathPattern_WrongEdgeType(t *testing.T) {
+	// Rule uses IMPORTS edge type — graph only has CALLS edges. Should find no violations.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-handler-imports-db",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeImports},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	for _, v := range violations {
+		if v.RuleID == "no-handler-imports-db" {
+			t.Errorf("unexpected violation: graph has no IMPORTS edges")
+		}
+	}
+}
+
+func TestCheckViolations_PathPattern_EmptyGraph(t *testing.T) {
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-handler-db",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				PathPattern: []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := graph.New("empty")
+	violations := cfg.CheckViolations(g)
+
+	if len(violations) != 0 {
+		t.Errorf("expected 0 violations on empty graph, got %d", len(violations))
+	}
+}
+
+func TestCheckViolations_PathPattern_DoesNotFireForSingleEdgeRules(t *testing.T) {
+	// A rule with EdgeType but no PathPattern must NOT be affected by the
+	// path-pattern code path. Existing single-edge behaviour unchanged.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-calls",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				EdgeType: graph.EdgeCalls,
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	// All CALLS edges should be caught by the normal single-edge path.
+	if len(violations) == 0 {
+		t.Error("expected violations for CALLS rule without path_pattern")
+	}
+}
+
+func TestCheckViolations_PathPattern_ViolationFields(t *testing.T) {
+	// Verify the violation has correct RuleID, Severity, and non-zero node IDs.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:          "check-fields",
+			Severity:    "warning",
+			Description: "handler must not call db directly",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	var v *config.Violation
+	for i := range violations {
+		if violations[i].RuleID == "check-fields" {
+			v = &violations[i]
+			break
+		}
+	}
+	if v == nil {
+		t.Fatal("expected violation 'check-fields', got none")
+	}
+	if v.Severity != "warning" {
+		t.Errorf("Severity = %q, want 'warning'", v.Severity)
+	}
+	if v.FromNode == "" {
+		t.Error("FromNode should not be empty")
+	}
+	if v.ToNode == "" {
+		t.Error("ToNode should not be empty")
+	}
+	if v.EdgeType != graph.EdgeCalls {
+		t.Errorf("EdgeType = %q, want CALLS", v.EdgeType)
+	}
+}
+
+func TestCheckViolationsForFile_PathPattern(t *testing.T) {
+	// File-scoped check: only fire when from-node is in the changed file.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "scoped-handler-db",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+
+	// Changed file is the handler — should detect violation.
+	violations := cfg.CheckViolationsForFile(g, "/repo/handlers/order.go")
+	found := false
+	for _, v := range violations {
+		if v.RuleID == "scoped-handler-db" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected violation when handler file changed")
+	}
+
+	// Changed file is the service — handler is NOT in this file, no violation.
+	violations = cfg.CheckViolationsForFile(g, "/repo/service/order.go")
+	for _, v := range violations {
+		if v.RuleID == "scoped-handler-db" {
+			t.Error("unexpected path-pattern violation when non-handler file changed")
+		}
+	}
+}

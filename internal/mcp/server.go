@@ -2346,6 +2346,15 @@ func (s *Server) registerTools() {
 			mcp.WithString("to_name_pattern",
 				mcp.Description("Substring that must appear in the target entity name."),
 			),
+			mcp.WithString("path_pattern",
+				mcp.Description(
+					"Optional comma-separated sequence of edge types for multi-hop path checking, "+
+						"e.g. 'CALLS,CALLS'. When set, the rule fires when a from-matching node can "+
+						"reach a to-matching node via the exact edge sequence (up to 8 hops). "+
+						"Enables constraints like 'no handler→database path without service layer'. "+
+						"When path_pattern is set, edge_type is ignored.",
+				),
+			),
 			mcp.WithString("context_source",
 				mcp.Description(
 					"Optional provenance of the context that led to this rule. "+
