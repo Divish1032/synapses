@@ -2875,6 +2875,18 @@ func (s *Store) DeleteManualEdge(fromID, toID graph.NodeID, relation string) err
 	return err
 }
 
+// ManualEdgeExists returns true when a manual edge with the given endpoints and
+// relation exists in the store (regardless of confirmed/suppressed state).
+// Uses the primary-key index — O(log N), no full table scan.
+func (s *Store) ManualEdgeExists(fromID, toID graph.NodeID, relation string) (bool, error) {
+	var n int
+	err := s.graphDB.QueryRow(
+		`SELECT COUNT(*) FROM manual_edges WHERE from_id=? AND to_id=? AND relation=?`,
+		string(fromID), string(toID), relation,
+	).Scan(&n)
+	return n > 0, err
+}
+
 // LoadManualEdges returns all persisted user-defined edges.
 func (s *Store) LoadManualEdges() ([]ManualEdge, error) {
 	rows, err := s.graphDB.Query(
@@ -4356,7 +4368,8 @@ func (s *Store) GetLearnedEdgeWeights() map[graph.EdgeWeightKey]float64 {
 	for rows.Next() {
 		var from, to, et string
 		var mult float64
-		if rows.Scan(&from, &to, &et, &mult) != nil {
+		if err := rows.Scan(&from, &to, &et, &mult); err != nil {
+			logutil.Warn("synapses/store: get_learned_edge_weights: scan row %s→%s: %v; skipping\n", from, to, err)
 			continue
 		}
 		if result == nil {
@@ -4397,6 +4410,19 @@ func (s *Store) GetLearnedEdgeWeightsVersion() int64 {
 func (s *Store) UpsertLearnedEdgeWeights(edges []graph.EdgeWeightKey, delta float64) {
 	if s == nil || s.graphDB == nil || len(edges) == 0 {
 		return
+	}
+	// Deduplicate: if the caller passes the same edge key twice the ON CONFLICT
+	// path would apply delta twice in a single transaction, corrupting the weight.
+	if len(edges) > 1 {
+		seen := make(map[graph.EdgeWeightKey]struct{}, len(edges))
+		deduped := edges[:0:len(edges)] // reuse backing array, avoid alloc
+		for _, ek := range edges {
+			if _, dup := seen[ek]; !dup {
+				seen[ek] = struct{}{}
+				deduped = append(deduped, ek)
+			}
+		}
+		edges = deduped
 	}
 	now := time.Now().UTC().Unix()
 	tx, err := s.graphDB.Begin()
@@ -4440,6 +4466,12 @@ func (s *Store) UpsertLearnedEdgeWeights(edges []graph.EdgeWeightKey, delta floa
 // Errors are silently dropped — this is best-effort maintenance.
 func (s *Store) MarkDormantEdges(before time.Time) {
 	if s == nil || s.graphDB == nil {
+		return
+	}
+	// Refuse zero-value timestamp: before.UTC().Unix() would be a large negative
+	// number, producing a vacuous WHERE condition that matches no rows. This guard
+	// makes the calling convention explicit rather than relying on that coincidence.
+	if before.IsZero() {
 		return
 	}
 	// 24-hour debounce — checked and updated under write lock.

@@ -34,6 +34,38 @@ const (
 	queryGraphTimeout = 500 * time.Millisecond
 )
 
+// unescapeStringLiteral converts raw content between double-quotes into the
+// intended string value by processing backslash escape sequences one character
+// at a time. Supported: \\ → \, \" → ". Any other \X passes through unchanged.
+// This avoids the overlapping-pattern bug that strings.ReplaceAll chains have
+// when the input contains sequences like \\" (should give \, not \").
+func unescapeStringLiteral(raw string) string {
+	if !strings.ContainsRune(raw, '\\') {
+		return raw // fast path: nothing to unescape
+	}
+	var b strings.Builder
+	b.Grow(len(raw))
+	i := 0
+	for i < len(raw) {
+		if raw[i] == '\\' && i+1 < len(raw) {
+			switch raw[i+1] {
+			case '\\':
+				b.WriteByte('\\')
+			case '"':
+				b.WriteByte('"')
+			default:
+				b.WriteByte('\\')
+				b.WriteByte(raw[i+1])
+			}
+			i += 2
+			continue
+		}
+		b.WriteByte(raw[i])
+		i++
+	}
+	return b.String()
+}
+
 // ── Tokenizer ────────────────────────────────────────────────────────────────
 
 type tokenKind int
@@ -75,10 +107,9 @@ func tokenize(s string) ([]token, error) {
 			if j >= len(s) {
 				return nil, fmt.Errorf("unterminated string literal starting at position %d", i)
 			}
-			// Unescape simple backslash sequences: \\ → \, \" → "
-			raw := s[i+1 : j]
-			raw = strings.ReplaceAll(raw, `\"`, `"`)
-			raw = strings.ReplaceAll(raw, `\\`, `\`)
+			// Unescape backslash sequences character by character so that overlapping
+			// patterns (e.g. \\") are handled correctly: \\ → \, \" → ".
+			raw := unescapeStringLiteral(s[i+1 : j])
 			tokens = append(tokens, token{kind: tokString, value: raw})
 			i = j + 1
 			continue
@@ -363,7 +394,7 @@ func matchCondition(n *graph.Node, fanin, fanout int, c graphQueryCondition) boo
 	case gqfDomain:
 		d := string(n.Domain)
 		if d == "" {
-			d = "code" // default domain
+			d = string(graph.DomainCode) // default domain
 		}
 		actual = d
 	case gqfFile:
@@ -461,6 +492,10 @@ func (s *Server) handleQueryGraph(
 
 	// Snapshot all nodes under one read lock.
 	allNodes := s.graph.AllNodes()
+	if len(allNodes) == 0 {
+		return mcp.NewToolResultError(
+			"Graph is empty — run 'synapses index' first and verify that parsing completed."), nil
+	}
 
 	// Build degree maps from a single AllEdges snapshot (one read lock).
 	// This avoids 2N per-node lock acquisitions (InEdges/OutEdges each lock),
@@ -477,6 +512,7 @@ func (s *Server) handleQueryGraph(
 	results := make([]graphNodeResult, 0) // never nil — serializes as [] not null
 	truncated := false
 	timedOut := false
+	matchedTotal := 0 // total nodes passing WHERE — may exceed queryGraphNodeCap
 
 	for _, n := range allNodes {
 		// Check the deadline in a non-blocking select every iteration.
@@ -498,30 +534,31 @@ func (s *Server) handleQueryGraph(
 		if !matchAllConditions(n, fanin, fanout, q.conditions) {
 			continue
 		}
+		matchedTotal++
 
-		domain := string(n.Domain)
-		if domain == "" {
-			domain = "code"
-		}
-
-		results = append(results, graphNodeResult{
-			ID:       string(n.ID),
-			Name:     n.Name,
-			Type:     string(n.Type),
-			Package:  n.Package,
-			File:     n.File,
-			Line:     n.Line,
-			Domain:   domain,
-			Exported: n.Exported,
-			FanIn:    fanin,
-			FanOut:   fanout,
-		})
-
-		// Enforce the 1000-node cap: stop scanning — total_nodes already
-		// reflects the full graph size via len(allNodes).
-		if len(results) >= queryGraphNodeCap {
-			truncated = true
-			break
+		// After the cap is hit, keep counting matches but stop collecting results.
+		// This gives callers an accurate matchedTotal so they can gauge truncation severity.
+		if len(results) < queryGraphNodeCap {
+			domain := string(n.Domain)
+			if domain == "" {
+				domain = string(graph.DomainCode)
+			}
+			results = append(results, graphNodeResult{
+				ID:       string(n.ID),
+				Name:     n.Name,
+				Type:     string(n.Type),
+				Package:  n.Package,
+				File:     n.File,
+				Line:     n.Line,
+				Domain:   domain,
+				Exported: n.Exported,
+				FanIn:    fanin,
+				FanOut:   fanout,
+			})
+			if len(results) >= queryGraphNodeCap {
+				truncated = true
+				// Don't break — keep iterating to get accurate matchedTotal.
+			}
 		}
 	}
 
@@ -529,6 +566,7 @@ func (s *Server) handleQueryGraph(
 		"query":         raw,
 		"nodes":         results,
 		"count":         len(results),
+		"matched_total": matchedTotal, // total passing WHERE; may exceed count when truncated
 		"total_nodes":   len(allNodes),
 		"truncated":     truncated,
 		"timed_out":     timedOut,
@@ -537,12 +575,18 @@ func (s *Server) handleQueryGraph(
 	}
 	if truncated && !timedOut {
 		out["hint"] = fmt.Sprintf(
-			"Result capped at %d nodes. Narrow your query with additional AND conditions.", queryGraphNodeCap)
+			"Result capped at %d of %d matching nodes. Narrow your query with additional AND conditions.",
+			queryGraphNodeCap, matchedTotal)
 	}
 	if timedOut {
+		// matched_total is a lower bound when timed out: the loop broke before
+		// evaluating the remaining nodes, so true total may be higher.
+		out["matched_total_note"] = "lower bound — query timed out before all nodes were evaluated"
 		out["hint"] = fmt.Sprintf(
-			"Query timed out after %dms. Narrow your query with additional AND conditions "+
-				"(e.g. add package= or type= to reduce the scan set).", queryGraphTimeout.Milliseconds())
+			"Query timed out after %dms (%d nodes matched so far, true total may be higher). "+
+				"Narrow your query with additional AND conditions "+
+				"(e.g. add package= or type= to reduce the scan set).",
+			queryGraphTimeout.Milliseconds(), matchedTotal)
 	}
 
 	return jsonResult(out)

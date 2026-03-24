@@ -1807,16 +1807,10 @@ func (s *Server) handleUnlinkEntities(
 	toID := toNode.ID
 
 	// Verify the manual edge exists in the store before removing.
-	edges, err := s.store.LoadManualEdges()
+	// Uses primary-key lookup — O(log N), no full table scan.
+	found, err := s.store.ManualEdgeExists(fromID, toID, relation)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("load edges: %v", err)), nil
-	}
-	found := false
-	for _, e := range edges {
-		if e.FromID == fromID && e.ToID == toID && e.Relation == relation {
-			found = true
-			break
-		}
+		return mcp.NewToolResultError(fmt.Sprintf("check edge: %v", err)), nil
 	}
 	if !found {
 		return mcp.NewToolResultError(fmt.Sprintf(
