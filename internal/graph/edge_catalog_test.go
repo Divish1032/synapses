@@ -129,6 +129,12 @@ func TestEdgeTypeCatalogKnownEdges(t *testing.T) {
 		{graph.EdgeLinksTo, 0.3, "docs", true},
 		{graph.EdgeContains, 0.15, "docs", true},
 		{graph.EdgeDefines, 0.15, "code", false},
+		// Sprint 16: cross-domain edge types.
+		{graph.EdgeDeploys, 0.75, "infra", true},
+		{graph.EdgeConsumes, 0.75, "api", true},
+		{graph.EdgeConfiguredBy, 0.65, "infra", true},
+		{graph.EdgeDocuments, 0.65, "docs", true},
+		{graph.EdgeMentions, 0.55, "knowledge", true},
 	}
 
 	for _, c := range checks {
