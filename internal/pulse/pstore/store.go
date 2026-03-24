@@ -2939,7 +2939,9 @@ func (s *Store) GetRecentEffectivenessTrend(days int, agentID string) []pulsetyp
 		args = append(args, agentID)
 	}
 	q += ` GROUP BY date(created_at) ORDER BY date(created_at)`
-	rows, err := s.execer().Query(q, args...)
+	// Use readDB() not execer(): trend reads must see committed historical state,
+	// never in-progress collector batch data from an unrelated concurrent flush.
+	rows, err := s.readDB().Query(q, args...)
 	if err != nil {
 		return nil
 	}
