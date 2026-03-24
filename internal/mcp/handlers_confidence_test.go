@@ -67,6 +67,15 @@ func TestComputeContextConfidence_OneAbandonedSession(t *testing.T) {
 	}
 }
 
+func TestComputeContextConfidence_TwoCancellations(t *testing.T) {
+	// qs=-1.0 (two task_cancelled signals, each -0.5): exact value 0.45.
+	// sigmoid(-0.5)≈0.378, scaled → 0.15+0.378*0.8 = 0.452 → rounds to 0.45.
+	conf := computeContextConfidence(-1.0, true, false, false)
+	if conf != 0.45 {
+		t.Errorf("expected 0.45 for qs=-1.0 (two cancellations), got %.2f", conf)
+	}
+}
+
 func TestComputeContextConfidence_MildNegative_AboveHintThreshold(t *testing.T) {
 	// qs=-0.2 (SignalWeightCorrectionDelayed = -0.2): mild negative signal.
 	// sigmoid(-0.1)≈0.475, scaled → 0.15+0.475*0.8 ≈ 0.53 — above 0.5, no hint.
