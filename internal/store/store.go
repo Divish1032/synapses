@@ -624,15 +624,16 @@ func Open(path string) (*Store, error) {
 	// Validate that the path is under the expected data directory or a temp dir
 	// (test scenarios use t.TempDir() which typically resolves under /tmp).
 	home, homeErr := os.UserHomeDir()
-	if homeErr == nil {
-		dataDir := filepath.Join(home, ".synapses")
-		if !strings.HasPrefix(path, dataDir) && !strings.HasPrefix(path, os.TempDir()) {
-			// Also allow os.TempDir() variants on macOS (/private/tmp vs /tmp).
-			// We accept any path under the system temp dir to support tests.
-			realTemp, _ := filepath.EvalSymlinks(os.TempDir())
-			if realTemp == "" || !strings.HasPrefix(path, realTemp) {
-				return nil, fmt.Errorf("store.Open: path %q is outside allowed directories", path)
-			}
+	if homeErr != nil {
+		return nil, fmt.Errorf("store.Open: cannot determine home dir for path validation: %w", homeErr)
+	}
+	dataDir := filepath.Join(home, ".synapses")
+	if !strings.HasPrefix(path, dataDir) && !strings.HasPrefix(path, os.TempDir()) {
+		// Also allow os.TempDir() variants on macOS (/private/tmp vs /tmp).
+		// We accept any path under the system temp dir to support tests.
+		realTemp, _ := filepath.EvalSymlinks(os.TempDir())
+		if realTemp == "" || !strings.HasPrefix(path, realTemp) {
+			return nil, fmt.Errorf("store.Open: path %q is outside allowed directories", path)
 		}
 	}
 	graphDB, err := openSQLiteDB(path)
