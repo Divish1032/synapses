@@ -1360,6 +1360,19 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 		}
 	}
 
+	// NL-to-graph Tier 0+1: extract entity candidates from markdown section
+	// bodies and create knowledge nodes (concept/entity/artifact/decision).
+	// Only meaningful for markdown files — code file changes don't add sections.
+	// Tier 2 LLM classification is submitted as a P1 brain task when available.
+	for _, s := range valid {
+		ext := strings.ToLower(filepath.Ext(s.result.path))
+		if ext != ".md" && ext != ".markdown" && ext != ".mdx" {
+			continue
+		}
+		unresolved := resolver.ResolveNLEntitiesForFile(w.graph, s.result.path)
+		w.scheduleNLClassification(s.result.path, unresolved)
+	}
+
 	// Phase 3: per-file post-resolve work (still under reparseMu).
 	// Only in-memory operations here — zero store I/O.
 	// Store writes (call-site persistence, memory staling) moved to Phase 2
@@ -1788,6 +1801,13 @@ func (w *Watcher) reparseFile(path, _ string) {
 		resolver.ResolveDocEdges(w.graph)
 	}
 
+	// NL-to-graph Tier 0+1 (markdown files only).
+	// Tier 2 LLM classification submitted as P1 when brain is available.
+	if ext == ".md" || ext == ".markdown" || ext == ".mdx" {
+		unresolved := resolver.ResolveNLEntitiesForFile(w.graph, path)
+		w.scheduleNLClassification(path, unresolved)
+	}
+
 	// Keep the stored call-site table consistent with the re-parsed file.
 	if w.store != nil {
 		if err := w.store.UpdateCallSitesForFile(path, newSites); err != nil {
@@ -2151,6 +2171,57 @@ func (w *Watcher) persistAsync(changedFile string) {
 // so its semantic summaries stay current. After ingest, schedules a delayed
 // write-back to fetch the generated summaries and store them as annotations.
 // Runs in a goroutine; all errors are silently discarded (fail-silent contract).
+// scheduleNLClassification submits a Tier 2 LLM classification task for the
+// given unresolved entity candidates from filePath. The task runs as P1
+// (background, soon) via the brain scheduler. When the LLM returns, each
+// knowledge node's NodeType is upgraded from the Tier 0 default ("concept")
+// to the classified type (concept | entity | artifact | decision).
+//
+// No-op when brainClient is nil or the unresolved list is empty.
+// Safe to call while reparseMu is held: applyFn runs in the scheduler goroutine
+// (not under reparseMu) but graph.UpdateNodeMetadata is internally mutex-safe.
+func (w *Watcher) scheduleNLClassification(filePath string, unresolved []parser.EntityCandidate) {
+	if w.brainClient == nil || len(unresolved) == 0 {
+		return
+	}
+
+	// Build NLCandidate list by reconstructing NodeIDs from the candidate names.
+	// The NodeID formula must match resolver.makeKnowledgeNodeID:
+	//   g.MakeNodeID(filePath, "knowledge:"+resolver.NormalizeKnowledgeName(name))
+	candidates := make([]brain.NLCandidate, 0, len(unresolved))
+	for _, c := range unresolved {
+		norm := resolver.NormalizeKnowledgeName(c.Name)
+		if norm == "" {
+			continue
+		}
+		nodeID := w.graph.MakeNodeID(filePath, "knowledge:"+norm)
+		candidates = append(candidates, brain.NLCandidate{
+			Name:    c.Name,
+			Context: c.Context,
+			NodeID:  string(nodeID),
+		})
+	}
+	if len(candidates) == 0 {
+		return
+	}
+
+	req := brain.NLClassifyRequest{FilePath: filePath, Candidates: candidates}
+	w.brainClient.ScheduleNLClassification(req, func(results []brain.NLClassifyResult) {
+		for _, r := range results {
+			if r.NodeType == "" {
+				continue
+			}
+			w.graph.UpdateNodeMetadata(graph.NodeID(r.NodeID), func(n *graph.Node) {
+				n.Type = graph.NodeType(r.NodeType)
+				if n.Metadata == nil {
+					n.Metadata = make(map[string]string)
+				}
+				n.Metadata["tier"] = "2"
+			})
+		}
+	})
+}
+
 func (w *Watcher) ingestToBrain(path string) {
 	bc := w.brainClient
 	if bc == nil {

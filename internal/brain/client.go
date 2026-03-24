@@ -266,6 +266,139 @@ func (c *Client) BrainHealth() map[string]interface{} {
 	}
 }
 
+// ── NL-to-graph Tier 2 (Sprint 17 #5) ───────────────────────────────────────
+
+// NLCandidate is a single entity candidate for Tier 2 LLM classification.
+// It carries the candidate name and its surrounding context sentence so the
+// LLM can infer entity type and relationship type from minimal context.
+type NLCandidate struct {
+	// Name is the normalised candidate name (lowercase, trimmed).
+	Name string
+	// Context is up to 200 chars of surrounding text for classification.
+	Context string
+	// NodeID is the existing graph NodeID of the knowledge node to update.
+	// Empty means no node was created in Tier 0/1 (should not happen in practice).
+	NodeID string
+}
+
+// NLClassifyResult is the LLM's classification of a single NLCandidate.
+type NLClassifyResult struct {
+	// NodeID matches the input NLCandidate.NodeID.
+	NodeID string
+	// NodeType is one of: concept | entity | artifact | decision.
+	// Empty means the LLM returned an unrecognised value; caller keeps the default.
+	NodeType string
+}
+
+// NLClassifyRequest bundles the file path and candidates for a single
+// ScheduleNLClassification call. Used as a P1 scheduler task key.
+type NLClassifyRequest struct {
+	// FilePath is the source markdown file, used as the scheduler dedup key.
+	FilePath string
+	// Candidates are the unresolved entity candidates from Tier 0/1 extraction.
+	Candidates []NLCandidate
+}
+
+// ScheduleNLClassification enqueues a P1 brain task that classifies the
+// entity type of each NLCandidate using the LLM and calls applyFn with the
+// results. applyFn is called from within the scheduler goroutine; it must be
+// safe to call concurrently with graph reads but not concurrent graph writes
+// (the watcher reparseMu serialises graph mutations).
+//
+// No-op when:
+//   - The candidate list is empty.
+//   - The brain is unavailable (NullBrain).
+//   - System health warrants P1 deferral (task is queued; applyFn runs later).
+//
+// The caller's context is NOT forwarded to the queued task — it may expire
+// before the P1 scheduler fires. A fresh background context is used instead.
+func (c *Client) ScheduleNLClassification(req NLClassifyRequest, applyFn func([]NLClassifyResult)) {
+	if len(req.Candidates) == 0 || applyFn == nil {
+		return
+	}
+	key := "nl-classify:" + req.FilePath
+	// Capture copies for the closure — req is value, applyFn is a func pointer.
+	candidates := req.Candidates
+	c.scheduler.Submit(key, PriorityP1, func() {
+		results := classifyNLCandidates(c.brain, candidates)
+		if len(results) > 0 {
+			applyFn(results)
+		}
+	})
+}
+
+// classifyNLCandidates sends one classification prompt per candidate to the LLM.
+// Each prompt is small (~50-80 tokens input, ~1-5 tokens output) so the full
+// batch for a typical document (20 candidates) completes in ~10-20 seconds on a
+// local 4B model.
+//
+// Valid NodeType responses: concept | entity | artifact | decision
+// Anything else is silently ignored (caller keeps the Tier 0 default "concept").
+func classifyNLCandidates(b Brain, candidates []NLCandidate) []NLClassifyResult {
+	if !b.Available() {
+		return nil
+	}
+	ctx := context.Background()
+	var results []NLClassifyResult
+	for _, c := range candidates {
+		if c.NodeID == "" || c.Name == "" {
+			continue
+		}
+		prompt := buildEntityTypePrompt(c.Name, c.Context)
+		resp, err := b.Generate(ctx, prompt)
+		if err != nil || resp == "" {
+			continue
+		}
+		nodeType := parseEntityTypeResponse(resp)
+		if nodeType != "" {
+			results = append(results, NLClassifyResult{
+				NodeID:   c.NodeID,
+				NodeType: nodeType,
+			})
+		}
+	}
+	return results
+}
+
+// buildEntityTypePrompt returns a minimal classification prompt for the LLM.
+// Prompt is intentionally tiny: one-word output keeps latency low and
+// format-compliance high (IFEval 89.8 on qwen3.5:4b is enough for one word).
+func buildEntityTypePrompt(name, context string) string {
+	ctx := strings.TrimSpace(context)
+	if len(ctx) > 150 {
+		// Truncate at word boundary to avoid splitting multi-byte UTF-8 runes.
+		cut := ctx[:150]
+		if idx := strings.LastIndexByte(cut, ' '); idx > 0 {
+			ctx = cut[:idx]
+		} else {
+			ctx = cut
+		}
+	}
+	prompt := "Entity: \"" + name + "\"\n"
+	if ctx != "" {
+		prompt += "Context: \"" + ctx + "\"\n"
+	}
+	prompt += "Type (one word only — concept / entity / artifact / decision):"
+	return prompt
+}
+
+// parseEntityTypeResponse extracts a valid node type from the LLM's one-word response.
+// Returns "" if the response is not one of the four valid types.
+func parseEntityTypeResponse(resp string) string {
+	// Normalise: lowercase, trim whitespace and punctuation.
+	r := strings.ToLower(strings.Trim(strings.TrimSpace(resp), ".,;:!?\"'"))
+	// Take only the first word in case the LLM added extra text.
+	if idx := strings.IndexByte(r, ' '); idx > 0 {
+		r = r[:idx]
+	}
+	switch r {
+	case "concept", "entity", "artifact", "decision":
+		return r
+	default:
+		return ""
+	}
+}
+
 // Close shuts down the in-process brain, scheduler, and system pulse,
 // releasing all associated resources.
 func (c *Client) Close() {
