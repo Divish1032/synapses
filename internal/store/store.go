@@ -1724,7 +1724,7 @@ func (s *Store) PruneStaleData(retentionDays int) {
 			}
 			placeholders := strings.Join(pTokens, ",")
 			for _, table := range []string{"memory_embeddings", "memory_anchors", "memory_surfaced", "memory_versions"} {
-				tx.Exec("DELETE FROM "+table+" WHERE memory_id IN ("+placeholders+")", args...)
+				tx.Exec("DELETE FROM "+quoteIdentifier(table)+" WHERE memory_id IN ("+placeholders+")", args...)
 			}
 		}
 
