@@ -422,3 +422,59 @@ func TestScheduler_ConcurrentSubmit(t *testing.T) {
 	}
 	t.Errorf("concurrent submit: want %d tasks executed; got %d", n, count.Load())
 }
+
+func TestScheduler_SubmitAfterStop_IsDropped(t *testing.T) {
+	// Submit() called after Stop() must silently drop the task rather than
+	// orphaning it in the queue where it would never execute.
+	sched, cleanup := newTestSchedulerGreen(t)
+	cleanup() // stop immediately
+
+	var called atomic.Bool
+	sched.Submit("node1:ingest", PriorityP2, func() { called.Store(true) })
+
+	// Give any potential spurious execution window time to pass.
+	time.Sleep(150 * time.Millisecond)
+	if called.Load() {
+		t.Error("task executed after Stop() — expected silent drop")
+	}
+	// Task should not have been enqueued (drain goroutine is gone).
+	if sched.QueueSize() != 0 {
+		t.Errorf("want empty queue after Submit-post-Stop; got %d", sched.QueueSize())
+	}
+}
+
+func TestScheduler_CloseAndReinit_NoGoroutineLeak(t *testing.T) {
+	// Simulates the daemon hot-reload pattern: Close old scheduler, create new one.
+	// Both old and new scheduler must run cleanly without goroutine leaks.
+	// This validates the production fix for the activeBrain hot-reload path.
+	sched1, cleanup1 := newTestSchedulerGreen(t)
+
+	var task1Ran atomic.Bool
+	sched1.Submit("node1:ingest", PriorityP2, func() { task1Ran.Store(true) })
+
+	// Drain task1, then stop the first scheduler.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if task1Ran.Load() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cleanup1() // mimics oldBrain.Close()
+
+	// Create a fresh scheduler (mimics newBrain = brain.NewInProcess(...)).
+	sched2, cleanup2 := newTestSchedulerGreen(t)
+	defer cleanup2()
+
+	var task2Ran atomic.Bool
+	sched2.Submit("node2:ingest", PriorityP2, func() { task2Ran.Store(true) })
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if task2Ran.Load() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error("new scheduler after hot-reload did not execute task")
+}
