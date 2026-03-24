@@ -259,8 +259,20 @@ func (r *Resolver) statusForEntry(ctx context.Context, e config.FederationEntry)
 		return es
 	}
 
+	// Guard remaining blocking calls against context expiry.
+	// os.Stat(dbPath) and newRawDB are not context-aware; check ctx after each.
+	if ctx.Err() != nil {
+		es.Status = "not_indexed"
+		es.Error = "timeout"
+		return es
+	}
 	if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
 		es.Status = "not_indexed"
+		return es
+	}
+	if ctx.Err() != nil {
+		es.Status = "not_indexed"
+		es.Error = "timeout"
 		return es
 	}
 
