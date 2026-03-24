@@ -543,8 +543,180 @@ func (p *KotlinParser) extractAllDeclarations(
 	walk(root, "")
 }
 
+// isKotlinBuiltinType returns true for Kotlin stdlib types that should not
+// generate varType entries (they have no user-defined methods to resolve).
+func isKotlinBuiltinType(name string) bool {
+	switch name {
+	case "String", "Int", "Long", "Boolean", "Float", "Double", "Short", "Byte", "Char",
+		"List", "Map", "Set", "Array", "MutableList", "MutableMap", "MutableSet",
+		"Any", "Unit", "Nothing", "Pair", "Triple",
+		"Number", "Comparable", "Iterable", "Sequence", "Collection",
+		"HashMap", "HashSet", "ArrayList", "LinkedHashMap", "LinkedHashSet":
+		return true
+	}
+	return false
+}
+
+// extractKotlinTypeName extracts the type name from a Kotlin type annotation node.
+// Handles user_type, nullable_type (unwraps), and generic_type (takes base).
+func extractKotlinTypeName(n sitter.Node, src []byte) string {
+	if n.IsNull() {
+		return ""
+	}
+	switch n.Type() {
+	case "nullable_type":
+		// Unwrap: String? → String, Repository? → Repository
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			child := n.Child(i)
+			if !child.IsNull() && child.Type() == "user_type" {
+				return extractKotlinTypeName(child, src)
+			}
+		}
+		return ""
+	case "user_type":
+		// user_type contains type_identifier (or simple_identifier in some grammar versions)
+		if ident := firstChildOfType(n, "type_identifier"); !ident.IsNull() {
+			return string(src[ident.StartByte():ident.EndByte()])
+		}
+		if ident := firstChildOfType(n, "simple_identifier"); !ident.IsNull() {
+			return string(src[ident.StartByte():ident.EndByte()])
+		}
+		// Fallback: strip generics and nullable
+		text := strings.TrimSpace(string(src[n.StartByte():n.EndByte()]))
+		if idx := strings.IndexByte(text, '<'); idx >= 0 {
+			text = text[:idx]
+		}
+		text = strings.TrimSuffix(text, "?")
+		return text
+	default:
+		// For type_reference or other wrappers, try to find user_type child
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			child := n.Child(i)
+			if !child.IsNull() && (child.Type() == "user_type" || child.Type() == "nullable_type") {
+				return extractKotlinTypeName(child, src)
+			}
+		}
+		return ""
+	}
+}
+
+// collectKotlinVarTypes walks the AST to extract variable → type mappings from:
+//   - Function parameters: fun process(repo: Repository) → repo→Repository
+//   - Property declarations: val service: AuthService → service→AuthService
+//   - Constructor parameters: class Foo(val name: String) → name→String (skips builtins)
+func collectKotlinVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePath string) {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "function_declaration":
+			// Extract typed parameters from function_value_parameters
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if child.IsNull() || child.Type() != "function_value_parameters" {
+					continue
+				}
+				for j := uint32(0); j < child.ChildCount(); j++ {
+					param := child.Child(j)
+					if param.IsNull() {
+						continue
+					}
+					// Grammar: function_value_parameters contains "parameter" children directly
+					if param.Type() != "parameter" && param.Type() != "function_value_parameter" {
+						continue
+					}
+					// If function_value_parameter, unwrap to parameter child
+					paramNode := param
+					if param.Type() == "function_value_parameter" {
+						if inner := firstChildOfType(param, "parameter"); !inner.IsNull() {
+							paramNode = inner
+						}
+					}
+					nameNode := firstChildOfType(paramNode, "simple_identifier")
+					if nameNode.IsNull() {
+						continue
+					}
+					varName := string(src[nameNode.StartByte():nameNode.EndByte()])
+
+					// Find the type annotation (user_type or nullable_type)
+					typeName := ""
+					for k := uint32(0); k < paramNode.ChildCount(); k++ {
+						tc := paramNode.Child(k)
+						if tc.IsNull() {
+							continue
+						}
+						if tc.Type() == "user_type" || tc.Type() == "nullable_type" {
+							typeName = extractKotlinTypeName(tc, src)
+							break
+						}
+					}
+					if typeName == "" || isKotlinBuiltinType(typeName) {
+						continue
+					}
+					g.AddVarType(filePath, varName, typeName)
+				}
+			}
+
+		case "property_declaration":
+			// val service: AuthService or var repo: Repository
+			var varName string
+			if varDecl := firstChildOfType(n, "variable_declaration"); !varDecl.IsNull() {
+				if nameNode := firstChildOfType(varDecl, "simple_identifier"); !nameNode.IsNull() {
+					varName = string(src[nameNode.StartByte():nameNode.EndByte()])
+				}
+				// Type annotation is on variable_declaration
+				typeName := ""
+				for k := uint32(0); k < varDecl.ChildCount(); k++ {
+					tc := varDecl.Child(k)
+					if tc.IsNull() {
+						continue
+					}
+					if tc.Type() == "user_type" || tc.Type() == "nullable_type" {
+						typeName = extractKotlinTypeName(tc, src)
+						break
+					}
+				}
+				if varName != "" && typeName != "" && !isKotlinBuiltinType(typeName) {
+					g.AddVarType(filePath, varName, typeName)
+				}
+			}
+
+		case "class_parameter":
+			// Constructor parameter: class Foo(val name: String)
+			nameNode := firstChildOfType(n, "simple_identifier")
+			if nameNode.IsNull() {
+				break
+			}
+			varName := string(src[nameNode.StartByte():nameNode.EndByte()])
+			typeName := ""
+			for k := uint32(0); k < n.ChildCount(); k++ {
+				tc := n.Child(k)
+				if tc.IsNull() {
+					continue
+				}
+				if tc.Type() == "user_type" || tc.Type() == "nullable_type" {
+					typeName = extractKotlinTypeName(tc, src)
+					break
+				}
+			}
+			if typeName == "" || isKotlinBuiltinType(typeName) {
+				break
+			}
+			g.AddVarType(filePath, varName, typeName)
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+}
+
 // collectKotlinCallSites collects call sites.
 func collectKotlinCallSites(g *graph.Graph, lang *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	// Collect variable type declarations for cross-file obj.method() resolution.
+	collectKotlinVarTypes(g, root, src, filePath)
 	callQuery := `(call_expression (simple_identifier) @callee)`
 	_ = runQuery(lang, root, src, callQuery, func(captures map[string]string, _ int) {
 		callee := captures["callee"]

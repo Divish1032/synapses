@@ -55,7 +55,13 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 	for _, e := range d.resolver.entries {
 		e := e
 		eg.Go(func() error {
-			if egCtx.Err() != nil {
+			// Per-query timeout: checkDriftForEntry runs git subprocesses and
+			// SQLite queries that accept ctx. SiblingQueryTimeout prevents one
+			// hanging sibling (e.g., unreachable NFS, slow git over network)
+			// from occupying a parallelism slot indefinitely.
+			qctx, cancel := context.WithTimeout(egCtx, SiblingQueryTimeout)
+			defer cancel()
+			if qctx.Err() != nil {
 				return nil
 			}
 
@@ -78,7 +84,7 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 				return nil
 			}
 
-			alerts := d.checkDriftForEntry(egCtx, e, localStore)
+			alerts := d.checkDriftForEntry(qctx, e, localStore)
 
 			d.mu.Lock()
 			d.cache[e.Alias] = alerts
