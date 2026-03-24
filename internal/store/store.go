@@ -480,6 +480,7 @@ type Store struct {
 	lastSessionPruneAt time.Time  // sessions prune (daily debounce)
 	lastPruneStaleMu   sync.Mutex // guards lastPruneStaleAt
 	lastPruneStaleAt   time.Time  // PruneStaleData (daily debounce)
+	memoryPruneMu      sync.Mutex // serializes memory-expiry block in PruneStaleData with ExpireMemories
 
 	// semanticDedupFunc embeds text on-the-fly for semantic dedup in prepareMemory.
 	// Protected by semanticDedupMu for concurrent read/write safety.
@@ -1712,6 +1713,12 @@ func (s *Store) PruneStaleData(retentionDays int) {
 
 	// episodes: stored as Unix seconds (INTEGER).
 	chunkedPrune("episodes", "created_at < ?", cutoffUnix)
+
+	// memories + cascades: serialize with ExpireMemories to prevent concurrent
+	// transactions on the same WHERE expires_at <= ? predicate, which would
+	// cause phantom knowledge_expired events for already-deleted IDs.
+	s.memoryPruneMu.Lock()
+	defer s.memoryPruneMu.Unlock()
 
 	// memories + cascades: wrap in a single transaction to prevent orphaned
 	// embeddings/anchors/surfaced/versions on crash between DELETEs.

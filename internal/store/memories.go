@@ -495,6 +495,9 @@ func (s *Store) TouchMemory(id string) error {
 // ExpireMemories deletes memories past their expires_at. Call periodically.
 // Also cleans up orphaned memory_anchors and memory_surfaced rows for deleted memories.
 func (s *Store) ExpireMemories() (int64, error) {
+	s.memoryPruneMu.Lock()
+	defer s.memoryPruneMu.Unlock()
+
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	// Delete expired memories and clean up their anchors in one transaction.
