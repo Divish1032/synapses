@@ -1056,6 +1056,11 @@ func recoverGraphDB(path string) error {
 //     replayed by SQLite against the fresh empty DB, corrupting it on first open
 //  4. Opens and returns a fresh empty DB at kPath
 func recoverKnowledgeDB(kPath string) (*sql.DB, error) {
+	// Remove WAL and SHM sidecars BEFORE renaming the main file.
+	// If we renamed first and then crashed, a stale -wal file could be replayed
+	// by SQLite's WAL recovery against the new empty DB on the next open.
+	_ = os.Remove(kPath + "-wal")
+	_ = os.Remove(kPath + "-shm")
 	// Rename the corrupt file so it can be inspected later.
 	if err := os.Rename(kPath, kPath+".corrupt"); err != nil {
 		// Rename failed — fall back to deletion so we can create a fresh file.
@@ -1063,10 +1068,6 @@ func recoverKnowledgeDB(kPath string) (*sql.DB, error) {
 		logutil.Warn("synapses: store: could not back up corrupt knowledge.db (%v) — deleting it\n", err)
 		_ = os.Remove(kPath)
 	}
-	// Always remove WAL and SHM sidecars. A leftover -wal file from the corrupt
-	// DB would be replayed by SQLite's WAL recovery against the new empty file.
-	_ = os.Remove(kPath + "-wal")
-	_ = os.Remove(kPath + "-shm")
 	return openSQLiteDB(kPath)
 }
 
