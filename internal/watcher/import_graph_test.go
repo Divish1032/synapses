@@ -95,7 +95,7 @@ func TestComputeInvalidationSet_IncludesCallers(t *testing.T) {
 	// When a.go changes:
 	// - b.go has Handle --CALLS--> DoModel(a.go) → b.go must be in set
 	// - c.go has no edges INTO a.go → c.go must NOT be in set
-	invalid := w.computeInvalidationSet("a.go", w.filePkg)
+	invalid := w.computeInvalidationSet("a.go", w.filePkg, w.pkgFiles)
 	sort.Strings(invalid)
 
 	if !slices.Contains(invalid, "a.go") {
@@ -125,7 +125,7 @@ func TestComputeInvalidationSet_IncludesSamePackageFiles(t *testing.T) {
 	w := newTestWatcher(t, g)
 
 	// When models/a.go changes, models/b.go (same package) must be in the set.
-	invalid := w.computeInvalidationSet("models/a.go", w.filePkg)
+	invalid := w.computeInvalidationSet("models/a.go", w.filePkg, w.pkgFiles)
 	if !slices.Contains(invalid, "models/b.go") {
 		t.Errorf("same-package file models/b.go should be in invalidation set, got %v", invalid)
 	}
@@ -137,7 +137,7 @@ func TestComputeInvalidationSet_UnknownFileReturnsSelf(t *testing.T) {
 	g := graph.New("repo")
 	w := newTestWatcher(t, g)
 
-	invalid := w.computeInvalidationSet("unknown.go", w.filePkg)
+	invalid := w.computeInvalidationSet("unknown.go", w.filePkg, w.pkgFiles)
 	if len(invalid) != 1 || invalid[0] != "unknown.go" {
 		t.Errorf("unknown file should return just itself, got %v", invalid)
 	}
@@ -170,7 +170,7 @@ func TestComputeInvalidationSet_AllLanguagesViaCalls(t *testing.T) {
 
 	// When Foo.java changes, Bar.java MUST be in the invalidation set —
 	// found via the CALLS edge, NOT via import name matching.
-	invalid := w.computeInvalidationSet("Foo.java", w.filePkg)
+	invalid := w.computeInvalidationSet("Foo.java", w.filePkg, w.pkgFiles)
 	if !slices.Contains(invalid, "Bar.java") {
 		t.Errorf("Bar.java (calls Foo.java) must be in invalidation set for Foo.java, got %v", invalid)
 	}
@@ -230,7 +230,7 @@ func TestComputeInvalidationSet_UnresolvedCrossPackageCallers(t *testing.T) {
 	// When models/user.go is modified (e.g. NewUser is added),
 	// handler.go MUST appear in the invalidation set via the DB query —
 	// even though no CALLS edge from handler.go → models/user.go exists yet.
-	invalid := w.computeInvalidationSet("models/user.go", w.filePkg)
+	invalid := w.computeInvalidationSet("models/user.go", w.filePkg, w.pkgFiles)
 
 	if !slices.Contains(invalid, "handler.go") {
 		t.Errorf("handler.go (unresolved caller via pkg_alias='models') must be in invalidation set, got %v", invalid)
@@ -269,7 +269,7 @@ func TestComputeInvalidationSet_TransitiveCallers(t *testing.T) {
 
 	w := newTestWatcher(t, g)
 
-	invalid := w.computeInvalidationSet("a.go", w.filePkg)
+	invalid := w.computeInvalidationSet("a.go", w.filePkg, w.pkgFiles)
 	sort.Strings(invalid)
 
 	if !slices.Contains(invalid, "a.go") {

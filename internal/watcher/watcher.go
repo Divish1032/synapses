@@ -189,6 +189,12 @@ type Watcher struct {
 	// each reparseFile.
 	filePkg map[string]string
 
+	// pkgFiles is the reverse index of filePkg: package name → set of files.
+	// Maintained in sync with filePkg so that computeInvalidationSet can find
+	// all same-package files in O(k) instead of O(N).
+	// Protected by reparseMu.
+	pkgFiles map[string][]string
+
 	// loopAlive tracks whether the event processing loop is running.
 	// Set to 0 (dead) when the loop exhausts all restart attempts.
 	loopAlive atomic.Int32
@@ -223,6 +229,7 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 		parseCh:            make(chan parseFileResult, parseChanSize),
 		brainWorkCh:        make(chan string, brainWorkChanSize),
 		filePkg:            make(map[string]string),
+		pkgFiles:           make(map[string][]string),
 	}
 
 	// Sprint 14.3: seed import graph from persisted import_edges table and
@@ -407,7 +414,10 @@ func (w *Watcher) initImportGraph() {
 			continue
 		}
 		if n.Package != "" && n.File != "" {
-			w.filePkg[n.File] = n.Package
+			if _, seen := w.filePkg[n.File]; !seen {
+				w.filePkg[n.File] = n.Package
+				w.pkgFiles[n.Package] = append(w.pkgFiles[n.Package], n.File)
+			}
 		}
 	}
 }
@@ -421,7 +431,22 @@ func (w *Watcher) updateImportGraphForFile(filePath string) {
 			continue
 		}
 		if n.Package != "" {
+			oldPkg := w.filePkg[filePath]
 			w.filePkg[filePath] = n.Package
+			// Keep pkgFiles in sync: remove from old bucket, add to new bucket.
+			if oldPkg != "" && oldPkg != n.Package {
+				files := w.pkgFiles[oldPkg]
+				for i, f := range files {
+					if f == filePath {
+						files[i] = files[len(files)-1]
+						w.pkgFiles[oldPkg] = files[:len(files)-1]
+						break
+					}
+				}
+			}
+			if oldPkg != n.Package {
+				w.pkgFiles[n.Package] = append(w.pkgFiles[n.Package], filePath)
+			}
 			return
 		}
 	}
@@ -449,7 +474,8 @@ func (w *Watcher) updateImportGraphForFile(filePath string) {
 //
 // Must be called BEFORE RemoveFile so the incoming edges are still present.
 // filePkgSnap must be a snapshot of w.filePkg taken under reparseMu.
-func (w *Watcher) computeInvalidationSet(filePath string, filePkgSnap map[string]string) []string {
+// pkgFilesSnap must be a snapshot of w.pkgFiles taken under reparseMu.
+func (w *Watcher) computeInvalidationSet(filePath string, filePkgSnap map[string]string, pkgFilesSnap map[string][]string) []string {
 	invalid := map[string]bool{filePath: true}
 
 	// All files that have a resolved CALLS or IMPLEMENTS edge into this file.
@@ -484,12 +510,11 @@ func (w *Watcher) computeInvalidationSet(filePath string, filePkgSnap map[string
 
 	// Same-package files: may have unresolved call sites that will succeed
 	// once the re-parsed functions are in the graph.
+	// O(k) lookup via the reverse index instead of O(N) full scan.
 	pkg := filePkgSnap[filePath]
 	if pkg != "" {
-		for f, fpkg := range filePkgSnap {
-			if fpkg == pkg {
-				invalid[f] = true
-			}
+		for _, f := range pkgFilesSnap[pkg] {
+			invalid[f] = true
 		}
 	}
 
@@ -772,7 +797,17 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 		w.graph.InvalidateCache()
 		// Clean up parse-error tracking and filePkg for deleted files.
 		delete(w.fileHadParseErrors, path)
-		delete(w.filePkg, path)
+		if oldPkg, ok := w.filePkg[path]; ok {
+			delete(w.filePkg, path)
+			files := w.pkgFiles[oldPkg]
+			for i, f := range files {
+				if f == path {
+					files[i] = files[len(files)-1]
+					w.pkgFiles[oldPkg] = files[:len(files)-1]
+					break
+				}
+			}
+		}
 		w.reparseMu.Unlock()
 		// fileHashMu is independent of reparseMu — update outside the lock.
 		w.fileHashMu.Lock()
@@ -1159,6 +1194,12 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 	for k, v := range w.filePkg {
 		filePkgSnapshot[k] = v
 	}
+	pkgFilesSnapshot := make(map[string][]string, len(w.pkgFiles))
+	for pkg, files := range w.pkgFiles {
+		cp := make([]string, len(files))
+		copy(cp, files)
+		pkgFilesSnapshot[pkg] = cp
+	}
 	w.reparseMu.Unlock()
 
 	type preFetch struct {
@@ -1171,7 +1212,7 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 			if result.err != nil {
 				continue
 			}
-			preFetches[i].invalidSet = w.computeInvalidationSet(result.path, filePkgSnapshot)
+			preFetches[i].invalidSet = w.computeInvalidationSet(result.path, filePkgSnapshot, pkgFilesSnapshot)
 			sites, loadErr := w.store.LoadCallSitesForFiles(preFetches[i].invalidSet)
 			if loadErr != nil {
 				logutil.Warn("synapses/watcher: scoped call-site pre-load failed, falling back to full load: %v\n", loadErr)
@@ -1667,7 +1708,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// InEdgesForFile, which is empty after RemoveFile.
 	var invalidSet []string
 	if w.store != nil {
-		invalidSet = w.computeInvalidationSet(path, w.filePkg)
+		invalidSet = w.computeInvalidationSet(path, w.filePkg, w.pkgFiles)
 	}
 
 	// Remove stale graph data and call sites for this file before re-parsing.
