@@ -1227,11 +1227,13 @@ func (s *Server) memoryExpiryLoop(st *store.Store) {
 
 	// Run once at startup to clear any stale memories from previous sessions.
 	st.ExpireMemories()
+	_ = st.PruneExpiredWebCache()
 
 	for {
 		select {
 		case <-ticker.C:
 			st.ExpireMemories()
+			_ = st.PruneExpiredWebCache()
 		case <-s.stopCh:
 			return
 		}
