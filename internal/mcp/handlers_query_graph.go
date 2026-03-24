@@ -579,9 +579,14 @@ func (s *Server) handleQueryGraph(
 			queryGraphNodeCap, matchedTotal)
 	}
 	if timedOut {
+		// matched_total is a lower bound when timed out: the loop broke before
+		// evaluating the remaining nodes, so true total may be higher.
+		out["matched_total_note"] = "lower bound — query timed out before all nodes were evaluated"
 		out["hint"] = fmt.Sprintf(
-			"Query timed out after %dms. Narrow your query with additional AND conditions "+
-				"(e.g. add package= or type= to reduce the scan set).", queryGraphTimeout.Milliseconds())
+			"Query timed out after %dms (%d nodes matched so far, true total may be higher). "+
+				"Narrow your query with additional AND conditions "+
+				"(e.g. add package= or type= to reduce the scan set).",
+			queryGraphTimeout.Milliseconds(), matchedTotal)
 	}
 
 	return jsonResult(out)
