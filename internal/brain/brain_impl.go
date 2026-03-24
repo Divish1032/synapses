@@ -432,12 +432,18 @@ func New(cfg config.BrainConfig) Brain {
 // Runs in a background goroutine — non-blocking, logs results to stderr.
 // Models that don't implement ModelWarmer (e.g. LocalClient) are skipped silently.
 // The parent context allows cancellation when the Brain is closed.
+// On first connection-refused error, all remaining warmups are cancelled fast to
+// avoid a 90s hang (5 models × 30s / 2 parallelism).
 func warmUpModels(parent context.Context, clients ...llm.LLMClient) {
 	seen := make(map[string]bool)
 	var wg sync.WaitGroup
 	// Semaphore limits concurrent warmups to 2 to avoid GPU memory pressure
 	// when multiple models compete for a single GPU.
 	sem := make(chan struct{}, 2)
+	// fast-fail context: cancelled on first connection-refused so remaining
+	// queued warmups abort immediately instead of timing out after 30s each.
+	warmCtx, warmCancel := context.WithCancel(parent)
+	defer warmCancel()
 	for _, c := range clients {
 		if c == nil {
 			continue
@@ -456,16 +462,29 @@ func warmUpModels(parent context.Context, clients ...llm.LLMClient) {
 			defer wg.Done()
 			sem <- struct{}{} // acquire
 			defer func() { <-sem }() // release
-			ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+			ctx, cancel := context.WithTimeout(warmCtx, 30*time.Second)
 			defer cancel()
 			if err := w.WarmUp(ctx); err != nil {
 				logutil.Error("brain: warmup %s: %v\n", name, err)
+				// Cancel remaining warmups on connection refused — Ollama is not running.
+				if isConnectionRefused(err) {
+					warmCancel()
+				}
 			} else {
 				logutil.Info("brain: warmup complete: %s\n", name)
 			}
 		}(w, name)
 	}
 	wg.Wait()
+}
+
+// isConnectionRefused returns true when the error indicates the target is not listening.
+func isConnectionRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection refused") || strings.Contains(msg, "connect: connection refused")
 }
 
 func (b *impl) Ingest(ctx context.Context, req IngestRequest) (IngestResponse, error) {
