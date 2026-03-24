@@ -113,28 +113,28 @@ func TestEdgeTypeCatalogKnownEdges(t *testing.T) {
 	checks := []struct {
 		et     graph.EdgeType
 		weight float64
-		domain string
+		domain graph.DomainType
 		synth  bool
 	}{
-		{graph.EdgeCalls, 1.0, "code", false},
-		{graph.EdgeDataFlows, 0.95, "code", false},
-		{graph.EdgeImplements, 0.9, "code", false},
-		{graph.EdgeHandles, 0.9, "code", true},
-		{graph.EdgeEmbeds, 0.85, "code", false},
-		{graph.EdgeDependsOn, 0.8, "code", false},
-		{graph.EdgeImports, 0.7, "code", false},
-		{graph.EdgeExplains, 0.7, "docs", true},
-		{graph.EdgeDocumentedBy, 0.6, "docs", true},
-		{graph.EdgeExports, 0.5, "code", false},
-		{graph.EdgeLinksTo, 0.3, "docs", true},
-		{graph.EdgeContains, 0.15, "docs", true},
-		{graph.EdgeDefines, 0.15, "code", false},
+		{graph.EdgeCalls, 1.0, graph.DomainCode, false},
+		{graph.EdgeDataFlows, 0.95, graph.DomainCode, false},
+		{graph.EdgeImplements, 0.9, graph.DomainCode, false},
+		{graph.EdgeHandles, 0.9, graph.DomainCode, true},
+		{graph.EdgeEmbeds, 0.85, graph.DomainCode, false},
+		{graph.EdgeDependsOn, 0.8, graph.DomainCode, false},
+		{graph.EdgeImports, 0.7, graph.DomainCode, false},
+		{graph.EdgeExplains, 0.7, graph.DomainDocs, true},
+		{graph.EdgeDocumentedBy, 0.6, graph.DomainDocs, true},
+		{graph.EdgeExports, 0.5, graph.DomainCode, false},
+		{graph.EdgeLinksTo, 0.3, graph.DomainDocs, true},
+		{graph.EdgeContains, 0.15, graph.DomainDocs, true},
+		{graph.EdgeDefines, 0.15, graph.DomainCode, false},
 		// Sprint 16: cross-domain edge types.
-		{graph.EdgeDeploys, 0.75, "infra", true},
-		{graph.EdgeConsumes, 0.75, "api", true},
-		{graph.EdgeConfiguredBy, 0.65, "infra", true},
-		{graph.EdgeDocuments, 0.65, "docs", true},
-		{graph.EdgeMentions, 0.55, "knowledge", true},
+		{graph.EdgeDeploys, 0.75, graph.DomainInfra, true},
+		{graph.EdgeConsumes, 0.75, graph.DomainAPI, true},
+		{graph.EdgeConfiguredBy, 0.65, graph.DomainInfra, true},
+		{graph.EdgeDocuments, 0.65, graph.DomainDocs, true},
+		{graph.EdgeMentions, 0.55, graph.DomainKnowledge, true},
 	}
 
 	for _, c := range checks {
