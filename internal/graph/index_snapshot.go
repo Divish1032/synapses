@@ -377,6 +377,28 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 		}
 	}
 
+	// Validate CSR offsets to detect corrupt blobs before they cause a panic.
+	for i := uint32(1); i <= nodeCount; i++ {
+		if idx.OutStart[i] > idx.OutEnd[i] || idx.OutEnd[i] > edgeCount {
+			return nil, fmt.Errorf("graph snapshot: corrupt out-edge offsets at node %d (start=%d end=%d edgeCount=%d)",
+				i, idx.OutStart[i], idx.OutEnd[i], edgeCount)
+		}
+		if idx.InStart[i] > idx.InEnd[i] || idx.InEnd[i] > edgeCount {
+			return nil, fmt.Errorf("graph snapshot: corrupt in-edge offsets at node %d (start=%d end=%d edgeCount=%d)",
+				i, idx.InStart[i], idx.InEnd[i], edgeCount)
+		}
+	}
+	for i, t := range idx.OutTargets {
+		if t == 0 || t > nodeCount {
+			return nil, fmt.Errorf("graph snapshot: out-target %d (%d) out of range [1, %d]", i, t, nodeCount)
+		}
+	}
+	for i, t := range idx.InTargets {
+		if t == 0 || t > nodeCount {
+			return nil, fmt.Errorf("graph snapshot: in-target %d (%d) out of range [1, %d]", i, t, nodeCount)
+		}
+	}
+
 	// Recompute eigenvector centrality from the restored CSR arrays.
 	// Not serialised — cheap to recompute (<10 ms) and avoids a version bump.
 	idx.computeEigenvectorCentrality()
