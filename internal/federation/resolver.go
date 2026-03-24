@@ -443,8 +443,14 @@ func (r *Resolver) cachedHead(ctx context.Context, alias string) string {
 	if err != nil || h == "" {
 		return ""
 	}
+	// Double-check under write lock to prevent duplicate git subprocess from
+	// racing: if another goroutine already stored a value, keep it.
 	r.mu.Lock()
-	r.gitHeads[alias] = h
+	if existing := r.gitHeads[alias]; existing == "" {
+		r.gitHeads[alias] = h
+	} else {
+		h = existing
+	}
 	r.mu.Unlock()
 	return h
 }
