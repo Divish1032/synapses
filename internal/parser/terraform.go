@@ -25,7 +25,7 @@ func NewTerraformParser() *TerraformParser {
 
 // Extensions returns the file extensions handled by this parser.
 func (p *TerraformParser) Extensions() []string {
-	return []string{".tf"}
+	return []string{".tf", ".tf.json"}
 }
 
 // TSLanguageForFile implements TreeSitterLanguageProvider so the watcher can
@@ -412,7 +412,8 @@ func tfGetAttrNameNode(src []byte, getAttr sitter.Node) string {
 }
 
 // tfIsBuiltinNamespace returns true for HCL namespaces that are not resource
-// references.
+// references. "module" is intentionally NOT excluded — module.vpc refs create
+// cross-resource edges.
 func tfIsBuiltinNamespace(name string) bool {
 	switch name {
 	case "var", "local", "locals", "path", "self", "terraform", "each", "count":

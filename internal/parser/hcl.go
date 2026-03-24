@@ -29,7 +29,7 @@ func NewHCLParser() *HCLParser {
 
 // Extensions returns the file extensions handled by this parser.
 func (p *HCLParser) Extensions() []string {
-	return []string{".tf", ".tfvars", ".hcl"}
+	return []string{".tf", ".tfvars", ".hcl", ".tf.json", ".tfvars.json"}
 }
 
 func (p *HCLParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }

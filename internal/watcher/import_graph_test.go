@@ -240,6 +240,49 @@ func TestComputeInvalidationSet_UnresolvedCrossPackageCallers(t *testing.T) {
 	}
 }
 
+// TestComputeInvalidationSet_TransitiveCallers verifies the 1-hop transitive
+// invalidation: if c.go calls b.go and b.go calls a.go, changing a.go must
+// invalidate all three files (a.go direct, b.go direct caller, c.go transitive
+// caller-of-caller).
+func TestComputeInvalidationSet_TransitiveCallers(t *testing.T) {
+	g := graph.New("repo")
+
+	// a.go (pkg "alpha")
+	aFuncID := g.MakeNodeID("a.go", "FuncA")
+	g.AddNode(&graph.Node{ID: aFuncID, Type: graph.NodeFunction, Name: "FuncA", File: "a.go", Package: "alpha"})
+	g.AddNode(&graph.Node{ID: g.MakeNodeID("a.go", "a.go"), Type: graph.NodeFile, Name: "a.go", File: "a.go", Package: "alpha"})
+
+	// b.go (pkg "beta") — calls a.go
+	bFuncID := g.MakeNodeID("b.go", "FuncB")
+	g.AddNode(&graph.Node{ID: bFuncID, Type: graph.NodeFunction, Name: "FuncB", File: "b.go", Package: "beta"})
+	g.AddNode(&graph.Node{ID: g.MakeNodeID("b.go", "b.go"), Type: graph.NodeFile, Name: "b.go", File: "b.go", Package: "beta"})
+
+	// c.go (pkg "gamma") — calls b.go
+	cFuncID := g.MakeNodeID("c.go", "FuncC")
+	g.AddNode(&graph.Node{ID: cFuncID, Type: graph.NodeFunction, Name: "FuncC", File: "c.go", Package: "gamma"})
+	g.AddNode(&graph.Node{ID: g.MakeNodeID("c.go", "c.go"), Type: graph.NodeFile, Name: "c.go", File: "c.go", Package: "gamma"})
+
+	// b.go → a.go (b calls a)
+	g.AddEdge(&graph.Edge{From: bFuncID, To: aFuncID, Type: graph.EdgeCalls})
+	// c.go → b.go (c calls b)
+	g.AddEdge(&graph.Edge{From: cFuncID, To: bFuncID, Type: graph.EdgeCalls})
+
+	w := newTestWatcher(t, g)
+
+	invalid := w.computeInvalidationSet("a.go")
+	sort.Strings(invalid)
+
+	if !slices.Contains(invalid, "a.go") {
+		t.Errorf("a.go (changed file) must be in invalidation set, got %v", invalid)
+	}
+	if !slices.Contains(invalid, "b.go") {
+		t.Errorf("b.go (direct caller of a.go) must be in invalidation set, got %v", invalid)
+	}
+	if !slices.Contains(invalid, "c.go") {
+		t.Errorf("c.go (transitive caller: calls b.go which calls a.go) must be in invalidation set, got %v", invalid)
+	}
+}
+
 func TestUpdateImportGraphForFile_UpdatesFilePkg(t *testing.T) {
 	g := buildCallsTestGraph(t)
 	w := newTestWatcher(t, g)

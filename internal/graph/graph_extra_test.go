@@ -242,6 +242,54 @@ func TestMergeFrom_WithEdges(t *testing.T) {
 	}
 }
 
+// ── MergeFrom transfers varTypes and instantiatedTypes ───────────────────────
+
+func TestMergeFrom_TransfersVarTypesAndInstantiatedTypes(t *testing.T) {
+	main := New("repo1")
+	temp := New("repo1")
+
+	// Populate temp with varTypes and instantiatedTypes.
+	temp.AddVarType("a.go", "repo", "Repository")
+	temp.AddVarType("a.go", "svc", "Service")
+	temp.AddVarType("b.go", "cfg", "Config")
+
+	temp.AddInstantiatedType("a.go", "Repository")
+	temp.AddInstantiatedType("b.go", "Config")
+	temp.AddInstantiatedType("b.go", "Service")
+
+	main.MergeFrom(temp)
+
+	// Verify varTypes transferred.
+	aVars := main.GetVarTypes("a.go")
+	if aVars == nil {
+		t.Fatal("expected varTypes for a.go after merge")
+	}
+	if aVars["repo"] != "Repository" {
+		t.Errorf("expected repo=Repository, got %q", aVars["repo"])
+	}
+	if aVars["svc"] != "Service" {
+		t.Errorf("expected svc=Service, got %q", aVars["svc"])
+	}
+	bVars := main.GetVarTypes("b.go")
+	if bVars == nil {
+		t.Fatal("expected varTypes for b.go after merge")
+	}
+	if bVars["cfg"] != "Config" {
+		t.Errorf("expected cfg=Config, got %q", bVars["cfg"])
+	}
+
+	// Verify instantiatedTypes transferred.
+	inst := main.GetInstantiatedTypes()
+	if inst == nil {
+		t.Fatal("expected instantiatedTypes after merge")
+	}
+	for _, name := range []string{"Repository", "Config", "Service"} {
+		if !inst[name] {
+			t.Errorf("expected instantiated type %q to be present", name)
+		}
+	}
+}
+
 // ── ExportDOT — dotNodeColor all variants ────────────────────────────────────
 
 func TestExportDOT_AllNodeTypes(t *testing.T) {

@@ -3137,7 +3137,9 @@ func (s *Store) LoadCallerFilesForPkgAliases(aliases []string) ([]string, error)
 		return nil, nil
 	}
 	if len(clean) > 900 {
-		clean = clean[:900]
+		// Too many aliases for a single IN clause (SQLite limit ~999).
+		// Fall back to querying ALL caller files rather than silently truncating.
+		return s.loadAllCallerFiles()
 	}
 	placeholders := make([]byte, 0, len(clean)*2)
 	args := make([]interface{}, len(clean))
@@ -3153,6 +3155,25 @@ func (s *Store) LoadCallerFilesForPkgAliases(aliases []string) ([]string, error)
 	rows, err := s.graphDB.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query caller files for pkg aliases: %w", err)
+	}
+	defer rows.Close()
+	var files []string
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			return nil, fmt.Errorf("scan caller_file: %w", err)
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
+}
+
+// loadAllCallerFiles returns all distinct caller files from the call_sites table.
+// Used as a fallback when the alias list exceeds the SQLite variable limit.
+func (s *Store) loadAllCallerFiles() ([]string, error) {
+	rows, err := s.graphDB.Query("SELECT DISTINCT caller_file FROM call_sites")
+	if err != nil {
+		return nil, fmt.Errorf("query all caller files: %w", err)
 	}
 	defer rows.Close()
 	var files []string

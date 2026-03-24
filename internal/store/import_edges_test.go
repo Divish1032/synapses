@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"fmt"
 	"slices"
 	"sort"
 	"testing"
@@ -206,6 +207,43 @@ func TestLoadCallerFilesForPkgAliases_DeduplicatesResults(t *testing.T) {
 	}
 	if len(files) != 1 || files[0] != "a.go" {
 		t.Errorf("want exactly [a.go] (deduplicated), got %v", files)
+	}
+}
+
+func TestLoadCallerFilesForPkgAliases_FallbackOver900(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+
+	// Seed call sites across 3 files with distinct pkg_alias values.
+	sites := []graph.CallSite{
+		{CallerID: "repo::a.go::F1", CallerFile: "a.go", PkgAlias: "alpha", FuncName: "Do"},
+		{CallerID: "repo::b.go::F2", CallerFile: "b.go", PkgAlias: "beta", FuncName: "Run"},
+		{CallerID: "repo::c.go::F3", CallerFile: "c.go", PkgAlias: "gamma", FuncName: "Exec"},
+	}
+	if err := st.SaveCallSites(sites); err != nil {
+		t.Fatalf("SaveCallSites: %v", err)
+	}
+
+	// Build an alias slice that exceeds the 900-entry SQLite threshold.
+	// Include the three real aliases among 901 total entries.
+	aliases := make([]string, 901)
+	for i := range aliases {
+		aliases[i] = fmt.Sprintf("fake_%d", i)
+	}
+	aliases[0] = "alpha"
+	aliases[1] = "beta"
+	aliases[2] = "gamma"
+
+	files, err := st.LoadCallerFilesForPkgAliases(aliases)
+	if err != nil {
+		t.Fatalf("LoadCallerFilesForPkgAliases fallback: %v", err)
+	}
+	sort.Strings(files)
+
+	// The fallback returns ALL caller files, so all 3 must appear.
+	want := []string{"a.go", "b.go", "c.go"}
+	if !slices.Equal(files, want) {
+		t.Errorf("want %v, got %v", want, files)
 	}
 }
 

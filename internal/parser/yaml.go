@@ -812,6 +812,10 @@ func (p *YAMLParser) collectOpenAPIRefs(node *yaml.Node, out []string) []string 
 // openAPIRefToSchemaName extracts the schema name from a $ref string.
 // Handles "#/components/schemas/Foo" → "Foo" and "#/definitions/Foo" → "Foo".
 // Returns "" if the ref does not match either pattern.
+//
+// NOTE: External $refs (e.g., "schemas/user.yaml#/User", "https://...")
+// are intentionally unsupported — the parser operates on single files.
+// Multi-file OpenAPI support is tracked for a future sprint.
 func openAPIRefToSchemaName(ref string) string {
 	const (
 		v3prefix  = "#/components/schemas/"
