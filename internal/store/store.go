@@ -659,6 +659,8 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE manual_edges ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0`,
 		`ALTER TABLE manual_edges ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE manual_edges ADD COLUMN suppressed INTEGER NOT NULL DEFAULT 0`,
+		// Index for CrossDomainEdgeStats() — filters WHERE suppressed=0 on every session_init.
+		`CREATE INDEX IF NOT EXISTS idx_manual_edges_suppressed ON manual_edges(suppressed, confirmed, created_by)`,
 	} {
 		if _, err := graphTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
