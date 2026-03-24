@@ -104,6 +104,7 @@ func TestGoBackground_BackPressure(t *testing.T) {
 	g := graph.New("test-repo")
 	cfg, _ := config.Load(t.TempDir())
 	srv := New(g, cfg, nil) // nil store — no memoryExpiryLoop
+	t.Cleanup(func() { srv.Close() }) // safety net if test fails before explicit Close() below
 	// Deliberately do NOT call StartBackground — no workers consuming.
 
 	for i := 0; i < bgQueueCap+50; i++ {
