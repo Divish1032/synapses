@@ -11,8 +11,9 @@ import (
 )
 
 // errJSON returns a tool result with a properly JSON-encoded error message.
+// Internal file paths are stripped to avoid leaking system information.
 func errJSON(err error) *mcp.CallToolResult {
-	msg := err.Error()
+	msg := stripInternalPaths(err.Error())
 	b, _ := json.Marshal(map[string]string{"error": msg})
 	return mcp.NewToolResultText(string(b))
 }
