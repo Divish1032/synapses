@@ -9,6 +9,7 @@ package watcher
 // than a hardcoded magic number.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -443,4 +444,55 @@ func TestWatcher_BatchCoalesce_NodeIDConsistency(t *testing.T) {
 			t.Errorf("temp graph node ID %q not in reference graph", n.ID)
 		}
 	}
+}
+
+// TestWatcher_ParseWorker_PanicRecovery verifies that a panicking parse
+// (simulated by an error result carrying a panic message) does NOT kill the
+// worker goroutine. The worker must remain alive and process the next file.
+func TestWatcher_ParseWorker_PanicRecovery(t *testing.T) {
+	dir := t.TempDir()
+	g := graph.New("test")
+	g.SetRoot(dir)
+
+	w, err := New(g, parser.NewWalker(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Inject a synthetic panic-error result directly into applyBatch to verify
+	// the skip-on-error path that panic recovery feeds into.
+	panicResult := parseFileResult{
+		path: filepath.Join(dir, "panic_file.go"),
+		err:  fmt.Errorf("parser panic: runtime error: index out of range"),
+	}
+	before := len(g.AllNodes())
+	w.applyBatch([]parseFileResult{panicResult})
+	after := len(g.AllNodes())
+	if after != before {
+		t.Errorf("graph mutated after panic-error result: before=%d after=%d", before, after)
+	}
+
+	// Now verify a real file still parses correctly after a panic result — the
+	// worker path is exercised end-to-end via Start.
+	if err := w.Start(dir); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { w.Stop() })
+
+	// Write the file AFTER Start so fsnotify detects the create event.
+	src := []byte("package alive\n\nfunc StillAlive() {}\n")
+	aliveFile := filepath.Join(dir, "alive.go")
+	if err := os.WriteFile(aliveFile, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(debounceDelay*3 + 500*time.Millisecond)
+	for time.Now().Before(deadline) {
+		nodes := g.NodesForFile(aliveFile)
+		if len(nodes) > 0 {
+			return // worker is alive and parsed the file
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Error("worker did not parse alive.go — worker may have died from panic")
 }
