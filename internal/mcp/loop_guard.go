@@ -60,10 +60,23 @@ func newLoopGuard() *loopGuard {
 	return g
 }
 
-// close stops the background GC goroutine and waits for it to exit.
+// close signals the background GC goroutine to stop and waits briefly for
+// it to exit. Under heavy load (e.g. 1000+ concurrent tests with -race) the
+// goroutine may be CPU-starved; the 200ms cap prevents Close() from blocking
+// indefinitely — the goroutine WILL exit once scheduled, it just won't hold
+// up the caller. 200ms is generous for a goroutine that only reads a channel.
 func (g *loopGuard) close() {
 	close(g.stopCh)
-	g.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		g.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		// Goroutine will exit on its own once the runtime schedules it.
+	}
 }
 
 // gcIdleSessions removes sessions that have been idle longer than maxIdle.
