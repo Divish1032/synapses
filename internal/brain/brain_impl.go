@@ -528,6 +528,7 @@ func (b *impl) Enrich(ctx context.Context, req EnrichRequest) (EnrichResponse, e
 		if b.fallbackEnricher != nil && !b.cb.isOpen("ingest") {
 			enrReq := enricher.Request{
 				RootID: req.RootID, RootName: req.RootName, RootType: req.RootType,
+				RootFile: req.RootFile, FanIn: req.FanIn,
 				CalleeNames: req.CalleeNames, CallerNames: req.CallerNames,
 				RelatedNames: req.RelatedNames, TaskContext: req.TaskContext,
 			}
@@ -544,6 +545,8 @@ func (b *impl) Enrich(ctx context.Context, req EnrichRequest) (EnrichResponse, e
 		RootID:       req.RootID,
 		RootName:     req.RootName,
 		RootType:     req.RootType,
+		RootFile:     req.RootFile,
+		FanIn:        req.FanIn,
 		CalleeNames:  req.CalleeNames,
 		CallerNames:  req.CallerNames,
 		RelatedNames: req.RelatedNames,

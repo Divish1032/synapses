@@ -51,6 +51,12 @@ type EnrichRequest struct {
 	RelatedNames []string `json:"related_names"`
 	// TaskContext is optional context from a linked task (from task_id).
 	TaskContext string `json:"task_context,omitempty"`
+	// RootFile is the file path of the root entity; used for SDLC phase inference
+	// and domain focus in the enricher's deterministic pass.
+	RootFile string `json:"root_file,omitempty"`
+	// FanIn is the total caller count (may exceed len(CallerNames) when capped).
+	// Used for the deterministic complexity score calculation.
+	FanIn int `json:"fan_in,omitempty"`
 }
 
 // EnrichResponse is added to the get_context response.
