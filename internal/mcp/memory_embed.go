@@ -40,6 +40,52 @@ func (s *Server) embedMemory(embedder embed.Embedder, st *store.Store, memoryID,
 	}
 }
 
+const maxFailedEmbedIDs = 256
+
+// trackFailedEmbed records a memory ID that failed to embed due to a full
+// background queue. Bounded to maxFailedEmbedIDs entries.
+func (s *Server) trackFailedEmbed(memoryID string) {
+	count := 0
+	s.failedEmbedIDs.Range(func(_, _ interface{}) bool {
+		count++
+		return count < maxFailedEmbedIDs
+	})
+	if count < maxFailedEmbedIDs {
+		s.failedEmbedIDs.Store(memoryID, struct{}{})
+	}
+}
+
+// failedEmbedRetryLoop retries embeddings that were dropped due to a full
+// background queue. Runs every 60 seconds.
+func (s *Server) failedEmbedRetryLoop(embedder embed.Embedder, st *store.Store) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			var ids []string
+			s.failedEmbedIDs.Range(func(k, _ interface{}) bool {
+				ids = append(ids, k.(string))
+				s.failedEmbedIDs.Delete(k)
+				return true
+			})
+			if len(ids) == 0 {
+				continue
+			}
+			logutil.Info("synapses: retrying %d dropped embed(s)\n", len(ids))
+			for _, memID := range ids {
+				content, ok := st.GetMemoryContent(memID)
+				if !ok || content == "" {
+					continue
+				}
+				s.goBackground(func() { s.embedMemory(embedder, st, memID, content) })
+			}
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
 // EmbedAllMemories generates embeddings for all un-embedded memories in the
 // background. Rate-limited to ~2 embeddings/second for builtin mode to avoid
 // CPU contention. Called at startup to lazy-migrate legacy memories.
