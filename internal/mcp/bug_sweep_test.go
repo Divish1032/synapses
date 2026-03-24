@@ -23,7 +23,9 @@ func TestHandleBenchmark_NilGraph(t *testing.T) {
 }
 
 func TestHandleBenchmark_NilStore(t *testing.T) {
-	s := newTestServer(t)
+	// Use a populated server (non-empty graph) so the empty-graph guard doesn't
+	// fire before we reach the nil-store guard.
+	s, _, _ := newPopulatedServer(t)
 	s.store = nil // force nil
 	res, err := s.handleBenchmark(context.Background(), callTool(map[string]any{}))
 	if err != nil {
@@ -34,8 +36,19 @@ func TestHandleBenchmark_NilStore(t *testing.T) {
 	}
 }
 
+func TestHandleBenchmark_EmptyGraph(t *testing.T) {
+	s := newTestServer(t) // graph has 0 nodes
+	res, err := s.handleBenchmark(context.Background(), callTool(map[string]any{}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil || !res.IsError {
+		t.Error("expected tool error for empty graph")
+	}
+}
+
 func TestHandleBenchmark_InvalidScenario(t *testing.T) {
-	s := newTestServer(t)
+	s, _, _ := newPopulatedServer(t)
 	res, err := s.handleBenchmark(context.Background(), callTool(map[string]any{
 		"scenario": "nonexistent_scenario_xyz",
 	}))
@@ -48,7 +61,7 @@ func TestHandleBenchmark_InvalidScenario(t *testing.T) {
 }
 
 func TestHandleBenchmark_AllScenarios(t *testing.T) {
-	s := newTestServer(t)
+	s, _, _ := newPopulatedServer(t)
 	res, err := s.handleBenchmark(context.Background(), callTool(map[string]any{
 		"scenario": "all",
 	}))
@@ -58,7 +71,7 @@ func TestHandleBenchmark_AllScenarios(t *testing.T) {
 	if res == nil {
 		t.Fatal("expected non-nil result")
 	}
-	// "all" on an empty graph should return results (possibly empty scenarios).
+	// Populated graph — benchmark should run (some scenarios may skip if graph is too small).
 	if res.IsError {
 		t.Errorf("unexpected tool error: %v", res.Content)
 	}
