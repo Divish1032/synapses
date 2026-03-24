@@ -158,12 +158,36 @@ func TestSerializeCompact_ConfidenceLowHint(t *testing.T) {
 }
 
 func TestSerializeCompact_ConfidenceAbsentWhenZero(t *testing.T) {
-	// Confidence=0 (zero value — unset) must not appear in compact output.
+	// Confidence=0 with no hint (zero value — unset) must not appear in compact output.
 	dc := newTestDC()
 	dc.Confidence = 0
+	dc.ConfidenceHint = ""
 	out := serializeCompact(dc, "full")
 	if strings.Contains(out, "confidence:") {
-		t.Errorf("confidence:0 should be suppressed in compact output (unset sentinel), got:\n%s", out)
+		t.Errorf("confidence:0 with no hint should be suppressed (unset sentinel), got:\n%s", out)
+	}
+}
+
+func TestSerializeCompact_ConfidenceZeroWithHint(t *testing.T) {
+	// Confidence=0.0 from formula (extreme qs + both staleness) — hint IS set.
+	// Must appear in compact output; suppressing it would silently hide the worst signal.
+	dc := newTestDC()
+	dc.Confidence = 0.0
+	dc.ConfidenceHint = "Low confidence (0.00): prior context deliveries for this entity were frequently followed by corrections or session abandonment. Context is not suppressed — agent decides. Consider depth=4 or a different entry point."
+	out := serializeCompact(dc, "full")
+	if !strings.Contains(out, "⚠ confidence:0.00") {
+		t.Errorf("confidence:0.00 with hint must appear in compact output, got:\n%s", out)
+	}
+}
+
+func TestSerializeCompact_ConfidenceZeroWithHintInSummary(t *testing.T) {
+	// Same as above but at summary detail level.
+	dc := newTestDC()
+	dc.Confidence = 0.0
+	dc.ConfidenceHint = "Low confidence (0.00): corrections pattern."
+	out := serializeCompact(dc, "summary")
+	if !strings.Contains(out, "⚠ confidence:0.00") {
+		t.Errorf("confidence:0.00 with hint must appear in summary level, got:\n%s", out)
 	}
 }
 
