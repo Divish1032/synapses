@@ -83,12 +83,13 @@ func newOllamaHTTPClient(timeout time.Duration) *http.Client {
 				return fmt.Errorf("ssrf: dial to non-loopback address %s blocked", ip)
 			}
 
-			// Validate port: allow Ollama default (11434) and user ports (1024-65535).
+			// Validate port: allow user ports (1024-65535).
+			// Note: Ollama default port 11434 > 1023, so no special case needed.
 			port, err := strconv.Atoi(portStr)
 			if err != nil || port <= 0 || port > 65535 {
 				return fmt.Errorf("ssrf: invalid port %q", portStr)
 			}
-			if port < 1024 && port != 11434 {
+			if port < 1024 {
 				return fmt.Errorf("ssrf: privileged port %d blocked", port)
 			}
 
