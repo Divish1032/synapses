@@ -1075,6 +1075,20 @@ func heuristicEnrichInsight(req EnrichRequest) string {
 	}
 }
 
+// relativeSourcePath extracts a package-relative path from an absolute or
+// project-rooted file path. It walks common Go project directory markers
+// (internal, cmd, pkg, src) and returns everything from the marker directory
+// onward so engineers and agents see "internal/mcp/handlers.go" instead of
+// just "handlers.go". Falls back to filepath.Base when no marker is found.
+func relativeSourcePath(filePath string) string {
+	for _, marker := range []string{"/internal/", "/cmd/", "/pkg/", "/src/"} {
+		if idx := strings.Index(filePath, marker); idx >= 0 {
+			return filePath[idx+1:]
+		}
+	}
+	return filepath.Base(filePath)
+}
+
 // guardianTemplateFallback builds a last-resort violation explanation from the
 // request fields — no LLM required.
 // Called when all LLM tiers (T1 and T0) have their circuit breakers open.
@@ -1085,7 +1099,7 @@ func guardianTemplateFallback(req ViolationRequest) ViolationResponse {
 	if description == "" {
 		description = req.RuleID
 	}
-	sourceFile := filepath.Base(req.SourceFile)
+	sourceFile := relativeSourcePath(req.SourceFile)
 	targetName := req.TargetName
 	if targetName == "" {
 		targetName = "a restricted entity"
