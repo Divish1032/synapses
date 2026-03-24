@@ -274,6 +274,18 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		fmt.Fprintf(&b, "Insight: %s\n", dc.ContextPacket.Insight)
 	}
 
+	// Sprint 16 #4: Cross-domain neighbors — infra, API, config, knowledge nodes.
+	// Rendered before same-domain related nodes so agents immediately see cross-domain
+	// context (e.g. Terraform resources, OpenAPI endpoints) without scrolling past code.
+	if len(dc.CrossDomain) > 0 {
+		names := make([]string, 0, len(dc.CrossDomain))
+		for _, cd := range dc.CrossDomain {
+			domain := string(cd.Node.Domain)
+			names = append(names, fmt.Sprintf("%s(%s)", cd.Node.Name, domain))
+		}
+		fmt.Fprintf(&b, "Cross-domain: %s\n", strings.Join(names, " · "))
+	}
+
 	// Show related nodes with brain summaries (often interface implementations, types).
 	for _, r := range dc.Related {
 		depSummary := getDepSummary(r.Node.Name, dc.ContextPacket)

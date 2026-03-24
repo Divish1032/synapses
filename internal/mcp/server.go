@@ -1609,8 +1609,9 @@ func (s *Server) registerTools() {
 					"Use get_context only when you need specific BFS parameters, conditional fetching via known_hash, "+
 					"or fine-grained output control that prepare_context doesn't expose. "+
 					"Returns a relevance-ranked subgraph centred on the named entity. "+
-					"Uses BFS with edge-type-weighted decay so the closest, most semantically "+
-					"significant relationships appear first.",
+					"Uses BFS/PPR with edge-type-weighted decay. Response includes a cross_domain bucket "+
+					"(infra/API/config/knowledge nodes) separate from same-domain code neighbors, "+
+					"enabling traversal from a Go function to its Terraform deployment or API spec in one call.",
 			),
 			mcp.WithString("entity",
 				mcp.Required(),
@@ -1665,6 +1666,12 @@ func (s *Server) registerTools() {
 			mcp.WithString("projects",
 				mcp.Description("Optional. Comma-separated federation aliases to include sibling project results "+
 					"(e.g. 'core,app'). When provided, also returns matching entities from sibling stores."),
+			),
+			mcp.WithNumber("cross_domain_decay",
+				mcp.Description("Optional. Multiplier applied to relevance when BFS/PPR crosses a domain boundary "+
+					"(e.g. code→infra, code→api). Range (0, 1]. Default 0.5 — cross-domain neighbors score at "+
+					"half the relevance of same-domain neighbors at equal structural distance. Use 1.0 to disable "+
+					"the penalty. Cross-domain nodes appear in the cross_domain response bucket regardless of this value."),
 			),
 		),
 		s.handleGetContext,
@@ -2031,7 +2038,11 @@ func (s *Server) registerTools() {
 					"could break if the entity changes. "+
 					"Results grouped by depth: direct (depth 1, confidence 1.0), "+
 					"indirect (depth 2, confidence 0.6), peripheral (depth 3+, confidence 0.3). "+
-					"Answers: 'what breaks if I change X?'",
+					"Also returns cross_domain_impact: infrastructure resources (DEPLOYS), "+
+					"API endpoints (CONSUMES), config files (CONFIGURED_BY), doc sections "+
+					"(DOCUMENTS), and name-matched entities (MENTIONS) directly linked to the entity. "+
+					"Only cross-domain edges with confidence ≥ 0.6 or human-confirmed are included. "+
+					"Answers: 'what breaks if I change X?' — across code, infra, API, and docs.",
 			),
 			mcp.WithString("symbol",
 				mcp.Required(),
