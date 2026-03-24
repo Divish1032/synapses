@@ -417,30 +417,13 @@ func (s *Store) normalizeStoredEmbeddings() {
 		Exec(string, ...any) (sql.Result, error)
 	}
 
-	allowedSampleTables := map[string]bool{"node_embeddings": true, "memory_embeddings": true}
-
-	// sampleIsNormalized reads one embedding and checks if it's unit-length.
-	// Returns true if no embeddings exist or the sample is already normalized.
-	sampleIsNormalized := func(db dbIface, table string) bool {
-		if !allowedSampleTables[table] {
-			return true
-		}
-		var blob []byte
-		err := db.QueryRow(fmt.Sprintf("SELECT embedding FROM %s LIMIT 1", table)).Scan(&blob)
-		if err != nil {
-			return true // no rows = nothing to migrate
-		}
-		vec := blobToVec(blob)
-		if len(vec) == 0 {
-			return true
-		}
-		norm := vek32.Norm(vec)
-		return norm > 0.999 && norm < 1.001
-	}
-
-	// Quick check: if samples from both tables are already normalized, skip the full scan.
-	if sampleIsNormalized(s.graphDB, "node_embeddings") &&
-		sampleIsNormalized(s.knowledgeDB, "memory_embeddings") {
+	// Check for a persisted normalization_complete flag in the meta table.
+	// The flag is set after a full verified sweep; this prevents the one-sample
+	// heuristic bug where a partially-migrated table re-uses the first row to
+	// skip normalization of all remaining un-normalized rows.
+	var flagVal string
+	_ = s.graphDB.QueryRow(`SELECT value FROM meta WHERE key = 'embedding_normalization_v1'`).Scan(&flagVal)
+	if flagVal == "1" {
 		return
 	}
 
@@ -542,6 +525,8 @@ func (s *Store) normalizeStoredEmbeddings() {
 	if nodeUpdated+memUpdated > 0 {
 		logutil.Info("synapses: normalized %d node + %d memory embeddings to unit length\n", nodeUpdated, memUpdated)
 	}
+	// Persist the completion flag so future startups skip the full sweep.
+	_, _ = s.graphDB.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('embedding_normalization_v1', '1')`)
 }
 
 // dotSimilarity returns the dot product of two pre-normalized vectors as their
