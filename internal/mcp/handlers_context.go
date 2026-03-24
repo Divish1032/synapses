@@ -659,7 +659,7 @@ func (s *Server) handleGetContext(
 		// which rules apply to the file. Cap at 5 to avoid overwhelming the response.
 		if len(allRules) > 0 && len(sg.Edges) > 0 {
 			checker := &config.Config{Rules: allRules}
-			violations := checker.CheckViolationsForEdges(sg.Edges, s.graph.GetNode)
+			violations := checker.CheckViolationsForEdges(sg.Edges, s.graph.GetNode, s.graph)
 			for i, v := range violations {
 				if i >= 5 {
 					break

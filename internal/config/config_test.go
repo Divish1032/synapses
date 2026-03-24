@@ -420,7 +420,7 @@ func TestCheckViolationsForEdges_MatchesSubset(t *testing.T) {
 	g := buildViolationGraph(t)
 	edges := g.AllEdges() // one CALLS edge: handler.tsx → Login
 
-	violations := cfg.CheckViolationsForEdges(edges, g.GetNode)
+	violations := cfg.CheckViolationsForEdges(edges, g.GetNode, nil)
 	if len(violations) != 1 {
 		t.Fatalf("expected 1 violation, got %d", len(violations))
 	}
@@ -439,7 +439,7 @@ func TestCheckViolationsForEdges_NoEdges(t *testing.T) {
 			},
 		}},
 	}
-	violations := cfg.CheckViolationsForEdges(nil, func(_ graph.NodeID) *graph.Node { return nil })
+	violations := cfg.CheckViolationsForEdges(nil, func(_ graph.NodeID) *graph.Node { return nil }, nil)
 	if len(violations) != 0 {
 		t.Errorf("expected no violations for nil edges, got %d", len(violations))
 	}
@@ -449,7 +449,7 @@ func TestCheckViolationsForEdges_NoRules(t *testing.T) {
 	cfg := &config.Config{}
 	g := buildViolationGraph(t)
 	edges := g.AllEdges()
-	violations := cfg.CheckViolationsForEdges(edges, g.GetNode)
+	violations := cfg.CheckViolationsForEdges(edges, g.GetNode, nil)
 	if len(violations) != 0 {
 		t.Errorf("expected no violations with no rules, got %d", len(violations))
 	}
@@ -883,5 +883,147 @@ func TestPathPattern_MultipleRulesShareNodeSnapshot(t *testing.T) {
 	}
 	if !ruleTwoHop {
 		t.Error("rule-twohop did not fire")
+	}
+}
+
+// ── CheckViolationsForEdges with graph (path-pattern BFS) ────────────────────
+
+func TestCheckViolationsForEdges_PathPattern_WithGraph(t *testing.T) {
+	// Carved subgraph contains only the handler→service edge.
+	// But the FULL graph has handler→db (forbidden 1-hop path).
+	// With g provided, CheckViolationsForEdges must detect the violation.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-handler-db",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+
+	// Carved subgraph: only the handler→service edge (not the direct handler→db edge).
+	handlerID := g.MakeNodeID("/repo/handlers/order.go", "HandleOrder")
+	serviceID := g.MakeNodeID("/repo/service/order.go", "OrderService")
+	carvedEdges := []*graph.Edge{
+		{From: handlerID, To: serviceID, Type: graph.EdgeCalls},
+	}
+
+	// Without graph: path-pattern BFS skipped, 0 violations.
+	noViolations := cfg.CheckViolationsForEdges(carvedEdges, g.GetNode, nil)
+	for _, v := range noViolations {
+		if v.RuleID == "no-handler-db" {
+			t.Error("path-pattern violation must not fire when g=nil")
+		}
+	}
+
+	// With graph: BFS from handler finds handler→db in full graph.
+	violations := cfg.CheckViolationsForEdges(carvedEdges, g.GetNode, g)
+	found := false
+	for _, v := range violations {
+		if v.RuleID == "no-handler-db" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected path-pattern violation when g provided — BFS must traverse full graph from handler seed")
+	}
+}
+
+func TestCheckViolationsForEdges_PathPattern_OnlySeedsFromEdges(t *testing.T) {
+	// BFS seeds must be from-nodes present in the carved edge set.
+	// If a forbidden path starts at a node NOT in the edge set, it must NOT fire.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-service-db",
+			Severity: "warning",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/service/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t) // service→db edge exists in full graph
+
+	// Carved subgraph: only the handler→service edge.
+	// Service is the TO node here, not a FROM node — so NOT a seed.
+	handlerID := g.MakeNodeID("/repo/handlers/order.go", "HandleOrder")
+	serviceID := g.MakeNodeID("/repo/service/order.go", "OrderService")
+	carvedEdges := []*graph.Edge{
+		{From: handlerID, To: serviceID, Type: graph.EdgeCalls},
+	}
+
+	violations := cfg.CheckViolationsForEdges(carvedEdges, g.GetNode, g)
+	for _, v := range violations {
+		if v.RuleID == "no-service-db" {
+			t.Error("must not fire for service→db: service is not a from-node in the carved edge set")
+		}
+	}
+}
+
+func TestCheckViolationsForEdges_PathPattern_NilGraph_SkipsPathPatternRules(t *testing.T) {
+	// Explicit: g=nil must never produce path-pattern violations.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "would-fire-with-graph",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				PathPattern: []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	handlerID := g.MakeNodeID("/repo/handlers/order.go", "HandleOrder")
+	dbID := g.MakeNodeID("/repo/db/store.go", "Insert")
+	carvedEdges := []*graph.Edge{{From: handlerID, To: dbID, Type: graph.EdgeCalls}}
+
+	violations := cfg.CheckViolationsForEdges(carvedEdges, g.GetNode, nil)
+	if len(violations) != 0 {
+		t.Errorf("expected 0 violations with g=nil, got %d", len(violations))
+	}
+}
+
+func TestCheckViolationsForEdges_SingleEdgeRules_Unaffected(t *testing.T) {
+	// Passing g must not break existing single-edge rule behaviour.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-calls",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				EdgeType: graph.EdgeCalls,
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	handlerID := g.MakeNodeID("/repo/handlers/order.go", "HandleOrder")
+	dbID := g.MakeNodeID("/repo/db/store.go", "Insert")
+	carvedEdges := []*graph.Edge{{From: handlerID, To: dbID, Type: graph.EdgeCalls}}
+
+	// With or without g, single-edge rules must fire.
+	withGraph := cfg.CheckViolationsForEdges(carvedEdges, g.GetNode, g)
+	withoutGraph := cfg.CheckViolationsForEdges(carvedEdges, g.GetNode, nil)
+
+	findRule := func(vs []config.Violation) bool {
+		for _, v := range vs {
+			if v.RuleID == "no-calls" {
+				return true
+			}
+		}
+		return false
+	}
+	if !findRule(withGraph) {
+		t.Error("single-edge rule did not fire with g provided")
+	}
+	if !findRule(withoutGraph) {
+		t.Error("single-edge rule did not fire with g=nil")
 	}
 }
