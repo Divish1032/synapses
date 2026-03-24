@@ -1049,8 +1049,24 @@ func (w *Watcher) mergeLoop() {
 }
 
 // applyBatch applies a batch of pre-parsed file results to the main graph.
-// It acquires reparseMu for the graph mutation and resolver phase (serialised),
-// then releases it before federation detection and other I/O-heavy post-steps.
+//
+// Three-phase design (lock-order safe):
+//
+//   Phase 0 (NO lock): pre-snapshot.
+//     Compute invalidation sets and pre-load stored call sites from SQLite.
+//     Safe without reparseMu because mergeLoop is the sole graph writer —
+//     no concurrent mutation can occur between here and the lock acquisition.
+//     All store I/O happens here, eliminating the implicit reparseMu→store.mu
+//     lock-ordering dependency that would cause a deadlock if store ever needed
+//     to re-enter the watcher.
+//
+//   Phase 1 (reparseMu held): pure in-memory graph mutations.
+//     RemoveFile / MergeFrom / BulkAddCallSites / resolvers.
+//     Zero store I/O. reparseMu is held for the minimum required duration.
+//
+//   Phase 2 (NO lock): store writes + side effects.
+//     Memory staling, call-site persistence, federation, pulse events.
+//     Uses pre-computed IDs captured under the lock (removedIDs, changedIDs).
 //
 // Running resolvers once per batch (rather than once per file) is the primary
 // performance win for branch switches: 20 files → 1 resolver pass instead of 20.
@@ -1058,6 +1074,32 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 	if len(results) == 0 {
 		return
 	}
+
+	// ── Phase 0: pre-snapshot (NO lock held) ─────────────────────────────────
+	// Pre-compute invalidation sets and load stored call sites from SQLite.
+	// mergeLoop is the sole graph writer, so reading graph edges here is
+	// equivalent to reading them under reparseMu.
+	type preFetch struct {
+		invalidSet     []string
+		preloadedSites []graph.CallSite
+	}
+	preFetches := make([]preFetch, len(results))
+	if w.store != nil {
+		for i, result := range results {
+			if result.err != nil {
+				continue
+			}
+			preFetches[i].invalidSet = w.computeInvalidationSet(result.path)
+			sites, loadErr := w.store.LoadCallSitesForFiles(preFetches[i].invalidSet)
+			if loadErr != nil {
+				logutil.Warn("synapses/watcher: scoped call-site pre-load failed, falling back to full load: %v\n", loadErr)
+				sites, _ = w.store.LoadCallSites()
+			}
+			preFetches[i].preloadedSites = sites
+		}
+	}
+
+	// ── Phase 1: acquire lock, pure graph mutations ───────────────────────────
 	w.reparseMu.Lock()
 	reparseMuHeld := true
 	defer func() {
@@ -1078,13 +1120,18 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 		edgesAfter     int    // captured under reparseMu for accurate pulse reporting
 		beforeNodeIDs  []string
 		prevFileHash   string
-		invalidSet     []string
 		newCallSites   []graph.CallSite
 		memoriesStaled int
+		// Pre-computed under reparseMu, consumed by Phase 2 store writes.
+		// Separating capture (in-memory, needs lock) from persistence (I/O, no
+		// lock needed) eliminates store I/O from the critical section.
+		removedIDs     []string // node IDs absent after reparse (stale anchors)
+		changedIDs     []string // node IDs present before and after (re-anchored)
+		contentChanged bool     // hash changed — embeddings need invalidation
 	}
 
 	valid := make([]fileState, 0, len(results))
-	for _, result := range results {
+	for i, result := range results {
 		if result.err != nil {
 			// prepareParseResult failed (disk error, symlink rejection, etc.)
 			continue
@@ -1136,11 +1183,6 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 			w.fileHashMu.Unlock()
 		}
 
-		// Sprint 14.3: capture callers BEFORE RemoveFile deletes the edges.
-		if w.store != nil {
-			state.invalidSet = w.computeInvalidationSet(result.path)
-		}
-
 		// Remove stale data from main graph.
 		w.graph.RemoveFile(result.path)
 		w.graph.RemoveCallSitesForFile(result.path)
@@ -1156,73 +1198,50 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 		}
 		w.graph.ClearFileSnapshot(result.path)
 
-		// Sprint 10.7: persist new content hash.
+		// Sprint 10.7: persist new content hash (fileHashMu is independent of
+		// reparseMu — updating it here is safe and keeps hash lookups consistent).
 		if w.store != nil && result.hashKnown {
 			w.fileHashMu.Lock()
 			w.fileHashes[result.path] = result.hash
 			w.fileHashMu.Unlock()
 		}
 
-		// AM-2: cascade stale flag to memories anchored to disappeared nodes.
+		// AM-2: compute which nodes were removed/changed for Phase 2 store writes.
+		// We capture the IDs here (under reparseMu, after the graph mutation) so
+		// Phase 2 can call MarkAnchoredMemoriesStale without holding any lock.
 		if w.store != nil && len(state.beforeNodeIDs) > 0 {
 			afterIDs := make(map[string]struct{}, len(state.beforeNodeIDs))
 			for _, n := range w.graph.NodesForFile(result.path) {
 				afterIDs[string(n.ID)] = struct{}{}
 			}
-			var removedIDs, changedIDs []string
 			for _, id := range state.beforeNodeIDs {
 				if _, ok := afterIDs[id]; !ok {
-					removedIDs = append(removedIDs, id)
+					state.removedIDs = append(state.removedIDs, id)
 				} else {
-					changedIDs = append(changedIDs, id)
+					state.changedIDs = append(state.changedIDs, id)
 				}
 			}
-			if len(removedIDs) > 0 {
-				state.memoriesStaled = len(removedIDs)
-				if err := w.store.MarkAnchoredMemoriesStale(removedIDs, "anchor node removed"); err != nil {
-					logutil.Warn("synapses/watcher: cascade memory stale: %v\n", err)
-				}
-				if err := w.store.MarkEntityMemoriesStaleForNodes(removedIDs, "entity node removed"); err != nil {
-					logutil.Warn("synapses/watcher: cascade entity memory stale: %v\n", err)
-				}
-			}
-			contentChanged := !result.hashKnown || result.hash != state.prevFileHash
-			if len(changedIDs) > 0 && contentChanged {
-				memIDs, err := w.store.GetMemoryIDsByAnchorNodes(changedIDs, 500)
-				if err != nil {
-					logutil.Warn("synapses/watcher: get anchor memory ids for embedding invalidation: %v\n", err)
-				} else if len(memIDs) > 0 {
-					if err := w.store.MarkMemoryEmbeddingsStale(memIDs); err != nil {
-						logutil.Warn("synapses/watcher: invalidate anchor embeddings: %v\n", err)
-					}
-				}
-			}
+			state.contentChanged = !result.hashKnown || result.hash != state.prevFileHash
 		}
 
 		// Sprint 14.3: update filePkg for the re-parsed file.
 		w.updateImportGraphForFile(result.path)
 
-		// Capture new call sites from the temp graph BEFORE loading stored
-		// call sites (so we know which sites belong to this file's fresh parse).
+		// Capture new call sites from the temp graph.
 		state.newCallSites = result.tempGraph.DrainCallSites()
 
-		// Load stored call sites for the invalidation set and merge into graph.
+		// Apply pre-loaded stored call sites (computed in Phase 0, no store I/O here).
+		// Filter out any sites whose CallerFile is this file — they are stale and
+		// will be replaced by state.newCallSites below.
 		if w.store != nil {
-			var stored []graph.CallSite
-			var loadErr error
-			if stored, loadErr = w.store.LoadCallSitesForFiles(state.invalidSet); loadErr != nil {
-				logutil.Warn("synapses/watcher: scoped call-site load failed, falling back to full load: %v\n", loadErr)
-				stored, loadErr = w.store.LoadCallSites()
-			}
-			if loadErr == nil {
-				var filtered []graph.CallSite
-				for _, cs := range stored {
-					if cs.CallerFile != result.path {
-						filtered = append(filtered, cs)
-					}
+			pf := preFetches[i]
+			var filtered []graph.CallSite
+			for _, cs := range pf.preloadedSites {
+				if cs.CallerFile != result.path {
+					filtered = append(filtered, cs)
 				}
-				w.graph.BulkAddCallSites(filtered)
 			}
+			w.graph.BulkAddCallSites(filtered)
 		}
 
 		// Add fresh call sites and terraform refs from this file's parse.
@@ -1264,15 +1283,11 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 	}
 
 	// Phase 3: per-file post-resolve work (still under reparseMu).
+	// Only in-memory operations here — zero store I/O.
+	// Store writes (call-site persistence, memory staling) moved to Phase 2
+	// (after reparseMu is released) to keep the critical section lock-order safe.
 	for i := range valid {
 		s := &valid[i] // pointer so mutations are visible outside the loop
-
-		// Persist updated call sites for this file.
-		if w.store != nil {
-			if err := w.store.UpdateCallSitesForFile(s.result.path, s.newCallSites); err != nil {
-				logutil.Error("synapses/watcher: update call sites for %s: %v\n", s.result.path, err)
-			}
-		}
 
 		// R3/R34: re-enrich blame and commit context for changed file.
 		if root := w.graph.Root(); root != "" {
@@ -1319,6 +1334,43 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 	// Release reparseMu before I/O-heavy post-steps (federation, pulse, persist).
 	w.reparseMu.Unlock()
 	reparseMuHeld = false
+
+	// ── Phase 2: store writes (NO lock held) ──────────────────────────────────
+	// Memory staling and call-site persistence run here, outside reparseMu.
+	// They use IDs captured under the lock (removedIDs, changedIDs, newCallSites)
+	// so no lock is required.  Running these sequentially (not via trackGo)
+	// prevents goroutine storms against the SQLite store during burst changes.
+	for i := range valid {
+		s := &valid[i]
+
+		// AM-2: cascade stale flag to memories anchored to disappeared nodes.
+		if w.store != nil && len(s.removedIDs) > 0 {
+			s.memoriesStaled = len(s.removedIDs)
+			if err := w.store.MarkAnchoredMemoriesStale(s.removedIDs, "anchor node removed"); err != nil {
+				logutil.Warn("synapses/watcher: cascade memory stale: %v\n", err)
+			}
+			if err := w.store.MarkEntityMemoriesStaleForNodes(s.removedIDs, "entity node removed"); err != nil {
+				logutil.Warn("synapses/watcher: cascade entity memory stale: %v\n", err)
+			}
+		}
+		if w.store != nil && len(s.changedIDs) > 0 && s.contentChanged {
+			memIDs, err := w.store.GetMemoryIDsByAnchorNodes(s.changedIDs, 500)
+			if err != nil {
+				logutil.Warn("synapses/watcher: get anchor memory ids for embedding invalidation: %v\n", err)
+			} else if len(memIDs) > 0 {
+				if err := w.store.MarkMemoryEmbeddingsStale(memIDs); err != nil {
+					logutil.Warn("synapses/watcher: invalidate anchor embeddings: %v\n", err)
+				}
+			}
+		}
+
+		// Persist updated call sites for this file.
+		if w.store != nil {
+			if err := w.store.UpdateCallSitesForFile(s.result.path, s.newCallSites); err != nil {
+				logutil.Error("synapses/watcher: update call sites for %s: %v\n", s.result.path, err)
+			}
+		}
+	}
 
 	for _, s := range valid {
 		// RX2 Phase 3: cross-project dependency detection.
@@ -1655,6 +1707,15 @@ func (w *Watcher) reparseFile(path, _ string) {
 	if w.store != nil {
 		if err := w.store.UpdateCallSitesForFile(path, newSites); err != nil {
 			logutil.Error("synapses/watcher: update call sites for %s: %v\n", path, err)
+		}
+	}
+
+	// Re-inject persisted manual edges so user-defined links survive file changes.
+	// RemoveFile drops all edges for re-parsed nodes; this restores them.
+	// ReinjectManualEdges is idempotent — AddEdge silently drops duplicates.
+	if w.store != nil {
+		if err := w.store.ReinjectManualEdges(w.graph); err != nil {
+			logutil.Warn("synapses/watcher: reinject manual edges after reparse: %v\n", err)
 		}
 	}
 
