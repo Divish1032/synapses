@@ -508,6 +508,10 @@ func cmdStartDirect(args []string) error {
 				fw.SetBrainClient(brainCli)           // wire incremental ingest
 				// Wire cross-domain name matcher: runs after each reindex to create MENTIONS edges.
 				nm := namematcher.New(brainCli)
+				// Prime the cross-domain flag from the already-loaded graph so that
+				// incremental reindex events with code-only changed files are not
+				// incorrectly skipped when non-code entities exist from a prior session.
+				nm.PrimeCrossDomain(g)
 				fw.SetNameMatcher(nm)
 				// Federation: wire cross-project dependency tracker into watcher.
 				var fedTracker *federation.DeterministicDetector

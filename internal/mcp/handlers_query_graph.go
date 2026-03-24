@@ -492,6 +492,10 @@ func (s *Server) handleQueryGraph(
 
 	// Snapshot all nodes under one read lock.
 	allNodes := s.graph.AllNodes()
+	if len(allNodes) == 0 {
+		return mcp.NewToolResultError(
+			"Graph is empty — run 'synapses index' first and verify that parsing completed."), nil
+	}
 
 	// Build degree maps from a single AllEdges snapshot (one read lock).
 	// This avoids 2N per-node lock acquisitions (InEdges/OutEdges each lock),
@@ -508,6 +512,7 @@ func (s *Server) handleQueryGraph(
 	results := make([]graphNodeResult, 0) // never nil — serializes as [] not null
 	truncated := false
 	timedOut := false
+	matchedTotal := 0 // total nodes passing WHERE — may exceed queryGraphNodeCap
 
 	for _, n := range allNodes {
 		// Check the deadline in a non-blocking select every iteration.
@@ -529,30 +534,31 @@ func (s *Server) handleQueryGraph(
 		if !matchAllConditions(n, fanin, fanout, q.conditions) {
 			continue
 		}
+		matchedTotal++
 
-		domain := string(n.Domain)
-		if domain == "" {
-			domain = string(graph.DomainCode)
-		}
-
-		results = append(results, graphNodeResult{
-			ID:       string(n.ID),
-			Name:     n.Name,
-			Type:     string(n.Type),
-			Package:  n.Package,
-			File:     n.File,
-			Line:     n.Line,
-			Domain:   domain,
-			Exported: n.Exported,
-			FanIn:    fanin,
-			FanOut:   fanout,
-		})
-
-		// Enforce the 1000-node cap: stop scanning — total_nodes already
-		// reflects the full graph size via len(allNodes).
-		if len(results) >= queryGraphNodeCap {
-			truncated = true
-			break
+		// After the cap is hit, keep counting matches but stop collecting results.
+		// This gives callers an accurate matchedTotal so they can gauge truncation severity.
+		if len(results) < queryGraphNodeCap {
+			domain := string(n.Domain)
+			if domain == "" {
+				domain = string(graph.DomainCode)
+			}
+			results = append(results, graphNodeResult{
+				ID:       string(n.ID),
+				Name:     n.Name,
+				Type:     string(n.Type),
+				Package:  n.Package,
+				File:     n.File,
+				Line:     n.Line,
+				Domain:   domain,
+				Exported: n.Exported,
+				FanIn:    fanin,
+				FanOut:   fanout,
+			})
+			if len(results) >= queryGraphNodeCap {
+				truncated = true
+				// Don't break — keep iterating to get accurate matchedTotal.
+			}
 		}
 	}
 
@@ -560,6 +566,7 @@ func (s *Server) handleQueryGraph(
 		"query":         raw,
 		"nodes":         results,
 		"count":         len(results),
+		"matched_total": matchedTotal, // total passing WHERE; may exceed count when truncated
 		"total_nodes":   len(allNodes),
 		"truncated":     truncated,
 		"timed_out":     timedOut,
@@ -568,7 +575,8 @@ func (s *Server) handleQueryGraph(
 	}
 	if truncated && !timedOut {
 		out["hint"] = fmt.Sprintf(
-			"Result capped at %d nodes. Narrow your query with additional AND conditions.", queryGraphNodeCap)
+			"Result capped at %d of %d matching nodes. Narrow your query with additional AND conditions.",
+			queryGraphNodeCap, matchedTotal)
 	}
 	if timedOut {
 		out["hint"] = fmt.Sprintf(

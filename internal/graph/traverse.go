@@ -1159,9 +1159,16 @@ type crossDomainResult struct {
 // graphs from producing unbounded output. truncated=true when either cap fires.
 //
 // Caller must hold g.mu.RLock.
+// cdSeenKey deduplicates cross-domain refs by (NodeID, EdgeType) so that a
+// node reachable via multiple cross-domain edge types (e.g. DEPLOYS and MENTIONS)
+// appears once per relationship — preserving full edge-type diversity.
+type cdSeenKey struct {
+	id NodeID
+	et EdgeType
+}
+
 func collectCrossDomainImpact(g *Graph, rootID NodeID) crossDomainResult {
-	seen := make(map[NodeID]bool)
-	seen[rootID] = true
+	seen := make(map[cdSeenKey]bool)
 
 	// perCat tracks how many nodes have been collected per edge type so we can
 	// enforce per-category caps without an extra pass.
@@ -1172,7 +1179,11 @@ func collectCrossDomainImpact(g *Graph, rootID NodeID) crossDomainResult {
 	// addRef attempts to add a CrossDomainRef. Returns true if added, false if
 	// the per-category cap, overall cap, or deduplication prevented it.
 	addRef := func(id NodeID, n *Node, et EdgeType) bool {
-		if seen[id] {
+		k := cdSeenKey{id: id, et: et}
+		if seen[k] {
+			return false
+		}
+		if id == rootID { // never include the root itself
 			return false
 		}
 		cap, ok := crossDomainCaps[et]
@@ -1187,7 +1198,7 @@ func collectCrossDomainImpact(g *Graph, rootID NodeID) crossDomainResult {
 			truncated = true
 			return false
 		}
-		seen[id] = true
+		seen[k] = true
 		perCat[et]++
 		refs = append(refs, CrossDomainRef{
 			EntityRef: EntityRef{
