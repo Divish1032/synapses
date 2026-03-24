@@ -1911,6 +1911,14 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	enrichMetricsIfEnabled(g, absPath, cfg)
 	analyzeDataFlowIfEnabled(g, cfg)
 
+	// D1: Activate FlatGraph SoA CSR fast path for BFS/PPR traversal.
+	// EnableFlatGraph builds the cache-friendly adjacency representation that
+	// eliminates pointer-chasing through g.outEdges on every PPR hop.
+	if cfg.UseFlatGraph {
+		g.EnableFlatGraph()
+		logutil.InfoP(projectHash(absPath), "synapses: FlatGraph CSR enabled (%d nodes)\n", g.NodeCount())
+	}
+
 	// Context file (auto-injected session context).
 	writeCtxFile := func() {
 		identity := g.ProjectIdentity()
@@ -2096,6 +2104,10 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			nm := namematcher.New(brainCli)
 			nm.PrimeCrossDomain(g) // prime flag from already-loaded graph
 			fw.SetNameMatcher(nm)
+			// D1: Keep FlatGraph CSR in sync after each graph rebuild.
+			if cfg.UseFlatGraph {
+				fw.SetAfterRebuildHook(func() { g.EnableFlatGraph() })
+			}
 			// Wire federation dependency tracker into the watcher so
 			// cross-project imports are detected on every file re-parse.
 			var fedTracker *federation.DeterministicDetector
