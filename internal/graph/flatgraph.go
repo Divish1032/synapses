@@ -19,6 +19,13 @@ type EdgeIndex uint32
 // ExtID maps our compact NodeIndex back to the stable string-based NodeID
 // required by the MCP protocol communication.
 func (fg *FlatGraph) ExtID(idx NodeIndex) NodeID {
+	fg.mu.RLock()
+	defer fg.mu.RUnlock()
+	return fg.extIDLocked(idx)
+}
+
+// extIDLocked is the lock-free variant of ExtID for callers that already hold fg.mu.
+func (fg *FlatGraph) extIDLocked(idx NodeIndex) NodeID {
 	if int(idx) >= len(fg.Names) {
 		return ""
 	}
@@ -86,6 +93,8 @@ type FlatGraph struct {
 // Neighbors returns the NodeIndex values for all undirected (out+in) neighbors
 // of the given node index. Used by the PPR BFS fast path.
 func (fg *FlatGraph) Neighbors(idx NodeIndex) []NodeIndex {
+	fg.mu.RLock()
+	defer fg.mu.RUnlock()
 	n := NodeIndex(len(fg.Names))
 	if idx >= n {
 		return nil
@@ -100,6 +109,8 @@ func (fg *FlatGraph) Neighbors(idx NodeIndex) []NodeIndex {
 
 // LookupIndex returns the NodeIndex for a NodeID, or (0, false) if not found.
 func (fg *FlatGraph) LookupIndex(id NodeID) (NodeIndex, bool) {
+	fg.mu.RLock()
+	defer fg.mu.RUnlock()
 	idx, ok := fg.stringIDToIndex[id]
 	return idx, ok
 }
@@ -107,6 +118,8 @@ func (fg *FlatGraph) LookupIndex(id NodeID) (NodeIndex, bool) {
 // NodeIDAt returns the original graph NodeID for a NodeIndex, or "" if out of range.
 // Uses the nodeIDs slice populated by Graph.EnableFlatGraph.
 func (fg *FlatGraph) NodeIDAt(idx NodeIndex) NodeID {
+	fg.mu.RLock()
+	defer fg.mu.RUnlock()
 	if int(idx) >= len(fg.nodeIDs) {
 		return ""
 	}
@@ -154,8 +167,8 @@ func (fg *FlatGraph) AddNode(name StringID, nodeType NodeType, fileID StringID, 
 	fg.OutOffsets = append(fg.OutOffsets, fg.OutOffsets[idx])
 	fg.InOffsets = append(fg.InOffsets, fg.InOffsets[idx])
 
-	// Store external mapping
-	extID := fg.ExtID(idx)
+	// Store external mapping (use lock-free variant — write lock already held)
+	extID := fg.extIDLocked(idx)
 	fg.stringIDToIndex[extID] = idx
 
 	return idx
