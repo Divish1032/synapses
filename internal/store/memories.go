@@ -929,6 +929,19 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 		return s.InsertMemory(m)
 	}
 
+	// Acquire rowCapMu to serialize cap-check + insert with InsertMemory,
+	// preventing concurrent callers from both bypassing the memory row cap.
+	s.rowCapMu.Lock()
+	defer s.rowCapMu.Unlock()
+	maxRows := s.MaxMemoryRows
+	if maxRows <= 0 {
+		maxRows = DefaultMaxMemoryRows
+	}
+	var count int
+	if err := s.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&count); err == nil && count >= maxRows {
+		return "", fmt.Errorf("memory row cap reached (%d/%d) — prune old memories or increase the cap", count, maxRows)
+	}
+
 	// ── Phase 1: Validate and check dedup OUTSIDE the tx ──────────────────
 	// Writer pool has MaxOpenConns=1: a tx holds the only writer conn.
 	// Reads go through the separate reader pool and won't deadlock, but we
