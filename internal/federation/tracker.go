@@ -131,9 +131,19 @@ func (d *DeterministicDetector) DetectDeps(ctx context.Context, filePath string,
 		return nil // unsupported language
 	}
 
+	// Reject symlinks before reading to prevent exfiltration of files
+	// outside the project root via crafted symlinks.
+	lfi, lstatErr := os.Lstat(filePath)
+	if lstatErr != nil {
+		return nil // fail-open
+	}
+	if lfi.Mode()&os.ModeSymlink != 0 {
+		return nil // never read through symlinks
+	}
+
 	// Skip files larger than 1MB — they are typically generated or vendored
 	// and cause excessive allocation with no meaningful import signal.
-	if info, statErr := os.Stat(filePath); statErr == nil && info.Size() > 1*1024*1024 {
+	if lfi.Size() > 1*1024*1024 {
 		return nil
 	}
 
