@@ -726,12 +726,12 @@ func safeReadManifest(projectPath, filename string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Do NOT fall back to filepath.Abs on EvalSymlinks failure: Abs does not
+	// resolve symlinks, so the containment check could be bypassed by a
+	// symlink whose physical target is outside projectPath.
 	absProject, err := filepath.EvalSymlinks(projectPath)
 	if err != nil {
-		absProject, err = filepath.Abs(projectPath)
-		if err != nil {
-			return nil, err
-		}
+		return nil, fmt.Errorf("safeReadManifest: cannot resolve project path: %w", err)
 	}
 	absProject = filepath.Clean(absProject) + string(filepath.Separator)
 	resolved = filepath.Clean(resolved)
