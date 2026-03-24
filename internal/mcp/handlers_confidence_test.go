@@ -158,6 +158,31 @@ func TestSerializeCompact_ConfidenceAbsentWhenZero(t *testing.T) {
 	}
 }
 
+// TestSerializeCompact_ConfidenceInSummaryLevel verifies confidence is present
+// even in the minimal "summary" detail level (fix for early-return gap).
+func TestSerializeCompact_ConfidenceInSummaryLevel(t *testing.T) {
+	dc := newTestDC()
+	dc.Confidence = 0.75
+	out := serializeCompact(dc, "summary")
+	if !strings.Contains(out, "confidence:0.75") {
+		t.Errorf("confidence must appear in summary level output, got:\n%s", out)
+	}
+	// Summary should NOT include Calls: section.
+	if strings.Contains(out, "Calls:") {
+		t.Error("summary level should not include Calls: section")
+	}
+}
+
+func TestSerializeCompact_LowConfidenceInSummaryLevel(t *testing.T) {
+	dc := newTestDC()
+	dc.Confidence = 0.37
+	dc.ConfidenceHint = "Low confidence (0.37): corrections pattern."
+	out := serializeCompact(dc, "summary")
+	if !strings.Contains(out, "⚠ confidence:0.37") {
+		t.Errorf("low confidence hint must appear in summary level, got:\n%s", out)
+	}
+}
+
 // ── Integration: confidence present in JSON get_context response ─────────────
 
 func TestGetContext_ConfidenceInJSONResponse(t *testing.T) {
