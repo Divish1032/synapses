@@ -66,17 +66,20 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 			}
 
 			// Check session-level cache first (with TTL).
-			d.mu.RLock()
+			// Use a single write-lock pass to atomically read + evict stale
+			// entries — avoids TOCTOU between the RLock read and the subsequent
+			// write-lock delete that could race with concurrent goroutines.
+			d.mu.Lock()
 			cached, hasCached := d.cache[e.Alias]
-			fresh := hasCached && d.clock().Sub(d.cacheTime[e.Alias]) < 5*time.Minute
-			d.mu.RUnlock()
-			if hasCached && !fresh {
-				d.mu.Lock()
-				delete(d.cache, e.Alias)
-				delete(d.cacheTime, e.Alias)
-				d.mu.Unlock()
-				hasCached = false
+			if hasCached {
+				fresh := d.clock().Sub(d.cacheTime[e.Alias]) < 5*time.Minute
+				if !fresh {
+					delete(d.cache, e.Alias)
+					delete(d.cacheTime, e.Alias)
+					hasCached = false
+				}
 			}
+			d.mu.Unlock()
 			if hasCached {
 				resultsMu.Lock()
 				allAlerts = append(allAlerts, cached...)
