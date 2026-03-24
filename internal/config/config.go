@@ -110,6 +110,12 @@ type Config struct {
 	// A value of 0 defaults to 4. Higher values find more indirect paths but are slower.
 	DataFlowMaxHops int `json:"data_flow_max_hops,omitempty"`
 
+	// UseFlatGraph enables the FlatGraph SoA layout as an opt-in fast path for
+	// PPR BFS candidate expansion. The pointer-based Graph remains the source of
+	// truth; FlatGraph is derived from it at build time for cache-friendly traversal.
+	// Default: false. Enable only after benchmarking on your specific graph size.
+	UseFlatGraph bool `json:"use_flat_graph,omitempty"`
+
 	// Plugins have been removed for security reasons (Workspace RCE).
 	// They must now be configured globally via the CLI or user-level config.
 	Plugins []PluginConfig `json:"-"`
