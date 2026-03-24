@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS edge_learned_weights (
     last_used   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (from_id, to_id, edge_type)
 );
+-- idx_elw_dormancy: MarkDormantEdges filters on (dormant=0, last_used<cutoff).
+-- Without this index the UPDATE is a full table scan — O(N) at 100K+ entries.
+-- Composite order (dormant first) lets SQLite skip already-dormant rows cheaply.
+CREATE INDEX IF NOT EXISTS idx_elw_dormancy ON edge_learned_weights(dormant, last_used);
 
 -- manual_edges stores user-defined cross-domain edges created via link_entities.
 -- These survive SaveGraph (which wipes the edges table) because they are stored here.
@@ -697,6 +701,9 @@ func Open(path string) (*Store, error) {
 			last_used   INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (from_id, to_id, edge_type)
 		)`,
+		// Composite index for MarkDormantEdges: WHERE dormant=0 AND last_used<cutoff.
+		// Skips already-dormant rows; avoids O(N) full table scan at 100K+ entries.
+		`CREATE INDEX IF NOT EXISTS idx_elw_dormancy ON edge_learned_weights(dormant, last_used)`,
 	} {
 		if _, err := graphTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
