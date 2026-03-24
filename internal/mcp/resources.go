@@ -120,7 +120,9 @@ func (s *Server) warmBrainCache(changedFile string) {
 	enableLLM := s.config.Brain.ContextBuilder
 	s.goBackground(func() {
 		for _, entity := range ents {
-			_ = bc.BuildContextPacket(context.Background(), brain.ContextPacketRequest{
+			ctx30, cancel30 := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel30()
+			_ = bc.BuildContextPacket(ctx30, brain.ContextPacketRequest{
 				ProjectID: projID,
 				Snapshot: brain.SnapshotInput{
 					RootNodeID: string(entity.ID),
