@@ -83,6 +83,7 @@ func (s *Store) RebuildMemoryHNSW() {
 			s.hnswMemMu.Lock()
 			s.hnswRebuilding = false
 			s.hnswPendingAdds = nil
+			s.hnswPendingDeletes = nil
 			s.hnswMemMu.Unlock()
 		}
 	}()
@@ -106,6 +107,7 @@ func (s *Store) RebuildMemoryHNSW() {
 		s.hnswMemMu.Lock()
 		s.hnswRebuilding = false
 		s.hnswPendingAdds = nil
+		s.hnswPendingDeletes = nil
 		s.hnswMemMu.Unlock()
 		return
 	}
@@ -146,6 +148,8 @@ func (s *Store) RebuildMemoryHNSW() {
 	// already in SQLite and will be picked up on the next rebuild.
 	pending := s.hnswPendingAdds
 	s.hnswPendingAdds = nil
+	pendingDeletes := s.hnswPendingDeletes
+	s.hnswPendingDeletes = nil
 	if len(pending) > 10000 {
 		logutil.Warn("synapses: HNSW rebuild: %d pending entries, capping replay to 10000\n", len(pending))
 		pending = pending[len(pending)-10000:] // keep most recent
@@ -160,6 +164,17 @@ func (s *Store) RebuildMemoryHNSW() {
 			g.Delete(p.memoryID)
 			g.Add(hnsw.MakeNode(p.memoryID, p.vec))
 			count++
+		}()
+	}
+	// Replay pending deletes (deletions that arrived during rebuild).
+	for _, memID := range pendingDeletes {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logutil.Warn("synapses: HNSW rebuild: skip pending delete %s: %v\n", memID, r)
+				}
+			}()
+			g.Delete(memID)
 		}()
 	}
 	s.hnswMemIndex = g
@@ -225,6 +240,10 @@ func (s *Store) hnswAdd(memoryID string, vec []float32) {
 func (s *Store) hnswDelete(memoryID string) (deleted bool) {
 	s.hnswMemMu.Lock()
 	defer s.hnswMemMu.Unlock()
+	if s.hnswRebuilding {
+		s.hnswPendingDeletes = append(s.hnswPendingDeletes, memoryID)
+		return true
+	}
 	if s.hnswMemIndex == nil {
 		return false
 	}
