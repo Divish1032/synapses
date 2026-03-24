@@ -2880,11 +2880,13 @@ func (s *Server) registerTools() {
 					"Syntax: NODES WHERE <field> <op> <value> [AND <field> <op> <value> ...]\n"+
 					"Fields: package, type, domain, file, name, exported, fanin, fanout\n"+
 					"Operators: = != > >= < <= (fanin/fanout support all; string fields support = and !=)\n"+
+					"Note: 'file' uses substring matching — NODES WHERE file=\"login.go\" matches \"internal/auth/login.go\".\n"+
 					"Examples:\n"+
 					"  NODES WHERE package=\"auth\" AND fanin > 5\n"+
 					"  NODES WHERE type=\"function\" AND exported=true AND fanout >= 3\n"+
 					"  NODES WHERE domain=\"infra\"\n"+
 					"  NODES WHERE fanout >= 10 AND fanin = 0\n"+
+					"  NODES WHERE file=\"login.go\"\n"+
 					"  NODES WHERE name=\"PaymentService\"",
 			),
 			mcp.WithString("query",
