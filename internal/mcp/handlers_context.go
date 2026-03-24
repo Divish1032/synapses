@@ -1189,8 +1189,19 @@ func (s *Server) handleGetContext(
 		} else if detailLevel == "" {
 			detailLevel = "neighbors"
 		}
+		compactText := serializeCompact(dc, detailLevel)
+		// D5: when the token budget was hit, use the brain pruner to compress the
+		// compact text further, preserving high-value content over crude node-count
+		// truncation. Fail-open: prune error → return uncompressed compact text.
+		if sg.Truncated {
+			if bc := s.brainClient; bc != nil {
+				if pruned, pruneErr := bc.Prune(ctx, compactText); pruneErr == nil && pruned != "" {
+					compactText = pruned
+				}
+			}
+		}
 		s.setSessionHash(sessionID, entityCacheKey, entityHash)
-		return mcp.NewToolResultText(serializeCompact(dc, detailLevel)), nil
+		return mcp.NewToolResultText(compactText), nil
 	}
 
 	s.setSessionHash(sessionID, entityCacheKey, entityHash)

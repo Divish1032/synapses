@@ -111,6 +111,13 @@ func (c *Client) SetPhase(_ context.Context, req SetPhaseRequest) (*SDLCConfig, 
 	return &cfg, nil
 }
 
+// Prune uses the Tier 0 LLM to extract core technical content from raw text
+// (e.g. web pages, over-budget context packets), discarding boilerplate.
+// Returns the original content unchanged if brain unavailable.
+func (c *Client) Prune(ctx context.Context, content string) (string, error) {
+	return c.brain.Prune(ctx, content)
+}
+
 // Memorize synthesizes a session transcript into persistent memory entries.
 // Returns empty response (no error) when the Archivist LLM is unavailable.
 func (c *Client) Memorize(ctx context.Context, req archivist.MemorizeRequest) (archivist.MemorizeResponse, error) {
