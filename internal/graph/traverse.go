@@ -961,9 +961,11 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 	visited := map[NodeID]int{rootID: 0} // node → first-seen depth
 	queue := []entry{{rootID, 0}}
 	fileSet := map[string]struct{}{}
+	bfsTruncated := false
 
 	for len(queue) > 0 {
 		if len(visited) >= maxVisited {
+			bfsTruncated = true
 			break
 		}
 		cur := queue[0]
@@ -1096,7 +1098,7 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 		Tiers:                tiers,
 		TotalAffected:        total,
 		AffectedFiles:        files,
-		Truncated:            anyTruncated,
+		Truncated:            anyTruncated || bfsTruncated,
 		CrossDomainImpact:    cdResult.refs,
 		CrossDomainAffected:  len(cdResult.refs),
 		CrossDomainTruncated: cdResult.truncated,
