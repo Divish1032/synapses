@@ -5,6 +5,9 @@ import (
 	"testing"
 )
 
+// floatPtr is a test helper that creates a *float64 from a literal.
+func floatPtr(v float64) *float64 { return &v }
+
 // ── buildEffectivenessMessage ──────────────────────────────────────────────
 
 func TestBuildEffectivenessMessage_NoDeliveries(t *testing.T) {
@@ -27,7 +30,7 @@ func TestBuildEffectivenessMessage_WithDeliveries(t *testing.T) {
 		TotalDeliveries:    16,
 		FirstFetchRight:    14,
 		ContextHitRate:     0.85,
-		TaskCompletionRate: 0.92,
+		TaskCompletionRate: floatPtr(0.92),
 		ToolCalls:          47,
 		TokensSaved:        3000,
 		DurationMs:         240_000,
@@ -91,5 +94,37 @@ func TestBuildEffectivenessMessage_AllZero(t *testing.T) {
 	msg := buildEffectivenessMessage(r)
 	if msg == "" {
 		t.Error("expected non-empty message for zero-value report")
+	}
+}
+
+// ── TaskCompletionRate nil vs zero distinction ────────────────────────────
+
+func TestEffectivenessReport_TaskCompletionRateNilWhenNoRetro(t *testing.T) {
+	// When retro is nil (no tool-call data), TaskCompletionRate must be nil
+	// so JSON consumers see omitted/null rather than false "0% success".
+	r := &EffectivenessReport{
+		ContextHitRate:     0.9,
+		TaskCompletionRate: nil, // explicitly nil = no data
+		ToolCalls:          0,
+		TotalDeliveries:    3,
+		FirstFetchRight:    3,
+		DurationMs:         5_000,
+	}
+	if r.TaskCompletionRate != nil {
+		t.Errorf("expected nil TaskCompletionRate when no retro, got %v", *r.TaskCompletionRate)
+	}
+}
+
+func TestEffectivenessReport_TaskCompletionRateSetWhenRetroPresent(t *testing.T) {
+	// When retro is present (even with 0% success), TaskCompletionRate is non-nil.
+	rate := 0.0 // 100% error rate → 0% completion
+	r := &EffectivenessReport{
+		TaskCompletionRate: &rate,
+	}
+	if r.TaskCompletionRate == nil {
+		t.Error("expected non-nil TaskCompletionRate when retro is present")
+	}
+	if *r.TaskCompletionRate != 0.0 {
+		t.Errorf("expected 0.0, got %v", *r.TaskCompletionRate)
 	}
 }
