@@ -118,8 +118,7 @@ func New(s *store.Store) *Cache {
 				defer dnsCancel()
 				addrs, lookupErr := net.DefaultResolver.LookupIPAddr(dnsCtx, host)
 				if lookupErr != nil {
-					// DNS failed or timed out — allow and let DialContext decide.
-					return nil
+					return fmt.Errorf("DNS lookup failed for redirect target %s: %w", host, lookupErr)
 				}
 				for _, addr := range addrs {
 					ip := addr.IP
