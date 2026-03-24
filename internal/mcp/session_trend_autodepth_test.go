@@ -20,10 +20,10 @@ func TestBuildSessionTrend_NonNil_WhenSingleDayButMultipleSessions(t *testing.T)
 	single := []pulse.DailyEffectiveness{
 		{Day: "2026-03-20", AvgContextHitRate: 0.8, Sessions: 5},
 	}
-	if buildSessionTrend(single) == nil {
+	if buildSessionTrend(single, 7) == nil {
 		t.Error("expected non-nil for single-day with 5 sessions")
 	}
-	out := buildSessionTrend(single)
+	out := buildSessionTrend(single, 7)
 	if out["trend"] != "stable" {
 		t.Errorf("single-day trend should be 'stable', got %q", out["trend"])
 	}
@@ -34,16 +34,16 @@ func TestBuildSessionTrend_Nil_WhenFewerThanTwoTotalSessions(t *testing.T) {
 		{Day: "2026-03-19", AvgContextHitRate: 0.8, Sessions: 1},
 		{Day: "2026-03-20", AvgContextHitRate: 0.9, Sessions: 0},
 	}
-	if buildSessionTrend(days) != nil {
+	if buildSessionTrend(days, 7) != nil {
 		t.Error("expected nil when total sessions < 2")
 	}
 }
 
 func TestBuildSessionTrend_Nil_WhenEmpty(t *testing.T) {
-	if buildSessionTrend(nil) != nil {
+	if buildSessionTrend(nil, 7) != nil {
 		t.Error("expected nil for nil input")
 	}
-	if buildSessionTrend([]pulse.DailyEffectiveness{}) != nil {
+	if buildSessionTrend([]pulse.DailyEffectiveness{}, 7) != nil {
 		t.Error("expected nil for empty input")
 	}
 }
@@ -55,7 +55,7 @@ func TestBuildSessionTrend_Improving(t *testing.T) {
 		{Day: "2026-03-17", AvgContextHitRate: 0.70, Sessions: 3},
 		{Day: "2026-03-18", AvgContextHitRate: 0.80, Sessions: 3},
 	}
-	out := buildSessionTrend(days)
+	out := buildSessionTrend(days, 7)
 	if out == nil {
 		t.Fatal("expected non-nil trend")
 	}
@@ -75,7 +75,7 @@ func TestBuildSessionTrend_Declining(t *testing.T) {
 		{Day: "2026-03-17", AvgContextHitRate: 0.65, Sessions: 3},
 		{Day: "2026-03-18", AvgContextHitRate: 0.60, Sessions: 3},
 	}
-	out := buildSessionTrend(days)
+	out := buildSessionTrend(days, 7)
 	if out == nil {
 		t.Fatal("expected non-nil trend")
 	}
@@ -95,7 +95,7 @@ func TestBuildSessionTrend_Stable(t *testing.T) {
 		{Day: "2026-03-17", AvgContextHitRate: 0.70, Sessions: 4},
 		{Day: "2026-03-18", AvgContextHitRate: 0.73, Sessions: 4},
 	}
-	out := buildSessionTrend(days)
+	out := buildSessionTrend(days, 7)
 	if out == nil {
 		t.Fatal("expected non-nil trend")
 	}
@@ -109,7 +109,7 @@ func TestBuildSessionTrend_AggregatesCorrectly(t *testing.T) {
 		{Day: "2026-03-19", AvgContextHitRate: 0.60, TotalTokensSaved: 1000, Sessions: 2},
 		{Day: "2026-03-20", AvgContextHitRate: 0.80, TotalTokensSaved: 2000, Sessions: 2},
 	}
-	out := buildSessionTrend(days)
+	out := buildSessionTrend(days, 7)
 	if out == nil {
 		t.Fatal("expected non-nil trend")
 	}
@@ -136,7 +136,7 @@ func TestBuildSessionTrend_DaysField(t *testing.T) {
 		{Day: "2026-03-19", AvgContextHitRate: 0.7, Sessions: 3},
 		{Day: "2026-03-20", AvgContextHitRate: 0.7, Sessions: 3},
 	}
-	out := buildSessionTrend(days)
+	out := buildSessionTrend(days, 7)
 	if out["days"].(int) != 3 {
 		t.Errorf("days: want 3, got %v", out["days"])
 	}
@@ -147,7 +147,7 @@ func TestBuildSessionTrend_NoTokenNote_WhenZeroSaved(t *testing.T) {
 		{Day: "2026-03-19", AvgContextHitRate: 0.7, Sessions: 3},
 		{Day: "2026-03-20", AvgContextHitRate: 0.7, Sessions: 3},
 	}
-	out := buildSessionTrend(days)
+	out := buildSessionTrend(days, 7)
 	note, _ := out["note"].(string)
 	if strings.Contains(note, "tokens saved") {
 		t.Errorf("note should not mention tokens when total_tokens_saved=0: %q", note)

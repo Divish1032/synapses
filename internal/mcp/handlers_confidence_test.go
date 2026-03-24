@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	mcp "github.com/mark3labs/mcp-go/mcp"
 )
 
 // ── computeContextConfidence unit tests ─────────────────────────────────────
@@ -260,7 +262,39 @@ func TestSerializeCompact_LowConfidenceInSummaryLevel(t *testing.T) {
 	}
 }
 
-// ── Integration: confidence present in JSON get_context response ─────────────
+// ── Integration: confidence present in both compact and JSON responses ────────
+
+// TestGetContext_ConfidenceInCompactResponse is the primary production path:
+// compact is the default format. Tests the full handler→serializeCompact chain.
+func TestGetContext_ConfidenceInCompactResponse(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+	res, err := s.handleGetContext(ctx, callTool(map[string]any{
+		"entity": "AuthLogin",
+		// No format= → defaults to compact, the production default.
+	}))
+	if err != nil || res == nil {
+		t.Fatalf("handleGetContext failed: %v", err)
+	}
+	if len(res.Content) == 0 {
+		t.Fatal("empty result content")
+	}
+	tc, ok := res.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", res.Content[0])
+	}
+	out := tc.Text
+	if !strings.Contains(out, "confidence:") {
+		t.Errorf("confidence line must appear in compact output, got:\n%s", out)
+	}
+	// New entity with no pulse data → default 0.75 (not low, no warning prefix).
+	if !strings.Contains(out, "confidence:0.75") {
+		t.Errorf("expected confidence:0.75 for new entity, got:\n%s", out)
+	}
+	// Must NOT have warning prefix at 0.75.
+	if strings.Contains(out, "⚠ confidence:") {
+		t.Errorf("should not show ⚠ prefix for 0.75 confidence, got:\n%s", out)
+	}
+}
 
 func TestGetContext_ConfidenceInJSONResponse(t *testing.T) {
 	s, _, _ := newPopulatedServer(t)

@@ -943,8 +943,8 @@ func (s *Server) handleGetContext(
 		dc.AdaptiveHint = "⟳ Context depth auto-expanded based on prior feedback for this entity."
 	} else if qualityAutoDepthBumped {
 		dc.AdaptiveHint = fmt.Sprintf(
-			"⟳ Context depth auto-expanded (quality score %.1f): prior deliveries for this entity were frequently followed by corrections or session abandonment.",
-			qualityAutoScore)
+			"⟳ Context depth auto-expanded to %d (quality score %.1f): prior deliveries for this entity were frequently followed by corrections or session abandonment.",
+			cfg.MaxDepth, qualityAutoScore)
 	}
 
 	// Sprint 15 #2 + #6: single quality-score fetch for both LowQualityHint and
