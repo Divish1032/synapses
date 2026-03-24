@@ -365,10 +365,18 @@ func (s *Server) handleEndSession(
 	// Feeds the PatternHints pipeline so future context packets surface
 	// "entities commonly edited together" suggestions.
 	// Fire-and-forget: brain unavailable → no-op.
+	// Caps at 20 entities to bound O(n²) related-entity allocation and per-task
+	// worker time. Each LogDecision call uses a 3s timeout to avoid pinning a
+	// background worker on a slow/hung brain server.
 	if s.brainClient != nil && sessSummary != nil && len(sessSummary.EntitiesExamined) > 0 {
+		const maxD1Entities = 20
 		bc := s.brainClient
-		entities := make([]string, len(sessSummary.EntitiesExamined))
-		copy(entities, sessSummary.EntitiesExamined)
+		src := sessSummary.EntitiesExamined
+		if len(src) > maxD1Entities {
+			src = src[:maxD1Entities]
+		}
+		entities := make([]string, len(src))
+		copy(entities, src)
 		sessOutcome := outcome
 		sessAgentID := agentID
 		sessTaskID := taskID
@@ -381,7 +389,8 @@ func (s *Server) handleEndSession(
 						related = append(related, other)
 					}
 				}
-				bc.LogDecision(context.Background(), brain.DecisionRequest{
+				dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Second)
+				bc.LogDecision(dctx, brain.DecisionRequest{
 					AgentID:         sessAgentID,
 					Phase:           "implementation",
 					EntityName:      entityName,
@@ -390,6 +399,7 @@ func (s *Server) handleEndSession(
 					Outcome:         sessOutcome,
 					Notes:           sessTaskID,
 				})
+				dcancel()
 			}
 		})
 	}
@@ -412,7 +422,11 @@ func (s *Server) handleEndSession(
 	// ── D4: Archivist session memory synthesis ──
 	// Fire-and-forget: calls the Archivist LLM to synthesize the session into
 	// durable institutional memories. No-op if brain unavailable or no events.
+	// archEvents is capped at 50 total to bound the LLM payload size — the
+	// archivist gets the most-recent events (entities first, then files).
+	// A 30s timeout prevents a slow brain from pinning a background worker.
 	if s.brainClient != nil && sessSummary != nil {
+		const maxArchEvents = 50
 		bc := s.brainClient
 		var archEvents []archivist.SessionEvent
 		for _, entity := range sessSummary.EntitiesExamined {
@@ -433,13 +447,18 @@ func (s *Server) handleEndSession(
 				Result: summary,
 			})
 		}
+		if len(archEvents) > maxArchEvents {
+			archEvents = archEvents[len(archEvents)-maxArchEvents:]
+		}
 		if len(archEvents) > 0 {
 			archReq := archivist.MemorizeRequest{SessionEvents: archEvents}
 			sessStore := s.store
 			sessAgentID2 := agentID
 			sessTaskID2 := taskID
 			s.goBackground(func() {
-				resp, err := bc.Memorize(context.Background(), archReq)
+				mctx, mcancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer mcancel()
+				resp, err := bc.Memorize(mctx, archReq)
 				if err != nil || sessStore == nil {
 					return
 				}
