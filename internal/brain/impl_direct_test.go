@@ -241,7 +241,7 @@ func TestImpl_ExplainViolation_TemplateFallback_BothCBOpen(t *testing.T) {
 		RuleID:       "no-store-in-view",
 		Description:  "view components must not import store packages",
 		RuleSeverity: "error",
-		SourceFile:   "internal/mcp/handlers.go",
+		SourceFile:   "/abs/path/to/project/internal/mcp/handlers.go",
 		TargetName:   "internal/store",
 	})
 	if err != nil {
@@ -311,14 +311,17 @@ func TestHeuristicEnrichInsight_Content(t *testing.T) {
 	}
 }
 
-// TestGuardianTemplateFallback_Content verifies the template response text.
+// TestGuardianTemplateFallback_Content verifies the template response text,
+// including that absolute source paths are rendered as package-relative paths
+// (e.g. "internal/ui/handler.go" not just "handler.go").
 func TestGuardianTemplateFallback_Content(t *testing.T) {
 	req := ViolationRequest{
 		RuleID:       "no-ui-imports-db",
 		Description:  "UI layer must not import DB packages",
 		RuleSeverity: "error",
-		SourceFile:   "internal/ui/handler.go",
-		TargetName:   "internal/db",
+		// Simulate the full absolute path that validate_plan passes via fromNode.File.
+		SourceFile: "/home/ubuntu/work/project/internal/ui/handler.go",
+		TargetName: "internal/db",
 	}
 	resp := guardianTemplateFallback(req)
 	if resp.Explanation == "" {
@@ -338,6 +341,35 @@ func TestGuardianTemplateFallback_Content(t *testing.T) {
 	}
 	if !strings.Contains(resp.Fix, "no-ui-imports-db") {
 		t.Errorf("fix missing rule ID: %q", resp.Fix)
+	}
+	// The source path must be package-relative, not just the filename.
+	if !strings.Contains(resp.Explanation, "internal/ui/handler.go") {
+		t.Errorf("explanation must use relative path, got: %q", resp.Explanation)
+	}
+}
+
+// TestRelativeSourcePath verifies the path extraction utility handles all cases.
+func TestRelativeSourcePath(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"/home/ubuntu/project/internal/mcp/handlers.go", "internal/mcp/handlers.go"},
+		{"/home/ubuntu/project/cmd/synapses/main.go", "cmd/synapses/main.go"},
+		{"/home/ubuntu/project/pkg/store/store.go", "pkg/store/store.go"},
+		{"/home/ubuntu/project/src/app/app.go", "src/app/app.go"},
+		// No known marker — fall back to base name only.
+		{"/random/path/to/file.go", "file.go"},
+		// Already relative — no leading slash, no marker match; returns base.
+		{"internal/ui/handler.go", "handler.go"},
+		// Empty string — filepath.Base("") returns ".", acceptable fallback.
+		{"", "."},
+	}
+	for _, tc := range cases {
+		got := relativeSourcePath(tc.input)
+		if got != tc.want {
+			t.Errorf("relativeSourcePath(%q) = %q, want %q", tc.input, got, tc.want)
+		}
 	}
 }
 
