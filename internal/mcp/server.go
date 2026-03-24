@@ -1270,6 +1270,7 @@ var standardTierTools = map[string]bool{
 	"annotate_node":         true,
 	"link_entities":         true,
 	"unlink_entities":       true,
+	"confirm_edge":          true,
 	// Standard additions.
 	"get_context":       true,
 	"find_entity":       true,
@@ -1985,6 +1986,37 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleUnlinkEntities,
+	)
+
+	// confirm_edge
+	s.addOrDefer(
+		mcp.NewTool(
+			"confirm_edge",
+			mcp.WithDescription(
+				"Approves or permanently rejects a cross-domain edge created by the name-matcher. "+
+					"Use this after reviewing MENTIONS edges surfaced by get_context to improve signal quality. "+
+					"Confirmed edges get confidence=1.0 and are never re-scored by the matcher. "+
+					"Rejected edges are suppressed immediately and permanently — "+
+					"they will not appear in future get_context results and the matcher will not re-create them.",
+			),
+			mcp.WithString("a",
+				mcp.Required(),
+				mcp.Description("Source entity of the edge: name or full node ID."),
+			),
+			mcp.WithString("b",
+				mcp.Required(),
+				mcp.Description("Target entity of the edge: name or full node ID."),
+			),
+			mcp.WithString("relation",
+				mcp.Required(),
+				mcp.Description("The edge type label, e.g. MENTIONS, DEPLOYS, CONSUMES. Must match exactly."),
+			),
+			mcp.WithBoolean("confirmed",
+				mcp.Required(),
+				mcp.Description("true to approve the edge (confidence → 1.0), false to reject it permanently."),
+			),
+		),
+		s.handleConfirmEdge,
 	)
 
 	// get_impact
