@@ -983,7 +983,10 @@ func Open(path string) (*Store, error) {
 	st.RebuildMemoryHNSW()
 	st.RebuildNodeHNSW()
 
-	if os.Getenv("SYNAPSES_QUERY_STATS") == "1" {
+	// D5: SQLite query plan diagnostics — run when SYNAPSES_QUERY_STATS=1 or
+	// SYNAPSES_DEBUG=1. Logs whether hot-path queries use indexes or full scans,
+	// catching accidental schema regressions (dropped indexes, planner changes).
+	if os.Getenv("SYNAPSES_QUERY_STATS") == "1" || os.Getenv("SYNAPSES_DEBUG") == "1" {
 		st.CollectQueryStats(os.Stderr)
 	}
 
