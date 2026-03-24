@@ -1,6 +1,7 @@
 package benchmark
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -205,6 +206,9 @@ func TestRunAll_FixtureGraph(t *testing.T) {
 	if result.Summary.ScenariosRun != 6 {
 		t.Errorf("ScenariosRun = %d, want 6", result.Summary.ScenariosRun)
 	}
+	if result.Summary.ScenariosErrored != 0 {
+		t.Errorf("ScenariosErrored = %d, want 0 — fixture graph should be large enough for all scenarios", result.Summary.ScenariosErrored)
+	}
 
 	// Verify structural properties of result.
 	if result.DurationMs < 0 {
@@ -330,5 +334,61 @@ func TestBuiltinScenarioNames(t *testing.T) {
 	names := BuiltinScenarioNames()
 	if len(names) != 6 {
 		t.Errorf("expected 6 built-in scenarios, got %d: %v", len(names), names)
+	}
+}
+
+// TestScenariosErrored verifies that the ScenariosErrored counter increments
+// when a scenario cannot run (graph too small / missing prerequisite data).
+func TestScenariosErrored_EmptyScenario(t *testing.T) {
+	t.Parallel()
+	g := graph.New("test-empty")
+	// Don't add any nodes — the scenario should error, not panic.
+	alwaysErr := Scenario{
+		Name:          "always-errors",
+		Description:   "test scenario",
+		PassThreshold: 1.0,
+		Run: func(g *graph.Graph, st *store.Store) ([]QueryResult, error) {
+			return nil, fmt.Errorf("no data available")
+		},
+	}
+
+	result := RunScenarios(g, nil, []Scenario{alwaysErr})
+	if result.Summary.ScenariosRun != 1 {
+		t.Errorf("ScenariosRun = %d, want 1", result.Summary.ScenariosRun)
+	}
+	if result.Summary.ScenariosErrored != 1 {
+		t.Errorf("ScenariosErrored = %d, want 1", result.Summary.ScenariosErrored)
+	}
+	if result.Summary.ScenariosPassed != 0 {
+		t.Errorf("ScenariosPassed = %d, want 0", result.Summary.ScenariosPassed)
+	}
+}
+
+// TestMemoryRecall_CleanupOnError verifies that benchmark memories inserted
+// before a failed operation are cleaned up by the defer, not left in the store.
+func TestMemoryRecall_CleanupOnError(t *testing.T) {
+	t.Parallel()
+	g := buildFixtureGraph(t)
+	st := openBenchTestStore(t, g)
+
+	// Run memory-recall once and confirm all memories are cleaned up.
+	queries, err := runMemoryRecall(g, st)
+	if err != nil {
+		t.Fatalf("runMemoryRecall: %v", err)
+	}
+	if len(queries) == 0 {
+		t.Fatal("expected results")
+	}
+
+	// After runMemoryRecall returns, all benchmark memories should be deleted.
+	// Searching for the distinctive benchmark content should return nothing.
+	found, err := st.SearchMemories("authentication token rotation", 10)
+	if err != nil {
+		t.Fatalf("SearchMemories after cleanup: %v", err)
+	}
+	for _, m := range found {
+		if m.Source == "benchmark" {
+			t.Errorf("benchmark memory %q still in store after runMemoryRecall returned — cleanup failed", m.ID)
+		}
 	}
 }

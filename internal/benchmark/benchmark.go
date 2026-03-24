@@ -30,13 +30,14 @@ type Result struct {
 
 // Summary aggregates across all scenarios.
 type Summary struct {
-	ScenariosRun    int     `json:"scenarios_run"`
-	ScenariosPassed int     `json:"scenarios_passed"`
-	AvgPrecision    float64 `json:"avg_precision"`
-	AvgRecall       float64 `json:"avg_recall"`
-	AvgF1           float64 `json:"avg_f1"`
-	AvgLatencyMs    float64 `json:"avg_latency_ms"`
-	P95LatencyMs    float64 `json:"p95_latency_ms"`
+	ScenariosRun     int     `json:"scenarios_run"`
+	ScenariosPassed  int     `json:"scenarios_passed"`
+	ScenariosErrored int     `json:"scenarios_errored"` // scenarios that could not run (graph too small, etc.)
+	AvgPrecision     float64 `json:"avg_precision"`
+	AvgRecall        float64 `json:"avg_recall"`
+	AvgF1            float64 `json:"avg_f1"`
+	AvgLatencyMs     float64 `json:"avg_latency_ms"`
+	P95LatencyMs     float64 `json:"p95_latency_ms"`
 }
 
 // ScenarioResult holds the outcome of a single scenario.
@@ -97,7 +98,9 @@ func RunScenarios(g *graph.Graph, st *store.Store, scenarios []Scenario) *Result
 		sr := runScenario(g, st, sc)
 		r.Scenarios = append(r.Scenarios, sr)
 
-		if sr.Passed {
+		if sr.Error != "" {
+			r.Summary.ScenariosErrored++
+		} else if sr.Passed {
 			r.Summary.ScenariosPassed++
 		}
 		for _, q := range sr.Queries {
@@ -223,24 +226,6 @@ func makeQueryResult(label string, expected, returned map[string]bool, latency t
 		Returned:  len(returned),
 		Relevant:  relevant,
 	}
-}
-
-// idSet converts a slice of strings to a set.
-func idSet(ids []string) map[string]bool {
-	s := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		s[id] = true
-	}
-	return s
-}
-
-// nodeIDSet converts a slice of graph.NodeID to a set of strings.
-func nodeIDSet(ids []graph.NodeID) map[string]bool {
-	s := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		s[string(id)] = true
-	}
-	return s
 }
 
 // BuiltinScenarios returns the standard set of scenarios shipped with Synapses.
