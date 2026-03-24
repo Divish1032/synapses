@@ -227,6 +227,13 @@ func (w *Walker) RegisterPlugin(extensions []string, command string, checker *Pl
 // parsers create a fresh sitter.Parser per call so there is no shared mutable
 // state between goroutines. Graph mutations are protected by Graph's own mutex.
 func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) {
+	// Canonicalize root so the mtime map keys match IncrementalReindex, which
+	// also canonicalizes. On macOS /var → /private/var via EvalSymlinks; without
+	// this, IncrementalReindex always sees every file as changed.
+	if canonical, evalErr := filepath.EvalSymlinks(root); evalErr == nil {
+		root = canonical
+	}
+
 	type fileJob struct {
 		path   string
 		parser LanguageParser

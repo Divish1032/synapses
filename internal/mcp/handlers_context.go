@@ -1305,7 +1305,7 @@ func (s *Server) asyncEnrichContext(
 			HasTests:        hasTests,
 			FanIn:           fanIn,
 		},
-		EnableLLM: s.config.Brain.ContextBuilder,
+		EnableLLM: s.config.Brain.ContextBuilderEnabled(),
 	})
 	brainDuration := time.Since(brainStart).Milliseconds()
 

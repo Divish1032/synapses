@@ -117,7 +117,7 @@ func (s *Server) warmBrainCache(changedFile string) {
 	ents := make([]*graph.Node, len(entities))
 	copy(ents, entities)
 	projID := s.projectID
-	enableLLM := s.config.Brain.ContextBuilder
+	enableLLM := s.config.Brain.ContextBuilderEnabled()
 	s.goBackground(func() {
 		for _, entity := range ents {
 			ctx30, cancel30 := context.WithTimeout(context.Background(), 30*time.Second)
