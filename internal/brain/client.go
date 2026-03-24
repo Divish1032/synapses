@@ -16,18 +16,46 @@ import (
 // Client wraps the in-process Brain implementation. It exposes the same method
 // signatures as the former HTTP client so all callers compile without changes.
 // Create with NewInProcess; always non-nil (uses NullBrain on failure).
+//
+// Background scheduling: when the brain is enabled, Client creates a SystemPulse
+// and a Scheduler. Low-priority background tasks (Ingest) are submitted to the
+// Scheduler as P2 tasks and executed by the drain goroutine only when system health
+// is Green. High-priority P0 tasks (BuildContextPacket, ExplainViolation) check
+// ShouldDegrade() before invoking the LLM to fast-fail under resource pressure.
 type Client struct {
-	brain Brain
+	brain     Brain
+	scheduler *Scheduler
+	pulse     *SystemPulse // owned by Client; nil when brain is disabled
 }
 
 // NewInProcess creates a Client backed by an in-process Brain. If cfg is nil or
 // cfg.Enabled is false, returns a Client wrapping NullBrain (all methods return
 // zero values). Never returns nil.
+//
+// When enabled, NewInProcess starts a SystemPulse (health monitor) and a Scheduler
+// (priority task queue). Both are stopped when Close() is called.
 func NewInProcess(cfg *brainconfig.BrainConfig) *Client {
 	if cfg == nil || !cfg.Enabled {
-		return &Client{brain: &NullBrain{}}
+		// NullBrain path: scheduler with nil pulse runs tasks immediately (no-op).
+		return &Client{
+			brain:     &NullBrain{},
+			scheduler: NewScheduler(nil),
+		}
 	}
-	return &Client{brain: New(*cfg)}
+
+	// Start system health monitoring so the scheduler can make health-aware
+	// decisions about when to run P1/P2 tasks.
+	pulse := NewSystemPulse()
+	pulse.Start()
+
+	sched := NewScheduler(pulse)
+	sched.Start()
+
+	return &Client{
+		brain:     New(*cfg),
+		scheduler: sched,
+		pulse:     pulse,
+	}
 }
 
 // NewClient is a backward-compatible constructor kept for callers that still use
@@ -36,7 +64,10 @@ func NewInProcess(cfg *brainconfig.BrainConfig) *Client {
 //
 // Deprecated: use NewInProcess.
 func NewClient(_ string, _ int) *Client {
-	return &Client{brain: &NullBrain{}}
+	return &Client{
+		brain:     &NullBrain{},
+		scheduler: NewScheduler(nil),
+	}
 }
 
 // HealthCheck returns ("ok", nil) when the brain is available, or an error when not.
@@ -47,9 +78,18 @@ func (c *Client) HealthCheck(_ context.Context) (string, error) {
 	return "", nil // NullBrain — brain disabled, not an error
 }
 
-// BuildContextPacket builds and returns an enriched context packet. Returns nil
-// if the brain is unavailable or returns an error.
+// BuildContextPacket builds and returns an enriched context packet.
+//
+// Returns nil when:
+//   - The brain is unavailable or returns an error.
+//   - System health is Red, or Yellow with no model loaded (ShouldDegrade).
+//     Callers fall back to raw Synapses context unchanged.
 func (c *Client) BuildContextPacket(ctx context.Context, req ContextPacketRequest) *ContextPacket {
+	// P0 degradation check: skip the LLM call if system is under memory pressure
+	// and no model is already loaded. Returning nil is the documented fallback.
+	if c.scheduler.ShouldDegrade() {
+		return nil
+	}
 	pkt, err := c.brain.BuildContextPacket(ctx, req)
 	if err != nil {
 		return nil
@@ -57,14 +97,34 @@ func (c *Client) BuildContextPacket(ctx context.Context, req ContextPacketReques
 	return pkt
 }
 
-// Ingest submits a code node for summarization. Fire-and-forget.
-func (c *Client) Ingest(ctx context.Context, req IngestRequest) {
-	_, _ = c.brain.Ingest(ctx, req)
+// Ingest submits a code node for semantic summarization.
+//
+// The request is enqueued as a P2 (IDLE priority) task via the Scheduler and
+// executed by the background drain goroutine when system health is Green.
+// Under Yellow or Red health, the task is deferred up to 15 minutes.
+//
+// The caller's ctx is intentionally not forwarded to the queued fn — the context
+// may expire before the task is eligible to run. The queued fn uses a fresh
+// background context so the LLM call succeeds when the drain goroutine fires.
+func (c *Client) Ingest(_ context.Context, req IngestRequest) {
+	// Build a stable dedup key: projectID + nodeID + task type.
+	key := req.ProjectID + ":" + req.NodeID + ":ingest"
+	c.scheduler.Submit(key, PriorityP2, func() {
+		_, _ = c.brain.Ingest(context.Background(), req)
+	})
 }
 
 // ExplainViolation returns (explanation, fix) for an architecture violation.
-// Returns ("", "") if the brain is unavailable.
+//
+// Returns ("", "") when:
+//   - The brain is unavailable.
+//   - System health warrants degradation (ShouldDegrade returns true).
 func (c *Client) ExplainViolation(ctx context.Context, req ViolationRequest) (string, string) {
+	// P0 degradation check: the caller (validate_plan handler) has a fallback
+	// rule-template message when explanation is empty.
+	if c.scheduler.ShouldDegrade() {
+		return "", ""
+	}
 	resp, err := c.brain.ExplainViolation(ctx, req)
 	if err != nil {
 		return "", ""
@@ -191,8 +251,18 @@ func (c *Client) BrainHealth() map[string]interface{} {
 	}
 }
 
-// Close shuts down the in-process brain, releasing resources.
+// Close shuts down the in-process brain, scheduler, and system pulse,
+// releasing all associated resources.
 func (c *Client) Close() {
+	// Stop the scheduler first so no new tasks are dispatched after brain close.
+	if c.scheduler != nil {
+		c.scheduler.Stop()
+	}
+	// Stop the system pulse sampler.
+	if c.pulse != nil {
+		c.pulse.Stop()
+	}
+	// Close the brain (releases LLM client, SQLite store).
 	if closer, ok := c.brain.(io.Closer); ok {
 		_ = closer.Close()
 	}
