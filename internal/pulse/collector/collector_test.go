@@ -507,6 +507,88 @@ func TestWriteBatch_ToolCall_EmptyAgentID(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 }
 
+// TestOutcomeSignal_QualityScoreUpdatedAfterFlush verifies that the entity
+// quality score is updated AFTER the outcome signal is flushed to the DB —
+// not at enqueue time. This is the regression test for the Sprint 15 #2 bug
+// where UpdateEntityQualityScore was called before RecordOutcomeSignal's
+// async flush, causing the score to always miss the triggering signal.
+func TestOutcomeSignal_QualityScoreUpdatedAfterFlush(t *testing.T) {
+	s := testStore(t)
+	c := New(s, 100, 500)
+	c.Start()
+
+	c.RecordOutcomeSignal(pulsetypes.OutcomeSignalEvent{
+		Entity:       "AuthService",
+		ProjectID:    "proj-1",
+		SignalType:   "task_done",
+		Count:        1,
+		SignalWeight: 1.0,
+	})
+
+	// Stop triggers a final flush, ensuring the signal AND quality update are committed.
+	c.Stop()
+
+	score, ok := s.GetEntityQualityScore("AuthService", "proj-1")
+	if !ok {
+		t.Fatal("expected entity_quality row to exist after flush")
+	}
+	if score != 1.0 {
+		t.Errorf("quality score = %.2f, want 1.0 (the task_done signal_weight)", score)
+	}
+}
+
+// TestOutcomeSignal_NegativeSignalReducesScore verifies that a negative signal
+// (correction/abandoned) reduces the quality score below zero.
+func TestOutcomeSignal_NegativeSignalReducesScore(t *testing.T) {
+	s := testStore(t)
+	c := New(s, 100, 500)
+	c.Start()
+
+	c.RecordOutcomeSignal(pulsetypes.OutcomeSignalEvent{
+		Entity:       "BadEntity",
+		ProjectID:    "proj-1",
+		SignalType:   "task_abandoned",
+		Count:        1,
+		SignalWeight: -0.8,
+	})
+	c.Stop()
+
+	score, ok := s.GetEntityQualityScore("BadEntity", "proj-1")
+	if !ok {
+		t.Fatal("expected entity_quality row to exist after flush")
+	}
+	if score >= 0 {
+		t.Errorf("quality score = %.2f, want negative (task_abandoned penalty)", score)
+	}
+}
+
+// TestOutcomeSignal_MultipleSignalsAccumulate verifies that successive signals
+// accumulate correctly — each flush picks up all prior signals.
+func TestOutcomeSignal_MultipleSignalsAccumulate(t *testing.T) {
+	s := testStore(t)
+	c := New(s, 100, 500)
+	c.Start()
+
+	// Two positive signals: total weight should be 2.0
+	c.RecordOutcomeSignal(pulsetypes.OutcomeSignalEvent{
+		Entity: "GoodFunc", ProjectID: "proj-1",
+		SignalType: "task_done", Count: 1, SignalWeight: 1.0,
+	})
+	c.RecordOutcomeSignal(pulsetypes.OutcomeSignalEvent{
+		Entity: "GoodFunc", ProjectID: "proj-1",
+		SignalType: "task_done", Count: 1, SignalWeight: 1.0,
+	})
+	c.Stop()
+
+	score, ok := s.GetEntityQualityScore("GoodFunc", "proj-1")
+	if !ok {
+		t.Fatal("expected entity_quality row to exist")
+	}
+	if score != 2.0 {
+		t.Errorf("quality score = %.2f, want 2.0 (two task_done signals)", score)
+	}
+}
+
 func TestComputeCostSaved_WithPricingLookup(t *testing.T) {
 	s := testStore(t)
 	c := New(s, 100, 500)
