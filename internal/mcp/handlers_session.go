@@ -1493,10 +1493,14 @@ func (s *Server) handleSessionInit(
 		// cross-domain connections). No IsCrossDomainEdge filtering needed —
 		// that would silently exclude user-defined custom relation strings.
 		var autoEdges, confirmedEdges, manualEdges int
+		var cdStatsErr string
 		if s.store != nil {
-			// Errors are non-fatal: stats degrade to zero rather than
-			// breaking session_init for all agents on a DB hiccup.
-			autoEdges, confirmedEdges, manualEdges, _ = s.store.CrossDomainEdgeStats()
+			var err error
+			autoEdges, confirmedEdges, manualEdges, err = s.store.CrossDomainEdgeStats()
+			if err != nil {
+				logutil.Warn("session_init: CrossDomainEdgeStats: %v\n", err)
+				cdStatsErr = "cross-domain stats temporarily unavailable"
+			}
 		}
 		total := autoEdges + confirmedEdges + manualEdges
 
@@ -1520,6 +1524,9 @@ func (s *Server) handleSessionInit(
 				"total":     total,
 			},
 			"freshness": freshness,
+		}
+		if cdStatsErr != "" {
+			kgSection["stats_error"] = cdStatsErr
 		}
 		// Guide agents toward confirm_edge when unreviewed auto edges exist.
 		if autoEdges > 0 {

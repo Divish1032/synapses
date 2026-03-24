@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -106,6 +107,25 @@ type Matcher struct {
 // New creates a Matcher. brainClient may be nil (brain-enhanced path is optional).
 func New(brainClient *brain.Client) *Matcher {
 	return &Matcher{brainClient: brainClient}
+}
+
+// PrimeCrossDomain scans g once to determine whether any non-code-domain
+// entities are already present. Must be called after the graph is loaded from
+// disk so that subsequent incremental reindex events with code-only changed
+// files are not incorrectly skipped by the hasCrossDomain gate.
+//
+// Safe to call concurrently — reads g under its own lock and writes via an
+// atomic store. Idempotent: calling more than once is harmless.
+func (m *Matcher) PrimeCrossDomain(g *graph.Graph) {
+	if g == nil || m.hasCrossDomain.Load() {
+		return // already primed or nothing to scan
+	}
+	for _, n := range g.AllNodes() {
+		if n.Domain != graph.DomainCode && n.Domain != "" {
+			m.hasCrossDomain.Store(true)
+			return
+		}
+	}
 }
 
 // RunAsync implements watcher.NameMatcherRunner.
@@ -323,12 +343,18 @@ func orderEdge(a, b *graph.Node) (*graph.Node, *graph.Node) {
 // that already exceed minConfidence on heuristics alone.
 // Returns the boosted confidence if the brain validates the match, or the original
 // confidence if unavailable or it rejects. Best-effort: any error returns baseConf.
+// brainEnhanceTimeout caps each LLM call so a hanging brain API cannot stall
+// the entire namematcher pass. 5 s is generous for a YES/NO answer.
+const brainEnhanceTimeout = 5 * time.Second
+
 func (m *Matcher) brainEnhance(ctx context.Context, a, b *graph.Node, baseConf float64) float64 {
 	prompt := "Do these two entities refer to the same concept? Answer YES or NO only.\n" +
 		"Entity 1: " + a.Name + " (domain=" + string(a.Domain) + ", type=" + string(a.Type) + ", file=" + filepath.Base(a.File) + ")\n" +
 		"Entity 2: " + b.Name + " (domain=" + string(b.Domain) + ", type=" + string(b.Type) + ", file=" + filepath.Base(b.File) + ")"
 
-	resp, err := m.brainClient.Generate(ctx, prompt)
+	callCtx, cancel := context.WithTimeout(ctx, brainEnhanceTimeout)
+	defer cancel()
+	resp, err := m.brainClient.Generate(callCtx, prompt)
 	if err != nil {
 		return baseConf
 	}
