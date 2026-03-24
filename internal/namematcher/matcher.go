@@ -40,6 +40,21 @@ const (
 	minNameLen = 4
 )
 
+// crossDomainExts is the set of file extensions that produce non-code domain
+// entities. A batch containing any of these extensions always triggers the
+// name-matching pass regardless of hasCrossDomain state.
+var crossDomainExts = map[string]bool{
+	".tf":      true, // Terraform (DomainInfra)
+	".hcl":     true, // HCL (DomainInfra)
+	".graphql": true, // GraphQL (DomainAPI)
+	".gql":     true, // GraphQL (DomainAPI)
+	".json":    true, // OpenAPI / JSON schemas (DomainAPI)
+	".yaml":    true, // OpenAPI YAML (DomainAPI)
+	".yml":     true, // OpenAPI YAML (DomainAPI)
+	".md":      true, // Markdown documentation (DomainDocs)
+	".rst":     true, // reStructuredText documentation (DomainDocs)
+}
+
 // skipNodeTypes contains node types that should not be matched.
 // These are structural containers, not semantic entities.
 var skipNodeTypes = map[graph.NodeType]bool{
@@ -62,15 +77,30 @@ var semanticTypeCorrelations = [][2]string{
 	{"docs:section", "code:struct"},
 }
 
+// domainWeight defines BFS traversal priority for edge ordering.
+// Heavier domains (code) are edge sources; lighter domains (docs) are targets.
+// Package-level to avoid per-call map allocation in orderEdge.
+var domainWeight = map[graph.DomainType]int{
+	graph.DomainCode:  4,
+	graph.DomainAPI:   3,
+	graph.DomainInfra: 2,
+	graph.DomainDocs:  1,
+}
+
 // Matcher scans the graph after each reindex and creates MENTIONS edges
 // between entities that share the same logical name across domains.
 //
 // At most one pass runs at a time — if a new reindex completes while a prior
 // pass is still running, the new trigger is silently dropped. The next reindex
 // will trigger a fresh pass, so no data is permanently lost.
+//
+// The pass is skipped entirely when changedFiles contains only code-domain
+// files AND no cross-domain entities have ever been observed in the graph.
+// This avoids wasteful full-graph scans on code-only projects.
 type Matcher struct {
-	brainClient *brain.Client // optional — nil means no LLM validation
-	running     atomic.Int32  // 1 while RunAsync is executing; CAS guards single-flight
+	brainClient    *brain.Client // optional — nil means no LLM validation
+	running        atomic.Int32  // 1 while RunAsync is executing; CAS guards single-flight
+	hasCrossDomain atomic.Bool   // true once a non-code domain entity is observed in the graph
 }
 
 // New creates a Matcher. brainClient may be nil (brain-enhanced path is optional).
@@ -79,14 +109,30 @@ func New(brainClient *brain.Client) *Matcher {
 }
 
 // RunAsync implements watcher.NameMatcherRunner.
-// Scans g for cross-domain name matches, scores candidate pairs, and
-// creates MENTIONS edges with confidence >= minConfidence via st.
+//
+// changedFiles is the list of files processed in the triggering applyBatch.
+// Pass nil to indicate a full re-walk (all domains affected — always run).
+//
+// The pass is skipped when changedFiles contains only code files AND no
+// cross-domain entities have ever been observed, avoiding unnecessary work on
+// code-only projects. Once a cross-domain entity is seen (hasCrossDomain=true),
+// the check is never re-enabled — cross-domain entities typically persist.
+//
 // At most one invocation runs at a time — concurrent calls return immediately.
 // Respects ctx cancellation. All errors are logged and skipped (fail-open).
-func (m *Matcher) RunAsync(ctx context.Context, g *graph.Graph, st *store.Store) {
+func (m *Matcher) RunAsync(ctx context.Context, g *graph.Graph, st *store.Store, changedFiles []string) {
 	if g == nil || st == nil {
 		return
 	}
+
+	// Domain-relevance gate: skip if no cross-domain files changed and no
+	// cross-domain entities have been seen yet. This avoids a full graph scan
+	// on every .go file save in a code-only project.
+	// nil changedFiles = full re-walk; always run.
+	if changedFiles != nil && !m.hasCrossDomain.Load() && !hasCrossDomainFiles(changedFiles) {
+		return
+	}
+
 	// Single-flight guard: if a prior pass is still running, drop this trigger.
 	// The next applyBatch will fire another trigger so no data is permanently skipped.
 	if !m.running.CompareAndSwap(0, 1) {
@@ -122,6 +168,12 @@ func (m *Matcher) RunAsync(ctx context.Context, g *graph.Graph, st *store.Store)
 		case graph.DomainCode, graph.DomainInfra, graph.DomainAPI, graph.DomainDocs:
 		default:
 			continue
+		}
+		// Record the first time a non-code entity is observed so future
+		// code-only batches still trigger the pass (new code entity may match
+		// an existing infra/api/docs entity).
+		if n.Domain != graph.DomainCode {
+			m.hasCrossDomain.Store(true)
 		}
 		if n.Name == "" {
 			continue
@@ -203,6 +255,17 @@ func (m *Matcher) RunAsync(ctx context.Context, g *graph.Graph, st *store.Store)
 	}
 }
 
+// hasCrossDomainFiles returns true if any file in the list has an extension
+// associated with a non-code domain (infra, api, docs).
+func hasCrossDomainFiles(files []string) bool {
+	for _, f := range files {
+		if crossDomainExts[strings.ToLower(filepath.Ext(f))] {
+			return true
+		}
+	}
+	return false
+}
+
 // scoreMatch computes a confidence score (0.0-1.0) for a cross-domain name match.
 func scoreMatch(a, b *graph.Node) float64 {
 	score := baseConfidence
@@ -246,14 +309,9 @@ func isSemanticallyCorrrelated(a, b *graph.Node) bool {
 // orderEdge returns (from, to) so that the MENTIONS edge points from the
 // "heavier" domain (code) toward the "lighter" domain (infra/api/docs).
 // This makes BFS traversal consistent and predictable.
+// Uses package-level domainWeight to avoid per-call map allocation.
 func orderEdge(a, b *graph.Node) (*graph.Node, *graph.Node) {
-	weight := map[graph.DomainType]int{
-		graph.DomainCode:  4,
-		graph.DomainAPI:   3,
-		graph.DomainInfra: 2,
-		graph.DomainDocs:  1,
-	}
-	if weight[a.Domain] >= weight[b.Domain] {
+	if domainWeight[a.Domain] >= domainWeight[b.Domain] {
 		return a, b
 	}
 	return b, a
