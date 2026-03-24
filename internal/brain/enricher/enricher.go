@@ -221,6 +221,7 @@ func (e *Enricher) Enrich(ctx context.Context, req Request) (Response, error) {
 		// LLM unavailable — return deterministic fields, no error (fail-silent).
 		return resp, nil
 	}
+	atomic.AddUint64(&e.ollamaCalls, 1)
 
 	result, parseErr := parseInsight(raw)
 	if parseErr != nil {
@@ -228,8 +229,6 @@ func (e *Enricher) Enrich(ctx context.Context, req Request) (Response, error) {
 		// Unparseable response — deterministic fields still delivered.
 		return resp, nil
 	}
-
-	atomic.AddUint64(&e.ollamaCalls, 1)
 
 	// Merge LLM result into response. Deterministic Phase wins over any LLM-inferred value.
 	resp.RootSummary = result.RootSummary
