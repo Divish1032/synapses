@@ -114,14 +114,13 @@ func (c *LocalClient) WithThinking(enabled bool) *LocalClient {
 // ---------------------------------------------------------------------------
 
 // Generate runs inference on prompt and returns the decoded response text.
-// Thread-safe: serialised via mu.
+// Thread-safe: mu is held only for the guard reads; inferSem serialises the
+// actual CGo call outside the lock so context cancellation at the semaphore
+// does not strand the next caller.
 func (c *LocalClient) Generate(ctx context.Context, prompt string) (string, error) {
 	if !c.available || c.model == nil {
 		return "", errors.New("local LLM: model not loaded")
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	// Check context cancellation before entering CGo.
 	select {
