@@ -581,6 +581,130 @@ func TestToDirectionalContext_RelatedNode(t *testing.T) {
 	}
 }
 
+// ── toDirectionalContext: CrossDomain bucket (Sprint 16 #4) ──────────────────
+
+func TestToDirectionalContext_InfraDomainGoesToCrossDomain(t *testing.T) {
+	codeNode := &graph.Node{ID: "root", Name: "DeployService", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	infraNode := &graph.Node{ID: "infra", Name: "aws_lambda", Type: graph.NodeFunction, Domain: graph.DomainInfra}
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: codeNode}, {Node: infraNode},
+		},
+		Edges: []*graph.Edge{
+			{From: "root", To: "infra", Type: graph.EdgeDeploys},
+		},
+	}
+	dc := toDirectionalContext(sg)
+
+	if len(dc.CrossDomain) == 0 {
+		t.Error("expected infra node in CrossDomain bucket")
+	}
+	if dc.CrossDomain[0].Node.Name != "aws_lambda" {
+		t.Errorf("expected aws_lambda in CrossDomain, got %q", dc.CrossDomain[0].Node.Name)
+	}
+	if len(dc.Related) != 0 {
+		t.Errorf("infra node should not be in Related bucket, got %d nodes", len(dc.Related))
+	}
+}
+
+func TestToDirectionalContext_APIDomainGoesToCrossDomain(t *testing.T) {
+	codeNode := &graph.Node{ID: "root", Name: "CallAPI", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	apiNode := &graph.Node{ID: "api", Name: "POST /users", Type: graph.NodeFunction, Domain: graph.DomainAPI}
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: codeNode}, {Node: apiNode},
+		},
+		Edges: []*graph.Edge{
+			{From: "root", To: "api", Type: graph.EdgeConsumes},
+		},
+	}
+	dc := toDirectionalContext(sg)
+
+	if len(dc.CrossDomain) == 0 {
+		t.Error("expected API node in CrossDomain bucket")
+	}
+	if len(dc.Related) != 0 {
+		t.Errorf("API node should not be in Related bucket, got %d nodes", len(dc.Related))
+	}
+}
+
+func TestToDirectionalContext_CodeNodeGoesToRelatedNotCrossDomain(t *testing.T) {
+	codeNode := &graph.Node{ID: "root", Name: "Root", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	siblingCode := &graph.Node{ID: "sibling", Name: "Helper", Type: graph.NodeFunction, Domain: graph.DomainCode}
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: codeNode}, {Node: siblingCode},
+		},
+		Edges: []*graph.Edge{
+			{From: "sibling", To: "root", Type: graph.EdgeImplements},
+		},
+	}
+	dc := toDirectionalContext(sg)
+
+	if len(dc.CrossDomain) != 0 {
+		t.Errorf("code domain node should not be in CrossDomain bucket, got %d nodes", len(dc.CrossDomain))
+	}
+	if len(dc.Related) == 0 {
+		t.Error("code domain node should be in Related bucket")
+	}
+}
+
+func TestToDirectionalContext_EmptyDomainTreatedAsCode(t *testing.T) {
+	// Nodes with empty Domain field default to code domain — should go to Related.
+	codeNode := &graph.Node{ID: "root", Name: "Root", Type: graph.NodeFunction}
+	nodomainNode := &graph.Node{ID: "nodomain", Name: "NoDomain", Type: graph.NodeFunction} // Domain is ""
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: codeNode}, {Node: nodomainNode},
+		},
+		Edges: []*graph.Edge{},
+	}
+	dc := toDirectionalContext(sg)
+
+	if len(dc.CrossDomain) != 0 {
+		t.Errorf("empty-domain node should not be in CrossDomain bucket (defaults to code), got %d", len(dc.CrossDomain))
+	}
+	if len(dc.Related) == 0 {
+		t.Error("empty-domain node should be in Related bucket")
+	}
+}
+
+func TestToDirectionalContext_CrossDomainSortedByRelevance(t *testing.T) {
+	root := &graph.Node{ID: "root", Name: "Root", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	infra1 := &graph.Node{ID: "infra1", Name: "Resource1", Type: graph.NodeFunction, Domain: graph.DomainInfra}
+	infra2 := &graph.Node{ID: "infra2", Name: "Resource2", Type: graph.NodeFunction, Domain: graph.DomainInfra}
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: root, Relevance: 1.0},
+			{Node: infra1, Relevance: 0.3}, // lower relevance
+			{Node: infra2, Relevance: 0.7}, // higher relevance
+		},
+		Edges: []*graph.Edge{},
+	}
+	dc := toDirectionalContext(sg)
+
+	if len(dc.CrossDomain) != 2 {
+		t.Fatalf("expected 2 cross-domain nodes, got %d", len(dc.CrossDomain))
+	}
+	// Should be sorted descending by relevance: infra2 (0.7) before infra1 (0.3)
+	if dc.CrossDomain[0].Node.Name != "Resource2" {
+		t.Errorf("expected Resource2 (higher relevance) first, got %q", dc.CrossDomain[0].Node.Name)
+	}
+	if dc.CrossDomain[1].Node.Name != "Resource1" {
+		t.Errorf("expected Resource1 (lower relevance) second, got %q", dc.CrossDomain[1].Node.Name)
+	}
+}
+
 // ── handleGetWorkingState ─────────────────────────────────────────────────────
 
 func TestHandleGetWorkingState_NonGitDir(t *testing.T) {

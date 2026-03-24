@@ -267,6 +267,28 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 				}
 			}
 
+			// Sprint 16 #4: apply cross-domain decay in PPR adjacency construction.
+			// Reduces the transition weight for cross-domain edges so PPR assigns lower
+			// rank to nodes in other domains relative to same-domain nodes at equal
+			// structural distance. Mirrors the BFS cross-domain decay behaviour.
+			if cfg.CrossDomainDecay > 0 && cfg.CrossDomainDecay < 1 {
+				currNode := g.nodes[id]
+				neighNode := g.nodes[nb]
+				if currNode != nil && neighNode != nil {
+					currDomain := currNode.Domain
+					if currDomain == "" {
+						currDomain = DomainCode
+					}
+					neighDomain := neighNode.Domain
+					if neighDomain == "" {
+						neighDomain = DomainCode
+					}
+					if currDomain != neighDomain {
+						w *= cfg.CrossDomainDecay
+					}
+				}
+			}
+
 			adj[id] = append(adj[id], nbEntry{nb, w})
 			outWeightSum[id] += w
 		}
@@ -539,6 +561,29 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 				neighbor := e.To
 				if e.To == curr.id {
 					neighbor = e.From
+				}
+
+				// Sprint 16 #4: apply cross-domain decay when BFS crosses a domain boundary.
+				// When a node in one domain (e.g. code) links to a node in another domain
+				// (e.g. infra, api), multiply relevance by CrossDomainDecay so cross-domain
+				// neighbors rank lower than same-domain neighbors at equal structural distance.
+				// Only applied when CrossDomainDecay is in (0, 1) and both nodes are visible.
+				if cfg.CrossDomainDecay > 0 && cfg.CrossDomainDecay < 1 {
+					currNode := g.nodes[curr.id]
+					neighNode := g.nodes[neighbor]
+					if currNode != nil && neighNode != nil {
+						currDomain := currNode.Domain
+						if currDomain == "" {
+							currDomain = DomainCode
+						}
+						neighDomain := neighNode.Domain
+						if neighDomain == "" {
+							neighDomain = DomainCode
+						}
+						if currDomain != neighDomain {
+							relevance *= cfg.CrossDomainDecay
+						}
+					}
 				}
 
 				// Directional CALLS boost — intent-aware:
@@ -999,6 +1044,13 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 		}
 	}
 
+	// Sprint 16 #5: cross-domain impact analysis.
+	// Collect entities reachable from root via cross-domain edges in one hop.
+	// Edges have already been filtered at injection time (suppressed edges are never
+	// injected; namematcher enforces confidence >= 0.6), so all edges present in
+	// the in-memory graph already satisfy the confidence threshold.
+	crossDomainImpact := collectCrossDomainImpact(g, rootID)
+
 	return &ImpactResult{
 		Root: EntityRef{
 			ID:   rootID,
@@ -1007,11 +1059,119 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 			File: root.File,
 			Line: root.Line,
 		},
-		Tiers:         tiers,
-		TotalAffected: total,
-		AffectedFiles: files,
-		Truncated:     anyTruncated,
+		Tiers:             tiers,
+		TotalAffected:     total,
+		AffectedFiles:     files,
+		Truncated:         anyTruncated,
+		CrossDomainImpact: crossDomainImpact,
 	}, nil
+}
+
+// CrossDomainImpactForNode returns the cross-domain entities directly reachable
+// from nodeID via cross-domain edges. It is the public entry point used by
+// the struct/interface aggregation path in handleGetImpact.
+func (g *Graph) CrossDomainImpactForNode(nodeID NodeID) []CrossDomainRef {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return collectCrossDomainImpact(g, nodeID)
+}
+
+// maxCrossDomainImpactNodes caps the number of cross-domain refs returned by
+// collectCrossDomainImpact to keep response sizes bounded.
+const maxCrossDomainImpactNodes = 100
+
+// collectCrossDomainImpact finds entities reachable from root in one hop via
+// cross-domain edges and returns them as CrossDomainRef slices.
+//
+// Forward edges followed (root → target):
+//   - DEPLOYS  → infra resources that may break if code changes
+//   - CONSUMES → API endpoints consumed by this code
+//   - CONFIGURED_BY → config entities that govern this code
+//   - MENTIONS → name-match entities (bidirectional, so also reverse)
+//   - MANUAL   → user-defined relationships
+//
+// Reverse edges followed (target → root, i.e. root is the target):
+//   - DOCUMENTS → doc sections that document this entity (may become stale)
+//   - MENTIONS  → entities that mention this entity by name
+//
+// Caller must hold g.mu.RLock.
+func collectCrossDomainImpact(g *Graph, rootID NodeID) []CrossDomainRef {
+	seen := make(map[NodeID]bool)
+	seen[rootID] = true
+	var refs []CrossDomainRef
+
+	// Forward: root → target via cross-domain outEdges.
+	for _, e := range g.outEdges[rootID] {
+		if !IsCrossDomainEdge(e.Type) {
+			continue
+		}
+		if seen[e.To] {
+			continue
+		}
+		n := g.nodes[e.To]
+		if n == nil {
+			continue
+		}
+		seen[e.To] = true
+		refs = append(refs, CrossDomainRef{
+			EntityRef: EntityRef{
+				ID:   e.To,
+				Name: n.Name,
+				Type: n.Type,
+				File: n.File,
+				Line: n.Line,
+			},
+			EdgeType: e.Type,
+			Category: CrossDomainCategory(e.Type),
+		})
+		if len(refs) >= maxCrossDomainImpactNodes {
+			return sortCrossDomainRefs(refs)
+		}
+	}
+
+	// Reverse: find entities whose cross-domain outEdge points TO root.
+	// This surfaces doc sections that DOCUMENT this entity and name-match
+	// entities that MENTION this entity — both become stale if root changes.
+	for _, e := range g.inEdges[rootID] {
+		if e.Type != EdgeDocuments && e.Type != EdgeMentions && e.Type != EdgeManual {
+			continue
+		}
+		if seen[e.From] {
+			continue
+		}
+		n := g.nodes[e.From]
+		if n == nil {
+			continue
+		}
+		seen[e.From] = true
+		refs = append(refs, CrossDomainRef{
+			EntityRef: EntityRef{
+				ID:   e.From,
+				Name: n.Name,
+				Type: n.Type,
+				File: n.File,
+				Line: n.Line,
+			},
+			EdgeType: e.Type,
+			Category: CrossDomainCategory(e.Type),
+		})
+		if len(refs) >= maxCrossDomainImpactNodes {
+			return sortCrossDomainRefs(refs)
+		}
+	}
+
+	return sortCrossDomainRefs(refs)
+}
+
+// sortCrossDomainRefs sorts cross-domain refs by category then name for stable output.
+func sortCrossDomainRefs(refs []CrossDomainRef) []CrossDomainRef {
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Category != refs[j].Category {
+			return refs[i].Category < refs[j].Category
+		}
+		return refs[i].Name < refs[j].Name
+	})
+	return refs
 }
 
 // testFileSuffixes covers test file conventions for Go, TypeScript, and JavaScript.

@@ -61,10 +61,10 @@ func newSubgraphCache() *subgraphCache {
 // a call without enrichment does not collide with an enriched call for the
 // same entity (they produce different Relevance scores in CarvedNode).
 func cacheKeyFor(rootID NodeID, cfg CarveConfig, fingerprint string) string {
-	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f|emb:%v|qs:%v",
+	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f|%.4f|emb:%v|qs:%v",
 		rootID, cfg.MaxDepth, cfg.TokenBudget, cfg.MinRelevance, cfg.DecayFactor,
 		cfg.DirectionBoost, cfg.IntentID, fingerprint, cfg.UsePPR, cfg.Alpha,
-		cfg.HybridLambda,
+		cfg.HybridLambda, cfg.CrossDomainDecay,
 		cfg.EmbeddingLookup != nil,
 		cfg.QualityScoreLookup != nil)
 }
