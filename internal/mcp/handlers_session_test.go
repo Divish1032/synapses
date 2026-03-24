@@ -1372,7 +1372,7 @@ func TestBudgetMultiplier_Integration_PrepareContext(t *testing.T) {
 // ── knowledge_graph stats (Sprint 16 #6) ─────────────────────────────────────
 
 // TestSessionInit_KnowledgeGraph_EmptyGraph verifies that session_init includes
-// a knowledge_graph section even when no non-code-domain nodes exist yet.
+// a knowledge_graph section in full mode even with no non-code-domain nodes.
 func TestSessionInit_KnowledgeGraph_EmptyGraph(t *testing.T) {
 	s := newTestServer(t)
 	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-agent"}))
@@ -1380,20 +1380,31 @@ func TestSessionInit_KnowledgeGraph_EmptyGraph(t *testing.T) {
 
 	kg, ok := m["knowledge_graph"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected knowledge_graph map in session_init response, got %T — keys: %v",
+		t.Fatalf("expected knowledge_graph map in full-mode session_init, got %T — keys: %v",
 			m["knowledge_graph"], mapKeys(m))
 	}
-	if kg["entities_by_domain"] == nil {
-		t.Error("expected entities_by_domain key in knowledge_graph")
+	for _, key := range []string{"entities_by_domain", "active_domains", "cross_domain_edges", "freshness"} {
+		if kg[key] == nil {
+			t.Errorf("expected %q key in knowledge_graph", key)
+		}
 	}
-	if kg["active_domains"] == nil {
-		t.Error("expected active_domains key in knowledge_graph")
+	// Freshness should say "live" not "current" (watcher live-indexes).
+	if fs, _ := kg["freshness"].(string); !strings.HasPrefix(fs, "live") {
+		t.Errorf("expected freshness to start with 'live', got %q", fs)
 	}
-	if kg["cross_domain_edges"] == nil {
-		t.Error("expected cross_domain_edges key in knowledge_graph")
-	}
-	if kg["freshness"] == nil {
-		t.Error("expected freshness key in knowledge_graph")
+}
+
+// TestSessionInit_KnowledgeGraph_QuickMode verifies that knowledge_graph is
+// omitted in scope=quick to honour the minimal-token contract.
+func TestSessionInit_KnowledgeGraph_QuickMode(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "kg-quick",
+		"scope":    "quick",
+	}))
+	m := mustResult(t, res, err)
+	if _, present := m["knowledge_graph"]; present {
+		t.Error("knowledge_graph must be absent in scope=quick to preserve token budget")
 	}
 }
 
@@ -1555,5 +1566,83 @@ func TestSessionInit_KnowledgeGraph_ConfirmedEdge(t *testing.T) {
 	}
 	if got := getInt("auto"); got != 0 {
 		t.Errorf("expected auto=0 after confirm, got %d", got)
+	}
+}
+
+// TestSessionInit_KnowledgeGraph_HintForAutoEdges verifies that a hint field
+// appears when unreviewed auto-detected edges exist, pointing agents to confirm_edge.
+func TestSessionInit_KnowledgeGraph_HintForAutoEdges(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	codeID := g.MakeNodeID("cmd/main.go", "main")
+	g.AddNode(&graph.Node{ID: codeID, Type: graph.NodeFunction, Name: "main",
+		File: "cmd/main.go", Domain: graph.DomainCode})
+	infraID := g.MakeNodeID("infra/main.tf", "web")
+	g.AddNode(&graph.Node{ID: infraID, Type: graph.NodeFunction, Name: "web",
+		File: "infra/main.tf", Domain: graph.DomainInfra})
+
+	// One unreviewed auto edge → hint must appear.
+	if _, err := st.SaveSyntheticEdge(codeID, infraID, graph.EdgeMentions, 0.8); err != nil {
+		t.Fatalf("SaveSyntheticEdge: %v", err)
+	}
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-hint"}))
+	m := mustResult(t, res, err)
+
+	kg := m["knowledge_graph"].(map[string]any)
+	hint, _ := kg["hint"].(string)
+	if !strings.Contains(hint, "confirm_edge") {
+		t.Errorf("expected hint mentioning confirm_edge when auto edges exist, got %q", hint)
+	}
+}
+
+// TestSessionInit_KnowledgeGraph_CustomRelationCounted verifies that a
+// user-created edge with a custom relation string (not in EdgeTypeCatalog) is
+// still counted under "manual" — not silently dropped.
+func TestSessionInit_KnowledgeGraph_CustomRelationCounted(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	codeID := g.MakeNodeID("cmd/main.go", "main")
+	g.AddNode(&graph.Node{ID: codeID, Type: graph.NodeFunction, Name: "main",
+		File: "cmd/main.go", Domain: graph.DomainCode})
+	docsID := g.MakeNodeID("README.md", "intro")
+	g.AddNode(&graph.Node{ID: docsID, Type: graph.NodeSection, Name: "intro",
+		File: "README.md", Domain: graph.DomainDocs})
+
+	// Custom relation not in EdgeTypeCatalog — must still count as manual.
+	if _, err := st.SaveManualEdge(codeID, docsID, "REFERENCES", "docs", "agent-x", 1.0, true); err != nil {
+		t.Fatalf("SaveManualEdge custom: %v", err)
+	}
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-custom"}))
+	m := mustResult(t, res, err)
+
+	kg := m["knowledge_graph"].(map[string]any)
+	cde := kg["cross_domain_edges"].(map[string]any)
+	manual := int(cde["manual"].(float64))
+	total := int(cde["total"].(float64))
+	if manual != 1 {
+		t.Errorf("expected manual=1 for custom relation, got %d (custom relations must not be silently dropped)", manual)
+	}
+	if total != 1 {
+		t.Errorf("expected total=1, got %d", total)
 	}
 }
