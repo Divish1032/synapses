@@ -280,7 +280,10 @@ func (b *BrainConfig) ToBrainConfig() *config.BrainConfig {
 		DBPath:           b.DBPath,
 		Ingest:           b.Ingest,
 		Enrich:           b.Enrich,
-		ContextBuilder:   b.ContextBuilder,
+		// D3: ContextBuilder defaults on when brain is enabled unless explicitly
+		// disabled in user config. This activates LLM-assembled context packets
+		// for all users who have already opted into brain intelligence.
+		ContextBuilder: b.ContextBuilder || b.Enabled,
 	}
 }
 
