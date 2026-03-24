@@ -2677,15 +2677,36 @@ type ManualEdge struct {
 }
 
 // SaveManualEdge persists a user-defined edge. Upserts on (from_id, to_id, relation).
-// Returns the edge immediately so callers can inject it into the in-memory graph.
-func (s *Store) SaveManualEdge(fromID, toID graph.NodeID, relation, domain, createdBy string, confidence float64) (ManualEdge, error) {
+// Returns the actual stored row so callers see the true confirmed/suppressed state.
+//
+// clearSuppressed=true  — human-initiated call (link_entities): resets suppressed=0 and
+//
+//	confirmed=0 so a previously-rejected edge becomes active again.
+//
+// clearSuppressed=false — automated call (namematcher): preserves existing confirmed and
+//
+//	suppressed flags; also guards confirmed edge confidence against downgrade.
+func (s *Store) SaveManualEdge(fromID, toID graph.NodeID, relation, domain, createdBy string, confidence float64, clearSuppressed bool) (ManualEdge, error) {
 	now := time.Now().Unix()
-	_, err := s.graphDB.Exec(
-		`INSERT INTO manual_edges (from_id, to_id, relation, domain, created_by, created_at, confidence)
+	var query string
+	if clearSuppressed {
+		// Human explicitly (re-)creating this edge: lift any prior suppression.
+		query = `INSERT INTO manual_edges (from_id, to_id, relation, domain, created_by, created_at, confidence)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(from_id, to_id, relation) DO UPDATE SET domain=excluded.domain, created_by=excluded.created_by, created_at=excluded.created_at, confidence=excluded.confidence`,
-		string(fromID), string(toID), relation, domain, createdBy, now, confidence,
-	)
+		 ON CONFLICT(from_id, to_id, relation) DO UPDATE SET
+		   domain=excluded.domain, created_by=excluded.created_by,
+		   created_at=excluded.created_at, confidence=excluded.confidence,
+		   suppressed=0, confirmed=0`
+	} else {
+		// Automated (namematcher): never downgrade a human-confirmed edge's confidence.
+		query = `INSERT INTO manual_edges (from_id, to_id, relation, domain, created_by, created_at, confidence)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(from_id, to_id, relation) DO UPDATE SET
+		   domain=excluded.domain, created_by=excluded.created_by,
+		   created_at=excluded.created_at,
+		   confidence=CASE WHEN manual_edges.confirmed=1 THEN manual_edges.confidence ELSE excluded.confidence END`
+	}
+	_, err := s.graphDB.Exec(query, string(fromID), string(toID), relation, domain, createdBy, now, confidence)
 	if err != nil {
 		return ManualEdge{}, fmt.Errorf("save manual edge: %w", err)
 	}
@@ -2711,9 +2732,10 @@ func (s *Store) SaveManualEdge(fromID, toID graph.NodeID, relation, domain, crea
 
 // SaveSyntheticEdge persists a synthetic MENTIONS edge created by the name matcher.
 // Convenience wrapper around SaveManualEdge with "namematcher" as the creator and
-// DomainKnowledge as the domain. Idempotent — upserts update confidence on re-run.
+// DomainKnowledge as the domain. Idempotent — upserts update confidence on re-run
+// but never downgrade a human-confirmed edge's confidence or clear suppression.
 func (s *Store) SaveSyntheticEdge(fromID, toID graph.NodeID, edgeType graph.EdgeType, confidence float64) (ManualEdge, error) {
-	return s.SaveManualEdge(fromID, toID, string(edgeType), string(graph.DomainKnowledge), "namematcher", confidence)
+	return s.SaveManualEdge(fromID, toID, string(edgeType), string(graph.DomainKnowledge), "namematcher", confidence, false)
 }
 
 // ConfirmEdge updates the human-review status of a persisted edge.
@@ -2755,7 +2777,10 @@ func (s *Store) ConfirmEdge(fromID, toID graph.NodeID, relation string, confirme
 // Errors are logged but do not block the caller — a stale DB row is not a hard failure.
 func (s *Store) PruneStaleSyntheticEdges(g *graph.Graph) error {
 	rows, err := s.graphDB.Query(
-		`SELECT from_id, to_id, relation FROM manual_edges WHERE created_by='namematcher'`,
+		// Exclude confirmed edges — a human explicitly verified this relationship.
+		// Even if an endpoint was renamed/deleted, confirmed edges are preserved
+		// so the human decision is not silently lost.
+		`SELECT from_id, to_id, relation FROM manual_edges WHERE created_by='namematcher' AND confirmed=0`,
 	)
 	if err != nil {
 		return fmt.Errorf("query synthetic edges: %w", err)

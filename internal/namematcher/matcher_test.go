@@ -167,14 +167,14 @@ func TestRunAsync_NilGraph(t *testing.T) {
 	m := New(nil)
 	st := openTestStore(t)
 	// Should not panic
-	m.RunAsync(context.Background(), nil, st)
+	m.RunAsync(context.Background(), nil, st, nil)
 }
 
 func TestRunAsync_NilStore(t *testing.T) {
 	m := New(nil)
 	g := graph.New("test-repo")
 	// Should not panic
-	m.RunAsync(context.Background(), g, nil)
+	m.RunAsync(context.Background(), g, nil, nil)
 }
 
 func TestRunAsync_EmptyGraph(t *testing.T) {
@@ -182,7 +182,7 @@ func TestRunAsync_EmptyGraph(t *testing.T) {
 	g := graph.New("test-repo")
 	st := openTestStore(t)
 	// Should not panic and create no edges
-	m.RunAsync(context.Background(), g, st)
+	m.RunAsync(context.Background(), g, st, nil)
 	edges, err := st.LoadManualEdges()
 	if err != nil {
 		t.Fatalf("LoadManualEdges: %v", err)
@@ -203,7 +203,7 @@ func TestRunAsync_SameDomainSkipped(t *testing.T) {
 	g.AddNode(n1)
 	g.AddNode(n2)
 
-	m.RunAsync(context.Background(), g, st)
+	m.RunAsync(context.Background(), g, st, nil)
 
 	edges, err := st.LoadManualEdges()
 	if err != nil {
@@ -225,7 +225,7 @@ func TestRunAsync_GenericNameSkipped(t *testing.T) {
 	g.AddNode(n1)
 	g.AddNode(n2)
 
-	m.RunAsync(context.Background(), g, st)
+	m.RunAsync(context.Background(), g, st, nil)
 
 	edges, err := st.LoadManualEdges()
 	if err != nil {
@@ -247,7 +247,7 @@ func TestRunAsync_ShortNameSkipped(t *testing.T) {
 	g.AddNode(n1)
 	g.AddNode(n2)
 
-	m.RunAsync(context.Background(), g, st)
+	m.RunAsync(context.Background(), g, st, nil)
 
 	edges, err := st.LoadManualEdges()
 	if err != nil {
@@ -269,7 +269,7 @@ func TestRunAsync_CreatesEdge(t *testing.T) {
 	g.AddNode(n1)
 	g.AddNode(n2)
 
-	m.RunAsync(context.Background(), g, st)
+	m.RunAsync(context.Background(), g, st, nil)
 
 	edges, err := st.LoadManualEdges()
 	if err != nil {
@@ -302,7 +302,7 @@ func TestRunAsync_MinConfidence(t *testing.T) {
 	g.AddNode(n1)
 	g.AddNode(n2)
 
-	m.RunAsync(context.Background(), g, st)
+	m.RunAsync(context.Background(), g, st, nil)
 
 	edges, err := st.LoadManualEdges()
 	if err != nil {
@@ -325,8 +325,8 @@ func TestRunAsync_Idempotent(t *testing.T) {
 	g.AddNode(n2)
 
 	// Run twice — should upsert, not duplicate
-	m.RunAsync(context.Background(), g, st)
-	m.RunAsync(context.Background(), g, st)
+	m.RunAsync(context.Background(), g, st, nil)
+	m.RunAsync(context.Background(), g, st, nil)
 
 	edges, err := st.LoadManualEdges()
 	if err != nil {
@@ -357,7 +357,7 @@ func TestRunAsync_ContextCancellation(t *testing.T) {
 	cancel() // cancel immediately
 
 	// Should not panic; may create 0 or some edges depending on timing
-	m.RunAsync(ctx, g, st)
+	m.RunAsync(ctx, g, st, nil)
 }
 
 // TestRunAsync_SingleFlight verifies that concurrent RunAsync calls do not
@@ -374,8 +374,8 @@ func TestRunAsync_SingleFlight(t *testing.T) {
 	g.AddNode(n2)
 
 	// Run sequentially twice after first completes — both should succeed (second sees running=0).
-	m.RunAsync(context.Background(), g, st)
-	m.RunAsync(context.Background(), g, st)
+	m.RunAsync(context.Background(), g, st, nil)
+	m.RunAsync(context.Background(), g, st, nil)
 
 	edges, err := st.LoadManualEdges()
 	if err != nil {
@@ -399,7 +399,7 @@ func TestRunAsync_PrunesStaleEdges(t *testing.T) {
 	n2 := makeNode("infra:PaymentService:1", "PaymentService", graph.DomainInfra, "resource", "/infra/payment.tf")
 	g.AddNode(n1)
 	g.AddNode(n2)
-	m.RunAsync(context.Background(), g, st)
+	m.RunAsync(context.Background(), g, st, nil)
 
 	edges, err := st.LoadManualEdges()
 	if err != nil {
@@ -415,7 +415,7 @@ func TestRunAsync_PrunesStaleEdges(t *testing.T) {
 	// infra node replaced by a different entity — PaymentService infra node is gone
 
 	// Pass 2: stale edge (pointing to the removed infra node) should be pruned.
-	m.RunAsync(context.Background(), g2, st)
+	m.RunAsync(context.Background(), g2, st, nil)
 
 	edges, err = st.LoadManualEdges()
 	if err != nil {
@@ -460,7 +460,7 @@ func TestRunAsync_StructuralNodeTypesSkipped(t *testing.T) {
 	g.AddNode(n1)
 	g.AddNode(n2)
 
-	m.RunAsync(context.Background(), g, st)
+	m.RunAsync(context.Background(), g, st, nil)
 
 	edges, err := st.LoadManualEdges()
 	if err != nil {
@@ -469,6 +469,49 @@ func TestRunAsync_StructuralNodeTypesSkipped(t *testing.T) {
 	if len(edges) != 0 {
 		t.Errorf("expected 0 edges for file node type, got %d", len(edges))
 	}
+}
+
+// TestRunAsync_ConfirmedEdgeConfidenceNotDowngraded verifies that the name-matcher
+// cannot overwrite a human-confirmed edge's confidence with a lower computed score.
+func TestRunAsync_ConfirmedEdgeConfidenceNotDowngraded(t *testing.T) {
+	m := New(nil)
+	g := graph.New("test-repo")
+	st := openTestStore(t)
+
+	n1 := makeNode("code:PaymentService:1", "PaymentService", graph.DomainCode, graph.NodeStruct, "/src/payment.go")
+	n2 := makeNode("infra:PaymentService:1", "PaymentService", graph.DomainInfra, "resource", "/infra/payment.tf")
+	g.AddNode(n1)
+	g.AddNode(n2)
+
+	// First run creates the edge.
+	m.running.Store(0)
+	m.RunAsync(context.Background(), g, st, nil)
+
+	// Simulate human confirmation (confidence=1.0).
+	if err := st.ConfirmEdge(n1.ID, n2.ID, string(graph.EdgeMentions), true); err != nil {
+		t.Fatalf("ConfirmEdge: %v", err)
+	}
+
+	// Second run: matcher must not downgrade confidence from 1.0 to computed score.
+	m.running.Store(0)
+	m.RunAsync(context.Background(), g, st, nil)
+
+	edges, err := st.LoadManualEdges()
+	if err != nil {
+		t.Fatalf("LoadManualEdges: %v", err)
+	}
+	for _, e := range edges {
+		if e.FromID == n1.ID && e.ToID == n2.ID && e.Relation == string(graph.EdgeMentions) {
+			if e.Confidence != 1.0 {
+				t.Errorf("confirmed edge confidence was downgraded to %v after re-run — must stay 1.0", e.Confidence)
+			}
+			if !e.Confirmed {
+				t.Error("confirmed flag was cleared by second matcher run")
+			}
+			return
+		}
+	}
+	t.Error("MENTIONS edge not found after second run")
 }
 
 // TestRunAsync_SuppressedEdgeNotReinjected verifies that when a MENTIONS edge has
@@ -486,7 +529,7 @@ func TestRunAsync_SuppressedEdgeNotReinjected(t *testing.T) {
 
 	// First run: matcher creates the MENTIONS edge.
 	m.running.Store(0) // reset so RunAsync can proceed
-	m.RunAsync(context.Background(), g, st)
+	m.RunAsync(context.Background(), g, st, nil)
 
 	if !g.HasEdge(n1.ID, n2.ID, graph.EdgeMentions) {
 		t.Fatal("expected MENTIONS edge after first run")
@@ -500,7 +543,7 @@ func TestRunAsync_SuppressedEdgeNotReinjected(t *testing.T) {
 
 	// Second run: matcher must not re-inject the suppressed edge.
 	m.running.Store(0)
-	m.RunAsync(context.Background(), g, st)
+	m.RunAsync(context.Background(), g, st, nil)
 
 	if g.HasEdge(n1.ID, n2.ID, graph.EdgeMentions) {
 		t.Error("suppressed MENTIONS edge was re-injected into live graph — confirm_edge rejection must be respected")
@@ -522,5 +565,151 @@ func TestRunAsync_SuppressedEdgeNotReinjected(t *testing.T) {
 	}
 	if !found {
 		t.Error("suppressed edge not found in store — audit trail lost")
+	}
+}
+
+// ── Domain-relevance filtering ─────────────────────────────────────────────
+
+func TestHasCrossDomainFiles_True(t *testing.T) {
+	cases := []string{
+		"/infra/main.tf",
+		"/infra/main.hcl",
+		"/api/openapi.json",
+		"/api/schema.yaml",
+		"/api/schema.yml",
+		"/api/schema.graphql",
+		"/api/schema.gql",
+		"/docs/README.md",
+		"/docs/guide.rst",
+	}
+	for _, f := range cases {
+		if !hasCrossDomainFiles([]string{f}) {
+			t.Errorf("hasCrossDomainFiles(%q) = false, want true", f)
+		}
+	}
+}
+
+func TestHasCrossDomainFiles_False(t *testing.T) {
+	codeOnly := []string{
+		"/src/main.go",
+		"/src/handler.py",
+		"/src/service.ts",
+		"/src/model.java",
+	}
+	if hasCrossDomainFiles(codeOnly) {
+		t.Error("hasCrossDomainFiles(code-only files) = true, want false")
+	}
+}
+
+// TestRunAsync_SkipsCodeOnlyWhenNoCrossdomainEntities verifies that a batch of
+// code-only file changes does NOT trigger the matching pass when no cross-domain
+// entities have ever been observed (hasCrossDomain=false).
+func TestRunAsync_SkipsCodeOnlyWhenNoCrossdomainEntities(t *testing.T) {
+	m := New(nil)
+	// hasCrossDomain starts false (no cross-domain entities seen yet).
+	g := graph.New("test-repo")
+	st := openTestStore(t)
+
+	n1 := makeNode("code:PaymentService:1", "PaymentService", graph.DomainCode, graph.NodeStruct, "/src/payment.go")
+	n2 := makeNode("code:OrderService:1", "OrderService", graph.DomainCode, graph.NodeStruct, "/src/order.go")
+	g.AddNode(n1)
+	g.AddNode(n2)
+
+	// changedFiles = code-only; hasCrossDomain = false → should skip.
+	m.RunAsync(context.Background(), g, st, []string{"/src/payment.go"})
+
+	edges, err := st.LoadManualEdges()
+	if err != nil {
+		t.Fatalf("LoadManualEdges: %v", err)
+	}
+	if len(edges) != 0 {
+		t.Errorf("expected 0 edges (pass skipped), got %d", len(edges))
+	}
+}
+
+// TestRunAsync_RunsForCrossDomainFile verifies that a batch containing a
+// cross-domain file (e.g. .tf) triggers the pass unconditionally.
+func TestRunAsync_RunsForCrossDomainFile(t *testing.T) {
+	m := New(nil)
+	g := graph.New("test-repo")
+	st := openTestStore(t)
+
+	n1 := makeNode("code:PaymentService:1", "PaymentService", graph.DomainCode, graph.NodeStruct, "/src/payment.go")
+	n2 := makeNode("infra:PaymentService:1", "PaymentService", graph.DomainInfra, "resource", "/infra/payment.tf")
+	g.AddNode(n1)
+	g.AddNode(n2)
+
+	// changedFiles includes a .tf file → should always run.
+	m.RunAsync(context.Background(), g, st, []string{"/infra/payment.tf"})
+
+	edges, err := st.LoadManualEdges()
+	if err != nil {
+		t.Fatalf("LoadManualEdges: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Errorf("expected 1 edge for cross-domain file trigger, got %d", len(edges))
+	}
+}
+
+// TestRunAsync_RunsCodeOnlyAfterCrossDomainSeen verifies that once a
+// cross-domain entity has been observed (hasCrossDomain=true), code-only
+// batch changes still trigger the pass — a new code entity may match an
+// existing infra entity that hasn't changed.
+func TestRunAsync_RunsCodeOnlyAfterCrossDomainSeen(t *testing.T) {
+	m := New(nil)
+	g := graph.New("test-repo")
+	st := openTestStore(t)
+
+	n1 := makeNode("code:PaymentService:1", "PaymentService", graph.DomainCode, graph.NodeStruct, "/src/payment.go")
+	n2 := makeNode("infra:PaymentService:1", "PaymentService", graph.DomainInfra, "resource", "/infra/payment.tf")
+	g.AddNode(n1)
+	g.AddNode(n2)
+
+	// First run with cross-domain file — sets hasCrossDomain=true.
+	m.RunAsync(context.Background(), g, st, []string{"/infra/payment.tf"})
+
+	// Reset for clean state in second run.
+	m.running.Store(0)
+
+	// Add a new code node that should match the existing infra node.
+	n3 := makeNode("code:BillingService:1", "BillingService", graph.DomainCode, graph.NodeStruct, "/src/billing.go")
+	n4 := makeNode("infra:BillingService:1", "BillingService", graph.DomainInfra, "resource", "/infra/billing.tf")
+	g.AddNode(n3)
+	g.AddNode(n4)
+
+	// Second run: code-only change, but hasCrossDomain=true → should still run.
+	m.RunAsync(context.Background(), g, st, []string{"/src/billing.go"})
+
+	edges, err := st.LoadManualEdges()
+	if err != nil {
+		t.Fatalf("LoadManualEdges: %v", err)
+	}
+	// Should have 2 edges: PaymentService and BillingService matches.
+	if len(edges) < 2 {
+		t.Errorf("expected >=2 edges after code-only trigger with hasCrossDomain=true, got %d", len(edges))
+	}
+}
+
+// TestRunAsync_NilFilesAlwaysRuns verifies that nil changedFiles (full re-walk)
+// always triggers the pass regardless of hasCrossDomain state.
+func TestRunAsync_NilFilesAlwaysRuns(t *testing.T) {
+	m := New(nil)
+	// hasCrossDomain=false, changedFiles=nil (full re-walk) → must run.
+	g := graph.New("test-repo")
+	st := openTestStore(t)
+
+	n1 := makeNode("code:PaymentService:1", "PaymentService", graph.DomainCode, graph.NodeStruct, "/src/payment.go")
+	n2 := makeNode("infra:PaymentService:1", "PaymentService", graph.DomainInfra, "resource", "/infra/payment.tf")
+	g.AddNode(n1)
+	g.AddNode(n2)
+
+	m.RunAsync(context.Background(), g, st, nil) // nil = full re-walk
+
+	edges, err := st.LoadManualEdges()
+	if err != nil {
+		t.Fatalf("LoadManualEdges: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Errorf("expected 1 edge for nil-files (full re-walk) trigger, got %d", len(edges))
 	}
 }
