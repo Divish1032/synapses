@@ -172,6 +172,71 @@ func TestGetSessionContextEntities_WrongSession(t *testing.T) {
 	}
 }
 
+// ── trackContextCall GC semantics ────────────────────────────────────────────
+
+// TestTrackContextCall_GCUsesLastAt verifies that the entry GC prunes based on
+// inactivity since the *last* call (lastAt), not since the *first* call (firstAt).
+//
+// The bug this covers: using firstAt meant entries in long sessions (>30min)
+// were pruned even while actively being refetched, silently dropping signals.
+func TestTrackContextCall_GCUsesLastAt(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Force the GC sweep window to expire so the next call triggers GC.
+	// We do this by backdating ctxCallLastGC to a time > 5 minutes ago.
+	srv.ctxCallMu.Lock()
+	srv.ctxCallLastGC = time.Now().Add(-10 * time.Minute)
+	// Manually insert an entry whose firstAt is >30min ago but lastAt is recent.
+	if srv.ctxCalls == nil {
+		srv.ctxCalls = make(map[string]*ctxCallEntry)
+	}
+	srv.ctxCalls["agent-1\x00EntityX"] = &ctxCallEntry{
+		count:   2,
+		firstAt: time.Now().Add(-35 * time.Minute), // first call was 35min ago
+		lastAt:  time.Now().Add(-1 * time.Minute),  // last call was 1min ago (active)
+	}
+	srv.ctxCallMu.Unlock()
+
+	// Call trackContextCall — this triggers the GC sweep.
+	// With lastAt GC: entry is NOT pruned (lastAt = 1min ago < 30min).
+	// With firstAt GC (the bug): entry WOULD be pruned (firstAt = 35min ago > 30min).
+	count, sinceLast := srv.trackContextCall("agent-1", "EntityX")
+
+	if count != 3 {
+		t.Errorf("expected count=3 (entry preserved by GC), got %d — GC may be using firstAt instead of lastAt", count)
+	}
+	if sinceLast < 30*time.Second {
+		t.Errorf("sinceLast should reflect ~1 minute gap, got %v", sinceLast)
+	}
+}
+
+// TestTrackContextCall_GCPrunesInactiveEntries verifies that genuinely inactive
+// entries (lastAt > 30min) are pruned by the GC, resetting count to 1.
+func TestTrackContextCall_GCPrunesInactiveEntries(t *testing.T) {
+	srv := newTestServer(t)
+
+	srv.ctxCallMu.Lock()
+	srv.ctxCallLastGC = time.Now().Add(-10 * time.Minute)
+	if srv.ctxCalls == nil {
+		srv.ctxCalls = make(map[string]*ctxCallEntry)
+	}
+	srv.ctxCalls["agent-1\x00InactiveEntity"] = &ctxCallEntry{
+		count:   5,
+		firstAt: time.Now().Add(-60 * time.Minute),
+		lastAt:  time.Now().Add(-35 * time.Minute), // genuinely inactive >30min
+	}
+	srv.ctxCallMu.Unlock()
+
+	count, sinceLast := srv.trackContextCall("agent-1", "InactiveEntity")
+
+	if count != 1 {
+		t.Errorf("expected count=1 (entry pruned — inactive 35min), got %d", count)
+	}
+	if sinceLast != 0 {
+		t.Errorf("expected sinceLast=0 for new entry after GC prune, got %v", sinceLast)
+	}
+}
+
 // ── emitAbandonedContextSignals ───────────────────────────────────────────────
 
 func TestEmitAbandonedContextSignals_NilPulseClient_NoPanic(t *testing.T) {
