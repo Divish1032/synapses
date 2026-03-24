@@ -307,11 +307,14 @@ func New(cfg config.BrainConfig) Brain {
 				logutil.Warn("brain: OllamaURL points to remote host %q — source code snippets will be transmitted to this endpoint\n", host)
 			}
 		}
-		// Compute keep_alive values based on intelligence mode.
-		// Sentry (T0) is always pinned — it is called on every file-save event.
-		// Librarian (T2) is pinned in Standard/Full; JIT in Optimal to save RAM.
-		// Navigator/Archivist (T3/cold) are JIT in Optimal, TTL in Standard, pinned in Full.
-		kaGuardian, kaEnrich, kaOrchestrate, kaArchivist := cfg.KeepAliveValues()
+		// All 5 Ollama identities share the same base model weights (qwen3.5:2b /
+		// qwen3.5:4b), so Ollama treats them as a single loaded model. A single
+		// keep_alive value applies — the last request's value wins. Use the
+		// mode-appropriate TTL so the model evicts after idle (Sprint 17 #3):
+		//   optimal  → 120s (2-min eviction on 8 GB machines)
+		//   standard → 300s (5-min eviction on 16 GB machines)
+		//   full     → -1  (always pinned on 32 GB+ machines)
+		ka := cfg.KeepAlive()
 
 		// All tiers use base qwen3.5:2b with different Ollama Modelfile identities
 		// (system prompts). All use /api/chat + format:json + think:false for
@@ -320,32 +323,32 @@ func New(cfg config.BrainConfig) Brain {
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithKeepAlive(-1) // Sentry always pinned regardless of mode
+			WithKeepAlive(ka)
 
 		guardianClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelGuardian, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithKeepAlive(kaGuardian)
+			WithKeepAlive(ka)
 
 		enrichClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelEnrich, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithKeepAlive(kaEnrich)
+			WithKeepAlive(ka)
 
 		orchestrateClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelOrchestrate, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithKeepAlive(kaOrchestrate)
+			WithKeepAlive(ka)
 
 		archivistClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelArchivist, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
 			WithNumPredict(1024). // session summaries need more tokens than default 400
-			WithKeepAlive(kaArchivist)
+			WithKeepAlive(ka)
 	}
 
 	// No backend could be configured — degrade gracefully.

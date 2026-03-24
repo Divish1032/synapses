@@ -17,15 +17,17 @@ import (
 // signatures as the former HTTP client so all callers compile without changes.
 // Create with NewInProcess; always non-nil (uses NullBrain on failure).
 //
-// Background scheduling: when the brain is enabled, Client creates a SystemPulse
-// and a Scheduler. Low-priority background tasks (Ingest) are submitted to the
-// Scheduler as P2 tasks and executed by the drain goroutine only when system health
-// is Green. High-priority P0 tasks (BuildContextPacket, ExplainViolation) check
+// Background scheduling: when the brain is enabled, Client creates a SystemPulse,
+// a ModelManager, and a Scheduler. Low-priority background tasks (Ingest) are
+// submitted to the Scheduler as P2 tasks and executed by the drain goroutine only
+// when system health is Green AND the ModelManager confirms a model can be loaded.
+// High-priority P0 tasks (BuildContextPacket, ExplainViolation) check
 // ShouldDegrade() before invoking the LLM to fast-fail under resource pressure.
 type Client struct {
 	brain     Brain
 	scheduler *Scheduler
-	pulse     *SystemPulse // owned by Client; nil when brain is disabled
+	pulse     *SystemPulse  // owned by Client; nil when brain is disabled
+	modelMgr  *ModelManager // owned by Client; nil when brain is disabled
 }
 
 // NewInProcess creates a Client backed by an in-process Brain. If cfg is nil or
@@ -48,13 +50,18 @@ func NewInProcess(cfg *brainconfig.BrainConfig) *Client {
 	pulse := NewSystemPulse()
 	pulse.Start()
 
-	sched := NewScheduler(pulse)
+	// ModelManager uses the same pulse for RAM checks and pre-loads the model
+	// before each drain cycle according to the configured intelligence mode.
+	mgr := NewModelManager(pulse, *cfg)
+
+	sched := NewScheduler(pulse).WithModelManager(mgr)
 	sched.Start()
 
 	return &Client{
 		brain:     New(*cfg),
 		scheduler: sched,
 		pulse:     pulse,
+		modelMgr:  mgr,
 	}
 }
 
