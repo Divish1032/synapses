@@ -258,33 +258,3 @@ func (s *Server) handleGetMessages(
 	return jsonResult(resp)
 }
 
-// handleMarkRead marks a message as read by the calling agent.
-// Idempotent: calling it on an already-read message is safe.
-func (s *Server) handleMarkRead(
-	_ context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	if s.store == nil {
-		return mcp.NewToolResultError("message bus unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
-	}
-
-	messageID := stringArg(req, "message_id")
-	if messageID == "" {
-		return mcp.NewToolResultError("message_id is required (use get_messages to list message IDs)"), nil
-	}
-	agentID := stringArg(req, "agent_id")
-	if agentID == "" {
-		return mcp.NewToolResultError("agent_id is required (e.g., 'implementer', 'reviewer')"), nil
-	}
-
-	s.upsertAgentIfNeeded(agentID)
-
-	if err := s.store.MarkRead(messageID, agentID); err != nil {
-		return toolError("mark read", err)
-	}
-	return jsonResult(map[string]interface{}{
-		"message_id": messageID,
-		"agent_id":   agentID,
-		"message":    "Message marked as read.",
-	})
-}

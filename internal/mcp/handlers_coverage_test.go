@@ -2205,15 +2205,6 @@ func TestHandleGetMessages_NoStore(t *testing.T) {
 	mustErrorResult(t, res, err)
 }
 
-func TestHandleMarkRead_NoStore(t *testing.T) {
-	s := newTestServer(t)
-	s.store = nil
-	res, err := s.handleMarkRead(ctx, callTool(map[string]any{
-		"message_id": "m1",
-		"agent_id":   "a",
-	}))
-	mustErrorResult(t, res, err)
-}
 
 // ── nil-store tests for task handlers ────────────────────────────────────────
 
