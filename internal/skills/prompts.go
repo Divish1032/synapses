@@ -8,12 +8,14 @@ package skills
 import (
 	"bufio"
 	"embed"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 //go:embed builtin_prompts/*.md
@@ -78,10 +80,14 @@ func LoadPromptDir(dir, source string) ([]PromptTemplate, error) {
 			continue
 		}
 		fullPath := filepath.Join(dir, entry.Name())
-		if fi, err := os.Lstat(fullPath); err != nil || fi.Mode()&os.ModeSymlink != 0 {
-			continue
+		// Open with O_NOFOLLOW to prevent TOCTOU: if the file is swapped to a
+		// symlink between the ReadDir check and the open, the kernel rejects it.
+		f, err := os.OpenFile(fullPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		if err != nil {
+			continue // symlink or unreadable — skip silently
 		}
-		data, err := os.ReadFile(fullPath)
+		data, err := io.ReadAll(f)
+		f.Close()
 		if err != nil {
 			continue // skip unreadable files silently
 		}
