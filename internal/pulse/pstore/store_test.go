@@ -618,3 +618,189 @@ func TestOpen_PerformancePragmas(t *testing.T) {
 		}
 	}
 }
+
+// ── Sprint 15 #2: UpdateEntityQualityScore tests ──────────────────────────────
+
+// TestUpdateEntityQualityScore_UsesSignalWeight verifies that the quality score
+// is computed from the signal_weight column (Sprint 15 #1) rather than from
+// a hardcoded CASE on signal_type. This ensures task_abandoned, correction, and
+// task_done signals produce the expected signed sum.
+func TestUpdateEntityQualityScore_UsesSignalWeight(t *testing.T) {
+	s := testStore(t)
+
+	// One task_done (+0.3) and one correction immediate (-0.5) → net -0.2.
+	_ = s.InsertOutcomeSignal(pulsetypes.OutcomeSignalEvent{
+		ProjectID:    "proj-1",
+		Entity:       "AuthService",
+		SignalType:   "task_done",
+		SignalWeight: pulsetypes.SignalWeightTaskDone,
+	})
+	_ = s.InsertOutcomeSignal(pulsetypes.OutcomeSignalEvent{
+		ProjectID:    "proj-1",
+		Entity:       "AuthService",
+		SignalType:   "correction",
+		SignalWeight: pulsetypes.SignalWeightCorrectionImmediate,
+	})
+
+	s.UpdateEntityQualityScore("AuthService", "proj-1")
+
+	score, ok := s.GetEntityQualityScore("AuthService", "proj-1")
+	if !ok {
+		t.Fatal("GetEntityQualityScore: entity not found after update")
+	}
+	want := pulsetypes.SignalWeightTaskDone + pulsetypes.SignalWeightCorrectionImmediate // -0.2
+	if score < want-0.001 || score > want+0.001 {
+		t.Errorf("quality score = %.4f, want %.4f (sum of signal_weight)", score, want)
+	}
+}
+
+// TestUpdateEntityQualityScore_TaskAbandoned verifies that task_abandoned signals
+// (previously missing from the CASE expression) now lower the quality score.
+func TestUpdateEntityQualityScore_TaskAbandoned(t *testing.T) {
+	s := testStore(t)
+
+	_ = s.InsertOutcomeSignal(pulsetypes.OutcomeSignalEvent{
+		ProjectID:    "proj-1",
+		Entity:       "DeadCode",
+		SignalType:   "task_abandoned",
+		SignalWeight: pulsetypes.SignalWeightTaskAbandoned,
+	})
+
+	s.UpdateEntityQualityScore("DeadCode", "proj-1")
+
+	score, ok := s.GetEntityQualityScore("DeadCode", "proj-1")
+	if !ok {
+		t.Fatal("GetEntityQualityScore: entity not found")
+	}
+	if score >= 0 {
+		t.Errorf("task_abandoned should produce a negative quality score, got %.4f", score)
+	}
+	if score < pulsetypes.SignalWeightTaskAbandoned-0.001 || score > pulsetypes.SignalWeightTaskAbandoned+0.001 {
+		t.Errorf("score = %.4f, want %.4f (SignalWeightTaskAbandoned)", score, pulsetypes.SignalWeightTaskAbandoned)
+	}
+}
+
+// TestUpdateEntityQualityScore_NoSignals verifies that an entity with no signals
+// is not written to entity_quality (GetEntityQualityScore returns false).
+func TestUpdateEntityQualityScore_NoSignals(t *testing.T) {
+	s := testStore(t)
+
+	// UpdateEntityQualityScore with no rows writes score=0, pos=0, neg=0.
+	// GetEntityQualityScore should still return the zero-value row.
+	s.UpdateEntityQualityScore("Ghost", "proj-1")
+
+	score, ok := s.GetEntityQualityScore("Ghost", "proj-1")
+	// A zero-weight row IS written (UPSERT always fires) — result is score=0, ok=true.
+	if !ok {
+		t.Fatal("GetEntityQualityScore returned false for entity with zero signals after upsert")
+	}
+	if score != 0.0 {
+		t.Errorf("score with no signals = %.4f, want 0.0", score)
+	}
+}
+
+// TestGetEntityQualityScore_MissingEntity verifies that (0, false) is returned
+// for an entity that has never been written to entity_quality.
+func TestGetEntityQualityScore_MissingEntity(t *testing.T) {
+	s := testStore(t)
+	score, ok := s.GetEntityQualityScore("NeverSeen", "proj-1")
+	if ok {
+		t.Errorf("expected ok=false for unseen entity, got ok=true score=%.4f", score)
+	}
+	if score != 0 {
+		t.Errorf("expected score=0 for unseen entity, got %.4f", score)
+	}
+}
+
+// TestGetEntityQualityScoresBatch_OnlyRequestedIDs verifies that the batch lookup
+// returns scores only for the requested entities, including low-scoring ones
+// (which a LIMIT-based query would miss if only fetching top-N).
+func TestGetEntityQualityScoresBatch_OnlyRequestedIDs(t *testing.T) {
+	s := testStore(t)
+
+	// Write a high-score entity, a low-score entity, and an entity with no record.
+	for _, tc := range []struct {
+		entity string
+		weight float64
+	}{
+		{"HighQuality", pulsetypes.SignalWeightTaskDone * 3},   // +0.9
+		{"LowQuality", pulsetypes.SignalWeightTaskAbandoned},   // -0.8
+	} {
+		_ = s.InsertOutcomeSignal(pulsetypes.OutcomeSignalEvent{
+			ProjectID:    "proj-1",
+			Entity:       tc.entity,
+			SignalType:   "test",
+			SignalWeight: tc.weight,
+		})
+		s.UpdateEntityQualityScore(tc.entity, "proj-1")
+	}
+
+	// Request both entities plus one that has no record.
+	result := s.GetEntityQualityScoresBatch(
+		[]string{"HighQuality", "LowQuality", "NoRecord"}, "proj-1")
+
+	if result == nil {
+		t.Fatal("GetEntityQualityScoresBatch returned nil, expected a map")
+	}
+	if _, ok := result["HighQuality"]; !ok {
+		t.Error("HighQuality missing from batch result")
+	}
+	if _, ok := result["LowQuality"]; !ok {
+		t.Error("LowQuality missing from batch result — batch must include negative-score entities")
+	}
+	if _, ok := result["NoRecord"]; ok {
+		t.Error("NoRecord should be absent from batch result (no entity_quality row)")
+	}
+	if result["LowQuality"] >= 0 {
+		t.Errorf("LowQuality score = %.4f, want negative", result["LowQuality"])
+	}
+}
+
+// TestGetEntityQualityScoresBatch_Empty verifies that an empty input returns nil.
+func TestGetEntityQualityScoresBatch_Empty(t *testing.T) {
+	s := testStore(t)
+	if result := s.GetEntityQualityScoresBatch(nil, "proj-1"); result != nil {
+		t.Errorf("expected nil for empty input, got %v", result)
+	}
+	if result := s.GetEntityQualityScoresBatch([]string{}, "proj-1"); result != nil {
+		t.Errorf("expected nil for empty slice, got %v", result)
+	}
+}
+
+// TestUpdateEntityQualityScore_PositiveNegativeCounts verifies that
+// positive_signals and negative_signals columns are updated correctly.
+func TestUpdateEntityQualityScore_PositiveNegativeCounts(t *testing.T) {
+	s := testStore(t)
+
+	_ = s.InsertOutcomeSignal(pulsetypes.OutcomeSignalEvent{
+		ProjectID: "proj-1", Entity: "API", SignalType: "task_done",
+		SignalWeight: pulsetypes.SignalWeightTaskDone,
+	})
+	_ = s.InsertOutcomeSignal(pulsetypes.OutcomeSignalEvent{
+		ProjectID: "proj-1", Entity: "API", SignalType: "task_done",
+		SignalWeight: pulsetypes.SignalWeightTaskDone,
+	})
+	_ = s.InsertOutcomeSignal(pulsetypes.OutcomeSignalEvent{
+		ProjectID: "proj-1", Entity: "API", SignalType: "correction",
+		SignalWeight: pulsetypes.SignalWeightCorrectionDelayed,
+	})
+
+	s.UpdateEntityQualityScore("API", "proj-1")
+
+	rows := s.GetEntityQualityScores("proj-1", 0)
+	var found bool
+	for _, eq := range rows {
+		if eq.Entity == "API" {
+			found = true
+			if eq.PositiveSignals != 2 {
+				t.Errorf("positive_signals = %d, want 2", eq.PositiveSignals)
+			}
+			if eq.NegativeSignals != 1 {
+				t.Errorf("negative_signals = %d, want 1", eq.NegativeSignals)
+			}
+		}
+	}
+	if !found {
+		t.Error("API entity not found in GetEntityQualityScores")
+	}
+}

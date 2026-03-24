@@ -464,14 +464,6 @@ func (c *Client) SetSessionTermination(sessionID, reason string) {
 	_ = c.store.SetSessionTermination(sessionID, reason)
 }
 
-// UpdateEntityQualityScore recomputes the running quality score for an entity. Fire-and-forget (P5 — Item 10).
-func (c *Client) UpdateEntityQualityScore(entity, projectID string) {
-	if c == nil {
-		return
-	}
-	c.store.UpdateEntityQualityScore(entity, projectID)
-}
-
 // UpdateRecallChannelStats recomputes recall channel attribution weights. Fire-and-forget (P5 — Item 12).
 func (c *Client) UpdateRecallChannelStats(projectID string) {
 	if c == nil {
@@ -494,6 +486,25 @@ func (c *Client) GetEntityQualityScores(projectID string, limit int) []EntityQua
 		return nil
 	}
 	return c.store.GetEntityQualityScores(projectID, limit)
+}
+
+// GetEntityQualityScore returns the quality score for a single entity (Sprint 15 #2).
+// Returns (score, true) when a quality record exists, or (0, false) when none.
+func (c *Client) GetEntityQualityScore(entity, projectID string) (float64, bool) {
+	if c == nil || entity == "" {
+		return 0, false
+	}
+	return c.store.GetEntityQualityScore(entity, projectID)
+}
+
+// GetEntityQualityScoresBatch returns quality scores for a specific set of entities
+// (Sprint 15 #2 — BFS/PPR lookup). Fetches only the requested IDs in one SQL
+// round-trip; entities with no quality record are absent from the result map.
+func (c *Client) GetEntityQualityScoresBatch(entities []string, projectID string) map[string]float64 {
+	if c == nil || len(entities) == 0 {
+		return nil
+	}
+	return c.store.GetEntityQualityScoresBatch(entities, projectID)
 }
 
 // GetDeliveryOutcomes returns delivery-to-outcome linkages (P5 — Item 11).

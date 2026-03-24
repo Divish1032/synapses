@@ -478,9 +478,12 @@ func (s *Server) ClearSynapseSession(mcpSessionID string) {
 }
 
 // ctxCallEntry tracks how many times an agent requested context for an entity.
+// lastAt is updated on every call so timing-based signal classification can
+// compute the interval between the previous delivery and the current refetch.
 type ctxCallEntry struct {
 	count   int
 	firstAt time.Time
+	lastAt  time.Time
 }
 
 // setLastAgent records the agent_id from the most recent session_init call.
