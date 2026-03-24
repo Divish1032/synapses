@@ -403,6 +403,7 @@ func buildTestGraphForQuery() *graph.Graph {
 func callQueryGraphTool(t *testing.T, g *graph.Graph, queryStr string) map[string]interface{} {
 	t.Helper()
 	srv := New(g, nil, nil)
+	t.Cleanup(func() { srv.Close() })
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]interface{}{"query": queryStr}
 	result, err := srv.handleQueryGraph(context.Background(), req)
@@ -487,6 +488,7 @@ func TestHandleQueryGraph_EmptyResultIsArray(t *testing.T) {
 	// null would break agent JSON parsing expecting an array.
 	g := buildTestGraphForQuery()
 	srv := New(g, nil, nil)
+	t.Cleanup(func() { srv.Close() })
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]interface{}{"query": `NODES WHERE package="doesnotexist"`}
 	result, err := srv.handleQueryGraph(context.Background(), req)
@@ -511,6 +513,7 @@ func TestHandleQueryGraph_ParseError(t *testing.T) {
 func TestHandleQueryGraph_EmptyQuery(t *testing.T) {
 	g := buildTestGraphForQuery()
 	srv := New(g, nil, nil)
+	t.Cleanup(func() { srv.Close() })
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]interface{}{"query": ""}
 	result, err := srv.handleQueryGraph(context.Background(), req)
@@ -524,6 +527,7 @@ func TestHandleQueryGraph_EmptyQuery(t *testing.T) {
 
 func TestHandleQueryGraph_NilGraph(t *testing.T) {
 	srv := New(nil, nil, nil)
+	t.Cleanup(func() { srv.Close() })
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]interface{}{"query": `NODES WHERE package="auth"`}
 	result, err := srv.handleQueryGraph(context.Background(), req)
@@ -665,6 +669,7 @@ func TestHandleQueryGraph_FileNotEquals(t *testing.T) {
 func TestHandleQueryGraph_QueryTooLong(t *testing.T) {
 	g := buildTestGraphForQuery()
 	srv := New(g, nil, nil)
+	t.Cleanup(func() { srv.Close() })
 	req := mcp.CallToolRequest{}
 	// 11 KB query — exceeds the 10 KB cap
 	req.Params.Arguments = map[string]interface{}{"query": strings.Repeat("x", 11*1024)}
@@ -712,6 +717,7 @@ func BenchmarkParseGraphQuery(b *testing.B) {
 func BenchmarkHandleQueryGraph_SmallGraph(b *testing.B) {
 	g := buildTestGraphForQuery()
 	srv := New(g, nil, nil)
+	b.Cleanup(func() { srv.Close() })
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]interface{}{"query": `NODES WHERE type="function"`}
 	b.ResetTimer()
