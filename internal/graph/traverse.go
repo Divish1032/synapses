@@ -220,6 +220,9 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 			// FlatGraph fast path: use cache-friendly CSR adjacency when available.
 			if flatNbs := g.flatGraphNeighbors(id); flatNbs != nil {
 				for _, nb := range flatNbs {
+					if len(candidate) >= maxPPRCandidates {
+						break
+					}
 					if _, seen := candidate[nb]; !seen {
 						candidate[nb] = struct{}{}
 						next = append(next, nb)
@@ -228,6 +231,9 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 				continue
 			}
 			for _, e := range g.outInEdges(id, idx) {
+				if len(candidate) >= maxPPRCandidates {
+					break
+				}
 				nb := e.To
 				if e.To == id {
 					nb = e.From
