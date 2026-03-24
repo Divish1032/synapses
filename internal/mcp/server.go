@@ -2166,7 +2166,12 @@ func (s *Server) registerTools() {
 					"entities examined, tasks updated. Saves session-log, entity, and project "+
 					"memories that future sessions will see in session_init and get_context. "+
 					"This is how institutional knowledge accumulates across sessions. "+
-					"Optionally reports LLM token usage (absorbs report_usage) if model is provided.",
+					"Optionally reports LLM token usage (absorbs report_usage) if model is provided. "+
+					"Returns effectiveness_report with session quality metrics: context_hit_rate, "+
+					"first_fetch_right/total_deliveries (how many context calls required no correction), "+
+					"tokens_saved, and prev_7d comparison to the last 7 days of sessions. "+
+					"Also includes a human-readable message field summarising the session. "+
+					"Read effectiveness_report.message after each session to track quality trends.",
 			),
 			mcp.WithString("agent_id",
 				mcp.Required(),

@@ -658,22 +658,9 @@ func (s *Server) handleGetContext(
 
 	dc := toDirectionalContext(sg)
 
-	// Sprint 15 #2: surface a low-quality hint when the root entity's quality
-	// score is significantly negative (≤ -2.0), meaning context deliveries for
-	// this entity were frequently followed by corrections or session abandonment.
-	// Threshold -2.0 requires multiple negative signals before firing — a single
-	// correction (weight -0.2 to -0.5) or one abandoned session (-0.8) won't
-	// trigger it; the agent needs to see a pattern before the hint appears.
-	if pc := s.getPulseClient(); pc != nil && sg.Root != "" {
-		const lowQualityThreshold = -2.0
-		if qs, ok := pc.GetEntityQualityScore(string(sg.Root), s.projectID); ok && qs <= lowQualityThreshold {
-			dc.LowQualityHint = fmt.Sprintf(
-				"Context for this entity has a low quality score (%.1f). "+
-					"Prior deliveries were frequently followed by corrections or session abandonment. "+
-					"Consider requesting a deeper fetch (depth=4) or a different entry point.",
-				qs)
-		}
-	}
+	// Sprint 15 #2 + #6: quality score is fetched once (deferred to after all
+	// enrichments, line ~933) so both LowQualityHint and Confidence share a
+	// single SQLite round-trip. Placeholder cleared; logic moved below.
 
 	// R1: strip synthetic route/inferred nodes when include_inferred=false.
 	if !includeInferred {
@@ -930,15 +917,27 @@ func (s *Server) handleGetContext(
 		dc.AdaptiveHint = "⟳ Context depth auto-expanded based on prior feedback for this entity."
 	}
 
-	// Sprint 15 #6: compute context confidence score.
-	// Placed after all enrichments (enrichWg.Wait + sequential passes) so that
-	// dc.GraphFreshness and dc.StaleAnnotationWarning are both already populated.
+	// Sprint 15 #2 + #6: single quality-score fetch for both LowQualityHint and
+	// Confidence. Placed here — after enrichWg.Wait() and all sequential passes —
+	// so dc.GraphFreshness and dc.StaleAnnotationWarning are already populated.
+	// One SQLite round-trip serves both consumers; avoids the dual-query pattern
+	// that the earlier Sprint 15 #2 placement would have caused.
 	{
 		var qs float64
 		var hasRecord bool
 		if pc := s.getPulseClient(); pc != nil && sg.Root != "" {
 			qs, hasRecord = pc.GetEntityQualityScore(string(sg.Root), s.projectID)
 		}
+		// Sprint 15 #2: low-quality hint fires at qs ≤ -2.0 (established pattern
+		// of insufficiency requiring multiple negative signals).
+		if hasRecord && qs <= -2.0 {
+			dc.LowQualityHint = fmt.Sprintf(
+				"Context for this entity has a low quality score (%.1f). "+
+					"Prior deliveries were frequently followed by corrections or session abandonment. "+
+					"Consider requesting a deeper fetch (depth=4) or a different entry point.",
+				qs)
+		}
+		// Sprint 15 #6: calibrated confidence in [0.0, 1.0].
 		dc.Confidence = computeContextConfidence(qs, hasRecord, dc.GraphFreshness != "", dc.StaleAnnotationWarning != "")
 		if dc.Confidence < 0.5 {
 			dc.ConfidenceHint = fmt.Sprintf(

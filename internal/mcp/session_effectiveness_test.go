@@ -1,8 +1,13 @@
 package mcp
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/SynapsesOS/synapses/internal/pulse"
+	pulsestore "github.com/SynapsesOS/synapses/internal/pulse/pstore"
+	pulsetypes "github.com/SynapsesOS/synapses/internal/pulse/types"
 )
 
 // floatPtr is a test helper that creates a *float64 from a literal.
@@ -36,7 +41,7 @@ func TestBuildEffectivenessMessage_WithDeliveries(t *testing.T) {
 		DurationMs:         240_000,
 	}
 	msg := buildEffectivenessMessage(r)
-	// Must contain the first-fetch fraction.
+	// Must contain the first-fetch fraction (new wording: "X/Y deliveries required no correction").
 	if !strings.Contains(msg, "14/16") {
 		t.Errorf("expected '14/16' in message, got: %q", msg)
 	}
@@ -127,4 +132,230 @@ func TestEffectivenessReport_TaskCompletionRateSetWhenRetroPresent(t *testing.T)
 	if *r.TaskCompletionRate != 0.0 {
 		t.Errorf("expected 0.0, got %v", *r.TaskCompletionRate)
 	}
+}
+
+// ── handleEndSession EffectivenessReport integration ─────────────────────────
+
+// TestHandleEndSession_EffectivenessReport_AbsentWithoutPulse verifies that
+// effectiveness_report is absent from the end_session response when no pulse
+// client is attached — no zero-value noise for projects without analytics.
+func TestHandleEndSession_EffectivenessReport_AbsentWithoutPulse(t *testing.T) {
+	srv := newTestServer(t) // no pulse client
+	_, _ = srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "no-pulse-agent"}))
+	res, err := srv.handleEndSession(ctx, callTool(map[string]any{"agent_id": "no-pulse-agent"}))
+	m := mustResult(t, res, err)
+	noKey(t, m, "effectiveness_report")
+}
+
+// TestHandleEndSession_EffectivenessReport_PresentAfterSessionInit verifies
+// that effectiveness_report is present whenever a pulse client is configured
+// and session_init has been called (so synapseSessionID is non-empty).
+// This covers the no-delivery path: message must describe a session with zero
+// context calls rather than silently omitting the field.
+func TestHandleEndSession_EffectivenessReport_PresentAfterSessionInit(t *testing.T) {
+	srv := newTestServer(t)
+	pc := newPulseClient(t)
+	defer pc.Close()
+	srv.SetPulseClient(pc)
+
+	_, _ = srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "eff-agent"}))
+
+	res, err := srv.handleEndSession(ctx, callTool(map[string]any{"agent_id": "eff-agent"}))
+	m := mustResult(t, res, err)
+
+	hasKey(t, m, "effectiveness_report")
+	report, ok := m["effectiveness_report"].(map[string]any)
+	if !ok {
+		t.Fatalf("effectiveness_report must be a map, got %T (keys: %v)", m["effectiveness_report"], mapKeys(m))
+	}
+	msg, _ := report["message"].(string)
+	if msg == "" {
+		t.Error("effectiveness_report.message must be non-empty")
+	}
+	// With no context deliveries the count must be present as 0, not missing.
+	if _, ok := report["total_deliveries"]; !ok {
+		t.Error("effectiveness_report.total_deliveries must be present")
+	}
+}
+
+// TestHandleEndSession_EffectivenessReport_CountsDeliveries verifies that
+// total_deliveries and first_fetch_right correctly reflect context deliveries
+// seeded for the session before end_session is called.
+//
+// Setup: 3 deliveries — 2 first-fetch (refetched=false) + 1 correction (refetched=true).
+// Expected: total_deliveries=3, first_fetch_right=2, message contains "2/3".
+func TestHandleEndSession_EffectivenessReport_CountsDeliveries(t *testing.T) {
+	dir := t.TempDir()
+	pulsePath := filepath.Join(dir, "pulse.sqlite")
+
+	pc, err := pulse.New(pulsePath)
+	if err != nil {
+		t.Fatalf("pulse.New: %v", err)
+	}
+	defer pc.Close()
+
+	srv := newTestServer(t)
+	srv.SetPulseClient(pc)
+
+	// session_init registers the Synapses session UUID under the "stdio" key.
+	_, _ = srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "del-agent"}))
+
+	// Retrieve the UUID assigned by session_init (same package → unexported OK).
+	sessID := srv.getSynapseSessionID("") // "" = stdio
+	if sessID == "" {
+		t.Fatal("expected non-empty Synapses session ID after session_init")
+	}
+
+	// Open a direct pstore connection for synchronous delivery inserts.
+	// SQLite WAL allows two concurrent connections; writes are visible on commit.
+	st, err := pulsestore.Open(pulsePath)
+	if err != nil {
+		t.Fatalf("pulsestore.Open: %v", err)
+	}
+
+	// 2 first-fetch deliveries (refetched=false) with token savings.
+	for i := 0; i < 2; i++ {
+		if err := st.InsertContextDeliveryTx(pulsetypes.ContextDeliveryEvent{
+			SessionID:      sessID,
+			AgentID:        "del-agent",
+			Entity:         "FooService",
+			BaselineTokens: 1000,
+			ResponseTokens: 800,
+			EntityFound:    true,
+		}); err != nil {
+			t.Fatalf("InsertContextDeliveryTx (first-fetch %d): %v", i, err)
+		}
+	}
+	// 1 correction delivery (refetched=true).
+	if err := st.InsertContextDeliveryTx(pulsetypes.ContextDeliveryEvent{
+		SessionID:      sessID,
+		AgentID:        "del-agent",
+		Entity:         "FooService",
+		BaselineTokens: 1000,
+		ResponseTokens: 950,
+		Refetched:      true,
+		EntityFound:    true,
+	}); err != nil {
+		t.Fatalf("InsertContextDeliveryTx (refetched): %v", err)
+	}
+	// Close direct store before end_session reads it — ensures WAL is flushed.
+	st.Close()
+
+	res, err := srv.handleEndSession(ctx, callTool(map[string]any{"agent_id": "del-agent"}))
+	m := mustResult(t, res, err)
+
+	hasKey(t, m, "effectiveness_report")
+	report, ok := m["effectiveness_report"].(map[string]any)
+	if !ok {
+		t.Fatalf("effectiveness_report must be a map, got %T", m["effectiveness_report"])
+	}
+
+	totalDel, _ := report["total_deliveries"].(float64)
+	firstFetch, _ := report["first_fetch_right"].(float64)
+	tokensSaved, _ := report["tokens_saved"].(float64)
+	msg, _ := report["message"].(string)
+
+	if totalDel != 3 {
+		t.Errorf("total_deliveries: want 3, got %v", totalDel)
+	}
+	if firstFetch != 2 {
+		t.Errorf("first_fetch_right: want 2, got %v", firstFetch)
+	}
+	// 2×(1000-800) + 1×(1000-950) = 400+50 = 450 tokens saved.
+	if tokensSaved != 450 {
+		t.Errorf("tokens_saved: want 450, got %v", tokensSaved)
+	}
+	// Message uses new wording: "First-fetch context: 2/3 deliveries required no correction"
+	if !strings.Contains(msg, "2/3") {
+		t.Errorf("message must contain '2/3', got: %q", msg)
+	}
+	if !strings.Contains(msg, "450 tokens saved") {
+		t.Errorf("message must mention token savings, got: %q", msg)
+	}
+}
+
+// TestHandleEndSession_EffectivenessReport_Prev7d verifies that prev_7d is
+// populated when prior session_effectiveness rows exist for the same agent.
+// This exercises the critical trend-read-before-insert ordering: the prior
+// session must NOT appear in its own Prev7d, and the seeded prior session
+// MUST appear in the new session's Prev7d.
+func TestHandleEndSession_EffectivenessReport_Prev7d(t *testing.T) {
+	dir := t.TempDir()
+	pulsePath := filepath.Join(dir, "pulse.sqlite")
+
+	pc, err := pulse.New(pulsePath)
+	if err != nil {
+		t.Fatalf("pulse.New: %v", err)
+	}
+	defer pc.Close()
+
+	// Seed a prior session effectiveness row directly (synchronous — bypasses collector).
+	st, err := pulsestore.Open(pulsePath)
+	if err != nil {
+		t.Fatalf("pulsestore.Open: %v", err)
+	}
+	if err := st.InsertSessionEffectiveness(pulsetypes.SessionEffectiveness{
+		SessionID:          "prior-session-uuid",
+		AgentID:            "prev-agent",
+		ProjectID:          "test-project",
+		ContextHitRate:     0.8,
+		TaskCompletionRate: 0.9,
+		TokensSaved:        1200,
+		ToolCalls:          30,
+		DurationMs:         120_000,
+	}); err != nil {
+		t.Fatalf("InsertSessionEffectiveness (prior): %v", err)
+	}
+	st.Close()
+
+	srv := newTestServer(t)
+	srv.SetPulseClient(pc)
+
+	// session_init registers the new Synapses session (different from the prior one).
+	_, _ = srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "prev-agent"}))
+
+	res, err := srv.handleEndSession(ctx, callTool(map[string]any{"agent_id": "prev-agent"}))
+	m := mustResult(t, res, err)
+
+	hasKey(t, m, "effectiveness_report")
+	report, ok := m["effectiveness_report"].(map[string]any)
+	if !ok {
+		t.Fatalf("effectiveness_report must be a map, got %T", m["effectiveness_report"])
+	}
+
+	// prev_7d must be present because the prior session exists.
+	hasKey(t, report, "prev_7d")
+	prev7d, ok := report["prev_7d"].(map[string]any)
+	if !ok {
+		t.Fatalf("prev_7d must be a map, got %T", report["prev_7d"])
+	}
+
+	sessions, _ := prev7d["sessions"].(float64)
+	if sessions < 1 {
+		t.Errorf("prev_7d.sessions: want ≥1 (the seeded prior session), got %v", sessions)
+	}
+	avgHitRate, _ := prev7d["avg_context_hit_rate"].(float64)
+	if avgHitRate <= 0 {
+		t.Errorf("prev_7d.avg_context_hit_rate: want >0, got %v", avgHitRate)
+	}
+	totalTokens, _ := prev7d["total_tokens_saved"].(float64)
+	if totalTokens != 1200 {
+		t.Errorf("prev_7d.total_tokens_saved: want 1200 (from prior session), got %v", totalTokens)
+	}
+}
+
+// TestHandleEndSession_EffectivenessReport_AbsentWithoutSessionInit verifies
+// that effectiveness_report is absent when pulse is configured but session_init
+// was never called for this agent — synapseSessionID is empty so the guard
+// `pc != nil && synapseSessionID != ""` blocks report generation.
+func TestHandleEndSession_EffectivenessReport_AbsentWithoutSessionInit(t *testing.T) {
+	srv := newTestServer(t)
+	pc := newPulseClient(t)
+	defer pc.Close()
+	srv.SetPulseClient(pc)
+
+	// end_session WITHOUT prior session_init — no Synapses session UUID registered.
+	res, err := srv.handleEndSession(ctx, callTool(map[string]any{"agent_id": "no-init-agent"}))
+	m := mustResult(t, res, err)
+	noKey(t, m, "effectiveness_report")
 }
