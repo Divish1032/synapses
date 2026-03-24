@@ -336,7 +336,7 @@ func (s *Server) scheduleToolCatalogRetry(ctx context.Context, embedder embed.Em
 			return
 		case <-time.After(30 * time.Second):
 		}
-		retryCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		retryCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 		s.EmbedToolCatalog(retryCtx, embedder)
 	}()
