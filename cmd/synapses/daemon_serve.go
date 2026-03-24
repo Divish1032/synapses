@@ -69,6 +69,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/federation"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
+	"github.com/SynapsesOS/synapses/internal/namematcher"
 	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/resolver"
@@ -2073,6 +2074,8 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			srv.SetChangeSource(fw)
 			fw.SetPacketInvalidator(srv)
 			fw.SetBrainClient(brainCli)
+			// Wire cross-domain name matcher: runs after each reindex to create MENTIONS edges.
+			fw.SetNameMatcher(namematcher.New(brainCli))
 			// Wire federation dependency tracker into the watcher so
 			// cross-project imports are detected on every file re-parse.
 			var fedTracker *federation.DeterministicDetector
@@ -2080,6 +2083,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 				newBrain := brain.NewInProcess(newCfg.Brain.ToBrainConfig())
 				srv.SetBrainClient(newBrain)
 				fw.SetBrainClient(newBrain)
+				fw.SetNameMatcher(namematcher.New(newBrain))
 				if fedTracker != nil {
 					fedTracker.Rebuild(newCfg.Federation)
 				}

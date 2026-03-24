@@ -105,6 +105,14 @@ type BrainCrossProjectTracker interface {
 	DetectAndStoreBrain(ctx context.Context, filePath string, localStore *store.Store)
 }
 
+// NameMatcherRunner runs the cross-domain name-matching pass after each reindex.
+// Implemented by namematcher.Matcher. Runs fire-and-forget in a tracked goroutine.
+type NameMatcherRunner interface {
+	// RunAsync scans g for cross-domain name matches and persists MENTIONS edges
+	// to st. Must respect ctx cancellation. Never blocks — errors are logged.
+	RunAsync(ctx context.Context, g *graph.Graph, st *store.Store)
+}
+
 type Watcher struct {
 	fw          *fsnotify.Watcher
 	graph       *graph.Graph
@@ -119,6 +127,7 @@ type Watcher struct {
 	rootPath    string                 // absolute resolved project root (set by Start)
 	cpTracker      CrossProjectTracker      // set via SetCrossProjectTracker; may be nil
 	cpBrainTracker BrainCrossProjectTracker // set via SetBrainCrossProjectTracker; may be nil
+	nmRunner       NameMatcherRunner        // set via SetNameMatcher; may be nil
 
 	mu        sync.Mutex
 	timers    map[string]*time.Timer // debounce timers keyed by absolute file path
@@ -351,6 +360,29 @@ func (w *Watcher) SetCrossProjectTracker(tracker CrossProjectTracker) {
 // Must be called before Start. tracker may be nil to disable.
 func (w *Watcher) SetBrainCrossProjectTracker(tracker BrainCrossProjectTracker) {
 	w.cpBrainTracker = tracker
+}
+
+// SetNameMatcher wires the cross-domain name-matching pass into the watcher.
+// Called after each applyBatch completes. nmRunner may be nil to disable.
+func (w *Watcher) SetNameMatcher(nm NameMatcherRunner) {
+	w.mu.Lock()
+	w.nmRunner = nm
+	w.mu.Unlock()
+}
+
+// triggerNameMatcher fires the name-matching pass in a tracked goroutine.
+// Runs after applyBatch so that newly-indexed cross-domain nodes are visible.
+// Fire-and-forget: errors are handled inside RunAsync.
+func (w *Watcher) triggerNameMatcher() {
+	w.mu.Lock()
+	nm := w.nmRunner
+	w.mu.Unlock()
+	if nm == nil {
+		return
+	}
+	w.trackGo(func() {
+		nm.RunAsync(w.stopCtx, w.graph, w.store)
+	})
 }
 
 // initFilePkg seeds filePkg from the graph's current nodes.
@@ -1479,6 +1511,7 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 			}
 		}
 	}
+	w.triggerNameMatcher()
 }
 
 // reparseFile removes stale nodes for path and re-parses it into the graph.

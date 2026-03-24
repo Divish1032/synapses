@@ -656,6 +656,9 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE node_embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_call_sites_file      ON call_sites(caller_file)`,
 		`CREATE INDEX IF NOT EXISTS idx_call_sites_pkg_alias ON call_sites(pkg_alias)`,
+		`ALTER TABLE manual_edges ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0`,
+		`ALTER TABLE manual_edges ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE manual_edges ADD COLUMN suppressed INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := graphTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
@@ -2668,29 +2671,40 @@ type ManualEdge struct {
 	Domain    string
 	CreatedBy string
 	CreatedAt int64
+	Confidence float64
+	Confirmed  bool
+	Suppressed bool
 }
 
 // SaveManualEdge persists a user-defined edge. Upserts on (from_id, to_id, relation).
 // Returns the edge immediately so callers can inject it into the in-memory graph.
-func (s *Store) SaveManualEdge(fromID, toID graph.NodeID, relation, domain, createdBy string) (ManualEdge, error) {
+func (s *Store) SaveManualEdge(fromID, toID graph.NodeID, relation, domain, createdBy string, confidence float64) (ManualEdge, error) {
 	now := time.Now().Unix()
 	_, err := s.graphDB.Exec(
-		`INSERT INTO manual_edges (from_id, to_id, relation, domain, created_by, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(from_id, to_id, relation) DO UPDATE SET domain=excluded.domain, created_by=excluded.created_by, created_at=excluded.created_at`,
-		string(fromID), string(toID), relation, domain, createdBy, now,
+		`INSERT INTO manual_edges (from_id, to_id, relation, domain, created_by, created_at, confidence)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(from_id, to_id, relation) DO UPDATE SET domain=excluded.domain, created_by=excluded.created_by, created_at=excluded.created_at, confidence=excluded.confidence`,
+		string(fromID), string(toID), relation, domain, createdBy, now, confidence,
 	)
 	if err != nil {
 		return ManualEdge{}, fmt.Errorf("save manual edge: %w", err)
 	}
 	return ManualEdge{
-		FromID:    fromID,
-		ToID:      toID,
-		Relation:  relation,
-		Domain:    domain,
-		CreatedBy: createdBy,
-		CreatedAt: now,
+		FromID:     fromID,
+		ToID:       toID,
+		Relation:   relation,
+		Domain:     domain,
+		CreatedBy:  createdBy,
+		CreatedAt:  now,
+		Confidence: confidence,
 	}, nil
+}
+
+// SaveSyntheticEdge persists a synthetic MENTIONS edge created by the name matcher.
+// Convenience wrapper around SaveManualEdge with "namematcher" as the creator and
+// DomainKnowledge as the domain. Idempotent — upserts update confidence on re-run.
+func (s *Store) SaveSyntheticEdge(fromID, toID graph.NodeID, edgeType graph.EdgeType, confidence float64) (ManualEdge, error) {
+	return s.SaveManualEdge(fromID, toID, string(edgeType), string(graph.DomainKnowledge), "namematcher", confidence)
 }
 
 // DeleteManualEdge removes a persisted user-defined edge.
@@ -2705,7 +2719,7 @@ func (s *Store) DeleteManualEdge(fromID, toID graph.NodeID, relation string) err
 // LoadManualEdges returns all persisted user-defined edges.
 func (s *Store) LoadManualEdges() ([]ManualEdge, error) {
 	rows, err := s.graphDB.Query(
-		`SELECT from_id, to_id, relation, domain, created_by, created_at FROM manual_edges`,
+		`SELECT from_id, to_id, relation, domain, created_by, created_at, confidence, confirmed, suppressed FROM manual_edges`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load manual edges: %w", err)
@@ -2715,11 +2729,14 @@ func (s *Store) LoadManualEdges() ([]ManualEdge, error) {
 	for rows.Next() {
 		var me ManualEdge
 		var fromID, toID string
-		if err := rows.Scan(&fromID, &toID, &me.Relation, &me.Domain, &me.CreatedBy, &me.CreatedAt); err != nil {
+		var confirmed, suppressed int
+		if err := rows.Scan(&fromID, &toID, &me.Relation, &me.Domain, &me.CreatedBy, &me.CreatedAt, &me.Confidence, &confirmed, &suppressed); err != nil {
 			return nil, fmt.Errorf("scan manual edge: %w", err)
 		}
 		me.FromID = graph.NodeID(fromID)
 		me.ToID = graph.NodeID(toID)
+		me.Confirmed = confirmed != 0
+		me.Suppressed = suppressed != 0
 		out = append(out, me)
 	}
 	return out, rows.Err()
@@ -2739,6 +2756,9 @@ func (s *Store) reinjectManualEdges(g *graph.Graph) error {
 		return err
 	}
 	for _, me := range edges {
+		if me.Suppressed {
+			continue // human rejected this edge; do not re-inject
+		}
 		edgeType := graph.EdgeType(me.Relation)
 		// Unknown relation strings that don't match catalog types get EdgeManual
 		// weight via the DefaultEdgeWeights map. The type string is preserved so
