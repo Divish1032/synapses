@@ -162,7 +162,10 @@ func computeMetrics(expected, returned map[string]bool) (precision, recall, f1 f
 		return 0, 0, 0
 	}
 	if len(expected) == 0 {
-		return 1.0, 1.0, 1.0 // nothing expected, anything is fine
+		// Non-empty returned set against an empty ground truth inflates scores.
+		// Treat as undefined (skip) by returning 0 — callers use average() which
+		// handles 0 correctly, and RunBenchmark skips cases with empty expected.
+		return 0, 0, 0
 	}
 
 	relevant := 0
