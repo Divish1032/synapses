@@ -431,6 +431,14 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[string]int64) (fresh map[string]int64, changed, removed int, err error) {
 	fresh = make(map[string]int64, len(known))
 
+	// Canonicalize root once so the symlink containment check below uses a
+	// fully resolved path; an un-resolved root causes false negatives (valid
+	// in-tree symlinks get rejected) or false positives (out-of-tree targets
+	// accepted) depending on how root and the resolved path align.
+	if canonical, evalErr := filepath.EvalSymlinks(root); evalErr == nil {
+		root = canonical
+	}
+
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil // skip unreadable entries
