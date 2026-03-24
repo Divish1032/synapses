@@ -387,13 +387,17 @@ func (s *Scheduler) runEligible() {
 	// when no tasks are queued (avoid unnecessary HTTP warmup calls).
 	if s.modelMgr != nil && health != HealthRed && s.queue.size() > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), modelManagerWarmupTimeout)
-		defer cancel()
-		if s.modelMgr.EnsureModel(ctx) == "" {
+		selectedModel := s.modelMgr.EnsureModel(ctx)
+		cancel() // release context resources immediately; ctx is only needed for the warmup HTTP call
+		if selectedModel == "" {
 			// Insufficient RAM to load any model — skip this cycle.
 			// Tasks stay in the queue; they will be retried on the next tick
 			// or expire naturally at their TTL.
 			return
 		}
+		// selectedModel is the model name EnsureModel chose (primary or 2B fallback).
+		// Sprint 17 #4 (fallback chains) will thread this value into task dispatch
+		// so that task closures use the correct OllamaClient tier.
 	}
 
 	tasks := s.queue.drain(health)

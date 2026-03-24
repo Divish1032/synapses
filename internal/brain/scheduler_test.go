@@ -2,6 +2,8 @@ package brain
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -477,4 +479,112 @@ func TestScheduler_CloseAndReinit_NoGoroutineLeak(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Error("new scheduler after hot-reload did not execute task")
+}
+
+// ─── Scheduler + ModelManager drain gate integration ─────────────────────────
+
+// TestScheduler_ModelManager_InsufficientRAM_BlocksDrain verifies that when
+// EnsureModel returns "" (insufficient RAM), the drain goroutine skips the
+// cycle and tasks remain queued rather than executing.
+func TestScheduler_ModelManager_InsufficientRAM_BlocksDrain(t *testing.T) {
+	warmupCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		warmupCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// 1 GB free — not enough for any model (needs 2.5 GB minimum).
+	pulse := newPulseWithState(1*1024*1024*1024, "")
+	mgr := newMgrWithServer(pulse, srv, "synapses/sentry", "", 120)
+
+	sched := NewScheduler(pulse).WithModelManager(mgr)
+	sched.Start()
+	defer sched.Stop()
+
+	var taskRan atomic.Bool
+	sched.Submit("test-task", PriorityP2, func() { taskRan.Store(true) })
+
+	// Wait long enough for the drain goroutine to attempt execution (>10s poll interval).
+	// Use a shorter wait + queue size check to confirm task is still queued.
+	time.Sleep(150 * time.Millisecond)
+
+	if taskRan.Load() {
+		t.Error("task ran despite insufficient RAM — drain gate should have blocked it")
+	}
+	if sched.QueueSize() == 0 {
+		t.Error("task was dropped from queue; it should remain for retry")
+	}
+	if warmupCalled {
+		t.Error("warmUp should not be called when no model fits (Case 4)")
+	}
+}
+
+// TestScheduler_ModelManager_SufficientRAM_AllowsDrain verifies that when
+// EnsureModel returns a model name (sufficient RAM), the drain goroutine
+// executes queued tasks normally.
+func TestScheduler_ModelManager_SufficientRAM_AllowsDrain(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// 4 GB free — enough for primary (needs 2.5 GB for 2B model).
+	pulse := newPulseWithState(4*1024*1024*1024, "")
+	mgr := newMgrWithServer(pulse, srv, "synapses/sentry", "", 120)
+
+	sched := NewScheduler(pulse).WithModelManager(mgr)
+	sched.Start()
+	defer sched.Stop()
+
+	var taskRan atomic.Bool
+	sched.Submit("test-task", PriorityP2, func() { taskRan.Store(true) })
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if taskRan.Load() {
+			return // task executed as expected
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Error("task did not run within 3s despite sufficient RAM")
+}
+
+// TestScheduler_ModelManager_HealthRed_BypassesGate verifies that when health
+// is Red, the RAM gate is skipped entirely (no warmup call, no EnsureModel call).
+// Red health means drain() returns nothing — the gate is redundant and must not
+// make unnecessary warmup HTTP calls.
+func TestScheduler_ModelManager_HealthRed_SkipsGate(t *testing.T) {
+	warmupCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		warmupCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Red pulse: 1 GB free.
+	p := &SystemPulse{done: make(chan struct{})}
+	p.mu.Lock()
+	p.current = SystemState{
+		AvailableRAM: 1 * 1024 * 1024 * 1024,
+		CPULoadNorm:  0.95,
+		Health:       HealthRed,
+		SampledAt:    time.Now(),
+	}
+	p.mu.Unlock()
+
+	mgr := newMgrWithServer(p, srv, "synapses/sentry", "", 120)
+	sched := NewScheduler(p).WithModelManager(mgr)
+	sched.Start()
+	defer func() {
+		sched.Stop()
+		p.stopOnce.Do(func() { close(p.done) })
+	}()
+
+	sched.Submit("test-task", PriorityP2, func() {})
+
+	time.Sleep(150 * time.Millisecond)
+	if warmupCalled {
+		t.Error("warmUp must NOT be called when health is Red — gate must be bypassed")
+	}
 }
