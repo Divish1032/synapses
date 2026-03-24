@@ -410,58 +410,9 @@ func (s *Store) DeleteMemoryEmbeddings(memoryIDs []string) error {
 }
 
 // memoryVectorSearchBruteForce is the O(N) fallback path for memory vector search.
-// Used when the HNSW index is not available (first startup, all embeddings stale).
-// Retains the original two-pass approach with a safety cap of 50,000 rows.
-// Concurrency is bounded by s.bfSemaphore to prevent GC pressure under load.
+// Routes through the context-aware variant with context.Background() and no threshold.
 func (s *Store) memoryVectorSearchBruteForce(normQuery []float32, limit int) ([]MemorySearchResult, error) {
-	if s.bfSemaphore != nil {
-		s.bfSemaphore <- struct{}{}
-		defer func() { <-s.bfSemaphore }()
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := s.knowledgeDB.Query(`
-		SELECT e.memory_id, e.embedding, e.stale
-		FROM memory_embeddings e
-		JOIN memories m ON e.memory_id = m.id
-		WHERE m.stale = 0
-		  AND m.expires_at > ?
-		ORDER BY e.rowid DESC
-		LIMIT 50000`, now)
-	if err != nil {
-		return nil, fmt.Errorf("memory vector search (brute-force): %w", err)
-	}
-	defer rows.Close()
-
-	h := &topKHeap{k: limit}
-	var scanned int
-	for rows.Next() {
-		scanned++
-		var memID string
-		var blob []byte
-		var embStale int
-		if err := rows.Scan(&memID, &blob, &embStale); err != nil {
-			return nil, fmt.Errorf("scan memory embedding row: %w", err)
-		}
-		vec := blobToVec(blob)
-		if len(vec) == 0 {
-			continue
-		}
-		score := dotSimilarity(normQuery, vec)
-		if score <= 0 {
-			continue
-		}
-		h.tryPush(memID, score, embStale == 1)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	winners := h.drain()
-	if len(winners) == 0 {
-		return nil, nil
-	}
-
-	return s.fetchMemorySearchResults(winners)
+	return s.memoryVectorSearchBruteForceWithThresholdCtx(context.Background(), normQuery, limit, 0)
 }
 
 // MemoryVectorSearchWithThreshold performs cosine similarity search with a
