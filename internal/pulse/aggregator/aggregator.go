@@ -357,26 +357,66 @@ func (a *Aggregator) rollup() {
 	// Rollback is safe — no writes occurred inside the snapshot.
 	a.store.EndReadSnapshot()
 
-	// P12-6: batch all metric upserts into a single transaction to reduce
-	// fsync overhead from ~80 individual commits to 1.
-	// Falls back to individual upserts if BeginBatch fails (e.g. DB locked).
+	// Pre-read supplemental metrics before acquiring the write lock.
+	peakRate := a.store.GetPeakReparseRate(today)
+	fcr, fcrErr := a.store.GetFirstContextRightRate(1)
+
+	// Merge all metric upserts, per-dimension rollups, and the rollup_completed
+	// sentinel into a single transaction. If we crash mid-rollup the whole
+	// transaction rolls back and the sentinel is never written — on restart the
+	// aggregator re-runs everything cleanly.
 	rollupOK := true
 	commit, batchErr := a.store.BeginBatch()
 	if batchErr != nil {
 		logutil.Warn("pulse aggregator: begin batch (fallback to individual): %v\n", batchErr)
-		// Fallback: write each metric individually (pre-P12-6 behavior).
+		up := a.store.UpsertDailyRollup
 		for metric, value := range metrics {
-			if err := a.store.UpsertDailyRollup(today, metric, value); err != nil {
+			if err := up(today, metric, value); err != nil {
 				logutil.Warn("pulse aggregator: upsert %s: %v\n", metric, err)
 				rollupOK = false
 			}
 		}
+		a.rollupPerProject(today, up)
+		a.rollupPerTool(today, up)
+		a.rollupPerAgent(today, up)
+		a.rollupPerLanguage(today, up)
+		a.rollupSearchMetrics(today, up)
+		a.rollupPerToolErrors(today, up)
+		if peakRate > 0 {
+			_ = up(today, "peak_reparse_rate_per_min", float64(peakRate))
+		}
+		if fcrErr == nil {
+			_ = up(today, "first_context_right_rate", fcr)
+		}
+		if rollupOK {
+			_ = up(today, "rollup_completed", 1)
+		}
 	} else {
+		upTx := a.store.UpsertDailyRollupTx
 		for metric, value := range metrics {
-			if err := a.store.UpsertDailyRollupTx(today, metric, value); err != nil {
+			if err := upTx(today, metric, value); err != nil {
 				logutil.Warn("pulse aggregator: upsert %s: %v\n", metric, err)
 				rollupOK = false
 			}
+		}
+		a.rollupPerProject(today, upTx)
+		a.rollupPerTool(today, upTx)
+		a.rollupPerAgent(today, upTx)
+		a.rollupPerLanguage(today, upTx)
+		a.rollupSearchMetrics(today, upTx)
+		a.rollupPerToolErrors(today, upTx)
+		if peakRate > 0 {
+			if err := upTx(today, "peak_reparse_rate_per_min", float64(peakRate)); err != nil {
+				logutil.Warn("pulse aggregator: peak reparse rate upsert: %v\n", err)
+			}
+		}
+		if fcrErr == nil {
+			if err := upTx(today, "first_context_right_rate", fcr); err != nil {
+				logutil.Warn("pulse aggregator: first_context_right_rate upsert: %v\n", err)
+			}
+		}
+		if rollupOK {
+			_ = upTx(today, "rollup_completed", 1)
 		}
 		if err := commit(rollupOK); err != nil {
 			logutil.Warn("pulse aggregator: commit batch: %v\n", err)
@@ -388,56 +428,6 @@ func (a *Aggregator) rollup() {
 	if rollupOK {
 		if hbErr := a.store.InsertHeartbeat(); hbErr != nil {
 			logutil.Warn("pulse aggregator: heartbeat insert: %v\n", hbErr)
-		}
-	}
-
-	// Pre-read metrics that will be written in the per-dimension batch.
-	// Doing reads before BeginBatch avoids holding the write lock during I/O.
-	peakRate := a.store.GetPeakReparseRate(today)
-	fcr, fcrErr := a.store.GetFirstContextRightRate(1)
-
-	// Per-dimension rollups + sentinel in a single transaction for crash-safety.
-	// BeginBatch holds the store mutex; UpsertDailyRollupTx executes within the
-	// held transaction. If we crash mid-rollup, the uncommitted transaction is
-	// rolled back and the sentinel is never written — restart re-runs everything.
-	dimCommit, dimBatchErr := a.store.BeginBatch()
-	if dimBatchErr != nil {
-		// Fallback: run per-dimension rollups individually (pre-transaction behavior).
-		logutil.Warn("pulse aggregator: per-dimension begin batch (fallback to individual): %v\n", dimBatchErr)
-		up := a.store.UpsertDailyRollup
-		a.rollupPerProject(today, up)
-		a.rollupPerTool(today, up)
-		a.rollupPerAgent(today, up)
-		a.rollupPerLanguage(today, up)
-		a.rollupSearchMetrics(today, up)
-		a.rollupPerToolErrors(today, up)
-		if rollupOK {
-			_ = a.store.UpsertDailyRollup(today, "rollup_completed", 1)
-		}
-	} else {
-		upTx := a.store.UpsertDailyRollupTx
-		a.rollupPerProject(today, upTx)
-		a.rollupPerTool(today, upTx)
-		a.rollupPerAgent(today, upTx)
-		a.rollupPerLanguage(today, upTx)
-		a.rollupSearchMetrics(today, upTx)
-		a.rollupPerToolErrors(today, upTx)
-
-		if peakRate > 0 {
-			if err := a.store.UpsertDailyRollupTx(today, "peak_reparse_rate_per_min", float64(peakRate)); err != nil {
-				logutil.Warn("pulse aggregator: peak reparse rate upsert: %v\n", err)
-			}
-		}
-		if fcrErr == nil {
-			if err := a.store.UpsertDailyRollupTx(today, "first_context_right_rate", fcr); err != nil {
-				logutil.Warn("pulse aggregator: first_context_right_rate upsert: %v\n", err)
-			}
-		}
-		if rollupOK {
-			_ = a.store.UpsertDailyRollupTx(today, "rollup_completed", 1)
-		}
-		if err := dimCommit(rollupOK); err != nil {
-			logutil.Warn("pulse aggregator: per-dimension commit: %v\n", err)
 		}
 	}
 
