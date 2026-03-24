@@ -110,8 +110,12 @@ func (c *subgraphCache) get(rootID NodeID, cfg CarveConfig, fingerprint string) 
 	}
 	if expired {
 		c.mu.Lock()
-		delete(c.entries, key)
-		c.removeFromOrder(key)
+		// Re-check under write lock: another goroutine may have replaced the
+		// entry between our RLock check and this Lock acquisition.
+		if e2, still := c.entries[key]; still && time.Now().After(e2.expiresAt) {
+			delete(c.entries, key)
+			c.removeFromOrder(key)
+		}
 		c.mu.Unlock()
 		return nil, false
 	}
