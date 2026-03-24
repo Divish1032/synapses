@@ -1708,8 +1708,13 @@ func (s *Server) handleLinkEntities(
 // and also returns the total number of matches found (for ambiguity detection).
 // Tries exact node-ID lookup first (unambiguous by definition), then FindByName,
 // then substring match. Returns (nil, 0) if no match found.
+//
+// When multiple candidates share the same name, selects the one with the highest
+// fan-in (incoming CALLS edge count) — the most-called entity is almost always
+// the one the caller means. This beats insertion-order for common names like
+// "New", "Close", "Init" that exist in many packages.
 func (s *Server) resolveEntityRefWithCount(nameOrID string) (*graph.Node, int) {
-	// Full node ID (repoID::file::name) — unambiguous.
+	// Full node ID (repoID::file::name) — unambiguous by definition.
 	if strings.Contains(nameOrID, "::") {
 		if n := s.graph.GetNode(graph.NodeID(nameOrID)); n != nil {
 			return n, 1
@@ -1718,12 +1723,119 @@ func (s *Server) resolveEntityRefWithCount(nameOrID string) (*graph.Node, int) {
 	// Exact name match — may return multiple nodes with the same name.
 	nodes := s.graph.FindByName(nameOrID)
 	if len(nodes) >= 1 {
-		return nodes[0], len(nodes)
+		return bestByFanIn(s.graph, nodes), len(nodes)
 	}
 	// Substring / pattern match — bounded to avoid large scans.
 	nodes = s.graph.FindByPatternLimit(nameOrID, 5)
 	if len(nodes) >= 1 {
-		return nodes[0], len(nodes)
+		return bestByFanIn(s.graph, nodes), len(nodes)
 	}
 	return nil, 0
+}
+
+// bestByFanIn returns the node with the highest incoming-edge count from candidates.
+// Prefers exported nodes over unexported as a secondary tiebreaker, and
+// non-test files over test files as a tertiary tiebreaker.
+// This heuristic makes link_entities prefer production-code hubs over test stubs.
+func bestByFanIn(g *graph.Graph, candidates []*graph.Node) *graph.Node {
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	best := candidates[0]
+	bestScore := nodeScore(g, best)
+	for _, n := range candidates[1:] {
+		if s := nodeScore(g, n); s > bestScore {
+			bestScore = s
+			best = n
+		}
+	}
+	return best
+}
+
+// nodeScore computes a composite priority for ambiguous name resolution.
+// Fan-in is the primary signal; exported and non-test are tiebreakers.
+func nodeScore(g *graph.Graph, n *graph.Node) int {
+	fanIn := len(g.InEdges(n.ID))
+	score := fanIn * 4 // fan-in carries 4× weight
+	if n.Exported {
+		score += 2
+	}
+	if !strings.Contains(n.File, "_test.go") {
+		score += 1
+	}
+	return score
+}
+
+// handleUnlinkEntities removes a previously-created manual edge immediately
+// from both the in-memory graph and the persistent store.
+func (s *Server) handleUnlinkEntities(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	if s.store == nil {
+		return mcp.NewToolResultError("unlink_entities requires a store — daemon may not be running"), nil
+	}
+
+	args := req.GetArguments()
+	a, ok := args["a"].(string)
+	if !ok || strings.TrimSpace(a) == "" {
+		return mcp.NewToolResultError("a is required — entity name or node ID for the source"), nil
+	}
+	b, ok := args["b"].(string)
+	if !ok || strings.TrimSpace(b) == "" {
+		return mcp.NewToolResultError("b is required — entity name or node ID for the target"), nil
+	}
+	relation, ok := args["relation"].(string)
+	relation = strings.TrimSpace(relation)
+	if !ok || relation == "" {
+		return mcp.NewToolResultError("relation is required — must match the relation used in link_entities"), nil
+	}
+
+	// Resolve endpoints. Use same heuristic as link_entities.
+	fromNode, _ := s.resolveEntityRefWithCount(a)
+	if fromNode == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q — use find_entity to discover the correct node ID", a)), nil
+	}
+	toNode, _ := s.resolveEntityRefWithCount(b)
+	if toNode == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q — use find_entity to discover the correct node ID", b)), nil
+	}
+
+	fromID := fromNode.ID
+	toID := toNode.ID
+
+	// Verify the manual edge exists in the store before removing.
+	edges, err := s.store.LoadManualEdges()
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("load edges: %v", err)), nil
+	}
+	found := false
+	for _, e := range edges {
+		if e.FromID == fromID && e.ToID == toID && e.Relation == relation {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"no manual edge found: %s -[%s]-> %s — was it created with link_entities?",
+			fromID, relation, toID,
+		)), nil
+	}
+
+	// Remove from persistent store first — if this fails, leave the graph unchanged.
+	if err := s.store.DeleteManualEdge(fromID, toID, relation); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("delete edge: %v", err)), nil
+	}
+
+	// Remove from in-memory graph immediately. Effect is instant — no restart needed.
+	s.graph.RemoveEdge(fromID, toID, graph.EdgeType(relation))
+
+	return jsonResult(map[string]interface{}{
+		"unlinked": true,
+		"from":     map[string]string{"id": string(fromID), "name": fromNode.Name},
+		"to":       map[string]string{"id": string(toID), "name": toNode.Name},
+		"relation": relation,
+		"hint":     "Edge removed from graph and store. Effect is immediate — get_context will no longer traverse this edge.",
+	})
 }
