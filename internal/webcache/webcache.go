@@ -115,7 +115,7 @@ func New(s *store.Store) *Cache {
 				}
 				// Case 2: hostname-based redirect — resolve DNS with a short
 				// timeout and reject if any resolved IP is private/internal.
-				// Fail-open on DNS errors (DialContext provides the backstop).
+				// Fail-closed on DNS errors: an unresolvable redirect target is blocked.
 				dnsCtx, dnsCancel := context.WithTimeout(req.Context(), 500*time.Millisecond)
 				defer dnsCancel()
 				addrs, lookupErr := net.DefaultResolver.LookupIPAddr(dnsCtx, host)
