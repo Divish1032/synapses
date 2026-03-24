@@ -671,25 +671,29 @@ func EnrichBlame(g *graph.Graph, repoRoot string) {
 		jobs = append(jobs, fileJob{absFile: n.File, gitRoot: gr})
 	}
 
-	// Phase 2: run fileBlame in parallel with bounded worker pool (4 concurrent
-	// git subprocesses). This is the expensive I/O-bound phase — parallelism
-	// gives ~4x speedup on repos with hundreds of unique files.
+	// Phase 2: run fileBlame in parallel with a true 4-worker pool.
+	// Creating exactly 4 goroutines (instead of 1 per file) avoids the
+	// ~2KB-per-goroutine stack overhead when jobs is very large (10K+ files).
 	cache := make(map[string]*blameResult, len(jobs))
 	var cacheMu sync.Mutex
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 4) // concurrency limit
-
+	jobCh := make(chan fileJob, len(jobs))
 	for _, j := range jobs {
+		jobCh <- j
+	}
+	close(jobCh)
+	var wg sync.WaitGroup
+	const workerCount = 4
+	for range workerCount {
 		wg.Add(1)
-		go func(f fileJob) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}        // acquire
-			bi := fileBlame(f.gitRoot, f.absFile)
-			<-sem                    // release
-			cacheMu.Lock()
-			cache[f.absFile] = bi
-			cacheMu.Unlock()
-		}(j)
+			for f := range jobCh {
+				bi := fileBlame(f.gitRoot, f.absFile)
+				cacheMu.Lock()
+				cache[f.absFile] = bi
+				cacheMu.Unlock()
+			}
+		}()
 	}
 	wg.Wait()
 
