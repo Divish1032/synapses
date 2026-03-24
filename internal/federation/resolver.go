@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -165,20 +167,35 @@ func newResolverWithClock(entries []config.FederationEntry, configDir string, cl
 // Status returns health info for each federation entry.
 // Errors on individual entries are contained — a broken sibling returns
 // a status entry with Error set, never a top-level error.
+// Entries are checked in parallel (bounded to 8) to avoid 20×I/O latency
+// at large federation sizes. Result ordering matches r.entries ordering.
 func (r *Resolver) Status(ctx context.Context) []EntryStatus {
-	results := make([]EntryStatus, 0, len(r.entries))
-	for _, e := range r.entries {
-		if ctx.Err() != nil {
-			results = append(results, EntryStatus{
-				Alias:  e.Alias,
-				Path:   e.Path,
-				Status: "not_indexed",
-				Error:  "timeout",
-			})
-			continue
-		}
-		results = append(results, r.statusForEntry(e))
+	if len(r.entries) == 0 {
+		return nil
 	}
+
+	results := make([]EntryStatus, len(r.entries))
+
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.SetLimit(8) // bound I/O parallelism — each entry opens a SQLite file
+
+	for i, e := range r.entries {
+		i, e := i, e // capture loop variables
+		eg.Go(func() error {
+			if egCtx.Err() != nil {
+				results[i] = EntryStatus{
+					Alias:  e.Alias,
+					Path:   e.Path,
+					Status: "not_indexed",
+					Error:  "timeout",
+				}
+				return nil
+			}
+			results[i] = r.statusForEntry(e)
+			return nil
+		})
+	}
+	_ = eg.Wait() // goroutines always return nil (fail-open)
 	return results
 }
 
