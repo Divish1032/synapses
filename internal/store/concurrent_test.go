@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -664,7 +665,7 @@ func TestConcurrentPruneAndWrite(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			// Use 0 retention days — prunes nothing recent, but exercises all code paths.
-			st.PruneStaleData(9999)
+			st.PruneStaleData(context.Background(), 9999)
 		}()
 	}
 

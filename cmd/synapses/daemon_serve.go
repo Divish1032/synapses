@@ -1775,7 +1775,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	// but including it here ensures sessions are cleaned up even when no agents
 	// connect for days (e.g. a paused project still running in the background).
 	go func() {
-		st.PruneStaleData(30)
+		st.PruneStaleData(projCtx, 30)
 		st.PruneOldSessions(90 * 24 * time.Hour) //nolint:errcheck
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
@@ -1783,7 +1783,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			select {
 			case <-ticker.C:
 				logutil.InfoP(projectHash(absPath), "synapses: daily prune running (30-day retention, 90-day sessions)\n")
-				st.PruneStaleData(30)
+				st.PruneStaleData(projCtx, 30)
 				st.PruneOldSessions(90 * 24 * time.Hour) //nolint:errcheck
 			case <-projCtx.Done():
 				return

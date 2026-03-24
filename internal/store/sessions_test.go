@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -873,7 +874,7 @@ func TestPruneStaleData_Debounce(t *testing.T) {
 
 	// First call: should run (no-op on empty DB, but should not be skipped).
 	before := time.Now()
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	st.lastPruneStaleMu.Lock()
 	firstAt := st.lastPruneStaleAt
@@ -884,7 +885,7 @@ func TestPruneStaleData_Debounce(t *testing.T) {
 	}
 
 	// Second call within 23 hours: should be skipped (debounced).
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	st.lastPruneStaleMu.Lock()
 	secondAt := st.lastPruneStaleAt

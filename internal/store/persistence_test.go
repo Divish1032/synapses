@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"context"
 	"io"
 	"testing"
 
@@ -373,7 +374,7 @@ func TestPruneStaleData_DoesNotCrash(t *testing.T) {
 	_, _ = st.SendMessage("a", "b", "ping", `{}`, "")
 
 	// Should not panic or error.
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 }
 
 // ── CountIndexedFiles ─────────────────────────────────────────────────────────
