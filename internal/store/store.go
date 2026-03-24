@@ -2679,9 +2679,10 @@ type ManualEdge struct {
 // SaveManualEdge persists a user-defined edge. Upserts on (from_id, to_id, relation).
 // Returns the actual stored row so callers see the true confirmed/suppressed state.
 //
-// clearSuppressed=true  — human-initiated call (link_entities): resets suppressed=0 and
+// clearSuppressed=true  — human-initiated call (link_entities): resets suppressed=0 so
 //
-//	confirmed=0 so a previously-rejected edge becomes active again.
+//	a previously-rejected edge becomes active again. Does NOT touch confirmed —
+//	the confirmed flag is owned exclusively by ConfirmEdge.
 //
 // clearSuppressed=false — automated call (namematcher): preserves existing confirmed and
 //
@@ -2691,12 +2692,15 @@ func (s *Store) SaveManualEdge(fromID, toID graph.NodeID, relation, domain, crea
 	var query string
 	if clearSuppressed {
 		// Human explicitly (re-)creating this edge: lift any prior suppression.
+		// Does NOT reset confirmed — confirm_edge is the only thing that sets/clears
+		// the confirmed flag. A previously-confirmed edge re-created via link_entities
+		// remains confirmed (the human's review decision is preserved).
 		query = `INSERT INTO manual_edges (from_id, to_id, relation, domain, created_by, created_at, confidence)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(from_id, to_id, relation) DO UPDATE SET
 		   domain=excluded.domain, created_by=excluded.created_by,
 		   created_at=excluded.created_at, confidence=excluded.confidence,
-		   suppressed=0, confirmed=0`
+		   suppressed=0`
 	} else {
 		// Automated (namematcher): never downgrade a human-confirmed edge's confidence.
 		query = `INSERT INTO manual_edges (from_id, to_id, relation, domain, created_by, created_at, confidence)

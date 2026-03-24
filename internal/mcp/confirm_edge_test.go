@@ -210,6 +210,52 @@ func TestHandleConfirmEdge_ReapproveAfterReject(t *testing.T) {
 	t.Error("MENTIONS edge not found in store")
 }
 
+// TestHandleConfirmEdge_LinkEntitiesPreservesConfirmed verifies that calling
+// link_entities on an already-confirmed edge does NOT reset the confirmed flag.
+// Bug: clearSuppressed=true previously also set confirmed=0, silently undoing
+// a human's review decision if they called link_entities a second time.
+func TestHandleConfirmEdge_LinkEntitiesPreservesConfirmed(t *testing.T) {
+	t.Parallel()
+	srv, loginID, logoutID := newPopulatedServer(t)
+	ctx := context.Background()
+
+	// Create, confirm, then call link_entities again (e.g. to update domain).
+	if _, err := srv.handleLinkEntities(ctx, callTool(map[string]any{
+		"a": "AuthLogin", "b": "AuthLogout", "relation": "MENTIONS", "domain": "code-to-infra",
+	})); err != nil {
+		t.Fatalf("link_entities initial: %v", err)
+	}
+	if _, err := srv.handleConfirmEdge(ctx, callTool(map[string]any{
+		"a": "AuthLogin", "b": "AuthLogout", "relation": "MENTIONS", "confirmed": true,
+	})); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+
+	// Re-call link_entities to update domain. Must NOT reset confirmed flag.
+	if _, err := srv.handleLinkEntities(ctx, callTool(map[string]any{
+		"a": "AuthLogin", "b": "AuthLogout", "relation": "MENTIONS", "domain": "updated-domain",
+	})); err != nil {
+		t.Fatalf("link_entities re-call: %v", err)
+	}
+
+	edges, err := srv.store.LoadManualEdges()
+	if err != nil {
+		t.Fatalf("LoadManualEdges: %v", err)
+	}
+	for _, e := range edges {
+		if e.FromID == loginID && e.ToID == logoutID && e.Relation == "MENTIONS" {
+			if !e.Confirmed {
+				t.Error("link_entities must not reset confirmed=1 — confirm_edge owns that flag")
+			}
+			if e.Suppressed {
+				t.Error("edge should not be suppressed")
+			}
+			return
+		}
+	}
+	t.Error("MENTIONS edge not found in store")
+}
+
 // TestHandleConfirmEdge_LinkEntitiesAfterRejectClearsSuppressed verifies that
 // explicitly calling link_entities after a rejection clears the suppressed flag.
 // Bug: previously the ON CONFLICT didn't reset suppressed=0, so the edge stayed
