@@ -120,9 +120,17 @@ func (c *subgraphCache) get(rootID NodeID, cfg CarveConfig, fingerprint string) 
 		return nil, false
 	}
 	c.mu.Lock()
-	c.promoteKey(key)
+	// Re-check entry existence after re-acquiring write lock: the entry may
+	// have been evicted between the RLock release and this Lock acquisition.
+	e2, still := c.entries[key]
+	if still {
+		c.promoteKey(key)
+	}
 	c.mu.Unlock()
-	return e.sub, true
+	if !still {
+		return nil, false
+	}
+	return e2.sub, true
 }
 
 // put stores a SubGraph in the cache. If the cache is at capacity the least
