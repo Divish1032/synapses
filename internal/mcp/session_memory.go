@@ -768,6 +768,87 @@ func buildEffectivenessMessage(r *EffectivenessReport) string {
 	return msg
 }
 
+// buildSessionTrend converts a slice of DailyEffectiveness rows (oldest-first,
+// from GetRecentEffectivenessTrend) into a summary map suitable for embedding
+// in session_init responses. Returns nil when there are fewer than 2 total
+// sessions across all days — insufficient data produces no actionable signal.
+//
+// Trend direction requires at least 2 distinct days to compare halves:
+//
+//	second_half_avg - first_half_avg > +0.05 → "improving"
+//	first_half_avg  - second_half_avg > 0.05 → "declining"
+//	otherwise (or only 1 day of data)        → "stable"
+func buildSessionTrend(days []pulse.DailyEffectiveness) map[string]interface{} {
+	if len(days) == 0 {
+		return nil
+	}
+	// Aggregate totals across all days.
+	var totalSessions int
+	var weightedHitRate float64
+	var totalTokensSaved int
+	for _, d := range days {
+		totalSessions += d.Sessions
+		weightedHitRate += d.AvgContextHitRate * float64(d.Sessions)
+		totalTokensSaved += d.TotalTokensSaved
+	}
+	if totalSessions < 2 {
+		return nil
+	}
+	avgHitRate := weightedHitRate / float64(totalSessions)
+
+	// Compute trend direction when there are ≥2 days to compare.
+	// With a single day (all sessions on the same calendar day), trend is "stable".
+	trend := "stable"
+	if len(days) >= 2 {
+		mid := len(days) / 2
+		var firstHalfHit, firstHalfSess float64
+		var secondHalfHit, secondHalfSess float64
+		for _, d := range days[:mid] {
+			firstHalfHit += d.AvgContextHitRate * float64(d.Sessions)
+			firstHalfSess += float64(d.Sessions)
+		}
+		for _, d := range days[mid:] {
+			secondHalfHit += d.AvgContextHitRate * float64(d.Sessions)
+			secondHalfSess += float64(d.Sessions)
+		}
+		if firstHalfSess > 0 && secondHalfSess > 0 {
+			firstAvg := firstHalfHit / firstHalfSess
+			secondAvg := secondHalfHit / secondHalfSess
+			switch {
+			case secondAvg-firstAvg > 0.05:
+				trend = "improving"
+			case firstAvg-secondAvg > 0.05:
+				trend = "declining"
+			}
+		}
+	}
+
+	// Human-readable note summarising the trend.
+	hitPct := int(avgHitRate * 100)
+	var note string
+	switch trend {
+	case "improving":
+		note = fmt.Sprintf("Context quality is improving over the last %d days. Hit rate: ~%d%%.", len(days), hitPct)
+	case "declining":
+		note = fmt.Sprintf("Context quality is declining over the last %d days. Hit rate: ~%d%%. Consider increasing depth on first call.", len(days), hitPct)
+	default:
+		note = fmt.Sprintf("Context quality is stable over the last %d days. Hit rate: ~%d%%.", len(days), hitPct)
+	}
+	if totalTokensSaved > 0 {
+		note += fmt.Sprintf(" %d tokens saved.", totalTokensSaved)
+	}
+
+	out := map[string]interface{}{
+		"days":                 len(days),
+		"sessions":             totalSessions,
+		"avg_context_hit_rate": avgHitRate,
+		"total_tokens_saved":   totalTokensSaved,
+		"trend":                trend,
+		"note":                 note,
+	}
+	return out
+}
+
 // parseExaminedEntities extracts entity names from a session log content string.
 // Session logs from buildSessionLogContent embed examined entities as:
 //

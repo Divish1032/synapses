@@ -1157,6 +1157,26 @@ func (s *Server) handleSessionInit(
 				// Pulse sidecar is slow or unavailable — skip hints rather than blocking.
 			}
 		}
+		// Rec #1: surface 7-day session effectiveness trend so agents see their
+		// quality history at session start. Uses the same 100ms deadline pattern
+		// as context_effectiveness_hints above. Omitted when fewer than 2 prior
+		// sessions exist — insufficient data produces no actionable signal.
+		if pc := s.getPulseClient(); pc != nil && agentID != "" {
+			type trendResult struct{ days []pulse.DailyEffectiveness }
+			trendCh := make(chan trendResult, 1)
+			aid := agentID
+			s.goBackground(func() {
+				trendCh <- trendResult{days: pc.GetRecentEffectivenessTrend(7, aid)}
+			})
+			select {
+			case tr := <-trendCh:
+				if t := buildSessionTrend(tr.days); t != nil {
+					resp["session_effectiveness_trend"] = t
+				}
+			case <-time.After(100 * time.Millisecond):
+				// Pulse sidecar slow or unavailable — skip.
+			}
+		}
 	} // end !quickMode && !resumeMode
 
 	// ── 8. Agent constraints (behavioral rules) ───────────────────────────

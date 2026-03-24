@@ -412,6 +412,34 @@ func (s *Server) handleGetContext(
 		adaptiveForceFullDetail = s.adaptiveCarveConfig(&cfg, entityName, agentIDForFeedback)
 	}
 
+	// Rec #2: Quality-based auto-depth — bump MaxDepth by 1 when the entity has a
+	// poor quality score (≤ -2.0), signalling that prior deliveries were repeatedly
+	// followed by corrections or abandonment. Only fires when the agent did NOT
+	// explicitly pass depth= (explicit always wins, applied below). Runs after F17
+	// adaptive expansion so the combined depth is still capped at 5 and the cache
+	// key (computed after this block) captures the bumped value.
+	//
+	// Entity key format: entityWithPath("Name@dir/file") — must match how outcome
+	// signals are stored in entity_quality (see pulse_tools.go emitContextDelivery).
+	qualityAutoDepthBumped := false
+	var qualityAutoScore float64
+	if _, hasExplicitDepth := req.GetArguments()["depth"]; !hasExplicitDepth {
+		if pc := s.getPulseClient(); pc != nil {
+			qualityKey := entityName
+			if qNodes := s.graph.FindByName(entityName); len(qNodes) > 0 {
+				qBest := pickBestNode(qNodes, s.graph)
+				qualityKey = entityWithPath(qBest.Name, qBest.File)
+			}
+			if qs, ok := pc.GetEntityQualityScore(qualityKey, s.projectID); ok && qs <= -2.0 {
+				if cfg.MaxDepth < 5 {
+					cfg.MaxDepth++
+					qualityAutoDepthBumped = true
+					qualityAutoScore = qs
+				}
+			}
+		}
+	}
+
 	// Sprint 11: apply model-based budget multiplier to the default budget.
 	// Only applies when the agent did NOT explicitly pass token_budget.
 	if mult := s.getSessionBudgetMultiplier(ctx); mult != 1.0 {
@@ -907,10 +935,16 @@ func (s *Server) handleGetContext(
 		}
 	}
 
-	// F17: surface adaptive expansion hint in the response so agents know why
-	// they received deeper context than the default.
+	// F17 + Rec #2: surface adaptive expansion hint in the response so agents
+	// know why they received deeper context than the default depth.
+	// F17 (episodic feedback) takes priority; quality-based auto-depth fires only
+	// when F17 did not already set a hint.
 	if adaptiveForceFullDetail {
 		dc.AdaptiveHint = "⟳ Context depth auto-expanded based on prior feedback for this entity."
+	} else if qualityAutoDepthBumped {
+		dc.AdaptiveHint = fmt.Sprintf(
+			"⟳ Context depth auto-expanded (quality score %.1f): prior deliveries for this entity were frequently followed by corrections or session abandonment.",
+			qualityAutoScore)
 	}
 
 	// Sprint 15 #2 + #6: single quality-score fetch for both LowQualityHint and
@@ -918,11 +952,16 @@ func (s *Server) handleGetContext(
 	// so dc.GraphFreshness and dc.StaleAnnotationWarning are already populated.
 	// One SQLite round-trip serves both consumers; avoids the dual-query pattern
 	// that the earlier Sprint 15 #2 placement would have caused.
+	//
+	// Key format: entityWithPath("Name@dir/file") — entity_quality is keyed by
+	// the same format as outcome_signals (see UpdateEntityQualityScore in store.go
+	// and emitContextDelivery in pulse_tools.go). Using string(sg.Root) (NodeID
+	// format) would never match any stored entry.
 	{
 		var qs float64
 		var hasRecord bool
-		if pc := s.getPulseClient(); pc != nil && sg.Root != "" {
-			qs, hasRecord = pc.GetEntityQualityScore(string(sg.Root), s.projectID)
+		if pc := s.getPulseClient(); pc != nil {
+			qs, hasRecord = pc.GetEntityQualityScore(entityWithPath(best.Name, best.File), s.projectID)
 		}
 		// Sprint 15 #2: low-quality hint fires at qs ≤ -2.0 (established pattern
 		// of insufficiency requiring multiple negative signals).
