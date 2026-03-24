@@ -1072,6 +1072,13 @@ func (s *Server) SetMemoryEmbedder(e embed.Embedder) {
 		go func() {
 			defer s.wg.Done()
 			ctx, cancel := context.WithCancel(context.Background())
+			go func() {
+				select {
+				case <-s.stopCh:
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
 			defer cancel()
 			s.EmbedToolCatalog(ctx, e)
 		}()
