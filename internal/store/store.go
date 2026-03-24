@@ -63,6 +63,19 @@ CREATE TABLE IF NOT EXISTS edges (
     PRIMARY KEY (from_id, to_id, type)
 );
 
+-- manual_edges stores user-defined cross-domain edges created via link_entities.
+-- These survive SaveGraph (which wipes the edges table) because they are stored here.
+-- On LoadGraph, they are re-injected into the in-memory graph.
+CREATE TABLE IF NOT EXISTS manual_edges (
+    from_id    TEXT NOT NULL,
+    to_id      TEXT NOT NULL,
+    relation   TEXT NOT NULL,
+    domain     TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (from_id, to_id, relation)
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -2635,7 +2648,103 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 		return nil, fmt.Errorf("iterate edges: %w", err)
 	}
 
+	// Re-inject persisted manual edges so user-defined links survive restarts.
+	if err := s.reinjectManualEdges(g); err != nil {
+		// Non-fatal: log and continue. Manual edges are overlays; losing them on
+		// load is worse than a startup failure, but we never want LoadGraph to fail
+		// solely because of manual-edge injection.
+		logutil.Warn("synapses: store: reinject manual edges: %v\n", err)
+	}
+
 	return g, nil
+}
+
+// ManualEdge represents a user-defined cross-domain edge created via link_entities.
+type ManualEdge struct {
+	FromID    graph.NodeID
+	ToID      graph.NodeID
+	Relation  string
+	Domain    string
+	CreatedBy string
+	CreatedAt int64
+}
+
+// SaveManualEdge persists a user-defined edge. Upserts on (from_id, to_id, relation).
+// Returns the edge immediately so callers can inject it into the in-memory graph.
+func (s *Store) SaveManualEdge(fromID, toID graph.NodeID, relation, domain, createdBy string) (ManualEdge, error) {
+	now := time.Now().Unix()
+	_, err := s.graphDB.Exec(
+		`INSERT INTO manual_edges (from_id, to_id, relation, domain, created_by, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(from_id, to_id, relation) DO UPDATE SET domain=excluded.domain, created_by=excluded.created_by, created_at=excluded.created_at`,
+		string(fromID), string(toID), relation, domain, createdBy, now,
+	)
+	if err != nil {
+		return ManualEdge{}, fmt.Errorf("save manual edge: %w", err)
+	}
+	return ManualEdge{
+		FromID:    fromID,
+		ToID:      toID,
+		Relation:  relation,
+		Domain:    domain,
+		CreatedBy: createdBy,
+		CreatedAt: now,
+	}, nil
+}
+
+// DeleteManualEdge removes a persisted user-defined edge.
+func (s *Store) DeleteManualEdge(fromID, toID graph.NodeID, relation string) error {
+	_, err := s.graphDB.Exec(
+		`DELETE FROM manual_edges WHERE from_id=? AND to_id=? AND relation=?`,
+		string(fromID), string(toID), relation,
+	)
+	return err
+}
+
+// LoadManualEdges returns all persisted user-defined edges.
+func (s *Store) LoadManualEdges() ([]ManualEdge, error) {
+	rows, err := s.graphDB.Query(
+		`SELECT from_id, to_id, relation, domain, created_by, created_at FROM manual_edges`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load manual edges: %w", err)
+	}
+	defer rows.Close()
+	var out []ManualEdge
+	for rows.Next() {
+		var me ManualEdge
+		var fromID, toID string
+		if err := rows.Scan(&fromID, &toID, &me.Relation, &me.Domain, &me.CreatedBy, &me.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan manual edge: %w", err)
+		}
+		me.FromID = graph.NodeID(fromID)
+		me.ToID = graph.NodeID(toID)
+		out = append(out, me)
+	}
+	return out, rows.Err()
+}
+
+// ReinjectManualEdges loads all persisted manual edges and adds them to g.
+// Safe to call after any graph rebuild — AddEdge is idempotent and silently
+// drops edges whose endpoints no longer exist.
+func (s *Store) ReinjectManualEdges(g *graph.Graph) error {
+	return s.reinjectManualEdges(g)
+}
+
+// reinjectManualEdges is the internal implementation shared by LoadGraph and ReinjectManualEdges.
+func (s *Store) reinjectManualEdges(g *graph.Graph) error {
+	edges, err := s.LoadManualEdges()
+	if err != nil {
+		return err
+	}
+	for _, me := range edges {
+		edgeType := graph.EdgeType(me.Relation)
+		// Unknown relation strings that don't match catalog types get EdgeManual
+		// weight via the DefaultEdgeWeights map. The type string is preserved so
+		// callers can filter on the semantic label (e.g. "DEPLOYS").
+		g.AddEdge(&graph.Edge{From: me.FromID, To: me.ToID, Type: edgeType})
+	}
+	return nil
 }
 
 // SignatureChange records an exported entity whose signature changed in the last SaveGraph.
