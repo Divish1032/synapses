@@ -86,12 +86,19 @@ func (s *Store) EndReadSnapshot() {
 	}
 }
 
-// readDB returns the raw database connection for read-only queries.
-// Prefer this over execer() for new read-path methods (Get*, Count*) to avoid
-// routing queries through the batch transaction. Existing read-path methods
-// still use execer() — the txMu synchronization prevents the data race, and
-// the practical risk of reading through a committed Tx is negligible (< 1μs window).
-func (s *Store) readDB() *sql.DB {
+// readDB returns the active read snapshot transaction when one is in progress
+// (matching execer()'s behavior), otherwise the raw database connection.
+// This ensures queries during rollup see a consistent WAL snapshot.
+func (s *Store) readDB() interface {
+	Query(string, ...any) (*sql.Rows, error)
+	QueryRow(string, ...any) *sql.Row
+} {
+	s.readTxMu.RLock()
+	rtx := s.readTx
+	s.readTxMu.RUnlock()
+	if rtx != nil {
+		return rtx
+	}
 	return s.db
 }
 
