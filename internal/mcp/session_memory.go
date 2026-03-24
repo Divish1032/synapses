@@ -33,7 +33,8 @@ type EffectivenessReport struct {
 	// ContextHitRate is the fraction of context deliveries served from cache.
 	ContextHitRate float64 `json:"context_hit_rate"`
 	// TaskCompletionRate is 1 - tool_call_error_rate (proxy: successful calls / total calls).
-	TaskCompletionRate float64 `json:"task_completion_rate"`
+	// Nil when no tool-call data is available for this session (not 0% — unknown).
+	TaskCompletionRate *float64 `json:"task_completion_rate,omitempty"`
 	// ToolCalls is the total number of MCP tool calls in this session.
 	ToolCalls int `json:"tool_calls"`
 	// TotalDeliveries is the total number of context deliveries in this session.
@@ -409,39 +410,23 @@ func (s *Server) handleEndSession(
 	// Sprint 15 #5: compute and record session effectiveness report, then surface it in the response.
 	if pc := s.getPulseClient(); pc != nil && synapseSessionID != "" {
 		var toolCalls int
-		var taskCompRate float64
+		var taskCompRate *float64 // nil = no measurement, not "0% success"
 		if retro != nil {
 			toolCalls = retro.TotalCalls
 			// Use (1 - error_rate) as a proxy for task completion rate.
-			taskCompRate = 1.0 - retro.ErrorRate
+			// Only set when we have actual call data — avoids showing 0% when there's
+			// simply no measurement (e.g. session ended without any tool calls recorded).
+			v := 1.0 - retro.ErrorRate
+			taskCompRate = &v
 		}
 		contextHitRate := pc.GetSessionContextHitRate(synapseSessionID)
 		totalDel, firstFetch, tokensSaved := pc.GetSessionDeliveryStats(synapseSessionID)
 
-		eff := pulse.SessionEffectiveness{
-			SessionID:          synapseSessionID,
-			AgentID:            agentID,
-			ProjectID:          s.projectID,
-			ContextHitRate:     contextHitRate,
-			TaskCompletionRate: taskCompRate,
-			TokensSaved:        tokensSaved,
-			ToolCalls:          toolCalls,
-			DurationMs:         durationMs,
-		}
-		s.goBackground(func() { pc.InsertSessionEffectiveness(eff) })
-
-		// Build the effectiveness report for the response.
-		// Read the 7-day trend from *previous* sessions (current session is still
-		// being inserted asynchronously above, so this reads historical data only).
-		report := &EffectivenessReport{
-			ContextHitRate:     contextHitRate,
-			TaskCompletionRate: taskCompRate,
-			ToolCalls:          toolCalls,
-			TotalDeliveries:    totalDel,
-			FirstFetchRight:    firstFetch,
-			TokensSaved:        tokensSaved,
-			DurationMs:         durationMs,
-		}
+		// Read the 7-day trend BEFORE queuing the insert so this session's data
+		// cannot race into its own Prev7d comparison. goBackground submits to a
+		// worker pool that may execute on an idle goroutine before this goroutine
+		// continues — reading trend first eliminates that race entirely.
+		var prev7d *prev7dSummary
 		if trend := pc.GetRecentEffectivenessTrend(7, agentID); len(trend) > 0 {
 			p := &prev7dSummary{}
 			for _, d := range trend {
@@ -453,8 +438,36 @@ func (s *Server) handleEndSession(
 			if p.Sessions > 0 {
 				p.AvgContextHitRate /= float64(p.Sessions)
 				p.AvgTaskCompletion /= float64(p.Sessions)
-				report.Prev7d = p
+				prev7d = p
 			}
+		}
+
+		// Queue the insert after the trend read — order matters (see above).
+		taskCompRateF64 := 0.0
+		if taskCompRate != nil {
+			taskCompRateF64 = *taskCompRate
+		}
+		eff := pulse.SessionEffectiveness{
+			SessionID:          synapseSessionID,
+			AgentID:            agentID,
+			ProjectID:          s.projectID,
+			ContextHitRate:     contextHitRate,
+			TaskCompletionRate: taskCompRateF64,
+			TokensSaved:        tokensSaved,
+			ToolCalls:          toolCalls,
+			DurationMs:         durationMs,
+		}
+		s.goBackground(func() { pc.InsertSessionEffectiveness(eff) })
+
+		report := &EffectivenessReport{
+			ContextHitRate:     contextHitRate,
+			TaskCompletionRate: taskCompRate,
+			ToolCalls:          toolCalls,
+			TotalDeliveries:    totalDel,
+			FirstFetchRight:    firstFetch,
+			TokensSaved:        tokensSaved,
+			DurationMs:         durationMs,
+			Prev7d:             prev7d,
 		}
 		report.Message = buildEffectivenessMessage(report)
 		result.EffectivenessReport = report
