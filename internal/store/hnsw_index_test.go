@@ -170,7 +170,7 @@ func TestMemoryVectorSearch_HNSW_FindsNearest(t *testing.T) {
 
 	// Search for a vector similar to the first memory.
 	queryVec := makeUnitVec(dims, 0)
-	results, err := st.MemoryVectorSearch(queryVec, 1)
+	results, err := st.MemoryVectorSearchWithThreshold(queryVec, 1, 0.0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestMemoryVectorSearch_HNSW_IncrementalAdd(t *testing.T) {
 
 	// Search for the second memory's direction — should find it via incremental add.
 	queryVec := makeUnitVec(dims, 200)
-	results, err := st.MemoryVectorSearch(queryVec, 1)
+	results, err := st.MemoryVectorSearchWithThreshold(queryVec, 1, 0.0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestMemoryVectorSearch_HNSW_BruteforceFallback(t *testing.T) {
 	st.hnswMemMu.Unlock()
 
 	// Search should still work via brute-force fallback.
-	results, err := st.MemoryVectorSearch(makeUnitVec(dims, 50), 1)
+	results, err := st.MemoryVectorSearchWithThreshold(makeUnitVec(dims, 50), 1, 0.0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestMemoryVectorSearch_HNSW_ConcurrentSafety(t *testing.T) {
 			localRng := rand.New(rand.NewSource(seed))
 			for i := 0; i < ops; i++ {
 				qv := makeRandomUnitVec(localRng, dims)
-				_, _ = st.MemoryVectorSearch(qv, 5)
+				_, _ = st.MemoryVectorSearchWithThreshold(qv, 5, 0.0)
 			}
 		}(int64(r + 42))
 	}
@@ -548,7 +548,7 @@ func TestMemoryVectorSearch_HNSW_RecallAccuracy(t *testing.T) {
 		}
 
 		// HNSW search.
-		results, err := st.MemoryVectorSearch(centres[q], k)
+		results, err := st.MemoryVectorSearchWithThreshold(centres[q], k, 0.0)
 		if err != nil {
 			t.Fatalf("cluster %d search: %v", q, err)
 		}
@@ -624,7 +624,7 @@ func BenchmarkMemoryVectorSearch_HNSW(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = st.MemoryVectorSearch(queryVec, 10)
+		_, _ = st.MemoryVectorSearchWithThreshold(queryVec, 10, 0.0)
 	}
 }
 
