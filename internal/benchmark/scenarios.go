@@ -472,25 +472,36 @@ func runMemoryRecall(g *graph.Graph, st *store.Store) ([]QueryResult, error) {
 	}
 
 	// Use a short TTL so benchmark memories expire quickly after the run.
+	// The immediate defer-based cleanup below is the primary protection; the TTL
+	// is a safety net for cases where cleanup cannot run (e.g. process killed).
 	shortExpiry := time.Now().UTC().Add(2 * time.Minute).Format(time.RFC3339)
 
-	// Insert memories.
-	insertedIDs := make([]string, len(memories))
+	// insertedIDs grows as each memory is inserted. The defer runs cleanup for
+	// every successfully inserted memory even if a later insert or search fails.
+	// This prevents benchmark noise from leaking into real recall() results.
+	var insertedIDs []string
+	defer func() {
+		for _, id := range insertedIDs {
+			st.DeleteMemoryByID(id)
+		}
+	}()
+
 	for i, tm := range memories {
 		id := fmt.Sprintf("bench-recall-%d-%d", i, time.Now().UnixNano())
 		m := store.Memory{
-			ID:        id,
-			Tier:      store.TierProject,
-			Content:   tm.content,
-			Source:    "benchmark",
-			Tags:     `["benchmark"]`,
+			ID:      id,
+			Tier:    store.TierProject,
+			AgentID: "benchmark", // tags events as benchmark noise, not real agent activity
+			Content: tm.content,
+			Source:  "benchmark",
+			Tags:    `["benchmark"]`,
 			ExpiresAt: shortExpiry,
 		}
 		insertedID, err := st.InsertMemory(m)
 		if err != nil {
 			return nil, fmt.Errorf("insert test memory %d: %w", i, err)
 		}
-		insertedIDs[i] = insertedID
+		insertedIDs = append(insertedIDs, insertedID)
 	}
 
 	// Search for each memory by its query.
@@ -513,12 +524,6 @@ func runMemoryRecall(g *graph.Graph, st *store.Store) ([]QueryResult, error) {
 
 		label := fmt.Sprintf("MemoryRecall(%q)", tm.query)
 		results = append(results, makeQueryResult(label, expected, returned, elapsed))
-	}
-
-	// Clean up benchmark memories immediately instead of waiting for TTL expiry.
-	// This prevents test data from appearing in real recall() results.
-	for _, id := range insertedIDs {
-		st.DeleteMemoryByID(id)
 	}
 
 	if len(results) == 0 {

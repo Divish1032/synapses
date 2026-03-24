@@ -2930,14 +2930,14 @@ func (s *Server) registerTools() {
 					"no hardcoded IDs, portable across any indexed codebase. "+
 					"Measures precision, recall, F1, and latency for key operations: "+
 					"context completeness, search accuracy, impact coverage, graph reachability, "+
-					"and FTS ranking quality. "+
-					"Use scenario=\"all\" (default) to run all 5 built-in scenarios, or "+
+					"FTS ranking quality, and memory recall. "+
+					"Use scenario=\"all\" (default) to run all 6 built-in scenarios, or "+
 					"pass a specific name: context-completeness, search-accuracy, impact-coverage, "+
-					"graph-reachability, fts-ranking.",
+					"graph-reachability, fts-ranking, memory-recall.",
 			),
 			mcp.WithString("scenario",
 				mcp.Description("Scenario to run: 'all' (default), 'context-completeness', 'search-accuracy', "+
-					"'impact-coverage', 'graph-reachability', 'fts-ranking'."),
+					"'impact-coverage', 'graph-reachability', 'fts-ranking', 'memory-recall'."),
 			),
 		),
 		s.handleBenchmark,

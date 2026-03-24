@@ -20,6 +20,9 @@ func (s *Server) handleBenchmark(
 	if s.graph == nil {
 		return mcp.NewToolResultError("no graph loaded — run 'synapses index' first"), nil
 	}
+	if s.graph.NodeCount() == 0 {
+		return mcp.NewToolResultError("graph is empty — run 'synapses index' on a non-empty codebase first"), nil
+	}
 	if s.store == nil {
 		return mcp.NewToolResultError("store not available"), nil
 	}

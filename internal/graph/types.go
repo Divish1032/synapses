@@ -496,9 +496,12 @@ type CarveConfig struct {
 	// node ID. Scores are the signed sum of signal_weight values from
 	// outcome_signals (Sprint 15 #1/2). Positive = context was consistently
 	// helpful; negative = context was repeatedly insufficient or abandoned.
-	// Called once after BFS/PPR scoring with all surviving node IDs.
+	// Called once after BFS/PPR scoring with all surviving nodes.
+	// Each QualityNode carries the ID, Name, and File so closures can convert
+	// to entityWithPath format without re-acquiring the graph read lock (which
+	// would deadlock — CarveEgoGraph already holds g.mu.RLock when calling this).
 	// Nil disables quality-based re-ranking (backward-compatible default).
-	QualityScoreLookup func(ids []NodeID) map[NodeID]float64
+	QualityScoreLookup func(nodes []QualityNode) map[NodeID]float64
 	// CrossDomainDecay is a multiplier applied to relevance when BFS/PPR crosses
 	// a domain boundary (e.g., code→infra, code→api). Range (0, 1].
 	// A value of 0.5 (default) means cross-domain neighbors score at half the
@@ -529,6 +532,17 @@ type EdgeWeightKey struct {
 	From NodeID
 	To   NodeID
 	Type EdgeType
+}
+
+// QualityNode carries the graph identity and file context for a single node
+// passed to CarveConfig.QualityScoreLookup. Name and File allow closures to
+// convert to entityWithPath format without calling Graph.GetNode — which would
+// attempt to re-acquire g.mu.RLock and potentially deadlock because
+// CarveEgoGraph already holds the lock when it invokes QualityScoreLookup.
+type QualityNode struct {
+	ID   NodeID
+	Name string
+	File string
 }
 
 // intentModifyWeights boosts outgoing CALLS (callees) for the "modify" intent.
