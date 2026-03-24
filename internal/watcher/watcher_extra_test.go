@@ -81,8 +81,8 @@ func TestCheckViolations_NoStore_ReturnsEarly(t *testing.T) {
 	w.checkViolations("bad.go")
 }
 
-// TestIngestToBrain_NonBrainClient covers the type-assertion failure path.
-func TestIngestToBrain_NonBrainClient(t *testing.T) {
+// TestIngestToBrain_NilBrainClient covers the nil early-return path.
+func TestIngestToBrain_NilBrainClient(t *testing.T) {
 	g := graph.New("test")
 	w, err := New(g, parser.NewWalker(), nil)
 	if err != nil {
@@ -90,9 +90,7 @@ func TestIngestToBrain_NonBrainClient(t *testing.T) {
 	}
 	defer w.Stop()
 
-	// Set a non-*brain.Client value so the type assertion fails.
-	w.brainClient = "not-a-brain-client"
-	// Must return immediately without panic.
+	// brainClient is nil by default — must return immediately without panic.
 	w.ingestToBrain("pkg/svc.go")
 }
 

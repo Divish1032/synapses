@@ -279,7 +279,7 @@ func TestSetBrainClient_StoresValue(t *testing.T) {
 	}
 	defer w.Stop()
 
-	w.SetBrainClient(nil) // nil interface{} — must not panic
+	w.SetBrainClient(nil) // nil *brain.Client — must not panic
 	if w.brainClient != nil {
 		t.Error("expected brainClient nil after SetBrainClient(nil)")
 	}

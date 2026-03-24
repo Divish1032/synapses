@@ -111,7 +111,7 @@ type Watcher struct {
 	walker      *parser.Walker
 	store       *store.Store           // may be nil — cache update is best-effort
 	cfg         *config.Config         // may be nil — violation checking is best-effort
-	brainClient interface{}            // *brain.Client — set via SetBrainClient; nil if brain not configured
+	brainClient *brain.Client          // set via SetBrainClient; nil if brain not configured
 	pktInval    PacketCacheInvalidator // set via SetPacketInvalidator; may be nil
 	cfgHandler  ConfigChangeHandler    // called when synapses.json changes; may be nil
 	configPath  string                 // absolute path to synapses.json (set by Start)
@@ -320,9 +320,8 @@ func (w *Watcher) SetConfig(cfg *config.Config) {
 }
 
 // SetBrainClient wires a *brain.Client into the watcher so that changed files
-// are incrementally ingested to the intelligence sidecar. Using interface{}
-// avoids an import cycle (brain imports only stdlib, not watcher).
-func (w *Watcher) SetBrainClient(bc interface{}) {
+// are incrementally ingested to the intelligence sidecar.
+func (w *Watcher) SetBrainClient(bc *brain.Client) {
 	w.brainClient = bc
 }
 
@@ -2100,8 +2099,8 @@ func (w *Watcher) persistAsync(changedFile string) {
 // write-back to fetch the generated summaries and store them as annotations.
 // Runs in a goroutine; all errors are silently discarded (fail-silent contract).
 func (w *Watcher) ingestToBrain(path string) {
-	bc, ok := w.brainClient.(*brain.Client)
-	if !ok || bc == nil {
+	bc := w.brainClient
+	if bc == nil {
 		return
 	}
 	// Derive context from stopCtx so in-flight ingests are cancelled on shutdown.
