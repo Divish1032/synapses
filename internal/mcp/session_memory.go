@@ -184,6 +184,14 @@ func (s *Server) handleEndSession(
 		if ts, err := s.store.GetToolCallSummary(synapseSessionID); err == nil && ts.TotalCalls > 0 {
 			retro = &ts
 		}
+		// Sprint 15 #1: emit "task_abandoned" signals for entities that received
+		// context but have no task completion outcome. Must run BEFORE
+		// CorrelateSessionOutcome so we can identify task_outcome='' rows.
+		// Outcome "unknown" means the agent ended without calling end_session
+		// with a summary — a strong negative signal.
+		if outcome == "unknown" {
+			s.emitAbandonedContextSignals(synapseSessionID, agentID, s.projectID)
+		}
 		// Sprint 6.7: correlate all context deliveries for this session with the outcome.
 		// Synchronous — must complete before session record is cleared.
 		_, _ = s.store.CorrelateSessionOutcome(synapseSessionID, outcome)

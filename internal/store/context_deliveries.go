@@ -37,6 +37,34 @@ func (s *Store) InsertContextDelivery(cd ContextDelivery) {
 	)
 }
 
+// GetSessionContextEntities returns the distinct non-empty entity names that
+// received context delivery in the given session and have not yet been assigned
+// a task_outcome. Used by emitAbandonedContextSignals at end_session to emit
+// "task_abandoned" signals before the rows are bulk-updated to "unknown".
+// Returns nil (not an error) when session_id is empty or no rows match.
+func (s *Store) GetSessionContextEntities(sessionID string) []string {
+	if s == nil || s.knowledgeDB == nil || sessionID == "" {
+		return nil
+	}
+	rows, err := s.knowledgeDB.Query(
+		`SELECT DISTINCT entity FROM context_deliveries
+		 WHERE session_id = ? AND task_outcome = '' AND entity != ''`,
+		sessionID,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var entities []string
+	for rows.Next() {
+		var e string
+		if rows.Scan(&e) == nil && e != "" {
+			entities = append(entities, e)
+		}
+	}
+	return entities
+}
+
 // CorrelateSessionOutcome updates all context_deliveries rows for the given
 // session with the resolved task outcome ("success" or "unknown").
 // Called synchronously from handleEndSession — outcome must be persisted before

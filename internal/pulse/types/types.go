@@ -85,7 +85,7 @@ type SessionEvent struct {
 }
 
 // OutcomeSignalEvent is sent for passive outcome signals (R29).
-// SignalType: "correction", "escalation", "replan", "task_done", "task_cancelled".
+// SignalType: "correction", "escalation", "replan", "task_done", "task_cancelled", "task_abandoned".
 type OutcomeSignalEvent struct {
 	ProjectID       string `json:"project_id,omitempty"`
 	AgentID         string `json:"agent_id,omitempty"`
@@ -99,7 +99,43 @@ type OutcomeSignalEvent struct {
 	TimeToOutcomeMs int64 `json:"time_to_outcome_ms,omitempty"`
 	// P8-8: task priority for priority-completion correlation.
 	Priority string `json:"priority,omitempty"`
+	// Sprint 15 #1: signal quality weight for per-entity quality scoring.
+	// Positive = context was helpful; negative = context was insufficient or session failed.
+	// Callers must set this using the Signal* constants below.
+	SignalWeight float64 `json:"signal_weight,omitempty"`
 }
+
+// Signal quality weights (Sprint 15 #1 — signal quality discipline).
+// These constants encode the ROADMAP's quality tiers into numeric weights so that
+// per-entity quality scores (Sprint 15 #2) can use COALESCE(SUM(signal_weight),0).
+const (
+	// SignalWeightTaskDone is a weak positive: task completed but context may have been
+	// over-broad. Positive because completion is the goal; "weak" because correlation
+	// is indirect — the task might have completed despite unhelpful context.
+	SignalWeightTaskDone = 0.3
+
+	// SignalWeightTaskCancelled is a moderate negative: agent explicitly abandoned the task.
+	SignalWeightTaskCancelled = -0.5
+
+	// SignalWeightTaskAbandoned is a strong negative: session ended without any task
+	// completion signal — context likely did not enable progress.
+	SignalWeightTaskAbandoned = -0.8
+
+	// SignalWeightCorrectionImmediate is a moderate negative: same-entity re-fetch
+	// within 5 minutes signals the initial context slice was insufficient.
+	SignalWeightCorrectionImmediate = -0.5
+
+	// SignalWeightCorrectionDelayed is a mild negative: same-entity re-fetch between
+	// 5 and 30 minutes. May be a new subtask angle rather than a correction.
+	SignalWeightCorrectionDelayed = -0.2
+
+	// SignalWeightEscalation is a strong negative: three or more fetches of the same
+	// entity — context was structurally insufficient (too shallow, wrong entity, etc).
+	SignalWeightEscalation = -0.7
+
+	// RefetchImmediateThreshold is the boundary between "correction" and "delayed" signals.
+	RefetchImmediateThreshold = 5 * 60 // seconds
+)
 
 // EntityEffectiveness is returned by GetEffectiveness for a single entity.
 type EntityEffectiveness struct {
