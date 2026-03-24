@@ -2188,6 +2188,26 @@ func (s *Server) registerTools() {
 		s.handleGetPendingTasks,
 	)
 
+	// get_my_tasks — scoped view of pending tasks for a specific agent
+	s.addOrDefer(
+		mcp.NewTool(
+			"get_my_tasks",
+			mcp.WithDescription(
+				"Returns unblocked pending tasks assigned to a specific agent. "+
+					"Requires agent_id. Use this to focus on your own work queue without "+
+					"seeing tasks assigned to other agents.",
+			),
+			mcp.WithString("agent_id",
+				mcp.Required(),
+				mcp.Description("The agent identifier to filter tasks by (e.g. 'implementer', 'reviewer')."),
+			),
+			mcp.WithString("plan_id",
+				mcp.Description("Optional. Filter to tasks belonging to a specific plan."),
+			),
+		),
+		s.handleGetMyTasks,
+	)
+
 	// save_session_state
 	s.addOrDefer(
 		mcp.NewTool(
