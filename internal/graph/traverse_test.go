@@ -1435,7 +1435,7 @@ func TestQualityScoreLookup_PositiveBoostsRanking(t *testing.T) {
 
 	cfg := graph.DefaultCarveConfig()
 	cfg.UsePPR = false
-	cfg.QualityScoreLookup = func(ids []graph.NodeID) map[graph.NodeID]float64 {
+	cfg.QualityScoreLookup = func(nodes []graph.QualityNode) map[graph.NodeID]float64 {
 		return map[graph.NodeID]float64{
 			good: 5.0, // strong positive — context was consistently helpful
 			// neutral has no entry → no change
@@ -1477,7 +1477,7 @@ func TestQualityScoreLookup_NegativePenalisesRanking(t *testing.T) {
 
 	cfg := graph.DefaultCarveConfig()
 	cfg.UsePPR = false
-	cfg.QualityScoreLookup = func(ids []graph.NodeID) map[graph.NodeID]float64 {
+	cfg.QualityScoreLookup = func(nodes []graph.QualityNode) map[graph.NodeID]float64 {
 		return map[graph.NodeID]float64{
 			bad: -5.0, // strong negative — context repeatedly caused corrections
 		}
@@ -1516,7 +1516,7 @@ func TestQualityScoreLookup_RootNeverPenalised(t *testing.T) {
 	cfg := graph.DefaultCarveConfig()
 	cfg.UsePPR = false
 	// Provide a very negative quality score for the root itself — must be ignored.
-	cfg.QualityScoreLookup = func(ids []graph.NodeID) map[graph.NodeID]float64 {
+	cfg.QualityScoreLookup = func(nodes []graph.QualityNode) map[graph.NodeID]float64 {
 		return map[graph.NodeID]float64{
 			root: -100.0,
 		}
@@ -1574,7 +1574,7 @@ func TestQualityScoreLookup_EmptyResultIsNoop(t *testing.T) {
 
 	cfgQuality := graph.DefaultCarveConfig()
 	cfgQuality.UsePPR = false
-	cfgQuality.QualityScoreLookup = func(ids []graph.NodeID) map[graph.NodeID]float64 {
+	cfgQuality.QualityScoreLookup = func(nodes []graph.QualityNode) map[graph.NodeID]float64 {
 		return nil // no quality data — new project
 	}
 

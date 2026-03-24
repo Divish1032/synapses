@@ -754,16 +754,25 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	//   Root is always pinned at 1.0 and is never penalised or boosted.
 	//   Nodes with no quality record are left unchanged.
 	if cfg.QualityScoreLookup != nil {
-		batchIDs := make([]NodeID, 0, len(scored))
+		// Build QualityNode slice — carries ID, Name, File so the closure can
+		// convert to entityWithPath without re-acquiring g.mu.RLock (held here).
+		// g.nodes is accessed directly (no lock) because we are inside RLock.
+		batchNodes := make([]QualityNode, 0, len(scored))
 		for i := range scored {
-			if scored[i].id != rootID {
-				batchIDs = append(batchIDs, scored[i].id)
+			if scored[i].id == rootID {
+				continue
 			}
+			qn := QualityNode{ID: scored[i].id}
+			if n := g.nodes[scored[i].id]; n != nil {
+				qn.Name = n.Name
+				qn.File = n.File
+			}
+			batchNodes = append(batchNodes, qn)
 		}
-		if len(batchIDs) > 0 {
+		if len(batchNodes) > 0 {
 			const qualityBeta = 0.2
 			const qualityScale = 5.0
-			qualityScores := cfg.QualityScoreLookup(batchIDs)
+			qualityScores := cfg.QualityScoreLookup(batchNodes)
 			for i := range scored {
 				if scored[i].id == rootID {
 					continue
