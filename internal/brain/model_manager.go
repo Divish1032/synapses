@@ -52,6 +52,11 @@ const (
 //  1. Model already loaded in Ollama → use it at no extra RAM cost.
 //  2. Sufficient RAM for preferred model → warm it up, return preferred.
 //  3. Preferred is 4B, only 2B fits → warm up 2B fallback, return fallback name.
+//     NOTE: Sprint 17 #4 (fallback chains) will make OllamaClients use the returned
+//     fallback name to route inference to the 2B tier. Until then, EnsureModel's
+//     return value is used as a go/no-go signal only; actual inference uses whichever
+//     model the OllamaClients are configured with (primary). The warmup pre-positions
+//     the fallback model so Ollama can swap quickly once #4 wires the routing.
 //  4. Insufficient RAM for any model → return "" (drain cycle deferred).
 //
 // When pulse is nil (NullBrain / testing) all RAM checks are skipped and
