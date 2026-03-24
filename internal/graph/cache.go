@@ -201,8 +201,8 @@ func entryReferencesFile(e *cacheEntry, file string) bool {
 
 // Len returns the number of entries currently in the cache (P9-8).
 func (c *subgraphCache) Len() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return len(c.entries)
 }
 
