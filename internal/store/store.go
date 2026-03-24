@@ -1435,6 +1435,9 @@ func (s *Store) likeSearch(query string, limit int) ([]SearchResult, error) {
 	if len(words) == 0 {
 		return nil, nil
 	}
+	if len(words) > 10 {
+		words = words[:10]
+	}
 	conds := make([]string, len(words))
 	args := make([]interface{}, 0, len(words)*2+1)
 	for i, w := range words {
@@ -1482,6 +1485,9 @@ func sanitizeFTSQuery(q string) string {
 	words := strings.Fields(q)
 	if len(words) == 0 {
 		return ""
+	}
+	if len(words) > 10 {
+		words = words[:10]
 	}
 	terms := make([]string, len(words))
 	for i, w := range words {
