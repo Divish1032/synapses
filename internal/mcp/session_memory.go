@@ -12,6 +12,7 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/brain/archivist"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -405,6 +406,57 @@ func (s *Server) handleEndSession(
 		})
 		if err == nil {
 			memoriesSaved++
+		}
+	}
+
+	// ── D4: Archivist session memory synthesis ──
+	// Fire-and-forget: calls the Archivist LLM to synthesize the session into
+	// durable institutional memories. No-op if brain unavailable or no events.
+	if s.brainClient != nil && sessSummary != nil {
+		bc := s.brainClient
+		var archEvents []archivist.SessionEvent
+		for _, entity := range sessSummary.EntitiesExamined {
+			archEvents = append(archEvents, archivist.SessionEvent{
+				Tool:   "get_context",
+				Entity: entity,
+			})
+		}
+		for _, f := range sessSummary.FilesTouched {
+			archEvents = append(archEvents, archivist.SessionEvent{
+				Tool:   "edit",
+				Entity: f,
+			})
+		}
+		if summary != "" {
+			archEvents = append(archEvents, archivist.SessionEvent{
+				Tool:   "end_session",
+				Result: summary,
+			})
+		}
+		if len(archEvents) > 0 {
+			archReq := archivist.MemorizeRequest{SessionEvents: archEvents}
+			sessStore := s.store
+			sessAgentID2 := agentID
+			sessTaskID2 := taskID
+			s.goBackground(func() {
+				resp, err := bc.Memorize(context.Background(), archReq)
+				if err != nil || sessStore == nil {
+					return
+				}
+				for _, m := range resp.NewMemories {
+					if m.Content == "" {
+						continue
+					}
+					_, _ = sessStore.InsertMemory(store.Memory{
+						Tier:    store.TierProject,
+						Content: m.Content,
+						AgentID: sessAgentID2,
+						TaskID:  sessTaskID2,
+						Source:  store.SourceAuto,
+						Tags:    `["archivist","session_synthesis","auto"]`,
+					})
+				}
+			})
 		}
 	}
 
