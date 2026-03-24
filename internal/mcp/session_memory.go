@@ -195,6 +195,14 @@ func (s *Server) handleEndSession(
 		// Sprint 6.7: correlate all context deliveries for this session with the outcome.
 		// Synchronous — must complete before session record is cleared.
 		_, _ = s.store.CorrelateSessionOutcome(synapseSessionID, outcome)
+		// Sprint 15 #3: apply BFS/PPR edge weight refinements based on this
+		// session's outcome. Background: acquires graph.RLocks and writes SQLite.
+		// Must run AFTER CorrelateSessionOutcome (uses the session_id index, not
+		// task_outcome, so ordering is safe — but clearing session below would
+		// not affect it since we pass synapseSessionID by value).
+		sessIDForRefinement := synapseSessionID
+		outcomeForRefinement := outcome
+		s.goBackground(func() { s.applyEdgeWeightRefinements(sessIDForRefinement, outcomeForRefinement) })
 		s.ClearSynapseSession(mcpSessionID)
 	}
 

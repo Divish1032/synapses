@@ -258,6 +258,9 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 				}
 			}
 
+			// Sprint 15 #3: apply per-edge learned weight multiplier.
+			w *= learnedEdgeMult(cfg.LearnedEdgeWeights, e.From, e.To, e.Type)
+
 			// Apply DirectionBoost to CALLS edges as a transition-probability bias.
 			if cfg.DirectionBoost != 0 && e.Type == EdgeCalls {
 				if cfg.DirectionBoost > 0 && isOutgoing {
@@ -533,6 +536,10 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 						}
 					}
 				}
+
+				// Sprint 15 #3: apply per-edge learned weight multiplier derived
+				// from historical task outcomes. Neutral (1.0) when no entry exists.
+				typeWeight *= learnedEdgeMult(cfg.LearnedEdgeWeights, e.From, e.To, e.Type)
 
 				relevance := typeWeight * localDecay * visited[curr.id]
 
@@ -834,6 +841,19 @@ func edgeWeight(et EdgeType, weights map[EdgeType]float64) float64 {
 		return w
 	}
 	return 0.5
+}
+
+// learnedEdgeMult returns the learned weight multiplier for a specific edge
+// from the LearnedEdgeWeights map (Sprint 15 #3). Returns 1.0 (neutral) when
+// the map is nil or the edge has no entry — callers need not check for nil.
+func learnedEdgeMult(lew map[EdgeWeightKey]float64, from, to NodeID, et EdgeType) float64 {
+	if lew == nil {
+		return 1.0
+	}
+	if m, ok := lew[EdgeWeightKey{From: from, To: to, Type: et}]; ok {
+		return m
+	}
+	return 1.0
 }
 
 // hopDistance estimates the hop count from relevance and decay.

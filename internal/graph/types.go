@@ -483,6 +483,21 @@ type CarveConfig struct {
 	// Called once after BFS/PPR scoring with all surviving node IDs.
 	// Nil disables quality-based re-ranking (backward-compatible default).
 	QualityScoreLookup func(ids []NodeID) map[NodeID]float64
+	// LearnedEdgeWeights contains per-specific-edge weight multipliers derived
+	// from historical task outcomes (Sprint 15 #3). When traversing edge
+	// (From→To, Type), the base edgeWeight is multiplied by this value.
+	// A multiplier of 1.0 is neutral; >1.0 boosts the edge; <1.0 penalises it.
+	// Cap: 2.0x boost, floor: 0.3x penalty. Nil disables learned-weight
+	// adjustments (backward-compatible default).
+	LearnedEdgeWeights map[EdgeWeightKey]float64
+}
+
+// EdgeWeightKey uniquely identifies a specific directed edge in the graph.
+// Used as a map key for per-edge learned weight multipliers (Sprint 15 #3).
+type EdgeWeightKey struct {
+	From NodeID
+	To   NodeID
+	Type EdgeType
 }
 
 // intentModifyWeights boosts outgoing CALLS (callees) for the "modify" intent.
