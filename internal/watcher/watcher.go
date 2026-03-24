@@ -915,18 +915,11 @@ func (w *Watcher) debounce(path, root string) {
 		w.mu.Unlock()
 
 		// Use bounded work channel to limit concurrent reparses.
-		// Guard with stopCh so timer callbacks that fire after Stop()
-		// closes stopCh do not block or write to a closed store.
+		// Block until a worker slot is available or the watcher is stopped.
+		// This prevents silent drops that would leave files permanently stale.
 		select {
 		case w.workCh <- reparseWork{path, root}:
-			return
 		case <-w.stopCh:
-			return
-		default:
-			// Channel full — drop rather than bypass the worker pool bound.
-			// The file will be re-parsed on the next change event.
-			logutil.Debug("synapses: watcher: work channel full, dropping reparse for %s\n", path)
-			return
 		}
 	})
 }
