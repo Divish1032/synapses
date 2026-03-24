@@ -1993,11 +1993,13 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"confirm_edge",
 			mcp.WithDescription(
-				"Approves or permanently rejects a cross-domain edge created by the name-matcher. "+
-					"Use this after reviewing MENTIONS edges surfaced by get_context to improve signal quality. "+
-					"Confirmed edges get confidence=1.0 and are never re-scored by the matcher. "+
-					"Rejected edges are suppressed immediately and permanently — "+
-					"they will not appear in future get_context results and the matcher will not re-create them.",
+				"Approves or permanently rejects any cross-domain edge — "+
+					"whether auto-created by the name-matcher (MENTIONS) or manually via link_entities. "+
+					"confirmed=true: edge confidence → 1.0, name-matcher will never re-score it, edge stays live. "+
+					"confirmed=false: edge suppressed immediately and permanently — "+
+					"removed from the live graph, not re-created by the matcher, invisible to get_context. "+
+					"Auto-retries reversed direction (a↔b) since the matcher stores edges heavy-domain-first. "+
+					"Use link_entities to undo a rejection.",
 			),
 			mcp.WithString("a",
 				mcp.Required(),
