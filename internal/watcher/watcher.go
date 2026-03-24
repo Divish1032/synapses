@@ -1623,16 +1623,13 @@ func (w *Watcher) reparseFile(path, _ string) {
 
 	reparseStart := time.Now() // P2-3: timing
 
-	// Sprint 11.9: Check for tree-sitter parse errors before updating graph.
-	// Half-saved files during active editing produce corrupted ASTs with phantom
-	// nodes. Strategy: skip on FIRST error (likely transient mid-save), but
-	// proceed on SECOND consecutive error (persistent syntax error or grammar
-	// gap — stale data is worse than imperfect data from error-recovering parse).
+	// Sprint 11.9: Read the file once and use the same bytes for both the
+	// parse-error check and the actual graph parse, eliminating the TOCTOU
+	// window where a second rapid save could cause a mismatch.
 	errorAction := "clean" // P9-7: track parse error action
+	var parseSrc []byte
 	if src, err := os.ReadFile(path); err == nil {
 		// BUG-009 TOCTOU check: verify inode hasn't changed between Lstat and ReadFile.
-		// If an attacker replaced the regular file with a symlink between our check
-		// and the read, the inode will differ. Reject to prevent exfiltration.
 		if lstatIno != 0 {
 			if postFi, postErr := os.Lstat(path); postErr == nil {
 				if postStat, ok := postFi.Sys().(*syscall.Stat_t); ok && postStat.Ino != lstatIno {
@@ -1641,6 +1638,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 				}
 			}
 		}
+		parseSrc = src
 		if w.walker.HasParseErrors(path, src) {
 			if !w.fileHadParseErrors[path] {
 				// First error: skip reparse, retain previous clean data.
@@ -1709,7 +1707,13 @@ func (w *Watcher) reparseFile(path, _ string) {
 	w.graph.RemoveCallSitesForFile(path)
 	w.graph.RemoveTerraformRefsForFile(path)
 
-	if err := w.walker.ParseFile(w.graph, path); err != nil {
+	var parseErr error
+	if len(parseSrc) > 0 {
+		parseErr = w.walker.ParseFileSrc(w.graph, path, parseSrc)
+	} else {
+		parseErr = w.walker.ParseFile(w.graph, path)
+	}
+	if err := parseErr; err != nil {
 		logutil.Error("synapses/watcher: re-parse %s: %v\n", path, err)
 		w.graph.ClearFileSnapshot(path)
 		return
