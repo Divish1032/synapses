@@ -117,74 +117,90 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 		st.RebuildMemoryHNSW()
 	}
 
-	ids, err := st.GetMemoriesWithoutEmbeddings(0) // 0 = no limit
-	if err != nil || len(ids) == 0 {
-		return
-	}
+	// Process in batches of 500 so that:
+	//   1. Memory usage is bounded even with millions of unembedded memories.
+	//   2. Resume is incremental: already-embedded memories are committed to
+	//      the DB before the next batch is fetched, so a crash mid-batch loses
+	//      at most batchSize embeddings rather than the entire queue.
+	const batchSize = 500
 
-	staleCount := len(ids) // P2-15: capture before processing
-	logutil.Info("synapses: embedding %d memories (model: %s) …\n", len(ids), embedder.Model())
 	done := 0
 	errors := 0
-	start := time.Now() // P2-6: timing
+	staleCount := 0
+	start := time.Now()
 
 	// Rate limit: pause between embeddings to avoid saturating CPU.
-	// Builtin mode is CPU-bound; Ollama mode has its own throughput limits.
-	// BUG-025: reduced from 500ms to 100ms — at 500ms, 100 memories took
-	// 50 seconds of zero embedding coverage after startup.
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	for i, memID := range ids {
-		select {
-		case <-ctx.Done():
-			if done > 0 {
-				logutil.Warn("synapses: memory embedding interrupted (%d/%d done)\n", done, len(ids))
-			}
-			return
-		default:
+	for {
+		if ctx.Err() != nil {
+			break
 		}
+		ids, err := st.GetMemoriesWithoutEmbeddings(batchSize)
+		if err != nil {
+			logutil.Error("synapses: get memories without embeddings: %v\n", err)
+			break
+		}
+		if len(ids) == 0 {
+			break
+		}
+		if staleCount == 0 {
+			logutil.Info("synapses: embedding memories (model: %s) …\n", embedder.Model())
+		}
+		staleCount += len(ids)
 
-		// Rate limit: wait between embeddings (skip for first one).
-		if i > 0 {
+		for i, memID := range ids {
 			select {
 			case <-ctx.Done():
+				if done > 0 {
+					logutil.Warn("synapses: memory embedding interrupted (%d done so far)\n", done)
+				}
 				return
-			case <-ticker.C:
+			default:
 			}
-		}
 
-		text, ok := st.GetMemoryTextForEmbedding(memID)
-		if !ok || text == "" {
-			continue
-		}
-
-		embedCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		vec, embedErr := embedder.Embed(embedCtx, text)
-		cancel()
-
-		if embedErr != nil {
-			errors++
-			// Log first 3 errors, then suppress to avoid log spam.
-			if errors <= 3 {
-				logutil.Error("synapses: embed memory %s: %v\n", memID, embedErr)
-			} else if errors == 4 {
-				logutil.Warn("synapses: suppressing further embedding errors (%d so far)\n", errors)
+			// Rate limit: wait between embeddings (skip for first one).
+			if i > 0 || done > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
 			}
-			continue
+
+			text, ok := st.GetMemoryTextForEmbedding(memID)
+			if !ok || text == "" {
+				continue
+			}
+
+			embedCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			vec, embedErr := embedder.Embed(embedCtx, text)
+			cancel()
+
+			if embedErr != nil {
+				errors++
+				if errors <= 3 {
+					logutil.Error("synapses: embed memory %s: %v\n", memID, embedErr)
+				} else if errors == 4 {
+					logutil.Warn("synapses: suppressing further embedding errors (%d so far)\n", errors)
+				}
+				continue
+			}
+			if len(vec) == 0 {
+				continue
+			}
+			if err := st.UpsertMemoryEmbedding(memID, embedder.Model(), vec); err != nil {
+				logutil.Error("synapses: store memory embedding %s: %v\n", memID, err)
+			}
+			done++
 		}
-		if len(vec) == 0 {
-			continue
-		}
-		if err := st.UpsertMemoryEmbedding(memID, embedder.Model(), vec); err != nil {
-			logutil.Error("synapses: store memory embedding %s: %v\n", memID, err)
-		}
-		done++
 	}
 
 	if done > 0 || errors > 0 {
-		logutil.Info("synapses: memory embedding complete (%d/%d indexed, %d errors)\n", done, len(ids), errors)
+		logutil.Info("synapses: memory embedding complete (%d/%d indexed, %d errors, %.1fs)\n", done, staleCount, errors, time.Since(start).Seconds())
 	}
+	_ = start // used in log above
 
 	// Phase 2: refresh stale embeddings (content changed since last embedding).
 	staleIDs, staleErr := st.GetStaleEmbeddingMemoryIDs(500)
