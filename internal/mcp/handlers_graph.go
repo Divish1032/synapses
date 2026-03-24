@@ -1654,7 +1654,7 @@ func (s *Server) handleLinkEntities(
 	toID := toNode.ID
 
 	// Persist the edge so it survives restarts and reindexes.
-	saved, err := s.store.SaveManualEdge(fromID, toID, relation, domain, agentID)
+	saved, err := s.store.SaveManualEdge(fromID, toID, relation, domain, agentID, 1.0)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("persist edge: %v", err)), nil
 	}
