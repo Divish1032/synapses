@@ -1654,7 +1654,9 @@ func (s *Server) handleLinkEntities(
 	toID := toNode.ID
 
 	// Persist the edge so it survives restarts and reindexes.
-	saved, err := s.store.SaveManualEdge(fromID, toID, relation, domain, agentID, 1.0)
+	// clearSuppressed=true: human explicitly (re-)creating this edge overrides any
+	// prior confirm_edge rejection.
+	saved, err := s.store.SaveManualEdge(fromID, toID, relation, domain, agentID, 1.0, true)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("persist edge: %v", err)), nil
 	}
@@ -1885,7 +1887,17 @@ func (s *Server) handleConfirmEdge(
 	}
 
 	if err := s.store.ConfirmEdge(fromNode.ID, toNode.ID, relation, confirmed); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		// Check reverse direction — the name-matcher uses orderEdge (heavier domain
+		// first) so the stored direction may be the opposite of what the caller passed.
+		if revErr := s.store.ConfirmEdge(toNode.ID, fromNode.ID, relation, confirmed); revErr == nil {
+			// Reverse worked: swap for the success path below.
+			fromNode, toNode = toNode, fromNode
+		} else {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"%v — also tried reverse direction and found no edge. Use get_context on either entity to see its cross-domain edges.",
+				err,
+			)), nil
+		}
 	}
 
 	if confirmed {
