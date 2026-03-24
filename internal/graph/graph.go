@@ -404,17 +404,18 @@ func (g *Graph) FindByPatternLimit(pattern string, limit int) []*Node {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	lower := strings.ToLower(pattern)
-	// Collect ALL matches first, then sort for determinism, then apply limit.
 	var results []*Node
 	for _, n := range g.nodes {
 		if strings.Contains(strings.ToLower(n.Name), lower) {
 			results = append(results, n)
+			// Stop early once the limit is satisfied — avoids O(N) full scan.
+			// We sort afterwards so results are deterministic within the collected set.
+			if limit > 0 && len(results) >= limit {
+				break
+			}
 		}
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].ID < results[j].ID })
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
-	}
 	return results
 }
 
