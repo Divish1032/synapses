@@ -11,6 +11,144 @@ import (
 
 const magicHeader = "SYNAPSES_FG_V1\n"
 
+// Serialize writes fg to w in zstd-compressed binary format, mirroring
+// Deserialize. The format is suitable for fast cold-start graph reloads.
+func Serialize(fg *FlatGraph, w io.Writer) error {
+	enc, err := zstd.NewWriter(w)
+	if err != nil {
+		return err
+	}
+	// Write magic header.
+	if _, err := enc.Write([]byte(magicHeader)); err != nil {
+		enc.Close()
+		return err
+	}
+	// Write RepoID.
+	if err := writeString(enc, fg.RepoID); err != nil {
+		enc.Close()
+		return err
+	}
+	// Serialize string pool.
+	if err := serializePool(enc); err != nil {
+		enc.Close()
+		return err
+	}
+
+	fg.mu.RLock()
+	defer fg.mu.RUnlock()
+
+	nodeCount := uint32(len(fg.Names))
+	if err := binary.Write(enc, binary.LittleEndian, nodeCount); err != nil {
+		enc.Close()
+		return err
+	}
+	if nodeCount > 0 {
+		if err := binary.Write(enc, binary.LittleEndian, fg.Names); err != nil {
+			enc.Close()
+			return err
+		}
+		typesInt := make([]uint8, nodeCount)
+		for i, t := range fg.Types {
+			typesInt[i] = NodeTypeToUint8(t)
+		}
+		if err := binary.Write(enc, binary.LittleEndian, typesInt); err != nil {
+			enc.Close()
+			return err
+		}
+		if err := binary.Write(enc, binary.LittleEndian, fg.FileIDs); err != nil {
+			enc.Close()
+			return err
+		}
+		if err := binary.Write(enc, binary.LittleEndian, fg.NamespaceIDs); err != nil {
+			enc.Close()
+			return err
+		}
+		tBytes := make([]byte, nodeCount)
+		for i, t := range fg.Tombstones {
+			if t {
+				tBytes[i] = 1
+			}
+		}
+		if _, err := enc.Write(tBytes); err != nil {
+			enc.Close()
+			return err
+		}
+	}
+
+	// OutEdges.
+	outEdgeCount := uint32(len(fg.OutEdges))
+	if err := binary.Write(enc, binary.LittleEndian, outEdgeCount); err != nil {
+		enc.Close()
+		return err
+	}
+	if outEdgeCount > 0 {
+		if err := binary.Write(enc, binary.LittleEndian, fg.OutEdges); err != nil {
+			enc.Close()
+			return err
+		}
+		if err := binary.Write(enc, binary.LittleEndian, fg.OutWeights); err != nil {
+			enc.Close()
+			return err
+		}
+		if err := binary.Write(enc, binary.LittleEndian, fg.OutOffsets); err != nil {
+			enc.Close()
+			return err
+		}
+	}
+
+	// InEdges.
+	inEdgeCount := uint32(len(fg.InEdges))
+	if err := binary.Write(enc, binary.LittleEndian, inEdgeCount); err != nil {
+		enc.Close()
+		return err
+	}
+	if inEdgeCount > 0 {
+		if err := binary.Write(enc, binary.LittleEndian, fg.InEdges); err != nil {
+			enc.Close()
+			return err
+		}
+		if err := binary.Write(enc, binary.LittleEndian, fg.InWeights); err != nil {
+			enc.Close()
+			return err
+		}
+		if err := binary.Write(enc, binary.LittleEndian, fg.InOffsets); err != nil {
+			enc.Close()
+			return err
+		}
+	}
+
+	return enc.Close()
+}
+
+// serializePool writes the global Pool to w in the same format deserializePool reads.
+func serializePool(w io.Writer) error {
+	Pool.mu.RLock()
+	defer Pool.mu.RUnlock()
+	count := uint32(len(Pool.reverse))
+	if err := binary.Write(w, binary.LittleEndian, count); err != nil {
+		return err
+	}
+	for _, h := range Pool.reverse {
+		if err := writeString(w, h.Value()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeString writes a length-prefixed string in the format readString expects.
+func writeString(w io.Writer, s string) error {
+	length := uint32(len(s))
+	if err := binary.Write(w, binary.LittleEndian, length); err != nil {
+		return err
+	}
+	if length > 0 {
+		_, err := io.WriteString(w, s)
+		return err
+	}
+	return nil
+}
+
 // Deserialize reads the zstd BLOB and reconstructs the global FlatGraph.
 func Deserialize(r io.Reader) (*FlatGraph, error) {
 	dec, err := zstd.NewReader(r)
