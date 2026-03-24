@@ -775,7 +775,9 @@ func (c *Config) CheckViolationsForFile(g *graph.Graph, file string) []Violation
 	}
 
 	edges := g.EdgesForFile(file)
-	violations := c.CheckViolationsForEdges(edges, g.GetNode)
+	// Pass nil for g: path-pattern rules are handled below by
+	// checkPathPatternViolations with correct file-scoped from-node filtering.
+	violations := c.CheckViolationsForEdges(edges, g.GetNode, nil)
 	// For path-pattern rules, restrict to violations where the from-node
 	// belongs to the changed file (avoids re-reporting violations rooted
 	// in unrelated files on every incremental re-parse).
@@ -785,9 +787,16 @@ func (c *Config) CheckViolationsForFile(g *graph.Graph, file string) []Violation
 
 // CheckViolationsForEdges checks a specific set of edges (typically from a
 // carved subgraph) against all rules. getNode resolves NodeIDs to *Node for
-// pattern matching. This avoids the AllEdges() allocation of CheckViolations
-// when only a subset of edges needs checking.
-func (c *Config) CheckViolationsForEdges(edges []*graph.Edge, getNode func(graph.NodeID) *graph.Node) []Violation {
+// single-edge pattern matching.
+//
+// When g is non-nil, path-pattern rules (multi-hop BFS) are also evaluated.
+// BFS is seeded from the unique from-node IDs present in the provided edge
+// set, so violations are scoped to paths that originate within the subgraph.
+// When g is nil, path-pattern rules are silently skipped (single-edge rules
+// still run). Pass nil when the caller handles path-pattern separately (e.g.
+// CheckViolationsForFile, which uses file-scoped BFS via
+// checkPathPatternViolations).
+func (c *Config) CheckViolationsForEdges(edges []*graph.Edge, getNode func(graph.NodeID) *graph.Node, g *graph.Graph) []Violation {
 	if len(c.Rules) == 0 || len(edges) == 0 {
 		return nil
 	}
@@ -809,6 +818,95 @@ func (c *Config) CheckViolationsForEdges(edges []*graph.Edge, getNode func(graph
 					EdgeType:     e.Type,
 					SuggestedFix: suggestFix(rule, e.Type, fromNode, toNode),
 				})
+			}
+		}
+	}
+
+	// Path-pattern rules require BFS on the full graph.
+	// When g is provided, seed BFS from the unique from-nodes present in the
+	// edge set so violations are scoped to paths originating in the subgraph.
+	if g != nil {
+		violations = append(violations, c.checkPathPatternViolationsFromSeeds(g, edgeFromNodes(edges))...)
+	}
+
+	return violations
+}
+
+// edgeFromNodes returns the unique set of from-node IDs present in edges.
+func edgeFromNodes(edges []*graph.Edge) map[graph.NodeID]struct{} {
+	seeds := make(map[graph.NodeID]struct{}, len(edges))
+	for _, e := range edges {
+		seeds[e.From] = struct{}{}
+	}
+	return seeds
+}
+
+// checkPathPatternViolationsFromSeeds is the seeded variant of
+// checkPathPatternViolations. Instead of iterating all nodes in the graph,
+// it restricts BFS candidates to the provided seed set. Used by
+// CheckViolationsForEdges to scope violations to a carved subgraph.
+func (c *Config) checkPathPatternViolationsFromSeeds(g *graph.Graph, seeds map[graph.NodeID]struct{}) []Violation {
+	if len(seeds) == 0 {
+		return nil
+	}
+	var violations []Violation
+
+	for _, rule := range c.Rules {
+		p := rule.ForbiddenEdge
+		if len(p.PathPattern) == 0 {
+			continue
+		}
+		depth := len(p.PathPattern)
+		if depth > maxPathPatternDepth {
+			depth = maxPathPatternDepth
+		}
+		pattern := p.PathPattern[:depth]
+		lastEdgeType := pattern[depth-1]
+
+		for seedID := range seeds {
+			fromNode := g.GetNode(seedID)
+			if fromNode == nil {
+				continue
+			}
+			if !matchesFromPattern(p, fromNode) {
+				continue
+			}
+
+			frontier := []graph.NodeID{fromNode.ID}
+			for hop, edgeType := range pattern {
+				if len(frontier) == 0 {
+					break
+				}
+				var next []graph.NodeID
+				seen := make(map[graph.NodeID]bool, len(frontier))
+				for _, nodeID := range frontier {
+					for _, e := range g.OutEdges(nodeID) {
+						if e.Type != edgeType {
+							continue
+						}
+						if seen[e.To] {
+							continue
+						}
+						seen[e.To] = true
+						if hop == len(pattern)-1 {
+							toNode := g.GetNode(e.To)
+							if toNode != nil && matchesToPattern(p, toNode) {
+								violations = append(violations, Violation{
+									RuleID:       rule.ID,
+									Severity:     rule.Severity,
+									Description:  rule.Description,
+									FromNode:     fromNode.ID,
+									ToNode:       e.To,
+									EdgeType:     lastEdgeType,
+									SuggestedFix: suggestFix(rule, lastEdgeType, fromNode, toNode),
+								})
+							}
+						} else {
+							next = append(next, e.To)
+						}
+					}
+				}
+				frontier = next
 			}
 		}
 	}
