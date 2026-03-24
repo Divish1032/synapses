@@ -1654,7 +1654,9 @@ func (s *Server) handleLinkEntities(
 	toID := toNode.ID
 
 	// Persist the edge so it survives restarts and reindexes.
-	saved, err := s.store.SaveManualEdge(fromID, toID, relation, domain, agentID)
+	// clearSuppressed=true: human explicitly (re-)creating this edge overrides any
+	// prior confirm_edge rejection.
+	saved, err := s.store.SaveManualEdge(fromID, toID, relation, domain, agentID, 1.0, true)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("persist edge: %v", err)), nil
 	}
@@ -1837,5 +1839,88 @@ func (s *Server) handleUnlinkEntities(
 		"to":       map[string]string{"id": string(toID), "name": toNode.Name},
 		"relation": relation,
 		"hint":     "Edge removed from graph and store. Effect is immediate — get_context will no longer traverse this edge.",
+	})
+}
+
+// handleConfirmEdge allows a human to approve or reject a cross-domain edge produced
+// by the name-matcher. Confirmed edges get confidence=1.0 and are never re-scored.
+// Rejected edges are suppressed permanently — they will not appear in get_context
+// results and the name-matcher will not re-inject them between restarts.
+func (s *Server) handleConfirmEdge(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	if s.store == nil {
+		return mcp.NewToolResultError("confirm_edge requires a store — daemon may not be running"), nil
+	}
+
+	args := req.GetArguments()
+	a, ok := args["a"].(string)
+	if !ok || strings.TrimSpace(a) == "" {
+		return mcp.NewToolResultError("a is required — entity name or node ID for the source"), nil
+	}
+	b, ok := args["b"].(string)
+	if !ok || strings.TrimSpace(b) == "" {
+		return mcp.NewToolResultError("b is required — entity name or node ID for the target"), nil
+	}
+	relation, ok := args["relation"].(string)
+	relation = strings.TrimSpace(relation)
+	if !ok || relation == "" {
+		return mcp.NewToolResultError("relation is required — the edge type label (e.g. MENTIONS, DEPLOYS)"), nil
+	}
+	confirmedRaw, ok := args["confirmed"]
+	if !ok {
+		return mcp.NewToolResultError("confirmed is required — true to approve the edge, false to reject it permanently"), nil
+	}
+	confirmed, ok := confirmedRaw.(bool)
+	if !ok {
+		return mcp.NewToolResultError("confirmed must be a boolean — true to approve, false to reject"), nil
+	}
+
+	fromNode, _ := s.resolveEntityRefWithCount(a)
+	if fromNode == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q — use find_entity to discover the correct node ID", a)), nil
+	}
+	toNode, _ := s.resolveEntityRefWithCount(b)
+	if toNode == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q — use find_entity to discover the correct node ID", b)), nil
+	}
+
+	if err := s.store.ConfirmEdge(fromNode.ID, toNode.ID, relation, confirmed); err != nil {
+		// Check reverse direction — the name-matcher uses orderEdge (heavier domain
+		// first) so the stored direction may be the opposite of what the caller passed.
+		if revErr := s.store.ConfirmEdge(toNode.ID, fromNode.ID, relation, confirmed); revErr == nil {
+			// Reverse worked: swap for the success path below.
+			fromNode, toNode = toNode, fromNode
+		} else {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"%v — also tried reverse direction and found no edge. Use get_context on either entity to see its cross-domain edges.",
+				err,
+			)), nil
+		}
+	}
+
+	if confirmed {
+		// Re-inject in case the edge was previously suppressed and removed from the graph.
+		s.graph.AddEdge(&graph.Edge{From: fromNode.ID, To: toNode.ID, Type: graph.EdgeType(relation)})
+	} else {
+		// For rejections: remove from the live graph immediately so get_context stops
+		// traversing the edge without waiting for the next restart.
+		s.graph.RemoveEdge(fromNode.ID, toNode.ID, graph.EdgeType(relation))
+	}
+
+	status := "confirmed"
+	hint := "Edge confidence set to 1.0. The name-matcher will not re-score this edge. It will continue to appear in get_context results."
+	if !confirmed {
+		status = "suppressed"
+		hint = "Edge suppressed permanently. Removed from the live graph. The name-matcher will not re-inject it. Use link_entities if you change your mind."
+	}
+
+	return jsonResult(map[string]interface{}{
+		"status":   status,
+		"from":     map[string]string{"id": string(fromNode.ID), "name": fromNode.Name},
+		"to":       map[string]string{"id": string(toNode.ID), "name": toNode.Name},
+		"relation": relation,
+		"hint":     hint,
 	})
 }

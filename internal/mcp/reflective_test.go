@@ -90,6 +90,7 @@ func TestWriteRetrospectiveAnnotations(t *testing.T) {
 	cfg, _ := config.Load(t.TempDir()) // default config, no rules
 
 	srv := New(g, cfg, st)
+	t.Cleanup(func() { srv.Close() })
 
 	// Create a task linked to both nodes.
 	planID, _, err := st.CreatePlan("refactor", "", "", []store.TaskInput{
@@ -154,6 +155,7 @@ func TestWriteRetrospectiveAnnotations_NoLinkedNodes(t *testing.T) {
 	cfg, _ := config.Load(t.TempDir())
 
 	srv := New(g, cfg, st)
+	t.Cleanup(func() { srv.Close() })
 
 	planID, _, err := st.CreatePlan("empty", "", "", []store.TaskInput{
 		{Title: "No linked nodes", Priority: "p2"},

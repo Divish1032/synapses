@@ -20,6 +20,10 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(tmp)
 	os.Setenv("SYNAPSES_CACHE_DIR", tmp)
+	// Prevent ensureSingletonDaemon from spawning a subprocess and waiting
+	// up to 120 s when no daemon is running. Tests that need a real daemon
+	// must unset this variable themselves.
+	os.Setenv("SYNAPSES_SKIP_DAEMON_START", "1")
 	os.Exit(m.Run())
 }
 

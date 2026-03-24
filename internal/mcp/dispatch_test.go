@@ -210,6 +210,7 @@ func TestDispatchTool_PopulatedAfterConstruction(t *testing.T) {
 	g := graph.New("test-repo")
 	cfg := &config.Config{}
 	srv := New(g, cfg, nil)
+	t.Cleanup(func() { srv.Close() })
 
 	srv.toolHandlersMu.RLock()
 	n := len(srv.toolHandlers)
@@ -225,6 +226,7 @@ func TestDispatchTool_StoreNil(t *testing.T) {
 	g := graph.New("test-repo")
 	cfg := &config.Config{}
 	srv := New(g, cfg, nil)
+	t.Cleanup(func() { srv.Close() })
 
 	result, err := srv.DispatchTool(context.Background(), "explain_codebase", nil)
 	if err != nil {

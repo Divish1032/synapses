@@ -70,7 +70,13 @@ type directionalContext struct {
 	Enrichment             *contextEnrichment            `json:"enrichment,omitempty"`               // auto-injected rules, failures, task context
 	Callees                []graph.CarvedNode            `json:"callees"`                            // root --CALLS--> node
 	Callers                []graph.CarvedNode            `json:"callers"`                            // node --CALLS--> root
-	Related                []graph.CarvedNode            `json:"related"`                            // everything else
+	Related                []graph.CarvedNode            `json:"related"`                            // same-domain neighbors (not callee/caller/docs)
+	// Sprint 16 #4: cross-domain neighbors in a dedicated bucket so agents can
+	// immediately distinguish code context (callees/callers/related) from
+	// cross-domain context (infra resources, API endpoints, config).
+	// Populated with nodes whose Domain is not DomainCode (infra, api, knowledge, custom).
+	// Documentation-domain nodes already linked via EXPLAINED_BY/EXPLAINS go into Documentation.
+	CrossDomain            *graph.CrossDomainContext      `json:"cross_domain,omitempty"`             // nodes in other knowledge domains grouped by edge type
 	ContextPacket          *brain.ContextPacket          `json:"context_packet,omitempty"`           // LLM-enriched packet (present when brain is available)
 	SuggestedNextTools     []toolSuggestion              `json:"suggested_next_tools,omitempty"`     // context-aware next steps
 	Truncated              bool                          `json:"truncated,omitempty"`                // true when token budget cut results
@@ -453,6 +459,17 @@ func (s *Server) handleGetContext(
 	if b, ok := req.GetArguments()["token_budget"].(float64); ok && b > 0 {
 		cfg.TokenBudget = int(b)
 	}
+	// Sprint 16 #4: cross_domain_decay — caller-configurable domain-boundary penalty.
+	// Range (0, 1]. Default 0.5 (set by DefaultCarveConfig). Use 1.0 to disable
+	// the penalty and treat cross-domain edges equally to same-domain edges.
+	// Values > 1.0 are clamped to 1.0 so the cache key is normalized and callers
+	// don't accidentally create separate cache entries for functionally identical configs.
+	if cdd, ok := req.GetArguments()["cross_domain_decay"].(float64); ok && cdd > 0 {
+		if cdd > 1.0 {
+			cdd = 1.0
+		}
+		cfg.CrossDomainDecay = cdd
+	}
 
 	// P1.6: Task-aware relevance boost — nodes linked to the active task float up.
 	taskID, _ := req.GetArguments()["task_id"].(string)
@@ -691,6 +708,18 @@ func (s *Server) handleGetContext(
 		dc.Callees = filterInferredNodes(dc.Callees)
 		dc.Callers = filterInferredNodes(dc.Callers)
 		dc.Related = filterInferredNodes(dc.Related)
+		if dc.CrossDomain != nil {
+			dc.CrossDomain.Deploys = filterInferredNodes(dc.CrossDomain.Deploys)
+			dc.CrossDomain.Consumes = filterInferredNodes(dc.CrossDomain.Consumes)
+			dc.CrossDomain.ConfiguredBy = filterInferredNodes(dc.CrossDomain.ConfiguredBy)
+			dc.CrossDomain.DocumentedIn = filterInferredNodes(dc.CrossDomain.DocumentedIn)
+			dc.CrossDomain.Mentions = filterInferredNodes(dc.CrossDomain.Mentions)
+			dc.CrossDomain.Manual = filterInferredNodes(dc.CrossDomain.Manual)
+			dc.CrossDomain.Related = filterInferredNodes(dc.CrossDomain.Related)
+			if dc.CrossDomain.IsEmpty() {
+				dc.CrossDomain = nil
+			}
+		}
 	}
 
 	// Brain enrichment: async pattern — serve raw graph immediately, enrich in background.
@@ -1343,6 +1372,7 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	calleesOfRoot := make(map[graph.NodeID]bool)
 	callersOfRoot := make(map[graph.NodeID]bool)
 	docsOfRoot := make(map[graph.NodeID]bool)
+	crossDomainDirectEdge := make(map[graph.NodeID]graph.EdgeType)
 	for _, e := range sg.Edges {
 		switch e.Type {
 		case graph.EdgeCalls, graph.EdgeHandles:
@@ -1361,6 +1391,23 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 			// section → code entity: section explains root
 			if e.To == sg.Root {
 				docsOfRoot[e.From] = true
+			}
+		case graph.EdgeDocuments:
+			// doc → code entity: doc documents root → treat as Documentation (same
+			// semantic as EdgeDocumentedBy but reversed direction). If the doc points
+			// at a non-root code entity, track it as a cross-domain direct edge.
+			if e.To == sg.Root {
+				docsOfRoot[e.From] = true
+			} else if e.From == sg.Root {
+				crossDomainDirectEdge[e.To] = e.Type
+			}
+		case graph.EdgeDeploys, graph.EdgeConsumes, graph.EdgeConfiguredBy,
+			graph.EdgeMentions, graph.EdgeManual:
+			if e.From == sg.Root {
+				crossDomainDirectEdge[e.To] = e.Type
+			}
+			if e.To == sg.Root {
+				crossDomainDirectEdge[e.From] = e.Type
 			}
 		}
 	}
@@ -1382,7 +1429,36 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 		case callersOfRoot[id]:
 			dc.Callers = append(dc.Callers, cn)
 		default:
-			dc.Related = append(dc.Related, cn)
+			domain := cn.Node.Domain
+			if domain == "" || domain == graph.DomainCode {
+				dc.Related = append(dc.Related, cn)
+				continue
+			}
+			// Cross-domain node: route by direct edge type if available.
+			if dc.CrossDomain == nil {
+				dc.CrossDomain = &graph.CrossDomainContext{}
+			}
+			if et, ok := crossDomainDirectEdge[id]; ok {
+				switch et {
+				case graph.EdgeDeploys:
+					dc.CrossDomain.Deploys = append(dc.CrossDomain.Deploys, cn)
+				case graph.EdgeConsumes:
+					dc.CrossDomain.Consumes = append(dc.CrossDomain.Consumes, cn)
+				case graph.EdgeConfiguredBy:
+					dc.CrossDomain.ConfiguredBy = append(dc.CrossDomain.ConfiguredBy, cn)
+				case graph.EdgeDocuments, graph.EdgeDocumentedBy, graph.EdgeExplains:
+					dc.CrossDomain.DocumentedIn = append(dc.CrossDomain.DocumentedIn, cn)
+				case graph.EdgeMentions:
+					dc.CrossDomain.Mentions = append(dc.CrossDomain.Mentions, cn)
+				case graph.EdgeManual:
+					dc.CrossDomain.Manual = append(dc.CrossDomain.Manual, cn)
+				default:
+					dc.CrossDomain.Related = append(dc.CrossDomain.Related, cn)
+				}
+			} else {
+				// Multi-hop cross-domain: no direct edge from root.
+				dc.CrossDomain.Related = append(dc.CrossDomain.Related, cn)
+			}
 		}
 	}
 
@@ -1400,6 +1476,21 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	sort.Slice(dc.Callers, func(i, j int) bool { return byRelevance(dc.Callers[i], dc.Callers[j]) < 0 })
 	sort.Slice(dc.Related, func(i, j int) bool { return byRelevance(dc.Related[i], dc.Related[j]) < 0 })
 	sort.Slice(dc.Documentation, func(i, j int) bool { return byRelevance(dc.Documentation[i], dc.Documentation[j]) < 0 })
+	if dc.CrossDomain != nil {
+		sortCN := func(s []graph.CarvedNode) {
+			sort.Slice(s, func(i, j int) bool { return byRelevance(s[i], s[j]) < 0 })
+		}
+		sortCN(dc.CrossDomain.Deploys)
+		sortCN(dc.CrossDomain.Consumes)
+		sortCN(dc.CrossDomain.ConfiguredBy)
+		sortCN(dc.CrossDomain.DocumentedIn)
+		sortCN(dc.CrossDomain.Mentions)
+		sortCN(dc.CrossDomain.Manual)
+		sortCN(dc.CrossDomain.Related)
+		if dc.CrossDomain.IsEmpty() {
+			dc.CrossDomain = nil
+		}
+	}
 
 	return dc
 }
@@ -1512,6 +1603,37 @@ func (s *Server) handleGetImpact(
 		}
 		merged.TestCoverage = s.trimRepoRoot(merged.TestCoverage)
 		sort.Strings(merged.TestCoverage)
+		// Sprint 16 #5: collect cross-domain impact from the struct/interface node
+		// itself AND from each method. Cross-domain edges (DEPLOYS, CONSUMES) may
+		// be on either the struct type or individual methods — check both so nothing
+		// is missed regardless of how link_entities was called.
+		seenCDNodes := make(map[graph.NodeID]bool)
+		addCDRefs := func(refs []graph.CrossDomainRef, truncated bool) {
+			for _, r := range refs {
+				if !seenCDNodes[r.ID] {
+					seenCDNodes[r.ID] = true
+					merged.CrossDomainImpact = append(merged.CrossDomainImpact, r)
+				}
+			}
+			if truncated {
+				merged.CrossDomainTruncated = true
+			}
+		}
+		// Root-level cross-domain (struct/interface node itself).
+		rootRefs, rootTrunc := s.graph.CrossDomainImpactForNode(root.ID)
+		addCDRefs(rootRefs, rootTrunc)
+		// Per-method cross-domain: ImpactAnalysis already populated CrossDomainImpact.
+		for _, m := range methods {
+			if m.Type != graph.NodeMethod || m.ID == root.ID {
+				continue
+			}
+			r, err2 := s.graph.ImpactAnalysis(m.ID, maxDepth)
+			if err2 != nil || r == nil {
+				continue
+			}
+			addCDRefs(r.CrossDomainImpact, r.CrossDomainTruncated)
+		}
+		merged.CrossDomainAffected = len(merged.CrossDomainImpact)
 		applyImpactTokenBudget(merged, tokenBudget)
 		// P7-10: emit search event for impact analysis.
 		if pc := s.getPulseClient(); pc != nil {
@@ -1605,6 +1727,11 @@ func applyImpactTokenBudget(result *graph.ImpactResult, tokenBudget int) {
 				return
 			}
 		}
+	}
+	// If still over budget, trim cross-domain impact (least critical for code blast-radius).
+	if len(result.CrossDomainImpact) > 0 {
+		result.CrossDomainImpact = nil
+		result.Truncated = true
 	}
 }
 

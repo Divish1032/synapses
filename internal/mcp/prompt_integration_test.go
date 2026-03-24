@@ -24,6 +24,7 @@ func TestActivePrompts_InjectedInGetContext(t *testing.T) {
 	g.AddNode(&n)
 
 	srv := New(g, &config.Config{}, nil)
+	t.Cleanup(func() { srv.Close() })
 	srv.SetPromptTemplates([]skills.PromptTemplate{
 		{ID: "go-guide", FilePattern: "**/*.go", Body: "Use fmt.Errorf wrapping.", Source: "builtin"},
 		{ID: "ts-guide", FilePattern: "**/*.ts", Body: "TypeScript only.", Source: "builtin"},
@@ -62,6 +63,7 @@ func TestActivePrompts_NoneWhenNoTemplates(t *testing.T) {
 	})
 
 	srv := New(g, &config.Config{}, nil)
+	t.Cleanup(func() { srv.Close() })
 	// No SetPromptTemplates call
 
 	req := mcp.CallToolRequest{}
@@ -84,6 +86,7 @@ func TestActivePrompts_NoneWhenNoTemplates(t *testing.T) {
 func TestAutoLoadPrompts_InSessionInit(t *testing.T) {
 	g := graph.New("test-repo")
 	srv := New(g, &config.Config{}, nil)
+	t.Cleanup(func() { srv.Close() })
 	srv.SetPromptTemplates([]skills.PromptTemplate{
 		{ID: "project-wide", AutoLoad: true, Body: "Always use X.", Source: "project"},
 		{ID: "entity-specific", FilePattern: "**/*.go", Body: "Go only.", Source: "builtin"},

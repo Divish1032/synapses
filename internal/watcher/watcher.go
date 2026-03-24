@@ -105,6 +105,16 @@ type BrainCrossProjectTracker interface {
 	DetectAndStoreBrain(ctx context.Context, filePath string, localStore *store.Store)
 }
 
+// NameMatcherRunner runs the cross-domain name-matching pass after each reindex.
+// Implemented by namematcher.Matcher. Runs fire-and-forget in a tracked goroutine.
+type NameMatcherRunner interface {
+	// RunAsync scans g for cross-domain name matches and persists MENTIONS edges
+	// to st. changedFiles is the list of files in the triggering batch; pass nil
+	// to indicate a full re-walk (all domains affected — always run).
+	// Must respect ctx cancellation. Never blocks — errors are logged.
+	RunAsync(ctx context.Context, g *graph.Graph, st *store.Store, changedFiles []string)
+}
+
 type Watcher struct {
 	fw          *fsnotify.Watcher
 	graph       *graph.Graph
@@ -119,6 +129,7 @@ type Watcher struct {
 	rootPath    string                 // absolute resolved project root (set by Start)
 	cpTracker      CrossProjectTracker      // set via SetCrossProjectTracker; may be nil
 	cpBrainTracker BrainCrossProjectTracker // set via SetBrainCrossProjectTracker; may be nil
+	nmRunner       NameMatcherRunner        // set via SetNameMatcher; may be nil
 
 	mu        sync.Mutex
 	timers    map[string]*time.Timer // debounce timers keyed by absolute file path
@@ -351,6 +362,37 @@ func (w *Watcher) SetCrossProjectTracker(tracker CrossProjectTracker) {
 // Must be called before Start. tracker may be nil to disable.
 func (w *Watcher) SetBrainCrossProjectTracker(tracker BrainCrossProjectTracker) {
 	w.cpBrainTracker = tracker
+}
+
+// SetNameMatcher wires the cross-domain name-matching pass into the watcher.
+// When nm is non-nil, an initial unconditional pass is scheduled immediately
+// so that MENTIONS edges are created from the already-loaded graph on first run
+// and after daemon restarts (hasCrossDomain would otherwise stay false until a
+// cross-domain file changes, silently skipping all code-only file saves).
+func (w *Watcher) SetNameMatcher(nm NameMatcherRunner) {
+	w.mu.Lock()
+	w.nmRunner = nm
+	w.mu.Unlock()
+	if nm != nil {
+		// nil changedFiles = always run, regardless of hasCrossDomain state.
+		w.triggerNameMatcher(nil)
+	}
+}
+
+// triggerNameMatcher fires the name-matching pass in a tracked goroutine.
+// changedFiles is forwarded to RunAsync for domain-relevance filtering.
+// Pass nil to indicate a full re-walk (all domains affected — always run).
+// Fire-and-forget: errors are handled inside RunAsync.
+func (w *Watcher) triggerNameMatcher(changedFiles []string) {
+	w.mu.Lock()
+	nm := w.nmRunner
+	w.mu.Unlock()
+	if nm == nil {
+		return
+	}
+	w.trackGo(func() {
+		nm.RunAsync(w.stopCtx, w.graph, w.store, changedFiles)
+	})
 }
 
 // initFilePkg seeds filePkg from the graph's current nodes.
@@ -818,6 +860,10 @@ func (w *Watcher) debounce(path, root string) {
 			logutil.Info("synapses/watcher: backlog > %d files, triggering full re-walk of %s\n", reparseBacklogThreshold, root)
 			if _, err := w.walker.WalkDir(w.graph, root); err != nil {
 				logutil.Warn("synapses/watcher: full re-walk failed: %v\n", err)
+			} else {
+				// Full re-walk bypasses applyBatch, so trigger the name matcher
+				// explicitly. Pass nil = all domains affected, always run.
+				w.triggerNameMatcher(nil)
 			}
 		}()
 		return
@@ -1479,6 +1525,13 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 			}
 		}
 	}
+	// Collect changed file paths for domain-relevance filtering in the name matcher.
+	// Only paths from successful parses are included (valid slice, not results slice).
+	changedPaths := make([]string, 0, len(valid))
+	for _, s := range valid {
+		changedPaths = append(changedPaths, s.result.path)
+	}
+	w.triggerNameMatcher(changedPaths)
 }
 
 // reparseFile removes stale nodes for path and re-parses it into the graph.
