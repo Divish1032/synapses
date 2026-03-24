@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -169,5 +170,64 @@ func TestHandleLinkEntities_ByNodeID(t *testing.T) {
 	}
 	if !srv.graph.HasEdge(loginID, logoutID, graph.EdgeCalls) {
 		t.Error("expected CALLS edge after node-ID link")
+	}
+}
+
+// TestHandleLinkEntities_RelationTooLong verifies input length validation.
+func TestHandleLinkEntities_RelationTooLong(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	res, err := srv.handleLinkEntities(context.Background(), callTool(map[string]any{
+		"a":        "AuthLogin",
+		"b":        "AuthLogout",
+		"relation": string(make([]byte, 300)), // 300 bytes > 256 limit
+	}))
+	mustErrorResult(t, res, err)
+}
+
+// TestHandleLinkEntities_RelationTrimmed verifies leading/trailing whitespace
+// is trimmed before storage.
+func TestHandleLinkEntities_RelationTrimmed(t *testing.T) {
+	t.Parallel()
+	srv, loginID, logoutID := newPopulatedServer(t)
+
+	res, err := srv.handleLinkEntities(context.Background(), callTool(map[string]any{
+		"a":        "AuthLogin",
+		"b":        "AuthLogout",
+		"relation": "  CALLS  ",
+	}))
+	out := mustResult(t, res, err)
+	if rel, _ := out["relation"].(string); rel != "CALLS" {
+		t.Errorf("expected trimmed relation=CALLS, got %q", rel)
+	}
+	if !srv.graph.HasEdge(loginID, logoutID, graph.EdgeCalls) {
+		t.Error("expected CALLS edge with trimmed relation")
+	}
+}
+
+// TestHandleLinkEntities_CustomRelationHasCorrectWeightNote verifies the
+// weight_note accurately describes the 0.5 fallback weight (not 0).
+func TestHandleLinkEntities_CustomRelationHasCorrectWeightNote(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newPopulatedServer(t)
+
+	res, err := srv.handleLinkEntities(context.Background(), callTool(map[string]any{
+		"a":        "AuthLogin",
+		"b":        "AuthLogout",
+		"relation": "CUSTOM_RELATION",
+	}))
+	out := mustResult(t, res, err)
+
+	note, _ := out["weight_note"].(string)
+	if note == "" {
+		t.Error("expected weight_note for unknown relation type")
+	}
+	// Must NOT claim the edge won't be traversed — that would be factually wrong.
+	if strings.Contains(note, "won't be traversed") || strings.Contains(note, "not traversed") || strings.Contains(note, "BFS weight is 0 ") {
+		t.Errorf("weight_note incorrectly claims edge won't be traversed: %s", note)
+	}
+	// Must mention the 0.5 fallback.
+	if !strings.Contains(note, "0.5") {
+		t.Errorf("weight_note should mention 0.5 fallback weight, got: %s", note)
 	}
 }
