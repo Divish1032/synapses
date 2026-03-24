@@ -383,11 +383,13 @@ func matchCondition(n *graph.Node, fanin, fanout int, c graphQueryCondition) boo
 	wantLower := strings.ToLower(c.sval)
 	actualLower := strings.ToLower(actual)
 
-	// file field: use substring (contains) matching so users can write
-	// NODES WHERE file="login.go" and match "internal/auth/login.go".
-	// Exact equality requires knowing the full repo-relative path, which
-	// users cannot discover without a successful query first.
-	if c.field == gqfFile {
+	// file and package use substring (contains) matching so users can write
+	// short names without knowing the internal storage format:
+	//   file:    NODES WHERE file="login.go"    matches "internal/auth/login.go"
+	//   package: NODES WHERE package="auth"     matches "com.example.auth" (Java)
+	// Exact equality for these fields requires knowing the full stored value,
+	// which users cannot discover without a successful query first.
+	if c.field == gqfFile || c.field == gqfPackage {
 		switch c.op {
 		case "=":
 			return strings.Contains(actualLower, wantLower)
@@ -397,8 +399,9 @@ func matchCondition(n *graph.Node, fanin, fanout int, c graphQueryCondition) boo
 		return false
 	}
 
-	// All other string fields: case-insensitive exact match.
-	// Parser blocks >, >=, <, <= for string fields — only = and != reach here.
+	// All other string fields (name, type, domain, exported): case-insensitive
+	// exact match. Parser blocks >, >=, <, <= for string fields — only = and
+	// != reach here.
 	switch c.op {
 	case "=":
 		return actualLower == wantLower
