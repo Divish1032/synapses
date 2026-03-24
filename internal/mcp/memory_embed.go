@@ -184,6 +184,47 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 		logutil.Info("synapses: memory embedding complete (%d/%d indexed, %d errors)\n", done, len(ids), errors)
 	}
 
+	// Phase 2: refresh stale embeddings (content changed since last embedding).
+	staleIDs, staleErr := st.GetStaleEmbeddingMemoryIDs(500)
+	if staleErr == nil && len(staleIDs) > 0 {
+		logutil.Info("synapses: refreshing %d stale embedding(s) (model: %s) …\n", len(staleIDs), embedder.Model())
+		if delErr := st.DeleteMemoryEmbeddings(staleIDs); delErr != nil {
+			logutil.Error("synapses: delete stale embeddings: %v\n", delErr)
+		} else {
+			staleDone := 0
+			for i, memID := range staleIDs {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				if i > 0 {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+					}
+				}
+				text, ok := st.GetMemoryTextForEmbedding(memID)
+				if !ok || text == "" {
+					continue
+				}
+				embedCtx2, cancel2 := context.WithTimeout(ctx, 30*time.Second)
+				vec2, err2 := embedder.Embed(embedCtx2, text)
+				cancel2()
+				if err2 != nil || len(vec2) == 0 {
+					continue
+				}
+				if err := st.UpsertMemoryEmbedding(memID, embedder.Model(), vec2); err != nil {
+					logutil.Error("synapses: store stale embedding %s: %v\n", memID, err)
+				} else {
+					staleDone++
+				}
+			}
+			logutil.Info("synapses: stale embedding refresh complete (%d/%d refreshed)\n", staleDone, len(staleIDs))
+		}
+	}
+
 	// P2-6: emit EmbeddingEvent on completion. Enqueue is mutex+append (O(1)) —
 	// direct call, no goroutine needed. EmbedAllMemories itself is already called
 	// from a goroutine by callers.
