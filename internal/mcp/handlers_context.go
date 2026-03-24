@@ -1279,8 +1279,17 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 			if e.To == sg.Root {
 				docsOfRoot[e.From] = true
 			}
+		case graph.EdgeDocuments:
+			// doc → code entity: doc documents root → treat as Documentation (same
+			// semantic as EdgeDocumentedBy but reversed direction). If the doc points
+			// at a non-root code entity, track it as a cross-domain direct edge.
+			if e.To == sg.Root {
+				docsOfRoot[e.From] = true
+			} else if e.From == sg.Root {
+				crossDomainDirectEdge[e.To] = e.Type
+			}
 		case graph.EdgeDeploys, graph.EdgeConsumes, graph.EdgeConfiguredBy,
-			graph.EdgeDocuments, graph.EdgeMentions, graph.EdgeManual:
+			graph.EdgeMentions, graph.EdgeManual:
 			if e.From == sg.Root {
 				crossDomainDirectEdge[e.To] = e.Type
 			}

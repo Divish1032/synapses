@@ -1094,8 +1094,28 @@ func (g *Graph) CrossDomainImpactForNode(nodeID NodeID) ([]CrossDomainRef, bool)
 	return r.refs, r.truncated
 }
 
-// maxCrossDomainImpactNodes caps the number of cross-domain refs returned by
-// collectCrossDomainImpact to keep response sizes bounded.
+// crossDomainCaps defines per-category node limits for collectCrossDomainImpact.
+//
+// Categories differ in signal strength and realistic cardinality:
+//   - DEPLOYS/CONSUMES: explicit hand-linked or parser-derived, high value, low volume → 30 each
+//   - CONFIGURED_BY/DOCUMENTS/MANUAL: explicit, trusted, typically very few → 20 each
+//   - MENTIONS: synthetic name-match heuristic, variable confidence, potentially high volume → 15
+//
+// High-signal categories fill first (collection order below). MENTIONS is collected
+// last so it cannot crowd out explicit relationships even when it has hundreds of matches.
+// The overall cap (maxCrossDomainImpactNodes=100) is a safety net for pathological graphs.
+var crossDomainCaps = map[EdgeType]int{
+	EdgeDeploys:      30,
+	EdgeConsumes:     30,
+	EdgeConfiguredBy: 20,
+	EdgeDocuments:    20,
+	EdgeManual:       20,
+	EdgeMentions:     15,
+}
+
+// maxCrossDomainImpactNodes is the overall safety-net cap across all categories.
+// Normal operation stays well under this via per-category caps, but it prevents
+// pathological graphs (e.g. 200 DEPLOYS + 200 MENTIONS) from blowing up responses.
 const maxCrossDomainImpactNodes = 100
 
 // crossDomainResult packages the output of collectCrossDomainImpact so callers
@@ -1108,84 +1128,90 @@ type crossDomainResult struct {
 // collectCrossDomainImpact finds entities reachable from root in one hop via
 // cross-domain edges and returns them as CrossDomainRef slices.
 //
-// Forward edges followed (root → target):
-//   - DEPLOYS  → infra resources that may break if code changes
-//   - CONSUMES → API endpoints consumed by this code
-//   - CONFIGURED_BY → config entities that govern this code
-//   - MENTIONS → name-match entities (bidirectional, so also reverse)
-//   - MANUAL   → user-defined relationships
+// Per-category caps (crossDomainCaps) guarantee that high-volume synthetic edges
+// (MENTIONS, up to 15) cannot crowd out explicit high-signal edges (DEPLOYS/CONSUMES,
+// up to 30 each). Each category is bounded independently: even if a node has 200
+// MENTIONS edges, DEPLOYS/CONSUMES still get their full quota.
 //
-// Reverse edges followed (target → root, i.e. root is the target):
-//   - DOCUMENTS → doc sections that document this entity (may become stale)
-//   - MENTIONS  → entities that mention this entity by name
+// An overall safety-net cap (maxCrossDomainImpactNodes=100) prevents pathological
+// graphs from producing unbounded output. truncated=true when either cap fires.
 //
 // Caller must hold g.mu.RLock.
 func collectCrossDomainImpact(g *Graph, rootID NodeID) crossDomainResult {
 	seen := make(map[NodeID]bool)
 	seen[rootID] = true
-	var refs []CrossDomainRef
 
-	// Forward: root → target via cross-domain outEdges.
+	// perCat tracks how many nodes have been collected per edge type so we can
+	// enforce per-category caps without an extra pass.
+	perCat := make(map[EdgeType]int, len(crossDomainCaps))
+	var refs []CrossDomainRef
+	truncated := false
+
+	// addRef attempts to add a CrossDomainRef. Returns true if added, false if
+	// the per-category cap, overall cap, or deduplication prevented it.
+	addRef := func(id NodeID, n *Node, et EdgeType) bool {
+		if seen[id] {
+			return false
+		}
+		cap, ok := crossDomainCaps[et]
+		if !ok {
+			cap = 10 // conservative default for unknown future edge types
+		}
+		if perCat[et] >= cap {
+			truncated = true
+			return false
+		}
+		if len(refs) >= maxCrossDomainImpactNodes {
+			truncated = true
+			return false
+		}
+		seen[id] = true
+		perCat[et]++
+		refs = append(refs, CrossDomainRef{
+			EntityRef: EntityRef{
+				ID:   id,
+				Name: n.Name,
+				Type: n.Type,
+				File: n.File,
+				Line: n.Line,
+			},
+			EdgeType: et,
+			Category: CrossDomainCategory(et),
+		})
+		return true
+	}
+
+	// Single-pass collection over outEdges then inEdges. Per-category counters enforce
+	// the priority ordering implicitly: because we scan all edges once, a category
+	// that fills its cap early still allows other categories to accumulate their quota.
+	// O(E) where E = out-degree + in-degree of root (bounded in practice).
+	//
+	// Forward outEdges: DEPLOYS, CONSUMES, CONFIGURED_BY, MANUAL, MENTIONS.
 	for _, e := range g.outEdges[rootID] {
 		if !IsCrossDomainEdge(e.Type) {
-			continue
-		}
-		if seen[e.To] {
 			continue
 		}
 		n := g.nodes[e.To]
 		if n == nil {
 			continue
 		}
-		seen[e.To] = true
-		refs = append(refs, CrossDomainRef{
-			EntityRef: EntityRef{
-				ID:   e.To,
-				Name: n.Name,
-				Type: n.Type,
-				File: n.File,
-				Line: n.Line,
-			},
-			EdgeType: e.Type,
-			Category: CrossDomainCategory(e.Type),
-		})
-		if len(refs) >= maxCrossDomainImpactNodes {
-			return crossDomainResult{refs: sortCrossDomainRefs(refs), truncated: true}
-		}
+		addRef(e.To, n, e.Type)
 	}
 
-	// Reverse: find entities whose cross-domain outEdge points TO root.
-	// This surfaces doc sections that DOCUMENT this entity and name-match
-	// entities that MENTION this entity — both become stale if root changes.
+	// Reverse inEdges: DOCUMENTS (docs → this entity), MENTIONS (name-match → this),
+	// MANUAL (user link → this). These surface stale docs and related entities.
 	for _, e := range g.inEdges[rootID] {
 		if e.Type != EdgeDocuments && e.Type != EdgeMentions && e.Type != EdgeManual {
-			continue
-		}
-		if seen[e.From] {
 			continue
 		}
 		n := g.nodes[e.From]
 		if n == nil {
 			continue
 		}
-		seen[e.From] = true
-		refs = append(refs, CrossDomainRef{
-			EntityRef: EntityRef{
-				ID:   e.From,
-				Name: n.Name,
-				Type: n.Type,
-				File: n.File,
-				Line: n.Line,
-			},
-			EdgeType: e.Type,
-			Category: CrossDomainCategory(e.Type),
-		})
-		if len(refs) >= maxCrossDomainImpactNodes {
-			return crossDomainResult{refs: sortCrossDomainRefs(refs), truncated: true}
-		}
+		addRef(e.From, n, e.Type)
 	}
 
-	return crossDomainResult{refs: sortCrossDomainRefs(refs), truncated: false}
+	return crossDomainResult{refs: sortCrossDomainRefs(refs), truncated: truncated}
 }
 
 // sortCrossDomainRefs sorts cross-domain refs by category then name for stable output.
