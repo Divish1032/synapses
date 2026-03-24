@@ -13,6 +13,7 @@ package graph_test
 //   - MANUAL edges are included in cross-domain impact
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -214,7 +215,7 @@ func TestCrossDomainImpactForNode(t *testing.T) {
 	g, ids := buildImpactFixture(t)
 
 	// CrossDomainImpactForNode must return the same cross-domain refs as ImpactAnalysis.
-	direct := g.CrossDomainImpactForNode(ids["paymentSvc"])
+	direct, _ := g.CrossDomainImpactForNode(ids["paymentSvc"])
 	via, err := g.ImpactAnalysis(ids["paymentSvc"], 3)
 	if err != nil {
 		t.Fatalf("ImpactAnalysis: %v", err)
@@ -223,6 +224,79 @@ func TestCrossDomainImpactForNode(t *testing.T) {
 	if len(direct) != len(via.CrossDomainImpact) {
 		t.Errorf("CrossDomainImpactForNode returned %d refs, ImpactAnalysis had %d",
 			len(direct), len(via.CrossDomainImpact))
+	}
+}
+
+func TestImpactAnalysisCrossDomainAffectedCount(t *testing.T) {
+	g, ids := buildImpactFixture(t)
+
+	result, err := g.ImpactAnalysis(ids["paymentSvc"], 3)
+	if err != nil {
+		t.Fatalf("ImpactAnalysis: %v", err)
+	}
+	if result.CrossDomainAffected != len(result.CrossDomainImpact) {
+		t.Errorf("CrossDomainAffected=%d does not match len(CrossDomainImpact)=%d",
+			result.CrossDomainAffected, len(result.CrossDomainImpact))
+	}
+	// Fixture has 5 cross-domain links: DEPLOYS, CONSUMES, CONFIGURED_BY (forward) +
+	// DOCUMENTS, MENTIONS (reverse).
+	if result.CrossDomainAffected != 5 {
+		t.Errorf("expected CrossDomainAffected=5, got %d", result.CrossDomainAffected)
+	}
+}
+
+func TestImpactAnalysisCrossDomainFilesInAffectedFiles(t *testing.T) {
+	g, ids := buildImpactFixture(t)
+
+	result, err := g.ImpactAnalysis(ids["paymentSvc"], 3)
+	if err != nil {
+		t.Fatalf("ImpactAnalysis: %v", err)
+	}
+	// Cross-domain files (infra/payment.tf, api/charge.yaml, etc.) must appear
+	// in AffectedFiles so agents know the full set of files to review.
+	fileSet := make(map[string]bool)
+	for _, f := range result.AffectedFiles {
+		fileSet[f] = true
+	}
+	wantFiles := []string{
+		"infra/payment.tf",
+		"api/charge.yaml",
+		"config/payment.yaml",
+		"docs/README.md",
+		"billing/service.go",
+	}
+	for _, want := range wantFiles {
+		if !fileSet[want] {
+			t.Errorf("AffectedFiles missing cross-domain file %q", want)
+		}
+	}
+}
+
+func TestImpactAnalysisCrossDomainTruncationSignal(t *testing.T) {
+	// Build a graph with more than maxCrossDomainImpactNodes cross-domain edges.
+	g := graph.New("testrepo")
+	const maxNodes = 100
+
+	rootID := g.MakeNodeID("svc.go", "HeavyService")
+	g.AddNode(&graph.Node{ID: rootID, Type: graph.NodeFunction, Name: "HeavyService", File: "svc.go", Domain: graph.DomainCode})
+
+	for i := 0; i <= maxNodes; i++ {
+		file := fmt.Sprintf("infra/resource_%d.tf", i)
+		name := fmt.Sprintf("aws_resource_%d", i)
+		nodeID := g.MakeNodeID(file, name)
+		g.AddNode(&graph.Node{ID: nodeID, Type: graph.NodeFunction, Name: name, File: file, Domain: graph.DomainInfra})
+		g.AddEdge(&graph.Edge{From: rootID, To: nodeID, Type: graph.EdgeDeploys})
+	}
+
+	result, err := g.ImpactAnalysis(rootID, 3)
+	if err != nil {
+		t.Fatalf("ImpactAnalysis: %v", err)
+	}
+	if !result.CrossDomainTruncated {
+		t.Error("expected CrossDomainTruncated=true when more than 100 cross-domain edges exist")
+	}
+	if len(result.CrossDomainImpact) != maxNodes {
+		t.Errorf("expected exactly %d refs when truncated, got %d", maxNodes, len(result.CrossDomainImpact))
 	}
 }
 

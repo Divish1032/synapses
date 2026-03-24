@@ -581,9 +581,9 @@ func TestToDirectionalContext_RelatedNode(t *testing.T) {
 	}
 }
 
-// ── toDirectionalContext: CrossDomain bucket (Sprint 16 #4) ──────────────────
+// ── toDirectionalContext: CrossDomain structured buckets ──────────────────────
 
-func TestToDirectionalContext_InfraDomainGoesToCrossDomain(t *testing.T) {
+func TestToDirectionalContext_DeployEdgeGoesToDeploys(t *testing.T) {
 	codeNode := &graph.Node{ID: "root", Name: "DeployService", Type: graph.NodeFunction, Domain: graph.DomainCode}
 	infraNode := &graph.Node{ID: "infra", Name: "aws_lambda", Type: graph.NodeFunction, Domain: graph.DomainInfra}
 
@@ -598,18 +598,18 @@ func TestToDirectionalContext_InfraDomainGoesToCrossDomain(t *testing.T) {
 	}
 	dc := toDirectionalContext(sg)
 
-	if len(dc.CrossDomain) == 0 {
-		t.Error("expected infra node in CrossDomain bucket")
+	if dc.CrossDomain == nil || len(dc.CrossDomain.Deploys) != 1 {
+		t.Fatal("expected infra node in CrossDomain.Deploys")
 	}
-	if dc.CrossDomain[0].Node.Name != "aws_lambda" {
-		t.Errorf("expected aws_lambda in CrossDomain, got %q", dc.CrossDomain[0].Node.Name)
+	if dc.CrossDomain.Deploys[0].Node.Name != "aws_lambda" {
+		t.Errorf("expected aws_lambda in Deploys, got %q", dc.CrossDomain.Deploys[0].Node.Name)
 	}
 	if len(dc.Related) != 0 {
 		t.Errorf("infra node should not be in Related bucket, got %d nodes", len(dc.Related))
 	}
 }
 
-func TestToDirectionalContext_APIDomainGoesToCrossDomain(t *testing.T) {
+func TestToDirectionalContext_ConsumeEdgeGoesToConsumes(t *testing.T) {
 	codeNode := &graph.Node{ID: "root", Name: "CallAPI", Type: graph.NodeFunction, Domain: graph.DomainCode}
 	apiNode := &graph.Node{ID: "api", Name: "POST /users", Type: graph.NodeFunction, Domain: graph.DomainAPI}
 
@@ -624,11 +624,97 @@ func TestToDirectionalContext_APIDomainGoesToCrossDomain(t *testing.T) {
 	}
 	dc := toDirectionalContext(sg)
 
-	if len(dc.CrossDomain) == 0 {
-		t.Error("expected API node in CrossDomain bucket")
+	if dc.CrossDomain == nil || len(dc.CrossDomain.Consumes) != 1 {
+		t.Fatal("expected API node in CrossDomain.Consumes")
 	}
 	if len(dc.Related) != 0 {
 		t.Errorf("API node should not be in Related bucket, got %d nodes", len(dc.Related))
+	}
+}
+
+func TestToDirectionalContext_ConfiguredByEdgeGoesToConfiguredBy(t *testing.T) {
+	codeNode := &graph.Node{ID: "root", Name: "PaymentService", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	cfgNode := &graph.Node{ID: "cfg", Name: "payment.yaml", Type: graph.NodeFunction, Domain: graph.DomainCustom}
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: codeNode}, {Node: cfgNode},
+		},
+		Edges: []*graph.Edge{
+			{From: "root", To: "cfg", Type: graph.EdgeConfiguredBy},
+		},
+	}
+	dc := toDirectionalContext(sg)
+
+	if dc.CrossDomain == nil || len(dc.CrossDomain.ConfiguredBy) != 1 {
+		t.Fatal("expected config node in CrossDomain.ConfiguredBy")
+	}
+}
+
+func TestToDirectionalContext_MentionsEdgeGoesToMentions(t *testing.T) {
+	codeNode := &graph.Node{ID: "root", Name: "AuthService", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	kNode := &graph.Node{ID: "kb", Name: "Auth Guide", Type: graph.NodeFunction, Domain: graph.DomainKnowledge}
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: codeNode}, {Node: kNode},
+		},
+		Edges: []*graph.Edge{
+			{From: "kb", To: "root", Type: graph.EdgeMentions},
+		},
+	}
+	dc := toDirectionalContext(sg)
+
+	if dc.CrossDomain == nil || len(dc.CrossDomain.Mentions) != 1 {
+		t.Fatal("expected knowledge node in CrossDomain.Mentions")
+	}
+}
+
+func TestToDirectionalContext_ManualEdgeGoesToManual(t *testing.T) {
+	codeNode := &graph.Node{ID: "root", Name: "Root", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	infraNode := &graph.Node{ID: "infra", Name: "manual-link", Type: graph.NodeFunction, Domain: graph.DomainInfra}
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: codeNode}, {Node: infraNode},
+		},
+		Edges: []*graph.Edge{
+			{From: "root", To: "infra", Type: graph.EdgeManual},
+		},
+	}
+	dc := toDirectionalContext(sg)
+
+	if dc.CrossDomain == nil || len(dc.CrossDomain.Manual) != 1 {
+		t.Fatal("expected node in CrossDomain.Manual")
+	}
+}
+
+func TestToDirectionalContext_MultiHopCrossDomainGoesToRelated(t *testing.T) {
+	// Infra node reached via multi-hop (no direct edge from root) → CrossDomain.Related
+	root := &graph.Node{ID: "root", Name: "Root", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	mid := &graph.Node{ID: "mid", Name: "Mid", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	infraNode := &graph.Node{ID: "infra", Name: "aws_ec2", Type: graph.NodeFunction, Domain: graph.DomainInfra}
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: root}, {Node: mid}, {Node: infraNode},
+		},
+		Edges: []*graph.Edge{
+			{From: "root", To: "mid", Type: graph.EdgeCalls},
+			{From: "mid", To: "infra", Type: graph.EdgeDeploys},
+		},
+	}
+	dc := toDirectionalContext(sg)
+
+	if dc.CrossDomain == nil || len(dc.CrossDomain.Related) != 1 {
+		t.Fatal("expected multi-hop infra node in CrossDomain.Related")
+	}
+	if dc.CrossDomain.Related[0].Node.Name != "aws_ec2" {
+		t.Errorf("expected aws_ec2, got %q", dc.CrossDomain.Related[0].Node.Name)
 	}
 }
 
@@ -647,8 +733,8 @@ func TestToDirectionalContext_CodeNodeGoesToRelatedNotCrossDomain(t *testing.T) 
 	}
 	dc := toDirectionalContext(sg)
 
-	if len(dc.CrossDomain) != 0 {
-		t.Errorf("code domain node should not be in CrossDomain bucket, got %d nodes", len(dc.CrossDomain))
+	if dc.CrossDomain != nil {
+		t.Errorf("code domain node should not produce CrossDomain struct")
 	}
 	if len(dc.Related) == 0 {
 		t.Error("code domain node should be in Related bucket")
@@ -656,9 +742,8 @@ func TestToDirectionalContext_CodeNodeGoesToRelatedNotCrossDomain(t *testing.T) 
 }
 
 func TestToDirectionalContext_EmptyDomainTreatedAsCode(t *testing.T) {
-	// Nodes with empty Domain field default to code domain — should go to Related.
 	codeNode := &graph.Node{ID: "root", Name: "Root", Type: graph.NodeFunction}
-	nodomainNode := &graph.Node{ID: "nodomain", Name: "NoDomain", Type: graph.NodeFunction} // Domain is ""
+	nodomainNode := &graph.Node{ID: "nodomain", Name: "NoDomain", Type: graph.NodeFunction}
 
 	sg := &graph.SubGraph{
 		Root: "root",
@@ -669,8 +754,8 @@ func TestToDirectionalContext_EmptyDomainTreatedAsCode(t *testing.T) {
 	}
 	dc := toDirectionalContext(sg)
 
-	if len(dc.CrossDomain) != 0 {
-		t.Errorf("empty-domain node should not be in CrossDomain bucket (defaults to code), got %d", len(dc.CrossDomain))
+	if dc.CrossDomain != nil {
+		t.Errorf("empty-domain node should not produce CrossDomain struct")
 	}
 	if len(dc.Related) == 0 {
 		t.Error("empty-domain node should be in Related bucket")
@@ -686,22 +771,68 @@ func TestToDirectionalContext_CrossDomainSortedByRelevance(t *testing.T) {
 		Root: "root",
 		Nodes: []graph.CarvedNode{
 			{Node: root, Relevance: 1.0},
-			{Node: infra1, Relevance: 0.3}, // lower relevance
-			{Node: infra2, Relevance: 0.7}, // higher relevance
+			{Node: infra1, Relevance: 0.3},
+			{Node: infra2, Relevance: 0.7},
 		},
-		Edges: []*graph.Edge{},
+		Edges: []*graph.Edge{
+			{From: "root", To: "infra1", Type: graph.EdgeDeploys},
+			{From: "root", To: "infra2", Type: graph.EdgeDeploys},
+		},
 	}
 	dc := toDirectionalContext(sg)
 
-	if len(dc.CrossDomain) != 2 {
-		t.Fatalf("expected 2 cross-domain nodes, got %d", len(dc.CrossDomain))
+	if dc.CrossDomain == nil || len(dc.CrossDomain.Deploys) != 2 {
+		t.Fatalf("expected 2 nodes in Deploys, got %v", dc.CrossDomain)
 	}
-	// Should be sorted descending by relevance: infra2 (0.7) before infra1 (0.3)
-	if dc.CrossDomain[0].Node.Name != "Resource2" {
-		t.Errorf("expected Resource2 (higher relevance) first, got %q", dc.CrossDomain[0].Node.Name)
+	if dc.CrossDomain.Deploys[0].Node.Name != "Resource2" {
+		t.Errorf("expected Resource2 (higher relevance) first, got %q", dc.CrossDomain.Deploys[0].Node.Name)
 	}
-	if dc.CrossDomain[1].Node.Name != "Resource1" {
-		t.Errorf("expected Resource1 (lower relevance) second, got %q", dc.CrossDomain[1].Node.Name)
+	if dc.CrossDomain.Deploys[1].Node.Name != "Resource1" {
+		t.Errorf("expected Resource1 (lower relevance) second, got %q", dc.CrossDomain.Deploys[1].Node.Name)
+	}
+}
+
+func TestToDirectionalContext_NilWhenNoCrossDomainNodes(t *testing.T) {
+	root := &graph.Node{ID: "root", Name: "Root", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	peer := &graph.Node{ID: "peer", Name: "Peer", Type: graph.NodeFunction, Domain: graph.DomainCode}
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: root}, {Node: peer},
+		},
+		Edges: []*graph.Edge{
+			{From: "root", To: "peer", Type: graph.EdgeCalls},
+		},
+	}
+	dc := toDirectionalContext(sg)
+
+	if dc.CrossDomain != nil {
+		t.Error("CrossDomain should be nil when no cross-domain nodes exist")
+	}
+}
+
+func TestToDirectionalContext_DocNodeWithDirectLinkGoesToDocumentation(t *testing.T) {
+	// A doc node directly linked to root via DOCUMENTED_BY goes to Documentation, not CrossDomain.
+	root := &graph.Node{ID: "root", Name: "Root", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	docNode := &graph.Node{ID: "doc", Name: "README section", Type: graph.NodeFunction, Domain: graph.DomainDocs}
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: root}, {Node: docNode},
+		},
+		Edges: []*graph.Edge{
+			{From: "root", To: "doc", Type: graph.EdgeDocumentedBy},
+		},
+	}
+	dc := toDirectionalContext(sg)
+
+	if len(dc.Documentation) != 1 {
+		t.Fatal("expected doc node in Documentation bucket")
+	}
+	if dc.CrossDomain != nil {
+		t.Error("doc node with direct DOCUMENTED_BY should not appear in CrossDomain")
 	}
 }
 
