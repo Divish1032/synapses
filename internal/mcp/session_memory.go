@@ -42,7 +42,8 @@ type EffectivenessReport struct {
 	// FirstFetchRight is the number of deliveries that required no correction re-fetch.
 	FirstFetchRight int `json:"first_fetch_right"`
 	// TokensSaved is the estimated tokens saved vs full-file grep (baseline - response).
-	TokensSaved int `json:"tokens_saved"`
+	// Omitted from JSON when zero so consumers can distinguish "no savings" from "no deliveries".
+	TokensSaved int `json:"tokens_saved,omitempty"`
 	// DurationMs is the session wall-clock duration in milliseconds.
 	DurationMs int64 `json:"duration_ms"`
 	// Prev7d is the 7-day historical average across all previous sessions (omitted when no history).
@@ -747,7 +748,7 @@ func truncateSlice(s []string, n int) []string {
 // buildEffectivenessMessage returns a human-readable one-liner summarising the session.
 // Examples:
 //
-//	"Your agent completed 14/16 tasks with first-fetch context (87%). Context hit rate: 85%. 47 tool calls in 4m0s."
+//	"First-fetch context: 14/16 deliveries required no correction (87%). Context hit rate: 85%. 47 tool calls in 4m0s."
 //	"No context deliveries this session. 12 tool calls in 30s."
 func buildEffectivenessMessage(r *EffectivenessReport) string {
 	dur := time.Duration(r.DurationMs) * time.Millisecond
@@ -757,7 +758,7 @@ func buildEffectivenessMessage(r *EffectivenessReport) string {
 	}
 	pct := 100.0 * float64(r.FirstFetchRight) / float64(r.TotalDeliveries)
 	msg := fmt.Sprintf(
-		"Your agent completed %d/%d tasks with first-fetch context (%.0f%%). Context hit rate: %.0f%%. %d tool calls in %s.",
+		"First-fetch context: %d/%d deliveries required no correction (%.0f%%). Context hit rate: %.0f%%. %d tool calls in %s.",
 		r.FirstFetchRight, r.TotalDeliveries, pct,
 		r.ContextHitRate*100, r.ToolCalls, durStr,
 	)

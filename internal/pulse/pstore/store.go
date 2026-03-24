@@ -2884,6 +2884,9 @@ func (s *Store) GetRecallChannelWeights(projectID string) map[string]float64 {
 // GetSessionContextHitRate returns the cache hit rate for context deliveries
 // in a specific session: cache_hits / total_deliveries. Returns 0 if no data.
 func (s *Store) GetSessionContextHitRate(sessionID string) float64 {
+	if sessionID == "" {
+		return 0
+	}
 	var hits, total int
 	s.execer().QueryRow(
 		`SELECT COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END), 0), COUNT(*)
@@ -2946,6 +2949,9 @@ func (s *Store) GetRecentEffectivenessTrend(days int, agentID string) []pulsetyp
 		var d pulsetypes.DailyEffectiveness
 		rows.Scan(&d.Day, &d.AvgContextHitRate, &d.AvgTaskCompletion, &d.TotalTokensSaved, &d.Sessions)
 		out = append(out, d)
+	}
+	if rows.Err() != nil {
+		return nil
 	}
 	return out
 }
