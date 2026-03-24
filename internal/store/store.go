@@ -653,9 +653,19 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("open fresh graph db after corruption recovery: %w", err)
 		}
 	}
-	if _, err := graphDB.Exec(graphSchema); err != nil {
+	if err := func() error {
+		schemaTx, txErr := graphDB.BeginTx(context.Background(), nil)
+		if txErr != nil {
+			return fmt.Errorf("begin graph schema tx: %w", txErr)
+		}
+		if _, execErr := schemaTx.Exec(graphSchema); execErr != nil {
+			_ = schemaTx.Rollback()
+			return fmt.Errorf("apply graph schema: %w", execErr)
+		}
+		return schemaTx.Commit()
+	}(); err != nil {
 		graphDB.Close()
-		return nil, fmt.Errorf("apply graph schema: %w", err)
+		return nil, err
 	}
 
 	kPath := KnowledgePath(path)
@@ -687,10 +697,20 @@ func Open(path string) (*Store, error) {
 			time.Now().UTC().Format(time.RFC3339), kPath)
 		_ = os.WriteFile(noticePath, []byte(notice), 0644)
 	}
-	if _, err := knowledgeDB.Exec(knowledgeSchema); err != nil {
+	if err := func() error {
+		schemaTx, txErr := knowledgeDB.BeginTx(context.Background(), nil)
+		if txErr != nil {
+			return fmt.Errorf("begin knowledge schema tx: %w", txErr)
+		}
+		if _, execErr := schemaTx.Exec(knowledgeSchema); execErr != nil {
+			_ = schemaTx.Rollback()
+			return fmt.Errorf("apply knowledge schema: %w", execErr)
+		}
+		return schemaTx.Commit()
+	}(); err != nil {
 		graphDB.Close()
 		knowledgeDB.Close()
-		return nil, fmt.Errorf("apply knowledge schema: %w", err)
+		return nil, err
 	}
 	// ── Graph migrations ─────────────────────────────────────────────────
 	// "duplicate column name" errors are safe to ignore — they mean the column
