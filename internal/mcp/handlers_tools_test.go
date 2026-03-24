@@ -836,6 +836,84 @@ func TestToDirectionalContext_DocNodeWithDirectLinkGoesToDocumentation(t *testin
 	}
 }
 
+func TestToDirectionalContext_EdgeDocumentsGoesToDocumentation(t *testing.T) {
+	// EdgeDocuments (doc→root) is the reverse of EdgeDocumentedBy — should also
+	// route to Documentation, not CrossDomain.DocumentedIn.
+	root := &graph.Node{ID: "root", Name: "Root", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	docNode := &graph.Node{ID: "doc", Name: "API doc section", Type: graph.NodeFunction, Domain: graph.DomainDocs}
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: root}, {Node: docNode},
+		},
+		Edges: []*graph.Edge{
+			{From: "doc", To: "root", Type: graph.EdgeDocuments},
+		},
+	}
+	dc := toDirectionalContext(sg)
+
+	if len(dc.Documentation) != 1 {
+		t.Fatalf("expected doc node in Documentation bucket, got %d", len(dc.Documentation))
+	}
+	if dc.CrossDomain != nil {
+		t.Error("doc node with direct DOCUMENTS edge to root should not appear in CrossDomain")
+	}
+}
+
+func TestToDirectionalContext_AllEdgeTypesRouteCorrectly(t *testing.T) {
+	// Integration test: one node per edge type, verify all route to correct sub-bucket.
+	root := &graph.Node{ID: "root", Name: "Root", Type: graph.NodeFunction, Domain: graph.DomainCode}
+	infra := &graph.Node{ID: "n1", Name: "Lambda", Type: graph.NodeFunction, Domain: graph.DomainInfra}
+	api := &graph.Node{ID: "n2", Name: "POST /pay", Type: graph.NodeFunction, Domain: graph.DomainAPI}
+	cfg := &graph.Node{ID: "n3", Name: "pay.yaml", Type: graph.NodeFunction, Domain: graph.DomainCustom}
+	kb := &graph.Node{ID: "n4", Name: "Wiki page", Type: graph.NodeFunction, Domain: graph.DomainKnowledge}
+	manual := &graph.Node{ID: "n5", Name: "linked", Type: graph.NodeFunction, Domain: graph.DomainInfra}
+	multiHop := &graph.Node{ID: "n6", Name: "distant", Type: graph.NodeFunction, Domain: graph.DomainAPI}
+
+	sg := &graph.SubGraph{
+		Root: "root",
+		Nodes: []graph.CarvedNode{
+			{Node: root}, {Node: infra}, {Node: api}, {Node: cfg},
+			{Node: kb}, {Node: manual}, {Node: multiHop},
+		},
+		Edges: []*graph.Edge{
+			{From: "root", To: "n1", Type: graph.EdgeDeploys},
+			{From: "root", To: "n2", Type: graph.EdgeConsumes},
+			{From: "root", To: "n3", Type: graph.EdgeConfiguredBy},
+			{From: "n4", To: "root", Type: graph.EdgeMentions},
+			{From: "root", To: "n5", Type: graph.EdgeManual},
+			// n6 has no direct edge from root — multi-hop
+		},
+	}
+	dc := toDirectionalContext(sg)
+
+	if dc.CrossDomain == nil {
+		t.Fatal("expected non-nil CrossDomain")
+	}
+	if len(dc.CrossDomain.Deploys) != 1 || dc.CrossDomain.Deploys[0].Node.Name != "Lambda" {
+		t.Errorf("Deploys: got %v", dc.CrossDomain.Deploys)
+	}
+	if len(dc.CrossDomain.Consumes) != 1 || dc.CrossDomain.Consumes[0].Node.Name != "POST /pay" {
+		t.Errorf("Consumes: got %v", dc.CrossDomain.Consumes)
+	}
+	if len(dc.CrossDomain.ConfiguredBy) != 1 || dc.CrossDomain.ConfiguredBy[0].Node.Name != "pay.yaml" {
+		t.Errorf("ConfiguredBy: got %v", dc.CrossDomain.ConfiguredBy)
+	}
+	if len(dc.CrossDomain.Mentions) != 1 || dc.CrossDomain.Mentions[0].Node.Name != "Wiki page" {
+		t.Errorf("Mentions: got %v", dc.CrossDomain.Mentions)
+	}
+	if len(dc.CrossDomain.Manual) != 1 || dc.CrossDomain.Manual[0].Node.Name != "linked" {
+		t.Errorf("Manual: got %v", dc.CrossDomain.Manual)
+	}
+	if len(dc.CrossDomain.Related) != 1 || dc.CrossDomain.Related[0].Node.Name != "distant" {
+		t.Errorf("Related: got %v", dc.CrossDomain.Related)
+	}
+	if len(dc.CrossDomain.DocumentedIn) != 0 {
+		t.Errorf("DocumentedIn should be empty, got %v", dc.CrossDomain.DocumentedIn)
+	}
+}
+
 // ── handleGetWorkingState ─────────────────────────────────────────────────────
 
 func TestHandleGetWorkingState_NonGitDir(t *testing.T) {
