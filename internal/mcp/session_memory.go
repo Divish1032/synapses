@@ -210,6 +210,11 @@ func (s *Server) handleEndSession(
 	outcome := "unknown"
 	if summary != "" {
 		outcome = "success" // agent provided a summary — treat as intentional close
+	} else if taskID != "" {
+		// D4: agent explicitly linked a task_id — treat as a success signal so
+		// the adaptive edge weight refinement accumulates positive reinforcement
+		// even for agents that don't write a free-form summary.
+		outcome = "success"
 	}
 	synapseSessionID := s.getSynapseSessionID(mcpSessionID)
 	var retro *store.ToolCallSummary
