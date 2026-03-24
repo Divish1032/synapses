@@ -208,7 +208,7 @@ func (r *Resolver) Status(ctx context.Context) []EntryStatus {
 				}
 				return nil
 			}
-			results[i] = r.statusForEntry(e)
+			results[i] = r.statusForEntry(qctx, e)
 			return nil
 		})
 	}
@@ -216,14 +216,33 @@ func (r *Resolver) Status(ctx context.Context) []EntryStatus {
 	return results
 }
 
-func (r *Resolver) statusForEntry(e config.FederationEntry) EntryStatus {
+func (r *Resolver) statusForEntry(ctx context.Context, e config.FederationEntry) EntryStatus {
 	es := EntryStatus{
 		Alias: e.Alias,
 		Path:  e.Path,
 	}
 
-	// Check if path exists.
-	info, err := os.Stat(e.Path)
+	// Run os.Stat in a goroutine so ctx cancellation can interrupt it.
+	// This is important for NFS-mounted paths where Stat can block for minutes.
+	type statResult struct {
+		info os.FileInfo
+		err  error
+	}
+	statCh := make(chan statResult, 1)
+	go func() {
+		info, err := os.Stat(e.Path)
+		statCh <- statResult{info: info, err: err}
+	}()
+	var info os.FileInfo
+	var err error
+	select {
+	case <-ctx.Done():
+		es.Status = "not_indexed"
+		es.Error = "timeout"
+		return es
+	case res := <-statCh:
+		info, err = res.info, res.err
+	}
 	if err != nil || !info.IsDir() {
 		es.Status = "not_found"
 		if err != nil {
