@@ -31,6 +31,7 @@ type loopGuard struct {
 	sessions       map[string]*loopGuardSession
 	lastActivity   map[string]time.Time
 	stopCh         chan struct{}
+	closeOnce      sync.Once
 	wg             sync.WaitGroup
 	pc             *pulse.Client // set via SetPulseClient; nil if pulse not configured
 	projectID      string
@@ -60,23 +61,14 @@ func newLoopGuard() *loopGuard {
 	return g
 }
 
-// close signals the background GC goroutine to stop and waits briefly for
-// it to exit. Under heavy load (e.g. 1000+ concurrent tests with -race) the
-// goroutine may be CPU-starved; the 200ms cap prevents Close() from blocking
-// indefinitely — the goroutine WILL exit once scheduled, it just won't hold
-// up the caller. 200ms is generous for a goroutine that only reads a channel.
+// close signals the background GC goroutine to stop and waits for it to exit.
+// Protected by sync.Once to prevent double-close panics. The goroutine only
+// selects on a closed channel so it exits promptly — wg.Wait() is safe here.
 func (g *loopGuard) close() {
-	close(g.stopCh)
-	done := make(chan struct{})
-	go func() {
+	g.closeOnce.Do(func() {
+		close(g.stopCh)
 		g.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(200 * time.Millisecond):
-		// Goroutine will exit on its own once the runtime schedules it.
-	}
+	})
 }
 
 // gcIdleSessions removes sessions that have been idle longer than maxIdle.
