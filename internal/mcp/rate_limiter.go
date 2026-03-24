@@ -133,6 +133,7 @@ type sessionBuckets struct {
 	write         tokenBucket
 	expensiveRead tokenBucket
 	crossProject  tokenBucket
+	lastActivity  time.Time
 }
 
 // rateLimiter manages per-session rate limit state. Embedded in Server and
@@ -157,6 +158,8 @@ type rateLimiter struct {
 	projectID      string
 	resolveSession func(string) string // P8-2: MCP session key → Synapses session UUID
 	resolveAgent   func(string) string // MCP session key → agent_id (for agent-scoped rate limiting)
+
+	stopCh chan struct{} // closed by close() to stop the GC sweep goroutine
 }
 
 // SetPulseClient wires a pulse client so rate-limiter can emit guard events.
@@ -174,7 +177,9 @@ func newRateLimiter(cfg config.RateLimitConfig) *rateLimiter {
 		writeLimitPerMin:         defaultWriteOpsPerMinute,
 		expensiveReadLimitPerMin: defaultExpensiveReadsPerMinute,
 		crossProjectLimitPerMin:  defaultCrossProjectPerMinute,
+		stopCh:                   make(chan struct{}),
 	}
+	go rl.gcSweep()
 	if cfg.WriteOpsPerMinute != 0 {
 		rl.writeLimitPerMin = cfg.WriteOpsPerMinute
 	}
@@ -222,6 +227,35 @@ func (rl *rateLimiter) clearSession(sessionKey string) {
 	rl.mu.Unlock()
 }
 
+// close stops the background GC sweep goroutine.
+func (rl *rateLimiter) close() {
+	close(rl.stopCh)
+}
+
+// gcSweep removes sessions inactive for more than 2 hours every 30 minutes.
+func (rl *rateLimiter) gcSweep() {
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			cutoff := time.Now().Add(-2 * time.Hour)
+			rl.mu.Lock()
+			for key, sb := range rl.sessions {
+				sb.mu.Lock()
+				inactive := sb.lastActivity.Before(cutoff)
+				sb.mu.Unlock()
+				if inactive {
+					delete(rl.sessions, key)
+				}
+			}
+			rl.mu.Unlock()
+		case <-rl.stopCh:
+			return
+		}
+	}
+}
+
 // checkResult holds the outcome of a multi-category rate-limit check.
 type checkResult struct {
 	allowed    bool
@@ -267,6 +301,7 @@ func (rl *rateLimiter) check(sessionKey, toolName string, args map[string]interf
 	defer sb.mu.Unlock()
 
 	now := time.Now()
+	sb.lastActivity = now
 
 	// Phase 1 — peek: refill then verify all applicable buckets. No tokens
 	// are consumed yet. First failing category returns immediately so the
