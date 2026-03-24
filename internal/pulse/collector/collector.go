@@ -266,14 +266,49 @@ func (c *Collector) WriteErrors() int64 {
 	return c.writeErrors.Load()
 }
 
+// isHighPriority returns true for events that must not be silently dropped by
+// a heartbeat flood. Session lifecycle events are the primary concern because
+// dropping a session_start or session_end corrupts billing and analytics.
+func isHighPriority(kind string) bool {
+	return kind == "session" || kind == "session_model"
+}
+
 func (c *Collector) enqueue(ev event) {
 	c.enqueued.Add(1)
 	c.mu.Lock()
 
-	// O(1) ring buffer enqueue — drop the oldest event when full.
+	// Ring buffer enqueue — when full, prefer dropping a low-priority (e.g.
+	// heartbeat) event to protect high-priority session events.
 	if c.count == c.cap {
-		c.head = (c.head + 1) % c.cap
-		c.dropped.Add(1)
+		if isHighPriority(ev.kind) {
+			// Scan from head to find the oldest low-priority event to evict.
+			evicted := false
+			for i := 0; i < c.count; i++ {
+				pos := (c.head + i) % c.cap
+				if !isHighPriority(c.ring[pos].kind) {
+					// Shift everything before this position one step forward
+					// to fill the hole, advancing head.
+					for j := i; j > 0; j-- {
+						src := (c.head + j - 1) % c.cap
+						dst := (c.head + j) % c.cap
+						c.ring[dst] = c.ring[src]
+					}
+					c.head = (c.head + 1) % c.cap
+					c.dropped.Add(1)
+					evicted = true
+					break
+				}
+			}
+			if !evicted {
+				// All buffered events are high-priority — drop oldest as usual.
+				c.head = (c.head + 1) % c.cap
+				c.dropped.Add(1)
+			}
+		} else {
+			// Low-priority incoming event — drop the oldest (standard behavior).
+			c.head = (c.head + 1) % c.cap
+			c.dropped.Add(1)
+		}
 	} else {
 		c.count++
 	}
