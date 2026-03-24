@@ -1614,6 +1614,8 @@ func (s *Server) handleLinkEntities(
 		return mcp.NewToolResultError("link_entities requires a store — daemon may not be running"), nil
 	}
 
+	const maxRelationLen = 256
+
 	args := req.GetArguments()
 	a, ok := args["a"].(string)
 	if !ok || strings.TrimSpace(a) == "" {
@@ -1624,19 +1626,26 @@ func (s *Server) handleLinkEntities(
 		return mcp.NewToolResultError("b is required — entity name or node ID for the target"), nil
 	}
 	relation, ok := args["relation"].(string)
-	if !ok || strings.TrimSpace(relation) == "" {
+	relation = strings.TrimSpace(relation)
+	if !ok || relation == "" {
 		return mcp.NewToolResultError("relation is required (e.g. 'CALLS', 'DEPLOYS', 'DEPENDS_ON', or any label)"), nil
 	}
+	if len(relation) > maxRelationLen {
+		return mcp.NewToolResultError(fmt.Sprintf("relation exceeds max length (%d chars)", maxRelationLen)), nil
+	}
 	domain, _ := args["domain"].(string)
+	if len(domain) > maxRelationLen {
+		domain = domain[:maxRelationLen]
+	}
 	agentID, _ := args["agent_id"].(string)
 
-	// Resolve a → node ID.
-	fromNode := s.resolveEntityRef(a)
+	// Resolve a → node ID, capturing ambiguity count for caller warning.
+	fromNode, fromAmbiguous := s.resolveEntityRefWithCount(a)
 	if fromNode == nil {
 		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q — use find_entity to discover the correct name or ID", a)), nil
 	}
 	// Resolve b → node ID.
-	toNode := s.resolveEntityRef(b)
+	toNode, toAmbiguous := s.resolveEntityRefWithCount(b)
 	if toNode == nil {
 		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q — use find_entity to discover the correct name or ID", b)), nil
 	}
@@ -1651,9 +1660,8 @@ func (s *Server) handleLinkEntities(
 	}
 
 	// Inject into the live in-memory graph. AddEdge is idempotent — safe to call
-	// even if the edge already exists. Uses the relation string as EdgeType; if
-	// it's not in DefaultEdgeWeights, BFS treats weight as 0 (edge present but
-	// not auto-traversed). Standard types (CALLS, DEPENDS_ON, etc.) carry full weights.
+	// even if the edge already exists. Unknown relation strings get BFS weight 0.5
+	// (the edgeWeight fallback) — they ARE traversed, just at medium priority.
 	s.graph.AddEdge(&graph.Edge{
 		From: fromID,
 		To:   toID,
@@ -1678,34 +1686,44 @@ func (s *Server) handleLinkEntities(
 		"hint":     "Edge is live in this session and will persist across restarts. Use get_context or get_impact to traverse it.",
 	}
 	if !knownType {
-		result["weight_note"] = fmt.Sprintf("Relation %q is not a catalog type — BFS weight is 0 (edge exists but won't auto-surface in context). Use a standard type (CALLS, DEPENDS_ON, IMPLEMENTS, etc.) for full BFS traversal.", relation)
+		// Unknown types get weight 0.5 from edgeWeight() fallback — they ARE traversed.
+		// Only CALLS/IMPLEMENTS/etc. are in the catalog with higher dedicated weights.
+		result["weight_note"] = fmt.Sprintf("Relation %q is not in the edge catalog (BFS weight=0.5 fallback). Edge will be traversed but at lower priority than catalog types. Use get_edge_types to see all catalog types.", relation)
+	}
+	// Warn when name resolution was ambiguous — agent may have linked the wrong entity.
+	var warnings []string
+	if fromAmbiguous > 1 {
+		warnings = append(warnings, fmt.Sprintf("source %q matched %d entities — linked first match (id=%s). Use full node ID to be precise.", a, fromAmbiguous, fromID))
+	}
+	if toAmbiguous > 1 {
+		warnings = append(warnings, fmt.Sprintf("target %q matched %d entities — linked first match (id=%s). Use full node ID to be precise.", b, toAmbiguous, toID))
+	}
+	if len(warnings) > 0 {
+		result["ambiguity_warnings"] = warnings
 	}
 	return jsonResult(result)
 }
 
-// resolveEntityRef resolves an entity name or full node ID to a graph Node.
-// Tries exact node-ID lookup first, then FindByName, then substring match.
-// Returns nil if no match found.
-func (s *Server) resolveEntityRef(nameOrID string) *graph.Node {
-	// Try as direct node ID first (contains "::" separator).
+// resolveEntityRefWithCount resolves an entity name or full node ID to a graph Node
+// and also returns the total number of matches found (for ambiguity detection).
+// Tries exact node-ID lookup first (unambiguous by definition), then FindByName,
+// then substring match. Returns (nil, 0) if no match found.
+func (s *Server) resolveEntityRefWithCount(nameOrID string) (*graph.Node, int) {
+	// Full node ID (repoID::file::name) — unambiguous.
 	if strings.Contains(nameOrID, "::") {
 		if n := s.graph.GetNode(graph.NodeID(nameOrID)); n != nil {
-			return n
+			return n, 1
 		}
 	}
-	// Exact name match.
+	// Exact name match — may return multiple nodes with the same name.
 	nodes := s.graph.FindByName(nameOrID)
-	if len(nodes) == 1 {
-		return nodes[0]
+	if len(nodes) >= 1 {
+		return nodes[0], len(nodes)
 	}
-	if len(nodes) > 1 {
-		// Multiple exact matches — return first (caller can use full node ID to disambiguate).
-		return nodes[0]
+	// Substring / pattern match — bounded to avoid large scans.
+	nodes = s.graph.FindByPatternLimit(nameOrID, 5)
+	if len(nodes) >= 1 {
+		return nodes[0], len(nodes)
 	}
-	// Substring / pattern match.
-	nodes = s.graph.FindByPatternLimit(nameOrID, 1)
-	if len(nodes) == 1 {
-		return nodes[0]
-	}
-	return nil
+	return nil, 0
 }
