@@ -13,6 +13,8 @@ package webcache
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -183,8 +185,9 @@ func (c *Cache) FetchPackageDocs(ctx context.Context, importPath, version string
 func (c *Cache) Fetch(ctx context.Context, rawURL string, ttlHours int) (string, bool, error) {
 	cacheKey := rawURL
 	if u, err := url.Parse(rawURL); err == nil && u.User != nil {
+		h := sha256.Sum256([]byte(u.User.String()))
 		u.User = nil
-		cacheKey = u.String()
+		cacheKey = u.String() + "|userinfo=" + hex.EncodeToString(h[:8])
 	}
 	if entry, ok := c.store.GetWebCache(cacheKey); ok {
 		return entry.Content, true, nil
