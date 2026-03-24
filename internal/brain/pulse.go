@@ -90,13 +90,14 @@ type SystemState struct {
 // SystemPulse samples system resources on a background goroutine and exposes
 // the latest snapshot via Current(). It is safe for concurrent use.
 //
-// Lifecycle: NewSystemPulse → Start → (use Current) → Stop.
+// Lifecycle: NewSystemPulse → (optional WithOllamaURL) → Start → (use Current) → Stop.
 // SystemPulse is NOT restartable: once Stop() is called, Start() is a no-op
 // and the pulse remains stopped. Create a new instance to restart.
 type SystemPulse struct {
 	mu         sync.RWMutex
 	current    SystemState
 	httpClient *http.Client
+	ollamaURL  string // full URL to Ollama /api/ps; defaults to pulseOllamaURL
 	done       chan struct{}
 
 	// platformCPUState holds platform-specific CPU sampling state.
@@ -123,8 +124,20 @@ type SystemPulse struct {
 func NewSystemPulse() *SystemPulse {
 	return &SystemPulse{
 		httpClient: &http.Client{Timeout: pulseOllamaTimeout},
+		ollamaURL:  pulseOllamaURL,
 		done:       make(chan struct{}),
 	}
+}
+
+// WithOllamaURL overrides the Ollama /api/ps URL used for model residency polling.
+// Call before Start(). The url must be the full URL including path, e.g.
+// "http://gpu-server:11434/api/ps".
+//
+// This is necessary when Ollama runs on a non-default host or port so that
+// OllamaModelLoaded in SystemState reflects the correct Ollama instance.
+func (p *SystemPulse) WithOllamaURL(url string) *SystemPulse {
+	p.ollamaURL = url
+	return p
 }
 
 // Start launches the background sampling goroutine. It is safe to call
@@ -226,7 +239,7 @@ func (p *SystemPulse) pollOllama() {
 		p.mu.Unlock()
 	}()
 
-	resp, err := p.httpClient.Get(pulseOllamaURL)
+	resp, err := p.httpClient.Get(p.ollamaURL)
 	if err != nil {
 		// Ollama may not be running — this is expected and not an error.
 		return

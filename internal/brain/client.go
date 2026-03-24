@@ -9,6 +9,7 @@ package brain
 import (
 	"context"
 	"io"
+	"strings"
 
 	brainconfig "github.com/SynapsesOS/synapses/internal/brain/config"
 )
@@ -46,8 +47,12 @@ func NewInProcess(cfg *brainconfig.BrainConfig) *Client {
 	}
 
 	// Start system health monitoring so the scheduler can make health-aware
-	// decisions about when to run P1/P2 tasks.
-	pulse := NewSystemPulse()
+	// decisions about when to run P1/P2 tasks. Point the pulse at the same
+	// Ollama instance that ModelManager and OllamaClients use so that
+	// OllamaModelLoaded correctly reflects model residency even when
+	// OllamaURL is set to a non-default host or port.
+	ollamaBase := strings.TrimRight(cfg.OllamaURL, "/")
+	pulse := NewSystemPulse().WithOllamaURL(ollamaBase + "/api/ps")
 	pulse.Start()
 
 	// ModelManager uses the same pulse for RAM checks and pre-loads the model

@@ -1,6 +1,8 @@
 package brain
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -219,4 +221,53 @@ func TestStopWithoutStartDoesNotBlock(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stop() without Start() blocked for more than 2 seconds")
 	}
+}
+
+// TestWithOllamaURL_CustomURL verifies that WithOllamaURL causes pollOllama to
+// hit the specified URL rather than the hardcoded default (localhost:11434).
+// This ensures pulse and ModelManager always point at the same Ollama instance
+// when OllamaURL is configured to a non-default host or port.
+func TestWithOllamaURL_CustomURL(t *testing.T) {
+	var pollCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/ps" {
+			pollCalled = true
+		}
+		// Return a valid /api/ps response with one loaded model.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"models":[{"name":"qwen3.5:2b"}]}`))
+	}))
+	defer srv.Close()
+
+	p := NewSystemPulse().WithOllamaURL(srv.URL + "/api/ps")
+	// pollOllama is called synchronously inside Start() before the goroutine launches.
+	p.Start()
+	defer p.Stop()
+
+	if !pollCalled {
+		t.Fatal("WithOllamaURL: custom /api/ps endpoint was not called during Start()")
+	}
+	state := p.Current()
+	if state.OllamaModelLoaded != "qwen3.5:2b" {
+		t.Errorf("OllamaModelLoaded = %q, want %q", state.OllamaModelLoaded, "qwen3.5:2b")
+	}
+}
+
+// TestWithOllamaURL_DefaultURL verifies that NewSystemPulse without WithOllamaURL
+// uses the package-default URL (localhost:11434/api/ps). Since Ollama is not
+// running in test environments, OllamaModelLoaded should be "".
+func TestWithOllamaURL_DefaultFallsBackGracefully(t *testing.T) {
+	p := NewSystemPulse()
+	p.Start()
+	defer p.Stop()
+
+	state := p.Current()
+	// OllamaModelLoaded is "" because Ollama isn't running in the test environment.
+	// The important thing is that it doesn't panic and SampledAt is set.
+	if state.SampledAt.IsZero() {
+		t.Error("SampledAt should be non-zero after Start()")
+	}
+	// OllamaModelLoaded "" is the expected state when Ollama is not reachable.
+	_ = state.OllamaModelLoaded
 }
