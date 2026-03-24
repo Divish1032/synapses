@@ -323,30 +323,25 @@ func (s *Server) handleGetContext(
 	}
 
 	// Sprint 15 #2: wire quality score lookup so BFS/PPR re-ranks nodes based
-	// on outcome signal history. Quality scores are fetched from the pulse store
-	// in a single batch call; nodes with no history pass through unchanged.
+	// on outcome signal history. Quality scores are fetched for exactly the nodes
+	// that survived BFS/PPR (passed to the closure by traverse.go) in a single
+	// batch SQL round-trip. Nodes with no quality record pass through unchanged.
 	if pc := s.getPulseClient(); pc != nil {
 		projID := s.projectID
 		cfg.QualityScoreLookup = func(ids []graph.NodeID) map[graph.NodeID]float64 {
-			// Build the lookup from entity_quality rows for the active project.
-			// GetEntityQualityScores returns all rows with at least 1 signal;
-			// we convert to a map keyed by node ID for O(1) lookup in traverse.go.
-			rows := pc.GetEntityQualityScores(projID, 1)
-			if len(rows) == 0 {
+			strIDs := make([]string, len(ids))
+			for i, id := range ids {
+				strIDs[i] = string(id)
+			}
+			raw := pc.GetEntityQualityScoresBatch(strIDs, projID)
+			if raw == nil {
 				return nil
 			}
-			out := make(map[graph.NodeID]float64, len(rows))
-			for _, eq := range rows {
-				out[graph.NodeID(eq.Entity)] = eq.QualityScore
+			out := make(map[graph.NodeID]float64, len(raw))
+			for k, v := range raw {
+				out[graph.NodeID(k)] = v
 			}
-			// Filter to only the requested IDs (traverse.go passes the surviving set).
-			filtered := make(map[graph.NodeID]float64, len(ids))
-			for _, id := range ids {
-				if qs, ok := out[id]; ok {
-					filtered[id] = qs
-				}
-			}
-			return filtered
+			return out
 		}
 	}
 

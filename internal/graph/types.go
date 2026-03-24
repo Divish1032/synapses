@@ -398,6 +398,13 @@ type CarveConfig struct {
 	// is nil or the root node has no stored embedding.
 	// Recommended production value: 0.3 (70% structural, 30% semantic).
 	HybridLambda float64
+	// QualityScoreLookup returns per-entity context quality scores keyed by
+	// node ID. Scores are the signed sum of signal_weight values from
+	// outcome_signals (Sprint 15 #1/2). Positive = context was consistently
+	// helpful; negative = context was repeatedly insufficient or abandoned.
+	// Called once after BFS/PPR scoring with all surviving node IDs.
+	// Nil disables quality-based re-ranking (backward-compatible default).
+	QualityScoreLookup func(ids []NodeID) map[NodeID]float64
 }
 
 // intentModifyWeights boosts outgoing CALLS (callees) for the "modify" intent.

@@ -57,11 +57,16 @@ func newSubgraphCache() *subgraphCache {
 // colliding with each other or with the default (non-intent) subgraph.
 // UsePPR and Alpha are included because PPR produces different score distributions.
 // HybridLambda is included because semantic blending changes node ranking.
+// EmbeddingLookup/QualityScoreLookup presence booleans are included so that
+// a call without enrichment does not collide with an enriched call for the
+// same entity (they produce different Relevance scores in CarvedNode).
 func cacheKeyFor(rootID NodeID, cfg CarveConfig, fingerprint string) string {
-	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f",
+	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f|emb:%v|qs:%v",
 		rootID, cfg.MaxDepth, cfg.TokenBudget, cfg.MinRelevance, cfg.DecayFactor,
 		cfg.DirectionBoost, cfg.IntentID, fingerprint, cfg.UsePPR, cfg.Alpha,
-		cfg.HybridLambda)
+		cfg.HybridLambda,
+		cfg.EmbeddingLookup != nil,
+		cfg.QualityScoreLookup != nil)
 }
 
 // extractFiles collects the set of source files referenced by nodes in the subgraph.

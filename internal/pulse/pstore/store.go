@@ -2689,17 +2689,14 @@ func (s *Store) GetSkillExecutionStatsP5(days int) []pulsetypes.SkillStat {
 }
 
 // UpdateEntityQualityScore recomputes the quality score for an entity (Item 10).
+// Uses the signal_weight column added in Sprint 15 #1 so the score stays
+// consistent with the SignalWeight* constants in pulse/types/types.go.
+// Pre-15 #1 rows have signal_weight=0.0 (neutral default) and do not skew the score.
 func (s *Store) UpdateEntityQualityScore(entity, projectID string) {
 	row := s.execer().QueryRow(`
-		SELECT COALESCE(SUM(CASE
-			WHEN signal_type = 'task_done' THEN 2.0
-			WHEN signal_type IN ('recall_hit','cross_session_hit') THEN 0.5
-			WHEN signal_type = 'correction' THEN -1.0
-			WHEN signal_type = 'escalation' THEN -3.0
-			WHEN signal_type = 'task_cancelled' THEN -2.0
-			ELSE 0 END), 0),
-		       COALESCE(SUM(CASE WHEN signal_type IN ('task_done') THEN 1 ELSE 0 END), 0),
-		       COALESCE(SUM(CASE WHEN signal_type IN ('correction','escalation','task_cancelled') THEN 1 ELSE 0 END), 0)
+		SELECT COALESCE(SUM(signal_weight), 0.0),
+		       COALESCE(COUNT(CASE WHEN signal_weight > 0 THEN 1 END), 0),
+		       COALESCE(COUNT(CASE WHEN signal_weight < 0 THEN 1 END), 0)
 		FROM outcome_signals WHERE entity = ? AND (project_id = ? OR ? = '')`,
 		entity, projectID, projectID)
 	var score float64
@@ -2729,6 +2726,67 @@ func (s *Store) GetEntityQualityScores(projectID string, minSignals int) []pulse
 		out = append(out, e)
 	}
 	return out
+}
+
+// GetEntityQualityScore returns the quality score for a single entity (Item 10).
+// Returns (score, true) when the entity has a recorded quality entry, or (0, false)
+// when no entry exists (entity has never been involved in a scored outcome).
+func (s *Store) GetEntityQualityScore(entity, projectID string) (float64, bool) {
+	var score float64
+	err := s.readDB().QueryRow(
+		`SELECT quality_score FROM entity_quality WHERE entity = ? AND (project_id = ? OR ? = '') LIMIT 1`,
+		entity, projectID, projectID).Scan(&score)
+	if err != nil {
+		return 0, false
+	}
+	return score, true
+}
+
+// GetEntityQualityScoresBatch returns quality scores for a set of entity IDs
+// (Sprint 15 #2 — BFS/PPR lookup). Uses IN(...) to fetch only the requested
+// entities in a single round-trip. Returns nil when entities is empty.
+// Entity IDs not present in entity_quality are omitted from the result.
+func (s *Store) GetEntityQualityScoresBatch(entities []string, projectID string) map[string]float64 {
+	if len(entities) == 0 {
+		return nil
+	}
+	// SQLite IN(...) limit is 999. CarveEgoGraph caps at 10K nodes so it is
+	// theoretically possible to exceed 999 — process in chunks of 900.
+	const chunkSize = 900
+	result := make(map[string]float64, len(entities))
+	for i := 0; i < len(entities); i += chunkSize {
+		end := i + chunkSize
+		if end > len(entities) {
+			end = len(entities)
+		}
+		chunk := entities[i:end]
+		args := make([]interface{}, 0, len(chunk)+2)
+		args = append(args, projectID, projectID)
+		placeholders := make([]string, len(chunk))
+		for j, e := range chunk {
+			placeholders[j] = "?"
+			args = append(args, e)
+		}
+		query := `SELECT entity, quality_score FROM entity_quality
+		          WHERE (project_id = ? OR ? = '') AND entity IN (` +
+			strings.Join(placeholders, ",") + `)`
+		rows, err := s.readDB().Query(query, args...)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var ent string
+			var score float64
+			if rows.Scan(&ent, &score) == nil {
+				result[ent] = score
+			}
+		}
+		rows.Close()
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 // GetDeliveryOutcomes returns delivery-to-outcome linkages (Item 11).
