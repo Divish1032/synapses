@@ -89,18 +89,31 @@ type SystemState struct {
 
 // SystemPulse samples system resources on a background goroutine and exposes
 // the latest snapshot via Current(). It is safe for concurrent use.
+//
+// Lifecycle: NewSystemPulse → Start → (use Current) → Stop.
+// SystemPulse is NOT restartable: once Stop() is called, Start() is a no-op
+// and the pulse remains stopped. Create a new instance to restart.
 type SystemPulse struct {
 	mu         sync.RWMutex
 	current    SystemState
 	httpClient *http.Client
 	done       chan struct{}
-	stopped    chan struct{}
+
+	// platformCPUState holds platform-specific CPU sampling state.
+	// On Linux/Darwin it is an empty struct (zero cost). On Windows it holds
+	// the previous GetSystemTimes values for delta computation, scoped to this
+	// instance so multiple SystemPulse instances do not share state.
+	platformCPUState
+
+	// wg tracks the single background goroutine launched by Start().
+	// Stop() calls wg.Wait(), which returns immediately if Start() was never
+	// called (counter stays at 0). This avoids any channel reassignment and
+	// the data race that would entail.
+	wg sync.WaitGroup
 
 	// startOnce ensures Start() launches at most one background goroutine.
 	startOnce sync.Once
-	// stopOnce ensures Stop() closes the done channel at most once and always
-	// waits for the loop to exit (or returns immediately if Start was never
-	// called, since stopped is pre-closed in that case).
+	// stopOnce ensures done is closed exactly once.
 	stopOnce sync.Once
 }
 
@@ -108,15 +121,10 @@ type SystemPulse struct {
 // The pulse is ready for use immediately; Current() returns a zero-value
 // SystemState until Start() is called.
 func NewSystemPulse() *SystemPulse {
-	p := &SystemPulse{
+	return &SystemPulse{
 		httpClient: &http.Client{Timeout: pulseOllamaTimeout},
 		done:       make(chan struct{}),
-		stopped:    make(chan struct{}),
 	}
-	// Pre-close stopped so that Stop() called without Start() returns immediately
-	// rather than blocking forever.
-	close(p.stopped)
-	return p
 }
 
 // Start launches the background sampling goroutine. It is safe to call
@@ -125,15 +133,15 @@ func NewSystemPulse() *SystemPulse {
 // so that Current() always returns a non-zero SampledAt after Start() returns.
 func (p *SystemPulse) Start() {
 	p.startOnce.Do(func() {
-		// Re-open stopped: the pre-closed channel made Stop()-without-Start() safe.
-		// Now that the loop will run, we need a fresh channel to signal loop exit.
-		p.stopped = make(chan struct{})
-
 		// Take one synchronous sample so Current() is immediately valid.
 		p.sample()
 		p.pollOllama()
 
-		go p.loop()
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			p.loop()
+		}()
 	})
 }
 
@@ -144,7 +152,7 @@ func (p *SystemPulse) Stop() {
 	p.stopOnce.Do(func() {
 		close(p.done)
 	})
-	<-p.stopped
+	p.wg.Wait() // no-op (counter=0) if Start() was never called
 }
 
 // Current returns a copy of the most recent SystemState snapshot.
@@ -159,8 +167,6 @@ func (p *SystemPulse) Current() SystemState {
 
 // loop is the background sampling goroutine.
 func (p *SystemPulse) loop() {
-	defer close(p.stopped)
-
 	sampleTick := time.NewTicker(pulseSampleInterval)
 	ollamaTick := time.NewTicker(pulseOllamaInterval)
 	defer sampleTick.Stop()
@@ -182,7 +188,7 @@ func (p *SystemPulse) loop() {
 // On error it logs a warning and retains the previous RAM/CPU values so that
 // health classification does not oscillate due to transient read failures.
 func (p *SystemPulse) sample() {
-	ram, cpu, err := samplePlatform()
+	ram, cpu, err := p.samplePlatform()
 	if err != nil {
 		logutil.Error("synapses: pulse: platform sample failed: %v", err)
 		// Retain previous values; only update timestamp.
@@ -228,10 +234,14 @@ func (p *SystemPulse) pollOllama() {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// Drain body so the connection can be reused by the HTTP transport.
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Limit read to 64 KB — /api/ps responses are <1 KB in practice.
+	// Guards against a rogue service on :11434 serving an arbitrarily large body.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
 		return
 	}

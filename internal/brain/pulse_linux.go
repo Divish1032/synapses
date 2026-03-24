@@ -10,12 +10,16 @@ import (
 	"strings"
 )
 
+// platformCPUState holds per-instance CPU sampling state. Empty on Linux —
+// /proc/loadavg already gives a rolling average, no delta computation needed.
+type platformCPUState struct{}
+
 // samplePlatform reads available RAM from /proc/meminfo and the 1-minute CPU
 // load average from /proc/loadavg, then normalises CPU by the number of cores.
 //
 // Returns (availableRAM bytes, cpuLoadNorm [0,∞), error).
 // cpuLoadNorm is NOT clamped here — the caller in pulse.go clamps to [0,1].
-func samplePlatform() (int64, float64, error) {
+func (p *SystemPulse) samplePlatform() (int64, float64, error) {
 	ram, err := readMemAvailable()
 	if err != nil {
 		return 0, 0, fmt.Errorf("pulse/linux: meminfo: %w", err)
