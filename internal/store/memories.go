@@ -1053,16 +1053,21 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 			tx.Exec(`INSERT OR IGNORE INTO memory_anchors (memory_id, node_id, created_at) VALUES (?, ?, ?)`,
 				dedup.dedupedID, nid, now) //nolint:errcheck — INSERT OR IGNORE
 		}
+		persisted := true
 		if commitErr := tx.Commit(); commitErr != nil {
 			// Tx failed — fall back to non-transactional touch + anchors.
 			logutil.Warn("synapses: store: dedup tx commit: %v (falling back)\n", commitErr)
-			_ = s.TouchMemory(dedup.dedupedID)
-			_ = s.InsertMemoryAnchors(dedup.dedupedID, anchorNodes)
+			touchErr := s.TouchMemory(dedup.dedupedID)
+			anchErr := s.InsertMemoryAnchors(dedup.dedupedID, anchorNodes)
+			// Only consider data persisted if at least the touch succeeded.
+			persisted = touchErr == nil || anchErr == nil
 		}
-		// Emit event only after data is persisted (commit or fallback).
-		if evErr := s.AppendEvent("knowledge_updated", m.AgentID,
-			fmt.Sprintf(`{"memory_id":%q,"reason":"dedup","anchors":%d}`, dedup.dedupedID, len(anchorNodes))); evErr != nil {
-			logutil.Warn("synapses: store: append knowledge_updated event: %v\n", evErr)
+		// Emit event only after data is actually persisted.
+		if persisted {
+			if evErr := s.AppendEvent("knowledge_updated", m.AgentID,
+				fmt.Sprintf(`{"memory_id":%q,"reason":"dedup","anchors":%d}`, dedup.dedupedID, len(anchorNodes))); evErr != nil {
+				logutil.Warn("synapses: store: append knowledge_updated event: %v\n", evErr)
+			}
 		}
 		return dedup.dedupedID, nil
 	}
