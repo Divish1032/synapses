@@ -380,28 +380,30 @@ func matchCondition(n *graph.Node, fanin, fanout int, c graphQueryCondition) boo
 		return false
 	}
 
-	// String comparison is case-sensitive by convention (package names, type names are precise).
-	// Exception: type and domain values are lowercased in the graph — accept both.
 	wantLower := strings.ToLower(c.sval)
 	actualLower := strings.ToLower(actual)
 
+	// file field: use substring (contains) matching so users can write
+	// NODES WHERE file="login.go" and match "internal/auth/login.go".
+	// Exact equality requires knowing the full repo-relative path, which
+	// users cannot discover without a successful query first.
+	if c.field == gqfFile {
+		switch c.op {
+		case "=":
+			return strings.Contains(actualLower, wantLower)
+		case "!=":
+			return !strings.Contains(actualLower, wantLower)
+		}
+		return false
+	}
+
+	// All other string fields: case-insensitive exact match.
+	// Parser blocks >, >=, <, <= for string fields — only = and != reach here.
 	switch c.op {
 	case "=":
 		return actualLower == wantLower
 	case "!=":
 		return actualLower != wantLower
-	case ">", ">=", "<", "<=":
-		// String ordering operators — supported but unusual; documented as lexicographic.
-		switch c.op {
-		case ">":
-			return actual > c.sval
-		case ">=":
-			return actual >= c.sval
-		case "<":
-			return actual < c.sval
-		case "<=":
-			return actual <= c.sval
-		}
 	}
 	return false
 }
@@ -430,7 +432,10 @@ func (s *Server) handleQueryGraph(
 			"No graph loaded — run 'synapses index' first."), nil
 	}
 
-	raw := stringArg(req, "query")
+	raw, err := stringArgLimited(req, "query", 10*1024) // 10 KB cap — tokenizer is O(len)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 	if raw == "" {
 		return mcp.NewToolResultError(
 			"query is required. Example: NODES WHERE package=\"auth\" AND fanin > 5"), nil
@@ -446,13 +451,25 @@ func (s *Server) handleQueryGraph(
 				"  NODES WHERE fanout >= 10 AND fanin = 0", err)), nil
 	}
 
-	// Snapshot all nodes — AllNodes acquires a read lock and returns a copy.
-	// This is safe to call without holding any lock ourselves.
-	allNodes := s.graph.AllNodes()
-
-	// Start the 500 ms deadline timer.
+	// Start the 500 ms deadline timer BEFORE the graph snapshots so that
+	// AllNodes + AllEdges are counted against the budget.
 	deadline := time.NewTimer(queryGraphTimeout)
 	defer deadline.Stop()
+
+	// Snapshot all nodes under one read lock.
+	allNodes := s.graph.AllNodes()
+
+	// Build degree maps from a single AllEdges snapshot (one read lock).
+	// This avoids 2N per-node lock acquisitions (InEdges/OutEdges each lock),
+	// which under concurrent reindexing can block the timeout from firing.
+	// Pattern mirrors the stats command in main.go.
+	allEdges := s.graph.AllEdges()
+	fanInMap := make(map[graph.NodeID]int, len(allNodes))
+	fanOutMap := make(map[graph.NodeID]int, len(allNodes))
+	for _, e := range allEdges {
+		fanInMap[e.To]++
+		fanOutMap[e.From]++
+	}
 
 	results := make([]graphNodeResult, 0) // never nil — serializes as [] not null
 	truncated := false
@@ -460,6 +477,8 @@ func (s *Server) handleQueryGraph(
 
 	for _, n := range allNodes {
 		// Check the deadline in a non-blocking select every iteration.
+		// Since degree lookups are now O(1) map ops (no locks), this check
+		// fires reliably within one iteration of the 500 ms budget.
 		select {
 		case <-deadline.C:
 			timedOut = true
@@ -470,10 +489,8 @@ func (s *Server) handleQueryGraph(
 			break
 		}
 
-		// Compute fanin and fanout for this node.
-		// InEdges/OutEdges each acquire a read lock briefly; safe to call in a loop.
-		fanin := len(s.graph.InEdges(n.ID))
-		fanout := len(s.graph.OutEdges(n.ID))
+		fanin := fanInMap[n.ID]
+		fanout := fanOutMap[n.ID]
 
 		if !matchAllConditions(n, fanin, fanout, q.conditions) {
 			continue

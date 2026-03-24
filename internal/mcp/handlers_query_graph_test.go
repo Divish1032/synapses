@@ -595,6 +595,81 @@ func TestHandleQueryGraph_TruncatedAndNotTruncated(t *testing.T) {
 	}
 }
 
+// ── File substring matching tests ────────────────────────────────────────────
+
+func TestHandleQueryGraph_FileSubstringMatch(t *testing.T) {
+	// file= uses substring matching — "auth.go" should match the stored path "auth.go"
+	g := buildTestGraphForQuery()
+	out := callQueryGraphTool(t, g, `NODES WHERE file="auth.go"`)
+	count := int(out["count"].(float64))
+	// 3 auth nodes are stored with File="auth.go"
+	if count != 3 {
+		t.Errorf("expected 3 nodes matching file substring 'auth.go', got %d", count)
+	}
+}
+
+func TestHandleQueryGraph_FileSubstringNoMatch(t *testing.T) {
+	// file= substring match: "nonexistent.go" should return 0 results
+	g := buildTestGraphForQuery()
+	out := callQueryGraphTool(t, g, `NODES WHERE file="nonexistent.go"`)
+	count := int(out["count"].(float64))
+	if count != 0 {
+		t.Errorf("expected 0 nodes matching file 'nonexistent.go', got %d", count)
+	}
+}
+
+func TestHandleQueryGraph_FileNotEquals(t *testing.T) {
+	// file!= uses inverted substring matching
+	g := buildTestGraphForQuery()
+	out := callQueryGraphTool(t, g, `NODES WHERE file!="auth.go"`)
+	count := int(out["count"].(float64))
+	// 5 total nodes, 3 are auth.go — expect 2 (payment.go and infra.go)
+	if count != 2 {
+		t.Errorf("expected 2 nodes with file not containing 'auth.go', got %d", count)
+	}
+}
+
+// ── Query length cap tests ────────────────────────────────────────────────────
+
+func TestHandleQueryGraph_QueryTooLong(t *testing.T) {
+	g := buildTestGraphForQuery()
+	srv := New(g, nil, nil)
+	req := mcp.CallToolRequest{}
+	// 11 KB query — exceeds the 10 KB cap
+	req.Params.Arguments = map[string]interface{}{"query": strings.Repeat("x", 11*1024)}
+	result, err := srv.handleQueryGraph(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error result for query exceeding length cap")
+	}
+}
+
+// ── Degree accuracy with pre-built map ───────────────────────────────────────
+
+func TestHandleQueryGraph_FanInAccuracy(t *testing.T) {
+	// Verifies that the degree map (built from AllEdges) produces same fanin
+	// values as the per-node InEdges/OutEdges approach used to produce.
+	// Login has fanin=1 (from ProcessPayment), hashPassword has fanin=1 (from Login).
+	g := buildTestGraphForQuery()
+	out := callQueryGraphTool(t, g, `NODES WHERE fanin = 1`)
+	nodes := out["nodes"].([]interface{})
+	names := make(map[string]bool)
+	for _, n := range nodes {
+		names[n.(map[string]interface{})["name"].(string)] = true
+	}
+	if !names["Login"] {
+		t.Error("expected Login (fanin=1) in results")
+	}
+	if !names["hashPassword"] {
+		t.Error("expected hashPassword (fanin=1) in results")
+	}
+	if len(nodes) != 2 {
+		t.Errorf("expected exactly 2 nodes with fanin=1, got %d", len(nodes))
+	}
+}
+
 // ── Benchmark ────────────────────────────────────────────────────────────────
 
 func BenchmarkParseGraphQuery(b *testing.B) {
