@@ -742,10 +742,19 @@ func saveUpdateState(state *UpdateState) {
 	if err != nil {
 		return
 	}
-	// Atomic write: temp file + rename prevents corrupt JSON on crash.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// Atomic write: unpredictable temp file + rename prevents corrupt JSON on crash.
+	f, err := os.CreateTemp(filepath.Dir(path), ".update_state-*.json")
+	if err != nil {
 		return
 	}
-	_ = os.Rename(tmp, path)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return
+	}
+	_ = os.Rename(f.Name(), path)
 }
