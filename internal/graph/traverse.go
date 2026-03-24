@@ -530,9 +530,8 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 
 		const maxVisited = 10_000
 
-		for len(queue) > 0 {
-			curr := queue[0]
-			queue = queue[1:]
+		for head1 := 0; head1 < len(queue); head1++ {
+			curr := queue[head1]
 
 			if len(visited) >= maxVisited {
 				bfsTruncated = true
@@ -986,13 +985,12 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 	fileSet := map[string]struct{}{}
 	bfsTruncated := false
 
-	for len(queue) > 0 {
+	for head2 := 0; head2 < len(queue); head2++ {
 		if len(visited) >= maxVisited {
 			bfsTruncated = true
 			break
 		}
-		cur := queue[0]
-		queue = queue[1:]
+		cur := queue[head2]
 
 		if cur.depth >= maxDepth {
 			continue
@@ -1328,12 +1326,11 @@ func (g *Graph) FindTestsFor(nodeID NodeID) []string {
 	queue := []entry{{nodeID, 0}}
 	testFiles := map[string]struct{}{}
 
-	for len(queue) > 0 {
+	for head3 := 0; head3 < len(queue); head3++ {
 		if len(visited) >= maxVisited {
 			break
 		}
-		cur := queue[0]
-		queue = queue[1:]
+		cur := queue[head3]
 		if cur.depth >= 5 { // cap at 5 hops to avoid runaway traversal
 			continue
 		}
