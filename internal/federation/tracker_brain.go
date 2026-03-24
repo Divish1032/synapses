@@ -107,18 +107,18 @@ func (bd *BrainDetector) DetectDeps(ctx context.Context, fileContent string, max
 		maxCodeLen = 2000
 	}
 	code := secrets.FilterLines(fileContent)
+	// Escape any closing delimiter in the code to prevent breakout.
+	// Sanitize before truncation so entity expansion is included in the budget.
+	code = strings.ReplaceAll(code, "</source_code>", "&lt;/source_code&gt;")
+	code = sanitizeCodeInput(code, maxCodeLen)
+	// Truncate once after sanitization at rune boundary to avoid invalid UTF-8.
 	if len(code) > maxCodeLen {
-		// Truncate at rune boundary to avoid producing invalid UTF-8.
 		runes := []rune(code)
 		if len(runes) > maxCodeLen {
 			runes = runes[:maxCodeLen]
 		}
 		code = string(runes)
 	}
-
-	// Escape any closing delimiter in the code to prevent breakout.
-	code = strings.ReplaceAll(code, "</source_code>", "&lt;/source_code&gt;")
-	code = sanitizeCodeInput(code, maxCodeLen)
 	prompt := fmt.Sprintf(crossProjectPromptSuffix, strings.Join(bd.aliases, ", ")) + code + "\n</source_code>"
 
 	response, err := bd.Generate(ctx, prompt)
