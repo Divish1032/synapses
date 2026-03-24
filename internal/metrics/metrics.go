@@ -29,6 +29,10 @@ import (
 // Callers that iterate over many files should cache results by directory
 // to avoid repeated subprocess spawns.
 func gitRootForDir(dir string) string {
+	// Guard against dir starting with '-' being misinterpreted as a git flag.
+	if strings.HasPrefix(dir, "-") {
+		return ""
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel").Output()
