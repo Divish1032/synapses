@@ -412,7 +412,12 @@ func (s *Store) DeleteMemoryEmbeddings(memoryIDs []string) error {
 // memoryVectorSearchBruteForce is the O(N) fallback path for memory vector search.
 // Used when the HNSW index is not available (first startup, all embeddings stale).
 // Retains the original two-pass approach with a safety cap of 50,000 rows.
+// Concurrency is bounded by s.bfSemaphore to prevent GC pressure under load.
 func (s *Store) memoryVectorSearchBruteForce(normQuery []float32, limit int) ([]MemorySearchResult, error) {
+	if s.bfSemaphore != nil {
+		s.bfSemaphore <- struct{}{}
+		defer func() { <-s.bfSemaphore }()
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.knowledgeDB.Query(`
 		SELECT e.memory_id, e.embedding, e.stale
@@ -514,7 +519,16 @@ func (s *Store) memoryVectorSearchBruteForceWithThreshold(normQuery []float32, l
 }
 
 // memoryVectorSearchBruteForceWithThresholdCtx is the context-aware variant of memoryVectorSearchBruteForceWithThreshold.
+// Concurrency is bounded by s.bfSemaphore to prevent GC pressure under load.
 func (s *Store) memoryVectorSearchBruteForceWithThresholdCtx(ctx context.Context, normQuery []float32, limit int, threshold float32) ([]MemorySearchResult, error) {
+	if s.bfSemaphore != nil {
+		select {
+		case s.bfSemaphore <- struct{}{}:
+			defer func() { <-s.bfSemaphore }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.knowledgeDB.QueryContext(ctx, `
 		SELECT e.memory_id, e.embedding, e.stale

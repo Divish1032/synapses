@@ -150,7 +150,8 @@ func (s *Store) RebuildMemoryHNSW() {
 	s.hnswPendingAdds = nil
 	pendingDeletes := s.hnswPendingDeletes
 	s.hnswPendingDeletes = nil
-	if len(pending) > 10000 {
+	cappedPending := len(pending) > 10000
+	if cappedPending {
 		logutil.Warn("synapses: HNSW rebuild: %d pending entries, capping replay to 10000\n", len(pending))
 		pending = pending[len(pending)-10000:] // keep most recent
 	}
@@ -183,6 +184,16 @@ func (s *Store) RebuildMemoryHNSW() {
 
 	if count > 0 {
 		logutil.Info("synapses: HNSW index built (%d memory embeddings, %d replayed, M=%d, efSearch=%d)\n", count, len(pending), hnswM, hnswEfSearch)
+	}
+
+	// If the pending-add queue was capped during this rebuild, some vectors
+	// (the oldest ones beyond 10K) are still in SQLite but not in the index.
+	// Schedule one immediate follow-up rebuild to pick them up.  This is
+	// safe because hnswRebuilding is now false, so the next call proceeds
+	// normally and won't loop more than once per original burst.
+	if cappedPending {
+		logutil.Info("synapses: HNSW rebuild: scheduling follow-up rebuild to recover %d dropped entries\n", len(pending))
+		go s.RebuildMemoryHNSW()
 	}
 }
 
