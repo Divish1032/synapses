@@ -94,6 +94,11 @@ type directionalContext struct {
 	DisambigHint    string                   `json:"disambig_hint,omitempty"`    // human-readable re-call instruction
 	// RX2 Phase 4: cross-project BFS context from sibling stores (opt-in via projects= parameter).
 	FederatedContexts []*federation.FederatedContext `json:"federated_contexts,omitempty"`
+	// Sprint 15 #2: set when the root entity's quality score is significantly
+	// negative, meaning prior context deliveries for this entity were frequently
+	// followed by corrections or session abandonment. Agents should treat this
+	// entity's context as potentially insufficient and consider a deeper fetch.
+	LowQualityHint string `json:"low_quality_hint,omitempty"`
 }
 
 // computeEntityHash returns a short SHA1 hex digest that identifies the
@@ -314,6 +319,34 @@ func (s *Server) handleGetContext(
 			cfg.HybridLambda = *s.config.ContextCarve.HybridLambda
 		} else {
 			cfg.HybridLambda = 0.3 // default: 70% structural + 30% semantic
+		}
+	}
+
+	// Sprint 15 #2: wire quality score lookup so BFS/PPR re-ranks nodes based
+	// on outcome signal history. Quality scores are fetched from the pulse store
+	// in a single batch call; nodes with no history pass through unchanged.
+	if pc := s.getPulseClient(); pc != nil {
+		projID := s.projectID
+		cfg.QualityScoreLookup = func(ids []graph.NodeID) map[graph.NodeID]float64 {
+			// Build the lookup from entity_quality rows for the active project.
+			// GetEntityQualityScores returns all rows with at least 1 signal;
+			// we convert to a map keyed by node ID for O(1) lookup in traverse.go.
+			rows := pc.GetEntityQualityScores(projID, 1)
+			if len(rows) == 0 {
+				return nil
+			}
+			out := make(map[graph.NodeID]float64, len(rows))
+			for _, eq := range rows {
+				out[graph.NodeID(eq.Entity)] = eq.QualityScore
+			}
+			// Filter to only the requested IDs (traverse.go passes the surviving set).
+			filtered := make(map[graph.NodeID]float64, len(ids))
+			for _, id := range ids {
+				if qs, ok := out[id]; ok {
+					filtered[id] = qs
+				}
+			}
+			return filtered
 		}
 	}
 
@@ -570,6 +603,23 @@ func (s *Server) handleGetContext(
 	}
 
 	dc := toDirectionalContext(sg)
+
+	// Sprint 15 #2: surface a low-quality hint when the root entity's quality
+	// score is significantly negative (≤ -2.0), meaning context deliveries for
+	// this entity were frequently followed by corrections or session abandonment.
+	// Threshold -2.0 requires multiple negative signals before firing — a single
+	// correction (weight -0.2 to -0.5) or one abandoned session (-0.8) won't
+	// trigger it; the agent needs to see a pattern before the hint appears.
+	if pc := s.getPulseClient(); pc != nil && sg.Root != "" {
+		const lowQualityThreshold = -2.0
+		if qs, ok := pc.GetEntityQualityScore(string(sg.Root), s.projectID); ok && qs <= lowQualityThreshold {
+			dc.LowQualityHint = fmt.Sprintf(
+				"Context for this entity has a low quality score (%.1f). "+
+					"Prior deliveries were frequently followed by corrections or session abandonment. "+
+					"Consider requesting a deeper fetch (depth=4) or a different entry point.",
+				qs)
+		}
+	}
 
 	// R1: strip synthetic route/inferred nodes when include_inferred=false.
 	if !includeInferred {
@@ -1509,11 +1559,17 @@ func (s *Server) trackContextCall(agentID, entity string) (count int, sinceLast 
 	}
 	// Time-gated GC: only scan the map if 5+ minutes have passed since the last
 	// sweep. This bounds GC cost to O(n) once per window rather than per call.
+	// Prune on lastAt (time since last delivery), not firstAt (session age).
+	// Rationale: the 30-min neutrality threshold is about inactivity since the
+	// last fetch — "re-fetch after 30+ min = new subtask". Using firstAt would
+	// incorrectly prune active entries in long sessions, silently dropping
+	// correction and escalation signals for agents working on an entity over
+	// multiple half-hour windows.
 	now := time.Now()
 	if now.Sub(s.ctxCallLastGC) > 5*time.Minute {
 		s.ctxCallLastGC = now
 		for k, e := range s.ctxCalls {
-			if now.Sub(e.firstAt) > 30*time.Minute {
+			if now.Sub(e.lastAt) > 30*time.Minute {
 				delete(s.ctxCalls, k)
 			}
 		}
