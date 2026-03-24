@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -535,7 +536,15 @@ func (s *Server) quadRecallSearch(
 		rankedIDs, attribution = store.ConvexMerge(channelScores, limit, cw)
 	} else {
 		// Default: Reciprocal Rank Fusion (rank-only).
-		rankedIDs, attribution = store.RRFMergeWeighted(channels, limit, 60, store.DefaultRRFWeights)
+		// Sprint 15 #4: filter metadata keys (e.g. "_vector_search_ms") so they
+		// don't pollute the attribution map with fake memory IDs.
+		rffChannels := make(map[string][]string, len(channels))
+		for k, v := range channels {
+			if !strings.HasPrefix(k, "_") {
+				rffChannels[k] = v
+			}
+		}
+		rankedIDs, attribution = store.RRFMergeWeighted(rffChannels, limit, 60, s.recallChannelWeights())
 	}
 
 	if len(rankedIDs) == 0 {
@@ -999,4 +1008,43 @@ func clampUnit(v float64) float64 {
 // Channel errors never fail the entire recall — other channels continue.
 func logRecallChannelError(channel string, err error) {
 	logutil.Warn("synapses: recall %s channel error: %v\n", channel, err)
+}
+
+// recallChannelWeights returns per-project RRF channel weight multipliers.
+//
+// Sprint 15 #4: when the pulse sidecar has accumulated channel attribution
+// data for this project (≥2 channels with learned win-rates), the win-rates
+// are used directly as weight multipliers so that channels that historically
+// produce the top-ranked result score proportionally higher.
+//
+// Win-rates are probabilities in [0, 1] that sum to ~1.0. They replace the
+// DefaultRRFWeights only after enough signal has been collected. Any channel
+// absent from the learned data (e.g. semantic when embedder is off) falls back
+// to its default weight so new/unavailable channels are not silenced.
+//
+// Falls back to DefaultRRFWeights when:
+//   - pulse client is nil
+//   - fewer than 2 channels have learned data (cold start or single-channel)
+func (s *Server) recallChannelWeights() map[string]float64 {
+	pc := s.getPulseClient()
+	if pc == nil {
+		return store.DefaultRRFWeights
+	}
+	learned := pc.GetRecallChannelWeights(s.projectID)
+	if len(learned) < 2 {
+		// Not enough per-channel data yet — keep default balance.
+		return store.DefaultRRFWeights
+	}
+	// Build blended weights: use learned win-rate for known channels, default
+	// for channels absent from the learned set. Clamp at 0.05 so no channel
+	// is ever fully silenced by a transient data gap.
+	weights := make(map[string]float64, len(store.DefaultRRFWeights))
+	for ch, def := range store.DefaultRRFWeights {
+		if wr, ok := learned[ch]; ok && wr > 0 {
+			weights[ch] = math.Max(wr, 0.05)
+		} else {
+			weights[ch] = def
+		}
+	}
+	return weights
 }
