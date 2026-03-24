@@ -204,6 +204,7 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 	// Seeding from teleport targets (not just root) ensures struct methods and
 	// their downstream subgraphs are included in the candidate set.
 	const pprBFSHorizon = 6
+	const maxPPRCandidates = 10_000
 	candidate := make(map[NodeID]struct{}, 128)
 	frontier := make([]NodeID, 0, len(teleport))
 	for id := range teleport {
@@ -213,6 +214,9 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 	for hop := 0; hop < pprBFSHorizon && len(frontier) > 0; hop++ {
 		var next []NodeID
 		for _, id := range frontier {
+			if len(candidate) >= maxPPRCandidates {
+				break
+			}
 			for _, e := range g.outInEdges(id, idx) {
 				nb := e.To
 				if e.To == id {
