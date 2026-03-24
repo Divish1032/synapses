@@ -1467,6 +1467,72 @@ func (s *Server) handleSessionInit(
 	// only FTS results in air-gapped or unconfigured environments.
 	resp["embeddings"] = embeddingStatus(s.memoryEmbedder)
 
+	// ── Knowledge graph stats (Sprint 16 #6) ─────────────────────────────
+	// Expose entity counts by domain, cross-domain edge breakdown, and
+	// freshness so agents can self-calibrate before issuing cross-domain queries.
+	// Excluded from quick mode — agents in quick mode want minimal tokens.
+	// Always included in full and resume modes.
+	if s.graph != nil && !quickMode {
+		// NodeCountsByDomain is O(N) under one read lock — no pointer copy,
+		// no sort. This avoids the O(N log N) cost of AllNodes() which also
+		// runs inside ProjectIdentity() earlier in this function.
+		domainCounts := s.graph.NodeCountsByDomain()
+
+		// Build sorted active-domains list for stable, deterministic output.
+		sortedDomains := make([]string, 0, len(domainCounts))
+		entitiesByDomain := make(map[string]int, len(domainCounts))
+		for d, cnt := range domainCounts {
+			sortedDomains = append(sortedDomains, string(d))
+			entitiesByDomain[string(d)] = cnt
+		}
+		sort.Strings(sortedDomains)
+
+		// Count cross-domain edges via a single aggregating SQL query.
+		// All rows in manual_edges are cross-domain by design (only the
+		// name-matcher and link_entities write to this table, both for
+		// cross-domain connections). No IsCrossDomainEdge filtering needed —
+		// that would silently exclude user-defined custom relation strings.
+		var autoEdges, confirmedEdges, manualEdges int
+		if s.store != nil {
+			// Errors are non-fatal: stats degrade to zero rather than
+			// breaking session_init for all agents on a DB hiccup.
+			autoEdges, confirmedEdges, manualEdges, _ = s.store.CrossDomainEdgeStats()
+		}
+		total := autoEdges + confirmedEdges + manualEdges
+
+		// Freshness: live-indexed means the watcher re-indexes on every file
+		// change event. "N files changed in last 15 min" tells agents which
+		// areas of the graph were recently updated — useful for cache invalidation
+		// decisions. We do NOT claim the graph is fully consistent because during
+		// a burst of changes the indexer may lag by a few seconds.
+		freshness := "live"
+		if len(recentChanges) > 0 {
+			freshness = fmt.Sprintf("live (%d files re-indexed in last 15 min)", len(recentChanges))
+		}
+
+		kgSection := map[string]interface{}{
+			"entities_by_domain": entitiesByDomain,
+			"active_domains":     sortedDomains,
+			"cross_domain_edges": map[string]interface{}{
+				"auto":      autoEdges,
+				"confirmed": confirmedEdges,
+				"manual":    manualEdges,
+				"total":     total,
+			},
+			"freshness": freshness,
+		}
+		// Guide agents toward confirm_edge when unreviewed auto edges exist.
+		if autoEdges > 0 {
+			kgSection["hint"] = fmt.Sprintf(
+				"%d auto-detected cross-domain edges await review. "+
+					"Use confirm_edge(a, b, relation, confirmed=true/false) to approve or reject them. "+
+					"Unconfirmed edges are included in get_context and get_impact at reduced weight.",
+				autoEdges,
+			)
+		}
+		resp["knowledge_graph"] = kgSection
+	}
+
 	// Cross-project status: show ACL-allowed projects only.
 	// Do not expose names of projects this project is not allowed to read from.
 	if s.projectRegistry != nil {

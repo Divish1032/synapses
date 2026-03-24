@@ -783,6 +783,24 @@ func (g *Graph) NodeCount() int {
 	return len(g.nodes)
 }
 
+// NodeCountsByDomain returns a map of domain → node count for all nodes in
+// the graph. Empty domain (code entities parsed before Sprint 16) is counted
+// under DomainCode. This is O(N) under one read lock and does not copy node
+// pointers — use it in hot paths like session_init instead of AllNodes().
+func (g *Graph) NodeCountsByDomain() map[DomainType]int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	out := make(map[DomainType]int, 4)
+	for _, n := range g.nodes {
+		d := n.Domain
+		if d == "" {
+			d = DomainCode
+		}
+		out[d]++
+	}
+	return out
+}
+
 // Index returns the current columnar GraphIndex, or nil if it has not been
 // built yet. Callers should check Index().Ready() before using it.
 func (g *Graph) Index() *GraphIndex {

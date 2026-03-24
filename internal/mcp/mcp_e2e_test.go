@@ -15,6 +15,7 @@ import (
 func TestE2E_SessionInitReturnsValidJSON(t *testing.T) {
 	g := graph.New("test-repo")
 	srv := New(g, &config.Config{}, nil)
+	t.Cleanup(func() { srv.Close() })
 
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]interface{}{}
@@ -60,6 +61,7 @@ func TestE2E_SessionInitThenGetContext(t *testing.T) {
 	g.AddEdge(&graph.Edge{From: authSvc.ID, To: validateToken.ID, Type: graph.EdgeCalls})
 
 	srv := New(g, &config.Config{}, nil)
+	t.Cleanup(func() { srv.Close() })
 
 	// Call session_init first (as protocol requires).
 	initReq := mcp.CallToolRequest{}
@@ -113,6 +115,7 @@ func TestE2E_GetContextWithEdges(t *testing.T) {
 	g.AddEdge(&graph.Edge{From: middle.ID, To: callee.ID, Type: graph.EdgeCalls})
 
 	srv := New(g, &config.Config{}, nil)
+	t.Cleanup(func() { srv.Close() })
 
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]interface{}{"entity": "ProcessData", "format": "json"}

@@ -313,6 +313,22 @@ func GetEdgeTypes() []EdgeTypeDescriptor {
 	return EdgeTypeCatalog
 }
 
+// IsCrossDomainEdge returns true for edge types that connect entities across
+// knowledge domain boundaries (code ↔ infra ↔ api ↔ docs ↔ knowledge ↔ custom).
+// Used by collectCrossDomainImpact for one-hop impact detection.
+//
+// Note: BFS/PPR cross-domain decay is applied based on node.Domain comparison
+// (currNode.Domain != neighNode.Domain), not on edge type. This function is not
+// called in the BFS/PPR hot path — it classifies edge types for impact analysis.
+func IsCrossDomainEdge(et EdgeType) bool {
+	switch et {
+	case EdgeDeploys, EdgeConsumes, EdgeConfiguredBy, EdgeDocuments, EdgeMentions, EdgeManual:
+		return true
+	default:
+		return false
+	}
+}
+
 // NodeID is a composite identifier with the format: "repoID::file::name".
 // Using a named type (not a plain string) enforces intent at compile time.
 type NodeID string
@@ -483,6 +499,15 @@ type CarveConfig struct {
 	// Called once after BFS/PPR scoring with all surviving node IDs.
 	// Nil disables quality-based re-ranking (backward-compatible default).
 	QualityScoreLookup func(ids []NodeID) map[NodeID]float64
+	// CrossDomainDecay is a multiplier applied to relevance when BFS/PPR crosses
+	// a domain boundary (e.g., code→infra, code→api). Range (0, 1].
+	// A value of 0.5 (default) means cross-domain neighbors score at half the
+	// relevance of same-domain neighbors at the same structural distance.
+	// This keeps same-domain code nodes higher in the ranking while still
+	// surfacing cross-domain context at meaningfully lower relevance.
+	// 0 disables the domain-boundary penalty (treats all edges equally).
+	// Values ≥ 1 are clamped to 1.0 (no penalty — backward compatible).
+	CrossDomainDecay float64
 	// LearnedEdgeWeights contains per-specific-edge weight multipliers derived
 	// from historical task outcomes (Sprint 15 #3). When traversing edge
 	// (From→To, Type), the base edgeWeight is multiplied by this value.
@@ -523,6 +548,13 @@ var intentModifyWeights = map[EdgeType]float64{
 	EdgeExplains:     0.5,
 	EdgeDocumentedBy: 0.4,
 	EdgeLinksTo:      0.2,
+	// Sprint 16: cross-domain edges — deploy/consume targets are critical for modify.
+	EdgeDeploys:      0.75,
+	EdgeConsumes:     0.75,
+	EdgeConfiguredBy: 0.65,
+	EdgeDocuments:    0.4,
+	EdgeMentions:     0.55,
+	EdgeManual:       0.5,
 }
 
 // intentDebugWeights boosts DATA_FLOWS and DEPENDS_ON for the "debug" intent.
@@ -541,6 +573,13 @@ var intentDebugWeights = map[EdgeType]float64{
 	EdgeExplains:     0.5,
 	EdgeDocumentedBy: 0.4,
 	EdgeLinksTo:      0.2,
+	// Sprint 16: cross-domain edges — config is extra important for debugging.
+	EdgeDeploys:      0.65,
+	EdgeConsumes:     0.75,
+	EdgeConfiguredBy: 0.75,
+	EdgeDocuments:    0.4,
+	EdgeMentions:     0.55,
+	EdgeManual:       0.5,
 }
 
 // intentReviewWeights boosts IMPLEMENTS and EMBEDS for the "review" intent.
@@ -559,6 +598,13 @@ var intentReviewWeights = map[EdgeType]float64{
 	EdgeExplains:     0.7,
 	EdgeDocumentedBy: 0.6,
 	EdgeLinksTo:      0.3,
+	// Sprint 16: cross-domain edges — all relevant for review.
+	EdgeDeploys:      0.75,
+	EdgeConsumes:     0.75,
+	EdgeConfiguredBy: 0.65,
+	EdgeDocuments:    0.65,
+	EdgeMentions:     0.55,
+	EdgeManual:       0.5,
 }
 
 // intentAddWeights boosts IMPORTS and IMPLEMENTS for the "add" intent.
@@ -577,6 +623,13 @@ var intentAddWeights = map[EdgeType]float64{
 	EdgeExplains:     0.7,
 	EdgeDocumentedBy: 0.6,
 	EdgeLinksTo:      0.3,
+	// Sprint 16: cross-domain edges — API/infra context useful when adding new code.
+	EdgeDeploys:      0.65,
+	EdgeConsumes:     0.75,
+	EdgeConfiguredBy: 0.65,
+	EdgeDocuments:    0.55,
+	EdgeMentions:     0.55,
+	EdgeManual:       0.5,
 }
 
 // intentPlanWeights boosts IMPLEMENTS and DEPENDS_ON for the "plan" intent.
@@ -595,6 +648,13 @@ var intentPlanWeights = map[EdgeType]float64{
 	EdgeExplains:     0.8,
 	EdgeDocumentedBy: 0.7,
 	EdgeLinksTo:      0.3,
+	// Sprint 16: cross-domain edges — plan intent needs full cross-domain picture.
+	EdgeDeploys:      0.75,
+	EdgeConsumes:     0.75,
+	EdgeConfiguredBy: 0.65,
+	EdgeDocuments:    0.65,
+	EdgeMentions:     0.55,
+	EdgeManual:       0.5,
 }
 
 // IntentCarveWeights returns the pre-allocated edge weight map for the given
@@ -668,6 +728,11 @@ func DefaultCarveConfig() CarveConfig {
 		// Validated by spike tests (diamond 4.69×, wide-fan 5.68× over BFS).
 		// Set use_ppr=false in synapses.json to revert to BFS for debugging.
 		UsePPR: true,
+		// Sprint 16 #4: cross-domain boundary penalty. Default 0.5 means
+		// infra/api/docs nodes score at half relevance relative to same-domain
+		// neighbors at equal structural distance. Keeps code context primary
+		// while still surfacing cross-domain context in the cross_domain bucket.
+		CrossDomainDecay: 0.5,
 	}
 }
 
@@ -774,6 +839,62 @@ type ImpactTier struct {
 	TotalNodes int         `json:"total_nodes,omitempty"` // actual count before cap
 }
 
+// CrossDomainRef is a single entity reached via a cross-domain edge during
+// impact analysis. Category groups the finding by relationship type so
+// agents can answer "what Terraform resources does this deploy to?" etc.
+type CrossDomainRef struct {
+	EntityRef
+	// EdgeType is the cross-domain edge type that led to this entity
+	// (e.g. "DEPLOYS", "CONSUMES", "CONFIGURED_BY", "DOCUMENTS", "MENTIONS", "MANUAL").
+	EdgeType EdgeType `json:"edge_type"`
+	// Category is a human-readable grouping derived from EdgeType:
+	// "infra" (DEPLOYS), "api" (CONSUMES), "config" (CONFIGURED_BY),
+	// "docs" (DOCUMENTS), "related" (MENTIONS/MANUAL).
+	Category string `json:"category"`
+}
+
+// CrossDomainContext groups cross-domain CarvedNodes from a BFS/PPR subgraph
+// by their relationship to the root entity. Used by directionalContext in
+// get_context responses. Each sub-slice preserves BFS Relevance scores for
+// ranking within the sub-bucket.
+//
+// Nodes connected via a direct edge from/to root are categorized by edge type.
+// Multi-hop cross-domain nodes with no direct root edge go into Related.
+type CrossDomainContext struct {
+	Deploys      []CarvedNode `json:"deploys,omitempty"`
+	Consumes     []CarvedNode `json:"consumes,omitempty"`
+	ConfiguredBy []CarvedNode `json:"configured_by,omitempty"`
+	DocumentedIn []CarvedNode `json:"documented_in,omitempty"`
+	Mentions     []CarvedNode `json:"mentions,omitempty"`
+	Manual       []CarvedNode `json:"manual,omitempty"`
+	Related      []CarvedNode `json:"related,omitempty"` // multi-hop or no direct edge from root
+}
+
+// IsEmpty returns true when all sub-buckets are empty.
+func (c *CrossDomainContext) IsEmpty() bool {
+	if c == nil {
+		return true
+	}
+	return len(c.Deploys) == 0 && len(c.Consumes) == 0 && len(c.ConfiguredBy) == 0 &&
+		len(c.DocumentedIn) == 0 && len(c.Mentions) == 0 && len(c.Manual) == 0 && len(c.Related) == 0
+}
+
+// CrossDomainCategory returns the human-readable category for a cross-domain edge type.
+func CrossDomainCategory(et EdgeType) string {
+	switch et {
+	case EdgeDeploys:
+		return "infra"
+	case EdgeConsumes:
+		return "api"
+	case EdgeConfiguredBy:
+		return "config"
+	case EdgeDocuments:
+		return "docs"
+	default:
+		return "related"
+	}
+}
+
 // ImpactResult is returned by ImpactAnalysis.
 type ImpactResult struct {
 	Root          EntityRef    `json:"root"`
@@ -786,4 +907,18 @@ type ImpactResult struct {
 	// TestCoverage lists test files that exercise the root entity (R2).
 	// Populated by FindTestsFor via reverse-BFS over CALLS edges filtered to test files.
 	TestCoverage []string `json:"test_coverage,omitempty"`
+	// CrossDomainImpact lists entities in other knowledge domains that are
+	// directly connected to the root via cross-domain edges (DEPLOYS, CONSUMES,
+	// CONFIGURED_BY, DOCUMENTS, MENTIONS, MANUAL). Only edges with confidence ≥ 0.6
+	// or confirmed are included — this is enforced at edge-injection time so all
+	// edges present in the in-memory graph already satisfy the threshold.
+	// Sprint 16 #5: the killer feature — "what infra/API/docs does this touch?"
+	CrossDomainImpact []CrossDomainRef `json:"cross_domain_impact,omitempty"`
+	// CrossDomainAffected is the count of cross-domain entities in CrossDomainImpact.
+	// Kept separate from TotalAffected (which counts code-caller tier nodes) so
+	// callers can distinguish code blast-radius from cross-domain blast-radius.
+	CrossDomainAffected int `json:"cross_domain_affected,omitempty"`
+	// CrossDomainTruncated is true when CrossDomainImpact was capped at
+	// maxCrossDomainImpactNodes (100). The full count is not available.
+	CrossDomainTruncated bool `json:"cross_domain_truncated,omitempty"`
 }

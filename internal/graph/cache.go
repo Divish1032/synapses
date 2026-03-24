@@ -72,10 +72,10 @@ func newSubgraphCache() *subgraphCache {
 //     invalidation. Zero when the caller bypasses the store (test path); the
 //     len discriminator then prevents any collision.
 func cacheKeyFor(rootID NodeID, cfg CarveConfig, fingerprint string) string {
-	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f|emb:%v|qs:%v|lew:%d|lewv:%d",
+	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f|%.4f|emb:%v|qs:%v|lew:%d|lewv:%d",
 		rootID, cfg.MaxDepth, cfg.TokenBudget, cfg.MinRelevance, cfg.DecayFactor,
 		cfg.DirectionBoost, cfg.IntentID, fingerprint, cfg.UsePPR, cfg.Alpha,
-		cfg.HybridLambda,
+		cfg.HybridLambda, cfg.CrossDomainDecay,
 		cfg.EmbeddingLookup != nil,
 		cfg.QualityScoreLookup != nil,
 		len(cfg.LearnedEdgeWeights),

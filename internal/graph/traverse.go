@@ -270,6 +270,28 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 				}
 			}
 
+			// Sprint 16 #4: apply cross-domain decay in PPR adjacency construction.
+			// Reduces the transition weight for cross-domain edges so PPR assigns lower
+			// rank to nodes in other domains relative to same-domain nodes at equal
+			// structural distance. Mirrors the BFS cross-domain decay behaviour.
+			if cfg.CrossDomainDecay > 0 && cfg.CrossDomainDecay < 1 {
+				currNode := g.nodes[id]
+				neighNode := g.nodes[nb]
+				if currNode != nil && neighNode != nil {
+					currDomain := currNode.Domain
+					if currDomain == "" {
+						currDomain = DomainCode
+					}
+					neighDomain := neighNode.Domain
+					if neighDomain == "" {
+						neighDomain = DomainCode
+					}
+					if currDomain != neighDomain {
+						w *= cfg.CrossDomainDecay
+					}
+				}
+			}
+
 			adj[id] = append(adj[id], nbEntry{nb, w})
 			outWeightSum[id] += w
 		}
@@ -546,6 +568,29 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 				neighbor := e.To
 				if e.To == curr.id {
 					neighbor = e.From
+				}
+
+				// Sprint 16 #4: apply cross-domain decay when BFS crosses a domain boundary.
+				// When a node in one domain (e.g. code) links to a node in another domain
+				// (e.g. infra, api), multiply relevance by CrossDomainDecay so cross-domain
+				// neighbors rank lower than same-domain neighbors at equal structural distance.
+				// Only applied when CrossDomainDecay is in (0, 1) and both nodes are visible.
+				if cfg.CrossDomainDecay > 0 && cfg.CrossDomainDecay < 1 {
+					currNode := g.nodes[curr.id]
+					neighNode := g.nodes[neighbor]
+					if currNode != nil && neighNode != nil {
+						currDomain := currNode.Domain
+						if currDomain == "" {
+							currDomain = DomainCode
+						}
+						neighDomain := neighNode.Domain
+						if neighDomain == "" {
+							neighDomain = DomainCode
+						}
+						if currDomain != neighDomain {
+							relevance *= cfg.CrossDomainDecay
+						}
+					}
 				}
 
 				// Directional CALLS boost — intent-aware:
@@ -1019,6 +1064,27 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 		}
 	}
 
+	// Sprint 16 #5: cross-domain impact analysis.
+	// Collect entities reachable from root via cross-domain edges in one hop.
+	// Edges have already been filtered at injection time (suppressed edges are never
+	// injected; namematcher enforces confidence >= 0.6), so all edges present in
+	// the in-memory graph already satisfy the confidence threshold.
+	cdResult := collectCrossDomainImpact(g, rootID)
+
+	// Add cross-domain entity files to AffectedFiles so callers (agents) see the
+	// full set of files to review — including Terraform, API specs, and doc files.
+	for _, ref := range cdResult.refs {
+		if ref.File != "" {
+			fileSet[ref.File] = struct{}{}
+		}
+	}
+	// Rebuild files slice now that cross-domain files have been added.
+	files = make([]string, 0, len(fileSet))
+	for f := range fileSet {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+
 	return &ImpactResult{
 		Root: EntityRef{
 			ID:   rootID,
@@ -1027,11 +1093,156 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 			File: root.File,
 			Line: root.Line,
 		},
-		Tiers:         tiers,
-		TotalAffected: total,
-		AffectedFiles: files,
-		Truncated:     anyTruncated,
+		Tiers:                tiers,
+		TotalAffected:        total,
+		AffectedFiles:        files,
+		Truncated:            anyTruncated,
+		CrossDomainImpact:    cdResult.refs,
+		CrossDomainAffected:  len(cdResult.refs),
+		CrossDomainTruncated: cdResult.truncated,
 	}, nil
+}
+
+// CrossDomainImpactForNode returns the cross-domain entities directly reachable
+// from nodeID via cross-domain edges. It is the public entry point used by
+// the struct/interface aggregation path in handleGetImpact.
+// Returns the refs and a truncated flag (true when capped at maxCrossDomainImpactNodes).
+func (g *Graph) CrossDomainImpactForNode(nodeID NodeID) ([]CrossDomainRef, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	r := collectCrossDomainImpact(g, nodeID)
+	return r.refs, r.truncated
+}
+
+// crossDomainCaps defines per-category node limits for collectCrossDomainImpact.
+//
+// Categories differ in signal strength and realistic cardinality:
+//   - DEPLOYS/CONSUMES: explicit hand-linked or parser-derived, high value, low volume → 30 each
+//   - CONFIGURED_BY/DOCUMENTS/MANUAL: explicit, trusted, typically very few → 20 each
+//   - MENTIONS: synthetic name-match heuristic, variable confidence, potentially high volume → 15
+//
+// High-signal categories fill first (collection order below). MENTIONS is collected
+// last so it cannot crowd out explicit relationships even when it has hundreds of matches.
+// The overall cap (maxCrossDomainImpactNodes=100) is a safety net for pathological graphs.
+var crossDomainCaps = map[EdgeType]int{
+	EdgeDeploys:      30,
+	EdgeConsumes:     30,
+	EdgeConfiguredBy: 20,
+	EdgeDocuments:    20,
+	EdgeManual:       20,
+	EdgeMentions:     15,
+}
+
+// maxCrossDomainImpactNodes is the overall safety-net cap across all categories.
+// Normal operation stays well under this via per-category caps, but it prevents
+// pathological graphs (e.g. 200 DEPLOYS + 200 MENTIONS) from blowing up responses.
+const maxCrossDomainImpactNodes = 100
+
+// crossDomainResult packages the output of collectCrossDomainImpact so callers
+// can propagate the truncation signal without a separate call.
+type crossDomainResult struct {
+	refs      []CrossDomainRef
+	truncated bool
+}
+
+// collectCrossDomainImpact finds entities reachable from root in one hop via
+// cross-domain edges and returns them as CrossDomainRef slices.
+//
+// Per-category caps (crossDomainCaps) guarantee that high-volume synthetic edges
+// (MENTIONS, up to 15) cannot crowd out explicit high-signal edges (DEPLOYS/CONSUMES,
+// up to 30 each). Each category is bounded independently: even if a node has 200
+// MENTIONS edges, DEPLOYS/CONSUMES still get their full quota.
+//
+// An overall safety-net cap (maxCrossDomainImpactNodes=100) prevents pathological
+// graphs from producing unbounded output. truncated=true when either cap fires.
+//
+// Caller must hold g.mu.RLock.
+func collectCrossDomainImpact(g *Graph, rootID NodeID) crossDomainResult {
+	seen := make(map[NodeID]bool)
+	seen[rootID] = true
+
+	// perCat tracks how many nodes have been collected per edge type so we can
+	// enforce per-category caps without an extra pass.
+	perCat := make(map[EdgeType]int, len(crossDomainCaps))
+	var refs []CrossDomainRef
+	truncated := false
+
+	// addRef attempts to add a CrossDomainRef. Returns true if added, false if
+	// the per-category cap, overall cap, or deduplication prevented it.
+	addRef := func(id NodeID, n *Node, et EdgeType) bool {
+		if seen[id] {
+			return false
+		}
+		cap, ok := crossDomainCaps[et]
+		if !ok {
+			cap = 10 // conservative default for unknown future edge types
+		}
+		if perCat[et] >= cap {
+			truncated = true
+			return false
+		}
+		if len(refs) >= maxCrossDomainImpactNodes {
+			truncated = true
+			return false
+		}
+		seen[id] = true
+		perCat[et]++
+		refs = append(refs, CrossDomainRef{
+			EntityRef: EntityRef{
+				ID:   id,
+				Name: n.Name,
+				Type: n.Type,
+				File: n.File,
+				Line: n.Line,
+			},
+			EdgeType: et,
+			Category: CrossDomainCategory(et),
+		})
+		return true
+	}
+
+	// Single-pass collection over outEdges then inEdges. Per-category counters enforce
+	// the priority ordering implicitly: because we scan all edges once, a category
+	// that fills its cap early still allows other categories to accumulate their quota.
+	// O(E) where E = out-degree + in-degree of root (bounded in practice).
+	//
+	// Forward outEdges: DEPLOYS, CONSUMES, CONFIGURED_BY, MANUAL, MENTIONS.
+	for _, e := range g.outEdges[rootID] {
+		if !IsCrossDomainEdge(e.Type) {
+			continue
+		}
+		n := g.nodes[e.To]
+		if n == nil {
+			continue
+		}
+		addRef(e.To, n, e.Type)
+	}
+
+	// Reverse inEdges: DOCUMENTS (docs → this entity), MENTIONS (name-match → this),
+	// MANUAL (user link → this). These surface stale docs and related entities.
+	for _, e := range g.inEdges[rootID] {
+		if e.Type != EdgeDocuments && e.Type != EdgeMentions && e.Type != EdgeManual {
+			continue
+		}
+		n := g.nodes[e.From]
+		if n == nil {
+			continue
+		}
+		addRef(e.From, n, e.Type)
+	}
+
+	return crossDomainResult{refs: sortCrossDomainRefs(refs), truncated: truncated}
+}
+
+// sortCrossDomainRefs sorts cross-domain refs by category then name for stable output.
+func sortCrossDomainRefs(refs []CrossDomainRef) []CrossDomainRef {
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Category != refs[j].Category {
+			return refs[i].Category < refs[j].Category
+		}
+		return refs[i].Name < refs[j].Name
+	})
+	return refs
 }
 
 // testFileSuffixes covers test file conventions for Go, TypeScript, and JavaScript.

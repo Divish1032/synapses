@@ -1284,6 +1284,7 @@ var standardTierTools = map[string]bool{
 	"annotate_node":         true,
 	"link_entities":         true,
 	"unlink_entities":       true,
+	"confirm_edge":          true,
 	// Standard additions.
 	"get_context":       true,
 	"find_entity":       true,
@@ -1622,8 +1623,11 @@ func (s *Server) registerTools() {
 					"Use get_context only when you need specific BFS parameters, conditional fetching via known_hash, "+
 					"or fine-grained output control that prepare_context doesn't expose. "+
 					"Returns a relevance-ranked subgraph centred on the named entity. "+
-					"Uses BFS with edge-type-weighted decay so the closest, most semantically "+
-					"significant relationships appear first.",
+					"Uses BFS/PPR with edge-type-weighted decay. Response includes a cross_domain object with sub-keys: "+
+					"deploys (infra resources this entity deploys to), consumes (APIs/services called), "+
+					"configured_by (config entities governing this), documented_in (doc nodes covering this), "+
+					"mentions (knowledge nodes referencing this), manual (user-defined links), "+
+					"related (multi-hop cross-domain). Enables traversal from a Go function to its Terraform deployment or API spec in one call.",
 			),
 			mcp.WithString("entity",
 				mcp.Required(),
@@ -1678,6 +1682,12 @@ func (s *Server) registerTools() {
 			mcp.WithString("projects",
 				mcp.Description("Optional. Comma-separated federation aliases to include sibling project results "+
 					"(e.g. 'core,app'). When provided, also returns matching entities from sibling stores."),
+			),
+			mcp.WithNumber("cross_domain_decay",
+				mcp.Description("Optional. Multiplier applied to relevance when BFS/PPR crosses a domain boundary "+
+					"(e.g. code→infra, code→api). Range (0, 1]. Default 0.5 — cross-domain neighbors score at "+
+					"half the relevance of same-domain neighbors at equal structural distance. Use 1.0 to disable "+
+					"the penalty. Cross-domain nodes appear in the structured cross_domain response object (grouped by edge type) regardless of this value."),
 			),
 		),
 		s.handleGetContext,
@@ -2001,6 +2011,39 @@ func (s *Server) registerTools() {
 		s.handleUnlinkEntities,
 	)
 
+	// confirm_edge
+	s.addOrDefer(
+		mcp.NewTool(
+			"confirm_edge",
+			mcp.WithDescription(
+				"Approves or permanently rejects any cross-domain edge — "+
+					"whether auto-created by the name-matcher (MENTIONS) or manually via link_entities. "+
+					"confirmed=true: edge confidence → 1.0, name-matcher will never re-score it, edge stays live. "+
+					"confirmed=false: edge suppressed immediately and permanently — "+
+					"removed from the live graph, not re-created by the matcher, invisible to get_context. "+
+					"Auto-retries reversed direction (a↔b) since the matcher stores edges heavy-domain-first. "+
+					"Use link_entities to undo a rejection.",
+			),
+			mcp.WithString("a",
+				mcp.Required(),
+				mcp.Description("Source entity of the edge: name or full node ID."),
+			),
+			mcp.WithString("b",
+				mcp.Required(),
+				mcp.Description("Target entity of the edge: name or full node ID."),
+			),
+			mcp.WithString("relation",
+				mcp.Required(),
+				mcp.Description("The edge type label, e.g. MENTIONS, DEPLOYS, CONSUMES. Must match exactly."),
+			),
+			mcp.WithBoolean("confirmed",
+				mcp.Required(),
+				mcp.Description("true to approve the edge (confidence → 1.0), false to reject it permanently."),
+			),
+		),
+		s.handleConfirmEdge,
+	)
+
 	// get_impact
 	s.addOrDefer(
 		mcp.NewTool(
@@ -2011,7 +2054,11 @@ func (s *Server) registerTools() {
 					"could break if the entity changes. "+
 					"Results grouped by depth: direct (depth 1, confidence 1.0), "+
 					"indirect (depth 2, confidence 0.6), peripheral (depth 3+, confidence 0.3). "+
-					"Answers: 'what breaks if I change X?'",
+					"Also returns cross_domain_impact: infrastructure resources (DEPLOYS), "+
+					"API endpoints (CONSUMES), config files (CONFIGURED_BY), doc sections "+
+					"(DOCUMENTS), and name-matched entities (MENTIONS) directly linked to the entity. "+
+					"Only cross-domain edges with confidence ≥ 0.6 or human-confirmed are included. "+
+					"Answers: 'what breaks if I change X?' — across code, infra, API, and docs.",
 			),
 			mcp.WithString("symbol",
 				mcp.Required(),
@@ -2837,6 +2884,39 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handlePlanContext,
+	)
+
+	// ── Graph Query ─────────────────────────────────────────────────────────
+
+	// query_graph — Sprint 16 #7: constrained DSL for direct graph node filtering.
+	s.addOrDefer(
+		mcp.NewTool(
+			"query_graph",
+			mcp.WithDescription(
+				"Constrained DSL for direct graph node filtering. Power user tool for "+
+					"cross-domain exploration when BFS traversal (get_context/get_impact) is too broad. "+
+					"Returns nodes matching ALL conditions (AND-only). Read-only, 1000-node cap, 500ms timeout. "+
+					"Syntax: NODES WHERE <field> <op> <value> [AND <field> <op> <value> ...]\n"+
+					"Fields: package, type, domain, file, name, exported, fanin, fanout\n"+
+					"Operators: = != > >= < <= (fanin/fanout support all; string fields support = and !=)\n"+
+					"Note: 'file' and 'package' use substring matching — NODES WHERE file=\"login.go\" matches \"internal/auth/login.go\"; NODES WHERE package=\"auth\" matches \"com.example.auth\" (Java).\n"+
+					"Examples:\n"+
+					"  NODES WHERE package=\"auth\" AND fanin > 5\n"+
+					"  NODES WHERE type=\"function\" AND exported=true AND fanout >= 3\n"+
+					"  NODES WHERE domain=\"infra\"\n"+
+					"  NODES WHERE fanout >= 10 AND fanin = 0\n"+
+					"  NODES WHERE file=\"login.go\"\n"+
+					"  NODES WHERE name=\"PaymentService\"",
+			),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description(
+					"DSL query string. Must start with NODES WHERE. "+
+						"Example: NODES WHERE package=\"auth\" AND fanin > 5",
+				),
+			),
+		),
+		s.handleQueryGraph,
 	)
 
 	// ── Benchmark ───────────────────────────────────────────────────────────

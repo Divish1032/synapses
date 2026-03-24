@@ -34,6 +34,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/namematcher"
 	"github.com/SynapsesOS/synapses/internal/contextfile"
 	"github.com/SynapsesOS/synapses/internal/dataflow"
 	"github.com/SynapsesOS/synapses/internal/embed"
@@ -505,6 +506,9 @@ func cmdStartDirect(args []string) error {
 				srv.SetChangeSource(fw)               // wire change log into get_working_state
 				fw.SetPacketInvalidator(srv)          // clear brain packet cache on file change
 				fw.SetBrainClient(brainCli)           // wire incremental ingest
+				// Wire cross-domain name matcher: runs after each reindex to create MENTIONS edges.
+				nm := namematcher.New(brainCli)
+				fw.SetNameMatcher(nm)
 				// Federation: wire cross-project dependency tracker into watcher.
 				var fedTracker *federation.DeterministicDetector
 				if fedResolver != nil {
@@ -516,6 +520,7 @@ func cmdStartDirect(args []string) error {
 					newBrain := brain.NewInProcess(newCfg.Brain.ToBrainConfig())
 					srv.SetBrainClient(newBrain)
 					fw.SetBrainClient(newBrain)
+					fw.SetNameMatcher(namematcher.New(newBrain))
 					if fedTracker != nil {
 						fedTracker.Rebuild(newCfg.Federation)
 					}

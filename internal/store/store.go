@@ -691,6 +691,11 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE node_embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_call_sites_file      ON call_sites(caller_file)`,
 		`CREATE INDEX IF NOT EXISTS idx_call_sites_pkg_alias ON call_sites(pkg_alias)`,
+		`ALTER TABLE manual_edges ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0`,
+		`ALTER TABLE manual_edges ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE manual_edges ADD COLUMN suppressed INTEGER NOT NULL DEFAULT 0`,
+		// Index for CrossDomainEdgeStats() — filters WHERE suppressed=0 on every session_init.
+		`CREATE INDEX IF NOT EXISTS idx_manual_edges_suppressed ON manual_edges(suppressed, confirmed, created_by)`,
 		// Sprint 15 #3: per-specific-edge learned weight multipliers.
 		`CREATE TABLE IF NOT EXISTS edge_learned_weights (
 			from_id     TEXT NOT NULL,
@@ -2716,29 +2721,149 @@ type ManualEdge struct {
 	Domain    string
 	CreatedBy string
 	CreatedAt int64
+	Confidence float64
+	Confirmed  bool
+	Suppressed bool
 }
 
 // SaveManualEdge persists a user-defined edge. Upserts on (from_id, to_id, relation).
-// Returns the edge immediately so callers can inject it into the in-memory graph.
-func (s *Store) SaveManualEdge(fromID, toID graph.NodeID, relation, domain, createdBy string) (ManualEdge, error) {
+// Returns the actual stored row so callers see the true confirmed/suppressed state.
+//
+// clearSuppressed=true  — human-initiated call (link_entities): resets suppressed=0 so
+//
+//	a previously-rejected edge becomes active again. Does NOT touch confirmed —
+//	the confirmed flag is owned exclusively by ConfirmEdge.
+//
+// clearSuppressed=false — automated call (namematcher): preserves existing confirmed and
+//
+//	suppressed flags; also guards confirmed edge confidence against downgrade.
+func (s *Store) SaveManualEdge(fromID, toID graph.NodeID, relation, domain, createdBy string, confidence float64, clearSuppressed bool) (ManualEdge, error) {
 	now := time.Now().Unix()
-	_, err := s.graphDB.Exec(
-		`INSERT INTO manual_edges (from_id, to_id, relation, domain, created_by, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(from_id, to_id, relation) DO UPDATE SET domain=excluded.domain, created_by=excluded.created_by, created_at=excluded.created_at`,
-		string(fromID), string(toID), relation, domain, createdBy, now,
-	)
+	var query string
+	if clearSuppressed {
+		// Human explicitly (re-)creating this edge: lift any prior suppression.
+		// Does NOT reset confirmed — confirm_edge is the only thing that sets/clears
+		// the confirmed flag. A previously-confirmed edge re-created via link_entities
+		// remains confirmed (the human's review decision is preserved).
+		query = `INSERT INTO manual_edges (from_id, to_id, relation, domain, created_by, created_at, confidence)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(from_id, to_id, relation) DO UPDATE SET
+		   domain=excluded.domain, created_by=excluded.created_by,
+		   created_at=excluded.created_at, confidence=excluded.confidence,
+		   suppressed=0`
+	} else {
+		// Automated (namematcher): never downgrade a human-confirmed edge's confidence.
+		query = `INSERT INTO manual_edges (from_id, to_id, relation, domain, created_by, created_at, confidence)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(from_id, to_id, relation) DO UPDATE SET
+		   domain=excluded.domain, created_by=excluded.created_by,
+		   created_at=excluded.created_at,
+		   confidence=CASE WHEN manual_edges.confirmed=1 THEN manual_edges.confidence ELSE excluded.confidence END`
+	}
+	_, err := s.graphDB.Exec(query, string(fromID), string(toID), relation, domain, createdBy, now, confidence)
 	if err != nil {
 		return ManualEdge{}, fmt.Errorf("save manual edge: %w", err)
 	}
-	return ManualEdge{
-		FromID:    fromID,
-		ToID:      toID,
-		Relation:  relation,
-		Domain:    domain,
-		CreatedBy: createdBy,
-		CreatedAt: now,
-	}, nil
+	// Re-read the actual row so callers see the true confirmed/suppressed state.
+	// The upsert above preserves confirmed/suppressed — we must not lie about them.
+	var me ManualEdge
+	var fid, tid string
+	var confirmed, suppressed int
+	row := s.graphDB.QueryRow(
+		`SELECT from_id, to_id, relation, domain, created_by, created_at, confidence, confirmed, suppressed
+		 FROM manual_edges WHERE from_id=? AND to_id=? AND relation=?`,
+		string(fromID), string(toID), relation,
+	)
+	if err := row.Scan(&fid, &tid, &me.Relation, &me.Domain, &me.CreatedBy, &me.CreatedAt, &me.Confidence, &confirmed, &suppressed); err != nil {
+		return ManualEdge{}, fmt.Errorf("save manual edge re-read: %w", err)
+	}
+	me.FromID = graph.NodeID(fid)
+	me.ToID = graph.NodeID(tid)
+	me.Confirmed = confirmed != 0
+	me.Suppressed = suppressed != 0
+	return me, nil
+}
+
+// SaveSyntheticEdge persists a synthetic MENTIONS edge created by the name matcher.
+// Convenience wrapper around SaveManualEdge with "namematcher" as the creator and
+// DomainKnowledge as the domain. Idempotent — upserts update confidence on re-run
+// but never downgrade a human-confirmed edge's confidence or clear suppression.
+func (s *Store) SaveSyntheticEdge(fromID, toID graph.NodeID, edgeType graph.EdgeType, confidence float64) (ManualEdge, error) {
+	return s.SaveManualEdge(fromID, toID, string(edgeType), string(graph.DomainKnowledge), "namematcher", confidence, false)
+}
+
+// ConfirmEdge updates the human-review status of a persisted edge.
+// confirmed=true  → sets confirmed=1 and raises confidence to 1.0 (human-verified, never re-scored).
+// confirmed=false → sets suppressed=1 (human-rejected; reinjectManualEdges and NameMatcher skip it).
+// Returns an error if no matching edge exists in the store.
+func (s *Store) ConfirmEdge(fromID, toID graph.NodeID, relation string, confirmed bool) error {
+	var res sql.Result
+	var err error
+	if confirmed {
+		// Clear suppressed so a previously-rejected edge can be re-approved.
+		res, err = s.graphDB.Exec(
+			`UPDATE manual_edges SET confirmed=1, confidence=1.0, suppressed=0 WHERE from_id=? AND to_id=? AND relation=?`,
+			string(fromID), string(toID), relation,
+		)
+	} else {
+		// Clear confirmed so the state is unambiguous: suppressed-only.
+		res, err = s.graphDB.Exec(
+			`UPDATE manual_edges SET suppressed=1, confirmed=0 WHERE from_id=? AND to_id=? AND relation=?`,
+			string(fromID), string(toID), relation,
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("confirm edge: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("confirm edge rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("confirm edge: no edge found (%s -[%s]-> %s)", fromID, relation, toID)
+	}
+	return nil
+}
+
+// PruneStaleSyntheticEdges removes synthetic MENTIONS edges (created_by="namematcher")
+// whose from_id or to_id no longer exists in g. Called at the start of each name-matching
+// pass so stale DB entries from renamed/deleted entities do not accumulate indefinitely.
+// Errors are logged but do not block the caller — a stale DB row is not a hard failure.
+func (s *Store) PruneStaleSyntheticEdges(g *graph.Graph) error {
+	rows, err := s.graphDB.Query(
+		// Exclude confirmed edges — a human explicitly verified this relationship.
+		// Even if an endpoint was renamed/deleted, confirmed edges are preserved
+		// so the human decision is not silently lost.
+		`SELECT from_id, to_id, relation FROM manual_edges WHERE created_by='namematcher' AND confirmed=0`,
+	)
+	if err != nil {
+		return fmt.Errorf("query synthetic edges: %w", err)
+	}
+	type edgeKey struct{ from, to, relation string }
+	var stale []edgeKey
+	for rows.Next() {
+		var from, to, rel string
+		if err := rows.Scan(&from, &to, &rel); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan synthetic edge: %w", err)
+		}
+		if g.GetNode(graph.NodeID(from)) == nil || g.GetNode(graph.NodeID(to)) == nil {
+			stale = append(stale, edgeKey{from, to, rel})
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate synthetic edges: %w", err)
+	}
+	for _, k := range stale {
+		if _, err := s.graphDB.Exec(
+			`DELETE FROM manual_edges WHERE from_id=? AND to_id=? AND relation=?`,
+			k.from, k.to, k.relation,
+		); err != nil {
+			logutil.Warn("synapses/store: prune stale synthetic edge %s→%s: %v\n", k.from, k.to, err)
+		}
+	}
+	return nil
 }
 
 // DeleteManualEdge removes a persisted user-defined edge.
@@ -2753,7 +2878,7 @@ func (s *Store) DeleteManualEdge(fromID, toID graph.NodeID, relation string) err
 // LoadManualEdges returns all persisted user-defined edges.
 func (s *Store) LoadManualEdges() ([]ManualEdge, error) {
 	rows, err := s.graphDB.Query(
-		`SELECT from_id, to_id, relation, domain, created_by, created_at FROM manual_edges`,
+		`SELECT from_id, to_id, relation, domain, created_by, created_at, confidence, confirmed, suppressed FROM manual_edges`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load manual edges: %w", err)
@@ -2763,14 +2888,53 @@ func (s *Store) LoadManualEdges() ([]ManualEdge, error) {
 	for rows.Next() {
 		var me ManualEdge
 		var fromID, toID string
-		if err := rows.Scan(&fromID, &toID, &me.Relation, &me.Domain, &me.CreatedBy, &me.CreatedAt); err != nil {
+		var confirmed, suppressed int
+		if err := rows.Scan(&fromID, &toID, &me.Relation, &me.Domain, &me.CreatedBy, &me.CreatedAt, &me.Confidence, &confirmed, &suppressed); err != nil {
 			return nil, fmt.Errorf("scan manual edge: %w", err)
 		}
 		me.FromID = graph.NodeID(fromID)
 		me.ToID = graph.NodeID(toID)
+		me.Confirmed = confirmed != 0
+		me.Suppressed = suppressed != 0
 		out = append(out, me)
 	}
 	return out, rows.Err()
+}
+
+// CrossDomainEdgeStats returns aggregate counts of cross-domain edges
+// grouped into three buckets. Only non-suppressed edges are counted.
+//
+//   - Auto: created by the name-matcher (created_by == "namematcher") and
+//     not yet human-reviewed (confirmed == 0).
+//   - Confirmed: human-approved via confirm_edge (confirmed == 1).
+//   - Manual: all other non-suppressed edges — created via link_entities
+//     or any path other than the name-matcher.
+//
+// Uses a single aggregating SQL query to avoid loading all edge rows into Go.
+func (s *Store) CrossDomainEdgeStats() (auto, confirmed, manual int, err error) {
+	rows, err := s.graphDB.Query(
+		`SELECT created_by, confirmed, COUNT(*) FROM manual_edges WHERE suppressed=0 GROUP BY created_by, confirmed`,
+	)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("cross_domain_edge_stats: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var createdBy string
+		var isConfirmed, cnt int
+		if err := rows.Scan(&createdBy, &isConfirmed, &cnt); err != nil {
+			return 0, 0, 0, fmt.Errorf("cross_domain_edge_stats scan: %w", err)
+		}
+		switch {
+		case isConfirmed != 0:
+			confirmed += cnt
+		case createdBy == "namematcher":
+			auto += cnt
+		default:
+			manual += cnt
+		}
+	}
+	return auto, confirmed, manual, rows.Err()
 }
 
 // ReinjectManualEdges loads all persisted manual edges and adds them to g.
@@ -2787,6 +2951,9 @@ func (s *Store) reinjectManualEdges(g *graph.Graph) error {
 		return err
 	}
 	for _, me := range edges {
+		if me.Suppressed {
+			continue // human rejected this edge; do not re-inject
+		}
 		edgeType := graph.EdgeType(me.Relation)
 		// Unknown relation strings that don't match catalog types get EdgeManual
 		// weight via the DefaultEdgeWeights map. The type string is preserved so
