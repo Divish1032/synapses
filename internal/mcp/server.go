@@ -1934,7 +1934,7 @@ func (s *Server) registerTools() {
 					"e.g. 'PaymentService DEPLOYS prod-cluster', 'AuthHandler DEPENDS_ON redis-config'. "+
 					"Edges persist across restarts and are immediately traversable by get_context and get_impact. "+
 					"Use standard relation types (CALLS, DEPENDS_ON, IMPLEMENTS, etc.) for full BFS traversal. "+
-					"Custom labels (e.g. 'DEPLOYS', 'CONFIGURED_BY') are stored but have BFS weight 0 until Sprint 16 adds them to the catalog.",
+					"Cross-domain labels (DEPLOYS, CONSUMES, CONFIGURED_BY, DOCUMENTS, MENTIONS) are first-class catalog types with BFS weights.",
 			),
 			mcp.WithString("a",
 				mcp.Required(),
@@ -1946,7 +1946,7 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("relation",
 				mcp.Required(),
-				mcp.Description("Edge type label. Use standard types for BFS traversal: CALLS, DEPENDS_ON, IMPLEMENTS, EMBEDS, DATA_FLOWS. Custom labels (DEPLOYS, CONFIGURED_BY, etc.) are valid but have BFS weight 0."),
+				mcp.Description("Edge type label. Standard: CALLS, DEPENDS_ON, IMPLEMENTS, EMBEDS, DATA_FLOWS. Cross-domain: DEPLOYS (code→infra), CONSUMES (code→API), CONFIGURED_BY (code→config), DOCUMENTS (docs→code), MENTIONS (name-match). All types are BFS-traversable."),
 			),
 			mcp.WithString("domain",
 				mcp.Description("Optional. Semantic domain of the relationship, e.g. 'code-to-infra', 'code-to-api', 'explicit'. Defaults to empty (code-to-code assumed)."),

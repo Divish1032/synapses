@@ -60,6 +60,29 @@ const (
 	// Used when the relation string doesn't match a known catalog type.
 	// BFS weight 0.5 — traversed but lower priority than structural code edges.
 	EdgeManual EdgeType = "MANUAL"
+
+	// Sprint 16: Cross-domain edge types.
+	// These connect entities across knowledge domains (code ↔ infra ↔ api ↔ docs ↔ config).
+
+	// EdgeDeploys links a code entity to the infrastructure resource that deploys it.
+	// Direction: code entity → Terraform/k8s resource.
+	EdgeDeploys EdgeType = "DEPLOYS"
+	// EdgeConsumes links a code entity to the API endpoint or service it calls.
+	// Direction: code entity → OpenAPI endpoint / gRPC service node.
+	EdgeConsumes EdgeType = "CONSUMES"
+	// EdgeConfiguredBy links a code entity to the config resource that controls it.
+	// Direction: code entity → config resource (Terraform variable, k8s ConfigMap, etc.).
+	EdgeConfiguredBy EdgeType = "CONFIGURED_BY"
+	// EdgeDocuments links a documentation section to the code entity it describes.
+	// Direction: docs section → code entity. Broader than EXPLAINS — used for
+	// cross-domain docs (e.g. a README section about a Terraform module).
+	EdgeDocuments EdgeType = "DOCUMENTS"
+	// EdgeMentions is a synthetic cross-domain name-match edge.
+	// Direction: any entity → any entity (cross-domain). Created by the name-matching
+	// background pass (Sprint 16 #2) when two entities share the same name across domains.
+	// Confidence 0.0–1.0 stored in edge metadata; only edges with confidence ≥ 0.6 are
+	// auto-created. BFS weight is lower than structural edges to reflect uncertainty.
+	EdgeMentions EdgeType = "MENTIONS"
 )
 
 // DefaultEdgeWeights defines the semantic significance of each edge type.
@@ -93,6 +116,15 @@ var DefaultEdgeWeights = map[EdgeType]float64{
 	// MANUAL is a user-defined cross-domain edge (created via link_entities).
 	// Medium weight — traversed by BFS but lower priority than structural code edges.
 	EdgeManual: 0.5,
+	// Sprint 16: Cross-domain edge weights.
+	// DEPLOYS and CONSUMES are strong dependency relationships across domain boundaries.
+	EdgeDeploys:  0.75,
+	EdgeConsumes: 0.75,
+	// CONFIGURED_BY and DOCUMENTS are moderate-weight cross-domain relationships.
+	EdgeConfiguredBy: 0.65,
+	EdgeDocuments:    0.65,
+	// MENTIONS is synthetic (name-match heuristic) — lower weight reflects uncertainty.
+	EdgeMentions: 0.55,
 }
 
 // EdgeTypeDescriptor captures the semantic metadata for a single edge type.
@@ -123,8 +155,8 @@ type EdgeTypeDescriptor struct {
 // Every entry in DefaultEdgeWeights must have a corresponding descriptor here —
 // the TestEdgeTypeCatalogCompleteness test enforces this invariant at test time.
 //
-// Sprint 9 adds: DEPLOYS, CONSUMES, CONFIGURED_BY (code-to-infra/api).
-// Sprint 12 adds: MENTIONS (cross-domain name match), DOCUMENTS (docs-to-code).
+// Sprint 16 adds: DEPLOYS, CONSUMES, CONFIGURED_BY (code-to-infra/api),
+// DOCUMENTS (docs-to-code), MENTIONS (cross-domain name match).
 // When new edge types are added, append a descriptor here AND add to DefaultEdgeWeights.
 var EdgeTypeCatalog = []EdgeTypeDescriptor{
 	{
@@ -171,6 +203,22 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Domain:         "code",
 	},
 	{
+		Name:           EdgeDeploys,
+		Description:    "Code entity deploys an infrastructure resource. Direction: code entity → Terraform/k8s resource node. Strong cross-domain dependency — code changes may break deployed infrastructure.",
+		SemanticWeight: 0.75,
+		Direction:      "directed",
+		Domain:         "infra",
+		Synthetic:      true,
+	},
+	{
+		Name:           EdgeConsumes,
+		Description:    "Code entity calls or depends on an API endpoint or service. Direction: code entity → OpenAPI endpoint / gRPC service node. Strong cross-domain dependency — API changes break consuming code.",
+		SemanticWeight: 0.75,
+		Direction:      "directed",
+		Domain:         "api",
+		Synthetic:      true,
+	},
+	{
 		Name:           EdgeImports,
 		Description:    "Source file or package imports another package. Direction: importer → imported package node. Lower weight than CALLS — import edges are structurally noisy (every file that uses a stdlib type gets an edge).",
 		SemanticWeight: 0.7,
@@ -186,11 +234,35 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Synthetic:      true,
 	},
 	{
+		Name:           EdgeConfiguredBy,
+		Description:    "Code entity is controlled by a configuration resource. Direction: code entity → Terraform variable / k8s ConfigMap / config file node. Cross-domain — config changes can silently break code behaviour.",
+		SemanticWeight: 0.65,
+		Direction:      "directed",
+		Domain:         "infra",
+		Synthetic:      true,
+	},
+	{
+		Name:           EdgeDocuments,
+		Description:    "Documentation section describes a cross-domain entity (broader than EXPLAINS). Direction: docs section → any entity (code, infra, API). Used for README sections that describe Terraform modules or API specs.",
+		SemanticWeight: 0.65,
+		Direction:      "directed",
+		Domain:         "docs",
+		Synthetic:      true,
+	},
+	{
 		Name:           EdgeDocumentedBy,
 		Description:    "Reverse of EXPLAINS: code entity references its documentation section (R31). Direction: code entity → Section node. Slightly lower than EXPLAINS so code-to-code edges are preferred under token budget pressure.",
 		SemanticWeight: 0.6,
 		Direction:      "directed",
 		Domain:         "docs",
+		Synthetic:      true,
+	},
+	{
+		Name:           EdgeMentions,
+		Description:    "Synthetic cross-domain name-match edge. Direction: any entity → any entity across domain boundary. Created by the name-matching background pass when two entities share the same identifier across domains. Confidence (0.0–1.0) stored in edge metadata; only edges with confidence ≥ 0.6 are auto-created.",
+		SemanticWeight: 0.55,
+		Direction:      "directed",
+		Domain:         "knowledge",
 		Synthetic:      true,
 	},
 	{

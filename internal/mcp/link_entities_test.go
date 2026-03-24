@@ -84,9 +84,10 @@ func TestHandleLinkEntities_EntityNotFound(t *testing.T) {
 	mustErrorResult(t, res, err)
 }
 
-// TestHandleLinkEntities_CustomRelation verifies custom (non-catalog) relation types
-// are stored and a weight_note is present in the response.
-func TestHandleLinkEntities_CustomRelation(t *testing.T) {
+// TestHandleLinkEntities_CatalogRelation verifies that Sprint 16 cross-domain edge
+// types (DEPLOYS, CONSUMES, CONFIGURED_BY, DOCUMENTS, MENTIONS) are stored and do NOT
+// produce a weight_note — they are first-class catalog types with real BFS weights.
+func TestHandleLinkEntities_CatalogRelation(t *testing.T) {
 	t.Parallel()
 	srv, loginID, logoutID := newPopulatedServer(t)
 	ctx := context.Background()
@@ -100,12 +101,12 @@ func TestHandleLinkEntities_CustomRelation(t *testing.T) {
 	out := mustResult(t, res, err)
 
 	// The edge should exist in the graph with type "DEPLOYS".
-	if !srv.graph.HasEdge(loginID, logoutID, graph.EdgeType("DEPLOYS")) {
+	if !srv.graph.HasEdge(loginID, logoutID, graph.EdgeDeploys) {
 		t.Error("expected DEPLOYS edge in live graph, not found")
 	}
-	// Custom type should produce a weight_note.
-	if _, ok := out["weight_note"]; !ok {
-		t.Error("expected weight_note for custom relation type, not present")
+	// DEPLOYS is a catalog type (Sprint 16) — no weight_note should be emitted.
+	if note, ok := out["weight_note"]; ok {
+		t.Errorf("DEPLOYS is a catalog type: unexpected weight_note %q", note)
 	}
 }
 
