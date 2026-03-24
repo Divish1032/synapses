@@ -351,10 +351,16 @@ func RRFMergeWeighted(channels map[string][]string, limit int, k int, weights ma
 		weights = DefaultRRFWeights
 	}
 
+	// chanContrib tracks a channel's contribution score for one result, so
+	// attribution channels can be sorted best-first (deterministic TopChannel).
+	type chanContrib struct {
+		name   string
+		contri float64
+	}
 	type scored struct {
-		id       string
-		score    float64
-		channels []string
+		id      string
+		score   float64
+		contribs []chanContrib
 	}
 
 	scoreMap := make(map[string]*scored)
@@ -365,19 +371,29 @@ func RRFMergeWeighted(channels map[string][]string, limit int, k int, weights ma
 			w = cw
 		}
 		for rank, id := range rankedIDs {
+			contrib := w * (1.0 / float64(k+rank+1)) // rank is 0-indexed, RRF uses 1-indexed
 			s, ok := scoreMap[id]
 			if !ok {
 				s = &scored{id: id}
 				scoreMap[id] = s
 			}
-			s.score += w * (1.0 / float64(k+rank+1)) // rank is 0-indexed, RRF uses 1-indexed
-			s.channels = append(s.channels, channelName)
+			s.score += contrib
+			s.contribs = append(s.contribs, chanContrib{name: channelName, contri: contrib})
 		}
 	}
 
 	// Collect and sort by score descending.
 	items := make([]scored, 0, len(scoreMap))
 	for _, s := range scoreMap {
+		// Sort this result's contributing channels by contribution descending so
+		// attribution[memID][0] is always the channel that ranked the result best.
+		// This makes TopChannel selection deterministic and accurate.
+		sort.Slice(s.contribs, func(i, j int) bool {
+			if math.Abs(s.contribs[i].contri-s.contribs[j].contri) > 1e-12 {
+				return s.contribs[i].contri > s.contribs[j].contri
+			}
+			return s.contribs[i].name < s.contribs[j].name // tie-break: alphabetical
+		})
 		items = append(items, *s)
 	}
 
@@ -397,7 +413,11 @@ func RRFMergeWeighted(channels map[string][]string, limit int, k int, weights ma
 	attribution := make(map[string][]string, len(items))
 	for i, item := range items {
 		resultIDs[i] = item.id
-		attribution[item.id] = item.channels
+		chans := make([]string, len(item.contribs))
+		for j, c := range item.contribs {
+			chans[j] = c.name
+		}
+		attribution[item.id] = chans
 	}
 
 	return resultIDs, attribution

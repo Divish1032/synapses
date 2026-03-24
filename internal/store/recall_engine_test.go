@@ -314,6 +314,44 @@ func TestRRFMerge_FourChannels(t *testing.T) {
 	}
 }
 
+// TestRRFMerge_AttributionOrderedByContribution verifies that attribution
+// channels for each result are sorted by RRF contribution descending — i.e.
+// attribution[memID][0] is always the channel that ranked the result best,
+// not a random first entry from Go map iteration.
+//
+// Before the Sprint 15 #4 fix, channels were appended in non-deterministic
+// map iteration order, making TopChannel selection unpredictable when a result
+// appeared in multiple channels.
+func TestRRFMerge_AttributionOrderedByContribution(t *testing.T) {
+	t.Parallel()
+	// m1 appears in both bm25 (rank 0 = best) and semantic (rank 2 = worse).
+	// Expected: attribution["m1"][0] == "bm25" because rank 0 > rank 2 in contribution.
+	channels := map[string][]string{
+		"bm25":     {"m1", "m2"},       // m1 at rank 0 → highest bm25 contribution
+		"semantic": {"m3", "m4", "m1"}, // m1 at rank 2 → lower semantic contribution
+	}
+	_, attr := RRFMerge(channels, 10, 60)
+
+	m1Chans := attr["m1"]
+	if len(m1Chans) != 2 {
+		t.Fatalf("m1 attribution = %v, want 2 channels", m1Chans)
+	}
+	if m1Chans[0] != "bm25" {
+		t.Errorf("attribution[m1][0] = %q, want \"bm25\" (rank-0 contributor beats rank-2)", m1Chans[0])
+	}
+	if m1Chans[1] != "semantic" {
+		t.Errorf("attribution[m1][1] = %q, want \"semantic\"", m1Chans[1])
+	}
+
+	// Verify determinism: run 20 times with the same input — result must be stable.
+	for i := 0; i < 20; i++ {
+		_, a := RRFMerge(channels, 10, 60)
+		if a["m1"][0] != "bm25" {
+			t.Errorf("iteration %d: attribution[m1][0] = %q, want deterministic \"bm25\"", i, a["m1"][0])
+		}
+	}
+}
+
 // ── RecentMemories ────────────────────────────────────────────────────────────
 
 func TestRecentMemories_ReturnsRecentOnly(t *testing.T) {
