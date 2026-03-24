@@ -10,12 +10,16 @@ import (
 	"strings"
 )
 
+// platformCPUState holds per-instance CPU sampling state. Empty on macOS —
+// vm.loadavg already provides a rolling average, no delta computation needed.
+type platformCPUState struct{}
+
 // samplePlatform reads available RAM via vm_stat and the 1-minute load average
 // via sysctl on macOS.
 //
 // Returns (availableRAM bytes, cpuLoadNorm [0,∞), error).
 // cpuLoadNorm is NOT clamped here — the caller in pulse.go clamps to [0,1].
-func samplePlatform() (int64, float64, error) {
+func (p *SystemPulse) samplePlatform() (int64, float64, error) {
 	ram, err := readRAMDarwin()
 	if err != nil {
 		return 0, 0, fmt.Errorf("pulse/darwin: vm_stat: %w", err)

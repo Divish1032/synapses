@@ -1,6 +1,7 @@
 package brain
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -122,7 +123,8 @@ func TestPollOllamaNoServer(t *testing.T) {
 // TestSamplePlatformReturnsPositiveValues verifies the Linux /proc reader
 // returns RAM > 0 and CPU >= 0 on the current host.
 func TestSamplePlatformReturnsPositiveValues(t *testing.T) {
-	ram, cpu, err := samplePlatform()
+	p := NewSystemPulse()
+	ram, cpu, err := p.samplePlatform()
 	if err != nil {
 		t.Fatalf("samplePlatform() error: %v", err)
 	}
@@ -181,4 +183,40 @@ func TestConcurrentCurrentCalls(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 	close(done)
+}
+
+// TestConcurrentStartStop verifies that Start() and Stop() called from
+// different goroutines simultaneously do not data-race or deadlock.
+// This specifically targets the channel-reassignment race that existed in the
+// original implementation (p.stopped = make(chan struct{}) in Start() vs
+// <-p.stopped in Stop()).
+func TestConcurrentStartStop(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		p := NewSystemPulse()
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); p.Start() }()
+		go func() { defer wg.Done(); p.Stop() }()
+		wg.Wait()
+		// After both return, the pulse must be in a clean stopped state —
+		// a second Stop() must not block or panic.
+		p.Stop()
+	}
+}
+
+// TestStopWithoutStartDoesNotBlock verifies that Stop() called without a prior
+// Start() returns immediately (does not block forever on a channel receive).
+func TestStopWithoutStartDoesNotBlock(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		p := NewSystemPulse()
+		p.Stop() // must not block
+		close(done)
+	}()
+	select {
+	case <-done:
+		// pass
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop() without Start() blocked for more than 2 seconds")
+	}
 }

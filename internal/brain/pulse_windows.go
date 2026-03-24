@@ -6,31 +6,31 @@ import (
 	"fmt"
 	"sync"
 	"syscall"
-	"time"
 	"unsafe"
 )
 
-// windowsCPUState stores the previous GetSystemTimes values so we can compute
-// the CPU-busy delta between successive samples.
-var (
-	windowsCPUMu   sync.Mutex
+// platformCPUState holds per-instance CPU delta state for Windows.
+// Embedding this in SystemPulse keeps each instance self-contained —
+// no package-level globals means multiple SystemPulse instances do not
+// interfere with each other's CPU measurements.
+type platformCPUState struct {
+	cpuMu          sync.Mutex
 	prevIdleTicks  uint64
 	prevTotalTicks uint64
-	prevSampleTime time.Time
-)
+}
 
 // samplePlatform reads available RAM via GlobalMemoryStatusEx and CPU load
 // via GetSystemTimes on Windows.
 //
 // Returns (availableRAM bytes, cpuLoadNorm [0,∞), error).
 // cpuLoadNorm is NOT clamped here — the caller in pulse.go clamps to [0,1].
-func samplePlatform() (int64, float64, error) {
+func (p *SystemPulse) samplePlatform() (int64, float64, error) {
 	ram, err := readRAMWindows()
 	if err != nil {
 		return 0, 0, fmt.Errorf("pulse/windows: GlobalMemoryStatusEx: %w", err)
 	}
 
-	cpu, err := readCPUWindows()
+	cpu, err := p.readCPUWindows()
 	if err != nil {
 		return 0, 0, fmt.Errorf("pulse/windows: GetSystemTimes: %w", err)
 	}
@@ -81,9 +81,10 @@ func fileTimeToUint64(ft fileTime) uint64 {
 }
 
 // readCPUWindows calls GetSystemTimes and computes the normalised CPU busy
-// fraction as a delta from the previous sample.  Returns 0.0 on the very first
-// call (no prior delta available).
-func readCPUWindows() (float64, error) {
+// fraction as a delta from the previous sample. Returns 0.0 on the very first
+// call (no prior delta available). Callers must treat CPULoadNorm == 0.0 as a
+// valid startup value (maps to HealthGreen, the safe default).
+func (p *SystemPulse) readCPUWindows() (float64, error) {
 	var idleTime, kernelTime, userTime fileTime
 	ret, _, err := procGetSystemTimes.Call(
 		uintptr(unsafe.Pointer(&idleTime)),
@@ -100,23 +101,21 @@ func readCPUWindows() (float64, error) {
 	user := fileTimeToUint64(userTime)
 	total := kernel + user
 
-	windowsCPUMu.Lock()
-	defer windowsCPUMu.Unlock()
+	p.cpuMu.Lock()
+	defer p.cpuMu.Unlock()
 
-	if prevTotalTicks == 0 {
+	if p.prevTotalTicks == 0 {
 		// First sample — store baseline, return 0 (no delta yet).
-		prevIdleTicks = idle
-		prevTotalTicks = total
-		prevSampleTime = time.Now()
+		p.prevIdleTicks = idle
+		p.prevTotalTicks = total
 		return 0.0, nil
 	}
 
-	deltaIdle := idle - prevIdleTicks
-	deltaTotal := total - prevTotalTicks
+	deltaIdle := idle - p.prevIdleTicks
+	deltaTotal := total - p.prevTotalTicks
 
-	prevIdleTicks = idle
-	prevTotalTicks = total
-	prevSampleTime = time.Now()
+	p.prevIdleTicks = idle
+	p.prevTotalTicks = total
 
 	if deltaTotal == 0 {
 		return 0.0, nil
