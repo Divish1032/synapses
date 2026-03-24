@@ -935,32 +935,21 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 		return "", err
 	}
 	if dedup.dedupedID != "" {
-		// Sprint 10.1: snapshot old content before overwriting via touch.
-		if dedup.dedupedContent != "" && dedup.dedupedContent != m.Content {
-			activeFrom := dedup.dedupedCreatedAt
-			var latestSupersededAt sql.NullString
-			_ = s.knowledgeDB.QueryRow(
-				`SELECT superseded_at FROM memory_versions WHERE memory_id = ? ORDER BY version DESC LIMIT 1`,
-				dedup.dedupedID,
-			).Scan(&latestSupersededAt)
-			if latestSupersededAt.Valid && latestSupersededAt.String != "" {
-				activeFrom = latestSupersededAt.String
-			}
-			if _, verr := s.CreateMemoryVersion(dedup.dedupedID, dedup.dedupedContent, activeFrom); verr != nil {
-				logutil.Warn("synapses: store: create memory version on dedup (anchored): %v\n", verr)
-			}
-		}
-		// Update memory content to the new (dedup-winning) content.
-		if m.Content != dedup.dedupedContent {
-			if uerr := s.UpdateMemoryContent(dedup.dedupedID, m.Content); uerr != nil {
-				logutil.Warn("synapses: store: update memory content on dedup (anchored): %v\n", uerr)
-			}
-		}
-		// Memory deduped — wrap touch + anchor inserts in one tx so crash
-		// between touch and anchors can't leave inconsistent state.
+		// Begin a single transaction covering version snapshot, content update,
+		// touch, and anchor inserts — all dedup writes are atomic.
 		tx, err := s.knowledgeDB.Begin()
 		if err != nil {
-			// Best-effort fallback: touch and anchors separately.
+			// Best-effort fallback: all ops separately.
+			if dedup.dedupedContent != "" && dedup.dedupedContent != m.Content {
+				if _, verr := s.CreateMemoryVersion(dedup.dedupedID, dedup.dedupedContent, dedup.dedupedCreatedAt); verr != nil {
+					logutil.Warn("synapses: store: create memory version on dedup (anchored): %v\n", verr)
+				}
+			}
+			if m.Content != dedup.dedupedContent {
+				if uerr := s.UpdateMemoryContent(dedup.dedupedID, m.Content); uerr != nil {
+					logutil.Warn("synapses: store: update memory content on dedup (anchored): %v\n", uerr)
+				}
+			}
 			_ = s.TouchMemory(dedup.dedupedID)
 			_ = s.InsertMemoryAnchors(dedup.dedupedID, anchorNodes)
 			// Emit outside any tx — connection is free after fallback ops.
@@ -971,6 +960,36 @@ func (s *Store) InsertMemoryWithAnchors(m Memory, anchorNodes []string) (string,
 			return dedup.dedupedID, nil
 		}
 		defer tx.Rollback()
+
+		// Snapshot old content as a version if content changed (within tx).
+		if dedup.dedupedContent != "" && dedup.dedupedContent != m.Content {
+			activeFrom := dedup.dedupedCreatedAt
+			var latestSupersededAt sql.NullString
+			_ = tx.QueryRow(
+				`SELECT superseded_at FROM memory_versions WHERE memory_id = ? ORDER BY version DESC LIMIT 1`,
+				dedup.dedupedID,
+			).Scan(&latestSupersededAt)
+			if latestSupersededAt.Valid && latestSupersededAt.String != "" {
+				activeFrom = latestSupersededAt.String
+			}
+			versionID := newID()
+			supersededAt := time.Now().UTC().Format(time.RFC3339)
+			if _, verr := tx.Exec(`
+				INSERT INTO memory_versions (id, memory_id, version, content, superseded_by, created_at, superseded_at)
+				SELECT ?, ?, COALESCE(MAX(version), 0) + 1, ?, ?, ?, ?
+				FROM memory_versions WHERE memory_id = ?`,
+				versionID, dedup.dedupedID, dedup.dedupedContent, dedup.dedupedID, activeFrom, supersededAt, dedup.dedupedID,
+			); verr != nil {
+				logutil.Warn("synapses: store: create memory version on dedup (anchored): %v\n", verr)
+			}
+		}
+
+		// Update memory content to the new (dedup-winning) content (within tx).
+		if m.Content != dedup.dedupedContent {
+			if _, uerr := tx.Exec(`UPDATE memories SET content = ? WHERE id = ?`, m.Content, dedup.dedupedID); uerr != nil {
+				logutil.Warn("synapses: store: update memory content on dedup (anchored): %v\n", uerr)
+			}
+		}
 
 		// Inline touch with TTL extension: update last_accessed_at and extend
 		// expires_at within the same transaction for consistency.
