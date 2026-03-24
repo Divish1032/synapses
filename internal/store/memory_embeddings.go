@@ -409,54 +409,6 @@ func (s *Store) DeleteMemoryEmbeddings(memoryIDs []string) error {
 	return nil
 }
 
-// MemoryVectorSearch performs cosine similarity search over memory embeddings.
-// Returns up to limit results ordered by descending similarity.
-// Only non-expired, non-stale memories are included.
-// Falls back gracefully with (nil, nil) when no embeddings are stored yet.
-//
-// Uses HNSW approximate nearest-neighbor index when available (Sprint 12 #4):
-//   - O(log N) query time vs O(N) brute-force
-//   - No 10,000-row safety cap — scales to 100K+ embeddings
-//   - 3× oversampling for ≥95% recall, then SQL Pass 2 re-ranks
-//
-// Falls back to brute-force scan when HNSW index is empty (e.g., first startup
-// before embeddings are computed, or if all embeddings are stale).
-func (s *Store) MemoryVectorSearch(queryVec []float32, limit int) ([]MemorySearchResult, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	if len(queryVec) == 0 {
-		return nil, nil
-	}
-
-	// Pre-normalize query vector so dot product = cosine similarity.
-	normQuery := normalizeVec(queryVec)
-	if normQuery == nil {
-		return nil, nil
-	}
-
-	// Fast path: HNSW ANN index (O(log N) per query).
-	if s.memoryHNSWReady() {
-		candidates := s.hnswSearch(normQuery, limit)
-		if len(candidates) > 0 {
-			// Select top-limit from oversampled candidates using the existing
-			// topKHeap. HNSW candidates are not distance-sorted (heap order);
-			// the heap ensures we pick the best ones.
-			h := &topKHeap{k: limit}
-			for _, c := range candidates {
-				h.tryPush(c.id, c.score, false) // stale flag resolved in Pass 2
-			}
-			winners := h.drain()
-			if len(winners) > 0 {
-				return s.fetchMemorySearchResults(winners)
-			}
-		}
-	}
-
-	// Fallback: brute-force scan (used when HNSW index is empty/not built yet).
-	return s.memoryVectorSearchBruteForce(normQuery, limit)
-}
-
 // memoryVectorSearchBruteForce is the O(N) fallback path for memory vector search.
 // Used when the HNSW index is not available (first startup, all embeddings stale).
 // Retains the original two-pass approach with a safety cap of 50,000 rows.
