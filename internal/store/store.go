@@ -4430,6 +4430,7 @@ func (s *Store) UpsertLearnedEdgeWeights(edges []graph.EdgeWeightKey, delta floa
 	if err != nil {
 		return
 	}
+	defer tx.Rollback() //nolint:errcheck
 	const upsertSQL = `
 		INSERT INTO edge_learned_weights (from_id, to_id, edge_type, weight_mult, dormant, last_used)
 		VALUES (?, ?, ?, MAX(?, MIN(?, 1.0 + ?)), 0, ?)
@@ -4445,7 +4446,6 @@ func (s *Store) UpsertLearnedEdgeWeights(edges []graph.EdgeWeightKey, delta floa
 		)
 	}
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		return
 	}
 	// Invalidate in-memory cache and bump version so CarveConfig/cache keys
