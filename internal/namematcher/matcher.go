@@ -283,7 +283,7 @@ func scoreMatch(a, b *graph.Node) float64 {
 	}
 
 	// Semantic type correlation across domains.
-	if isSemanticallyCorrrelated(a, b) {
+	if isSemanticallyCorrelated(a, b) {
 		score += semanticTypeBoost
 	}
 
@@ -293,9 +293,9 @@ func scoreMatch(a, b *graph.Node) float64 {
 	return score
 }
 
-// isSemanticallyCorrrelated returns true when the two nodes' domain+type
+// isSemanticallyCorrelated returns true when the two nodes' domain+type
 // combination appears in the semanticTypeCorrelations table.
-func isSemanticallyCorrrelated(a, b *graph.Node) bool {
+func isSemanticallyCorrelated(a, b *graph.Node) bool {
 	keyA := string(a.Domain) + ":" + string(a.Type)
 	keyB := string(b.Domain) + ":" + string(b.Type)
 	for _, pair := range semanticTypeCorrelations {

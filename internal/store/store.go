@@ -2875,6 +2875,18 @@ func (s *Store) DeleteManualEdge(fromID, toID graph.NodeID, relation string) err
 	return err
 }
 
+// ManualEdgeExists returns true when a manual edge with the given endpoints and
+// relation exists in the store (regardless of confirmed/suppressed state).
+// Uses the primary-key index — O(log N), no full table scan.
+func (s *Store) ManualEdgeExists(fromID, toID graph.NodeID, relation string) (bool, error) {
+	var n int
+	err := s.graphDB.QueryRow(
+		`SELECT COUNT(*) FROM manual_edges WHERE from_id=? AND to_id=? AND relation=?`,
+		string(fromID), string(toID), relation,
+	).Scan(&n)
+	return n > 0, err
+}
+
 // LoadManualEdges returns all persisted user-defined edges.
 func (s *Store) LoadManualEdges() ([]ManualEdge, error) {
 	rows, err := s.graphDB.Query(

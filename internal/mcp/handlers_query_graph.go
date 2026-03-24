@@ -34,6 +34,38 @@ const (
 	queryGraphTimeout = 500 * time.Millisecond
 )
 
+// unescapeStringLiteral converts raw content between double-quotes into the
+// intended string value by processing backslash escape sequences one character
+// at a time. Supported: \\ → \, \" → ". Any other \X passes through unchanged.
+// This avoids the overlapping-pattern bug that strings.ReplaceAll chains have
+// when the input contains sequences like \\" (should give \, not \").
+func unescapeStringLiteral(raw string) string {
+	if !strings.ContainsRune(raw, '\\') {
+		return raw // fast path: nothing to unescape
+	}
+	var b strings.Builder
+	b.Grow(len(raw))
+	i := 0
+	for i < len(raw) {
+		if raw[i] == '\\' && i+1 < len(raw) {
+			switch raw[i+1] {
+			case '\\':
+				b.WriteByte('\\')
+			case '"':
+				b.WriteByte('"')
+			default:
+				b.WriteByte('\\')
+				b.WriteByte(raw[i+1])
+			}
+			i += 2
+			continue
+		}
+		b.WriteByte(raw[i])
+		i++
+	}
+	return b.String()
+}
+
 // ── Tokenizer ────────────────────────────────────────────────────────────────
 
 type tokenKind int
@@ -75,10 +107,9 @@ func tokenize(s string) ([]token, error) {
 			if j >= len(s) {
 				return nil, fmt.Errorf("unterminated string literal starting at position %d", i)
 			}
-			// Unescape simple backslash sequences: \\ → \, \" → "
-			raw := s[i+1 : j]
-			raw = strings.ReplaceAll(raw, `\"`, `"`)
-			raw = strings.ReplaceAll(raw, `\\`, `\`)
+			// Unescape backslash sequences character by character so that overlapping
+			// patterns (e.g. \\") are handled correctly: \\ → \, \" → ".
+			raw := unescapeStringLiteral(s[i+1 : j])
 			tokens = append(tokens, token{kind: tokString, value: raw})
 			i = j + 1
 			continue
@@ -363,7 +394,7 @@ func matchCondition(n *graph.Node, fanin, fanout int, c graphQueryCondition) boo
 	case gqfDomain:
 		d := string(n.Domain)
 		if d == "" {
-			d = "code" // default domain
+			d = string(graph.DomainCode) // default domain
 		}
 		actual = d
 	case gqfFile:
@@ -501,7 +532,7 @@ func (s *Server) handleQueryGraph(
 
 		domain := string(n.Domain)
 		if domain == "" {
-			domain = "code"
+			domain = string(graph.DomainCode)
 		}
 
 		results = append(results, graphNodeResult{
