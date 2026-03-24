@@ -200,14 +200,14 @@ func cmdStartDirect(args []string) error {
 	// Prevents unbounded growth of tool_calls, events, agent_messages, and
 	// episodes tables during long stdio process uptime (hours/days).
 	go func() {
-		st.PruneStaleData(30)
+		st.PruneStaleData(appCtx, 30)
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
 				logutil.Info("synapses: daily prune running (30-day retention)\n")
-				st.PruneStaleData(30)
+				st.PruneStaleData(appCtx, 30)
 			case <-appCtx.Done():
 				return
 			}

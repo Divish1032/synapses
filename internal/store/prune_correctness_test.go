@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -177,7 +178,7 @@ func TestPruneStaleData_ToolCalls_DeletesOldPreservesRecent(t *testing.T) {
 	}
 
 	// Prune with 30-day retention — 60-day-old rows should be deleted.
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	after := pruneCountRows(t, st, "tool_calls")
 	if after != 3 {
@@ -201,7 +202,7 @@ func TestPruneStaleData_Events_DeletesOldPreservesRecent(t *testing.T) {
 		t.Fatalf("expected 6 events before prune, got %d", before)
 	}
 
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	after := pruneCountRows(t, st, "events")
 	if after != 2 {
@@ -233,7 +234,7 @@ func TestPruneStaleData_Episodes_DeletesOldPreservesRecent(t *testing.T) {
 		t.Fatalf("expected 4 episodes before prune, got %d", before)
 	}
 
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	after := pruneCountRows(t, st, "episodes")
 	if after != 1 {
@@ -258,7 +259,7 @@ func TestPruneStaleData_AgentMessages_DeletesOldPreservesRecent(t *testing.T) {
 		t.Fatalf("expected 6 agent_messages before prune, got %d", before)
 	}
 
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	after := pruneCountRows(t, st, "agent_messages")
 	if after != 2 {
@@ -289,7 +290,7 @@ func TestPruneStaleData_ContextDeliveries_DeletesOldPreservesRecent(t *testing.T
 		t.Fatalf("expected 4 context_deliveries before prune, got %d", before)
 	}
 
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	after := pruneCountRows(t, st, "context_deliveries")
 	if after != 1 {
@@ -325,7 +326,7 @@ func TestPruneStaleData_Memories_ExpiredAndSessionLog(t *testing.T) {
 		t.Fatalf("expected 6 memories before prune, got %d", before)
 	}
 
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	after := pruneCountRows(t, st, "memories")
 	// Survivors: 1 entity with future expiry + 1 recent session_log = 2
@@ -360,7 +361,7 @@ func TestPruneStaleData_ZeroRetention_DeletesAll(t *testing.T) {
 		`INSERT INTO agent_messages(id, from_agent, to_agent, topic, payload, project_id, created_at)
 		 VALUES('msg-zero', 'a', 'b', 't', '{}', '', ?)`, pastUnix)
 
-	st.PruneStaleData(0)
+	st.PruneStaleData(context.Background(), 0)
 
 	if n := pruneCountRows(t, st, "tool_calls"); n != 0 {
 		t.Errorf("tool_calls: expected 0 after zero-retention prune, got %d", n)
@@ -433,7 +434,7 @@ func TestPruneStaleData_Annotations_OrphanedStaleDeleted(t *testing.T) {
 		t.Fatalf("expected 3 annotations before prune, got %d", before)
 	}
 
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	after := pruneCountRows(t, st, "annotations")
 	// Survivors: ann-1 (node exists) + ann-3 (not stale) = 2
@@ -479,7 +480,7 @@ func TestPruneStaleData_Annotations_NoGraphDB(t *testing.T) {
 	st.graphDB = nil
 	defer func() { st.graphDB = savedGraphDB }()
 
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	// Annotation should survive — no graph to cross-reference.
 	after := pruneCountRows(t, st, "annotations")
@@ -517,7 +518,7 @@ func TestPruneStaleData_Annotations_EmptyGraph(t *testing.T) {
 		t.Fatalf("expected 0 nodes in empty graph, got %d", nodeCount)
 	}
 
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	// Annotation must survive — empty graph means skip reconciliation.
 	after := pruneCountRows(t, st, "annotations")
@@ -558,7 +559,7 @@ func TestPruneStaleData_AllTables_IntegrationRoundTrip(t *testing.T) {
 	)
 
 	// --- Prune at 30 days ---
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	// --- Verify ---
 	checks := []struct {

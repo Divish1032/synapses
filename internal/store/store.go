@@ -1648,7 +1648,7 @@ func (s *Store) CollectQueryStats(w io.Writer) QueryStats {
 // Safe to call concurrently — a built-in 23-hour debounce ensures at most one
 // prune runs per day regardless of how many goroutines invoke it.
 // Intended to be called at startup and then on a daily timer.
-func (s *Store) PruneStaleData(retentionDays int) {
+func (s *Store) PruneStaleData(ctx context.Context, retentionDays int) {
 	s.lastPruneStaleMu.Lock()
 	if time.Since(s.lastPruneStaleAt) < 23*time.Hour {
 		s.lastPruneStaleMu.Unlock()
@@ -1701,7 +1701,11 @@ func (s *Store) PruneStaleData(retentionDays int) {
 			if n < 5000 {
 				return // done
 			}
-			time.Sleep(50 * time.Millisecond)
+			select {
+		case <-time.After(50 * time.Millisecond):
+		case <-ctx.Done():
+			return
+		}
 		}
 	}
 

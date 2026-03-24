@@ -17,6 +17,7 @@ package store_test
 // - LoadGraph restores promoted metadata fields
 
 import (
+	"context"
 	"io"
 	"path/filepath"
 	"testing"
@@ -123,7 +124,7 @@ func TestPruneStaleData_NoData_NoPanic(t *testing.T) {
 	t.Parallel()
 	st := openTestStore(t)
 	// Should not panic on an empty database.
-	st.PruneStaleData(7)
+	st.PruneStaleData(context.Background(), 7)
 }
 
 func TestPruneStaleData_WithData(t *testing.T) {
@@ -144,7 +145,7 @@ func TestPruneStaleData_WithData(t *testing.T) {
 	})
 
 	// Prune with 0-day retention — should delete everything.
-	st.PruneStaleData(0)
+	st.PruneStaleData(context.Background(), 0)
 }
 
 // TestPruneStaleData_OrphanedQualityGaps verifies that PruneStaleData removes
@@ -198,7 +199,7 @@ func TestPruneStaleData_OrphanedQualityGaps(t *testing.T) {
 	}
 
 	// Run prune — fresh store has zero debounce, so this runs immediately.
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	// Gap 1 must survive: its node still exists.
 	surviving, err := st.GetGaps(store.GapFilter{NodeID: existingID})

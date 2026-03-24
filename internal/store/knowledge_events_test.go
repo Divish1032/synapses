@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -185,7 +186,7 @@ func TestKnowledgeEvent_Expired(t *testing.T) {
 	st.lastPruneStaleAt = time.Time{}
 	st.lastPruneStaleMu.Unlock()
 
-	st.PruneStaleData(30)
+	st.PruneStaleData(context.Background(), 30)
 
 	events := eventsOfType(t, st, "knowledge_expired")
 	if len(events) == 0 {
