@@ -2867,6 +2867,37 @@ func (s *Server) registerTools() {
 		s.handlePlanContext,
 	)
 
+	// ── Graph Query ─────────────────────────────────────────────────────────
+
+	// query_graph — Sprint 16 #7: constrained DSL for direct graph node filtering.
+	s.addOrDefer(
+		mcp.NewTool(
+			"query_graph",
+			mcp.WithDescription(
+				"Constrained DSL for direct graph node filtering. Power user tool for "+
+					"cross-domain exploration when BFS traversal (get_context/get_impact) is too broad. "+
+					"Returns nodes matching ALL conditions (AND-only). Read-only, 1000-node cap, 500ms timeout. "+
+					"Syntax: NODES WHERE <field> <op> <value> [AND <field> <op> <value> ...]\n"+
+					"Fields: package, type, domain, file, name, exported, fanin, fanout\n"+
+					"Operators: = != > >= < <= (fanin/fanout support all; string fields support = and !=)\n"+
+					"Examples:\n"+
+					"  NODES WHERE package=\"auth\" AND fanin > 5\n"+
+					"  NODES WHERE type=\"function\" AND exported=true AND fanout >= 3\n"+
+					"  NODES WHERE domain=\"infra\"\n"+
+					"  NODES WHERE fanout >= 10 AND fanin = 0\n"+
+					"  NODES WHERE name=\"PaymentService\"",
+			),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description(
+					"DSL query string. Must start with NODES WHERE. "+
+						"Example: NODES WHERE package=\"auth\" AND fanin > 5",
+				),
+			),
+		),
+		s.handleQueryGraph,
+	)
+
 	// ── Benchmark ───────────────────────────────────────────────────────────
 
 	s.addOrDefer(
