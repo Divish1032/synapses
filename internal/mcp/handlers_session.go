@@ -1447,6 +1447,82 @@ func (s *Server) handleSessionInit(
 	// only FTS results in air-gapped or unconfigured environments.
 	resp["embeddings"] = embeddingStatus(s.memoryEmbedder)
 
+	// ── Knowledge graph stats (Sprint 16 #6) ─────────────────────────────
+	// Expose entity counts by domain, cross-domain edge breakdown, and
+	// freshness so agents can self-calibrate before issuing cross-domain queries.
+	// Included in all scope modes — it's small (~100 tokens) and high-value.
+	if s.graph != nil {
+		// Count entities by domain.
+		entitiesByDomain := make(map[string]int)
+		activeDomains := make(map[string]bool)
+		for _, n := range s.graph.AllNodes() {
+			d := string(n.Domain)
+			if d == "" {
+				d = string(graph.DomainCode)
+			}
+			entitiesByDomain[d]++
+			activeDomains[d] = true
+		}
+		// Build sorted active-domains list for stable output.
+		sortedDomains := make([]string, 0, len(activeDomains))
+		for d := range activeDomains {
+			sortedDomains = append(sortedDomains, d)
+		}
+		sort.Strings(sortedDomains)
+
+		// Count cross-domain edges: auto (name-matcher), confirmed (human-approved),
+		// manual (user via link_entities). Only non-suppressed, cross-domain typed
+		// edges are counted — intra-domain relations (e.g. CALLS, IMPORTS) stored in
+		// manual_edges via link_entities are excluded from these stats.
+		var autoEdges, confirmedEdges, manualEdges int
+		if s.store != nil {
+			if mes, err := s.store.LoadManualEdges(); err == nil {
+				for _, me := range mes {
+					if me.Suppressed {
+						continue
+					}
+					// Only count edges with relation types that are definitionally
+					// cross-domain (DEPLOYS, CONSUMES, CONFIGURED_BY, DOCUMENTS,
+					// MENTIONS, MANUAL). Intra-domain edges stored in manual_edges
+					// (rare, but possible via link_entities) are excluded.
+					if !graph.IsCrossDomainEdge(graph.EdgeType(me.Relation)) {
+						continue
+					}
+					switch {
+					case me.Confirmed:
+						confirmedEdges++
+					case me.CreatedBy == "namematcher":
+						autoEdges++
+					default:
+						manualEdges++
+					}
+				}
+			}
+		}
+
+		// Freshness: report whether the graph reflects the current file state.
+		// recentChanges contains files modified in the last 15 min window; each
+		// entry has already been re-indexed (the watcher indexes on change), so
+		// the graph is always current. A non-empty list tells agents which files
+		// changed recently.
+		freshness := "current"
+		if len(recentChanges) > 0 {
+			freshness = fmt.Sprintf("current (%d files changed in last 15 min)", len(recentChanges))
+		}
+
+		resp["knowledge_graph"] = map[string]interface{}{
+			"entities_by_domain": entitiesByDomain,
+			"active_domains":     sortedDomains,
+			"cross_domain_edges": map[string]interface{}{
+				"auto":      autoEdges,
+				"confirmed": confirmedEdges,
+				"manual":    manualEdges,
+				"total":     autoEdges + confirmedEdges + manualEdges,
+			},
+			"freshness": freshness,
+		}
+	}
+
 	// Cross-project status: show ACL-allowed projects only.
 	// Do not expose names of projects this project is not allowed to read from.
 	if s.projectRegistry != nil {

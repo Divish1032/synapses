@@ -1368,3 +1368,192 @@ func TestBudgetMultiplier_Integration_PrepareContext(t *testing.T) {
 		t.Fatal("expected successful response from prepare_context")
 	}
 }
+
+// ── knowledge_graph stats (Sprint 16 #6) ─────────────────────────────────────
+
+// TestSessionInit_KnowledgeGraph_EmptyGraph verifies that session_init includes
+// a knowledge_graph section even when no non-code-domain nodes exist yet.
+func TestSessionInit_KnowledgeGraph_EmptyGraph(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-agent"}))
+	m := mustResult(t, res, err)
+
+	kg, ok := m["knowledge_graph"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected knowledge_graph map in session_init response, got %T — keys: %v",
+			m["knowledge_graph"], mapKeys(m))
+	}
+	if kg["entities_by_domain"] == nil {
+		t.Error("expected entities_by_domain key in knowledge_graph")
+	}
+	if kg["active_domains"] == nil {
+		t.Error("expected active_domains key in knowledge_graph")
+	}
+	if kg["cross_domain_edges"] == nil {
+		t.Error("expected cross_domain_edges key in knowledge_graph")
+	}
+	if kg["freshness"] == nil {
+		t.Error("expected freshness key in knowledge_graph")
+	}
+}
+
+// TestSessionInit_KnowledgeGraph_MultiDomain verifies entity counts and active
+// domains are correct when the graph has nodes in multiple domains.
+func TestSessionInit_KnowledgeGraph_MultiDomain(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	// Add code node (default domain).
+	codeID := g.MakeNodeID("cmd/main.go", "main")
+	g.AddNode(&graph.Node{ID: codeID, Type: graph.NodeFunction, Name: "main",
+		File: "cmd/main.go", Domain: graph.DomainCode})
+
+	// Add infra node.
+	infraID := g.MakeNodeID("infra/main.tf", "aws_instance.web")
+	g.AddNode(&graph.Node{ID: infraID, Type: graph.NodeFunction, Name: "aws_instance.web",
+		File: "infra/main.tf", Domain: graph.DomainInfra})
+
+	// Add API node.
+	apiID := g.MakeNodeID("api/openapi.yaml", "POST /payments")
+	g.AddNode(&graph.Node{ID: apiID, Type: graph.NodeFunction, Name: "POST /payments",
+		File: "api/openapi.yaml", Domain: graph.DomainAPI})
+	_ = apiID
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-multi"}))
+	m := mustResult(t, res, err)
+
+	kg := m["knowledge_graph"].(map[string]any)
+	ebd := kg["entities_by_domain"].(map[string]any)
+
+	if ebd["code"] == nil {
+		t.Error("expected 'code' in entities_by_domain")
+	}
+	if ebd["infra"] == nil {
+		t.Error("expected 'infra' in entities_by_domain")
+	}
+	if ebd["api"] == nil {
+		t.Error("expected 'api' in entities_by_domain")
+	}
+
+	domains, ok := kg["active_domains"].([]any)
+	if !ok || len(domains) < 3 {
+		t.Errorf("expected at least 3 active_domains, got %v", kg["active_domains"])
+	}
+}
+
+// TestSessionInit_KnowledgeGraph_CrossDomainEdgeCounts verifies the breakdown of
+// auto/confirmed/manual edges (non-suppressed only) is correct.
+func TestSessionInit_KnowledgeGraph_CrossDomainEdgeCounts(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	codeID := g.MakeNodeID("cmd/main.go", "main")
+	g.AddNode(&graph.Node{ID: codeID, Type: graph.NodeFunction, Name: "main",
+		File: "cmd/main.go", Domain: graph.DomainCode})
+	infraID := g.MakeNodeID("infra/main.tf", "aws_instance.web")
+	g.AddNode(&graph.Node{ID: infraID, Type: graph.NodeFunction, Name: "aws_instance.web",
+		File: "infra/main.tf", Domain: graph.DomainInfra})
+
+	// Auto edge: created by namematcher.
+	if _, err := st.SaveSyntheticEdge(codeID, infraID, graph.EdgeMentions, 0.75); err != nil {
+		t.Fatalf("SaveSyntheticEdge: %v", err)
+	}
+	// Manual edge: created by user.
+	if _, err := st.SaveManualEdge(codeID, infraID, string(graph.EdgeDeploys), "infra", "agent-1", 1.0, true); err != nil {
+		t.Fatalf("SaveManualEdge: %v", err)
+	}
+	// Suppressed edge: should not be counted.
+	if _, err := st.SaveManualEdge(codeID, infraID, string(graph.EdgeConsumes), "api", "agent-1", 0.7, true); err != nil {
+		t.Fatalf("SaveManualEdge (suppressed): %v", err)
+	}
+	if err := st.ConfirmEdge(codeID, infraID, string(graph.EdgeConsumes), false); err != nil {
+		t.Fatalf("ConfirmEdge(suppress): %v", err)
+	}
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-edges"}))
+	m := mustResult(t, res, err)
+
+	kg := m["knowledge_graph"].(map[string]any)
+	cde := kg["cross_domain_edges"].(map[string]any)
+
+	// auto = 1 (namematcher), manual = 1 (link_entities), suppressed = excluded
+	getInt := func(key string) int {
+		v, _ := cde[key].(float64)
+		return int(v)
+	}
+	if got := getInt("auto"); got != 1 {
+		t.Errorf("expected auto=1, got %d", got)
+	}
+	if got := getInt("manual"); got != 1 {
+		t.Errorf("expected manual=1, got %d", got)
+	}
+	if got := getInt("confirmed"); got != 0 {
+		t.Errorf("expected confirmed=0, got %d", got)
+	}
+	if got := getInt("total"); got != 2 {
+		t.Errorf("expected total=2, got %d (suppressed edge must be excluded)", got)
+	}
+}
+
+// TestSessionInit_KnowledgeGraph_ConfirmedEdge verifies that a confirmed edge
+// is counted under "confirmed" rather than "auto" or "manual".
+func TestSessionInit_KnowledgeGraph_ConfirmedEdge(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	codeID := g.MakeNodeID("cmd/main.go", "main")
+	g.AddNode(&graph.Node{ID: codeID, Type: graph.NodeFunction, Name: "main",
+		File: "cmd/main.go", Domain: graph.DomainCode})
+	infraID := g.MakeNodeID("infra/main.tf", "aws_instance.web")
+	g.AddNode(&graph.Node{ID: infraID, Type: graph.NodeFunction, Name: "aws_instance.web",
+		File: "infra/main.tf", Domain: graph.DomainInfra})
+
+	// Start as auto, then confirm.
+	if _, err := st.SaveSyntheticEdge(codeID, infraID, graph.EdgeMentions, 0.7); err != nil {
+		t.Fatalf("SaveSyntheticEdge: %v", err)
+	}
+	if err := st.ConfirmEdge(codeID, infraID, string(graph.EdgeMentions), true); err != nil {
+		t.Fatalf("ConfirmEdge: %v", err)
+	}
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-conf"}))
+	m := mustResult(t, res, err)
+
+	kg := m["knowledge_graph"].(map[string]any)
+	cde := kg["cross_domain_edges"].(map[string]any)
+
+	getInt := func(key string) int {
+		v, _ := cde[key].(float64)
+		return int(v)
+	}
+	if got := getInt("confirmed"); got != 1 {
+		t.Errorf("expected confirmed=1, got %d", got)
+	}
+	if got := getInt("auto"); got != 0 {
+		t.Errorf("expected auto=0 after confirm, got %d", got)
+	}
+}
