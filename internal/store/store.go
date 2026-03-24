@@ -63,6 +63,20 @@ CREATE TABLE IF NOT EXISTS edges (
     PRIMARY KEY (from_id, to_id, type)
 );
 
+-- edge_learned_weights stores per-specific-edge weight multipliers derived from
+-- historical task outcomes (Sprint 15 #3). Survives SaveGraph (separate table).
+-- weight_mult: [0.3, 2.0]; dormant: 1 when last_used older than 30 days (and
+-- weight_mult already includes the dormancy penalty applied at mark time).
+CREATE TABLE IF NOT EXISTS edge_learned_weights (
+    from_id     TEXT NOT NULL,
+    to_id       TEXT NOT NULL,
+    edge_type   TEXT NOT NULL,
+    weight_mult REAL    NOT NULL DEFAULT 1.0,
+    dormant     INTEGER NOT NULL DEFAULT 0,
+    last_used   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (from_id, to_id, edge_type)
+);
+
 -- manual_edges stores user-defined cross-domain edges created via link_entities.
 -- These survive SaveGraph (which wipes the edges table) because they are stored here.
 -- On LoadGraph, they are re-injected into the in-memory graph.
@@ -656,6 +670,16 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE node_embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_call_sites_file      ON call_sites(caller_file)`,
 		`CREATE INDEX IF NOT EXISTS idx_call_sites_pkg_alias ON call_sites(pkg_alias)`,
+		// Sprint 15 #3: per-specific-edge learned weight multipliers.
+		`CREATE TABLE IF NOT EXISTS edge_learned_weights (
+			from_id     TEXT NOT NULL,
+			to_id       TEXT NOT NULL,
+			edge_type   TEXT NOT NULL,
+			weight_mult REAL    NOT NULL DEFAULT 1.0,
+			dormant     INTEGER NOT NULL DEFAULT 0,
+			last_used   INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (from_id, to_id, edge_type)
+		)`,
 	} {
 		if _, err := graphTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
@@ -4086,4 +4110,97 @@ func (s *Store) LoadIndexSnapshot() ([]byte, error) {
 		return nil, nil
 	}
 	return blob, err
+}
+
+// ---------------------------------------------------------------------------
+// Edge learned weights (Sprint 15 #3 — BFS/PPR weight refinement)
+//
+// Per-specific-edge weight multipliers derived from historical task outcomes.
+// Stored in graphDB so they survive SaveGraph (which wipes the edges table).
+// weight_mult range: [0.3, 2.0]. dormant=1 when last_used older than 30 days
+// (the dormancy penalty is already baked into weight_mult at mark time).
+// ---------------------------------------------------------------------------
+
+const (
+	learnedWeightCap   = 2.0  // maximum boost
+	learnedWeightFloor = 0.3  // minimum (penalty floor)
+	dormancyPenalty    = 0.7  // multiplied once when an edge is marked dormant
+	dormancyDays       = 30   // days of inactivity before dormant flag
+)
+
+// GetLearnedEdgeWeights loads all per-edge learned weight multipliers from
+// graphDB and returns them as a map keyed by EdgeWeightKey. Returns nil (not
+// an error) when no entries exist yet. The caller passes the result directly
+// to CarveConfig.LearnedEdgeWeights.
+func (s *Store) GetLearnedEdgeWeights() map[graph.EdgeWeightKey]float64 {
+	if s == nil || s.graphDB == nil {
+		return nil
+	}
+	rows, err := s.graphDB.Query(
+		`SELECT from_id, to_id, edge_type, weight_mult FROM edge_learned_weights`,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var result map[graph.EdgeWeightKey]float64
+	for rows.Next() {
+		var from, to, et string
+		var mult float64
+		if rows.Scan(&from, &to, &et, &mult) != nil {
+			continue
+		}
+		if result == nil {
+			result = make(map[graph.EdgeWeightKey]float64)
+		}
+		result[graph.EdgeWeightKey{
+			From: graph.NodeID(from),
+			To:   graph.NodeID(to),
+			Type: graph.EdgeType(et),
+		}] = mult
+	}
+	return result
+}
+
+// UpsertLearnedEdgeWeights applies a signed delta to each of the given edges'
+// weight_mult, clamping to [learnedWeightFloor, learnedWeightCap].
+// last_used is set to now for all updated edges. dormant is cleared on update
+// (the agent just used the edge, so it is no longer dormant).
+// Errors are silently dropped — this is best-effort instrumentation.
+func (s *Store) UpsertLearnedEdgeWeights(edges []graph.EdgeWeightKey, delta float64) {
+	if s == nil || s.graphDB == nil || len(edges) == 0 {
+		return
+	}
+	now := time.Now().UTC().Unix()
+	for _, ek := range edges {
+		_, _ = s.graphDB.Exec(`
+			INSERT INTO edge_learned_weights (from_id, to_id, edge_type, weight_mult, dormant, last_used)
+			VALUES (?, ?, ?, MAX(?, MIN(?, 1.0 + ?)), 0, ?)
+			ON CONFLICT(from_id, to_id, edge_type) DO UPDATE SET
+				weight_mult = MAX(?, MIN(?, weight_mult + ?)),
+				dormant     = 0,
+				last_used   = ?`,
+			string(ek.From), string(ek.To), string(ek.Type),
+			learnedWeightFloor, learnedWeightCap, delta, now,
+			learnedWeightFloor, learnedWeightCap, delta, now,
+		)
+	}
+}
+
+// MarkDormantEdges marks edges whose last_used timestamp is older than before
+// as dormant and applies a one-time dormancyPenalty to weight_mult (floored at
+// learnedWeightFloor). Only edges not already dormant are updated.
+// Errors are silently dropped — this is best-effort maintenance.
+func (s *Store) MarkDormantEdges(before time.Time) {
+	if s == nil || s.graphDB == nil {
+		return
+	}
+	cutoff := before.UTC().Unix()
+	_, _ = s.graphDB.Exec(`
+		UPDATE edge_learned_weights
+		SET dormant     = 1,
+		    weight_mult = MAX(?, weight_mult * ?)
+		WHERE last_used < ? AND last_used > 0 AND dormant = 0`,
+		learnedWeightFloor, dormancyPenalty, cutoff,
+	)
 }

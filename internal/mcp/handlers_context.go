@@ -345,6 +345,13 @@ func (s *Server) handleGetContext(
 		}
 	}
 
+	// Sprint 15 #3: load per-edge learned weight multipliers from graphDB.
+	// Returns nil (no-op) when no entries exist yet or store is unavailable.
+	// Fire-and-forget single SQL SELECT — negligible latency on warm cache.
+	if s.store != nil {
+		cfg.LearnedEdgeWeights = s.store.GetLearnedEdgeWeights()
+	}
+
 	// F17: Adaptive Context Learning — auto-expand depth/detail based on
 	// stored feedback for this entity+agent before per-call explicit overrides
 	// are applied. Explicit caller values always win over adaptive adjustments.
