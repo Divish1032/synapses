@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"golang.org/x/sync/singleflight"
@@ -38,27 +39,33 @@ type ProjectInstance struct {
 
 // Close shuts down all resources owned by this instance.
 // Called when the project is deregistered or the daemon exits.
+// Each resource is closed via defer so a hang or panic in one closer does not
+// prevent the remaining resources from being released.
 func (pi *ProjectInstance) Close() {
-	if pi.cancel != nil {
-		pi.cancel()
-	}
-	if pi.Watcher != nil {
-		pi.Watcher.Stop()
-	}
-	if pi.MCPServer != nil {
-		pi.MCPServer.Close()
-	}
-	if pi.HTTPHandler != nil {
-		pi.HTTPHandler.Shutdown(context.Background()) //nolint:errcheck
-	}
-	if pi.Store != nil {
-		pi.Store.Close()
+	if pi.MemoryEmbedder != nil {
+		defer pi.MemoryEmbedder.Close()
 	}
 	if pi.BrainClient != nil {
-		pi.BrainClient.Close()
+		defer pi.BrainClient.Close()
 	}
-	if pi.MemoryEmbedder != nil {
-		pi.MemoryEmbedder.Close()
+	if pi.Store != nil {
+		defer pi.Store.Close()
+	}
+	if pi.HTTPHandler != nil {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			pi.HTTPHandler.Shutdown(ctx) //nolint:errcheck
+		}()
+	}
+	if pi.MCPServer != nil {
+		defer pi.MCPServer.Close()
+	}
+	if pi.Watcher != nil {
+		defer pi.Watcher.Stop()
+	}
+	if pi.cancel != nil {
+		pi.cancel()
 	}
 }
 
