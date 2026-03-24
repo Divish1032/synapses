@@ -272,15 +272,16 @@ func TestImpactAnalysisCrossDomainFilesInAffectedFiles(t *testing.T) {
 	}
 }
 
-func TestImpactAnalysisCrossDomainTruncationSignal(t *testing.T) {
-	// Build a graph with more than maxCrossDomainImpactNodes cross-domain edges.
+func TestImpactAnalysisCrossDomainPerCategoryCapTruncation(t *testing.T) {
+	// DEPLOYS cap is 30. Adding 35 DEPLOYS edges must truncate at 30 and set CrossDomainTruncated.
 	g := graph.New("testrepo")
-	const maxNodes = 100
+	const deployCount = 35
+	const deployCap = 30 // must match crossDomainCaps[EdgeDeploys]
 
 	rootID := g.MakeNodeID("svc.go", "HeavyService")
 	g.AddNode(&graph.Node{ID: rootID, Type: graph.NodeFunction, Name: "HeavyService", File: "svc.go", Domain: graph.DomainCode})
 
-	for i := 0; i <= maxNodes; i++ {
+	for i := 0; i < deployCount; i++ {
 		file := fmt.Sprintf("infra/resource_%d.tf", i)
 		name := fmt.Sprintf("aws_resource_%d", i)
 		nodeID := g.MakeNodeID(file, name)
@@ -293,10 +294,74 @@ func TestImpactAnalysisCrossDomainTruncationSignal(t *testing.T) {
 		t.Fatalf("ImpactAnalysis: %v", err)
 	}
 	if !result.CrossDomainTruncated {
-		t.Error("expected CrossDomainTruncated=true when more than 100 cross-domain edges exist")
+		t.Error("expected CrossDomainTruncated=true when DEPLOYS exceeds per-category cap")
 	}
-	if len(result.CrossDomainImpact) != maxNodes {
-		t.Errorf("expected exactly %d refs when truncated, got %d", maxNodes, len(result.CrossDomainImpact))
+	deploysFound := 0
+	for _, r := range result.CrossDomainImpact {
+		if r.EdgeType == graph.EdgeDeploys {
+			deploysFound++
+		}
+	}
+	if deploysFound != deployCap {
+		t.Errorf("expected exactly %d DEPLOYS refs (per-category cap), got %d", deployCap, deploysFound)
+	}
+}
+
+func TestImpactAnalysisMentionsCannotCrowdOutDeploys(t *testing.T) {
+	// The key guarantee of per-category caps: even if MENTIONS has 200 edges,
+	// DEPLOYS still gets its full quota (up to 30).
+	g := graph.New("testrepo")
+	const mentionsCount = 200
+	const deploysCount = 10
+	const mentionsCap = 15 // must match crossDomainCaps[EdgeMentions]
+
+	rootID := g.MakeNodeID("svc.go", "PopularService")
+	g.AddNode(&graph.Node{ID: rootID, Type: graph.NodeFunction, Name: "PopularService", File: "svc.go", Domain: graph.DomainCode})
+
+	// Add 200 MENTIONS edges (reverse direction: other → root).
+	for i := 0; i < mentionsCount; i++ {
+		file := fmt.Sprintf("other/file_%d.go", i)
+		name := fmt.Sprintf("OtherService_%d", i)
+		nodeID := g.MakeNodeID(file, name)
+		g.AddNode(&graph.Node{ID: nodeID, Type: graph.NodeFunction, Name: name, File: file, Domain: graph.DomainCode})
+		g.AddEdge(&graph.Edge{From: nodeID, To: rootID, Type: graph.EdgeMentions})
+	}
+
+	// Add 10 DEPLOYS edges (forward: root → infra).
+	for i := 0; i < deploysCount; i++ {
+		file := fmt.Sprintf("infra/resource_%d.tf", i)
+		name := fmt.Sprintf("aws_resource_%d", i)
+		nodeID := g.MakeNodeID(file, name)
+		g.AddNode(&graph.Node{ID: nodeID, Type: graph.NodeFunction, Name: name, File: file, Domain: graph.DomainInfra})
+		g.AddEdge(&graph.Edge{From: rootID, To: nodeID, Type: graph.EdgeDeploys})
+	}
+
+	result, err := g.ImpactAnalysis(rootID, 3)
+	if err != nil {
+		t.Fatalf("ImpactAnalysis: %v", err)
+	}
+
+	var deploysFound, mentionsFound int
+	for _, r := range result.CrossDomainImpact {
+		switch r.EdgeType {
+		case graph.EdgeDeploys:
+			deploysFound++
+		case graph.EdgeMentions:
+			mentionsFound++
+		}
+	}
+
+	// All 10 DEPLOYS must be present — MENTIONS must not crowd them out.
+	if deploysFound != deploysCount {
+		t.Errorf("DEPLOYS: expected %d, got %d — MENTIONS may have crowded them out", deploysCount, deploysFound)
+	}
+	// MENTIONS is capped at 15.
+	if mentionsFound > mentionsCap {
+		t.Errorf("MENTIONS: expected at most %d (per-category cap), got %d", mentionsCap, mentionsFound)
+	}
+	// With 200 MENTIONS, truncation must fire.
+	if !result.CrossDomainTruncated {
+		t.Error("expected CrossDomainTruncated=true with 200 MENTIONS edges")
 	}
 }
 
