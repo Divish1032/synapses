@@ -11,6 +11,7 @@ import (
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -357,6 +358,39 @@ func (s *Server) handleEndSession(
 				memoriesSaved++
 			}
 		}
+	}
+
+	// ── D1: Co-occurrence learning — LogDecision for each modified entity ──
+	// Feeds the PatternHints pipeline so future context packets surface
+	// "entities commonly edited together" suggestions.
+	// Fire-and-forget: brain unavailable → no-op.
+	if s.brainClient != nil && sessSummary != nil && len(sessSummary.EntitiesExamined) > 0 {
+		bc := s.brainClient
+		entities := make([]string, len(sessSummary.EntitiesExamined))
+		copy(entities, sessSummary.EntitiesExamined)
+		sessOutcome := outcome
+		sessAgentID := agentID
+		sessTaskID := taskID
+		s.goBackground(func() {
+			for _, entityName := range entities {
+				// related = all other entities examined this session
+				related := make([]string, 0, len(entities)-1)
+				for _, other := range entities {
+					if other != entityName {
+						related = append(related, other)
+					}
+				}
+				bc.LogDecision(context.Background(), brain.DecisionRequest{
+					AgentID:         sessAgentID,
+					Phase:           "implementation",
+					EntityName:      entityName,
+					Action:          "edit",
+					RelatedEntities: related,
+					Outcome:         sessOutcome,
+					Notes:           sessTaskID,
+				})
+			}
+		})
 	}
 
 	// ── Step 4: Save user-provided summary as project memory ──
