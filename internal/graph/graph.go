@@ -58,6 +58,11 @@ type Graph struct {
 	// indexMu ensures only one index rebuild runs at a time.
 	indexMu sync.Mutex
 
+	// flatGraph is a lazily-built FlatGraph (SoA layout) used as opt-in fast
+	// path for PPR BFS candidate expansion when UseFlatGraph is enabled.
+	// Protected by mu (rebuilt under write lock).
+	flatGraph *FlatGraph
+
 	// pool is the shared string interning pool used by GraphIndex.
 	// Kept on Graph so it persists across index rebuilds (strings stay interned).
 	pool *StringPool
@@ -278,6 +283,95 @@ func (g *Graph) FindByName(name string) []*Node {
 // On large graphs (100K+ nodes), consider FindByPatternLimit to cap the scan.
 func (g *Graph) FindByPattern(pattern string) []*Node {
 	return g.FindByPatternLimit(pattern, 0)
+}
+
+// EnableFlatGraph builds the FlatGraph from the current graph state and stores
+// it for use as the PPR BFS fast path. Safe to call at any time; rebuilds
+// atomically under write lock. Idempotent — calling multiple times is safe.
+func (g *Graph) EnableFlatGraph() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	fg := NewFlatGraph(g.repoID)
+	indexMap := make(map[NodeID]NodeIndex, len(g.nodes))
+	for id, n := range g.nodes {
+		fileID := Pool.Intern(n.File)
+		nameID := Pool.Intern(n.Name)
+		idx := fg.AddNode(nameID, n.Type, fileID, 0)
+		indexMap[id] = idx
+		fg.stringIDToIndex[id] = idx
+	}
+	edges := make([]BulkEdge, 0, len(g.outEdges)*2)
+	for _, elist := range g.outEdges {
+		for _, e := range elist {
+			fromIdx, fok := indexMap[e.From]
+			toIdx, tok := indexMap[e.To]
+			if !fok || !tok {
+				continue
+			}
+			edges = append(edges, BulkEdge{From: fromIdx, To: toIdx, Weight: 1.0})
+		}
+	}
+	fg.BulkAddEdges(edges)
+	g.flatGraph = fg
+}
+
+// flatGraphNeighbors returns undirected neighbor NodeIDs for id using the
+// FlatGraph fast path. Returns nil if FlatGraph is not built.
+// Caller must hold g.mu.RLock.
+func (g *Graph) flatGraphNeighbors(id NodeID) []NodeID {
+	fg := g.flatGraph
+	if fg == nil {
+		return nil
+	}
+	idx, ok := fg.LookupIndex(id)
+	if !ok {
+		return nil
+	}
+	nbs := fg.Neighbors(idx)
+	result := make([]NodeID, 0, len(nbs))
+	for _, nbIdx := range nbs {
+		result = append(result, fg.ExtID(nbIdx))
+	}
+	return result
+}
+
+// ToFlatGraph converts the pointer-based Graph to a FlatGraph (SoA layout) for
+// cache-friendly BFS traversal. The result is a snapshot — mutations to the
+// original Graph are not reflected. Caller must hold no lock; this method
+// acquires g.mu.RLock internally.
+func (g *Graph) ToFlatGraph() *FlatGraph {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	fg := NewFlatGraph(g.repoID)
+	// Assign a sequential NodeIndex to each node.
+	indexMap := make(map[NodeID]NodeIndex, len(g.nodes))
+	for id, n := range g.nodes {
+		fileID := Pool.Intern(n.File)
+		nameID := Pool.Intern(n.Name)
+		idx := fg.AddNode(nameID, n.Type, fileID, 0)
+		indexMap[id] = idx
+		fg.stringIDToIndex[id] = idx
+	}
+	// Build bulk edges.
+	type rawEdge struct {
+		From   NodeIndex
+		To     NodeIndex
+		Weight float32
+	}
+	edges := make([]BulkEdge, 0, len(g.outEdges)*2)
+	for _, elist := range g.outEdges {
+		for _, e := range elist {
+			fromIdx, fok := indexMap[e.From]
+			toIdx, tok := indexMap[e.To]
+			if !fok || !tok {
+				continue
+			}
+			edges = append(edges, BulkEdge{From: fromIdx, To: toIdx, Weight: 1.0})
+		}
+	}
+	fg.BulkAddEdges(edges)
+	return fg
 }
 
 // FindByPatternLimit is like FindByPattern but stops scanning after limit

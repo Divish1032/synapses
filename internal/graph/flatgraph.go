@@ -78,6 +78,27 @@ type FlatGraph struct {
 	stringIDToIndex map[NodeID]NodeIndex
 }
 
+// Neighbors returns the NodeIndex values for all undirected (out+in) neighbors
+// of the given node index. Used by the PPR BFS fast path.
+func (fg *FlatGraph) Neighbors(idx NodeIndex) []NodeIndex {
+	n := NodeIndex(len(fg.Names))
+	if idx >= n {
+		return nil
+	}
+	out := fg.OutEdges[fg.OutOffsets[idx]:fg.OutOffsets[idx+1]]
+	in := fg.InEdges[fg.InOffsets[idx]:fg.InOffsets[idx+1]]
+	result := make([]NodeIndex, 0, len(out)+len(in))
+	result = append(result, out...)
+	result = append(result, in...)
+	return result
+}
+
+// LookupIndex returns the NodeIndex for a NodeID, or (0, false) if not found.
+func (fg *FlatGraph) LookupIndex(id NodeID) (NodeIndex, bool) {
+	idx, ok := fg.stringIDToIndex[id]
+	return idx, ok
+}
+
 // NewFlatGraph initializes an empty SoA Graph structure.
 func NewFlatGraph(repoID string) *FlatGraph {
 	fg := &FlatGraph{
