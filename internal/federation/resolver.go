@@ -251,69 +251,81 @@ func (r *Resolver) statusForEntry(ctx context.Context, e config.FederationEntry)
 		return es
 	}
 
-	// Derive sibling's store DB path.
-	dbPath, err := SiblingDBPath(e.Path)
-	if err != nil {
-		es.Status = "not_indexed"
-		es.Error = err.Error()
-		return es
-	}
+	// All remaining work (os.Stat(dbPath), newRawDB, SQLite reads) runs in a
+	// goroutine so ctx cancellation interrupts the caller even if the OS/NFS
+	// call blocks. The goroutine itself leaks until the OS releases it (NFS
+	// timeout), but the caller returns promptly — the channel is buffered(1)
+	// so the goroutine can send and exit without the caller being present.
+	resCh := make(chan EntryStatus, 1)
+	go func() {
+		var out EntryStatus
+		out.Alias = e.Alias
+		out.Path = e.Path
 
-	// Guard remaining blocking calls against context expiry.
-	// os.Stat(dbPath) and newRawDB are not context-aware; check ctx after each.
-	if ctx.Err() != nil {
-		es.Status = "not_indexed"
-		es.Error = "timeout"
-		return es
-	}
-	if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
-		es.Status = "not_indexed"
-		return es
-	}
-	if ctx.Err() != nil {
-		es.Status = "not_indexed"
-		es.Error = "timeout"
-		return es
-	}
-
-	// Single open: use rawDB for both schema check and stats read.
-	// This avoids the double-open penalty of checking compat then opening again.
-	db, err := newRawDB(dbPath)
-	if err != nil {
-		es.Status = "not_indexed"
-		es.Error = err.Error()
-		return es
-	}
-	defer db.Close()
-
-	// Schema compatibility: verify critical tables exist.
-	if err := db.checkTables("nodes", "meta"); err != nil {
-		es.Status = "incompatible"
-		es.Error = err.Error()
-		return es
-	}
-
-	// Read stats from meta table (same queries as store.Stat).
-	stat, err := db.readProjectStat(dbPath)
-	if err != nil || stat == nil {
-		es.Status = "not_indexed"
+		dbPath, err := SiblingDBPath(e.Path)
 		if err != nil {
-			es.Error = err.Error()
+			out.Status = "not_indexed"
+			out.Error = err.Error()
+			resCh <- out
+			return
 		}
+
+		if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
+			out.Status = "not_indexed"
+			resCh <- out
+			return
+		}
+
+		// Single open: use rawDB for both schema check and stats read.
+		// This avoids the double-open penalty of checking compat then opening again.
+		db, err := newRawDB(dbPath)
+		if err != nil {
+			out.Status = "not_indexed"
+			out.Error = err.Error()
+			resCh <- out
+			return
+		}
+		defer db.Close()
+
+		// Schema compatibility: verify critical tables exist.
+		if err := db.checkTables("nodes", "meta"); err != nil {
+			out.Status = "incompatible"
+			out.Error = err.Error()
+			resCh <- out
+			return
+		}
+
+		// Read stats from meta table (same queries as store.Stat).
+		stat, err := db.readProjectStat(dbPath)
+		if err != nil || stat == nil {
+			out.Status = "not_indexed"
+			if err != nil {
+				out.Error = err.Error()
+			}
+			resCh <- out
+			return
+		}
+
+		out.NodeCount = stat.NodeCount
+		out.FileCount = stat.FileCount
+		out.IndexedAt = stat.SavedAt
+
+		if r.clock().Sub(stat.SavedAt) > staleThreshold {
+			out.Status = "stale"
+		} else {
+			out.Status = "indexed"
+		}
+		resCh <- out
+	}()
+
+	select {
+	case <-ctx.Done():
+		es.Status = "not_indexed"
+		es.Error = "timeout"
 		return es
+	case result := <-resCh:
+		return result
 	}
-
-	es.NodeCount = stat.NodeCount
-	es.FileCount = stat.FileCount
-	es.IndexedAt = stat.SavedAt
-
-	if r.clock().Sub(stat.SavedAt) > staleThreshold {
-		es.Status = "stale"
-	} else {
-		es.Status = "indexed"
-	}
-
-	return es
 }
 
 // InvalidateCache clears all cached state — stores, drift results, git heads,
