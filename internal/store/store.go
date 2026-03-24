@@ -694,7 +694,8 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE agents ADD COLUMN focus_file  TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE agents ADD COLUMN focus_since TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE agents ADD COLUMN intent      TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE dynamic_rules ADD COLUMN rule_type TEXT NOT NULL DEFAULT 'structural'`,
+		`ALTER TABLE dynamic_rules ADD COLUMN rule_type     TEXT NOT NULL DEFAULT 'structural'`,
+		`ALTER TABLE dynamic_rules ADD COLUMN path_pattern TEXT NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS agent_watched_symbols (
 			agent_id    TEXT NOT NULL,
 			entity_id   TEXT NOT NULL,
@@ -3197,11 +3198,12 @@ func (s *Store) UpsertDynamicRule(r config.Rule) error {
 	if ruleType == "" {
 		ruleType = "structural"
 	}
+	pathPattern := serializePathPattern(r.ForbiddenEdge.PathPattern)
 	_, err := s.knowledgeDB.Exec(`
         INSERT INTO dynamic_rules
             (id, description, severity, from_file_pattern, to_file_pattern,
-             from_type, to_type, edge_type, to_name_pattern, rule_type, created_at, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+             from_type, to_type, edge_type, to_name_pattern, rule_type, path_pattern, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             description=excluded.description, severity=excluded.severity,
             from_file_pattern=excluded.from_file_pattern,
@@ -3210,12 +3212,13 @@ func (s *Store) UpsertDynamicRule(r config.Rule) error {
             edge_type=excluded.edge_type,
             to_name_pattern=excluded.to_name_pattern,
             rule_type=excluded.rule_type,
+            path_pattern=excluded.path_pattern,
             updated_at=excluded.updated_at`,
 		r.ID, r.Description, r.Severity,
 		r.ForbiddenEdge.FromFilePattern, r.ForbiddenEdge.ToFilePattern,
 		string(r.ForbiddenEdge.FromType), string(r.ForbiddenEdge.ToType),
 		string(r.ForbiddenEdge.EdgeType), r.ForbiddenEdge.ToNamePattern,
-		ruleType, now, now,
+		ruleType, pathPattern, now, now,
 	)
 	return err
 }
@@ -3227,7 +3230,7 @@ func (s *Store) LoadDynamicRules() ([]config.Rule, error) {
 	rows, err := s.knowledgeDB.Query(`
         SELECT id, description, severity,
             from_file_pattern, to_file_pattern, from_type, to_type,
-            edge_type, to_name_pattern, rule_type
+            edge_type, to_name_pattern, rule_type, path_pattern
         FROM dynamic_rules
         ORDER BY created_at`)
 	if err != nil {
@@ -3238,21 +3241,54 @@ func (s *Store) LoadDynamicRules() ([]config.Rule, error) {
 	var rules []config.Rule
 	for rows.Next() {
 		var r config.Rule
-		var fromType, toType, edgeType string
+		var fromType, toType, edgeType, pathPattern string
 		if err := rows.Scan(
 			&r.ID, &r.Description, &r.Severity,
 			&r.ForbiddenEdge.FromFilePattern, &r.ForbiddenEdge.ToFilePattern,
 			&fromType, &toType, &edgeType,
-			&r.ForbiddenEdge.ToNamePattern, &r.RuleType,
+			&r.ForbiddenEdge.ToNamePattern, &r.RuleType, &pathPattern,
 		); err != nil {
 			return nil, fmt.Errorf("scan dynamic_rule: %w", err)
 		}
 		r.ForbiddenEdge.FromType = graph.NodeType(fromType)
 		r.ForbiddenEdge.ToType = graph.NodeType(toType)
 		r.ForbiddenEdge.EdgeType = graph.EdgeType(edgeType)
+		r.ForbiddenEdge.PathPattern = deserializePathPattern(pathPattern)
 		rules = append(rules, r)
 	}
 	return rules, rows.Err()
+}
+
+// serializePathPattern converts a []graph.EdgeType slice to a comma-separated
+// string for SQLite storage. An empty/nil slice returns "".
+func serializePathPattern(pp []graph.EdgeType) string {
+	if len(pp) == 0 {
+		return ""
+	}
+	parts := make([]string, len(pp))
+	for i, et := range pp {
+		parts[i] = string(et)
+	}
+	return strings.Join(parts, ",")
+}
+
+// deserializePathPattern converts a comma-separated SQLite string back to
+// []graph.EdgeType. An empty string returns nil.
+func deserializePathPattern(s string) []graph.EdgeType {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]graph.EdgeType, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, graph.EdgeType(p))
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // hashPath produces a short, filesystem-safe hash of a path string.

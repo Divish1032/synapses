@@ -483,6 +483,18 @@ type ForbiddenEdge struct {
 	EdgeType graph.EdgeType `json:"edge_type,omitempty"`
 	// ToNamePattern is a substring that must appear in the target node's name.
 	ToNamePattern string `json:"to_name_pattern,omitempty"`
+	// PathPattern enables multi-hop constraint checking. When non-empty, the
+	// rule fires when a from-matching node can reach a to-matching node by
+	// traversing edges in the exact sequence specified here. Each element is
+	// an edge type that must be followed in order.
+	//
+	// Example: PathPattern=["CALLS","CALLS"] with FromFilePattern="*/handlers/*"
+	// and ToFilePattern="*/db/*" fires when a handler calls an intermediary
+	// that directly calls a database entity — the two-hop path is forbidden.
+	//
+	// When PathPattern is set, EdgeType is ignored (the pattern defines the
+	// edge sequence). Maximum depth is 8 hops; longer patterns are capped.
+	PathPattern []graph.EdgeType `json:"path_pattern,omitempty"`
 }
 
 // ContextCarveConfig holds project-level defaults for context carving.
@@ -743,6 +755,9 @@ func (c *Config) CheckViolations(g *graph.Graph) []Violation {
 			}
 		}
 	}
+
+	// Check path-pattern rules (multi-hop BFS traversal).
+	violations = append(violations, c.checkPathPatternViolations(g, nil)...)
 	return violations
 }
 
@@ -760,7 +775,12 @@ func (c *Config) CheckViolationsForFile(g *graph.Graph, file string) []Violation
 	}
 
 	edges := g.EdgesForFile(file)
-	return c.CheckViolationsForEdges(edges, g.GetNode)
+	violations := c.CheckViolationsForEdges(edges, g.GetNode)
+	// For path-pattern rules, restrict to violations where the from-node
+	// belongs to the changed file (avoids re-reporting violations rooted
+	// in unrelated files on every incremental re-parse).
+	violations = append(violations, c.checkPathPatternViolations(g, &file)...)
+	return violations
 }
 
 // CheckViolationsForEdges checks a specific set of edges (typically from a
@@ -795,6 +815,122 @@ func (c *Config) CheckViolationsForEdges(edges []*graph.Edge, getNode func(graph
 	return violations
 }
 
+// maxPathPatternDepth caps the BFS depth for path-pattern rules to prevent
+// runaway traversal on dense graphs.
+const maxPathPatternDepth = 8
+
+// checkPathPatternViolations runs BFS-based multi-hop rule checking for all
+// rules that have PathPattern set. When fromFile is non-nil, only violations
+// where the from-node belongs to that file are returned (used by the
+// per-file incremental check to avoid re-reporting unrelated violations).
+//
+// Algorithm:
+//  1. Collect all nodes that match the from-pattern.
+//  2. For each such node, perform a depth-constrained BFS that follows edges
+//     in the exact sequence defined by PathPattern[0..n-1].
+//  3. At the final depth, any node that matches the to-pattern is a violation.
+//
+// The violation is reported with the from-node and to-node IDs. EdgeType is
+// set to the last edge in the path pattern.
+func (c *Config) checkPathPatternViolations(g *graph.Graph, fromFile *string) []Violation {
+	var violations []Violation
+
+	for _, rule := range c.Rules {
+		p := rule.ForbiddenEdge
+		if len(p.PathPattern) == 0 {
+			continue
+		}
+		depth := len(p.PathPattern)
+		if depth > maxPathPatternDepth {
+			depth = maxPathPatternDepth
+		}
+		pattern := p.PathPattern[:depth]
+		lastEdgeType := pattern[depth-1]
+
+		// Collect candidate from-nodes.
+		allNodes := g.AllNodes()
+		for _, fromNode := range allNodes {
+			if fromNode == nil {
+				continue
+			}
+			// Filter by from-file when doing incremental per-file check.
+			if fromFile != nil && fromNode.File != *fromFile {
+				continue
+			}
+			if !matchesFromPattern(p, fromNode) {
+				continue
+			}
+
+			// BFS: frontier is a set of node IDs at each depth level.
+			frontier := []graph.NodeID{fromNode.ID}
+			for hop, edgeType := range pattern {
+				if len(frontier) == 0 {
+					break
+				}
+				var next []graph.NodeID
+				seen := make(map[graph.NodeID]bool, len(frontier))
+				for _, nodeID := range frontier {
+					for _, e := range g.OutEdges(nodeID) {
+						if e.Type != edgeType {
+							continue
+						}
+						if seen[e.To] {
+							continue
+						}
+						seen[e.To] = true
+						if hop == len(pattern)-1 {
+							// Final hop: check if target matches to-pattern.
+							toNode := g.GetNode(e.To)
+							if toNode != nil && matchesToPattern(p, toNode) {
+								violations = append(violations, Violation{
+									RuleID:       rule.ID,
+									Severity:     rule.Severity,
+									Description:  rule.Description,
+									FromNode:     fromNode.ID,
+									ToNode:       e.To,
+									EdgeType:     lastEdgeType,
+									SuggestedFix: suggestFix(rule, lastEdgeType, fromNode, toNode),
+								})
+							}
+						} else {
+							next = append(next, e.To)
+						}
+					}
+				}
+				frontier = next
+			}
+		}
+	}
+	return violations
+}
+
+// matchesFromPattern returns true if node satisfies the from-side constraints
+// of a ForbiddenEdge (FromFilePattern, FromType). Used by path-pattern BFS.
+func matchesFromPattern(p ForbiddenEdge, n *graph.Node) bool {
+	if p.FromType != "" && n.Type != p.FromType {
+		return false
+	}
+	if p.FromFilePattern != "" && !matchFilePath(p.FromFilePattern, n.File) {
+		return false
+	}
+	return true
+}
+
+// matchesToPattern returns true if node satisfies the to-side constraints of a
+// ForbiddenEdge (ToFilePattern, ToType, ToNamePattern). Used by path-pattern BFS.
+func matchesToPattern(p ForbiddenEdge, n *graph.Node) bool {
+	if p.ToType != "" && n.Type != p.ToType {
+		return false
+	}
+	if p.ToFilePattern != "" && !matchFilePath(p.ToFilePattern, n.File) {
+		return false
+	}
+	if p.ToNamePattern != "" && n.Name != p.ToNamePattern && !globContains(n.Name, p.ToNamePattern) {
+		return false
+	}
+	return true
+}
+
 // matchFilePath returns true if filePath matches pattern.
 // It tries progressively shorter path suffixes so that path-component patterns
 // like "*/mcp/*" correctly match "synapses/internal/mcp/tools.go", while simple
@@ -816,10 +952,16 @@ func matchFilePath(pattern, filePath string) bool {
 
 // matchesForbidden returns true if the given edge matches the forbidden pattern.
 // All non-empty pattern fields must match for the rule to fire.
+// Rules with PathPattern set are NOT checked here — they require BFS traversal
+// and are handled by checkPathPatternViolations instead.
 func matchesForbidden(p ForbiddenEdge, e *graph.Edge, from, to *graph.Node) bool {
 	// An all-empty ForbiddenEdge means no code-graph check (agent/behavioral rule).
 	// Without this guard, every field check would be skipped and the function
 	// would return true for every edge, generating spurious violations.
+	// Rules with PathPattern are structural but require BFS — skip here.
+	if len(p.PathPattern) > 0 {
+		return false
+	}
 	if p.EdgeType == "" && p.FromType == "" && p.ToType == "" &&
 		p.FromFilePattern == "" && p.ToFilePattern == "" && p.ToNamePattern == "" {
 		return false

@@ -868,6 +868,7 @@ func (s *Server) handleUpsertRule(
 		FromFilePattern: stringArg(req, "from_file_pattern"),
 		ToFilePattern:   stringArg(req, "to_file_pattern"),
 		ToNamePattern:   stringArg(req, "to_name_pattern"),
+		PathPattern:     parsePathPattern(stringArg(req, "path_pattern")),
 	}
 
 	// Auto-detect rule type: if no ForbiddenEdge fields are set, this is a
@@ -875,7 +876,8 @@ func (s *Server) handleUpsertRule(
 	// code-graph rule. Agent rules are surfaced in session_init as
 	// agent_constraints rather than being checked against the call graph.
 	ruleType := "structural"
-	if fe.EdgeType == "" && fe.FromFilePattern == "" && fe.ToFilePattern == "" && fe.ToNamePattern == "" {
+	if fe.EdgeType == "" && fe.FromFilePattern == "" && fe.ToFilePattern == "" &&
+		fe.ToNamePattern == "" && len(fe.PathPattern) == 0 {
 		ruleType = "agent"
 	}
 
@@ -968,6 +970,28 @@ func (s *Server) detectRuleProvenance(ruleID, description string) (string, strin
 		}
 	}
 	return "", ""
+}
+
+// parsePathPattern parses a comma-separated edge-type string from the
+// path_pattern tool argument into a typed slice. Returns nil for empty input.
+// Whitespace around each element is trimmed. Example: "CALLS, CALLS" → [CALLS, CALLS].
+func parsePathPattern(s string) []graph.EdgeType {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]graph.EdgeType, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, graph.EdgeType(p))
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // ── Tool Catalog for discover_tools ─────────────────────────────────────────
