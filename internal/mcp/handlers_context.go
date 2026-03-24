@@ -383,18 +383,32 @@ func (s *Server) handleGetContext(
 	// batch SQL round-trip. Nodes with no quality record pass through unchanged.
 	if pc := s.getPulseClient(); pc != nil {
 		projID := s.projectID
-		cfg.QualityScoreLookup = func(ids []graph.NodeID) map[graph.NodeID]float64 {
-			strIDs := make([]string, len(ids))
-			for i, id := range ids {
-				strIDs[i] = string(id)
+		cfg.QualityScoreLookup = func(nodes []graph.QualityNode) map[graph.NodeID]float64 {
+			// entity_quality is keyed by entityWithPath("Name@dir/file") — the same
+			// format used by outcome_signals and emitContextDelivery. QualityNode
+			// provides Name+File so we can convert without calling graph.GetNode
+			// (which would deadlock — CarveEgoGraph holds g.mu.RLock when calling us).
+			epToNodeID := make(map[string]graph.NodeID, len(nodes))
+			epKeys := make([]string, 0, len(nodes))
+			for _, qn := range nodes {
+				ep := entityWithPath(qn.Name, qn.File)
+				if _, dup := epToNodeID[ep]; !dup {
+					epKeys = append(epKeys, ep)
+				}
+				epToNodeID[ep] = qn.ID
 			}
-			raw := pc.GetEntityQualityScoresBatch(strIDs, projID)
+			if len(epKeys) == 0 {
+				return nil
+			}
+			raw := pc.GetEntityQualityScoresBatch(epKeys, projID)
 			if raw == nil {
 				return nil
 			}
 			out := make(map[graph.NodeID]float64, len(raw))
-			for k, v := range raw {
-				out[graph.NodeID(k)] = v
+			for ep, v := range raw {
+				if nodeID, ok := epToNodeID[ep]; ok {
+					out[nodeID] = v
+				}
 			}
 			return out
 		}
