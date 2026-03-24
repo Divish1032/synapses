@@ -383,8 +383,11 @@ func (c *OllamaClient) ModelName() string {
 
 // ModelPulled returns true if the configured model is already present in
 // Ollama's local model library (i.e. no pull is needed).
+// Uses a short 3s deadline so startup is not blocked for 30s if Ollama is slow.
 func (c *OllamaClient) ModelPulled(ctx context.Context) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/tags", nil)
+	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, c.baseURL+"/api/tags", nil)
 	if err != nil {
 		return false
 	}
