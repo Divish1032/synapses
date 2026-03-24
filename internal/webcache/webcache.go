@@ -244,7 +244,24 @@ func (c *Cache) InvalidatePackage(importPath, oldVersion string) {
 // module import path → version for all direct and indirect dependencies.
 func ParseGoMod(projectPath string) (map[string]string, error) {
 	gomodPath := filepath.Join(projectPath, "go.mod")
-	f, err := os.Open(gomodPath)
+	// Resolve symlinks and validate containment before opening to prevent
+	// symlink-based path traversal when projectPath is untrusted.
+	resolved, err := filepath.EvalSymlinks(gomodPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // not a Go module — not an error
+		}
+		return nil, fmt.Errorf("open go.mod: %w", err)
+	}
+	absProject, err := filepath.EvalSymlinks(projectPath)
+	if err != nil {
+		return nil, fmt.Errorf("ParseGoMod: cannot resolve project path: %w", err)
+	}
+	prefix := filepath.Clean(absProject) + string(filepath.Separator)
+	if !strings.HasPrefix(filepath.Clean(resolved)+string(filepath.Separator), prefix) {
+		return nil, fmt.Errorf("go.mod resolves outside project: %s", resolved)
+	}
+	f, err := os.Open(resolved)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil // not a Go module — not an error
