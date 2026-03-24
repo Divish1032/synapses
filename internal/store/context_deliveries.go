@@ -65,6 +65,34 @@ func (s *Store) GetSessionContextEntities(sessionID string) []string {
 	return entities
 }
 
+// GetSessionAllDeliveredEntities returns all distinct non-empty entity names
+// that received context delivery in the given session (regardless of
+// task_outcome). Used by Sprint 15 #3 edge-weight refinement at end_session
+// AFTER CorrelateSessionOutcome has set task_outcome — the outcome is already
+// known from the caller's local variable, so no filtering by outcome is needed.
+func (s *Store) GetSessionAllDeliveredEntities(sessionID string) []string {
+	if s == nil || s.knowledgeDB == nil || sessionID == "" {
+		return nil
+	}
+	rows, err := s.knowledgeDB.Query(
+		`SELECT DISTINCT entity FROM context_deliveries
+		 WHERE session_id = ? AND entity != ''`,
+		sessionID,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var entities []string
+	for rows.Next() {
+		var e string
+		if rows.Scan(&e) == nil && e != "" {
+			entities = append(entities, e)
+		}
+	}
+	return entities
+}
+
 // CorrelateSessionOutcome updates all context_deliveries rows for the given
 // session with the resolved task outcome ("success" or "unknown").
 // Called synchronously from handleEndSession — outcome must be persisted before

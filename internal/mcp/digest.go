@@ -159,6 +159,18 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		if len(warnings) > 0 {
 			fmt.Fprintf(&b, "⚠ %s\n", strings.Join(warnings, " · "))
 		}
+		// Sprint 15 #6: confidence must appear at every detail level — agents
+		// using "summary" need the advisory as much as those using "full".
+		// Use ConfidenceHint as the sentinel for "was computed" so that a
+		// legitimately-zero confidence (extreme qs + both staleness flags)
+		// is not silently suppressed by the Confidence > 0 guard.
+		if dc.Confidence > 0 || dc.ConfidenceHint != "" {
+			if dc.ConfidenceHint != "" {
+				fmt.Fprintf(&b, "⚠ confidence:%.2f — %s\n", dc.Confidence, dc.ConfidenceHint)
+			} else {
+				fmt.Fprintf(&b, "confidence:%.2f\n", dc.Confidence)
+			}
+		}
 		if dc.EntityHash != "" {
 			fmt.Fprintf(&b, "\nentity_hash:%s\n", dc.EntityHash)
 		}
@@ -182,6 +194,17 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 	// DIAG-3: caller-count confidence warning.
 	if dc.CallerCountWarning != "" {
 		fmt.Fprintf(&b, "%s\n", dc.CallerCountWarning)
+	}
+
+	// Sprint 15 #6: context confidence score. Present when computed (non-zero
+	// or when a hint is set — hint fires at confidence < 0.5, including the
+	// edge case of confidence == 0.0 from extreme qs + both staleness flags).
+	if dc.Confidence > 0 || dc.ConfidenceHint != "" {
+		if dc.ConfidenceHint != "" {
+			fmt.Fprintf(&b, "⚠ confidence:%.2f — %s\n", dc.Confidence, dc.ConfidenceHint)
+		} else {
+			fmt.Fprintf(&b, "confidence:%.2f\n", dc.Confidence)
+		}
 	}
 
 	// === MIDDLE: Supplementary content (lowest LLM attention zone) ===

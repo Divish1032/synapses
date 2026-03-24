@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -58,12 +59,15 @@ type TraversalPath struct {
 
 // GraphTraversalInfo describes the graph channel's multi-hop traversal for a recall() call.
 // Surfaced in the response when the graph channel was active and found results.
+// VectorSearchMs is always set when the semantic channel ran, regardless of
+// whether the graph channel produced results.
 type GraphTraversalInfo struct {
-	Depth        int             `json:"depth"`
-	AnchorCount  int             `json:"anchor_count"`  // query-matching seed entities
-	VisitedNodes int             `json:"visited_nodes"` // graph nodes explored by BFS
-	Paths        []TraversalPath `json:"paths,omitempty"`
-	Note         string          `json:"note"`
+	Depth          int             `json:"depth"`
+	AnchorCount    int             `json:"anchor_count"`           // query-matching seed entities
+	VisitedNodes   int             `json:"visited_nodes"`          // graph nodes explored by BFS
+	Paths          []TraversalPath `json:"paths,omitempty"`
+	Note           string          `json:"note"`
+	VectorSearchMs float64         `json:"vector_search_ms,omitempty"` // embedding query latency
 }
 
 // buildEnrichedQuery appends session-context terms (intent, task title) to a
@@ -128,7 +132,7 @@ func (s *Server) quadRecallSearch(
 	sinceDays int,
 	untilTime *time.Time, // Sprint 10.5: optional upper time bound for temporal channel
 	depth int,
-) ([]store.Memory, map[string][]string, []string, *GraphTraversalInfo) {
+) ([]store.Memory, store.Attribution, []string, *GraphTraversalInfo) {
 	// Fallback: empty enrichedQuery means no session context — use original query.
 	if enrichedQuery == "" {
 		enrichedQuery = query
@@ -517,8 +521,16 @@ func (s *Server) quadRecallSearch(
 		return nil, nil, nil, nil
 	}
 
+	// Extract sideband metadata from channels before filtering for RRF/Convex.
+	// _vector_search_ms is injected into the INPUT channels map by the semantic
+	// goroutine and must be read here — it is NOT present in the output Attribution.
+	var vecSearchMs float64
+	if vs, ok := channels["_vector_search_ms"]; ok && len(vs) > 0 {
+		fmt.Sscanf(vs[0], "%f", &vecSearchMs)
+	}
+
 	var rankedIDs []string
-	var attribution map[string][]string
+	var attribution store.Attribution
 
 	if useConvex && len(channelScores) > 0 {
 		// Score-aware convex fusion: uses score magnitudes, not just ranks.
@@ -535,7 +547,15 @@ func (s *Server) quadRecallSearch(
 		rankedIDs, attribution = store.ConvexMerge(channelScores, limit, cw)
 	} else {
 		// Default: Reciprocal Rank Fusion (rank-only).
-		rankedIDs, attribution = store.RRFMergeWeighted(channels, limit, 60, store.DefaultRRFWeights)
+		// Filter metadata keys (e.g. "_vector_search_ms") — they are not real
+		// channels and must not reach RRFMergeWeighted (already extracted above).
+		rffChannels := make(map[string][]string, len(channels))
+		for k, v := range channels {
+			if !strings.HasPrefix(k, "_") {
+				rffChannels[k] = v
+			}
+		}
+		rankedIDs, attribution = store.RRFMergeWeighted(rffChannels, limit, 60, s.recallChannelWeights())
 	}
 
 	if len(rankedIDs) == 0 {
@@ -630,11 +650,20 @@ func (s *Server) quadRecallSearch(
 		traversalInfo = ti
 	}
 
+	// Attach vector search latency to traversalInfo so callers can record it
+	// without reading the raw INPUT channels map (which is local to this function).
+	if vecSearchMs > 0 {
+		if traversalInfo == nil {
+			traversalInfo = &GraphTraversalInfo{}
+		}
+		traversalInfo.VectorSearchMs = vecSearchMs
+	}
+
 	return result, attribution, staleEmbIDs, traversalInfo
 }
 
 // graphAttributedMemIDs returns memory IDs from result that have "graph" in their attribution.
-func graphAttributedMemIDs(result []store.Memory, attribution map[string][]string) []string {
+func graphAttributedMemIDs(result []store.Memory, attribution store.Attribution) []string {
 	var ids []string
 	for _, m := range result {
 		for _, ch := range attribution[m.ID] {
@@ -652,7 +681,7 @@ func graphAttributedMemIDs(result []store.Memory, attribution map[string][]strin
 // (those are found by BM25 directly — no interesting multi-hop to show).
 func (s *Server) reconstructTraversalPaths(
 	mems []store.Memory,
-	attribution map[string][]string,
+	attribution store.Attribution,
 	bfsResult GraphBFSResult,
 	anchorMap map[string]string, // memID → first anchor nodeID
 ) []TraversalPath {
@@ -999,4 +1028,72 @@ func clampUnit(v float64) float64 {
 // Channel errors never fail the entire recall — other channels continue.
 func logRecallChannelError(channel string, err error) {
 	logutil.Warn("synapses: recall %s channel error: %v\n", channel, err)
+}
+
+// recallWeightsCacheTTL is how long recallChannelWeights() serves cached
+// weights before re-querying pstore. Weights change slowly (only after
+// UpdateRecallChannelStats runs), so a 5-minute TTL eliminates per-recall
+// SQLite round-trips without meaningful staleness risk.
+const recallWeightsCacheTTL = 5 * time.Minute
+
+// recallStatsMinInterval is the minimum time between UpdateRecallChannelStats
+// triggers. Debounces the per-recall_hit trigger so a session with 100 recalls
+// fires at most one full aggregation per interval instead of 100.
+const recallStatsMinInterval = 5 * time.Minute
+
+// recallChannelWeights returns per-project RRF channel weight multipliers.
+//
+// Sprint 15 #4: when the pulse sidecar has accumulated channel attribution
+// data for this project (≥2 channels with learned win-rates), the win-rates
+// are used directly as weight multipliers so that channels that historically
+// produce the top-ranked result score proportionally higher.
+//
+// Results are cached for recallWeightsCacheTTL to avoid a SQLite SELECT on
+// every recall call. Weights change only when UpdateRecallChannelStats runs,
+// which is itself debounced to recallStatsMinInterval.
+//
+// Falls back to DefaultRRFWeights when:
+//   - pulse client is nil
+//   - fewer than 2 channels have learned data (cold start or single-channel)
+func (s *Server) recallChannelWeights() map[string]float64 {
+	pc := s.getPulseClient()
+	if pc == nil {
+		return store.DefaultRRFWeights
+	}
+
+	// Fast path: return cached weights if still fresh.
+	s.recallWeightsMu.RLock()
+	if s.recallWeightsCache != nil && time.Since(s.recallWeightsCachedAt) < recallWeightsCacheTTL {
+		w := s.recallWeightsCache
+		s.recallWeightsMu.RUnlock()
+		return w
+	}
+	s.recallWeightsMu.RUnlock()
+
+	// Cache miss: fetch from pstore and rebuild.
+	learned := pc.GetRecallChannelWeights(s.projectID)
+	var weights map[string]float64
+	if len(learned) < 2 {
+		// Not enough per-channel data yet — keep default balance.
+		weights = store.DefaultRRFWeights
+	} else {
+		// Build blended weights: use learned win-rate for known channels,
+		// default for channels absent from the learned set. Clamp at 0.05
+		// so no channel is ever fully silenced by a transient data gap.
+		weights = make(map[string]float64, len(store.DefaultRRFWeights))
+		for ch, def := range store.DefaultRRFWeights {
+			if wr, ok := learned[ch]; ok && wr > 0 {
+				weights[ch] = math.Max(wr, 0.05)
+			} else {
+				weights[ch] = def
+			}
+		}
+	}
+
+	s.recallWeightsMu.Lock()
+	s.recallWeightsCache = weights
+	s.recallWeightsCachedAt = time.Now()
+	s.recallWeightsMu.Unlock()
+
+	return weights
 }
