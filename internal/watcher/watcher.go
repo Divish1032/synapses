@@ -127,9 +127,10 @@ type Watcher struct {
 	configPath  string                 // absolute path to synapses.json (set by Start)
 	projectID   string                 // stable project identifier (FNV hash of project root path)
 	rootPath    string                 // absolute resolved project root (set by Start)
-	cpTracker      CrossProjectTracker      // set via SetCrossProjectTracker; may be nil
-	cpBrainTracker BrainCrossProjectTracker // set via SetBrainCrossProjectTracker; may be nil
-	nmRunner       NameMatcherRunner        // set via SetNameMatcher; may be nil
+	cpTracker        CrossProjectTracker      // set via SetCrossProjectTracker; may be nil
+	cpBrainTracker   BrainCrossProjectTracker // set via SetBrainCrossProjectTracker; may be nil
+	nmRunner         NameMatcherRunner        // set via SetNameMatcher; may be nil
+	afterRebuildHook func()                   // called after each RebuildIndex; may be nil
 
 	mu        sync.Mutex
 	timers    map[string]*time.Timer // debounce timers keyed by absolute file path
@@ -376,6 +377,14 @@ func (w *Watcher) SetBrainCrossProjectTracker(tracker BrainCrossProjectTracker) 
 // so that MENTIONS edges are created from the already-loaded graph on first run
 // and after daemon restarts (hasCrossDomain would otherwise stay false until a
 // cross-domain file changes, silently skipping all code-only file saves).
+// SetAfterRebuildHook registers a callback invoked after each RebuildIndex call
+// completes. Used to keep secondary structures (e.g. FlatGraph CSR) in sync.
+func (w *Watcher) SetAfterRebuildHook(fn func()) {
+	w.mu.Lock()
+	w.afterRebuildHook = fn
+	w.mu.Unlock()
+}
+
 func (w *Watcher) SetNameMatcher(nm NameMatcherRunner) {
 	w.mu.Lock()
 	w.nmRunner = nm
@@ -1417,6 +1426,12 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 		w.trackGo(func() {
 			rebuildStart := time.Now()
 			w.graph.RebuildIndex()
+			w.mu.Lock()
+			hook := w.afterRebuildHook
+			w.mu.Unlock()
+			if hook != nil {
+				hook()
+			}
 			if w.pulseClient != nil {
 				w.pulseClient.RecordGraphSnapshot(pulse.GraphSnapshotEvent{
 					RebuildDurationMs: float64(time.Since(rebuildStart).Milliseconds()),
@@ -1862,6 +1877,12 @@ func (w *Watcher) reparseFile(path, _ string) {
 	w.trackGo(func() {
 		rebuildStart := time.Now()
 		w.graph.RebuildIndex()
+		w.mu.Lock()
+		hook := w.afterRebuildHook
+		w.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 		// P5 — COV-7: emit graph rebuild duration to pulse.
 		if w.pulseClient != nil {
 			w.pulseClient.RecordGraphSnapshot(pulse.GraphSnapshotEvent{
