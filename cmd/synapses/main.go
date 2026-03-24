@@ -369,6 +369,7 @@ func cmdStartDirect(args []string) error {
 
 	// Brain — now in-process; no external sidecar or port required.
 	brainCli := brain.NewInProcess(cfg.Brain.ToBrainConfig())
+	defer brainCli.Close() // stops SystemPulse + Scheduler goroutines on graceful shutdown
 	if cfg.Brain.Enabled {
 		if model, _ := brainCli.HealthCheck(context.Background()); model != "" {
 			logutil.Info("synapses: brain enabled in-process (%s)\n", model)
