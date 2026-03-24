@@ -14,6 +14,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/pulse"
+	pulsetypes "github.com/SynapsesOS/synapses/internal/pulse/types"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -561,6 +562,12 @@ func (s *Server) handleUpdateTask(
 						taskPriority = task.Priority
 					}
 
+					// Sprint 15 #1: signal quality weight for per-entity quality scoring.
+					sigWeight := pulsetypes.SignalWeightTaskDone
+					if sig == "task_cancelled" {
+						sigWeight = pulsetypes.SignalWeightTaskCancelled
+					}
+
 					var emitted bool
 					if sg != nil && taskErr == nil {
 						for _, nodeID := range task.LinkedNodes {
@@ -578,10 +585,12 @@ func (s *Server) handleUpdateTask(
 									TimeToOutcomeMs:  int64(durationMs),
 									ToolCallsBetween: toolsBetween,
 									Priority:         taskPriority,
+									SignalWeight:     sigWeight,
 								})
-								// P5 — Item 10: recompute entity quality score after outcome.
-								pc.UpdateEntityQualityScore(entity, projID)
 								// P5 — Item 11: link most recent delivery to this outcome.
+								// NOTE: quality score recomputation (Sprint 15 #2) is handled by
+								// the pulse collector after InsertOutcomeSignalTx — calling it here
+								// would run before the signal is flushed to the DB.
 								if sig == "task_done" {
 									if did := pc.GetMostRecentDeliveryID(entity); did > 0 {
 										pc.InsertDeliveryOutcome(did, pulseSessID, entity, sig, toolsBetween, true)
@@ -600,6 +609,7 @@ func (s *Server) handleUpdateTask(
 							SessionID:       pulseSessID,
 							TimeToOutcomeMs: int64(durationMs),
 							Priority:        taskPriority,
+							SignalWeight:    sigWeight,
 						})
 					}
 				})

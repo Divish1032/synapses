@@ -1414,3 +1414,191 @@ func TestCarveEgoGraph_InterfaceImplementorExpansion_SelfLoop(t *testing.T) {
 	}
 	t.Error("root Iface node missing from subgraph")
 }
+
+// ── Sprint 15 #2: Quality score boost tests ───────────────────────────────────
+
+// TestQualityScoreLookup_PositiveBoostsRanking verifies that a node with a
+// positive quality score ranks higher than a structurally identical node with
+// no quality record.
+func TestQualityScoreLookup_PositiveBoostsRanking(t *testing.T) {
+	g := graph.New("testrepo")
+	root := g.MakeNodeID("main.go", "Root")
+	good := g.MakeNodeID("good.go", "GoodHelper")
+	neutral := g.MakeNodeID("neutral.go", "NeutralHelper")
+
+	g.AddNode(&graph.Node{ID: root, Type: graph.NodeFunction, Name: "Root", File: "main.go"})
+	g.AddNode(&graph.Node{ID: good, Type: graph.NodeFunction, Name: "GoodHelper", File: "good.go"})
+	g.AddNode(&graph.Node{ID: neutral, Type: graph.NodeFunction, Name: "NeutralHelper", File: "neutral.go"})
+	// Both helpers are at equal structural distance from root.
+	g.AddEdge(&graph.Edge{From: root, To: good, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: root, To: neutral, Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = false
+	cfg.QualityScoreLookup = func(ids []graph.NodeID) map[graph.NodeID]float64 {
+		return map[graph.NodeID]float64{
+			good: 5.0, // strong positive — context was consistently helpful
+			// neutral has no entry → no change
+		}
+	}
+
+	sub, err := g.CarveEgoGraph(root, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph error: %v", err)
+	}
+
+	var goodRel, neutralRel float64
+	for _, cn := range sub.Nodes {
+		switch cn.Node.ID {
+		case good:
+			goodRel = cn.Relevance
+		case neutral:
+			neutralRel = cn.Relevance
+		}
+	}
+	if goodRel <= neutralRel {
+		t.Errorf("good helper (score +5) relevance %.4f should be > neutral helper %.4f", goodRel, neutralRel)
+	}
+}
+
+// TestQualityScoreLookup_NegativePenalisesRanking verifies that a node with a
+// negative quality score ranks lower than a structurally identical node.
+func TestQualityScoreLookup_NegativePenalisesRanking(t *testing.T) {
+	g := graph.New("testrepo")
+	root := g.MakeNodeID("main.go", "Root")
+	bad := g.MakeNodeID("bad.go", "BadHelper")
+	neutral := g.MakeNodeID("neutral.go", "NeutralHelper")
+
+	g.AddNode(&graph.Node{ID: root, Type: graph.NodeFunction, Name: "Root", File: "main.go"})
+	g.AddNode(&graph.Node{ID: bad, Type: graph.NodeFunction, Name: "BadHelper", File: "bad.go"})
+	g.AddNode(&graph.Node{ID: neutral, Type: graph.NodeFunction, Name: "NeutralHelper", File: "neutral.go"})
+	g.AddEdge(&graph.Edge{From: root, To: bad, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: root, To: neutral, Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = false
+	cfg.QualityScoreLookup = func(ids []graph.NodeID) map[graph.NodeID]float64 {
+		return map[graph.NodeID]float64{
+			bad: -5.0, // strong negative — context repeatedly caused corrections
+		}
+	}
+
+	sub, err := g.CarveEgoGraph(root, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph error: %v", err)
+	}
+
+	var badRel, neutralRel float64
+	for _, cn := range sub.Nodes {
+		switch cn.Node.ID {
+		case bad:
+			badRel = cn.Relevance
+		case neutral:
+			neutralRel = cn.Relevance
+		}
+	}
+	if badRel >= neutralRel {
+		t.Errorf("bad helper (score -5) relevance %.4f should be < neutral helper %.4f", badRel, neutralRel)
+	}
+}
+
+// TestQualityScoreLookup_RootNeverPenalised verifies that the root node's
+// relevance is always pinned at 1.0 regardless of quality score.
+func TestQualityScoreLookup_RootNeverPenalised(t *testing.T) {
+	g := graph.New("testrepo")
+	root := g.MakeNodeID("main.go", "Root")
+	child := g.MakeNodeID("child.go", "Child")
+
+	g.AddNode(&graph.Node{ID: root, Type: graph.NodeFunction, Name: "Root", File: "main.go"})
+	g.AddNode(&graph.Node{ID: child, Type: graph.NodeFunction, Name: "Child", File: "child.go"})
+	g.AddEdge(&graph.Edge{From: root, To: child, Type: graph.EdgeCalls})
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = false
+	// Provide a very negative quality score for the root itself — must be ignored.
+	cfg.QualityScoreLookup = func(ids []graph.NodeID) map[graph.NodeID]float64 {
+		return map[graph.NodeID]float64{
+			root: -100.0,
+		}
+	}
+
+	sub, err := g.CarveEgoGraph(root, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph error: %v", err)
+	}
+
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == root {
+			if cn.Relevance != 1.0 {
+				t.Errorf("root relevance = %.4f after quality penalty; want exactly 1.0", cn.Relevance)
+			}
+			return
+		}
+	}
+	t.Error("root node missing from subgraph")
+}
+
+// TestQualityScoreLookup_NilLookupIsNoop verifies that a nil QualityScoreLookup
+// produces the same output as when no lookup is provided (backward-compatible default).
+func TestQualityScoreLookup_NilLookupIsNoop(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	cfgNil := graph.DefaultCarveConfig()
+	cfgNil.UsePPR = false
+	cfgNil.QualityScoreLookup = nil
+
+	cfgNoField := graph.DefaultCarveConfig()
+	cfgNoField.UsePPR = false
+	// QualityScoreLookup is already nil by default — just confirm matching output.
+
+	subNil, err := g.CarveEgoGraph(ids["service"], cfgNil)
+	if err != nil {
+		t.Fatalf("nil lookup error: %v", err)
+	}
+	subNoField, err := g.CarveEgoGraph(ids["service"], cfgNoField)
+	if err != nil {
+		t.Fatalf("no-field lookup error: %v", err)
+	}
+	if len(subNil.Nodes) != len(subNoField.Nodes) {
+		t.Errorf("node counts differ: nil=%d no-field=%d", len(subNil.Nodes), len(subNoField.Nodes))
+	}
+}
+
+// TestQualityScoreLookup_EmptyResultIsNoop verifies that when the lookup returns
+// an empty map (no quality data yet), relevance scores are unchanged.
+func TestQualityScoreLookup_EmptyResultIsNoop(t *testing.T) {
+	g, ids := buildCarveFixture(t)
+
+	cfgBase := graph.DefaultCarveConfig()
+	cfgBase.UsePPR = false
+
+	cfgQuality := graph.DefaultCarveConfig()
+	cfgQuality.UsePPR = false
+	cfgQuality.QualityScoreLookup = func(ids []graph.NodeID) map[graph.NodeID]float64 {
+		return nil // no quality data — new project
+	}
+
+	subBase, err := g.CarveEgoGraph(ids["handler"], cfgBase)
+	if err != nil {
+		t.Fatalf("base error: %v", err)
+	}
+	subQuality, err := g.CarveEgoGraph(ids["handler"], cfgQuality)
+	if err != nil {
+		t.Fatalf("quality error: %v", err)
+	}
+
+	baseMap := make(map[graph.NodeID]float64)
+	for _, cn := range subBase.Nodes {
+		baseMap[cn.Node.ID] = cn.Relevance
+	}
+	for _, cn := range subQuality.Nodes {
+		base, ok := baseMap[cn.Node.ID]
+		if !ok {
+			t.Errorf("node %s in quality result but not in base", cn.Node.ID)
+			continue
+		}
+		if math.Abs(cn.Relevance-base) > 1e-9 {
+			t.Errorf("node %s: base relevance %.6f != quality relevance %.6f with empty map", cn.Node.ID, base, cn.Relevance)
+		}
+	}
+}
