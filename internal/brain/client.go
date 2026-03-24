@@ -110,6 +110,15 @@ func (c *Client) SetPhase(_ context.Context, req SetPhaseRequest) (*SDLCConfig, 
 	return &cfg, nil
 }
 
+// SetQualityMode updates the active quality mode. Returns the updated SDLCConfig.
+func (c *Client) SetQualityMode(_ context.Context, mode QualityMode) (*SDLCConfig, error) {
+	if err := c.brain.SetQualityMode(mode, ""); err != nil {
+		return nil, err
+	}
+	cfg := c.brain.GetSDLCConfig()
+	return &cfg, nil
+}
+
 // UpsertADR creates or updates an ADR. Returns the stored ADR.
 func (c *Client) UpsertADR(_ context.Context, req ADRRequest) (*ADR, error) {
 	if err := c.brain.UpsertADR(req); err != nil {

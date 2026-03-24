@@ -118,6 +118,54 @@ func (s *Server) handleGetADRs(
 	return jsonResult(result)
 }
 
+// handleSetSDLCPhase sets the active SDLC phase on the brain.
+func (s *Server) handleSetSDLCPhase(
+	ctx context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	bc := s.getBrainClient()
+	if bc == nil {
+		return mcp.NewToolResultText(`{"error": "brain not configured — add brain.url to synapses.json"}`), nil
+	}
+	phase, _ := req.GetArguments()["phase"].(string)
+	if phase == "" {
+		return mcp.NewToolResultText(`{"error": "phase is required (planning|implementation|testing|review|maintenance)"}`), nil
+	}
+	cfg, err := bc.SetPhase(ctx, brain.SetPhaseRequest{Phase: phase})
+	if err != nil {
+		return errJSON(err), nil
+	}
+	return jsonResult(map[string]interface{}{
+		"status": "ok",
+		"phase":  cfg.Phase,
+		"mode":   cfg.QualityMode,
+	})
+}
+
+// handleSetQualityMode sets the active quality mode on the brain.
+func (s *Server) handleSetQualityMode(
+	ctx context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	bc := s.getBrainClient()
+	if bc == nil {
+		return mcp.NewToolResultText(`{"error": "brain not configured — add brain.url to synapses.json"}`), nil
+	}
+	mode, _ := req.GetArguments()["mode"].(string)
+	if mode == "" {
+		return mcp.NewToolResultText(`{"error": "mode is required (quick|standard|enterprise)"}`), nil
+	}
+	cfg, err := bc.SetQualityMode(ctx, brain.QualityMode(mode))
+	if err != nil {
+		return errJSON(err), nil
+	}
+	return jsonResult(map[string]interface{}{
+		"status": "ok",
+		"phase":  cfg.Phase,
+		"mode":   cfg.QualityMode,
+	})
+}
+
 // ingestWebContent sends fetched web content to the intelligence sidecar as a
 // fire-and-forget ingest. Used by handleWebFetch to enrich brain with web articles.
 // No-op if brain is not configured or content is too short.

@@ -2960,6 +2960,41 @@ func (s *Server) registerTools() {
 		s.handleGetADRs,
 	)
 
+	// set_sdlc_phase — D2: phase-aware context packets
+	s.addOrDefer(
+		mcp.NewTool(
+			"set_sdlc_phase",
+			mcp.WithDescription(
+				"Sets the active SDLC phase for this project. Phase-aware Context Packets adapt "+
+					"their sections to the current phase (e.g. testing gets test-focused sections, "+
+					"review gets quality gates). Requires brain.url to be configured in synapses.json. "+
+					"Valid phases: planning, implementation, testing, review, maintenance.",
+			),
+			mcp.WithString("phase",
+				mcp.Required(),
+				mcp.Description("SDLC phase to activate: planning | implementation | testing | review | maintenance"),
+			),
+		),
+		s.handleSetSDLCPhase,
+	)
+
+	// set_quality_mode — D2: quality gate control
+	s.addOrDefer(
+		mcp.NewTool(
+			"set_quality_mode",
+			mcp.WithDescription(
+				"Sets the active quality mode for this project. Controls how strict quality gates are: "+
+					"quick = prototype (just make it work), standard = unit tests required, "+
+					"enterprise = tests + docs + PR checklist. Requires brain.url to be configured in synapses.json.",
+			),
+			mcp.WithString("mode",
+				mcp.Required(),
+				mcp.Description("Quality mode: quick | standard | enterprise"),
+			),
+		),
+		s.handleSetQualityMode,
+	)
+
 	// plan_context — single-call pre-implementation gate (replaces the 3-step ritual:
 	// check_plan_safety → validate_plan → prepare_context(intent=plan)).
 	s.addOrDefer(
