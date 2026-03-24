@@ -448,8 +448,8 @@ func (w *Watcher) updateImportGraphForFile(filePath string) {
 //     re-resolved on the next pass. This closes the "new public function" gap.
 //
 // Must be called BEFORE RemoveFile so the incoming edges are still present.
-// Must be called under reparseMu (reparseFile is already serialised).
-func (w *Watcher) computeInvalidationSet(filePath string) []string {
+// filePkgSnap must be a snapshot of w.filePkg taken under reparseMu.
+func (w *Watcher) computeInvalidationSet(filePath string, filePkgSnap map[string]string) []string {
 	invalid := map[string]bool{filePath: true}
 
 	// All files that have a resolved CALLS or IMPLEMENTS edge into this file.
@@ -484,9 +484,9 @@ func (w *Watcher) computeInvalidationSet(filePath string) []string {
 
 	// Same-package files: may have unresolved call sites that will succeed
 	// once the re-parsed functions are in the graph.
-	pkg := w.filePkg[filePath]
+	pkg := filePkgSnap[filePath]
 	if pkg != "" {
-		for f, fpkg := range w.filePkg {
+		for f, fpkg := range filePkgSnap {
 			if fpkg == pkg {
 				invalid[f] = true
 			}
@@ -1149,14 +1149,18 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 		return
 	}
 
-	// ── Phase 0: pre-snapshot (NO lock held) ─────────────────────────────────
+	// ── Phase 0: pre-snapshot (NO lock held for I/O, but filePkg read under lock) ──
 	// Pre-compute invalidation sets and load stored call sites from SQLite.
-	// All graph writers (applyBatch Phase 1 and handleEvent's remove path) hold
-	// reparseMu before mutating the graph.  Phase 0 reads are serialised at the
-	// graph.mu level, so they see a consistent snapshot of the last completed
-	// writer.  Any edge observed here may be removed by a concurrent handleEvent
-	// between Phase 0 and Phase 1, but that is benign: the invalidation set
-	// erring toward inclusion is safe (extra entries are no-ops).
+	// computeInvalidationSet reads w.filePkg which is written under reparseMu;
+	// snapshot filePkg under reparseMu first so Phase 0 I/O can proceed without
+	// holding the lock.
+	w.reparseMu.Lock()
+	filePkgSnapshot := make(map[string]string, len(w.filePkg))
+	for k, v := range w.filePkg {
+		filePkgSnapshot[k] = v
+	}
+	w.reparseMu.Unlock()
+
 	type preFetch struct {
 		invalidSet     []string
 		preloadedSites []graph.CallSite
@@ -1167,7 +1171,7 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 			if result.err != nil {
 				continue
 			}
-			preFetches[i].invalidSet = w.computeInvalidationSet(result.path)
+			preFetches[i].invalidSet = w.computeInvalidationSet(result.path, filePkgSnapshot)
 			sites, loadErr := w.store.LoadCallSitesForFiles(preFetches[i].invalidSet)
 			if loadErr != nil {
 				logutil.Warn("synapses/watcher: scoped call-site pre-load failed, falling back to full load: %v\n", loadErr)
@@ -1663,7 +1667,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// InEdgesForFile, which is empty after RemoveFile.
 	var invalidSet []string
 	if w.store != nil {
-		invalidSet = w.computeInvalidationSet(path)
+		invalidSet = w.computeInvalidationSet(path, w.filePkg)
 	}
 
 	// Remove stale graph data and call sites for this file before re-parsing.
