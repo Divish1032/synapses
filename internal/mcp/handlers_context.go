@@ -22,6 +22,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/metrics"
 	"github.com/SynapsesOS/synapses/internal/pulse"
+	pulsetypes "github.com/SynapsesOS/synapses/internal/pulse/types"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -182,7 +183,7 @@ func (s *Server) handleGetContext(
 	// in the same session. Captured here so it can be written to context_deliveries below.
 	contextRefetched := false
 	if agentIDForFeedback != "" && s.store != nil {
-		repeatCount := s.trackContextCall(agentIDForFeedback, entityName)
+		repeatCount, sinceLast := s.trackContextCall(agentIDForFeedback, entityName)
 		contextRefetched = repeatCount > 1
 		// R29: disambiguate entity name for pulse signals when same name exists
 		// in multiple packages. Resolves to "Name@dir/file" format.
@@ -197,29 +198,38 @@ func (s *Server) handleGetContext(
 		// P6-3: resolve pulse session ID early for outcome signals.
 		earlyPulseSessID := s.getSynapseSessionID(sessionID)
 		if repeatCount == 2 {
-			// R29: correction signal — second fetch of same entity in session.
-			if pc := s.getPulseClient(); pc != nil {
-				evt := pulse.OutcomeSignalEvent{
-					ProjectID:  s.projectID,
-					AgentID:    agentIDForFeedback,
-					Entity:     pulseEntity,
-					SignalType: "correction",
-					Count:      repeatCount,
-					SessionID:  earlyPulseSessID,
+			// Sprint 15 #1: timing-aware correction signal.
+			// < 5 min = moderate negative (context was immediately insufficient).
+			// 5–30 min = mild negative (may be a different subtask angle).
+			// ≥ 30 min = neutral: the GC already removed the entry and count is 1,
+			//            so this branch is only reached for sinceLast < 30 min.
+			sigType, sigWeight, emitSig := classifyRefetchSignal(sinceLast)
+			if emitSig {
+				if pc := s.getPulseClient(); pc != nil {
+					evt := pulse.OutcomeSignalEvent{
+						ProjectID:    s.projectID,
+						AgentID:      agentIDForFeedback,
+						Entity:       pulseEntity,
+						SignalType:   sigType,
+						Count:        repeatCount,
+						SessionID:    earlyPulseSessID,
+						SignalWeight: sigWeight,
+					}
+					s.goBackground(func() { pc.RecordOutcomeSignal(evt) })
 				}
-				s.goBackground(func() { pc.RecordOutcomeSignal(evt) })
 			}
 		}
 		if repeatCount == 3 {
-			// R29: escalation signal — three or more fetches.
+			// R29: escalation signal — three or more fetches; strong negative.
 			if pc := s.getPulseClient(); pc != nil {
 				evt := pulse.OutcomeSignalEvent{
-					ProjectID:  s.projectID,
-					AgentID:    agentIDForFeedback,
-					Entity:     pulseEntity,
-					SignalType: "escalation",
-					Count:      repeatCount,
-					SessionID:  earlyPulseSessID,
+					ProjectID:    s.projectID,
+					AgentID:      agentIDForFeedback,
+					Entity:       pulseEntity,
+					SignalType:   "escalation",
+					Count:        repeatCount,
+					SessionID:    earlyPulseSessID,
+					SignalWeight: pulsetypes.SignalWeightEscalation,
 				}
 				s.goBackground(func() { pc.RecordOutcomeSignal(evt) })
 			}
@@ -1478,10 +1488,19 @@ func (s *Server) adaptiveCarveConfig(cfg *graph.CarveConfig, entityName, agentID
 	return forceFullDetail
 }
 
-// trackContextCall increments and returns the call count for (agentID, entity)
-// within the current server session. Entries older than 30m are pruned at most
-// once every 5 minutes to avoid O(n) iteration on every write (R29 GAP3).
-func (s *Server) trackContextCall(agentID, entity string) int {
+// trackContextCall increments the call count for (agentID, entity) within the
+// current server session and returns the new count together with the duration
+// since the previous call for the same key.
+//
+// sinceLast is zero on the first call (no prior delivery to measure against).
+// Callers use sinceLast to classify refetch signals by the Sprint 15 #1
+// quality discipline (< 5 min = moderate negative, 5–30 min = mild negative,
+// ≥ 30 min = neutral/new-subtask — but the GC below removes entries after
+// 30 min so a call after that window always returns count=1 with sinceLast=0).
+//
+// Entries older than 30m are pruned at most once every 5 minutes to avoid
+// O(n) iteration on every write (R29 GAP3).
+func (s *Server) trackContextCall(agentID, entity string) (count int, sinceLast time.Duration) {
 	key := agentID + "\x00" + entity
 	s.ctxCallMu.Lock()
 	defer s.ctxCallMu.Unlock()
@@ -1501,9 +1520,11 @@ func (s *Server) trackContextCall(agentID, entity string) int {
 	}
 	e, ok := s.ctxCalls[key]
 	if !ok {
-		s.ctxCalls[key] = &ctxCallEntry{count: 1, firstAt: now}
-		return 1
+		s.ctxCalls[key] = &ctxCallEntry{count: 1, firstAt: now, lastAt: now}
+		return 1, 0
 	}
+	sinceLast = now.Sub(e.lastAt)
 	e.count++
-	return e.count
+	e.lastAt = now
+	return e.count, sinceLast
 }

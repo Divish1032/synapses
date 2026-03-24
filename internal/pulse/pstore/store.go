@@ -260,9 +260,9 @@ func (s *Store) InsertBrainUsageTx(ev pulsetypes.BrainUsageEvent) error {
 func (s *Store) InsertOutcomeSignalTx(ev pulsetypes.OutcomeSignalEvent) error {
 	today := time.Now().UTC().Format("2006-01-02")
 	_, err := s.execer().Exec(
-		`INSERT INTO outcome_signals (project_id, agent_id, entity, signal_type, count, session_id, tool_calls_between, time_to_outcome_ms, created_date, priority)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ev.ProjectID, ev.AgentID, ev.Entity, ev.SignalType, ev.Count, ev.SessionID, ev.ToolCallsBetween, ev.TimeToOutcomeMs, today, ev.Priority,
+		`INSERT INTO outcome_signals (project_id, agent_id, entity, signal_type, count, session_id, tool_calls_between, time_to_outcome_ms, created_date, priority, signal_weight)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ev.ProjectID, ev.AgentID, ev.Entity, ev.SignalType, ev.Count, ev.SessionID, ev.ToolCallsBetween, ev.TimeToOutcomeMs, today, ev.Priority, ev.SignalWeight,
 	)
 	return err
 }
@@ -1029,6 +1029,10 @@ func (s *Store) migrateColumns() error {
 		`ALTER TABLE pricing ADD COLUMN cached_input_per_1m REAL NOT NULL DEFAULT 0.0`,
 		// Pulse Phase 11 — P11-5: session_id on brain_usage for session correlation.
 		`ALTER TABLE brain_usage ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`,
+		// Sprint 15 #1 — signal quality weights for per-entity quality scoring.
+		// DEFAULT 0.0 means pre-existing rows (before this migration) have neutral weight;
+		// all new rows will carry the explicit weight set by the emitting caller.
+		`ALTER TABLE outcome_signals ADD COLUMN signal_weight REAL NOT NULL DEFAULT 0.0`,
 	}
 	for _, stmt := range alterStmts {
 		if _, err := s.execer().Exec(stmt); err != nil {
