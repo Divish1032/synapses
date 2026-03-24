@@ -55,6 +55,7 @@ type Collector struct {
 	cap      int
 	interval time.Duration
 	stopCh   chan struct{}
+	stopOnce sync.Once
 	wg       sync.WaitGroup
 	// P2-17: high-water mark — peak buffer depth since last flush.
 	highWaterMark atomic.Int64
@@ -95,8 +96,9 @@ func (c *Collector) Start() {
 }
 
 // Stop signals the flush loop to exit and waits for a final flush.
+// Safe to call multiple times.
 func (c *Collector) Stop() {
-	close(c.stopCh)
+	c.stopOnce.Do(func() { close(c.stopCh) })
 	c.wg.Wait()
 }
 
