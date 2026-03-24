@@ -3245,7 +3245,7 @@ func (s *Store) SaveCallSites(sites []graph.CallSite) error {
 // LoadCallSites returns all persisted call sites from the last full index.
 // Returns nil (not an error) if the table is empty.
 func (s *Store) LoadCallSites() ([]graph.CallSite, error) {
-	rows, err := s.graphDB.Query(`SELECT caller_id, caller_file, pkg_alias, func_name FROM call_sites`)
+	rows, err := s.graphDB.Query(`SELECT caller_id, caller_file, pkg_alias, func_name FROM call_sites LIMIT 2000000`)
 	if err != nil {
 		return nil, fmt.Errorf("query call_sites: %w", err)
 	}
@@ -3400,7 +3400,7 @@ func (s *Store) LoadCallerFilesForPkgAliases(aliases []string) ([]string, error)
 // loadAllCallerFiles returns all distinct caller files from the call_sites table.
 // Used as a fallback when the alias list exceeds the SQLite variable limit.
 func (s *Store) loadAllCallerFiles() ([]string, error) {
-	rows, err := s.graphDB.Query("SELECT DISTINCT caller_file FROM call_sites")
+	rows, err := s.graphDB.Query("SELECT DISTINCT caller_file FROM call_sites LIMIT 2000000")
 	if err != nil {
 		return nil, fmt.Errorf("query all caller files: %w", err)
 	}
