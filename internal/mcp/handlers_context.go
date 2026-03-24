@@ -116,8 +116,8 @@ type directionalContext struct {
 //   - Has record: sigmoid(qs/2.0) rescaled to [0.15, 0.95].
 //     qs=0  → 0.55 (neutral outcome history)
 //     qs=+3 → 0.80 (consistently helped agents)
-//     qs=+5 → 0.90 (strong positive history)
-//     qs=-1 → 0.42 (one abandonment or two cancellations)
+//     qs=+5 → 0.89 (strong positive history)
+//     qs=-1 → 0.45 (two task_cancelled signals)
 //     qs=-2 → 0.37 (established pattern of insufficiency — triggers low-quality hint)
 //   - Staleness downgrades:
 //     −0.10 if graph freshness warning (file modified <10s, graph may lag)
