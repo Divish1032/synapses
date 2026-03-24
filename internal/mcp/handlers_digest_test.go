@@ -137,6 +137,7 @@ func TestWriteNodeHeader_DomainBadge_AllNonCodeDomains(t *testing.T) {
 		graph.DomainDocs,
 		graph.DomainIssues,
 		graph.DomainCustom,
+		graph.DomainKnowledge,
 	}
 	for _, dom := range nonCodeDomains {
 		dom := dom

@@ -143,9 +143,11 @@ type EdgeTypeDescriptor struct {
 	// Reserved for future bidirectional edge types (e.g. cross-domain MENTIONS).
 	Direction string `json:"direction"`
 	// Domain classifies which knowledge domain this edge belongs to.
-	// Uses the same string values as DomainType: "code", "docs", "infra", "api", "knowledge".
-	// Sprint 9 and 12 will add edges with "infra", "api", and "knowledge" domains.
-	Domain string `json:"domain"`
+	// Uses the same values as DomainType constants: DomainCode, DomainDocs,
+	// DomainInfra, DomainAPI, DomainKnowledge, DomainIssues, DomainCustom.
+	// Sprint 16 added infra, api, and knowledge domain edges (DEPLOYS, CONSUMES,
+	// CONFIGURED_BY, DOCUMENTS, MENTIONS).
+	Domain DomainType `json:"domain"`
 	// Synthetic marks edges injected by heuristic passes rather than derived from the AST.
 	// Synthetic edges carry an inherent confidence < 1.0 (stored in node metadata).
 	Synthetic bool `json:"synthetic,omitempty"`
@@ -164,28 +166,28 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Description:    "Function or method invocation. Direction: caller → callee. Highest BFS weight — runtime behaviour flows along CALLS edges.",
 		SemanticWeight: 1.0,
 		Direction:      "directed",
-		Domain:         "code",
+		Domain:         DomainCode,
 	},
 	{
 		Name:           EdgeDataFlows,
 		Description:    "Data dependency between entities: a value produced by one entity is consumed by another. Near-highest weight — data-flow edges are critical for debugging and impact analysis.",
 		SemanticWeight: 0.95,
 		Direction:      "directed",
-		Domain:         "code",
+		Domain:         DomainCode,
 	},
 	{
 		Name:           EdgeImplements,
 		Description:    "Struct or type implements an interface. Direction: concrete type → interface. High weight — interface compliance is central to code review and contract analysis.",
 		SemanticWeight: 0.9,
 		Direction:      "directed",
-		Domain:         "code",
+		Domain:         DomainCode,
 	},
 	{
 		Name:           EdgeHandles,
 		Description:    "HTTP/RPC route dispatches to a handler function. Direction: route node → handler. Injected by the R1 heuristic pass (not AST-derived). Confidence stored in route node metadata.",
 		SemanticWeight: 0.9,
 		Direction:      "directed",
-		Domain:         "code",
+		Domain:         DomainCode,
 		Synthetic:      true,
 	},
 	{
@@ -193,21 +195,21 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Description:    "Struct embeds another struct (Go embedding / composition). Direction: outer struct → embedded struct. High weight — embedding propagates the full method set.",
 		SemanticWeight: 0.85,
 		Direction:      "directed",
-		Domain:         "code",
+		Domain:         DomainCode,
 	},
 	{
 		Name:           EdgeDependsOn,
 		Description:    "Explicit dependency relationship between entities or modules. Broader than CALLS — captures package-level or declarative dependencies not visible as direct call sites.",
 		SemanticWeight: 0.8,
 		Direction:      "directed",
-		Domain:         "code",
+		Domain:         DomainCode,
 	},
 	{
 		Name:           EdgeDeploys,
 		Description:    "Code entity deploys an infrastructure resource. Direction: code entity → Terraform/k8s resource node. Strong cross-domain dependency — code changes may break deployed infrastructure.",
 		SemanticWeight: 0.75,
 		Direction:      "directed",
-		Domain:         "infra",
+		Domain:         DomainInfra,
 		Synthetic:      true,
 	},
 	{
@@ -215,7 +217,7 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Description:    "Code entity calls or depends on an API endpoint or service. Direction: code entity → OpenAPI endpoint / gRPC service node. Strong cross-domain dependency — API changes break consuming code.",
 		SemanticWeight: 0.75,
 		Direction:      "directed",
-		Domain:         "api",
+		Domain:         DomainAPI,
 		Synthetic:      true,
 	},
 	{
@@ -223,14 +225,14 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Description:    "Source file or package imports another package. Direction: importer → imported package node. Lower weight than CALLS — import edges are structurally noisy (every file that uses a stdlib type gets an edge).",
 		SemanticWeight: 0.7,
 		Direction:      "directed",
-		Domain:         "code",
+		Domain:         DomainCode,
 	},
 	{
 		Name:           EdgeExplains,
 		Description:    "Documentation section describes a code entity (R31). Direction: Section node → code entity. Moderate weight — doc context is valuable but secondary to structural code edges.",
 		SemanticWeight: 0.7,
 		Direction:      "directed",
-		Domain:         "docs",
+		Domain:         DomainDocs,
 		Synthetic:      true,
 	},
 	{
@@ -238,7 +240,7 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Description:    "Code entity is controlled by a configuration resource. Direction: code entity → Terraform variable / k8s ConfigMap / config file node. Cross-domain — config changes can silently break code behaviour.",
 		SemanticWeight: 0.65,
 		Direction:      "directed",
-		Domain:         "infra",
+		Domain:         DomainInfra,
 		Synthetic:      true,
 	},
 	{
@@ -246,7 +248,7 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Description:    "Documentation section describes a cross-domain entity (broader than EXPLAINS). Direction: docs section → any entity (code, infra, API). Used for README sections that describe Terraform modules or API specs.",
 		SemanticWeight: 0.65,
 		Direction:      "directed",
-		Domain:         "docs",
+		Domain:         DomainDocs,
 		Synthetic:      true,
 	},
 	{
@@ -254,7 +256,7 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Description:    "Reverse of EXPLAINS: code entity references its documentation section (R31). Direction: code entity → Section node. Slightly lower than EXPLAINS so code-to-code edges are preferred under token budget pressure.",
 		SemanticWeight: 0.6,
 		Direction:      "directed",
-		Domain:         "docs",
+		Domain:         DomainDocs,
 		Synthetic:      true,
 	},
 	{
@@ -262,7 +264,7 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Description:    "Synthetic cross-domain name-match edge. Direction: any entity → any entity across domain boundary. Created by the name-matching background pass when two entities share the same identifier across domains. Confidence (0.0–1.0) stored in edge metadata; only edges with confidence ≥ 0.6 are auto-created.",
 		SemanticWeight: 0.55,
 		Direction:      "directed",
-		Domain:         "knowledge",
+		Domain:         DomainKnowledge,
 		Synthetic:      true,
 	},
 	{
@@ -270,14 +272,14 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Description:    "Module or file exports an identifier. Direction: file/module → exported symbol. Medium-low weight — captures public API surface without dominating BFS traversal.",
 		SemanticWeight: 0.5,
 		Direction:      "directed",
-		Domain:         "code",
+		Domain:         DomainCode,
 	},
 	{
 		Name:           EdgeManual,
 		Description:    "User-defined cross-domain relationship created via link_entities. Used when no standard edge type applies. Medium BFS weight (0.5) — traversed but lower priority than structural code edges.",
 		SemanticWeight: 0.5,
 		Direction:      "directed",
-		Domain:         "custom",
+		Domain:         DomainCustom,
 		Synthetic:      true,
 	},
 	{
@@ -285,15 +287,15 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Description:    "Markdown cross-document link (R31). Direction: source document/section → target document node. Lowest semantic weight among doc edges — navigation structure, not content relationship.",
 		SemanticWeight: 0.3,
 		Direction:      "directed",
-		Domain:         "docs",
+		Domain:         DomainDocs,
 		Synthetic:      true,
 	},
 	{
 		Name:           EdgeContains,
-		Description:    "Document file contains a section, or parent section contains a subsection (R31). Direction: doc file/section → child section. Structural edge — same intentionally low weight as DEFINES to avoid hub inflation.",
+		Description:    "Document file contains a section, or parent section contains a subsections (R31). Direction: doc file/section → child section. Structural edge — same intentionally low weight as DEFINES to avoid hub inflation.",
 		SemanticWeight: 0.15,
 		Direction:      "directed",
-		Domain:         "docs",
+		Domain:         DomainDocs,
 		Synthetic:      true,
 	},
 	{
@@ -301,7 +303,7 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Description:    "Source file defines a code entity. Direction: file node → entity node. Lowest weight — every entity has exactly one DEFINES edge, so including it at higher weight would uniformly equalise all siblings in a file.",
 		SemanticWeight: 0.15,
 		Direction:      "directed",
-		Domain:         "code",
+		Domain:         DomainCode,
 	},
 }
 
@@ -333,6 +335,10 @@ const (
 	DomainIssues DomainType = "issues"
 	// DomainCustom is a catch-all for user-defined domain parsers and connectors.
 	DomainCustom DomainType = "custom"
+	// DomainKnowledge represents cross-domain or meta-level relationships.
+	// Used by synthetic edges (e.g. MENTIONS) that bridge two existing-domain entities
+	// rather than belonging to any single domain. Sprint 16.
+	DomainKnowledge DomainType = "knowledge"
 )
 
 // ProvenanceType classifies the trust tier of a graph node.

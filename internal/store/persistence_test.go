@@ -459,6 +459,7 @@ func TestDomainField_AllDomains(t *testing.T) {
 		graph.DomainDocs,
 		graph.DomainIssues,
 		graph.DomainCustom,
+		graph.DomainKnowledge,
 	}
 
 	for _, dom := range domains {
