@@ -1170,7 +1170,7 @@ func (s *Server) handleSessionInit(
 			})
 			select {
 			case tr := <-trendCh:
-				if t := buildSessionTrend(tr.days); t != nil {
+				if t := buildSessionTrend(tr.days, 7); t != nil {
 					resp["session_effectiveness_trend"] = t
 				}
 			case <-time.After(100 * time.Millisecond):

@@ -770,19 +770,20 @@ func buildEffectivenessMessage(r *EffectivenessReport) string {
 
 // buildSessionTrend converts a slice of DailyEffectiveness rows (oldest-first,
 // from GetRecentEffectivenessTrend) into a summary map suitable for embedding
-// in session_init responses. Returns nil when there are fewer than 2 total
-// sessions across all days — insufficient data produces no actionable signal.
+// in session_init responses. windowDays is the query window (e.g. 7 for 7-day
+// lookback) and is included in the response and note for clarity.
+// Returns nil when there are fewer than 2 total sessions — insufficient data.
 //
-// Trend direction requires at least 2 distinct days to compare halves:
+// Trend direction requires at least 2 distinct calendar days to compare halves:
 //
 //	second_half_avg - first_half_avg > +0.05 → "improving"
 //	first_half_avg  - second_half_avg > 0.05 → "declining"
-//	otherwise (or only 1 day of data)        → "stable"
-func buildSessionTrend(days []pulse.DailyEffectiveness) map[string]interface{} {
+//	otherwise (or only 1 active day)         → "stable"
+func buildSessionTrend(days []pulse.DailyEffectiveness, windowDays int) map[string]interface{} {
 	if len(days) == 0 {
 		return nil
 	}
-	// Aggregate totals across all days.
+	// Aggregate totals across all active days.
 	var totalSessions int
 	var weightedHitRate float64
 	var totalTokensSaved int
@@ -795,12 +796,15 @@ func buildSessionTrend(days []pulse.DailyEffectiveness) map[string]interface{} {
 		return nil
 	}
 	avgHitRate := weightedHitRate / float64(totalSessions)
+	activeDays := len(days)
 
-	// Compute trend direction when there are ≥2 days to compare.
-	// With a single day (all sessions on the same calendar day), trend is "stable".
+	// Compute trend direction when there are ≥2 distinct calendar days.
+	// With a single active day (all sessions on the same date), we cannot
+	// determine direction — "stable" is the neutral default, noted as such.
 	trend := "stable"
-	if len(days) >= 2 {
-		mid := len(days) / 2
+	canCompareTrend := activeDays >= 2
+	if canCompareTrend {
+		mid := activeDays / 2
 		var firstHalfHit, firstHalfSess float64
 		var secondHalfHit, secondHalfSess float64
 		for _, d := range days[:mid] {
@@ -823,23 +827,37 @@ func buildSessionTrend(days []pulse.DailyEffectiveness) map[string]interface{} {
 		}
 	}
 
-	// Human-readable note summarising the trend.
+	// Human-readable note. Uses the query window (windowDays) not activeDays so
+	// agents understand the full analysis period, not just the days with data.
 	hitPct := int(avgHitRate * 100)
+	dayWord := "days"
+	if windowDays == 1 {
+		dayWord = "day"
+	}
 	var note string
-	switch trend {
-	case "improving":
-		note = fmt.Sprintf("Context quality is improving over the last %d days. Hit rate: ~%d%%.", len(days), hitPct)
-	case "declining":
-		note = fmt.Sprintf("Context quality is declining over the last %d days. Hit rate: ~%d%%. Consider increasing depth on first call.", len(days), hitPct)
-	default:
-		note = fmt.Sprintf("Context quality is stable over the last %d days. Hit rate: ~%d%%.", len(days), hitPct)
+	if !canCompareTrend {
+		// Only 1 active day — cannot assess trend direction.
+		note = fmt.Sprintf("Context quality: hit rate ~%d%% (%d sessions today).", hitPct, totalSessions)
+	} else {
+		switch trend {
+		case "improving":
+			note = fmt.Sprintf("Context quality improving over %d %s: hit rate ~%d%%, %d sessions.",
+				windowDays, dayWord, hitPct, totalSessions)
+		case "declining":
+			note = fmt.Sprintf("Context quality declining over %d %s: hit rate ~%d%%, %d sessions. Consider increasing depth on first call.",
+				windowDays, dayWord, hitPct, totalSessions)
+		default:
+			note = fmt.Sprintf("Context quality stable over %d %s: hit rate ~%d%%, %d sessions.",
+				windowDays, dayWord, hitPct, totalSessions)
+		}
 	}
 	if totalTokensSaved > 0 {
 		note += fmt.Sprintf(" %d tokens saved.", totalTokensSaved)
 	}
 
 	out := map[string]interface{}{
-		"days":                 len(days),
+		"window_days":          windowDays,
+		"active_days":          activeDays,
 		"sessions":             totalSessions,
 		"avg_context_hit_rate": avgHitRate,
 		"total_tokens_saved":   totalTokensSaved,
