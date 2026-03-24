@@ -919,6 +919,7 @@ func (s *Server) buildBrainPacket(
 	bc := s.getBrainClient()
 	if bc == nil {
 		dc.BrainHint = "not configured — add brain.url to synapses.json for semantic enrichment"
+		dc.BrainStatus = "unavailable"
 		return nil
 	}
 
@@ -928,7 +929,8 @@ func (s *Server) buildBrainPacket(
 	}
 
 	// Async enrichment: fire background goroutine, return nil for this call.
-	dc.BrainHint = "enrichment in progress — call again in a few seconds for brain-enriched results"
+	dc.BrainHint = "enrichment in progress (~2-5s) — call get_context(entity=\"" + node.Name + "\") again for LLM-enriched summary"
+	dc.BrainStatus = "pending"
 	s.goBackground(func() { s.asyncEnrichContext(bc, cacheKey, dc, node, taskID) })
 	return nil
 }

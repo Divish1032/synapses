@@ -81,7 +81,8 @@ type directionalContext struct {
 	SuggestedNextTools     []toolSuggestion              `json:"suggested_next_tools,omitempty"`     // context-aware next steps
 	Truncated              bool                          `json:"truncated,omitempty"`                // true when token budget cut results
 	TruncatedCount         int                           `json:"truncated_count,omitempty"`          // nodes dropped by budget
-	BrainHint              string                        `json:"brain,omitempty"`                    // set when brain is not configured
+	BrainHint              string                        `json:"brain,omitempty"`                    // set when brain is not configured or enrichment is pending
+	BrainStatus            string                        `json:"brain_status,omitempty"`             // "pending" | "ready" | "unavailable"
 	Principles             []string                      `json:"principles,omitempty"`               // Hot Constitution principles from synapses.json
 	ActivePrompts          []activePrompt                `json:"active_prompts,omitempty"`           // matched activation-context snippets from .synapses/prompts/
 	ADRs                   []brain.ADR                   `json:"adrs,omitempty"`                     // relevant accepted ADRs for this entity's file
@@ -747,11 +748,17 @@ func (s *Server) handleGetContext(
 			dc.ContextPacket = pkt
 		} else {
 			// Async enrichment: return raw graph now, enrich in background.
-			dc.BrainHint = "enrichment in progress — call get_context again in a few seconds for brain-enriched results"
+			hintEntity := entityName
+			if best != nil && best.Name != "" {
+				hintEntity = best.Name
+			}
+			dc.BrainHint = "enrichment in progress (~2-5s) — call get_context(entity=\"" + hintEntity + "\") again for LLM-enriched summary"
+			dc.BrainStatus = "pending"
 			s.goBackground(func() { s.asyncEnrichContext(bc, cacheKey, dc, best, taskID) })
 		}
 	} else {
 		dc.BrainHint = "not configured — add brain.url to synapses.json for semantic enrichment"
+		dc.BrainStatus = "unavailable"
 	}
 
 	// ── Parallel enrichment: run independent I/O-bound queries concurrently ──

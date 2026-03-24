@@ -1556,7 +1556,9 @@ func cmdDaemonServe(args []string) error {
 
 	// CSRF token endpoint — fetched once by the web console on load.
 	// Restricted to GET; requires trusted Origin (or no Origin for same-origin).
-	// Non-browser callers (no Origin/Sec-Fetch-Site header) must present a Bearer token.
+	// Non-browser callers (no Origin/Sec-Fetch-Site header) from loopback are
+	// trusted (consistent with authMiddleware). Non-loopback non-browser callers
+	// must present a Bearer token.
 	mux.HandleFunc("/api/admin/csrf-token", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "use GET", http.StatusMethodNotAllowed)
@@ -1571,11 +1573,23 @@ func cmdDaemonServe(args []string) error {
 				return
 			}
 		} else {
-			authHeader := r.Header.Get("Authorization")
-			if !strings.HasPrefix(authHeader, "Bearer ") || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(authHeader, "Bearer ")), []byte(authToken)) != 1 {
-				w.Header().Set("WWW-Authenticate", `Bearer realm="synapses"`)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
+			// Non-browser: loopback callers (CLI tools) are trusted without a token.
+			// Non-loopback callers must present a valid Bearer token.
+			host, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				host = r.RemoteAddr
+			}
+			isLoopback := func() bool {
+				ip := net.ParseIP(host)
+				return ip != nil && ip.IsLoopback()
+			}()
+			if !isLoopback {
+				authHeader := r.Header.Get("Authorization")
+				if !strings.HasPrefix(authHeader, "Bearer ") || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(authHeader, "Bearer ")), []byte(authToken)) != 1 {
+					w.Header().Set("WWW-Authenticate", `Bearer realm="synapses"`)
+					http.Error(w, "Unauthorized", http.StatusUnauthorized)
+					return
+				}
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")

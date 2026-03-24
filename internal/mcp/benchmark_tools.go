@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"strings"
 
 	"github.com/SynapsesOS/synapses/internal/benchmark"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -34,11 +35,23 @@ func (s *Server) handleBenchmark(
 		return jsonResult(result)
 	}
 
+	// Issue 6: normalize underscores → hyphens and lowercase so "memory_recall"
+	// works the same as "memory-recall". Surfaces a note when normalization fires.
+	normalizedScenario := strings.ToLower(strings.ReplaceAll(scenario, "_", "-"))
+	var normalizeNote string
+	if normalizedScenario != scenario {
+		normalizeNote = "Scenario name normalized from " + scenario + " to " + normalizedScenario + "."
+		scenario = normalizedScenario
+	}
+
 	sc, err := benchmark.FindScenario(scenario)
 	if err != nil {
 		return toolError("find scenario", err)
 	}
 
 	result := benchmark.RunScenarios(s.graph, s.store, []benchmark.Scenario{sc})
+	if normalizeNote != "" {
+		result.Note = normalizeNote
+	}
 	return jsonResult(result)
 }

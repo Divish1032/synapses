@@ -1119,8 +1119,10 @@ func (s *Server) handleCheckPlanSafety(
 }
 
 // handleGetRuleCandidates returns failure episodes that have appeared ≥N times
-// and have not yet been promoted to a dynamic rule. Agents can review these and
-// call upsert_rule() + mark_episode_promoted() to close the feedback loop.
+// and have not yet been promoted to a dynamic rule, plus structural coupling
+// patterns detected by the graph (source="structural_coupling"). Agents can
+// review these and call upsert_rule() + mark_episode_promoted() / upsert_adr()
+// to close the loop.
 func (s *Server) handleGetRuleCandidates(
 	_ context.Context,
 	req mcp.CallToolRequest,
@@ -1139,14 +1141,60 @@ func (s *Server) handleGetRuleCandidates(
 		return toolError("get rule candidates", err)
 	}
 
-	summary := fmt.Sprintf("no failure patterns with ≥%d occurrences yet", minOccurrences)
-	if len(candidates) > 0 {
-		summary = fmt.Sprintf("%d rule candidate(s) ready for promotion", len(candidates))
+	// Build uniform candidate list with source field.
+	type candidate struct {
+		Source      string  `json:"source"`
+		ID          string  `json:"id"`
+		Description string  `json:"description"`
+		Confidence  float64 `json:"confidence,omitempty"`
+		Occurrences int     `json:"occurrences,omitempty"`
+	}
+	var all []candidate
+	for i, c := range candidates {
+		// Trigger is optional on older episodes — fall back to a slug of the
+		// decision text so agents always have a non-empty ID to pass to upsert_rule.
+		id := c.Trigger
+		if id == "" {
+			words := strings.Fields(strings.ToLower(c.Decision))
+			if len(words) > 4 {
+				words = words[:4]
+			}
+			slug := strings.Map(func(r rune) rune {
+				if r == '-' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+					return r
+				}
+				return '-'
+			}, strings.Join(words, "-"))
+			id = fmt.Sprintf("failure-%d-%s", i+1, slug)
+		}
+		all = append(all, candidate{
+			Source:      "failure_pattern",
+			ID:          id,
+			Description: c.Decision,
+			Occurrences: c.Occurrences,
+		})
+	}
+
+	// Add structural coupling patterns from the graph when available.
+	if s.graph != nil {
+		for _, sr := range s.graph.SuggestRules() {
+			all = append(all, candidate{
+				Source:      "structural_coupling",
+				ID:          sr.ID,
+				Description: sr.Description,
+				Confidence:  sr.Confidence,
+			})
+		}
+	}
+
+	summary := fmt.Sprintf("no candidates found (failure patterns with ≥%d occurrences or high-confidence structural couplings)", minOccurrences)
+	if len(all) > 0 {
+		summary = fmt.Sprintf("%d rule candidate(s) ready for promotion", len(all))
 	}
 	return jsonResult(map[string]interface{}{
 		"summary":    summary,
-		"candidates": candidates,
-		"hint":       "For each candidate: call upsert_rule() to enforce it structurally, then call mark_episode_promoted(episode_id, rule_id) to close the loop.",
+		"candidates": all,
+		"hint":       "For failure_pattern candidates: upsert_rule() then mark_episode_promoted(). For structural_coupling candidates: upsert_rule() to enforce, then upsert_adr() to document the architectural decision.",
 	})
 }
 
