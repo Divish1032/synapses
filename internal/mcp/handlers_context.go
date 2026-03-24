@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -99,6 +100,54 @@ type directionalContext struct {
 	// followed by corrections or session abandonment. Agents should treat this
 	// entity's context as potentially insufficient and consider a deeper fetch.
 	LowQualityHint string `json:"low_quality_hint,omitempty"`
+	// Sprint 15 #6: context confidence score in [0.0, 1.0].
+	// Derived from per-entity quality score, graph freshness, and stale annotations.
+	// confidence < 0.5 adds ConfidenceHint but does NOT suppress the result — agents decide.
+	// Default 0.75 when no prior outcome data exists (optimistic for unscored entities).
+	Confidence     float64 `json:"confidence"`
+	ConfidenceHint string  `json:"confidence_hint,omitempty"`
+}
+
+// computeContextConfidence maps a quality score + staleness indicators to a
+// calibrated confidence value in [0.0, 1.0] (Sprint 15 #6).
+//
+// Formula:
+//   - No prior record (entity never appeared in a scored outcome): 0.75 (optimistic).
+//   - Has record: sigmoid(qs/2.0) rescaled to [0.15, 0.95].
+//     qs=0  → 0.55 (neutral outcome history)
+//     qs=+3 → 0.80 (consistently helped agents)
+//     qs=+5 → 0.90 (strong positive history)
+//     qs=-1 → 0.42 (one abandonment or two cancellations)
+//     qs=-2 → 0.37 (established pattern of insufficiency — triggers low-quality hint)
+//   - Staleness downgrades:
+//     −0.10 if graph freshness warning (file modified <10s, graph may lag)
+//     −0.05 if stale annotations exist
+//   - Result clamped to [0.0, 1.0], rounded to 2 decimal places.
+//
+// confidence < 0.5 should add a hint in the response but MUST NOT suppress
+// the result — the agent decides how to act on the information.
+func computeContextConfidence(qs float64, hasRecord, graphFreshWarning, staleAnnotWarning bool) float64 {
+	var conf float64
+	if !hasRecord {
+		conf = 0.75 // no scored outcomes yet — deliver optimistically
+	} else {
+		// sigmoid(qs/2.0) ∈ (0, 1); rescale to [0.15, 0.95] to avoid extreme values.
+		sig := 1.0 / (1.0 + math.Exp(-qs/2.0))
+		conf = 0.15 + sig*0.8
+	}
+	if graphFreshWarning {
+		conf -= 0.10
+	}
+	if staleAnnotWarning {
+		conf -= 0.05
+	}
+	if conf < 0.0 {
+		conf = 0.0
+	}
+	if conf > 1.0 {
+		conf = 1.0
+	}
+	return math.Round(conf*100) / 100
 }
 
 // computeEntityHash returns a short SHA1 hex digest that identifies the
@@ -879,6 +928,26 @@ func (s *Server) handleGetContext(
 	// they received deeper context than the default.
 	if adaptiveForceFullDetail {
 		dc.AdaptiveHint = "⟳ Context depth auto-expanded based on prior feedback for this entity."
+	}
+
+	// Sprint 15 #6: compute context confidence score.
+	// Placed after all enrichments (enrichWg.Wait + sequential passes) so that
+	// dc.GraphFreshness and dc.StaleAnnotationWarning are both already populated.
+	{
+		var qs float64
+		var hasRecord bool
+		if pc := s.getPulseClient(); pc != nil && sg.Root != "" {
+			qs, hasRecord = pc.GetEntityQualityScore(string(sg.Root), s.projectID)
+		}
+		dc.Confidence = computeContextConfidence(qs, hasRecord, dc.GraphFreshness != "", dc.StaleAnnotationWarning != "")
+		if dc.Confidence < 0.5 {
+			dc.ConfidenceHint = fmt.Sprintf(
+				"Low confidence (%.2f): prior context deliveries for this entity were "+
+					"frequently followed by corrections or session abandonment. "+
+					"Context is not suppressed — agent decides. "+
+					"Consider depth=4 or a different entry point.",
+				dc.Confidence)
+		}
 	}
 
 	// Attach entity_hash to the response so clients can cache and compare.

@@ -184,6 +184,16 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		fmt.Fprintf(&b, "%s\n", dc.CallerCountWarning)
 	}
 
+	// Sprint 15 #6: context confidence score. Always present (non-zero).
+	// Low confidence (< 0.5) adds the hint inline so agents cannot miss it.
+	if dc.Confidence > 0 {
+		if dc.ConfidenceHint != "" {
+			fmt.Fprintf(&b, "⚠ confidence:%.2f — %s\n", dc.Confidence, dc.ConfidenceHint)
+		} else {
+			fmt.Fprintf(&b, "confidence:%.2f\n", dc.Confidence)
+		}
+	}
+
 	// === MIDDLE: Supplementary content (lowest LLM attention zone) ===
 
 	// IMP-IMPL-2: For struct nodes, list field names and types from metadata.
