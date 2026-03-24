@@ -265,6 +265,48 @@ func TestPPRCrossDomainDecayReducesInfraRelevance(t *testing.T) {
 	}
 }
 
+// TestBFSCrossDomainDecayAboveOneIsNoPenalty verifies that a CrossDomainDecay value
+// greater than 1.0 is treated as no-penalty (the `> 0 && < 1` guard skips the decay).
+// This protects against cache key fragmentation: decay=1.5 and decay=2.0 must produce
+// identical subgraph scores so the caller's normalization clamp (to 1.0) is safe.
+func TestBFSCrossDomainDecayAboveOneIsNoPenalty(t *testing.T) {
+	g, ids := buildCrossDomainFixture(t)
+
+	cfgOver := graph.DefaultCarveConfig()
+	cfgOver.UsePPR = false
+	cfgOver.CrossDomainDecay = 2.0 // > 1, guard skips decay
+	cfgOver.MaxDepth = 2
+	cfgOver.ExcludeTypes = nil
+
+	cfgOne := graph.DefaultCarveConfig()
+	cfgOne.UsePPR = false
+	cfgOne.CrossDomainDecay = 1.0 // exact boundary, no penalty
+	cfgOne.MaxDepth = 2
+	cfgOne.ExcludeTypes = nil
+
+	sgOver, err := g.CarveEgoGraph(ids["codeFunc"], cfgOver)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph (decay=2.0): %v", err)
+	}
+	sgOne, err := g.CarveEgoGraph(ids["codeFunc"], cfgOne)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph (decay=1.0): %v", err)
+	}
+
+	relevanceOver := make(map[graph.NodeID]float64)
+	for _, cn := range sgOver.Nodes {
+		relevanceOver[cn.Node.ID] = cn.Relevance
+	}
+	for _, cn := range sgOne.Nodes {
+		if got, ok := relevanceOver[cn.Node.ID]; ok {
+			if got != cn.Relevance {
+				t.Errorf("node %s: decay=2.0 relevance %v != decay=1.0 relevance %v — values>1 must be no-op",
+					cn.Node.ID, got, cn.Relevance)
+			}
+		}
+	}
+}
+
 // TestIntentWeightsIncludeCrossDomainEdges ensures all intent weight maps contain
 // the cross-domain edge types so they don't fall back to the 0.5 default.
 func TestIntentWeightsIncludeCrossDomainEdges(t *testing.T) {

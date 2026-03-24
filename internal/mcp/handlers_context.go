@@ -375,7 +375,12 @@ func (s *Server) handleGetContext(
 	// Sprint 16 #4: cross_domain_decay — caller-configurable domain-boundary penalty.
 	// Range (0, 1]. Default 0.5 (set by DefaultCarveConfig). Use 1.0 to disable
 	// the penalty and treat cross-domain edges equally to same-domain edges.
+	// Values > 1.0 are clamped to 1.0 so the cache key is normalized and callers
+	// don't accidentally create separate cache entries for functionally identical configs.
 	if cdd, ok := req.GetArguments()["cross_domain_decay"].(float64); ok && cdd > 0 {
+		if cdd > 1.0 {
+			cdd = 1.0
+		}
 		cfg.CrossDomainDecay = cdd
 	}
 
