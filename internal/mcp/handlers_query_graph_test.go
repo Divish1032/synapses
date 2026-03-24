@@ -597,6 +597,37 @@ func TestHandleQueryGraph_TruncatedAndNotTruncated(t *testing.T) {
 
 // ── File substring matching tests ────────────────────────────────────────────
 
+func TestHandleQueryGraph_PackageSubstringMatch(t *testing.T) {
+	// package= uses substring matching — "auth" should match stored package "auth"
+	// AND a fully-qualified Java-style "com.example.auth".
+	g := graph.New("testrepo")
+	// Add a Java-style node with full package path.
+	g.AddNode(&graph.Node{
+		ID:      g.MakeNodeID("Auth.java", "AuthService"),
+		Name:    "AuthService",
+		Package: "com.example.auth",
+		Type:    graph.NodeType("class"),
+		Domain:  "code",
+		File:    "src/com/example/auth/AuthService.java",
+	})
+	// Add a Go-style node with short package name.
+	g.AddNode(&graph.Node{
+		ID:      g.MakeNodeID("auth.go", "Login"),
+		Name:    "Login",
+		Package: "auth",
+		Type:    graph.NodeType("function"),
+		Domain:  "code",
+		File:    "internal/auth/login.go",
+	})
+
+	out := callQueryGraphTool(t, g, `NODES WHERE package="auth"`)
+	count := int(out["count"].(float64))
+	// Both nodes should match: "com.example.auth" contains "auth", "auth" contains "auth"
+	if count != 2 {
+		t.Errorf("expected 2 nodes (Go short + Java qualified package containing 'auth'), got %d", count)
+	}
+}
+
 func TestHandleQueryGraph_FileSubstringMatch(t *testing.T) {
 	// file= uses substring matching — "auth.go" should match the stored path "auth.go"
 	g := buildTestGraphForQuery()
