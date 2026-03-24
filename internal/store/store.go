@@ -508,6 +508,13 @@ type Store struct {
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
 
+	// bfSemaphore limits the number of concurrent brute-force vector searches
+	// to prevent GC pressure when HNSW is unavailable and many goroutines call
+	// MemoryVectorSearchWithThreshold simultaneously. Each brute-force scan
+	// loads up to 50K rows (≈75 MB at 384 dims); capping at 4 concurrent scans
+	// bounds peak RSS to ~300 MB for this subsystem.
+	bfSemaphore chan struct{}
+
 	// hnswMemIndex is the in-memory HNSW approximate nearest-neighbor index for
 	// memory embeddings. Replaces O(N) brute-force scan with O(log N) graph
 	// traversal. Keyed by memory_id, values are pre-normalized embedding vectors.
@@ -912,7 +919,8 @@ func Open(path string) (*Store, error) {
 	}
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
-	st := &Store{graphDB: graphRW, knowledgeDB: knowledgeRW, bgCtx: bgCtx, bgCancel: bgCancel}
+	st := &Store{graphDB: graphRW, knowledgeDB: knowledgeRW, bgCtx: bgCtx, bgCancel: bgCancel,
+		bfSemaphore: make(chan struct{}, 4)}
 
 	// Rebuild FTS index for existing databases where nodes_fts is empty but
 	// the nodes table already has data.
@@ -1123,7 +1131,8 @@ func OpenReadOnly(path string) (*Store, error) {
 		_, _ = knowledgeDB.Exec(knowledgeSchema)
 	}
 	bgCtx, bgCancel := context.WithCancel(context.Background())
-	return &Store{graphDB: wrapSingleDB(graphDB), knowledgeDB: wrapSingleDB(knowledgeDB), bgCtx: bgCtx, bgCancel: bgCancel}, nil
+	return &Store{graphDB: wrapSingleDB(graphDB), knowledgeDB: wrapSingleDB(knowledgeDB), bgCtx: bgCtx, bgCancel: bgCancel,
+		bfSemaphore: make(chan struct{}, 4)}, nil
 }
 
 // rebuildFTS repopulates the nodes_fts table from the current nodes table.

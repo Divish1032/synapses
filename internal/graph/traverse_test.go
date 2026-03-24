@@ -1602,3 +1602,84 @@ func TestQualityScoreLookup_EmptyResultIsNoop(t *testing.T) {
 		}
 	}
 }
+
+// TestFlatGraph_PPR_ParityWithSlowPath verifies that enabling the FlatGraph BFS
+// fast path produces the same ranked node set as the pointer-based slow path.
+// This is the key correctness invariant: FlatGraph is a performance optimisation
+// and must not change which nodes appear in the PPR subgraph.
+func TestFlatGraph_PPR_ParityWithSlowPath(t *testing.T) {
+	// Build a moderately-connected graph so PPR BFS exercises multi-hop expansion.
+	g := graph.New("parity-repo")
+
+	// Six nodes across three files — enough edges that PPR ranking is non-trivial.
+	nA := g.MakeNodeID("a.go", "Alpha")
+	nB := g.MakeNodeID("b.go", "Beta")
+	nC := g.MakeNodeID("c.go", "Gamma")
+	nD := g.MakeNodeID("a.go", "Delta")
+	nE := g.MakeNodeID("b.go", "Epsilon")
+	nF := g.MakeNodeID("c.go", "Zeta")
+
+	for _, n := range []struct {
+		id   graph.NodeID
+		name string
+		file string
+	}{
+		{nA, "Alpha", "a.go"}, {nB, "Beta", "b.go"}, {nC, "Gamma", "c.go"},
+		{nD, "Delta", "a.go"}, {nE, "Epsilon", "b.go"}, {nF, "Zeta", "c.go"},
+	} {
+		g.AddNode(&graph.Node{ID: n.id, Type: graph.NodeFunction, Name: n.name, File: n.file})
+	}
+
+	g.AddEdge(&graph.Edge{From: nA, To: nB, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: nB, To: nC, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: nC, To: nD, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: nD, To: nE, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: nE, To: nF, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: nF, To: nA, Type: graph.EdgeCalls}) // cycle
+
+	cfg := graph.DefaultCarveConfig()
+	cfg.UsePPR = true
+	cfg.MaxDepth = 6
+	cfg.TokenBudget = 100_000
+
+	// Slow path (no FlatGraph).
+	slowSub, err := g.CarveEgoGraph(nA, cfg)
+	if err != nil {
+		t.Fatalf("slow path: %v", err)
+	}
+
+	// Enable FlatGraph fast path and re-run from fresh cache.
+	g.EnableFlatGraph()
+	g.InvalidateCache()
+
+	fastSub, err := g.CarveEgoGraph(nA, cfg)
+	if err != nil {
+		t.Fatalf("fast path: %v", err)
+	}
+
+	// Both runs must return the same set of node IDs.
+	slowSet := make(map[graph.NodeID]struct{}, len(slowSub.Nodes))
+	for _, cn := range slowSub.Nodes {
+		slowSet[cn.Node.ID] = struct{}{}
+	}
+	fastSet := make(map[graph.NodeID]struct{}, len(fastSub.Nodes))
+	for _, cn := range fastSub.Nodes {
+		fastSet[cn.Node.ID] = struct{}{}
+	}
+
+	for id := range slowSet {
+		if _, ok := fastSet[id]; !ok {
+			t.Errorf("FlatGraph fast path missing node %s that slow path found", id)
+		}
+	}
+	for id := range fastSet {
+		if _, ok := slowSet[id]; !ok {
+			t.Errorf("FlatGraph fast path has extra node %s not in slow path", id)
+		}
+	}
+
+	if t.Failed() {
+		t.Logf("slow set (%d): %v", len(slowSet), slowSet)
+		t.Logf("fast set (%d): %v", len(fastSet), fastSet)
+	}
+}
