@@ -136,7 +136,14 @@ func (p *StringPool) internGhost(s string) StringID {
 		id = 1
 	}
 	p.ghostCache[id] = s
-	p.ghostNext = id + 1
+	// Guard against uint32 overflow: ghostNext is always in [1, ReservedGhostRange)
+	// due to the wrap check above, so this can only trigger if ReservedGhostRange
+	// is ever set close to math.MaxUint32. Saturate to 1 (wraps to start).
+	if id+1 < id { // overflow
+		p.ghostNext = 1
+	} else {
+		p.ghostNext = id + 1
+	}
 	return StringID(id)
 }
 
