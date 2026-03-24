@@ -262,7 +262,7 @@ func (s *Server) handleRemember(
 		copy(ids, memoryIDs)
 		if !s.goBackground(func() {
 			for _, memID := range ids {
-				s.embedMemory(embedder, st, memID, content)
+				s.embedMemory(s.lifecycleCtx, embedder, st, memID, content)
 			}
 		}) {
 			for _, memID := range ids {
