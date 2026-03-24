@@ -135,14 +135,35 @@ func (s *Server) handleFindEntity(
 		results = append(results, m)
 	}
 
-	// Sort results: implementation files before test files, then by path depth
-	// (shorter = closer to root). This ensures the authoritative definition
-	// appears first when both a_test.go and a.go define the same function name.
+	// Sort results: code nodes (function/method/struct/interface) before doc
+	// sections, then non-test before test, then by path depth (shorter = closer
+	// to root). This ensures code definitions appear first when both a markdown
+	// section and a Go function share the same name.
+	nodeTypeTier := func(t graph.NodeType) int {
+		switch t {
+		case graph.NodeFunction, graph.NodeMethod:
+			return 1
+		case graph.NodeStruct, graph.NodeInterface:
+			return 2
+		case graph.NodeRoute, graph.NodeVariable:
+			return 3
+		case graph.NodeFile, graph.NodePackage:
+			return 4
+		default: // NodeSection and anything else
+			return 5
+		}
+	}
 	sort.Slice(results, func(i, j int) bool {
-		ti := isTestFile(results[i].File)
-		tj := isTestFile(results[j].File)
+		ti := nodeTypeTier(results[i].Type)
+		tj := nodeTypeTier(results[j].Type)
 		if ti != tj {
-			return !ti // non-test wins
+			return ti < tj // lower tier number wins (code before docs)
+		}
+		// Same type tier: non-test before test.
+		iTest := isTestFile(results[i].File)
+		jTest := isTestFile(results[j].File)
+		if iTest != jTest {
+			return !iTest
 		}
 		// Same test-ness: prefer shorter file path (closer to project root).
 		if len(results[i].File) != len(results[j].File) {
@@ -630,6 +651,11 @@ func (s *Server) handleDiscoverTools(ctx context.Context, req mcp.CallToolReques
 		}()
 	}
 
+	// semanticFallbackReason is set when the semantic path was attempted but fell
+	// back to keyword scoring. Declared before the goto so it is in scope at the
+	// keywordPath label (Go forbids jumping over variable declarations).
+	var semanticFallbackReason string
+
 	if embeddingsReady && s.memoryEmbedder != nil {
 		embedCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		queryVec, embedErr := s.memoryEmbedder.Embed(embedCtx, query)
@@ -662,6 +688,7 @@ func (s *Server) handleDiscoverTools(ctx context.Context, req mcp.CallToolReques
 			}
 			if len(filtered) == 0 {
 				// No positive-similarity tools — keyword path will do better.
+				semanticFallbackReason = "semantic search returned no positive-similarity tools — keyword fallback used"
 				goto keywordPath
 			}
 			semResults = filtered
@@ -740,7 +767,10 @@ func (s *Server) handleDiscoverTools(ctx context.Context, req mcp.CallToolReques
 			}
 			return jsonResult(resp)
 		}
-		// Embed failed or no positive-similarity results — fall through to keyword path.
+		// Embed failed — fall through to keyword path.
+		if semanticFallbackReason == "" {
+			semanticFallbackReason = "semantic embedding failed — keyword fallback used"
+		}
 	}
 
 keywordPath:
@@ -774,6 +804,9 @@ keywordPath:
 		"query":       query,
 		"matches":     matches,
 		"search_mode": "keyword",
+	}
+	if semanticFallbackReason != "" {
+		resp["fallback_reason"] = semanticFallbackReason
 	}
 	if len(matches) == 0 {
 		resp["hint"] = "No matches. Try broader terms like 'explore', 'task', 'web', 'architecture'."
@@ -1165,15 +1198,32 @@ func (s *Server) handleGetCallChain(
 		return mcp.NewToolResultError("from and to are required"), nil
 	}
 
+	// resolve maps a name to a graph node, preferring code nodes over doc sections.
+	// Always combines exact-name matches and pattern matches so that a doc section
+	// with a matching header (e.g. "## session_init") does not win over a code
+	// function that has the same term in its identifier.
 	resolve := func(name string) *graph.Node {
-		nodes := s.graph.FindByName(name)
-		if len(nodes) == 0 {
-			nodes = s.graph.FindByPatternLimit(name, 50)
+		exact := s.graph.FindByName(name)
+		pattern := s.graph.FindByPatternLimit(name, 50)
+		// Combine, deduplicating by node ID, exact matches first.
+		seen := make(map[graph.NodeID]bool, len(exact)+len(pattern))
+		combined := make([]*graph.Node, 0, len(exact)+len(pattern))
+		for _, n := range exact {
+			if !seen[n.ID] {
+				seen[n.ID] = true
+				combined = append(combined, n)
+			}
 		}
-		if len(nodes) == 0 {
+		for _, n := range pattern {
+			if !seen[n.ID] {
+				seen[n.ID] = true
+				combined = append(combined, n)
+			}
+		}
+		if len(combined) == 0 {
 			return nil
 		}
-		return pickBestNode(nodes, s.graph)
+		return pickBestNode(combined, s.graph)
 	}
 
 	fromNode := resolve(fromName)
@@ -1191,11 +1241,31 @@ func (s *Server) handleGetCallChain(
 		})
 	}
 
+	// Warn when resolution picked a doc section instead of a code node — the
+	// caller probably meant the function/handler, not the documentation heading.
+	var resolveWarnings []string
+	if fromNode.Type == graph.NodeSection {
+		resolveWarnings = append(resolveWarnings, fmt.Sprintf(
+			"from=%q resolved to a documentation section (type=section, file=%s). "+
+				"If you meant a code function, use the full node ID from find_entity().",
+			fromName, fromNode.File))
+	}
+	if toNode.Type == graph.NodeSection {
+		resolveWarnings = append(resolveWarnings, fmt.Sprintf(
+			"to=%q resolved to a documentation section (type=section, file=%s). "+
+				"If you meant a code function, use the full node ID from find_entity().",
+			toName, toNode.File))
+	}
+
 	if fromNode.ID == toNode.ID {
-		return jsonResult(map[string]interface{}{
+		resp := map[string]interface{}{
 			"found": true,
 			"chain": []string{fromNode.Name},
-		})
+		}
+		if len(resolveWarnings) > 0 {
+			resp["resolve_warnings"] = resolveWarnings
+		}
+		return jsonResult(resp)
 	}
 
 	// BFS following CALLS + HANDLES edges (forward) and IMPLEMENTS edges (both
@@ -1314,6 +1384,9 @@ func (s *Server) handleGetCallChain(
 			"reason": reason,
 			"hint":   hint,
 		}
+		if len(resolveWarnings) > 0 {
+			notFound["resolve_warnings"] = resolveWarnings
+		}
 		// R2: surface the deepest reachable node so agents know where the static
 		// graph ends — especially useful for dynamic-dispatch gaps.
 		if closestReachableID != "" && closestReachableID != fromNode.ID {
@@ -1383,13 +1456,17 @@ func (s *Server) handleGetCallChain(
 		})
 	}
 
-	return jsonResult(map[string]interface{}{
+	resp := map[string]interface{}{
 		"found":         true,
 		"hops":          len(chain) - 1,
 		"via_interface": usedInterface,
 		"via_handles":   usedHandles, // R1: true when path crossed a synthetic routing edge
 		"chain":         chain,
-	})
+	}
+	if len(resolveWarnings) > 0 {
+		resp["resolve_warnings"] = resolveWarnings
+	}
+	return jsonResult(resp)
 }
 
 // isTestFile returns true for test files (_test.go, test_*.py, *_test.ts, etc.)
@@ -1418,11 +1495,17 @@ func (s *Server) handleSemanticSearch(
 	// On any error, silently fall through to FTS5-only results.
 	var vectorResults []store.SearchResult
 	searchMode := "fts5_bm25"
+	// embedFailed is true when the embed API call itself errored (timeout, endpoint
+	// down, etc.) — distinct from "embed succeeded but no vector matches found".
+	// Used below to produce an accurate fallback_reason for the caller.
+	var embedFailed bool
 	if s.embedClient != nil {
 		embedCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		queryVec, embedErr := s.embedClient.Embed(embedCtx, query)
 		cancel()
-		if embedErr == nil && len(queryVec) > 0 {
+		if embedErr != nil || len(queryVec) == 0 {
+			embedFailed = true
+		} else {
 			vr, verr := s.store.VectorSearch(queryVec, limit)
 			if verr == nil && len(vr) > 0 {
 				vectorResults = vr
@@ -1473,6 +1556,21 @@ func (s *Server) handleSemanticSearch(
 			resp["note"] = fmt.Sprintf("Vector embeddings not yet built. Run 'synapses index' or wait for the background embedding pass to complete (model: %s).", s.embedClient.Model())
 		} else {
 			resp["note"] = fmt.Sprintf("Vector index partial (%d nodes embedded). Results blended from cosine+FTS5 as more embeddings complete.", embeddingCount)
+		}
+	}
+	// Issue 1: when mode="semantic" was explicitly requested but we fell back to
+	// FTS5, surface a fallback_reason so the agent knows semantic ranking was not used.
+	// Three distinct failure modes produce different diagnostics:
+	//   1. embedClient nil     → embedder not configured
+	//   2. embedFailed=true    → embed API call errored (timeout / endpoint down)
+	//   3. neither             → embed worked but the vector index had no matches
+	if mode := stringArg(req, "mode"); mode == "semantic" && searchMode == "fts5_bm25" {
+		if s.embedClient == nil {
+			resp["fallback_reason"] = "semantic unavailable — embedder not ready (call session_init to check embeddings status)"
+		} else if embedFailed {
+			resp["fallback_reason"] = "semantic embedding failed (endpoint timeout or error) — FTS5 fallback used"
+		} else {
+			resp["fallback_reason"] = "semantic index has no vector matches for this query — FTS5 fallback used"
 		}
 	}
 	if len(results) == 0 {

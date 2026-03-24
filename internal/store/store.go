@@ -1390,14 +1390,17 @@ func (s *Store) SemanticSearch(query string, limit int) ([]SearchResult, error) 
 
 	// bm25() returns negative values: more negative = better match.
 	// We invert the sign so Score is positive and higher = better.
+	// Secondary sort: exact name match always ranks first within the same score
+	// tier, so searching "handleFoo" returns the node named exactly "handleFoo"
+	// at position #1 even when other nodes contain that word in their doc/sig.
 	const ftsSQL = `
         SELECT node_id, name, signature, doc, -bm25(nodes_fts, 0, 10, 8, 5, 2) AS score
         FROM nodes_fts
         WHERE nodes_fts MATCH ?
-        ORDER BY score DESC
+        ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END ASC, score DESC
         LIMIT ?`
 
-	rows, err := s.graphDB.Query(ftsSQL, q, limit)
+	rows, err := s.graphDB.Query(ftsSQL, q, q, limit)
 	if err != nil {
 		// FTS5 syntax error — fall back to LIKE search on name.
 		return s.likeSearch(query, limit)
@@ -3473,6 +3476,20 @@ func (s *Store) UpsertDynamicRule(r config.Rule) error {
 		ruleType, pathPattern, now, now,
 	)
 	return err
+}
+
+// DeleteDynamicRule removes a dynamic rule by ID. Returns (true, nil) when the
+// rule was found and deleted, (false, nil) when no rule with that ID exists.
+func (s *Store) DeleteDynamicRule(ruleID string) (bool, error) {
+	result, err := s.knowledgeDB.Exec(`DELETE FROM dynamic_rules WHERE id = ?`, ruleID)
+	if err != nil {
+		return false, fmt.Errorf("delete dynamic_rule: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // LoadDynamicRules returns all dynamic rules persisted in the store, ordered

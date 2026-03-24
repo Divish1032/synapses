@@ -26,6 +26,7 @@ type Result struct {
 	Scenarios  []ScenarioResult `json:"scenarios"`
 	Summary    Summary          `json:"summary"`
 	DurationMs int64            `json:"total_duration_ms"`
+	Note       string           `json:"note,omitempty"` // informational note (e.g. scenario name normalization)
 }
 
 // Summary aggregates across all scenarios.

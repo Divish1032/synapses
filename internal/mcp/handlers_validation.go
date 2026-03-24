@@ -77,6 +77,13 @@ func (s *Server) handleValidatePlan(
 		return mcp.NewToolResultError(fmt.Sprintf("invalid changes JSON: %v", stripInternalPaths(err.Error()))), nil
 	}
 
+	if s.graph == nil {
+		return jsonResult(map[string]interface{}{
+			"status":  "unprotected",
+			"message": "graph not loaded — start the daemon with a valid project path to enable structural validation",
+		})
+	}
+
 	// Optional inline safety check — runs check_plan_safety before structural validation.
 	var safetyCheck map[string]interface{}
 	if checkSafety, _ := req.GetArguments()["check_safety"].(bool); checkSafety && s.store != nil {
@@ -180,13 +187,21 @@ func (s *Server) handleValidatePlan(
 	}
 
 	s.rulesMu.RLock()
-	violations := s.config.CheckViolations(overlay)
-	hasRules := len(s.config.Rules) > 0
+	var violations []config.Violation
+	var hasRules bool
+	if s.config != nil {
+		violations = s.config.CheckViolations(overlay)
+		hasRules = len(s.config.Rules) > 0
+	}
 	s.rulesMu.RUnlock()
 
 	status := "ok"
 	if len(violations) > 0 {
 		status = "violations_found"
+	} else if !hasRules {
+		// Issue 3: distinguish "validated clean" from "not checked at all".
+		// "ok" must only appear when at least one rule was evaluated and passed.
+		status = "unprotected"
 	}
 
 	// P3-5: emit validation outcome event.
@@ -313,7 +328,7 @@ func (s *Server) handleValidatePlan(
 		result["warnings"] = warnings
 	}
 	if !hasRules {
-		result["hint"] = "No architectural rules configured. Add rules via upsert_rule or in synapses.json to enable validation."
+		result["message"] = "No architectural rules active — plan was NOT validated. Add rules via upsert_rule() or configure them in synapses.json. Proceeding without rules gives no protection against architecture violations."
 	}
 	if safetyCheck != nil {
 		result["safety_check"] = safetyCheck
@@ -940,6 +955,63 @@ func (s *Server) handleUpsertRule(
 		"rule_id":   ruleID,
 		"rule_type": ruleType,
 		"message":   fmt.Sprintf("Rule %q (%s) is now active.", ruleID, ruleType),
+	})
+}
+
+// handleDeleteRule removes a dynamic architectural rule by ID.
+// Both the in-memory config and the persistent SQLite store are updated so the
+// deletion survives daemon restart. Returns status="not_found" when the rule
+// doesn't exist — not an error, since idempotent deletion is safe.
+func (s *Server) handleDeleteRule(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	ruleID := strings.TrimSpace(stringArg(req, "rule_id"))
+	if ruleID == "" {
+		return mcp.NewToolResultError("rule_id is required"), nil
+	}
+
+	// Delete from store first so a store failure leaves in-memory state unchanged.
+	// If we removed from memory first and then the store write failed, the rule
+	// would be gone this session but reload on restart — a silent inconsistency.
+	storeDeleted := false
+	if s.store != nil {
+		deleted, err := s.store.DeleteDynamicRule(ruleID)
+		if err != nil {
+			return toolError("delete rule", err)
+		}
+		storeDeleted = deleted
+	}
+
+	// Remove from in-memory config (covers both dynamic rules and config-file
+	// rules that happen to share the same ID).
+	removed := false
+	s.rulesMu.Lock()
+	if s.config != nil {
+		newRules := s.config.Rules[:0]
+		for _, r := range s.config.Rules {
+			if r.ID == ruleID {
+				removed = true
+			} else {
+				newRules = append(newRules, r)
+			}
+		}
+		s.config.Rules = newRules
+	}
+	s.rulesMu.Unlock()
+	removed = removed || storeDeleted
+
+	if !removed {
+		return jsonResult(map[string]interface{}{
+			"status":  "not_found",
+			"rule_id": ruleID,
+			"message": fmt.Sprintf("Rule %q does not exist — nothing to delete.", ruleID),
+		})
+	}
+	return jsonResult(map[string]interface{}{
+		"status":  "ok",
+		"rule_id": ruleID,
+		"message": fmt.Sprintf("Rule %q deleted and no longer active.", ruleID),
 	})
 }
 

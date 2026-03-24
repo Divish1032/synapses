@@ -162,15 +162,11 @@ func (s *Server) handleCreatePlan(
 
 	s.upsertAgentIfNeeded(agentID)
 
-	// Auto-detect code nodes mentioned in each task's text and merge with any
-	// explicitly provided linked_nodes — bridges "work to be done" with "code
-	// to be changed" without requiring the caller to know node IDs upfront.
-	// Build the name index once and reuse across all tasks to avoid O(N×tasks).
-	nameIdx := s.buildNameIndex()
-	for i := range taskInputs {
-		detected := linkNodesWithIndex(taskInputs[i].Title+" "+taskInputs[i].Description, nameIdx)
-		taskInputs[i].LinkedNodes = mergeNodeIDs(taskInputs[i].LinkedNodes, detected)
-	}
+	// Issue 4: Auto-linking removed — it produced spurious links to unrelated
+	// nodes (e.g. package-lock.json fields, frontend component fields) that
+	// misled agents about which code to modify. Agents should call
+	// link_task_nodes(task_id, node_ids=[...]) explicitly after identifying the
+	// relevant nodes via find_entity() or search().
 
 	// R29: detect mid-session replan — emit only when the agent has an
 	// in_progress task that was recently started (within 2 hours). Stale
@@ -217,7 +213,7 @@ func (s *Server) handleCreatePlan(
 		"plan_id":    planID,
 		"title":      title,
 		"task_count": len(taskInputs),
-		"message":    "Plan saved. Call get_pending_tasks() at the start of future sessions to resume.",
+		"message":    "Plan saved. Call get_pending_tasks() at the start of future sessions to resume. Use link_task_nodes(task_id, node_ids=[...]) to associate tasks with specific code entities after identifying them via find_entity() or search().",
 	})
 }
 

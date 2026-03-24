@@ -2483,6 +2483,24 @@ func (s *Server) registerTools() {
 		s.handleUpsertRule,
 	)
 
+	// delete_rule
+	s.addOrDefer(
+		mcp.NewTool(
+			"delete_rule",
+			mcp.WithDescription(
+				"Delete a dynamic architectural rule by ID. "+
+					"Removes the rule from both in-memory validation and persistent storage — "+
+					"validate_plan() will no longer check this rule after deletion. "+
+					"Returns status=\"not_found\" (not an error) when the rule ID does not exist.",
+			),
+			mcp.WithString("rule_id",
+				mcp.Required(),
+				mcp.Description("The rule ID to delete (same ID used in upsert_rule)."),
+			),
+		),
+		s.handleDeleteRule,
+	)
+
 	// ── Session Awareness Tools ──────────────────────────────────────────────
 
 	// get_working_state
@@ -2573,7 +2591,10 @@ func (s *Server) registerTools() {
 					"they appear in get_context compact output when linked_files match the entity's file. "+
 					"IMPORTANT: always pass linked_files=[\"path/to/file.go\"] when creating an ADR — "+
 					"without it, get_adrs(file=...) will never return this ADR for that file. "+
-					"Requires brain.url to be configured in synapses.json.",
+					"Requires brain.url to be configured in synapses.json. "+
+					"Typical workflow: (1) get_rule_candidates() to find structural patterns, "+
+					"(2) upsert_rule(rule_id=...) to enforce the pattern, "+
+					"(3) upsert_adr(id=..., context=\"Enforced via rule <rule_id>\", linked_files=[...]) to document the decision.",
 			),
 			mcp.WithString("id",
 				mcp.Required(),
@@ -3015,7 +3036,8 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("scenario",
 				mcp.Description("Scenario to run: 'all' (default), 'context-completeness', 'search-accuracy', "+
-					"'impact-coverage', 'graph-reachability', 'fts-ranking', 'memory-recall'."),
+					"'impact-coverage', 'graph-reachability', 'fts-ranking', 'memory-recall'. "+
+					"Names use hyphens, not underscores (underscore variants are auto-normalized)."),
 			),
 		),
 		s.handleBenchmark,
