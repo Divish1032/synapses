@@ -496,6 +496,25 @@ func (c *Client) GetEntityQualityScores(projectID string, limit int) []EntityQua
 	return c.store.GetEntityQualityScores(projectID, limit)
 }
 
+// GetEntityQualityScore returns the quality score for a single entity (Sprint 15 #2).
+// Returns (score, true) when a quality record exists, or (0, false) when none.
+func (c *Client) GetEntityQualityScore(entity, projectID string) (float64, bool) {
+	if c == nil || entity == "" {
+		return 0, false
+	}
+	return c.store.GetEntityQualityScore(entity, projectID)
+}
+
+// GetEntityQualityScoresBatch returns quality scores for a specific set of entities
+// (Sprint 15 #2 — BFS/PPR lookup). Fetches only the requested IDs in one SQL
+// round-trip; entities with no quality record are absent from the result map.
+func (c *Client) GetEntityQualityScoresBatch(entities []string, projectID string) map[string]float64 {
+	if c == nil || len(entities) == 0 {
+		return nil
+	}
+	return c.store.GetEntityQualityScoresBatch(entities, projectID)
+}
+
 // GetDeliveryOutcomes returns delivery-to-outcome linkages (P5 — Item 11).
 func (c *Client) GetDeliveryOutcomes(days int) []DeliveryOutcome {
 	if c == nil {

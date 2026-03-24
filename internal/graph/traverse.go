@@ -692,6 +692,37 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		}
 	}
 
+	// Sprint 15 #2: Quality score boost — entities that have consistently
+	// produced helpful context rank higher; entities that caused repeated
+	// corrections or session abandonment rank lower.
+	//
+	// Formula: relevance *= (1 + qualityBeta × tanh(score / qualityScale))
+	//   tanh squashes the unbounded quality score into (-1, +1) so a very
+	//   negative entity is penalised by at most qualityBeta (never zeroed).
+	//   Root is always pinned at 1.0 and is never penalised or boosted.
+	//   Nodes with no quality record are left unchanged.
+	if cfg.QualityScoreLookup != nil {
+		batchIDs := make([]NodeID, 0, len(scored))
+		for i := range scored {
+			if scored[i].id != rootID {
+				batchIDs = append(batchIDs, scored[i].id)
+			}
+		}
+		if len(batchIDs) > 0 {
+			const qualityBeta = 0.2
+			const qualityScale = 5.0
+			qualityScores := cfg.QualityScoreLookup(batchIDs)
+			for i := range scored {
+				if scored[i].id == rootID {
+					continue
+				}
+				if qs, ok := qualityScores[scored[i].id]; ok {
+					scored[i].relevance *= 1.0 + qualityBeta*math.Tanh(qs/qualityScale)
+				}
+			}
+		}
+	}
+
 	// Sort by relevance descending so we keep the most important nodes first
 	// when applying the token budget.
 	sort.Slice(scored, func(i, j int) bool {
