@@ -59,12 +59,15 @@ type TraversalPath struct {
 
 // GraphTraversalInfo describes the graph channel's multi-hop traversal for a recall() call.
 // Surfaced in the response when the graph channel was active and found results.
+// VectorSearchMs is always set when the semantic channel ran, regardless of
+// whether the graph channel produced results.
 type GraphTraversalInfo struct {
-	Depth        int             `json:"depth"`
-	AnchorCount  int             `json:"anchor_count"`  // query-matching seed entities
-	VisitedNodes int             `json:"visited_nodes"` // graph nodes explored by BFS
-	Paths        []TraversalPath `json:"paths,omitempty"`
-	Note         string          `json:"note"`
+	Depth          int             `json:"depth"`
+	AnchorCount    int             `json:"anchor_count"`           // query-matching seed entities
+	VisitedNodes   int             `json:"visited_nodes"`          // graph nodes explored by BFS
+	Paths          []TraversalPath `json:"paths,omitempty"`
+	Note           string          `json:"note"`
+	VectorSearchMs float64         `json:"vector_search_ms,omitempty"` // embedding query latency
 }
 
 // buildEnrichedQuery appends session-context terms (intent, task title) to a
@@ -129,7 +132,7 @@ func (s *Server) quadRecallSearch(
 	sinceDays int,
 	untilTime *time.Time, // Sprint 10.5: optional upper time bound for temporal channel
 	depth int,
-) ([]store.Memory, map[string][]string, []string, *GraphTraversalInfo) {
+) ([]store.Memory, store.Attribution, []string, *GraphTraversalInfo) {
 	// Fallback: empty enrichedQuery means no session context — use original query.
 	if enrichedQuery == "" {
 		enrichedQuery = query
@@ -518,8 +521,16 @@ func (s *Server) quadRecallSearch(
 		return nil, nil, nil, nil
 	}
 
+	// Extract sideband metadata from channels before filtering for RRF/Convex.
+	// _vector_search_ms is injected into the INPUT channels map by the semantic
+	// goroutine and must be read here — it is NOT present in the output Attribution.
+	var vecSearchMs float64
+	if vs, ok := channels["_vector_search_ms"]; ok && len(vs) > 0 {
+		fmt.Sscanf(vs[0], "%f", &vecSearchMs)
+	}
+
 	var rankedIDs []string
-	var attribution map[string][]string
+	var attribution store.Attribution
 
 	if useConvex && len(channelScores) > 0 {
 		// Score-aware convex fusion: uses score magnitudes, not just ranks.
@@ -536,8 +547,8 @@ func (s *Server) quadRecallSearch(
 		rankedIDs, attribution = store.ConvexMerge(channelScores, limit, cw)
 	} else {
 		// Default: Reciprocal Rank Fusion (rank-only).
-		// Sprint 15 #4: filter metadata keys (e.g. "_vector_search_ms") so they
-		// don't pollute the attribution map with fake memory IDs.
+		// Filter metadata keys (e.g. "_vector_search_ms") — they are not real
+		// channels and must not reach RRFMergeWeighted (already extracted above).
 		rffChannels := make(map[string][]string, len(channels))
 		for k, v := range channels {
 			if !strings.HasPrefix(k, "_") {
@@ -639,11 +650,20 @@ func (s *Server) quadRecallSearch(
 		traversalInfo = ti
 	}
 
+	// Attach vector search latency to traversalInfo so callers can record it
+	// without reading the raw INPUT channels map (which is local to this function).
+	if vecSearchMs > 0 {
+		if traversalInfo == nil {
+			traversalInfo = &GraphTraversalInfo{}
+		}
+		traversalInfo.VectorSearchMs = vecSearchMs
+	}
+
 	return result, attribution, staleEmbIDs, traversalInfo
 }
 
 // graphAttributedMemIDs returns memory IDs from result that have "graph" in their attribution.
-func graphAttributedMemIDs(result []store.Memory, attribution map[string][]string) []string {
+func graphAttributedMemIDs(result []store.Memory, attribution store.Attribution) []string {
 	var ids []string
 	for _, m := range result {
 		for _, ch := range attribution[m.ID] {
@@ -661,7 +681,7 @@ func graphAttributedMemIDs(result []store.Memory, attribution map[string][]strin
 // (those are found by BM25 directly — no interesting multi-hop to show).
 func (s *Server) reconstructTraversalPaths(
 	mems []store.Memory,
-	attribution map[string][]string,
+	attribution store.Attribution,
 	bfsResult GraphBFSResult,
 	anchorMap map[string]string, // memID → first anchor nodeID
 ) []TraversalPath {
