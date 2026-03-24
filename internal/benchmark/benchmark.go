@@ -225,24 +225,6 @@ func makeQueryResult(label string, expected, returned map[string]bool, latency t
 	}
 }
 
-// idSet converts a slice of strings to a set.
-func idSet(ids []string) map[string]bool {
-	s := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		s[id] = true
-	}
-	return s
-}
-
-// nodeIDSet converts a slice of graph.NodeID to a set of strings.
-func nodeIDSet(ids []graph.NodeID) map[string]bool {
-	s := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		s[string(id)] = true
-	}
-	return s
-}
-
 // BuiltinScenarios returns the standard set of scenarios shipped with Synapses.
 // These are listed in BuiltinScenarioNames() for MCP tool discovery.
 func BuiltinScenarios() []Scenario {
