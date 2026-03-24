@@ -742,11 +742,17 @@ func uninstallSystemd() error {
 		fmt.Printf("  \033[32m✓\033[0m %-8s uninstalled\n", s.Name)
 	}
 
-	// Uninstall the daemon unit.
+	// Uninstall the daemon service unit.
 	daemonUnitName := "synapses-daemon.service"
 	exec.Command("systemctl", "--user", "disable", "--now", daemonUnitName).Run() //nolint:errcheck
 	os.Remove(filepath.Join(svcDir, daemonUnitName))
 	fmt.Printf("  \033[32m✓\033[0m %-8s uninstalled\n", "daemon")
+
+	// Uninstall the daemon socket unit.
+	socketUnitName := "synapses.socket"
+	exec.Command("systemctl", "--user", "disable", "--now", socketUnitName).Run() //nolint:errcheck
+	os.Remove(filepath.Join(svcDir, socketUnitName))
+	fmt.Printf("  \033[32m✓\033[0m %-8s uninstalled\n", "socket")
 
 	exec.Command("systemctl", "--user", "daemon-reload").Run() //nolint:errcheck
 	fmt.Println()
