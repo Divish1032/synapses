@@ -742,8 +742,15 @@ func (s *Server) handleRecall(
 			TopChannel:     topChan,
 		})
 		// P5 — Item 12: trigger recall channel attribution refresh after hits.
+		// Debounced to recallStatsMinInterval: a busy session with N recalls
+		// triggers at most one full aggregation per interval via CAS on a
+		// unix-nanosecond timestamp — no mutex, no goroutine.
 		if op == "recall_hit" {
-			s.goBackground(func() { pc.UpdateRecallChannelStats(projID) })
+			now := time.Now().UnixNano()
+			last := s.recallStatsLastNs.Load()
+			if now-last > int64(recallStatsMinInterval) && s.recallStatsLastNs.CompareAndSwap(last, now) {
+				s.goBackground(func() { pc.UpdateRecallChannelStats(projID) })
+			}
 		}
 	}
 

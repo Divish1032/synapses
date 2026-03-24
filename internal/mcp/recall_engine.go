@@ -1030,6 +1030,17 @@ func logRecallChannelError(channel string, err error) {
 	logutil.Warn("synapses: recall %s channel error: %v\n", channel, err)
 }
 
+// recallWeightsCacheTTL is how long recallChannelWeights() serves cached
+// weights before re-querying pstore. Weights change slowly (only after
+// UpdateRecallChannelStats runs), so a 5-minute TTL eliminates per-recall
+// SQLite round-trips without meaningful staleness risk.
+const recallWeightsCacheTTL = 5 * time.Minute
+
+// recallStatsMinInterval is the minimum time between UpdateRecallChannelStats
+// triggers. Debounces the per-recall_hit trigger so a session with 100 recalls
+// fires at most one full aggregation per interval instead of 100.
+const recallStatsMinInterval = 5 * time.Minute
+
 // recallChannelWeights returns per-project RRF channel weight multipliers.
 //
 // Sprint 15 #4: when the pulse sidecar has accumulated channel attribution
@@ -1037,10 +1048,9 @@ func logRecallChannelError(channel string, err error) {
 // are used directly as weight multipliers so that channels that historically
 // produce the top-ranked result score proportionally higher.
 //
-// Win-rates are probabilities in [0, 1] that sum to ~1.0. They replace the
-// DefaultRRFWeights only after enough signal has been collected. Any channel
-// absent from the learned data (e.g. semantic when embedder is off) falls back
-// to its default weight so new/unavailable channels are not silenced.
+// Results are cached for recallWeightsCacheTTL to avoid a SQLite SELECT on
+// every recall call. Weights change only when UpdateRecallChannelStats runs,
+// which is itself debounced to recallStatsMinInterval.
 //
 // Falls back to DefaultRRFWeights when:
 //   - pulse client is nil
@@ -1050,21 +1060,40 @@ func (s *Server) recallChannelWeights() map[string]float64 {
 	if pc == nil {
 		return store.DefaultRRFWeights
 	}
+
+	// Fast path: return cached weights if still fresh.
+	s.recallWeightsMu.RLock()
+	if s.recallWeightsCache != nil && time.Since(s.recallWeightsCachedAt) < recallWeightsCacheTTL {
+		w := s.recallWeightsCache
+		s.recallWeightsMu.RUnlock()
+		return w
+	}
+	s.recallWeightsMu.RUnlock()
+
+	// Cache miss: fetch from pstore and rebuild.
 	learned := pc.GetRecallChannelWeights(s.projectID)
+	var weights map[string]float64
 	if len(learned) < 2 {
 		// Not enough per-channel data yet — keep default balance.
-		return store.DefaultRRFWeights
-	}
-	// Build blended weights: use learned win-rate for known channels, default
-	// for channels absent from the learned set. Clamp at 0.05 so no channel
-	// is ever fully silenced by a transient data gap.
-	weights := make(map[string]float64, len(store.DefaultRRFWeights))
-	for ch, def := range store.DefaultRRFWeights {
-		if wr, ok := learned[ch]; ok && wr > 0 {
-			weights[ch] = math.Max(wr, 0.05)
-		} else {
-			weights[ch] = def
+		weights = store.DefaultRRFWeights
+	} else {
+		// Build blended weights: use learned win-rate for known channels,
+		// default for channels absent from the learned set. Clamp at 0.05
+		// so no channel is ever fully silenced by a transient data gap.
+		weights = make(map[string]float64, len(store.DefaultRRFWeights))
+		for ch, def := range store.DefaultRRFWeights {
+			if wr, ok := learned[ch]; ok && wr > 0 {
+				weights[ch] = math.Max(wr, 0.05)
+			} else {
+				weights[ch] = def
+			}
 		}
 	}
+
+	s.recallWeightsMu.Lock()
+	s.recallWeightsCache = weights
+	s.recallWeightsCachedAt = time.Now()
+	s.recallWeightsMu.Unlock()
+
 	return weights
 }
