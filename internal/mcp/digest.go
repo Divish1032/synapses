@@ -161,7 +161,10 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		}
 		// Sprint 15 #6: confidence must appear at every detail level — agents
 		// using "summary" need the advisory as much as those using "full".
-		if dc.Confidence > 0 {
+		// Use ConfidenceHint as the sentinel for "was computed" so that a
+		// legitimately-zero confidence (extreme qs + both staleness flags)
+		// is not silently suppressed by the Confidence > 0 guard.
+		if dc.Confidence > 0 || dc.ConfidenceHint != "" {
 			if dc.ConfidenceHint != "" {
 				fmt.Fprintf(&b, "⚠ confidence:%.2f — %s\n", dc.Confidence, dc.ConfidenceHint)
 			} else {
@@ -193,9 +196,10 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		fmt.Fprintf(&b, "%s\n", dc.CallerCountWarning)
 	}
 
-	// Sprint 15 #6: context confidence score. Always present (non-zero).
-	// Low confidence (< 0.5) adds the hint inline so agents cannot miss it.
-	if dc.Confidence > 0 {
+	// Sprint 15 #6: context confidence score. Present when computed (non-zero
+	// or when a hint is set — hint fires at confidence < 0.5, including the
+	// edge case of confidence == 0.0 from extreme qs + both staleness flags).
+	if dc.Confidence > 0 || dc.ConfidenceHint != "" {
 		if dc.ConfidenceHint != "" {
 			fmt.Fprintf(&b, "⚠ confidence:%.2f — %s\n", dc.Confidence, dc.ConfidenceHint)
 		} else {
