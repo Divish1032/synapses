@@ -2689,15 +2689,24 @@ func (s *Store) SaveManualEdge(fromID, toID graph.NodeID, relation, domain, crea
 	if err != nil {
 		return ManualEdge{}, fmt.Errorf("save manual edge: %w", err)
 	}
-	return ManualEdge{
-		FromID:     fromID,
-		ToID:       toID,
-		Relation:   relation,
-		Domain:     domain,
-		CreatedBy:  createdBy,
-		CreatedAt:  now,
-		Confidence: confidence,
-	}, nil
+	// Re-read the actual row so callers see the true confirmed/suppressed state.
+	// The upsert above preserves confirmed/suppressed — we must not lie about them.
+	var me ManualEdge
+	var fid, tid string
+	var confirmed, suppressed int
+	row := s.graphDB.QueryRow(
+		`SELECT from_id, to_id, relation, domain, created_by, created_at, confidence, confirmed, suppressed
+		 FROM manual_edges WHERE from_id=? AND to_id=? AND relation=?`,
+		string(fromID), string(toID), relation,
+	)
+	if err := row.Scan(&fid, &tid, &me.Relation, &me.Domain, &me.CreatedBy, &me.CreatedAt, &me.Confidence, &confirmed, &suppressed); err != nil {
+		return ManualEdge{}, fmt.Errorf("save manual edge re-read: %w", err)
+	}
+	me.FromID = graph.NodeID(fid)
+	me.ToID = graph.NodeID(tid)
+	me.Confirmed = confirmed != 0
+	me.Suppressed = suppressed != 0
+	return me, nil
 }
 
 // SaveSyntheticEdge persists a synthetic MENTIONS edge created by the name matcher.
@@ -2705,6 +2714,77 @@ func (s *Store) SaveManualEdge(fromID, toID graph.NodeID, relation, domain, crea
 // DomainKnowledge as the domain. Idempotent — upserts update confidence on re-run.
 func (s *Store) SaveSyntheticEdge(fromID, toID graph.NodeID, edgeType graph.EdgeType, confidence float64) (ManualEdge, error) {
 	return s.SaveManualEdge(fromID, toID, string(edgeType), string(graph.DomainKnowledge), "namematcher", confidence)
+}
+
+// ConfirmEdge updates the human-review status of a persisted edge.
+// confirmed=true  → sets confirmed=1 and raises confidence to 1.0 (human-verified, never re-scored).
+// confirmed=false → sets suppressed=1 (human-rejected; reinjectManualEdges and NameMatcher skip it).
+// Returns an error if no matching edge exists in the store.
+func (s *Store) ConfirmEdge(fromID, toID graph.NodeID, relation string, confirmed bool) error {
+	var res sql.Result
+	var err error
+	if confirmed {
+		// Clear suppressed so a previously-rejected edge can be re-approved.
+		res, err = s.graphDB.Exec(
+			`UPDATE manual_edges SET confirmed=1, confidence=1.0, suppressed=0 WHERE from_id=? AND to_id=? AND relation=?`,
+			string(fromID), string(toID), relation,
+		)
+	} else {
+		// Clear confirmed so the state is unambiguous: suppressed-only.
+		res, err = s.graphDB.Exec(
+			`UPDATE manual_edges SET suppressed=1, confirmed=0 WHERE from_id=? AND to_id=? AND relation=?`,
+			string(fromID), string(toID), relation,
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("confirm edge: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("confirm edge rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("confirm edge: no edge found (%s -[%s]-> %s)", fromID, relation, toID)
+	}
+	return nil
+}
+
+// PruneStaleSyntheticEdges removes synthetic MENTIONS edges (created_by="namematcher")
+// whose from_id or to_id no longer exists in g. Called at the start of each name-matching
+// pass so stale DB entries from renamed/deleted entities do not accumulate indefinitely.
+// Errors are logged but do not block the caller — a stale DB row is not a hard failure.
+func (s *Store) PruneStaleSyntheticEdges(g *graph.Graph) error {
+	rows, err := s.graphDB.Query(
+		`SELECT from_id, to_id, relation FROM manual_edges WHERE created_by='namematcher'`,
+	)
+	if err != nil {
+		return fmt.Errorf("query synthetic edges: %w", err)
+	}
+	type edgeKey struct{ from, to, relation string }
+	var stale []edgeKey
+	for rows.Next() {
+		var from, to, rel string
+		if err := rows.Scan(&from, &to, &rel); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan synthetic edge: %w", err)
+		}
+		if g.GetNode(graph.NodeID(from)) == nil || g.GetNode(graph.NodeID(to)) == nil {
+			stale = append(stale, edgeKey{from, to, rel})
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate synthetic edges: %w", err)
+	}
+	for _, k := range stale {
+		if _, err := s.graphDB.Exec(
+			`DELETE FROM manual_edges WHERE from_id=? AND to_id=? AND relation=?`,
+			k.from, k.to, k.relation,
+		); err != nil {
+			logutil.Warn("synapses/store: prune stale synthetic edge %s→%s: %v\n", k.from, k.to, err)
+		}
+	}
+	return nil
 }
 
 // DeleteManualEdge removes a persisted user-defined edge.
