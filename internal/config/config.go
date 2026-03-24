@@ -835,6 +835,11 @@ const maxPathPatternDepth = 8
 func (c *Config) checkPathPatternViolations(g *graph.Graph, fromFile *string) []Violation {
 	var violations []Violation
 
+	// Snapshot all nodes once — reused across all path-pattern rules.
+	// g.AllNodes() acquires a read lock and copies the slice; calling it
+	// inside the rule loop would allocate N copies for N rules.
+	var allNodes []*graph.Node // lazy: populated on first path-pattern rule
+
 	for _, rule := range c.Rules {
 		p := rule.ForbiddenEdge
 		if len(p.PathPattern) == 0 {
@@ -847,8 +852,11 @@ func (c *Config) checkPathPatternViolations(g *graph.Graph, fromFile *string) []
 		pattern := p.PathPattern[:depth]
 		lastEdgeType := pattern[depth-1]
 
-		// Collect candidate from-nodes.
-		allNodes := g.AllNodes()
+		// Populate node snapshot on first path-pattern rule encountered.
+		if allNodes == nil {
+			allNodes = g.AllNodes()
+		}
+
 		for _, fromNode := range allNodes {
 			if fromNode == nil {
 				continue

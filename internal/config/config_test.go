@@ -781,3 +781,107 @@ func TestCheckViolationsForFile_PathPattern(t *testing.T) {
 		}
 	}
 }
+
+func TestPathPattern_JSONRoundTrip_SynapsesJSON(t *testing.T) {
+	// Verify that path_pattern survives a full synapses.json write → Load cycle.
+	// This tests the JSON unmarshaling path that agents and users hit when
+	// they write path-pattern rules directly in their synapses.json config.
+	cfg := config.Config{
+		Version: "1",
+		Rules: []config.Rule{{
+			ID:          "no-handler-db-json",
+			Description: "handlers must not call db directly",
+			Severity:    "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls, graph.EdgeCalls},
+			},
+		}},
+	}
+
+	dir := writeConfig(t, cfg)
+	loaded, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(loaded.Rules))
+	}
+	r := loaded.Rules[0]
+	if r.ID != "no-handler-db-json" {
+		t.Errorf("rule ID = %q", r.ID)
+	}
+	if len(r.ForbiddenEdge.PathPattern) != 2 {
+		t.Fatalf("PathPattern len = %d, want 2", len(r.ForbiddenEdge.PathPattern))
+	}
+	if r.ForbiddenEdge.PathPattern[0] != graph.EdgeCalls {
+		t.Errorf("PathPattern[0] = %q, want CALLS", r.ForbiddenEdge.PathPattern[0])
+	}
+	if r.ForbiddenEdge.PathPattern[1] != graph.EdgeCalls {
+		t.Errorf("PathPattern[1] = %q, want CALLS", r.ForbiddenEdge.PathPattern[1])
+	}
+	if r.ForbiddenEdge.FromFilePattern != "*/handlers/*" {
+		t.Errorf("FromFilePattern = %q", r.ForbiddenEdge.FromFilePattern)
+	}
+
+	// End-to-end: loaded config must detect violations on the layered graph.
+	g := buildLayeredGraph(t)
+	violations := loaded.CheckViolations(g)
+	found := false
+	for _, v := range violations {
+		if v.RuleID == "no-handler-db-json" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("loaded config did not detect path-pattern violation")
+	}
+}
+
+func TestPathPattern_MultipleRulesShareNodeSnapshot(t *testing.T) {
+	// Two path-pattern rules must both fire correctly — validates that the
+	// lazy allNodes snapshot is shared correctly between rules.
+	cfg := &config.Config{
+		Rules: []config.Rule{
+			{
+				ID:       "rule-direct",
+				Severity: "error",
+				ForbiddenEdge: config.ForbiddenEdge{
+					FromFilePattern: "*/handlers/*",
+					ToFilePattern:   "*/db/*",
+					PathPattern:     []graph.EdgeType{graph.EdgeCalls},
+				},
+			},
+			{
+				ID:       "rule-twohop",
+				Severity: "warning",
+				ForbiddenEdge: config.ForbiddenEdge{
+					FromFilePattern: "*/handlers/*",
+					ToFilePattern:   "*/db/*",
+					PathPattern:     []graph.EdgeType{graph.EdgeCalls, graph.EdgeCalls},
+				},
+			},
+		},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	ruleDirect, ruleTwoHop := false, false
+	for _, v := range violations {
+		switch v.RuleID {
+		case "rule-direct":
+			ruleDirect = true
+		case "rule-twohop":
+			ruleTwoHop = true
+		}
+	}
+	if !ruleDirect {
+		t.Error("rule-direct did not fire")
+	}
+	if !ruleTwoHop {
+		t.Error("rule-twohop did not fire")
+	}
+}
