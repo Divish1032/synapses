@@ -628,7 +628,11 @@ func tailFile(path string, n int) []string {
 		}
 	}
 
-	// Fallback for small files: read all lines.
+	// Fallback: rewind to the beginning (the seek-based loop above may have
+	// advanced the file cursor) and read all lines.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return []string{}
+	}
 	var lines []string
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
