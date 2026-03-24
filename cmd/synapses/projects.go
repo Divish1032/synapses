@@ -96,10 +96,25 @@ func writeKnownProjects(paths []string) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return
 	}
-	// Write to temp then rename for atomicity.
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
-		logutil.Warn("projects.json: write failed: %v\n", err)
+	// Write to an unpredictable temp file (os.CreateTemp) then rename for
+	// atomicity. Using a predictable name like p+".tmp" would allow a local
+	// attacker to pre-create a symlink and redirect the write.
+	dir := filepath.Dir(p)
+	f, err := os.CreateTemp(dir, ".projects-*.tmp")
+	if err != nil {
+		logutil.Warn("projects.json: create temp failed: %v\n", err)
+		return
+	}
+	tmp := f.Name()
+	_, writeErr := f.Write(append(data, '\n'))
+	closeErr := f.Close()
+	if writeErr != nil || closeErr != nil {
+		logutil.Warn("projects.json: write failed: %v %v\n", writeErr, closeErr)
+		os.Remove(tmp)
+		return
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		os.Remove(tmp)
 		return
 	}
 	if err := os.Rename(tmp, p); err != nil {
