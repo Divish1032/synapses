@@ -150,6 +150,7 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 		}
 		staleCount += len(ids)
 
+		batchDone := 0
 		for i, memID := range ids {
 			select {
 			case <-ctx.Done():
@@ -194,6 +195,14 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 				logutil.Error("synapses: store memory embedding %s: %v\n", memID, err)
 			}
 			done++
+			batchDone++
+		}
+
+		// If the entire batch made zero progress (embedder persistently unavailable),
+		// stop to avoid an infinite retry loop on the same IDs.
+		if batchDone == 0 {
+			logutil.Warn("synapses: memory embedding stalled — embedder unavailable (%d errors total), stopping\n", errors)
+			break
 		}
 	}
 

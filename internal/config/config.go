@@ -263,8 +263,21 @@ type BrainConfig struct {
 	Ingest bool `json:"ingest"`
 	// Enrich enables LLM enrichment of get_context responses. Default: false.
 	Enrich bool `json:"enrich"`
-	// ContextBuilder enables LLM-assembled context packets. Default: false.
-	ContextBuilder bool `json:"context_builder"`
+	// ContextBuilder enables LLM-assembled context packets.
+	// nil (omitted in JSON) → inherit from brain.Enabled (on when brain is on).
+	// true  → always enabled.
+	// false → explicitly disabled (opt-out).
+	ContextBuilder *bool `json:"context_builder,omitempty"`
+}
+
+// ContextBuilderEnabled returns the resolved ContextBuilder value:
+// - explicit *bool (set by user) → use as-is
+// - nil (omitted)               → inherit from brain.Enabled
+func (b *BrainConfig) ContextBuilderEnabled() bool {
+	if b.ContextBuilder != nil {
+		return *b.ContextBuilder
+	}
+	return b.Enabled
 }
 
 // ToBrainConfig converts to the internal brain configuration type used by NewInProcess.
@@ -280,10 +293,10 @@ func (b *BrainConfig) ToBrainConfig() *config.BrainConfig {
 		DBPath:           b.DBPath,
 		Ingest:           b.Ingest,
 		Enrich:           b.Enrich,
-		// D3: ContextBuilder defaults on when brain is enabled unless explicitly
-		// disabled in user config. This activates LLM-assembled context packets
-		// for all users who have already opted into brain intelligence.
-		ContextBuilder: b.ContextBuilder || b.Enabled,
+		// D3: ContextBuilder defaults on when brain is enabled, but respects
+		// an explicit opt-out (context_builder: false) in user config.
+		// nil → inherit from brain.Enabled; *bool → use the explicit value.
+		ContextBuilder: b.ContextBuilderEnabled(),
 	}
 }
 

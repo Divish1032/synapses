@@ -71,9 +71,7 @@ func (o *Orchestrator) Coordinate(ctx context.Context, req Request) (Response, e
 	prompt := o.buildPrompt(req)
 	raw, err := o.llm.Generate(ctx, prompt)
 	if err != nil {
-		// LLM failures are non-fatal for coordination — degrade gracefully so
-		// callers always receive a usable (if basic) response.
-		return o.fallbackResponse(req), nil
+		return Response{}, fmt.Errorf("orchestrator LLM unavailable: %w", err)
 	}
 
 	result, err := parseCoordinate(raw)
