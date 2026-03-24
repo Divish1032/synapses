@@ -137,3 +137,52 @@ resource "aws_subnet" "pub" { vpc_id = aws_vpc.main.id }
 	}
 	_ = n1
 }
+
+func TestResolveTerraformRefs_BreaksCycles(t *testing.T) {
+	g := graph.New("test-repo")
+
+	// Manually add two infra resource nodes that reference each other.
+	aID := graph.NodeID("node-a")
+	bID := graph.NodeID("node-b")
+	g.AddNode(&graph.Node{
+		ID:     aID,
+		Name:   "aws_instance.a",
+		Domain: graph.DomainInfra,
+		Metadata: map[string]string{
+			"kind": "resource",
+		},
+	})
+	g.AddNode(&graph.Node{
+		ID:     bID,
+		Name:   "aws_instance.b",
+		Domain: graph.DomainInfra,
+		Metadata: map[string]string{
+			"kind": "resource",
+		},
+	})
+
+	// A depends on B AND B depends on A — a cycle.
+	g.AddTerraformRef(graph.TerraformRef{
+		FromID:   aID,
+		FromFile: "/repo/a.tf",
+		RefName:  "aws_instance.b",
+	})
+	g.AddTerraformRef(graph.TerraformRef{
+		FromID:   bID,
+		FromFile: "/repo/b.tf",
+		RefName:  "aws_instance.a",
+	})
+
+	resolver.ResolveTerraformRefs(g)
+
+	// Count surviving DEPENDS_ON edges.
+	depCount := 0
+	for _, e := range g.AllEdges() {
+		if e.Type == graph.EdgeDependsOn {
+			depCount++
+		}
+	}
+	if depCount != 1 {
+		t.Errorf("expected exactly 1 DEPENDS_ON edge after cycle-breaking, got %d", depCount)
+	}
+}

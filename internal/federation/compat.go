@@ -27,7 +27,7 @@ func newRawDB(path string) (rawDB, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return rawDB{}, fmt.Errorf("db file not found: %s", path)
 	}
-	dsn := path + "?_pragma=query_only(true)&_pragma=busy_timeout(2000)"
+	dsn := path + "?_pragma=query_only(true)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return rawDB{}, fmt.Errorf("open raw db: %w", err)

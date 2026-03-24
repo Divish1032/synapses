@@ -192,7 +192,14 @@ func (r *Resolver) Status(ctx context.Context) []EntryStatus {
 	for i, e := range r.entries {
 		i, e := i, e // capture loop variables
 		eg.Go(func() error {
-			if egCtx.Err() != nil {
+			// Per-query timeout: statusForEntry does os.Stat + SQLite reads,
+			// all bounded by SQLite busy_timeout(5000ms). The SiblingQueryTimeout
+			// here guards against unexpected hangs (e.g., NFS-mounted paths where
+			// os.Stat blocks). The SQLite busy_timeout is the inner bound; this
+			// context timeout is the outer safety net.
+			qctx, cancel := context.WithTimeout(egCtx, SiblingQueryTimeout)
+			defer cancel()
+			if qctx.Err() != nil {
 				results[i] = EntryStatus{
 					Alias:  e.Alias,
 					Path:   e.Path,

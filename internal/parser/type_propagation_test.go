@@ -295,3 +295,55 @@ plain = helper()
 		t.Errorf("varTypes[\"plain\"] = %q, want \"\" (non-uppercase constructor)", got)
 	}
 }
+
+// TestKotlinTypeAnnotationParams verifies that Kotlin function parameters,
+// property declarations, and constructor parameters with class types are
+// recorded as varTypes for call-site resolution.
+func TestKotlinTypeAnnotationParams(t *testing.T) {
+	src := `package com.example
+
+class OrderService(val repo: Repository, val count: Int) {
+    val auth: AuthService = AuthService()
+    var handler: EventHandler? = null
+
+    fun process(svc: PaymentService, name: String, flag: Boolean) {
+        svc.charge()
+        repo.save()
+    }
+}
+`
+	g := graph.New("testrepo")
+	p := parser.NewKotlinParser()
+	if err := p.Parse(g, "OrderService.kt", []byte(src)); err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	vt := g.GetVarTypes("OrderService.kt")
+	if vt == nil {
+		t.Fatal("GetVarTypes returned nil")
+	}
+
+	// Class types should be recorded.
+	tests := []struct {
+		varName  string
+		wantType string
+	}{
+		{"repo", "Repository"},       // constructor param
+		{"auth", "AuthService"},      // property declaration
+		{"handler", "EventHandler"},  // nullable property declaration
+		{"svc", "PaymentService"},    // function param
+	}
+	for _, tc := range tests {
+		if got := vt[tc.varName]; got != tc.wantType {
+			t.Errorf("varTypes[%q] = %q, want %q", tc.varName, got, tc.wantType)
+		}
+	}
+
+	// Builtins should NOT be recorded.
+	builtins := []string{"count", "name", "flag"}
+	for _, b := range builtins {
+		if got := vt[b]; got != "" {
+			t.Errorf("varTypes[%q] = %q, want \"\" (builtin type)", b, got)
+		}
+	}
+}
