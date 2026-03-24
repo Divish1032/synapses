@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -539,7 +540,9 @@ func (b *impl) Enrich(ctx context.Context, req EnrichRequest) (EnrichResponse, e
 				return EnrichResponse{Insight: r.Insight, Concerns: r.Concerns, Summaries: summaries, LLMUsed: r.LLMUsed, Degraded: true}, nil
 			}
 		}
-		return EnrichResponse{Summaries: summaries}, nil
+		// All LLM tiers exhausted — return heuristic insight so agents always
+		// receive a non-empty response even when the brain is fully unavailable.
+		return EnrichResponse{Summaries: summaries, Insight: heuristicEnrichInsight(req), Degraded: true}, nil
 	}
 
 	start := time.Now()
@@ -579,12 +582,15 @@ func (b *impl) Enrich(ctx context.Context, req EnrichRequest) (EnrichResponse, e
 }
 
 func (b *impl) ExplainViolation(ctx context.Context, req ViolationRequest) (ViolationResponse, error) {
-	if !b.cfg.Guardian || b.guardian == nil {
+	if !b.cfg.Guardian {
 		return ViolationResponse{}, nil
 	}
 
-	// Circuit breaker: if primary guardian tier is tripped, try fallback (T0 model).
-	if b.cb.isOpen("guardian") {
+	// Circuit breaker check precedes the guardian nil-check: an open circuit
+	// means the LLM path is unavailable regardless of component state, so we
+	// fall through the fallback chain without needing a live guardian client.
+	// Guard: b.cb is nil only in unit tests that construct impl directly.
+	if b.cb != nil && b.cb.isOpen("guardian") {
 		if b.fallbackGuardian != nil && !b.cb.isOpen("ingest") {
 			grdReq := guardian.Request{
 				RuleID: req.RuleID, RuleSeverity: req.RuleSeverity, Description: req.Description,
@@ -595,6 +601,13 @@ func (b *impl) ExplainViolation(ctx context.Context, req ViolationRequest) (Viol
 				return ViolationResponse{Explanation: r.Explanation, Fix: r.Fix, Degraded: true}, nil
 			}
 		}
+		// All LLM tiers exhausted — return rule template so validate_plan always
+		// surfaces an actionable message even when the brain is fully unavailable.
+		return guardianTemplateFallback(req), nil
+	}
+
+	// Guardian component is required for the primary LLM path.
+	if b.guardian == nil {
 		return ViolationResponse{}, nil
 	}
 
@@ -1032,6 +1045,64 @@ func validateCoordinateResponse(suggestion string) bool {
 // validateIngestResponse checks the ingestor output has non-empty summary.
 func validateIngestResponse(summary string) bool {
 	return strings.TrimSpace(summary) != "" && len(summary) >= 10
+}
+
+// heuristicEnrichInsight builds a last-resort insight string from graph
+// topology data in the EnrichRequest — no LLM required.
+// Called when all LLM tiers (T2 and T0) have their circuit breakers open.
+// Returns a non-empty sentence so agents always receive useful context.
+func heuristicEnrichInsight(req EnrichRequest) string {
+	name := req.RootName
+	if name == "" {
+		name = "this entity"
+	}
+	nodeType := req.RootType
+	if nodeType == "" {
+		nodeType = "entity"
+	}
+	callers := len(req.CallerNames)
+	callees := len(req.CalleeNames)
+
+	switch {
+	case callers > 0 && callees > 0:
+		return fmt.Sprintf("%s (%s) has %d caller(s) and %d callee(s).", name, nodeType, callers, callees)
+	case callers > 0:
+		return fmt.Sprintf("%s (%s) has %d caller(s) and no direct callees.", name, nodeType, callers)
+	case callees > 0:
+		return fmt.Sprintf("%s (%s) has no callers and %d callee(s).", name, nodeType, callees)
+	default:
+		return fmt.Sprintf("%s (%s) has no recorded callers or callees.", name, nodeType)
+	}
+}
+
+// guardianTemplateFallback builds a last-resort violation explanation from the
+// request fields — no LLM required.
+// Called when all LLM tiers (T1 and T0) have their circuit breakers open.
+// Returns a non-empty, actionable response so validate_plan always surfaces a
+// useful message even when the brain is fully unavailable.
+func guardianTemplateFallback(req ViolationRequest) ViolationResponse {
+	description := req.Description
+	if description == "" {
+		description = req.RuleID
+	}
+	sourceFile := filepath.Base(req.SourceFile)
+	targetName := req.TargetName
+	if targetName == "" {
+		targetName = "a restricted entity"
+	}
+	severity := req.RuleSeverity
+	if severity == "" {
+		severity = "warning"
+	}
+	explanation := fmt.Sprintf(
+		"Rule violation (%s): %s imports or calls %q, which is restricted by rule %q.",
+		severity, sourceFile, targetName, description,
+	)
+	fix := fmt.Sprintf(
+		"Remove or replace the usage of %q in %s to comply with rule %q.",
+		targetName, sourceFile, req.RuleID,
+	)
+	return ViolationResponse{Explanation: explanation, Fix: fix, Degraded: true}
 }
 
 // circuitBreaker tracks consecutive failures per operation tier and temporarily
