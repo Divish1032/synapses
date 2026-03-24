@@ -246,9 +246,8 @@ func bfsReachableSinks(g *graph.Graph, sourceID graph.NodeID, sinkSet map[graph.
 	var found []graph.NodeID
 
 outerLoop:
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
+	for head4 := 0; head4 < len(queue); head4++ {
+		cur := queue[head4]
 
 		if cur.hop >= maxHops {
 			continue
