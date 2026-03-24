@@ -3381,7 +3381,10 @@ func (s *Store) PruneOldEvents(retentionDays int) (int64, error) {
 func (s *Store) Vacuum() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.execer().Exec("VACUUM")
+	if s.tx != nil {
+		return fmt.Errorf("vacuum: called inside a transaction")
+	}
+	_, err := s.db.Exec("VACUUM")
 	return err
 }
 
