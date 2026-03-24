@@ -217,6 +217,12 @@ type Server struct {
 	shutdownMu sync.RWMutex // guards bgClosed + bgQueue sends
 	bgClosed   bool         // true after Close() — rejects new work
 
+	// failedEmbedIDs tracks memory IDs whose embedding was dropped due to a
+	// full background queue. A 60s retry goroutine re-embeds them. Bounded to
+	// 256 entries to prevent unbounded growth.
+	// Key: memoryID (string), Value: struct{}.
+	failedEmbedIDs sync.Map
+
 	// toolHandlers is the dispatch table for the REST API (POST /v1/tools/{name}).
 	// Populated in addOrDefer alongside mcp-go registration so REST and MCP share
 	// the exact same handler functions. In knowledge mode, graph-tool entries hold
@@ -304,11 +310,12 @@ const (
 // goBackground enqueues fn for execution by the bounded worker pool.
 // Safe to call from any handler goroutine. Work is silently dropped after
 // Close() is called or when the queue is full (back-pressure).
-func (s *Server) goBackground(fn func()) {
+// Returns true if the work was queued, false if it was dropped.
+func (s *Server) goBackground(fn func()) bool {
 	s.shutdownMu.RLock()
 	if s.bgClosed {
 		s.shutdownMu.RUnlock()
-		return
+		return false
 	}
 	select {
 	case s.bgQueue <- fn:
@@ -317,6 +324,8 @@ func (s *Server) goBackground(fn func()) {
 			pc.RecordBackgroundWorkerEnqueue() // P2-5
 			pc.RecordBackgroundQueueDepth(len(s.bgQueue)) // P9-4
 		}
+		s.shutdownMu.RUnlock()
+		return true
 	default:
 		s.bgDrops.Add(1) // BUG-020: track drops for health endpoint
 		logutil.Warn("synapses: background queue full (%d), dropping work\n", bgQueueCap)
@@ -325,6 +334,7 @@ func (s *Server) goBackground(fn func()) {
 		}
 	}
 	s.shutdownMu.RUnlock()
+	return false
 }
 
 // getConfig returns a snapshot of the server config, safe for concurrent use.
@@ -1138,6 +1148,12 @@ func (s *Server) StartBackground() {
 					defer s.wg.Done()
 					s.embedSweepLoop(embedder, st)
 				}()
+				// Retry goroutine for embeds dropped due to full bgQueue.
+				s.wg.Add(1)
+				go func() {
+					defer s.wg.Done()
+					s.failedEmbedRetryLoop(embedder, st)
+				}()
 			}
 		}
 	})
@@ -1236,7 +1252,9 @@ func (s *Server) embedSweepLoop(embedder embed.Embedder, st *store.Store) {
 				if !ok || content == "" {
 					continue
 				}
-				s.goBackground(func() { s.embedMemory(embedder, st, memID, content) })
+				if !s.goBackground(func() { s.embedMemory(embedder, st, memID, content) }) {
+					s.trackFailedEmbed(memID)
+				}
 			}
 		case <-s.stopCh:
 			return

@@ -260,11 +260,15 @@ func (s *Server) handleRemember(
 		content := memContent
 		ids := make([]string, len(memoryIDs))
 		copy(ids, memoryIDs)
-		s.goBackground(func() {
+		if !s.goBackground(func() {
 			for _, memID := range ids {
 				s.embedMemory(embedder, st, memID, content)
 			}
-		})
+		}) {
+			for _, memID := range ids {
+				s.trackFailedEmbed(memID)
+			}
+		}
 	}
 
 	if episodeType == "failure" {
