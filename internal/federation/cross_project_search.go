@@ -60,7 +60,7 @@ func (s *CrossProjectSearch) FindEntities(ctx context.Context, query string, ali
 	var results []FederatedSearchResult
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(8) // bound parallelism to avoid overwhelming sibling stores
+	g.SetLimit(FederationParallelism) // bound parallelism to avoid overwhelming sibling stores
 	for _, e := range targets {
 		e := e // capture loop variable
 		g.Go(func() error {
@@ -69,7 +69,12 @@ func (s *CrossProjectSearch) FindEntities(ctx context.Context, query string, ali
 				return nil
 			}
 
-			nodes, err := st.FindNodesByNameCtx(gctx, query, limit)
+			// Per-sibling timeout prevents one hanging store from exhausting
+			// a parallelism slot indefinitely.
+			qctx, cancel := context.WithTimeout(gctx, SiblingQueryTimeout)
+			defer cancel()
+
+			nodes, err := st.FindNodesByNameCtx(qctx, query, limit)
 			if err != nil {
 				log.Printf("federation: find_entity in %q: %v", e.Alias, err)
 				return nil // fail-open
@@ -215,7 +220,7 @@ func (s *CrossProjectSearch) SearchEpisodes(ctx context.Context, query string, a
 	var results []FederatedEpisode
 
 	eg, egctx := errgroup.WithContext(ctx)
-	eg.SetLimit(8) // bound parallelism to avoid overwhelming sibling stores
+	eg.SetLimit(FederationParallelism) // bound parallelism to avoid overwhelming sibling stores
 	for _, e := range targets {
 		e := e
 		eg.Go(func() error {
@@ -230,7 +235,10 @@ func (s *CrossProjectSearch) SearchEpisodes(ctx context.Context, query string, a
 				return nil
 			}
 
-			episodes, err := st.RecallEpisodesCtx(egctx, query, "", "", "", "", limit, 0)
+			qctx, cancel := context.WithTimeout(egctx, SiblingQueryTimeout)
+			defer cancel()
+
+			episodes, err := st.RecallEpisodesCtx(qctx, query, "", "", "", "", limit, 0)
 			if err != nil {
 				log.Printf("federation: search episodes in %q: %v", e.Alias, err)
 				return nil
@@ -264,7 +272,7 @@ func (s *CrossProjectSearch) SearchMemoriesForEntity(ctx context.Context, entity
 	var hints []FederatedMemoryHint
 
 	eg, egctx := errgroup.WithContext(ctx)
-	eg.SetLimit(8) // bound parallelism to avoid overwhelming sibling stores
+	eg.SetLimit(FederationParallelism) // bound parallelism to avoid overwhelming sibling stores
 	for _, e := range targets {
 		e := e
 		eg.Go(func() error {
@@ -276,11 +284,14 @@ func (s *CrossProjectSearch) SearchMemoriesForEntity(ctx context.Context, entity
 				return nil
 			}
 
+			qctx, cancel := context.WithTimeout(egctx, SiblingQueryTimeout)
+			defer cancel()
+
 			// Primary: graph-anchored search via node ID in affected_nodes.
 			// This is precise — finds only memories explicitly linked to the entity,
 			// not just any memory that mentions the name in text.
 			var episodes []store.Episode
-			nodes, err := st.FindNodesByNameCtx(egctx, entityName, 1)
+			nodes, err := st.FindNodesByNameCtx(qctx, entityName, 1)
 			if err == nil && len(nodes) > 0 {
 				episodes, _ = st.FindEpisodesByNodeID(nodes[0].ID, 3)
 			}
@@ -289,7 +300,7 @@ func (s *CrossProjectSearch) SearchMemoriesForEntity(ctx context.Context, entity
 			// Used when the entity has no node in the sibling store (e.g., removed
 			// entity with memories still referencing it by name).
 			if len(episodes) == 0 {
-				episodes, _ = st.RecallEpisodesCtx(egctx, entityName, "", "", "", "", 3, 0)
+				episodes, _ = st.RecallEpisodesCtx(qctx, entityName, "", "", "", "", 3, 0)
 			}
 
 			mu.Lock()

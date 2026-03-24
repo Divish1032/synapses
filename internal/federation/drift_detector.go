@@ -50,7 +50,7 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 	)
 
 	eg, egCtx := errgroup.WithContext(ctx)
-	eg.SetLimit(8)
+	eg.SetLimit(FederationParallelism)
 
 	for _, e := range d.resolver.entries {
 		e := e

@@ -88,6 +88,16 @@ type BrainSummaryProvider interface {
 // staleThreshold is how long since last index before a sibling is "stale".
 const staleThreshold = 24 * time.Hour
 
+// FederationParallelism is the max concurrent I/O operations against sibling
+// stores. Each operation opens a SQLite file, so this bounds file descriptor
+// and I/O pressure. Tuned for typical developer machines (8+ cores).
+const FederationParallelism = 8
+
+// SiblingQueryTimeout is the maximum time a single sibling query may take
+// before being cancelled. Prevents one hanging sibling from exhausting a
+// parallelism slot indefinitely.
+const SiblingQueryTimeout = 10 * time.Second
+
 // Clock is a function that returns the current time.
 // Injected into Resolver for deterministic staleness testing.
 type Clock func() time.Time
@@ -177,7 +187,7 @@ func (r *Resolver) Status(ctx context.Context) []EntryStatus {
 	results := make([]EntryStatus, len(r.entries))
 
 	eg, egCtx := errgroup.WithContext(ctx)
-	eg.SetLimit(8) // bound I/O parallelism — each entry opens a SQLite file
+	eg.SetLimit(FederationParallelism) // bound I/O parallelism — each entry opens a SQLite file
 
 	for i, e := range r.entries {
 		i, e := i, e // capture loop variables

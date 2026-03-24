@@ -645,7 +645,7 @@ func extractPythonTypeName(typeNode sitter.Node, src []byte) string {
 				if inner := extractGenericNthType(child, src, 0); inner != "" {
 					return inner
 				}
-				return outerName // fallback if inner can't be extracted
+				return "" // fallback: wrapper type (Optional etc.) is not useful for resolution
 			case "Union":
 				// Union[Service, None] → first non-None uppercase type
 				if inner := extractUnionInnerType(child, src); inner != "" {
@@ -658,8 +658,12 @@ func extractPythonTypeName(typeNode sitter.Node, src []byte) string {
 					return inner
 				}
 			default:
-				// List[X], Dict[K,V], etc. — caller can filter via isBuiltin
-				return outerName
+				// List[X], Dict[K,V], etc. — extract inner type; container name
+				// alone would produce incorrect type resolution.
+				if inner := extractGenericNthType(child, src, 0); inner != "" {
+					return inner
+				}
+				return ""
 			}
 
 		case "binary_operator":

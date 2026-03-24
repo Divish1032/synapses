@@ -1018,14 +1018,41 @@ func (g *Graph) EdgeCountsByType() map[EdgeType]int {
 	return counts
 }
 
-// MergeFrom copies all nodes and edges from other into g.
-// Existing nodes in g are never overwritten — other's data is purely additive.
-// This is used at startup to merge federated (linked) project graphs so that
-// cross-project context is available via get_context and find_entity.
+// MergeFrom copies all nodes, edges, varTypes, and instantiatedTypes from
+// other into g. Existing nodes in g are never overwritten — other's data is
+// purely additive. This is used at startup to merge federated (linked) project
+// graphs and by the watcher to merge parallel-parsed temp graphs back into the
+// main graph.
 func (g *Graph) MergeFrom(other *Graph) {
 	// Snapshot other under its read lock, then release before acquiring g's write lock.
 	nodes := other.AllNodes()
 	edges := other.AllEdges()
+
+	// Snapshot varTypes and instantiatedTypes under other's read lock.
+	other.mu.RLock()
+	var otherVarTypes map[string]map[string]string
+	if len(other.varTypes) > 0 {
+		otherVarTypes = make(map[string]map[string]string, len(other.varTypes))
+		for file, vars := range other.varTypes {
+			cp := make(map[string]string, len(vars))
+			for k, v := range vars {
+				cp[k] = v
+			}
+			otherVarTypes[file] = cp
+		}
+	}
+	var otherInstTypes map[string]map[string]bool
+	if len(other.instantiatedTypes) > 0 {
+		otherInstTypes = make(map[string]map[string]bool, len(other.instantiatedTypes))
+		for file, types := range other.instantiatedTypes {
+			cp := make(map[string]bool, len(types))
+			for k := range types {
+				cp[k] = true
+			}
+			otherInstTypes[file] = cp
+		}
+	}
+	other.mu.RUnlock()
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -1051,6 +1078,32 @@ func (g *Graph) MergeFrom(other *Graph) {
 		g.edgeSet[ek] = struct{}{}
 		g.outEdges[e.From] = append(g.outEdges[e.From], e)
 		g.inEdges[e.To] = append(g.inEdges[e.To], e)
+	}
+
+	// Copy varTypes (type annotations collected by parsers).
+	for file, vars := range otherVarTypes {
+		if g.varTypes == nil {
+			g.varTypes = make(map[string]map[string]string)
+		}
+		if g.varTypes[file] == nil {
+			g.varTypes[file] = make(map[string]string, len(vars))
+		}
+		for varName, typeName := range vars {
+			g.varTypes[file][varName] = typeName
+		}
+	}
+
+	// Copy instantiatedTypes (RTA constructor tracking).
+	for file, types := range otherInstTypes {
+		if g.instantiatedTypes == nil {
+			g.instantiatedTypes = make(map[string]map[string]bool)
+		}
+		if g.instantiatedTypes[file] == nil {
+			g.instantiatedTypes[file] = make(map[string]bool, len(types))
+		}
+		for typeName := range types {
+			g.instantiatedTypes[file][typeName] = true
+		}
 	}
 }
 
