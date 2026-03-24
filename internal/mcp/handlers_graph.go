@@ -1601,3 +1601,111 @@ func (s *Server) handleGetEdgeTypes(
 //     → expand to depth=3 (if not already deeper), force full detail
 //
 // Older feedback (7–30 days) is ignored so decay is natural over time.
+
+// handleLinkEntities creates a user-defined cross-domain edge between two entities.
+// Edges are persisted in the manual_edges store table so they survive restarts and
+// reindexes. The in-memory graph is updated immediately — get_context and get_impact
+// can traverse the edge in the same session.
+func (s *Server) handleLinkEntities(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	if s.store == nil {
+		return mcp.NewToolResultError("link_entities requires a store — daemon may not be running"), nil
+	}
+
+	args := req.GetArguments()
+	a, ok := args["a"].(string)
+	if !ok || strings.TrimSpace(a) == "" {
+		return mcp.NewToolResultError("a is required — entity name or node ID for the source"), nil
+	}
+	b, ok := args["b"].(string)
+	if !ok || strings.TrimSpace(b) == "" {
+		return mcp.NewToolResultError("b is required — entity name or node ID for the target"), nil
+	}
+	relation, ok := args["relation"].(string)
+	if !ok || strings.TrimSpace(relation) == "" {
+		return mcp.NewToolResultError("relation is required (e.g. 'CALLS', 'DEPLOYS', 'DEPENDS_ON', or any label)"), nil
+	}
+	domain, _ := args["domain"].(string)
+	agentID, _ := args["agent_id"].(string)
+
+	// Resolve a → node ID.
+	fromNode := s.resolveEntityRef(a)
+	if fromNode == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q — use find_entity to discover the correct name or ID", a)), nil
+	}
+	// Resolve b → node ID.
+	toNode := s.resolveEntityRef(b)
+	if toNode == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q — use find_entity to discover the correct name or ID", b)), nil
+	}
+
+	fromID := fromNode.ID
+	toID := toNode.ID
+
+	// Persist the edge so it survives restarts and reindexes.
+	saved, err := s.store.SaveManualEdge(fromID, toID, relation, domain, agentID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("persist edge: %v", err)), nil
+	}
+
+	// Inject into the live in-memory graph. AddEdge is idempotent — safe to call
+	// even if the edge already exists. Uses the relation string as EdgeType; if
+	// it's not in DefaultEdgeWeights, BFS treats weight as 0 (edge present but
+	// not auto-traversed). Standard types (CALLS, DEPENDS_ON, etc.) carry full weights.
+	s.graph.AddEdge(&graph.Edge{
+		From: fromID,
+		To:   toID,
+		Type: graph.EdgeType(relation),
+	})
+
+	// Check whether the relation is a known catalog type to advise the caller.
+	knownType := false
+	for _, d := range graph.GetEdgeTypes() {
+		if d.Name == graph.EdgeType(relation) {
+			knownType = true
+			break
+		}
+	}
+
+	result := map[string]interface{}{
+		"linked":   true,
+		"from":     map[string]string{"id": string(fromID), "name": fromNode.Name, "file": fromNode.File},
+		"to":       map[string]string{"id": string(toID), "name": toNode.Name, "file": toNode.File},
+		"relation": saved.Relation,
+		"domain":   saved.Domain,
+		"hint":     "Edge is live in this session and will persist across restarts. Use get_context or get_impact to traverse it.",
+	}
+	if !knownType {
+		result["weight_note"] = fmt.Sprintf("Relation %q is not a catalog type — BFS weight is 0 (edge exists but won't auto-surface in context). Use a standard type (CALLS, DEPENDS_ON, IMPLEMENTS, etc.) for full BFS traversal.", relation)
+	}
+	return jsonResult(result)
+}
+
+// resolveEntityRef resolves an entity name or full node ID to a graph Node.
+// Tries exact node-ID lookup first, then FindByName, then substring match.
+// Returns nil if no match found.
+func (s *Server) resolveEntityRef(nameOrID string) *graph.Node {
+	// Try as direct node ID first (contains "::" separator).
+	if strings.Contains(nameOrID, "::") {
+		if n := s.graph.GetNode(graph.NodeID(nameOrID)); n != nil {
+			return n
+		}
+	}
+	// Exact name match.
+	nodes := s.graph.FindByName(nameOrID)
+	if len(nodes) == 1 {
+		return nodes[0]
+	}
+	if len(nodes) > 1 {
+		// Multiple exact matches — return first (caller can use full node ID to disambiguate).
+		return nodes[0]
+	}
+	// Substring / pattern match.
+	nodes = s.graph.FindByPatternLimit(nameOrID, 1)
+	if len(nodes) == 1 {
+		return nodes[0]
+	}
+	return nil
+}

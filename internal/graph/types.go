@@ -56,6 +56,10 @@ const (
 	// EdgeLinksTo connects document nodes via markdown [text](path.md) links.
 	// Direction: source document/section → target document node.
 	EdgeLinksTo EdgeType = "LINKS_TO"
+	// EdgeManual is a user-defined relationship created via link_entities.
+	// Used when the relation string doesn't match a known catalog type.
+	// BFS weight 0.5 — traversed but lower priority than structural code edges.
+	EdgeManual EdgeType = "MANUAL"
 )
 
 // DefaultEdgeWeights defines the semantic significance of each edge type.
@@ -86,6 +90,9 @@ var DefaultEdgeWeights = map[EdgeType]float64{
 	EdgeDocumentedBy: 0.6,
 	// LINKS_TO is cross-doc navigation, lowest semantic weight.
 	EdgeLinksTo: 0.3,
+	// MANUAL is a user-defined cross-domain edge (created via link_entities).
+	// Medium weight — traversed by BFS but lower priority than structural code edges.
+	EdgeManual: 0.5,
 }
 
 // EdgeTypeDescriptor captures the semantic metadata for a single edge type.
@@ -192,6 +199,14 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		SemanticWeight: 0.5,
 		Direction:      "directed",
 		Domain:         "code",
+	},
+	{
+		Name:           EdgeManual,
+		Description:    "User-defined cross-domain relationship created via link_entities. Used when no standard edge type applies. Medium BFS weight (0.5) — traversed but lower priority than structural code edges.",
+		SemanticWeight: 0.5,
+		Direction:      "directed",
+		Domain:         "custom",
+		Synthetic:      true,
 	},
 	{
 		Name:           EdgeLinksTo,

@@ -1265,6 +1265,7 @@ var standardTierTools = map[string]bool{
 	"end_session":           true,
 	"discover_tools":        true,
 	"annotate_node":         true,
+	"link_entities":         true,
 	// Standard additions.
 	"get_context":       true,
 	"find_entity":       true,
@@ -1920,6 +1921,40 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleAnnotateNode,
+	)
+
+	// link_entities
+	s.addOrDefer(
+		mcp.NewTool(
+			"link_entities",
+			mcp.WithDescription(
+				"Creates a user-defined cross-domain edge between two entities. "+
+					"Use this to express relationships that automatic parsers haven't discovered yet — "+
+					"e.g. 'PaymentService DEPLOYS prod-cluster', 'AuthHandler DEPENDS_ON redis-config'. "+
+					"Edges persist across restarts and are immediately traversable by get_context and get_impact. "+
+					"Use standard relation types (CALLS, DEPENDS_ON, IMPLEMENTS, etc.) for full BFS traversal. "+
+					"Custom labels (e.g. 'DEPLOYS', 'CONFIGURED_BY') are stored but have BFS weight 0 until Sprint 16 adds them to the catalog.",
+			),
+			mcp.WithString("a",
+				mcp.Required(),
+				mcp.Description("Source entity: name (e.g. 'PaymentService') or full node ID (e.g. 'repo::file.go::PaymentService')."),
+			),
+			mcp.WithString("b",
+				mcp.Required(),
+				mcp.Description("Target entity: name or full node ID."),
+			),
+			mcp.WithString("relation",
+				mcp.Required(),
+				mcp.Description("Edge type label. Use standard types for BFS traversal: CALLS, DEPENDS_ON, IMPLEMENTS, EMBEDS, DATA_FLOWS. Custom labels (DEPLOYS, CONFIGURED_BY, etc.) are valid but have BFS weight 0."),
+			),
+			mcp.WithString("domain",
+				mcp.Description("Optional. Semantic domain of the relationship, e.g. 'code-to-infra', 'code-to-api', 'explicit'. Defaults to empty (code-to-code assumed)."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Optional. Agent identifier for attribution."),
+			),
+		),
+		s.handleLinkEntities,
 	)
 
 	// get_impact
