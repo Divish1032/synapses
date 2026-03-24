@@ -1969,11 +1969,13 @@ func (s *Store) reconcileOrphanedReferences() {
 			}
 		}
 		if tx, txErr := s.knowledgeDB.Begin(); txErr == nil {
-			defer func() { _ = tx.Rollback() }()
 			for _, nid := range staleNodeIDs {
 				tx.Exec(deleteSQL, nid) //nolint:errcheck
 			}
-			tx.Commit() //nolint:errcheck
+			if commitErr := tx.Commit(); commitErr != nil {
+				_ = tx.Rollback()
+				return 0
+			}
 		} else {
 			for _, nid := range staleNodeIDs {
 				s.knowledgeDB.Exec(deleteSQL, nid) //nolint:errcheck
