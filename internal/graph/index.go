@@ -362,16 +362,29 @@ func buildIndex(g *Graph, pool *StringPool) *GraphIndex {
 	idx := newGraphIndex(pool)
 	n := len(nodeSnaps)
 
+	// Local intern cache: avoids repeated pool mutex acquisitions for strings
+	// that appear many times (e.g. the same package or file across thousands of
+	// nodes). Only the first occurrence for each string acquires the pool lock.
+	localIntern := make(map[string]StringID, n*2)
+	cachedIntern := func(s string) StringID {
+		if id, ok := localIntern[s]; ok {
+			return id
+		}
+		id := pool.Intern(s)
+		localIntern[s] = id
+		return id
+	}
+
 	// Assign sequential IDs (1-based; 0 is the sentinel) and build secondary
 	// indexes for FindByName and FindByFile in the same pass.
 	for i, ns := range nodeSnaps {
 		seq := uint32(i + 1)
 		idx.IDToSeq[ns.id] = seq
 		idx.SeqIDs = append(idx.SeqIDs, ns.id)
-		idx.Types = append(idx.Types, pool.Intern(string(ns.ntype)))
-		idx.Names = append(idx.Names, pool.Intern(ns.name))
-		idx.FileIDs = append(idx.FileIDs, pool.Intern(ns.file))
-		idx.PkgIDs = append(idx.PkgIDs, pool.Intern(ns.pkg))
+		idx.Types = append(idx.Types, cachedIntern(string(ns.ntype)))
+		idx.Names = append(idx.Names, cachedIntern(ns.name))
+		idx.FileIDs = append(idx.FileIDs, cachedIntern(ns.file))
+		idx.PkgIDs = append(idx.PkgIDs, cachedIntern(ns.pkg))
 		idx.Lines = append(idx.Lines, int32(ns.line))
 		idx.Exported = append(idx.Exported, ns.exported)
 		idx.Tombstone = append(idx.Tombstone, false)
