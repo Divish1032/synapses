@@ -1206,6 +1206,9 @@ func (s *Server) Close() {
 	if s.lg != nil {
 		s.lg.close()
 	}
+	if s.rl != nil {
+		s.rl.close()
+	}
 
 	// 3. Close queue — workers drain remaining items then exit.
 	close(s.bgQueue)
