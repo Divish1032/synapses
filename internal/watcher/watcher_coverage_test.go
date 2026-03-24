@@ -404,9 +404,9 @@ func TestRecordChange_PathNotUnderRoot(t *testing.T) {
 	}
 }
 
-// ── ingestToBrain: brainClient is not *brain.Client ──────────────────────────
+// ── ingestToBrain: brainClient is nil ────────────────────────────────────────
 
-func TestIngestToBrain_NonBrainClient_EarlyReturn(t *testing.T) {
+func TestIngestToBrain_NilBrainClient_EarlyReturn(t *testing.T) {
 	g := graph.New("test")
 	w, err := New(g, parser.NewWalker(), nil)
 	if err != nil {
@@ -414,8 +414,7 @@ func TestIngestToBrain_NonBrainClient_EarlyReturn(t *testing.T) {
 	}
 	defer w.Stop()
 
-	// Set a non-*brain.Client value — type assertion will fail → early return.
-	w.brainClient = "not a brain"
+	// brainClient is nil by default — must return early without panic.
 	w.ingestToBrain("pkg/auth.go") // must not panic
 }
 
