@@ -233,7 +233,19 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 					if !ok {
 						return
 					}
-					result := watcher.prepareParseResult(work.path)
+					// Wrap in a closure with panic recovery so a crashing
+					// parser (e.g. tree-sitter nil-deref on a malformed file)
+					// cannot kill the worker goroutine permanently. The result
+					// carries the error, which applyBatch skips gracefully.
+					result := func() (r parseFileResult) {
+						defer func() {
+							if rec := recover(); rec != nil {
+								logutil.Error("synapses/watcher: parse worker panic for %s: %v\n", work.path, rec)
+								r = parseFileResult{path: work.path, err: fmt.Errorf("parser panic: %v", rec)}
+							}
+						}()
+						return watcher.prepareParseResult(work.path)
+					}()
 					select {
 					case watcher.parseCh <- result:
 					case <-watcher.stopCh:
@@ -248,7 +260,15 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 							if !ok {
 								return
 							}
-							result := watcher.prepareParseResult(work.path)
+							result := func() (r parseFileResult) {
+								defer func() {
+									if rec := recover(); rec != nil {
+										logutil.Error("synapses/watcher: parse worker panic for %s: %v\n", work.path, rec)
+										r = parseFileResult{path: work.path, err: fmt.Errorf("parser panic: %v", rec)}
+									}
+								}()
+								return watcher.prepareParseResult(work.path)
+							}()
 							select {
 							case watcher.parseCh <- result:
 							default:
