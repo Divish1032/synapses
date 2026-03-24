@@ -508,6 +508,27 @@ type CarveConfig struct {
 	// 0 disables the domain-boundary penalty (treats all edges equally).
 	// Values ≥ 1 are clamped to 1.0 (no penalty — backward compatible).
 	CrossDomainDecay float64
+	// LearnedEdgeWeights contains per-specific-edge weight multipliers derived
+	// from historical task outcomes (Sprint 15 #3). When traversing edge
+	// (From→To, Type), the base edgeWeight is multiplied by this value.
+	// A multiplier of 1.0 is neutral; >1.0 boosts the edge; <1.0 penalises it.
+	// Cap: 2.0x boost, floor: 0.3x penalty. Nil disables learned-weight
+	// adjustments (backward-compatible default).
+	LearnedEdgeWeights map[EdgeWeightKey]float64
+	// LearnedEdgeWeightsVersion is the store's monotonic write counter at the
+	// time LearnedEdgeWeights was loaded. It is included in the subgraph cache
+	// key so that cached subgraphs are automatically invalidated after any write
+	// to the edge_learned_weights table — regardless of whether the map has the
+	// same number of entries (len-based discrimination is not sufficient).
+	LearnedEdgeWeightsVersion int64
+}
+
+// EdgeWeightKey uniquely identifies a specific directed edge in the graph.
+// Used as a map key for per-edge learned weight multipliers (Sprint 15 #3).
+type EdgeWeightKey struct {
+	From NodeID
+	To   NodeID
+	Type EdgeType
 }
 
 // intentModifyWeights boosts outgoing CALLS (callees) for the "modify" intent.

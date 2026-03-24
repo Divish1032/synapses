@@ -60,13 +60,26 @@ func newSubgraphCache() *subgraphCache {
 // EmbeddingLookup/QualityScoreLookup presence booleans are included so that
 // a call without enrichment does not collide with an enriched call for the
 // same entity (they produce different Relevance scores in CarvedNode).
+// LearnedEdgeWeights uses a two-field discriminator in the cache key:
+//   - lew:%d  — len(LearnedEdgeWeights): fast first-pass check that covers
+//     callers who set the map directly without going through the store (e.g.
+//     unit tests). Baseline (nil) has len=0; enriched callers have len=N.
+//   - lewv:%d — LearnedEdgeWeightsVersion: the store's monotonic write counter.
+//     In production, two weight maps with the same len but different edge entries
+//     (e.g. learned over different sessions) would collide on len alone. The
+//     version increments on every write, so any change to the weight table
+//     automatically produces a cache miss without explicit subgraph cache
+//     invalidation. Zero when the caller bypasses the store (test path); the
+//     len discriminator then prevents any collision.
 func cacheKeyFor(rootID NodeID, cfg CarveConfig, fingerprint string) string {
-	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f|%.4f|emb:%v|qs:%v",
+	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f|%.4f|emb:%v|qs:%v|lew:%d|lewv:%d",
 		rootID, cfg.MaxDepth, cfg.TokenBudget, cfg.MinRelevance, cfg.DecayFactor,
 		cfg.DirectionBoost, cfg.IntentID, fingerprint, cfg.UsePPR, cfg.Alpha,
 		cfg.HybridLambda, cfg.CrossDomainDecay,
 		cfg.EmbeddingLookup != nil,
-		cfg.QualityScoreLookup != nil)
+		cfg.QualityScoreLookup != nil,
+		len(cfg.LearnedEdgeWeights),
+		cfg.LearnedEdgeWeightsVersion)
 }
 
 // extractFiles collects the set of source files referenced by nodes in the subgraph.
