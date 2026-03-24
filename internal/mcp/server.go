@@ -268,6 +268,20 @@ type Server struct {
 	toolDescs        map[string]string
 	toolDescBaseline string
 
+	// Sprint 15 #4: recall channel weight learning — rate controls.
+	//
+	// recallStatsLastNs is the unix-nanosecond timestamp of the last
+	// UpdateRecallChannelStats trigger. CAS-updated so multiple concurrent
+	// recall_hit events debounce to at most one aggregation per interval.
+	recallStatsLastNs atomic.Int64
+
+	// recallWeightsMu guards recallWeightsCache and recallWeightsCachedAt.
+	// recallChannelWeights() reads from SQLite at most once per cache TTL
+	// to keep the hot recall path free of per-call database round-trips.
+	recallWeightsMu       sync.RWMutex
+	recallWeightsCache    map[string]float64
+	recallWeightsCachedAt time.Time
+
 	// updateChecker is an optional function that returns the pending update
 	// version string, or "" if up to date. Set via SetUpdateChecker.
 	// Used by session_init to include an update_available hint.
