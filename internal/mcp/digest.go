@@ -159,6 +159,15 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		if len(warnings) > 0 {
 			fmt.Fprintf(&b, "⚠ %s\n", strings.Join(warnings, " · "))
 		}
+		// Sprint 15 #6: confidence must appear at every detail level — agents
+		// using "summary" need the advisory as much as those using "full".
+		if dc.Confidence > 0 {
+			if dc.ConfidenceHint != "" {
+				fmt.Fprintf(&b, "⚠ confidence:%.2f — %s\n", dc.Confidence, dc.ConfidenceHint)
+			} else {
+				fmt.Fprintf(&b, "confidence:%.2f\n", dc.Confidence)
+			}
+		}
 		if dc.EntityHash != "" {
 			fmt.Fprintf(&b, "\nentity_hash:%s\n", dc.EntityHash)
 		}

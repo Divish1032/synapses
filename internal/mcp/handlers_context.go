@@ -658,10 +658,6 @@ func (s *Server) handleGetContext(
 
 	dc := toDirectionalContext(sg)
 
-	// Sprint 15 #2 + #6: quality score is fetched once (deferred to after all
-	// enrichments, line ~933) so both LowQualityHint and Confidence share a
-	// single SQLite round-trip. Placeholder cleared; logic moved below.
-
 	// R1: strip synthetic route/inferred nodes when include_inferred=false.
 	if !includeInferred {
 		dc.Callees = filterInferredNodes(dc.Callees)
