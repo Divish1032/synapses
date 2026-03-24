@@ -281,7 +281,9 @@ func (b *BuiltinEmbedder) doInit(ctx context.Context) error {
 				opts.MaxRetries = 3
 				opts.RetryInterval = 2
 				dlCh := make(chan error, 1)
+				b.dlWg.Add(1)
 				go func() {
+					defer b.dlWg.Done()
 					_, dlErr := hugot.DownloadModel(builtinModelName, b.modelsDir, opts)
 					dlCh <- dlErr
 				}()
