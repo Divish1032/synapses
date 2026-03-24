@@ -2846,6 +2846,37 @@ func (s *Server) registerTools() {
 		s.handleRecall,
 	)
 
+	// get_episodes — chronological episode browser (distinct from recall search)
+	s.addOrDefer(
+		mcp.NewTool(
+			"get_episodes",
+			mcp.WithDescription(
+				"Lists episodic memories in chronological order (newest first) with optional filters. "+
+					"Use this for auditing, reviewing recent decisions, or browsing by type/tags. "+
+					"For semantic search use recall(query=...) instead.",
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Max episodes to return. Default 20."),
+			),
+			mcp.WithNumber("since_days",
+				mcp.Description("Only return episodes from the last N days. 0 = no time filter."),
+			),
+			mcp.WithString("episode_type",
+				mcp.Description("Filter by type: decision, failure, pattern, rule_proposal (empty = all)."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Filter to episodes recorded by this agent (empty = all agents)."),
+			),
+			mcp.WithString("project_id",
+				mcp.Description("Filter to episodes for this project (empty = all projects)."),
+			),
+			mcp.WithString("tags",
+				mcp.Description("Comma-separated tags to filter by, e.g. 'auth,breaking'."),
+			),
+		),
+		s.handleGetEpisodes,
+	)
+
 	// check_plan_safety
 	s.addOrDefer(
 		mcp.NewTool(
