@@ -1192,10 +1192,14 @@ func (s *Server) handleGetContext(
 		compactText := serializeCompact(dc, detailLevel)
 		// D5: when the token budget was hit, use the brain pruner to compress the
 		// compact text further, preserving high-value content over crude node-count
-		// truncation. Fail-open: prune error → return uncompressed compact text.
+		// truncation. Fail-open: prune error or timeout → return uncompressed text.
+		// Cap at 5s so a slow LLM does not delay the hot-path get_context response.
 		if sg.Truncated {
 			if bc := s.brainClient; bc != nil {
-				if pruned, pruneErr := bc.Prune(ctx, compactText); pruneErr == nil && pruned != "" {
+				pruneCtx, pruneCancel := context.WithTimeout(ctx, 5*time.Second)
+				pruned, pruneErr := bc.Prune(pruneCtx, compactText)
+				pruneCancel()
+				if pruneErr == nil && pruned != "" {
 					compactText = pruned
 				}
 			}
