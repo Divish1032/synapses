@@ -11,6 +11,7 @@ import (
 	"io"
 
 	brainconfig "github.com/SynapsesOS/synapses/internal/brain/config"
+	"github.com/SynapsesOS/synapses/internal/brain/archivist"
 )
 
 // Client wraps the in-process Brain implementation. It exposes the same method
@@ -108,6 +109,12 @@ func (c *Client) SetPhase(_ context.Context, req SetPhaseRequest) (*SDLCConfig, 
 	}
 	cfg := c.brain.GetSDLCConfig()
 	return &cfg, nil
+}
+
+// Memorize synthesizes a session transcript into persistent memory entries.
+// Returns empty response (no error) when the Archivist LLM is unavailable.
+func (c *Client) Memorize(ctx context.Context, req archivist.MemorizeRequest) (archivist.MemorizeResponse, error) {
+	return c.brain.Memorize(ctx, req)
 }
 
 // SetQualityMode updates the active quality mode. Returns the updated SDLCConfig.
