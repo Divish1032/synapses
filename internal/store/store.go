@@ -1160,23 +1160,15 @@ func OpenReadOnly(path string) (*Store, error) {
 
 // rebuildFTS repopulates the nodes_fts table from the current nodes table.
 // Called once on Open() for existing databases and after SaveGraph().
+//
+// Reading is done outside the write transaction so the write lock is held only
+// for the DELETE + INSERT phase, not while streaming potentially millions of rows.
 func (s *Store) rebuildFTS() error {
-	tx, err := s.graphDB.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	if _, err := tx.Exec(`DELETE FROM nodes_fts`); err != nil {
-		return err
-	}
-
-	// Buffer all rows before inserting to avoid interleaving tx.Query reads
-	// with tx.Exec inserts on the same transaction.
+	// Phase 1: read all nodes outside any write transaction.
 	type ftsRow struct{ id, name, sig, doc string }
 	var buf []ftsRow
 	{
-		rows, err := tx.Query(`SELECT id, name, signature, doc FROM nodes`)
+		rows, err := s.graphDB.Query(`SELECT id, name, signature, doc FROM nodes`)
 		if err != nil {
 			return err
 		}
@@ -1193,6 +1185,17 @@ func (s *Store) rebuildFTS() error {
 			return err
 		}
 		rows.Close()
+	}
+
+	// Phase 2: write transaction — DELETE old FTS rows then INSERT fresh ones.
+	tx, err := s.graphDB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.Exec(`DELETE FROM nodes_fts`); err != nil {
+		return err
 	}
 
 	stmt, err := tx.Prepare(`INSERT INTO nodes_fts (node_id, name, split_name, signature, doc) VALUES (?, ?, ?, ?, ?)`)
