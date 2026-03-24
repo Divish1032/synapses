@@ -4146,10 +4146,10 @@ func (s *Store) LoadIndexSnapshot() ([]byte, error) {
 // ---------------------------------------------------------------------------
 
 const (
-	learnedWeightCap   = 2.0  // maximum boost
-	learnedWeightFloor = 0.3  // minimum (penalty floor)
-	dormancyPenalty    = 0.7  // multiplied once when an edge is marked dormant
-	dormancyDays       = 30   // days of inactivity before dormant flag
+	learnedWeightCap   = 2.0 // maximum boost
+	learnedWeightFloor = 0.3 // minimum (penalty floor)
+	dormancyPenalty    = 0.7 // multiplied once when an edge is marked dormant
+	// dormancy window is defined in mcp/weight_refinement.go as dormancyDuration
 )
 
 // GetLearnedEdgeWeights returns all per-edge learned weight multipliers.
