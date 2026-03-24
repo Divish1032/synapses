@@ -30,13 +30,14 @@ type Result struct {
 
 // Summary aggregates across all scenarios.
 type Summary struct {
-	ScenariosRun    int     `json:"scenarios_run"`
-	ScenariosPassed int     `json:"scenarios_passed"`
-	AvgPrecision    float64 `json:"avg_precision"`
-	AvgRecall       float64 `json:"avg_recall"`
-	AvgF1           float64 `json:"avg_f1"`
-	AvgLatencyMs    float64 `json:"avg_latency_ms"`
-	P95LatencyMs    float64 `json:"p95_latency_ms"`
+	ScenariosRun     int     `json:"scenarios_run"`
+	ScenariosPassed  int     `json:"scenarios_passed"`
+	ScenariosErrored int     `json:"scenarios_errored"` // scenarios that could not run (graph too small, etc.)
+	AvgPrecision     float64 `json:"avg_precision"`
+	AvgRecall        float64 `json:"avg_recall"`
+	AvgF1            float64 `json:"avg_f1"`
+	AvgLatencyMs     float64 `json:"avg_latency_ms"`
+	P95LatencyMs     float64 `json:"p95_latency_ms"`
 }
 
 // ScenarioResult holds the outcome of a single scenario.
@@ -97,7 +98,9 @@ func RunScenarios(g *graph.Graph, st *store.Store, scenarios []Scenario) *Result
 		sr := runScenario(g, st, sc)
 		r.Scenarios = append(r.Scenarios, sr)
 
-		if sr.Passed {
+		if sr.Error != "" {
+			r.Summary.ScenariosErrored++
+		} else if sr.Passed {
 			r.Summary.ScenariosPassed++
 		}
 		for _, q := range sr.Queries {
