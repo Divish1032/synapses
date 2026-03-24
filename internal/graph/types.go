@@ -307,10 +307,10 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 	},
 }
 
-// GetEdgeTypes returns the full EdgeTypeCatalog slice.
-// The returned slice is the package-level variable — callers must not mutate it.
+// GetEdgeTypes returns a copy of the EdgeTypeCatalog slice.
+// Callers may safely range over or index the result without mutating shared state.
 func GetEdgeTypes() []EdgeTypeDescriptor {
-	return EdgeTypeCatalog
+	return append([]EdgeTypeDescriptor(nil), EdgeTypeCatalog...)
 }
 
 // IsCrossDomainEdge returns true for edge types that connect entities across

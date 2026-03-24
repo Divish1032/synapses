@@ -2075,7 +2075,9 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			fw.SetPacketInvalidator(srv)
 			fw.SetBrainClient(brainCli)
 			// Wire cross-domain name matcher: runs after each reindex to create MENTIONS edges.
-			fw.SetNameMatcher(namematcher.New(brainCli))
+			nm := namematcher.New(brainCli)
+			nm.PrimeCrossDomain(g) // prime flag from already-loaded graph
+			fw.SetNameMatcher(nm)
 			// Wire federation dependency tracker into the watcher so
 			// cross-project imports are detected on every file re-parse.
 			var fedTracker *federation.DeterministicDetector
