@@ -104,6 +104,7 @@ type BuiltinEmbedder struct {
 	closed        bool
 	done          chan struct{}   // closed by Close() to unblock pool waiters
 	inflight      sync.WaitGroup // tracks in-flight Embed calls for graceful shutdown
+	dlWg          sync.WaitGroup // tracks active download goroutines for graceful shutdown
 	initGroup     singleflight.Group // coalesces concurrent model downloads
 
 	// P8-11: optional callback for model download lifecycle events.
@@ -234,7 +235,9 @@ func (b *BuiltinEmbedder) doInit(ctx context.Context) error {
 		// goroutine and race against ctx cancellation.
 		type dlResult struct{ err error }
 		dlCh := make(chan dlResult, 1)
+		b.dlWg.Add(1)
 		go func() {
+			defer b.dlWg.Done()
 			_, dlErr := hugot.DownloadModel(builtinModelName, b.modelsDir, opts)
 			dlCh <- dlResult{err: dlErr}
 		}()
@@ -564,6 +567,9 @@ func (b *BuiltinEmbedder) Close() error {
 	b.closed = true
 	close(b.done) // unblock goroutines waiting for a pool slot
 	b.mu.Unlock()
+
+	// Wait for any in-progress model downloads to complete or be cancelled.
+	b.dlWg.Wait()
 
 	// Wait for all in-flight Embed calls to finish and return their slots.
 	// Safe because: inflight.Add(1) only happens under mu while closed==false,
