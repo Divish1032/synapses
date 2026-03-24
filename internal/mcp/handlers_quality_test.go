@@ -266,6 +266,7 @@ func TestGetViolations_StoreNil_HasZeroValueKeys(t *testing.T) {
 	g := newGraphForTest(t)
 	cfg := newConfigForTest(t)
 	srv := New(g, cfg, nil) // explicitly nil store
+	t.Cleanup(func() { srv.Close() })
 
 	res, err := srv.handleGetViolations(ctx, callTool(nil))
 	m := mustResult(t, res, err)

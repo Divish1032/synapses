@@ -78,6 +78,7 @@ func newFederatedServerFull(t *testing.T, sibAlias, sibEntityName, sibEntitySig 
 	}
 
 	srv := New(g, cfg, st)
+	t.Cleanup(func() { srv.Close() })
 
 	// Create sibling store with the entity.
 	sibDir := t.TempDir()
@@ -472,6 +473,7 @@ func TestRecall_CrossProject_SiblingUnavailable(t *testing.T) {
 	g := graph.New("test-repo")
 	cfg, _ := config.Load(t.TempDir())
 	srv := New(g, cfg, st)
+	t.Cleanup(func() { srv.Close() })
 
 	// Configure federation with nonexistent sibling path.
 	resolver := federation.NewResolver([]config.FederationEntry{

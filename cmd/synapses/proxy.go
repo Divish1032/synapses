@@ -115,9 +115,17 @@ func cmdStartProxy(args []string) error {
 
 // ensureSingletonDaemon checks if the singleton daemon is running and starts
 // it if not. Uses the HTTP health endpoint as the source of truth.
+//
+// If SYNAPSES_SKIP_DAEMON_START=1 is set, the function returns an error
+// immediately without attempting to spawn a subprocess. This is used by tests
+// that exercise init/start logic but must not block waiting for a daemon.
 func ensureSingletonDaemon(absPath string) error {
 	if IsSingletonDaemonRunning() {
 		return nil
+	}
+
+	if os.Getenv("SYNAPSES_SKIP_DAEMON_START") == "1" {
+		return fmt.Errorf("daemon start skipped (SYNAPSES_SKIP_DAEMON_START=1)")
 	}
 
 	cleanStaleSingletonPID()
