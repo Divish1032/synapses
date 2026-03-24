@@ -148,16 +148,22 @@ func (p *SecurityPolicy) CheckWithSteps(skillID string, origin TrustOrigin, requ
 		return err
 	}
 	// Then check inferred permissions from steps.
+	// For non-builtin recipes, inferred permissions must be a subset of the
+	// declared required permissions — not just the broad policy grants.
+	// This prevents a user recipe from silently gaining graph_write simply
+	// because the user-trust policy happens to allow it; the recipe must
+	// explicitly declare every elevated permission it uses.
 	if TrustOrigin(origin) != TrustBuiltin {
-		inferred := inferPermissionsFromSteps(steps)
-		allowed := p.grants[origin]
-		if allowed == nil {
-			allowed = p.grants[TrustRemote]
+		declaredSet := make(map[Permission]bool, len(required)+1)
+		declaredSet[PermGraphRead] = true // always implicitly declared
+		for _, r := range required {
+			declaredSet[Permission(r)] = true
 		}
+		inferred := inferPermissionsFromSteps(steps)
 		for _, req := range inferred {
-			if !allowed[Permission(req)] {
+			if !declaredSet[Permission(req)] {
 				return fmt.Errorf(
-					"skills: recipe %q (origin=%q) step requires permission %q which is not granted",
+					"skills: recipe %q (origin=%q) step requires permission %q which was not declared in required_permissions",
 					skillID, origin, req,
 				)
 			}
