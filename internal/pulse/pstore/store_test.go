@@ -804,3 +804,183 @@ func TestUpdateEntityQualityScore_PositiveNegativeCounts(t *testing.T) {
 		t.Error("API entity not found in GetEntityQualityScores")
 	}
 }
+
+// TestUpdateRecallChannelStats_LearnedWeights verifies Sprint 15 #4's
+// weight-learning pipeline end-to-end at the store layer:
+// - InsertMemoryOp seeds recall_hit events with top_channel values
+// - UpdateRecallChannelStats aggregates win-rates into recall_channel_weights
+// - GetRecallChannelWeights returns per-project win-rates that sum to ~1.0
+// - A dominant channel's win-rate exceeds equal-share baseline (0.25)
+func TestUpdateRecallChannelStats_LearnedWeights(t *testing.T) {
+	s := testStore(t)
+	projID := "test-proj-sprint15"
+
+	// Seed 16 recall_hit ops: graph=8, bm25=4, semantic=2, temporal=2.
+	// Expected win-rates: graph=0.5, bm25=0.25, semantic=0.125, temporal=0.125.
+	seed := []struct {
+		ch    string
+		count int
+	}{
+		{"graph", 8},
+		{"bm25", 4},
+		{"semantic", 2},
+		{"temporal", 2},
+	}
+	for _, entry := range seed {
+		for i := 0; i < entry.count; i++ {
+			if err := s.InsertMemoryOp(pulsetypes.MemoryOperationEvent{
+				Operation: "recall_hit",
+				ProjectID: projID,
+				TopChannel: entry.ch,
+			}); err != nil {
+				t.Fatalf("InsertMemoryOp(%s): %v", entry.ch, err)
+			}
+		}
+	}
+
+	// Recompute channel win-rates from memory_ops.
+	s.UpdateRecallChannelStats(projID)
+
+	weights := s.GetRecallChannelWeights(projID)
+	if len(weights) < 2 {
+		t.Fatalf("expected ≥2 channel weights, got %d: %v", len(weights), weights)
+	}
+
+	// graph should have the highest win-rate (0.5).
+	graphWR, ok := weights["graph"]
+	if !ok {
+		t.Fatal("graph channel missing from learned weights")
+	}
+	if graphWR < 0.4 {
+		t.Errorf("graph win-rate %.3f, expected ≥0.4 for dominant channel", graphWR)
+	}
+
+	// Learned win-rates must sum to ~1.0 (they are probabilities).
+	total := 0.0
+	for _, wr := range weights {
+		total += wr
+	}
+	if total < 0.95 || total > 1.05 {
+		t.Errorf("win-rates sum to %.3f, expected ~1.0 (they are probabilities)", total)
+	}
+
+	// temporal (smallest slice) should have lowest win-rate.
+	tempWR, ok := weights["temporal"]
+	if !ok {
+		t.Fatal("temporal channel missing from learned weights")
+	}
+	if tempWR > graphWR {
+		t.Errorf("temporal win-rate %.3f > graph %.3f, expected temporal < graph for graph-dominant project", tempWR, graphWR)
+	}
+
+	// Verify that an unknown project returns empty (no cross-project bleed).
+	other := s.GetRecallChannelWeights("other-proj")
+	if len(other) != 0 {
+		t.Errorf("expected no weights for unknown project, got %v", other)
+	}
+}
+
+
+// ---------------------------------------------------------------------------
+// Sprint 15 #5: GetSessionDeliveryStats
+// ---------------------------------------------------------------------------
+
+func TestGetSessionDeliveryStats_Empty(t *testing.T) {
+	s := testStore(t)
+	total, firstFetch, saved := s.GetSessionDeliveryStats("no-such-session")
+	if total != 0 || firstFetch != 0 || saved != 0 {
+		t.Errorf("expected all zeros for missing session, got total=%d firstFetch=%d saved=%d", total, firstFetch, saved)
+	}
+}
+
+func TestGetSessionDeliveryStats_EmptySessionID(t *testing.T) {
+	s := testStore(t)
+	total, firstFetch, saved := s.GetSessionDeliveryStats("")
+	if total != 0 || firstFetch != 0 || saved != 0 {
+		t.Errorf("expected all zeros for empty sessionID, got total=%d firstFetch=%d saved=%d", total, firstFetch, saved)
+	}
+}
+
+func TestGetSessionDeliveryStats_Counts(t *testing.T) {
+	s := testStore(t)
+	sess := "sess-eff-test"
+
+	// Delivery 1: first-fetch (refetched=false), baseline=400 response=100 → saves 300
+	if err := s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName:       "get_context",
+		SessionID:      sess,
+		Entity:         "AuthService",
+		BaselineTokens: 400,
+		ResponseTokens: 100,
+		Refetched:      false,
+	}); err != nil {
+		t.Fatalf("InsertContextDelivery: %v", err)
+	}
+
+	// Delivery 2: first-fetch, baseline=200 response=200 → saves 0 (no saving)
+	if err := s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName:       "get_context",
+		SessionID:      sess,
+		Entity:         "UserService",
+		BaselineTokens: 200,
+		ResponseTokens: 200,
+		Refetched:      false,
+	}); err != nil {
+		t.Fatalf("InsertContextDelivery: %v", err)
+	}
+
+	// Delivery 3: re-fetch (refetched=true), baseline=300 response=150 → saves 150 but NOT first-fetch
+	if err := s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName:       "get_context",
+		SessionID:      sess,
+		Entity:         "AuthService",
+		BaselineTokens: 300,
+		ResponseTokens: 150,
+		Refetched:      true,
+	}); err != nil {
+		t.Fatalf("InsertContextDelivery: %v", err)
+	}
+
+	// Different session — must not bleed into sess.
+	if err := s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName:       "get_context",
+		SessionID:      "other-sess",
+		Entity:         "OtherFunc",
+		BaselineTokens: 1000,
+		ResponseTokens: 100,
+	}); err != nil {
+		t.Fatalf("InsertContextDelivery other-sess: %v", err)
+	}
+
+	total, firstFetch, saved := s.GetSessionDeliveryStats(sess)
+
+	if total != 3 {
+		t.Errorf("total: got %d, want 3", total)
+	}
+	if firstFetch != 2 {
+		t.Errorf("firstFetch: got %d, want 2", firstFetch)
+	}
+	// Delivery 1: max(400-100,0)=300; Delivery 2: max(200-200,0)=0; Delivery 3: max(300-150,0)=150
+	// Total = 300+0+150 = 450
+	if saved != 450 {
+		t.Errorf("tokensSaved: got %d, want 450", saved)
+	}
+}
+
+func TestGetSessionDeliveryStats_NegativeSavingsClampedToZero(t *testing.T) {
+	// When response_tokens > baseline_tokens (unusual but possible for enriched responses),
+	// MAX(baseline-response, 0) should clamp to 0, not subtract.
+	s := testStore(t)
+	sess := "sess-negative"
+	_ = s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName:       "get_context",
+		SessionID:      sess,
+		Entity:         "BigFunc",
+		BaselineTokens: 50,
+		ResponseTokens: 200, // brain enrichment added more content than baseline
+	})
+	_, _, saved := s.GetSessionDeliveryStats(sess)
+	if saved != 0 {
+		t.Errorf("expected tokensSaved=0 for negative savings, got %d", saved)
+	}
+}

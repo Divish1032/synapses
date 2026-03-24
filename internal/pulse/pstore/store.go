@@ -2884,6 +2884,9 @@ func (s *Store) GetRecallChannelWeights(projectID string) map[string]float64 {
 // GetSessionContextHitRate returns the cache hit rate for context deliveries
 // in a specific session: cache_hits / total_deliveries. Returns 0 if no data.
 func (s *Store) GetSessionContextHitRate(sessionID string) float64 {
+	if sessionID == "" {
+		return 0
+	}
 	var hits, total int
 	s.execer().QueryRow(
 		`SELECT COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END), 0), COUNT(*)
@@ -2892,6 +2895,25 @@ func (s *Store) GetSessionContextHitRate(sessionID string) float64 {
 		return 0
 	}
 	return float64(hits) / float64(total)
+}
+
+// GetSessionDeliveryStats returns three counters for a session (Sprint 15 #5):
+//   - total:       all context deliveries in the session
+//   - firstFetch:  deliveries where refetched=0 (no correction re-fetch was needed)
+//   - tokensSaved: SUM(MAX(baseline_tokens - response_tokens, 0)) — conservative estimate
+//
+// All three are 0 when sessionID is empty or no deliveries exist.
+func (s *Store) GetSessionDeliveryStats(sessionID string) (total, firstFetch, tokensSaved int) {
+	if sessionID == "" {
+		return
+	}
+	s.execer().QueryRow(
+		`SELECT COUNT(*),
+		        COALESCE(SUM(CASE WHEN refetched = 0 THEN 1 ELSE 0 END), 0),
+		        COALESCE(SUM(MAX(baseline_tokens - response_tokens, 0)), 0)
+		 FROM context_deliveries WHERE session_id = ?`, sessionID,
+	).Scan(&total, &firstFetch, &tokensSaved)
+	return
 }
 
 // GetSessionEffectivenessP5 returns effectiveness data for a session (Item 13).
@@ -2917,7 +2939,9 @@ func (s *Store) GetRecentEffectivenessTrend(days int, agentID string) []pulsetyp
 		args = append(args, agentID)
 	}
 	q += ` GROUP BY date(created_at) ORDER BY date(created_at)`
-	rows, err := s.execer().Query(q, args...)
+	// Use readDB() not execer(): trend reads must see committed historical state,
+	// never in-progress collector batch data from an unrelated concurrent flush.
+	rows, err := s.readDB().Query(q, args...)
 	if err != nil {
 		return nil
 	}
@@ -2927,6 +2951,9 @@ func (s *Store) GetRecentEffectivenessTrend(days int, agentID string) []pulsetyp
 		var d pulsetypes.DailyEffectiveness
 		rows.Scan(&d.Day, &d.AvgContextHitRate, &d.AvgTaskCompletion, &d.TotalTokensSaved, &d.Sessions)
 		out = append(out, d)
+	}
+	if rows.Err() != nil {
+		return nil
 	}
 	return out
 }

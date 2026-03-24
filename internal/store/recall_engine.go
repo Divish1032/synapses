@@ -326,6 +326,28 @@ func (s *Store) GetMemoriesByAnchorNodesCtx(ctx context.Context, nodeIDs []strin
 // The temporal weight of 0.5 ensures that at 1000+ memories, a temporal-only
 // result (score ~0.008) never outranks a BM25 rank-2 result (score ~0.016).
 // Temporal results still surface when other channels leave gaps.
+// Attribution is the output of a recall merge operation (RRF or ConvexMerge).
+//
+// Key direction: memID → []channelNames  (opposite of the input channels map
+// which is channelName → []memIDs). Attribution channels are sorted by
+// contribution score descending, so [0] is always the highest-contributing
+// channel for that result.
+//
+// Use TopChannel to safely extract the best real channel for a result.
+type Attribution map[string][]string
+
+// TopChannel returns the highest-contributing real channel for memID.
+// "Real" means not prefixed with "_" (metadata pseudo-channels are excluded).
+// Returns "" if memID has no attribution or only metadata entries.
+func (a Attribution) TopChannel(memID string) string {
+	for _, ch := range a[memID] {
+		if !strings.HasPrefix(ch, "_") {
+			return ch
+		}
+	}
+	return ""
+}
+
 var DefaultRRFWeights = map[string]float64{
 	"bm25":     1.0,
 	"semantic": 1.0,
@@ -340,7 +362,7 @@ func RRFMerge(channels map[string][]string, limit int, k int) ([]string, map[str
 // RRFMergeWeighted applies Reciprocal Rank Fusion with per-channel weights.
 // weights maps channel name → weight multiplier (nil = DefaultRRFWeights).
 // Channels not in the weights map get weight 1.0.
-func RRFMergeWeighted(channels map[string][]string, limit int, k int, weights map[string]float64) ([]string, map[string][]string) {
+func RRFMergeWeighted(channels map[string][]string, limit int, k int, weights map[string]float64) ([]string, Attribution) {
 	if k <= 0 {
 		k = 60
 	}
@@ -351,10 +373,16 @@ func RRFMergeWeighted(channels map[string][]string, limit int, k int, weights ma
 		weights = DefaultRRFWeights
 	}
 
+	// chanContrib tracks a channel's contribution score for one result, so
+	// attribution channels can be sorted best-first (deterministic TopChannel).
+	type chanContrib struct {
+		name   string
+		contri float64
+	}
 	type scored struct {
-		id       string
-		score    float64
-		channels []string
+		id      string
+		score   float64
+		contribs []chanContrib
 	}
 
 	scoreMap := make(map[string]*scored)
@@ -365,19 +393,29 @@ func RRFMergeWeighted(channels map[string][]string, limit int, k int, weights ma
 			w = cw
 		}
 		for rank, id := range rankedIDs {
+			contrib := w * (1.0 / float64(k+rank+1)) // rank is 0-indexed, RRF uses 1-indexed
 			s, ok := scoreMap[id]
 			if !ok {
 				s = &scored{id: id}
 				scoreMap[id] = s
 			}
-			s.score += w * (1.0 / float64(k+rank+1)) // rank is 0-indexed, RRF uses 1-indexed
-			s.channels = append(s.channels, channelName)
+			s.score += contrib
+			s.contribs = append(s.contribs, chanContrib{name: channelName, contri: contrib})
 		}
 	}
 
 	// Collect and sort by score descending.
 	items := make([]scored, 0, len(scoreMap))
 	for _, s := range scoreMap {
+		// Sort this result's contributing channels by contribution descending so
+		// attribution[memID][0] is always the channel that ranked the result best.
+		// This makes TopChannel selection deterministic and accurate.
+		sort.Slice(s.contribs, func(i, j int) bool {
+			if math.Abs(s.contribs[i].contri-s.contribs[j].contri) > 1e-12 {
+				return s.contribs[i].contri > s.contribs[j].contri
+			}
+			return s.contribs[i].name < s.contribs[j].name // tie-break: alphabetical
+		})
 		items = append(items, *s)
 	}
 
@@ -394,10 +432,14 @@ func RRFMergeWeighted(channels map[string][]string, limit int, k int, weights ma
 	}
 
 	resultIDs := make([]string, len(items))
-	attribution := make(map[string][]string, len(items))
+	attribution := make(Attribution, len(items))
 	for i, item := range items {
 		resultIDs[i] = item.id
-		attribution[item.id] = item.channels
+		chans := make([]string, len(item.contribs))
+		for j, c := range item.contribs {
+			chans[j] = c.name
+		}
+		attribution[item.id] = chans
 	}
 
 	return resultIDs, attribution
@@ -463,15 +505,21 @@ func ConvexMerge(
 	channels map[string]*ChannelScores,
 	limit int,
 	weights ConvexWeights,
-) ([]string, map[string][]string) {
+) ([]string, Attribution) {
 	if limit <= 0 {
 		limit = 20
 	}
 
+	// chanContrib tracks a channel's score contribution for one result so
+	// attribution channels can be sorted best-first (same pattern as RRF).
+	type chanContrib struct {
+		name   string
+		contri float64
+	}
 	type scored struct {
 		id       string
 		score    float64
-		channels []string
+		contribs []chanContrib
 	}
 	scoreMap := make(map[string]*scored)
 
@@ -490,19 +538,28 @@ func ConvexMerge(
 		w := channelWeight(channelName, weights)
 
 		for i, id := range cs.IDs {
+			contrib := w * norm[i]
 			s, ok := scoreMap[id]
 			if !ok {
 				s = &scored{id: id}
 				scoreMap[id] = s
 			}
-			s.score += w * norm[i]
-			s.channels = append(s.channels, channelName)
+			s.score += contrib
+			s.contribs = append(s.contribs, chanContrib{name: channelName, contri: contrib})
 		}
 	}
 
 	// Collect and sort by score descending.
 	items := make([]scored, 0, len(scoreMap))
 	for _, s := range scoreMap {
+		// Sort this result's channels by contribution descending so Attribution[0]
+		// is always the channel that contributed most — deterministic TopChannel.
+		sort.Slice(s.contribs, func(i, j int) bool {
+			if math.Abs(s.contribs[i].contri-s.contribs[j].contri) > 1e-12 {
+				return s.contribs[i].contri > s.contribs[j].contri
+			}
+			return s.contribs[i].name < s.contribs[j].name
+		})
 		items = append(items, *s)
 	}
 
@@ -518,10 +575,14 @@ func ConvexMerge(
 	}
 
 	resultIDs := make([]string, len(items))
-	attribution := make(map[string][]string, len(items))
+	attribution := make(Attribution, len(items))
 	for i, item := range items {
 		resultIDs[i] = item.id
-		attribution[item.id] = item.channels
+		chans := make([]string, len(item.contribs))
+		for j, c := range item.contribs {
+			chans[j] = c.name
+		}
+		attribution[item.id] = chans
 	}
 
 	return resultIDs, attribution

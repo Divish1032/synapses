@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -105,6 +106,54 @@ type directionalContext struct {
 	// followed by corrections or session abandonment. Agents should treat this
 	// entity's context as potentially insufficient and consider a deeper fetch.
 	LowQualityHint string `json:"low_quality_hint,omitempty"`
+	// Sprint 15 #6: context confidence score in [0.0, 1.0].
+	// Derived from per-entity quality score, graph freshness, and stale annotations.
+	// confidence < 0.5 adds ConfidenceHint but does NOT suppress the result — agents decide.
+	// Default 0.75 when no prior outcome data exists (optimistic for unscored entities).
+	Confidence     float64 `json:"confidence"`
+	ConfidenceHint string  `json:"confidence_hint,omitempty"`
+}
+
+// computeContextConfidence maps a quality score + staleness indicators to a
+// calibrated confidence value in [0.0, 1.0] (Sprint 15 #6).
+//
+// Formula:
+//   - No prior record (entity never appeared in a scored outcome): 0.75 (optimistic).
+//   - Has record: sigmoid(qs/2.0) rescaled to [0.15, 0.95].
+//     qs=0  → 0.55 (neutral outcome history)
+//     qs=+3 → 0.80 (consistently helped agents)
+//     qs=+5 → 0.89 (strong positive history)
+//     qs=-1 → 0.45 (two task_cancelled signals)
+//     qs=-2 → 0.37 (established pattern of insufficiency — triggers low-quality hint)
+//   - Staleness downgrades:
+//     −0.10 if graph freshness warning (file modified <10s, graph may lag)
+//     −0.05 if stale annotations exist
+//   - Result clamped to [0.0, 1.0], rounded to 2 decimal places.
+//
+// confidence < 0.5 should add a hint in the response but MUST NOT suppress
+// the result — the agent decides how to act on the information.
+func computeContextConfidence(qs float64, hasRecord, graphFreshWarning, staleAnnotWarning bool) float64 {
+	var conf float64
+	if !hasRecord {
+		conf = 0.75 // no scored outcomes yet — deliver optimistically
+	} else {
+		// sigmoid(qs/2.0) ∈ (0, 1); rescale to [0.15, 0.95] to avoid extreme values.
+		sig := 1.0 / (1.0 + math.Exp(-qs/2.0))
+		conf = 0.15 + sig*0.8
+	}
+	if graphFreshWarning {
+		conf -= 0.10
+	}
+	if staleAnnotWarning {
+		conf -= 0.05
+	}
+	if conf < 0.0 {
+		conf = 0.0
+	}
+	if conf > 1.0 {
+		conf = 1.0
+	}
+	return math.Round(conf*100) / 100
 }
 
 // computeEntityHash returns a short SHA1 hex digest that identifies the
@@ -351,12 +400,50 @@ func (s *Server) handleGetContext(
 		}
 	}
 
+	// Sprint 15 #3: load per-edge learned weight multipliers from the store's
+	// in-memory cache (populated from graphDB on first call after each write).
+	// Also capture the version counter: cacheKeyFor uses it to distinguish
+	// subgraphs built with different weight tables, preventing cache collisions
+	// that would occur if two weight maps happened to have the same entry count.
+	if s.store != nil {
+		cfg.LearnedEdgeWeights = s.store.GetLearnedEdgeWeights()
+		cfg.LearnedEdgeWeightsVersion = s.store.GetLearnedEdgeWeightsVersion()
+	}
+
 	// F17: Adaptive Context Learning — auto-expand depth/detail based on
 	// stored feedback for this entity+agent before per-call explicit overrides
 	// are applied. Explicit caller values always win over adaptive adjustments.
 	adaptiveForceFullDetail := false
 	if agentIDForFeedback != "" && s.store != nil {
 		adaptiveForceFullDetail = s.adaptiveCarveConfig(&cfg, entityName, agentIDForFeedback)
+	}
+
+	// Rec #2: Quality-based auto-depth — bump MaxDepth by 1 when the entity has a
+	// poor quality score (≤ -2.0), signalling that prior deliveries were repeatedly
+	// followed by corrections or abandonment. Only fires when the agent did NOT
+	// explicitly pass depth= (explicit always wins, applied below). Runs after F17
+	// adaptive expansion so the combined depth is still capped at 5 and the cache
+	// key (computed after this block) captures the bumped value.
+	//
+	// Entity key format: entityWithPath("Name@dir/file") — must match how outcome
+	// signals are stored in entity_quality (see pulse_tools.go emitContextDelivery).
+	qualityAutoDepthBumped := false
+	var qualityAutoScore float64
+	if _, hasExplicitDepth := req.GetArguments()["depth"]; !hasExplicitDepth {
+		if pc := s.getPulseClient(); pc != nil {
+			qualityKey := entityName
+			if qNodes := s.graph.FindByName(entityName); len(qNodes) > 0 {
+				qBest := pickBestNode(qNodes, s.graph)
+				qualityKey = entityWithPath(qBest.Name, qBest.File)
+			}
+			if qs, ok := pc.GetEntityQualityScore(qualityKey, s.projectID); ok && qs <= -2.0 {
+				if cfg.MaxDepth < 5 {
+					cfg.MaxDepth++
+					qualityAutoDepthBumped = true
+					qualityAutoScore = qs
+				}
+			}
+		}
 	}
 
 	// Sprint 11: apply model-based budget multiplier to the default budget.
@@ -615,23 +702,6 @@ func (s *Server) handleGetContext(
 	}
 
 	dc := toDirectionalContext(sg)
-
-	// Sprint 15 #2: surface a low-quality hint when the root entity's quality
-	// score is significantly negative (≤ -2.0), meaning context deliveries for
-	// this entity were frequently followed by corrections or session abandonment.
-	// Threshold -2.0 requires multiple negative signals before firing — a single
-	// correction (weight -0.2 to -0.5) or one abandoned session (-0.8) won't
-	// trigger it; the agent needs to see a pattern before the hint appears.
-	if pc := s.getPulseClient(); pc != nil && sg.Root != "" {
-		const lowQualityThreshold = -2.0
-		if qs, ok := pc.GetEntityQualityScore(string(sg.Root), s.projectID); ok && qs <= lowQualityThreshold {
-			dc.LowQualityHint = fmt.Sprintf(
-				"Context for this entity has a low quality score (%.1f). "+
-					"Prior deliveries were frequently followed by corrections or session abandonment. "+
-					"Consider requesting a deeper fetch (depth=4) or a different entry point.",
-				qs)
-		}
-	}
 
 	// R1: strip synthetic route/inferred nodes when include_inferred=false.
 	if !includeInferred {
@@ -894,10 +964,53 @@ func (s *Server) handleGetContext(
 		}
 	}
 
-	// F17: surface adaptive expansion hint in the response so agents know why
-	// they received deeper context than the default.
+	// F17 + Rec #2: surface adaptive expansion hint in the response so agents
+	// know why they received deeper context than the default depth.
+	// F17 (episodic feedback) takes priority; quality-based auto-depth fires only
+	// when F17 did not already set a hint.
 	if adaptiveForceFullDetail {
 		dc.AdaptiveHint = "⟳ Context depth auto-expanded based on prior feedback for this entity."
+	} else if qualityAutoDepthBumped {
+		dc.AdaptiveHint = fmt.Sprintf(
+			"⟳ Context depth auto-expanded to %d (quality score %.1f): prior deliveries for this entity were frequently followed by corrections or session abandonment.",
+			cfg.MaxDepth, qualityAutoScore)
+	}
+
+	// Sprint 15 #2 + #6: single quality-score fetch for both LowQualityHint and
+	// Confidence. Placed here — after enrichWg.Wait() and all sequential passes —
+	// so dc.GraphFreshness and dc.StaleAnnotationWarning are already populated.
+	// One SQLite round-trip serves both consumers; avoids the dual-query pattern
+	// that the earlier Sprint 15 #2 placement would have caused.
+	//
+	// Key format: entityWithPath("Name@dir/file") — entity_quality is keyed by
+	// the same format as outcome_signals (see UpdateEntityQualityScore in store.go
+	// and emitContextDelivery in pulse_tools.go). Using string(sg.Root) (NodeID
+	// format) would never match any stored entry.
+	{
+		var qs float64
+		var hasRecord bool
+		if pc := s.getPulseClient(); pc != nil {
+			qs, hasRecord = pc.GetEntityQualityScore(entityWithPath(best.Name, best.File), s.projectID)
+		}
+		// Sprint 15 #2: low-quality hint fires at qs ≤ -2.0 (established pattern
+		// of insufficiency requiring multiple negative signals).
+		if hasRecord && qs <= -2.0 {
+			dc.LowQualityHint = fmt.Sprintf(
+				"Context for this entity has a low quality score (%.1f). "+
+					"Prior deliveries were frequently followed by corrections or session abandonment. "+
+					"Consider requesting a deeper fetch (depth=4) or a different entry point.",
+				qs)
+		}
+		// Sprint 15 #6: calibrated confidence in [0.0, 1.0].
+		dc.Confidence = computeContextConfidence(qs, hasRecord, dc.GraphFreshness != "", dc.StaleAnnotationWarning != "")
+		if dc.Confidence < 0.5 {
+			dc.ConfidenceHint = fmt.Sprintf(
+				"Low confidence (%.2f): prior context deliveries for this entity were "+
+					"frequently followed by corrections or session abandonment. "+
+					"Context is not suppressed — agent decides. "+
+					"Consider depth=4 or a different entry point.",
+				dc.Confidence)
+		}
 	}
 
 	// Attach entity_hash to the response so clients can cache and compare.

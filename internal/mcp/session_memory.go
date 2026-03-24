@@ -18,13 +18,46 @@ import (
 
 // endSessionResult is the response from end_session.
 type endSessionResult struct {
-	Status          string                  `json:"status"`
-	AgentID         string                  `json:"agent_id"`
-	SessionDuration string                  `json:"session_duration,omitempty"`
-	MemoriesSaved   int                     `json:"memories_saved"`
-	SessionSummary  *sessionSummary         `json:"session_summary,omitempty"`
-	MemoriesExpired int64                   `json:"memories_expired"`
-	Retrospective   *store.ToolCallSummary  `json:"retrospective,omitempty"`
+	Status              string                  `json:"status"`
+	AgentID             string                  `json:"agent_id"`
+	SessionDuration     string                  `json:"session_duration,omitempty"`
+	MemoriesSaved       int                     `json:"memories_saved"`
+	SessionSummary      *sessionSummary         `json:"session_summary,omitempty"`
+	MemoriesExpired     int64                   `json:"memories_expired"`
+	Retrospective       *store.ToolCallSummary  `json:"retrospective,omitempty"`
+	EffectivenessReport *EffectivenessReport    `json:"effectiveness_report,omitempty"`
+}
+
+// EffectivenessReport summarises session quality and compares to recent history (Sprint 15 #5).
+type EffectivenessReport struct {
+	// ContextHitRate is the fraction of context deliveries served from cache.
+	ContextHitRate float64 `json:"context_hit_rate"`
+	// TaskCompletionRate is 1 - tool_call_error_rate (proxy: successful calls / total calls).
+	// Nil when no tool-call data is available for this session (not 0% — unknown).
+	TaskCompletionRate *float64 `json:"task_completion_rate,omitempty"`
+	// ToolCalls is the total number of MCP tool calls in this session.
+	ToolCalls int `json:"tool_calls"`
+	// TotalDeliveries is the total number of context deliveries in this session.
+	TotalDeliveries int `json:"total_deliveries"`
+	// FirstFetchRight is the number of deliveries that required no correction re-fetch.
+	FirstFetchRight int `json:"first_fetch_right"`
+	// TokensSaved is the estimated tokens saved vs full-file grep (baseline - response).
+	// Omitted from JSON when zero so consumers can distinguish "no savings" from "no deliveries".
+	TokensSaved int `json:"tokens_saved,omitempty"`
+	// DurationMs is the session wall-clock duration in milliseconds.
+	DurationMs int64 `json:"duration_ms"`
+	// Prev7d is the 7-day historical average across all previous sessions (omitted when no history).
+	Prev7d *prev7dSummary `json:"prev_7d,omitempty"`
+	// Message is the human-readable effectiveness summary.
+	Message string `json:"message"`
+}
+
+// prev7dSummary holds the 7-day rolling averages for cross-session comparison.
+type prev7dSummary struct {
+	Sessions          int     `json:"sessions"`
+	AvgContextHitRate float64 `json:"avg_context_hit_rate"`
+	AvgTaskCompletion float64 `json:"avg_task_completion"`
+	TotalTokensSaved  int     `json:"total_tokens_saved"`
 }
 
 // sessionSummary captures the structured extraction from a session.
@@ -195,6 +228,14 @@ func (s *Server) handleEndSession(
 		// Sprint 6.7: correlate all context deliveries for this session with the outcome.
 		// Synchronous — must complete before session record is cleared.
 		_, _ = s.store.CorrelateSessionOutcome(synapseSessionID, outcome)
+		// Sprint 15 #3: apply BFS/PPR edge weight refinements based on this
+		// session's outcome. Background: acquires graph.RLocks and writes SQLite.
+		// Must run AFTER CorrelateSessionOutcome (uses the session_id index, not
+		// task_outcome, so ordering is safe — but clearing session below would
+		// not affect it since we pass synapseSessionID by value).
+		sessIDForRefinement := synapseSessionID
+		outcomeForRefinement := outcome
+		s.goBackground(func() { s.applyEdgeWeightRefinements(sessIDForRefinement, outcomeForRefinement) })
 		s.ClearSynapseSession(mcpSessionID)
 	}
 
@@ -367,26 +408,70 @@ func (s *Server) handleEndSession(
 		s.goBackground(func() { pc.SetSessionTermination(synapseSessionID, reason) })
 	}
 
-	// P5 — Item 13: compute and record session effectiveness report.
+	// Sprint 15 #5: compute and record session effectiveness report, then surface it in the response.
 	if pc := s.getPulseClient(); pc != nil && synapseSessionID != "" {
 		var toolCalls int
-		var taskCompRate float64
+		var taskCompRate *float64 // nil = no measurement, not "0% success"
 		if retro != nil {
 			toolCalls = retro.TotalCalls
 			// Use (1 - error_rate) as a proxy for task completion rate.
-			taskCompRate = 1.0 - retro.ErrorRate
+			// Only set when we have actual call data — avoids showing 0% when there's
+			// simply no measurement (e.g. session ended without any tool calls recorded).
+			v := 1.0 - retro.ErrorRate
+			taskCompRate = &v
 		}
 		contextHitRate := pc.GetSessionContextHitRate(synapseSessionID)
+		totalDel, firstFetch, tokensSaved := pc.GetSessionDeliveryStats(synapseSessionID)
+
+		// Read the 7-day trend BEFORE queuing the insert so this session's data
+		// cannot race into its own Prev7d comparison. goBackground submits to a
+		// worker pool that may execute on an idle goroutine before this goroutine
+		// continues — reading trend first eliminates that race entirely.
+		var prev7d *prev7dSummary
+		if trend := pc.GetRecentEffectivenessTrend(7, agentID); len(trend) > 0 {
+			p := &prev7dSummary{}
+			for _, d := range trend {
+				p.Sessions += d.Sessions
+				p.AvgContextHitRate += d.AvgContextHitRate * float64(d.Sessions)
+				p.AvgTaskCompletion += d.AvgTaskCompletion * float64(d.Sessions)
+				p.TotalTokensSaved += d.TotalTokensSaved
+			}
+			if p.Sessions > 0 {
+				p.AvgContextHitRate /= float64(p.Sessions)
+				p.AvgTaskCompletion /= float64(p.Sessions)
+				prev7d = p
+			}
+		}
+
+		// Queue the insert after the trend read — order matters (see above).
+		taskCompRateF64 := 0.0
+		if taskCompRate != nil {
+			taskCompRateF64 = *taskCompRate
+		}
 		eff := pulse.SessionEffectiveness{
 			SessionID:          synapseSessionID,
 			AgentID:            agentID,
 			ProjectID:          s.projectID,
 			ContextHitRate:     contextHitRate,
-			TaskCompletionRate: taskCompRate,
+			TaskCompletionRate: taskCompRateF64,
+			TokensSaved:        tokensSaved,
 			ToolCalls:          toolCalls,
 			DurationMs:         durationMs,
 		}
 		s.goBackground(func() { pc.InsertSessionEffectiveness(eff) })
+
+		report := &EffectivenessReport{
+			ContextHitRate:     contextHitRate,
+			TaskCompletionRate: taskCompRate,
+			ToolCalls:          toolCalls,
+			TotalDeliveries:    totalDel,
+			FirstFetchRight:    firstFetch,
+			TokensSaved:        tokensSaved,
+			DurationMs:         durationMs,
+			Prev7d:             prev7d,
+		}
+		report.Message = buildEffectivenessMessage(report)
+		result.EffectivenessReport = report
 	}
 
 	return jsonResult(result)
@@ -658,6 +743,128 @@ func truncateSlice(s []string, n int) []string {
 	copy(result, s[:n])
 	result[n] = fmt.Sprintf("(+%d more)", len(s)-n)
 	return result
+}
+
+// buildEffectivenessMessage returns a human-readable one-liner summarising the session.
+// Examples:
+//
+//	"First-fetch context: 14/16 deliveries required no correction (87%). Context hit rate: 85%. 47 tool calls in 4m0s."
+//	"No context deliveries this session. 12 tool calls in 30s."
+func buildEffectivenessMessage(r *EffectivenessReport) string {
+	dur := time.Duration(r.DurationMs) * time.Millisecond
+	durStr := dur.Round(time.Second).String()
+	if r.TotalDeliveries == 0 {
+		return fmt.Sprintf("No context deliveries this session. %d tool calls in %s.", r.ToolCalls, durStr)
+	}
+	pct := 100.0 * float64(r.FirstFetchRight) / float64(r.TotalDeliveries)
+	msg := fmt.Sprintf(
+		"First-fetch context: %d/%d deliveries required no correction (%.0f%%). Context hit rate: %.0f%%. %d tool calls in %s.",
+		r.FirstFetchRight, r.TotalDeliveries, pct,
+		r.ContextHitRate*100, r.ToolCalls, durStr,
+	)
+	if r.TokensSaved > 0 {
+		msg += fmt.Sprintf(" ~%d tokens saved.", r.TokensSaved)
+	}
+	return msg
+}
+
+// buildSessionTrend converts a slice of DailyEffectiveness rows (oldest-first,
+// from GetRecentEffectivenessTrend) into a summary map suitable for embedding
+// in session_init responses. windowDays is the query window (e.g. 7 for 7-day
+// lookback) and is included in the response and note for clarity.
+// Returns nil when there are fewer than 2 total sessions — insufficient data.
+//
+// Trend direction requires at least 2 distinct calendar days to compare halves:
+//
+//	second_half_avg - first_half_avg > +0.05 → "improving"
+//	first_half_avg  - second_half_avg > 0.05 → "declining"
+//	otherwise (or only 1 active day)         → "stable"
+func buildSessionTrend(days []pulse.DailyEffectiveness, windowDays int) map[string]interface{} {
+	if len(days) == 0 {
+		return nil
+	}
+	// Aggregate totals across all active days.
+	var totalSessions int
+	var weightedHitRate float64
+	var totalTokensSaved int
+	for _, d := range days {
+		totalSessions += d.Sessions
+		weightedHitRate += d.AvgContextHitRate * float64(d.Sessions)
+		totalTokensSaved += d.TotalTokensSaved
+	}
+	if totalSessions < 2 {
+		return nil
+	}
+	avgHitRate := weightedHitRate / float64(totalSessions)
+	activeDays := len(days)
+
+	// Compute trend direction when there are ≥2 distinct calendar days.
+	// With a single active day (all sessions on the same date), we cannot
+	// determine direction — "stable" is the neutral default, noted as such.
+	trend := "stable"
+	canCompareTrend := activeDays >= 2
+	if canCompareTrend {
+		mid := activeDays / 2
+		var firstHalfHit, firstHalfSess float64
+		var secondHalfHit, secondHalfSess float64
+		for _, d := range days[:mid] {
+			firstHalfHit += d.AvgContextHitRate * float64(d.Sessions)
+			firstHalfSess += float64(d.Sessions)
+		}
+		for _, d := range days[mid:] {
+			secondHalfHit += d.AvgContextHitRate * float64(d.Sessions)
+			secondHalfSess += float64(d.Sessions)
+		}
+		if firstHalfSess > 0 && secondHalfSess > 0 {
+			firstAvg := firstHalfHit / firstHalfSess
+			secondAvg := secondHalfHit / secondHalfSess
+			switch {
+			case secondAvg-firstAvg > 0.05:
+				trend = "improving"
+			case firstAvg-secondAvg > 0.05:
+				trend = "declining"
+			}
+		}
+	}
+
+	// Human-readable note. Uses the query window (windowDays) not activeDays so
+	// agents understand the full analysis period, not just the days with data.
+	hitPct := int(avgHitRate * 100)
+	dayWord := "days"
+	if windowDays == 1 {
+		dayWord = "day"
+	}
+	var note string
+	if !canCompareTrend {
+		// Only 1 active day — cannot assess trend direction.
+		note = fmt.Sprintf("Context quality: hit rate ~%d%% (%d sessions today).", hitPct, totalSessions)
+	} else {
+		switch trend {
+		case "improving":
+			note = fmt.Sprintf("Context quality improving over %d %s: hit rate ~%d%%, %d sessions.",
+				windowDays, dayWord, hitPct, totalSessions)
+		case "declining":
+			note = fmt.Sprintf("Context quality declining over %d %s: hit rate ~%d%%, %d sessions. Consider increasing depth on first call.",
+				windowDays, dayWord, hitPct, totalSessions)
+		default:
+			note = fmt.Sprintf("Context quality stable over %d %s: hit rate ~%d%%, %d sessions.",
+				windowDays, dayWord, hitPct, totalSessions)
+		}
+	}
+	if totalTokensSaved > 0 {
+		note += fmt.Sprintf(" %d tokens saved.", totalTokensSaved)
+	}
+
+	out := map[string]interface{}{
+		"window_days":          windowDays,
+		"active_days":          activeDays,
+		"sessions":             totalSessions,
+		"avg_context_hit_rate": avgHitRate,
+		"total_tokens_saved":   totalTokensSaved,
+		"trend":                trend,
+		"note":                 note,
+	}
+	return out
 }
 
 // parseExaminedEntities extracts entity names from a session log content string.
