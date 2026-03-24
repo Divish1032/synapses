@@ -615,6 +615,11 @@ func tailFile(path string, n int) []string {
 				return lines
 			}
 			// Too few lines; double chunk size and retry.
+			// Break early if we've already covered the entire file — no point
+			// reading it again on the next iteration.
+			if chunkSize >= info.Size() {
+				break
+			}
 			chunkSize *= 2
 			if chunkSize > info.Size() {
 				chunkSize = info.Size()
