@@ -293,13 +293,22 @@ func (g *Graph) EnableFlatGraph() {
 	defer g.mu.Unlock()
 	fg := NewFlatGraph(g.repoID)
 	indexMap := make(map[NodeID]NodeIndex, len(g.nodes))
+	// nodeIDs is a parallel slice: nodeIDs[idx] = original graph NodeID (relative-path format).
+	// This is used by flatGraphNeighbors to return the correct NodeID format after BFS expansion.
+	nodeIDs := make([]NodeID, 0, len(g.nodes))
 	for id, n := range g.nodes {
 		fileID := Pool.Intern(n.File)
 		nameID := Pool.Intern(n.Name)
 		idx := fg.AddNode(nameID, n.Type, fileID, 0)
 		indexMap[id] = idx
 		fg.stringIDToIndex[id] = idx
+		// Grow nodeIDs to cover idx — AddNode assigns indices sequentially.
+		for len(nodeIDs) <= int(idx) {
+			nodeIDs = append(nodeIDs, "")
+		}
+		nodeIDs[idx] = id
 	}
+	fg.nodeIDs = nodeIDs
 	edges := make([]BulkEdge, 0, len(g.outEdges)*2)
 	for _, elist := range g.outEdges {
 		for _, e := range elist {
@@ -330,7 +339,11 @@ func (g *Graph) flatGraphNeighbors(id NodeID) []NodeID {
 	nbs := fg.Neighbors(idx)
 	result := make([]NodeID, 0, len(nbs))
 	for _, nbIdx := range nbs {
-		result = append(result, fg.ExtID(nbIdx))
+		// Use the original graph NodeID (relative-path format), not ExtID which
+		// would reconstruct from the absolute n.File path and produce the wrong key.
+		if id := fg.NodeIDAt(nbIdx); id != "" {
+			result = append(result, id)
+		}
 	}
 	return result
 }

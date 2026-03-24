@@ -76,6 +76,11 @@ type FlatGraph struct {
 	// stringIDToIndex maps a stable "repoID::file::name" NodeID string back to the continuous NodeIndex.
 	// Used primarily when agents request specific nodes by name.
 	stringIDToIndex map[NodeID]NodeIndex
+
+	// nodeIDs is a NodeIndex-indexed slice of the original graph NodeIDs (relative-path format).
+	// Populated by Graph.EnableFlatGraph for O(1) reverse lookup in flatGraphNeighbors.
+	// Must be used instead of ExtID when the canonical NodeID is needed.
+	nodeIDs []NodeID
 }
 
 // Neighbors returns the NodeIndex values for all undirected (out+in) neighbors
@@ -97,6 +102,15 @@ func (fg *FlatGraph) Neighbors(idx NodeIndex) []NodeIndex {
 func (fg *FlatGraph) LookupIndex(id NodeID) (NodeIndex, bool) {
 	idx, ok := fg.stringIDToIndex[id]
 	return idx, ok
+}
+
+// NodeIDAt returns the original graph NodeID for a NodeIndex, or "" if out of range.
+// Uses the nodeIDs slice populated by Graph.EnableFlatGraph.
+func (fg *FlatGraph) NodeIDAt(idx NodeIndex) NodeID {
+	if int(idx) >= len(fg.nodeIDs) {
+		return ""
+	}
+	return fg.nodeIDs[idx]
 }
 
 // NewFlatGraph initializes an empty SoA Graph structure.
