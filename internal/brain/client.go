@@ -150,9 +150,12 @@ func (c *Client) Available() bool {
 }
 
 // Generate sends a prompt to the brain's LLM and returns the raw response.
-// Returns ("", error) if brain is unavailable. Used for brain-enhanced
-// drift summaries in the federation resolver.
+// Returns ("", nil) if brain is unavailable or system health warrants degradation.
+// Used for brain-enhanced drift summaries in the federation resolver.
 func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
+	if c.scheduler.ShouldDegrade() {
+		return "", nil
+	}
 	return c.brain.Generate(ctx, prompt)
 }
 

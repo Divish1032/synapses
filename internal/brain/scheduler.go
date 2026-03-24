@@ -251,11 +251,21 @@ func (s *Scheduler) Stop() {
 //
 // Submit never blocks. It always returns immediately, regardless of queue state.
 // If the queue is full and cannot evict, the task is silently dropped.
+// If Stop() has already been called, the task is silently dropped (drain goroutine
+// has exited; enqueuing would orphan the task permanently).
 func (s *Scheduler) Submit(key string, priority TaskPriority, fn func()) {
 	if s.pulse == nil {
 		// No system monitoring — run immediately (NullBrain / test fallback).
 		go safeSchedulerRun(key, fn)
 		return
+	}
+
+	// Guard: if the scheduler has been stopped, the drain goroutine has exited.
+	// Enqueuing would silently orphan the task. Drop it instead.
+	select {
+	case <-s.done:
+		return
+	default:
 	}
 
 	ttl := schedulerP1TTL
