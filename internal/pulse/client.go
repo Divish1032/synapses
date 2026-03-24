@@ -464,14 +464,6 @@ func (c *Client) SetSessionTermination(sessionID, reason string) {
 	_ = c.store.SetSessionTermination(sessionID, reason)
 }
 
-// UpdateEntityQualityScore recomputes the running quality score for an entity. Fire-and-forget (P5 — Item 10).
-func (c *Client) UpdateEntityQualityScore(entity, projectID string) {
-	if c == nil {
-		return
-	}
-	c.store.UpdateEntityQualityScore(entity, projectID)
-}
-
 // UpdateRecallChannelStats recomputes recall channel attribution weights. Fire-and-forget (P5 — Item 12).
 func (c *Client) UpdateRecallChannelStats(projectID string) {
 	if c == nil {
