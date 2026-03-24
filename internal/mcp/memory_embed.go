@@ -20,11 +20,13 @@ type statusDetailer interface {
 // embedMemory generates a vector embedding for a single memory and stores it.
 // Fail-silent: errors are logged to stderr but never propagated to callers.
 // This is designed to be called from goroutines on the write path.
-func (s *Server) embedMemory(embedder embed.Embedder, st *store.Store, memoryID, content string) {
+// parentCtx is the server lifecycle context; the 30s timeout is nested under it
+// so embedding work stops when the server shuts down.
+func (s *Server) embedMemory(parentCtx context.Context, embedder embed.Embedder, st *store.Store, memoryID, content string) {
 	if embedder == nil || st == nil || content == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer cancel()
 
 	vec, err := embedder.Embed(ctx, content)
@@ -78,7 +80,7 @@ func (s *Server) failedEmbedRetryLoop(embedder embed.Embedder, st *store.Store) 
 				if !ok || content == "" {
 					continue
 				}
-				s.goBackground(func() { s.embedMemory(embedder, st, memID, content) })
+				s.goBackground(func() { s.embedMemory(s.lifecycleCtx, embedder, st, memID, content) })
 			}
 		case <-s.stopCh:
 			return

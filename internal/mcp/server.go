@@ -207,6 +207,12 @@ type Server struct {
 	startOnce sync.Once
 	wg        sync.WaitGroup
 
+	// lifecycleCtx is cancelled by Close() to bound embedding and other
+	// background work to the server lifetime. Background ops that accept a
+	// context should use this rather than context.Background().
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+
 	// Bounded background worker pool for fire-and-forget operations.
 	// All handler goroutines (telemetry, embedding, store writes) go through
 	// goBackground() which enqueues work items. Fixed workers drain the queue.
@@ -551,6 +557,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		approvals:        newApprovalStore(),
 		toolDescs:        make(map[string]string),
 	}
+	s.lifecycleCtx, s.lifecycleCancel = context.WithCancel(context.Background())
 
 	// Security F10: build rate limiter from config (or defaults if cfg is nil).
 	if cfg != nil {
@@ -1192,8 +1199,9 @@ func (s *Server) Close() {
 		return
 	}
 
-	// 2. Signal long-running loops (memoryExpiryLoop).
+	// 2. Signal long-running loops (memoryExpiryLoop) and cancel lifecycle context.
 	close(s.stopCh)
+	s.lifecycleCancel()
 
 	if s.lg != nil {
 		s.lg.close()
@@ -1261,7 +1269,7 @@ func (s *Server) embedSweepLoop(embedder embed.Embedder, st *store.Store) {
 				if !ok || content == "" {
 					continue
 				}
-				if !s.goBackground(func() { s.embedMemory(embedder, st, memID, content) }) {
+				if !s.goBackground(func() { s.embedMemory(s.lifecycleCtx, embedder, st, memID, content) }) {
 					s.trackFailedEmbed(memID)
 				}
 			}

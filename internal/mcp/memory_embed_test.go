@@ -36,13 +36,13 @@ var _ embed.Embedder = (*testEmbedder)(nil)
 func TestEmbedMemory_NilEmbedder(t *testing.T) {
 	s := &Server{}
 	// Should not panic with nil embedder.
-	s.embedMemory(nil, nil, "mem1", "some content")
+	s.embedMemory(context.Background(), nil, nil, "mem1", "some content")
 }
 
 func TestEmbedMemory_EmptyContent(t *testing.T) {
 	e := &testEmbedder{vec: []float32{0.1}, model: "test"}
 	s := &Server{}
-	s.embedMemory(e, nil, "mem1", "")
+	s.embedMemory(context.Background(), e, nil, "mem1", "")
 	assert.Equal(t, int32(0), e.callCount.Load())
 }
 
@@ -69,7 +69,7 @@ func TestEmbedMemory_StoresEmbedding(t *testing.T) {
 	}
 
 	s := &Server{}
-	s.embedMemory(e, st, mid, "auth service uses JWT")
+	s.embedMemory(context.Background(), e, st, mid, "auth service uses JWT")
 
 	assert.Equal(t, int32(1), e.callCount.Load())
 	assert.NotNil(t, st.GetMemoryEmbedding(mid), "embedding should be stored")
@@ -86,7 +86,7 @@ func TestEmbedMemory_EmbedError_NoStoreWrite(t *testing.T) {
 	}
 
 	s := &Server{}
-	s.embedMemory(e, st, "mem1", "content")
+	s.embedMemory(context.Background(), e, st, "mem1", "content")
 
 	assert.Equal(t, int32(1), e.callCount.Load())
 	assert.Nil(t, st.GetMemoryEmbedding("mem1"), "no embedding should be stored on error")
