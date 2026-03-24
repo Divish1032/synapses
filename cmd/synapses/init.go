@@ -680,13 +680,8 @@ func diagnoseDaemonFailure() {
 	// 1. Show daemon log tail.
 	logPath, err := singletonLogPath()
 	if err == nil {
-		data, readErr := os.ReadFile(logPath)
-		if readErr == nil && len(data) > 0 {
-			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			tail := lines
-			if len(tail) > 10 {
-				tail = tail[len(tail)-10:]
-			}
+		tail := tailFile(logPath, 10)
+		if len(tail) > 0 {
 			fmt.Printf("  Log (%s):\n", logPath)
 			for _, line := range tail {
 				fmt.Printf("    %s\n", line)
