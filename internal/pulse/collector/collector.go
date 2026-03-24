@@ -249,9 +249,15 @@ func (c *Collector) HighWaterMark() int64 {
 
 // DropRate returns the fraction of enqueued events that were dropped (Bug 28 — ROI-E8).
 // Returns 0.0 if no events have been dropped or the high-water mark is zero.
+// If either counter has overflowed to negative (extremely high-throughput case),
+// returns 1.0 (100% drop rate) as a conservative safe value rather than 0.0.
 func (c *Collector) DropRate() float64 {
 	enqueued := c.enqueued.Load()
-	if enqueued <= 0 {
+	if enqueued < 0 {
+		// Counter overflow — return 1.0 (worst case) rather than a misleading 0.
+		return 1.0
+	}
+	if enqueued == 0 {
 		return 0.0
 	}
 	dropped := c.dropped.Load()
