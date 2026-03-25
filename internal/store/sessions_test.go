@@ -1407,3 +1407,66 @@ func TestGetOrResumeSession_Phase2_FiltersOnHibernatedState(t *testing.T) {
 		}
 	}
 }
+
+// ── CountProjectSessions ──────────────────────────────────────────────────────
+
+func TestCountProjectSessions_ZeroBeforeAnySession(t *testing.T) {
+	st := openTestStore(t)
+	count, err := st.CountProjectSessions("proj-never-seen")
+	if err != nil {
+		t.Fatalf("CountProjectSessions: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 sessions for unknown project, got %d", count)
+	}
+}
+
+func TestCountProjectSessions_OneAfterFirstSession(t *testing.T) {
+	st := openTestStore(t)
+	createTestSession(t, st, "agent-1", "proj-cps1", "work")
+	count, err := st.CountProjectSessions("proj-cps1")
+	if err != nil {
+		t.Fatalf("CountProjectSessions: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 session after first session_init, got %d", count)
+	}
+}
+
+func TestCountProjectSessions_CountsAllSessionsIncludingClosed(t *testing.T) {
+	st := openTestStore(t)
+	// Create 3 independent sessions for the same project.
+	createTestSession(t, st, "agent-1", "proj-cps2", "first")
+	createTestSession(t, st, "agent-1", "proj-cps2", "second")
+	createTestSession(t, st, "agent-1", "proj-cps2", "third")
+
+	count, err := st.CountProjectSessions("proj-cps2")
+	if err != nil {
+		t.Fatalf("CountProjectSessions: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("expected 3 sessions, got %d", count)
+	}
+}
+
+func TestCountProjectSessions_IsolatedByProjectID(t *testing.T) {
+	st := openTestStore(t)
+	createTestSession(t, st, "agent-1", "proj-A", "work")
+	createTestSession(t, st, "agent-1", "proj-A", "work")
+	createTestSession(t, st, "agent-1", "proj-B", "work")
+
+	countA, err := st.CountProjectSessions("proj-A")
+	if err != nil {
+		t.Fatalf("CountProjectSessions proj-A: %v", err)
+	}
+	countB, err := st.CountProjectSessions("proj-B")
+	if err != nil {
+		t.Fatalf("CountProjectSessions proj-B: %v", err)
+	}
+	if countA != 2 {
+		t.Errorf("proj-A: expected 2, got %d", countA)
+	}
+	if countB != 1 {
+		t.Errorf("proj-B: expected 1, got %d", countB)
+	}
+}

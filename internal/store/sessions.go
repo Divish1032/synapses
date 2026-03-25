@@ -604,3 +604,13 @@ func (s *Store) PruneOldSessions(age time.Duration) (int64, error) {
 	}
 	return res.RowsAffected()
 }
+
+// CountProjectSessions returns the total number of sessions (including closed)
+// ever recorded for the given project. Returns 1 on the very first session_init
+// call for a project, allowing callers to detect first-ever-session.
+func (s *Store) CountProjectSessions(projectID string) (int, error) {
+	var count int
+	err := s.knowledgeDB.QueryRow(
+		`SELECT COUNT(*) FROM sessions WHERE project_id = ?`, projectID).Scan(&count)
+	return count, err
+}

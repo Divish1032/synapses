@@ -406,6 +406,20 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// Detect project-wide first session: count == 1 means this is the first
+	// session_init ever recorded for this project — surfaced as highlights.
+	// sessionResumed alone is insufficient: it is per-agent-session, not project-wide.
+	// Detect project-wide first session: count == 1 means this is the first
+	// session_init ever recorded for this project — surfaced as highlights.
+	// Guard s.projectID != "" prevents false matches when projectID was never
+	// set (e.g. unconfigured server or tests that don't call SetProjectID).
+	var isFirstProjectSession bool
+	if s.store != nil && !sessionResumed && s.projectID != "" {
+		if count, countErr := s.store.CountProjectSessions(s.projectID); countErr == nil && count == 1 {
+			isFirstProjectSession = true
+		}
+	}
+
 	// Notify pulse of session start using the Synapses session UUID (eliminates
 	// session ID collision from the old synthetic agentID:projectID:date format).
 	if pc := s.getPulseClient(); pc != nil && agentID != "" && s.logSessions {
@@ -1589,6 +1603,35 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// ── First-session "wow" moment (Sprint 18 #1) ────────────────────────
+	// On the project's very first session, surface surprising insights that
+	// demonstrate Synapses' value immediately: dead code, high-risk entities
+	// with no test coverage, and active architectural violations.
+	//
+	// Fires in ALL scope modes (including quickMode) because this event is
+	// one-shot — if suppressed on the first call, count becomes ≥2 and
+	// highlights never appear again. In quickMode a compact (counts-only)
+	// version is shown to respect the token budget.
+	if isFirstProjectSession && s.graph != nil {
+		var vlog []store.ViolationLogEntry
+		if s.store != nil && !quickMode {
+			// Fetch violation details only in non-quick modes; quickMode shows counts only.
+			vlog, _ = s.store.GetViolationLog("", 20)
+		}
+		// Build recently-changed file set for recency-boosted risk sorting.
+		// Entities in files touched within the last 15 min rank above equal-fanin
+		// entities that are dormant — agent is actively working in those files.
+		recentFileSet := make(map[string]bool, len(recentChanges))
+		for _, rc := range recentChanges {
+			if rc.File != "" {
+				recentFileSet[rc.File] = true
+			}
+		}
+		if highlights := computeFirstSessionHighlights(s.graph, vlog, recentFileSet, quickMode); highlights != nil {
+			resp["first_session_highlights"] = highlights
+		}
+	}
+
 	// ── Update agent context profile ─────────────────────────────────────
 	// Record what this agent now knows so the next session_init can be incremental.
 	if agentID != "" && s.store != nil {
@@ -1704,6 +1747,27 @@ func (s *Server) handleSessionInit(
 		if fed, ok := resp["federation_health"].(map[string]interface{}); ok {
 			if status, ok := fed["status"].(string); ok && status != "" {
 				parts = append(parts, fmt.Sprintf("federation=%s", status))
+			}
+		}
+		// First-session highlights signal — agents scanning _summary see it immediately.
+		if fsh, ok := resp["first_session_highlights"].(map[string]interface{}); ok {
+			var fshParts []string
+			if n, ok := fsh["dead_code_count"].(int); ok && n > 0 {
+				fshParts = append(fshParts, fmt.Sprintf("%d dead", n))
+			} else if dc, ok := fsh["dead_code"].(map[string]interface{}); ok {
+				if n, ok := dc["total"].(int); ok && n > 0 {
+					fshParts = append(fshParts, fmt.Sprintf("%d dead", n))
+				}
+			}
+			if n, ok := fsh["high_risk_count"].(int); ok && n > 0 {
+				fshParts = append(fshParts, fmt.Sprintf("%d high-risk", n))
+			} else if hr, ok := fsh["high_risk_entities"].(map[string]interface{}); ok {
+				if n, ok := hr["total"].(int); ok && n > 0 {
+					fshParts = append(fshParts, fmt.Sprintf("%d high-risk", n))
+				}
+			}
+			if len(fshParts) > 0 {
+				parts = append(parts, fmt.Sprintf("first-session: %s", strings.Join(fshParts, ", ")))
 			}
 		}
 		resp["_summary"] = strings.Join(parts, "; ")
@@ -2061,6 +2125,184 @@ func (s *Server) trimRepoRoot(paths []string) []string {
 	out := make([]string, len(paths))
 	for i, p := range paths {
 		out[i] = strings.TrimPrefix(p, prefix)
+	}
+	return out
+}
+
+// computeFirstSessionHighlights analyses the code graph for patterns that
+// demonstrate immediate value on a project's first session:
+//
+//   - Dead code: functions/methods with no CALLS in-edges and no test callers.
+//   - High-risk entities: high call fanin but no test coverage.
+//   - Architectural violations: active rule violations from the violation log.
+//
+// compact=true returns counts and hint only (no sample arrays) for quickMode.
+// recentFiles: set of recently-changed file paths for recency-boosted sorting.
+// Uses a single graph snapshot (one RLock) for efficiency — O(N+E).
+// Returns nil when the graph is empty or no findings are present.
+func computeFirstSessionHighlights(g *graph.Graph, vlog []store.ViolationLogEntry, recentFiles map[string]bool, compact bool) map[string]interface{} {
+	// Single-lock snapshot: avoids holding the read lock across individual
+	// per-node queries, which would require N separate lock acquisitions.
+	outEdges, nodes := g.SnapshotEdgesAndNodes()
+	if len(nodes) == 0 {
+		return nil
+	}
+
+	// Build per-node CALLS fanin and test-caller flag from the snapshot.
+	// Only EdgeCalls is considered — structural edges (EdgeContains, EdgeImports,
+	// etc.) would produce false-positive "callers" for every container node.
+	callFanin := make(map[graph.NodeID]int, len(nodes)/4)
+	hasTestCaller := make(map[graph.NodeID]bool)
+	for fromID, edges := range outEdges {
+		fromNode := nodes[fromID]
+		isTestFile := fromNode != nil && strings.HasSuffix(fromNode.File, "_test.go")
+		for _, e := range edges {
+			if e.Type == graph.EdgeCalls {
+				callFanin[e.To]++
+				if isTestFile {
+					hasTestCaller[e.To] = true
+				}
+			}
+		}
+	}
+
+	type deadEntry struct {
+		Name string `json:"name"`
+		File string `json:"file"`
+		Type string `json:"type"`
+	}
+	type riskEntry struct {
+		Name        string `json:"name"`
+		File        string `json:"file"`
+		Type        string `json:"type"`
+		Fanin       int    `json:"call_fanin"`
+		RecentlyChanged bool `json:"recently_changed,omitempty"`
+		Note        string `json:"note"`
+		score       int    // internal sort key: fanin × recency_multiplier; not serialised
+	}
+
+	var deadCode []deadEntry
+	var highRisk []riskEntry
+
+	for id, n := range nodes {
+		// Only analyse callable entities — skip files, packages, structs, etc.
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		fanin := callFanin[id]
+		tested := hasTestCaller[id]
+
+		// Dead code: no callers, never exercised by tests, AND unexported.
+		// Exported functions are public API — external packages may call them
+		// even if no in-repo callers exist (graph only sees the current repo).
+		// main() and init() are unexported Go entry points with no CALLS edges
+		// by design; flagging them would produce misleading noise.
+		if fanin == 0 && !tested && !n.Exported && n.Name != "main" && n.Name != "init" {
+			deadCode = append(deadCode, deadEntry{
+				Name: n.Name,
+				File: n.File,
+				Type: string(n.Type),
+			})
+		}
+
+		// High risk: called frequently but never covered by tests.
+		// Threshold ≥3 callers avoids noise from low-use utilities.
+		// Risk score = fanin × recency_multiplier: recently-changed files are
+		// 10× more urgent because the agent is actively working in them.
+		if fanin >= 3 && !tested {
+			recently := recentFiles[n.File]
+			mult := 1
+			if recently {
+				mult = 10
+			}
+			highRisk = append(highRisk, riskEntry{
+				Name:            n.Name,
+				File:            n.File,
+				Type:            string(n.Type),
+				Fanin:           fanin,
+				RecentlyChanged: recently,
+				Note:            "frequently called — no test coverage",
+				score:           fanin * mult,
+			})
+		}
+	}
+
+	// Stable, deterministic sort:
+	// - Dead code: by name (no recency signal — dead code has no recent callers).
+	// - High-risk: by score desc (fanin × recency_multiplier), then name asc.
+	sort.Slice(deadCode, func(i, j int) bool { return deadCode[i].Name < deadCode[j].Name })
+	sort.Slice(highRisk, func(i, j int) bool {
+		if highRisk[i].score != highRisk[j].score {
+			return highRisk[i].score > highRisk[j].score
+		}
+		return highRisk[i].Name < highRisk[j].Name
+	})
+
+	// Cap results to avoid token bloat.
+	const maxDead = 10
+	const maxRisk = 5
+	const maxViolations = 5
+	totalDead := len(deadCode)
+	totalRisk := len(highRisk)
+	if len(deadCode) > maxDead {
+		deadCode = deadCode[:maxDead]
+	}
+	if len(highRisk) > maxRisk {
+		highRisk = highRisk[:maxRisk]
+	}
+
+	// Return nil when no findings — zero-noise for clean codebases.
+	if totalDead == 0 && totalRisk == 0 && len(vlog) == 0 {
+		return nil
+	}
+
+	hint := "First session detected — Synapses scanned your codebase and found these patterns. " +
+		"Review before starting work. Re-run get_violations() for full architectural detail."
+
+	// compact mode (quickMode callers): counts + hint only — no sample arrays.
+	// Keeps token cost to ~20 tokens while ensuring the signal is never silently lost.
+	if compact {
+		out := map[string]interface{}{
+			"hint": hint + " Call scope=\"full\" for entity samples.",
+		}
+		if totalDead > 0 {
+			out["dead_code_count"] = totalDead
+		}
+		if totalRisk > 0 {
+			out["high_risk_count"] = totalRisk
+		}
+		if len(vlog) > 0 {
+			out["violation_count"] = len(vlog)
+		}
+		return out
+	}
+
+	// Full mode: include sample arrays for each finding category.
+	out := map[string]interface{}{"hint": hint}
+	if totalDead > 0 {
+		out["dead_code"] = map[string]interface{}{
+			"total":  totalDead,
+			"sample": deadCode,
+			"note":   "Functions/methods with no callers and no test coverage — likely dead code or untested paths.",
+		}
+	}
+	if totalRisk > 0 {
+		out["high_risk_entities"] = map[string]interface{}{
+			"total":  totalRisk,
+			"sample": highRisk,
+			"note":   "Frequently called code with no test coverage — high blast radius if these functions fail.",
+		}
+	}
+	if len(vlog) > 0 {
+		sample := vlog
+		if len(sample) > maxViolations {
+			sample = sample[:maxViolations]
+		}
+		out["architectural_violations"] = map[string]interface{}{
+			"total":  len(vlog),
+			"sample": sample,
+			"note":   "Active architectural rule violations. Run get_violations() for full list and remediation hints.",
+		}
 	}
 	return out
 }
