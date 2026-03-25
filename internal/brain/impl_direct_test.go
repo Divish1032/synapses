@@ -381,3 +381,66 @@ func TestGuardianTemplateFallback_Defaults(t *testing.T) {
 		t.Error("template fallback returned empty fields for zero-value request")
 	}
 }
+
+// ── NL classification helpers ─────────────────────────────────────────────────
+
+func TestParseEntityTypeResponse_ValidTypes(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"concept", "concept"},
+		{"CONCEPT", "concept"},
+		{"entity", "entity"},
+		{"artifact", "artifact"},
+		{"decision", "decision"},
+		// Trailing punctuation stripped.
+		{"concept.", "concept"},
+		{"entity,", "entity"},
+		// Extra words after the type word — split on space.
+		{"concept is a general idea", "concept"},
+		// Newline-separated extra text — the original bug: IndexByte(' ') missed this.
+		{"concept\nThis is a general concept.", "concept"},
+		{"entity\n\nSome further explanation.", "entity"},
+		// Leading/trailing whitespace.
+		{"  artifact  ", "artifact"},
+	}
+	for _, tc := range cases {
+		got := parseEntityTypeResponse(tc.input)
+		if got != tc.want {
+			t.Errorf("parseEntityTypeResponse(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestParseEntityTypeResponse_Invalid(t *testing.T) {
+	invalid := []string{"", "unknown", "node", "class", "function", "  ", "123"}
+	for _, s := range invalid {
+		if got := parseEntityTypeResponse(s); got != "" {
+			t.Errorf("parseEntityTypeResponse(%q) should return \"\", got %q", s, got)
+		}
+	}
+}
+
+func TestBuildEntityTypePrompt_ContainsFields(t *testing.T) {
+	p := buildEntityTypePrompt("TokenBucket", "The TokenBucket controls throughput.")
+	if !strings.Contains(p, "TokenBucket") {
+		t.Error("prompt should contain entity name")
+	}
+	if !strings.Contains(p, "throughput") {
+		t.Error("prompt should contain context")
+	}
+	if !strings.Contains(p, "concept") {
+		t.Error("prompt should contain valid types")
+	}
+}
+
+func TestBuildEntityTypePrompt_LongContextTruncated(t *testing.T) {
+	long := strings.Repeat("word ", 60) // 300 chars
+	p := buildEntityTypePrompt("X", long)
+	// The context in the prompt should be truncated to ≤150 chars (at word boundary).
+	// Rough check: total prompt length should be well under 500 chars.
+	if len(p) > 500 {
+		t.Errorf("prompt too long for truncated context: %d chars", len(p))
+	}
+}

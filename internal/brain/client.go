@@ -385,11 +385,12 @@ func buildEntityTypePrompt(name, context string) string {
 // parseEntityTypeResponse extracts a valid node type from the LLM's one-word response.
 // Returns "" if the response is not one of the four valid types.
 func parseEntityTypeResponse(resp string) string {
-	// Normalise: lowercase, trim whitespace and punctuation.
+	// Normalise: lowercase, trim punctuation, then split on any whitespace
+	// (space, tab, newline) so "concept\nSome explanation" → "concept".
 	r := strings.ToLower(strings.Trim(strings.TrimSpace(resp), ".,;:!?\"'"))
-	// Take only the first word in case the LLM added extra text.
-	if idx := strings.IndexByte(r, ' '); idx > 0 {
-		r = r[:idx]
+	// Fields splits on any whitespace — handles newlines that IndexByte(' ') misses.
+	if fields := strings.Fields(r); len(fields) > 0 {
+		r = fields[0]
 	}
 	switch r {
 	case "concept", "entity", "artifact", "decision":

@@ -1363,14 +1363,19 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 	// NL-to-graph Tier 0+1: extract entity candidates from markdown section
 	// bodies and create knowledge nodes (concept/entity/artifact/decision).
 	// Only meaningful for markdown files — code file changes don't add sections.
-	// Tier 2 LLM classification is submitted as a P1 brain task when available.
+	// Batch variant: ResolveNLEntitiesForFiles calls buildCodeNames once for all
+	// files in the batch (O(|graph|) instead of O(N×|graph|) for N markdown files).
+	// Tier 2 LLM classification is submitted as a P1 brain task per file.
+	var mdPaths []string
 	for _, s := range valid {
-		ext := strings.ToLower(filepath.Ext(s.result.path))
-		if ext != ".md" && ext != ".markdown" && ext != ".mdx" {
-			continue
+		if ext := strings.ToLower(filepath.Ext(s.result.path)); ext == ".md" || ext == ".markdown" || ext == ".mdx" {
+			mdPaths = append(mdPaths, s.result.path)
 		}
-		unresolved := resolver.ResolveNLEntitiesForFile(w.graph, s.result.path)
-		w.scheduleNLClassification(s.result.path, unresolved)
+	}
+	if len(mdPaths) > 0 {
+		for fp, unresolved := range resolver.ResolveNLEntitiesForFiles(w.graph, mdPaths) {
+			w.scheduleNLClassification(fp, unresolved)
+		}
 	}
 
 	// Phase 3: per-file post-resolve work (still under reparseMu).

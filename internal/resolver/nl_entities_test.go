@@ -229,6 +229,79 @@ func TestResolveNLEntities_UnresolvedCandidatesReturned(t *testing.T) {
 	}
 }
 
+// ── Bug regression tests ─────────────────────────────────────────────────────
+
+// TestResolveNLEntities_CaseInsensitiveCodeEntitySkip covers the case where a
+// doc uses `` `tokenbucket` `` (lowercase) but the code entity is "TokenBucket"
+// (original case). Without the codeNamesLower secondary index, this created a
+// spurious knowledge node even though a code entity already existed.
+func TestResolveNLEntities_CaseInsensitiveCodeEntitySkip(t *testing.T) {
+	g := newTestGraph(t)
+	addCodeNode(t, g, "TokenBucket") // code entity: original case
+	// Doc references the SAME entity in lowercase — should be skipped.
+	addSection(t, g, "docs/case.md", "Throttling", "The `tokenbucket` controls traffic.", 1)
+
+	resolver.ResolveNLEntities(g)
+
+	// No knowledge node should be created — "tokenbucket" is a code entity.
+	for _, c := range g.FindByType(graph.NodeConcept) {
+		if strings.Contains(strings.ToLower(c.Name), "tokenbucket") {
+			t.Errorf("should not create knowledge node for code entity referenced in lowercase: %q", c.Name)
+		}
+	}
+}
+
+// TestResolveNLEntitiesForFiles_BatchEfficiency verifies that processing multiple
+// files via the batch variant produces the same results as per-file calls.
+func TestResolveNLEntitiesForFiles_BatchEfficiency(t *testing.T) {
+	g := newTestGraph(t)
+	addSection(t, g, "docs/x.md", "X", "Uses `RateLimiter` here.", 1)
+	addSection(t, g, "docs/y.md", "Y", "Uses `CircuitBreaker` pattern.", 1)
+	addSection(t, g, "docs/z.md", "Z", "", 1) // empty — should be absent from result
+
+	result := resolver.ResolveNLEntitiesForFiles(g, []string{"docs/x.md", "docs/y.md", "docs/z.md"})
+
+	if _, ok := result["docs/x.md"]; !ok {
+		t.Error("expected unresolved candidates for docs/x.md")
+	}
+	if _, ok := result["docs/y.md"]; !ok {
+		t.Error("expected unresolved candidates for docs/y.md")
+	}
+	if _, ok := result["docs/z.md"]; ok {
+		t.Error("docs/z.md has empty body — should not appear in result map")
+	}
+
+	// Knowledge nodes should exist for both files.
+	concepts := g.FindByType(graph.NodeConcept)
+	hasRL, hasCB := false, false
+	for _, c := range concepts {
+		lower := strings.ToLower(c.Name)
+		if strings.Contains(lower, "ratelimiter") {
+			hasRL = true
+		}
+		if strings.Contains(lower, "circuitbreaker") {
+			hasCB = true
+		}
+	}
+	if !hasRL {
+		t.Error("expected RateLimiter knowledge node from batch run")
+	}
+	if !hasCB {
+		t.Error("expected CircuitBreaker knowledge node from batch run")
+	}
+}
+
+// TestResolveNLEntitiesForFiles_EmptyInput verifies nil return on empty input.
+func TestResolveNLEntitiesForFiles_EmptyInput(t *testing.T) {
+	g := newTestGraph(t)
+	if r := resolver.ResolveNLEntitiesForFiles(g, nil); r != nil {
+		t.Errorf("expected nil for nil filePaths, got %v", r)
+	}
+	if r := resolver.ResolveNLEntitiesForFiles(g, []string{}); r != nil {
+		t.Errorf("expected nil for empty filePaths, got %v", r)
+	}
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func nodeNames(nodes []*graph.Node) []string {
