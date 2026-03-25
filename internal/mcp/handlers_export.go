@@ -55,9 +55,43 @@ func (s *Server) handleExportKnowledge(
 
 	outputPath := stringArg(req, "output_path")
 
+	// Validate output_path before running the (potentially expensive) export.
+	if outputPath != "" {
+		// Always require absolute paths. Relative paths would resolve against
+		// the daemon's working directory — a location the caller cannot predict.
+		// The tool description says "Absolute path"; enforce it here so there is
+		// no silent footgun of writing to an unexpected directory.
+		outputPath = filepath.Clean(outputPath)
+		if !filepath.IsAbs(outputPath) {
+			return mcp.NewToolResultError(
+				"output_path must be an absolute path (e.g. \"/Users/you/backups/export.json\"). " +
+					"Relative paths write to the daemon's working directory and are not supported.",
+			), nil
+		}
+	}
+
 	export, err := s.store.ExportKnowledge(s.projectID)
 	if err != nil {
 		return toolError("export_knowledge", err)
+	}
+
+	// Fast-path guard for inline mode: if the export has embeddings and no
+	// output_path was given, reject immediately before marshaling. Embedding
+	// vectors alone can be 20+ MiB — marshaling only to throw it away is wasteful.
+	if outputPath == "" && export.Summary.MemoryEmbeddingCount > 0 {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"export has %d embedding vectors and cannot be returned inline "+
+				"(would exceed context window limits). "+
+				"Provide output_path to write directly to a file:\n"+
+				"  export_knowledge(output_path=\"/path/to/backup.json\")\n\n"+
+				"Export summary:\nmemories: %d  episodes: %d  rules: %d  annotations: %d  gaps: %d",
+			export.Summary.MemoryEmbeddingCount,
+			export.Summary.MemoryCount,
+			export.Summary.EpisodeCount,
+			export.Summary.DynamicRuleCount,
+			export.Summary.AnnotationCount,
+			export.Summary.QualityGapCount,
+		)), nil
 	}
 
 	b, err := json.MarshalIndent(export, "", "  ")
@@ -80,21 +114,15 @@ func (s *Server) handleExportKnowledge(
 		humanBytes(len(b)),
 	)
 
-	// ── File output path ─────────────────────────────────────────────────
+	// ── File output path ──────────────────────────────────────────────────
 	if outputPath != "" {
-		// Clean and resolve the path. Reject traversal attempts.
-		clean := filepath.Clean(outputPath)
-		if clean != outputPath && filepath.IsAbs(outputPath) {
-			// Clean changed an absolute path — potential traversal.
-			// Allow — filepath.Clean is safe; the check below is belt-and-suspenders.
-			outputPath = clean
-		}
 		dir := filepath.Dir(outputPath)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return toolError("create output directory", err)
 		}
 		// Write atomically: write to a temp file in the same directory, then
-		// rename. This prevents a partial file if the process is interrupted.
+		// rename. This prevents a partial file if the process is interrupted
+		// or the disk fills mid-write.
 		tmp := outputPath + ".tmp"
 		if err := os.WriteFile(tmp, b, 0o644); err != nil {
 			_ = os.Remove(tmp)
@@ -110,9 +138,9 @@ func (s *Server) handleExportKnowledge(
 		)), nil
 	}
 
-	// ── Inline output ─────────────────────────────────────────────────────
-	// Guard: inline responses above maxInlineExportBytes would overwhelm the
-	// agent's context window. The caller must use output_path for large exports.
+	// ── Inline output ──────────────────────────────────────────────────────
+	// Secondary size guard: catch large text-only exports (no embeddings but
+	// many memories/episodes). Already blocked the embedding case above.
 	if len(b) > maxInlineExportBytes {
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"export is too large for inline mode (%s). "+

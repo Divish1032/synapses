@@ -218,6 +218,82 @@ func TestHandleExportKnowledge_NilStore(t *testing.T) {
 	}
 }
 
+// TestHandleExportKnowledge_RelativePathRejected verifies that a relative
+// output_path is rejected with a clear error. Relative paths would write to
+// the daemon's working directory — an unpredictable location for the caller.
+func TestHandleExportKnowledge_RelativePathRejected(t *testing.T) {
+	srv := newTestServer(t)
+
+	result, err := srv.handleExportKnowledge(context.Background(), callTool(map[string]any{
+		"output_path": "backup.json", // relative — should be rejected
+	}))
+	if err != nil {
+		t.Fatalf("handleExportKnowledge: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error for relative output_path, got success")
+	}
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(tc.Text, "absolute") {
+		t.Errorf("error message should mention 'absolute', got: %q", tc.Text)
+	}
+}
+
+// TestHandleExportKnowledge_EmbeddingsRequireOutputPath verifies that inline
+// mode is blocked when the export contains embedding vectors, with a fast
+// rejection before marshaling.
+func TestHandleExportKnowledge_EmbeddingsRequireOutputPath(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Insert a memory with an embedding.
+	id, err := srv.store.InsertMemory(store.Memory{
+		Tier:      store.TierProject,
+		Content:   "embedding inline block test",
+		Source:    store.SourceManual,
+		ExpiresAt: time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+	})
+	if err != nil || id == "" {
+		t.Skip("memory insert failed")
+	}
+	if err := srv.store.UpsertMemoryEmbedding(id, "test-model", []float32{1.0, 0.0, 0.0}); err != nil {
+		t.Fatalf("UpsertMemoryEmbedding: %v", err)
+	}
+
+	// Inline mode (no output_path) must be rejected.
+	result, err := srv.handleExportKnowledge(context.Background(), callTool(map[string]any{}))
+	if err != nil {
+		t.Fatalf("handleExportKnowledge: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error when embeddings present and no output_path, got success")
+	}
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(tc.Text, "output_path") {
+		t.Errorf("error should mention output_path, got: %q", tc.Text)
+	}
+
+	// File mode must still succeed.
+	outPath := filepath.Join(t.TempDir(), "embed-export.json")
+	result2, err := srv.handleExportKnowledge(context.Background(), callTool(map[string]any{
+		"output_path": outPath,
+	}))
+	if err != nil {
+		t.Fatalf("handleExportKnowledge file mode: %v", err)
+	}
+	if result2.IsError {
+		t.Errorf("file mode should succeed with embeddings: %v", result2.Content)
+	}
+	if _, err := os.Stat(outPath); err != nil {
+		t.Errorf("output file not created: %v", err)
+	}
+}
+
 // TestHandleExportKnowledge_AtomicWrite verifies that the output file is
 // complete and valid even if we check it immediately after the call (no
 // partial-write window where the file is incomplete JSON).
