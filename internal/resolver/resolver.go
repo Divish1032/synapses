@@ -162,15 +162,16 @@ func buildLookupTables(g *graph.Graph) (map[string]map[string]string, map[string
 	importMap := make(map[string]map[string]string)
 	pkgIndex := make(map[string][]*graph.Node)
 
-	for _, n := range g.AllNodes() {
+	// Single-pass snapshot: acquire the read lock once for all imports adjacency
+	// and the full node map, avoiding O(N×imports) per-node lock acquisitions.
+	importAdj, nodeMap := g.SnapshotImportAdjacency()
+
+	for id, n := range nodeMap {
 		switch n.Type {
 		case graph.NodeFile:
 			aliases := make(map[string]string)
-			for _, e := range g.OutEdges(n.ID) {
-				if e.Type != graph.EdgeImports {
-					continue
-				}
-				pkgNode := g.GetNode(e.To)
+			for _, toID := range importAdj[id] {
+				pkgNode := nodeMap[toID]
 				if pkgNode == nil || pkgNode.Type != graph.NodePackage {
 					continue
 				}

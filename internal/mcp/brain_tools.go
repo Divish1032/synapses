@@ -3,7 +3,9 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"strings"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
@@ -114,6 +116,62 @@ func (s *Server) handleGetADRs(
 		if len(adrs) == 0 {
 			result["hint"] = "No ADRs linked to this file. When creating ADRs with upsert_adr, pass linked_files=[\"" + fileFilter + "\"] to enable file-based filtering."
 		}
+	}
+	return jsonResult(result)
+}
+
+// handleGetDecisionLog retrieves decision log entries from the brain.
+func (s *Server) handleGetDecisionLog(
+	ctx context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	bc := s.getBrainClient()
+	if bc == nil {
+		return mcp.NewToolResultText(`{"error": "brain not configured — add brain.url to synapses.json"}`), nil
+	}
+
+	entity, _ := req.GetArguments()["entity"].(string)
+	limit := 20
+	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	entries, err := bc.QueryDecisions(ctx, entity, limit)
+	if err != nil {
+		return errJSON(err), nil
+	}
+	if entries == nil {
+		entries = []brain.DecisionLogEntry{}
+	}
+
+	// Format as a human-readable list for the agent.
+	// oneline collapses any embedded newlines so each field stays on one line.
+	oneline := func(s string) string {
+		return strings.ReplaceAll(strings.ReplaceAll(s, "\n", " "), "\r", "")
+	}
+	var sb strings.Builder
+	for i, e := range entries {
+		sb.WriteString(fmt.Sprintf("[%d] %s | agent=%s phase=%s entity=%s\n    action: %s\n    outcome: %s\n",
+			i+1, oneline(e.CreatedAt), oneline(e.AgentID), oneline(e.Phase),
+			oneline(e.EntityName), oneline(e.Action), oneline(e.Outcome)))
+		if len(e.RelatedEntities) > 0 {
+			sb.WriteString(fmt.Sprintf("    related: %s\n", oneline(strings.Join(e.RelatedEntities, ", "))))
+		}
+		if e.Notes != "" {
+			sb.WriteString(fmt.Sprintf("    notes: %s\n", oneline(e.Notes)))
+		}
+	}
+
+	result := map[string]interface{}{
+		"decisions": entries,
+		"count":     len(entries),
+		"formatted": sb.String(),
+	}
+	if entity != "" {
+		result["entity_filter"] = entity
 	}
 	return jsonResult(result)
 }

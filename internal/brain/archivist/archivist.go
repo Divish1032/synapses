@@ -167,7 +167,3 @@ Return {"new_memories":[],"annotations":[]} if nothing is worth saving.`,
 		string(eventsJSON), string(memoryJSON))
 }
 
-func sanitizePromptInput(s string) string {
-	r := strings.NewReplacer("<", "&lt;", ">", "&gt;")
-	return r.Replace(s)
-}

@@ -612,3 +612,62 @@ func TestClose(t *testing.T) {
 		t.Errorf("Close: %v", err)
 	}
 }
+
+// --- GetDecisionLog ---
+
+func TestGetDecisionLog(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+
+	// Log two decisions.
+	if err := s.LogDecision("agent1", "planning", "ServiceA", "refactor", []string{"ServiceB"}, "success", ""); err != nil {
+		t.Fatalf("LogDecision: %v", err)
+	}
+	if err := s.LogDecision("agent1", "testing", "ServiceA", "add tests", nil, "success", "improved coverage"); err != nil {
+		t.Fatalf("LogDecision: %v", err)
+	}
+	if err := s.LogDecision("agent2", "review", "ServiceB", "code review", []string{"ServiceA"}, "approved", ""); err != nil {
+		t.Fatalf("LogDecision: %v", err)
+	}
+
+	// All entries.
+	all, err := s.GetDecisionLog("", 100)
+	if err != nil {
+		t.Fatalf("GetDecisionLog all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Errorf("want 3 entries, got %d", len(all))
+	}
+
+	// Filtered by entity.
+	filtered, err := s.GetDecisionLog("ServiceA", 100)
+	if err != nil {
+		t.Fatalf("GetDecisionLog filtered: %v", err)
+	}
+	if len(filtered) != 2 {
+		t.Errorf("want 2 entries for ServiceA, got %d", len(filtered))
+	}
+
+	// Verify related_entities round-trip.
+	found := false
+	for _, e := range all {
+		if e.EntityName == "ServiceA" && e.Action == "refactor" {
+			if len(e.RelatedEntities) != 1 || e.RelatedEntities[0] != "ServiceB" {
+				t.Errorf("related_entities mismatch: %v", e.RelatedEntities)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Error("refactor entry not found")
+	}
+
+	// Limit respected.
+	limited, err := s.GetDecisionLog("", 1)
+	if err != nil {
+		t.Fatalf("GetDecisionLog limited: %v", err)
+	}
+	if len(limited) != 1 {
+		t.Errorf("want 1 entry with limit=1, got %d", len(limited))
+	}
+}

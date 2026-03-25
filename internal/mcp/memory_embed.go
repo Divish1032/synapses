@@ -212,10 +212,20 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 	_ = start // used in log above
 
 	// Phase 2: refresh stale embeddings (content changed since last embedding).
-	staleIDs, staleErr := st.GetStaleEmbeddingMemoryIDs(500)
-	if staleErr == nil && len(staleIDs) > 0 {
-		logutil.Info("synapses: refreshing %d stale embedding(s) (model: %s) …\n", len(staleIDs), embedder.Model())
-		staleDone := 0
+	// Loop until no stale IDs remain, mirroring the primary phase above.
+	staleDone := 0
+	for {
+		if ctx.Err() != nil {
+			break
+		}
+		staleIDs, staleErr := st.GetStaleEmbeddingMemoryIDs(500)
+		if staleErr != nil || len(staleIDs) == 0 {
+			break
+		}
+		if staleDone == 0 {
+			logutil.Info("synapses: refreshing stale embedding(s) (model: %s) …\n", embedder.Model())
+		}
+		batchStaleDone := 0
 		for i, memID := range staleIDs {
 			select {
 			case <-ctx.Done():
@@ -245,9 +255,17 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 				logutil.Error("synapses: store stale embedding %s: %v\n", memID, err)
 			} else {
 				staleDone++
+				batchStaleDone++
 			}
 		}
-		logutil.Info("synapses: stale embedding refresh complete (%d/%d refreshed)\n", staleDone, len(staleIDs))
+		// If the entire batch made zero progress, stop to avoid infinite loop.
+		if batchStaleDone == 0 {
+			logutil.Warn("synapses: stale embedding refresh stalled — embedder unavailable, stopping\n")
+			break
+		}
+	}
+	if staleDone > 0 {
+		logutil.Info("synapses: stale embedding refresh complete (%d refreshed)\n", staleDone)
 	}
 
 	// P2-6: emit EmbeddingEvent on completion. Enqueue is mutex+append (O(1)) —
