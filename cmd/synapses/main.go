@@ -1496,6 +1496,11 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 	if nd := resolver.ResolveDocEdges(g); nd > 0 {
 		logutil.Info("synapses: resolved %d EXPLAINS edges\n", nd)
 	}
+	// Full-graph NL entity linking: link pre-existing docs/READMEs to code nodes
+	// so they are immediately visible in the knowledge graph on first index.
+	if nc := resolver.ResolveNLEntities(g, nil); len(nc) > 0 {
+		logutil.Info("synapses: NL entity resolution: %d unresolved candidates\n", len(nc))
+	}
 	if nt := resolver.ResolveTerraformRefs(g); nt > 0 {
 		logutil.Info("synapses: resolved %d Terraform DEPENDS_ON edges\n", nt)
 	}
