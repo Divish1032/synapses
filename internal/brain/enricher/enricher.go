@@ -427,7 +427,7 @@ func joinNames(names []string, n int) string {
 func (e *Enricher) buildSILPrompt(req Request) string {
 	nodes := []silGraphNode{{
 		ID:      0,
-		Name:    req.RootName,
+		Name:    sanitizePromptInput(req.RootName),
 		Type:    nodeTypeOrDefault(req.RootType),
 		Package: packageFromFile(req.RootFile),
 		File:    stripToRelative(req.RootFile),
@@ -440,7 +440,7 @@ func (e *Enricher) buildSILPrompt(req Request) string {
 		if i >= maxNamesInPrompt {
 			break
 		}
-		nodes = append(nodes, silGraphNode{ID: id, Name: name, Type: "function"})
+		nodes = append(nodes, silGraphNode{ID: id, Name: sanitizePromptInput(name), Type: "function"})
 		edges = append(edges, silGraphEdge{From: 0, To: id, Type: "CALLS"})
 		id++
 	}
@@ -448,7 +448,7 @@ func (e *Enricher) buildSILPrompt(req Request) string {
 		if i >= maxNamesInPrompt {
 			break
 		}
-		nodes = append(nodes, silGraphNode{ID: id, Name: name, Type: "function"})
+		nodes = append(nodes, silGraphNode{ID: id, Name: sanitizePromptInput(name), Type: "function"})
 		edges = append(edges, silGraphEdge{From: id, To: 0, Type: "CALLS"})
 		id++
 	}
