@@ -81,6 +81,11 @@ func (n *NullBrain) AllADRs() ([]ADR, error) { return nil, nil }
 // GetADRsForFile returns nil — no brain is configured.
 func (n *NullBrain) GetADRsForFile(_ string, _ int) ([]ADR, error) { return nil, nil }
 
+// QueryDecisions returns nil — no brain is configured.
+func (n *NullBrain) QueryDecisions(_ context.Context, _ string, _ int) ([]DecisionLogEntry, error) {
+	return nil, nil
+}
+
 // Generate returns an empty string — no LLM is available.
 func (n *NullBrain) Generate(_ context.Context, _ string) (string, error) { return "", nil }
 

@@ -117,6 +117,10 @@ type Brain interface {
 
 	// GetADRsForFile returns accepted ADRs whose linked_files patterns match the given file path.
 	GetADRsForFile(filePath string, limit int) ([]ADR, error)
+
+	// QueryDecisions returns up to limit decision log entries, optionally
+	// filtered by entityName (empty = all recent), ordered by created_at DESC.
+	QueryDecisions(ctx context.Context, entityName string, limit int) ([]DecisionLogEntry, error)
 }
 
 // TierState describes the current circuit-breaker state for one tier.
@@ -1011,6 +1015,28 @@ func (b *impl) GetADRsForFile(filePath string, limit int) ([]ADR, error) {
 	out := make([]ADR, len(adrs))
 	for i, a := range adrs {
 		out[i] = storeADRtoBrain(a)
+	}
+	return out, nil
+}
+
+func (b *impl) QueryDecisions(_ context.Context, entityName string, limit int) ([]DecisionLogEntry, error) {
+	entries, err := b.store.GetDecisionLog(entityName, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DecisionLogEntry, len(entries))
+	for i, e := range entries {
+		out[i] = DecisionLogEntry{
+			ID:              e.ID,
+			AgentID:         e.AgentID,
+			Phase:           e.Phase,
+			EntityName:      e.EntityName,
+			Action:          e.Action,
+			RelatedEntities: e.RelatedEntities,
+			Outcome:         e.Outcome,
+			Notes:           e.Notes,
+			CreatedAt:       e.CreatedAt,
+		}
 	}
 	return out, nil
 }
