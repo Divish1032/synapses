@@ -140,50 +140,73 @@ func migrateSingleTable(srcDB, dstDB *sql.DB, table string) (int64, error) {
 	placeholders := strings.Repeat("?, ", len(commonCols))
 	placeholders = placeholders[:len(placeholders)-2] // trim trailing ", "
 
-	// Read all rows from source.
-	srcRows, err := srcDB.Query(fmt.Sprintf("SELECT %s FROM %s", colList, quotedTable))
-	if err != nil {
-		return 0, fmt.Errorf("select from source: %w", err)
-	}
-	defer srcRows.Close()
-
-	// Begin transaction on destination.
-	tx, err := dstDB.Begin()
-	if err != nil {
-		return 0, fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
+	// Paginate source reads to avoid loading the entire table into memory.
+	// Commit each batch of 1000 rows independently to bound write-lock duration.
+	const pageSize = 1000
+	selectSQL := fmt.Sprintf("SELECT rowid, %s FROM %s WHERE rowid > ? ORDER BY rowid LIMIT %d",
+		colList, quotedTable, pageSize)
 	insertSQL := fmt.Sprintf("INSERT OR IGNORE INTO %s (%s) VALUES (%s)", quotedTable, colList, placeholders)
-	stmt, err := tx.Prepare(insertSQL)
-	if err != nil {
-		return 0, fmt.Errorf("prepare insert: %w", err)
-	}
-	defer stmt.Close()
 
-	var count int64
-	scanDest := make([]interface{}, len(commonCols))
-	scanPtrs := make([]interface{}, len(commonCols))
+	scanDest := make([]interface{}, len(commonCols)+1) // +1 for rowid
+	scanPtrs := make([]interface{}, len(commonCols)+1)
 	for i := range scanDest {
 		scanPtrs[i] = &scanDest[i]
 	}
 
-	for srcRows.Next() {
-		if err := srcRows.Scan(scanPtrs...); err != nil {
-			return count, fmt.Errorf("scan row: %w", err)
-		}
-		if _, err := stmt.Exec(scanDest...); err != nil {
-			// Non-fatal per row — skip and continue.
-			continue
-		}
-		count++
-	}
-	if err := srcRows.Err(); err != nil {
-		return count, fmt.Errorf("iterate rows: %w", err)
-	}
+	var count int64
+	var lastRowID int64 = 0
 
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
+	for {
+		srcRows, err := srcDB.Query(selectSQL, lastRowID)
+		if err != nil {
+			return count, fmt.Errorf("select from source: %w", err)
+		}
+
+		tx, err := dstDB.Begin()
+		if err != nil {
+			srcRows.Close()
+			return count, fmt.Errorf("begin tx: %w", err)
+		}
+
+		stmt, err := tx.Prepare(insertSQL)
+		if err != nil {
+			srcRows.Close()
+			_ = tx.Rollback()
+			return count, fmt.Errorf("prepare insert: %w", err)
+		}
+
+		var batchCount int
+		for srcRows.Next() {
+			if err := srcRows.Scan(scanPtrs...); err != nil {
+				stmt.Close()
+				srcRows.Close()
+				_ = tx.Rollback()
+				return count, fmt.Errorf("scan row: %w", err)
+			}
+			lastRowID = scanDest[0].(int64)
+			rowData := scanDest[1:] // skip rowid
+			if _, err := stmt.Exec(rowData...); err != nil {
+				// Non-fatal per row — skip and continue.
+				continue
+			}
+			count++
+			batchCount++
+		}
+		iterErr := srcRows.Err()
+		srcRows.Close()
+		stmt.Close()
+
+		if iterErr != nil {
+			_ = tx.Rollback()
+			return count, fmt.Errorf("iterate rows: %w", iterErr)
+		}
+		if err := tx.Commit(); err != nil {
+			return count, fmt.Errorf("commit: %w", err)
+		}
+
+		if batchCount < pageSize {
+			break // no more rows
+		}
 	}
 	return count, nil
 }
