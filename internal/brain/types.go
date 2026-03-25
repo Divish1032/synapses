@@ -358,6 +358,19 @@ type ADRRequest struct {
 	LinkedFiles  []string `json:"linked_files,omitempty"`
 }
 
+// DecisionLogEntry is a single row from the brain's decision_log table.
+type DecisionLogEntry struct {
+	ID              string   `json:"id"`
+	AgentID         string   `json:"agent_id"`
+	Phase           string   `json:"phase"`
+	EntityName      string   `json:"entity_name"`
+	Action          string   `json:"action"`
+	RelatedEntities []string `json:"related_entities,omitempty"`
+	Outcome         string   `json:"outcome"`
+	Notes           string   `json:"notes,omitempty"`
+	CreatedAt       string   `json:"created_at"`
+}
+
 // SnapshotInput is a backward-compat alias for SynapsesSnapshotInput.
 type SnapshotInput = SynapsesSnapshotInput
 

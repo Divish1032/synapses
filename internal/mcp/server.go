@@ -2984,6 +2984,27 @@ func (s *Server) registerTools() {
 		s.handleGetADRs,
 	)
 
+	// get_decision_log
+	s.addOrDefer(
+		mcp.NewTool(
+			"get_decision_log",
+			mcp.WithDescription(
+				"Returns the agent decision audit trail from the brain. "+
+					"Each entry records what action was taken, by which agent, in which SDLC phase, "+
+					"for which entity, and what the outcome was. "+
+					"Use to understand past agent behavior or audit decisions. "+
+					"Requires brain.url to be configured in synapses.json.",
+			),
+			mcp.WithString("entity",
+				mcp.Description("Optional entity name to filter decisions (empty = all recent)."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Maximum number of entries to return (default 20, max 100)."),
+			),
+		),
+		s.handleGetDecisionLog,
+	)
+
 	// set_sdlc_phase — D2: phase-aware context packets
 	s.addOrDefer(
 		mcp.NewTool(

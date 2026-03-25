@@ -494,6 +494,53 @@ func (s *Store) LogDecision(agentID, phase, entityName, action string, relatedEn
 	return err
 }
 
+// GetDecisionLog returns up to limit decision log entries, optionally filtered
+// by entityName (empty string = all), ordered by created_at DESC.
+func (s *Store) GetDecisionLog(entityName string, limit int) ([]DecisionLogEntry, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if entityName != "" {
+		rows, err = s.db.Query(`
+			SELECT id, agent_id, phase, entity_name, action, related_entities, outcome, notes, created_at
+			FROM decision_log
+			WHERE entity_name = ?
+			ORDER BY created_at DESC
+			LIMIT ?`, entityName, limit)
+	} else {
+		rows, err = s.db.Query(`
+			SELECT id, agent_id, phase, entity_name, action, related_entities, outcome, notes, created_at
+			FROM decision_log
+			ORDER BY created_at DESC
+			LIMIT ?`, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []DecisionLogEntry
+	for rows.Next() {
+		var e DecisionLogEntry
+		var relJSON string
+		if err := rows.Scan(&e.ID, &e.AgentID, &e.Phase, &e.EntityName, &e.Action,
+			&relJSON, &e.Outcome, &e.Notes, &e.CreatedAt); err != nil {
+			continue
+		}
+		if relJSON != "" {
+			_ = json.Unmarshal([]byte(relJSON), &e.RelatedEntities)
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
 // --- Reset ---
 
 // Reset deletes all brain data.

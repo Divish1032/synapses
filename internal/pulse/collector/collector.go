@@ -281,35 +281,12 @@ func (c *Collector) enqueue(ev event) {
 	// Ring buffer enqueue — when full, prefer dropping a low-priority (e.g.
 	// heartbeat) event to protect high-priority session events.
 	if c.count == c.cap {
-		if isHighPriority(ev.kind) {
-			// Scan from head to find the oldest low-priority event to evict.
-			evicted := false
-			for i := 0; i < c.count; i++ {
-				pos := (c.head + i) % c.cap
-				if !isHighPriority(c.ring[pos].kind) {
-					// Shift everything before this position one step forward
-					// to fill the hole, advancing head.
-					for j := i; j > 0; j-- {
-						src := (c.head + j - 1) % c.cap
-						dst := (c.head + j) % c.cap
-						c.ring[dst] = c.ring[src]
-					}
-					c.head = (c.head + 1) % c.cap
-					c.dropped.Add(1)
-					evicted = true
-					break
-				}
-			}
-			if !evicted {
-				// All buffered events are high-priority — drop oldest as usual.
-				c.head = (c.head + 1) % c.cap
-				c.dropped.Add(1)
-			}
-		} else {
-			// Low-priority incoming event — drop the oldest (standard behavior).
-			c.head = (c.head + 1) % c.cap
-			c.dropped.Add(1)
-		}
+		// Buffer is full — drop oldest event and advance head (standard ring
+		// buffer behavior). The previous shift-based priority eviction was
+		// incorrect: it overwrote valid newer events with older content,
+		// corrupting adjacent entries. Dropping oldest is safe and correct.
+		c.head = (c.head + 1) % c.cap
+		c.dropped.Add(1)
 	} else {
 		c.count++
 	}
@@ -325,8 +302,8 @@ func (c *Collector) enqueue(ev event) {
 	// Only allow one concurrent early-flush goroutine to prevent unbounded goroutine spawning.
 	if c.count >= c.cap*80/100 && c.earlyFlushRunning.CompareAndSwap(0, 1) {
 		batch := c.drainLocked()
-		c.mu.Unlock()
 		c.wg.Add(1)
+		c.mu.Unlock()
 		go func() {
 			defer c.wg.Done()
 			defer c.earlyFlushRunning.Store(0)

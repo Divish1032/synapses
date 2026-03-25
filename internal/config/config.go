@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/SynapsesOS/synapses/internal/brain/config"
@@ -984,10 +985,21 @@ const maxPathPatternDepth = 8
 func (c *Config) checkPathPatternViolations(g *graph.Graph, fromFile *string) []Violation {
 	var violations []Violation
 
-	// Snapshot all nodes once — reused across all path-pattern rules.
-	// g.AllNodes() acquires a read lock and copies the slice; calling it
-	// inside the rule loop would allocate N copies for N rules.
-	var allNodes []*graph.Node // lazy: populated on first path-pattern rule
+	// Determine if any path-pattern rules exist before taking the snapshot.
+	hasPathPattern := false
+	for _, rule := range c.Rules {
+		if len(rule.ForbiddenEdge.PathPattern) > 0 {
+			hasPathPattern = true
+			break
+		}
+	}
+	if !hasPathPattern {
+		return nil
+	}
+
+	// Single snapshot of all edges and nodes under one RLock, shared across
+	// all path-pattern rules to eliminate O(N×M) per-node lock acquisitions.
+	outEdges, nodeMap := g.SnapshotEdgesAndNodes()
 
 	for _, rule := range c.Rules {
 		p := rule.ForbiddenEdge
@@ -1001,12 +1013,7 @@ func (c *Config) checkPathPatternViolations(g *graph.Graph, fromFile *string) []
 		pattern := p.PathPattern[:depth]
 		lastEdgeType := pattern[depth-1]
 
-		// Populate node snapshot on first path-pattern rule encountered.
-		if allNodes == nil {
-			allNodes = g.AllNodes()
-		}
-
-		for _, fromNode := range allNodes {
+		for _, fromNode := range nodeMap {
 			if fromNode == nil {
 				continue
 			}
@@ -1027,7 +1034,7 @@ func (c *Config) checkPathPatternViolations(g *graph.Graph, fromFile *string) []
 				var next []graph.NodeID
 				seen := make(map[graph.NodeID]bool, len(frontier))
 				for _, nodeID := range frontier {
-					for _, e := range g.OutEdges(nodeID) {
+					for _, e := range outEdges[nodeID] {
 						if e.Type != edgeType {
 							continue
 						}
@@ -1037,7 +1044,7 @@ func (c *Config) checkPathPatternViolations(g *graph.Graph, fromFile *string) []
 						seen[e.To] = true
 						if hop == len(pattern)-1 {
 							// Final hop: check if target matches to-pattern.
-							toNode := g.GetNode(e.To)
+							toNode := nodeMap[e.To]
 							if toNode != nil && matchesToPattern(p, toNode) {
 								violations = append(violations, Violation{
 									RuleID:       rule.ID,
@@ -1060,6 +1067,17 @@ func (c *Config) checkPathPatternViolations(g *graph.Graph, fromFile *string) []
 			}
 		}
 	}
+	// Sort violations for deterministic output. The original code iterated
+	// g.AllNodes() which returns a sorted slice; nodeMap iteration is unordered.
+	sort.Slice(violations, func(i, j int) bool {
+		if violations[i].RuleID != violations[j].RuleID {
+			return violations[i].RuleID < violations[j].RuleID
+		}
+		if violations[i].FromNode != violations[j].FromNode {
+			return violations[i].FromNode < violations[j].FromNode
+		}
+		return violations[i].ToNode < violations[j].ToNode
+	})
 	return violations
 }
 

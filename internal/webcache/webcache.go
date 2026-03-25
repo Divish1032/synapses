@@ -308,9 +308,9 @@ func ParseGoMod(projectPath string) (map[string]string, error) {
 // fetchAndStrip performs an HTTP GET and returns HTML-stripped plain text,
 // capped at maxDocBytes.
 func (c *Cache) fetchAndStrip(ctx context.Context, url string) (string, error) {
-	// Validate URL scheme — only allow http and https.
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		return "", fmt.Errorf("unsupported URL scheme (only http/https allowed): %s", url)
+	// Validate URL scheme — only allow https to prevent MITM cache poisoning.
+	if !strings.HasPrefix(url, "https://") {
+		return "", fmt.Errorf("only https:// URLs are supported: %s", url)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

@@ -2039,6 +2039,38 @@ func (s *Store) reconcileOrphanedReferences() {
 	// specific anchor row, not all anchors for the memory.
 	removed += cleanupByNodeID("memory_anchors", "DELETE FROM memory_anchors WHERE node_id = ?")
 
+	// batchDelete issues batched transactional IN-list DELETEs for a slice of
+	// string IDs, chunking at 500 per batch (SQLite variable limit safety).
+	batchDelete := func(table, column string, ids []string) int {
+		const chunkSize = 500
+		n := 0
+		for i := 0; i < len(ids); i += chunkSize {
+			end := i + chunkSize
+			if end > len(ids) {
+				end = len(ids)
+			}
+			chunk := ids[i:end]
+			placeholders := make([]string, len(chunk))
+			args := make([]interface{}, len(chunk))
+			for j, id := range chunk {
+				placeholders[j] = "?"
+				args[j] = id
+			}
+			q := "DELETE FROM " + table + " WHERE " + column + " IN (" + strings.Join(placeholders, ",") + ")"
+			tx, txErr := s.knowledgeDB.Begin()
+			if txErr != nil {
+				continue
+			}
+			tx.Exec(q, args...) //nolint:errcheck
+			if commitErr := tx.Commit(); commitErr != nil {
+				_ = tx.Rollback()
+				continue
+			}
+			n += len(chunk)
+		}
+		return n
+	}
+
 	// agent_watched_symbols uses entity_id (not node_id) referencing graph nodes.
 	// Clean up symbols pointing at nodes that no longer exist in the graph.
 	if r, err := s.knowledgeDB.Query("SELECT DISTINCT entity_id FROM agent_watched_symbols LIMIT 100000"); err == nil {
@@ -2054,12 +2086,13 @@ func (s *Store) reconcileOrphanedReferences() {
 			logutil.Warn("synapses: store: agent_watched_symbols has >100k distinct entities; reconcile truncated — consider pruning old sessions\n")
 		}
 		existingNodes := batchNodeExists(entityIDs)
+		var staleEntityIDs []string
 		for _, eid := range entityIDs {
 			if !existingNodes[eid] {
-				s.knowledgeDB.Exec("DELETE FROM agent_watched_symbols WHERE entity_id = ?", eid) //nolint:errcheck
-				removed++
+				staleEntityIDs = append(staleEntityIDs, eid)
 			}
 		}
+		removed += batchDelete("agent_watched_symbols", "entity_id", staleEntityIDs)
 	}
 
 	// quality_gaps: only clean up open gaps referencing absent nodes.
@@ -2077,12 +2110,13 @@ func (s *Store) reconcileOrphanedReferences() {
 		qr.Close()
 		if len(gapNodeIDs) > 0 {
 			existingGapNodes := batchNodeExists(gapNodeIDs)
+			var staleGapIDs []string
 			for _, g := range gaps {
 				if !existingGapNodes[g.nodeID] {
-					s.knowledgeDB.Exec(`DELETE FROM quality_gaps WHERE id = ?`, g.id) //nolint:errcheck
-					removed++
+					staleGapIDs = append(staleGapIDs, g.id)
 				}
 			}
+			removed += batchDelete("quality_gaps", "id", staleGapIDs)
 		}
 	}
 

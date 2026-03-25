@@ -292,6 +292,12 @@ func (c *Client) GetADRs(_ context.Context, fileFilter string) ([]ADR, error) {
 	return c.brain.AllADRs()
 }
 
+// QueryDecisions returns up to limit decision log entries, optionally filtered
+// by entityName (empty string = all), ordered by created_at DESC.
+func (c *Client) QueryDecisions(ctx context.Context, entityName string, limit int) ([]DecisionLogEntry, error) {
+	return c.brain.QueryDecisions(ctx, entityName, limit)
+}
+
 // BrainHealth returns structured per-tier health data for session_init.
 // Returns nil if the underlying Brain does not implement BrainStatsProvider
 // (e.g. NullBrain when brain is disabled).
