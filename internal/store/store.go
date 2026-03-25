@@ -584,7 +584,10 @@ func CacheDir() (string, error) {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("locate home dir: %w", err)
+		// Headless/Docker/CI environments may not set $HOME.
+		// Fall back to a temp-dir-based cache so the daemon still functions.
+		// The SYNAPSES_CACHE_DIR override above handles intentional redirection.
+		return filepath.Join(os.TempDir(), "synapses", "cache"), nil
 	}
 	return filepath.Join(home, ".synapses", "cache"), nil
 }
@@ -624,18 +627,24 @@ func Open(path string) (*Store, error) {
 	path = filepath.Clean(path)
 	// Validate that the path is under the expected data directory or a temp dir
 	// (test scenarios use t.TempDir() which typically resolves under /tmp).
+	//
+	// When $HOME is unset (headless/Docker/CI), skip the home-based containment
+	// check — the daemon constructs the path from its own config, so we trust the
+	// caller. We still require an absolute path to catch obvious mistakes.
 	home, homeErr := os.UserHomeDir()
-	if homeErr != nil {
-		return nil, fmt.Errorf("store.Open: cannot determine home dir for path validation: %w", homeErr)
-	}
-	dataDir := filepath.Join(home, ".synapses")
-	if !strings.HasPrefix(path, dataDir) && !strings.HasPrefix(path, os.TempDir()) {
-		// Also allow os.TempDir() variants on macOS (/private/tmp vs /tmp).
-		// We accept any path under the system temp dir to support tests.
-		realTemp, _ := filepath.EvalSymlinks(os.TempDir())
-		if realTemp == "" || !strings.HasPrefix(path, realTemp) {
-			return nil, fmt.Errorf("store.Open: path %q is outside allowed directories", path)
+	if homeErr == nil {
+		dataDir := filepath.Join(home, ".synapses")
+		if !strings.HasPrefix(path, dataDir) && !strings.HasPrefix(path, os.TempDir()) {
+			// Also allow os.TempDir() variants on macOS (/private/tmp vs /tmp).
+			// We accept any path under the system temp dir to support tests.
+			realTemp, _ := filepath.EvalSymlinks(os.TempDir())
+			if realTemp == "" || !strings.HasPrefix(path, realTemp) {
+				return nil, fmt.Errorf("store.Open: path %q is outside allowed directories", path)
+			}
 		}
+	} else if !filepath.IsAbs(path) {
+		// $HOME is unset; still reject relative paths as a basic sanity guard.
+		return nil, fmt.Errorf("store.Open: path %q must be absolute", path)
 	}
 	graphDB, err := openSQLiteDB(path)
 	if err != nil {
