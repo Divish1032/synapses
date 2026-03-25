@@ -1451,6 +1451,14 @@ func cmdDaemonServe(args []string) error {
 			}
 		}()
 
+		// Origin check: reject cross-origin browser requests to /mcp.
+		// Native MCP clients (CLI, proxies) send no Origin header and are allowed.
+		// The mutationGuard only covers POST/PUT/DELETE; this check also covers GET (SSE).
+		if origin := r.Header.Get("Origin"); origin != "" && !trustedOrigins[origin] {
+			http.Error(w, "Forbidden: untrusted origin", http.StatusForbidden)
+			return
+		}
+
 		projectPath := r.URL.Query().Get("project")
 		if projectPath == "" {
 			http.Error(w, "missing ?project=<abs-path> query parameter", http.StatusBadRequest)
