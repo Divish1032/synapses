@@ -338,3 +338,44 @@ func TestHandleExportKnowledge_AtomicWrite(t *testing.T) {
 		t.Fatalf("output file not valid JSON immediately after write: %v", err)
 	}
 }
+
+// TestHandleExportKnowledge_PathContainment verifies that output_path outside
+// both the project root and ~/.synapses/exports/ is rejected, while a path
+// inside either allowed location is accepted.
+func TestHandleExportKnowledge_PathContainment(t *testing.T) {
+	srv := newTestServer(t)
+	root := t.TempDir()
+	srv.graph.SetRoot(root)
+
+	// Path outside both allowed roots must be rejected.
+	result, err := srv.handleExportKnowledge(context.Background(), callTool(map[string]any{
+		"output_path": "/tmp/should-be-rejected-export.json",
+	}))
+	if err != nil {
+		t.Fatalf("handleExportKnowledge: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected containment error for path outside allowed roots, got success")
+		// Clean up in case it somehow wrote the file.
+		_ = os.Remove("/tmp/should-be-rejected-export.json")
+	}
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(tc.Text, "outside the allowed") {
+		t.Errorf("error should mention 'outside the allowed', got: %q", tc.Text)
+	}
+
+	// Path inside the project root must be accepted.
+	goodPath := filepath.Join(root, "export.json")
+	result2, err := srv.handleExportKnowledge(context.Background(), callTool(map[string]any{
+		"output_path": goodPath,
+	}))
+	if err != nil {
+		t.Fatalf("handleExportKnowledge (good path): %v", err)
+	}
+	if result2.IsError {
+		t.Errorf("path within project root should be accepted, got error: %v", result2.Content)
+	}
+}

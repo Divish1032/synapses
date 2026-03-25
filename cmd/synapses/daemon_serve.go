@@ -622,6 +622,10 @@ func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectIn
 				defer wg.Done()
 				saveKnownProject(p)
 			}(absPath)
+		} else {
+			// wg is nil (e.g. in tests or misconfigured call sites).
+			// Run synchronously to ensure the project is always persisted.
+			saveKnownProject(absPath)
 		}
 
 		// Parse request body as tool arguments. Empty or absent body → empty args.
@@ -1826,7 +1830,8 @@ func buildHealthHandler(reg *projectRegistry, sharedPulse *pulse.Client, daemonS
 		type projectResult struct {
 			nodes, edges, memories int
 			watcherDead            bool
-			brainModel             string // empty when brain unavailable
+			brainModel             string   // empty when brain unavailable
+			ollamaModels           []string // installed Ollama models (from first client that returns any)
 			fedHealthy, fedStale   int
 		}
 
@@ -1876,6 +1881,11 @@ func buildHealthHandler(reg *projectRegistry, sharedPulse *pulse.Client, daemonS
 						if model, _ := pi.BrainClient.HealthCheck(r.Context()); model != "" {
 							pr.brainModel = model
 						}
+						// Best-effort: list installed Ollama models for diagnostics.
+						// Run here so it's parallel with federation (same 3s budget).
+						mctx, mcancel := context.WithTimeout(r.Context(), 3*time.Second)
+						pr.ollamaModels = pi.BrainClient.ListInstalledModels(mctx)
+						mcancel()
 					}()
 				}
 				if pi.FederationResolver != nil {
@@ -1903,6 +1913,7 @@ func buildHealthHandler(reg *projectRegistry, sharedPulse *pulse.Client, daemonS
 		// Aggregate results.
 		var totalNodes, totalEdges, totalMemories, watchersDead, fedHealthy, fedStale int
 		brainModelSet := make(map[string]struct{})
+		ollamaModelSet := make(map[string]struct{})
 		for _, pr := range results {
 			totalNodes += pr.nodes
 			totalEdges += pr.edges
@@ -1912,6 +1923,9 @@ func buildHealthHandler(reg *projectRegistry, sharedPulse *pulse.Client, daemonS
 			}
 			if pr.brainModel != "" {
 				brainModelSet[pr.brainModel] = struct{}{}
+			}
+			for _, m := range pr.ollamaModels {
+				ollamaModelSet[m] = struct{}{}
 			}
 			fedHealthy += pr.fedHealthy
 			fedStale += pr.fedStale
@@ -1929,19 +1943,14 @@ func buildHealthHandler(reg *projectRegistry, sharedPulse *pulse.Client, daemonS
 			snap["brain_model"] = strings.Join(models, ",")
 		}
 
-		// Best-effort: list installed Ollama models for diagnostics.
-		// Use the first available brain client — Ollama URL is daemon-wide.
-		for _, pi := range projects {
-			if pi.BrainClient != nil {
-				mctx, mcancel := context.WithTimeout(r.Context(), 3*time.Second)
-				installed := pi.BrainClient.ListInstalledModels(mctx)
-				mcancel()
-				if len(installed) > 0 {
-					sort.Strings(installed)
-					snap["ollama_installed_models"] = installed
-				}
-				break
+		// Expose installed Ollama models collected in parallel above.
+		if len(ollamaModelSet) > 0 {
+			installed := make([]string, 0, len(ollamaModelSet))
+			for m := range ollamaModelSet {
+				installed = append(installed, m)
 			}
+			sort.Strings(installed)
+			snap["ollama_installed_models"] = installed
 		}
 
 		if watchersDead > 0 {
