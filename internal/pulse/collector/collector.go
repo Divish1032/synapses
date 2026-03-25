@@ -330,8 +330,8 @@ func (c *Collector) enqueue(ev event) {
 	// Only allow one concurrent early-flush goroutine to prevent unbounded goroutine spawning.
 	if c.count >= c.cap*80/100 && c.earlyFlushRunning.CompareAndSwap(0, 1) {
 		batch := c.drainLocked()
-		c.mu.Unlock()
 		c.wg.Add(1)
+		c.mu.Unlock()
 		go func() {
 			defer c.wg.Done()
 			defer c.earlyFlushRunning.Store(0)
