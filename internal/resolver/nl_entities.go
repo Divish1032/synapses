@@ -66,12 +66,12 @@ func ResolveNLEntitiesForFiles(g *graph.Graph, filePaths []string) map[string][]
 	existingKnowledge := buildKnowledgeNames(g)
 
 	// Index sections by cleaned file path for O(1) per-file lookup.
-	type cleanPath = string
-	absPaths := make(map[cleanPath]string, len(filePaths)) // abs → original
+	// absPaths maps cleaned path → original path (preserves caller's path format).
+	absPaths := make(map[string]string, len(filePaths))
 	for _, fp := range filePaths {
 		absPaths[filepath.Clean(fp)] = fp
 	}
-	sectByFile := make(map[cleanPath][]*graph.Node, len(filePaths))
+	sectByFile := make(map[string][]*graph.Node, len(filePaths))
 	for _, s := range g.FindByType(graph.NodeSection) {
 		abs := filepath.Clean(s.File)
 		if _, ok := absPaths[abs]; ok {
