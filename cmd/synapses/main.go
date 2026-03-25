@@ -340,25 +340,6 @@ func cmdStartDirect(args []string) error {
 		}
 	}
 
-	// Load skill recipes from all scopes (fail-silent per scope).
-	// Order: builtin < user < project (project recipes take precedence by ID).
-	{
-		allRecipes := skills.BuiltinRecipes()
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			userDir := filepath.Join(homeDir, ".synapses", "skills")
-			if rs, err := skills.LoadRecipeDir(userDir, "user"); err == nil {
-				allRecipes = append(allRecipes, rs...)
-			}
-		}
-		projectDir := filepath.Join(absPath, ".synapses", "skills")
-		if rs, err := skills.LoadRecipeDir(projectDir, "project"); err == nil {
-			allRecipes = append(allRecipes, rs...)
-		}
-		allRecipes = skills.DeduplicateRecipes(allRecipes) // project overrides user, user overrides builtin
-		srv.SetSkillRecipes(allRecipes)
-		logutil.Info("synapses: loaded %d skill recipes\n", len(allRecipes))
-	}
-
 	// Federation resolver: cross-project drift detection + dependency tracking.
 	var fedResolver *federation.Resolver
 	if len(cfg.Federation) > 0 {

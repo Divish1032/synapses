@@ -2487,28 +2487,6 @@ func (s *Store) InsertFederationEvent(ev pulsetypes.FederationDetectEvent) error
 	return s.InsertFederationEventTx(ev)
 }
 
-// InsertSkillExecutionTx records a skill execution event.
-func (s *Store) InsertSkillExecutionTx(ev pulsetypes.SkillExecutionEvent) error {
-	successInt := 0
-	if ev.Success {
-		successInt = 1
-	}
-	today := time.Now().UTC().Format("2006-01-02")
-	_, err := s.execer().Exec(
-		`INSERT INTO skill_executions (agent_id, project_id, skill_name, duration_ms, steps_total, steps_succeeded, success, error_step, created_date)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ev.AgentID, ev.ProjectID, ev.SkillName, ev.DurationMs,
-		ev.StepsTotal, ev.StepsSucceeded, successInt, ev.ErrorStep, today)
-	return err
-}
-
-// InsertSkillExecution records a skill execution event, acquiring the mutex.
-func (s *Store) InsertSkillExecution(ev pulsetypes.SkillExecutionEvent) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.InsertSkillExecutionTx(ev)
-}
-
 // InsertSessionEffectiveness records session effectiveness metrics.
 func (s *Store) InsertSessionEffectiveness(e pulsetypes.SessionEffectiveness) error {
 	s.mu.Lock()
@@ -2676,25 +2654,6 @@ func (s *Store) CountCrossProjectImpactAlerts(day string) int {
 	return n
 }
 
-// GetSkillExecutionStatsP5 returns skill stats from skill_executions table (COV-15).
-func (s *Store) GetSkillExecutionStatsP5(days int) []pulsetypes.SkillStat {
-	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	rows, err := s.execer().Query(
-		`SELECT skill_name, COUNT(*), COALESCE(AVG(CASE WHEN success=1 THEN 1.0 ELSE 0.0 END),0), COALESCE(AVG(duration_ms),0)
-		 FROM skill_executions WHERE created_at >= ? GROUP BY skill_name ORDER BY COUNT(*) DESC`, since)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var out []pulsetypes.SkillStat
-	for rows.Next() {
-		var st pulsetypes.SkillStat
-		rows.Scan(&st.Name, &st.Count, &st.SuccessRate, &st.AvgDuration)
-		out = append(out, st)
-	}
-	return out
-}
-
 // UpdateEntityQualityScore recomputes the quality score for an entity (Item 10).
 // Uses the signal_weight column added in Sprint 15 #1 so the score stays
 // consistent with the SignalWeight* constants in pulse/types/types.go.
@@ -2786,6 +2745,56 @@ func (s *Store) GetEntityQualityScoresBatch(entities []string, projectID string)
 			var score float64
 			if rows.Scan(&ent, &score) == nil {
 				result[ent] = score
+			}
+		}
+		rows.Close()
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// EntityQualityDetail holds score and signal counts for a single entity.
+type EntityQualityDetail struct {
+	QualityScore    float64 `json:"quality_score"`
+	NegativeSignals int     `json:"negative_signals"`
+}
+
+// GetEntityQualityDetailsBatch returns quality details (score + negative signals)
+// for a set of entity names. Follows the same chunked-IN pattern as
+// GetEntityQualityScoresBatch. Returns nil when entities is empty.
+func (s *Store) GetEntityQualityDetailsBatch(entities []string, projectID string) map[string]EntityQualityDetail {
+	if len(entities) == 0 {
+		return nil
+	}
+	const chunkSize = 900
+	result := make(map[string]EntityQualityDetail, len(entities))
+	for i := 0; i < len(entities); i += chunkSize {
+		end := i + chunkSize
+		if end > len(entities) {
+			end = len(entities)
+		}
+		chunk := entities[i:end]
+		args := make([]interface{}, 0, len(chunk)+2)
+		args = append(args, projectID, projectID)
+		placeholders := make([]string, len(chunk))
+		for j, e := range chunk {
+			placeholders[j] = "?"
+			args = append(args, e)
+		}
+		query := `SELECT entity, quality_score, negative_signals FROM entity_quality
+		          WHERE (project_id = ? OR ? = '') AND entity IN (` +
+			strings.Join(placeholders, ",") + `)`
+		rows, err := s.readDB().Query(query, args...)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var ent string
+			var d EntityQualityDetail
+			if rows.Scan(&ent, &d.QualityScore, &d.NegativeSignals) == nil {
+				result[ent] = d
 			}
 		}
 		rows.Close()
@@ -3297,7 +3306,7 @@ func (s *Store) PruneOldEvents(retentionDays int) (int64, error) {
 		"guard_events", "memory_ops", "validation_events",
 		"search_events", "config_reload_events", "persistence_events",
 		"enrichment_events", "rule_eval_events", "lifecycle_events",
-		"tool_sequences", "federation_events", "skill_executions",
+		"tool_sequences", "federation_events",
 		"delivery_outcomes", "heartbeat_events",
 	} {
 		// Bug 74: count rows before deleting so we can log them.
@@ -4680,42 +4689,6 @@ func (s *Store) GetDiscoveryToolEffectiveness(days int) float64 {
 }
 
 // ---------------------------------------------------------------------------
-// Bug 44 — SA-C6: skill execution stats
-// ---------------------------------------------------------------------------
-
-// SkillStat holds aggregated statistics for a specific skill.
-type SkillStat struct {
-	SkillName     string  `json:"skill_name"`
-	CallCount     int     `json:"call_count"`
-	SuccessRate   float64 `json:"success_rate"`
-	AvgDurationMs float64 `json:"avg_duration_ms"`
-}
-
-// GetSkillExecutionStats returns aggregated stats for execute_skill calls.
-func (s *Store) GetSkillExecutionStats(days int) ([]SkillStat, error) {
-	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
-	rows, err := s.execer().Query(`
-		SELECT entity, COUNT(*),
-		       COALESCE(CAST(SUM(success) AS REAL)/NULLIF(COUNT(*),0), 0.0),
-		       COALESCE(AVG(duration_ms), 0.0)
-		FROM tool_calls
-		WHERE tool_name = 'execute_skill' AND created_date >= ? AND entity != ''
-		GROUP BY entity ORDER BY COUNT(*) DESC`, cutoff)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var result []SkillStat
-	for rows.Next() {
-		var ss SkillStat
-		if rows.Scan(&ss.SkillName, &ss.CallCount, &ss.SuccessRate, &ss.AvgDurationMs) == nil {
-			result = append(result, ss)
-		}
-	}
-	return result, rows.Err()
-}
-
-// ---------------------------------------------------------------------------
 // Bug 45 — SA-D5: memory type distribution
 // ---------------------------------------------------------------------------
 
@@ -5744,7 +5717,7 @@ func (s *Store) DeleteByAgent(agentID string) (int64, error) {
 		"tool_calls", "context_deliveries", "search_events",
 		"guard_events", "memory_ops", "validation_events",
 		"brain_usage", "agent_llm_usage", "outcome_signals",
-		"heartbeat_events", "sessions",
+		"heartbeat_events", "sessions", "skill_executions",
 	}
 	for _, tbl := range tables {
 		result, err := s.execer().Exec(
@@ -5774,7 +5747,7 @@ func (s *Store) DeleteByProject(projectID string) (int64, error) {
 		"guard_events", "memory_ops", "validation_events",
 		"brain_usage", "agent_llm_usage", "outcome_signals",
 		"heartbeat_events", "sessions", "federation_events",
-		"entity_quality", "recall_channel_weights",
+		"entity_quality", "recall_channel_weights", "skill_executions",
 	}
 	for _, tbl := range tables {
 		result, err := s.execer().Exec(

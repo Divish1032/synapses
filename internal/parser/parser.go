@@ -160,7 +160,8 @@ func NewWalker() *Walker {
 	// Scientific computing
 	w.Register(NewMATLABParser()) // deep: .m (MATLAB/Octave)
 	// Documentation
-	w.Register(NewMarkdownParser()) // deep: .md .markdown .mdx (overrides generic)
+	w.Register(NewMarkdownParser())   // deep: .md .markdown .mdx (overrides generic)
+	w.Register(NewPlaintextParser())  // deep: .txt .rst (section extraction, overrides generic)
 	// Frontend
 	w.Register(NewVueParser()) // deep: .vue (SFC, delegates script to JS/TS)
 	// Data formats

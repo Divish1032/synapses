@@ -1,13 +1,49 @@
 package resolver
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/parser"
 )
+
+// EmbedResolver provides optional embedding-based entity resolution.
+// When non-nil, Tier 1 uses vector similarity in addition to name-matching.
+// Implementations must be safe for concurrent use.
+type EmbedResolver interface {
+	// EmbedText returns a vector embedding for the given text.
+	// Returns (nil, nil) if embedding is intentionally disabled.
+	// Returns (nil, err) on transient failure — callers fall back to name-match.
+	EmbedText(ctx context.Context, text string) ([]float32, error)
+
+	// SearchByVector finds the top-k graph nodes most similar to queryVec.
+	// Returns node IDs with cosine similarity scores, descending order.
+	SearchByVector(queryVec []float32, k int) []EmbedMatch
+}
+
+// EmbedMatch is a single result from EmbedResolver.SearchByVector.
+type EmbedMatch struct {
+	NodeID string
+	Score  float64 // cosine similarity [0, 1]
+}
+
+// embedTimeout is the per-candidate budget for embedding calls in Tier 1.
+// If the embedder is slow, we skip to name-match rather than blocking the pipeline.
+const embedTimeout = 2 * time.Second
+
+// embedHighThreshold is the cosine similarity above which an entity candidate
+// is considered a confident match to an existing graph node.
+// From iText2KG (arxiv Sept 2024): reliable entity resolution at cosine > 0.6.
+const embedHighThreshold = 0.6
+
+// embedMidThreshold is the cosine similarity below which no match is assumed
+// (genuinely new concept). Between mid and high the candidate is flagged for
+// Tier 2 review.
+const embedMidThreshold = 0.4
 
 // ResolveNLEntities runs the Tier 0+1 NL-to-graph extraction pipeline for all
 // markdown Section nodes in the graph.
@@ -20,13 +56,18 @@ import (
 //   - No match → create a NodeConcept knowledge node + RELATES_TO edge from
 //     the section to the new knowledge node.
 //
+// When er is non-nil, Tier 1 also performs embedding-based HNSW similarity
+// search. Candidates with cosine > 0.6 are wired directly to an existing graph
+// node via EXPLAINS (Section→CodeEntity); candidates in the 0.4–0.6 band are
+// created as knowledge nodes and flagged with embed_hint metadata for Tier 2.
+//
 // Returns the unresolved candidates across all sections, suitable for Tier 2
 // LLM classification via brain.Client.ScheduleNLClassification.
 //
 // Must be called after MarkdownParser.Parse (Section nodes must exist) and
 // after ResolveDocEdges (so code-entity links don't get duplicated).
-func ResolveNLEntities(g *graph.Graph) []parser.EntityCandidate {
-	return resolveNLForSections(g, g.FindByType(graph.NodeSection))
+func ResolveNLEntities(g *graph.Graph, er EmbedResolver) []parser.EntityCandidate {
+	return resolveNLForSections(g, g.FindByType(graph.NodeSection), er)
 }
 
 // ResolveNLEntitiesForFile runs the Tier 0+1 NL-to-graph pipeline scoped to
@@ -34,7 +75,7 @@ func ResolveNLEntities(g *graph.Graph) []parser.EntityCandidate {
 // single markdown file changes — avoids rescanning all sections.
 //
 // Returns unresolved candidates from this file for Tier 2 classification.
-func ResolveNLEntitiesForFile(g *graph.Graph, filePath string) []parser.EntityCandidate {
+func ResolveNLEntitiesForFile(g *graph.Graph, filePath string, er EmbedResolver) []parser.EntityCandidate {
 	abs := filepath.Clean(filePath)
 	var sections []*graph.Node
 	for _, s := range g.FindByType(graph.NodeSection) {
@@ -42,7 +83,7 @@ func ResolveNLEntitiesForFile(g *graph.Graph, filePath string) []parser.EntityCa
 			sections = append(sections, s)
 		}
 	}
-	return resolveNLForSections(g, sections)
+	return resolveNLForSections(g, sections, er)
 }
 
 // ResolveNLEntitiesForFiles runs the Tier 0+1 pipeline for a set of markdown
@@ -52,7 +93,7 @@ func ResolveNLEntitiesForFile(g *graph.Graph, filePath string) []parser.EntityCa
 //
 // Returns a map from filePath → unresolved candidates for Tier 2 scheduling.
 // Files with no unresolved candidates are omitted from the result.
-func ResolveNLEntitiesForFiles(g *graph.Graph, filePaths []string) map[string][]parser.EntityCandidate {
+func ResolveNLEntitiesForFiles(g *graph.Graph, filePaths []string, er EmbedResolver) map[string][]parser.EntityCandidate {
 	if len(filePaths) == 0 {
 		return nil
 	}
@@ -81,7 +122,7 @@ func ResolveNLEntitiesForFiles(g *graph.Graph, filePaths []string) map[string][]
 
 	result := make(map[string][]parser.EntityCandidate, len(filePaths))
 	for abs, sections := range sectByFile {
-		unresolved := resolveNLCore(g, sections, codeNames, codeNamesLower, existingKnowledge)
+		unresolved := resolveNLCore(g, sections, codeNames, codeNamesLower, existingKnowledge, er)
 		if len(unresolved) > 0 {
 			result[absPaths[abs]] = unresolved
 		}
@@ -91,14 +132,14 @@ func ResolveNLEntitiesForFiles(g *graph.Graph, filePaths []string) map[string][]
 
 // resolveNLForSections is the shared implementation for single-graph-scope calls.
 // It builds the lookup maps internally and delegates to resolveNLCore.
-func resolveNLForSections(g *graph.Graph, sections []*graph.Node) []parser.EntityCandidate {
+func resolveNLForSections(g *graph.Graph, sections []*graph.Node, er EmbedResolver) []parser.EntityCandidate {
 	if len(sections) == 0 {
 		return nil
 	}
 	codeNames := buildCodeNames(g)
 	codeNamesLower := buildCodeNamesLower(codeNames)
 	existingKnowledge := buildKnowledgeNames(g)
-	return resolveNLCore(g, sections, codeNames, codeNamesLower, existingKnowledge)
+	return resolveNLCore(g, sections, codeNames, codeNamesLower, existingKnowledge, er)
 }
 
 // resolveNLCore is the extraction kernel. It accepts pre-built lookup maps so
@@ -114,6 +155,7 @@ func resolveNLCore(
 	codeNames map[string][]*graph.Node,
 	codeNamesLower map[string]bool,
 	existingKnowledge map[string]bool,
+	er EmbedResolver,
 ) []parser.EntityCandidate {
 	if len(sections) == 0 {
 		return nil
@@ -147,14 +189,14 @@ func resolveNLCore(
 
 		// For each candidate: check if it resolves to a code entity.
 		// If yes — skip (docedges.go handles it).
-		// If no — create a knowledge node and a RELATES_TO edge.
+		// If no — try embedding-based resolution, then create a knowledge node.
 		for _, c := range candidates {
 			norm := normalizeKnowledgeName(c.Name)
 			if norm == "" {
 				continue
 			}
 
-			// Skip if already a known code entity (exact or case-insensitive).
+			// Tier 1a: name-match (fast, zero-cost).
 			// buildCodeNames keys are original-case ("TokenBucket"); codeNamesLower
 			// handles docs that use lowercase references (`` `tokenbucket` ``).
 			if _, isCode := codeNames[c.Name]; isCode {
@@ -164,7 +206,97 @@ func resolveNLCore(
 				continue
 			}
 
-			// Create or reuse knowledge node.
+			// Tier 1b: embedding-based resolution.
+			// When er is available, embed the candidate name+context and search
+			// the HNSW index.
+			//   Score > 0.6: confident match → EXPLAINS edge to existing node, skip unresolved.
+			//   Score 0.4–0.6: ambiguous → knowledge node with embed_hint, queue for Tier 2.
+			//   Score < 0.4 or embed error: new concept → standard knowledge node (tier=0).
+			//
+			// embedResolved is set true when the embedding path fully handles the
+			// candidate so the standard knowledge-node creation below is skipped.
+			embedResolved := false
+			if er != nil {
+				embedText := c.Name
+				if c.Context != "" {
+					embedText = c.Name + " " + truncateContext(c.Context, 100)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), embedTimeout)
+				vec, embedErr := er.EmbedText(ctx, embedText)
+				cancel()
+				if embedErr == nil && len(vec) > 0 {
+					matches := er.SearchByVector(vec, 5)
+					// Find the best-scoring match explicitly (SearchByVector is
+					// sorted descending but we guard defensively).
+					bestScore := 0.0
+					bestID := ""
+					for _, m := range matches {
+						if m.Score > bestScore {
+							bestScore = m.Score
+							bestID = m.NodeID
+						}
+					}
+
+					switch {
+					case bestScore > embedHighThreshold:
+						// Confident match. Guard against stale HNSW entries: if the
+						// matched node was deleted/renamed since the last HNSW rebuild,
+						// treat it as a new concept (fall through to standard creation).
+						matchID := graph.NodeID(bestID)
+						if g.GetNode(matchID) != nil {
+							// Section --EXPLAINS--> existing code entity.
+							// (EdgeExplains is Section→Code; EdgeDocumentedBy is the reverse.)
+							g.AddEdge(&graph.Edge{
+								From: sec.ID,
+								To:   matchID,
+								Type: graph.EdgeExplains,
+							})
+							embedResolved = true // candidate resolved; skip knowledge node
+						}
+						// If node is stale (nil), embedResolved stays false → fall through.
+
+					case bestScore > embedMidThreshold:
+						// Ambiguous match: create knowledge node flagged for Tier 2 review.
+						nodeID := makeKnowledgeNodeID(g, sec.File, norm)
+						if !existingKnowledge[string(nodeID)] {
+							g.AddNode(&graph.Node{
+								ID:     nodeID,
+								Type:   graph.NodeConcept,
+								Name:   norm,
+								File:   sec.File,
+								Line:   c.SourceLine,
+								Domain: graph.DomainKnowledge,
+								Metadata: map[string]string{
+									"context":     truncateContext(c.Context, 200),
+									"confidence":  fmt.Sprintf("%.2f", c.Confidence),
+									"tier":        "1",
+									"embed_hint":  bestID,
+									"embed_score": fmt.Sprintf("%.3f", bestScore),
+								},
+							})
+							existingKnowledge[string(nodeID)] = true
+						}
+						g.AddEdge(&graph.Edge{
+							From: sec.ID,
+							To:   nodeID,
+							Type: graph.EdgeRelatesTo,
+						})
+						unresolved = append(unresolved, c)
+						embedResolved = true
+
+					// default: bestScore <= embedMidThreshold — genuinely new concept;
+					// fall through to standard creation with tier=0.
+					}
+				}
+				// embedErr or empty vec: fall through to standard creation.
+			}
+
+			if embedResolved {
+				continue
+			}
+
+			// Standard path: create or reuse a knowledge node (tier=0).
+			// Reached when: er is nil, embedding failed, or score < 0.4 (new concept).
 			nodeID := makeKnowledgeNodeID(g, sec.File, norm)
 			if !existingKnowledge[string(nodeID)] {
 				g.AddNode(&graph.Node{
