@@ -1361,8 +1361,9 @@ var knowledgeTools = map[string]bool{
 	"get_plans":          true,
 	"link_task_nodes":    true,
 	"check_plan_safety":  true,
-	"report_usage":       true,
-	"get_my_analytics":   true,
+	"report_usage":        true,
+	"get_my_analytics":    true,
+	"export_knowledge":    true,
 }
 
 // hiddenTools are deprecated or subsumed tools that remain callable but are
@@ -3104,6 +3105,28 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleQueryGraph,
+	)
+
+	// ── Knowledge Export ─────────────────────────────────────────────────────
+
+	s.addOrDefer(
+		mcp.NewTool(
+			"export_knowledge",
+			mcp.WithDescription(
+				"Exports all durable knowledge for this project to a portable JSON snapshot: "+
+					"memories (with version history, node anchors, and embedding vectors), "+
+					"episodes, dynamic architectural rules, node annotations, and quality gaps. "+
+					"Use for backup, migration, or auditing accumulated agent knowledge. "+
+					"Graph nodes/edges are excluded (regenerable from source code). "+
+					"Transient data (tool_calls, sessions, web_cache) is also excluded. "+
+					"Write the returned JSON to a file with a tool call or shell command — "+
+					"large projects may produce multi-megabyte output.",
+			),
+			mcp.WithString("format",
+				mcp.Description("Output format. Only \"json\" is supported (default)."),
+			),
+		),
+		s.handleExportKnowledge,
 	)
 
 	// ── Benchmark ───────────────────────────────────────────────────────────
