@@ -43,6 +43,19 @@ func pathWithinRoot(root, path string) bool {
 	// Resolve symlinks for paths that exist on disk.
 	if resolved, err := filepath.EvalSymlinks(cleanPath); err == nil {
 		cleanPath = resolved
+	} else {
+		// Path doesn't exist yet (proposed file). Walk up to find the deepest
+		// existing ancestor and resolve its symlinks, then reattach the suffix.
+		// This handles macOS /var→/private/var without false containment failures.
+		ancestor := filepath.Dir(cleanPath)
+		for ancestor != filepath.Dir(ancestor) {
+			if resolved, err := filepath.EvalSymlinks(ancestor); err == nil {
+				rel := cleanPath[len(ancestor):]
+				cleanPath = filepath.Join(resolved, rel)
+				break
+			}
+			ancestor = filepath.Dir(ancestor)
+		}
 	}
 	if resolved, err := filepath.EvalSymlinks(cleanRoot); err == nil {
 		cleanRoot = resolved
