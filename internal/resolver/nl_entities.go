@@ -45,20 +45,79 @@ func ResolveNLEntitiesForFile(g *graph.Graph, filePath string) []parser.EntityCa
 	return resolveNLForSections(g, sections)
 }
 
-// resolveNLForSections is the shared implementation used by both public funcs.
+// ResolveNLEntitiesForFiles runs the Tier 0+1 pipeline for a set of markdown
+// files in a single pass — buildCodeNames is called only once regardless of
+// how many files are in the batch. Use this in the watcher for multi-file
+// batches (initial index, branch switch) to avoid O(N×|graph|) redundancy.
+//
+// Returns a map from filePath → unresolved candidates for Tier 2 scheduling.
+// Files with no unresolved candidates are omitted from the result.
+func ResolveNLEntitiesForFiles(g *graph.Graph, filePaths []string) map[string][]parser.EntityCandidate {
+	if len(filePaths) == 0 {
+		return nil
+	}
+
+	// Build lookup maps ONCE for the entire batch.
+	codeNames := buildCodeNames(g)
+	codeNamesLower := buildCodeNamesLower(codeNames)
+	// existingKnowledge is intentionally shared across all files in the batch:
+	// knowledge NodeIDs are file-scoped so file A's nodes won't mask file B's,
+	// but the shared map prevents duplicates within the same batch run.
+	existingKnowledge := buildKnowledgeNames(g)
+
+	// Index sections by cleaned file path for O(1) per-file lookup.
+	type cleanPath = string
+	absPaths := make(map[cleanPath]string, len(filePaths)) // abs → original
+	for _, fp := range filePaths {
+		absPaths[filepath.Clean(fp)] = fp
+	}
+	sectByFile := make(map[cleanPath][]*graph.Node, len(filePaths))
+	for _, s := range g.FindByType(graph.NodeSection) {
+		abs := filepath.Clean(s.File)
+		if _, ok := absPaths[abs]; ok {
+			sectByFile[abs] = append(sectByFile[abs], s)
+		}
+	}
+
+	result := make(map[string][]parser.EntityCandidate, len(filePaths))
+	for abs, sections := range sectByFile {
+		unresolved := resolveNLCore(g, sections, codeNames, codeNamesLower, existingKnowledge)
+		if len(unresolved) > 0 {
+			result[absPaths[abs]] = unresolved
+		}
+	}
+	return result
+}
+
+// resolveNLForSections is the shared implementation for single-graph-scope calls.
+// It builds the lookup maps internally and delegates to resolveNLCore.
 func resolveNLForSections(g *graph.Graph, sections []*graph.Node) []parser.EntityCandidate {
 	if len(sections) == 0 {
 		return nil
 	}
-
-	// Build code-name lookup (same function used by docedges.go).
-	// Candidates matching code entity names are skipped — docedges.go already
-	// handles the EXPLAINS/DOCUMENTED_BY link for those.
 	codeNames := buildCodeNames(g)
-
-	// Build a set of existing knowledge node IDs to avoid duplicates across
-	// multiple calls (e.g. initial index + watcher incremental update).
+	codeNamesLower := buildCodeNamesLower(codeNames)
 	existingKnowledge := buildKnowledgeNames(g)
+	return resolveNLCore(g, sections, codeNames, codeNamesLower, existingKnowledge)
+}
+
+// resolveNLCore is the extraction kernel. It accepts pre-built lookup maps so
+// ResolveNLEntitiesForFiles can reuse them across multiple file passes without
+// redundant full-graph scans.
+//
+// existingKnowledge is mutated in-place (new node IDs are added as they are
+// created) — callers that share it across multiple calls benefit from the
+// cross-call dedup automatically.
+func resolveNLCore(
+	g *graph.Graph,
+	sections []*graph.Node,
+	codeNames map[string][]*graph.Node,
+	codeNamesLower map[string]bool,
+	existingKnowledge map[string]bool,
+) []parser.EntityCandidate {
+	if len(sections) == 0 {
+		return nil
+	}
 
 	var unresolved []parser.EntityCandidate
 
@@ -82,12 +141,13 @@ func resolveNLForSections(g *graph.Graph, sections []*graph.Node) []parser.Entit
 				continue
 			}
 
-			// Skip if already a known code entity.
+			// Skip if already a known code entity (exact or case-insensitive).
+			// buildCodeNames keys are original-case ("TokenBucket"); codeNamesLower
+			// handles docs that use lowercase references (`` `tokenbucket` ``).
 			if _, isCode := codeNames[c.Name]; isCode {
 				continue
 			}
-			// Also check normalised variant.
-			if _, isCode := codeNames[norm]; isCode {
+			if codeNamesLower[norm] {
 				continue
 			}
 
@@ -111,7 +171,7 @@ func resolveNLForSections(g *graph.Graph, sections []*graph.Node) []parser.Entit
 			}
 
 			// RELATES_TO from section → knowledge node.
-			// Use dedup: AddEdge is idempotent (graph ignores duplicate From+To+Type).
+			// AddEdge is idempotent (graph ignores duplicate From+To+Type).
 			g.AddEdge(&graph.Edge{
 				From: sec.ID,
 				To:   nodeID,
@@ -165,6 +225,16 @@ func signalToEdgeType(signal string) graph.EdgeType {
 	default:
 		return graph.EdgeRelatesTo
 	}
+}
+
+// buildCodeNamesLower returns a lowercase key set from a buildCodeNames map.
+// Used so `` `tokenbucket` `` matches a code entity named "TokenBucket".
+func buildCodeNamesLower(codeNames map[string][]*graph.Node) map[string]bool {
+	m := make(map[string]bool, len(codeNames))
+	for k := range codeNames {
+		m[strings.ToLower(k)] = true
+	}
+	return m
 }
 
 // buildKnowledgeNames returns a set of existing knowledge node IDs.
