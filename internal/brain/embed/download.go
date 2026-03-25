@@ -104,6 +104,15 @@ func EnsureLlamaServer(ctx context.Context, opts DownloadOptions) (string, error
 	binPath := LlamaServerBinPath(opts.BinDir)
 	if fileExists(binPath) {
 		logProgress(opts.Progress, "llama-server: already installed at %s", binPath)
+		// Opportunistically backfill the SHA-256 sidecar if the binary exists but
+		// the sidecar does not. This activates pre-execution integrity checks for
+		// binaries installed before this feature shipped without requiring a full
+		// re-download.
+		if !fileExists(binPath + ".sha256") {
+			if err := writeSHA256Sidecar(binPath); err != nil {
+				logProgress(opts.Progress, "warning: failed to write SHA-256 sidecar for llama-server: %v", err)
+			}
+		}
 		return binPath, nil
 	}
 
