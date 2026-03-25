@@ -826,7 +826,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event, root string) {
 
 	// New directory created: add it and its children to the watch list.
 	if event.Has(fsnotify.Create) {
-		if info, err := os.Stat(path); err == nil && info.IsDir() {
+		if info, err := os.Lstat(path); err == nil && info.IsDir() {
 			if !shouldSkipDir(filepath.Base(path)) {
 				_ = w.fw.Add(path)
 			}
