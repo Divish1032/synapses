@@ -6,7 +6,7 @@ package main
 // the binary needs no external files. Calling sequence:
 //
 //  1. Ping Ollama — abort with a helpful message if unreachable.
-//  2. Pull qwen3.5:2b (~2.7 GB, Q8) — skip if already installed or --skip-pull.
+//  2. Pull base model (qwen3.5:2b for optimal, qwen3.5:4b for standard/full).
 //  3. Register all 5 synapses/* identities via `ollama create`.
 //  4. Smoke-test each identity (optional, --skip-smoke).
 //  5. Write/update ~/.synapses/brain.json with enabled:true and the chosen mode.
@@ -36,6 +36,11 @@ import (
 // ── Embedded Modelfile content ────────────────────────────────────────────────
 // Kept in sync with synapses-fine-distilling/quantization/Modelfile.* — if you
 // update those files, update these constants too.
+//
+// The FROM line uses a placeholder that is replaced at registration time with
+// the mode-appropriate base model (qwen3.5:2b for optimal, qwen3.5:4b for
+// standard/full). See baseModelForMode().
+const modelfileFromPlaceholder = "qwen3.5:2b"
 
 const modelfileSentry = `FROM qwen3.5:2b
 
@@ -183,6 +188,24 @@ var brainTiers = []brainTierDef{
 	},
 }
 
+// baseModelForMode returns the raw Ollama model tag for the given intelligence
+// mode. Standard and Full use the 4B model (IFEval 89.8, Q4_K_M); Optimal
+// stays on 2B to fit 8 GB RAM budgets.
+func baseModelForMode(mode string) string {
+	switch mode {
+	case "standard", "full":
+		return "qwen3.5:4b"
+	default:
+		return "qwen3.5:2b"
+	}
+}
+
+// modelfileWithBase replaces the FROM placeholder in a Modelfile template with
+// the actual base model tag for the current mode.
+func modelfileWithBase(content, baseModel string) string {
+	return strings.Replace(content, "FROM "+modelfileFromPlaceholder, "FROM "+baseModel, 1)
+}
+
 // ── Entry points ──────────────────────────────────────────────────────────────
 
 // cmdBrain dispatches "synapses brain <subcommand>".
@@ -198,7 +221,7 @@ func cmdBrain(args []string) error {
 		fmt.Println("  Flags for 'setup':")
 		fmt.Println("    --ollama <url>   Ollama base URL  (default: http://localhost:11434)")
 		fmt.Println("    --mode <mode>    Intelligence mode: optimal | standard | full  (default: standard)")
-		fmt.Println("    --skip-pull      Assume qwen3.5:2b is already downloaded")
+		fmt.Println("    --skip-pull      Assume the base model is already downloaded")
 		fmt.Println("    --skip-smoke     Skip post-registration smoke tests")
 		fmt.Println("    --no-color       Disable ANSI color codes (for GUI / non-terminal output)")
 		fmt.Println()
@@ -217,7 +240,7 @@ func cmdBrainSetup(args []string) error {
 	fs := flag.NewFlagSet("brain setup", flag.ContinueOnError)
 	ollamaURL := fs.String("ollama", "http://localhost:11434", "Ollama base URL")
 	mode      := fs.String("mode", "standard", "Intelligence mode: optimal | standard | full")
-	skipPull  := fs.Bool("skip-pull", false, "Skip pulling qwen3.5:2b")
+	skipPull  := fs.Bool("skip-pull", false, "Skip pulling the base model")
 	skipSmoke := fs.Bool("skip-smoke", false, "Skip smoke tests")
 	noColor   := fs.Bool("no-color", false, "Disable ANSI color codes (useful when output is consumed by a GUI)")
 	if err := fs.Parse(args); err != nil {
@@ -241,11 +264,13 @@ func cmdBrainSetup(args []string) error {
 	red    := func(s string) string { if *noColor { return s }; return "\033[31m" + s + "\033[0m" }
 	bold   := func(s string) string { if *noColor { return s }; return "\033[1m" + s + "\033[0m" }
 
+	baseModel := baseModelForMode(*mode)
+
 	fmt.Println()
 	fmt.Println("  Synapses Brain Setup")
 	fmt.Println("  ─────────────────────────────────────────")
 	fmt.Println()
-	fmt.Println("  The brain runs on one shared model — qwen3.5:2b (Q8, ~2.7 GB).")
+	fmt.Printf("  The brain runs on one shared model — %s.\n", baseModel)
 	fmt.Println("  Five AI personas are layered on top via Ollama Modelfiles (~1 KB each).")
 	fmt.Println("  All personas share the same weights in RAM — one download, five tiers.")
 	fmt.Println()
@@ -270,10 +295,9 @@ func cmdBrainSetup(args []string) error {
 	fmt.Println()
 
 	// ── Step 2: Base model ───────────────────────────────────────────────────
-	const baseModel = "qwen3.5:2b"
 	fmt.Printf("  [2/4] Base model — %s\n", baseModel)
 	fmt.Println("        This is the foundation. All 5 AI tiers run on this one model.")
-	fmt.Println("        Ollama deduplicates weights — all tiers share the same 2.7 GB in RAM.")
+	fmt.Println("        Ollama deduplicates weights — all tiers share the same weights in RAM.")
 	fmt.Println()
 
 	if *skipPull {
@@ -286,7 +310,7 @@ func cmdBrainSetup(args []string) error {
 		if installed {
 			fmt.Printf("        %s %s is already downloaded\n", green("✓"), baseModel)
 		} else {
-			fmt.Printf("        %s Downloading %s (~2.7 GB) — this may take a few minutes...\n\n", yellow("↓"), baseModel)
+			fmt.Printf("        %s Downloading %s — this may take a few minutes...\n\n", yellow("↓"), baseModel)
 			if err := brainPullModel(*ollamaURL, baseModel, safeClient); err != nil {
 				return fmt.Errorf("brain setup: pull %s: %w", baseModel, err)
 			}
@@ -303,7 +327,9 @@ func cmdBrainSetup(args []string) error {
 	fmt.Println()
 	for _, tier := range brainTiers {
 		fmt.Printf("        %-24s  %s\n", tier.label, tier.role)
-		if err := brainRegisterIdentity(tier); err != nil {
+		tierWithBase := tier
+		tierWithBase.content = modelfileWithBase(tier.content, baseModel)
+		if err := brainRegisterIdentity(tierWithBase); err != nil {
 			fmt.Printf("        %s  Failed to register %s: %v\n", red("✗"), tier.name, err)
 			return fmt.Errorf("brain setup: register %s: %w", tier.name, err)
 		}

@@ -353,22 +353,26 @@ func TestNewModelManager_OptimalMode(t *testing.T) {
 	if mgr.keepAlive != 120 {
 		t.Errorf("keepAlive = %d, want 120 (optimal mode)", mgr.keepAlive)
 	}
-	if mgr.primary != "synapses/sentry" {
-		t.Errorf("primary = %q, want synapses/sentry", mgr.primary)
+	// NewModelManager uses BaseModelTag() (qwen3.5:2b for optimal), not ModelIngest.
+	if mgr.primary != "qwen3.5:2b" {
+		t.Errorf("primary = %q, want qwen3.5:2b (BaseModelTag for optimal)", mgr.primary)
 	}
 }
 
 func TestNewModelManager_StandardMode_4BPrimaryHasFallback(t *testing.T) {
 	cfg := brainconfig.DefaultConfig()
 	cfg.IntelligenceMode = brainconfig.ModeStandard
-	cfg.ModelIngest = "qwen3.5:4b"
 
 	mgr := NewModelManager(nil, cfg)
 	if mgr.keepAlive != 300 {
 		t.Errorf("keepAlive = %d, want 300 (standard mode)", mgr.keepAlive)
 	}
-	if mgr.fallback == "" {
-		t.Error("fallback should be set when primary is 4B")
+	// BaseModelTag returns "qwen3.5:4b" for standard mode.
+	if mgr.primary != "qwen3.5:4b" {
+		t.Errorf("primary = %q, want qwen3.5:4b (BaseModelTag for standard)", mgr.primary)
+	}
+	if mgr.fallback != "qwen3.5:2b" {
+		t.Errorf("fallback = %q, want qwen3.5:2b", mgr.fallback)
 	}
 }
 
@@ -379,5 +383,9 @@ func TestNewModelManager_FullMode(t *testing.T) {
 	mgr := NewModelManager(nil, cfg)
 	if mgr.keepAlive != -1 {
 		t.Errorf("keepAlive = %d, want -1 (full mode = pinned)", mgr.keepAlive)
+	}
+	// Full mode also uses 4B base model.
+	if mgr.primary != "qwen3.5:4b" {
+		t.Errorf("primary = %q, want qwen3.5:4b (BaseModelTag for full)", mgr.primary)
 	}
 }
