@@ -15,6 +15,7 @@ import (
 
 	brainconfig "github.com/SynapsesOS/synapses/internal/brain/config"
 	"github.com/SynapsesOS/synapses/internal/brain/archivist"
+	"github.com/SynapsesOS/synapses/internal/brain/llm"
 )
 
 // Client wraps the in-process Brain implementation. It exposes the same method
@@ -28,10 +29,11 @@ import (
 // High-priority P0 tasks (BuildContextPacket, ExplainViolation) check
 // ShouldDegrade() before invoking the LLM to fast-fail under resource pressure.
 type Client struct {
-	brain     Brain
-	scheduler *Scheduler
-	pulse     *SystemPulse  // owned by Client; nil when brain is disabled
-	modelMgr  *ModelManager // owned by Client; nil when brain is disabled
+	brain      Brain
+	scheduler  *Scheduler
+	pulse      *SystemPulse  // owned by Client; nil when brain is disabled
+	modelMgr   *ModelManager // owned by Client; nil when brain is disabled
+	ollamaBase string        // Ollama base URL; empty when Ollama not configured
 }
 
 // NewInProcess creates a Client backed by an in-process Brain. If cfg is nil or
@@ -66,10 +68,11 @@ func NewInProcess(cfg *brainconfig.BrainConfig) *Client {
 	sched.Start()
 
 	return &Client{
-		brain:     New(*cfg),
-		scheduler: sched,
-		pulse:     pulse,
-		modelMgr:  mgr,
+		brain:      New(*cfg),
+		scheduler:  sched,
+		pulse:      pulse,
+		modelMgr:   mgr,
+		ollamaBase: ollamaBase,
 	}
 }
 
@@ -83,6 +86,19 @@ func NewClient(_ string, _ int) *Client {
 		brain:     &NullBrain{},
 		scheduler: NewScheduler(nil),
 	}
+}
+
+// ListInstalledModels returns the names of all Ollama models installed locally.
+// Returns nil when Ollama is not configured or the query fails.
+func (c *Client) ListInstalledModels(ctx context.Context) []string {
+	if c.ollamaBase == "" {
+		return nil
+	}
+	models, err := llm.ListInstalledModels(ctx, c.ollamaBase)
+	if err != nil {
+		return nil
+	}
+	return models
 }
 
 // HealthCheck returns ("ok", nil) when the brain is available, or an error when not.
