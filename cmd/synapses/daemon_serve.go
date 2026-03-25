@@ -2301,18 +2301,49 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcps
 		if sessionCtx.Err() != nil {
 			return sessionCtx.Err()
 		}
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return err
+		// readBoundedLine reads one '\n'-terminated line using ReadSlice so
+		// memory allocation is bounded to maxMsgBytes + internal buffer size.
+		// bufio.ReadString accumulates the full message before returning, which
+		// would allow a single large message to OOM the daemon before the size
+		// check fires. ReadSlice returns ErrBufferFull for each internal-buffer
+		// chunk, letting us enforce the limit incrementally.
+		var (
+			lineBuf   []byte
+			lineErr   error
+			tooLarge  bool
+		)
+		for {
+			frag, sliceErr := reader.ReadSlice('\n')
+			if !tooLarge {
+				if len(lineBuf)+len(frag) > maxMsgBytes {
+					tooLarge = true
+					lineBuf = nil // release already-accumulated memory
+				} else {
+					lineBuf = append(lineBuf, frag...)
+				}
+			}
+			// sliceErr == nil means delimiter found; anything else means keep
+			// reading (ErrBufferFull) or a real connection error.
+			if sliceErr == nil {
+				lineErr = nil
+				break
+			}
+			if sliceErr != bufio.ErrBufferFull {
+				lineErr = sliceErr
+				break
+			}
 		}
-		if len(line) > maxMsgBytes {
+		if lineErr != nil {
+			return lineErr
+		}
+		if tooLarge {
 			writeJSON(map[string]interface{}{
 				"jsonrpc": "2.0", "id": nil,
 				"error": map[string]interface{}{"code": -32600, "message": "message exceeds 4 MiB limit"},
 			}) //nolint:errcheck
 			continue
 		}
-		line = strings.TrimSpace(line)
+		line := strings.TrimSpace(string(lineBuf))
 		if line == "" {
 			continue
 		}

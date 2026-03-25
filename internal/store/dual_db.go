@@ -175,7 +175,11 @@ func migrateSingleTable(srcDB, dstDB *sql.DB, table string) (int64, error) {
 			return count, fmt.Errorf("prepare insert: %w", err)
 		}
 
-		var batchCount int
+		// rowsSeen counts rows returned by the query (regardless of insert success)
+		// so the loop termination `rowsSeen < pageSize` correctly detects exhaustion.
+		// Using batchCount (successful inserts only) would terminate early when many
+		// rows are skipped via INSERT OR IGNORE — a logic bug for tables with conflicts.
+		var rowsSeen int
 		for srcRows.Next() {
 			if err := srcRows.Scan(scanPtrs...); err != nil {
 				stmt.Close()
@@ -183,6 +187,7 @@ func migrateSingleTable(srcDB, dstDB *sql.DB, table string) (int64, error) {
 				_ = tx.Rollback()
 				return count, fmt.Errorf("scan row: %w", err)
 			}
+			rowsSeen++
 			lastRowID = scanDest[0].(int64)
 			rowData := scanDest[1:] // skip rowid
 			if _, err := stmt.Exec(rowData...); err != nil {
@@ -190,7 +195,6 @@ func migrateSingleTable(srcDB, dstDB *sql.DB, table string) (int64, error) {
 				continue
 			}
 			count++
-			batchCount++
 		}
 		iterErr := srcRows.Err()
 		srcRows.Close()
@@ -204,7 +208,7 @@ func migrateSingleTable(srcDB, dstDB *sql.DB, table string) (int64, error) {
 			return count, fmt.Errorf("commit: %w", err)
 		}
 
-		if batchCount < pageSize {
+		if rowsSeen < pageSize {
 			break // no more rows
 		}
 	}
