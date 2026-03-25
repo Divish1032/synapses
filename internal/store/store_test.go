@@ -452,6 +452,134 @@ func TestSemanticSearch_SpecialChars(t *testing.T) {
 	_ = results
 }
 
+// TestSemanticSearch_SectionBodyIndexed verifies that FTS5 indexes section node
+// body text (metadata["body"]) so documentation content is searchable, not just
+// section titles. This is the Sprint 17.5 #3 FTS5 gap fix.
+func TestSemanticSearch_SectionBodyIndexed(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+	g := graph.New("testrepo")
+
+	// Section node with body in metadata["body"], no metadata["doc"].
+	g.AddNode(&graph.Node{
+		ID:   g.MakeNodeID("README.md", "README.md"),
+		Type: graph.NodeFile, Name: "README.md", File: "README.md", Line: 1,
+	})
+	g.AddNode(&graph.Node{
+		ID:   g.MakeNodeID("README.md", "README.md § Authentication"),
+		Type: graph.NodeSection,
+		Name: "README.md § Authentication",
+		File: "README.md",
+		Line: 5,
+		Metadata: map[string]string{
+			"title":        "Authentication",
+			"depth":        "2",
+			"body":         "Token bucket rate limiting protects the OAuth2 endpoints from abuse",
+			"body_preview": "Token bucket rate limiting",
+		},
+	})
+
+	// Knowledge node with context in metadata["context"], no metadata["doc"].
+	g.AddNode(&graph.Node{
+		ID:   g.MakeNodeID("README.md", "eventual_consistency"),
+		Type: graph.NodeConcept,
+		Name: "eventual_consistency",
+		File: "README.md",
+		Line: 20,
+		Metadata: map[string]string{
+			"context":    "Eventual consistency is used for cross-region replication of session data",
+			"confidence": "0.85",
+			"tier":       "1",
+		},
+	})
+
+	if err := st.SaveGraph(g); err != nil {
+		t.Fatalf("SaveGraph: %v", err)
+	}
+
+	// Search by body content — should find the section node.
+	results, err := st.SemanticSearch("token bucket", 10)
+	if err != nil {
+		t.Fatalf("SemanticSearch('token bucket'): %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.Name == "README.md § Authentication" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected section node in results for 'token bucket', got: %+v", results)
+	}
+
+	// Search by knowledge context — should find the concept node.
+	results2, err := st.SemanticSearch("eventual consistency", 10)
+	if err != nil {
+		t.Fatalf("SemanticSearch('eventual consistency'): %v", err)
+	}
+	found2 := false
+	for _, r := range results2 {
+		if r.Name == "eventual_consistency" {
+			found2 = true
+		}
+	}
+	if !found2 {
+		t.Errorf("expected concept node in results for 'eventual consistency', got: %+v", results2)
+	}
+}
+
+// TestSemanticSearch_SectionBodyIndexed_Delta verifies the FTS5 body fallback
+// also works through the SaveGraphDelta path (incremental updates).
+func TestSemanticSearch_SectionBodyIndexed_Delta(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+
+	// Initial graph with a code file.
+	g := graph.New("testrepo")
+	g.AddNode(&graph.Node{
+		ID:   g.MakeNodeID("main.go", "main.go"),
+		Type: graph.NodeFile, Name: "main.go", File: "main.go", Line: 1,
+	})
+	if err := st.SaveGraph(g); err != nil {
+		t.Fatalf("SaveGraph: %v", err)
+	}
+
+	// Delta: add a section node with body.
+	g.AddNode(&graph.Node{
+		ID:   g.MakeNodeID("guide.rst", "guide.rst"),
+		Type: graph.NodeFile, Name: "guide.rst", File: "guide.rst", Line: 1,
+	})
+	g.AddNode(&graph.Node{
+		ID:   g.MakeNodeID("guide.rst", "guide.rst § Deployment"),
+		Type: graph.NodeSection,
+		Name: "guide.rst § Deployment",
+		File: "guide.rst",
+		Line: 3,
+		Metadata: map[string]string{
+			"title": "Deployment",
+			"depth": "1",
+			"body":  "Blue-green deployment strategy ensures zero downtime during releases",
+		},
+	})
+	if err := st.SaveGraphDelta("guide.rst", g); err != nil {
+		t.Fatalf("SaveGraphDelta: %v", err)
+	}
+
+	results, err := st.SemanticSearch("blue-green deployment", 10)
+	if err != nil {
+		t.Fatalf("SemanticSearch: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.Name == "guide.rst § Deployment" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected section in delta FTS results for 'blue-green deployment', got: %+v", results)
+	}
+}
+
 // TestScanAll_DoesNotCrash verifies that ScanAll on the live cache dir returns
 // without error regardless of what is (or isn't) cached on this machine.
 func TestScanAll_DoesNotCrash(t *testing.T) {

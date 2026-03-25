@@ -108,7 +108,7 @@ func newGenericParser() *genericParser {
 
 			// ── Documentation ─────────────────────────────────────────────────
 			// NOTE: .md .markdown .mdx → MarkdownParser
-			".rst",           // reStructuredText
+			// NOTE: .rst .txt → PlaintextParser
 			".tex", ".latex", // LaTeX
 			".adoc", ".asciidoc", // AsciiDoc
 
