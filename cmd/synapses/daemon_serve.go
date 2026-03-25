@@ -1834,10 +1834,21 @@ func buildHealthHandler(reg *projectRegistry, sharedPulse *pulse.Client, daemonS
 
 		results := make([]projectResult, len(projects))
 		var outerWg sync.WaitGroup
+
+		// Cap outer parallelism: each project's federation check may open up to
+		// FederationParallelism (8) SQLite files simultaneously.  Without a cap,
+		// a daemon with many registered projects could exhaust file descriptors.
+		// 16 projects × 8 FD each × 2 (brain+fed) = 256 FDs — well within the
+		// typical ulimit of 1024.
+		const maxHealthParallel = 16
+		sem := make(chan struct{}, maxHealthParallel)
+
 		for i, pi := range projects {
 			i, pi := i, pi
 			outerWg.Add(1)
+			sem <- struct{}{} // acquire slot before launching goroutine
 			go func() {
+				defer func() { <-sem }() // release slot
 				defer outerWg.Done()
 				pr := &results[i]
 
