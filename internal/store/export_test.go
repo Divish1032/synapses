@@ -8,8 +8,8 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
-// TestExportKnowledge_EmptyStore verifies the export works on a fresh store
-// with no data: all slices are nil/empty and summary counts are zero.
+// TestExportKnowledge_EmptyStore verifies the export works on a fresh store:
+// all slices are non-nil empty arrays (not null) and summary counts are zero.
 func TestExportKnowledge_EmptyStore(t *testing.T) {
 	s := openTestStore(t)
 	exp, err := s.ExportKnowledge("testproject")
@@ -25,26 +25,50 @@ func TestExportKnowledge_EmptyStore(t *testing.T) {
 	if exp.ExportedAt == "" {
 		t.Error("ExportedAt is empty")
 	}
+	if exp.TTLNote == "" {
+		t.Error("TTLNote is empty — importers need this guidance")
+	}
 	if exp.Summary.MemoryCount != 0 {
 		t.Errorf("MemoryCount = %d, want 0", exp.Summary.MemoryCount)
 	}
-	if exp.Summary.EpisodeCount != 0 {
-		t.Errorf("EpisodeCount = %d, want 0", exp.Summary.EpisodeCount)
+
+	// All slices must be non-nil (JSON: [] not null) even on empty store.
+	if exp.Memories == nil {
+		t.Error("Memories is nil, want []")
+	}
+	if exp.MemoryVersions == nil {
+		t.Error("MemoryVersions is nil, want []")
+	}
+	if exp.MemoryAnchors == nil {
+		t.Error("MemoryAnchors is nil, want []")
+	}
+	if exp.MemoryEmbeddings == nil {
+		t.Error("MemoryEmbeddings is nil, want []")
+	}
+	if exp.Episodes == nil {
+		t.Error("Episodes is nil, want []")
+	}
+	if exp.DynamicRules == nil {
+		t.Error("DynamicRules is nil, want []")
+	}
+	if exp.Annotations == nil {
+		t.Error("Annotations is nil, want []")
+	}
+	if exp.QualityGaps == nil {
+		t.Error("QualityGaps is nil, want []")
 	}
 }
 
-// TestExportKnowledge_Memories verifies memories (including expired) are exported.
+// TestExportKnowledge_Memories verifies memories are exported.
 func TestExportKnowledge_Memories(t *testing.T) {
 	s := openTestStore(t)
 
-	// Insert two memories via InsertMemory.
-	m1 := store.Memory{
+	id1, err := s.InsertMemory(store.Memory{
 		Tier:      store.TierProject,
 		Content:   "test memory one",
 		Source:    store.SourceManual,
 		ExpiresAt: time.Now().Add(24 * time.Hour).Format(time.RFC3339),
-	}
-	id1, err := s.InsertMemory(m1)
+	})
 	if err != nil {
 		t.Fatalf("InsertMemory 1: %v", err)
 	}
@@ -52,17 +76,15 @@ func TestExportKnowledge_Memories(t *testing.T) {
 		t.Skip("memory was deduplicated on empty store — unexpected but skip")
 	}
 
-	m2 := store.Memory{
+	_, err = s.InsertMemory(store.Memory{
 		Tier:      store.TierProject,
 		Content:   "test memory two with distinct content",
 		Source:    store.SourceManual,
 		ExpiresAt: time.Now().Add(24 * time.Hour).Format(time.RFC3339),
-	}
-	id2, err := s.InsertMemory(m2)
+	})
 	if err != nil {
 		t.Fatalf("InsertMemory 2: %v", err)
 	}
-	_ = id2
 
 	exp, err := s.ExportKnowledge("proj")
 	if err != nil {
@@ -74,7 +96,6 @@ func TestExportKnowledge_Memories(t *testing.T) {
 	if exp.Summary.MemoryCount < 1 {
 		t.Errorf("expected ≥1 memory in export, got %d", exp.Summary.MemoryCount)
 	}
-	// Verify the inserted memory content is present.
 	found := false
 	for _, m := range exp.Memories {
 		if m.Content == "test memory one" {
@@ -91,18 +112,13 @@ func TestExportKnowledge_Memories(t *testing.T) {
 func TestExportKnowledge_Episodes(t *testing.T) {
 	s := openTestStore(t)
 
-	ep := store.Episode{
-		AgentID:     "test-agent",
-		EpisodeType: "decision",
-		Outcome:     "success",
-		Decision:    "use NoSQL for session cache",
-		Rationale:   "lower latency requirements",
-		AffectedFiles: "[]",
-		AffectedNodes: "[]",
-		Tags:        "[]",
-		Importance:  0.7,
-	}
-	_, err := s.RememberEpisode(ep)
+	_, err := s.RememberEpisode(store.Episode{
+		AgentID:       "test-agent",
+		EpisodeType:   "decision",
+		Outcome:       "success",
+		Decision:      "use NoSQL for session cache",
+		AffectedFiles: "[]", AffectedNodes: "[]", Tags: "[]",
+	})
 	if err != nil {
 		t.Fatalf("RememberEpisode: %v", err)
 	}
@@ -132,7 +148,6 @@ func TestExportKnowledge_Episodes(t *testing.T) {
 func TestExportKnowledge_MemoryVersions(t *testing.T) {
 	s := openTestStore(t)
 
-	// Insert a memory, then create a version snapshot.
 	id, err := s.InsertMemory(store.Memory{
 		Tier:      store.TierProject,
 		Content:   "original content for versioning",
@@ -189,11 +204,11 @@ func TestExportKnowledge_MemoryAnchors(t *testing.T) {
 	}
 }
 
-// TestExportKnowledge_EmbeddingBase64 verifies embeddings are base64-encoded.
+// TestExportKnowledge_EmbeddingBase64 verifies embeddings are base64-encoded
+// with correct size and stale flag.
 func TestExportKnowledge_EmbeddingBase64(t *testing.T) {
 	s := openTestStore(t)
 
-	// Insert a memory then manually insert an embedding blob.
 	id, err := s.InsertMemory(store.Memory{
 		Tier:      store.TierProject,
 		Content:   "embedding export test",
@@ -204,10 +219,8 @@ func TestExportKnowledge_EmbeddingBase64(t *testing.T) {
 		t.Skip("memory insert failed")
 	}
 
-	// Provide a non-zero float32 vector (must have non-zero magnitude).
-	vec := []float32{1.0, 0.0, 0.0}
-	err = s.UpsertMemoryEmbedding(id, "test-model", vec)
-	if err != nil {
+	vec := []float32{1.0, 0.0, 0.0} // non-zero magnitude for normalization
+	if err := s.UpsertMemoryEmbedding(id, "test-model", vec); err != nil {
 		t.Fatalf("UpsertMemoryEmbedding: %v", err)
 	}
 
@@ -218,7 +231,7 @@ func TestExportKnowledge_EmbeddingBase64(t *testing.T) {
 	if exp.Summary.MemoryEmbeddingCount < 1 {
 		t.Fatalf("expected ≥1 embedding in export, got %d", exp.Summary.MemoryEmbeddingCount)
 	}
-	// Verify the blob was correctly base64-encoded and round-trips.
+
 	var found *store.ExportedMemEmbed
 	for i := range exp.MemoryEmbeddings {
 		if exp.MemoryEmbeddings[i].MemoryID == id {
@@ -229,21 +242,27 @@ func TestExportKnowledge_EmbeddingBase64(t *testing.T) {
 	if found == nil {
 		t.Fatalf("embedding for memory %s not found in export", id)
 	}
+	// Verify the BLOB round-trips correctly through base64.
 	decoded, err := base64.StdEncoding.DecodeString(found.EmbeddingB64)
 	if err != nil {
 		t.Fatalf("base64 decode failed: %v", err)
 	}
-	// Each float32 is 4 bytes; verify the decoded blob has the right size.
+	// Stored as normalized float32 BLOB: 3 floats × 4 bytes = 12 bytes.
 	if len(decoded) != len(vec)*4 {
 		t.Errorf("decoded blob len %d, want %d (3 float32s × 4 bytes)", len(decoded), len(vec)*4)
 	}
+	// A freshly inserted embedding is not stale.
+	if found.Stale {
+		t.Error("freshly inserted embedding should not be stale")
+	}
 }
 
-// TestExportKnowledge_QualityGaps verifies all gap statuses are exported.
+// TestExportKnowledge_QualityGaps verifies ALL statuses are exported
+// (not just "open" — the GetGaps default). Also verifies the export
+// bypasses the 1000-row cap that GetGaps applies for normal UI queries.
 func TestExportKnowledge_QualityGaps(t *testing.T) {
 	s := openTestStore(t)
 
-	// Insert one open and one fixed gap.
 	_, err := s.UpsertGap(store.QualityGap{
 		NodeID: "repo::auth.go::Login", GapID: "no-test",
 		Description: "no test coverage", Severity: "high", Status: "open",
@@ -263,12 +282,23 @@ func TestExportKnowledge_QualityGaps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExportKnowledge: %v", err)
 	}
-	// Export should include both open and fixed gaps (Status: "all").
+	// Both open and fixed gaps must appear.
 	if exp.Summary.QualityGapCount < 2 {
-		t.Errorf("expected ≥2 gaps in export, got %d", exp.Summary.QualityGapCount)
+		t.Errorf("expected ≥2 gaps (both open and fixed), got %d", exp.Summary.QualityGapCount)
 	}
 	if exp.Summary.QualityGapCount != len(exp.QualityGaps) {
 		t.Errorf("summary count %d != slice len %d", exp.Summary.QualityGapCount, len(exp.QualityGaps))
+	}
+	// Verify both statuses are represented.
+	statuses := map[string]bool{}
+	for _, g := range exp.QualityGaps {
+		statuses[g.Status] = true
+	}
+	if !statuses["open"] {
+		t.Error("no 'open' gap in export")
+	}
+	if !statuses["fixed"] {
+		t.Error("no 'fixed' gap in export — GetGaps default 'open' filter may have leaked into export path")
 	}
 }
 
@@ -276,7 +306,6 @@ func TestExportKnowledge_QualityGaps(t *testing.T) {
 func TestExportKnowledge_SummaryCounts(t *testing.T) {
 	s := openTestStore(t)
 
-	// Insert a memory and an episode to have non-zero counts.
 	_, _ = s.InsertMemory(store.Memory{
 		Tier:      store.TierProject,
 		Content:   "summary counts test memory",
@@ -284,10 +313,10 @@ func TestExportKnowledge_SummaryCounts(t *testing.T) {
 		ExpiresAt: time.Now().Add(24 * time.Hour).Format(time.RFC3339),
 	})
 	_, _ = s.RememberEpisode(store.Episode{
-		AgentID:     "a",
-		EpisodeType: "decision",
-		Outcome:     "success",
-		Decision:    "counts test episode",
+		AgentID:       "a",
+		EpisodeType:   "decision",
+		Outcome:       "success",
+		Decision:      "counts test episode",
 		AffectedFiles: "[]", AffectedNodes: "[]", Tags: "[]",
 	})
 

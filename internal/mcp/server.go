@@ -3114,13 +3114,25 @@ func (s *Server) registerTools() {
 			"export_knowledge",
 			mcp.WithDescription(
 				"Exports all durable knowledge for this project to a portable JSON snapshot: "+
-					"memories (with version history, node anchors, and embedding vectors), "+
+					"memories (with version history, node anchors, and embedding vectors as base64), "+
 					"episodes, dynamic architectural rules, node annotations, and quality gaps. "+
+					"The export runs in a single read transaction — it is a consistent atomic snapshot "+
+					"even if concurrent writes occur. "+
 					"Use for backup, migration, or auditing accumulated agent knowledge. "+
 					"Graph nodes/edges are excluded (regenerable from source code). "+
-					"Transient data (tool_calls, sessions, web_cache) is also excluded. "+
-					"Write the returned JSON to a file with a tool call or shell command — "+
-					"large projects may produce multi-megabyte output.",
+					"Transient data (tool_calls, sessions, web_cache) is also excluded.\n\n"+
+					"IMPORTANT: Projects with embedding vectors produce large exports (10K memories "+
+					"with embeddings ≈ 20 MiB). Always provide output_path for any real project — "+
+					"inline responses above 512 KiB are rejected to protect the agent context window.",
+			),
+			mcp.WithString("output_path",
+				mcp.Description(
+					"Absolute path to write the JSON export file. "+
+						"Recommended for any project with memories or embeddings. "+
+						"The file is written atomically (temp-file + rename) so it is never partially written. "+
+						"Parent directories are created automatically. "+
+						"Example: \"/home/user/backups/synapses-export-2026-03-25.json\"",
+				),
 			),
 			mcp.WithString("format",
 				mcp.Description("Output format. Only \"json\" is supported (default)."),
