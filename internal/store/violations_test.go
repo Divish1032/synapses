@@ -89,6 +89,8 @@ func TestViolationIDsForFile_Match(t *testing.T) {
 			FromNode: graph.NodeID("cmd/main.go:main"),
 			ToNode:   graph.NodeID("internal/auth.go:Auth"),
 			EdgeType: graph.EdgeType("IMPORTS"),
+			FromFile: "cmd/main.go",
+			ToFile:   "internal/auth.go",
 		},
 	}
 	_ = st.LogViolations(vs)

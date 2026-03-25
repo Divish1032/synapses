@@ -218,8 +218,8 @@ CREATE TABLE IF NOT EXISTS violation_log (
     first_seen  TEXT NOT NULL,
     last_seen   TEXT NOT NULL,
     occurrences INTEGER NOT NULL DEFAULT 1,
-    from_file   TEXT NOT NULL DEFAULT '',
-    to_file     TEXT NOT NULL DEFAULT ''
+    from_file   TEXT,
+    to_file     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -903,11 +903,13 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE memories ADD COLUMN importance TEXT NOT NULL DEFAULT '1.0'`,
 		// Sprint 11.5: ACT-R frequency-weighted decay — access counter on memories.
 		`ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0`,
-		// L2 fix: add indexed file_path columns to violation_log for O(1) lookup instead of full-table LIKE scan.
-		`ALTER TABLE violation_log ADD COLUMN from_file TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE violation_log ADD COLUMN to_file   TEXT NOT NULL DEFAULT ''`,
-		`CREATE INDEX IF NOT EXISTS idx_vlog_from_file ON violation_log(from_file) WHERE from_file != ''`,
-		`CREATE INDEX IF NOT EXISTS idx_vlog_to_file   ON violation_log(to_file)   WHERE to_file   != ''`,
+		// L2 fix: add nullable file columns to violation_log for indexed lookup.
+		// NULL = legacy row (pre-migration, use LIKE fallback); non-NULL = post-migration.
+		// Empty string is valid for nodes with no source file (virtual/synthetic nodes).
+		`ALTER TABLE violation_log ADD COLUMN from_file TEXT`,
+		`ALTER TABLE violation_log ADD COLUMN to_file   TEXT`,
+		`CREATE INDEX IF NOT EXISTS idx_vlog_from_file ON violation_log(from_file) WHERE from_file IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_vlog_to_file   ON violation_log(to_file)   WHERE to_file   IS NOT NULL`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
@@ -3718,14 +3720,14 @@ func (s *Store) LogViolations(vs []config.Violation) error {
 // substring. Used by the watcher to distinguish newly-detected violations
 // (which should trigger an event) from pre-existing ones (which should not).
 func (s *Store) ViolationIDsForFile(file string) (map[string]struct{}, error) {
-	// Query by indexed file columns (exact match) instead of LIKE on node IDs.
-	// Rows inserted before the from_file/to_file migration fall back to the
-	// LIKE scan on the legacy columns so no violations are missed during upgrade.
+	// Post-migration rows: query by indexed from_file/to_file columns (exact match).
+	// Pre-migration rows: from_file IS NULL — fall back to LIKE on node IDs.
+	// NULL distinguishes legacy rows from new rows with empty-file nodes (from_file='').
 	rows, err := s.knowledgeDB.Query(
 		`SELECT id FROM violation_log WHERE from_file = ? OR to_file = ?
 		 UNION
 		 SELECT id FROM violation_log
-		 WHERE from_file = '' AND to_file = ''
+		 WHERE from_file IS NULL
 		   AND (from_node LIKE ? ESCAPE '\' OR to_node LIKE ? ESCAPE '\')`,
 		file, file, "%"+escapeLike(file)+"%", "%"+escapeLike(file)+"%",
 	)
