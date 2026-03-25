@@ -1,9 +1,8 @@
 // Package archivist synthesizes agent session transcripts into persistent
 // memory entries and code annotations.
 //
-// This is a Tier 2 (cold standby) component — the archivist llama-server
-// process is started lazily on first Memorize() call and shares the same
-// LLMClient interface as all other tiers.
+// This is a Tier 2 (cold standby) component — started lazily on first
+// Memorize() call and shares the same LLMClient interface as all other tiers.
 package archivist
 
 import (

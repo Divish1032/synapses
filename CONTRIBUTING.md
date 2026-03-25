@@ -59,7 +59,7 @@ synapses/
 │   ├── socket_activation_other.go      # Fallback (no-op) for unsupported platforms
 │   └── selfupdate.go                   # Self-update logic (GitHub Releases)
 ├── internal/
-│   ├── brain/          # In-process LLM layer (Ollama / llama-server / local GGUF)
+│   ├── brain/          # In-process LLM layer (Ollama / local GGUF)
 │   ├── graph/          # In-memory code graph (nodes, edges, BFS)
 │   ├── mcp/            # MCP server — tool registration and handlers
 │   │   ├── server.go       # Server constructor, hooks, tool registration

@@ -30,46 +30,6 @@ func TestEmbedBatch_EmptyTexts(t *testing.T) {
 	}
 }
 
-// ── EmbedBatch — Brain batch format (/v1/embed) ───────────────────────────────
-
-func newBrainBatchServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
-			"embeddings": [][]float32{{0.1, 0.2}, {0.3, 0.4}},
-		})
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-func TestEmbedBatch_BrainFormat(t *testing.T) {
-	srv := newBrainBatchServer(t)
-	c := embed.NewBrainClient(srv.URL)
-	vecs, err := c.EmbedBatch(ctx, []string{"hello", "world"})
-	if err != nil {
-		t.Fatalf("EmbedBatch (brain): %v", err)
-	}
-	if len(vecs) != 2 {
-		t.Errorf("expected 2 embeddings, got %d", len(vecs))
-	}
-}
-
-func TestEmbedBatch_BrainFormat_LengthMismatch(t *testing.T) {
-	// Server returns 1 embedding but we asked for 2 — should error.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
-			"embeddings": [][]float32{{0.1, 0.2}},
-		})
-	}))
-	defer srv.Close()
-	c := embed.NewBrainClient(srv.URL)
-	_, err := c.EmbedBatch(ctx, []string{"hello", "world"})
-	if err == nil {
-		t.Error("expected error for length mismatch")
-	}
-}
-
 // ── EmbedBatch — OpenAI batch format (/v1/embeddings) ─────────────────────────
 
 func newOpenAIBatchServer(t *testing.T) *httptest.Server {
@@ -160,7 +120,7 @@ func TestEmbedBatch_ServerError(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 	}))
 	defer srv.Close()
-	c := embed.NewBrainClient(srv.URL)
+	c := embed.NewClient(srv.URL+"/v1/embeddings", "model")
 	_, err := c.EmbedBatch(ctx, []string{"hello"})
 	if err == nil {
 		t.Error("expected error for 400 response")
@@ -168,7 +128,7 @@ func TestEmbedBatch_ServerError(t *testing.T) {
 }
 
 func TestEmbedBatch_Unreachable(t *testing.T) {
-	c := embed.NewBrainClient("http://127.0.0.1:19999")
+	c := embed.NewClient("http://127.0.0.1:19999/v1/embeddings", "model")
 	_, err := c.EmbedBatch(ctx, []string{"hello"})
 	if err == nil {
 		t.Error("expected error for unreachable server")

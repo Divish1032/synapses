@@ -104,17 +104,6 @@ func TestApplyDefaults_NegativeTimeout(t *testing.T) {
 	}
 }
 
-func TestApplyDefaults_NegativeEmbedPort(t *testing.T) {
-	path := writePartialConfig(t, map[string]interface{}{"embed_port": -5})
-	cfg, err := config.LoadFile(path)
-	if err != nil {
-		t.Fatalf("LoadFile: %v", err)
-	}
-	if cfg.EmbedPort != 11437 {
-		t.Errorf("EmbedPort = %d, want 11437", cfg.EmbedPort)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // AutoConfigureModels — boundary RAM values
 // ---------------------------------------------------------------------------
