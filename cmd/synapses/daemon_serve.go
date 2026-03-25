@@ -52,6 +52,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1250,91 +1251,9 @@ func cmdDaemonServe(args []string) error {
 	// GET /v1/health — Sprint 18 #2: full daemon health endpoint.
 	// Returns daemon uptime, per-project graph/memory sizes, brain availability,
 	// federation status, embedding model status, and pulse collector metrics.
-	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Pulse data is best-effort — respond even when pulse is disabled.
-		var snap map[string]interface{}
-		if sharedPulse != nil {
-			snap = sharedPulse.GetHealthSnapshot()
-		} else {
-			snap = map[string]interface{}{"status": "ok"}
-		}
-
-		// Daemon uptime.
-		snap["uptime_secs"] = int(time.Since(daemonStartedAt).Seconds())
-
-		// Aggregate per-project metrics.
-		projects := reg.All()
-		snap["project_count"] = len(projects)
-		var totalNodes, totalEdges, totalMemories int
-		var watchersDead int
-		var brainAvailable bool
-		var brainModel string
-		var fedHealthy, fedStale int
-
-		// Federation Status() does disk I/O; cap total wait across all projects.
-		fedCtx, fedCancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer fedCancel()
-
-		for _, pi := range projects {
-			if pi.Graph != nil {
-				totalNodes += pi.Graph.NodeCount()
-				totalEdges += pi.Graph.EdgeCount()
-			}
-			if pi.Store != nil {
-				totalMemories += pi.Store.CountEmbeddableMemories()
-			}
-			if pi.Watcher != nil && !pi.Watcher.IsAlive() {
-				watchersDead++
-			}
-			if pi.BrainClient != nil {
-				if model, _ := pi.BrainClient.HealthCheck(r.Context()); model != "" {
-					brainAvailable = true
-					brainModel = model
-				}
-			}
-			if pi.FederationResolver != nil {
-				for _, es := range pi.FederationResolver.Status(fedCtx) {
-					if es.Status == "indexed" {
-						fedHealthy++
-					} else {
-						fedStale++
-					}
-				}
-			}
-		}
-
-		if watchersDead > 0 {
-			snap["status"] = "degraded"
-		}
-		snap["total_nodes"] = totalNodes
-		snap["total_edges"] = totalEdges
-		snap["total_memories"] = totalMemories
-		snap["watchers_dead"] = watchersDead
-		snap["brain_available"] = brainAvailable
-		if brainModel != "" {
-			snap["brain_model"] = brainModel
-		}
-		snap["federation_healthy"] = fedHealthy
-		snap["federation_stale"] = fedStale
-
-		// Last index time and embedding model status from pulse events.
-		if sharedPulse != nil {
-			if t := sharedPulse.GetLastIndexTime(); t != "" {
-				snap["last_index_time"] = t
-			}
-			snap["embedding_status"] = sharedPulse.GetLatestEmbeddingModelStatus()
-		} else {
-			snap["embedding_status"] = "none"
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(snap)
-	})
+	// Handler logic lives in buildHealthHandler (defined below) so it can be
+	// unit-tested independently of the full daemon setup.
+	mux.HandleFunc("/v1/health", buildHealthHandler(reg, sharedPulse, daemonStartedAt))
 
 	// GET /api/admin/pulse/monthly?year=YYYY&month=MM — P5 Item 20: monthly ROI report.
 	mux.HandleFunc("/api/admin/pulse/monthly", func(w http.ResponseWriter, r *http.Request) {
@@ -1862,6 +1781,169 @@ func cmdDaemonServe(args []string) error {
 	}
 	logutil.Info("synapses daemon: stopped\n")
 	return nil
+}
+
+// buildHealthHandler returns the http.HandlerFunc for GET /v1/health.
+//
+// Extracted from the cmdDaemonServe inline closure so it can be unit-tested
+// independently of the full daemon setup.
+//
+// Latency design: two I/O-bound operations dominate per-project health checks:
+//
+//   - brain.HealthCheck makes a network call; impl.Available() has its own
+//     internal 2-second timeout that ignores the caller's context, so a
+//     sequential loop over N projects would block for up to 2s × N.
+//   - federation.Status opens SQLite files and performs disk I/O per sibling;
+//     with a shared context the first slow project drains the time budget for
+//     all others.
+//
+// Both are parallelised: each project runs in its own goroutine, and within a
+// project the brain check and federation check run concurrently.  Overall
+// handler latency is max(individual latencies) instead of the sum.  Each
+// project also gets its own 3-second federation context so that a slow project
+// cannot starve its siblings.
+func buildHealthHandler(reg *projectRegistry, sharedPulse *pulse.Client, daemonStartedAt time.Time) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Pulse data is best-effort — respond even when pulse is disabled.
+		var snap map[string]interface{}
+		if sharedPulse != nil {
+			snap = sharedPulse.GetHealthSnapshot()
+		} else {
+			snap = map[string]interface{}{"status": "ok"}
+		}
+
+		// Daemon uptime.
+		snap["uptime_secs"] = int(time.Since(daemonStartedAt).Seconds())
+
+		// Collect per-project health in parallel.
+		projects := reg.All()
+		snap["project_count"] = len(projects)
+
+		type projectResult struct {
+			nodes, edges, memories int
+			watcherDead            bool
+			brainModel             string // empty when brain unavailable
+			fedHealthy, fedStale   int
+		}
+
+		results := make([]projectResult, len(projects))
+		var outerWg sync.WaitGroup
+		for i, pi := range projects {
+			i, pi := i, pi
+			outerWg.Add(1)
+			go func() {
+				defer outerWg.Done()
+				pr := &results[i]
+
+				// Cheap reads — safe from any goroutine (graph/store are thread-safe).
+				if pi.Graph != nil {
+					pr.nodes = pi.Graph.NodeCount()
+					pr.edges = pi.Graph.EdgeCount()
+				}
+				if pi.Store != nil {
+					pr.memories = pi.Store.CountEmbeddableMemories()
+				}
+				if pi.Watcher != nil && !pi.Watcher.IsAlive() {
+					pr.watcherDead = true
+				}
+
+				// Brain check and federation check are I/O-bound; run concurrently
+				// so neither blocks the other.  They write to different struct fields
+				// (pr.brainModel vs pr.fedHealthy/fedStale) — no data race.
+				var innerWg sync.WaitGroup
+				if pi.BrainClient != nil {
+					innerWg.Add(1)
+					go func() {
+						defer innerWg.Done()
+						// impl.Available() uses context.Background() internally and
+						// cannot be cancelled from outside.  Running in a goroutine
+						// prevents it from lengthening the sequential chain.
+						if model, _ := pi.BrainClient.HealthCheck(r.Context()); model != "" {
+							pr.brainModel = model
+						}
+					}()
+				}
+				if pi.FederationResolver != nil {
+					innerWg.Add(1)
+					go func() {
+						defer innerWg.Done()
+						// Per-project context: a slow project exhausts only its own
+						// 3-second budget, not the budgets of all other projects.
+						pCtx, pCancel := context.WithTimeout(r.Context(), 3*time.Second)
+						defer pCancel()
+						for _, es := range pi.FederationResolver.Status(pCtx) {
+							if es.Status == "indexed" {
+								pr.fedHealthy++
+							} else {
+								pr.fedStale++
+							}
+						}
+					}()
+				}
+				innerWg.Wait()
+			}()
+		}
+		outerWg.Wait()
+
+		// Aggregate results.
+		var totalNodes, totalEdges, totalMemories, watchersDead, fedHealthy, fedStale int
+		brainModelSet := make(map[string]struct{})
+		for _, pr := range results {
+			totalNodes += pr.nodes
+			totalEdges += pr.edges
+			totalMemories += pr.memories
+			if pr.watcherDead {
+				watchersDead++
+			}
+			if pr.brainModel != "" {
+				brainModelSet[pr.brainModel] = struct{}{}
+			}
+			fedHealthy += pr.fedHealthy
+			fedStale += pr.fedStale
+		}
+
+		// Deterministic brain model output: sort distinct names so the response
+		// is stable across calls even when multiple projects use different models.
+		brainAvailable := len(brainModelSet) > 0
+		if brainAvailable {
+			models := make([]string, 0, len(brainModelSet))
+			for m := range brainModelSet {
+				models = append(models, m)
+			}
+			sort.Strings(models)
+			snap["brain_model"] = strings.Join(models, ",")
+		}
+
+		if watchersDead > 0 {
+			snap["status"] = "degraded"
+		}
+		snap["total_nodes"] = totalNodes
+		snap["total_edges"] = totalEdges
+		snap["total_memories"] = totalMemories
+		snap["watchers_dead"] = watchersDead
+		snap["brain_available"] = brainAvailable
+		snap["federation_healthy"] = fedHealthy
+		snap["federation_stale"] = fedStale
+
+		// Last index time and embedding model status from pulse events.
+		if sharedPulse != nil {
+			if t := sharedPulse.GetLastIndexTime(); t != "" {
+				snap["last_index_time"] = t
+			}
+			snap["embedding_status"] = sharedPulse.GetLatestEmbeddingModelStatus()
+		} else {
+			snap["embedding_status"] = "none"
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(snap)
+	}
 }
 
 // emitLifecycleEvent writes a structured JSON event to stdout (which is
