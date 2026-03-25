@@ -1,9 +1,10 @@
 package embed
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -86,75 +87,100 @@ func TestSafeModelEvent_PanicRecovery(t *testing.T) {
 	e.safeModelEvent("test_event")
 }
 
-func TestVerifyModelIntegrity_FP32_TOFU_FirstUse(t *testing.T) {
-	// FP32 variant with no hardcoded hash: first use should succeed (TOFU)
-	// and create a sidecar .sha256 file for future verification.
+func TestVerifyModelIntegrity_FP32_PinnedHash_IsNonEmpty(t *testing.T) {
+	// Guard: builtinModelSHA256FP32 must remain non-empty so GPU users get
+	// cryptographic verification rather than TOFU trust-on-first-use.
+	if builtinModelSHA256FP32 == "" {
+		t.Fatal("builtinModelSHA256FP32 is empty — GPU users will not get pinned-hash verification; pin the hash before shipping")
+	}
+	// Verify it looks like a hex-encoded SHA-256 (64 lowercase hex chars).
+	if len(builtinModelSHA256FP32) != 64 {
+		t.Fatalf("builtinModelSHA256FP32 length %d != 64 — must be a full SHA-256 hex digest", len(builtinModelSHA256FP32))
+	}
+	for _, c := range builtinModelSHA256FP32 {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("builtinModelSHA256FP32 contains non-hex character %q", c)
+		}
+	}
+}
+
+func TestVerifyModelIntegrity_FP32_PinnedHash_CorruptFile_ReturnsError(t *testing.T) {
+	// FP32 variant now has a pinned hash. Fake content must fail verification
+	// and the corrupt file must be removed so the next Embed() re-downloads.
 	dir := t.TempDir()
 	onnxPath := filepath.Join(dir, builtinModelFileFP32)
-	if err := os.WriteFile(onnxPath, []byte("fp32 model content"), 0o644); err != nil {
+	if err := os.WriteFile(onnxPath, []byte("not a real fp32 model"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	err := verifyModelIntegrity(onnxPath, builtinModelFileFP32)
-	if err != nil {
-		t.Fatalf("expected TOFU first-use to succeed, got: %v", err)
+	if err == nil {
+		t.Fatal("expected error for corrupt fp32 model, got nil")
 	}
 
-	// Sidecar file should exist.
-	sidecar := onnxPath + ".sha256"
-	stored, err := os.ReadFile(sidecar)
-	if err != nil {
-		t.Fatalf("sidecar file not created: %v", err)
-	}
-	if strings.TrimSpace(string(stored)) == "" {
-		t.Fatal("sidecar file is empty")
+	// The corrupt file should have been removed.
+	if _, statErr := os.Stat(onnxPath); !os.IsNotExist(statErr) {
+		t.Errorf("corrupt fp32 model file should have been removed, but still exists")
 	}
 }
 
-func TestVerifyModelIntegrity_FP32_TOFU_SubsequentLoad(t *testing.T) {
-	// After TOFU stores the hash, subsequent loads verify against it.
+func TestVerifyModelIntegrity_LimitReader_DoesNotFalseRejectSmallFile(t *testing.T) {
+	// The io.LimitReader cap (maxOnnxVerifyBytes = 2 GiB) must not truncate
+	// a legitimate small model file. Write a file with known content, compute
+	// its SHA-256 manually, then verify verifyModelIntegrity produces the same
+	// hash (and rejects it, since it won't match the pinned constant — but the
+	// error must be "hash mismatch", not "hash model file: read error").
 	dir := t.TempDir()
-	onnxPath := filepath.Join(dir, builtinModelFileFP32)
-	content := []byte("fp32 model content v2")
+	content := []byte("small synthetic model content for limit reader test")
+	onnxPath := filepath.Join(dir, builtinModelFileQuantized)
 	if err := os.WriteFile(onnxPath, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// First call: stores hash via TOFU.
-	if err := verifyModelIntegrity(onnxPath, builtinModelFileFP32); err != nil {
-		t.Fatalf("TOFU first-use failed: %v", err)
-	}
+	h := sha256.New()
+	h.Write(content)
+	wantHash := hex.EncodeToString(h.Sum(nil))
 
-	// Second call with same content: should pass.
-	if err := verifyModelIntegrity(onnxPath, builtinModelFileFP32); err != nil {
-		t.Fatalf("TOFU verification of unchanged file failed: %v", err)
+	err := verifyModelIntegrity(onnxPath, builtinModelFileQuantized)
+	// Expected to fail (content doesn't match pinned hash) but the error must
+	// reference both the expected and actual hash — proving the full file was
+	// read and the hash mismatch was detected, not an I/O error.
+	if err == nil {
+		t.Fatal("expected error (hash mismatch), got nil")
+	}
+	errMsg := err.Error()
+	if !containsSubstr(errMsg, wantHash) {
+		t.Errorf("error should contain actual hash %s, got: %v", wantHash, err)
 	}
 }
 
-func TestVerifyModelIntegrity_FP32_TOFU_TamperDetected(t *testing.T) {
-	// If the model file changes after TOFU, verification should fail.
+// containsSubstr is a helper to check substring without importing strings.
+func containsSubstr(s, sub string) bool {
+	return len(s) >= len(sub) && func() bool {
+		for i := 0; i <= len(s)-len(sub); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
+		}
+		return false
+	}()
+}
+
+func TestVerifyModelIntegrity_FP32_PinnedHash_EmptyFile_ReturnsError(t *testing.T) {
+	// An empty fp32 file must fail verification with the pinned hash.
 	dir := t.TempDir()
 	onnxPath := filepath.Join(dir, builtinModelFileFP32)
-	if err := os.WriteFile(onnxPath, []byte("original content"), 0o644); err != nil {
+	if err := os.WriteFile(onnxPath, []byte{}, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// First call: stores hash.
-	if err := verifyModelIntegrity(onnxPath, builtinModelFileFP32); err != nil {
-		t.Fatalf("TOFU first-use failed: %v", err)
-	}
-
-	// Tamper with the file.
-	if err := os.WriteFile(onnxPath, []byte("tampered content"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Second call: should detect tampering.
 	err := verifyModelIntegrity(onnxPath, builtinModelFileFP32)
 	if err == nil {
-		t.Fatal("expected TOFU to detect tampering, got nil")
+		t.Fatal("expected error for empty fp32 model, got nil")
 	}
-	if !strings.Contains(err.Error(), "TOFU") {
-		t.Fatalf("expected TOFU error, got: %v", err)
+
+	// The empty file should have been removed.
+	if _, statErr := os.Stat(onnxPath); !os.IsNotExist(statErr) {
+		t.Errorf("empty fp32 model file should have been removed, but still exists")
 	}
 }

@@ -403,15 +403,14 @@ No external sidecar binary is needed — the brain runs in the same process as t
 
 ### Choosing a Backend
 
-Synapses supports three LLM backends. Choose one based on your setup:
+Synapses supports two LLM backends. Choose one based on your setup:
 
 | Backend | When to use | Setup |
 |---------|------------|-------|
-| **llama-server** | No Ollama, want GPU/CPU auto-detect | `brain setup --llama-server` |
-| **ollama** | Ollama already installed | `brain setup` |
-| **local** | In-process GGUF, CGo build | `brain setup --local` |
+| **ollama** | Recommended — Ollama manages models and GPU/CPU selection | `brain setup` |
+| **local** | In-process GGUF, CGo build (advanced) | `brain setup --local` |
 
-**llama-server is the recommended default** — it requires no Ollama installation, auto-detects Metal/CUDA/CPU, and manages the subprocess automatically.
+**Ollama is the recommended default** — it manages model downloads, GPU/CPU auto-detection, and memory budgeting automatically.
 
 ### Quick Enable
 
@@ -425,7 +424,7 @@ Synapses supports three LLM backends. Choose one based on your setup:
 }
 ```
 
-Run `brain setup` (or `brain setup --llama-server`) to auto-detect your hardware and write a tuned `~/.synapses/brain.json`. The setup command probes installed models for latency and picks the right tier for your machine.
+Run `brain setup` to auto-detect your hardware and write a tuned `~/.synapses/brain.json`. The setup command probes installed models for latency and picks the right tier for your machine.
 
 ### Default Models
 

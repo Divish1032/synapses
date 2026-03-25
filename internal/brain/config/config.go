@@ -43,7 +43,6 @@ type BrainConfig struct {
 
 	// Model is the primary model tag (enrichment fallback when ModelEnrich is unset).
 	// Default: "qwen3.5:2b" — base model until fine-tuned SIL models are available.
-	// Used by llama-server (default) and Ollama (opt-in) backends.
 	Model string `json:"model,omitempty"`
 
 	// FastModel is the model tag for bulk ingestion (fallback when ModelIngest is unset).
@@ -136,36 +135,6 @@ type BrainConfig struct {
 	// Default: "standard"
 	DefaultMode string `json:"default_mode,omitempty"`
 
-	// --- Ollama-free embedding (v0.7.0) ---
-	// EmbeddingEnabled activates the /v1/embed endpoint on the brain HTTP server.
-	// When true, brain spawns a llama-server subprocess in embedding-only mode.
-	// No Ollama required. Default: false.
-	EmbeddingEnabled bool `json:"embedding_enabled"`
-
-	// EmbedModelPath is the path to the embedding GGUF model file.
-	// Default: ModelDir/nomic-embed-text-v1.5.Q4_K_M.gguf
-	EmbedModelPath string `json:"embed_model_path,omitempty"`
-
-	// EmbedHFRepo is the HuggingFace repo to download the embedding model from.
-	// Default: "nomic-ai/nomic-embed-text-v1.5-GGUF"
-	EmbedHFRepo string `json:"embed_hf_repo,omitempty"`
-
-	// EmbedHFFilename is the GGUF filename in the HuggingFace repo.
-	// Default: "nomic-embed-text-v1.5.Q4_K_M.gguf"
-	EmbedHFFilename string `json:"embed_hf_filename,omitempty"`
-
-	// EmbedPort is the internal port used by the llama-server subprocess.
-	// This is NOT exposed externally — brain proxies /v1/embed to it.
-	// Default: 11437
-	EmbedPort int `json:"embed_port,omitempty"`
-
-	// LlamaBinDir is the directory where llama.cpp binaries are installed.
-	// Default: ~/.synapses/bin
-	LlamaBinDir string `json:"llama_bin_dir,omitempty"`
-
-	// LlamaCPPVersion pins the llama.cpp GitHub release used for binary downloads.
-	// Default: "b5618"
-	LlamaCPPVersion string `json:"llama_cpp_version,omitempty"`
 
 	// PulseURL is the base URL of the synapses-pulse analytics sidecar.
 	// When set, every LLM inference call is reported as a BrainUsageEvent.
@@ -206,12 +175,6 @@ func DefaultConfig() BrainConfig {
 		LearningEnabled:  true,
 		DefaultPhase:     "development",
 		DefaultMode:      "standard",
-		EmbeddingEnabled: false,
-		EmbedHFRepo:      "nomic-ai/nomic-embed-text-v1.5-GGUF",
-		EmbedHFFilename:  "nomic-embed-text-v1.5.Q4_K_M.gguf",
-		EmbedPort:        11437,
-		LlamaBinDir:     filepath.Join(home, ".synapses", "bin"),
-		LlamaCPPVersion: "b5618",
 	}
 }
 
@@ -333,27 +296,6 @@ func (c *BrainConfig) applyDefaults() {
 	// Auto-compute GGUFPath from ModelDir+HFFilename when backend needs a GGUF file.
 	if c.Backend == "local" && c.GGUFPath == "" {
 		c.GGUFPath = filepath.Join(c.ModelDir, c.HFFilename)
-	}
-	// Embedding defaults.
-	if c.EmbedHFRepo == "" {
-		c.EmbedHFRepo = "nomic-ai/nomic-embed-text-v1.5-GGUF"
-	}
-	if c.EmbedHFFilename == "" {
-		c.EmbedHFFilename = "nomic-embed-text-v1.5.Q4_K_M.gguf"
-	}
-	if c.EmbedPort <= 0 {
-		c.EmbedPort = 11437
-	}
-	if c.LlamaBinDir == "" {
-		home, _ := os.UserHomeDir()
-		c.LlamaBinDir = filepath.Join(home, ".synapses", "bin")
-	}
-	if c.LlamaCPPVersion == "" {
-		c.LlamaCPPVersion = "b5618"
-	}
-	// Auto-compute EmbedModelPath from ModelDir+EmbedHFFilename when not set.
-	if c.EmbeddingEnabled && c.EmbedModelPath == "" {
-		c.EmbedModelPath = filepath.Join(c.ModelDir, c.EmbedHFFilename)
 	}
 
 	// Smart model selection: if any tier model is set to "auto", auto-configure

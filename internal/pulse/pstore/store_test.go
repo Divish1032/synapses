@@ -984,3 +984,52 @@ func TestGetSessionDeliveryStats_NegativeSavingsClampedToZero(t *testing.T) {
 		t.Errorf("expected tokensSaved=0 for negative savings, got %d", saved)
 	}
 }
+
+// TestGetLatestEmbeddingModelStatus verifies "none" before any events and the
+// most recent model_status after inserts.
+func TestGetLatestEmbeddingModelStatus(t *testing.T) {
+	t.Parallel()
+	s := testStore(t)
+
+	// Empty store returns "none".
+	if got := s.GetLatestEmbeddingModelStatus(); got != "none" {
+		t.Errorf("empty store: got %q, want %q", got, "none")
+	}
+
+	// Insert two events; latest status must win.
+	_ = s.InsertEmbeddingEvent(pulsetypes.EmbeddingEvent{ModelStatus: "downloading", Model: "nomic"})
+	_ = s.InsertEmbeddingEvent(pulsetypes.EmbeddingEvent{ModelStatus: "loaded", Model: "nomic", Success: true})
+
+	if got := s.GetLatestEmbeddingModelStatus(); got != "loaded" {
+		t.Errorf("after inserts: got %q, want %q", got, "loaded")
+	}
+}
+
+// TestGetLastIndexTime verifies "" before any events and an ISO timestamp after
+// an index event is recorded.
+func TestGetLastIndexTime(t *testing.T) {
+	t.Parallel()
+	s := testStore(t)
+
+	// Empty store returns "".
+	if got := s.GetLastIndexTime(); got != "" {
+		t.Errorf("empty store: got %q, want %q", got, "")
+	}
+
+	// Insert an index event.
+	before := time.Now().UTC().Add(-time.Second)
+	_ = s.InsertIndexEvent(pulsetypes.IndexEvent{FilesIndexed: 10, TotalNodes: 100})
+	after := time.Now().UTC().Add(time.Second)
+
+	got := s.GetLastIndexTime()
+	if got == "" {
+		t.Fatal("expected non-empty timestamp after InsertIndexEvent")
+	}
+	ts, err := time.Parse("2006-01-02T15:04:05Z", got)
+	if err != nil {
+		t.Fatalf("parse timestamp %q: %v", got, err)
+	}
+	if ts.Before(before) || ts.After(after) {
+		t.Errorf("timestamp %v out of range [%v, %v]", ts, before, after)
+	}
+}

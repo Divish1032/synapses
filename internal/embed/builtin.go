@@ -3,6 +3,7 @@ package embed
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -68,12 +69,21 @@ const (
 	builtinModelSHA256 = "b4342336debaea79de872370664b0aaeb67dea4605513d00ee236ea871a81f27"
 
 	// builtinModelSHA256FP32 is the expected SHA-256 of onnx/model.onnx at
-	// builtinModelRevision. Left empty to use TOFU (Trust-On-First-Use):
-	// verifyModelIntegrity writes a .sha256 sidecar on first download and
-	// verifies against it on every subsequent load — safe without a pinned hash.
-	// To pin: download onnx/model.onnx from HuggingFace at builtinModelRevision
-	// and run: shasum -a 256 model.onnx
-	builtinModelSHA256FP32 = ""
+	// builtinModelRevision (e5cf08aa). Verified from the Git LFS object ID,
+	// which equals the SHA-256 of the file content (confirmed by cross-checking
+	// the quantized model's LFS OID against sha256sum of the cached file).
+	// Update this value whenever builtinModelRevision changes.
+	// Captured from nomic-embed-text-v1.5 fp32 ONNX at revision e5cf08aa.
+	builtinModelSHA256FP32 = "147d5aa88c2101237358e17796cf3a227cead1ec304ec34b465bb08e9d952965"
+
+	// maxOnnxVerifyBytes caps how many bytes are read from disk when hashing
+	// the ONNX model file for integrity verification. The quantized model is
+	// ~137 MB and the FP32 model is ~548 MB; 2 GiB is far above the realistic
+	// ceiling for any ONNX embedding model. This prevents an adversary who
+	// replaces the model path with a symlink to a large file (e.g. /dev/zero)
+	// from causing the daemon to spin in an unbounded read inside doInit.
+	// A file above this size fails the SHA-256 check and triggers a re-download.
+	maxOnnxVerifyBytes = 2 << 30 // 2 GiB
 )
 
 // pipelineSlot is one independently-usable ONNX pipeline instance.
@@ -364,10 +374,11 @@ func (b *BuiltinEmbedder) doInit(ctx context.Context) error {
 //
 // modelFile identifies which variant is being verified:
 //   - builtinModelFileQuantized → hash verified against builtinModelSHA256
-//   - builtinModelFileFP32 → hash logged for capture but not enforced
+//   - builtinModelFileFP32 → hash verified against builtinModelSHA256FP32
 //
-// When builtinModelSHA256 is empty, the hash is logged for capture but not enforced.
-// TODO: capture the fp32 model SHA-256 hash and add it as builtinModelSHA256FP32.
+// When the expected hash is empty, the hash is written to a .sha256 sidecar
+// file on first use (TOFU) and verified against it on subsequent loads.
+// Both variants currently have pinned hashes — TOFU path is a safety fallback.
 func verifyModelIntegrity(onnxPath string, modelFile string) error {
 	f, err := os.Open(onnxPath)
 	if err != nil {
@@ -376,7 +387,11 @@ func verifyModelIntegrity(onnxPath string, modelFile string) error {
 	defer f.Close()
 
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	// Cap reads to maxOnnxVerifyBytes — prevents an adversarially large file
+	// at the model path (e.g. /dev/zero via symlink) from spinning the daemon
+	// in an unbounded read inside doInit. Any file above this size fails the
+	// pinned SHA-256 check and triggers a re-download.
+	if _, err := io.Copy(h, io.LimitReader(f, maxOnnxVerifyBytes)); err != nil {
 		return fmt.Errorf("hash model file: %w", err)
 	}
 
@@ -400,7 +415,7 @@ func verifyModelIntegrity(onnxPath string, modelFile string) error {
 		sidecar := onnxPath + ".sha256"
 		if stored, err := os.ReadFile(sidecar); err == nil {
 			storedHash := strings.TrimSpace(string(stored))
-			if storedHash != got {
+			if subtle.ConstantTimeCompare([]byte(storedHash), []byte(got)) != 1 {
 				os.Remove(onnxPath)
 				return fmt.Errorf("embedding model integrity check failed (TOFU): stored sha256:%s, got sha256:%s — removed corrupt file", storedHash, got)
 			}
@@ -414,7 +429,10 @@ func verifyModelIntegrity(onnxPath string, modelFile string) error {
 		logutil.Info("synapses: embedding model (%s) SHA-256: %s — TOFU: hash stored for future integrity verification\n", modelFile, got)
 		return nil
 	}
-	if got != expected {
+	// Constant-time comparison — consistent with DownloadGGUF's use of
+	// subtle.ConstantTimeCompare; safe if this path is ever called from a
+	// context where timing leaks matter.
+	if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
 		// Remove the tampered/corrupt file so the next attempt re-downloads.
 		os.Remove(onnxPath)
 		return fmt.Errorf("embedding model integrity check failed: expected sha256:%s, got sha256:%s — removed corrupt file", expected, got)
@@ -633,11 +651,10 @@ func detectAccelerator() string {
 // full-precision fp32 model for higher quality; CPU gets the quantized model
 // for lower memory and faster inference.
 func selectOnnxVariant() (modelFile, onnxRepoPath string) {
-	// FP32 escape hatch removed: until builtinModelSHA256FP32 is populated
-	// with a verified hash, we refuse to serve an unverified fp32 model even
-	// when explicitly requested. This prevents trust-on-first-use (TOFU) attacks
-	// where a compromised download would be permanently trusted.
-	// SYNAPSES_EMBED_FP32=1 forces fp32 model selection regardless of GPU detection.
+	// Both FP32 and quantized variants now have pinned SHA-256 hashes and can
+	// be served with full cryptographic verification.
+	// SYNAPSES_EMBED_FP32=1 forces fp32 model selection regardless of GPU
+	// detection — useful for testing or benchmarking on CPU hardware.
 	if os.Getenv("SYNAPSES_EMBED_FP32") == "1" {
 		logutil.Info("synapses: SYNAPSES_EMBED_FP32=1 — selecting fp32 ONNX model\n")
 		return builtinModelFileFP32, builtinOnnxFilePathFP32

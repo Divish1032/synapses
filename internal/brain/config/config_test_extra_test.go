@@ -240,22 +240,6 @@ func TestApplyDefaults_LocalBackendAutoComputesGGUFPath(t *testing.T) {
 	}
 }
 
-func TestApplyDefaults_EmbeddingEnabledAutoComputesEmbedModelPath(t *testing.T) {
-	path := writePartialConfig(t, map[string]interface{}{
-		"embedding_enabled": true,
-		"embed_model_path":  "",
-		"model_dir":         "/tmp/models",
-		"embed_hf_filename": "nomic-embed.gguf",
-	})
-	cfg, err := config.LoadFile(path)
-	if err != nil {
-		t.Fatalf("LoadFile: %v", err)
-	}
-	want := "/tmp/models/nomic-embed.gguf"
-	if cfg.EmbedModelPath != want {
-		t.Errorf("EmbedModelPath = %q after applyDefaults, want %q", cfg.EmbedModelPath, want)
-	}
-}
 
 // ---------------------------------------------------------------------------
 // AutoConfigureModels — additional coverage beyond config_test.go
@@ -365,11 +349,6 @@ func TestApplyDefaults_AllZeroOverrides(t *testing.T) {
 		"default_mode":       "",
 		"model_dir":          "",
 		"hf_filename":        "",
-		"embed_hf_repo":      "",
-		"embed_hf_filename":  "",
-		"embed_port":         0,
-		"llama_bin_dir":      "",
-		"llama_cpp_version":  "",
 	})
 	cfg, err := config.LoadFile(path)
 	if err != nil {
@@ -402,21 +381,6 @@ func TestApplyDefaults_AllZeroOverrides(t *testing.T) {
 	}
 	if cfg.HFFilename == "" {
 		t.Error("expected HFFilename to be set")
-	}
-	if cfg.EmbedHFRepo == "" {
-		t.Error("expected EmbedHFRepo to be set")
-	}
-	if cfg.EmbedHFFilename == "" {
-		t.Error("expected EmbedHFFilename to be set")
-	}
-	if cfg.EmbedPort == 0 {
-		t.Error("expected EmbedPort to be set")
-	}
-	if cfg.LlamaBinDir == "" {
-		t.Error("expected LlamaBinDir to be set")
-	}
-	if cfg.LlamaCPPVersion == "" {
-		t.Error("expected LlamaCPPVersion to be set")
 	}
 }
 
