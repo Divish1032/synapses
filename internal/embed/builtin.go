@@ -415,7 +415,7 @@ func verifyModelIntegrity(onnxPath string, modelFile string) error {
 		sidecar := onnxPath + ".sha256"
 		if stored, err := os.ReadFile(sidecar); err == nil {
 			storedHash := strings.TrimSpace(string(stored))
-			if storedHash != got {
+			if subtle.ConstantTimeCompare([]byte(storedHash), []byte(got)) != 1 {
 				os.Remove(onnxPath)
 				return fmt.Errorf("embedding model integrity check failed (TOFU): stored sha256:%s, got sha256:%s — removed corrupt file", storedHash, got)
 			}
