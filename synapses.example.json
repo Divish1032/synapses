@@ -109,12 +109,15 @@
 
   "brain": {
     "enabled": false,
+    "intelligence_mode": "",
     "ollama_url": "http://localhost:11434",
     "model": "qwen3.5:2b",
     "fast_model": "qwen3.5:2b",
     "model_ingest": "",
+    "model_guardian": "",
     "model_enrich": "",
     "model_orchestrate": "",
+    "model_archivist": "",
     "db_path": "",
     "ingest": false,
     "enrich": false,
