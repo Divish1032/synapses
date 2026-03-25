@@ -77,6 +77,7 @@ func (a *Aggregator) loop() {
 		case <-ticker.C:
 			a.rollup()
 		case <-a.stopCh:
+			a.rollup()
 			return
 		}
 	}
