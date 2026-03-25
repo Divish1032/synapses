@@ -285,6 +285,11 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 				remainingStale = 0
 			}
 			coveragePct = float64(totalMemories-remainingStale) / float64(totalMemories)
+		if coveragePct < 0 {
+			coveragePct = 0
+		} else if coveragePct > 1 {
+			coveragePct = 1
+		}
 		}
 		pc.RecordEmbeddingEvent(pulse.EmbeddingEvent{
 			Trigger:     "startup",
