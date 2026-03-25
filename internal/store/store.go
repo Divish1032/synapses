@@ -2018,7 +2018,7 @@ func (s *Store) reconcileOrphanedReferences() {
 
 	// agent_watched_symbols uses entity_id (not node_id) referencing graph nodes.
 	// Clean up symbols pointing at nodes that no longer exist in the graph.
-	if r, err := s.knowledgeDB.Query("SELECT DISTINCT entity_id FROM agent_watched_symbols"); err == nil {
+	if r, err := s.knowledgeDB.Query("SELECT DISTINCT entity_id FROM agent_watched_symbols LIMIT 100000"); err == nil {
 		var entityIDs []string
 		for r.Next() {
 			var eid string
@@ -2027,6 +2027,9 @@ func (s *Store) reconcileOrphanedReferences() {
 			}
 		}
 		r.Close()
+		if len(entityIDs) == 100000 {
+			logutil.Warn("synapses: store: agent_watched_symbols has >100k distinct entities; reconcile truncated — consider pruning old sessions\n")
+		}
 		existingNodes := batchNodeExists(entityIDs)
 		for _, eid := range entityIDs {
 			if !existingNodes[eid] {
