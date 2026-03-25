@@ -1017,6 +1017,7 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 	}
 
 	// Build tiers.
+	idx := g.index
 	tierNodes := map[int][]EntityRef{}
 	for id, depth := range visited {
 		if depth == 0 {
@@ -1025,6 +1026,12 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 		n := g.nodes[id]
 		if n == nil {
 			continue
+		}
+		// Skip tombstoned nodes (deleted but not yet compacted from inEdges).
+		if idx != nil && idx.Ready() {
+			if seq := idx.UnsafeSeq(id); seq != 0 && idx.UnsafeIsTombstoned(seq) {
+				continue
+			}
 		}
 		tierNodes[depth] = append(tierNodes[depth], EntityRef{
 			ID:   id,
