@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // gitRootForDir returns the absolute path of the git repository root that
@@ -156,11 +157,17 @@ func fileChurn(repoRoot string, days int) (map[string]int, error) {
 	}
 
 	counts := make(map[string]int)
+	commitCount := 0
 	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			counts[line]++
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			commitCount++
+		} else {
+			counts[trimmed]++
 		}
+	}
+	if commitCount >= 10000 {
+		logutil.Warn("synapses: metrics: fileChurn git log truncated at 10000 commits; churn counts may undercount for mature repositories\n")
 	}
 	return counts, nil
 }
