@@ -1929,6 +1929,21 @@ func buildHealthHandler(reg *projectRegistry, sharedPulse *pulse.Client, daemonS
 			snap["brain_model"] = strings.Join(models, ",")
 		}
 
+		// Best-effort: list installed Ollama models for diagnostics.
+		// Use the first available brain client — Ollama URL is daemon-wide.
+		for _, pi := range projects {
+			if pi.BrainClient != nil {
+				mctx, mcancel := context.WithTimeout(r.Context(), 3*time.Second)
+				installed := pi.BrainClient.ListInstalledModels(mctx)
+				mcancel()
+				if len(installed) > 0 {
+					sort.Strings(installed)
+					snap["ollama_installed_models"] = installed
+				}
+				break
+			}
+		}
+
 		if watchersDead > 0 {
 			snap["status"] = "degraded"
 		}
