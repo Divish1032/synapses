@@ -104,6 +104,8 @@ func TestHandleExportKnowledge_Basic(t *testing.T) {
 // when output_path is provided and returns only the summary (not the full JSON).
 func TestHandleExportKnowledge_OutputPath(t *testing.T) {
 	srv := newTestServer(t)
+	root := t.TempDir()
+	srv.graph.SetRoot(root)
 
 	_, _ = srv.store.InsertMemory(store.Memory{
 		Tier:      store.TierProject,
@@ -112,7 +114,7 @@ func TestHandleExportKnowledge_OutputPath(t *testing.T) {
 		ExpiresAt: time.Now().Add(24 * time.Hour).Format(time.RFC3339),
 	})
 
-	outPath := filepath.Join(t.TempDir(), "export.json")
+	outPath := filepath.Join(root, "export.json")
 
 	result, err := srv.handleExportKnowledge(context.Background(), callTool(map[string]any{
 		"output_path": outPath,
@@ -158,8 +160,10 @@ func TestHandleExportKnowledge_OutputPath(t *testing.T) {
 // created automatically when they don't exist.
 func TestHandleExportKnowledge_OutputPath_CreatesDir(t *testing.T) {
 	srv := newTestServer(t)
+	root := t.TempDir()
+	srv.graph.SetRoot(root)
 
-	outPath := filepath.Join(t.TempDir(), "subdir", "nested", "export.json")
+	outPath := filepath.Join(root, "subdir", "nested", "export.json")
 
 	result, err := srv.handleExportKnowledge(context.Background(), callTool(map[string]any{
 		"output_path": outPath,
@@ -247,6 +251,8 @@ func TestHandleExportKnowledge_RelativePathRejected(t *testing.T) {
 // rejection before marshaling.
 func TestHandleExportKnowledge_EmbeddingsRequireOutputPath(t *testing.T) {
 	srv := newTestServer(t)
+	root := t.TempDir()
+	srv.graph.SetRoot(root)
 
 	// Insert a memory with an embedding.
 	id, err := srv.store.InsertMemory(store.Memory{
@@ -279,7 +285,7 @@ func TestHandleExportKnowledge_EmbeddingsRequireOutputPath(t *testing.T) {
 	}
 
 	// File mode must still succeed.
-	outPath := filepath.Join(t.TempDir(), "embed-export.json")
+	outPath := filepath.Join(root, "embed-export.json")
 	result2, err := srv.handleExportKnowledge(context.Background(), callTool(map[string]any{
 		"output_path": outPath,
 	}))
@@ -299,6 +305,8 @@ func TestHandleExportKnowledge_EmbeddingsRequireOutputPath(t *testing.T) {
 // partial-write window where the file is incomplete JSON).
 func TestHandleExportKnowledge_AtomicWrite(t *testing.T) {
 	srv := newTestServer(t)
+	root := t.TempDir()
+	srv.graph.SetRoot(root)
 
 	for i := 0; i < 5; i++ {
 		_, _ = srv.store.InsertMemory(store.Memory{
@@ -309,7 +317,7 @@ func TestHandleExportKnowledge_AtomicWrite(t *testing.T) {
 		})
 	}
 
-	outPath := filepath.Join(t.TempDir(), "atomic.json")
+	outPath := filepath.Join(root, "atomic.json")
 
 	_, err := srv.handleExportKnowledge(context.Background(), callTool(map[string]any{
 		"output_path": outPath,
