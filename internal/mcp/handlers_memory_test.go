@@ -269,14 +269,17 @@ func TestMemoryTouchOnAccess(t *testing.T) {
 		t.Fatalf("expected initial access_count=0, got %d", initial.AccessCount)
 	}
 
-	// Call session_init with scope=full so memories are surfaced and touched.
+	// Call session_init with scope=full so the memory-surfacing code path
+	// (gated by !quickMode) runs and TouchMemory is enqueued.
 	// Default scope is "standard" which skips memory surfacing (quickMode).
 	srv.handleSessionInit(ctx, callTool(map[string]any{
 		"agent_id": "agent-8",
 		"scope":    "full",
 	}))
-	// TouchMemory runs in a background goroutine — give it time to complete.
-	time.Sleep(100 * time.Millisecond)
+	// TouchMemory runs in a background goroutine and persists an RFC3339
+	// second-precision timestamp. Sleep >1 s so the updated expires_at
+	// falls in a strictly later second than initialExpiry.
+	time.Sleep(1100 * time.Millisecond)
 
 	// Read again and verify touch evidence: access_count incremented, last_accessed_at set.
 	mems, _ = srv.store.QueryMemories(store.TierProject, "", "", 10)
