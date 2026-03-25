@@ -588,3 +588,87 @@ func TestScheduler_ModelManager_HealthRed_SkipsGate(t *testing.T) {
 		t.Error("warmUp must NOT be called when health is Red — gate must be bypassed")
 	}
 }
+
+// TestScheduler_P2Piggyback verifies that P2 tasks drain immediately when a P1
+// task runs under Yellow health (the model is already loaded, so P2 can piggyback).
+func TestScheduler_P2Piggyback(t *testing.T) {
+	sched, cleanup := newTestSchedulerYellow(t, "qwen3.5:2b")
+	defer cleanup()
+
+	var p1Ran, p2Ran atomic.Bool
+
+	// Submit a P1 and a P2 task.
+	sched.Submit("p1-task", PriorityP1, func() { p1Ran.Store(true) })
+	sched.Submit("p2-task", PriorityP2, func() { p2Ran.Store(true) })
+
+	// Under Yellow, the drain loop picks P1. After P1 runs, the piggyback
+	// logic should drain P2 with Green eligibility (since model is loaded).
+	deadline := time.After(12 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timeout: p1Ran=%v, p2Ran=%v", p1Ran.Load(), p2Ran.Load())
+		default:
+			if p1Ran.Load() && p2Ran.Load() {
+				return // success: both ran
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+}
+
+// TestScheduler_HealthTransitionDrain verifies that queued tasks drain when
+// health transitions from Yellow to Green.
+func TestScheduler_HealthTransitionDrain(t *testing.T) {
+	// Start with Yellow — P2 tasks stay in queue.
+	p := &SystemPulse{
+		httpClient: nil,
+		done:       make(chan struct{}),
+	}
+	p.mu.Lock()
+	p.current = SystemState{
+		AvailableRAM:      2 * 1024 * 1024 * 1024,
+		CPULoadNorm:       0.5,
+		OllamaModelLoaded: "qwen3.5:2b",
+		Health:            HealthYellow,
+		SampledAt:         time.Now(),
+	}
+	p.mu.Unlock()
+
+	sched := NewScheduler(p)
+	sched.Start()
+	defer sched.Stop()
+	defer p.stopOnce.Do(func() { close(p.done) })
+
+	var taskRan atomic.Bool
+	sched.Submit("delayed-task", PriorityP2, func() { taskRan.Store(true) })
+
+	// P2 under Yellow → stays in queue on first tick (only drained by piggyback
+	// if a P1 task ran first). With no P1, P2 waits.
+	time.Sleep(200 * time.Millisecond)
+
+	// Transition to Green by updating the pulse state.
+	p.mu.Lock()
+	p.current = SystemState{
+		AvailableRAM:      4 * 1024 * 1024 * 1024,
+		CPULoadNorm:       0.3,
+		OllamaModelLoaded: "qwen3.5:2b",
+		Health:            HealthGreen,
+		SampledAt:         time.Now(),
+	}
+	p.mu.Unlock()
+
+	// Wait for the drain tick to detect the transition and drain.
+	deadline := time.After(12 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timeout: P2 task should have drained after health→Green")
+		default:
+			if taskRan.Load() {
+				return // success
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+}

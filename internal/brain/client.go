@@ -343,6 +343,9 @@ type NLClassifyResult struct {
 	// NodeType is one of: concept | entity | artifact | decision.
 	// Empty means the LLM returned an unrecognised value; caller keeps the default.
 	NodeType string
+	// Description is a one-sentence LLM-generated summary of the entity.
+	// Empty when the LLM is unavailable or returns an invalid response.
+	Description string
 }
 
 // NLClassifyRequest bundles the file path and candidates for a single
@@ -382,10 +385,14 @@ func (c *Client) ScheduleNLClassification(req NLClassifyRequest, applyFn func([]
 	})
 }
 
-// classifyNLCandidates sends one classification prompt per candidate to the LLM.
-// Each prompt is small (~50-80 tokens input, ~1-5 tokens output) so the full
-// batch for a typical document (20 candidates) completes in ~10-20 seconds on a
-// local 4B model.
+// classifyNLCandidates sends classification + description prompts per candidate
+// to the LLM. Each prompt is small (~50-80 tokens input, ~1-10 tokens output)
+// so the full batch for a typical document (20 candidates) completes in
+// ~15-30 seconds on a local 4B model.
+//
+// Two-pass strategy within a single model residency window:
+//   1. Entity type classification: concept | entity | artifact | decision
+//   2. One-sentence description generation (skipped if classification fails)
 //
 // Valid NodeType responses: concept | entity | artifact | decision
 // Anything else is silently ignored (caller keeps the Tier 0 default "concept").
@@ -399,20 +406,60 @@ func classifyNLCandidates(b Brain, candidates []NLCandidate) []NLClassifyResult 
 		if c.NodeID == "" || c.Name == "" {
 			continue
 		}
+		// Pass 0: Binary relevance filter for low-confidence candidates.
+		// Skip LLM call for high-confidence candidates (backticks, frontmatter).
+		if c.Context != "frontmatter tag" && c.Context != "frontmatter category" {
+			relPrompt := buildRelevancePrompt(c.Name, c.Context)
+			relResp, relErr := b.Generate(ctx, relPrompt)
+			if relErr == nil && relResp != "" && !parseRelevanceResponse(relResp) {
+				continue // LLM says not a meaningful concept — skip
+			}
+		}
+
+		// Pass 1: Entity type classification.
 		prompt := buildEntityTypePrompt(c.Name, c.Context)
 		resp, err := b.Generate(ctx, prompt)
 		if err != nil || resp == "" {
 			continue
 		}
 		nodeType := parseEntityTypeResponse(resp)
-		if nodeType != "" {
-			results = append(results, NLClassifyResult{
-				NodeID:   c.NodeID,
-				NodeType: nodeType,
-			})
+		if nodeType == "" {
+			continue
 		}
+
+		result := NLClassifyResult{
+			NodeID:   c.NodeID,
+			NodeType: nodeType,
+		}
+
+		// Pass 2: One-sentence description.
+		descPrompt := buildDescriptionPrompt(c.Name, c.Context)
+		descResp, descErr := b.Generate(ctx, descPrompt)
+		if descErr == nil && descResp != "" {
+			result.Description = parseDescriptionResponse(descResp)
+		}
+
+		results = append(results, result)
 	}
 	return results
+}
+
+// buildRelevancePrompt returns a binary yes/no prompt for entity relevance filtering.
+// Used to filter low-confidence candidates before spending tokens on full classification.
+func buildRelevancePrompt(name, context string) string {
+	return "Is \"" + name + "\" a specific technical concept, named entity, or design decision? Answer yes or no only."
+}
+
+// parseRelevanceResponse extracts a yes/no answer from the LLM's response.
+// Returns true for "yes" (relevant), false for "no" (not relevant).
+// Defaults to true (include) when the response is ambiguous.
+func parseRelevanceResponse(resp string) bool {
+	r := strings.ToLower(strings.TrimSpace(resp))
+	if fields := strings.Fields(r); len(fields) > 0 {
+		r = fields[0]
+	}
+	r = strings.Trim(r, ".,;:!?\"'")
+	return r != "no"
 }
 
 // buildEntityTypePrompt returns a minimal classification prompt for the LLM.
@@ -435,6 +482,47 @@ func buildEntityTypePrompt(name, context string) string {
 	}
 	prompt += "Type (one word only — concept / entity / artifact / decision):"
 	return prompt
+}
+
+// buildDescriptionPrompt returns a minimal one-sentence description prompt.
+// Output should be a single sentence (max ~30 words). Designed for low-latency
+// classification within the same model residency window as entity type prompts.
+func buildDescriptionPrompt(name, context string) string {
+	ctx := strings.TrimSpace(context)
+	if len(ctx) > 150 {
+		cut := ctx[:150]
+		if idx := strings.LastIndexByte(cut, ' '); idx > 0 {
+			ctx = cut[:idx]
+		} else {
+			ctx = cut
+		}
+	}
+	prompt := "Describe \"" + name + "\" in one sentence"
+	if ctx != "" {
+		prompt += " based on: \"" + ctx + "\""
+	}
+	prompt += ".\nDescription:"
+	return prompt
+}
+
+// parseDescriptionResponse cleans the LLM's description response.
+// Returns a trimmed single sentence, or "" if the response is too long or empty.
+func parseDescriptionResponse(resp string) string {
+	s := strings.TrimSpace(resp)
+	// Take only the first line/sentence — LLM might explain further.
+	if idx := strings.IndexByte(s, '\n'); idx > 0 {
+		s = s[:idx]
+	}
+	s = strings.TrimSpace(s)
+	// Guard against excessively long descriptions (LLM rambling).
+	if len(s) > 200 {
+		if idx := strings.LastIndexByte(s[:200], '.'); idx > 0 {
+			s = s[:idx+1]
+		} else {
+			s = s[:200]
+		}
+	}
+	return s
 }
 
 // parseEntityTypeResponse extracts a valid node type from the LLM's one-word response.

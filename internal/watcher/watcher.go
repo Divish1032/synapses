@@ -2222,6 +2222,9 @@ func (w *Watcher) scheduleNLClassification(filePath string, unresolved []parser.
 					n.Metadata = make(map[string]string)
 				}
 				n.Metadata["tier"] = "2"
+				if r.Description != "" {
+					n.Metadata["description"] = r.Description
+				}
 			})
 		}
 	})

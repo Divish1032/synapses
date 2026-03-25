@@ -135,3 +135,33 @@ func TestFindByTypedMethod_PartialNameMatch(t *testing.T) {
 		t.Errorf("expected empty string for partial method name, got %q", id)
 	}
 }
+
+func TestSignalToEdgeType(t *testing.T) {
+	tests := []struct {
+		signal string
+		want   graph.EdgeType
+	}{
+		{"caused by", graph.EdgeCausedBy},
+		{"causes", graph.EdgeCausedBy},
+		{"instance of", graph.EdgeInstanceOf},
+		{"is a type of", graph.EdgeInstanceOf},
+		{"contradicts", graph.EdgeContradicts},
+		{"conflicts with", graph.EdgeContradicts},
+		{"depends on", graph.EdgeCausedBy},
+		{"depends_on", graph.EdgeCausedBy},
+		{"implements", graph.EdgeInstanceOf},
+		{"implemented by", graph.EdgeInstanceOf},
+		{"extends", graph.EdgeInstanceOf},
+		{"extended by", graph.EdgeInstanceOf},
+		{"uses", graph.EdgeRelatesTo},
+		{"used by", graph.EdgeRelatesTo},
+		{"see also", graph.EdgeRelatesTo},
+		{"related to", graph.EdgeRelatesTo},
+	}
+	for _, tt := range tests {
+		got := signalToEdgeType(tt.signal)
+		if got != tt.want {
+			t.Errorf("signalToEdgeType(%q) = %q, want %q", tt.signal, got, tt.want)
+		}
+	}
+}

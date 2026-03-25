@@ -128,6 +128,19 @@ func resolveNLCore(
 		}
 
 		candidates := parser.ExtractEntityCandidates(body)
+
+		// Frontmatter-derived candidates: tags and category from the file node
+		// metadata are high-confidence entity signals (explicitly authored).
+		fileNodeID := g.MakeNodeID(sec.File, sec.File)
+		if fileNode := g.GetNode(fileNodeID); fileNode != nil {
+			var fmTags []string
+			if raw := fileNode.Metadata["frontmatter_tags"]; raw != "" {
+				fmTags = strings.Split(raw, ",")
+			}
+			fmCandidates := parser.ExtractFrontmatterCandidates(fmTags, fileNode.Metadata["frontmatter_category"])
+			candidates = append(candidates, fmCandidates...)
+		}
+
 		if len(candidates) == 0 {
 			continue
 		}
@@ -213,6 +226,8 @@ func applyRelationshipSignals(g *graph.Graph, sec *graph.Node, signals []parser.
 }
 
 // signalToEdgeType maps a relationship keyword to a graph EdgeType.
+// Covers all 8 signal types detected by Tier 0 regex: depends on, implements,
+// uses, extends, caused by, instance of, see also/related to, contradicts.
 func signalToEdgeType(signal string) graph.EdgeType {
 	lower := strings.ToLower(signal)
 	switch {
@@ -222,6 +237,14 @@ func signalToEdgeType(signal string) graph.EdgeType {
 		return graph.EdgeInstanceOf
 	case strings.Contains(lower, "contradicts") || strings.Contains(lower, "conflicts"):
 		return graph.EdgeContradicts
+	case strings.Contains(lower, "depends on") || strings.Contains(lower, "depends_on"):
+		return graph.EdgeCausedBy // dependency is a causal relationship
+	case strings.Contains(lower, "implements") || strings.Contains(lower, "implemented by"):
+		return graph.EdgeInstanceOf // implementation is an instance-of relationship
+	case strings.Contains(lower, "extends") || strings.Contains(lower, "extended by"):
+		return graph.EdgeInstanceOf // extension is specialisation
+	case strings.Contains(lower, "uses") || strings.Contains(lower, "used by"):
+		return graph.EdgeRelatesTo // generic usage — no stronger semantic available
 	default:
 		return graph.EdgeRelatesTo
 	}
