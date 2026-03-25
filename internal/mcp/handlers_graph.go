@@ -288,7 +288,7 @@ var toolCatalog = []toolCatalogEntry{
 	{Name: "get_context", Category: "exploration", Description: "Relevance-ranked subgraph around an entity", Keywords: []string{"context", "understand", "entity", "function", "struct", "interface", "subgraph", "explore", "code", "definition"}, Example: `get_context(entity="AuthService")`},
 	{Name: "find_entity", Category: "exploration", Description: "Locate nodes by name or substring", Keywords: []string{"find", "search", "locate", "entity", "name", "symbol", "discover", "where", "defined", "definition", "which", "contains", "method", "function", "class", "type", "has"}, Example: `find_entity(query="Auth")`},
 	{Name: "get_file_context", Category: "exploration", Description: "All entities in a file", Keywords: []string{"file", "entities", "overview", "list", "defined"}, Example: `get_file_context(file="internal/store/tasks.go")`},
-	{Name: "search", Category: "exploration", Description: "Keyword/fulltext search across entities", Keywords: []string{"search", "keyword", "concept", "fulltext", "semantic", "grep"}, Example: `search(query="rate limiting", mode="fulltext")`},
+	{Name: "search", Category: "exploration", Description: "Keyword/fulltext/semantic search across entities", Keywords: []string{"search", "keyword", "concept", "fulltext", "semantic", "grep", "hyde"}, Example: `search(query="rate limiting", mode="semantic")`},
 	{Name: "get_call_chain", Category: "exploration", Description: "Shortest call path between two entities", Keywords: []string{"call", "chain", "path", "trace", "reach", "how"}, Example: `get_call_chain(from="Handler", to="Repository")`},
 	{Name: "get_impact", Category: "exploration", Description: "Blast-radius analysis of what breaks if entity changes", Keywords: []string{"impact", "blast", "radius", "breaks", "change", "depends", "affected", "callers", "usage", "uses", "downstream", "refactor", "safe", "remove", "delete", "who", "using", "touching"}, Example: `get_impact(symbol="CarveEgoGraph")`},
 
@@ -1568,12 +1568,10 @@ func (s *Server) handleSemanticSearch(
 		if len(results) > limit {
 			results = results[:limit]
 		}
-		if len(vectorResults) > 0 {
-			if hydeHypothesis != "" {
-				searchMode = "hybrid_vector+fts5+hyde"
-			} else {
-				searchMode = "hybrid_vector+fts5"
-			}
+		if hydeHypothesis != "" {
+			searchMode = "hybrid_vector+fts5+hyde"
+		} else {
+			searchMode = "hybrid_vector+fts5"
 		}
 	} else {
 		results = ftsResults
