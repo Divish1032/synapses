@@ -74,7 +74,7 @@ func safeReadManifest(path string) ([]byte, error) {
 	if !strings.HasPrefix(real, realDir+string(filepath.Separator)) && real != realDir {
 		return nil, os.ErrPermission
 	}
-	return os.ReadFile(path)
+	return os.ReadFile(real)
 }
 
 // ── manifest parsers ──────────────────────────────────────────────────────────
