@@ -8,6 +8,7 @@ package brain
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -192,14 +193,32 @@ const hydeTimeout = 500 * time.Millisecond
 //
 // The caller should embed the returned hypothesis and, on empty return, fall back
 // to embedding the original query unchanged.
+// hydeMaxQueryRunes caps the query length used in the HyDE prompt.
+// Typical semantic queries are 5-20 words; 150 runes keeps the total prompt
+// well under the "~100 token" budget specified in the design doc.
+const hydeMaxQueryRunes = 150
+
 func (c *Client) GenerateHypothetical(ctx context.Context, query string) string {
 	if c.scheduler.ShouldDegrade() {
 		return ""
 	}
 	hydeCtx, cancel := context.WithTimeout(ctx, hydeTimeout)
 	defer cancel()
-	prompt := "Write a realistic function signature or type definition for code that answers: " +
-		`"` + query + `". Output only the code definition, no explanation.`
+
+	// Truncate long queries to keep the prompt compact. Long queries (e.g. a full
+	// sentence or pasted code) could push the LLM past its context budget.
+	q := query
+	if rr := []rune(q); len(rr) > hydeMaxQueryRunes {
+		q = string(rr[:hydeMaxQueryRunes])
+	}
+
+	// Use fmt.Sprintf %q to safely quote the query. This escapes any embedded
+	// double-quotes so they cannot accidentally terminate the delimited region
+	// and confuse the LLM about where the query ends.
+	prompt := fmt.Sprintf(
+		"Write a realistic function signature or type definition for code that answers: %s. Output only the code definition, no explanation.",
+		fmt.Sprintf("%q", q),
+	)
 	hyp, err := c.brain.Generate(hydeCtx, prompt)
 	if err != nil || hyp == "" {
 		return ""

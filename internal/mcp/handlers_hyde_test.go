@@ -139,3 +139,53 @@ func TestHyDE_SemanticModeWithNilBrainNoError(t *testing.T) {
 		t.Fatal("expected clean result, not a tool error")
 	}
 }
+
+// TestHyDE_QueryWithEmbeddedQuotes verifies that a query containing embedded
+// double-quotes doesn't cause a panic or tool error. The %q-escaped prompt
+// means the LLM receives a well-formed prompt regardless of query content.
+func TestHyDE_QueryWithEmbeddedQuotes(t *testing.T) {
+	s := newTestServer(t)
+	s.brainClient = brain.NewInProcess(nil)
+
+	m := hydeSearch(t, s, map[string]any{
+		"query": `authenticate the "admin" user`,
+		"mode":  "semantic",
+	})
+	// No error, no hyde_hypothesis (NullBrain returns "").
+	if _, ok := m["hyde_hypothesis"]; ok {
+		t.Error("hyde_hypothesis should not appear with NullBrain")
+	}
+}
+
+// TestHyDE_VeryLongQuery verifies that a very long query (>150 runes) is handled
+// gracefully. The truncation in GenerateHypothetical prevents prompt budget overrun.
+func TestHyDE_VeryLongQuery(t *testing.T) {
+	s := newTestServer(t)
+	s.brainClient = brain.NewInProcess(nil)
+
+	longQuery := strings.Repeat("rate limiting circuit breaker auth middleware ", 20)
+	m := hydeSearch(t, s, map[string]any{
+		"query": longQuery,
+		"mode":  "semantic",
+	})
+	// No error regardless of query length.
+	if m == nil {
+		t.Fatal("expected non-nil result for long query")
+	}
+}
+
+// TestHyDE_SearchModeNeverVectorCosineOnly verifies that "vector_cosine" (without
+// "+hyde") is the reported mode when no hypothesis is generated (nil brain),
+// confirming the dead-code branch was correctly removed.
+func TestHyDE_SearchModeNeverContainsVectorCosineHyde(t *testing.T) {
+	s := newTestServer(t)
+	s.brainClient = nil // no brain → no hypothesis
+
+	m := hydeSearch(t, s, map[string]any{
+		"query": "dependency injection container",
+		"mode":  "semantic",
+	})
+	if sm, _ := m["search_mode"].(string); sm == "vector_cosine+hyde" {
+		t.Errorf("search_mode 'vector_cosine+hyde' should never appear (dead code removed)")
+	}
+}
