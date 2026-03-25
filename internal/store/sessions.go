@@ -502,6 +502,9 @@ func (s *Store) GetToolCallSummary(sessionID string) (ToolCallSummary, error) {
 			summary.TopTools = append(summary.TopTools, tc)
 		}
 	}
+	if rows.Err() != nil {
+		return summary, rows.Err()
+	}
 	return summary, nil
 }
 
