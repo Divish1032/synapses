@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -125,6 +126,11 @@ type Resolver struct {
 	drift  *DriftDetector
 	brain  *BrainEnricher
 	search *CrossProjectSearch
+
+	// statusGroup deduplicates concurrent statusForEntry calls for the same
+	// alias. On NFS-mounted paths os.Stat can block for minutes; without dedup
+	// repeated health checks accumulate goroutines until the NFS timeout fires.
+	statusGroup singleflight.Group
 }
 
 // FederatedEpisode wraps a store.Episode with its source project alias.
@@ -217,6 +223,16 @@ func (r *Resolver) Status(ctx context.Context) []EntryStatus {
 }
 
 func (r *Resolver) statusForEntry(ctx context.Context, e config.FederationEntry) EntryStatus {
+	// Dedup concurrent calls for the same alias. On NFS-mounted paths os.Stat
+	// can block for minutes; without dedup, repeated health checks accumulate
+	// goroutines for the same path until the NFS timeout fires.
+	result, _, _ := r.statusGroup.Do(e.Alias, func() (interface{}, error) {
+		return r.doStatusForEntry(ctx, e), nil
+	})
+	return result.(EntryStatus)
+}
+
+func (r *Resolver) doStatusForEntry(ctx context.Context, e config.FederationEntry) EntryStatus {
 	es := EntryStatus{
 		Alias: e.Alias,
 		Path:  e.Path,
