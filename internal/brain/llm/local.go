@@ -4,7 +4,7 @@ package llm
 //
 // This client implements the LLMClient interface using the go-skynet/go-llama.cpp
 // library, which embeds llama.cpp directly in the Go binary via CGo. No external
-// process (Ollama, llama-server) is required at runtime.
+// process (Ollama) is required at runtime.
 //
 // The model is loaded once at construction time from a local .gguf file.
 // Hardware acceleration is selected automatically:
