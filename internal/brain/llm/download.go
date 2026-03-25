@@ -26,6 +26,13 @@ import (
 // HFBaseURL is the HuggingFace resolve endpoint for file downloads.
 const HFBaseURL = "https://huggingface.co"
 
+// maxGGUFBytes is the maximum number of bytes accepted from a GGUF download
+// response body. 20 GiB covers the largest practical quantized models (~14B Q5)
+// while preventing a compromised CDN or rogue server from streaming an
+// unbounded response. The SHA-256 integrity check already catches truncation,
+// so this is defense-in-depth at the transport layer.
+const maxGGUFBytes = 20 << 30 // 20 GiB
+
 // DownloadConfig holds parameters for a GGUF download.
 type DownloadConfig struct {
 	// Repo is the HuggingFace repo, e.g. "divish/sil-coder"
@@ -117,9 +124,16 @@ func DownloadGGUF(ctx context.Context, cfg DownloadConfig) (string, error) {
 		return "", fmt.Errorf("download: create temp file: %w", err)
 	}
 
+	// Cap the response body to maxGGUFBytes before wrapping with the progress
+	// reporter. io.LimitReader returns io.EOF after N bytes, so an oversized
+	// response is silently truncated here; the subsequent SHA-256 check then
+	// rejects and removes the partial file, preventing corrupt models from
+	// being used or cached.
+	cappedBody := io.LimitReader(resp.Body, maxGGUFBytes)
+
 	// Wrap body with progress reporter.
 	reader := &progressReader{
-		r:     resp.Body,
+		r:     cappedBody,
 		total: totalBytes,
 		w:     cfg.Progress,
 		name:  cfg.Filename,
