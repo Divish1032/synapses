@@ -68,6 +68,24 @@ func (s *Server) handleExportKnowledge(
 					"Relative paths write to the daemon's working directory and are not supported.",
 			), nil
 		}
+		// Enforce path containment: exports must stay within the project root.
+		// When root is empty (no graph loaded) fall back to ~/.synapses/exports/
+		// so that the export is still usable while preventing arbitrary writes.
+		allowedRoot := s.graph.Root()
+		if allowedRoot == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return toolError("resolve home directory", err)
+			}
+			allowedRoot = filepath.Join(home, ".synapses", "exports")
+		}
+		if !pathWithinRoot(allowedRoot, outputPath) {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"output_path %q is outside the allowed export directory %q. "+
+					"Exports must be written within the project root.",
+				outputPath, allowedRoot,
+			)), nil
+		}
 	}
 
 	export, err := s.store.ExportKnowledge(s.projectID)
