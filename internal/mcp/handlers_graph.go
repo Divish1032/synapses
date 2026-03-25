@@ -1508,16 +1508,11 @@ func (s *Server) handleSemanticSearch(
 	// 500 ms timeout expires, hydeHypothesis stays "" and we fall through to
 	// embedding the raw query unchanged — zero degradation visible to the caller.
 	var hydeHypothesis string
-	hydeSkipped := false // true when hyde=false was explicitly passed
 	if mode == "semantic" && s.brainClient != nil {
-		hydeParam, hydeParamSet := req.GetArguments()["hyde"]
-		if hydeParamSet {
-			// Explicit hyde=false bypasses hypothesis generation entirely.
-			if b, ok := hydeParam.(bool); ok && !b {
-				hydeSkipped = true
-			}
-		}
-		if !hydeSkipped {
+		// hyde=false is an explicit opt-out for exact-name queries where the raw
+		// query name is already the best search signal and hypothesis generation
+		// would only add latency. Any non-bool or absent value defaults to true.
+		if b, ok := req.GetArguments()["hyde"].(bool); !ok || b {
 			hydeHypothesis = s.brainClient.GenerateHypothetical(ctx, query)
 		}
 	}
@@ -1582,12 +1577,6 @@ func (s *Server) handleSemanticSearch(
 		}
 	} else {
 		results = ftsResults
-	}
-
-	// When HyDE was used in the vector-only path (no FTS5 supplement needed),
-	// tag the search_mode to reflect hypothesis embedding was applied.
-	if hydeHypothesis != "" && searchMode == "vector_cosine" {
-		searchMode = "vector_cosine+hyde"
 	}
 
 	resp := map[string]interface{}{
