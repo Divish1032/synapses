@@ -283,6 +283,17 @@ func loadOrCreateAuthToken() (string, error) {
 	}
 	// Try to read an existing valid token.
 	if data, err := os.ReadFile(path); err == nil {
+		// Verify file permissions — a world-readable token file is a security risk.
+		if info, statErr := os.Stat(path); statErr == nil {
+			if perm := info.Mode().Perm(); perm != 0o600 {
+				// Fix permissions and warn; do not abort so the daemon can still start.
+				if chmodErr := os.Chmod(path, 0o600); chmodErr == nil {
+					logutil.Warn("synapses: auth token file had insecure permissions %04o — corrected to 0600\n", perm)
+				} else {
+					logutil.Warn("synapses: auth token file has insecure permissions %04o and could not be corrected: %v\n", perm, chmodErr)
+				}
+			}
+		}
 		token := strings.TrimSpace(string(data))
 		if len(token) == 64 {
 			if _, hexErr := hex.DecodeString(token); hexErr == nil {
