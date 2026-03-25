@@ -82,7 +82,7 @@ func TestFetch_CacheMiss_ThenHit(t *testing.T) {
 		w.Header().Set("Content-Type", "text/html")
 		w.Write([]byte("<html><body><p>Hello World</p></body></html>"))
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewTLSServer(handler)
 	defer srv.Close()
 
 	s := testStore(t)
@@ -122,7 +122,7 @@ func TestFetchFresh(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("plain text response"))
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewTLSServer(handler)
 	defer srv.Close()
 
 	s := testStore(t)
@@ -144,7 +144,7 @@ func TestFetch_HTTPError(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewTLSServer(handler)
 	defer srv.Close()
 
 	s := testStore(t)
@@ -255,7 +255,7 @@ func TestFetchAndStrip_ContentCapped(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(largeContent))
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewTLSServer(handler)
 	defer srv.Close()
 
 	s := testStore(t)
@@ -370,7 +370,7 @@ func TestFetchPackageDocs_NetworkError(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewTLSServer(handler)
 	defer srv.Close()
 
 	s := testStore(t)
@@ -396,7 +396,7 @@ func TestFetchPackageDocsFresh(t *testing.T) {
 		w.Header().Set("Content-Type", "text/html")
 		w.Write([]byte("fresh package docs"))
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewTLSServer(handler)
 	defer srv.Close()
 
 	s := testStore(t)
@@ -422,7 +422,7 @@ func TestFetchPackageDocsFresh_WithoutVersion(t *testing.T) {
 		w.Header().Set("Content-Type", "text/html")
 		w.Write([]byte("stdlib docs"))
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewTLSServer(handler)
 	defer srv.Close()
 
 	s := testStore(t)
@@ -472,7 +472,7 @@ func TestFetch_NetworkTimeout(t *testing.T) {
 		// Don't respond at all - will trigger timeout
 		<-r.Context().Done()
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewTLSServer(handler)
 	defer srv.Close()
 
 	s := testStore(t)
@@ -494,7 +494,7 @@ func TestFetch_EmptyResponse(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		// Write nothing
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewTLSServer(handler)
 	defer srv.Close()
 
 	s := testStore(t)
