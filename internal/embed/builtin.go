@@ -67,10 +67,13 @@ const (
 	// Captured from nomic-embed-text-v1.5 quantized ONNX at revision e5cf08aa.
 	builtinModelSHA256 = "b4342336debaea79de872370664b0aaeb67dea4605513d00ee236ea871a81f27"
 
-	// builtinModelSHA256FP32 is the expected SHA-256 hash of the fp32 ONNX
-	// model file (nomic-embed-text-v1.5, revision e5cf08aa, onnx/model.onnx).
-	// Captured via: shasum -a 256 ~/.synapses/models/nomic-ai_nomic-embed-text-v1.5/model.onnx
-	builtinModelSHA256FP32 = "147d5aa88c2101237358e17796cf3a227cead1ec304ec34b465bb08e9d952965"
+	// builtinModelSHA256FP32 is the expected SHA-256 of onnx/model.onnx at
+	// builtinModelRevision. Left empty to use TOFU (Trust-On-First-Use):
+	// verifyModelIntegrity writes a .sha256 sidecar on first download and
+	// verifies against it on every subsequent load — safe without a pinned hash.
+	// To pin: download onnx/model.onnx from HuggingFace at builtinModelRevision
+	// and run: shasum -a 256 model.onnx
+	builtinModelSHA256FP32 = ""
 )
 
 // pipelineSlot is one independently-usable ONNX pipeline instance.

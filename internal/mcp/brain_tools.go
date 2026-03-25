@@ -148,15 +148,20 @@ func (s *Server) handleGetDecisionLog(
 	}
 
 	// Format as a human-readable list for the agent.
+	// oneline collapses any embedded newlines so each field stays on one line.
+	oneline := func(s string) string {
+		return strings.ReplaceAll(strings.ReplaceAll(s, "\n", " "), "\r", "")
+	}
 	var sb strings.Builder
 	for i, e := range entries {
 		sb.WriteString(fmt.Sprintf("[%d] %s | agent=%s phase=%s entity=%s\n    action: %s\n    outcome: %s\n",
-			i+1, e.CreatedAt, e.AgentID, e.Phase, e.EntityName, e.Action, e.Outcome))
+			i+1, oneline(e.CreatedAt), oneline(e.AgentID), oneline(e.Phase),
+			oneline(e.EntityName), oneline(e.Action), oneline(e.Outcome)))
 		if len(e.RelatedEntities) > 0 {
-			sb.WriteString(fmt.Sprintf("    related: %s\n", strings.Join(e.RelatedEntities, ", ")))
+			sb.WriteString(fmt.Sprintf("    related: %s\n", oneline(strings.Join(e.RelatedEntities, ", "))))
 		}
 		if e.Notes != "" {
-			sb.WriteString(fmt.Sprintf("    notes: %s\n", e.Notes))
+			sb.WriteString(fmt.Sprintf("    notes: %s\n", oneline(e.Notes)))
 		}
 	}
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/SynapsesOS/synapses/internal/brain/config"
@@ -1066,6 +1067,17 @@ func (c *Config) checkPathPatternViolations(g *graph.Graph, fromFile *string) []
 			}
 		}
 	}
+	// Sort violations for deterministic output. The original code iterated
+	// g.AllNodes() which returns a sorted slice; nodeMap iteration is unordered.
+	sort.Slice(violations, func(i, j int) bool {
+		if violations[i].RuleID != violations[j].RuleID {
+			return violations[i].RuleID < violations[j].RuleID
+		}
+		if violations[i].FromNode != violations[j].FromNode {
+			return violations[i].FromNode < violations[j].FromNode
+		}
+		return violations[i].ToNode < violations[j].ToNode
+	})
 	return violations
 }
 

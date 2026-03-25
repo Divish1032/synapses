@@ -96,21 +96,34 @@ var restSessionCounter atomic.Int64
 // per-session MCP rate limits). 50 requests/sec burst, refills at 10/sec.
 var restRateLimiter = newTokenBucket(10, 50)
 
-// perCallerBuckets holds a per-RemoteAddr token bucket as a secondary
+// perCallerBuckets holds a per-caller-IP token bucket as a secondary
 // rate limiter. Entries idle >60s are evicted lazily on each access.
-var perCallerBuckets sync.Map // key: string (RemoteAddr), value: *perCallerEntry
+// Keyed by IP address only (not IP:port) so all connections from the same
+// host share one bucket, preventing port-cycling bypass.
+var perCallerBuckets sync.Map // key: string (IP only), value: *perCallerEntry
 
 type perCallerEntry struct {
-	bucket    *tokenBucket
-	lastSeen  time.Time
-	mu        sync.Mutex
+	bucket   *tokenBucket
+	lastSeen time.Time
+	mu       sync.Mutex
 }
 
-// callerBucket returns (or creates) the per-RemoteAddr bucket for addr,
+// callerIP extracts the IP address from a "host:port" RemoteAddr string.
+// Falls back to the full string if parsing fails (should not happen on loopback).
+func callerIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr // defensive fallback
+	}
+	return host
+}
+
+// callerBucket returns (or creates) the per-IP bucket for the given remote address,
 // evicting entries that have been idle for more than 60 seconds.
-func callerBucket(addr string) *tokenBucket {
+func callerBucket(remoteAddr string) *tokenBucket {
+	ip := callerIP(remoteAddr)
 	now := time.Now()
-	v, _ := perCallerBuckets.LoadOrStore(addr, &perCallerEntry{
+	v, _ := perCallerBuckets.LoadOrStore(ip, &perCallerEntry{
 		bucket:   newTokenBucket(5, 20),
 		lastSeen: now,
 	})
@@ -120,6 +133,8 @@ func callerBucket(addr string) *tokenBucket {
 	entry.mu.Unlock()
 
 	// Lazy eviction: sweep for entries idle >60s.
+	// For a loopback-only daemon, the number of distinct IPs is tiny (1-2),
+	// so this sweep is O(1) in practice.
 	perCallerBuckets.Range(func(k, val interface{}) bool {
 		e := val.(*perCallerEntry)
 		e.mu.Lock()
