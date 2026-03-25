@@ -84,6 +84,13 @@ type WatcherHealthChecker interface {
 	IsAlive() bool
 }
 
+// NodeEmbedderSetter is an optional interface that ChangeSource implementations
+// may satisfy to accept a node embedder for Tier 1 embedding-based entity resolution.
+// Implemented by *watcher.Watcher; checked via type assertion in SetMemoryEmbedder.
+type NodeEmbedderSetter interface {
+	SetNodeEmbedder(embed.Embedder)
+}
+
 // ProjectStoreProvider gives access to a sibling project's store for cross-project queries.
 // Implemented by the daemon's project registry; nil in single-project (stdio) mode.
 type ProjectStoreProvider interface {
@@ -1072,6 +1079,12 @@ func (s *Server) SetMemoryEmbedder(e embed.Embedder) {
 	} else if s.store != nil {
 		s.store.SetSemanticDedupFunc(nil)
 	}
+	// Wire the same embedder into the watcher for Tier 1 node embedding.
+	// Uses an optional interface so this compiles without importing watcher directly.
+	if setter, ok := s.changeSource.(NodeEmbedderSetter); ok {
+		setter.SetNodeEmbedder(e)
+	}
+
 	// Pre-embed tool catalog in background so discover_tools can rank by
 	// cosine similarity instead of keyword overlap (Sprint 12 #5).
 	if e != nil {

@@ -22,6 +22,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/metrics"
@@ -205,6 +206,14 @@ type Watcher struct {
 	pulseClient *pulse.Client
 	// loopPanics counts how many times the watcher event loop panicked. (P2-4)
 	loopPanics atomic.Int64
+
+	// nodeEmbedder is the embedder used for node embedding and Tier 1 entity
+	// resolution. Set via SetNodeEmbedder; nil if embedding is not configured.
+	nodeEmbedder embed.Embedder
+
+	// nodeEmbedRunning guards against concurrent node embedding passes.
+	// CAS from 0→1 before launching runNodeEmbedPass; reset to 0 on completion.
+	nodeEmbedRunning atomic.Int32
 }
 
 // New creates a Watcher. store may be nil; if provided the cache is updated
@@ -564,6 +573,38 @@ func (w *Watcher) computeInvalidationSet(filePath string, filePkgSnap map[string
 // SetPulseClient wires a pulse.Client into the watcher for pipeline instrumentation.
 // When set, reparseFile emits ReparseEvents and the event loop emits health events.
 // Must be called before Start. pc may be nil to disable. (P2-3/P2-4)
+// SetNodeEmbedder wires an embedder for Tier 1 embedding-based entity resolution
+// and for the background node embedding pass. Pass nil to disable (name-match only).
+func (w *Watcher) SetNodeEmbedder(e embed.Embedder) {
+	w.mu.Lock()
+	w.nodeEmbedder = e
+	w.mu.Unlock()
+}
+
+// launchNodeEmbedPass starts a background node embedding pass if an embedder
+// and store are both available and no pass is already running.
+//
+// Uses a CAS guard to prevent concurrent passes. If trackGo returns false
+// (watcher already stopped), the guard is reset so a future restart could
+// re-trigger the pass (defensive — Watcher is effectively single-use after Stop).
+func (w *Watcher) launchNodeEmbedPass(embedder embed.Embedder, st *store.Store) {
+	if embedder == nil || st == nil {
+		return
+	}
+	if !w.nodeEmbedRunning.CompareAndSwap(0, 1) {
+		return // another pass is already in flight
+	}
+	ctx := w.stopCtx
+	if !w.trackGo(func() {
+		defer w.nodeEmbedRunning.Store(0)
+		runNodeEmbedPass(ctx, embedder, st)
+	}) {
+		// Watcher stopped before the goroutine could be launched.
+		// Clear the guard so the atomic doesn't stay stuck at 1.
+		w.nodeEmbedRunning.Store(0)
+	}
+}
+
 func (w *Watcher) SetPulseClient(pc *pulse.Client) {
 	w.pulseClient = pc
 }
@@ -1420,10 +1461,23 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 		}
 	}
 	if len(mdPaths) > 0 {
-		for fp, unresolved := range resolver.ResolveNLEntitiesForFiles(w.graph, mdPaths) {
+		w.mu.Lock()
+		er := newStoreEmbedResolver(w.nodeEmbedder, w.store)
+		w.mu.Unlock()
+		for fp, unresolved := range resolver.ResolveNLEntitiesForFiles(w.graph, mdPaths, er) {
 			w.scheduleNLClassification(fp, unresolved)
 		}
 	}
+
+	// Launch the background node embedding pass when an embedder is configured.
+	// This ensures code entity vectors are populated in the HNSW index so future
+	// NL resolver runs can use Tier 1 embedding-based entity resolution.
+	// The atomic guard prevents concurrent passes when rapid batches arrive.
+	w.mu.Lock()
+	nodeEmbedder := w.nodeEmbedder
+	nodeSt := w.store
+	w.mu.Unlock()
+	w.launchNodeEmbedPass(nodeEmbedder, nodeSt)
 
 	// Phase 3: per-file post-resolve work (still under reparseMu).
 	// Only in-memory operations here — zero store I/O.
@@ -1866,9 +1920,22 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// NL-to-graph Tier 0+1 (markdown files only).
 	// Tier 2 LLM classification submitted as P1 when brain is available.
 	if ext == ".md" || ext == ".markdown" || ext == ".mdx" {
-		unresolved := resolver.ResolveNLEntitiesForFile(w.graph, path)
+		w.mu.Lock()
+		er := newStoreEmbedResolver(w.nodeEmbedder, w.store)
+		w.mu.Unlock()
+		unresolved := resolver.ResolveNLEntitiesForFile(w.graph, path, er)
 		w.scheduleNLClassification(path, unresolved)
 	}
+
+	// Trigger background node embedding pass for this file change.
+	// Runs for both code and markdown files: code changes add new entities that
+	// need vectors for future NL resolution; markdown changes add knowledge nodes.
+	// The atomic guard in launchNodeEmbedPass prevents concurrent passes.
+	w.mu.Lock()
+	reparseNodeEmbedder := w.nodeEmbedder
+	reparseNodeSt := w.store
+	w.mu.Unlock()
+	w.launchNodeEmbedPass(reparseNodeEmbedder, reparseNodeSt)
 
 	// Keep the stored call-site table consistent with the re-parsed file.
 	if w.store != nil {
