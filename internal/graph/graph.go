@@ -784,6 +784,23 @@ func (g *Graph) FindByType(t NodeType) []*Node {
 func (g *Graph) NodesForFile(file string) []*Node {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+
+	if idx := g.index; idx != nil && idx.Ready() {
+		seqs := idx.fileSeqs(file)
+		if len(seqs) == 0 {
+			return nil
+		}
+		out := make([]*Node, 0, len(seqs))
+		for _, seq := range seqs {
+			if int(seq) < len(idx.SeqIDs) {
+				if n := g.nodes[idx.SeqIDs[seq]]; n != nil {
+					out = append(out, n)
+				}
+			}
+		}
+		return out
+	}
+
 	var out []*Node
 	for _, n := range g.nodes {
 		if n.File == file {
@@ -1278,9 +1295,10 @@ func (g *Graph) SnapshotFileStableIDs(file string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	var records []stableIDRecord
-	for _, n := range g.nodes {
+
+	collectNode := func(n *Node) {
 		if n.File != file || n.StableID == "" {
-			continue
+			return
 		}
 		sig := ""
 		if n.Metadata != nil {
@@ -1292,6 +1310,21 @@ func (g *Graph) SnapshotFileStableIDs(file string) {
 			sig:  sig,
 			id:   n.StableID,
 		})
+	}
+
+	if idx := g.index; idx != nil && idx.Ready() {
+		seqs := idx.fileSeqs(file)
+		for _, seq := range seqs {
+			if int(seq) < len(idx.SeqIDs) {
+				if n := g.nodes[idx.SeqIDs[seq]]; n != nil {
+					collectNode(n)
+				}
+			}
+		}
+	} else {
+		for _, n := range g.nodes {
+			collectNode(n)
+		}
 	}
 	if g.fileStableIDs == nil {
 		g.fileStableIDs = make(map[string][]stableIDRecord)
