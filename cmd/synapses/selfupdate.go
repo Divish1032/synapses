@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -260,6 +261,10 @@ func cmdUpdate(args []string) error {
 			runtime.GOOS, runtime.GOARCH, state.ChangelogURL)
 	}
 
+	if err := validateGitHubURL(state.AssetURL); err != nil {
+		return fmt.Errorf("asset URL rejected: %w", err)
+	}
+
 	fmt.Printf("Downloading %s...\n", state.AssetName)
 
 	tmpDir, err := os.MkdirTemp("", "synapses-update-*")
@@ -381,6 +386,22 @@ func fetchLatestRelease() (*githubRelease, error) {
 
 // ── Download + extract ──────────────────────────────────────────────────────
 
+// validateGitHubURL returns an error if rawURL does not belong to github.com
+// or githubusercontent.com. This prevents a compromised GitHub API response
+// from redirecting downloads to an attacker-controlled server where the
+// attacker also controls the expected checksum file.
+func validateGitHubURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	h := u.Hostname()
+	if !strings.HasSuffix(h, "github.com") && !strings.HasSuffix(h, "githubusercontent.com") {
+		return fmt.Errorf("URL hostname %q is not github.com or githubusercontent.com", h)
+	}
+	return nil
+}
+
 // downloadFile downloads url to dst with progress output. Verifies the download
 // is complete by checking actual bytes written against Content-Length.
 func downloadFile(dst, url string) error {
@@ -404,12 +425,17 @@ func downloadFile(dst, url string) error {
 	hasher := sha256.New()
 	multiWriter := io.MultiWriter(f, hasher)
 
+	// Cap the download at 600 MiB to prevent disk exhaustion from a server
+	// sending an unbounded response body (no Content-Length).
+	const maxDownloadBytes = 600 << 20
+	limitedBody := io.LimitReader(resp.Body, maxDownloadBytes)
+
 	total := resp.ContentLength
 	var written int64
 	buf := make([]byte, 32*1024)
 	lastPct := -1
 	for {
-		n, readErr := resp.Body.Read(buf)
+		n, readErr := limitedBody.Read(buf)
 		if n > 0 {
 			if _, wErr := multiWriter.Write(buf[:n]); wErr != nil {
 				f.Close()
@@ -449,6 +475,10 @@ func downloadFile(dst, url string) error {
 	// Fetch the published .sha256 checksum file and verify integrity.
 	// Fail closed: if checksum file is unavailable or malformed, refuse the download.
 	checksumURL := url + ".sha256"
+	if err := validateGitHubURL(checksumURL); err != nil {
+		os.Remove(dst)
+		return fmt.Errorf("integrity check: checksum URL rejected: %w", err)
+	}
 	checksumResp, checksumErr := client.Get(checksumURL)
 	if checksumErr != nil {
 		os.Remove(dst)
