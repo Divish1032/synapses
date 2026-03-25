@@ -69,7 +69,7 @@ func NewClient(endpoint, model string, opts ...Option) *Client {
 	c := &Client{
 		endpoint:   endpoint,
 		model:      model,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: &http.Client{Timeout: 60 * time.Second},
 	}
 	for _, o := range opts {
 		o(c)
