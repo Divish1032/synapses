@@ -68,12 +68,12 @@ const (
 	builtinModelSHA256 = "b4342336debaea79de872370664b0aaeb67dea4605513d00ee236ea871a81f27"
 
 	// builtinModelSHA256FP32 is the expected SHA-256 of onnx/model.onnx at
-	// builtinModelRevision. Left empty to use TOFU (Trust-On-First-Use):
-	// verifyModelIntegrity writes a .sha256 sidecar on first download and
-	// verifies against it on every subsequent load — safe without a pinned hash.
-	// To pin: download onnx/model.onnx from HuggingFace at builtinModelRevision
-	// and run: shasum -a 256 model.onnx
-	builtinModelSHA256FP32 = ""
+	// builtinModelRevision (e5cf08aa). Verified from the Git LFS object ID,
+	// which equals the SHA-256 of the file content (confirmed by cross-checking
+	// the quantized model's LFS OID against sha256sum of the cached file).
+	// Update this value whenever builtinModelRevision changes.
+	// Captured from nomic-embed-text-v1.5 fp32 ONNX at revision e5cf08aa.
+	builtinModelSHA256FP32 = "147d5aa88c2101237358e17796cf3a227cead1ec304ec34b465bb08e9d952965"
 )
 
 // pipelineSlot is one independently-usable ONNX pipeline instance.
@@ -364,10 +364,11 @@ func (b *BuiltinEmbedder) doInit(ctx context.Context) error {
 //
 // modelFile identifies which variant is being verified:
 //   - builtinModelFileQuantized → hash verified against builtinModelSHA256
-//   - builtinModelFileFP32 → hash logged for capture but not enforced
+//   - builtinModelFileFP32 → hash verified against builtinModelSHA256FP32
 //
-// When builtinModelSHA256 is empty, the hash is logged for capture but not enforced.
-// TODO: capture the fp32 model SHA-256 hash and add it as builtinModelSHA256FP32.
+// When the expected hash is empty, the hash is written to a .sha256 sidecar
+// file on first use (TOFU) and verified against it on subsequent loads.
+// Both variants currently have pinned hashes — TOFU path is a safety fallback.
 func verifyModelIntegrity(onnxPath string, modelFile string) error {
 	f, err := os.Open(onnxPath)
 	if err != nil {
