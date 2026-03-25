@@ -413,10 +413,11 @@ func verifyBinarySidecar(binPath string) error {
 	sidecarPath := binPath + ".sha256"
 	rawExpected, err := os.ReadFile(sidecarPath)
 	if os.IsNotExist(err) {
-		// Sidecar absent — installed before integrity verification was added.
-		// Allow startup; re-running brain setup will write the sidecar.
-		logutil.Info("synapses-intelligence/embed: llama-server SHA-256 sidecar absent — skipping pre-execution check (re-run brain setup to enable)\n")
-		return nil
+		// Sidecar absent. EnsureLlamaServer writes the sidecar at install time
+		// (and backfills it when brain setup detects an existing binary without one).
+		// An absent sidecar at startup means the binary was placed without going
+		// through brain setup — refuse to execute it.
+		return fmt.Errorf("llama-server SHA-256 sidecar missing — re-run brain setup --with-embeddings to verify the binary")
 	}
 	if err != nil {
 		return fmt.Errorf("read llama-server SHA-256 sidecar: %w", err)
