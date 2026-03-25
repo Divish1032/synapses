@@ -330,6 +330,10 @@ func (s *Store) hnswDeleteBatch(memoryIDs []string) {
 	}
 	s.hnswMemMu.Lock()
 	defer s.hnswMemMu.Unlock()
+	if s.hnswRebuilding {
+		s.hnswPendingDeletes = append(s.hnswPendingDeletes, memoryIDs...)
+		return
+	}
 	if s.hnswMemIndex == nil {
 		return
 	}
