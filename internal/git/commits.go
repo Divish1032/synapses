@@ -2,29 +2,48 @@ package git
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
 const gitCmdTimeout = 5 * time.Second
 
+var (
+	resolvedGitOnce sync.Once
+	resolvedGitPath string
+	resolvedGitErr  error
+)
+
+func resolveGit() (string, error) {
+	resolvedGitOnce.Do(func() {
+		resolvedGitPath, resolvedGitErr = exec.LookPath("git")
+	})
+	return resolvedGitPath, resolvedGitErr
+}
+
 // safeGitCmd creates a git command with a minimal environment to prevent
 // secrets (GITHUB_TOKEN, OPENAI_API_KEY, etc.) from leaking to git hooks
-// in indexed repositories.
-func safeGitCmd(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "git", args...)
+// in indexed repositories. Uses the absolute path to git resolved at first
+// call so that Homebrew/nix installs at non-standard PATH locations work.
+func safeGitCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
+	gitPath, err := resolveGit()
+	if err != nil {
+		return nil, fmt.Errorf("git not found: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, gitPath, args...)
 	cmd.Env = []string{
 		"HOME=" + os.Getenv("HOME"),
-		"PATH=/usr/bin:/bin",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_LOCAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ASKPASS=/bin/false",
 	}
-	return cmd
+	return cmd, nil
 }
 
 // HeadSHA returns the current HEAD commit SHA in the given repo.
@@ -37,7 +56,11 @@ func HeadSHA(repoRoot string) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
 	defer cancel()
-	out, err := safeGitCmd(ctx, "-C", repoRoot, "rev-parse", "HEAD").Output()
+	cmd, err := safeGitCmd(ctx, "-C", repoRoot, "rev-parse", "HEAD")
+	if err != nil {
+		return ""
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
@@ -65,18 +88,26 @@ func LogSince(repoRoot, startCommit string) []string {
 	// If not (rebase / force-push), return nil so the task update still succeeds.
 	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
 	defer cancel()
-	catOut, err := safeGitCmd(ctx, "-C", repoRoot, "cat-file", "-t", startCommit).Output()
+	catCmd, err := safeGitCmd(ctx, "-C", repoRoot, "cat-file", "-t", startCommit)
+	if err != nil {
+		return nil
+	}
+	catOut, err := catCmd.Output()
 	if err != nil || strings.TrimSpace(string(catOut)) != "commit" {
 		return nil
 	}
 	// git log <startCommit>..HEAD --oneline returns commits after startCommit.
 	ctx2, cancel2 := context.WithTimeout(context.Background(), gitCmdTimeout)
 	defer cancel2()
-	out, err := safeGitCmd(ctx2,
+	logCmd, err := safeGitCmd(ctx2,
 		"-C", repoRoot,
 		"log", "--oneline",
 		startCommit+"..HEAD",
-	).Output()
+	)
+	if err != nil {
+		return nil
+	}
+	out, err := logCmd.Output()
 	if err != nil {
 		return nil
 	}
