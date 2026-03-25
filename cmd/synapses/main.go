@@ -383,9 +383,8 @@ func cmdStartDirect(args []string) error {
 	}
 
 	// Optional: vector embedding for semantic search (node embeddings).
-	// Priority: (1) brain /v1/embed when brain is connected and embedding is available,
-	//           (2) explicit embedding_endpoint in synapses.json (Ollama/OpenAI compat),
-	//           (3) FTS5-only fallback (no embeddings).
+	// Configured via embedding_endpoint in synapses.json (Ollama/OpenAI compat).
+	// Falls back to FTS5-only search when not configured.
 	// Embeddings are built/updated in the background so startup is never delayed.
 	{
 		var embedCli *embed.Client

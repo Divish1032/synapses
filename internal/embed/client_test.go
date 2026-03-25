@@ -34,7 +34,7 @@ func newMockResponse(statusCode int, body interface{}) *http.Response {
 
 var ctx = context.Background()
 
-// ── NewClient / NewBrainClient ────────────────────────────────────────────────
+// ── NewClient ─────────────────────────────────────────────────────────────────
 
 func TestNewClient_EmptyEndpoint(t *testing.T) {
 	c := embed.NewClient("", "")
@@ -57,20 +57,6 @@ func TestNewClient_CustomModel(t *testing.T) {
 	}
 }
 
-func TestNewBrainClient_EmptyURL(t *testing.T) {
-	c := embed.NewBrainClient("")
-	if c != nil {
-		t.Error("expected nil for empty brain URL")
-	}
-}
-
-func TestNewBrainClient_ValidURL(t *testing.T) {
-	c := embed.NewBrainClient("http://localhost:11435")
-	if c == nil {
-		t.Fatal("expected non-nil brain client")
-	}
-}
-
 // ── Embed — nil client ────────────────────────────────────────────────────────
 
 func TestEmbed_NilClient(t *testing.T) {
@@ -78,31 +64,6 @@ func TestEmbed_NilClient(t *testing.T) {
 	vec, err := c.Embed(ctx, "hello world")
 	if vec != nil || err != nil {
 		t.Errorf("expected (nil, nil) for nil client, got (%v, %v)", vec, err)
-	}
-}
-
-// ── Embed — Brain format ──────────────────────────────────────────────────────
-
-func newBrainEmbedServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string][]float32{ //nolint:errcheck
-			"embedding": {0.1, 0.2, 0.3},
-		})
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-func TestEmbed_BrainFormat(t *testing.T) {
-	srv := newBrainEmbedServer(t)
-	c := embed.NewBrainClient(srv.URL)
-	vec, err := c.Embed(ctx, "test input")
-	if err != nil {
-		t.Fatalf("Embed (brain): %v", err)
-	}
-	if len(vec) == 0 {
-		t.Error("expected non-empty embedding")
 	}
 }
 
@@ -214,23 +175,6 @@ func TestWithHTTPDoer_NewClient_UsesInjectedTransport(t *testing.T) {
 	}
 }
 
-// TestWithHTTPDoer_NewBrainClient verifies injection on the Brain client path.
-func TestWithHTTPDoer_NewBrainClient_UsesInjectedTransport(t *testing.T) {
-	mock := &mockDoer{
-		resp: newMockResponse(http.StatusOK, map[string][]float32{
-			"embedding": {0.5, 0.6},
-		}),
-	}
-	c := embed.NewBrainClient("http://nowhere.invalid", embed.WithHTTPDoer(mock))
-	vec, err := c.Embed(context.Background(), "hello")
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if len(vec) != 2 {
-		t.Errorf("expected 2 dims, got %d", len(vec))
-	}
-}
-
 // TestWithHTTPDoer_PropagatesTransportError verifies that transport-level errors
 // (e.g. connection refused) are surfaced when using an injected doer.
 func TestWithHTTPDoer_PropagatesTransportError(t *testing.T) {
@@ -245,8 +189,8 @@ func TestWithHTTPDoer_PropagatesTransportError(t *testing.T) {
 
 // ── Embed — decode error paths (malformed JSON from server) ───────────────────
 
-// TestEmbed_OllamaBrainDecodeError covers the decode-error branch for the
-// brain/Ollama shared response path ({"embedding": [...]}).
+// TestEmbed_OllamaDecodeError covers the decode-error branch for the
+// Ollama response path ({"embedding": [...]}).
 func TestEmbed_OllamaBrainDecodeError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -277,20 +221,6 @@ func TestEmbed_OpenAIDecodeError(t *testing.T) {
 
 // ── EmbedBatch — decode error paths ───────────────────────────────────────────
 
-// TestEmbedBatch_BrainDecodeError covers the Brain batch decode-error branch.
-func TestEmbedBatch_BrainDecodeError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("not json"))
-	}))
-	defer srv.Close()
-	c := embed.NewBrainClient(srv.URL)
-	_, err := c.EmbedBatch(ctx, []string{"a", "b"})
-	if err == nil {
-		t.Error("expected decode error for malformed Brain batch JSON")
-	}
-}
-
 // TestEmbedBatch_OpenAIDecodeError covers the OpenAI batch decode-error branch.
 func TestEmbedBatch_OpenAIDecodeError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -308,7 +238,7 @@ func TestEmbedBatch_OpenAIDecodeError(t *testing.T) {
 // ── Embed — empty embedding error paths ───────────────────────────────────────
 
 // TestEmbed_OllamaEmptyEmbedding covers the "empty embedding" error for
-// brain/Ollama format ({"embedding": []}).
+// Ollama format ({"embedding": []}).
 func TestEmbed_OllamaEmptyEmbedding(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode(map[string][]float32{"embedding": {}}) //nolint:errcheck
@@ -318,19 +248,5 @@ func TestEmbed_OllamaEmptyEmbedding(t *testing.T) {
 	_, err := c.Embed(ctx, "test")
 	if err == nil {
 		t.Error("expected error for empty Ollama embedding")
-	}
-}
-
-// TestEmbed_OllamaBrainEmptyEmbeddingViaBrainClient covers the same empty-
-// embedding branch reached through NewBrainClient (/v1/embed path).
-func TestEmbed_BrainEmptyEmbedding(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string][]float32{"embedding": {}}) //nolint:errcheck
-	}))
-	defer srv.Close()
-	c := embed.NewBrainClient(srv.URL)
-	_, err := c.Embed(ctx, "test")
-	if err == nil {
-		t.Error("expected error for empty Brain embedding")
 	}
 }

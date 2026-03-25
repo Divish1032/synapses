@@ -2,6 +2,10 @@
 // from an Ollama-compatible or OpenAI-compatible HTTP endpoint.
 // A nil *Client is safe — all methods return (nil, nil) so callers can use
 // the zero value without checking for configuration.
+//
+// Supported endpoint formats (auto-detected from URL):
+//   - OpenAI (/v1/embeddings) — batch-capable, request {"model":...,"input":...}
+//   - Ollama (/api/embeddings) — serial-only, request {"model":...,"prompt":...}
 package embed
 
 import (
@@ -25,10 +29,9 @@ type HTTPDoer interface {
 }
 
 // Client calls an embedding endpoint to convert text into float32 vectors.
-// Supports three formats, auto-detected from the endpoint URL:
-//   - Brain  (/v1/embed)        — synapses-intelligence native (Ollama-free)
-//   - OpenAI (/v1/embeddings)   — OpenAI-compatible
-//   - Ollama (/api/embeddings)  — Ollama native
+// Supports two formats, auto-detected from the endpoint URL:
+//   - OpenAI (/v1/embeddings)   — OpenAI-compatible, supports batch
+//   - Ollama (/api/embeddings)  — Ollama native, serial-only
 //
 // A nil Client is safe to use — Embed returns (nil, nil).
 type Client struct {
@@ -74,30 +77,8 @@ func NewClient(endpoint, model string, opts ...Option) *Client {
 	return c
 }
 
-// NewBrainClient creates a Client that calls synapses-intelligence's native
-// POST /v1/embed endpoint. This requires no Ollama — embeddings are generated
-// by a llama-server subprocess managed by the brain sidecar.
-//
-// brainURL is the base URL of the brain server, e.g. "http://localhost:11435".
-// Returns nil if brainURL is empty.
-func NewBrainClient(brainURL string, opts ...Option) *Client {
-	if brainURL == "" {
-		return nil
-	}
-	c := &Client{
-		endpoint:   strings.TrimRight(brainURL, "/") + "/v1/embed",
-		model:      "nomic-embed-text-v1.5.Q4_K_M",
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-	}
-	for _, o := range opts {
-		o(c)
-	}
-	return c
-}
-
 // Embed returns a vector embedding for text.
 // The format is auto-detected from the endpoint URL:
-//   - "/v1/embed"       → Brain format  (synapses-intelligence native)
 //   - "/v1/embeddings"  → OpenAI format
 //   - otherwise         → Ollama format
 //
@@ -107,18 +88,13 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 		return nil, nil
 	}
 
-	isBrain := strings.HasSuffix(c.endpoint, "/v1/embed")
-	isOpenAI := !isBrain && strings.Contains(c.endpoint, "/v1/embeddings")
+	isOpenAI := strings.Contains(c.endpoint, "/v1/embeddings")
 
 	var bodyMap map[string]interface{}
-	switch {
-	case isBrain:
-		// Brain format: {"input": "text"}
-		bodyMap = map[string]interface{}{"input": text}
-	case isOpenAI:
+	if isOpenAI {
 		// OpenAI format: {"model": "...", "input": "text"}
 		bodyMap = map[string]interface{}{"model": c.model, "input": text}
-	default:
+	} else {
 		// Ollama format: {"model": "...", "prompt": "text"}
 		bodyMap = map[string]interface{}{"model": c.model, "prompt": text}
 	}
@@ -163,7 +139,7 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 		return normed, nil
 	}
 
-	// Brain format and Ollama format both use {"embedding": [float, ...]}
+	// Ollama format: {"embedding": [float, ...]}
 	var out struct {
 		Embedding []float32 `json:"embedding"`
 	}
@@ -181,7 +157,7 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 }
 
 // EmbedBatch returns vector embeddings for a batch of texts in one HTTP round-trip.
-// Supports Brain batch format ({"input": [...]}) and OpenAI batch format.
+// Supports OpenAI batch format ({"model":...,"input":[...]}).
 // Ollama does not support batch — falls back to serial Embed() calls.
 // Returns (nil, nil) if the client is nil or texts is empty.
 func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
@@ -189,20 +165,14 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		return nil, nil
 	}
 
-	isBrain := strings.HasSuffix(c.endpoint, "/v1/embed")
-	isOpenAI := !isBrain && strings.Contains(c.endpoint, "/v1/embeddings")
+	isOpenAI := strings.Contains(c.endpoint, "/v1/embeddings")
 
-	if !isBrain && !isOpenAI {
+	if !isOpenAI {
 		// Ollama doesn't support batch — fall back to serial.
 		return c.embedSerial(ctx, texts)
 	}
 
-	var bodyMap map[string]interface{}
-	if isBrain {
-		bodyMap = map[string]interface{}{"input": texts}
-	} else {
-		bodyMap = map[string]interface{}{"model": c.model, "input": texts}
-	}
+	bodyMap := map[string]interface{}{"model": c.model, "input": texts}
 
 	body, err := json.Marshal(bodyMap)
 	if err != nil {
@@ -225,47 +195,27 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		return nil, fmt.Errorf("embed batch endpoint returned %d", resp.StatusCode)
 	}
 
-	if isOpenAI {
-		var out struct {
-			Data []struct {
-				Embedding []float32 `json:"embedding"`
-			} `json:"data"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			return nil, fmt.Errorf("decode batch embed response: %w", err)
-		}
-		if len(out.Data) != len(texts) {
-			return nil, fmt.Errorf("batch response length mismatch: got %d, want %d", len(out.Data), len(texts))
-		}
-		vecs := make([][]float32, len(out.Data))
-		for i, d := range out.Data {
-			normed := normalizeL2(d.Embedding)
-			if normed == nil {
-				return nil, fmt.Errorf("batch embedding[%d] contains NaN/Inf values", i)
-			}
-			vecs[i] = normed
-		}
-		return vecs, nil
-	}
-
-	// Brain format: {"embeddings": [[...], ...]}
+	// OpenAI batch format: {"data": [{"embedding": [...]}, ...]}
 	var out struct {
-		Embeddings [][]float32 `json:"embeddings"`
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode batch embed response: %w", err)
 	}
-	if len(out.Embeddings) != len(texts) {
-		return nil, fmt.Errorf("batch response length mismatch: got %d, want %d", len(out.Embeddings), len(texts))
+	if len(out.Data) != len(texts) {
+		return nil, fmt.Errorf("batch response length mismatch: got %d, want %d", len(out.Data), len(texts))
 	}
-	for i, v := range out.Embeddings {
-		normed := normalizeL2(v)
+	vecs := make([][]float32, len(out.Data))
+	for i, d := range out.Data {
+		normed := normalizeL2(d.Embedding)
 		if normed == nil {
 			return nil, fmt.Errorf("batch embedding[%d] contains NaN/Inf values", i)
 		}
-		out.Embeddings[i] = normed
+		vecs[i] = normed
 	}
-	return out.Embeddings, nil
+	return vecs, nil
 }
 
 // embedSerial falls back to individual Embed() calls for endpoints that don't
@@ -324,4 +274,3 @@ func (c *Client) Model() string {
 	}
 	return c.model
 }
-

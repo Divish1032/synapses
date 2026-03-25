@@ -1881,13 +1881,15 @@ func newBatchEmbedServer(t *testing.T) *httptest.Server {
 		input := req["input"]
 		switch v := input.(type) {
 		case []interface{}:
-			vecs := make([][]float32, len(v))
+			items := make([]map[string]interface{}, len(v))
 			for i := range v {
-				vecs[i] = []float32{0.1, 0.2, 0.3}
+				items[i] = map[string]interface{}{"embedding": []float32{0.1, 0.2, 0.3}}
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{"embeddings": vecs}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": items}) //nolint:errcheck
 		default:
-			json.NewEncoder(w).Encode(map[string]interface{}{"embedding": []float32{0.1, 0.2, 0.3}}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": []map[string]interface{}{
+				{"embedding": []float32{0.1, 0.2, 0.3}},
+			}}) //nolint:errcheck
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -1896,7 +1898,7 @@ func newBatchEmbedServer(t *testing.T) *httptest.Server {
 
 func TestEmbedAllNodes_BatchSuccess(t *testing.T) {
 	srv := newBatchEmbedServer(t)
-	ec := embed.NewBrainClient(srv.URL)
+	ec := embed.NewClient(srv.URL+"/v1/embeddings", "nomic-embed-text")
 
 	_, st, g := buildTestIndexedDir(t)
 	defer st.Close()
@@ -1912,15 +1914,17 @@ func TestEmbedAllNodes_BatchFallback(t *testing.T) {
 		input := req["input"]
 		switch input.(type) {
 		case []interface{}:
-			// Return empty embeddings list — mismatch triggers fallback.
-			json.NewEncoder(w).Encode(map[string]interface{}{"embeddings": [][]float32{}}) //nolint:errcheck
+			// Return empty data list — mismatch triggers fallback.
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": []interface{}{}}) //nolint:errcheck
 		default:
-			json.NewEncoder(w).Encode(map[string]interface{}{"embedding": []float32{0.4, 0.5}}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": []map[string]interface{}{
+				{"embedding": []float32{0.4, 0.5}},
+			}}) //nolint:errcheck
 		}
 	}))
 	defer srv.Close()
 
-	ec := embed.NewBrainClient(srv.URL)
+	ec := embed.NewClient(srv.URL+"/v1/embeddings", "nomic-embed-text")
 	_, st, g := buildTestIndexedDir(t)
 	defer st.Close()
 
