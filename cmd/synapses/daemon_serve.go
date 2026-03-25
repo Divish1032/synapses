@@ -1247,16 +1247,91 @@ func cmdDaemonServe(args []string) error {
 		json.NewEncoder(w).Encode(data)
 	})
 
-	// GET /v1/health — P5 Item 23: lightweight health endpoint.
+	// GET /v1/health — Sprint 18 #2: full daemon health endpoint.
+	// Returns daemon uptime, per-project graph/memory sizes, brain availability,
+	// federation status, embedding model status, and pulse collector metrics.
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if pulseGuard(w) {
-			return
+
+		// Pulse data is best-effort — respond even when pulse is disabled.
+		var snap map[string]interface{}
+		if sharedPulse != nil {
+			snap = sharedPulse.GetHealthSnapshot()
+		} else {
+			snap = map[string]interface{}{"status": "ok"}
 		}
-		snap := sharedPulse.GetHealthSnapshot()
+
+		// Daemon uptime.
+		snap["uptime_secs"] = int(time.Since(daemonStartedAt).Seconds())
+
+		// Aggregate per-project metrics.
+		projects := reg.All()
+		snap["project_count"] = len(projects)
+		var totalNodes, totalEdges, totalMemories int
+		var watchersDead int
+		var brainAvailable bool
+		var brainModel string
+		var fedHealthy, fedStale int
+
+		// Federation Status() does disk I/O; cap total wait across all projects.
+		fedCtx, fedCancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer fedCancel()
+
+		for _, pi := range projects {
+			if pi.Graph != nil {
+				totalNodes += pi.Graph.NodeCount()
+				totalEdges += pi.Graph.EdgeCount()
+			}
+			if pi.Store != nil {
+				totalMemories += pi.Store.CountEmbeddableMemories()
+			}
+			if pi.Watcher != nil && !pi.Watcher.IsAlive() {
+				watchersDead++
+			}
+			if pi.BrainClient != nil {
+				if model, _ := pi.BrainClient.HealthCheck(r.Context()); model != "" {
+					brainAvailable = true
+					brainModel = model
+				}
+			}
+			if pi.FederationResolver != nil {
+				for _, es := range pi.FederationResolver.Status(fedCtx) {
+					if es.Status == "indexed" {
+						fedHealthy++
+					} else {
+						fedStale++
+					}
+				}
+			}
+		}
+
+		if watchersDead > 0 {
+			snap["status"] = "degraded"
+		}
+		snap["total_nodes"] = totalNodes
+		snap["total_edges"] = totalEdges
+		snap["total_memories"] = totalMemories
+		snap["watchers_dead"] = watchersDead
+		snap["brain_available"] = brainAvailable
+		if brainModel != "" {
+			snap["brain_model"] = brainModel
+		}
+		snap["federation_healthy"] = fedHealthy
+		snap["federation_stale"] = fedStale
+
+		// Last index time and embedding model status from pulse events.
+		if sharedPulse != nil {
+			if t := sharedPulse.GetLastIndexTime(); t != "" {
+				snap["last_index_time"] = t
+			}
+			snap["embedding_status"] = sharedPulse.GetLatestEmbeddingModelStatus()
+		} else {
+			snap["embedding_status"] = "none"
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(snap)
 	})
@@ -2209,15 +2284,16 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		identity.Summary.Edges)
 
 	return &ProjectInstance{
-		AbsPath:        absPath,
-		Graph:          g,
-		Store:          st,
-		MCPServer:      srv,
-		HTTPHandler:    httpHandler,
-		BrainClient:    brainCli,
-		Watcher:        fw,
-		MemoryEmbedder: memEmbedder,
-		cancel:         projCancel,
+		AbsPath:            absPath,
+		Graph:              g,
+		Store:              st,
+		MCPServer:          srv,
+		HTTPHandler:        httpHandler,
+		BrainClient:        brainCli,
+		Watcher:            fw,
+		MemoryEmbedder:     memEmbedder,
+		FederationResolver: fedResolver,
+		cancel:             projCancel,
 	}, nil
 }
 

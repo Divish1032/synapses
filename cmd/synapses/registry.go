@@ -17,6 +17,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/embed"
+	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -31,10 +32,11 @@ type ProjectInstance struct {
 	Store       *store.Store
 	MCPServer   *mcpsrv.Server
 	HTTPHandler *mcpserver.StreamableHTTPServer // HTTP MCP endpoint for this project
-	BrainClient    *brain.Client
-	Watcher        *watcher.Watcher
-	MemoryEmbedder embed.Embedder    // closed on project shutdown, NOT via defer in init
-	cancel         context.CancelFunc // cancels the project context (stops watcher, socket listener)
+	BrainClient        *brain.Client
+	Watcher            *watcher.Watcher
+	MemoryEmbedder     embed.Embedder          // closed on project shutdown, NOT via defer in init
+	FederationResolver *federation.Resolver    // nil when no federation configured
+	cancel             context.CancelFunc      // cancels the project context (stops watcher, socket listener)
 }
 
 // Close shuts down all resources owned by this instance.
