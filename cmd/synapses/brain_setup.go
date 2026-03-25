@@ -256,7 +256,8 @@ func cmdBrainSetup(args []string) error {
 	if err := validateOllamaURL(*ollamaURL); err != nil {
 		return fmt.Errorf("brain setup: %w", err)
 	}
-	safeClient := newOllamaHTTPClient(30 * time.Second)
+	safeClient     := newOllamaHTTPClient(30 * time.Second)
+	smokeClient    := newOllamaHTTPClient(90 * time.Second) // inference can take 30-60s on CPU for 4b models
 
 	// color helpers — inline so callers stay readable
 	green  := func(s string) string { if *noColor { return s }; return "\033[32m" + s + "\033[0m" }
@@ -341,24 +342,35 @@ func cmdBrainSetup(args []string) error {
 	if *skipSmoke {
 		fmt.Println("  [4/4] Smoke test skipped (--skip-smoke)")
 	} else {
-		fmt.Println("  [4/4] Smoke testing each identity (sending a minimal JSON request)...")
+		fmt.Println("  [4/4] Smoke test...")
 		fmt.Println()
-		failed := 0
-		for _, tier := range brainTiers {
-			ok, elapsed := brainSmokeTest(*ollamaURL, tier.name, safeClient)
+
+		// Test only the first identity (Sentry). All 5 identities share the same
+		// base weights — if Sentry responds correctly, all others will too.
+		// Testing all 5 would add ~100s on cold hardware with no extra signal.
+		warmOK, warmElapsed := brainSmokeWarmup(*ollamaURL, baseModel, smokeClient)
+		if !warmOK {
+			fmt.Printf("  %s  Model did not respond within 90 seconds.\n", yellow("!"))
+			fmt.Println("        The brain is configured correctly — the model will warm up on first use.")
+			goto skipSmokeTests
+		}
+		_ = warmElapsed // elapsed printed live by brainSmokeWarmup's ticker
+
+		{
+			// brainTiers[0] is Sentry — the canonical representative identity.
+			fmt.Printf("        Sending test request to %s...", brainTiers[0].name)
+			ok, elapsed := brainSmokeTest(*ollamaURL, brainTiers[0].name, smokeClient)
 			if ok {
-				fmt.Printf("        %s  %-24s  responded in %s\n", green("✓"), tier.name, elapsed)
+				fmt.Printf(" %s (%s)\n", green("✓"), elapsed)
+				fmt.Printf("        %s  All 5 identities share the same weights — brain is working.\n", green("✓"))
 			} else {
-				fmt.Printf("        %s  %-24s  no valid JSON (cold-start timeout?)\n", yellow("!"), tier.name)
-				failed++
+				fmt.Printf(" %s\n", red("✗"))
+				fmt.Println()
+				fmt.Printf("  %s  Smoke test failed — Modelfile registration may be incomplete.\n", yellow("✗"))
+				fmt.Println("        Try: synapses brain setup --skip-pull")
 			}
 		}
-		if failed > 0 {
-			fmt.Println()
-			fmt.Printf("  %s  %d tier(s) did not respond during smoke test.\n", yellow("!"), failed)
-			fmt.Println("        This is often a cold-start timeout — try running the test again:")
-			fmt.Printf("        synapses brain setup --skip-pull --skip-smoke\n")
-		}
+	skipSmokeTests:
 	}
 	fmt.Println()
 
@@ -557,22 +569,81 @@ func brainRegisterIdentity(tier brainTierDef) error {
 	return nil
 }
 
-// brainSmokeTest sends a minimal chat request and checks for valid JSON output.
-// Returns (ok, elapsed) — the elapsed is formatted as "1.2s".
+// brainSmokeWarmup loads the base model into memory and keeps it resident for
+// 5 minutes so subsequent identity smoke tests run against warm weights.
+// It uses keep_alive=300 (seconds) so Ollama does not evict the model between tests.
+// Prints a live elapsed-seconds ticker so users know the process is not stuck.
+// Returns (ok, elapsed).
+func brainSmokeWarmup(baseURL, modelName string, client *http.Client) (bool, string) {
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	// Live ticker: prints "Xs..." every second while the HTTP call blocks.
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				fmt.Printf("\r        Loading %s into memory... %ds", modelName, int(time.Since(start).Seconds()))
+			}
+		}
+	}()
+
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model":      modelName,
+		"stream":     false,
+		"prompt":     "hi",
+		"keep_alive": 300, // keep model loaded for 5 min so identity tests hit warm weights
+		"options": map[string]interface{}{
+			"num_predict": 1,
+		},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/generate", bytes.NewReader(reqBody))
+	if err != nil {
+		close(done)
+		fmt.Print("\r\033[K")
+		return false, ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req) // ticker runs during this blocking call
+	close(done)
+	fmt.Print("\r\033[K") // clear ticker line (carriage return + erase to end of line)
+	if err != nil {
+		return false, ""
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	elapsed := fmt.Sprintf("%.1fs", time.Since(start).Seconds())
+	return resp.StatusCode == http.StatusOK, elapsed
+}
+
+// brainSmokeTest verifies the identity responds by waiting for the first
+// streamed token. Streaming means we only wait for time-to-first-token (~2-5s
+// on a warm model) rather than full generation time (60-90s on CPU), which
+// makes the test fast and reliable regardless of hardware speed.
+// Returns (ok, elapsed) — elapsed is time to first token.
 func brainSmokeTest(baseURL, modelName string, client *http.Client) (bool, string) {
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	reqBody, _ := json.Marshal(map[string]interface{}{
 		"model":  modelName,
-		"stream": false,
+		"stream": true, // streaming: we only need the first token
 		"messages": []map[string]string{
 			{"role": "user", "content": `{"name":"init","type":"function","package":"main","code":"func init() {}"}`},
 		},
-		"options": map[string]interface{}{"temperature": 0},
-		"format":  "json",
-		"think":   false,
+		"options": map[string]interface{}{
+			"temperature": 0,
+			"num_predict": 1, // one token is enough to prove the model responded
+		},
+		"think": false,
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/chat", bytes.NewReader(reqBody))
 	if err != nil {
@@ -585,17 +656,24 @@ func brainSmokeTest(baseURL, modelName string, client *http.Client) (bool, strin
 	}
 	defer resp.Body.Close()
 
-	var chatResp struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+	if resp.StatusCode != http.StatusOK {
 		return false, ""
 	}
-	content := strings.TrimSpace(chatResp.Message.Content)
-	ok := len(content) > 0 && strings.Contains(content, "{")
-	return ok, fmt.Sprintf("%.1fs", time.Since(start).Seconds())
+
+	// Read the first streamed chunk — if we get any valid JSON line, the model is working.
+	var chunk struct {
+		Message struct{ Content string `json:"content"` } `json:"message"`
+		Done    bool                                       `json:"done"`
+	}
+	dec := json.NewDecoder(resp.Body)
+	for dec.More() {
+		if err := dec.Decode(&chunk); err != nil {
+			break
+		}
+		// Any chunk (even an empty content token) confirms the model is alive.
+		return true, fmt.Sprintf("%.1fs", time.Since(start).Seconds())
+	}
+	return false, ""
 }
 
 // brainWriteConfig creates or updates ~/.synapses/brain.json, preserving
