@@ -62,6 +62,9 @@ func (s *Store) GetSessionContextEntities(sessionID string) []string {
 			entities = append(entities, e)
 		}
 	}
+	if rows.Err() != nil {
+		return nil
+	}
 	return entities
 }
 
@@ -89,6 +92,9 @@ func (s *Store) GetSessionAllDeliveredEntities(sessionID string) []string {
 		if rows.Scan(&e) == nil && e != "" {
 			entities = append(entities, e)
 		}
+	}
+	if rows.Err() != nil {
+		return nil
 	}
 	return entities
 }
