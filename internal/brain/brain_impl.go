@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -307,45 +308,49 @@ func New(cfg config.BrainConfig) Brain {
 				logutil.Warn("brain: OllamaURL points to remote host %q — source code snippets will be transmitted to this endpoint\n", host)
 			}
 		}
-		// Compute keep_alive values based on intelligence mode.
-		// Sentry (T0) is always pinned — it is called on every file-save event.
-		// Librarian (T2) is pinned in Standard/Full; JIT in Optimal to save RAM.
-		// Navigator/Archivist (T3/cold) are JIT in Optimal, TTL in Standard, pinned in Full.
-		kaGuardian, kaEnrich, kaOrchestrate, kaArchivist := cfg.KeepAliveValues()
+		// All 5 Ollama identities share the same base model weights (qwen3.5:2b /
+		// qwen3.5:4b), so Ollama treats them as a single loaded model. A single
+		// keep_alive value applies — the last request's value wins. Use the
+		// mode-appropriate TTL so the model evicts after idle (Sprint 17 #3):
+		//   optimal  → 120s (2-min eviction on 8 GB machines)
+		//   standard → 300s (5-min eviction on 16 GB machines)
+		//   full     → -1  (always pinned on 32 GB+ machines)
+		ka := cfg.KeepAlive()
 
-		// All tiers use base qwen3.5:2b with different Ollama Modelfile identities
-		// (system prompts). All use /api/chat + format:json + think:false for
-		// consistent structured JSON output.
+		// All tiers share the same base model (qwen3.5:2b for optimal, qwen3.5:4b
+		// for standard/full) with different Ollama Modelfile identities (system
+		// prompts). All use /api/chat + format:json + think:false for consistent
+		// structured JSON output.
 		ingestClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelIngest, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithKeepAlive(-1) // Sentry always pinned regardless of mode
+			WithKeepAlive(ka)
 
 		guardianClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelGuardian, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithKeepAlive(kaGuardian)
+			WithKeepAlive(ka)
 
 		enrichClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelEnrich, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithKeepAlive(kaEnrich)
+			WithKeepAlive(ka)
 
 		orchestrateClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelOrchestrate, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithKeepAlive(kaOrchestrate)
+			WithKeepAlive(ka)
 
 		archivistClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelArchivist, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
 			WithNumPredict(1024). // session summaries need more tokens than default 400
-			WithKeepAlive(kaArchivist)
+			WithKeepAlive(ka)
 	}
 
 	// No backend could be configured — degrade gracefully.
@@ -556,7 +561,9 @@ func (b *impl) Enrich(ctx context.Context, req EnrichRequest) (EnrichResponse, e
 				return EnrichResponse{Insight: r.Insight, Concerns: r.Concerns, Summaries: summaries, LLMUsed: r.LLMUsed, Degraded: true}, nil
 			}
 		}
-		return EnrichResponse{Summaries: summaries}, nil
+		// All LLM tiers exhausted — return heuristic insight so agents always
+		// receive a non-empty response even when the brain is fully unavailable.
+		return EnrichResponse{Summaries: summaries, Insight: heuristicEnrichInsight(req), Degraded: true}, nil
 	}
 
 	start := time.Now()
@@ -598,12 +605,15 @@ func (b *impl) Enrich(ctx context.Context, req EnrichRequest) (EnrichResponse, e
 }
 
 func (b *impl) ExplainViolation(ctx context.Context, req ViolationRequest) (ViolationResponse, error) {
-	if !b.cfg.Guardian || b.guardian == nil {
+	if !b.cfg.Guardian {
 		return ViolationResponse{}, nil
 	}
 
-	// Circuit breaker: if primary guardian tier is tripped, try fallback (T0 model).
-	if b.cb.isOpen("guardian") {
+	// Circuit breaker check precedes the guardian nil-check: an open circuit
+	// means the LLM path is unavailable regardless of component state, so we
+	// fall through the fallback chain without needing a live guardian client.
+	// Guard: b.cb is nil only in unit tests that construct impl directly.
+	if b.cb != nil && b.cb.isOpen("guardian") {
 		if b.fallbackGuardian != nil && !b.cb.isOpen("ingest") {
 			grdReq := guardian.Request{
 				RuleID: req.RuleID, RuleSeverity: req.RuleSeverity, Description: req.Description,
@@ -614,6 +624,13 @@ func (b *impl) ExplainViolation(ctx context.Context, req ViolationRequest) (Viol
 				return ViolationResponse{Explanation: r.Explanation, Fix: r.Fix, Degraded: true}, nil
 			}
 		}
+		// All LLM tiers exhausted — return rule template so validate_plan always
+		// surfaces an actionable message even when the brain is fully unavailable.
+		return guardianTemplateFallback(req), nil
+	}
+
+	// Guardian component is required for the primary LLM path.
+	if b.guardian == nil {
 		return ViolationResponse{}, nil
 	}
 
@@ -1056,6 +1073,78 @@ func validateCoordinateResponse(suggestion string) bool {
 // validateIngestResponse checks the ingestor output has non-empty summary.
 func validateIngestResponse(summary string) bool {
 	return strings.TrimSpace(summary) != "" && len(summary) >= 10
+}
+
+// heuristicEnrichInsight builds a last-resort insight string from graph
+// topology data in the EnrichRequest — no LLM required.
+// Called when all LLM tiers (T2 and T0) have their circuit breakers open.
+// Returns a non-empty sentence so agents always receive useful context.
+func heuristicEnrichInsight(req EnrichRequest) string {
+	name := req.RootName
+	if name == "" {
+		name = "this entity"
+	}
+	nodeType := req.RootType
+	if nodeType == "" {
+		nodeType = "entity"
+	}
+	callers := len(req.CallerNames)
+	callees := len(req.CalleeNames)
+
+	switch {
+	case callers > 0 && callees > 0:
+		return fmt.Sprintf("%s (%s) has %d caller(s) and %d callee(s).", name, nodeType, callers, callees)
+	case callers > 0:
+		return fmt.Sprintf("%s (%s) has %d caller(s) and no direct callees.", name, nodeType, callers)
+	case callees > 0:
+		return fmt.Sprintf("%s (%s) has no callers and %d callee(s).", name, nodeType, callees)
+	default:
+		return fmt.Sprintf("%s (%s) has no recorded callers or callees.", name, nodeType)
+	}
+}
+
+// relativeSourcePath extracts a package-relative path from an absolute or
+// project-rooted file path. It walks common Go project directory markers
+// (internal, cmd, pkg, src) and returns everything from the marker directory
+// onward so engineers and agents see "internal/mcp/handlers.go" instead of
+// just "handlers.go". Falls back to filepath.Base when no marker is found.
+func relativeSourcePath(filePath string) string {
+	for _, marker := range []string{"/internal/", "/cmd/", "/pkg/", "/src/"} {
+		if idx := strings.Index(filePath, marker); idx >= 0 {
+			return filePath[idx+1:]
+		}
+	}
+	return filepath.Base(filePath)
+}
+
+// guardianTemplateFallback builds a last-resort violation explanation from the
+// request fields — no LLM required.
+// Called when all LLM tiers (T1 and T0) have their circuit breakers open.
+// Returns a non-empty, actionable response so validate_plan always surfaces a
+// useful message even when the brain is fully unavailable.
+func guardianTemplateFallback(req ViolationRequest) ViolationResponse {
+	description := req.Description
+	if description == "" {
+		description = req.RuleID
+	}
+	sourceFile := relativeSourcePath(req.SourceFile)
+	targetName := req.TargetName
+	if targetName == "" {
+		targetName = "a restricted entity"
+	}
+	severity := req.RuleSeverity
+	if severity == "" {
+		severity = "warning"
+	}
+	explanation := fmt.Sprintf(
+		"Rule violation (%s): %s imports or calls %q, which is restricted by rule %q.",
+		severity, sourceFile, targetName, description,
+	)
+	fix := fmt.Sprintf(
+		"Remove or replace the usage of %q in %s to comply with rule %q.",
+		targetName, sourceFile, req.RuleID,
+	)
+	return ViolationResponse{Explanation: explanation, Fix: fix, Degraded: true}
 }
 
 // circuitBreaker tracks consecutive failures per operation tier and temporarily

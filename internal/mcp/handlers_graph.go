@@ -128,6 +128,9 @@ func (s *Server) handleFindEntity(
 		}
 		if n.Metadata != nil {
 			m.Doc = n.Metadata["doc"]
+			if m.Doc == "" {
+				m.Doc = n.Metadata["description"] // knowledge nodes use "description"
+			}
 			m.Signature = n.Metadata["signature"]
 		}
 		m.Callers = s.graph.Fanin(n.ID)
@@ -149,8 +152,10 @@ func (s *Server) handleFindEntity(
 			return 3
 		case graph.NodeFile, graph.NodePackage:
 			return 4
+		case graph.NodeConcept, graph.NodeEntity, graph.NodeArtifact, graph.NodeDecision:
+			return 5 // knowledge nodes: after code, before sections
 		default: // NodeSection and anything else
-			return 5
+			return 6
 		}
 	}
 	sort.Slice(results, func(i, j int) bool {
@@ -288,7 +293,7 @@ var toolCatalog = []toolCatalogEntry{
 	{Name: "get_context", Category: "exploration", Description: "Relevance-ranked subgraph around an entity", Keywords: []string{"context", "understand", "entity", "function", "struct", "interface", "subgraph", "explore", "code", "definition"}, Example: `get_context(entity="AuthService")`},
 	{Name: "find_entity", Category: "exploration", Description: "Locate nodes by name or substring", Keywords: []string{"find", "search", "locate", "entity", "name", "symbol", "discover", "where", "defined", "definition", "which", "contains", "method", "function", "class", "type", "has"}, Example: `find_entity(query="Auth")`},
 	{Name: "get_file_context", Category: "exploration", Description: "All entities in a file", Keywords: []string{"file", "entities", "overview", "list", "defined"}, Example: `get_file_context(file="internal/store/tasks.go")`},
-	{Name: "search", Category: "exploration", Description: "Keyword/fulltext search across entities", Keywords: []string{"search", "keyword", "concept", "fulltext", "semantic", "grep"}, Example: `search(query="rate limiting", mode="fulltext")`},
+	{Name: "search", Category: "exploration", Description: "Keyword/fulltext/semantic search across entities", Keywords: []string{"search", "keyword", "concept", "fulltext", "semantic", "grep", "hyde"}, Example: `search(query="rate limiting", mode="semantic")`},
 	{Name: "get_call_chain", Category: "exploration", Description: "Shortest call path between two entities", Keywords: []string{"call", "chain", "path", "trace", "reach", "how"}, Example: `get_call_chain(from="Handler", to="Repository")`},
 	{Name: "get_impact", Category: "exploration", Description: "Blast-radius analysis of what breaks if entity changes", Keywords: []string{"impact", "blast", "radius", "breaks", "change", "depends", "affected", "callers", "usage", "uses", "downstream", "refactor", "safe", "remove", "delete", "who", "using", "touching"}, Example: `get_impact(symbol="CarveEgoGraph")`},
 
@@ -1018,7 +1023,10 @@ func (s *Server) handleSearch(
 		s.trackContextCall(agentIDSrch, "search:"+query)
 	}
 
-	// mode=fulltext (or legacy alias "semantic") delegates to FTS5 BM25 search.
+	// mode=semantic → HyDE-enhanced vector search (brain generates a hypothesis,
+	// we embed the hypothesis and search HNSW against it). Falls back to raw
+	// query embedding when brain is unavailable or the 500 ms timeout fires.
+	// mode=fulltext → FTS5 BM25 full-text search (no HyDE, no vector path).
 	if mode := stringArg(req, "mode"); mode == "semantic" || mode == "fulltext" {
 		return s.handleSemanticSearch(ctx, req)
 	}
@@ -1180,9 +1188,10 @@ func (s *Server) handleSearch(
 	}
 
 	return jsonResult(map[string]interface{}{
-		"query":   query,
-		"count":   len(results),
-		"results": results,
+		"query":    query,
+		"count":    len(results),
+		"results":  results,
+		"_summary": fmt.Sprintf("%d result(s) for %q", len(results), query),
 	})
 }
 
@@ -1490,9 +1499,33 @@ func (s *Server) handleSemanticSearch(
 		limit = 20
 	}
 
+	mode := stringArg(req, "mode")
+
+	// --- HyDE: Hypothetical Document Embeddings (mode=semantic + brain available) ---
+	// When the user requests semantic search and the brain is online, generate a
+	// hypothetical code entity definition that "answers" the query. Embedding the
+	// hypothesis instead of the raw query bridges the vocabulary gap between natural-
+	// language queries and code names in the HNSW index.
+	//
+	// hyde=false opt-out: skip hypothesis generation for exact-name queries where
+	// the raw name is already the best search signal.
+	//
+	// Fallback contract: if the brain is unavailable, ShouldDegrade fires, or the
+	// 500 ms timeout expires, hydeHypothesis stays "" and we fall through to
+	// embedding the raw query unchanged — zero degradation visible to the caller.
+	var hydeHypothesis string
+	if mode == "semantic" && s.brainClient != nil {
+		// hyde=false is an explicit opt-out for exact-name queries where the raw
+		// query name is already the best search signal and hypothesis generation
+		// would only add latency. Any non-bool or absent value defaults to true.
+		if b, ok := req.GetArguments()["hyde"].(bool); !ok || b {
+			hydeHypothesis = s.brainClient.GenerateHypothetical(ctx, query)
+		}
+	}
+
 	// --- Vector path (when embedding_endpoint is configured) ---
-	// Embed the query with a 2s timeout so a slow Ollama never blocks the agent.
-	// On any error, silently fall through to FTS5-only results.
+	// Embed the query (or the HyDE hypothesis) with a 2s timeout so a slow Ollama
+	// never blocks the agent. On any error, silently fall through to FTS5-only.
 	var vectorResults []store.SearchResult
 	searchMode := "fts5_bm25"
 	// embedFailed is true when the embed API call itself errored (timeout, endpoint
@@ -1500,8 +1533,13 @@ func (s *Server) handleSemanticSearch(
 	// Used below to produce an accurate fallback_reason for the caller.
 	var embedFailed bool
 	if s.embedClient != nil {
+		// Prefer embedding the HyDE hypothesis; fall back to raw query.
+		embedTarget := query
+		if hydeHypothesis != "" {
+			embedTarget = hydeHypothesis
+		}
 		embedCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		queryVec, embedErr := s.embedClient.Embed(embedCtx, query)
+		queryVec, embedErr := s.embedClient.Embed(embedCtx, embedTarget)
 		cancel()
 		if embedErr != nil || len(queryVec) == 0 {
 			embedFailed = true
@@ -1536,7 +1574,9 @@ func (s *Server) handleSemanticSearch(
 		if len(results) > limit {
 			results = results[:limit]
 		}
-		if len(vectorResults) > 0 {
+		if hydeHypothesis != "" {
+			searchMode = "hybrid_vector+fts5+hyde"
+		} else {
 			searchMode = "hybrid_vector+fts5"
 		}
 	} else {
@@ -1550,6 +1590,18 @@ func (s *Server) handleSemanticSearch(
 		"search_mode": searchMode,
 	}
 
+	// Surface HyDE metadata so agents understand how results were ranked.
+	// hyde_hypothesis is truncated to 200 chars — enough for debugging without
+	// bloating the response when the LLM generates a long signature.
+	if hydeHypothesis != "" {
+		h := hydeHypothesis
+		if len([]rune(h)) > 200 {
+			rr := []rune(h)
+			h = string(rr[:200]) + "…"
+		}
+		resp["hyde_hypothesis"] = h
+	}
+
 	embeddingCount := s.store.EmbeddingCount()
 	if s.embedClient != nil && searchMode == "fts5_bm25" {
 		if embeddingCount == 0 {
@@ -1558,13 +1610,13 @@ func (s *Server) handleSemanticSearch(
 			resp["note"] = fmt.Sprintf("Vector index partial (%d nodes embedded). Results blended from cosine+FTS5 as more embeddings complete.", embeddingCount)
 		}
 	}
-	// Issue 1: when mode="semantic" was explicitly requested but we fell back to
-	// FTS5, surface a fallback_reason so the agent knows semantic ranking was not used.
+	// When mode="semantic" was explicitly requested but we fell back to FTS5,
+	// surface a fallback_reason so the agent knows semantic ranking was not used.
 	// Three distinct failure modes produce different diagnostics:
 	//   1. embedClient nil     → embedder not configured
 	//   2. embedFailed=true    → embed API call errored (timeout / endpoint down)
 	//   3. neither             → embed worked but the vector index had no matches
-	if mode := stringArg(req, "mode"); mode == "semantic" && searchMode == "fts5_bm25" {
+	if mode == "semantic" && searchMode == "fts5_bm25" {
 		if s.embedClient == nil {
 			resp["fallback_reason"] = "semantic unavailable — embedder not ready (call session_init to check embeddings status)"
 		} else if embedFailed {
@@ -1575,6 +1627,13 @@ func (s *Server) handleSemanticSearch(
 	}
 	if len(results) == 0 {
 		resp["hint"] = "No matches found. Try broader terms, partial names, or use search() for exact substring matching."
+	}
+	// _summary with match-type breakdown when hybrid search is active.
+	if len(vectorResults) > 0 {
+		resp["_summary"] = fmt.Sprintf("%d result(s) for %q: %d vector, %d fts5 [%s]",
+			len(results), query, len(vectorResults), len(ftsResults), searchMode)
+	} else {
+		resp["_summary"] = fmt.Sprintf("%d result(s) for %q [%s]", len(results), query, searchMode)
 	}
 
 	return jsonResult(resp)

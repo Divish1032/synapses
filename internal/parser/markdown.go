@@ -38,10 +38,19 @@ func (p *MarkdownParser) Parse(g *graph.Graph, filePath string, src []byte) erro
 	// resolver.ResolveDocEdges can create EXPLAINS edges from the file to the
 	// entities it documents (highest-confidence doc-code signal per arxiv:2506.16440).
 	fileNodeID := g.MakeNodeID(filePath, filePath)
-	sections, fmTitle := extractSections(src)
+	sections, fm := extractSections(src)
 	var fileMeta map[string]string
-	if fmTitle != "" {
-		fileMeta = map[string]string{"frontmatter_title": fmTitle}
+	if fm.Title != "" || fm.Category != "" || len(fm.Tags) > 0 {
+		fileMeta = make(map[string]string)
+		if fm.Title != "" {
+			fileMeta["frontmatter_title"] = fm.Title
+		}
+		if fm.Category != "" {
+			fileMeta["frontmatter_category"] = fm.Category
+		}
+		if len(fm.Tags) > 0 {
+			fileMeta["frontmatter_tags"] = strings.Join(fm.Tags, ",")
+		}
 	}
 	g.AddNode(&graph.Node{
 		ID:       fileNodeID,
@@ -148,21 +157,28 @@ type section struct {
 	BodyPreview  string // first 200 chars of body
 }
 
+// frontmatterData holds structured fields extracted from YAML/TOML frontmatter.
+type frontmatterData struct {
+	Title    string
+	Tags     []string
+	Category string
+}
+
 // extractSections parses ATX and setext headings and collects body text.
 //
 // extractSections parses ATX and setext headings and collects body text.
-// Returns the list of sections and the frontmatter title (if the file starts
-// with YAML/TOML frontmatter that contains a `title:` / `title =` field).
-func extractSections(src []byte) ([]section, string) {
+// Returns the list of sections and the frontmatter data (title, tags, category)
+// if the file starts with YAML/TOML frontmatter.
+func extractSections(src []byte) ([]section, frontmatterData) {
 	lines := strings.Split(string(src), "\n")
 	if len(lines) == 0 {
-		return nil, ""
+		return nil, frontmatterData{}
 	}
 
-	// ── Step 1: skip YAML/TOML frontmatter, extract title field ─────────────
+	// ── Step 1: skip YAML/TOML frontmatter, extract structured fields ───────
 	// Frontmatter is a --- or +++ block at the VERY start of the file.
 	startIdx := 0
-	var frontmatterTitle string
+	var fm frontmatterData
 	if len(lines) > 0 {
 		first := strings.TrimSpace(lines[0])
 		if first == "---" || first == "+++" {
@@ -172,16 +188,15 @@ func extractSections(src []byte) ([]section, string) {
 					startIdx = i + 1 // resume after closing delimiter
 					break
 				}
-				// Extract title from YAML (`title: "..."`) or TOML (`title = "..."`).
 				line := strings.TrimSpace(lines[i])
-				var val string
-				if strings.HasPrefix(line, "title:") {
-					val = strings.TrimSpace(strings.TrimPrefix(line, "title:"))
-				} else if strings.HasPrefix(line, "title =") {
-					val = strings.TrimSpace(strings.TrimPrefix(line, "title ="))
-				}
-				if val != "" {
-					frontmatterTitle = strings.TrimSpace(strings.Trim(val, `"'`))
+				// YAML: `key: value` / TOML: `key = value`
+				if val := extractFMField(line, "title"); val != "" {
+					fm.Title = val
+				} else if val := extractFMField(line, "category"); val != "" {
+					fm.Category = val
+				} else if val := extractFMField(line, "tags"); val != "" {
+					// tags: [foo, bar] or tags: foo, bar
+					fm.Tags = parseFMTags(val)
 				}
 			}
 		}
@@ -285,7 +300,7 @@ func extractSections(src []byte) ([]section, string) {
 		}
 	}
 
-	return sections, frontmatterTitle
+	return sections, fm
 }
 
 // isSetextUnderline returns true for a setext heading underline:
@@ -357,4 +372,40 @@ func isExternalLink(link string) bool {
 		strings.HasPrefix(link, "mailto:") ||
 		strings.HasPrefix(link, "ftp://") ||
 		strings.HasPrefix(link, "//")
+}
+
+// extractFMField extracts a value for the given key from a frontmatter line.
+// Supports YAML (`key: value`) and TOML (`key = value`) formats.
+// Returns "" if the line doesn't match the key.
+func extractFMField(line, key string) string {
+	yamlPrefix := key + ":"
+	tomlPrefix := key + " ="
+	var val string
+	if strings.HasPrefix(line, yamlPrefix) {
+		val = strings.TrimSpace(strings.TrimPrefix(line, yamlPrefix))
+	} else if strings.HasPrefix(line, tomlPrefix) {
+		val = strings.TrimSpace(strings.TrimPrefix(line, tomlPrefix))
+	}
+	if val == "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.Trim(val, `"'`))
+}
+
+// parseFMTags parses a tags value from frontmatter.
+// Handles formats: [foo, bar], foo, bar, or single tag.
+func parseFMTags(val string) []string {
+	// Strip surrounding brackets: [foo, bar] → foo, bar
+	val = strings.TrimSpace(val)
+	val = strings.TrimPrefix(val, "[")
+	val = strings.TrimSuffix(val, "]")
+	parts := strings.Split(val, ",")
+	var tags []string
+	for _, p := range parts {
+		t := strings.TrimSpace(strings.Trim(strings.TrimSpace(p), `"'`))
+		if t != "" {
+			tags = append(tags, t)
+		}
+	}
+	return tags
 }

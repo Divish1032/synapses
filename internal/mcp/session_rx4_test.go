@@ -308,6 +308,7 @@ func TestRX4_E2E_WorkSummaryRoundtrip(t *testing.T) {
 	// Now call session_init for the same agent — should surface previous_session_work.
 	result, err := srv.handleSessionInit(ctx, callTool(map[string]any{
 		"agent_id": "agent-rx4",
+		"scope":    "full",
 	}))
 	m := mustResult(t, result, err)
 

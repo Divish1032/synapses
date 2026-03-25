@@ -372,6 +372,26 @@ func (s *Server) handleValidatePlan(
 		}
 	}
 
+	// _summary: one-line digest for quick scanning.
+	// Format: "Plan {status}: {V} violations, {W} logic warnings. Safety: {safety}."
+	{
+		status := "ok"
+		if len(violations) > 0 {
+			status = "violations_found"
+		}
+		safetyStatus := "pass"
+		if safetyCheck != nil {
+			if s, ok := safetyCheck["level"].(string); ok {
+				safetyStatus = s
+			}
+		}
+		if !hasRules {
+			safetyStatus = "no_rules"
+		}
+		result["_summary"] = fmt.Sprintf("Plan %s: %d violation(s), %d logic warning(s), %d change(s). Safety: %s.",
+			status, len(violations), len(logicWarnings), len(changes), safetyStatus)
+	}
+
 	return jsonResult(result)
 }
 
@@ -702,6 +722,17 @@ func (s *Server) handleVerifyImplementation(
 				log.Printf("mcp: auto-record verify_implementation episode: %v", err)
 			}
 		})
+	}
+
+	// _summary: one-line digest for quick scanning.
+	// Format: "{F} files verified, {V} violations, {I} impact warnings."
+	{
+		status := "pass"
+		if totalViolations > 0 {
+			status = "violations_found"
+		}
+		result["_summary"] = fmt.Sprintf("%s: %d file(s), %d violation(s), %d impact warning(s)",
+			status, len(files), totalViolations, totalImpactWarnings)
 	}
 
 	return jsonResult(result)

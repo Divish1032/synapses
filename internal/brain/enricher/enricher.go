@@ -218,7 +218,10 @@ func (e *Enricher) Enrich(ctx context.Context, req Request) (Response, error) {
 	raw, err := e.llm.Generate(llmCtx, prompt)
 	if err != nil {
 		atomic.AddUint64(&e.ollamaFailures, 1)
-		// LLM unavailable — return deterministic fields, no error (fail-silent).
+		// LLM unavailable — populate a topology-based heuristic insight so that
+		// get_context always delivers a non-empty Insight field even when Ollama
+		// is down. This is the last heuristic tier of the fallback chain.
+		resp.Insight = heuristicInsight(req)
 		return resp, nil
 	}
 	atomic.AddUint64(&e.ollamaCalls, 1)
@@ -245,6 +248,37 @@ func deterministicPass(req Request) deterministicResult {
 	return deterministicResult{
 		Phase:           deterministicPhase(req.RootFile),
 		ComplexityScore: deterministicComplexity(req.FanIn, fanOut),
+	}
+}
+
+// heuristicInsight builds a topology-based insight string from the request
+// fields when the LLM is unavailable. It is the terminal fallback tier in the
+// brain degradation chain — always returns a non-empty string.
+func heuristicInsight(req Request) string {
+	name := req.RootName
+	if name == "" {
+		name = "this entity"
+	}
+	nodeType := req.RootType
+	if nodeType == "" {
+		nodeType = "entity"
+	}
+	// Use FanIn when available (accurate caller count from graph); fall back to
+	// len(CallerNames) which may be capped by maxNamesInPrompt.
+	callers := req.FanIn
+	if callers == 0 {
+		callers = len(req.CallerNames)
+	}
+	callees := len(req.CalleeNames)
+	switch {
+	case callers > 0 && callees > 0:
+		return fmt.Sprintf("%s (%s) has %d caller(s) and %d callee(s).", name, nodeType, callers, callees)
+	case callers > 0:
+		return fmt.Sprintf("%s (%s) has %d caller(s) and no direct callees.", name, nodeType, callers)
+	case callees > 0:
+		return fmt.Sprintf("%s (%s) has no callers and %d callee(s).", name, nodeType, callees)
+	default:
+		return fmt.Sprintf("%s (%s) has no recorded callers or callees.", name, nodeType)
 	}
 }
 
