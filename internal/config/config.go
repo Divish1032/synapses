@@ -573,6 +573,10 @@ type Violation struct {
 	FromNode    graph.NodeID   `json:"from_node"`
 	ToNode      graph.NodeID   `json:"to_node"`
 	EdgeType    graph.EdgeType `json:"edge_type"`
+	// FromFile and ToFile are the source files of the from/to nodes respectively.
+	// Populated at detection time for indexed lookup in violation_log.
+	FromFile string `json:"from_file,omitempty"`
+	ToFile   string `json:"to_file,omitempty"`
 	// SuggestedFix is a concise, actionable refactoring hint generated from the
 	// rule pattern and the names of the two nodes involved in the violation.
 	SuggestedFix string `json:"suggested_fix,omitempty"`
@@ -772,6 +776,8 @@ func (c *Config) CheckViolations(g *graph.Graph) []Violation {
 					FromNode:     e.From,
 					ToNode:       e.To,
 					EdgeType:     e.Type,
+					FromFile:     fromNode.File,
+					ToFile:       toNode.File,
 					SuggestedFix: suggestFix(rule, e.Type, fromNode, toNode),
 				})
 			}
@@ -838,6 +844,8 @@ func (c *Config) CheckViolationsForEdges(edges []*graph.Edge, getNode func(graph
 					FromNode:     e.From,
 					ToNode:       e.To,
 					EdgeType:     e.Type,
+					FromFile:     fromNode.File,
+					ToFile:       toNode.File,
 					SuggestedFix: suggestFix(rule, e.Type, fromNode, toNode),
 				})
 			}
@@ -920,6 +928,8 @@ func (c *Config) checkPathPatternViolationsFromSeeds(g *graph.Graph, seeds map[g
 									FromNode:     fromNode.ID,
 									ToNode:       e.To,
 									EdgeType:     lastEdgeType,
+									FromFile:     fromNode.File,
+									ToFile:       toNode.File,
 									SuggestedFix: suggestFix(rule, lastEdgeType, fromNode, toNode),
 								})
 							}
@@ -1017,6 +1027,8 @@ func (c *Config) checkPathPatternViolations(g *graph.Graph, fromFile *string) []
 									FromNode:     fromNode.ID,
 									ToNode:       e.To,
 									EdgeType:     lastEdgeType,
+									FromFile:     fromNode.File,
+									ToFile:       toNode.File,
 									SuggestedFix: suggestFix(rule, lastEdgeType, fromNode, toNode),
 								})
 							}

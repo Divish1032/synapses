@@ -217,7 +217,9 @@ CREATE TABLE IF NOT EXISTS violation_log (
     edge_type   TEXT NOT NULL,
     first_seen  TEXT NOT NULL,
     last_seen   TEXT NOT NULL,
-    occurrences INTEGER NOT NULL DEFAULT 1
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    from_file   TEXT NOT NULL DEFAULT '',
+    to_file     TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -901,6 +903,11 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE memories ADD COLUMN importance TEXT NOT NULL DEFAULT '1.0'`,
 		// Sprint 11.5: ACT-R frequency-weighted decay — access counter on memories.
 		`ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0`,
+		// L2 fix: add indexed file_path columns to violation_log for O(1) lookup instead of full-table LIKE scan.
+		`ALTER TABLE violation_log ADD COLUMN from_file TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE violation_log ADD COLUMN to_file   TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_vlog_from_file ON violation_log(from_file) WHERE from_file != ''`,
+		`CREATE INDEX IF NOT EXISTS idx_vlog_to_file   ON violation_log(to_file)   WHERE to_file   != ''`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
@@ -3684,8 +3691,8 @@ func (s *Store) LogViolations(vs []config.Violation) error {
 	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`
-        INSERT INTO violation_log (id, rule_id, severity, from_node, to_node, edge_type, first_seen, last_seen, occurrences)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+        INSERT INTO violation_log (id, rule_id, severity, from_node, to_node, edge_type, first_seen, last_seen, occurrences, from_file, to_file)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             last_seen   = excluded.last_seen,
             occurrences = occurrences + 1
@@ -3699,7 +3706,7 @@ func (s *Store) LogViolations(vs []config.Violation) error {
 		id := violationID(v.RuleID, string(v.FromNode), string(v.ToNode), string(v.EdgeType))
 		if _, err := stmt.Exec(id, v.RuleID, v.Severity,
 			string(v.FromNode), string(v.ToNode), string(v.EdgeType),
-			now, now); err != nil {
+			now, now, v.FromFile, v.ToFile); err != nil {
 			return err
 		}
 	}
@@ -3711,11 +3718,16 @@ func (s *Store) LogViolations(vs []config.Violation) error {
 // substring. Used by the watcher to distinguish newly-detected violations
 // (which should trigger an event) from pre-existing ones (which should not).
 func (s *Store) ViolationIDsForFile(file string) (map[string]struct{}, error) {
-	escaped := escapeLike(file)
-	pattern := "%" + escaped + "%"
+	// Query by indexed file columns (exact match) instead of LIKE on node IDs.
+	// Rows inserted before the from_file/to_file migration fall back to the
+	// LIKE scan on the legacy columns so no violations are missed during upgrade.
 	rows, err := s.knowledgeDB.Query(
-		`SELECT id FROM violation_log WHERE from_node LIKE ? ESCAPE '\' OR to_node LIKE ? ESCAPE '\'`,
-		pattern, pattern,
+		`SELECT id FROM violation_log WHERE from_file = ? OR to_file = ?
+		 UNION
+		 SELECT id FROM violation_log
+		 WHERE from_file = '' AND to_file = ''
+		   AND (from_node LIKE ? ESCAPE '\' OR to_node LIKE ? ESCAPE '\')`,
+		file, file, "%"+escapeLike(file)+"%", "%"+escapeLike(file)+"%",
 	)
 	if err != nil {
 		return nil, err
