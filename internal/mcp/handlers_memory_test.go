@@ -253,21 +253,25 @@ func TestMemoryTouchOnAccess(t *testing.T) {
 		t.Fatalf("InsertMemory: %v", err)
 	}
 
-	// Read the initial expires_at.
+	// Read the initial state.
 	mems, _ := srv.store.QueryMemories(store.TierProject, "", "", 10)
-	var initialExpiry string
+	var initial store.Memory
 	for _, m := range mems {
 		if m.ID == id {
-			initialExpiry = m.ExpiresAt
+			initial = m
 			break
 		}
 	}
-	if initialExpiry == "" {
+	if initial.ID == "" {
 		t.Fatal("could not find initial memory")
+	}
+	if initial.AccessCount != 0 {
+		t.Fatalf("expected initial access_count=0, got %d", initial.AccessCount)
 	}
 
 	// Call session_init with scope=full so the memory-surfacing code path
 	// (gated by !quickMode) runs and TouchMemory is enqueued.
+	// Default scope is "standard" which skips memory surfacing (quickMode).
 	srv.handleSessionInit(ctx, callTool(map[string]any{
 		"agent_id": "agent-8",
 		"scope":    "full",
@@ -277,12 +281,18 @@ func TestMemoryTouchOnAccess(t *testing.T) {
 	// falls in a strictly later second than initialExpiry.
 	time.Sleep(1100 * time.Millisecond)
 
-	// Read again and verify expires_at was extended.
+	// Read again and verify touch evidence: access_count incremented, last_accessed_at set.
 	mems, _ = srv.store.QueryMemories(store.TierProject, "", "", 10)
 	for _, m := range mems {
 		if m.ID == id {
-			if m.ExpiresAt <= initialExpiry {
-				t.Errorf("expected expires_at to be extended, got %s <= %s", m.ExpiresAt, initialExpiry)
+			if m.AccessCount < 1 {
+				t.Errorf("expected access_count >= 1 after touch, got %d", m.AccessCount)
+			}
+			if m.LastAccessedAt == "" {
+				t.Error("expected last_accessed_at to be set after touch")
+			}
+			if m.ExpiresAt < initial.ExpiresAt {
+				t.Errorf("expected expires_at not to decrease, got %s < %s", m.ExpiresAt, initial.ExpiresAt)
 			}
 			return
 		}

@@ -1548,6 +1548,160 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 
 	return dc
 }
+// ── Review scope types for enriched get_impact ──────────────────────────────
+
+type blastRadiusSummary struct {
+	DirectCallers     int `json:"direct_callers"`
+	TransitiveCallers int `json:"transitive_callers"`
+	AffectedFiles     int `json:"affected_files"`
+	UntestedEntities  int `json:"untested_entities"`
+	HighRiskEntities  int `json:"high_risk_entities"`
+}
+
+type testGap struct {
+	Entity string `json:"entity"`
+	File   string `json:"file"`
+	Depth  int    `json:"depth"`
+}
+
+type riskFlag struct {
+	Entity          string  `json:"entity"`
+	File            string  `json:"file"`
+	QualityScore    float64 `json:"quality_score"`
+	NegativeSignals int     `json:"negative_signals"`
+}
+
+type failureEpisode struct {
+	Title     string `json:"title"`
+	Timestamp int64  `json:"timestamp"`
+	Summary   string `json:"summary,omitempty"`
+}
+
+type reviewImpact struct {
+	*graph.ImpactResult
+	BlastRadius    blastRadiusSummary `json:"blast_radius"`
+	TestGaps       []testGap          `json:"test_gaps,omitempty"`
+	RiskFlags      []riskFlag         `json:"risk_flags,omitempty"`
+	FailureHistory []failureEpisode   `json:"failure_history,omitempty"`
+}
+
+// enrichImpactForReview augments an ImpactResult with compound intelligence:
+// blast radius summary, test coverage gaps on impacted entities, risk flags
+// from entity quality scores, and recent failure episodes. This replaces
+// what would have required 10+ separate tool calls for an agent to assemble.
+func (s *Server) enrichImpactForReview(result *graph.ImpactResult, rootName string) *reviewImpact {
+	ri := &reviewImpact{ImpactResult: result}
+
+	// 1. Blast radius summary — pre-computed counts from tiers.
+	// Deduplicate node IDs across tiers (struct aggregation can produce
+	// the same node in merged tiers from different methods).
+	seenIDs := make(map[graph.NodeID]bool)
+	for _, tier := range result.Tiers {
+		for _, ref := range tier.Nodes {
+			if seenIDs[ref.ID] {
+				continue
+			}
+			seenIDs[ref.ID] = true
+			if tier.Depth == 1 {
+				ri.BlastRadius.DirectCallers++
+			} else {
+				ri.BlastRadius.TransitiveCallers++
+			}
+		}
+	}
+	ri.BlastRadius.AffectedFiles = len(result.AffectedFiles)
+
+	// 2. Test gaps — check up to 30 impacted entities for test coverage.
+	// Depth-1 entities are checked first (most important for review).
+	// Deduplication via seenIDs ensures we don't check the same node twice.
+	const maxTestGapChecks = 30
+	type nodeForCheck struct {
+		ref   graph.EntityRef
+		depth int
+	}
+	seenForGap := make(map[graph.NodeID]bool)
+	var candidates []nodeForCheck
+	for _, tier := range result.Tiers {
+		for _, ref := range tier.Nodes {
+			if seenForGap[ref.ID] {
+				continue
+			}
+			seenForGap[ref.ID] = true
+			candidates = append(candidates, nodeForCheck{ref: ref, depth: tier.Depth})
+		}
+	}
+	// Sort depth-1 first so direct callers are prioritised within the cap.
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].depth < candidates[j].depth
+	})
+	if len(candidates) > maxTestGapChecks {
+		candidates = candidates[:maxTestGapChecks]
+	}
+	for _, c := range candidates {
+		tests := s.graph.FindTestsFor(c.ref.ID)
+		if len(tests) == 0 {
+			ri.TestGaps = append(ri.TestGaps, testGap{
+				Entity: c.ref.Name,
+				File:   c.ref.File,
+				Depth:  c.depth,
+			})
+		}
+	}
+	ri.BlastRadius.UntestedEntities = len(ri.TestGaps)
+
+	// 3. Risk flags — entities with negative quality scores.
+	// Deduplicate entity names to avoid wasted SQL and ambiguous file mappings.
+	if pc := s.getPulseClient(); pc != nil {
+		seenNames := make(map[string]bool)
+		var entityNames []string
+		entityFileMap := make(map[string]string)
+		for _, tier := range result.Tiers {
+			for _, ref := range tier.Nodes {
+				if seenNames[ref.Name] {
+					continue
+				}
+				seenNames[ref.Name] = true
+				entityNames = append(entityNames, ref.Name)
+				entityFileMap[ref.Name] = ref.File
+			}
+		}
+		if len(entityNames) > 0 {
+			details := pc.GetEntityQualityDetailsBatch(entityNames, s.projectID)
+			// Collect then sort for deterministic output order.
+			for name, d := range details {
+				if d.QualityScore < 0 {
+					ri.RiskFlags = append(ri.RiskFlags, riskFlag{
+						Entity:          name,
+						File:            entityFileMap[name],
+						QualityScore:    d.QualityScore,
+						NegativeSignals: d.NegativeSignals,
+					})
+				}
+			}
+			sort.Slice(ri.RiskFlags, func(i, j int) bool {
+				return ri.RiskFlags[i].QualityScore < ri.RiskFlags[j].QualityScore
+			})
+		}
+		ri.BlastRadius.HighRiskEntities = len(ri.RiskFlags)
+	}
+
+	// 4. Failure history — recent failure episodes related to the root entity.
+	if s.store != nil && rootName != "" {
+		episodes, err := s.store.RecallEpisodes(rootName, s.projectID, "", "failure", "", 5, 90)
+		if err == nil {
+			for _, ep := range episodes {
+				ri.FailureHistory = append(ri.FailureHistory, failureEpisode{
+					Title:     truncateUTF8(ep.Decision, 100),
+					Timestamp: ep.CreatedAt,
+					Summary:   truncateUTF8(ep.Rationale, 200),
+				})
+			}
+		}
+	}
+
+	return ri
+}
+
 func (s *Server) handleGetImpact(
 	ctx context.Context,
 	req mcp.CallToolRequest,
@@ -1573,6 +1727,8 @@ func (s *Server) handleGetImpact(
 	if tb, ok := req.GetArguments()["token_budget"].(float64); ok && tb > 0 {
 		tokenBudget = int(tb)
 	}
+
+	scope, _ := req.GetArguments()["scope"].(string)
 
 	// Resolve symbol name → node. Fall back to pattern match (same as get_context).
 	candidates := s.graph.FindByName(symbol)
@@ -1696,6 +1852,9 @@ func (s *Server) handleGetImpact(
 				ResultCount: merged.TotalAffected, ProjectID: s.projectID,
 			})
 		}
+		if scope == "review" {
+			return jsonResult(s.enrichImpactForReview(merged, root.Name))
+		}
 		return jsonResult(merged)
 	}
 
@@ -1719,6 +1878,30 @@ func (s *Server) handleGetImpact(
 			Mode: "impact", Query: symbol,
 			ResultCount: result.TotalAffected, ProjectID: s.projectID,
 		})
+	}
+
+	// Review scope: enriched output for code review with blast radius summary,
+	// test gaps, risk flags, and failure history in a single response.
+	if scope == "review" {
+		ri := s.enrichImpactForReview(result, root.Name)
+		// Attach federation data if also requested.
+		projectsParam, _ := req.GetArguments()["projects"].(string)
+		if projectsParam != "" && s.federationResolver != nil && s.store != nil {
+			fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
+			crossDeps := s.federationResolver.GetDepsForEntity(fedCtx, string(root.ID), s.store)
+			fedCancel()
+			if len(crossDeps) > 0 {
+				type reviewWithFederation struct {
+					*reviewImpact
+					CrossProjectDeps []federation.CrossProjectDepStatus `json:"cross_project_deps,omitempty"`
+				}
+				return jsonResult(reviewWithFederation{
+					reviewImpact:     ri,
+					CrossProjectDeps: crossDeps,
+				})
+			}
+		}
+		return jsonResult(ri)
 	}
 
 	// Cross-project impact: when projects= is specified, include cross-project

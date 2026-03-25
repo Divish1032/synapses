@@ -22,6 +22,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/metrics"
@@ -205,6 +206,14 @@ type Watcher struct {
 	pulseClient *pulse.Client
 	// loopPanics counts how many times the watcher event loop panicked. (P2-4)
 	loopPanics atomic.Int64
+
+	// nodeEmbedder is the embedder used for node embedding and Tier 1 entity
+	// resolution. Set via SetNodeEmbedder; nil if embedding is not configured.
+	nodeEmbedder embed.Embedder
+
+	// nodeEmbedRunning guards against concurrent node embedding passes.
+	// CAS from 0→1 before launching runNodeEmbedPass; reset to 0 on completion.
+	nodeEmbedRunning atomic.Int32
 }
 
 // New creates a Watcher. store may be nil; if provided the cache is updated
@@ -329,6 +338,17 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 	}
 
 	return watcher, nil
+}
+
+// isDocFile returns true for file extensions that produce Section nodes
+// (documentation files with heading-based structure). Used to determine
+// whether NL extraction and scoped doc-edge resolution should run.
+func isDocFile(ext string) bool {
+	switch ext {
+	case ".md", ".markdown", ".mdx", ".txt", ".rst":
+		return true
+	}
+	return false
 }
 
 // SetConfig wires the project config into the watcher so that rule violations
@@ -564,6 +584,38 @@ func (w *Watcher) computeInvalidationSet(filePath string, filePkgSnap map[string
 // SetPulseClient wires a pulse.Client into the watcher for pipeline instrumentation.
 // When set, reparseFile emits ReparseEvents and the event loop emits health events.
 // Must be called before Start. pc may be nil to disable. (P2-3/P2-4)
+// SetNodeEmbedder wires an embedder for Tier 1 embedding-based entity resolution
+// and for the background node embedding pass. Pass nil to disable (name-match only).
+func (w *Watcher) SetNodeEmbedder(e embed.Embedder) {
+	w.mu.Lock()
+	w.nodeEmbedder = e
+	w.mu.Unlock()
+}
+
+// launchNodeEmbedPass starts a background node embedding pass if an embedder
+// and store are both available and no pass is already running.
+//
+// Uses a CAS guard to prevent concurrent passes. If trackGo returns false
+// (watcher already stopped), the guard is reset so a future restart could
+// re-trigger the pass (defensive — Watcher is effectively single-use after Stop).
+func (w *Watcher) launchNodeEmbedPass(embedder embed.Embedder, st *store.Store) {
+	if embedder == nil || st == nil {
+		return
+	}
+	if !w.nodeEmbedRunning.CompareAndSwap(0, 1) {
+		return // another pass is already in flight
+	}
+	ctx := w.stopCtx
+	if !w.trackGo(func() {
+		defer w.nodeEmbedRunning.Store(0)
+		runNodeEmbedPass(ctx, embedder, st)
+	}) {
+		// Watcher stopped before the goroutine could be launched.
+		// Clear the guard so the atomic doesn't stay stuck at 1.
+		w.nodeEmbedRunning.Store(0)
+	}
+}
+
 func (w *Watcher) SetPulseClient(pc *pulse.Client) {
 	w.pulseClient = pc
 }
@@ -1389,17 +1441,17 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 	resolver.ResolveImplementsEdges(w.graph)
 
 	// Doc edges: if any file in the batch is a code file, run the full scan
-	// (markdown sections may reference the new entities). Otherwise use the
-	// file-scoped variant (only markdown files changed — code entities unchanged).
-	hasNonMarkdown := false
+	// (doc sections may reference the new entities). Otherwise use the
+	// file-scoped variant (only doc files changed — code entities unchanged).
+	hasNonDoc := false
 	for _, s := range valid {
 		ext := strings.ToLower(filepath.Ext(s.result.path))
-		if ext != ".md" && ext != ".markdown" && ext != ".mdx" {
-			hasNonMarkdown = true
+		if !isDocFile(ext) {
+			hasNonDoc = true
 			break
 		}
 	}
-	if hasNonMarkdown {
+	if hasNonDoc {
 		resolver.ResolveDocEdges(w.graph)
 	} else {
 		for _, s := range valid {
@@ -1407,23 +1459,36 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 		}
 	}
 
-	// NL-to-graph Tier 0+1: extract entity candidates from markdown section
+	// NL-to-graph Tier 0+1: extract entity candidates from doc section
 	// bodies and create knowledge nodes (concept/entity/artifact/decision).
-	// Only meaningful for markdown files — code file changes don't add sections.
+	// Only meaningful for doc files — code file changes don't add sections.
 	// Batch variant: ResolveNLEntitiesForFiles calls buildCodeNames once for all
-	// files in the batch (O(|graph|) instead of O(N×|graph|) for N markdown files).
+	// files in the batch (O(|graph|) instead of O(N×|graph|) for N doc files).
 	// Tier 2 LLM classification is submitted as a P1 brain task per file.
-	var mdPaths []string
+	var docPaths []string
 	for _, s := range valid {
-		if ext := strings.ToLower(filepath.Ext(s.result.path)); ext == ".md" || ext == ".markdown" || ext == ".mdx" {
-			mdPaths = append(mdPaths, s.result.path)
+		if ext := strings.ToLower(filepath.Ext(s.result.path)); isDocFile(ext) {
+			docPaths = append(docPaths, s.result.path)
 		}
 	}
-	if len(mdPaths) > 0 {
-		for fp, unresolved := range resolver.ResolveNLEntitiesForFiles(w.graph, mdPaths) {
+	if len(docPaths) > 0 {
+		w.mu.Lock()
+		er := newStoreEmbedResolver(w.nodeEmbedder, w.store)
+		w.mu.Unlock()
+		for fp, unresolved := range resolver.ResolveNLEntitiesForFiles(w.graph, docPaths, er) {
 			w.scheduleNLClassification(fp, unresolved)
 		}
 	}
+
+	// Launch the background node embedding pass when an embedder is configured.
+	// This ensures code entity vectors are populated in the HNSW index so future
+	// NL resolver runs can use Tier 1 embedding-based entity resolution.
+	// The atomic guard prevents concurrent passes when rapid batches arrive.
+	w.mu.Lock()
+	nodeEmbedder := w.nodeEmbedder
+	nodeSt := w.store
+	w.mu.Unlock()
+	w.launchNodeEmbedPass(nodeEmbedder, nodeSt)
 
 	// Phase 3: per-file post-resolve work (still under reparseMu).
 	// Only in-memory operations here — zero store I/O.
@@ -1856,19 +1921,31 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// For code file changes, all sections may reference the new entities,
 	// so a full scan is required.
 	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".md", ".markdown", ".mdx":
+	if isDocFile(ext) {
 		resolver.ResolveDocEdgesForFile(w.graph, path)
-	default:
+	} else {
 		resolver.ResolveDocEdges(w.graph)
 	}
 
-	// NL-to-graph Tier 0+1 (markdown files only).
+	// NL-to-graph Tier 0+1 (doc files only — md, txt, rst).
 	// Tier 2 LLM classification submitted as P1 when brain is available.
-	if ext == ".md" || ext == ".markdown" || ext == ".mdx" {
-		unresolved := resolver.ResolveNLEntitiesForFile(w.graph, path)
+	if isDocFile(ext) {
+		w.mu.Lock()
+		er := newStoreEmbedResolver(w.nodeEmbedder, w.store)
+		w.mu.Unlock()
+		unresolved := resolver.ResolveNLEntitiesForFile(w.graph, path, er)
 		w.scheduleNLClassification(path, unresolved)
 	}
+
+	// Trigger background node embedding pass for this file change.
+	// Runs for both code and markdown files: code changes add new entities that
+	// need vectors for future NL resolution; markdown changes add knowledge nodes.
+	// The atomic guard in launchNodeEmbedPass prevents concurrent passes.
+	w.mu.Lock()
+	reparseNodeEmbedder := w.nodeEmbedder
+	reparseNodeSt := w.store
+	w.mu.Unlock()
+	w.launchNodeEmbedPass(reparseNodeEmbedder, reparseNodeSt)
 
 	// Keep the stored call-site table consistent with the re-parsed file.
 	if w.store != nil {
