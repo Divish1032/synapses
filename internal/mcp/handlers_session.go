@@ -1660,6 +1660,7 @@ func (s *Server) handleSessionInit(
 
 	// _summary: one-line template-based digest — no LLM, negligible tokens.
 	// Helps agents scan response content without parsing every nested field.
+	// Format: "{N} pending tasks, {M} recent changes, {V} violations. {federation_status}."
 	{
 		taskCount := 0
 		if pt, ok := resp["pending_tasks"].(map[string]interface{}); ok {
@@ -1673,17 +1674,37 @@ func (s *Server) handleSessionInit(
 				branch = b
 			}
 		}
+		recentChangeCount := 0
+		if re, ok := resp["recent_events"].(map[string]interface{}); ok {
+			if c, ok := re["count"].(int); ok {
+				recentChangeCount = c
+			}
+		}
+		violationCount := 0
+		if sa, ok := resp["safety_alerts"].(map[string]interface{}); ok {
+			if v, ok := sa["violations"].([]interface{}); ok {
+				violationCount = len(v)
+			}
+		}
 		var parts []string
-		if taskCount > 0 {
-			parts = append(parts, fmt.Sprintf("%d pending task(s)", taskCount))
-		} else {
-			parts = append(parts, "0 pending tasks")
+		parts = append(parts, fmt.Sprintf("%d pending task(s)", taskCount))
+		if recentChangeCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d recent change(s)", recentChangeCount))
+		}
+		if violationCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d violation(s)", violationCount))
 		}
 		if branch != "" {
 			parts = append(parts, fmt.Sprintf("branch=%s", branch))
 		}
 		if agentID != "" {
 			parts = append(parts, fmt.Sprintf("agent=%s", agentID))
+		}
+		// Federation status
+		if fed, ok := resp["federation_health"].(map[string]interface{}); ok {
+			if status, ok := fed["status"].(string); ok && status != "" {
+				parts = append(parts, fmt.Sprintf("federation=%s", status))
+			}
 		}
 		resp["_summary"] = strings.Join(parts, "; ")
 	}

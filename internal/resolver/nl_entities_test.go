@@ -314,3 +314,58 @@ func nodeNames(nodes []*graph.Node) []string {
 
 // Verify parser.EntityCandidate is accessible (compilation check).
 var _ parser.EntityCandidate
+
+func TestResolveNLEntities_FrontmatterTags(t *testing.T) {
+	g := graph.New("test-fm")
+	g.SetRoot("/repo")
+	// Add a file node with frontmatter tags.
+	fileID := g.MakeNodeID("/repo/docs/design.md", "/repo/docs/design.md")
+	g.AddNode(&graph.Node{
+		ID:     fileID,
+		Type:   graph.NodeFile,
+		Name:   "design.md",
+		File:   "/repo/docs/design.md",
+		Line:   1,
+		Domain: graph.DomainDocs,
+		Metadata: map[string]string{
+			"frontmatter_title":    "Rate Limiter",
+			"frontmatter_tags":     "rate-limiting,throttling",
+			"frontmatter_category": "infrastructure",
+		},
+	})
+	// Add a section node.
+	secID := g.MakeNodeID("/repo/docs/design.md", "Overview")
+	g.AddNode(&graph.Node{
+		ID:     secID,
+		Type:   graph.NodeSection,
+		Name:   "Overview",
+		File:   "/repo/docs/design.md",
+		Line:   5,
+		Domain: graph.DomainDocs,
+		Metadata: map[string]string{
+			"body": "The system uses a TokenBucket for rate limiting.",
+		},
+	})
+
+	unresolved := resolver.ResolveNLEntities(g)
+
+	// Should have candidates from both body text and frontmatter.
+	found := make(map[string]bool)
+	for _, c := range unresolved {
+		found[c.Name] = true
+	}
+	// Check that at least frontmatter tags and body entities are present.
+	knowledgeNodes := g.FindByType(graph.NodeConcept)
+	knowledgeNames := make(map[string]bool)
+	for _, n := range knowledgeNodes {
+		knowledgeNames[n.Name] = true
+	}
+	// "rate-limiting" from tags should appear as a knowledge node
+	if !knowledgeNames["rate-limiting"] {
+		t.Error("expected knowledge node for frontmatter tag 'rate-limiting'")
+	}
+	// "infrastructure" from category should appear
+	if !knowledgeNames["infrastructure"] {
+		t.Error("expected knowledge node for frontmatter category 'infrastructure'")
+	}
+}

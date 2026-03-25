@@ -444,3 +444,64 @@ func TestBuildEntityTypePrompt_LongContextTruncated(t *testing.T) {
 		t.Errorf("prompt too long for truncated context: %d chars", len(p))
 	}
 }
+
+func TestBuildDescriptionPrompt(t *testing.T) {
+	p := buildDescriptionPrompt("TokenBucket", "controls throughput via token allocation")
+	if !strings.Contains(p, "TokenBucket") {
+		t.Error("prompt should contain entity name")
+	}
+	if !strings.Contains(p, "one sentence") {
+		t.Error("prompt should request one sentence")
+	}
+	if !strings.Contains(p, "controls throughput") {
+		t.Error("prompt should include context")
+	}
+}
+
+func TestParseDescriptionResponse(t *testing.T) {
+	tests := []struct {
+		resp string
+		want string
+	}{
+		{"An algorithm that controls throughput.", "An algorithm that controls throughput."},
+		{"An algorithm.\nMore details.", "An algorithm."},
+		{"", ""},
+		{"  Whitespace  ", "Whitespace"},
+	}
+	for _, tt := range tests {
+		got := parseDescriptionResponse(tt.resp)
+		if got != tt.want {
+			t.Errorf("parseDescriptionResponse(%q) = %q, want %q", tt.resp, got, tt.want)
+		}
+	}
+}
+
+func TestBuildRelevancePrompt(t *testing.T) {
+	p := buildRelevancePrompt("TokenBucket", "controls throughput")
+	if !strings.Contains(p, "TokenBucket") {
+		t.Error("prompt should contain entity name")
+	}
+	if !strings.Contains(p, "yes or no") {
+		t.Error("prompt should ask for yes/no")
+	}
+}
+
+func TestParseRelevanceResponse(t *testing.T) {
+	tests := []struct {
+		resp string
+		want bool
+	}{
+		{"yes", true},
+		{"Yes.", true},
+		{"no", false},
+		{"No", false},
+		{"maybe", true}, // ambiguous defaults to include
+		{"", true},      // empty defaults to include
+	}
+	for _, tt := range tests {
+		got := parseRelevanceResponse(tt.resp)
+		if got != tt.want {
+			t.Errorf("parseRelevanceResponse(%q) = %v, want %v", tt.resp, got, tt.want)
+		}
+	}
+}

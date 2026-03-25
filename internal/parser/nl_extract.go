@@ -274,6 +274,33 @@ func add(seen map[string]EntityCandidate, c EntityCandidate) {
 	seen[key] = c
 }
 
+// ExtractFrontmatterCandidates creates entity candidates from frontmatter metadata
+// (tags and category) stored on file nodes. These have high confidence (0.95) since
+// they are explicitly authored by the document owner.
+func ExtractFrontmatterCandidates(tags []string, category string) []EntityCandidate {
+	var candidates []EntityCandidate
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if isValidCandidate(tag) {
+			candidates = append(candidates, EntityCandidate{
+				Name:       tag,
+				Context:    "frontmatter tag",
+				SourceLine: 1,
+				Confidence: 0.95,
+			})
+		}
+	}
+	if category != "" && isValidCandidate(category) {
+		candidates = append(candidates, EntityCandidate{
+			Name:       category,
+			Context:    "frontmatter category",
+			SourceLine: 1,
+			Confidence: 0.95,
+		})
+	}
+	return candidates
+}
+
 // truncateSentence returns up to maxLen bytes from s, cutting at word boundary.
 func truncateSentence(s string, maxLen int) string {
 	s = strings.TrimSpace(s)

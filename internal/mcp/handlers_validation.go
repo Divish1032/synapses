@@ -373,10 +373,23 @@ func (s *Server) handleValidatePlan(
 	}
 
 	// _summary: one-line digest for quick scanning.
-	if len(violations) > 0 {
-		result["_summary"] = fmt.Sprintf("violations_found: %d violation(s)", len(violations))
-	} else {
-		result["_summary"] = fmt.Sprintf("ok: 0 violations, %d change(s) checked", len(changes))
+	// Format: "Plan {status}: {V} violations, {W} logic warnings. Safety: {safety}."
+	{
+		status := "ok"
+		if len(violations) > 0 {
+			status = "violations_found"
+		}
+		safetyStatus := "pass"
+		if safetyCheck != nil {
+			if s, ok := safetyCheck["level"].(string); ok {
+				safetyStatus = s
+			}
+		}
+		if !hasRules {
+			safetyStatus = "no_rules"
+		}
+		result["_summary"] = fmt.Sprintf("Plan %s: %d violation(s), %d logic warning(s), %d change(s). Safety: %s.",
+			status, len(violations), len(logicWarnings), len(changes), safetyStatus)
 	}
 
 	return jsonResult(result)
@@ -712,10 +725,14 @@ func (s *Server) handleVerifyImplementation(
 	}
 
 	// _summary: one-line digest for quick scanning.
-	if totalViolations > 0 {
-		result["_summary"] = fmt.Sprintf("violations_found: %d file(s), %d violation(s)", len(files), totalViolations)
-	} else {
-		result["_summary"] = fmt.Sprintf("pass: %d file(s), 0 violations", len(files))
+	// Format: "{F} files verified, {V} violations, {I} impact warnings."
+	{
+		status := "pass"
+		if totalViolations > 0 {
+			status = "violations_found"
+		}
+		result["_summary"] = fmt.Sprintf("%s: %d file(s), %d violation(s), %d impact warning(s)",
+			status, len(files), totalViolations, totalImpactWarnings)
 	}
 
 	return jsonResult(result)

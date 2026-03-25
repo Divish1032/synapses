@@ -217,6 +217,10 @@ type Scheduler struct {
 	wg        sync.WaitGroup
 	startOnce sync.Once
 	stopOnce  sync.Once
+
+	// prevHealth tracks the last observed health level so drainLoop can detect
+	// Yellow/Red → Green transitions and trigger an immediate drain.
+	prevHealth HealthLevel
 }
 
 // NewScheduler creates a Scheduler. Call Start() before submitting tasks.
@@ -348,8 +352,8 @@ func (s *Scheduler) QueueSize() int {
 }
 
 // drainLoop is the single background goroutine. It wakes on an explicit signal
-// (s.drainCh) or on a 10-second poll interval, then runs all eligible tasks
-// serially.
+// (s.drainCh), on a 10-second poll interval, or on a Yellow/Red → Green health
+// transition, then runs all eligible tasks serially.
 func (s *Scheduler) drainLoop() {
 	defer s.wg.Done()
 	ticker := time.NewTicker(schedulerDrainInterval)
@@ -362,6 +366,15 @@ func (s *Scheduler) drainLoop() {
 		case <-s.drainCh:
 			s.runEligible()
 		case <-ticker.C:
+			// Detect health transitions: Yellow/Red → Green triggers immediate
+			// drain of all queued tasks (including P2 piggyback).
+			if s.pulse != nil {
+				cur := s.pulse.Current().Health
+				if s.prevHealth > HealthGreen && cur == HealthGreen && s.queue.size() > 0 {
+					logutil.Debug("brain: scheduler: health recovered to Green, draining queued tasks\n")
+				}
+				s.prevHealth = cur
+			}
 			s.runEligible()
 		}
 	}
@@ -404,6 +417,17 @@ func (s *Scheduler) runEligible() {
 	for _, t := range tasks {
 		safeSchedulerRun(t.key, t.fn)
 	}
+
+	// P2 piggyback: when we loaded a model for P1 tasks under Yellow health,
+	// the model is now resident. Drain P2 tasks immediately while the model is
+	// still warm — this avoids waiting for the next Green tick or keep_alive expiry.
+	if health == HealthYellow && len(tasks) > 0 && s.queue.size() > 0 {
+		piggyback := s.queue.drain(HealthGreen) // Green eligibility → includes P2
+		for _, t := range piggyback {
+			safeSchedulerRun(t.key, t.fn)
+		}
+	}
+
 	// If more tasks appeared during task execution (e.g. concurrent file saves),
 	// and health is Green, re-signal immediately rather than waiting for the ticker.
 	// This avoids a 10-second delay when bursts of work arrive concurrently.

@@ -433,6 +433,47 @@ func TestMarkdownParser_TOMLFrontmatterTitleExtracted(t *testing.T) {
 	t.Fatal("file node not found")
 }
 
+func TestMarkdownParser_FrontmatterTagsExtracted(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("---\ntitle: \"Rate Limiter\"\ntags: [rate-limiting, throttling, reliability]\ncategory: infrastructure\n---\n# Overview\nBody.\n")
+	if err := p.Parse(g, "/repo/README.md", src); err != nil {
+		t.Fatal(err)
+	}
+	fileNodeID := g.MakeNodeID("/repo/README.md", "/repo/README.md")
+	fileNode := g.GetNode(fileNodeID)
+	if fileNode == nil {
+		t.Fatal("file node not found")
+	}
+	if fileNode.Metadata["frontmatter_title"] != "Rate Limiter" {
+		t.Errorf("frontmatter_title = %q, want %q", fileNode.Metadata["frontmatter_title"], "Rate Limiter")
+	}
+	if fileNode.Metadata["frontmatter_category"] != "infrastructure" {
+		t.Errorf("frontmatter_category = %q, want %q", fileNode.Metadata["frontmatter_category"], "infrastructure")
+	}
+	wantTags := "rate-limiting,throttling,reliability"
+	if fileNode.Metadata["frontmatter_tags"] != wantTags {
+		t.Errorf("frontmatter_tags = %q, want %q", fileNode.Metadata["frontmatter_tags"], wantTags)
+	}
+}
+
+func TestMarkdownParser_FrontmatterNoTags(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("---\ntitle: Simple\n---\n# Heading\nBody.\n")
+	if err := p.Parse(g, "/repo/README.md", src); err != nil {
+		t.Fatal(err)
+	}
+	fileNodeID := g.MakeNodeID("/repo/README.md", "/repo/README.md")
+	fileNode := g.GetNode(fileNodeID)
+	if fileNode == nil {
+		t.Fatal("file node not found")
+	}
+	if _, ok := fileNode.Metadata["frontmatter_tags"]; ok {
+		t.Error("frontmatter_tags should not be set when no tags in frontmatter")
+	}
+}
+
 // assertEdge checks that an edge exists from→to with the given type.
 func assertEdge(t *testing.T, g *graph.Graph, from, to graph.NodeID, edgeType graph.EdgeType) {
 	t.Helper()

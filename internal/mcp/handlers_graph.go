@@ -128,6 +128,9 @@ func (s *Server) handleFindEntity(
 		}
 		if n.Metadata != nil {
 			m.Doc = n.Metadata["doc"]
+			if m.Doc == "" {
+				m.Doc = n.Metadata["description"] // knowledge nodes use "description"
+			}
 			m.Signature = n.Metadata["signature"]
 		}
 		m.Callers = s.graph.Fanin(n.ID)
@@ -149,8 +152,10 @@ func (s *Server) handleFindEntity(
 			return 3
 		case graph.NodeFile, graph.NodePackage:
 			return 4
+		case graph.NodeConcept, graph.NodeEntity, graph.NodeArtifact, graph.NodeDecision:
+			return 5 // knowledge nodes: after code, before sections
 		default: // NodeSection and anything else
-			return 5
+			return 6
 		}
 	}
 	sort.Slice(results, func(i, j int) bool {
@@ -1623,7 +1628,13 @@ func (s *Server) handleSemanticSearch(
 	if len(results) == 0 {
 		resp["hint"] = "No matches found. Try broader terms, partial names, or use search() for exact substring matching."
 	}
-	resp["_summary"] = fmt.Sprintf("%d result(s) for %q [%s]", len(results), query, searchMode)
+	// _summary with match-type breakdown when hybrid search is active.
+	if len(vectorResults) > 0 {
+		resp["_summary"] = fmt.Sprintf("%d result(s) for %q: %d vector, %d fts5 [%s]",
+			len(results), query, len(vectorResults), len(ftsResults), searchMode)
+	} else {
+		resp["_summary"] = fmt.Sprintf("%d result(s) for %q [%s]", len(results), query, searchMode)
+	}
 
 	return jsonResult(resp)
 }
