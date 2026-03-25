@@ -396,7 +396,8 @@ func validateGitHubURL(rawURL string) error {
 		return fmt.Errorf("invalid URL: %w", err)
 	}
 	h := u.Hostname()
-	if !strings.HasSuffix(h, "github.com") && !strings.HasSuffix(h, "githubusercontent.com") {
+	if !(h == "github.com" || strings.HasSuffix(h, ".github.com")) &&
+		!(h == "githubusercontent.com" || strings.HasSuffix(h, ".githubusercontent.com")) {
 		return fmt.Errorf("URL hostname %q is not github.com or githubusercontent.com", h)
 	}
 	return nil
