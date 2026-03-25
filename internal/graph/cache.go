@@ -85,7 +85,22 @@ func cacheKeyFor(rootID NodeID, cfg CarveConfig, fingerprint string) string {
 		sort.Strings(types)
 		excludeTypes = strings.Join(types, ",")
 	}
-	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f|%.4f|emb:%v|qs:%v|lew:%d|lewv:%d|excl:%s|extest:%v",
+	// Build a deterministic fingerprint for EdgeWeights (sorted by key) so
+	// that two configs differing only in their custom weight map don't collide.
+	ewFP := "ew:default"
+	if len(cfg.EdgeWeights) > 0 {
+		keys := make([]string, 0, len(cfg.EdgeWeights))
+		for k := range cfg.EdgeWeights {
+			keys = append(keys, string(k))
+		}
+		sort.Strings(keys)
+		parts := make([]string, len(keys))
+		for i, k := range keys {
+			parts[i] = fmt.Sprintf("%s=%.4f", k, cfg.EdgeWeights[EdgeType(k)])
+		}
+		ewFP = "ew:" + strings.Join(parts, ",")
+	}
+	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f|%.4f|emb:%v|qs:%v|lew:%d|lewv:%d|excl:%s|extest:%v|%s",
 		rootID, cfg.MaxDepth, cfg.TokenBudget, cfg.MinRelevance, cfg.DecayFactor,
 		cfg.DirectionBoost, cfg.IntentID, fingerprint, cfg.UsePPR, cfg.Alpha,
 		cfg.HybridLambda, cfg.CrossDomainDecay,
@@ -94,7 +109,8 @@ func cacheKeyFor(rootID NodeID, cfg CarveConfig, fingerprint string) string {
 		len(cfg.LearnedEdgeWeights),
 		cfg.LearnedEdgeWeightsVersion,
 		excludeTypes,
-		cfg.ExcludeTestFiles)
+		cfg.ExcludeTestFiles,
+		ewFP)
 }
 
 // extractFiles collects the set of source files referenced by nodes in the subgraph.
