@@ -102,6 +102,63 @@ func TestHandleSessionInit_FullScope_NoMoreAvailable(t *testing.T) {
 	noKey(t, m, "more_available")
 }
 
+func TestHandleSessionInit_SummaryReflectsTaskCount(t *testing.T) {
+	s := newTestServer(t)
+	// Create a task via the MCP tool so pending_tasks.count > 0.
+	_, _ = s.handleCreatePlan(ctx, callTool(map[string]any{
+		"agent_id": "sum-agent",
+		"title":    "Test plan",
+		"tasks":    []any{map[string]any{"title": "Do something", "priority": "p1"}},
+	}))
+
+	res, initErr := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "sum-agent"}))
+	m := mustResult(t, res, initErr)
+
+	summary, ok := m["_summary"].(string)
+	if !ok || summary == "" {
+		t.Fatalf("_summary must be a non-empty string, got %v", m["_summary"])
+	}
+	if !strings.Contains(summary, "1 pending task") {
+		t.Errorf("_summary must reflect task count, got %q", summary)
+	}
+}
+
+func TestHandleSessionInit_ResumeScope_MoreAvailableIsSubset(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "res-agent", "scope": "resume"}))
+	m := mustResult(t, res, err)
+
+	// resume scope should have more_available.
+	hasKey(t, m, "more_available")
+
+	ma, ok := m["more_available"].(map[string]any)
+	if !ok {
+		t.Fatalf("more_available must be a map")
+	}
+	sections, ok := ma["sections"].([]any)
+	if !ok {
+		t.Fatalf("more_available.sections must be a list")
+	}
+
+	// Convert to a set for easy lookup.
+	sectionSet := make(map[string]bool, len(sections))
+	for _, s := range sections {
+		if str, ok := s.(string); ok {
+			sectionSet[str] = true
+		}
+	}
+
+	// Sections present in resume mode must NOT appear in more_available.
+	// federation_health, relevant_memories, previous_session_work, knowledge_graph
+	// are all guarded by !quickMode only — they ARE present in resume mode.
+	for _, shouldBePresent := range []string{"federation_health", "relevant_memories", "previous_session_work", "knowledge_graph"} {
+		if sectionSet[shouldBePresent] {
+			t.Errorf("more_available must not list %q for scope=resume — it is already present in resume responses", shouldBePresent)
+		}
+	}
+}
+
+
 func TestHandleSessionInit_EmitsSessionStartEvent(t *testing.T) {
 	s := newTestServer(t)
 	_, _ = s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "agent-x"}))

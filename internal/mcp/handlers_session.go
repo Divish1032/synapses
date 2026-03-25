@@ -550,6 +550,7 @@ func (s *Server) handleSessionInit(
 				summary = fmt.Sprintf("%d task(s) pending/in-progress", len(tasks))
 			}
 			pendingSection = map[string]interface{}{
+				"count":    len(tasks),
 				"summary":  summary,
 				"reminder": "Call update_task(id, 'in_progress') before starting a task and update_task(id, 'done', notes) immediately when finished. Never batch completions.",
 			}
@@ -1621,14 +1622,35 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
-	// Progressive disclosure: when standard/quick/resume mode suppresses rich
-	// sections, list what was omitted so agents can request scope="full" if needed.
+	// Progressive disclosure: list sections suppressed in this scope so agents
+	// know what to request with scope="full".
+	//
+	// Sections suppressed per scope:
+	//   standard/quick (!quickMode&&!resumeMode AND !quickMode guards fire):
+	//     all 12 rich sections are deferred.
+	//   resume (!quickMode&&!resumeMode fires, !quickMode does NOT fire):
+	//     only the 8 sections guarded by !quickMode&&!resumeMode are deferred;
+	//     federation_health, relevant_memories, previous_session_work, knowledge_graph
+	//     are already present in resume mode.
 	if quickMode || resumeMode {
-		deferred := []string{
-			"project_identity", "session_hint", "recent_events",
-			"sidecars", "brain_health", "federation_health",
-			"relevant_memories", "previous_session_work", "knowledge_graph",
-			"daemon_health", "context_effectiveness_hints", "session_effectiveness_trend",
+		var deferred []string
+		if quickMode {
+			// standard/quick: ALL rich sections are suppressed.
+			deferred = []string{
+				"project_identity", "session_hint", "recent_events",
+				"sidecars", "brain_health", "federation_health",
+				"relevant_memories", "previous_session_work", "knowledge_graph",
+				"daemon_health", "context_effectiveness_hints", "session_effectiveness_trend",
+			}
+		} else {
+			// resume: only sections guarded by !quickMode&&!resumeMode are suppressed.
+			// federation_health, relevant_memories, previous_session_work, knowledge_graph
+			// are NOT in this list because they ARE present in resume mode.
+			deferred = []string{
+				"project_identity", "session_hint", "recent_events",
+				"sidecars", "brain_health",
+				"daemon_health", "context_effectiveness_hints", "session_effectiveness_trend",
+			}
 		}
 		resp["more_available"] = map[string]interface{}{
 			"sections": deferred,

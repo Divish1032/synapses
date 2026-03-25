@@ -1623,6 +1623,7 @@ func (s *Server) handleSemanticSearch(
 	if len(results) == 0 {
 		resp["hint"] = "No matches found. Try broader terms, partial names, or use search() for exact substring matching."
 	}
+	resp["_summary"] = fmt.Sprintf("%d result(s) for %q [%s]", len(results), query, searchMode)
 
 	return jsonResult(resp)
 }
