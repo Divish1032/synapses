@@ -220,11 +220,6 @@ func (c *Collector) RecordFederationEvent(ev pulsetypes.FederationDetectEvent) {
 	c.enqueue(event{kind: "federation_event", data: ev})
 }
 
-// RecordSkillExecution enqueues a skill execution event (P5 — COV-15).
-func (c *Collector) RecordSkillExecution(ev pulsetypes.SkillExecutionEvent) {
-	c.enqueue(event{kind: "skill_execution", data: ev})
-}
-
 // RecordToolSequenceEntry enqueues a tool call sequence entry (P5 — SA-C1).
 func (c *Collector) RecordToolSequenceEntry(sessionID, toolName string, position int, success bool) {
 	c.enqueue(event{kind: "tool_sequence", data: pulsetypes.ToolSequenceEntry{
@@ -643,13 +638,6 @@ func (c *Collector) dispatchTx(ev event) error {
 			return nil
 		}
 		return c.store.InsertFederationEventTx(fe)
-	case "skill_execution":
-		se, ok := ev.data.(pulsetypes.SkillExecutionEvent)
-		if !ok {
-			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
-			return nil
-		}
-		return c.store.InsertSkillExecutionTx(se)
 	case "tool_sequence":
 		ts, ok := ev.data.(pulsetypes.ToolSequenceEntry)
 		if !ok {
@@ -870,13 +858,6 @@ func (c *Collector) dispatchNoTx(ev event) error {
 			return nil
 		}
 		return c.store.InsertFederationEvent(fe)
-	case "skill_execution":
-		se, ok := ev.data.(pulsetypes.SkillExecutionEvent)
-		if !ok {
-			logutil.Warn("pulse collector: type assertion failed for %s\n", ev.kind)
-			return nil
-		}
-		return c.store.InsertSkillExecution(se)
 	case "tool_sequence":
 		ts, ok := ev.data.(pulsetypes.ToolSequenceEntry)
 		if !ok {
