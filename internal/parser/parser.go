@@ -305,13 +305,10 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 	mtimes := make(map[string]int64, len(jobs))
 	var mtimesMu sync.Mutex
 
-	// R1: collect route registrations during parallel parse; inject HANDLES
-	// edges serially after wg.Wait() so all handler nodes are present.
-	type parsedFile struct {
-		path string
-		src  []byte
-	}
-	var heuristicFiles []parsedFile
+	// R1: collect paths of successfully parsed files for the serial heuristic
+	// pass after wg.Wait(). Only paths are stored — re-reading from disk avoids
+	// holding the full source bytes of every file in memory simultaneously.
+	var heuristicPaths []string
 	var heuristicMu sync.Mutex
 
 	// Phase 1 complete: total is now known. Notify before goroutines start.
@@ -377,9 +374,10 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 					nodesProduced = g.NodeCount() - before
 					// R28: stamp provenance on all nodes produced by this file.
 					ApplyProvenance(g, job.path, src)
-					// R1: collect for heuristic pass.
+					// R1: collect path for heuristic pass; re-read from disk later
+					// to avoid holding all source bytes in memory simultaneously.
 					heuristicMu.Lock()
-					heuristicFiles = append(heuristicFiles, parsedFile{job.path, src})
+					heuristicPaths = append(heuristicPaths, job.path)
 					heuristicMu.Unlock()
 				}
 			}
@@ -423,8 +421,14 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 	emitProgress(true)
 
 	// R1: serial heuristic pass — all AST nodes are now present in the graph.
-	for _, pf := range heuristicFiles {
-		ApplyHeuristics(g, pf.path, pf.src)
+	// Re-read each file from disk instead of holding bytes in memory since
+	// the OS page cache makes this cheap.
+	for _, path := range heuristicPaths {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		ApplyHeuristics(g, path, src)
 	}
 
 	return mtimes, nil
