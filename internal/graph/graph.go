@@ -517,6 +517,25 @@ func (g *Graph) OutEdges(id NodeID) []*Edge {
 // SnapshotCallsAdjacency returns a snapshot of CALLS outgoing edges for all nodes,
 // taken under a single RLock. This allows callers to do BFS/DFS traversal
 // without holding the lock for each step.
+// SnapshotEdgesAndNodes returns, under a single RLock, a complete snapshot of
+// all outgoing edges by source node and all nodes by ID. This allows callers
+// to perform graph traversal without per-node lock acquisitions.
+func (g *Graph) SnapshotEdgesAndNodes() (map[NodeID][]*Edge, map[NodeID]*Node) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	edges := make(map[NodeID][]*Edge, len(g.outEdges))
+	for id, ee := range g.outEdges {
+		cp := make([]*Edge, len(ee))
+		copy(cp, ee)
+		edges[id] = cp
+	}
+	nodes := make(map[NodeID]*Node, len(g.nodes))
+	for id, n := range g.nodes {
+		nodes[id] = n
+	}
+	return edges, nodes
+}
+
 // SnapshotImportAdjacency returns, under a single RLock, a map of
 // fileNodeID → []packageNodeID for all IMPORTS edges, plus a flat node map.
 // This allows callers to build import lookup tables without per-node locking.
