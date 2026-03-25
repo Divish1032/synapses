@@ -2135,6 +2135,9 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 			}
 		}
 		fanRows.Close() // close before write tx to avoid holding reader pool connection
+		if len(oldFanIn) == 2000000 {
+			logutil.Warn("synapses: store: fan-in query truncated at 2M rows; graph may have >2M CALLS edges — increase limit for full accuracy\n")
+		}
 	}
 
 	// R20/FIX-R20A: Snapshot current signatures before the wipe so we can detect
@@ -2151,6 +2154,9 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 			}
 		}
 		sigRows.Close() // close before write tx to avoid holding reader pool connection
+		if len(oldSigs) == 2000000 {
+			logutil.Warn("synapses: store: signature query truncated at 2M rows; some signature-change detection may be missed\n")
+		}
 	}
 
 	tx, err := s.graphDB.Begin()
@@ -3255,6 +3261,9 @@ func (s *Store) LoadFileMtimes() (map[string]int64, error) {
 		}
 		m[path] = mtime
 	}
+	if len(m) == 2000000 {
+		logutil.Warn("synapses: store: file_hashes query truncated at 2M rows; incremental reindex may miss files in large repos\n")
+	}
 	return m, rows.Err()
 }
 
@@ -3343,6 +3352,9 @@ func (s *Store) LoadCallSites() ([]graph.CallSite, error) {
 		}
 		cs.CallerID = graph.NodeID(callerID)
 		sites = append(sites, cs)
+	}
+	if len(sites) == 2000000 {
+		logutil.Warn("synapses: store: call_sites query truncated at 2M rows; call graph resolution may be incomplete for large repos\n")
 	}
 	return sites, rows.Err()
 }
@@ -3495,6 +3507,9 @@ func (s *Store) loadAllCallerFiles() ([]string, error) {
 			return nil, fmt.Errorf("scan caller_file: %w", err)
 		}
 		files = append(files, f)
+	}
+	if len(files) == 2000000 {
+		logutil.Warn("synapses: store: caller_file query truncated at 2M rows; call site resolution may be incomplete\n")
 	}
 	return files, rows.Err()
 }
