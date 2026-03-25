@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -121,6 +122,33 @@ type resolvedTarget struct {
 	file       string        // set when target resolved as a file path
 	isFile     bool
 	isConcept  bool // fell through to semantic search (no graph match)
+}
+
+// resolvedFileBaseline computes the baseline token cost for a resolved entity.
+// Baseline = sum of unique source file sizes / 4 across the best node and all
+// candidates. Returns 0 when the resolution failed (concept/nil).
+func resolvedFileBaseline(r *resolvedTarget) int {
+	if r == nil || r.isConcept {
+		return 0
+	}
+	seen := make(map[string]bool, len(r.candidates)+1)
+	var total int64
+	addFile := func(path string) {
+		if path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		if fi, err := os.Stat(path); err == nil {
+			total += fi.Size()
+		}
+	}
+	if r.bestNode != nil {
+		addFile(r.bestNode.File)
+	}
+	for _, n := range r.candidates {
+		addFile(n.File)
+	}
+	return int(total / 4)
 }
 
 // resolveTarget maps a free-form target string to graph nodes.
@@ -358,6 +386,10 @@ func (s *Server) handlePrepareContext(
 		sessID := synapseSessionID
 		intentCopy := intent
 		entityCopy := target
+		// Baseline = sum of unique source file sizes / 4 for files behind the
+		// resolved entity. This is the cost the agent would pay reading those
+		// files with cat/grep instead of using prepare_context.
+		baselineTokens := resolvedFileBaseline(resolved)
 		s.goBackground(func() {
 			pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
 				ToolName:       "prepare_context",
@@ -365,6 +397,7 @@ func (s *Server) handlePrepareContext(
 				Entity:         entityCopy,
 				ResponseBytes:  responseBytes,
 				ResponseTokens: responseBytes / 4,
+				BaselineTokens: baselineTokens,
 				DurationMs:     0, // not tracked at this level
 				SessionID:      sessID,
 				Intent:         intentCopy,
@@ -1138,14 +1171,21 @@ func (s *Server) handlePlanContext(
 		sessID := s.getSynapseSessionID(mcpSessID)
 		projID := s.projectID
 		entityCopy := target
+		baselineTokens := resolvedFileBaseline(resolved)
+		// Estimate response size from the result map.
+		respBytes, _ := json.Marshal(result)
+		responseBytes := len(respBytes)
 		s.goBackground(func() {
 			pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
-				ToolName:    "plan_context",
-				ProjectID:   projID,
-				Entity:      entityCopy,
-				SessionID:   sessID,
-				Intent:      "plan",
-				EntityFound: true,
+				ToolName:       "plan_context",
+				ProjectID:      projID,
+				Entity:         entityCopy,
+				ResponseBytes:  responseBytes,
+				ResponseTokens: responseBytes / 4,
+				BaselineTokens: baselineTokens,
+				SessionID:      sessID,
+				Intent:         "plan",
+				EntityFound:    true,
 			})
 		})
 	}

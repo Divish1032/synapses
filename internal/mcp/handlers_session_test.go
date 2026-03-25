@@ -2123,6 +2123,47 @@ func TestComputeFirstSessionHighlights_RecencyBoostsRiskOrder(t *testing.T) {
 	}
 }
 
+// TestComputeFirstSessionHighlights_ArchitecturalViolations verifies that
+// violations appear in the highlights response when vlog is non-empty, and that
+// the sample is capped at maxViolations=5 while the total count reflects all.
+func TestComputeFirstSessionHighlights_ArchitecturalViolations(t *testing.T) {
+	g := graph.New("test-repo")
+	// Need at least one dead function so the result is non-nil.
+	deadID := g.MakeNodeID("pkg/util.go", "orphaned")
+	g.AddNode(&graph.Node{ID: deadID, Type: graph.NodeFunction, Name: "orphaned", File: "pkg/util.go"})
+
+	vlog := []store.ViolationLogEntry{
+		{ID: "v1", RuleID: "r1", Severity: "error", FromNode: "a", ToNode: "b", EdgeType: "imports"},
+		{ID: "v2", RuleID: "r2", Severity: "warning", FromNode: "c", ToNode: "d", EdgeType: "calls"},
+		{ID: "v3", RuleID: "r3", Severity: "error", FromNode: "e", ToNode: "f", EdgeType: "imports"},
+		{ID: "v4", RuleID: "r4", Severity: "warning", FromNode: "g", ToNode: "h", EdgeType: "calls"},
+		{ID: "v5", RuleID: "r5", Severity: "error", FromNode: "i", ToNode: "j", EdgeType: "imports"},
+		{ID: "v6", RuleID: "r6", Severity: "warning", FromNode: "k", ToNode: "l", EdgeType: "calls"},
+		{ID: "v7", RuleID: "r7", Severity: "error", FromNode: "m", ToNode: "n", EdgeType: "imports"},
+	}
+
+	result := highlightsJSON(t, g, vlog)
+	if result == nil {
+		t.Fatal("expected non-nil highlights")
+	}
+	av, ok := result["architectural_violations"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected architectural_violations section, got %T", result["architectural_violations"])
+	}
+	// Total must reflect all 7 violations, not the capped sample.
+	if total := av["total"].(float64); int(total) != 7 {
+		t.Errorf("total: want 7, got %v", total)
+	}
+	sample, ok := av["sample"].([]any)
+	if !ok {
+		t.Fatalf("expected sample array, got %T", av["sample"])
+	}
+	// maxViolations = 5 — sample should be capped.
+	if len(sample) != 5 {
+		t.Errorf("sample length: want 5 (maxViolations cap), got %d", len(sample))
+	}
+}
+
 // TestComputeFirstSessionHighlights_MainAndInitNotDeadCode verifies that
 // main() and init() are excluded from dead code even though they are unexported
 // and have no CALLS in-edges (they are Go entry points invoked by the runtime).

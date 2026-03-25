@@ -359,3 +359,85 @@ func TestHandleEndSession_EffectivenessReport_AbsentWithoutSessionInit(t *testin
 	m := mustResult(t, res, err)
 	noKey(t, m, "effectiveness_report")
 }
+
+// ── Knowledge growth ─────────────────────────────────────────────────────────
+
+func TestBuildEffectivenessMessage_KnowledgeGrowth(t *testing.T) {
+	r := &EffectivenessReport{
+		TotalDeliveries: 2,
+		FirstFetchRight: 2,
+		ContextHitRate:  0.5,
+		ToolCalls:       10,
+		DurationMs:      60_000,
+		KnowledgeGrowth: 3,
+	}
+	msg := buildEffectivenessMessage(r)
+	if !strings.Contains(msg, "3 memories created") {
+		t.Errorf("message should mention knowledge growth: %q", msg)
+	}
+}
+
+func TestBuildEffectivenessMessage_ZeroKnowledgeGrowth_NoMention(t *testing.T) {
+	r := &EffectivenessReport{
+		TotalDeliveries: 1,
+		FirstFetchRight: 1,
+		ContextHitRate:  1.0,
+		ToolCalls:       5,
+		DurationMs:      30_000,
+		KnowledgeGrowth: 0,
+	}
+	msg := buildEffectivenessMessage(r)
+	if strings.Contains(msg, "memories") {
+		t.Errorf("message should not mention memories when growth is 0: %q", msg)
+	}
+}
+
+func TestHandleEndSession_EffectivenessReport_KnowledgeGrowthInPrev7d(t *testing.T) {
+	dir := t.TempDir()
+	pulsePath := filepath.Join(dir, "pulse.sqlite")
+
+	pc, err := pulse.New(pulsePath)
+	if err != nil {
+		t.Fatalf("pulse.New: %v", err)
+	}
+	defer pc.Close()
+
+	// Seed a prior session with knowledge_growth > 0.
+	st, err := pulsestore.Open(pulsePath)
+	if err != nil {
+		t.Fatalf("pulsestore.Open: %v", err)
+	}
+	if err := st.InsertSessionEffectiveness(pulsetypes.SessionEffectiveness{
+		SessionID:       "prior-kg-session",
+		AgentID:         "kg-agent",
+		ProjectID:       "test-project",
+		ContextHitRate:  0.5,
+		TokensSaved:     100,
+		ToolCalls:       5,
+		DurationMs:      30_000,
+		KnowledgeGrowth: 7,
+	}); err != nil {
+		t.Fatalf("InsertSessionEffectiveness: %v", err)
+	}
+	st.Close()
+
+	srv := newTestServer(t)
+	srv.SetPulseClient(pc)
+
+	_, _ = srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-agent"}))
+	res, err := srv.handleEndSession(ctx, callTool(map[string]any{"agent_id": "kg-agent"}))
+	m := mustResult(t, res, err)
+
+	report, ok := m["effectiveness_report"].(map[string]any)
+	if !ok {
+		t.Fatalf("effectiveness_report must be a map, got %T", m["effectiveness_report"])
+	}
+	prev7d, ok := report["prev_7d"].(map[string]any)
+	if !ok {
+		t.Fatalf("prev_7d must be a map, got %T", report["prev_7d"])
+	}
+	kg, _ := prev7d["total_knowledge_growth"].(float64)
+	if kg != 7 {
+		t.Errorf("prev_7d.total_knowledge_growth: want 7 (from seeded session), got %v", kg)
+	}
+}

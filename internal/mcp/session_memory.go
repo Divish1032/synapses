@@ -46,6 +46,8 @@ type EffectivenessReport struct {
 	// TokensSaved is the estimated tokens saved vs full-file grep (baseline - response).
 	// Omitted from JSON when zero so consumers can distinguish "no savings" from "no deliveries".
 	TokensSaved int `json:"tokens_saved,omitempty"`
+	// KnowledgeGrowth is the number of memories created or updated during this session.
+	KnowledgeGrowth int `json:"knowledge_growth"`
 	// DurationMs is the session wall-clock duration in milliseconds.
 	DurationMs int64 `json:"duration_ms"`
 	// Prev7d is the 7-day historical average across all previous sessions (omitted when no history).
@@ -56,10 +58,11 @@ type EffectivenessReport struct {
 
 // prev7dSummary holds the 7-day rolling averages for cross-session comparison.
 type prev7dSummary struct {
-	Sessions          int     `json:"sessions"`
-	AvgContextHitRate float64 `json:"avg_context_hit_rate"`
-	AvgTaskCompletion float64 `json:"avg_task_completion"`
-	TotalTokensSaved  int     `json:"total_tokens_saved"`
+	Sessions             int     `json:"sessions"`
+	AvgContextHitRate    float64 `json:"avg_context_hit_rate"`
+	AvgTaskCompletion    float64 `json:"avg_task_completion"`
+	TotalTokensSaved     int     `json:"total_tokens_saved"`
+	TotalKnowledgeGrowth int     `json:"total_knowledge_growth"`
 }
 
 // sessionSummary captures the structured extraction from a session.
@@ -545,6 +548,7 @@ func (s *Server) handleEndSession(
 				p.AvgContextHitRate += d.AvgContextHitRate * float64(d.Sessions)
 				p.AvgTaskCompletion += d.AvgTaskCompletion * float64(d.Sessions)
 				p.TotalTokensSaved += d.TotalTokensSaved
+				p.TotalKnowledgeGrowth += d.TotalKnowledgeGrowth
 			}
 			if p.Sessions > 0 {
 				p.AvgContextHitRate /= float64(p.Sessions)
@@ -567,6 +571,7 @@ func (s *Server) handleEndSession(
 			TokensSaved:        tokensSaved,
 			ToolCalls:          toolCalls,
 			DurationMs:         durationMs,
+			KnowledgeGrowth:    memoriesSaved,
 		}
 		s.goBackground(func() { pc.InsertSessionEffectiveness(eff) })
 
@@ -578,6 +583,7 @@ func (s *Server) handleEndSession(
 			FirstFetchRight:    firstFetch,
 			TokensSaved:        tokensSaved,
 			DurationMs:         durationMs,
+			KnowledgeGrowth:    memoriesSaved,
 			Prev7d:             prev7d,
 		}
 		report.Message = buildEffectivenessMessage(report)
@@ -875,6 +881,9 @@ func buildEffectivenessMessage(r *EffectivenessReport) string {
 	if r.TokensSaved > 0 {
 		msg += fmt.Sprintf(" ~%d tokens saved.", r.TokensSaved)
 	}
+	if r.KnowledgeGrowth > 0 {
+		msg += fmt.Sprintf(" %d memories created.", r.KnowledgeGrowth)
+	}
 	return msg
 }
 
@@ -897,10 +906,12 @@ func buildSessionTrend(days []pulse.DailyEffectiveness, windowDays int) map[stri
 	var totalSessions int
 	var weightedHitRate float64
 	var totalTokensSaved int
+	var totalKnowledgeGrowth int
 	for _, d := range days {
 		totalSessions += d.Sessions
 		weightedHitRate += d.AvgContextHitRate * float64(d.Sessions)
 		totalTokensSaved += d.TotalTokensSaved
+		totalKnowledgeGrowth += d.TotalKnowledgeGrowth
 	}
 	if totalSessions < 2 {
 		return nil
@@ -964,15 +975,19 @@ func buildSessionTrend(days []pulse.DailyEffectiveness, windowDays int) map[stri
 	if totalTokensSaved > 0 {
 		note += fmt.Sprintf(" %d tokens saved.", totalTokensSaved)
 	}
+	if totalKnowledgeGrowth > 0 {
+		note += fmt.Sprintf(" %d memories created.", totalKnowledgeGrowth)
+	}
 
 	out := map[string]interface{}{
-		"window_days":          windowDays,
-		"active_days":          activeDays,
-		"sessions":             totalSessions,
-		"avg_context_hit_rate": avgHitRate,
-		"total_tokens_saved":   totalTokensSaved,
-		"trend":                trend,
-		"note":                 note,
+		"window_days":            windowDays,
+		"active_days":            activeDays,
+		"sessions":               totalSessions,
+		"avg_context_hit_rate":   avgHitRate,
+		"total_tokens_saved":     totalTokensSaved,
+		"total_knowledge_growth": totalKnowledgeGrowth,
+		"trend":                  trend,
+		"note":                   note,
 	}
 	return out
 }

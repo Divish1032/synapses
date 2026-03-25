@@ -621,7 +621,7 @@ func applySelfUpdateFromPath(newBinary string, expectedHash string) error {
 	// Re-verify hash to close TOCTOU between the caller's hash check and this read.
 	if expectedHash != "" {
 		actualHash := sha256.Sum256(data)
-		if hex.EncodeToString(actualHash[:]) != expectedHash {
+		if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(actualHash[:])), []byte(expectedHash)) != 1 {
 			return fmt.Errorf("binary integrity check failed: hash changed between verification and apply")
 		}
 	}

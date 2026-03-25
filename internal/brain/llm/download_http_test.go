@@ -139,6 +139,46 @@ func TestDownloadGGUF_HTTPSuccess_DownloadsFile(t *testing.T) {
 }
 
 // ============================================================
+// DownloadGGUF — Hash mismatch (corrupt or tampered download)
+// ============================================================
+
+func TestDownloadGGUF_HashMismatch_ReturnsErrorAndCleansUp(t *testing.T) {
+	fileContent := []byte("this is the actual download content")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(fileContent)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := DownloadConfig{
+		Repo:     "owner/repo",
+		Filename: "model.gguf",
+		DestDir:  dir,
+		SHA256:   "0000000000000000000000000000000000000000000000000000000000000000", // wrong hash
+	}
+
+	withHijackedHTTP(t, srv, func() {
+		_, err := DownloadGGUF(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected error for hash mismatch, got nil")
+		}
+		if !strings.Contains(err.Error(), "integrity check failed") {
+			t.Errorf("error should mention integrity check failure: %v", err)
+		}
+		// Verify the corrupt file was removed — neither .tmp nor final should exist.
+		finalPath := filepath.Join(dir, "model.gguf")
+		tmpPath := finalPath + ".tmp"
+		if _, statErr := os.Stat(finalPath); statErr == nil {
+			t.Error("final file should not exist after hash mismatch")
+		}
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			t.Error(".tmp file should not exist after hash mismatch")
+		}
+	})
+}
+
+// ============================================================
 // DownloadGGUF — MkdirAll creates nested directories
 // ============================================================
 

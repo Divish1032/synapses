@@ -6,6 +6,8 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -780,4 +782,83 @@ func TestHandleGetContext_NoIntent_IncludesBothDirections(t *testing.T) {
 		t.Error("CalleeB should appear with no intent (balanced default)")
 	}
 	t.Logf("no intent: CallerA=%.4f CalleeB=%.4f", scores["CallerA"], scores["CalleeB"])
+}
+
+// ── resolvedFileBaseline ─────────────────────────────────────────────────────
+
+func TestResolvedFileBaseline_NilTarget(t *testing.T) {
+	if got := resolvedFileBaseline(nil); got != 0 {
+		t.Errorf("nil target: want 0, got %d", got)
+	}
+}
+
+func TestResolvedFileBaseline_Concept(t *testing.T) {
+	r := &resolvedTarget{isConcept: true}
+	if got := resolvedFileBaseline(r); got != 0 {
+		t.Errorf("concept target: want 0, got %d", got)
+	}
+}
+
+func TestResolvedFileBaseline_SingleFile(t *testing.T) {
+	// Create a temp file with known content.
+	dir := t.TempDir()
+	f := filepath.Join(dir, "main.go")
+	data := []byte("package main\n\nfunc main() {}\n") // 29 bytes
+	if err := os.WriteFile(f, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &resolvedTarget{
+		bestNode:   &graph.Node{File: f},
+		candidates: []*graph.Node{{File: f}}, // same file, should deduplicate
+	}
+	got := resolvedFileBaseline(r)
+	want := len(data) / 4 // 29/4 = 7
+	if got != want {
+		t.Errorf("single file baseline: want %d, got %d", want, got)
+	}
+}
+
+func TestResolvedFileBaseline_MultipleFiles(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "a.go")
+	f2 := filepath.Join(dir, "b.go")
+	os.WriteFile(f1, make([]byte, 400), 0o644)
+	os.WriteFile(f2, make([]byte, 800), 0o644)
+
+	r := &resolvedTarget{
+		bestNode: &graph.Node{File: f1},
+		candidates: []*graph.Node{
+			{File: f1},
+			{File: f2},
+			{File: f1}, // duplicate — should not double-count
+		},
+	}
+	got := resolvedFileBaseline(r)
+	want := (400 + 800) / 4 // 300
+	if got != want {
+		t.Errorf("multi-file baseline: want %d, got %d", want, got)
+	}
+}
+
+func TestResolvedFileBaseline_MissingFile(t *testing.T) {
+	// File doesn't exist on disk — os.Stat fails, should be skipped gracefully.
+	r := &resolvedTarget{
+		bestNode:   &graph.Node{File: "/nonexistent/path/foo.go"},
+		candidates: []*graph.Node{{File: "/nonexistent/path/foo.go"}},
+	}
+	if got := resolvedFileBaseline(r); got != 0 {
+		t.Errorf("missing file: want 0, got %d", got)
+	}
+}
+
+func TestResolvedFileBaseline_EmptyFileField(t *testing.T) {
+	// Nodes with empty File fields should be skipped.
+	r := &resolvedTarget{
+		bestNode:   &graph.Node{File: ""},
+		candidates: []*graph.Node{{File: ""}},
+	}
+	if got := resolvedFileBaseline(r); got != 0 {
+		t.Errorf("empty file: want 0, got %d", got)
+	}
 }

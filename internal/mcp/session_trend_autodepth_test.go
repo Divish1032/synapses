@@ -176,6 +176,40 @@ func TestBuildSessionTrend_NoTokenNote_WhenZeroSaved(t *testing.T) {
 	}
 }
 
+func TestBuildSessionTrend_KnowledgeGrowthAggregated(t *testing.T) {
+	days := []pulse.DailyEffectiveness{
+		{Day: "2026-03-19", AvgContextHitRate: 0.7, Sessions: 2, TotalKnowledgeGrowth: 5},
+		{Day: "2026-03-20", AvgContextHitRate: 0.7, Sessions: 2, TotalKnowledgeGrowth: 3},
+	}
+	out := buildSessionTrend(days, 7)
+	if out == nil {
+		t.Fatal("expected non-nil trend")
+	}
+	kg, ok := out["total_knowledge_growth"].(int)
+	if !ok {
+		t.Fatalf("total_knowledge_growth missing or wrong type: %T", out["total_knowledge_growth"])
+	}
+	if kg != 8 {
+		t.Errorf("total_knowledge_growth: want 8, got %d", kg)
+	}
+	note, _ := out["note"].(string)
+	if !strings.Contains(note, "8 memories created") {
+		t.Errorf("note should mention knowledge growth: %q", note)
+	}
+}
+
+func TestBuildSessionTrend_NoKnowledgeNote_WhenZero(t *testing.T) {
+	days := []pulse.DailyEffectiveness{
+		{Day: "2026-03-19", AvgContextHitRate: 0.7, Sessions: 3},
+		{Day: "2026-03-20", AvgContextHitRate: 0.7, Sessions: 3},
+	}
+	out := buildSessionTrend(days, 7)
+	note, _ := out["note"].(string)
+	if strings.Contains(note, "memories") {
+		t.Errorf("note should not mention memories when knowledge_growth=0: %q", note)
+	}
+}
+
 // ── session_init integration: session_effectiveness_trend ────────────────────
 
 // TestHandleSessionInit_EffectivenessTrend_AbsentWithoutPulse verifies the

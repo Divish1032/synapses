@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -343,5 +344,97 @@ func TestExportKnowledge_SummaryCounts(t *testing.T) {
 		if c.summary != c.slice {
 			t.Errorf("%s: summary=%d != len(slice)=%d", c.name, c.summary, c.slice)
 		}
+	}
+}
+
+// TestExportKnowledge_DynamicRules verifies that dynamic rules inserted via
+// UpsertDynamicRule appear in the export with all fields round-tripped.
+func TestExportKnowledge_DynamicRules(t *testing.T) {
+	s := openTestStore(t)
+
+	err := s.UpsertDynamicRule(config.Rule{
+		ID:          "no-util-from-api",
+		Description: "API layer must not import internal/util",
+		Severity:    "error",
+		ForbiddenEdge: config.ForbiddenEdge{
+			FromFilePattern: "api/",
+			ToFilePattern:   "internal/util/",
+			EdgeType:        "imports",
+		},
+		RuleType: "structural",
+	})
+	if err != nil {
+		t.Fatalf("UpsertDynamicRule: %v", err)
+	}
+
+	exp, err := s.ExportKnowledge("proj")
+	if err != nil {
+		t.Fatalf("ExportKnowledge: %v", err)
+	}
+	if len(exp.DynamicRules) != 1 {
+		t.Fatalf("DynamicRules: want 1, got %d", len(exp.DynamicRules))
+	}
+	r := exp.DynamicRules[0]
+	if r.ID != "no-util-from-api" {
+		t.Errorf("ID: want no-util-from-api, got %s", r.ID)
+	}
+	if r.Description != "API layer must not import internal/util" {
+		t.Errorf("Description mismatch: %s", r.Description)
+	}
+	if r.Severity != "error" {
+		t.Errorf("Severity: want error, got %s", r.Severity)
+	}
+	if r.FromFilePattern != "api/" {
+		t.Errorf("FromFilePattern: want api/, got %s", r.FromFilePattern)
+	}
+	if r.ToFilePattern != "internal/util/" {
+		t.Errorf("ToFilePattern: want internal/util/, got %s", r.ToFilePattern)
+	}
+	if r.EdgeType != "imports" {
+		t.Errorf("EdgeType: want imports, got %s", r.EdgeType)
+	}
+	if r.RuleType != "structural" {
+		t.Errorf("RuleType: want structural, got %s", r.RuleType)
+	}
+	if exp.Summary.DynamicRuleCount != 1 {
+		t.Errorf("Summary.DynamicRuleCount: want 1, got %d", exp.Summary.DynamicRuleCount)
+	}
+}
+
+// TestExportKnowledge_Annotations verifies that annotations inserted via
+// AddAnnotation appear in the export with all fields preserved.
+func TestExportKnowledge_Annotations(t *testing.T) {
+	s := openTestStore(t)
+
+	id, err := s.AddAnnotation("pkg/server.go::handleRequest", "agent-1", "This handler needs rate limiting")
+	if err != nil {
+		t.Fatalf("AddAnnotation: %v", err)
+	}
+	if id == "" {
+		t.Fatal("AddAnnotation returned empty id")
+	}
+
+	exp, err := s.ExportKnowledge("proj")
+	if err != nil {
+		t.Fatalf("ExportKnowledge: %v", err)
+	}
+	if len(exp.Annotations) != 1 {
+		t.Fatalf("Annotations: want 1, got %d", len(exp.Annotations))
+	}
+	a := exp.Annotations[0]
+	if a.NodeID != "pkg/server.go::handleRequest" {
+		t.Errorf("NodeID: want pkg/server.go::handleRequest, got %s", a.NodeID)
+	}
+	if a.AgentID != "agent-1" {
+		t.Errorf("AgentID: want agent-1, got %s", a.AgentID)
+	}
+	if a.Note != "This handler needs rate limiting" {
+		t.Errorf("Note mismatch: %s", a.Note)
+	}
+	if a.Source != "agent" {
+		t.Errorf("Source: want agent, got %s", a.Source)
+	}
+	if exp.Summary.AnnotationCount != 1 {
+		t.Errorf("Summary.AnnotationCount: want 1, got %d", exp.Summary.AnnotationCount)
 	}
 }
