@@ -394,7 +394,7 @@ func (s *Server) handleEndSession(
 						related = append(related, other)
 					}
 				}
-				dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Second)
+				dctx, dcancel := context.WithTimeout(ctx, 3*time.Second)
 				bc.LogDecision(dctx, brain.DecisionRequest{
 					AgentID:         sessAgentID,
 					Phase:           "implementation",
@@ -461,7 +461,7 @@ func (s *Server) handleEndSession(
 			sessAgentID2 := agentID
 			sessTaskID2 := taskID
 			s.goBackground(func() {
-				mctx, mcancel := context.WithTimeout(context.Background(), 30*time.Second)
+				mctx, mcancel := context.WithTimeout(ctx, 30*time.Second)
 				defer mcancel()
 				resp, err := bc.Memorize(mctx, archReq)
 				if err != nil || sessStore == nil {
