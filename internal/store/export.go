@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"time"
@@ -14,18 +16,27 @@ type KnowledgeExport struct {
 	// Schema version — bump when fields are added to enable future importers.
 	Version    string `json:"version"`
 	ExportedAt string `json:"exported_at"`
-	ProjectID  string `json:"project_id"`
+	// ProjectID is the FNV hash of the project root path used by this daemon.
+	// It is machine-specific (depends on the absolute path). Include it for
+	// identification/correlation, not as a stable cross-machine identifier.
+	ProjectID string `json:"project_id"`
 
-	// Core knowledge
-	Memories        []Memory           `json:"memories"`
-	MemoryVersions  []ExportedMemVer   `json:"memory_versions"`
-	MemoryAnchors   []ExportedMemAnchor `json:"memory_anchors"`
-	MemoryEmbeddings []ExportedMemEmbed `json:"memory_embeddings"`
+	// TTL note: expires_at values are preserved as-is from the DB for audit
+	// fidelity. Importers should reset expires_at on re-import if they want
+	// memories to remain active — past-dated entries will be pruned on the
+	// next PruneStaleData run.
+	TTLNote string `json:"ttl_note"`
 
-	Episodes    []Episode      `json:"episodes"`
+	// Core knowledge (all slices are always non-null, even when empty).
+	Memories         []Memory            `json:"memories"`
+	MemoryVersions   []ExportedMemVer    `json:"memory_versions"`
+	MemoryAnchors    []ExportedMemAnchor `json:"memory_anchors"`
+	MemoryEmbeddings []ExportedMemEmbed  `json:"memory_embeddings"`
+
+	Episodes     []Episode      `json:"episodes"`
 	DynamicRules []ExportedRule `json:"dynamic_rules"`
-	Annotations []Annotation   `json:"annotations"`
-	QualityGaps []QualityGap   `json:"quality_gaps"`
+	Annotations  []Annotation   `json:"annotations"`
+	QualityGaps  []QualityGap   `json:"quality_gaps"`
 
 	// Summary counts for quick inspection.
 	Summary ExportSummary `json:"summary"`
@@ -43,7 +54,7 @@ type ExportSummary struct {
 	QualityGapCount      int `json:"quality_gap_count"`
 }
 
-// ExportedMemVer is a stripped-down view of MemoryVersion safe for export.
+// ExportedMemVer is a historical snapshot preserved when remember() deduplicates.
 // Mirrors the memory_versions table fields.
 type ExportedMemVer struct {
 	ID           string `json:"id"`
@@ -63,94 +74,108 @@ type ExportedMemAnchor struct {
 }
 
 // ExportedMemEmbed holds a memory's embedding vector encoded as base64 for
-// portability. The original BLOB (little-endian float32 array) is preserved
+// portability. The BLOB (normalized little-endian float32 array) is preserved
 // verbatim so embeddings can be re-imported without re-computation.
+// Stale embeddings (content changed since embedding was computed) are flagged
+// — importers may choose to re-embed these rather than re-import them.
 type ExportedMemEmbed struct {
-	MemoryID    string `json:"memory_id"`
-	Model       string `json:"model"`
-	EmbeddingB64 string `json:"embedding_b64"` // base64-encoded float32 BLOB
-	ContentHash string `json:"content_hash"`
-	EmbeddedAt  int64  `json:"embedded_at"` // Unix seconds
+	MemoryID     string `json:"memory_id"`
+	Model        string `json:"model"`
+	EmbeddingB64 string `json:"embedding_b64"` // base64-encoded normalized float32 BLOB
+	ContentHash  string `json:"content_hash"`
+	EmbeddedAt   int64  `json:"embedded_at"` // Unix seconds
+	Stale        bool   `json:"stale,omitempty"`
 }
 
 // ExportedRule captures a dynamic architectural rule in a portable form.
 // Mirrors the dynamic_rules table without internal DB columns.
 type ExportedRule struct {
-	ID                string `json:"id"`
-	Description       string `json:"description"`
-	Severity          string `json:"severity"`
-	FromFilePattern   string `json:"from_file_pattern,omitempty"`
-	ToFilePattern     string `json:"to_file_pattern,omitempty"`
-	FromType          string `json:"from_type,omitempty"`
-	ToType            string `json:"to_type,omitempty"`
-	EdgeType          string `json:"edge_type,omitempty"`
-	ToNamePattern     string `json:"to_name_pattern,omitempty"`
-	RuleType          string `json:"rule_type,omitempty"`
-	PathPattern       string `json:"path_pattern,omitempty"` // comma-separated EdgeType list
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
+	ID              string `json:"id"`
+	Description     string `json:"description"`
+	Severity        string `json:"severity"`
+	FromFilePattern string `json:"from_file_pattern,omitempty"`
+	ToFilePattern   string `json:"to_file_pattern,omitempty"`
+	FromType        string `json:"from_type,omitempty"`
+	ToType          string `json:"to_type,omitempty"`
+	EdgeType        string `json:"edge_type,omitempty"`
+	ToNamePattern   string `json:"to_name_pattern,omitempty"`
+	RuleType        string `json:"rule_type,omitempty"`
+	PathPattern     string `json:"path_pattern,omitempty"` // comma-separated EdgeType list
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
-// ExportKnowledge serializes all durable knowledge to a portable snapshot.
-// It runs four parallel queries plus three sequential ones — all read-only.
+// ExportKnowledge serializes all durable knowledge to an atomic, consistent
+// snapshot. All 8 queries run inside a single DEFERRED read transaction so
+// concurrent writes do not produce partially-visible state (e.g. an anchor
+// row that references a memory not yet visible in the memories query).
+//
 // Intentionally excluded: graph nodes/edges (regenerable), file_hashes
 // (ephemeral), tool_calls (analytics), web_cache (transient), sessions,
 // agent_messages, events (operational logs).
+//
+// All slice fields in the returned KnowledgeExport are non-nil even when
+// empty, so JSON consumers always receive arrays rather than null.
 func (s *Store) ExportKnowledge(projectID string) (*KnowledgeExport, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	// ── 1. Memories (cap at 10 000 matching the row cap constant) ──────────
-	memories, err := s.exportMemories()
+	// Open a DEFERRED read transaction. All 8 export queries run inside it so
+	// the snapshot is consistent — no write committed between queries can
+	// partially appear in the result.
+	tx, err := s.knowledgeDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("export begin tx: %w", err)
+	}
+	// Always roll back — this is a read-only transaction, so rollback is
+	// equivalent to commit (no writes to discard).
+	defer tx.Rollback() //nolint:errcheck
+
+	memories, err := exportMemoriesTx(tx)
 	if err != nil {
 		return nil, fmt.Errorf("export memories: %w", err)
 	}
 
-	// ── 2. Memory versions ────────────────────────────────────────────────
-	versions, err := s.exportMemoryVersions()
+	versions, err := exportMemoryVersionsTx(tx)
 	if err != nil {
 		return nil, fmt.Errorf("export memory versions: %w", err)
 	}
 
-	// ── 3. Memory anchors ─────────────────────────────────────────────────
-	anchors, err := s.exportMemoryAnchors()
+	anchors, err := exportMemoryAnchorsTx(tx)
 	if err != nil {
 		return nil, fmt.Errorf("export memory anchors: %w", err)
 	}
 
-	// ── 4. Memory embeddings (base64-encoded BLOBs) ───────────────────────
-	embeds, err := s.exportMemoryEmbeddings()
+	embeds, err := exportMemoryEmbeddingsTx(tx)
 	if err != nil {
 		return nil, fmt.Errorf("export memory embeddings: %w", err)
 	}
 
-	// ── 5. Episodes ────────────────────────────────────────────────────────
-	episodes, err := s.exportEpisodes()
+	episodes, err := exportEpisodesTx(tx)
 	if err != nil {
 		return nil, fmt.Errorf("export episodes: %w", err)
 	}
 
-	// ── 6. Dynamic rules (includes rule_type and path_pattern) ────────────
-	rules, err := s.exportDynamicRules()
+	rules, err := exportDynamicRulesTx(tx)
 	if err != nil {
 		return nil, fmt.Errorf("export dynamic rules: %w", err)
 	}
 
-	// ── 7. Annotations ────────────────────────────────────────────────────
-	annotations, err := s.exportAnnotations()
+	annotations, err := exportAnnotationsTx(tx)
 	if err != nil {
 		return nil, fmt.Errorf("export annotations: %w", err)
 	}
 
-	// ── 8. Quality gaps (all statuses) ────────────────────────────────────
-	gaps, err := s.GetGaps(GapFilter{Status: "all"})
+	gaps, err := exportQualityGapsTx(tx)
 	if err != nil {
 		return nil, fmt.Errorf("export quality gaps: %w", err)
 	}
 
 	exp := &KnowledgeExport{
-		Version:          "1",
-		ExportedAt:       now,
-		ProjectID:        projectID,
+		Version:    "1",
+		ExportedAt: now,
+		ProjectID:  projectID,
+		TTLNote: "expires_at values are preserved from the database for audit fidelity. " +
+			"Importers must reset expires_at on re-import to prevent immediate expiry on the next prune cycle.",
 		Memories:         memories,
 		MemoryVersions:   versions,
 		MemoryAnchors:    anchors,
@@ -173,11 +198,10 @@ func (s *Store) ExportKnowledge(projectID string) (*KnowledgeExport, error) {
 	return exp, nil
 }
 
-// exportMemories returns all memories (including stale/expired) up to the row cap.
-// Uses the same column selection as scanMemories so the standard Memory struct
-// can be scanned without modification.
-func (s *Store) exportMemories() ([]Memory, error) {
-	rows, err := s.knowledgeDB.Query(`
+// exportMemoriesTx returns all memories (including stale/expired) up to the
+// row cap. Runs within the caller's transaction for snapshot consistency.
+func exportMemoriesTx(tx *sql.Tx) ([]Memory, error) {
+	rows, err := tx.Query(`
 		SELECT id, tier, content, entity_id, agent_id, task_id, tags,
 		       created_at, expires_at, last_accessed_at, source,
 		       importance, access_count
@@ -188,12 +212,16 @@ func (s *Store) exportMemories() ([]Memory, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanMemories(rows)
+	out, err := scanMemories(rows)
+	if out == nil {
+		out = []Memory{}
+	}
+	return out, err
 }
 
-// exportMemoryVersions returns all historical memory version snapshots.
-func (s *Store) exportMemoryVersions() ([]ExportedMemVer, error) {
-	rows, err := s.knowledgeDB.Query(`
+// exportMemoryVersionsTx returns all historical memory version snapshots.
+func exportMemoryVersionsTx(tx *sql.Tx) ([]ExportedMemVer, error) {
+	rows, err := tx.Query(`
 		SELECT id, memory_id, version, content, superseded_by, created_at, superseded_at
 		FROM memory_versions
 		ORDER BY memory_id, version`)
@@ -202,7 +230,7 @@ func (s *Store) exportMemoryVersions() ([]ExportedMemVer, error) {
 	}
 	defer rows.Close()
 
-	var out []ExportedMemVer
+	out := make([]ExportedMemVer, 0)
 	for rows.Next() {
 		var v ExportedMemVer
 		if err := rows.Scan(
@@ -216,9 +244,9 @@ func (s *Store) exportMemoryVersions() ([]ExportedMemVer, error) {
 	return out, rows.Err()
 }
 
-// exportMemoryAnchors returns all memory→node staleness anchors.
-func (s *Store) exportMemoryAnchors() ([]ExportedMemAnchor, error) {
-	rows, err := s.knowledgeDB.Query(`
+// exportMemoryAnchorsTx returns all memory→node staleness anchors.
+func exportMemoryAnchorsTx(tx *sql.Tx) ([]ExportedMemAnchor, error) {
+	rows, err := tx.Query(`
 		SELECT memory_id, node_id, created_at
 		FROM memory_anchors
 		ORDER BY memory_id`)
@@ -227,7 +255,7 @@ func (s *Store) exportMemoryAnchors() ([]ExportedMemAnchor, error) {
 	}
 	defer rows.Close()
 
-	var out []ExportedMemAnchor
+	out := make([]ExportedMemAnchor, 0)
 	for rows.Next() {
 		var a ExportedMemAnchor
 		if err := rows.Scan(&a.MemoryID, &a.NodeID, &a.CreatedAt); err != nil {
@@ -238,10 +266,11 @@ func (s *Store) exportMemoryAnchors() ([]ExportedMemAnchor, error) {
 	return out, rows.Err()
 }
 
-// exportMemoryEmbeddings returns all memory embedding vectors as base64-encoded BLOBs.
-func (s *Store) exportMemoryEmbeddings() ([]ExportedMemEmbed, error) {
-	rows, err := s.knowledgeDB.Query(`
-		SELECT memory_id, model, embedding, content_hash, embedded_at
+// exportMemoryEmbeddingsTx returns all memory embedding vectors as base64-encoded
+// BLOBs. Includes the stale flag so importers can skip re-importing stale vectors.
+func exportMemoryEmbeddingsTx(tx *sql.Tx) ([]ExportedMemEmbed, error) {
+	rows, err := tx.Query(`
+		SELECT memory_id, model, embedding, content_hash, embedded_at, stale
 		FROM memory_embeddings
 		ORDER BY memory_id`)
 	if err != nil {
@@ -249,22 +278,24 @@ func (s *Store) exportMemoryEmbeddings() ([]ExportedMemEmbed, error) {
 	}
 	defer rows.Close()
 
-	var out []ExportedMemEmbed
+	out := make([]ExportedMemEmbed, 0)
 	for rows.Next() {
 		var e ExportedMemEmbed
 		var blob []byte
-		if err := rows.Scan(&e.MemoryID, &e.Model, &blob, &e.ContentHash, &e.EmbeddedAt); err != nil {
+		var staleInt int
+		if err := rows.Scan(&e.MemoryID, &e.Model, &blob, &e.ContentHash, &e.EmbeddedAt, &staleInt); err != nil {
 			return nil, err
 		}
 		e.EmbeddingB64 = base64.StdEncoding.EncodeToString(blob)
+		e.Stale = staleInt != 0
 		out = append(out, e)
 	}
 	return out, rows.Err()
 }
 
-// exportEpisodes returns all episodes ordered by creation time.
-func (s *Store) exportEpisodes() ([]Episode, error) {
-	rows, err := s.knowledgeDB.Query(`
+// exportEpisodesTx returns all episodes ordered by creation time.
+func exportEpisodesTx(tx *sql.Tx) ([]Episode, error) {
+	rows, err := tx.Query(`
 		SELECT id, agent_id, project_id, created_at, episode_type, outcome,
 		       trigger, decision, rationale, affected_files, affected_nodes,
 		       tags, importance, promoted_rule
@@ -275,12 +306,16 @@ func (s *Store) exportEpisodes() ([]Episode, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanEpisodes(rows)
+	out, err := scanEpisodes(rows)
+	if out == nil {
+		out = []Episode{}
+	}
+	return out, err
 }
 
-// exportDynamicRules returns all dynamic rules including rule_type/path_pattern.
-func (s *Store) exportDynamicRules() ([]ExportedRule, error) {
-	rows, err := s.knowledgeDB.Query(`
+// exportDynamicRulesTx returns all dynamic rules including rule_type/path_pattern.
+func exportDynamicRulesTx(tx *sql.Tx) ([]ExportedRule, error) {
+	rows, err := tx.Query(`
 		SELECT id, description, severity,
 		       from_file_pattern, to_file_pattern, from_type, to_type,
 		       edge_type, to_name_pattern, rule_type, path_pattern,
@@ -292,7 +327,7 @@ func (s *Store) exportDynamicRules() ([]ExportedRule, error) {
 	}
 	defer rows.Close()
 
-	var out []ExportedRule
+	out := make([]ExportedRule, 0)
 	for rows.Next() {
 		var r ExportedRule
 		if err := rows.Scan(
@@ -308,9 +343,9 @@ func (s *Store) exportDynamicRules() ([]ExportedRule, error) {
 	return out, rows.Err()
 }
 
-// exportAnnotations returns all annotations across all nodes.
-func (s *Store) exportAnnotations() ([]Annotation, error) {
-	rows, err := s.knowledgeDB.Query(`
+// exportAnnotationsTx returns all annotations across all nodes.
+func exportAnnotationsTx(tx *sql.Tx) ([]Annotation, error) {
+	rows, err := tx.Query(`
 		SELECT id, node_id, agent_id, note, created_at, source, stale
 		FROM annotations
 		ORDER BY created_at`)
@@ -319,7 +354,7 @@ func (s *Store) exportAnnotations() ([]Annotation, error) {
 	}
 	defer rows.Close()
 
-	var out []Annotation
+	out := make([]Annotation, 0)
 	for rows.Next() {
 		var a Annotation
 		var staleInt int
@@ -330,6 +365,42 @@ func (s *Store) exportAnnotations() ([]Annotation, error) {
 		}
 		a.Stale = staleInt != 0
 		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// exportQualityGapsTx returns ALL quality gaps regardless of status, bypassing
+// the 1000-row cap that GetGaps applies for normal UI queries. Export must be
+// complete — silently capping at 1000 would produce an incomplete backup.
+func exportQualityGapsTx(tx *sql.Tx) ([]QualityGap, error) {
+	rows, err := tx.Query(`
+		SELECT id, node_id, gap_id, description, severity, status,
+		       found_by, found_at, updated_at, fix_notes
+		FROM quality_gaps
+		ORDER BY
+		    CASE severity
+		        WHEN 'critical' THEN 4
+		        WHEN 'high'     THEN 3
+		        WHEN 'medium'   THEN 2
+		        WHEN 'low'      THEN 1
+		        ELSE 0
+		    END DESC,
+		    updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]QualityGap, 0)
+	for rows.Next() {
+		var g QualityGap
+		if err := rows.Scan(
+			&g.ID, &g.NodeID, &g.GapID, &g.Description,
+			&g.Severity, &g.Status, &g.FoundBy, &g.FoundAt, &g.UpdatedAt, &g.FixNotes,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
 	}
 	return out, rows.Err()
 }
