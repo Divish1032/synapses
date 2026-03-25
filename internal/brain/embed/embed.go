@@ -19,6 +19,7 @@ package embed
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -26,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,6 +134,12 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	if _, err := os.Stat(s.modelPath); err != nil {
 		return fmt.Errorf("embedding model not found at %s — run: brain setup --with-embeddings", s.modelPath)
+	}
+
+	// Pre-execution integrity check: verify binary against its SHA-256 sidecar.
+	// Protects against disk corruption or post-installation tampering.
+	if err := verifyBinarySidecar(s.llamaBin); err != nil {
+		return err
 	}
 
 	threads := runtime.NumCPU()
@@ -393,6 +401,41 @@ func (s *Server) Stop() {
 		_ = s.proc.Wait()
 	}
 	s.started = false
+}
+
+// verifyBinarySidecar reads the SHA-256 sidecar file alongside the binary and
+// verifies the binary's current hash matches. If the sidecar is absent (e.g.,
+// the binary was installed before this feature shipped), the check is skipped
+// with an informational log — startup is not blocked for backwards compatibility.
+// If the sidecar exists but the hash mismatches, returns a clear error
+// distinguishing corruption from a missing binary.
+func verifyBinarySidecar(binPath string) error {
+	sidecarPath := binPath + ".sha256"
+	rawExpected, err := os.ReadFile(sidecarPath)
+	if os.IsNotExist(err) {
+		// Sidecar absent — installed before integrity verification was added.
+		// Allow startup; re-running brain setup will write the sidecar.
+		logutil.Info("synapses-intelligence/embed: llama-server SHA-256 sidecar absent — skipping pre-execution check (re-run brain setup to enable)\n")
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read llama-server SHA-256 sidecar: %w", err)
+	}
+
+	expected := strings.TrimSpace(string(rawExpected))
+	if len(expected) != 64 {
+		return fmt.Errorf("llama-server SHA-256 sidecar malformed (want 64 hex chars, got %d) — re-run brain setup --with-embeddings", len(expected))
+	}
+
+	actual, err := hashFileSHA256(binPath)
+	if err != nil {
+		return fmt.Errorf("hash llama-server binary: %w", err)
+	}
+
+	if subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) != 1 {
+		return fmt.Errorf("llama-server binary corrupted (sha256 mismatch) — re-run brain setup --with-embeddings to restore")
+	}
+	return nil
 }
 
 // waitReady polls the /health endpoint until it responds OK or timeout.

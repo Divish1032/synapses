@@ -135,8 +135,51 @@ func EnsureLlamaServer(ctx context.Context, opts DownloadOptions) (string, error
 	if err := os.Chmod(binPath, 0o755); err != nil {
 		return "", err
 	}
+
+	// Write SHA-256 sidecar so Server.Start() can verify integrity before exec.
+	// Non-fatal: a missing sidecar degrades to a warning, not a startup failure.
+	if err := writeSHA256Sidecar(binPath); err != nil {
+		logProgress(opts.Progress, "warning: failed to write SHA-256 sidecar for llama-server: %v", err)
+	}
+
 	logProgress(opts.Progress, "llama-server installed: %s", binPath)
 	return binPath, nil
+}
+
+// hashFileSHA256 returns the hex-encoded SHA-256 digest of the file at path.
+// Streams the file to avoid loading large binaries into memory.
+func hashFileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("hash %s: %w", path, err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// writeSHA256Sidecar computes the SHA-256 of binPath and writes it atomically
+// to binPath+".sha256". The atomic rename prevents a partial write from leaving
+// a corrupt sidecar that would block future startups.
+func writeSHA256Sidecar(binPath string) error {
+	digest, err := hashFileSHA256(binPath)
+	if err != nil {
+		return err
+	}
+	sidecarPath := binPath + ".sha256"
+	// Atomic write: temp file in same directory + rename.
+	tmp := sidecarPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(digest), 0o644); err != nil {
+		return fmt.Errorf("write sidecar temp: %w", err)
+	}
+	if err := os.Rename(tmp, sidecarPath); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename sidecar: %w", err)
+	}
+	return nil
 }
 
 // EnsureEmbedModel checks whether the embedding GGUF model exists at modelDir;
