@@ -2276,7 +2276,8 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcps
 		}
 	}()
 
-	reader := bufio.NewReader(io.LimitReader(conn, 4*1024*1024))
+	const maxMsgBytes = 4 * 1024 * 1024 // 4 MiB per-message limit
+	reader := bufio.NewReader(conn)
 	for {
 		if sessionCtx.Err() != nil {
 			return sessionCtx.Err()
@@ -2284,6 +2285,13 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcps
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			return err
+		}
+		if len(line) > maxMsgBytes {
+			writeJSON(map[string]interface{}{
+				"jsonrpc": "2.0", "id": nil,
+				"error": map[string]interface{}{"code": -32600, "message": "message exceeds 4 MiB limit"},
+			}) //nolint:errcheck
+			continue
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
