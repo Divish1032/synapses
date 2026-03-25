@@ -622,8 +622,6 @@ func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectIn
 				defer wg.Done()
 				saveKnownProject(p)
 			}(absPath)
-		} else {
-			go saveKnownProject(absPath)
 		}
 
 		// Parse request body as tool arguments. Empty or absent body → empty args.
