@@ -1183,9 +1183,10 @@ func (s *Server) handleSearch(
 	}
 
 	return jsonResult(map[string]interface{}{
-		"query":   query,
-		"count":   len(results),
-		"results": results,
+		"query":    query,
+		"count":    len(results),
+		"results":  results,
+		"_summary": fmt.Sprintf("%d result(s) for %q", len(results), query),
 	})
 }
 
