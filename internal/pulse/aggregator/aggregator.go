@@ -353,13 +353,14 @@ func (a *Aggregator) rollup() {
 		metrics["collector_drop_rate"] = a.collDropRate()
 	}
 
+	// Read supplemental metrics inside the snapshot so all data is from the same
+	// consistent point in time.
+	peakRate := a.store.GetPeakReparseRate(today)
+	fcr, fcrErr := a.store.GetFirstContextRightRate(1)
+
 	// End the consistent read snapshot before starting the write transaction.
 	// Rollback is safe — no writes occurred inside the snapshot.
 	a.store.EndReadSnapshot()
-
-	// Pre-read supplemental metrics before acquiring the write lock.
-	peakRate := a.store.GetPeakReparseRate(today)
-	fcr, fcrErr := a.store.GetFirstContextRightRate(1)
 
 	// Merge all metric upserts, per-dimension rollups, and the rollup_completed
 	// sentinel into a single transaction. If we crash mid-rollup the whole
