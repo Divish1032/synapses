@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 // ── handleSessionInit ─────────────────────────────────────────────────────────
@@ -1764,5 +1767,395 @@ func TestSessionInit_KnowledgeGraph_CustomRelationCounted(t *testing.T) {
 	}
 	if total != 1 {
 		t.Errorf("expected total=1, got %d", total)
+	}
+}
+
+// ── First-session highlights (Sprint 18 #1) ───────────────────────────────────
+
+// TestSessionInit_FirstSessionHighlights_AppearsOnFirstSession verifies that
+// first_session_highlights is present in full-mode session_init on the very
+// first call for a project, and that it contains the expected sections.
+func TestSessionInit_FirstSessionHighlights_AppearsOnFirstSession(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	// Add two functions: one with a caller (not dead), one without (dead code).
+	calledID := g.MakeNodeID("pkg/auth.go", "Login")
+	g.AddNode(&graph.Node{ID: calledID, Type: graph.NodeFunction, Name: "Login", File: "pkg/auth.go"})
+
+	callerID := g.MakeNodeID("pkg/api.go", "Handle")
+	g.AddNode(&graph.Node{ID: callerID, Type: graph.NodeFunction, Name: "Handle", File: "pkg/api.go"})
+
+	deadID := g.MakeNodeID("pkg/util.go", "unused")
+	g.AddNode(&graph.Node{ID: deadID, Type: graph.NodeFunction, Name: "unused", File: "pkg/util.go"})
+
+	// Handle calls Login (so Login has a caller), but unused has no callers.
+	g.AddEdge(&graph.Edge{From: callerID, To: calledID, Type: graph.EdgeCalls})
+
+	srv := New(g, cfg, st)
+	// projectID must be non-empty — first-session detection is skipped when empty
+	// to avoid false matches on misconfigured servers or tests that never call SetProjectID.
+	srv.projectID = "proj-first-session-test"
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "first-agent",
+		"scope":    "full",
+	}))
+	m := mustResult(t, res, err)
+
+	fsh, ok := m["first_session_highlights"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected first_session_highlights on first session, got %T — keys: %v",
+			m["first_session_highlights"], mapKeys(m))
+	}
+	if fsh["hint"] == nil {
+		t.Error("expected hint in first_session_highlights")
+	}
+	// dead_code section should be present: "unused" is unexported, has no callers,
+	// and is not named "main"/"init" — all guards pass.
+	dc, ok := fsh["dead_code"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected dead_code section in first_session_highlights, got %T — keys: %v",
+			fsh["dead_code"], mapKeys(fsh))
+	}
+	// mustResult JSON-unmarshals the response, so numbers are float64.
+	total, _ := dc["total"].(float64)
+	if total < 1 {
+		t.Errorf("expected at least 1 dead code entry, got %v", total)
+	}
+}
+
+// TestSessionInit_FirstSessionHighlights_AbsentOnSecondSession verifies that
+// first_session_highlights is NOT present on subsequent sessions.
+// Two separate session_init calls on the same project with different MCP session IDs
+// produce two session rows (count = 2), so highlights must not fire on the second.
+func TestSessionInit_FirstSessionHighlights_AbsentOnSecondSession(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	// Add one dead-code function so highlights WOULD fire if conditions were met.
+	deadID := g.MakeNodeID("pkg/util.go", "unused")
+	g.AddNode(&graph.Node{ID: deadID, Type: graph.NodeFunction, Name: "unused", File: "pkg/util.go"})
+
+	// Pre-insert a prior session row for this project directly, so the session
+	// count for the project is already ≥1 before the test call.
+	// This simulates "user already ran session_init once before".
+	const projectID = "proj-second-session-test"
+	if _, _, _, insertErr := st.GetOrResumeSession("prior-agent", projectID, "prior-mcp-conn", "prior work", 0, -1); insertErr != nil {
+		t.Fatalf("pre-insert session: %v", insertErr)
+	}
+
+	// Build a server that uses the same projectID so CountProjectSessions matches.
+	srv := New(g, cfg, st)
+	srv.projectID = projectID
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "second-agent",
+		"scope":    "full",
+	}))
+	m := mustResult(t, res, err)
+
+	// count > 1 → highlights must be absent.
+	if _, present := m["first_session_highlights"]; present {
+		t.Error("first_session_highlights must be absent on second+ session")
+	}
+}
+
+// TestSessionInit_FirstSessionHighlights_CompactInQuickMode verifies that
+// first_session_highlights IS present in scope=quick on first session, but
+// in compact form (counts only, no sample arrays) to respect token budget.
+// This prevents the "missed forever" failure mode where an agent using quickMode
+// on their very first session permanently loses the one-shot highlights.
+func TestSessionInit_FirstSessionHighlights_CompactInQuickMode(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	deadID := g.MakeNodeID("pkg/util.go", "unused")
+	g.AddNode(&graph.Node{ID: deadID, Type: graph.NodeFunction, Name: "unused", File: "pkg/util.go"})
+
+	srv := New(g, cfg, st)
+	srv.projectID = "proj-quick-mode-test"
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "quick-agent",
+		"scope":    "quick",
+	}))
+	m := mustResult(t, res, err)
+
+	// Highlights must be PRESENT even in quickMode — first session is one-shot.
+	fsh, ok := m["first_session_highlights"].(map[string]any)
+	if !ok {
+		t.Fatalf("first_session_highlights must be present in scope=quick on first session, got %T — keys: %v",
+			m["first_session_highlights"], mapKeys(m))
+	}
+	// In compact mode: counts present, no sample arrays.
+	if fsh["dead_code_count"] == nil {
+		t.Error("expected dead_code_count in compact highlights (scope=quick)")
+	}
+	if _, hasFullSection := fsh["dead_code"]; hasFullSection {
+		t.Error("dead_code sample section must be absent in compact (scope=quick) — only counts allowed")
+	}
+	if fsh["hint"] == nil {
+		t.Error("expected hint in compact highlights")
+	}
+}
+
+// TestComputeFirstSessionHighlights_CompactMode verifies the compact flag
+// returns counts-only (no sample arrays) for quickMode callers.
+func TestComputeFirstSessionHighlights_CompactMode(t *testing.T) {
+	g := graph.New("test-repo")
+	deadID := g.MakeNodeID("pkg/util.go", "unused")
+	g.AddNode(&graph.Node{ID: deadID, Type: graph.NodeFunction, Name: "unused", File: "pkg/util.go"})
+
+	result := computeFirstSessionHighlights(g, nil, map[string]bool{}, true /* compact */)
+	if result == nil {
+		t.Fatal("expected non-nil compact highlights")
+	}
+	if result["dead_code_count"] == nil {
+		t.Error("expected dead_code_count key in compact mode")
+	}
+	if _, present := result["dead_code"]; present {
+		t.Error("dead_code sample section must be absent in compact mode")
+	}
+	if result["hint"] == nil {
+		t.Error("expected hint in compact mode")
+	}
+}
+
+// TestComputeFirstSessionHighlights_HighRiskEntity verifies that a function
+// with high fanin (≥3) and no test callers appears in high_risk_entities.
+func TestComputeFirstSessionHighlights_HighRiskEntity(t *testing.T) {
+	g := graph.New("test-repo")
+
+	// Add a function called by 4 non-test callers, no test callers.
+	targetID := g.MakeNodeID("pkg/core.go", "CoreOp")
+	g.AddNode(&graph.Node{ID: targetID, Type: graph.NodeFunction, Name: "CoreOp", File: "pkg/core.go"})
+
+	for i := 0; i < 4; i++ {
+		callerID := g.MakeNodeID("pkg/caller.go", fmt.Sprintf("caller%d", i))
+		g.AddNode(&graph.Node{ID: callerID, Type: graph.NodeFunction,
+			Name: fmt.Sprintf("caller%d", i), File: "pkg/caller.go"})
+		g.AddEdge(&graph.Edge{From: callerID, To: targetID, Type: graph.EdgeCalls})
+	}
+
+	highlights := computeFirstSessionHighlights(g, nil, map[string]bool{}, false)
+	if highlights == nil {
+		t.Fatal("expected non-nil highlights for high-risk entity")
+	}
+	hr, ok := highlights["high_risk_entities"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected high_risk_entities section, got %T — highlight keys: %v",
+			highlights["high_risk_entities"], mapKeys(highlights))
+	}
+	// Direct call (no JSON round-trip), so "total" is int, not float64.
+	total, _ := hr["total"].(int)
+	if total < 1 {
+		t.Errorf("expected at least 1 high-risk entity (total), got %d", total)
+	}
+}
+
+// TestComputeFirstSessionHighlights_TestCallerExcludesFromDead verifies that
+// a function called only from _test.go is NOT flagged as dead code.
+func TestComputeFirstSessionHighlights_TestCallerExcludesFromDead(t *testing.T) {
+	g := graph.New("test-repo")
+
+	testedID := g.MakeNodeID("pkg/auth.go", "Validate")
+	g.AddNode(&graph.Node{ID: testedID, Type: graph.NodeFunction, Name: "Validate", File: "pkg/auth.go"})
+
+	testCallerID := g.MakeNodeID("pkg/auth_test.go", "TestValidate")
+	g.AddNode(&graph.Node{ID: testCallerID, Type: graph.NodeFunction,
+		Name: "TestValidate", File: "pkg/auth_test.go"})
+
+	g.AddEdge(&graph.Edge{From: testCallerID, To: testedID, Type: graph.EdgeCalls})
+
+	highlights := computeFirstSessionHighlights(g, nil, map[string]bool{}, false)
+	// Either nil (no dead code found) or dead_code absent — Validate has a test caller.
+	if highlights != nil {
+		if dc, ok := highlights["dead_code"].(map[string]any); ok {
+			sample, _ := dc["sample"].([]any)
+			for _, entry := range sample {
+				if em, ok := entry.(map[string]any); ok {
+					if em["name"] == "Validate" {
+						t.Error("Validate should not appear in dead_code — it has a test caller")
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestComputeFirstSessionHighlights_EmptyGraphReturnsNil verifies that an empty
+// graph produces no highlights rather than an empty map.
+func TestComputeFirstSessionHighlights_EmptyGraphReturnsNil(t *testing.T) {
+	g := graph.New("test-repo")
+	if result := computeFirstSessionHighlights(g, nil, map[string]bool{}, false); result != nil {
+		t.Errorf("expected nil for empty graph, got %v", result)
+	}
+}
+
+// highlightsJSON is a test helper that JSON-marshals computeFirstSessionHighlights
+// output so all types are JSON-standard (numbers=float64, slices=[]interface{}).
+func highlightsJSON(t *testing.T, g *graph.Graph, vlog []store.ViolationLogEntry) map[string]any {
+	t.Helper()
+	raw := computeFirstSessionHighlights(g, vlog, map[string]bool{}, false)
+	if raw == nil {
+		return nil
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("highlightsJSON marshal: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("highlightsJSON unmarshal: %v", err)
+	}
+	return out
+}
+
+// TestComputeFirstSessionHighlights_ExportedFuncNotDeadCode verifies that
+// exported functions with no in-repo callers are NOT flagged as dead code —
+// they may be public API called by external packages.
+func TestComputeFirstSessionHighlights_ExportedFuncNotDeadCode(t *testing.T) {
+	g := graph.New("test-repo")
+
+	// Exported function, no callers in-repo — should NOT be dead code.
+	exportedID := g.MakeNodeID("pkg/api.go", "HandleHTTP")
+	g.AddNode(&graph.Node{
+		ID:       exportedID,
+		Type:     graph.NodeFunction,
+		Name:     "HandleHTTP",
+		File:     "pkg/api.go",
+		Exported: true,
+	})
+
+	// Unexported function, no callers — should be dead code.
+	unexportedID := g.MakeNodeID("pkg/api.go", "internalHelper")
+	g.AddNode(&graph.Node{
+		ID:   unexportedID,
+		Type: graph.NodeFunction,
+		Name: "internalHelper",
+		File: "pkg/api.go",
+	})
+
+	result := highlightsJSON(t, g, nil)
+	if result == nil {
+		t.Fatal("expected non-nil highlights (unexported dead function present)")
+	}
+	dc, ok := result["dead_code"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected dead_code section, got %T — keys: %v", result["dead_code"], mapKeys(result))
+	}
+	total, _ := dc["total"].(float64)
+	if total < 1 {
+		t.Errorf("expected at least 1 dead code entry (internalHelper), got %v", total)
+	}
+	for _, entry := range dc["sample"].([]interface{}) {
+		em := entry.(map[string]interface{})
+		if em["name"] == "HandleHTTP" {
+			t.Error("HandleHTTP (exported) must NOT appear in dead_code")
+		}
+	}
+}
+
+// TestComputeFirstSessionHighlights_RecencyBoostsRiskOrder verifies that a
+// recently-changed file with lower fanin ranks above a non-recent file with
+// higher fanin, because recency multiplies the score by 10.
+func TestComputeFirstSessionHighlights_RecencyBoostsRiskOrder(t *testing.T) {
+	g := graph.New("test-repo")
+
+	// stableOp: fanin=5, NOT recently changed → score=5
+	stableID := g.MakeNodeID("pkg/stable.go", "stableOp")
+	g.AddNode(&graph.Node{ID: stableID, Type: graph.NodeFunction, Name: "stableOp", File: "pkg/stable.go"})
+	for i := 0; i < 5; i++ {
+		cID := g.MakeNodeID("pkg/stable.go", fmt.Sprintf("sCallerOp%d", i))
+		g.AddNode(&graph.Node{ID: cID, Type: graph.NodeFunction, Name: fmt.Sprintf("sCallerOp%d", i), File: "pkg/stable.go"})
+		g.AddEdge(&graph.Edge{From: cID, To: stableID, Type: graph.EdgeCalls})
+	}
+
+	// hotOp: fanin=3, IS recently changed → score=30 (3×10)
+	hotID := g.MakeNodeID("pkg/hot.go", "hotOp")
+	g.AddNode(&graph.Node{ID: hotID, Type: graph.NodeFunction, Name: "hotOp", File: "pkg/hot.go"})
+	for i := 0; i < 3; i++ {
+		cID := g.MakeNodeID("pkg/hot.go", fmt.Sprintf("hCallerOp%d", i))
+		g.AddNode(&graph.Node{ID: cID, Type: graph.NodeFunction, Name: fmt.Sprintf("hCallerOp%d", i), File: "pkg/hot.go"})
+		g.AddEdge(&graph.Edge{From: cID, To: hotID, Type: graph.EdgeCalls})
+	}
+
+	recentFiles := map[string]bool{"pkg/hot.go": true}
+	// Use JSON round-trip so types are standard (riskEntry is local to the helper).
+	raw := computeFirstSessionHighlights(g, nil, recentFiles, false)
+	if raw == nil {
+		t.Fatal("expected non-nil highlights")
+	}
+	b, _ := json.Marshal(raw)
+	var highlights map[string]any
+	json.Unmarshal(b, &highlights)
+
+	hr, ok := highlights["high_risk_entities"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected high_risk_entities section")
+	}
+	sample, _ := hr["sample"].([]any)
+	if len(sample) < 2 {
+		t.Fatalf("expected at least 2 high-risk entries, got %d", len(sample))
+	}
+	first, _ := sample[0].(map[string]any)
+	if first["name"] != "hotOp" {
+		t.Errorf("expected hotOp first (recency-boosted score=30 > stableOp score=5), got %s first", first["name"])
+	}
+}
+
+// TestComputeFirstSessionHighlights_MainAndInitNotDeadCode verifies that
+// main() and init() are excluded from dead code even though they are unexported
+// and have no CALLS in-edges (they are Go entry points invoked by the runtime).
+func TestComputeFirstSessionHighlights_MainAndInitNotDeadCode(t *testing.T) {
+	g := graph.New("test-repo")
+
+	for _, name := range []string{"main", "init"} {
+		id := g.MakeNodeID("cmd/main.go", name)
+		g.AddNode(&graph.Node{
+			ID:   id,
+			Type: graph.NodeFunction,
+			Name: name,
+			File: "cmd/main.go",
+			// Exported: false (default) — runtime entry points are lowercase.
+		})
+	}
+
+	// Add one genuine dead function so the result is non-nil.
+	deadID := g.MakeNodeID("pkg/util.go", "orphaned")
+	g.AddNode(&graph.Node{ID: deadID, Type: graph.NodeFunction, Name: "orphaned", File: "pkg/util.go"})
+
+	result := highlightsJSON(t, g, nil)
+	if result == nil {
+		t.Fatal("expected non-nil highlights (orphaned dead function present)")
+	}
+	dc, ok := result["dead_code"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected dead_code section, got %T", result["dead_code"])
+	}
+	for _, entry := range dc["sample"].([]interface{}) {
+		em := entry.(map[string]interface{})
+		if em["name"] == "main" || em["name"] == "init" {
+			t.Errorf("%v() must NOT appear in dead_code — it is a Go runtime entry point", em["name"])
+		}
 	}
 }
