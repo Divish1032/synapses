@@ -94,6 +94,9 @@ func TestStart_MissingModel(t *testing.T) {
 	if err := os.WriteFile(fakeBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := writeSHA256Sidecar(fakeBin); err != nil {
+		t.Fatal(err)
+	}
 	s := New("/nonexistent/model.gguf", 11437, fakeBin)
 	err := s.Start(context.Background())
 	if err == nil {
@@ -862,6 +865,9 @@ func TestStart_ContextCanceled(t *testing.T) {
 	script := "#!/bin/sh\nsleep 10\n"
 	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("setup failed: %v", err)
+	}
+	if err := writeSHA256Sidecar(binPath); err != nil {
+		t.Fatalf("write sidecar: %v", err)
 	}
 
 	s := New(modelPath, 11437, binPath)
