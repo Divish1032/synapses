@@ -879,6 +879,26 @@ func (s *Store) CountStaleEmbeddings() int {
 	return n
 }
 
+// GetLastIndexTime returns the created_at timestamp of the most recent
+// index_events row, or "" when no index has been recorded yet.
+func (s *Store) GetLastIndexTime() string {
+	var t string
+	s.execer().QueryRow(`SELECT created_at FROM index_events ORDER BY rowid DESC LIMIT 1`).Scan(&t)
+	return t
+}
+
+// GetLatestEmbeddingModelStatus returns the model_status from the most recent
+// embedding_events row ("loaded" | "downloading" | "failed" | "none").
+// Returns "none" when no events have been recorded yet.
+func (s *Store) GetLatestEmbeddingModelStatus() string {
+	var status string
+	s.execer().QueryRow(`SELECT model_status FROM embedding_events ORDER BY rowid DESC LIMIT 1`).Scan(&status)
+	if status == "" {
+		return "none"
+	}
+	return status
+}
+
 // migrate creates all tables and indexes if they don't exist, then runs
 // column-level migrations for databases created before new columns were added.
 func (s *Store) migrate() error {

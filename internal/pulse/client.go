@@ -699,6 +699,24 @@ func (c *Client) GetHealthSnapshot() map[string]interface{} {
 	}
 }
 
+// GetLastIndexTime returns the timestamp of the most recent full index event,
+// or "" when no index has been recorded yet.
+func (c *Client) GetLastIndexTime() string {
+	if c == nil {
+		return ""
+	}
+	return c.store.GetLastIndexTime()
+}
+
+// GetLatestEmbeddingModelStatus returns the model_status from the most recent
+// embedding event ("loaded" | "downloading" | "failed" | "none").
+func (c *Client) GetLatestEmbeddingModelStatus() string {
+	if c == nil {
+		return "none"
+	}
+	return c.store.GetLatestEmbeddingModelStatus()
+}
+
 // GetSummaryForProject returns aggregated analytics for the last N days filtered to projectID.
 // Returns a PulseSummary with only Summary populated (no per-tool/agent breakdowns).
 func (c *Client) GetSummaryForProject(days int, projectID string) *PulseSummary {
