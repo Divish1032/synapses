@@ -215,6 +215,7 @@ func (e *Enricher) Enrich(ctx context.Context, req Request) (Response, error) {
 		prompt = e.buildPrompt(req)
 	}
 
+	atomic.AddUint64(&e.ollamaCalls, 1)
 	raw, err := e.llm.Generate(llmCtx, prompt)
 	if err != nil {
 		atomic.AddUint64(&e.ollamaFailures, 1)
@@ -224,7 +225,6 @@ func (e *Enricher) Enrich(ctx context.Context, req Request) (Response, error) {
 		resp.Insight = heuristicInsight(req)
 		return resp, nil
 	}
-	atomic.AddUint64(&e.ollamaCalls, 1)
 
 	result, parseErr := parseInsight(raw)
 	if parseErr != nil {
