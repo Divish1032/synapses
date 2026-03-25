@@ -3,6 +3,7 @@ package graph
 import (
 	"container/list"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -72,14 +73,28 @@ func newSubgraphCache() *subgraphCache {
 //     invalidation. Zero when the caller bypasses the store (test path); the
 //     len discriminator then prevents any collision.
 func cacheKeyFor(rootID NodeID, cfg CarveConfig, fingerprint string) string {
-	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f|%.4f|emb:%v|qs:%v|lew:%d|lewv:%d",
+	// Build a deterministic string for ExcludeTypes (sorted).
+	excludeTypes := ""
+	if len(cfg.ExcludeTypes) > 0 {
+		types := make([]string, 0, len(cfg.ExcludeTypes))
+		for t, v := range cfg.ExcludeTypes {
+			if v {
+				types = append(types, string(t))
+			}
+		}
+		sort.Strings(types)
+		excludeTypes = strings.Join(types, ",")
+	}
+	return fmt.Sprintf("%s|%d|%d|%.6f|%.6f|%.4f|%s|%s|%v|%.4f|%.4f|%.4f|emb:%v|qs:%v|lew:%d|lewv:%d|excl:%s|extest:%v",
 		rootID, cfg.MaxDepth, cfg.TokenBudget, cfg.MinRelevance, cfg.DecayFactor,
 		cfg.DirectionBoost, cfg.IntentID, fingerprint, cfg.UsePPR, cfg.Alpha,
 		cfg.HybridLambda, cfg.CrossDomainDecay,
 		cfg.EmbeddingLookup != nil,
 		cfg.QualityScoreLookup != nil,
 		len(cfg.LearnedEdgeWeights),
-		cfg.LearnedEdgeWeightsVersion)
+		cfg.LearnedEdgeWeightsVersion,
+		excludeTypes,
+		cfg.ExcludeTestFiles)
 }
 
 // extractFiles collects the set of source files referenced by nodes in the subgraph.
