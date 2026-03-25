@@ -1233,6 +1233,20 @@ func (s *Store) rebuildFTS() error {
 	return tx.Commit()
 }
 
+// nodeDocText extracts the best available documentation text from a node's metadata.
+// Code nodes store docstrings in "doc"; section nodes use "body"; knowledge nodes
+// use "context". The fallback chain ensures FTS5 indexes meaningful text for all
+// node types, not just code nodes.
+func nodeDocText(meta map[string]string) string {
+	if d := meta["doc"]; d != "" {
+		return d
+	}
+	if b := meta["body"]; b != "" {
+		return b
+	}
+	return meta["context"]
+}
+
 // splitCamelCase inserts spaces before each uppercase letter that follows a
 // lowercase letter, making camelCase names tokenizable as individual words.
 // E.g. "CarveEgoGraph" → "Carve Ego Graph", "handleGetContext" → "handle Get Context".
@@ -2207,7 +2221,8 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		}
 
 		// Promote doc/signature/line_count to first-class columns.
-		doc := n.Metadata["doc"]
+		// nodeDocText falls through body→context for section/knowledge nodes.
+		doc := nodeDocText(n.Metadata)
 		sig := n.Metadata["signature"]
 		lineCount := 0
 		if lc, err := strconv.Atoi(n.Metadata["line_count"]); err == nil {
@@ -2270,7 +2285,7 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		if n.Type == graph.NodeFile || n.Type == graph.NodePackage {
 			continue // not useful for search
 		}
-		doc := n.Metadata["doc"]
+		doc := nodeDocText(n.Metadata)
 		sig := n.Metadata["signature"]
 		if _, err := ftsStmt.Exec(string(n.ID), n.Name, splitCamelCase(n.Name), sig, doc); err != nil {
 			return fmt.Errorf("insert fts node %s: %w", n.ID, err)
@@ -2516,7 +2531,7 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 	defer nodeStmt.Close()
 
 	for _, n := range newNodes {
-		doc := n.Metadata["doc"]
+		doc := nodeDocText(n.Metadata)
 		sig := n.Metadata["signature"]
 		lineCount := 0
 		if lc, err := strconv.Atoi(n.Metadata["line_count"]); err == nil {
@@ -2565,7 +2580,7 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 		if n.Type == graph.NodeFile || n.Type == graph.NodePackage {
 			continue
 		}
-		doc := n.Metadata["doc"]
+		doc := nodeDocText(n.Metadata)
 		sig := n.Metadata["signature"]
 		if _, err := ftsStmt.Exec(string(n.ID), n.Name, splitCamelCase(n.Name), sig, doc); err != nil {
 			return fmt.Errorf("delta: insert fts node %s: %w", n.ID, err)

@@ -340,6 +340,17 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 	return watcher, nil
 }
 
+// isDocFile returns true for file extensions that produce Section nodes
+// (documentation files with heading-based structure). Used to determine
+// whether NL extraction and scoped doc-edge resolution should run.
+func isDocFile(ext string) bool {
+	switch ext {
+	case ".md", ".markdown", ".mdx", ".txt", ".rst":
+		return true
+	}
+	return false
+}
+
 // SetConfig wires the project config into the watcher so that rule violations
 // are checked after each incremental re-parse and emitted to the event log.
 // Must be called before Start. cfg may be nil to disable violation checking.
@@ -1430,17 +1441,17 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 	resolver.ResolveImplementsEdges(w.graph)
 
 	// Doc edges: if any file in the batch is a code file, run the full scan
-	// (markdown sections may reference the new entities). Otherwise use the
-	// file-scoped variant (only markdown files changed — code entities unchanged).
-	hasNonMarkdown := false
+	// (doc sections may reference the new entities). Otherwise use the
+	// file-scoped variant (only doc files changed — code entities unchanged).
+	hasNonDoc := false
 	for _, s := range valid {
 		ext := strings.ToLower(filepath.Ext(s.result.path))
-		if ext != ".md" && ext != ".markdown" && ext != ".mdx" {
-			hasNonMarkdown = true
+		if !isDocFile(ext) {
+			hasNonDoc = true
 			break
 		}
 	}
-	if hasNonMarkdown {
+	if hasNonDoc {
 		resolver.ResolveDocEdges(w.graph)
 	} else {
 		for _, s := range valid {
@@ -1448,23 +1459,23 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 		}
 	}
 
-	// NL-to-graph Tier 0+1: extract entity candidates from markdown section
+	// NL-to-graph Tier 0+1: extract entity candidates from doc section
 	// bodies and create knowledge nodes (concept/entity/artifact/decision).
-	// Only meaningful for markdown files — code file changes don't add sections.
+	// Only meaningful for doc files — code file changes don't add sections.
 	// Batch variant: ResolveNLEntitiesForFiles calls buildCodeNames once for all
-	// files in the batch (O(|graph|) instead of O(N×|graph|) for N markdown files).
+	// files in the batch (O(|graph|) instead of O(N×|graph|) for N doc files).
 	// Tier 2 LLM classification is submitted as a P1 brain task per file.
-	var mdPaths []string
+	var docPaths []string
 	for _, s := range valid {
-		if ext := strings.ToLower(filepath.Ext(s.result.path)); ext == ".md" || ext == ".markdown" || ext == ".mdx" {
-			mdPaths = append(mdPaths, s.result.path)
+		if ext := strings.ToLower(filepath.Ext(s.result.path)); isDocFile(ext) {
+			docPaths = append(docPaths, s.result.path)
 		}
 	}
-	if len(mdPaths) > 0 {
+	if len(docPaths) > 0 {
 		w.mu.Lock()
 		er := newStoreEmbedResolver(w.nodeEmbedder, w.store)
 		w.mu.Unlock()
-		for fp, unresolved := range resolver.ResolveNLEntitiesForFiles(w.graph, mdPaths, er) {
+		for fp, unresolved := range resolver.ResolveNLEntitiesForFiles(w.graph, docPaths, er) {
 			w.scheduleNLClassification(fp, unresolved)
 		}
 	}
@@ -1910,16 +1921,15 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// For code file changes, all sections may reference the new entities,
 	// so a full scan is required.
 	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".md", ".markdown", ".mdx":
+	if isDocFile(ext) {
 		resolver.ResolveDocEdgesForFile(w.graph, path)
-	default:
+	} else {
 		resolver.ResolveDocEdges(w.graph)
 	}
 
-	// NL-to-graph Tier 0+1 (markdown files only).
+	// NL-to-graph Tier 0+1 (doc files only — md, txt, rst).
 	// Tier 2 LLM classification submitted as P1 when brain is available.
-	if ext == ".md" || ext == ".markdown" || ext == ".mdx" {
+	if isDocFile(ext) {
 		w.mu.Lock()
 		er := newStoreEmbedResolver(w.nodeEmbedder, w.store)
 		w.mu.Unlock()
