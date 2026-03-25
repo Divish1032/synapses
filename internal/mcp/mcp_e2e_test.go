@@ -32,7 +32,7 @@ func TestE2E_SessionInitReturnsValidJSON(t *testing.T) {
 		t.Fatalf("response is not valid JSON: %v\nraw: %s", err, text)
 	}
 
-	for _, key := range []string{"project_identity", "working_state", "scale_guidance"} {
+	for _, key := range []string{"working_state", "scale_guidance"} {
 		if _, ok := parsed[key]; !ok {
 			t.Errorf("missing top-level key %q in session_init response", key)
 		}

@@ -119,6 +119,7 @@ func TestSessionInit_Federation_Healthy_NoDrift(t *testing.T) {
 
 	result, err := srv.handleSessionInit(context.Background(), makeReq(map[string]interface{}{
 		"agent_id": "test-agent",
+		"scope":    "full",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -160,6 +161,7 @@ func TestSessionInit_Federation_WithDrift(t *testing.T) {
 
 	result, err := srv.handleSessionInit(context.Background(), makeReq(map[string]interface{}{
 		"agent_id": "test-agent",
+		"scope":    "full",
 	}))
 	if err != nil {
 		t.Fatal(err)

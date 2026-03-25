@@ -235,7 +235,7 @@ func TestHandleSessionInit_EffectivenessTrend_PresentWithPriorSessions(t *testin
 	srv := newTestServer(t)
 	srv.SetPulseClient(pc)
 
-	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "trend-agent"}))
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "trend-agent", "scope": "full"}))
 	m := mustResult(t, res, err)
 
 	hasKey(t, m, "session_effectiveness_trend")

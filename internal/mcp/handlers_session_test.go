@@ -19,7 +19,7 @@ import (
 
 func TestHandleSessionInit_SoloAgent_ResponseShape(t *testing.T) {
 	s := newTestServer(t)
-	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "solo-agent"}))
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "solo-agent", "scope": "full"}))
 	m := mustResult(t, res, err)
 
 	hasKey(t, m, "project_identity")
@@ -33,10 +33,73 @@ func TestHandleSessionInit_SoloAgent_ResponseShape(t *testing.T) {
 
 func TestHandleSessionInit_NoAgentID_StillReturnsIdentity(t *testing.T) {
 	s := newTestServer(t)
-	res, err := s.handleSessionInit(ctx, callTool(nil))
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"scope": "full"}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "project_identity")
 	hasKey(t, m, "scale_guidance")
+}
+
+func TestHandleSessionInit_StandardScope_IsDefault(t *testing.T) {
+	s := newTestServer(t)
+	// No scope argument — should default to "standard" (lean mode).
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "std-agent"}))
+	m := mustResult(t, res, err)
+
+	// Always-present keys.
+	hasKey(t, m, "pending_tasks")
+	hasKey(t, m, "scale_guidance")
+	hasKey(t, m, "working_state")
+	hasKey(t, m, "_summary")
+	hasKey(t, m, "more_available")
+
+	// Full-mode-only keys must be absent in standard mode.
+	noKey(t, m, "project_identity")
+	noKey(t, m, "session_hint")
+
+	// more_available must list deferred sections.
+	ma, ok := m["more_available"].(map[string]any)
+	if !ok {
+		t.Fatalf("more_available must be a map, got %T", m["more_available"])
+	}
+	sections, ok := ma["sections"].([]any)
+	if !ok || len(sections) == 0 {
+		t.Error("more_available.sections must be a non-empty list")
+	}
+	hint, _ := ma["hint"].(string)
+	if hint == "" {
+		t.Error("more_available.hint must be non-empty")
+	}
+}
+
+func TestHandleSessionInit_Summary_NonEmpty(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "sum-agent"}))
+	m := mustResult(t, res, err)
+
+	summary, ok := m["_summary"].(string)
+	if !ok || summary == "" {
+		t.Errorf("_summary must be a non-empty string, got %v", m["_summary"])
+	}
+}
+
+func TestHandleSessionInit_QuickScopeAlias_SameAsStandard(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "quick-agent", "scope": "quick"}))
+	m := mustResult(t, res, err)
+
+	// quick is an alias for standard — should also have more_available and no project_identity.
+	hasKey(t, m, "more_available")
+	noKey(t, m, "project_identity")
+}
+
+func TestHandleSessionInit_FullScope_NoMoreAvailable(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "full-agent", "scope": "full"}))
+	m := mustResult(t, res, err)
+
+	// Full scope must include rich sections and must NOT include more_available.
+	hasKey(t, m, "project_identity")
+	noKey(t, m, "more_available")
 }
 
 func TestHandleSessionInit_EmitsSessionStartEvent(t *testing.T) {
@@ -230,7 +293,7 @@ func TestHandleSessionInit_BrainHealth_PresentWhenBrainEnabled(t *testing.T) {
 	defer bc.Close()
 	s.SetBrainClient(bc)
 
-	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "brain-agent"}))
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "brain-agent", "scope": "full"}))
 	m := mustResult(t, res, err)
 
 	health, ok := m["brain_health"].(map[string]any)
@@ -281,7 +344,7 @@ func TestHandleSessionInit_BrainWarning_DegradedTier(t *testing.T) {
 		})
 	}
 
-	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "warn-agent"}))
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "warn-agent", "scope": "full"}))
 	m := mustResult(t, res, err)
 
 	health, ok := m["brain_health"].(map[string]any)
@@ -1375,7 +1438,7 @@ func TestBudgetMultiplier_Integration_PrepareContext(t *testing.T) {
 // a knowledge_graph section in full mode even with no non-code-domain nodes.
 func TestSessionInit_KnowledgeGraph_EmptyGraph(t *testing.T) {
 	s := newTestServer(t)
-	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-agent"}))
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-agent", "scope": "full"}))
 	m := mustResult(t, res, err)
 
 	kg, ok := m["knowledge_graph"].(map[string]any)
@@ -1438,7 +1501,7 @@ func TestSessionInit_KnowledgeGraph_MultiDomain(t *testing.T) {
 	srv.StartBackground()
 	t.Cleanup(func() { srv.Close() })
 
-	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-multi"}))
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-multi", "scope": "full"}))
 	m := mustResult(t, res, err)
 
 	kg := m["knowledge_graph"].(map[string]any)
@@ -1497,7 +1560,7 @@ func TestSessionInit_KnowledgeGraph_CrossDomainEdgeCounts(t *testing.T) {
 	srv.StartBackground()
 	t.Cleanup(func() { srv.Close() })
 
-	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-edges"}))
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-edges", "scope": "full"}))
 	m := mustResult(t, res, err)
 
 	kg := m["knowledge_graph"].(map[string]any)
@@ -1551,7 +1614,7 @@ func TestSessionInit_KnowledgeGraph_ConfirmedEdge(t *testing.T) {
 	srv.StartBackground()
 	t.Cleanup(func() { srv.Close() })
 
-	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-conf"}))
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-conf", "scope": "full"}))
 	m := mustResult(t, res, err)
 
 	kg := m["knowledge_graph"].(map[string]any)
@@ -1595,7 +1658,7 @@ func TestSessionInit_KnowledgeGraph_HintForAutoEdges(t *testing.T) {
 	srv.StartBackground()
 	t.Cleanup(func() { srv.Close() })
 
-	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-hint"}))
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-hint", "scope": "full"}))
 	m := mustResult(t, res, err)
 
 	kg := m["knowledge_graph"].(map[string]any)
@@ -1632,7 +1695,7 @@ func TestSessionInit_KnowledgeGraph_CustomRelationCounted(t *testing.T) {
 	srv.StartBackground()
 	t.Cleanup(func() { srv.Close() })
 
-	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-custom"}))
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "kg-custom", "scope": "full"}))
 	m := mustResult(t, res, err)
 
 	kg := m["knowledge_graph"].(map[string]any)

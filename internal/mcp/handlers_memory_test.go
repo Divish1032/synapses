@@ -28,6 +28,7 @@ func TestSessionInit_SurfacesProjectMemories(t *testing.T) {
 	// Call session_init.
 	result, err := srv.handleSessionInit(ctx, callTool(map[string]any{
 		"agent_id": "agent-1",
+		"scope":    "full",
 	}))
 	m := mustResult(t, result, err)
 
@@ -82,6 +83,7 @@ func TestSessionInit_SurfacesSessionHistory(t *testing.T) {
 
 	result, err := srv.handleSessionInit(ctx, callTool(map[string]any{
 		"agent_id": "agent-3",
+		"scope":    "full",
 	}))
 	m := mustResult(t, result, err)
 
@@ -307,6 +309,7 @@ func TestE2E_SessionMemoryRoundtrip(t *testing.T) {
 	// Step 3: New session — memories should surface.
 	result, err := srv.handleSessionInit(ctx, callTool(map[string]any{
 		"agent_id": "agent-e2e",
+		"scope":    "full",
 	}))
 	m := mustResult(t, result, err)
 
@@ -363,6 +366,7 @@ func TestSessionInit_SurfacesTaskLinkedEntityMemories(t *testing.T) {
 	// session_init should surface the entity memory via the task_entity path.
 	result, err := srv.handleSessionInit(ctx, callTool(map[string]any{
 		"agent_id": "agent-task",
+		"scope":    "full",
 	}))
 	m := mustResult(t, result, err)
 

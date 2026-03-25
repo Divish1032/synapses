@@ -1279,7 +1279,7 @@ func TestHandleSessionInit_AgentAwareness(t *testing.T) {
 	s := newTestServer(t)
 	// Register another agent so GetActiveAgents returns a peer.
 	_ = s.store.UpsertAgent("peer-agent", nil)
-	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "main-agent"}))
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "main-agent", "scope": "full"}))
 	if err != nil {
 		t.Fatalf("session_init: %v", err)
 	}

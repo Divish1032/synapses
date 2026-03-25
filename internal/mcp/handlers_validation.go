@@ -372,6 +372,13 @@ func (s *Server) handleValidatePlan(
 		}
 	}
 
+	// _summary: one-line digest for quick scanning.
+	if len(violations) > 0 {
+		result["_summary"] = fmt.Sprintf("violations_found: %d violation(s)", len(violations))
+	} else {
+		result["_summary"] = fmt.Sprintf("ok: 0 violations, %d change(s) checked", len(changes))
+	}
+
 	return jsonResult(result)
 }
 
@@ -702,6 +709,13 @@ func (s *Server) handleVerifyImplementation(
 				log.Printf("mcp: auto-record verify_implementation episode: %v", err)
 			}
 		})
+	}
+
+	// _summary: one-line digest for quick scanning.
+	if totalViolations > 0 {
+		result["_summary"] = fmt.Sprintf("violations_found: %d file(s), %d violation(s)", len(files), totalViolations)
+	} else {
+		result["_summary"] = fmt.Sprintf("pass: %d file(s), 0 violations", len(files))
 	}
 
 	return jsonResult(result)
