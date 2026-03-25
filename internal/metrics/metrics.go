@@ -158,7 +158,13 @@ func fileChurn(repoRoot string, days int) (map[string]int, error) {
 
 	counts := make(map[string]int)
 	commitCount := 0
-	for _, line := range strings.Split(string(out), "\n") {
+	lines := strings.Split(string(out), "\n")
+	// strings.Split on a trailing newline produces a final empty element that
+	// would be counted as a commit separator — trim it to avoid an off-by-one.
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			commitCount++
