@@ -155,17 +155,25 @@ func (c *LocalClient) PullModel(_ context.Context, _ io.Writer) error {
 // Close releases GPU/CPU memory held by the llama.cpp model and context.
 // Safe to call multiple times; second and subsequent calls are no-ops.
 func (c *LocalClient) Close() {
+	// Mark unavailable and collect pending done channels without holding mu
+	// during the (potentially long) drain. This prevents Close() from blocking
+	// new Generate() calls for up to N*30s while draining abandoned goroutines.
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	// Drain all pending abandoned-goroutine done channels before destroying the
-	// llama context. This ensures no abandoned inference goroutines are still
-	// referencing llamaCtx when we free it below.
-	for _, done := range c.abandonedDones {
+	c.available = false
+	dones := c.abandonedDones
+	c.abandonedDones = nil
+	c.mu.Unlock()
+
+	// Drain abandoned inference goroutines outside the lock.
+	for _, done := range dones {
 		if done != nil {
 			<-done
 		}
 	}
-	c.abandonedDones = nil
+
+	// Now destroy llama resources under lock.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	// Release context first (depends on model), then model.
 	if closer, ok := c.llamaCtx.(io.Closer); ok {
 		closer.Close()
@@ -175,7 +183,6 @@ func (c *LocalClient) Close() {
 		closer.Close()
 	}
 	c.model = nil
-	c.available = false
 }
 
 // ---------------------------------------------------------------------------
