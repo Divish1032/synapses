@@ -195,8 +195,21 @@ func (b *BuiltinEmbedder) ensureModelWithSingleflight(ctx context.Context) error
 		b.initAttempted = true
 		b.mu.Unlock()
 
+		// Use a lifecycle context tied to b.done rather than the first
+		// caller's ctx. This prevents a short-lived request context from
+		// cancelling a multi-GB download that all waiters depend on.
+		lctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			select {
+			case <-b.done:
+				cancel()
+			case <-lctx.Done():
+			}
+		}()
+		defer cancel()
+
 		// All work below runs WITHOUT holding b.mu.
-		return nil, b.doInit(ctx)
+		return nil, b.doInit(lctx)
 	})
 	return err
 }
