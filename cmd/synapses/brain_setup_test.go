@@ -394,6 +394,48 @@ func TestBrainTiers_AllConfigured(t *testing.T) {
 	}
 }
 
+// --- Tests for baseModelForMode ---
+
+func TestBaseModelForMode(t *testing.T) {
+	cases := []struct {
+		mode string
+		want string
+	}{
+		{"optimal", "qwen3.5:2b"},
+		{"standard", "qwen3.5:4b"},
+		{"full", "qwen3.5:4b"},
+		{"", "qwen3.5:2b"}, // unknown defaults to 2b
+	}
+	for _, tc := range cases {
+		got := baseModelForMode(tc.mode)
+		if got != tc.want {
+			t.Errorf("baseModelForMode(%q) = %q, want %q", tc.mode, got, tc.want)
+		}
+	}
+}
+
+// --- Tests for modelfileWithBase ---
+
+func TestModelfileWithBase(t *testing.T) {
+	content := modelfileSentry // has FROM qwen3.5:2b
+	result := modelfileWithBase(content, "qwen3.5:4b")
+	if !strings.Contains(result, "FROM qwen3.5:4b") {
+		t.Error("expected FROM line to be replaced with qwen3.5:4b")
+	}
+	if strings.Contains(result, "FROM qwen3.5:2b") {
+		t.Error("expected original FROM qwen3.5:2b to be replaced")
+	}
+}
+
+func TestModelfileWithBase_AllTiers(t *testing.T) {
+	for i, tier := range brainTiers {
+		result := modelfileWithBase(tier.content, "qwen3.5:4b")
+		if !strings.Contains(result, "FROM qwen3.5:4b") {
+			t.Errorf("tier %d (%s): FROM not replaced", i, tier.name)
+		}
+	}
+}
+
 // --- Integration-like test ---
 
 func TestCmdBrainSetup_HelpPath(t *testing.T) {

@@ -15,17 +15,16 @@ type IntelligenceMode string
 const (
 	// ModeOptimal targets 8 GB RAM systems.
 	// Guardian shares Librarian's identity (no separate Critic).
-	// All identities share qwen3.5:2b weights (~2.7GB), always pinned.
+	// All identities share qwen3.5:2b weights (~1.5GB), evicts after 2 min.
 	ModeOptimal IntelligenceMode = "optimal"
 
 	// ModeStandard targets 16 GB+ RAM systems.
 	// Critic gets its own identity for violation explanations.
-	// All identities share qwen3.5:2b weights (~2.7GB), always pinned.
+	// All identities share qwen3.5:4b Q4_K_M weights (~2.7GB), evicts after 5 min.
 	ModeStandard IntelligenceMode = "standard"
 
 	// ModeFull is identical to ModeStandard. Kept for config compatibility.
-	// Originally planned for Q8 quantization, but all identities now share
-	// the same base model and Q8/Q4 distinction was dropped.
+	// All identities share qwen3.5:4b Q4_K_M weights (~2.7GB), pinned.
 	ModeFull IntelligenceMode = "full"
 )
 
@@ -270,7 +269,7 @@ func (c *BrainConfig) applyDefaults() {
 		c.FastModel = c.Model
 	}
 	// Tier fallback chain: tier model → Model → hardcoded default.
-	// All tiers share qwen3.5:2b until fine-tuned SIL models are available.
+	// All tiers share the base model for the current intelligence mode.
 	if c.ModelIngest == "" {
 		c.ModelIngest = c.FastModel
 	}
@@ -284,10 +283,9 @@ func (c *BrainConfig) applyDefaults() {
 		c.ModelOrchestrate = c.Model
 	}
 	if c.ModelArchivist == "" {
-		// Archivist always uses a Qwen 3.5 base model (not fine-tuned).
-		// Default to qwen3.5:2b regardless of what ModelOrchestrate is set to,
-		// so that changing the orchestrate tier doesn't accidentally break Archivist.
-		c.ModelArchivist = "qwen3.5:2b"
+		// Archivist uses the base model for the current intelligence mode.
+		// BaseModelTag() returns qwen3.5:2b for optimal, qwen3.5:4b for standard/full.
+		c.ModelArchivist = c.BaseModelTag()
 	}
 	if c.TimeoutMS <= 0 {
 		c.TimeoutMS = 60000
@@ -310,10 +308,20 @@ func (c *BrainConfig) applyDefaults() {
 		c.ModelDir = filepath.Join(home, ".synapses", "models")
 	}
 	if c.HFFilename == "" {
-		c.HFFilename = "qwen3.5-2b-instruct-q4_k_m.gguf"
+		switch c.IntelligenceMode {
+		case ModeStandard, ModeFull:
+			c.HFFilename = "qwen3.5-4b-instruct-q4_k_m.gguf"
+		default:
+			c.HFFilename = "qwen3.5-2b-instruct-q4_k_m.gguf"
+		}
 	}
 	if c.HFRepo == "" && c.Backend == "local" {
-		c.HFRepo = "Qwen/Qwen3.5-2B-Instruct-GGUF"
+		switch c.IntelligenceMode {
+		case ModeStandard, ModeFull:
+			c.HFRepo = "Qwen/Qwen3.5-4B-Instruct-GGUF"
+		default:
+			c.HFRepo = "Qwen/Qwen3.5-2B-Instruct-GGUF"
+		}
 	}
 	// Expand leading ~/ in paths.
 	for _, p := range []*string{&c.DBPath, &c.GGUFPath, &c.ModelDir} {
@@ -359,15 +367,15 @@ func (c *BrainConfig) applyDefaults() {
 
 // AutoConfigureModels sets per-tier model tags based on IntelligenceMode.
 //
-// All tiers use base Qwen 3.5 2B (Q8, ~2.7GB) with different Ollama Modelfile
-// identities (system prompts). FT models were evaluated and found to underperform
-// the base model — catastrophic forgetting destroyed task capability while the
-// base model with system prompt + format:json produces correct output for all tiers.
+// Optimal mode uses base Qwen 3.5 2B (~1.5 GB). Standard and Full modes use
+// Qwen 3.5 4B Q4_K_M (~2.7 GB) — the 4B model reaches IFEval 89.8, the
+// threshold for reliable format compliance in classification tasks.
 //
-// Ollama deduplicates weights: all 5 identities share the same 2.7GB of RAM.
-// Modes differ only in keep_alive (RAM residency), not model quality.
+// All tiers in a given mode share the same base model via Ollama Modelfile
+// identities (system prompts + parameters). Ollama deduplicates weights:
+// all 5 identities share one copy of the weights in RAM.
 //
-// Model tags (all backed by qwen3.5:2b):
+// Model tags:
 //
 //	synapses/sentry    — Gate & Router (classify entities)
 //	synapses/librarian — Enricher (analyze graph slices)
@@ -449,5 +457,28 @@ func (c *BrainConfig) KeepAlive() int {
 func (c *BrainConfig) KeepAliveValues() (kaGuardian, kaEnrich, kaOrchestrate, kaArchivist int) {
 	ka := c.KeepAlive()
 	return ka, ka, ka, ka
+}
+
+// BaseModelTag returns the raw Ollama model tag backing all synapses/*
+// identities for this intelligence mode. This is the actual model weights
+// loaded in RAM — not the identity name (synapses/sentry etc.).
+//
+// Used by ModelManager for RAM requirement checks: is4BModel("synapses/sentry")
+// returns false, but is4BModel(BaseModelTag()) correctly returns true when the
+// mode is standard/full.
+//
+//	optimal  → "qwen3.5:2b"  (~1.5 GB, IFEval ~80)
+//	standard → "qwen3.5:4b"  (~2.7 GB, IFEval 89.8, Q4_K_M)
+//	full     → "qwen3.5:4b"  (~2.7 GB, IFEval 89.8, Q4_K_M)
+//	""       → c.Model       (legacy path, no mode set)
+func (c *BrainConfig) BaseModelTag() string {
+	switch c.IntelligenceMode {
+	case ModeOptimal:
+		return "qwen3.5:2b"
+	case ModeStandard, ModeFull:
+		return "qwen3.5:4b"
+	default:
+		return c.Model
+	}
 }
 

@@ -76,8 +76,11 @@ type ModelManager struct {
 // share the same system-state snapshot. Pass nil to disable RAM gating
 // (useful in unit tests without a live system monitor).
 func NewModelManager(pulse *SystemPulse, cfg brainconfig.BrainConfig) *ModelManager {
-	primary := cfg.ModelIngest // all 5 Ollama identities share the same weights;
-	// ModelIngest (synapses/sentry) is representative of the loaded model.
+	// Use BaseModelTag() for the raw Ollama model tag (e.g. "qwen3.5:4b"),
+	// not the identity name ("synapses/sentry"). Identity names don't encode
+	// model size, so is4BModel("synapses/sentry") returns false — but the
+	// underlying weights may be 4B and need 3.7 GB of RAM.
+	primary := cfg.BaseModelTag()
 
 	fallback := ""
 	if is4BModel(primary) {
