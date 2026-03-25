@@ -54,6 +54,12 @@ type Config struct {
 	// Embeddings are computed locally and never sent anywhere (Privacy value).
 	Embeddings string `json:"embeddings,omitempty"`
 
+	// EmbedPoolSize controls the number of parallel ONNX inference workers when
+	// Embeddings is "builtin". Valid range: 1–8. Defaults to 3.
+	// Higher values improve throughput on multi-core machines at the cost of
+	// additional memory (~137 MB per extra worker for the quantized model).
+	EmbedPoolSize int `json:"embed_pool_size,omitempty"`
+
 	// ApiEntries defines custom patterns for identifying API entry points via
 	// get_api_contract. These supplement built-in convention detection (net/http,
 	// gin, echo, fiber, gRPC, proto RPC). All non-empty fields in a pattern are
@@ -701,7 +707,7 @@ func Load(dir string) (*Config, error) {
 var knownTopLevelKeys = map[string]bool{
 	"version": true, "mode": true, "rules": true, "edge_weights": true,
 	"context_carve": true, "linked": true, "embedding_endpoint": true,
-	"embeddings": true, "api_entries": true, "use_go_types": true,
+	"embeddings": true, "embed_pool_size": true, "api_entries": true, "use_go_types": true,
 	"use_ts_types": true, "metrics_days": true, "coverage_profile": true,
 	"pprof_profile": true, "data_flow_sources": true, "data_flow_sinks": true,
 	"data_flow_max_hops": true, "federation": true, "federation_acl": true,

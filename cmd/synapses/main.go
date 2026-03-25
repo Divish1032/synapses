@@ -3067,6 +3067,9 @@ func createMemoryEmbedder(cfg *config.Config) embed.Embedder {
 		}
 		modelsDir := filepath.Join(homeDir, ".synapses", "models")
 		logutil.Info("synapses: memory embeddings via builtin nomic-embed-text-v1.5\n")
+		if cfg.EmbedPoolSize > 0 {
+			return embed.NewBuiltinEmbedderWithPoolSize(modelsDir, cfg.EmbedPoolSize)
+		}
 		return embed.NewBuiltinEmbedder(modelsDir)
 	default:
 		logutil.Warn("synapses: unknown embeddings mode %q, disabling\n", mode)
