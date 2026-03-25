@@ -1,6 +1,8 @@
 package embed
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -120,6 +122,48 @@ func TestVerifyModelIntegrity_FP32_PinnedHash_CorruptFile_ReturnsError(t *testin
 	if _, statErr := os.Stat(onnxPath); !os.IsNotExist(statErr) {
 		t.Errorf("corrupt fp32 model file should have been removed, but still exists")
 	}
+}
+
+func TestVerifyModelIntegrity_LimitReader_DoesNotFalseRejectSmallFile(t *testing.T) {
+	// The io.LimitReader cap (maxOnnxVerifyBytes = 2 GiB) must not truncate
+	// a legitimate small model file. Write a file with known content, compute
+	// its SHA-256 manually, then verify verifyModelIntegrity produces the same
+	// hash (and rejects it, since it won't match the pinned constant — but the
+	// error must be "hash mismatch", not "hash model file: read error").
+	dir := t.TempDir()
+	content := []byte("small synthetic model content for limit reader test")
+	onnxPath := filepath.Join(dir, builtinModelFileQuantized)
+	if err := os.WriteFile(onnxPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := sha256.New()
+	h.Write(content)
+	wantHash := hex.EncodeToString(h.Sum(nil))
+
+	err := verifyModelIntegrity(onnxPath, builtinModelFileQuantized)
+	// Expected to fail (content doesn't match pinned hash) but the error must
+	// reference both the expected and actual hash — proving the full file was
+	// read and the hash mismatch was detected, not an I/O error.
+	if err == nil {
+		t.Fatal("expected error (hash mismatch), got nil")
+	}
+	errMsg := err.Error()
+	if !containsSubstr(errMsg, wantHash) {
+		t.Errorf("error should contain actual hash %s, got: %v", wantHash, err)
+	}
+}
+
+// containsSubstr is a helper to check substring without importing strings.
+func containsSubstr(s, sub string) bool {
+	return len(s) >= len(sub) && func() bool {
+		for i := 0; i <= len(s)-len(sub); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
+		}
+		return false
+	}()
 }
 
 func TestVerifyModelIntegrity_FP32_PinnedHash_EmptyFile_ReturnsError(t *testing.T) {
