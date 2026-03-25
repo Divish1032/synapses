@@ -403,12 +403,14 @@ func (s *Server) Stop() {
 	s.started = false
 }
 
-// verifyBinarySidecar reads the SHA-256 sidecar file alongside the binary and
-// verifies the binary's current hash matches. If the sidecar is absent (e.g.,
-// the binary was installed before this feature shipped), the check is skipped
-// with an informational log — startup is not blocked for backwards compatibility.
-// If the sidecar exists but the hash mismatches, returns a clear error
-// distinguishing corruption from a missing binary.
+// verifyBinarySidecar reads the SHA-256 sidecar alongside the binary and
+// verifies the binary's current hash matches. Three outcomes:
+//   - Sidecar absent: the binary was not installed via brain setup — refused.
+//   - Sidecar present, hash matches: binary is intact — allowed.
+//   - Sidecar present, hash mismatch: binary was corrupted or tampered — refused.
+//
+// EnsureLlamaServer writes the sidecar at install time and backfills it for
+// pre-existing binaries, so a missing sidecar indicates manual placement.
 func verifyBinarySidecar(binPath string) error {
 	sidecarPath := binPath + ".sha256"
 	rawExpected, err := os.ReadFile(sidecarPath)
