@@ -245,6 +245,10 @@ type ConstitutionConfig struct {
 type BrainConfig struct {
 	// Enabled controls whether the brain is active. Default: false.
 	Enabled bool `json:"enabled"`
+	// IntelligenceMode controls RAM residency and model quality tier.
+	// "optimal" (8 GB, qwen3.5:2b), "standard" (16 GB, qwen3.5:4b),
+	// "full" (32 GB+, qwen3.5:4b pinned). Leave empty for legacy auto-scaling.
+	IntelligenceMode string `json:"intelligence_mode,omitempty"`
 	// OllamaURL is the base URL of the Ollama server. Default: "http://localhost:11434".
 	OllamaURL string `json:"ollama_url,omitempty"`
 	// Model is the primary model tag. Default: "qwen3.5:2b".
@@ -253,10 +257,14 @@ type BrainConfig struct {
 	FastModel string `json:"fast_model,omitempty"`
 	// ModelIngest overrides the model for the ingest tier.
 	ModelIngest string `json:"model_ingest,omitempty"`
+	// ModelGuardian overrides the model for the guardian tier.
+	ModelGuardian string `json:"model_guardian,omitempty"`
 	// ModelEnrich overrides the model for the enrich tier.
 	ModelEnrich string `json:"model_enrich,omitempty"`
 	// ModelOrchestrate overrides the model for the orchestrate tier.
 	ModelOrchestrate string `json:"model_orchestrate,omitempty"`
+	// ModelArchivist overrides the model for the archivist tier.
+	ModelArchivist string `json:"model_archivist,omitempty"`
 	// DBPath overrides the default SQLite path (~/.synapses/brain.sqlite).
 	DBPath string `json:"db_path,omitempty"`
 	// Ingest enables automatic code summarization on file save. Default: false.
@@ -268,20 +276,31 @@ type BrainConfig struct {
 }
 
 // ToBrainConfig converts to the internal brain configuration type used by NewInProcess.
+// The returned config has applyDefaults() called to ensure mode-aware model selection
+// (e.g., standard mode uses qwen3.5:4b instead of 2b).
 func (b *BrainConfig) ToBrainConfig() *config.BrainConfig {
-	return &config.BrainConfig{
+	cfg := &config.BrainConfig{
 		Enabled:          b.Enabled,
+		IntelligenceMode: config.IntelligenceMode(b.IntelligenceMode),
 		OllamaURL:        b.OllamaURL,
 		Model:            b.Model,
 		FastModel:        b.FastModel,
 		ModelIngest:      b.ModelIngest,
+		ModelGuardian:    b.ModelGuardian,
 		ModelEnrich:      b.ModelEnrich,
 		ModelOrchestrate: b.ModelOrchestrate,
+		ModelArchivist:   b.ModelArchivist,
 		DBPath:           b.DBPath,
 		Ingest:           b.Ingest,
 		Enrich:           b.Enrich,
 		ContextBuilder:   b.ContextBuilder,
 	}
+	// When IntelligenceMode is set and tier models aren't explicitly overridden,
+	// auto-configure tier models and mode-aware defaults (base model, HF repo, etc.).
+	if cfg.IntelligenceMode != "" {
+		cfg.AutoConfigureModels(0)
+	}
+	return cfg
 }
 
 // PulseConfig describes the connection to a synapses-pulse analytics sidecar.
@@ -1162,7 +1181,13 @@ func (c *Config) applyDefaults() {
 			c.Brain.OllamaURL = "http://localhost:11434"
 		}
 		if c.Brain.Model == "" {
-			c.Brain.Model = "qwen3.5:2b"
+			// Use mode-aware base model when intelligence_mode is set.
+			switch c.Brain.IntelligenceMode {
+			case "standard", "full":
+				c.Brain.Model = "qwen3.5:4b"
+			default:
+				c.Brain.Model = "qwen3.5:2b"
+			}
 		}
 	}
 }

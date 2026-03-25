@@ -394,3 +394,116 @@ func TestSuggestFix_DefaultEdgeType(t *testing.T) {
 		t.Error("expected non-empty SuggestedFix for default edge type")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ToBrainConfig — IntelligenceMode passthrough and auto-configuration
+// ---------------------------------------------------------------------------
+
+func TestToBrainConfig_PassesIntelligenceMode(t *testing.T) {
+	bc := config.BrainConfig{
+		Enabled:          true,
+		IntelligenceMode: "standard",
+		OllamaURL:        "http://localhost:11434",
+	}
+	got := bc.ToBrainConfig()
+	if string(got.IntelligenceMode) != "standard" {
+		t.Errorf("IntelligenceMode = %q, want %q", got.IntelligenceMode, "standard")
+	}
+}
+
+func TestToBrainConfig_StandardMode_AutoConfiguresIdentities(t *testing.T) {
+	bc := config.BrainConfig{
+		Enabled:          true,
+		IntelligenceMode: "standard",
+		OllamaURL:        "http://localhost:11434",
+	}
+	got := bc.ToBrainConfig()
+	if got.ModelIngest != "synapses/sentry" {
+		t.Errorf("ModelIngest = %q, want synapses/sentry", got.ModelIngest)
+	}
+	if got.ModelGuardian != "synapses/critic" {
+		t.Errorf("ModelGuardian = %q, want synapses/critic", got.ModelGuardian)
+	}
+	if got.ModelEnrich != "synapses/librarian" {
+		t.Errorf("ModelEnrich = %q, want synapses/librarian", got.ModelEnrich)
+	}
+	if got.ModelOrchestrate != "synapses/navigator" {
+		t.Errorf("ModelOrchestrate = %q, want synapses/navigator", got.ModelOrchestrate)
+	}
+	if got.ModelArchivist != "synapses/archivist" {
+		t.Errorf("ModelArchivist = %q, want synapses/archivist", got.ModelArchivist)
+	}
+}
+
+func TestToBrainConfig_OptimalMode_GuardianSharesLibrarian(t *testing.T) {
+	bc := config.BrainConfig{
+		Enabled:          true,
+		IntelligenceMode: "optimal",
+	}
+	got := bc.ToBrainConfig()
+	if got.ModelGuardian != "synapses/librarian" {
+		t.Errorf("ModelGuardian = %q, want synapses/librarian (shared in optimal)", got.ModelGuardian)
+	}
+}
+
+func TestToBrainConfig_NoMode_LegacyBehavior(t *testing.T) {
+	bc := config.BrainConfig{
+		Enabled:   true,
+		Model:     "qwen3.5:2b",
+		OllamaURL: "http://localhost:11434",
+	}
+	got := bc.ToBrainConfig()
+	// Without IntelligenceMode, AutoConfigureModels should NOT be called.
+	// Tier models remain empty (to be filled by brain/config.applyDefaults).
+	if string(got.IntelligenceMode) != "" {
+		t.Errorf("IntelligenceMode = %q, want empty (legacy)", got.IntelligenceMode)
+	}
+}
+
+func TestToBrainConfig_PassesGuardianAndArchivist(t *testing.T) {
+	bc := config.BrainConfig{
+		Enabled:        true,
+		ModelGuardian:  "custom/guardian",
+		ModelArchivist: "custom/archivist",
+	}
+	got := bc.ToBrainConfig()
+	// Without IntelligenceMode, explicit values should pass through.
+	if got.ModelGuardian != "custom/guardian" {
+		t.Errorf("ModelGuardian = %q, want custom/guardian", got.ModelGuardian)
+	}
+	if got.ModelArchivist != "custom/archivist" {
+		t.Errorf("ModelArchivist = %q, want custom/archivist", got.ModelArchivist)
+	}
+}
+
+func TestApplyDefaults_BrainModel_ModeAware(t *testing.T) {
+	cases := []struct {
+		mode string
+		want string
+	}{
+		{"standard", "qwen3.5:4b"},
+		{"full", "qwen3.5:4b"},
+		{"optimal", "qwen3.5:2b"},
+		{"", "qwen3.5:2b"},
+	}
+	for _, tc := range cases {
+		dir := t.TempDir()
+		raw := map[string]interface{}{
+			"brain": map[string]interface{}{
+				"enabled": true,
+			},
+		}
+		if tc.mode != "" {
+			raw["brain"].(map[string]interface{})["intelligence_mode"] = tc.mode
+		}
+		data, _ := json.Marshal(raw)
+		os.WriteFile(filepath.Join(dir, "synapses.json"), data, 0o644)
+		cfg, err := config.Load(dir)
+		if err != nil {
+			t.Fatalf("mode=%q: Load failed: %v", tc.mode, err)
+		}
+		if cfg.Brain.Model != tc.want {
+			t.Errorf("mode=%q: Brain.Model = %q, want %q", tc.mode, cfg.Brain.Model, tc.want)
+		}
+	}
+}

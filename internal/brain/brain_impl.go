@@ -317,9 +317,10 @@ func New(cfg config.BrainConfig) Brain {
 		//   full     → -1  (always pinned on 32 GB+ machines)
 		ka := cfg.KeepAlive()
 
-		// All tiers use base qwen3.5:2b with different Ollama Modelfile identities
-		// (system prompts). All use /api/chat + format:json + think:false for
-		// consistent structured JSON output.
+		// All tiers share the same base model (qwen3.5:2b for optimal, qwen3.5:4b
+		// for standard/full) with different Ollama Modelfile identities (system
+		// prompts). All use /api/chat + format:json + think:false for consistent
+		// structured JSON output.
 		ingestClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelIngest, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
