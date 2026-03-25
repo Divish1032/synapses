@@ -17,9 +17,10 @@ func safeGitCmd(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = []string{
 		"HOME=" + os.Getenv("HOME"),
-		"PATH=" + os.Getenv("PATH"),
+		"PATH=/usr/bin:/bin",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_LOCAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ASKPASS=/bin/false",
 	}
