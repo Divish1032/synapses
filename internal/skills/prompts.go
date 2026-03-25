@@ -86,7 +86,7 @@ func LoadPromptDir(dir, source string) ([]PromptTemplate, error) {
 		if err != nil {
 			continue // symlink or unreadable — skip silently
 		}
-		data, err := io.ReadAll(f)
+		data, err := io.ReadAll(io.LimitReader(f, 64*1024))
 		f.Close()
 		if err != nil {
 			continue // skip unreadable files silently
