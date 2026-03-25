@@ -66,6 +66,7 @@ func New(s *store.Store) *Cache {
 	}
 
 	transport := &http.Transport{
+		DisableKeepAlives: true, // prevent connection reuse across DNS rebind windows
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
