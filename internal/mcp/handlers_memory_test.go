@@ -266,12 +266,16 @@ func TestMemoryTouchOnAccess(t *testing.T) {
 		t.Fatal("could not find initial memory")
 	}
 
-	// Call session_init which should touch the memory.
+	// Call session_init with scope=full so the memory-surfacing code path
+	// (gated by !quickMode) runs and TouchMemory is enqueued.
 	srv.handleSessionInit(ctx, callTool(map[string]any{
 		"agent_id": "agent-8",
+		"scope":    "full",
 	}))
-	// TouchMemory runs in a background goroutine — give it time to complete.
-	time.Sleep(50 * time.Millisecond)
+	// TouchMemory runs in a background goroutine and persists an RFC3339
+	// second-precision timestamp. Sleep >1 s so the updated expires_at
+	// falls in a strictly later second than initialExpiry.
+	time.Sleep(1100 * time.Millisecond)
 
 	// Read again and verify expires_at was extended.
 	mems, _ = srv.store.QueryMemories(store.TierProject, "", "", 10)
