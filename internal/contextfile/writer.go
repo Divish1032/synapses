@@ -51,9 +51,25 @@ func Write(repoRoot string, identity *graph.ProjectIdentity, tasks []store.Task)
 		return err
 	}
 	content := render(identity, tasks)
-	// Atomic write: temp file + rename avoids a partial read by the hook.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+	// Atomic write: unique temp file + rename avoids a partial read by the hook
+	// and races between concurrent Write calls for the same project.
+	f, err := os.CreateTemp(filepath.Dir(path), ".ctx-*.tmp")
+	if err != nil {
+		return fmt.Errorf("write context file: %w", err)
+	}
+	tmp := f.Name()
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("write context file: %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("write context file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
 		return fmt.Errorf("write context file: %w", err)
 	}
 	return os.Rename(tmp, path)
