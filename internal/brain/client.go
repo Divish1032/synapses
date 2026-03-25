@@ -216,8 +216,8 @@ func (c *Client) GenerateHypothetical(ctx context.Context, query string) string 
 	// double-quotes so they cannot accidentally terminate the delimited region
 	// and confuse the LLM about where the query ends.
 	prompt := fmt.Sprintf(
-		"Write a realistic function signature or type definition for code that answers: %s. Output only the code definition, no explanation.",
-		fmt.Sprintf("%q", q),
+		"Write a realistic function signature or type definition for code that answers: %q. Output only the code definition, no explanation.",
+		q,
 	)
 	hyp, err := c.brain.Generate(hydeCtx, prompt)
 	if err != nil || hyp == "" {
