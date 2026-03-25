@@ -33,7 +33,7 @@ Synapses maintains **episodic memory** (past decisions, failures), an **agent me
 
 ## Features
 
-**48 MCP Tools** — session management, code graph queries, task memory, agent coordination, episodic memory, architecture enforcement, skill automation
+**48 MCP Tools** — session management, code graph queries, task memory, agent coordination, episodic memory, architecture enforcement
 **49+ Language Parsers** — Go, TypeScript, Python, Java, Rust, C/C++, C#, Swift, Ruby, PHP, Kotlin, Scala, Dart, Zig, Haskell, Terraform, Nix, and 30+ more with generic fallback
 **Episodic Memory** — persist past decisions and failures; future sessions query them to avoid repeating mistakes
 **Agent Message Bus** — broadcast work status across agents; unread messages surface on session start
@@ -247,12 +247,6 @@ Synapses registers **40 MCP tools** across 9 categories. All are available in yo
 |------|--------|-------------|
 | `lookup_docs` | `package`, `url`, `entity` | Returns cached Go package documentation or arbitrary URL content. Package docs are version-pinned from go.mod. Use to verify API signatures before writing code. |
 | `web_annotate` | `node_id` (required), `note`, `hits`, `agent_id` | Persist web findings to a graph node annotation. Makes web research a first-class data object visible to all future sessions. |
-
-### Skills (Composable Tool Sequences)
-| Tool | Params | Description |
-|------|--------|-------------|
-| `list_skills` | — | List all available skill recipes with their IDs, descriptions, parameters, and step counts. |
-| `execute_skill` | `skill_id` (required), `params` | Execute a named skill recipe that composes multiple tools into a single call. |
 
 ---
 

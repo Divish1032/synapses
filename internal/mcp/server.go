@@ -172,11 +172,6 @@ type Server struct {
 	// Populated via SetPromptTemplates after the server is constructed.
 	promptTemplates []skills.PromptTemplate
 
-	// skillRecipes holds named multi-step workflow definitions.
-	// Populated via SetSkillRecipes after the server is constructed.
-	skillRecipes  []skills.Recipe
-	skillExecutor *skills.Executor
-
 	// sessionHashes auto-caches entity_hash per session to allow the server to
 	// detect unchanged context without requiring agents to pass known_hash manually.
 	// Key format: "sessionID::entityCacheKey", Value: entity_hash string.
@@ -771,8 +766,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 	s.registerTools()
 	s.registerResources()
 	s.registerPrompts()      // no-op until SetPromptTemplates is called
-	s.registerSkillTools()   // no-op until SetSkillRecipes is called
-	// OF-S4: compute baseline AFTER all registrations so skill tools are included.
+	// OF-S4: compute baseline AFTER all registrations.
 	// handleSessionInit re-derives and compares to detect runtime tampering.
 	s.toolDescBaseline = hashToolDescs(s.toolDescs)
 	return s
@@ -2131,6 +2125,13 @@ func (s *Server) registerTools() {
 			mcp.WithString("projects",
 				mcp.Description("Optional. Comma-separated federation aliases to also check sibling project dependents "+
 					"(e.g. 'app'). Returns cross-project callers alongside local ones."),
+			),
+			mcp.WithString("scope",
+				mcp.Description("Optional. 'review': enriched output for code review — adds blast_radius summary "+
+					"(direct/transitive/files/untested/high-risk counts), test_gaps (impacted entities with zero test coverage), "+
+					"risk_flags (entities with negative quality scores from historical signals), and failure_history "+
+					"(recent failure episodes related to this entity). One call replaces 10+ separate tool calls. "+
+					"Default: standard impact analysis."),
 			),
 		),
 		s.handleGetImpact,

@@ -406,18 +406,6 @@ type FederationDetectEvent struct {
 	EventType      string  `json:"event_type"` // "detection" | "impact_notification"
 }
 
-// SkillExecutionEvent records a skill recipe execution (COV-15).
-type SkillExecutionEvent struct {
-	AgentID        string  `json:"agent_id,omitempty"`
-	ProjectID      string  `json:"project_id,omitempty"`
-	SkillName      string  `json:"skill_name"`
-	DurationMs     float64 `json:"duration_ms"`
-	StepsTotal     int     `json:"steps_total"`
-	StepsSucceeded int     `json:"steps_succeeded"`
-	Success        bool    `json:"success"`
-	ErrorStep      string  `json:"error_step,omitempty"`
-}
-
 // ToolSequenceEntry records a single tool call in session order (SA-C1).
 type ToolSequenceEntry struct {
 	SessionID string `json:"session_id"`
@@ -512,14 +500,6 @@ type SessionPercentiles struct {
 	CallsP50  float64 `json:"calls_p50"`
 	CallsP95  float64 `json:"calls_p95"`
 	CallsP99  float64 `json:"calls_p99"`
-}
-
-// SkillStat holds aggregated skill execution statistics.
-type SkillStat struct {
-	Name        string  `json:"name"`
-	Count       int     `json:"count"`
-	SuccessRate float64 `json:"success_rate"`
-	AvgDuration float64 `json:"avg_duration_ms"`
 }
 
 // DurationBuckets holds session duration percentiles (DQ-C.2).

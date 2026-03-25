@@ -63,7 +63,7 @@
   Sprint 15: Self-Refining Intelligence ......... 9 tasks — Accuracy (feedback loop)
   Sprint 16: Cross-Domain Knowledge Graph ....... 7 tasks — Accuracy (killer feature)
   Sprint 17: Knowledge Substrate & Brain Arch ... 8 tasks — Accuracy + Speed (domain expansion)
-  Sprint 17.5: Skills & Workflow Polish ......... 4 tasks (2 shipped) — Speed (compound operations)
+  Sprint 17.5: Skills & Workflow Polish ......... 4 tasks (2 shipped, 2 dropped) — Speed (compound operations)
   Sprint 18: Observability, Proof & Polish ...... 8 tasks — Speed + Privacy (demonstrate value)
                                                   ─────
                                                   42 tasks remaining → 9 parallel waves
@@ -108,7 +108,7 @@ Wave 7 ──┬── Laptop A: 15.5 + 15.6 + 15.8 (session report + confidence
           └── Laptop B: 16.4 + 16.5 + 16.6 (multi-domain BFS/PPR + cross-domain impact + KG stats)
           ── merge → main ──
 
-Wave 8 ──┬── Laptop A: 17.1 + 17.2 + 17.3 (docs graph + skills phase 1 + code review flow)
+Wave 8 ──┬── Laptop A: 17.1 + 17.2 + 17.3 (docs graph + get_impact review scope + workflow polish)
           └── Laptop B: 16.7 + 17.4 + 17.5 + 17.6 (raw graph query + HyDE search + progressive disclosure + compression)
           ── merge → main ──
 
@@ -128,7 +128,7 @@ Wave 9 ──┬── Laptop A: 18.1 + 18.2 + 18.3 + 18.4 (dashboard + wow mome
 | 5 | Wave 4 | Outcome signals need full intelligence stack in place. Path-pattern rules are independent. |
 | 6 | Wave 5 | Weight refinement needs outcome signals (15.1). Cross-domain matching needs parsers (14.6/14.7). |
 | 7 | Wave 6 | Reports need quality scores (15.2). Multi-domain BFS needs edge types (16.1) + PPR (13.2). |
-| 8 | Wave 7 | Skills/docs compose existing tools. HyDE needs embeddings. Progressive disclosure needs stable session_init. |
+| 8 | Wave 7 | Docs compose existing tools. HyDE needs embeddings. Progressive disclosure needs stable session_init. |
 | 9 | Wave 8 | Dashboard needs Sprint 15 data. Benchmarks need full intelligence stack. |
 
 ### File separation per wave (no merge conflicts)
@@ -142,7 +142,7 @@ Wave 9 ──┬── Laptop A: 18.1 + 18.2 + 18.3 + 18.4 (dashboard + wow mome
 | 5 | `internal/mcp/context_signal*.go` (new) | `internal/store/rules.go`, `internal/graph/edge_types.go` |
 | 6 | `internal/graph/weights.go`, `internal/store/recall_engine.go` | `internal/graph/cross_domain*.go` (new) |
 | 7 | `internal/mcp/session_report.go`, `cmd/synapses/benchmark*` | `internal/graph/traverse.go` (cross-domain), `internal/mcp/tools.go` |
-| 8 | `internal/parser/markdown.go`, `internal/mcp/skills*` | `internal/store/search.go`, `internal/mcp/tools.go` (session_init) |
+| 8 | `internal/parser/markdown.go`, `internal/mcp/tools.go` (get_impact review) | `internal/store/search.go`, `internal/mcp/tools.go` (session_init) |
 | 9 | `internal/mcp/dashboard*.go`, `cmd/synapses/health.go` | `internal/store/export.go`, `cmd/synapses/benchmark*` |
 
 ---
@@ -273,12 +273,12 @@ Wave 9 ──┬── Laptop A: 18.1 + 18.2 + 18.3 + 18.4 (dashboard + wow mome
 
 ## Sprint 17.5: Skills & Workflow Polish
 
-**Goal:** Compound operations over existing tools. Deferred from Sprint 17 to prioritize the knowledge substrate foundation. These items are incremental improvements to an already-functional skills engine (4 builtin recipes, executor, security policy, `execute_skill`/`list_skills` MCP tools all shipped).
+**Goal:** Compound operations over existing tools. Deferred from Sprint 17 to prioritize the knowledge substrate foundation. The recipe engine (`execute_skill`/`list_skills` MCP tools) has been removed — compound operations are now served by enriched existing tools (e.g., `get_impact(scope="review")`).
 
 | # | Item | What | Source | Effort | Value |
 |---|------|------|--------|--------|-------|
-| 1 | **Skills cross-project support** (R18) | Add `projects` field to `RecipeStep` struct. Enables recipes to pass `projects: "*"` through to tools that already support cross-project queries (`get_context`, `get_impact`, `recall`). Federated recipe variants. | Original Sprint 13 | Medium | Speed |
-| 2 | **Code review flow** (OF-F1) | Dedicated `"code-review"` recipe (extends existing `pre-review-checklist`). Structured `ReviewReport` type with executive summary, risk level, action items. Template-based report formatter. | Original Sprint 13 | Medium | Speed |
+| 1 | ~~**Skills cross-project support** (R18)~~ | ~~Add `projects` field to `RecipeStep` struct. Enables recipes to pass `projects: "*"` through to tools that already support cross-project queries.~~ DROPPED — recipe engine removed. Cross-project queries already supported natively by `get_context`, `get_impact`, `recall` via their `projects` parameter. | Original Sprint 13 | — | — |
+| 2 | ~~**Code review flow** (OF-F1)~~ | ~~Dedicated `"code-review"` recipe.~~ Superseded by `get_impact(scope="review")` which provides structured review output (executive summary, risk level, action items) without the recipe engine. | Original Sprint 13 | — | — |
 | 3 | ~~**Documentation graph integration** (OF-F4)~~ | ~~Wire NL-to-graph nodes into `get_context` BFS (traverse `DOCUMENTED_BY` edges), `search` results (include `NodeSection` + knowledge nodes), and `prepare_context` intents. FTS5 indexing of doc section bodies for semantic search.~~ BFS/search/prepare_context already wired in Sprint 17. FTS5 body indexing gap fixed (2026-03-25). | Sprint 17 follow-up | Medium | Accuracy |
 | 4 | ~~**Watcher-triggered incremental NL extraction**~~ | ~~File watcher calls NL-to-graph pipeline on `.md`/`.txt`/`.rst` changes. Remove old nodes/edges for changed file, re-run Tier 0+1, submit Tier 2 as P1 task to brain scheduler. Uses existing `ResolveDocEdgesForFile()` pattern extended for full pipeline.~~ `.md` pipeline shipped in Sprint 17. `.txt`/`.rst` support added via PlaintextParser (2026-03-25). | Sprint 17 follow-up | Low | Accuracy |
 
@@ -330,18 +330,18 @@ Items evaluated by the Research Council and deliberately deferred. High effort, 
 | Batch embedding pipeline parallelism | When memory corpus exceeds 10K per project | RC: IR #6 |
 | Per-project lazy loading in daemon | When 10+ simultaneous projects is a real user scenario | RC: Performance #7 |
 | BFS allocation pooling (sync.Pool) | Nice-to-have during any BFS refactor, not standalone | RC: Performance #6 |
-| Workflow recipe server-side execution | When tool-call latency becomes documented user pain point | RC: Context #8 |
+| ~~Workflow recipe server-side execution~~ | DROPPED — recipe engine removed; compound operations served by enriched tools (e.g., `get_impact(scope="review")`) | RC: Context #8 |
 
 ### Other Backlog Items
 
 | Item | Trigger |
 |------|---------|
 | MCP Streamable HTTP (B27) | When spec is finalized (targeting June 2026) |
-| Background mutation analysis (MUT-1) | When skills Phase 1 is stable |
+| Background mutation analysis (MUT-1) | When compound workflow tooling is stable |
 | SQL parser | When SQL-heavy project users request it |
 | Protobuf parser | When gRPC-heavy project users request it |
-| Skills Phase 2 — Context hooks (B14-B22) | When R18 Phase 1 is stable |
-| WASM sandbox for skills (OF-S1) | When third-party skills ship |
+| ~~Skills Phase 2 — Context hooks (B14-B22)~~ | DROPPED — recipe engine removed |
+| ~~WASM sandbox for skills (OF-S1)~~ | DROPPED — recipe engine removed |
 | Cross-encoder reranker for recall | When Sprint 12's retrieval pipeline is stable (+5-10% precision) |
 | Sequential pattern mining → bundles (R30) | When intent alignment has meaningful volume |
 | Built-in task scheduler (OF-E1) | When scheduled jobs are needed |
@@ -405,7 +405,7 @@ Items evaluated and deliberately excluded. See `docs/DEFERRED.md` for detailed r
 
 | Value | Sprint Impact |
 |-------|--------------|
-| **Speed** | Sprint 11 (SQLite 4-8x reads, SIMD 3-5x cosine, cache 2-4x hits, dynamic token budgets), Sprint 12 (HNSW 50-100x vector search at scale, semantic tool discovery), Sprint 13 (PPR convergence faster than deep BFS on hub-heavy graphs), Sprint 14 (incremental reanalysis 10-50x, parallel parsing), Sprint 17 (brain scheduler on-demand loading, progressive disclosure 4-6x fewer boot tokens, _summary compression), Sprint 17.5 (one-call skills), Sprint 18 (token savings proof, health endpoint) |
+| **Speed** | Sprint 11 (SQLite 4-8x reads, SIMD 3-5x cosine, cache 2-4x hits, dynamic token budgets), Sprint 12 (HNSW 50-100x vector search at scale, semantic tool discovery), Sprint 13 (PPR convergence faster than deep BFS on hub-heavy graphs), Sprint 14 (incremental reanalysis 10-50x, parallel parsing), Sprint 17 (brain scheduler on-demand loading, progressive disclosure 4-6x fewer boot tokens, _summary compression), Sprint 17.5 (docs integration), Sprint 18 (token savings proof, health endpoint) |
 | **Privacy** | Architecture: all computation local. Sprint 12: nomic-embed runs local ONNX, HNSW runs in-process. Sprint 17: brain scheduler keeps models local with on-demand loading, HyDE uses local brain, NL-to-graph runs entirely on-device. Sprint 18: model integrity verification, knowledge export for full data control. EU AI Act makes local-first a regulatory advantage. |
 | **Accuracy** | Sprint 11 (ACT-R decay, tier-specific half-lives, sandwich ordering, semantic dedup, error recovery, heritage clauses), Sprint 12 (nomic-embed 32x context, spreading activation, admission control, score-aware fusion), Sprint 13 (PPR multi-path, hybrid scoring, centrality, adaptive density, context-weighted recall), Sprint 14 (type propagation 15-30% more edges, RTA 10-40% fewer false positives), Sprint 15 (outcome-driven weight refinement, path-pattern rules, confidence scoring), Sprint 16 (cross-domain impact with precision safeguards), Sprint 17 (NL-to-graph 4-tier extraction, HyDE for abstract queries, qwen3.5:4b model upgrade), Sprint 18 (benchmarked accuracy) |
 

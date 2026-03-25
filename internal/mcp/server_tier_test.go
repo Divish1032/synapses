@@ -15,7 +15,7 @@ func TestToolInTier_AllToolsAlwaysAvailable(t *testing.T) {
 		"get_context", "find_entity", "get_pending_tasks", "get_file_context",
 		"get_impact", "get_call_chain",
 		"get_working_state", "get_violations",
-		"get_events", "upsert_rule", "send_message", "execute_skill",
+		"get_events", "upsert_rule", "send_message",
 	}
 	for _, name := range tools {
 		if !s.toolInTier(name) {

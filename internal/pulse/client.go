@@ -51,7 +51,6 @@ type RuleEvalEvent = types.RuleEvalEvent
 
 // Phase 5 event types.
 type FederationDetectEvent = types.FederationDetectEvent
-type SkillExecutionEvent = types.SkillExecutionEvent
 type ToolSequenceEntry = types.ToolSequenceEntry
 type EntityQuality = types.EntityQuality
 type DeliveryOutcome = types.DeliveryOutcome
@@ -61,7 +60,6 @@ type WeeklyEfficiency = types.WeeklyEfficiency
 type MonthlyROI = types.MonthlyROI
 type DecayStats = types.DecayStats
 type SessionPercentiles = types.SessionPercentiles
-type SkillStat = types.SkillStat
 type DurationBuckets = types.DurationBuckets
 
 // Client is the in-process analytics collector. It replaces the HTTP sidecar.
@@ -416,14 +414,6 @@ func (c *Client) RecordFederationEvent(ev FederationDetectEvent) {
 	c.coll.RecordFederationEvent(ev)
 }
 
-// RecordSkillExecution enqueues a skill execution event. Fire-and-forget (P5 — COV-15).
-func (c *Client) RecordSkillExecution(ev SkillExecutionEvent) {
-	if c == nil {
-		return
-	}
-	c.coll.RecordSkillExecution(ev)
-}
-
 // RecordToolSequenceEntry enqueues a tool call sequence entry. Fire-and-forget (P5 — SA-C1).
 func (c *Client) RecordToolSequenceEntry(sessionID, toolName string, position int, success bool) {
 	if c == nil || sessionID == "" {
@@ -514,6 +504,15 @@ func (c *Client) GetEntityQualityScoresBatch(entities []string, projectID string
 		return nil
 	}
 	return c.store.GetEntityQualityScoresBatch(entities, projectID)
+}
+
+// GetEntityQualityDetailsBatch returns quality details (score + negative signal
+// count) for a set of entity names. Entities without a quality record are absent.
+func (c *Client) GetEntityQualityDetailsBatch(entities []string, projectID string) map[string]pulsestore.EntityQualityDetail {
+	if c == nil || len(entities) == 0 {
+		return nil
+	}
+	return c.store.GetEntityQualityDetailsBatch(entities, projectID)
 }
 
 // GetDeliveryOutcomes returns delivery-to-outcome linkages (P5 — Item 11).
@@ -649,17 +648,6 @@ func (c *Client) GetToolsPerSessionPercentiles(days int) SessionPercentiles {
 	sp.ToolsP50, sp.ToolsP95, sp.ToolsP99 = c.store.GetToolsPerSessionPercentiles(days)
 	sp.CallsP50, sp.CallsP95, sp.CallsP99 = c.store.GetCallsPerSessionPercentiles(days)
 	return sp
-}
-
-// GetSkillExecutionStatsP5 returns skill execution stats for the last N days (P5 — COV-15).
-func (c *Client) GetSkillExecutionStatsP5(days int) []SkillStat {
-	if c == nil {
-		return nil
-	}
-	if days <= 0 {
-		days = 30
-	}
-	return c.store.GetSkillExecutionStatsP5(days)
 }
 
 // GetMostRecentDeliveryID returns the most recent context delivery ID for an entity (P5 — Item 11).
@@ -820,7 +808,6 @@ type PulseSummary struct {
 	ErrorRecoveryPatterns   []pulsestore.ErrorRecovery        `json:"error_recovery_patterns,omitempty"`
 	ToolPairCorrelation     []pulsestore.ToolPairStat         `json:"tool_pair_correlation,omitempty"`
 	DiscoveryToolEffective  float64                           `json:"discovery_tool_effectiveness,omitempty"`
-	SkillExecutionStats     []pulsestore.SkillStat            `json:"skill_execution_stats,omitempty"`
 	MemoryTypeDistribution  map[string]int                    `json:"memory_type_distribution,omitempty"`
 	CancellationReasons     []pulsestore.CancellationStat     `json:"cancellation_reasons,omitempty"`
 	PlanComplexityVsOutcome []pulsestore.PlanComplexityStat   `json:"plan_complexity_vs_outcome,omitempty"`
@@ -853,7 +840,6 @@ type PulseSummary struct {
 	GraphFreshnessScoreP5   float64                           `json:"graph_freshness_score_p5,omitempty"`
 	TokenSavingsByIntent    map[string]int64                  `json:"token_savings_by_intent,omitempty"`
 	SessionPercentiles      types.SessionPercentiles          `json:"session_percentiles,omitempty"`
-	SkillStatsP5            []types.SkillStat                 `json:"skill_stats_p5,omitempty"`
 	CollectorWriteErrors    int64                             `json:"collector_write_errors,omitempty"`
 	CrossSessionReuseRate   float64                           `json:"cross_session_reuse_rate,omitempty"`
 	ConcurrentAgentsMax     int                               `json:"concurrent_agents_max,omitempty"`
@@ -910,7 +896,6 @@ func (c *Client) GetSummarySectioned(days int, sections map[string]bool) *PulseS
 		ps.ModelComparison, _ = c.store.GetModelComparison(days)
 		ps.ErrorRecoveryPatterns, _ = c.store.GetErrorRecoveryPatterns(days)
 		ps.ToolPairCorrelation, _ = c.store.GetToolPairCorrelation(days)
-		ps.SkillExecutionStats, _ = c.store.GetSkillExecutionStats(days)
 		ps.MemoryTypeDistribution, _ = c.store.GetMemoryTypeDistribution(days)
 		ps.CancellationReasons, _ = c.store.GetCancellationReasons(days)
 		ps.PlanComplexityVsOutcome, _ = c.store.GetPlanComplexityVsOutcome(days)
@@ -947,7 +932,6 @@ func (c *Client) GetSummarySectioned(days int, sections map[string]bool) *PulseS
 		ps.DecayEffectiveness = c.store.GetDecayEffectiveness(90)
 		ps.GraphFreshnessScoreP5 = c.store.GetGraphFreshnessScoreP5(today)
 		ps.TokenSavingsByIntent = c.store.GetTokenSavingsByIntent(days)
-		ps.SkillStatsP5 = c.store.GetSkillExecutionStatsP5(days)
 		ps.CollectorWriteErrors = c.coll.WriteErrors()
 		ps.CrossSessionReuseRate = c.store.GetCrossSessionReuseRate(days)
 		ps.ConcurrentAgentsMax = c.store.GetConcurrentAgentsMax(today)
@@ -1009,7 +993,6 @@ func (c *Client) GetSummary(days int) *PulseSummary {
 	modelCmp, _ := c.store.GetModelComparison(days)
 	errRecovery, _ := c.store.GetErrorRecoveryPatterns(days)
 	toolPairs, _ := c.store.GetToolPairCorrelation(days)
-	skillStats, _ := c.store.GetSkillExecutionStats(days)
 	memTypeDist, _ := c.store.GetMemoryTypeDistribution(days)
 	cancReasons, _ := c.store.GetCancellationReasons(days)
 	planCmplx, _ := c.store.GetPlanComplexityVsOutcome(days)
@@ -1026,7 +1009,6 @@ func (c *Client) GetSummary(days int) *PulseSummary {
 	entityQuality := c.store.GetEntityQualityScores("", 20)
 	recallWeights := c.store.GetRecallChannelWeights("")
 	effTrend := c.store.GetRecentEffectivenessTrend(14, "")
-	skillStatsP5 := c.store.GetSkillExecutionStatsP5(days)
 	tokensByIntent := c.store.GetTokenSavingsByIntent(days)
 	var sessPct types.SessionPercentiles
 	sessPct.ToolsP50, sessPct.ToolsP95, sessPct.ToolsP99 = c.store.GetToolsPerSessionPercentiles(days)
@@ -1056,7 +1038,6 @@ func (c *Client) GetSummary(days int) *PulseSummary {
 		ErrorRecoveryPatterns:       errRecovery,
 		ToolPairCorrelation:         toolPairs,
 		DiscoveryToolEffective:      c.store.GetDiscoveryToolEffectiveness(days),
-		SkillExecutionStats:         skillStats,
 		MemoryTypeDistribution:      memTypeDist,
 		CancellationReasons:         cancReasons,
 		PlanComplexityVsOutcome:     planCmplx,
@@ -1089,7 +1070,6 @@ func (c *Client) GetSummary(days int) *PulseSummary {
 		GraphFreshnessScoreP5:    c.store.GetGraphFreshnessScoreP5(today),
 		TokenSavingsByIntent:     tokensByIntent,
 		SessionPercentiles:       sessPct,
-		SkillStatsP5:             skillStatsP5,
 		CollectorWriteErrors:     c.coll.WriteErrors(),
 		CrossSessionReuseRate:    c.store.GetCrossSessionReuseRate(days),
 		ConcurrentAgentsMax:      c.store.GetConcurrentAgentsMax(today),

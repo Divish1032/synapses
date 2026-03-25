@@ -1847,21 +1847,6 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 				srv.SetPromptTemplates(allPrompts)
 			}
 		}
-		{
-			allRecipes := skills.BuiltinRecipes()
-			if homeDir, err := os.UserHomeDir(); err == nil {
-				userDir := filepath.Join(homeDir, ".synapses", "skills")
-				if rs, err := skills.LoadRecipeDir(userDir, "user"); err == nil {
-					allRecipes = append(allRecipes, rs...)
-				}
-			}
-			projectDir := filepath.Join(absPath, ".synapses", "skills")
-			if rs, err := skills.LoadRecipeDir(projectDir, "project"); err == nil {
-				allRecipes = append(allRecipes, rs...)
-			}
-			allRecipes = skills.DeduplicateRecipes(allRecipes)
-			srv.SetSkillRecipes(allRecipes)
-		}
 
 		httpHandler := mcpserver.NewStreamableHTTPServer(srv.MCPServer())
 
@@ -2018,21 +2003,6 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		if len(allPrompts) > 0 {
 			srv.SetPromptTemplates(allPrompts)
 		}
-	}
-	{
-		allRecipes := skills.BuiltinRecipes()
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			userDir := filepath.Join(homeDir, ".synapses", "skills")
-			if rs, err := skills.LoadRecipeDir(userDir, "user"); err == nil {
-				allRecipes = append(allRecipes, rs...)
-			}
-		}
-		projectDir := filepath.Join(absPath, ".synapses", "skills")
-		if rs, err := skills.LoadRecipeDir(projectDir, "project"); err == nil {
-			allRecipes = append(allRecipes, rs...)
-		}
-		allRecipes = skills.DeduplicateRecipes(allRecipes)
-		srv.SetSkillRecipes(allRecipes)
 	}
 
 	// Federation resolver: cross-project drift detection + dependency tracking.
