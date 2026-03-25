@@ -1466,19 +1466,17 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"session_init",
 			mcp.WithDescription(
-				"Single-call session bootstrap. Returns pending_tasks, project_identity, "+
-					"working_state, and recent_events in one round-trip — replacing the "+
-					"three-step startup ritual. Includes scale_guidance so agents self-tune "+
-					"their tool usage to repo size. Call this INSTEAD of the three individual tools. "+
+				"Single-call session bootstrap replacing the three-step startup ritual. "+
+					"Default scope (standard): returns pending_tasks, working_state, scale_guidance, "+
+					"and a more_available field listing richer sections you can request. "+
+					"Pass scope=\"full\" to also receive project_identity, brain_health, "+
+					"federation_health, relevant_memories, knowledge_graph, and session analytics. "+
 					"Incremental mode: when agent_id is provided and the agent has called "+
-					"session_init before, unchanged sections are skipped to save tokens "+
-					"(e.g. project_identity is omitted if the graph hasn't changed). "+
-					"Also surfaces invalidated_memories — beliefs anchored to graph nodes that "+
-					"were removed or changed since the last session. Per-agent: each agent sees "+
-					"invalidations independently. "+
-					"Lean defaults: pending_tasks.tasks is omitted when empty (no tasks exist) — "+
-					"check pending_tasks.summary instead. recent_events is omitted when empty — "+
-					"latest_event_seq is always present for event-stream subscription.",
+					"session_init before, unchanged sections are skipped to save tokens. "+
+					"Safety-critical alerts (cross_project_alerts, agent_awareness, tool_integrity_alert) "+
+					"are always included regardless of scope. "+
+					"Lean defaults: pending_tasks.tasks is omitted when empty — check pending_tasks.summary. "+
+					"recent_events is omitted when empty — latest_event_seq is always present.",
 			),
 			mcp.WithString("agent_id",
 				mcp.Description("Self-declared agent identifier. Enables incremental delivery: "+
@@ -1497,10 +1495,14 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("scope",
 				mcp.Description("Optional. Controls response verbosity. "+
-					"\"full\" (default): all sections; empty arrays omitted (pending_tasks.tasks, recent_events absent when empty — check pending_tasks.summary and latest_event_seq). "+
-					"\"quick\": tasks + working_state + scale_guidance (~500 tokens for single-repo; "+
-					"safety-critical alerts like cross_project_alerts and agent_awareness are always included). "+
-					"\"resume\": tasks with session states + working_state + relevant_memories (for task context continuity)."),
+					"\"standard\" (default): tasks + working_state + scale_guidance (~500 tokens); "+
+					"rich sections are deferred — see more_available in the response for what is available. "+
+					"\"full\": all sections; use when you need project_identity, brain_health, federation_health, "+
+					"relevant_memories, knowledge_graph, or other rich sections. Empty arrays still omitted. "+
+					"\"quick\": alias for standard (legacy). "+
+					"\"resume\": tasks with session states + working_state + relevant_memories + federation_health "+
+					"(for task context continuity across reconnects). "+
+					"Safety-critical alerts (cross_project_alerts, agent_awareness, tool_integrity_alert) are always included in all scopes."),
 			),
 		),
 		s.handleSessionInit,
@@ -1923,21 +1925,26 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"search",
 			mcp.WithDescription(
-				"Keyword search across entity names and doc comments. "+
-					"Results are ranked: exact name match > name prefix > name substring > doc comment match. "+
-					"Returns up to 25 results. Use this to find auth-related code, error handlers, etc. "+
-					"Set mode='fulltext' for FTS5 BM25 full-text search by concept ('rate limiting', 'JWT validation'). "+
-					"CamelCase names are auto-split: searching 'carve' finds 'CarveEgoGraph'.",
+				"Search across entity names and doc comments. "+
+					"mode='keyword' (default): exact/prefix/substring match — fastest, best for known names. "+
+					"mode='fulltext': FTS5 BM25 ranked full-text search by concept ('rate limiting', 'JWT validation'). "+
+					"mode='semantic': HyDE-enhanced vector search — brain generates a hypothetical code definition "+
+					"matching the query, embeds it, and searches the HNSW index. Best for concept queries "+
+					"('how does auth work', 'find the rate limiter'). Falls back to raw query embedding when brain "+
+					"is unavailable. CamelCase names are auto-split: 'carve' finds 'CarveEgoGraph'.",
 			),
 			mcp.WithString("query",
 				mcp.Required(),
 				mcp.Description("Search term (case-insensitive)."),
 			),
 			mcp.WithString("mode",
-				mcp.Description("Search mode: 'keyword' (default, exact/prefix/substring) or 'fulltext' (FTS5 BM25 ranked full-text search — NOT vector/embedding search). 'semantic' is a deprecated alias for 'fulltext' (will be removed in a future version)."),
+				mcp.Description("Search mode: 'keyword' (default), 'fulltext' (FTS5 BM25), or 'semantic' (HyDE-enhanced vector search when brain available, falls back to vector+FTS5)."),
 			),
 			mcp.WithNumber("limit",
-				mcp.Description("Maximum results to return (default 20, max 50). Only used for mode=semantic."),
+				mcp.Description("Maximum results to return (default 20, max 50). Only used for mode=semantic or mode=fulltext."),
+			),
+			mcp.WithBoolean("hyde",
+				mcp.Description("HyDE hypothesis generation (default true). Set hyde=false to skip hypothesis generation and embed the raw query directly — useful for exact-name lookups where the query is already a code identifier. Only applies when mode='semantic'."),
 			),
 		),
 		s.handleSearch,

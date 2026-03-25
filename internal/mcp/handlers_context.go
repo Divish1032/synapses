@@ -96,6 +96,9 @@ type directionalContext struct {
 	CallerCountWarning     string                        `json:"caller_count_warning,omitempty"`     // DIAG-3: set when caller count is 0 for a method and use_go_types=false
 	// R31: documentation sections linked to this code entity via DOCUMENTED_BY edges.
 	Documentation []graph.CarvedNode `json:"documentation,omitempty"`
+	// Sprint 17: knowledge graph nodes linked via RELATES_TO, CAUSED_BY, INSTANCE_OF,
+	// CONTRADICTS edges — NL-to-graph derived concepts, entities, artifacts, decisions.
+	Knowledge []graph.CarvedNode `json:"knowledge,omitempty"`
 	// BUG-EVAL-9: disambiguation — present when multiple entities share the same name
 	// and no file= hint was provided. Available in both JSON and compact formats.
 	OtherCandidates []map[string]interface{} `json:"other_candidates,omitempty"` // all matching entities (including the one shown)
@@ -1405,9 +1408,12 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	// Build sets of nodes directly called by / directly calling the root.
 	// R1: also include HANDLES edges so route nodes surface as callees.
 	// R31: also track DOCUMENTED_BY targets (section nodes documenting root).
+	// Sprint 17: also track knowledge-domain edges (RELATES_TO, CAUSED_BY, INSTANCE_OF,
+	// CONTRADICTS) so NL-to-graph knowledge nodes surface in context results.
 	calleesOfRoot := make(map[graph.NodeID]bool)
 	callersOfRoot := make(map[graph.NodeID]bool)
 	docsOfRoot := make(map[graph.NodeID]bool)
+	knowledgeOfRoot := make(map[graph.NodeID]bool)
 	crossDomainDirectEdge := make(map[graph.NodeID]graph.EdgeType)
 	for _, e := range sg.Edges {
 		switch e.Type {
@@ -1437,6 +1443,15 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 			} else if e.From == sg.Root {
 				crossDomainDirectEdge[e.To] = e.Type
 			}
+		case graph.EdgeRelatesTo, graph.EdgeCausedBy, graph.EdgeInstanceOf, graph.EdgeContradicts:
+			// Knowledge-domain edges: NL-to-graph derived relationships.
+			// Track both directions — section→knowledge and knowledge→code.
+			if e.From == sg.Root {
+				knowledgeOfRoot[e.To] = true
+			}
+			if e.To == sg.Root {
+				knowledgeOfRoot[e.From] = true
+			}
 		case graph.EdgeDeploys, graph.EdgeConsumes, graph.EdgeConfiguredBy,
 			graph.EdgeMentions, graph.EdgeManual:
 			if e.From == sg.Root {
@@ -1460,6 +1475,8 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 			dc.Root = cn.Node
 		case docsOfRoot[id]:
 			dc.Documentation = append(dc.Documentation, cn)
+		case knowledgeOfRoot[id]:
+			dc.Knowledge = append(dc.Knowledge, cn)
 		case calleesOfRoot[id]:
 			dc.Callees = append(dc.Callees, cn)
 		case callersOfRoot[id]:
@@ -1512,6 +1529,7 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	sort.Slice(dc.Callers, func(i, j int) bool { return byRelevance(dc.Callers[i], dc.Callers[j]) < 0 })
 	sort.Slice(dc.Related, func(i, j int) bool { return byRelevance(dc.Related[i], dc.Related[j]) < 0 })
 	sort.Slice(dc.Documentation, func(i, j int) bool { return byRelevance(dc.Documentation[i], dc.Documentation[j]) < 0 })
+	sort.Slice(dc.Knowledge, func(i, j int) bool { return byRelevance(dc.Knowledge[i], dc.Knowledge[j]) < 0 })
 	if dc.CrossDomain != nil {
 		sortCN := func(s []graph.CarvedNode) {
 			sort.Slice(s, func(i, j int) bool { return byRelevance(s[i], s[j]) < 0 })

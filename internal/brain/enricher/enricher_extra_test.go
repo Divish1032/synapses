@@ -3,6 +3,7 @@ package enricher
 import (
 	"context"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -275,3 +276,75 @@ func (c *captureMockClient) Available(_ context.Context) bool         { return t
 func (c *captureMockClient) ModelName() string                        { return "capture:test" }
 func (c *captureMockClient) ModelPulled(_ context.Context) bool       { return true }
 func (c *captureMockClient) PullModel(_ context.Context, _ io.Writer) error { return nil }
+
+// TestHeuristicInsight_Content verifies topology-based heuristic text for all
+// caller/callee combinations, including the FanIn > len(CallerNames) case.
+func TestHeuristicInsight_Content(t *testing.T) {
+	cases := []struct {
+		name     string
+		req      Request
+		contains []string
+	}{
+		{
+			name:     "both callers and callees",
+			req:      Request{RootName: "Store", RootType: "struct", CallerNames: []string{"A", "B"}, CalleeNames: []string{"X"}},
+			contains: []string{"Store", "struct", "2", "1"},
+		},
+		{
+			name:     "FanIn overrides len(CallerNames)",
+			req:      Request{RootName: "Router", RootType: "struct", CallerNames: []string{"A"}, FanIn: 42, CalleeNames: []string{"X"}},
+			contains: []string{"Router", "42"},
+		},
+		{
+			name:     "only callees",
+			req:      Request{RootName: "Root", RootType: "function", CalleeNames: []string{"A", "B", "C"}},
+			contains: []string{"Root", "function", "3"},
+		},
+		{
+			name:     "isolated node",
+			req:      Request{RootName: "Util", RootType: "function"},
+			contains: []string{"Util", "no recorded"},
+		},
+		{
+			name:     "empty name defaults",
+			req:      Request{},
+			contains: []string{"this entity", "entity"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := heuristicInsight(tc.req)
+			if got == "" {
+				t.Fatal("heuristicInsight returned empty string")
+			}
+			for _, want := range tc.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("heuristicInsight %q missing %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestEnrich_LLMFailure_HeuristicInsight_FanIn verifies that FanIn is used in
+// the heuristic when the LLM fails, so the reported caller count is accurate
+// even when CallerNames is capped by the maxNamesInPrompt limit.
+func TestEnrich_LLMFailure_HeuristicInsight_FanIn(t *testing.T) {
+	mock := &llm.MockClient{Err: os.ErrDeadlineExceeded}
+	st := openTestStore(t)
+	e := New(mock, st, 3*time.Second)
+
+	resp, err := e.Enrich(context.Background(), Request{
+		RootName:    "HotPath",
+		RootType:    "function",
+		CallerNames: []string{"A", "B"}, // capped subset
+		FanIn:       99,                 // true total
+		CalleeNames: []string{"X"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(resp.Insight, "99") {
+		t.Errorf("heuristic must use FanIn=99, got: %q", resp.Insight)
+	}
+}

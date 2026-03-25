@@ -23,6 +23,26 @@ const (
 	// Each ATX heading (# through ######) becomes a Section node with metadata:
 	// title, depth (1-6), body_preview (first 200 chars), body (up to 2000 chars).
 	NodeSection NodeType = "section"
+
+	// Sprint 17 #5: NL-to-graph knowledge node types.
+	// These represent entities extracted from natural-language documents that
+	// don't correspond to code entities in the AST.
+
+	// NodeConcept is an abstract idea, algorithm, pattern, or methodology
+	// extracted from documentation (e.g. "token bucket", "eventual consistency").
+	NodeConcept NodeType = "concept"
+
+	// NodeEntity is a named real-world entity extracted from documentation
+	// (e.g. a person, organization, product, or external system).
+	NodeEntity NodeType = "entity"
+
+	// NodeArtifact is a document, specification, standard, or law referenced
+	// in documentation (e.g. "RFC 7519", "OpenAPI 3.0 spec", "GDPR Article 17").
+	NodeArtifact NodeType = "artifact"
+
+	// NodeDecision is an architectural or design decision extracted from docs
+	// (e.g. from ADR-style prose, decision logs, or architecture notes).
+	NodeDecision NodeType = "decision"
 )
 
 // EdgeType classifies the relationship between two nodes.
@@ -83,6 +103,30 @@ const (
 	// Confidence 0.0–1.0 stored in edge metadata; only edges with confidence ≥ 0.6 are
 	// auto-created. BFS weight is lower than structural edges to reflect uncertainty.
 	EdgeMentions EdgeType = "MENTIONS"
+
+	// Sprint 17 #5: NL-to-graph knowledge edge types.
+	// Created during NL-to-graph extraction from natural-language documents.
+
+	// EdgeContradicts links two entities that express conflicting information
+	// (e.g. two doc sections making incompatible claims about a system).
+	// Direction: newer/conflicting entity → established entity.
+	EdgeContradicts EdgeType = "CONTRADICTS"
+
+	// EdgeCausedBy links an effect entity to its cause
+	// (e.g. "OutOfMemoryError" caused_by "LeakedConnection").
+	// Direction: effect → cause.
+	EdgeCausedBy EdgeType = "CAUSED_BY"
+
+	// EdgeInstanceOf links a specific entity to its general type or category
+	// (e.g. "Redis" instance_of "CacheSystem").
+	// Direction: specific → general.
+	EdgeInstanceOf EdgeType = "INSTANCE_OF"
+
+	// EdgeRelatesTo is the generic fallback relationship for NL-extracted edges
+	// where no more specific type applies. Used when Tier 2 classification is
+	// unavailable or returns an unrecognized type.
+	// Direction: source entity → related entity.
+	EdgeRelatesTo EdgeType = "RELATES_TO"
 )
 
 // DefaultEdgeWeights defines the semantic significance of each edge type.
@@ -125,6 +169,14 @@ var DefaultEdgeWeights = map[EdgeType]float64{
 	EdgeDocuments:    0.65,
 	// MENTIONS is synthetic (name-match heuristic) — lower weight reflects uncertainty.
 	EdgeMentions: 0.55,
+	// Sprint 17 #5: NL-to-graph knowledge edge weights.
+	// CONTRADICTS is notable: opposing information carries more signal than a generic link.
+	EdgeContradicts: 0.6,
+	// CAUSED_BY and INSTANCE_OF are structured relationship types — moderate weight.
+	EdgeCausedBy:   0.5,
+	EdgeInstanceOf: 0.4,
+	// RELATES_TO is the generic fallback — lowest NL edge weight.
+	EdgeRelatesTo: 0.3,
 }
 
 // EdgeTypeDescriptor captures the semantic metadata for a single edge type.
@@ -260,6 +312,14 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Synthetic:      true,
 	},
 	{
+		Name:           EdgeContradicts,
+		Description:    "Sprint 17 NL-to-graph: two entities express conflicting information (e.g. two doc sections with incompatible claims). Direction: newer/conflicting entity → established entity. Weight reflects the high signal value of detected contradictions.",
+		SemanticWeight: 0.6,
+		Direction:      "directed",
+		Domain:         DomainKnowledge,
+		Synthetic:      true,
+	},
+	{
 		Name:           EdgeMentions,
 		Description:    "Synthetic cross-domain name-match edge. Direction: any entity → any entity across domain boundary. Created by the name-matching background pass when two entities share the same identifier across domains. Confidence (0.0–1.0) stored in edge metadata; only edges with confidence ≥ 0.6 are auto-created.",
 		SemanticWeight: 0.55,
@@ -283,11 +343,35 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Synthetic:      true,
 	},
 	{
+		Name:           EdgeCausedBy,
+		Description:    "Sprint 17 NL-to-graph: causal relationship between entities extracted from documentation. Direction: effect → cause (e.g. OutOfMemoryError caused_by LeakedConnection). Enables root-cause traversal in knowledge graph queries.",
+		SemanticWeight: 0.5,
+		Direction:      "directed",
+		Domain:         DomainKnowledge,
+		Synthetic:      true,
+	},
+	{
+		Name:           EdgeInstanceOf,
+		Description:    "Sprint 17 NL-to-graph: type hierarchy relationship extracted from documentation. Direction: specific → general (e.g. Redis instance_of CacheSystem). Lower weight than structural relationships — type hierarchy is contextual, not runtime-critical.",
+		SemanticWeight: 0.4,
+		Direction:      "directed",
+		Domain:         DomainKnowledge,
+		Synthetic:      true,
+	},
+	{
 		Name:           EdgeLinksTo,
 		Description:    "Markdown cross-document link (R31). Direction: source document/section → target document node. Lowest semantic weight among doc edges — navigation structure, not content relationship.",
 		SemanticWeight: 0.3,
 		Direction:      "directed",
 		Domain:         DomainDocs,
+		Synthetic:      true,
+	},
+	{
+		Name:           EdgeRelatesTo,
+		Description:    "Sprint 17 NL-to-graph: generic fallback relationship between knowledge entities when no more specific type applies. Direction: source entity → related entity. Created by Tier 0 heuristic extraction; may be upgraded to a typed edge by Tier 2 LLM classification.",
+		SemanticWeight: 0.3,
+		Direction:      "directed",
+		Domain:         DomainKnowledge,
 		Synthetic:      true,
 	},
 	{
@@ -322,7 +406,8 @@ func GetEdgeTypes() []EdgeTypeDescriptor {
 // called in the BFS/PPR hot path — it classifies edge types for impact analysis.
 func IsCrossDomainEdge(et EdgeType) bool {
 	switch et {
-	case EdgeDeploys, EdgeConsumes, EdgeConfiguredBy, EdgeDocuments, EdgeMentions, EdgeManual:
+	case EdgeDeploys, EdgeConsumes, EdgeConfiguredBy, EdgeDocuments, EdgeMentions, EdgeManual,
+		EdgeContradicts, EdgeCausedBy, EdgeInstanceOf, EdgeRelatesTo:
 		return true
 	default:
 		return false

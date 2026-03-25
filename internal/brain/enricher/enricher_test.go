@@ -45,8 +45,9 @@ func TestEnrich_Success(t *testing.T) {
 }
 
 func TestEnrich_LLMFailure_ReturnsDeterministicFields(t *testing.T) {
-	// After R33: Enrich is fail-silent on LLM errors. The deterministic pass
-	// always runs and returns Phase + ComplexityScore even when the LLM is down.
+	// Enrich is fail-silent on LLM errors. The deterministic pass always runs
+	// and returns Phase + ComplexityScore. The heuristic fallback also populates
+	// Insight so get_context always delivers a non-empty Insight to agents.
 	mock := &llm.MockClient{Err: os.ErrDeadlineExceeded}
 	st := newTestStore(t)
 	e := New(mock, st, 3*time.Second)
@@ -60,8 +61,9 @@ func TestEnrich_LLMFailure_ReturnsDeterministicFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil error (fail-silent), got: %v", err)
 	}
-	if resp.Insight != "" {
-		t.Error("expected empty insight when LLM fails")
+	// Heuristic fallback: Insight must be non-empty even when LLM fails.
+	if resp.Insight == "" {
+		t.Error("expected non-empty heuristic insight when LLM fails")
 	}
 	if !resp.DeterministicHit {
 		t.Error("expected DeterministicHit=true even when LLM fails")

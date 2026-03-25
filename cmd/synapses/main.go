@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -368,6 +369,7 @@ func cmdStartDirect(args []string) error {
 
 	// Brain — now in-process; no external sidecar or port required.
 	brainCli := brain.NewInProcess(cfg.Brain.ToBrainConfig())
+	defer brainCli.Close() // stops SystemPulse + Scheduler goroutines on graceful shutdown
 	if cfg.Brain.Enabled {
 		if model, _ := brainCli.HealthCheck(context.Background()); model != "" {
 			logutil.Info("synapses: brain enabled in-process (%s)\n", model)
@@ -520,8 +522,14 @@ func cmdStartDirect(args []string) error {
 					fw.SetCrossProjectTracker(fedTracker)
 				}
 				// Hot-reload synapses.json: reconnect brain and federation when config changes.
+				// activeBrain tracks the current brain client so each reload can close the
+				// previous instance, stopping its background goroutines (SystemPulse sampler
+				// + Scheduler drain) and releasing LLM + SQLite resources.
+				var activeBrain atomic.Pointer[brain.Client]
+				activeBrain.Store(brainCli)
 				fw.SetConfigChangeHandler(func(newCfg *config.Config) {
 					newBrain := brain.NewInProcess(newCfg.Brain.ToBrainConfig())
+					oldBrain := activeBrain.Swap(newBrain)
 					srv.SetBrainClient(newBrain)
 					fw.SetBrainClient(newBrain)
 					fw.SetNameMatcher(namematcher.New(newBrain))
@@ -529,6 +537,9 @@ func cmdStartDirect(args []string) error {
 						fedTracker.Rebuild(newCfg.Federation)
 					}
 					logutil.Info("synapses: brain reloaded (enabled=%v)\n", newCfg.Brain.Enabled)
+					// Close old brain after wiring in the new one so no new tasks are
+					// submitted to it. Async to avoid blocking the config-change callback.
+					go oldBrain.Close()
 				})
 				logutil.Info("synapses: watching %s for changes\n", absPath)
 			}

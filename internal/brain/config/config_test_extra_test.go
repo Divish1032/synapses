@@ -155,9 +155,8 @@ func TestApplyDefaults_ModelIngestFallsToFastModel(t *testing.T) {
 	}
 }
 
-func TestApplyDefaults_ModelArchivistDefaultsToQwen35(t *testing.T) {
-	// Archivist always defaults to qwen3.5:2b independently of ModelOrchestrate.
-	// Navigator and Archivist are base-model tiers; they must not inherit FT model tags.
+func TestApplyDefaults_ModelArchivistDefaultsToBaseModel(t *testing.T) {
+	// Archivist defaults to BaseModelTag() — qwen3.5:2b when no mode is set.
 	path := writePartialConfig(t, map[string]interface{}{
 		"model_orchestrate": "myorch:3b",
 		"model_archivist":   "",
@@ -168,6 +167,21 @@ func TestApplyDefaults_ModelArchivistDefaultsToQwen35(t *testing.T) {
 	}
 	if cfg.ModelArchivist != "qwen3.5:2b" {
 		t.Errorf("ModelArchivist = %q after applyDefaults, want %q", cfg.ModelArchivist, "qwen3.5:2b")
+	}
+}
+
+func TestApplyDefaults_ModelArchivistUsesBaseModelForMode(t *testing.T) {
+	// When intelligence_mode=standard, Archivist defaults to qwen3.5:4b.
+	path := writePartialConfig(t, map[string]interface{}{
+		"intelligence_mode": "standard",
+		"model_archivist":   "",
+	})
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if cfg.ModelArchivist != "qwen3.5:4b" {
+		t.Errorf("ModelArchivist = %q after applyDefaults with standard mode, want qwen3.5:4b", cfg.ModelArchivist)
 	}
 }
 
@@ -424,6 +438,47 @@ func TestApplyDefaults_LocalBackend_SetsHFRepo(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults_HFFilename_ModeAware(t *testing.T) {
+	// No mode → 2b filename.
+	path := writePartialConfig(t, map[string]interface{}{"hf_filename": ""})
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if cfg.HFFilename != "qwen3.5-2b-instruct-q4_k_m.gguf" {
+		t.Errorf("HFFilename = %q, want 2b variant", cfg.HFFilename)
+	}
+
+	// Standard mode → 4b filename.
+	path = writePartialConfig(t, map[string]interface{}{
+		"intelligence_mode": "standard",
+		"hf_filename":       "",
+	})
+	cfg, err = config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if cfg.HFFilename != "qwen3.5-4b-instruct-q4_k_m.gguf" {
+		t.Errorf("HFFilename = %q with standard mode, want 4b variant", cfg.HFFilename)
+	}
+}
+
+func TestApplyDefaults_HFRepo_ModeAware(t *testing.T) {
+	// Standard mode + local backend → 4b repo.
+	path := writePartialConfig(t, map[string]interface{}{
+		"backend":           "local",
+		"intelligence_mode": "standard",
+		"hf_repo":           "",
+	})
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if cfg.HFRepo != "Qwen/Qwen3.5-4B-Instruct-GGUF" {
+		t.Errorf("HFRepo = %q with standard mode, want Qwen3.5-4B repo", cfg.HFRepo)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DefaultConfig — fields that must always be non-zero (regression for Bug 2+3)
 // ---------------------------------------------------------------------------
@@ -433,8 +488,41 @@ func TestDefaultConfig_ModelArchivistIsSet(t *testing.T) {
 	if cfg.ModelArchivist == "" {
 		t.Error("DefaultConfig().ModelArchivist must not be empty — Archivist client would call Ollama with empty model string")
 	}
+	// DefaultConfig has no IntelligenceMode → BaseModelTag() returns Model = "qwen3.5:2b".
 	if cfg.ModelArchivist != "qwen3.5:2b" {
 		t.Errorf("DefaultConfig().ModelArchivist = %q, want qwen3.5:2b", cfg.ModelArchivist)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BaseModelTag — returns raw Ollama model tag for the current intelligence mode
+// ---------------------------------------------------------------------------
+
+func TestBaseModelTag_PerMode(t *testing.T) {
+	cases := []struct {
+		mode config.IntelligenceMode
+		want string
+	}{
+		{config.ModeOptimal, "qwen3.5:2b"},
+		{config.ModeStandard, "qwen3.5:4b"},
+		{config.ModeFull, "qwen3.5:4b"},
+		{"", "qwen3.5:2b"}, // no mode → falls back to cfg.Model default
+	}
+	for _, tc := range cases {
+		cfg := config.DefaultConfig()
+		cfg.IntelligenceMode = tc.mode
+		if got := cfg.BaseModelTag(); got != tc.want {
+			t.Errorf("mode=%q BaseModelTag() = %q, want %q", tc.mode, got, tc.want)
+		}
+	}
+}
+
+func TestBaseModelTag_LegacyCustomModel(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Model = "custom:7b"
+	// No intelligence mode → BaseModelTag returns cfg.Model.
+	if got := cfg.BaseModelTag(); got != "custom:7b" {
+		t.Errorf("BaseModelTag() = %q, want custom:7b", got)
 	}
 }
 
@@ -449,8 +537,8 @@ func TestDefaultConfig_MemorizeIsTrue(t *testing.T) {
 // AutoConfigureModels — IntelligenceMode paths (Optimal / Standard / Full)
 // ---------------------------------------------------------------------------
 
-// All modes use synapses/* Ollama identities backed by base qwen3.5:2b.
-// Modes differ only in keep_alive, not model tags.
+// All modes use synapses/* Ollama identities. Optimal is backed by qwen3.5:2b;
+// Standard and Full are backed by qwen3.5:4b (Q4_K_M). Modes also differ in keep_alive.
 
 func TestAutoConfigureModels_ModeOptimal(t *testing.T) {
 	cfg := config.DefaultConfig()
@@ -521,22 +609,55 @@ func TestAutoConfigureModels_ModeFull(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// KeepAliveValues — all modes including guardian (regression for Bug 1)
+// KeepAlive / KeepAliveValues — per-mode keep_alive (Sprint 17 #3)
 // ---------------------------------------------------------------------------
 
-// All modes return keep_alive=-1 (pinned) because all identities share the
-// same qwen3.5:2b weights. Ollama treats them as one loaded model — evicting
-// one evicts all. Verified via /api/ps testing.
-func TestKeepAliveValues_AllModesPinned(t *testing.T) {
-	for _, mode := range []config.IntelligenceMode{config.ModeOptimal, config.ModeStandard, config.ModeFull, ""} {
+// All 5 Ollama identities share the same base model weights so a single
+// keep_alive value applies. Per-mode policy:
+//   - optimal  → 120s  (2-min eviction on 8 GB machines)
+//   - standard → 300s  (5-min eviction on 16 GB machines)
+//   - full     → -1    (pinned on 32 GB+ machines)
+//   - ""       → -1    (backward-compatible default)
+func TestKeepAlive_PerMode(t *testing.T) {
+	cases := []struct {
+		mode config.IntelligenceMode
+		want int
+	}{
+		{config.ModeOptimal, 120},
+		{config.ModeStandard, 300},
+		{config.ModeFull, -1},
+		{"", -1},
+	}
+	for _, tc := range cases {
 		cfg := config.DefaultConfig()
-		cfg.IntelligenceMode = mode
+		cfg.IntelligenceMode = tc.mode
+		if got := cfg.KeepAlive(); got != tc.want {
+			t.Errorf("mode=%q KeepAlive() = %d, want %d", tc.mode, got, tc.want)
+		}
+	}
+}
+
+// KeepAliveValues delegates to KeepAlive() — all four returned values must
+// equal the single per-mode keep_alive.
+func TestKeepAliveValues_DelegatesPerMode(t *testing.T) {
+	cases := []struct {
+		mode config.IntelligenceMode
+		want int
+	}{
+		{config.ModeOptimal, 120},
+		{config.ModeStandard, 300},
+		{config.ModeFull, -1},
+		{"", -1},
+	}
+	for _, tc := range cases {
+		cfg := config.DefaultConfig()
+		cfg.IntelligenceMode = tc.mode
 		kaG, kaE, kaO, kaA := cfg.KeepAliveValues()
 		for name, v := range map[string]int{
 			"guardian": kaG, "enrich": kaE, "orchestrate": kaO, "archivist": kaA,
 		} {
-			if v != -1 {
-				t.Errorf("mode=%q %s = %d, want -1 (shared weights → always pinned)", mode, name, v)
+			if v != tc.want {
+				t.Errorf("mode=%q %s = %d, want %d", tc.mode, name, v, tc.want)
 			}
 		}
 	}

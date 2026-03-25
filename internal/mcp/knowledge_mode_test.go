@@ -35,6 +35,7 @@ func TestKnowledgeMode_SessionInit(t *testing.T) {
 
 	res, err := srv.handleSessionInit(context.Background(), callTool(map[string]any{
 		"agent_id": "marketing-agent",
+		"scope":    "full",
 	}))
 	m := mustResult(t, res, err)
 

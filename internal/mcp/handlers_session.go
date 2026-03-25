@@ -301,20 +301,21 @@ func (s *Server) handleSessionInit(
 	intent, _ := req.GetArguments()["intent"].(string)
 	agentVersion, _ := req.GetArguments()["agent_version"].(string)
 	// scope controls response verbosity:
-	//   "full"   (default) — all sections, backward compatible
-	//   "quick"  — tasks + working_state + scale_guidance only (~500 tokens)
-	//   "resume" — tasks with session states + working_state + stale hints only
+	//   "standard" (default) — tasks + working_state + scale_guidance (~500 tokens); lists deferred sections in more_available
+	//   "full"               — all sections, backward compatible
+	//   "quick"              — alias for standard (legacy; same lean response)
+	//   "resume"             — tasks with session states + working_state + stale hints only
 	scope, _ := req.GetArguments()["scope"].(string)
 	if scope == "" {
-		scope = "full"
+		scope = "standard"
 	}
-	validScopes := map[string]bool{"full": true, "quick": true, "resume": true}
+	validScopes := map[string]bool{"full": true, "quick": true, "resume": true, "standard": true}
 	scopeWarning := ""
 	if !validScopes[scope] {
-		scopeWarning = fmt.Sprintf("unknown scope %q — defaulting to 'full'. Valid values: full, quick, resume.", scope)
-		scope = "full"
+		scopeWarning = fmt.Sprintf("unknown scope %q — defaulting to 'standard'. Valid values: full, standard, quick, resume.", scope)
+		scope = "standard"
 	}
-	quickMode := scope == "quick"
+	quickMode := scope == "quick" || scope == "standard"
 	resumeMode := scope == "resume"
 	s.upsertAgentIfNeeded(agentID)
 	// Phase 6: reset component health tracker for this agent on new session
@@ -549,6 +550,7 @@ func (s *Server) handleSessionInit(
 				summary = fmt.Sprintf("%d task(s) pending/in-progress", len(tasks))
 			}
 			pendingSection = map[string]interface{}{
+				"count":    len(tasks),
 				"summary":  summary,
 				"reminder": "Call update_task(id, 'in_progress') before starting a task and update_task(id, 'done', notes) immediately when finished. Never batch completions.",
 			}
@@ -1618,6 +1620,93 @@ func (s *Server) handleSessionInit(
 				"actual":   current,
 			}
 		}
+	}
+
+	// Progressive disclosure: list sections suppressed in this scope so agents
+	// know what to request with scope="full".
+	//
+	// Sections suppressed per scope:
+	//   standard/quick (!quickMode&&!resumeMode AND !quickMode guards fire):
+	//     all 12 rich sections are deferred.
+	//   resume (!quickMode&&!resumeMode fires, !quickMode does NOT fire):
+	//     only the 8 sections guarded by !quickMode&&!resumeMode are deferred;
+	//     federation_health, relevant_memories, previous_session_work, knowledge_graph
+	//     are already present in resume mode.
+	if quickMode || resumeMode {
+		var deferred []string
+		if quickMode {
+			// standard/quick: ALL rich sections are suppressed.
+			deferred = []string{
+				"project_identity", "session_hint", "recent_events",
+				"sidecars", "brain_health", "federation_health",
+				"relevant_memories", "previous_session_work", "knowledge_graph",
+				"daemon_health", "context_effectiveness_hints", "session_effectiveness_trend",
+			}
+		} else {
+			// resume: only sections guarded by !quickMode&&!resumeMode are suppressed.
+			// federation_health, relevant_memories, previous_session_work, knowledge_graph
+			// are NOT in this list because they ARE present in resume mode.
+			deferred = []string{
+				"project_identity", "session_hint", "recent_events",
+				"sidecars", "brain_health",
+				"daemon_health", "context_effectiveness_hints", "session_effectiveness_trend",
+			}
+		}
+		resp["more_available"] = map[string]interface{}{
+			"sections": deferred,
+			"hint":     "Pass scope=\"full\" to session_init to receive all sections.",
+		}
+	}
+
+	// _summary: one-line template-based digest — no LLM, negligible tokens.
+	// Helps agents scan response content without parsing every nested field.
+	// Format: "{N} pending tasks, {M} recent changes, {V} violations. {federation_status}."
+	{
+		taskCount := 0
+		if pt, ok := resp["pending_tasks"].(map[string]interface{}); ok {
+			if c, ok := pt["count"].(int); ok {
+				taskCount = c
+			}
+		}
+		branch := ""
+		if ws, ok := resp["working_state"].(map[string]interface{}); ok {
+			if b, ok := ws["branch"].(string); ok {
+				branch = b
+			}
+		}
+		recentChangeCount := 0
+		if re, ok := resp["recent_events"].(map[string]interface{}); ok {
+			if c, ok := re["count"].(int); ok {
+				recentChangeCount = c
+			}
+		}
+		violationCount := 0
+		if sa, ok := resp["safety_alerts"].(map[string]interface{}); ok {
+			if v, ok := sa["violations"].([]interface{}); ok {
+				violationCount = len(v)
+			}
+		}
+		var parts []string
+		parts = append(parts, fmt.Sprintf("%d pending task(s)", taskCount))
+		if recentChangeCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d recent change(s)", recentChangeCount))
+		}
+		if violationCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d violation(s)", violationCount))
+		}
+		if branch != "" {
+			parts = append(parts, fmt.Sprintf("branch=%s", branch))
+		}
+		if agentID != "" {
+			parts = append(parts, fmt.Sprintf("agent=%s", agentID))
+		}
+		// Federation status
+		if fed, ok := resp["federation_health"].(map[string]interface{}); ok {
+			if status, ok := fed["status"].(string); ok && status != "" {
+				parts = append(parts, fmt.Sprintf("federation=%s", status))
+			}
+		}
+		resp["_summary"] = strings.Join(parts, "; ")
 	}
 
 	// R6: response_tokens + context_window_pct — measure token cost of this
