@@ -96,6 +96,43 @@ var restSessionCounter atomic.Int64
 // per-session MCP rate limits). 50 requests/sec burst, refills at 10/sec.
 var restRateLimiter = newTokenBucket(10, 50)
 
+// perCallerBuckets holds a per-RemoteAddr token bucket as a secondary
+// rate limiter. Entries idle >60s are evicted lazily on each access.
+var perCallerBuckets sync.Map // key: string (RemoteAddr), value: *perCallerEntry
+
+type perCallerEntry struct {
+	bucket    *tokenBucket
+	lastSeen  time.Time
+	mu        sync.Mutex
+}
+
+// callerBucket returns (or creates) the per-RemoteAddr bucket for addr,
+// evicting entries that have been idle for more than 60 seconds.
+func callerBucket(addr string) *tokenBucket {
+	now := time.Now()
+	v, _ := perCallerBuckets.LoadOrStore(addr, &perCallerEntry{
+		bucket:   newTokenBucket(5, 20),
+		lastSeen: now,
+	})
+	entry := v.(*perCallerEntry)
+	entry.mu.Lock()
+	entry.lastSeen = now
+	entry.mu.Unlock()
+
+	// Lazy eviction: sweep for entries idle >60s.
+	perCallerBuckets.Range(func(k, val interface{}) bool {
+		e := val.(*perCallerEntry)
+		e.mu.Lock()
+		idle := now.Sub(e.lastSeen)
+		e.mu.Unlock()
+		if idle > 60*time.Second {
+			perCallerBuckets.Delete(k)
+		}
+		return true
+	})
+	return entry.bucket
+}
+
 // adminProjectsRateLimiter rate-limits POST/DELETE /api/admin/projects (2/sec burst 10).
 var adminProjectsRateLimiter = newTokenBucket(2, 10)
 
@@ -495,7 +532,16 @@ func spaHandler(root http.FileSystem) http.Handler {
 // Extracted from cmdDaemonServe to enable HTTP-level testing.
 func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectInstance, error), wg *sync.WaitGroup) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Global rate limit — independent of per-session MCP limits.
+		// Per-caller rate limit (20 burst, 5/sec refill) applied first to
+		// prevent a single caller from starving others on the shared bucket.
+		if !callerBucket(r.RemoteAddr).Allow() {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]string{"error": "rate limit exceeded, try again later"}) //nolint:errcheck
+			return
+		}
+		// Global rate limit — coarse abuse guard across all callers.
 		if !restRateLimiter.Allow() {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Retry-After", "1")
