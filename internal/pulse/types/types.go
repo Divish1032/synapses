@@ -445,16 +445,18 @@ type SessionEffectiveness struct {
 	TokensSaved        int     `json:"tokens_saved"`
 	ToolCalls          int     `json:"tool_calls"`
 	DurationMs         int64   `json:"duration_ms"`
+	KnowledgeGrowth    int     `json:"knowledge_growth"`
 	CreatedAt          string  `json:"created_at"`
 }
 
 // DailyEffectiveness holds daily aggregated effectiveness for trend charts (Phase 5 Item 13).
 type DailyEffectiveness struct {
-	Day                string  `json:"day"`
-	AvgContextHitRate  float64 `json:"avg_context_hit_rate"`
-	AvgTaskCompletion  float64 `json:"avg_task_completion"`
-	TotalTokensSaved   int     `json:"total_tokens_saved"`
-	Sessions           int     `json:"sessions"`
+	Day                  string  `json:"day"`
+	AvgContextHitRate    float64 `json:"avg_context_hit_rate"`
+	AvgTaskCompletion    float64 `json:"avg_task_completion"`
+	TotalTokensSaved     int     `json:"total_tokens_saved"`
+	Sessions             int     `json:"sessions"`
+	TotalKnowledgeGrowth int     `json:"total_knowledge_growth"`
 }
 
 // WeeklyEfficiency holds per-week agent efficiency metrics (SA-B2).

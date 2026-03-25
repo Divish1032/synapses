@@ -1060,6 +1060,8 @@ func (s *Store) migrateColumns() error {
 		// DEFAULT 0.0 means pre-existing rows (before this migration) have neutral weight;
 		// all new rows will carry the explicit weight set by the emitting caller.
 		`ALTER TABLE outcome_signals ADD COLUMN signal_weight REAL NOT NULL DEFAULT 0.0`,
+		// Sprint 18 #7: knowledge growth (memories created per session) for productivity dashboard.
+		`ALTER TABLE session_effectiveness ADD COLUMN knowledge_growth INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range alterStmts {
 		if _, err := s.execer().Exec(stmt); err != nil {
@@ -1635,6 +1637,7 @@ CREATE TABLE IF NOT EXISTS session_effectiveness (
     tokens_saved        INTEGER NOT NULL DEFAULT 0,
     tool_calls          INTEGER NOT NULL DEFAULT 0,
     duration_ms         INTEGER NOT NULL DEFAULT 0,
+    knowledge_growth    INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_seff_agent ON session_effectiveness(agent_id);
@@ -2512,9 +2515,9 @@ func (s *Store) InsertSessionEffectiveness(e pulsetypes.SessionEffectiveness) er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.execer().Exec(
-		`INSERT OR REPLACE INTO session_effectiveness (session_id, agent_id, project_id, context_hit_rate, task_completion_rate, tokens_saved, tool_calls, duration_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.SessionID, e.AgentID, e.ProjectID, e.ContextHitRate, e.TaskCompletionRate, e.TokensSaved, e.ToolCalls, e.DurationMs)
+		`INSERT OR REPLACE INTO session_effectiveness (session_id, agent_id, project_id, context_hit_rate, task_completion_rate, tokens_saved, tool_calls, duration_ms, knowledge_growth)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.SessionID, e.AgentID, e.ProjectID, e.ContextHitRate, e.TaskCompletionRate, e.TokensSaved, e.ToolCalls, e.DurationMs, e.KnowledgeGrowth)
 	return err
 }
 
@@ -2955,10 +2958,10 @@ func (s *Store) GetSessionDeliveryStats(sessionID string) (total, firstFetch, to
 // GetSessionEffectivenessP5 returns effectiveness data for a session (Item 13).
 func (s *Store) GetSessionEffectivenessP5(sessionID string) *pulsetypes.SessionEffectiveness {
 	row := s.execer().QueryRow(
-		`SELECT session_id, agent_id, project_id, context_hit_rate, task_completion_rate, tokens_saved, tool_calls, duration_ms, created_at
+		`SELECT session_id, agent_id, project_id, context_hit_rate, task_completion_rate, tokens_saved, tool_calls, duration_ms, knowledge_growth, created_at
 		 FROM session_effectiveness WHERE session_id = ?`, sessionID)
 	var e pulsetypes.SessionEffectiveness
-	if err := row.Scan(&e.SessionID, &e.AgentID, &e.ProjectID, &e.ContextHitRate, &e.TaskCompletionRate, &e.TokensSaved, &e.ToolCalls, &e.DurationMs, &e.CreatedAt); err != nil {
+	if err := row.Scan(&e.SessionID, &e.AgentID, &e.ProjectID, &e.ContextHitRate, &e.TaskCompletionRate, &e.TokensSaved, &e.ToolCalls, &e.DurationMs, &e.KnowledgeGrowth, &e.CreatedAt); err != nil {
 		return nil
 	}
 	return &e
@@ -2967,7 +2970,7 @@ func (s *Store) GetSessionEffectivenessP5(sessionID string) *pulsetypes.SessionE
 // GetRecentEffectivenessTrend returns daily effectiveness for the last N days (Item 13).
 func (s *Store) GetRecentEffectivenessTrend(days int, agentID string) []pulsetypes.DailyEffectiveness {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	q := `SELECT date(created_at), AVG(context_hit_rate), AVG(task_completion_rate), SUM(tokens_saved), COUNT(*)
+	q := `SELECT date(created_at), AVG(context_hit_rate), AVG(task_completion_rate), SUM(tokens_saved), COUNT(*), SUM(knowledge_growth)
 		FROM session_effectiveness WHERE created_at >= ?`
 	args := []interface{}{since}
 	if agentID != "" {
@@ -2985,7 +2988,7 @@ func (s *Store) GetRecentEffectivenessTrend(days int, agentID string) []pulsetyp
 	var out []pulsetypes.DailyEffectiveness
 	for rows.Next() {
 		var d pulsetypes.DailyEffectiveness
-		rows.Scan(&d.Day, &d.AvgContextHitRate, &d.AvgTaskCompletion, &d.TotalTokensSaved, &d.Sessions)
+		rows.Scan(&d.Day, &d.AvgContextHitRate, &d.AvgTaskCompletion, &d.TotalTokensSaved, &d.Sessions, &d.TotalKnowledgeGrowth)
 		out = append(out, d)
 	}
 	if rows.Err() != nil {
