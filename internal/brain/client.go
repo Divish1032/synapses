@@ -10,6 +10,7 @@ import (
 	"context"
 	"io"
 	"strings"
+	"time"
 
 	brainconfig "github.com/SynapsesOS/synapses/internal/brain/config"
 )
@@ -169,6 +170,41 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 		return "", nil
 	}
 	return c.brain.Generate(ctx, prompt)
+}
+
+// hydeTimeout is the hard deadline for HyDE hypothesis generation. P0 (user-waiting)
+// tasks must not block the search response for more than this duration.
+const hydeTimeout = 500 * time.Millisecond
+
+// GenerateHypothetical generates a hypothetical code entity definition for
+// HyDE-enhanced semantic search (Hypothetical Document Embeddings).
+//
+// The hypothesis is a realistic function signature or type definition that the
+// LLM imagines would match the user's query. Embedding the hypothesis instead of
+// the raw query bridges the vocabulary gap between natural-language queries and
+// code entity names in the HNSW index.
+//
+// Returns "" when:
+//   - Brain is unavailable (NullBrain / brain disabled).
+//   - System health warrants degradation (ShouldDegrade returns true).
+//   - The 500 ms P0 timeout fires (LLM too slow — caller falls back to raw query).
+//   - The LLM returns an empty response.
+//
+// The caller should embed the returned hypothesis and, on empty return, fall back
+// to embedding the original query unchanged.
+func (c *Client) GenerateHypothetical(ctx context.Context, query string) string {
+	if c.scheduler.ShouldDegrade() {
+		return ""
+	}
+	hydeCtx, cancel := context.WithTimeout(ctx, hydeTimeout)
+	defer cancel()
+	prompt := "Write a realistic function signature or type definition for code that answers: " +
+		`"` + query + `". Output only the code definition, no explanation.`
+	hyp, err := c.brain.Generate(hydeCtx, prompt)
+	if err != nil || hyp == "" {
+		return ""
+	}
+	return strings.TrimSpace(hyp)
 }
 
 // LogDecision records a reasoning decision. Fire-and-forget.

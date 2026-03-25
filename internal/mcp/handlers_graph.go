@@ -1018,7 +1018,10 @@ func (s *Server) handleSearch(
 		s.trackContextCall(agentIDSrch, "search:"+query)
 	}
 
-	// mode=fulltext (or legacy alias "semantic") delegates to FTS5 BM25 search.
+	// mode=semantic → HyDE-enhanced vector search (brain generates a hypothesis,
+	// we embed the hypothesis and search HNSW against it). Falls back to raw
+	// query embedding when brain is unavailable or the 500 ms timeout fires.
+	// mode=fulltext → FTS5 BM25 full-text search (no HyDE, no vector path).
 	if mode := stringArg(req, "mode"); mode == "semantic" || mode == "fulltext" {
 		return s.handleSemanticSearch(ctx, req)
 	}
@@ -1490,9 +1493,38 @@ func (s *Server) handleSemanticSearch(
 		limit = 20
 	}
 
+	mode := stringArg(req, "mode")
+
+	// --- HyDE: Hypothetical Document Embeddings (mode=semantic + brain available) ---
+	// When the user requests semantic search and the brain is online, generate a
+	// hypothetical code entity definition that "answers" the query. Embedding the
+	// hypothesis instead of the raw query bridges the vocabulary gap between natural-
+	// language queries and code names in the HNSW index.
+	//
+	// hyde=false opt-out: skip hypothesis generation for exact-name queries where
+	// the raw name is already the best search signal.
+	//
+	// Fallback contract: if the brain is unavailable, ShouldDegrade fires, or the
+	// 500 ms timeout expires, hydeHypothesis stays "" and we fall through to
+	// embedding the raw query unchanged — zero degradation visible to the caller.
+	var hydeHypothesis string
+	hydeSkipped := false // true when hyde=false was explicitly passed
+	if mode == "semantic" && s.brainClient != nil {
+		hydeParam, hydeParamSet := req.GetArguments()["hyde"]
+		if hydeParamSet {
+			// Explicit hyde=false bypasses hypothesis generation entirely.
+			if b, ok := hydeParam.(bool); ok && !b {
+				hydeSkipped = true
+			}
+		}
+		if !hydeSkipped {
+			hydeHypothesis = s.brainClient.GenerateHypothetical(ctx, query)
+		}
+	}
+
 	// --- Vector path (when embedding_endpoint is configured) ---
-	// Embed the query with a 2s timeout so a slow Ollama never blocks the agent.
-	// On any error, silently fall through to FTS5-only results.
+	// Embed the query (or the HyDE hypothesis) with a 2s timeout so a slow Ollama
+	// never blocks the agent. On any error, silently fall through to FTS5-only.
 	var vectorResults []store.SearchResult
 	searchMode := "fts5_bm25"
 	// embedFailed is true when the embed API call itself errored (timeout, endpoint
@@ -1500,8 +1532,13 @@ func (s *Server) handleSemanticSearch(
 	// Used below to produce an accurate fallback_reason for the caller.
 	var embedFailed bool
 	if s.embedClient != nil {
+		// Prefer embedding the HyDE hypothesis; fall back to raw query.
+		embedTarget := query
+		if hydeHypothesis != "" {
+			embedTarget = hydeHypothesis
+		}
 		embedCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		queryVec, embedErr := s.embedClient.Embed(embedCtx, query)
+		queryVec, embedErr := s.embedClient.Embed(embedCtx, embedTarget)
 		cancel()
 		if embedErr != nil || len(queryVec) == 0 {
 			embedFailed = true
@@ -1537,10 +1574,20 @@ func (s *Server) handleSemanticSearch(
 			results = results[:limit]
 		}
 		if len(vectorResults) > 0 {
-			searchMode = "hybrid_vector+fts5"
+			if hydeHypothesis != "" {
+				searchMode = "hybrid_vector+fts5+hyde"
+			} else {
+				searchMode = "hybrid_vector+fts5"
+			}
 		}
 	} else {
 		results = ftsResults
+	}
+
+	// When HyDE was used in the vector-only path (no FTS5 supplement needed),
+	// tag the search_mode to reflect hypothesis embedding was applied.
+	if hydeHypothesis != "" && searchMode == "vector_cosine" {
+		searchMode = "vector_cosine+hyde"
 	}
 
 	resp := map[string]interface{}{
@@ -1548,6 +1595,18 @@ func (s *Server) handleSemanticSearch(
 		"count":       len(results),
 		"results":     results,
 		"search_mode": searchMode,
+	}
+
+	// Surface HyDE metadata so agents understand how results were ranked.
+	// hyde_hypothesis is truncated to 200 chars — enough for debugging without
+	// bloating the response when the LLM generates a long signature.
+	if hydeHypothesis != "" {
+		h := hydeHypothesis
+		if len([]rune(h)) > 200 {
+			rr := []rune(h)
+			h = string(rr[:200]) + "…"
+		}
+		resp["hyde_hypothesis"] = h
 	}
 
 	embeddingCount := s.store.EmbeddingCount()
@@ -1558,13 +1617,13 @@ func (s *Server) handleSemanticSearch(
 			resp["note"] = fmt.Sprintf("Vector index partial (%d nodes embedded). Results blended from cosine+FTS5 as more embeddings complete.", embeddingCount)
 		}
 	}
-	// Issue 1: when mode="semantic" was explicitly requested but we fell back to
-	// FTS5, surface a fallback_reason so the agent knows semantic ranking was not used.
+	// When mode="semantic" was explicitly requested but we fell back to FTS5,
+	// surface a fallback_reason so the agent knows semantic ranking was not used.
 	// Three distinct failure modes produce different diagnostics:
 	//   1. embedClient nil     → embedder not configured
 	//   2. embedFailed=true    → embed API call errored (timeout / endpoint down)
 	//   3. neither             → embed worked but the vector index had no matches
-	if mode := stringArg(req, "mode"); mode == "semantic" && searchMode == "fts5_bm25" {
+	if mode == "semantic" && searchMode == "fts5_bm25" {
 		if s.embedClient == nil {
 			resp["fallback_reason"] = "semantic unavailable — embedder not ready (call session_init to check embeddings status)"
 		} else if embedFailed {

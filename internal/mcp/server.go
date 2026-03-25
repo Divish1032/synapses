@@ -1912,21 +1912,26 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"search",
 			mcp.WithDescription(
-				"Keyword search across entity names and doc comments. "+
-					"Results are ranked: exact name match > name prefix > name substring > doc comment match. "+
-					"Returns up to 25 results. Use this to find auth-related code, error handlers, etc. "+
-					"Set mode='fulltext' for FTS5 BM25 full-text search by concept ('rate limiting', 'JWT validation'). "+
-					"CamelCase names are auto-split: searching 'carve' finds 'CarveEgoGraph'.",
+				"Search across entity names and doc comments. "+
+					"mode='keyword' (default): exact/prefix/substring match — fastest, best for known names. "+
+					"mode='fulltext': FTS5 BM25 ranked full-text search by concept ('rate limiting', 'JWT validation'). "+
+					"mode='semantic': HyDE-enhanced vector search — brain generates a hypothetical code definition "+
+					"matching the query, embeds it, and searches the HNSW index. Best for concept queries "+
+					"('how does auth work', 'find the rate limiter'). Falls back to raw query embedding when brain "+
+					"is unavailable. CamelCase names are auto-split: 'carve' finds 'CarveEgoGraph'.",
 			),
 			mcp.WithString("query",
 				mcp.Required(),
 				mcp.Description("Search term (case-insensitive)."),
 			),
 			mcp.WithString("mode",
-				mcp.Description("Search mode: 'keyword' (default, exact/prefix/substring) or 'fulltext' (FTS5 BM25 ranked full-text search — NOT vector/embedding search). 'semantic' is a deprecated alias for 'fulltext' (will be removed in a future version)."),
+				mcp.Description("Search mode: 'keyword' (default), 'fulltext' (FTS5 BM25), or 'semantic' (HyDE-enhanced vector search when brain available, falls back to vector+FTS5)."),
 			),
 			mcp.WithNumber("limit",
-				mcp.Description("Maximum results to return (default 20, max 50). Only used for mode=semantic."),
+				mcp.Description("Maximum results to return (default 20, max 50). Only used for mode=semantic or mode=fulltext."),
+			),
+			mcp.WithBoolean("hyde",
+				mcp.Description("HyDE hypothesis generation (default true). Set hyde=false to skip hypothesis generation and embed the raw query directly — useful for exact-name lookups where the query is already a code identifier. Only applies when mode='semantic'."),
 			),
 		),
 		s.handleSearch,
