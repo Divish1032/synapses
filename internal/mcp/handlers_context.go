@@ -95,6 +95,9 @@ type directionalContext struct {
 	EntityHash             string                        `json:"entity_hash,omitempty"`              // R14: SHA1 of node+neighbor IDs; stable cache key for clients
 	CallerCountWarning     string                        `json:"caller_count_warning,omitempty"`     // DIAG-3: set when caller count is 0 for a method and use_go_types=false
 	// R31: documentation sections linked to this code entity via DOCUMENTED_BY edges.
+	// File-level imports: populated when the query target is a file path.
+	// Contains all packages/modules imported by this file (IMPORTS edges from the NodeFile node).
+	Imports []graph.CarvedNode `json:"imports,omitempty"`
 	Documentation []graph.CarvedNode `json:"documentation,omitempty"`
 	// Sprint 17: knowledge graph nodes linked via RELATES_TO, CAUSED_BY, INSTANCE_OF,
 	// CONTRADICTS edges — NL-to-graph derived concepts, entities, artifacts, decisions.
@@ -726,6 +729,38 @@ func (s *Server) handleGetContext(
 	}
 
 	dc := toDirectionalContext(sg)
+
+	// File-level imports: when the query resolved via file path, find the
+	// NodeFile node and include its outgoing IMPORTS edges. This makes
+	// get_context answer "what does this file import?" directly.
+	if looksLikeFilePath(entityName) {
+		fileNodes := s.graph.FindByFile(entityName)
+		repoRoot := s.graph.Root()
+		prefix := repoRoot
+		if prefix != "" && !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
+		}
+		for _, fn := range fileNodes {
+			if fn.Type == graph.NodeFile {
+				for _, edge := range s.graph.OutEdges(fn.ID) {
+					if edge.Type == graph.EdgeImports {
+						if importNode := s.graph.GetNode(edge.To); importNode != nil {
+							nodeCopy := *importNode
+							if prefix != "" {
+								nodeCopy.File = strings.TrimPrefix(nodeCopy.File, prefix)
+							}
+							dc.Imports = append(dc.Imports, graph.CarvedNode{
+								Node:      &nodeCopy,
+								Relevance: 1.0,
+								Hop:       1,
+							})
+						}
+					}
+				}
+				break
+			}
+		}
+	}
 
 	// R1: strip synthetic route/inferred nodes when include_inferred=false.
 	if !includeInferred {

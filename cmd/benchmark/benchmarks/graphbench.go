@@ -135,6 +135,13 @@ type contextResponse struct {
 		Manual       []crossDomainNode `json:"manual"`
 		Related      []crossDomainNode `json:"related"`
 	} `json:"cross_domain"`
+	Imports []struct {
+		Node struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+			File string `json:"file"`
+		} `json:"node"`
+	} `json:"imports"`
 	OtherCandidates []struct {
 		Name string `json:"name"`
 		Type string `json:"type"`
@@ -398,14 +405,10 @@ func queryContextCallers(client *agent.SynapsesClient, entity string) (names, fi
 	return names, files, raw
 }
 
-// queryFileImports handles find_imports by querying top-level symbols in the file.
-// The daemon doesn't resolve file paths as entities (root: null), so we:
-// 1. Get the file's related nodes (which ARE returned even with root: null)
-// 2. For each related symbol, get its callees to find cross-file dependencies
-// 3. Aggregate unique source packages/modules from callee files
+// queryFileImports handles find_imports by querying get_context with a file path.
+// The daemon now returns an "imports" field containing all IMPORTS edges from
+// the file's NodeFile node — directly answering "what does this file import?"
 func queryFileImports(client *agent.SynapsesClient, filePath string) (names, files []string, raw string) {
-	// First try: get_context on the file path — root will be null but related nodes
-	// contain the top-level symbols defined in this file.
 	raw, err := client.GetContextJSON("graphbench", filePath, "full")
 	if err != nil {
 		return nil, nil, fmt.Sprintf("error: %v", err)
@@ -416,65 +419,68 @@ func queryFileImports(client *agent.SynapsesClient, filePath string) (names, fil
 		return extractNamesFromText(raw), extractFilesFromText(raw), raw
 	}
 
-	// Collect symbol names from the "related" list (these are symbols in/near the file).
-	var symbols []string
-	for _, rel := range cr.Related {
-		if rel.Node.Name != "" {
-			symbols = append(symbols, rel.Node.Name)
-		}
-	}
-
-	// Also try OtherCandidates which sometimes lists file-level symbols.
-	for _, oc := range cr.OtherCandidates {
-		if oc.Name != "" {
-			symbols = append(symbols, oc.Name)
-		}
-	}
-
-	// Limit to first 3 symbols to avoid rate limiting.
-	if len(symbols) > 3 {
-		symbols = symbols[:3]
-	}
-
-	// For each symbol, query its callees and collect external dependencies.
-	var allRaw strings.Builder
-	allRaw.WriteString(raw)
 	seenNames := make(map[string]bool)
 	seenFiles := make(map[string]bool)
 
-	for _, sym := range symbols {
-		symRaw, err := client.GetContextJSON("graphbench", sym, "full")
-		if err != nil {
-			continue
+	// Primary: use the new "imports" field (NodeFile → IMPORTS edges).
+	// Import node names are the full import path (e.g., "net/http" for Go,
+	// "werkzeug" for Python). Use them directly — extractPackageName is for
+	// callee-based extraction and doesn't handle Go paths correctly.
+	for _, imp := range cr.Imports {
+		n := imp.Node.Name
+		f := imp.Node.File
+		if n != "" && !seenNames[strings.ToLower(n)] {
+			seenNames[strings.ToLower(n)] = true
+			names = append(names, n)
 		}
-		allRaw.WriteString("\n---\n")
-		allRaw.WriteString(symRaw)
-
-		var symCR contextResponse
-		if err := json.Unmarshal([]byte(symRaw), &symCR); err != nil {
-			continue
-		}
-
-		// Extract package/module names from callee files.
-		for _, callee := range symCR.Callees {
-			n := callee.Node.Name
-			f := callee.Node.File
-			if n != "" {
-				// Extract the module/package part: "werkzeug.serving.run_simple" -> "werkzeug"
-				pkg := extractPackageName(n, filePath)
-				if pkg != "" && !seenNames[strings.ToLower(pkg)] {
-					seenNames[strings.ToLower(pkg)] = true
-					names = append(names, pkg)
-				}
-			}
-			if f != "" && !seenFiles[normalizeFile(f)] {
-				seenFiles[normalizeFile(f)] = true
-				files = append(files, f)
-			}
+		if f != "" && !seenFiles[normalizeFile(f)] {
+			seenFiles[normalizeFile(f)] = true
+			files = append(files, f)
 		}
 	}
 
-	return names, files, truncate(allRaw.String(), 2000)
+	// Fallback: if no imports found, try callees of related symbols (old approach).
+	if len(names) == 0 && len(files) == 0 {
+		var symbols []string
+		for _, rel := range cr.Related {
+			if rel.Node.Name != "" {
+				symbols = append(symbols, rel.Node.Name)
+			}
+		}
+		if len(symbols) > 3 {
+			symbols = symbols[:3]
+		}
+		var allRaw strings.Builder
+		allRaw.WriteString(raw)
+		for _, sym := range symbols {
+			symRaw, err := client.GetContextJSON("graphbench", sym, "full")
+			if err != nil {
+				continue
+			}
+			allRaw.WriteString("\n---\n")
+			allRaw.WriteString(symRaw)
+			var symCR contextResponse
+			if err := json.Unmarshal([]byte(symRaw), &symCR); err != nil {
+				continue
+			}
+			for _, callee := range symCR.Callees {
+				if callee.Node.Name != "" {
+					pkg := extractPackageName(callee.Node.Name, filePath)
+					if pkg != "" && !seenNames[strings.ToLower(pkg)] {
+						seenNames[strings.ToLower(pkg)] = true
+						names = append(names, pkg)
+					}
+				}
+				if callee.Node.File != "" && !seenFiles[normalizeFile(callee.Node.File)] {
+					seenFiles[normalizeFile(callee.Node.File)] = true
+					files = append(files, callee.Node.File)
+				}
+			}
+		}
+		raw = truncate(allRaw.String(), 2000)
+	}
+
+	return names, files, truncate(raw, 2000)
 }
 
 // extractPackageName extracts the top-level package/module name from a symbol
