@@ -431,9 +431,9 @@ func queryFileImports(client *agent.SynapsesClient, filePath string) (names, fil
 		}
 	}
 
-	// Limit to first 5 symbols to avoid excessive API calls.
-	if len(symbols) > 5 {
-		symbols = symbols[:5]
+	// Limit to first 3 symbols to avoid rate limiting.
+	if len(symbols) > 3 {
+		symbols = symbols[:3]
 	}
 
 	// For each symbol, query its callees and collect external dependencies.

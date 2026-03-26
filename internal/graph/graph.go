@@ -72,6 +72,13 @@ type Graph struct {
 	// Used by the resolver to resolve obj.method() call sites cross-file.
 	varTypes map[string]map[string]string
 
+	// importAliases stores per-file explicit import alias → import path mappings
+	// collected during parsing. Go allows `import alias "pkg/path"` where the
+	// alias differs from path.Base(importPath). Without this map the resolver
+	// can only guess the alias via path.Base, which fails when the two differ.
+	// Maps file path → alias → importPath.
+	importAliases map[string]map[string]string
+
 	// instantiatedTypes stores per-file sets of type names that are explicitly
 	// constructed (Java: new Foo(), TypeScript: new Foo()). Used by the resolver
 	// for RTA-style call graph refinement — prefer method candidates whose
@@ -555,6 +562,25 @@ func (g *Graph) SnapshotImportAdjacency() (map[NodeID][]NodeID, map[NodeID]*Node
 	return adj, nodes
 }
 
+// SnapshotImportAliases returns a snapshot of all per-file explicit import
+// alias mappings. The outer map is file path → alias → importPath.
+func (g *Graph) SnapshotImportAliases() map[string]map[string]string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if len(g.importAliases) == 0 {
+		return nil
+	}
+	cp := make(map[string]map[string]string, len(g.importAliases))
+	for file, aliases := range g.importAliases {
+		m := make(map[string]string, len(aliases))
+		for k, v := range aliases {
+			m[k] = v
+		}
+		cp[file] = m
+	}
+	return cp
+}
+
 func (g *Graph) SnapshotCallsAdjacency() map[NodeID][]NodeID {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -739,6 +765,40 @@ func (g *Graph) GetVarTypes(file string) map[string]string {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	orig := g.varTypes[file]
+	if orig == nil {
+		return nil
+	}
+	cp := make(map[string]string, len(orig))
+	for k, v := range orig {
+		cp[k] = v
+	}
+	return cp
+}
+
+// AddImportAlias records that file uses alias as the identifier for importPath.
+// Called by Go parser when an explicit import alias is present
+// (e.g., `import alias "github.com/foo/bar"`).
+func (g *Graph) AddImportAlias(file, alias, importPath string) {
+	if alias == "" || importPath == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.importAliases == nil {
+		g.importAliases = make(map[string]map[string]string)
+	}
+	if g.importAliases[file] == nil {
+		g.importAliases[file] = make(map[string]string)
+	}
+	g.importAliases[file][alias] = importPath
+}
+
+// GetImportAliases returns the alias → importPath map for the given file.
+// Returns nil if no explicit import aliases were recorded for the file.
+func (g *Graph) GetImportAliases(file string) map[string]string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	orig := g.importAliases[file]
 	if orig == nil {
 		return nil
 	}
@@ -1156,6 +1216,12 @@ func (g *Graph) Compact() {
 		newInstTypes[k] = v
 	}
 	g.instantiatedTypes = newInstTypes
+
+	newImportAliases := make(map[string]map[string]string, len(g.importAliases))
+	for k, v := range g.importAliases {
+		newImportAliases[k] = v
+	}
+	g.importAliases = newImportAliases
 }
 
 // EdgeCount returns the total number of edges.
@@ -1256,6 +1322,17 @@ func (g *Graph) MergeFrom(other *Graph) {
 			otherInstTypes[file] = cp
 		}
 	}
+	var otherImportAliases map[string]map[string]string
+	if len(other.importAliases) > 0 {
+		otherImportAliases = make(map[string]map[string]string, len(other.importAliases))
+		for file, aliases := range other.importAliases {
+			cp := make(map[string]string, len(aliases))
+			for k, v := range aliases {
+				cp[k] = v
+			}
+			otherImportAliases[file] = cp
+		}
+	}
 	other.mu.RUnlock()
 
 	g.mu.Lock()
@@ -1307,6 +1384,19 @@ func (g *Graph) MergeFrom(other *Graph) {
 		}
 		for typeName := range types {
 			g.instantiatedTypes[file][typeName] = true
+		}
+	}
+
+	// Copy importAliases (explicit Go import rename mappings).
+	for file, aliases := range otherImportAliases {
+		if g.importAliases == nil {
+			g.importAliases = make(map[string]map[string]string)
+		}
+		if g.importAliases[file] == nil {
+			g.importAliases[file] = make(map[string]string, len(aliases))
+		}
+		for alias, importPath := range aliases {
+			g.importAliases[file][alias] = importPath
 		}
 	}
 }
@@ -1449,6 +1539,8 @@ func (g *Graph) RemoveFile(file string) {
 	// Clean up per-file variable type annotations so the resolver doesn't
 	// create incorrect CALLS edges for variable names that no longer exist.
 	delete(g.varTypes, file)
+	// Clean up per-file import aliases so stale alias mappings don't persist.
+	delete(g.importAliases, file)
 	// Clean up per-file instantiated type sets to keep RTA data consistent.
 	delete(g.instantiatedTypes, file)
 	// Note: fileStableIDs is NOT deleted here because RemoveFile is called
