@@ -8,6 +8,7 @@ package resolver
 
 import (
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -53,7 +54,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 
 	// Build all lookup tables in a single AllNodes() pass to avoid redundant
 	// full-graph scans. Previously 3 separate passes; now 1 pass + edge lookups.
-	importMap, pkgIndex := buildLookupTables(g)
+	importMap, pkgIndex, dirBaseToPkg := buildLookupTables(g)
 	methodIndex := buildMethodIndex(pkgIndex) // derived from pkgIndex, no graph scan
 
 	// RTA: collect which types are explicitly instantiated across the project.
@@ -80,6 +81,14 @@ func ResolveCallEdges(g *graph.Graph) int {
 				if importPath, found := aliases[site.PkgAlias]; found {
 					shortPkg := path.Base(importPath)
 					targets = findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated)
+					// Fallback: directory name may differ from Go package clause
+					// (e.g. directory "v2" but `package foo`). Use dirBaseToPkg
+					// to find the actual package name used in pkgIndex.
+					if len(targets) == 0 {
+						if actualPkg, ok := dirBaseToPkg[shortPkg]; ok {
+							targets = findInPackage(pkgIndex, actualPkg, site.FuncName, instantiated)
+						}
+					}
 				}
 			}
 
@@ -113,7 +122,13 @@ func ResolveCallEdges(g *graph.Graph) int {
 						sort.Strings(sortedPaths)
 						for _, importPath := range sortedPaths {
 							shortPkg := path.Base(importPath)
-							if ids := findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated); len(ids) > 0 {
+							ids := findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated)
+							if len(ids) == 0 {
+								if actualPkg, ok2 := dirBaseToPkg[shortPkg]; ok2 {
+									ids = findInPackage(pkgIndex, actualPkg, site.FuncName, instantiated)
+								}
+							}
+							if len(ids) > 0 {
 								targets = ids
 								break
 							}
@@ -146,7 +161,13 @@ func ResolveCallEdges(g *graph.Graph) int {
 					sort.Strings(sortedPaths)
 					for _, importPath := range sortedPaths {
 						shortPkg := path.Base(importPath)
-						if ids := findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated); len(ids) > 0 {
+						ids := findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated)
+						if len(ids) == 0 {
+							if actualPkg, ok2 := dirBaseToPkg[shortPkg]; ok2 {
+								ids = findInPackage(pkgIndex, actualPkg, site.FuncName, instantiated)
+							}
+						}
+						if len(ids) > 0 {
 							targets = ids
 							break
 						}
@@ -182,13 +203,17 @@ func ResolveCallEdges(g *graph.Graph) int {
 //
 // The pkgIndex is sorted by node name to guarantee deterministic resolution
 // order in findInPackage across runs (Go map iteration is non-deterministic).
-func buildLookupTables(g *graph.Graph) (map[string]map[string]string, map[string][]*graph.Node) {
+func buildLookupTables(g *graph.Graph) (map[string]map[string]string, map[string][]*graph.Node, map[string]string) {
 	importMap := make(map[string]map[string]string)
 	pkgIndex := make(map[string][]*graph.Node)
 
 	// Single-pass snapshot: acquire the read lock once for all imports adjacency
 	// and the full node map, avoiding O(N×imports) per-node lock acquisitions.
 	importAdj, nodeMap := g.SnapshotImportAdjacency()
+
+	// Explicit import aliases recorded by the Go parser (e.g., import alias "pkg").
+	// These override the path.Base() derived alias when the two differ.
+	explicitAliases := g.SnapshotImportAliases()
 
 	for id, n := range nodeMap {
 		switch n.Type {
@@ -202,9 +227,32 @@ func buildLookupTables(g *graph.Graph) (map[string]map[string]string, map[string
 				alias := path.Base(pkgNode.Name)
 				aliases[alias] = pkgNode.Name
 			}
+			// Overlay explicit import aliases — these take precedence over
+			// path.Base() derived aliases because Go allows renaming imports
+			// (e.g., `import fuzzy "github.com/foo/algo"` uses "fuzzy" not "algo").
+			if fileAliases := explicitAliases[n.File]; fileAliases != nil {
+				for alias, importPath := range fileAliases {
+					aliases[alias] = importPath
+				}
+			}
 			importMap[n.File] = aliases
 		case graph.NodeFunction, graph.NodeMethod:
 			pkgIndex[n.Package] = append(pkgIndex[n.Package], n)
+		}
+	}
+
+	// Build a directory-base → Go package name mapping from file nodes.
+	// In Go, the default import identifier is the package clause name (e.g.
+	// `package foo`), NOT the directory name. When these differ (e.g. directory
+	// "v2" but `package foo`), path.Base(importPath) returns "v2" but pkgIndex
+	// is keyed by "foo". This mapping lets us bridge the gap.
+	dirBaseToPkg := make(map[string]string)
+	for _, n := range nodeMap {
+		if n.Type == graph.NodeFile && n.File != "" && n.Package != "" {
+			dirBase := filepath.Base(filepath.Dir(n.File))
+			if dirBase != "" && dirBase != "." && dirBase != n.Package {
+				dirBaseToPkg[dirBase] = n.Package
+			}
 		}
 	}
 
@@ -217,7 +265,7 @@ func buildLookupTables(g *graph.Graph) (map[string]map[string]string, map[string
 		})
 	}
 
-	return importMap, pkgIndex
+	return importMap, pkgIndex, dirBaseToPkg
 }
 
 // findInPackage returns NodeIDs for functions/methods named `name` in package `pkg`.

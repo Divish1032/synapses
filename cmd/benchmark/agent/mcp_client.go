@@ -168,6 +168,40 @@ func (c *SynapsesClient) GetImpact(taskID, entity string) (*ImpactResult, error)
 	return &ImpactResult{Raw: raw, Text: raw}, nil
 }
 
+// GetContextJSON calls get_context with format=json, returning the raw JSON string.
+// This gives structured callees, callers, related nodes — far more reliable than
+// regex-parsing Markdown from prepare_context.
+func (c *SynapsesClient) GetContextJSON(taskID, entity, detailLevel string) (string, error) {
+	if c.disabled {
+		return "{}", nil
+	}
+	args := map[string]interface{}{
+		"entity":       entity,
+		"format":       "json",
+		"detail_level": detailLevel,
+	}
+	raw, err := c.callTool("get_context", args)
+	if err != nil {
+		return "", err
+	}
+	c.recordAccess(taskID, "get_context", raw)
+	return raw, nil
+}
+
+// GetImpactWithDepth calls get_impact with an explicit depth parameter.
+func (c *SynapsesClient) GetImpactWithDepth(taskID, entity string, depth int) (*ImpactResult, error) {
+	if c.disabled {
+		return &ImpactResult{}, nil
+	}
+	args := map[string]interface{}{"symbol": entity, "depth": float64(depth)}
+	raw, err := c.callTool("get_impact", args)
+	if err != nil {
+		return nil, err
+	}
+	c.recordAccess(taskID, "get_impact", raw)
+	return &ImpactResult{Raw: raw, Text: raw}, nil
+}
+
 // Recall calls the recall tool.
 func (c *SynapsesClient) Recall(taskID, query string) (*RecallResult, error) {
 	if c.disabled {
@@ -250,22 +284,39 @@ func (c *SynapsesClient) callTool(tool string, args map[string]interface{}) (str
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("http post %s: %w", tool, err)
-	}
-	defer resp.Body.Close()
+	// Retry loop for rate limiting (429) with exponential backoff.
+	var respBody []byte
+	for attempt := 0; attempt < 5; attempt++ {
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("http post %s: %w", tool, err)
+		}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
-	}
+		respBody, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("read response: %w", err)
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("tool %s returned %d: %s", tool, resp.StatusCode, string(respBody))
-	}
+		if resp.StatusCode == 429 {
+			wait := time.Duration(1<<uint(attempt)) * time.Second
+			time.Sleep(wait)
+			// Rebuild request body reader for retry.
+			req, _ = http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			if c.authToken != "" {
+				req.Header.Set("Authorization", "Bearer "+c.authToken)
+			}
+			continue
+		}
 
-	return extractText(respBody)
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("tool %s returned %d: %s", tool, resp.StatusCode, string(respBody))
+		}
+
+		return extractText(respBody)
+	}
+	return "", fmt.Errorf("tool %s: rate limited after 5 retries", tool)
 }
 
 // extractText parses the MCP CallToolResult JSON and returns concatenated text.

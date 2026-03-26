@@ -662,8 +662,12 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 			continue
 		}
 		// Drop excluded node types from output (still traversed in BFS above).
-		if n, ok := g.nodes[id]; ok && cfg.ExcludeTypes[n.Type] {
-			continue
+		// Guard: never exclude the root node itself — file-level queries set
+		// ExcludeTypes[NodeFile] but the queried file must still appear.
+		if id != rootID {
+			if n, ok := g.nodes[id]; ok && cfg.ExcludeTypes[n.Type] {
+				continue
+			}
 		}
 		// Drop test-file nodes when requested (still traversed for edge discovery).
 		if cfg.ExcludeTestFiles {

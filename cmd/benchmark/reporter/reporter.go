@@ -275,6 +275,120 @@ func asFloat(v interface{}) float64 {
 	return 0
 }
 
+// ─── GraphBench ───────────────────────────────────────────────────────────────
+
+// GraphBenchResult holds the full results of a GraphBench run.
+type GraphBenchResult struct {
+	Timestamp   string              `json:"timestamp"`
+	TotalTests  int                 `json:"total_tests"`
+	ErrorCount  int                 `json:"error_count"`
+	Summary     GraphBenchMetrics   `json:"summary"`
+	ByQueryType []GraphBenchSlice   `json:"by_query_type"`
+	ByLanguage  []GraphBenchSlice   `json:"by_language"`
+	TestResults []interface{}       `json:"tests"`
+}
+
+// GraphBenchMetrics holds P/R/F1 scores.
+type GraphBenchMetrics struct {
+	Precision float64 `json:"precision"`
+	Recall    float64 `json:"recall"`
+	F1        float64 `json:"f1"`
+}
+
+// GraphBenchSlice is a breakdown by one dimension (query_type or language).
+type GraphBenchSlice struct {
+	Label   string            `json:"label"`
+	Tests   int               `json:"tests"`
+	Metrics GraphBenchMetrics `json:"metrics"`
+}
+
+// WriteGraphBench writes JSON + Markdown results for a GraphBench run.
+func (r *Reporter) WriteGraphBench(result *GraphBenchResult) error {
+	ts := strings.ReplaceAll(result.Timestamp, ":", "-")
+	jsonPath := filepath.Join(r.dir, fmt.Sprintf("graphbench_%s.json", ts))
+	mdPath := filepath.Join(r.dir, fmt.Sprintf("graphbench_%s.md", ts))
+
+	if err := writeJSON(jsonPath, result); err != nil {
+		return fmt.Errorf("write json: %w", err)
+	}
+	if err := os.WriteFile(mdPath, []byte(graphBenchMarkdown(result)), 0o644); err != nil {
+		return fmt.Errorf("write markdown: %w", err)
+	}
+	fmt.Printf("Results written:\n  JSON: %s\n  Markdown: %s\n", jsonPath, mdPath)
+	return nil
+}
+
+// PrintGraphBenchSummary prints a compact summary to stdout.
+func (r *Reporter) PrintGraphBenchSummary(result *GraphBenchResult) {
+	fmt.Printf("\n=== GraphBench Summary ===\n")
+	fmt.Printf("Tests: %d | Precision: %.1f%% | Recall: %.1f%% | F1: %.1f%%\n",
+		result.TotalTests,
+		result.Summary.Precision*100,
+		result.Summary.Recall*100,
+		result.Summary.F1*100,
+	)
+	if len(result.ByQueryType) > 0 {
+		fmt.Printf("\n%-25s  %6s  %10s  %8s  %6s\n", "Query Type", "Tests", "Precision", "Recall", "F1")
+		fmt.Printf("%s\n", strings.Repeat("-", 60))
+		for _, s := range result.ByQueryType {
+			fmt.Printf("%-25s  %6d  %9.1f%%  %7.1f%%  %5.1f%%\n",
+				s.Label, s.Tests,
+				s.Metrics.Precision*100,
+				s.Metrics.Recall*100,
+				s.Metrics.F1*100,
+			)
+		}
+	}
+	if len(result.ByLanguage) > 0 {
+		fmt.Printf("\n%-12s  %6s  %10s  %8s  %6s\n", "Language", "Tests", "Precision", "Recall", "F1")
+		fmt.Printf("%s\n", strings.Repeat("-", 50))
+		for _, s := range result.ByLanguage {
+			fmt.Printf("%-12s  %6d  %9.1f%%  %7.1f%%  %5.1f%%\n",
+				s.Label, s.Tests,
+				s.Metrics.Precision*100,
+				s.Metrics.Recall*100,
+				s.Metrics.F1*100,
+			)
+		}
+	}
+}
+
+func graphBenchMarkdown(result *GraphBenchResult) string {
+	var sb strings.Builder
+	sb.WriteString("# GraphBench Results (Graph Accuracy Benchmark)\n\n")
+	sb.WriteString(fmt.Sprintf("**Run timestamp:** %s  \n", result.Timestamp))
+	sb.WriteString(fmt.Sprintf("**Total tests:** %d  \n\n", result.TotalTests))
+
+	sb.WriteString("## Overall Metrics\n\n")
+	sb.WriteString(fmt.Sprintf("- **Precision:** %.1f%%\n", result.Summary.Precision*100))
+	sb.WriteString(fmt.Sprintf("- **Recall:** %.1f%%\n", result.Summary.Recall*100))
+	sb.WriteString(fmt.Sprintf("- **F1:** %.1f%%\n\n", result.Summary.F1*100))
+
+	if len(result.ByQueryType) > 0 {
+		sb.WriteString("## By Query Type\n\n")
+		sb.WriteString("| Query Type | Tests | Precision | Recall | F1 |\n")
+		sb.WriteString("|------------|-------|-----------|--------|----|\n")
+		for _, s := range result.ByQueryType {
+			sb.WriteString(fmt.Sprintf("| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
+				s.Label, s.Tests,
+				s.Metrics.Precision*100, s.Metrics.Recall*100, s.Metrics.F1*100))
+		}
+	}
+
+	if len(result.ByLanguage) > 0 {
+		sb.WriteString("\n## By Language\n\n")
+		sb.WriteString("| Language | Tests | Precision | Recall | F1 |\n")
+		sb.WriteString("|----------|-------|-----------|--------|----|\n")
+		for _, s := range result.ByLanguage {
+			sb.WriteString(fmt.Sprintf("| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
+				s.Label, s.Tests,
+				s.Metrics.Precision*100, s.Metrics.Recall*100, s.Metrics.F1*100))
+		}
+	}
+
+	return sb.String()
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 func writeJSON(path string, v interface{}) error {
