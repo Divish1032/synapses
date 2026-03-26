@@ -384,8 +384,8 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 		}
 	}
 
-	// Score files by number of unique lines mentioned.
-	// Tie-break: prefer source files (deeper paths) over docs/tests/top-level.
+	// Score files by number of unique lines mentioned, with bonuses for
+	// files whose name matches problem-statement entities and for source files.
 	fileDepth := func(f string) int { return strings.Count(f, "/") }
 	isSourceFile := func(f string) bool {
 		return !strings.HasPrefix(f, "docs/") &&
@@ -395,6 +395,33 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 			!strings.HasSuffix(f, ".rst") &&
 			!strings.HasSuffix(f, ".md")
 	}
+	// Build set of lowercase entity stems for filename matching.
+	entityStems := make(map[string]bool)
+	for _, e := range entities {
+		low := strings.ToLower(e)
+		entityStems[low] = true
+		// Also add last component of dotted paths.
+		if idx := strings.LastIndex(low, "."); idx >= 0 {
+			entityStems[low[idx+1:]] = true
+		}
+		// Add underscore-joined version of CamelCase.
+		// e.g. "SeparabilityMatrix" → "separability_matrix"
+		var snake []byte
+		for j := 0; j < len(e); j++ {
+			c := e[j]
+			if c >= 'A' && c <= 'Z' {
+				if j > 0 && e[j-1] >= 'a' && e[j-1] <= 'z' {
+					snake = append(snake, '_')
+				}
+				snake = append(snake, c+32)
+			} else {
+				snake = append(snake, c)
+			}
+		}
+		if s := string(snake); s != low && len(s) >= 3 {
+			entityStems[s] = true
+		}
+	}
 	type fileScore struct {
 		file   string
 		score  int
@@ -403,7 +430,36 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 	}
 	var scored []fileScore
 	for file, lines := range fileMentions {
-		scored = append(scored, fileScore{file, len(lines), isSourceFile(file), fileDepth(file)})
+		score := len(lines)
+		// Filename-entity match bonus: if the file's basename (without extension)
+		// matches any entity, boost its score significantly. This helps when the
+		// entity "qdp" maps to qdp.py even though qdp.py has fewer mentions than
+		// generic files like table.py.
+		base := filepath.Base(file)
+		ext := filepath.Ext(base)
+		stem := strings.ToLower(strings.TrimSuffix(base, ext))
+		if entityStems[stem] {
+			score += 15 // strong boost for exact basename match
+		} else {
+			// Check if any entity stem is a substring of the filename.
+			// Use the LONGEST match to prefer "sliced_wcs" matching
+			// "sliced_wcs" over "wcs" matching "sliced_wcs".
+			bestMatchLen := 0
+			for es := range entityStems {
+				if len(es) >= 4 && strings.Contains(stem, es) && len(es) > bestMatchLen {
+					bestMatchLen = len(es)
+				}
+			}
+			if bestMatchLen > 0 {
+				// Scale boost by match length — longer matches are more specific.
+				boost := 5 + bestMatchLen
+				if boost > 15 {
+					boost = 15
+				}
+				score += boost
+			}
+		}
+		scored = append(scored, fileScore{file, score, isSourceFile(file), fileDepth(file)})
 	}
 	// Sort: primary = score desc, secondary = source files first, tertiary = depth desc.
 	for i := 1; i < len(scored); i++ {
@@ -443,10 +499,10 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 		start, end   int
 		mentionCount int
 	}
-	buildWindows := func(mentions map[int]bool) []windowBlock {
+	buildWindows := func(mentions map[int]bool, winAfter int) []windowBlock {
 		lineSet := make(map[int]bool)
 		for line := range mentions {
-			for l := maxInt(1, line-windowBefore); l <= line+windowAfter; l++ {
+			for l := maxInt(1, line-windowBefore); l <= line+winAfter; l++ {
 				lineSet[l] = true
 			}
 		}
@@ -495,7 +551,7 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 		if i >= topFiles || len(retrievedLines) >= maxRetrievedLines {
 			break
 		}
-		blocks := buildWindows(fileMentions[fs.file])
+		blocks := buildWindows(fileMentions[fs.file], windowAfter)
 		if len(blocks) == 0 {
 			continue
 		}
