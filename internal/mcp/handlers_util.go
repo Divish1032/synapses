@@ -106,9 +106,17 @@ func camelWords(name string) []string {
 //	Tier 5: everything else
 //
 // Within each tier the node with the highest connectivity (fanin+fanout) wins.
-func pickBestNode(nodes []*graph.Node, g *graph.Graph) *graph.Node {
+func pickBestNode(nodes []*graph.Node, g *graph.Graph, query ...string) *graph.Node {
 	tierOf := func(n *graph.Node) int {
-		isTest := strings.HasSuffix(n.File, "_test.go")
+		isTest := isTestFile(n.File)
+		// Tier 0: exact case-sensitive name match on struct/interface in non-test file.
+		// This prevents "Table" resolving to "Row.table" (method) or "HTML" to
+		// "html" (function in Makefile) when an exact struct match exists.
+		if len(query) > 0 && query[0] != "" && n.Name == query[0] && !isTest {
+			if n.Type == graph.NodeStruct || n.Type == graph.NodeInterface {
+				return 0
+			}
+		}
 		switch n.Type {
 		case graph.NodeFunction, graph.NodeMethod:
 			if !isTest {

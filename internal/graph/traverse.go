@@ -1016,6 +1016,43 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 		}
 	}
 
+	// Supplementary pass: find files that IMPORT the root's package.
+	// These are downstream dependents that the CALLS-only BFS misses — e.g.
+	// table.py imports NdarrayMixin but never calls a method on it directly.
+	// Add importers at maxDepth (peripheral) so they don't outrank direct callers.
+	if root.Package != "" {
+		// Find the package node for root's package.
+		for _, n := range g.nodes {
+			if n.Type != NodePackage || n.Name != root.Package {
+				continue
+			}
+			// inEdges on the package node: file nodes that import it.
+			for _, e := range g.inEdges[n.ID] {
+				if e.Type != EdgeImports {
+					continue
+				}
+				importerFile := g.nodes[e.From]
+				if importerFile == nil || importerFile.File == "" {
+					continue
+				}
+				// Add code entities from the importing file at maxDepth.
+				for _, cn := range g.nodes {
+					if cn.File != importerFile.File || cn.ID == rootID {
+						continue
+					}
+					if cn.Type == NodeFile || cn.Type == NodePackage {
+						continue
+					}
+					if _, seen := visited[cn.ID]; !seen {
+						visited[cn.ID] = maxDepth
+						fileSet[cn.File] = struct{}{}
+					}
+				}
+			}
+			break // found the package node
+		}
+	}
+
 	// Build tiers.
 	idx := g.index
 	tierNodes := map[int][]EntityRef{}

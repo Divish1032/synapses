@@ -14,6 +14,26 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
+// ambiguousUnqualified lists method names that are too common to resolve via
+// the cross-package fallback (step 2 of direct calls). Without a qualified
+// receiver, these names match dozens of unrelated targets (e.g. "write" →
+// HTML.write, file.write, csv.writer.write, …) producing false CALLS edges.
+var ambiguousUnqualified = map[string]bool{
+	"write": true, "read": true, "get": true, "set": true,
+	"close": true, "open": true, "init": true, "run": true,
+	"start": true, "stop": true, "send": true, "recv": true,
+	"push": true, "pop": true, "add": true, "remove": true,
+	"delete": true, "update": true, "create": true, "reset": true,
+	"clear": true, "flush": true, "load": true, "save": true,
+	"parse": true, "render": true, "handle": true, "process": true,
+	"execute": true, "call": true, "format": true, "validate": true,
+	"copy": true, "clone": true, "merge": true, "split": true,
+	"encode": true, "decode": true, "dump": true, "append": true,
+	"extend": true, "insert": true, "keys": true, "values": true,
+	"items": true, "next": true, "iter": true, "len": true,
+	"str": true, "repr": true, "hash": true, "eq": true,
+}
+
 // ResolveCallEdges drains all pending call sites from the graph and creates
 // CALLS edges for any targets that can be resolved. Returns the number of
 // edges created.
@@ -113,7 +133,11 @@ func ResolveCallEdges(g *graph.Graph) int {
 			// 2. Fallback: search all packages imported by the caller's file.
 			//    This handles Python/TypeScript `from X import Y` style calls where
 			//    the symbol is imported directly (no qualifier) from another module.
-			if len(targets) == 0 {
+			//
+			//    Guard: skip cross-package fallback for extremely common method
+			//    names (write, read, get, set, etc.) — false positives from these
+			//    are far more harmful than false negatives.
+			if len(targets) == 0 && !ambiguousUnqualified[strings.ToLower(site.FuncName)] {
 				if aliases, ok := importMap[site.CallerFile]; ok {
 					sortedPaths := make([]string, 0, len(aliases))
 					for _, p := range aliases {
