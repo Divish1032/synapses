@@ -121,21 +121,50 @@ Chasing ContextBench F1 by bolting on BM25 source search would make Synapses sco
 
 ---
 
-## Sprint 22: GraphBench v2 — Structural Accuracy Push 🔥 NEXT
+## Sprint 22: GraphBench v2 — Structural Accuracy Push 🔥 IN PROGRESS
 
-**Goal:** Push GraphBench F1 from 21.8% to 60%+. This is Synapses' core product — if the graph is wrong, nothing else matters.
+**Goal:** Push GraphBench F1 from 24.6% to 60%+. This is Synapses' core product — if the graph is wrong, nothing else matters.
 
-**Why this is #1 priority:** GraphBench directly tests what Synapses promises: accurate structural understanding. Every point of improvement here means better prepare_context, better get_impact, better search results. This is the foundation everything else builds on.
+**Current score: 40.2% F1** (up from 24.6% baseline, +63% relative improvement)
 
-| # | Task | What | Effort | Impact |
-|---|------|------|--------|--------|
-| 22.1 | **File-level entity support** | Add NodeFile entities to the graph so find_imports queries can resolve to actual files. Currently imports create NodePackage edges but no file-level nodes for file-to-file import queries. Parser change across Python, Go, TS. | High | Critical |
-| 22.2 | **find_callers precision improvement** | get_context callers field returns too many results (includes transitive callers). Add depth-1-only mode or direct-callers filter. Measure: current callers F1=42.9%, target ≥70%. | Medium | High |
-| 22.3 | **JS/TS require() and module.exports parsing** | Express.js scores ~0% because `require('express')` and `module.exports = router` aren't parsed as imports/exports. Add tree-sitter queries for CommonJS patterns. | High | High |
-| 22.4 | **Go package-level import resolution** | Go imports resolve to packages but not to specific symbols. `import "net/http"` should create edges to `http.Handler`, `http.ListenAndServe`, etc. when those symbols are used. | Medium | Medium |
-| 22.5 | **Expand test cases to 100** | Add 50 more test cases: 20 Python (focus on class hierarchies, decorators), 15 Go (interfaces, goroutine patterns), 15 TS (class inheritance, async/await chains). More diverse repos. | Medium | High |
-| 22.6 | **find_implementations query type** | Test interface→concrete type resolution. Python ABCs, Go interfaces, TS abstract classes. Currently untested — could be a strength or a gap. | Medium | Medium |
-| 22.7 | **Cross-file data flow tracking** | Variables assigned in one file and used in another (via imports) should create DATA_FLOWS edges. Currently only intra-file data flow is tracked. Critical for understanding how values propagate. | High | Medium |
+**Per-query-type scores:**
+| Query Type | Tests | F1 | Status |
+|---|---|---|---|
+| find_imports | 18 | 40.1% | Much improved (was 6.4%) |
+| find_callees | 15 | 35.8% | Decent |
+| find_callers | 7 | 54.2% | Good |
+| impact_analysis | 9 | 38.9% | OK |
+| find_implementations | 1 | 22.2% | Only 1 test |
+
+**Per-language scores:**
+| Language | Tests | F1 | Status |
+|---|---|---|---|
+| Python | 20 | 48.4% | Good (was 40.6%) |
+| Go | 20 | 47.3% | Good (was 21.0%) |
+| TypeScript | 10 | 9.5% | Poor (was 0.0%) |
+
+| # | Task | What | Effort | Impact | Status |
+|---|------|------|--------|--------|--------|
+| 22.1 | **File-level imports in get_context** | When get_context receives a file path, include the NodeFile's outgoing IMPORTS edges in a new `imports` JSON field. Enables direct "what does this file import?" queries. | Medium | Critical | ✅ Done |
+| 22.1b | **looksLikeFilePath for bare filenames** | Accept bare filenames like `gin.go`, `context.go` (lowercase + code extension) as file path queries, not just paths with `/`. | Low | High | ✅ Done |
+| 22.2 | **CommonJS require() in TS parser** | Add tree-sitter query for `require('...')` → IMPORTS edge. JS parser already had this; TS parser now matches. | Low | Medium | ✅ Done |
+| 22.3 | **Python relative import file resolution** | Resolve `from .cli import X` → target file `src/flask/cli.py` instead of storing importer's path. Handle dotted paths (`.sansio.blueprints` → `sansio/blueprints.py`). | Low | High | ✅ Done |
+| 22.4 | **Precision matching fix** | Fix GraphBench precision calculation to use same partial dot-suffix matching as recall. Was using exact-only lookups. | Low | Medium | ✅ Done |
+| 22.5 | **impact_analysis depth tuning** | Reduce BFS depth from 3 to 2. Depth=3 returns too many transitive dependents (27% precision vs 70% recall). | Low | Medium | ✅ Done |
+| 22.6 | **JS/TS call resolution** | Express.js callees/callers/impact all score 0%. CommonJS function patterns (`createApplication`, `app.listen`) not resolved by call graph. Needs deeper JS call-site resolution or module.exports parsing. | High | High | ⏳ Remaining |
+| 22.7 | **Cross-repo callee resolution** | Tests expect callees like `werkzeug.serving.run_simple` (external package). Synapses only indexes the current repo — can't resolve cross-package calls without dependency indexing. | High | Medium | ⏳ Remaining |
+| 22.8 | **Expand test cases to 100** | Add 50 more test cases across diverse repos and languages. Current 50 tests may not be representative. | Medium | High | ⏳ Remaining |
+
+**Key architectural changes shipped:**
+1. **`imports` field in get_context JSON response** — new structural information directly answering file-level import queries
+2. **Bare filename resolution** — `gin.go` now resolves as a file path, not just a symbol name
+3. **Python relative import → file path mapping** — parser now resolves `.cli` to `src/flask/cli.py`
+4. **CommonJS require() → IMPORTS edges** — JS/TS files now have import edges from require() calls
+
+**Remaining gaps analysis:**
+- TypeScript: 9.5% F1 — all callees/callers/impact tests score 0%. Root cause: Express.js uses CommonJS patterns that the JS call resolver can't connect (e.g., `module.exports = createApplication` → `var app = require('express')()` → `app.listen()`). This requires understanding module.exports assignments and tracing them through require() consumers.
+- find_callees: 35.8% — 7/15 tests at 0%. Mixed causes: generic names like `get`/`New`/`Run` resolve to wrong entities; cross-package calls; JS call resolution.
+- find_imports precision: 30% — returning many internal imports alongside expected external ones.
 
 **Success criteria:** GraphBench F1 ≥ 60% overall. find_callers ≥ 70%, find_imports ≥ 50%, JS/TS ≥ 20%.
 
