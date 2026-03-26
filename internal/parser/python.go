@@ -190,8 +190,9 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		// For "from .cli import X" in src/flask/testing.py:
 		//   relPath = "cli" → target file = "src/flask/cli.py"
 		importNodeID := g.MakeNodeID(relPath, relPath)
-		// Compute target file: sibling in same directory.
-		targetFile := filepath.Join(filepath.Dir(filePath), relPath+".py")
+		// Compute target file: convert dots to path separators for nested packages.
+		// "cli" → "cli.py", "sansio.blueprints" → "sansio/blueprints.py"
+		targetFile := filepath.Join(filepath.Dir(filePath), strings.ReplaceAll(relPath, ".", "/")+".py")
 		g.AddNode(&graph.Node{
 			ID:      importNodeID,
 			Type:    graph.NodePackage,
