@@ -32,7 +32,7 @@ import (
 
 func main() {
 	var (
-		benchmarkName = flag.String("benchmark", "repobench", "Benchmark to run: contextbench | swe-verified | repobench")
+		benchmarkName = flag.String("benchmark", "repobench", "Benchmark to run: contextbench | swe-verified | repobench | graphbench")
 		endpoint      = flag.String("endpoint", "http://127.0.0.1:11435", "Synapses daemon REST endpoint")
 		project       = flag.String("project", "", "Single project path (overrides per-repo routing for synapses-embed)")
 		outputDir     = flag.String("output-dir", "results", "Directory to write JSON and markdown results")
@@ -50,6 +50,8 @@ func main() {
 		cbDataFile    = flag.String("cb-data", "contextbench.jsonl", "Path to ContextBench JSONL dataset")
 		cbLanguages   = flag.String("cb-languages", "", "Comma-separated language filter for ContextBench (empty = all)")
 		cbSources     = flag.String("cb-sources", "", "Comma-separated source filter for ContextBench (e.g. Verified)")
+		// GraphBench-specific flags.
+		gbDataFile    = flag.String("gb-data", "graphbench.jsonl", "Path to GraphBench JSONL dataset")
 	)
 	flag.Parse()
 
@@ -190,6 +192,21 @@ func main() {
 			log.Fatalf("write results: %v", err)
 		}
 		rep.PrintContextBenchSummary(cbResult)
+
+	case "graphbench", "graph-bench", "graph_bench":
+		gbOpts := benchmarks.GraphBenchOptions{
+			DataFile: *gbDataFile,
+			ReposDir: *reposDir,
+			Limit:    *limit,
+		}
+		gbResult, err := benchmarks.RunGraphBench(mcpClient, gbOpts)
+		if err != nil {
+			log.Fatalf("graphbench failed: %v", err)
+		}
+		if err := rep.WriteGraphBench(gbResult); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintGraphBenchSummary(gbResult)
 
 	case "swe-verified", "swe_verified":
 		log.Fatal("swe-verified runner not yet implemented (Phase 3)")

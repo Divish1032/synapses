@@ -168,6 +168,20 @@ func (c *SynapsesClient) GetImpact(taskID, entity string) (*ImpactResult, error)
 	return &ImpactResult{Raw: raw, Text: raw}, nil
 }
 
+// GetImpactWithDepth calls get_impact with an explicit depth parameter.
+func (c *SynapsesClient) GetImpactWithDepth(taskID, entity string, depth int) (*ImpactResult, error) {
+	if c.disabled {
+		return &ImpactResult{}, nil
+	}
+	args := map[string]interface{}{"symbol": entity, "depth": float64(depth)}
+	raw, err := c.callTool("get_impact", args)
+	if err != nil {
+		return nil, err
+	}
+	c.recordAccess(taskID, "get_impact", raw)
+	return &ImpactResult{Raw: raw, Text: raw}, nil
+}
+
 // Recall calls the recall tool.
 func (c *SynapsesClient) Recall(taskID, query string) (*RecallResult, error) {
 	if c.disabled {
