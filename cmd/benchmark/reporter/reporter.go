@@ -281,6 +281,7 @@ func asFloat(v interface{}) float64 {
 type GraphBenchResult struct {
 	Timestamp   string              `json:"timestamp"`
 	TotalTests  int                 `json:"total_tests"`
+	ErrorCount  int                 `json:"error_count"`
 	Summary     GraphBenchMetrics   `json:"summary"`
 	ByQueryType []GraphBenchSlice   `json:"by_query_type"`
 	ByLanguage  []GraphBenchSlice   `json:"by_language"`

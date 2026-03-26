@@ -168,6 +168,26 @@ func (c *SynapsesClient) GetImpact(taskID, entity string) (*ImpactResult, error)
 	return &ImpactResult{Raw: raw, Text: raw}, nil
 }
 
+// GetContextJSON calls get_context with format=json, returning the raw JSON string.
+// This gives structured callees, callers, related nodes — far more reliable than
+// regex-parsing Markdown from prepare_context.
+func (c *SynapsesClient) GetContextJSON(taskID, entity, detailLevel string) (string, error) {
+	if c.disabled {
+		return "{}", nil
+	}
+	args := map[string]interface{}{
+		"entity":       entity,
+		"format":       "json",
+		"detail_level": detailLevel,
+	}
+	raw, err := c.callTool("get_context", args)
+	if err != nil {
+		return "", err
+	}
+	c.recordAccess(taskID, "get_context", raw)
+	return raw, nil
+}
+
 // GetImpactWithDepth calls get_impact with an explicit depth parameter.
 func (c *SynapsesClient) GetImpactWithDepth(taskID, entity string, depth int) (*ImpactResult, error) {
 	if c.disabled {

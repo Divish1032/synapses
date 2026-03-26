@@ -6,22 +6,23 @@
 //
 // Query types:
 //   - find_callers(symbol)        — who calls this? via get_impact depth=1
-//   - find_callees(symbol)        — what does this call? via get_context
-//   - find_imports(file)          — what does this file import? via get_context
+//   - find_callees(symbol)        — what does this call? via get_context format=json
+//   - find_imports(file)          — what does this file import? via get_context format=json
 //   - impact_analysis(symbol)     — what's affected? via get_impact depth=3
-//   - find_implementations(iface) — who implements this? via get_context
+//   - find_implementations(iface) — who implements this? via get_context format=json
 //
+// All daemon responses are parsed as structured JSON (not regex on Markdown).
 // Metrics: per-test Precision, Recall, F1. Aggregated by query_type and language.
 package benchmarks
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -56,6 +57,8 @@ type GraphBenchTest struct {
 
 // GraphBenchTestResult holds the outcome of one test.
 type GraphBenchTestResult struct {
+	Repo          string   `json:"repo"`
+	Language      string   `json:"language"`
 	QueryType     string   `json:"query_type"`
 	Query         string   `json:"query"`
 	ExpectedNames []string `json:"expected_names,omitempty"`
@@ -66,6 +69,84 @@ type GraphBenchTestResult struct {
 	Recall        float64  `json:"recall"`
 	F1            float64  `json:"f1"`
 	Error         string   `json:"error,omitempty"`
+	RawResponse   string   `json:"raw_response,omitempty"` // for debugging failures
+}
+
+// ─── Daemon response JSON shapes ─────────────────────────────────────────────
+
+// impactResponse is the JSON shape of get_impact responses.
+type impactResponse struct {
+	Root struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+		File string `json:"file"`
+		Line int    `json:"line"`
+	} `json:"root"`
+	Tiers []struct {
+		Depth int    `json:"depth"`
+		Label string `json:"label"`
+		Nodes []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+			File string `json:"file"`
+			Line int    `json:"line"`
+		} `json:"nodes"`
+	} `json:"tiers"`
+	AffectedFiles []string `json:"affected_files"`
+	TotalAffected int      `json:"total_affected"`
+}
+
+// contextResponse is the JSON shape of get_context format=json responses.
+type contextResponse struct {
+	Root struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+		File string `json:"file"`
+		Line int    `json:"line"`
+	} `json:"root"`
+	Callees []struct {
+		Node struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+			File string `json:"file"`
+		} `json:"node"`
+		Relevance float64 `json:"relevance"`
+	} `json:"callees"`
+	Callers []struct {
+		Node struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+			File string `json:"file"`
+		} `json:"node"`
+	} `json:"callers"`
+	Related []struct {
+		Node struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+			File string `json:"file"`
+		} `json:"node"`
+	} `json:"related"`
+	CrossDomain struct {
+		DeploysTo    []crossDomainNode `json:"deploys"`
+		Consumes     []crossDomainNode `json:"consumes"`
+		ConfiguredBy []crossDomainNode `json:"configured_by"`
+		DocumentedIn []crossDomainNode `json:"documented_in"`
+		Mentions     []crossDomainNode `json:"mentions"`
+		Manual       []crossDomainNode `json:"manual"`
+		Related      []crossDomainNode `json:"related"`
+	} `json:"cross_domain"`
+	OtherCandidates []struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+		File string `json:"file"`
+	} `json:"other_candidates"`
+	DisambigHint string `json:"disambig_hint"`
+}
+
+type crossDomainNode struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	File string `json:"file"`
 }
 
 // ─── Runner ──────────────────────────────────────────────────────────────────
@@ -85,7 +166,7 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 	var allResults []GraphBenchTestResult
 
 	for i, suite := range suites {
-		log.Printf("[%d/%d] %s @ %.8s (%s, %d tests)",
+		log.Printf("[%d/%d] %s @ %s (%s, %d tests)",
 			i+1, len(suites), suite.Repo, suite.Commit, suite.Language, len(suite.Tests))
 
 		repoDir, err := ensureRepo(opts.ReposDir, suite.Repo, suite.Commit)
@@ -93,29 +174,27 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 			log.Printf("  SKIP: clone/checkout failed: %v", err)
 			for _, t := range suite.Tests {
 				allResults = append(allResults, GraphBenchTestResult{
-					QueryType: t.QueryType,
-					Query:     t.Query,
-					Error:     fmt.Sprintf("repo setup: %v", err),
+					Repo: suite.Repo, Language: suite.Language,
+					QueryType: t.QueryType, Query: t.Query,
+					Error: fmt.Sprintf("repo setup: %v", err),
 				})
 			}
 			continue
 		}
 
-		// Trigger indexing by calling search on the project.
 		projClient := client.WithProject(repoDir)
-		log.Printf("  indexing via search probe...")
-		if _, err := projClient.Search("graphbench-index", "main"); err != nil {
-			log.Printf("  warning: index probe failed: %v", err)
+
+		// Trigger indexing and wait for it to complete.
+		if err := waitForIndex(projClient, repoDir); err != nil {
+			log.Printf("  warning: indexing may be incomplete: %v", err)
 		}
-		// Give daemon a moment to finish background indexing.
-		time.Sleep(3 * time.Second)
 
 		for j, test := range suite.Tests {
 			result := runGraphTest(projClient, suite, test)
 			allResults = append(allResults, result)
 			status := "✓"
 			if result.Error != "" {
-				status = "✗ " + result.Error
+				status = "✗ " + truncate(result.Error, 80)
 			}
 			log.Printf("  [%d/%d] %s(%s): P=%.0f%% R=%.0f%% F1=%.0f%% %s",
 				j+1, len(suite.Tests), test.QueryType, test.Query,
@@ -126,112 +205,123 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 	return aggregateGraphResults(allResults, suites), nil
 }
 
+// waitForIndex triggers indexing via a search probe and polls until the daemon
+// has indexed the project (subsequent search returns results or stops erroring).
+func waitForIndex(client *agent.SynapsesClient, repoDir string) error {
+	log.Printf("  triggering index for %s ...", filepath.Base(repoDir))
+
+	// First call triggers indexing.
+	_, _ = client.Search("graphbench-index", "main")
+
+	// Poll: retry search up to 30 times (60s total) waiting for index.
+	for attempt := 0; attempt < 30; attempt++ {
+		time.Sleep(2 * time.Second)
+		resp, err := client.Search("graphbench-poll", "function")
+		if err == nil && resp != nil && len(resp.Text) > 20 {
+			log.Printf("  index ready (attempt %d)", attempt+1)
+			return nil
+		}
+		if attempt%5 == 4 {
+			log.Printf("  still waiting for index (attempt %d)...", attempt+1)
+		}
+	}
+	return fmt.Errorf("indexing did not complete within 60s")
+}
+
 // runGraphTest executes a single test case against the daemon.
 func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test GraphBenchTest) GraphBenchTestResult {
 	result := GraphBenchTestResult{
+		Repo:          suite.Repo,
+		Language:      suite.Language,
 		QueryType:     test.QueryType,
 		Query:         test.Query,
 		ExpectedNames: test.ExpectedNames,
 		ExpectedFiles: test.ExpectedFiles,
 	}
 
-	var rawText string
+	var names []string
+	var files []string
+	var rawResp string
 
 	switch test.QueryType {
 	case "find_callers":
-		// get_impact with depth=1 returns direct callers.
-		resp, e := client.GetImpactWithDepth("graphbench", test.Query, 1)
-		if e != nil {
-			result.Error = e.Error()
-			return result
-		}
-		rawText = resp.Text
+		names, files, rawResp = queryImpact(client, test.Query, 1)
 
 	case "find_callees":
-		// get_context returns callees in the response.
-		resp, e := client.PrepareContext("graphbench", test.Query, "understand")
-		if e != nil {
-			result.Error = e.Error()
-			return result
-		}
-		rawText = resp.Text
+		names, files, rawResp = queryContextCallees(client, test.Query)
 
 	case "find_imports":
-		// get_context on a file shows its imports.
-		resp, e := client.PrepareContext("graphbench", test.Query, "understand")
-		if e != nil {
-			result.Error = e.Error()
-			return result
-		}
-		rawText = resp.Text
+		// For file-level queries, use get_context on the file entity.
+		names, files, rawResp = queryContextFull(client, test.Query)
 
 	case "impact_analysis":
-		// get_impact with depth=3 for transitive impact.
-		resp, e := client.GetImpactWithDepth("graphbench", test.Query, 3)
-		if e != nil {
-			result.Error = e.Error()
-			return result
-		}
-		rawText = resp.Text
+		names, files, rawResp = queryImpact(client, test.Query, 3)
 
 	case "find_implementations":
-		// get_context on interface returns implementations.
-		resp, e := client.PrepareContext("graphbench", test.Query, "understand")
-		if e != nil {
-			result.Error = e.Error()
-			return result
-		}
-		rawText = resp.Text
+		names, files, rawResp = queryContextRelated(client, test.Query)
 
 	default:
 		result.Error = fmt.Sprintf("unknown query_type %q", test.QueryType)
 		return result
 	}
 
-	// Extract names and files from the response text.
-	result.ActualNames = extractNamesFromResponse(rawText)
-	result.ActualFiles = extractFilesFromResponse(rawText)
+	result.ActualNames = names
+	result.ActualFiles = files
+	if rawResp == "" {
+		rawResp = "(empty response)"
+	}
+	// Store truncated raw response for debugging.
+	result.RawResponse = truncate(rawResp, 500)
 
-	// Compute metrics: check expected_names against actual_names,
-	// and expected_files against actual_files. Combine both sets.
-	hits, total := 0, 0
+	// Check for error responses.
+	if strings.Contains(rawResp, "entity not found") {
+		result.Error = "entity not found"
+		return result
+	}
+
+	// Compute Recall: what fraction of expected items were found?
+	recallHits, recallTotal := 0, 0
 	if len(test.ExpectedNames) > 0 {
-		h, t := setOverlap(test.ExpectedNames, result.ActualNames)
-		hits += h
-		total += t
+		h, t := setOverlap(test.ExpectedNames, names)
+		recallHits += h
+		recallTotal += t
 	}
 	if len(test.ExpectedFiles) > 0 {
-		h, t := setOverlap(test.ExpectedFiles, result.ActualFiles)
-		hits += h
-		total += t
+		h, t := setOverlapFiles(test.ExpectedFiles, files)
+		recallHits += h
+		recallTotal += t
+	}
+	if recallTotal > 0 {
+		result.Recall = float64(recallHits) / float64(recallTotal)
 	}
 
-	if total > 0 {
-		result.Recall = float64(hits) / float64(total)
-	}
-
-	// Precision: of all things returned, how many were expected?
-	actualTotal := len(result.ActualNames) + len(result.ActualFiles)
-	if actualTotal > 0 {
-		expectedSet := make(map[string]bool)
-		for _, n := range test.ExpectedNames {
-			expectedSet[normalizeName(n)] = true
-		}
-		for _, f := range test.ExpectedFiles {
-			expectedSet[normalizeFile(f)] = true
-		}
-		precHits := 0
-		for _, n := range result.ActualNames {
-			if expectedSet[normalizeName(n)] {
+	// Compute Precision: what fraction of returned items were expected?
+	precHits, precTotal := 0, 0
+	if len(test.ExpectedNames) > 0 && len(names) > 0 {
+		h, t := setOverlap(names, test.ExpectedNames)
+		// h = how many of `names` appear in `expectedNames`
+		// But we want: how many of actual are in expected. Swap the logic.
+		expectedNameSet := makeNormSet(test.ExpectedNames)
+		for _, n := range names {
+			precTotal++
+			if expectedNameSet[normalizeName(n)] {
 				precHits++
 			}
 		}
-		for _, f := range result.ActualFiles {
-			if expectedSet[normalizeFile(f)] {
+		_ = h
+		_ = t
+	}
+	if len(test.ExpectedFiles) > 0 && len(files) > 0 {
+		expectedFileSet := makeNormFileSet(test.ExpectedFiles)
+		for _, f := range files {
+			precTotal++
+			if matchesFileSet(f, expectedFileSet) {
 				precHits++
 			}
 		}
-		result.Precision = float64(precHits) / float64(actualTotal)
+	}
+	if precTotal > 0 {
+		result.Precision = float64(precHits) / float64(precTotal)
 	}
 
 	if result.Precision+result.Recall > 0 {
@@ -241,45 +331,189 @@ func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test Grap
 	return result
 }
 
-// ─── Response parsing ────────────────────────────────────────────────────────
+// ─── Query helpers (structured JSON parsing) ─────────────────────────────────
 
-var (
-	// Matches file paths like "src/flask/app.py:123" or "lib/router/index.js"
-	filePathRe = regexp.MustCompile(`(?:^|[\s│\|])([a-zA-Z][\w./-]*\.\w{1,10})(?::(\d+))?`)
-	// Matches symbol names like "Flask.run", "Session.request", "func New()"
-	symbolNameRe = regexp.MustCompile(`(?:→|←|calls?|called by|imports?|implements?)\s+[` + "`" + `]?([A-Z]\w+(?:\.\w+)*)`)
-	// Matches names in structured output like "- **Flask.run**" or "• Session.send"
-	bulletNameRe = regexp.MustCompile(`(?:^|\n)\s*[-•*]\s+\*{0,2}([A-Z]\w+(?:\.\w+)*)\*{0,2}`)
-	// Matches names after "Tier" headers: "Tier 1 (direct): Node, OtherNode"
-	tierNameRe = regexp.MustCompile(`(?i)tier\s+\d+[^:]*:\s*(.+)`)
-)
+// queryImpact calls get_impact and extracts node names + affected_files from
+// the structured JSON response.
+func queryImpact(client *agent.SynapsesClient, symbol string, depth int) (names, files []string, raw string) {
+	resp, err := client.GetImpactWithDepth("graphbench", symbol, depth)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("error: %v", err)
+	}
+	raw = resp.Text
 
-func extractNamesFromResponse(text string) []string {
-	seen := make(map[string]bool)
-	var names []string
+	var ir impactResponse
+	if err := json.Unmarshal([]byte(raw), &ir); err != nil {
+		// Fallback: try regex extraction if JSON parse fails.
+		return extractNamesFromText(raw), extractFilesFromText(raw), raw
+	}
 
-	for _, re := range []*regexp.Regexp{symbolNameRe, bulletNameRe} {
-		for _, m := range re.FindAllStringSubmatch(text, -1) {
-			if len(m) >= 2 {
-				name := m[1]
-				norm := normalizeName(name)
-				if !seen[norm] && norm != "" {
-					seen[norm] = true
-					names = append(names, name)
-				}
+	nameSet := make(map[string]bool)
+	for _, tier := range ir.Tiers {
+		for _, node := range tier.Nodes {
+			if node.Name != "" && !nameSet[strings.ToLower(node.Name)] {
+				nameSet[strings.ToLower(node.Name)] = true
+				names = append(names, node.Name)
+			}
+			if node.File != "" {
+				files = appendUniqueFile(files, node.File)
 			}
 		}
 	}
 
-	// Parse tier names from structured impact output.
-	for _, m := range tierNameRe.FindAllStringSubmatch(text, -1) {
-		if len(m) >= 2 {
-			for _, part := range strings.Split(m[1], ",") {
-				name := strings.TrimSpace(part)
-				name = strings.Trim(name, "`*")
-				if name == "" {
-					continue
+	// Also include affected_files from the response.
+	for _, f := range ir.AffectedFiles {
+		files = appendUniqueFile(files, f)
+	}
+
+	return names, files, raw
+}
+
+// queryContextCallees calls get_context (JSON) and extracts callee names+files.
+func queryContextCallees(client *agent.SynapsesClient, entity string) (names, files []string, raw string) {
+	raw, err := client.GetContextJSON("graphbench", entity, "full")
+	if err != nil {
+		return nil, nil, fmt.Sprintf("error: %v", err)
+	}
+
+	var cr contextResponse
+	if err := json.Unmarshal([]byte(raw), &cr); err != nil {
+		return extractNamesFromText(raw), extractFilesFromText(raw), raw
+	}
+
+	for _, callee := range cr.Callees {
+		if callee.Node.Name != "" {
+			names = appendUniqueName(names, callee.Node.Name)
+		}
+		if callee.Node.File != "" {
+			files = appendUniqueFile(files, callee.Node.File)
+		}
+	}
+
+	return names, files, raw
+}
+
+// queryContextRelated calls get_context (JSON) and extracts related nodes
+// (implementations, callers, cross-domain) — used for find_implementations.
+func queryContextRelated(client *agent.SynapsesClient, entity string) (names, files []string, raw string) {
+	raw, err := client.GetContextJSON("graphbench", entity, "full")
+	if err != nil {
+		return nil, nil, fmt.Sprintf("error: %v", err)
+	}
+
+	var cr contextResponse
+	if err := json.Unmarshal([]byte(raw), &cr); err != nil {
+		return extractNamesFromText(raw), extractFilesFromText(raw), raw
+	}
+
+	// Collect related nodes (these include implementations, subtypes, etc.)
+	for _, rel := range cr.Related {
+		if rel.Node.Name != "" {
+			names = appendUniqueName(names, rel.Node.Name)
+		}
+		if rel.Node.File != "" {
+			files = appendUniqueFile(files, rel.Node.File)
+		}
+	}
+
+	// Also check callers — interface implementations appear as callers in some cases.
+	for _, caller := range cr.Callers {
+		if caller.Node.Name != "" {
+			names = appendUniqueName(names, caller.Node.Name)
+		}
+	}
+
+	return names, files, raw
+}
+
+// queryContextFull calls get_context (JSON) and extracts all nodes (callees,
+// callers, related) — used for find_imports which needs the full neighborhood.
+func queryContextFull(client *agent.SynapsesClient, entity string) (names, files []string, raw string) {
+	raw, err := client.GetContextJSON("graphbench", entity, "full")
+	if err != nil {
+		return nil, nil, fmt.Sprintf("error: %v", err)
+	}
+
+	var cr contextResponse
+	if err := json.Unmarshal([]byte(raw), &cr); err != nil {
+		return extractNamesFromText(raw), extractFilesFromText(raw), raw
+	}
+
+	// For imports, we care about callees (outgoing edges from the file).
+	for _, callee := range cr.Callees {
+		if callee.Node.Name != "" {
+			names = appendUniqueName(names, callee.Node.Name)
+		}
+		if callee.Node.File != "" {
+			files = appendUniqueFile(files, callee.Node.File)
+		}
+	}
+
+	// Related nodes may also capture import relationships.
+	for _, rel := range cr.Related {
+		if rel.Node.Name != "" {
+			names = appendUniqueName(names, rel.Node.Name)
+		}
+		if rel.Node.File != "" {
+			files = appendUniqueFile(files, rel.Node.File)
+		}
+	}
+
+	return names, files, raw
+}
+
+// ─── Text fallback extractors (used when JSON parse fails) ───────────────────
+
+func extractNamesFromText(text string) []string {
+	seen := make(map[string]bool)
+	var names []string
+
+	// Parse "Calls: a · b · c" and "Called by: x · y" patterns.
+	for _, prefix := range []string{"Calls:", "Called by:", "DIRECT:", "INDIRECT:", "PERIPHERAL:"} {
+		idx := strings.Index(text, prefix)
+		if idx < 0 {
+			continue
+		}
+		rest := text[idx+len(prefix):]
+		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+			rest = rest[:nl]
+		}
+		// Split on both · (daemon format) and , (common in DIRECT/INDIRECT lines).
+		parts := strings.Split(rest, "·")
+		if len(parts) == 1 {
+			// No · separator found — try comma.
+			parts = strings.Split(rest, ",")
+		}
+		for _, part := range parts {
+			name := strings.TrimSpace(part)
+			name = strings.Trim(name, "`*[]")
+			if name == "" || name == "(none)" {
+				continue
+			}
+			// Strip node type suffix like " method" or " function"
+			if sp := strings.LastIndex(name, " "); sp > 0 {
+				candidate := name[:sp]
+				suffix := strings.ToLower(name[sp+1:])
+				if suffix == "method" || suffix == "function" || suffix == "class" ||
+					suffix == "struct" || suffix == "interface" || suffix == "module" {
+					name = candidate
 				}
+			}
+			norm := normalizeName(name)
+			if !seen[norm] {
+				seen[norm] = true
+				names = append(names, name)
+			}
+		}
+	}
+
+	// Parse "[NodeName] type · file.go:line" headers.
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) > 2 && line[0] == '[' {
+			end := strings.IndexByte(line, ']')
+			if end > 1 {
+				name := line[1:end]
 				norm := normalizeName(name)
 				if !seen[norm] {
 					seen[norm] = true
@@ -292,17 +526,23 @@ func extractNamesFromResponse(text string) []string {
 	return names
 }
 
-func extractFilesFromResponse(text string) []string {
+func extractFilesFromText(text string) []string {
 	seen := make(map[string]bool)
 	var files []string
 
-	for _, m := range filePathRe.FindAllStringSubmatch(text, -1) {
-		if len(m) >= 2 {
-			f := strings.TrimSpace(m[1])
-			norm := normalizeFile(f)
-			if !seen[norm] && looksLikeFile(f) {
-				seen[norm] = true
-				files = append(files, f)
+	for _, line := range strings.Split(text, "\n") {
+		// Look for "file.ext:line" patterns.
+		for _, word := range strings.Fields(line) {
+			word = strings.Trim(word, "·│|`*[](){}")
+			if colon := strings.LastIndex(word, ":"); colon > 0 {
+				word = word[:colon]
+			}
+			if looksLikeFile(word) {
+				norm := normalizeFile(word)
+				if !seen[norm] {
+					seen[norm] = true
+					files = append(files, word)
+				}
 			}
 		}
 	}
@@ -313,7 +553,8 @@ func extractFilesFromResponse(text string) []string {
 func looksLikeFile(s string) bool {
 	ext := filepath.Ext(s)
 	switch ext {
-	case ".py", ".go", ".js", ".ts", ".tsx", ".jsx", ".java", ".rs", ".rb", ".c", ".h", ".cpp", ".hpp":
+	case ".py", ".go", ".js", ".ts", ".tsx", ".jsx", ".java", ".rs", ".rb",
+		".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cs", ".swift", ".kt":
 		return true
 	}
 	return false
@@ -322,41 +563,117 @@ func looksLikeFile(s string) bool {
 // ─── Set operations ──────────────────────────────────────────────────────────
 
 // setOverlap returns (hits, total) where hits = |expected ∩ actual|, total = |expected|.
+// Uses name normalization for matching.
 func setOverlap(expected, actual []string) (int, int) {
-	actualSet := make(map[string]bool, len(actual))
-	for _, a := range actual {
-		actualSet[normalizeName(a)] = true
-		// Also try file normalization.
-		actualSet[normalizeFile(a)] = true
-	}
+	actualSet := makeNormSet(actual)
 	hits := 0
 	for _, e := range expected {
-		if actualSet[normalizeName(e)] || actualSet[normalizeFile(e)] {
+		ne := normalizeName(e)
+		if actualSet[ne] {
+			hits++
+			continue
+		}
+		// Partial match: "Flask.__init__" should match "__init__" or "Flask".
+		// Also "Session.request" should match "request".
+		for _, a := range actual {
+			na := normalizeName(a)
+			if strings.HasSuffix(na, "."+ne) || strings.HasSuffix(ne, "."+na) {
+				hits++
+				break
+			}
+		}
+	}
+	return hits, len(expected)
+}
+
+// setOverlapFiles returns (hits, total) for file path matching.
+// Uses suffix matching so "src/flask/app.py" matches "flask/app.py".
+func setOverlapFiles(expected, actual []string) (int, int) {
+	hits := 0
+	for _, e := range expected {
+		ne := normalizeFile(e)
+		matched := false
+		for _, a := range actual {
+			na := normalizeFile(a)
+			if na == ne || strings.HasSuffix(na, "/"+ne) || strings.HasSuffix(ne, "/"+na) {
+				matched = true
+				break
+			}
+		}
+		if matched {
 			hits++
 		}
 	}
 	return hits, len(expected)
 }
 
+func makeNormSet(items []string) map[string]bool {
+	set := make(map[string]bool, len(items))
+	for _, item := range items {
+		set[normalizeName(item)] = true
+	}
+	return set
+}
+
+func makeNormFileSet(items []string) map[string]bool {
+	set := make(map[string]bool, len(items))
+	for _, item := range items {
+		set[normalizeFile(item)] = true
+	}
+	return set
+}
+
+func matchesFileSet(f string, expectedSet map[string]bool) bool {
+	nf := normalizeFile(f)
+	if expectedSet[nf] {
+		return true
+	}
+	// Suffix match: actual "src/flask/app.py" should match expected "flask/app.py".
+	for expected := range expectedSet {
+		if strings.HasSuffix(nf, "/"+expected) || strings.HasSuffix(expected, "/"+nf) {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeName(s string) string {
 	s = strings.TrimSpace(s)
-	s = strings.Trim(s, "`*\"'")
+	s = strings.Trim(s, "`*\"'[]")
 	return strings.ToLower(s)
 }
 
 func normalizeFile(s string) string {
 	s = strings.TrimSpace(s)
-	s = strings.Trim(s, "`*\"'")
-	// Strip leading "./" or "/"
+	s = strings.Trim(s, "`*\"'[]")
 	s = strings.TrimPrefix(s, "./")
 	s = strings.TrimPrefix(s, "/")
 	return strings.ToLower(s)
 }
 
+func appendUniqueName(names []string, name string) []string {
+	norm := normalizeName(name)
+	for _, existing := range names {
+		if normalizeName(existing) == norm {
+			return names
+		}
+	}
+	return append(names, name)
+}
+
+func appendUniqueFile(files []string, file string) []string {
+	norm := normalizeFile(file)
+	for _, existing := range files {
+		if normalizeFile(existing) == norm {
+			return files
+		}
+	}
+	return append(files, file)
+}
+
 // ─── Repo management ─────────────────────────────────────────────────────────
 
 func ensureRepo(reposDir, repo, commit string) (string, error) {
-	// repo = "pallets/flask" → dir = reposDir/pallets_flask
 	safeName := strings.ReplaceAll(repo, "/", "_")
 	dir := filepath.Join(reposDir, safeName)
 
@@ -367,7 +684,9 @@ func ensureRepo(reposDir, repo, commit string) (string, error) {
 	if _, err := os.Stat(filepath.Join(dir, ".git")); os.IsNotExist(err) {
 		url := fmt.Sprintf("https://github.com/%s.git", repo)
 		log.Printf("  cloning %s ...", url)
-		cmd := exec.Command("git", "clone", "--no-checkout", url, dir)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "git", "clone", "--no-checkout", url, dir)
 		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -375,29 +694,50 @@ func ensureRepo(reposDir, repo, commit string) (string, error) {
 		}
 	}
 
-	// Checkout specific commit.
-	cmd := exec.Command("git", "checkout", commit)
+	// Try checkout directly first (works for branch names, commit SHAs).
+	if tryCheckout(dir, commit) {
+		return dir, nil
+	}
+
+	// Try as a tag: "tags/<commit>" (handles annotated tags).
+	if tryCheckout(dir, "tags/"+commit) {
+		return dir, nil
+	}
+
+	// Fetch tags and retry.
+	fetch := exec.Command("git", "fetch", "--tags", "origin")
+	fetch.Dir = dir
+	fetch.Stdout = os.Stderr
+	fetch.Stderr = os.Stderr
+	_ = fetch.Run()
+
+	if tryCheckout(dir, commit) {
+		return dir, nil
+	}
+	if tryCheckout(dir, "tags/"+commit) {
+		return dir, nil
+	}
+
+	// Last resort: fetch the specific ref.
+	fetch2 := exec.Command("git", "fetch", "origin", commit)
+	fetch2.Dir = dir
+	fetch2.Stdout = os.Stderr
+	fetch2.Stderr = os.Stderr
+	_ = fetch2.Run()
+
+	if tryCheckout(dir, "FETCH_HEAD") {
+		return dir, nil
+	}
+
+	return "", fmt.Errorf("git checkout %s: all strategies failed", commit)
+}
+
+func tryCheckout(dir, ref string) bool {
+	cmd := exec.Command("git", "checkout", ref)
 	cmd.Dir = dir
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		// Try fetching first in case it's a tag.
-		fetch := exec.Command("git", "fetch", "--tags", "--depth=1", "origin", commit)
-		fetch.Dir = dir
-		fetch.Stdout = os.Stderr
-		fetch.Stderr = os.Stderr
-		_ = fetch.Run()
-		// Retry checkout.
-		cmd2 := exec.Command("git", "checkout", commit)
-		cmd2.Dir = dir
-		cmd2.Stdout = os.Stderr
-		cmd2.Stderr = os.Stderr
-		if err := cmd2.Run(); err != nil {
-			return "", fmt.Errorf("git checkout %s: %w", commit, err)
-		}
-	}
-
-	return dir, nil
+	return cmd.Run() == nil
 }
 
 // ─── Data loading ────────────────────────────────────────────────────────────
@@ -408,17 +748,24 @@ func loadGraphBenchData(path string) ([]GraphBenchSuite, error) {
 		return nil, err
 	}
 	var suites []GraphBenchSuite
-	for _, line := range strings.Split(string(data), "\n") {
+	for lineNum, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
 			continue
 		}
 		var s GraphBenchSuite
 		if err := json.Unmarshal([]byte(line), &s); err != nil {
-			log.Printf("graphbench: skip bad line: %v", err)
+			log.Printf("graphbench: skip bad line %d: %v", lineNum+1, err)
+			continue
+		}
+		if s.Repo == "" || len(s.Tests) == 0 {
+			log.Printf("graphbench: skip empty suite at line %d", lineNum+1)
 			continue
 		}
 		suites = append(suites, s)
+	}
+	if len(suites) == 0 {
+		return nil, fmt.Errorf("no valid test suites found in %s", path)
 	}
 	return suites, nil
 }
@@ -426,45 +773,29 @@ func loadGraphBenchData(path string) ([]GraphBenchSuite, error) {
 // ─── Aggregation ─────────────────────────────────────────────────────────────
 
 func aggregateGraphResults(results []GraphBenchTestResult, suites []GraphBenchSuite) *reporter.GraphBenchResult {
-	// Build language map from suites.
-	repoLang := make(map[string]string)
-	for _, s := range suites {
-		repoLang[s.Repo] = s.Language
-	}
-
-	// Aggregate by query_type.
 	byType := make(map[string]*metricAccum)
 	byLang := make(map[string]*metricAccum)
 	overall := &metricAccum{}
+	errorCount := 0
 
 	for _, r := range results {
 		if r.Error != "" {
+			errorCount++
 			continue
 		}
 		if byType[r.QueryType] == nil {
 			byType[r.QueryType] = &metricAccum{}
 		}
 		byType[r.QueryType].add(r.Precision, r.Recall, r.F1)
+
+		if byLang[r.Language] == nil {
+			byLang[r.Language] = &metricAccum{}
+		}
+		byLang[r.Language].add(r.Precision, r.Recall, r.F1)
+
 		overall.add(r.Precision, r.Recall, r.F1)
 	}
 
-	// Aggregate by language — need to match results back to suites.
-	// Build a flat list pairing (result, suite) via index tracking.
-	idx := 0
-	for _, suite := range suites {
-		lang := suite.Language
-		if byLang[lang] == nil {
-			byLang[lang] = &metricAccum{}
-		}
-		for range suite.Tests {
-			if idx < len(results) && results[idx].Error == "" {
-				byLang[lang].add(results[idx].Precision, results[idx].Recall, results[idx].F1)
-			}
-			idx++
-		}
-	}
-
-	// Build result.
 	gbResult := &reporter.GraphBenchResult{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Summary: reporter.GraphBenchMetrics{
@@ -473,6 +804,7 @@ func aggregateGraphResults(results []GraphBenchTestResult, suites []GraphBenchSu
 			F1:        overall.avgF1(),
 		},
 		TotalTests: len(results),
+		ErrorCount: errorCount,
 	}
 
 	for qt, acc := range byType {
@@ -491,7 +823,6 @@ func aggregateGraphResults(results []GraphBenchTestResult, suites []GraphBenchSu
 		})
 	}
 
-	// Include per-test detail.
 	taskResults := make([]interface{}, len(results))
 	for i, r := range results {
 		taskResults[i] = r
@@ -502,7 +833,7 @@ func aggregateGraphResults(results []GraphBenchTestResult, suites []GraphBenchSu
 }
 
 type metricAccum struct {
-	n          int
+	n                 int
 	sumP, sumR, sumF1 float64
 }
 
@@ -532,4 +863,13 @@ func (m *metricAccum) avgF1() float64 {
 		return 0
 	}
 	return m.sumF1 / float64(m.n)
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
