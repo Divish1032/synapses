@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -436,7 +437,7 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 		windowAfter       = 60  // covers most function bodies after the definition line
 		mergeGap          = 10  // merge windows within 10 lines of each other
 		maxRetrievedLines = 500
-		perFileBudget     = 100 // max lines contributed by any single file
+		perFileBudget     = 120 // max lines contributed by any single file
 	)
 	type windowBlock struct {
 		start, end   int
@@ -495,18 +496,52 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 			break
 		}
 		blocks := buildWindows(fileMentions[fs.file])
+		if len(blocks) == 0 {
+			continue
+		}
+		// Top-2 files get a larger budget — they're the most likely to contain
+		// gold context and need more coverage for implementation regions.
+		fileBudget := perFileBudget
+		if i == 0 {
+			fileBudget = perFileBudget * 2 // 240 lines for #1 file
+		}
+		// Two-pass budget distribution: give each block a minimum share,
+		// then allocate remaining budget to denser blocks. This prevents
+		// a single large definition block from starving implementation blocks.
 		fileAdded := 0
-		for _, b := range blocks {
-			if fileAdded >= perFileBudget || len(retrievedLines) >= maxRetrievedLines {
+		minPerBlock := fileBudget / (len(blocks) + 1) // floor share
+		if minPerBlock < 20 {
+			minPerBlock = 20
+		}
+		// Pass 1: each block gets up to minPerBlock lines (centered on mentions).
+		blockUsed := make([]int, len(blocks))
+		for bi, b := range blocks {
+			limit := minPerBlock
+			if limit > b.end-b.start+1 {
+				limit = b.end - b.start + 1
+			}
+			for ll := b.start; ll <= b.end && blockUsed[bi] < limit && fileAdded < fileBudget && len(retrievedLines) < maxRetrievedLines; ll++ {
+				key := fmt.Sprintf("%s:%d", fs.file, ll)
+				if !retrievedLines[key] {
+					retrievedLines[key] = true
+					fileAdded++
+					blockUsed[bi]++
+				}
+			}
+		}
+		// Pass 2: distribute remaining budget to blocks in density order.
+		for bi, b := range blocks {
+			if fileAdded >= fileBudget || len(retrievedLines) >= maxRetrievedLines {
 				break
 			}
-			for ll := b.start; ll <= b.end && fileAdded < perFileBudget && len(retrievedLines) < maxRetrievedLines; ll++ {
+			for ll := b.start + blockUsed[bi]; ll <= b.end && fileAdded < fileBudget && len(retrievedLines) < maxRetrievedLines; ll++ {
 				key := fmt.Sprintf("%s:%d", fs.file, ll)
 				if !retrievedLines[key] {
 					retrievedLines[key] = true
 					fileAdded++
 				}
 			}
+			_ = bi
 		}
 	}
 
@@ -537,6 +572,29 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 			fmt.Printf("%s(%d) ", fs.file, fs.score)
 		}
 		fmt.Println()
+		// Debug: show mention lines for gold files
+		goldFiles := map[string]bool{}
+		for gl := range goldLines {
+			parts := strings.SplitN(gl, ":", 2)
+			if len(parts) == 2 {
+				goldFiles[parts[0]] = true
+			}
+		}
+		for gf := range goldFiles {
+			if mentions, ok := fileMentions[gf]; ok {
+				var mlines []int
+				for ml := range mentions {
+					mlines = append(mlines, ml)
+				}
+				sort.Ints(mlines)
+				if len(mlines) > 10 {
+					mlines = mlines[:10]
+				}
+				fmt.Printf("  [debug] gold file %s mention lines: %v (total=%d)\n", gf, mlines, len(mentions))
+			} else {
+				fmt.Printf("  [debug] gold file %s NOT MENTIONED\n", gf)
+			}
+		}
 	}
 
 	// Compute Context F1.
