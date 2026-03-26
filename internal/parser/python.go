@@ -186,16 +186,18 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		if relPath == "" {
 			return
 		}
-		// Resolve relative import to the target module name.
-		// For "from .ndarray_mixin import X" in astropy/table/table.py,
-		// relPath = "ndarray_mixin", which IS the target module's moduleName.
+		// Resolve relative import to the target module name and file path.
+		// For "from .cli import X" in src/flask/testing.py:
+		//   relPath = "cli" → target file = "src/flask/cli.py"
 		importNodeID := g.MakeNodeID(relPath, relPath)
+		// Compute target file: sibling in same directory.
+		targetFile := filepath.Join(filepath.Dir(filePath), relPath+".py")
 		g.AddNode(&graph.Node{
 			ID:      importNodeID,
 			Type:    graph.NodePackage,
 			Name:    relPath,
 			Package: relPath,
-			File:    filePath,
+			File:    targetFile,
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
 	}); err != nil {
