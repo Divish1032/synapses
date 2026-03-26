@@ -44,9 +44,9 @@
 
 ## Sprint 19: Graph Architecture Fixes ✅
 
-**Goal:** Fix core graph gaps revealed by ContextBench analysis. All code written, tests pass, needs commit.
+**Goal:** Fix core graph gaps revealed by ContextBench analysis.
 
-**Status:** DONE (code complete, uncommitted on `release/0.8.0`)
+**Status:** DONE — committed on `release/0.8.0` (5d04e45, 5032247)
 
 | # | Task | File | Status |
 |---|------|------|--------|
