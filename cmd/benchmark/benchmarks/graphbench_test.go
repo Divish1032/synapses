@@ -307,3 +307,21 @@ func TestMatchesFileSet(t *testing.T) {
 		t.Error("non-matching file should not match")
 	}
 }
+
+func TestExtractPackageName(t *testing.T) {
+	tests := []struct {
+		callee, queryFile, want string
+	}{
+		{"werkzeug.serving.run_simple", "src/flask/app.py", "werkzeug"},
+		{"click.command", "src/flask/cli.py", "click"},
+		{"Flask.run", "src/flask/app.py", ""},         // same package
+		{"json.dumps", "src/flask/app.py", "json"},
+		{"simple_func", "src/flask/app.py", ""},        // no dots
+	}
+	for _, tt := range tests {
+		got := extractPackageName(tt.callee, tt.queryFile)
+		if got != tt.want {
+			t.Errorf("extractPackageName(%q, %q) = %q, want %q", tt.callee, tt.queryFile, got, tt.want)
+		}
+	}
+}
