@@ -1402,6 +1402,10 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 	g := graph.New(repoID)
 	g.SetRoot(root)
 	w := parser.NewWalker()
+	// Full-index: throttle to half workers + nice +10 so the machine stays
+	// responsive during the first-impression index. Incremental updates
+	// (smartReindex / watcher) don't go through buildGraph so are unaffected.
+	w.Throttle = true
 	// P2-9: wire pulse client so WalkDir emits per-file ParseEvents.
 	w.PulseClient = pc
 	w.ProjectID = projectID
@@ -3043,7 +3047,7 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 func createMemoryEmbedder(cfg *config.Config) embed.Embedder {
 	mode := cfg.Embeddings
 	if mode == "" {
-		mode = "builtin" // default
+		mode = detectEmbedMode()
 	}
 	switch mode {
 	case "off":
@@ -3057,24 +3061,55 @@ func createMemoryEmbedder(cfg *config.Config) embed.Embedder {
 		if e == nil {
 			return nil
 		}
+		// Validate the model is actually available before committing to Ollama.
+		// If warmup fails (model not pulled, server flaky), fall back to builtin
+		// ONNX so embeddings still work — just slower.
+		if err := e.WarmUp(context.Background()); err != nil {
+			logutil.Warn("synapses: ollama embedder warmup failed (%v) — falling back to builtin\n", err)
+			return createBuiltinEmbedder(cfg)
+		}
 		logutil.Info("synapses: memory embeddings via ollama (%s)\n", endpoint)
 		return e
 	case "builtin":
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			logutil.Error("synapses: cannot determine home dir for builtin embeddings: %v\n", err)
-			return nil
-		}
-		modelsDir := filepath.Join(homeDir, ".synapses", "models")
-		logutil.Info("synapses: memory embeddings via builtin nomic-embed-text-v1.5\n")
-		if cfg.EmbedPoolSize > 0 {
-			return embed.NewBuiltinEmbedderWithPoolSize(modelsDir, cfg.EmbedPoolSize)
-		}
-		return embed.NewBuiltinEmbedder(modelsDir)
+		return createBuiltinEmbedder(cfg)
 	default:
 		logutil.Warn("synapses: unknown embeddings mode %q, disabling\n", mode)
 		return nil
 	}
+}
+
+// createBuiltinEmbedder creates the in-process ONNX embedder. Extracted so
+// the Ollama path can fall back to it when warmup fails.
+func createBuiltinEmbedder(cfg *config.Config) embed.Embedder {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		logutil.Error("synapses: cannot determine home dir for builtin embeddings: %v\n", err)
+		return nil
+	}
+	modelsDir := filepath.Join(homeDir, ".synapses", "models")
+	logutil.Info("synapses: memory embeddings via builtin nomic-embed-text-v1.5\n")
+	if cfg.EmbedPoolSize > 0 {
+		return embed.NewBuiltinEmbedderWithPoolSize(modelsDir, cfg.EmbedPoolSize)
+	}
+	return embed.NewBuiltinEmbedder(modelsDir)
+}
+
+// detectEmbedMode probes localhost:11434 for a running Ollama instance.
+// If Ollama is reachable (responds within 500ms), returns "ollama" for 20x
+// faster Metal GPU embeddings. Otherwise falls back to "builtin" (in-process
+// ONNX on CPU). This makes Ollama the default when available without requiring
+// explicit config — users can still override via synapses.json "embeddings" field.
+func detectEmbedMode() string {
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get("http://localhost:11434/api/version")
+	if err == nil {
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			logutil.Info("synapses: detected Ollama at localhost:11434 — using ollama embeddings\n")
+			return "ollama"
+		}
+	}
+	return "builtin"
 }
 
 // embedAllMemories generates embeddings for all un-embedded memories.

@@ -658,3 +658,92 @@ func BenchmarkMemoryVectorSearch_BruteForce(b *testing.B) {
 		_, _ = st.memoryVectorSearchBruteForce(normQuery, 10)
 	}
 }
+
+// TestHNSW_PersistenceRoundTrip verifies save → load preserves search results.
+func TestHNSW_PersistenceRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	st := openHNSWTestStore(t)
+	defer st.Close()
+
+	const dims = 384
+	rng := rand.New(rand.NewSource(42))
+
+	// Insert some vectors.
+	for i := 0; i < 50; i++ {
+		vec := makeRandomUnitVec(rng, dims)
+		st.hnswAdd(fmt.Sprintf("mem-%d", i), vec)
+	}
+
+	// Verify index works.
+	queryVec := makeRandomUnitVec(rng, dims)
+	resultsBefore := st.hnswSearch(queryVec, 5)
+	if len(resultsBefore) == 0 {
+		t.Fatal("expected search results before save")
+	}
+
+	// Save to disk.
+	path := st.hnswMemPath()
+	saveHNSWToFile(st.hnswMemIndex, path)
+
+	// Load into a fresh graph.
+	loaded := loadHNSW(path, 50)
+	if loaded == nil {
+		t.Fatal("loadHNSW returned nil")
+	}
+	if loaded.Len() != 50 {
+		t.Errorf("loaded graph has %d vectors, want 50", loaded.Len())
+	}
+
+	// Replace the in-memory index with the loaded one and search again.
+	st.hnswMemMu.Lock()
+	st.hnswMemIndex = loaded
+	st.hnswMemMu.Unlock()
+
+	resultsAfter := st.hnswSearch(queryVec, 5)
+	if len(resultsAfter) == 0 {
+		t.Fatal("expected search results after load")
+	}
+
+	// Top-1 must match.
+	if resultsBefore[0].id != resultsAfter[0].id {
+		t.Errorf("top-1 changed after persistence: before=%s after=%s", resultsBefore[0].id, resultsAfter[0].id)
+	}
+}
+
+// TestHNSW_LoadStaleFile verifies that a stale file is rejected.
+func TestHNSW_LoadStaleFile(t *testing.T) {
+	t.Parallel()
+
+	st := openHNSWTestStore(t)
+	defer st.Close()
+
+	const dims = 384
+	rng := rand.New(rand.NewSource(99))
+
+	// Insert 100 vectors and save.
+	for i := 0; i < 100; i++ {
+		st.hnswAdd(fmt.Sprintf("mem-%d", i), makeRandomUnitVec(rng, dims))
+	}
+	path := st.hnswMemPath()
+	saveHNSWToFile(st.hnswMemIndex, path)
+
+	// File has 100, but expected count is 50 — should be rejected as stale.
+	loaded := loadHNSW(path, 50)
+	if loaded != nil {
+		t.Error("expected stale file to be rejected (count mismatch 100 vs 50)")
+	}
+
+	// expectedCount=0 but file has data — should be rejected.
+	loaded = loadHNSW(path, 0)
+	if loaded != nil {
+		t.Error("expected stale file to be rejected (db empty, file has data)")
+	}
+
+	// expectedCount close to actual (within 5%) — should succeed.
+	loaded = loadHNSW(path, 98)
+	if loaded == nil {
+		t.Error("expected file to be accepted (count within tolerance)")
+	}
+}
+

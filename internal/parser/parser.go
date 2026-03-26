@@ -86,6 +86,12 @@ type Walker struct {
 	ProjectID     string
 	mMATLABParser LanguageParser
 	mObjCParser   LanguageParser
+
+	// Throttle reduces parsing concurrency to half the normal worker count
+	// and lowers the OS scheduling priority (nice +10). Use this for the
+	// initial full-index so the machine stays responsive during the first
+	// impression — incremental updates are already fast and don't need this.
+	Throttle bool
 }
 
 // NewWalker creates a Walker pre-loaded with all built-in language parsers.
@@ -294,10 +300,16 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 
 	// Phase 2 — parallel read + parse.
 	// Worker count is bounded to 8 to avoid opening too many files at once on
-	// systems with low file-descriptor limits.
+	// systems with low file-descriptor limits. When Throttle is set (initial
+	// full-index), halve the workers so the machine stays responsive.
 	workers := runtime.NumCPU()
 	if workers > 8 {
 		workers = 8
+	}
+	if w.Throttle {
+		workers = max(1, workers/2)
+		restorePriority := lowerProcessPriority()
+		defer restorePriority()
 	}
 
 	sem := make(chan struct{}, workers)
