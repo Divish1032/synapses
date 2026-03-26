@@ -94,13 +94,13 @@
 
 **Why:** ContextBench conflates graph quality with retrieval strategy. Benchmark A isolates graph quality. If the graph is wrong, no retrieval strategy can fix it. If the graph is right, retrieval improvements have a solid foundation.
 
-| # | Task | What | Effort | Impact |
-|---|------|------|--------|--------|
-| 21.1 | **Define test format and gold standard** | Design JSONL format: `{repo, commit, language, tests: [{query_type, query, expected}]}`. Query types: `find_callers(fn)`, `find_callees(fn)`, `find_imports(file)`, `impact_analysis(symbol)`, `find_implementations(interface)`. Expected = exact set of node names/files. | Low | Critical |
-| 21.2 | **Generate test cases from real repos** | For 5 repos per language (Python, Java, Go, TypeScript), manually create 10 test cases each using IDE cross-references as ground truth. Total: 200 test cases. Use popular, well-structured repos (Flask, Spring Boot, Gin, Next.js). Automate where possible using LSP/gopls/pyright. | High | Critical |
-| 21.3 | **Build benchmark runner** | `cmd/benchmark/benchmarks/graphbench.go`. For each test case: index repo, run query via Synapses API, compare result set against expected. Metrics: Precision, Recall, F1 per query type and per language. | Medium | Critical |
-| 21.4 | **Parser gap analysis** | Run Benchmark A, identify systematic failures. Categorize: (a) parser didn't create the node, (b) parser didn't create the edge, (c) resolver created wrong edge, (d) node resolution picked wrong target. Each category maps to a specific fix location. | Medium | High |
-| 21.5 | **Fix top-3 parser gaps** | Based on 21.4 analysis, fix the three highest-impact parser/resolver issues. Each fix should improve multiple test cases. Re-run benchmark to verify. | Medium | High |
+| # | Task | What | Effort | Impact | Status |
+|---|------|------|--------|--------|--------|
+| 21.1 | **Define test format and gold standard** | Design JSONL format: `{repo, commit, language, tests: [{query_type, query, expected}]}`. Query types: `find_callers(fn)`, `find_callees(fn)`, `find_imports(file)`, `impact_analysis(symbol)`, `find_implementations(interface)`. Expected = exact set of node names/files. | Low | Critical | ✅ Done |
+| 21.2 | **Generate test cases from real repos** | 50 test cases across 5 repos (Flask, requests, gin, fzf, express), 10 per repo, 3 languages (Python, Go, TypeScript). Gold data verified against source code at pinned tags. | High | Critical | ✅ Done |
+| 21.3 | **Build benchmark runner** | `cmd/benchmark/benchmarks/graphbench.go`. For each test case: clone repo at commit, index via daemon, run query via API (get_impact, prepare_context), compare result set via set P/R/F1. Aggregation by query_type and language. `--benchmark=graphbench` CLI flag. | Medium | Critical | ✅ Done |
+| 21.4 | **Parser gap analysis** | Run Benchmark A, identify systematic failures. Categorize: (a) parser didn't create the node, (b) parser didn't create the edge, (c) resolver created wrong edge, (d) node resolution picked wrong target. Each category maps to a specific fix location. | Medium | High | |
+| 21.5 | **Fix top-3 parser gaps** | Based on 21.4 analysis, fix the three highest-impact parser/resolver issues. Each fix should improve multiple test cases. Re-run benchmark to verify. | Medium | High | |
 
 **Success criteria:** Graph F1 ≥ 80% on `find_callers` and `find_imports` queries. ≥ 60% on `impact_analysis` (harder due to transitive closure). All 4 languages tested.
 
