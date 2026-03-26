@@ -283,7 +283,11 @@ var stripInternalPaths = StripInternalPaths
 // recognised code extension. Used to gate the FindByFile fallback so that
 // ordinary symbol queries don't accidentally match file nodes.
 func looksLikeFilePath(q string) bool {
-	if !strings.Contains(q, "/") {
+	// Bare filenames (no '/'): only accept if the extension is a code extension
+	// AND the stem doesn't look like a qualified symbol name (e.g. "render.JSON").
+	// The heuristic: bare filenames must be lowercase (files like "gin.go",
+	// "context.go") to avoid false positives on "Engine.Run", "render.JSON".
+	if !strings.Contains(q, "/") && q != strings.ToLower(q) {
 		return false
 	}
 	ext := strings.ToLower(filepath.Ext(q))
