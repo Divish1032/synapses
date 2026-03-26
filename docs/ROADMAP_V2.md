@@ -1,14 +1,14 @@
 # SynapsesOS — Roadmap V2
 
-*Post-benchmark roadmap. Originally written 2026-03-26. Updated 2026-03-26 after ContextBench architecture analysis revealed core graph gaps. V1 (Sprints 1-18) and V2-A/D1-D2/E1-E2-E5/F are fully shipped. V2 now focuses on three measurement tracks: graph correctness, context retrieval quality, and LLM augmentation delta.*
+*Post-benchmark roadmap. Originally written 2026-03-26. Updated 2026-03-27 after deep analysis revealed ContextBench is the wrong primary benchmark for Synapses — it measures NL→Code fault localization, but Synapses' value is structural code intelligence. V2 now prioritizes benchmarks that measure what Synapses actually does, then adds complementary retrieval to prove delta value.*
 
 ---
 
 ## Current State
 
 - **RepoBench-R:** 59.9% Acc@5 (200 repos, 11,453 samples, Python + Java). Ties BM25. Neural embeddings add zero lift. Hard-difficulty gap is structural — lexical engineering exhausted.
-- **ContextBench:** 8.3% F1 (5 tasks, Python). Improved from 4.3% baseline through architecture fixes. Graph structural intelligence is now measurable but weak — most gold context requires semantic understanding the graph doesn't have.
-- **Architecture fixes shipped (uncommitted):** Python relative imports, IMPORTS reverse traversal, pickBestNode exact-match tier, provenance weighting in search, ambiguous call guard, struct-level ImpactAnalysis, benchmark `affected_files` parsing.
+- **GraphBench:** 21.8% F1 (50 queries, 5 repos, 3 languages). Callers=42.9%, imports=weak, JS/TS near-zero. This is the benchmark that tests what Synapses actually does.
+- **ContextBench:** 4.7% F1 (20 tasks, Python, deterministic). Most failures are NL→Code vocabulary gap — the graph can't bridge "bug description in English" → "buggy function in code" without text retrieval. This benchmark does NOT test Synapses' core value.
 
 ---
 
@@ -20,24 +20,44 @@
 
 ---
 
+## Key Insight (2026-03-27)
+
+**ContextBench measures fault localization (NL→Code retrieval). Synapses is a structural code intelligence tool (Code→Code graph).** These are fundamentally different problems:
+
+- **Fault localization** needs: BM25/embedding search over source text, NL-to-code vocabulary bridging, semantic understanding. State-of-the-art systems (Agentless, Meta-RAG) use LLMs and dense embeddings for this — achieving 75-85% file-level accuracy.
+- **Structural intelligence** needs: accurate call graphs, import chains, type hierarchies, impact analysis. No BM25 or embedding can answer "what breaks if I change this function?"
+
+Chasing ContextBench F1 by bolting on BM25 source search would make Synapses score higher on a benchmark that doesn't test its value. Instead:
+
+1. **First**: Build the right benchmarks that test structural intelligence (GraphBench improvements + LLM augmentation delta)
+2. **Then**: Add complementary retrieval (BM25 source search) and measure the *delta* — does Synapses graph + BM25 beat BM25 alone?
+
+---
+
 ## Sprint Sequence
 
 ```
   V1 Sprints 1-18 ...................... ALL SHIPPED
-  V2-A: Retrieval Quality .............. ALL DONE (10 tasks — 4 shipped, 6 invalidated)
-  V2-D1-D2: Java Benchmark ............ DONE (59.0% Acc@5, within 2pp of Python)
-  V2-E1-E2-E5: Embedding/Reranking .... DONE (cross-encoder, code embeddings, adaptive fusion)
-  V2-F: Production Hardening ........... ALL DONE (startup, RAM, graceful degradation, crash recovery)
-  V2-B1-B2: Benchmark Infra ........... DONE (ContextBench runner, context access logger)
-  V2-C1-C2: Tool Surface .............. DONE (tool tiering, first-session highlights)
+  V2-A: Retrieval Quality .............. ALL DONE
+  V2-D1-D2: Java Benchmark ............ DONE (59.0% Acc@5)
+  V2-E1-E2-E5: Embedding/Reranking .... DONE
+  V2-F: Production Hardening ........... ALL DONE
+  V2-B1-B2: Benchmark Infra ........... DONE
+  V2-C1-C2: Tool Surface .............. DONE
+
+  ── COMPLETED ──
+
+  Sprint 19: Graph Architecture Fixes .. 6 tasks — DONE
+  Sprint 20: ContextBench Analysis ..... Harness improvements + deep diagnosis — DONE (revealed paradigm mismatch)
+  Sprint 21: GraphBench v1 ............. 5 tasks — DONE (21.8% F1 baseline)
 
   ── ACTIVE / UPCOMING ──
 
-  Sprint 19: Graph Architecture Fixes .. 6 tasks — DONE, needs commit
-  Sprint 20: ContextBench F1 Push ...... 6 tasks — Find and fix remaining gaps
-  Sprint 21: Graph Accuracy Benchmark .. 5 tasks — Benchmark A (structural correctness)
-  Sprint 22: LLM Augmentation Benchmark  5 tasks — Benchmark B (Synapses + LLM delta)
-  Sprint 23: Tool & Retrieval Polish ... 5 tasks — Remaining V2-C/E/D tasks
+  Sprint 22: GraphBench v2 ............. 7 tasks — Push structural accuracy to 60%+
+  Sprint 23: LLM Augmentation Bench .... 5 tasks — Prove Synapses product value (delta measurement)
+  Sprint 24: BM25 Source Search ........ 5 tasks — Add complementary text retrieval to Synapses core
+  Sprint 25: ContextBench Honest ....... 5 tasks — Measure BM25-only vs BM25+Graph delta
+  Sprint 26: Tool & Retrieval Polish ... 5 tasks — Production quality pass
 ```
 
 ---
@@ -57,58 +77,73 @@
 | 19.5 | **Ambiguous method name guard** — Block unqualified call resolution for 50+ common names (`write`, `read`, `get`, `set`, `close`, etc.). Prevents `file.write()` → `HTML.write` false positives. | `internal/resolver/resolver.go` | ✅ Done |
 | 19.6 | **Python relative import parsing** — Tree-sitter query for `(relative_import (dotted_name))` AST nodes. Creates NodePackage + IMPORTS edge for `from .foo import Bar`. Previously only absolute imports were parsed. | `internal/parser/python.go` | ✅ Done |
 
-**Key learning:** Daemon caches parsed graphs in `~/.synapses/cache/`. After parser changes, stale caches must be cleared or the fixes are invisible. This blocked diagnosis for hours.
+**Key learning:** Daemon caches parsed graphs in `~/.synapses/cache/`. After parser changes, stale caches must be cleared or the fixes are invisible.
 
 ---
 
-## Sprint 20: ContextBench F1 Push
+## Sprint 20: ContextBench Analysis ✅ (Scope Changed)
 
-**Goal:** Improve ContextBench F1 from 8.3% toward 15%+ by finding and fixing the remaining retrieval gaps. Not over-engineering — find the highest-leverage gaps through task-by-task failure analysis.
+**Original goal:** Push ContextBench F1 from 8.3% to 15%+.
 
-**Current scores (5-task pilot, Python):**
+**Actual outcome:** Deep analysis revealed ContextBench is testing NL→Code fault localization, not structural intelligence. Harness-level fixes (multi-block retrieval, filename boosting, deterministic sorting) yielded marginal improvements (4.3% → 4.7% deterministic baseline). 14/20 tasks score 0% because the tools never find the right file — this is a vocabulary gap, not a graph gap.
 
-| Task | F1 | Issue |
-|------|-----|-------|
-| Task 1 (separable.py) | 0.0% | Right file found, but retrieval window (lines 80-166) doesn't reach gold (lines 207-317). Window positioning problem. |
-| Task 2 (NdarrayMixin→table.py) | 12.9% | Fixed by Sprint 19. `table.py` now found via IMPORTS. |
-| Task 3 (coordinates) | 16.9% | Partial — some gold files found, but `attributes.py` missed. |
-| Task 4 (html.py) | 0.0% | Right file is top-mentioned (18 mentions), but retrieval starts at line 42. Gold is at lines 345-421. Deep-in-file problem. |
-| Task 5 (sliced_wcs.py) | 11.8% | Partial — file found but line coverage misaligned. |
+**Key findings:**
+- Earlier reported F1 scores (8.3%) were inflated by Go map iteration randomness — results weren't reproducible
+- True deterministic baseline: 4.7% F1 (20 tasks, Python)
+- Root cause: Synapses searches graph node names, not source code text. Bug reports use natural language; code uses identifiers. No keyword overlap = no retrieval.
+- State-of-the-art fault localization (Agentless, Meta-RAG) uses LLM-based localization + dense embeddings — fundamentally different from structural graph analysis
+- **Conclusion:** ContextBench F1 should be improved by adding BM25 source search as a complementary capability, then measuring the delta that Synapses graph adds on top
+
+**Harness improvements shipped (committed):**
+- Deterministic sorting (filename tiebreaker + block start-line tiebreaker)
+- Multi-block per-file retrieval with density-sorted windows
+- Filename-entity boost (CamelCase→snake_case matching)
+- Extern/vendor file penalization
+- Debug diagnostics for gold file mention analysis
+
+---
+
+## Sprint 21: GraphBench v1 ✅
+
+**Goal:** Build a benchmark that directly tests Synapses' structural analysis correctness.
+
+**Status:** DONE — 21.8% F1 baseline established.
+
+| # | Task | What | Status |
+|---|------|------|--------|
+| 21.1 | **Define test format and gold standard** | JSONL format with query types: find_callers, find_callees, find_imports, impact_analysis, find_implementations. | ✅ Done |
+| 21.2 | **Generate test cases from real repos** | 50 test cases across 5 repos (Flask, requests, gin, fzf, express), 3 languages. | ✅ Done |
+| 21.3 | **Build benchmark runner** | `cmd/benchmark/benchmarks/graphbench.go` with set P/R/F1 scoring. | ✅ Done |
+| 21.4 | **Parser gap analysis** | Baseline F1=19.4%. Python best (39%), Go weak (14%), TS near-zero (2%). | ✅ Done |
+| 21.5 | **Fix top-3 parser gaps** | find_callers fix (8.3%→42.9%), find_imports multi-symbol strategy. Overall 19.4%→21.8%. | ✅ Done |
+
+**Key gaps identified:** (1) find_imports F1=5% — no file-level entities, (2) JS/TS near-zero — require()/module.exports barely parsed, (3) Go imports weak — package-level resolution incomplete.
+
+---
+
+## Sprint 22: GraphBench v2 — Structural Accuracy Push 🔥 NEXT
+
+**Goal:** Push GraphBench F1 from 21.8% to 60%+. This is Synapses' core product — if the graph is wrong, nothing else matters.
+
+**Why this is #1 priority:** GraphBench directly tests what Synapses promises: accurate structural understanding. Every point of improvement here means better prepare_context, better get_impact, better search results. This is the foundation everything else builds on.
 
 | # | Task | What | Effort | Impact |
 |---|------|------|--------|--------|
-| 20.1 | **Task-by-task failure analysis (20 tasks)** | Run full 20-task ContextBench. For each task scoring <5% F1, diagnose: (a) is the right file found? (b) is the right region found? (c) what tool call would have found it? Categorize failures into: file-miss, region-miss, entity-miss, tool-gap. | Medium | Critical |
-| 20.2 | **Retrieval window tuning** | Tasks 1 and 4 find the right file but retrieve the wrong region (top of file instead of gold region deeper in). Investigate: use line mentions from tools to center windows on mentioned lines rather than starting from line 1. Density-based window placement. | Medium | High |
-| 20.3 | **Multi-window per file** | Currently retrieves one contiguous window per file. Gold context often spans multiple disjoint regions (e.g., imports at top + implementation at line 300). Allow 2-3 windows per file when mention density shows multiple clusters. | Medium | High |
-| 20.4 | **Entity extraction improvement** | The harness extracts entities from the problem statement using regex. Missed entities = missed tool calls = missed files. Audit entity extraction on all 20 tasks. Consider: CamelCase splitting, backtick-quoted identifiers, function signatures in issue text. | Low | Medium |
-| 20.5 | **Benchmark `affected_files` path normalization** | `affected_files` returns absolute paths (`/private/tmp/cb_repos/...`). The `addMention` function normalizes to repo-relative, but verify this works for all path formats (symlinks, `/private/tmp` vs `/tmp` on macOS). | Low | Medium |
-| 20.6 | **Run 20-task benchmark with all fixes** | Full 20-task run after 20.2-20.5 fixes. Compare against 8.3% baseline. Target: 12%+ F1. | Low | Critical |
+| 22.1 | **File-level entity support** | Add NodeFile entities to the graph so find_imports queries can resolve to actual files. Currently imports create NodePackage edges but no file-level nodes for file-to-file import queries. Parser change across Python, Go, TS. | High | Critical |
+| 22.2 | **find_callers precision improvement** | get_context callers field returns too many results (includes transitive callers). Add depth-1-only mode or direct-callers filter. Measure: current callers F1=42.9%, target ≥70%. | Medium | High |
+| 22.3 | **JS/TS require() and module.exports parsing** | Express.js scores ~0% because `require('express')` and `module.exports = router` aren't parsed as imports/exports. Add tree-sitter queries for CommonJS patterns. | High | High |
+| 22.4 | **Go package-level import resolution** | Go imports resolve to packages but not to specific symbols. `import "net/http"` should create edges to `http.Handler`, `http.ListenAndServe`, etc. when those symbols are used. | Medium | Medium |
+| 22.5 | **Expand test cases to 100** | Add 50 more test cases: 20 Python (focus on class hierarchies, decorators), 15 Go (interfaces, goroutine patterns), 15 TS (class inheritance, async/await chains). More diverse repos. | Medium | High |
+| 22.6 | **find_implementations query type** | Test interface→concrete type resolution. Python ABCs, Go interfaces, TS abstract classes. Currently untested — could be a strength or a gap. | Medium | Medium |
+| 22.7 | **Cross-file data flow tracking** | Variables assigned in one file and used in another (via imports) should create DATA_FLOWS edges. Currently only intra-file data flow is tracked. Critical for understanding how values propagate. | High | Medium |
 
-**Success criteria:** F1 ≥ 12% on 20-task Python ContextBench. At least 10/20 tasks score >0% F1 (file found).
-
----
-
-## Sprint 21: Graph Accuracy Benchmark (Benchmark A)
-
-**Goal:** Build a benchmark that directly tests Synapses' structural analysis correctness — does the graph accurately represent code relationships? This is what Synapses *actually does*, unlike ContextBench which tests retrieval.
-
-**Why:** ContextBench conflates graph quality with retrieval strategy. Benchmark A isolates graph quality. If the graph is wrong, no retrieval strategy can fix it. If the graph is right, retrieval improvements have a solid foundation.
-
-| # | Task | What | Effort | Impact | Status |
-|---|------|------|--------|--------|--------|
-| 21.1 | **Define test format and gold standard** | Design JSONL format: `{repo, commit, language, tests: [{query_type, query, expected}]}`. Query types: `find_callers(fn)`, `find_callees(fn)`, `find_imports(file)`, `impact_analysis(symbol)`, `find_implementations(interface)`. Expected = exact set of node names/files. | Low | Critical | ✅ Done |
-| 21.2 | **Generate test cases from real repos** | 50 test cases across 5 repos (Flask, requests, gin, fzf, express), 10 per repo, 3 languages (Python, Go, TypeScript). Gold data verified against source code at pinned tags. | High | Critical | ✅ Done |
-| 21.3 | **Build benchmark runner** | `cmd/benchmark/benchmarks/graphbench.go`. For each test case: clone repo at commit, index via daemon, run query via API (get_impact, prepare_context), compare result set via set P/R/F1. Aggregation by query_type and language. `--benchmark=graphbench` CLI flag. | Medium | Critical | ✅ Done |
-| 21.4 | **Parser gap analysis** | Baseline F1=19.4%. Three systematic gaps: (1) find_imports F1=5% — daemon has no file-level entities (root:null), (2) find_callers F1=8.3% — get_impact BFS returns 50+ nodes vs 1 expected, (3) Express JS F1≈0% — require()/module.exports barely parsed. Python best (39%), Go weak (14%), TS near-zero (2%). | Medium | High | ✅ Done |
-| 21.5 | **Fix top-3 parser gaps** | Fix 1: find_callers switched from get_impact to get_context callers field (F1: 8.3%→42.9%). Fix 2: find_imports multi-symbol strategy queries related symbols' callees. Fix 3: identified JS/TS parser limitation as future work (not benchmark-fixable). Overall F1: 19.4%→21.8%. | Medium | High | ✅ Done |
-
-**Success criteria:** Graph F1 ≥ 80% on `find_callers` and `find_imports` queries. ≥ 60% on `impact_analysis` (harder due to transitive closure). All 4 languages tested.
+**Success criteria:** GraphBench F1 ≥ 60% overall. find_callers ≥ 70%, find_imports ≥ 50%, JS/TS ≥ 20%.
 
 ---
 
-## Sprint 22: LLM Augmentation Benchmark (Benchmark B)
+## Sprint 23: LLM Augmentation Benchmark — Product Value Proof
 
-**Goal:** Measure Synapses' actual product value — does giving an LLM access to Synapses tools make it better at solving real coding tasks? This is the number that matters for users.
+**Goal:** Answer THE question: *Does giving an LLM access to Synapses tools make it better at solving real coding tasks?* This is the number that justifies Synapses' existence.
 
 **Design:** Run Claude on SWE-Bench-Verified tasks in two conditions:
 - **Control:** Claude + repo access (read files, grep, run tests) — no Synapses
@@ -117,27 +152,81 @@
 
 | # | Task | What | Effort | Impact |
 |---|------|------|--------|--------|
-| 22.1 | **Agent scaffold** | Build a minimal agent loop in `cmd/benchmark/benchmarks/swebench.go`: takes issue text → calls tools → produces patch. Two modes: `baseline` (file read/grep only) and `synapses` (+ MCP tools). Use Claude API with tool_use. Deterministic (temperature=0). | High | Critical |
-| 22.2 | **SWE-Bench-Verified dataset integration** | Download SWE-Bench-Verified dataset (500 tasks, 12 repos). Build repo checkout + pre-indexing pipeline. Cache indexed repos by `repo@commit`. | Medium | Critical |
-| 22.3 | **Evaluation harness** | Run agent on N tasks in both conditions. Produce prediction JSONL. Use SWE-bench evaluation Docker images to score. Output: per-task pass/fail for both conditions, aggregate Pass@1, delta with bootstrap CI. | High | Critical |
-| 22.4 | **Pilot run (20 tasks)** | Run on 20 diverse tasks (mix of Python repos, difficulty levels). Measure delta. If delta < +2pp, analyze why — are tools not being called? Are tool results not helpful? Is the agent scaffold too simple? | Medium | High |
-| 22.5 | **Tool usage analysis** | For each task, log which Synapses tools were called and whether the tool response contained information that appeared in the final patch. Compute "tool contribution rate" — fraction of successful patches where a Synapses tool provided the key insight. | Medium | Medium |
+| 23.1 | **Agent scaffold** | Minimal agent loop in `cmd/benchmark/benchmarks/swebench.go`: issue text → tool calls → patch. Two modes: `baseline` (file read/grep only) and `synapses` (+ MCP tools). Claude API with tool_use, temperature=0. | High | Critical |
+| 23.2 | **SWE-Bench-Verified dataset integration** | Download dataset (500 tasks, 12 repos). Build repo checkout + pre-indexing pipeline. Cache indexed repos by `repo@commit`. | Medium | Critical |
+| 23.3 | **Evaluation harness** | Run agent on N tasks in both conditions. Produce prediction JSONL. Use SWE-bench eval Docker images. Output: per-task pass/fail, aggregate Pass@1, delta with bootstrap CI. | High | Critical |
+| 23.4 | **Pilot run (20 tasks)** | Run on 20 diverse tasks. Measure delta. If delta < +2pp, analyze why — are tools not being called? Are tool results not helpful? Is the agent scaffold too simple? | Medium | High |
+| 23.5 | **Tool usage analysis** | Log which Synapses tools were called per task. Compute "tool contribution rate" — fraction of successful patches where a Synapses tool provided the key insight. | Medium | Medium |
 
-**Success criteria:** Pass@1 delta ≥ +3pp on 20-task pilot. Tool contribution rate ≥ 50% (Synapses tools contributed to at least half of successful patches).
+**Success criteria:** Pass@1 delta ≥ +3pp on 20-task pilot. Tool contribution rate ≥ 50%.
+
+**Key insight:** If this benchmark shows no delta, that's valuable information — it means Synapses' tools aren't surfacing information the LLM can't find on its own. If it shows +5pp or more, that's the pitch deck number.
 
 ---
 
-## Sprint 23: Tool & Retrieval Polish
+## Sprint 24: BM25 Source Code Search — Complementary Retrieval
 
-**Goal:** Remaining high-value tasks from V2 streams that don't fit the benchmark sprints but improve the product.
+**Goal:** Add full-text search over actual source code to Synapses. This is NOT replacing the graph — it's adding a retrieval channel that the graph alone can't provide. The graph answers "what connects to X?" while BM25 answers "where does this term appear?"
+
+**Why now (not earlier):** We need GraphBench and LLM benchmarks established first so we can measure the *delta* that BM25 adds vs graph-only, and the delta that graph adds vs BM25-only. Without baselines, we can't tell if improvements come from BM25 or from the graph.
+
+**Architecture decisions:**
+- **Chunking:** Function-level (AST-aware). The parser already knows function boundaries — use them as natural chunk boundaries. Research shows function-level chunks (32-64 lines) work best at small token budgets.
+- **Index:** BM25 with word-level splitting (research: best quality-latency tradeoff for code). Use `crawlab-team/bm25` Go library or implement from scratch (~200 lines for inverted index + TF-IDF scoring).
+- **Storage:** Extend SQLite graph DB with an FTS5 virtual table over source code chunks. Indexed per-function with file path + line range metadata.
+- **Privacy:** 100% local. No embeddings, no network calls. Pure algorithmic text matching.
+- **Speed:** BM25 queries are O(1) with inverted index, <10ms. Index build during existing parse phase adds ~20% time.
 
 | # | Task | What | Effort | Impact |
 |---|------|------|--------|--------|
-| 23.1 | **Session-init token budget** (was V2-C3) | Enforce 800-token cap on `session_init` default scope. Move detailed sections behind `scope="full"`. | Low | Medium |
-| 23.2 | **Tool documentation quality pass** (was V2-C4) | Review all 35+ tool descriptions for clarity, examples, when-to-use guidance. Tool catalog embedding quality depends on this. | Medium | Medium |
-| 23.3 | **LLM query expansion** (was V2-E3) | When brain is available, use lightweight prompt to extract likely completion targets. Add to query for `synapses-search` and `synapses-embed` modes. 300ms timeout. | Medium | Medium |
-| 23.4 | **TypeScript/Go retrieval evaluation** (was V2-D3) | Custom evaluation set: 10 repos per language, cross-file completion samples. Validates parser depth for TS/Go where Synapses has deepest type resolution. | High | Medium |
-| 23.5 | **Benchmark CI integration** (was V2-B6) | GitHub Actions: run RepoBench-R (5-repo quick mode) on PRs to `release/*`. Fail if >2pp regression. Baseline in `docs/benchmarks/baseline.json`. | Medium | Medium |
+| 24.1 | **Function-level source chunking** | During parsing, extract function/method bodies as text chunks with metadata (file, start_line, end_line, function_name). Store in graph DB alongside AST nodes. Reuse existing parser infrastructure — extend `NodeFunction` with a `Body` field or create a `chunks` table. | Medium | Critical |
+| 24.2 | **BM25 inverted index** | Build FTS5 virtual table over source chunks. Index function name + body text. Query returns ranked chunks with file + line range. Evaluate: FTS5 built-in BM25 vs custom implementation. FTS5 is simpler and already used for memories. | Medium | Critical |
+| 24.3 | **`search` tool: `source` mode** | Add `mode=source` to the search handler. Queries BM25 index over source code. Returns file + function + line range + snippet. Complements existing `keyword` (node names), `fulltext` (memory FTS), and `semantic` (vector) modes. | Low | High |
+| 24.4 | **Hybrid fusion in search** | When no mode is specified, run both `keyword` (graph nodes) and `source` (BM25 code) in parallel. Fuse results with RRF (already implemented in recall_engine.go). Graph results surface structurally relevant code; BM25 surfaces lexically matching code. | Medium | High |
+| 24.5 | **Function-aware retrieval windows** | When returning code context, snap to function boundaries using AST metadata. Instead of "lines 80-166 of file.py" (arbitrary window), return "function `_separability_matrix` at lines 207-317" (meaningful unit). | Medium | Medium |
+
+**Success criteria:** `search mode=source` returns the correct file in top-5 results for ≥60% of ContextBench tasks. Hybrid search (graph+BM25) outperforms either channel alone.
+
+**Key design principle:** BM25 source search is a *tool* the LLM can use, not a replacement for graph traversal. The LLM decides when to search text vs when to traverse the graph. Synapses provides both capabilities.
+
+---
+
+## Sprint 25: ContextBench Honest — Delta Measurement
+
+**Goal:** Re-run ContextBench in a way that honestly measures Synapses' contribution. Instead of "can Synapses alone find the bug?" (unfair), measure "does adding Synapses graph on top of BM25 text search improve retrieval?"
+
+**Design:** Three conditions:
+- **BM25-only:** Source code search only, no graph traversal
+- **Graph-only:** Current Synapses tools only (search nodes, prepare_context, get_impact)
+- **BM25+Graph (hybrid):** Both channels, RRF fusion
+
+**Metric:** F1 for each condition. The number that matters is `hybrid F1 - BM25-only F1` = Synapses' structural contribution.
+
+| # | Task | What | Effort | Impact |
+|---|------|------|--------|--------|
+| 25.1 | **Refactor ContextBench harness for multi-condition runs** | Run each task in all 3 conditions. Produce per-condition F1 and delta columns in output. Deterministic (seeded) entity extraction and file scoring. | Medium | Critical |
+| 25.2 | **BM25-only baseline** | ContextBench using only `search mode=source` tool calls. No prepare_context, no get_impact. Measures what pure text retrieval achieves. Expected: 15-25% F1 (competitive with BM25 baselines in literature). | Low | Critical |
+| 25.3 | **Hybrid condition** | ContextBench using BM25 source search + graph tools. Entity → BM25 search for file candidates → prepare_context on top candidates → merge. Expected: 20-35% F1 if graph adds value. | Medium | High |
+| 25.4 | **Delta analysis** | Per-task breakdown: which tasks improved from graph addition? Which got worse? Categorize: (a) graph helped — found structurally connected files BM25 missed, (b) graph hurt — BFS noise diluted BM25 signal, (c) neutral. | Low | High |
+| 25.5 | **Expand to 66 tasks** | Run all 66 ContextBench tasks (not just --limit=20). Multi-language if dataset supports it. Statistical significance test on delta. | Medium | Medium |
+
+**Success criteria:** Hybrid F1 ≥ BM25-only F1 + 5pp. At least 30% of tasks show measurable graph contribution.
+
+**What this proves:** If the delta is positive, Synapses' structural intelligence adds real value on top of text search. If it's zero or negative, we know the graph needs more work (back to Sprint 22) or the tools need better orchestration.
+
+---
+
+## Sprint 26: Tool & Retrieval Polish
+
+**Goal:** Production quality pass on all tools and benchmarks.
+
+| # | Task | What | Effort | Impact |
+|---|------|------|--------|--------|
+| 26.1 | **Session-init token budget** (was V2-C3) | Enforce 800-token cap on `session_init` default scope. Move detailed sections behind `scope="full"`. | Low | Medium |
+| 26.2 | **Tool documentation quality pass** (was V2-C4) | Review all tool descriptions for clarity, examples, when-to-use guidance. | Medium | Medium |
+| 26.3 | **LLM query expansion** (was V2-E3) | When brain is available, use lightweight prompt to extract likely completion targets. Add to query. 300ms timeout. | Medium | Medium |
+| 26.4 | **TypeScript/Go retrieval evaluation** (was V2-D3) | Custom evaluation set: 10 repos per language. Validates parser depth for TS/Go. | High | Medium |
+| 26.5 | **Benchmark CI integration** (was V2-B6) | GitHub Actions: run GraphBench + RepoBench-R on PRs to `release/*`. Fail if >2pp regression. | Medium | Medium |
 
 ---
 
@@ -145,40 +234,44 @@
 
 | Priority | Sprint | Why |
 |----------|--------|-----|
-| 1 | Sprint 19: Architecture Fixes | Done. Commit and ship. Unblocks everything. |
-| 2 | Sprint 20: ContextBench F1 Push | Directly improves measurable quality. Reveals more gaps. |
-| 3 | Sprint 21: Graph Accuracy Benchmark | Tests what Synapses actually does. Foundational measurement. |
-| 4 | Sprint 22: LLM Augmentation Benchmark | The product-value proof. Harder to build but most convincing. |
-| 5 | Sprint 23: Tool & Retrieval Polish | Quality-of-life. Do after measurement infrastructure exists. |
+| 1 | **Sprint 22: GraphBench v2** | Fix the core product. If the graph is wrong, nothing else matters. |
+| 2 | **Sprint 23: LLM Augmentation** | Prove product value. The number that justifies Synapses to users. |
+| 3 | **Sprint 24: BM25 Source Search** | Add complementary capability. Enables honest ContextBench. |
+| 4 | **Sprint 25: ContextBench Honest** | Measure delta. Proves graph adds value over text search alone. |
+| 5 | **Sprint 26: Polish** | Production readiness. Do after measurement infrastructure exists. |
 
 ---
 
 ## What V2 Does NOT Include
 
 - **New language parsers.** 61-parser coverage is sufficient. Fix quality before adding quantity.
-- **New MCP tools.** 35+ tools is enough. Add only if benchmarks reveal a missing capability.
-- **Cloud infrastructure.** Synapses remains local-first.
+- **Cloud embeddings or external APIs for retrieval.** Privacy-first means local-only retrieval.
+- **LLM-in-the-loop for localization.** Agentless-style "ask GPT-4 which files are relevant" is effective but violates speed+privacy. Synapses' localization must be algorithmic.
 - **UI/frontend work.** Tauri app is a separate workstream.
-- **Learned sparse retrieval (was V2-E4).** Deferred — requires training infrastructure and the ROI is unclear given lexical engineering exhaustion.
+- **Chasing ContextBench F1 as a standalone metric.** It conflates text retrieval with structural intelligence. Only meaningful as a delta measurement (Sprint 25).
 
 ---
 
 ## The Narrative Arc
 
 ```
-Today:       "Synapses ties BM25 on retrieval. Graph analysis works but isn't well-measured.
-              ContextBench F1 = 8.3% after architecture fixes."
+Today:       "GraphBench F1 = 21.8%. ContextBench F1 = 4.7% (wrong benchmark for the product).
+              Synapses' structural intelligence works but has precision gaps."
 
-After S20:   "ContextBench F1 ≥ 12%. We know exactly where the graph helps and where it doesn't."
+After S22:   "GraphBench F1 ≥ 60%. Call graphs, imports, and impact analysis are reliably
+              accurate across Python, Go, and TS. The foundation is solid."
 
-After S21:   "Graph accuracy is ≥ 80% on callers/imports. Parser gaps are identified and fixed.
-              We have a regression test suite for structural correctness."
-
-After S22:   "Claude + Synapses solves +3pp more SWE-Bench tasks than Claude alone.
+After S23:   "Claude + Synapses solves +3pp more SWE-Bench tasks than Claude alone.
               The product value is measurable and provable."
 
-After S23:   "Tool surface is polished, CI prevents regressions, TS/Go validated.
+After S24:   "BM25 source search added. Synapses now finds code by text AND by structure.
+              Two retrieval channels that complement each other."
+
+After S25:   "ContextBench: BM25-only=20%, Graph-only=5%, Hybrid=28%. The graph adds
+              +8pp on top of text search — proof that structural intelligence matters."
+
+After S26:   "Tools polished, CI prevents regressions, multi-language validated.
               Ready for broader adoption."
 ```
 
-The goal is not to ship features. The goal is to produce numbers that prove the architecture is right — and then let those numbers speak.
+The goal is not to inflate benchmark numbers. The goal is to prove that **structural code intelligence adds value that text search alone cannot provide** — and then ship that value to users.
