@@ -615,7 +615,7 @@ func (s *Server) handleGetContext(
 		}
 	}
 
-	best := pickBestNode(nodes, s.graph)
+	best := pickBestNode(nodes, s.graph, entityName)
 
 	if agentIDForFeedback != "" && s.store != nil {
 		relFile := strings.TrimPrefix(best.File, s.graph.Root()+"/")
@@ -1738,7 +1738,7 @@ func (s *Server) handleGetImpact(
 	if len(candidates) == 0 {
 		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q", symbol)), nil
 	}
-	root := pickBestNode(candidates, s.graph)
+	root := pickBestNode(candidates, s.graph, symbol)
 
 	// For struct/interface nodes, aggregate impact across all their methods.
 	// A struct itself has no incoming CALLS edges — its methods do.
@@ -1787,6 +1787,38 @@ func (s *Server) handleGetImpact(
 				merged.AffectedFiles = append(merged.AffectedFiles, r.AffectedFiles...)
 				merged.TotalAffected += len(tierNodes)
 			}
+		}
+		// Supplementary: run ImpactAnalysis on the struct/interface node itself.
+		// The per-method loop above only finds callers of methods. The struct node
+		// carries the IMPORTS-based importers pass (Fix 3) which finds files that
+		// import the struct's module — critical when the struct is used as a type
+		// rather than having its methods called directly (e.g. NdarrayMixin).
+		if structImpact, err2 := s.graph.ImpactAnalysis(root.ID, maxDepth); err2 == nil && structImpact != nil {
+			for _, tier := range structImpact.Tiers {
+				for _, ref := range tier.Nodes {
+					if !seen[ref.ID] {
+						seen[ref.ID] = true
+						found := false
+						for i, mt := range merged.Tiers {
+							if mt.Label == tier.Label {
+								merged.Tiers[i].Nodes = append(merged.Tiers[i].Nodes, ref)
+								merged.Tiers[i].TotalNodes++
+								found = true
+								break
+							}
+						}
+						if !found {
+							merged.Tiers = append(merged.Tiers, graph.ImpactTier{
+								Label: tier.Label, Depth: tier.Depth,
+								Confidence: tier.Confidence,
+								Nodes: []graph.EntityRef{ref}, TotalNodes: 1,
+							})
+						}
+						merged.TotalAffected++
+					}
+				}
+			}
+			merged.AffectedFiles = append(merged.AffectedFiles, structImpact.AffectedFiles...)
 		}
 		// Deduplicate AffectedFiles.
 		seenFiles := make(map[string]bool)

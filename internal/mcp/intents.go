@@ -178,7 +178,7 @@ func (s *Server) resolveTarget(target, fileHint string) *resolvedTarget {
 	}
 
 	if len(nodes) > 0 {
-		best := pickBestNode(nodes, s.graph)
+		best := pickBestNode(nodes, s.graph, target)
 		return &resolvedTarget{bestNode: best, candidates: nodes}
 	}
 
@@ -196,7 +196,7 @@ func (s *Server) resolveTarget(target, fileHint string) *resolvedTarget {
 	// 4. Pattern / substring match.
 	nodes = s.graph.FindByPatternLimit(target, 50)
 	if len(nodes) > 0 {
-		best := pickBestNode(nodes, s.graph)
+		best := pickBestNode(nodes, s.graph, target)
 		return &resolvedTarget{bestNode: best, candidates: nodes}
 	}
 

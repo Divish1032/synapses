@@ -1134,6 +1134,23 @@ func (s *Server) handleSearch(
 		}
 	}
 
+	// Deprioritize vendored/external/generated nodes so user-authored code
+	// ranks higher. Without this, bundled third-party libraries (e.g.
+	// vendor/configobj.py) can dominate results for common terms.
+	for i := range hits {
+		switch hits[i].node.Provenance {
+		case graph.ProvenanceVendored:
+			hits[i].score -= 5
+		case graph.ProvenanceExternal:
+			hits[i].score -= 8
+		case graph.ProvenanceGenerated:
+			hits[i].score -= 3
+		}
+		if hits[i].score < 1 {
+			hits[i].score = 1
+		}
+	}
+
 	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].score != hits[j].score {
 			return hits[i].score > hits[j].score

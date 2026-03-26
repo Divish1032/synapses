@@ -155,7 +155,7 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		return err
 	}
 
-	// --- from X import Y ---
+	// --- from X import Y (absolute: from astropy.table import NdarrayMixin) ---
 	fromImportQuery := `(import_from_statement module_name: (dotted_name) @import_path)`
 	if err := runQuery(lang, root, src, fromImportQuery, func(captures map[string]string, _ int) {
 		importPath := captures["import_path"]
@@ -168,6 +168,33 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 			Type:    graph.NodePackage,
 			Name:    importPath,
 			Package: importPath,
+			File:    filePath,
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
+	}); err != nil {
+		return err
+	}
+
+	// --- from .X import Y (relative: from .ndarray_mixin import NdarrayMixin) ---
+	// Relative imports use a (relative_import) AST node containing a dotted_name.
+	// Resolve the relative path to an absolute module name using the importer's
+	// directory so the IMPORTS edge connects to the same package node that the
+	// target module's entities use as their Package field.
+	relImportQuery := `(import_from_statement module_name: (relative_import (dotted_name) @rel_path))`
+	if err := runQuery(lang, root, src, relImportQuery, func(captures map[string]string, _ int) {
+		relPath := captures["rel_path"]
+		if relPath == "" {
+			return
+		}
+		// Resolve relative import to the target module name.
+		// For "from .ndarray_mixin import X" in astropy/table/table.py,
+		// relPath = "ndarray_mixin", which IS the target module's moduleName.
+		importNodeID := g.MakeNodeID(relPath, relPath)
+		g.AddNode(&graph.Node{
+			ID:      importNodeID,
+			Type:    graph.NodePackage,
+			Name:    relPath,
+			Package: relPath,
 			File:    filePath,
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
