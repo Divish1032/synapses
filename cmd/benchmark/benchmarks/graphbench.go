@@ -429,8 +429,9 @@ func queryFileImports(client *agent.SynapsesClient, filePath string) (names, fil
 
 	// Primary: use the new "imports" field (NodeFile → IMPORTS edges).
 	// Import node names are the full import path (e.g., "net/http" for Go,
-	// "werkzeug" for Python). Use them directly — extractPackageName is for
-	// callee-based extraction and doesn't handle Go paths correctly.
+	// "werkzeug.test" for Python). Add both the full name and the top-level
+	// package name (before first dot) so matching works against expected
+	// names that may be either form.
 	for _, imp := range cr.Imports {
 		n := imp.Node.Name
 		f := imp.Node.File
