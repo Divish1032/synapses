@@ -1044,6 +1044,16 @@ func openSQLiteDB(path string) (*sql.DB, error) {
 	// After store.Open() completes all migrations, this becomes the writer pool
 	// (MaxOpenConns=1) and a separate reader pool (MaxOpenConns=8) is opened.
 	db.SetMaxOpenConns(1)
+
+	// V2-F4: WAL checkpoint on startup — flush any uncommitted WAL frames
+	// left by a crash (OOM kill, SIGKILL) into the main database file.
+	// TRUNCATE mode removes the WAL file after checkpointing, reclaiming disk
+	// space and ensuring the next open starts from a clean state.
+	// Best-effort: if the WAL doesn't exist or the checkpoint fails, continue
+	// normally (SQLite will replay the WAL on the next write anyway).
+	if _, execErr := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); execErr != nil {
+		logutil.Warn("synapses: store: wal_checkpoint on open failed: %v (non-fatal)\n", execErr)
+	}
 	return db, nil
 }
 

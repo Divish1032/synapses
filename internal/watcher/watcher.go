@@ -602,6 +602,14 @@ func (w *Watcher) launchNodeEmbedPass(embedder embed.Embedder, st *store.Store) 
 	if embedder == nil || st == nil {
 		return
 	}
+	// V2-F2: RAM budget enforcement — defer embedding when system is under RAM
+	// pressure (health Yellow or Red, i.e. < 3 GB free). This prevents OOM kills
+	// during concurrent indexing + ONNX inference on memory-constrained machines.
+	// The pass will be triggered again on the next applyBatch call.
+	if w.brainClient != nil && w.brainClient.SystemUnderRAMPressure() {
+		logutil.Info("synapses/watcher: node embed pass deferred — system under RAM pressure\n")
+		return
+	}
 	if !w.nodeEmbedRunning.CompareAndSwap(0, 1) {
 		return // another pass is already in flight
 	}
