@@ -245,14 +245,17 @@ func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test Grap
 
 	switch test.QueryType {
 	case "find_callers":
-		names, files, rawResp = queryImpact(client, test.Query, 1)
+		// Use get_context (callers field) — much more precise than get_impact BFS.
+		names, files, rawResp = queryContextCallers(client, test.Query)
 
 	case "find_callees":
 		names, files, rawResp = queryContextCallees(client, test.Query)
 
 	case "find_imports":
-		// For file-level queries, use get_context on the file entity.
-		names, files, rawResp = queryContextFull(client, test.Query)
+		// File-level entities don't resolve in the daemon (root: null).
+		// Strategy: search for symbols defined in the file, then aggregate
+		// their callees' source packages as proxy for imports.
+		names, files, rawResp = queryFileImports(client, test.Query)
 
 	case "impact_analysis":
 		names, files, rawResp = queryImpact(client, test.Query, 3)
@@ -369,6 +372,128 @@ func queryImpact(client *agent.SynapsesClient, symbol string, depth int) (names,
 	return names, files, raw
 }
 
+// queryContextCallers calls get_context (JSON) and extracts caller names+files.
+// This is far more precise than get_impact depth=1 which does BFS and returns
+// dozens of unrelated nodes.
+func queryContextCallers(client *agent.SynapsesClient, entity string) (names, files []string, raw string) {
+	raw, err := client.GetContextJSON("graphbench", entity, "full")
+	if err != nil {
+		return nil, nil, fmt.Sprintf("error: %v", err)
+	}
+
+	var cr contextResponse
+	if err := json.Unmarshal([]byte(raw), &cr); err != nil {
+		return extractNamesFromText(raw), extractFilesFromText(raw), raw
+	}
+
+	for _, caller := range cr.Callers {
+		if caller.Node.Name != "" {
+			names = appendUniqueName(names, caller.Node.Name)
+		}
+		if caller.Node.File != "" {
+			files = appendUniqueFile(files, caller.Node.File)
+		}
+	}
+
+	return names, files, raw
+}
+
+// queryFileImports handles find_imports by querying top-level symbols in the file.
+// The daemon doesn't resolve file paths as entities (root: null), so we:
+// 1. Get the file's related nodes (which ARE returned even with root: null)
+// 2. For each related symbol, get its callees to find cross-file dependencies
+// 3. Aggregate unique source packages/modules from callee files
+func queryFileImports(client *agent.SynapsesClient, filePath string) (names, files []string, raw string) {
+	// First try: get_context on the file path — root will be null but related nodes
+	// contain the top-level symbols defined in this file.
+	raw, err := client.GetContextJSON("graphbench", filePath, "full")
+	if err != nil {
+		return nil, nil, fmt.Sprintf("error: %v", err)
+	}
+
+	var cr contextResponse
+	if err := json.Unmarshal([]byte(raw), &cr); err != nil {
+		return extractNamesFromText(raw), extractFilesFromText(raw), raw
+	}
+
+	// Collect symbol names from the "related" list (these are symbols in/near the file).
+	var symbols []string
+	for _, rel := range cr.Related {
+		if rel.Node.Name != "" {
+			symbols = append(symbols, rel.Node.Name)
+		}
+	}
+
+	// Also try OtherCandidates which sometimes lists file-level symbols.
+	for _, oc := range cr.OtherCandidates {
+		if oc.Name != "" {
+			symbols = append(symbols, oc.Name)
+		}
+	}
+
+	// Limit to first 5 symbols to avoid excessive API calls.
+	if len(symbols) > 5 {
+		symbols = symbols[:5]
+	}
+
+	// For each symbol, query its callees and collect external dependencies.
+	var allRaw strings.Builder
+	allRaw.WriteString(raw)
+	seenNames := make(map[string]bool)
+	seenFiles := make(map[string]bool)
+
+	for _, sym := range symbols {
+		symRaw, err := client.GetContextJSON("graphbench", sym, "full")
+		if err != nil {
+			continue
+		}
+		allRaw.WriteString("\n---\n")
+		allRaw.WriteString(symRaw)
+
+		var symCR contextResponse
+		if err := json.Unmarshal([]byte(symRaw), &symCR); err != nil {
+			continue
+		}
+
+		// Extract package/module names from callee files.
+		for _, callee := range symCR.Callees {
+			n := callee.Node.Name
+			f := callee.Node.File
+			if n != "" {
+				// Extract the module/package part: "werkzeug.serving.run_simple" -> "werkzeug"
+				pkg := extractPackageName(n, filePath)
+				if pkg != "" && !seenNames[strings.ToLower(pkg)] {
+					seenNames[strings.ToLower(pkg)] = true
+					names = append(names, pkg)
+				}
+			}
+			if f != "" && !seenFiles[normalizeFile(f)] {
+				seenFiles[normalizeFile(f)] = true
+				files = append(files, f)
+			}
+		}
+	}
+
+	return names, files, truncate(allRaw.String(), 2000)
+}
+
+// extractPackageName extracts the top-level package/module name from a symbol
+// or file path. For a callee in a different file than the queried file, the
+// first path component (Python package) or the base name is the "import".
+func extractPackageName(calleeName, queryFile string) string {
+	// If callee name has dots (e.g., "werkzeug.serving.run_simple"), extract root.
+	parts := strings.Split(calleeName, ".")
+	if len(parts) > 1 {
+		root := strings.ToLower(parts[0])
+		// Skip if root matches the queried file's own package.
+		queryBase := strings.ToLower(filepath.Base(filepath.Dir(queryFile)))
+		if root != queryBase && root != "" {
+			return parts[0]
+		}
+	}
+	return ""
+}
+
 // queryContextCallees calls get_context (JSON) and extracts callee names+files.
 func queryContextCallees(client *agent.SynapsesClient, entity string) (names, files []string, raw string) {
 	raw, err := client.GetContextJSON("graphbench", entity, "full")
@@ -426,41 +551,6 @@ func queryContextRelated(client *agent.SynapsesClient, entity string) (names, fi
 	return names, files, raw
 }
 
-// queryContextFull calls get_context (JSON) and extracts all nodes (callees,
-// callers, related) — used for find_imports which needs the full neighborhood.
-func queryContextFull(client *agent.SynapsesClient, entity string) (names, files []string, raw string) {
-	raw, err := client.GetContextJSON("graphbench", entity, "full")
-	if err != nil {
-		return nil, nil, fmt.Sprintf("error: %v", err)
-	}
-
-	var cr contextResponse
-	if err := json.Unmarshal([]byte(raw), &cr); err != nil {
-		return extractNamesFromText(raw), extractFilesFromText(raw), raw
-	}
-
-	// For imports, we care about callees (outgoing edges from the file).
-	for _, callee := range cr.Callees {
-		if callee.Node.Name != "" {
-			names = appendUniqueName(names, callee.Node.Name)
-		}
-		if callee.Node.File != "" {
-			files = appendUniqueFile(files, callee.Node.File)
-		}
-	}
-
-	// Related nodes may also capture import relationships.
-	for _, rel := range cr.Related {
-		if rel.Node.Name != "" {
-			names = appendUniqueName(names, rel.Node.Name)
-		}
-		if rel.Node.File != "" {
-			files = appendUniqueFile(files, rel.Node.File)
-		}
-	}
-
-	return names, files, raw
-}
 
 // ─── Text fallback extractors (used when JSON parse fails) ───────────────────
 
