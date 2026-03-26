@@ -308,18 +308,23 @@ func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test Grap
 	// Compute Precision: what fraction of returned items were expected?
 	precHits, precTotal := 0, 0
 	if len(test.ExpectedNames) > 0 && len(names) > 0 {
-		h, t := setOverlap(names, test.ExpectedNames)
-		// h = how many of `names` appear in `expectedNames`
-		// But we want: how many of actual are in expected. Swap the logic.
-		expectedNameSet := makeNormSet(test.ExpectedNames)
+		// Precision: what fraction of returned names match any expected name?
+		// Uses the same partial dot-suffix matching as recall.
 		for _, n := range names {
 			precTotal++
-			if expectedNameSet[normalizeName(n)] {
+			nn := normalizeName(n)
+			matched := false
+			for _, e := range test.ExpectedNames {
+				ne := normalizeName(e)
+				if nn == ne || strings.HasSuffix(nn, "."+ne) || strings.HasSuffix(ne, "."+nn) {
+					matched = true
+					break
+				}
+			}
+			if matched {
 				precHits++
 			}
 		}
-		_ = h
-		_ = t
 	}
 	if len(test.ExpectedFiles) > 0 && len(files) > 0 {
 		expectedFileSet := makeNormFileSet(test.ExpectedFiles)

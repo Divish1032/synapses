@@ -192,6 +192,35 @@ func (p *TypeScriptParser) extractDeclarations(
 		return err
 	}
 
+	// --- CommonJS require() calls ---
+	// Handles: const x = require('module'), var x = require('./router')
+	// Creates IMPORTS edges identical to ES6 import statements.
+	requireQuery := `(call_expression
+		function: (identifier) @fn_name
+		arguments: (arguments (string (string_fragment) @import_path))
+	)`
+	if err := runQuery(lang, root, src, requireQuery, func(captures map[string]string, startLine int) {
+		if captures["fn_name"] != "require" {
+			return
+		}
+		importPath := captures["import_path"]
+		if importPath == "" {
+			return
+		}
+		importNodeID := g.MakeNodeID(importPath, importPath)
+		g.AddNode(&graph.Node{
+			ID:      importNodeID,
+			Type:    graph.NodePackage,
+			Name:    importPath,
+			Package: importPath,
+			File:    filePath,
+			Line:    startLine,
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
+	}); err != nil {
+		return err
+	}
+
 	// --- Function declarations (regular and ambient/declare) ---
 	// function_declaration: function foo() { ... }
 	// function_signature:   declare function foo(): void;  (no body, used in .d.ts)
