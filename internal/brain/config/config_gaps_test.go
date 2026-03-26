@@ -123,16 +123,16 @@ func TestAutoConfigureModels_ExactlyAt24GB(t *testing.T) {
 	if cfg.ModelEnrich != "qwen3.5:4b" {
 		t.Errorf("24GB ModelEnrich = %q, want qwen3.5:4b", cfg.ModelEnrich)
 	}
-	if cfg.ModelOrchestrate != "qwen3.5:4b" {
-		t.Errorf("24GB ModelOrchestrate = %q, want qwen3.5:4b", cfg.ModelOrchestrate)
+	if cfg.ModelOrchestrate != "qwen3.5:2b" {
+		t.Errorf("24GB ModelOrchestrate = %q, want qwen3.5:2b", cfg.ModelOrchestrate)
 	}
 }
 
 func TestAutoConfigureModels_ExactlyAt25GB(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.AutoConfigureModels(25)
-	// > 24, so high tier.
-	if cfg.ModelOrchestrate != "qwen3.5:9b" {
-		t.Errorf("25GB ModelOrchestrate = %q, want qwen3.5:9b", cfg.ModelOrchestrate)
+	// > 24, so high tier — enrich and orchestrate both on 4b (same model slot).
+	if cfg.ModelOrchestrate != "qwen3.5:4b" {
+		t.Errorf("25GB ModelOrchestrate = %q, want qwen3.5:4b", cfg.ModelOrchestrate)
 	}
 }

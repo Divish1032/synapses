@@ -273,8 +273,8 @@ func TestAutoConfigureModels_20GB(t *testing.T) {
 	if cfg.ModelEnrich != "qwen3.5:4b" {
 		t.Errorf("20GB ModelEnrich = %q, want qwen3.5:4b", cfg.ModelEnrich)
 	}
-	if cfg.ModelOrchestrate != "qwen3.5:4b" {
-		t.Errorf("20GB ModelOrchestrate = %q, want qwen3.5:4b", cfg.ModelOrchestrate)
+	if cfg.ModelOrchestrate != "qwen3.5:2b" {
+		t.Errorf("20GB ModelOrchestrate = %q, want qwen3.5:2b", cfg.ModelOrchestrate)
 	}
 }
 
@@ -284,8 +284,8 @@ func TestAutoConfigureModels_30GB(t *testing.T) {
 	if cfg.ModelEnrich != "qwen3.5:4b" {
 		t.Errorf("30GB ModelEnrich = %q, want qwen3.5:4b", cfg.ModelEnrich)
 	}
-	if cfg.ModelOrchestrate != "qwen3.5:9b" {
-		t.Errorf("30GB ModelOrchestrate = %q, want qwen3.5:9b", cfg.ModelOrchestrate)
+	if cfg.ModelOrchestrate != "qwen3.5:4b" {
+		t.Errorf("30GB ModelOrchestrate = %q, want qwen3.5:4b", cfg.ModelOrchestrate)
 	}
 }
 

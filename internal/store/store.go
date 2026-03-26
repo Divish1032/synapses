@@ -471,8 +471,9 @@ CREATE INDEX IF NOT EXISTS idx_cross_deps_file     ON cross_project_deps(to_proj
 // hard-reference node_ids against graphDB and flags orphans immediately,
 // rather than waiting for the next daily prune cycle.
 type Store struct {
-	graphDB     *rwDB // code-domain: nodes, edges, meta, file_hashes, call_sites, node_embeddings
-	knowledgeDB *rwDB // universal: memories, episodes, sessions, events, tasks, agents, ...
+	graphDB     *rwDB  // code-domain: nodes, edges, meta, file_hashes, call_sites, node_embeddings
+	knowledgeDB *rwDB  // universal: memories, episodes, sessions, events, tasks, agents, ...
+	dataDir     string // directory containing the DB files — used for HNSW persistence
 
 	// Per-function prune mutexes — split to avoid contention between independent
 	// prune operations (tool_calls hourly, sessions daily, stale data daily).
@@ -960,7 +961,8 @@ func Open(path string) (*Store, error) {
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	st := &Store{graphDB: graphRW, knowledgeDB: knowledgeRW, bgCtx: bgCtx, bgCancel: bgCancel,
-		bfSemaphore: make(chan struct{}, 4)}
+		bfSemaphore: make(chan struct{}, 4),
+		dataDir:     filepath.Dir(path)}
 
 	// Rebuild FTS index for existing databases where nodes_fts is empty but
 	// the nodes table already has data.
@@ -995,11 +997,11 @@ func Open(path string) (*Store, error) {
 	// normalizing an already-normalized vector is a no-op within float32 precision.
 	st.normalizeStoredEmbeddings()
 
-	// Build HNSW ANN indexes from stored embeddings. These are in-memory
-	// acceleration structures — SQLite remains the authoritative store.
-	// O(N log N) rebuild: ~200-500ms for 10K embeddings, ~2-5s for 50K.
-	st.RebuildMemoryHNSW()
-	st.RebuildNodeHNSW()
+	// Load or rebuild HNSW ANN indexes. Try loading from persistent files
+	// first (sub-100ms for 50K vectors). Fall back to full SQLite rebuild
+	// if the file is missing, corrupt, or stale (count mismatch).
+	st.loadOrRebuildMemoryHNSW()
+	st.loadOrRebuildNodeHNSW()
 
 	// D5: SQLite query plan diagnostics — run when SYNAPSES_QUERY_STATS=1 or
 	// SYNAPSES_DEBUG=1. Logs whether hot-path queries use indexes or full scans,
@@ -1585,6 +1587,11 @@ func (s *Store) Close() error {
 	case <-time.After(10 * time.Second):
 		logutil.Warn("synapses: store: Close() timed out waiting for background goroutines after 10s; proceeding with DB close\n")
 	}
+
+	// Persist HNSW indexes so the next startup can skip the full SQLite rebuild.
+	// Best-effort — errors are logged but don't prevent clean shutdown.
+	s.saveMemoryHNSW()
+	s.saveNodeHNSW()
 
 	var firstErr error
 	if s.graphDB != nil {

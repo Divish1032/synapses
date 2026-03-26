@@ -1,6 +1,10 @@
 package embed
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"time"
+)
 
 // OllamaEmbedder wraps an embed.Client to satisfy the Embedder interface.
 // Use this when embeddings mode is "ollama" — delegates to a local Ollama
@@ -31,8 +35,18 @@ func (o *OllamaEmbedder) Model() string {
 	return o.client.Model()
 }
 
-// WarmUp is a no-op for the Ollama embedder (model is managed by the Ollama server).
-func (o *OllamaEmbedder) WarmUp(_ context.Context) error { return nil }
+// WarmUp validates that the Ollama server has the embedding model available by
+// performing a single test embed. Returns an error if the model is not pulled
+// or the server is unreachable — callers can fall back to builtin ONNX.
+func (o *OllamaEmbedder) WarmUp(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := o.client.Embed(ctx, "warmup")
+	if err != nil {
+		return fmt.Errorf("ollama warmup: %w", err)
+	}
+	return nil
+}
 
 // Close is a no-op for the Ollama embedder (HTTP client has no resources to release).
 func (o *OllamaEmbedder) Close() error { return nil }

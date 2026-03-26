@@ -1361,6 +1361,7 @@ var knowledgeTools = map[string]bool{
 	"get_plans":          true,
 	"link_task_nodes":    true,
 	"check_plan_safety":  true,
+	"rank_candidates":    true, // embedding-only, no graph needed
 	"report_usage":        true,
 	"get_my_analytics":    true,
 	"export_knowledge":    true,
@@ -3141,7 +3142,28 @@ func (s *Server) registerTools() {
 		s.handleExportKnowledge,
 	)
 
-	// ── Benchmark ───────────────────────────────────────────────────────────
+	// ── Benchmark / Evaluation ───────────────────────────────────────────────
+
+	s.addOrDefer(
+		mcp.NewTool(
+			"rank_candidates",
+			mcp.WithDescription(
+				"Embed a query and a list of candidate code snippets using the daemon's "+
+					"built-in embedder (nomic-embed), then return candidates ranked by cosine "+
+					"similarity. Used by the external benchmark binary for RepoBench-R evaluation. "+
+					"Returns a JSON array [{\"index\": N, \"score\": 0.92}, ...] sorted highest-first.",
+			),
+			mcp.WithString("query",
+				mcp.Description("Query text to embed (code context, last ~500 chars of current file)."),
+				mcp.Required(),
+			),
+			mcp.WithArray("candidates",
+				mcp.Description("Array of candidate code snippet strings to rank (max 50)."),
+				mcp.Required(),
+			),
+		),
+		s.handleRankCandidates,
+	)
 
 	s.addOrDefer(
 		mcp.NewTool(

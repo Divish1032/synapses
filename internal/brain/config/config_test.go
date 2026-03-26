@@ -40,20 +40,20 @@ func TestAutoConfigureModels(t *testing.T) {
 			wantOrch:     "qwen3.5:2b",
 		},
 		{
-			name:         "RAM 20GB (16-24GB) -> ingest/guardian 2b, enrich/orch 4b",
+			name:         "RAM 20GB (16-24GB) -> ingest/guardian 2b, enrich 4b, orch 2b",
 			ramGB:        20,
 			wantIngest:   "qwen3.5:2b",
 			wantGuardian: "qwen3.5:2b",
 			wantEnrich:   "qwen3.5:4b",
-			wantOrch:     "qwen3.5:4b",
+			wantOrch:     "qwen3.5:2b",
 		},
 		{
-			name:         "RAM 48GB (>24GB) -> ingest/guardian 2b, enrich 4b, orch 9b",
+			name:         "RAM 48GB (>24GB) -> ingest/guardian 2b, enrich/orch 4b",
 			ramGB:        48,
 			wantIngest:   "qwen3.5:2b",
 			wantGuardian: "qwen3.5:2b",
 			wantEnrich:   "qwen3.5:4b",
-			wantOrch:     "qwen3.5:9b",
+			wantOrch:     "qwen3.5:4b",
 		},
 	}
 

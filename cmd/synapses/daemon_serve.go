@@ -2112,6 +2112,17 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			}
 		}
 
+		// Wire embedder into knowledge-mode server so rank_candidates is usable.
+		knowledgeEmbedder := createMemoryEmbedder(cfg)
+		if knowledgeEmbedder != nil {
+			srv.SetMemoryEmbedder(knowledgeEmbedder)
+			go func() {
+				if err := knowledgeEmbedder.WarmUp(projCtx); err != nil {
+					logutil.Warn("synapses: knowledge-mode embedder warmup: %v\n", err)
+				}
+			}()
+		}
+
 		logutil.Info("synapses: project ready — %s (knowledge mode)\n", filepath.Base(absPath))
 
 		return &ProjectInstance{

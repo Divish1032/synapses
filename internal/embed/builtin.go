@@ -182,10 +182,13 @@ func (b *BuiltinEmbedder) ensureModelWithSingleflight(ctx context.Context) error
 	}
 	b.mu.Unlock()
 
-	// Use singleflight so concurrent Embed() callers coalesce into one download.
-	// This releases b.mu during the potentially slow download, unblocking new
-	// Embed() callers to wait on the singleflight result instead.
-	_, err, _ := b.initGroup.Do("init", func() (interface{}, error) {
+	// Use DoChan (not Do) so that each waiting caller can select on both the
+	// singleflight result channel AND its own ctx.Done(). With Do(), every
+	// waiter is unconditionally blocked until the download finishes regardless
+	// of their individual context deadlines. DoChan() returns a channel that
+	// all sharers of the same in-flight call receive, allowing each caller to
+	// bail out independently without cancelling the underlying download.
+	ch := b.initGroup.DoChan("init", func() (interface{}, error) {
 		// Re-check under lock in case another goroutine finished first.
 		b.mu.Lock()
 		if b.ready {
@@ -198,6 +201,8 @@ func (b *BuiltinEmbedder) ensureModelWithSingleflight(ctx context.Context) error
 		// Use a lifecycle context tied to b.done rather than the first
 		// caller's ctx. This prevents a short-lived request context from
 		// cancelling a multi-GB download that all waiters depend on.
+		// The download continues even if all current callers cancel —
+		// it will be available for the next Embed() call.
 		lctx, cancel := context.WithCancel(context.Background())
 		go func() {
 			select {
@@ -211,7 +216,18 @@ func (b *BuiltinEmbedder) ensureModelWithSingleflight(ctx context.Context) error
 		// All work below runs WITHOUT holding b.mu.
 		return nil, b.doInit(lctx)
 	})
-	return err
+
+	// Wait for either our own context to expire or the singleflight to finish.
+	// If our ctx is cancelled we return immediately — other waiters and the
+	// download goroutine are unaffected.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-b.done:
+		return fmt.Errorf("builtin embedder: closed")
+	case result := <-ch:
+		return result.Err
+	}
 }
 
 // doInit performs the actual model download, integrity verification, and pipeline
@@ -553,6 +569,65 @@ func (b *BuiltinEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 	return vec, nil
 }
 
+// EmbedBatch embeds multiple texts in a single ONNX forward pass, which is
+// significantly faster than calling Embed() N times. Returns one vector per
+// input text in the same order. Uses one pool slot for the entire batch.
+func (b *BuiltinEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil, fmt.Errorf("builtin embedder: closed")
+	}
+	b.inflight.Add(1)
+	b.mu.Unlock()
+	defer b.inflight.Done()
+
+	if err := b.ensureModelWithSingleflight(ctx); err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	pool := b.pool
+	b.mu.Unlock()
+
+	var slot *pipelineSlot
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-b.done:
+		return nil, fmt.Errorf("builtin embedder: closed")
+	case slot = <-pool:
+	}
+	defer func() { pool <- slot }()
+
+	result, runErr := slot.pipeline.RunPipeline(texts)
+	if runErr != nil {
+		return nil, fmt.Errorf("builtin embed batch: %w", runErr)
+	}
+	if len(result.Embeddings) != len(texts) {
+		return nil, fmt.Errorf("builtin embed batch: got %d embeddings for %d texts", len(result.Embeddings), len(texts))
+	}
+	out := make([][]float32, len(texts))
+	for i, vec := range result.Embeddings {
+		if len(vec) > matryoshkaDims {
+			vec = vec[:matryoshkaDims]
+		}
+		vec = l2Normalize(vec)
+		if vec == nil {
+			return nil, fmt.Errorf("builtin embed batch: l2 normalization failed for text[%d]", i)
+		}
+		out[i] = vec
+	}
+	return out, nil
+}
+
 // Model returns the builtin model identifier.
 func (b *BuiltinEmbedder) Model() string {
 	return builtinModel
@@ -671,6 +746,12 @@ func selectOnnxVariant() (modelFile, onnxRepoPath string) {
 	if os.Getenv("SYNAPSES_EMBED_FP32") == "1" {
 		logutil.Info("synapses: SYNAPSES_EMBED_FP32=1 — selecting fp32 ONNX model\n")
 		return builtinModelFileFP32, builtinOnnxFilePathFP32
+	}
+	// SYNAPSES_EMBED_QUANTIZED=1 forces quantized model even on GPU hardware —
+	// useful for bulk inference benchmarks where CPU INT8 throughput > GPU fp32.
+	if os.Getenv("SYNAPSES_EMBED_QUANTIZED") == "1" {
+		logutil.Info("synapses: SYNAPSES_EMBED_QUANTIZED=1 — selecting quantized ONNX model\n")
+		return builtinModelFileQuantized, builtinOnnxFilePathQuantized
 	}
 
 	accel := detectAccelerator()

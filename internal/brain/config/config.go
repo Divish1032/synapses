@@ -347,19 +347,25 @@ func (c *BrainConfig) AutoConfigureModels(totalRAMGB float64) {
 
 	default:
 		// Legacy auto-scaling: no IntelligenceMode set.
-		// Keep existing behaviour until user explicitly picks a mode.
+		// Ingest and guardian always use the smallest model — their tasks
+		// (entity classification, diff review) are well within 2b capability
+		// and this avoids loading a second model on tight-RAM machines.
 		c.ModelIngest = "qwen3.5:2b"
 		c.ModelGuardian = "qwen3.5:2b"
 		switch {
 		case totalRAMGB <= 16:
+			// ≤16 GB: everything on 2b — single model slot (~1.5 GB).
 			c.ModelEnrich = "qwen3.5:2b"
 			c.ModelOrchestrate = "qwen3.5:2b"
 		case totalRAMGB <= 24:
+			// 16-24 GB: enrich benefits from 4b; orchestrate stays on 2b
+			// so only one extra model slot is needed (~2.7 GB + 1.5 GB).
+			c.ModelEnrich = "qwen3.5:4b"
+			c.ModelOrchestrate = "qwen3.5:2b"
+		default:
+			// 24+ GB: both enricher and orchestrator on 4b (same model slot).
 			c.ModelEnrich = "qwen3.5:4b"
 			c.ModelOrchestrate = "qwen3.5:4b"
-		default:
-			c.ModelEnrich = "qwen3.5:4b"
-			c.ModelOrchestrate = "qwen3.5:9b"
 		}
 		c.ModelArchivist = "qwen3.5:2b"
 	}
