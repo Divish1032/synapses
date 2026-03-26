@@ -130,3 +130,13 @@ func TestGenerateHypothetical_VeryLongQuery(t *testing.T) {
 		t.Errorf("expected empty hypothesis from NullBrain, got %q", hyp)
 	}
 }
+
+// TestSystemUnderRAMPressure_NullBrain verifies that SystemUnderRAMPressure
+// returns false when the brain is disabled (NullBrain, no SystemPulse).
+// V2-F2: the embed pass must always run when there is no pulse to check.
+func TestSystemUnderRAMPressure_NullBrain(t *testing.T) {
+	c := brain.NewInProcess(nil)
+	if c.SystemUnderRAMPressure() {
+		t.Error("expected false from NullBrain (no pulse), got true")
+	}
+}

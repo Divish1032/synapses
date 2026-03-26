@@ -22,10 +22,17 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// markdownFileLineRe matches patterns like "path/to/file.go:123" or
+// "path/to/file.py:45" in Markdown/text tool responses (prepare_context, recall).
+// Hyphen is placed first in the character class to avoid range interpretation.
+var markdownFileLineRe = regexp.MustCompile(`([-\w./]+\.\w+):(\d+)`)
 
 // ContextAccess records a single file+line-range access made via a Synapses tool.
 // Used for ContextBench Context F1 calculation.
@@ -287,16 +294,105 @@ func extractText(body []byte) (string, error) {
 	return sb.String(), nil
 }
 
-// recordAccess appends a raw access record. File/line parsing is best-effort;
-// for ContextBench the full text is stored and parsed at evaluation time.
-func (c *SynapsesClient) recordAccess(taskID, tool, _ string) {
+// recordAccess parses the tool response and appends one ContextAccess per
+// file+line block extracted. Falls back to a single record with no file/line
+// when parsing yields nothing (ensures DrainAccesses always sees a record).
+func (c *SynapsesClient) recordAccess(taskID, tool, responseText string) {
+	accesses := extractContextAccesses(taskID, tool, responseText)
 	c.mu.Lock()
-	c.accesses = append(c.accesses, ContextAccess{
-		TaskID:    taskID,
-		Tool:      tool,
-		Timestamp: time.Now(),
-	})
+	c.accesses = append(c.accesses, accesses...)
 	c.mu.Unlock()
+}
+
+// extractContextAccesses parses a tool response and returns one ContextAccess
+// per file+line hit. Three parsers cover the actual Synapses response schemas:
+//
+//   - search:          JSON {"results":[{"file":"...","line":N,...},...]}
+//   - get_impact:      JSON {"tiers":[{"nodes":[{"file":"...","line":N},...]},...]}
+//   - prepare_context / recall: Markdown text with "path/to/file.ext:NNN" patterns
+//
+// If no file/line blocks are found (empty response, parse error, unsupported
+// tool), a single placeholder record is returned so callers always see ≥1 entry.
+func extractContextAccesses(taskID, tool, text string) []ContextAccess {
+	now := time.Now()
+	var out []ContextAccess
+
+	switch tool {
+	case "search":
+		var resp struct {
+			Results []struct {
+				File string `json:"file"`
+				Line int    `json:"line"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal([]byte(text), &resp); err == nil {
+			for _, r := range resp.Results {
+				if r.File != "" && r.Line > 0 {
+					out = append(out, ContextAccess{
+						TaskID:    taskID,
+						Tool:      tool,
+						File:      r.File,
+						LineStart: r.Line,
+						LineEnd:   r.Line,
+						Timestamp: now,
+					})
+				}
+			}
+		}
+
+	case "get_impact":
+		var resp struct {
+			Tiers []struct {
+				Nodes []struct {
+					File string `json:"file"`
+					Line int    `json:"line"`
+				} `json:"nodes"`
+			} `json:"tiers"`
+		}
+		if err := json.Unmarshal([]byte(text), &resp); err == nil {
+			for _, tier := range resp.Tiers {
+				for _, n := range tier.Nodes {
+					if n.File != "" && n.Line > 0 {
+						out = append(out, ContextAccess{
+							TaskID:    taskID,
+							Tool:      tool,
+							File:      n.File,
+							LineStart: n.Line,
+							LineEnd:   n.Line,
+							Timestamp: now,
+						})
+					}
+				}
+			}
+		}
+
+	default: // prepare_context, recall, and any future text-format tools
+		for _, m := range markdownFileLineRe.FindAllStringSubmatch(text, -1) {
+			if len(m) == 3 {
+				lineNum, err := strconv.Atoi(m[2])
+				if err == nil && lineNum > 0 {
+					out = append(out, ContextAccess{
+						TaskID:    taskID,
+						Tool:      tool,
+						File:      m[1],
+						LineStart: lineNum,
+						LineEnd:   lineNum,
+						Timestamp: now,
+					})
+				}
+			}
+		}
+	}
+
+	// Fallback: always return at least one record so DrainAccesses sees the call.
+	if len(out) == 0 {
+		out = []ContextAccess{{
+			TaskID:    taskID,
+			Tool:      tool,
+			Timestamp: now,
+		}}
+	}
+	return out
 }
 
 // parseRankedCandidates parses the rank_candidates tool response.

@@ -101,6 +101,20 @@ func (c *Client) ListInstalledModels(ctx context.Context) []string {
 	return models
 }
 
+// SystemUnderRAMPressure returns true when the system health is Yellow or Red —
+// indicating that available RAM is below 3 GB (Yellow) or 1.5 GB (Red).
+// The embedding background pass should be deferred when this returns true to
+// avoid OOM during concurrent indexing + embedding on memory-constrained machines.
+//
+// Returns false when the pulse is nil (NullBrain / brain disabled) so that
+// the embed pass always runs when the brain is not configured.
+func (c *Client) SystemUnderRAMPressure() bool {
+	if c.pulse == nil {
+		return false
+	}
+	return c.pulse.Current().Health != HealthGreen
+}
+
 // HealthCheck returns ("ok", nil) when the brain is available, or an error when not.
 func (c *Client) HealthCheck(_ context.Context) (string, error) {
 	if c.brain.Available() {

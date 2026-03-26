@@ -130,6 +130,151 @@ func repoBenchMarkdown(result *RepoBenchResult) string {
 	return sb.String()
 }
 
+// ─── ContextBench ─────────────────────────────────────────────────────────────
+
+// ContextBenchResult holds the full results of a ContextBench run.
+type ContextBenchResult struct {
+	Timestamp    string                    `json:"timestamp"`
+	TotalTasks   int                       `json:"total_tasks"`
+	AvgPrecision float64                   `json:"avg_precision"`
+	AvgRecall    float64                   `json:"avg_recall"`
+	AvgF1        float64                   `json:"avg_f1"`
+	PerLanguage  []ContextBenchLangResult  `json:"per_language"`
+	TaskResults  []interface{}             `json:"tasks"` // []ContextBenchTaskResult from benchmarks pkg
+}
+
+// ContextBenchLangResult holds per-language metrics.
+type ContextBenchLangResult struct {
+	Language     string  `json:"language"`
+	Tasks        int     `json:"tasks"`
+	AvgPrecision float64 `json:"avg_precision"`
+	AvgRecall    float64 `json:"avg_recall"`
+	AvgF1        float64 `json:"avg_f1"`
+}
+
+// WriteContextBench writes JSON + Markdown results for a ContextBench run.
+func (r *Reporter) WriteContextBench(result *ContextBenchResult) error {
+	ts := strings.ReplaceAll(result.Timestamp, ":", "-")
+	jsonPath := filepath.Join(r.dir, fmt.Sprintf("contextbench_%s.json", ts))
+	mdPath := filepath.Join(r.dir, fmt.Sprintf("contextbench_%s.md", ts))
+
+	if err := writeJSON(jsonPath, result); err != nil {
+		return fmt.Errorf("write json: %w", err)
+	}
+	if err := os.WriteFile(mdPath, []byte(contextBenchMarkdown(result)), 0o644); err != nil {
+		return fmt.Errorf("write markdown: %w", err)
+	}
+	fmt.Printf("Results written:\n  JSON: %s\n  Markdown: %s\n", jsonPath, mdPath)
+	return nil
+}
+
+// PrintContextBenchSummary prints a compact summary to stdout.
+func (r *Reporter) PrintContextBenchSummary(result *ContextBenchResult) {
+	fmt.Printf("\n=== ContextBench Summary ===\n")
+	fmt.Printf("Tasks: %d | Precision: %.1f%% | Recall: %.1f%% | F1: %.1f%%\n",
+		result.TotalTasks,
+		result.AvgPrecision*100,
+		result.AvgRecall*100,
+		result.AvgF1*100,
+	)
+	if len(result.PerLanguage) > 0 {
+		fmt.Printf("\n%-12s  %6s  %10s  %8s  %6s\n", "Language", "Tasks", "Precision", "Recall", "F1")
+		fmt.Printf("%s\n", strings.Repeat("-", 50))
+		for _, l := range result.PerLanguage {
+			fmt.Printf("%-12s  %6d  %9.1f%%  %7.1f%%  %5.1f%%\n",
+				l.Language, l.Tasks,
+				l.AvgPrecision*100,
+				l.AvgRecall*100,
+				l.AvgF1*100,
+			)
+		}
+	}
+}
+
+func contextBenchMarkdown(result *ContextBenchResult) string {
+	var sb strings.Builder
+	sb.WriteString("# ContextBench Results\n\n")
+	sb.WriteString(fmt.Sprintf("**Run timestamp:** %s  \n", result.Timestamp))
+	sb.WriteString(fmt.Sprintf("**Total tasks:** %d  \n\n", result.TotalTasks))
+
+	sb.WriteString("## Overall Metrics\n\n")
+	sb.WriteString(fmt.Sprintf("- **Context Precision:** %.1f%%\n", result.AvgPrecision*100))
+	sb.WriteString(fmt.Sprintf("- **Context Recall:** %.1f%%\n", result.AvgRecall*100))
+	sb.WriteString(fmt.Sprintf("- **Context F1:** %.1f%%\n\n", result.AvgF1*100))
+
+	if len(result.PerLanguage) > 0 {
+		sb.WriteString("## Per-Language Breakdown\n\n")
+		sb.WriteString("| Language | Tasks | Precision | Recall | F1 |\n")
+		sb.WriteString("|----------|-------|-----------|--------|----|\n")
+		for _, l := range result.PerLanguage {
+			sb.WriteString(fmt.Sprintf("| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
+				l.Language, l.Tasks,
+				l.AvgPrecision*100,
+				l.AvgRecall*100,
+				l.AvgF1*100,
+			))
+		}
+	}
+
+	if len(result.TaskResults) > 0 {
+		sb.WriteString("\n## Per-Task Results\n\n")
+		sb.WriteString("| Task | Repo | P | R | F1 | Gold | Hits | Retrieved | Tools |\n")
+		sb.WriteString("|------|------|---|---|----|------|------|-----------|-------|\n")
+		for _, raw := range result.TaskResults {
+			// TaskResults are stored as interface{} — could be a typed struct or
+			// map[string]interface{} after JSON roundtrip.
+			var (
+				instanceID string
+				repo       string
+				prec, rec, f1 float64
+				gold, hits, retrieved, tools int
+			)
+			switch v := raw.(type) {
+			case map[string]interface{}:
+				instanceID, _ = v["instance_id"].(string)
+				repo, _ = v["repo"].(string)
+				prec, _ = v["precision"].(float64)
+				rec, _ = v["recall"].(float64)
+				f1, _ = v["f1"].(float64)
+				gold = int(asFloat(v["gold_lines"]))
+				hits = int(asFloat(v["hit_lines"]))
+				retrieved = int(asFloat(v["total_retrieved_lines"]))
+				tools = int(asFloat(v["tool_calls"]))
+			default:
+				continue
+			}
+			// Shorten instance ID: last 20 chars
+			short := instanceID
+			if len(short) > 20 {
+				short = "…" + short[len(short)-20:]
+			}
+			sb.WriteString(fmt.Sprintf("| %s | %s | %.1f%% | %.1f%% | %.1f%% | %d | %d | %d | %d |\n",
+				short, repo,
+				prec*100, rec*100, f1*100,
+				gold, hits, retrieved, tools,
+			))
+		}
+	}
+
+	sb.WriteString("\n## Comparison Against Leaderboard\n\n")
+	sb.WriteString("| System | Context F1 |\n")
+	sb.WriteString("|--------|------------|\n")
+	sb.WriteString("| Leaderboard avg (most entries) | <40% |\n")
+	sb.WriteString(fmt.Sprintf("| **Synapses** | **%.1f%%** |\n", result.AvgF1*100))
+
+	return sb.String()
+}
+
+func asFloat(v interface{}) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	}
+	return 0
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 func writeJSON(path string, v interface{}) error {

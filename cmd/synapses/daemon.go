@@ -16,6 +16,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"html"
 	"io"
@@ -284,6 +285,8 @@ func cmdDaemon(args []string) error {
 		return daemonStatus()
 	case "logs":
 		return daemonLogs(target)
+	case "wait":
+		return daemonWait(rest)
 	case "install":
 		return daemonInstall(os.Stdout)
 	case "uninstall":
@@ -381,6 +384,36 @@ func daemonLogs(name string) error {
 	}
 	fmt.Print(strings.Join(lines, "\n"))
 	return nil
+}
+
+// daemonWait blocks until the singleton daemon responds to health checks or
+// the timeout expires. Useful in scripts and CI to gate further commands on
+// daemon readiness: `synapses daemon wait --timeout 60`.
+func daemonWait(args []string) error {
+	fs := flag.NewFlagSet("daemon wait", flag.ContinueOnError)
+	timeout := fs.Duration("timeout", 30*time.Second, "Maximum time to wait")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(*timeout)
+	interval := 250 * time.Millisecond
+	const maxInterval = 2 * time.Second
+	fmt.Printf("Waiting for Synapses daemon at %s", DaemonHTTPAddr)
+	for {
+		if IsSingletonDaemonRunning() {
+			fmt.Println(" ✓ ready")
+			return nil
+		}
+		if time.Now().After(deadline) {
+			fmt.Println()
+			return fmt.Errorf("daemon at %s did not become healthy within %s", DaemonHTTPAddr, *timeout)
+		}
+		fmt.Print(".")
+		time.Sleep(interval)
+		if interval < maxInterval {
+			interval = interval * 3 / 2
+		}
+	}
 }
 
 // ── OS init system integration ────────────────────────────────────────────────
@@ -765,6 +798,8 @@ func printDaemonUsage() {
 
   Usage:
     synapses daemon serve                Run singleton MCP daemon (HTTP :11435)
+    synapses daemon wait                 Block until daemon is healthy (default 30s)
+    synapses daemon wait --timeout 60s   Block up to 60 seconds
     synapses daemon start                Start all external sidecars (none currently)
     synapses daemon start --service X    Start a named external sidecar
     synapses daemon stop                 Stop all sidecars

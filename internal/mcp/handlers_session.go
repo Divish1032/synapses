@@ -1701,6 +1701,29 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// ── Tool tiers (V2-C1) ────────────────────────────────────────────────
+	// Surface standard-tier tools (beyond core) so agents know what is
+	// available without calling discover_tools. Suppressed in quickMode/resumeMode
+	// to respect the token budget — the hint in more_available covers this case.
+	// Advanced tools are discoverable via discover_tools("what tools exist").
+	if !quickMode && !resumeMode {
+		var standardOnly []string
+		for name := range standardTierTools {
+			if !coreTierTools[name] {
+				standardOnly = append(standardOnly, name)
+			}
+		}
+		sort.Strings(standardOnly)
+		if len(standardOnly) > 0 {
+			resp["more_tools"] = map[string]interface{}{
+				"standard": standardOnly,
+				"hint": "These standard tools are always available. " +
+					"Call discover_tools(query=\"...\") to find advanced tools by intent, " +
+					"or discover_tools(query=\"list all\") to see everything.",
+			}
+		}
+	}
+
 	// _summary: one-line template-based digest — no LLM, negligible tokens.
 	// Helps agents scan response content without parsing every nested field.
 	// Format: "{N} pending tasks, {M} recent changes, {V} violations. {federation_status}."
@@ -2251,9 +2274,108 @@ func computeFirstSessionHighlights(g *graph.Graph, vlog []store.ViolationLogEntr
 		highRisk = highRisk[:maxRisk]
 	}
 
-	// Return nil when no findings — zero-noise for clean codebases.
+	// ── "What Synapses knows" (V2-C2) ────────────────────────────────────
+	// Compute codebase_knowledge before deciding whether to return nil.
+	// Always present on first session — makes the value of indexing concrete
+	// even for clean codebases with no dead code or violations.
+	var codebaseKnowledge map[string]interface{}
+	{
+		// Most-connected entity: highest call fanin.
+		var topName, topFile string
+		var topFanin int
+		for id, n := range nodes {
+			if fi := callFanin[id]; fi > topFanin {
+				topFanin = fi
+				topName = n.Name
+				topFile = n.File
+			}
+		}
+
+		// Deepest call chain: iterative DP via topological sort (Kahn's algorithm).
+		// Avoids recursive DFS stack overflow on large repos with deep chains.
+		// Considers only CALLS edges; capped at 20 000 nodes to stay O(N).
+		deepest := 0
+		if len(outEdges) > 0 {
+			const maxNodes = 20_000
+			// Build in-degree count and adjacency restricted to CALLS.
+			inDeg := make(map[graph.NodeID]int, len(nodes))
+			callsAdj := make(map[graph.NodeID][]graph.NodeID, len(nodes))
+			nodeCount := 0
+			for id := range nodes {
+				if nodeCount >= maxNodes {
+					break
+				}
+				nodeCount++
+				inDeg[id] = inDeg[id] // ensure entry exists
+				for _, e := range outEdges[id] {
+					if e.Type == graph.EdgeCalls {
+						callsAdj[id] = append(callsAdj[id], e.To)
+						inDeg[e.To]++ // e.To may not be in nodes if graph is inconsistent
+					}
+				}
+			}
+			// Kahn's BFS: process zero-in-degree nodes first.
+			dist := make(map[graph.NodeID]int, len(inDeg))
+			queue := make([]graph.NodeID, 0, len(inDeg))
+			for id := range inDeg {
+				if inDeg[id] == 0 {
+					queue = append(queue, id)
+					dist[id] = 1
+				}
+			}
+			for len(queue) > 0 {
+				cur := queue[0]
+				queue = queue[1:]
+				if dist[cur] > deepest {
+					deepest = dist[cur]
+				}
+				for _, next := range callsAdj[cur] {
+					if dist[next] < dist[cur]+1 {
+						dist[next] = dist[cur] + 1
+					}
+					inDeg[next]--
+					if inDeg[next] == 0 {
+						queue = append(queue, next)
+					}
+				}
+			}
+		}
+
+		if compact {
+			ck := map[string]interface{}{"total_entities": len(nodes)}
+			if deepest > 1 {
+				ck["deepest_call_chain"] = deepest
+			}
+			if topFanin > 0 {
+				ck["most_connected_entity"] = topName
+			}
+			codebaseKnowledge = ck
+		} else {
+			ck := map[string]interface{}{
+				"total_entities": len(nodes),
+				"hint":           "All entities are accessible via get_context, search, get_impact, and recall.",
+			}
+			if topFanin > 0 {
+				ck["most_connected_entity"] = map[string]interface{}{
+					"name":       topName,
+					"file":       topFile,
+					"call_fanin": topFanin,
+					"note":       "Most-called entity — changes here have the widest blast radius.",
+				}
+			}
+			if deepest > 1 {
+				ck["deepest_call_chain"] = deepest
+			}
+			codebaseKnowledge = ck
+		}
+	}
+
+	// Return codebase_knowledge-only for clean codebases (no dead code / risk / violations).
+	// This ensures the first-session "aha" moment fires even when the codebase is clean.
 	if totalDead == 0 && totalRisk == 0 && len(vlog) == 0 {
-		return nil
+		return map[string]interface{}{
+			"codebase_knowledge": codebaseKnowledge,
+		}
 	}
 
 	hint := "First session detected — Synapses scanned your codebase and found these patterns. " +
@@ -2263,7 +2385,8 @@ func computeFirstSessionHighlights(g *graph.Graph, vlog []store.ViolationLogEntr
 	// Keeps token cost to ~20 tokens while ensuring the signal is never silently lost.
 	if compact {
 		out := map[string]interface{}{
-			"hint": hint + " Call scope=\"full\" for entity samples.",
+			"hint":               hint + " Call scope=\"full\" for entity samples.",
+			"codebase_knowledge": codebaseKnowledge,
 		}
 		if totalDead > 0 {
 			out["dead_code_count"] = totalDead
@@ -2278,7 +2401,10 @@ func computeFirstSessionHighlights(g *graph.Graph, vlog []store.ViolationLogEntr
 	}
 
 	// Full mode: include sample arrays for each finding category.
-	out := map[string]interface{}{"hint": hint}
+	out := map[string]interface{}{
+		"hint":               hint,
+		"codebase_knowledge": codebaseKnowledge,
+	}
 	if totalDead > 0 {
 		out["dead_code"] = map[string]interface{}{
 			"total":  totalDead,

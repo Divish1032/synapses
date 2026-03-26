@@ -37,6 +37,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"errors"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -305,6 +306,27 @@ func cleanStaleSingletonPID() {
 			}
 		}
 	}
+}
+
+// isAddrInUse returns true when err indicates the bind address is already in use.
+func isAddrInUse(err error) bool {
+	if err == nil {
+		return false
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno == syscall.EADDRINUSE
+	}
+	return strings.Contains(err.Error(), "address already in use")
+}
+
+// daemonPort extracts the port number from DaemonHTTPAddr (e.g. "127.0.0.1:11435" → "11435").
+func daemonPort() string {
+	_, port, err := net.SplitHostPort(DaemonHTTPAddr)
+	if err != nil {
+		return DaemonHTTPPort
+	}
+	return port
 }
 
 // ── Auth token ────────────────────────────────────────────────────────────────
@@ -920,14 +942,16 @@ func cmdDaemonServe(args []string) error {
 			}
 		}
 
+		snap := ActiveSnapshot()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":            overallStatus,
-			"project_count":     len(projects),
-			"watchers_dead":     watcherDead,
-			"bg_queue_depth":    totalBgDepth,
-			"bg_queue_drops":    totalBgDrops,
-			"indexing_progress": ActiveSnapshot(),
+			"status":               overallStatus,
+			"project_count":        len(projects),
+			"watchers_dead":        watcherDead,
+			"bg_queue_depth":       totalBgDepth,
+			"bg_queue_drops":       totalBgDrops,
+			"indexing_progress":    snap,
+			"indexing_in_progress": snap.State == "indexing",
 		})
 	})
 
@@ -1762,6 +1786,19 @@ func cmdDaemonServe(args []string) error {
 		// Fallback: direct TCP bind.
 		ln, err = net.Listen("tcp", DaemonHTTPAddr)
 		if err != nil {
+			if isAddrInUse(err) {
+				return fmt.Errorf(
+					"port %s is already in use.\n\n"+
+						"This usually means:\n"+
+						"  • A previous Synapses daemon is still running (check: lsof -i :%s)\n"+
+						"  • Another app is occupying port %s\n\n"+
+						"To fix:\n"+
+						"  1. If a Synapses daemon is running: synapses daemon stop (or kill the process)\n"+
+						"  2. If the PID file is stale: rm ~/.synapses/daemon.pid\n"+
+						"  3. If another app owns the port: stop that app or change DaemonHTTPAddr\n\n"+
+						"Original error: %w",
+					DaemonHTTPAddr, daemonPort(), daemonPort(), err)
+			}
 			return fmt.Errorf("http listen: %w", err)
 		}
 	} else {
