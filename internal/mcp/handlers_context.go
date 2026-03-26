@@ -530,6 +530,12 @@ func (s *Server) handleGetContext(
 	if len(nodes) == 0 {
 		nodes = s.graph.FindByPatternLimit(entityName, 50)
 	}
+	// File-path fallback: if the query looks like a file path (contains '/'
+	// and has a code extension), try matching against Node.File so that
+	// callers can query e.g. "internal/graph/traverse.go" directly.
+	if len(nodes) == 0 && looksLikeFilePath(entityName) {
+		nodes = s.graph.FindByFile(entityName)
+	}
 	// Dotted-name resolution: "Graph.New" where "New" is a standalone function
 	// (not a method). FindByName only does suffix matching on stored names, so
 	// "Graph.New" won't match a node named "New". Split on dot and filter by
@@ -1734,6 +1740,10 @@ func (s *Server) handleGetImpact(
 	candidates := s.graph.FindByName(symbol)
 	if len(candidates) == 0 {
 		candidates = s.graph.FindByPatternLimit(symbol, 50)
+	}
+	// File-path fallback (same as get_context).
+	if len(candidates) == 0 && looksLikeFilePath(symbol) {
+		candidates = s.graph.FindByFile(symbol)
 	}
 	if len(candidates) == 0 {
 		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q", symbol)), nil

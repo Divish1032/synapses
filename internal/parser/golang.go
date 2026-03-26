@@ -541,6 +541,19 @@ func (p *GoParser) extractDeclarations(
 		return err
 	}
 
+	// Capture explicit import aliases (e.g., `import alias "pkg/path"`).
+	// Go allows renaming imports so the call-site qualifier differs from
+	// path.Base(importPath). A separate query avoids relying on optional-
+	// capture semantics which vary across tree-sitter binding versions.
+	aliasQuery := `(import_spec name: (package_identifier) @alias path: (interpreted_string_literal) @path)`
+	_ = runQuery(lang, root, src, aliasQuery, func(captures map[string]string, _ int) {
+		alias := captures["alias"]
+		raw := strings.Trim(captures["path"], `"`)
+		if alias != "" && alias != "_" && alias != "." && raw != "" {
+			g.AddImportAlias(filePath, alias, raw)
+		}
+	})
+
 	// --- Function declarations ---
 	funcQuery := `(function_declaration name: (identifier) @func_name)`
 	if err := runQuery(lang, root, src, funcQuery, func(captures map[string]string, startLine int) {

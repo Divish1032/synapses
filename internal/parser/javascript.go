@@ -181,6 +181,59 @@ func (p *JavaScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 		return err
 	}
 
+	// --- CommonJS module.exports = X → mark X as exported ---
+	moduleExportsQuery := `
+(assignment_expression
+  left: (member_expression
+    object: (identifier) @obj
+    property: (property_identifier) @prop)
+  right: (identifier) @rhs
+  (#eq? @obj "module")
+  (#eq? @prop "exports"))`
+	var moduleExportedNames []string
+	if err := runQuery(lang, root, src, moduleExportsQuery, func(captures map[string]string, _ int) {
+		if name := captures["rhs"]; name != "" {
+			moduleExportedNames = append(moduleExportedNames, name)
+		}
+	}); err != nil {
+		return err
+	}
+
+	// --- CommonJS exports.foo = expr → EdgeExports from file ---
+	exportsPropertyQuery := `
+(assignment_expression
+  left: (member_expression
+    object: (identifier) @obj
+    property: (property_identifier) @prop)
+  (#eq? @obj "exports"))`
+	if err := runQuery(lang, root, src, exportsPropertyQuery, func(captures map[string]string, startLine int) {
+		propName := captures["prop"]
+		if propName == "" || propName == "exports" {
+			return
+		}
+		// Create an exported node for the property if it doesn't already exist.
+		nodeID := g.MakeNodeID(filePath, propName)
+		if g.GetNode(nodeID) == nil {
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeFunction,
+				Name:     propName,
+				Package:  moduleName,
+				File:     filePath,
+				Line:     startLine,
+				Exported: true,
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+		} else {
+			// Node already exists (e.g., from a function declaration); mark exported.
+			if n := g.GetNode(nodeID); n != nil {
+				n.Exported = true
+			}
+		}
+	}); err != nil {
+		return err
+	}
+
 	// --- Function declarations ---
 	funcQuery := `(function_declaration name: (identifier) @func_name)`
 	if err := runQuery(lang, root, src, funcQuery, func(captures map[string]string, startLine int) {
@@ -296,6 +349,14 @@ func (p *JavaScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 
 	// --- Call sites ---
 	collectJSCallSites(g, lang, root, src, filePath, fileNodeID)
+
+	// --- Apply module.exports = X: mark the named function/variable as exported ---
+	for _, name := range moduleExportedNames {
+		nodeID := g.MakeNodeID(filePath, name)
+		if n := g.GetNode(nodeID); n != nil {
+			n.Exported = true
+		}
+	}
 
 	return nil
 }
