@@ -284,22 +284,39 @@ func (c *SynapsesClient) callTool(tool string, args map[string]interface{}) (str
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("http post %s: %w", tool, err)
-	}
-	defer resp.Body.Close()
+	// Retry loop for rate limiting (429) with exponential backoff.
+	var respBody []byte
+	for attempt := 0; attempt < 5; attempt++ {
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("http post %s: %w", tool, err)
+		}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
-	}
+		respBody, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("read response: %w", err)
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("tool %s returned %d: %s", tool, resp.StatusCode, string(respBody))
-	}
+		if resp.StatusCode == 429 {
+			wait := time.Duration(1<<uint(attempt)) * time.Second
+			time.Sleep(wait)
+			// Rebuild request body reader for retry.
+			req, _ = http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			if c.authToken != "" {
+				req.Header.Set("Authorization", "Bearer "+c.authToken)
+			}
+			continue
+		}
 
-	return extractText(respBody)
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("tool %s returned %d: %s", tool, resp.StatusCode, string(respBody))
+		}
+
+		return extractText(respBody)
+	}
+	return "", fmt.Errorf("tool %s: rate limited after 5 retries", tool)
 }
 
 // extractText parses the MCP CallToolResult JSON and returns concatenated text.

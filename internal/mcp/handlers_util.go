@@ -277,3 +277,25 @@ func StripInternalPaths(msg string) string {
 
 // stripInternalPaths is an unexported alias for internal callers.
 var stripInternalPaths = StripInternalPaths
+
+// looksLikeFilePath returns true when the query string appears to be a file
+// path rather than a symbol name — it contains a '/' separator and ends with a
+// recognised code extension. Used to gate the FindByFile fallback so that
+// ordinary symbol queries don't accidentally match file nodes.
+func looksLikeFilePath(q string) bool {
+	if !strings.Contains(q, "/") {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(q))
+	switch ext {
+	case ".go", ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".kt", ".rb",
+		".rs", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".swift", ".m",
+		".scala", ".clj", ".ex", ".exs", ".erl", ".hs", ".ml", ".fs",
+		".vue", ".svelte", ".php", ".lua", ".r", ".jl", ".dart", ".zig",
+		".sol", ".tf", ".hcl", ".yaml", ".yml", ".json", ".toml", ".xml",
+		".graphql", ".gql", ".proto", ".sql", ".sh", ".bash", ".zsh",
+		".ps1", ".el", ".vim", ".css", ".scss", ".less", ".html", ".md":
+		return true
+	}
+	return false
+}
