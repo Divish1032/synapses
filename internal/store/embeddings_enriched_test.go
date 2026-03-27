@@ -43,8 +43,8 @@ func TestNodeTextEnriched_CalleesMaxFive(t *testing.T) {
 }
 
 func TestNodeContentHashEnriched_ChangesWithCallGraph(t *testing.T) {
-	h1 := nodeContentHashEnriched("Func", "", "", nil, nil)
-	h2 := nodeContentHashEnriched("Func", "", "", []string{"Caller"}, nil)
+	h1 := nodeContentHashEnriched("Func", "", "", nil, nil, "function", "code")
+	h2 := nodeContentHashEnriched("Func", "", "", []string{"Caller"}, nil, "function", "code")
 	if h1 == h2 {
 		t.Error("hash should change when callers change")
 	}

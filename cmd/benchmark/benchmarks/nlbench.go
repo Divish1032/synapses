@@ -106,6 +106,9 @@ func RunNLBench(client *agent.SynapsesClient, opts NLBenchOptions) (*reporter.NL
 			log.Printf("  warning: indexing may be incomplete: %v", err)
 		}
 
+		// Wait for embeddings to complete so discovery edges exist.
+		waitForEmbeddings(projClient)
+
 		for j, test := range suite.Tests {
 			result := runNLTest(projClient, suite, test)
 			allResults = append(allResults, result)
@@ -641,4 +644,24 @@ func aggregateNLResults(results []NLBenchTestResult) *reporter.NLBenchResult {
 	result.TestResults = taskResults
 
 	return result
+}
+
+// waitForEmbeddings polls semantic search until embeddings are indexed and
+// discovery passes have run. Waits for mode=semantic to return vector results
+// (not FTS fallback). Times out after 180s.
+func waitForEmbeddings(client *agent.SynapsesClient) {
+	for attempt := 0; attempt < 90; attempt++ {
+		time.Sleep(2 * time.Second)
+		raw, err := client.SearchWithMode("function", "semantic")
+		if err == nil && strings.Contains(raw, "vector") && !strings.Contains(raw, "fallback_reason") {
+			// Vector search works. Wait for discovery passes to complete.
+			time.Sleep(5 * time.Second)
+			log.Printf("  embeddings + discovery ready (attempt %d)", attempt+1)
+			return
+		}
+		if attempt%15 == 14 {
+			log.Printf("  waiting for embeddings (attempt %d)...", attempt+1)
+		}
+	}
+	log.Printf("  warning: embeddings may not be complete after 180s")
 }

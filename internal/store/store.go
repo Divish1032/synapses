@@ -134,6 +134,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     node_id   UNINDEXED,
     name,
     split_name,
+    nl_description,
     signature,
     doc,
     tokenize = "unicode61 remove_diacritics 2"
@@ -777,6 +778,34 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("graph migration commit: %w", err)
 	}
 
+	// ── FTS5 schema migration: add nl_description column ─────────────────
+	// FTS5 virtual tables don't support ALTER TABLE ADD COLUMN, so we detect
+	// the old schema (missing nl_description) and DROP+RECREATE.
+	{
+		var hasNLDesc bool
+		row := graphDB.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='nodes_fts'`)
+		var createSQL string
+		if row.Scan(&createSQL) == nil {
+			hasNLDesc = strings.Contains(createSQL, "nl_description")
+		}
+		if !hasNLDesc {
+			// Drop old FTS table and recreate with new schema. Data will be
+			// repopulated by rebuildFTS on next index cycle.
+			graphDB.Exec(`DROP TABLE IF EXISTS nodes_fts`)
+			if _, err := graphDB.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+				node_id   UNINDEXED,
+				name,
+				split_name,
+				nl_description,
+				signature,
+				doc,
+				tokenize = "unicode61 remove_diacritics 2"
+			)`); err != nil {
+				logutil.Warn("synapses: FTS migration: %v\n", err)
+			}
+		}
+	}
+
 	// ── Knowledge migrations ─────────────────────────────────────────────
 	knowledgeTx, err := knowledgeDB.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -1198,16 +1227,16 @@ func OpenReadOnly(path string) (*Store, error) {
 // for the DELETE + INSERT phase, not while streaming potentially millions of rows.
 func (s *Store) rebuildFTS() error {
 	// Phase 1: read all nodes outside any write transaction.
-	type ftsRow struct{ id, name, sig, doc string }
+	type ftsRow struct{ id, name, sig, doc, nodeType, domain string }
 	var buf []ftsRow
 	{
-		rows, err := s.graphDB.Query(`SELECT id, name, signature, doc FROM nodes`)
+		rows, err := s.graphDB.Query(`SELECT id, name, signature, doc, type, COALESCE(domain, '') FROM nodes`)
 		if err != nil {
 			return err
 		}
 		for rows.Next() {
 			var r ftsRow
-			if err := rows.Scan(&r.id, &r.name, &r.sig, &r.doc); err != nil {
+			if err := rows.Scan(&r.id, &r.name, &r.sig, &r.doc, &r.nodeType, &r.domain); err != nil {
 				rows.Close()
 				return err
 			}
@@ -1231,14 +1260,19 @@ func (s *Store) rebuildFTS() error {
 		return err
 	}
 
-	stmt, err := tx.Prepare(`INSERT INTO nodes_fts (node_id, name, split_name, signature, doc) VALUES (?, ?, ?, ?, ?)`)
+	stmt, err := tx.Prepare(`INSERT INTO nodes_fts (node_id, name, split_name, nl_description, signature, doc) VALUES (?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
 	for _, r := range buf {
-		if _, err := stmt.Exec(r.id, r.name, splitCamelCase(r.name), r.sig, r.doc); err != nil {
+		nlDesc := ""
+		nt := graph.NodeType(r.nodeType)
+		if IsCodeNodeType(nt) && r.domain != string(graph.DomainDocs) {
+			nlDesc = GenerateNLDescription(r.name, nt, r.sig, r.doc, nil, nil)
+		}
+		if _, err := stmt.Exec(r.id, r.name, splitCamelCase(r.name), nlDesc, r.sig, r.doc); err != nil {
 			return err
 		}
 	}
@@ -1468,7 +1502,7 @@ func (s *Store) SemanticSearch(query string, limit int) ([]SearchResult, error) 
 	// tier, so searching "handleFoo" returns the node named exactly "handleFoo"
 	// at position #1 even when other nodes contain that word in their doc/sig.
 	const ftsSQL = `
-        SELECT node_id, name, signature, doc, -bm25(nodes_fts, 0, 10, 8, 5, 2) AS score
+        SELECT node_id, name, signature, doc, -bm25(nodes_fts, 0, 10, 8, 7, 5, 2) AS score
         FROM nodes_fts
         WHERE nodes_fts MATCH ?
         ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END ASC, score DESC
@@ -1516,7 +1550,7 @@ func (s *Store) SemanticSearchWithDomain(query string, limit int, domain string)
 	}
 
 	const ftsDomainSQL = `
-        SELECT f.node_id, f.name, f.signature, f.doc, n.file, -bm25(nodes_fts, 0, 10, 8, 5, 2) AS score
+        SELECT f.node_id, f.name, f.signature, f.doc, n.file, -bm25(nodes_fts, 0, 10, 8, 7, 5, 2) AS score
         FROM nodes_fts f
         JOIN nodes n ON n.id = f.node_id
         WHERE nodes_fts MATCH ?
@@ -2460,7 +2494,7 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	if _, err := tx.Exec(`DELETE FROM nodes_fts`); err != nil {
 		return fmt.Errorf("clear fts: %w", err)
 	}
-	ftsStmt, err := tx.Prepare(`INSERT INTO nodes_fts (node_id, name, split_name, signature, doc) VALUES (?, ?, ?, ?, ?)`)
+	ftsStmt, err := tx.Prepare(`INSERT INTO nodes_fts (node_id, name, split_name, nl_description, signature, doc) VALUES (?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("prepare fts stmt: %w", err)
 	}
@@ -2474,7 +2508,11 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		}
 		doc := nodeDocText(n.Metadata)
 		sig := n.Metadata["signature"]
-		if _, err := ftsStmt.Exec(string(n.ID), n.Name, splitCamelCase(n.Name), sig, doc); err != nil {
+		nlDesc := ""
+		if IsCodeNodeType(n.Type) && n.Domain != graph.DomainDocs {
+			nlDesc = GenerateNLDescription(n.Name, n.Type, sig, doc, nil, nil)
+		}
+		if _, err := ftsStmt.Exec(string(n.ID), n.Name, splitCamelCase(n.Name), nlDesc, sig, doc); err != nil {
 			return fmt.Errorf("insert fts node %s: %w", n.ID, err)
 		}
 	}
@@ -2758,7 +2796,7 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 	}
 
 	// Insert FTS entries for new nodes (skip file/package nodes — not useful for search).
-	ftsStmt, err := tx.Prepare(`INSERT INTO nodes_fts (node_id, name, split_name, signature, doc) VALUES (?, ?, ?, ?, ?)`)
+	ftsStmt, err := tx.Prepare(`INSERT INTO nodes_fts (node_id, name, split_name, nl_description, signature, doc) VALUES (?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("delta: prepare fts stmt: %w", err)
 	}
@@ -2769,7 +2807,11 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 		}
 		doc := nodeDocText(n.Metadata)
 		sig := n.Metadata["signature"]
-		if _, err := ftsStmt.Exec(string(n.ID), n.Name, splitCamelCase(n.Name), sig, doc); err != nil {
+		nlDesc := ""
+		if IsCodeNodeType(n.Type) && n.Domain != graph.DomainDocs {
+			nlDesc = GenerateNLDescription(n.Name, n.Type, sig, doc, nil, nil)
+		}
+		if _, err := ftsStmt.Exec(string(n.ID), n.Name, splitCamelCase(n.Name), nlDesc, sig, doc); err != nil {
 			return fmt.Errorf("delta: insert fts node %s: %w", n.ID, err)
 		}
 	}

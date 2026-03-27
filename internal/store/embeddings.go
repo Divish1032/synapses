@@ -9,6 +9,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/viterin/vek/vek32"
 )
@@ -54,8 +55,19 @@ func nodeTextEnriched(name, sig, doc string, callers, callees []string) string {
 
 // nodeContentHashEnriched includes callers/callees in the hash to detect
 // call graph changes that should trigger re-embedding.
-func nodeContentHashEnriched(name, sig, doc string, callers, callees []string) string {
-	text := nodeTextEnriched(name, sig, doc, callers, callees)
+// nodeType and domain determine whether the NL path is used (must mirror GetNodeTextForEmbedding).
+func nodeContentHashEnriched(name, sig, doc string, callers, callees []string, nodeType, domain string) string {
+	var text string
+	nt := graph.NodeType(nodeType)
+	if domain != string(graph.DomainDocs) && domain != string(graph.DomainKnowledge) && IsCodeNodeType(nt) {
+		if nl := GenerateNLDescription(name, nt, sig, doc, callees, callers); nl != "" {
+			text = nl
+		} else {
+			text = nodeTextEnriched(name, sig, doc, callers, callees)
+		}
+	} else {
+		text = nodeTextEnriched(name, sig, doc, callers, callees)
+	}
 	sum := sha256.Sum256([]byte(text))
 	return hex.EncodeToString(sum[:4])
 }
@@ -77,11 +89,11 @@ func (s *Store) UpsertEmbedding(nodeID, model string, vec []float32) error {
 	// Compute content hash for change detection. If the node has been deleted
 	// or renamed, the query returns empty strings and the hash reflects that —
 	// the embedding will be marked stale on the next re-index pass.
-	var name, sig, doc string
-	_ = s.graphDB.QueryRow(`SELECT name, signature, doc FROM nodes WHERE id = ?`, nodeID).
-		Scan(&name, &sig, &doc)
+	var name, sig, doc, nodeType, domain string
+	_ = s.graphDB.QueryRow(`SELECT name, signature, doc, type, COALESCE(domain, '') FROM nodes WHERE id = ?`, nodeID).
+		Scan(&name, &sig, &doc, &nodeType, &domain)
 	callers, callees := s.getParserDerivedEdgeNames(nodeID)
-	hash := nodeContentHashEnriched(name, sig, doc, callers, callees)
+	hash := nodeContentHashEnriched(name, sig, doc, callers, callees, nodeType, domain)
 
 	_, err := s.graphDB.Exec(`
 		INSERT INTO node_embeddings (node_id, model, embedding, content_hash, indexed_at)
@@ -177,7 +189,8 @@ func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 	edgeCallees, edgeCallers := s.batchParserDerivedEdgeNames()
 
 	baseQuery := `
-		SELECT n.rowid, n.id, n.name, n.signature, n.doc, COALESCE(e.content_hash, '') AS stored_hash
+		SELECT n.rowid, n.id, n.name, n.signature, n.doc, COALESCE(e.content_hash, '') AS stored_hash,
+		       n.type, COALESCE(n.domain, '') AS domain
 		FROM nodes n
 		LEFT JOIN node_embeddings e ON n.id = e.node_id
 		WHERE n.type NOT IN ('file', 'package')`
@@ -192,11 +205,11 @@ func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 		var ids []string
 		for rows.Next() {
 			var rowid int64
-			var id, name, sig, doc, storedHash string
-			if err := rows.Scan(&rowid, &id, &name, &sig, &doc, &storedHash); err != nil {
+			var id, name, sig, doc, storedHash, nodeType, domain string
+			if err := rows.Scan(&rowid, &id, &name, &sig, &doc, &storedHash, &nodeType, &domain); err != nil {
 				return nil, err
 			}
-			if nodeContentHashEnriched(name, sig, doc, edgeCallers[id], edgeCallees[id]) != storedHash {
+			if nodeContentHashEnriched(name, sig, doc, edgeCallers[id], edgeCallees[id], nodeType, domain) != storedHash {
 				ids = append(ids, id)
 			}
 		}
@@ -219,13 +232,13 @@ func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 		for rows.Next() {
 			rowCount++
 			var rowid int64
-			var id, name, sig, doc, storedHash string
-			if err := rows.Scan(&rowid, &id, &name, &sig, &doc, &storedHash); err != nil {
+			var id, name, sig, doc, storedHash, nodeType, domain string
+			if err := rows.Scan(&rowid, &id, &name, &sig, &doc, &storedHash, &nodeType, &domain); err != nil {
 				rows.Close()
 				return nil, err
 			}
 			cursor = rowid
-			if nodeContentHashEnriched(name, sig, doc, edgeCallers[id], edgeCallees[id]) != storedHash {
+			if nodeContentHashEnriched(name, sig, doc, edgeCallers[id], edgeCallees[id], nodeType, domain) != storedHash {
 				ids = append(ids, id)
 				if len(ids) >= limit {
 					break
@@ -248,14 +261,23 @@ func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 // Includes caller/callee context from parser-derived edges (CALLS, IMPLEMENTS).
 // Returns ("", false) if the node does not exist.
 func (s *Store) GetNodeTextForEmbedding(nodeID string) (text string, ok bool) {
-	var name, sig, doc string
+	var name, sig, doc, nodeType, domain string
 	err := s.graphDB.QueryRow(
-		`SELECT name, signature, doc FROM nodes WHERE id = ?`, nodeID,
-	).Scan(&name, &sig, &doc)
+		`SELECT name, signature, doc, type, COALESCE(domain, '') FROM nodes WHERE id = ?`, nodeID,
+	).Scan(&name, &sig, &doc, &nodeType, &domain)
 	if err != nil {
 		return "", false
 	}
 	callers, callees := s.getParserDerivedEdgeNames(nodeID)
+
+	// Code nodes get deterministic NL descriptions for better NL↔NL embedding similarity.
+	nt := graph.NodeType(nodeType)
+	if domain != string(graph.DomainDocs) && domain != string(graph.DomainKnowledge) && IsCodeNodeType(nt) {
+		nl := GenerateNLDescription(name, nt, sig, doc, callees, callers)
+		if nl != "" {
+			return nl, true
+		}
+	}
 	return nodeTextEnriched(name, sig, doc, callers, callees), true
 }
 

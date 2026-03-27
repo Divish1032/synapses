@@ -589,7 +589,15 @@ func (w *Watcher) computeInvalidationSet(filePath string, filePkgSnap map[string
 func (w *Watcher) SetNodeEmbedder(e embed.Embedder) {
 	w.mu.Lock()
 	w.nodeEmbedder = e
+	st := w.store
 	w.mu.Unlock()
+	// Trigger the background node embed pass immediately so nodes indexed
+	// during the initial parse (before the embedder was wired) get embedded.
+	// The CAS guard inside launchNodeEmbedPass prevents concurrent passes.
+	if e != nil {
+		logutil.Info("synapses/watcher: SetNodeEmbedder called (model=%s, store=%v)\n", e.Model(), st != nil)
+		w.launchNodeEmbedPass(e, st)
+	}
 }
 
 // launchNodeEmbedPass starts a background node embedding pass if an embedder
