@@ -119,8 +119,8 @@ func pickBestNode(nodes []*graph.Node, g *graph.Graph, query ...string) *graph.N
 			if n.Type == graph.NodeStruct || n.Type == graph.NodeInterface {
 				return 0
 			}
-			if (n.Type == graph.NodeFunction || n.Type == graph.NodeMethod) && n.Exported {
-				return 1
+			if n.Type == graph.NodeFunction || n.Type == graph.NodeMethod {
+				return 1 // exact name match always wins among functions
 			}
 		}
 		switch n.Type {
