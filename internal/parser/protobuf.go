@@ -254,6 +254,69 @@ func (v *protoExtractor) walkElements(elements []eproto.Visitee, enclosing strin
 	}
 }
 
+// resolveProtoTypeRefs creates DEPENDS_ON edges from fields to their message/enum
+// types within the same proto graph. This enables impact analysis: changing a message
+// type surfaces all messages that reference it.
+// Must be called after all proto files in the project are parsed.
+func ResolveProtoTypeRefs(g *graph.Graph) int {
+	resolved := 0
+	for _, n := range g.AllNodes() {
+		if n.Metadata == nil || n.Metadata["kind"] != "field" && n.Metadata["kind"] != "oneof_field" && n.Metadata["kind"] != "rpc" {
+			continue
+		}
+		// For fields: type is the field's protobuf type (e.g., "OtherMessage", "google.protobuf.Timestamp")
+		// For RPCs: request_type and response_type
+		var typeRefs []string
+		if ft := n.Metadata["type"]; ft != "" {
+			typeRefs = append(typeRefs, ft)
+		}
+		if rt := n.Metadata["request_type"]; rt != "" {
+			typeRefs = append(typeRefs, rt)
+		}
+		if rt := n.Metadata["response_type"]; rt != "" {
+			typeRefs = append(typeRefs, rt)
+		}
+
+		for _, typeName := range typeRefs {
+			// Skip primitive types.
+			if isProtoPrimitive(typeName) {
+				continue
+			}
+			// Find the target message/enum node by name.
+			targets := g.FindByName(typeName)
+			for _, target := range targets {
+				if target.Type != graph.NodeStruct && target.Type != graph.NodeInterface {
+					continue
+				}
+				if target.ID == n.ID {
+					continue
+				}
+				if !g.HasEdge(n.ID, target.ID, graph.EdgeDependsOn) {
+					g.AddEdge(&graph.Edge{
+						From: n.ID,
+						To:   target.ID,
+						Type: graph.EdgeDependsOn,
+					})
+					resolved++
+				}
+				break // take first match
+			}
+		}
+	}
+	return resolved
+}
+
+// isProtoPrimitive returns true for proto built-in scalar types.
+func isProtoPrimitive(t string) bool {
+	switch t {
+	case "double", "float", "int32", "int64", "uint32", "uint64",
+		"sint32", "sint64", "fixed32", "fixed64", "sfixed32", "sfixed64",
+		"bool", "string", "bytes":
+		return true
+	}
+	return false
+}
+
 // protoQualify returns "parent.child" when inside a scope, or "child" at file level.
 func protoQualify(parent, child string) string {
 	if parent == "" {

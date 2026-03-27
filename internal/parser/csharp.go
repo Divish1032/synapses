@@ -578,27 +578,39 @@ func collectCSharpCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node
 			}
 			return ""
 		},
-		CalleeExtractor: func(n sitter.Node, src []byte) string {
+		AliasedCalleeExtractor: func(n sitter.Node, src []byte) (alias, name string) {
 			switch n.Type() {
 			case "invocation_expression":
 				fn := n.ChildByFieldName("function")
 				if fn.IsNull() {
-					return ""
+					return "", ""
 				}
 				switch fn.Type() {
 				case "identifier":
-					return string(src[fn.StartByte():fn.EndByte()])
+					// Bare call inside a class — treat as implicit this.
+					return "this", string(src[fn.StartByte():fn.EndByte()])
 				case "member_access_expression":
+					// obj.Method() or this.Method()
+					var objName, methodName string
 					if nameNode := fn.ChildByFieldName("name"); !nameNode.IsNull() {
-						return string(src[nameNode.StartByte():nameNode.EndByte()])
+						methodName = string(src[nameNode.StartByte():nameNode.EndByte()])
 					}
+					if expr := fn.ChildByFieldName("expression"); !expr.IsNull() {
+						valText := string(src[expr.StartByte():expr.EndByte()])
+						if valText == "this" || valText == "base" {
+							objName = valText
+						} else {
+							objName = valText
+						}
+					}
+					return objName, methodName
 				}
 			case "object_creation_expression":
 				if typeNode := n.ChildByFieldName("type"); !typeNode.IsNull() {
-					return string(src[typeNode.StartByte():typeNode.EndByte()])
+					return "", string(src[typeNode.StartByte():typeNode.EndByte()])
 				}
 			}
-			return ""
+			return "", ""
 		},
 		IsBuiltin: func(name string) bool { return false }, // C# has no builtins to filter
 	})

@@ -467,24 +467,41 @@ func collectCppCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, s
 			}
 			return ""
 		},
-		CalleeExtractor: func(n sitter.Node, src []byte) string {
+		AliasedCalleeExtractor: func(n sitter.Node, src []byte) (alias, name string) {
 			fn := n.ChildByFieldName("function")
 			if fn.IsNull() {
-				return ""
+				return "", ""
 			}
 			switch fn.Type() {
 			case "identifier":
-				return string(src[fn.StartByte():fn.EndByte()])
+				return "", string(src[fn.StartByte():fn.EndByte()])
 			case "field_expression":
+				// this->method(), obj.method(), obj->method()
+				var objName, methodName string
 				if field := fn.ChildByFieldName("field"); !field.IsNull() {
-					return string(src[field.StartByte():field.EndByte()])
+					methodName = string(src[field.StartByte():field.EndByte()])
 				}
+				if arg := fn.ChildByFieldName("argument"); !arg.IsNull() {
+					valText := string(src[arg.StartByte():arg.EndByte()])
+					if valText == "this" {
+						objName = "this"
+					} else {
+						objName = valText
+					}
+				}
+				return objName, methodName
 			case "qualified_identifier":
+				// Namespace::method() or Class::staticMethod()
+				var scopeName, methodName string
 				if nameNode := fn.ChildByFieldName("name"); !nameNode.IsNull() {
-					return string(src[nameNode.StartByte():nameNode.EndByte()])
+					methodName = string(src[nameNode.StartByte():nameNode.EndByte()])
 				}
+				if scope := fn.ChildByFieldName("scope"); !scope.IsNull() {
+					scopeName = string(src[scope.StartByte():scope.EndByte()])
+				}
+				return scopeName, methodName
 			}
-			return ""
+			return "", ""
 		},
 		IsBuiltin: isCBuiltin,
 	})
