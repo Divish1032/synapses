@@ -111,6 +111,9 @@ func buildCodeNames(g *graph.Graph) map[string][]*graph.Node {
 		if n.Type == graph.NodeFile || n.Type == graph.NodePackage || n.Type == graph.NodeSection {
 			continue
 		}
+		if isTestFile(n.File) {
+			continue
+		}
 		name := n.Name
 		if len(name) < 4 {
 			continue
@@ -123,7 +126,23 @@ func buildCodeNames(g *graph.Graph) map[string][]*graph.Node {
 			}
 		}
 	}
+	// Ambiguity cap: remove names that map to >3 targets.
+	for name, targets := range codeNames {
+		if len(targets) > 3 {
+			delete(codeNames, name)
+		}
+	}
 	return codeNames
+}
+
+// isTestFile returns true if the file path looks like a test file.
+func isTestFile(path string) bool {
+	return strings.HasSuffix(path, "_test.go") ||
+		strings.HasSuffix(path, ".test.ts") || strings.HasSuffix(path, ".test.js") ||
+		strings.HasSuffix(path, ".test.tsx") || strings.HasSuffix(path, ".test.jsx") ||
+		strings.HasSuffix(path, "_test.py") || strings.HasSuffix(path, "_spec.rb") ||
+		strings.Contains(path, "/test/") || strings.Contains(path, "/tests/") ||
+		strings.Contains(path, "/__tests__/") || strings.Contains(path, "/testdata/")
 }
 
 // linkSections creates EXPLAINS and DOCUMENTED_BY edges for the given sections.
@@ -142,6 +161,7 @@ func linkSections(g *graph.Graph, sections []*graph.Node, codeNames map[string][
 
 		refs := extractEntityRefs(text)
 		seen := make(map[graph.NodeID]bool)
+		secCreated := 0
 
 		for _, ref := range refs {
 			targets, ok := codeNames[ref]
@@ -156,9 +176,13 @@ func linkSections(g *graph.Graph, sections []*graph.Node, codeNames map[string][
 
 				g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeExplains})
 				g.AddEdge(&graph.Edge{From: target.ID, To: sec.ID, Type: graph.EdgeDocumentedBy})
-				created++
+				secCreated++
 			}
 		}
+		if secCreated > 0 {
+			sec.Metadata["doc_link_source"] = "name_match"
+		}
+		created += secCreated
 	}
 	return created
 }

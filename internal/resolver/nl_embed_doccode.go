@@ -27,6 +27,7 @@ package resolver
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -215,6 +216,8 @@ func linkMatches(g *graph.Graph, sec *graph.Node, matches []EmbedMatch, targetID
 			To:   sec.ID,
 			Type: graph.EdgeDocumentedBy,
 		})
+		sec.Metadata["doc_link_source"] = "embedding"
+		sec.Metadata["doc_link_confidence"] = fmt.Sprintf("%.3f", m.Score)
 		created++
 
 		// Limit edges per section to avoid noise (max 3 per specificity level).

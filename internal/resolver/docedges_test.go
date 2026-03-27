@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -691,6 +692,156 @@ func TestBuildFileIndex_MultipleSuffixes(t *testing.T) {
 	for _, key := range []string{"handler.go", "pkg/handler.go", "src/pkg/handler.go"} {
 		if nodes, ok := idx[key]; !ok || len(nodes) == 0 {
 			t.Errorf("buildFileIndex: expected to find %q", key)
+		}
+	}
+}
+
+func TestResolveDocEdges_AmbiguityCap(t *testing.T) {
+	g := newDocTestGraph()
+
+	// Create 5 entities named "Handler" — should exceed the ambiguity cap of 3.
+	for i := 0; i < 5; i++ {
+		file := fmt.Sprintf("/repo/pkg%d/handler.go", i)
+		id := g.MakeNodeID(file, "Handler")
+		g.AddNode(&graph.Node{
+			ID:   id,
+			Type: graph.NodeStruct,
+			Name: "Handler",
+			File: file,
+			Line: 1,
+		})
+	}
+
+	secID := g.MakeNodeID("/repo/README.md", "README.md § API")
+	g.AddNode(&graph.Node{
+		ID:   secID,
+		Type: graph.NodeSection,
+		Name: "README.md § API",
+		File: "/repo/README.md",
+		Line: 1,
+		Metadata: map[string]string{
+			"title": "API",
+			"body":  "The `Handler` processes all requests.",
+		},
+		Domain: graph.DomainDocs,
+	})
+
+	n := ResolveDocEdges(g)
+	if n != 0 {
+		t.Fatalf("expected 0 edges (ambiguity cap: Handler matches 5 entities), got %d", n)
+	}
+}
+
+func TestResolveDocEdges_TestFileFiltered(t *testing.T) {
+	g := newDocTestGraph()
+
+	// Entity in a test file — should be filtered out.
+	testID := g.MakeNodeID("/repo/main_test.go", "TestHelper")
+	g.AddNode(&graph.Node{
+		ID:   testID,
+		Type: graph.NodeFunction,
+		Name: "TestHelper",
+		File: "/repo/main_test.go",
+		Line: 1,
+	})
+
+	// Entity in production file — should be linked.
+	prodID := g.MakeNodeID("/repo/main.go", "BuildGraph")
+	g.AddNode(&graph.Node{
+		ID:   prodID,
+		Type: graph.NodeFunction,
+		Name: "BuildGraph",
+		File: "/repo/main.go",
+		Line: 1,
+	})
+
+	secID := g.MakeNodeID("/repo/README.md", "README.md § Usage")
+	g.AddNode(&graph.Node{
+		ID:   secID,
+		Type: graph.NodeSection,
+		Name: "README.md § Usage",
+		File: "/repo/README.md",
+		Line: 1,
+		Metadata: map[string]string{
+			"title": "Usage",
+			"body":  "Use `TestHelper` and `BuildGraph` in your code.",
+		},
+		Domain: graph.DomainDocs,
+	})
+
+	n := ResolveDocEdges(g)
+	if n != 1 {
+		t.Fatalf("expected 1 edge (TestHelper filtered), got %d", n)
+	}
+
+	// Should only link to BuildGraph.
+	var found bool
+	for _, e := range g.OutEdges(secID) {
+		if e.To == testID && e.Type == graph.EdgeExplains {
+			t.Error("should NOT link to test file entity")
+		}
+		if e.To == prodID && e.Type == graph.EdgeExplains {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("missing EXPLAINS edge to production entity BuildGraph")
+	}
+}
+
+func TestResolveDocEdges_ProvenanceMetadata(t *testing.T) {
+	g := newDocTestGraph()
+
+	funcID := g.MakeNodeID("/repo/main.go", "FlatGraph")
+	g.AddNode(&graph.Node{
+		ID:   funcID,
+		Type: graph.NodeStruct,
+		Name: "FlatGraph",
+		File: "/repo/main.go",
+		Line: 10,
+	})
+
+	secID := g.MakeNodeID("/repo/README.md", "README.md § Arch")
+	g.AddNode(&graph.Node{
+		ID:   secID,
+		Type: graph.NodeSection,
+		Name: "README.md § Arch",
+		File: "/repo/README.md",
+		Line: 1,
+		Metadata: map[string]string{
+			"title": "Arch",
+			"body":  "The `FlatGraph` is central.",
+		},
+		Domain: graph.DomainDocs,
+	})
+
+	ResolveDocEdges(g)
+
+	sec := g.GetNode(secID)
+	if sec.Metadata["doc_link_source"] != "name_match" {
+		t.Errorf("doc_link_source = %q, want 'name_match'", sec.Metadata["doc_link_source"])
+	}
+}
+
+func TestIsTestFile(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/repo/main_test.go", true},
+		{"/repo/main.go", false},
+		{"/repo/src/app.test.ts", true},
+		{"/repo/src/app.ts", false},
+		{"/repo/tests/helper.py", true},
+		{"/repo/__tests__/foo.js", true},
+		{"/repo/testdata/fixture.json", true},
+		{"/repo/src/handler_test.py", true},
+		{"/repo/spec/foo_spec.rb", true},
+	}
+	for _, c := range cases {
+		got := isTestFile(c.path)
+		if got != c.want {
+			t.Errorf("isTestFile(%q) = %v, want %v", c.path, got, c.want)
 		}
 	}
 }
