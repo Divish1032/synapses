@@ -27,6 +27,7 @@ package resolver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -106,7 +107,8 @@ func DiscoverDocCodeRelations(g *graph.Graph, er EmbedResolver, threshold float6
 		if body == "" {
 			body = sec.Metadata["body_preview"]
 		}
-		embedText := buildSectionEmbedText(title, body)
+		codeBlocksJSON := sec.Metadata["code_blocks"]
+		embedText := buildSectionEmbedText(title, body, codeBlocksJSON)
 		if len(embedText) < 10 {
 			continue // too short to embed meaningfully
 		}
@@ -230,8 +232,8 @@ func linkMatches(g *graph.Graph, sec *graph.Node, matches []EmbedMatch, targetID
 }
 
 // buildSectionEmbedText constructs the text to embed for a doc section.
-// Combines title and truncated body for a balanced representation.
-func buildSectionEmbedText(title, body string) string {
+// Combines title, truncated body, and code block identifier names.
+func buildSectionEmbedText(title, body, codeBlocksJSON string) string {
 	var sb strings.Builder
 	if title != "" {
 		sb.WriteString(title)
@@ -240,12 +242,50 @@ func buildSectionEmbedText(title, body string) string {
 		if sb.Len() > 0 {
 			sb.WriteString(": ")
 		}
-		// Truncate body to keep embed text focused.
 		b := body
 		if len(b) > 300 {
 			b = b[:300]
 		}
 		sb.WriteString(b)
 	}
-	return sb.String()
+	// Append code block identifiers as structured suffix.
+	if codeBlocksJSON != "" {
+		names := extractCodeBlockNames(codeBlocksJSON)
+		if len(names) > 0 {
+			suffix := " [code: " + strings.Join(names, ", ") + "]"
+			if sb.Len()+len(suffix) <= 500 {
+				sb.WriteString(suffix)
+			}
+		}
+	}
+	// Hard cap at 500 chars.
+	s := sb.String()
+	if len(s) > 500 {
+		s = s[:500]
+	}
+	return s
+}
+
+// extractCodeBlockNames extracts identifier names from code blocks JSON metadata.
+func extractCodeBlockNames(codeBlocksJSON string) []string {
+	type cb struct {
+		Language string `json:"language"`
+		Content  string `json:"content"`
+	}
+	var blocks []cb
+	if err := json.Unmarshal([]byte(codeBlocksJSON), &blocks); err != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var names []string
+	for _, block := range blocks {
+		idents := extractCodeBlockIdentifiers(block.Content, block.Language)
+		for _, id := range idents {
+			if !seen[id] {
+				seen[id] = true
+				names = append(names, id)
+			}
+		}
+	}
+	return names
 }

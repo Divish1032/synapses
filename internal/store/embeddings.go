@@ -40,6 +40,40 @@ func nodeText(name, sig, doc string) string {
 	return strings.Join(parts, " ")
 }
 
+// nodeTextEnriched appends caller/callee context to the base node text.
+// callers and callees MUST be populated ONLY from parser-derived edges
+// (CALLS, IMPLEMENTS) — NEVER from embedding-derived edge types.
+func nodeTextEnriched(name, sig, doc string, callers, callees []string) string {
+	base := nodeText(name, sig, doc)
+	var sb strings.Builder
+	sb.WriteString(base)
+	if len(callees) > 0 {
+		limit := 5
+		if len(callees) < limit {
+			limit = len(callees)
+		}
+		sb.WriteString(" calls: ")
+		sb.WriteString(strings.Join(callees[:limit], ", "))
+	}
+	if len(callers) > 0 {
+		limit := 3
+		if len(callers) < limit {
+			limit = len(callers)
+		}
+		sb.WriteString(" called by: ")
+		sb.WriteString(strings.Join(callers[:limit], ", "))
+	}
+	return sb.String()
+}
+
+// nodeContentHashEnriched includes callers/callees in the hash to detect
+// call graph changes that should trigger re-embedding.
+func nodeContentHashEnriched(name, sig, doc string, callers, callees []string) string {
+	text := nodeTextEnriched(name, sig, doc, callers, callees)
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:4])
+}
+
 // UpsertEmbedding stores or replaces the vector embedding for a graph node.
 // vec is encoded as a little-endian float32 BLOB. model is the model name
 // used to generate the embedding (for cache invalidation when the model
@@ -60,7 +94,8 @@ func (s *Store) UpsertEmbedding(nodeID, model string, vec []float32) error {
 	var name, sig, doc string
 	_ = s.graphDB.QueryRow(`SELECT name, signature, doc FROM nodes WHERE id = ?`, nodeID).
 		Scan(&name, &sig, &doc)
-	hash := nodeContentHash(name, sig, doc)
+	callers, callees := s.getParserDerivedEdgeNames(nodeID)
+	hash := nodeContentHashEnriched(name, sig, doc, callers, callees)
 
 	_, err := s.graphDB.Exec(`
 		INSERT INTO node_embeddings (node_id, model, embedding, content_hash, indexed_at)
@@ -172,7 +207,8 @@ func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 			if err := rows.Scan(&rowid, &id, &name, &sig, &doc, &storedHash); err != nil {
 				return nil, err
 			}
-			if nodeContentHash(name, sig, doc) != storedHash {
+			callers, callees := s.getParserDerivedEdgeNames(id)
+			if nodeContentHashEnriched(name, sig, doc, callers, callees) != storedHash {
 				ids = append(ids, id)
 			}
 		}
@@ -201,7 +237,8 @@ func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 				return nil, err
 			}
 			cursor = rowid
-			if nodeContentHash(name, sig, doc) != storedHash {
+			callers, callees := s.getParserDerivedEdgeNames(id)
+			if nodeContentHashEnriched(name, sig, doc, callers, callees) != storedHash {
 				ids = append(ids, id)
 				if len(ids) >= limit {
 					break
@@ -220,8 +257,9 @@ func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 	return ids, nil
 }
 
-// GetNodeTextForEmbedding returns the text that should be embedded for a node:
-// "name signature doc". Returns ("", false) if the node does not exist.
+// GetNodeTextForEmbedding returns the text that should be embedded for a node.
+// Includes caller/callee context from parser-derived edges (CALLS, IMPLEMENTS).
+// Returns ("", false) if the node does not exist.
 func (s *Store) GetNodeTextForEmbedding(nodeID string) (text string, ok bool) {
 	var name, sig, doc string
 	err := s.graphDB.QueryRow(
@@ -230,7 +268,42 @@ func (s *Store) GetNodeTextForEmbedding(nodeID string) (text string, ok bool) {
 	if err != nil {
 		return "", false
 	}
-	return nodeText(name, sig, doc), true
+	callers, callees := s.getParserDerivedEdgeNames(nodeID)
+	return nodeTextEnriched(name, sig, doc, callers, callees), true
+}
+
+// getParserDerivedEdgeNames returns caller/callee names from CALLS and IMPLEMENTS
+// edges only. NEVER from embedding-derived edge types (EXPLAINS, DOCUMENTED_BY, etc.)
+func (s *Store) getParserDerivedEdgeNames(nodeID string) (callers, callees []string) {
+	// Callees: this node → target via CALLS or IMPLEMENTS
+	rows, err := s.graphDB.Query(`
+		SELECT n.name FROM edges e JOIN nodes n ON e.to_id = n.id
+		WHERE e.from_id = ? AND e.type IN ('calls', 'implements')
+		LIMIT 5`, nodeID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if rows.Scan(&name) == nil && name != "" {
+				callees = append(callees, name)
+			}
+		}
+	}
+	// Callers: source → this node via CALLS or IMPLEMENTS
+	rows2, err := s.graphDB.Query(`
+		SELECT n.name FROM edges e JOIN nodes n ON e.from_id = n.id
+		WHERE e.to_id = ? AND e.type IN ('calls', 'implements')
+		LIMIT 3`, nodeID)
+	if err == nil {
+		defer rows2.Close()
+		for rows2.Next() {
+			var name string
+			if rows2.Scan(&name) == nil && name != "" {
+				callers = append(callers, name)
+			}
+		}
+	}
+	return
 }
 
 // VectorSearch performs cosine similarity search over all stored node embeddings.
