@@ -97,6 +97,19 @@ func camelWords(name string) []string {
 }
 
 // pickBestNode selects the most-relevant node from a candidate list using a
+// stripSeparators removes hyphens, underscores, and path separators from s.
+// Used for fuzzy entity-to-file matching: "honobase" matches "hono-base" in paths.
+func stripSeparators(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r != '-' && r != '_' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // tiered priority system that avoids test files and structural noise:
 //
 //	Tier 1: function or method in a non-test file  (exact semantic match)
