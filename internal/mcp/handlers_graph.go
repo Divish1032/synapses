@@ -1137,6 +1137,9 @@ func (s *Server) handleSearch(
 	// Deprioritize vendored/external/generated nodes so user-authored code
 	// ranks higher. Without this, bundled third-party libraries (e.g.
 	// vendor/configobj.py) can dominate results for common terms.
+	// Also deprioritize doc section nodes: sections are supplemental context
+	// and should not crowd out code entities in search results. An exact name
+	// match on a section still ranks high; only weak matches are penalized.
 	for i := range hits {
 		switch hits[i].node.Provenance {
 		case graph.ProvenanceVendored:
@@ -1145,6 +1148,12 @@ func (s *Server) handleSearch(
 			hits[i].score -= 8
 		case graph.ProvenanceGenerated:
 			hits[i].score -= 3
+		}
+		// Doc sections: penalize weak matches (score < 10) so code entities
+		// dominate. Exact/prefix name matches (score >= 10) keep their rank
+		// because they are genuinely relevant.
+		if hits[i].node.Type == graph.NodeSection && hits[i].score < 10 {
+			hits[i].score = 1
 		}
 		if hits[i].score < 1 {
 			hits[i].score = 1

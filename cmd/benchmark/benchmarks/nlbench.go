@@ -204,7 +204,11 @@ func nlQueryDocEntities(client *agent.SynapsesClient, docFile string) (names []s
 		raw = ctxRaw
 		var cr contextResponse
 		if err := json.Unmarshal([]byte(ctxRaw), &cr); err == nil {
-			// Extract section names (split on § to get topic).
+			// Documentation field: sections contained in the doc file.
+			for _, doc := range cr.Documentation {
+				names = appendSectionWords(names, doc.Node.Name)
+			}
+			// Related nodes (may still contain sections in non-doc-root edge cases).
 			for _, rel := range cr.Related {
 				names = appendSectionWords(names, rel.Node.Name)
 			}
@@ -265,14 +269,20 @@ func nlQueryDocExplainsCode(client *agent.SynapsesClient, entity string, expecte
 		names = append(names, cr.Root.Name)
 	}
 
-	// Collect cross-domain doc references — this is the core signal.
-	for _, doc := range cr.CrossDomain.DocumentedIn {
-		if doc.Name != "" {
-			names = append(names, doc.Name)
-			// Also extract meaningful words from section names.
-			names = appendSectionWords(names, doc.Name)
+	// Documentation field: canonical source for "what docs explain this code".
+	// Includes graph-derived edges (EXPLAINS/DOCUMENTED_BY) merged from
+	// CrossDomain.DocumentedIn, plus search-fallback results.
+	for _, doc := range cr.Documentation {
+		if doc.Node.Name != "" {
+			names = append(names, doc.Node.Name)
+			names = appendSectionWords(names, doc.Node.Name)
+		}
+		if doc.Node.File != "" {
+			names = append(names, doc.Node.File)
 		}
 	}
+
+	// CrossDomain: supplemental signals not already in Documentation.
 	for _, rel := range cr.CrossDomain.Related {
 		if rel.Name != "" {
 			names = append(names, rel.Name)

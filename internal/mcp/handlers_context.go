@@ -788,10 +788,26 @@ func (s *Server) handleGetContext(
 		}
 	}
 
-	// Search fallback for Documentation: when a code entity has no explicit
-	// doc edges (DOCUMENTED_BY/EXPLAINS), search FTS for doc-domain sections
-	// that mention the entity name. Results are marked as search_fallback so
-	// consumers can distinguish them from graph-derived documentation.
+	// Canonical Documentation field: for code roots, merge CrossDomain.DocumentedIn
+	// into Documentation so agents have a single field for "what docs explain this code".
+	// CrossDomain.DocumentedIn still retains the entries for structural inspection,
+	// but Documentation becomes the canonical agent-facing answer.
+	if dc.Root != nil && dc.Root.Domain != graph.DomainDocs && dc.CrossDomain != nil {
+		seen := make(map[graph.NodeID]bool, len(dc.Documentation))
+		for _, d := range dc.Documentation {
+			seen[d.Node.ID] = true
+		}
+		for _, d := range dc.CrossDomain.DocumentedIn {
+			if !seen[d.Node.ID] {
+				dc.Documentation = append(dc.Documentation, d)
+				seen[d.Node.ID] = true
+			}
+		}
+	}
+
+	// Search fallback for Documentation: when a code entity has no graph-derived
+	// doc links, search FTS for doc-domain sections that mention the entity name.
+	// Results are marked as search_fallback so consumers can distinguish them.
 	if len(dc.Documentation) == 0 && s.store != nil && dc.Root != nil &&
 		dc.Root.Domain != graph.DomainDocs && len(dc.Root.Name) >= 3 {
 		if docResults, err := s.store.SemanticSearchWithDomain(dc.Root.Name, 5, "docs"); err == nil {
