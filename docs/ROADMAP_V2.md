@@ -125,23 +125,23 @@ Chasing ContextBench F1 by bolting on BM25 source search would make Synapses sco
 
 **Goal:** Push GraphBench F1 from 24.6% to 60%+. This is Synapses' core product — if the graph is wrong, nothing else matters.
 
-**Current score: 40.2% F1** (up from 24.6% baseline, +63% relative improvement)
+**Current score: 43.9% F1** (up from 24.6% baseline, +78% relative improvement)
 
 **Per-query-type scores:**
 | Query Type | Tests | F1 | Status |
 |---|---|---|---|
-| find_imports | 18 | 40.1% | Much improved (was 6.4%) |
-| find_callees | 15 | 35.8% | Decent |
-| find_callers | 7 | 54.2% | Good |
-| impact_analysis | 9 | 38.9% | OK |
-| find_implementations | 1 | 22.2% | Only 1 test |
+| find_implementations | 1 | 66.7% | Excellent (was 22.2%) |
+| find_callers | 7 | 58.3% | Good (was 42.9%) |
+| find_callees | 15 | 44.7% | Improved (was 30.4%) |
+| find_imports | 18 | 40.7% | Much improved (was 6.4%) |
+| impact_analysis | 9 | 39.8% | OK (was 37.6%) |
 
 **Per-language scores:**
 | Language | Tests | F1 | Status |
 |---|---|---|---|
-| Python | 20 | 48.4% | Good (was 40.6%) |
-| Go | 20 | 47.3% | Good (was 21.0%) |
-| TypeScript | 10 | 9.5% | Poor (was 0.0%) |
+| Python | 20 | 50.3% | Good (was 40.6%) |
+| Go | 20 | 49.5% | Good (was 21.0%) |
+| TypeScript | 10 | 22.9% | Improved (was 0.0%) |
 
 | # | Task | What | Effort | Impact | Status |
 |---|------|------|--------|--------|--------|
@@ -151,20 +151,32 @@ Chasing ContextBench F1 by bolting on BM25 source search would make Synapses sco
 | 22.3 | **Python relative import file resolution** | Resolve `from .cli import X` → target file `src/flask/cli.py` instead of storing importer's path. Handle dotted paths (`.sansio.blueprints` → `sansio/blueprints.py`). | Low | High | ✅ Done |
 | 22.4 | **Precision matching fix** | Fix GraphBench precision calculation to use same partial dot-suffix matching as recall. Was using exact-only lookups. | Low | Medium | ✅ Done |
 | 22.5 | **impact_analysis depth tuning** | Reduce BFS depth from 3 to 2. Depth=3 returns too many transitive dependents (27% precision vs 70% recall). | Low | Medium | ✅ Done |
-| 22.6 | **JS/TS call resolution** | Express.js callees/callers/impact all score 0%. CommonJS function patterns (`createApplication`, `app.listen`) not resolved by call graph. Needs deeper JS call-site resolution or module.exports parsing. | High | High | ⏳ Remaining |
-| 22.7 | **Cross-repo callee resolution** | Tests expect callees like `werkzeug.serving.run_simple` (external package). Synapses only indexes the current repo — can't resolve cross-package calls without dependency indexing. | High | Medium | ⏳ Remaining |
-| 22.8 | **Expand test cases to 100** | Add 50 more test cases across diverse repos and languages. Current 50 tests may not be representative. | Medium | High | ⏳ Remaining |
+| 22.6 | **JS prototype method parsing** | Express.js `app.METHOD = function() {}` patterns not parsed. Added tree-sitter query for prototype method assignment — captures all Express.js application API methods. | Medium | Critical | ✅ Done |
+| 22.7 | **Aliased callee extraction** | `obj.method()` calls now set PkgAlias to the object name, enabling cross-module call resolution. `createApplication → app.init()` now resolves through import map. | Medium | High | ✅ Done |
+| 22.8 | **Dotted-name entity resolution** | Prefer code entities (functions/methods) over NL-extracted concepts and test files when resolving dotted names like `app.listen`. | Low | High | ✅ Done |
+| 22.9 | **Exported function preference** | pickBestNode now prefers exported functions over non-exported ones. `New` resolves to gin.New (public API) over internal helpers. | Low | Medium | ✅ Done |
+| 22.10 | **Test directory detection** | isTestFile now detects test/, tests/, spec/ directories. Express.js test files correctly classified. | Low | Medium | ✅ Done |
+| 22.11 | **find_implementations type filter** | Only return struct/class/interface nodes, not their methods. IRouter implementations: 22% → 67% F1. | Low | Medium | ✅ Done |
+| 22.12 | **Cross-repo callee resolution** | Tests expect callees like `werkzeug.serving.run_simple` (external package). Requires dependency indexing. | High | Medium | ⏳ Blocked |
+| 22.13 | **Expand test cases to 100** | Add 50 more test cases across diverse repos and languages. | Medium | High | ⏳ Remaining |
 
-**Key architectural changes shipped:**
+**Key architectural changes shipped (11 commits):**
 1. **`imports` field in get_context JSON response** — new structural information directly answering file-level import queries
 2. **Bare filename resolution** — `gin.go` now resolves as a file path, not just a symbol name
-3. **Python relative import → file path mapping** — parser now resolves `.cli` to `src/flask/cli.py`
+3. **Python relative import → file path mapping** — parser resolves `.cli` to `src/flask/cli.py`, `.sansio.blueprints` to `sansio/blueprints.py`
 4. **CommonJS require() → IMPORTS edges** — JS/TS files now have import edges from require() calls
+5. **JS prototype method parsing** — `obj.method = function() {}` patterns create NodeMethod entries
+6. **Aliased callee extraction** — `obj.method()` sets PkgAlias enabling cross-module call resolution
+7. **Dotted-name resolution improvement** — prefers code over concepts/files for `app.listen` style queries
+8. **Exported function preference** — public API functions preferred over internal helpers
+9. **Test directory detection** — `test/`, `tests/`, `spec/` directories recognized
+10. **find_implementations type filtering** — only struct/class types, not their methods
+11. **Import deduplication** — prevents duplicate import entries in response
 
-**Remaining gaps analysis:**
-- TypeScript: 9.5% F1 — all callees/callers/impact tests score 0%. Root cause: Express.js uses CommonJS patterns that the JS call resolver can't connect (e.g., `module.exports = createApplication` → `var app = require('express')()` → `app.listen()`). This requires understanding module.exports assignments and tracing them through require() consumers.
-- find_callees: 35.8% — 7/15 tests at 0%. Mixed causes: generic names like `get`/`New`/`Run` resolve to wrong entities; cross-package calls; JS call resolution.
-- find_imports precision: 30% — returning many internal imports alongside expected external ones.
+**Remaining gaps to 60% (need +16pp):**
+- 10 tests at 0%: 5 cross-package calls (can't fix without dependency indexing), 3 ambiguous names (get/New/Run), 2 JS impact analysis
+- find_imports precision 30% — returns internal relative imports alongside expected external ones
+- TypeScript non-import tests still mostly 0% — need module.exports tracing for full CommonJS support
 
 **Success criteria:** GraphBench F1 ≥ 60% overall. find_callers ≥ 70%, find_imports ≥ 50%, JS/TS ≥ 20%.
 
