@@ -160,22 +160,35 @@ func (p *JavaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	declInfo := extractJavaDeclInfo(root, src, lines)
 
 	// --- package declaration ---
+	// Java packages: scoped (com.example.app) or single (retrofit2).
 	var javaPackage string
-	pkgQuery := `(package_declaration (scoped_identifier) @pkg_name)`
-	_ = runQuery(lang, root, src, pkgQuery, func(captures map[string]string, _ int) {
-		pkgName := captures["pkg_name"]
-		if pkgName == "" {
-			return
+	for _, pkgQ := range []string{
+		`(package_declaration (scoped_identifier) @pkg_name)`,
+		`(package_declaration (identifier) @pkg_name)`,
+	} {
+		if javaPackage != "" {
+			break
 		}
-		javaPackage = pkgName
-		// Set the file node's package.
+		_ = runQuery(lang, root, src, pkgQ, func(captures map[string]string, _ int) {
+			if n := captures["pkg_name"]; n != "" {
+				javaPackage = n
+			}
+		})
+	}
+	// Set file node package.
+	if javaPackage != "" {
 		if fn := g.GetNode(fileNodeID); fn != nil {
-			fn.Package = pkgName
+			fn.Package = javaPackage
 		}
-	})
-	// Fallback: use the filename stem as the package name.
+	}
+	// Fallback: use directory name as package.
 	if javaPackage == "" {
-		javaPackage = strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
+		dirName := filepath.Base(filepath.Dir(filePath))
+		if dirName != "" && dirName != "." {
+			javaPackage = dirName
+		} else {
+			javaPackage = strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
+		}
 	}
 
 	// --- import declarations ---
