@@ -182,6 +182,31 @@ Chasing ContextBench F1 by bolting on BM25 source search would make Synapses sco
 
 ---
 
+## Sprint 22b: GraphBench Language Expansion — Production Readiness 🔥 NEXT
+
+**Goal:** Expand GraphBench from 3 languages (Python, Go, TypeScript) to 6 languages (+ Java, Rust, Ruby). Fix any parser gaps discovered. Target: 40%+ F1 across ALL 6 languages.
+
+**Why now:** We can't ship Sprint 23 (LLM augmentation) without knowing if our parsers work for Java (most popular enterprise language), Rust (fastest growing systems language), and Ruby (critical web framework language). GraphBench is our quality gate — every language we add becomes a regression test. The fixes we made in Sprint 22 (aliased callee extraction, prototype method parsing, dotted-name resolution) may have broken things for untested languages.
+
+**Repos selected:**
+- **Java:** OkHttp (square/okhttp) — mid-size HTTP client, clear interceptor/protocol interfaces, cross-module calls
+- **Rust:** reqwest (seanmonstar/reqwest) — trait-based architecture, feature gating, layered abstractions
+- **Ruby:** Rack (rack/rack) — minimal but rich middleware pattern, clean call chains, module dependencies
+
+| # | Task | What | Effort | Impact |
+|---|------|------|--------|--------|
+| 22b.1 | **Java test cases (OkHttp)** | 10 test cases: find_imports (3), find_callees (3), find_callers (2), impact_analysis (1), find_implementations (1). Focus on interface hierarchy (Interceptor, Call, Connection) and cross-package calls. | Medium | Critical |
+| 22b.2 | **Rust test cases (reqwest)** | 10 test cases: find_imports (3), find_callees (3), find_callers (2), impact_analysis (1), find_implementations (1). Focus on trait implementations, async call chains, and module hierarchy. | Medium | Critical |
+| 22b.3 | **Ruby test cases (Rack)** | 10 test cases: find_imports (3), find_callees (3), find_callers (2), impact_analysis (1), find_implementations (1). Focus on middleware stack, require patterns, and module mixins. | Medium | Critical |
+| 22b.4 | **Fix Java parser gaps** | Run GraphBench on Java, analyze failures, fix any parser issues (import resolution, method call extraction, interface detection). | Variable | High |
+| 22b.5 | **Fix Rust parser gaps** | Run GraphBench on Rust, analyze failures, fix any parser issues (use/mod resolution, trait impl detection, associated function calls). | Variable | High |
+| 22b.6 | **Fix Ruby parser gaps** | Run GraphBench on Ruby, analyze failures, fix any parser issues (require/require_relative resolution, method_missing, module inclusion). | Variable | High |
+| 22b.7 | **Cross-language regression test** | Re-run full 80-test GraphBench (50 existing + 30 new) to verify no regressions. Target: 40%+ F1 per language, 45%+ overall. | Low | Critical |
+
+**Success criteria:** GraphBench F1 ≥ 40% for EACH of the 6 languages. Overall F1 ≥ 45% on 80 tests.
+
+---
+
 ## Sprint 23: LLM Augmentation Benchmark — Product Value Proof
 
 **Goal:** Answer THE question: *Does giving an LLM access to Synapses tools make it better at solving real coding tasks?* This is the number that justifies Synapses' existence.
