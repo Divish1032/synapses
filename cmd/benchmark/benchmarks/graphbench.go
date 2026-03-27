@@ -316,7 +316,8 @@ func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test Grap
 			matched := false
 			for _, e := range test.ExpectedNames {
 				ne := normalizeName(e)
-				if nn == ne || strings.HasSuffix(nn, "."+ne) || strings.HasSuffix(ne, "."+nn) {
+				if nn == ne || strings.HasSuffix(nn, "."+ne) || strings.HasSuffix(ne, "."+nn) ||
+				strings.HasPrefix(nn, ne+"::") || strings.HasPrefix(ne, nn+"::") {
 					matched = true
 					break
 				}
@@ -682,9 +683,11 @@ func setOverlap(expected, actual []string) (int, int) {
 		}
 		// Partial match: "Flask.__init__" should match "__init__" or "Flask".
 		// Also "Session.request" should match "request".
+		// For Rust: "std::future" should match "std::future::Future".
 		for _, a := range actual {
 			na := normalizeName(a)
-			if strings.HasSuffix(na, "."+ne) || strings.HasSuffix(ne, "."+na) {
+			if strings.HasSuffix(na, "."+ne) || strings.HasSuffix(ne, "."+na) ||
+				strings.HasPrefix(na, ne+"::") || strings.HasPrefix(ne, na+"::") {
 				hits++
 				break
 			}
