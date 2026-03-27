@@ -61,6 +61,11 @@ func ResolveCallEdges(g *graph.Graph) int {
 	// nil means no instantiation data (e.g. pure Go project) — CHA behavior used.
 	instantiated := g.GetInstantiatedTypes()
 
+	// Build inheritance map from heritage_extends metadata (Java/TypeScript).
+	// Maps child class name → list of parent class names for method resolution
+	// fallback: if child.method() is not found, try parent.method().
+	inheritanceMap := buildInheritanceMap(g)
+
 	// Track edges added in this batch. Existing edges checked via g.HasEdge.
 	type edgeKey struct{ from, to graph.NodeID }
 	seen := make(map[edgeKey]bool)
@@ -85,14 +90,25 @@ func ResolveCallEdges(g *graph.Graph) int {
 		// caller's node name (e.g., "View.dispatch" → class "View") and look
 		// for "View.method" in the method index. This is more precise than the
 		// package-wide suffix fallback because it targets the exact class.
-		if (site.PkgAlias == "self" || site.PkgAlias == "this" ||
-			originalAlias == "self" || originalAlias == "this") && len(targets) == 0 {
+		if (site.PkgAlias == "self" || site.PkgAlias == "this" || site.PkgAlias == "super" ||
+			originalAlias == "self" || originalAlias == "this" || originalAlias == "super") && len(targets) == 0 {
 			callerNode := g.GetNode(site.CallerID)
 			if callerNode != nil {
 				if dot := strings.LastIndexByte(callerNode.Name, '.'); dot > 0 {
 					className := callerNode.Name[:dot]
-					if id := findByTypedMethod(methodIndex, className, site.FuncName); id != "" {
-						targets = []graph.NodeID{id}
+					isSuperCall := site.PkgAlias == "super" || originalAlias == "super"
+					if isSuperCall {
+						// super.method() — skip the current class, start from parent.
+						if id := findByInheritedMethod(methodIndex, inheritanceMap, className, site.FuncName, true); id != "" {
+							targets = []graph.NodeID{id}
+						}
+					} else {
+						// this.method() — try current class first, then walk parents.
+						if id := findByTypedMethod(methodIndex, className, site.FuncName); id != "" {
+							targets = []graph.NodeID{id}
+						} else if id := findByInheritedMethod(methodIndex, inheritanceMap, className, site.FuncName, false); id != "" {
+							targets = []graph.NodeID{id}
+						}
 					}
 				}
 			}
@@ -123,12 +139,18 @@ func ResolveCallEdges(g *graph.Graph) int {
 			// known declared type (e.g. repo: Repository = ... or Repository repo = ...).
 			// Resolve the type name then look for TypeName.method across all packages.
 			// This path is already precise (exact type known) — single target only.
+			// Falls back to inheritance chain if the exact type lacks the method.
 			if len(targets) == 0 {
 				varTypes := g.GetVarTypes(site.CallerFile)
 				// Try both normalized alias ("router") and original ("self.router").
 				for _, tryAlias := range []string{site.PkgAlias, originalAlias} {
 					if typeName, hasType := varTypes[tryAlias]; hasType {
 						if id := findByTypedMethod(methodIndex, typeName, site.FuncName); id != "" {
+							targets = []graph.NodeID{id}
+							break
+						}
+						// Inheritance fallback: type may inherit the method from a parent.
+						if id := findByInheritedMethod(methodIndex, inheritanceMap, typeName, site.FuncName, false); id != "" {
 							targets = []graph.NodeID{id}
 							break
 						}
@@ -385,4 +407,83 @@ func buildMethodIndex(pkgIndex map[string][]*graph.Node) map[string]graph.NodeID
 // O(1) per call instead of O(N) full scan.
 func findByTypedMethod(methodIndex map[string]graph.NodeID, typeName, methodName string) graph.NodeID {
 	return methodIndex[typeName+"."+methodName]
+}
+
+// buildInheritanceMap builds a class name → parent class names map from
+// heritage_extends metadata stored on struct/interface nodes during parsing.
+// Supports Java (extends/implements) and TypeScript (extends/implements).
+//
+// Note: keyed by simple class name (not package-qualified), consistent with
+// methodIndex. If two packages have same-named classes with different parents,
+// parents are merged (both hierarchies are walked). This trades a small risk
+// of false positives for much better recall.
+func buildInheritanceMap(g *graph.Graph) map[string][]string {
+	result := make(map[string][]string)
+	seen := make(map[string]map[string]bool) // dedup parents per class name
+	for _, n := range g.AllNodes() {
+		if n.Type != graph.NodeStruct && n.Type != graph.NodeInterface {
+			continue
+		}
+		if n.Metadata == nil {
+			continue
+		}
+		var parents []string
+		if ext := n.Metadata["heritage_extends"]; ext != "" {
+			parents = append(parents, strings.Split(ext, ",")...)
+		}
+		if impl := n.Metadata["heritage_implements"]; impl != "" {
+			parents = append(parents, strings.Split(impl, ",")...)
+		}
+		if len(parents) == 0 {
+			continue
+		}
+		if seen[n.Name] == nil {
+			seen[n.Name] = make(map[string]bool)
+		}
+		for _, p := range parents {
+			p = strings.TrimSpace(p)
+			if p == "" || p == n.Name {
+				continue // skip self-references and empty
+			}
+			if !seen[n.Name][p] {
+				seen[n.Name][p] = true
+				result[n.Name] = append(result[n.Name], p)
+			}
+		}
+	}
+	return result
+}
+
+// findByInheritedMethod walks the inheritance chain to find a method defined
+// on a parent class. If skipSelf is true (super.method() calls), starts from
+// the parents directly; otherwise tries the class itself first (already done
+// by caller) then walks parents.
+// Guards against circular inheritance with a visited set (max depth 10).
+func findByInheritedMethod(
+	methodIndex map[string]graph.NodeID,
+	inheritanceMap map[string][]string,
+	className, methodName string,
+	skipSelf bool,
+) graph.NodeID {
+	visited := make(map[string]bool)
+	if skipSelf {
+		visited[className] = true
+	}
+	// BFS through inheritance chain.
+	queue := inheritanceMap[className]
+	for depth := 0; len(queue) > 0 && depth < 10; depth++ {
+		var next []string
+		for _, parent := range queue {
+			if visited[parent] {
+				continue
+			}
+			visited[parent] = true
+			if id := methodIndex[parent+"."+methodName]; id != "" {
+				return id
+			}
+			next = append(next, inheritanceMap[parent]...)
+		}
+		queue = next
+	}
+	return ""
 }

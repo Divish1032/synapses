@@ -502,24 +502,41 @@ func collectRustCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, 
 			}
 			return ""
 		},
-		CalleeExtractor: func(n sitter.Node, src []byte) string {
+		AliasedCalleeExtractor: func(n sitter.Node, src []byte) (alias, name string) {
 			fn := n.ChildByFieldName("function")
 			if fn.IsNull() {
-				return ""
+				return "", ""
 			}
 			switch fn.Type() {
 			case "identifier":
-				return string(src[fn.StartByte():fn.EndByte()])
+				return "", string(src[fn.StartByte():fn.EndByte()])
 			case "field_expression":
+				// self.method() or obj.method() — extract both receiver and method.
+				var objName, methodName string
 				if field := fn.ChildByFieldName("field"); !field.IsNull() {
-					return string(src[field.StartByte():field.EndByte()])
+					methodName = string(src[field.StartByte():field.EndByte()])
 				}
+				if value := fn.ChildByFieldName("value"); !value.IsNull() {
+					valText := string(src[value.StartByte():value.EndByte()])
+					if valText == "self" || valText == "Self" {
+						objName = "self"
+					} else {
+						objName = valText
+					}
+				}
+				return objName, methodName
 			case "scoped_identifier":
+				// Type::method() — extract type as alias.
+				var scopeName, methodName string
 				if nameNode := fn.ChildByFieldName("name"); !nameNode.IsNull() {
-					return string(src[nameNode.StartByte():nameNode.EndByte()])
+					methodName = string(src[nameNode.StartByte():nameNode.EndByte()])
 				}
+				if pathNode := fn.ChildByFieldName("path"); !pathNode.IsNull() {
+					scopeName = string(src[pathNode.StartByte():pathNode.EndByte()])
+				}
+				return scopeName, methodName
 			}
-			return ""
+			return "", ""
 		},
 		IsBuiltin: isRustBuiltin,
 	})

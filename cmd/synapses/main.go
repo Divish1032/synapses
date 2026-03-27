@@ -1485,6 +1485,9 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 	}
 
 	resolverStart := time.Now()
+	if na := resolver.ResolvePathAliases(g); na > 0 {
+		logutil.Info("synapses: resolved %d tsconfig path aliases\n", na)
+	}
 	n := resolver.ResolveCallEdges(g)
 	logutil.Info("synapses: resolved %d CALLS edges\n", n)
 	nh := resolver.ResolveHeritageEdges(g)
@@ -2960,12 +2963,35 @@ func fetchTopNSummaries(ctx context.Context, bc *brain.Client, g *graph.Graph, s
 // completes in ~3min at 8× concurrency — runs in background, does not block startup.
 // Summaries are stored in brain.sqlite and surfaced in get_context responses.
 // Sort order: high-fanin nodes first so the most-used code gets summaries soonest.
+// mainEmbedResolver adapts embed.Client + store.Store into the resolver.EmbedResolver
+// interface for post-embed discovery passes (doc↔code linking, knowledge relations).
+type mainEmbedResolver struct {
+	ec *embed.Client
+	st *store.Store
+}
+
+func (r *mainEmbedResolver) EmbedText(ctx context.Context, text string) ([]float32, error) {
+	return r.ec.Embed(ctx, text)
+}
+
+func (r *mainEmbedResolver) SearchByVector(queryVec []float32, k int) []resolver.EmbedMatch {
+	results, err := r.st.VectorSearch(queryVec, k)
+	if err != nil || len(results) == 0 {
+		return nil
+	}
+	out := make([]resolver.EmbedMatch, len(results))
+	for i, sr := range results {
+		out[i] = resolver.EmbedMatch{NodeID: sr.ID, Score: sr.Score}
+	}
+	return out
+}
+
 // embedAllNodes generates vector embeddings for every graph node that does not
 // yet have one, storing results in the node_embeddings table. Runs in a
 // background goroutine after startup so the MCP server is never delayed.
 // Rate-limited to ~10 req/s to avoid saturating a local Ollama instance.
 // Fail-silent: any error per-node is logged to stderr and skipped.
-func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *store.Store) {
+func embedAllNodes(ctx context.Context, ec *embed.Client, g *graph.Graph, st *store.Store, onComplete ...func()) {
 	if ec == nil || st == nil {
 		return
 	}
@@ -3040,6 +3066,44 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 	}
 
 	logutil.Info("synapses: embedding complete (%d/%d nodes indexed)\n", done, len(nodeIDs))
+
+	// Rebuild HNSW so new vectors are immediately searchable.
+	if done > 0 {
+		st.RebuildNodeHNSW()
+	}
+
+	// Post-embed discovery: create doc↔code, knowledge, and community edges
+	// now that HNSW is populated. These passes are idempotent.
+	if g != nil {
+		er := &mainEmbedResolver{ec: ec, st: st}
+		dcCount := resolver.DiscoverDocCodeRelations(g, er, 0.60)
+		erCount := resolver.DiscoverEmbedRelations(g, er, 0.55)
+		comCount := resolver.DetectCommunities(g, 10)
+		if dcCount+erCount+comCount > 0 {
+			logutil.Info("synapses: post-embed discovery: %d doc-code, %d relations, %d communities\n",
+				dcCount, erCount, comCount)
+			// Persist new discovery edges to SQLite.
+			var newEdges []graph.Edge
+			for _, e := range g.AllEdges() {
+				switch e.Type {
+				case graph.EdgeExplains, graph.EdgeDocumentedBy, graph.EdgeRelatesTo,
+					graph.EdgeCausedBy, graph.EdgeInstanceOf, graph.EdgeContradicts:
+					newEdges = append(newEdges, *e)
+				}
+			}
+			if len(newEdges) > 0 {
+				if err := st.SaveDiscoveryEdges(newEdges); err != nil {
+					logutil.Warn("synapses: persist discovery edges: %v\n", err)
+				} else {
+					logutil.Info("synapses: persisted %d discovery edges\n", len(newEdges))
+				}
+			}
+		}
+	}
+
+	for _, fn := range onComplete {
+		fn()
+	}
 }
 
 // createMemoryEmbedder creates a memory Embedder based on the config's Embeddings mode.
@@ -3057,7 +3121,7 @@ func createMemoryEmbedder(cfg *config.Config) embed.Embedder {
 		if endpoint == "" {
 			endpoint = "http://localhost:11434/api/embeddings"
 		}
-		e := embed.NewOllamaEmbedder(endpoint, "")
+		e := embed.NewOllamaEmbedder(endpoint, cfg.EmbeddingModel)
 		if e == nil {
 			return nil
 		}

@@ -2152,6 +2152,19 @@ func (s *Server) trimRepoRoot(paths []string) []string {
 	return out
 }
 
+// trimRepoRootSingle trims the repo root prefix from a single path.
+func (s *Server) trimRepoRootSingle(p string) string {
+	root := s.graph.Root()
+	if root == "" || p == "" {
+		return p
+	}
+	prefix := root
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return strings.TrimPrefix(p, prefix)
+}
+
 // computeFirstSessionHighlights analyses the code graph for patterns that
 // demonstrate immediate value on a project's first session:
 //

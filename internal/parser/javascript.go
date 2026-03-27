@@ -406,6 +406,7 @@ func (p *JavaScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 			return
 		}
 		nodeID := g.MakeNodeID(filePath, name)
+		meta := buildLangMeta(declInfo[name])
 		g.AddNode(&graph.Node{
 			ID:       nodeID,
 			Type:     graph.NodeStruct,
@@ -414,12 +415,16 @@ func (p *JavaScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 			File:     filePath,
 			Line:     startLine,
 			Exported: isExported(name),
-			Metadata: buildLangMeta(declInfo[name]),
+			Metadata: meta,
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 	}); err != nil {
 		return err
 	}
+
+	// Extract heritage (extends/implements) for class declarations.
+	// TypeScript: class Foo extends Bar implements IBaz { ... }
+	extractTSClassHeritage(g, root, src, filePath)
 
 	// --- Method definitions (inside class bodies) --- class-qualified names.
 	p.extractClassMethods(g, root, src, filePath, moduleName, fileNodeID, declInfo)
@@ -636,12 +641,145 @@ func jsAliasedCalleeExtractor(n sitter.Node, src []byte) (string, string) {
 		prop := fn.ChildByFieldName("property")
 		if !prop.IsNull() {
 			callee := string(src[prop.StartByte():prop.EndByte()])
-			if !obj.IsNull() && obj.Type() == "identifier" {
-				alias := string(src[obj.StartByte():obj.EndByte()])
-				return alias, callee
+			if !obj.IsNull() {
+				switch obj.Type() {
+				case "identifier":
+					return string(src[obj.StartByte():obj.EndByte()]), callee
+				case "this":
+					return "this", callee
+				case "super":
+					return "super", callee
+				case "member_expression":
+					// Chained: a.b.method() → alias="a.b"
+					return string(src[obj.StartByte():obj.EndByte()]), callee
+				}
 			}
 			return "", callee
 		}
 	}
 	return "", ""
+}
+
+// extractTSClassHeritage walks the AST to find class_declaration nodes with
+// heritage clauses (extends/implements) and stores them as metadata on the
+// corresponding graph node. This enables inheritance-based method resolution.
+//
+// TypeScript AST shape:
+//
+//	(class_declaration
+//	  name: (type_identifier)
+//	  (class_heritage
+//	    (extends_clause (identifier) ...)
+//	    (implements_clause (type_identifier) ...)))
+//
+// JavaScript only has extends (no implements keyword).
+func extractTSClassHeritage(g *graph.Graph, root sitter.Node, src []byte, filePath string) {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
+			return
+		}
+		if n.Type() == "class_declaration" {
+			extractSingleClassHeritage(g, n, src, filePath)
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+}
+
+// extractSingleClassHeritage extracts heritage (extends/implements) from a
+// single class_declaration node and stores it as metadata.
+func extractSingleClassHeritage(g *graph.Graph, classNode sitter.Node, src []byte, filePath string) {
+	nameNode := classNode.ChildByFieldName("name")
+	if nameNode.IsNull() {
+		return
+	}
+	className := string(src[nameNode.StartByte():nameNode.EndByte()])
+	nodeID := g.MakeNodeID(filePath, className)
+	node := g.GetNode(nodeID)
+	if node == nil {
+		return
+	}
+
+	var extendsNames, implementsNames []string
+	for i := uint32(0); i < classNode.ChildCount(); i++ {
+		child := classNode.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		switch child.Type() {
+		case "class_heritage":
+			for j := uint32(0); j < child.ChildCount(); j++ {
+				clause := child.Child(j)
+				if clause.IsNull() {
+					continue
+				}
+				switch clause.Type() {
+				case "extends_clause":
+					extendsNames = append(extendsNames, extractTSTypeNames(clause, src)...)
+				case "implements_clause":
+					implementsNames = append(implementsNames, extractTSTypeNames(clause, src)...)
+				}
+			}
+		case "extends_clause":
+			extendsNames = append(extendsNames, extractTSTypeNames(child, src)...)
+		case "implements_clause":
+			implementsNames = append(implementsNames, extractTSTypeNames(child, src)...)
+		}
+	}
+
+	if len(extendsNames) == 0 && len(implementsNames) == 0 {
+		return
+	}
+	if node.Metadata == nil {
+		node.Metadata = make(map[string]string)
+	}
+	if len(extendsNames) > 0 {
+		node.Metadata["heritage_extends"] = strings.Join(extendsNames, ",")
+	}
+	if len(implementsNames) > 0 {
+		node.Metadata["heritage_implements"] = strings.Join(implementsNames, ",")
+	}
+}
+
+// extractTSTypeNames extracts type identifier names from an extends_clause or
+// implements_clause node. Handles both simple identifiers and generic types
+// (e.g., Array<string> → "Array").
+func extractTSTypeNames(clause sitter.Node, src []byte) []string {
+	var names []string
+	for i := uint32(0); i < clause.ChildCount(); i++ {
+		child := clause.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		switch child.Type() {
+		case "identifier", "type_identifier":
+			names = append(names, string(src[child.StartByte():child.EndByte()]))
+		case "generic_type":
+			// Generic type: React.Component<Props> → extract "Component" or just the name part.
+			if nameNode := child.ChildByFieldName("name"); !nameNode.IsNull() {
+				names = append(names, string(src[nameNode.StartByte():nameNode.EndByte()]))
+			} else {
+				// Fallback: first identifier child.
+				for j := uint32(0); j < child.ChildCount(); j++ {
+					gc := child.Child(j)
+					if !gc.IsNull() && (gc.Type() == "identifier" || gc.Type() == "type_identifier") {
+						names = append(names, string(src[gc.StartByte():gc.EndByte()]))
+						break
+					}
+				}
+			}
+		case "member_expression", "nested_type_identifier":
+			// Qualified: React.Component → extract full text but just last segment.
+			text := string(src[child.StartByte():child.EndByte()])
+			if dot := strings.LastIndexByte(text, '.'); dot >= 0 {
+				names = append(names, text[dot+1:])
+			} else {
+				names = append(names, text)
+			}
+		}
+	}
+	return names
 }
