@@ -112,23 +112,26 @@ func pickBestNode(nodes []*graph.Node, g *graph.Graph, query ...string) *graph.N
 		// Tier 0: exact case-sensitive name match on struct/interface in non-test file.
 		// This prevents "Table" resolving to "Row.table" (method) or "HTML" to
 		// "html" (function in Makefile) when an exact struct match exists.
-		// Tier 0: exact case-sensitive struct/interface match.
+		// Tier 0: exact case-sensitive name match — highest priority.
+		// "New" prefers a function named exactly "New" over "Router.New".
+		// "get" prefers a function named "get" over "CookieJar.get".
 		if len(query) > 0 && query[0] != "" && n.Name == query[0] && !isTest {
 			if n.Type == graph.NodeStruct || n.Type == graph.NodeInterface {
 				return 0
+			}
+			if (n.Type == graph.NodeFunction || n.Type == graph.NodeMethod) && n.Exported {
+				return 1
 			}
 		}
 		switch n.Type {
 		case graph.NodeFunction, graph.NodeMethod:
 			if !isTest {
-				// Prefer exported functions: "New" should resolve to the
-				// public API function, not an internal helper.
 				if n.Exported {
-					return 1
+					return 2
 				}
-				return 2
+				return 3
 			}
-			return 5
+			return 6
 		case graph.NodeStruct, graph.NodeInterface:
 			if !isTest {
 				return 1
