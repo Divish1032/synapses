@@ -132,8 +132,18 @@ func (p *RubyParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
 	})
 
+	// Derive module name from filename: "builder.rb" → "builder", "rack.rb" → "rack".
+	moduleName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
+
 	// --- All declarations via AST walk ---
 	p.extractAllDeclarations(g, root, src, filePath, fileNodeID, declInfo)
+
+	// Post-process: set Package on all nodes in this file that don't have it.
+	for _, n := range g.FindByFile(filePath) {
+		if n.Package == "" && n.Type != graph.NodeFile && n.Type != graph.NodePackage {
+			n.Package = moduleName
+		}
+	}
 
 	// --- Call sites ---
 	collectRubyCallSites(g, lang, root, src, filePath, fileNodeID)
