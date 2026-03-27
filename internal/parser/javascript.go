@@ -321,6 +321,42 @@ func (p *JavaScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 		return err
 	}
 
+	// --- Prototype method assignments: obj.method = function name() {} ---
+	// Captures CommonJS patterns like: app.listen = function listen() { ... }
+	// The function_expression's name (if present) becomes the node name.
+	// Falls back to the property name if the function is anonymous.
+	protoMethodQuery := `
+(assignment_expression
+  left: (member_expression
+    object: (identifier) @obj_name
+    property: (property_identifier) @method_name)
+  right: [(function_expression) (arrow_function)]
+)`
+	if err := runQuery(lang, root, src, protoMethodQuery, func(captures map[string]string, startLine int) {
+		methodName := captures["method_name"]
+		if methodName == "" || methodName == "exports" {
+			return
+		}
+		// Skip if node already exists (from function_declaration or other query).
+		nodeID := g.MakeNodeID(filePath, methodName)
+		if g.GetNode(nodeID) != nil {
+			return
+		}
+		g.AddNode(&graph.Node{
+			ID:       nodeID,
+			Type:     graph.NodeMethod,
+			Name:     methodName,
+			Package:  moduleName,
+			File:     filePath,
+			Line:     startLine,
+			Exported: true,
+			Metadata: buildLangMeta(declInfo[methodName]),
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+	}); err != nil {
+		return err
+	}
+
 	// --- Class declarations ---
 	classQuery := `(class_declaration name: (identifier) @class_name)`
 	if err := runQuery(lang, root, src, classQuery, func(captures map[string]string, startLine int) {
@@ -512,17 +548,12 @@ func collectJSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, sr
 		},
 		CallTypes: map[string]bool{"call_expression": true},
 		NameExtractor: func(n sitter.Node, src []byte) string {
-			// For functions/methods: try "name" field first.
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				return string(src[nameNode.StartByte():nameNode.EndByte()])
 			}
-			// For arrow functions assigned to variables, the name is on the parent
-			// variable_declarator node, not on the arrow_function itself.
-			// The walk will use "" which falls back to file-level — acceptable for
-			// anonymous lambdas since they have no graph node to attribute to.
 			return ""
 		},
-		CalleeExtractor: jsCalleeExtractor,
+		AliasedCalleeExtractor: jsAliasedCalleeExtractor,
 		IsBuiltin: func(name string) bool {
 			return isTSBuiltin(name) || name == "require"
 		},
@@ -546,4 +577,30 @@ func jsCalleeExtractor(n sitter.Node, src []byte) string {
 		}
 	}
 	return ""
+}
+
+// jsAliasedCalleeExtractor returns (alias, callee) for qualified calls.
+// For obj.method(), alias="obj", callee="method".
+// For direct calls foo(), alias="", callee="foo".
+func jsAliasedCalleeExtractor(n sitter.Node, src []byte) (string, string) {
+	fn := n.ChildByFieldName("function")
+	if fn.IsNull() {
+		return "", ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		return "", string(src[fn.StartByte():fn.EndByte()])
+	case "member_expression":
+		obj := fn.ChildByFieldName("object")
+		prop := fn.ChildByFieldName("property")
+		if !prop.IsNull() {
+			callee := string(src[prop.StartByte():prop.EndByte()])
+			if !obj.IsNull() && obj.Type() == "identifier" {
+				alias := string(src[obj.StartByte():obj.EndByte()])
+				return alias, callee
+			}
+			return "", callee
+		}
+	}
+	return "", ""
 }
