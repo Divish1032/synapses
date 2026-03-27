@@ -13,20 +13,6 @@ import (
 	"github.com/viterin/vek/vek32"
 )
 
-// nodeContentHash computes an 8-char hex hash of the concatenated node text
-// (name + signature + doc) used to detect stale embeddings after code changes.
-func nodeContentHash(name, sig, doc string) string {
-	parts := []string{name}
-	if sig != "" {
-		parts = append(parts, sig)
-	}
-	if doc != "" {
-		parts = append(parts, doc)
-	}
-	sum := sha256.Sum256([]byte(strings.Join(parts, " ")))
-	return hex.EncodeToString(sum[:4]) // 8 hex chars
-}
-
 // nodeText builds the embedding input string from raw node fields.
 // Mirrors GetNodeTextForEmbedding without a DB round-trip.
 func nodeText(name, sig, doc string) string {
@@ -187,6 +173,9 @@ func (s *Store) EmbeddingCount() int {
 func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 	const pageSize = 500
 
+	// Batch pre-load all CALLS/IMPLEMENTS edges to avoid O(2N) per-node queries.
+	edgeCallees, edgeCallers := s.batchParserDerivedEdgeNames()
+
 	baseQuery := `
 		SELECT n.rowid, n.id, n.name, n.signature, n.doc, COALESCE(e.content_hash, '') AS stored_hash
 		FROM nodes n
@@ -207,8 +196,7 @@ func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 			if err := rows.Scan(&rowid, &id, &name, &sig, &doc, &storedHash); err != nil {
 				return nil, err
 			}
-			callers, callees := s.getParserDerivedEdgeNames(id)
-			if nodeContentHashEnriched(name, sig, doc, callers, callees) != storedHash {
+			if nodeContentHashEnriched(name, sig, doc, edgeCallers[id], edgeCallees[id]) != storedHash {
 				ids = append(ids, id)
 			}
 		}
@@ -237,8 +225,7 @@ func (s *Store) GetNodesWithoutEmbeddings(limit int) ([]string, error) {
 				return nil, err
 			}
 			cursor = rowid
-			callers, callees := s.getParserDerivedEdgeNames(id)
-			if nodeContentHashEnriched(name, sig, doc, callers, callees) != storedHash {
+			if nodeContentHashEnriched(name, sig, doc, edgeCallers[id], edgeCallees[id]) != storedHash {
 				ids = append(ids, id)
 				if len(ids) >= limit {
 					break
@@ -270,6 +257,47 @@ func (s *Store) GetNodeTextForEmbedding(nodeID string) (text string, ok bool) {
 	}
 	callers, callees := s.getParserDerivedEdgeNames(nodeID)
 	return nodeTextEnriched(name, sig, doc, callers, callees), true
+}
+
+// batchParserDerivedEdgeNames pre-loads ALL CALLS/IMPLEMENTS edge names in 2 queries,
+// returning maps keyed by node ID. Used by GetNodesWithoutEmbeddings to avoid O(2N) queries.
+func (s *Store) batchParserDerivedEdgeNames() (callees, callers map[string][]string) {
+	callees = make(map[string][]string)
+	callers = make(map[string][]string)
+
+	// Callees: from_id → callee names (limit 5 per node)
+	rows, err := s.graphDB.Query(`
+		SELECT e.from_id, n.name FROM edges e JOIN nodes n ON e.to_id = n.id
+		WHERE e.type IN ('calls', 'implements')`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var fromID, name string
+			if rows.Scan(&fromID, &name) == nil && name != "" {
+				if len(callees[fromID]) < 5 {
+					callees[fromID] = append(callees[fromID], name)
+				}
+			}
+		}
+	}
+
+	// Callers: to_id → caller names (limit 3 per node)
+	rows2, err := s.graphDB.Query(`
+		SELECT e.to_id, n.name FROM edges e JOIN nodes n ON e.from_id = n.id
+		WHERE e.type IN ('calls', 'implements')`)
+	if err == nil {
+		defer rows2.Close()
+		for rows2.Next() {
+			var toID, name string
+			if rows2.Scan(&toID, &name) == nil && name != "" {
+				if len(callers[toID]) < 3 {
+					callers[toID] = append(callers[toID], name)
+				}
+			}
+		}
+	}
+
+	return
 }
 
 // getParserDerivedEdgeNames returns caller/callee names from CALLS and IMPLEMENTS

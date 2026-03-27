@@ -259,6 +259,9 @@ func linkSectionsToFiles(g *graph.Graph, sections []*graph.Node, fileIdx map[str
 				created++
 			}
 		}
+		if len(seen) > 0 && sec.Metadata["doc_link_source"] == "" {
+			sec.Metadata["doc_link_source"] = "name_match"
+		}
 	}
 	return created
 }
@@ -513,7 +516,7 @@ func linkCodeBlocks(g *graph.Graph, sections []*graph.Node, codeNames map[string
 // Regex patterns for code block identifier extraction.
 var (
 	// Python/JS imports: `from X import Y`, `import X`, `require('X')`
-	pyImportRe  = regexp.MustCompile(`(?:from\s+(\w+)\s+import\s+([\w, ]+)|import\s+([\w.]+))`)
+	pyImportRe  = regexp.MustCompile(`(?:from\s+(\w+)\s+import\s+\(?([\w, ]+)\)?|import\s+([\w.]+))`)
 	jsRequireRe = regexp.MustCompile(`require\(['"]([^'"]+)['"]\)`)
 	jsImportRe  = regexp.MustCompile(`import\s+(?:\{([^}]+)\}|(\w+))\s+from`)
 	// Qualified calls: X.method() where X is CamelCase

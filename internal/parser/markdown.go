@@ -246,8 +246,7 @@ func extractSections(src []byte) ([]section, frontmatterData) {
 				}
 			}
 		} else {
-			if len(trimmed) >= 3 && trimmed[0] == fenceChar &&
-				trimmed[1] == fenceChar && trimmed[2] == fenceChar {
+			if len(trimmed) >= 3 && isClosingFence(trimmed, fenceChar) {
 				// Closing fence — attach code block to most recent section.
 				content := strings.TrimSpace(strings.Join(fenceBody, "\n"))
 				if content != "" && len(sections) > 0 {
@@ -342,6 +341,17 @@ func extractSections(src []byte) ([]section, frontmatterData) {
 	}
 
 	return sections, fm
+}
+
+// isClosingFence returns true if the line is a valid closing code fence:
+// 3+ consecutive fence characters with no other content (CommonMark spec).
+func isClosingFence(trimmed string, fenceChar byte) bool {
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] != fenceChar {
+			return false
+		}
+	}
+	return len(trimmed) >= 3
 }
 
 // isSetextUnderline returns true for a setext heading underline:

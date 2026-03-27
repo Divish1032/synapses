@@ -993,6 +993,22 @@ result = Client.send(data)
 	}
 }
 
+func TestExtractCodeBlockIdentifiers_ParenthesizedImport(t *testing.T) {
+	content := `from flask import (Flask, render_template)
+`
+	idents := extractCodeBlockIdentifiers(content, "python")
+	has := make(map[string]bool)
+	for _, id := range idents {
+		has[id] = true
+	}
+	if !has["Flask"] {
+		t.Error("expected Flask from parenthesized import")
+	}
+	if !has["render_template"] {
+		t.Error("expected render_template from parenthesized import")
+	}
+}
+
 func TestExtractCodeBlockIdentifiers_TypeAnnotation(t *testing.T) {
 	content := `def process(handler: RequestHandler) -> Response:
     pass

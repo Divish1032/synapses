@@ -287,6 +287,9 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 				if sourceNode := g.nodes[sourceID]; sourceNode != nil {
 					if confStr := sourceNode.Metadata["doc_link_confidence"]; confStr != "" {
 						if conf, err := strconv.ParseFloat(confStr, 64); err == nil && conf > 0 {
+							if conf > 1.0 {
+								conf = 1.0 // clamp: confidence is a cosine similarity, must be in (0, 1]
+							}
 							w *= conf
 						}
 					}
@@ -604,6 +607,9 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 					if sourceNode := g.nodes[sourceID]; sourceNode != nil {
 						if confStr := sourceNode.Metadata["doc_link_confidence"]; confStr != "" {
 							if conf, err := strconv.ParseFloat(confStr, 64); err == nil && conf > 0 {
+								if conf > 1.0 {
+									conf = 1.0 // clamp: confidence is a cosine similarity, must be in (0, 1]
+								}
 								typeWeight *= conf
 							}
 						}
