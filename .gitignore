@@ -1,5 +1,9 @@
 docs/ROADMAP.md
 
+# Benchmark results (regenerable)
+results/
+benchmark
+
 # Binaries
 bin/
 dist/
