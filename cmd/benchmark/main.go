@@ -32,7 +32,7 @@ import (
 
 func main() {
 	var (
-		benchmarkName = flag.String("benchmark", "repobench", "Benchmark to run: contextbench | swe-verified | repobench | graphbench")
+		benchmarkName = flag.String("benchmark", "repobench", "Benchmark to run: contextbench | swe-verified | repobench | graphbench | featurebench")
 		endpoint      = flag.String("endpoint", "http://127.0.0.1:11435", "Synapses daemon REST endpoint")
 		project       = flag.String("project", "", "Single project path (overrides per-repo routing for synapses-embed)")
 		outputDir     = flag.String("output-dir", "results", "Directory to write JSON and markdown results")
@@ -58,6 +58,12 @@ func main() {
 		sweDataFile   = flag.String("swe-data", "swebench_pilot.jsonl", "Path to SWE-bench JSONL dataset")
 		sweMode       = flag.String("mode", "baseline", "Agent mode: baseline | synapses")
 		sweModel      = flag.String("model", "claude-sonnet-4-6", "Claude model for SWE-bench agent")
+		// FeatureBench-specific flags.
+		fbSplit       = flag.String("fb-split", "lite", "FeatureBench split: lite | fast | full")
+		fbTaskIDs     = flag.String("fb-task-ids", "", "Comma-separated FeatureBench task IDs")
+		fbLevel       = flag.Int("fb-level", 0, "FeatureBench level filter: 1 or 2 (0 = all)")
+		fbTimeout     = flag.Int("fb-timeout", 1200, "Timeout per FeatureBench task in seconds")
+		fbDebug       = flag.Bool("fb-debug", false, "Dump raw stream-json to file for MCP tool inspection")
 		sweMaxTurns   = flag.Int("max-turns", 25, "Max agent loop turns for SWE-bench")
 	)
 	flag.Parse()
@@ -247,6 +253,28 @@ func main() {
 			log.Fatalf("write results: %v", err)
 		}
 		rep.PrintSWEBenchSummary(sweResult)
+
+	case "featurebench", "feature-bench", "feature_bench":
+		fbResults, err := benchmarks.RunFeatureBench(benchmarks.FeatureBenchOptions{
+			Split:       *fbSplit,
+			TaskIDs:     splitComma(*fbTaskIDs),
+			Level:       *fbLevel,
+			ReposDir:    *reposDir,
+			Limit:       *limit,
+			Mode:        *sweMode,
+			Model:       *sweModel,
+			Timeout:     *fbTimeout,
+			OutputDir:   *outputDir,
+			Debug:       *fbDebug,
+		})
+		if err != nil {
+			log.Fatalf("featurebench failed: %v", err)
+		}
+		fbReport := benchmarks.BuildFeatureBenchReport(*sweMode, *sweModel, fbResults)
+		if err := rep.WriteFeatureBench(fbReport); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintFeatureBenchSummary(fbReport)
 
 	default:
 		log.Fatalf("unknown benchmark %q", *benchmarkName)
