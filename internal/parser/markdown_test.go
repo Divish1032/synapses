@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -471,6 +472,120 @@ func TestMarkdownParser_FrontmatterNoTags(t *testing.T) {
 	}
 	if _, ok := fileNode.Metadata["frontmatter_tags"]; ok {
 		t.Error("frontmatter_tags should not be set when no tags in frontmatter")
+	}
+}
+
+func TestMarkdownParser_CodeBlockExtraction(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("# Quick Start\n\nInstall Flask:\n\n```python\nfrom flask import Flask\napp = Flask(__name__)\n```\n\nThen run it:\n\n```bash\npython app.py\n```\n")
+	if err := p.Parse(g, "/repo/README.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(sections))
+	}
+	cbJSON := sections[0].Metadata["code_blocks"]
+	if cbJSON == "" {
+		t.Fatal("code_blocks metadata missing")
+	}
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(cbJSON), &blocks); err != nil {
+		t.Fatalf("failed to unmarshal code_blocks: %v", err)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 code blocks, got %d", len(blocks))
+	}
+	if blocks[0].Language != "python" {
+		t.Errorf("block 0 language = %q, want python", blocks[0].Language)
+	}
+	if !strings.Contains(blocks[0].Content, "from flask import Flask") {
+		t.Errorf("block 0 content missing expected code: %q", blocks[0].Content)
+	}
+	if blocks[1].Language != "bash" {
+		t.Errorf("block 1 language = %q, want bash", blocks[1].Language)
+	}
+}
+
+func TestMarkdownParser_CodeBlockMaxFivePerSection(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// Create a section with 7 code blocks — only first 5 should be kept.
+	var sb strings.Builder
+	sb.WriteString("# Many Blocks\n\n")
+	for i := 0; i < 7; i++ {
+		sb.WriteString("```go\nfunc F" + string(rune('A'+i)) + "() {}\n```\n\n")
+	}
+	if err := p.Parse(g, "/repo/test.md", []byte(sb.String())); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(sections))
+	}
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(sections[0].Metadata["code_blocks"]), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 5 {
+		t.Errorf("expected max 5 code blocks, got %d", len(blocks))
+	}
+}
+
+func TestMarkdownParser_CodeBlockEmptySkipped(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("# Section\n\n```python\n   \n```\n\n```go\nfmt.Println(\"hi\")\n```\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(sections))
+	}
+	var blocks []codeBlock
+	cbJSON := sections[0].Metadata["code_blocks"]
+	if cbJSON == "" {
+		t.Fatal("code_blocks missing — the non-empty block should be captured")
+	}
+	if err := json.Unmarshal([]byte(cbJSON), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 {
+		t.Errorf("expected 1 code block (empty one skipped), got %d", len(blocks))
+	}
+}
+
+func TestMarkdownParser_CodeBlockTruncation(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	longCode := strings.Repeat("x", 3000)
+	src := []byte("# Section\n\n```go\n" + longCode + "\n```\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(sections[0].Metadata["code_blocks"]), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks[0].Content) > 2000 {
+		t.Errorf("code block content should be truncated to 2000, got %d", len(blocks[0].Content))
+	}
+}
+
+func TestMarkdownParser_UnclosedFenceNotCaptured(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// Unclosed fence — should not produce a code block, body includes it as prose.
+	src := []byte("# Section\n\n```python\nprint('hello')\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if sections[0].Metadata["code_blocks"] != "" {
+		t.Error("unclosed fence should not produce code_blocks metadata")
 	}
 }
 
