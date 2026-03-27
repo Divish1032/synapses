@@ -543,10 +543,25 @@ func (s *Server) handleGetContext(
 	// (not a method). FindByName only does suffix matching on stored names, so
 	// "Graph.New" won't match a node named "New". Split on dot and filter by
 	// whether the prefix appears in the node's ID or file path.
-	if len(nodes) == 0 && strings.Contains(entityName, ".") {
+	//
+	// Also run when existing results are all non-code entities (concepts, files,
+	// knowledge nodes) — prefer code entities over NL-extracted concepts.
+	hasCodeNode := false
+	for _, n := range nodes {
+		if n.Type == graph.NodeFunction || n.Type == graph.NodeMethod ||
+			n.Type == graph.NodeStruct || n.Type == graph.NodeInterface {
+			hasCodeNode = true
+			break
+		}
+	}
+	if !hasCodeNode && strings.Contains(entityName, ".") {
 		parts := strings.SplitN(entityName, ".", 2)
 		prefix, method := strings.ToLower(parts[0]), parts[1]
 		for _, n := range s.graph.FindByName(method) {
+			// Skip test files and non-code entities for dotted-name resolution.
+			if isTestFile(n.File) {
+				continue
+			}
 			if strings.Contains(strings.ToLower(string(n.ID)), prefix) ||
 				strings.Contains(strings.ToLower(n.File), prefix) {
 				nodes = append(nodes, n)
