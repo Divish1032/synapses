@@ -346,6 +346,12 @@ func cmdStartDirect(args []string) error {
 		fedResolver = federation.NewResolver(cfg.Federation, cfgDir)
 		srv.SetFederationResolver(fedResolver)
 		defer fedResolver.Close()
+		// Cross-repo module discovery: find Go module and npm workspace siblings.
+		moduleDeps := federation.DiscoverModuleSiblings(absPath, cfg.Federation)
+		if siblings := federation.FilterSiblingDeps(moduleDeps); len(siblings) > 0 {
+			logutil.Info("synapses: discovered %d cross-repo module dependencies (%d match federation siblings)\n",
+				len(moduleDeps), len(siblings))
+		}
 	}
 
 	// Brain — now in-process; no external sidecar or port required.
@@ -1497,6 +1503,10 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 	ni := resolver.ResolveImplementsEdges(g)
 	if ni > 0 {
 		logutil.Info("synapses: resolved %d structural IMPLEMENTS edges\n", ni)
+	}
+	// Proto/GraphQL cross-file type reference resolution.
+	if npt := parser.ResolveProtoTypeRefs(g); npt > 0 {
+		logutil.Info("synapses: resolved %d proto type reference edges\n", npt)
 	}
 	resolverDurationMs := float64(time.Since(resolverStart).Milliseconds())
 	// R31: resolve documentation → code entity links (EXPLAINS/DOCUMENTED_BY).

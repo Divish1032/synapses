@@ -119,8 +119,20 @@ func (p *GraphQLParser) walkDefinitions(
 			p.extractFragment(g, child, src, filePath, fileNodeID)
 		case "directive_definition":
 			p.extractDirectiveDefinition(g, child, src, filePath, fileNodeID)
+		// Type extensions: extend type Foo { newField: String }
+		// These create DEPENDS_ON edges from the extension to the base type,
+		// enabling impact analysis: changing the base type surfaces extensions.
+		case "object_type_extension":
+			p.extractTypeExtension(g, child, src, filePath, fileNodeID, "type", deferred)
+		case "input_object_type_extension":
+			p.extractTypeExtension(g, child, src, filePath, fileNodeID, "input", deferred)
+		case "interface_type_extension":
+			p.extractTypeExtension(g, child, src, filePath, fileNodeID, "interface", deferred)
+		case "enum_type_extension":
+			p.extractTypeExtension(g, child, src, filePath, fileNodeID, "enum", deferred)
 		case "document", "definition", "type_system_definition",
-			"executable_definition", "type_definition":
+			"executable_definition", "type_definition", "type_system_extension",
+			"type_extension":
 			// Wrapper nodes — recurse to find actual definitions.
 			p.walkDefinitions(g, child, src, filePath, fileNodeID, deferred)
 		}
@@ -357,6 +369,62 @@ func (p *GraphQLParser) extractSchemaDefinition(
 		Metadata: meta,
 	})
 	g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+}
+
+// extractTypeExtension handles GraphQL type extension nodes (extend type Foo { ... }).
+// Creates the extension's fields as nodes and a DEPENDS_ON edge from the extension
+// file to the base type, enabling cross-file schema impact analysis.
+func (p *GraphQLParser) extractTypeExtension(
+	g *graph.Graph, n sitter.Node, src []byte,
+	filePath string, fileNodeID graph.NodeID, kind string,
+	deferred *[]fieldTypeRef,
+) {
+	name := graphqlNodeName(n, src)
+	if name == "" {
+		return
+	}
+
+	// Create the extension fields as nodes (same as regular type).
+	isOperation := name == "Query" || name == "Mutation" || name == "Subscription"
+	extNodeID := g.MakeNodeID(filePath, name)
+
+	// If the base type node doesn't exist in this file, create a stub.
+	if g.GetNode(extNodeID) == nil {
+		nodeType := graph.NodeStruct
+		if kind == "interface" {
+			nodeType = graph.NodeInterface
+		}
+		g.AddNode(&graph.Node{
+			ID:       extNodeID,
+			Type:     nodeType,
+			Name:     name,
+			File:     filePath,
+			Line:     int(n.StartPoint().Row) + 1,
+			Exported: true,
+			Domain:   graph.DomainAPI,
+			Metadata: map[string]string{"kind": kind, "extension": "true"},
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: extNodeID, Type: graph.EdgeDefines})
+	}
+
+	// Create a DEPENDS_ON edge from this file to the base type (cross-file reference).
+	// Find the original type definition by name across all files.
+	for _, candidate := range g.FindByName(name) {
+		if candidate.ID == extNodeID || candidate.File == filePath {
+			continue
+		}
+		if candidate.Type == graph.NodeStruct || candidate.Type == graph.NodeInterface {
+			g.AddEdge(&graph.Edge{
+				From: extNodeID,
+				To:   candidate.ID,
+				Type: graph.EdgeDependsOn,
+			})
+			break
+		}
+	}
+
+	// Extract fields from the extension body.
+	p.extractFields(g, n, src, filePath, fileNodeID, extNodeID, name, isOperation, deferred)
 }
 
 // extractFragment handles fragment_definition nodes.
