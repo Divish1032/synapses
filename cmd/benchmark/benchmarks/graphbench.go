@@ -543,10 +543,15 @@ func queryContextRelated(client *agent.SynapsesClient, entity string) (names, fi
 		return extractNamesFromText(raw), extractFilesFromText(raw), raw
 	}
 
-	// Collect related nodes (these include implementations, subtypes, etc.)
+	// Collect related nodes — for find_implementations, prefer struct/class types
+	// over their methods. Methods of implementing types are noise.
 	for _, rel := range cr.Related {
 		if rel.Node.Name != "" {
-			names = appendUniqueName(names, rel.Node.Name)
+			// Only include struct/interface/class types, not methods.
+			nodeType := rel.Node.Type
+			if nodeType == "struct" || nodeType == "class" || nodeType == "interface" {
+				names = appendUniqueName(names, rel.Node.Name)
+			}
 		}
 		if rel.Node.File != "" {
 			files = appendUniqueFile(files, rel.Node.File)
