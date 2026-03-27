@@ -243,5 +243,50 @@ func ResolveImplementsEdges(g *graph.Graph) int {
 			count++
 		}
 	}
+
+	// 6. Nominal typing: Java/TS "implements InterfaceName" / "extends ClassName".
+	//    For heritage-tagged structs, directly resolve the interface name to a node
+	//    and create IMPLEMENTS edges without structural matching.
+	ifaceByName := make(map[string]graph.NodeID)
+	for _, n := range nodes {
+		if n.Type == graph.NodeInterface {
+			ifaceByName[n.Name] = n.ID
+			if dot := strings.LastIndexByte(n.Name, '.'); dot >= 0 {
+				ifaceByName[n.Name[dot+1:]] = n.ID
+			}
+		}
+	}
+	for _, n := range nodes {
+		if n.Type != graph.NodeStruct {
+			continue
+		}
+		heritage := n.Metadata["heritage_implements"]
+		if heritage == "" {
+			continue
+		}
+		for _, ifaceName := range strings.Split(heritage, ",") {
+			ifaceName = strings.TrimSpace(ifaceName)
+			if ifaceName == "" {
+				continue
+			}
+			ifaceID, ok := ifaceByName[ifaceName]
+			if !ok {
+				if dot := strings.LastIndexByte(ifaceName, '.'); dot >= 0 {
+					ifaceID, ok = ifaceByName[ifaceName[dot+1:]]
+				}
+			}
+			if !ok {
+				continue
+			}
+			edgeKey := string(n.ID) + "->" + string(ifaceID)
+			if seen[edgeKey] || g.HasEdge(n.ID, ifaceID, graph.EdgeImplements) {
+				continue
+			}
+			seen[edgeKey] = true
+			g.AddEdge(&graph.Edge{From: n.ID, To: ifaceID, Type: graph.EdgeImplements})
+			count++
+		}
+	}
+
 	return count
 }
