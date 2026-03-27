@@ -192,8 +192,16 @@ func (tb *tokenBucket) Allow() bool {
 	return true
 }
 
-// DaemonHTTPAddr is the loopback address the singleton daemon binds to.
-const DaemonHTTPAddr = "127.0.0.1:" + DaemonHTTPPort
+// DaemonHTTPAddr returns the address the singleton daemon binds to.
+// Override with SYNAPSES_BIND_ADDR env var (e.g. "0.0.0.0:11435" for Docker).
+var DaemonHTTPAddr = daemonHTTPAddr()
+
+func daemonHTTPAddr() string {
+	if addr := os.Getenv("SYNAPSES_BIND_ADDR"); addr != "" {
+		return addr
+	}
+	return "127.0.0.1:" + DaemonHTTPPort
+}
 
 // canonicalPath resolves a path to its absolute, symlink-free form.
 // This ensures that /project and /symlink-to-project map to the same daemon.
@@ -721,7 +729,7 @@ func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectIn
 // This ensures that 401 rejections carry the Access-Control-Allow-* headers
 // a browser needs to surface the auth error rather than a generic CORS error.
 func authMiddleware(token string, next http.Handler) http.Handler {
-	if token == "" {
+	if token == "" || os.Getenv("SYNAPSES_NO_AUTH") == "1" {
 		return next // disabled — no-op pass-through
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1675,6 +1683,9 @@ func cmdDaemonServe(args []string) error {
 		} else {
 			// Non-browser: loopback callers (CLI tools) are trusted without a token.
 			// Non-loopback callers must present a valid Bearer token.
+			// SYNAPSES_NO_AUTH=1 disables token checks (for Docker/CI where
+			// requests arrive from the bridge network, not loopback).
+			noAuth := os.Getenv("SYNAPSES_NO_AUTH") == "1"
 			host, _, err := net.SplitHostPort(r.RemoteAddr)
 			if err != nil {
 				host = r.RemoteAddr
@@ -1683,7 +1694,7 @@ func cmdDaemonServe(args []string) error {
 				ip := net.ParseIP(host)
 				return ip != nil && ip.IsLoopback()
 			}()
-			if !isLoopback {
+			if !isLoopback && !noAuth {
 				authHeader := r.Header.Get("Authorization")
 				if !strings.HasPrefix(authHeader, "Bearer ") || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(authHeader, "Bearer ")), []byte(authToken)) != 1 {
 					w.Header().Set("WWW-Authenticate", `Bearer realm="synapses"`)
