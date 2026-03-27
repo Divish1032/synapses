@@ -199,6 +199,47 @@ func (p *JavaScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 		return err
 	}
 
+	// --- CommonJS module.exports = { key: val, ... } → create exported nodes for each key ---
+	// Handles patterns like: module.exports = { Router: Router, json: bodyParser.json }
+	moduleExportsObjQuery := `
+(assignment_expression
+  left: (member_expression
+    object: (identifier) @obj
+    property: (property_identifier) @prop)
+  right: (object
+    (pair
+      key: [(property_identifier) (string)] @key) @pair)
+  (#eq? @obj "module")
+  (#eq? @prop "exports"))`
+	if err := runQuery(lang, root, src, moduleExportsObjQuery, func(captures map[string]string, startLine int) {
+		keyName := captures["key"]
+		// Strip quotes from string keys.
+		keyName = strings.Trim(keyName, "\"'")
+		if keyName == "" {
+			return
+		}
+		nodeID := g.MakeNodeID(filePath, keyName)
+		if g.GetNode(nodeID) == nil {
+			g.AddNode(&graph.Node{
+				ID:       nodeID,
+				Type:     graph.NodeFunction,
+				Name:     keyName,
+				Package:  moduleName,
+				File:     filePath,
+				Line:     startLine,
+				Exported: true,
+				Metadata: buildLangMeta(declInfo[keyName]),
+			})
+			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+		} else {
+			if n := g.GetNode(nodeID); n != nil {
+				n.Exported = true
+			}
+		}
+	}); err != nil {
+		return err
+	}
+
 	// --- CommonJS exports.foo = expr → EdgeExports from file ---
 	exportsPropertyQuery := `
 (assignment_expression

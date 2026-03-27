@@ -322,6 +322,16 @@ func nlQueryFindRelevantDocs(client *agent.SynapsesClient, entity string) (names
 	if err == nil {
 		var cr contextResponse
 		if err := json.Unmarshal([]byte(raw), &cr); err == nil {
+			// Extract from direct documentation field first.
+			for _, doc := range cr.Documentation {
+				if doc.Node.File != "" {
+					names = append(names, doc.Node.File)
+				}
+				if doc.Node.Name != "" {
+					names = append(names, doc.Node.Name)
+					names = appendSectionWords(names, doc.Node.Name)
+				}
+			}
 			// Extract doc file names and section titles from cross-domain.
 			for _, doc := range cr.CrossDomain.DocumentedIn {
 				if doc.File != "" {
