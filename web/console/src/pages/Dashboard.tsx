@@ -82,7 +82,10 @@ export function Dashboard({ onNav }: { onNav: (r: string) => void }) {
         get<any>("/api/admin/pulse/summary?days=7"),
         get<{ update_available: boolean; latest_version: string; changelog_url: string }>("/api/admin/update-check"),
       ]);
-      if (projRes.status === "fulfilled") setProjects(projRes.value);
+      if (projRes.status === "fulfilled") {
+        const d = projRes.value;
+        setProjects(Array.isArray(d) ? d : (d as any)?.projects ?? []);
+      }
       if (pulseRes.status === "fulfilled") {
         setSummary(pulseRes.value.summary ?? null);
         setAgents((pulseRes.value.agents ?? []).slice(0, 6));
@@ -243,7 +246,13 @@ export function Dashboard({ onNav }: { onNav: (r: string) => void }) {
         ) : (
           <div className="dash-project-grid">
             {projects.slice(0, 4).map((p) => (
-              <div key={p.path} className="dash-project-card">
+              <div
+                key={p.path}
+                className="dash-project-card dash-project-card-clickable"
+                onClick={() => onNav(`/projects/${encodeURIComponent(p.path)}`)}
+                role="button"
+                tabIndex={0}
+              >
                 <div className="dash-project-card-header">
                   <span className="dash-project-name">{p.path.split("/").pop()}</span>
                 </div>

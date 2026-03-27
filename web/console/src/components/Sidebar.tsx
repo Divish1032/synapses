@@ -4,6 +4,7 @@ import { useServices } from "../hooks/useServices";
 const NAV_ITEMS = [
   { to: "/",          label: "Home",     icon: "\u2302" },
   { to: "/projects",  label: "Projects", icon: "\u2750" },
+  { to: "/brain",     label: "Brain",    icon: "\u2606" },
   { to: "/activity",  label: "Activity", icon: "\u2261" },
   { to: "/settings",  label: "Settings", icon: "\u2699" },
 ];
@@ -43,6 +44,12 @@ export function Sidebar({ route, onNav }: { route: string; onNav: (r: string) =>
       ? "Degraded"
       : "Running";
 
+  // Match active nav: /projects/... matches /projects
+  const activeNav = (to: string) => {
+    if (to === "/") return route === "/" || route === "";
+    return route === to || route.startsWith(to + "/");
+  };
+
   return (
     <nav className="sidebar">
       <div className="sidebar-logo">
@@ -55,7 +62,7 @@ export function Sidebar({ route, onNav }: { route: string; onNav: (r: string) =>
           <li key={to}>
             <a
               href={`#${to}`}
-              className={`nav-item ${route === to ? "active" : ""}`}
+              className={`nav-item ${activeNav(to) ? "active" : ""}`}
               onClick={(e) => { e.preventDefault(); onNav(to); }}
             >
               <span style={{ fontSize: 15 }}>{icon}</span>
