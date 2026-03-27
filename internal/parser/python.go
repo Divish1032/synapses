@@ -205,6 +205,13 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		return err
 	}
 
+	// --- from . import name (bare relative: from . import cli) ---
+	// Handles `from . import cli` where relative_import has no dotted_name child
+	// (only dots). The imported names are sibling modules in the same package.
+	// Cannot use a simple query because it would also match `from .cli import X`.
+	// Instead, walk import_from_statement nodes and check the AST structure.
+	bareRelImportWalk(g, root, src, filePath, fileNodeID)
+
 	// --- Function / method definitions (class-qualified via AST walk) ---
 	p.extractFunctionsAndMethods(g, root, src, filePath, moduleName, fileNodeID, declInfo)
 
@@ -510,6 +517,78 @@ func collectPythonCallSites(g *graph.Graph, lang *sitter.Language, root sitter.N
 // collectPythonVarTypes walks the AST to extract variable → type mappings for
 // cross-file call resolution. Records four patterns:
 //   - Annotated assignments:        obj: ClassName = ...
+// bareRelImportWalk handles `from . import name1, name2` imports where the
+// relative_import node contains only dots (no subpackage). These import sibling
+// modules in the same directory. We walk import_from_statement nodes and check
+// that the relative_import has no dotted_name child (distinguishing from
+// `from .cli import func` which IS handled by the relImportQuery).
+func bareRelImportWalk(g *graph.Graph, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
+			return
+		}
+		if n.Type() == "import_from_statement" {
+			modName := n.ChildByFieldName("module_name")
+			if modName.IsNull() || modName.Type() != "relative_import" {
+				return
+			}
+			// Check that the relative_import has NO dotted_name child
+			// (i.e., it's just dots like "." or "..").
+			hasDottedName := false
+			for i := uint32(0); i < modName.ChildCount(); i++ {
+				if modName.Child(i).Type() == "dotted_name" {
+					hasDottedName = true
+					break
+				}
+			}
+			if hasDottedName {
+				return // already handled by relImportQuery
+			}
+			// Extract each imported name from the `name:` children.
+			nameNode := n.ChildByFieldName("name")
+			if nameNode.IsNull() {
+				return
+			}
+			// name can be a single dotted_name or a comma-separated list.
+			// Walk all dotted_name children at this level.
+			var extractNames func(nn sitter.Node)
+			extractNames = func(nn sitter.Node) {
+				if nn.IsNull() {
+					return
+				}
+				if nn.Type() == "dotted_name" || nn.Type() == "identifier" {
+					importName := string(src[nn.StartByte():nn.EndByte()])
+					if importName == "" {
+						return
+					}
+					importNodeID := g.MakeNodeID(importName, importName)
+					targetFile := filepath.Join(filepath.Dir(filePath),
+						strings.ReplaceAll(importName, ".", "/")+".py")
+					g.AddNode(&graph.Node{
+						ID:      importNodeID,
+						Type:    graph.NodePackage,
+						Name:    importName,
+						Package: importName,
+						File:    targetFile,
+					})
+					g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
+					return
+				}
+				for i := uint32(0); i < nn.ChildCount(); i++ {
+					extractNames(nn.Child(i))
+				}
+			}
+			extractNames(nameNode)
+			return // don't recurse into children of import_from_statement
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+}
+
 //   - Constructor assignments:      obj = ClassName(...)
 //   - Function parameter types:     def f(repo: Repository, ...) → repo → Repository
 //   - Self-attribute constructors:  self.attr = ClassName(...) → "self.attr" → ClassName

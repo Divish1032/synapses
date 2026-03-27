@@ -793,13 +793,16 @@ func (s *Server) handleGetContext(
 	// that mention the entity name. Results are marked as search_fallback so
 	// consumers can distinguish them from graph-derived documentation.
 	if len(dc.Documentation) == 0 && s.store != nil && dc.Root != nil &&
-		dc.Root.Domain != graph.DomainDocs && dc.Root.Name != "" {
+		dc.Root.Domain != graph.DomainDocs && len(dc.Root.Name) >= 3 {
 		if docResults, err := s.store.SemanticSearchWithDomain(dc.Root.Name, 5, "docs"); err == nil {
 			for _, sr := range docResults {
 				dc.Documentation = append(dc.Documentation, graph.CarvedNode{
 					Node: &graph.Node{
-						ID:   graph.NodeID(sr.ID),
-						Name: sr.Name,
+						ID:       graph.NodeID(sr.ID),
+						Name:     sr.Name,
+						Type:     graph.NodeSection,
+						File:     sr.File,
+						Domain:   graph.DomainDocs,
 						Metadata: map[string]string{
 							"doc_link_source": "search_fallback",
 						},

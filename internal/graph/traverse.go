@@ -454,6 +454,21 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		// the rest of the graph). Always output root at relevance=1.0 regardless
 		// of the PPR mathematical rank.
 		visited[rootID] = 1.0
+
+		// Post-PPR implementor boost: when the root is an interface, PPR teleport
+		// normalization can dilute implementor struct scores below MinRelevance
+		// (especially for interfaces with many methods × many implementors).
+		// Ensure each implementing struct has at least 0.5 relevance so it
+		// survives pruning and appears in the output for find_implementations.
+		if rootNode := g.nodes[rootID]; rootNode != nil && rootNode.Type == NodeInterface {
+			for _, e := range g.outInEdges(rootID, idx) {
+				if e.Type == EdgeImplements && e.To == rootID && e.From != rootID {
+					if prev, ok := visited[e.From]; !ok || prev < 0.5 {
+						visited[e.From] = 0.5
+					}
+				}
+			}
+		}
 	} else {
 		weights := cfg.EdgeWeights
 		if weights == nil {

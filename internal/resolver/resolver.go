@@ -80,6 +80,24 @@ func ResolveCallEdges(g *graph.Graph) int {
 			site.PkgAlias = site.PkgAlias[strings.IndexByte(site.PkgAlias, '.')+1:]
 		}
 
+		// Self/this intra-class resolution: self.method() or this.method()
+		// When PkgAlias is "self" or "this", extract the class name from the
+		// caller's node name (e.g., "View.dispatch" → class "View") and look
+		// for "View.method" in the method index. This is more precise than the
+		// package-wide suffix fallback because it targets the exact class.
+		if (site.PkgAlias == "self" || site.PkgAlias == "this" ||
+			originalAlias == "self" || originalAlias == "this") && len(targets) == 0 {
+			callerNode := g.GetNode(site.CallerID)
+			if callerNode != nil {
+				if dot := strings.LastIndexByte(callerNode.Name, '.'); dot > 0 {
+					className := callerNode.Name[:dot]
+					if id := findByTypedMethod(methodIndex, className, site.FuncName); id != "" {
+						targets = []graph.NodeID{id}
+					}
+				}
+			}
+		}
+
 		if site.PkgAlias != "" {
 			// Qualified call: pkg.Func() or var.Method()
 			// The parser cannot distinguish these at AST time, so we try
