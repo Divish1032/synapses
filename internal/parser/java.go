@@ -160,17 +160,23 @@ func (p *JavaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	declInfo := extractJavaDeclInfo(root, src, lines)
 
 	// --- package declaration ---
+	var javaPackage string
 	pkgQuery := `(package_declaration (scoped_identifier) @pkg_name)`
 	_ = runQuery(lang, root, src, pkgQuery, func(captures map[string]string, _ int) {
 		pkgName := captures["pkg_name"]
 		if pkgName == "" {
 			return
 		}
+		javaPackage = pkgName
 		// Set the file node's package.
 		if fn := g.GetNode(fileNodeID); fn != nil {
 			fn.Package = pkgName
 		}
 	})
+	// Fallback: use the filename stem as the package name.
+	if javaPackage == "" {
+		javaPackage = strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
+	}
 
 	// --- import declarations ---
 	importQuery := `(import_declaration (scoped_identifier) @import_path)`
@@ -193,7 +199,7 @@ func (p *JavaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	}
 
 	// --- All type and method declarations via AST walk (class-qualified) ---
-	p.extractAllDeclarations(g, root, src, filePath, fileNodeID, declInfo)
+	p.extractAllDeclarations(g, root, src, filePath, fileNodeID, declInfo, javaPackage)
 
 	// --- Call sites ---
 	collectJavaCallSites(g, lang, root, src, filePath, fileNodeID)
@@ -210,6 +216,7 @@ func (p *JavaParser) extractAllDeclarations(
 	filePath string,
 	fileNodeID graph.NodeID,
 	declInfo map[string]declMeta,
+	javaPackage string,
 ) {
 	var walk func(n sitter.Node, enclosingClass string)
 	walk = func(n sitter.Node, enclosingClass string) {
@@ -492,6 +499,16 @@ func (p *JavaParser) extractAllDeclarations(
 		}
 	}
 	walk(root, "")
+
+	// Post-process: set Package on all nodes in this file that don't have it.
+	// This ensures same-package call resolution works for Java.
+	if javaPackage != "" {
+		for _, n := range g.FindByFile(filePath) {
+			if n.Package == "" && n.Type != graph.NodeFile && n.Type != graph.NodePackage {
+				n.Package = javaPackage
+			}
+		}
+	}
 }
 
 // collectJavaCallSites performs a depth-first AST walk to collect call sites
