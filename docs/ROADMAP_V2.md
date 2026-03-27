@@ -182,9 +182,20 @@ Chasing ContextBench F1 by bolting on BM25 source search would make Synapses sco
 
 ---
 
-## Sprint 22b: GraphBench Language Expansion — Production Readiness 🔥 NEXT
+## Sprint 22b: GraphBench Language Expansion — Production Readiness ✅ IN PROGRESS
 
-**Goal:** Expand GraphBench from 3 languages (Python, Go, TypeScript) to 6 languages (+ Java, Rust, Ruby). Fix any parser gaps discovered. Target: 40%+ F1 across ALL 6 languages.
+**Goal:** Expand GraphBench from 3 languages to 6. Fix parser/resolver gaps discovered.
+
+**Current score: 40.3% F1** across 80 tests, 6 languages (up from 24.6% on 50 tests, 3 languages)
+
+| Language | Tests | F1 | Status |
+|---|---|---|---|
+| Python | 20 | 54.9% | Strong |
+| Go | 20 | 50.4% | Strong |
+| Rust | 10 | 38.3% | Good (new) |
+| Ruby | 10 | 36.1% | Good (new, was 0%) |
+| TypeScript | 10 | 22.9% | Improved (was 0%) |
+| Java | 10 | 14.7% | Working (was 0%) |
 
 **Why now:** We can't ship Sprint 23 (LLM augmentation) without knowing if our parsers work for Java (most popular enterprise language), Rust (fastest growing systems language), and Ruby (critical web framework language). GraphBench is our quality gate — every language we add becomes a regression test. The fixes we made in Sprint 22 (aliased callee extraction, prototype method parsing, dotted-name resolution) may have broken things for untested languages.
 
