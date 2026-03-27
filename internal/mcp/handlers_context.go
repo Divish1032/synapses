@@ -755,10 +755,12 @@ func (s *Server) handleGetContext(
 		if prefix != "" && !strings.HasSuffix(prefix, "/") {
 			prefix += "/"
 		}
+		seenImport := make(map[graph.NodeID]bool)
 		for _, fn := range fileNodes {
 			if fn.Type == graph.NodeFile {
 				for _, edge := range s.graph.OutEdges(fn.ID) {
-					if edge.Type == graph.EdgeImports {
+					if edge.Type == graph.EdgeImports && !seenImport[edge.To] {
+						seenImport[edge.To] = true
 						if importNode := s.graph.GetNode(edge.To); importNode != nil {
 							nodeCopy := *importNode
 							if prefix != "" {
