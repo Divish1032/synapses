@@ -311,14 +311,34 @@ func (p *RubyParser) extractAllDeclarations(
 }
 
 // collectRubyCallSites collects call sites.
-func collectRubyCallSites(g *graph.Graph, lang *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
-	callQuery := `(call method: (identifier) @callee)`
-	_ = runQuery(lang, root, src, callQuery, func(captures map[string]string, _ int) {
-		callee := captures["callee"]
-		if callee == "" || isRubyBuiltin(callee) {
-			return
-		}
-		g.AddCallSite(graph.CallSite{CallerID: fileNodeID, CallerFile: filePath, FuncName: callee})
+func collectRubyCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
+		ClassTypes: map[string]bool{"class": true, "module": true},
+		FuncTypes:  map[string]bool{"method": true, "singleton_method": true},
+		CallTypes:  map[string]bool{"call": true},
+		NameExtractor: func(n sitter.Node, src []byte) string {
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
+				return string(src[nameNode.StartByte():nameNode.EndByte()])
+			}
+			return ""
+		},
+		AliasedCalleeExtractor: func(n sitter.Node, src []byte) (string, string) {
+			methodNode := n.ChildByFieldName("method")
+			if methodNode.IsNull() {
+				return "", ""
+			}
+			callee := string(src[methodNode.StartByte():methodNode.EndByte()])
+			// Check for receiver: obj.method(args)
+			recvNode := n.ChildByFieldName("receiver")
+			if !recvNode.IsNull() && recvNode.Type() == "identifier" {
+				recv := string(src[recvNode.StartByte():recvNode.EndByte()])
+				if recv != "self" {
+					return recv, callee
+				}
+			}
+			return "", callee
+		},
+		IsBuiltin: isRubyBuiltin,
 	})
 }
 
