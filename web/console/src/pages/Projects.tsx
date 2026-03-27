@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "preact/hooks";
-import { get, api } from "../api";
+import { get, api, callTool } from "../api";
 import { useToast } from "../context/ToastContext";
 
 interface Project {
@@ -17,7 +17,7 @@ interface EntityRow {
   domain: string;
 }
 
-export function Projects() {
+export function Projects({ onNav }: { onNav?: (r: string) => void }) {
   const { addToast } = useToast();
   const [projects, setProjects] = useState<Project[]>([]);
   const [searchProject, setSearchProject] = useState("");
@@ -29,7 +29,8 @@ export function Projects() {
 
   const loadProjects = async () => {
     try {
-      const p = await get<Project[]>("/api/admin/projects");
+      const res = await get<any>("/api/admin/projects");
+      const p = Array.isArray(res) ? res : res.projects ?? [];
       setProjects(p);
       if (p.length > 0 && !searchProject) setSearchProject(p[0].path);
     } catch {
@@ -47,24 +48,31 @@ export function Projects() {
       setSearched(false);
       return;
     }
+    let cancelled = false;
     searchDebounce.current = setTimeout(async () => {
       setSearchLoading(true);
       try {
-        const res = await api<{ entities: EntityRow[] }>(
-          `/v1/tools/find_entity?project=${encodeURIComponent(searchProject)}`,
-          {
-            method: "POST",
-            body: JSON.stringify({ name: searchQuery.trim() }),
-          }
+        const res = await callTool<any>(
+          "find_entity",
+          searchProject,
+          { name: searchQuery.trim() },
         );
-        setSearchResults(res.entities ?? []);
-        setSearched(true);
+        if (!cancelled) {
+          // find_entity returns compact text or { entities: [...] }
+          const entities = Array.isArray(res?.entities) ? res.entities : [];
+          setSearchResults(entities);
+          setSearched(true);
+        }
       } catch {
-        setSearchResults([]);
+        if (!cancelled) setSearchResults([]);
       } finally {
-        setSearchLoading(false);
+        if (!cancelled) setSearchLoading(false);
       }
     }, 300);
+    return () => {
+      cancelled = true;
+      if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    };
   }, [searchQuery, searchProject]);
 
   const addProject = async () => {
@@ -105,6 +113,10 @@ export function Projects() {
     } catch (e: any) {
       addToast("error", `Failed: ${e.message}`);
     }
+  };
+
+  const openProject = (path: string) => {
+    if (onNav) onNav(`/projects/${encodeURIComponent(path)}`);
   };
 
   return (
@@ -162,14 +174,28 @@ export function Projects() {
       {/* Project grid */}
       <div className="dash-project-grid">
         {projects.map((p) => (
-          <div key={p.path} className="dash-project-card">
+          <div
+            key={p.path}
+            className="dash-project-card dash-project-card-clickable"
+            onClick={() => openProject(p.path)}
+            role="button"
+            tabIndex={0}
+          >
             <div className="dash-project-card-header">
               <span className="dash-project-name">{p.path.split("/").pop()}</span>
             </div>
             <div className="dash-project-meta">{p.path}</div>
             <div className="card-actions" style={{ marginTop: 8 }}>
-              <button className="icon-btn" title="Reindex" onClick={() => reindex(p.path)}>{"\u21BB"}</button>
-              <button className="icon-btn icon-btn-danger" title="Remove" onClick={() => removeProject(p.path)}>{"\u2715"}</button>
+              <button
+                className="icon-btn"
+                title="Reindex"
+                onClick={(e) => { e.stopPropagation(); reindex(p.path); }}
+              >{"\u21BB"}</button>
+              <button
+                className="icon-btn icon-btn-danger"
+                title="Remove"
+                onClick={(e) => { e.stopPropagation(); removeProject(p.path); }}
+              >{"\u2715"}</button>
             </div>
           </div>
         ))}

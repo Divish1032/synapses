@@ -488,6 +488,82 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 		}()
 	})
 
+	// ── GET/PUT /api/admin/projects/config — read/write project synapses.json ─
+	mux.HandleFunc("/api/admin/projects/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.Method {
+		case http.MethodGet:
+			projPath := r.URL.Query().Get("path")
+			if projPath == "" {
+				http.Error(w, `{"error":"path query param required"}`, http.StatusBadRequest)
+				return
+			}
+			absPath, err := canonicalPath(projPath)
+			if err != nil {
+				http.Error(w, `{"error":"invalid path"}`, http.StatusBadRequest)
+				return
+			}
+			if err := isValidProjectPath(absPath); err != nil {
+				http.Error(w, `{"error":"invalid project path"}`, http.StatusBadRequest)
+				return
+			}
+			cfgPath := filepath.Join(absPath, "synapses.json")
+			data, err := os.ReadFile(cfgPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					// Return empty config — project has no synapses.json yet
+					json.NewEncoder(w).Encode(map[string]interface{}{"config": map[string]interface{}{}}) //nolint:errcheck
+					return
+				}
+				http.Error(w, `{"error":"read config: `+mcpsrv.StripInternalPaths(err.Error())+`"}`, http.StatusInternalServerError)
+				return
+			}
+			var parsed interface{}
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				http.Error(w, `{"error":"parse config: `+err.Error()+`"}`, http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"config": parsed}) //nolint:errcheck
+
+		case http.MethodPut:
+			var req struct {
+				Path   string          `json:"path"`
+				Config json.RawMessage `json:"config"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil || req.Path == "" {
+				http.Error(w, `{"error":"path and config required"}`, http.StatusBadRequest)
+				return
+			}
+			absPath, err := canonicalPath(req.Path)
+			if err != nil {
+				http.Error(w, `{"error":"invalid path"}`, http.StatusBadRequest)
+				return
+			}
+			if err := isValidProjectPath(absPath); err != nil {
+				http.Error(w, `{"error":"invalid project path"}`, http.StatusBadRequest)
+				return
+			}
+			// Validate JSON
+			var check interface{}
+			if json.Unmarshal(req.Config, &check) != nil {
+				http.Error(w, `{"error":"invalid config JSON"}`, http.StatusBadRequest)
+				return
+			}
+			// Pretty-print for readability
+			pretty, _ := json.MarshalIndent(check, "", "  ")
+			cfgPath := filepath.Join(absPath, "synapses.json")
+			if err := os.WriteFile(cfgPath, pretty, 0o644); err != nil {
+				http.Error(w, `{"error":"write config: `+mcpsrv.StripInternalPaths(err.Error())+`"}`, http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
+
+		default:
+			http.Error(w, "use GET or PUT", http.StatusMethodNotAllowed)
+		}
+	})
+
 	// ── GET/POST /api/admin/update-check — update status ────────────────────
 	mux.HandleFunc("/api/admin/update-check", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
