@@ -2635,7 +2635,9 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcps
 }
 
 // hasSourceFiles checks if the directory contains any files with extensions
-// supported by Synapses parsers. Scans top-level and one level deep to keep it fast.
+// supported by Synapses parsers. Uses a bounded walk (max 4 levels, max 200
+// entries) to handle standard layouts like Maven/Gradle (src/main/java/...)
+// and Rust (src/lib.rs) without being too slow on huge repos.
 func hasSourceFiles(dir string) bool {
 	sourceExts := map[string]bool{
 		".go": true, ".py": true, ".js": true, ".ts": true, ".tsx": true, ".jsx": true,
@@ -2643,32 +2645,45 @@ func hasSourceFiles(dir string) bool {
 		".cs": true, ".rb": true, ".php": true, ".scala": true, ".dart": true,
 		".vue": true, ".svelte": true, ".zig": true, ".lua": true, ".ex": true, ".erl": true,
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			// Check one level deep.
-			subEntries, err := os.ReadDir(filepath.Join(dir, e.Name()))
-			if err != nil {
+	checked := 0
+	const maxChecked = 500
+	const maxDepth = 6
+
+	var walk func(path string, depth int) bool
+	walk = func(path string, depth int) bool {
+		if depth > maxDepth || checked >= maxChecked {
+			return false
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return false
+		}
+		for _, e := range entries {
+			checked++
+			if checked > maxChecked {
+				return false
+			}
+			if e.IsDir() {
+				// Skip known non-source directories.
+				name := e.Name()
+				if name == "node_modules" || name == ".git" || name == "vendor" ||
+					name == "__pycache__" || name == "build" || name == "target" ||
+					name == "dist" || name == ".gradle" {
+					continue
+				}
+				if walk(filepath.Join(path, name), depth+1) {
+					return true
+				}
 				continue
 			}
-			for _, se := range subEntries {
-				if !se.IsDir() {
-					ext := filepath.Ext(se.Name())
-					if sourceExts[ext] {
-						return true
-					}
-				}
+			ext := filepath.Ext(e.Name())
+			if sourceExts[ext] {
+				return true
 			}
-			continue
 		}
-		ext := filepath.Ext(e.Name())
-		if sourceExts[ext] {
-			return true
-		}
+		return false
 	}
+	return walk(dir, 0)
 	return false
 }
 
