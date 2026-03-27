@@ -112,6 +112,7 @@ func pickBestNode(nodes []*graph.Node, g *graph.Graph, query ...string) *graph.N
 		// Tier 0: exact case-sensitive name match on struct/interface in non-test file.
 		// This prevents "Table" resolving to "Row.table" (method) or "HTML" to
 		// "html" (function in Makefile) when an exact struct match exists.
+		// Tier 0: exact case-sensitive struct/interface match.
 		if len(query) > 0 && query[0] != "" && n.Name == query[0] && !isTest {
 			if n.Type == graph.NodeStruct || n.Type == graph.NodeInterface {
 				return 0
@@ -120,19 +121,24 @@ func pickBestNode(nodes []*graph.Node, g *graph.Graph, query ...string) *graph.N
 		switch n.Type {
 		case graph.NodeFunction, graph.NodeMethod:
 			if !isTest {
-				return 1
+				// Prefer exported functions: "New" should resolve to the
+				// public API function, not an internal helper.
+				if n.Exported {
+					return 1
+				}
+				return 2
 			}
-			return 3
+			return 5
 		case graph.NodeStruct, graph.NodeInterface:
 			if !isTest {
-				return 2
+				return 1
 			}
 			return 4
 		default:
 			if !isTest {
 				return 4
 			}
-			return 5
+			return 6
 		}
 	}
 
@@ -195,6 +201,13 @@ func isTestFile(filePath string) bool {
 	if i := strings.LastIndex(filePath, "/"); i >= 0 {
 		base = filePath[i+1:]
 	}
+	// Check directory-based test detection: files in test/, tests/, spec/ dirs.
+	lower := strings.ToLower(filePath)
+	if strings.Contains(lower, "/test/") || strings.Contains(lower, "/tests/") ||
+		strings.Contains(lower, "/spec/") || strings.Contains(lower, "/__tests__/") ||
+		strings.HasPrefix(lower, "test/") || strings.HasPrefix(lower, "tests/") {
+		return true
+	}
 	return strings.HasSuffix(base, "_test.go") ||
 		strings.HasPrefix(base, "test_") ||
 		strings.HasSuffix(base, "_test.ts") ||
@@ -202,7 +215,8 @@ func isTestFile(filePath string) bool {
 		strings.HasSuffix(base, "_test.py") ||
 		strings.HasSuffix(base, ".spec.ts") ||
 		strings.HasSuffix(base, "_test.js") ||
-		strings.HasSuffix(base, ".test.js")
+		strings.HasSuffix(base, ".test.js") ||
+		strings.HasSuffix(base, ".spec.js")
 }
 
 // topLevelPackage returns the first path component of filePath (the top-level
