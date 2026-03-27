@@ -56,7 +56,13 @@ func runNodeEmbedPass(ctx context.Context, embedder embed.Embedder, st *store.St
 		logutil.Warn("synapses/watcher: node embed pass: list nodes: %v\n", err)
 		return
 	}
+
+	// Even when all nodes are embedded, we still run post-embed discovery
+	// (below) to ensure semantic edges exist in the in-memory graph.
 	if len(ids) == 0 {
+		if g != nil {
+			runPostEmbedDiscovery(ctx, embedder, st, g)
+		}
 		return
 	}
 
@@ -115,8 +121,21 @@ func runNodeEmbedPass(ctx context.Context, embedder embed.Embedder, st *store.St
 	}
 }
 
+// discoveryEdgeTypes are the edge types created by post-embed discovery passes.
+// Used to collect and persist new edges to the store.
+var discoveryEdgeTypes = map[graph.EdgeType]bool{
+	graph.EdgeExplains:     true,
+	graph.EdgeDocumentedBy: true,
+	graph.EdgeRelatesTo:    true,
+	graph.EdgeCausedBy:     true,
+	graph.EdgeInstanceOf:   true,
+	graph.EdgeContradicts:  true,
+}
+
 // runPostEmbedDiscovery runs the three semantic discovery passes that depend on
 // populated HNSW embeddings: doc↔code linking, knowledge relations, communities.
+// After creating edges in the in-memory graph, persists them to the store so
+// they survive daemon restarts.
 func runPostEmbedDiscovery(ctx context.Context, embedder embed.Embedder, st *store.Store, g *graph.Graph) {
 	// Check for shutdown before starting potentially expensive passes.
 	select {
@@ -128,6 +147,14 @@ func runPostEmbedDiscovery(ctx context.Context, embedder embed.Embedder, st *sto
 	er := newStoreEmbedResolver(embedder, st)
 	if er == nil {
 		return
+	}
+
+	// Snapshot existing discovery edges before the passes run.
+	existingEdges := make(map[[3]string]bool)
+	for _, e := range g.AllEdges() {
+		if discoveryEdgeTypes[e.Type] {
+			existingEdges[[3]string{string(e.From), string(e.To), string(e.Type)}] = true
+		}
 	}
 
 	// Phase 1: Semantic doc↔code linking — creates EXPLAINS/DOCUMENTED_BY edges
@@ -145,5 +172,23 @@ func runPostEmbedDiscovery(ctx context.Context, embedder embed.Embedder, st *sto
 	if dcCount+erCount+comCount > 0 {
 		logutil.Info("synapses/watcher: post-embed discovery: %d doc-code, %d relations, %d communities\n",
 			dcCount, erCount, comCount)
+
+		// Collect newly created edges and persist to SQLite so they survive restarts.
+		var newEdges []graph.Edge
+		for _, e := range g.AllEdges() {
+			if discoveryEdgeTypes[e.Type] {
+				key := [3]string{string(e.From), string(e.To), string(e.Type)}
+				if !existingEdges[key] {
+					newEdges = append(newEdges, *e)
+				}
+			}
+		}
+		if len(newEdges) > 0 {
+			if err := st.SaveDiscoveryEdges(newEdges); err != nil {
+				logutil.Warn("synapses/watcher: persist discovery edges: %v\n", err)
+			} else {
+				logutil.Info("synapses/watcher: persisted %d discovery edges\n", len(newEdges))
+			}
+		}
 	}
 }

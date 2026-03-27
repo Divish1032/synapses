@@ -1444,6 +1444,7 @@ type SearchResult struct {
 	Name      string  `json:"name"`
 	Signature string  `json:"signature,omitempty"`
 	Doc       string  `json:"doc,omitempty"`
+	File      string  `json:"file,omitempty"`
 	Score     float64 `json:"score"` // higher = more relevant (normalised from BM25)
 }
 
@@ -1515,7 +1516,7 @@ func (s *Store) SemanticSearchWithDomain(query string, limit int, domain string)
 	}
 
 	const ftsDomainSQL = `
-        SELECT f.node_id, f.name, f.signature, f.doc, -bm25(nodes_fts, 0, 10, 8, 5, 2) AS score
+        SELECT f.node_id, f.name, f.signature, f.doc, n.file, -bm25(nodes_fts, 0, 10, 8, 5, 2) AS score
         FROM nodes_fts f
         JOIN nodes n ON n.id = f.node_id
         WHERE nodes_fts MATCH ?
@@ -1532,7 +1533,7 @@ func (s *Store) SemanticSearchWithDomain(query string, limit int, domain string)
 	var results []SearchResult
 	for rows.Next() {
 		var r SearchResult
-		if err := rows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc, &r.Score); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc, &r.File, &r.Score); err != nil {
 			return nil, err
 		}
 		results = append(results, r)
@@ -1549,7 +1550,7 @@ func (s *Store) SemanticSearchWithDomain(query string, limit int, domain string)
 // FilterResultsByDomain post-filters search results by node domain.
 // Looks up the domain column for each result and keeps only matching ones.
 func (s *Store) FilterResultsByDomain(results []SearchResult, domain string) []SearchResult {
-	if len(results) == 0 || domain == "" {
+	if len(results) == 0 || domain == "" || s.graphDB == nil {
 		return results
 	}
 	// Batch lookup: collect IDs, query once.
@@ -1611,7 +1612,7 @@ func (s *Store) likeSearchWithDomain(query string, limit int, domain string) ([]
 	}
 	args = append(args, limit)
 	rows, err := s.graphDB.Query(fmt.Sprintf(`
-        SELECT id, name, signature, doc
+        SELECT id, name, signature, doc, file
         FROM nodes
         WHERE domain = ? AND (%s)
         ORDER BY length(name) ASC
@@ -1624,7 +1625,7 @@ func (s *Store) likeSearchWithDomain(query string, limit int, domain string) ([]
 	var results []SearchResult
 	for rows.Next() {
 		var r SearchResult
-		if err := rows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc, &r.File); err != nil {
 			return nil, err
 		}
 		r.Score = 1.0
@@ -3522,6 +3523,33 @@ func (s *Store) UpsertFileMtime(path string, mtime int64) error {
 // SaveCallSites replaces the persisted call-site table with sites.
 // Called after every full parse so cross-project CALLS can be re-resolved
 // on subsequent starts once linked project graphs have been merged.
+// SaveDiscoveryEdges persists a batch of edges created by post-embed discovery
+// passes (DiscoverDocCodeRelations, DiscoverEmbedRelations). Uses INSERT OR
+// IGNORE so existing edges are not duplicated. This is the lightweight
+// alternative to SaveGraph for persisting edges created outside the normal
+// parse→resolve→save cycle.
+func (s *Store) SaveDiscoveryEdges(edges []graph.Edge) error {
+	if len(edges) == 0 {
+		return nil
+	}
+	tx, err := s.graphDB.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO edges (from_id, to_id, type) VALUES (?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close()
+	for _, e := range edges {
+		if _, err := stmt.Exec(string(e.From), string(e.To), string(e.Type)); err != nil {
+			return fmt.Errorf("insert edge %s→%s: %w", e.From, e.To, err)
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) SaveCallSites(sites []graph.CallSite) error {
 	tx, err := s.graphDB.Begin()
 	if err != nil {
