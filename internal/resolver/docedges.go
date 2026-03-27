@@ -25,7 +25,8 @@ func ResolveDocEdges(g *graph.Graph) int {
 		return 0
 	}
 	codeNames := buildCodeNames(g)
-	return linkSections(g, sections, codeNames) + linkDocFiles(g, files, codeNames)
+	fileIdx := buildFileIndex(g)
+	return linkSections(g, sections, codeNames) + linkDocFiles(g, files, codeNames) + linkSectionsToFiles(g, sections, fileIdx)
 }
 
 // ResolveDocEdgesForFile resolves doc edges only for Section nodes and the
@@ -57,7 +58,8 @@ func ResolveDocEdgesForFile(g *graph.Graph, filePath string) int {
 		return 0
 	}
 	codeNames := buildCodeNames(g)
-	return linkSections(g, sections, codeNames) + linkDocFiles(g, files, codeNames)
+	fileIdx := buildFileIndex(g)
+	return linkSections(g, sections, codeNames) + linkDocFiles(g, files, codeNames) + linkSectionsToFiles(g, sections, fileIdx)
 }
 
 // linkDocFiles creates EXPLAINS and DOCUMENTED_BY edges from markdown file nodes
@@ -159,6 +161,121 @@ func linkSections(g *graph.Graph, sections []*graph.Node, codeNames map[string][
 		}
 	}
 	return created
+}
+
+// ── File-level doc→code linking ───────────────────────────────────────────────
+
+// filePathRe matches file paths in text: at least one directory separator with a
+// common source extension. Designed for backtick spans and prose references.
+var filePathRe = regexp.MustCompile(`[A-Za-z0-9_.]+/[A-Za-z0-9_./]+\.[a-z]{1,4}`)
+
+// buildFileIndex builds a lookup from basename and suffix paths to file nodes.
+// E.g., for "/repo/src/app/main.go": indexes "main.go", "app/main.go", "src/app/main.go".
+func buildFileIndex(g *graph.Graph) map[string][]*graph.Node {
+	idx := make(map[string][]*graph.Node)
+	for _, n := range g.FindByType(graph.NodeFile) {
+		if n.Domain == graph.DomainDocs {
+			continue // skip doc files — we link doc sections TO code files
+		}
+		rel := n.File
+		// Index under progressively longer suffixes.
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		for i := len(parts) - 1; i >= 0; i-- {
+			suffix := strings.Join(parts[i:], "/")
+			idx[suffix] = append(idx[suffix], n)
+		}
+	}
+	return idx
+}
+
+// linkSectionsToFiles creates EXPLAINS/DOCUMENTED_BY edges when doc sections
+// reference file paths (e.g., `src/app/main.go` in backtick spans or prose).
+func linkSectionsToFiles(g *graph.Graph, sections []*graph.Node, fileIdx map[string][]*graph.Node) int {
+	var created int
+	for _, sec := range sections {
+		title := sec.Metadata["title"]
+		body := sec.Metadata["body"]
+		text := strings.TrimSpace(title + " " + body)
+		if text == "" {
+			continue
+		}
+
+		seen := make(map[graph.NodeID]bool)
+
+		// Extract file paths from backtick spans.
+		for _, m := range backtickRe.FindAllStringSubmatch(text, -1) {
+			if len(m) < 2 {
+				continue
+			}
+			ref := strings.TrimSpace(m[1])
+			if !looksLikeFilePath(ref) {
+				continue
+			}
+			for _, target := range resolveFileRef(ref, fileIdx) {
+				if target.ID == sec.ID || seen[target.ID] {
+					continue
+				}
+				seen[target.ID] = true
+				g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeExplains})
+				g.AddEdge(&graph.Edge{From: target.ID, To: sec.ID, Type: graph.EdgeDocumentedBy})
+				created++
+			}
+		}
+
+		// Extract file paths from prose text.
+		for _, ref := range filePathRe.FindAllString(text, -1) {
+			for _, target := range resolveFileRef(ref, fileIdx) {
+				if target.ID == sec.ID || seen[target.ID] {
+					continue
+				}
+				seen[target.ID] = true
+				g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeExplains})
+				g.AddEdge(&graph.Edge{From: target.ID, To: sec.ID, Type: graph.EdgeDocumentedBy})
+				created++
+			}
+		}
+	}
+	return created
+}
+
+// resolveFileRef looks up a file path reference in the file index.
+// Tries the full ref first, then progressively shorter suffixes.
+func resolveFileRef(ref string, idx map[string][]*graph.Node) []*graph.Node {
+	ref = filepath.ToSlash(ref)
+	if nodes, ok := idx[ref]; ok {
+		return nodes
+	}
+	// Try basename.
+	base := filepath.Base(ref)
+	if nodes, ok := idx[base]; ok {
+		return nodes
+	}
+	return nil
+}
+
+// looksLikeFilePath returns true if s looks like a file path reference.
+func looksLikeFilePath(s string) bool {
+	// Must contain a dot (extension) and either a slash or common extension.
+	if !strings.Contains(s, ".") {
+		return false
+	}
+	// Must not be a URL.
+	if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
+		return false
+	}
+	// Should contain a slash or end with a common extension.
+	if strings.Contains(s, "/") {
+		return true
+	}
+	ext := filepath.Ext(s)
+	switch ext {
+	case ".go", ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".rb", ".rs",
+		".c", ".h", ".cpp", ".hpp", ".cs", ".swift", ".kt", ".scala",
+		".yaml", ".yml", ".toml", ".json", ".xml", ".html", ".css", ".scss",
+		".md", ".rst", ".txt":
+		return true
+	}
+	return false
 }
 
 // ── Regex patterns ────────────────────────────────────────────────────────────
