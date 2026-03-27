@@ -939,7 +939,7 @@ func collectTSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, sr
 			}
 			return ""
 		},
-		CalleeExtractor: jsCalleeExtractor, // TS uses the same call expression structure as JS.
+		AliasedCalleeExtractor: jsAliasedCalleeExtractor, // TS uses the same call expression structure as JS.
 		IsBuiltin:       isTSBuiltin,
 	})
 }
