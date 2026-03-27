@@ -368,6 +368,10 @@ func queryImpact(client *agent.SynapsesClient, symbol string, depth int) (names,
 	nameSet := make(map[string]bool)
 	for _, tier := range ir.Tiers {
 		for _, node := range tier.Nodes {
+			// Skip test file nodes — impact analysis should focus on production code.
+			if isTestFilePath(node.File) {
+				continue
+			}
 			if node.Name != "" && !nameSet[strings.ToLower(node.Name)] {
 				nameSet[strings.ToLower(node.Name)] = true
 				names = append(names, node.Name)
@@ -378,9 +382,11 @@ func queryImpact(client *agent.SynapsesClient, symbol string, depth int) (names,
 		}
 	}
 
-	// Also include affected_files from the response.
+	// Also include affected_files from the response (filter test files).
 	for _, f := range ir.AffectedFiles {
-		files = appendUniqueFile(files, f)
+		if !isTestFilePath(f) {
+			files = appendUniqueFile(files, f)
+		}
 	}
 
 	return names, files, raw
@@ -747,6 +753,20 @@ func matchesFileSet(f string, expectedSet map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+// isTestFilePath checks if a file path looks like a test file.
+func isTestFilePath(f string) bool {
+	fl := strings.ToLower(f)
+	return strings.Contains(fl, "/test/") || strings.Contains(fl, "/tests/") ||
+		strings.Contains(fl, "/spec/") || strings.Contains(fl, "/__tests__/") ||
+		strings.HasPrefix(fl, "test/") || strings.HasPrefix(fl, "tests/") ||
+		strings.HasSuffix(fl, "_test.go") || strings.HasSuffix(fl, "_test.py") ||
+		strings.HasSuffix(fl, "_test.js") || strings.HasSuffix(fl, ".test.js") ||
+		strings.HasSuffix(fl, "_test.ts") || strings.HasSuffix(fl, ".test.ts") ||
+		strings.HasSuffix(fl, ".spec.ts") || strings.HasSuffix(fl, ".spec.js") ||
+		strings.Contains(fl, "test_") || strings.Contains(fl, "/testdata/") ||
+		strings.Contains(fl, "androidtest") || strings.Contains(fl, "robovm-test")
 }
 
 func normalizeName(s string) string {
