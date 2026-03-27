@@ -557,13 +557,22 @@ func (s *Server) handleGetContext(
 	if !hasCodeNode && strings.Contains(entityName, ".") {
 		parts := strings.SplitN(entityName, ".", 2)
 		prefix, method := strings.ToLower(parts[0]), parts[1]
+		// Normalize prefix by stripping hyphens/underscores for fuzzy matching.
+		// "HonoBase" → prefix "honobase" should match file "hono-base.ts" or
+		// ID containing "hono_base". Strip separators from both sides of the
+		// Contains check.
+		normPrefix := stripSeparators(prefix)
 		for _, n := range s.graph.FindByName(method) {
 			// Skip test files and non-code entities for dotted-name resolution.
 			if isTestFile(n.File) {
 				continue
 			}
-			if strings.Contains(strings.ToLower(string(n.ID)), prefix) ||
-				strings.Contains(strings.ToLower(n.File), prefix) {
+			lowID := strings.ToLower(string(n.ID))
+			lowFile := strings.ToLower(n.File)
+			if strings.Contains(lowID, prefix) ||
+				strings.Contains(lowFile, prefix) ||
+				strings.Contains(stripSeparators(lowID), normPrefix) ||
+				strings.Contains(stripSeparators(lowFile), normPrefix) {
 				nodes = append(nodes, n)
 			}
 		}
@@ -1472,9 +1481,16 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	callersOfRoot := make(map[graph.NodeID]bool)
 	docsOfRoot := make(map[graph.NodeID]bool)
 	knowledgeOfRoot := make(map[graph.NodeID]bool)
+	containedByRoot := make(map[graph.NodeID]bool)
 	crossDomainDirectEdge := make(map[graph.NodeID]graph.EdgeType)
 	for _, e := range sg.Edges {
 		switch e.Type {
+		case graph.EdgeContains:
+			// file → section or section → subsection: mark children of root
+			// so they surface in Related (e.g. doc file → its sections).
+			if e.From == sg.Root {
+				containedByRoot[e.To] = true
+			}
 		case graph.EdgeCalls, graph.EdgeHandles:
 			if e.From == sg.Root {
 				calleesOfRoot[e.To] = true
@@ -1539,6 +1555,9 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 			dc.Callees = append(dc.Callees, cn)
 		case callersOfRoot[id]:
 			dc.Callers = append(dc.Callers, cn)
+		case containedByRoot[id]:
+			// Direct children (e.g. sections of a doc file) go into Related.
+			dc.Related = append(dc.Related, cn)
 		default:
 			domain := cn.Node.Domain
 			if domain == "" || domain == graph.DomainCode {

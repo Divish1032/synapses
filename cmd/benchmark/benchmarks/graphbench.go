@@ -126,6 +126,14 @@ type contextResponse struct {
 			File string `json:"file"`
 		} `json:"node"`
 	} `json:"related"`
+	Documentation []struct {
+		Node struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+			File string `json:"file"`
+		} `json:"node"`
+		Relevance float64 `json:"relevance"`
+	} `json:"documentation"`
 	CrossDomain struct {
 		DeploysTo    []crossDomainNode `json:"deploys"`
 		Consumes     []crossDomainNode `json:"consumes"`
