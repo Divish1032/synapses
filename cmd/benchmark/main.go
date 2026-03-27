@@ -52,6 +52,8 @@ func main() {
 		cbSources     = flag.String("cb-sources", "", "Comma-separated source filter for ContextBench (e.g. Verified)")
 		// GraphBench-specific flags.
 		gbDataFile    = flag.String("gb-data", "graphbench.jsonl", "Path to GraphBench JSONL dataset")
+		// NLBench-specific flags.
+		nlDataFile    = flag.String("nl-data", "nlbench.jsonl", "Path to NLBench JSONL dataset")
 	)
 	flag.Parse()
 
@@ -207,6 +209,21 @@ func main() {
 			log.Fatalf("write results: %v", err)
 		}
 		rep.PrintGraphBenchSummary(gbResult)
+
+	case "nlbench", "nl-bench", "nl_bench":
+		nlOpts := benchmarks.NLBenchOptions{
+			DataFile: *nlDataFile,
+			ReposDir: *reposDir,
+			Limit:    *limit,
+		}
+		nlResult, err := benchmarks.RunNLBench(mcpClient, nlOpts)
+		if err != nil {
+			log.Fatalf("nlbench failed: %v", err)
+		}
+		if err := rep.WriteNLBench(nlResult); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintNLBenchSummary(nlResult)
 
 	case "swe-verified", "swe_verified":
 		log.Fatal("swe-verified runner not yet implemented (Phase 3)")

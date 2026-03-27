@@ -74,6 +74,8 @@ func ResolveCallEdges(g *graph.Graph) int {
 		// Normalize chained self/this access: "self.router" → "router",
 		// "this.service" → "service". This handles Python/Java patterns like
 		// self.router.add_api_route() where the alias is "self.router".
+		// Preserve the original for var-type lookup (keyed as "self.router").
+		originalAlias := site.PkgAlias
 		if strings.HasPrefix(site.PkgAlias, "self.") || strings.HasPrefix(site.PkgAlias, "this.") {
 			site.PkgAlias = site.PkgAlias[strings.IndexByte(site.PkgAlias, '.')+1:]
 		}
@@ -105,9 +107,13 @@ func ResolveCallEdges(g *graph.Graph) int {
 			// This path is already precise (exact type known) — single target only.
 			if len(targets) == 0 {
 				varTypes := g.GetVarTypes(site.CallerFile)
-				if typeName, hasType := varTypes[site.PkgAlias]; hasType {
-					if id := findByTypedMethod(methodIndex, typeName, site.FuncName); id != "" {
-						targets = []graph.NodeID{id}
+				// Try both normalized alias ("router") and original ("self.router").
+				for _, tryAlias := range []string{site.PkgAlias, originalAlias} {
+					if typeName, hasType := varTypes[tryAlias]; hasType {
+						if id := findByTypedMethod(methodIndex, typeName, site.FuncName); id != "" {
+							targets = []graph.NodeID{id}
+							break
+						}
 					}
 				}
 			}

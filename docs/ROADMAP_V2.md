@@ -329,6 +329,14 @@ Chasing ContextBench F1 by bolting on BM25 source search would make Synapses sco
 
 ---
 
+## Things to Think On
+
+- **IPW-aware model selection for brain tiers.** Paper: [Intelligence per Watt](https://arxiv.org/abs/2511.07885) (2025). Key finding: small local models handle 88.7% of structured tasks; IPW (accuracy ÷ power) improved 5.3× in two years. Synapses' brain has 6 tiers with wildly different complexity — ingestor (domain tags, 500-char caps) needs far less model capability than guardian (violation explanations) or archivist (session synthesis). Today ModelManager pre-loads one Ollama model for everything. If we ever support multiple local models, per-tier IPW benchmarking would tell us the smallest model that maintains accuracy for each tier. Not a task yet — just a design direction worth keeping in mind as local model ecosystem matures. Synapses is a helper, not the main agent; brain work is lightweight structured JSON extraction, which is exactly where small models shine.
+
+- **BitNet (1-bit LLMs) for brain inference.** [microsoft/BitNet](https://github.com/microsoft/BitNet) trains models from scratch with ternary weights {-1, 0, 1} — fundamentally different from post-training quantization (GGUF/GPTQ/AWQ). No matrix multiplications, just lookups. Results: 55-82% energy reduction, 2-6× speedup, 100B params on a single CPU at 5-7 tok/s. A 2-3B BitNet model could run ingestor/enricher tiers on CPU with near-zero power draw — ideal for a background helper. **Blockers today:** ecosystem is tiny (main model is BitNet b1.58-2B-4T), no fine-tuning pipeline for structured JSON output, Ollama doesn't support BitNet kernels (would need its own inference path). **Watch for:** a 7-8B instruction-following BitNet model with reliable JSON extraction — that's when this becomes actionable for Synapses' lower brain tiers. Pairs naturally with the IPW thinking above.
+
+---
+
 ## The Narrative Arc
 
 ```

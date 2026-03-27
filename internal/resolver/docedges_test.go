@@ -589,3 +589,128 @@ func TestResolveDocEdges_NoSections(t *testing.T) {
 		t.Fatalf("expected 0 edges (no sections), got %d", n)
 	}
 }
+
+// ── File-level linking tests ──────────────────────────────────────────────────
+
+func TestResolveDocEdges_FilePathInBacktick(t *testing.T) {
+	g := newDocTestGraph()
+
+	// Code file node.
+	fileID := g.MakeNodeID("/repo/src/app/main.go", "/repo/src/app/main.go")
+	g.AddNode(&graph.Node{
+		ID:   fileID,
+		Type: graph.NodeFile,
+		Name: "main.go",
+		File: "/repo/src/app/main.go",
+		Line: 1,
+	})
+
+	// Doc section referencing the file path in backticks.
+	secID := g.MakeNodeID("/repo/README.md", "README.md § Setup")
+	g.AddNode(&graph.Node{
+		ID:   secID,
+		Type: graph.NodeSection,
+		Name: "README.md § Setup",
+		File: "/repo/README.md",
+		Line: 1,
+		Metadata: map[string]string{
+			"title": "Setup",
+			"body":  "Edit `src/app/main.go` to configure the app.",
+		},
+		Domain: graph.DomainDocs,
+	})
+
+	n := ResolveDocEdges(g)
+	if n < 1 {
+		t.Fatalf("expected at least 1 file-path edge, got %d", n)
+	}
+
+	var found bool
+	for _, e := range g.OutEdges(secID) {
+		if e.To == fileID && e.Type == graph.EdgeExplains {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("missing EXPLAINS edge from section to file referenced in backtick")
+	}
+}
+
+func TestResolveDocEdges_FilePathNoSelfLink(t *testing.T) {
+	g := newDocTestGraph()
+
+	// Doc file node — should NOT link to itself.
+	fileID := g.MakeNodeID("/repo/README.md", "/repo/README.md")
+	g.AddNode(&graph.Node{
+		ID:   fileID,
+		Type: graph.NodeFile,
+		Name: "README.md",
+		File: "/repo/README.md",
+		Line: 1,
+		Domain: graph.DomainDocs,
+	})
+
+	// Section in the same doc file mentioning its own name.
+	secID := g.MakeNodeID("/repo/README.md", "README.md § Intro")
+	g.AddNode(&graph.Node{
+		ID:   secID,
+		Type: graph.NodeSection,
+		Name: "README.md § Intro",
+		File: "/repo/README.md",
+		Line: 1,
+		Metadata: map[string]string{
+			"title": "Intro",
+			"body":  "This is `README.md` introduction.",
+		},
+		Domain: graph.DomainDocs,
+	})
+
+	n := ResolveDocEdges(g)
+	// Doc files are excluded from the file index (DomainDocs filtered out),
+	// so no file-path edges should be created.
+	if n != 0 {
+		t.Fatalf("expected 0 edges (doc file excluded from index), got %d", n)
+	}
+}
+
+func TestBuildFileIndex_MultipleSuffixes(t *testing.T) {
+	g := newDocTestGraph()
+
+	fileID := g.MakeNodeID("/repo/src/pkg/handler.go", "/repo/src/pkg/handler.go")
+	g.AddNode(&graph.Node{
+		ID:   fileID,
+		Type: graph.NodeFile,
+		Name: "handler.go",
+		File: "/repo/src/pkg/handler.go",
+		Line: 1,
+	})
+
+	idx := buildFileIndex(g)
+
+	// Should be findable by multiple suffixes.
+	for _, key := range []string{"handler.go", "pkg/handler.go", "src/pkg/handler.go"} {
+		if nodes, ok := idx[key]; !ok || len(nodes) == 0 {
+			t.Errorf("buildFileIndex: expected to find %q", key)
+		}
+	}
+}
+
+func TestLooksLikeFilePath(t *testing.T) {
+	cases := []struct {
+		input string
+		want  bool
+	}{
+		{"src/app/main.go", true},
+		{"handler.go", true},
+		{"main.py", true},
+		{"FlatGraph", false},
+		{"https://example.com/file.go", false},
+		{"README.md", true},
+	}
+	for _, c := range cases {
+		got := looksLikeFilePath(c.input)
+		if got != c.want {
+			t.Errorf("looksLikeFilePath(%q) = %v, want %v", c.input, got, c.want)
+		}
+	}
+}
