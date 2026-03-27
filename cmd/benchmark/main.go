@@ -54,6 +54,11 @@ func main() {
 		gbDataFile    = flag.String("gb-data", "graphbench.jsonl", "Path to GraphBench JSONL dataset")
 		// NLBench-specific flags.
 		nlDataFile    = flag.String("nl-data", "nlbench.jsonl", "Path to NLBench JSONL dataset")
+		// SWE-bench-specific flags.
+		sweDataFile   = flag.String("swe-data", "swebench_pilot.jsonl", "Path to SWE-bench JSONL dataset")
+		sweMode       = flag.String("mode", "baseline", "Agent mode: baseline | synapses")
+		sweModel      = flag.String("model", "claude-sonnet-4-6", "Claude model for SWE-bench agent")
+		sweMaxTurns   = flag.Int("max-turns", 25, "Max agent loop turns for SWE-bench")
 	)
 	flag.Parse()
 
@@ -226,7 +231,22 @@ func main() {
 		rep.PrintNLBenchSummary(nlResult)
 
 	case "swe-verified", "swe_verified":
-		log.Fatal("swe-verified runner not yet implemented (Phase 3)")
+		sweResult, err := benchmarks.RunSWEBench(mcpClient, benchmarks.SWEBenchOptions{
+			DataFile: *sweDataFile,
+			ReposDir: *reposDir,
+			Limit:    *limit,
+			Mode:     *sweMode,
+			Model:    *sweModel,
+			MaxTurns: *sweMaxTurns,
+			Endpoint: *endpoint,
+		})
+		if err != nil {
+			log.Fatalf("swe-bench failed: %v", err)
+		}
+		if err := rep.WriteSWEBench(sweResult); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintSWEBenchSummary(sweResult)
 
 	default:
 		log.Fatalf("unknown benchmark %q", *benchmarkName)
