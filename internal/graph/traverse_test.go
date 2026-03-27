@@ -1683,3 +1683,78 @@ func TestFlatGraph_PPR_ParityWithSlowPath(t *testing.T) {
 		t.Logf("fast set (%d): %v", len(fastSet), fastSet)
 	}
 }
+
+// TestCarveEgoGraph_DocEdgeConfidenceWeighting verifies that embedding-derived
+// EXPLAINS edges with confidence metadata are weighted lower than name-match edges.
+func TestCarveEgoGraph_DocEdgeConfidenceWeighting(t *testing.T) {
+	g := graph.New("testrepo")
+
+	codeID := g.MakeNodeID("main.go", "BuildGraph")
+	g.AddNode(&graph.Node{
+		ID: codeID, Type: graph.NodeFunction, Name: "BuildGraph", File: "main.go",
+		Domain: graph.DomainCode,
+	})
+
+	// Doc section with name-match edge (no confidence metadata → full weight).
+	secNameMatch := g.MakeNodeID("README.md", "README.md § API")
+	g.AddNode(&graph.Node{
+		ID:   secNameMatch,
+		Type: graph.NodeSection,
+		Name: "README.md § API",
+		File: "README.md",
+		Metadata: map[string]string{
+			"title":           "API",
+			"body":            "The `BuildGraph` function.",
+			"doc_link_source": "name_match",
+		},
+		Domain: graph.DomainDocs,
+	})
+	g.AddEdge(&graph.Edge{From: secNameMatch, To: codeID, Type: graph.EdgeExplains})
+
+	// Doc section with embedding edge (confidence 0.60 → scaled weight).
+	secEmbed := g.MakeNodeID("docs.md", "docs.md § Overview")
+	g.AddNode(&graph.Node{
+		ID:   secEmbed,
+		Type: graph.NodeSection,
+		Name: "docs.md § Overview",
+		File: "docs.md",
+		Metadata: map[string]string{
+			"title":               "Overview",
+			"body":                "General overview.",
+			"doc_link_source":     "embedding",
+			"doc_link_confidence": "0.600",
+		},
+		Domain: graph.DomainDocs,
+	})
+	g.AddEdge(&graph.Edge{From: secEmbed, To: codeID, Type: graph.EdgeExplains})
+
+	// BFS from code node — both sections should be reachable but with different scores.
+	cfg := graph.DefaultCarveConfig()
+	cfg.MaxDepth = 2
+	sub, err := g.CarveEgoGraph(codeID, cfg)
+	if err != nil {
+		t.Fatalf("CarveEgoGraph error: %v", err)
+	}
+
+	var nameMatchScore, embedScore float64
+	for _, cn := range sub.Nodes {
+		if cn.Node.ID == secNameMatch {
+			nameMatchScore = cn.Relevance
+		}
+		if cn.Node.ID == secEmbed {
+			embedScore = cn.Relevance
+		}
+	}
+
+	// Name-match edge (full weight) should score higher than embedding edge (0.6× weight).
+	if nameMatchScore <= 0 {
+		t.Error("name-match section should be reachable")
+	}
+	if embedScore <= 0 {
+		t.Error("embedding section should be reachable")
+	}
+	if embedScore >= nameMatchScore {
+		t.Errorf("embedding section (score=%.4f) should rank below name-match section (score=%.4f)",
+			embedScore, nameMatchScore)
+	}
+}

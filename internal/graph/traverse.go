@@ -278,6 +278,21 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 				}
 			}
 
+			// Doc edge confidence scaling (mirrors BFS).
+			if e.Type == EdgeExplains || e.Type == EdgeDocumentedBy {
+				sourceID := e.From
+				if e.Type == EdgeDocumentedBy {
+					sourceID = e.To
+				}
+				if sourceNode := g.nodes[sourceID]; sourceNode != nil {
+					if confStr := sourceNode.Metadata["doc_link_confidence"]; confStr != "" {
+						if conf, err := strconv.ParseFloat(confStr, 64); err == nil && conf > 0 {
+							w *= conf
+						}
+					}
+				}
+			}
+
 			// Sprint 15 #3: apply per-edge learned weight multiplier.
 			w *= learnedEdgeMult(cfg.LearnedEdgeWeights, e.From, e.To, e.Type)
 
@@ -574,6 +589,23 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 					if routeNode := g.nodes[e.From]; routeNode != nil {
 						if conf, err := strconv.ParseFloat(routeNode.Metadata["confidence"], 64); err == nil && conf > 0 {
 							typeWeight *= conf
+						}
+					}
+				}
+
+				// Doc edge confidence scaling: embedding-derived EXPLAINS/DOCUMENTED_BY
+				// edges carry confidence metadata on the section node. Scale weight so
+				// high-confidence edges rank above low-confidence ones.
+				if e.Type == EdgeExplains || e.Type == EdgeDocumentedBy {
+					sourceID := e.From
+					if e.Type == EdgeDocumentedBy {
+						sourceID = e.To // confidence lives on the doc section node
+					}
+					if sourceNode := g.nodes[sourceID]; sourceNode != nil {
+						if confStr := sourceNode.Metadata["doc_link_confidence"]; confStr != "" {
+							if conf, err := strconv.ParseFloat(confStr, 64); err == nil && conf > 0 {
+								typeWeight *= conf
+							}
 						}
 					}
 				}
