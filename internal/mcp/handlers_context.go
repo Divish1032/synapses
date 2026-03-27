@@ -788,6 +788,29 @@ func (s *Server) handleGetContext(
 		}
 	}
 
+	// Search fallback for Documentation: when a code entity has no explicit
+	// doc edges (DOCUMENTED_BY/EXPLAINS), search FTS for doc-domain sections
+	// that mention the entity name. Results are marked as search_fallback so
+	// consumers can distinguish them from graph-derived documentation.
+	if len(dc.Documentation) == 0 && s.store != nil && dc.Root != nil &&
+		dc.Root.Domain != graph.DomainDocs && dc.Root.Name != "" {
+		if docResults, err := s.store.SemanticSearchWithDomain(dc.Root.Name, 5, "docs"); err == nil {
+			for _, sr := range docResults {
+				dc.Documentation = append(dc.Documentation, graph.CarvedNode{
+					Node: &graph.Node{
+						ID:   graph.NodeID(sr.ID),
+						Name: sr.Name,
+						Metadata: map[string]string{
+							"doc_link_source": "search_fallback",
+						},
+					},
+					Relevance: 0.3,
+					Hop:       2,
+				})
+			}
+		}
+	}
+
 	// R1: strip synthetic route/inferred nodes when include_inferred=false.
 	if !includeInferred {
 		dc.Callees = filterInferredNodes(dc.Callees)
@@ -1537,6 +1560,16 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 		}
 	}
 
+	// Determine if root is a doc-domain node so contained children (sections)
+	// are routed to Documentation instead of the generic Related bucket.
+	isDocRoot := false
+	for i := range sg.Nodes {
+		if sg.Nodes[i].Node.ID == sg.Root {
+			isDocRoot = sg.Nodes[i].Node.Domain == graph.DomainDocs
+			break
+		}
+	}
+
 	dc := &directionalContext{
 		Truncated:      sg.Truncated,
 		TruncatedCount: sg.TruncatedCount,
@@ -1556,8 +1589,13 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 		case callersOfRoot[id]:
 			dc.Callers = append(dc.Callers, cn)
 		case containedByRoot[id]:
-			// Direct children (e.g. sections of a doc file) go into Related.
-			dc.Related = append(dc.Related, cn)
+			// Doc file children (sections) go into Documentation for better
+			// discoverability; code file children stay in Related.
+			if isDocRoot {
+				dc.Documentation = append(dc.Documentation, cn)
+			} else {
+				dc.Related = append(dc.Related, cn)
+			}
 		default:
 			domain := cn.Node.Domain
 			if domain == "" || domain == graph.DomainCode {
