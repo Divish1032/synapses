@@ -2108,15 +2108,21 @@ func (s *Server) registerTools() {
 					"could break if the entity changes. "+
 					"Results grouped by depth: direct (depth 1, confidence 1.0), "+
 					"indirect (depth 2, confidence 0.6), peripheral (depth 3+, confidence 0.3). "+
-					"Also returns cross_domain_impact: infrastructure resources (DEPLOYS), "+
+					"Also returns implementor_impact (types that implement the root interface), "+
+					"cross_domain_impact: infrastructure resources (DEPLOYS), "+
 					"API endpoints (CONSUMES), config files (CONFIGURED_BY), doc sections "+
 					"(DOCUMENTS), and name-matched entities (MENTIONS) directly linked to the entity. "+
 					"Only cross-domain edges with confidence ≥ 0.6 or human-confirmed are included. "+
-					"Answers: 'what breaks if I change X?' — across code, infra, API, and docs.",
+					"Answers: 'what breaks if I change X?' — across code, infra, API, and docs. "+
+					"Use files= for PR blast-radius: pass comma-separated changed file paths to "+
+					"aggregate impact across all entities in those files.",
 			),
 			mcp.WithString("symbol",
-				mcp.Required(),
-				mcp.Description("Name of the entity to analyse (e.g. 'CarveEgoGraph')."),
+				mcp.Description("Name of the entity to analyse (e.g. 'CarveEgoGraph'). Required unless files= is provided."),
+			),
+			mcp.WithString("files",
+				mcp.Description("Comma-separated file paths for change-set impact analysis (PR blast radius). "+
+					"Aggregates impact across all entities in the specified files. Alternative to symbol=."),
 			),
 			mcp.WithNumber("depth",
 				mcp.Description("Max hop depth. Default 3, max 10."),

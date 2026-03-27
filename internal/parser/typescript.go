@@ -192,6 +192,30 @@ func (p *TypeScriptParser) extractDeclarations(
 		return err
 	}
 
+	// --- Re-export statements: export { X } from './bar', export * from './baz' ---
+	// These create IMPORTS edges to the source module, enabling the resolver
+	// to follow re-export chains through barrel files (index.ts).
+	reExportQuery := `(export_statement source: (string (string_fragment) @import_path))`
+	if err := runQuery(lang, root, src, reExportQuery, func(captures map[string]string, _ int) {
+		importPath := captures["import_path"]
+		if importPath == "" {
+			return
+		}
+		importNodeID := g.MakeNodeID(importPath, importPath)
+		if g.GetNode(importNodeID) == nil {
+			g.AddNode(&graph.Node{
+				ID:      importNodeID,
+				Type:    graph.NodePackage,
+				Name:    importPath,
+				Package: importPath,
+				File:    filePath,
+			})
+		}
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
+	}); err != nil {
+		return err
+	}
+
 	// --- CommonJS require() calls ---
 	// Handles: const x = require('module'), var x = require('./router')
 	// Creates IMPORTS edges identical to ES6 import statements.

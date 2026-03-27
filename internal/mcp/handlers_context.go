@@ -1680,6 +1680,45 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 		}
 	}
 
+	// Enrich code nodes with deterministic NL descriptions so AI agents
+	// get a human-readable summary alongside the code signature.
+	enrichNodesWithNL := func(nodes []graph.CarvedNode) {
+		for i := range nodes {
+			n := nodes[i].Node
+			if n == nil || n.Domain == graph.DomainDocs || n.Domain == graph.DomainKnowledge {
+				continue
+			}
+			if !store.IsCodeNodeType(n.Type) {
+				continue
+			}
+			sig := n.Metadata["signature"]
+			doc := n.Metadata["doc"]
+			nl := store.GenerateNLDescription(n.Name, n.Type, sig, doc, nil, nil)
+			if nl != "" {
+				if n.Metadata == nil {
+					n.Metadata = make(map[string]string)
+				}
+				n.Metadata["nl_description"] = nl
+			}
+		}
+	}
+	enrichNodesWithNL(dc.Callees)
+	enrichNodesWithNL(dc.Callers)
+	enrichNodesWithNL(dc.Related)
+	// Enrich root node
+	if dc.Root != nil && store.IsCodeNodeType(dc.Root.Type) &&
+		dc.Root.Domain != graph.DomainDocs && dc.Root.Domain != graph.DomainKnowledge {
+		sig := dc.Root.Metadata["signature"]
+		doc := dc.Root.Metadata["doc"]
+		nl := store.GenerateNLDescription(dc.Root.Name, dc.Root.Type, sig, doc, nil, nil)
+		if nl != "" {
+			if dc.Root.Metadata == nil {
+				dc.Root.Metadata = make(map[string]string)
+			}
+			dc.Root.Metadata["nl_description"] = nl
+		}
+	}
+
 	return dc
 }
 // ── Review scope types for enriched get_impact ──────────────────────────────
@@ -1841,8 +1880,9 @@ func (s *Server) handleGetImpact(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	symbol, _ := req.GetArguments()["symbol"].(string)
-	if symbol == "" {
-		return mcp.NewToolResultError("symbol is required (e.g., 'AuthService', 'handleLogin')"), nil
+	filesParam, _ := req.GetArguments()["files"].(string)
+	if symbol == "" && filesParam == "" {
+		return mcp.NewToolResultError("symbol or files is required (e.g., symbol='AuthService' or files='src/auth.ts,src/login.ts')"), nil
 	}
 
 	maxDepth := 3
@@ -1864,6 +1904,13 @@ func (s *Server) handleGetImpact(
 
 	scope, _ := req.GetArguments()["scope"].(string)
 
+	// File-based impact: when files= is provided, aggregate impact across all
+	// entities in the specified files. This is the "PR blast radius" mode —
+	// the agent passes git diff --name-only output.
+	if filesParam != "" {
+		return s.handleFileBasedImpact(ctx, req, filesParam, maxDepth, tokenBudget, scope)
+	}
+
 	// Resolve symbol name → node. Fall back to pattern match (same as get_context).
 	candidates := s.graph.FindByName(symbol)
 	if len(candidates) == 0 {
@@ -1884,10 +1931,17 @@ func (s *Server) handleGetImpact(
 		methods := s.graph.FindByPatternLimit(root.Name, 100)
 		merged := &graph.ImpactResult{Tiers: []graph.ImpactTier{}}
 		seen := make(map[graph.NodeID]bool)
+		methodsTraversed := 0
+		const maxMethodTraversals = 30 // cap to prevent fan-out explosion on huge classes
 		for _, m := range methods {
 			if m.Type != graph.NodeMethod || m.ID == root.ID {
 				continue
 			}
+			if methodsTraversed >= maxMethodTraversals {
+				merged.Truncated = true
+				break
+			}
+			methodsTraversed++
 			r, err2 := s.graph.ImpactAnalysis(m.ID, maxDepth)
 			if err2 != nil || r == nil {
 				continue
@@ -2040,6 +2094,35 @@ func (s *Server) handleGetImpact(
 	// trimRepoRoot converts absolute paths to repo-relative paths for consistency
 	// with all other file references in get_context/get_impact responses.
 	result.TestCoverage = s.trimRepoRoot(s.graph.FindTestsFor(root.ID))
+	// API surface detection: flag exported entities and count external consumers.
+	if root.Exported && root.Package != "" {
+		externalPkgs := 0
+		// Find the package node by name and count its IMPORTS in-edges.
+		pkgCandidates := s.graph.FindByName(root.Package)
+		for _, pkgNode := range pkgCandidates {
+			if pkgNode.Type == graph.NodePackage {
+				externalPkgs = s.graph.Fanin(pkgNode.ID)
+				break
+			}
+		}
+		risk := "low"
+		if externalPkgs > 5 {
+			risk = "high"
+		} else if externalPkgs > 0 {
+			risk = "medium"
+		}
+		result.APISurface = &graph.APISurfaceInfo{
+			Exported:         true,
+			ExternalPackages: externalPkgs,
+			BreakingRisk:     risk,
+		}
+	}
+	// Test prioritization: distance-scored test files.
+	testRefs := s.graph.FindTestsWithDistance(root.ID)
+	for i := range testRefs {
+		testRefs[i].File = s.trimRepoRootSingle(testRefs[i].File)
+	}
+	result.TestPriority = testRefs
 	applyImpactTokenBudget(result, tokenBudget)
 
 	// P7-10: emit search event for impact analysis.
@@ -2102,6 +2185,131 @@ func (s *Server) handleGetImpact(
 // (1 token ≈ 4 bytes of JSON). Drops peripheral (depth 3+) tiers first, then
 // indirect (depth 2), always keeping direct (depth 1) callers.
 // Sets result.Truncated=true when any tier is dropped.
+// handleFileBasedImpact aggregates impact analysis across all entities in the
+// specified files. This is the "PR blast radius" mode — pass git diff --name-only
+// output to see the full impact of a set of file changes.
+func (s *Server) handleFileBasedImpact(
+	ctx context.Context,
+	req mcp.CallToolRequest,
+	filesParam string,
+	maxDepth, tokenBudget int,
+	scope string,
+) (*mcp.CallToolResult, error) {
+	filePaths := strings.Split(filesParam, ",")
+	if len(filePaths) > 50 {
+		filePaths = filePaths[:50] // cap to prevent runaway analysis
+	}
+	merged := &graph.ImpactResult{Tiers: []graph.ImpactTier{}}
+	seen := make(map[graph.NodeID]bool)
+	seenFiles := make(map[string]bool)
+	seenTests := make(map[string]bool)
+	seenImpl := make(map[graph.NodeID]bool)
+	tierIdx := make(map[string]int) // label → index in merged.Tiers (O(1) lookup)
+
+	// Resolve repo root for relative→absolute path matching.
+	repoRoot := s.graph.Root()
+
+	entityCount := 0
+	const maxEntities = 200 // cap total ImpactAnalysis calls
+
+	for _, fp := range filePaths {
+		fp = strings.TrimSpace(fp)
+		if fp == "" {
+			continue
+		}
+		// Try both as-is and with repo root prefix (handles relative paths).
+		entities := s.graph.FindByFile(fp)
+		if len(entities) == 0 && repoRoot != "" && !filepath.IsAbs(fp) {
+			entities = s.graph.FindByFile(filepath.Join(repoRoot, fp))
+		}
+		for _, entity := range entities {
+			if entity.Type == graph.NodeFile || entity.Type == graph.NodePackage {
+				continue
+			}
+			if entityCount >= maxEntities {
+				merged.Truncated = true
+				break
+			}
+			entityCount++
+			result, err := s.graph.ImpactAnalysis(entity.ID, maxDepth)
+			if err != nil || result == nil {
+				continue
+			}
+			// Merge tiers (O(1) lookup via tierIdx map).
+			for _, tier := range result.Tiers {
+				var tierNodes []graph.EntityRef
+				for _, ref := range tier.Nodes {
+					if !seen[ref.ID] {
+						seen[ref.ID] = true
+						tierNodes = append(tierNodes, ref)
+					}
+				}
+				if len(tierNodes) == 0 {
+					continue
+				}
+				if idx, ok := tierIdx[tier.Label]; ok {
+					merged.Tiers[idx].Nodes = append(merged.Tiers[idx].Nodes, tierNodes...)
+					merged.Tiers[idx].TotalNodes += len(tierNodes)
+				} else {
+					tierIdx[tier.Label] = len(merged.Tiers)
+					merged.Tiers = append(merged.Tiers, graph.ImpactTier{
+						Label: tier.Label, Depth: tier.Depth,
+						Confidence: tier.Confidence,
+						Nodes: tierNodes, TotalNodes: len(tierNodes),
+					})
+				}
+				merged.TotalAffected += len(tierNodes)
+			}
+			// Merge affected files.
+			for _, f := range result.AffectedFiles {
+				if !seenFiles[f] {
+					seenFiles[f] = true
+					merged.AffectedFiles = append(merged.AffectedFiles, f)
+				}
+			}
+			// Merge test coverage.
+			for _, tf := range result.TestCoverage {
+				if !seenTests[tf] {
+					seenTests[tf] = true
+					merged.TestCoverage = append(merged.TestCoverage, tf)
+				}
+			}
+			// Merge implementor impact.
+			for _, impl := range result.ImplementorImpact {
+				if !seenImpl[impl.ID] {
+					seenImpl[impl.ID] = true
+					merged.ImplementorImpact = append(merged.ImplementorImpact, impl)
+				}
+			}
+		}
+	}
+
+	sort.Strings(merged.AffectedFiles)
+	sort.Strings(merged.TestCoverage)
+
+	// Set root to a summary node.
+	merged.Root = graph.EntityRef{
+		Name: fmt.Sprintf("changeset(%d files)", len(filePaths)),
+		Type: graph.NodeFile,
+	}
+
+	// Attach test coverage from graph.
+	merged.TestCoverage = s.trimRepoRoot(merged.TestCoverage)
+	applyImpactTokenBudget(merged, tokenBudget)
+
+	if pc := s.getPulseClient(); pc != nil {
+		pc.RecordSearchEvent(pulse.SearchEvent{
+			Mode: "impact_files", Query: filesParam,
+			ResultCount: merged.TotalAffected, ProjectID: s.projectID,
+		})
+	}
+
+	if scope == "review" {
+		return jsonResult(s.enrichImpactForReview(merged, merged.Root.Name))
+	}
+	return jsonResult(merged)
+}
+
 func applyImpactTokenBudget(result *graph.ImpactResult, tokenBudget int) {
 	if tokenBudget <= 0 {
 		return

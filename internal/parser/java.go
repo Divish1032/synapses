@@ -569,10 +569,22 @@ func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, 
 				objNode := n.ChildByFieldName("object")
 				var objName string
 				if !objNode.IsNull() {
-					// Use only simple identifiers as alias — skip chained or complex expressions.
-					if objNode.Type() == "identifier" {
+					switch objNode.Type() {
+					case "identifier":
+						objName = string(src[objNode.StartByte():objNode.EndByte()])
+					case "this":
+						objName = "this"
+					case "super":
+						objName = "super"
+					case "field_access":
+						// Chained: this.field.method() → alias="this.field"
 						objName = string(src[objNode.StartByte():objNode.EndByte()])
 					}
+				} else {
+					// Bare method call like _readValue() inside a class method.
+					// In Java, bare calls are implicitly this.method().
+					// Set alias to "this" so the resolver uses intra-class resolution.
+					objName = "this"
 				}
 				return objName, methodName
 			case "object_creation_expression":

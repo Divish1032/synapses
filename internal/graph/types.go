@@ -929,6 +929,14 @@ type EntityInfo struct {
 }
 
 // ImpactTier groups nodes at the same blast-radius hop distance.
+// APISurfaceInfo describes whether an entity is part of the public API and
+// how many external consumers depend on it.
+type APISurfaceInfo struct {
+	Exported         bool   `json:"exported"`
+	ExternalPackages int    `json:"external_packages"` // number of packages that import this entity's package
+	BreakingRisk     string `json:"breaking_risk"`     // "high" (exported, many consumers), "medium" (exported, few), "low" (not exported)
+}
+
 type ImpactTier struct {
 	Depth      int         `json:"depth"`
 	Label      string      `json:"label"`      // "direct" | "indirect" | "peripheral"
@@ -1006,6 +1014,17 @@ type ImpactResult struct {
 	// TestCoverage lists test files that exercise the root entity (R2).
 	// Populated by FindTestsFor via reverse-BFS over CALLS edges filtered to test files.
 	TestCoverage []string `json:"test_coverage,omitempty"`
+	// APISurface flags whether the root entity is part of the public API surface
+	// and lists external consumers. Populated when root is exported.
+	APISurface *APISurfaceInfo `json:"api_surface,omitempty"`
+	// TestPriority provides distance-scored test files: "critical" tests (distance 1)
+	// are most likely to break, "likely" (distance 2) somewhat likely, "peripheral" (3+)
+	// less likely. Sorted by distance ascending.
+	TestPriority []TestRef `json:"test_priority,omitempty"`
+	// ImplementorImpact lists types that implement the root interface/type.
+	// When an interface method signature changes, all implementors must update.
+	// Populated when root is an interface node or method on an interface.
+	ImplementorImpact []EntityRef `json:"implementor_impact,omitempty"`
 	// CrossDomainImpact lists entities in other knowledge domains that are
 	// directly connected to the root via cross-domain edges (DEPLOYS, CONSUMES,
 	// CONFIGURED_BY, DOCUMENTS, MENTIONS, MANUAL). Only edges with confidence ≥ 0.6

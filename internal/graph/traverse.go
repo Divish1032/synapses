@@ -1215,6 +1215,60 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 	}
 	sort.Strings(files)
 
+	// Collect implementor impact: types that implement this interface.
+	// When an interface method changes signature, all implementors break.
+	// Follow IMPLEMENTS edges where root is the target (implementors point TO interface).
+	var implementors []EntityRef
+	if root.Type == NodeInterface || root.Type == NodeMethod {
+		// For interface nodes: find structs that implement it.
+		// For methods: find the parent interface, then its implementors.
+		ifaceID := NodeID("")
+		if root.Type == NodeInterface {
+			ifaceID = rootID
+		} else {
+			// Method: check if parent is an interface (via DEFINES edge).
+			for _, e := range g.inEdges[rootID] {
+				if e.Type == EdgeDefines {
+					if parent := g.nodes[e.From]; parent != nil && parent.Type == NodeInterface {
+						ifaceID = parent.ID
+						break
+					}
+				}
+			}
+		}
+		// Collect all IMPLEMENTS edges pointing to this interface.
+		// Only proceed if we found an actual interface (skip for struct methods).
+		if ifaceID != "" {
+			for _, e := range g.inEdges[ifaceID] {
+				if e.Type != EdgeImplements {
+					continue
+				}
+				implNode := g.nodes[e.From]
+				if implNode == nil || implNode.ID == rootID {
+					continue
+				}
+				implementors = append(implementors, EntityRef{
+					ID:   implNode.ID,
+					Name: implNode.Name,
+					Type: implNode.Type,
+					File: implNode.File,
+					Line: implNode.Line,
+				})
+				if implNode.File != "" {
+					fileSet[implNode.File] = struct{}{}
+				}
+			}
+			if len(implementors) > 0 {
+				// Rebuild files since we added implementor files.
+				files = make([]string, 0, len(fileSet))
+				for f := range fileSet {
+					files = append(files, f)
+				}
+				sort.Strings(files)
+			}
+		}
+	}
+
 	return &ImpactResult{
 		Root: EntityRef{
 			ID:   rootID,
@@ -1227,6 +1281,7 @@ func (g *Graph) ImpactAnalysis(rootID NodeID, maxDepth int) (*ImpactResult, erro
 		TotalAffected:        total,
 		AffectedFiles:        files,
 		Truncated:            anyTruncated || bfsTruncated,
+		ImplementorImpact:    implementors,
 		CrossDomainImpact:    cdResult.refs,
 		CrossDomainAffected:  len(cdResult.refs),
 		CrossDomainTruncated: cdResult.truncated,
@@ -1468,6 +1523,91 @@ func (g *Graph) FindTestsFor(nodeID NodeID) []string {
 	}
 	sort.Strings(files)
 	return files
+}
+
+// Test priority constants for FindTestsWithDistance.
+const (
+	TestPriorityCritical   = "critical"   // distance 1: directly calls changed entity
+	TestPriorityLikely     = "likely"     // distance 2: calls through one intermediate
+	TestPriorityPeripheral = "peripheral" // distance 3+: transitive dependency
+)
+
+// TestRef represents a test file with its distance from the changed entity.
+type TestRef struct {
+	File     string `json:"file"`
+	Distance int    `json:"distance"` // BFS hops from changed entity
+	Priority string `json:"priority"` // TestPriorityCritical, TestPriorityLikely, TestPriorityPeripheral
+}
+
+// FindTestsWithDistance is like FindTestsFor but returns distance-scored results.
+// Tests at distance 1 (directly call the entity) are "critical" — most likely to break.
+// Distance 2 is "likely", distance 3+ is "peripheral".
+func (g *Graph) FindTestsWithDistance(nodeID NodeID) []TestRef {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	if _, ok := g.nodes[nodeID]; !ok {
+		return nil
+	}
+
+	type entry struct {
+		id    NodeID
+		depth int
+	}
+	const maxVisited = 5_000
+	visited := map[NodeID]bool{nodeID: true}
+	queue := []entry{{nodeID, 0}}
+	testMap := map[string]int{} // file → min distance
+
+	for head := 0; head < len(queue); head++ {
+		if len(visited) >= maxVisited {
+			break
+		}
+		cur := queue[head]
+		if cur.depth >= 5 {
+			continue
+		}
+		for _, e := range g.inEdges[cur.id] {
+			if e.Type != EdgeCalls {
+				continue
+			}
+			if visited[e.From] {
+				continue
+			}
+			visited[e.From] = true
+			caller := g.nodes[e.From]
+			if caller == nil {
+				continue
+			}
+			dist := cur.depth + 1
+			if isTestFile(caller.File) {
+				if existing, ok := testMap[caller.File]; !ok || dist < existing {
+					testMap[caller.File] = dist
+				}
+			} else {
+				queue = append(queue, entry{e.From, dist})
+			}
+		}
+	}
+
+	refs := make([]TestRef, 0, len(testMap))
+	for file, dist := range testMap {
+		priority := TestPriorityPeripheral
+		if dist <= 1 {
+			priority = TestPriorityCritical
+		} else if dist <= 2 {
+			priority = TestPriorityLikely
+		}
+		refs = append(refs, TestRef{File: file, Distance: dist, Priority: priority})
+	}
+	// Sort by distance ascending, then file name for stability.
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Distance != refs[j].Distance {
+			return refs[i].Distance < refs[j].Distance
+		}
+		return refs[i].File < refs[j].File
+	})
+	return refs
 }
 
 // ErrNodeNotFound is returned when a query targets a non-existent node.
