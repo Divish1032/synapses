@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -8,6 +9,13 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
+
+// codeBlock represents a fenced code block extracted from a documentation file.
+type codeBlock struct {
+	Language string `json:"language"`
+	Content  string `json:"content"`
+	Line     int    `json:"line"`
+}
 
 // MarkdownParser extracts structural sections from Markdown files (.md, .markdown, .mdx).
 // Each ATX or setext heading becomes a Section node with CONTAINS edges forming a tree.
@@ -89,6 +97,11 @@ func (p *MarkdownParser) Parse(g *graph.Graph, filePath string, src []byte) erro
 		if sec.Body != "" {
 			meta["body"] = sec.Body
 		}
+		if len(sec.CodeBlocks) > 0 {
+			if cbJSON, err := json.Marshal(sec.CodeBlocks); err == nil {
+				meta["code_blocks"] = string(cbJSON)
+			}
+		}
 
 		g.AddNode(&graph.Node{
 			ID:       sectionNodeID,
@@ -149,12 +162,13 @@ func (p *MarkdownParser) Parse(g *graph.Graph, filePath string, src []byte) erro
 
 // section represents a parsed heading section from a markdown file.
 type section struct {
-	Title        string // heading text (without # prefix)
-	Depth        int    // heading level (1-6)
-	Line         int    // 1-based line number of heading text
-	bodyStartIdx int    // 0-based index into lines[] where body begins (after heading + underline)
-	Body         string // full body text between this heading and the next (max 2000 chars)
-	BodyPreview  string // first 200 chars of body
+	Title        string      // heading text (without # prefix)
+	Depth        int         // heading level (1-6)
+	Line         int         // 1-based line number of heading text
+	bodyStartIdx int         // 0-based index into lines[] where body begins (after heading + underline)
+	Body         string      // full body text between this heading and the next (max 2000 chars)
+	BodyPreview  string      // first 200 chars of body
+	CodeBlocks   []codeBlock // fenced code blocks within this section
 }
 
 // frontmatterData holds structured fields extracted from YAML/TOML frontmatter.
@@ -202,10 +216,13 @@ func extractSections(src []byte) ([]section, frontmatterData) {
 		}
 	}
 
-	// ── Step 2: collect headings (ATX + setext), skip fenced blocks ─────────
+	// ── Step 2: collect headings (ATX + setext), capture fenced code blocks ──
 	var sections []section
 	inFence := false
-	var fenceChar byte // '`' or '~'
+	var fenceChar byte   // '`' or '~'
+	var fenceLang string // language tag from opening fence
+	var fenceLine int    // 1-based line of opening fence
+	var fenceBody []string
 
 	for i := startIdx; i < len(lines); i++ {
 		line := lines[i]
@@ -218,14 +235,38 @@ func extractSections(src []byte) ([]section, frontmatterData) {
 				if trimmed[1] == ch && trimmed[2] == ch {
 					inFence = true
 					fenceChar = ch
+					fenceLang = strings.TrimSpace(trimmed[3:])
+					// Strip info string after space (e.g. "python title=foo" → "python")
+					if idx := strings.IndexByte(fenceLang, ' '); idx >= 0 {
+						fenceLang = fenceLang[:idx]
+					}
+					fenceLine = i + 1 // 1-based
+					fenceBody = fenceBody[:0]
 					continue
 				}
 			}
 		} else {
 			if len(trimmed) >= 3 && trimmed[0] == fenceChar &&
 				trimmed[1] == fenceChar && trimmed[2] == fenceChar {
+				// Closing fence — attach code block to most recent section.
+				content := strings.TrimSpace(strings.Join(fenceBody, "\n"))
+				if content != "" && len(sections) > 0 {
+					sec := &sections[len(sections)-1]
+					if len(sec.CodeBlocks) < 5 {
+						if len(content) > 2000 {
+							content = content[:2000]
+						}
+						sec.CodeBlocks = append(sec.CodeBlocks, codeBlock{
+							Language: fenceLang,
+							Content:  content,
+							Line:     fenceLine,
+						})
+					}
+				}
 				inFence = false
 				fenceChar = 0
+			} else {
+				fenceBody = append(fenceBody, line)
 			}
 			continue
 		}

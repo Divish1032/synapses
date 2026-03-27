@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 	"testing"
@@ -484,5 +485,86 @@ func TestPlaintextParser_RST_ShortUnderlineIgnored(t *testing.T) {
 		if n.Type == graph.NodeSection {
 			t.Errorf("should not have created a section for short underline, got %q", n.Name)
 		}
+	}
+}
+
+// ── RST Code Block Tests ────────────────────────────────────────────────────
+
+func TestPlaintextParser_RST_CodeBlockExtraction(t *testing.T) {
+	g := newPlaintextTestGraph()
+	p := NewPlaintextParser()
+
+	src := []byte(`Introduction
+============
+
+Install the package:
+
+.. code-block:: python
+
+   from mylib import Client
+   client = Client()
+
+Then configure:
+
+.. code-block:: bash
+
+   export API_KEY=xxx
+`)
+
+	if err := p.Parse(g, "/repo/docs/guide.rst", src); err != nil {
+		t.Fatal(err)
+	}
+
+	sections := collectSections(g)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(sections))
+	}
+
+	cbJSON := sections[0].Metadata["code_blocks"]
+	if cbJSON == "" {
+		t.Fatal("code_blocks metadata missing")
+	}
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(cbJSON), &blocks); err != nil {
+		t.Fatalf("failed to unmarshal code_blocks: %v", err)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 code blocks, got %d", len(blocks))
+	}
+	if blocks[0].Language != "python" {
+		t.Errorf("block 0 language = %q, want python", blocks[0].Language)
+	}
+	if !strings.Contains(blocks[0].Content, "from mylib import Client") {
+		t.Errorf("block 0 content missing expected code: %q", blocks[0].Content)
+	}
+	if blocks[1].Language != "bash" {
+		t.Errorf("block 1 language = %q, want bash", blocks[1].Language)
+	}
+}
+
+func TestPlaintextParser_RST_CodeBlockMaxFive(t *testing.T) {
+	g := newPlaintextTestGraph()
+	p := NewPlaintextParser()
+
+	var sb strings.Builder
+	sb.WriteString("Overview\n========\n\n")
+	for i := 0; i < 7; i++ {
+		sb.WriteString(".. code-block:: python\n\n   print(" + string(rune('A'+i)) + ")\n\n")
+	}
+
+	if err := p.Parse(g, "/repo/docs/many.rst", []byte(sb.String())); err != nil {
+		t.Fatal(err)
+	}
+
+	sections := collectSections(g)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(sections))
+	}
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(sections[0].Metadata["code_blocks"]), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 5 {
+		t.Errorf("expected max 5 code blocks, got %d", len(blocks))
 	}
 }

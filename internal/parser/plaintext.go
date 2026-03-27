@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -77,6 +78,11 @@ func (p *PlaintextParser) Parse(g *graph.Graph, filePath string, src []byte) err
 		}
 		if sec.Body != "" {
 			meta["body"] = sec.Body
+		}
+		if len(sec.CodeBlocks) > 0 {
+			if cbJSON, err := json.Marshal(sec.CodeBlocks); err == nil {
+				meta["code_blocks"] = string(cbJSON)
+			}
 		}
 
 		g.AddNode(&graph.Node{
@@ -225,7 +231,110 @@ func extractRSTSections(src []byte) []section {
 
 	// Fill body text.
 	fillSectionBodies(lines, sections)
+
+	// Extract RST code-block directives and attach to sections.
+	extractRSTCodeBlocks(lines, sections)
+
 	return sections
+}
+
+// extractRSTCodeBlocks parses RST `.. code-block:: lang` directives and attaches
+// the indented content to the enclosing section.
+func extractRSTCodeBlocks(lines []string, sections []section) {
+	for i := 0; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(trimmed, ".. code-block::") && !strings.HasPrefix(trimmed, ".. sourcecode::") {
+			continue
+		}
+		// Extract language tag.
+		lang := ""
+		if idx := strings.Index(trimmed, "::"); idx >= 0 {
+			lang = strings.TrimSpace(trimmed[idx+2:])
+		}
+		directiveLine := i + 1 // 1-based
+
+		// Find the indented content block (skip blank lines, then collect indented).
+		j := i + 1
+		for j < len(lines) && strings.TrimSpace(lines[j]) == "" {
+			j++
+		}
+		if j >= len(lines) {
+			continue
+		}
+		// Determine indent level from first content line.
+		indent := 0
+		for _, ch := range lines[j] {
+			if ch == ' ' {
+				indent++
+			} else if ch == '\t' {
+				indent += 4
+			} else {
+				break
+			}
+		}
+		if indent == 0 {
+			continue // no indented block
+		}
+
+		var contentLines []string
+		for j < len(lines) {
+			line := lines[j]
+			if strings.TrimSpace(line) == "" {
+				contentLines = append(contentLines, "")
+				j++
+				continue
+			}
+			// Check if still indented.
+			lineIndent := 0
+			for _, ch := range line {
+				if ch == ' ' {
+					lineIndent++
+				} else if ch == '\t' {
+					lineIndent += 4
+				} else {
+					break
+				}
+			}
+			if lineIndent < indent {
+				break
+			}
+			// Strip the common indent.
+			if len(line) > indent {
+				contentLines = append(contentLines, line[indent:])
+			} else {
+				contentLines = append(contentLines, strings.TrimSpace(line))
+			}
+			j++
+		}
+
+		content := strings.TrimSpace(strings.Join(contentLines, "\n"))
+		if content == "" {
+			continue
+		}
+
+		// Find which section owns this directive.
+		secIdx := -1
+		for si := len(sections) - 1; si >= 0; si-- {
+			if sections[si].Line <= directiveLine {
+				secIdx = si
+				break
+			}
+		}
+		if secIdx < 0 {
+			continue
+		}
+		if len(sections[secIdx].CodeBlocks) >= 5 {
+			continue
+		}
+		if len(content) > 2000 {
+			content = content[:2000]
+		}
+		sections[secIdx].CodeBlocks = append(sections[secIdx].CodeBlocks, codeBlock{
+			Language: lang,
+			Content:  content,
+			Line:     directiveLine,
+		})
+	}
 }
 
 // ── TXT Section Extraction ──────────────────────────────────────────────────
