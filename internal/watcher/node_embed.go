@@ -7,6 +7,11 @@ package watcher
 // index is populated with code entity vectors BEFORE the NL resolver runs,
 // making Tier 1 embedding-based entity resolution possible.
 //
+// After embedding completes, runs post-embed discovery passes:
+//   - DiscoverDocCodeRelations: semantic doc↔code linking via embedding similarity
+//   - DiscoverEmbedRelations: knowledge-node relationship discovery
+//   - DetectCommunities: label propagation over knowledge nodes
+//
 // Modeled after the memory embedding sweep in internal/mcp/server.go
 // (embedSweepLoop / embedMemory).
 
@@ -15,7 +20,9 @@ import (
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/embed"
+	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -33,14 +40,17 @@ const (
 )
 
 // runNodeEmbedPass embeds all graph nodes that lack stored vectors, then
-// triggers an HNSW rebuild. Designed to run once in a background goroutine
-// after initial parse completes. Safe to call multiple times; skips already-
-// embedded nodes automatically (via the content_hash check in
-// GetNodesWithoutEmbeddings).
+// triggers an HNSW rebuild and runs post-embed discovery passes (doc↔code
+// linking, knowledge relations, community detection).
+//
+// Designed to run once in a background goroutine after initial parse completes.
+// Safe to call multiple times; skips already-embedded nodes automatically
+// (via the content_hash check in GetNodesWithoutEmbeddings).
 //
 // ctx is the daemon lifecycle context — cancelled on daemon shutdown.
 // embedder and st must both be non-nil (callers should guard before calling).
-func runNodeEmbedPass(ctx context.Context, embedder embed.Embedder, st *store.Store) {
+// g may be nil — in that case post-embed discovery is skipped.
+func runNodeEmbedPass(ctx context.Context, embedder embed.Embedder, st *store.Store, g *graph.Graph) {
 	ids, err := st.GetNodesWithoutEmbeddings(nodeEmbedBatchSize)
 	if err != nil {
 		logutil.Warn("synapses/watcher: node embed pass: list nodes: %v\n", err)
@@ -95,5 +105,45 @@ func runNodeEmbedPass(ctx context.Context, embedder embed.Embedder, st *store.St
 		logutil.Info("synapses/watcher: node embed pass complete: %d nodes embedded\n", embedded)
 		// Rebuild the HNSW node index so new vectors are immediately searchable.
 		st.RebuildNodeHNSW()
+	}
+
+	// Post-embed discovery: run semantic linking passes now that HNSW is populated.
+	// All three functions are idempotent — safe to re-run on repeated embed passes.
+	// Skipped when graph is nil (e.g. standalone embed-only invocation).
+	if g != nil {
+		runPostEmbedDiscovery(ctx, embedder, st, g)
+	}
+}
+
+// runPostEmbedDiscovery runs the three semantic discovery passes that depend on
+// populated HNSW embeddings: doc↔code linking, knowledge relations, communities.
+func runPostEmbedDiscovery(ctx context.Context, embedder embed.Embedder, st *store.Store, g *graph.Graph) {
+	// Check for shutdown before starting potentially expensive passes.
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	er := newStoreEmbedResolver(embedder, st)
+	if er == nil {
+		return
+	}
+
+	// Phase 1: Semantic doc↔code linking — creates EXPLAINS/DOCUMENTED_BY edges
+	// between doc sections and code entities based on embedding similarity.
+	dcCount := resolver.DiscoverDocCodeRelations(g, er, 0.60)
+
+	// Phase 2: Knowledge-node relationship discovery — creates RELATES_TO edges
+	// between semantically similar knowledge nodes (concepts, entities, etc.).
+	erCount := resolver.DiscoverEmbedRelations(g, er, 0.55)
+
+	// Phase 3: Community detection — label propagation over knowledge nodes
+	// to assign community IDs for downstream clustering/grouping.
+	comCount := resolver.DetectCommunities(g, 10)
+
+	if dcCount+erCount+comCount > 0 {
+		logutil.Info("synapses/watcher: post-embed discovery: %d doc-code, %d relations, %d communities\n",
+			dcCount, erCount, comCount)
 	}
 }

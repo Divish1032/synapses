@@ -1498,6 +1498,141 @@ func (s *Store) SemanticSearch(query string, limit int) ([]SearchResult, error) 
 	return results, nil
 }
 
+// SemanticSearchWithDomain queries the FTS5 index filtered by node domain.
+// When domain is non-empty, results are restricted to nodes whose domain column
+// matches (e.g. "docs" for doc sections, "code" for code entities).
+// When domain is empty, behaves identically to SemanticSearch (no filtering).
+func (s *Store) SemanticSearchWithDomain(query string, limit int, domain string) ([]SearchResult, error) {
+	if domain == "" {
+		return s.SemanticSearch(query, limit)
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	q := sanitizeFTSQuery(query)
+	if q == "" {
+		return nil, nil
+	}
+
+	const ftsDomainSQL = `
+        SELECT f.node_id, f.name, f.signature, f.doc, -bm25(nodes_fts, 0, 10, 8, 5, 2) AS score
+        FROM nodes_fts f
+        JOIN nodes n ON n.id = f.node_id
+        WHERE nodes_fts MATCH ?
+          AND n.domain = ?
+        ORDER BY CASE WHEN f.name = ? THEN 0 ELSE 1 END ASC, score DESC
+        LIMIT ?`
+
+	rows, err := s.graphDB.Query(ftsDomainSQL, q, domain, q, limit)
+	if err != nil {
+		return s.likeSearchWithDomain(query, limit, domain)
+	}
+	defer rows.Close()
+
+	var results []SearchResult
+	for rows.Next() {
+		var r SearchResult
+		if err := rows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc, &r.Score); err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return s.likeSearchWithDomain(query, limit, domain)
+	}
+	return results, nil
+}
+
+// FilterResultsByDomain post-filters search results by node domain.
+// Looks up the domain column for each result and keeps only matching ones.
+func (s *Store) FilterResultsByDomain(results []SearchResult, domain string) []SearchResult {
+	if len(results) == 0 || domain == "" {
+		return results
+	}
+	// Batch lookup: collect IDs, query once.
+	ids := make([]string, len(results))
+	for i, r := range results {
+		ids[i] = r.ID
+	}
+	domainMap := make(map[string]string, len(ids))
+	for start := 0; start < len(ids); start += 500 {
+		end := start + 500
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		placeholders := strings.Repeat("?,", len(chunk))
+		placeholders = placeholders[:len(placeholders)-1]
+		args := make([]interface{}, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		rows, err := s.graphDB.Query(
+			fmt.Sprintf("SELECT id, domain FROM nodes WHERE id IN (%s)", placeholders), args...)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var id, d string
+			if rows.Scan(&id, &d) == nil {
+				domainMap[id] = d
+			}
+		}
+		rows.Close()
+	}
+	var filtered []SearchResult
+	for _, r := range results {
+		if domainMap[r.ID] == domain {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
+}
+
+// likeSearchWithDomain is the LIKE fallback filtered by domain.
+func (s *Store) likeSearchWithDomain(query string, limit int, domain string) ([]SearchResult, error) {
+	words := strings.Fields(query)
+	if len(words) == 0 {
+		return nil, nil
+	}
+	if len(words) > 10 {
+		words = words[:10]
+	}
+	conds := make([]string, len(words))
+	args := make([]interface{}, 0, len(words)*2+2)
+	args = append(args, domain)
+	for i, w := range words {
+		pat := "%" + escapeLike(w) + "%"
+		conds[i] = "(name LIKE ? ESCAPE '\\' OR doc LIKE ? ESCAPE '\\')"
+		args = append(args, pat, pat)
+	}
+	args = append(args, limit)
+	rows, err := s.graphDB.Query(fmt.Sprintf(`
+        SELECT id, name, signature, doc
+        FROM nodes
+        WHERE domain = ? AND (%s)
+        ORDER BY length(name) ASC
+        LIMIT ?`, strings.Join(conds, " OR ")), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []SearchResult
+	for rows.Next() {
+		var r SearchResult
+		if err := rows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc); err != nil {
+			return nil, err
+		}
+		r.Score = 1.0
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
 // likeSearch is a fallback when FTS5 returns no results or encounters a syntax
 // error. It splits the query into words and matches each word independently
 // using LIKE, joining the per-word conditions with OR so that a multi-word

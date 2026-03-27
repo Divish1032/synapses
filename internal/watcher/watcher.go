@@ -614,9 +614,10 @@ func (w *Watcher) launchNodeEmbedPass(embedder embed.Embedder, st *store.Store) 
 		return // another pass is already in flight
 	}
 	ctx := w.stopCtx
+	g := w.graph
 	if !w.trackGo(func() {
 		defer w.nodeEmbedRunning.Store(0)
-		runNodeEmbedPass(ctx, embedder, st)
+		runNodeEmbedPass(ctx, embedder, st, g)
 	}) {
 		// Watcher stopped before the goroutine could be launched.
 		// Clear the guard so the atomic doesn't stay stuck at 1.

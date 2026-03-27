@@ -1517,6 +1517,7 @@ func (s *Server) handleSemanticSearch(
 	}
 
 	mode := stringArg(req, "mode")
+	domain := stringArg(req, "domain") // optional: "code", "docs", or "" (all)
 
 	// --- HyDE: Hypothetical Document Embeddings (mode=semantic + brain available) ---
 	// When the user requests semantic search and the brain is online, generate a
@@ -1561,16 +1562,29 @@ func (s *Server) handleSemanticSearch(
 		if embedErr != nil || len(queryVec) == 0 {
 			embedFailed = true
 		} else {
-			vr, verr := s.store.VectorSearch(queryVec, limit)
+			// Over-fetch when domain filter active, then post-filter.
+			fetchLimit := limit
+			if domain != "" {
+				fetchLimit = limit * 3
+			}
+			vr, verr := s.store.VectorSearch(queryVec, fetchLimit)
 			if verr == nil && len(vr) > 0 {
-				vectorResults = vr
-				searchMode = "vector_cosine"
+				if domain != "" {
+					vr = s.store.FilterResultsByDomain(vr, domain)
+				}
+				if len(vr) > limit {
+					vr = vr[:limit]
+				}
+				if len(vr) > 0 {
+					vectorResults = vr
+					searchMode = "vector_cosine"
+				}
 			}
 		}
 	}
 
 	// --- FTS5 path (always runs as fallback / supplement) ---
-	ftsResults, err := s.store.SemanticSearch(query, limit)
+	ftsResults, err := s.store.SemanticSearchWithDomain(query, limit, domain)
 	if err != nil {
 		return toolError("semantic search", err)
 	}
