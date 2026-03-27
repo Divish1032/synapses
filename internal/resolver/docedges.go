@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -26,7 +27,7 @@ func ResolveDocEdges(g *graph.Graph) int {
 	}
 	codeNames := buildCodeNames(g)
 	fileIdx := buildFileIndex(g)
-	return linkSections(g, sections, codeNames) + linkDocFiles(g, files, codeNames) + linkSectionsToFiles(g, sections, fileIdx)
+	return linkSections(g, sections, codeNames) + linkDocFiles(g, files, codeNames) + linkSectionsToFiles(g, sections, fileIdx) + linkCodeBlocks(g, sections, codeNames)
 }
 
 // ResolveDocEdgesForFile resolves doc edges only for Section nodes and the
@@ -59,7 +60,7 @@ func ResolveDocEdgesForFile(g *graph.Graph, filePath string) int {
 	}
 	codeNames := buildCodeNames(g)
 	fileIdx := buildFileIndex(g)
-	return linkSections(g, sections, codeNames) + linkDocFiles(g, files, codeNames) + linkSectionsToFiles(g, sections, fileIdx)
+	return linkSections(g, sections, codeNames) + linkDocFiles(g, files, codeNames) + linkSectionsToFiles(g, sections, fileIdx) + linkCodeBlocks(g, sections, codeNames)
 }
 
 // linkDocFiles creates EXPLAINS and DOCUMENTED_BY edges from markdown file nodes
@@ -438,4 +439,161 @@ func isCamelCase(word string) bool {
 		}
 	}
 	return hasLower
+}
+
+// ── Code block identifier linking (Phase 3) ─────────────────────────────────
+
+// docCodeBlock mirrors parser.codeBlock for JSON deserialization.
+type docCodeBlock struct {
+	Language string `json:"language"`
+	Content  string `json:"content"`
+	Line     int    `json:"line"`
+}
+
+// linkCodeBlocks parses code blocks from section metadata (Phase 1) and creates
+// EXPLAINS edges for identifiers that exactly match entries in codeNames.
+func linkCodeBlocks(g *graph.Graph, sections []*graph.Node, codeNames map[string][]*graph.Node) int {
+	var created int
+	for _, sec := range sections {
+		cbJSON := sec.Metadata["code_blocks"]
+		if cbJSON == "" {
+			continue
+		}
+		var blocks []docCodeBlock
+		if err := json.Unmarshal([]byte(cbJSON), &blocks); err != nil {
+			continue
+		}
+
+		// Collect existing EXPLAINS targets to dedup.
+		existing := make(map[graph.NodeID]bool)
+		for _, e := range g.OutEdges(sec.ID) {
+			if e.Type == graph.EdgeExplains {
+				existing[e.To] = true
+			}
+		}
+
+		secCreated := 0
+		for _, block := range blocks {
+			if secCreated >= 5 {
+				break
+			}
+			idents := extractCodeBlockIdentifiers(block.Content, block.Language)
+			for _, ident := range idents {
+				if secCreated >= 5 {
+					break
+				}
+				targets, ok := codeNames[ident]
+				if !ok {
+					continue
+				}
+				for _, target := range targets {
+					if existing[target.ID] {
+						continue
+					}
+					existing[target.ID] = true
+					g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeExplains})
+					g.AddEdge(&graph.Edge{From: target.ID, To: sec.ID, Type: graph.EdgeDocumentedBy})
+					secCreated++
+					if secCreated >= 5 {
+						break
+					}
+				}
+			}
+		}
+		if secCreated > 0 {
+			if sec.Metadata["doc_link_source"] == "" {
+				sec.Metadata["doc_link_source"] = "code_block"
+			}
+		}
+		created += secCreated
+	}
+	return created
+}
+
+// Regex patterns for code block identifier extraction.
+var (
+	// Python/JS imports: `from X import Y`, `import X`, `require('X')`
+	pyImportRe  = regexp.MustCompile(`(?:from\s+(\w+)\s+import\s+([\w, ]+)|import\s+([\w.]+))`)
+	jsRequireRe = regexp.MustCompile(`require\(['"]([^'"]+)['"]\)`)
+	jsImportRe  = regexp.MustCompile(`import\s+(?:\{([^}]+)\}|(\w+))\s+from`)
+	// Qualified calls: X.method() where X is CamelCase
+	qualCallRe = regexp.MustCompile(`([A-Z][A-Za-z0-9]+)\.\w+\(`)
+	// Type annotations: : TypeName or -> TypeName
+	typeAnnotRe = regexp.MustCompile(`(?::\s*|->)\s*([A-Z][A-Za-z0-9]+)`)
+	// Decorators/attributes: @decorator or #[attribute]
+	decoratorRe = regexp.MustCompile(`@([A-Za-z_]\w{3,})`)
+	rustAttrRe  = regexp.MustCompile(`#\[([A-Za-z_]\w{3,})`)
+	// Go/Rust use: use X
+	useImportRe = regexp.MustCompile(`use\s+([\w:]+)`)
+)
+
+// extractCodeBlockIdentifiers extracts potential code entity names from a code block.
+func extractCodeBlockIdentifiers(content, lang string) []string {
+	seen := make(map[string]bool)
+	var idents []string
+
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if len(s) < 4 || seen[s] {
+			return
+		}
+		seen[s] = true
+		idents = append(idents, s)
+	}
+
+	// Python imports
+	for _, m := range pyImportRe.FindAllStringSubmatch(content, -1) {
+		if m[1] != "" {
+			add(m[1]) // from X
+			for _, name := range strings.Split(m[2], ",") {
+				add(strings.TrimSpace(name))
+			}
+		}
+		if m[3] != "" {
+			add(m[3])
+		}
+	}
+
+	// JS/TS imports
+	for _, m := range jsImportRe.FindAllStringSubmatch(content, -1) {
+		if m[1] != "" {
+			for _, name := range strings.Split(m[1], ",") {
+				add(strings.TrimSpace(name))
+			}
+		}
+		if m[2] != "" {
+			add(m[2])
+		}
+	}
+	for _, m := range jsRequireRe.FindAllStringSubmatch(content, -1) {
+		// Extract basename for require paths
+		parts := strings.Split(m[1], "/")
+		add(parts[len(parts)-1])
+	}
+
+	// Qualified calls: Flask.run() → Flask
+	for _, m := range qualCallRe.FindAllStringSubmatch(content, -1) {
+		add(m[1])
+	}
+
+	// Type annotations
+	for _, m := range typeAnnotRe.FindAllStringSubmatch(content, -1) {
+		add(m[1])
+	}
+
+	// Decorators
+	for _, m := range decoratorRe.FindAllStringSubmatch(content, -1) {
+		add(m[1])
+	}
+	for _, m := range rustAttrRe.FindAllStringSubmatch(content, -1) {
+		add(m[1])
+	}
+
+	// Use imports (Go/Rust)
+	for _, m := range useImportRe.FindAllStringSubmatch(content, -1) {
+		parts := strings.Split(m[1], "::")
+		add(parts[len(parts)-1])
+	}
+
+	return idents
 }

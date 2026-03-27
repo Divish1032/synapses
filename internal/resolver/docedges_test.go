@@ -846,6 +846,170 @@ func TestIsTestFile(t *testing.T) {
 	}
 }
 
+// ── Phase 3: Code block identifier linking ──────────────────────────────────
+
+func TestResolveDocEdges_CodeBlockIdentifiers(t *testing.T) {
+	g := newDocTestGraph()
+
+	// Code entity.
+	flaskID := g.MakeNodeID("/repo/app.py", "Flask")
+	g.AddNode(&graph.Node{
+		ID:   flaskID,
+		Type: graph.NodeStruct,
+		Name: "Flask",
+		File: "/repo/app.py",
+		Line: 1,
+	})
+
+	renderID := g.MakeNodeID("/repo/app.py", "render_template")
+	g.AddNode(&graph.Node{
+		ID:   renderID,
+		Type: graph.NodeFunction,
+		Name: "render_template",
+		File: "/repo/app.py",
+		Line: 10,
+	})
+
+	// Section with code blocks in metadata.
+	secID := g.MakeNodeID("/repo/README.md", "README.md § Quick Start")
+	g.AddNode(&graph.Node{
+		ID:   secID,
+		Type: graph.NodeSection,
+		Name: "README.md § Quick Start",
+		File: "/repo/README.md",
+		Line: 1,
+		Metadata: map[string]string{
+			"title":       "Quick Start",
+			"body":        "Install Flask and run the app.",
+			"code_blocks": `[{"language":"python","content":"from flask import Flask, render_template\napp = Flask(__name__)","line":5}]`,
+		},
+		Domain: graph.DomainDocs,
+	})
+
+	n := ResolveDocEdges(g)
+	// Should link to Flask (from body CamelCase + code block import)
+	// and render_template (from code block import)
+	if n < 2 {
+		t.Fatalf("expected at least 2 edges (Flask + render_template), got %d", n)
+	}
+
+	var foundFlask, foundRender bool
+	for _, e := range g.OutEdges(secID) {
+		if e.Type == graph.EdgeExplains {
+			if e.To == flaskID {
+				foundFlask = true
+			}
+			if e.To == renderID {
+				foundRender = true
+			}
+		}
+	}
+	if !foundFlask {
+		t.Error("missing EXPLAINS edge to Flask from code block")
+	}
+	if !foundRender {
+		t.Error("missing EXPLAINS edge to render_template from code block")
+	}
+}
+
+func TestResolveDocEdges_CodeBlockMaxFiveEdges(t *testing.T) {
+	g := newDocTestGraph()
+
+	// Create 7 code entities.
+	for i := 0; i < 7; i++ {
+		name := fmt.Sprintf("Entity%d", i)
+		id := g.MakeNodeID("/repo/main.go", name)
+		g.AddNode(&graph.Node{
+			ID:   id,
+			Type: graph.NodeFunction,
+			Name: name,
+			File: "/repo/main.go",
+			Line: i + 1,
+		})
+	}
+
+	// Code block that imports all 7.
+	imports := ""
+	for i := 0; i < 7; i++ {
+		imports += fmt.Sprintf("from x import Entity%d\n", i)
+	}
+
+	secID := g.MakeNodeID("/repo/README.md", "README.md § All")
+	g.AddNode(&graph.Node{
+		ID:   secID,
+		Type: graph.NodeSection,
+		Name: "README.md § All",
+		File: "/repo/README.md",
+		Line: 1,
+		Metadata: map[string]string{
+			"title":       "All",
+			"body":        "No entity refs in body.",
+			"code_blocks": fmt.Sprintf(`[{"language":"python","content":%q,"line":5}]`, imports),
+		},
+		Domain: graph.DomainDocs,
+	})
+
+	n := ResolveDocEdges(g)
+	if n > 5 {
+		t.Errorf("expected max 5 edges from code blocks, got %d", n)
+	}
+}
+
+func TestExtractCodeBlockIdentifiers_Python(t *testing.T) {
+	content := `from flask import Flask, render_template
+import os
+app = Flask(__name__)
+`
+	idents := extractCodeBlockIdentifiers(content, "python")
+	has := make(map[string]bool)
+	for _, id := range idents {
+		has[id] = true
+	}
+	if !has["flask"] {
+		t.Error("expected 'flask' from 'from flask import ...'")
+	}
+	if !has["Flask"] {
+		t.Error("expected 'Flask' from import")
+	}
+	if !has["render_template"] {
+		t.Error("expected 'render_template' from import")
+	}
+}
+
+func TestExtractCodeBlockIdentifiers_QualifiedCall(t *testing.T) {
+	content := `app = Flask.create()
+result = Client.send(data)
+`
+	idents := extractCodeBlockIdentifiers(content, "python")
+	has := make(map[string]bool)
+	for _, id := range idents {
+		has[id] = true
+	}
+	if !has["Flask"] {
+		t.Error("expected Flask from Flask.create()")
+	}
+	if !has["Client"] {
+		t.Error("expected Client from Client.send()")
+	}
+}
+
+func TestExtractCodeBlockIdentifiers_TypeAnnotation(t *testing.T) {
+	content := `def process(handler: RequestHandler) -> Response:
+    pass
+`
+	idents := extractCodeBlockIdentifiers(content, "python")
+	has := make(map[string]bool)
+	for _, id := range idents {
+		has[id] = true
+	}
+	if !has["RequestHandler"] {
+		t.Error("expected RequestHandler from type annotation")
+	}
+	if !has["Response"] {
+		t.Error("expected Response from return type")
+	}
+}
+
 func TestLooksLikeFilePath(t *testing.T) {
 	cases := []struct {
 		input string
