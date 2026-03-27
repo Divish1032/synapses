@@ -57,6 +57,8 @@ func runNodeEmbedPass(ctx context.Context, embedder embed.Embedder, st *store.St
 		return
 	}
 
+	logutil.Info("synapses/watcher: node embed pass: %d nodes need embedding (model=%s)\n", len(ids), embedder.Model())
+
 	// Even when all nodes are embedded, we still run post-embed discovery
 	// (below) to ensure semantic edges exist in the in-memory graph.
 	if len(ids) == 0 {

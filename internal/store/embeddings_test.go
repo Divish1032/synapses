@@ -131,8 +131,9 @@ func TestGetNodeTextForEmbedding_ReturnsNameAndDoc(t *testing.T) {
 	if text == "" {
 		t.Error("expected non-empty text")
 	}
-	if !strings.Contains(text, "ParseRequest") {
-		t.Errorf("expected text to contain 'ParseRequest', got: %q", text)
+	// NL pipeline converts "ParseRequest" to "parse request" for code nodes.
+	if !strings.Contains(text, "parse request") {
+		t.Errorf("expected text to contain 'parse request', got: %q", text)
 	}
 }
 

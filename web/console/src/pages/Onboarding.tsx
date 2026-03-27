@@ -3,6 +3,24 @@ import { get, api } from "../api";
 import { ProgressBar } from "../components/ProgressBar";
 import { useToast } from "../context/ToastContext";
 
+const isTauri = !!(window as any).__TAURI__;
+
+async function openFolderPicker(): Promise<string | null> {
+  if (!isTauri) return null;
+  try {
+    // Use Tauri's invoke API directly to avoid build-time import resolution.
+    // The dialog plugin exposes `plugin:dialog|open` as an IPC command.
+    const invoke = (window as any).__TAURI__.core?.invoke ?? (window as any).__TAURI__?.invoke;
+    if (!invoke) return null;
+    const result = await invoke("plugin:dialog|open", {
+      options: { directory: true, multiple: false, title: "Select your project folder" },
+    });
+    return typeof result === "string" ? result : null;
+  } catch {
+    return null;
+  }
+}
+
 interface AgentInfo { Key: string; Display: string; Detected: boolean; }
 interface OllamaStatus { running: boolean; version?: string; models?: string[]; }
 
@@ -166,6 +184,19 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
               />
               {!projectAdded && (
                 <button
+                  className="btn-ghost"
+                  onClick={async () => {
+                    const path = await openFolderPicker();
+                    if (path) setProjectPath(path);
+                  }}
+                  disabled={indexing}
+                  style={{ whiteSpace: "nowrap" }}
+                >
+                  Browse
+                </button>
+              )}
+              {!projectAdded && (
+                <button
                   className="btn-primary"
                   onClick={addProject}
                   disabled={indexing || !projectPath.trim()}
@@ -189,6 +220,9 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
               </div>
             )}
             <div className="onboarding-actions">
+              <button className="btn-ghost" onClick={() => setStep(1)}>
+                Skip
+              </button>
               <button
                 className="btn-primary"
                 disabled={!projectAdded}

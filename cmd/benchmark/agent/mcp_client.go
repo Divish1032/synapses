@@ -154,6 +154,15 @@ func (c *SynapsesClient) Search(taskID, query string) (*SearchResult, error) {
 	return &SearchResult{Raw: raw, Text: raw}, nil
 }
 
+// SearchWithMode calls the search tool with an explicit mode (e.g. "vector").
+func (c *SynapsesClient) SearchWithMode(query, mode string) (string, error) {
+	if c.disabled {
+		return "", nil
+	}
+	args := map[string]interface{}{"query": query, "mode": mode}
+	return c.callTool("search", args)
+}
+
 // GetImpact calls the get_impact tool.
 func (c *SynapsesClient) GetImpact(taskID, entity string) (*ImpactResult, error) {
 	if c.disabled {

@@ -228,19 +228,20 @@ func waitForIndex(client *agent.SynapsesClient, repoDir string) error {
 	// First call triggers indexing.
 	_, _ = client.Search("graphbench-index", "main")
 
-	// Poll: retry search up to 30 times (60s total) waiting for index.
-	for attempt := 0; attempt < 30; attempt++ {
+	// Poll: retry search up to 150 times (5 min total) waiting for index.
+	// Large repos (Hono, Axum, Guava) need well over 60s to parse.
+	for attempt := 0; attempt < 150; attempt++ {
 		time.Sleep(2 * time.Second)
 		resp, err := client.Search("graphbench-poll", "function")
 		if err == nil && resp != nil && len(resp.Text) > 20 {
 			log.Printf("  index ready (attempt %d)", attempt+1)
 			return nil
 		}
-		if attempt%5 == 4 {
-			log.Printf("  still waiting for index (attempt %d)...", attempt+1)
+		if attempt%15 == 14 {
+			log.Printf("  still waiting for index (attempt %d/150)...", attempt+1)
 		}
 	}
-	return fmt.Errorf("indexing did not complete within 60s")
+	return fmt.Errorf("indexing did not complete within 5 min")
 }
 
 // runGraphTest executes a single test case against the daemon.

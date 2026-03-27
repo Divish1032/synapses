@@ -49,14 +49,94 @@ info() { printf "  \033[1m→\033[0m %s\n" "$*"; }
 warn() { printf "  \033[33m!\033[0m %s\n" "$*"; }
 die()  { printf "\n  \033[31m✗\033[0m %s\n\n" "$*" >&2; exit 1; }
 
+# ── platform detection ────────────────────────────────────────────────────────
+
+detect_platform() {
+  OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    x86_64|amd64) ARCH="x86_64" ;;
+    arm64|aarch64) ARCH="arm64" ;;
+    *) ARCH="$ARCH" ;;
+  esac
+  case "$OS" in
+    darwin) PLATFORM="${OS}_${ARCH}" ;;
+    linux)  PLATFORM="${OS}_${ARCH}" ;;
+    mingw*|msys*|cygwin*) PLATFORM="windows_${ARCH}" ;;
+    *) PLATFORM="" ;;
+  esac
+}
+
+# ── try downloading pre-built binary ─────────────────────────────────────────
+
+GITHUB_REPO="SynapsesOS/synapses"
+INSTALL_DIR="$HOME/.synapses/bin"
+
+try_download_binary() {
+  detect_platform
+  if [ -z "$PLATFORM" ]; then
+    return 1
+  fi
+
+  # Get latest release tag
+  LATEST_URL="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
+  if command -v curl >/dev/null 2>&1; then
+    RELEASE_JSON=$(curl -fsSL "$LATEST_URL" 2>/dev/null) || return 1
+  elif command -v wget >/dev/null 2>&1; then
+    RELEASE_JSON=$(wget -qO- "$LATEST_URL" 2>/dev/null) || return 1
+  else
+    return 1
+  fi
+
+  # Extract download URL for our platform (e.g., synapses_darwin_arm64.tar.gz)
+  ASSET_NAME="synapses_${PLATFORM}.tar.gz"
+  DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[^\"]*${ASSET_NAME}\"" | head -1 | grep -o 'https://[^"]*')
+
+  if [ -z "$DOWNLOAD_URL" ]; then
+    return 1
+  fi
+
+  info "Downloading pre-built binary ($PLATFORM)..."
+  mkdir -p "$INSTALL_DIR"
+  TMPDIR=$(mktemp -d)
+  trap "rm -rf $TMPDIR" EXIT
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$DOWNLOAD_URL" -o "$TMPDIR/$ASSET_NAME" || return 1
+  else
+    wget -q "$DOWNLOAD_URL" -O "$TMPDIR/$ASSET_NAME" || return 1
+  fi
+
+  tar -xzf "$TMPDIR/$ASSET_NAME" -C "$TMPDIR" 2>/dev/null || return 1
+
+  # Find the binary in extracted files
+  if [ -f "$TMPDIR/synapses" ]; then
+    mv "$TMPDIR/synapses" "$INSTALL_DIR/synapses"
+  elif [ -f "$TMPDIR/synapses.exe" ]; then
+    mv "$TMPDIR/synapses.exe" "$INSTALL_DIR/synapses.exe"
+  else
+    return 1
+  fi
+
+  chmod +x "$INSTALL_DIR/synapses" 2>/dev/null
+  ok "synapses installed to $INSTALL_DIR/synapses"
+  BINARY_INSTALLED=true
+  return 0
+}
+
+BINARY_INSTALLED=false
+
 # ── preflight ────────────────────────────────────────────────────────────────
 
-if ! command -v go >/dev/null 2>&1; then
-  die "Go is not installed. Install it from https://go.dev/dl/ then re-run this script."
+# Try pre-built binary first (no Go required)
+if try_download_binary; then
+  info "Installed pre-built binary (no Go required)"
+elif command -v go >/dev/null 2>&1; then
+  GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
+  info "No pre-built binary available; using Go $GO_VERSION"
+else
+  die "Could not download pre-built binary and Go is not installed.\n  Install Go from https://go.dev/dl/ or download the desktop app from https://github.com/$GITHUB_REPO/releases"
 fi
-
-GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
-info "Using Go $GO_VERSION"
 
 if [ "$WITH_SCOUT" = true ] && ! command -v python3 >/dev/null 2>&1; then
   warn "--with-scout requires Python 3.11+. Python not found — skipping scout."
@@ -83,10 +163,15 @@ echo ""
 
 # ── install core ──────────────────────────────────────────────────────────────
 
-info "Installing synapses core..."
-go install "$SYNAPSES_PKG"
-GOBIN_DIR=$(go env GOBIN); GOPATH_DIR=$(go env GOPATH); EFFECTIVE_BIN="${GOBIN_DIR:-${GOPATH_DIR}/bin}"
-ok "synapses installed  ($(command -v synapses 2>/dev/null || echo "$EFFECTIVE_BIN/synapses"))"
+if [ "$BINARY_INSTALLED" = true ]; then
+  info "Synapses core already installed via download"
+  EFFECTIVE_BIN="$INSTALL_DIR"
+else
+  info "Installing synapses core via go install..."
+  go install "$SYNAPSES_PKG"
+  GOBIN_DIR=$(go env GOBIN); GOPATH_DIR=$(go env GOPATH); EFFECTIVE_BIN="${GOBIN_DIR:-${GOPATH_DIR}/bin}"
+  ok "synapses installed  ($(command -v synapses 2>/dev/null || echo "$EFFECTIVE_BIN/synapses"))"
+fi
 
 # ── install brain ─────────────────────────────────────────────────────────────
 
@@ -139,9 +224,14 @@ fi
 if command -v synapses >/dev/null 2>&1; then
   ok "synapses is in PATH — ready to use"
 else
-  GOBIN_DIR=$(go env GOBIN)
-  GOPATH_DIR=$(go env GOPATH)
-  EFFECTIVE_BIN="${GOBIN_DIR:-${GOPATH_DIR}/bin}"
+  # If we downloaded to ~/.synapses/bin, that's our effective bin
+  if [ "$BINARY_INSTALLED" = true ]; then
+    EFFECTIVE_BIN="$INSTALL_DIR"
+  elif command -v go >/dev/null 2>&1; then
+    GOBIN_DIR=$(go env GOBIN)
+    GOPATH_DIR=$(go env GOPATH)
+    EFFECTIVE_BIN="${GOBIN_DIR:-${GOPATH_DIR}/bin}"
+  fi
 
   echo ""
   warn "$EFFECTIVE_BIN is not in your PATH."

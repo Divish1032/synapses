@@ -1598,27 +1598,46 @@ func (s *Server) handleSemanticSearch(
 		return toolError("semantic search", err)
 	}
 
-	// --- Merge: vector results first, then FTS results not already returned ---
+	// --- Merge via Reciprocal Rank Fusion (RRF) when both channels have results ---
 	var results []store.SearchResult
-	if len(vectorResults) > 0 {
-		results = vectorResults
-		seen := make(map[string]bool, len(vectorResults))
-		for _, r := range vectorResults {
-			seen[r.ID] = true
+	if len(vectorResults) > 0 && len(ftsResults) > 0 {
+		// Build ranked ID lists for each channel.
+		channels := map[string][]string{
+			"vector": make([]string, len(vectorResults)),
+			"bm25":   make([]string, len(ftsResults)),
 		}
-		for _, r := range ftsResults {
-			if !seen[r.ID] {
+		resultLookup := make(map[string]store.SearchResult, len(vectorResults)+len(ftsResults))
+		for i, r := range vectorResults {
+			channels["vector"][i] = r.ID
+			resultLookup[r.ID] = r
+		}
+		for i, r := range ftsResults {
+			channels["bm25"][i] = r.ID
+			if _, exists := resultLookup[r.ID]; !exists {
+				resultLookup[r.ID] = r
+			}
+		}
+
+		mergedIDs, _ := store.RRFMergeWeighted(channels, limit, 60, map[string]float64{
+			"vector": 1.0,
+			"bm25":   1.0,
+		})
+
+		results = make([]store.SearchResult, 0, len(mergedIDs))
+		for _, id := range mergedIDs {
+			if r, ok := resultLookup[id]; ok {
 				results = append(results, r)
 			}
 		}
-		if len(results) > limit {
-			results = results[:limit]
-		}
+
 		if hydeHypothesis != "" {
-			searchMode = "hybrid_vector+fts5+hyde"
+			searchMode = "hybrid_rrf+hyde"
 		} else {
-			searchMode = "hybrid_vector+fts5"
+			searchMode = "hybrid_rrf"
 		}
+	} else if len(vectorResults) > 0 {
+		results = vectorResults
+		searchMode = "vector_cosine"
 	} else {
 		results = ftsResults
 	}
