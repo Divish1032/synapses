@@ -265,7 +265,7 @@ func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test Grap
 		names, files, rawResp = queryFileImports(client, test.Query)
 
 	case "impact_analysis":
-		names, files, rawResp = queryImpact(client, test.Query, 2)
+		names, files, rawResp = queryImpact(client, test.Query, 1)
 
 	case "find_implementations":
 		names, files, rawResp = queryContextRelated(client, test.Query)
