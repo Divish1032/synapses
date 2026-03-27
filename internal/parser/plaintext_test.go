@@ -542,6 +542,83 @@ Then configure:
 	}
 }
 
+func TestPlaintextParser_RST_CodeBlockWithOptions(t *testing.T) {
+	g := newPlaintextTestGraph()
+	p := NewPlaintextParser()
+
+	// RST code block with directive options (:linenos:, :emphasize-lines:)
+	// that should NOT appear in the extracted content.
+	src := []byte(`Introduction
+============
+
+Example:
+
+.. code-block:: python
+   :linenos:
+   :emphasize-lines: 1
+
+   from flask import Flask
+   app = Flask(__name__)
+`)
+
+	if err := p.Parse(g, "/repo/docs/guide.rst", src); err != nil {
+		t.Fatal(err)
+	}
+
+	sections := collectSections(g)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(sections))
+	}
+
+	cbJSON := sections[0].Metadata["code_blocks"]
+	if cbJSON == "" {
+		t.Fatal("code_blocks metadata missing")
+	}
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(cbJSON), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 code block, got %d", len(blocks))
+	}
+	// Content should NOT contain the :linenos: directive option.
+	if strings.Contains(blocks[0].Content, ":linenos:") {
+		t.Error("directive options should be stripped from code block content")
+	}
+	if !strings.Contains(blocks[0].Content, "from flask import Flask") {
+		t.Errorf("code block content missing expected code: %q", blocks[0].Content)
+	}
+}
+
+func TestPlaintextParser_RST_CodeBlockTabIndent(t *testing.T) {
+	g := newPlaintextTestGraph()
+	p := NewPlaintextParser()
+
+	// RST code block with tab indentation.
+	src := []byte("Overview\n========\n\n.. code-block:: go\n\n\tfmt.Println(\"hello\")\n\tfmt.Println(\"world\")\n")
+
+	if err := p.Parse(g, "/repo/docs/tab.rst", src); err != nil {
+		t.Fatal(err)
+	}
+
+	sections := collectSections(g)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(sections))
+	}
+
+	cbJSON := sections[0].Metadata["code_blocks"]
+	if cbJSON == "" {
+		t.Fatal("code_blocks metadata missing for tab-indented block")
+	}
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(cbJSON), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(blocks[0].Content, "fmt.Println") {
+		t.Errorf("tab-indented code block content corrupted: %q", blocks[0].Content)
+	}
+}
+
 func TestPlaintextParser_RST_CodeBlockMaxFive(t *testing.T) {
 	g := newPlaintextTestGraph()
 	p := NewPlaintextParser()

@@ -261,19 +261,20 @@ func extractRSTCodeBlocks(lines []string, sections []section) {
 		if j >= len(lines) {
 			continue
 		}
-		// Determine indent level from first content line.
-		indent := 0
-		for _, ch := range lines[j] {
-			if ch == ' ' {
-				indent++
-			} else if ch == '\t' {
-				indent += 4
-			} else {
-				break
-			}
-		}
+		// Determine indent level using byte counting (consistent with line[indent:] slicing).
+		indent := byteIndent(lines[j])
 		if indent == 0 {
 			continue // no indented block
+		}
+
+		// Skip RST directive options (lines like `:linenos:`, `:emphasize-lines: 1,3`).
+		for j < len(lines) {
+			lt := strings.TrimSpace(lines[j])
+			if lt == "" || (len(lt) > 1 && lt[0] == ':' && strings.Contains(lt[1:], ":")) {
+				j++
+				continue
+			}
+			break
 		}
 
 		var contentLines []string
@@ -284,21 +285,12 @@ func extractRSTCodeBlocks(lines []string, sections []section) {
 				j++
 				continue
 			}
-			// Check if still indented.
-			lineIndent := 0
-			for _, ch := range line {
-				if ch == ' ' {
-					lineIndent++
-				} else if ch == '\t' {
-					lineIndent += 4
-				} else {
-					break
-				}
-			}
+			// Check if still indented (byte-based).
+			lineIndent := byteIndent(line)
 			if lineIndent < indent {
 				break
 			}
-			// Strip the common indent.
+			// Strip the common indent (byte-based).
 			if len(line) > indent {
 				contentLines = append(contentLines, line[indent:])
 			} else {
@@ -464,6 +456,17 @@ func toTitleCase(s string) string {
 		}
 	}
 	return strings.Join(words, " ")
+}
+
+// byteIndent returns the number of leading space/tab BYTES in a line.
+// Uses byte counting (not logical columns) so the result is safe for line[n:] slicing.
+func byteIndent(line string) int {
+	for i := 0; i < len(line); i++ {
+		if line[i] != ' ' && line[i] != '\t' {
+			return i
+		}
+	}
+	return len(line)
 }
 
 // ── Shared Helpers ──────────────────────────────────────────────────────────

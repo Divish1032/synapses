@@ -589,6 +589,75 @@ func TestMarkdownParser_UnclosedFenceNotCaptured(t *testing.T) {
 	}
 }
 
+func TestMarkdownParser_CodeBlockBeforeFirstHeading(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// Code block appears before any heading — should be silently dropped, not panic.
+	src := []byte("```python\nprint('hello')\n```\n\n# First Heading\nBody.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(sections))
+	}
+	// The code block before the heading should NOT be attached to the section.
+	if sections[0].Metadata["code_blocks"] != "" {
+		t.Error("code block before first heading should not be attached to any section")
+	}
+}
+
+func TestMarkdownParser_ClosingFenceWithExtraText(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// "```python" followed by "```extra" — the extra text means it's NOT a valid closing fence.
+	// The block should remain unclosed and not produce a code_blocks entry.
+	src := []byte("# Section\n\n```python\nprint('hi')\n```extra\nmore text\n```\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatal("expected 1 section")
+	}
+	cbJSON := sections[0].Metadata["code_blocks"]
+	if cbJSON == "" {
+		t.Fatal("expected a code block (```extra is not a closing fence, ``` at end is)")
+	}
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(cbJSON), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	// The content should include "print('hi')", "```extra", "more text" since
+	// ```extra is not a valid closer. The real ``` at the end closes it.
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 code block, got %d", len(blocks))
+	}
+	if !strings.Contains(blocks[0].Content, "```extra") {
+		t.Errorf("content should include the non-closing fence line: %q", blocks[0].Content)
+	}
+}
+
+func TestMarkdownParser_TildeFenceWithLanguage(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("# Section\n\n~~~javascript\nconsole.log('hi');\n~~~\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatal("expected 1 section")
+	}
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(sections[0].Metadata["code_blocks"]), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if blocks[0].Language != "javascript" {
+		t.Errorf("language = %q, want javascript", blocks[0].Language)
+	}
+}
+
 // assertEdge checks that an edge exists from→to with the given type.
 func assertEdge(t *testing.T, g *graph.Graph, from, to graph.NodeID, edgeType graph.EdgeType) {
 	t.Helper()
