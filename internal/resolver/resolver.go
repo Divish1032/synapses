@@ -71,6 +71,13 @@ func ResolveCallEdges(g *graph.Graph) int {
 		// occur when RTA finds several instantiated classes with the same method.
 		var targets []graph.NodeID
 
+		// Normalize chained self/this access: "self.router" → "router",
+		// "this.service" → "service". This handles Python/Java patterns like
+		// self.router.add_api_route() where the alias is "self.router".
+		if strings.HasPrefix(site.PkgAlias, "self.") || strings.HasPrefix(site.PkgAlias, "this.") {
+			site.PkgAlias = site.PkgAlias[strings.IndexByte(site.PkgAlias, '.')+1:]
+		}
+
 		if site.PkgAlias != "" {
 			// Qualified call: pkg.Func() or var.Method()
 			// The parser cannot distinguish these at AST time, so we try
