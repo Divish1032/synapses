@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gomlx/go-huggingface/hub"
 	hugot "github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
 	"golang.org/x/sync/singleflight"
@@ -275,18 +276,15 @@ func (b *BuiltinEmbedder) doInit(ctx context.Context) error {
 		if err := os.MkdirAll(b.modelsDir, 0o755); err != nil {
 			return fmt.Errorf("create models dir: %w", err)
 		}
-		opts := hugot.NewDownloadOptions()
-		opts.Branch = builtinModelRevision
-		opts.OnnxFilePath = repoPath // download the selected variant (fp32 or quantized)
-		opts.Verbose = false
-		opts.MaxRetries = 3
-		opts.RetryInterval = 2
 		// Check context before starting the potentially slow download.
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("download cancelled before start: %w", err)
 		}
-		// hugot.DownloadModel does not accept a context, so we run it in a
-		// goroutine and race against ctx cancellation.
+		// Download model files sequentially using hub.Repo.DownloadFileCtx
+		// instead of hugot.DownloadModel. The upstream go-huggingface library
+		// has a data race in DownloadFilesCtx (unsynchronized counter increments
+		// across per-file goroutines). Downloading one file at a time avoids
+		// the multi-goroutine path entirely.
 		type dlResult struct{ err error }
 		dlCh := make(chan dlResult, 1)
 		if !b.trackDownload() {
@@ -294,8 +292,7 @@ func (b *BuiltinEmbedder) doInit(ctx context.Context) error {
 		}
 		go func() {
 			defer b.dlWg.Done()
-			_, dlErr := hugot.DownloadModel(builtinModelName, b.modelsDir, opts)
-			dlCh <- dlResult{err: dlErr}
+			dlCh <- dlResult{err: downloadModelSequential(builtinModelName, b.modelsDir, repoPath)}
 		}()
 		select {
 		case <-ctx.Done():
@@ -330,20 +327,13 @@ func (b *BuiltinEmbedder) doInit(ctx context.Context) error {
 			onnxDisk = filepath.Join(modelPath, modelFile)
 			// Download quantized if not present.
 			if _, statErr := os.Stat(onnxDisk); os.IsNotExist(statErr) {
-				opts := hugot.NewDownloadOptions()
-				opts.Branch = builtinModelRevision
-				opts.OnnxFilePath = repoPath
-				opts.Verbose = false
-				opts.MaxRetries = 3
-				opts.RetryInterval = 2
 				dlCh := make(chan error, 1)
 				if !b.trackDownload() {
 					return fmt.Errorf("builtin embedder: closed during fallback download setup")
 				}
 				go func() {
 					defer b.dlWg.Done()
-					_, dlErr := hugot.DownloadModel(builtinModelName, b.modelsDir, opts)
-					dlCh <- dlErr
+					dlCh <- downloadModelSequential(builtinModelName, b.modelsDir, repoPath)
 				}()
 				select {
 				case <-ctx.Done():
@@ -822,4 +812,83 @@ func l2Normalize(vec []float32) []float32 {
 		}
 	}
 	return out
+}
+
+// downloadModelSequential downloads the embedding model from HuggingFace one
+// file at a time. This avoids a data race in the upstream go-huggingface
+// library where DownloadFilesCtx increments shared counters from unsynchronized
+// per-file goroutines (hub/files.go:231, :250). By calling DownloadFileCtx for
+// each file individually, only one goroutine runs per call, eliminating the race.
+func downloadModelSequential(modelName, destination, onnxFilePath string) error {
+	repo := hub.New(modelName).WithRevision(builtinModelRevision)
+	repo.Verbosity = 0
+	repo.WithProgressBar(false)
+
+	// Enumerate repo files to find what to download (mirrors hugot validation).
+	if err := repo.DownloadInfo(false); err != nil {
+		return fmt.Errorf("list repo files: %w", err)
+	}
+	var toDownload []string
+	foundOnnx := false
+	for fileName, err := range repo.IterFileNames() {
+		if err != nil {
+			return fmt.Errorf("iterate repo files: %w", err)
+		}
+		base := filepath.Base(fileName)
+		switch {
+		case fileName == onnxFilePath:
+			toDownload = append(toDownload, fileName)
+			foundOnnx = true
+		case base == "tokenizer.json",
+			base == "special_tokens_map.json",
+			base == "tokenizer_config.json",
+			base == "config.json",
+			base == "vocab.txt":
+			toDownload = append(toDownload, fileName)
+		}
+	}
+	if !foundOnnx {
+		return fmt.Errorf("model .onnx file not found at %s", onnxFilePath)
+	}
+
+	modelPath := filepath.Join(destination, strings.ReplaceAll(modelName, "/", "_"))
+
+	// Download each file sequentially (one goroutine per call → no race).
+	ctx := context.Background()
+	for _, fileName := range toDownload {
+		dlPath, err := repo.DownloadFileCtx(ctx, fileName)
+		if err != nil {
+			return fmt.Errorf("download %s: %w", fileName, err)
+		}
+		truePath, err := filepath.EvalSymlinks(dlPath)
+		if err != nil {
+			return fmt.Errorf("resolve symlink %s: %w", dlPath, err)
+		}
+		dst := filepath.Join(modelPath, filepath.Base(fileName))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return fmt.Errorf("create dir for %s: %w", dst, err)
+		}
+		if err := copyFile(truePath, dst); err != nil {
+			return fmt.Errorf("copy %s: %w", fileName, err)
+		}
+	}
+	return nil
+}
+
+// copyFile copies src to dst, creating dst if needed.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Close()
 }

@@ -50,14 +50,17 @@ require (
 	github.com/alexaandru/go-tree-sitter-bare v1.11.0
 	github.com/charmbracelet/huh v1.0.0
 	github.com/coder/hnsw v0.6.1
+	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/emicklei/proto v1.14.3
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/godeps/gollama v0.1.8
+	github.com/gomlx/go-huggingface v0.3.2
 	github.com/klauspost/compress v1.18.4
 	github.com/knights-analytics/hugot v0.6.5
 	github.com/mark3labs/mcp-go v0.32.0
 	github.com/mattn/go-isatty v0.0.20
 	github.com/stretchr/testify v1.11.1
+	github.com/tprasadtp/go-launchd v0.0.0-20240710170319-16c17c9d2432
 	github.com/viterin/vek v0.4.3
 	golang.org/x/net v0.52.0
 	golang.org/x/sync v0.20.0
@@ -81,7 +84,6 @@ require (
 	github.com/chewxy/math32 v1.11.1 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/daulet/tokenizers v1.26.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -91,7 +93,6 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/gomlx/exceptions v0.0.3 // indirect
-	github.com/gomlx/go-huggingface v0.3.2 // indirect
 	github.com/gomlx/go-xla v0.2.0 // indirect
 	github.com/gomlx/gomlx v0.27.1 // indirect
 	github.com/gomlx/onnx-gomlx v0.4.1 // indirect
@@ -117,7 +118,6 @@ require (
 	github.com/spf13/cast v1.7.1 // indirect
 	github.com/sugarme/regexpset v0.0.0-20200920021344-4d4ec8eaf93c // indirect
 	github.com/sugarme/tokenizer v0.3.0 // indirect
-	github.com/tprasadtp/go-launchd v0.0.0-20240710170319-16c17c9d2432 // indirect
 	github.com/viant/afs v1.30.0 // indirect
 	github.com/viterin/partial v1.1.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
