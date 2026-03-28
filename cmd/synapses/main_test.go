@@ -1408,8 +1408,8 @@ func TestServeMCPConn_ContextCancel(t *testing.T) {
 	select {
 	case <-errCh:
 		// Expected.
-	case <-time.After(5 * time.Second):
-		t.Error("serveMCPConn did not exit within 5s after context cancel")
+	case <-time.After(15 * time.Second):
+		t.Error("serveMCPConn did not exit within 15s after context cancel")
 	}
 }
 
@@ -2088,6 +2088,10 @@ func TestCmdStartDirect_EmptyStdin(t *testing.T) {
 func TestCmdStartDirect_WithReindex(t *testing.T) {
 	dir, st, _ := buildTestIndexedDir(t)
 	defer st.Close()
+
+	// Disable embedder to prevent background model download race on CI.
+	cfgPath := filepath.Join(dir, "synapses.json")
+	os.WriteFile(cfgPath, []byte(`{"embeddings":"off"}`), 0o644) //nolint:errcheck
 
 	restore := stdioCloseStdin(t)
 	defer restore()

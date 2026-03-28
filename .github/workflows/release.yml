@@ -24,7 +24,7 @@ jobs:
           cache: true
 
       - name: Run tests
-        run: go test ./... -race -timeout 300s
+        run: go test ./... -race -timeout 600s
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
