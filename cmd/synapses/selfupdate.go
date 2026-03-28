@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -323,6 +324,8 @@ func cmdUpdate(args []string) error {
 				if data, readErr := os.ReadFile(installedExe); readErr == nil {
 					if writeErr := os.WriteFile(binCopy, data, 0o755); writeErr != nil {
 						fmt.Fprintf(os.Stderr, "warning: failed to update %s: %v\n", binCopy, writeErr)
+					} else if runtime.GOOS == "darwin" {
+						exec.Command("codesign", "--force", "--sign", "-", binCopy).Run() //nolint:errcheck
 					}
 				}
 			}
@@ -650,6 +653,12 @@ func applySelfUpdateFromPath(newBinary string, expectedHash string) error {
 			return &os.PathError{Op: "rename", Path: exe, Err: os.ErrPermission}
 		}
 		return fmt.Errorf("rename new binary into place: %w", err)
+	}
+
+	// Re-sign on macOS — cp/rename strips the ad-hoc signature and macOS
+	// kills unsigned arm64 binaries.
+	if runtime.GOOS == "darwin" {
+		exec.Command("codesign", "--force", "--sign", "-", exe).Run() //nolint:errcheck
 	}
 
 	return nil

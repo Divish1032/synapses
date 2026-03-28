@@ -2203,5 +2203,6 @@ func (s *Server) registerTools() {
 	// rank_candidates: REST-only (not in tools/list) — called by RepoBench-R benchmark binary.
 	s.toolHandlersMu.Lock()
 	s.toolHandlers["rank_candidates"] = s.handleRankCandidates
+	s.toolHandlers["benchmark"] = s.handleBenchmark
 	s.toolHandlersMu.Unlock()
 }

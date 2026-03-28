@@ -46,7 +46,7 @@ func TestServerClose_DrainsWorkers(t *testing.T) {
 	srv.StartBackground()
 
 	// Dispatch a tool call to prove the server is functional.
-	result, err := srv.DispatchTool(context.Background(), "explain_codebase", nil)
+	result, err := srv.DispatchTool(context.Background(), "session_init", nil)
 	if err != nil {
 		t.Fatalf("dispatch before close: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestServerClose_RejectsPostCloseWork(t *testing.T) {
 	// DispatchTool after Close should still work (it's a direct function call,
 	// not a background task). The server remains functional for in-flight
 	// requests; only goBackground is shut down.
-	result, err := srv.DispatchTool(context.Background(), "explain_codebase", nil)
+	result, err := srv.DispatchTool(context.Background(), "session_init", nil)
 	if err != nil {
 		t.Fatalf("dispatch after close should still work: %v", err)
 	}
@@ -495,21 +495,21 @@ func TestFullResourceLifecycle(t *testing.T) {
 	srv.StartBackground()
 
 	// Dispatch a real tool to exercise the full path.
-	result, err := srv.DispatchTool(context.Background(), "explain_codebase", nil)
+	result, err := srv.DispatchTool(context.Background(), "session_init", nil)
 	if err != nil {
-		t.Fatalf("explain_codebase: %v", err)
+		t.Fatalf("session_init: %v", err)
 	}
 	if result == nil || result.IsError {
-		t.Fatal("expected successful result from explain_codebase")
+		t.Fatal("expected successful result from session_init")
 	}
 
 	// Dispatch a second tool to exercise store interaction.
-	result, err = srv.DispatchTool(context.Background(), "recall", map[string]interface{}{})
+	result, err = srv.DispatchTool(context.Background(), "memory", map[string]interface{}{})
 	if err != nil {
-		t.Fatalf("recall: %v", err)
+		t.Fatalf("memory: %v", err)
 	}
 	if result == nil {
-		t.Fatal("expected non-nil result from recall")
+		t.Fatal("expected non-nil result from memory")
 	}
 
 	// Clean up in correct order.
@@ -538,15 +538,15 @@ func TestFullResourceLifecycle_ConcurrentDispatchDuringShutdown(t *testing.T) {
 	srv := mcpsrv.New(g, cfg, st)
 	srv.StartBackground()
 
-	// Start several concurrent dispatches. Use "recall" (pure store read)
-	// instead of "explain_codebase" to avoid triggering the pre-existing race
+	// Start several concurrent dispatches. Use "memory" (pure store read)
+	// instead of "session_init" to avoid triggering the pre-existing race
 	// in graph.ProjectIdentity() — same approach as TestDispatchTool_ConcurrentSafe.
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			srv.DispatchTool(context.Background(), "recall", map[string]interface{}{}) //nolint:errcheck
+			srv.DispatchTool(context.Background(), "memory", map[string]interface{}{}) //nolint:errcheck
 		}()
 	}
 
@@ -978,7 +978,7 @@ func TestProjectInstanceClose_FullStack(t *testing.T) {
 	}
 
 	// Dispatch a tool to exercise the server.
-	result, err := srv.DispatchTool(context.Background(), "recall", map[string]interface{}{})
+	result, err := srv.DispatchTool(context.Background(), "memory", map[string]interface{}{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

@@ -7,8 +7,6 @@ Thank you for your interest in contributing to Synapses! We welcome pull request
 - **Go 1.22+** — Download from [golang.org](https://golang.org/dl)
 - **make** — Standard build tool
 - **golangci-lint** — Linter (v2.10+): `go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest`
-- **Node.js 18+** — Required only if modifying the web console UI (`web/console/`)
-- **npm** — Comes with Node.js
 
 ## Development Setup
 
@@ -70,8 +68,6 @@ synapses/
 │   ├── embed/          # ONNX embedding model (all-MiniLM-L6-v2)
 │   ├── scout/          # HTTP client for synapses-scout sidecar
 │   └── watcher/        # fsnotify-based incremental re-indexer
-└── web/
-    └── console/        # React/TypeScript web console (built to web/console/dist/)
 ```
 
 ## Architecture Guidelines
@@ -174,30 +170,6 @@ func (w *Walker) ParseFile(g *graph.Graph, path string) error {
 ```
 
 3. **Add tests** in `internal/parser/rust_test.go`.
-
-## Working on the Web Console
-
-The web console lives in `web/console/` (React + TypeScript + Vite). To run it in dev mode:
-
-```bash
-cd web/console
-npm install
-npm run dev        # Vite dev server at http://localhost:5173
-```
-
-To build the production bundle (embedded in the binary via `//go:embed`):
-
-```bash
-cd web/console
-npm run build      # outputs to web/console/dist/
-```
-
-Then rebuild the Go binary:
-```bash
-make build
-```
-
-> **Tip**: During local development you can serve the dev bundle directly by running `npm run dev` and visiting `http://localhost:5173`. The Go binary does not need to be running for frontend work.
 
 ## Running Tests
 

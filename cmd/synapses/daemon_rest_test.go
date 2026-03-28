@@ -98,9 +98,9 @@ func decodeJSONResponse(t *testing.T, resp *http.Response) map[string]interface{
 func TestREST_ValidToolCall_200(t *testing.T) {
 	ts, projectPath := setupRESTTest(t)
 
-	// Call get_project_identity — a lightweight tool that always works.
+	// Call session_init — a lightweight tool that always works.
 	resp, err := http.Post(
-		ts.URL+"/v1/tools/get_project_identity?project="+projectPath,
+		ts.URL+"/v1/tools/session_init?project="+projectPath,
 		"application/json",
 		strings.NewReader("{}"),
 	)
@@ -115,7 +115,7 @@ func TestREST_ValidToolCall_200(t *testing.T) {
 	}
 
 	m := decodeJSONResponse(t, resp)
-	// get_project_identity returns a CallToolResult with content array.
+	// session_init returns a CallToolResult with content array.
 	if _, ok := m["content"]; !ok {
 		t.Errorf("expected 'content' key in response, got keys: %v", mapKeysREST(m))
 	}
@@ -130,7 +130,7 @@ func TestREST_EmptyBody_200(t *testing.T) {
 	ts, projectPath := setupRESTTest(t)
 
 	resp, err := http.Post(
-		ts.URL+"/v1/tools/get_project_identity?project="+projectPath,
+		ts.URL+"/v1/tools/session_init?project="+projectPath,
 		"application/json",
 		nil, // no body at all
 	)
@@ -219,7 +219,7 @@ func TestREST_InvalidJSON_400(t *testing.T) {
 	ts, projectPath := setupRESTTest(t)
 
 	resp, err := http.Post(
-		ts.URL+"/v1/tools/get_project_identity?project="+projectPath,
+		ts.URL+"/v1/tools/session_init?project="+projectPath,
 		"application/json",
 		strings.NewReader("{not valid json"),
 	)
@@ -250,7 +250,7 @@ func TestREST_OversizedBody_400(t *testing.T) {
 	body := `{"big":"` + bigValue + `"}`
 
 	resp, err := http.Post(
-		ts.URL+"/v1/tools/get_project_identity?project="+projectPath,
+		ts.URL+"/v1/tools/session_init?project="+projectPath,
 		"application/json",
 		strings.NewReader(body),
 	)
@@ -314,7 +314,7 @@ func TestREST_InvalidProjectPath_400(t *testing.T) {
 	noMarkerDir := t.TempDir()
 
 	resp, err := http.Post(
-		ts.URL+"/v1/tools/get_project_identity?project="+noMarkerDir,
+		ts.URL+"/v1/tools/session_init?project="+noMarkerDir,
 		"application/json",
 		strings.NewReader("{}"),
 	)
@@ -347,7 +347,7 @@ func TestREST_CanonicalPathResolution(t *testing.T) {
 
 	// Calling via symlink should resolve to the same canonical project.
 	resp, err := http.Post(
-		ts.URL+"/v1/tools/get_project_identity?project="+symlinkPath,
+		ts.URL+"/v1/tools/session_init?project="+symlinkPath,
 		"application/json",
 		strings.NewReader("{}"),
 	)
@@ -374,7 +374,7 @@ func TestREST_SessionIDInjection(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		resp, err := http.Post(
-			ts.URL+"/v1/tools/get_project_identity?project="+projectPath,
+			ts.URL+"/v1/tools/session_init?project="+projectPath,
 			"application/json",
 			strings.NewReader("{}"),
 		)
@@ -405,7 +405,7 @@ func TestREST_ContentTypeJSON(t *testing.T) {
 		path   string
 		status int
 	}{
-		{"success", http.MethodPost, "/v1/tools/get_project_identity?project=" + projectPath, 200},
+		{"success", http.MethodPost, "/v1/tools/session_init?project=" + projectPath, 200},
 		{"405", http.MethodGet, "/v1/tools/session_init?project=" + projectPath, 405},
 		{"400 missing project", http.MethodPost, "/v1/tools/session_init", 400},
 	}
@@ -480,7 +480,7 @@ func TestREST_URLEncodedProjectPath(t *testing.T) {
 	// handler's QueryUnescape works correctly.
 	encodedPath := strings.ReplaceAll(absPath, " ", "%20")
 	resp, err := http.Post(
-		ts.URL+"/v1/tools/get_project_identity?project="+encodedPath,
+		ts.URL+"/v1/tools/session_init?project="+encodedPath,
 		"application/json",
 		strings.NewReader("{}"),
 	)
@@ -567,7 +567,7 @@ func TestREST_UnicodeInToolBody_200(t *testing.T) {
 	body := `{"agent_id":"test-agent","decision":"認証をOAuth 2.0に切り替えました 🔒","outcome":"success"}`
 
 	resp, err := http.Post(
-		ts.URL+"/v1/tools/remember?project="+projectPath,
+		ts.URL+"/v1/tools/memory?project="+projectPath,
 		"application/json",
 		strings.NewReader(body),
 	)

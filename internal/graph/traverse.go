@@ -469,6 +469,44 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 				}
 			}
 		}
+
+		// Sprint 24: Structural caller/callee injection.
+		//
+		// PPR distributes random-walk mass across the entire candidate set.
+		// For high-fanin entities (40+ callers), each caller gets ~0.003 PPR
+		// score — below MinRelevance (0.01) — and ALL callers are silently
+		// dropped. This is a known PPR failure mode (CatRAG 2026: "Static
+		// Graph Fallacy"). The same can happen to callees of high-fanout entities.
+		//
+		// Fix: after PPR runs, inject direct CALLS callers and callees into
+		// the visited map with a guaranteed minimum relevance score. This
+		// ensures they survive MinRelevance filtering and reach the directional
+		// budget split stage where they get their own 35% allocation.
+		//
+		// Relevance scores:
+		//   - If PPR already scored the node above the floor → keep PPR score
+		//     (PPR ranking is preserved for nodes it discovered naturally)
+		//   - If PPR scored below floor or missed entirely → set to floor
+		//
+		// Floor value: 0.05 — well above MinRelevance (0.01) so nodes survive
+		// filtering, but low enough that PPR's natural ranking is preserved
+		// for nodes it scored higher. The directional budget split (35/35/30)
+		// handles the caller vs callee allocation downstream.
+		const directNeighborFloor = 0.05
+		for _, e := range g.inEdges[rootID] {
+			if e.Type == EdgeCalls && e.From != rootID {
+				if prev, ok := visited[e.From]; !ok || prev < directNeighborFloor {
+					visited[e.From] = directNeighborFloor
+				}
+			}
+		}
+		for _, e := range g.outEdges[rootID] {
+			if e.Type == EdgeCalls && e.To != rootID {
+				if prev, ok := visited[e.To]; !ok || prev < directNeighborFloor {
+					visited[e.To] = directNeighborFloor
+				}
+			}
+		}
 	} else {
 		weights := cfg.EdgeWeights
 		if weights == nil {

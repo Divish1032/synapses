@@ -1,6 +1,5 @@
-.PHONY: build test lint clean install fmt vet \
-        run/index run/start run/status run/reset run/reset-all \
-        web/build
+.PHONY: build test lint clean install fmt vet completions \
+        run/index run/start run/status run/reset run/reset-all
 
 BINARY     := synapses
 BUILD_DIR  := bin
@@ -9,12 +8,8 @@ CMD_PATH   := ./cmd/synapses
 VERSION    ?= $(shell git describe --tags --always --dirty --match "v[0-9]*" 2>/dev/null || echo "dev")
 LDFLAGS    := -ldflags "-X main.version=$(VERSION) -s -w"
 
-## web/build: Build the embedded web console (Preact + Vite)
-web/build:
-	@cd web/console && npm ci --silent && npm run build
-
-## build: Build web console + compile Go binary (embeds console assets)
-build: web/build
+## build: Compile Go binary
+build:
 	@mkdir -p $(BUILD_DIR)
 	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY) $(CMD_PATH)
 
@@ -24,7 +19,7 @@ build: web/build
 ## PATH for any Go developer). Also copy to ~/.synapses/bin/ for the Tauri
 ## desktop app's find_binary() fallback.
 ##
-## Works immediately — no terminal restart needed on macOS, Linux, or Windows.
+## Works immediately — no terminal restart needed on macOS or Linux.
 install: build
 	@go install $(LDFLAGS) $(CMD_PATH)
 	@GOBIN_DIR=$$(go env GOBIN); \
@@ -33,6 +28,8 @@ install: build
 	echo "  Installed $$EFFECTIVE_BIN/$(BINARY)"; \
 	mkdir -p "$$HOME/.synapses/bin"; \
 	cp "$(BUILD_DIR)/$(BINARY)" "$$HOME/.synapses/bin/$(BINARY)" 2>/dev/null || true; \
+	xattr -d com.apple.quarantine "$$HOME/.synapses/bin/$(BINARY)" 2>/dev/null || true; \
+	codesign --force --sign - "$$HOME/.synapses/bin/$(BINARY)" 2>/dev/null || true; \
 	if command -v $(BINARY) >/dev/null 2>&1; then \
 		printf "  \033[32m✓\033[0m Ready! Run: synapses version\n"; \
 	else \
@@ -85,9 +82,17 @@ fmt:
 vet:
 	go vet ./...
 
+## completions: Generate shell completion scripts for release archives
+completions: build
+	@mkdir -p completions
+	./$(BUILD_DIR)/$(BINARY) completion bash > completions/synapses.bash
+	./$(BUILD_DIR)/$(BINARY) completion zsh  > completions/synapses.zsh
+	./$(BUILD_DIR)/$(BINARY) completion fish > completions/synapses.fish
+	@echo "  Generated completions/ (bash, zsh, fish)"
+
 ## clean: Remove build artifacts
 clean:
-	rm -rf $(BUILD_DIR) coverage.out coverage.html
+	rm -rf $(BUILD_DIR) completions coverage.out coverage.html
 
 ## tidy: Tidy and verify go modules
 tidy:
