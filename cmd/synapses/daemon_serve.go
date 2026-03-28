@@ -2521,16 +2521,17 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcps
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	sessionCtx = mcpsrv.WithSessionID(sessionCtx, sessionID)
+	sessionCtx = mcpSrv.WithContext(sessionCtx, session)
+
 	// Unblock any blocked reads when context is cancelled by setting an
 	// immediate read deadline. This is necessary because bufio.ReadSlice
 	// blocks on the underlying conn and does not observe context cancellation.
+	// Must be launched after sessionCtx is fully built to avoid a data race.
 	go func() {
 		<-sessionCtx.Done()
 		conn.SetReadDeadline(time.Now())
 	}()
-
-	sessionCtx = mcpsrv.WithSessionID(sessionCtx, sessionID)
-	sessionCtx = mcpSrv.WithContext(sessionCtx, session)
 
 	var writeMu sync.Mutex
 	writeJSON := func(v interface{}) error {
