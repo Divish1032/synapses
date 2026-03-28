@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
@@ -90,7 +89,7 @@ func (s *Server) handleLinkTaskNodes(
 	}
 	taskID := stringArg(req, "task_id")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required (use get_pending_tasks to list task IDs)"), nil
+		return mcp.NewToolResultError("task_id is required (use tasks(action=\"pending\") to list task IDs)"), nil
 	}
 
 	// Accept node_ids as a JSON array string or a raw []interface{}.
@@ -122,159 +121,5 @@ func (s *Server) handleLinkTaskNodes(
 	})
 }
 
-// handleGetAgents returns all agents that have interacted with Synapses,
-// ordered by last-seen timestamp descending. Includes presence classification
-// and current task/focus.
-func (s *Server) handleGetAgents(
-	_ context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
-	}
-	agents, err := s.store.GetAgents()
-	if err != nil {
-		return toolError("get agents", err)
-	}
-
-	// Cross-project agents via daemon registry.
-	var crossProjectAgents []map[string]interface{}
-	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.projectRegistry != nil {
-		stores, notFound := s.resolveProjectStores(projectsParam)
-		for projName, projStore := range stores {
-			projAgents, pErr := projStore.GetAgents()
-			if pErr != nil {
-				continue
-			}
-			for _, a := range projAgents {
-				crossProjectAgents = append(crossProjectAgents, map[string]interface{}{
-					"source":    fmt.Sprintf("[%s]", projName),
-					"agent_id":  a.ID,
-					"presence":  a.Presence,
-					"last_seen": a.LastSeen,
-					"intent":    a.Intent,
-				})
-			}
-		}
-		if len(notFound) > 0 {
-			crossProjectAgents = append(crossProjectAgents, map[string]interface{}{
-				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.allowedProjectNames(), ", ")),
-			})
-		}
-	}
-
-	active := 0
-	for _, a := range agents {
-		if a.Presence == "active" || a.Presence == "idle" {
-			active++
-		}
-	}
-
-	summary := "no agents seen yet"
-	if len(agents) > 0 {
-		summary = fmt.Sprintf("%d agent(s) known (%d currently active/idle)", len(agents), active)
-	}
-	resp := map[string]interface{}{
-		"summary": summary,
-		"agents":  agents,
-	}
-	if len(crossProjectAgents) > 0 {
-		resp["cross_project_agents"] = crossProjectAgents
-	}
-	return jsonResult(resp)
-}
-
-// handleGetEvents returns events from the pull-based event log with seq >
-// since_seq. Use the latest_event_seq from session_init as the starting cursor.
-// Emitted event types: file_change, agent_examining, agent_message,
-// agent_session_start, task_update, task_node_changed, plan_completed,
-// annotation_added, failure_recorded, rule_violation.
-func (s *Server) handleGetEvents(
-	_ context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
-	}
-
-	var sinceSeq int64
-	if v, ok := req.GetArguments()["since_seq"].(float64); ok {
-		sinceSeq = int64(v)
-	}
-
-	limit := 50
-	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
-		limit = int(v)
-	}
-
-	// Parse optional types filter — accepts JSON array string or []interface{}.
-	var types []string
-	switch v := req.GetArguments()["types"].(type) {
-	case string:
-		if v != "" {
-			for _, t := range strings.Split(v, ",") {
-				if t = strings.TrimSpace(t); t != "" {
-					types = append(types, t)
-				}
-			}
-		}
-	case []interface{}:
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				types = append(types, s)
-			}
-		}
-	}
-
-	// Optional agent_id filter: returns only events emitted by that agent.
-	// Use for on-demand peer activity stream (Tier 3).
-	agentIDFilter := stringArg(req, "agent_id")
-
-	events, latestSeq, err := s.store.GetEvents(sinceSeq, types, agentIDFilter, limit)
-	if err != nil {
-		return toolError("get events", err)
-	}
-
-	// Cross-project events via daemon registry.
-	// Returned in a separate field so latest_seq remains a clean local cursor.
-	var crossProjectEvents []map[string]interface{}
-	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.projectRegistry != nil {
-		stores, notFound := s.resolveProjectStores(projectsParam)
-		for projName, projStore := range stores {
-			projEvents, _, pErr := projStore.GetEvents(sinceSeq, types, agentIDFilter, limit)
-			if pErr != nil {
-				continue
-			}
-			for _, e := range projEvents {
-				crossProjectEvents = append(crossProjectEvents, map[string]interface{}{
-					"source":     fmt.Sprintf("[%s]", projName),
-					"seq":        e.Seq,
-					"type":       e.Type,
-					"agent_id":   e.AgentID,
-					"payload":    e.Payload,
-					"created_at": e.CreatedAt,
-				})
-			}
-		}
-		if len(notFound) > 0 {
-			crossProjectEvents = append(crossProjectEvents, map[string]interface{}{
-				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.allowedProjectNames(), ", ")),
-			})
-		}
-	}
-
-	summary := "no new events"
-	if len(events) > 0 {
-		summary = fmt.Sprintf("%d event(s) since seq %d", len(events), sinceSeq)
-	}
-	resp := map[string]interface{}{
-		"summary":    summary,
-		"events":     events,
-		"latest_seq": latestSeq,
-		"hint":       "Store latest_seq and pass as since_seq on next poll to get only new events.",
-	}
-	if len(crossProjectEvents) > 0 {
-		resp["cross_project_events"] = crossProjectEvents
-	}
-	return jsonResult(resp)
-}
+// Sprint 24: handleGetAgents and handleGetEvents removed.
+// Cross-session awareness is now handled by the Work Ledger.

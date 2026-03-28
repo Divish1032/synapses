@@ -25,7 +25,7 @@ type ToolCallEvent struct {
 }
 
 // ContextDeliveryEvent is sent for context-delivery tools (get_context,
-// get_file_context, prepare_context) and carries token savings data.
+// get_file_context) and carries token savings data.
 type ContextDeliveryEvent struct {
 	ToolName        string `json:"tool_name"`
 	AgentID         string `json:"agent_id,omitempty"`
@@ -291,7 +291,7 @@ type GuardEvent struct {
 	SessionID string `json:"session_id,omitempty"`
 }
 
-// MemoryOperationEvent tracks recall hits/misses and memory writes.
+// MemoryOperationEvent tracks memory(action=search) hits/misses and memory writes.
 type MemoryOperationEvent struct {
 	Operation   string `json:"operation"`    // "recall_hit" | "recall_miss" | "write" | "anchor_invalidated" | "cross_session_hit" | "invalidated_cascade"
 	Tier        string `json:"tier"`         // "episodic" | "entity" | "project"
@@ -311,9 +311,9 @@ type MemoryOperationEvent struct {
 	VectorSearchMs float64 `json:"vector_search_ms,omitempty"`
 }
 
-// ValidationEvent tracks outcomes of validate_plan and verify_implementation.
+// ValidationEvent tracks outcomes of validate (phase=pre/post/list/full/safety).
 type ValidationEvent struct {
-	ToolName       string `json:"tool_name"`              // "validate_plan" | "verify_implementation"
+	ToolName       string `json:"tool_name"`              // "validate" (with phase qualifier)
 	Status         string `json:"status"`                 // "ok" | "violations_found" | "pass"
 	ViolationCount int    `json:"violation_count"`
 	SafetyStatus   string `json:"safety_status,omitempty"` // "clear" | "warning"
@@ -349,7 +349,7 @@ type IndexEvent struct {
 	ImplementsEdgesCreated int `json:"implements_edges_created,omitempty"`
 }
 
-// SearchEvent records a search or find_entity tool call for analytics (Bug 57 / Task P4-8).
+// SearchEvent records a search tool call for analytics (Bug 57 / Task P4-8).
 type SearchEvent struct {
 	AgentID     string `json:"agent_id,omitempty"`
 	ProjectID   string `json:"project_id,omitempty"`

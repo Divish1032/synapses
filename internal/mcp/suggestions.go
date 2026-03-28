@@ -16,6 +16,7 @@ type ToolSuggestion struct {
 // intentKeywords maps keywords found in the agent's intent string to tool
 // suggestions. Multiple keywords can match — results are deduplicated by
 // tool name. Ordering within each slice determines display priority.
+// Sprint 24: all suggestions use the consolidated 12-tool names.
 var intentKeywords = map[string][]ToolSuggestion{
 	"implement": {
 		{Tool: "get_impact", Reason: "Check what depends on entities you'll modify", Example: `get_impact(symbol="AuthService")`},
@@ -30,68 +31,67 @@ var intentKeywords = map[string][]ToolSuggestion{
 		{Tool: "get_file_context", Reason: "See all entities in files you'll change", Example: `get_file_context(file="internal/auth/service.go")`},
 	},
 	"debug": {
-		{Tool: "get_call_chain", Reason: "Trace execution path to find the bug", Example: `get_call_chain(from="Handler", to="Repository")`},
+		{Tool: "get_context", Reason: "Trace execution path to find the bug", Example: `get_context(mode="path", from="Handler", to="Repository")`},
 		{Tool: "get_file_context", Reason: "Understand full file structure", Example: `get_file_context(file="internal/auth/service.go")`},
 	},
 	"fix": {
-		{Tool: "get_call_chain", Reason: "Trace execution path to find the bug", Example: `get_call_chain(from="Handler", to="Repository")`},
+		{Tool: "get_context", Reason: "Trace execution path to find the bug", Example: `get_context(mode="path", from="Handler", to="Repository")`},
 		{Tool: "get_file_context", Reason: "Understand full file structure", Example: `get_file_context(file="internal/auth/service.go")`},
 	},
 	"investigate": {
-		{Tool: "get_call_chain", Reason: "Trace execution path to find the bug", Example: `get_call_chain(from="Handler", to="Repository")`},
+		{Tool: "get_context", Reason: "Trace execution path to find the bug", Example: `get_context(mode="path", from="Handler", to="Repository")`},
 		{Tool: "get_file_context", Reason: "Understand full file structure", Example: `get_file_context(file="internal/auth/service.go")`},
 	},
 	"review": {
-		{Tool: "get_violations", Reason: "Check architecture rule compliance", Example: `get_violations()`},
-		{Tool: "get_gaps", Reason: "View known quality issues", Example: `get_gaps()`},
-		{Tool: "get_adrs", Reason: "See past architectural decisions", Example: `get_adrs()`},
+		{Tool: "validate", Reason: "Check architecture rule compliance", Example: `validate(phase="list")`},
+		{Tool: "annotate", Reason: "View known quality issues", Example: `annotate(action="list_gaps")`},
+		{Tool: "rules", Reason: "See past architectural decisions", Example: `rules(action="list_adrs")`},
 	},
 	"audit": {
-		{Tool: "get_violations", Reason: "Check architecture rule compliance", Example: `get_violations()`},
-		{Tool: "get_gaps", Reason: "View known quality issues", Example: `get_gaps()`},
-		{Tool: "get_adrs", Reason: "See past architectural decisions", Example: `get_adrs()`},
+		{Tool: "validate", Reason: "Check architecture rule compliance", Example: `validate(phase="list")`},
+		{Tool: "annotate", Reason: "View known quality issues", Example: `annotate(action="list_gaps")`},
+		{Tool: "rules", Reason: "See past architectural decisions", Example: `rules(action="list_adrs")`},
 	},
 	"refactor": {
 		{Tool: "get_impact", Reason: "Blast radius analysis before refactoring", Example: `get_impact(symbol="AuthService")`},
 		{Tool: "get_file_context", Reason: "See all entities in scope", Example: `get_file_context(file="internal/auth/service.go")`},
 	},
 	"explore": {
-		{Tool: "get_repo_map", Reason: "Navigate the codebase by package and layer", Example: `get_repo_map(detail="compact")`},
-		{Tool: "explain_codebase", Reason: "Architectural overview", Example: `explain_codebase()`},
+		{Tool: "get_context", Reason: "Navigate codebase structure", Example: `get_context(entity="main", intent="understand")`},
+		{Tool: "search", Reason: "Find entities by name or concept", Example: `search(query="auth", mode="keyword")`},
 	},
 	"understand": {
-		{Tool: "get_repo_map", Reason: "Navigate the codebase by package and layer", Example: `get_repo_map(detail="compact")`},
-		{Tool: "explain_codebase", Reason: "Architectural overview", Example: `explain_codebase()`},
+		{Tool: "get_context", Reason: "Navigate codebase structure", Example: `get_context(entity="main", intent="understand")`},
+		{Tool: "search", Reason: "Find entities by name or concept", Example: `search(query="auth", mode="keyword")`},
 	},
 	"plan": {
-		{Tool: "get_adrs", Reason: "Review past architectural decisions", Example: `get_adrs()`},
-		{Tool: "get_violations", Reason: "Current rule state", Example: `get_violations()`},
-		{Tool: "get_plans", Reason: "See existing plans", Example: `get_plans()`},
+		{Tool: "rules", Reason: "Review past architectural decisions", Example: `rules(action="list_adrs")`},
+		{Tool: "validate", Reason: "Current rule state", Example: `validate(phase="list")`},
+		{Tool: "tasks", Reason: "See existing plans", Example: `tasks(action="list_plans")`},
 	},
 	"design": {
-		{Tool: "get_adrs", Reason: "Review past architectural decisions", Example: `get_adrs()`},
-		{Tool: "get_violations", Reason: "Current rule state", Example: `get_violations()`},
-		{Tool: "get_plans", Reason: "See existing plans", Example: `get_plans()`},
+		{Tool: "rules", Reason: "Review past architectural decisions", Example: `rules(action="list_adrs")`},
+		{Tool: "validate", Reason: "Current rule state", Example: `validate(phase="list")`},
+		{Tool: "tasks", Reason: "See existing plans", Example: `tasks(action="list_plans")`},
 	},
 	"test": {
-		{Tool: "verify_implementation", Reason: "Check files against architectural rules before testing", Example: `verify_implementation(files_written=["file.go"])`},
-		{Tool: "get_gaps", Reason: "View known quality issues to prioritize test coverage", Example: `get_gaps()`},
+		{Tool: "validate", Reason: "Check files against architectural rules", Example: `validate(phase="post", files_written=["file.go"])`},
+		{Tool: "annotate", Reason: "View known quality issues to prioritize test coverage", Example: `annotate(action="list_gaps")`},
 		{Tool: "get_impact", Reason: "Find what depends on the code under test", Example: `get_impact(symbol="FunctionName")`},
 	},
 	"document": {
 		{Tool: "get_context", Reason: "Get full context for the entity you're documenting", Example: `get_context(entity="FunctionName")`},
-		{Tool: "get_adrs", Reason: "Review past architectural decisions to document rationale", Example: `get_adrs()`},
-		{Tool: "explain_codebase", Reason: "Generate architectural overview for documentation", Example: `explain_codebase()`},
+		{Tool: "rules", Reason: "Review past architectural decisions to document rationale", Example: `rules(action="list_adrs")`},
 	},
 	"optimize": {
 		{Tool: "get_impact", Reason: "Understand blast radius before optimizing", Example: `get_impact(symbol="SlowFunction")`},
 		{Tool: "get_file_context", Reason: "See all entities in files you're optimizing", Example: `get_file_context(file="internal/hot/path.go")`},
-		{Tool: "get_gaps", Reason: "View known performance issues", Example: `get_gaps()`},
+		{Tool: "annotate", Reason: "View known performance issues", Example: `annotate(action="list_gaps")`},
 	},
 	"profile": {
 		{Tool: "get_impact", Reason: "Identify high-fanin hot paths worth profiling", Example: `get_impact(symbol="HotFunction")`},
 		{Tool: "get_file_context", Reason: "See all entities in the hot path", Example: `get_file_context(file="internal/hot/path.go")`},
-		{Tool: "get_gaps", Reason: "View known performance issues", Example: `get_gaps()`},
+		{Tool: "annotate", Reason: "View known performance issues", Example: `annotate(action="list_gaps")`},
 	},
 }
 

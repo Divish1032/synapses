@@ -2,7 +2,21 @@
 
 All notable changes to Synapses are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.8.0] - 2026-03-23
+## [0.8.0] - 2026-03-28
+
+### Changed
+- **MCP Tool Consolidation (58→12)** — Merged 58 MCP tools into 12 via action/mode/phase dispatcher params. Research shows LLM accuracy drops past 20 tools; this puts Synapses at the optimal range. Tools: `session_init`, `search`, `get_context`, `get_file_context`, `get_impact`, `validate`, `memory`, `end_session`, `tasks`, `rules`, `annotate`, `lookup_docs`.
+- **5 Tools → MCP Resources** — Read-only tools (`get_repo_map`, `get_edge_types`, `get_my_analytics`, `get_decision_log`, `query_graph`) moved to MCP Resources (`synapses://repo-map`, `synapses://edge-types`, `synapses://analytics`, `synapses://decision-log`, `synapses://query/{q}`).
+- **11 Tools Removed** — `discover_tools` (unnecessary with 12 tools), graph edit tools (`link_entities`, `unlink_entities`, `confirm_edge`), coordination tools (`get_agents`, `get_events`, `send_message`, `get_messages`), internal tools (`rank_candidates`, `benchmark`, `export_knowledge`).
+
+### Added
+- **Work Ledger** — Ambient cross-session coordination without explicit tools. Every MCP call passively records entity/file signals to SQLite. Overlap detection (Tier 1: same file/entity, Tier 2: 1-hop graph neighbor) injects alerts into tool responses. Per-session watermark dedup prevents noise. `session_init` returns full cross-session briefing. 24h auto-prune.
+
+### Fixed
+- **handleRecall panic** — Pre-existing `index out of range [0]` panic when recall returned zero results (episode_tools.go:736).
+- **Knowledge mode validate crash** — `validate(phase=post/list/full)` would panic on nil graph in knowledge mode. Added nil-graph guard in dispatcher.
+
+## [0.8.0-pre] - 2026-03-23
 
 ### Added
 - **Socket Activation** — Daemon now supports launchd (macOS) and systemd (Linux) socket activation. The OS holds port 11435 during daemon restarts, so AI agents see a brief delay instead of "connection refused". New files: `socket_activation_darwin.go`, `socket_activation_linux.go`, `socket_activation_other.go`.
