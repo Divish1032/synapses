@@ -123,20 +123,21 @@ func (c *SynapsesClient) WithProject(project string) *SynapsesClient {
 	return &copy
 }
 
-// PrepareContext calls the prepare_context tool.
+// PrepareContext calls get_context with mode=intent (was prepare_context before Sprint 24).
 func (c *SynapsesClient) PrepareContext(taskID, entity, intent string) (*ContextResult, error) {
 	if c.disabled {
 		return &ContextResult{}, nil
 	}
 	args := map[string]interface{}{
-		"target": entity,
+		"entity": entity,
 		"intent": intent,
+		"mode":   "intent",
 	}
-	raw, err := c.callTool("prepare_context", args)
+	raw, err := c.callTool("get_context", args)
 	if err != nil {
 		return nil, err
 	}
-	c.recordAccess(taskID, "prepare_context", raw)
+	c.recordAccess(taskID, "get_context", raw)
 	return &ContextResult{Raw: raw, Text: raw}, nil
 }
 
@@ -212,16 +213,17 @@ func (c *SynapsesClient) GetImpactWithDepth(taskID, entity string, depth int) (*
 }
 
 // Recall calls the recall tool.
+// Recall calls memory(action=search) (was recall before Sprint 24).
 func (c *SynapsesClient) Recall(taskID, query string) (*RecallResult, error) {
 	if c.disabled {
 		return &RecallResult{}, nil
 	}
-	args := map[string]interface{}{"query": query}
-	raw, err := c.callTool("recall", args)
+	args := map[string]interface{}{"action": "search", "query": query}
+	raw, err := c.callTool("memory", args)
 	if err != nil {
 		return nil, err
 	}
-	c.recordAccess(taskID, "recall", raw)
+	c.recordAccess(taskID, "memory", raw)
 	return &RecallResult{Raw: raw, Text: raw}, nil
 }
 

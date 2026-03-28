@@ -2199,6 +2199,9 @@ func (s *Server) registerTools() {
 
 	// ── Knowledge Export ─────────────────────────────────────────────────────
 
-	// Sprint 24: export_knowledge, rank_candidates, benchmark removed from MCP tools.
-	// export_knowledge → CLI command; rank_candidates/benchmark → internal only.
+	// Sprint 24: export_knowledge, benchmark removed from MCP tools.
+	// rank_candidates: REST-only (not in tools/list) — called by RepoBench-R benchmark binary.
+	s.toolHandlersMu.Lock()
+	s.toolHandlers["rank_candidates"] = s.handleRankCandidates
+	s.toolHandlersMu.Unlock()
 }
