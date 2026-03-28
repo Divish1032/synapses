@@ -733,7 +733,10 @@ func (s *Server) handleRecall(
 		// Sprint 15 #4: TopChannel — the channel that contributed most to the
 		// rank-1 result. attr.TopChannel returns attribution[memories[0].ID][0],
 		// which is sorted best-contributor first by RRFMergeWeighted/ConvexMerge.
-		topChan := attr.TopChannel(memories[0].ID)
+		var topChan string
+		if len(memories) > 0 {
+			topChan = attr.TopChannel(memories[0].ID)
+		}
 		pc.RecordMemoryOp(pulse.MemoryOperationEvent{
 			Operation:      op,
 			Tier:           "episodic",

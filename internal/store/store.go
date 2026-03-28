@@ -940,6 +940,18 @@ func Open(path string) (*Store, error) {
 		`ALTER TABLE violation_log ADD COLUMN to_file   TEXT`,
 		`CREATE INDEX IF NOT EXISTS idx_vlog_from_file ON violation_log(from_file) WHERE from_file IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_vlog_to_file   ON violation_log(to_file)   WHERE to_file   IS NOT NULL`,
+		// Sprint 24: Work Ledger — cross-session ambient coordination.
+		// Records entity/file signals from every tool call for overlap detection.
+		`CREATE TABLE IF NOT EXISTS work_ledger (
+			session_id  TEXT NOT NULL,
+			project_id  TEXT NOT NULL DEFAULT '',
+			tool_name   TEXT NOT NULL,
+			entity_ids  TEXT NOT NULL DEFAULT '[]',
+			file_paths  TEXT NOT NULL DEFAULT '[]',
+			created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_wl_session ON work_ledger(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_wl_project ON work_ledger(project_id, created_at)`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()

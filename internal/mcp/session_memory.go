@@ -247,6 +247,8 @@ func (s *Server) handleEndSession(
 		outcomeForRefinement := outcome
 		s.goBackground(func() { s.applyEdgeWeightRefinements(sessIDForRefinement, outcomeForRefinement) })
 		s.ClearSynapseSession(mcpSessionID)
+		// Sprint 24: clean up Work Ledger watermark to prevent unbounded memory growth.
+		s.clearLedgerWatermark(synapseSessionID)
 	}
 
 	// Pulse: record session end event using the Synapses session UUID.

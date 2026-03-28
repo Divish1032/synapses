@@ -70,7 +70,7 @@ func TestToolIntegrity_BaselineMatchesAtStartup(t *testing.T) {
 func TestToolIntegrity_AllToolsCaptured(t *testing.T) {
 	s := newTestServer(t)
 
-	required := []string{"session_init", "remember", "recall", "end_session"}
+	required := []string{"session_init", "memory", "end_session"}
 	for _, name := range required {
 		if _, ok := s.toolDescs[name]; !ok {
 			t.Errorf("toolDescs missing %q — addOrDefer capture may be incomplete", name)
@@ -150,7 +150,7 @@ func TestToolIntegrity_SessionInitAlertsOnTampering(t *testing.T) {
 // does NOT suppress the integrity alert. Security alerts surface in all modes.
 func TestToolIntegrity_QuickScopeAlertsOnTampering(t *testing.T) {
 	s := newTestServer(t)
-	s.toolDescs["recall"] = "TAMPERED"
+	s.toolDescs["memory"] = "TAMPERED"
 
 	res, err := s.DispatchTool(context.Background(), "session_init", map[string]interface{}{
 		"agent_id": "integrity-test",
@@ -173,7 +173,7 @@ func TestToolIntegrity_QuickScopeAlertsOnTampering(t *testing.T) {
 // not suppress the integrity alert.
 func TestToolIntegrity_ResumeScopeAlertsOnTampering(t *testing.T) {
 	s := newTestServer(t)
-	s.toolDescs["remember"] = "TAMPERED"
+	s.toolDescs["validate"] = "TAMPERED"
 
 	res, err := s.DispatchTool(context.Background(), "session_init", map[string]interface{}{
 		"agent_id": "integrity-test",

@@ -508,7 +508,7 @@ func (s *Server) handleSessionInit(
 		primaryRepoID = filepath.Base(s.projectPath)
 		identity = &graph.ProjectIdentity{
 			RepoID:       primaryRepoID,
-			ToolGuidance: "Knowledge mode — no code graph. Use remember, recall, create_plan, update_task, send_message, get_messages.",
+			ToolGuidance: "Knowledge mode — no code graph. Use memory(action=save/search), tasks(action=create_plan/pending/update), validate(phase=safety).",
 		}
 	}
 
@@ -918,8 +918,41 @@ func (s *Server) handleSessionInit(
 			totalAge := formatSessionDuration(time.Since(time.Unix(hibernateCtx.StartedAt, 0)))
 			resumeBlock["session_age"] = totalAge
 		}
+		// Sprint 24: enrich resume with Work Ledger data from prior session.
+		if s.store != nil && hibernateCtx.ParentID != "" {
+			entities, files, _ := s.store.SessionLedgerEntities(hibernateCtx.ParentID)
+			if len(entities) > 0 || len(files) > 0 {
+				resumeBlock["prior_entities"] = entities
+				resumeBlock["prior_files"] = files
+			}
+		}
 		resp["session_resumed"] = resumeBlock
 	}
+
+	// Sprint 24: Work Ledger — include cross-session briefing on every session_init.
+	if s.store != nil && synapseSessionID != "" {
+		others, _ := s.store.ActiveSessionWork(s.projectID, synapseSessionID, 15)
+		if len(others) > 0 {
+			var briefing []map[string]interface{}
+			for _, o := range others {
+				entry := map[string]interface{}{
+					"session":     o.SessionID,
+					"agent":       o.AgentID,
+					"intent":      o.Intent,
+					"last_active": o.LastActive,
+				}
+				if len(o.EntityIDs) > 0 {
+					entry["entities"] = o.EntityIDs
+				}
+				if len(o.FilePaths) > 0 {
+					entry["files"] = o.FilePaths
+				}
+				briefing = append(briefing, entry)
+			}
+			resp["active_sessions"] = briefing
+		}
+	}
+
 	if len(crossProjectAlerts) > 0 {
 		resp["cross_project_alerts"] = map[string]interface{}{
 			"count":    len(crossProjectAlerts),

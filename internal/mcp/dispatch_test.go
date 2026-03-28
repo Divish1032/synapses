@@ -14,7 +14,7 @@ import (
 // its result is returned without error.
 func TestDispatchTool_KnownTool(t *testing.T) {
 	srv := newTestServer(t)
-	result, err := srv.DispatchTool(context.Background(), "explain_codebase", nil)
+	result, err := srv.DispatchTool(context.Background(), "get_file_context", nil)
 	if err != nil {
 		t.Fatalf("expected no error for known tool, got: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestDispatchTool_EmptyToolName(t *testing.T) {
 // treated as an empty map by the handler.
 func TestDispatchTool_NilArgs(t *testing.T) {
 	srv := newTestServer(t)
-	result, err := srv.DispatchTool(context.Background(), "explain_codebase", nil)
+	result, err := srv.DispatchTool(context.Background(), "get_file_context", nil)
 	if err != nil {
 		t.Fatalf("unexpected error with nil args: %v", err)
 	}
@@ -159,15 +159,15 @@ func TestDispatchTool_KnowledgeMode_KnowledgeToolWorks(t *testing.T) {
 	cfg := &config.Config{Mode: "knowledge"}
 	srv := NewKnowledge(cfg, st)
 
-	result, err := srv.DispatchTool(context.Background(), "recall", map[string]interface{}{})
+	result, err := srv.DispatchTool(context.Background(), "memory", map[string]interface{}{"action": "search"})
 	if err != nil {
-		t.Fatalf("recall in knowledge mode returned Go error: %v", err)
+		t.Fatalf("memory(action=search) in knowledge mode returned Go error: %v", err)
 	}
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
 	if result.IsError {
-		t.Error("expected recall to succeed with empty results, not error")
+		t.Error("expected memory(action=search) to succeed with empty results, not error")
 	}
 }
 
@@ -177,7 +177,7 @@ func TestDispatchTool_SessionIDInContext(t *testing.T) {
 	srv := newTestServer(t)
 	ctx := WithSessionID(context.Background(), "rest-42")
 	// session_init records the session; we just verify no panic/error from dispatch.
-	result, err := srv.DispatchTool(ctx, "explain_codebase", nil)
+	result, err := srv.DispatchTool(ctx, "get_file_context", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestDispatchTool_StoreNil(t *testing.T) {
 	srv := New(g, cfg, nil)
 	t.Cleanup(func() { srv.Close() })
 
-	result, err := srv.DispatchTool(context.Background(), "explain_codebase", nil)
+	result, err := srv.DispatchTool(context.Background(), "get_file_context", nil)
 	if err != nil {
 		t.Fatalf("unexpected error with nil store: %v", err)
 	}

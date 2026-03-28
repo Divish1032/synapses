@@ -605,6 +605,32 @@ func (g *Graph) InEdges(id NodeID) []*Edge {
 	return out
 }
 
+// DirectNeighbors returns deduplicated NodeIDs that are 1-hop away from id
+// via any edge direction. Uses the FlatGraph fast path when available,
+// otherwise falls back to OutEdges + InEdges. Returns nil if id is unknown.
+func (g *Graph) DirectNeighbors(id NodeID) []NodeID {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if nbs := g.flatGraphNeighbors(id); nbs != nil {
+		return nbs
+	}
+	seen := make(map[NodeID]struct{})
+	for _, e := range g.outEdges[id] {
+		seen[e.To] = struct{}{}
+	}
+	for _, e := range g.inEdges[id] {
+		seen[e.From] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	result := make([]NodeID, 0, len(seen))
+	for n := range seen {
+		result = append(result, n)
+	}
+	return result
+}
+
 // AddCallSite records an unresolved call site for post-parse resolution.
 func (g *Graph) AddCallSite(cs CallSite) {
 	g.mu.Lock()
@@ -1735,10 +1761,10 @@ func (g *Graph) ProjectIdentity() *ProjectIdentity {
 	switch {
 	case semanticNodes < 100:
 		scale = ScaleMicro
-		toolGuidance = "Micro repo (<100 semantic nodes): Read/Grep is often faster for targeted edits. Use Synapses tools (get_context, find_entity, search) for structural understanding and cross-file analysis. Always use validate_plan before multi-file changes."
+		toolGuidance = "Micro repo (<100 semantic nodes): Read/Grep is often faster for targeted edits. Use Synapses tools (get_context, search) for structural understanding and cross-file analysis. Always use validate(phase=\"pre\") before multi-file changes."
 	case semanticNodes < 500:
 		scale = ScaleSmall
-		toolGuidance = "Small repo (100–499 nodes): prefer Synapses for exploration (get_context, search), use Read/Grep for targeted single-file edits. Use validate_plan before multi-file changes."
+		toolGuidance = "Small repo (100–499 nodes): prefer Synapses for exploration (get_context, search), use Read/Grep for targeted single-file edits. Use validate(phase=\"pre\") before multi-file changes."
 	case semanticNodes < 2000:
 		scale = ScaleMedium
 		toolGuidance = "Medium repo (500–1999 nodes): Synapses tools recommended for exploration — they surface callers, callees, and architecture rules that Glob/Grep miss. Use Read/Grep when you know the exact file to edit."

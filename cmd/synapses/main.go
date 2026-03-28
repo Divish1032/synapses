@@ -2026,45 +2026,43 @@ These 12 core tools cover 95% of workflows. All 40+ tools remain available — c
 | Goal | Tool |
 |---|---|
 | Start session | ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` |
-| Understand code | ` + "`prepare_context(intent=\"understand\", target=\"EntityName\")`" + ` |
-| Prepare to modify | ` + "`prepare_context(intent=\"modify\", target=\"EntityName\")`" + ` |
-| Find a symbol | ` + "`search(query=\"name\")`" + ` |
+| Understand code | ` + "`get_context(entity=\"EntityName\", intent=\"understand\")`" + ` |
+| Prepare to modify | ` + "`get_context(entity=\"EntityName\", intent=\"modify\")`" + ` |
+| Find a symbol | ` + "`search(query=\"name\", mode=\"exact\")`" + ` |
 | Search by concept | ` + "`search(query=\"auth caching\", mode=\"semantic\")`" + ` |
-| Check before implementing | ` + "`validate_plan(changes=[...])`" + ` |
-| Verify after writing | ` + "`verify_implementation(files_written=[\"...\"])`" + ` |
-| Save knowledge | ` + "`remember(decision=\"...\", agent_id=\"...\")`" + ` |
-| Retrieve knowledge | ` + "`recall(query=\"...\")`" + ` |
-| Plan tasks | ` + "`create_plan(title=\"...\", tasks=[...])`" + ` |
-| Update task | ` + "`update_task(id=\"...\", status=\"done\")`" + ` |
+| Check before implementing | ` + "`validate(phase=\"pre\", changes=[...])`" + ` |
+| Verify after writing | ` + "`validate(phase=\"post\", files_written=[\"...\"])`" + ` |
+| Save knowledge | ` + "`memory(action=\"save\", decision=\"...\", agent_id=\"...\")`" + ` |
+| Retrieve knowledge | ` + "`memory(action=\"search\", query=\"...\")`" + ` |
+| Plan tasks | ` + "`tasks(action=\"create_plan\", title=\"...\", tasks=[...])`" + ` |
+| Update task | ` + "`tasks(action=\"update\", id=\"...\", status=\"done\")`" + ` |
 | End session | ` + "`end_session(agent_id=\"...\")`" + ` — persists session knowledge, optionally reports usage |
 
 ### Need more?
 
 ` + "`session_init`" + ` suggests specialized tools based on your declared intent (e.g. ` + "`get_impact`" + `, ` + "`get_file_context`" + `).
-Call ` + "`discover_tools(query=\"what you need\")`" + ` to find any tool by description.
+Synapses exposes 12 tools — read their descriptions via ` + "`tools/list`" + ` to find what you need.
 
 ### Cross-Project Queries
 When multiple projects are registered with the daemon, query knowledge across them:
-- ` + "`recall(query=\"...\", projects=\"*\")`" + ` — search memories across all projects
-- ` + "`get_events(projects=\"backend\")`" + ` — events from a specific sibling
-- ` + "`get_messages(agent_id=\"...\", projects=\"*\")`" + ` — messages across projects
-- ` + "`get_agents(projects=\"*\")`" + ` — see who's working across all projects
+- ` + "`memory(action=\"search\", query=\"...\", projects=\"*\")`" + ` — search memories across all projects
 Cross-project results appear in separate response fields (e.g. ` + "`cross_project_episodes`" + `).
+Active sessions on related projects are automatically surfaced in ` + "`session_init`" + ` via the Work Ledger.
 
 ### Anti-patterns
 - **Prefer** Synapses tools over Grep/Glob for code exploration — they return callers, callees, and architecture rules that raw file scanning misses
-- **Always** run ` + "`validate_plan()`" + ` before multi-file changes — it catches architecture violations before any code is written
-- **Always** track discovered bugs as tasks via ` + "`create_plan()`" + ` immediately
+- **Always** run ` + "`validate(phase=\"pre\")`" + ` before multi-file changes — it catches architecture violations before any code is written
+- **Always** track discovered bugs as tasks via ` + "`tasks(action=\"create_plan\")`" + ` immediately
 
 ### Memory Tiers
 
-Synapses memory is organized in three tiers. Use ` + "`remember()`" + ` to save persistent knowledge about your work:
+Synapses memory is organized in three tiers. Use ` + "`memory(action=\"save\")`" + ` to save persistent knowledge about your work:
 
 | Tier | Purpose | Persistence | Scope |
 |------|---------|-----------|-------|
 | **Tier 1 — Live** | In-session work tracking, todo lists, blocked tasks. Use ` + "`TodoWrite`" + ` for current work. | Session-only | This conversation |
-| **Tier 2 — Anchored** | Code insights, discovered bugs, architecture decisions linked to graph nodes. Use ` + "`remember(anchor_nodes=...)`" + ` to tie memory to code entities. | Persistent; auto-flagged stale if linked node changes | All sessions |
-| **Tier 3 — Durable** | User preferences, feedback, project context, external references. No code links — survives refactoring. Use ` + "`remember(decision=...)`" + ` without ` + "`anchor_nodes`" + ` for durable facts. | Persistent | All sessions |
+| **Tier 2 — Anchored** | Code insights, discovered bugs, architecture decisions linked to graph nodes. Use ` + "`memory(action=\"save\", anchor_nodes=[...])`" + ` to tie memory to code entities. | Persistent; auto-flagged stale if linked node changes | All sessions |
+| **Tier 3 — Durable** | User preferences, feedback, project context, external references. No code links — survives refactoring. Use ` + "`memory(action=\"save\", decision=\"...\")`" + ` without ` + "`anchor_nodes`" + ` for durable facts. | Persistent | All sessions |
 
 **Memory storage rules:**
 - Write memory to separate ` + "`.md`" + ` files in the project's ` + "`/Users/itachi/.claude/projects/{{project}}/memory/`" + ` directory, not to MEMORY.md.
@@ -2073,7 +2071,7 @@ Synapses memory is organized in three tiers. Use ` + "`remember()`" + ` to save 
 - When a user asks you to remember something, always save it immediately as the correct tier.
 
 ### Workflow
-` + "`session_init`" + ` → explore (` + "`prepare_context`" + `, ` + "`search`" + `) → ` + "`validate_plan`" + ` → edit files → ` + "`verify_implementation`" + ` → ` + "`end_session`" + `
+` + "`session_init`" + ` → explore (` + "`get_context`" + `, ` + "`search`" + `) → ` + "`validate(phase=\"pre\")`" + ` → edit files → ` + "`validate(phase=\"post\")`" + ` → ` + "`end_session`" + `
 ` + synapsesSectionEnd
 
 // knowledgeSynapsesSection is the guidance block for knowledge-mode projects
@@ -2090,25 +2088,20 @@ Call ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` at
 | Goal | Tool |
 |---|---|
 | Start session | ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` |
-| Save knowledge | ` + "`remember(decision=\"...\", agent_id=\"...\")`" + ` |
-| Retrieve knowledge | ` + "`recall(query=\"...\")`" + ` |
-| Plan tasks | ` + "`create_plan(title=\"...\", tasks=[...])`" + ` |
-| Update task | ` + "`update_task(id=\"...\", status=\"done\")`" + ` |
-| Get pending tasks | ` + "`get_pending_tasks()`" + ` |
-| Send message | ` + "`send_message(from_agent=\"...\", topic=\"...\")`" + ` |
-| Get messages | ` + "`get_messages(agent_id=\"...\")`" + ` |
+| Save knowledge | ` + "`memory(action=\"save\", decision=\"...\", agent_id=\"...\")`" + ` |
+| Retrieve knowledge | ` + "`memory(action=\"search\", query=\"...\")`" + ` |
+| Plan tasks | ` + "`tasks(action=\"create_plan\", title=\"...\", tasks=[...])`" + ` |
+| Update task | ` + "`tasks(action=\"update\", id=\"...\", status=\"done\")`" + ` |
+| Get pending tasks | ` + "`tasks(action=\"pending\")`" + ` |
 | End session | ` + "`end_session(agent_id=\"...\")`" + ` |
 
 ### Cross-Project Queries
 When multiple projects are registered with the daemon, query knowledge across them:
-- ` + "`recall(query=\"...\", projects=\"*\")`" + ` — search memories across all projects
-- ` + "`get_events(projects=\"backend\")`" + ` — events from a specific sibling
-- ` + "`get_messages(agent_id=\"...\", projects=\"*\")`" + ` — messages across projects
-- ` + "`get_agents(projects=\"*\")`" + ` — see who's working across all projects
-Cross-project results appear in separate response fields (e.g. ` + "`cross_project_episodes`" + `).
+- ` + "`memory(action=\"search\", query=\"...\", projects=\"*\")`" + ` — search memories across all projects
+Cross-project awareness is handled automatically by the Work Ledger — ` + "`session_init`" + ` shows active sessions on related projects.
 
 ### Workflow
-` + "`session_init`" + ` → ` + "`recall`" + ` / ` + "`get_pending_tasks`" + ` → work → ` + "`remember`" + ` / ` + "`update_task`" + ` → ` + "`end_session`" + `
+` + "`session_init`" + ` → ` + "`memory(action=\"search\")`" + ` / ` + "`tasks(action=\"pending\")`" + ` → work → ` + "`memory(action=\"save\")`" + ` / ` + "`tasks(action=\"update\")`" + ` → ` + "`end_session`" + `
 ` + synapsesSectionEnd
 
 // writeProjectCLAUDE writes (or updates) a Synapses-managed section in
@@ -2211,7 +2204,8 @@ func writeClaudeSettings(repoRoot string) error {
 	// The Glob|Grep hard block and low-value PostToolUse confirmations were
 	// removed — clean them from already-connected projects on re-connect.
 	removeHookEntry(hooks, "PreToolUse", "Glob|Grep")
-	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__validate_plan")
+	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__validate_plan")  // legacy cleanup
+	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__validate")       // cleanup if validate hook was auto-added
 	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__create_plan")
 
 	// ── SessionStart: cat the daemon-written context file instead of a static echo.
@@ -2228,17 +2222,17 @@ func writeClaudeSettings(repoRoot string) error {
 		// Fallback to static reminder if we can't compute the path.
 		sessionStartCmd = "echo '[Synapses] MANDATORY: Call session_init() as your FIRST action — " +
 			"it returns pending tasks, project identity, working state, and scale_guidance in one call. " +
-			"WORKFLOW: session_init → prepare_context → validate_plan → edit files → verify_implementation.'"
+			"WORKFLOW: session_init → get_context → validate(phase=pre) → edit files → validate(phase=post) → end_session.'"
 	}
 	upsertHookEntry(hooks, "SessionStart", "startup", map[string]interface{}{
 		"type":    "command",
 		"command": sessionStartCmd,
 	})
 
-	// ── PostToolUse: nudge verify_implementation after any file write/edit.
+	// ── PostToolUse: nudge validate(phase=post) after any file write/edit.
 	upsertHookEntry(hooks, "PostToolUse", "Write|Edit", map[string]interface{}{
 		"type": "command",
-		"command": "echo '[Synapses] Files written. Now call verify_implementation(files_written=[\"<path>\"]) " +
+		"command": "echo '[Synapses] Files written. Now call validate(phase=\"post\", files_written=[\"<path>\"]) " +
 			"to check your changes against architecture rules before continuing.'",
 	})
 

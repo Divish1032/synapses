@@ -34,9 +34,9 @@ func TestFingerprintCall_fallsThrough(t *testing.T) {
 
 func TestFingerprintCall_noArgs(t *testing.T) {
 	// Falls back to tool name alone when no recognised arg is present.
-	fp := fingerprintCall("discover_tools", nil)
-	if fp != "discover_tools" {
-		t.Errorf("got %q, want %q", fp, "discover_tools")
+	fp := fingerprintCall("find_entity", nil)
+	if fp != "find_entity" {
+		t.Errorf("got %q, want %q", fp, "find_entity")
 	}
 }
 
@@ -409,18 +409,18 @@ func TestLoopGuard_resetOnFileChange(t *testing.T) {
 
 func TestLoopGuard_integratedWithServer(t *testing.T) {
 	// This test proves that the loop guard is wired into the server's dispatch
-	// table — calling any tool (e.g. discover_tools) enough times trips the breaker.
+	// table — calling any tool (e.g. search) enough times trips the breaker.
 	s := newTestServer(t)
 
 	ctx := context.Background()
 	req := mcp.CallToolRequest{}
-	req.Params.Name = "discover_tools"
-	req.Params.Arguments = map[string]interface{}{}
+	req.Params.Name = "search"
+	req.Params.Arguments = map[string]interface{}{"mode": "exact"}
 
 	var lastResult *mcp.CallToolResult
 	for i := 0; i < loopGuardCircuitBreak; i++ {
 		var err error
-		lastResult, err = s.DispatchTool(ctx, "discover_tools", map[string]interface{}{})
+		lastResult, err = s.DispatchTool(ctx, "search", map[string]interface{}{"mode": "exact"})
 		if err != nil {
 			t.Fatalf("call %d: error: %v", i+1, err)
 		}
@@ -439,17 +439,18 @@ func TestLoopGuard_integratedWithServer(t *testing.T) {
 func TestLoopGuard_resetOnFingerprintChange(t *testing.T) {
 	s := newTestServer(t)
 
-	// Drive discover_tools close to the circuit breaker.
+	// Drive search(mode=exact) close to the circuit breaker.
+	args := map[string]interface{}{"query": "test", "mode": "exact"}
 	for i := 0; i < loopGuardCircuitBreak-1; i++ {
-		s.DispatchTool(context.Background(), "discover_tools", map[string]interface{}{}) //nolint:errcheck
+		s.DispatchTool(context.Background(), "search", args) //nolint:errcheck
 	}
 
 	// Call a DIFFERENT tool — this changes the fingerprint, which auto-resets
 	// the loop guard window (proving the agent made progress).
-	s.DispatchTool(context.Background(), "get_repo_map", map[string]interface{}{}) //nolint:errcheck
+	s.DispatchTool(context.Background(), "get_file_context", map[string]interface{}{"file": "test.go"}) //nolint:errcheck
 
 	// After fingerprint change, the original call should succeed.
-	result, err := s.DispatchTool(context.Background(), "discover_tools", map[string]interface{}{})
+	result, err := s.DispatchTool(context.Background(), "search", args)
 	if err != nil {
 		t.Fatalf("after fingerprint change: error: %v", err)
 	}
