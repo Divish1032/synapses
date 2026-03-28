@@ -44,7 +44,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -80,7 +79,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 	"github.com/SynapsesOS/synapses/internal/webcache"
-	"github.com/SynapsesOS/synapses/web"
 
 	"golang.org/x/net/netutil"
 )
@@ -553,25 +551,6 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 }
 
-// spaHandler serves static files from root and falls back to index.html for
-// client-side routing (SPA pattern). If the requested path matches a file in
-// the embedded FS, it's served directly. Otherwise index.html is served.
-func spaHandler(root http.FileSystem) http.Handler {
-	fileServer := http.FileServer(root)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		// Try to open the file. If it exists, serve it.
-		f, err := root.Open(path)
-		if err == nil {
-			f.Close()
-			fileServer.ServeHTTP(w, r)
-			return
-		}
-		// File not found — serve index.html for SPA routing.
-		r.URL.Path = "/"
-		fileServer.ServeHTTP(w, r)
-	})
-}
 
 // restToolsHandler returns the HTTP handler for POST /v1/tools/{name}?project=<path>.
 // projectInit is called to lazily initialize a project that is not yet registered.
@@ -1627,19 +1606,15 @@ func cmdDaemonServe(args []string) error {
 	//
 	// SPA fallback: if the path doesn't match an existing file in dist/,
 	// serve index.html so client-side routing works.
-	var consoleFS http.FileSystem
-	if home, err := synapsesHome(); err == nil {
-		overridePath := filepath.Join(home, "console")
-		if info, statErr := os.Stat(filepath.Join(overridePath, "index.html")); statErr == nil && !info.IsDir() {
-			consoleFS = http.Dir(overridePath)
-			logutil.Info("synapses: serving web console from disk override: %s\n", overridePath)
+	// Root path returns a simple JSON health response (no UI — UI is in the Tauri app).
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
 		}
-	}
-	if consoleFS == nil {
-		consoleDist, _ := fs.Sub(web.ConsoleFS, "console/dist")
-		consoleFS = http.FS(consoleDist)
-	}
-	mux.Handle("/", spaHandler(consoleFS))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"status": "ok", "service": "synapses", "ui": "use SynapsesOS app"}) //nolint:errcheck
+	})
 
 	// ── Auth token ────────────────────────────────────────────────────────────
 	// Generated on first start, persisted at ~/.synapses/auth_token.
@@ -2695,7 +2670,6 @@ func hasSourceFiles(dir string) bool {
 		return false
 	}
 	return walk(dir, 0)
-	return false
 }
 
 // jsonDepth returns the maximum nesting depth of a decoded JSON value.
