@@ -4,8 +4,9 @@ docs/ROADMAP.md
 results/
 benchmark
 
-# Binaries
+# Build artifacts
 bin/
+completions/
 dist/
 /synapses
 *.exe

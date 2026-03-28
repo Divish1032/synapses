@@ -404,7 +404,7 @@ func TestSynapsesSection_ContainsMemoryTiers(t *testing.T) {
 		"Tier 1 — Live",
 		"Tier 2 — Anchored",
 		"Tier 3 — Durable",
-		`remember(decision=`, // guards correct param name — NOT "content=" which is invalid
+		`memory(action="save", decision=`, // guards correct param name
 		"anchor_nodes",
 		"Never write these to MEMORY.md",
 	}

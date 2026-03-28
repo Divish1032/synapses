@@ -175,51 +175,9 @@ func (fg *FlatGraph) AddNode(name StringID, nodeType NodeType, fileID StringID, 
 }
 
 
-// addEdgeSlow inserts a directed edge. O(E) due to offset shifting — internal only.
-// Production code must use BulkAddEdges for batch insertion (O(N+E)).
-func (fg *FlatGraph) addEdgeSlow(from, to NodeIndex, weight float32) {
+// addEdgeSlow is disabled — use BulkAddEdges for batch insertion (O(N+E)).
+func (fg *FlatGraph) addEdgeSlow(_, _ NodeIndex, _ float32) {
 	panic("addEdgeSlow: use BulkAddEdges for batch insertion")
-	fg.mu.Lock() //nolint:unreachable
-	defer fg.mu.Unlock()
-
-	if int(from) >= len(fg.Names) || int(to) >= len(fg.Names) {
-		return // Out of bounds safety
-	}
-	if int(from)+1 >= len(fg.OutOffsets) || int(to)+1 >= len(fg.InOffsets) {
-		return // CSR offset sentinel missing — BulkAddEdges not called yet
-	}
-
-	// 1. Insert Outgoing Edge for 'from'
-	outInsertIdx := fg.OutOffsets[from+1]
-
-	// Create space
-	fg.OutEdges = append(fg.OutEdges, 0)
-	copy(fg.OutEdges[outInsertIdx+1:], fg.OutEdges[outInsertIdx:])
-	fg.OutEdges[outInsertIdx] = to
-
-	fg.OutWeights = append(fg.OutWeights, 0)
-	copy(fg.OutWeights[outInsertIdx+1:], fg.OutWeights[outInsertIdx:])
-	fg.OutWeights[outInsertIdx] = weight
-
-	// Shift subsequent offsets
-	for i := int(from) + 1; i < len(fg.OutOffsets); i++ {
-		fg.OutOffsets[i]++
-	}
-
-	// 2. Insert Incoming Edge for 'to'
-	inInsertIdx := fg.InOffsets[to+1]
-
-	fg.InEdges = append(fg.InEdges, 0)
-	copy(fg.InEdges[inInsertIdx+1:], fg.InEdges[inInsertIdx:])
-	fg.InEdges[inInsertIdx] = from
-
-	fg.InWeights = append(fg.InWeights, 0)
-	copy(fg.InWeights[inInsertIdx+1:], fg.InWeights[inInsertIdx:])
-	fg.InWeights[inInsertIdx] = weight
-
-	for i := int(to) + 1; i < len(fg.InOffsets); i++ {
-		fg.InOffsets[i]++
-	}
 }
 
 // BulkEdge is a single edge for bulk insertion.

@@ -5,15 +5,16 @@ project_name: synapses
 before:
   hooks:
     - go mod verify
+    - make completions
 
 builds:
   - id: synapses
     main: ./cmd/synapses
     binary: synapses
     env:
-      - CGO_ENABLED=1
-      - 'CC={{ if eq .Arch "arm64" }}aarch64-linux-gnu-gcc{{ else }}gcc{{ end }}'
+      - CGO_ENABLED=0
     goos:
+      - darwin
       - linux
     goarch:
       - amd64
@@ -28,13 +29,11 @@ archives:
       {{- .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else }}{{ .Arch }}{{ end }}
-    format_overrides:
-      - goos: windows
-        format: zip
     files:
       - README.md
       - LICENSE
       - synapses.example.json
+      - completions/*
 
 checksum:
   name_template: 'checksums.txt'
@@ -48,6 +47,23 @@ changelog:
       - '^ci:'
       - Merge pull request
       - Merge branch
+
+brews:
+  - repository:
+      owner: SynapsesOS
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/SynapsesOS/synapses"
+    description: "Graph-based code intelligence MCP server for AI coding agents"
+    license: "MIT"
+    install: |
+      bin.install "synapses"
+      bash_completion.install "completions/synapses.bash" => "synapses"
+      zsh_completion.install "completions/synapses.zsh" => "_synapses"
+      fish_completion.install "completions/synapses.fish"
+    test: |
+      system "#{bin}/synapses", "version"
 
 release:
   github:
