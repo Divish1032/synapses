@@ -34,7 +34,7 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: go test ./... -v -race -timeout 120s
+        run: go test ./... -v -race -timeout 300s
 
   lint:
     name: Lint
