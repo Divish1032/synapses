@@ -270,13 +270,9 @@ func TestReparseFile_ClearsErrorFlagOnCleanParse(t *testing.T) {
 	}
 	w.reparseFile(goFile, root) // skipped (first error)
 
-	// Fix the error. Small delay ensures macOS filesystem flushes the previous
-	// write before the new content is visible to the parser.
-	time.Sleep(50 * time.Millisecond)
-	if err := os.WriteFile(goFile, []byte("package main\n\nfunc Fixed() {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(50 * time.Millisecond)
+	// Fix the error. Explicit fsync ensures the clean content is visible to the
+	// parser on slow CI filesystems (Ubuntu).
+	syncWrite(t, goFile, []byte("package main\n\nfunc Fixed() {}\n"))
 	w.reparseFile(goFile, root) // clean → should parse and clear error flag
 
 	// Introduce error again → should skip again (flag was cleared).
@@ -579,4 +575,23 @@ func TestReparseFile_CallSitesPersistAcrossMultipleReparses(t *testing.T) {
 	if len(sitesAfterSecond) == 0 {
 		t.Error("call-site table must not be empty after second reparseFile (table was wiped and not restored)")
 	}
+}
+
+// syncWrite writes data to path and fsyncs to ensure the content is visible on
+// disk before returning. Avoids flaky parse-error detection on slow CI filesystems.
+func syncWrite(t *testing.T, path string, data []byte) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	f.Close()
 }

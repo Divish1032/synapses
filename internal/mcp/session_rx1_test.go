@@ -179,9 +179,15 @@ func TestConcurrentSessions_IsolatedCounters(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		s.trackSessionCall("sess-g", "agent-g")
 	}
-	time.Sleep(50 * time.Millisecond)
-
-	countF := memoryCountForAgent(t, s.store, "agent-f")
+	// Background goroutine may need more time on slow CI runners (Ubuntu).
+	var countF int
+	for range 20 {
+		time.Sleep(50 * time.Millisecond)
+		countF = memoryCountForAgent(t, s.store, "agent-f")
+		if countF == 1 {
+			break
+		}
+	}
 	countG := memoryCountForAgent(t, s.store, "agent-g")
 
 	if countF != 1 {
