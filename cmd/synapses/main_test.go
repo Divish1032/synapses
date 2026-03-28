@@ -1561,6 +1561,7 @@ func TestServeMCPConn_SessionAutoCacheE2E(t *testing.T) {
 func buildTestIndexedDir(t *testing.T) (string, *store.Store, *graph.Graph) {
 	t.Helper()
 	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".git"), 0o755) //nolint:errcheck
 
 	// Write a minimal Go source file so the parser finds real nodes.
 	src := "package hello\n\n// HelloFunc greets the world.\nfunc HelloFunc() string { return \"hello\" }\n\n// GoodbyeFunc says goodbye.\nfunc GoodbyeFunc() {}\n"
@@ -2071,6 +2072,9 @@ func TestCmdStartDirect_EmptyStdin(t *testing.T) {
 	// Create a temp dir with a Go source file so the indexer has something to parse.
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package hello\n\nfunc Foo() {}\nfunc Bar() string { return \"hello\" }\n"), 0o644) //nolint:errcheck
+	os.MkdirAll(filepath.Join(dir, ".git"), 0o755)                                                                                          //nolint:errcheck
+	// Disable builtin embedder to prevent background model download race on CI.
+	os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(`{"embeddings":"off"}`), 0o644) //nolint:errcheck
 
 	restore := stdioCloseStdin(t)
 	defer restore()

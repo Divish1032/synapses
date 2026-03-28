@@ -270,10 +270,13 @@ func TestReparseFile_ClearsErrorFlagOnCleanParse(t *testing.T) {
 	}
 	w.reparseFile(goFile, root) // skipped (first error)
 
-	// Fix the error.
+	// Fix the error. Small delay ensures macOS filesystem flushes the previous
+	// write before the new content is visible to the parser.
+	time.Sleep(50 * time.Millisecond)
 	if err := os.WriteFile(goFile, []byte("package main\n\nfunc Fixed() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	time.Sleep(50 * time.Millisecond)
 	w.reparseFile(goFile, root) // clean → should parse and clear error flag
 
 	// Introduce error again → should skip again (flag was cleared).
