@@ -159,6 +159,18 @@ func NewBuiltinEmbedderWithPoolSize(modelsDir string, poolSize int) *BuiltinEmbe
 	}
 }
 
+// trackDownload safely increments dlWg under the mutex. Returns false if the
+// embedder is already closed, preventing a WaitGroup.Add concurrent with Wait.
+func (b *BuiltinEmbedder) trackDownload() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return false
+	}
+	b.dlWg.Add(1)
+	return true
+}
+
 // WarmUp pre-initializes the embedder by downloading the model if not already
 // cached and setting up the inference pipeline pool. Call at daemon startup in
 // a background goroutine so the first Embed() call doesn't block on download.
@@ -277,7 +289,9 @@ func (b *BuiltinEmbedder) doInit(ctx context.Context) error {
 		// goroutine and race against ctx cancellation.
 		type dlResult struct{ err error }
 		dlCh := make(chan dlResult, 1)
-		b.dlWg.Add(1)
+		if !b.trackDownload() {
+			return fmt.Errorf("builtin embedder: closed during download setup")
+		}
 		go func() {
 			defer b.dlWg.Done()
 			_, dlErr := hugot.DownloadModel(builtinModelName, b.modelsDir, opts)
@@ -323,7 +337,9 @@ func (b *BuiltinEmbedder) doInit(ctx context.Context) error {
 				opts.MaxRetries = 3
 				opts.RetryInterval = 2
 				dlCh := make(chan error, 1)
-				b.dlWg.Add(1)
+				if !b.trackDownload() {
+					return fmt.Errorf("builtin embedder: closed during fallback download setup")
+				}
 				go func() {
 					defer b.dlWg.Done()
 					_, dlErr := hugot.DownloadModel(builtinModelName, b.modelsDir, opts)

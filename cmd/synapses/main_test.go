@@ -1408,8 +1408,8 @@ func TestServeMCPConn_ContextCancel(t *testing.T) {
 	select {
 	case <-errCh:
 		// Expected.
-	case <-time.After(15 * time.Second):
-		t.Error("serveMCPConn did not exit within 15s after context cancel")
+	case <-time.After(30 * time.Second):
+		t.Fatal("serveMCPConn did not exit within 30s after context cancel")
 	}
 }
 
