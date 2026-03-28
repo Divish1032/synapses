@@ -118,9 +118,13 @@ func NewDisabledClient() *SynapsesClient {
 // Used for per-repo routing in RepoBench-R: each sample gets routed to its own
 // indexed project directory.
 func (c *SynapsesClient) WithProject(project string) *SynapsesClient {
-	copy := *c
-	copy.project = project
-	return &copy
+	return &SynapsesClient{
+		endpoint:   c.endpoint,
+		project:    project,
+		authToken:  c.authToken,
+		disabled:   c.disabled,
+		httpClient: c.httpClient,
+	}
 }
 
 // PrepareContext calls get_context with mode=intent (was prepare_context before Sprint 24).
