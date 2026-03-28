@@ -37,6 +37,7 @@ func DefaultAgentConfig() AgentConfig {
 // AgentMode selects the tool set.
 type AgentMode string
 
+// Supported agent modes.
 const (
 	ModeBaseline AgentMode = "baseline"
 	ModeSynapses AgentMode = "synapses"

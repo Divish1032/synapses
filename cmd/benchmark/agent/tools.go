@@ -33,6 +33,7 @@ type BaselineExecutor struct {
 	RepoDir string
 }
 
+// Execute dispatches baseline tool calls (read_file, grep_search, etc.).
 func (e *BaselineExecutor) Execute(toolName string, input json.RawMessage) (string, error) {
 	switch toolName {
 	case "read_file":
@@ -150,6 +151,7 @@ type SynapsesExecutor struct {
 	TaskID string
 }
 
+// Execute dispatches Synapses-augmented tool calls, falling back to baseline tools.
 func (e *SynapsesExecutor) Execute(toolName string, input json.RawMessage) (string, error) {
 	switch toolName {
 	case "synapses_search":

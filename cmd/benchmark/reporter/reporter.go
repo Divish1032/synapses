@@ -95,37 +95,37 @@ func (r *Reporter) PrintRepoBenchSummary(result *RepoBenchResult) {
 func repoBenchMarkdown(result *RepoBenchResult) string {
 	var sb strings.Builder
 	sb.WriteString("# RepoBench-R Results\n\n")
-	sb.WriteString(fmt.Sprintf("**Retrieval mode:** `%s`  \n", result.RetrievalMode))
-	sb.WriteString(fmt.Sprintf("**Run timestamp:** %s  \n\n", result.Timestamp))
+	fmt.Fprintf(&sb, "**Retrieval mode:** `%s`  \n", result.RetrievalMode)
+	fmt.Fprintf(&sb, "**Run timestamp:** %s  \n\n", result.Timestamp)
 
 	sb.WriteString("## Per-Config Results\n\n")
 	sb.WriteString("| Config | Difficulty | Samples | Acc@1 | Acc@3 | Acc@5 | Acc@10 | Avg Gold Rank |\n")
 	sb.WriteString("|--------|-----------|---------|-------|-------|-------|--------|---------------|\n")
 	for _, cfg := range result.Configs {
-		sb.WriteString(fmt.Sprintf("| %s | %s | %d | %.1f%% | %.1f%% | %.1f%% | %.1f%% | %.1f |\n",
+		fmt.Fprintf(&sb, "| %s | %s | %d | %.1f%% | %.1f%% | %.1f%% | %.1f%% | %.1f |\n",
 			cfg.Config, cfg.Difficulty, cfg.Samples,
 			pct(cfg.AccAtK[1]),
 			pct(cfg.AccAtK[3]),
 			pct(cfg.AccAtK[5]),
 			pct(cfg.AccAtK[10]),
 			cfg.AvgRank,
-		))
+		)
 	}
 
 	sb.WriteString("\n## Summary (Macro Average)\n\n")
 	s := result.Summary
-	sb.WriteString(fmt.Sprintf("- **Total samples:** %d\n", s.TotalSamples))
-	sb.WriteString(fmt.Sprintf("- **Acc@1:** %.1f%%\n", pct(s.AccAtK[1])))
-	sb.WriteString(fmt.Sprintf("- **Acc@3:** %.1f%%\n", pct(s.AccAtK[3])))
-	sb.WriteString(fmt.Sprintf("- **Acc@5:** %.1f%%\n", pct(s.AccAtK[5])))
-	sb.WriteString(fmt.Sprintf("- **Acc@10:** %.1f%%\n", pct(s.AccAtK[10])))
+	fmt.Fprintf(&sb, "- **Total samples:** %d\n", s.TotalSamples)
+	fmt.Fprintf(&sb, "- **Acc@1:** %.1f%%\n", pct(s.AccAtK[1]))
+	fmt.Fprintf(&sb, "- **Acc@3:** %.1f%%\n", pct(s.AccAtK[3]))
+	fmt.Fprintf(&sb, "- **Acc@5:** %.1f%%\n", pct(s.AccAtK[5]))
+	fmt.Fprintf(&sb, "- **Acc@10:** %.1f%%\n", pct(s.AccAtK[10]))
 
 	sb.WriteString("\n## Comparison Against Published Baselines\n\n")
 	sb.WriteString("| System | Acc@5 (hard) |\n")
 	sb.WriteString("|--------|-------------|\n")
 	sb.WriteString("| BM25 baseline (RepoBench paper) | ~60% |\n")
 	sb.WriteString("| Dense retrieval, ada-002 | ~65% |\n")
-	sb.WriteString(fmt.Sprintf("| **Synapses %s** | **%.1f%%** |\n", result.RetrievalMode, pct(s.AccAtK[5])))
+	fmt.Fprintf(&sb, "| **Synapses %s** | **%.1f%%** |\n", result.RetrievalMode, pct(s.AccAtK[5]))
 
 	return sb.String()
 }
@@ -194,25 +194,25 @@ func (r *Reporter) PrintContextBenchSummary(result *ContextBenchResult) {
 func contextBenchMarkdown(result *ContextBenchResult) string {
 	var sb strings.Builder
 	sb.WriteString("# ContextBench Results\n\n")
-	sb.WriteString(fmt.Sprintf("**Run timestamp:** %s  \n", result.Timestamp))
-	sb.WriteString(fmt.Sprintf("**Total tasks:** %d  \n\n", result.TotalTasks))
+	fmt.Fprintf(&sb, "**Run timestamp:** %s  \n", result.Timestamp)
+	fmt.Fprintf(&sb, "**Total tasks:** %d  \n\n", result.TotalTasks)
 
 	sb.WriteString("## Overall Metrics\n\n")
-	sb.WriteString(fmt.Sprintf("- **Context Precision:** %.1f%%\n", result.AvgPrecision*100))
-	sb.WriteString(fmt.Sprintf("- **Context Recall:** %.1f%%\n", result.AvgRecall*100))
-	sb.WriteString(fmt.Sprintf("- **Context F1:** %.1f%%\n\n", result.AvgF1*100))
+	fmt.Fprintf(&sb, "- **Context Precision:** %.1f%%\n", result.AvgPrecision*100)
+	fmt.Fprintf(&sb, "- **Context Recall:** %.1f%%\n", result.AvgRecall*100)
+	fmt.Fprintf(&sb, "- **Context F1:** %.1f%%\n\n", result.AvgF1*100)
 
 	if len(result.PerLanguage) > 0 {
 		sb.WriteString("## Per-Language Breakdown\n\n")
 		sb.WriteString("| Language | Tasks | Precision | Recall | F1 |\n")
 		sb.WriteString("|----------|-------|-----------|--------|----|\n")
 		for _, l := range result.PerLanguage {
-			sb.WriteString(fmt.Sprintf("| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
+			fmt.Fprintf(&sb, "| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
 				l.Language, l.Tasks,
 				l.AvgPrecision*100,
 				l.AvgRecall*100,
 				l.AvgF1*100,
-			))
+			)
 		}
 	}
 
@@ -248,11 +248,11 @@ func contextBenchMarkdown(result *ContextBenchResult) string {
 			if len(short) > 20 {
 				short = "…" + short[len(short)-20:]
 			}
-			sb.WriteString(fmt.Sprintf("| %s | %s | %.1f%% | %.1f%% | %.1f%% | %d | %d | %d | %d |\n",
+			fmt.Fprintf(&sb, "| %s | %s | %.1f%% | %.1f%% | %.1f%% | %d | %d | %d | %d |\n",
 				short, repo,
 				prec*100, rec*100, f1*100,
 				gold, hits, retrieved, tools,
-			))
+			)
 		}
 	}
 
@@ -260,7 +260,7 @@ func contextBenchMarkdown(result *ContextBenchResult) string {
 	sb.WriteString("| System | Context F1 |\n")
 	sb.WriteString("|--------|------------|\n")
 	sb.WriteString("| Leaderboard avg (most entries) | <40% |\n")
-	sb.WriteString(fmt.Sprintf("| **Synapses** | **%.1f%%** |\n", result.AvgF1*100))
+	fmt.Fprintf(&sb, "| **Synapses** | **%.1f%%** |\n", result.AvgF1*100)
 
 	return sb.String()
 }
@@ -356,22 +356,22 @@ func (r *Reporter) PrintGraphBenchSummary(result *GraphBenchResult) {
 func graphBenchMarkdown(result *GraphBenchResult) string {
 	var sb strings.Builder
 	sb.WriteString("# GraphBench Results (Graph Accuracy Benchmark)\n\n")
-	sb.WriteString(fmt.Sprintf("**Run timestamp:** %s  \n", result.Timestamp))
-	sb.WriteString(fmt.Sprintf("**Total tests:** %d  \n\n", result.TotalTests))
+	fmt.Fprintf(&sb, "**Run timestamp:** %s  \n", result.Timestamp)
+	fmt.Fprintf(&sb, "**Total tests:** %d  \n\n", result.TotalTests)
 
 	sb.WriteString("## Overall Metrics\n\n")
-	sb.WriteString(fmt.Sprintf("- **Precision:** %.1f%%\n", result.Summary.Precision*100))
-	sb.WriteString(fmt.Sprintf("- **Recall:** %.1f%%\n", result.Summary.Recall*100))
-	sb.WriteString(fmt.Sprintf("- **F1:** %.1f%%\n\n", result.Summary.F1*100))
+	fmt.Fprintf(&sb, "- **Precision:** %.1f%%\n", result.Summary.Precision*100)
+	fmt.Fprintf(&sb, "- **Recall:** %.1f%%\n", result.Summary.Recall*100)
+	fmt.Fprintf(&sb, "- **F1:** %.1f%%\n\n", result.Summary.F1*100)
 
 	if len(result.ByQueryType) > 0 {
 		sb.WriteString("## By Query Type\n\n")
 		sb.WriteString("| Query Type | Tests | Precision | Recall | F1 |\n")
 		sb.WriteString("|------------|-------|-----------|--------|----|\n")
 		for _, s := range result.ByQueryType {
-			sb.WriteString(fmt.Sprintf("| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
+			fmt.Fprintf(&sb, "| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
 				s.Label, s.Tests,
-				s.Metrics.Precision*100, s.Metrics.Recall*100, s.Metrics.F1*100))
+				s.Metrics.Precision*100, s.Metrics.Recall*100, s.Metrics.F1*100)
 		}
 	}
 
@@ -380,9 +380,9 @@ func graphBenchMarkdown(result *GraphBenchResult) string {
 		sb.WriteString("| Language | Tests | Precision | Recall | F1 |\n")
 		sb.WriteString("|----------|-------|-----------|--------|----|\n")
 		for _, s := range result.ByLanguage {
-			sb.WriteString(fmt.Sprintf("| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
+			fmt.Fprintf(&sb, "| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
 				s.Label, s.Tests,
-				s.Metrics.Precision*100, s.Metrics.Recall*100, s.Metrics.F1*100))
+				s.Metrics.Precision*100, s.Metrics.Recall*100, s.Metrics.F1*100)
 		}
 	}
 
@@ -451,22 +451,22 @@ func (r *Reporter) PrintNLBenchSummary(result *NLBenchResult) {
 func nlBenchMarkdown(result *NLBenchResult) string {
 	var sb strings.Builder
 	sb.WriteString("# NLBench Results (NL Parsing Benchmark)\n\n")
-	sb.WriteString(fmt.Sprintf("**Run timestamp:** %s  \n", result.Timestamp))
-	sb.WriteString(fmt.Sprintf("**Total tests:** %d  \n\n", result.TotalTests))
+	fmt.Fprintf(&sb, "**Run timestamp:** %s  \n", result.Timestamp)
+	fmt.Fprintf(&sb, "**Total tests:** %d  \n\n", result.TotalTests)
 
 	sb.WriteString("## Overall Metrics\n\n")
-	sb.WriteString(fmt.Sprintf("- **Precision:** %.1f%%\n", result.Summary.Precision*100))
-	sb.WriteString(fmt.Sprintf("- **Recall:** %.1f%%\n", result.Summary.Recall*100))
-	sb.WriteString(fmt.Sprintf("- **F1:** %.1f%%\n\n", result.Summary.F1*100))
+	fmt.Fprintf(&sb, "- **Precision:** %.1f%%\n", result.Summary.Precision*100)
+	fmt.Fprintf(&sb, "- **Recall:** %.1f%%\n", result.Summary.Recall*100)
+	fmt.Fprintf(&sb, "- **F1:** %.1f%%\n\n", result.Summary.F1*100)
 
 	if len(result.ByQueryType) > 0 {
 		sb.WriteString("## By Query Type\n\n")
 		sb.WriteString("| Query Type | Tests | Precision | Recall | F1 |\n")
 		sb.WriteString("|------------|-------|-----------|--------|----|\n")
 		for _, s := range result.ByQueryType {
-			sb.WriteString(fmt.Sprintf("| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
+			fmt.Fprintf(&sb, "| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
 				s.Label, s.Tests,
-				s.Metrics.Precision*100, s.Metrics.Recall*100, s.Metrics.F1*100))
+				s.Metrics.Precision*100, s.Metrics.Recall*100, s.Metrics.F1*100)
 		}
 	}
 
@@ -475,9 +475,9 @@ func nlBenchMarkdown(result *NLBenchResult) string {
 		sb.WriteString("| Language | Tests | Precision | Recall | F1 |\n")
 		sb.WriteString("|----------|-------|-----------|--------|----|\n")
 		for _, s := range result.ByLanguage {
-			sb.WriteString(fmt.Sprintf("| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
+			fmt.Fprintf(&sb, "| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
 				s.Label, s.Tests,
-				s.Metrics.Precision*100, s.Metrics.Recall*100, s.Metrics.F1*100))
+				s.Metrics.Precision*100, s.Metrics.Recall*100, s.Metrics.F1*100)
 		}
 	}
 
@@ -635,19 +635,19 @@ func (r *Reporter) PrintFeatureBenchSummary(result *FeatureBenchReport) {
 func featureBenchMarkdown(result *FeatureBenchReport) string {
 	var sb strings.Builder
 	sb.WriteString("# FeatureBench Results\n\n")
-	sb.WriteString(fmt.Sprintf("- **Mode:** %s\n", result.Mode))
-	sb.WriteString(fmt.Sprintf("- **Model:** %s\n", result.Model))
-	sb.WriteString(fmt.Sprintf("- **Timestamp:** %s\n\n", result.Timestamp))
+	fmt.Fprintf(&sb, "- **Mode:** %s\n", result.Mode)
+	fmt.Fprintf(&sb, "- **Model:** %s\n", result.Model)
+	fmt.Fprintf(&sb, "- **Timestamp:** %s\n\n", result.Timestamp)
 	sb.WriteString("## Summary\n\n")
 	sb.WriteString("| Metric | Value |\n|--------|-------|\n")
-	sb.WriteString(fmt.Sprintf("| Tasks | %d |\n", result.TotalTasks))
-	sb.WriteString(fmt.Sprintf("| Patches generated | %d (%.1f%%) |\n", result.PatchCount, result.PatchRate))
-	sb.WriteString(fmt.Sprintf("| Avg turns | %.1f |\n", result.AvgTurns))
+	fmt.Fprintf(&sb, "| Tasks | %d |\n", result.TotalTasks)
+	fmt.Fprintf(&sb, "| Patches generated | %d (%.1f%%) |\n", result.PatchCount, result.PatchRate)
+	fmt.Fprintf(&sb, "| Avg turns | %.1f |\n", result.AvgTurns)
 	if len(result.ToolUsage) > 0 {
 		sb.WriteString("\n## Tool Usage\n\n")
 		sb.WriteString("| Tool | Calls |\n|------|-------|\n")
 		for name, count := range result.ToolUsage {
-			sb.WriteString(fmt.Sprintf("| %s | %d |\n", name, count))
+			fmt.Fprintf(&sb, "| %s | %d |\n", name, count)
 		}
 	}
 	sb.WriteString("\n---\n*Generated by Synapses FeatureBench runner*\n")
@@ -657,26 +657,26 @@ func featureBenchMarkdown(result *FeatureBenchReport) string {
 func sweBenchMarkdown(result *SWEBenchResult) string {
 	var sb strings.Builder
 	sb.WriteString("# SWE-bench Results\n\n")
-	sb.WriteString(fmt.Sprintf("- **Mode:** %s\n", result.Mode))
-	sb.WriteString(fmt.Sprintf("- **Model:** %s\n", result.Model))
-	sb.WriteString(fmt.Sprintf("- **Timestamp:** %s\n\n", result.Timestamp))
+	fmt.Fprintf(&sb, "- **Mode:** %s\n", result.Mode)
+	fmt.Fprintf(&sb, "- **Model:** %s\n", result.Model)
+	fmt.Fprintf(&sb, "- **Timestamp:** %s\n\n", result.Timestamp)
 
 	sb.WriteString("## Summary\n\n")
 	sb.WriteString("| Metric | Value |\n|--------|-------|\n")
-	sb.WriteString(fmt.Sprintf("| Tasks | %d |\n", result.TotalTasks))
-	sb.WriteString(fmt.Sprintf("| Patches generated | %d (%.1f%%) |\n", result.PatchCount, result.PatchRate))
-	sb.WriteString(fmt.Sprintf("| Pass@1 | %d (%.1f%%) |\n", result.PassCount, result.PassRate))
-	sb.WriteString(fmt.Sprintf("| Avg turns | %.1f |\n", result.AvgTurns))
-	sb.WriteString(fmt.Sprintf("| Avg tokens | %d |\n", result.AvgTokens))
+	fmt.Fprintf(&sb, "| Tasks | %d |\n", result.TotalTasks)
+	fmt.Fprintf(&sb, "| Patches generated | %d (%.1f%%) |\n", result.PatchCount, result.PatchRate)
+	fmt.Fprintf(&sb, "| Pass@1 | %d (%.1f%%) |\n", result.PassCount, result.PassRate)
+	fmt.Fprintf(&sb, "| Avg turns | %.1f |\n", result.AvgTurns)
+	fmt.Fprintf(&sb, "| Avg tokens | %d |\n", result.AvgTokens)
 	if result.Mode == "synapses" {
-		sb.WriteString(fmt.Sprintf("| Tool contribution rate | %.1f%% |\n", result.ToolContribRate))
+		fmt.Fprintf(&sb, "| Tool contribution rate | %.1f%% |\n", result.ToolContribRate)
 	}
 
 	if len(result.ToolUsage) > 0 {
 		sb.WriteString("\n## Tool Usage\n\n")
 		sb.WriteString("| Tool | Calls |\n|------|-------|\n")
 		for name, count := range result.ToolUsage {
-			sb.WriteString(fmt.Sprintf("| %s | %d |\n", name, count))
+			fmt.Fprintf(&sb, "| %s | %d |\n", name, count)
 		}
 	}
 

@@ -231,7 +231,7 @@ func (c *SynapsesClient) Recall(taskID, query string) (*RecallResult, error) {
 	return &RecallResult{Raw: raw, Text: raw}, nil
 }
 
-// EmbedSnippets calls the Synapses embedder via the embed_snippet tool (if
+// RankCandidates calls the Synapses embedder via the embed_snippet tool (if
 // available) or falls back to requesting the daemon to rank a list of candidate
 // snippets against a query. Used by RepoBench-R (Approach B: embedding-based
 // ranking without needing a live repo index).
