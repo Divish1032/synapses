@@ -399,7 +399,8 @@ func TestQuadRecallSearch_GraphChannel_SortsByActivation(t *testing.T) {
 // GetAllMemoryAnchorNodeIDsInSet replacing the single-anchor sort path.
 //
 // Graph: seedNode → highNode (CALLS)  → activation 0.5
-//        seedNode → lowNode  (IMPORTS) → activation 0.25
+//
+//	seedNode → lowNode  (IMPORTS) → activation 0.25
 //
 // dualAnchorMem is anchored to BOTH lowNode AND highNode.
 // singleHighMem is anchored to highNode only.

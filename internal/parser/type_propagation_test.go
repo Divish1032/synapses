@@ -328,10 +328,10 @@ class OrderService(val repo: Repository, val count: Int) {
 		varName  string
 		wantType string
 	}{
-		{"repo", "Repository"},       // constructor param
-		{"auth", "AuthService"},      // property declaration
-		{"handler", "EventHandler"},  // nullable property declaration
-		{"svc", "PaymentService"},    // function param
+		{"repo", "Repository"},      // constructor param
+		{"auth", "AuthService"},     // property declaration
+		{"handler", "EventHandler"}, // nullable property declaration
+		{"svc", "PaymentService"},   // function param
 	}
 	for _, tc := range tests {
 		if got := vt[tc.varName]; got != tc.wantType {

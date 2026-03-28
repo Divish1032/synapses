@@ -682,20 +682,20 @@ func (c *Client) GetHealthSnapshot() map[string]interface{} {
 	}
 	today := time.Now().UTC().Format("2006-01-02")
 	return map[string]interface{}{
-		"status":               "ok",
-		"events_today":         c.store.CountEventsToday(),
-		"last_rollup":          c.store.GetLastRollupTime(),
-		"collector_errors":     c.coll.WriteErrors(),
-		"collector_drop_rate":  c.coll.DropRate(),
-		"collector_hwm":        c.coll.HighWaterMark(),
-		"collector_buf_len":    c.coll.Len(),
-		"db_size_bytes":        c.store.DBSizeBytesP5(c.dbPath),
-		"errors_today":         c.store.GetErrorsToday(),
-		"graph_freshness":      c.store.GetGraphFreshnessScoreP5(today),
-		"bg_enqueued":          c.bgEnqueued.Load(),
-		"bg_dropped":           c.bgDropped.Load(),
-		"bg_panics":            c.bgPanics.Load(),
-		"bg_peak_queue_depth":  c.bgPeakQueueDepth.Load(), // P9-4
+		"status":              "ok",
+		"events_today":        c.store.CountEventsToday(),
+		"last_rollup":         c.store.GetLastRollupTime(),
+		"collector_errors":    c.coll.WriteErrors(),
+		"collector_drop_rate": c.coll.DropRate(),
+		"collector_hwm":       c.coll.HighWaterMark(),
+		"collector_buf_len":   c.coll.Len(),
+		"db_size_bytes":       c.store.DBSizeBytesP5(c.dbPath),
+		"errors_today":        c.store.GetErrorsToday(),
+		"graph_freshness":     c.store.GetGraphFreshnessScoreP5(today),
+		"bg_enqueued":         c.bgEnqueued.Load(),
+		"bg_dropped":          c.bgDropped.Load(),
+		"bg_panics":           c.bgPanics.Load(),
+		"bg_peak_queue_depth": c.bgPeakQueueDepth.Load(), // P9-4
 	}
 }
 
@@ -803,64 +803,64 @@ func (c *Client) FetchEffectiveness(projectID string, minSignals int) []EntityEf
 
 // PulseSummary is the response shape for GET /api/admin/pulse/summary.
 type PulseSummary struct {
-	Days        int                          `json:"days"`
-	Summary     *pulsestore.Summary          `json:"summary"`
-	Tools       []pulsestore.ToolStats       `json:"tools"`
-	Agents      []pulsestore.AgentStats      `json:"agents"`
-	Timeline    []pulsestore.TimelinePoint   `json:"timeline"`
-	TopEntities []pulsestore.EntityCount     `json:"top_entities"`
-	Insights    []EntityEffectiveness        `json:"insights"`
-	LLMStats    []pulsestore.AgentLLMStats   `json:"llm_stats"`
-	RuleHits    []pulsestore.RuleHitStat     `json:"rule_hits"`
+	Days        int                        `json:"days"`
+	Summary     *pulsestore.Summary        `json:"summary"`
+	Tools       []pulsestore.ToolStats     `json:"tools"`
+	Agents      []pulsestore.AgentStats    `json:"agents"`
+	Timeline    []pulsestore.TimelinePoint `json:"timeline"`
+	TopEntities []pulsestore.EntityCount   `json:"top_entities"`
+	Insights    []EntityEffectiveness      `json:"insights"`
+	LLMStats    []pulsestore.AgentLLMStats `json:"llm_stats"`
+	RuleHits    []pulsestore.RuleHitStat   `json:"rule_hits"`
 	// Phase 4 analytics extensions.
-	TopEntitiesBySavings    []pulsestore.EntitySavings        `json:"top_entities_by_savings,omitempty"`
-	CostSavingsByModel      []pulsestore.ModelCostStat        `json:"cost_savings_by_model,omitempty"`
-	AgentTokenEfficiency    []pulsestore.AgentEfficiencyStat  `json:"agent_token_efficiency,omitempty"`
-	ContextReuseRate        float64                           `json:"context_reuse_rate,omitempty"`
-	EngagementScore         float64                           `json:"engagement_score,omitempty"`
-	OnboardingLatencyMs     float64                           `json:"onboarding_latency_ms,omitempty"`
-	MultiSessionCampaigns   int                               `json:"multi_session_campaigns,omitempty"`
-	AgentToolPreferences    []pulsestore.AgentToolPref        `json:"agent_tool_preferences,omitempty"`
-	AgentEfficiencyScores   []pulsestore.AgentEfficiency      `json:"agent_efficiency_scores,omitempty"`
-	ModelComparison         []pulsestore.ModelComparisonStat  `json:"model_comparison,omitempty"`
-	ErrorRecoveryPatterns   []pulsestore.ErrorRecovery        `json:"error_recovery_patterns,omitempty"`
-	ToolPairCorrelation     []pulsestore.ToolPairStat         `json:"tool_pair_correlation,omitempty"`
-	DiscoveryToolEffective  float64                           `json:"discovery_tool_effectiveness,omitempty"`
-	MemoryTypeDistribution  map[string]int                    `json:"memory_type_distribution,omitempty"`
-	CancellationReasons     []pulsestore.CancellationStat     `json:"cancellation_reasons,omitempty"`
-	PlanComplexityVsOutcome []pulsestore.PlanComplexityStat   `json:"plan_complexity_vs_outcome,omitempty"`
-	BlockedTaskCount        int                               `json:"blocked_task_count,omitempty"`
-	MessageVolumeStats      *pulsestore.MessageVolumeStat     `json:"message_volume_stats,omitempty"`
-	CrossProjectQueryVolume int                               `json:"cross_project_query_volume,omitempty"`
-	ApprovalGateUsage       int                               `json:"approval_gate_usage,omitempty"`
-	ModelEfficiencyComparison []pulsestore.ModelEfficiency    `json:"model_efficiency_comparison,omitempty"`
-	ProjectEfficiencyComparison []pulsestore.ProjectEfficiency `json:"project_efficiency_comparison,omitempty"`
-	HypotheticalCostUSD     float64                           `json:"hypothetical_cost_usd,omitempty"`
-	WithSynapsesCostUSD     float64                           `json:"with_synapses_cost_usd,omitempty"`
-	LatencyP50Ms            float64                           `json:"latency_p50_ms,omitempty"`
-	LatencyP95Ms            float64                           `json:"latency_p95_ms,omitempty"`
-	LatencyP99Ms            float64                           `json:"latency_p99_ms,omitempty"`
-	ContextPrecision        float64                           `json:"context_precision,omitempty"`
-	ContextRecall           float64                           `json:"context_recall,omitempty"`
-	ContextF1               float64                           `json:"context_f1,omitempty"`
-	BrainCostStats          []pulsestore.BrainCostStat        `json:"brain_cost_stats,omitempty"`
-	SearchStats             *pulsestore.SearchStats           `json:"search_stats,omitempty"`
-	GraphSnapshot           *pulsestore.GraphSnapshotRow      `json:"graph_snapshot,omitempty"`
-	AvgTaskDurationMs       float64                           `json:"avg_task_duration_ms,omitempty"`
+	TopEntitiesBySavings        []pulsestore.EntitySavings       `json:"top_entities_by_savings,omitempty"`
+	CostSavingsByModel          []pulsestore.ModelCostStat       `json:"cost_savings_by_model,omitempty"`
+	AgentTokenEfficiency        []pulsestore.AgentEfficiencyStat `json:"agent_token_efficiency,omitempty"`
+	ContextReuseRate            float64                          `json:"context_reuse_rate,omitempty"`
+	EngagementScore             float64                          `json:"engagement_score,omitempty"`
+	OnboardingLatencyMs         float64                          `json:"onboarding_latency_ms,omitempty"`
+	MultiSessionCampaigns       int                              `json:"multi_session_campaigns,omitempty"`
+	AgentToolPreferences        []pulsestore.AgentToolPref       `json:"agent_tool_preferences,omitempty"`
+	AgentEfficiencyScores       []pulsestore.AgentEfficiency     `json:"agent_efficiency_scores,omitempty"`
+	ModelComparison             []pulsestore.ModelComparisonStat `json:"model_comparison,omitempty"`
+	ErrorRecoveryPatterns       []pulsestore.ErrorRecovery       `json:"error_recovery_patterns,omitempty"`
+	ToolPairCorrelation         []pulsestore.ToolPairStat        `json:"tool_pair_correlation,omitempty"`
+	DiscoveryToolEffective      float64                          `json:"discovery_tool_effectiveness,omitempty"`
+	MemoryTypeDistribution      map[string]int                   `json:"memory_type_distribution,omitempty"`
+	CancellationReasons         []pulsestore.CancellationStat    `json:"cancellation_reasons,omitempty"`
+	PlanComplexityVsOutcome     []pulsestore.PlanComplexityStat  `json:"plan_complexity_vs_outcome,omitempty"`
+	BlockedTaskCount            int                              `json:"blocked_task_count,omitempty"`
+	MessageVolumeStats          *pulsestore.MessageVolumeStat    `json:"message_volume_stats,omitempty"`
+	CrossProjectQueryVolume     int                              `json:"cross_project_query_volume,omitempty"`
+	ApprovalGateUsage           int                              `json:"approval_gate_usage,omitempty"`
+	ModelEfficiencyComparison   []pulsestore.ModelEfficiency     `json:"model_efficiency_comparison,omitempty"`
+	ProjectEfficiencyComparison []pulsestore.ProjectEfficiency   `json:"project_efficiency_comparison,omitempty"`
+	HypotheticalCostUSD         float64                          `json:"hypothetical_cost_usd,omitempty"`
+	WithSynapsesCostUSD         float64                          `json:"with_synapses_cost_usd,omitempty"`
+	LatencyP50Ms                float64                          `json:"latency_p50_ms,omitempty"`
+	LatencyP95Ms                float64                          `json:"latency_p95_ms,omitempty"`
+	LatencyP99Ms                float64                          `json:"latency_p99_ms,omitempty"`
+	ContextPrecision            float64                          `json:"context_precision,omitempty"`
+	ContextRecall               float64                          `json:"context_recall,omitempty"`
+	ContextF1                   float64                          `json:"context_f1,omitempty"`
+	BrainCostStats              []pulsestore.BrainCostStat       `json:"brain_cost_stats,omitempty"`
+	SearchStats                 *pulsestore.SearchStats          `json:"search_stats,omitempty"`
+	GraphSnapshot               *pulsestore.GraphSnapshotRow     `json:"graph_snapshot,omitempty"`
+	AvgTaskDurationMs           float64                          `json:"avg_task_duration_ms,omitempty"`
 	// Phase 5: self-refining loop, coverage & observability.
-	EntityQualityScores     []types.EntityQuality             `json:"entity_quality_scores,omitempty"`
-	RecallChannelWeights    map[string]float64                `json:"recall_channel_weights,omitempty"`
-	EffectivenessTrend      []types.DailyEffectiveness        `json:"effectiveness_trend,omitempty"`
-	ImplementationQualityGap float64                          `json:"implementation_quality_gap,omitempty"`
-	BrainEnrichmentUplift   float64                           `json:"brain_enrichment_uplift,omitempty"`
-	MemoryFailurePrevRate   float64                           `json:"memory_failure_prevention_rate,omitempty"`
-	DecayEffectiveness      types.DecayStats                  `json:"decay_effectiveness,omitempty"`
-	GraphFreshnessScoreP5   float64                           `json:"graph_freshness_score_p5,omitempty"`
-	TokenSavingsByIntent    map[string]int64                  `json:"token_savings_by_intent,omitempty"`
-	SessionPercentiles      types.SessionPercentiles          `json:"session_percentiles,omitempty"`
-	CollectorWriteErrors    int64                             `json:"collector_write_errors,omitempty"`
-	CrossSessionReuseRate   float64                           `json:"cross_session_reuse_rate,omitempty"`
-	ConcurrentAgentsMax     int                               `json:"concurrent_agents_max,omitempty"`
+	EntityQualityScores      []types.EntityQuality      `json:"entity_quality_scores,omitempty"`
+	RecallChannelWeights     map[string]float64         `json:"recall_channel_weights,omitempty"`
+	EffectivenessTrend       []types.DailyEffectiveness `json:"effectiveness_trend,omitempty"`
+	ImplementationQualityGap float64                    `json:"implementation_quality_gap,omitempty"`
+	BrainEnrichmentUplift    float64                    `json:"brain_enrichment_uplift,omitempty"`
+	MemoryFailurePrevRate    float64                    `json:"memory_failure_prevention_rate,omitempty"`
+	DecayEffectiveness       types.DecayStats           `json:"decay_effectiveness,omitempty"`
+	GraphFreshnessScoreP5    float64                    `json:"graph_freshness_score_p5,omitempty"`
+	TokenSavingsByIntent     map[string]int64           `json:"token_savings_by_intent,omitempty"`
+	SessionPercentiles       types.SessionPercentiles   `json:"session_percentiles,omitempty"`
+	CollectorWriteErrors     int64                      `json:"collector_write_errors,omitempty"`
+	CrossSessionReuseRate    float64                    `json:"cross_session_reuse_rate,omitempty"`
+	ConcurrentAgentsMax      int                        `json:"concurrent_agents_max,omitempty"`
 }
 
 // GetSummarySectioned returns a PulseSummary with only the requested sections populated.
@@ -1315,13 +1315,13 @@ func (c *Client) GetAgentEntityOverlap(days, windowMinutes int) []pulsestore.Age
 
 // AgentDrillDown is a composite view of a single agent's analytics.
 type AgentDrillDown struct {
-	AgentID        string                         `json:"agent_id"`
-	Days           int                            `json:"days"`
-	Summary        *pulsestore.Summary            `json:"summary"`
-	LearningCurve []WeeklyEfficiency              `json:"learning_curve"`
-	FirstSessions  []SessionPerformance           `json:"first_sessions"`
-	ToolPrefs      []pulsestore.AgentToolPref     `json:"tool_preferences"`
-	Efficiency     []pulsestore.AgentEfficiency    `json:"efficiency_scores"`
+	AgentID       string                       `json:"agent_id"`
+	Days          int                          `json:"days"`
+	Summary       *pulsestore.Summary          `json:"summary"`
+	LearningCurve []WeeklyEfficiency           `json:"learning_curve"`
+	FirstSessions []SessionPerformance         `json:"first_sessions"`
+	ToolPrefs     []pulsestore.AgentToolPref   `json:"tool_preferences"`
+	Efficiency    []pulsestore.AgentEfficiency `json:"efficiency_scores"`
 }
 
 // GetAgentDrillDown returns a composite view of a single agent's analytics (P12-1).

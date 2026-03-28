@@ -39,7 +39,7 @@ import (
 const (
 	nomicModelName     = "nomic-ai/nomic-embed-text-v1.5"
 	nomicOnnxFilePath  = "onnx/model_quantized.onnx" // quantized for spike (~137 MB); production uses onnx/model.onnx
-	nomicLocalOnnxFile = "model_quantized.onnx"       // hugot strips dir prefix: onnx/x.onnx → x.onnx
+	nomicLocalOnnxFile = "model_quantized.onnx"      // hugot strips dir prefix: onnx/x.onnx → x.onnx
 	matryoshkaDims     = 384
 )
 
@@ -371,7 +371,7 @@ func TestSpikeNomicEmbedTextV15(t *testing.T) {
 		outputDims, float64(info.Size())/1e6)
 	fmt.Printf("║  (b) Latency: %v avg on CPU-only Linux              ║\n", avg.Round(time.Millisecond))
 	fmt.Printf("║      1000 memories re-embed: ~%v (pool/3: ~%v)    ║\n",
-		est1000.Round(time.Second), (est1000/3).Round(time.Second))
+		est1000.Round(time.Second), (est1000 / 3).Round(time.Second))
 	fmt.Printf("║  (c) Matryoshka 384d truncation:             %s               ║\n", boolPass(cPassFail))
 	fmt.Printf("║  (d) Quality vs MiniLM — nomic(raw):  %+.1f%%  nomic(pfx): %+.1f%%  ║\n",
 		(rawGap-miniGap)/math.Max(miniGap, 0.001)*100,

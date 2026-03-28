@@ -415,15 +415,15 @@ func TestClient_BrainHealth_WithStats(t *testing.T) {
 	mockBrain := &mockBrainWithStats{
 		NullBrain: &NullBrain{},
 		stats: map[string]interface{}{
-			"ingest_calls":      int64(10),
-			"ingest_success":    int64(8),
-			"ingest_avg_ms":     int64(50),
-			"enrich_calls":      int64(5),
-			"enrich_success":    int64(5),
-			"enrich_avg_ms":     int64(100),
-			"guardian_calls":    int64(0),
-			"orchestrate_calls": int64(0),
-			"archivist_calls":   int64(0),
+			"ingest_calls":          int64(10),
+			"ingest_success":        int64(8),
+			"ingest_avg_ms":         int64(50),
+			"enrich_calls":          int64(5),
+			"enrich_success":        int64(5),
+			"enrich_avg_ms":         int64(100),
+			"guardian_calls":        int64(0),
+			"orchestrate_calls":     int64(0),
+			"archivist_calls":       int64(0),
 			"context_builder_calls": int64(0),
 		},
 	}
@@ -456,13 +456,13 @@ func TestClient_BrainHealth_WithTierStatus(t *testing.T) {
 	mockBrain := &mockBrainWithTierStatus{
 		NullBrain: &NullBrain{},
 		stats: map[string]interface{}{
-			"ingest_calls":      int64(1),
-			"ingest_success":    int64(0),
-			"ingest_avg_ms":     int64(0),
-			"enrich_calls":      int64(0),
-			"guardian_calls":    int64(0),
-			"orchestrate_calls": int64(0),
-			"archivist_calls":   int64(0),
+			"ingest_calls":          int64(1),
+			"ingest_success":        int64(0),
+			"ingest_avg_ms":         int64(0),
+			"enrich_calls":          int64(0),
+			"guardian_calls":        int64(0),
+			"orchestrate_calls":     int64(0),
+			"archivist_calls":       int64(0),
 			"context_builder_calls": int64(0),
 		},
 		tierState: map[string]TierState{
@@ -1353,15 +1353,15 @@ func TestImpl_LogDecision_WithOutcome(t *testing.T) {
 // --- impl with mocked LLM clients ---
 
 type mockLLMClient struct {
-	modelName    string
-	isAvailable  bool
-	modelPulled  bool
-	shouldError  bool
+	modelName   string
+	isAvailable bool
+	modelPulled bool
+	shouldError bool
 }
 
-func (m *mockLLMClient) ModelName() string                              { return m.modelName }
-func (m *mockLLMClient) Available(context.Context) bool                { return m.isAvailable }
-func (m *mockLLMClient) ModelPulled(context.Context) bool              { return m.modelPulled }
+func (m *mockLLMClient) ModelName() string                { return m.modelName }
+func (m *mockLLMClient) Available(context.Context) bool   { return m.isAvailable }
+func (m *mockLLMClient) ModelPulled(context.Context) bool { return m.modelPulled }
 func (m *mockLLMClient) PullModel(context.Context, io.Writer) error {
 	if m.shouldError {
 		return fmt.Errorf("mock pull error")
@@ -1550,10 +1550,10 @@ func TestImpl_WarmUpModels_WithNilClients(t *testing.T) {
 
 func TestImpl_ValidateResponse_EdgeCases(t *testing.T) {
 	tests := []struct {
-		name      string
-		response  string
-		minLen    int
-		expected  bool
+		name     string
+		response string
+		minLen   int
+		expected bool
 	}{
 		{"empty", "", 10, false},
 		{"single word", "test", 5, false},
@@ -1625,4 +1625,3 @@ func TestImpl_BrainStats_Integration(t *testing.T) {
 		t.Errorf("ingest_success: got %v, want 1", count)
 	}
 }
-

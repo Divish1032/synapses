@@ -509,8 +509,8 @@ name: myapp
 	fileID := fileNodes[0].ID
 
 	wantRefs := map[string]bool{
-		"base.yaml":             false,
-		"common/defaults.yml":   false,
+		"base.yaml":           false,
+		"common/defaults.yml": false,
 	}
 	for _, e := range g.OutEdges(fileID) {
 		if e.Type == graph.EdgeImports {

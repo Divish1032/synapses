@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SynapsesOS/synapses/internal/store"
 	pulsetypes "github.com/SynapsesOS/synapses/internal/pulse/types"
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 // ── classifyRefetchSignal ─────────────────────────────────────────────────────

@@ -99,7 +99,6 @@ func TestOpenRecoverCorruptKnowledgeDB(t *testing.T) {
 
 }
 
-
 // TestOpenRecoverCorruptKnowledgeDB_WithWALSidecar verifies that a leftover
 // WAL file from a corrupt knowledge.db is cleaned up during recovery.
 // This is the critical production scenario: WAL checkpoint replay against
@@ -209,4 +208,3 @@ func TestOpenHealthyDB(t *testing.T) {
 		t.Error("knowledge.db.corrupt should not exist for a healthy DB")
 	}
 }
-

@@ -314,9 +314,9 @@ func TestExtractPackageName(t *testing.T) {
 	}{
 		{"werkzeug.serving.run_simple", "src/flask/app.py", "werkzeug"},
 		{"click.command", "src/flask/cli.py", "click"},
-		{"Flask.run", "src/flask/app.py", ""},         // same package
+		{"Flask.run", "src/flask/app.py", ""}, // same package
 		{"json.dumps", "src/flask/app.py", "json"},
-		{"simple_func", "src/flask/app.py", ""},        // no dots
+		{"simple_func", "src/flask/app.py", ""}, // no dots
 	}
 	for _, tt := range tests {
 		got := extractPackageName(tt.callee, tt.queryFile)

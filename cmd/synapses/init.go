@@ -454,7 +454,6 @@ func detectCursor(home string) bool {
 	}
 }
 
-
 func detectWindsurf(home string) bool {
 	switch runtime.GOOS {
 	case "darwin":

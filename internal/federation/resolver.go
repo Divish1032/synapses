@@ -76,7 +76,7 @@ type FederatedContext struct {
 	Entity    string             `json:"entity"`
 	NodeCount int                `json:"node_count"`
 	Nodes     []graph.CarvedNode `json:"nodes"`
-	Edges     []*graph.Edge     `json:"edges,omitempty"`
+	Edges     []*graph.Edge      `json:"edges,omitempty"`
 }
 
 // BrainSummaryProvider retrieves brain summaries for cross-project entities.

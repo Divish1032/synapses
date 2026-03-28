@@ -7,8 +7,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/SynapsesOS/synapses/internal/benchmark"
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/SynapsesOS/synapses/internal/benchmark"
 )
 
 // handleBenchmark runs one or all built-in benchmark scenarios against the

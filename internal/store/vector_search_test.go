@@ -17,7 +17,7 @@ func TestTopKHeap_Basic(t *testing.T) {
 	h.tryPush("a", 0.5, false)
 	h.tryPush("b", 0.9, false)
 	h.tryPush("c", 0.7, false)
-	h.tryPush("d", 0.3, false) // should NOT enter (below min of 0.5)
+	h.tryPush("d", 0.3, false)  // should NOT enter (below min of 0.5)
 	h.tryPush("e", 0.95, false) // should replace "a" (0.5)
 
 	if h.Len() != 3 {

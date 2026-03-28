@@ -7,9 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/store"
-	"golang.org/x/sync/errgroup"
 )
 
 // DriftDetector handles cross-project dependency drift detection.
@@ -45,8 +46,8 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 	}
 
 	var (
-		resultsMu  sync.Mutex
-		allAlerts  []DriftAlert
+		resultsMu sync.Mutex
+		allAlerts []DriftAlert
 	)
 
 	eg, egCtx := errgroup.WithContext(ctx)

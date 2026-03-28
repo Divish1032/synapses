@@ -309,7 +309,7 @@ func TestDeleteMemoryEmbeddings_RemovesRows(t *testing.T) {
 		t.Fatalf("expected 1 before delete, got %d", count)
 	}
 
-	if err := testDeleteMemoryEmbeddings(st,[]string{memID}); err != nil {
+	if err := testDeleteMemoryEmbeddings(st, []string{memID}); err != nil {
 		t.Fatalf("DeleteMemoryEmbeddings: %v", err)
 	}
 	if count := testMemoryEmbeddingCount(st); count != 0 {
@@ -320,7 +320,7 @@ func TestDeleteMemoryEmbeddings_RemovesRows(t *testing.T) {
 func TestDeleteMemoryEmbeddings_EmptyIDs_Noop(t *testing.T) {
 	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
-	err := testDeleteMemoryEmbeddings(st,nil)
+	err := testDeleteMemoryEmbeddings(st, nil)
 	if err != nil {
 		t.Errorf("expected nil error for empty IDs, got: %v", err)
 	}
@@ -332,10 +332,10 @@ func TestMemoryVectorSearch_ReturnsMostSimilar(t *testing.T) {
 	ids := seedMultipleMemories(t, st)
 
 	// Embed with distinct directions.
-	_ = st.UpsertMemoryEmbedding(ids[0], "test", []float32{1, 0, 0, 0})   // auth
-	_ = st.UpsertMemoryEmbedding(ids[1], "test", []float32{0, 1, 0, 0})   // cache
-	_ = st.UpsertMemoryEmbedding(ids[2], "test", []float32{0, 0, 1, 0})   // database
-	_ = st.UpsertMemoryEmbedding(ids[3], "test", []float32{0, 0, 0, 1})   // payment
+	_ = st.UpsertMemoryEmbedding(ids[0], "test", []float32{1, 0, 0, 0}) // auth
+	_ = st.UpsertMemoryEmbedding(ids[1], "test", []float32{0, 1, 0, 0}) // cache
+	_ = st.UpsertMemoryEmbedding(ids[2], "test", []float32{0, 0, 1, 0}) // database
+	_ = st.UpsertMemoryEmbedding(ids[3], "test", []float32{0, 0, 0, 1}) // payment
 
 	// Query closest to auth.
 	results, err := st.MemoryVectorSearchWithThreshold([]float32{0.9, 0.1, 0, 0}, 5, 0.0)
@@ -714,7 +714,7 @@ func TestDeleteMemoryEmbeddings_LargeBatch(t *testing.T) {
 		t.Fatalf("expected 550 embeddings, got %d", count)
 	}
 
-	if err := testDeleteMemoryEmbeddings(st,ids); err != nil {
+	if err := testDeleteMemoryEmbeddings(st, ids); err != nil {
 		t.Fatalf("DeleteMemoryEmbeddings large batch: %v", err)
 	}
 	if count := testMemoryEmbeddingCount(st); count != 0 {
@@ -987,7 +987,7 @@ func TestGetMemoryIDsByAnchorNodes_UnknownNodeReturnsEmpty(t *testing.T) {
 func TestGetStaleEmbeddingMemoryIDs_EmptyStore(t *testing.T) {
 	t.Parallel()
 	st, _ := openMemEmbedTestStore(t)
-	ids, err := testGetStaleEmbeddingMemoryIDs(st,50)
+	ids, err := testGetStaleEmbeddingMemoryIDs(st, 50)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1008,7 +1008,7 @@ func TestGetStaleEmbeddingMemoryIDs_ReturnsStaleOnly(t *testing.T) {
 	_ = st.UpsertMemoryEmbedding(staleID, "test", []float32{0, 1})
 	_ = st.MarkMemoryEmbeddingsStale([]string{staleID})
 
-	ids, err := testGetStaleEmbeddingMemoryIDs(st,50)
+	ids, err := testGetStaleEmbeddingMemoryIDs(st, 50)
 	if err != nil {
 		t.Fatalf("GetStaleEmbeddingMemoryIDs: %v", err)
 	}
@@ -1039,7 +1039,7 @@ func TestGetStaleEmbeddingMemoryIDs_StaleMemoryExcluded(t *testing.T) {
 	// Mark the memory record itself stale (anchor removed) — no point re-embedding it.
 	st.knowledgeDB.Exec(`UPDATE memories SET stale = 1 WHERE id = ?`, memID)
 
-	ids, err := testGetStaleEmbeddingMemoryIDs(st,50)
+	ids, err := testGetStaleEmbeddingMemoryIDs(st, 50)
 	if err != nil {
 		t.Fatalf("GetStaleEmbeddingMemoryIDs: %v", err)
 	}
@@ -1070,7 +1070,7 @@ func TestGetStaleEmbeddingMemoryIDs_LimitRespected(t *testing.T) {
 			id, vecToBlob([]float32{float32(i), 0}), now.Unix())
 	}
 
-	ids, err := testGetStaleEmbeddingMemoryIDs(st,5)
+	ids, err := testGetStaleEmbeddingMemoryIDs(st, 5)
 	if err != nil {
 		t.Fatalf("GetStaleEmbeddingMemoryIDs: %v", err)
 	}

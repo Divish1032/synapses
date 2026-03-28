@@ -413,8 +413,8 @@ func TestHandleAnnotateNode_MissingNodeID(t *testing.T) {
 func TestHandleAnnotateNode_ValidNodeID(t *testing.T) {
 	s, loginID, _ := newPopulatedServer(t)
 	req := callTool(map[string]any{
-		"node_id": string(loginID),
-		"note":    "handles user authentication",
+		"node_id":  string(loginID),
+		"note":     "handles user authentication",
 		"agent_id": "test-agent",
 	})
 	result, err := s.handleAnnotateNode(ctx, req)
@@ -443,7 +443,7 @@ func TestHandleGetContext_WithTaskID(t *testing.T) {
 	req := callTool(map[string]any{
 		"entity":  "AuthLogin",
 		"task_id": "task-123",
-		"format": "json",
+		"format":  "json",
 	})
 	result, err := s.handleGetContext(ctx, req)
 	if err != nil {
@@ -468,9 +468,9 @@ func TestHandleUpsertRule_MissingID(t *testing.T) {
 func TestHandleUpsertRule_ValidRule(t *testing.T) {
 	s := newTestServer(t)
 	req := callTool(map[string]any{
-		"rule_id":     "no-direct-db",
-		"description": "Handlers must not call DB directly",
-		"severity":    "error",
+		"rule_id":           "no-direct-db",
+		"description":       "Handlers must not call DB directly",
+		"severity":          "error",
 		"from_file_pattern": "pkg/api/*",
 		"to_file_pattern":   "pkg/db/*",
 	})
@@ -826,10 +826,10 @@ func TestHandleRecall_BrowseWithTags(t *testing.T) {
 	s := newTestServer(t)
 	// Remember an episode with tags.
 	_, _ = s.handleRemember(ctx, callTool(map[string]any{
-		"agent_id":   "a",
-		"decision":   "use redis",
-		"outcome":    "success",
-		"tags":       `["caching","performance"]`,
+		"agent_id": "a",
+		"decision": "use redis",
+		"outcome":  "success",
+		"tags":     `["caching","performance"]`,
 	}))
 	res, err := s.handleRecall(ctx, callTool(map[string]any{
 		"tags": "caching",
@@ -1025,7 +1025,7 @@ func TestHandleGetContext_WithHelpfulFeedback(t *testing.T) {
 		"entity":   "AuthLogin",
 		"agent_id": "feedback-agent",
 		"helpful":  true,
-		"format": "json",
+		"format":   "json",
 	})
 	result, err := s.handleGetContext(ctx, req)
 	if err != nil {
@@ -1040,7 +1040,7 @@ func TestHandleGetContext_WithHelpfulFalse(t *testing.T) {
 		"entity":   "AuthLogin",
 		"agent_id": "feedback-agent2",
 		"helpful":  false,
-		"format": "json",
+		"format":   "json",
 	})
 	result, err := s.handleGetContext(ctx, req)
 	if err != nil {
@@ -2063,7 +2063,7 @@ func TestHandleGetContext_WithDepthAndBudget(t *testing.T) {
 		"entity":       "AuthLogin",
 		"depth":        float64(2),
 		"token_budget": float64(1000),
-		"format": "json",
+		"format":       "json",
 	}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "root")
@@ -2169,7 +2169,7 @@ func TestHandleGetContext_WithLinkedTaskNodes(t *testing.T) {
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":  "AuthLogin",
 		"task_id": taskID,
-		"format": "json",
+		"format":  "json",
 	}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "root")
@@ -2626,7 +2626,7 @@ func TestHandleGetContext_IncludeInferred_FiltersRouteNodes(t *testing.T) {
 	resTrue, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":           "GetUsers",
 		"include_inferred": true,
-		"format": "json",
+		"format":           "json",
 	}))
 	if err != nil {
 		t.Fatalf("include_inferred=true: unexpected error: %v", err)
@@ -2649,7 +2649,7 @@ func TestHandleGetContext_IncludeInferred_FiltersRouteNodes(t *testing.T) {
 	resFalse, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":           "GetUsers",
 		"include_inferred": false,
-		"format": "json",
+		"format":           "json",
 	}))
 	if err != nil {
 		t.Fatalf("include_inferred=false: unexpected error: %v", err)

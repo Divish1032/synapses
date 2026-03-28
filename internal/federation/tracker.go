@@ -319,10 +319,10 @@ func getAliasPattern(alias string) *regexp.Regexp {
 func (d *DeterministicDetector) extractGoRefs(content string) []crossProjectRef {
 	// Step 1: Extract imports with their aliases.
 	type goImport struct {
-		alias      string // explicit alias, or last segment of path
-		path       string // full import path
-		fedAlias   string // federation alias if matches a sibling
-		fedPrefix  string // matched module prefix
+		alias     string // explicit alias, or last segment of path
+		path      string // full import path
+		fedAlias  string // federation alias if matches a sibling
+		fedPrefix string // matched module prefix
 	}
 
 	var imports []goImport

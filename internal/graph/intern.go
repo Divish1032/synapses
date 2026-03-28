@@ -146,4 +146,3 @@ func (p *StringPool) internGhost(s string) StringID {
 	}
 	return StringID(id)
 }
-

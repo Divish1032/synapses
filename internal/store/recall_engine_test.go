@@ -1150,4 +1150,3 @@ func TestConvexMerge_EmptyScoresSlice(t *testing.T) {
 		t.Errorf("got %d results from empty scores, want 0", len(ids))
 	}
 }
-

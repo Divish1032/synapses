@@ -619,14 +619,14 @@ func (s *Server) handleDiscoverTools(ctx context.Context, req mcp.CallToolReques
 
 	// Format output with status indicator (Phase 6: tool discoverability).
 	type toolMatch struct {
-		Name             string     `json:"name"`
-		Category         string     `json:"category"`
-		Description      string     `json:"description"`
-		Example          string     `json:"example"`
-		Score            int        `json:"score,omitempty"`
-		SimilarityScore  float32    `json:"similarity_score,omitempty"`
-		Status           string     `json:"status"`
-		Breakdown        *breakdown `json:"breakdown,omitempty"`
+		Name            string     `json:"name"`
+		Category        string     `json:"category"`
+		Description     string     `json:"description"`
+		Example         string     `json:"example"`
+		Score           int        `json:"score,omitempty"`
+		SimilarityScore float32    `json:"similarity_score,omitempty"`
+		Status          string     `json:"status"`
+		Breakdown       *breakdown `json:"breakdown,omitempty"`
 	}
 
 	// ── Semantic path ──────────────────────────────────────────────────────────

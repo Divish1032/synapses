@@ -28,8 +28,8 @@ type Message struct {
 // Read messages are cheap to discard early; unread messages are kept longer
 // so agents that are temporarily offline don't miss broadcasts.
 const (
-	msgReadTTL   = 24 * time.Hour      // prune already-read messages after 24 h
-	msgUnreadTTL = 7 * 24 * time.Hour  // prune unread messages after 7 days
+	msgReadTTL   = 24 * time.Hour     // prune already-read messages after 24 h
+	msgUnreadTTL = 7 * 24 * time.Hour // prune unread messages after 7 days
 )
 
 func (s *Store) SendMessage(fromAgent, toAgent, topic, payload, projectID string) (string, error) {

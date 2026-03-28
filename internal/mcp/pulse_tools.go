@@ -18,7 +18,7 @@ type contextDeliveryExtras struct {
 	NodesVisited         int
 	AnnotationsIncluded  bool
 	OutputFormat         string
-	EdgeTypesDist        string  // JSON map of edge type -> count
+	EdgeTypesDist        string // JSON map of edge type -> count
 	TraversalDurationMs  float64
 	GraphSizeAtTraversal int
 	DetailLevel          string

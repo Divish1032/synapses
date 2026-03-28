@@ -60,7 +60,7 @@ type Memory struct {
 	EntityID       string `json:"entity_id,omitempty"`
 	AgentID        string `json:"agent_id,omitempty"`
 	TaskID         string `json:"task_id,omitempty"`
-	Tags           string `json:"tags,omitempty"`           // JSON array string
+	Tags           string `json:"tags,omitempty"` // JSON array string
 	CreatedAt      string `json:"created_at"`
 	ExpiresAt      string `json:"expires_at,omitempty"`
 	LastAccessedAt string `json:"last_accessed_at,omitempty"`

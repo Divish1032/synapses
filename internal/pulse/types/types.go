@@ -27,26 +27,26 @@ type ToolCallEvent struct {
 // ContextDeliveryEvent is sent for context-delivery tools (get_context,
 // get_file_context) and carries token savings data.
 type ContextDeliveryEvent struct {
-	ToolName        string `json:"tool_name"`
-	AgentID         string `json:"agent_id,omitempty"`
-	ProjectID       string `json:"project_id,omitempty"`
-	Entity          string `json:"entity,omitempty"`
-	File            string `json:"file,omitempty"`
-	ResponseBytes   int    `json:"response_bytes"`
-	ResponseTokens  int    `json:"response_tokens"`
-	BaselineTokens  int    `json:"baseline_tokens"`
-	NodesDelivered  int    `json:"nodes_delivered"`
-	NodesPruned     int    `json:"nodes_pruned"`
-	EdgesDelivered  int    `json:"edges_delivered"`
-	Truncated       bool   `json:"truncated"`
-	DurationMs      int64  `json:"duration_ms"`
-	CacheHit        bool   `json:"cache_hit"`
-	BrainEnriched   bool   `json:"brain_enriched"`
-	SessionID       string `json:"session_id,omitempty"`
-	Intent          string `json:"intent,omitempty"`
-	DepthRequested  int    `json:"depth_requested,omitempty"`
-	DepthAchieved   int    `json:"depth_achieved,omitempty"`
-	NodesVisited    int    `json:"nodes_visited,omitempty"`
+	ToolName       string `json:"tool_name"`
+	AgentID        string `json:"agent_id,omitempty"`
+	ProjectID      string `json:"project_id,omitempty"`
+	Entity         string `json:"entity,omitempty"`
+	File           string `json:"file,omitempty"`
+	ResponseBytes  int    `json:"response_bytes"`
+	ResponseTokens int    `json:"response_tokens"`
+	BaselineTokens int    `json:"baseline_tokens"`
+	NodesDelivered int    `json:"nodes_delivered"`
+	NodesPruned    int    `json:"nodes_pruned"`
+	EdgesDelivered int    `json:"edges_delivered"`
+	Truncated      bool   `json:"truncated"`
+	DurationMs     int64  `json:"duration_ms"`
+	CacheHit       bool   `json:"cache_hit"`
+	BrainEnriched  bool   `json:"brain_enriched"`
+	SessionID      string `json:"session_id,omitempty"`
+	Intent         string `json:"intent,omitempty"`
+	DepthRequested int    `json:"depth_requested,omitempty"`
+	DepthAchieved  int    `json:"depth_achieved,omitempty"`
+	NodesVisited   int    `json:"nodes_visited,omitempty"`
 	// Bug 12 — DQ-B.6: whether annotation data was included in delivery.
 	AnnotationsIncluded bool `json:"annotations_included,omitempty"`
 	// Bug 13 — DQ-B.7: serialization format used for this delivery.
@@ -60,7 +60,7 @@ type ContextDeliveryEvent struct {
 	// P5 — DQ-B.4: detail level ("full", "compact", "").
 	DetailLevel string `json:"detail_level,omitempty"`
 	// P5 — DQ-B.5: architectural rules matched and violations found.
-	RulesMatched   int `json:"rules_matched,omitempty"`
+	RulesMatched    int `json:"rules_matched,omitempty"`
 	ViolationsFound int `json:"violations_found,omitempty"`
 	// P5 — DQ-B.8: whether entity was found or not.
 	EntityFound bool `json:"entity_found,omitempty"`
@@ -76,10 +76,10 @@ type ContextDeliveryEvent struct {
 
 // SessionEvent is sent when an agent session starts or ends.
 type SessionEvent struct {
-	AgentID      string `json:"agent_id"`
-	ProjectID    string `json:"project_id,omitempty"`
-	Event        string `json:"event"` // "start" | "end" | "task_done"
-	SessionID    string `json:"session_id,omitempty"`
+	AgentID   string `json:"agent_id"`
+	ProjectID string `json:"project_id,omitempty"`
+	Event     string `json:"event"` // "start" | "end" | "task_done"
+	SessionID string `json:"session_id,omitempty"`
 	// Bug 16 — DQ-C.6: record which version of the agent started the session.
 	AgentVersion string `json:"agent_version,omitempty"`
 }
@@ -87,12 +87,12 @@ type SessionEvent struct {
 // OutcomeSignalEvent is sent for passive outcome signals (R29).
 // SignalType: "correction", "escalation", "replan", "task_done", "task_cancelled", "task_abandoned".
 type OutcomeSignalEvent struct {
-	ProjectID       string `json:"project_id,omitempty"`
-	AgentID         string `json:"agent_id,omitempty"`
-	Entity          string `json:"entity,omitempty"`
-	SignalType      string `json:"signal_type"`
-	Count           int    `json:"count,omitempty"`
-	SessionID       string `json:"session_id,omitempty"`
+	ProjectID  string `json:"project_id,omitempty"`
+	AgentID    string `json:"agent_id,omitempty"`
+	Entity     string `json:"entity,omitempty"`
+	SignalType string `json:"signal_type"`
+	Count      int    `json:"count,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
 	// Bug 17 — DQ-D.3: how many tool calls occurred between context delivery and this signal.
 	ToolCallsBetween int `json:"tool_calls_between,omitempty"`
 	// P5 — DQ-D.2: time from most recent context delivery to this signal.
@@ -140,7 +140,7 @@ const (
 // EntityEffectiveness is returned by GetEffectiveness for a single entity.
 type EntityEffectiveness struct {
 	Entity     string  `json:"entity"`
-	Score      float64 `json:"score"`     // 0.0–1.0; higher = context was helpful
+	Score      float64 `json:"score"` // 0.0–1.0; higher = context was helpful
 	Signals    int     `json:"signals"`
 	Positives  int     `json:"positives"`
 	Negatives  int     `json:"negatives"`
@@ -234,21 +234,21 @@ type ReparseEvent struct {
 
 // GraphSnapshotEvent captures a point-in-time snapshot of graph topology metrics.
 type GraphSnapshotEvent struct {
-	SnapshotType       string  `json:"snapshot_type"` // "full" | "delta"
-	NodesTotal         int     `json:"nodes_total"`
-	EdgesTotal         int     `json:"edges_total"`
-	EdgesCalls         int     `json:"edges_calls"`
-	Density            float64 `json:"density"`
-	OrphanNodes        int     `json:"orphan_nodes"`
-	CrossFileEdgePct   float64 `json:"cross_file_edge_pct"`
-	MaxFanin           int     `json:"max_fanin"`
-	MaxFanout          int     `json:"max_fanout"`
-	FanInP50           int     `json:"fan_in_p50"`
-	FanInP95           int     `json:"fan_in_p95"`
-	FanOutP50          int     `json:"fan_out_p50"`
-	FanOutP95          int     `json:"fan_out_p95"`
-	NodeTypeDistJSON   string  `json:"node_type_distribution"` // JSON map
-	ProjectID          string  `json:"project_id"`
+	SnapshotType     string  `json:"snapshot_type"` // "full" | "delta"
+	NodesTotal       int     `json:"nodes_total"`
+	EdgesTotal       int     `json:"edges_total"`
+	EdgesCalls       int     `json:"edges_calls"`
+	Density          float64 `json:"density"`
+	OrphanNodes      int     `json:"orphan_nodes"`
+	CrossFileEdgePct float64 `json:"cross_file_edge_pct"`
+	MaxFanin         int     `json:"max_fanin"`
+	MaxFanout        int     `json:"max_fanout"`
+	FanInP50         int     `json:"fan_in_p50"`
+	FanInP95         int     `json:"fan_in_p95"`
+	FanOutP50        int     `json:"fan_out_p50"`
+	FanOutP95        int     `json:"fan_out_p95"`
+	NodeTypeDistJSON string  `json:"node_type_distribution"` // JSON map
+	ProjectID        string  `json:"project_id"`
 	// Bug 58 — PIPE-B6: ratio of tombstoned (deleted) nodes to total nodes.
 	TombstoneRatio float64 `json:"tombstone_ratio,omitempty"`
 	// Bug 59 — PIPE-B8: JSON map of node provenance (parser, inferred, manual).
@@ -263,7 +263,7 @@ type GraphSnapshotEvent struct {
 
 // EmbeddingEvent records the outcome of an EmbedAllMemories batch operation.
 type EmbeddingEvent struct {
-	Trigger     string `json:"trigger"`      // "startup" | "reparse" | "manual"
+	Trigger     string `json:"trigger"` // "startup" | "reparse" | "manual"
 	Count       int    `json:"count"`
 	Errors      int    `json:"errors"`
 	DurationMs  int64  `json:"duration_ms"`
@@ -293,9 +293,9 @@ type GuardEvent struct {
 
 // MemoryOperationEvent tracks memory(action=search) hits/misses and memory writes.
 type MemoryOperationEvent struct {
-	Operation   string `json:"operation"`    // "recall_hit" | "recall_miss" | "write" | "anchor_invalidated" | "cross_session_hit" | "invalidated_cascade"
-	Tier        string `json:"tier"`         // "episodic" | "entity" | "project"
-	Source      string `json:"source"`       // "manual" | "auto"
+	Operation   string `json:"operation"` // "recall_hit" | "recall_miss" | "write" | "anchor_invalidated" | "cross_session_hit" | "invalidated_cascade"
+	Tier        string `json:"tier"`      // "episodic" | "entity" | "project"
+	Source      string `json:"source"`    // "manual" | "auto"
 	ResultCount int    `json:"result_count"`
 	AgentID     string `json:"agent_id,omitempty"`
 	ProjectID   string `json:"project_id,omitempty"`
@@ -313,8 +313,8 @@ type MemoryOperationEvent struct {
 
 // ValidationEvent tracks outcomes of validate (phase=pre/post/list/full/safety).
 type ValidationEvent struct {
-	ToolName       string `json:"tool_name"`              // "validate" (with phase qualifier)
-	Status         string `json:"status"`                 // "ok" | "violations_found" | "pass"
+	ToolName       string `json:"tool_name"` // "validate" (with phase qualifier)
+	Status         string `json:"status"`    // "ok" | "violations_found" | "pass"
 	ViolationCount int    `json:"violation_count"`
 	SafetyStatus   string `json:"safety_status,omitempty"` // "clear" | "warning"
 	RuleIDs        string `json:"rule_ids,omitempty"`      // JSON array of config.Violation.RuleID strings
@@ -354,7 +354,7 @@ type SearchEvent struct {
 	AgentID     string `json:"agent_id,omitempty"`
 	ProjectID   string `json:"project_id,omitempty"`
 	Query       string `json:"query,omitempty"`
-	Mode        string `json:"mode,omitempty"`   // "semantic", "exact", "hybrid", "discover", "call_chain", "impact", "doc_lookup"
+	Mode        string `json:"mode,omitempty"` // "semantic", "exact", "hybrid", "discover", "call_chain", "impact", "doc_lookup"
 	ResultCount int    `json:"result_count"`
 	DurationMs  int64  `json:"duration_ms"`
 	CacheHit    bool   `json:"cache_hit"`
@@ -461,8 +461,8 @@ type DailyEffectiveness struct {
 
 // WeeklyEfficiency holds per-week agent efficiency metrics (SA-B2).
 type WeeklyEfficiency struct {
-	WeekStart       string  `json:"week_start"`
-	TasksPerSession float64 `json:"tasks_per_session"`
+	WeekStart        string  `json:"week_start"`
+	TasksPerSession  float64 `json:"tasks_per_session"`
 	ToolCallsPerTask float64 `json:"tool_calls_per_task"`
 }
 
@@ -477,31 +477,31 @@ type SessionPerformance struct {
 
 // MonthlyROI holds monthly ROI report data (ROI-F5).
 type MonthlyROI struct {
-	TotalTokensSaved   int64   `json:"total_tokens_saved"`
-	TotalCostSavedUSD  float64 `json:"total_cost_saved_usd"`
-	TotalSessions      int     `json:"total_sessions"`
-	TotalTasksCompleted int    `json:"total_tasks_completed"`
-	AvgDailyAgents     float64 `json:"avg_daily_agents"`
-	AvgContextHitRate  float64 `json:"avg_context_hit_rate"`
-	BestWeek           string  `json:"best_week"`
-	WorstWeek          string  `json:"worst_week"`
+	TotalTokensSaved    int64   `json:"total_tokens_saved"`
+	TotalCostSavedUSD   float64 `json:"total_cost_saved_usd"`
+	TotalSessions       int     `json:"total_sessions"`
+	TotalTasksCompleted int     `json:"total_tasks_completed"`
+	AvgDailyAgents      float64 `json:"avg_daily_agents"`
+	AvgContextHitRate   float64 `json:"avg_context_hit_rate"`
+	BestWeek            string  `json:"best_week"`
+	WorstWeek           string  `json:"worst_week"`
 }
 
 // DecayStats holds recall hit rates bucketed by memory age (ROI-D4).
 type DecayStats struct {
-	HitRateUnder7d  float64 `json:"hit_rate_under_7d"`
-	HitRate7to30d   float64 `json:"hit_rate_7_to_30d"`
-	HitRateOver30d  float64 `json:"hit_rate_over_30d"`
+	HitRateUnder7d float64 `json:"hit_rate_under_7d"`
+	HitRate7to30d  float64 `json:"hit_rate_7_to_30d"`
+	HitRateOver30d float64 `json:"hit_rate_over_30d"`
 }
 
 // SessionPercentiles holds tools/calls-per-session distribution (SA-A3).
 type SessionPercentiles struct {
-	ToolsP50  float64 `json:"tools_p50"`
-	ToolsP95  float64 `json:"tools_p95"`
-	ToolsP99  float64 `json:"tools_p99"`
-	CallsP50  float64 `json:"calls_p50"`
-	CallsP95  float64 `json:"calls_p95"`
-	CallsP99  float64 `json:"calls_p99"`
+	ToolsP50 float64 `json:"tools_p50"`
+	ToolsP95 float64 `json:"tools_p95"`
+	ToolsP99 float64 `json:"tools_p99"`
+	CallsP50 float64 `json:"calls_p50"`
+	CallsP95 float64 `json:"calls_p95"`
+	CallsP99 float64 `json:"calls_p99"`
 }
 
 // DurationBuckets holds session duration percentiles (DQ-C.2).

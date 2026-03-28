@@ -484,5 +484,3 @@ func TestHandleUpsertRule_BlocksGeneratedContextSource(t *testing.T) {
 	}))
 	mustErrorResult(t, res, err)
 }
-
-

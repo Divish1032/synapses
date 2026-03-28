@@ -34,12 +34,12 @@ func TestLooksLikeSecret_RegexPatterns(t *testing.T) {
 		line string
 		want bool
 	}{
-		{`apiKey = "sk-abc123def456ghi789"`, true},                      // generic assignment
-		{`postgres://user:pass@host:5432/db`, true},                     // connection string
-		{`AKIAIOSFODNN7EXAMPLE`, true},                                  // AWS key
-		{`ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh1234`, true},           // GitHub token
-		{`sk_live_abcdefghij0123456789`, true},                          // Stripe key
-		{`Authorization: "Bearer eyJhbGciOi..."`, true},                 // bearer
+		{`apiKey = "sk-abc123def456ghi789"`, true},           // generic assignment
+		{`postgres://user:pass@host:5432/db`, true},          // connection string
+		{`AKIAIOSFODNN7EXAMPLE`, true},                       // AWS key
+		{`ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh1234`, true}, // GitHub token
+		{`sk_live_abcdefghij0123456789`, true},               // Stripe key
+		{`Authorization: "Bearer eyJhbGciOi..."`, true},      // bearer
 		{`const maxRetries = 3`, false},
 		{`import "net/http"`, false},
 	}

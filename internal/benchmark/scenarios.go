@@ -494,12 +494,12 @@ func runMemoryRecall(g *graph.Graph, st *store.Store) ([]QueryResult, error) {
 	for i, tm := range memories {
 		id := fmt.Sprintf("bench-recall-%d-%d", i, time.Now().UnixNano())
 		m := store.Memory{
-			ID:      id,
-			Tier:    store.TierProject,
-			AgentID: "benchmark", // tags events as benchmark noise, not real agent activity
-			Content: tm.content,
-			Source:  "benchmark",
-			Tags:    `["benchmark"]`,
+			ID:        id,
+			Tier:      store.TierProject,
+			AgentID:   "benchmark", // tags events as benchmark noise, not real agent activity
+			Content:   tm.content,
+			Source:    "benchmark",
+			Tags:      `["benchmark"]`,
 			ExpiresAt: shortExpiry,
 		}
 		insertedID, err := st.InsertMemory(m)

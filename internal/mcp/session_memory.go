@@ -20,14 +20,14 @@ import (
 
 // endSessionResult is the response from end_session.
 type endSessionResult struct {
-	Status              string                  `json:"status"`
-	AgentID             string                  `json:"agent_id"`
-	SessionDuration     string                  `json:"session_duration,omitempty"`
-	MemoriesSaved       int                     `json:"memories_saved"`
-	SessionSummary      *sessionSummary         `json:"session_summary,omitempty"`
-	MemoriesExpired     int64                   `json:"memories_expired"`
-	Retrospective       *store.ToolCallSummary  `json:"retrospective,omitempty"`
-	EffectivenessReport *EffectivenessReport    `json:"effectiveness_report,omitempty"`
+	Status              string                 `json:"status"`
+	AgentID             string                 `json:"agent_id"`
+	SessionDuration     string                 `json:"session_duration,omitempty"`
+	MemoriesSaved       int                    `json:"memories_saved"`
+	SessionSummary      *sessionSummary        `json:"session_summary,omitempty"`
+	MemoriesExpired     int64                  `json:"memories_expired"`
+	Retrospective       *store.ToolCallSummary `json:"retrospective,omitempty"`
+	EffectivenessReport *EffectivenessReport   `json:"effectiveness_report,omitempty"`
 }
 
 // EffectivenessReport summarises session quality and compares to recent history (Sprint 15 #5).
@@ -285,8 +285,8 @@ func (s *Server) handleEndSession(
 	}
 
 	result := endSessionResult{
-		Status:         "ok",
-		AgentID:        agentID,
+		Status:  "ok",
+		AgentID: agentID,
 	}
 
 	var memoriesSaved int

@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	thriftg "github.com/alexaandru/go-sitter-forest/thrift"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -25,17 +25,18 @@ import (
 // All top-level Thrift definitions are Exported=true (IDL is a public interface by definition).
 //
 // AST node types verified via TestProbeThrift:
-//   document → top-level container
-//   namespace_declaration: [namespace][namespace_scope][namespace]
-//   typedef_definition: [typedef][definition_type][typedef_identifier]
-//   enum_definition: [enum][identifier]{[identifier][=][number][,]...}
-//   struct_definition: [struct][identifier]{[field]...}
-//   exception_definition: [exception][identifier]{[field]...}
-//   service_definition: [service][identifier]{[function_definition]...}
-//   union_definition: [union][identifier]{[field]...}
-//   const_definition: [const][definition_type][identifier][=][literal]
-//   field: [field_id][field_modifier?][type][identifier][,?]
-//   function_definition: [type][identifier][parameters][throws?][,?]
+//
+//	document → top-level container
+//	namespace_declaration: [namespace][namespace_scope][namespace]
+//	typedef_definition: [typedef][definition_type][typedef_identifier]
+//	enum_definition: [enum][identifier]{[identifier][=][number][,]...}
+//	struct_definition: [struct][identifier]{[field]...}
+//	exception_definition: [exception][identifier]{[field]...}
+//	service_definition: [service][identifier]{[function_definition]...}
+//	union_definition: [union][identifier]{[field]...}
+//	const_definition: [const][definition_type][identifier][=][literal]
+//	field: [field_id][field_modifier?][type][identifier][,?]
+//	function_definition: [type][identifier][parameters][throws?][,?]
 type ThriftParser struct {
 	language *sitter.Language
 }
@@ -111,12 +112,14 @@ func (p *ThriftParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 
 // extractNamespace handles namespace_declaration nodes.
 // AST (simple): [namespace(kw)][namespace_scope][namespace(name)]
-//   e.g. "namespace go myservice" →
-//     namespace_scope=[go], then one namespace token = "myservice"
+//
+//	e.g. "namespace go myservice" →
+//	  namespace_scope=[go], then one namespace token = "myservice"
 //
 // AST (dotted): "namespace java com.example.myservice" →
-//   namespace_scope=[java], then [namespace]="com", then
-//   [namespace][.][identifier][.][identifier] = ".example.myservice"
+//
+//	namespace_scope=[java], then [namespace]="com", then
+//	[namespace][.][identifier][.][identifier] = ".example.myservice"
 //
 // We collect all namespace children after the namespace_scope to reconstruct
 // the full qualified name by concatenating their text.
@@ -455,8 +458,9 @@ func (p *ThriftParser) extractConst(g *graph.Graph, n sitter.Node, src []byte, f
 // Emits a NodeInterface (kind=service) and function_definition children as NodeMethod.
 //
 // function_definition AST:
-//   [type][identifier][parameters][throws?][,?]
-//   where type is the return type (or [void]).
+//
+//	[type][identifier][parameters][throws?][,?]
+//	where type is the return type (or [void]).
 func (p *ThriftParser) extractService(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
 	// First identifier child = service name. If "extends" keyword appears,
 	// the next identifier is the parent service.

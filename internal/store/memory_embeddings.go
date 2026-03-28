@@ -15,8 +15,8 @@ type MemorySearchResult struct {
 	Content        string  `json:"content"`
 	Tier           string  `json:"tier"`
 	EntityID       string  `json:"entity_id,omitempty"`
-	Score          float64 `json:"score"`                      // cosine similarity, higher = more relevant
-	StaleEmbedding bool    `json:"stale_embedding,omitempty"`  // true when anchored entity changed since embedding was computed
+	Score          float64 `json:"score"`                     // cosine similarity, higher = more relevant
+	StaleEmbedding bool    `json:"stale_embedding,omitempty"` // true when anchored entity changed since embedding was computed
 }
 
 // memoryContentHash computes an 8-char hex hash of the memory content

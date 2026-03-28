@@ -61,7 +61,7 @@ type filenamePrefixEntry struct {
 type Walker struct {
 	parsers               map[string]LanguageParser // extension → parser
 	filenameParsers       map[string]LanguageParser // base filename → parser
-	filenamePrefixParsers []filenamePrefixEntry      // base filename prefix → parser
+	filenamePrefixParsers []filenamePrefixEntry     // base filename prefix → parser
 
 	// BeginFunc is called once, on the main goroutine, after the filesystem
 	// scan completes and the total file count is known, but before any parsing
@@ -119,11 +119,11 @@ func NewWalker() *Walker {
 	w.Register(NewCSharpParser()) // deep: .cs
 	w.Register(NewSwiftParser())  // deep: .swift
 	// Scripting
-	w.Register(NewRubyParser())      // deep: .rb .rbi (Sorbet type stubs)
-	w.Register(NewRBSParser())       // deep: .rbs (Ruby type signatures)
-	w.Register(NewPHPParser())       // deep: .php
-	w.Register(NewLuaParser())       // deep: .lua
-	w.Register(NewBashParser())      // deep: .sh .bash
+	w.Register(NewRubyParser())       // deep: .rb .rbi (Sorbet type stubs)
+	w.Register(NewRBSParser())        // deep: .rbs (Ruby type signatures)
+	w.Register(NewPHPParser())        // deep: .php
+	w.Register(NewLuaParser())        // deep: .lua
+	w.Register(NewBashParser())       // deep: .sh .bash
 	w.Register(NewPowerShellParser()) // deep: .ps1 .psm1 .psd1
 	// Functional
 	w.Register(NewElixirParser())  // deep: .ex .exs
@@ -144,10 +144,10 @@ func NewWalker() *Walker {
 	// Infrastructure
 	w.Register(NewHCLParser())        // deep: .tf .tfvars .hcl
 	w.Register(NewDockerfileParser()) // deep: .dockerfile
-	w.Register(NewMakefileParser())  // deep: .mk, Makefile
-	w.Register(NewCMakeParser())     // deep: .cmake, CMakeLists.txt
-	w.Register(NewNixParser())       // deep: .nix
-	w.Register(NewStarlarkParser())  // deep: .bzl .star, BUILD
+	w.Register(NewMakefileParser())   // deep: .mk, Makefile
+	w.Register(NewCMakeParser())      // deep: .cmake, CMakeLists.txt
+	w.Register(NewNixParser())        // deep: .nix
+	w.Register(NewStarlarkParser())   // deep: .bzl .star, BUILD
 	w.Register(NewCUEParser())        // deep: .cue
 	w.Register(NewYAMLParser())       // deep: .yaml .yml (overrides generic)
 	w.Register(NewTOMLParser())       // deep: .toml
@@ -162,12 +162,12 @@ func NewWalker() *Walker {
 	// Configuration scripting
 	w.Register(NewJsonnetParser()) // deep: .jsonnet .libsonnet
 	// Scripting
-	w.Register(NewPerlParser())   // deep: .pl .pm .t
+	w.Register(NewPerlParser()) // deep: .pl .pm .t
 	// Scientific computing
 	w.Register(NewMATLABParser()) // deep: .m (MATLAB/Octave)
 	// Documentation
-	w.Register(NewMarkdownParser())   // deep: .md .markdown .mdx (overrides generic)
-	w.Register(NewPlaintextParser())  // deep: .txt .rst (section extraction, overrides generic)
+	w.Register(NewMarkdownParser())  // deep: .md .markdown .mdx (overrides generic)
+	w.Register(NewPlaintextParser()) // deep: .txt .rst (section extraction, overrides generic)
 	// Frontend
 	w.Register(NewVueParser()) // deep: .vue (SFC, delegates script to JS/TS)
 	// Data formats
@@ -183,7 +183,7 @@ func NewWalker() *Walker {
 	// Populate disambiguation fields for .m extension (MATLAB vs Objective-C).
 	// MATLAB was registered first; ObjC registered last wins in w.parsers[".m"].
 	// resolveParser uses these fields to disambiguate at parse time.
-	w.mObjCParser = w.parsers[".m"]    // ObjC (last registered, current winner)
+	w.mObjCParser = w.parsers[".m"]     // ObjC (last registered, current winner)
 	w.mMATLABParser = NewMATLABParser() // MATLAB (re-instantiate since overwritten)
 	return w
 }
@@ -261,7 +261,7 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 			}
 			return nil
 		}
-		
+
 		info, statErr := d.Info()
 		if statErr != nil {
 			return nil
@@ -329,10 +329,10 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 	if w.BeginFunc != nil {
 		w.BeginFunc(total)
 	}
-	var doneCount atomic.Int64   // files completed (read+parsed)
+	var doneCount atomic.Int64 // files completed (read+parsed)
 	var byExtMu sync.Mutex
 	byExt := make(map[string]int, 16)
-	var lastEmitNs atomic.Int64  // UnixNano of last ProgressFunc call (throttle)
+	var lastEmitNs atomic.Int64 // UnixNano of last ProgressFunc call (throttle)
 
 	emitProgress := func(final bool) {
 		if w.ProgressFunc == nil {
@@ -358,7 +358,7 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 		w.ProgressFunc(done, total, snapshot)
 	}
 
-	pc := w.PulseClient   // capture to avoid data race on walker field
+	pc := w.PulseClient // capture to avoid data race on walker field
 	projID := w.ProjectID
 
 	for _, job := range jobs {

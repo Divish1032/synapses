@@ -2,9 +2,11 @@ package parser
 
 import (
 	"testing"
-	"github.com/SynapsesOS/synapses/internal/graph"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // CSS: verify @font-face is actually captured
@@ -20,7 +22,9 @@ func TestCSS_FontFace(t *testing.T) {
 	require.NoError(t, NewCSSParser().Parse(g, "test.css", src))
 	vars := g.FindByType(graph.NodeVariable)
 	names := make([]string, 0)
-	for _, v := range vars { names = append(names, v.Name) }
+	for _, v := range vars {
+		names = append(names, v.Name)
+	}
 	assert.Contains(t, names, "MyFont", "@font-face font-family should be captured")
 }
 
@@ -84,7 +88,10 @@ resource "aws_instance" "web" {
 	edges := g.AllEdges()
 	hasCalls := false
 	for _, e := range edges {
-		if e.Type == graph.EdgeCalls { hasCalls = true; break }
+		if e.Type == graph.EdgeCalls {
+			hasCalls = true
+			break
+		}
 	}
 	assert.True(t, hasCalls, "resource referencing var.region should produce EdgeCalls")
 }
@@ -98,7 +105,9 @@ CMD ["/app/server", "--port", "8080"]
 	require.NoError(t, NewDockerfileParser().Parse(g, "Dockerfile", src))
 	fns := g.FindByType(graph.NodeFunction)
 	names := make([]string, 0)
-	for _, n := range fns { names = append(names, n.Name) }
+	for _, n := range fns {
+		names = append(names, n.Name)
+	}
 	assert.NotEmpty(t, fns, "CMD should create at least one NodeFunction")
 	t.Logf("NodeFunction names: %v", names)
 }
@@ -120,7 +129,9 @@ const handleClick = (e) => {
 	require.NoError(t, NewSvelteParser().Parse(g, "App.svelte", src))
 	fns := g.FindByType(graph.NodeFunction)
 	names := make([]string, 0)
-	for _, n := range fns { names = append(names, n.Name) }
+	for _, n := range fns {
+		names = append(names, n.Name)
+	}
 	assert.Contains(t, names, "fetchData", "async function should be NodeFunction")
 	assert.Contains(t, names, "handleClick", "arrow function should be NodeFunction")
 	t.Logf("NodeFunction names: %v", names)
@@ -143,7 +154,10 @@ func TestSCSS_IncludeEdgeCalls(t *testing.T) {
 	edges := g.AllEdges()
 	hasCalls := false
 	for _, e := range edges {
-		if e.Type == graph.EdgeCalls { hasCalls = true; break }
+		if e.Type == graph.EdgeCalls {
+			hasCalls = true
+			break
+		}
 	}
 	assert.True(t, hasCalls, "@include flex-center should produce EdgeCalls to flex-center mixin")
 }
@@ -169,7 +183,10 @@ func TestCUE_LineCountCorrect(t *testing.T) {
 	structs := g.FindByType(graph.NodeStruct)
 	var dbNode *graph.Node
 	for _, n := range structs {
-		if n.Name == "#Database" { dbNode = n; break }
+		if n.Name == "#Database" {
+			dbNode = n
+			break
+		}
 	}
 	require.NotNil(t, dbNode, "#Database definition must exist")
 	lc := dbNode.Metadata["line_count"]

@@ -36,7 +36,7 @@ func classifyRefetchSignal(sinceLast time.Duration) (signalType string, weight f
 // worked with this context but the session ended without a success outcome).
 //
 // Must be called BEFORE CorrelateSessionOutcome so it can query rows with
-// task_outcome='' — after correlation those rows become "unknown" and are
+// task_outcome=” — after correlation those rows become "unknown" and are
 // indistinguishable from sessions that simply had no tasks.
 //
 // Errors are silently swallowed: instrumentation must never block session close.

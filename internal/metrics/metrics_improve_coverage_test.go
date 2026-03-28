@@ -56,7 +56,6 @@ func TestEnrichPprof_NoFunctionNodes(t *testing.T) {
 	}
 }
 
-
 // TestEnrichChurn_WithGitRepo tests EnrichChurn actually sets churn metadata.
 func TestEnrichChurn_WithGitRepo(t *testing.T) {
 	tmpdir := initGitRepoWithCommit(t)
@@ -151,11 +150,11 @@ func TestRecentCommitsForFile_LargeLimit(t *testing.T) {
 func TestEnrichCoverage_NoProfile(t *testing.T) {
 	g := graph.New("test")
 	fn := &graph.Node{
-		ID:   g.MakeNodeID("file.go", "Func"),
-		Type: graph.NodeFunction,
-		Name: "Func",
-		File: "file.go",
-		Line: 10,
+		ID:       g.MakeNodeID("file.go", "Func"),
+		Type:     graph.NodeFunction,
+		Name:     "Func",
+		File:     "file.go",
+		Line:     10,
 		Metadata: map[string]string{"line_count": "10"},
 	}
 	g.AddNode(fn)

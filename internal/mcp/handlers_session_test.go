@@ -161,7 +161,6 @@ func TestHandleSessionInit_ResumeScope_MoreAvailableIsSubset(t *testing.T) {
 	}
 }
 
-
 func TestHandleSessionInit_EmitsSessionStartEvent(t *testing.T) {
 	s := newTestServer(t)
 	_, _ = s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "agent-x"}))
@@ -454,9 +453,9 @@ func TestEmbeddingStatus_UnknownEmbedder_ReturnsUnknown(t *testing.T) {
 type stubEmbedder struct{}
 
 func (s *stubEmbedder) Embed(_ context.Context, _ string) ([]float32, error) { return nil, nil }
-func (s *stubEmbedder) WarmUp(_ context.Context) error                         { return nil }
-func (s *stubEmbedder) Model() string                                          { return "stub" }
-func (s *stubEmbedder) Close() error                                           { return nil }
+func (s *stubEmbedder) WarmUp(_ context.Context) error                       { return nil }
+func (s *stubEmbedder) Model() string                                        { return "stub" }
+func (s *stubEmbedder) Close() error                                         { return nil }
 
 func TestEmbeddingStatus_Ollama_ReturnsOllama(t *testing.T) {
 	e := embed.NewOllamaEmbedder("http://localhost:11434/api/embeddings", "")
@@ -646,7 +645,7 @@ func TestHandleGetContext_UpdatesAgentFocus(t *testing.T) {
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":   "AuthLogin",
 		"agent_id": "focus-agent",
-		"format": "json",
+		"format":   "json",
 	}))
 	mustResult(t, res, err)
 
@@ -852,7 +851,7 @@ func TestHandleGetContext_KnownHash_ReturnsUnchanged(t *testing.T) {
 	res2, err2 := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":     "AuthLogin",
 		"known_hash": hash,
-		"format": "json",
+		"format":     "json",
 	}))
 	m2 := mustResult(t, res2, err2)
 	if m2["unchanged"] != true {
@@ -868,7 +867,7 @@ func TestHandleGetContext_WrongKnownHash_ReturnsFull(t *testing.T) {
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":     "AuthLogin",
 		"known_hash": "000000000000",
-		"format": "json",
+		"format":     "json",
 	}))
 	m := mustResult(t, res, err)
 	// Hash mismatch → full response with root and entity_hash.
@@ -1020,7 +1019,7 @@ func TestHandleGetContext_SessionAutoCache_ManualKnownHashTakesPrecedence(t *tes
 	res2, err2 := s.handleGetContext(sctx, callTool(map[string]any{
 		"entity":     "AuthLogin",
 		"known_hash": "000000000000",
-		"format": "json",
+		"format":     "json",
 	}))
 	m2 := mustResult(t, res2, err2)
 	if m2["unchanged"] == true {
@@ -1032,7 +1031,7 @@ func TestHandleGetContext_SessionAutoCache_ManualKnownHashTakesPrecedence(t *tes
 	res3, err3 := s.handleGetContext(sctx, callTool(map[string]any{
 		"entity":     "AuthLogin",
 		"known_hash": hash,
-		"format": "json",
+		"format":     "json",
 	}))
 	m3 := mustResult(t, res3, err3)
 	if m3["unchanged"] != true {

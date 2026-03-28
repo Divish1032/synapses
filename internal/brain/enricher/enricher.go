@@ -78,9 +78,9 @@ type Response struct {
 	LLMUsed     bool // true when the LLM was called; false on cache hit or deterministic-only path
 
 	// Deterministic fields — always populated, no LLM required.
-	Phase           string  // SDLC phase inferred from file path ("entry_point", "persistence", "test", "api", "core", "")
-	ComplexityScore float64 // (fanin + fanout) * (1 + fanout/10.0); 0 when topology unknown
-	DeterministicHit bool   // true when deterministic pass ran (even if LLM was also called)
+	Phase            string  // SDLC phase inferred from file path ("entry_point", "persistence", "test", "api", "core", "")
+	ComplexityScore  float64 // (fanin + fanout) * (1 + fanout/10.0); 0 when topology unknown
+	DeterministicHit bool    // true when deterministic pass ran (even if LLM was also called)
 }
 
 // deterministicResult holds the output of the deterministic pre-pass.

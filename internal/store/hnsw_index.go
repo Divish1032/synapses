@@ -31,8 +31,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/coder/hnsw"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // hnswPendingEntry is a vector queued during an HNSW rebuild.

@@ -79,11 +79,11 @@ func TestEnrichChurn_NodeNoMetadata(t *testing.T) {
 	id := g.MakeNodeID(goFile, "Login")
 	// Node with nil Metadata.
 	g.AddNode(&graph.Node{
-		ID:      id,
-		Name:    "Login",
-		Type:    graph.NodeFunction,
-		File:    goFile,
-		Package: "pkg",
+		ID:       id,
+		Name:     "Login",
+		Type:     graph.NodeFunction,
+		File:     goFile,
+		Package:  "pkg",
 		Metadata: nil, // intentionally nil
 	})
 

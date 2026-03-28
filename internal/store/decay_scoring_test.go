@@ -141,8 +141,8 @@ func TestDecayedImportanceScore_UsesLastAccessedAt_NotCreatedAt(t *testing.T) {
 	// This verifies we use last_accessed_at for the decay signal, not created_at.
 	m := Memory{
 		Importance:     "1.0",
-		LastAccessedAt: time.Now().Format(time.RFC3339),                              // accessed now
-		CreatedAt:      time.Now().Add(-3200 * time.Hour).Format(time.RFC3339),       // created long ago
+		LastAccessedAt: time.Now().Format(time.RFC3339),                        // accessed now
+		CreatedAt:      time.Now().Add(-3200 * time.Hour).Format(time.RFC3339), // created long ago
 	}
 	score := DecayedImportanceScore(m, 168)
 	if score < 0.99 {

@@ -165,4 +165,3 @@ Return JSON only: {"new_memories":[{"key":"short_snake_case_key","content":"what
 Return {"new_memories":[],"annotations":[]} if nothing is worth saving.`,
 		string(eventsJSON), string(memoryJSON))
 }
-

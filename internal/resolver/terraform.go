@@ -145,7 +145,7 @@ func breakDependsOnCycles(g *graph.Graph) int {
 				g.RemoveEdge(top.node, next, graph.EdgeDependsOn)
 				log.Printf("synapses: removed cyclic DEPENDS_ON edge %v → %v", top.node, next)
 				removed++
-			// black: cross/forward edge, ignore.
+				// black: cross/forward edge, ignore.
 			}
 		}
 	}

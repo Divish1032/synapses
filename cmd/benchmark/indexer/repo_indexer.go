@@ -50,11 +50,11 @@ type Options struct {
 
 // Result holds the outcome of indexing a single repo.
 type Result struct {
-	Repo      string `json:"repo"`
-	LocalPath string `json:"local_path"`
-	Indexed   bool   `json:"indexed"`
-	Skipped   bool   `json:"skipped"` // already cached
-	Error     string `json:"error,omitempty"`
+	Repo      string  `json:"repo"`
+	LocalPath string  `json:"local_path"`
+	Indexed   bool    `json:"indexed"`
+	Skipped   bool    `json:"skipped"` // already cached
+	Error     string  `json:"error,omitempty"`
 	DurationS float64 `json:"duration_s"`
 }
 

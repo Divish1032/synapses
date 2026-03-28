@@ -615,11 +615,11 @@ func (p *PowerShellParser) extractWorkflows(g *graph.Graph, filePath string, fil
 		line := lineIdx + 1
 		nodeID := g.MakeNodeID(filePath, name)
 		g.AddNode(&graph.Node{
-			ID:   nodeID,
-			Type: graph.NodeStruct,
-			Name: name,
-			File: filePath,
-			Line: line,
+			ID:       nodeID,
+			Type:     graph.NodeStruct,
+			Name:     name,
+			File:     filePath,
+			Line:     line,
 			Metadata: map[string]string{"kind": "workflow"},
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})

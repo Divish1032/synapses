@@ -120,12 +120,12 @@ func (p *DartParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		exportLine := countNewlines(content[:m[0]]) + 1
 		exportNodeID := g.MakeNodeID(exportPath, exportPath)
 		g.AddNode(&graph.Node{
-			ID:      exportNodeID,
-			Type:    graph.NodePackage,
-			Name:    exportPath,
-			Package: exportPath,
-			File:    filePath,
-			Line:    exportLine,
+			ID:       exportNodeID,
+			Type:     graph.NodePackage,
+			Name:     exportPath,
+			Package:  exportPath,
+			File:     filePath,
+			Line:     exportLine,
 			Metadata: map[string]string{"kind": "export"},
 		})
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: exportNodeID, Type: graph.EdgeImports})

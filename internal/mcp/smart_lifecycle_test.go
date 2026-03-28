@@ -195,10 +195,10 @@ func TestAutoFixTask_HighImportance_AutoCreatesFixTask(t *testing.T) {
 	s := newTestServer(t)
 
 	m := remember(t, s, map[string]any{
-		"agent_id":       "agent-fix",
-		"episode_type":   "failure",
-		"outcome":        "failure",
-		"decision":       "DB connection pool exhausted under load",
+		"agent_id":        "agent-fix",
+		"episode_type":    "failure",
+		"outcome":         "failure",
+		"decision":        "DB connection pool exhausted under load",
 		"create_fix_task": true, // BUG-018: importance param removed; use explicit flag
 	})
 

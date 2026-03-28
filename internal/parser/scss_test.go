@@ -20,7 +20,11 @@ func parseSCSS(t *testing.T, src string) *graph.Graph {
 func TestSCSSParser_Extensions(t *testing.T) {
 	exts := parser.NewSCSSParser().Extensions()
 	has := func(e string) bool {
-		for _, x := range exts { if x == e { return true } }
+		for _, x := range exts {
+			if x == e {
+				return true
+			}
+		}
 		return false
 	}
 	for _, e := range []string{".scss", ".sass"} {
@@ -129,7 +133,9 @@ func TestSCSSParser_UseImport(t *testing.T) {
 	g := parseSCSS(t, "@use 'sass:math';")
 	hasImport := false
 	for _, e := range g.AllEdges() {
-		if e.Type == graph.EdgeImports { hasImport = true }
+		if e.Type == graph.EdgeImports {
+			hasImport = true
+		}
 	}
 	if !hasImport {
 		t.Error("expected EdgeImports from @use")
@@ -140,7 +146,9 @@ func TestSCSSParser_ForwardImport(t *testing.T) {
 	g := parseSCSS(t, "@forward 'tokens';")
 	hasImport := false
 	for _, e := range g.AllEdges() {
-		if e.Type == graph.EdgeImports { hasImport = true }
+		if e.Type == graph.EdgeImports {
+			hasImport = true
+		}
 	}
 	if !hasImport {
 		t.Error("expected EdgeImports from @forward")
@@ -151,7 +159,9 @@ func TestSCSSParser_IncludeAddsCallSite(t *testing.T) {
 	g := parseSCSS(t, ".btn {\n  @include flex-center;\n}")
 	found := false
 	for _, cs := range g.PeekCallSites() {
-		if cs.FuncName == "flex-center" { found = true }
+		if cs.FuncName == "flex-center" {
+			found = true
+		}
 	}
 	if !found {
 		t.Error("expected call site for @include flex-center")
@@ -162,7 +172,9 @@ func TestSCSSParser_IncludeSameFileDirectEdge(t *testing.T) {
 	g := parseSCSS(t, "@mixin foo { color: red; }\n.bar {\n  @include foo;\n}")
 	hasCall := false
 	for _, e := range g.AllEdges() {
-		if e.Type == graph.EdgeCalls { hasCall = true }
+		if e.Type == graph.EdgeCalls {
+			hasCall = true
+		}
 	}
 	if !hasCall {
 		t.Error("expected direct EdgeCalls for same-file @include")
@@ -173,7 +185,9 @@ func TestSCSSParser_ExtendSameFilePlaceholder(t *testing.T) {
 	g := parseSCSS(t, "%btn-base {\n  border: none;\n}\n.btn {\n  @extend %btn-base;\n}")
 	hasCall := false
 	for _, e := range g.AllEdges() {
-		if e.Type == graph.EdgeCalls { hasCall = true }
+		if e.Type == graph.EdgeCalls {
+			hasCall = true
+		}
 	}
 	if !hasCall {
 		t.Error("expected EdgeCalls from @extend to same-file placeholder")
@@ -184,7 +198,9 @@ func TestSCSSParser_ExtendCrossFileAddsCallSite(t *testing.T) {
 	g := parseSCSS(t, ".btn {\n  @extend .external-btn;\n}")
 	found := false
 	for _, cs := range g.PeekCallSites() {
-		if cs.FuncName == ".external-btn" { found = true }
+		if cs.FuncName == ".external-btn" {
+			found = true
+		}
 	}
 	if !found {
 		t.Error("expected call site for cross-file @extend .external-btn")
@@ -195,7 +211,9 @@ func TestSCSSParser_DefinesEdges(t *testing.T) {
 	g := parseSCSS(t, "$x: 1;\n@mixin foo {}\n.bar {}")
 	count := 0
 	for _, e := range g.AllEdges() {
-		if e.Type == graph.EdgeDefines { count++ }
+		if e.Type == graph.EdgeDefines {
+			count++
+		}
 	}
 	if count < 3 {
 		t.Errorf("expected >=3 DEFINES edges, got %d", count)

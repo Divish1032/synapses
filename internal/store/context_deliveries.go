@@ -104,7 +104,7 @@ func (s *Store) GetSessionAllDeliveredEntities(sessionID string) []string {
 // Called synchronously from handleEndSession — outcome must be persisted before
 // the session record is cleared so Sprint 11 queries see consistent state.
 // sessionID must be the Synapses session UUID (not the MCP protocol session ID).
-// Only rows with task_outcome='' are updated, making this safe to call multiple
+// Only rows with task_outcome=” are updated, making this safe to call multiple
 // times (idempotent: already-correlated rows are never overwritten).
 // Returns the number of rows updated and any database error.
 func (s *Store) CorrelateSessionOutcome(sessionID, outcome string) (int64, error) {
@@ -121,4 +121,3 @@ func (s *Store) CorrelateSessionOutcome(sessionID, outcome string) (int64, error
 	n, _ := res.RowsAffected()
 	return n, nil
 }
-

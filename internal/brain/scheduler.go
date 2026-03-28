@@ -73,9 +73,9 @@ const (
 
 // brainTask is a single deferred unit of brain work.
 type brainTask struct {
-	key        string       // dedup key; same key keeps the latest fn only
+	key        string // dedup key; same key keeps the latest fn only
 	priority   TaskPriority
-	fn         func()       // the work closure; must not be nil
+	fn         func() // the work closure; must not be nil
 	enqueuedAt time.Time
 	ttl        time.Duration
 }

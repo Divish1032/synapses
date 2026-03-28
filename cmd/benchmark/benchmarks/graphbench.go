@@ -326,8 +326,8 @@ func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test Grap
 			for _, e := range test.ExpectedNames {
 				ne := normalizeName(e)
 				if nn == ne || strings.HasSuffix(nn, "."+ne) || strings.HasSuffix(ne, "."+nn) ||
-				strings.HasPrefix(nn, ne+".") || strings.HasPrefix(ne, nn+".") ||
-				strings.HasPrefix(nn, ne+"::") || strings.HasPrefix(ne, nn+"::") {
+					strings.HasPrefix(nn, ne+".") || strings.HasPrefix(ne, nn+".") ||
+					strings.HasPrefix(nn, ne+"::") || strings.HasPrefix(ne, nn+"::") {
 					matched = true
 					break
 				}
@@ -584,7 +584,6 @@ func queryContextRelated(client *agent.SynapsesClient, entity string) (names, fi
 
 	return names, files, raw
 }
-
 
 // ─── Text fallback extractors (used when JSON parse fails) ───────────────────
 

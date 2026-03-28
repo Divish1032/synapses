@@ -85,9 +85,9 @@ func TestAdmissionControl_ContentTypePriorRanking(t *testing.T) {
 	st := openMemTestStore(t)
 
 	type memSpec struct {
-		agentID     string
-		tags        string
-		wantPrior   float64
+		agentID   string
+		tags      string
+		wantPrior float64
 	}
 	specs := []memSpec{
 		{"agent-f", `["episode","failure"]`, 1.4},

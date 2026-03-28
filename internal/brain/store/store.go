@@ -13,8 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/SynapsesOS/synapses/internal/logutil"
 	_ "modernc.org/sqlite"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 const schema = `

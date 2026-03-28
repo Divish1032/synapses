@@ -736,7 +736,7 @@ function func3 {
 }
 `
 	g := parseBash(t, src)
-	
+
 	styles := []string{"func1", "func2", "func3"}
 	for _, style := range styles {
 		nodes := g.FindByName(style)
@@ -817,7 +817,7 @@ func TestBashParser_NestedFunctions(t *testing.T) {
 outer
 `
 	g := parseBash(t, src)
-	
+
 	outerNodes := g.FindByName("outer")
 	if len(outerNodes) == 0 {
 		t.Fatal("expected outer function")

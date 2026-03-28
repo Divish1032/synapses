@@ -293,8 +293,8 @@ func extractSections(src []byte) ([]section, frontmatterData) {
 				sections = append(sections, section{
 					Title:        strings.TrimSpace(line),
 					Depth:        depth,
-					Line:         i + 1,     // 1-based: the text line
-					bodyStartIdx: i + 2,     // skip both text and underline lines
+					Line:         i + 1, // 1-based: the text line
+					bodyStartIdx: i + 2, // skip both text and underline lines
 				})
 				i++ // consume the underline line
 				continue

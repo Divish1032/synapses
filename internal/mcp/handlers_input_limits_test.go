@@ -238,7 +238,6 @@ func TestStringArg_CJKInputProducesValidUTF8(t *testing.T) {
 	}
 }
 
-
 // ── handleRemember: rationale field (4 KB limit) ─────────────────────────────
 
 // Attack: oversized rationale bypasses decision limit via concatenation before

@@ -31,8 +31,8 @@ import (
 type BrainDetectedDep struct {
 	TargetProject string  `json:"target_project"` // federation alias
 	TargetEntity  string  `json:"target_entity"`  // function/class/struct name
-	ImportPath    string  `json:"import_path"`     // the import or URL reference
-	Confidence    float64 `json:"confidence"`      // 0.0–1.0
+	ImportPath    string  `json:"import_path"`    // the import or URL reference
+	Confidence    float64 `json:"confidence"`     // 0.0–1.0
 }
 
 // BrainDetector provides Tier 2 dependency detection using LLM analysis.

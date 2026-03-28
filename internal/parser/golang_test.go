@@ -270,10 +270,10 @@ type Node struct {
 	fields := structFieldsOf(t, g, "Node")
 	// Must contain pointer and slice types with correct text.
 	want := map[string]bool{
-		"ID string":          true,
-		"Children []*Node":   true,
-		"Parent *Node":       true,
-		"Tags []string":      true,
+		"ID string":        true,
+		"Children []*Node": true,
+		"Parent *Node":     true,
+		"Tags []string":    true,
 	}
 	for _, f := range fields {
 		delete(want, f)

@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	jsong "github.com/alexaandru/go-sitter-forest/json"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )

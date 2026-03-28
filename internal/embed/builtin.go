@@ -114,9 +114,9 @@ type BuiltinEmbedder struct {
 	ready         bool
 	initAttempted bool // true once ensureModel() has been called at least once
 	closed        bool
-	done          chan struct{}   // closed by Close() to unblock pool waiters
-	inflight      sync.WaitGroup // tracks in-flight Embed calls for graceful shutdown
-	dlWg          sync.WaitGroup // tracks active download goroutines for graceful shutdown
+	done          chan struct{}      // closed by Close() to unblock pool waiters
+	inflight      sync.WaitGroup     // tracks in-flight Embed calls for graceful shutdown
+	dlWg          sync.WaitGroup     // tracks active download goroutines for graceful shutdown
 	initGroup     singleflight.Group // coalesces concurrent model downloads
 
 	// P8-11: optional callback for model download lifecycle events.
@@ -806,4 +806,3 @@ func l2Normalize(vec []float32) []float32 {
 	}
 	return out
 }
-

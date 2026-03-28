@@ -26,10 +26,10 @@ func New(dir string) *Reporter {
 
 // RepoBenchResult holds the full results of a RepoBench-R run.
 type RepoBenchResult struct {
-	Timestamp     string              `json:"timestamp"`
-	RetrievalMode string              `json:"retrieval_mode"`
-	Configs       []RepoBenchConfig   `json:"configs"`
-	Summary       RepoBenchSummary    `json:"summary"`
+	Timestamp     string            `json:"timestamp"`
+	RetrievalMode string            `json:"retrieval_mode"`
+	Configs       []RepoBenchConfig `json:"configs"`
+	Summary       RepoBenchSummary  `json:"summary"`
 }
 
 // RepoBenchConfig holds results for one config×difficulty combination.
@@ -134,13 +134,13 @@ func repoBenchMarkdown(result *RepoBenchResult) string {
 
 // ContextBenchResult holds the full results of a ContextBench run.
 type ContextBenchResult struct {
-	Timestamp    string                    `json:"timestamp"`
-	TotalTasks   int                       `json:"total_tasks"`
-	AvgPrecision float64                   `json:"avg_precision"`
-	AvgRecall    float64                   `json:"avg_recall"`
-	AvgF1        float64                   `json:"avg_f1"`
-	PerLanguage  []ContextBenchLangResult  `json:"per_language"`
-	TaskResults  []interface{}             `json:"tasks"` // []ContextBenchTaskResult from benchmarks pkg
+	Timestamp    string                   `json:"timestamp"`
+	TotalTasks   int                      `json:"total_tasks"`
+	AvgPrecision float64                  `json:"avg_precision"`
+	AvgRecall    float64                  `json:"avg_recall"`
+	AvgF1        float64                  `json:"avg_f1"`
+	PerLanguage  []ContextBenchLangResult `json:"per_language"`
+	TaskResults  []interface{}            `json:"tasks"` // []ContextBenchTaskResult from benchmarks pkg
 }
 
 // ContextBenchLangResult holds per-language metrics.
@@ -224,9 +224,9 @@ func contextBenchMarkdown(result *ContextBenchResult) string {
 			// TaskResults are stored as interface{} — could be a typed struct or
 			// map[string]interface{} after JSON roundtrip.
 			var (
-				instanceID string
-				repo       string
-				prec, rec, f1 float64
+				instanceID                   string
+				repo                         string
+				prec, rec, f1                float64
 				gold, hits, retrieved, tools int
 			)
 			switch v := raw.(type) {
@@ -279,13 +279,13 @@ func asFloat(v interface{}) float64 {
 
 // GraphBenchResult holds the full results of a GraphBench run.
 type GraphBenchResult struct {
-	Timestamp   string              `json:"timestamp"`
-	TotalTests  int                 `json:"total_tests"`
-	ErrorCount  int                 `json:"error_count"`
-	Summary     GraphBenchMetrics   `json:"summary"`
-	ByQueryType []GraphBenchSlice   `json:"by_query_type"`
-	ByLanguage  []GraphBenchSlice   `json:"by_language"`
-	TestResults []interface{}       `json:"tests"`
+	Timestamp   string            `json:"timestamp"`
+	TotalTests  int               `json:"total_tests"`
+	ErrorCount  int               `json:"error_count"`
+	Summary     GraphBenchMetrics `json:"summary"`
+	ByQueryType []GraphBenchSlice `json:"by_query_type"`
+	ByLanguage  []GraphBenchSlice `json:"by_language"`
+	TestResults []interface{}     `json:"tests"`
 }
 
 // GraphBenchMetrics holds P/R/F1 scores.
@@ -394,13 +394,13 @@ func graphBenchMarkdown(result *GraphBenchResult) string {
 // NLBenchResult holds the full results of an NLBench run.
 // Reuses GraphBenchMetrics and GraphBenchSlice for consistency.
 type NLBenchResult struct {
-	Timestamp   string             `json:"timestamp"`
-	TotalTests  int                `json:"total_tests"`
-	ErrorCount  int                `json:"error_count"`
-	Summary     GraphBenchMetrics  `json:"summary"`
-	ByQueryType []GraphBenchSlice  `json:"by_query_type"`
-	ByLanguage  []GraphBenchSlice  `json:"by_language"`
-	TestResults []interface{}      `json:"tests"`
+	Timestamp   string            `json:"timestamp"`
+	TotalTests  int               `json:"total_tests"`
+	ErrorCount  int               `json:"error_count"`
+	Summary     GraphBenchMetrics `json:"summary"`
+	ByQueryType []GraphBenchSlice `json:"by_query_type"`
+	ByLanguage  []GraphBenchSlice `json:"by_language"`
+	TestResults []interface{}     `json:"tests"`
 }
 
 // WriteNLBench writes JSON + Markdown results for an NLBench run.

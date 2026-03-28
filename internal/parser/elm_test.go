@@ -226,4 +226,3 @@ func TestElmParser_PortSignature(t *testing.T) {
 		t.Error("sendMessage port should have a signature")
 	}
 }
-

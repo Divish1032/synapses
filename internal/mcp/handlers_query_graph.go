@@ -71,10 +71,10 @@ func unescapeStringLiteral(raw string) string {
 type tokenKind int
 
 const (
-	tokWord     tokenKind = iota // bareword identifier or keyword
-	tokString                    // double-quoted string literal
-	tokNumber                    // integer literal
-	tokOp                        // operator: = != > >= < <=
+	tokWord   tokenKind = iota // bareword identifier or keyword
+	tokString                  // double-quoted string literal
+	tokNumber                  // integer literal
+	tokOp                      // operator: = != > >= < <=
 	tokEOF
 )
 

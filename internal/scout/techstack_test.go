@@ -629,4 +629,3 @@ func TestModuleShortName_SingleSlash(t *testing.T) {
 		t.Errorf("expected %q, got %q", "b", got)
 	}
 }
-

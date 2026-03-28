@@ -23,10 +23,10 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
-	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/scout"
 	"github.com/SynapsesOS/synapses/internal/skills"
@@ -115,28 +115,28 @@ type packetCacheEntry struct {
 
 // Server holds the MCP server and the dependencies that tool handlers need.
 type Server struct {
-	mcp          *server.MCPServer
-	graph        *graph.Graph
-	config       *config.Config
-	store        *store.Store  // nil if started without a persistent store
-	changeSource ChangeSource  // nil if started without a file watcher
-	federationResolver  *federation.Resolver   // nil if no federation configured — set via SetFederationResolver
-	projectRegistry     ProjectStoreProvider   // nil in single-project mode — set via SetProjectRegistry
-	brainClient  *brain.Client   // set via SetBrainClient; nil if brain not configured
-	webCache     *webcache.Cache // nil if webcache not configured
-	pulseClient  *pulse.Client   // set via SetPulseClient; nil if pulse not configured
-	embedClient    *embed.Client  // nil if embedding_endpoint not configured
-	memoryEmbedder embed.Embedder // nil if embeddings mode is "off" — set via SetMemoryEmbedder
-	techStack    []scout.TechStackEntry // set via SetTechStack after autosubscribe; nil if not detected
-	injectionScanner *InjectionScanner // prompt injection scanner for externally-sourced content (nil = disabled)
-	knowledgeMode bool          // when true, only knowledge tools are registered (no code graph)
-	projectID    string         // stable project identifier (FNV hash of project root path)
-	projectPath  string         // absolute path to the project root (for go.mod parsing)
-	rulesMu      sync.RWMutex  // protects s.config.Rules for concurrent dynamic upserts
-	toolEmbeds         [][]float32  // per-tool normalized vectors; len==len(toolCatalog) when ready
-	toolEmbedModel     string       // embedding model used to build toolEmbeds; must match query model
-	toolEmbedsMu       sync.RWMutex // protects toolEmbeds and toolEmbedModel
-	toolCatalogRetries atomic.Int32 // counts delayed retries to cap at 2
+	mcp                *server.MCPServer
+	graph              *graph.Graph
+	config             *config.Config
+	store              *store.Store           // nil if started without a persistent store
+	changeSource       ChangeSource           // nil if started without a file watcher
+	federationResolver *federation.Resolver   // nil if no federation configured — set via SetFederationResolver
+	projectRegistry    ProjectStoreProvider   // nil in single-project mode — set via SetProjectRegistry
+	brainClient        *brain.Client          // set via SetBrainClient; nil if brain not configured
+	webCache           *webcache.Cache        // nil if webcache not configured
+	pulseClient        *pulse.Client          // set via SetPulseClient; nil if pulse not configured
+	embedClient        *embed.Client          // nil if embedding_endpoint not configured
+	memoryEmbedder     embed.Embedder         // nil if embeddings mode is "off" — set via SetMemoryEmbedder
+	techStack          []scout.TechStackEntry // set via SetTechStack after autosubscribe; nil if not detected
+	injectionScanner   *InjectionScanner      // prompt injection scanner for externally-sourced content (nil = disabled)
+	knowledgeMode      bool                   // when true, only knowledge tools are registered (no code graph)
+	projectID          string                 // stable project identifier (FNV hash of project root path)
+	projectPath        string                 // absolute path to the project root (for go.mod parsing)
+	rulesMu            sync.RWMutex           // protects s.config.Rules for concurrent dynamic upserts
+	toolEmbeds         [][]float32            // per-tool normalized vectors; len==len(toolCatalog) when ready
+	toolEmbedModel     string                 // embedding model used to build toolEmbeds; must match query model
+	toolEmbedsMu       sync.RWMutex           // protects toolEmbeds and toolEmbedModel
+	toolCatalogRetries atomic.Int32           // counts delayed retries to cap at 2
 
 	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
 	// Loaded once at startup. When false, the corresponding data collection is skipped.
@@ -220,7 +220,7 @@ type Server struct {
 	// goBackground() which enqueues work items. Fixed workers drain the queue.
 	// Close() rejects new work, closes the queue, and waits for workers to
 	// drain remaining items — preventing goroutines from racing with Store.Close().
-	bgQueue    chan func()   // buffered work queue (cap bgQueueCap)
+	bgQueue    chan func()  // buffered work queue (cap bgQueueCap)
 	bgDrops    atomic.Int64 // BUG-020: total work items dropped due to full queue
 	shutdownMu sync.RWMutex // guards bgClosed + bgQueue sends
 	bgClosed   bool         // true after Close() — rejects new work
@@ -333,7 +333,7 @@ func (s *Server) goBackground(fn func()) bool {
 	case s.bgQueue <- fn:
 		// queued successfully
 		if pc := s.getPulseClient(); pc != nil {
-			pc.RecordBackgroundWorkerEnqueue() // P2-5
+			pc.RecordBackgroundWorkerEnqueue()            // P2-5
 			pc.RecordBackgroundQueueDepth(len(s.bgQueue)) // P9-4
 		}
 		s.shutdownMu.RUnlock()
@@ -755,7 +755,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 	s.mcp = server.NewMCPServer(serverName, Version,
 		server.WithToolCapabilities(true),
 		server.WithResourceCapabilities(true, true), // subscribe + listChanged
-		server.WithPromptCapabilities(false),         // static prompts; no listChanged notifications
+		server.WithPromptCapabilities(false),        // static prompts; no listChanged notifications
 		server.WithHooks(hooks),
 		server.WithRecovery(), // recover panics in tool handlers — prevents daemon crash
 	)
@@ -769,7 +769,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 
 	s.registerTools()
 	s.registerResources()
-	s.registerPrompts()      // no-op until SetPromptTemplates is called
+	s.registerPrompts() // no-op until SetPromptTemplates is called
 	// OF-S4: compute baseline AFTER all registrations.
 	// handleSessionInit re-derives and compares to detect runtime tampering.
 	s.toolDescBaseline = hashToolDescs(s.toolDescs)
@@ -1302,34 +1302,34 @@ func (s *Server) embedSweepLoop(embedder embed.Embedder, st *store.Store) {
 // All other tools are deferred and auto-promoted on first call.
 // Sprint 24 Phase 6: final 12-tool set. All tools are core — no tiers needed.
 var coreTierTools = map[string]bool{
-	"session_init":    true,
-	"search":          true,
-	"get_context":     true,
+	"session_init":     true,
+	"search":           true,
+	"get_context":      true,
 	"get_file_context": true,
-	"get_impact":      true,
-	"validate":        true,
-	"memory":          true,
-	"end_session":     true,
-	"tasks":           true,
-	"rules":           true,
-	"annotate":        true,
-	"lookup_docs":     true,
+	"get_impact":       true,
+	"validate":         true,
+	"memory":           true,
+	"end_session":      true,
+	"tasks":            true,
+	"rules":            true,
+	"annotate":         true,
+	"lookup_docs":      true,
 }
 
 // standardTierTools = coreTierTools (all 12 tools are core after consolidation).
 var standardTierTools = map[string]bool{
-	"session_init":    true,
-	"search":          true,
-	"get_context":     true,
+	"session_init":     true,
+	"search":           true,
+	"get_context":      true,
 	"get_file_context": true,
-	"get_impact":      true,
-	"validate":        true,
-	"memory":          true,
-	"end_session":     true,
-	"tasks":           true,
-	"rules":           true,
-	"annotate":        true,
-	"lookup_docs":     true,
+	"get_impact":       true,
+	"validate":         true,
+	"memory":           true,
+	"end_session":      true,
+	"tasks":            true,
+	"rules":            true,
+	"annotate":         true,
+	"lookup_docs":      true,
 }
 
 // knowledgeTools are the tools available when the server runs in knowledge mode

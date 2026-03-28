@@ -118,10 +118,10 @@ func (s *IndexingState) Snapshot() IndexingSnapshot {
 
 // IndexingSnapshot is the JSON-serialisable view returned by the health endpoint.
 type IndexingSnapshot struct {
-	State string `json:"state"`        // "idle" | "indexing" | "ready"
+	State string `json:"state"` // "idle" | "indexing" | "ready"
 	Done  int64  `json:"files_done"`
 	Total int64  `json:"files_total"`
-	Pct   int64  `json:"pct"`          // 0–100; capped at 99 while still indexing
+	Pct   int64  `json:"pct"`             // 0–100; capped at 99 while still indexing
 	Label string `json:"label,omitempty"` // phase label shown after file parsing (e.g. "Resolving edges…")
 }
 

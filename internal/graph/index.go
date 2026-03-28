@@ -106,7 +106,7 @@ type GraphIndex struct {
 // newGraphIndex returns an empty, unready GraphIndex with a shared StringPool.
 func newGraphIndex(pool *StringPool) *GraphIndex {
 	idx := &GraphIndex{
-		Pool:      pool,
+		Pool:          pool,
 		IDToSeq:       make(map[NodeID]uint32),
 		nameIndex:     make(map[string][]uint32),
 		fileIndex:     make(map[string][]uint32),

@@ -114,11 +114,11 @@ var (
 func gitEnv() []string {
 	cachedGitEnvOnce.Do(func() {
 		env := []string{
-			"GIT_TERMINAL_PROMPT=0",         // never prompt for credentials
-			"GIT_ASKPASS=",                  // disable credential helpers
-			"SSH_ASKPASS=",                  // disable SSH credential prompts
-			"GIT_CONFIG_GLOBAL=/dev/null",   // prevent ~/.gitconfig hooks
-			"GIT_CONFIG_SYSTEM=/dev/null",   // prevent system gitconfig hooks
+			"GIT_TERMINAL_PROMPT=0",       // never prompt for credentials
+			"GIT_ASKPASS=",                // disable credential helpers
+			"SSH_ASKPASS=",                // disable SSH credential prompts
+			"GIT_CONFIG_GLOBAL=/dev/null", // prevent ~/.gitconfig hooks
+			"GIT_CONFIG_SYSTEM=/dev/null", // prevent system gitconfig hooks
 		}
 		// Git needs PATH (to find itself + helpers), HOME (for ~/.gitconfig),
 		// and TMPDIR (for temp files during diff).

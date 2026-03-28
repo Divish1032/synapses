@@ -50,11 +50,12 @@ import (
 // nodes (personalized: all teleport mass concentrates on rootID).
 //
 // Analytical validation (diamond topology, α=0.15, all edge weights=1):
-//   By symmetry A=B and D=E. Solving the linear system gives:
-//     a = αβ/2 / (1-β²) ≈ 0.2297  where β=1-α=0.85
-//     c = 2d = 2β·a/3 ≈ 0.1302
-//   c/d = 2.00 exactly — C gets precisely 2× D's score for 2 incoming paths.
-//   This matches the test output: C=0.13018, D=0.06509. ✓
+//
+//	By symmetry A=B and D=E. Solving the linear system gives:
+//	  a = αβ/2 / (1-β²) ≈ 0.2297  where β=1-α=0.85
+//	  c = 2d = 2β·a/3 ≈ 0.1302
+//	c/d = 2.00 exactly — C gets precisely 2× D's score for 2 incoming paths.
+//	This matches the test output: C=0.13018, D=0.06509. ✓
 func spikePersonalizedPageRank(g *Graph, rootID NodeID, alpha float64, maxIter int, epsilon float64) map[NodeID]float64 {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -449,10 +450,19 @@ func TestPPRSpike_FindingsReport(t *testing.T) {
 		g := New("report-widefan")
 		mkID := func(n string) NodeID { return g.MakeNodeID("fan.go", n) }
 		ids := make(map[string]NodeID)
-		add := func(name string) { id := mkID(name); ids[name] = id; g.AddNode(&Node{ID: id, Type: NodeFunction, Name: name, File: "fan.go"}) }
-		add("Root"); add("Util"); add("Y")
+		add := func(name string) {
+			id := mkID(name)
+			ids[name] = id
+			g.AddNode(&Node{ID: id, Type: NodeFunction, Name: name, File: "fan.go"})
+		}
+		add("Root")
+		add("Util")
+		add("Y")
 		const N = 5
-		for i := 1; i <= N; i++ { add(fmt.Sprintf("A%d", i)); add(fmt.Sprintf("U%d", i)) }
+		for i := 1; i <= N; i++ {
+			add(fmt.Sprintf("A%d", i))
+			add(fmt.Sprintf("U%d", i))
+		}
 		for i := 1; i <= N; i++ {
 			ai := fmt.Sprintf("A%d", i)
 			g.AddEdge(&Edge{From: ids["Root"], To: ids[ai], Type: EdgeCalls})

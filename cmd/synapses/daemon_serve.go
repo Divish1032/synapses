@@ -37,11 +37,11 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
-	"errors"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -64,11 +64,11 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
-	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/contextfile"
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/federation"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/namematcher"
 	"github.com/SynapsesOS/synapses/internal/parser"
@@ -156,7 +156,7 @@ type tokenBucket struct {
 	mu         sync.Mutex
 	tokens     float64
 	maxTokens  float64
-	refillRate float64   // tokens per second
+	refillRate float64 // tokens per second
 	lastRefill time.Time
 }
 
@@ -486,9 +486,9 @@ func hostGuard(next http.Handler) http.Handler {
 // Browsers ALWAYS send Origin on cross-origin POST/PUT/DELETE.
 var trustedOrigins = map[string]bool{
 	"http://127.0.0.1:11435":  true,
-	"http://localhost:11435":   true,
-	"tauri://localhost":        true,
-	"https://tauri.localhost":  true,
+	"http://localhost:11435":  true,
+	"tauri://localhost":       true,
+	"https://tauri.localhost": true,
 }
 
 // mutationGuard blocks CSRF by validating Origin and CSRF token on mutations.
@@ -550,7 +550,6 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 }
-
 
 // restToolsHandler returns the HTTP handler for POST /v1/tools/{name}?project=<path>.
 // projectInit is called to lazily initialize a project that is not yet registered.
@@ -769,7 +768,7 @@ type connSession struct {
 	clientInfo    atomic.Value
 }
 
-func (s *connSession) SessionID() string                                  { return s.id }
+func (s *connSession) SessionID() string                                   { return s.id }
 func (s *connSession) NotificationChannel() chan<- mcp.JSONRPCNotification { return s.notifications }
 func (s *connSession) Initialize() {
 	s.loggingLevel.Store(mcp.LoggingLevelError)
@@ -1001,10 +1000,10 @@ func cmdDaemonServe(args []string) error {
 			}
 			// Persist for eager warming on next daemon restart.
 			saveKnownProjectWg.Add(1)
-		go func(p string) {
-			defer saveKnownProjectWg.Done()
-			saveKnownProject(p)
-		}(absPath)
+			go func(p string) {
+				defer saveKnownProjectWg.Done()
+				saveKnownProject(p)
+			}(absPath)
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1450,8 +1449,8 @@ func cmdDaemonServe(args []string) error {
 		rate := sharedPulse.GetValidateToVerifyRate(days)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"days":             days,
-			"verify_rate":      rate,
+			"days":        days,
+			"verify_rate": rate,
 		})
 	})
 
@@ -2564,9 +2563,9 @@ func serveMCPConn(ctx context.Context, mcpSrv *mcpserver.MCPServer, synSrv *mcps
 		// check fires. ReadSlice returns ErrBufferFull for each internal-buffer
 		// chunk, letting us enforce the limit incrementally.
 		var (
-			lineBuf   []byte
-			lineErr   error
-			tooLarge  bool
+			lineBuf  []byte
+			lineErr  error
+			tooLarge bool
 		)
 		for {
 			frag, sliceErr := reader.ReadSlice('\n')

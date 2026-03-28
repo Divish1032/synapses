@@ -7,10 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SynapsesOS/synapses/internal/embed"
-	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/SynapsesOS/synapses/internal/embed"
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 // testEmbedder is a mock that satisfies embed.Embedder.

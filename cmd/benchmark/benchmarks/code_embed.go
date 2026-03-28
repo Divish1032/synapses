@@ -103,8 +103,8 @@ type CodeModelEmbedder struct {
 }
 
 const (
-	codeEmbedBatchSize = 8
-	codeEmbedTimeout   = 10 * time.Second
+	codeEmbedBatchSize       = 8
+	codeEmbedTimeout         = 10 * time.Second
 	codeEmbedDownloadTimeout = 15 * time.Minute
 )
 

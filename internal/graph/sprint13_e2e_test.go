@@ -47,7 +47,7 @@ func TestSprint13_E2E_FullPipeline(t *testing.T) {
 	}
 
 	// ── Nodes ──────────────────────────────────────────────────────────────
-	storerID := mkID("store.go", "Storer")    // interface root
+	storerID := mkID("store.go", "Storer")       // interface root
 	fileStoreID := mkID("store.go", "FileStore") // implementor
 	netStoreID := mkID("store.go", "NetStore")   // implementor
 	storeID := mkID("store.go", "Store")         // hub — both call it

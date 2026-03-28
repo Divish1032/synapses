@@ -136,9 +136,9 @@ func (s *Server) handleGetGaps(
 	}
 
 	return jsonResult(map[string]interface{}{
-		"gaps":    gaps,
-		"count":   len(gaps),
-		"filter":  displayStatus,
-		"hint":    "Use upsert_gap(status=\"fixed\", fix_notes=\"...\") to close a gap after fixing it.",
+		"gaps":   gaps,
+		"count":  len(gaps),
+		"filter": displayStatus,
+		"hint":   "Use upsert_gap(status=\"fixed\", fix_notes=\"...\") to close a gap after fixing it.",
 	})
 }

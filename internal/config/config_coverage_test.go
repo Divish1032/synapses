@@ -138,7 +138,6 @@ func TestApplyDefaults_BrainEnabled(t *testing.T) {
 	}
 }
 
-
 func TestApplyDefaults_ConstitutionPrinciples(t *testing.T) {
 	raw := map[string]interface{}{
 		"version": "1",

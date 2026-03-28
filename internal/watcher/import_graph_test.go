@@ -206,17 +206,17 @@ func TestComputeInvalidationSet_UnresolvedCrossPackageCallers(t *testing.T) {
 	// Graph: models/user.go defines existing functions — no CALLS edge to handler.go.
 	g := graph.New("repo")
 	g.AddNode(&graph.Node{
-		ID: g.MakeNodeID("models/user.go", "models/user.go"),
+		ID:   g.MakeNodeID("models/user.go", "models/user.go"),
 		Type: graph.NodeFile, Name: "models/user.go",
 		File: "models/user.go", Package: "models",
 	})
 	g.AddNode(&graph.Node{
-		ID: g.MakeNodeID("models/user.go", "OldFunc"),
+		ID:   g.MakeNodeID("models/user.go", "OldFunc"),
 		Type: graph.NodeFunction, Name: "OldFunc",
 		File: "models/user.go", Package: "models",
 	})
 	g.AddNode(&graph.Node{
-		ID: g.MakeNodeID("handler.go", "handler.go"),
+		ID:   g.MakeNodeID("handler.go", "handler.go"),
 		Type: graph.NodeFile, Name: "handler.go",
 		File: "handler.go", Package: "main",
 	})

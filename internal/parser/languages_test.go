@@ -4,10 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/SynapsesOS/synapses/internal/graph"
-	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/parser"
 )
 
 // ─── shared helpers ───────────────────────────────────────────────────────────

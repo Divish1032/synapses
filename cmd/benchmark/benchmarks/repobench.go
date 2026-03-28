@@ -82,14 +82,14 @@ type RepoBenchOptions struct {
 //   - ImportStatement  = imports at the top of the query file
 type RepoBenchSample struct {
 	// Code is the current file's code up to the completion point — the query.
-	Code            string   `json:"code"`
+	Code string `json:"code"`
 	// Context is the list of candidate snippets from other files to rank.
-	Context         []string `json:"context"`
-	ImportStatement string   `json:"import_statement"`
-	GoldenSnippetIndex int   `json:"golden_snippet_index"`
-	NextLine        string   `json:"next_line"`
-	Repo            string   `json:"repo_name"`
-	File            string   `json:"file_path"`
+	Context            []string `json:"context"`
+	ImportStatement    string   `json:"import_statement"`
+	GoldenSnippetIndex int      `json:"golden_snippet_index"`
+	NextLine           string   `json:"next_line"`
+	Repo               string   `json:"repo_name"`
+	File               string   `json:"file_path"`
 }
 
 // RunRepoBench executes the RepoBench-R benchmark across all requested configs

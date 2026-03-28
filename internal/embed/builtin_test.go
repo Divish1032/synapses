@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/SynapsesOS/synapses/internal/embed"
 )
 
 // ── Unit tests (no model download required) ─────────────────────────────────

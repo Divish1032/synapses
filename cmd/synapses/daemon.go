@@ -179,7 +179,6 @@ func startSidecar(s Sidecar, quiet bool) error {
 	cmd.Stderr = lf
 	cmd.SysProcAttr = detachedSysProcAttr()
 
-
 	if err := cmd.Start(); err != nil {
 		lf.Close()
 		return fmt.Errorf("start %s: %w", s.Name, err)

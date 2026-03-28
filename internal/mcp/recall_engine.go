@@ -63,8 +63,8 @@ type TraversalPath struct {
 // whether the graph channel produced results.
 type GraphTraversalInfo struct {
 	Depth          int             `json:"depth"`
-	AnchorCount    int             `json:"anchor_count"`           // query-matching seed entities
-	VisitedNodes   int             `json:"visited_nodes"`          // graph nodes explored by BFS
+	AnchorCount    int             `json:"anchor_count"`  // query-matching seed entities
+	VisitedNodes   int             `json:"visited_nodes"` // graph nodes explored by BFS
 	Paths          []TraversalPath `json:"paths,omitempty"`
 	Note           string          `json:"note"`
 	VectorSearchMs float64         `json:"vector_search_ms,omitempty"` // embedding query latency
@@ -164,8 +164,8 @@ func (s *Server) quadRecallSearch(
 		mu              sync.Mutex
 		channels        = make(map[string][]string)
 		channelScores   = make(map[string]*store.ChannelScores) // raw scores for ConvexMerge
-		memMap          = make(map[string]store.Memory)          // id → full memory for hydration
-		staleEmbeddings = make(map[string]bool)                  // memory IDs with stale embeddings (entity changed)
+		memMap          = make(map[string]store.Memory)         // id → full memory for hydration
+		staleEmbeddings = make(map[string]bool)                 // memory IDs with stale embeddings (entity changed)
 	)
 
 	// Graph channel metadata: written only by the graph goroutine, read after

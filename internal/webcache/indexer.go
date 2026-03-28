@@ -111,4 +111,3 @@ func IndexProjectImports(ctx context.Context, projectPath string, g *graph.Graph
 		log.Printf("webcache: indexed %d/%d external packages for %s", fetched, len(entries), projectPath)
 	}
 }
-

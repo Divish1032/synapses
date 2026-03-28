@@ -332,9 +332,9 @@ func (c *retryMockClient) Generate(_ context.Context, _ string) (string, error) 
 	return `{"new_memories":[{"key":"retry-hit","content":"found on retry","entities":"Foo"}],"annotations":[]}`, nil
 }
 
-func (c *retryMockClient) Available(_ context.Context) bool            { return true }
-func (c *retryMockClient) ModelPulled(_ context.Context) bool          { return true }
-func (c *retryMockClient) ModelName() string                           { return "mock" }
+func (c *retryMockClient) Available(_ context.Context) bool               { return true }
+func (c *retryMockClient) ModelPulled(_ context.Context) bool             { return true }
+func (c *retryMockClient) ModelName() string                              { return "mock" }
 func (c *retryMockClient) PullModel(_ context.Context, _ io.Writer) error { return nil }
 
 func TestMemorize_RetryMock_SecondCallReturnsData(t *testing.T) {

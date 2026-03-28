@@ -23,8 +23,8 @@ import (
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/embed"
-	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/metrics"
 	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/pulse"
@@ -50,15 +50,15 @@ type reparseWork struct {
 // parseFileResult holds the output of the parallel (CPU-bound) parse phase.
 // It is produced by prepareParseResult and consumed by applyBatch.
 type parseFileResult struct {
-	path      string
-	src       []byte       // file bytes read once; reused for hash + parse
-	hasErrors bool         // tree-sitter detected syntax errors in src
-	hash      string       // SHA-256 content hash of src
-	hashKnown bool         // false when hash computation failed (conservative)
-	lstatIno  uint64       // inode at Lstat time; 0 if unavailable
-	tempGraph *graph.Graph // nodes/edges/callSites/terraformRefs from parse
-	err       error        // non-nil → skip this file in applyBatch
-	reparseStart time.Time // timing for pulse ReparseEvent
+	path         string
+	src          []byte       // file bytes read once; reused for hash + parse
+	hasErrors    bool         // tree-sitter detected syntax errors in src
+	hash         string       // SHA-256 content hash of src
+	hashKnown    bool         // false when hash computation failed (conservative)
+	lstatIno     uint64       // inode at Lstat time; 0 if unavailable
+	tempGraph    *graph.Graph // nodes/edges/callSites/terraformRefs from parse
+	err          error        // non-nil → skip this file in applyBatch
+	reparseStart time.Time    // timing for pulse ReparseEvent
 }
 
 // ChangeEvent records a single file modification processed by the watcher.
@@ -117,17 +117,17 @@ type NameMatcherRunner interface {
 }
 
 type Watcher struct {
-	fw          *fsnotify.Watcher
-	graph       *graph.Graph
-	walker      *parser.Walker
-	store       *store.Store           // may be nil — cache update is best-effort
-	cfg         *config.Config         // may be nil — violation checking is best-effort
-	brainClient *brain.Client          // set via SetBrainClient; nil if brain not configured
-	pktInval    PacketCacheInvalidator // set via SetPacketInvalidator; may be nil
-	cfgHandler  ConfigChangeHandler    // called when synapses.json changes; may be nil
-	configPath  string                 // absolute path to synapses.json (set by Start)
-	projectID   string                 // stable project identifier (FNV hash of project root path)
-	rootPath    string                 // absolute resolved project root (set by Start)
+	fw               *fsnotify.Watcher
+	graph            *graph.Graph
+	walker           *parser.Walker
+	store            *store.Store             // may be nil — cache update is best-effort
+	cfg              *config.Config           // may be nil — violation checking is best-effort
+	brainClient      *brain.Client            // set via SetBrainClient; nil if brain not configured
+	pktInval         PacketCacheInvalidator   // set via SetPacketInvalidator; may be nil
+	cfgHandler       ConfigChangeHandler      // called when synapses.json changes; may be nil
+	configPath       string                   // absolute path to synapses.json (set by Start)
+	projectID        string                   // stable project identifier (FNV hash of project root path)
+	rootPath         string                   // absolute resolved project root (set by Start)
 	cpTracker        CrossProjectTracker      // set via SetCrossProjectTracker; may be nil
 	cpBrainTracker   BrainCrossProjectTracker // set via SetBrainCrossProjectTracker; may be nil
 	nmRunner         NameMatcherRunner        // set via SetNameMatcher; may be nil
@@ -1231,22 +1231,22 @@ func (w *Watcher) mergeLoop() {
 //
 // Three-phase design (lock-order safe):
 //
-//   Phase 0 (NO lock): pre-snapshot.
-//     Compute invalidation sets and pre-load stored call sites from SQLite.
-//     Safe without reparseMu because all graph writers hold reparseMu (both
-//     applyBatch Phase 1 and handleEvent's remove path).  Reads are serialised
-//     at graph.mu.  Any staleness between Phase 0 and Phase 1 is benign.
-//     All store I/O happens here, eliminating the implicit reparseMu→store.mu
-//     lock-ordering dependency that would cause a deadlock if store ever needed
-//     to re-enter the watcher.
+//	Phase 0 (NO lock): pre-snapshot.
+//	  Compute invalidation sets and pre-load stored call sites from SQLite.
+//	  Safe without reparseMu because all graph writers hold reparseMu (both
+//	  applyBatch Phase 1 and handleEvent's remove path).  Reads are serialised
+//	  at graph.mu.  Any staleness between Phase 0 and Phase 1 is benign.
+//	  All store I/O happens here, eliminating the implicit reparseMu→store.mu
+//	  lock-ordering dependency that would cause a deadlock if store ever needed
+//	  to re-enter the watcher.
 //
-//   Phase 1 (reparseMu held): pure in-memory graph mutations.
-//     RemoveFile / MergeFrom / BulkAddCallSites / resolvers.
-//     Zero store I/O. reparseMu is held for the minimum required duration.
+//	Phase 1 (reparseMu held): pure in-memory graph mutations.
+//	  RemoveFile / MergeFrom / BulkAddCallSites / resolvers.
+//	  Zero store I/O. reparseMu is held for the minimum required duration.
 //
-//   Phase 2 (NO lock): store writes + side effects.
-//     Memory staling, call-site persistence, federation, pulse events.
-//     Uses pre-computed IDs captured under the lock (removedIDs, changedIDs).
+//	Phase 2 (NO lock): store writes + side effects.
+//	  Memory staling, call-site persistence, federation, pulse events.
+//	  Uses pre-computed IDs captured under the lock (removedIDs, changedIDs).
 //
 // Running resolvers once per batch (rather than once per file) is the primary
 // performance win for branch switches: 20 files → 1 resolver pass instead of 20.
@@ -1310,8 +1310,8 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 		errorAction    string // "clean", "proceed", "skip"
 		nodesBefore    int
 		edgesBefore    int
-		nodesAfter     int    // captured under reparseMu for accurate pulse reporting
-		edgesAfter     int    // captured under reparseMu for accurate pulse reporting
+		nodesAfter     int // captured under reparseMu for accurate pulse reporting
+		edgesAfter     int // captured under reparseMu for accurate pulse reporting
 		beforeNodeIDs  []string
 		prevFileHash   string
 		newCallSites   []graph.CallSite

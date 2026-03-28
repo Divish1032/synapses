@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	"github.com/alexaandru/go-sitter-forest/c_sharp"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -569,7 +569,7 @@ func collectCSharpCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node
 			"constructor_declaration": true,
 		},
 		CallTypes: map[string]bool{
-			"invocation_expression":    true,
+			"invocation_expression":      true,
 			"object_creation_expression": true,
 		},
 		NameExtractor: func(n sitter.Node, src []byte) string {

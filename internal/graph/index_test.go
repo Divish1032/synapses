@@ -400,4 +400,3 @@ func TestEigenvectorCentrality_BoostsInCarve(t *testing.T) {
 		t.Errorf("expected central (%f) to outrank leaf (%f) after centrality boost", centralRel, leafRel)
 	}
 }
-

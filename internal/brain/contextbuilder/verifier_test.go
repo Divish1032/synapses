@@ -11,10 +11,10 @@ func TestVerifyClaim_TableDriven(t *testing.T) {
 	// Table-driven test for claim verification logic.
 	// Each test case defines: claim text, topology state, and expected annotation result.
 	tests := []struct {
-		name         string
-		claim        string
-		req          Request
-		wantVerified bool // true if expect [✓], false if expect UNVERIFIED, nil if expect unchanged
+		name          string
+		claim         string
+		req           Request
+		wantVerified  bool // true if expect [✓], false if expect UNVERIFIED, nil if expect unchanged
 		wantUnchanged bool // true if expect original claim unchanged
 	}{
 		// Orphan/isolated claims
@@ -89,9 +89,9 @@ func TestVerifyClaim_TableDriven(t *testing.T) {
 
 		// Unrecognized/unknown claims
 		{
-			name:         "unknown_claim_unchanged",
-			claim:        "This function handles request routing.",
-			req:          Request{FanIn: 3},
+			name:          "unknown_claim_unchanged",
+			claim:         "This function handles request routing.",
+			req:           Request{FanIn: 3},
 			wantUnchanged: true,
 		},
 	}
@@ -225,9 +225,9 @@ func TestVerifyPacket_MixedTrueClaims(t *testing.T) {
 
 	pkt := &Packet{
 		Concerns: []string{
-			"Acts as a gravity center", // TRUE — high fanin
+			"Acts as a gravity center",  // TRUE — high fanin
 			"This function is untested", // TRUE — no tests
-			"Has circular dependency", // FALSE — no bidirectional edges
+			"Has circular dependency",   // FALSE — no bidirectional edges
 		},
 	}
 

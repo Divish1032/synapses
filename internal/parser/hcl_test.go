@@ -344,14 +344,14 @@ func TestHCLParser_DefinesEdges(t *testing.T) {
 	fileID := fileNodes[0].ID
 
 	wantNames := map[string]bool{
-		"aws_instance.web":     false,
-		"data.aws_ami.ubuntu":  false,
-		"module.vpc":           false,
-		"var.region":           false,
-		"output.ip":            false,
-		"local.env_name":       false,
-		"local.app_name":       false,
-		"provider.aws":         false,
+		"aws_instance.web":    false,
+		"data.aws_ami.ubuntu": false,
+		"module.vpc":          false,
+		"var.region":          false,
+		"output.ip":           false,
+		"local.env_name":      false,
+		"local.app_name":      false,
+		"provider.aws":        false,
 	}
 
 	for _, e := range g.OutEdges(fileID) {

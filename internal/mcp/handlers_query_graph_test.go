@@ -39,8 +39,8 @@ func TestTokenize_BasicTokens(t *testing.T) {
 
 func TestTokenize_TwoCharOps(t *testing.T) {
 	tests := []struct {
-		input    string
-		wantOp   string
+		input  string
+		wantOp string
 	}{
 		{"x != y", "!="},
 		{"x >= 5", ">="},

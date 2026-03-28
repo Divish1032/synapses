@@ -538,7 +538,6 @@ func TestGetSummary_WithMultipleEvents(t *testing.T) {
 	}
 }
 
-
 func TestOpen_CreatesDatabase(t *testing.T) {
 	// Test that Open creates a database file
 	dir := t.TempDir()
@@ -564,14 +563,14 @@ func TestMergeSummaries_WeightedAverages(t *testing.T) {
 	// Test that mergeSummaries recomputes rates from summable components.
 	hist := &Summary{
 		ContextDeliveries:  10,
-		CacheHits:          8,    // 80% hit rate
+		CacheHits:          8, // 80% hit rate
 		BrainEnrichedCount: 0,
 		TotalToolCalls:     20,
 		TotalLatencyMs:     2000, // avg = 100ms
 	}
 	today := &Summary{
 		ContextDeliveries:  5,
-		CacheHits:          3,    // 60% hit rate
+		CacheHits:          3, // 60% hit rate
 		BrainEnrichedCount: 0,
 		TotalToolCalls:     10,
 		TotalLatencyMs:     500, // avg = 50ms
@@ -606,7 +605,7 @@ func TestOpen_PerformancePragmas(t *testing.T) {
 		pragma, want string
 	}{
 		{"synchronous", "1"},       // NORMAL
-		{"cache_size", "-65536"},    // 64 MB
+		{"cache_size", "-65536"},   // 64 MB
 		{"mmap_size", "268435456"}, // 256 MB
 		{"temp_store", "2"},        // MEMORY
 	} {
@@ -723,8 +722,8 @@ func TestGetEntityQualityScoresBatch_OnlyRequestedIDs(t *testing.T) {
 		entity string
 		weight float64
 	}{
-		{"HighQuality", pulsetypes.SignalWeightTaskDone * 3},   // +0.9
-		{"LowQuality", pulsetypes.SignalWeightTaskAbandoned},   // -0.8
+		{"HighQuality", pulsetypes.SignalWeightTaskDone * 3}, // +0.9
+		{"LowQuality", pulsetypes.SignalWeightTaskAbandoned}, // -0.8
 	} {
 		_ = s.InsertOutcomeSignal(pulsetypes.OutcomeSignalEvent{
 			ProjectID:    "proj-1",
@@ -829,8 +828,8 @@ func TestUpdateRecallChannelStats_LearnedWeights(t *testing.T) {
 	for _, entry := range seed {
 		for i := 0; i < entry.count; i++ {
 			if err := s.InsertMemoryOp(pulsetypes.MemoryOperationEvent{
-				Operation: "recall_hit",
-				ProjectID: projID,
+				Operation:  "recall_hit",
+				ProjectID:  projID,
 				TopChannel: entry.ch,
 			}); err != nil {
 				t.Fatalf("InsertMemoryOp(%s): %v", entry.ch, err)
@@ -879,7 +878,6 @@ func TestUpdateRecallChannelStats_LearnedWeights(t *testing.T) {
 		t.Errorf("expected no weights for unknown project, got %v", other)
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // Sprint 15 #5: GetSessionDeliveryStats

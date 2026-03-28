@@ -4,9 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/SynapsesOS/synapses/internal/embed"
 )
 
 // mockEmbedder is a test double that satisfies the Embedder interface.

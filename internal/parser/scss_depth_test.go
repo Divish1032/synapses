@@ -3,9 +3,10 @@ package parser
 import (
 	"testing"
 
-	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 func TestSCSSParser_LocalVarsNotCaptured(t *testing.T) {

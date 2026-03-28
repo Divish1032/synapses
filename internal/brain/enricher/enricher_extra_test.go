@@ -96,7 +96,7 @@ func TestNodeTypeOrDefault(t *testing.T) {
 
 func TestDetectDomain(t *testing.T) {
 	cases := []struct {
-		path        string
+		path         string
 		wantNonEmpty bool
 		wantContains string
 	}{
@@ -272,9 +272,9 @@ func (c *captureMockClient) Generate(_ context.Context, prompt string) (string, 
 	return c.resp, nil
 }
 
-func (c *captureMockClient) Available(_ context.Context) bool         { return true }
-func (c *captureMockClient) ModelName() string                        { return "capture:test" }
-func (c *captureMockClient) ModelPulled(_ context.Context) bool       { return true }
+func (c *captureMockClient) Available(_ context.Context) bool               { return true }
+func (c *captureMockClient) ModelName() string                              { return "capture:test" }
+func (c *captureMockClient) ModelPulled(_ context.Context) bool             { return true }
 func (c *captureMockClient) PullModel(_ context.Context, _ io.Writer) error { return nil }
 
 // TestHeuristicInsight_Content verifies topology-based heuristic text for all

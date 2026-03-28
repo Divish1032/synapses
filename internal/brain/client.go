@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	brainconfig "github.com/SynapsesOS/synapses/internal/brain/config"
 	"github.com/SynapsesOS/synapses/internal/brain/archivist"
+	brainconfig "github.com/SynapsesOS/synapses/internal/brain/config"
 	"github.com/SynapsesOS/synapses/internal/brain/llm"
 )
 
@@ -450,8 +450,8 @@ func (c *Client) ScheduleNLClassification(req NLClassifyRequest, applyFn func([]
 // ~15-30 seconds on a local 4B model.
 //
 // Two-pass strategy within a single model residency window:
-//   1. Entity type classification: concept | entity | artifact | decision
-//   2. One-sentence description generation (skipped if classification fails)
+//  1. Entity type classification: concept | entity | artifact | decision
+//  2. One-sentence description generation (skipped if classification fails)
 //
 // Valid NodeType responses: concept | entity | artifact | decision
 // Anything else is silently ignored (caller keeps the Tier 0 default "concept").

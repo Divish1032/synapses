@@ -4,9 +4,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	tsxsitter "github.com/alexaandru/go-sitter-forest/tsx"
 	tssitter "github.com/alexaandru/go-sitter-forest/typescript"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -952,8 +952,8 @@ func collectTSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, sr
 		},
 		FuncTypes: map[string]bool{
 			"function_declaration": true,
-			"method_definition":   true,
-			"arrow_function":      true,
+			"method_definition":    true,
+			"arrow_function":       true,
 			"function_expression":  true,
 		},
 		CallTypes: map[string]bool{"call_expression": true},
@@ -964,7 +964,7 @@ func collectTSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, sr
 			return ""
 		},
 		AliasedCalleeExtractor: jsAliasedCalleeExtractor, // TS uses the same call expression structure as JS.
-		IsBuiltin:       isTSBuiltin,
+		IsBuiltin:              isTSBuiltin,
 	})
 }
 

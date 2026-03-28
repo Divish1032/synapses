@@ -61,9 +61,9 @@ func buildImplementsFixture(t *testing.T) (*graph.Graph, map[string]graph.NodeID
 	g := graph.New("testrepo")
 
 	ids := map[string]graph.NodeID{
-		"target":    g.MakeNodeID("svc.go", "target"),
+		"target":     g.MakeNodeID("svc.go", "target"),
 		"calleeNode": g.MakeNodeID("svc.go", "calleeNode"),
-		"ifaceNode": g.MakeNodeID("iface.go", "ifaceNode"),
+		"ifaceNode":  g.MakeNodeID("iface.go", "ifaceNode"),
 	}
 
 	g.AddNode(&graph.Node{ID: ids["target"], Type: graph.NodeFunction, Name: "target", File: "svc.go"})

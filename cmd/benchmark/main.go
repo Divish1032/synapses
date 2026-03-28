@@ -47,24 +47,24 @@ func main() {
 		indexOnly     = flag.Bool("index-only", false, "Clone and index repos, then exit")
 		skipIndex     = flag.Bool("skip-index", false, "Skip synapses index step (clone only)")
 		// ContextBench-specific flags.
-		cbDataFile    = flag.String("cb-data", "contextbench.jsonl", "Path to ContextBench JSONL dataset")
-		cbLanguages   = flag.String("cb-languages", "", "Comma-separated language filter for ContextBench (empty = all)")
-		cbSources     = flag.String("cb-sources", "", "Comma-separated source filter for ContextBench (e.g. Verified)")
+		cbDataFile  = flag.String("cb-data", "contextbench.jsonl", "Path to ContextBench JSONL dataset")
+		cbLanguages = flag.String("cb-languages", "", "Comma-separated language filter for ContextBench (empty = all)")
+		cbSources   = flag.String("cb-sources", "", "Comma-separated source filter for ContextBench (e.g. Verified)")
 		// GraphBench-specific flags.
-		gbDataFile    = flag.String("gb-data", "graphbench.jsonl", "Path to GraphBench JSONL dataset")
+		gbDataFile = flag.String("gb-data", "graphbench.jsonl", "Path to GraphBench JSONL dataset")
 		// NLBench-specific flags.
-		nlDataFile    = flag.String("nl-data", "nlbench.jsonl", "Path to NLBench JSONL dataset")
+		nlDataFile = flag.String("nl-data", "nlbench.jsonl", "Path to NLBench JSONL dataset")
 		// SWE-bench-specific flags.
-		sweDataFile   = flag.String("swe-data", "swebench_pilot.jsonl", "Path to SWE-bench JSONL dataset")
-		sweMode       = flag.String("mode", "baseline", "Agent mode: baseline | synapses")
-		sweModel      = flag.String("model", "claude-sonnet-4-6", "Claude model for SWE-bench agent")
+		sweDataFile = flag.String("swe-data", "swebench_pilot.jsonl", "Path to SWE-bench JSONL dataset")
+		sweMode     = flag.String("mode", "baseline", "Agent mode: baseline | synapses")
+		sweModel    = flag.String("model", "claude-sonnet-4-6", "Claude model for SWE-bench agent")
 		// FeatureBench-specific flags.
-		fbSplit       = flag.String("fb-split", "lite", "FeatureBench split: lite | fast | full")
-		fbTaskIDs     = flag.String("fb-task-ids", "", "Comma-separated FeatureBench task IDs")
-		fbLevel       = flag.Int("fb-level", 0, "FeatureBench level filter: 1 or 2 (0 = all)")
-		fbTimeout     = flag.Int("fb-timeout", 1200, "Timeout per FeatureBench task in seconds")
-		fbDebug       = flag.Bool("fb-debug", false, "Dump raw stream-json to file for MCP tool inspection")
-		sweMaxTurns   = flag.Int("max-turns", 25, "Max agent loop turns for SWE-bench")
+		fbSplit     = flag.String("fb-split", "lite", "FeatureBench split: lite | fast | full")
+		fbTaskIDs   = flag.String("fb-task-ids", "", "Comma-separated FeatureBench task IDs")
+		fbLevel     = flag.Int("fb-level", 0, "FeatureBench level filter: 1 or 2 (0 = all)")
+		fbTimeout   = flag.Int("fb-timeout", 1200, "Timeout per FeatureBench task in seconds")
+		fbDebug     = flag.Bool("fb-debug", false, "Dump raw stream-json to file for MCP tool inspection")
+		sweMaxTurns = flag.Int("max-turns", 25, "Max agent loop turns for SWE-bench")
 	)
 	flag.Parse()
 
@@ -256,16 +256,16 @@ func main() {
 
 	case "featurebench", "feature-bench", "feature_bench":
 		fbResults, err := benchmarks.RunFeatureBench(benchmarks.FeatureBenchOptions{
-			Split:       *fbSplit,
-			TaskIDs:     splitComma(*fbTaskIDs),
-			Level:       *fbLevel,
-			ReposDir:    *reposDir,
-			Limit:       *limit,
-			Mode:        *sweMode,
-			Model:       *sweModel,
-			Timeout:     *fbTimeout,
-			OutputDir:   *outputDir,
-			Debug:       *fbDebug,
+			Split:     *fbSplit,
+			TaskIDs:   splitComma(*fbTaskIDs),
+			Level:     *fbLevel,
+			ReposDir:  *reposDir,
+			Limit:     *limit,
+			Mode:      *sweMode,
+			Model:     *sweModel,
+			Timeout:   *fbTimeout,
+			OutputDir: *outputDir,
+			Debug:     *fbDebug,
 		})
 		if err != nil {
 			log.Fatalf("featurebench failed: %v", err)

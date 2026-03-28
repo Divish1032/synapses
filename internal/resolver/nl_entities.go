@@ -284,8 +284,8 @@ func resolveNLCore(
 						unresolved = append(unresolved, c)
 						embedResolved = true
 
-					// default: bestScore <= embedMidThreshold — genuinely new concept;
-					// fall through to standard creation with tier=0.
+						// default: bestScore <= embedMidThreshold — genuinely new concept;
+						// fall through to standard creation with tier=0.
 					}
 				}
 				// embedErr or empty vec: fall through to standard creation.
@@ -383,7 +383,7 @@ func signalToEdgeType(signal string) graph.EdgeType {
 }
 
 // buildCodeNamesLower returns a lowercase key set from a buildCodeNames map.
-// Used so `` `tokenbucket` `` matches a code entity named "TokenBucket".
+// Used so “ `tokenbucket` “ matches a code entity named "TokenBucket".
 func buildCodeNamesLower(codeNames map[string][]*graph.Node) map[string]bool {
 	m := make(map[string]bool, len(codeNames))
 	for k := range codeNames {

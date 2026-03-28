@@ -141,11 +141,11 @@ func TestSpike_CoderHNSW_RecallAccuracyWithOversampling(t *testing.T) {
 	t.Parallel()
 	const (
 		nClusters  = 20
-		N          = nClusters * 10  // 200 — fast enough for test suite
-		dims       = 384             // production embedding dimension
+		N          = nClusters * 10 // 200 — fast enough for test suite
+		dims       = 384            // production embedding dimension
 		k          = 10
-		oversample = 3              // request k*oversample from HNSW, pick true top-k via SQL
-		noiseStd   = float32(0.01)  // per-component; L2 ≈ 0.01×sqrt(384) ≈ 0.196
+		oversample = 3             // request k*oversample from HNSW, pick true top-k via SQL
+		noiseStd   = float32(0.01) // per-component; L2 ≈ 0.01×sqrt(384) ≈ 0.196
 	)
 	rng := rand.New(rand.NewSource(42))
 
@@ -508,11 +508,11 @@ func TestSpike_CoderHNSW_SearchResultOrdering(t *testing.T) {
 		wantRank int // 1=closest … 5=farthest
 	}
 	nodes := []entry{
-		{"rank5-ortho", normalise([]float32{0, 0, 1, 0}), 5},  // dist = 1.0
-		{"rank4-far", normalise([]float32{0.5, 0.87, 0, 0}), 4}, // dist ≈ 0.50
-		{"rank3-mid", normalise([]float32{0.7, 0.71, 0, 0}), 3}, // dist ≈ 0.30
+		{"rank5-ortho", normalise([]float32{0, 0, 1, 0}), 5},      // dist = 1.0
+		{"rank4-far", normalise([]float32{0.5, 0.87, 0, 0}), 4},   // dist ≈ 0.50
+		{"rank3-mid", normalise([]float32{0.7, 0.71, 0, 0}), 3},   // dist ≈ 0.30
 		{"rank2-near", normalise([]float32{0.95, 0.31, 0, 0}), 2}, // dist ≈ 0.05
-		{"rank1-exact", normalise([]float32{1, 0, 0, 0}), 1},   // dist = 0.0
+		{"rank1-exact", normalise([]float32{1, 0, 0, 0}), 1},      // dist = 0.0
 	}
 
 	g := hnsw.NewGraph[string]()

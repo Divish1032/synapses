@@ -225,10 +225,10 @@ func TestApplyDefaults_TildeExpansionInDBPath(t *testing.T) {
 
 func TestApplyDefaults_LocalBackendAutoComputesGGUFPath(t *testing.T) {
 	path := writePartialConfig(t, map[string]interface{}{
-		"backend":      "local",
-		"gguf_path":    "",
-		"model_dir":    "/tmp/models",
-		"hf_filename":  "sil-coder.gguf",
+		"backend":     "local",
+		"gguf_path":   "",
+		"model_dir":   "/tmp/models",
+		"hf_filename": "sil-coder.gguf",
 	})
 	cfg, err := config.LoadFile(path)
 	if err != nil {
@@ -239,7 +239,6 @@ func TestApplyDefaults_LocalBackendAutoComputesGGUFPath(t *testing.T) {
 		t.Errorf("GGUFPath = %q after applyDefaults, want %q", cfg.GGUFPath, want)
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // AutoConfigureModels — additional coverage beyond config_test.go
@@ -339,16 +338,16 @@ func TestApplyDefaults_AllZeroOverrides(t *testing.T) {
 	// Explicitly zero out fields that DefaultConfig() pre-fills.
 	// json.Unmarshal overwrites them → applyDefaults sets defaults.
 	path := writePartialConfig(t, map[string]interface{}{
-		"backend":            "ollama",
-		"fast_model":         "",
-		"model_guardian":     "",
-		"model_enrich":       "",
-		"model_orchestrate":  "",
-		"db_path":            "",
-		"default_phase":      "",
-		"default_mode":       "",
-		"model_dir":          "",
-		"hf_filename":        "",
+		"backend":           "ollama",
+		"fast_model":        "",
+		"model_guardian":    "",
+		"model_enrich":      "",
+		"model_orchestrate": "",
+		"db_path":           "",
+		"default_phase":     "",
+		"default_mode":      "",
+		"model_dir":         "",
+		"hf_filename":       "",
 	})
 	cfg, err := config.LoadFile(path)
 	if err != nil {

@@ -225,8 +225,8 @@ require github.com/single/line v2.0.0
 	}
 
 	expected := map[string]string{
-		"github.com/foo/bar":    "v1.2.3",
-		"github.com/baz/qux":   "v0.5.0",
+		"github.com/foo/bar":     "v1.2.3",
+		"github.com/baz/qux":     "v0.5.0",
 		"github.com/single/line": "v2.0.0",
 	}
 

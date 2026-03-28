@@ -278,9 +278,9 @@ func TestComputeCostSaved_MultipleTokenAmounts(t *testing.T) {
 		tokens int
 		name   string
 	}{
-		{100000, "100K tokens"},     // 100K tokens → $0.25 (100K / 1M * 2.50)
-		{500000, "500K tokens"},     // 500K tokens → $1.25 (500K / 1M * 2.50)
-		{2000000, "2M tokens"},      // 2M tokens → $5.00 (2M / 1M * 2.50)
+		{100000, "100K tokens"}, // 100K tokens → $0.25 (100K / 1M * 2.50)
+		{500000, "500K tokens"}, // 500K tokens → $1.25 (500K / 1M * 2.50)
+		{2000000, "2M tokens"},  // 2M tokens → $5.00 (2M / 1M * 2.50)
 	}
 
 	for _, tc := range testCases {
@@ -446,14 +446,14 @@ func TestWriteBatch_WithAgentLLMUsage(t *testing.T) {
 	defer c.Stop()
 
 	c.RecordAgentLLMUsage(pulsetypes.AgentLLMUsageEvent{
-		SessionID:   "sess-1",
-		AgentID:     "agent-1",
-		ProjectID:   "proj-1",
-		Model:       "gpt-4o",
-		Provider:    "openai",
-		InputTokens: 1000,
+		SessionID:    "sess-1",
+		AgentID:      "agent-1",
+		ProjectID:    "proj-1",
+		Model:        "gpt-4o",
+		Provider:     "openai",
+		InputTokens:  1000,
 		OutputTokens: 500,
-		CostUSD:     0.05,
+		CostUSD:      0.05,
 	})
 
 	time.Sleep(100 * time.Millisecond)
@@ -599,9 +599,9 @@ func TestComputeCostSaved_WithPricingLookup(t *testing.T) {
 		want   float64
 	}{
 		{0, 0},
-		{500_000, 1.25},    // 500k tokens * 2.50 / 1M
-		{1_000_000, 2.50},  // 1M tokens
-		{2_000_000, 5.00},  // 2M tokens
+		{500_000, 1.25},   // 500k tokens * 2.50 / 1M
+		{1_000_000, 2.50}, // 1M tokens
+		{2_000_000, 5.00}, // 2M tokens
 	}
 
 	for _, tt := range tests {

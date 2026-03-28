@@ -9,9 +9,10 @@ import (
 	"math"
 	"strings"
 
+	"github.com/viterin/vek/vek32"
+
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/logutil"
-	"github.com/viterin/vek/vek32"
 )
 
 // nodeText builds the embedding input string from raw node fields.
@@ -441,11 +442,17 @@ func (s *Store) vectorSearchBruteForce(normQuery []float32, limit int) ([]Search
 // fetchNodeSearchResults performs Pass 2 of the two-pass node vector search:
 // given top-K (id, score) tuples, fetches full node metadata from graphDB.
 func (s *Store) fetchNodeSearchResults(winners []scoredID) ([]SearchResult, error) {
-	lookup := make(map[string]struct{ pos int; score float64 }, len(winners))
+	lookup := make(map[string]struct {
+		pos   int
+		score float64
+	}, len(winners))
 	placeholders := make([]string, len(winners))
 	args := make([]any, len(winners))
 	for i, w := range winners {
-		lookup[w.id] = struct{ pos int; score float64 }{pos: i, score: float64(w.score)}
+		lookup[w.id] = struct {
+			pos   int
+			score float64
+		}{pos: i, score: float64(w.score)}
 		placeholders[i] = "?"
 		args[i] = w.id
 	}

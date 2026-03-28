@@ -100,8 +100,8 @@ func TestBuildORQuery_ShortWordFallback(t *testing.T) {
 		wantValid bool
 		wantEmpty bool
 	}{
-		{"go is it", true, false},  // all ≤2 chars: fallback triggered
-		{"the a if", true, false},  // mix of short words
+		{"go is it", true, false},   // all ≤2 chars: fallback triggered
+		{"the a if", true, false},   // mix of short words
 		{"OR AND NOT", true, false}, // FTS5 keywords as query terms — must not produce `OR OR AND OR NOT`
 		{"", false, true},
 		{"change auth token logic", true, false}, // normal long words — no fallback

@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	perlg "github.com/alexaandru/go-sitter-forest/perl"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -21,7 +21,7 @@ type PerlParser struct{}
 
 func NewPerlParser() *PerlParser { return &PerlParser{} }
 
-func (p *PerlParser) Language() string { return "perl" }
+func (p *PerlParser) Language() string     { return "perl" }
 func (p *PerlParser) Extensions() []string { return []string{".pl", ".pm", ".t"} }
 
 func (p *PerlParser) TSLanguageForFile(_ string) *sitter.Language {

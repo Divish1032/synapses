@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	objcg "github.com/alexaandru/go-sitter-forest/objc"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -333,27 +333,30 @@ func (p *ObjCParser) extractProtocolMethods(g *graph.Graph, n sitter.Node, src [
 //   - Multi-part:    - (ReturnType)initWithName:(NSString *)n count:(int)c; → selector = "initWithName:count:"
 //
 // The method_declaration structure is:
-//   [-/+] [method_type] [identifier] ([identifier] [method_parameter])*  [;]
+//
+//	[-/+] [method_type] [identifier] ([identifier] [method_parameter])*  [;]
 //
 // The selector is built from:
-//   1. The first identifier child (first part of selector).
-//   2. For each method_parameter: its leading identifier child (keyword label before ":").
-//      Wait — re-reading the AST: the grammar puts the keyword before ":" directly in the
-//      method_declaration, NOT inside method_parameter. Let's look at the probe output:
 //
-//   [method_declaration]
+//  1. The first identifier child (first part of selector).
+//
+//  2. For each method_parameter: its leading identifier child (keyword label before ":").
+//     Wait — re-reading the AST: the grammar puts the keyword before ":" directly in the
+//     method_declaration, NOT inside method_parameter. Let's look at the probe output:
+//
+//     [method_declaration]
 //     [-]
 //     [method_type] → (instancetype)
 //     [identifier] → "initWithName"    ← first keyword
 //     [method_parameter]
-//       [:] → ":"
-//       [method_type] → (NSString *)
-//       [identifier] → "name"          ← param name
+//     [:] → ":"
+//     [method_type] → (NSString *)
+//     [identifier] → "name"          ← param name
 //     [identifier] → "count"           ← second keyword (between method_parameters)
 //     [method_parameter]
-//       [:] → ":"
-//       [method_type] → (NSInteger)
-//       [identifier] → "count"         ← param name
+//     [:] → ":"
+//     [method_type] → (NSInteger)
+//     [identifier] → "count"         ← param name
 //
 // So the selector parts are identifiers that PRECEDE each method_parameter [:].
 // We need to collect: identifiers that come BEFORE a method_parameter in the
@@ -460,18 +463,19 @@ func (p *ObjCParser) extractMethod(g *graph.Graph, n sitter.Node, src []byte, fi
 // Emits a NodeMethod (kind=property) qualified as ClassName.propertyName.
 //
 // AST structure for @property:
-//   [property_declaration]
-//     [@property]
-//     [property_attributes_declaration] → (nonatomic, strong)
-//     [struct_declaration]
-//       [type_identifier] → "NSString"
-//       [struct_declarator]
-//         [pointer_declarator]
-//           [*]
-//           [identifier] → "name"    ← property name
-//       OR
-//       [struct_declarator]
-//         [identifier] → "count"     ← property name (no pointer)
+//
+//	[property_declaration]
+//	  [@property]
+//	  [property_attributes_declaration] → (nonatomic, strong)
+//	  [struct_declaration]
+//	    [type_identifier] → "NSString"
+//	    [struct_declarator]
+//	      [pointer_declarator]
+//	        [*]
+//	        [identifier] → "name"    ← property name
+//	    OR
+//	    [struct_declarator]
+//	      [identifier] → "count"     ← property name (no pointer)
 func (p *ObjCParser) extractProperty(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID, enclosingClass string) {
 	// Collect property attributes text.
 	attrText := ""

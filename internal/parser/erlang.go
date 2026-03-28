@@ -130,11 +130,11 @@ func (p *ErlangParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		behNodeID := g.MakeNodeID(filePath, "behaviour:"+behaviourName)
 		if g.GetNode(behNodeID) == nil {
 			g.AddNode(&graph.Node{
-				ID:   behNodeID,
-				Type: graph.NodeVariable,
-				Name: behaviourName,
-				File: filePath,
-				Line: behLine,
+				ID:       behNodeID,
+				Type:     graph.NodeVariable,
+				Name:     behaviourName,
+				File:     filePath,
+				Line:     behLine,
 				Metadata: map[string]string{"kind": "otp_behaviour"},
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: behNodeID, Type: graph.EdgeDefines})

@@ -383,7 +383,7 @@ func TestResolveBrainDeps_DeduplicatesAgainstTier1(t *testing.T) {
 
 	brainDeps := []federation.RawCrossDep{
 		{ToProject: "core", ToEntity: "Validate"}, // duplicate
-		{ToProject: "core", ToEntity: "Login"},     // new
+		{ToProject: "core", ToEntity: "Login"},    // new
 	}
 
 	resolved := det.ResolveBrainDeps(context.Background(), brainDeps, tier1Deps, "/test/file.py")

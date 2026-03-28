@@ -41,12 +41,12 @@ func TestDiscoverEmbedRelations_CreatesEdge(t *testing.T) {
 	idB := g.MakeNodeID("_knowledge", "knowledge:token bucket")
 	g.AddNode(&graph.Node{
 		ID: idA, Type: graph.NodeConcept, Name: "rate limiter",
-		Domain: graph.DomainKnowledge,
+		Domain:   graph.DomainKnowledge,
 		Metadata: map[string]string{"context": "controls throughput"},
 	})
 	g.AddNode(&graph.Node{
 		ID: idB, Type: graph.NodeConcept, Name: "token bucket",
-		Domain: graph.DomainKnowledge,
+		Domain:   graph.DomainKnowledge,
 		Metadata: map[string]string{"context": "algorithm for rate limiting"},
 	})
 

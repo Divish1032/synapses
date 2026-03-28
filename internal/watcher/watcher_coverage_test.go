@@ -32,8 +32,8 @@ import (
 // mockInvalidator is a minimal PacketCacheInvalidator for testing.
 type mockInvalidator struct{ calls int }
 
-func (m *mockInvalidator) InvalidatePacketCache()                          { m.calls++ }
-func (m *mockInvalidator) InvalidatePacketCacheForFile(_ string)           { m.calls++ }
+func (m *mockInvalidator) InvalidatePacketCache()                { m.calls++ }
+func (m *mockInvalidator) InvalidatePacketCacheForFile(_ string) { m.calls++ }
 
 // ── Stop ──────────────────────────────────────────────────────────────────────
 

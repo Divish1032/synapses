@@ -20,10 +20,11 @@ import (
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver; no CGo required
 
+	"github.com/coder/hnsw"
+
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/logutil"
-	"github.com/coder/hnsw"
 )
 
 // ProjectStat holds the lightweight per-project metadata that can be read
@@ -526,9 +527,9 @@ type Store struct {
 	// Rebuilt from SQLite at startup via RebuildMemoryHNSW(). Protected by hnswMemMu.
 	hnswMemIndex       *hnsw.Graph[string]
 	hnswMemMu          sync.RWMutex
-	hnswRebuilding     bool                // true while async rebuild is in progress
-	hnswPendingAdds    []hnswPendingEntry  // vectors queued during rebuild
-	hnswPendingDeletes []string            // memory IDs deleted during rebuild
+	hnswRebuilding     bool               // true while async rebuild is in progress
+	hnswPendingAdds    []hnswPendingEntry // vectors queued during rebuild
+	hnswPendingDeletes []string           // memory IDs deleted during rebuild
 
 	// hnswNodeIndex is the in-memory HNSW index for graph node embeddings.
 	// Used by semantic search in the search tool. Same pattern as memory HNSW.
@@ -1936,10 +1937,10 @@ func (s *Store) PruneStaleData(ctx context.Context, retentionDays int) {
 				return // done
 			}
 			select {
-		case <-time.After(50 * time.Millisecond):
-		case <-ctx.Done():
-			return
-		}
+			case <-time.After(50 * time.Millisecond):
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 
@@ -3073,12 +3074,12 @@ func (s *Store) LoadGraph() (*graph.Graph, error) {
 
 // ManualEdge represents a user-defined cross-domain edge created via link_entities.
 type ManualEdge struct {
-	FromID    graph.NodeID
-	ToID      graph.NodeID
-	Relation  string
-	Domain    string
-	CreatedBy string
-	CreatedAt int64
+	FromID     graph.NodeID
+	ToID       graph.NodeID
+	Relation   string
+	Domain     string
+	CreatedBy  string
+	CreatedAt  int64
 	Confidence float64
 	Confirmed  bool
 	Suppressed bool
@@ -3335,13 +3336,13 @@ func (s *Store) reinjectManualEdges(g *graph.Graph) error {
 
 // SignatureChange records an exported entity whose signature changed in the last SaveGraph.
 type SignatureChange struct {
-	NodeID    string // graph node ID
-	Name      string
-	NodeType  string
-	File      string
-	Line      int
-	OldSig    string // signature before the last SaveGraph
-	NewSig    string // current signature
+	NodeID   string // graph node ID
+	Name     string
+	NodeType string
+	File     string
+	Line     int
+	OldSig   string // signature before the last SaveGraph
+	NewSig   string // current signature
 }
 
 // GetSignatureChanges returns exported entities in the given file whose signature
@@ -4074,12 +4075,12 @@ func (s *Store) GetViolationLog(ruleID string, limit int) ([]ViolationLogEntry, 
 // Unlike architecture violations (deterministic rule checks), quality gaps are
 // asserted through reasoning — "I examined this function and found this edge case."
 type QualityGap struct {
-	ID          string `json:"id"`          // "{node_id}:{gap_id}"
+	ID          string `json:"id"` // "{node_id}:{gap_id}"
 	NodeID      string `json:"node_id"`
-	GapID       string `json:"gap_id"`      // slug: "dist-relative-path"
+	GapID       string `json:"gap_id"` // slug: "dist-relative-path"
 	Description string `json:"description"`
-	Severity    string `json:"severity"`    // low | medium | high | critical
-	Status      string `json:"status"`      // open | fixed | wontfix
+	Severity    string `json:"severity"` // low | medium | high | critical
+	Status      string `json:"status"`   // open | fixed | wontfix
 	FoundBy     string `json:"found_by,omitempty"`
 	FoundAt     string `json:"found_at"`
 	UpdatedAt   string `json:"updated_at"`
@@ -4390,7 +4391,6 @@ func (s *Store) NodeCount() int {
 	return n
 }
 
-
 // ── Agent Context Profile ────────────────────────────────────────────────────
 
 // GetAgentContext retrieves the context profile for the given agent.
@@ -4640,7 +4640,6 @@ func (s *Store) MarkAnnotationsStale(nodeIDs []string) error {
 	)
 	return err
 }
-
 
 // ── Tool Call Observability ───────────────────────────────────────────────────
 

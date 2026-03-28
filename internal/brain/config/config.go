@@ -135,7 +135,6 @@ type BrainConfig struct {
 	// Default: "standard"
 	DefaultMode string `json:"default_mode,omitempty"`
 
-
 	// PulseURL is the base URL of the synapses-pulse analytics sidecar.
 	// When set, every LLM inference call is reported as a BrainUsageEvent.
 	// Leave empty to disable (default). Example: "http://localhost:11437"
@@ -429,4 +428,3 @@ func (c *BrainConfig) BaseModelTag() string {
 		return c.Model
 	}
 }
-

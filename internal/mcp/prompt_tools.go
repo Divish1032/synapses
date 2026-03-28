@@ -77,4 +77,3 @@ func (s *Server) promptSummaries() []map[string]string {
 	}
 	return out
 }
-

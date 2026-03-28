@@ -12,10 +12,10 @@ import (
 // declMeta holds the enriched metadata extracted for any declaration node.
 // It is language-agnostic and used by all non-Go parsers.
 type declMeta struct {
-	Signature   string
-	Doc         string
-	LineCount   int
-	IfdefGuard  string // non-empty when symbol is inside a #ifdef/#if/#else block
+	Signature  string
+	Doc        string
+	LineCount  int
+	IfdefGuard string // non-empty when symbol is inside a #ifdef/#if/#else block
 }
 
 // langCallSite is the language-agnostic equivalent of rawCallSite used by

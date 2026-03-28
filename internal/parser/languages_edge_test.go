@@ -3051,6 +3051,7 @@ message User {
 	assertNode(t, g, "User.active", graph.NodeMethod)
 	assertMetaKind(t, g, "User.name", "field")
 }
+
 // --- Python: dataclass annotated fields ---
 func TestAudit_Python_DataclassFields(t *testing.T) {
 	src := []byte(`from dataclasses import dataclass

@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	sitter "github.com/alexaandru/go-tree-sitter-bare"
+
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
@@ -213,15 +214,15 @@ func TestPluginParser_ValidJSON(t *testing.T) {
 			{Name: "MyPkg", Type: "package", Line: 30},
 			{Name: "MyMethod", Type: "method", Line: 40},
 			// Skipped nodes
-			{Name: "", Type: "function", Line: 5},   // empty name → skip
+			{Name: "", Type: "function", Line: 5},       // empty name → skip
 			{Name: "NoLine", Type: "function", Line: 0}, // line 0 → skip
 		},
 		Edges: []pluginEdge{
 			{From: "MyFunc", To: "MyClass", Type: "CALLS"}, // valid edge
-			{From: "", To: "MyClass", Type: "CALLS"},        // empty from → skip
-			{From: "MyFunc", To: "", Type: "CALLS"},          // empty to → skip
-			{From: "MyFunc", To: "MyClass", Type: ""},        // empty type → skip
-			{From: "MyFunc", To: "Missing", Type: "CALLS"},   // missing endpoint → skip
+			{From: "", To: "MyClass", Type: "CALLS"},       // empty from → skip
+			{From: "MyFunc", To: "", Type: "CALLS"},        // empty to → skip
+			{From: "MyFunc", To: "MyClass", Type: ""},      // empty type → skip
+			{From: "MyFunc", To: "Missing", Type: "CALLS"}, // missing endpoint → skip
 		},
 	}
 	jsonBytes, err := json.Marshal(output)

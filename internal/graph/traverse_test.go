@@ -1252,12 +1252,12 @@ func TestCarveEgoGraph_InterfaceImplementorExpansion(t *testing.T) {
 	g.AddNode(&graph.Node{ID: unrelatedID, Type: graph.NodeStruct, Name: "MemStore", File: "store.go"})
 
 	type testCase struct {
-		usePPR      bool
-		name        string
+		usePPR bool
+		name   string
 		// BFS seeds implementors at the literal 0.85; PPR normalises the teleport
 		// vector across all seeds so each node's rank is lower than 0.85 but still
 		// well above MinRelevance.  The thresholds reflect this difference.
-		implMinRel  float64 // concrete implementor struct
+		implMinRel   float64 // concrete implementor struct
 		methodMinRel float64 // implementor methods
 	}
 	cases := []testCase{

@@ -20,8 +20,8 @@ func TestParseGoldContext(t *testing.T) {
 		{"single block", `[{"file": "foo.py", "start_line": 10, "end_line": 20, "content": "code"}]`, 1, false},
 		{"multiple blocks", `[{"file": "a.py", "start_line": 1, "end_line": 5, "content": "a"}, {"file": "b.py", "start_line": 10, "end_line": 15, "content": "b"}]`, 2, false},
 		{"invalid json", `not json`, 0, true},
-		{"missing file", `[{"file": "", "start_line": 1, "end_line": 5}]`, 0, false},   // filtered out
-		{"zero start", `[{"file": "a.py", "start_line": 0, "end_line": 5}]`, 0, false},  // filtered out
+		{"missing file", `[{"file": "", "start_line": 1, "end_line": 5}]`, 0, false},     // filtered out
+		{"zero start", `[{"file": "a.py", "start_line": 0, "end_line": 5}]`, 0, false},   // filtered out
 		{"end < start", `[{"file": "a.py", "start_line": 10, "end_line": 5}]`, 0, false}, // filtered out
 	}
 	for _, tt := range tests {
@@ -43,7 +43,10 @@ func TestParseGoldContext(t *testing.T) {
 func TestCollectSearchMentions(t *testing.T) {
 	// Valid search response — collect raw (file, line) mentions (no windowing).
 	resp := `{"query":"test","count":2,"results":[{"file":"src/auth.py","line":42,"name":"authenticate","type":"function"},{"file":"src/utils.py","line":10,"name":"helper","type":"function"}]}`
-	type mention struct{ file string; line int }
+	type mention struct {
+		file string
+		line int
+	}
 	var got []mention
 	collectSearchMentions(resp, func(file string, line int) {
 		got = append(got, mention{file, line})
@@ -106,17 +109,30 @@ func TestCollectImpactMentions(t *testing.T) {
 		"affected_files": ["src/handler.go", "src/model.go", "src/service.go"]
 	}`
 
-	type mention struct{ file string; line int }
+	type mention struct {
+		file string
+		line int
+	}
 	var got []mention
 	collectImpactMentions(resp, func(f string, l int) { got = append(got, mention{f, l}) })
 
 	find := func(file string, line int) bool {
-		for _, m := range got { if m.file == file && m.line == line { return true } }
+		for _, m := range got {
+			if m.file == file && m.line == line {
+				return true
+			}
+		}
 		return false
 	}
-	if !find("src/handler.go", 55) { t.Error("expected src/handler.go:55") }
-	if !find("src/model.go", 120)  { t.Error("expected src/model.go:120") }
-	if !find("src/service.go", 30) { t.Error("expected src/service.go:30") }
+	if !find("src/handler.go", 55) {
+		t.Error("expected src/handler.go:55")
+	}
+	if !find("src/model.go", 120) {
+		t.Error("expected src/model.go:120")
+	}
+	if !find("src/service.go", 30) {
+		t.Error("expected src/service.go:30")
+	}
 
 	// Nodes with missing file or zero line should be skipped.
 	resp2 := `{"tiers":[{"nodes":[{"file":"","line":10},{"file":"a.go","line":0}]}]}`
@@ -141,18 +157,33 @@ func TestCollectMarkdownMentions(t *testing.T) {
 ### Callers
 - tests/test_auth.py:20 — test_login
 `
-	type mention struct{ file string; line int }
+	type mention struct {
+		file string
+		line int
+	}
 	var got []mention
 	collectMarkdownMentions(md, func(f string, l int) { got = append(got, mention{f, l}) })
 
 	find := func(file string, line int) bool {
-		for _, m := range got { if m.file == file && m.line == line { return true } }
+		for _, m := range got {
+			if m.file == file && m.line == line {
+				return true
+			}
+		}
 		return false
 	}
-	if !find("src/auth.py", 42)         { t.Error("expected src/auth.py:42") }
-	if !find("src/db.py", 100)          { t.Error("expected src/db.py:100") }
-	if !find("src/crypto.py", 55)       { t.Error("expected src/crypto.py:55") }
-	if !find("tests/test_auth.py", 20)  { t.Error("expected tests/test_auth.py:20") }
+	if !find("src/auth.py", 42) {
+		t.Error("expected src/auth.py:42")
+	}
+	if !find("src/db.py", 100) {
+		t.Error("expected src/db.py:100")
+	}
+	if !find("src/crypto.py", 55) {
+		t.Error("expected src/crypto.py:55")
+	}
+	if !find("tests/test_auth.py", 20) {
+		t.Error("expected tests/test_auth.py:20")
+	}
 
 	// No file:line patterns.
 	var got2 []mention
@@ -440,7 +471,10 @@ func TestIsIdentifier(t *testing.T) {
 // ─── edge case: file line pattern regex ──────────────────────────────────────
 
 func TestFileLinePatternEdgeCases(t *testing.T) {
-	type mention struct{ file string; line int }
+	type mention struct {
+		file string
+		line int
+	}
 	collect := func(text string) []mention {
 		var out []mention
 		collectMarkdownMentions(text, func(f string, l int) { out = append(out, mention{f, l}) })
@@ -451,7 +485,9 @@ func TestFileLinePatternEdgeCases(t *testing.T) {
 	got := collect("src/auth/handler.go:142")
 	found := false
 	for _, m := range got {
-		if m.file == "src/auth/handler.go" && m.line == 142 { found = true }
+		if m.file == "src/auth/handler.go" && m.line == 142 {
+			found = true
+		}
 	}
 	if !found {
 		t.Error("expected src/auth/handler.go:142")
@@ -461,7 +497,9 @@ func TestFileLinePatternEdgeCases(t *testing.T) {
 	got2 := collect("internal/pkg/handler/auth.go:99")
 	found2 := false
 	for _, m := range got2 {
-		if m.file == "internal/pkg/handler/auth.go" && m.line == 99 { found2 = true }
+		if m.file == "internal/pkg/handler/auth.go" && m.line == 99 {
+			found2 = true
+		}
 	}
 	if !found2 {
 		t.Error("expected internal/pkg/handler/auth.go:99")

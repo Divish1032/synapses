@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	"github.com/alexaandru/go-sitter-forest/javascript"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -588,8 +588,8 @@ func collectJSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, sr
 		ClassTypes: map[string]bool{"class_declaration": true},
 		FuncTypes: map[string]bool{
 			"function_declaration": true,
-			"method_definition":   true,
-			"arrow_function":      true,
+			"method_definition":    true,
+			"arrow_function":       true,
 			"function_expression":  true,
 		},
 		CallTypes: map[string]bool{"call_expression": true},

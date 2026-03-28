@@ -150,7 +150,10 @@ func RunContextBench(client *agent.SynapsesClient, opts ContextBenchOptions) (*r
 	}
 
 	// Per-language breakdown.
-	type langAcc struct{ p, r, f1 float64; n int }
+	type langAcc struct {
+		p, r, f1 float64
+		n        int
+	}
 	langMetrics := make(map[string]*langAcc)
 	for _, tr := range results {
 		lm := langMetrics[tr.Language]
@@ -490,8 +493,8 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 	const (
 		topFiles          = 8
 		windowBefore      = 5
-		windowAfter       = 60  // covers most function bodies after the definition line
-		mergeGap          = 10  // merge windows within 10 lines of each other
+		windowAfter       = 60 // covers most function bodies after the definition line
+		mergeGap          = 10 // merge windows within 10 lines of each other
 		maxRetrievedLines = 500
 		perFileBudget     = 120 // max lines contributed by any single file
 	)

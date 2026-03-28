@@ -636,16 +636,16 @@ func TestWalkerIntegration_NewParsersRegistered(t *testing.T) {
 	w := NewWalker()
 
 	extensions := map[string]string{
-		".sh":      "Bash",
-		".bash":    "Bash",
-		".sql":     "SQL",
-		".css":     "CSS",
-		".ml":      "OCaml",
-		".mli":     "OCaml",
-		".elm":     "Elm",
-		".tf":      "HCL",
-		".tfvars":  "HCL",
-		".hcl":     "HCL",
+		".sh":     "Bash",
+		".bash":   "Bash",
+		".sql":    "SQL",
+		".css":    "CSS",
+		".ml":     "OCaml",
+		".mli":    "OCaml",
+		".elm":    "Elm",
+		".tf":     "HCL",
+		".tfvars": "HCL",
+		".hcl":    "HCL",
 	}
 
 	for ext, name := range extensions {

@@ -194,4 +194,3 @@ func (c *LocalClient) generate(ctx context.Context, prompt string) (string, erro
 		return strings.TrimSpace(r.text), nil
 	}
 }
-

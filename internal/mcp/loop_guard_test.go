@@ -63,7 +63,7 @@ func TestFingerprintCall_utf8SafeTruncation(t *testing.T) {
 	// 3-byte UTF-8 rune: '€' = 0xE2 0x82 0xAC. Build a string that is exactly
 	// 201 bytes long ending mid-rune so a naive byte slice would split it.
 	// truncateUTF8 must walk back to the last complete rune.
-	rune3 := "€" // 3 bytes
+	rune3 := "€"                          // 3 bytes
 	s := strings.Repeat("a", 199) + rune3 // 202 bytes; rune starts at byte 199
 	fp := fingerprintCall("tool", map[string]interface{}{"query": s})
 	suffix := strings.TrimPrefix(fp, "tool:")

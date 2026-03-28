@@ -299,8 +299,8 @@ func TestIsCamelCase(t *testing.T) {
 		{"AddNode", true},
 		{"ALLCAPS", false},
 		{"lowercase", false},
-		{"A", false},  // too short (but isCamelCase only checks pattern)
-		{"Ab", true},  // technically CamelCase
+		{"A", false},   // too short (but isCamelCase only checks pattern)
+		{"Ab", true},   // technically CamelCase
 		{"a_b", false}, // starts lowercase
 		{"Store.Close", true},
 	}
@@ -643,11 +643,11 @@ func TestResolveDocEdges_FilePathNoSelfLink(t *testing.T) {
 	// Doc file node — should NOT link to itself.
 	fileID := g.MakeNodeID("/repo/README.md", "/repo/README.md")
 	g.AddNode(&graph.Node{
-		ID:   fileID,
-		Type: graph.NodeFile,
-		Name: "README.md",
-		File: "/repo/README.md",
-		Line: 1,
+		ID:     fileID,
+		Type:   graph.NodeFile,
+		Name:   "README.md",
+		File:   "/repo/README.md",
+		Line:   1,
 		Domain: graph.DomainDocs,
 	})
 

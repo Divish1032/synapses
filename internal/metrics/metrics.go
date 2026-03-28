@@ -885,9 +885,9 @@ func EnrichCommitContext(g *graph.Graph, repoRoot string) {
 		wg.Add(1)
 		go func(f fileJob) {
 			defer wg.Done()
-			sem <- struct{}{}        // acquire
+			sem <- struct{}{} // acquire
 			commits := RecentCommitsForFile(context.Background(), f.gitRoot, f.absFile, 3)
-			<-sem                    // release
+			<-sem // release
 			if len(commits) > 0 {
 				if raw, err := json.Marshal(commits); err == nil {
 					cacheMu.Lock()

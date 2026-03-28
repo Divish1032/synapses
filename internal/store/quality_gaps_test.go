@@ -91,12 +91,12 @@ func TestUpsertGap_FixedLifecycle(t *testing.T) {
 	}
 
 	fixed, err := st.UpsertGap(store.QualityGap{
-		NodeID:    "tools.go:handleGetContext",
-		GapID:     "entity-disambig",
+		NodeID:      "tools.go:handleGetContext",
+		GapID:       "entity-disambig",
 		Description: "bare entity name in signals",
-		Severity:  "low",
-		Status:    "fixed",
-		FixNotes:  "now uses entityWithPath helper",
+		Severity:    "low",
+		Status:      "fixed",
+		FixNotes:    "now uses entityWithPath helper",
 	})
 	if err != nil {
 		t.Fatalf("UpsertGap fixed: %v", err)

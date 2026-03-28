@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	"github.com/alexaandru/go-sitter-forest/elm"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -34,7 +34,7 @@ func extractElmDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 	lines := strings.Split(string(src), "\n")
 
 	// First pass: collect type annotations so we can pair them with value_declarations.
-	annotations := make(map[string]string) // name → signature text
+	annotations := make(map[string]string)  // name → signature text
 	annotationLines := make(map[string]int) // name → 1-indexed start line of type_annotation
 
 	for i := uint32(0); i < root.ChildCount(); i++ {

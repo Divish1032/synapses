@@ -42,8 +42,8 @@ type NLBenchSuite struct {
 
 // NLBenchTest is a single query+expected pair.
 type NLBenchTest struct {
-	QueryType    string   `json:"query_type"`
-	Query        string   `json:"query"`
+	QueryType     string   `json:"query_type"`
+	Query         string   `json:"query"`
 	ExpectedNames []string `json:"expected_names,omitempty"`
 	ExpectedDocs  []string `json:"expected_docs,omitempty"`
 	Description   string   `json:"description"`

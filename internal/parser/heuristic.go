@@ -28,13 +28,13 @@ import (
 
 // RouteRegistration holds a single detected route registration.
 type RouteRegistration struct {
-	File         string
-	Line         int    // 1-based line number of the registration call
-	Method       string // HTTP method ("GET", "POST", …) or "*" for wildcard
-	Path         string // URL path e.g. "/api/users"
-	Handler      string // handler function name
-	EnclosingFn  string // function/method that contains the registration call
-	Confidence   float64
+	File        string
+	Line        int    // 1-based line number of the registration call
+	Method      string // HTTP method ("GET", "POST", …) or "*" for wildcard
+	Path        string // URL path e.g. "/api/users"
+	Handler     string // handler function name
+	EnclosingFn string // function/method that contains the registration call
+	Confidence  float64
 }
 
 // -- compiled regexes ---------------------------------------------------------

@@ -21,10 +21,10 @@ import (
 
 // Store is the pulse analytics database.
 type Store struct {
-	db    *sql.DB
-	tx    *sql.Tx    // non-nil inside a BeginBatch/commit window
-	mu    sync.Mutex // protects write-path batch serialization
-	txMu  sync.RWMutex // protects reads of s.tx from concurrent goroutines
+	db   *sql.DB
+	tx   *sql.Tx      // non-nil inside a BeginBatch/commit window
+	mu   sync.Mutex   // protects write-path batch serialization
+	txMu sync.RWMutex // protects reads of s.tx from concurrent goroutines
 	// readTx is a non-nil *sql.Tx while a BeginReadSnapshot/EndReadSnapshot
 	// window is active. All readDB() calls route through it, giving the
 	// rollup read phase a consistent WAL snapshot.
@@ -1748,19 +1748,19 @@ func (s *Store) ReadDailyRollup(day, metric string) (float64, error) {
 
 // Summary holds aggregated metrics for a time period.
 type Summary struct {
-	TotalToolCalls     int     `json:"total_tool_calls"`
-	TokensDelivered    int     `json:"tokens_delivered"`
-	BaselineTokens     int     `json:"baseline_tokens"`
-	TokensSaved        int     `json:"tokens_saved"`
-	SavingsPct         float64 `json:"savings_pct"`
-	CompressionRatio   float64 `json:"compression_ratio"`
-	CostSavedUSD       float64 `json:"cost_saved_usd"`
-	AvgLatencyMs       float64 `json:"avg_latency_ms"`
-	CacheHitRate       float64 `json:"cache_hit_rate"`
-	BrainEnrichRate    float64 `json:"brain_enrichment_rate"`
-	ContextDeliveries  int     `json:"context_deliveries"`
-	Sessions           int     `json:"sessions"`
-	TasksCompleted     int     `json:"tasks_completed"`
+	TotalToolCalls    int     `json:"total_tool_calls"`
+	TokensDelivered   int     `json:"tokens_delivered"`
+	BaselineTokens    int     `json:"baseline_tokens"`
+	TokensSaved       int     `json:"tokens_saved"`
+	SavingsPct        float64 `json:"savings_pct"`
+	CompressionRatio  float64 `json:"compression_ratio"`
+	CostSavedUSD      float64 `json:"cost_saved_usd"`
+	AvgLatencyMs      float64 `json:"avg_latency_ms"`
+	CacheHitRate      float64 `json:"cache_hit_rate"`
+	BrainEnrichRate   float64 `json:"brain_enrichment_rate"`
+	ContextDeliveries int     `json:"context_deliveries"`
+	Sessions          int     `json:"sessions"`
+	TasksCompleted    int     `json:"tasks_completed"`
 	// Summable components — stored in rollups so rates can be recomputed correctly
 	// across multi-day queries instead of naively summing daily averages.
 	CacheHits          int     `json:"cache_hits"`
@@ -1768,7 +1768,7 @@ type Summary struct {
 	TotalLatencyMs     float64 `json:"total_latency_ms"`
 	// ValueMultiplier shows how many tokens the agent would have consumed without
 	// Synapses for every 1 token actually delivered ("Nx multiplier").
-	ValueMultiplier    float64 `json:"value_multiplier"`
+	ValueMultiplier float64 `json:"value_multiplier"`
 }
 
 // GetSummary returns aggregated analytics for the last N days.
@@ -2007,7 +2007,7 @@ var wowSummableMetrics = map[string]bool{
 	"sessions": true, "tasks_completed": true, "cache_hits": true,
 	"brain_enriched_count": true, "total_latency_ms": true,
 	"total_reparses": true, "total_reparse_duration_ms": true,
-	"file_changes_count": true,
+	"file_changes_count":   true,
 	"guard_circuit_breaks": true, "rate_limit_rejections": true,
 	"recall_hits": true, "recall_misses": true, "validation_violations": true,
 	// Phase 3B summable metrics (rate/average metrics intentionally excluded).
@@ -2271,10 +2271,10 @@ func (s *Store) GetSummaryForDay(day string) (*Summary, error) {
 
 // TimelinePoint is a single data point in a time series.
 type TimelinePoint struct {
-	Date             string  `json:"date"`
-	TokensSaved      int     `json:"tokens_saved"`
-	ToolCalls        int     `json:"tool_calls"`
-	CostSavedUSD     float64 `json:"cost_saved_usd"`
+	Date         string  `json:"date"`
+	TokensSaved  int     `json:"tokens_saved"`
+	ToolCalls    int     `json:"tool_calls"`
+	CostSavedUSD float64 `json:"cost_saved_usd"`
 	// Bug 30 — ROI-A5: compression ratio (baseline / delivered) for this day.
 	CompressionRatio float64 `json:"compression_ratio,omitempty"`
 }
@@ -2389,11 +2389,11 @@ func (s *Store) GetToolStats(days int) ([]ToolStats, error) {
 
 // AgentStats holds per-agent aggregated metrics.
 type AgentStats struct {
-	AgentID              string `json:"agent_id"`
-	Sessions             int    `json:"sessions"`
-	ToolCalls            int    `json:"tool_calls"`
-	TokensSaved          int    `json:"tokens_saved"`
-	TasksCompleted       int    `json:"tasks_completed"`
+	AgentID        string `json:"agent_id"`
+	Sessions       int    `json:"sessions"`
+	ToolCalls      int    `json:"tool_calls"`
+	TokensSaved    int    `json:"tokens_saved"`
+	TasksCompleted int    `json:"tasks_completed"`
 	// Bug 14 — DQ-C.3: number of distinct entities queried by this agent.
 	UniqueEntitiesQueried int `json:"unique_entities_queried,omitempty"`
 	// Bug 15 — DQ-C.4: number of distinct tools used by this agent.
@@ -3485,10 +3485,10 @@ func (s *Store) CountReparses(day string) (count int, totalDurationMs float64, e
 
 // LanguageStats holds per-language aggregated parse metrics for a given day (P9-10).
 type LanguageStats struct {
-	Language     string
-	ParseCount   int
+	Language      string
+	ParseCount    int
 	AvgDurationMs float64
-	ErrorCount   int // reparse events with error_action != 'clean'
+	ErrorCount    int // reparse events with error_action != 'clean'
 }
 
 // GetLanguageStatsForDay returns per-language parse statistics for the given day (P9-10).
@@ -4542,9 +4542,9 @@ func (s *Store) GetAgentEfficiencyForAgent(agentID string, days int) ([]AgentEff
 
 // AgentEfficiency holds per-agent efficiency metrics.
 type AgentEfficiency struct {
-	AgentID              string  `json:"agent_id"`
-	TasksPerSession      float64 `json:"tasks_per_session"`
-	TokensSavedPerTask   float64 `json:"tokens_saved_per_task"`
+	AgentID            string  `json:"agent_id"`
+	TasksPerSession    float64 `json:"tasks_per_session"`
+	TokensSavedPerTask float64 `json:"tokens_saved_per_task"`
 }
 
 // GetAgentEfficiencyScores returns per-agent efficiency scores.
@@ -4979,14 +4979,14 @@ func (s *Store) GetToolTimeline(toolName string, days int) ([]ToolTimelinePoint,
 
 // SessionDetail holds full detail for a single session.
 type SessionDetail struct {
-	SessionID  string                             `json:"session_id"`
-	AgentID    string                             `json:"agent_id"`
-	StartedAt  string                             `json:"started_at"`
-	EndedAt    string                             `json:"ended_at,omitempty"`
-	Model      string                             `json:"model,omitempty"`
-	ToolCalls  []pulsetypes.ToolCallEvent         `json:"tool_calls"`
-	Deliveries []pulsetypes.ContextDeliveryEvent  `json:"context_deliveries"`
-	Signals    []pulsetypes.OutcomeSignalEvent    `json:"outcome_signals"`
+	SessionID  string                            `json:"session_id"`
+	AgentID    string                            `json:"agent_id"`
+	StartedAt  string                            `json:"started_at"`
+	EndedAt    string                            `json:"ended_at,omitempty"`
+	Model      string                            `json:"model,omitempty"`
+	ToolCalls  []pulsetypes.ToolCallEvent        `json:"tool_calls"`
+	Deliveries []pulsetypes.ContextDeliveryEvent `json:"context_deliveries"`
+	Signals    []pulsetypes.OutcomeSignalEvent   `json:"outcome_signals"`
 }
 
 // GetSessionDetail returns full event detail for a single session.
@@ -5821,10 +5821,10 @@ func (s *Store) GetValidateToVerifyRate(days int) float64 {
 
 // DecliningTool holds a tool whose daily usage is trending downward.
 type DecliningTool struct {
-	ToolName     string  `json:"tool_name"`
-	RecentCalls  int     `json:"recent_calls"`
-	PriorCalls   int     `json:"prior_calls"`
-	DeclineRate  float64 `json:"decline_rate"` // 0.0–1.0, fraction of decline
+	ToolName    string  `json:"tool_name"`
+	RecentCalls int     `json:"recent_calls"`
+	PriorCalls  int     `json:"prior_calls"`
+	DeclineRate float64 `json:"decline_rate"` // 0.0–1.0, fraction of decline
 }
 
 // GetDecliningTools returns tools whose usage has decreased significantly.

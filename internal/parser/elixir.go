@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	"github.com/alexaandru/go-sitter-forest/elixir"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -742,9 +742,9 @@ func injectElixirBehaviourCallbacks(
 				continue
 			}
 			meta := map[string]string{
-				"kind":     "behaviour_callback",
+				"kind":      "behaviour_callback",
 				"behaviour": bname,
-				"virtual":  "true",
+				"virtual":   "true",
 			}
 			g.AddNode(&graph.Node{
 				ID:       qualID,

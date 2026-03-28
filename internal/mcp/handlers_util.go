@@ -27,11 +27,11 @@ var winPathStripRe = regexp.MustCompile(`[A-Z]:\\[^\s:,"'\)]+`)
 // string args; tighter per-field limits apply to content stored in SQLite or
 // passed to the embedder.
 const (
-	maxArgLength           = 64 * 1024 // default cap for all string args
-	maxArgLengthDecision   = 4 * 1024  // episodic memory / remember() decision field
-	maxArgLengthRationale  = 4 * 1024  // remember() rationale — concatenated with decision before embedding
-	maxArgLengthNote       = 8 * 1024  // annotation note field (annotate_node, web_annotate)
-	maxArgLengthPayload    = 16 * 1024 // message bus payload field
+	maxArgLength          = 64 * 1024 // default cap for all string args
+	maxArgLengthDecision  = 4 * 1024  // episodic memory / remember() decision field
+	maxArgLengthRationale = 4 * 1024  // remember() rationale — concatenated with decision before embedding
+	maxArgLengthNote      = 8 * 1024  // annotation note field (annotate_node, web_annotate)
+	maxArgLengthPayload   = 16 * 1024 // message bus payload field
 )
 
 // stringArg extracts a string argument from a CallToolRequest by key.

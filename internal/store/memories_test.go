@@ -1236,7 +1236,10 @@ func TestMarkAnchoredMemoriesStale_BatchNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, tc := range []struct{ id string; wantStale int }{
+	for _, tc := range []struct {
+		id        string
+		wantStale int
+	}{
 		{id1, 1}, {id2, 1}, {id3, 0},
 	} {
 		var stale int
@@ -2029,7 +2032,7 @@ func TestQueryInvalidatedMemories_CapsAt10(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := st.MarkEntityMemoriesStaleForNodes([]string{"repo::entity"+string(rune('A'+i))}, "removed"); err != nil {
+		if err := st.MarkEntityMemoriesStaleForNodes([]string{"repo::entity" + string(rune('A'+i))}, "removed"); err != nil {
 			t.Fatal(err)
 		}
 	}

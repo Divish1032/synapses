@@ -31,16 +31,16 @@ type edgeKey struct {
 // Graph is the core in-memory code graph. It is safe for concurrent reads
 // and writes — a RWMutex serialises mutations while allowing parallel queries.
 type Graph struct {
-	mu        sync.RWMutex
-	repoID    string
-	root      string // absolute path to the repository root; may be empty
-	nodes     map[NodeID]*Node
-	outEdges  map[NodeID][]*Edge // edges leaving a node
-	inEdges   map[NodeID][]*Edge // edges arriving at a node
-	edgeSet   map[edgeKey]struct{} // O(1) edge deduplication
-	callSites     []CallSite     // temporary: accumulated during parse, drained by resolver
-	terraformRefs []TerraformRef // temporary: accumulated during .tf parse, drained by resolver
-	cache     *subgraphCache     // in-memory cache for carved subgraphs (30s TTL, max 20 entries)
+	mu            sync.RWMutex
+	repoID        string
+	root          string // absolute path to the repository root; may be empty
+	nodes         map[NodeID]*Node
+	outEdges      map[NodeID][]*Edge   // edges leaving a node
+	inEdges       map[NodeID][]*Edge   // edges arriving at a node
+	edgeSet       map[edgeKey]struct{} // O(1) edge deduplication
+	callSites     []CallSite           // temporary: accumulated during parse, drained by resolver
+	terraformRefs []TerraformRef       // temporary: accumulated during .tf parse, drained by resolver
+	cache         *subgraphCache       // in-memory cache for carved subgraphs (30s TTL, max 20 entries)
 
 	// fileStableIDs stores stable UUID snapshots keyed by absolute file path.
 	// Populated by SnapshotFileStableIDs before RemoveFile; consumed by MigrateStableID.

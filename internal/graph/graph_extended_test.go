@@ -364,4 +364,3 @@ func TestFlatGraph_BulkAddEdges(t *testing.T) {
 	// Should not panic.
 	_ = fg.BulkAddEdges([]graph.BulkEdge{{From: aID, To: bID, Weight: 1.0}})
 }
-

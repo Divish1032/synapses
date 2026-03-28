@@ -291,8 +291,9 @@ func TestKnowledgeEvent_NoSpuriousOnError(t *testing.T) {
 // knowledge_updated must NOT fire when TouchMemory fails for a nonexistent ID.
 //
 // The production race this guards against:
-//   prepareMemory finds dedup candidate X → concurrent prune deletes X →
-//   TouchMemory(X) fails → WITHOUT the guard, knowledge_updated fires for a ghost memory.
+//
+//	prepareMemory finds dedup candidate X → concurrent prune deletes X →
+//	TouchMemory(X) fails → WITHOUT the guard, knowledge_updated fires for a ghost memory.
 //
 // We test the guard by calling TouchMemory on a nonexistent ID (which we know
 // returns an error per TestTouchMemory_NonExistentID) and verifying that the

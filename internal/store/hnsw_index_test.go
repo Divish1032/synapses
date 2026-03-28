@@ -746,4 +746,3 @@ func TestHNSW_LoadStaleFile(t *testing.T) {
 		t.Error("expected file to be accepted (count within tolerance)")
 	}
 }
-

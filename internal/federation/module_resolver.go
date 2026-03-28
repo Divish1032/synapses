@@ -10,11 +10,11 @@ import (
 // ModuleDependency represents a cross-repo dependency discovered from
 // package manifests (go.mod, package.json).
 type ModuleDependency struct {
-	ImportPath  string // the import path as it appears in source code
-	ModulePath  string // the module/package identifier
-	Version     string // version string (e.g., "v1.2.3", "workspace:*")
+	ImportPath   string // the import path as it appears in source code
+	ModulePath   string // the module/package identifier
+	Version      string // version string (e.g., "v1.2.3", "workspace:*")
 	SiblingAlias string // federation alias if matches a sibling, or ""
-	Ecosystem   string // "gomod", "npm", "pnpm"
+	Ecosystem    string // "gomod", "npm", "pnpm"
 }
 
 // DiscoverModuleSiblings analyzes the project's dependency manifests (go.mod,

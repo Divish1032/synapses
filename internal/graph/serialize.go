@@ -379,4 +379,3 @@ func readString(r io.Reader) (string, error) {
 	}
 	return string(buf), nil
 }
-

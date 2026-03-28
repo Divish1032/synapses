@@ -65,39 +65,39 @@ type taskHint struct {
 }
 
 type directionalContext struct {
-	Root                   *graph.Node                   `json:"root"`
-	Annotations            map[string][]store.Annotation `json:"annotations,omitempty"`              // node_id → []Annotation — surfaced first for multi-agent visibility
-	Enrichment             *contextEnrichment            `json:"enrichment,omitempty"`               // auto-injected rules, failures, task context
-	Callees                []graph.CarvedNode            `json:"callees"`                            // root --CALLS--> node
-	Callers                []graph.CarvedNode            `json:"callers"`                            // node --CALLS--> root
-	Related                []graph.CarvedNode            `json:"related"`                            // same-domain neighbors (not callee/caller/docs)
+	Root        *graph.Node                   `json:"root"`
+	Annotations map[string][]store.Annotation `json:"annotations,omitempty"` // node_id → []Annotation — surfaced first for multi-agent visibility
+	Enrichment  *contextEnrichment            `json:"enrichment,omitempty"`  // auto-injected rules, failures, task context
+	Callees     []graph.CarvedNode            `json:"callees"`               // root --CALLS--> node
+	Callers     []graph.CarvedNode            `json:"callers"`               // node --CALLS--> root
+	Related     []graph.CarvedNode            `json:"related"`               // same-domain neighbors (not callee/caller/docs)
 	// Sprint 16 #4: cross-domain neighbors in a dedicated bucket so agents can
 	// immediately distinguish code context (callees/callers/related) from
 	// cross-domain context (infra resources, API endpoints, config).
 	// Populated with nodes whose Domain is not DomainCode (infra, api, knowledge, custom).
 	// Documentation-domain nodes already linked via EXPLAINED_BY/EXPLAINS go into Documentation.
-	CrossDomain            *graph.CrossDomainContext      `json:"cross_domain,omitempty"`             // nodes in other knowledge domains grouped by edge type
-	ContextPacket          *brain.ContextPacket          `json:"context_packet,omitempty"`           // LLM-enriched packet (present when brain is available)
-	SuggestedNextTools     []toolSuggestion              `json:"suggested_next_tools,omitempty"`     // context-aware next steps
-	Truncated              bool                          `json:"truncated,omitempty"`                // true when token budget cut results
-	TruncatedCount         int                           `json:"truncated_count,omitempty"`          // nodes dropped by budget
-	BrainHint              string                        `json:"brain,omitempty"`                    // set when brain is not configured or enrichment is pending
-	BrainStatus            string                        `json:"brain_status,omitempty"`             // "pending" | "ready" | "unavailable"
-	Principles             []string                      `json:"principles,omitempty"`               // Hot Constitution principles from synapses.json
-	ActivePrompts          []activePrompt                `json:"active_prompts,omitempty"`           // matched activation-context snippets from .synapses/prompts/
-	ADRs                   []brain.ADR                   `json:"adrs,omitempty"`                     // relevant accepted ADRs for this entity's file
-	StaleAnnotationWarning string                        `json:"stale_annotation_warning,omitempty"` // GAP-3: set when ≥1 annotation may be outdated
-	RecentChanges          []metrics.CommitInfo          `json:"recent_changes,omitempty"`           // GAP-7: last 3 git commits that touched the entity's file
-	GraphFreshness         string                        `json:"graph_freshness,omitempty"`          // GAP-4: warning when entity's file was recently modified
-	AdaptiveHint           string                        `json:"adaptive_hint,omitempty"`            // F17: set when BFS depth/detail was auto-expanded based on prior feedback
-	EntityMemories         []entityMemoryHint            `json:"entity_memories,omitempty"`          // R10: institutional knowledge attached to this entity
-	QualityGaps            []store.QualityGap            `json:"quality_gaps,omitempty"`             // R32: open quality gaps on this entity
-	EntityHash             string                        `json:"entity_hash,omitempty"`              // R14: SHA1 of node+neighbor IDs; stable cache key for clients
-	CallerCountWarning     string                        `json:"caller_count_warning,omitempty"`     // DIAG-3: set when caller count is 0 for a method and use_go_types=false
+	CrossDomain            *graph.CrossDomainContext `json:"cross_domain,omitempty"`             // nodes in other knowledge domains grouped by edge type
+	ContextPacket          *brain.ContextPacket      `json:"context_packet,omitempty"`           // LLM-enriched packet (present when brain is available)
+	SuggestedNextTools     []toolSuggestion          `json:"suggested_next_tools,omitempty"`     // context-aware next steps
+	Truncated              bool                      `json:"truncated,omitempty"`                // true when token budget cut results
+	TruncatedCount         int                       `json:"truncated_count,omitempty"`          // nodes dropped by budget
+	BrainHint              string                    `json:"brain,omitempty"`                    // set when brain is not configured or enrichment is pending
+	BrainStatus            string                    `json:"brain_status,omitempty"`             // "pending" | "ready" | "unavailable"
+	Principles             []string                  `json:"principles,omitempty"`               // Hot Constitution principles from synapses.json
+	ActivePrompts          []activePrompt            `json:"active_prompts,omitempty"`           // matched activation-context snippets from .synapses/prompts/
+	ADRs                   []brain.ADR               `json:"adrs,omitempty"`                     // relevant accepted ADRs for this entity's file
+	StaleAnnotationWarning string                    `json:"stale_annotation_warning,omitempty"` // GAP-3: set when ≥1 annotation may be outdated
+	RecentChanges          []metrics.CommitInfo      `json:"recent_changes,omitempty"`           // GAP-7: last 3 git commits that touched the entity's file
+	GraphFreshness         string                    `json:"graph_freshness,omitempty"`          // GAP-4: warning when entity's file was recently modified
+	AdaptiveHint           string                    `json:"adaptive_hint,omitempty"`            // F17: set when BFS depth/detail was auto-expanded based on prior feedback
+	EntityMemories         []entityMemoryHint        `json:"entity_memories,omitempty"`          // R10: institutional knowledge attached to this entity
+	QualityGaps            []store.QualityGap        `json:"quality_gaps,omitempty"`             // R32: open quality gaps on this entity
+	EntityHash             string                    `json:"entity_hash,omitempty"`              // R14: SHA1 of node+neighbor IDs; stable cache key for clients
+	CallerCountWarning     string                    `json:"caller_count_warning,omitempty"`     // DIAG-3: set when caller count is 0 for a method and use_go_types=false
 	// R31: documentation sections linked to this code entity via DOCUMENTED_BY edges.
 	// File-level imports: populated when the query target is a file path.
 	// Contains all packages/modules imported by this file (IMPORTS edges from the NodeFile node).
-	Imports []graph.CarvedNode `json:"imports,omitempty"`
+	Imports       []graph.CarvedNode `json:"imports,omitempty"`
 	Documentation []graph.CarvedNode `json:"documentation,omitempty"`
 	// Sprint 17: knowledge graph nodes linked via RELATES_TO, CAUSED_BY, INSTANCE_OF,
 	// CONTRADICTS edges — NL-to-graph derived concepts, entities, artifacts, decisions.
@@ -814,11 +814,11 @@ func (s *Server) handleGetContext(
 			for _, sr := range docResults {
 				dc.Documentation = append(dc.Documentation, graph.CarvedNode{
 					Node: &graph.Node{
-						ID:       graph.NodeID(sr.ID),
-						Name:     sr.Name,
-						Type:     graph.NodeSection,
-						File:     sr.File,
-						Domain:   graph.DomainDocs,
+						ID:     graph.NodeID(sr.ID),
+						Name:   sr.Name,
+						Type:   graph.NodeSection,
+						File:   sr.File,
+						Domain: graph.DomainDocs,
 						Metadata: map[string]string{
 							"doc_link_source": "search_fallback",
 						},
@@ -1721,6 +1721,7 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 
 	return dc
 }
+
 // ── Review scope types for enriched get_impact ──────────────────────────────
 
 type blastRadiusSummary struct {
@@ -2003,7 +2004,7 @@ func (s *Server) handleGetImpact(
 							merged.Tiers = append(merged.Tiers, graph.ImpactTier{
 								Label: tier.Label, Depth: tier.Depth,
 								Confidence: tier.Confidence,
-								Nodes: []graph.EntityRef{ref}, TotalNodes: 1,
+								Nodes:      []graph.EntityRef{ref}, TotalNodes: 1,
 							})
 						}
 						merged.TotalAffected++
@@ -2255,7 +2256,7 @@ func (s *Server) handleFileBasedImpact(
 					merged.Tiers = append(merged.Tiers, graph.ImpactTier{
 						Label: tier.Label, Depth: tier.Depth,
 						Confidence: tier.Confidence,
-						Nodes: tierNodes, TotalNodes: len(tierNodes),
+						Nodes:      tierNodes, TotalNodes: len(tierNodes),
 					})
 				}
 				merged.TotalAffected += len(tierNodes)

@@ -22,9 +22,9 @@ import (
 // different tool descriptions produce different embeddings and ranking is
 // meaningful even without a real model.
 type indexedEmbedder struct {
-	callIdx  atomic.Int32
+	callIdx   atomic.Int32
 	failAfter int32 // embed returns error once callIdx >= failAfter (0 = never fail)
-	model    string
+	model     string
 }
 
 func (e *indexedEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {

@@ -24,10 +24,10 @@ const (
 type InjectionCategory string
 
 const (
-	CategoryRoleOverride       InjectionCategory = "role_override"
-	CategoryDelimiterInjection InjectionCategory = "delimiter_injection"
-	CategoryPromptExtraction   InjectionCategory = "prompt_extraction"
-	CategoryExfiltration       InjectionCategory = "exfiltration_signal"
+	CategoryRoleOverride        InjectionCategory = "role_override"
+	CategoryDelimiterInjection  InjectionCategory = "delimiter_injection"
+	CategoryPromptExtraction    InjectionCategory = "prompt_extraction"
+	CategoryExfiltration        InjectionCategory = "exfiltration_signal"
 	CategoryInstructionOverride InjectionCategory = "instruction_override"
 )
 

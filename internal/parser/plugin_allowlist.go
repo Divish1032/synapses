@@ -31,11 +31,11 @@ type pluginAllowlist struct {
 // PluginChecker validates whether a plugin command is allowed to execute.
 // It reads the allowlist from the user's home directory (~/.synapses/).
 type PluginChecker struct {
-	synapsesDir    string
-	mu             sync.Mutex
-	loaded         bool
-	approved       map[string]string // hash → original command
-	envWarnLogged  bool
+	synapsesDir   string
+	mu            sync.Mutex
+	loaded        bool
+	approved      map[string]string // hash → original command
+	envWarnLogged bool
 }
 
 // NewPluginChecker creates a checker that reads allowlists from synapsesDir.

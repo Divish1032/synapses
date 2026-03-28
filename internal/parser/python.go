@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	"github.com/alexaandru/go-sitter-forest/python"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -517,6 +517,7 @@ func collectPythonCallSites(g *graph.Graph, lang *sitter.Language, root sitter.N
 // collectPythonVarTypes walks the AST to extract variable → type mappings for
 // cross-file call resolution. Records four patterns:
 //   - Annotated assignments:        obj: ClassName = ...
+//
 // bareRelImportWalk handles `from . import name1, name2` imports where the
 // relative_import node contains only dots (no subpackage). These import sibling
 // modules in the same directory. We walk import_from_statement nodes and check
@@ -589,9 +590,9 @@ func bareRelImportWalk(g *graph.Graph, root sitter.Node, src []byte, filePath st
 	walk(root)
 }
 
-//   - Constructor assignments:      obj = ClassName(...)
-//   - Function parameter types:     def f(repo: Repository, ...) → repo → Repository
-//   - Self-attribute constructors:  self.attr = ClassName(...) → "self.attr" → ClassName
+// - Constructor assignments:      obj = ClassName(...)
+// - Function parameter types:     def f(repo: Repository, ...) → repo → Repository
+// - Self-attribute constructors:  self.attr = ClassName(...) → "self.attr" → ClassName
 func collectPythonVarTypes(g *graph.Graph, _ *sitter.Language, root sitter.Node, src []byte, filePath string) {
 	var walk func(n sitter.Node)
 	walk = func(n sitter.Node) {

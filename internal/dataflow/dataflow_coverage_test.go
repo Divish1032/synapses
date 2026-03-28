@@ -214,11 +214,11 @@ func TestAnnotateGraph_ExecSinkByPackage(t *testing.T) {
 	// Package == "exec" triggers fileInPackage.
 	sinkID := g.MakeNodeID("/repo/runner.go", "Run")
 	g.AddNode(&graph.Node{
-		ID:      sinkID,
-		Name:    "Run",
-		Type:    graph.NodeFunction,
-		File:    "/repo/runner.go",
-		Package: "exec", // fileInPackage will match via n.Package == pkg
+		ID:       sinkID,
+		Name:     "Run",
+		Type:     graph.NodeFunction,
+		File:     "/repo/runner.go",
+		Package:  "exec", // fileInPackage will match via n.Package == pkg
 		Metadata: map[string]string{"signature": "func Run(cmd string)"},
 	})
 	g.AddEdge(&graph.Edge{From: srcID, To: sinkID, Type: graph.EdgeCalls})

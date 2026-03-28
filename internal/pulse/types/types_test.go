@@ -4,9 +4,9 @@ import "testing"
 
 func TestBrainUsageEvent_TotalTokens(t *testing.T) {
 	tests := []struct {
-		name   string
-		event  BrainUsageEvent
-		want   int
+		name  string
+		event BrainUsageEvent
+		want  int
 	}{
 		{
 			name:  "both zero",

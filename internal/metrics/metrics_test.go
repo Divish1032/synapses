@@ -236,12 +236,12 @@ func TestEnrichBlame_WithGitRepo(t *testing.T) {
 	for _, name := range []string{"Serve", "Stop"} {
 		id := g.MakeNodeID(srcFile, name)
 		g.AddNode(&graph.Node{
-			ID:      id,
-			Type:    graph.NodeFunction,
-			Name:    name,
-			Package: "pkg",
-			File:    srcFile,
-			Line:    2,
+			ID:       id,
+			Type:     graph.NodeFunction,
+			Name:     name,
+			Package:  "pkg",
+			File:     srcFile,
+			Line:     2,
 			Metadata: map[string]string{"line_count": "1"},
 		})
 	}

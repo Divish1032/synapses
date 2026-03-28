@@ -27,16 +27,16 @@ import (
 // ProjectInstance holds all resources owned by the daemon for one project.
 // It is created by initProjectInstance and managed by projectRegistry.
 type ProjectInstance struct {
-	AbsPath     string
-	Graph       *graph.Graph
-	Store       *store.Store
-	MCPServer   *mcpsrv.Server
-	HTTPHandler *mcpserver.StreamableHTTPServer // HTTP MCP endpoint for this project
+	AbsPath            string
+	Graph              *graph.Graph
+	Store              *store.Store
+	MCPServer          *mcpsrv.Server
+	HTTPHandler        *mcpserver.StreamableHTTPServer // HTTP MCP endpoint for this project
 	BrainClient        *brain.Client
 	Watcher            *watcher.Watcher
-	MemoryEmbedder     embed.Embedder          // closed on project shutdown, NOT via defer in init
-	FederationResolver *federation.Resolver    // nil when no federation configured
-	cancel             context.CancelFunc      // cancels the project context (stops watcher, socket listener)
+	MemoryEmbedder     embed.Embedder       // closed on project shutdown, NOT via defer in init
+	FederationResolver *federation.Resolver // nil when no federation configured
+	cancel             context.CancelFunc   // cancels the project context (stops watcher, socket listener)
 }
 
 // Close shuts down all resources owned by this instance.

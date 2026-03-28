@@ -818,8 +818,8 @@ func (p *YAMLParser) collectOpenAPIRefs(node *yaml.Node, out []string) []string 
 // Multi-file OpenAPI support is tracked for a future sprint.
 func openAPIRefToSchemaName(ref string) string {
 	const (
-		v3prefix  = "#/components/schemas/"
-		v2prefix  = "#/definitions/"
+		v3prefix = "#/components/schemas/"
+		v2prefix = "#/definitions/"
 	)
 	switch {
 	case strings.HasPrefix(ref, v3prefix):

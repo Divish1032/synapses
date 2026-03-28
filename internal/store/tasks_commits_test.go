@@ -193,7 +193,7 @@ func TestCommitTracking_FullLifecycle(t *testing.T) {
 }
 
 // TestGetPendingTasks_CommitFieldsDefaultEmpty verifies that tasks created before
-// R21 (start_commit='', commits='[]') surface empty fields gracefully.
+// R21 (start_commit=”, commits='[]') surface empty fields gracefully.
 func TestGetPendingTasks_CommitFieldsDefaultEmpty(t *testing.T) {
 	t.Parallel()
 	st := openTestStore(t)

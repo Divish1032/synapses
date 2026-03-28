@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	vueg "github.com/alexaandru/go-sitter-forest/vue"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -22,16 +22,16 @@ import (
 // a parsed AST, so script content is delegated to the JS/TS sub-parsers.
 type VueParser struct {
 	language *sitter.Language
-	jsParser  *JavaScriptParser
-	tsParser  *TypeScriptParser
+	jsParser *JavaScriptParser
+	tsParser *TypeScriptParser
 }
 
 // NewVueParser creates a ready-to-use VueParser.
 func NewVueParser() *VueParser {
 	return &VueParser{
 		language: sitter.NewLanguage(vueg.GetLanguage()),
-		jsParser:  NewJavaScriptParser(),
-		tsParser:  NewTypeScriptParser(),
+		jsParser: NewJavaScriptParser(),
+		tsParser: NewTypeScriptParser(),
 	}
 }
 
@@ -77,13 +77,13 @@ func (p *VueParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	// Walk top-level children of the document root to find template, script,
 	// and style elements.
 	var (
-		scriptLang      = "js"   // default script language
-		scriptSetup     = false  // true when <script setup> is present
+		scriptLang      = "js"  // default script language
+		scriptSetup     = false // true when <script setup> is present
 		scriptContent   []byte
 		scriptStartLine int // 1-based line number where raw_text begins
 
 		styleLang   = "css" // default style language
-		styleScoped = false  // true when <style scoped>
+		styleScoped = false // true when <style scoped>
 		styleLine   = 1
 		hasStyle    = false
 	)

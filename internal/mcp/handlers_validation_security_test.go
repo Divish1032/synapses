@@ -73,10 +73,11 @@ func newServerWithRoot(t *testing.T) (*Server, string) {
 // is closed in handleValidatePlan.
 //
 // Attack: agent passes a recently-modified file via traversal
-//   (e.g. "../../outside/secret.txt"). Before fix: os.Stat is called and
-//   "graph_freshness" appears in the response, leaking that the external file
-//   was modified < 10s ago. After fix: pathWithinRoot rejects it → "graph_freshness"
-//   is absent entirely.
+//
+//	(e.g. "../../outside/secret.txt"). Before fix: os.Stat is called and
+//	"graph_freshness" appears in the response, leaking that the external file
+//	was modified < 10s ago. After fix: pathWithinRoot rejects it → "graph_freshness"
+//	is absent entirely.
 func TestValidatePlanPathTraversal_FreshnessCheck(t *testing.T) {
 	s, root := newServerWithRoot(t)
 
@@ -111,9 +112,10 @@ func TestValidatePlanPathTraversal_FreshnessCheck(t *testing.T) {
 // closed in handleValidatePlan's logic-check path.
 //
 // Attack: agent passes a .go file via traversal. Before fix: os.ReadFile reads
-//   the file and parser.RunLogicChecks produces warnings based on its content.
-//   After fix: pathWithinRoot rejects it → the file is never read → no
-//   logic_warnings appear.
+//
+//	the file and parser.RunLogicChecks produces warnings based on its content.
+//	After fix: pathWithinRoot rejects it → the file is never read → no
+//	logic_warnings appear.
 //
 // The outside file contains a known tilde-path pattern ("~/data") which
 // RunLogicChecks detects in Go source. If the guard fires, no warnings appear.
@@ -161,8 +163,9 @@ func bad() {
 // attack is closed in handleVerifyImplementation.
 //
 // Attack: agent passes a recently-modified external file via traversal in
-//   files_written. Before fix: os.Stat fires → FreshnessWarning leaks metadata.
-//   After fix: pathWithinRoot rejects it → FreshnessWarning stays empty.
+//
+//	files_written. Before fix: os.Stat fires → FreshnessWarning leaks metadata.
+//	After fix: pathWithinRoot rejects it → FreshnessWarning stays empty.
 func TestVerifyImplementationPathTraversal_FreshnessCheck(t *testing.T) {
 	s, root := newServerWithRoot(t)
 

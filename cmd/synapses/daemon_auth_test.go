@@ -497,8 +497,8 @@ func TestCORSWildcardNeverSet(t *testing.T) {
 	origins := []string{
 		"https://evil.com",
 		"http://attacker.local",
-		"tauri://localhost",        // allowed, but should reflect, not *
-		"http://localhost:3000",    // allowed, but should reflect, not *
+		"tauri://localhost",     // allowed, but should reflect, not *
+		"http://localhost:3000", // allowed, but should reflect, not *
 	}
 	for _, origin := range origins {
 		req := httptest.NewRequest(http.MethodPost, "/v1/tools/session_init", nil)

@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SynapsesOS/synapses/internal/brain/config"
 	"github.com/SynapsesOS/synapses/internal/brain/archivist"
+	"github.com/SynapsesOS/synapses/internal/brain/config"
 	"github.com/SynapsesOS/synapses/internal/brain/contextbuilder"
 	"github.com/SynapsesOS/synapses/internal/brain/enricher"
 	"github.com/SynapsesOS/synapses/internal/brain/guardian"
@@ -23,7 +23,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/brain/store"
 	"github.com/SynapsesOS/synapses/internal/logutil"
 )
-
 
 // Brain is the public interface for the Thinking Brain.
 // All methods are safe for concurrent use.
@@ -147,23 +146,23 @@ type BrainStatsProvider interface {
 // brainStats tracks per-tier success/failure counts and cumulative latency.
 // Thread-safe via sync/atomic. Exported via GetSummary for health checks.
 type brainStats struct {
-	mu                   sync.Mutex
-	ingestCalls          int64
-	ingestSuccess        int64
-	ingestDeterministic  int64 // fast-path hits (no LLM)
-	ingestLatencyMS      int64
-	enrichCalls          int64
-	enrichSuccess        int64
-	enrichLatencyMS      int64
-	guardianCalls        int64
-	guardianSuccess      int64
-	orchestrateCalls     int64
-	orchestrateSuccess   int64
-	archivistCalls          int64
-	archivistSuccess        int64
-	archivistRepairs        int64 // JSON bracket repairs
-	contextBuilderCalls     int64
-	contextBuilderSuccess   int64
+	mu                    sync.Mutex
+	ingestCalls           int64
+	ingestSuccess         int64
+	ingestDeterministic   int64 // fast-path hits (no LLM)
+	ingestLatencyMS       int64
+	enrichCalls           int64
+	enrichSuccess         int64
+	enrichLatencyMS       int64
+	guardianCalls         int64
+	guardianSuccess       int64
+	orchestrateCalls      int64
+	orchestrateSuccess    int64
+	archivistCalls        int64
+	archivistSuccess      int64
+	archivistRepairs      int64 // JSON bracket repairs
+	contextBuilderCalls   int64
+	contextBuilderSuccess int64
 }
 
 func (s *brainStats) record(tier string, success bool, latencyMS int64) {
@@ -217,22 +216,22 @@ func (s *brainStats) snapshot() map[string]interface{} {
 		avgEnrich = s.enrichLatencyMS / s.enrichCalls
 	}
 	return map[string]interface{}{
-		"ingest_calls":         s.ingestCalls,
-		"ingest_success":       s.ingestSuccess,
-		"ingest_deterministic": s.ingestDeterministic,
-		"ingest_avg_ms":        avgIngest,
-		"enrich_calls":         s.enrichCalls,
-		"enrich_success":       s.enrichSuccess,
-		"enrich_avg_ms":        avgEnrich,
-		"guardian_calls":       s.guardianCalls,
-		"guardian_success":     s.guardianSuccess,
-		"orchestrate_calls":    s.orchestrateCalls,
-		"orchestrate_success":  s.orchestrateSuccess,
-		"archivist_calls":            s.archivistCalls,
-		"archivist_success":          s.archivistSuccess,
-		"archivist_repairs":          s.archivistRepairs,
-		"context_builder_calls":      s.contextBuilderCalls,
-		"context_builder_success":    s.contextBuilderSuccess,
+		"ingest_calls":            s.ingestCalls,
+		"ingest_success":          s.ingestSuccess,
+		"ingest_deterministic":    s.ingestDeterministic,
+		"ingest_avg_ms":           avgIngest,
+		"enrich_calls":            s.enrichCalls,
+		"enrich_success":          s.enrichSuccess,
+		"enrich_avg_ms":           avgEnrich,
+		"guardian_calls":          s.guardianCalls,
+		"guardian_success":        s.guardianSuccess,
+		"orchestrate_calls":       s.orchestrateCalls,
+		"orchestrate_success":     s.orchestrateSuccess,
+		"archivist_calls":         s.archivistCalls,
+		"archivist_success":       s.archivistSuccess,
+		"archivist_repairs":       s.archivistRepairs,
+		"context_builder_calls":   s.contextBuilderCalls,
+		"context_builder_success": s.contextBuilderSuccess,
 	}
 }
 
@@ -403,7 +402,7 @@ func New(cfg config.BrainConfig) Brain {
 	// These are used when the primary tier's circuit breaker trips, so callers
 	// always receive a degraded-but-present response instead of zero-values.
 	fallbackEnr := enricher.New(ingestClient, st, timeout) // T2→T0: enrich with T0 model
-	fallbackGrd := guardian.New(ingestClient, st, timeout)  // T1→T0: explain with T0 model
+	fallbackGrd := guardian.New(ingestClient, st, timeout) // T1→T0: explain with T0 model
 	// No fallback LLM orchestrators: sending orchestration prompts to code-graph
 	// FT models (Librarian, Sentry) produces garbage — they have no conflict-resolution
 	// capability. coordinateFallback uses orchestrator.DeterministicCoordinate instead,
@@ -469,7 +468,7 @@ func warmUpModels(parent context.Context, clients ...llm.LLMClient) {
 		wg.Add(1)
 		go func(w llm.ModelWarmer, name string) {
 			defer wg.Done()
-			sem <- struct{}{} // acquire
+			sem <- struct{}{}        // acquire
 			defer func() { <-sem }() // release
 			ctx, cancel := context.WithTimeout(warmCtx, 30*time.Second)
 			defer cancel()

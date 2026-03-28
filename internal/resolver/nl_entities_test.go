@@ -23,11 +23,11 @@ func addSection(t *testing.T, g *graph.Graph, filePath, title, body string, line
 	sectionName := filePath + " § " + title
 	id := g.MakeNodeID(filePath, sectionName)
 	g.AddNode(&graph.Node{
-		ID:   id,
-		Type: graph.NodeSection,
-		Name: sectionName,
-		File: filePath,
-		Line: line,
+		ID:     id,
+		Type:   graph.NodeSection,
+		Name:   sectionName,
+		File:   filePath,
+		Line:   line,
 		Domain: graph.DomainDocs,
 		Metadata: map[string]string{
 			"title": title,
@@ -233,7 +233,7 @@ func TestResolveNLEntities_UnresolvedCandidatesReturned(t *testing.T) {
 // ── Bug regression tests ─────────────────────────────────────────────────────
 
 // TestResolveNLEntities_CaseInsensitiveCodeEntitySkip covers the case where a
-// doc uses `` `tokenbucket` `` (lowercase) but the code entity is "TokenBucket"
+// doc uses “ `tokenbucket` “ (lowercase) but the code entity is "TokenBucket"
 // (original case). Without the codeNamesLower secondary index, this created a
 // spurious knowledge node even though a code entity already existed.
 func TestResolveNLEntities_CaseInsensitiveCodeEntitySkip(t *testing.T) {
@@ -307,9 +307,9 @@ func TestResolveNLEntitiesForFiles_EmptyInput(t *testing.T) {
 
 // mockEmbedResolver is a test double for resolver.EmbedResolver.
 type mockEmbedResolver struct {
-	embedErr  error
-	embedVec  []float32
-	matches   []resolver.EmbedMatch
+	embedErr error
+	embedVec []float32
+	matches  []resolver.EmbedMatch
 }
 
 func (m *mockEmbedResolver) EmbedText(_ context.Context, _ string) ([]float32, error) {

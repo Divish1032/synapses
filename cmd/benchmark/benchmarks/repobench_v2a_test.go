@@ -468,8 +468,8 @@ func TestClosestCentroid_EmptyCentroidLoses(t *testing.T) {
 	// Empty centroid (cosine=0) should lose to any non-empty centroid.
 	query := map[string]float64{"embedding": 1.0}
 	centroids := []map[string]float64{
-		{},                      // empty centroid, cosine=0
-		{"embedding": 1.0},      // perfect match
+		{},                 // empty centroid, cosine=0
+		{"embedding": 1.0}, // perfect match
 	}
 	got := closestCentroid(query, centroids)
 	if got != 1 {

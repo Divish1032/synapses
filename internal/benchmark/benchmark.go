@@ -43,25 +43,25 @@ type Summary struct {
 
 // ScenarioResult holds the outcome of a single scenario.
 type ScenarioResult struct {
-	Name        string        `json:"name"`
-	Description string        `json:"description"`
-	Queries     []QueryResult `json:"queries"`
-	Passed      bool          `json:"passed"`
-	AvgF1       float64       `json:"avg_f1"`
-	AvgLatencyMs float64      `json:"avg_latency_ms"`
-	Error       string        `json:"error,omitempty"`
+	Name         string        `json:"name"`
+	Description  string        `json:"description"`
+	Queries      []QueryResult `json:"queries"`
+	Passed       bool          `json:"passed"`
+	AvgF1        float64       `json:"avg_f1"`
+	AvgLatencyMs float64       `json:"avg_latency_ms"`
+	Error        string        `json:"error,omitempty"`
 }
 
 // QueryResult holds the outcome of a single benchmark query.
 type QueryResult struct {
-	Label      string  `json:"label"`
-	Precision  float64 `json:"precision"`
-	Recall     float64 `json:"recall"`
-	F1         float64 `json:"f1"`
-	LatencyMs  float64 `json:"latency_ms"`
-	Expected   int     `json:"expected"`   // ground truth size
-	Returned   int     `json:"returned"`   // result size
-	Relevant   int     `json:"relevant"`   // |expected ∩ returned|
+	Label     string  `json:"label"`
+	Precision float64 `json:"precision"`
+	Recall    float64 `json:"recall"`
+	F1        float64 `json:"f1"`
+	LatencyMs float64 `json:"latency_ms"`
+	Expected  int     `json:"expected"` // ground truth size
+	Returned  int     `json:"returned"` // result size
+	Relevant  int     `json:"relevant"` // |expected ∩ returned|
 }
 
 // Scenario defines a benchmark that derives ground truth from the graph.

@@ -7,8 +7,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	gositter "github.com/alexaandru/go-sitter-forest/go"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/logutil"

@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	nixg "github.com/alexaandru/go-sitter-forest/nix"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )

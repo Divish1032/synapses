@@ -20,9 +20,9 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/embed"
-	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
@@ -671,28 +671,28 @@ func (s *Server) handleSessionInit(
 						if safeBranchRe.MatchString(prevBranch) && safeBranchRe.MatchString(currentBranch) &&
 							!strings.Contains(prevBranch, "\x00") && !strings.Contains(currentBranch, "\x00") &&
 							!strings.Contains(prevBranch, "...") && !strings.Contains(currentBranch, "...") {
-						if diffOut, diffErr := exec.CommandContext(gitCtxDiff, "git", "-C", root, "diff", "--name-only", prevBranch+"..."+currentBranch).Output(); diffErr == nil {
-							diffFiles := strings.Split(strings.TrimSpace(string(diffOut)), "\n")
-							// Filter empty strings and paths that escape root.
-							var files []string
-							for _, f := range diffFiles {
-								if f == "" {
-									continue
+							if diffOut, diffErr := exec.CommandContext(gitCtxDiff, "git", "-C", root, "diff", "--name-only", prevBranch+"..."+currentBranch).Output(); diffErr == nil {
+								diffFiles := strings.Split(strings.TrimSpace(string(diffOut)), "\n")
+								// Filter empty strings and paths that escape root.
+								var files []string
+								for _, f := range diffFiles {
+									if f == "" {
+										continue
+									}
+									if !pathWithinRoot(root, filepath.Join(root, f)) {
+										continue
+									}
+									files = append(files, f)
 								}
-								if !pathWithinRoot(root, filepath.Join(root, f)) {
-									continue
+								if len(files) > 50 {
+									workingSection["branch_diff_truncated"] = true
+									files = files[:50]
 								}
-								files = append(files, f)
+								if len(files) > 0 {
+									workingSection["branch_diff_files"] = files
+									workingSection["branch_diff_note"] = fmt.Sprintf("Switched from %s to %s. %d file(s) differ between branches. The file watcher handles re-indexing automatically.", prevBranch, currentBranch, len(files))
+								}
 							}
-							if len(files) > 50 {
-								workingSection["branch_diff_truncated"] = true
-								files = files[:50]
-							}
-							if len(files) > 0 {
-								workingSection["branch_diff_files"] = files
-								workingSection["branch_diff_note"] = fmt.Sprintf("Switched from %s to %s. %d file(s) differ between branches. The file watcher handles re-indexing automatically.", prevBranch, currentBranch, len(files))
-							}
-						}
 						}
 						gitCancelDiff()
 					}
@@ -998,11 +998,11 @@ func (s *Server) handleSessionInit(
 		if pc := s.getPulseClient(); pc != nil {
 			driftMs := float64(time.Since(driftStart).Milliseconds())
 			pc.RecordFederationEvent(pulse.FederationDetectEvent{
-				AgentID:   agentID,
-				ProjectID: s.projectID,
-				DepsFound: len(driftAlerts),
+				AgentID:    agentID,
+				ProjectID:  s.projectID,
+				DepsFound:  len(driftAlerts),
 				DurationMs: driftMs,
-				EventType: "drift_check",
+				EventType:  "drift_check",
 			})
 			// Per-project breakdown when drift is found.
 			perProject := make(map[string]int, len(driftAlerts))
@@ -1476,8 +1476,8 @@ func (s *Server) handleSessionInit(
 				pkgs = env.Packages
 			} else {
 				if err := json.Unmarshal([]byte(workMem.Content), &pkgs); err != nil {
-				logutil.Debug("synapses: session: unmarshal legacy work_summary packages for memory %q: %v\n", workMem.ID, err)
-			}
+					logutil.Debug("synapses: session: unmarshal legacy work_summary packages for memory %q: %v\n", workMem.ID, err)
+				}
 			}
 			if len(pkgs) > 0 {
 				resp["previous_session_work"] = map[string]interface{}{
@@ -2022,10 +2022,10 @@ func (s *Server) handleGetMyAnalytics(
 	sum := pc.GetSummaryForProject(days, s.projectID)
 
 	result := map[string]interface{}{
-		"available":   true,
-		"days":        days,
-		"agent_id":    agentID,
-		"project_id":  s.projectID,
+		"available":  true,
+		"days":       days,
+		"agent_id":   agentID,
+		"project_id": s.projectID,
 	}
 
 	if sum != nil && sum.Summary != nil {
@@ -2241,13 +2241,13 @@ func computeFirstSessionHighlights(g *graph.Graph, vlog []store.ViolationLogEntr
 		Type string `json:"type"`
 	}
 	type riskEntry struct {
-		Name        string `json:"name"`
-		File        string `json:"file"`
-		Type        string `json:"type"`
-		Fanin       int    `json:"call_fanin"`
-		RecentlyChanged bool `json:"recently_changed,omitempty"`
-		Note        string `json:"note"`
-		score       int    // internal sort key: fanin × recency_multiplier; not serialised
+		Name            string `json:"name"`
+		File            string `json:"file"`
+		Type            string `json:"type"`
+		Fanin           int    `json:"call_fanin"`
+		RecentlyChanged bool   `json:"recently_changed,omitempty"`
+		Note            string `json:"note"`
+		score           int    // internal sort key: fanin × recency_multiplier; not serialised
 	}
 
 	var deadCode []deadEntry

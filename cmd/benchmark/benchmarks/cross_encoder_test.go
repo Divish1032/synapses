@@ -17,9 +17,9 @@ func TestRerankModeDetection(t *testing.T) {
 		{"rerank-tfidf", true, "tfidf"},
 		{"rerank-hybrid", true, "hybrid"},
 		{"rerank-convex", true, "convex"},
-		{"fts-only", false, "hybrid"},     // default fallback
-		{"hybrid-rrf", false, "hybrid"},   // default fallback
-		{"", false, "hybrid"},             // default fallback
+		{"fts-only", false, "hybrid"},   // default fallback
+		{"hybrid-rrf", false, "hybrid"}, // default fallback
+		{"", false, "hybrid"},           // default fallback
 	}
 	for _, tt := range tests {
 		if got := IsRerankMode(tt.mode); got != tt.isRerank {

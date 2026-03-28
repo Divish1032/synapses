@@ -239,10 +239,10 @@ func cmdBrain(args []string) error {
 func cmdBrainSetup(args []string) error {
 	fs := flag.NewFlagSet("brain setup", flag.ContinueOnError)
 	ollamaURL := fs.String("ollama", "http://localhost:11434", "Ollama base URL")
-	mode      := fs.String("mode", "standard", "Intelligence mode: optimal | standard | full")
-	skipPull  := fs.Bool("skip-pull", false, "Skip pulling the base model")
+	mode := fs.String("mode", "standard", "Intelligence mode: optimal | standard | full")
+	skipPull := fs.Bool("skip-pull", false, "Skip pulling the base model")
 	skipSmoke := fs.Bool("skip-smoke", false, "Skip smoke tests")
-	noColor   := fs.Bool("no-color", false, "Disable ANSI color codes (useful when output is consumed by a GUI)")
+	noColor := fs.Bool("no-color", false, "Disable ANSI color codes (useful when output is consumed by a GUI)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -256,14 +256,34 @@ func cmdBrainSetup(args []string) error {
 	if err := validateOllamaURL(*ollamaURL); err != nil {
 		return fmt.Errorf("brain setup: %w", err)
 	}
-	safeClient     := newOllamaHTTPClient(30 * time.Second)
-	smokeClient    := newOllamaHTTPClient(90 * time.Second) // inference can take 30-60s on CPU for 4b models
+	safeClient := newOllamaHTTPClient(30 * time.Second)
+	smokeClient := newOllamaHTTPClient(90 * time.Second) // inference can take 30-60s on CPU for 4b models
 
 	// color helpers — inline so callers stay readable
-	green  := func(s string) string { if *noColor { return s }; return "\033[32m" + s + "\033[0m" }
-	yellow := func(s string) string { if *noColor { return s }; return "\033[33m" + s + "\033[0m" }
-	red    := func(s string) string { if *noColor { return s }; return "\033[31m" + s + "\033[0m" }
-	bold   := func(s string) string { if *noColor { return s }; return "\033[1m" + s + "\033[0m" }
+	green := func(s string) string {
+		if *noColor {
+			return s
+		}
+		return "\033[32m" + s + "\033[0m"
+	}
+	yellow := func(s string) string {
+		if *noColor {
+			return s
+		}
+		return "\033[33m" + s + "\033[0m"
+	}
+	red := func(s string) string {
+		if *noColor {
+			return s
+		}
+		return "\033[31m" + s + "\033[0m"
+	}
+	bold := func(s string) string {
+		if *noColor {
+			return s
+		}
+		return "\033[1m" + s + "\033[0m"
+	}
 
 	baseModel := baseModelForMode(*mode)
 
@@ -399,7 +419,9 @@ func cmdBrainRegister(args []string) error {
 		return fmt.Errorf("usage: synapses brain register <tier-name>\nKnown tiers: %s",
 			func() string {
 				names := make([]string, len(brainTiers))
-				for i, t := range brainTiers { names[i] = t.name }
+				for i, t := range brainTiers {
+					names[i] = t.name
+				}
 				return strings.Join(names, ", ")
 			}())
 	}
@@ -662,8 +684,10 @@ func brainSmokeTest(baseURL, modelName string, client *http.Client) (bool, strin
 
 	// Read the first streamed chunk — if we get any valid JSON line, the model is working.
 	var chunk struct {
-		Message struct{ Content string `json:"content"` } `json:"message"`
-		Done    bool                                       `json:"done"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+		Done bool `json:"done"`
 	}
 	dec := json.NewDecoder(resp.Body)
 	for dec.More() {

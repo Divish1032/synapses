@@ -378,4 +378,3 @@ func TestFindTasksByNodeID_NoSubstringFalsePositive(t *testing.T) {
 		t.Errorf("expected 'short name', got %q", tasks[0].Title)
 	}
 }
-

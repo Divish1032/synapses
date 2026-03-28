@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/skills"

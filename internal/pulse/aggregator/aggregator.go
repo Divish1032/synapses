@@ -14,11 +14,11 @@ import (
 
 // Aggregator periodically rolls up raw events into daily summaries.
 type Aggregator struct {
-	store        *pulsestore.Store
-	interval     time.Duration
-	stopCh       chan struct{}
-	stopOnce     sync.Once
-	wg           sync.WaitGroup
+	store    *pulsestore.Store
+	interval time.Duration
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 	// P2-20: track last vacuum time so it runs at most once per day.
 	lastVacuumDay atomic.Value // stores string "YYYY-MM-DD"
 	// Bug 27 — ROI-E7: DB file path for size metric.
@@ -216,18 +216,18 @@ func buildDayMetrics(sum *pulsestore.Summary, reparseCount int, reparseDurationM
 		"avg_persist_ms": p3.avgPersistMs,
 		// Phase 5: coverage completeness & self-refining.
 		"cross_session_recall_hits": float64(p3.crossSessionRecallHits),
-		"uptime_pct":               p3.uptimePct,
-		"avg_rebuild_ms":           p3.avgRebuildMs,
-		"federation_detections":    float64(p3.federationDetections),
-		"memory_invalidations":     float64(p3.memoryInvalidations),
-		"watcher_violations":       float64(p3.watcherViolations),
-		"cross_project_alerts":     float64(p3.crossProjectAlerts),
-		"delivery_success_rate":    p3.deliverySuccessRate,
-		"concurrent_agents_max":    float64(p3.concurrentAgentsMax),
-		"graph_freshness_score_p5": p3.graphFreshnessScore,
-		"clean_session_rate":       p3.cleanSessionRate,
-		"token_budget_hit_rate":    p3.tokenBudgetHitRate,
-		"bfs_cache_hit_rate_p5":    p3.bfsCacheHitRateP5,
+		"uptime_pct":                p3.uptimePct,
+		"avg_rebuild_ms":            p3.avgRebuildMs,
+		"federation_detections":     float64(p3.federationDetections),
+		"memory_invalidations":      float64(p3.memoryInvalidations),
+		"watcher_violations":        float64(p3.watcherViolations),
+		"cross_project_alerts":      float64(p3.crossProjectAlerts),
+		"delivery_success_rate":     p3.deliverySuccessRate,
+		"concurrent_agents_max":     float64(p3.concurrentAgentsMax),
+		"graph_freshness_score_p5":  p3.graphFreshnessScore,
+		"clean_session_rate":        p3.cleanSessionRate,
+		"token_budget_hit_rate":     p3.tokenBudgetHitRate,
+		"bfs_cache_hit_rate_p5":     p3.bfsCacheHitRateP5,
 	}
 }
 
@@ -528,9 +528,9 @@ func (a *Aggregator) rollupPerLanguage(day string, upsert upsertFunc) {
 			return fmt.Sprintf("lang:%s:%s", ls.Language, metric)
 		}
 		entries := map[string]float64{
-			key("parse_count"):    float64(ls.ParseCount),
+			key("parse_count"):     float64(ls.ParseCount),
 			key("avg_duration_ms"): ls.AvgDurationMs,
-			key("error_count"):    float64(ls.ErrorCount),
+			key("error_count"):     float64(ls.ErrorCount),
 		}
 		for metric, value := range entries {
 			if err := upsert(day, metric, value); err != nil {
@@ -551,7 +551,6 @@ func (a *Aggregator) rollupPerTool(day string, upsert upsertFunc) {
 		}
 	}
 }
-
 
 // backfillMissedDays computes and inserts rollups for any days between the last
 // recorded rollup and today (exclusive) that are missing — handles daemon downtime
@@ -579,23 +578,23 @@ func (a *Aggregator) backfillMissedDays(today string) {
 		// Rate/average metrics use 0.0 for historical backfill — they can't be reconstructed.
 		backfillTruncated, _ := a.store.CountTruncatedDeliveries(day)
 		backfillP3 := p3Metrics{
-			guardCircuitBreaks:    a.store.CountGuardEvents(day, "loop_circuit_break"),
-			rateLimitRejections:   a.store.CountGuardEvents(day, "rate_limit"),
-			recallHits:            a.store.CountMemoryOps(day, "recall_hit"),
-			recallMisses:          a.store.CountMemoryOps(day, "recall_miss"),
-			validationViolations:  a.store.CountValidationViolations(day),
-			errorCount:            a.store.CountToolErrors(day),
-			brainCostUSD:          a.store.SumBrainCostForDay(day),
-			agentLLMCostUSD:       a.store.SumAgentLLMCostForDay(day),
-			truncatedDeliveries:   backfillTruncated,
-			bfsCacheHits:          a.store.CountBFSCacheHitsForDay(day),
-			validatePlanCount:     a.store.CountValidationCalls(day, "validate_plan"),
-			memoryWrites:          a.store.CountMemoryOps(day, "write"),
-			safetyCheckHits:       a.store.CountMemoryOps(day, "safety_hit"),
-			safetyCheckMisses:     a.store.CountMemoryOps(day, "safety_miss"),
-			memoriesStaled:        a.store.SumMemoriesStaled(day),
-			resumedSessions:       a.store.CountResumedSessions(day),
-			replanCount:           a.store.CountOutcomeSignals(day, "replan"),
+			guardCircuitBreaks:   a.store.CountGuardEvents(day, "loop_circuit_break"),
+			rateLimitRejections:  a.store.CountGuardEvents(day, "rate_limit"),
+			recallHits:           a.store.CountMemoryOps(day, "recall_hit"),
+			recallMisses:         a.store.CountMemoryOps(day, "recall_miss"),
+			validationViolations: a.store.CountValidationViolations(day),
+			errorCount:           a.store.CountToolErrors(day),
+			brainCostUSD:         a.store.SumBrainCostForDay(day),
+			agentLLMCostUSD:      a.store.SumAgentLLMCostForDay(day),
+			truncatedDeliveries:  backfillTruncated,
+			bfsCacheHits:         a.store.CountBFSCacheHitsForDay(day),
+			validatePlanCount:    a.store.CountValidationCalls(day, "validate_plan"),
+			memoryWrites:         a.store.CountMemoryOps(day, "write"),
+			safetyCheckHits:      a.store.CountMemoryOps(day, "safety_hit"),
+			safetyCheckMisses:    a.store.CountMemoryOps(day, "safety_miss"),
+			memoriesStaled:       a.store.SumMemoriesStaled(day),
+			resumedSessions:      a.store.CountResumedSessions(day),
+			replanCount:          a.store.CountOutcomeSignals(day, "replan"),
 			// Bug 8 — DQ-G.5: abandonment rate from raw data.
 			abandonmentRate: a.store.GetAbandonmentRate(day),
 			// Bug 23 — ROI-C5: cache token savings from raw data.
@@ -686,4 +685,3 @@ func (a *Aggregator) rollupPerToolErrors(day string, upsert upsertFunc) {
 		}
 	}
 }
-

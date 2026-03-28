@@ -127,4 +127,3 @@ func TestSendMessage_PrunesVeryOldUnread(t *testing.T) {
 		t.Errorf("expected 8-day-old unread message to be pruned")
 	}
 }
-

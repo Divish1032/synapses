@@ -197,7 +197,7 @@ func (p *SvelteParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		}
 		emitted[name] = true
 		scriptLineIdx := countNewlines(script[:m[0]]) // 0-based index in scriptLines
-		line := scriptStartLine + scriptLineIdx        // 1-based file line
+		line := scriptStartLine + scriptLineIdx       // 1-based file line
 		// Check if this function line is an export.
 		lineText := getLineAt(scriptLines, scriptLineIdx)
 		exported := strings.Contains(lineText, "export ")

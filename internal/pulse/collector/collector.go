@@ -47,10 +47,10 @@ type sessionModelPayload struct {
 type Collector struct {
 	store *pulsestore.Store
 	// Ring buffer: fixed-size array with head/tail indices.
-	ring  []event
-	head  int // index of oldest event
-	tail  int // index of next write slot
-	count int // number of events in the buffer
+	ring     []event
+	head     int // index of oldest event
+	tail     int // index of next write slot
+	count    int // number of events in the buffer
 	mu       sync.Mutex
 	cap      int
 	interval time.Duration
@@ -60,9 +60,9 @@ type Collector struct {
 	// P2-17: high-water mark — peak buffer depth since last flush.
 	highWaterMark atomic.Int64
 	// P2-19: events dropped due to full buffer (ring buffer overflow).
-	dropped        atomic.Int64
+	dropped         atomic.Int64
 	lastLoggedDrops atomic.Int64 // last dropped count we logged — avoids repeated warnings
-	enqueued       atomic.Int64
+	enqueued        atomic.Int64
 	// P5 — DQ-Integrity.1: write errors during batch persistence.
 	writeErrors atomic.Int64
 	// earlyFlushRunning prevents concurrent early-flush goroutines. Only one

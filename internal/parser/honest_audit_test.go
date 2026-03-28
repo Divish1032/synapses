@@ -2,6 +2,7 @@ package parser_test
 
 import (
 	"testing"
+
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/parser"
 )

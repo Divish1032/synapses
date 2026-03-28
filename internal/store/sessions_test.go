@@ -309,7 +309,7 @@ func TestGetOrResumeSession_HibernateResume_ExpiredSessionNotResumed(t *testing.
 
 	// Session last seen 5 hours ago — outside the 4-hour hibernate window.
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-he", "mcp-conn-A", "work", 300, 14400)
-	wayPast := time.Now().UTC().Unix() - 18001 // >5 hours ago
+	wayPast := time.Now().UTC().Unix() - 18001                                             // >5 hours ago
 	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, wayPast, id1) //nolint:errcheck
 
 	id2, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-he", "mcp-conn-B", "work", 300, 14400)
@@ -390,9 +390,9 @@ func TestGetOrResumeSession_HibernateResume_PicksMostRecentSession(t *testing.T)
 	id1, _, _, _ := st.GetOrResumeSession("agent-1", "proj-hpick", "mcp-conn-A", "old work", 300, 14400)
 	id2, _, _, _ := st.GetOrResumeSession("agent-1", "proj-hpick", "mcp-conn-B", "recent work", 300, 14400)
 
-	olderPast := time.Now().UTC().Unix() - 7200 // 2 hours ago
-	recentPast := time.Now().UTC().Unix() - 3600 // 1 hour ago
-	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, olderPast, id1) //nolint:errcheck
+	olderPast := time.Now().UTC().Unix() - 7200                                               // 2 hours ago
+	recentPast := time.Now().UTC().Unix() - 3600                                              // 1 hour ago
+	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, olderPast, id1)  //nolint:errcheck
 	st.knowledgeDB.Exec(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`, recentPast, id2) //nolint:errcheck
 
 	resumedID, _, hibCtx, _ := st.GetOrResumeSession("agent-1", "proj-hpick", "mcp-conn-C", "work", 300, 14400)
@@ -980,7 +980,7 @@ func TestSessionLifecycle_ParallelSessions(t *testing.T) {
 		st.TouchSession(sessC)
 	}
 
-	st.EndSession(sessA, "clean", "success", "")  //nolint:errcheck
+	st.EndSession(sessA, "clean", "success", "") //nolint:errcheck
 	st.EndSession(sessB, "clean", "partial", "") //nolint:errcheck
 
 	past := time.Now().UTC().Unix() - 120
@@ -1294,7 +1294,7 @@ func TestGetOrResumeSession_IdleActiveSession_NotStolenByPhase2(t *testing.T) {
 	st := openTestStore(t)
 
 	now := time.Now().UTC().Unix()
-	reconnectWindow := int64(300) // 5 min
+	reconnectWindow := int64(300)   // 5 min
 	idleFor := reconnectWindow + 60 // 6 minutes idle — past reconnect, within hibernate window
 
 	// Insert a session that is state='active' but has been idle for 6 minutes.

@@ -33,24 +33,24 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/benchmark"
 	"github.com/SynapsesOS/synapses/internal/brain"
-	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/config"
-	"github.com/SynapsesOS/synapses/internal/namematcher"
 	"github.com/SynapsesOS/synapses/internal/contextfile"
 	"github.com/SynapsesOS/synapses/internal/dataflow"
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/metrics"
-	"github.com/SynapsesOS/synapses/internal/skills"
+	"github.com/SynapsesOS/synapses/internal/namematcher"
 	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/scout"
-	"github.com/SynapsesOS/synapses/internal/webcache"
+	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
+	"github.com/SynapsesOS/synapses/internal/webcache"
 )
 
 // version is set at build time via ldflags: -X main.version=<tag>
@@ -491,11 +491,11 @@ func cmdStartDirect(args []string) error {
 				logutil.Error("synapses: file watcher start failed: %v\n", err)
 			} else {
 				defer fw.Stop()
-				fw.SetConfig(cfg)                    // wire rules for proactive violation events
+				fw.SetConfig(cfg)                       // wire rules for proactive violation events
 				fw.SetProjectID(pathProjectID(absPath)) // scope brain ingest to this project
-				srv.SetChangeSource(fw)               // wire change log into get_working_state
-				fw.SetPacketInvalidator(srv)          // clear brain packet cache on file change
-				fw.SetBrainClient(brainCli)           // wire incremental ingest
+				srv.SetChangeSource(fw)                 // wire change log into get_working_state
+				fw.SetPacketInvalidator(srv)            // clear brain packet cache on file change
+				fw.SetBrainClient(brainCli)             // wire incremental ingest
 				// Wire cross-domain name matcher: runs after each reindex to create MENTIONS edges.
 				nm := namematcher.New(brainCli)
 				// Prime the cross-domain flag from the already-loaded graph so that
@@ -1442,7 +1442,10 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 				return
 			}
 			// Build compact language breakdown: top 3 extensions by count.
-			type lc struct{ name string; count int }
+			type lc struct {
+				name  string
+				count int
+			}
 			langs := make([]lc, 0, len(byExt))
 			for ext, cnt := range byExt {
 				langs = append(langs, lc{extDisplayName(ext), cnt})
@@ -2206,8 +2209,8 @@ func writeClaudeSettings(repoRoot string) error {
 	// The Glob|Grep hard block and low-value PostToolUse confirmations were
 	// removed — clean them from already-connected projects on re-connect.
 	removeHookEntry(hooks, "PreToolUse", "Glob|Grep")
-	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__validate_plan")  // legacy cleanup
-	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__validate")       // cleanup if validate hook was auto-added
+	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__validate_plan") // legacy cleanup
+	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__validate")      // cleanup if validate hook was auto-added
 	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__create_plan")
 
 	// ── SessionStart: cat the daemon-written context file instead of a static echo.
@@ -2412,7 +2415,6 @@ func writeZedMCPConfig(repoRoot string) error {
 	}
 	return os.WriteFile(file, append(out, '\n'), 0o644)
 }
-
 
 // writeGuidanceFile writes (or updates) the Synapses guidance section in a
 // plain-markdown rules file (e.g. .windsurfrules). frontmatter is prepended

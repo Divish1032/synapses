@@ -10,11 +10,11 @@
 // when similarity exceeds a threshold. This catches implicit doc↔code links.
 //
 // Cascade strategy (most specific → broadest):
-//   1. Function/class level — exact name matches (handled by docedges.go)
-//   2. Function/class level — embedding similarity (this file, high threshold)
-//   3. File level — file path references in text (handled by docedges.go linkSectionsToFiles)
-//   4. File level — embedding similarity against file nodes (this file, medium threshold)
-//   5. Module/package level — embedding similarity (this file, lower threshold)
+//  1. Function/class level — exact name matches (handled by docedges.go)
+//  2. Function/class level — embedding similarity (this file, high threshold)
+//  3. File level — file path references in text (handled by docedges.go linkSectionsToFiles)
+//  4. File level — embedding similarity against file nodes (this file, medium threshold)
+//  5. Module/package level — embedding similarity (this file, lower threshold)
 //
 // Only levels 2, 4, 5 are implemented here. Levels 1, 3 are in docedges.go.
 // The cascade logic: if a section already has specific edges (function-level),
@@ -74,8 +74,8 @@ func DiscoverDocCodeRelations(g *graph.Graph, er EmbedResolver, threshold float6
 
 	// Build sets of code node IDs by specificity level.
 	codeEntityIDs := make(map[string]bool)  // functions, methods, structs, classes, etc.
-	codeFileIDs := make(map[string]bool)     // NodeFile in DomainCode
-	codePackageIDs := make(map[string]bool)  // NodePackage
+	codeFileIDs := make(map[string]bool)    // NodeFile in DomainCode
+	codePackageIDs := make(map[string]bool) // NodePackage
 
 	for _, n := range g.AllNodes() {
 		switch {

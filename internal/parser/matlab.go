@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	matlabg "github.com/alexaandru/go-sitter-forest/matlab"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -21,7 +21,7 @@ type MATLABParser struct{}
 
 func NewMATLABParser() *MATLABParser { return &MATLABParser{} }
 
-func (p *MATLABParser) Language() string       { return "matlab" }
+func (p *MATLABParser) Language() string     { return "matlab" }
 func (p *MATLABParser) Extensions() []string { return []string{".m"} }
 
 func (p *MATLABParser) TSLanguageForFile(_ string) *sitter.Language {

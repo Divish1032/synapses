@@ -45,7 +45,7 @@ func StripHTML(s string) string {
 				// Treat block-level closing tags as newlines for readability.
 				// Pre-lowercase the 20-byte window once to avoid O(n*m*9)
 				// containsFold calls on crafted input.
-				restLower := strings.ToLower(s[max(0, i-20) : i])
+				restLower := strings.ToLower(s[max(0, i-20):i])
 				for _, tag := range []string{"/p", "/div", "/li", "/h1", "/h2", "/h3", "/h4", "/pre", "/section", "br"} {
 					if strings.Contains(restLower, tag) {
 						b.WriteByte('\n')
@@ -151,4 +151,3 @@ func hasPrefixFold(s, prefix string) bool {
 	}
 	return strings.EqualFold(s[:len(prefix)], prefix)
 }
-

@@ -90,4 +90,3 @@ func TestProjectIsolation_UpdateDoesNotCrossProjects(t *testing.T) {
 		t.Errorf("proj-B should be unchanged = %q, want original-B", got)
 	}
 }
-

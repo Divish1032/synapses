@@ -271,18 +271,18 @@ func TestHeuristicEnrichInsight_Content(t *testing.T) {
 		contains []string
 	}{
 		{
-			name: "both callers and callees",
-			req:  EnrichRequest{RootName: "Store", RootType: "struct", CallerNames: []string{"A", "B"}, CalleeNames: []string{"X"}},
+			name:     "both callers and callees",
+			req:      EnrichRequest{RootName: "Store", RootType: "struct", CallerNames: []string{"A", "B"}, CalleeNames: []string{"X"}},
 			contains: []string{"Store", "struct", "2", "1"},
 		},
 		{
-			name: "only callers",
-			req:  EnrichRequest{RootName: "Leaf", RootType: "function", CallerNames: []string{"X"}, CalleeNames: nil},
+			name:     "only callers",
+			req:      EnrichRequest{RootName: "Leaf", RootType: "function", CallerNames: []string{"X"}, CalleeNames: nil},
 			contains: []string{"Leaf", "function", "1"},
 		},
 		{
-			name: "only callees",
-			req:  EnrichRequest{RootName: "Root", RootType: "function", CallerNames: nil, CalleeNames: []string{"A", "B", "C"}},
+			name:     "only callees",
+			req:      EnrichRequest{RootName: "Root", RootType: "function", CallerNames: nil, CalleeNames: []string{"A", "B", "C"}},
 			contains: []string{"Root", "function", "3"},
 		},
 		{

@@ -1588,7 +1588,7 @@ var testFileSuffixes = []string{
 	"_test.go",
 	"_test.ts", "_test.js",
 	"_spec.ts", "_spec.js",
-	"_test.py",       // Python suffix convention: auth_test.py
+	"_test.py", // Python suffix convention: auth_test.py
 	".test.ts", ".test.js",
 	".spec.ts", ".spec.js",
 }
@@ -1756,4 +1756,3 @@ type ErrNodeNotFound NodeID
 func (e ErrNodeNotFound) Error() string {
 	return "node not found: " + string(e)
 }
-

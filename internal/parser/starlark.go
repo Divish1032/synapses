@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	starlarkg "github.com/alexaandru/go-sitter-forest/starlark"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -61,12 +61,12 @@ var knownBazelRules = map[string]bool{
 	"local_repository":     true,
 	"new_local_repository": true,
 	// Toolchain / platform
-	"alias":              true,
+	"alias":               true,
 	"register_toolchains": true,
-	"platform":           true,
-	"constraint_value":   true,
-	"constraint_setting": true,
-	"toolchain":          true,
+	"platform":            true,
+	"constraint_value":    true,
+	"constraint_setting":  true,
+	"toolchain":           true,
 	// Config
 	"config_setting": true,
 	"bool_flag":      true,

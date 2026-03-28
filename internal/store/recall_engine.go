@@ -380,8 +380,8 @@ func RRFMergeWeighted(channels map[string][]string, limit int, k int, weights ma
 		contri float64
 	}
 	type scored struct {
-		id      string
-		score   float64
+		id       string
+		score    float64
 		contribs []chanContrib
 	}
 
@@ -652,4 +652,3 @@ func minMaxNormalize(scores []float64) []float64 {
 	}
 	return norm
 }
-

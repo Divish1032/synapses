@@ -46,7 +46,7 @@ func newGenericParser() *genericParser {
 			".jl",        // Julia
 			".pl", ".pm", // Perl
 			// NOTE: .sh .bash .zsh → BashParser
-			".fish", // Shell scripts (no deep parser yet)
+			".fish",        // Shell scripts (no deep parser yet)
 			".bat", ".cmd", // Windows batch
 
 			// ── Data Science / Notebooks ─────────────────────────────────────
@@ -95,7 +95,7 @@ func newGenericParser() *genericParser {
 
 			// ── Web templates ─────────────────────────────────────────────────
 			// NOTE: .svelte → SvelteParser
-			".vue", // Vue SFC
+			".vue",          // Vue SFC
 			".erb",          // Ruby ERB templates
 			".ejs",          // EJS templates
 			".jinja", ".j2", // Jinja2 templates

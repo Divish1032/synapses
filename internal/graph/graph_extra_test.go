@@ -36,7 +36,7 @@ func TestUpsertRouteNode_ExistingNode_ReturnsFalse(t *testing.T) {
 		Type: NodeFunction,
 		File: "route.go",
 	}
-	g.UpsertRouteNode(n) // first insert
+	g.UpsertRouteNode(n)            // first insert
 	created := g.UpsertRouteNode(n) // duplicate
 	if created {
 		t.Error("expected false for duplicate node")

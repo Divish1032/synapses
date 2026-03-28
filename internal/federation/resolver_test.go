@@ -1226,7 +1226,7 @@ func TestNodeExistsByName_LikeWildcardEscaped(t *testing.T) {
 		&graph.Node{ID: "test::b.go::Xinit", Name: "Xinit", Type: graph.NodeFunction, File: "b.go"},
 	)
 	// Searching "_init" should NOT match "Xinit" — underscore must be escaped.
-	results, err := st.FindNodesByNameCtx(context.Background(),"_init", 10)
+	results, err := st.FindNodesByNameCtx(context.Background(), "_init", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1245,7 +1245,7 @@ func TestNodeExistsByName_PercentEscaped(t *testing.T) {
 		&graph.Node{ID: "test::b.go::XabcY", Name: "XabcY", Type: graph.NodeFunction, File: "b.go"},
 	)
 	// Searching "X%Y" should only match literal "X%Y", not "XabcY".
-	exists, err := st.NodeExistsByNameCtx(context.Background(),"X%Y")
+	exists, err := st.NodeExistsByNameCtx(context.Background(), "X%Y")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1253,7 +1253,7 @@ func TestNodeExistsByName_PercentEscaped(t *testing.T) {
 		t.Error("expected X%Y to exist via exact match")
 	}
 	// FindNodesByName should find exactly 1 (the exact match) — not 2 via LIKE wildcard.
-	results, err := st.FindNodesByNameCtx(context.Background(),"X%Y", 10)
+	results, err := st.FindNodesByNameCtx(context.Background(), "X%Y", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1271,7 +1271,7 @@ func TestFindNodesByName_MultipleMatches(t *testing.T) {
 		&graph.Node{ID: "test::b.go::Foo", Name: "Foo", Type: graph.NodeFunction, File: "b.go"},
 		&graph.Node{ID: "test::c.go::Bar", Name: "Bar", Type: graph.NodeFunction, File: "c.go"},
 	)
-	results, err := st.FindNodesByNameCtx(context.Background(),"Foo", 10)
+	results, err := st.FindNodesByNameCtx(context.Background(), "Foo", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1286,7 +1286,7 @@ func TestFindNodesByName_QualifiedSuffix(t *testing.T) {
 		&graph.Node{ID: "test::a.go::Server.Handle", Name: "Server.Handle", Type: graph.NodeMethod, File: "a.go"},
 		&graph.Node{ID: "test::b.go::Handle", Name: "Handle", Type: graph.NodeFunction, File: "b.go"},
 	)
-	results, err := st.FindNodesByNameCtx(context.Background(),"Handle", 10)
+	results, err := st.FindNodesByNameCtx(context.Background(), "Handle", 10)
 	if err != nil {
 		t.Fatal(err)
 	}

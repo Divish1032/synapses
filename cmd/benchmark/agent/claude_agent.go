@@ -62,16 +62,16 @@ type AgentResult struct {
 // ── Claude API types ─────────────────────────────────────────────────────────
 
 type claudeRequest struct {
-	Model       string           `json:"model"`
-	MaxTokens   int              `json:"max_tokens"`
-	Temperature float64          `json:"temperature"`
-	System      string           `json:"system,omitempty"`
-	Tools       []ToolDef        `json:"tools,omitempty"`
-	Messages    []claudeMessage  `json:"messages"`
+	Model       string          `json:"model"`
+	MaxTokens   int             `json:"max_tokens"`
+	Temperature float64         `json:"temperature"`
+	System      string          `json:"system,omitempty"`
+	Tools       []ToolDef       `json:"tools,omitempty"`
+	Messages    []claudeMessage `json:"messages"`
 }
 
 type claudeMessage struct {
-	Role    string        `json:"role"`
+	Role    string         `json:"role"`
 	Content []contentBlock `json:"content"`
 }
 

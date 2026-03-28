@@ -173,7 +173,6 @@ func (ing *Ingestor) buildPrompt(req Request) string {
 	return fmt.Sprintf(promptTemplate, sanitizePromptInput(req.NodeName), sanitizePromptInput(nodeType), sanitizePromptInput(pkg), sanitizePromptInput(code))
 }
 
-
 // parseSummary extracts the summary and tags from the LLM JSON response.
 // Handles cases where the model wraps the JSON in markdown code fences.
 // Falls back to treating the full response as a plain-text summary when

@@ -251,10 +251,10 @@ func TestRealWorld_Protobuf_gRPC(t *testing.T) {
 
 	// route_guide.proto has all 4 RPC types
 	requireSymbol(t, g, "RouteGuide")
-	requireSymbol(t, g, "RouteGuide.GetFeature")        // unary
-	requireSymbol(t, g, "RouteGuide.ListFeatures")      // server streaming
-	requireSymbol(t, g, "RouteGuide.RecordRoute")       // client streaming
-	requireSymbol(t, g, "RouteGuide.RouteChat")         // bidi streaming
+	requireSymbol(t, g, "RouteGuide.GetFeature")   // unary
+	requireSymbol(t, g, "RouteGuide.ListFeatures") // server streaming
+	requireSymbol(t, g, "RouteGuide.RecordRoute")  // client streaming
+	requireSymbol(t, g, "RouteGuide.RouteChat")    // bidi streaming
 	requireMeta(t, g, "RouteGuide.ListFeatures", "streams_response", "true")
 	requireMeta(t, g, "RouteGuide.RecordRoute", "streams_request", "true")
 	requireMeta(t, g, "RouteGuide.RouteChat", "streams_request", "true")

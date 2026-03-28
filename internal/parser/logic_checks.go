@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/alexaandru/go-tree-sitter-bare"
 	gositter "github.com/alexaandru/go-sitter-forest/go"
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 )
 
 // LogicWarning represents a single heuristic logic warning found by AST analysis.

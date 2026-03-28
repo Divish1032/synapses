@@ -280,10 +280,10 @@ func TestIs4BModel(t *testing.T) {
 		want  bool
 	}{
 		{"qwen3.5:4b", true},
-		{"qwen3.5:4B", true},        // case-insensitive
+		{"qwen3.5:4B", true}, // case-insensitive
 		{"qwen3.5:2b", false},
-		{"qwen3.5:14b", false},       // 14B must NOT be treated as 4B (regression)
-		{"llama3.1:40b", false},      // 40B must NOT be treated as 4B (regression)
+		{"qwen3.5:14b", false},  // 14B must NOT be treated as 4B (regression)
+		{"llama3.1:40b", false}, // 40B must NOT be treated as 4B (regression)
 		{"synapses/librarian", false},
 		{"synapses/sentry", false},
 		{"qwen3.5-4b-instruct", true},

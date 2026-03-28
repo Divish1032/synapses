@@ -24,7 +24,7 @@ func TestNameToWords(t *testing.T) {
 		{"io", "io"},
 		{"URL", "url"},
 		{"parseURL", "parse url"},
-		{"XMLHTTPRequest", "xmlhttp request"}, // all-caps run treated as one acronym
+		{"XMLHTTPRequest", "xmlhttp request"},  // all-caps run treated as one acronym
 		{"XMLHttpRequest", "xml http request"}, // real-world mixed case
 		{"get_http_response", "get http response"},
 		{"MY_CONST_VALUE", "my const value"},

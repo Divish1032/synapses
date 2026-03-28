@@ -40,14 +40,14 @@ type SWEBenchTask struct {
 
 // SWEBenchTaskResult is the outcome of running the agent on one task.
 type SWEBenchTaskResult struct {
-	InstanceID     string          `json:"instance_id"`
-	Repo           string          `json:"repo"`
-	Mode           string          `json:"mode"`
-	GeneratedPatch string          `json:"generated_patch"`
-	Pass           bool            `json:"pass"`            // set by evaluator (manual or Docker)
+	InstanceID     string           `json:"instance_id"`
+	Repo           string           `json:"repo"`
+	Mode           string           `json:"mode"`
+	GeneratedPatch string           `json:"generated_patch"`
+	Pass           bool             `json:"pass"` // set by evaluator (manual or Docker)
 	Stats          agent.AgentStats `json:"stats"`
-	Error          string          `json:"error,omitempty"`
-	Duration       string          `json:"duration"`
+	Error          string           `json:"error,omitempty"`
+	Duration       string           `json:"duration"`
 }
 
 // RunSWEBench runs the SWE-bench benchmark in the specified mode.

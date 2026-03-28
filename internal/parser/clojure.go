@@ -272,7 +272,7 @@ func (p *ClojureParser) Parse(g *graph.Graph, filePath string, src []byte) error
 	for _, m := range reClojureDefn.FindAllStringSubmatchIndex(content, -1) {
 		// Group 1: "-" suffix (non-empty means defn-)
 		// Group 2: function name
-		dash := content[m[2]:m[3]]  // "" or "-"
+		dash := content[m[2]:m[3]] // "" or "-"
 		name := content[m[4]:m[5]]
 		if emitted[name] {
 			continue

@@ -94,8 +94,8 @@ func (g *loopGuard) getPulseClient() *pulse.Client {
 // loopGuardSession holds the sliding window for one MCP connection.
 type loopGuardSession struct {
 	window   [loopGuardWindowSize]string
-	head     int // next write index (wraps modulo loopGuardWindowSize)
-	size     int // valid entries in window (0..loopGuardWindowSize)
+	head     int       // next write index (wraps modulo loopGuardWindowSize)
+	size     int       // valid entries in window (0..loopGuardWindowSize)
 	lastFP   string    // last fingerprint seen — used for auto-reset on change
 	lastCall time.Time // last call time — used for time-based decay
 }

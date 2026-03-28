@@ -302,4 +302,3 @@ func TestHealthHandler_PerProjectFederationTimeout(t *testing.T) {
 		t.Errorf("handler took %v — os.Stat should be instant", elapsed)
 	}
 }
-

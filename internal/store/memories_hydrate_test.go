@@ -3,9 +3,10 @@ package store_test
 import (
 	"testing"
 
-	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 func TestGetMemoriesByIDs_EmptySlice(t *testing.T) {
