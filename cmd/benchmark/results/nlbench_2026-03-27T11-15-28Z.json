@@ -1,0 +1,1265 @@
+{
+  "timestamp": "2026-03-27T11:15:28Z",
+  "total_tests": 65,
+  "error_count": 0,
+  "summary": {
+    "precision": 0,
+    "recall": 0,
+    "f1": 0
+  },
+  "by_query_type": [
+    {
+      "label": "doc_explains_code",
+      "tests": 11,
+      "metrics": {
+        "precision": 0,
+        "recall": 0,
+        "f1": 0
+      }
+    },
+    {
+      "label": "concept_search",
+      "tests": 38,
+      "metrics": {
+        "precision": 0,
+        "recall": 0,
+        "f1": 0
+      }
+    },
+    {
+      "label": "find_relevant_docs",
+      "tests": 8,
+      "metrics": {
+        "precision": 0,
+        "recall": 0,
+        "f1": 0
+      }
+    },
+    {
+      "label": "find_doc_entities",
+      "tests": 8,
+      "metrics": {
+        "precision": 0,
+        "recall": 0,
+        "f1": 0
+      }
+    }
+  ],
+  "by_language": [
+    {
+      "label": "python",
+      "tests": 24,
+      "metrics": {
+        "precision": 0,
+        "recall": 0,
+        "f1": 0
+      }
+    },
+    {
+      "label": "go",
+      "tests": 22,
+      "metrics": {
+        "precision": 0,
+        "recall": 0,
+        "f1": 0
+      }
+    },
+    {
+      "label": "javascript",
+      "tests": 11,
+      "metrics": {
+        "precision": 0,
+        "recall": 0,
+        "f1": 0
+      }
+    },
+    {
+      "label": "typescript",
+      "tests": 8,
+      "metrics": {
+        "precision": 0,
+        "recall": 0,
+        "f1": 0
+      }
+    }
+  ],
+  "tests": [
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "find_doc_entities",
+      "query": "CONTRIBUTING.rst",
+      "description": "Contributing guide sections should surface process-related topics",
+      "expected_names": [
+        "coding",
+        "tests",
+        "docs",
+        "setup",
+        "patches",
+        "issues"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fpallets_flask\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "find_doc_entities",
+      "query": "README.md",
+      "description": "Top-level README should surface project overview concepts",
+      "expected_names": [
+        "flask",
+        "install",
+        "links",
+        "donate"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fpallets_flask\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "doc_explains_code",
+      "query": "Flask",
+      "description": "Flask class should link to quickstart/API doc sections",
+      "expected_names": [
+        "Flask"
+      ],
+      "expected_docs": [
+        "app",
+        "application",
+        "quickstart",
+        "api"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post get_context: Post \"http://127.0.0.1:11435/v1/tools/get_context?project=%2Ftmp%2Fnl_repos%2Fpallets_flask\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "doc_explains_code",
+      "query": "Flask.run",
+      "description": "Flask.run should link to server/CLI docs",
+      "expected_names": [
+        "Flask.run",
+        "run"
+      ],
+      "expected_docs": [
+        "run",
+        "server",
+        "cli",
+        "command"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post get_context: Post \"http://127.0.0.1:11435/v1/tools/get_context?project=%2Ftmp%2Fnl_repos%2Fpallets_flask\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "doc_explains_code",
+      "query": "Flask.make_response",
+      "description": "make_response should link to response handling docs",
+      "expected_names": [
+        "make_response"
+      ],
+      "expected_docs": [
+        "response",
+        "api"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post get_context: Post \"http://127.0.0.1:11435/v1/tools/get_context?project=%2Ftmp%2Fnl_repos%2Fpallets_flask\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "doc_explains_code",
+      "query": "Blueprint",
+      "description": "Blueprint should link to modular application docs",
+      "expected_names": [
+        "Blueprint"
+      ],
+      "expected_docs": [
+        "blueprint",
+        "modular",
+        "application"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post get_context: Post \"http://127.0.0.1:11435/v1/tools/get_context?project=%2Ftmp%2Fnl_repos%2Fpallets_flask\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "template rendering",
+      "description": "Template rendering should find Jinja-related entities and doc sections",
+      "expected_names": [
+        "render_template",
+        "template",
+        "jinja"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fpallets_flask\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "request handling",
+      "description": "Request handling should find request processing code and docs",
+      "expected_names": [
+        "request",
+        "context",
+        "dispatch"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fpallets_flask\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "blueprint",
+      "description": "Blueprint concept should find modular app code and docs",
+      "expected_names": [
+        "Blueprint",
+        "blueprint",
+        "register"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fpallets_flask\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "error handling",
+      "description": "Error handling should find error handler doc sections and code",
+      "expected_names": [
+        "error",
+        "handling",
+        "errorhandler"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fpallets_flask\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "session",
+      "description": "Session concept should find session management code",
+      "expected_names": [
+        "session",
+        "cookie",
+        "SecureCookieSessionInterface"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fpallets_flask\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "testing",
+      "description": "Testing concept should find test client and test utilities",
+      "expected_names": [
+        "test",
+        "client",
+        "FlaskClient"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fpallets_flask\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "find_relevant_docs",
+      "query": "Flask.send_static_file",
+      "description": "send_static_file should have doc references about static files",
+      "expected_names": [
+        "static",
+        "api.rst"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "(empty response)"
+    },
+    {
+      "repo": "pallets/flask",
+      "language": "python",
+      "query_type": "find_relevant_docs",
+      "query": "Flask.config",
+      "description": "Flask.config should be documented in configuration docs",
+      "expected_names": [
+        "config",
+        "configuration"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "(empty response)"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "find_doc_entities",
+      "query": "README.md",
+      "description": "Gin README should surface core framework concepts from section headers",
+      "expected_names": [
+        "gin",
+        "router",
+        "middleware",
+        "context",
+        "JSON",
+        "model",
+        "binding",
+        "quick start"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgin-gonic_gin\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "find_doc_entities",
+      "query": "CHANGELOG.md",
+      "description": "Changelog should surface release-related section words",
+      "expected_names": [
+        "release",
+        "version",
+        "fix",
+        "feature",
+        "bug"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgin-gonic_gin\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "doc_explains_code",
+      "query": "Engine",
+      "description": "Engine struct should link to main README doc sections",
+      "expected_names": [
+        "Engine"
+      ],
+      "expected_docs": [
+        "engine",
+        "router",
+        "gin",
+        "readme"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post get_context: Post \"http://127.0.0.1:11435/v1/tools/get_context?project=%2Ftmp%2Fnl_repos%2Fgin-gonic_gin\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "doc_explains_code",
+      "query": "Context",
+      "description": "Context struct should link to request/response handling docs",
+      "expected_names": [
+        "Context"
+      ],
+      "expected_docs": [
+        "context",
+        "request",
+        "response",
+        "json",
+        "bind"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post get_context: Post \"http://127.0.0.1:11435/v1/tools/get_context?project=%2Ftmp%2Fnl_repos%2Fgin-gonic_gin\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "doc_explains_code",
+      "query": "RouterGroup",
+      "description": "RouterGroup should link to routing docs",
+      "expected_names": [
+        "RouterGroup"
+      ],
+      "expected_docs": [
+        "group",
+        "router",
+        "route"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post get_context: Post \"http://127.0.0.1:11435/v1/tools/get_context?project=%2Ftmp%2Fnl_repos%2Fgin-gonic_gin\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "concept_search",
+      "query": "middleware",
+      "description": "Middleware concept should find handler chain docs and code",
+      "expected_names": [
+        "middleware",
+        "HandlerFunc",
+        "Use",
+        "Logger",
+        "Recovery"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgin-gonic_gin\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "concept_search",
+      "query": "route group",
+      "description": "Route group should find router group code and docs",
+      "expected_names": [
+        "RouterGroup",
+        "Group",
+        "route"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgin-gonic_gin\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "concept_search",
+      "query": "JSON binding",
+      "description": "JSON binding should find data binding code and docs",
+      "expected_names": [
+        "Bind",
+        "ShouldBindJSON",
+        "JSON",
+        "binding"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgin-gonic_gin\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "concept_search",
+      "query": "static files",
+      "description": "Static files should find static serving code",
+      "expected_names": [
+        "Static",
+        "StaticFile",
+        "StaticFS"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgin-gonic_gin\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "concept_search",
+      "query": "validation",
+      "description": "Validation should find binding/validator code",
+      "expected_names": [
+        "validator",
+        "binding",
+        "validate"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgin-gonic_gin\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "concept_search",
+      "query": "multipart form",
+      "description": "Multipart form should find file upload handling code",
+      "expected_names": [
+        "multipart",
+        "form",
+        "upload",
+        "FormFile"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgin-gonic_gin\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "concept_search",
+      "query": "HTML rendering",
+      "description": "HTML rendering should find template rendering code",
+      "expected_names": [
+        "HTML",
+        "template",
+        "render",
+        "LoadHTMLGlob"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgin-gonic_gin\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "find_relevant_docs",
+      "query": "Context.JSON",
+      "description": "Context.JSON should be documented in README",
+      "expected_names": [
+        "README.md",
+        "json"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "(empty response)"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "language": "go",
+      "query_type": "find_relevant_docs",
+      "query": "Engine.Run",
+      "description": "Engine.Run should appear in quick start docs",
+      "expected_names": [
+        "README.md",
+        "run",
+        "quick start"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "(empty response)"
+    },
+    {
+      "repo": "expressjs/express",
+      "language": "javascript",
+      "query_type": "find_doc_entities",
+      "query": "Readme.md",
+      "description": "Express README should surface core concepts",
+      "expected_names": [
+        "express",
+        "web",
+        "framework",
+        "middleware",
+        "api"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fexpressjs_express\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "expressjs/express",
+      "language": "javascript",
+      "query_type": "doc_explains_code",
+      "query": "Router",
+      "description": "Router should link to routing/middleware docs",
+      "expected_names": [
+        "Router"
+      ],
+      "expected_docs": [
+        "router",
+        "route",
+        "middleware"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post get_context: Post \"http://127.0.0.1:11435/v1/tools/get_context?project=%2Ftmp%2Fnl_repos%2Fexpressjs_express\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "expressjs/express",
+      "language": "javascript",
+      "query_type": "doc_explains_code",
+      "query": "Application",
+      "description": "Application should link to app docs",
+      "expected_names": [
+        "Application",
+        "app"
+      ],
+      "expected_docs": [
+        "application",
+        "express",
+        "app"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post get_context: Post \"http://127.0.0.1:11435/v1/tools/get_context?project=%2Ftmp%2Fnl_repos%2Fexpressjs_express\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "expressjs/express",
+      "language": "javascript",
+      "query_type": "concept_search",
+      "query": "middleware",
+      "description": "Middleware concept should find middleware chain code",
+      "expected_names": [
+        "middleware",
+        "use",
+        "next",
+        "layer"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fexpressjs_express\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "expressjs/express",
+      "language": "javascript",
+      "query_type": "concept_search",
+      "query": "template engine",
+      "description": "Template engine should find view rendering code",
+      "expected_names": [
+        "render",
+        "view",
+        "engine",
+        "template"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fexpressjs_express\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "expressjs/express",
+      "language": "javascript",
+      "query_type": "concept_search",
+      "query": "error handling",
+      "description": "Error handling should find error middleware code",
+      "expected_names": [
+        "error",
+        "next",
+        "middleware",
+        "finalhandler"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fexpressjs_express\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "expressjs/express",
+      "language": "javascript",
+      "query_type": "concept_search",
+      "query": "security",
+      "description": "Security concept should find trust proxy settings",
+      "expected_names": [
+        "trust",
+        "proxy",
+        "security"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fexpressjs_express\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "expressjs/express",
+      "language": "javascript",
+      "query_type": "concept_search",
+      "query": "static files",
+      "description": "Static files should find static middleware",
+      "expected_names": [
+        "static",
+        "serve"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fexpressjs_express\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "expressjs/express",
+      "language": "javascript",
+      "query_type": "concept_search",
+      "query": "cookie",
+      "description": "Cookie concept should find cookie handling code",
+      "expected_names": [
+        "cookie",
+        "session",
+        "signed"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fexpressjs_express\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "expressjs/express",
+      "language": "javascript",
+      "query_type": "find_relevant_docs",
+      "query": "Router.route",
+      "description": "Router.route should be documented",
+      "expected_names": [
+        "Readme.md",
+        "route"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "(empty response)"
+    },
+    {
+      "repo": "expressjs/express",
+      "language": "javascript",
+      "query_type": "find_relevant_docs",
+      "query": "response.json",
+      "description": "response.json should have documentation references",
+      "expected_names": [
+        "json",
+        "response"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "(empty response)"
+    },
+    {
+      "repo": "tiangolo/fastapi",
+      "language": "python",
+      "query_type": "find_doc_entities",
+      "query": "README.md",
+      "description": "FastAPI README should extract core framework and dependency names",
+      "expected_names": [
+        "fastapi",
+        "api",
+        "python",
+        "performance",
+        "starlette",
+        "pydantic"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Ftiangolo_fastapi\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "tiangolo/fastapi",
+      "language": "python",
+      "query_type": "doc_explains_code",
+      "query": "FastAPI",
+      "description": "FastAPI class should link to tutorial/API docs",
+      "expected_names": [
+        "FastAPI"
+      ],
+      "expected_docs": [
+        "api",
+        "application",
+        "readme",
+        "tutorial"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post get_context: Post \"http://127.0.0.1:11435/v1/tools/get_context?project=%2Ftmp%2Fnl_repos%2Ftiangolo_fastapi\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "tiangolo/fastapi",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "dependency injection",
+      "description": "Dependency injection should find Depends and related code",
+      "expected_names": [
+        "Depends",
+        "dependency",
+        "inject"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Ftiangolo_fastapi\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "tiangolo/fastapi",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "request validation",
+      "description": "Request validation should find Pydantic model usage",
+      "expected_names": [
+        "pydantic",
+        "BaseModel",
+        "validation",
+        "body"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Ftiangolo_fastapi\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "tiangolo/fastapi",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "path parameters",
+      "description": "Path parameters should find routing parameter code",
+      "expected_names": [
+        "path",
+        "parameter",
+        "Path"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Ftiangolo_fastapi\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "tiangolo/fastapi",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "middleware",
+      "description": "Middleware should find CORS and middleware code",
+      "expected_names": [
+        "middleware",
+        "CORS",
+        "CORSMiddleware"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Ftiangolo_fastapi\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "tiangolo/fastapi",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "authentication",
+      "description": "Authentication should find security utilities",
+      "expected_names": [
+        "security",
+        "OAuth",
+        "token",
+        "HTTPBearer"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Ftiangolo_fastapi\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "tiangolo/fastapi",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "websocket",
+      "description": "WebSocket concept should find WebSocket handling code",
+      "expected_names": [
+        "WebSocket",
+        "websocket"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Ftiangolo_fastapi\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "tiangolo/fastapi",
+      "language": "python",
+      "query_type": "concept_search",
+      "query": "response model",
+      "description": "Response model should find response serialization code",
+      "expected_names": [
+        "response_model",
+        "BaseModel",
+        "schema"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Ftiangolo_fastapi\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "tiangolo/fastapi",
+      "language": "python",
+      "query_type": "find_relevant_docs",
+      "query": "FastAPI.get",
+      "description": "FastAPI.get decorator should be documented",
+      "expected_names": [
+        "README.md",
+        "route",
+        "get"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "(empty response)"
+    },
+    {
+      "repo": "gorilla/mux",
+      "language": "go",
+      "query_type": "find_doc_entities",
+      "query": "README.md",
+      "description": "Gorilla mux README should extract core routing concepts",
+      "expected_names": [
+        "mux",
+        "router",
+        "route",
+        "gorilla",
+        "http",
+        "handler"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgorilla_mux\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gorilla/mux",
+      "language": "go",
+      "query_type": "doc_explains_code",
+      "query": "Router",
+      "description": "Router struct should link to routing docs",
+      "expected_names": [
+        "Router"
+      ],
+      "expected_docs": [
+        "router",
+        "mux",
+        "readme",
+        "route"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post get_context: Post \"http://127.0.0.1:11435/v1/tools/get_context?project=%2Ftmp%2Fnl_repos%2Fgorilla_mux\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gorilla/mux",
+      "language": "go",
+      "query_type": "concept_search",
+      "query": "routing",
+      "description": "Routing should find route registration code",
+      "expected_names": [
+        "Route",
+        "Router",
+        "HandleFunc",
+        "Handle"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgorilla_mux\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gorilla/mux",
+      "language": "go",
+      "query_type": "concept_search",
+      "query": "middleware",
+      "description": "Middleware should find middleware chain code",
+      "expected_names": [
+        "middleware",
+        "Use",
+        "CORSMethodMiddleware"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgorilla_mux\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gorilla/mux",
+      "language": "go",
+      "query_type": "concept_search",
+      "query": "URL variables",
+      "description": "URL variables should find Vars extraction code",
+      "expected_names": [
+        "Vars",
+        "variable",
+        "mux"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgorilla_mux\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gorilla/mux",
+      "language": "go",
+      "query_type": "concept_search",
+      "query": "subrouter",
+      "description": "Subrouter should find sub-routing code",
+      "expected_names": [
+        "Subrouter",
+        "PathPrefix",
+        "router"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgorilla_mux\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gorilla/mux",
+      "language": "go",
+      "query_type": "concept_search",
+      "query": "path matching",
+      "description": "Path matching should find route matching code",
+      "expected_names": [
+        "Match",
+        "Route",
+        "path",
+        "regexp"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fgorilla_mux\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "gorilla/mux",
+      "language": "go",
+      "query_type": "find_relevant_docs",
+      "query": "Router.HandleFunc",
+      "description": "Router.HandleFunc should be documented in README",
+      "expected_names": [
+        "README.md",
+        "route",
+        "handle"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "(empty response)"
+    },
+    {
+      "repo": "honojs/hono",
+      "language": "typescript",
+      "query_type": "find_doc_entities",
+      "query": "README.md",
+      "description": "Hono README should extract core framework concepts",
+      "expected_names": [
+        "hono",
+        "web",
+        "framework",
+        "middleware",
+        "router"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fhonojs_hono\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "honojs/hono",
+      "language": "typescript",
+      "query_type": "concept_search",
+      "query": "middleware",
+      "description": "Middleware should find middleware chain code",
+      "expected_names": [
+        "middleware",
+        "use",
+        "next"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fhonojs_hono\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "honojs/hono",
+      "language": "typescript",
+      "query_type": "concept_search",
+      "query": "routing",
+      "description": "Routing should find route registration code",
+      "expected_names": [
+        "router",
+        "route",
+        "get",
+        "post"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fhonojs_hono\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "honojs/hono",
+      "language": "typescript",
+      "query_type": "concept_search",
+      "query": "context",
+      "description": "Context should find response helper code",
+      "expected_names": [
+        "Context",
+        "json",
+        "text",
+        "html"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fhonojs_hono\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "honojs/hono",
+      "language": "typescript",
+      "query_type": "concept_search",
+      "query": "validation",
+      "description": "Validation should find input validation code",
+      "expected_names": [
+        "validator",
+        "zod",
+        "validate"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fhonojs_hono\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "honojs/hono",
+      "language": "typescript",
+      "query_type": "concept_search",
+      "query": "JWT",
+      "description": "JWT should find authentication token code",
+      "expected_names": [
+        "jwt",
+        "token",
+        "sign",
+        "verify"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fhonojs_hono\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "honojs/hono",
+      "language": "typescript",
+      "query_type": "concept_search",
+      "query": "CORS",
+      "description": "CORS should find cross-origin handling code",
+      "expected_names": [
+        "cors",
+        "origin",
+        "header"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fhonojs_hono\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    },
+    {
+      "repo": "honojs/hono",
+      "language": "typescript",
+      "query_type": "concept_search",
+      "query": "adapter",
+      "description": "Adapter should find platform adapter code",
+      "expected_names": [
+        "adapter",
+        "serve",
+        "Deno",
+        "Bun",
+        "cloudflare"
+      ],
+      "actual_names": null,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "raw_response": "error: http post search: Post \"http://127.0.0.1:11435/v1/tools/search?project=%2Ftmp%2Fnl_repos%2Fhonojs_hono\": dial tcp 127.0.0.1:11435: connect: connection refused"
+    }
+  ]
+}
