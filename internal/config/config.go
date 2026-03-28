@@ -757,9 +757,12 @@ func (c *Config) CarveConfig() graph.CarveConfig {
 	}
 	if c.ContextCarve.DirectionBoost != 0 {
 		cfg.DirectionBoost = c.ContextCarve.DirectionBoost
-	} else {
-		cfg.DirectionBoost = 0.2 // default: 20% callee preference
 	}
+	// Sprint 24: default DirectionBoost is now 0.0 (neutral).
+	// The previous default of 0.2 caused callers to be systematically
+	// deprioritized in PPR, then pruned by token budget — resulting in
+	// callers=None for high-fanin entities. Callers and callees should
+	// get equal treatment unless an intent explicitly overrides this.
 	// HybridLambda: nil means "not configured" — handled in the MCP layer where
 	// the store is available and a default of 0.3 is applied. Explicit *float64
 	// values (including 0.0 to disable) are passed through via CarveConfig.HybridLambda.
