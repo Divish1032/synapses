@@ -25,6 +25,7 @@ func (p *KotlinParser) Extensions() []string {
 	return []string{".kt", ".kts"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *KotlinParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractKotlinDeclInfo performs a pre-pass to collect metadata.

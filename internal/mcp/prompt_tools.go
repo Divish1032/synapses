@@ -60,20 +60,3 @@ func (s *Server) SetPromptTemplates(templates []skills.PromptTemplate) {
 	// so we call it again here after templates are populated.
 	s.registerPrompts()
 }
-
-// promptSummaries returns a list of {id, description, source} maps for all
-// loaded templates — used in session_init hint text.
-func (s *Server) promptSummaries() []map[string]string {
-	if len(s.promptTemplates) == 0 {
-		return nil
-	}
-	out := make([]map[string]string, 0, len(s.promptTemplates))
-	for _, pt := range s.promptTemplates {
-		out = append(out, map[string]string{
-			"id":          pt.ID,
-			"description": pt.Description,
-			"source":      pt.Source,
-		})
-	}
-	return out
-}

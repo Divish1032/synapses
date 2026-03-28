@@ -41,10 +41,6 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 		return nil
 	}
 
-	type entryResult struct {
-		alerts []DriftAlert
-	}
-
 	var (
 		resultsMu sync.Mutex
 		allAlerts []DriftAlert

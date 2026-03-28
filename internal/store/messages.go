@@ -32,6 +32,7 @@ const (
 	msgUnreadTTL = 7 * 24 * time.Hour // prune unread messages after 7 days
 )
 
+// SendMessage stores a new inter-agent message and returns its ID.
 func (s *Store) SendMessage(fromAgent, toAgent, topic, payload, projectID string) (string, error) {
 	id := newID()
 	now := time.Now()

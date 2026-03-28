@@ -32,6 +32,7 @@ func (p *HCLParser) Extensions() []string {
 	return []string{".tf", ".tfvars", ".hcl", ".tf.json", ".tfvars.json"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *HCLParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // Parse extracts code entities from a single HCL/Terraform file.

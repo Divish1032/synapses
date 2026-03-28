@@ -11,15 +11,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
-func makeGraph(t *testing.T, nodes []*graph.Node) *graph.Graph {
-	t.Helper()
-	g := graph.New("test-repo")
-	for _, n := range nodes {
-		g.AddNode(n)
-	}
-	return g
-}
-
 // TestGetSignatureChanges_ChangedSignature verifies the common case: an
 // exported function whose signature changes between two SaveGraph calls.
 func TestGetSignatureChanges_ChangedSignature(t *testing.T) {

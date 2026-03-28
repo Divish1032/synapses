@@ -422,7 +422,7 @@ not-a-dep = "value"
 
 func TestDetectTechStack_EmptyDir(t *testing.T) {
 	entries := DetectTechStack(t.TempDir())
-	if entries != nil && len(entries) != 0 {
+	if len(entries) != 0 {
 		t.Errorf("expected empty result for dir with no manifests, got %d", len(entries))
 	}
 }
@@ -525,7 +525,7 @@ func TestParseCargoToml_EmptyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	entries := parseCargoToml(dir)
-	if entries != nil && len(entries) != 0 {
+	if len(entries) != 0 {
 		t.Errorf("expected empty or nil for empty Cargo.toml, got %d entries", len(entries))
 	}
 }
@@ -539,7 +539,7 @@ another-invalid`
 		t.Fatal(err)
 	}
 	entries := parseCargoToml(dir)
-	if entries != nil && len(entries) != 0 {
+	if len(entries) != 0 {
 		t.Errorf("expected no entries for invalid deps, got %d", len(entries))
 	}
 }
@@ -571,7 +571,7 @@ func TestParsePyprojectToml_EmptyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	entries := parsePyprojectToml(dir)
-	if entries != nil && len(entries) != 0 {
+	if len(entries) != 0 {
 		t.Errorf("expected empty or nil for empty pyproject.toml, got %d entries", len(entries))
 	}
 }

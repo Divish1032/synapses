@@ -690,12 +690,11 @@ func brainSmokeTest(baseURL, modelName string, client *http.Client) (bool, strin
 		Done bool `json:"done"`
 	}
 	dec := json.NewDecoder(resp.Body)
-	for dec.More() {
-		if err := dec.Decode(&chunk); err != nil {
-			break
+	if dec.More() { //nolint:staticcheck // SA4004: intentionally read only the first chunk
+		if err := dec.Decode(&chunk); err == nil {
+			// Any chunk (even an empty content token) confirms the model is alive.
+			return true, fmt.Sprintf("%.1fs", time.Since(start).Seconds())
 		}
-		// Any chunk (even an empty content token) confirms the model is alive.
-		return true, fmt.Sprintf("%.1fs", time.Since(start).Seconds())
 	}
 	return false, ""
 }

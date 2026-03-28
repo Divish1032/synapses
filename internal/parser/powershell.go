@@ -505,9 +505,10 @@ func estimatePSBlockEnd(lines []string, startLineIdx int) int {
 	for i := startLineIdx; i < len(lines); i++ {
 		line := stripPSStringLiterals(lines[i])
 		for _, ch := range line {
-			if ch == '{' {
+			switch ch {
+			case '{':
 				depth++
-			} else if ch == '}' {
+			case '}':
 				depth--
 				if depth == 0 {
 					return i + 1 // 1-based

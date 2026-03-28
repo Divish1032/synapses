@@ -112,6 +112,7 @@ func (p *TypeScriptParser) Extensions() []string {
 	return []string{".ts", ".tsx"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *TypeScriptParser) TSLanguageForFile(filePath string) *sitter.Language {
 	return p.langForFile(filePath)
 }

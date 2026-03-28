@@ -49,7 +49,7 @@ func TestLoadOrCreateAuthToken_CreatesTokenWhenAbsent(t *testing.T) {
 	}
 	// Verify it's lowercase hex.
 	for _, c := range token {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Errorf("token contains non-hex char %q", c)
 		}
 	}

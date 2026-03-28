@@ -229,6 +229,7 @@ const hydeTimeout = 500 * time.Millisecond
 // well under the "~100 token" budget specified in the design doc.
 const hydeMaxQueryRunes = 150
 
+// GenerateHypothetical generates a hypothetical document for HyDE-based retrieval.
 func (c *Client) GenerateHypothetical(ctx context.Context, query string) string {
 	if c.scheduler.ShouldDegrade() {
 		return ""

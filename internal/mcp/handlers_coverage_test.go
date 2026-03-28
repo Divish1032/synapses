@@ -519,9 +519,6 @@ func TestMergeNodeIDs_Dedup(t *testing.T) {
 
 func TestMergeNodeIDs_Empty(t *testing.T) {
 	result := mergeNodeIDs(nil, nil)
-	if result == nil {
-		// nil is acceptable for empty merge
-	}
 	if len(result) != 0 {
 		t.Errorf("expected empty result, got %d", len(result))
 	}

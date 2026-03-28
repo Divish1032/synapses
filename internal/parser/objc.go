@@ -155,12 +155,8 @@ func (p *ObjCParser) extractClassInterface(g *graph.Graph, n sitter.Node, src []
 		case "identifier":
 			if className == "" {
 				className = string(src[child.StartByte():child.EndByte()])
-			} else if superclass == "" && !isCategory {
-				// The second identifier after ":" is the superclass.
-				// We check that the previous sibling was ":".
-				// Simpler: after we see ":", the next identifier is superclass.
-				// We handle this by tracking state below.
 			}
+			// Note: superclass extraction is handled via ":" state tracking below.
 		case "(":
 			isCategory = true
 		case ":":

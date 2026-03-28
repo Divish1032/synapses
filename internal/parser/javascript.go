@@ -25,6 +25,7 @@ func (p *JavaScriptParser) Extensions() []string {
 	return []string{".js", ".jsx", ".mjs", ".cjs"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *JavaScriptParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractJSDeclInfo walks the JavaScript AST and builds a name→declMeta map
@@ -604,25 +605,6 @@ func collectJSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, sr
 			return isTSBuiltin(name) || name == "require"
 		},
 	})
-}
-
-// jsCalleeExtractor extracts callee names from JS/TS call expressions.
-// Handles: foo(...), obj.method(...), and obj?.method(...).
-func jsCalleeExtractor(n sitter.Node, src []byte) string {
-	fn := n.ChildByFieldName("function")
-	if fn.IsNull() {
-		return ""
-	}
-	switch fn.Type() {
-	case "identifier":
-		return string(src[fn.StartByte():fn.EndByte()])
-	case "member_expression":
-		prop := fn.ChildByFieldName("property")
-		if !prop.IsNull() {
-			return string(src[prop.StartByte():prop.EndByte()])
-		}
-	}
-	return ""
 }
 
 // jsAliasedCalleeExtractor returns (alias, callee) for qualified calls.

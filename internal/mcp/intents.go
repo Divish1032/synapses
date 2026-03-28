@@ -1528,12 +1528,8 @@ func collectBrainSection(pkt *brain.ContextPacket) *tieredSection {
 		return nil
 	}
 	var items []string
-	for _, w := range pkt.GraphWarnings {
-		items = append(items, w)
-	}
-	for _, c := range pkt.Concerns {
-		items = append(items, c)
-	}
+	items = append(items, pkt.GraphWarnings...)
+	items = append(items, pkt.Concerns...)
 	if len(items) == 0 {
 		return nil
 	}

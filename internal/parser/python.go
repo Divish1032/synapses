@@ -98,6 +98,7 @@ func (p *PythonParser) Extensions() []string {
 	return []string{".py", ".pyi"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *PythonParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // Parse extracts code entities from a single Python file and merges them
@@ -240,7 +241,7 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 
 	// --- Module-level ALL_CAPS constants (e.g. MAX_RETRIES = 3, DEFAULT_TIMEOUT = 30) ---
 	// Walk top-level assignment nodes; if the name is ALL_CAPS, emit a const node.
-	var walkPyConst func(n sitter.Node)
+	var walkPyConst func(n sitter.Node) //nolint:staticcheck // S1021: recursive closure requires separate var declaration
 	walkPyConst = func(n sitter.Node) {
 		if n.IsNull() {
 			return

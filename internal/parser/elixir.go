@@ -25,6 +25,7 @@ func (p *ElixirParser) Extensions() []string {
 	return []string{".ex", ".exs"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *ElixirParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractElixirDeclInfo performs a pre-pass for metadata.

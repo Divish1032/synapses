@@ -267,13 +267,6 @@ func (c *Collector) WriteErrors() int64 {
 	return c.writeErrors.Load()
 }
 
-// isHighPriority returns true for events that must not be silently dropped by
-// a heartbeat flood. Session lifecycle events are the primary concern because
-// dropping a session_start or session_end corrupts billing and analytics.
-func isHighPriority(kind string) bool {
-	return kind == "session" || kind == "session_model"
-}
-
 func (c *Collector) enqueue(ev event) {
 	c.enqueued.Add(1)
 	c.mu.Lock()

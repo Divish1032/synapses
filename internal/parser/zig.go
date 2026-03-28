@@ -25,6 +25,7 @@ func (p *ZigParser) Extensions() []string {
 	return []string{".zig"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *ZigParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // isZigPub returns true if the node has a direct child with type "pub".

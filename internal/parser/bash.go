@@ -25,6 +25,7 @@ func (p *BashParser) Extensions() []string {
 	return []string{".sh", ".bash", ".zsh"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *BashParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractBashDeclInfo performs a pre-pass collecting metadata for function

@@ -23,6 +23,7 @@ const (
 // InjectionCategory classifies detected injection patterns.
 type InjectionCategory string
 
+// Injection detection categories.
 const (
 	CategoryRoleOverride        InjectionCategory = "role_override"
 	CategoryDelimiterInjection  InjectionCategory = "delimiter_injection"
@@ -262,14 +263,12 @@ func FormatWarning(matches []InjectionMatch) string {
 		return ""
 	}
 	var sb strings.Builder
-	sb.WriteString("injection_warning: content triggered ")
-	sb.WriteString(fmt.Sprintf("%d", len(matches)))
-	sb.WriteString(" prompt injection pattern(s): ")
+	fmt.Fprintf(&sb, "injection_warning: content triggered %d prompt injection pattern(s): ", len(matches))
 	for i, m := range matches {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString(fmt.Sprintf("[%s] %s (%s)", m.Severity, m.Pattern, m.Category))
+		fmt.Fprintf(&sb, "[%s] %s (%s)", m.Severity, m.Pattern, m.Category)
 	}
 	return sb.String()
 }

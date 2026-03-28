@@ -727,9 +727,10 @@ func findRequireBlockEnd(s string) int {
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
 		if inString {
-			if ch == '\\' {
+			switch ch {
+			case '\\':
 				i++
-			} else if ch == '"' {
+			case '"':
 				inString = false
 			}
 			continue

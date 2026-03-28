@@ -25,6 +25,7 @@ func (p *ElmParser) Extensions() []string {
 	return []string{".elm"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *ElmParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractElmDeclInfo does a pre-pass to collect metadata (doc comments,

@@ -48,7 +48,7 @@ func newBrainHTTPServer(t *testing.T) *httptest.Server {
 func wireBrain(t *testing.T, brainSrv *httptest.Server) *Server {
 	t.Helper()
 	s := newTestServer(t)
-	bc := brain.NewClient(brainSrv.URL, 5)
+	bc := brain.NewClient(brainSrv.URL, 5) //nolint:staticcheck // SA1019: test uses deprecated HTTP-based constructor
 	s.SetBrainClient(bc)
 	return s
 }
@@ -119,7 +119,7 @@ func TestHandleUpsertADR_BrainError(t *testing.T) {
 	}))
 	defer errSrv.Close()
 	s := newTestServer(t)
-	s.SetBrainClient(brain.NewClient(errSrv.URL, 5))
+	s.SetBrainClient(brain.NewClient(errSrv.URL, 5)) //nolint:staticcheck // SA1019: test uses deprecated HTTP-based constructor
 	args := map[string]any{
 		"id":       "adr-x",
 		"title":    "error ADR",
@@ -162,7 +162,7 @@ func TestHandleGetADRs_BrainError(t *testing.T) {
 	}))
 	defer errSrv.Close()
 	s := newTestServer(t)
-	s.SetBrainClient(brain.NewClient(errSrv.URL, 5))
+	s.SetBrainClient(brain.NewClient(errSrv.URL, 5)) //nolint:staticcheck // SA1019: test uses deprecated HTTP-based constructor
 	res, err := s.handleGetADRs(ctx, callTool(map[string]any{}))
 	if err != nil {
 		t.Fatalf("unexpected Go error: %v", err)

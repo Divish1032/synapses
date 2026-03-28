@@ -451,7 +451,7 @@ func TestIngestToBrain_ValidClient_WithNodes(t *testing.T) {
 	defer w.Stop()
 
 	// Wire a real brain client pointing at the fake server.
-	w.brainClient = brain.NewClient(srv.URL, 2)
+	w.brainClient = brain.NewClient(srv.URL, 2) //nolint:staticcheck // SA1019: test uses deprecated HTTP-based constructor
 
 	// ingestToBrain should loop over nodes and send Ingest requests.
 	// The package node should be skipped; the function node should be ingested.

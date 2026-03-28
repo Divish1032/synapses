@@ -189,12 +189,12 @@ func buildRepoMap(
 			if len(p.topNodes) == 0 {
 				continue
 			}
-			sb.WriteString(fmt.Sprintf("%-60s %s\n", p.dir+"/", lbl))
+			fmt.Fprintf(&sb, "%-60s %s\n", p.dir+"/", lbl)
 			for _, e := range p.topNodes {
 				if e.refs > 0 {
-					sb.WriteString(fmt.Sprintf("  %s (%d refs)\n", e.name, e.refs))
+					fmt.Fprintf(&sb, "  %s (%d refs)\n", e.name, e.refs)
 				} else {
-					sb.WriteString(fmt.Sprintf("  %s\n", e.name))
+					fmt.Fprintf(&sb, "  %s\n", e.name)
 				}
 			}
 			layerWritten = true
@@ -211,12 +211,12 @@ func buildRepoMap(
 			if layerWritten {
 				sb.WriteString("\n")
 			}
-			sb.WriteString(fmt.Sprintf("%-60s\n", p.dir+"/"))
+			fmt.Fprintf(&sb, "%-60s\n", p.dir+"/")
 			for _, e := range p.topNodes {
 				if e.refs > 0 {
-					sb.WriteString(fmt.Sprintf("  %s (%d refs)\n", e.name, e.refs))
+					fmt.Fprintf(&sb, "  %s (%d refs)\n", e.name, e.refs)
 				} else {
-					sb.WriteString(fmt.Sprintf("  %s\n", e.name))
+					fmt.Fprintf(&sb, "  %s\n", e.name)
 				}
 			}
 			layerWritten = true

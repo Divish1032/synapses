@@ -1022,15 +1022,9 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	// Merge all pools back into scored (root first).
 	scored = scored[:0]
 	// Re-add root.
-	for _, s := range callerNodes {
-		scored = append(scored, s)
-	}
-	for _, s := range calleeNodes {
-		scored = append(scored, s)
-	}
-	for _, s := range otherNodes {
-		scored = append(scored, s)
-	}
+	scored = append(scored, callerNodes...)
+	scored = append(scored, calleeNodes...)
+	scored = append(scored, otherNodes...)
 	// Re-add root at position 0.
 	rootNode := scoredNode{id: rootID, relevance: 1.0, hop: 0}
 	scored = append([]scoredNode{rootNode}, scored...)

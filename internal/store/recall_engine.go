@@ -302,16 +302,13 @@ func (s *Store) GetMemoriesByAnchorNodesCtx(ctx context.Context, nodeIDs []strin
 	return result, nil
 }
 
-// RRFMerge applies Reciprocal Rank Fusion across multiple ranked result lists.
-// Each channel provides a list of memory IDs in ranked order (best first).
-// score(d) = sum(1 / (k + rank_i(d))) where k=60 (standard RRF constant).
-// Returns the top-N memory IDs sorted by fused score, along with the
-// per-memory channel attribution (which channels contributed to each result).
+// Attribution records which retrieval channels contributed to a recall result.
 //
 // k=60 is the standard value from Cormack et al. (2009). It balances the
 // contribution between channels — a rank-1 result scores 1/61 ≈ 0.0164,
 // rank-10 scores 1/70 ≈ 0.0143. The flat curve ensures multi-channel
 // presence matters more than exact rank within any single channel.
+
 // RRFChannelWeights defines per-channel weight multipliers for RRF scoring.
 // A weight of 1.0 means the channel contributes at full RRF strength.
 // Lower weights reduce the channel's influence, preventing it from
@@ -326,6 +323,7 @@ func (s *Store) GetMemoriesByAnchorNodesCtx(ctx context.Context, nodeIDs []strin
 // The temporal weight of 0.5 ensures that at 1000+ memories, a temporal-only
 // result (score ~0.008) never outranks a BM25 rank-2 result (score ~0.016).
 // Temporal results still surface when other channels leave gaps.
+
 // Attribution is the output of a recall merge operation (RRF or ConvexMerge).
 //
 // Key direction: memID → []channelNames  (opposite of the input channels map
@@ -348,6 +346,7 @@ func (a Attribution) TopChannel(memID string) string {
 	return ""
 }
 
+// DefaultRRFWeights is the default set of per-channel RRF weight multipliers.
 var DefaultRRFWeights = map[string]float64{
 	"bm25":     1.0,
 	"semantic": 1.0,
@@ -355,6 +354,7 @@ var DefaultRRFWeights = map[string]float64{
 	"temporal": 0.5,
 }
 
+// RRFMerge applies Reciprocal Rank Fusion across multiple ranked result lists.
 func RRFMerge(channels map[string][]string, limit int, k int) ([]string, map[string][]string) {
 	return RRFMergeWeighted(channels, limit, k, nil)
 }

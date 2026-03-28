@@ -20,46 +20,97 @@ import (
 	"github.com/SynapsesOS/synapses/internal/pulse/types"
 )
 
-// Re-export event types from pulse/types so callers use pulse.ToolCallEvent etc.
-// without needing to import the types sub-package.
+// ToolCallEvent re-exports types.ToolCallEvent so callers use pulse.ToolCallEvent.
 type ToolCallEvent = types.ToolCallEvent
+
+// ContextDeliveryEvent re-exports types.ContextDeliveryEvent.
 type ContextDeliveryEvent = types.ContextDeliveryEvent
+
+// SessionEvent re-exports types.SessionEvent.
 type SessionEvent = types.SessionEvent
+
+// OutcomeSignalEvent re-exports types.OutcomeSignalEvent.
 type OutcomeSignalEvent = types.OutcomeSignalEvent
+
+// EntityEffectiveness re-exports types.EntityEffectiveness.
 type EntityEffectiveness = types.EntityEffectiveness
+
+// BrainUsageEvent re-exports types.BrainUsageEvent.
 type BrainUsageEvent = types.BrainUsageEvent
+
+// AgentLLMUsageEvent re-exports types.AgentLLMUsageEvent.
 type AgentLLMUsageEvent = types.AgentLLMUsageEvent
 
-// Phase 2 pipeline event types.
+// ParseEvent re-exports types.ParseEvent.
 type ParseEvent = types.ParseEvent
+
+// ReparseEvent re-exports types.ReparseEvent.
 type ReparseEvent = types.ReparseEvent
+
+// GraphSnapshotEvent re-exports types.GraphSnapshotEvent.
 type GraphSnapshotEvent = types.GraphSnapshotEvent
+
+// EmbeddingEvent re-exports types.EmbeddingEvent.
 type EmbeddingEvent = types.EmbeddingEvent
+
+// IndexEvent re-exports types.IndexEvent.
 type IndexEvent = types.IndexEvent
 
-// Phase 3 agent behavior event types.
+// GuardEvent re-exports types.GuardEvent.
 type GuardEvent = types.GuardEvent
+
+// MemoryOperationEvent re-exports types.MemoryOperationEvent.
 type MemoryOperationEvent = types.MemoryOperationEvent
+
+// ValidationEvent re-exports types.ValidationEvent.
 type ValidationEvent = types.ValidationEvent
 
-// Phase 4 event types.
+// SearchEvent re-exports types.SearchEvent.
 type SearchEvent = types.SearchEvent
+
+// ConfigReloadEvent re-exports types.ConfigReloadEvent.
 type ConfigReloadEvent = types.ConfigReloadEvent
+
+// PersistenceEvent re-exports types.PersistenceEvent.
 type PersistenceEvent = types.PersistenceEvent
+
+// EnrichmentEvent re-exports types.EnrichmentEvent.
 type EnrichmentEvent = types.EnrichmentEvent
+
+// RuleEvalEvent re-exports types.RuleEvalEvent.
 type RuleEvalEvent = types.RuleEvalEvent
 
-// Phase 5 event types.
+// FederationDetectEvent re-exports types.FederationDetectEvent.
 type FederationDetectEvent = types.FederationDetectEvent
+
+// ToolSequenceEntry re-exports types.ToolSequenceEntry.
 type ToolSequenceEntry = types.ToolSequenceEntry
+
+// EntityQuality re-exports types.EntityQuality.
 type EntityQuality = types.EntityQuality
+
+// DeliveryOutcome re-exports types.DeliveryOutcome.
 type DeliveryOutcome = types.DeliveryOutcome
+
+// SessionEffectiveness re-exports types.SessionEffectiveness.
 type SessionEffectiveness = types.SessionEffectiveness
+
+// DailyEffectiveness re-exports types.DailyEffectiveness.
 type DailyEffectiveness = types.DailyEffectiveness
+
+// WeeklyEfficiency re-exports types.WeeklyEfficiency.
 type WeeklyEfficiency = types.WeeklyEfficiency
+
+// MonthlyROI re-exports types.MonthlyROI.
 type MonthlyROI = types.MonthlyROI
+
+// DecayStats re-exports types.DecayStats.
 type DecayStats = types.DecayStats
+
+// SessionPercentiles re-exports types.SessionPercentiles.
 type SessionPercentiles = types.SessionPercentiles
+
+// DurationBuckets re-exports types.DurationBuckets.
 type DurationBuckets = types.DurationBuckets
 
 // Client is the in-process analytics collector. It replaces the HTTP sidecar.
@@ -1255,7 +1306,7 @@ func (c *Client) GetTimelineRaw(days int) []pulsestore.TimelinePoint {
 	return pts
 }
 
-// Phase 8 types.
+// SessionPerformance re-exports types.SessionPerformance.
 type SessionPerformance = types.SessionPerformance
 
 // GetAgentFirstSessionsPerformance returns per-session efficiency for the first N sessions (P8-6).

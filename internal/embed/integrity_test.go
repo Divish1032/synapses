@@ -98,7 +98,7 @@ func TestVerifyModelIntegrity_FP32_PinnedHash_IsNonEmpty(t *testing.T) {
 		t.Fatalf("builtinModelSHA256FP32 length %d != 64 — must be a full SHA-256 hex digest", len(builtinModelSHA256FP32))
 	}
 	for _, c := range builtinModelSHA256FP32 {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Fatalf("builtinModelSHA256FP32 contains non-hex character %q", c)
 		}
 	}

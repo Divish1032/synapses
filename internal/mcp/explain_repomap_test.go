@@ -506,7 +506,7 @@ func TestBuildExplanation_EntryPointRanking_TierOrder(t *testing.T) {
 	if cmdPos == -1 || svcPos == -1 || archPos == -1 {
 		t.Fatalf("all three entry points should appear in output; got %q", out)
 	}
-	if !(cmdPos < svcPos && svcPos < archPos) {
+	if cmdPos >= svcPos || svcPos >= archPos {
 		t.Errorf("expected tier order cmd < service < archive; positions: cmd=%d svc=%d arch=%d\nout=%q",
 			cmdPos, svcPos, archPos, out)
 	}

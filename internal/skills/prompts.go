@@ -270,10 +270,7 @@ func parsePromptFile(data []byte, source string) PromptTemplate {
 	}
 
 	// Strip the opening "---\n"
-	rest := content[3:]
-	if strings.HasPrefix(rest, "\n") {
-		rest = rest[1:]
-	}
+	rest := strings.TrimPrefix(content[3:], "\n")
 
 	// Find the closing "---"
 	closeIdx := strings.Index(rest, "\n---")

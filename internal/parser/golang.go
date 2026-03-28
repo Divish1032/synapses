@@ -415,6 +415,7 @@ func (p *GoParser) Extensions() []string {
 	return []string{".go"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *GoParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // Parse extracts code entities from a single Go source file and merges them

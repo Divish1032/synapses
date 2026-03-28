@@ -29,6 +29,7 @@ type PlaintextParser struct{}
 // NewPlaintextParser returns a parser for plaintext and RST documentation files.
 func NewPlaintextParser() *PlaintextParser { return &PlaintextParser{} }
 
+// Extensions returns the file extensions handled by PlaintextParser.
 func (p *PlaintextParser) Extensions() []string {
 	return []string{".txt", ".rst"}
 }

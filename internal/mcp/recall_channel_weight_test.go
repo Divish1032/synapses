@@ -144,11 +144,8 @@ func TestRecallChannelWeights_CacheReturnsSameMap(t *testing.T) {
 	w2 := srv.recallChannelWeights()
 	// Both calls within the TTL window must return the exact same map pointer —
 	// the second call must hit the cache, not re-query pstore.
-	if &w1 == &w2 {
-		// Maps are value types; compare via content instead of pointer.
-		// The real signal is that no SQLite query was issued on the second call —
-		// we verify by ensuring the maps are equal (same cold-start fallback).
-	}
+	// Maps are value types; the real signal is that no SQLite query was issued
+	// on the second call. We verify by ensuring the maps are equal (same cold-start fallback).
 	for ch := range store.DefaultRRFWeights {
 		if w1[ch] != w2[ch] {
 			t.Errorf("cached weight for %q changed between calls: %.4f → %.4f", ch, w1[ch], w2[ch])

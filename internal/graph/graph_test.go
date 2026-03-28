@@ -501,7 +501,7 @@ func TestAddVarType_IgnoresEmptyVarName(t *testing.T) {
 	g.AddVarType("app.go", "", "*Database")
 
 	types := g.GetVarTypes("app.go")
-	if types != nil && len(types) > 0 {
+	if len(types) > 0 {
 		t.Error("expected empty entry for empty var name")
 	}
 }
@@ -511,7 +511,7 @@ func TestAddVarType_IgnoresEmptyTypeName(t *testing.T) {
 	g.AddVarType("app.go", "db", "")
 
 	types := g.GetVarTypes("app.go")
-	if types != nil && len(types) > 0 {
+	if len(types) > 0 {
 		t.Error("expected empty entry for empty type name")
 	}
 }

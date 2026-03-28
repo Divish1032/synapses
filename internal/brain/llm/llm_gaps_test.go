@@ -1,7 +1,7 @@
 package llm
 
 import (
-	"os"
+	"context"
 	"testing"
 )
 
@@ -49,7 +49,7 @@ func TestNewUnavailableMockClient_ModelName(t *testing.T) {
 
 func TestNewUnavailableMockClient_Generate(t *testing.T) {
 	mc := NewUnavailableMockClient()
-	resp, err := mc.Generate(nil, "prompt")
+	resp, err := mc.Generate(context.TODO(), "prompt")
 	// Should return empty response and nil error (no Err configured).
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -61,7 +61,7 @@ func TestNewUnavailableMockClient_Generate(t *testing.T) {
 
 func TestMockClient_PullModel_NilWriter(t *testing.T) {
 	mc := NewMockClient("resp")
-	if err := mc.PullModel(nil, nil); err != nil {
+	if err := mc.PullModel(context.TODO(), nil); err != nil {
 		t.Errorf("PullModel(nil) unexpected error: %v", err)
 	}
 }
@@ -156,12 +156,7 @@ func TestStripThinkBlocks_NestedAngleBrackets(t *testing.T) {
 
 func TestIsAppleSilicon_PlatformDependent(t *testing.T) {
 	// Just ensure it doesn't panic and returns a bool.
-	result := isAppleSilicon()
-	if os.Getenv("CI") != "" && result {
-		// On CI (typically Linux), Apple Silicon should not be detected.
-		// Skip on macOS since it may genuinely be Apple Silicon.
-	}
-	_ = result // no assertion — platform dependent
+	_ = isAppleSilicon() // just ensure it doesn't panic — platform dependent
 }
 
 func TestHasCUDA_PlatformDependent(t *testing.T) {

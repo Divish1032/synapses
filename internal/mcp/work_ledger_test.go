@@ -140,10 +140,9 @@ func TestAlertHash_Stable(t *testing.T) {
 func TestAlertHash_OrderSensitive(t *testing.T) {
 	a := LedgerAlert{SessionID: "s1", OverlapType: "entity", Overlap: []string{"A", "B"}}
 	b := LedgerAlert{SessionID: "s1", OverlapType: "entity", Overlap: []string{"B", "A"}}
-	if alertHash(a) == alertHash(b) {
-		// This is acceptable — we just document the behavior.
-		// In practice, overlap order is deterministic per-session.
-	}
+	// alertHash may or may not be order-sensitive — both outcomes are acceptable.
+	// In practice, overlap order is deterministic per-session.
+	_ = alertHash(a) == alertHash(b)
 }
 
 func TestInjectAlerts_AppendsContentBlock(t *testing.T) {

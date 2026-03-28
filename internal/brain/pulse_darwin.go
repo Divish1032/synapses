@@ -10,8 +10,7 @@ import (
 	"strings"
 )
 
-// platformCPUState holds per-instance CPU sampling state. Empty on macOS —
-// vm.loadavg already provides a rolling average, no delta computation needed.
+//nolint:unused // embedded in SystemPulse; used on Windows for CPU delta state
 type platformCPUState struct{}
 
 // samplePlatform reads available RAM via vm_stat and the 1-minute load average

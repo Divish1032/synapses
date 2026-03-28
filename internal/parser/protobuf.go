@@ -254,7 +254,7 @@ func (v *protoExtractor) walkElements(elements []eproto.Visitee, enclosing strin
 	}
 }
 
-// resolveProtoTypeRefs creates DEPENDS_ON edges from fields to their message/enum
+// ResolveProtoTypeRefs creates DEPENDS_ON edges from fields to their message/enum
 // types within the same proto graph. This enables impact analysis: changing a message
 // type surfaces all messages that reference it.
 // Must be called after all proto files in the project are parsed.

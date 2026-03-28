@@ -349,10 +349,7 @@ func isTypeName(s string) bool {
 		"interface{}", "any":
 		return true
 	}
-	if isJavaType(s) {
-		return true
-	}
-	return false
+	return isJavaType(s)
 }
 
 // firstDocSentence extracts the first sentence from a docstring.

@@ -160,6 +160,7 @@ func (p *CppParser) Extensions() []string {
 	return []string{".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".mm"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *CppParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // Parse extracts code entities from a single C++ file and merges them into the graph.

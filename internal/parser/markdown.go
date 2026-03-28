@@ -34,6 +34,7 @@ type MarkdownParser struct{}
 // NewMarkdownParser returns a parser for Markdown documentation files.
 func NewMarkdownParser() *MarkdownParser { return &MarkdownParser{} }
 
+// Extensions returns the file extensions handled by MarkdownParser.
 func (p *MarkdownParser) Extensions() []string {
 	return []string{".md", ".markdown", ".mdx"}
 }

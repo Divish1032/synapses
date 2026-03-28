@@ -93,6 +93,7 @@ func (p *JavaParser) Extensions() []string {
 	return []string{".java"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *JavaParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // isJavaPublicNode checks if a declaration node has the "public" modifier

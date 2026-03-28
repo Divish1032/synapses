@@ -1271,7 +1271,7 @@ func TestSmartReindex_NoStoredMtimes(t *testing.T) {
 
 func TestEmbedAllNodes_NilClient(t *testing.T) {
 	// Nil embed client → early return immediately.
-	embedAllNodes(nil, nil, graph.New("test"), nil)
+	embedAllNodes(context.TODO(), nil, graph.New("test"), nil)
 }
 
 // ── fetchAndWriteBackSummaries nil guard ──────────────────────────────────────
@@ -1810,7 +1810,7 @@ func TestBulkIngestToBrain_WithGraph(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	bc := brain.NewClient(srv.URL, 5)
+	bc := brain.NewClient(srv.URL, 5) //nolint:staticcheck // SA1019: test uses deprecated HTTP-based constructor
 
 	// Build a graph with a few nodes.
 	g := graph.New("brain-test")

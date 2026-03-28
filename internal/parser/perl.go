@@ -19,15 +19,21 @@ import (
 //   - use statements (imports) → NodePackage edges
 type PerlParser struct{}
 
+// NewPerlParser returns a new Perl parser.
 func NewPerlParser() *PerlParser { return &PerlParser{} }
 
-func (p *PerlParser) Language() string     { return "perl" }
+// Language returns the language name.
+func (p *PerlParser) Language() string { return "perl" }
+
+// Extensions returns the file extensions handled by this parser.
 func (p *PerlParser) Extensions() []string { return []string{".pl", ".pm", ".t"} }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *PerlParser) TSLanguageForFile(_ string) *sitter.Language {
 	return sitter.NewLanguage(perlg.GetLanguage())
 }
 
+// Parse parses a Perl file into the graph.
 func (p *PerlParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(sitter.NewLanguage(perlg.GetLanguage()))

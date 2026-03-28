@@ -209,7 +209,7 @@ func (g *Graph) RemoveEdge(from, to NodeID, edgeType EdgeType) {
 	out := g.outEdges[from]
 	filtered := out[:0]
 	for _, e := range out {
-		if !(e.From == from && e.To == to && e.Type == edgeType) {
+		if e.From != from || e.To != to || e.Type != edgeType {
 			filtered = append(filtered, e)
 		}
 	}
@@ -218,7 +218,7 @@ func (g *Graph) RemoveEdge(from, to NodeID, edgeType EdgeType) {
 	in := g.inEdges[to]
 	filteredIn := in[:0]
 	for _, e := range in {
-		if !(e.From == from && e.To == to && e.Type == edgeType) {
+		if e.From != from || e.To != to || e.Type != edgeType {
 			filteredIn = append(filteredIn, e)
 		}
 	}
@@ -383,11 +383,6 @@ func (g *Graph) ToFlatGraph() *FlatGraph {
 		fg.stringIDToIndex[id] = idx
 	}
 	// Build bulk edges.
-	type rawEdge struct {
-		From   NodeIndex
-		To     NodeIndex
-		Weight float32
-	}
 	edges := make([]BulkEdge, 0, len(g.outEdges)*2)
 	for _, elist := range g.outEdges {
 		for _, e := range elist {
@@ -521,9 +516,6 @@ func (g *Graph) OutEdges(id NodeID) []*Edge {
 	return out
 }
 
-// SnapshotCallsAdjacency returns a snapshot of CALLS outgoing edges for all nodes,
-// taken under a single RLock. This allows callers to do BFS/DFS traversal
-// without holding the lock for each step.
 // SnapshotEdgesAndNodes returns, under a single RLock, a complete snapshot of
 // all outgoing edges by source node and all nodes by ID. This allows callers
 // to perform graph traversal without per-node lock acquisitions.
@@ -581,6 +573,7 @@ func (g *Graph) SnapshotImportAliases() map[string]map[string]string {
 	return cp
 }
 
+// SnapshotCallsAdjacency returns a snapshot of CALLS outgoing edges for all nodes.
 func (g *Graph) SnapshotCallsAdjacency() map[NodeID][]NodeID {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -934,7 +927,7 @@ func (g *Graph) NodesForFile(file string) []*Node {
 	return out
 }
 
-// UpdateFileNodeMetadata calls update(n) for every node whose File matches
+// UpdateNodeMetadata calls update(n) for every node whose File matches
 // absFile, holding the graph write lock for the duration. The callback may
 // safely read and write n.Metadata — no structural graph changes (add/remove
 // nodes or edges) should be made inside update.
@@ -953,6 +946,7 @@ func (g *Graph) UpdateNodeMetadata(id NodeID, update func(n *Node)) {
 	}
 }
 
+// UpdateFileNodeMetadata updates metadata on all nodes belonging to the given file.
 func (g *Graph) UpdateFileNodeMetadata(absFile string, update func(n *Node)) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

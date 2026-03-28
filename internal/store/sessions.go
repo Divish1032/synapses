@@ -31,6 +31,7 @@ type HibernateResumeContext struct {
 // SessionTaskAction is the relationship between a session and a task.
 type SessionTaskAction string
 
+// Session task lifecycle actions.
 const (
 	SessionTaskCreated   SessionTaskAction = "created"
 	SessionTaskClaimed   SessionTaskAction = "claimed"

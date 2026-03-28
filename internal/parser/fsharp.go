@@ -81,9 +81,6 @@ var (
 	// Detect record type body: contains "{ ... }" on same line or starts with "{"
 	reFSharpRecordBody = regexp.MustCompile(`\{`)
 
-	// Detect discriminated union: RHS contains "|" cases (with optional leading "|")
-	reFSharpDUBody = regexp.MustCompile(`^\s*=\s*\|?[A-Z]`)
-
 	// Detect class: constructor params "(param: type)" before "="
 	// Matches "(anything) =" or "(anything)=" at start of rest
 	reFSharpClassCtor = regexp.MustCompile(`\([^)]*\)\s*=`)
@@ -495,24 +492,6 @@ func (p *FSharpParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 	}
 
 	return nil
-}
-
-// fsharpEnclosingType returns the name of the nearest type declaration above
-// the given 1-based line number, or "" if none found within 200 lines.
-func fsharpEnclosingType(typeLines map[int]string, memberLine int) string {
-	best := 0
-	bestName := ""
-	for tl, name := range typeLines {
-		if tl < memberLine && tl > best {
-			best = tl
-			bestName = name
-		}
-	}
-	// Sanity check: don't attribute a member to a type that's too far away.
-	if memberLine-best > 200 {
-		return ""
-	}
-	return bestName
 }
 
 // fsharpClassifyType determines the kind of an F# type definition based on its

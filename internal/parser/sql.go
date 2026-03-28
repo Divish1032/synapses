@@ -28,6 +28,7 @@ func (p *SQLParser) Extensions() []string {
 	return []string{".sql"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *SQLParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // Parse extracts code entities from a single SQL file and merges them into the graph.

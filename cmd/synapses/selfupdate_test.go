@@ -37,7 +37,7 @@ func TestPlatformAssetName(t *testing.T) {
 		t.Fatal("platformAssetName returned empty string")
 	}
 	// Should end with .tar.gz or .zip.
-	if !(len(name) > 7 && (name[len(name)-7:] == ".tar.gz" || name[len(name)-4:] == ".zip")) {
+	if len(name) <= 7 || (name[len(name)-7:] != ".tar.gz" && name[len(name)-4:] != ".zip") {
 		t.Errorf("platformAssetName = %q, expected .tar.gz or .zip suffix", name)
 	}
 }

@@ -117,7 +117,7 @@ func TestEdgesForFile_UnknownFileReturnsEmpty(t *testing.T) {
 	g := buildEdgeTestGraph(t)
 
 	edges := g.EdgesForFile("nonexistent.go")
-	if edges != nil && len(edges) != 0 {
+	if len(edges) != 0 {
 		t.Errorf("want empty for unknown file, got %d edges", len(edges))
 	}
 }

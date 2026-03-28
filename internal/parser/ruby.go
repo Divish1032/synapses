@@ -27,6 +27,7 @@ func (p *RubyParser) Extensions() []string {
 	return []string{".rb", ".rbi"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *RubyParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractRubyDeclInfo performs a pre-pass for metadata.

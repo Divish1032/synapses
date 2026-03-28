@@ -65,7 +65,7 @@ func TestLoadCallSites_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCallSites empty: %v", err)
 	}
-	if sites != nil && len(sites) != 0 {
+	if len(sites) != 0 {
 		t.Errorf("expected nil/empty, got %d", len(sites))
 	}
 }

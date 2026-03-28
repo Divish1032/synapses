@@ -19,15 +19,21 @@ import (
 //   - top-level function_definition → NodeFunction
 type MATLABParser struct{}
 
+// NewMATLABParser returns a new MATLAB parser.
 func NewMATLABParser() *MATLABParser { return &MATLABParser{} }
 
-func (p *MATLABParser) Language() string     { return "matlab" }
+// Language returns the language name.
+func (p *MATLABParser) Language() string { return "matlab" }
+
+// Extensions returns the file extensions handled by this parser.
 func (p *MATLABParser) Extensions() []string { return []string{".m"} }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *MATLABParser) TSLanguageForFile(_ string) *sitter.Language {
 	return sitter.NewLanguage(matlabg.GetLanguage())
 }
 
+// Parse parses a MATLAB file into the graph.
 func (p *MATLABParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	parser := sitter.NewParser()
 	parser.SetLanguage(sitter.NewLanguage(matlabg.GetLanguage()))

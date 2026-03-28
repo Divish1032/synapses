@@ -25,6 +25,7 @@ func (p *ScalaParser) Extensions() []string {
 	return []string{".scala"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *ScalaParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractScalaDeclInfo performs a pre-pass for metadata.

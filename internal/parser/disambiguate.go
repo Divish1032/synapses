@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // disambiguateM inspects the first non-empty lines of a .m file to determine
@@ -105,22 +103,4 @@ func isPathContainedIn(resolved, root string) bool {
 		cur = parent
 	}
 	return false
-}
-
-// isSymlinkContained checks if a file is a symlink and, if so, verifies that
-// it resolves to a target within the repository root. Returns true if the file
-// is safe to process (not a symlink, or symlink within root).
-func isSymlinkContained(info os.FileInfo, path, root string) bool {
-	if info.Mode()&os.ModeSymlink == 0 {
-		return true
-	}
-	resolved, symErr := filepath.EvalSymlinks(path)
-	if symErr != nil {
-		return false
-	}
-	if !isPathContainedIn(resolved, root) {
-		logutil.Warn("synapses/security: skipped symlink resolving outside repo root: %s -> %s\n", path, resolved)
-		return false
-	}
-	return true
 }

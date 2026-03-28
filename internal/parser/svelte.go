@@ -508,11 +508,11 @@ func extractDestructuredNames(braces string) []string {
 		}
 		valid := true
 		for i, ch := range part {
-			if i == 0 && !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' || ch == '$') {
+			if i == 0 && (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && ch != '_' && ch != '$' {
 				valid = false
 				break
 			}
-			if i > 0 && !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '$') {
+			if i > 0 && (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') && ch != '_' && ch != '$' {
 				valid = false
 				break
 			}

@@ -18,13 +18,6 @@ type declMeta struct {
 	IfdefGuard string // non-empty when symbol is inside a #ifdef/#if/#else block
 }
 
-// langCallSite is the language-agnostic equivalent of rawCallSite used by
-// non-Go parsers to collect call sites for post-parse resolution.
-type langCallSite struct {
-	pkgAlias string
-	funcName string
-}
-
 // callSiteConfig tells the generic call-site collector which AST node types
 // represent class-like and function-like declarations, and which node types
 // are call expressions. This allows a single AST walk to resolve function-level
@@ -214,28 +207,6 @@ func hasChildToken(n sitter.Node, src []byte, token string) bool {
 		}
 	}
 	return false
-}
-
-// findEnclosingClass walks the AST tree from a method node upward to find the
-// enclosing class/struct name. This is used for class-qualifying method names.
-// classTypes is the set of node types that represent classes (e.g. "class_declaration",
-// "class_definition", "struct_specifier").
-func findEnclosingClass(n sitter.Node, src []byte, classTypes map[string]bool) string {
-	for p := n.Parent(); !p.IsNull(); p = p.Parent() {
-		if classTypes[p.Type()] {
-			nameNode := p.ChildByFieldName("name")
-			if !nameNode.IsNull() {
-				return string(src[nameNode.StartByte():nameNode.EndByte()])
-			}
-			// Some grammars use unnamed children — try first type_identifier or identifier.
-			for _, typ := range []string{"type_identifier", "identifier", "constant", "name"} {
-				if ch := firstChildOfType(p, typ); !ch.IsNull() {
-					return string(src[ch.StartByte():ch.EndByte()])
-				}
-			}
-		}
-	}
-	return ""
 }
 
 // extractSigToBodyMulti tries multiple body block type names when extracting

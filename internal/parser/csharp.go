@@ -25,6 +25,7 @@ func (p *CSharpParser) Extensions() []string {
 	return []string{".cs"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *CSharpParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractCSharpDeclInfo performs a pre-pass over the AST to collect metadata.

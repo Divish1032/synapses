@@ -25,6 +25,7 @@ func (p *OCamlParser) Extensions() []string {
 	return []string{".ml", ".mli"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *OCamlParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractOCamlDocComment scans backwards from startLine (1-indexed) looking for

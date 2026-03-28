@@ -328,10 +328,6 @@ func uint8ToNodeType(t uint8) NodeType {
 	}
 }
 
-// maxKnownNodeType is the highest uint8 value with a defined NodeType mapping.
-// Used by Deserialize to detect data from a newer serializer version.
-const maxKnownNodeType uint8 = 8
-
 // NodeTypeToUint8 maps a NodeType to its serialized uint8 value.
 func NodeTypeToUint8(nt NodeType) uint8 {
 	switch nt {

@@ -871,11 +871,6 @@ func TestMemoryVectorSearchWithThreshold_LargeDataset_NoCap(t *testing.T) {
 	}
 }
 
-// contains is a simple helper for substring checks in test assertions.
-func contains(s, sub string) bool {
-	return strings.Contains(s, sub)
-}
-
 func TestMemoryContentHash_Deterministic(t *testing.T) {
 	t.Parallel()
 	h1 := memoryContentHash("AuthService uses JWT tokens")

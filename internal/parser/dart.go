@@ -44,21 +44,6 @@ var (
 	// enum Color { red, green, blue }
 	reDartEnum = regexp.MustCompile(`(?m)^[ \t]*enum\s+(\w+)`)
 
-	// Top-level function: optional return type, name, params
-	// Matches: void main() {, Future<void> fetchData() async {, String greet(String name) {
-	// We detect functions NOT inside a class body (top-level).
-	// Pattern: optional modifiers + optional return-type + name + (
-	reDartTopLevelFunc = regexp.MustCompile(`(?m)^(?:[ \t]*)(?:(?:async\s+)?(?:static\s+)?)?(?:[\w<>\[\]?,\s]+\s+)?(\w+)\s*\(`)
-
-	// Method inside a class body — same structure but indented (at least 2 spaces or 1 tab)
-	reDartMethod = regexp.MustCompile(`(?m)^[ \t]{2,}(?:(?:static|async|external|factory|get|set|operator)\s+)*(?:[\w<>\[\]?,\s]*\s+)?(\w+)\s*\(`)
-
-	// Doc comment: /// lines
-	reDartTripleSlash = regexp.MustCompile(`(?m)^[ \t]*///[ \t]?(.*)$`)
-
-	// Block doc comment: /** ... */
-	reDartBlockDocStart = regexp.MustCompile(`(?m)^[ \t]*/\*\*`)
-
 	// New-style typedef: typedef CallbackType = void Function(int x)
 	// Group 1: the typedef name
 	// Using [^;{]* for the generic constraint to handle nested generics like Map<String, List<T>>.

@@ -30,6 +30,7 @@ func (p *NixParser) Extensions() []string {
 	return []string{".nix"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *NixParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // Parse extracts code entities from a single Nix file.

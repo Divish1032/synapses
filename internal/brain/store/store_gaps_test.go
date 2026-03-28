@@ -173,7 +173,7 @@ func TestUpsertADR_NilLinkedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetADR: %v", err)
 	}
-	if got.LinkedFiles != nil && len(got.LinkedFiles) != 0 {
+	if len(got.LinkedFiles) != 0 {
 		t.Errorf("LinkedFiles = %v, want nil or empty", got.LinkedFiles)
 	}
 }

@@ -107,6 +107,7 @@ func (d *DeterministicDetector) buildModuleIndex(entries []config.FederationEntr
 // Entity resolution uses the sibling store's graph — not regex, not git.
 // This means every dep gets a VerifiedSignature from the parsed graph,
 // enabling graph-first drift detection immediately.
+
 // Rebuild replaces the module index with a fresh one built from entries.
 // Safe to call concurrently with DetectDeps — protected by mu.
 func (d *DeterministicDetector) Rebuild(entries []config.FederationEntry) {
@@ -116,6 +117,7 @@ func (d *DeterministicDetector) Rebuild(entries []config.FederationEntry) {
 	d.buildModuleIndex(entries)
 }
 
+// DetectDeps scans a file for cross-project imports and resolves them against sibling graphs.
 func (d *DeterministicDetector) DetectDeps(ctx context.Context, filePath string, localStore *store.Store) []store.CrossProjectDep {
 	// Hold RLock for the entire detection so Rebuild() cannot replace d.modules
 	// mid-scan. Rebuild() only happens on config reload (infrequent); the
@@ -512,9 +514,6 @@ var tsNamedImportRe = regexp.MustCompile(`import\s*\{([^}]+)\}\s*from\s*["']([^"
 // tsDefaultImportRe: import Foo from "package"
 var tsDefaultImportRe = regexp.MustCompile(`import\s+(\w+)\s+from\s*["']([^"']+)["']`)
 
-// tsRequireRe: const { Foo } = require("package") or const Foo = require("package")
-var tsRequireRe = regexp.MustCompile(`require\s*\(\s*["']([^"']+)["']\s*\)`)
-
 // tsRequireDestructureRe: const { Foo, Bar } = require("package")
 var tsRequireDestructureRe = regexp.MustCompile(`(?:const|let|var)\s*\{([^}]+)\}\s*=\s*require\s*\(\s*["']([^"']+)["']\s*\)`)
 
@@ -621,9 +620,6 @@ var rustUseRe = regexp.MustCompile(`use\s+([\w]+(?:::\w+)*);`)
 
 // rustUseGroupRe: use crate_name::module::{Entity1, Entity2};
 var rustUseGroupRe = regexp.MustCompile(`use\s+([\w]+(?:::\w+)*)::\{([^}]+)\};`)
-
-// rustUseWildcardRe: use crate_name::module::*;
-var rustUseWildcardRe = regexp.MustCompile(`use\s+([\w]+(?:::\w+)*)::\*;`)
 
 // extractRustRefs parses Rust use statements.
 //

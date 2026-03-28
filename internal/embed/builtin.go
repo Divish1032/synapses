@@ -239,12 +239,13 @@ func (b *BuiltinEmbedder) doInit(ctx context.Context) error {
 	modelPath := filepath.Join(b.modelsDir, builtinModelDirName)
 
 	// Check for stale model files from previous variant selections.
-	if modelFile == builtinModelFileQuantized {
+	switch modelFile {
+	case builtinModelFileQuantized:
 		staleFile := filepath.Join(modelPath, builtinModelFileFP32)
 		if _, statErr := os.Stat(staleFile); statErr == nil {
 			logutil.Info("synapses: stale fp32 model found at %s — safe to delete (not in use)\n", staleFile)
 		}
-	} else if modelFile == builtinModelFileFP32 {
+	case builtinModelFileFP32:
 		staleFile := filepath.Join(modelPath, builtinModelFileQuantized)
 		if _, statErr := os.Stat(staleFile); statErr == nil {
 			logutil.Info("synapses: stale quantized model found at %s — safe to delete (not in use)\n", staleFile)

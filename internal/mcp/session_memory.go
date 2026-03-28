@@ -670,21 +670,21 @@ func (s *Server) extractSessionSummary(agentID string, sessionStart time.Time, s
 // buildSessionLogContent creates a concise structured log of the session.
 func buildSessionLogContent(agentID, taskID, summary string, sess *sessionSummary) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Session by %s", agentID))
+	fmt.Fprintf(&b, "Session by %s", agentID)
 	if taskID != "" {
-		b.WriteString(fmt.Sprintf(" (task: %s)", taskID))
+		fmt.Fprintf(&b, " (task: %s)", taskID)
 	}
-	b.WriteString(fmt.Sprintf(" at %s.", time.Now().UTC().Format("2006-01-02 15:04")))
+	fmt.Fprintf(&b, " at %s.", time.Now().UTC().Format("2006-01-02 15:04"))
 
 	if sess != nil {
 		if len(sess.FilesTouched) > 0 {
-			b.WriteString(fmt.Sprintf(" Files: %s.", strings.Join(truncateSlice(sess.FilesTouched, 5), ", ")))
+			fmt.Fprintf(&b, " Files: %s.", strings.Join(truncateSlice(sess.FilesTouched, 5), ", "))
 		}
 		if len(sess.EntitiesExamined) > 0 {
-			b.WriteString(fmt.Sprintf(" Examined: %s.", strings.Join(truncateSlice(sess.EntitiesExamined, 5), ", ")))
+			fmt.Fprintf(&b, " Examined: %s.", strings.Join(truncateSlice(sess.EntitiesExamined, 5), ", "))
 		}
 		if len(sess.TasksUpdated) > 0 {
-			b.WriteString(fmt.Sprintf(" Tasks: %s.", strings.Join(sess.TasksUpdated, ", ")))
+			fmt.Fprintf(&b, " Tasks: %s.", strings.Join(sess.TasksUpdated, ", "))
 		}
 	}
 

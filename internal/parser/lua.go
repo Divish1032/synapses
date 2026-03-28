@@ -25,6 +25,7 @@ func (p *LuaParser) Extensions() []string {
 	return []string{".lua"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *LuaParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractLuaCATS does a line-by-line pre-pass scanning for LuaCATS annotations

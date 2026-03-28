@@ -64,10 +64,6 @@ var (
 	// Group 1: function name, Group 2: full spec text after name (one line)
 	reErlSpec = regexp.MustCompile(`(?m)^-spec\s+(\w+)\s*\(([^\n]*)`)
 
-	// -callback name(Args) -> RetType.
-	// Group 1: callback name, Group 2: arity
-	reErlCallback = regexp.MustCompile(`(?m)^-callback\s+(\w+)\s*/(\d+)\.`)
-
 	// -callback name(ArgTypes) -> RetType. (alternative form with type signatures)
 	reErlCallbackSig = regexp.MustCompile(`(?m)^-callback\s+(\w+)\s*\(([^\n]*)`)
 )

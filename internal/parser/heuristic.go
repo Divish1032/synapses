@@ -78,10 +78,9 @@ var (
 	)
 
 	// Enclosing function detection per language.
-	reEnclosingGo  = regexp.MustCompile(`^\s*func\s+(?:\([^)]+\)\s+)?(\w+)\s*\(`)
-	reEnclosingTS  = regexp.MustCompile(`^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*[(<]`)
-	reEnclosingPy  = regexp.MustCompile(`^\s*(?:async\s+)?def\s+(\w+)\s*\(`)
-	reEnclosingAny = regexp.MustCompile(`^\s*(?:func|function|def|sub|fn)\s+(\w+)\s*[\((\[]`)
+	reEnclosingGo = regexp.MustCompile(`^\s*func\s+(?:\([^)]+\)\s+)?(\w+)\s*\(`)
+	reEnclosingTS = regexp.MustCompile(`^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*[(<]`)
+	reEnclosingPy = regexp.MustCompile(`^\s*(?:async\s+)?def\s+(\w+)\s*\(`)
 
 	// MCP tool registration: addOrDefer(mcp.NewTool("name", ...), s.handleXxx)
 	// Matches the opening of an addOrDefer call.

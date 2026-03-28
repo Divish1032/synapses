@@ -25,6 +25,7 @@ func (p *PHPParser) Extensions() []string {
 	return []string{".php"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *PHPParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractPHPDeclInfo collects metadata for PHP declarations.

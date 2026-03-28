@@ -174,11 +174,6 @@ func (fg *FlatGraph) AddNode(name StringID, nodeType NodeType, fileID StringID, 
 	return idx
 }
 
-// addEdgeSlow is disabled — use BulkAddEdges for batch insertion (O(N+E)).
-func (fg *FlatGraph) addEdgeSlow(_, _ NodeIndex, _ float32) {
-	panic("addEdgeSlow: use BulkAddEdges for batch insertion")
-}
-
 // BulkEdge is a single edge for bulk insertion.
 type BulkEdge struct {
 	From, To NodeIndex

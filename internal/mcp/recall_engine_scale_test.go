@@ -201,7 +201,7 @@ func TestQuadRecall_Scale_EmptyProject(t *testing.T) {
 	if len(mems) != 0 {
 		t.Errorf("empty project: expected 0 results, got %d", len(mems))
 	}
-	if attr != nil && len(attr) > 0 {
+	if len(attr) > 0 {
 		t.Errorf("empty project: expected nil attribution, got %v", attr)
 	}
 }

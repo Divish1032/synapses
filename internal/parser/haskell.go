@@ -73,15 +73,8 @@ var (
 	// Group 1: operator text inside parens (e.g. "+++", ">>=")
 	reHaskellOpTypeSig = regexp.MustCompile(`(?m)^\(([^\)]+)\)\s*::`)
 
-	// Haddock doc comment lines immediately before a declaration:
-	//   -- | doc text
-	reHaskellHaddockLine = regexp.MustCompile(`(?m)^--\s*\|(.*)$`)
-
 	// Haddock block doc comment: {- | ... -}
 	reHaskellBlockDoc = regexp.MustCompile(`(?s)\{-\s*\|(.+?)-\}`)
-
-	// Bird-track style in literate Haskell (.lhs): lines starting with >
-	reHaskellBirdTrack = regexp.MustCompile(`(?m)^>\s*(.*)$`)
 
 	// foreign import: foreign import callconv [safe|unsafe] ["header"] funcName :: Type
 	// The calling convention may be a single word (ccall) or two words (ccall safe).

@@ -373,13 +373,3 @@ func containsName(nodeID, name string) bool {
 		(nodeID == name ||
 			len(nodeID) > len(name) && nodeID[len(nodeID)-len(name)-2:] == "::"+name)
 }
-
-// nodeIDToName resolves a NodeID back to a node name by scanning the node list.
-func nodeIDToName(id graph.NodeID, nodes []*graph.Node) string {
-	for _, n := range nodes {
-		if n.ID == id {
-			return n.Name
-		}
-	}
-	return string(id)
-}

@@ -805,7 +805,6 @@ func TestMultipleBackgroundGoroutinesShutdown(t *testing.T) {
 	// Verify they ALL exit promptly when context is cancelled.
 	appCtx, appCancel := context.WithCancel(context.Background())
 
-	const numGoroutines = 7
 	var wg sync.WaitGroup
 
 	// Pattern 1: ticker + ctx.Done (used by defrag, prune)

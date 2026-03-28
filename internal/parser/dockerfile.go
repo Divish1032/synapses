@@ -33,6 +33,7 @@ func (p *DockerfileParser) Extensions() []string {
 	return []string{".dockerfile", ".containerfile"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *DockerfileParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // Filenames returns the exact base filenames handled by this parser.

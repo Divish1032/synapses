@@ -50,14 +50,6 @@ func commitChange(t *testing.T, dir, filePath, newContent, msg string) string {
 	return getHead(t, dir)
 }
 
-// removeFileAndCommit removes a file and commits. Returns the new HEAD.
-func removeFileAndCommit(t *testing.T, dir, filePath, msg string) string {
-	t.Helper()
-	runGit(t, dir, "rm", filePath)
-	runGit(t, dir, "commit", "-m", msg)
-	return getHead(t, dir)
-}
-
 func getHead(t *testing.T, dir string) string {
 	t.Helper()
 	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()

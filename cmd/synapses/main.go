@@ -385,7 +385,7 @@ func cmdStartDirect(args []string) error {
 	// all errors are silently discarded and the MCP server continues normally.
 	var sharedPulse *pulse.Client // P2-6: shared with embedAllMemories
 	if cfg.Pulse.URL != "" {
-		sharedPulse = pulse.NewClient(cfg.Pulse.URL, cfg.Pulse.TimeoutSec)
+		sharedPulse = pulse.NewClient(cfg.Pulse.URL, cfg.Pulse.TimeoutSec) //nolint:staticcheck // SA1019: NewClient is the HTTP-based constructor needed here
 		srv.SetPulseClient(sharedPulse)
 		logutil.Info("synapses: pulse analytics enabled at %s\n", cfg.Pulse.URL)
 	}
@@ -2786,7 +2786,7 @@ func cmdBrief(args []string) error {
 		if len(names) > 5 {
 			names = names[:5]
 		}
-		b.WriteString(fmt.Sprintf("- **Active agents** (%d): %s\n", len(agents), strings.Join(names, ", ")))
+		fmt.Fprintf(&b, "- **Active agents** (%d): %s\n", len(agents), strings.Join(names, ", "))
 	}
 
 	// 2. Priority tasks (top 3, ordered by priority)
@@ -2801,10 +2801,10 @@ func cmdBrief(args []string) error {
 			if t.Status == "in_progress" {
 				marker = " (in_progress)"
 			}
-			b.WriteString(fmt.Sprintf("- **[%s] %s**%s\n", t.Priority, t.Title, marker))
+			fmt.Fprintf(&b, "- **[%s] %s**%s\n", t.Priority, t.Title, marker)
 		}
 		if len(tasks) > limit {
-			b.WriteString(fmt.Sprintf("- ... and %d more task(s)\n", len(tasks)-limit))
+			fmt.Fprintf(&b, "- ... and %d more task(s)\n", len(tasks)-limit)
 		}
 	} else {
 		b.WriteString("- No pending tasks\n")
@@ -2812,7 +2812,7 @@ func cmdBrief(args []string) error {
 
 	// 3. Cross-project alerts (unread)
 	if msgs, _, err := st.GetMessages("", 0, "cross_project_impact", true, 5); err == nil && len(msgs) > 0 {
-		b.WriteString(fmt.Sprintf("- **%d cross-project alert(s)**: recent changes may have broken linked dependencies\n", len(msgs)))
+		fmt.Fprintf(&b, "- **%d cross-project alert(s)**: recent changes may have broken linked dependencies\n", len(msgs))
 	}
 
 	// 4. Recent failure episode (if any)
@@ -2822,7 +2822,7 @@ func cmdBrief(args []string) error {
 	}
 	if failures, err := st.GetEpisodes(repoID, "", "failure", nil, 1, 0); err == nil && len(failures) > 0 {
 		f := failures[0]
-		b.WriteString(fmt.Sprintf("- **Recent failure**: %s\n", f.Decision))
+		fmt.Fprintf(&b, "- **Recent failure**: %s\n", f.Decision)
 	}
 
 	fmt.Print(b.String())

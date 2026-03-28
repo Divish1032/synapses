@@ -18,7 +18,6 @@ import (
 type ledgerWatermark struct {
 	mu              sync.Mutex
 	seenAlertHashes map[uint64]bool
-	lastBriefingAt  time.Time
 }
 
 // LedgerAlert is a cross-session overlap notification injected into tool responses.

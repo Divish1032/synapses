@@ -141,7 +141,7 @@ func TestRecentCommitsForFile_LargeLimit(t *testing.T) {
 	commits := metrics.RecentCommitsForFile(context.Background(), tmpdir, filePath, 100)
 
 	// Should return at most 3 commits (what we created)
-	if commits != nil && len(commits) > 3 {
+	if len(commits) > 3 {
 		t.Errorf("got %d commits, want at most 3", len(commits))
 	}
 }
@@ -220,10 +220,9 @@ func TestEnrichBlameForFile_UpdatesMetadata(t *testing.T) {
 	// After enrichment, should have blame metadata
 	if fn.Metadata != nil {
 		// Check for any of the blame fields
-		hasBlame := fn.Metadata["blame_author"] != "" ||
+		if fn.Metadata["blame_author"] != "" ||
 			fn.Metadata["blame_date"] != "" ||
-			fn.Metadata["blame_commit"] != ""
-		if hasBlame {
+			fn.Metadata["blame_commit"] != "" {
 			// Success - at least one blame field is set
 			return
 		}

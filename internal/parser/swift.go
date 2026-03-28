@@ -25,6 +25,7 @@ func (p *SwiftParser) Extensions() []string {
 	return []string{".swift"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *SwiftParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractSwiftDeclInfo performs a pre-pass over the AST to collect metadata.

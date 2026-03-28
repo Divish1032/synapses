@@ -89,9 +89,10 @@ func (s *Server) handleUpsertGap(
 	}
 
 	statusVerb := "recorded"
-	if status == "fixed" {
+	switch status {
+	case "fixed":
 		statusVerb = "marked fixed"
-	} else if status == "wontfix" {
+	case "wontfix":
 		statusVerb = "marked wontfix"
 	}
 

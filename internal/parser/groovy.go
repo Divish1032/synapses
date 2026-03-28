@@ -25,6 +25,7 @@ func (p *GroovyParser) Extensions() []string {
 	return []string{".groovy", ".gradle"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *GroovyParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // extractGroovyDeclInfo performs a pre-pass for metadata.

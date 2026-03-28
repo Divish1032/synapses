@@ -261,7 +261,7 @@ func porterStep5a(s []rune) []rune {
 	}
 	if m == 1 {
 		c := sub[len(sub)-1]
-		if !(porterHasCVCSuffix(sub) && c != 'w' && c != 'x' && c != 'y') {
+		if !porterHasCVCSuffix(sub) || c == 'w' || c == 'x' || c == 'y' {
 			return sub
 		}
 	}

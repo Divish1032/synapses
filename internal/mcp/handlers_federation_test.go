@@ -547,15 +547,9 @@ func TestCrossProjectSummary_BrainSummaryExists(t *testing.T) {
 	text := extractText(t, result)
 
 	// With brain summary available, the cross-project dep should show the
-	// brain summary instead of raw signature.
-	if strings.Contains(text, "Cross-Project Dependencies") {
-		if strings.Contains(text, "Validates JWT tokens") {
-			// Brain summary is being used.
-		} else if strings.Contains(text, "func Validate(token string) error") {
-			// Raw signature being used — brain summary not picked up.
-			// This is acceptable if the brain nodeID format doesn't match.
-		}
-	}
+	// brain summary instead of raw signature. Both outcomes are acceptable.
+	// Brain summary = "Validates JWT tokens"; raw signature = "func Validate(token string) error".
+	_ = strings.Contains(text, "Cross-Project Dependencies") // verified by earlier assertions
 }
 
 // ── Test 14: cross-project summary — no brain ───────────────────────────────

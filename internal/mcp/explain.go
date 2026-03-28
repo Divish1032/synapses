@@ -73,14 +73,14 @@ func buildExplanation(
 
 	// ── Header ────────────────────────────────────────────────────────────────
 	sb.WriteString("# Codebase Orientation\n\n")
-	sb.WriteString(fmt.Sprintf(
+	fmt.Fprintf(&sb,
 		"**Scale**: %s (%d files, %d functions+methods, %d structs, %d edges)\n\n",
 		identity.Scale,
 		identity.Summary.Files,
 		identity.Summary.Functions+identity.Summary.Methods,
 		identity.Summary.Structs,
 		identity.Summary.Edges,
-	))
+	)
 
 	// ── Tech Stack ────────────────────────────────────────────────────────────
 	langs, externalImports := detectTechStack(nodes)
@@ -102,7 +102,7 @@ func buildExplanation(
 
 	// ── Architectural Pattern ─────────────────────────────────────────────────
 	pattern := detectArchPattern(nodes)
-	sb.WriteString(fmt.Sprintf("**Architectural pattern**: %s\n\n", pattern))
+	fmt.Fprintf(&sb, "**Architectural pattern**: %s\n\n", pattern)
 
 	// ── Entry Points ──────────────────────────────────────────────────────────
 	if len(identity.EntryPoints) > 0 {
@@ -156,7 +156,7 @@ func buildExplanation(
 			// ep.File is already relative (stripped by Graph.ProjectIdentity via
 			// Graph.relPath). Using it directly avoids a double-relPath call that
 			// would fail when the path is already relative.
-			sb.WriteString(fmt.Sprintf("- `%s` — %s:%d\n", ep.Name, ep.File, ep.Line))
+			fmt.Fprintf(&sb, "- `%s` — %s:%d\n", ep.Name, ep.File, ep.Line)
 		}
 		sb.WriteString("\n")
 	}
@@ -197,8 +197,8 @@ func buildExplanation(
 			// "N refs" is accurate for all node types: structs get IMPLEMENTS/
 			// DATA_FLOWS/EMBEDS references, not CALLS. Using "callers" would be
 			// misleading for non-function types.
-			sb.WriteString(fmt.Sprintf("- `%s` (%s) — %d refs — %s:%d\n",
-				c.node.Name, c.node.Type, c.score, relFile, c.node.Line))
+			fmt.Fprintf(&sb, "- `%s` (%s) — %d refs — %s:%d\n",
+				c.node.Name, c.node.Type, c.score, relFile, c.node.Line)
 		}
 	}
 	sb.WriteString("\n")
@@ -215,7 +215,7 @@ func buildExplanation(
 	}
 	for _, ps := range shown {
 		label := detectLayerLabel(ps.pkg)
-		sb.WriteString(fmt.Sprintf("  %-50s %s\n", ps.pkg+"/", label))
+		fmt.Fprintf(&sb, "  %-50s %s\n", ps.pkg+"/", label)
 	}
 	sb.WriteString("\n")
 
@@ -232,7 +232,7 @@ func buildExplanation(
 		if i > 0 {
 			sb.WriteString(" > ")
 		}
-		sb.WriteString(fmt.Sprintf("%s(%.2f)%s", d.Name, d.SemanticWeight, synMark))
+		fmt.Fprintf(&sb, "%s(%.2f)%s", d.Name, d.SemanticWeight, synMark)
 	}
 	sb.WriteString("\n```\n")
 	sb.WriteString("_* = synthetic/heuristic edge. Domain tags and descriptions: `get_edge_types()`._\n")

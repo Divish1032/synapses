@@ -100,11 +100,7 @@ type SystemPulse struct {
 	ollamaURL  string // full URL to Ollama /api/ps; defaults to pulseOllamaURL
 	done       chan struct{}
 
-	// platformCPUState holds platform-specific CPU sampling state.
-	// On Linux/Darwin it is an empty struct (zero cost). On Windows it holds
-	// the previous GetSystemTimes values for delta computation, scoped to this
-	// instance so multiple SystemPulse instances do not share state.
-	platformCPUState
+	platformCPUState //nolint:unused // used on Windows for CPU delta state
 
 	// wg tracks the single background goroutine launched by Start().
 	// Stop() calls wg.Wait(), which returns immediately if Start() was never

@@ -3575,9 +3575,6 @@ func (s *Store) UpsertFileMtime(path string, mtime int64) error {
 	return err
 }
 
-// SaveCallSites replaces the persisted call-site table with sites.
-// Called after every full parse so cross-project CALLS can be re-resolved
-// on subsequent starts once linked project graphs have been merged.
 // SaveDiscoveryEdges persists a batch of edges created by post-embed discovery
 // passes (DiscoverDocCodeRelations, DiscoverEmbedRelations). Uses INSERT OR
 // IGNORE so existing edges are not duplicated. This is the lightweight
@@ -3605,6 +3602,7 @@ func (s *Store) SaveDiscoveryEdges(edges []graph.Edge) error {
 	return tx.Commit()
 }
 
+// SaveCallSites replaces the persisted call-site table with the given sites.
 func (s *Store) SaveCallSites(sites []graph.CallSite) error {
 	tx, err := s.graphDB.Begin()
 	if err != nil {

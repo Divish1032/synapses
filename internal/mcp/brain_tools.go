@@ -154,14 +154,14 @@ func (s *Server) handleGetDecisionLog(
 	}
 	var sb strings.Builder
 	for i, e := range entries {
-		sb.WriteString(fmt.Sprintf("[%d] %s | agent=%s phase=%s entity=%s\n    action: %s\n    outcome: %s\n",
+		fmt.Fprintf(&sb, "[%d] %s | agent=%s phase=%s entity=%s\n    action: %s\n    outcome: %s\n",
 			i+1, oneline(e.CreatedAt), oneline(e.AgentID), oneline(e.Phase),
-			oneline(e.EntityName), oneline(e.Action), oneline(e.Outcome)))
+			oneline(e.EntityName), oneline(e.Action), oneline(e.Outcome))
 		if len(e.RelatedEntities) > 0 {
-			sb.WriteString(fmt.Sprintf("    related: %s\n", oneline(strings.Join(e.RelatedEntities, ", "))))
+			fmt.Fprintf(&sb, "    related: %s\n", oneline(strings.Join(e.RelatedEntities, ", ")))
 		}
 		if e.Notes != "" {
-			sb.WriteString(fmt.Sprintf("    notes: %s\n", oneline(e.Notes)))
+			fmt.Fprintf(&sb, "    notes: %s\n", oneline(e.Notes))
 		}
 	}
 
@@ -174,54 +174,6 @@ func (s *Server) handleGetDecisionLog(
 		result["entity_filter"] = entity
 	}
 	return jsonResult(result)
-}
-
-// handleSetSDLCPhase sets the active SDLC phase on the brain.
-func (s *Server) handleSetSDLCPhase(
-	ctx context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	bc := s.getBrainClient()
-	if bc == nil {
-		return mcp.NewToolResultText(`{"error": "brain not configured — add brain.url to synapses.json"}`), nil
-	}
-	phase, _ := req.GetArguments()["phase"].(string)
-	if phase == "" {
-		return mcp.NewToolResultText(`{"error": "phase is required (planning|implementation|testing|review|maintenance)"}`), nil
-	}
-	cfg, err := bc.SetPhase(ctx, brain.SetPhaseRequest{Phase: phase})
-	if err != nil {
-		return errJSON(err), nil
-	}
-	return jsonResult(map[string]interface{}{
-		"status": "ok",
-		"phase":  cfg.Phase,
-		"mode":   cfg.QualityMode,
-	})
-}
-
-// handleSetQualityMode sets the active quality mode on the brain.
-func (s *Server) handleSetQualityMode(
-	ctx context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	bc := s.getBrainClient()
-	if bc == nil {
-		return mcp.NewToolResultText(`{"error": "brain not configured — add brain.url to synapses.json"}`), nil
-	}
-	mode, _ := req.GetArguments()["mode"].(string)
-	if mode == "" {
-		return mcp.NewToolResultText(`{"error": "mode is required (quick|standard|enterprise)"}`), nil
-	}
-	cfg, err := bc.SetQualityMode(ctx, brain.QualityMode(mode))
-	if err != nil {
-		return errJSON(err), nil
-	}
-	return jsonResult(map[string]interface{}{
-		"status": "ok",
-		"phase":  cfg.Phase,
-		"mode":   cfg.QualityMode,
-	})
 }
 
 // ingestWebContent sends fetched web content to the intelligence sidecar as a

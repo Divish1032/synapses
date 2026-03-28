@@ -464,11 +464,6 @@ func (s *Store) MemoryVectorSearchWithThresholdCtx(ctx context.Context, queryVec
 	return s.memoryVectorSearchBruteForceWithThresholdCtx(ctx, normQuery, limit, threshold)
 }
 
-// memoryVectorSearchBruteForceWithThreshold is the O(N) fallback with threshold.
-func (s *Store) memoryVectorSearchBruteForceWithThreshold(normQuery []float32, limit int, threshold float32) ([]MemorySearchResult, error) {
-	return s.memoryVectorSearchBruteForceWithThresholdCtx(context.Background(), normQuery, limit, threshold)
-}
-
 // memoryVectorSearchBruteForceWithThresholdCtx is the context-aware variant of memoryVectorSearchBruteForceWithThreshold.
 // Concurrency is bounded by s.bfSemaphore to prevent GC pressure under load.
 func (s *Store) memoryVectorSearchBruteForceWithThresholdCtx(ctx context.Context, normQuery []float32, limit int, threshold float32) ([]MemorySearchResult, error) {

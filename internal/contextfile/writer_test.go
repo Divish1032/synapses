@@ -34,7 +34,7 @@ func TestFnvHash_Format(t *testing.T) {
 		t.Errorf("expected 16-char hex hash, got %q (len %d)", h, len(h))
 	}
 	for _, c := range h {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Errorf("non-hex char %q in hash %q", c, h)
 		}
 	}
@@ -537,10 +537,9 @@ func TestWrite_RelativePathHandling(t *testing.T) {
 func TestWrite_ContextFilePathError(t *testing.T) {
 	// If ContextFilePath returns an error (e.g., HOME not accessible),
 	// Write should propagate that error
-	if err := Write("", nil, nil); err == nil {
-		// Empty repoRoot may or may not error depending on hash behavior
-		// Just verify Write handles the call without panicking
-	}
+	// Empty repoRoot may or may not error depending on hash behavior.
+	// Just verify Write handles the call without panicking.
+	_ = Write("", nil, nil)
 }
 
 func TestWrite_WriteFileError(t *testing.T) {

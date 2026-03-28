@@ -3302,7 +3302,7 @@ func (s *Store) GetErrorsToday() int {
 	return s.CountToolErrors(today)
 }
 
-// DBSizeBytes returns the database file size if dbPath was provided.
+// DBSizeBytesP5 returns the database file size if dbPath was provided.
 func (s *Store) DBSizeBytesP5(dbPath string) int64 {
 	info, err := os.Stat(dbPath)
 	if err != nil {

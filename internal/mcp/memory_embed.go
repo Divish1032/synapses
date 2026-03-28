@@ -133,10 +133,7 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	for {
-		if ctx.Err() != nil {
-			break
-		}
+	for ctx.Err() == nil {
 		ids, err := st.GetMemoriesWithoutEmbeddings(batchSize)
 		if err != nil {
 			logutil.Error("synapses: get memories without embeddings: %v\n", err)
@@ -214,10 +211,7 @@ func EmbedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.St
 	// Phase 2: refresh stale embeddings (content changed since last embedding).
 	// Loop until no stale IDs remain, mirroring the primary phase above.
 	staleDone := 0
-	for {
-		if ctx.Err() != nil {
-			break
-		}
+	for ctx.Err() == nil {
 		staleIDs, staleErr := st.GetStaleEmbeddingMemoryIDs(500)
 		if staleErr != nil || len(staleIDs) == 0 {
 			break

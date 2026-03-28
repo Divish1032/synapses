@@ -1934,65 +1934,6 @@ func (s *Server) inferOrphanEvidence(ot store.OrphanedTask, recentChanges []chan
 	return ot
 }
 
-// handleReportUsage records agent-self-reported LLM token usage (Option B).
-// The agent calls this after completing a response to give Synapses accurate
-// model cost data that cannot be inferred from the MCP layer alone.
-func (s *Server) handleReportUsage(
-	ctx context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	args := req.GetArguments()
-	model, _ := args["model"].(string)
-	provider, _ := args["provider"].(string)
-	agentID, _ := args["agent_id"].(string)
-	if agentID == "" {
-		agentID = s.getLastAgent()
-	}
-
-	inputTokens := 0
-	outputTokens := 0
-	costUSD := 0.0
-	if v, ok := args["input_tokens"].(float64); ok {
-		inputTokens = int(v)
-	}
-	if v, ok := args["output_tokens"].(float64); ok {
-		outputTokens = int(v)
-	}
-	if v, ok := args["cost_usd"].(float64); ok {
-		costUSD = v
-	}
-
-	if model == "" {
-		return mcp.NewToolResultError("model is required (e.g., 'claude-sonnet-4-6', 'gpt-4o')"), nil
-	}
-
-	pc := s.getPulseClient()
-	if pc != nil {
-		mcpSessID := SessionIDFromContext(ctx)
-		sessID := s.getSynapseSessionID(mcpSessID)
-		if sessID == "" {
-			sessID = agentID + ":" + s.projectID + ":" + time.Now().UTC().Format("2006-01-02")
-		}
-		evt := pulse.AgentLLMUsageEvent{
-			SessionID:    sessID,
-			AgentID:      agentID,
-			ProjectID:    s.projectID,
-			Model:        model,
-			Provider:     provider,
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			CostUSD:      costUSD,
-		}
-		s.goBackground(func() { pc.RecordAgentLLMUsage(evt) })
-	}
-
-	return jsonResult(map[string]interface{}{
-		"recorded": true,
-		"model":    model,
-		"note":     "Usage recorded. Thank you — this improves cost-savings accuracy in Analytics.",
-	})
-}
-
 // handleGetMyAnalytics returns a per-agent analytics summary for the current agent
 // (Bug 57 — STO-D.4.5). This is the agent-facing complement to the admin HTTP
 // /api/admin/pulse/summary endpoint.
@@ -2352,7 +2293,7 @@ func computeFirstSessionHighlights(g *graph.Graph, vlog []store.ViolationLogEntr
 					break
 				}
 				nodeCount++
-				inDeg[id] = inDeg[id] // ensure entry exists
+				_ = inDeg[id] // ensure entry exists (zero-value initialization)
 				for _, e := range outEdges[id] {
 					if e.Type == graph.EdgeCalls {
 						callsAdj[id] = append(callsAdj[id], e.To)

@@ -199,7 +199,7 @@ func TestQuadRecallSearch_EmptyResults(t *testing.T) {
 	if len(mems) != 0 {
 		t.Errorf("expected 0 memories from empty store, got %d", len(mems))
 	}
-	if attr != nil && len(attr) > 0 {
+	if len(attr) > 0 {
 		t.Errorf("expected nil/empty attribution, got %v", attr)
 	}
 }

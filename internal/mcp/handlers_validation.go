@@ -1072,7 +1072,7 @@ func (s *Server) detectRuleProvenance(ruleID, description string) (string, strin
 	}
 	seen := make(map[string]bool)
 	for _, word := range strings.FieldsFunc(ruleID+" "+description, func(r rune) bool {
-		return !('a' <= r && r <= 'z') && !('A' <= r && r <= 'Z') && !('0' <= r && r <= '9') && r != '_'
+		return ('a' > r || r > 'z') && ('A' > r || r > 'Z') && ('0' > r || r > '9') && r != '_'
 	}) {
 		if len(word) < 3 || seen[word] {
 			continue

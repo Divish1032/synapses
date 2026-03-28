@@ -123,6 +123,7 @@ func (p *RustParser) Extensions() []string {
 	return []string{".rs"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *RustParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // Parse extracts code entities from a single Rust file and merges them into the graph.

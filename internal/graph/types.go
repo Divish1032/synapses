@@ -928,7 +928,6 @@ type EntityInfo struct {
 	Fanout int `json:"fanout"`
 }
 
-// ImpactTier groups nodes at the same blast-radius hop distance.
 // APISurfaceInfo describes whether an entity is part of the public API and
 // how many external consumers depend on it.
 type APISurfaceInfo struct {
@@ -937,6 +936,7 @@ type APISurfaceInfo struct {
 	BreakingRisk     string `json:"breaking_risk"`     // "high" (exported, many consumers), "medium" (exported, few), "low" (not exported)
 }
 
+// ImpactTier groups nodes at the same blast-radius hop distance.
 type ImpactTier struct {
 	Depth      int         `json:"depth"`
 	Label      string      `json:"label"`      // "direct" | "indirect" | "peripheral"

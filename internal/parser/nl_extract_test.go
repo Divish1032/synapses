@@ -137,7 +137,7 @@ func TestExtractEntityCandidates_NumbersFiltered(t *testing.T) {
 	for _, c := range cs {
 		allDigits := true
 		for _, r := range c.Name {
-			if r != '.' && r != '-' && !(r >= '0' && r <= '9') {
+			if r != '.' && r != '-' && (r < '0' || r > '9') {
 				allDigits = false
 				break
 			}

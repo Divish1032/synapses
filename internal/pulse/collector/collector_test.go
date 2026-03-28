@@ -52,9 +52,8 @@ func TestRecordToolCall(t *testing.T) {
 		ToolName: "get_context", DurationMs: 42, Success: true,
 	})
 
-	if c.Len() == 0 {
-		// May already have been flushed, that's OK
-	}
+	// c.Len() may be 0 if already flushed — that's OK.
+	_ = c.Len()
 }
 
 func TestRecordContextDelivery(t *testing.T) {

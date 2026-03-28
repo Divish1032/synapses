@@ -84,7 +84,6 @@ type PacketCacheInvalidator interface {
 // any clients (scout, brain) whose settings may have changed.
 type ConfigChangeHandler func(newCfg *config.Config)
 
-// Watcher watches a directory tree and keeps a Graph current as files change.
 // CrossProjectTracker detects cross-project dependencies in parsed files.
 // Implemented by federation.DeterministicDetector.
 type CrossProjectTracker interface {
@@ -116,6 +115,7 @@ type NameMatcherRunner interface {
 	RunAsync(ctx context.Context, g *graph.Graph, st *store.Store, changedFiles []string)
 }
 
+// Watcher watches a directory tree and keeps a Graph current as files change.
 type Watcher struct {
 	fw               *fsnotify.Watcher
 	graph            *graph.Graph
@@ -392,11 +392,6 @@ func (w *Watcher) SetBrainCrossProjectTracker(tracker BrainCrossProjectTracker) 
 	w.cpBrainTracker = tracker
 }
 
-// SetNameMatcher wires the cross-domain name-matching pass into the watcher.
-// When nm is non-nil, an initial unconditional pass is scheduled immediately
-// so that MENTIONS edges are created from the already-loaded graph on first run
-// and after daemon restarts (hasCrossDomain would otherwise stay false until a
-// cross-domain file changes, silently skipping all code-only file saves).
 // SetAfterRebuildHook registers a callback invoked after each RebuildIndex call
 // completes. Used to keep secondary structures (e.g. FlatGraph CSR) in sync.
 func (w *Watcher) SetAfterRebuildHook(fn func()) {
@@ -405,6 +400,7 @@ func (w *Watcher) SetAfterRebuildHook(fn func()) {
 	w.mu.Unlock()
 }
 
+// SetNameMatcher wires the cross-domain name-matching pass into the watcher.
 func (w *Watcher) SetNameMatcher(nm NameMatcherRunner) {
 	w.mu.Lock()
 	w.nmRunner = nm
@@ -581,9 +577,6 @@ func (w *Watcher) computeInvalidationSet(filePath string, filePkgSnap map[string
 	return result
 }
 
-// SetPulseClient wires a pulse.Client into the watcher for pipeline instrumentation.
-// When set, reparseFile emits ReparseEvents and the event loop emits health events.
-// Must be called before Start. pc may be nil to disable. (P2-3/P2-4)
 // SetNodeEmbedder wires an embedder for Tier 1 embedding-based entity resolution
 // and for the background node embedding pass. Pass nil to disable (name-match only).
 func (w *Watcher) SetNodeEmbedder(e embed.Embedder) {
@@ -633,6 +626,7 @@ func (w *Watcher) launchNodeEmbedPass(embedder embed.Embedder, st *store.Store) 
 	}
 }
 
+// SetPulseClient wires a pulse.Client into the watcher for pipeline instrumentation.
 func (w *Watcher) SetPulseClient(pc *pulse.Client) {
 	w.pulseClient = pc
 }

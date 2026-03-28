@@ -150,26 +150,6 @@ func extractCIfdefGuard(n sitter.Node, src []byte) string {
 	return ""
 }
 
-// isCStatic checks if a C declaration has the `static` storage class specifier.
-func isCStatic(n sitter.Node, src []byte) bool {
-	if n.IsNull() {
-		return false
-	}
-	for i := uint32(0); i < n.ChildCount(); i++ {
-		child := n.Child(i)
-		if child.IsNull() {
-			continue
-		}
-		if child.Type() == "storage_class_specifier" {
-			text := string(src[child.StartByte():child.EndByte()])
-			if text == "static" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // CParser parses C (.c, .h) source files.
 type CParser struct {
 	language *sitter.Language
@@ -185,6 +165,7 @@ func (p *CParser) Extensions() []string {
 	return []string{".c", ".h", ".ino"}
 }
 
+// TSLanguageForFile returns the tree-sitter language for this parser.
 func (p *CParser) TSLanguageForFile(_ string) *sitter.Language { return p.language }
 
 // Parse extracts code entities from a single C file and merges them into the graph.
