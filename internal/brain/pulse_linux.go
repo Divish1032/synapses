@@ -12,7 +12,7 @@ import (
 
 // platformCPUState holds per-instance CPU sampling state. Empty on Linux —
 // /proc/loadavg already gives a rolling average, no delta computation needed.
-type platformCPUState struct{}
+type platformCPUState struct{} //nolint:unused // embedded in SystemPulse; empty on Linux
 
 // samplePlatform reads available RAM from /proc/meminfo and the 1-minute CPU
 // load average from /proc/loadavg, then normalises CPU by the number of cores.

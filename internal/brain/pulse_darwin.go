@@ -10,8 +10,7 @@ import (
 	"strings"
 )
 
-//nolint:unused // embedded in SystemPulse; used on Windows for CPU delta state
-type platformCPUState struct{}
+type platformCPUState struct{} //nolint:unused // embedded in SystemPulse; empty on macOS
 
 // samplePlatform reads available RAM via vm_stat and the 1-minute load average
 // via sysctl on macOS.
