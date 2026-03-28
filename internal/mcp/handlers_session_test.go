@@ -220,32 +220,6 @@ func TestHandleSessionInit_Incremental_SkipsIdentityOnRepeat(t *testing.T) {
 	}
 }
 
-func TestHandleSessionInit_UnreadMessages_Delivered(t *testing.T) {
-	s := newTestServer(t)
-
-	// Agent A sends a message to agent B before B's session starts.
-	res, err := s.handleSendMessage(ctx, callTool(map[string]any{
-		"from_agent": "agent-a",
-		"to_agent":   "agent-b",
-		"topic":      "ping",
-		"payload":    `{"msg":"hello"}`,
-	}))
-	mustResult(t, res, err)
-
-	// Agent B starts — unread message should be auto-delivered.
-	res2, err2 := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "agent-b"}))
-	m := mustResult(t, res2, err2)
-
-	msgs, ok := m["unread_messages"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected unread_messages in response, keys: %v", mapKeys(m))
-	}
-	count, _ := msgs["count"].(float64)
-	if count < 1 {
-		t.Errorf("expected ≥1 unread message, got count=%v", count)
-	}
-}
-
 func TestHandleSessionInit_CollisionWarning(t *testing.T) {
 	s := newTestServer(t)
 	agentID := "clash-agent"
@@ -1164,27 +1138,6 @@ func TestHandleGetCallChain_NotFound_ClosestReachable(t *testing.T) {
 	}
 }
 
-// ── handleGetEvents ───────────────────────────────────────────────────────────
-
-func TestHandleGetEvents_InitialEmpty(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleGetEvents(ctx, callTool(map[string]any{"since_seq": float64(0)}))
-	m := mustResult(t, res, err)
-	hasKey(t, m, "events")
-}
-
-func TestHandleGetEvents_AfterSessionInit(t *testing.T) {
-	s := newTestServer(t)
-	_, _ = s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "watcher-agent"}))
-
-	res, err := s.handleGetEvents(ctx, callTool(map[string]any{"since_seq": float64(0)}))
-	m := mustResult(t, res, err)
-	events, _ := m["events"].([]any)
-	if len(events) == 0 {
-		t.Error("expected at least one event after session_init")
-	}
-}
-
 // ── entity_hash stable (root not double-counted) ──────────────────────────────
 
 func TestHandleGetContext_EntityHashStable(t *testing.T) {
@@ -1268,32 +1221,6 @@ func TestHandleGetImpact_StructNode_TestCoverageField(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected store_test.go in test_coverage for struct node, got %v", m["test_coverage"])
-	}
-}
-
-// ── handleGetEvents ───────────────────────────────────────────────────────────
-
-func TestHandleGetEvents_SinceCursorFilters(t *testing.T) {
-	s := newTestServer(t)
-	_, _ = s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "evt-a"}))
-	time.Sleep(5 * time.Millisecond)
-
-	res1, err1 := s.handleGetEvents(ctx, callTool(map[string]any{"since_seq": float64(0)}))
-	m1 := mustResult(t, res1, err1)
-	events1, _ := m1["events"].([]any)
-	if len(events1) == 0 {
-		t.Skip("no events to cursor-test")
-	}
-	lastEvent, _ := events1[len(events1)-1].(map[string]any)
-	lastSeq, _ := lastEvent["seq"].(float64)
-
-	_, _ = s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "evt-b"}))
-
-	res2, err2 := s.handleGetEvents(ctx, callTool(map[string]any{"since_seq": lastSeq}))
-	m2 := mustResult(t, res2, err2)
-	events2, _ := m2["events"].([]any)
-	if len(events2) == 0 {
-		t.Error("expected new events after cursor position")
 	}
 }
 

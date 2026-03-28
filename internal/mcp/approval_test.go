@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -256,121 +255,11 @@ func TestApproveRequest_ExpiredToken_ReturnsError(t *testing.T) {
 	}
 }
 
-// ── Integration tests for send_message approval gate ─────────────────────────
-
-func TestSendMessage_Broadcast_RequiresApproval(t *testing.T) {
-	s := newTestServer(t)
-	result, err := s.handleSendMessage(context.Background(), callTool(map[string]any{
-		"from_agent": "test-agent",
-		"topic":      "api_changed",
-	}))
-	data := mustResult(t, result, err)
-
-	if data["requires_approval"] != true {
-		t.Error("expected broadcast without prior approval to require approval")
-	}
-	// Token must NOT leak into MCP response.
-	if _, hasToken := data["approval_token"]; hasToken {
-		t.Fatal("approval_token must not appear in tool response")
-	}
-	if data["operation"] != "broadcast_message" {
-		t.Errorf("expected operation=broadcast_message, got %v", data["operation"])
-	}
-}
-
-func TestSendMessage_Broadcast_AfterApprove_Succeeds(t *testing.T) {
-	s := newTestServer(t)
-
-	// Step 1: request approval.
-	_, _ = s.handleSendMessage(context.Background(), callTool(map[string]any{
-		"from_agent": "approve-test-agent",
-		"topic":      "api_changed",
-	}))
-
-	// Step 2: user approves via CLI (find the specific pending for this agent).
-	p := findPendingFor(t, "broadcast_message", "approve-test-agent")
-	if err := ApproveRequest(p.Token); err != nil {
-		t.Fatalf("ApproveRequest: %v", err)
-	}
-
-	// Step 3: agent retries (no approval_token needed).
-	result, err := s.handleSendMessage(context.Background(), callTool(map[string]any{
-		"from_agent": "approve-test-agent",
-		"topic":      "api_changed",
-	}))
-	data := mustResult(t, result, err)
-
-	if _, ok := data["message_id"]; !ok {
-		t.Error("expected message_id in successful send_message response")
-	}
-}
-
-func TestSendMessage_Broadcast_SingleUse(t *testing.T) {
-	s := newTestServer(t)
-
-	// Get and approve.
-	_, _ = s.handleSendMessage(context.Background(), callTool(map[string]any{
-		"from_agent": "single-use-agent",
-		"topic":      "api_changed",
-	}))
-	p := findPendingFor(t, "broadcast_message", "single-use-agent")
-	_ = ApproveRequest(p.Token)
-
-	// First retry: succeeds.
-	result, _ := s.handleSendMessage(context.Background(), callTool(map[string]any{
-		"from_agent": "single-use-agent",
-		"topic":      "api_changed",
-	}))
-	data := mustResult(t, result, nil)
-	if _, ok := data["message_id"]; !ok {
-		t.Fatal("first retry should succeed")
-	}
-
-	// Second retry: needs a new approval (single-use consumed above).
-	result, err := s.handleSendMessage(context.Background(), callTool(map[string]any{
-		"from_agent": "single-use-agent",
-		"topic":      "api_changed",
-	}))
-	data2 := mustResult(t, result, err)
-	if data2["requires_approval"] != true {
-		t.Error("second retry should require a new approval (prior approval was consumed)")
-	}
-}
-
-func TestSendMessage_Directed_NoApproval(t *testing.T) {
-	s := newTestServer(t)
-	result, err := s.handleSendMessage(context.Background(), callTool(map[string]any{
-		"from_agent": "test-agent",
-		"topic":      "api_changed",
-		"to_agent":   "other-agent",
-	}))
-	data := mustResult(t, result, err)
-	if _, ok := data["message_id"]; !ok {
-		t.Error("expected directed message to succeed without approval")
-	}
-	if data["requires_approval"] == true {
-		t.Error("directed message should not require approval")
-	}
-}
-
-func TestSendMessage_WhitespaceToAgent_TreatedAsBroadcast(t *testing.T) {
-	s := newTestServer(t)
-	result, err := s.handleSendMessage(context.Background(), callTool(map[string]any{
-		"from_agent": "test-agent",
-		"topic":      "test",
-		"to_agent":   "   ",
-	}))
-	data := mustResult(t, result, err)
-	if data["requires_approval"] != true {
-		t.Error("whitespace-only to_agent should be treated as broadcast and require approval")
-	}
-}
-
 // ── Integration tests for remember approval gate ─────────────────────────────
 
 func TestRemember_CrossProject_RequiresApproval(t *testing.T) {
 	s := newTestServer(t)
-	result, err := s.handleRemember(context.Background(), callTool(map[string]any{
+	result, err := s.handleRemember(ctx, callTool(map[string]any{
 		"agent_id":   "test-agent",
 		"decision":   "test decision",
 		"project_id": "other-project",
@@ -391,7 +280,7 @@ func TestRemember_CrossProject_AfterApprove_Succeeds(t *testing.T) {
 	s := newTestServer(t)
 
 	// Step 1: request approval.
-	_, _ = s.handleRemember(context.Background(), callTool(map[string]any{
+	_, _ = s.handleRemember(ctx, callTool(map[string]any{
 		"agent_id":   "remember-approve-agent",
 		"decision":   "test decision",
 		"project_id": "other-project",
@@ -404,7 +293,7 @@ func TestRemember_CrossProject_AfterApprove_Succeeds(t *testing.T) {
 	}
 
 	// Step 3: agent retries.
-	result, err := s.handleRemember(context.Background(), callTool(map[string]any{
+	result, err := s.handleRemember(ctx, callTool(map[string]any{
 		"agent_id":   "remember-approve-agent",
 		"decision":   "test decision",
 		"project_id": "other-project",
@@ -417,7 +306,7 @@ func TestRemember_CrossProject_AfterApprove_Succeeds(t *testing.T) {
 
 func TestRemember_SameProject_NoApproval(t *testing.T) {
 	s := newTestServer(t)
-	result, err := s.handleRemember(context.Background(), callTool(map[string]any{
+	result, err := s.handleRemember(ctx, callTool(map[string]any{
 		"agent_id": "test-agent",
 		"decision": "test decision",
 	}))
@@ -433,7 +322,7 @@ func TestRemember_SameProject_NoApproval(t *testing.T) {
 func TestRemember_MatchingProjectID_NoApproval(t *testing.T) {
 	s := newTestServer(t)
 	// The test graph's repoID is "test-repo".
-	result, err := s.handleRemember(context.Background(), callTool(map[string]any{
+	result, err := s.handleRemember(ctx, callTool(map[string]any{
 		"agent_id":   "test-agent",
 		"decision":   "test decision",
 		"project_id": "test-repo",

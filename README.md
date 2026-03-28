@@ -21,7 +21,7 @@ Instead of line-by-line searching, Synapses maintains an in-memory graph of your
 - **Nodes**: functions, methods, structs, classes, interfaces, variables, files, packages
 - **Edges**: calls, implements, defines, embeds, imports, depends on, data flows
 
-AI agents query the graph via **48 MCP tools** to answer questions like:
+AI agents query the graph via **12 MCP tools** (+ 8 MCP resources) to answer questions like:
 - "Find all callers of auth.Login()"
 - "What breaks if I change this function signature?"
 - "Architect a context packet for debugging checkout flow"
@@ -33,10 +33,10 @@ Synapses maintains **episodic memory** (past decisions, failures), an **agent me
 
 ## Features
 
-**48 MCP Tools** — session management, code graph queries, task memory, agent coordination, episodic memory, architecture enforcement
+**12 MCP Tools + 8 Resources** — consolidated tool surface for optimal LLM accuracy: session_init, search, get_context, get_file_context, get_impact, validate, memory, end_session, tasks, rules, annotate, lookup_docs
 **49+ Language Parsers** — Go, TypeScript, Python, Java, Rust, C/C++, C#, Swift, Ruby, PHP, Kotlin, Scala, Dart, Zig, Haskell, Terraform, Nix, and 30+ more with generic fallback
 **Episodic Memory** — persist past decisions and failures; future sessions query them to avoid repeating mistakes
-**Agent Message Bus** — broadcast work status across agents; unread messages surface on session start
+**Work Ledger** — ambient cross-session coordination: every tool call passively records entity/file signals; overlapping sessions are detected and surfaced automatically
 **Vector Embeddings** — built-in all-MiniLM-L6-v2 ONNX model, zero external dependencies. Optional Ollama or OpenAI-compatible endpoint.
 **Cross-Project Federation** — query sibling project graphs and memories from a single session
 **Intent-Based Context** — context packets adapt to agent intent (understand/review/debug/add/modify/plan)

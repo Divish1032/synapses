@@ -229,13 +229,13 @@ func (s *Server) handleGetWorkingState(
 func suggestToolsForChanges(events []changeEntry) []toolSuggestion {
 	if len(events) == 0 {
 		return []toolSuggestion{
-			{Tool: "get_project_identity", Reason: "orient yourself before starting work"},
-			{Tool: "get_pending_tasks", Reason: "find your next task"},
+			{Tool: "search", Reason: "orient yourself — find key entities before starting work"},
+			{Tool: "tasks", Reason: "find your next task: tasks(action=\"pending\")"},
 		}
 	}
 	suggestions := []toolSuggestion{
-		{Tool: "get_violations", Reason: "check if recent edits introduced architectural violations"},
-		{Tool: "update_task", Reason: "mark in-progress tasks complete if work is finished"},
+		{Tool: "validate", Reason: "check if recent edits introduced violations: validate(phase=\"list\")"},
+		{Tool: "tasks", Reason: "mark in-progress tasks complete: tasks(action=\"update\", status=\"done\")"},
 	}
 	// Suggest exploring changed files.
 	seen := make(map[string]bool)
@@ -1061,7 +1061,7 @@ func (s *Server) handleSessionInit(
 			resp["suggested_tools"] = map[string]interface{}{
 				"for_intent": intent,
 				"tools":      suggestions,
-				"note":       "These tools are recommended for your intent. Call discover_tools(query='...') to find others.",
+				"note":       "These tools are recommended for your intent.",
 			}
 		}
 	}

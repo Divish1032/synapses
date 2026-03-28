@@ -123,43 +123,6 @@ func TestHandleAnnotateNode_NoteAtLimit_Accepted(t *testing.T) {
 	mustResult(t, res, err)
 }
 
-// ── handleSendMessage: payload field (16 KB limit) ────────────────────────────
-
-// Attack: oversized JSON payload bloats the message bus table.
-func TestHandleSendMessage_OversizedPayload_ReturnsError(t *testing.T) {
-	s := newTestServer(t)
-	// Construct valid JSON that exceeds the payload limit.
-	inner := strings.Repeat("x", maxArgLengthPayload)
-	oversized := `{"data":"` + inner + `"}`
-	res, err := s.handleSendMessage(ctx, callTool(map[string]any{
-		"from_agent": "attacker",
-		"topic":      "flood",
-		"payload":    oversized,
-	}))
-	msg := mustErrorResult(t, res, err)
-	if !strings.Contains(msg, "payload") || !strings.Contains(msg, "exceeds") {
-		t.Errorf("error message should mention payload limit, got: %q", msg)
-	}
-}
-
-func TestHandleSendMessage_PayloadAtLimit_Accepted(t *testing.T) {
-	s := newTestServer(t)
-	// Build JSON exactly at the limit: {"d":"<N bytes>"} — account for wrapper.
-	innerLen := maxArgLengthPayload - len(`{"d":""}`)
-	inner := strings.Repeat("y", innerLen)
-	atLimit := `{"d":"` + inner + `"}`
-	if len(atLimit) > maxArgLengthPayload {
-		t.Fatalf("test setup: payload too large (%d > %d)", len(atLimit), maxArgLengthPayload)
-	}
-	res, err := s.handleSendMessage(ctx, callTool(map[string]any{
-		"from_agent": "agent",
-		"to_agent":   "receiver", // directed message avoids approval gate
-		"topic":      "ok",
-		"payload":    atLimit,
-	}))
-	mustResult(t, res, err)
-}
-
 // ── handleWebAnnotate: note field (8 KB limit) ────────────────────────────────
 
 // Attack: oversized note in web annotation floods storage.

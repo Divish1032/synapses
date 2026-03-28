@@ -71,24 +71,24 @@ func TestSuggestTools_ImplementIntent(t *testing.T) {
 
 func TestSuggestTools_DebugIntent(t *testing.T) {
 	suggestions := suggestToolsForIntent("debugging login flow")
-	assertContains(t, toolNames(suggestions), "get_call_chain")
+	assertContains(t, toolNames(suggestions), "get_context")
 }
 
 func TestSuggestTools_ReviewIntent(t *testing.T) {
 	suggestions := suggestToolsForIntent("reviewing code quality")
 	names := toolNames(suggestions)
-	assertContains(t, names, "get_violations")
-	assertContains(t, names, "get_gaps")
+	assertContains(t, names, "validate")
+	assertContains(t, names, "annotate")
 }
 
 func TestSuggestTools_ExploreIntent(t *testing.T) {
 	suggestions := suggestToolsForIntent("exploring the codebase")
-	assertContains(t, toolNames(suggestions), "get_repo_map")
+	assertContains(t, toolNames(suggestions), "get_context")
 }
 
 func TestSuggestTools_PlanIntent(t *testing.T) {
 	suggestions := suggestToolsForIntent("planning the architecture")
-	assertContains(t, toolNames(suggestions), "get_adrs")
+	assertContains(t, toolNames(suggestions), "rules")
 }
 
 func TestSuggestTools_RefactorIntent(t *testing.T) {
@@ -98,7 +98,7 @@ func TestSuggestTools_RefactorIntent(t *testing.T) {
 
 func TestSuggestTools_FixIntent(t *testing.T) {
 	suggestions := suggestToolsForIntent("fix the login bug")
-	assertContains(t, toolNames(suggestions), "get_call_chain")
+	assertContains(t, toolNames(suggestions), "get_context")
 }
 
 func TestSuggestTools_NoIntent(t *testing.T) {
@@ -137,11 +137,11 @@ func TestSuggestTools_StemMatch(t *testing.T) {
 		expectedTool string
 	}{
 		{"implementing auth", "get_impact"},
-		{"exploring codebase", "get_repo_map"},
-		{"investigated the bug", "get_call_chain"},
-		{"reviewed the PR", "get_violations"},
+		{"exploring codebase", "get_context"},
+		{"investigated the bug", "get_context"},
+		{"reviewed the PR", "validate"},
 		{"refactoring module", "get_impact"},
-		{"designing system", "get_adrs"},
+		{"designing system", "rules"},
 	}
 	for _, tc := range cases {
 		suggestions := suggestToolsForIntent(tc.intent)

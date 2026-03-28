@@ -23,12 +23,12 @@ func TestSuggestToolsForChanges_EmptyEvents(t *testing.T) {
 	// Should contain orient/task suggestions.
 	found := false
 	for _, s := range suggestions {
-		if s.Tool == "get_project_identity" || s.Tool == "get_pending_tasks" {
+		if s.Tool == "search" || s.Tool == "tasks" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected get_project_identity or get_pending_tasks in default suggestions")
+		t.Error("expected search or tasks in default suggestions")
 	}
 }
 
@@ -40,14 +40,14 @@ func TestSuggestToolsForChanges_SingleFile(t *testing.T) {
 	if len(suggestions) == 0 {
 		t.Error("expected suggestions for single file event")
 	}
-	foundViolations := false
+	foundValidate := false
 	for _, s := range suggestions {
-		if s.Tool == "get_violations" {
-			foundViolations = true
+		if s.Tool == "validate" {
+			foundValidate = true
 		}
 	}
-	if !foundViolations {
-		t.Error("expected get_violations suggestion for recent events")
+	if !foundValidate {
+		t.Error("expected validate suggestion for recent events")
 	}
 }
 
@@ -765,108 +765,6 @@ func TestHandleGetSessionState_Found(t *testing.T) {
 	}
 }
 
-// ── handleGetEvents (types filter) ───────────────────────────────────────────
-
-func TestHandleGetEvents_WithTypesStringFilter(t *testing.T) {
-	s := newTestServer(t)
-	_ = s.store.AppendEvent("file_change", "agent-a", `{"file":"pkg/auth/auth.go"}`)
-	_ = s.store.AppendEvent("task_update", "agent-a", `{"task_id":"t1"}`)
-
-	req := callTool(map[string]any{
-		"types":     "file_change,task_update",
-		"since_seq": float64(0),
-	})
-	result, err := s.handleGetEvents(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	m := mustResult(t, result, nil)
-	hasKey(t, m, "events")
-}
-
-func TestHandleGetEvents_WithTypesArrayFilter(t *testing.T) {
-	s := newTestServer(t)
-	_ = s.store.AppendEvent("file_change", "agent-b", `{"file":"pkg/db/store.go"}`)
-
-	req := callTool(map[string]any{
-		"types": []interface{}{"file_change"},
-		"limit": float64(10),
-	})
-	result, err := s.handleGetEvents(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	m := mustResult(t, result, nil)
-	hasKey(t, m, "events")
-}
-
-func TestHandleGetEvents_WithLimit(t *testing.T) {
-	s := newTestServer(t)
-	req := callTool(map[string]any{
-		"since_seq": float64(0),
-		"limit":     float64(5),
-	})
-	result, err := s.handleGetEvents(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	_ = mustResult(t, result, nil)
-}
-
-// ── handleGetMessages (mark_read_ids) ────────────────────────────────────────
-
-func TestHandleGetMessages_WithMarkReadIDsString(t *testing.T) {
-	s := newTestServer(t)
-	// Send a message first.
-	sendRes, err := s.handleSendMessage(ctx, callTool(map[string]any{
-		"from_agent": "sender",
-		"to_agent":   "receiver",
-		"topic":      "api_changed",
-		"payload":    `{"key":"value"}`,
-	}))
-	sendM := mustResult(t, sendRes, err)
-	msgID, _ := sendM["message_id"].(string)
-
-	// Retrieve and mark read in the same call (string JSON array format).
-	req := callTool(map[string]any{
-		"agent_id":      "receiver",
-		"unread_only":   false,
-		"mark_read_ids": `["` + msgID + `"]`,
-	})
-	result, err := s.handleGetMessages(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	m := mustResult(t, result, nil)
-	_ = m
-}
-
-func TestHandleGetMessages_WithMarkReadIDsArray(t *testing.T) {
-	s := newTestServer(t)
-	sendRes, err := s.handleSendMessage(ctx, callTool(map[string]any{
-		"from_agent": "sender2",
-		"to_agent":   "receiver2",
-		"topic":      "task_blocked",
-		"payload":    `{}`,
-	}))
-	sendM := mustResult(t, sendRes, err)
-	msgID, _ := sendM["message_id"].(string)
-
-	req := callTool(map[string]any{
-		"agent_id":      "receiver2",
-		"unread_only":   false,
-		"mark_read_ids": []interface{}{msgID},
-	})
-	result, err := s.handleGetMessages(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	m := mustResult(t, result, nil)
-	if marked, _ := m["marked_read"].(float64); marked < 1 {
-		t.Error("expected at least 1 message marked as read")
-	}
-}
-
 // ── handleRemember (episode_type=failure, invalid args) ───────────────────────
 
 func TestHandleRemember_EpisodeTypeFailure(t *testing.T) {
@@ -1048,34 +946,6 @@ func TestStringArgDefault_WithDefault(t *testing.T) {
 	}
 }
 
-// ── handleSendMessage (invalid JSON payload, with to_agent) ──────────────────
-
-func TestHandleSendMessage_InvalidJSONPayload(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleSendMessage(ctx, callTool(map[string]any{
-		"from_agent": "sender",
-		"topic":      "test",
-		"payload":    "not valid json",
-	}))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !res.IsError {
-		t.Error("expected error for invalid JSON payload")
-	}
-}
-
-func TestHandleSendMessage_WithToAgent(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleSendMessage(ctx, callTool(map[string]any{
-		"from_agent": "sender",
-		"to_agent":   "receiver",
-		"topic":      "status_update",
-	}))
-	m := mustResult(t, res, err)
-	hasKey(t, m, "message_id")
-}
-
 // ── handleLinkTaskNodes (JSON string path) ────────────────────────────────────
 
 func TestHandleLinkTaskNodes_JSONStringPath(t *testing.T) {
@@ -1251,28 +1121,6 @@ func TestHandleSessionInit_IncrementalMode(t *testing.T) {
 	if _, ok := m["incremental"]; !ok {
 		t.Error("expected 'incremental' key on second session_init call")
 	}
-}
-
-func TestHandleSessionInit_WithUnreadMessages(t *testing.T) {
-	s := newTestServer(t)
-	agentID := "msg-agent"
-	// Send a message to this agent.
-	_, err := s.handleSendMessage(ctx, callTool(map[string]any{
-		"from_agent": "sender-agent",
-		"to_agent":   agentID,
-		"topic":      "review_needed",
-		"payload":    `{"pr": 42}`,
-	}))
-	if err != nil {
-		t.Fatalf("send message: %v", err)
-	}
-	// session_init should auto-deliver unread messages.
-	res, initErr := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": agentID}))
-	if initErr != nil {
-		t.Fatalf("session_init: %v", initErr)
-	}
-	m := mustResult(t, res, nil)
-	hasKey(t, m, "pending_tasks") // sanity check response structure
 }
 
 func TestHandleSessionInit_AgentAwareness(t *testing.T) {
@@ -2130,20 +1978,6 @@ func TestHandleLinkTaskNodes_NoStore(t *testing.T) {
 	mustErrorResult(t, res, err)
 }
 
-func TestHandleGetAgents_NoStore(t *testing.T) {
-	s := newTestServer(t)
-	s.store = nil
-	res, err := s.handleGetAgents(ctx, callTool(map[string]any{}))
-	mustErrorResult(t, res, err)
-}
-
-func TestHandleGetEvents_NoStore(t *testing.T) {
-	s := newTestServer(t)
-	s.store = nil
-	res, err := s.handleGetEvents(ctx, callTool(map[string]any{}))
-	mustErrorResult(t, res, err)
-}
-
 // ── nil-store tests for episode handlers ──────────────────────────────────────
 
 func TestHandleRemember_NoStore(t *testing.T) {
@@ -2187,24 +2021,6 @@ func TestHandleGetRuleCandidates_NoStore(t *testing.T) {
 }
 
 // ── nil-store tests for message handlers ─────────────────────────────────────
-
-func TestHandleSendMessage_NoStore(t *testing.T) {
-	s := newTestServer(t)
-	s.store = nil
-	res, err := s.handleSendMessage(ctx, callTool(map[string]any{
-		"from_agent": "a",
-		"topic":      "test",
-	}))
-	mustErrorResult(t, res, err)
-}
-
-func TestHandleGetMessages_NoStore(t *testing.T) {
-	s := newTestServer(t)
-	s.store = nil
-	res, err := s.handleGetMessages(ctx, callTool(map[string]any{"agent_id": "a"}))
-	mustErrorResult(t, res, err)
-}
-
 
 // ── nil-store tests for task handlers ────────────────────────────────────────
 
